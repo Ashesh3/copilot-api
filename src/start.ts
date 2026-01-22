@@ -25,9 +25,16 @@ interface RunServerOptions {
   claudeCode: boolean
   showToken: boolean
   proxyEnv: boolean
+  insecure: boolean
 }
 
 export async function runServer(options: RunServerOptions): Promise<void> {
+  if (options.insecure) {
+    // Disable SSL certificate verification globally
+    process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0"
+    consola.warn("SSL certificate verification disabled (insecure mode)")
+  }
+
   if (options.proxyEnv) {
     initProxyFromEnv()
   }
@@ -193,6 +200,12 @@ export const start = defineCommand({
       default: false,
       description: "Initialize proxy from environment variables",
     },
+    insecure: {
+      type: "boolean",
+      default: false,
+      description:
+        "Disable SSL certificate verification (for corporate proxies with self-signed certs)",
+    },
   },
   run({ args }) {
     const rateLimitRaw = args["rate-limit"]
@@ -211,6 +224,7 @@ export const start = defineCommand({
       claudeCode: args["claude-code"],
       showToken: args["show-token"],
       proxyEnv: args["proxy-env"],
+      insecure: args.insecure,
     })
   },
 })
