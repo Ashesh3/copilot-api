@@ -4,6 +4,7 @@ import consola from "consola"
 import { streamSSE, type SSEMessage } from "hono/streaming"
 
 import { awaitApproval } from "~/lib/approval"
+import { applyReplacementsToPayload } from "~/lib/auto-replace"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { state } from "~/lib/state"
 import { getTokenCount } from "~/lib/tokenizer"
@@ -21,7 +22,12 @@ import {
 export async function handleCompletion(c: Context) {
   await checkRateLimit(state)
 
-  let payload = await c.req.json<ChatCompletionsPayload>()
+  const rawPayload = await c.req.json<ChatCompletionsPayload>()
+
+  // Apply auto-replacements to the payload
+  // eslint-disable-next-line require-atomic-updates
+  let payload = await applyReplacementsToPayload(rawPayload)
+
   consola.debug("Request payload:", JSON.stringify(payload).slice(-400))
 
   // Check if this is an Azure OpenAI model

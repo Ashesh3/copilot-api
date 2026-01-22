@@ -1,8 +1,8 @@
-import type { ModelsResponse } from "~/services/copilot/get-models"
 import type {
   AzureOpenAIConfig,
   AzureOpenAIDeploymentInfo,
 } from "~/services/azure-openai/types"
+import type { ModelsResponse } from "~/services/copilot/get-models"
 
 export interface State {
   githubToken?: string

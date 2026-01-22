@@ -19,8 +19,19 @@ export const isNullish = (value: unknown): value is null | undefined =>
   value === null || value === undefined
 
 export async function cacheModels(): Promise<void> {
-  const models = await getModels()
-  state.models = models
+  try {
+    const models = await getModels()
+    state.models = models
+  } catch (error) {
+    consola.error("Failed to fetch and cache models. This could be due to:")
+    consola.error("  - Invalid or expired Copilot token")
+    consola.error("  - Network connectivity issues")
+    consola.error("  - GitHub Copilot service unavailable")
+    consola.error(
+      "  - Account type mismatch (try --account-type=individual or --account-type=business)",
+    )
+    throw error
+  }
 }
 
 export const cacheVSCodeVersion = async () => {
