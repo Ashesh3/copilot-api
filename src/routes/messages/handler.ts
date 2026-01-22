@@ -4,6 +4,7 @@ import consola from "consola"
 import { streamSSE } from "hono/streaming"
 
 import { awaitApproval } from "~/lib/approval"
+import { applyReplacementsToPayload } from "~/lib/auto-replace"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { state } from "~/lib/state"
 import {
@@ -32,7 +33,11 @@ export async function handleCompletion(c: Context) {
   const anthropicPayload = await c.req.json<AnthropicMessagesPayload>()
   consola.debug("Anthropic request payload:", JSON.stringify(anthropicPayload))
 
-  const openAIPayload = translateToOpenAI(anthropicPayload)
+  const translatedPayload = translateToOpenAI(anthropicPayload)
+
+  // Apply auto-replacements to the payload
+  const openAIPayload = await applyReplacementsToPayload(translatedPayload)
+
   consola.debug(
     "Translated OpenAI request payload:",
     JSON.stringify(openAIPayload),
@@ -80,7 +85,10 @@ export async function handleCompletion(c: Context) {
       }
 
       for await (const rawEvent of response) {
-        consola.debug("Azure OpenAI raw stream event:", JSON.stringify(rawEvent))
+        consola.debug(
+          "Azure OpenAI raw stream event:",
+          JSON.stringify(rawEvent),
+        )
         if (rawEvent.data === "[DONE]") {
           break
         }

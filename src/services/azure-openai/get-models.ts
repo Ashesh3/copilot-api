@@ -2,12 +2,13 @@ import consola from "consola"
 
 import { HTTPError } from "~/lib/error"
 
-import { AZURE_OPENAI_MODEL_PREFIX } from "./config"
 import type {
   AzureOpenAIConfig,
   AzureOpenAIDeploymentInfo,
   AzureOpenAIDeploymentsResponse,
 } from "./types"
+
+import { AZURE_OPENAI_MODEL_PREFIX } from "./config"
 
 // Different API versions for different endpoints
 const AZURE_DEPLOYMENTS_API_VERSION = "2022-12-01"

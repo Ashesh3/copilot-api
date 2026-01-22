@@ -1,14 +1,16 @@
 import consola from "consola"
 import { events } from "fetch-event-stream"
 
-import { HTTPError } from "~/lib/error"
 import type {
   ChatCompletionResponse,
   ChatCompletionsPayload,
 } from "~/services/copilot/create-chat-completions"
 
-import { getAzureDeploymentName } from "./config"
+import { HTTPError } from "~/lib/error"
+
 import type { AzureOpenAIConfig } from "./types"
+
+import { getAzureDeploymentName } from "./config"
 
 const AZURE_API_VERSION = "2024-10-21"
 

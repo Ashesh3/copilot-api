@@ -6,11 +6,13 @@ const APP_DIR = path.join(os.homedir(), ".local", "share", "copilot-api")
 
 const GITHUB_TOKEN_PATH = path.join(APP_DIR, "github_token")
 const AZURE_OPENAI_CONFIG_PATH = path.join(APP_DIR, "azure_openai_config")
+const REPLACEMENTS_CONFIG_PATH = path.join(APP_DIR, "replacements.json")
 
 export const PATHS = {
   APP_DIR,
   GITHUB_TOKEN_PATH,
   AZURE_OPENAI_CONFIG_PATH,
+  REPLACEMENTS_CONFIG_PATH,
 }
 
 export async function ensurePaths(): Promise<void> {

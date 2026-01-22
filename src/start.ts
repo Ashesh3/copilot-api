@@ -69,7 +69,9 @@ export async function runServer(options: RunServerOptions): Promise<void> {
     state.azureOpenAIDeployments?.map((deployment) => deployment.id) ?? []
   const allModelIds = [...copilotModelIds, ...azureModelIds]
 
-  consola.info(`Available models: \n${allModelIds.map((id) => `- ${id}`).join("\n")}`)
+  consola.info(
+    `Available models: \n${allModelIds.map((id) => `- ${id}`).join("\n")}`,
+  )
 
   const serverUrl = `http://localhost:${options.port}`
 
