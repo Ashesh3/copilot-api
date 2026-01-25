@@ -7,6 +7,7 @@ import type {
 } from "~/services/copilot/create-chat-completions"
 
 import { HTTPError } from "~/lib/error"
+import { fetchWithRetry } from "~/lib/retry-fetch"
 
 import type { AzureOpenAIConfig } from "./types"
 
@@ -30,7 +31,7 @@ export async function createAzureOpenAIChatCompletions(
     ...(max_tokens != null && { max_completion_tokens: max_tokens }),
   }
 
-  const response = await fetch(
+  const response = await fetchWithRetry(
     `${config.endpoint}/openai/deployments/${deploymentName}/chat/completions?api-version=${AZURE_API_VERSION}`,
     {
       method: "POST",

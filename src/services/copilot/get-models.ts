@@ -2,11 +2,12 @@ import consola from "consola"
 
 import { copilotBaseUrl, copilotHeaders } from "~/lib/api-config"
 import { HTTPError } from "~/lib/error"
+import { fetchWithRetry } from "~/lib/retry-fetch"
 import { state } from "~/lib/state"
 
 export const getModels = async () => {
   const url = `${copilotBaseUrl(state)}/models`
-  const response = await fetch(url, {
+  const response = await fetchWithRetry(url, {
     headers: copilotHeaders(state),
   })
 
