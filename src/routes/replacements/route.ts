@@ -7,6 +7,7 @@ import {
   getUserReplacements,
   removeReplacement,
   toggleReplacement,
+  updateReplacement,
 } from "~/lib/auto-replace"
 
 export const replacementsRoute = new Hono()
@@ -25,6 +26,7 @@ replacementsRoute.post("/", async (c) => {
     pattern: string
     replacement?: string
     isRegex?: boolean
+    name?: string
   }>()
 
   if (!body.pattern) {
@@ -35,6 +37,7 @@ replacementsRoute.post("/", async (c) => {
     body.pattern,
     body.replacement ?? "",
     body.isRegex ?? false,
+    body.name,
   )
 
   return c.json(rule, 201)
@@ -50,6 +53,26 @@ replacementsRoute.delete("/:id", async (c) => {
   }
 
   return c.json({ success: true })
+})
+
+// Update a replacement rule
+replacementsRoute.patch("/:id", async (c) => {
+  const id = c.req.param("id")
+  const body = await c.req.json<{
+    name?: string
+    pattern?: string
+    replacement?: string
+    isRegex?: boolean
+    enabled?: boolean
+  }>()
+
+  const rule = await updateReplacement(id, body)
+
+  if (!rule) {
+    return c.json({ error: "Replacement not found or is a system rule" }, 404)
+  }
+
+  return c.json(rule)
 })
 
 // Toggle a replacement rule

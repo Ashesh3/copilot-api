@@ -9,6 +9,7 @@ import {
   getUserReplacements,
   removeReplacement,
   toggleReplacement,
+  updateReplacement,
   type ReplacementRule,
 } from "~/lib/auto-replace"
 import { ensurePaths, PATHS } from "~/lib/paths"
@@ -16,6 +17,7 @@ import { ensurePaths, PATHS } from "~/lib/paths"
 type MenuAction =
   | "list"
   | "add"
+  | "edit"
   | "remove"
   | "toggle"
   | "test"
@@ -26,8 +28,9 @@ function formatRule(rule: ReplacementRule, index: number): string {
   const status = rule.enabled ? "✓" : "✗"
   const type = rule.isRegex ? "regex" : "string"
   const system = rule.isSystem ? " [system]" : ""
+  const name = rule.name ? ` "${rule.name}"` : ""
   const replacement = rule.replacement || "(empty)"
-  return `${index + 1}. [${status}] (${type})${system} "${rule.pattern}" → "${replacement}"`
+  return `${index + 1}. [${status}] (${type})${system}${name} "${rule.pattern}" → "${replacement}"`
 }
 
 async function listReplacements(): Promise<void> {
@@ -46,6 +49,16 @@ async function listReplacements(): Promise<void> {
 }
 
 async function addNewReplacement(): Promise<void> {
+  const name = await consola.prompt("Name (optional, short description):", {
+    type: "text",
+    default: "",
+  })
+
+  if (typeof name === "symbol") {
+    consola.info("Cancelled.")
+    return
+  }
+
   const matchType = await consola.prompt("Match type:", {
     type: "select",
     options: [
@@ -91,9 +104,114 @@ async function addNewReplacement(): Promise<void> {
     return
   }
 
-  const rule = await addReplacement(pattern, replacement, matchType === "regex")
+  const rule = await addReplacement(
+    pattern,
+    replacement,
+    matchType === "regex",
+    name || undefined,
+  )
 
-  consola.success(`Added rule: ${rule.id}`)
+  consola.success(`Added rule: ${rule.name || rule.id}`)
+}
+
+async function editExistingReplacement(): Promise<void> {
+  const userRules = await getUserReplacements()
+
+  if (userRules.length === 0) {
+    consola.info("No user rules to edit.")
+    return
+  }
+
+  const options = userRules.map((rule, i) => ({
+    label: formatRule(rule, i),
+    value: rule.id,
+  }))
+
+  const selected = await consola.prompt("Select rule to edit:", {
+    type: "select",
+    options,
+  })
+
+  if (typeof selected === "symbol") {
+    consola.info("Cancelled.")
+    return
+  }
+
+  const rule = userRules.find((r) => r.id === selected)
+  if (!rule) {
+    consola.error("Rule not found.")
+    return
+  }
+
+  consola.info(`\nEditing rule: ${rule.name || rule.id}`)
+  consola.info("Press Enter to keep current value.\n")
+
+  const name = await consola.prompt("Name:", {
+    type: "text",
+    default: rule.name || "",
+  })
+
+  if (typeof name === "symbol") {
+    consola.info("Cancelled.")
+    return
+  }
+
+  const matchType = await consola.prompt("Match type:", {
+    type: "select",
+    options: [
+      { label: "String (exact match)", value: "string" },
+      { label: "Regex (regular expression)", value: "regex" },
+    ],
+    initial: rule.isRegex ? "regex" : "string",
+  })
+
+  if (typeof matchType === "symbol") {
+    consola.info("Cancelled.")
+    return
+  }
+
+  const pattern = await consola.prompt("Pattern to match:", {
+    type: "text",
+    default: rule.pattern,
+  })
+
+  if (typeof pattern === "symbol" || !pattern) {
+    consola.info("Cancelled.")
+    return
+  }
+
+  // Validate regex if needed
+  if (matchType === "regex") {
+    try {
+      new RegExp(pattern)
+    } catch {
+      consola.error(`Invalid regex pattern: ${pattern}`)
+      return
+    }
+  }
+
+  const replacement = await consola.prompt("Replacement text:", {
+    type: "text",
+    default: rule.replacement,
+  })
+
+  if (typeof replacement === "symbol") {
+    consola.info("Cancelled.")
+    return
+  }
+
+  const updated = await updateReplacement(selected, {
+    name: name || undefined,
+    pattern,
+    replacement,
+    isRegex: matchType === "regex",
+  })
+
+  if (updated) {
+    consola.success(`Updated rule: ${updated.name || updated.id}`)
+  } else {
+    consola.error("Failed to update rule.")
+  }
 }
 
 async function removeExistingReplacement(): Promise<void> {
@@ -206,6 +324,7 @@ async function mainMenu(): Promise<void> {
       options: [
         { label: "📋 List all rules", value: "list" as MenuAction },
         { label: "➕ Add new rule", value: "add" as MenuAction },
+        { label: "✏️  Edit rule", value: "edit" as MenuAction },
         { label: "➖ Remove rule", value: "remove" as MenuAction },
         { label: "🔄 Toggle rule on/off", value: "toggle" as MenuAction },
         { label: "🧪 Test replacements", value: "test" as MenuAction },
@@ -225,6 +344,10 @@ async function mainMenu(): Promise<void> {
       }
       case "add": {
         await addNewReplacement()
+        break
+      }
+      case "edit": {
+        await editExistingReplacement()
         break
       }
       case "remove": {
