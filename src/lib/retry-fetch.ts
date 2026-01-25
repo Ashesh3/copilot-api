@@ -2,13 +2,8 @@ import consola from "consola"
 
 import { sleep } from "./utils"
 
-const DEFAULT_MAX_RETRIES = 3
-const DEFAULT_BASE_DELAY_MS = 1000
-
-interface RetryOptions {
-  maxRetries?: number
-  baseDelayMs?: number
-}
+// Fast retry: 100ms, 200ms, 300ms, then stop (max ~600ms total wait)
+const RETRY_DELAYS_MS = [100, 200, 300]
 
 /**
  * Check if an error is retryable (transient network error)
@@ -27,6 +22,7 @@ function isRetryableError(error: unknown): boolean {
     "connection reset",
     "econnreset",
     "socket hang up",
+    "socket connection was closed unexpectedly",
     "etimedout",
     "econnrefused",
     "network error",
@@ -43,25 +39,25 @@ function isRetryableError(error: unknown): boolean {
  * Check if an HTTP response status is retryable
  */
 function isRetryableStatus(status: number): boolean {
-  // 408 Request Timeout, 429 Too Many Requests, 5xx Server Errors
+  // 4xx client errors (except 400, 401, 403, 404) and 5xx server errors
+  // Retry: 408 Timeout, 429 Rate Limit, and all 5xx
   return status === 408 || status === 429 || (status >= 500 && status <= 599)
 }
 
 /**
- * Fetch with automatic retry on transient failures
+ * Fetch with automatic fast retry on transient failures
+ * Retries with delays: 100ms, 200ms, 300ms (max ~600ms total wait)
  */
 export async function fetchWithRetry(
   input: string | URL | Request,
   init?: RequestInit,
-  options: RetryOptions = {},
 ): Promise<Response> {
-  const { maxRetries = DEFAULT_MAX_RETRIES, baseDelayMs = DEFAULT_BASE_DELAY_MS } =
-    options
+  const maxAttempts = RETRY_DELAYS_MS.length + 1 // 4 total attempts
 
   let lastError: Error | undefined
   let lastResponse: Response | undefined
 
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
       // Force a new connection by adding cache-busting and connection headers
       const headers = new Headers(init?.headers)
@@ -77,11 +73,11 @@ export async function fetchWithRetry(
       })
 
       // Check for retryable HTTP status codes
-      if (isRetryableStatus(response.status) && attempt < maxRetries) {
+      if (isRetryableStatus(response.status) && attempt < maxAttempts - 1) {
         lastResponse = response
-        const delayMs = baseDelayMs * 2 ** attempt
+        const delayMs = RETRY_DELAYS_MS[attempt]
         consola.warn(
-          `HTTP ${response.status} (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delayMs}ms`,
+          `HTTP ${response.status} (attempt ${attempt + 1}/${maxAttempts}), retrying in ${delayMs}ms`,
         )
         await sleep(delayMs)
         continue
@@ -91,13 +87,13 @@ export async function fetchWithRetry(
     } catch (error) {
       lastError = error as Error
 
-      if (!isRetryableError(error) || attempt === maxRetries) {
+      if (!isRetryableError(error) || attempt === maxAttempts - 1) {
         throw error
       }
 
-      const delayMs = baseDelayMs * 2 ** attempt
+      const delayMs = RETRY_DELAYS_MS[attempt]
       consola.warn(
-        `Fetch failed (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delayMs}ms:`,
+        `Fetch failed (attempt ${attempt + 1}/${maxAttempts}), retrying in ${delayMs}ms:`,
         lastError.message,
       )
       await sleep(delayMs)
