@@ -1,4 +1,7 @@
-import { type ChatCompletionChunk } from "~/services/copilot/create-chat-completions"
+import {
+  type ChatCompletionChunk,
+  type ChatCompletionResponse,
+} from "~/services/copilot/create-chat-completions"
 
 import {
   type AnthropicStreamEventData,
@@ -31,6 +34,9 @@ export function translateChunkToAnthropicEvents(
   const { delta } = choice
 
   if (!state.messageStartSent) {
+    // Don't include usage in message_start - we don't have accurate data yet
+    // Claude Code will fall back to its own estimation
+    // The actual usage will be sent in message_delta at the end
     events.push({
       type: "message_start",
       message: {
@@ -41,17 +47,8 @@ export function translateChunkToAnthropicEvents(
         model: chunk.model,
         stop_reason: null,
         stop_sequence: null,
-        usage: {
-          input_tokens:
-            (chunk.usage?.prompt_tokens ?? 0)
-            - (chunk.usage?.prompt_tokens_details?.cached_tokens ?? 0),
-          output_tokens: 0, // Will be updated in message_delta when finished
-          ...(chunk.usage?.prompt_tokens_details?.cached_tokens
-            !== undefined && {
-            cache_read_input_tokens:
-              chunk.usage.prompt_tokens_details.cached_tokens,
-          }),
-        },
+        // Note: Intentionally omitting usage here so Claude Code uses its own estimates
+        // until we get actual data in message_delta
       },
     })
     state.messageStartSent = true
@@ -151,6 +148,11 @@ export function translateChunkToAnthropicEvents(
       state.contentBlockOpen = false
     }
 
+    // Get final usage from chunk - this is where the actual token counts are
+    const inputTokens = chunk.usage?.prompt_tokens ?? 0
+    const outputTokens = chunk.usage?.completion_tokens ?? 0
+    const cachedTokens = chunk.usage?.prompt_tokens_details?.cached_tokens ?? 0
+
     events.push(
       {
         type: "message_delta",
@@ -159,15 +161,10 @@ export function translateChunkToAnthropicEvents(
           stop_sequence: null,
         },
         usage: {
-          input_tokens:
-            (chunk.usage?.prompt_tokens ?? 0)
-            - (chunk.usage?.prompt_tokens_details?.cached_tokens ?? 0),
-          output_tokens: chunk.usage?.completion_tokens ?? 0,
-          ...(chunk.usage?.prompt_tokens_details?.cached_tokens
-            !== undefined && {
-            cache_read_input_tokens:
-              chunk.usage.prompt_tokens_details.cached_tokens,
-          }),
+          input_tokens: inputTokens,
+          output_tokens: outputTokens,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: cachedTokens,
         },
       },
       {
@@ -175,6 +172,137 @@ export function translateChunkToAnthropicEvents(
       },
     )
   }
+
+  return events
+}
+
+/**
+ * Convert a complete OpenAI ChatCompletionResponse to Anthropic streaming events.
+ * This is used when we fetch non-streaming from upstream but need to simulate
+ * streaming to the client with accurate token counts.
+ */
+export function translateResponseToAnthropicEvents(
+  response: ChatCompletionResponse,
+): Array<AnthropicStreamEventData> {
+  const events: Array<AnthropicStreamEventData> = []
+
+  const choice = response.choices[0]
+  if (!choice) {
+    return events
+  }
+
+  const inputTokens = response.usage?.prompt_tokens ?? 0
+  const outputTokens = response.usage?.completion_tokens ?? 0
+  const cachedTokens =
+    response.usage?.prompt_tokens_details?.cached_tokens ?? 0
+
+  // 1. message_start - with actual token counts from response
+  events.push({
+    type: "message_start",
+    message: {
+      id: response.id,
+      type: "message",
+      role: "assistant",
+      content: [],
+      model: response.model,
+      stop_reason: null,
+      stop_sequence: null,
+      usage: {
+        input_tokens: inputTokens,
+        output_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: cachedTokens,
+      },
+    },
+  })
+
+  let contentBlockIndex = 0
+
+  // Handle text content
+  if (choice.message.content) {
+    // 2. content_block_start for text
+    events.push({
+      type: "content_block_start",
+      index: contentBlockIndex,
+      content_block: {
+        type: "text",
+        text: "",
+      },
+    })
+
+    // 3. content_block_delta with the full text
+    events.push({
+      type: "content_block_delta",
+      index: contentBlockIndex,
+      delta: {
+        type: "text_delta",
+        text: choice.message.content,
+      },
+    })
+
+    // 4. content_block_stop
+    events.push({
+      type: "content_block_stop",
+      index: contentBlockIndex,
+    })
+
+    contentBlockIndex++
+  }
+
+  // Handle tool calls
+  if (choice.message.tool_calls) {
+    for (const toolCall of choice.message.tool_calls) {
+      // content_block_start for tool_use
+      events.push({
+        type: "content_block_start",
+        index: contentBlockIndex,
+        content_block: {
+          type: "tool_use",
+          id: toolCall.id,
+          name: toolCall.function.name,
+          input: {},
+        },
+      })
+
+      // content_block_delta with tool arguments
+      events.push({
+        type: "content_block_delta",
+        index: contentBlockIndex,
+        delta: {
+          type: "input_json_delta",
+          partial_json: toolCall.function.arguments,
+        },
+      })
+
+      // content_block_stop
+      events.push({
+        type: "content_block_stop",
+        index: contentBlockIndex,
+      })
+
+      contentBlockIndex++
+    }
+  }
+
+  // 5. message_delta with final usage
+  events.push({
+    type: "message_delta",
+    delta: {
+      stop_reason: mapOpenAIStopReasonToAnthropic(choice.finish_reason),
+      stop_sequence: null,
+    },
+    usage: {
+      input_tokens: inputTokens,
+      output_tokens: outputTokens,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: cachedTokens,
+    },
+  })
+
+  // 6. message_stop
+  events.push({
+    type: "message_stop",
+  })
 
   return events
 }

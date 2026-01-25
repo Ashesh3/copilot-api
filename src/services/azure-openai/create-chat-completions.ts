@@ -48,6 +48,7 @@ export async function createAzureOpenAIChatCompletions(
     throw new HTTPError(
       "Failed to create Azure OpenAI chat completions",
       response,
+      payload,
     )
   }
 

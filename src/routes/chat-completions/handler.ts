@@ -88,7 +88,7 @@ export async function handleCompletion(c: Context) {
   try {
     if (selectedModel) {
       const tokenCount = await getTokenCount(payload, selectedModel)
-      setRequestContext(c, { inputTokens: tokenCount })
+      setRequestContext(c, { inputTokens: tokenCount.input })
     }
   } catch (error) {
     consola.warn("Failed to calculate token count:", error)
