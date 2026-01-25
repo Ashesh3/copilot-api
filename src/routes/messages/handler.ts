@@ -26,7 +26,9 @@ import {
   translateToAnthropic,
   translateToOpenAI,
 } from "./non-stream-translation"
-import { translateChunkToAnthropicEvents } from "./stream-translation"
+import {
+  translateChunkToAnthropicEvents,
+} from "./stream-translation"
 
 export async function handleCompletion(c: Context) {
   await checkRateLimit(state)
@@ -56,140 +58,101 @@ export async function handleCompletion(c: Context) {
       return c.json({ error: "Azure OpenAI not configured" }, 500)
     }
 
-    setRequestContext(c, { provider: "Azure OpenAI", model: openAIPayload.model })
+    setRequestContext(c, {
+      provider: "Azure OpenAI",
+      model: openAIPayload.model,
+    })
+  } else {
+    setRequestContext(c, { provider: "Copilot", model: openAIPayload.model })
+  }
 
-    const response = await createAzureOpenAIChatCompletions(
-      state.azureOpenAIConfig,
-      openAIPayload,
-    )
-
-    if (isNonStreaming(response)) {
-      consola.debug(
-        "Non-streaming response from Azure OpenAI:",
-        JSON.stringify(response).slice(-400),
-      )
-      // Set token counts from response
-      if (response.usage) {
-        setRequestContext(c, {
-          inputTokens: response.usage.prompt_tokens,
-          outputTokens: response.usage.completion_tokens,
-        })
-      }
-      const anthropicResponse = translateToAnthropic(response)
-      consola.debug(
-        "Translated Anthropic response:",
-        JSON.stringify(anthropicResponse),
-      )
-      return c.json(anthropicResponse)
+  // Handle streaming
+  if (anthropicPayload.stream) {
+    const streamPayload = {
+      ...openAIPayload,
+      stream: true,
+      stream_options: { include_usage: true },
     }
 
-    consola.debug("Streaming response from Azure OpenAI")
+    const response = isAzureModel
+      ? await createAzureOpenAIChatCompletions(
+          state.azureOpenAIConfig!,
+          streamPayload,
+        )
+      : await createChatCompletions(streamPayload)
+
+    // Response is an async iterable of SSE events
+    const eventStream = response as AsyncIterable<{ event?: string; data?: string }>
+
     return streamSSE(c, async (stream) => {
       const streamState: AnthropicStreamState = {
         messageStartSent: false,
-        contentBlockIndex: 0,
         contentBlockOpen: false,
+        contentBlockIndex: 0,
         toolCalls: {},
       }
 
-      for await (const rawEvent of response) {
-        consola.debug(
-          "Azure OpenAI raw stream event:",
-          JSON.stringify(rawEvent),
-        )
-        if (rawEvent.data === "[DONE]") {
-          break
-        }
-
-        if (!rawEvent.data) {
+      for await (const event of eventStream) {
+        if (!event.data || event.data === "[DONE]") {
           continue
         }
 
-        const chunk = JSON.parse(rawEvent.data) as ChatCompletionChunk
-        // Capture usage from final chunk if available
-        if (chunk.usage) {
-          setRequestContext(c, {
-            inputTokens: chunk.usage.prompt_tokens,
-            outputTokens: chunk.usage.completion_tokens,
-          })
-        }
-        const events = translateChunkToAnthropicEvents(chunk, streamState)
+        try {
+          const chunk = JSON.parse(event.data) as ChatCompletionChunk
+          consola.debug("OpenAI chunk:", JSON.stringify(chunk))
 
-        for (const event of events) {
-          consola.debug("Translated Anthropic event:", JSON.stringify(event))
-          await stream.writeSSE({
-            event: event.type,
-            data: JSON.stringify(event),
-          })
+          const anthropicEvents = translateChunkToAnthropicEvents(
+            chunk,
+            streamState,
+          )
+
+          for (const anthropicEvent of anthropicEvents) {
+            consola.debug("Anthropic event:", JSON.stringify(anthropicEvent))
+            await stream.writeSSE({
+              event: anthropicEvent.type,
+              data: JSON.stringify(anthropicEvent),
+            })
+          }
+
+          // Update token counts from final chunk if available
+          if (chunk.usage) {
+            setRequestContext(c, {
+              inputTokens: chunk.usage.prompt_tokens,
+              outputTokens: chunk.usage.completion_tokens,
+            })
+          }
+        } catch (error) {
+          consola.error("Failed to parse chunk:", error, event.data)
         }
       }
     })
   }
 
-  setRequestContext(c, { provider: "Copilot", model: openAIPayload.model })
+  // Non-streaming response
+  const nonStreamPayload = { ...openAIPayload, stream: false }
 
-  const response = await createChatCompletions(openAIPayload)
+  const response = isAzureModel
+    ? ((await createAzureOpenAIChatCompletions(
+        state.azureOpenAIConfig!,
+        nonStreamPayload,
+      )) as ChatCompletionResponse)
+    : ((await createChatCompletions(nonStreamPayload)) as ChatCompletionResponse)
 
-  if (isNonStreaming(response)) {
-    consola.debug(
-      "Non-streaming response from Copilot:",
-      JSON.stringify(response).slice(-400),
-    )
-    // Set token counts from response
-    if (response.usage) {
-      setRequestContext(c, {
-        inputTokens: response.usage.prompt_tokens,
-        outputTokens: response.usage.completion_tokens,
-      })
-    }
-    const anthropicResponse = translateToAnthropic(response)
-    consola.debug(
-      "Translated Anthropic response:",
-      JSON.stringify(anthropicResponse),
-    )
-    return c.json(anthropicResponse)
+  consola.debug("Response from upstream:", JSON.stringify(response).slice(-400))
+
+  // Set token counts from response
+  if (response.usage) {
+    setRequestContext(c, {
+      inputTokens: response.usage.prompt_tokens,
+      outputTokens: response.usage.completion_tokens,
+    })
   }
 
-  consola.debug("Streaming response from Copilot")
-  return streamSSE(c, async (stream) => {
-    const streamState: AnthropicStreamState = {
-      messageStartSent: false,
-      contentBlockIndex: 0,
-      contentBlockOpen: false,
-      toolCalls: {},
-    }
-
-    for await (const rawEvent of response) {
-      consola.debug("Copilot raw stream event:", JSON.stringify(rawEvent))
-      if (rawEvent.data === "[DONE]") {
-        break
-      }
-
-      if (!rawEvent.data) {
-        continue
-      }
-
-      const chunk = JSON.parse(rawEvent.data) as ChatCompletionChunk
-      // Capture usage from final chunk if available
-      if (chunk.usage) {
-        setRequestContext(c, {
-          inputTokens: chunk.usage.prompt_tokens,
-          outputTokens: chunk.usage.completion_tokens,
-        })
-      }
-      const events = translateChunkToAnthropicEvents(chunk, streamState)
-
-      for (const event of events) {
-        consola.debug("Translated Anthropic event:", JSON.stringify(event))
-        await stream.writeSSE({
-          event: event.type,
-          data: JSON.stringify(event),
-        })
-      }
-    }
-  })
+  // Translate to Anthropic format
+  const anthropicResponse = translateToAnthropic(response)
+  consola.debug(
+    "Translated Anthropic response:",
+    JSON.stringify(anthropicResponse),
+  )
+  return c.json(anthropicResponse)
 }
-
-const isNonStreaming = (
-  response: Awaited<ReturnType<typeof createChatCompletions>>,
-): response is ChatCompletionResponse => Object.hasOwn(response, "choices")

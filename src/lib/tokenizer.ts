@@ -346,3 +346,55 @@ export const getTokenCount = async (
     output: outputTokens,
   }
 }
+
+/**
+ * Estimate token count for a payload without model info (uses o200k_base encoding)
+ * This is a rough estimate used when we don't have model-specific info
+ */
+export const estimateTokenCount = async (
+  payload: ChatCompletionsPayload,
+): Promise<number> => {
+  const encoder = await getEncodeChatFunction("o200k_base")
+
+  // Simple estimation: encode all message content
+  let tokens = 0
+  for (const message of payload.messages) {
+    // 3 tokens per message overhead
+    tokens += 3
+
+    if (typeof message.content === "string") {
+      tokens += encoder.encode(message.content).length
+    } else if (Array.isArray(message.content)) {
+      for (const part of message.content) {
+        if (part.type === "text" && part.text) {
+          tokens += encoder.encode(part.text).length
+        } else if (part.type === "image_url") {
+          // Rough estimate for images
+          tokens += 85
+        }
+      }
+    }
+
+    // Add role tokens
+    if (message.role) {
+      tokens += encoder.encode(message.role).length
+    }
+
+    // Tool calls in messages (assistant responses with tool use)
+    if (message.tool_calls) {
+      tokens += encoder.encode(JSON.stringify(message.tool_calls)).length
+    }
+  }
+
+  // Add tool definitions if present (but don't double count - use simplified estimate)
+  // Tool definitions add overhead but the full JSON stringify overcounts
+  if (payload.tools && payload.tools.length > 0) {
+    // Estimate ~50 tokens per tool on average for function name + description + params
+    tokens += payload.tools.length * 50
+  }
+
+  // Priming tokens
+  tokens += 3
+
+  return tokens
+}
