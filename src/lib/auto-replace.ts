@@ -7,6 +7,7 @@ import { PATHS } from "./paths"
 
 export interface ReplacementRule {
   id: string
+  name?: string // Human-readable name/description
   pattern: string
   replacement: string
   isRegex: boolean
@@ -18,7 +19,8 @@ export interface ReplacementRule {
 const SYSTEM_REPLACEMENTS: Array<ReplacementRule> = [
   {
     id: "system-anthropic-billing",
-    pattern: "x-anthropic-billing-header:[^\n]*\n?",
+    name: "Remove Anthropic billing header",
+    pattern: "x-anthropic-billing-header:[^\\n]*\\n?",
     replacement: "",
     isRegex: true,
     enabled: true,
@@ -36,7 +38,7 @@ let isLoaded = false
 export async function loadReplacements(): Promise<void> {
   try {
     const data = await fs.readFile(PATHS.REPLACEMENTS_CONFIG_PATH)
-    const parsed = JSON.parse(data) as Array<ReplacementRule>
+    const parsed = JSON.parse(data.toString()) as Array<ReplacementRule>
     userReplacements = parsed.filter((r) => !r.isSystem)
     isLoaded = true
     consola.debug(`Loaded ${userReplacements.length} user replacement rules`)
@@ -96,10 +98,12 @@ export async function addReplacement(
   pattern: string,
   replacement: string,
   isRegex = false,
+  name?: string,
 ): Promise<ReplacementRule> {
   await ensureLoaded()
   const rule: ReplacementRule = {
     id: `user-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+    name,
     pattern,
     replacement,
     isRegex,
@@ -129,6 +133,42 @@ export async function removeReplacement(id: string): Promise<boolean> {
   await saveReplacements()
   consola.info(`Removed replacement rule: ${id}`)
   return true
+}
+
+/**
+ * Update an existing user replacement rule
+ */
+export async function updateReplacement(
+  id: string,
+  updates: {
+    name?: string
+    pattern?: string
+    replacement?: string
+    isRegex?: boolean
+    enabled?: boolean
+  },
+): Promise<ReplacementRule | null> {
+  await ensureLoaded()
+
+  const rule = userReplacements.find((r) => r.id === id)
+  if (!rule) {
+    return null
+  }
+
+  if (rule.isSystem) {
+    consola.warn("Cannot update system replacement rule")
+    return null
+  }
+
+  if (updates.name !== undefined) rule.name = updates.name
+  if (updates.pattern !== undefined) rule.pattern = updates.pattern
+  if (updates.replacement !== undefined) rule.replacement = updates.replacement
+  if (updates.isRegex !== undefined) rule.isRegex = updates.isRegex
+  if (updates.enabled !== undefined) rule.enabled = updates.enabled
+
+  await saveReplacements()
+  consola.info(`Updated replacement rule: ${rule.name || rule.id}`)
+  return rule
 }
 
 /**
@@ -169,22 +209,27 @@ export async function clearUserReplacements(): Promise<void> {
 }
 
 /**
- * Apply a single replacement rule to text
+ * Apply a single replacement rule to text and return info about whether it matched
  */
-function applyRule(text: string, rule: ReplacementRule): string {
-  if (!rule.enabled) return text
+function applyRule(
+  text: string,
+  rule: ReplacementRule,
+): { result: string; matched: boolean } {
+  if (!rule.enabled) return { result: text, matched: false }
 
   if (rule.isRegex) {
     try {
       const regex = new RegExp(rule.pattern, "g")
-      return text.replace(regex, rule.replacement)
+      const result = text.replace(regex, rule.replacement)
+      return { result, matched: result !== text }
     } catch {
       consola.warn(`Invalid regex pattern in rule ${rule.id}: ${rule.pattern}`)
-      return text
+      return { result: text, matched: false }
     }
   }
 
-  return text.split(rule.pattern).join(rule.replacement)
+  const result = text.split(rule.pattern).join(rule.replacement)
+  return { result, matched: result !== text }
 }
 
 /**
@@ -193,13 +238,18 @@ function applyRule(text: string, rule: ReplacementRule): string {
 export async function applyReplacements(text: string): Promise<string> {
   let result = text
   const allRules = await getAllReplacements()
+  const appliedRules: string[] = []
 
   for (const rule of allRules) {
-    const before = result
-    result = applyRule(result, rule)
-    if (before !== result) {
-      consola.debug(`Applied replacement rule: ${rule.id}`)
+    const { result: newResult, matched } = applyRule(result, rule)
+    if (matched) {
+      result = newResult
+      appliedRules.push(rule.name || rule.id)
     }
+  }
+
+  if (appliedRules.length > 0) {
+    consola.info(`Replacements applied: ${appliedRules.join(", ")}`)
   }
 
   return result
