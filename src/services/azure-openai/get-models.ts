@@ -1,6 +1,7 @@
 import consola from "consola"
 
 import { HTTPError } from "~/lib/error"
+import { fetchWithRetry } from "~/lib/retry-fetch"
 
 import type {
   AzureOpenAIConfig,
@@ -17,7 +18,7 @@ export async function getAzureOpenAIDeployments(
   config: AzureOpenAIConfig,
 ): Promise<Array<AzureOpenAIDeploymentInfo>> {
   try {
-    const response = await fetch(
+    const response = await fetchWithRetry(
       `${config.endpoint}/openai/deployments?api-version=${AZURE_DEPLOYMENTS_API_VERSION}`,
       {
         headers: {
