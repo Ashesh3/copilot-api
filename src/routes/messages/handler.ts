@@ -6,6 +6,7 @@ import { streamSSE } from "hono/streaming"
 import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
 import { checkRateLimit } from "~/lib/rate-limit"
+import { setRequestContext } from "~/lib/request-logger"
 import { state } from "~/lib/state"
 import {
   createAzureOpenAIChatCompletions,
@@ -55,7 +56,7 @@ export async function handleCompletion(c: Context) {
       return c.json({ error: "Azure OpenAI not configured" }, 500)
     }
 
-    consola.info(`Routing to Azure OpenAI -> ${openAIPayload.model}`)
+    setRequestContext(c, { provider: "Azure OpenAI", model: openAIPayload.model })
 
     const response = await createAzureOpenAIChatCompletions(
       state.azureOpenAIConfig,
@@ -67,6 +68,13 @@ export async function handleCompletion(c: Context) {
         "Non-streaming response from Azure OpenAI:",
         JSON.stringify(response).slice(-400),
       )
+      // Set token counts from response
+      if (response.usage) {
+        setRequestContext(c, {
+          inputTokens: response.usage.prompt_tokens,
+          outputTokens: response.usage.completion_tokens,
+        })
+      }
       const anthropicResponse = translateToAnthropic(response)
       consola.debug(
         "Translated Anthropic response:",
@@ -98,6 +106,13 @@ export async function handleCompletion(c: Context) {
         }
 
         const chunk = JSON.parse(rawEvent.data) as ChatCompletionChunk
+        // Capture usage from final chunk if available
+        if (chunk.usage) {
+          setRequestContext(c, {
+            inputTokens: chunk.usage.prompt_tokens,
+            outputTokens: chunk.usage.completion_tokens,
+          })
+        }
         const events = translateChunkToAnthropicEvents(chunk, streamState)
 
         for (const event of events) {
@@ -111,7 +126,7 @@ export async function handleCompletion(c: Context) {
     })
   }
 
-  consola.info(`Routing to Copilot -> ${openAIPayload.model}`)
+  setRequestContext(c, { provider: "Copilot", model: openAIPayload.model })
 
   const response = await createChatCompletions(openAIPayload)
 
@@ -120,6 +135,13 @@ export async function handleCompletion(c: Context) {
       "Non-streaming response from Copilot:",
       JSON.stringify(response).slice(-400),
     )
+    // Set token counts from response
+    if (response.usage) {
+      setRequestContext(c, {
+        inputTokens: response.usage.prompt_tokens,
+        outputTokens: response.usage.completion_tokens,
+      })
+    }
     const anthropicResponse = translateToAnthropic(response)
     consola.debug(
       "Translated Anthropic response:",
@@ -148,6 +170,13 @@ export async function handleCompletion(c: Context) {
       }
 
       const chunk = JSON.parse(rawEvent.data) as ChatCompletionChunk
+      // Capture usage from final chunk if available
+      if (chunk.usage) {
+        setRequestContext(c, {
+          inputTokens: chunk.usage.prompt_tokens,
+          outputTokens: chunk.usage.completion_tokens,
+        })
+      }
       const events = translateChunkToAnthropicEvents(chunk, streamState)
 
       for (const event of events) {

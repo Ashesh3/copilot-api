@@ -6,6 +6,7 @@ import { streamSSE, type SSEMessage } from "hono/streaming"
 import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
 import { checkRateLimit } from "~/lib/rate-limit"
+import { setRequestContext } from "~/lib/request-logger"
 import { state } from "~/lib/state"
 import { getTokenCount } from "~/lib/tokenizer"
 import { isNullish } from "~/lib/utils"
@@ -15,6 +16,7 @@ import {
 } from "~/services/azure-openai"
 import {
   createChatCompletions,
+  type ChatCompletionChunk,
   type ChatCompletionResponse,
   type ChatCompletionsPayload,
 } from "~/services/copilot/create-chat-completions"
@@ -36,7 +38,7 @@ export async function handleCompletion(c: Context) {
       return c.json({ error: "Azure OpenAI not configured" }, 500)
     }
 
-    consola.info(`Routing to Azure OpenAI -> ${payload.model}`)
+    setRequestContext(c, { provider: "Azure OpenAI", model: payload.model })
 
     if (state.manualApprove) await awaitApproval()
 
@@ -47,6 +49,12 @@ export async function handleCompletion(c: Context) {
 
     if (isNonStreaming(response)) {
       consola.debug("Non-streaming response:", JSON.stringify(response))
+      if (response.usage) {
+        setRequestContext(c, {
+          inputTokens: response.usage.prompt_tokens,
+          outputTokens: response.usage.completion_tokens,
+        })
+      }
       return c.json(response)
     }
 
@@ -54,12 +62,22 @@ export async function handleCompletion(c: Context) {
     return streamSSE(c, async (stream) => {
       for await (const chunk of response) {
         consola.debug("Streaming chunk:", JSON.stringify(chunk))
+        // Capture usage from final chunk if available
+        if (chunk.data && chunk.data !== "[DONE]") {
+          const parsed = JSON.parse(chunk.data) as ChatCompletionChunk
+          if (parsed.usage) {
+            setRequestContext(c, {
+              inputTokens: parsed.usage.prompt_tokens,
+              outputTokens: parsed.usage.completion_tokens,
+            })
+          }
+        }
         await stream.writeSSE(chunk as SSEMessage)
       }
     })
   }
 
-  consola.info(`Routing to Copilot -> ${payload.model}`)
+  setRequestContext(c, { provider: "Copilot", model: payload.model })
 
   // Find the selected model
   const selectedModel = state.models?.data.find(
@@ -70,9 +88,7 @@ export async function handleCompletion(c: Context) {
   try {
     if (selectedModel) {
       const tokenCount = await getTokenCount(payload, selectedModel)
-      consola.info("Current token count:", tokenCount)
-    } else {
-      consola.warn("No model selected, skipping token count calculation")
+      setRequestContext(c, { inputTokens: tokenCount })
     }
   } catch (error) {
     consola.warn("Failed to calculate token count:", error)
@@ -92,6 +108,12 @@ export async function handleCompletion(c: Context) {
 
   if (isNonStreaming(response)) {
     consola.debug("Non-streaming response:", JSON.stringify(response))
+    if (response.usage) {
+      setRequestContext(c, {
+        inputTokens: response.usage.prompt_tokens,
+        outputTokens: response.usage.completion_tokens,
+      })
+    }
     return c.json(response)
   }
 
@@ -99,6 +121,16 @@ export async function handleCompletion(c: Context) {
   return streamSSE(c, async (stream) => {
     for await (const chunk of response) {
       consola.debug("Streaming chunk:", JSON.stringify(chunk))
+      // Capture usage from final chunk if available
+      if (chunk.data && chunk.data !== "[DONE]") {
+        const parsed = JSON.parse(chunk.data) as ChatCompletionChunk
+        if (parsed.usage) {
+          setRequestContext(c, {
+            inputTokens: parsed.usage.prompt_tokens,
+            outputTokens: parsed.usage.completion_tokens,
+          })
+        }
+      }
       await stream.writeSSE(chunk as SSEMessage)
     }
   })
