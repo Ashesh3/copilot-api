@@ -15,6 +15,7 @@ export interface State {
   manualApprove: boolean
   rateLimitWait: boolean
   showToken: boolean
+  debug: boolean
 
   // Rate limiting configuration
   rateLimitSeconds?: number
@@ -30,4 +31,5 @@ export const state: State = {
   manualApprove: false,
   rateLimitWait: false,
   showToken: false,
+  debug: false,
 }

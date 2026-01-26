@@ -26,6 +26,7 @@ interface RunServerOptions {
   showToken: boolean
   proxyEnv: boolean
   insecure: boolean
+  debug: boolean
 }
 
 export async function runServer(options: RunServerOptions): Promise<void> {
@@ -53,6 +54,11 @@ export async function runServer(options: RunServerOptions): Promise<void> {
   state.rateLimitSeconds = options.rateLimit
   state.rateLimitWait = options.rateLimitWait
   state.showToken = options.showToken
+  state.debug = options.debug
+
+  if (options.debug) {
+    consola.info("Debug mode enabled - raw HTTP requests will be logged")
+  }
 
   await ensurePaths()
   await cacheVSCodeVersion()
@@ -206,6 +212,12 @@ export const start = defineCommand({
       description:
         "Disable SSL certificate verification (for corporate proxies with self-signed certs)",
     },
+    debug: {
+      alias: "d",
+      type: "boolean",
+      default: false,
+      description: "Log raw HTTP requests received by the server (headers, method, path)",
+    },
   },
   run({ args }) {
     const rateLimitRaw = args["rate-limit"]
@@ -225,6 +237,7 @@ export const start = defineCommand({
       showToken: args["show-token"],
       proxyEnv: args["proxy-env"],
       insecure: args.insecure,
+      debug: args.debug,
     })
   },
 })

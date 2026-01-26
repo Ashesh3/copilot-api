@@ -5,6 +5,7 @@ import { streamSSE } from "hono/streaming"
 
 import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
+import { normalizeModelName } from "~/lib/model-resolver"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { setRequestContext } from "~/lib/request-logger"
 import { state } from "~/lib/state"
@@ -39,7 +40,13 @@ export async function handleCompletion(c: Context) {
   const translatedPayload = translateToOpenAI(anthropicPayload)
 
   // Apply auto-replacements to the payload
-  const openAIPayload = await applyReplacementsToPayload(translatedPayload)
+  let openAIPayload = await applyReplacementsToPayload(translatedPayload)
+
+  // Normalize model name (e.g., claude-opus-4-5 -> claude-opus-4.5)
+  openAIPayload = {
+    ...openAIPayload,
+    model: normalizeModelName(openAIPayload.model),
+  }
 
   consola.debug(
     "Translated OpenAI request payload:",

@@ -5,6 +5,7 @@ import { streamSSE, type SSEMessage } from "hono/streaming"
 
 import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
+import { normalizeModelName } from "~/lib/model-resolver"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { setRequestContext } from "~/lib/request-logger"
 import { state } from "~/lib/state"
@@ -29,6 +30,12 @@ export async function handleCompletion(c: Context) {
   // Apply auto-replacements to the payload
   // eslint-disable-next-line require-atomic-updates
   let payload = await applyReplacementsToPayload(rawPayload)
+
+  // Normalize model name (e.g., claude-opus-4-5 -> claude-opus-4.5)
+  payload = {
+    ...payload,
+    model: normalizeModelName(payload.model),
+  }
 
   consola.debug("Request payload:", JSON.stringify(payload).slice(-400))
 

@@ -1,5 +1,7 @@
 import type { Context, Next } from "hono"
 
+import { state } from "./state"
+
 /**
  * Request context stored for logging on response
  */
@@ -51,6 +53,62 @@ function getStatusColor(status: number): string {
 }
 
 /**
+ * Log raw HTTP request details (for debug mode)
+ */
+async function logRawRequest(c: Context): Promise<void> {
+  const method = c.req.method
+  const url = c.req.url
+  const headers = Object.fromEntries(c.req.raw.headers.entries())
+
+  const lines: string[] = []
+  lines.push(`${colors.magenta}${colors.bold}[DEBUG] Incoming Request${colors.reset}`)
+  lines.push(`${colors.cyan}${method}${colors.reset} ${url}`)
+  lines.push(`${colors.dim}Headers:${colors.reset}`)
+
+  for (const [key, value] of Object.entries(headers)) {
+    // Mask authorization headers
+    const displayValue = key.toLowerCase().includes("authorization")
+      ? `${value.slice(0, 20)}...`
+      : value
+    lines.push(`  ${colors.gray}${key}:${colors.reset} ${displayValue}`)
+  }
+
+  // Try to get body info without consuming it
+  if (method !== "GET" && method !== "HEAD") {
+    try {
+      const clonedRequest = c.req.raw.clone()
+      const body = await clonedRequest.text()
+      if (body) {
+        // Parse JSON to extract model, omit messages/prompt
+        try {
+          const parsed = JSON.parse(body)
+          const sanitized: Record<string, unknown> = {}
+
+          for (const [key, value] of Object.entries(parsed)) {
+            if (key === "messages" || key === "prompt") {
+              sanitized[key] = `[${Array.isArray(value) ? value.length : 1} items omitted]`
+            } else {
+              sanitized[key] = value
+            }
+          }
+
+          lines.push(`${colors.dim}Body (sanitized):${colors.reset}`)
+          lines.push(`  ${JSON.stringify(sanitized, null, 2).split("\n").join("\n  ")}`)
+        } catch {
+          // Not JSON, show length
+          lines.push(`${colors.dim}Body:${colors.reset} [${body.length} bytes]`)
+        }
+      }
+    } catch {
+      lines.push(`${colors.dim}Body:${colors.reset} [unable to read]`)
+    }
+  }
+
+  lines.push(`${colors.dim}${"─".repeat(60)}${colors.reset}`)
+  console.log(lines.join("\n"))
+}
+
+/**
  * Set request context for logging
  */
 export function setRequestContext(
@@ -67,6 +125,11 @@ export function setRequestContext(
  * Custom request logger middleware
  */
 export async function requestLogger(c: Context, next: Next): Promise<void> {
+  // Log raw request in debug mode
+  if (state.debug) {
+    await logRawRequest(c)
+  }
+
   const startTime = Date.now()
   const method = c.req.method
   const path =
