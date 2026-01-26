@@ -2,6 +2,7 @@ import type { Context } from "hono"
 
 import consola from "consola"
 
+import { normalizeModelName } from "~/lib/model-resolver"
 import { state } from "~/lib/state"
 import { getTokenCount } from "~/lib/tokenizer"
 
@@ -19,8 +20,11 @@ export async function handleCountTokens(c: Context) {
 
     const openAIPayload = translateToOpenAI(anthropicPayload)
 
+    // Normalize model name (e.g., claude-opus-4-5 -> claude-opus-4.5) before lookup
+    const normalizedModel = normalizeModelName(anthropicPayload.model)
+
     const selectedModel = state.models?.data.find(
-      (model) => model.id === anthropicPayload.model,
+      (model) => model.id === normalizedModel,
     )
 
     if (!selectedModel) {
