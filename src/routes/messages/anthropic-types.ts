@@ -203,4 +203,14 @@ export interface AnthropicStreamState {
       anthropicBlockIndex: number
     }
   }
+  // Track usage from chunks (may come separately from finish_reason)
+  pendingUsage?: {
+    prompt_tokens: number
+    completion_tokens: number
+    cached_tokens: number
+  }
+  // Track finish_reason to defer message_delta until we have usage
+  pendingFinishReason?: "stop" | "length" | "tool_calls" | "content_filter"
+  // Track if message_delta was already sent
+  messageDeltaSent?: boolean
 }

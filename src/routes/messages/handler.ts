@@ -28,8 +28,41 @@ import {
   translateToOpenAI,
 } from "./non-stream-translation"
 import {
+  createFallbackMessageDeltaEvents,
   translateChunkToAnthropicEvents,
 } from "./stream-translation"
+
+interface UsageData {
+  prompt_tokens: number
+  completion_tokens: number
+  cached_tokens: number
+}
+
+/** Collect all chunks and extract usage data */
+async function collectChunksWithUsage(
+  eventStream: AsyncIterable<{ event?: string; data?: string }>,
+): Promise<{ chunks: Array<ChatCompletionChunk>; usage: UsageData | null }> {
+  const chunks: Array<ChatCompletionChunk> = []
+  let usage: UsageData | null = null
+
+  for await (const event of eventStream) {
+    if (!event.data || event.data === "[DONE]") continue
+    try {
+      const chunk = JSON.parse(event.data) as ChatCompletionChunk
+      chunks.push(chunk)
+      if (chunk.usage) {
+        usage = {
+          prompt_tokens: chunk.usage.prompt_tokens,
+          completion_tokens: chunk.usage.completion_tokens,
+          cached_tokens: chunk.usage.prompt_tokens_details?.cached_tokens ?? 0,
+        }
+      }
+    } catch (error) {
+      consola.error("Failed to parse chunk:", error, event.data)
+    }
+  }
+  return { chunks, usage }
+}
 
 export async function handleCompletion(c: Context) {
   await checkRateLimit(state)
@@ -38,42 +71,22 @@ export async function handleCompletion(c: Context) {
   consola.debug("Anthropic request payload:", JSON.stringify(anthropicPayload))
 
   const translatedPayload = translateToOpenAI(anthropicPayload)
-
-  // Apply auto-replacements to the payload
   let openAIPayload = await applyReplacementsToPayload(translatedPayload)
+  openAIPayload = { ...openAIPayload, model: normalizeModelName(openAIPayload.model) }
 
-  // Normalize model name (e.g., claude-opus-4-5 -> claude-opus-4.5)
-  openAIPayload = {
-    ...openAIPayload,
-    model: normalizeModelName(openAIPayload.model),
-  }
+  if (state.manualApprove) await awaitApproval()
 
-  consola.debug(
-    "Translated OpenAI request payload:",
-    JSON.stringify(openAIPayload),
-  )
-
-  if (state.manualApprove) {
-    await awaitApproval()
-  }
-
-  // Route to Azure OpenAI if the model has the azure_openai_ prefix
   const isAzureModel = isAzureOpenAIModel(openAIPayload.model)
 
   if (isAzureModel) {
     if (!state.azureOpenAIConfig) {
       return c.json({ error: "Azure OpenAI not configured" }, 500)
     }
-
-    setRequestContext(c, {
-      provider: "Azure OpenAI",
-      model: openAIPayload.model,
-    })
+    setRequestContext(c, { provider: "Azure OpenAI", model: openAIPayload.model })
   } else {
     setRequestContext(c, { provider: "Copilot", model: openAIPayload.model })
   }
 
-  // Handle streaming
   if (anthropicPayload.stream) {
     const streamPayload = {
       ...openAIPayload,
@@ -82,55 +95,39 @@ export async function handleCompletion(c: Context) {
     }
 
     const response = isAzureModel
-      ? await createAzureOpenAIChatCompletions(
-          state.azureOpenAIConfig!,
-          streamPayload,
-        )
+      ? await createAzureOpenAIChatCompletions(state.azureOpenAIConfig!, streamPayload)
       : await createChatCompletions(streamPayload)
 
-    // Response is an async iterable of SSE events
     const eventStream = response as AsyncIterable<{ event?: string; data?: string }>
 
     return streamSSE(c, async (stream) => {
+      // Buffer all chunks first to get usage before emitting message_start
+      const { chunks, usage } = await collectChunksWithUsage(eventStream)
+
+      if (usage) {
+        setRequestContext(c, {
+          inputTokens: usage.prompt_tokens,
+          outputTokens: usage.completion_tokens,
+        })
+      }
+
       const streamState: AnthropicStreamState = {
         messageStartSent: false,
         contentBlockOpen: false,
         contentBlockIndex: 0,
         toolCalls: {},
+        pendingUsage: usage ?? undefined,
       }
 
-      for await (const event of eventStream) {
-        if (!event.data || event.data === "[DONE]") {
-          continue
+      // Emit all events with correct usage in message_start
+      for (const chunk of chunks) {
+        for (const evt of translateChunkToAnthropicEvents(chunk, streamState, anthropicPayload.model)) {
+          await stream.writeSSE({ event: evt.type, data: JSON.stringify(evt) })
         }
+      }
 
-        try {
-          const chunk = JSON.parse(event.data) as ChatCompletionChunk
-          consola.debug("OpenAI chunk:", JSON.stringify(chunk))
-
-          const anthropicEvents = translateChunkToAnthropicEvents(
-            chunk,
-            streamState,
-          )
-
-          for (const anthropicEvent of anthropicEvents) {
-            consola.debug("Anthropic event:", JSON.stringify(anthropicEvent))
-            await stream.writeSSE({
-              event: anthropicEvent.type,
-              data: JSON.stringify(anthropicEvent),
-            })
-          }
-
-          // Update token counts from final chunk if available
-          if (chunk.usage) {
-            setRequestContext(c, {
-              inputTokens: chunk.usage.prompt_tokens,
-              outputTokens: chunk.usage.completion_tokens,
-            })
-          }
-        } catch (error) {
-          consola.error("Failed to parse chunk:", error, event.data)
-        }
+      for (const evt of createFallbackMessageDeltaEvents(streamState)) {
+        await stream.writeSSE({ event: evt.type, data: JSON.stringify(evt) })
       }
     })
   }
@@ -145,9 +142,6 @@ export async function handleCompletion(c: Context) {
       )) as ChatCompletionResponse)
     : ((await createChatCompletions(nonStreamPayload)) as ChatCompletionResponse)
 
-  consola.debug("Response from upstream:", JSON.stringify(response).slice(-400))
-
-  // Set token counts from response
   if (response.usage) {
     setRequestContext(c, {
       inputTokens: response.usage.prompt_tokens,
@@ -155,11 +149,6 @@ export async function handleCompletion(c: Context) {
     })
   }
 
-  // Translate to Anthropic format
-  const anthropicResponse = translateToAnthropic(response)
-  consola.debug(
-    "Translated Anthropic response:",
-    JSON.stringify(anthropicResponse),
-  )
+  const anthropicResponse = translateToAnthropic(response, anthropicPayload.model)
   return c.json(anthropicResponse)
 }
