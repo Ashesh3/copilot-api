@@ -282,6 +282,7 @@ function translateAnthropicToolChoiceToOpenAI(
 
 export function translateToAnthropic(
   response: ChatCompletionResponse,
+  originalModel?: string,
 ): AnthropicResponse {
   // Merge content from all choices
   const allTextBlocks: Array<AnthropicTextBlock> = []
@@ -310,7 +311,8 @@ export function translateToAnthropic(
     id: response.id,
     type: "message",
     role: "assistant",
-    model: response.model,
+    // Use original requested model for cost calculation in Claude Code
+    model: originalModel ?? response.model,
     content: [...allTextBlocks, ...allToolUseBlocks],
     stop_reason: mapOpenAIStopReasonToAnthropic(stopReason),
     stop_sequence: null,
