@@ -6,6 +6,8 @@ import consola from "consola"
 import { serve, type ServerHandler } from "srvx"
 import invariant from "tiny-invariant"
 
+import packageJson from "../package.json" with { type: "json" }
+
 import { ensurePaths } from "./lib/paths"
 import { initProxyFromEnv } from "./lib/proxy"
 import { generateEnvScript } from "./lib/shell"
@@ -30,6 +32,8 @@ interface RunServerOptions {
 }
 
 export async function runServer(options: RunServerOptions): Promise<void> {
+  consola.info(`copilot-api v${packageJson.version}`)
+
   if (options.insecure) {
     // Disable SSL certificate verification globally
     process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0"

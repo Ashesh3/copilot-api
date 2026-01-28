@@ -11,6 +11,9 @@ export default defineConfig({
   clean: true,
   removeNodeProtocol: false,
 
+  // Keep gpt-tokenizer external since it uses dynamic imports for encodings
+  external: ["gpt-tokenizer"],
+
   env: {
     NODE_ENV: "production",
   },
