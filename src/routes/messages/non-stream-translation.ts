@@ -50,9 +50,9 @@ function translateModelName(model: string): string {
   // Subagent requests use a specific dated model which Copilot doesn't support
   // e.g., claude-sonnet-4-20250514 -> claude-sonnet-4
   // But preserve version numbers like claude-opus-4-5 (normalized to claude-opus-4.5 later)
-  if (model.match(/^claude-sonnet-4-\d{8}/)) {
+  if (/^claude-sonnet-4-\d{8}/.test(model)) {
     return "claude-sonnet-4"
-  } else if (model.match(/^claude-opus-4-\d{8}/)) {
+  } else if (/^claude-opus-4-\d{8}/.test(model)) {
     return "claude-opus-4"
   }
   return model
@@ -284,36 +284,55 @@ export function translateToAnthropic(
   response: ChatCompletionResponse,
   originalModel?: string,
 ): AnthropicResponse {
-  // Merge content from all choices
+  const { contentBlocks, stopReason } = extractContentFromChoices(response)
+  return buildAnthropicResponse(response, {
+    contentBlocks,
+    stopReason,
+    originalModel,
+  })
+}
+
+function extractContentFromChoices(response: ChatCompletionResponse): {
+  contentBlocks: Array<AnthropicTextBlock | AnthropicToolUseBlock>
+  stopReason: "stop" | "length" | "tool_calls" | "content_filter" | null
+} {
   const allTextBlocks: Array<AnthropicTextBlock> = []
   const allToolUseBlocks: Array<AnthropicToolUseBlock> = []
   let stopReason: "stop" | "length" | "tool_calls" | "content_filter" | null =
-    null // default
-  stopReason = response.choices[0]?.finish_reason ?? stopReason
+    response.choices[0]?.finish_reason ?? null
 
-  // Process all choices to extract text and tool use blocks
   for (const choice of response.choices) {
-    const textBlocks = getAnthropicTextBlocks(choice.message.content)
-    const toolUseBlocks = getAnthropicToolUseBlocks(choice.message.tool_calls)
+    allTextBlocks.push(...getAnthropicTextBlocks(choice.message.content))
+    allToolUseBlocks.push(
+      ...getAnthropicToolUseBlocks(choice.message.tool_calls),
+    )
 
-    allTextBlocks.push(...textBlocks)
-    allToolUseBlocks.push(...toolUseBlocks)
-
-    // Use the finish_reason from the first choice, or prioritize tool_calls
     if (choice.finish_reason === "tool_calls" || stopReason === "stop") {
       stopReason = choice.finish_reason
     }
   }
 
-  // Note: GitHub Copilot doesn't generate thinking blocks, so we don't include them in responses
+  return {
+    contentBlocks: [...allTextBlocks, ...allToolUseBlocks],
+    stopReason,
+  }
+}
 
+function buildAnthropicResponse(
+  response: ChatCompletionResponse,
+  options: {
+    contentBlocks: Array<AnthropicTextBlock | AnthropicToolUseBlock>
+    stopReason: "stop" | "length" | "tool_calls" | "content_filter" | null
+    originalModel?: string
+  },
+): AnthropicResponse {
+  const { contentBlocks, stopReason, originalModel } = options
   return {
     id: response.id,
     type: "message",
     role: "assistant",
-    // Use original requested model for cost calculation in Claude Code
     model: originalModel ?? response.model,
-    content: [...allTextBlocks, ...allToolUseBlocks],
+    content: contentBlocks,
     stop_reason: mapOpenAIStopReasonToAnthropic(stopReason),
     stop_sequence: null,
     usage: {

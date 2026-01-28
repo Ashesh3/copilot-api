@@ -20,7 +20,7 @@ const SYSTEM_REPLACEMENTS: Array<ReplacementRule> = [
   {
     id: "system-anthropic-billing",
     name: "Remove Anthropic billing header",
-    pattern: "x-anthropic-billing-header:[^\\n]*\\n?",
+    pattern: String.raw`x-anthropic-billing-header:[^\n]*\n?`,
     replacement: "",
     isRegex: true,
     enabled: true,
@@ -97,9 +97,9 @@ export async function getUserReplacements(): Promise<Array<ReplacementRule>> {
 export async function addReplacement(
   pattern: string,
   replacement: string,
-  isRegex = false,
-  name?: string,
+  options?: { isRegex?: boolean; name?: string },
 ): Promise<ReplacementRule> {
+  const { isRegex = false, name } = options ?? {}
   await ensureLoaded()
   const rule: ReplacementRule = {
     id: `user-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
@@ -238,7 +238,7 @@ function applyRule(
 export async function applyReplacements(text: string): Promise<string> {
   let result = text
   const allRules = await getAllReplacements()
-  const appliedRules: string[] = []
+  const appliedRules: Array<string> = []
 
   for (const rule of allRules) {
     const { result: newResult, matched } = applyRule(result, rule)

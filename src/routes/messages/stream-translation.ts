@@ -22,10 +22,16 @@ function isToolBlockOpen(state: AnthropicStreamState): boolean {
 // Helper to create message_delta and message_stop events
 function createMessageDeltaEvents(
   finishReason: "stop" | "length" | "tool_calls" | "content_filter",
-  usage: { prompt_tokens: number; completion_tokens: number; cached_tokens: number },
+  usage: {
+    prompt_tokens: number
+    completion_tokens: number
+    cached_tokens: number
+  },
 ): Array<AnthropicStreamEventData> {
   const stopReason = mapOpenAIStopReasonToAnthropic(finishReason)
-  console.log(`[stream-translation] Creating message_delta with stop_reason: ${stopReason}, finishReason: ${finishReason}`)
+  console.log(
+    `[stream-translation] Creating message_delta with stop_reason: ${stopReason}, finishReason: ${finishReason}`,
+  )
   return [
     {
       type: "message_delta",
@@ -57,7 +63,11 @@ export function createFallbackMessageDeltaEvents(
 
   // If we have a pending finish_reason, send message_delta with whatever usage we have
   if (state.pendingFinishReason) {
-    const usage = state.pendingUsage ?? { prompt_tokens: 0, completion_tokens: 0, cached_tokens: 0 }
+    const usage = state.pendingUsage ?? {
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      cached_tokens: 0,
+    }
     return createMessageDeltaEvents(state.pendingFinishReason, usage)
   }
 
@@ -75,15 +85,18 @@ export function translateChunkToAnthropicEvents(
   // Capture usage from any chunk that has it (may come before, with, or after finish_reason)
   if (chunk.usage) {
     state.pendingUsage = {
-      prompt_tokens: chunk.usage.prompt_tokens ?? 0,
-      completion_tokens: chunk.usage.completion_tokens ?? 0,
+      prompt_tokens: chunk.usage.prompt_tokens,
+      completion_tokens: chunk.usage.completion_tokens,
       cached_tokens: chunk.usage.prompt_tokens_details?.cached_tokens ?? 0,
     }
 
     // If we already saw finish_reason but deferred message_delta, send it now
     if (state.pendingFinishReason && !state.messageDeltaSent) {
       events.push(
-        ...createMessageDeltaEvents(state.pendingFinishReason, state.pendingUsage),
+        ...createMessageDeltaEvents(
+          state.pendingFinishReason,
+          state.pendingUsage,
+        ),
       )
       state.messageDeltaSent = true
     }
@@ -100,7 +113,11 @@ export function translateChunkToAnthropicEvents(
   if (!state.messageStartSent) {
     // Include usage in message_start for context window display
     // Use pending usage if available (captured from earlier chunks)
-    const usage = state.pendingUsage ?? { prompt_tokens: 0, completion_tokens: 0, cached_tokens: 0 }
+    const usage = state.pendingUsage ?? {
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      cached_tokens: 0,
+    }
     events.push({
       type: "message_start",
       message: {
@@ -224,9 +241,16 @@ export function translateChunkToAnthropicEvents(
     if (hasUsage) {
       // We have usage - send message_delta immediately
       const usage = {
-        prompt_tokens: chunk.usage?.prompt_tokens ?? state.pendingUsage?.prompt_tokens ?? 0,
-        completion_tokens: chunk.usage?.completion_tokens ?? state.pendingUsage?.completion_tokens ?? 0,
-        cached_tokens: chunk.usage?.prompt_tokens_details?.cached_tokens ?? state.pendingUsage?.cached_tokens ?? 0,
+        prompt_tokens:
+          chunk.usage?.prompt_tokens ?? state.pendingUsage?.prompt_tokens ?? 0,
+        completion_tokens:
+          chunk.usage?.completion_tokens
+          ?? state.pendingUsage?.completion_tokens
+          ?? 0,
+        cached_tokens:
+          chunk.usage?.prompt_tokens_details?.cached_tokens
+          ?? state.pendingUsage?.cached_tokens
+          ?? 0,
       }
 
       events.push(...createMessageDeltaEvents(choice.finish_reason, usage))
@@ -249,27 +273,54 @@ export function translateResponseToAnthropicEvents(
   response: ChatCompletionResponse,
   originalModel?: string,
 ): Array<AnthropicStreamEventData> {
-  const events: Array<AnthropicStreamEventData> = []
-
   const choice = response.choices[0]
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- defensive check for empty choices array
   if (!choice) {
-    return events
+    return []
   }
 
   const inputTokens = response.usage?.prompt_tokens ?? 0
   const outputTokens = response.usage?.completion_tokens ?? 0
-  const cachedTokens =
-    response.usage?.prompt_tokens_details?.cached_tokens ?? 0
+  const cachedTokens = response.usage?.prompt_tokens_details?.cached_tokens ?? 0
 
-  // 1. message_start - with actual token counts from response
-  events.push({
+  const events: Array<AnthropicStreamEventData> = [
+    createMessageStartEvent(response, {
+      originalModel,
+      inputTokens,
+      cachedTokens,
+    }),
+  ]
+
+  let contentBlockIndex = 0
+  contentBlockIndex = addTextContentEvents(events, choice, contentBlockIndex)
+  addToolCallEvents(events, choice, contentBlockIndex)
+  addMessageDeltaAndStopEvents(events, choice, {
+    inputTokens,
+    outputTokens,
+    cachedTokens,
+  })
+
+  return events
+}
+
+interface MessageStartEventOptions {
+  originalModel: string | undefined
+  inputTokens: number
+  cachedTokens: number
+}
+
+function createMessageStartEvent(
+  response: ChatCompletionResponse,
+  options: MessageStartEventOptions,
+): AnthropicStreamEventData {
+  const { originalModel, inputTokens, cachedTokens } = options
+  return {
     type: "message_start",
     message: {
       id: response.id,
       type: "message",
       role: "assistant",
       content: [],
-      // Use original requested model for cost calculation in Claude Code
       model: originalModel ?? response.model,
       stop_reason: null,
       stop_sequence: null,
@@ -280,97 +331,94 @@ export function translateResponseToAnthropicEvents(
         cache_read_input_tokens: cachedTokens,
       },
     },
-  })
-
-  let contentBlockIndex = 0
-
-  // Handle text content
-  if (choice.message.content) {
-    // 2. content_block_start for text
-    events.push({
-      type: "content_block_start",
-      index: contentBlockIndex,
-      content_block: {
-        type: "text",
-        text: "",
-      },
-    })
-
-    // 3. content_block_delta with the full text
-    events.push({
-      type: "content_block_delta",
-      index: contentBlockIndex,
-      delta: {
-        type: "text_delta",
-        text: choice.message.content,
-      },
-    })
-
-    // 4. content_block_stop
-    events.push({
-      type: "content_block_stop",
-      index: contentBlockIndex,
-    })
-
-    contentBlockIndex++
   }
+}
 
-  // Handle tool calls
-  if (choice.message.tool_calls) {
-    for (const toolCall of choice.message.tool_calls) {
-      // content_block_start for tool_use
-      events.push({
+function addTextContentEvents(
+  events: Array<AnthropicStreamEventData>,
+  choice: ChatCompletionResponse["choices"][0],
+  contentBlockIndex: number,
+): number {
+  if (choice.message.content) {
+    events.push(
+      {
         type: "content_block_start",
         index: contentBlockIndex,
+        content_block: { type: "text", text: "" },
+      },
+      {
+        type: "content_block_delta",
+        index: contentBlockIndex,
+        delta: { type: "text_delta", text: choice.message.content },
+      },
+      { type: "content_block_stop", index: contentBlockIndex },
+    )
+    return contentBlockIndex + 1
+  }
+  return contentBlockIndex
+}
+
+function addToolCallEvents(
+  events: Array<AnthropicStreamEventData>,
+  choice: ChatCompletionResponse["choices"][0],
+  startIndex: number,
+): void {
+  if (!choice.message.tool_calls) return
+
+  let idx = startIndex
+  for (const toolCall of choice.message.tool_calls) {
+    events.push(
+      {
+        type: "content_block_start",
+        index: idx,
         content_block: {
           type: "tool_use",
           id: toolCall.id,
           name: toolCall.function.name,
           input: {},
         },
-      })
-
-      // content_block_delta with tool arguments
-      events.push({
+      },
+      {
         type: "content_block_delta",
-        index: contentBlockIndex,
+        index: idx,
         delta: {
           type: "input_json_delta",
           partial_json: toolCall.function.arguments,
         },
-      })
-
-      // content_block_stop
-      events.push({
-        type: "content_block_stop",
-        index: contentBlockIndex,
-      })
-
-      contentBlockIndex++
-    }
+      },
+      { type: "content_block_stop", index: idx },
+    )
+    idx++
   }
+}
 
-  // 5. message_delta with final usage
-  events.push({
-    type: "message_delta",
-    delta: {
-      stop_reason: mapOpenAIStopReasonToAnthropic(choice.finish_reason),
-      stop_sequence: null,
+interface UsageTokens {
+  inputTokens: number
+  outputTokens: number
+  cachedTokens: number
+}
+
+function addMessageDeltaAndStopEvents(
+  events: Array<AnthropicStreamEventData>,
+  choice: ChatCompletionResponse["choices"][0],
+  usage: UsageTokens,
+): void {
+  events.push(
+    {
+      type: "message_delta",
+      delta: {
+        stop_reason: mapOpenAIStopReasonToAnthropic(choice.finish_reason),
+        stop_sequence: null,
+      },
+      usage: {
+        input_tokens: usage.inputTokens,
+        output_tokens: usage.outputTokens,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: usage.cachedTokens,
+      },
     },
-    usage: {
-      input_tokens: inputTokens,
-      output_tokens: outputTokens,
-      cache_creation_input_tokens: 0,
-      cache_read_input_tokens: cachedTokens,
-    },
-  })
-
-  // 6. message_stop
-  events.push({
-    type: "message_stop",
-  })
-
-  return events
+    { type: "message_stop" },
+  )
 }
 
 export function translateErrorToAnthropicErrorEvent(): AnthropicStreamEventData {

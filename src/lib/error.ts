@@ -26,11 +26,11 @@ interface ContentFilterError {
 
 function isContentFilterError(obj: unknown): obj is ContentFilterError {
   return (
-    typeof obj === "object" &&
-    obj !== null &&
-    "error" in obj &&
-    typeof (obj as ContentFilterError).error === "object" &&
-    (obj as ContentFilterError).error?.code === "content_filter"
+    typeof obj === "object"
+    && obj !== null
+    && "error" in obj
+    && typeof (obj as ContentFilterError).error === "object"
+    && (obj as ContentFilterError).error.code === "content_filter"
   )
 }
 

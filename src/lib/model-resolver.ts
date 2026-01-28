@@ -6,5 +6,5 @@
  */
 export function normalizeModelName(model: string): string {
   // Replace dash with dot only between two digits: "4-5" -> "4.5"
-  return model.replace(/(\d)-(\d)/g, (_, p1, p2) => `${p1}.${p2}`)
+  return model.replaceAll(/(\d)-(\d)/g, (_, p1, p2) => `${p1}.${p2}`)
 }

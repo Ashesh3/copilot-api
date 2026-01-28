@@ -7,7 +7,6 @@ import { serve, type ServerHandler } from "srvx"
 import invariant from "tiny-invariant"
 
 import packageJson from "../package.json" with { type: "json" }
-
 import { ensurePaths } from "./lib/paths"
 import { initProxyFromEnv } from "./lib/proxy"
 import { generateEnvScript } from "./lib/shell"
@@ -225,7 +224,8 @@ export const start = defineCommand({
       alias: "d",
       type: "boolean",
       default: false,
-      description: "Log raw HTTP requests received by the server (headers, method, path)",
+      description:
+        "Log raw HTTP requests received by the server (headers, method, path)",
     },
   },
   run({ args }) {

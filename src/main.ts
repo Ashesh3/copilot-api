@@ -3,7 +3,6 @@
 import { defineCommand, runMain } from "citty"
 
 import packageJson from "../package.json" with { type: "json" }
-
 import { auth } from "./auth"
 import { checkUsage } from "./check-usage"
 import { config } from "./config"

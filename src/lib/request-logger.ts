@@ -53,6 +53,22 @@ function getStatusColor(status: number): string {
 }
 
 /**
+ * Sanitize request body by omitting large message/prompt arrays
+ */
+function sanitizeRequestBody(
+  parsed: Record<string, unknown>,
+): Record<string, unknown> {
+  const sanitized: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(parsed)) {
+    sanitized[key] =
+      key === "messages" || key === "prompt" ?
+        `[${Array.isArray(value) ? value.length : 1} items omitted]`
+      : value
+  }
+  return sanitized
+}
+
+/**
  * Log raw HTTP request details (for debug mode)
  */
 async function logRawRequest(c: Context): Promise<void> {
@@ -60,15 +76,18 @@ async function logRawRequest(c: Context): Promise<void> {
   const url = c.req.url
   const headers = Object.fromEntries(c.req.raw.headers.entries())
 
-  const lines: string[] = []
-  lines.push(`${colors.magenta}${colors.bold}[DEBUG] Incoming Request${colors.reset}`)
-  lines.push(`${colors.cyan}${method}${colors.reset} ${url}`)
-  lines.push(`${colors.dim}Headers:${colors.reset}`)
+  const lines: Array<string> = []
+  lines.push(
+    `${colors.magenta}${colors.bold}[DEBUG] Incoming Request${colors.reset}`,
+    `${colors.cyan}${method}${colors.reset} ${url}`,
+    `${colors.dim}Headers:${colors.reset}`,
+  )
 
   for (const [key, value] of Object.entries(headers)) {
     // Mask authorization headers
-    const displayValue = key.toLowerCase().includes("authorization")
-      ? `${value.slice(0, 20)}...`
+    const displayValue =
+      key.toLowerCase().includes("authorization") ?
+        `${value.slice(0, 20)}...`
       : value
     lines.push(`  ${colors.gray}${key}:${colors.reset} ${displayValue}`)
   }
@@ -81,19 +100,13 @@ async function logRawRequest(c: Context): Promise<void> {
       if (body) {
         // Parse JSON to extract model, omit messages/prompt
         try {
-          const parsed = JSON.parse(body)
-          const sanitized: Record<string, unknown> = {}
+          const parsed = JSON.parse(body) as Record<string, unknown>
+          const sanitized = sanitizeRequestBody(parsed)
 
-          for (const [key, value] of Object.entries(parsed)) {
-            if (key === "messages" || key === "prompt") {
-              sanitized[key] = `[${Array.isArray(value) ? value.length : 1} items omitted]`
-            } else {
-              sanitized[key] = value
-            }
-          }
-
-          lines.push(`${colors.dim}Body (sanitized):${colors.reset}`)
-          lines.push(`  ${JSON.stringify(sanitized, null, 2).split("\n").join("\n  ")}`)
+          lines.push(
+            `${colors.dim}Body (sanitized):${colors.reset}`,
+            `  ${JSON.stringify(sanitized, null, 2).split("\n").join("\n  ")}`,
+          )
         } catch {
           // Not JSON, show length
           lines.push(`${colors.dim}Body:${colors.reset} [${body.length} bytes]`)
@@ -133,8 +146,8 @@ export async function requestLogger(c: Context, next: Next): Promise<void> {
   const startTime = Date.now()
   const method = c.req.method
   const path =
-    c.req.path +
-    (c.req.raw.url.includes("?") ? "?" + c.req.raw.url.split("?")[1] : "")
+    c.req.path
+    + (c.req.raw.url.includes("?") ? "?" + c.req.raw.url.split("?")[1] : "")
 
   // Initialize request context
   c.set(REQUEST_CONTEXT_KEY, { startTime } as RequestContext)
@@ -148,7 +161,7 @@ export async function requestLogger(c: Context, next: Next): Promise<void> {
   const statusColor = getStatusColor(status)
 
   // Build the log block
-  const lines: string[] = []
+  const lines: Array<string> = []
 
   // Separator
   lines.push(`${colors.dim}${"─".repeat(60)}${colors.reset}`)
@@ -161,7 +174,7 @@ export async function requestLogger(c: Context, next: Next): Promise<void> {
   )
 
   // Provider and model info
-  if (ctx?.provider && ctx?.model) {
+  if (ctx?.provider && ctx.model) {
     const providerColor =
       ctx.provider === "Azure OpenAI" ? colors.blue : colors.magenta
     lines.push(
@@ -171,7 +184,7 @@ export async function requestLogger(c: Context, next: Next): Promise<void> {
 
   // Token info
   if (ctx?.inputTokens !== undefined || ctx?.outputTokens !== undefined) {
-    const tokenParts: string[] = []
+    const tokenParts: Array<string> = []
     if (ctx.inputTokens !== undefined) {
       tokenParts.push(
         `${colors.gray}Input:${colors.reset} ${colors.yellow}${ctx.inputTokens.toLocaleString()}${colors.reset}`,

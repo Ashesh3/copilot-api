@@ -72,7 +72,10 @@ export async function handleCompletion(c: Context) {
 
   const translatedPayload = translateToOpenAI(anthropicPayload)
   let openAIPayload = await applyReplacementsToPayload(translatedPayload)
-  openAIPayload = { ...openAIPayload, model: normalizeModelName(openAIPayload.model) }
+  openAIPayload = {
+    ...openAIPayload,
+    model: normalizeModelName(openAIPayload.model),
+  }
 
   if (state.manualApprove) await awaitApproval()
 
@@ -82,7 +85,10 @@ export async function handleCompletion(c: Context) {
     if (!state.azureOpenAIConfig) {
       return c.json({ error: "Azure OpenAI not configured" }, 500)
     }
-    setRequestContext(c, { provider: "Azure OpenAI", model: openAIPayload.model })
+    setRequestContext(c, {
+      provider: "Azure OpenAI",
+      model: openAIPayload.model,
+    })
   } else {
     setRequestContext(c, { provider: "Copilot", model: openAIPayload.model })
   }
@@ -94,11 +100,16 @@ export async function handleCompletion(c: Context) {
       stream_options: { include_usage: true },
     }
 
-    const response = isAzureModel
-      ? await createAzureOpenAIChatCompletions(state.azureOpenAIConfig!, streamPayload)
+    const azureConfig = state.azureOpenAIConfig
+    const response =
+      isAzureModel && azureConfig ?
+        await createAzureOpenAIChatCompletions(azureConfig, streamPayload)
       : await createChatCompletions(streamPayload)
 
-    const eventStream = response as AsyncIterable<{ event?: string; data?: string }>
+    const eventStream = response as AsyncIterable<{
+      event?: string
+      data?: string
+    }>
 
     return streamSSE(c, async (stream) => {
       // Buffer all chunks first to get usage before emitting message_start
@@ -123,7 +134,11 @@ export async function handleCompletion(c: Context) {
 
       // Emit all events with correct usage in message_start
       for (const chunk of chunks) {
-        const events = translateChunkToAnthropicEvents(chunk, streamState, anthropicPayload.model)
+        const events = translateChunkToAnthropicEvents(
+          chunk,
+          streamState,
+          anthropicPayload.model,
+        )
         for (const evt of events) {
           consola.debug(`[stream] Emitting event: ${evt.type}`)
           await stream.writeSSE({ event: evt.type, data: JSON.stringify(evt) })
@@ -131,7 +146,9 @@ export async function handleCompletion(c: Context) {
       }
 
       const fallbackEvents = createFallbackMessageDeltaEvents(streamState)
-      consola.debug(`[stream] Fallback events: ${fallbackEvents.length}, messageDeltaSent: ${streamState.messageDeltaSent}`)
+      consola.debug(
+        `[stream] Fallback events: ${fallbackEvents.length}, messageDeltaSent: ${streamState.messageDeltaSent}`,
+      )
       for (const evt of fallbackEvents) {
         consola.debug(`[stream] Emitting fallback event: ${evt.type}`)
         await stream.writeSSE({ event: evt.type, data: JSON.stringify(evt) })
@@ -142,12 +159,16 @@ export async function handleCompletion(c: Context) {
   // Non-streaming response
   const nonStreamPayload = { ...openAIPayload, stream: false }
 
-  const response = isAzureModel
-    ? ((await createAzureOpenAIChatCompletions(
-        state.azureOpenAIConfig!,
+  const azureConfigNonStream = state.azureOpenAIConfig
+  const response =
+    isAzureModel && azureConfigNonStream ?
+      ((await createAzureOpenAIChatCompletions(
+        azureConfigNonStream,
         nonStreamPayload,
       )) as ChatCompletionResponse)
-    : ((await createChatCompletions(nonStreamPayload)) as ChatCompletionResponse)
+    : ((await createChatCompletions(
+        nonStreamPayload,
+      )) as ChatCompletionResponse)
 
   if (response.usage) {
     setRequestContext(c, {
@@ -156,6 +177,9 @@ export async function handleCompletion(c: Context) {
     })
   }
 
-  const anthropicResponse = translateToAnthropic(response, anthropicPayload.model)
+  const anthropicResponse = translateToAnthropic(
+    response,
+    anthropicPayload.model,
+  )
   return c.json(anthropicResponse)
 }

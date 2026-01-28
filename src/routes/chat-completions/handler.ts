@@ -28,7 +28,7 @@ export async function handleCompletion(c: Context) {
   const rawPayload = await c.req.json<ChatCompletionsPayload>()
 
   // Apply auto-replacements to the payload
-  // eslint-disable-next-line require-atomic-updates
+
   let payload = await applyReplacementsToPayload(rawPayload)
 
   // Normalize model name (e.g., claude-opus-4-5 -> claude-opus-4.5)
