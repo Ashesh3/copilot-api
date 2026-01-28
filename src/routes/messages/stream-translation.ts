@@ -24,11 +24,13 @@ function createMessageDeltaEvents(
   finishReason: "stop" | "length" | "tool_calls" | "content_filter",
   usage: { prompt_tokens: number; completion_tokens: number; cached_tokens: number },
 ): Array<AnthropicStreamEventData> {
+  const stopReason = mapOpenAIStopReasonToAnthropic(finishReason)
+  console.log(`[stream-translation] Creating message_delta with stop_reason: ${stopReason}, finishReason: ${finishReason}`)
   return [
     {
       type: "message_delta",
       delta: {
-        stop_reason: mapOpenAIStopReasonToAnthropic(finishReason),
+        stop_reason: stopReason,
         stop_sequence: null,
       },
       usage: {
