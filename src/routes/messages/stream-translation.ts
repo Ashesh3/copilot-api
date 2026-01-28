@@ -29,9 +29,6 @@ function createMessageDeltaEvents(
   },
 ): Array<AnthropicStreamEventData> {
   const stopReason = mapOpenAIStopReasonToAnthropic(finishReason)
-  console.log(
-    `[stream-translation] Creating message_delta with stop_reason: ${stopReason}, finishReason: ${finishReason}`,
-  )
   return [
     {
       type: "message_delta",
