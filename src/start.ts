@@ -143,6 +143,11 @@ export async function runServer(options: RunServerOptions): Promise<void> {
   serve({
     fetch: server.fetch as ServerHandler,
     port: options.port,
+    // Increase idle timeout for long-running requests (e.g. Claude Code compact)
+    // Bun default is 10s which is too short
+    bun: {
+      idleTimeout: 255, // max value in seconds (4m 15s)
+    },
   })
 }
 

@@ -104,6 +104,8 @@ export async function handleCompletion(c: Context) {
       // Buffer all chunks first to get usage before emitting message_start
       const { chunks, usage } = await collectChunksWithUsage(eventStream)
 
+      consola.debug(`[stream] Collected ${chunks.length} chunks, usage:`, usage)
+
       if (usage) {
         setRequestContext(c, {
           inputTokens: usage.prompt_tokens,
@@ -121,12 +123,17 @@ export async function handleCompletion(c: Context) {
 
       // Emit all events with correct usage in message_start
       for (const chunk of chunks) {
-        for (const evt of translateChunkToAnthropicEvents(chunk, streamState, anthropicPayload.model)) {
+        const events = translateChunkToAnthropicEvents(chunk, streamState, anthropicPayload.model)
+        for (const evt of events) {
+          consola.debug(`[stream] Emitting event: ${evt.type}`)
           await stream.writeSSE({ event: evt.type, data: JSON.stringify(evt) })
         }
       }
 
-      for (const evt of createFallbackMessageDeltaEvents(streamState)) {
+      const fallbackEvents = createFallbackMessageDeltaEvents(streamState)
+      consola.debug(`[stream] Fallback events: ${fallbackEvents.length}, messageDeltaSent: ${streamState.messageDeltaSent}`)
+      for (const evt of fallbackEvents) {
+        consola.debug(`[stream] Emitting fallback event: ${evt.type}`)
         await stream.writeSSE({ event: evt.type, data: JSON.stringify(evt) })
       }
     })
