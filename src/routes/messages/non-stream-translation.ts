@@ -327,6 +327,7 @@ function buildAnthropicResponse(
   },
 ): AnthropicResponse {
   const { contentBlocks, stopReason, originalModel } = options
+  const cachedTokens = response.usage?.prompt_tokens_details?.cached_tokens ?? 0
   return {
     id: response.id,
     type: "message",
@@ -336,14 +337,12 @@ function buildAnthropicResponse(
     stop_reason: mapOpenAIStopReasonToAnthropic(stopReason),
     stop_sequence: null,
     usage: {
-      input_tokens:
-        (response.usage?.prompt_tokens ?? 0)
-        - (response.usage?.prompt_tokens_details?.cached_tokens ?? 0),
+      // Anthropic input_tokens = uncached tokens only
+      // OpenAI prompt_tokens includes cached, so subtract them
+      input_tokens: (response.usage?.prompt_tokens ?? 0) - cachedTokens,
       output_tokens: response.usage?.completion_tokens ?? 0,
-      ...(response.usage?.prompt_tokens_details?.cached_tokens
-        !== undefined && {
-        cache_read_input_tokens:
-          response.usage.prompt_tokens_details.cached_tokens,
+      ...(cachedTokens > 0 && {
+        cache_read_input_tokens: cachedTokens,
       }),
     },
   }

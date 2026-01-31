@@ -7,7 +7,7 @@ import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
 import { normalizeModelName } from "~/lib/model-resolver"
 import { checkRateLimit } from "~/lib/rate-limit"
-import { setRequestContext } from "~/lib/request-logger"
+import { setRequestContext, logTokenUsage } from "~/lib/request-logger"
 import { state } from "~/lib/state"
 import {
   createAzureOpenAIChatCompletions,
@@ -122,6 +122,7 @@ export async function handleCompletion(c: Context) {
           inputTokens: usage.prompt_tokens,
           outputTokens: usage.completion_tokens,
         })
+        logTokenUsage(usage.prompt_tokens, usage.completion_tokens)
       }
 
       const streamState: AnthropicStreamState = {

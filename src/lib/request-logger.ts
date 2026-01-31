@@ -16,7 +16,7 @@ export interface RequestContext {
 const REQUEST_CONTEXT_KEY = "requestContext"
 
 // ANSI color codes
-const colors = {
+export const colors = {
   reset: "\x1b[0m",
   dim: "\x1b[2m",
   bold: "\x1b[1m",
@@ -203,4 +203,15 @@ export async function requestLogger(c: Context, next: Next): Promise<void> {
 
   // Print all lines
   console.log(lines.join("\n"))
+}
+
+/**
+ * Log token usage (for streaming responses where tokens are known after stream completes)
+ */
+export function logTokenUsage(inputTokens: number, outputTokens: number): void {
+  const parts: Array<string> = []
+  parts.push(
+    `  ${colors.gray}Tokens:${colors.reset} ${colors.yellow}${inputTokens.toLocaleString()} in${colors.reset} ${colors.gray}/${colors.reset} ${colors.green}${outputTokens.toLocaleString()} out${colors.reset}`,
+  )
+  console.log(parts.join(""))
 }

@@ -29,6 +29,9 @@ function createMessageDeltaEvents(
   },
 ): Array<AnthropicStreamEventData> {
   const stopReason = mapOpenAIStopReasonToAnthropic(finishReason)
+  // Anthropic input_tokens = uncached tokens only
+  // OpenAI prompt_tokens includes cached, so subtract them
+  const inputTokens = usage.prompt_tokens - usage.cached_tokens
   return [
     {
       type: "message_delta",
@@ -37,7 +40,7 @@ function createMessageDeltaEvents(
         stop_sequence: null,
       },
       usage: {
-        input_tokens: usage.prompt_tokens,
+        input_tokens: inputTokens,
         output_tokens: usage.completion_tokens,
         cache_creation_input_tokens: 0,
         cache_read_input_tokens: usage.cached_tokens,
@@ -115,6 +118,8 @@ export function translateChunkToAnthropicEvents(
       completion_tokens: 0,
       cached_tokens: 0,
     }
+    // Anthropic input_tokens = uncached tokens only
+    const inputTokens = usage.prompt_tokens - usage.cached_tokens
     events.push({
       type: "message_start",
       message: {
@@ -127,9 +132,10 @@ export function translateChunkToAnthropicEvents(
         stop_reason: null,
         stop_sequence: null,
         // Include usage for context window display
+        // Note: output_tokens should be 0 at message_start (final count comes in message_delta)
         usage: {
-          input_tokens: usage.prompt_tokens,
-          output_tokens: usage.completion_tokens,
+          input_tokens: inputTokens,
+          output_tokens: 0,
           cache_creation_input_tokens: 0,
           cache_read_input_tokens: usage.cached_tokens,
         },
@@ -276,9 +282,11 @@ export function translateResponseToAnthropicEvents(
     return []
   }
 
-  const inputTokens = response.usage?.prompt_tokens ?? 0
+  const promptTokens = response.usage?.prompt_tokens ?? 0
   const outputTokens = response.usage?.completion_tokens ?? 0
   const cachedTokens = response.usage?.prompt_tokens_details?.cached_tokens ?? 0
+  // Anthropic input_tokens = uncached tokens only
+  const inputTokens = promptTokens - cachedTokens
 
   const events: Array<AnthropicStreamEventData> = [
     createMessageStartEvent(response, {
