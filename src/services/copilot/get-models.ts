@@ -47,9 +47,15 @@ interface ModelLimits {
 }
 
 interface ModelSupports {
+  max_thinking_budget?: number
+  min_thinking_budget?: number
   tool_calls?: boolean
   parallel_tool_calls?: boolean
   dimensions?: boolean
+  streaming?: boolean
+  structured_outputs?: boolean
+  vision?: boolean
+  adaptive_thinking?: boolean
 }
 
 interface ModelCapabilities {
@@ -74,4 +80,5 @@ export interface Model {
     state: string
     terms: string
   }
+  supported_endpoints?: Array<string>
 }
