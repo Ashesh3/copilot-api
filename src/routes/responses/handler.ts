@@ -6,6 +6,7 @@ import { awaitApproval } from "~/lib/approval"
 import { getConfig } from "~/lib/config"
 import { createHandlerLogger } from "~/lib/logger"
 import { checkRateLimit } from "~/lib/rate-limit"
+import { setRequestContext } from "~/lib/request-logger"
 import { state } from "~/lib/state"
 import {
   createResponses,
@@ -24,6 +25,7 @@ export const handleResponses = async (c: Context) => {
   await checkRateLimit(state)
 
   const payload = await c.req.json<ResponsesPayload>()
+  setRequestContext(c, { provider: "Copilot (Responses)", model: payload.model })
   logger.debug("Responses request payload:", JSON.stringify(payload))
 
   useFunctionApplyPatch(payload)
