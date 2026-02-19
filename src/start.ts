@@ -7,6 +7,7 @@ import { serve, type ServerHandler } from "srvx"
 import invariant from "tiny-invariant"
 
 import packageJson from "../package.json" with { type: "json" }
+import { mergeConfigWithDefaults } from "./lib/config"
 import { ensurePaths } from "./lib/paths"
 import { initProxyFromEnv } from "./lib/proxy"
 import { generateEnvScript } from "./lib/shell"
@@ -58,12 +59,14 @@ export async function runServer(options: RunServerOptions): Promise<void> {
   state.rateLimitWait = options.rateLimitWait
   state.showToken = options.showToken
   state.debug = options.debug
+  state.verbose = options.verbose
 
   if (options.debug) {
     consola.info("Debug mode enabled - raw HTTP requests will be logged")
   }
 
   await ensurePaths()
+  mergeConfigWithDefaults()
   await cacheVSCodeVersion()
 
   if (options.githubToken) {
