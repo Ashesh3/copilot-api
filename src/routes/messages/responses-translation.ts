@@ -293,7 +293,7 @@ const createReasoningContent = (
   // align with vscode-copilot-chat extractThinkingData, should add id, otherwise it will cause miss cache occasionally —— the usage input cached tokens to be 0
   // https://github.com/microsoft/vscode-copilot-chat/blob/main/src/platform/endpoint/node/responsesApi.ts#L162
   // when use in codex cli, reasoning id is empty, so it will cause miss cache occasionally
-  const array = block.signature.split("@")
+  const array = (block.signature ?? "").split("@")
   const signature = array[0]
   const id = array[1]
   const thinking = block.thinking === THINKING_TEXT ? "" : block.thinking
