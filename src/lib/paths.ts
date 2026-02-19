@@ -10,6 +10,7 @@ const REPLACEMENTS_CONFIG_PATH = path.join(APP_DIR, "replacements.json")
 
 export const PATHS = {
   APP_DIR,
+  CONFIG_PATH: path.join(APP_DIR, "config.json"),
   GITHUB_TOKEN_PATH,
   AZURE_OPENAI_CONFIG_PATH,
   REPLACEMENTS_CONFIG_PATH,
