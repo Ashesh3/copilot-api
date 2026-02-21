@@ -29,6 +29,8 @@ interface RunServerOptions {
   proxyEnv: boolean
   insecure: boolean
   debug: boolean
+  apiKeyAuth?: string
+  host?: string
 }
 
 export async function runServer(options: RunServerOptions): Promise<void> {
@@ -60,6 +62,13 @@ export async function runServer(options: RunServerOptions): Promise<void> {
   state.showToken = options.showToken
   state.debug = options.debug
   state.verbose = options.verbose
+  state.apiKeyAuth = options.apiKeyAuth
+
+  if (options.apiKeyAuth)
+    consola.info(
+      "API key authentication enabled - unauthorized requests will be silently dropped",
+    )
+  if (options.host) consola.info(`Binding to host: ${options.host}`)
 
   if (options.debug) {
     consola.info("Debug mode enabled - raw HTTP requests will be logged")
@@ -85,7 +94,7 @@ export async function runServer(options: RunServerOptions): Promise<void> {
     `Available models: \n${allModelIds.map((id) => `- ${id}`).join("\n")}`,
   )
 
-  const serverUrl = `http://localhost:${options.port}`
+  const serverUrl = `http://${options.host ?? "localhost"}:${options.port}`
 
   if (options.claudeCode) {
     invariant(state.models, "Models should be loaded by now")
@@ -138,6 +147,7 @@ export async function runServer(options: RunServerOptions): Promise<void> {
   serve({
     fetch: server.fetch as ServerHandler,
     port: options.port,
+    hostname: options.host,
     // Increase idle timeout for long-running requests (e.g. Claude Code compact)
     // Bun default is 10s which is too short
     bun: {
@@ -223,6 +233,16 @@ export const start = defineCommand({
       description:
         "Log raw HTTP requests received by the server (headers, method, path)",
     },
+    "api-key-auth": {
+      type: "string",
+      description:
+        "API key for incoming request authentication. Requests with mismatched keys are silently dropped.",
+    },
+    host: {
+      type: "string",
+      description:
+        "Hostname/IP to bind the server to (e.g., 0.0.0.0 for all interfaces)",
+    },
   },
   run({ args }) {
     const rateLimitRaw = args["rate-limit"]
@@ -243,6 +263,8 @@ export const start = defineCommand({
       proxyEnv: args["proxy-env"],
       insecure: args.insecure,
       debug: args.debug,
+      apiKeyAuth: args["api-key-auth"],
+      host: args.host,
     })
   },
 })

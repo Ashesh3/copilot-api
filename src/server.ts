@@ -1,6 +1,7 @@
 import { Hono } from "hono"
 import { cors } from "hono/cors"
 
+import { apiKeyGuard } from "./lib/api-key-guard"
 import { createAuthMiddleware } from "./lib/request-auth"
 import { requestLogger } from "./lib/request-logger"
 import { completionRoutes } from "./routes/chat-completions/route"
@@ -14,6 +15,7 @@ import { usageRoute } from "./routes/usage/route"
 
 export const server = new Hono()
 
+server.use(apiKeyGuard)
 server.use(requestLogger)
 server.use(cors())
 server.use("*", createAuthMiddleware())
