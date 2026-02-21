@@ -16,10 +16,6 @@ import { normalizeModelName } from "~/lib/model-resolver"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { state } from "~/lib/state"
 import {
-  createAzureOpenAIChatCompletions,
-  isAzureOpenAIModel,
-} from "~/services/azure-openai"
-import {
   buildErrorEvent,
   createResponsesStreamState,
   translateResponsesStreamEvent,
@@ -130,18 +126,18 @@ const handleWithChatCompletions = async (
 ) => {
   const openAIPayload = translateToOpenAI(anthropicPayload)
   let finalPayload = await applyReplacementsToPayload(openAIPayload)
-  finalPayload = { ...finalPayload, model: normalizeModelName(finalPayload.model) }
+  finalPayload = {
+    ...finalPayload,
+    model: normalizeModelName(finalPayload.model),
+  }
   logger.debug(
     "Translated OpenAI request payload:",
     JSON.stringify(finalPayload),
   )
 
-  const isAzureModel = isAzureOpenAIModel(finalPayload.model)
-  const response = isAzureModel && state.azureOpenAIConfig
-    ? await createAzureOpenAIChatCompletions(state.azureOpenAIConfig, finalPayload)
-    : await createChatCompletions(finalPayload, {
-        initiator: initiatorOverride,
-      })
+  const response = await createChatCompletions(finalPayload, {
+    initiator: initiatorOverride,
+  })
 
   if (isNonStreaming(response)) {
     logger.debug(

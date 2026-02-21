@@ -10,7 +10,7 @@ export interface RequestContext {
   model?: string
   inputTokens?: number
   outputTokens?: number
-  provider?: "Copilot" | "Azure OpenAI"
+  provider?: "Copilot"
 }
 
 const REQUEST_CONTEXT_KEY = "requestContext"
@@ -175,8 +175,7 @@ export async function requestLogger(c: Context, next: Next): Promise<void> {
 
   // Provider and model info
   if (ctx?.provider && ctx.model) {
-    const providerColor =
-      ctx.provider === "Azure OpenAI" ? colors.blue : colors.magenta
+    const providerColor = colors.magenta
     lines.push(
       `  ${colors.gray}Provider:${colors.reset} ${providerColor}${ctx.provider}${colors.reset} ${colors.gray}->${colors.reset} ${colors.white}${ctx.model}${colors.reset}`,
     )

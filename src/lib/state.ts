@@ -1,7 +1,3 @@
-import type {
-  AzureOpenAIConfig,
-  AzureOpenAIDeploymentInfo,
-} from "~/services/azure-openai/types"
 import type { ModelsResponse } from "~/services/copilot/get-models"
 
 export interface State {
@@ -21,10 +17,6 @@ export interface State {
   // Rate limiting configuration
   rateLimitSeconds?: number
   lastRequestTimestamp?: number
-
-  // Azure OpenAI configuration
-  azureOpenAIConfig?: AzureOpenAIConfig
-  azureOpenAIDeployments?: Array<AzureOpenAIDeploymentInfo>
 }
 
 export const state: State = {
