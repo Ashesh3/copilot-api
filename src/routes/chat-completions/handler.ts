@@ -6,6 +6,7 @@ import { streamSSE, type SSEMessage } from "hono/streaming"
 import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
 import { normalizeModelName } from "~/lib/model-resolver"
+import { parseModelSuffix } from "~/lib/model-suffix"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { setRequestContext } from "~/lib/request-logger"
 import { state } from "~/lib/state"
@@ -22,6 +23,10 @@ export async function handleCompletion(c: Context) {
   await checkRateLimit(state)
 
   const rawPayload = await c.req.json<ChatCompletionsPayload>()
+
+  // Parse model suffix to strip reasoning effort suffix (e.g. "gpt-5.3-codex:high" -> "gpt-5.3-codex")
+  const { baseModel } = parseModelSuffix(rawPayload.model)
+  rawPayload.model = baseModel
 
   // Apply auto-replacements to the payload
 

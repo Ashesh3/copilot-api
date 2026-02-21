@@ -13,6 +13,7 @@ import {
 } from "~/lib/config"
 import { createHandlerLogger } from "~/lib/logger"
 import { normalizeModelName } from "~/lib/model-resolver"
+import { parseModelSuffix } from "~/lib/model-suffix"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { state } from "~/lib/state"
 import {
@@ -61,6 +62,12 @@ export async function handleCompletion(c: Context) {
   const anthropicPayload = await c.req.json<AnthropicMessagesPayload>()
   logger.debug("Anthropic request payload:", JSON.stringify(anthropicPayload))
 
+  // Parse model suffix for reasoning effort override (e.g. "claude-sonnet-4.6:high")
+  const { baseModel, reasoningEffort: suffixEffort } = parseModelSuffix(
+    anthropicPayload.model,
+  )
+  anthropicPayload.model = baseModel
+
   const subagentMarker = parseSubagentMarkerFromFirstUser(anthropicPayload)
   const initiatorOverride = subagentMarker ? "agent" : undefined
   if (subagentMarker) {
@@ -106,11 +113,15 @@ export async function handleCompletion(c: Context) {
       anthropicBetaHeader: anthropicBeta,
       initiatorOverride,
       selectedModel,
+      effortOverride: suffixEffort,
     })
   }
 
   if (shouldUseResponsesApi(selectedModel)) {
-    return await handleWithResponsesApi(c, anthropicPayload, initiatorOverride)
+    return await handleWithResponsesApi(c, anthropicPayload, {
+      initiatorOverride,
+      effortOverride: suffixEffort,
+    })
   }
 
   return await handleWithChatCompletions(c, anthropicPayload, initiatorOverride)
@@ -188,10 +199,16 @@ const handleWithChatCompletions = async (
 const handleWithResponsesApi = async (
   c: Context,
   anthropicPayload: AnthropicMessagesPayload,
-  initiatorOverride?: "agent" | "user",
+  options?: {
+    initiatorOverride?: "agent" | "user"
+    effortOverride?: "low" | "medium" | "high" | "xhigh"
+  },
 ) => {
-  const responsesPayload =
-    translateAnthropicMessagesToResponsesPayload(anthropicPayload)
+  const { initiatorOverride, effortOverride } = options ?? {}
+  const responsesPayload = translateAnthropicMessagesToResponsesPayload(
+    anthropicPayload,
+    effortOverride,
+  )
   logger.debug(
     "Translated Responses payload:",
     JSON.stringify(responsesPayload),
@@ -277,10 +294,15 @@ const handleWithMessagesApi = async (
     anthropicBetaHeader?: string
     initiatorOverride?: "agent" | "user"
     selectedModel?: Model
+    effortOverride?: "low" | "medium" | "high" | "xhigh"
   },
 ) => {
-  const { anthropicBetaHeader, initiatorOverride, selectedModel } =
-    options ?? {}
+  const {
+    anthropicBetaHeader,
+    initiatorOverride,
+    selectedModel,
+    effortOverride,
+  } = options ?? {}
   // Pre-request processing: filter thinking blocks for Claude models so only
   // valid thinking blocks are sent to the Copilot Messages API.
   for (const msg of anthropicPayload.messages) {
@@ -302,7 +324,10 @@ const handleWithMessagesApi = async (
       type: "adaptive",
     }
     anthropicPayload.output_config = {
-      effort: getAnthropicEffortForModel(anthropicPayload.model),
+      effort: getAnthropicEffortForModel(
+        anthropicPayload.model,
+        effortOverride,
+      ),
     }
   }
 
@@ -356,8 +381,9 @@ const isAsyncIterable = <T>(value: unknown): value is AsyncIterable<T> =>
 
 const getAnthropicEffortForModel = (
   model: string,
+  override?: "low" | "medium" | "high" | "xhigh",
 ): "low" | "medium" | "high" | "max" => {
-  const reasoningEffort = getReasoningEffortForModel(model)
+  const reasoningEffort = getReasoningEffortForModel(model, override)
 
   if (reasoningEffort === "xhigh") return "max"
   if (reasoningEffort === "none" || reasoningEffort === "minimal") return "low"

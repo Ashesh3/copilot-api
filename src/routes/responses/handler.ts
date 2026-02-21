@@ -5,6 +5,7 @@ import { streamSSE } from "hono/streaming"
 import { awaitApproval } from "~/lib/approval"
 import { getConfig } from "~/lib/config"
 import { createHandlerLogger } from "~/lib/logger"
+import { parseModelSuffix } from "~/lib/model-suffix"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { setRequestContext } from "~/lib/request-logger"
 import { state } from "~/lib/state"
@@ -25,7 +26,15 @@ export const handleResponses = async (c: Context) => {
   await checkRateLimit(state)
 
   const payload = await c.req.json<ResponsesPayload>()
-  setRequestContext(c, { provider: "Copilot (Responses)", model: payload.model })
+
+  // Parse model suffix to strip reasoning effort suffix (e.g. "gpt-5.3-codex:high")
+  const { baseModel } = parseModelSuffix(payload.model)
+  payload.model = baseModel
+
+  setRequestContext(c, {
+    provider: "Copilot (Responses)",
+    model: payload.model,
+  })
   logger.debug("Responses request payload:", JSON.stringify(payload))
 
   useFunctionApplyPatch(payload)

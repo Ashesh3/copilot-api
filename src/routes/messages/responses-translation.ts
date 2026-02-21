@@ -50,6 +50,7 @@ export const THINKING_TEXT = "Thinking..."
 
 export const translateAnthropicMessagesToResponsesPayload = (
   payload: AnthropicMessagesPayload,
+  effortOverride?: "low" | "medium" | "high" | "xhigh",
 ): ResponsesPayload => {
   const input: Array<ResponseInputItem> = []
 
@@ -80,7 +81,7 @@ export const translateAnthropicMessagesToResponsesPayload = (
     store: false,
     parallel_tool_calls: true,
     reasoning: {
-      effort: getReasoningEffortForModel(payload.model),
+      effort: getReasoningEffortForModel(payload.model, effortOverride),
       summary: "detailed",
     },
     include: ["reasoning.encrypted_content"],
