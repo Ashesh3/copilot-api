@@ -1,6 +1,7 @@
 import { Hono } from "hono"
 
 import { forwardError } from "~/lib/error"
+import { generateVirtualModels } from "~/lib/model-suffix"
 import { state } from "~/lib/state"
 import { cacheModels } from "~/lib/utils"
 
@@ -25,9 +26,13 @@ modelRoutes.get("/", async (c) => {
         display_name: model.name,
       })) ?? []
 
+    // Virtual models for reasoning effort variants (e.g. "claude-sonnet-4.6:high")
+    const virtualModels =
+      state.models ? generateVirtualModels(state.models.data) : []
+
     return c.json({
       object: "list",
-      data: copilotModels,
+      data: [...copilotModels, ...virtualModels],
       has_more: false,
     })
   } catch (error) {

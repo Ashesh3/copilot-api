@@ -167,7 +167,9 @@ export function getSmallModel(): string {
 
 export function getReasoningEffortForModel(
   model: string,
+  override?: "low" | "medium" | "high" | "xhigh",
 ): "none" | "minimal" | "low" | "medium" | "high" | "xhigh" {
+  if (override) return override
   const config = getConfig()
   return config.modelReasoningEfforts?.[model] ?? "high"
 }
