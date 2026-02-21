@@ -13,6 +13,7 @@ export interface State {
   showToken: boolean
   debug: boolean
   verbose: boolean
+  apiKeyAuth?: string
 
   // Rate limiting configuration
   rateLimitSeconds?: number
