@@ -13,7 +13,7 @@ import { initProxyFromEnv } from "./lib/proxy"
 import { generateEnvScript } from "./lib/shell"
 import { state } from "./lib/state"
 import { setupCopilotToken, setupGitHubToken } from "./lib/token"
-import { cacheModels, cacheVSCodeVersion, setupAzureOpenAI } from "./lib/utils"
+import { cacheModels, cacheVSCodeVersion } from "./lib/utils"
 import { server } from "./server"
 
 interface RunServerOptions {
@@ -79,14 +79,7 @@ export async function runServer(options: RunServerOptions): Promise<void> {
   await setupCopilotToken()
   await cacheModels()
 
-  // Setup Azure OpenAI (prompt on first run, load from config thereafter)
-  await setupAzureOpenAI()
-
-  // Build combined model list for display
-  const copilotModelIds = state.models?.data.map((model) => model.id) ?? []
-  const azureModelIds =
-    state.azureOpenAIDeployments?.map((deployment) => deployment.id) ?? []
-  const allModelIds = [...copilotModelIds, ...azureModelIds]
+  const allModelIds = state.models?.data.map((model) => model.id) ?? []
 
   consola.info(
     `Available models: \n${allModelIds.map((id) => `- ${id}`).join("\n")}`,

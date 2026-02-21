@@ -12,10 +12,6 @@ import { state } from "~/lib/state"
 import { getTokenCount } from "~/lib/tokenizer"
 import { isNullish } from "~/lib/utils"
 import {
-  createAzureOpenAIChatCompletions,
-  isAzureOpenAIModel,
-} from "~/services/azure-openai"
-import {
   createChatCompletions,
   type ChatCompletionChunk,
   type ChatCompletionResponse,
@@ -38,51 +34,6 @@ export async function handleCompletion(c: Context) {
   }
 
   consola.debug("Request payload:", JSON.stringify(payload).slice(-400))
-
-  // Check if this is an Azure OpenAI model
-  if (isAzureOpenAIModel(payload.model)) {
-    if (!state.azureOpenAIConfig) {
-      return c.json({ error: "Azure OpenAI not configured" }, 500)
-    }
-
-    setRequestContext(c, { provider: "Azure OpenAI", model: payload.model })
-
-    if (state.manualApprove) await awaitApproval()
-
-    const response = await createAzureOpenAIChatCompletions(
-      state.azureOpenAIConfig,
-      payload,
-    )
-
-    if (isNonStreaming(response)) {
-      consola.debug("Non-streaming response:", JSON.stringify(response))
-      if (response.usage) {
-        setRequestContext(c, {
-          inputTokens: response.usage.prompt_tokens,
-          outputTokens: response.usage.completion_tokens,
-        })
-      }
-      return c.json(response)
-    }
-
-    consola.debug("Streaming response")
-    return streamSSE(c, async (stream) => {
-      for await (const chunk of response) {
-        consola.debug("Streaming chunk:", JSON.stringify(chunk))
-        // Capture usage from final chunk if available
-        if (chunk.data && chunk.data !== "[DONE]") {
-          const parsed = JSON.parse(chunk.data) as ChatCompletionChunk
-          if (parsed.usage) {
-            setRequestContext(c, {
-              inputTokens: parsed.usage.prompt_tokens,
-              outputTokens: parsed.usage.completion_tokens,
-            })
-          }
-        }
-        await stream.writeSSE(chunk as SSEMessage)
-      }
-    })
-  }
 
   setRequestContext(c, { provider: "Copilot", model: payload.model })
 

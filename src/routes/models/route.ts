@@ -25,23 +25,9 @@ modelRoutes.get("/", async (c) => {
         display_name: model.name,
       })) ?? []
 
-    // Azure OpenAI deployments
-    const azureModels =
-      state.azureOpenAIDeployments?.map((deployment) => ({
-        id: deployment.id,
-        object: "model",
-        type: "model",
-        created: deployment.created,
-        created_at: new Date(deployment.created * 1000).toISOString(),
-        owned_by: deployment.owned_by,
-        display_name: `${deployment.deploymentName} (${deployment.model})`,
-      })) ?? []
-
-    const allModels = [...copilotModels, ...azureModels]
-
     return c.json({
       object: "list",
-      data: allModels,
+      data: copilotModels,
       has_more: false,
     })
   } catch (error) {
