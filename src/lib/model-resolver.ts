@@ -10,6 +10,9 @@ export function normalizeModelName(model: string): string {
   // Convert Anthropic's [1m] context suffix to Copilot's -1m format
   let normalized = model.replace("[1m]", "-1m")
 
+  // Strip Anthropic date suffixes (e.g., "-20251001") — Copilot doesn't support them
+  normalized = normalized.replace(/-\d{8}$/, "")
+
   // Replace dash with dot only between two digits: "4-5" -> "4.5"
   normalized = normalized.replaceAll(/(\d)-(\d)/g, (_, p1, p2) => `${p1}.${p2}`)
 
