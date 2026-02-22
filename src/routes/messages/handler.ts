@@ -6,16 +6,14 @@ import type { Model } from "~/services/copilot/get-models"
 
 import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
-import {
-  getSmallModel,
-  shouldCompactUseSmallModel,
-  getReasoningEffortForModel,
-} from "~/lib/config"
+import { getReasoningEffortForModel } from "~/lib/config"
 import { createHandlerLogger } from "~/lib/logger"
 import { normalizeModelName } from "~/lib/model-resolver"
 import { parseModelSuffix } from "~/lib/model-suffix"
 import { checkRateLimit } from "~/lib/rate-limit"
+import { setRequestContext } from "~/lib/request-logger"
 import { state } from "~/lib/state"
+import { getTokenCount } from "~/lib/tokenizer"
 import {
   buildErrorEvent,
   createResponsesStreamState,
@@ -62,11 +60,15 @@ export async function handleCompletion(c: Context) {
   const anthropicPayload = await c.req.json<AnthropicMessagesPayload>()
   logger.debug("Anthropic request payload:", JSON.stringify(anthropicPayload))
 
+  // Capture the originally requested model before any manipulation
+  const requestedModel = anthropicPayload.model
+
   // Parse model suffix for reasoning effort override (e.g. "claude-sonnet-4.6:high")
   const { baseModel, reasoningEffort: suffixEffort } = parseModelSuffix(
     anthropicPayload.model,
   )
-  anthropicPayload.model = baseModel
+  // Normalize model name (e.g. "claude-opus-4-6[1m]" → "claude-opus-4.6-1m")
+  anthropicPayload.model = normalizeModelName(baseModel)
 
   const subagentMarker = parseSubagentMarkerFromFirstUser(anthropicPayload)
   const initiatorOverride = subagentMarker ? "agent" : undefined
@@ -77,20 +79,14 @@ export async function handleCompletion(c: Context) {
   // claude code and opencode compact request detection
   const isCompact = isCompactRequest(anthropicPayload)
 
-  // fix claude code 2.0.28+ warmup request consume premium request, forcing small model if no tools are used
-  // set "CLAUDE_CODE_SUBAGENT_MODEL": "you small model" also can avoid this
   const anthropicBeta = c.req.header("anthropic-beta")
   logger.debug("Anthropic Beta header:", anthropicBeta)
-  const noTools = !anthropicPayload.tools || anthropicPayload.tools.length === 0
-  if (anthropicBeta && noTools && !isCompact) {
-    anthropicPayload.model = getSmallModel()
-  }
+
+  // Route to model variants based on client signals
+  applyModelVariantRouting(anthropicPayload, anthropicBeta)
 
   if (isCompact) {
     logger.debug("Is compact request:", isCompact)
-    if (shouldCompactUseSmallModel()) {
-      anthropicPayload.model = getSmallModel()
-    }
   } else {
     // Merge tool_result and text blocks into tool_result to avoid consuming premium requests
     // (caused by skill invocations, edit hooks, plan or to do reminders)
@@ -107,6 +103,26 @@ export async function handleCompletion(c: Context) {
   const selectedModel = state.models?.data.find(
     (m) => m.id === anthropicPayload.model,
   )
+
+  // Log the requested vs routed model
+  let apiType = "ChatCompletions"
+  if (shouldUseMessagesApi(selectedModel)) {
+    apiType = "Messages"
+  } else if (shouldUseResponsesApi(selectedModel)) {
+    apiType = "Responses"
+  }
+
+  // Determine effective reasoning effort for logging
+  // Priority: suffix > body thinking config
+  const bodyEffort = getBodyReasoningEffort(anthropicPayload)
+  const effectiveEffort = suffixEffort ?? bodyEffort
+
+  setRequestContext(c, {
+    requestedModel,
+    model: anthropicPayload.model,
+    provider: apiType,
+    reasoningEffort: effectiveEffort,
+  })
 
   if (shouldUseMessagesApi(selectedModel)) {
     return await handleWithMessagesApi(c, anthropicPayload, {
@@ -136,11 +152,30 @@ const handleWithChatCompletions = async (
   initiatorOverride?: "agent" | "user",
 ) => {
   const openAIPayload = translateToOpenAI(anthropicPayload)
-  let finalPayload = await applyReplacementsToPayload(openAIPayload)
-  finalPayload = {
-    ...finalPayload,
-    model: normalizeModelName(finalPayload.model),
+  const { payload: replacedPayload, appliedRules } =
+    await applyReplacementsToPayload(openAIPayload)
+  const finalPayload = {
+    ...replacedPayload,
+    model: normalizeModelName(replacedPayload.model),
   }
+
+  if (appliedRules.length > 0) {
+    setRequestContext(c, { replacements: appliedRules })
+  }
+
+  // Calculate token count for the translated payload
+  try {
+    const selectedModel = state.models?.data.find(
+      (m) => m.id === finalPayload.model,
+    )
+    if (selectedModel) {
+      const tokenCount = await getTokenCount(finalPayload, selectedModel)
+      setRequestContext(c, { inputTokens: tokenCount.input })
+    }
+  } catch {
+    // Token counting is best-effort, don't fail the request
+  }
+
   logger.debug(
     "Translated OpenAI request payload:",
     JSON.stringify(finalPayload),
@@ -320,14 +355,18 @@ const handleWithMessagesApi = async (
   }
 
   if (selectedModel?.capabilities.supports.adaptive_thinking) {
-    anthropicPayload.thinking = {
-      type: "adaptive",
+    // Only set thinking if client didn't already provide it
+    if (!anthropicPayload.thinking) {
+      anthropicPayload.thinking = {
+        type: "adaptive",
+      }
     }
+    // Priority: suffix override > client body > config default
+    const clientEffort = anthropicPayload.output_config?.effort
     anthropicPayload.output_config = {
-      effort: getAnthropicEffortForModel(
-        anthropicPayload.model,
-        effortOverride,
-      ),
+      effort: effortOverride
+        ? getAnthropicEffortForModel(anthropicPayload.model, effortOverride)
+        : clientEffort ?? getAnthropicEffortForModel(anthropicPayload.model),
     }
   }
 
@@ -359,6 +398,32 @@ const handleWithMessagesApi = async (
   return c.json(response)
 }
 
+/**
+ * Route to model variants based on client signals (1m context, fast mode).
+ * Mutates the payload in place.
+ */
+function applyModelVariantRouting(
+  payload: AnthropicMessagesPayload,
+  anthropicBeta: string | undefined,
+): void {
+  // 1M context via beta header → route to -1m model variant
+  if (anthropicBeta?.includes("context-1m")) {
+    const candidate = `${payload.model}-1m`
+    if (state.models?.data.some((m) => m.id === candidate)) {
+      payload.model = candidate
+    }
+  }
+
+  // Fast mode → route to -fast model variant, strip unsupported field
+  if (payload.speed === "fast") {
+    const candidate = `${payload.model}-fast`
+    if (state.models?.data.some((m) => m.id === candidate)) {
+      payload.model = candidate
+    }
+    delete payload.speed
+  }
+}
+
 const shouldUseResponsesApi = (selectedModel: Model | undefined): boolean => {
   return (
     selectedModel?.supported_endpoints?.includes(RESPONSES_ENDPOINT) ?? false
@@ -378,6 +443,38 @@ const isNonStreaming = (
 const isAsyncIterable = <T>(value: unknown): value is AsyncIterable<T> =>
   Boolean(value)
   && typeof (value as AsyncIterable<T>)[Symbol.asyncIterator] === "function"
+
+/**
+ * Extract reasoning effort info from the Anthropic request body for logging.
+ * Claude Code sends effort as `output_config.effort` (low/medium/high/max)
+ * and thinking mode as `thinking.type` (enabled/adaptive).
+ * When effort is "high" (the default), Claude Code omits output_config.effort entirely.
+ */
+function getBodyReasoningEffort(
+  payload: AnthropicMessagesPayload,
+): string | undefined {
+  // No thinking config at all — no effort to report
+  if (!payload.thinking && !payload.output_config?.effort) return undefined
+
+  const parts: Array<string> = []
+
+  // output_config.effort is the actual effort level (low/medium/high/max)
+  // Claude Code omits this field when effort is "high" (the API default)
+  const effort = payload.output_config?.effort ?? (payload.thinking ? "high" : undefined)
+  if (effort) {
+    parts.push(effort)
+  }
+
+  // thinking.type indicates the thinking mode (enabled/adaptive)
+  if (payload.thinking) {
+    parts.push(payload.thinking.type)
+    if (payload.thinking.budget_tokens) {
+      parts.push(`${payload.thinking.budget_tokens.toLocaleString()} budget`)
+    }
+  }
+
+  return parts.length > 0 ? parts.join(", ") : undefined
+}
 
 const getAnthropicEffortForModel = (
   model: string,

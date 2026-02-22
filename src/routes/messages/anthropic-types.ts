@@ -26,6 +26,7 @@ export interface AnthropicMessagesPayload {
   output_config?: {
     effort?: "low" | "medium" | "high" | "max"
   }
+  speed?: "fast"
 }
 
 export interface AnthropicTextBlock {

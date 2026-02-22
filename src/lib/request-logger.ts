@@ -7,10 +7,14 @@ import { state } from "./state"
  */
 export interface RequestContext {
   startTime: number
+  requestedModel?: string
   model?: string
+  inputLength?: number
   inputTokens?: number
   outputTokens?: number
-  provider?: "Copilot"
+  provider?: string
+  replacements?: Array<string>
+  reasoningEffort?: string
 }
 
 const REQUEST_CONTEXT_KEY = "requestContext"
@@ -135,6 +139,75 @@ export function setRequestContext(
 }
 
 /**
+ * Format the input size for display
+ */
+function formatInputSize(bytes: number): string {
+  return bytes >= 1024
+    ? `${(bytes / 1024).toFixed(1)}KB`
+    : `${bytes}B`
+}
+
+/**
+ * Build the model routing log line
+ */
+function buildModelLine(ctx: RequestContext): string {
+  const parts: Array<string> = []
+
+  // Model name(s)
+  if (ctx.requestedModel && ctx.requestedModel !== ctx.model) {
+    parts.push(
+      `${colors.gray}${ctx.requestedModel}${colors.reset} ${colors.dim}→${colors.reset} ${colors.white}${ctx.model}${colors.reset}`,
+    )
+  } else {
+    parts.push(`${colors.white}${ctx.model}${colors.reset}`)
+  }
+
+  // API type from provider
+  if (ctx.provider) {
+    parts.push(
+      `${colors.dim}via${colors.reset} ${colors.magenta}${ctx.provider}${colors.reset}`,
+    )
+  }
+
+  // Input size
+  if (ctx.inputLength !== undefined) {
+    parts.push(
+      `${colors.dim}·${colors.reset} ${colors.yellow}${formatInputSize(ctx.inputLength)}${colors.reset}`,
+    )
+  }
+
+  return `  ${parts.join(" ")}`
+}
+
+/**
+ * Build the modifications log line (effort, replacements, tokens)
+ */
+function buildModificationsLine(ctx: RequestContext): string | undefined {
+  const modParts: Array<string> = []
+
+  if (ctx.reasoningEffort) {
+    modParts.push(
+      `${colors.blue}effort=${ctx.reasoningEffort}${colors.reset}`,
+    )
+  }
+
+  if (ctx.replacements && ctx.replacements.length > 0) {
+    modParts.push(
+      `${colors.green}replace: ${ctx.replacements.join(", ")}${colors.reset}`,
+    )
+  }
+
+  if (ctx.inputTokens !== undefined) {
+    modParts.push(
+      `${colors.yellow}${ctx.inputTokens.toLocaleString()} tokens${colors.reset}`,
+    )
+  }
+
+  if (modParts.length === 0) return undefined
+  return `  ${modParts.join(` ${colors.dim}·${colors.reset} `)}`
+}
+
+/**
  * Custom request logger middleware
  */
 export async function requestLogger(c: Context, next: Next): Promise<void> {
@@ -150,7 +223,11 @@ export async function requestLogger(c: Context, next: Next): Promise<void> {
     + (c.req.raw.url.includes("?") ? "?" + c.req.raw.url.split("?")[1] : "")
 
   // Initialize request context
-  c.set(REQUEST_CONTEXT_KEY, { startTime } as RequestContext)
+  const contentLength = c.req.header("content-length")
+  c.set(REQUEST_CONTEXT_KEY, {
+    startTime,
+    inputLength: contentLength ? Number(contentLength) : undefined,
+  } as RequestContext)
 
   await next()
 
@@ -173,28 +250,15 @@ export async function requestLogger(c: Context, next: Next): Promise<void> {
     `${colors.bold}${method}${colors.reset} ${path} ${statusBadge} ${durationStr}`,
   )
 
-  // Provider and model info
-  if (ctx?.provider && ctx.model) {
-    const providerColor = colors.magenta
-    lines.push(
-      `  ${colors.gray}Provider:${colors.reset} ${providerColor}${ctx.provider}${colors.reset} ${colors.gray}->${colors.reset} ${colors.white}${ctx.model}${colors.reset}`,
-    )
+  // Model routing line
+  if (ctx?.model) {
+    lines.push(buildModelLine(ctx))
   }
 
-  // Token info
-  if (ctx?.inputTokens !== undefined || ctx?.outputTokens !== undefined) {
-    const tokenParts: Array<string> = []
-    if (ctx.inputTokens !== undefined) {
-      tokenParts.push(
-        `${colors.gray}Input:${colors.reset} ${colors.yellow}${ctx.inputTokens.toLocaleString()}${colors.reset}`,
-      )
-    }
-    if (ctx.outputTokens !== undefined) {
-      tokenParts.push(
-        `${colors.gray}Output:${colors.reset} ${colors.green}${ctx.outputTokens.toLocaleString()}${colors.reset}`,
-      )
-    }
-    lines.push(`  ${tokenParts.join("  ")}`)
+  // Applied modifications line
+  if (ctx) {
+    const modsLine = buildModificationsLine(ctx)
+    if (modsLine) lines.push(modsLine)
   }
 
   // Timestamp

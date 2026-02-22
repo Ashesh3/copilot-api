@@ -44,11 +44,15 @@ export const createMessages = async (
   }
 
   if (anthropicBetaHeader) {
-    // align with vscode copilot extension anthropic-beta
+    // Strip beta flags unsupported by Copilot API
+    const unsupportedBetas = new Set([
+      "claude-code-20250219",
+      "context-1m-2025-08-07",
+    ])
     const filteredBeta = anthropicBetaHeader
       .split(",")
       .map((item) => item.trim())
-      .filter((item) => item !== "claude-code-20250219")
+      .filter((item) => !unsupportedBetas.has(item))
       .join(",")
     if (filteredBeta) {
       headers["anthropic-beta"] = filteredBeta

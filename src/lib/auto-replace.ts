@@ -232,10 +232,17 @@ function applyRule(
   return { result, matched: result !== text }
 }
 
+export interface ReplacementResult {
+  text: string
+  appliedRules: Array<string>
+}
+
 /**
  * Apply all replacement rules to text
  */
-export async function applyReplacements(text: string): Promise<string> {
+export async function applyReplacements(
+  text: string,
+): Promise<ReplacementResult> {
   let result = text
   const allRules = await getAllReplacements()
   const appliedRules: Array<string> = []
@@ -248,11 +255,12 @@ export async function applyReplacements(text: string): Promise<string> {
     }
   }
 
-  if (appliedRules.length > 0) {
-    consola.info(`Replacements applied: ${appliedRules.join(", ")}`)
-  }
+  return { text: result, appliedRules }
+}
 
-  return result
+export interface PayloadReplacementResult {
+  payload: ChatCompletionsPayload
+  appliedRules: Array<string>
 }
 
 /**
@@ -261,14 +269,15 @@ export async function applyReplacements(text: string): Promise<string> {
  */
 export async function applyReplacementsToPayload(
   payload: ChatCompletionsPayload,
-): Promise<ChatCompletionsPayload> {
+): Promise<PayloadReplacementResult> {
+  const allAppliedRules: Array<string> = []
+
   const processedMessages = await Promise.all(
     payload.messages.map(async (message) => {
       if (typeof message.content === "string") {
-        return {
-          ...message,
-          content: await applyReplacements(message.content),
-        }
+        const { text, appliedRules } = await applyReplacements(message.content)
+        allAppliedRules.push(...appliedRules)
+        return { ...message, content: text }
       }
 
       // Handle array content (multimodal)
@@ -282,10 +291,11 @@ export async function applyReplacementsToPayload(
                 && part.type === "text"
                 && part.text
               ) {
-                return {
-                  ...part,
-                  text: await applyReplacements(part.text),
-                }
+                const { text, appliedRules } = await applyReplacements(
+                  part.text,
+                )
+                allAppliedRules.push(...appliedRules)
+                return { ...part, text }
               }
               return part
             }),
@@ -297,8 +307,11 @@ export async function applyReplacementsToPayload(
     }),
   )
 
+  // Deduplicate rule names
+  const uniqueRules = [...new Set(allAppliedRules)]
+
   return {
-    ...payload,
-    messages: processedMessages,
+    payload: { ...payload, messages: processedMessages },
+    appliedRules: uniqueRules,
   }
 }

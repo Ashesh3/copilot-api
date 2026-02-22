@@ -286,7 +286,7 @@ async function testReplacements(): Promise<void> {
     return
   }
 
-  const result = await applyReplacements(testText)
+  const { text: result } = await applyReplacements(testText)
 
   consola.info("\n📝 Original:")
   console.log(testText)
