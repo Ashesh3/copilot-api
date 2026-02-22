@@ -33,12 +33,10 @@ replacementsRoute.post("/", async (c) => {
     return c.json({ error: "Pattern is required" }, 400)
   }
 
-  const rule = await addReplacement(
-    body.pattern,
-    body.replacement ?? "",
-    body.isRegex ?? false,
-    body.name,
-  )
+  const rule = await addReplacement(body.pattern, body.replacement ?? "", {
+    isRegex: body.isRegex ?? false,
+    name: body.name,
+  })
 
   return c.json(rule, 201)
 })

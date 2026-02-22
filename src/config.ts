@@ -94,7 +94,7 @@ async function addNewReplacement(): Promise<void> {
     return
   }
 
-  if (!isValidPatternForMatchType(pattern, matchType)) {
+  if (!isValidPatternForMatchType(pattern, matchType as "string" | "regex")) {
     consola.error(`Invalid regex pattern: ${pattern}`)
     return
   }
@@ -112,12 +112,10 @@ async function addNewReplacement(): Promise<void> {
     return
   }
 
-  const rule = await addReplacement(
-    pattern,
-    replacement,
-    matchType === "regex",
-    name || undefined,
-  )
+  const rule = await addReplacement(pattern, replacement, {
+    isRegex: matchType === "regex",
+    name: name || undefined,
+  })
 
   consola.success(`Added rule: ${rule.name || rule.id}`)
 }
@@ -188,7 +186,7 @@ async function editExistingReplacement(): Promise<void> {
     return
   }
 
-  if (!isValidPatternForMatchType(pattern, matchType)) {
+  if (!isValidPatternForMatchType(pattern, matchType as "string" | "regex")) {
     consola.error(`Invalid regex pattern: ${pattern}`)
     return
   }

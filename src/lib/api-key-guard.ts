@@ -9,20 +9,19 @@ import { state } from "./state"
  *
  * Only active when state.apiKeyAuth is set (via --api-key-auth CLI flag).
  */
-export async function apiKeyGuard(
-  c: Context,
-  next: Next,
-): Promise<Response | undefined> {
+export async function apiKeyGuard(c: Context, next: Next): Promise<void> {
   if (!state.apiKeyAuth) {
-    return next()
+    await next()
+    return
   }
 
   const requestApiKey = extractRequestApiKey(c)
 
   if (requestApiKey === state.apiKeyAuth) {
-    return next()
+    await next()
+    return
   }
 
   // Silent drop: never resolves, client gets no response
-  return new Promise(() => {})
+  await new Promise(() => {})
 }
