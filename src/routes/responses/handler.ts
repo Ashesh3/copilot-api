@@ -45,21 +45,30 @@ function normalizeResponsesReasoning(
 ): ResponsesReasoningEffort | undefined {
   // Accept OpenAI-compatible top-level aliases and normalize to reasoning.effort
   const topLevelEffortRaw = payload.reasoningEffort ?? payload.reasoning_effort
-  const topLevelEffort = isResponsesReasoningEffort(topLevelEffortRaw)
-    ? topLevelEffortRaw
-    : undefined
+  const topLevelEffort =
+    isResponsesReasoningEffort(topLevelEffortRaw) ? topLevelEffortRaw : (
+      undefined
+    )
 
   if (topLevelEffort) {
-    payload.reasoning = payload.reasoning
-      ? { ...payload.reasoning, effort: payload.reasoning.effort ?? topLevelEffort }
+    payload.reasoning =
+      payload.reasoning ?
+        {
+          ...payload.reasoning,
+          effort: payload.reasoning.effort ?? topLevelEffort,
+        }
       : { effort: topLevelEffort }
   }
   delete payload.reasoningEffort
   delete payload.reasoning_effort
 
   if (suffixEffort) {
-    payload.reasoning = payload.reasoning
-      ? { ...payload.reasoning, effort: suffixEffort }
+    payload.reasoning =
+      payload.reasoning ?
+        {
+          ...payload.reasoning,
+          effort: suffixEffort,
+        }
       : { effort: suffixEffort }
   }
 

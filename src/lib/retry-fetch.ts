@@ -59,11 +59,10 @@ export async function fetchWithRetry(
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
-      // Force a new connection by adding cache-busting and connection headers
-      const headers = new Headers(init?.headers)
-
-      // Ensure we're not reusing potentially stale connections
-      headers.set("Connection", "close")
+      // Force a new connection by adding connection-close while preserving
+      // caller-provided header casing (tests assert exact header key names).
+      const headers = toHeaderRecord(init?.headers)
+      headers.Connection = "close"
 
       const response = await fetch(input, {
         ...init,
@@ -105,5 +104,43 @@ export async function fetchWithRetry(
     return lastResponse
   }
 
-  throw lastError
+  throw lastError ?? new Error("Request failed without a captured error")
+}
+
+function toHeaderRecord(
+  headersInit: RequestInit["headers"],
+): Record<string, string> {
+  const headers: Record<string, string> = {}
+  if (!headersInit) return headers
+
+  if (headersInit instanceof Headers) {
+    for (const [key, value] of headersInit.entries()) {
+      headers[key] = value
+    }
+    return headers
+  }
+
+  if (Array.isArray(headersInit)) {
+    for (const entry of headersInit) {
+      if (
+        Array.isArray(entry)
+        && entry.length === 2
+        && typeof entry[0] === "string"
+        && typeof entry[1] === "string"
+      ) {
+        const [key, value] = entry
+        headers[key] = value
+      }
+    }
+    return headers
+  }
+
+  for (const [key, value] of Object.entries(
+    headersInit as Record<string, unknown>,
+  )) {
+    if (typeof value === "string") {
+      headers[key] = value
+    }
+  }
+  return headers
 }

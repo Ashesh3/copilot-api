@@ -33,6 +33,19 @@ function formatRule(rule: ReplacementRule, index: number): string {
   return `${index + 1}. [${status}] (${type})${system}${name} "${rule.pattern}" → "${replacement}"`
 }
 
+function isValidPatternForMatchType(
+  pattern: string,
+  matchType: "string" | "regex",
+): boolean {
+  if (matchType !== "regex") return true
+  try {
+    new RegExp(pattern)
+    return true
+  } catch {
+    return false
+  }
+}
+
 async function listReplacements(): Promise<void> {
   const all = await getAllReplacements()
 
@@ -81,14 +94,9 @@ async function addNewReplacement(): Promise<void> {
     return
   }
 
-  // Validate regex if needed
-  if (matchType === "regex") {
-    try {
-      new RegExp(pattern)
-    } catch {
-      consola.error(`Invalid regex pattern: ${pattern}`)
-      return
-    }
+  if (!isValidPatternForMatchType(pattern, matchType)) {
+    consola.error(`Invalid regex pattern: ${pattern}`)
+    return
   }
 
   const replacement = await consola.prompt(
@@ -180,14 +188,9 @@ async function editExistingReplacement(): Promise<void> {
     return
   }
 
-  // Validate regex if needed
-  if (matchType === "regex") {
-    try {
-      new RegExp(pattern)
-    } catch {
-      consola.error(`Invalid regex pattern: ${pattern}`)
-      return
-    }
+  if (!isValidPatternForMatchType(pattern, matchType)) {
+    consola.error(`Invalid regex pattern: ${pattern}`)
+    return
   }
 
   const replacement = await consola.prompt("Replacement text:", {

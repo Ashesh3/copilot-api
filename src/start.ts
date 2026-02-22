@@ -36,8 +36,9 @@ interface RunServerOptions {
 
 function getAllModelIds(): Array<string> {
   const baseModelIds = state.models?.data.map((model) => model.id) ?? []
-  const virtualModelIds = state.models
-    ? generateVirtualModels(state.models.data).map((model) => model.id)
+  const virtualModelIds =
+    state.models ?
+      generateVirtualModels(state.models.data).map((model) => model.id)
     : []
   return [...baseModelIds, ...virtualModelIds]
 }
