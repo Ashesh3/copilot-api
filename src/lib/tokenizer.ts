@@ -376,9 +376,7 @@ export const estimateTokenCount = async (
     }
 
     // Add role tokens
-    if (message.role) {
-      tokens += encoder.encode(message.role).length
-    }
+    tokens += encoder.encode(message.role).length
 
     // Tool calls in messages (assistant responses with tool use)
     if (message.tool_calls) {

@@ -142,9 +142,7 @@ export function setRequestContext(
  * Format the input size for display
  */
 function formatInputSize(bytes: number): string {
-  return bytes >= 1024
-    ? `${(bytes / 1024).toFixed(1)}KB`
-    : `${bytes}B`
+  return bytes >= 1024 ? `${(bytes / 1024).toFixed(1)}KB` : `${bytes}B`
 }
 
 /**
@@ -186,9 +184,7 @@ function buildModificationsLine(ctx: RequestContext): string | undefined {
   const modParts: Array<string> = []
 
   if (ctx.reasoningEffort) {
-    modParts.push(
-      `${colors.blue}effort=${ctx.reasoningEffort}${colors.reset}`,
-    )
+    modParts.push(`${colors.blue}effort=${ctx.reasoningEffort}${colors.reset}`)
   }
 
   if (ctx.replacements && ctx.replacements.length > 0) {

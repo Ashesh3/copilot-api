@@ -364,9 +364,10 @@ const handleWithMessagesApi = async (
     // Priority: suffix override > client body > config default
     const clientEffort = anthropicPayload.output_config?.effort
     anthropicPayload.output_config = {
-      effort: effortOverride
-        ? getAnthropicEffortForModel(anthropicPayload.model, effortOverride)
-        : clientEffort ?? getAnthropicEffortForModel(anthropicPayload.model),
+      effort:
+        effortOverride ?
+          getAnthropicEffortForModel(anthropicPayload.model, effortOverride)
+        : (clientEffort ?? getAnthropicEffortForModel(anthropicPayload.model)),
     }
   }
 
@@ -460,7 +461,8 @@ function getBodyReasoningEffort(
 
   // output_config.effort is the actual effort level (low/medium/high/max)
   // Claude Code omits this field when effort is "high" (the API default)
-  const effort = payload.output_config?.effort ?? (payload.thinking ? "high" : undefined)
+  const effort =
+    payload.output_config?.effort ?? (payload.thinking ? "high" : undefined)
   if (effort) {
     parts.push(effort)
   }
