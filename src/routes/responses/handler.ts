@@ -22,18 +22,70 @@ const logger = createHandlerLogger("responses-handler")
 
 const RESPONSES_ENDPOINT = "/responses"
 
+type ResponsesReasoningEffort = NonNullable<
+  NonNullable<ResponsesPayload["reasoning"]>["effort"]
+>
+
+function isResponsesReasoningEffort(
+  value: unknown,
+): value is ResponsesReasoningEffort {
+  return (
+    value === "none"
+    || value === "minimal"
+    || value === "low"
+    || value === "medium"
+    || value === "high"
+    || value === "xhigh"
+  )
+}
+
+function normalizeResponsesReasoning(
+  payload: ResponsesPayload,
+  suffixEffort?: "low" | "medium" | "high" | "xhigh",
+): ResponsesReasoningEffort | undefined {
+  // Accept OpenAI-compatible top-level aliases and normalize to reasoning.effort
+  const topLevelEffortRaw = payload.reasoningEffort ?? payload.reasoning_effort
+  const topLevelEffort = isResponsesReasoningEffort(topLevelEffortRaw)
+    ? topLevelEffortRaw
+    : undefined
+
+  if (topLevelEffort) {
+    payload.reasoning = payload.reasoning
+      ? { ...payload.reasoning, effort: payload.reasoning.effort ?? topLevelEffort }
+      : { effort: topLevelEffort }
+  }
+  delete payload.reasoningEffort
+  delete payload.reasoning_effort
+
+  if (suffixEffort) {
+    payload.reasoning = payload.reasoning
+      ? { ...payload.reasoning, effort: suffixEffort }
+      : { effort: suffixEffort }
+  }
+
+  return payload.reasoning?.effort ?? undefined
+}
+
 export const handleResponses = async (c: Context) => {
   await checkRateLimit(state)
 
   const payload = await c.req.json<ResponsesPayload>()
 
-  // Parse model suffix to strip reasoning effort suffix (e.g. "gpt-5.3-codex:high")
-  const { baseModel } = parseModelSuffix(payload.model)
+  // Capture the originally requested model before any manipulation
+  const requestedModel = payload.model
+
+  // Parse model suffix and apply reasoning effort override (e.g. "gpt-5.3-codex:high")
+  const { baseModel, reasoningEffort: suffixEffort } = parseModelSuffix(
+    payload.model,
+  )
   payload.model = baseModel
+  const effectiveEffort = normalizeResponsesReasoning(payload, suffixEffort)
 
   setRequestContext(c, {
-    provider: "Copilot (Responses)",
+    requestedModel,
+    provider: "Responses",
     model: payload.model,
+    reasoningEffort: effectiveEffort,
   })
   logger.debug("Responses request payload:", JSON.stringify(payload))
 

@@ -24,23 +24,32 @@ export async function handleCompletion(c: Context) {
 
   const rawPayload = await c.req.json<ChatCompletionsPayload>()
 
+  // Capture the originally requested model before any manipulation
+  const requestedModel = rawPayload.model
+
   // Parse model suffix to strip reasoning effort suffix (e.g. "gpt-5.3-codex:high" -> "gpt-5.3-codex")
-  const { baseModel } = parseModelSuffix(rawPayload.model)
+  const { baseModel, reasoningEffort } = parseModelSuffix(rawPayload.model)
   rawPayload.model = baseModel
 
   // Apply auto-replacements to the payload
-
-  let payload = await applyReplacementsToPayload(rawPayload)
+  const { payload: replacedPayload, appliedRules } =
+    await applyReplacementsToPayload(rawPayload)
 
   // Normalize model name (e.g., claude-opus-4-5 -> claude-opus-4.5)
-  payload = {
-    ...payload,
-    model: normalizeModelName(payload.model),
+  let payload = {
+    ...replacedPayload,
+    model: normalizeModelName(replacedPayload.model),
   }
 
   consola.debug("Request payload:", JSON.stringify(payload).slice(-400))
 
-  setRequestContext(c, { provider: "Copilot", model: payload.model })
+  setRequestContext(c, {
+    requestedModel,
+    provider: "ChatCompletions",
+    model: payload.model,
+    replacements: appliedRules,
+    reasoningEffort,
+  })
 
   // Find the selected model
   const selectedModel = state.models?.data.find(

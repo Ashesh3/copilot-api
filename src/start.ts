@@ -8,6 +8,7 @@ import invariant from "tiny-invariant"
 
 import packageJson from "../package.json" with { type: "json" }
 import { mergeConfigWithDefaults } from "./lib/config"
+import { generateVirtualModels } from "./lib/model-suffix"
 import { ensurePaths } from "./lib/paths"
 import { initProxyFromEnv } from "./lib/proxy"
 import { generateEnvScript } from "./lib/shell"
@@ -31,6 +32,14 @@ interface RunServerOptions {
   debug: boolean
   apiKeyAuth?: string
   host?: string
+}
+
+function getAllModelIds(): Array<string> {
+  const baseModelIds = state.models?.data.map((model) => model.id) ?? []
+  const virtualModelIds = state.models
+    ? generateVirtualModels(state.models.data).map((model) => model.id)
+    : []
+  return [...baseModelIds, ...virtualModelIds]
 }
 
 export async function runServer(options: RunServerOptions): Promise<void> {
@@ -88,7 +97,7 @@ export async function runServer(options: RunServerOptions): Promise<void> {
   await setupCopilotToken()
   await cacheModels()
 
-  const allModelIds = state.models?.data.map((model) => model.id) ?? []
+  const allModelIds = getAllModelIds()
 
   consola.info(
     `Available models: \n${allModelIds.map((id) => `- ${id}`).join("\n")}`,
@@ -154,6 +163,25 @@ export async function runServer(options: RunServerOptions): Promise<void> {
       idleTimeout: 255, // max value in seconds (4m 15s)
     },
   })
+}
+
+/**
+ * Resolve --api-key-auth value: use provided value, fall back to env, or error if flag used without value.
+ */
+function resolveApiKeyAuth(cliValue: string | undefined): string | undefined {
+  if (cliValue === undefined) return undefined
+
+  // If a non-empty value was provided via CLI, use it
+  if (cliValue !== "" && cliValue !== "true") return cliValue
+
+  // Flag was provided but no value — fall back to env
+  const envValue = process.env.COPILOT_API_KEY_AUTH
+  if (envValue) return envValue
+
+  consola.error(
+    "--api-key-auth requires a value or COPILOT_API_KEY_AUTH environment variable",
+  )
+  process.exit(1)
 }
 
 export const start = defineCommand({
@@ -263,7 +291,7 @@ export const start = defineCommand({
       proxyEnv: args["proxy-env"],
       insecure: args.insecure,
       debug: args.debug,
-      apiKeyAuth: args["api-key-auth"],
+      apiKeyAuth: resolveApiKeyAuth(args["api-key-auth"]),
       host: args.host,
     })
   },
