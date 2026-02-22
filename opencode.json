@@ -1,20 +1,6 @@
 {
-  "mcp": {
-    "playwright": {
-      "type": "local",
-      "command": [
-        "docker",
-        "container",
-        "run",
-        "-i",
-        "--rm",
-        "--init",
-        "--network",
-        "host",
-        "mcr.microsoft.com/playwright/mcp"
-      ],
-      "enabled": true
-    }
-  },
-  "$schema": "https://opencode.ai/config.json"
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "*": "allow"
+  }
 }
