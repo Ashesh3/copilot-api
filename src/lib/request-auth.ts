@@ -43,6 +43,12 @@ export function extractRequestApiKey(c: Context): string | null {
     return xApiKey
   }
 
+  // Google AI SDK sends API key via x-goog-api-key header
+  const googleApiKey = c.req.header("x-goog-api-key")?.trim()
+  if (googleApiKey) {
+    return googleApiKey
+  }
+
   const authorization = c.req.header("authorization")
   if (!authorization) {
     return null
