@@ -90,7 +90,10 @@ async function logRawRequest(c: Context): Promise<void> {
   for (const [key, value] of Object.entries(headers)) {
     // Mask authorization headers
     const displayValue =
-      key.toLowerCase().includes("authorization") ?
+      (
+        key.toLowerCase().includes("authorization")
+        || key.toLowerCase().includes("api-key")
+      ) ?
         `${value.slice(0, 20)}...`
       : value
     lines.push(`  ${colors.gray}${key}:${colors.reset} ${displayValue}`)
