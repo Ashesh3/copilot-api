@@ -1,5 +1,6 @@
 import type { Context, Next } from "hono"
 
+import { extractClientIp, isIpBlocked, recordFailedAttempt } from "./ip-blocker"
 import { extractRequestApiKey } from "./request-auth"
 import { state } from "./state"
 
@@ -15,11 +16,23 @@ export async function apiKeyGuard(c: Context, next: Next): Promise<void> {
     return
   }
 
+  const clientIp = extractClientIp(c)
+
+  if (clientIp !== null && isIpBlocked(clientIp)) {
+    // Silent drop: never resolves, client gets no response
+    await new Promise(() => {})
+    return
+  }
+
   const requestApiKey = extractRequestApiKey(c)
 
   if (requestApiKey === state.apiKeyAuth) {
     await next()
     return
+  }
+
+  if (clientIp !== null) {
+    recordFailedAttempt(clientIp)
   }
 
   // Silent drop: never resolves, client gets no response
