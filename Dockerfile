@@ -17,9 +17,9 @@ COPY --from=builder /app/dist ./dist
 
 EXPOSE 4141
 
-
-# Persist auth token and config across container recreations
-VOLUME /root/.local/share/copilot-api
+# Docker-friendly data directory for token persistence
+ENV DATA_DIR=/app/data
+VOLUME /app/data
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD wget --spider -q http://localhost:4141/ || exit 1
