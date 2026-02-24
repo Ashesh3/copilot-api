@@ -8,6 +8,7 @@
 
 import type { Context } from "hono"
 
+import consola from "consola"
 import { streamSSE } from "hono/streaming"
 
 import { awaitApproval } from "~/lib/approval"
@@ -18,11 +19,24 @@ import { checkRateLimit } from "~/lib/rate-limit"
 import { setRequestContext } from "~/lib/request-logger"
 import { state } from "~/lib/state"
 import { getTokenCount } from "~/lib/tokenizer"
+import { isNullish } from "~/lib/utils"
 import {
   createChatCompletions,
   type ChatCompletionChunk,
   type ChatCompletionResponse,
+  type ChatCompletionsPayload,
 } from "~/services/copilot/create-chat-completions"
+import {
+  createResponses,
+  type ResponseInputItem,
+  type ResponseInputMessage,
+  type ResponseFunctionToolCallItem,
+  type ResponseFunctionCallOutputItem,
+  type ResponsesPayload,
+  type ResponsesResult,
+  type ResponseStreamEvent,
+  type FunctionTool,
+} from "~/services/copilot/create-responses"
 
 import type { GoogleAIRequest } from "./google-ai-types"
 
@@ -31,9 +45,13 @@ import {
   createGoogleStreamState,
   translateChunkToGoogle,
   translateOpenAIToGoogle,
+  translateResponsesResultToGoogle,
+  translateResponsesStreamEventToGoogle,
 } from "./response-translation"
 
 const logger = createHandlerLogger("google-ai-handler")
+
+const RESPONSES_ENDPOINT = "/responses"
 
 /**
  * Parse model name and action from the URL path segment.
@@ -50,6 +68,28 @@ function parseModelAction(modelAction: string): {
   return {
     model: modelAction.slice(0, colonIdx),
     action: modelAction.slice(colonIdx + 1),
+  }
+}
+
+/**
+ * Cap max_tokens at the model's advertised limit to prevent 400 errors.
+ */
+function capMaxTokens(
+  payload: ChatCompletionsPayload,
+  selectedModel:
+    | { capabilities: { limits: { max_output_tokens?: number } } }
+    | undefined,
+): void {
+  const maxAllowed = selectedModel?.capabilities.limits.max_output_tokens
+  if (!maxAllowed) return
+
+  if (isNullish(payload.max_tokens)) {
+    payload.max_tokens = maxAllowed
+  } else if (payload.max_tokens > maxAllowed) {
+    consola.debug(
+      `Capping max_tokens from ${payload.max_tokens} to ${maxAllowed} for ${payload.model}`,
+    )
+    payload.max_tokens = maxAllowed
   }
 }
 
@@ -95,17 +135,22 @@ export async function handleGoogleAI(c: Context) {
     model: normalizeModelName(replacedPayload.model),
   }
 
-  setRequestContext(c, {
-    requestedModel: rawModel,
-    model: finalPayload.model,
-    provider: "GoogleAI→ChatCompletions",
-    replacements: appliedRules,
-  })
-
-  // Find the selected model for token counting
+  // Find the selected model for token counting and capability checks
   const selectedModel = state.models?.data.find(
     (m) => m.id === finalPayload.model,
   )
+
+  // Determine API type based on supported_endpoints
+  const useResponsesApi =
+    selectedModel?.supported_endpoints?.includes(RESPONSES_ENDPOINT) ?? false
+
+  setRequestContext(c, {
+    requestedModel: rawModel,
+    model: finalPayload.model,
+    provider:
+      useResponsesApi ? "GoogleAI→Responses" : "GoogleAI→ChatCompletions",
+    replacements: appliedRules,
+  })
 
   // Calculate token count
   try {
@@ -121,19 +166,35 @@ export async function handleGoogleAI(c: Context) {
     await awaitApproval()
   }
 
-  // Set max_tokens if not provided
-  if (finalPayload.max_tokens === null && selectedModel) {
-    finalPayload.max_tokens =
-      selectedModel.capabilities.limits.max_output_tokens
-  }
+  capMaxTokens(finalPayload, selectedModel)
 
+  consola.debug(
+    `[google-ai] Translated payload: model=${finalPayload.model}, max_tokens=${finalPayload.max_tokens}, stream=${finalPayload.stream}, tools=${finalPayload.tools?.length ?? 0}, messages=${finalPayload.messages.length}`,
+  )
   logger.debug("Translated OpenAI payload:", JSON.stringify(finalPayload))
 
-  // Call Copilot's ChatCompletions API
+  // Route to the correct API based on model capabilities
+  if (useResponsesApi) {
+    consola.debug(`[google-ai] Using Responses API for ${finalPayload.model}`)
+    return handleWithResponsesApi(c, finalPayload, isStream)
+  }
+
+  consola.debug(
+    `[google-ai] Using ChatCompletions API for ${finalPayload.model}`,
+  )
+  return handleWithChatCompletions(c, finalPayload)
+}
+
+// ─── ChatCompletions path ───
+
+async function handleWithChatCompletions(
+  c: Context,
+  finalPayload: ChatCompletionsPayload,
+) {
   const response = await createChatCompletions(finalPayload)
 
   // ─── Non-Streaming Response ───
-  if (isNonStreaming(response)) {
+  if (isNonStreamingCC(response)) {
     logger.debug(
       "Non-streaming response from Copilot:",
       JSON.stringify(response),
@@ -153,7 +214,6 @@ export async function handleGoogleAI(c: Context) {
   // ─── Streaming Response ───
   logger.debug("Streaming response from Copilot")
 
-  // Google streaming uses raw SSE: data: {json}\r\n\r\n
   return streamSSE(c, async (stream) => {
     const streamState = createGoogleStreamState()
 
@@ -187,6 +247,226 @@ export async function handleGoogleAI(c: Context) {
   })
 }
 
-const isNonStreaming = (
+// ─── Responses API path ───
+
+/**
+ * Convert an OpenAI ChatCompletions payload to a Responses API payload.
+ */
+function openAIPayloadToResponses(
+  payload: ChatCompletionsPayload,
+): ResponsesPayload {
+  // Extract system messages → instructions
+  const systemMessages = payload.messages.filter((m) => m.role === "system")
+  const instructions =
+    systemMessages
+      .map((m) => (typeof m.content === "string" ? m.content : ""))
+      .join("\n") || null
+  const input = convertMessagesToInput(payload.messages)
+  const tools = convertToolsToResponses(payload.tools)
+  const toolChoice = convertToolChoiceToResponses(payload.tool_choice)
+  return {
+    model: payload.model,
+    input,
+    instructions,
+    temperature: payload.temperature ?? null,
+    top_p: payload.top_p ?? null,
+    max_output_tokens: payload.max_tokens ?? null,
+    tools,
+    tool_choice: toolChoice,
+    stream: payload.stream ?? null,
+    store: false,
+    parallel_tool_calls: true,
+  }
+}
+
+/**
+ * Convert OpenAI messages to Responses API input items.
+ */
+function convertMessagesToInput(
+  messages: ChatCompletionsPayload["messages"],
+): Array<ResponseInputItem> {
+  const input: Array<ResponseInputItem> = []
+  for (const msg of messages) {
+    if (msg.role === "system") continue
+    switch (msg.role) {
+      case "user": {
+        input.push(
+          createResponseMessage(
+            "user",
+            typeof msg.content === "string" ? msg.content : "",
+          ),
+        )
+        break
+      }
+      case "assistant": {
+        if (msg.content) {
+          input.push(
+            createResponseMessage(
+              "assistant",
+              typeof msg.content === "string" ? msg.content : "",
+            ),
+          )
+        }
+        if (msg.tool_calls) {
+          for (const tc of msg.tool_calls) {
+            input.push({
+              type: "function_call",
+              call_id: tc.id,
+              name: tc.function.name,
+              arguments: tc.function.arguments,
+              status: "completed",
+            } satisfies ResponseFunctionToolCallItem)
+          }
+        }
+        break
+      }
+      case "tool": {
+        input.push({
+          type: "function_call_output",
+          call_id: msg.tool_call_id ?? "",
+          output:
+            typeof msg.content === "string" ?
+              msg.content
+            : JSON.stringify(msg.content),
+        } satisfies ResponseFunctionCallOutputItem)
+        break
+      }
+      // No default
+    }
+  }
+
+  return input
+}
+
+/**
+ * Convert OpenAI tools to Responses API tools.
+ */
+function convertToolsToResponses(
+  tools: ChatCompletionsPayload["tools"],
+): Array<FunctionTool> | null {
+  return (
+    tools?.map((t) => ({
+      type: "function" as const,
+      name: t.function.name,
+      description: t.function.description ?? null,
+      parameters: t.function.parameters,
+      strict: false,
+    })) ?? null
+  )
+}
+
+/**
+ * Convert OpenAI tool_choice to Responses API tool_choice.
+ */
+function convertToolChoiceToResponses(
+  toolChoice: ChatCompletionsPayload["tool_choice"],
+): ResponsesPayload["tool_choice"] {
+  if (typeof toolChoice === "string") {
+    return toolChoice
+  }
+  if (
+    toolChoice
+    && typeof toolChoice === "object"
+    && "function" in toolChoice
+  ) {
+    return {
+      type: "function",
+      name: toolChoice.function.name,
+    }
+  }
+  return "auto"
+}
+
+function createResponseMessage(
+  role: "user" | "assistant",
+  content: string,
+): ResponseInputMessage {
+  return { type: "message", role, content }
+}
+
+async function handleWithResponsesApi(
+  c: Context,
+  payload: ChatCompletionsPayload,
+  isStream: boolean,
+) {
+  const responsesPayload = openAIPayloadToResponses(payload)
+  logger.debug(
+    "Translated Responses payload:",
+    JSON.stringify(responsesPayload),
+  )
+
+  const response = await createResponses(responsesPayload, {
+    vision: false,
+    initiator: "user",
+  })
+
+  // ─── Non-streaming ───
+  if (!isStream || !isAsyncIterable(response)) {
+    const result = response as ResponsesResult
+    logger.debug(
+      "Non-streaming Responses result:",
+      JSON.stringify(result).slice(-400),
+    )
+
+    if (result.usage) {
+      setRequestContext(c, {
+        inputTokens: result.usage.input_tokens,
+        outputTokens: result.usage.output_tokens,
+      })
+    }
+
+    const googleResponse = translateResponsesResultToGoogle(result)
+    return c.json(googleResponse)
+  }
+
+  // ─── Streaming ───
+  logger.debug("Streaming response from Copilot (Responses API)")
+
+  return streamSSE(c, async (stream) => {
+    const streamState = createGoogleStreamState()
+
+    for await (const chunk of response) {
+      const eventName = chunk.event
+      if (eventName === "ping") continue
+
+      const data = chunk.data
+      if (!data) continue
+
+      logger.debug("Responses raw stream event:", data)
+
+      const parsed = JSON.parse(data) as ResponseStreamEvent
+      const googleChunk = translateResponsesStreamEventToGoogle(
+        parsed,
+        streamState,
+      )
+
+      if (googleChunk) {
+        // Capture usage from completed response
+        if (
+          parsed.type === "response.completed"
+          || parsed.type === "response.incomplete"
+        ) {
+          const usage = parsed.response.usage
+          if (usage) {
+            setRequestContext(c, {
+              inputTokens: usage.input_tokens,
+              outputTokens: usage.output_tokens,
+            })
+          }
+        }
+
+        await stream.writeSSE({
+          data: JSON.stringify(googleChunk),
+        })
+      }
+    }
+  })
+}
+
+const isNonStreamingCC = (
   response: Awaited<ReturnType<typeof createChatCompletions>>,
 ): response is ChatCompletionResponse => Object.hasOwn(response, "choices")
+
+const isAsyncIterable = <T>(value: unknown): value is AsyncIterable<T> =>
+  Boolean(value)
+  && typeof (value as AsyncIterable<T>)[Symbol.asyncIterator] === "function"

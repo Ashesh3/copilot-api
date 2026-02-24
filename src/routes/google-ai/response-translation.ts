@@ -7,6 +7,13 @@ import type {
   ChatCompletionChunk,
   ChatCompletionResponse,
 } from "~/services/copilot/create-chat-completions"
+import type {
+  IncompleteDetails,
+  ResponseOutputText,
+  ResponsesResult,
+  ResponseStreamEvent,
+  ResponseUsage,
+} from "~/services/copilot/create-responses"
 
 import type {
   GoogleAIResponse,
@@ -284,4 +291,167 @@ export function translateChunkToGoogle(
     index: choice.index,
     usage: chunk.usage,
   })
+}
+
+// ─── Responses API → Google AI Translation ───
+
+/**
+ * Map Responses API status → Google finish reason.
+ */
+function mapResponsesFinishReason(
+  status: string,
+  incompleteDetails?: IncompleteDetails | null,
+): GoogleCandidate["finishReason"] {
+  if (status === "completed") return "STOP"
+  if (status === "incomplete") {
+    if (incompleteDetails?.reason === "max_output_tokens") return "MAX_TOKENS"
+    if (incompleteDetails?.reason === "content_filter") return "SAFETY"
+    return "MAX_TOKENS"
+  }
+  if (status === "failed") return "OTHER"
+  return null
+}
+
+/**
+ * Translate Responses API usage → Google usage metadata.
+ */
+function translateResponsesUsage(
+  usage: ResponseUsage | null | undefined,
+): GoogleUsageMetadata | undefined {
+  if (!usage) return undefined
+  return {
+    promptTokenCount: usage.input_tokens,
+    candidatesTokenCount: usage.output_tokens,
+    totalTokenCount: usage.total_tokens,
+    cachedContentTokenCount:
+      usage.input_tokens_details?.cached_tokens ?? undefined,
+  }
+}
+
+/**
+ * Type guard for ResponseOutputText blocks.
+ */
+function isOutputTextBlock(block: unknown): block is ResponseOutputText {
+  return (
+    typeof block === "object"
+    && block !== null
+    && "type" in block
+    && (block as { type: string }).type === "output_text"
+  )
+}
+
+/**
+ * Convert Responses API result → Google Generative AI response (non-streaming).
+ */
+export function translateResponsesResultToGoogle(
+  result: ResponsesResult,
+): GoogleAIResponse {
+  const parts: Array<GooglePart> = []
+
+  for (const item of result.output) {
+    if (item.type === "message" && item.content) {
+      for (const block of item.content) {
+        if (isOutputTextBlock(block)) {
+          parts.push({ text: block.text })
+        }
+      }
+    } else if (item.type === "function_call") {
+      const funcCall = item
+      parts.push({
+        functionCall: {
+          name: funcCall.name,
+          args: parseToolCallArgs(funcCall.arguments),
+        },
+      })
+    }
+    // Skip "reasoning" items — Google AI format has no thinking equivalent
+  }
+
+  // Ensure at least one part
+  if (parts.length === 0) {
+    parts.push({ text: result.output_text || "" })
+  }
+
+  const finishReason = mapResponsesFinishReason(
+    result.status,
+    result.incomplete_details,
+  )
+
+  return {
+    candidates: [
+      {
+        content: { role: "model", parts },
+        finishReason,
+        index: 0,
+      },
+    ],
+    usageMetadata: translateResponsesUsage(result.usage),
+  }
+}
+
+/**
+ * Translate a single Responses API stream event → Google streaming chunk.
+ * Returns null if the event doesn't produce a Google event.
+ */
+export function translateResponsesStreamEventToGoogle(
+  event: ResponseStreamEvent,
+  _streamState: GoogleStreamState,
+): GoogleStreamChunk | null {
+  switch (event.type) {
+    case "response.output_text.delta": {
+      return {
+        candidates: [
+          {
+            content: { role: "model", parts: [{ text: event.delta }] },
+            finishReason: null,
+            index: 0,
+          },
+        ],
+      }
+    }
+
+    case "response.function_call_arguments.done": {
+      return {
+        candidates: [
+          {
+            content: {
+              role: "model",
+              parts: [
+                {
+                  functionCall: {
+                    name: event.name,
+                    args: parseToolCallArgs(event.arguments),
+                  },
+                },
+              ],
+            },
+            finishReason: null,
+            index: 0,
+          },
+        ],
+      }
+    }
+
+    case "response.completed":
+    case "response.incomplete": {
+      const finishReason = mapResponsesFinishReason(
+        event.response.status,
+        event.response.incomplete_details,
+      )
+      return {
+        candidates: [
+          {
+            content: { role: "model", parts: [{ text: "" }] },
+            finishReason,
+            index: 0,
+          },
+        ],
+        usageMetadata: translateResponsesUsage(event.response.usage),
+      }
+    }
+
+    default: {
+      return null
+    }
+  }
 }

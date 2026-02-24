@@ -148,7 +148,7 @@ function translateTools(
           function: {
             name: decl.name,
             description: decl.description,
-            parameters: decl.parameters ?? {},
+            parameters: normalizeToolParameters(decl.parameters ?? {}),
           },
         })
       }
@@ -157,6 +157,25 @@ function translateTools(
   }
 
   return openAITools.length > 0 ? openAITools : undefined
+}
+
+/**
+ * Remove $schema from tool parameters and ensure valid structure.
+ * Copilot requires parameters to have at least { type: "object", properties: {} }.
+ */
+function normalizeToolParameters(
+  params: Record<string, unknown>,
+): Record<string, unknown> {
+  const cleaned = { ...params }
+  delete cleaned.$schema
+  // Ensure minimum valid schema — Copilot rejects empty {} or {type:"object"} without properties
+  if (!cleaned.type) {
+    cleaned.type = "object"
+  }
+  if (!cleaned.properties) {
+    cleaned.properties = {}
+  }
+  return cleaned
 }
 
 /**

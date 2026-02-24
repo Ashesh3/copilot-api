@@ -36,6 +36,19 @@ export const createChatCompletions = async (
     "X-Initiator": options?.initiator ?? (isAgentCall ? "agent" : "user"),
   }
 
+  // Normalize tool parameters — Copilot rejects empty {} or {type:"object"} without properties
+  if (payload.tools) {
+    for (const tool of payload.tools) {
+      const params = tool.function.parameters
+      if (!params.type) {
+        params.type = "object"
+      }
+      if (!params.properties) {
+        params.properties = {}
+      }
+    }
+  }
+
   const response = await fetchWithRetry(
     `${copilotBaseUrl(state)}/chat/completions`,
     {
@@ -46,7 +59,12 @@ export const createChatCompletions = async (
   )
 
   if (!response.ok) {
-    consola.error("Failed to create chat completions", response)
+    const errorBody = await response.clone().text()
+    consola.error(
+      "Failed to create chat completions",
+      `Status: ${response.status}`,
+      errorBody,
+    )
     throw new HTTPError("Failed to create chat completions", response)
   }
 
