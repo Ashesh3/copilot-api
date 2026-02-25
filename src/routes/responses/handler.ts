@@ -392,6 +392,18 @@ const responsesToChatCompletions = (
   const tools = convertToolsForCC(payload.tools)
   const toolChoice = convertToolChoiceForCC(payload.tool_choice)
 
+  // Map structured output (text.format) to response_format
+  const textFormat = (payload as Record<string, unknown>).text as
+    | { format?: { type: string; [key: string]: unknown } }
+    | undefined
+  const responseFormat =
+    (
+      textFormat?.format?.type === "json_schema"
+      || textFormat?.format?.type === "json_object"
+    ) ?
+      { type: textFormat.format.type as "json_object" }
+    : undefined
+
   return {
     model: payload.model,
     messages,
@@ -402,6 +414,7 @@ const responsesToChatCompletions = (
     ...(tools ? { tools } : {}),
     ...(toolChoice !== undefined ? { tool_choice: toolChoice } : {}),
     ...(payload.stream ? { stream_options: { include_usage: true } } : {}),
+    ...(responseFormat ? { response_format: responseFormat } : {}),
   }
 }
 
@@ -779,20 +792,23 @@ const streamChatCompletionsAsResponses = async (
       s.responseCreated = true
     }
 
-    const choice = chunk.choices[0]
+    const delta = chunk.choices.at(0)?.delta
+    if (!delta) continue
 
-    if (choice.delta.content) {
-      await emitTextDelta(s, choice.delta.content, writeEvent)
+    const content = delta.content as string | undefined
+    if (content) {
+      await emitTextDelta(s, content, writeEvent)
     }
 
-    if (choice.delta.tool_calls) {
-      for (const tc of choice.delta.tool_calls) {
+    if (delta.tool_calls) {
+      for (const tc of delta.tool_calls) {
         await emitToolCallDelta(s, tc, writeEvent)
       }
     }
 
-    if (choice.finish_reason) {
-      await emitDoneEvents(s, choice.finish_reason, writeEvent)
+    const finishReason = chunk.choices.at(0)?.finish_reason
+    if (finishReason) {
+      await emitDoneEvents(s, finishReason, writeEvent)
     }
   }
 
