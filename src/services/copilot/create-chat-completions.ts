@@ -72,7 +72,24 @@ export const createChatCompletions = async (
     return events(response)
   }
 
-  return (await response.json()) as ChatCompletionResponse
+  const text = await response.text()
+  if (!text) {
+    consola.error("Empty response body from Copilot (status 200)")
+    throw new HTTPError(
+      "Empty response body from upstream",
+      new Response("", { status: 502 }),
+    )
+  }
+
+  try {
+    return JSON.parse(text) as ChatCompletionResponse
+  } catch {
+    consola.error("Invalid JSON from Copilot:", text.slice(0, 200))
+    throw new HTTPError(
+      "Invalid JSON response from upstream",
+      new Response(text, { status: 502 }),
+    )
+  }
 }
 
 // Streaming types
