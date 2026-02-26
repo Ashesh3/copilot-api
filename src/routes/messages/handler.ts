@@ -513,10 +513,14 @@ const mergeContentWithText = (
   if (typeof tr.content === "string") {
     return { ...tr, content: `${tr.content}\n\n${textBlock.text}` }
   }
-  return {
-    ...tr,
-    content: [...tr.content, textBlock],
+  if (Array.isArray(tr.content)) {
+    return {
+      ...tr,
+      content: [...tr.content, textBlock],
+    }
   }
+  // content is null/undefined — start fresh with just the text block
+  return { ...tr, content: [textBlock] }
 }
 
 const mergeContentWithTexts = (
@@ -527,7 +531,11 @@ const mergeContentWithTexts = (
     const appendedTexts = textBlocks.map((tb) => tb.text).join("\n\n")
     return { ...tr, content: `${tr.content}\n\n${appendedTexts}` }
   }
-  return { ...tr, content: [...tr.content, ...textBlocks] }
+  if (Array.isArray(tr.content)) {
+    return { ...tr, content: [...tr.content, ...textBlocks] }
+  }
+  // content is null/undefined
+  return { ...tr, content: [...textBlocks] }
 }
 
 const mergeToolResultForClaude = (
