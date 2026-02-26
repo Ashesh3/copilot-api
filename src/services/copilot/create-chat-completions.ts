@@ -10,6 +10,7 @@ import { state } from "~/lib/state"
  * Normalize payload before sending to Copilot.
  * - Fix empty tool parameters (Copilot rejects {} without type/properties)
  * - Downgrade json_schema to json_object (Copilot returns empty content for json_schema)
+ *   and stash the schema so injectJsonInstruction can reference it
  */
 const normalizePayload = (payload: ChatCompletionsPayload): void => {
   if (payload.tools) {
@@ -29,6 +30,12 @@ const normalizePayload = (payload: ChatCompletionsPayload): void => {
     && (payload.response_format as Record<string, unknown>).type
       === "json_schema"
   ) {
+    const fmt = payload.response_format as Record<string, unknown>
+    const schemaWrapper = fmt.json_schema as Record<string, unknown> | undefined
+    const jsonSchema = schemaWrapper?.schema
+    if (jsonSchema) {
+      ;(payload as Record<string, unknown>)._json_schema = jsonSchema
+    }
     payload.response_format = { type: "json_object" }
   }
 }
@@ -61,12 +68,21 @@ const stripJsonFences = (result: ChatCompletionResponse): void => {
  * When response_format requests JSON output, inject a system-level instruction
  * as a fallback. Copilot may not pass response_format through for all models
  * (e.g. Claude), causing the model to return markdown instead of JSON.
+ *
+ * If a json_schema was downgraded to json_object, include the schema in the
+ * instruction so the model returns the correct structure.
  */
 const injectJsonInstruction = (payload: ChatCompletionsPayload): void => {
   if (!isJsonResponseFormat(payload)) return
 
-  const instruction =
+  const stashedSchema = (payload as Record<string, unknown>)._json_schema
+  let instruction =
     "IMPORTANT: You MUST respond with valid JSON only. No markdown, no code fences, no explanation — just raw JSON."
+
+  if (stashedSchema) {
+    instruction += `\nYou MUST conform to this JSON schema:\n${JSON.stringify(stashedSchema)}`
+    delete (payload as Record<string, unknown>)._json_schema
+  }
 
   const systemMsg = payload.messages.find((m) => m.role === "system")
   if (systemMsg && typeof systemMsg.content === "string") {

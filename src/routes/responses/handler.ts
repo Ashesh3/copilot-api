@@ -393,16 +393,26 @@ const responsesToChatCompletions = (
   const toolChoice = convertToolChoiceForCC(payload.tool_choice)
 
   // Map structured output (text.format) to response_format
+  // Preserve json_schema details so normalizePayload can stash the schema
+  // before downgrading to json_object
   const textFormat = (payload as Record<string, unknown>).text as
-    | { format?: { type: string; [key: string]: unknown } }
+    | { format?: { type: string; schema?: unknown; [key: string]: unknown } }
     | undefined
-  const responseFormat =
-    (
-      textFormat?.format?.type === "json_schema"
-      || textFormat?.format?.type === "json_object"
-    ) ?
-      { type: textFormat.format.type as "json_object" }
-    : undefined
+  let responseFormat:
+    | {
+        type: string
+        json_schema?: { schema: unknown }
+        [key: string]: unknown
+      }
+    | undefined
+  if (textFormat?.format?.type === "json_schema") {
+    responseFormat = {
+      type: "json_schema",
+      json_schema: { schema: textFormat.format.schema },
+    }
+  } else if (textFormat?.format?.type === "json_object") {
+    responseFormat = { type: "json_object" }
+  }
 
   return {
     model: payload.model,
