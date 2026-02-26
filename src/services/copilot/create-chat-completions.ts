@@ -6,6 +6,33 @@ import { HTTPError } from "~/lib/error"
 import { fetchWithRetry } from "~/lib/retry-fetch"
 import { state } from "~/lib/state"
 
+/**
+ * Normalize payload before sending to Copilot.
+ * - Fix empty tool parameters (Copilot rejects {} without type/properties)
+ * - Downgrade json_schema to json_object (Copilot returns empty content for json_schema)
+ */
+const normalizePayload = (payload: ChatCompletionsPayload): void => {
+  if (payload.tools) {
+    for (const tool of payload.tools) {
+      const params = tool.function.parameters
+      if (!params.type) {
+        params.type = "object"
+      }
+      if (!params.properties) {
+        params.properties = {}
+      }
+    }
+  }
+
+  if (
+    payload.response_format
+    && (payload.response_format as Record<string, unknown>).type
+      === "json_schema"
+  ) {
+    payload.response_format = { type: "json_object" }
+  }
+}
+
 export const createChatCompletions = async (
   payload: ChatCompletionsPayload,
   options?: {
@@ -36,18 +63,7 @@ export const createChatCompletions = async (
     "X-Initiator": options?.initiator ?? (isAgentCall ? "agent" : "user"),
   }
 
-  // Normalize tool parameters — Copilot rejects empty {} or {type:"object"} without properties
-  if (payload.tools) {
-    for (const tool of payload.tools) {
-      const params = tool.function.parameters
-      if (!params.type) {
-        params.type = "object"
-      }
-      if (!params.properties) {
-        params.properties = {}
-      }
-    }
-  }
+  normalizePayload(payload)
 
   const response = await fetchWithRetry(
     `${copilotBaseUrl(state)}/chat/completions`,
@@ -185,7 +201,7 @@ export interface ChatCompletionsPayload {
   presence_penalty?: number | null
   logit_bias?: Record<string, number> | null
   logprobs?: boolean | null
-  response_format?: { type: "json_object" } | null
+  response_format?: { type: string; [key: string]: unknown } | null
   seed?: number | null
   tools?: Array<Tool> | null
   tool_choice?:
