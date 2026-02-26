@@ -57,6 +57,25 @@ const stripJsonFences = (result: ChatCompletionResponse): void => {
   }
 }
 
+/**
+ * When response_format requests JSON output, inject a system-level instruction
+ * as a fallback. Copilot may not pass response_format through for all models
+ * (e.g. Claude), causing the model to return markdown instead of JSON.
+ */
+const injectJsonInstruction = (payload: ChatCompletionsPayload): void => {
+  if (!isJsonResponseFormat(payload)) return
+
+  const instruction =
+    "IMPORTANT: You MUST respond with valid JSON only. No markdown, no code fences, no explanation — just raw JSON."
+
+  const systemMsg = payload.messages.find((m) => m.role === "system")
+  if (systemMsg && typeof systemMsg.content === "string") {
+    systemMsg.content = `${systemMsg.content}\n\n${instruction}`
+  } else {
+    payload.messages.unshift({ role: "system", content: instruction })
+  }
+}
+
 export const createChatCompletions = async (
   payload: ChatCompletionsPayload,
   options?: {
@@ -88,6 +107,7 @@ export const createChatCompletions = async (
   }
 
   normalizePayload(payload)
+  injectJsonInstruction(payload)
 
   const response = await fetchWithRetry(
     `${copilotBaseUrl(state)}/chat/completions`,
