@@ -60,10 +60,10 @@ describe("POST /v1/responses - basic", () => {
       expect(res.headers.get("content-type")).toContain("text/event-stream")
       const events = await collectSSEEvents(res)
       expect(events.length).toBeGreaterThan(0)
-      const eventTypes = events.map((e) => e.event)
+      const eventTypes = new Set(events.map((e) => e.event))
       const hasCompletionEvent =
-        eventTypes.includes("response.completed") ||
-        eventTypes.includes("response.output_text.done")
+        eventTypes.has("response.completed")
+        || eventTypes.has("response.output_text.done")
       expect(hasCompletionEvent).toBe(true)
     },
     TEST_TIMEOUT,
