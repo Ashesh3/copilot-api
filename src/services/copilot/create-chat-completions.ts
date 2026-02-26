@@ -33,6 +33,30 @@ const normalizePayload = (payload: ChatCompletionsPayload): void => {
   }
 }
 
+const isJsonResponseFormat = (payload: ChatCompletionsPayload): boolean => {
+  const type = (payload.response_format as Record<string, unknown> | undefined)
+    ?.type
+  return type === "json_object" || type === "json_schema"
+}
+
+/**
+ * Strip markdown code fences from content when json response_format is requested.
+ * Claude wraps JSON output in ```json ... ``` fences, violating the OpenAI contract
+ * that guarantees raw JSON in the content field.
+ */
+const stripJsonFences = (result: ChatCompletionResponse): void => {
+  for (const choice of result.choices) {
+    const content = choice.message.content
+    if (typeof content !== "string") continue
+    const stripped = content
+      .replace(/^```(?:json)?\s*/, "")
+      .replace(/\n?```\s*$/, "")
+    if (stripped !== content) {
+      choice.message.content = stripped
+    }
+  }
+}
+
 export const createChatCompletions = async (
   payload: ChatCompletionsPayload,
   options?: {
@@ -98,7 +122,11 @@ export const createChatCompletions = async (
   }
 
   try {
-    return JSON.parse(text) as ChatCompletionResponse
+    const result = JSON.parse(text) as ChatCompletionResponse
+    if (isJsonResponseFormat(payload)) {
+      stripJsonFences(result)
+    }
+    return result
   } catch {
     consola.error("Invalid JSON from Copilot:", text.slice(0, 200))
     throw new HTTPError(
