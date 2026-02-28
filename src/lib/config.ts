@@ -58,7 +58,7 @@ const defaultConfig: AppConfig = {
     "gpt-5-mini": "low",
   },
   useFunctionApplyPatch: true,
-  compactUseSmallModel: true,
+  compactUseSmallModel: false,
 }
 
 let cachedConfig: AppConfig | null = null
@@ -176,5 +176,5 @@ export function getReasoningEffortForModel(
 
 export function shouldCompactUseSmallModel(): boolean {
   const config = getConfig()
-  return config.compactUseSmallModel ?? true
+  return config.compactUseSmallModel ?? false
 }
