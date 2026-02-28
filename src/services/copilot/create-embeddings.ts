@@ -1,14 +1,10 @@
-import { copilotHeaders, copilotBaseUrl } from "~/lib/api-config"
 import { HTTPError } from "~/lib/error"
-import { fetchWithRetry } from "~/lib/retry-fetch"
-import { state } from "~/lib/state"
+import { copilotFetch, copilotHeaders } from "~/services/copilot/copilot-client"
 
 export const createEmbeddings = async (payload: EmbeddingRequest) => {
-  if (!state.copilotToken) throw new Error("Copilot token not found")
-
-  const response = await fetchWithRetry(`${copilotBaseUrl(state)}/embeddings`, {
+  const response = await copilotFetch("/embeddings", {
     method: "POST",
-    headers: copilotHeaders(state),
+    headers: copilotHeaders(),
     body: JSON.stringify(payload),
   })
 

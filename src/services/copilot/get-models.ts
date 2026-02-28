@@ -1,14 +1,11 @@
 import consola from "consola"
 
-import { copilotBaseUrl, copilotHeaders } from "~/lib/api-config"
 import { HTTPError } from "~/lib/error"
-import { fetchWithRetry } from "~/lib/retry-fetch"
-import { state } from "~/lib/state"
+import { copilotFetch, copilotHeaders } from "~/services/copilot/copilot-client"
 
 export const getModels = async () => {
-  const url = `${copilotBaseUrl(state)}/models`
-  const response = await fetchWithRetry(url, {
-    headers: copilotHeaders(state),
+  const response = await copilotFetch("/models", {
+    headers: copilotHeaders(),
   })
 
   if (!response.ok) {
@@ -21,7 +18,7 @@ export const getModels = async () => {
       errorDetails = errorBody || "(empty response)"
     }
     consola.error(
-      `Failed to get models from ${url}\n`
+      `Failed to get models from /models\n`
         + `Status: ${response.status} ${response.statusText}\n`
         + `Response: ${errorDetails}`,
     )
