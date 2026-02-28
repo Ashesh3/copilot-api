@@ -1,6 +1,7 @@
 import type { Context } from "hono"
 import type { ContentfulStatusCode } from "hono/utils/http-status"
 
+import * as Sentry from "@sentry/bun"
 import consola from "consola"
 
 export class HTTPError extends Error {
@@ -36,6 +37,16 @@ function isContentFilterError(obj: unknown): obj is ContentFilterError {
 
 export async function forwardError(c: Context, error: unknown) {
   consola.error("Error occurred:", error)
+
+  Sentry.captureException(error, {
+    tags: {
+      path: c.req.path,
+      method: c.req.method,
+    },
+    extra: {
+      status: error instanceof HTTPError ? error.response.status : 500,
+    },
+  })
 
   if (error instanceof HTTPError) {
     const errorText = await error.response.text()

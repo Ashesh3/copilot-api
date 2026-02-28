@@ -11,6 +11,7 @@ import { mergeConfigWithDefaults } from "./lib/config"
 import { generateVirtualModels } from "./lib/model-suffix"
 import { ensurePaths } from "./lib/paths"
 import { initProxyFromEnv } from "./lib/proxy"
+import { initSentry, setupSentryShutdown } from "./lib/sentry"
 import { generateEnvScript } from "./lib/shell"
 import { state } from "./lib/state"
 import { setupCopilotToken, setupGitHubToken } from "./lib/token"
@@ -44,6 +45,8 @@ function getAllModelIds(): Array<string> {
 }
 
 export async function runServer(options: RunServerOptions): Promise<void> {
+  initSentry()
+
   consola.info(`copilot-api v${packageJson.version}`)
 
   if (options.insecure) {
@@ -162,6 +165,8 @@ export async function runServer(options: RunServerOptions): Promise<void> {
       idleTimeout: 255, // max value in seconds (4m 15s)
     },
   })
+
+  setupSentryShutdown()
 }
 
 /**

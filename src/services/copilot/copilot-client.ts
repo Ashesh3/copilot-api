@@ -1,3 +1,4 @@
+import * as Sentry from "@sentry/bun"
 import consola from "consola"
 import { randomUUID } from "node:crypto"
 
@@ -209,6 +210,12 @@ export async function copilotFetch(
         consola.warn(
           `HTTP ${response.status} on ${path} (attempt ${attempt + 1}/${maxAttempts}), retrying in ${delaySeconds}s`,
         )
+        Sentry.addBreadcrumb({
+          category: "copilot",
+          message: `HTTP ${response.status} on ${path} (attempt ${attempt + 1}/${maxAttempts})`,
+          level: "warning",
+          data: { status: response.status, delay: delaySeconds },
+        })
         await sleep(delaySeconds * 1000)
         continue
       }
@@ -226,6 +233,12 @@ export async function copilotFetch(
         `Fetch failed on ${path} (attempt ${attempt + 1}/${maxAttempts}), retrying in ${delaySeconds}s:`,
         lastError.message,
       )
+      Sentry.addBreadcrumb({
+        category: "copilot",
+        message: `Fetch error on ${path} (attempt ${attempt + 1}/${maxAttempts})`,
+        level: "warning",
+        data: { error: lastError.message, delay: delaySeconds },
+      })
       await sleep(delaySeconds * 1000)
     }
   }
