@@ -179,7 +179,8 @@ describe("Per-model: ChatCompletions (streaming)", () => {
         const events = await collectSSEEvents(res)
         expect(events.length).toBeGreaterThan(0)
         const lastEvent = events.at(-1)
-        expect(lastEvent.data).toBe("[DONE]")
+        expect(lastEvent).toBeDefined()
+        expect(lastEvent?.data).toBe("[DONE]")
       },
       TEST_TIMEOUT,
     )

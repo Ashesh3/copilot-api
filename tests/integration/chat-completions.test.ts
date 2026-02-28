@@ -87,7 +87,8 @@ describe("POST /v1/chat/completions - basic", () => {
         expect(chunk.choices).toBeDefined()
       }
       const lastEvent = events.at(-1)
-      expect(lastEvent.data).toBe("[DONE]")
+      expect(lastEvent).toBeDefined()
+      expect(lastEvent?.data).toBe("[DONE]")
     },
     TEST_TIMEOUT,
   )

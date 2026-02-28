@@ -38,7 +38,7 @@ const normalizePayload = (payload: ChatCompletionsPayload): void => {
     const schemaWrapper = fmt.json_schema as Record<string, unknown> | undefined
     const jsonSchema = schemaWrapper?.schema
     if (jsonSchema) {
-      ;(payload as Record<string, unknown>)._json_schema = jsonSchema
+      ;(payload as unknown as Record<string, unknown>)._json_schema = jsonSchema
     }
     payload.response_format = { type: "json_object" }
   }
@@ -79,13 +79,14 @@ const stripJsonFences = (result: ChatCompletionResponse): void => {
 const injectJsonInstruction = (payload: ChatCompletionsPayload): void => {
   if (!isJsonResponseFormat(payload)) return
 
-  const stashedSchema = (payload as Record<string, unknown>)._json_schema
+  const stashedSchema = (payload as unknown as Record<string, unknown>)
+    ._json_schema
   let instruction =
     "IMPORTANT: You MUST respond with valid JSON only. No markdown, no code fences, no explanation — just raw JSON."
 
   if (stashedSchema) {
     instruction += `\nYou MUST conform to this JSON schema:\n${JSON.stringify(stashedSchema)}`
-    delete (payload as Record<string, unknown>)._json_schema
+    delete (payload as unknown as Record<string, unknown>)._json_schema
   }
 
   const systemMsg = payload.messages.find((m) => m.role === "system")
