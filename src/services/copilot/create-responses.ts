@@ -1,9 +1,8 @@
 import consola from "consola"
 import { events } from "fetch-event-stream"
 
-import { copilotBaseUrl, copilotHeaders } from "~/lib/api-config"
 import { HTTPError } from "~/lib/error"
-import { state } from "~/lib/state"
+import { copilotFetch, copilotHeaders } from "~/services/copilot/copilot-client"
 
 export interface ResponsesPayload {
   model: string
@@ -331,17 +330,28 @@ export const createResponses = async (
   payload: ResponsesPayload,
   { vision, initiator }: ResponsesRequestOptions,
 ): Promise<CreateResponsesReturn> => {
-  if (!state.copilotToken) throw new Error("Copilot token not found")
-
-  const headers: Record<string, string> = {
-    ...copilotHeaders(state, vision),
-    "X-Initiator": initiator,
-  }
+  const headers = copilotHeaders({ vision, initiator })
 
   // service_tier is not supported by github copilot
   payload.service_tier = null
 
-  const response = await fetch(`${copilotBaseUrl(state)}/responses`, {
+  // Zero-data retention enforcement
+  payload.store = false
+
+  // Ensure reasoning includes encrypted_content and defaults summary to "auto"
+  if (payload.reasoning) {
+    if (!payload.include) {
+      payload.include = []
+    }
+    if (!payload.include.includes("reasoning.encrypted_content")) {
+      payload.include.push("reasoning.encrypted_content")
+    }
+    if (!payload.reasoning.summary) {
+      payload.reasoning.summary = "auto"
+    }
+  }
+
+  const response = await copilotFetch("/responses", {
     method: "POST",
     headers,
     body: JSON.stringify(payload),
