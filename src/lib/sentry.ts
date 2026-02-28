@@ -1,4 +1,5 @@
 import * as Sentry from "@sentry/bun"
+import consola from "consola"
 
 import packageJson from "../../package.json" with { type: "json" }
 
@@ -36,6 +37,8 @@ export function initSentry(): void {
   process.on("unhandledRejection", (reason) => {
     Sentry.captureException(reason)
   })
+
+  consola.info("Sentry initialized")
 }
 
 export function setupSentryShutdown(): void {
