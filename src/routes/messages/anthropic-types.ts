@@ -218,4 +218,7 @@ export interface AnthropicStreamState {
   pendingFinishReason?: "stop" | "length" | "tool_calls" | "content_filter"
   // Track if message_delta was already sent
   messageDeltaSent?: boolean
+  // Track thinking/reasoning block state (for CAPI reasoning_text)
+  thinkingBlockOpen?: boolean
+  thinkingBlockIndex?: number
 }

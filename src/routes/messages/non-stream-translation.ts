@@ -293,15 +293,27 @@ export function translateToAnthropic(
 }
 
 function extractContentFromChoices(response: ChatCompletionResponse): {
-  contentBlocks: Array<AnthropicTextBlock | AnthropicToolUseBlock>
+  contentBlocks: Array<
+    AnthropicTextBlock | AnthropicToolUseBlock | AnthropicThinkingBlock
+  >
   stopReason: "stop" | "length" | "tool_calls" | "content_filter" | null
 } {
+  const allThinkingBlocks: Array<AnthropicThinkingBlock> = []
   const allTextBlocks: Array<AnthropicTextBlock> = []
   const allToolUseBlocks: Array<AnthropicToolUseBlock> = []
   let stopReason: "stop" | "length" | "tool_calls" | "content_filter" | null =
     response.choices[0]?.finish_reason ?? null
 
   for (const choice of response.choices) {
+    // Extract reasoning/thinking blocks from CAPI response
+    if (choice.message.reasoning_text) {
+      allThinkingBlocks.push({
+        type: "thinking",
+        thinking: choice.message.reasoning_text,
+        signature: choice.message.reasoning_opaque ?? "",
+      })
+    }
+
     allTextBlocks.push(...getAnthropicTextBlocks(choice.message.content))
     allToolUseBlocks.push(
       ...getAnthropicToolUseBlocks(choice.message.tool_calls),
@@ -313,7 +325,11 @@ function extractContentFromChoices(response: ChatCompletionResponse): {
   }
 
   return {
-    contentBlocks: [...allTextBlocks, ...allToolUseBlocks],
+    contentBlocks: [
+      ...allThinkingBlocks,
+      ...allTextBlocks,
+      ...allToolUseBlocks,
+    ],
     stopReason,
   }
 }
@@ -321,7 +337,9 @@ function extractContentFromChoices(response: ChatCompletionResponse): {
 function buildAnthropicResponse(
   response: ChatCompletionResponse,
   options: {
-    contentBlocks: Array<AnthropicTextBlock | AnthropicToolUseBlock>
+    contentBlocks: Array<
+      AnthropicTextBlock | AnthropicToolUseBlock | AnthropicThinkingBlock
+    >
     stopReason: "stop" | "length" | "tool_calls" | "content_filter" | null
     originalModel?: string
   },

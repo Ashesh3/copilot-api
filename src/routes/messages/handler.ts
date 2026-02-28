@@ -6,7 +6,6 @@ import type { Model } from "~/services/copilot/get-models"
 
 import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
-import { getReasoningEffortForModel } from "~/lib/config"
 import { createHandlerLogger } from "~/lib/logger"
 import { normalizeModelName } from "~/lib/model-resolver"
 import { parseModelSuffix } from "~/lib/model-suffix"
@@ -29,7 +28,6 @@ import {
   type ChatCompletionChunk,
   type ChatCompletionResponse,
 } from "~/services/copilot/create-chat-completions"
-import { createMessages } from "~/services/copilot/create-messages"
 import {
   createResponses,
   type ResponsesResult,
@@ -106,9 +104,7 @@ export async function handleCompletion(c: Context) {
 
   // Log the requested vs routed model
   let apiType = "ChatCompletions"
-  if (shouldUseMessagesApi(selectedModel)) {
-    apiType = "Messages"
-  } else if (shouldUseResponsesApi(selectedModel)) {
+  if (shouldUseResponsesApi(selectedModel)) {
     apiType = "Responses"
   }
 
@@ -124,15 +120,6 @@ export async function handleCompletion(c: Context) {
     reasoningEffort: effectiveEffort,
   })
 
-  if (shouldUseMessagesApi(selectedModel)) {
-    return await handleWithMessagesApi(c, anthropicPayload, {
-      anthropicBetaHeader: anthropicBeta,
-      initiatorOverride,
-      selectedModel,
-      effortOverride: suffixEffort,
-    })
-  }
-
   if (shouldUseResponsesApi(selectedModel)) {
     return await handleWithResponsesApi(c, anthropicPayload, {
       initiatorOverride,
@@ -144,7 +131,6 @@ export async function handleCompletion(c: Context) {
 }
 
 const RESPONSES_ENDPOINT = "/responses"
-const MESSAGES_ENDPOINT = "/v1/messages"
 
 const handleWithChatCompletions = async (
   c: Context,
@@ -152,6 +138,15 @@ const handleWithChatCompletions = async (
   initiatorOverride?: "agent" | "user",
 ) => {
   const openAIPayload = translateToOpenAI(anthropicPayload)
+
+  // Add thinking_budget if the client requested thinking with a budget
+  if (anthropicPayload.thinking?.budget_tokens) {
+    ;(openAIPayload as unknown as Record<string, unknown>).thinking_budget =
+      anthropicPayload.thinking.budget_tokens
+    // Claude requires temperature=1 when thinking is enabled
+    openAIPayload.temperature = 1
+  }
+
   const { payload: replacedPayload, appliedRules } =
     await applyReplacementsToPayload(openAIPayload)
   const finalPayload = {
@@ -322,81 +317,10 @@ const handleWithResponsesApi = async (
   return c.json(anthropicResponse)
 }
 
-const handleWithMessagesApi = async (
-  c: Context,
-  anthropicPayload: AnthropicMessagesPayload,
-  options?: {
-    anthropicBetaHeader?: string
-    initiatorOverride?: "agent" | "user"
-    selectedModel?: Model
-    effortOverride?: "low" | "medium" | "high" | "xhigh"
-  },
-) => {
-  const {
-    anthropicBetaHeader,
-    initiatorOverride,
-    selectedModel,
-    effortOverride,
-  } = options ?? {}
-  // Pre-request processing: filter thinking blocks for Claude models so only
-  // valid thinking blocks are sent to the Copilot Messages API.
-  for (const msg of anthropicPayload.messages) {
-    if (msg.role === "assistant" && Array.isArray(msg.content)) {
-      msg.content = msg.content.filter((block) => {
-        if (block.type !== "thinking") return true
-        return (
-          block.thinking
-          && block.thinking !== "Thinking..."
-          && block.signature
-          && !block.signature.includes("@")
-        )
-      })
-    }
-  }
-
-  if (selectedModel?.capabilities.supports.adaptive_thinking) {
-    // Only set thinking if client didn't already provide it
-    if (!anthropicPayload.thinking) {
-      anthropicPayload.thinking = {
-        type: "adaptive",
-      }
-    }
-    // Priority: suffix override > client body > config default
-    const clientEffort = anthropicPayload.output_config?.effort
-    anthropicPayload.output_config = {
-      effort:
-        effortOverride ?
-          getAnthropicEffortForModel(anthropicPayload.model, effortOverride)
-        : (clientEffort ?? getAnthropicEffortForModel(anthropicPayload.model)),
-    }
-  }
-
-  logger.debug("Translated Messages payload:", JSON.stringify(anthropicPayload))
-
-  const response = await createMessages(anthropicPayload, anthropicBetaHeader, {
-    initiator: initiatorOverride,
-  })
-
-  if (isAsyncIterable(response)) {
-    logger.debug("Streaming response from Copilot (Messages API)")
-    return streamSSE(c, async (stream) => {
-      for await (const event of response) {
-        const eventName = event.event
-        const data = event.data ?? ""
-        logger.debug("Messages raw stream event:", data)
-        await stream.writeSSE({
-          event: eventName,
-          data,
-        })
-      }
-    })
-  }
-
-  logger.debug(
-    "Non-streaming Messages result:",
-    JSON.stringify(response).slice(-400),
+const shouldUseResponsesApi = (selectedModel: Model | undefined): boolean => {
+  return (
+    selectedModel?.supported_endpoints?.includes(RESPONSES_ENDPOINT) ?? false
   )
-  return c.json(response)
 }
 
 /**
@@ -423,18 +347,6 @@ function applyModelVariantRouting(
     }
     delete payload.speed
   }
-}
-
-const shouldUseResponsesApi = (selectedModel: Model | undefined): boolean => {
-  return (
-    selectedModel?.supported_endpoints?.includes(RESPONSES_ENDPOINT) ?? false
-  )
-}
-
-const shouldUseMessagesApi = (selectedModel: Model | undefined): boolean => {
-  return (
-    selectedModel?.supported_endpoints?.includes(MESSAGES_ENDPOINT) ?? false
-  )
 }
 
 const isNonStreaming = (
@@ -476,18 +388,6 @@ function getBodyReasoningEffort(
   }
 
   return parts.length > 0 ? parts.join(", ") : undefined
-}
-
-const getAnthropicEffortForModel = (
-  model: string,
-  override?: "low" | "medium" | "high" | "xhigh",
-): "low" | "medium" | "high" | "max" => {
-  const reasoningEffort = getReasoningEffortForModel(model, override)
-
-  if (reasoningEffort === "xhigh") return "max"
-  if (reasoningEffort === "none" || reasoningEffort === "minimal") return "low"
-
-  return reasoningEffort
 }
 
 const isCompactRequest = (

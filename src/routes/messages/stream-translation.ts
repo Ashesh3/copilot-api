@@ -144,7 +144,45 @@ export function translateChunkToAnthropicEvents(
     state.messageStartSent = true
   }
 
+  // Handle reasoning_text (Claude thinking via CAPI)
+  if (delta.reasoning_text) {
+    if (!state.thinkingBlockOpen) {
+      // Open a new thinking content block
+      state.thinkingBlockIndex = state.contentBlockIndex
+      events.push({
+        type: "content_block_start",
+        index: state.contentBlockIndex,
+        content_block: {
+          type: "thinking",
+          thinking: "",
+        },
+      })
+      state.thinkingBlockOpen = true
+      state.contentBlockOpen = true
+    }
+
+    events.push({
+      type: "content_block_delta",
+      index: state.thinkingBlockIndex ?? state.contentBlockIndex,
+      delta: {
+        type: "thinking_delta",
+        thinking: delta.reasoning_text,
+      },
+    })
+  }
+
   if (delta.content) {
+    // Close thinking block if it was open before starting text
+    if (state.thinkingBlockOpen) {
+      events.push({
+        type: "content_block_stop",
+        index: state.thinkingBlockIndex ?? state.contentBlockIndex,
+      })
+      state.thinkingBlockOpen = false
+      state.contentBlockIndex++
+      state.contentBlockOpen = false
+    }
+
     if (isToolBlockOpen(state)) {
       // A tool block was open, so close it before starting a text block.
       events.push({
@@ -230,6 +268,22 @@ export function translateChunkToAnthropicEvents(
   }
 
   if (choice.finish_reason) {
+    // Close thinking block if still open
+    if (state.thinkingBlockOpen) {
+      events.push({
+        type: "content_block_stop",
+        index: state.thinkingBlockIndex ?? state.contentBlockIndex,
+      })
+      state.thinkingBlockOpen = false
+      if (
+        !state.contentBlockOpen
+        || state.contentBlockIndex === state.thinkingBlockIndex
+      ) {
+        state.contentBlockIndex++
+        state.contentBlockOpen = false
+      }
+    }
+
     if (state.contentBlockOpen) {
       events.push({
         type: "content_block_stop",

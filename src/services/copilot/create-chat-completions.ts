@@ -209,8 +209,9 @@ export interface ChatCompletionChunk {
   }
 }
 
-interface Delta {
+export interface Delta {
   content?: string | null
+  reasoning_text?: string | null // Claude thinking text from CAPI
   role?: "user" | "assistant" | "system" | "tool"
   tool_calls?: Array<{
     index: number
@@ -249,9 +250,11 @@ export interface ChatCompletionResponse {
   }
 }
 
-interface ResponseMessage {
+export interface ResponseMessage {
   role: "assistant"
   content: string | null
+  reasoning_text?: string | null // Claude thinking text from CAPI
+  reasoning_opaque?: string | null // Encrypted signature from CAPI
   tool_calls?: Array<ToolCall>
 }
 
