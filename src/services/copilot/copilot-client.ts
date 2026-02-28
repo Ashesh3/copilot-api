@@ -240,27 +240,21 @@ export async function copilotFetch(
 
 interface ContentPart {
   type: string
-  [key: string]: unknown
-}
-
-interface Message {
-  role: string
-  content?: string | Array<ContentPart>
-  [key: string]: unknown
-}
-
-interface Tool {
-  [key: string]: unknown
 }
 
 // --- Helper Functions ---
 
-export function hasVisionContent(messages: Array<Message>): boolean {
+export function hasVisionContent(
+  messages: ReadonlyArray<{
+    content?: string | ReadonlyArray<ContentPart> | null
+  }>,
+): boolean {
   const imageTypes = new Set(["image_url", "image", "input_image"])
 
   for (const message of messages) {
     if (Array.isArray(message.content)) {
-      for (const part of message.content) {
+      const parts = message.content as ReadonlyArray<ContentPart>
+      for (const part of parts) {
         if (imageTypes.has(part.type)) {
           return true
         }
@@ -272,7 +266,7 @@ export function hasVisionContent(messages: Array<Message>): boolean {
 }
 
 export function detectInitiator(
-  messages: Array<Message>,
+  messages: ReadonlyArray<{ role: string }>,
   override?: string,
 ): string {
   if (override) return override
@@ -291,13 +285,15 @@ export function detectInitiator(
 }
 
 export function addPromptCaching(
-  messages: Array<Message>,
-  tools?: Array<Tool>,
+  messages: Array<{ role: string }>,
+  tools?: Array<object>,
 ): void {
   // Add cache control to last system message
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i].role === "system") {
-      messages[i].copilot_cache_control = { type: "ephemeral" }
+      ;(messages[i] as Record<string, unknown>).copilot_cache_control = {
+        type: "ephemeral",
+      }
       break
     }
   }
@@ -306,7 +302,9 @@ export function addPromptCaching(
   if (tools && tools.length > 0) {
     const lastTool = tools.at(-1)
     if (lastTool) {
-      lastTool.copilot_cache_control = { type: "ephemeral" }
+      ;(lastTool as Record<string, unknown>).copilot_cache_control = {
+        type: "ephemeral",
+      }
     }
   }
 }

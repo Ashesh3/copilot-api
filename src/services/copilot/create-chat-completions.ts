@@ -1,10 +1,14 @@
 import consola from "consola"
 import { events } from "fetch-event-stream"
 
-import { copilotHeaders, copilotBaseUrl } from "~/lib/api-config"
 import { HTTPError } from "~/lib/error"
-import { fetchWithRetry } from "~/lib/retry-fetch"
-import { state } from "~/lib/state"
+import {
+  copilotFetch,
+  copilotHeaders,
+  hasVisionContent,
+  detectInitiator,
+  addPromptCaching,
+} from "~/services/copilot/copilot-client"
 
 /**
  * Normalize payload before sending to Copilot.
@@ -92,48 +96,22 @@ const injectJsonInstruction = (payload: ChatCompletionsPayload): void => {
   }
 }
 
-export const createChatCompletions = async (
-  payload: ChatCompletionsPayload,
-  options?: {
-    initiator?: "agent" | "user"
-  },
-) => {
-  if (!state.copilotToken) throw new Error("Copilot token not found")
-
-  const enableVision = payload.messages.some(
-    (x) =>
-      typeof x.content !== "string"
-      && x.content?.some((x) => x.type === "image_url"),
-  )
-
-  // Agent/user check for X-Initiator header
-  // Check only the last message to prevent false positives in multi-turn conversations
-  let isAgentCall = false
-  if (payload.messages.length > 0) {
-    const lastMessage = payload.messages.at(-1)
-    if (lastMessage) {
-      isAgentCall = ["assistant", "tool"].includes(lastMessage.role)
+function removeImages(payload: ChatCompletionsPayload): void {
+  for (const msg of payload.messages) {
+    if (Array.isArray(msg.content)) {
+      msg.content = msg.content.filter((part) => part.type !== "image_url")
+      if (msg.content.length === 1) {
+        const first = msg.content[0] as TextPart
+        msg.content = first.text
+      }
     }
   }
+}
 
-  // Build headers and add X-Initiator
-  const headers: Record<string, string> = {
-    ...copilotHeaders(state, enableVision),
-    "X-Initiator": options?.initiator ?? (isAgentCall ? "agent" : "user"),
-  }
-
-  normalizePayload(payload)
-  injectJsonInstruction(payload)
-
-  const response = await fetchWithRetry(
-    `${copilotBaseUrl(state)}/chat/completions`,
-    {
-      method: "POST",
-      headers,
-      body: JSON.stringify(payload),
-    },
-  )
-
+async function handleResponse(
+  response: Response,
+  payload: ChatCompletionsPayload,
+) {
   if (!response.ok) {
     const errorBody = await response.clone().text()
     consola.error(
@@ -170,6 +148,42 @@ export const createChatCompletions = async (
       new Response(text, { status: 502 }),
     )
   }
+}
+
+export const createChatCompletions = async (
+  payload: ChatCompletionsPayload,
+  options?: {
+    initiator?: "agent" | "user"
+  },
+) => {
+  const vision = hasVisionContent(payload.messages)
+  const initiator = detectInitiator(payload.messages, options?.initiator)
+  const headers = copilotHeaders({ vision, initiator })
+
+  normalizePayload(payload)
+  injectJsonInstruction(payload)
+  addPromptCaching(payload.messages, payload.tools ?? undefined)
+
+  const response = await copilotFetch("/chat/completions", {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload),
+  })
+
+  // 413 image fallback: if request has images and response is 413, remove images and retry
+  if (response.status === 413 && vision) {
+    consola.warn("413 Payload Too Large with images, retrying without images")
+    removeImages(payload)
+    const retryHeaders = copilotHeaders({ vision: false, initiator })
+    const retryResponse = await copilotFetch("/chat/completions", {
+      method: "POST",
+      headers: retryHeaders,
+      body: JSON.stringify(payload),
+    })
+    return handleResponse(retryResponse, payload)
+  }
+
+  return handleResponse(response, payload)
 }
 
 // Streaming types
