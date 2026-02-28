@@ -9,11 +9,16 @@ import { getCopilotToken } from "~/services/github/get-copilot-token"
 
 export const TEST_TIMEOUT = 60_000
 
-let initialized = false
+let initPromise: Promise<void> | null = null
 
-export async function initializeTestState(): Promise<void> {
-  if (initialized) return
+export function initializeTestState(): Promise<void> {
+  if (!initPromise) {
+    initPromise = doInit()
+  }
+  return initPromise
+}
 
+async function doInit(): Promise<void> {
   // Read stored GitHub token
   const githubToken = await fs.readFile(PATHS.GITHUB_TOKEN_PATH, "utf8")
   if (!githubToken.trim()) {
@@ -30,8 +35,6 @@ export async function initializeTestState(): Promise<void> {
   // Fetch and cache models
   const models = await getModels()
   state.models = models
-
-  initialized = true // eslint-disable-line require-atomic-updates
 }
 
 export async function request(

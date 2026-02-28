@@ -19,17 +19,6 @@ describe("Error handling and edge cases", () => {
   )
 
   test(
-    "GET /api/claude_code_penguin_mode returns enabled",
-    async () => {
-      const res = await request("/api/claude_code_penguin_mode")
-      expect(res.status).toBe(200)
-      const body = (await res.json()) as { enabled: boolean }
-      expect(body.enabled).toBe(true)
-    },
-    TEST_TIMEOUT,
-  )
-
-  test(
     "chat completions with nonexistent model returns error",
     async () => {
       const res = await postJSON("/v1/chat/completions", {

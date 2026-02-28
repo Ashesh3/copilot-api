@@ -1,9 +1,12 @@
-import { test, expect, mock } from "bun:test"
+import { test, expect, mock, beforeAll, afterAll } from "bun:test"
 
 import type { ChatCompletionsPayload } from "../src/services/copilot/create-chat-completions"
 
 import { state } from "../src/lib/state"
 import { createChatCompletions } from "../src/services/copilot/create-chat-completions"
+
+// Save and restore original fetch so integration tests aren't affected
+const originalFetch = globalThis.fetch
 
 // Mock state
 state.copilotToken = "test-token"
@@ -33,8 +36,15 @@ const fetchMock = mock(
     }
   },
 )
-// @ts-expect-error - Mock fetch doesn't implement all fetch properties
-;(globalThis as unknown as { fetch: typeof fetch }).fetch = fetchMock
+
+beforeAll(() => {
+  // @ts-expect-error - Mock fetch doesn't implement all fetch properties
+  ;(globalThis as unknown as { fetch: typeof fetch }).fetch = fetchMock
+})
+
+afterAll(() => {
+  ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
+})
 
 test("sets X-Initiator to agent if tool/assistant present", async () => {
   const payload: ChatCompletionsPayload = {
