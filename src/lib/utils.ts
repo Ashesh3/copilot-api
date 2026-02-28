@@ -1,7 +1,6 @@
 import consola from "consola"
 
 import { getModels } from "~/services/copilot/get-models"
-import { getVSCodeVersion } from "~/services/get-vscode-version"
 
 import { state } from "./state"
 
@@ -27,11 +26,4 @@ export async function cacheModels(): Promise<void> {
     )
     throw error
   }
-}
-
-export const cacheVSCodeVersion = async () => {
-  const response = await getVSCodeVersion()
-  state.vsCodeVersion = response
-
-  consola.info(`Using VSCode version: ${response}`)
 }

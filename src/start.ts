@@ -14,7 +14,7 @@ import { initProxyFromEnv } from "./lib/proxy"
 import { generateEnvScript } from "./lib/shell"
 import { state } from "./lib/state"
 import { setupCopilotToken, setupGitHubToken } from "./lib/token"
-import { cacheModels, cacheVSCodeVersion } from "./lib/utils"
+import { cacheModels } from "./lib/utils"
 import { server } from "./server"
 
 interface RunServerOptions {
@@ -86,8 +86,6 @@ export async function runServer(options: RunServerOptions): Promise<void> {
 
   await ensurePaths()
   mergeConfigWithDefaults()
-  await cacheVSCodeVersion()
-
   if (options.githubToken) {
     state.githubToken = options.githubToken
     consola.info("Using provided GitHub token")
