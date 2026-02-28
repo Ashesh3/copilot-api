@@ -221,4 +221,5 @@ export interface AnthropicStreamState {
   // Track thinking/reasoning block state (for CAPI reasoning_text)
   thinkingBlockOpen?: boolean
   thinkingBlockIndex?: number
+  pendingSignature?: string
 }

@@ -171,12 +171,30 @@ export function translateChunkToAnthropicEvents(
     })
   }
 
+  // Capture reasoning_opaque (encrypted signature for thinking round-trip)
+  if (delta.reasoning_opaque) {
+    state.pendingSignature = delta.reasoning_opaque
+  }
+
   if (delta.content) {
     // Close thinking block if it was open before starting text
     if (state.thinkingBlockOpen) {
+      const thinkingIdx = state.thinkingBlockIndex ?? state.contentBlockIndex
+      // Emit signature_delta if we have a pending signature
+      if (state.pendingSignature) {
+        events.push({
+          type: "content_block_delta",
+          index: thinkingIdx,
+          delta: {
+            type: "signature_delta",
+            signature: state.pendingSignature,
+          },
+        })
+        state.pendingSignature = undefined
+      }
       events.push({
         type: "content_block_stop",
-        index: state.thinkingBlockIndex ?? state.contentBlockIndex,
+        index: thinkingIdx,
       })
       state.thinkingBlockOpen = false
       state.contentBlockIndex++
@@ -270,9 +288,22 @@ export function translateChunkToAnthropicEvents(
   if (choice.finish_reason) {
     // Close thinking block if still open
     if (state.thinkingBlockOpen) {
+      const thinkingIdx = state.thinkingBlockIndex ?? state.contentBlockIndex
+      // Emit signature_delta if we have a pending signature
+      if (state.pendingSignature) {
+        events.push({
+          type: "content_block_delta",
+          index: thinkingIdx,
+          delta: {
+            type: "signature_delta",
+            signature: state.pendingSignature,
+          },
+        })
+        state.pendingSignature = undefined
+      }
       events.push({
         type: "content_block_stop",
-        index: state.thinkingBlockIndex ?? state.contentBlockIndex,
+        index: thinkingIdx,
       })
       state.thinkingBlockOpen = false
       if (
@@ -351,6 +382,11 @@ export function translateResponseToAnthropicEvents(
   ]
 
   let contentBlockIndex = 0
+  contentBlockIndex = addThinkingContentEvents(
+    events,
+    choice,
+    contentBlockIndex,
+  )
   contentBlockIndex = addTextContentEvents(events, choice, contentBlockIndex)
   addToolCallEvents(events, choice, contentBlockIndex)
   addMessageDeltaAndStopEvents(events, choice, {
@@ -391,6 +427,43 @@ function createMessageStartEvent(
       },
     },
   }
+}
+
+function addThinkingContentEvents(
+  events: Array<AnthropicStreamEventData>,
+  choice: ChatCompletionResponse["choices"][0],
+  contentBlockIndex: number,
+): number {
+  if (choice.message.reasoning_text) {
+    events.push(
+      {
+        type: "content_block_start",
+        index: contentBlockIndex,
+        content_block: { type: "thinking", thinking: "" },
+      },
+      {
+        type: "content_block_delta",
+        index: contentBlockIndex,
+        delta: {
+          type: "thinking_delta",
+          thinking: choice.message.reasoning_text,
+        },
+      },
+    )
+    if (choice.message.reasoning_opaque) {
+      events.push({
+        type: "content_block_delta",
+        index: contentBlockIndex,
+        delta: {
+          type: "signature_delta",
+          signature: choice.message.reasoning_opaque,
+        },
+      })
+    }
+    events.push({ type: "content_block_stop", index: contentBlockIndex })
+    return contentBlockIndex + 1
+  }
+  return contentBlockIndex
 }
 
 function addTextContentEvents(

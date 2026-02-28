@@ -26,7 +26,7 @@ export function copilotBaseUrl(): string {
 
 export interface CopilotHeaderOptions {
   vision?: boolean
-  initiator?: string
+  initiator?: "agent" | "user"
 }
 
 export function copilotHeaders(
@@ -75,7 +75,7 @@ export function parseQuotaHeaders(
       found = true
       const quotaType = lowerKey.slice(quotaPrefix.length)
       const params: QuotaParams = {}
-      for (const part of value.split(";")) {
+      for (const part of value.split(/[;&]/)) {
         const trimmed = part.trim()
         const eqIndex = trimmed.indexOf("=")
         if (eqIndex !== -1) {
@@ -112,6 +112,7 @@ function isRetryableError(error: unknown): boolean {
     "timeout",
     "terminated",
     "goaway",
+    "other side closed",
   ]
 
   return retryablePatterns.some(
@@ -267,8 +268,8 @@ export function hasVisionContent(
 
 export function detectInitiator(
   messages: ReadonlyArray<{ role: string }>,
-  override?: string,
-): string {
+  override?: "agent" | "user",
+): "agent" | "user" {
   if (override) return override
 
   if (messages.length === 0) return "user"

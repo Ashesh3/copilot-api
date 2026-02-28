@@ -97,10 +97,12 @@ const injectJsonInstruction = (payload: ChatCompletionsPayload): void => {
   }
 }
 
+const imageTypes = new Set(["image_url", "image", "input_image"])
+
 function removeImages(payload: ChatCompletionsPayload): void {
   for (const msg of payload.messages) {
     if (Array.isArray(msg.content)) {
-      msg.content = msg.content.filter((part) => part.type !== "image_url")
+      msg.content = msg.content.filter((part) => !imageTypes.has(part.type))
       if (msg.content.length === 1) {
         const first = msg.content[0] as TextPart
         msg.content = first.text
@@ -213,6 +215,7 @@ export interface ChatCompletionChunk {
 export interface Delta {
   content?: string | null
   reasoning_text?: string | null // Claude thinking text from CAPI
+  reasoning_opaque?: string | null // Encrypted signature from CAPI (streaming)
   role?: "user" | "assistant" | "system" | "tool"
   tool_calls?: Array<{
     index: number
