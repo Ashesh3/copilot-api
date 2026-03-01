@@ -5,6 +5,7 @@
  *       "claude-opus-4-6[1m]" -> "claude-opus-4.6-1m"
  *       "gpt-4-1" -> "gpt-4.1"
  *       "gpt-5-1-codex" -> "gpt-5.1-codex"
+ *       "claude-opus-4.6-1m" -> "claude-opus-4.6-1m" (preserved)
  */
 export function normalizeModelName(model: string): string {
   // Convert Anthropic's [1m] context suffix to Copilot's -1m format
@@ -13,8 +14,16 @@ export function normalizeModelName(model: string): string {
   // Strip Anthropic date suffixes (e.g., "-20251001") — Copilot doesn't support them
   normalized = normalized.replace(/-\d{8}$/, "")
 
+  // Strip known suffixes before digit-dash-digit conversion to avoid mangling them
+  let suffix = ""
+  const suffixMatch = normalized.match(/(?:-1m|-fast)$/)
+  if (suffixMatch) {
+    suffix = suffixMatch[0]
+    normalized = normalized.slice(0, -suffix.length)
+  }
+
   // Replace dash with dot only between two digits: "4-5" -> "4.5"
   normalized = normalized.replaceAll(/(\d)-(\d)/g, (_, p1, p2) => `${p1}.${p2}`)
 
-  return normalized
+  return normalized + suffix
 }
