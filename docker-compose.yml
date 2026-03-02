@@ -1,0 +1,20 @@
+services:
+  copilot-api:
+    build: .
+    container_name: copilot-api
+    restart: unless-stopped
+    ports:
+      - "4141:4141"
+    volumes:
+      - copilot-data:/app/data
+    env_file:
+      - .env
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:4141/"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  copilot-data:
