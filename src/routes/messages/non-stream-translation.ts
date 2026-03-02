@@ -7,6 +7,10 @@ import {
   type Tool,
   type ToolCall,
 } from "~/services/copilot/create-chat-completions"
+import {
+  isWebSearchToolType,
+  WEB_SEARCH_FUNCTION_TOOL,
+} from "~/services/copilot/mcp-web-search"
 
 import {
   type AnthropicAssistantContentBlock,
@@ -246,14 +250,32 @@ function translateAnthropicToolsToOpenAI(
   if (!anthropicTools) {
     return undefined
   }
-  return anthropicTools.map((tool) => ({
-    type: "function",
-    function: {
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.input_schema,
-    },
-  }))
+
+  const result: Array<Tool> = []
+
+  for (const tool of anthropicTools) {
+    // Convert web_search server-side tool to a function tool
+    if (isWebSearchToolType(tool)) {
+      result.push(WEB_SEARCH_FUNCTION_TOOL)
+      continue
+    }
+
+    // Filter out other server-side tools without input_schema
+    if (tool.input_schema === undefined) {
+      continue
+    }
+
+    result.push({
+      type: "function",
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.input_schema,
+      },
+    })
+  }
+
+  return result.length > 0 ? result : undefined
 }
 
 function translateAnthropicToolChoiceToOpenAI(

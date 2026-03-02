@@ -26,6 +26,10 @@ import {
   type ToolChoiceFunction,
   type ToolChoiceOptions,
 } from "~/services/copilot/create-responses"
+import {
+  isWebSearchToolType,
+  WEB_SEARCH_RESPONSES_TOOL,
+} from "~/services/copilot/mcp-web-search"
 
 import {
   type AnthropicAssistantContentBlock,
@@ -357,13 +361,30 @@ const convertAnthropicTools = (
     return null
   }
 
-  return tools.map((tool) => ({
-    type: "function",
-    name: tool.name,
-    parameters: tool.input_schema,
-    strict: false,
-    ...(tool.description ? { description: tool.description } : {}),
-  }))
+  const result: Array<Tool> = []
+
+  for (const tool of tools) {
+    // Convert web_search server-side tool to a function tool
+    if (isWebSearchToolType(tool)) {
+      result.push(WEB_SEARCH_RESPONSES_TOOL)
+      continue
+    }
+
+    // Filter out other server-side tools without input_schema
+    if (tool.input_schema === undefined) {
+      continue
+    }
+
+    result.push({
+      type: "function",
+      name: tool.name,
+      parameters: tool.input_schema,
+      strict: false,
+      ...(tool.description ? { description: tool.description } : {}),
+    })
+  }
+
+  return result.length > 0 ? result : null
 }
 
 const convertAnthropicToolChoice = (

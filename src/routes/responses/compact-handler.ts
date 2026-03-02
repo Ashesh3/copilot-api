@@ -1,0 +1,232 @@
+import type { Context } from "hono"
+
+import consola from "consola"
+import { randomUUID } from "node:crypto"
+
+import { createHandlerLogger } from "~/lib/logger"
+import { parseModelSuffix } from "~/lib/model-suffix"
+import { checkRateLimit } from "~/lib/rate-limit"
+import { setRequestContext } from "~/lib/request-logger"
+import { state } from "~/lib/state"
+import {
+  type ChatCompletionResponse,
+  type ChatCompletionsPayload,
+  createChatCompletions,
+} from "~/services/copilot/create-chat-completions"
+import {
+  type ResponseInputItem,
+  type ResponseUsage,
+  type ResponsesPayload,
+  type ResponsesResult,
+  createResponses,
+} from "~/services/copilot/create-responses"
+
+import { getCompactionPrompt } from "./compact-prompt"
+import { getResponsesRequestOptions } from "./utils"
+
+const logger = createHandlerLogger("compact-handler")
+
+const RESPONSES_ENDPOINT = "/responses"
+
+interface CompactRequestBody {
+  model: string
+  input: Array<ResponseInputItem>
+  instructions?: string
+  previous_response_id?: string
+  prompt_cache_key?: string
+}
+
+interface CompactionItem {
+  id: string
+  type: "compaction"
+  encrypted_content: string
+}
+
+interface CompactedResponse {
+  id: string
+  object: "response.compaction"
+  created_at: number
+  output: Array<CompactionItem>
+  usage: ResponseUsage | null
+}
+
+/**
+ * Extract text output from a Responses API result.
+ */
+const extractTextFromResponsesResult = (result: ResponsesResult): string => {
+  for (const item of result.output) {
+    if (item.type === "message" && item.content) {
+      for (const block of item.content) {
+        const outputBlock = block as { type?: string; text?: string }
+        if (outputBlock.type === "output_text" && outputBlock.text) {
+          return outputBlock.text
+        }
+      }
+    }
+  }
+  return result.output_text
+}
+
+/**
+ * Extract text output from a ChatCompletions response.
+ */
+const extractTextFromCCResult = (result: ChatCompletionResponse): string => {
+  const choice = result.choices[0]
+  return choice.message.content ?? ""
+}
+
+/**
+ * Map ChatCompletions usage to ResponseUsage format.
+ */
+const mapCCUsage = (
+  usage: ChatCompletionResponse["usage"],
+): ResponseUsage | null => {
+  if (!usage) return null
+  return {
+    input_tokens: usage.prompt_tokens,
+    output_tokens: usage.completion_tokens,
+    total_tokens: usage.total_tokens,
+    input_tokens_details: { cached_tokens: 0 },
+    output_tokens_details: { reasoning_tokens: 0 },
+  }
+}
+
+/**
+ * Build the final CompactedResponse from summary text and usage data.
+ */
+const buildCompactedResponse = (
+  summaryText: string,
+  usage: ResponseUsage | null,
+): CompactedResponse => {
+  const encoded = Buffer.from(summaryText, "utf8").toString("base64")
+
+  return {
+    id: `resp_compact_${randomUUID().replaceAll("-", "").slice(0, 24)}`,
+    object: "response.compaction",
+    created_at: Math.floor(Date.now() / 1000),
+    output: [
+      {
+        id: `cmp_${randomUUID().replaceAll("-", "").slice(0, 24)}`,
+        type: "compaction",
+        encrypted_content: encoded,
+      },
+    ],
+    usage,
+  }
+}
+
+export const handleCompact = async (c: Context) => {
+  await checkRateLimit(state)
+
+  const body = await c.req.json<CompactRequestBody>()
+
+  const { baseModel } = parseModelSuffix(body.model)
+  const model = baseModel
+
+  setRequestContext(c, {
+    requestedModel: body.model,
+    provider: "Compact",
+    model,
+  })
+  logger.debug("Compact request for model:", model)
+
+  // Build the compaction payload — send conversation to model with compaction prompt
+  const compactionPrompt = getCompactionPrompt()
+  const compactionUserMessage: ResponseInputItem = {
+    type: "message",
+    role: "user",
+    content: "Please summarize the conversation above concisely.",
+  }
+
+  const input: Array<ResponseInputItem> = [
+    ...(Array.isArray(body.input) ? body.input : []),
+    compactionUserMessage,
+  ]
+
+  // Check if the model supports native /responses
+  const selectedModel = state.models?.data.find((m) => m.id === model)
+  const supportsResponses =
+    selectedModel?.supported_endpoints?.includes(RESPONSES_ENDPOINT) ?? false
+
+  let summaryText: string
+  let usage: ResponseUsage | null
+
+  if (supportsResponses) {
+    // Use native Responses API
+    const responsesPayload: ResponsesPayload = {
+      model,
+      instructions: compactionPrompt,
+      input,
+      stream: false,
+      tool_choice: "none",
+      store: false,
+    }
+
+    const { vision, initiator } = getResponsesRequestOptions(responsesPayload)
+    const response = await createResponses(responsesPayload, {
+      vision,
+      initiator,
+    })
+
+    const result = response as ResponsesResult
+    summaryText = extractTextFromResponsesResult(result)
+    usage = result.usage ?? null
+
+    logger.debug("Compact result (Responses):", summaryText.slice(0, 200))
+  } else {
+    // Fall back to ChatCompletions
+    consola.debug(
+      `[compact] Model ${model} does not support /responses, falling back to ChatCompletions`,
+    )
+    setRequestContext(c, { provider: "Compact→ChatCompletions" })
+
+    const messages: ChatCompletionsPayload["messages"] = [
+      { role: "system", content: compactionPrompt },
+    ]
+
+    // Convert ResponseInputItems to ChatCompletions messages
+    for (const item of input) {
+      const itemType = (item as { type?: string }).type
+      if (!itemType || itemType === "message") {
+        const msg = item as {
+          role: "user" | "assistant" | "system" | "developer"
+          content?: string | Array<{ type?: string; text?: string }>
+        }
+        const role = msg.role === "developer" ? "system" : msg.role
+        let content = ""
+        if (typeof msg.content === "string") {
+          content = msg.content
+        } else if (Array.isArray(msg.content)) {
+          content = msg.content
+            .map((part) => (typeof part.text === "string" ? part.text : ""))
+            .join("")
+        }
+        messages.push({ role, content })
+      }
+    }
+
+    const ccPayload: ChatCompletionsPayload = {
+      model,
+      messages,
+      stream: false,
+      temperature: 0,
+    }
+
+    const response = await createChatCompletions(ccPayload)
+    const result = response as ChatCompletionResponse
+    summaryText = extractTextFromCCResult(result)
+    usage = mapCCUsage(result.usage)
+
+    logger.debug("Compact result (ChatCompletions):", summaryText.slice(0, 200))
+  }
+
+  if (usage) {
+    setRequestContext(c, {
+      inputTokens: usage.input_tokens,
+      outputTokens: usage.output_tokens,
+    })
+  }
+
+  const compactedResponse = buildCompactedResponse(summaryText, usage)
+  return c.json(compactedResponse)
+}

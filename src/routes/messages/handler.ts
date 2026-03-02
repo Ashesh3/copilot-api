@@ -27,15 +27,22 @@ import {
   createChatCompletions,
   type ChatCompletionChunk,
   type ChatCompletionResponse,
+  type ChatCompletionsPayload,
+  type Message,
+  type ToolCall,
 } from "~/services/copilot/create-chat-completions"
 import {
   createResponses,
+  type ResponseInputItem,
+  type ResponsesPayload,
   type ResponsesResult,
   type ResponseStreamEvent,
 } from "~/services/copilot/create-responses"
+import { executeWebSearch } from "~/services/copilot/mcp-web-search"
 
 import {
   type AnthropicMessagesPayload,
+  type AnthropicResponse,
   type AnthropicStreamState,
   type AnthropicTextBlock,
   type AnthropicToolResultBlock,
@@ -132,6 +139,8 @@ export async function handleCompletion(c: Context) {
 
 const RESPONSES_ENDPOINT = "/responses"
 
+const MAX_WEB_SEARCH_ITERATIONS = 3
+
 const handleWithChatCompletions = async (
   c: Context,
   anthropicPayload: AnthropicMessagesPayload,
@@ -181,11 +190,18 @@ const handleWithChatCompletions = async (
   })
 
   if (isNonStreaming(response)) {
+    // Check for web_search tool calls and execute them in a loop
+    const finalResponse = await resolveWebSearchCalls(
+      response,
+      finalPayload,
+      initiatorOverride,
+    )
+
     logger.debug(
       "Non-streaming response from Copilot:",
-      JSON.stringify(response).slice(-400),
+      JSON.stringify(finalResponse).slice(-400),
     )
-    const anthropicResponse = translateToAnthropic(response)
+    const anthropicResponse = translateToAnthropic(finalResponse)
     logger.debug(
       "Translated Anthropic response:",
       JSON.stringify(anthropicResponse),
@@ -193,8 +209,51 @@ const handleWithChatCompletions = async (
     return c.json(anthropicResponse)
   }
 
+  // Streaming: buffer first response to check for web_search tool calls
   logger.debug("Streaming response from Copilot")
   return streamSSE(c, async (stream) => {
+    // Collect all chunks first to check for web_search calls
+    const bufferedChunks: Array<ChatCompletionChunk> = []
+    let hasWebSearchCall = false
+
+    for await (const rawEvent of response) {
+      if (rawEvent.data === "[DONE]") break
+      if (!rawEvent.data) continue
+
+      const chunk = JSON.parse(rawEvent.data) as ChatCompletionChunk
+      bufferedChunks.push(chunk)
+
+      // Check if any chunk has a web_search tool call
+      for (const choice of chunk.choices) {
+        if (choice.delta.tool_calls) {
+          for (const tc of choice.delta.tool_calls) {
+            if (tc.function?.name === "web_search") {
+              hasWebSearchCall = true
+            }
+          }
+        }
+      }
+    }
+
+    if (hasWebSearchCall) {
+      // Reconstruct the full response from buffered chunks
+      const reconstructed = reconstructFromChunks(bufferedChunks)
+      if (reconstructed) {
+        // Execute web search and get final response (non-streaming)
+        const resolved = await resolveWebSearchCalls(
+          reconstructed,
+          finalPayload,
+          initiatorOverride,
+        )
+        // Re-send as a non-streaming response, but translate to stream events
+        const anthropicResponse = translateToAnthropic(resolved)
+        // Emit all events for the complete response as stream
+        await emitAnthropicResponseAsStream(stream, anthropicResponse)
+        return
+      }
+    }
+
+    // No web_search calls — replay buffered chunks as normal stream
     const streamState: AnthropicStreamState = {
       messageStartSent: false,
       contentBlockIndex: 0,
@@ -202,19 +261,8 @@ const handleWithChatCompletions = async (
       toolCalls: {},
     }
 
-    for await (const rawEvent of response) {
-      logger.debug("Copilot raw stream event:", JSON.stringify(rawEvent))
-      if (rawEvent.data === "[DONE]") {
-        break
-      }
-
-      if (!rawEvent.data) {
-        continue
-      }
-
-      const chunk = JSON.parse(rawEvent.data) as ChatCompletionChunk
+    for (const chunk of bufferedChunks) {
       const events = translateChunkToAnthropicEvents(chunk, streamState)
-
       for (const event of events) {
         logger.debug("Translated Anthropic event:", JSON.stringify(event))
         await stream.writeSSE({
@@ -253,39 +301,68 @@ const handleWithResponsesApi = async (
   if (responsesPayload.stream && isAsyncIterable(response)) {
     logger.debug("Streaming response from Copilot (Responses API)")
     return streamSSE(c, async (stream) => {
-      const streamState = createResponsesStreamState()
+      // Buffer all stream events to check for web_search function calls
+      const bufferedEvents: Array<ResponseStreamEvent> = []
+      let hasWebSearchCall = false
+      let completedResult: ResponsesResult | null = null
 
       for await (const chunk of response) {
         const eventName = chunk.event
-        if (eventName === "ping") {
-          await stream.writeSSE({ event: "ping", data: '{"type":"ping"}' })
-          continue
-        }
+        if (eventName === "ping") continue
 
         const data = chunk.data
-        if (!data) {
-          continue
+        if (!data) continue
+
+        const parsed = JSON.parse(data) as ResponseStreamEvent
+        bufferedEvents.push(parsed)
+
+        // Check for web_search function calls
+        if (
+          parsed.type === "response.output_item.done"
+          && "item" in parsed
+          && (parsed.item as { type?: string }).type === "function_call"
+          && (parsed.item as { name?: string }).name === "web_search"
+        ) {
+          hasWebSearchCall = true
         }
 
-        logger.debug("Responses raw stream event:", data)
+        // Capture the completed result for web search resolution
+        if (
+          (parsed.type === "response.completed"
+            || parsed.type === "response.incomplete")
+          && "response" in parsed
+        ) {
+          completedResult = parsed.response as ResponsesResult
+        }
+      }
 
-        const events = translateResponsesStreamEvent(
-          JSON.parse(data) as ResponseStreamEvent,
-          streamState,
+      if (hasWebSearchCall && completedResult) {
+        // Execute web searches and get final response
+        const resolved = await resolveResponsesWebSearchCalls(
+          completedResult,
+          responsesPayload,
+          { vision, initiator: initiatorOverride ?? initiator },
         )
+        const anthropicResponse = translateResponsesResultToAnthropic(resolved)
+        await emitAnthropicResponseAsStream(stream, anthropicResponse)
+        return
+      }
+
+      // No web_search calls — replay buffered events as normal stream
+      const streamState = createResponsesStreamState()
+      for (const parsed of bufferedEvents) {
+        if (parsed.type === "error") continue
+
+        const events = translateResponsesStreamEvent(parsed, streamState)
         for (const event of events) {
           const eventData = JSON.stringify(event)
-          logger.debug("Translated Anthropic event:", eventData)
           await stream.writeSSE({
             event: event.type,
             data: eventData,
           })
         }
 
-        if (streamState.messageCompleted) {
-          logger.debug("Message completed, ending stream")
-          break
-        }
+        if (streamState.messageCompleted) break
       }
 
       if (!streamState.messageCompleted) {
@@ -303,13 +380,19 @@ const handleWithResponsesApi = async (
     })
   }
 
+  // Non-streaming: check for web_search calls
+  const result = response as ResponsesResult
+  const resolved = await resolveResponsesWebSearchCalls(
+    result,
+    responsesPayload,
+    { vision, initiator: initiatorOverride ?? initiator },
+  )
+
   logger.debug(
     "Non-streaming Responses result:",
-    JSON.stringify(response).slice(-400),
+    JSON.stringify(resolved).slice(-400),
   )
-  const anthropicResponse = translateResponsesResultToAnthropic(
-    response as ResponsesResult,
-  )
+  const anthropicResponse = translateResponsesResultToAnthropic(resolved)
   logger.debug(
     "Translated Anthropic response:",
     JSON.stringify(anthropicResponse),
@@ -479,4 +562,395 @@ const mergeToolResult = (
   return toolResults.map((tr, i) =>
     i === lastIndex ? mergeContentWithTexts(tr, textBlocks) : tr,
   )
+}
+
+// --- Web search tool execution helpers ---
+
+/**
+ * Check if a ChatCompletion response contains web_search tool calls.
+ * If so, execute the searches via MCP and re-send to get a final response.
+ */
+const resolveWebSearchCalls = async (
+  response: ChatCompletionResponse,
+  payload: ChatCompletionsPayload,
+  initiatorOverride?: "agent" | "user",
+): Promise<ChatCompletionResponse> => {
+  let current = response
+  let currentPayload = payload
+
+  for (let i = 0; i < MAX_WEB_SEARCH_ITERATIONS; i++) {
+    const webSearchCalls = extractWebSearchCalls(current)
+    if (webSearchCalls.length === 0) {
+      return current
+    }
+
+    logger.info(
+      `Executing ${webSearchCalls.length} web search(es), iteration ${i + 1}`,
+    )
+
+    // Execute all web searches in parallel
+    const results = await Promise.all(
+      webSearchCalls.map(async (tc) => {
+        const args = JSON.parse(tc.function.arguments) as { query?: string }
+        const query = args.query ?? ""
+        logger.debug("Web search query:", query)
+        const result = await executeWebSearch(query)
+        return { callId: tc.id, result }
+      }),
+    )
+
+    // Build new messages: append assistant message with tool_calls + tool results
+    const assistantMessage: Message = {
+      role: "assistant",
+      content: current.choices[0]?.message.content ?? null,
+      tool_calls: current.choices[0]?.message.tool_calls,
+    }
+
+    const toolMessages: Array<Message> = results.map((r) => ({
+      role: "tool" as const,
+      content: r.result,
+      tool_call_id: r.callId,
+    }))
+
+    currentPayload = {
+      ...currentPayload,
+      messages: [...currentPayload.messages, assistantMessage, ...toolMessages],
+      stream: false,
+    }
+
+    current = (await createChatCompletions(currentPayload, {
+      initiator: initiatorOverride,
+    })) as ChatCompletionResponse
+  }
+
+  return current
+}
+
+const extractWebSearchCalls = (
+  response: ChatCompletionResponse,
+): Array<ToolCall> => {
+  const calls: Array<ToolCall> = []
+  for (const choice of response.choices) {
+    if (choice.message.tool_calls) {
+      for (const tc of choice.message.tool_calls) {
+        if (tc.function.name === "web_search") {
+          calls.push(tc)
+        }
+      }
+    }
+  }
+  return calls
+}
+
+/**
+ * Reconstruct a full ChatCompletionResponse from buffered streaming chunks.
+ */
+const reconstructFromChunks = (
+  chunks: Array<ChatCompletionChunk>,
+): ChatCompletionResponse | null => {
+  if (chunks.length === 0) return null
+
+  let id = ""
+  let model = ""
+  let created = 0
+  let content = ""
+  let finishReason: "stop" | "length" | "tool_calls" | "content_filter" =
+    "stop"
+  const toolCallsMap = new Map<
+    number,
+    { id: string; name: string; arguments: string }
+  >()
+  let reasoningText: string | null = null
+  let reasoningOpaque: string | null = null
+  let usage:
+    | {
+        prompt_tokens: number
+        completion_tokens: number
+        total_tokens: number
+        prompt_tokens_details?: { cached_tokens: number }
+      }
+    | undefined
+
+  for (const chunk of chunks) {
+    if (chunk.id) id = chunk.id
+    if (chunk.model) model = chunk.model
+    if (chunk.created) created = chunk.created
+    if (chunk.usage) usage = chunk.usage
+
+    for (const choice of chunk.choices) {
+      if (choice.finish_reason) {
+        finishReason = choice.finish_reason
+      }
+
+      if (choice.delta.content) {
+        content += choice.delta.content
+      }
+
+      if (choice.delta.reasoning_text) {
+        reasoningText = (reasoningText ?? "") + choice.delta.reasoning_text
+      }
+
+      if (choice.delta.reasoning_opaque) {
+        reasoningOpaque = choice.delta.reasoning_opaque
+      }
+
+      if (choice.delta.tool_calls) {
+        for (const tc of choice.delta.tool_calls) {
+          const existing = toolCallsMap.get(tc.index)
+          if (!existing) {
+            toolCallsMap.set(tc.index, {
+              id: tc.id ?? "",
+              name: tc.function?.name ?? "",
+              arguments: tc.function?.arguments ?? "",
+            })
+          } else {
+            if (tc.id) existing.id = tc.id
+            if (tc.function?.name) existing.name = tc.function.name
+            if (tc.function?.arguments) {
+              existing.arguments += tc.function.arguments
+            }
+          }
+        }
+      }
+    }
+  }
+
+  const toolCalls =
+    toolCallsMap.size > 0 ?
+      Array.from(toolCallsMap.values()).map((tc) => ({
+        id: tc.id,
+        type: "function" as const,
+        function: { name: tc.name, arguments: tc.arguments },
+      }))
+    : undefined
+
+  return {
+    id,
+    object: "chat.completion",
+    created,
+    model,
+    choices: [
+      {
+        index: 0,
+        message: {
+          role: "assistant",
+          content: content || null,
+          ...(reasoningText ? { reasoning_text: reasoningText } : {}),
+          ...(reasoningOpaque ? { reasoning_opaque: reasoningOpaque } : {}),
+          ...(toolCalls ? { tool_calls: toolCalls } : {}),
+        },
+        logprobs: null,
+        finish_reason: finishReason,
+      },
+    ],
+    usage,
+  }
+}
+
+/**
+ * Emit a complete AnthropicResponse as a series of SSE stream events.
+ */
+const emitAnthropicResponseAsStream = async (
+  stream: { writeSSE: (data: { event: string; data: string }) => Promise<void> },
+  response: AnthropicResponse,
+): Promise<void> => {
+  // message_start
+  await stream.writeSSE({
+    event: "message_start",
+    data: JSON.stringify({
+      type: "message_start",
+      message: {
+        id: response.id,
+        type: "message",
+        role: "assistant",
+        model: response.model,
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: response.usage,
+      },
+    }),
+  })
+
+  // Content blocks
+  for (let i = 0; i < response.content.length; i++) {
+    const block = response.content[i]
+
+    // content_block_start
+    if (block.type === "text") {
+      await stream.writeSSE({
+        event: "content_block_start",
+        data: JSON.stringify({
+          type: "content_block_start",
+          index: i,
+          content_block: { type: "text", text: "" },
+        }),
+      })
+      // content_block_delta
+      await stream.writeSSE({
+        event: "content_block_delta",
+        data: JSON.stringify({
+          type: "content_block_delta",
+          index: i,
+          delta: { type: "text_delta", text: block.text },
+        }),
+      })
+    } else if (block.type === "thinking") {
+      await stream.writeSSE({
+        event: "content_block_start",
+        data: JSON.stringify({
+          type: "content_block_start",
+          index: i,
+          content_block: { type: "thinking", thinking: "" },
+        }),
+      })
+      await stream.writeSSE({
+        event: "content_block_delta",
+        data: JSON.stringify({
+          type: "content_block_delta",
+          index: i,
+          delta: { type: "thinking_delta", thinking: block.thinking },
+        }),
+      })
+      if (block.signature) {
+        await stream.writeSSE({
+          event: "content_block_delta",
+          data: JSON.stringify({
+            type: "content_block_delta",
+            index: i,
+            delta: { type: "signature_delta", signature: block.signature },
+          }),
+        })
+      }
+    } else if (block.type === "tool_use") {
+      await stream.writeSSE({
+        event: "content_block_start",
+        data: JSON.stringify({
+          type: "content_block_start",
+          index: i,
+          content_block: {
+            type: "tool_use",
+            id: block.id,
+            name: block.name,
+            input: {},
+          },
+        }),
+      })
+      await stream.writeSSE({
+        event: "content_block_delta",
+        data: JSON.stringify({
+          type: "content_block_delta",
+          index: i,
+          delta: {
+            type: "input_json_delta",
+            partial_json: JSON.stringify(block.input),
+          },
+        }),
+      })
+    }
+
+    // content_block_stop
+    await stream.writeSSE({
+      event: "content_block_stop",
+      data: JSON.stringify({
+        type: "content_block_stop",
+        index: i,
+      }),
+    })
+  }
+
+  // message_delta
+  await stream.writeSSE({
+    event: "message_delta",
+    data: JSON.stringify({
+      type: "message_delta",
+      delta: {
+        stop_reason: response.stop_reason,
+        stop_sequence: response.stop_sequence,
+      },
+      usage: { output_tokens: response.usage.output_tokens },
+    }),
+  })
+
+  // message_stop
+  await stream.writeSSE({
+    event: "message_stop",
+    data: JSON.stringify({ type: "message_stop" }),
+  })
+}
+
+/**
+ * Check if a Responses API result contains web_search function calls.
+ * If so, execute searches via MCP and re-send to get a final response.
+ */
+const resolveResponsesWebSearchCalls = async (
+  result: ResponsesResult,
+  payload: ResponsesPayload,
+  requestOptions: { vision: boolean; initiator: "agent" | "user" },
+): Promise<ResponsesResult> => {
+  let current = result
+  let currentPayload = payload
+
+  for (let i = 0; i < MAX_WEB_SEARCH_ITERATIONS; i++) {
+    const webSearchCalls = current.output.filter(
+      (item) => item.type === "function_call" && item.name === "web_search",
+    )
+
+    if (webSearchCalls.length === 0) {
+      return current
+    }
+
+    logger.info(
+      `Executing ${webSearchCalls.length} web search(es) via Responses API, iteration ${i + 1}`,
+    )
+
+    // Execute all web searches in parallel
+    const searchResults = await Promise.all(
+      webSearchCalls.map(async (item) => {
+        if (item.type !== "function_call") return null
+        const args = JSON.parse(item.arguments) as { query?: string }
+        const query = args.query ?? ""
+        logger.debug("Web search query:", query)
+        const searchResult = await executeWebSearch(query)
+        return { callId: item.call_id, result: searchResult }
+      }),
+    )
+
+    // Build new input: original input + all output items + tool results
+    const newInput: Array<ResponseInputItem> = [
+      ...(Array.isArray(currentPayload.input) ? currentPayload.input : []),
+      ...current.output.map((item) => {
+        if (item.type === "function_call") {
+          return {
+            type: "function_call" as const,
+            call_id: item.call_id,
+            name: item.name,
+            arguments: item.arguments,
+            status: "completed" as const,
+          }
+        }
+        return item as ResponseInputItem
+      }),
+      ...searchResults
+        .filter(
+          (r): r is { callId: string; result: string } => r !== null,
+        )
+        .map((r) => ({
+          type: "function_call_output" as const,
+          call_id: r.callId,
+          output: r.result,
+        })),
+    ]
+
+    currentPayload = {
+      ...currentPayload,
+      input: newInput,
+      stream: false,
+    }
+
+    const response = await createResponses(currentPayload, requestOptions)
+    current = response as ResponsesResult
+  }
+
+  return current
 }

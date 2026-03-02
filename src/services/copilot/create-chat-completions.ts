@@ -19,6 +19,10 @@ import {
 const normalizePayload = (payload: ChatCompletionsPayload): void => {
   if (payload.tools) {
     for (const tool of payload.tools) {
+      if (!tool.function.parameters) {
+        tool.function.parameters = { type: "object", properties: {} }
+        continue
+      }
       const params = tool.function.parameters
       if (!params.type) {
         params.type = "object"

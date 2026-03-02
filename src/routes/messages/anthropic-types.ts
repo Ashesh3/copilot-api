@@ -86,9 +86,10 @@ export interface AnthropicAssistantMessage {
 export type AnthropicMessage = AnthropicUserMessage | AnthropicAssistantMessage
 
 export interface AnthropicTool {
+  type?: string
   name: string
   description?: string
-  input_schema: Record<string, unknown>
+  input_schema?: Record<string, unknown>
 }
 
 export interface AnthropicResponse {
