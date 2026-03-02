@@ -5,6 +5,7 @@
 
 import type {
   ChatCompletionsPayload,
+  ContentPart,
   Message,
   Tool,
 } from "~/services/copilot/create-chat-completions"
@@ -12,8 +13,10 @@ import type {
 import type {
   GoogleAIRequest,
   GoogleContent,
+  GoogleFileDataPart,
   GoogleFunctionCallPart,
   GoogleFunctionResponsePart,
+  GoogleInlineDataPart,
   GooglePart,
   GoogleTextPart,
 } from "./google-ai-types"
@@ -36,6 +39,91 @@ function isFunctionResponsePart(
   part: GooglePart,
 ): part is GoogleFunctionResponsePart {
   return "functionResponse" in part
+}
+
+function isInlineDataPart(part: GooglePart): part is GoogleInlineDataPart {
+  return "inlineData" in part
+}
+
+function isFileDataPart(part: GooglePart): part is GoogleFileDataPart {
+  return "fileData" in part
+}
+
+function isImageMimeType(mimeType: string): boolean {
+  return mimeType.toLowerCase().startsWith("image/")
+}
+
+function isSupportedImageUri(uri: string): boolean {
+  return uri.startsWith("https://") || uri.startsWith("http://") || uri.startsWith("data:")
+}
+
+function flattenContentParts(
+  contentParts: Array<ContentPart>,
+): string | Array<ContentPart> | null {
+  if (contentParts.length === 0) {
+    return null
+  }
+
+  if (contentParts.every((part) => part.type === "text")) {
+    return (contentParts as Array<{ type: "text"; text: string }>)
+      .map((part) => part.text)
+      .join("")
+  }
+
+  return contentParts
+}
+
+function translateContentParts(
+  parts: Array<GooglePart>,
+  options?: { includeThoughtText?: boolean },
+): string | Array<ContentPart> | null {
+  const includeThoughtText = options?.includeThoughtText ?? false
+  const contentParts: Array<ContentPart> = []
+
+  for (const part of parts) {
+    if (isTextPart(part)) {
+      if (part.thought && !includeThoughtText) {
+        continue
+      }
+      contentParts.push({ type: "text", text: part.text })
+      continue
+    }
+
+    if (isInlineDataPart(part)) {
+      if (isImageMimeType(part.inlineData.mimeType)) {
+        contentParts.push({
+          type: "image_url",
+          image_url: {
+            url: `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`,
+          },
+        })
+      } else {
+        contentParts.push({
+          type: "text",
+          text: `[inlineData:${part.inlineData.mimeType}]`,
+        })
+      }
+      continue
+    }
+
+    if (isFileDataPart(part)) {
+      const uri = part.fileData.fileUri
+      if (isImageMimeType(part.fileData.mimeType) && isSupportedImageUri(uri)) {
+        contentParts.push({
+          type: "image_url",
+          image_url: { url: uri },
+        })
+      } else {
+        contentParts.push({
+          type: "text",
+          text: `[fileData:${part.fileData.mimeType}] ${uri}`,
+        })
+      }
+      continue
+    }
+  }
+
+  return flattenContentParts(contentParts)
 }
 
 /**
@@ -63,27 +151,16 @@ function translateContents(contents: Array<GoogleContent>): Array<Message> {
 
       // Emit regular user message if there are non-tool parts
       if (otherParts.length > 0) {
-        const textContent = otherParts
-          .filter((p) => isTextPart(p))
-          .map((p) => p.text)
-          .join("")
-
-        if (textContent) {
-          messages.push({
-            role: "user",
-            content: textContent,
-          })
+        const content = translateContentParts(otherParts)
+        if (content) {
+          messages.push({ role: "user", content })
         }
       }
     } else {
       // Model messages may contain text and/or function calls
-      const textParts = content.parts.filter((p) => isTextPart(p))
       const functionCalls = content.parts.filter((p) => isFunctionCallPart(p))
 
-      const textContent = textParts
-        .filter((p) => !p.thought) // Skip thinking/reasoning text
-        .map((p) => p.text)
-        .join("")
+      const modelContent = translateContentParts(content.parts)
 
       const toolCalls =
         functionCalls.length > 0 ?
@@ -99,7 +176,7 @@ function translateContents(contents: Array<GoogleContent>): Array<Message> {
 
       messages.push({
         role: "assistant",
-        content: textContent || null,
+        content: modelContent,
         tool_calls: toolCalls,
       })
     }
