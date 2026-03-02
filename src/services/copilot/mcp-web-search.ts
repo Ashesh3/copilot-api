@@ -38,14 +38,17 @@ interface JsonRpcResponse {
 const MCP_PATH = "/mcp/readonly"
 
 const mcpHeaders = (sessionId?: string | null): Record<string, string> => {
-  if (!state.copilotToken) {
-    throw new Error("Copilot token is not set. Cannot call MCP endpoint.")
+  if (!state.githubToken) {
+    throw new Error("GitHub token is not set. Cannot call MCP endpoint.")
   }
 
   const headers: Record<string, string> = {
     "content-type": "application/json",
     accept: "application/json",
-    Authorization: `Bearer ${state.copilotToken}`,
+    Authorization: `Bearer ${state.githubToken}`,
+    "X-MCP-Toolsets": "web_search",
+    "X-MCP-Host": "github-coding-agent",
+    "Copilot-Integration-Id": "vscode-chat",
   }
 
   if (sessionId) {
