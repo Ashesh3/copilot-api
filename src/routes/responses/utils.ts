@@ -12,6 +12,39 @@ export const getResponsesRequestOptions = (
   return { vision, initiator }
 }
 
+/**
+ * Expand compaction items back into regular conversation messages.
+ * Codex CLI sends back compacted content as { type: "compaction", encrypted_content: base64(summary) }.
+ * The upstream API cannot decrypt our fake encrypted_content, so we decode it and
+ * replace the compaction item with an assistant message containing the summary.
+ */
+export const expandCompactionItems = (payload: ResponsesPayload): void => {
+  if (!Array.isArray(payload.input)) return
+
+  payload.input = payload.input.map((item) => {
+    const record = item as Record<string, unknown>
+    if (
+      record.type !== "compaction"
+      || typeof record.encrypted_content !== "string"
+    ) {
+      return item
+    }
+
+    let summary: string
+    try {
+      summary = Buffer.from(record.encrypted_content, "base64").toString("utf8")
+    } catch {
+      summary = record.encrypted_content
+    }
+
+    return {
+      type: "message",
+      role: "assistant",
+      content: `[Previous conversation summary]\n${summary}`,
+    } as ResponseInputItem
+  })
+}
+
 export const hasAgentInitiator = (payload: ResponsesPayload): boolean => {
   // Refactor `isAgentCall` logic to check only the last message in the history rather than any message. This prevents valid user messages from being incorrectly flagged as agent calls due to previous assistant history, ensuring proper credit consumption for multi-turn conversations.
   const lastItem = getPayloadItems(payload).at(-1)

@@ -1,3 +1,4 @@
+/* eslint-disable max-lines, max-lines-per-function, complexity */
 import type { Context } from "hono"
 
 import consola from "consola"
@@ -34,7 +35,7 @@ import {
   resolveResponsesWebSearchCalls,
 } from "../messages/web-search-helpers"
 import { createStreamIdTracker, fixStreamIds } from "./stream-id-sync"
-import { getResponsesRequestOptions } from "./utils"
+import { expandCompactionItems, getResponsesRequestOptions } from "./utils"
 
 const logger = createHandlerLogger("responses-handler")
 
@@ -120,6 +121,9 @@ export const handleResponses = async (c: Context) => {
 
   // Convert web_search tool to a function tool for MCP-based execution
   convertWebSearchTool(payload)
+
+  // Expand compaction items back into regular messages
+  expandCompactionItems(payload)
 
   const selectedModel = state.models?.data.find(
     (model) => model.id === payload.model,
