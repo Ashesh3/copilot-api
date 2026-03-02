@@ -44,7 +44,7 @@ const mcpHeaders = (sessionId?: string | null): Record<string, string> => {
 
   const headers: Record<string, string> = {
     "content-type": "application/json",
-    accept: "application/json",
+    accept: "application/json, text/event-stream",
     Authorization: `Bearer ${state.githubToken}`,
     "X-MCP-Toolsets": "web_search",
     "X-MCP-Host": "github-coding-agent",
