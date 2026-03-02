@@ -19,7 +19,6 @@ import {
 import {
   createResponses,
   type FunctionTool,
-  type ResponseInputItem,
   type ResponseOutputFunctionCall,
   type ResponseOutputItem,
   type ResponseOutputMessage,
@@ -28,11 +27,12 @@ import {
   type ResponsesResult,
   type ResponseUsage,
 } from "~/services/copilot/create-responses"
-import {
-  executeWebSearch,
-  WEB_SEARCH_RESPONSES_TOOL,
-} from "~/services/copilot/mcp-web-search"
+import { WEB_SEARCH_RESPONSES_TOOL } from "~/services/copilot/mcp-web-search"
 
+import {
+  emitResponsesResultAsStream,
+  resolveResponsesWebSearchCalls,
+} from "../messages/web-search-helpers"
 import { createStreamIdTracker, fixStreamIds } from "./stream-id-sync"
 import { getResponsesRequestOptions } from "./utils"
 
@@ -171,7 +171,7 @@ export const handleResponses = async (c: Context) => {
             }
             if (
               parsed.item?.type === "function_call"
-              && parsed.item?.name === "web_search"
+              && parsed.item.name === "web_search"
             ) {
               hasWebSearchCall = true
             }
@@ -201,7 +201,7 @@ export const handleResponses = async (c: Context) => {
 
       if (hasWebSearchCall && completedResult) {
         // Execute web searches, get final non-streaming response
-        const resolved = await resolveResponsesWebSearch(
+        const resolved = await resolveResponsesWebSearchCalls(
           completedResult,
           payload,
           { vision, initiator },
@@ -231,7 +231,7 @@ export const handleResponses = async (c: Context) => {
 
   // Non-streaming: check for web_search calls
   const result = response as ResponsesResult
-  const resolved = await resolveResponsesWebSearch(result, payload, {
+  const resolved = await resolveResponsesWebSearchCalls(result, payload, {
     vision,
     initiator,
   })
@@ -290,194 +290,6 @@ const convertWebSearchTool = (payload: ResponsesPayload): void => {
       return WEB_SEARCH_RESPONSES_TOOL
     }
     return t
-  })
-}
-
-const MAX_WEB_SEARCH_ITERATIONS = 3
-
-/**
- * Check if a Responses result contains web_search function calls.
- * If so, execute searches via MCP and re-send to get a final response.
- */
-const resolveResponsesWebSearch = async (
-  result: ResponsesResult,
-  payload: ResponsesPayload,
-  requestOptions: { vision: boolean; initiator: "agent" | "user" },
-): Promise<ResponsesResult> => {
-  let current = result
-  let currentPayload = payload
-
-  for (let i = 0; i < MAX_WEB_SEARCH_ITERATIONS; i++) {
-    const webSearchCalls = current.output.filter(
-      (item) => item.type === "function_call" && item.name === "web_search",
-    )
-
-    if (webSearchCalls.length === 0) {
-      return current
-    }
-
-    logger.info(
-      `Executing ${webSearchCalls.length} web search(es) in Responses handler, iteration ${i + 1}`,
-    )
-
-    const searchResults = await Promise.all(
-      webSearchCalls.map(async (item) => {
-        if (item.type !== "function_call") return null
-        const args = JSON.parse(item.arguments) as { query?: string }
-        const query = args.query ?? ""
-        logger.debug("Web search query:", query)
-        const searchResult = await executeWebSearch(query)
-        return { callId: item.call_id, result: searchResult }
-      }),
-    )
-
-    const newInput = buildResolvedInput(currentPayload, current, searchResults)
-
-    currentPayload = {
-      ...currentPayload,
-      input: newInput,
-      stream: false,
-    }
-
-    const response = await createResponses(currentPayload, requestOptions)
-    current = response as ResponsesResult
-  }
-
-  return current
-}
-
-const buildResolvedInput = (
-  payload: ResponsesPayload,
-  result: ResponsesResult,
-  searchResults?: Array<{ callId: string; result: string } | null>,
-): Array<ResponseInputItem> => {
-  const existingInput: Array<ResponseInputItem> =
-    Array.isArray(payload.input) ? payload.input : []
-
-  const outputItems: Array<ResponseInputItem> = result.output.map((item) => {
-    if (item.type === "function_call") {
-      return {
-        type: "function_call" as const,
-        call_id: item.call_id,
-        name: item.name,
-        arguments: item.arguments,
-        status: "completed" as const,
-      }
-    }
-    return item as ResponseInputItem
-  })
-
-  const toolOutputs: Array<ResponseInputItem> = (searchResults ?? [])
-    .filter((r): r is { callId: string; result: string } => r !== null)
-    .map((r) => ({
-      type: "function_call_output" as const,
-      call_id: r.callId,
-      output: r.result,
-    }))
-
-  return [...existingInput, ...outputItems, ...toolOutputs]
-}
-
-/**
- * Emit a ResponsesResult as stream events for a streaming response.
- * Emits: response.created → output items → response.completed
- */
-const emitResponsesResultAsStream = async (
-  stream: { writeSSE: (data: { event?: string; data: string }) => Promise<void> },
-  result: ResponsesResult,
-): Promise<void> => {
-  let seqNum = 0
-
-  // response.created
-  await stream.writeSSE({
-    event: "response.created",
-    data: JSON.stringify({
-      type: "response.created",
-      response: { ...result, output: [], status: "in_progress" },
-      sequence_number: seqNum++,
-    }),
-  })
-
-  // Emit output items
-  for (let i = 0; i < result.output.length; i++) {
-    const item = result.output[i]
-
-    await stream.writeSSE({
-      event: "response.output_item.added",
-      data: JSON.stringify({
-        type: "response.output_item.added",
-        item: { ...item, status: "in_progress" },
-        output_index: i,
-        sequence_number: seqNum++,
-      }),
-    })
-
-    // Emit content deltas for message items
-    if (item.type === "message" && item.content) {
-      for (let ci = 0; ci < item.content.length; ci++) {
-        const block = item.content[ci]
-        if ("type" in block && (block as { type?: string }).type === "output_text") {
-          const text = (block as ResponseOutputText).text
-          await stream.writeSSE({
-            event: "response.output_text.delta",
-            data: JSON.stringify({
-              type: "response.output_text.delta",
-              item_id: item.id,
-              output_index: i,
-              content_index: ci,
-              delta: text,
-              sequence_number: seqNum++,
-            }),
-          })
-          await stream.writeSSE({
-            event: "response.output_text.done",
-            data: JSON.stringify({
-              type: "response.output_text.done",
-              item_id: item.id,
-              output_index: i,
-              content_index: ci,
-              text,
-              sequence_number: seqNum++,
-            }),
-          })
-        }
-      }
-    }
-
-    // Emit function call arguments for function_call items
-    if (item.type === "function_call") {
-      await stream.writeSSE({
-        event: "response.function_call_arguments.done",
-        data: JSON.stringify({
-          type: "response.function_call_arguments.done",
-          item_id: item.id ?? `fc_${item.call_id}`,
-          output_index: i,
-          arguments: item.arguments,
-          name: item.name,
-          sequence_number: seqNum++,
-        }),
-      })
-    }
-
-    await stream.writeSSE({
-      event: "response.output_item.done",
-      data: JSON.stringify({
-        type: "response.output_item.done",
-        item,
-        output_index: i,
-        sequence_number: seqNum++,
-      }),
-    })
-  }
-
-  // response.completed
-  await stream.writeSSE({
-    event: "response.completed",
-    data: JSON.stringify({
-      type: "response.completed",
-      response: result,
-      sequence_number: seqNum++,
-    }),
   })
 }
 

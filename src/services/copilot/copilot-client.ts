@@ -8,7 +8,7 @@ import { sleep } from "~/lib/utils"
 // --- Constants ---
 
 export const API_VERSION = "2025-05-01"
-export const INTEGRATION_ID = "copilot-developer-cli"
+export const INTEGRATION_ID = "vscode-chat"
 export const MAX_RETRIES = 5
 export const BASE_DELAY_SECONDS = 5
 export const BACKOFF_FACTOR = 2
@@ -43,6 +43,7 @@ export function copilotHeaders(
     accept: "application/json",
     Authorization: `Bearer ${state.copilotToken}`,
     "Copilot-Integration-Id": INTEGRATION_ID,
+    "editor-version": `vscode/${state.vsCodeVersion ?? "1.104.3"}`,
     "Openai-Intent": "conversation-agent",
     "X-GitHub-Api-Version": API_VERSION,
     "X-Initiator": options?.initiator ?? "user",

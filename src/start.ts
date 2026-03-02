@@ -17,6 +17,12 @@ import { state } from "./lib/state"
 import { setupCopilotToken, setupGitHubToken } from "./lib/token"
 import { cacheModels } from "./lib/utils"
 import { server } from "./server"
+import { getVSCodeVersion } from "./services/get-vscode-version"
+
+async function cacheVSCodeVersion(): Promise<void> {
+  state.vsCodeVersion = await getVSCodeVersion()
+  consola.info(`Editor version: vscode/${state.vsCodeVersion}`)
+}
 
 interface RunServerOptions {
   port: number
@@ -97,6 +103,7 @@ export async function runServer(options: RunServerOptions): Promise<void> {
   }
 
   await setupCopilotToken()
+  await cacheVSCodeVersion()
   await cacheModels()
 
   const allModelIds = getAllModelIds()

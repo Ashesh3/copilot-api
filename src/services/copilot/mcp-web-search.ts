@@ -7,6 +7,7 @@ import { copilotBaseUrl } from "~/services/copilot/copilot-client"
 // --- MCP Session State ---
 
 let mcpSessionId: string | null = null
+let mcpSessionPromise: Promise<string> | null = null
 
 // --- JSON-RPC Helpers ---
 
@@ -54,11 +55,14 @@ const mcpHeaders = (sessionId?: string | null): Record<string, string> => {
   return headers
 }
 
-const mcpFetch = async (body: JsonRpcRequest): Promise<Response> => {
+const mcpFetch = async (
+  body: JsonRpcRequest,
+  sessionId: string | null,
+): Promise<Response> => {
   const url = `${copilotBaseUrl()}${MCP_PATH}`
   return fetch(url, {
     method: "POST",
-    headers: mcpHeaders(mcpSessionId),
+    headers: mcpHeaders(sessionId),
     body: JSON.stringify(body),
   })
 }
@@ -80,7 +84,7 @@ const initializeSession = async (): Promise<string> => {
     id: randomUUID(),
   }
 
-  const response = await mcpFetch(request)
+  const response = await mcpFetch(request, null)
 
   if (!response.ok) {
     const errorText = await response.text()
@@ -99,9 +103,41 @@ const initializeSession = async (): Promise<string> => {
   return sessionId
 }
 
-const ensureSession = async (): Promise<void> => {
-  if (!mcpSessionId) {
-    mcpSessionId = await initializeSession()
+/**
+ * Ensure an MCP session exists. Serializes concurrent callers so only one
+ * initialization request is made, and all callers receive the same session ID.
+ */
+const ensureSession = async (): Promise<string> => {
+  if (mcpSessionId) {
+    return mcpSessionId
+  }
+
+  if (mcpSessionPromise) {
+    return mcpSessionPromise
+  }
+
+  mcpSessionPromise = initializeSession()
+    .then((id) => {
+      mcpSessionId = id
+      mcpSessionPromise = null
+      return id
+    })
+    .catch((error) => {
+      mcpSessionPromise = null
+      throw error
+    })
+
+  return mcpSessionPromise
+}
+
+/**
+ * Invalidate the current MCP session, but only if the caller's session matches
+ * the current global one. This prevents a stale caller from resetting a
+ * freshly-initialized session obtained by another concurrent call.
+ */
+const invalidateSession = (callerSessionId: string): void => {
+  if (mcpSessionId === callerSessionId) {
+    mcpSessionId = null
   }
 }
 
@@ -109,7 +145,8 @@ const ensureSession = async (): Promise<void> => {
 
 export const executeWebSearch = async (query: string): Promise<string> => {
   try {
-    await ensureSession()
+    // Capture session ID locally so concurrent calls don't interfere
+    const sessionId = await ensureSession()
 
     const request: JsonRpcRequest = {
       jsonrpc: "2.0",
@@ -121,16 +158,16 @@ export const executeWebSearch = async (query: string): Promise<string> => {
       id: randomUUID(),
     }
 
-    const response = await mcpFetch(request)
+    const response = await mcpFetch(request, sessionId)
 
     if (!response.ok) {
-      // Session may have expired — reset and retry once
+      // Session may have expired — invalidate and retry once
       if (response.status === 401 || response.status === 403) {
         consola.warn("MCP session expired, re-initializing")
-        mcpSessionId = null
-        await ensureSession()
+        invalidateSession(sessionId)
+        const newSessionId = await ensureSession()
 
-        const retryResponse = await mcpFetch(request)
+        const retryResponse = await mcpFetch(request, newSessionId)
         if (!retryResponse.ok) {
           const errorText = await retryResponse.text()
           consola.error("MCP web_search retry failed:", errorText.slice(0, 200))
@@ -145,12 +182,14 @@ export const executeWebSearch = async (query: string): Promise<string> => {
     }
 
     return parseSearchResponse(await response.json())
-  } catch (error) {
+  } catch (error: unknown) {
     const message =
       error instanceof Error ? error.message : "Unknown MCP error"
     consola.error("MCP web search error:", message)
     // Reset session on error so next attempt re-initializes
+    // Use a sentinel to invalidate — safe since we don't have the caller's ID here
     mcpSessionId = null
+    mcpSessionPromise = null
     return `Web search failed: ${message}`
   }
 }

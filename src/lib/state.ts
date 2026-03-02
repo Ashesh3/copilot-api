@@ -9,6 +9,7 @@ export interface State {
   accountType: string
   models?: ModelsResponse
   sessionId: string
+  vsCodeVersion?: string
 
   manualApprove: boolean
   rateLimitWait: boolean
