@@ -12,6 +12,7 @@ export const INTEGRATION_ID = "copilot-developer-cli"
 export const MAX_RETRIES = 5
 export const BASE_DELAY_SECONDS = 5
 export const BACKOFF_FACTOR = 2
+export const INITIAL_RETRY_BACKOFF_EXTRA_SECONDS = 1
 export const MAX_DELAY_SECONDS = 180
 export const RETRYABLE_STATUSES = new Set([429, 500, 502, 503])
 
@@ -153,19 +154,42 @@ function toHeaderRecord(
 
 // --- Retry Delay Calculation ---
 
-function calculateRetryDelay(
-  attempt: number,
+function parseRetryAfterSeconds(
   retryAfterHeader: string | null,
-): number {
-  const exponentialDelay = BASE_DELAY_SECONDS * BACKOFF_FACTOR ** attempt
+): number | null {
+  if (!retryAfterHeader) return null
 
-  if (retryAfterHeader) {
-    const parsed = Number(retryAfterHeader)
-    const delay = Number.isNaN(parsed) ? exponentialDelay : parsed
-    return Math.min(delay, MAX_DELAY_SECONDS)
+  const parsedNumber = Number(retryAfterHeader)
+  if (!Number.isNaN(parsedNumber)) {
+    return Math.max(0, parsedNumber)
   }
 
+  const parsedDate = Date.parse(retryAfterHeader)
+  if (Number.isNaN(parsedDate)) {
+    return null
+  }
+
+  const seconds = Math.ceil((parsedDate - Date.now()) / 1000)
+  return Math.max(0, seconds)
+}
+
+function calculateHttpRetryDelay(
+  retryAfterHeader: string | null,
+  retryBackoffExtraSeconds: number,
+): number {
+  const retryAfterSeconds = parseRetryAfterSeconds(retryAfterHeader)
+  const baseDelay = retryAfterSeconds ?? BASE_DELAY_SECONDS
+  return Math.min(baseDelay + retryBackoffExtraSeconds, MAX_DELAY_SECONDS)
+}
+
+function calculateNetworkRetryDelay(attempt: number): number {
+  const exponentialDelay = BASE_DELAY_SECONDS * BACKOFF_FACTOR ** attempt
   return Math.min(exponentialDelay, MAX_DELAY_SECONDS)
+}
+
+function applyRetryJitter(delaySeconds: number): number {
+  const jitterMultiplier = 0.8 + Math.random() * 0.4
+  return Math.min(delaySeconds * jitterMultiplier, MAX_DELAY_SECONDS)
 }
 
 // --- Fetch with Retry ---
@@ -176,6 +200,7 @@ export async function copilotFetch(
 ): Promise<Response> {
   const url = `${copilotBaseUrl()}${path}`
   const maxAttempts = MAX_RETRIES + 1
+  let retryBackoffExtraSeconds = INITIAL_RETRY_BACKOFF_EXTRA_SECONDS
 
   let lastError: Error | undefined
   let lastResponse: Response | undefined
@@ -203,18 +228,24 @@ export async function copilotFetch(
         && attempt < maxAttempts - 1
       ) {
         lastResponse = response
-        const delaySeconds = calculateRetryDelay(
-          attempt,
+        const rawDelaySeconds = calculateHttpRetryDelay(
           response.headers.get("retry-after"),
+          retryBackoffExtraSeconds,
         )
+        retryBackoffExtraSeconds *= BACKOFF_FACTOR
+        const delaySeconds = applyRetryJitter(rawDelaySeconds)
         consola.warn(
-          `HTTP ${response.status} on ${path} (attempt ${attempt + 1}/${maxAttempts}), retrying in ${delaySeconds}s`,
+          `HTTP ${response.status} on ${path} (attempt ${attempt + 1}/${maxAttempts}), retrying in ${delaySeconds.toFixed(1)}s`,
         )
         Sentry.addBreadcrumb({
           category: "copilot",
           message: `HTTP ${response.status} on ${path} (attempt ${attempt + 1}/${maxAttempts})`,
           level: "warning",
-          data: { status: response.status, delay: delaySeconds },
+          data: {
+            status: response.status,
+            delay: delaySeconds,
+            rawDelay: rawDelaySeconds,
+          },
         })
         await sleep(delaySeconds * 1000)
         continue
@@ -228,7 +259,7 @@ export async function copilotFetch(
         throw error
       }
 
-      const delaySeconds = calculateRetryDelay(attempt, null)
+      const delaySeconds = calculateNetworkRetryDelay(attempt)
       consola.warn(
         `Fetch failed on ${path} (attempt ${attempt + 1}/${maxAttempts}), retrying in ${delaySeconds}s:`,
         lastError.message,
@@ -299,7 +330,14 @@ export function detectInitiator(
 }
 
 export function addPromptCaching(
-  messages: Array<{ role: string }>,
+  messages: Array<{
+    role: string
+    content?: string | Array<unknown> | null
+    tool_calls?: Array<unknown>
+    reasoning_text?: string | null
+    reasoning_opaque?: string | null
+    encrypted_content?: string | null
+  }>,
   tools?: Array<object>,
 ): void {
   // Add cache control to last system message
@@ -312,6 +350,19 @@ export function addPromptCaching(
     }
   }
 
+  // CAPI caching is most effective when the checkpoint is on the last non-user turn.
+  // Avoid pure reasoning-only assistant turns to prevent Anthropic validation issues.
+  const lastNonUserIndex = messages.findLastIndex(
+    (message) => message.role !== "user" && !isReasoningOnlyMessage(message),
+  )
+  if (lastNonUserIndex !== -1) {
+    ;(
+      messages[lastNonUserIndex] as Record<string, unknown>
+    ).copilot_cache_control = {
+      type: "ephemeral",
+    }
+  }
+
   // Add cache control to last tool definition
   if (tools && tools.length > 0) {
     const lastTool = tools.at(-1)
@@ -321,4 +372,32 @@ export function addPromptCaching(
       }
     }
   }
+}
+
+function isReasoningOnlyMessage(message: {
+  role: string
+  content?: string | Array<unknown> | null
+  tool_calls?: Array<unknown>
+  reasoning_text?: string | null
+  reasoning_opaque?: string | null
+  encrypted_content?: string | null
+}): boolean {
+  if (message.role !== "assistant") return false
+
+  const hasReasoning = Boolean(
+    message.reasoning_text
+      || message.reasoning_opaque
+      || message.encrypted_content,
+  )
+  if (!hasReasoning) return false
+
+  const hasContent =
+    typeof message.content === "string" ?
+      message.content.trim().length > 0
+    : Array.isArray(message.content) && message.content.length > 0
+
+  const hasToolCalls =
+    Array.isArray(message.tool_calls) && message.tool_calls.length > 0
+
+  return !hasContent && !hasToolCalls
 }

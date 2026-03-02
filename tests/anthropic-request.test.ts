@@ -136,6 +136,7 @@ describe("Anthropic to OpenAI translation logic", () => {
             {
               type: "thinking",
               thinking: "Let me think about this simple math problem...",
+              signature: "sig-123",
             },
             { type: "text", text: "2+2 equals 4." },
           ],
@@ -146,14 +147,15 @@ describe("Anthropic to OpenAI translation logic", () => {
     const openAIPayload = translateToOpenAI(anthropicPayload)
     expect(isValidChatCompletionRequest(openAIPayload)).toBe(true)
 
-    // Check that thinking content is combined with text content
+    // Check that thinking content is mapped to reasoning fields
     const assistantMessage = openAIPayload.messages.find(
       (m) => m.role === "assistant",
     )
-    expect(assistantMessage?.content).toContain(
+    expect(assistantMessage?.reasoning_text).toContain(
       "Let me think about this simple math problem...",
     )
-    expect(assistantMessage?.content).toContain("2+2 equals 4.")
+    expect(assistantMessage?.reasoning_opaque).toBe("sig-123")
+    expect(assistantMessage?.content).toBe("2+2 equals 4.")
   })
 
   test("should handle thinking blocks with tool calls", () => {
@@ -184,16 +186,14 @@ describe("Anthropic to OpenAI translation logic", () => {
     const openAIPayload = translateToOpenAI(anthropicPayload)
     expect(isValidChatCompletionRequest(openAIPayload)).toBe(true)
 
-    // Check that thinking content is included in the message content
+    // Check that thinking content is mapped to reasoning fields
     const assistantMessage = openAIPayload.messages.find(
       (m) => m.role === "assistant",
     )
-    expect(assistantMessage?.content).toContain(
+    expect(assistantMessage?.reasoning_text).toContain(
       "I need to call the weather API",
     )
-    expect(assistantMessage?.content).toContain(
-      "I'll check the weather for you.",
-    )
+    expect(assistantMessage?.content).toBe("I'll check the weather for you.")
     expect(assistantMessage?.tool_calls).toHaveLength(1)
     expect(assistantMessage?.tool_calls?.[0].function.name).toBe("get_weather")
   })

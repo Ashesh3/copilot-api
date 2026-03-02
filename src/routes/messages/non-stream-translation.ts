@@ -149,17 +149,25 @@ function handleAssistantMessage(
     (block): block is AnthropicThinkingBlock => block.type === "thinking",
   )
 
-  // Combine text and thinking blocks, as OpenAI doesn't have separate thinking blocks
-  const allTextContent = [
-    ...textBlocks.map((b) => b.text),
-    ...thinkingBlocks.map((b) => b.thinking),
-  ].join("\n\n")
+  const textContent = textBlocks.map((block) => block.text).join("\n\n")
+  const reasoningText = thinkingBlocks
+    .map((block) => block.thinking)
+    .filter(
+      (thinking) => thinking.trim().length > 0 && thinking !== "Thinking...",
+    )
+    .join("\n\n")
+  const reasoningOpaque = thinkingBlocks
+    .map((block) => block.signature)
+    .find((signature) => isValidReasoningSignature(signature))
 
-  return toolUseBlocks.length > 0 ?
-      [
+  return [
+    {
+      role: "assistant",
+      content: textContent || null,
+      ...(reasoningText ? { reasoning_text: reasoningText } : {}),
+      ...(reasoningOpaque ? { reasoning_opaque: reasoningOpaque } : {}),
+      ...(toolUseBlocks.length > 0 ?
         {
-          role: "assistant",
-          content: allTextContent || null,
           tool_calls: toolUseBlocks.map((toolUse) => ({
             id: toolUse.id,
             type: "function",
@@ -168,14 +176,16 @@ function handleAssistantMessage(
               arguments: JSON.stringify(toolUse.input),
             },
           })),
-        },
-      ]
-    : [
-        {
-          role: "assistant",
-          content: mapContent(message.content),
-        },
-      ]
+        }
+      : {}),
+    },
+  ]
+}
+
+function isValidReasoningSignature(
+  signature: string | undefined,
+): signature is string {
+  return Boolean(signature && signature.length > 0 && !signature.includes("@"))
 }
 
 function mapContent(

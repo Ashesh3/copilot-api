@@ -310,6 +310,9 @@ export interface Tool {
 export interface Message {
   role: "user" | "assistant" | "system" | "tool" | "developer"
   content: string | Array<ContentPart> | null
+  reasoning_text?: string | null
+  reasoning_opaque?: string | null
+  encrypted_content?: string | null
 
   name?: string
   tool_calls?: Array<ToolCall>
