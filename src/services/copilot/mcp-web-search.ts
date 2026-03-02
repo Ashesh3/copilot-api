@@ -70,6 +70,38 @@ const mcpFetch = async (
   })
 }
 
+/**
+ * Parse response body as JSON, handling both direct JSON and SSE (text/event-stream)
+ * responses. MCP Streamable HTTP transport may return either format.
+ */
+const parseResponseBody = async (response: Response): Promise<unknown> => {
+  const contentType = response.headers.get("content-type") ?? ""
+
+  if (contentType.includes("text/event-stream")) {
+    // Parse SSE: extract JSON-RPC messages from `data:` lines
+    const text = await response.text()
+    const lines = text.split("\n")
+
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed.startsWith("data:")) continue
+
+      const data = trimmed.slice(5).trim()
+      if (!data || data === "[DONE]") continue
+
+      try {
+        return JSON.parse(data)
+      } catch {
+        // Try next data line
+      }
+    }
+
+    throw new Error("No valid JSON-RPC message found in SSE response")
+  }
+
+  return response.json()
+}
+
 // --- MCP Session Initialization ---
 
 const initializeSession = async (): Promise<string> => {
@@ -98,6 +130,10 @@ const initializeSession = async (): Promise<string> => {
 
   // Extract session ID from response header
   const sessionId = response.headers.get("Mcp-Session-Id")
+
+  // Consume the response body to close the connection
+  await parseResponseBody(response).catch(() => {})
+
   if (!sessionId) {
     throw new Error("MCP initialize response missing Mcp-Session-Id header")
   }
@@ -176,7 +212,7 @@ export const executeWebSearch = async (query: string): Promise<string> => {
           consola.error("MCP web_search retry failed:", errorText.slice(0, 200))
           return `Web search failed: ${retryResponse.status}`
         }
-        return parseSearchResponse(await retryResponse.json())
+        return parseSearchResponse(await parseResponseBody(retryResponse))
       }
 
       const errorText = await response.text()
@@ -184,7 +220,7 @@ export const executeWebSearch = async (query: string): Promise<string> => {
       return `Web search failed: ${response.status}`
     }
 
-    return parseSearchResponse(await response.json())
+    return parseSearchResponse(await parseResponseBody(response))
   } catch (error: unknown) {
     const message =
       error instanceof Error ? error.message : "Unknown MCP error"
