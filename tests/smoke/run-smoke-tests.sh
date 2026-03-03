@@ -80,14 +80,14 @@ if command -v codex &>/dev/null; then
   export OPENAI_API_KEY="dummy"
 
   run_test "codex:text-generation" '
-    output=$(codex -q "Reply with exactly: SMOKE_TEST_OK" 2>&1)
+    output=$(codex exec "Reply with exactly: SMOKE_TEST_OK" 2>&1)
     echo "$output"
     echo "$output" | grep -q "SMOKE_TEST_OK"
   '
 
   cleanup_smoke_file
   run_test "codex:tool-calling" '
-    output=$(codex -q --full-auto "Create a file called smoke.txt with the content: hello" 2>&1)
+    output=$(codex exec --full-auto "Create a file called smoke.txt with the content: hello" 2>&1)
     echo "$output"
     test -f smoke.txt
   '
@@ -107,7 +107,7 @@ echo "==============================="
 
 if command -v gemini &>/dev/null; then
   export GEMINI_API_KEY="dummy"
-  export GEMINI_API_ENDPOINT="$SERVER_URL"
+  export GOOGLE_GEMINI_BASE_URL="$SERVER_URL"
 
   run_test "gemini:text-generation" '
     output=$(gemini -p "Reply with exactly: SMOKE_TEST_OK" 2>&1)

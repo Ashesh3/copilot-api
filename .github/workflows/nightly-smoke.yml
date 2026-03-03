@@ -21,10 +21,6 @@ jobs:
         with:
           node-version: "22"
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
       - name: Install dependencies & build
         run: bun install && bun run build
 
@@ -32,8 +28,17 @@ jobs:
         run: |
           bun run dist/main.js start -g "$GH_TOKEN" --host 0.0.0.0 &
           echo "Waiting for server..."
-          curl --retry 15 --retry-delay 3 --retry-all-errors -sf http://localhost:4141/ > /dev/null
-          echo "Server is up"
+          # Wait for server to be ready and models to load
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:4141/v1/models > /dev/null 2>&1; then
+              echo "Server is up (models loaded)"
+              break
+            fi
+            echo "  attempt $i/30..."
+            sleep 3
+          done
+          # Final check
+          curl -sf http://localhost:4141/v1/models > /dev/null || { echo "Server failed to start"; exit 1; }
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
 
@@ -41,7 +46,7 @@ jobs:
         run: |
           npm i -g @anthropic-ai/claude-code@latest &
           npm i -g @openai/codex@latest &
-          pip install gemini-cli &
+          npm i -g @google/gemini-cli@latest &
           wait
           echo "--- Installed versions ---"
           claude --version || echo "claude not found"
