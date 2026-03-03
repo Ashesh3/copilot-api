@@ -26,9 +26,9 @@ jobs:
 
       - name: Start copilot-api
         run: |
-          bun run dist/main.js start -g "$GH_TOKEN" --host 0.0.0.0 --debug &
+          bun run dist/main.js start -g "$GH_TOKEN" --host 0.0.0.0 --debug \
+            > tests/smoke/server.log 2>&1 &
           echo "Waiting for server..."
-          # Wait for server to be ready and models to load
           for i in $(seq 1 30); do
             if curl -sf http://localhost:4141/v1/models > /dev/null 2>&1; then
               echo "Server is up (models loaded)"
@@ -39,8 +39,7 @@ jobs:
           done
           # Print available models for debugging
           echo "--- Available models ---"
-          curl -sf http://localhost:4141/v1/models | head -c 2000 || true
-          echo ""
+          curl -sf http://localhost:4141/v1/models | python3 -c "import sys,json; [print(f'  {m[\"id\"]}') for m in json.load(sys.stdin)['data']]" || true
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
 
@@ -62,11 +61,17 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
 
+      - name: Print server logs
+        if: always()
+        run: |
+          echo "=== copilot-api server logs ==="
+          cat tests/smoke/server.log 2>/dev/null || echo "No server log found"
+
       - name: Upload test logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: smoke-test-logs
-          path: tests/smoke/*.log
+          path: tests/smoke/server.log
           retention-days: 7
           if-no-files-found: ignore

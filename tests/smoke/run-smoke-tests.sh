@@ -34,6 +34,29 @@ cleanup_smoke_file() {
 }
 
 ###############################################################################
+# Direct API test (curl) to verify the Messages endpoint works
+###############################################################################
+echo ""
+echo "==============================="
+echo "  Direct API Tests (curl)"
+echo "==============================="
+
+run_test "api:messages-endpoint" '
+  response=$(curl -sf -X POST "$SERVER_URL/v1/messages" \
+    -H "Content-Type: application/json" \
+    -H "x-api-key: dummy" \
+    -H "anthropic-version: 2023-06-01" \
+    -d "{
+      \"model\": \"claude-sonnet-4\",
+      \"max_tokens\": 64,
+      \"stream\": false,
+      \"messages\": [{\"role\": \"user\", \"content\": \"Reply with exactly: SMOKE_TEST_OK\"}]
+    }" 2>&1)
+  echo "$response"
+  echo "$response" | grep -q "SMOKE_TEST_OK"
+'
+
+###############################################################################
 # Claude Code
 ###############################################################################
 echo ""
@@ -111,14 +134,14 @@ if command -v gemini &>/dev/null; then
 
   # Use --model to bypass Gemini CLI's internal classifier (which 404s on proxy)
   run_test "gemini:text-generation" '
-    output=$(gemini --model gemini-2.0-flash -p "Reply with exactly: SMOKE_TEST_OK" 2>&1)
+    output=$(gemini --model gemini-2.5-pro -p "Reply with exactly: SMOKE_TEST_OK" 2>&1)
     echo "$output"
     echo "$output" | grep -q "SMOKE_TEST_OK"
   '
 
   cleanup_smoke_file
   run_test "gemini:tool-calling" '
-    output=$(gemini --model gemini-2.0-flash -p "Create a file called smoke.txt with the content: hello" 2>&1)
+    output=$(gemini --model gemini-2.5-pro -p "Create a file called smoke.txt with the content: hello" 2>&1)
     echo "$output"
     test -f smoke.txt
   '
