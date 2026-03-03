@@ -146,10 +146,15 @@ const handleWithChatCompletions = async (
 ) => {
   const openAIPayload = translateToOpenAI(anthropicPayload)
 
-  // Add thinking_budget if the client requested thinking with a budget
-  if (anthropicPayload.thinking?.budget_tokens) {
-    ;(openAIPayload as unknown as Record<string, unknown>).thinking_budget =
-      anthropicPayload.thinking.budget_tokens
+  // Enable thinking/reasoning on the ChatCompletions path
+  // Copilot API uses reasoning_effort to enable thinking (returns reasoning_text in response)
+  // thinking_budget is also sent for models that support explicit budget control
+  if (anthropicPayload.thinking) {
+    const extra = openAIPayload as unknown as Record<string, unknown>
+    extra.reasoning_effort = "high"
+    if (anthropicPayload.thinking.budget_tokens) {
+      extra.thinking_budget = anthropicPayload.thinking.budget_tokens
+    }
     // Claude requires temperature=1 when thinking is enabled
     openAIPayload.temperature = 1
   }
