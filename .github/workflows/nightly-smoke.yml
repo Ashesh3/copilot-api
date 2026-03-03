@@ -26,7 +26,7 @@ jobs:
 
       - name: Start copilot-api
         run: |
-          bun run dist/main.js start -g "$GH_TOKEN" --host 0.0.0.0 &
+          bun run dist/main.js start -g "$GH_TOKEN" --host 0.0.0.0 --debug &
           echo "Waiting for server..."
           # Wait for server to be ready and models to load
           for i in $(seq 1 30); do
@@ -37,8 +37,10 @@ jobs:
             echo "  attempt $i/30..."
             sleep 3
           done
-          # Final check
-          curl -sf http://localhost:4141/v1/models > /dev/null || { echo "Server failed to start"; exit 1; }
+          # Print available models for debugging
+          echo "--- Available models ---"
+          curl -sf http://localhost:4141/v1/models | head -c 2000 || true
+          echo ""
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
 

@@ -109,15 +109,16 @@ if command -v gemini &>/dev/null; then
   export GEMINI_API_KEY="dummy"
   export GOOGLE_GEMINI_BASE_URL="$SERVER_URL"
 
+  # Use --model to bypass Gemini CLI's internal classifier (which 404s on proxy)
   run_test "gemini:text-generation" '
-    output=$(gemini -p "Reply with exactly: SMOKE_TEST_OK" 2>&1)
+    output=$(gemini --model gemini-2.0-flash -p "Reply with exactly: SMOKE_TEST_OK" 2>&1)
     echo "$output"
     echo "$output" | grep -q "SMOKE_TEST_OK"
   '
 
   cleanup_smoke_file
   run_test "gemini:tool-calling" '
-    output=$(gemini -p "Create a file called smoke.txt with the content: hello" 2>&1)
+    output=$(gemini --model gemini-2.0-flash -p "Create a file called smoke.txt with the content: hello" 2>&1)
     echo "$output"
     test -f smoke.txt
   '
