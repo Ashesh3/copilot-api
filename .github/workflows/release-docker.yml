@@ -6,12 +6,7 @@ name: Docker Build and Push
 # documentation.
 
 on:
-  push:
-    # branches: [ "main" ]
-    # Publish semver tags as releases.
-    tags: [ 'v*.*.*' ]
-    paths-ignore:
-      - 'docs/**'
+  workflow_dispatch: # disabled automatic trigger
 
 env:
   # Use docker.io for Docker Hub if empty

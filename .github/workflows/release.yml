@@ -5,9 +5,7 @@ permissions:
   contents: write
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch: # disabled automatic trigger
 
 jobs:
   release:
