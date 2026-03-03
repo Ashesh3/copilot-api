@@ -47,7 +47,7 @@ run_test "api:messages-endpoint" '
     -H "x-api-key: dummy" \
     -H "anthropic-version: 2023-06-01" \
     -d "{
-      \"model\": \"claude-sonnet-4\",
+      \"model\": \"claude-sonnet-4.6\",
       \"max_tokens\": 64,
       \"stream\": false,
       \"messages\": [{\"role\": \"user\", \"content\": \"Reply with exactly: SMOKE_TEST_OK\"}]
@@ -67,8 +67,8 @@ echo "==============================="
 if command -v claude &>/dev/null; then
   export ANTHROPIC_BASE_URL="$SERVER_URL"
   export ANTHROPIC_AUTH_TOKEN="dummy"
-  export ANTHROPIC_MODEL="claude-sonnet-4"
-  export ANTHROPIC_SMALL_FAST_MODEL="gpt-4.1-mini"
+  export ANTHROPIC_MODEL="claude-sonnet-4.6"
+  export ANTHROPIC_SMALL_FAST_MODEL="gpt-4o-mini"
   export DISABLE_NON_ESSENTIAL_MODEL_CALLS="1"
   export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1"
 

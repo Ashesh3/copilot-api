@@ -46,4 +46,5 @@ server.route("/v1/messages", messageRoutes)
 // Google Generative AI compatible endpoints
 // Handles POST /v1/models/{model}:generateContent and :streamGenerateContent
 server.route("/v1/models", googleAIRoutes)
+server.route("/v1beta/models", googleAIRoutes)
 server.route("/models", googleAIRoutes)
