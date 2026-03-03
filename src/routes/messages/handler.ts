@@ -214,7 +214,7 @@ const streamChatCompletionsWithWebSearch = async (
 
 const tryCountTokens = async (
   c: Context,
-  payload: { model: string },
+  payload: Parameters<typeof getTokenCount>[0],
 ): Promise<void> => {
   try {
     const selectedModel = state.models?.data.find((m) => m.id === payload.model)
