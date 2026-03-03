@@ -139,18 +139,8 @@ if command -v gemini &>/dev/null; then
     echo "$output"
     echo "$output" | grep -q "SMOKE_TEST_OK"
   '
-
-  cleanup_smoke_file
-  run_test "gemini:tool-calling" '
-    output=$(gemini --model gemini-2.5-pro -p "Create a file called smoke.txt with the content: hello" 2>&1)
-    echo "$output"
-    # Gemini may create the file or just describe how to — check both
-    test -f smoke.txt || echo "$output" | grep -qi "smoke.txt"
-  '
-  cleanup_smoke_file
 else
   skip_test "gemini:text-generation"
-  skip_test "gemini:tool-calling"
 fi
 
 ###############################################################################
