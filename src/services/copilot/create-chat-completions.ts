@@ -10,120 +10,8 @@ import {
   addPromptCaching,
 } from "~/services/copilot/copilot-client"
 
-interface StreamEvent {
-  data?: string
-  event?: string
-  id?: string | number
-  retry?: number
-}
-
-interface ToolCallMappings {
-  nextSequenceNumber: number
-  mappings: Map<number, { callId: string | undefined; sequenceNumber: number }>
-}
-
-export interface StreamNormalizationState {
-  roleSetByChoiceIndex: Set<number>
-  toolCallMappingsByChoiceIndex: Map<number, ToolCallMappings>
-}
-
-type StreamingChoice = ChatCompletionChunk["choices"][number]
-type StreamingToolCall = NonNullable<Delta["tool_calls"]>[number]
-
-const createStreamNormalizationState = (): StreamNormalizationState => ({
-  roleSetByChoiceIndex: new Set<number>(),
-  toolCallMappingsByChoiceIndex: new Map<number, ToolCallMappings>(),
-})
-
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null
-
-// Note: streaming normalization helpers mutate chunks in-place for performance.
-// The caller (normalizeStreamingEvents) creates a new StreamEvent via spread,
-// so only the transient parsed chunk is modified, not the original SSE data.
-const ensureAssistantRole = (
-  choice: StreamingChoice,
-  state: StreamNormalizationState,
-  hasContent: boolean,
-): void => {
-  const isFirstChunkForChoice = !state.roleSetByChoiceIndex.has(choice.index)
-  if (!choice.delta.role && (hasContent || isFirstChunkForChoice)) {
-    choice.delta.role = "assistant"
-    state.roleSetByChoiceIndex.add(choice.index)
-  }
-}
-
-const ensureToolCallMappings = (
-  state: StreamNormalizationState,
-  choiceIndex: number,
-): ToolCallMappings => {
-  const existingMappings = state.toolCallMappingsByChoiceIndex.get(choiceIndex)
-  if (existingMappings) {
-    return existingMappings
-  }
-
-  const createdMappings: ToolCallMappings = {
-    nextSequenceNumber: 0,
-    mappings: new Map<
-      number,
-      { callId: string | undefined; sequenceNumber: number }
-    >(),
-  }
-
-  state.toolCallMappingsByChoiceIndex.set(choiceIndex, createdMappings)
-  return createdMappings
-}
-
-const normalizeToolCallIndexes = (
-  toolCalls: Array<StreamingToolCall>,
-  toolCallMappings: ToolCallMappings,
-): void => {
-  for (const toolCall of toolCalls) {
-    const sourceIndex = toolCall.index
-    const existingMapping = toolCallMappings.mappings.get(sourceIndex)
-
-    if (existingMapping !== undefined) {
-      if (toolCall.id && existingMapping.callId !== toolCall.id) {
-        existingMapping.sequenceNumber = toolCallMappings.nextSequenceNumber++
-        existingMapping.callId = toolCall.id
-      }
-
-      toolCall.index = existingMapping.sequenceNumber
-      continue
-    }
-
-    const newMapping = {
-      callId: toolCall.id,
-      sequenceNumber: toolCallMappings.nextSequenceNumber++,
-    }
-    toolCallMappings.mappings.set(sourceIndex, newMapping)
-    toolCall.index = newMapping.sequenceNumber
-  }
-}
-
-const normalizeToolCallChoice = (
-  choice: StreamingChoice,
-  state: StreamNormalizationState,
-): void => {
-  const toolCalls = choice.delta.tool_calls
-  if (!toolCalls || toolCalls.length === 0) {
-    return
-  }
-
-  if (!choice.delta.role) {
-    choice.delta.role = "assistant"
-    state.roleSetByChoiceIndex.add(choice.index)
-  }
-
-  // Only set finish_reason when it's truly missing (undefined), not when
-  // it's intentionally null (OpenAI uses null on intermediate chunks)
-  if (choice.finish_reason === undefined) {
-    choice.finish_reason = "tool_calls"
-  }
-
-  const mappings = ensureToolCallMappings(state, choice.index)
-  normalizeToolCallIndexes(toolCalls, mappings)
-}
 
 const normalizeFunctionTool = (tool: unknown): void => {
   if (!isRecord(tool) || tool.type !== "function") {
@@ -146,64 +34,6 @@ const normalizeFunctionTool = (tool: unknown): void => {
   }
   if (!isRecord(parameters.properties)) {
     parameters.properties = {}
-  }
-}
-
-export const normalizeStreamingChunk = (
-  chunk: ChatCompletionChunk,
-  state: StreamNormalizationState,
-): ChatCompletionChunk => {
-  for (const choice of chunk.choices) {
-    const delta = choice.delta
-    const hasContent = Boolean(
-      delta.content
-      || Boolean(delta.tool_calls?.length)
-      || (delta as { refusal?: unknown }).refusal,
-    )
-    ensureAssistantRole(choice, state, hasContent)
-    normalizeToolCallChoice(choice, state)
-  }
-
-  return chunk
-}
-
-const normalizeStreamingEvents = async function* (
-  stream: AsyncIterable<StreamEvent>,
-): AsyncGenerator<StreamEvent> {
-  const normalizationState = createStreamNormalizationState()
-
-  for await (const streamEvent of stream) {
-    const data = streamEvent.data
-    if (!data || data === "[DONE]") {
-      yield streamEvent
-      continue
-    }
-
-    try {
-      const parsedChunk = JSON.parse(data) as {
-        choices?: unknown
-      }
-      if (
-        !Array.isArray(parsedChunk.choices)
-        || !parsedChunk.choices.every(
-          (choice) => isRecord(choice) && isRecord(choice.delta),
-        )
-      ) {
-        yield streamEvent
-        continue
-      }
-
-      const normalizedChunk = normalizeStreamingChunk(
-        parsedChunk as ChatCompletionChunk,
-        normalizationState,
-      )
-      yield {
-        ...streamEvent,
-        data: JSON.stringify(normalizedChunk),
-      }
-    } catch {
-      yield streamEvent
-    }
   }
 }
 
@@ -317,7 +147,7 @@ async function handleResponse(
   }
 
   if (payload.stream) {
-    return normalizeStreamingEvents(events(response))
+    return events(response)
   }
 
   const text = await response.text()

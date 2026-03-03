@@ -1,15 +1,12 @@
 import { test, expect, mock, beforeAll, afterAll } from "bun:test"
 
 import type {
-  ChatCompletionChunk,
   ChatCompletionsPayload,
-  StreamNormalizationState,
 } from "../src/services/copilot/create-chat-completions"
 
 import { state } from "../src/lib/state"
 import {
   createChatCompletions,
-  normalizeStreamingChunk,
 } from "../src/services/copilot/create-chat-completions"
 
 // Save and restore original fetch so integration tests aren't affected
@@ -83,102 +80,6 @@ test("sets X-Initiator to user if only user present", async () => {
     fetchMock.mock.calls[1][1] as { headers: Record<string, string> }
   ).headers
   expect(headers["X-Initiator"]).toBe("user")
-})
-
-test("normalizes malformed streaming tool-call chunks", () => {
-  const state: StreamNormalizationState = {
-    roleSetByChoiceIndex: new Set<number>(),
-    toolCallMappingsByChoiceIndex: new Map(),
-  }
-
-  const emptyFirstChunk = {
-    id: "chunk-0",
-    object: "chat.completion.chunk",
-    created: 1,
-    model: "gpt-test",
-    choices: [{ index: 0, delta: {}, finish_reason: null, logprobs: null }],
-  } as ChatCompletionChunk
-
-  normalizeStreamingChunk(emptyFirstChunk, state)
-  expect(emptyFirstChunk.choices[0].delta.role).toBe("assistant")
-
-  const malformedToolCallChunk = {
-    id: "chunk-1",
-    object: "chat.completion.chunk",
-    created: 1,
-    model: "gpt-test",
-    choices: [
-      {
-        index: 0,
-        delta: {
-          tool_calls: [
-            {
-              index: 1,
-              id: "call_1",
-              function: { name: "get_weather", arguments: '{"loc' },
-            },
-          ],
-        },
-        logprobs: null,
-      },
-    ],
-  } as unknown as ChatCompletionChunk
-
-  normalizeStreamingChunk(malformedToolCallChunk, state)
-  expect(malformedToolCallChunk.choices[0].delta.role).toBe("assistant")
-  expect(malformedToolCallChunk.choices[0].finish_reason).toBe("tool_calls")
-  expect(malformedToolCallChunk.choices[0].delta.tool_calls?.[0]?.index).toBe(0)
-
-  const continuationChunk = {
-    id: "chunk-2",
-    object: "chat.completion.chunk",
-    created: 1,
-    model: "gpt-test",
-    choices: [
-      {
-        index: 0,
-        delta: {
-          tool_calls: [
-            {
-              index: 1,
-              function: { arguments: 'ation":"Paris"}' },
-            },
-          ],
-        },
-        finish_reason: null,
-        logprobs: null,
-      },
-    ],
-  } as ChatCompletionChunk
-
-  normalizeStreamingChunk(continuationChunk, state)
-  expect(continuationChunk.choices[0].delta.tool_calls?.[0]?.index).toBe(0)
-
-  const recycledIndexChunk = {
-    id: "chunk-3",
-    object: "chat.completion.chunk",
-    created: 1,
-    model: "gpt-test",
-    choices: [
-      {
-        index: 0,
-        delta: {
-          tool_calls: [
-            {
-              index: 1,
-              id: "call_2",
-              function: { name: "get_time", arguments: "{}" },
-            },
-          ],
-        },
-        finish_reason: null,
-        logprobs: null,
-      },
-    ],
-  } as ChatCompletionChunk
-
-  normalizeStreamingChunk(recycledIndexChunk, state)
-  expect(recycledIndexChunk.choices[0].delta.tool_calls?.[0]?.index).toBe(1)
 })
 
 test("skips non-function tools during payload normalization", async () => {
