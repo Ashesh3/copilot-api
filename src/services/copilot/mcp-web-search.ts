@@ -161,7 +161,7 @@ const ensureSession = async (): Promise<string> => {
       mcpSessionPromise = null
       return id
     })
-    .catch((error) => {
+    .catch((error: unknown) => {
       mcpSessionPromise = null
       throw error
     })
@@ -222,8 +222,7 @@ export const executeWebSearch = async (query: string): Promise<string> => {
 
     return parseSearchResponse(await parseResponseBody(response))
   } catch (error: unknown) {
-    const message =
-      error instanceof Error ? error.message : "Unknown MCP error"
+    const message = error instanceof Error ? error.message : "Unknown MCP error"
     consola.error("MCP web search error:", message)
     // Reset session on error so next attempt re-initializes
     // Use a sentinel to invalidate — safe since we don't have the caller's ID here

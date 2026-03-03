@@ -115,6 +115,80 @@ const buildCompactedResponse = (
   }
 }
 
+/**
+ * Convert ResponseInputItems to ChatCompletions messages for the fallback path.
+ */
+const convertInputToMessages = (
+  input: Array<ResponseInputItem>,
+): ChatCompletionsPayload["messages"] => {
+  const messages: ChatCompletionsPayload["messages"] = []
+
+  for (const item of input) {
+    const itemType = (item as { type?: string }).type
+    if (!itemType || itemType === "message") {
+      const msg = item as {
+        role: "user" | "assistant" | "system" | "developer"
+        content?: string | Array<{ type?: string; text?: string }>
+      }
+      const role = msg.role === "developer" ? "system" : msg.role
+      let content = ""
+      if (typeof msg.content === "string") {
+        content = msg.content
+      } else if (Array.isArray(msg.content)) {
+        content = msg.content
+          .map((part) => (typeof part.text === "string" ? part.text : ""))
+          .join("")
+      }
+      messages.push({ role, content })
+    } else {
+      convertSpecialItem(messages, itemType, item)
+    }
+  }
+
+  return messages
+}
+
+const convertSpecialItem = (
+  messages: ChatCompletionsPayload["messages"],
+  itemType: string,
+  item: ResponseInputItem,
+): void => {
+  switch (itemType) {
+    case "function_call": {
+      const fc = item as { name?: string; arguments?: string }
+      messages.push({
+        role: "assistant",
+        content: `[Tool call: ${fc.name ?? "unknown"}(${fc.arguments ?? ""})]`,
+      })
+      break
+    }
+    case "function_call_output": {
+      const fco = item as { output?: string }
+      const output =
+        typeof fco.output === "string" ? fco.output : JSON.stringify(fco.output)
+      messages.push({ role: "user", content: `[Tool result: ${output}]` })
+      break
+    }
+    case "reasoning": {
+      const reasoning = item as {
+        summary?: Array<{ text?: string }>
+      }
+      const text = reasoning.summary
+        ?.map((s) => s.text ?? "")
+        .filter(Boolean)
+        .join("\n")
+      if (text) {
+        messages.push({
+          role: "assistant",
+          content: `[Thinking: ${text}]`,
+        })
+      }
+      break
+    }
+    // No default
+  }
+}
+
 export const handleCompact = async (c: Context) => {
   await checkRateLimit(state)
 
@@ -182,53 +256,8 @@ export const handleCompact = async (c: Context) => {
 
     const messages: ChatCompletionsPayload["messages"] = [
       { role: "system", content: compactionPrompt },
+      ...convertInputToMessages(input),
     ]
-
-    // Convert ResponseInputItems to ChatCompletions messages
-    for (const item of input) {
-      const itemType = (item as { type?: string }).type
-      if (!itemType || itemType === "message") {
-        const msg = item as {
-          role: "user" | "assistant" | "system" | "developer"
-          content?: string | Array<{ type?: string; text?: string }>
-        }
-        const role = msg.role === "developer" ? "system" : msg.role
-        let content = ""
-        if (typeof msg.content === "string") {
-          content = msg.content
-        } else if (Array.isArray(msg.content)) {
-          content = msg.content
-            .map((part) => (typeof part.text === "string" ? part.text : ""))
-            .join("")
-        }
-        messages.push({ role, content })
-      } else if (itemType === "function_call") {
-        const fc = item as { name?: string; arguments?: string }
-        messages.push({
-          role: "assistant",
-          content: `[Tool call: ${fc.name ?? "unknown"}(${fc.arguments ?? ""})]`,
-        })
-      } else if (itemType === "function_call_output") {
-        const fco = item as { output?: string }
-        const output =
-          typeof fco.output === "string" ? fco.output : JSON.stringify(fco.output)
-        messages.push({ role: "user", content: `[Tool result: ${output}]` })
-      } else if (itemType === "reasoning") {
-        const reasoning = item as {
-          summary?: Array<{ text?: string }>
-        }
-        const text = reasoning.summary
-          ?.map((s) => s.text ?? "")
-          .filter(Boolean)
-          .join("\n")
-        if (text) {
-          messages.push({
-            role: "assistant",
-            content: `[Thinking: ${text}]`,
-          })
-        }
-      }
-    }
 
     const ccPayload: ChatCompletionsPayload = {
       model,

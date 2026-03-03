@@ -1,13 +1,9 @@
 import { test, expect, mock, beforeAll, afterAll } from "bun:test"
 
-import type {
-  ChatCompletionsPayload,
-} from "../src/services/copilot/create-chat-completions"
+import type { ChatCompletionsPayload } from "../src/services/copilot/create-chat-completions"
 
 import { state } from "../src/lib/state"
-import {
-  createChatCompletions,
-} from "../src/services/copilot/create-chat-completions"
+import { createChatCompletions } from "../src/services/copilot/create-chat-completions"
 
 // Save and restore original fetch so integration tests aren't affected
 const originalFetch = globalThis.fetch

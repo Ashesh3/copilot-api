@@ -143,22 +143,99 @@ export async function handleCompletion(c: Context) {
     })
   }
 
-  return await handleWithChatCompletions(
-    c,
-    anthropicPayload,
+  return await handleWithChatCompletions(c, anthropicPayload, {
     initiatorOverride,
     requestedModel,
-  )
+  })
 }
 
 const RESPONSES_ENDPOINT = "/responses"
 
+interface ChatCompletionsStreamContext {
+  finalPayload: ReturnType<typeof translateToOpenAI> & { model: string }
+  initiatorOverride?: "agent" | "user"
+  requestedModel?: string
+}
+
+const streamChatCompletionsWithWebSearch = async (
+  stream: {
+    writeSSE: (data: { event: string; data: string }) => Promise<void>
+  },
+  response: AsyncIterable<{ data?: string }>,
+  ctx: ChatCompletionsStreamContext,
+): Promise<void> => {
+  const bufferedChunks: Array<ChatCompletionChunk> = []
+
+  for await (const rawEvent of response) {
+    if (rawEvent.data === "[DONE]") break
+    if (!rawEvent.data) continue
+    bufferedChunks.push(JSON.parse(rawEvent.data) as ChatCompletionChunk)
+  }
+
+  if (hasWebSearchInChunks(bufferedChunks)) {
+    const reconstructed = reconstructFromChunks(bufferedChunks)
+    if (reconstructed) {
+      const resolved = await resolveWebSearchCalls(
+        reconstructed,
+        ctx.finalPayload,
+        ctx.initiatorOverride,
+      )
+      const anthropicResponse = translateToAnthropic(
+        resolved,
+        ctx.requestedModel,
+      )
+      await emitAnthropicResponseAsStream(stream, anthropicResponse)
+      return
+    }
+  }
+
+  // No web_search calls — replay buffered chunks
+  const streamState: AnthropicStreamState = {
+    messageStartSent: false,
+    contentBlockIndex: 0,
+    contentBlockOpen: false,
+    toolCalls: {},
+  }
+
+  for (const chunk of bufferedChunks) {
+    const events = translateChunkToAnthropicEvents(
+      chunk,
+      streamState,
+      ctx.requestedModel,
+    )
+    for (const event of events) {
+      await stream.writeSSE({
+        event: event.type,
+        data: JSON.stringify(event),
+      })
+    }
+  }
+}
+
+const tryCountTokens = async (
+  c: Context,
+  payload: { model: string },
+): Promise<void> => {
+  try {
+    const selectedModel = state.models?.data.find((m) => m.id === payload.model)
+    if (selectedModel) {
+      const tokenCount = await getTokenCount(payload, selectedModel)
+      setRequestContext(c, { inputTokens: tokenCount.input })
+    }
+  } catch {
+    // Token counting is best-effort, don't fail the request
+  }
+}
+
 const handleWithChatCompletions = async (
   c: Context,
   anthropicPayload: AnthropicMessagesPayload,
-  initiatorOverride?: "agent" | "user",
-  requestedModel?: string,
+  options?: {
+    initiatorOverride?: "agent" | "user"
+    requestedModel?: string
+  },
 ) => {
+  const { initiatorOverride, requestedModel } = options ?? {}
   const openAIPayload = translateToOpenAI(anthropicPayload)
 
   // Enable thinking/reasoning on the ChatCompletions path
@@ -185,18 +262,7 @@ const handleWithChatCompletions = async (
     setRequestContext(c, { replacements: appliedRules })
   }
 
-  // Calculate token count for the translated payload
-  try {
-    const selectedModel = state.models?.data.find(
-      (m) => m.id === finalPayload.model,
-    )
-    if (selectedModel) {
-      const tokenCount = await getTokenCount(finalPayload, selectedModel)
-      setRequestContext(c, { inputTokens: tokenCount.input })
-    }
-  } catch {
-    // Token counting is best-effort, don't fail the request
-  }
+  await tryCountTokens(c, finalPayload)
 
   logger.debug(
     "Translated OpenAI request payload:",
@@ -219,7 +285,10 @@ const handleWithChatCompletions = async (
       "Non-streaming response from Copilot:",
       JSON.stringify(finalResponse).slice(-400),
     )
-    const anthropicResponse = translateToAnthropic(finalResponse, requestedModel)
+    const anthropicResponse = translateToAnthropic(
+      finalResponse,
+      requestedModel,
+    )
     logger.debug(
       "Translated Anthropic response:",
       JSON.stringify(anthropicResponse),
@@ -235,53 +304,11 @@ const handleWithChatCompletions = async (
   logger.debug("Streaming response from Copilot")
   return streamSSE(c, async (stream) => {
     if (needsWebSearchBuffering) {
-      // Buffer all chunks to detect web_search tool calls
-      const bufferedChunks: Array<ChatCompletionChunk> = []
-
-      for await (const rawEvent of response) {
-        if (rawEvent.data === "[DONE]") break
-        if (!rawEvent.data) continue
-        bufferedChunks.push(JSON.parse(rawEvent.data) as ChatCompletionChunk)
-      }
-
-      if (hasWebSearchInChunks(bufferedChunks)) {
-        const reconstructed = reconstructFromChunks(bufferedChunks)
-        if (reconstructed) {
-          const resolved = await resolveWebSearchCalls(
-            reconstructed,
-            finalPayload,
-            initiatorOverride,
-          )
-          const anthropicResponse = translateToAnthropic(
-            resolved,
-            requestedModel,
-          )
-          await emitAnthropicResponseAsStream(stream, anthropicResponse)
-          return
-        }
-      }
-
-      // No web_search calls — replay buffered chunks
-      const streamState: AnthropicStreamState = {
-        messageStartSent: false,
-        contentBlockIndex: 0,
-        contentBlockOpen: false,
-        toolCalls: {},
-      }
-
-      for (const chunk of bufferedChunks) {
-        const events = translateChunkToAnthropicEvents(
-          chunk,
-          streamState,
-          requestedModel,
-        )
-        for (const event of events) {
-          await stream.writeSSE({
-            event: event.type,
-            data: JSON.stringify(event),
-          })
-        }
-      }
+      await streamChatCompletionsWithWebSearch(stream, response, {
+        finalPayload,
+        initiatorOverride,
+        requestedModel,
+      })
       return
     }
 
@@ -311,6 +338,187 @@ const handleWithChatCompletions = async (
       }
     }
   })
+}
+
+type SSEStream = {
+  writeSSE: (data: { event: string; data: string }) => Promise<void>
+}
+
+type ResponsesStream = AsyncIterable<{ event?: string; data?: string }>
+
+const parseResponsesStreamError = (
+  parsed: ResponseStreamEvent,
+): string | null => {
+  if (parsed.type !== "error") return null
+  return "message" in parsed ?
+      (parsed as { message: string }).message
+    : "Upstream error"
+}
+
+const writeResponsesEvents = async (
+  stream: SSEStream,
+  parsed: ResponseStreamEvent,
+  streamState: ReturnType<typeof createResponsesStreamState>,
+): Promise<void> => {
+  const events = translateResponsesStreamEvent(parsed, streamState)
+  for (const event of events) {
+    await stream.writeSSE({
+      event: event.type,
+      data: JSON.stringify(event),
+    })
+  }
+}
+
+const isWebSearchFunctionCall = (parsed: ResponseStreamEvent): boolean =>
+  parsed.type === "response.output_item.done"
+  && "item" in parsed
+  && (parsed.item as { type?: string }).type === "function_call"
+  && (parsed.item as { name?: string }).name === "web_search"
+
+const isResponseCompleted = (
+  parsed: ResponseStreamEvent,
+): parsed is ResponseStreamEvent & { response: ResponsesResult } =>
+  (parsed.type === "response.completed"
+    || parsed.type === "response.incomplete")
+  && "response" in parsed
+
+const bufferResponsesStream = async (
+  stream: SSEStream,
+  response: ResponsesStream,
+): Promise<{
+  events: Array<ResponseStreamEvent>
+  hasWebSearch: boolean
+  completedResult: ResponsesResult | null
+}> => {
+  const events: Array<ResponseStreamEvent> = []
+  let hasWebSearch = false
+  let completedResult: ResponsesResult | null = null
+
+  for await (const chunk of response) {
+    if (chunk.event === "ping") {
+      await stream.writeSSE({ event: "ping", data: '{"type":"ping"}' })
+      continue
+    }
+    if (!chunk.data) continue
+
+    const parsed = JSON.parse(chunk.data) as ResponseStreamEvent
+    events.push(parsed)
+
+    if (isWebSearchFunctionCall(parsed)) hasWebSearch = true
+    if (isResponseCompleted(parsed)) completedResult = parsed.response
+  }
+
+  return { events, hasWebSearch, completedResult }
+}
+
+const replayBufferedEvents = async (
+  stream: SSEStream,
+  bufferedEvents: Array<ResponseStreamEvent>,
+): Promise<void> => {
+  const streamState = createResponsesStreamState()
+  let errorForwarded = false
+
+  for (const parsed of bufferedEvents) {
+    const errorMsg = parseResponsesStreamError(parsed)
+    if (errorMsg) {
+      const errorEvent = buildErrorEvent(errorMsg)
+      await stream.writeSSE({
+        event: errorEvent.type,
+        data: JSON.stringify(errorEvent),
+      })
+      errorForwarded = true
+      continue
+    }
+
+    await writeResponsesEvents(stream, parsed, streamState)
+    if (streamState.messageCompleted) break
+  }
+
+  if (!streamState.messageCompleted && !errorForwarded) {
+    logger.warn(
+      "Responses stream ended without completion; sending error event",
+    )
+    const errorEvent = buildErrorEvent(
+      "Responses stream ended without completion",
+    )
+    await stream.writeSSE({
+      event: errorEvent.type,
+      data: JSON.stringify(errorEvent),
+    })
+  }
+}
+
+const streamResponsesWithWebSearch = async (
+  stream: SSEStream,
+  response: ResponsesStream,
+  ctx: {
+    responsesPayload: ReturnType<
+      typeof translateAnthropicMessagesToResponsesPayload
+    >
+    requestOptions: { vision: boolean; initiator: "agent" | "user" }
+    requestedModel?: string
+  },
+): Promise<void> => {
+  const { events, hasWebSearch, completedResult } = await bufferResponsesStream(
+    stream,
+    response,
+  )
+
+  if (hasWebSearch && completedResult) {
+    const resolved = await resolveResponsesWebSearchCalls(
+      completedResult,
+      ctx.responsesPayload,
+      ctx.requestOptions,
+    )
+    const anthropicResponse = translateResponsesResultToAnthropic(resolved)
+    if (ctx.requestedModel) anthropicResponse.model = ctx.requestedModel
+    await emitAnthropicResponseAsStream(stream, anthropicResponse)
+    return
+  }
+
+  await replayBufferedEvents(stream, events)
+}
+
+const streamResponsesDirect = async (
+  stream: SSEStream,
+  response: ResponsesStream,
+): Promise<void> => {
+  const streamState = createResponsesStreamState()
+
+  for await (const chunk of response) {
+    if (chunk.event === "ping") {
+      await stream.writeSSE({ event: "ping", data: '{"type":"ping"}' })
+      continue
+    }
+    if (!chunk.data) continue
+
+    const parsed = JSON.parse(chunk.data) as ResponseStreamEvent
+    const errorMsg = parseResponsesStreamError(parsed)
+    if (errorMsg) {
+      const errorEvent = buildErrorEvent(errorMsg)
+      await stream.writeSSE({
+        event: errorEvent.type,
+        data: JSON.stringify(errorEvent),
+      })
+      continue
+    }
+
+    await writeResponsesEvents(stream, parsed, streamState)
+    if (streamState.messageCompleted) break
+  }
+
+  if (!streamState.messageCompleted) {
+    logger.warn(
+      "Responses stream ended without completion; sending error event",
+    )
+    const errorEvent = buildErrorEvent(
+      "Responses stream ended without completion",
+    )
+    await stream.writeSSE({
+      event: errorEvent.type,
+      data: JSON.stringify(errorEvent),
+    })
+  }
 }
 
 const handleWithResponsesApi = async (
@@ -346,149 +554,15 @@ const handleWithResponsesApi = async (
     logger.debug("Streaming response from Copilot (Responses API)")
     return streamSSE(c, async (stream) => {
       if (needsWebSearchBuffering) {
-        // Buffer all stream events to check for web_search function calls
-        const bufferedEvents: Array<ResponseStreamEvent> = []
-        let hasWebSearchCall = false
-        let completedResult: ResponsesResult | null = null
-
-        for await (const chunk of response) {
-          const eventName = chunk.event
-          if (eventName === "ping") {
-            await stream.writeSSE({ event: "ping", data: '{"type":"ping"}' })
-            continue
-          }
-
-          const data = chunk.data
-          if (!data) continue
-
-          const parsed = JSON.parse(data) as ResponseStreamEvent
-          bufferedEvents.push(parsed)
-
-          if (
-            parsed.type === "response.output_item.done"
-            && "item" in parsed
-            && (parsed.item as { type?: string }).type === "function_call"
-            && (parsed.item as { name?: string }).name === "web_search"
-          ) {
-            hasWebSearchCall = true
-          }
-
-          if (
-            (parsed.type === "response.completed"
-              || parsed.type === "response.incomplete")
-            && "response" in parsed
-          ) {
-            completedResult = parsed.response as ResponsesResult
-          }
-        }
-
-        if (hasWebSearchCall && completedResult) {
-          const resolved = await resolveResponsesWebSearchCalls(
-            completedResult,
-            responsesPayload,
-            { vision, initiator: initiatorOverride ?? initiator },
-          )
-          const anthropicResponse =
-            translateResponsesResultToAnthropic(resolved)
-          if (requestedModel) anthropicResponse.model = requestedModel
-          await emitAnthropicResponseAsStream(stream, anthropicResponse)
-          return
-        }
-
-        // Replay buffered events
-        const streamState = createResponsesStreamState()
-        let errorForwarded = false
-        for (const parsed of bufferedEvents) {
-          if (parsed.type === "error") {
-            const errorMessage =
-              "message" in parsed ?
-                (parsed as { message: string }).message
-              : "Upstream error"
-            const errorEvent = buildErrorEvent(errorMessage)
-            await stream.writeSSE({
-              event: errorEvent.type,
-              data: JSON.stringify(errorEvent),
-            })
-            errorForwarded = true
-            continue
-          }
-
-          const events = translateResponsesStreamEvent(parsed, streamState)
-          for (const event of events) {
-            await stream.writeSSE({
-              event: event.type,
-              data: JSON.stringify(event),
-            })
-          }
-
-          if (streamState.messageCompleted) break
-        }
-
-        if (!streamState.messageCompleted && !errorForwarded) {
-          logger.warn(
-            "Responses stream ended without completion; sending error event",
-          )
-          const errorEvent = buildErrorEvent(
-            "Responses stream ended without completion",
-          )
-          await stream.writeSSE({
-            event: errorEvent.type,
-            data: JSON.stringify(errorEvent),
-          })
-        }
+        await streamResponsesWithWebSearch(stream, response, {
+          responsesPayload,
+          requestOptions: { vision, initiator: initiatorOverride ?? initiator },
+          requestedModel,
+        })
         return
       }
 
-      // No web_search tool — stream directly without buffering
-      const streamState = createResponsesStreamState()
-
-      for await (const chunk of response) {
-        const eventName = chunk.event
-        if (eventName === "ping") {
-          await stream.writeSSE({ event: "ping", data: '{"type":"ping"}' })
-          continue
-        }
-
-        const data = chunk.data
-        if (!data) continue
-
-        const parsed = JSON.parse(data) as ResponseStreamEvent
-        if (parsed.type === "error") {
-          const errorMessage =
-            "message" in parsed ?
-              (parsed as { message: string }).message
-            : "Upstream error"
-          const errorEvent = buildErrorEvent(errorMessage)
-          await stream.writeSSE({
-            event: errorEvent.type,
-            data: JSON.stringify(errorEvent),
-          })
-          continue
-        }
-
-        const events = translateResponsesStreamEvent(parsed, streamState)
-        for (const event of events) {
-          await stream.writeSSE({
-            event: event.type,
-            data: JSON.stringify(event),
-          })
-        }
-
-        if (streamState.messageCompleted) break
-      }
-
-      if (!streamState.messageCompleted) {
-        logger.warn(
-          "Responses stream ended without completion; sending error event",
-        )
-        const errorEvent = buildErrorEvent(
-          "Responses stream ended without completion",
-        )
-        await stream.writeSSE({
-          event: errorEvent.type,
-          data: JSON.stringify(errorEvent),
-        })
-      }
+      await streamResponsesDirect(stream, response)
     })
   }
 

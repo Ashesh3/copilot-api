@@ -605,7 +605,7 @@ const closeOpenBlocks = (
   state: ResponsesStreamState,
   events: Array<AnthropicStreamEventData>,
 ) => {
-  for (const blockIndex of [...state.openBlocks]) {
+  for (const blockIndex of state.openBlocks) {
     closeBlockIfOpen(state, blockIndex, events)
   }
 }

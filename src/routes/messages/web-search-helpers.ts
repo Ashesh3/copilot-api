@@ -190,7 +190,8 @@ const accumulateChunk = (
     if (choice.finish_reason) acc.finishReason = choice.finish_reason
     if (choice.delta.content) acc.content += choice.delta.content
     if (choice.delta.reasoning_text) {
-      acc.reasoningText = (acc.reasoningText ?? "") + choice.delta.reasoning_text
+      acc.reasoningText =
+        (acc.reasoningText ?? "") + choice.delta.reasoning_text
     }
     if (choice.delta.reasoning_opaque) {
       acc.reasoningOpaque = choice.delta.reasoning_opaque
@@ -203,7 +204,9 @@ const accumulateChunk = (
 
 const accumulateToolCalls = (
   map: Map<number, { id: string; name: string; arguments: string }>,
-  toolCalls: NonNullable<ChatCompletionChunk["choices"][0]["delta"]["tool_calls"]>,
+  toolCalls: NonNullable<
+    ChatCompletionChunk["choices"][0]["delta"]["tool_calls"]
+  >,
 ): void => {
   for (const tc of toolCalls) {
     const existing = map.get(tc.index)
@@ -252,7 +255,9 @@ export const reconstructFromChunks = (
           role: "assistant",
           content: acc.content || null,
           ...(acc.reasoningText ? { reasoning_text: acc.reasoningText } : {}),
-          ...(acc.reasoningOpaque ? { reasoning_opaque: acc.reasoningOpaque } : {}),
+          ...(acc.reasoningOpaque ?
+            { reasoning_opaque: acc.reasoningOpaque }
+          : {}),
           ...(toolCalls ? { tool_calls: toolCalls } : {}),
         },
         logprobs: null,
@@ -309,12 +314,23 @@ const emitContentBlock = async (
   block: AnthropicResponse["content"][0],
   index: number,
 ): Promise<void> => {
-  if (block.type === "text") {
-    await emitTextBlock(stream, block.text, index)
-  } else if (block.type === "thinking") {
-    await emitThinkingBlock(stream, block, index)
-  } else if (block.type === "tool_use") {
-    await emitToolUseBlock(stream, block, index)
+  switch (block.type) {
+    case "text": {
+      await emitTextBlock(stream, block.text, index)
+
+      break
+    }
+    case "thinking": {
+      await emitThinkingBlock(stream, block, index)
+
+      break
+    }
+    case "tool_use": {
+      await emitToolUseBlock(stream, block, index)
+
+      break
+    }
+    // No default
   }
 
   await stream.writeSSE({
@@ -389,7 +405,12 @@ const emitToolUseBlock = async (
     data: JSON.stringify({
       type: "content_block_start",
       index,
-      content_block: { type: "tool_use", id: block.id, name: block.name, input: {} },
+      content_block: {
+        type: "tool_use",
+        id: block.id,
+        name: block.name,
+        input: {},
+      },
     }),
   })
   await stream.writeSSE({
@@ -397,7 +418,10 @@ const emitToolUseBlock = async (
     data: JSON.stringify({
       type: "content_block_delta",
       index,
-      delta: { type: "input_json_delta", partial_json: JSON.stringify(block.input) },
+      delta: {
+        type: "input_json_delta",
+        partial_json: JSON.stringify(block.input),
+      },
     }),
   })
 }
@@ -410,7 +434,10 @@ const emitMessageEnd = async (
     event: "message_delta",
     data: JSON.stringify({
       type: "message_delta",
-      delta: { stop_reason: response.stop_reason, stop_sequence: response.stop_sequence },
+      delta: {
+        stop_reason: response.stop_reason,
+        stop_sequence: response.stop_sequence,
+      },
       usage: { output_tokens: response.usage.output_tokens },
     }),
   })
@@ -423,7 +450,9 @@ const emitMessageEnd = async (
 // --- Emit Responses result as SSE stream ---
 
 export const emitResponsesResultAsStream = async (
-  stream: { writeSSE: (data: { event?: string; data: string }) => Promise<void> },
+  stream: {
+    writeSSE: (data: { event?: string; data: string }) => Promise<void>
+  },
   result: ResponsesResult,
 ): Promise<void> => {
   let seqNum = 0
@@ -438,7 +467,11 @@ export const emitResponsesResultAsStream = async (
   })
 
   for (let i = 0; i < result.output.length; i++) {
-    seqNum = await emitResponsesOutputItem(stream, result.output[i], i, seqNum)
+    seqNum = await emitResponsesOutputItem(result.output[i], {
+      stream,
+      outputIndex: i,
+      seqNum,
+    })
   }
 
   await stream.writeSSE({
@@ -451,38 +484,54 @@ export const emitResponsesResultAsStream = async (
   })
 }
 
+type ResponsesSSEWriter = {
+  writeSSE: (data: { event?: string; data: string }) => Promise<void>
+}
+
+interface ResponsesEmitContext {
+  stream: ResponsesSSEWriter
+  outputIndex: number
+  seqNum: number
+}
+
 const emitResponsesOutputItem = async (
-  stream: { writeSSE: (data: { event?: string; data: string }) => Promise<void> },
   item: ResponseOutputItem,
-  outputIndex: number,
-  seqNum: number,
+  ctx: ResponsesEmitContext,
 ): Promise<number> => {
-  let seq = seqNum
+  let seq = ctx.seqNum
   const itemId =
-    item.id ?? (item.type === "function_call" ? `fc_${item.call_id}` : `item_${outputIndex}`)
+    item.id
+    ?? (item.type === "function_call" ?
+      `fc_${item.call_id}`
+    : `item_${ctx.outputIndex}`)
   const itemWithId = { ...item, id: itemId }
 
-  await stream.writeSSE({
+  await ctx.stream.writeSSE({
     event: "response.output_item.added",
     data: JSON.stringify({
       type: "response.output_item.added",
       item: { ...itemWithId, status: "in_progress" },
-      output_index: outputIndex,
+      output_index: ctx.outputIndex,
       sequence_number: seq++,
     }),
   })
 
   if (item.type === "message" && item.content) {
-    seq = await emitResponsesMessageContent(stream, item.content, itemId, outputIndex, seq)
+    seq = await emitResponsesMessageContent(item.content, {
+      stream: ctx.stream,
+      itemId,
+      outputIndex: ctx.outputIndex,
+      seqNum: seq,
+    })
   }
 
   if (item.type === "function_call") {
-    await stream.writeSSE({
+    await ctx.stream.writeSSE({
       event: "response.function_call_arguments.done",
       data: JSON.stringify({
         type: "response.function_call_arguments.done",
         item_id: itemId,
-        output_index: outputIndex,
+        output_index: ctx.outputIndex,
         arguments: item.arguments,
         name: item.name,
         sequence_number: seq++,
@@ -490,12 +539,12 @@ const emitResponsesOutputItem = async (
     })
   }
 
-  await stream.writeSSE({
+  await ctx.stream.writeSSE({
     event: "response.output_item.done",
     data: JSON.stringify({
       type: "response.output_item.done",
       item: itemWithId,
-      output_index: outputIndex,
+      output_index: ctx.outputIndex,
       sequence_number: seq++,
     }),
   })
@@ -503,37 +552,44 @@ const emitResponsesOutputItem = async (
   return seq
 }
 
-const emitResponsesMessageContent = async (
-  stream: { writeSSE: (data: { event?: string; data: string }) => Promise<void> },
-  content: Array<ResponseOutputContentBlock>,
-  itemId: string,
-  outputIndex: number,
-  seqNum: number,
-): Promise<number> => {
-  let seq = seqNum
+interface MessageContentEmitContext {
+  stream: ResponsesSSEWriter
+  itemId: string
+  outputIndex: number
+  seqNum: number
+}
 
-  for (let ci = 0; ci < content.length; ci++) {
-    const block = content[ci]
-    if (!("type" in block) || (block as { type: string }).type !== "output_text") continue
+const emitResponsesMessageContent = async (
+  content: Array<ResponseOutputContentBlock>,
+  ctx: MessageContentEmitContext,
+): Promise<number> => {
+  let seq = ctx.seqNum
+
+  for (const [ci, block] of content.entries()) {
+    if (
+      !("type" in block)
+      || (block as { type: string }).type !== "output_text"
+    )
+      continue
 
     const text = (block as unknown as ResponseOutputText).text
-    await stream.writeSSE({
+    await ctx.stream.writeSSE({
       event: "response.output_text.delta",
       data: JSON.stringify({
         type: "response.output_text.delta",
-        item_id: itemId,
-        output_index: outputIndex,
+        item_id: ctx.itemId,
+        output_index: ctx.outputIndex,
         content_index: ci,
         delta: text,
         sequence_number: seq++,
       }),
     })
-    await stream.writeSSE({
+    await ctx.stream.writeSSE({
       event: "response.output_text.done",
       data: JSON.stringify({
         type: "response.output_text.done",
-        item_id: itemId,
-        output_index: outputIndex,
+        item_id: ctx.itemId,
+        output_index: ctx.outputIndex,
         content_index: ci,
         text,
         sequence_number: seq++,
@@ -549,14 +605,9 @@ const emitResponsesMessageContent = async (
 export const hasWebSearchInChunks = (
   chunks: Array<ChatCompletionChunk>,
 ): boolean => {
-  for (const chunk of chunks) {
-    for (const choice of chunk.choices) {
-      if (choice.delta.tool_calls) {
-        for (const tc of choice.delta.tool_calls) {
-          if (tc.function?.name === "web_search") return true
-        }
-      }
-    }
-  }
-  return false
+  return chunks.some((chunk) =>
+    chunk.choices.some((choice) =>
+      choice.delta.tool_calls?.some((tc) => tc.function?.name === "web_search"),
+    ),
+  )
 }

@@ -54,7 +54,11 @@ function isImageMimeType(mimeType: string): boolean {
 }
 
 function isSupportedImageUri(uri: string): boolean {
-  return uri.startsWith("https://") || uri.startsWith("http://") || uri.startsWith("data:")
+  return (
+    uri.startsWith("https://")
+    || uri.startsWith("http://")
+    || uri.startsWith("data:")
+  )
 }
 
 function flattenContentParts(
