@@ -27,6 +27,8 @@ jobs:
 
       - name: Run tests
         run: bun test
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
 
       - name: Build
         run: bun run build

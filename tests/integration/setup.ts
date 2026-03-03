@@ -19,14 +19,21 @@ export function initializeTestState(): Promise<void> {
 }
 
 async function doInit(): Promise<void> {
-  // Read stored GitHub token
-  const githubToken = await fs.readFile(PATHS.GITHUB_TOKEN_PATH, "utf8")
-  if (!githubToken.trim()) {
+  // Read GitHub token: prefer GH_TOKEN env var (CI), fall back to stored file
+  let githubToken = process.env.GH_TOKEN?.trim() ?? ""
+  if (!githubToken) {
+    try {
+      githubToken = (await fs.readFile(PATHS.GITHUB_TOKEN_PATH, "utf8")).trim()
+    } catch {
+      // File doesn't exist
+    }
+  }
+  if (!githubToken) {
     throw new Error(
-      "No GitHub token found. Run 'copilot-api auth' first to authenticate.",
+      "No GitHub token found. Set GH_TOKEN env var or run 'copilot-api auth' to authenticate.",
     )
   }
-  state.githubToken = githubToken.trim()
+  state.githubToken = githubToken
 
   // Get Copilot token
   const { token } = await getCopilotToken()
