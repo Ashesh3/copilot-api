@@ -14,7 +14,7 @@ export const BASE_DELAY_SECONDS = 5
 export const BACKOFF_FACTOR = 2
 export const INITIAL_RETRY_BACKOFF_EXTRA_SECONDS = 1
 export const MAX_DELAY_SECONDS = 180
-export const RETRYABLE_STATUSES = new Set([429, 500, 502, 503])
+export const RETRYABLE_STATUSES = new Set([400, 429, 500, 502, 503])
 
 // --- Base URL ---
 
