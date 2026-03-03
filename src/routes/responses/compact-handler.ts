@@ -202,6 +202,31 @@ export const handleCompact = async (c: Context) => {
             .join("")
         }
         messages.push({ role, content })
+      } else if (itemType === "function_call") {
+        const fc = item as { name?: string; arguments?: string }
+        messages.push({
+          role: "assistant",
+          content: `[Tool call: ${fc.name ?? "unknown"}(${fc.arguments ?? ""})]`,
+        })
+      } else if (itemType === "function_call_output") {
+        const fco = item as { output?: string }
+        const output =
+          typeof fco.output === "string" ? fco.output : JSON.stringify(fco.output)
+        messages.push({ role: "user", content: `[Tool result: ${output}]` })
+      } else if (itemType === "reasoning") {
+        const reasoning = item as {
+          summary?: Array<{ text?: string }>
+        }
+        const text = reasoning.summary
+          ?.map((s) => s.text ?? "")
+          .filter(Boolean)
+          .join("\n")
+        if (text) {
+          messages.push({
+            role: "assistant",
+            content: `[Thinking: ${text}]`,
+          })
+        }
       }
     }
 

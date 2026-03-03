@@ -33,6 +33,7 @@ import {
   type ResponsesResult,
   type ResponseStreamEvent,
 } from "~/services/copilot/create-responses"
+import { isWebSearchToolType } from "~/services/copilot/mcp-web-search"
 
 import {
   type AnthropicMessagesPayload,
@@ -58,6 +59,13 @@ const logger = createHandlerLogger("messages-handler")
 
 const compactSystemPromptStart =
   "You are a helpful AI assistant tasked with summarizing conversations"
+
+const hasWebSearchToolInPayload = (
+  tools: AnthropicMessagesPayload["tools"],
+): boolean => {
+  if (!tools) return false
+  return tools.some((tool) => isWebSearchToolType(tool))
+}
 
 export async function handleCompletion(c: Context) {
   await checkRateLimit(state)
@@ -131,10 +139,16 @@ export async function handleCompletion(c: Context) {
     return await handleWithResponsesApi(c, anthropicPayload, {
       initiatorOverride,
       effortOverride: suffixEffort,
+      requestedModel,
     })
   }
 
-  return await handleWithChatCompletions(c, anthropicPayload, initiatorOverride)
+  return await handleWithChatCompletions(
+    c,
+    anthropicPayload,
+    initiatorOverride,
+    requestedModel,
+  )
 }
 
 const RESPONSES_ENDPOINT = "/responses"
@@ -143,6 +157,7 @@ const handleWithChatCompletions = async (
   c: Context,
   anthropicPayload: AnthropicMessagesPayload,
   initiatorOverride?: "agent" | "user",
+  requestedModel?: string,
 ) => {
   const openAIPayload = translateToOpenAI(anthropicPayload)
 
@@ -204,7 +219,7 @@ const handleWithChatCompletions = async (
       "Non-streaming response from Copilot:",
       JSON.stringify(finalResponse).slice(-400),
     )
-    const anthropicResponse = translateToAnthropic(finalResponse)
+    const anthropicResponse = translateToAnthropic(finalResponse, requestedModel)
     logger.debug(
       "Translated Anthropic response:",
       JSON.stringify(anthropicResponse),
@@ -212,31 +227,65 @@ const handleWithChatCompletions = async (
     return c.json(anthropicResponse)
   }
 
-  // Streaming: buffer first response to check for web_search tool calls
+  // Streaming path
+  const needsWebSearchBuffering = hasWebSearchToolInPayload(
+    anthropicPayload.tools,
+  )
+
   logger.debug("Streaming response from Copilot")
   return streamSSE(c, async (stream) => {
-    const bufferedChunks: Array<ChatCompletionChunk> = []
+    if (needsWebSearchBuffering) {
+      // Buffer all chunks to detect web_search tool calls
+      const bufferedChunks: Array<ChatCompletionChunk> = []
 
-    for await (const rawEvent of response) {
-      if (rawEvent.data === "[DONE]") break
-      if (!rawEvent.data) continue
-      bufferedChunks.push(JSON.parse(rawEvent.data) as ChatCompletionChunk)
-    }
-
-    if (hasWebSearchInChunks(bufferedChunks)) {
-      const reconstructed = reconstructFromChunks(bufferedChunks)
-      if (reconstructed) {
-        const resolved = await resolveWebSearchCalls(
-          reconstructed,
-          finalPayload,
-          initiatorOverride,
-        )
-        const anthropicResponse = translateToAnthropic(resolved)
-        await emitAnthropicResponseAsStream(stream, anthropicResponse)
-        return
+      for await (const rawEvent of response) {
+        if (rawEvent.data === "[DONE]") break
+        if (!rawEvent.data) continue
+        bufferedChunks.push(JSON.parse(rawEvent.data) as ChatCompletionChunk)
       }
+
+      if (hasWebSearchInChunks(bufferedChunks)) {
+        const reconstructed = reconstructFromChunks(bufferedChunks)
+        if (reconstructed) {
+          const resolved = await resolveWebSearchCalls(
+            reconstructed,
+            finalPayload,
+            initiatorOverride,
+          )
+          const anthropicResponse = translateToAnthropic(
+            resolved,
+            requestedModel,
+          )
+          await emitAnthropicResponseAsStream(stream, anthropicResponse)
+          return
+        }
+      }
+
+      // No web_search calls — replay buffered chunks
+      const streamState: AnthropicStreamState = {
+        messageStartSent: false,
+        contentBlockIndex: 0,
+        contentBlockOpen: false,
+        toolCalls: {},
+      }
+
+      for (const chunk of bufferedChunks) {
+        const events = translateChunkToAnthropicEvents(
+          chunk,
+          streamState,
+          requestedModel,
+        )
+        for (const event of events) {
+          await stream.writeSSE({
+            event: event.type,
+            data: JSON.stringify(event),
+          })
+        }
+      }
+      return
     }
 
+    // No web_search tool — stream directly without buffering
     const streamState: AnthropicStreamState = {
       messageStartSent: false,
       contentBlockIndex: 0,
@@ -244,8 +293,16 @@ const handleWithChatCompletions = async (
       toolCalls: {},
     }
 
-    for (const chunk of bufferedChunks) {
-      const events = translateChunkToAnthropicEvents(chunk, streamState)
+    for await (const rawEvent of response) {
+      if (rawEvent.data === "[DONE]") break
+      if (!rawEvent.data) continue
+
+      const chunk = JSON.parse(rawEvent.data) as ChatCompletionChunk
+      const events = translateChunkToAnthropicEvents(
+        chunk,
+        streamState,
+        requestedModel,
+      )
       for (const event of events) {
         await stream.writeSSE({
           event: event.type,
@@ -262,9 +319,10 @@ const handleWithResponsesApi = async (
   options?: {
     initiatorOverride?: "agent" | "user"
     effortOverride?: "low" | "medium" | "high" | "xhigh"
+    requestedModel?: string
   },
 ) => {
-  const { initiatorOverride, effortOverride } = options ?? {}
+  const { initiatorOverride, effortOverride, requestedModel } = options ?? {}
   const responsesPayload = translateAnthropicMessagesToResponsesPayload(
     anthropicPayload,
     effortOverride,
@@ -280,18 +338,113 @@ const handleWithResponsesApi = async (
     initiator: initiatorOverride ?? initiator,
   })
 
+  const needsWebSearchBuffering = hasWebSearchToolInPayload(
+    anthropicPayload.tools,
+  )
+
   if (responsesPayload.stream && isAsyncIterable(response)) {
     logger.debug("Streaming response from Copilot (Responses API)")
     return streamSSE(c, async (stream) => {
-      // Buffer all stream events to check for web_search function calls
-      const bufferedEvents: Array<ResponseStreamEvent> = []
-      let hasWebSearchCall = false
-      let completedResult: ResponsesResult | null = null
+      if (needsWebSearchBuffering) {
+        // Buffer all stream events to check for web_search function calls
+        const bufferedEvents: Array<ResponseStreamEvent> = []
+        let hasWebSearchCall = false
+        let completedResult: ResponsesResult | null = null
+
+        for await (const chunk of response) {
+          const eventName = chunk.event
+          if (eventName === "ping") {
+            await stream.writeSSE({ event: "ping", data: '{"type":"ping"}' })
+            continue
+          }
+
+          const data = chunk.data
+          if (!data) continue
+
+          const parsed = JSON.parse(data) as ResponseStreamEvent
+          bufferedEvents.push(parsed)
+
+          if (
+            parsed.type === "response.output_item.done"
+            && "item" in parsed
+            && (parsed.item as { type?: string }).type === "function_call"
+            && (parsed.item as { name?: string }).name === "web_search"
+          ) {
+            hasWebSearchCall = true
+          }
+
+          if (
+            (parsed.type === "response.completed"
+              || parsed.type === "response.incomplete")
+            && "response" in parsed
+          ) {
+            completedResult = parsed.response as ResponsesResult
+          }
+        }
+
+        if (hasWebSearchCall && completedResult) {
+          const resolved = await resolveResponsesWebSearchCalls(
+            completedResult,
+            responsesPayload,
+            { vision, initiator: initiatorOverride ?? initiator },
+          )
+          const anthropicResponse =
+            translateResponsesResultToAnthropic(resolved)
+          if (requestedModel) anthropicResponse.model = requestedModel
+          await emitAnthropicResponseAsStream(stream, anthropicResponse)
+          return
+        }
+
+        // Replay buffered events
+        const streamState = createResponsesStreamState()
+        let errorForwarded = false
+        for (const parsed of bufferedEvents) {
+          if (parsed.type === "error") {
+            const errorMessage =
+              "message" in parsed ?
+                (parsed as { message: string }).message
+              : "Upstream error"
+            const errorEvent = buildErrorEvent(errorMessage)
+            await stream.writeSSE({
+              event: errorEvent.type,
+              data: JSON.stringify(errorEvent),
+            })
+            errorForwarded = true
+            continue
+          }
+
+          const events = translateResponsesStreamEvent(parsed, streamState)
+          for (const event of events) {
+            await stream.writeSSE({
+              event: event.type,
+              data: JSON.stringify(event),
+            })
+          }
+
+          if (streamState.messageCompleted) break
+        }
+
+        if (!streamState.messageCompleted && !errorForwarded) {
+          logger.warn(
+            "Responses stream ended without completion; sending error event",
+          )
+          const errorEvent = buildErrorEvent(
+            "Responses stream ended without completion",
+          )
+          await stream.writeSSE({
+            event: errorEvent.type,
+            data: JSON.stringify(errorEvent),
+          })
+        }
+        return
+      }
+
+      // No web_search tool — stream directly without buffering
+      const streamState = createResponsesStreamState()
 
       for await (const chunk of response) {
         const eventName = chunk.event
         if (eventName === "ping") {
-          // Forward keepalive pings immediately during buffering
           await stream.writeSSE({ event: "ping", data: '{"type":"ping"}' })
           continue
         }
@@ -300,70 +453,31 @@ const handleWithResponsesApi = async (
         if (!data) continue
 
         const parsed = JSON.parse(data) as ResponseStreamEvent
-        bufferedEvents.push(parsed)
-
-        // Check for web_search function calls
-        if (
-          parsed.type === "response.output_item.done"
-          && "item" in parsed
-          && (parsed.item as { type?: string }).type === "function_call"
-          && (parsed.item as { name?: string }).name === "web_search"
-        ) {
-          hasWebSearchCall = true
-        }
-
-        // Capture the completed result for web search resolution
-        if (
-          (parsed.type === "response.completed"
-            || parsed.type === "response.incomplete")
-          && "response" in parsed
-        ) {
-          completedResult = parsed.response as ResponsesResult
-        }
-      }
-
-      if (hasWebSearchCall && completedResult) {
-        // Execute web searches and get final response
-        const resolved = await resolveResponsesWebSearchCalls(
-          completedResult,
-          responsesPayload,
-          { vision, initiator: initiatorOverride ?? initiator },
-        )
-        const anthropicResponse = translateResponsesResultToAnthropic(resolved)
-        await emitAnthropicResponseAsStream(stream, anthropicResponse)
-        return
-      }
-
-      // No web_search calls — replay buffered events as normal stream
-      const streamState = createResponsesStreamState()
-      let errorForwarded = false
-      for (const parsed of bufferedEvents) {
-        // Forward upstream error events as Anthropic error events
         if (parsed.type === "error") {
           const errorMessage =
-            "message" in parsed ? (parsed as { message: string }).message : "Upstream error"
+            "message" in parsed ?
+              (parsed as { message: string }).message
+            : "Upstream error"
           const errorEvent = buildErrorEvent(errorMessage)
           await stream.writeSSE({
             event: errorEvent.type,
             data: JSON.stringify(errorEvent),
           })
-          errorForwarded = true
           continue
         }
 
         const events = translateResponsesStreamEvent(parsed, streamState)
         for (const event of events) {
-          const eventData = JSON.stringify(event)
           await stream.writeSSE({
             event: event.type,
-            data: eventData,
+            data: JSON.stringify(event),
           })
         }
 
         if (streamState.messageCompleted) break
       }
 
-      if (!streamState.messageCompleted && !errorForwarded) {
+      if (!streamState.messageCompleted) {
         logger.warn(
           "Responses stream ended without completion; sending error event",
         )
@@ -391,6 +505,7 @@ const handleWithResponsesApi = async (
     JSON.stringify(resolved).slice(-400),
   )
   const anthropicResponse = translateResponsesResultToAnthropic(resolved)
+  if (requestedModel) anthropicResponse.model = requestedModel
   logger.debug(
     "Translated Anthropic response:",
     JSON.stringify(anthropicResponse),
