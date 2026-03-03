@@ -1,0 +1,65 @@
+name: Nightly Smoke Tests
+
+on:
+  schedule:
+    - cron: "0 0 * * *" # midnight UTC
+  workflow_dispatch: # manual trigger
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies & build
+        run: bun install && bun run build
+
+      - name: Start copilot-api
+        run: |
+          bun run dist/main.js start -g "$GH_TOKEN" --host 0.0.0.0 &
+          echo "Waiting for server..."
+          curl --retry 15 --retry-delay 3 --retry-all-errors -sf http://localhost:4141/ > /dev/null
+          echo "Server is up"
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+
+      - name: Install CLI tools
+        run: |
+          npm i -g @anthropic-ai/claude-code@latest &
+          npm i -g @openai/codex@latest &
+          pip install gemini-cli &
+          wait
+          echo "--- Installed versions ---"
+          claude --version || echo "claude not found"
+          codex --version || echo "codex not found"
+          gemini --version || echo "gemini not found"
+
+      - name: Run smoke tests
+        run: |
+          chmod +x tests/smoke/run-smoke-tests.sh
+          tests/smoke/run-smoke-tests.sh http://localhost:4141
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-test-logs
+          path: tests/smoke/*.log
+          retention-days: 7
+          if-no-files-found: ignore
