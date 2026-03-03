@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SERVER_URL="${1:?Usage: $0 <server-url>}"
+export SERVER_URL
 PASS=0
 FAIL=0
 SKIP=0
@@ -141,7 +142,7 @@ if command -v gemini &>/dev/null; then
 
   cleanup_smoke_file
   run_test "gemini:tool-calling" '
-    output=$(gemini --model gemini-2.5-pro --sandbox -p "Create a file called smoke.txt with the content: hello" 2>&1)
+    output=$(gemini --model gemini-2.5-pro -p "Create a file called smoke.txt with the content: hello" 2>&1)
     echo "$output"
     # Gemini may create the file or just describe how to — check both
     test -f smoke.txt || echo "$output" | grep -qi "smoke.txt"
