@@ -514,6 +514,7 @@ const messageStart = (
           input_tokens: inputTokens,
           output_tokens: 0,
           cache_read_input_tokens: inputCachedTokens ?? 0,
+          cache_creation_input_tokens: 0,
         },
       },
     },
@@ -604,7 +605,7 @@ const closeOpenBlocks = (
   state: ResponsesStreamState,
   events: Array<AnthropicStreamEventData>,
 ) => {
-  for (const blockIndex of state.openBlocks) {
+  for (const blockIndex of [...state.openBlocks]) {
     closeBlockIfOpen(state, blockIndex, events)
   }
 }

@@ -387,13 +387,10 @@ function buildAnthropicResponse(
     stop_reason: mapOpenAIStopReasonToAnthropic(stopReason),
     stop_sequence: null,
     usage: {
-      // Anthropic input_tokens = uncached tokens only
-      // OpenAI prompt_tokens includes cached, so subtract them
       input_tokens: (response.usage?.prompt_tokens ?? 0) - cachedTokens,
       output_tokens: response.usage?.completion_tokens ?? 0,
-      ...(cachedTokens > 0 && {
-        cache_read_input_tokens: cachedTokens,
-      }),
+      cache_read_input_tokens: cachedTokens,
+      cache_creation_input_tokens: 0,
     },
   }
 }
@@ -424,6 +421,16 @@ function getAnthropicToolUseBlocks(
     type: "tool_use",
     id: toolCall.id,
     name: toolCall.function.name,
-    input: JSON.parse(toolCall.function.arguments) as Record<string, unknown>,
+    input: safeParseFunctionArgs(toolCall.function.arguments),
   }))
+}
+
+const safeParseFunctionArgs = (
+  rawArguments: string,
+): Record<string, unknown> => {
+  try {
+    return JSON.parse(rawArguments) as Record<string, unknown>
+  } catch {
+    return { raw_arguments: rawArguments }
+  }
 }
