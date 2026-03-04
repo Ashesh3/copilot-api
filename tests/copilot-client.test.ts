@@ -75,6 +75,23 @@ describe("isDeterministic400", () => {
     expect(isDeterministic400("Invalid signature in thinking block")).toBe(true)
   })
 
+  test("should detect model_not_supported error", () => {
+    const body =
+      '{"error":{"message":"The requested model is not supported.","code":"model_not_supported","param":"model","type":"invalid_request_error"}}'
+    expect(isDeterministic400(body)).toBe(true)
+  })
+
+  test("should detect messages must be non-empty error", () => {
+    const body = '{"error":{"message":"messages must be non-empty","code":""}}'
+    expect(isDeterministic400(body)).toBe(true)
+  })
+
+  test("should detect invalid_request_body error", () => {
+    const body =
+      '{"error":{"message":"some validation error","code":"invalid_request_body"}}'
+    expect(isDeterministic400(body)).toBe(true)
+  })
+
   test("should NOT flag transient 400 errors", () => {
     const body =
       '{"error":{"message":"rate limit exceeded","code":"rate_limit"}}'

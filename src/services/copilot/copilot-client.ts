@@ -101,9 +101,15 @@ export function parseQuotaHeaders(
  * These should not be retried as they will fail the same way every time.
  */
 export function isDeterministic400(body: string): boolean {
-  return (
-    body.includes("Invalid signature") || body.includes("Invalid `signature`")
-  )
+  const patterns = [
+    "Invalid signature",
+    "Invalid `signature`",
+    "model_not_supported",
+    "model is not supported",
+    "messages must be non-empty",
+    "invalid_request_body",
+  ]
+  return patterns.some((pattern) => body.includes(pattern))
 }
 
 async function isDeterministic400Response(
