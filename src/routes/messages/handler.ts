@@ -55,6 +55,25 @@ import {
   resolveWebSearchCalls,
 } from "./web-search-helpers"
 
+/**
+ * Strip thinking blocks from all assistant messages in the payload.
+ * Returns true if any thinking blocks were removed.
+ * Used to recover from "Invalid signature in thinking block" errors
+ * when models are switched mid-conversation.
+ */
+export function stripThinkingBlocks(
+  payload: AnthropicMessagesPayload,
+): boolean {
+  let stripped = false
+  for (const msg of payload.messages) {
+    if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue
+    const before = msg.content.length
+    msg.content = msg.content.filter((block) => block.type !== "thinking")
+    if (msg.content.length < before) stripped = true
+  }
+  return stripped
+}
+
 const logger = createHandlerLogger("messages-handler")
 
 const compactSystemPromptStart =

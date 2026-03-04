@@ -3,6 +3,7 @@ import { z } from "zod"
 
 import type { AnthropicMessagesPayload } from "~/routes/messages/anthropic-types"
 
+import { stripThinkingBlocks } from "../src/routes/messages/handler"
 import { translateToOpenAI } from "../src/routes/messages/non-stream-translation"
 
 // Zod schema for a single message in the chat completion request.
@@ -309,5 +310,83 @@ describe("OpenAI Chat Completion v1 Request Payload Validation with Zod", () => 
     expect(isValidChatCompletionRequest(undefined)).toBe(false)
     expect(isValidChatCompletionRequest("a string")).toBe(false)
     expect(isValidChatCompletionRequest(123)).toBe(false)
+  })
+})
+
+describe("stripThinkingBlocks", () => {
+  test("should remove thinking blocks from assistant messages", () => {
+    const payload = {
+      model: "claude-opus-4.6",
+      messages: [
+        { role: "user", content: "Hello" },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "thinking",
+              thinking: "Let me think...",
+              signature: "sig-abc",
+            },
+            { type: "text", text: "Hi there!" },
+          ],
+        },
+        { role: "user", content: "Follow up" },
+      ],
+      max_tokens: 100,
+    }
+
+    const stripped = stripThinkingBlocks(payload as AnthropicMessagesPayload)
+    expect(stripped).toBe(true)
+
+    const assistant = payload.messages[1]
+    expect(Array.isArray(assistant.content)).toBe(true)
+    const content = assistant.content as Array<{ type: string }>
+    expect(content).toHaveLength(1)
+    expect(content[0].type).toBe("text")
+  })
+
+  test("should handle assistant messages with string content", () => {
+    const payload = {
+      model: "claude-opus-4.6",
+      messages: [
+        { role: "user", content: "Hello" },
+        { role: "assistant", content: "Simple response" },
+      ],
+      max_tokens: 100,
+    }
+
+    const stripped = stripThinkingBlocks(payload as AnthropicMessagesPayload)
+    expect(stripped).toBe(false)
+    expect(payload.messages[1].content).toBe("Simple response")
+  })
+
+  test("should return false when no thinking blocks exist", () => {
+    const payload = {
+      model: "claude-opus-4.6",
+      messages: [
+        { role: "user", content: "Hello" },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "Response" }],
+        },
+      ],
+      max_tokens: 100,
+    }
+
+    const stripped = stripThinkingBlocks(payload as AnthropicMessagesPayload)
+    expect(stripped).toBe(false)
+  })
+
+  test("should not modify user messages", () => {
+    const payload = {
+      model: "claude-opus-4.6",
+      messages: [{ role: "user", content: [{ type: "text", text: "Hello" }] }],
+      max_tokens: 100,
+    }
+
+    const stripped = stripThinkingBlocks(payload as AnthropicMessagesPayload)
+    expect(stripped).toBe(false)
+    const content = payload.messages[0].content as Array<{ type: string }>
+    expect(content).toHaveLength(1)
   })
 })
