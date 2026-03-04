@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test"
 
-import { addPromptCaching } from "~/services/copilot/copilot-client"
+import {
+  addPromptCaching,
+  isDeterministic400,
+} from "~/services/copilot/copilot-client"
 
 describe("addPromptCaching", () => {
   test("adds cache control to the last non-user message", () => {
@@ -58,5 +61,31 @@ describe("addPromptCaching", () => {
     expect(
       (tools[0] as Record<string, unknown>).copilot_cache_control,
     ).toBeUndefined()
+  })
+})
+
+describe("isDeterministic400", () => {
+  test("should detect Invalid signature error", () => {
+    const body =
+      '{"error":{"message":"messages.1.content.0: Invalid `signature` in `thinking` block","code":"invalid_request_body"}}'
+    expect(isDeterministic400(body)).toBe(true)
+  })
+
+  test("should detect plain Invalid signature text", () => {
+    expect(isDeterministic400("Invalid signature in thinking block")).toBe(true)
+  })
+
+  test("should NOT flag transient 400 errors", () => {
+    const body =
+      '{"error":{"message":"rate limit exceeded","code":"rate_limit"}}'
+    expect(isDeterministic400(body)).toBe(false)
+  })
+
+  test("should handle empty body", () => {
+    expect(isDeterministic400("")).toBe(false)
+  })
+
+  test("should handle non-JSON body", () => {
+    expect(isDeterministic400("Bad Request")).toBe(false)
   })
 })

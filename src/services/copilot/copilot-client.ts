@@ -94,6 +94,27 @@ export function parseQuotaHeaders(
   return found ? result : undefined
 }
 
+// --- Deterministic 400 Detection ---
+
+/**
+ * Check if a 400 response body indicates a deterministic (non-transient) error.
+ * These should not be retried as they will fail the same way every time.
+ */
+export function isDeterministic400(body: string): boolean {
+  return (
+    body.includes("Invalid signature") || body.includes("Invalid `signature`")
+  )
+}
+
+async function isDeterministic400Response(
+  response: Response,
+): Promise<boolean> {
+  const body = await response.clone().text()
+  if (!isDeterministic400(body)) return false
+  consola.warn(`Deterministic HTTP 400, skipping retry: ${body.slice(0, 200)}`)
+  return true
+}
+
 // --- Retryable Error Detection ---
 
 function isRetryableError(error: unknown): boolean {
@@ -228,6 +249,14 @@ export async function copilotFetch(
         RETRYABLE_STATUSES.has(response.status)
         && attempt < maxAttempts - 1
       ) {
+        // Don't retry deterministic 400 errors (e.g. invalid thinking block signatures)
+        if (
+          response.status === 400
+          && (await isDeterministic400Response(response))
+        ) {
+          return response
+        }
+
         lastResponse = response
         const rawDelaySeconds = calculateHttpRetryDelay(
           response.headers.get("retry-after"),
