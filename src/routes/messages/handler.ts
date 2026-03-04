@@ -578,6 +578,35 @@ const handleWithResponsesApi = async (
     requestedModel?: string
   },
 ) => {
+  try {
+    return await executeResponsesApi(c, anthropicPayload, options)
+  } catch (error) {
+    if (error instanceof HTTPError && error.response.status === 400) {
+      const body = await error.response.clone().text()
+      if (
+        (body.includes("Invalid signature")
+          || body.includes("Invalid `signature`"))
+        && stripThinkingBlocks(anthropicPayload)
+      ) {
+        logger.warn(
+          "Stripped thinking blocks due to invalid signature (Responses API), retrying",
+        )
+        return await executeResponsesApi(c, anthropicPayload, options)
+      }
+    }
+    throw error
+  }
+}
+
+const executeResponsesApi = async (
+  c: Context,
+  anthropicPayload: AnthropicMessagesPayload,
+  options?: {
+    initiatorOverride?: "agent" | "user"
+    effortOverride?: "low" | "medium" | "high" | "xhigh"
+    requestedModel?: string
+  },
+) => {
   const { initiatorOverride, effortOverride, requestedModel } = options ?? {}
   const responsesPayload = translateAnthropicMessagesToResponsesPayload(
     anthropicPayload,
