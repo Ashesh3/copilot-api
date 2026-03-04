@@ -6,6 +6,7 @@ import type { Model } from "~/services/copilot/get-models"
 
 import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
+import { HTTPError } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
 import { normalizeModelName } from "~/lib/model-resolver"
 import { parseModelSuffix } from "~/lib/model-suffix"
@@ -247,6 +248,34 @@ const tryCountTokens = async (
 }
 
 const handleWithChatCompletions = async (
+  c: Context,
+  anthropicPayload: AnthropicMessagesPayload,
+  options?: {
+    initiatorOverride?: "agent" | "user"
+    requestedModel?: string
+  },
+) => {
+  try {
+    return await executeChatCompletions(c, anthropicPayload, options)
+  } catch (error) {
+    if (error instanceof HTTPError && error.response.status === 400) {
+      const body = await error.response.clone().text()
+      if (
+        (body.includes("Invalid signature")
+          || body.includes("Invalid `signature`"))
+        && stripThinkingBlocks(anthropicPayload)
+      ) {
+        logger.warn(
+          "Stripped thinking blocks due to invalid signature, retrying",
+        )
+        return await executeChatCompletions(c, anthropicPayload, options)
+      }
+    }
+    throw error
+  }
+}
+
+const executeChatCompletions = async (
   c: Context,
   anthropicPayload: AnthropicMessagesPayload,
   options?: {
