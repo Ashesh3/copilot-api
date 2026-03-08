@@ -15,6 +15,7 @@ import { initSentry, setupSentryShutdown } from "./lib/sentry"
 import { generateEnvScript } from "./lib/shell"
 import { state } from "./lib/state"
 import { setupCopilotToken, setupGitHubToken } from "./lib/token"
+import { tokenPool } from "./lib/token-pool"
 import { cacheModels } from "./lib/utils"
 import { server } from "./server"
 import { getVSCodeVersion } from "./services/get-vscode-version"
@@ -97,6 +98,91 @@ async function promptClaudeCodeSetup(
   }
 }
 
+/**
+ * Set up multi-token mode from GITHUB_TOKENS env var.
+ * Returns true if multi-token mode was activated.
+ */
+async function initializeMultiToken(
+  options: RunServerOptions,
+): Promise<boolean> {
+  const githubTokensEnv = process.env.GITHUB_TOKENS
+  if (!githubTokensEnv) return false
+
+  const tokens = githubTokensEnv
+    .split(",")
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0)
+
+  if (tokens.length === 0) return false
+
+  state.isMultiToken = true
+  consola.info(`Multi-token mode: ${tokens.length} GitHub tokens configured`)
+
+  tokenPool.setSessionId(state.sessionId)
+
+  // Add all accounts
+  const accounts = tokens.map((token, i) =>
+    tokenPool.addAccount(token, options.accountType, i),
+  )
+
+  // Initialize each account, log warnings on failure
+  for (const account of accounts) {
+    try {
+      await tokenPool.initializeAccount(account, options.showToken)
+    } catch (error) {
+      consola.warn(
+        `Failed to initialize account #${account.id}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+      tokenPool.markUnhealthy(account)
+    }
+  }
+
+  // Check that at least one account is healthy
+  const healthyAccounts = accounts.filter((a) => a.healthy)
+  if (healthyAccounts.length === 0) {
+    consola.error(
+      "No healthy accounts available. All GitHub tokens failed to initialize.",
+    )
+    process.exit(1)
+  }
+
+  tokenPool.rebuildModelIndex()
+  state.models = tokenPool.getAllModels()
+
+  // Backwards compatibility: set state tokens to first healthy account
+  const firstHealthy = healthyAccounts[0]
+  state.copilotToken = firstHealthy.copilotToken
+  state.githubToken = firstHealthy.githubToken
+
+  // Cache VS Code version and pass to token pool
+  await cacheVSCodeVersion()
+  if (state.vsCodeVersion) {
+    tokenPool.setVSCodeVersion(state.vsCodeVersion)
+  }
+
+  return true
+}
+
+/**
+ * Initialize tokens: try multi-token mode first, fall back to single-token.
+ */
+async function initializeTokens(options: RunServerOptions): Promise<void> {
+  const multiTokenActive = await initializeMultiToken(options)
+  if (multiTokenActive) return
+
+  // Single-token mode (existing flow)
+  if (options.githubToken) {
+    state.githubToken = options.githubToken
+    consola.info("Using provided GitHub token")
+  } else {
+    await setupGitHubToken()
+  }
+
+  await setupCopilotToken()
+  await cacheVSCodeVersion()
+  await cacheModels()
+}
+
 export async function runServer(options: RunServerOptions): Promise<void> {
   initSentry()
 
@@ -142,16 +228,8 @@ export async function runServer(options: RunServerOptions): Promise<void> {
 
   await ensurePaths()
   mergeConfigWithDefaults()
-  if (options.githubToken) {
-    state.githubToken = options.githubToken
-    consola.info("Using provided GitHub token")
-  } else {
-    await setupGitHubToken()
-  }
 
-  await setupCopilotToken()
-  await cacheVSCodeVersion()
-  await cacheModels()
+  await initializeTokens(options)
 
   const allModelIds = getAllModelIds()
 
