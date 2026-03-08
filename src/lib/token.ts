@@ -1,6 +1,7 @@
 import consola from "consola"
 import fs from "node:fs/promises"
 
+import { addAccount, getStoredTokens } from "~/lib/accounts-store"
 import { PATHS } from "~/lib/paths"
 import { getCopilotToken } from "~/services/github/get-copilot-token"
 import { getDeviceCode } from "~/services/github/get-device-code"
@@ -49,12 +50,15 @@ export async function setupGitHubToken(
   options?: SetupGitHubTokenOptions,
 ): Promise<void> {
   try {
-    const githubToken = await readGithubToken()
+    // Try stored accounts first, then legacy file
+    const storedTokens = await getStoredTokens()
+    const legacyToken = await readGithubToken()
+    const existingToken = storedTokens[0] ?? legacyToken
 
-    if (githubToken && !options?.force) {
-      state.githubToken = githubToken
+    if (existingToken && !options?.force) {
+      state.githubToken = existingToken
       if (state.showToken) {
-        consola.info("GitHub token:", githubToken)
+        consola.info("GitHub token:", existingToken)
       }
       await logUser()
 
@@ -70,7 +74,9 @@ export async function setupGitHubToken(
     )
 
     const token = await pollAccessToken(response)
+    // Save to both legacy file and accounts store
     await writeGithubToken(token)
+    await addAccount(token)
     state.githubToken = token
 
     if (state.showToken) {

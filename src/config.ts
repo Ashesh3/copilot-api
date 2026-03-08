@@ -1,6 +1,11 @@
 import { defineCommand } from "citty"
 import consola from "consola"
 
+import {
+  loadAccounts,
+  addAccount as storeAddAccount,
+  removeAccount as storeRemoveAccount,
+} from "~/lib/accounts-store"
 import { GITHUB_API_BASE_URL } from "~/lib/api-config"
 import {
   addReplacement,
@@ -328,10 +333,11 @@ function maskToken(token: string): string {
   return `${token.slice(0, 4)}...${token.slice(-4)}`
 }
 
-function listAccounts(): void {
+async function listAccounts(): Promise<void> {
+  // If the server is running, show live data from tokenPool
   if (tokenPool.size > 0) {
     const accounts = tokenPool.getAllAccounts()
-    consola.info("\n👤 Accounts:\n")
+    consola.info("\n👤 Accounts (live):\n")
     consola.info(
       `${"#".padEnd(4)} ${"Token".padEnd(16)} ${"Status".padEnd(10)} ${"Models".padEnd(8)} Type`,
     )
@@ -347,67 +353,88 @@ function listAccounts(): void {
     return
   }
 
-  const tokensEnv = process.env.GITHUB_TOKENS
-  if (!tokensEnv) {
-    consola.info(
-      "No accounts loaded. Set GITHUB_TOKENS environment variable with comma-separated GitHub tokens.",
-    )
+  // Otherwise, show stored accounts from file
+  const stored = await loadAccounts()
+  if (stored.length === 0) {
+    consola.info('No accounts configured. Use "Add account" to add one.')
     return
   }
 
-  const tokens = tokensEnv
-    .split(",")
-    .map((t) => t.trim())
-    .filter(Boolean)
-  consola.info("\n👤 Tokens from GITHUB_TOKENS (server not running):\n")
-  for (const [i, token] of tokens.entries()) {
-    console.log(`  ${i + 1}. ${maskToken(token)}`)
+  consola.info(`\n👤 Stored accounts (${stored.length}):\n`)
+  for (const [i, account] of stored.entries()) {
+    const label = account.label ? ` (${account.label})` : ""
+    console.log(`  ${i + 1}. ${maskToken(account.token)}${label}`)
   }
   console.log()
 }
 
 async function showAccountDetails(): Promise<void> {
-  if (tokenPool.size === 0) {
-    consola.info(
-      "No accounts initialized. Run the server first to see account details.",
-    )
+  // Live data from server
+  if (tokenPool.size > 0) {
+    const accounts = tokenPool.getAllAccounts()
+    const options = accounts.map((account) => ({
+      label: `#${account.id} ${maskToken(account.githubToken)} (${account.accountType})`,
+      value: String(account.id),
+    }))
+
+    const selected = await consola.prompt("Select an account:", {
+      type: "select",
+      options,
+    })
+
+    if (typeof selected === "symbol") {
+      consola.info("Cancelled.")
+      return
+    }
+
+    const account = accounts.find((a) => String(a.id) === selected)
+    if (!account) {
+      consola.error("Account not found.")
+      return
+    }
+
+    consola.info(`\n🔍 Account #${account.id}`)
+    consola.info(`  Token: ${maskToken(account.githubToken)}`)
+    consola.info(`  Type: ${account.accountType}`)
+    consola.info(`  Status: ${account.healthy ? "✓ healthy" : "✗ unhealthy"}`)
+    consola.info(`  Models (${account.models.size}):`)
+    for (const model of account.models) {
+      console.log(`    - ${model}`)
+    }
+    console.log()
     return
   }
 
-  const accounts = tokenPool.getAllAccounts()
-  const options = accounts.map((account) => ({
-    label: `#${account.id} ${maskToken(account.githubToken)} (${account.accountType})`,
-    value: String(account.id),
-  }))
+  // Stored data (no live server)
+  const stored = await loadAccounts()
+  if (stored.length === 0) {
+    consola.info('No accounts configured. Use "Add account" to add one.')
+    return
+  }
+
+  const options = stored.map((account, i) => {
+    const label = account.label ? ` (${account.label})` : ""
+    return {
+      label: `${i + 1}. ${maskToken(account.token)}${label}`,
+      value: String(i),
+    }
+  })
 
   const selected = await consola.prompt("Select an account:", {
     type: "select",
     options,
   })
 
-  if (typeof selected === "symbol") {
-    consola.info("Cancelled.")
-    return
-  }
+  const account = stored[Number(selected)]
 
-  const account = accounts.find((a) => String(a.id) === selected)
-  if (!account) {
-    consola.error("Account not found.")
-    return
-  }
-
-  consola.info(`\n🔍 Account #${account.id}`)
-  consola.info(`  Token: ${maskToken(account.githubToken)}`)
-  consola.info(`  Type: ${account.accountType}`)
-  consola.info(`  Status: ${account.healthy ? "✓ healthy" : "✗ unhealthy"}`)
-  consola.info(`  Models (${account.models.size}):`)
-  for (const model of account.models) {
-    console.log(`    - ${model}`)
-  }
+  consola.info(`\n🔍 Account #${Number(selected) + 1}`)
+  consola.info(`  Token: ${maskToken(account.token)}`)
+  if (account.label) consola.info(`  Label: ${account.label}`)
+  consola.info("  (Start the server to see models and health status)")
   console.log()
 }
 
-async function addAccountGuide(): Promise<void> {
+async function addAccountMenu(): Promise<void> {
   const method = await consola.prompt("How would you like to add an account?", {
     type: "select",
     options: [
@@ -431,7 +458,7 @@ async function addAccountGuide(): Promise<void> {
     if (!result) return
     token = result
   } else {
-    const input = await consola.prompt("Enter a GitHub token to validate:", {
+    const input = await consola.prompt("Enter a GitHub token:", {
       type: "text",
     })
 
@@ -467,15 +494,23 @@ async function addAccountGuide(): Promise<void> {
     }
 
     consola.success("Token is valid and has Copilot access!")
-
-    const existingTokens = process.env.GITHUB_TOKENS
-    const newValue = existingTokens ? `${existingTokens},${token}` : token
-
-    consola.info("\nTo add this token, update your environment variable:")
-    consola.info(`  GITHUB_TOKENS=${newValue}\n`)
   } catch (error) {
     consola.error("Failed to validate token:", error)
+    return
   }
+
+  // Ask for optional label
+  const label = await consola.prompt(
+    "Label for this account (optional, e.g. 'work', 'personal'):",
+    { type: "text", default: "" },
+  )
+
+  const labelValue =
+    typeof label === "symbol" || !label ? undefined : label.trim() || undefined
+
+  // Save to store
+  const accounts = await storeAddAccount(token, labelValue)
+  consola.success(`Account saved! (${accounts.length} total)`)
 }
 
 async function loginViaDeviceCode(): Promise<string | undefined> {
@@ -498,28 +533,22 @@ async function loginViaDeviceCode(): Promise<string | undefined> {
   }
 }
 
-async function removeAccountGuide(): Promise<void> {
-  const tokensEnv = process.env.GITHUB_TOKENS
-  if (!tokensEnv) {
-    consola.info("GITHUB_TOKENS is not set. Nothing to remove.")
+async function removeAccountMenu(): Promise<void> {
+  const stored = await loadAccounts()
+  if (stored.length === 0) {
+    consola.info('No accounts configured. Use "Add account" to add one.')
     return
   }
 
-  const tokens = tokensEnv
-    .split(",")
-    .map((t) => t.trim())
-    .filter(Boolean)
-  if (tokens.length === 0) {
-    consola.info("No tokens found in GITHUB_TOKENS.")
-    return
-  }
+  const options = stored.map((account, i) => {
+    const label = account.label ? ` (${account.label})` : ""
+    return {
+      label: `${i + 1}. ${maskToken(account.token)}${label}`,
+      value: String(i),
+    }
+  })
 
-  const options = tokens.map((token, i) => ({
-    label: `${i + 1}. ${maskToken(token)}`,
-    value: String(i),
-  }))
-
-  const selected = await consola.prompt("Select a token to remove:", {
+  const selected = await consola.prompt("Select an account to remove:", {
     type: "select",
     options,
   })
@@ -529,16 +558,22 @@ async function removeAccountGuide(): Promise<void> {
     return
   }
 
-  const index = Number.parseInt(selected, 10)
-  const remaining = tokens.filter((_, i) => i !== index)
+  const index = Number(selected)
+  const account = stored[index]
+  const label = account.label ? ` (${account.label})` : ""
 
-  if (remaining.length === 0) {
-    consola.info("\nTo remove this token, unset the environment variable:")
-    consola.info("  unset GITHUB_TOKENS\n")
-  } else {
-    consola.info("\nTo remove this token, update your environment variable:")
-    consola.info(`  GITHUB_TOKENS=${remaining.join(",")}\n`)
+  const confirm = await consola.prompt(
+    `Remove account ${maskToken(account.token)}${label}?`,
+    { type: "confirm", initial: false },
+  )
+
+  if (!confirm) {
+    consola.info("Cancelled.")
+    return
   }
+
+  const remaining = await storeRemoveAccount(index)
+  consola.success(`Account removed. (${remaining.length} remaining)`)
 }
 
 async function mainMenu(): Promise<void> {
@@ -561,11 +596,11 @@ async function mainMenu(): Promise<void> {
         { label: "👤 List accounts", value: "list-accounts" as MenuAction },
         { label: "🔍 Account details", value: "account-details" as MenuAction },
         {
-          label: "➕ Add account (validate)",
+          label: "➕ Add account",
           value: "add-account" as MenuAction,
         },
         {
-          label: "➖ Remove account (guide)",
+          label: "➖ Remove account",
           value: "remove-account" as MenuAction,
         },
         { label: "🚪 Exit", value: "exit" as MenuAction },
@@ -606,7 +641,7 @@ async function mainMenu(): Promise<void> {
         break
       }
       case "list-accounts": {
-        listAccounts()
+        await listAccounts()
         break
       }
       case "account-details": {
@@ -614,11 +649,11 @@ async function mainMenu(): Promise<void> {
         break
       }
       case "add-account": {
-        await addAccountGuide()
+        await addAccountMenu()
         break
       }
       case "remove-account": {
-        await removeAccountGuide()
+        await removeAccountMenu()
         break
       }
       case "exit": {

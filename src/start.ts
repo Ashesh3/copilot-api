@@ -7,6 +7,7 @@ import { serve, type ServerHandler } from "srvx"
 import invariant from "tiny-invariant"
 
 import packageJson from "../package.json" with { type: "json" }
+import { getStoredTokens } from "./lib/accounts-store"
 import { mergeConfigWithDefaults } from "./lib/config"
 import { generateVirtualModels } from "./lib/model-suffix"
 import { ensurePaths } from "./lib/paths"
@@ -99,21 +100,29 @@ async function promptClaudeCodeSetup(
 }
 
 /**
- * Set up multi-token mode from GITHUB_TOKENS env var.
- * Returns true if multi-token mode was activated.
+ * Set up multi-token mode from GITHUB_TOKENS env var or stored accounts file.
+ * Priority: env var > github_tokens.json
+ * Returns true if multi-token mode was activated (2+ tokens).
  */
 async function initializeMultiToken(
   options: RunServerOptions,
 ): Promise<boolean> {
+  // Collect tokens: env var takes priority, then stored file
+  let tokens: Array<string> = []
   const githubTokensEnv = process.env.GITHUB_TOKENS
-  if (!githubTokensEnv) return false
+  if (githubTokensEnv) {
+    tokens = githubTokensEnv
+      .split(",")
+      .map((t) => t.trim())
+      .filter((t) => t.length > 0)
+  }
 
-  const tokens = githubTokensEnv
-    .split(",")
-    .map((t) => t.trim())
-    .filter((t) => t.length > 0)
+  if (tokens.length === 0) {
+    tokens = await getStoredTokens()
+  }
 
-  if (tokens.length === 0) return false
+  // Need at least 2 tokens for multi-token mode
+  if (tokens.length < 2) return false
 
   state.isMultiToken = true
   consola.info(`Multi-token mode: ${tokens.length} GitHub tokens configured`)
