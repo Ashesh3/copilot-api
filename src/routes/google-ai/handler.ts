@@ -11,6 +11,7 @@ import type { Context } from "hono"
 import consola from "consola"
 import { streamSSE } from "hono/streaming"
 
+import { getLastUsedAccountId } from "~/lib/account-router"
 import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
 import { createHandlerLogger } from "~/lib/logger"
@@ -192,6 +193,12 @@ async function handleWithChatCompletions(
   finalPayload: ChatCompletionsPayload,
 ) {
   const response = await createChatCompletions(finalPayload)
+
+  // Track which account handled this request (multi-token mode)
+  const ccAccountId = getLastUsedAccountId()
+  if (ccAccountId !== undefined) {
+    setRequestContext(c, { accountId: ccAccountId })
+  }
 
   // ─── Non-Streaming Response ───
   if (isNonStreamingCC(response)) {
@@ -399,6 +406,12 @@ async function handleWithResponsesApi(
     vision: false,
     initiator: "user",
   })
+
+  // Track which account handled this request (multi-token mode)
+  const respAccountId = getLastUsedAccountId()
+  if (respAccountId !== undefined) {
+    setRequestContext(c, { accountId: respAccountId })
+  }
 
   // ─── Non-streaming ───
   if (!isStream || !isAsyncIterable(response)) {

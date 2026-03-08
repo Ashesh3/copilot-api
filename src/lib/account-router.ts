@@ -11,6 +11,18 @@ import { copilotFetch, copilotHeaders } from "~/services/copilot/copilot-client"
 
 const FAILOVER_STATUSES = new Set([401, 403, 429])
 
+// --- Last used account tracking ---
+
+let _lastUsedAccountId: number | undefined
+
+/**
+ * Get the account ID used by the most recent routedFetch call.
+ * Useful for logging without changing service return types.
+ */
+export function getLastUsedAccountId(): number | undefined {
+  return _lastUsedAccountId
+}
+
 // --- Header routing ---
 
 /**
@@ -60,6 +72,8 @@ export async function routedFetch(
   options: RoutedFetchOptions,
 ): Promise<{ response: Response; account: Account | undefined }> {
   const { modelId, headerOptions } = options
+  _lastUsedAccountId = undefined
+
   if (!state.isMultiToken) {
     const response = await copilotFetch(path, init)
     return { response, account: undefined }
@@ -81,6 +95,7 @@ export async function routedFetch(
   const baseUrl = tokenPool.getBaseUrl(account)
 
   consola.debug(`[Account #${account.id}] ${path} (model: ${modelId})`)
+  _lastUsedAccountId = account.id
 
   try {
     const response = await copilotFetch(path, { ...init, headers }, { baseUrl })
@@ -94,6 +109,7 @@ export async function routedFetch(
         if (response.status === 401 || response.status === 403) {
           tokenPool.markUnhealthy(account)
         }
+        _lastUsedAccountId = next.id
 
         const retryHeaders = copilotHeaders({
           ...headerOptions,
@@ -120,6 +136,7 @@ export async function routedFetch(
       consola.warn(
         `[Account #${account.id}] Network error on ${path}, failing over to Account #${next.id}: ${(error as Error).message}`,
       )
+      _lastUsedAccountId = next.id
 
       const retryHeaders = copilotHeaders({
         ...headerOptions,
