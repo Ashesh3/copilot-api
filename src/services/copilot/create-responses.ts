@@ -1,7 +1,7 @@
 import consola from "consola"
 import { events } from "fetch-event-stream"
 
-import { getHeadersForModel, routedFetch } from "~/lib/account-router"
+import { routedFetch } from "~/lib/account-router"
 import { HTTPError } from "~/lib/error"
 
 export interface ResponsesPayload {
@@ -351,10 +351,9 @@ export const createResponses = async (
     }
   }
 
-  const { headers } = getHeadersForModel(payload.model, headerOpts)
   const { response } = await routedFetch(
     "/responses",
-    { method: "POST", headers, body: JSON.stringify(payload) },
+    { method: "POST", body: JSON.stringify(payload) },
     { modelId: payload.model, headerOptions: headerOpts },
   )
 

@@ -23,34 +23,6 @@ export function getLastUsedAccountId(): number | undefined {
   return _lastUsedAccountId
 }
 
-// --- Header routing ---
-
-/**
- * Build Copilot headers, optionally routing through a specific account
- * when multi-token mode is active.
- */
-export function getHeadersForModel(
-  modelId: string,
-  headerOptions?: CopilotHeaderOptions,
-): { headers: Record<string, string>; account: Account | undefined } {
-  if (!state.isMultiToken) {
-    return { headers: copilotHeaders(headerOptions), account: undefined }
-  }
-
-  const account = tokenPool.getAccountForModel(modelId)
-  if (!account) {
-    // No account has this model — fall back to default
-    return { headers: copilotHeaders(headerOptions), account: undefined }
-  }
-
-  const headers = copilotHeaders({
-    ...headerOptions,
-    copilotToken: account.copilotToken,
-  })
-
-  return { headers, account }
-}
-
 // --- Fetch routing with failover ---
 
 export interface RoutedFetchOptions {
@@ -61,10 +33,15 @@ export interface RoutedFetchOptions {
 /**
  * Perform a fetch with account-aware routing and single-attempt failover.
  *
- * In single-token mode, delegates directly to `copilotFetch`.
+ * In single-token mode, builds headers from headerOptions and delegates
+ * to `copilotFetch`.
  * In multi-token mode, selects an account for the requested model,
- * issues the request, and on 401/403/429 or network error attempts
- * one failover to an alternative account.
+ * builds headers with that account's token, issues the request, and on
+ * 401/403/429 or network error attempts one failover to an alternative
+ * account.
+ *
+ * Callers should NOT pre-build headers — this function handles header
+ * construction in all modes to avoid double-advancing the round-robin.
  */
 export async function routedFetch(
   path: string,
@@ -75,7 +52,8 @@ export async function routedFetch(
   _lastUsedAccountId = undefined
 
   if (!state.isMultiToken) {
-    const response = await copilotFetch(path, init)
+    const headers = copilotHeaders(headerOptions)
+    const response = await copilotFetch(path, { ...init, headers })
     return { response, account: undefined }
   }
 

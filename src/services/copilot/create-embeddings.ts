@@ -1,11 +1,10 @@
-import { getHeadersForModel, routedFetch } from "~/lib/account-router"
+import { routedFetch } from "~/lib/account-router"
 import { HTTPError } from "~/lib/error"
 
 export const createEmbeddings = async (payload: EmbeddingRequest) => {
-  const { headers } = getHeadersForModel(payload.model)
   const { response } = await routedFetch(
     "/embeddings",
-    { method: "POST", headers, body: JSON.stringify(payload) },
+    { method: "POST", body: JSON.stringify(payload) },
     { modelId: payload.model },
   )
 
