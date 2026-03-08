@@ -77,12 +77,20 @@ export function stripThinkingBlocks(
 }
 
 /**
- * Proactively strip all thinking blocks from assistant messages.
- * We cannot locally validate whether a signature will be accepted
- * by the API (signatures are tied to the specific Copilot token/session),
- * so it's cheaper to strip them upfront than to fail and retry.
+ * Strip thinking blocks from assistant messages in multi-token mode.
+ *
+ * Thinking block signatures (reasoning_opaque / signature) are cryptographically
+ * tied to the specific Copilot token that generated them. In multi-token mode,
+ * round-robin may route the next request to a different account, making
+ * previous signatures invalid. Stripping them avoids the wasted 400 round-trip.
+ *
+ * In single-token mode, signatures stay valid and thinking context is preserved.
  */
-function stripThinkingBlocksProactive(payload: AnthropicMessagesPayload): void {
+function stripThinkingBlocksForMultiToken(
+  payload: AnthropicMessagesPayload,
+): void {
+  if (!state.isMultiToken) return
+
   for (const msg of payload.messages) {
     if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue
     msg.content = msg.content.filter((block) => block.type !== "thinking")
@@ -298,7 +306,7 @@ const executeChatCompletions = async (
   },
 ) => {
   const { initiatorOverride, requestedModel } = options ?? {}
-  stripThinkingBlocksProactive(anthropicPayload)
+  stripThinkingBlocksForMultiToken(anthropicPayload)
   const openAIPayload = translateToOpenAI(anthropicPayload)
 
   // Enable thinking/reasoning on the ChatCompletions path
@@ -629,7 +637,7 @@ const executeResponsesApi = async (
   },
 ) => {
   const { initiatorOverride, effortOverride, requestedModel } = options ?? {}
-  stripThinkingBlocksProactive(anthropicPayload)
+  stripThinkingBlocksForMultiToken(anthropicPayload)
   const responsesPayload = translateAnthropicMessagesToResponsesPayload(
     anthropicPayload,
     effortOverride,
