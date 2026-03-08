@@ -179,8 +179,14 @@ async function initializeTokens(options: RunServerOptions): Promise<void> {
   const multiTokenActive = await initializeMultiToken(options)
   if (multiTokenActive) return
 
-  // Single-token mode (existing flow)
-  if (options.githubToken) {
+  // Check if GITHUB_TOKENS has exactly 1 token — use it directly
+  const envTokens = process.env.GITHUB_TOKENS?.split(",")
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0)
+  if (envTokens && envTokens.length === 1) {
+    state.githubToken = envTokens[0]
+    consola.info("Using GitHub token from GITHUB_TOKENS")
+  } else if (options.githubToken) {
     state.githubToken = options.githubToken
     consola.info("Using provided GitHub token")
   } else {
