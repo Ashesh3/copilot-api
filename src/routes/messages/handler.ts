@@ -77,23 +77,15 @@ export function stripThinkingBlocks(
 }
 
 /**
- * Proactively filter out invalid thinking blocks before sending to the API.
- * Removes blocks that are empty, placeholder "Thinking..." text, missing
- * signatures, or have GPT-generated signatures (containing "@").
- * Valid thinking blocks are preserved.
+ * Proactively strip all thinking blocks from assistant messages.
+ * We cannot locally validate whether a signature will be accepted
+ * by the API (signatures are tied to the specific Copilot token/session),
+ * so it's cheaper to strip them upfront than to fail and retry.
  */
-function filterInvalidThinkingBlocks(payload: AnthropicMessagesPayload): void {
+function stripThinkingBlocksProactive(payload: AnthropicMessagesPayload): void {
   for (const msg of payload.messages) {
     if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue
-    msg.content = msg.content.filter((block) => {
-      if (block.type !== "thinking") return true
-      return (
-        block.thinking
-        && block.thinking !== "Thinking..."
-        && block.signature
-        && !block.signature.includes("@")
-      )
-    })
+    msg.content = msg.content.filter((block) => block.type !== "thinking")
   }
 }
 
@@ -306,7 +298,7 @@ const executeChatCompletions = async (
   },
 ) => {
   const { initiatorOverride, requestedModel } = options ?? {}
-  filterInvalidThinkingBlocks(anthropicPayload)
+  stripThinkingBlocksProactive(anthropicPayload)
   const openAIPayload = translateToOpenAI(anthropicPayload)
 
   // Enable thinking/reasoning on the ChatCompletions path
@@ -637,7 +629,7 @@ const executeResponsesApi = async (
   },
 ) => {
   const { initiatorOverride, effortOverride, requestedModel } = options ?? {}
-  filterInvalidThinkingBlocks(anthropicPayload)
+  stripThinkingBlocksProactive(anthropicPayload)
   const responsesPayload = translateAnthropicMessagesToResponsesPayload(
     anthropicPayload,
     effortOverride,
