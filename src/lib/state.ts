@@ -18,6 +18,9 @@ export interface State {
   verbose: boolean
   apiKeyAuth?: string
 
+  // Multi-token mode
+  isMultiToken: boolean
+
   // Rate limiting configuration
   rateLimitSeconds?: number
   lastRequestTimestamp?: number
@@ -31,4 +34,5 @@ export const state: State = {
   showToken: false,
   debug: false,
   verbose: false,
+  isMultiToken: false,
 }

@@ -15,6 +15,7 @@ export interface RequestContext {
   provider?: string
   replacements?: Array<string>
   reasoningEffort?: string
+  accountId?: number
 }
 
 const REQUEST_CONTEXT_KEY = "requestContext"
@@ -161,6 +162,11 @@ function buildModelLine(ctx: RequestContext): string {
     )
   } else {
     parts.push(`${colors.white}${ctx.model}${colors.reset}`)
+  }
+
+  // Account ID (multi-token mode)
+  if (ctx.accountId !== undefined) {
+    parts.push(`${colors.cyan}[Account #${ctx.accountId}]${colors.reset}`)
   }
 
   // API type from provider

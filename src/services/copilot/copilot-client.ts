@@ -29,19 +29,21 @@ export function copilotBaseUrl(): string {
 export interface CopilotHeaderOptions {
   vision?: boolean
   initiator?: "agent" | "user"
+  copilotToken?: string
 }
 
 export function copilotHeaders(
   options?: CopilotHeaderOptions,
 ): Record<string, string> {
-  if (!state.copilotToken) {
+  const token = options?.copilotToken ?? state.copilotToken
+  if (!token) {
     throw new Error("Copilot token is not set. Cannot build request headers.")
   }
 
   const headers: Record<string, string> = {
     "content-type": "application/json",
     accept: "application/json",
-    Authorization: `Bearer ${state.copilotToken}`,
+    Authorization: `Bearer ${token}`,
     "Copilot-Integration-Id": INTEGRATION_ID,
     "editor-version": `vscode/${state.vsCodeVersion ?? "1.104.3"}`,
     "Openai-Intent": "conversation-agent",
@@ -225,8 +227,9 @@ function applyRetryJitter(delaySeconds: number): number {
 export async function copilotFetch(
   path: string,
   init?: RequestInit,
+  fetchOptions?: { baseUrl?: string },
 ): Promise<Response> {
-  const url = `${copilotBaseUrl()}${path}`
+  const url = `${fetchOptions?.baseUrl ?? copilotBaseUrl()}${path}`
   const maxAttempts = MAX_RETRIES + 1
   let retryBackoffExtraSeconds = INITIAL_RETRY_BACKOFF_EXTRA_SECONDS
 

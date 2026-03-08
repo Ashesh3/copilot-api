@@ -4,6 +4,7 @@ import { streamSSE } from "hono/streaming"
 
 import type { Model } from "~/services/copilot/get-models"
 
+import { getLastUsedAccountId } from "~/lib/account-router"
 import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
 import { HTTPError } from "~/lib/error"
@@ -73,6 +74,27 @@ export function stripThinkingBlocks(
     if (msg.content.length < before) stripped = true
   }
   return stripped
+}
+
+/**
+ * Proactively filter out invalid thinking blocks before sending to the API.
+ * Removes blocks that are empty, placeholder "Thinking..." text, missing
+ * signatures, or have GPT-generated signatures (containing "@").
+ * Valid thinking blocks are preserved.
+ */
+function filterInvalidThinkingBlocks(payload: AnthropicMessagesPayload): void {
+  for (const msg of payload.messages) {
+    if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue
+    msg.content = msg.content.filter((block) => {
+      if (block.type !== "thinking") return true
+      return (
+        block.thinking
+        && block.thinking !== "Thinking..."
+        && block.signature
+        && !block.signature.includes("@")
+      )
+    })
+  }
 }
 
 const logger = createHandlerLogger("messages-handler")
@@ -284,6 +306,7 @@ const executeChatCompletions = async (
   },
 ) => {
   const { initiatorOverride, requestedModel } = options ?? {}
+  filterInvalidThinkingBlocks(anthropicPayload)
   const openAIPayload = translateToOpenAI(anthropicPayload)
 
   // Enable thinking/reasoning on the ChatCompletions path
@@ -320,6 +343,12 @@ const executeChatCompletions = async (
   const response = await createChatCompletions(finalPayload, {
     initiator: initiatorOverride,
   })
+
+  // Track which account handled this request (multi-token mode)
+  const accountId = getLastUsedAccountId()
+  if (accountId !== undefined) {
+    setRequestContext(c, { accountId })
+  }
 
   if (isNonStreaming(response)) {
     // Check for web_search tool calls and execute them in a loop
@@ -608,6 +637,7 @@ const executeResponsesApi = async (
   },
 ) => {
   const { initiatorOverride, effortOverride, requestedModel } = options ?? {}
+  filterInvalidThinkingBlocks(anthropicPayload)
   const responsesPayload = translateAnthropicMessagesToResponsesPayload(
     anthropicPayload,
     effortOverride,
@@ -622,6 +652,12 @@ const executeResponsesApi = async (
     vision,
     initiator: initiatorOverride ?? initiator,
   })
+
+  // Track which account handled this request (multi-token mode)
+  const responsesAccountId = getLastUsedAccountId()
+  if (responsesAccountId !== undefined) {
+    setRequestContext(c, { accountId: responsesAccountId })
+  }
 
   const needsWebSearchBuffering = hasWebSearchToolInPayload(
     anthropicPayload.tools,

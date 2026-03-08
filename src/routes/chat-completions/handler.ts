@@ -3,6 +3,7 @@ import type { Context } from "hono"
 import consola from "consola"
 import { streamSSE, type SSEMessage } from "hono/streaming"
 
+import { getLastUsedAccountId } from "~/lib/account-router"
 import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
 import { normalizeModelName } from "~/lib/model-resolver"
@@ -77,6 +78,12 @@ export async function handleCompletion(c: Context) {
   }
 
   const response = await createChatCompletions(payload)
+
+  // Track which account handled this request (multi-token mode)
+  const accountId = getLastUsedAccountId()
+  if (accountId !== undefined) {
+    setRequestContext(c, { accountId })
+  }
 
   if (isNonStreaming(response)) {
     consola.debug("Non-streaming response:", JSON.stringify(response))
