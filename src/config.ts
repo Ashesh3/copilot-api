@@ -1,6 +1,7 @@
 import { defineCommand } from "citty"
 import consola from "consola"
 
+import { GITHUB_API_BASE_URL } from "~/lib/api-config"
 import {
   addReplacement,
   applyReplacements,
@@ -13,6 +14,7 @@ import {
   type ReplacementRule,
 } from "~/lib/auto-replace"
 import { ensurePaths, PATHS } from "~/lib/paths"
+import { tokenPool } from "~/lib/token-pool"
 
 type MenuAction =
   | "list"
@@ -22,6 +24,10 @@ type MenuAction =
   | "toggle"
   | "test"
   | "clear"
+  | "list-accounts"
+  | "account-details"
+  | "add-account"
+  | "remove-account"
   | "exit"
 
 function formatRule(rule: ReplacementRule, index: number): string {
@@ -313,6 +319,181 @@ async function clearAllReplacements(): Promise<void> {
   }
 }
 
+// --- Account management ---
+
+function maskToken(token: string): string {
+  if (token.length <= 8) return "****"
+  return `${token.slice(0, 4)}...${token.slice(-4)}`
+}
+
+function listAccounts(): void {
+  if (tokenPool.size > 0) {
+    const accounts = tokenPool.getAllAccounts()
+    consola.info("\n👤 Accounts:\n")
+    consola.info(
+      `${"#".padEnd(4)} ${"Token".padEnd(16)} ${"Status".padEnd(10)} ${"Models".padEnd(8)} Type`,
+    )
+    consola.info("-".repeat(60))
+    for (const account of accounts) {
+      const status = account.healthy ? "✓ healthy" : "✗ unhealthy"
+      const models = String(account.models.size)
+      console.log(
+        `${String(account.id).padEnd(4)} ${maskToken(account.githubToken).padEnd(16)} ${status.padEnd(10)} ${models.padEnd(8)} ${account.accountType}`,
+      )
+    }
+    console.log()
+    return
+  }
+
+  const tokensEnv = process.env.GITHUB_TOKENS
+  if (!tokensEnv) {
+    consola.info(
+      "No accounts loaded. Set GITHUB_TOKENS environment variable with comma-separated GitHub tokens.",
+    )
+    return
+  }
+
+  const tokens = tokensEnv
+    .split(",")
+    .map((t) => t.trim())
+    .filter(Boolean)
+  consola.info("\n👤 Tokens from GITHUB_TOKENS (server not running):\n")
+  for (const [i, token] of tokens.entries()) {
+    console.log(`  ${i + 1}. ${maskToken(token)}`)
+  }
+  console.log()
+}
+
+async function showAccountDetails(): Promise<void> {
+  if (tokenPool.size === 0) {
+    consola.info(
+      "No accounts initialized. Run the server first to see account details.",
+    )
+    return
+  }
+
+  const accounts = tokenPool.getAllAccounts()
+  const options = accounts.map((account) => ({
+    label: `#${account.id} ${maskToken(account.githubToken)} (${account.accountType})`,
+    value: String(account.id),
+  }))
+
+  const selected = await consola.prompt("Select an account:", {
+    type: "select",
+    options,
+  })
+
+  if (typeof selected === "symbol") {
+    consola.info("Cancelled.")
+    return
+  }
+
+  const account = accounts.find((a) => String(a.id) === selected)
+  if (!account) {
+    consola.error("Account not found.")
+    return
+  }
+
+  consola.info(`\n🔍 Account #${account.id}`)
+  consola.info(`  Token: ${maskToken(account.githubToken)}`)
+  consola.info(`  Type: ${account.accountType}`)
+  consola.info(`  Status: ${account.healthy ? "✓ healthy" : "✗ unhealthy"}`)
+  consola.info(`  Models (${account.models.size}):`)
+  for (const model of account.models) {
+    console.log(`    - ${model}`)
+  }
+  console.log()
+}
+
+async function addAccountGuide(): Promise<void> {
+  const token = await consola.prompt("Enter a GitHub token to validate:", {
+    type: "text",
+  })
+
+  if (typeof token === "symbol" || !token) {
+    consola.info("Cancelled.")
+    return
+  }
+
+  consola.start("Validating token...")
+
+  try {
+    const response = await fetch(
+      `${GITHUB_API_BASE_URL}/copilot_internal/v2/token`,
+      {
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json",
+          authorization: `token ${token.trim()}`,
+        },
+      },
+    )
+
+    if (!response.ok) {
+      const body = await response.text()
+      consola.error(
+        `Token validation failed: ${response.status} ${response.statusText}`,
+      )
+      consola.error(body)
+      return
+    }
+
+    consola.success("Token is valid!")
+
+    const existingTokens = process.env.GITHUB_TOKENS
+    const newValue =
+      existingTokens ? `${existingTokens},${token.trim()}` : token.trim()
+
+    consola.info("\nTo add this token, update your environment variable:")
+    consola.info(`  GITHUB_TOKENS=${newValue}\n`)
+  } catch (error) {
+    consola.error("Failed to validate token:", error)
+  }
+}
+
+async function removeAccountGuide(): Promise<void> {
+  const tokensEnv = process.env.GITHUB_TOKENS
+  if (!tokensEnv) {
+    consola.info("GITHUB_TOKENS is not set. Nothing to remove.")
+    return
+  }
+
+  const tokens = tokensEnv
+    .split(",")
+    .map((t) => t.trim())
+    .filter(Boolean)
+  if (tokens.length === 0) {
+    consola.info("No tokens found in GITHUB_TOKENS.")
+    return
+  }
+
+  const options = tokens.map((token, i) => ({
+    label: `${i + 1}. ${maskToken(token)}`,
+    value: String(i),
+  }))
+
+  const selected = await consola.prompt("Select a token to remove:", {
+    type: "select",
+    options,
+  })
+
+  if (typeof selected === "symbol") {
+    consola.info("Cancelled.")
+    return
+  }
+
+  const index = Number.parseInt(selected, 10)
+  const remaining = tokens.filter((_, i) => i !== index)
+
+  if (remaining.length === 0) {
+    consola.info("\nTo remove this token, unset the environment variable:")
+    consola.info("  unset GITHUB_TOKENS\n")
+  } else {
+    consola.info("\nTo remove this token, update your environment variable:")
+    consola.info(`  GITHUB_TOKENS=${remaining.join(",")}\n`)
+  }
+}
+
 async function mainMenu(): Promise<void> {
   consola.info(`\n🔧 Copilot API - Replacement Configuration`)
   consola.info(`Config file: ${PATHS.REPLACEMENTS_CONFIG_PATH}\n`)
@@ -330,6 +511,16 @@ async function mainMenu(): Promise<void> {
         { label: "🔄 Toggle rule on/off", value: "toggle" as MenuAction },
         { label: "🧪 Test replacements", value: "test" as MenuAction },
         { label: "🗑️  Clear all user rules", value: "clear" as MenuAction },
+        { label: "👤 List accounts", value: "list-accounts" as MenuAction },
+        { label: "🔍 Account details", value: "account-details" as MenuAction },
+        {
+          label: "➕ Add account (validate)",
+          value: "add-account" as MenuAction,
+        },
+        {
+          label: "➖ Remove account (guide)",
+          value: "remove-account" as MenuAction,
+        },
         { label: "🚪 Exit", value: "exit" as MenuAction },
       ],
     })
@@ -365,6 +556,22 @@ async function mainMenu(): Promise<void> {
       }
       case "clear": {
         await clearAllReplacements()
+        break
+      }
+      case "list-accounts": {
+        listAccounts()
+        break
+      }
+      case "account-details": {
+        await showAccountDetails()
+        break
+      }
+      case "add-account": {
+        await addAccountGuide()
+        break
+      }
+      case "remove-account": {
+        await removeAccountGuide()
         break
       }
       case "exit": {
