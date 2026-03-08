@@ -15,6 +15,8 @@ import {
 } from "~/lib/auto-replace"
 import { ensurePaths, PATHS } from "~/lib/paths"
 import { tokenPool } from "~/lib/token-pool"
+import { getDeviceCode } from "~/services/github/get-device-code"
+import { pollAccessToken } from "~/services/github/poll-access-token"
 
 type MenuAction =
   | "list"
@@ -406,16 +408,42 @@ async function showAccountDetails(): Promise<void> {
 }
 
 async function addAccountGuide(): Promise<void> {
-  const token = await consola.prompt("Enter a GitHub token to validate:", {
-    type: "text",
+  const method = await consola.prompt("How would you like to add an account?", {
+    type: "select",
+    options: [
+      {
+        label: "🔑 Login via GitHub (device code flow)",
+        value: "device-code",
+      },
+      { label: "📋 Paste an existing token", value: "paste-token" },
+    ],
   })
 
-  if (typeof token === "symbol" || !token) {
+  if (typeof method === "symbol") {
     consola.info("Cancelled.")
     return
   }
 
-  consola.start("Validating token...")
+  let token: string
+
+  if (method === "device-code") {
+    const result = await loginViaDeviceCode()
+    if (!result) return
+    token = result
+  } else {
+    const input = await consola.prompt("Enter a GitHub token to validate:", {
+      type: "text",
+    })
+
+    if (typeof input === "symbol" || !input) {
+      consola.info("Cancelled.")
+      return
+    }
+    token = input.trim()
+  }
+
+  // Validate the token against Copilot API
+  consola.start("Validating token with Copilot API...")
 
   try {
     const response = await fetch(
@@ -424,7 +452,7 @@ async function addAccountGuide(): Promise<void> {
         headers: {
           "content-type": "application/json",
           accept: "application/json",
-          authorization: `token ${token.trim()}`,
+          authorization: `token ${token}`,
         },
       },
     )
@@ -438,16 +466,35 @@ async function addAccountGuide(): Promise<void> {
       return
     }
 
-    consola.success("Token is valid!")
+    consola.success("Token is valid and has Copilot access!")
 
     const existingTokens = process.env.GITHUB_TOKENS
-    const newValue =
-      existingTokens ? `${existingTokens},${token.trim()}` : token.trim()
+    const newValue = existingTokens ? `${existingTokens},${token}` : token
 
     consola.info("\nTo add this token, update your environment variable:")
     consola.info(`  GITHUB_TOKENS=${newValue}\n`)
   } catch (error) {
     consola.error("Failed to validate token:", error)
+  }
+}
+
+async function loginViaDeviceCode(): Promise<string | undefined> {
+  try {
+    consola.start("Requesting device code from GitHub...")
+    const deviceCode = await getDeviceCode()
+
+    consola.box(
+      `Open ${deviceCode.verification_uri}\nand enter code: ${deviceCode.user_code}`,
+    )
+
+    consola.start("Waiting for authorization...")
+    const token = await pollAccessToken(deviceCode)
+
+    consola.success("Login successful!")
+    return token
+  } catch (error) {
+    consola.error("Device code login failed:", error)
+    return undefined
   }
 }
 
