@@ -1,8 +1,8 @@
 import consola from "consola"
 import { events } from "fetch-event-stream"
 
+import { getHeadersForModel, routedFetch } from "~/lib/account-router"
 import { HTTPError } from "~/lib/error"
-import { copilotFetch, copilotHeaders } from "~/services/copilot/copilot-client"
 
 export interface ResponsesPayload {
   model: string
@@ -330,7 +330,7 @@ export const createResponses = async (
   payload: ResponsesPayload,
   { vision, initiator }: ResponsesRequestOptions,
 ): Promise<CreateResponsesReturn> => {
-  const headers = copilotHeaders({ vision, initiator })
+  const headerOpts = { vision, initiator }
 
   // service_tier is not supported by github copilot
   payload.service_tier = null
@@ -351,11 +351,12 @@ export const createResponses = async (
     }
   }
 
-  const response = await copilotFetch("/responses", {
-    method: "POST",
-    headers,
-    body: JSON.stringify(payload),
-  })
+  const { headers } = getHeadersForModel(payload.model, headerOpts)
+  const { response } = await routedFetch(
+    "/responses",
+    { method: "POST", headers, body: JSON.stringify(payload) },
+    { modelId: payload.model, headerOptions: headerOpts },
+  )
 
   if (!response.ok) {
     consola.error("Failed to create responses", response)

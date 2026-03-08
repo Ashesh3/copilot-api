@@ -1,12 +1,13 @@
+import { getHeadersForModel, routedFetch } from "~/lib/account-router"
 import { HTTPError } from "~/lib/error"
-import { copilotFetch, copilotHeaders } from "~/services/copilot/copilot-client"
 
 export const createEmbeddings = async (payload: EmbeddingRequest) => {
-  const response = await copilotFetch("/embeddings", {
-    method: "POST",
-    headers: copilotHeaders(),
-    body: JSON.stringify(payload),
-  })
+  const { headers } = getHeadersForModel(payload.model)
+  const { response } = await routedFetch(
+    "/embeddings",
+    { method: "POST", headers, body: JSON.stringify(payload) },
+    { modelId: payload.model },
+  )
 
   if (!response.ok) throw new HTTPError("Failed to create embeddings", response)
 

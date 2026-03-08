@@ -1,10 +1,9 @@
 import consola from "consola"
 import { events } from "fetch-event-stream"
 
+import { getHeadersForModel, routedFetch } from "~/lib/account-router"
 import { HTTPError } from "~/lib/error"
 import {
-  copilotFetch,
-  copilotHeaders,
   hasVisionContent,
   detectInitiator,
   addPromptCaching,
@@ -182,28 +181,33 @@ export const createChatCompletions = async (
 ) => {
   const vision = hasVisionContent(payload.messages)
   const initiator = detectInitiator(payload.messages, options?.initiator)
-  const headers = copilotHeaders({ vision, initiator })
+  const headerOpts = { vision, initiator }
 
   normalizePayload(payload)
   injectJsonInstruction(payload)
   addPromptCaching(payload.messages, payload.tools ?? undefined)
 
-  const response = await copilotFetch("/chat/completions", {
-    method: "POST",
-    headers,
-    body: JSON.stringify(payload),
-  })
+  const { headers } = getHeadersForModel(payload.model, headerOpts)
+  const { response } = await routedFetch(
+    "/chat/completions",
+    { method: "POST", headers, body: JSON.stringify(payload) },
+    { modelId: payload.model, headerOptions: headerOpts },
+  )
 
   // 413 image fallback: if request has images and response is 413, remove images and retry
   if (response.status === 413 && vision) {
     consola.warn("413 Payload Too Large with images, retrying without images")
     removeImages(payload)
-    const retryHeaders = copilotHeaders({ vision: false, initiator })
-    const retryResponse = await copilotFetch("/chat/completions", {
-      method: "POST",
-      headers: retryHeaders,
-      body: JSON.stringify(payload),
-    })
+    const retryHeaderOpts = { vision: false, initiator }
+    const { headers: retryHeaders } = getHeadersForModel(
+      payload.model,
+      retryHeaderOpts,
+    )
+    const { response: retryResponse } = await routedFetch(
+      "/chat/completions",
+      { method: "POST", headers: retryHeaders, body: JSON.stringify(payload) },
+      { modelId: payload.model, headerOptions: retryHeaderOpts },
+    )
     return handleResponse(retryResponse, payload)
   }
 
