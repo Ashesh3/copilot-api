@@ -7,6 +7,9 @@ services:
       - "4141:4141"
     volumes:
       - copilot-data:/app/data
+    environment:
+      - OP_TOKEN=${OP_TOKEN}
+      - OP_ENV_ID=${OP_ENV_ID}
     env_file:
       - .env
     healthcheck:

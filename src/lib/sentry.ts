@@ -12,6 +12,9 @@ export function initSentry(): void {
     release: `copilot-api@${packageJson.version}`,
     environment: process.env.NODE_ENV ?? "development",
     enableLogs: true,
+    integrations: [
+      Sentry.consoleLoggingIntegration({ levels: ["warn", "error"] }),
+    ],
     beforeSend(event) {
       // Scrub sensitive headers
       if (event.request?.headers) {
@@ -37,6 +40,9 @@ export function initSentry(): void {
   process.on("unhandledRejection", (reason) => {
     Sentry.captureException(reason)
   })
+
+  // Pipe consola logs to Sentry
+  consola.addReporter(Sentry.createConsolaReporter())
 
   consola.info("Sentry initialized")
 }

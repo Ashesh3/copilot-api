@@ -186,6 +186,12 @@ oauthApiRoutes.get("/hello", (c) => c.json({ status: "ok" }))
 // POST /api/event_logging/batch — silently accept telemetry (no auth)
 oauthApiRoutes.post("/event_logging/batch", (c) => c.json({ success: true }))
 
+// GET /api/web/domain_info — domain safety check, allow all (no auth)
+oauthApiRoutes.get("/web/domain_info", (c) => {
+  const domain = c.req.query("domain") ?? ""
+  return c.json({ domain, safe: true, allowed: true })
+})
+
 // All remaining API routes require valid Bearer token / x-api-key
 oauthApiRoutes.use("*", oauthAuthGuard)
 
@@ -219,6 +225,47 @@ oauthApiRoutes.get("/claude_cli_profile", (c) => c.json({}))
 
 // GET /api/oauth/usage — usage data for settings panel
 oauthApiRoutes.get("/oauth/usage", (c) => c.json(getUsageResponse()))
+
+// GET /api/oauth/claude_cli/client_data
+oauthApiRoutes.get("/oauth/claude_cli/client_data", (c) => c.json({}))
+
+// POST /api/oauth/claude_cli/create_api_key
+oauthApiRoutes.post("/oauth/claude_cli/create_api_key", (c) =>
+  c.json({ api_key: getAccessToken() }),
+)
+
+// POST /api/claude_cli_feedback
+oauthApiRoutes.post("/claude_cli_feedback", (c) => c.json({ success: true }))
+
+// POST /api/claude_code/metrics
+oauthApiRoutes.post("/claude_code/metrics", (c) => c.json({ success: true }))
+
+// GET /api/claude_code/organizations/metrics_enabled
+oauthApiRoutes.get("/claude_code/organizations/metrics_enabled", (c) =>
+  c.json({ enabled: false }),
+)
+
+// POST /api/claude_code/link_vcs_account
+oauthApiRoutes.post("/claude_code/link_vcs_account", (c) =>
+  c.json({ success: true }),
+)
+
+// GET /api/claude_code/user_settings
+oauthApiRoutes.get("/claude_code/user_settings", (c) => c.json({}))
+
+// PUT /api/claude_code/user_settings
+oauthApiRoutes.put("/claude_code/user_settings", (c) =>
+  c.json({ success: true }),
+)
+
+// GET /api/organization
+oauthApiRoutes.get("/organization/:id", (c) =>
+  c.json({
+    uuid: c.req.param("id"),
+    name: "Copilot API",
+    settings: {},
+  }),
+)
 
 // --- Authorize page HTML ---
 

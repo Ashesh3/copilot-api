@@ -23,3 +23,6 @@ docs/plans/
 
 # windows /dev/null artifact
 nul
+
+# SSL certs for local HTTPS proxy
+scripts/certs/

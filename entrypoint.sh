@@ -11,6 +11,12 @@ ARGS=""
 [ "$COPILOT_VERBOSE" = "true" ] && ARGS="$ARGS --verbose"
 [ "$COPILOT_DEBUG" = "true" ] && ARGS="$ARGS --debug"
 
+# Resolve secrets from 1Password via varlock (if OP_TOKEN is set)
+if [ -n "$OP_TOKEN" ] && [ -f ".env.schema" ]; then
+  echo "Resolving secrets from 1Password via varlock..."
+  eval "$(bunx varlock resolve --shell 2>/dev/null)" || true
+fi
+
 if [ -n "$GH_TOKEN" ]; then
   # Token provided via env — pass directly
   exec bun run dist/main.js start -g "$GH_TOKEN" $ARGS "$@"
