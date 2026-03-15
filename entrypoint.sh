@@ -8,7 +8,7 @@ fi
 # Must run BEFORE building CLI args so resolved values are available
 if [ -n "$OP_TOKEN" ] && [ -f ".env.schema" ]; then
   echo "Resolving secrets from 1Password via varlock..."
-  eval "$(bunx varlock resolve --shell 2>/dev/null)" || true
+  eval "$(bunx varlock load --format shell --compact 2>/dev/null)" || true
 fi
 
 # Build CLI args from environment variables (after varlock resolution)
