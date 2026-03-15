@@ -1,6 +1,7 @@
 import type { Context, Next } from "hono"
 
 import { state } from "./state"
+import { recordUsage } from "./usage-tracker"
 
 /**
  * Request context stored for logging on response
@@ -236,6 +237,9 @@ export async function requestLogger(c: Context, next: Next): Promise<void> {
 
   await next()
 
+  // Skip logging for noisy telemetry endpoints
+  if (path.startsWith("/api/event_logging/")) return
+
   // Get context that may have been set during request handling
   const ctx = c.get(REQUEST_CONTEXT_KEY) as RequestContext | undefined
   const duration = ((Date.now() - startTime) / 1000).toFixed(1)
@@ -268,6 +272,11 @@ export async function requestLogger(c: Context, next: Next): Promise<void> {
 
   // Timestamp
   lines.push(`  ${colors.dim}${getTimeString()}${colors.reset}`)
+
+  // Record token usage for the usage tracker
+  if (ctx?.inputTokens || ctx?.outputTokens) {
+    recordUsage(ctx.inputTokens ?? 0, ctx.outputTokens ?? 0, ctx.model)
+  }
 
   // Print all lines
   console.log(lines.join("\n"))

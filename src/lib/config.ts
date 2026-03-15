@@ -15,6 +15,8 @@ export interface AppConfig {
   >
   useFunctionApplyPatch?: boolean
   compactUseSmallModel?: boolean
+  groqApiKey?: string
+  groqModel?: string
 }
 
 const gpt5ExplorationPrompt = `## Exploration and reading files

@@ -7,18 +7,37 @@ import { createAuthMiddleware } from "./lib/request-auth"
 import { requestLogger } from "./lib/request-logger"
 import { completionRoutes } from "./routes/chat-completions/route"
 import { embeddingRoutes } from "./routes/embeddings/route"
+import { featureFlagsRoutes } from "./routes/feature-flags/route"
 import { googleAIRoutes } from "./routes/google-ai/route"
+import { growthbookRoutes } from "./routes/growthbook/route"
 import { messageRoutes } from "./routes/messages/route"
 import { modelRoutes } from "./routes/models/route"
+import {
+  oauthApiRoutes,
+  oauthBrowserRoutes,
+  oauthTokenRoutes,
+} from "./routes/oauth/route"
 import { replacementsRoute } from "./routes/replacements/route"
 import { responsesRoutes } from "./routes/responses/route"
 import { usageRoute } from "./routes/usage/route"
 
 export const server = new Hono()
 
-server.use(apiKeyGuard)
+// Global middleware — applied to ALL routes including pre-auth ones
 server.use(requestLogger)
 server.use(cors())
+
+// Routes that bypass apiKeyGuard and auth middleware
+// GrowthBook remote eval — Claude Code's SDK calls this for feature flags
+server.route("/api/eval", growthbookRoutes)
+// Feature flags admin page (HTML served unauthenticated; API sub-routes have their own auth)
+server.route("/feature-flags", featureFlagsRoutes)
+// OAuth fake layer — authorize, token exchange, profile
+server.route("/oauth", oauthBrowserRoutes)
+server.route("/v1/oauth", oauthTokenRoutes)
+server.route("/api", oauthApiRoutes)
+
+server.use(apiKeyGuard)
 server.use("*", createAuthMiddleware())
 
 server.onError((err, c) => {

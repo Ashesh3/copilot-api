@@ -3,7 +3,6 @@
 import { defineCommand } from "citty"
 import clipboard from "clipboardy"
 import consola from "consola"
-import { serve, type ServerHandler } from "srvx"
 import invariant from "tiny-invariant"
 
 import packageJson from "../package.json" with { type: "json" }
@@ -18,6 +17,7 @@ import { state } from "./lib/state"
 import { setupCopilotToken, setupGitHubToken } from "./lib/token"
 import { tokenPool } from "./lib/token-pool"
 import { cacheModels } from "./lib/utils"
+import { tryUpgradeVoiceWebSocket, voiceWebSocket } from "./routes/voice/route"
 import { server } from "./server"
 import { getVSCodeVersion } from "./services/get-vscode-version"
 
@@ -83,7 +83,6 @@ async function promptClaudeCodeSetup(
       ANTHROPIC_SMALL_FAST_MODEL: selectedSmallModel,
       ANTHROPIC_DEFAULT_HAIKU_MODEL: selectedSmallModel,
       DISABLE_NON_ESSENTIAL_MODEL_CALLS: "1",
-      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
     },
     "claude",
   )
@@ -262,16 +261,26 @@ export async function runServer(options: RunServerOptions): Promise<void> {
     `🌐 Usage Viewer: https://ericc-ch.github.io/copilot-api?endpoint=${serverUrl}/usage`,
   )
 
-  serve({
-    fetch: server.fetch as ServerHandler,
+  Bun.serve({
     port: options.port,
     hostname: options.host,
-    // Increase idle timeout for long-running requests (e.g. Claude Code compact)
-    // Bun default is 10s which is too short
-    bun: {
-      idleTimeout: 255, // max value in seconds (4m 15s)
+    idleTimeout: 255,
+    fetch(req, bunServer) {
+      // WebSocket upgrade must happen before Hono routing
+      if (
+        req.headers.get("upgrade")?.toLowerCase() === "websocket"
+        && tryUpgradeVoiceWebSocket(req, bunServer)
+      ) {
+        return undefined as unknown as Response
+      }
+      return server.fetch(req)
     },
+    websocket: voiceWebSocket,
   })
+
+  consola.info(
+    `Listening on: http://${options.host ?? "localhost"}:${options.port}/`,
+  )
 
   setupSentryShutdown()
 }

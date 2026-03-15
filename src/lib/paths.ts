@@ -9,6 +9,8 @@ const APP_DIR =
 const GITHUB_TOKEN_PATH = path.join(APP_DIR, "github_token")
 const GITHUB_TOKENS_PATH = path.join(APP_DIR, "github_tokens.json")
 const REPLACEMENTS_CONFIG_PATH = path.join(APP_DIR, "replacements.json")
+const FEATURE_FLAGS_PATH = path.join(APP_DIR, "feature_flags.json")
+const USAGE_PATH = path.join(APP_DIR, "usage.json")
 
 export const PATHS = {
   APP_DIR,
@@ -16,6 +18,8 @@ export const PATHS = {
   GITHUB_TOKEN_PATH,
   GITHUB_TOKENS_PATH,
   REPLACEMENTS_CONFIG_PATH,
+  FEATURE_FLAGS_PATH,
+  USAGE_PATH,
 }
 
 export async function ensurePaths(): Promise<void> {
