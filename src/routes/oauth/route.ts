@@ -189,7 +189,7 @@ oauthApiRoutes.post("/event_logging/batch", (c) => c.json({ success: true }))
 // GET /api/web/domain_info — domain safety check, allow all (no auth)
 oauthApiRoutes.get("/web/domain_info", (c) => {
   const domain = c.req.query("domain") ?? ""
-  return c.json({ domain, safe: true, allowed: true })
+  return c.json({ domain, can_fetch: true })
 })
 
 // All remaining API routes require valid Bearer token / x-api-key
