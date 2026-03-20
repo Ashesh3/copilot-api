@@ -1,8 +1,8 @@
-import * as Sentry from "@sentry/bun"
 import { Hono } from "hono"
 import { cors } from "hono/cors"
 
 import { apiKeyGuard } from "./lib/api-key-guard"
+import { forwardError } from "./lib/error"
 import { createAuthMiddleware } from "./lib/request-auth"
 import { requestLogger } from "./lib/request-logger"
 import { completionRoutes } from "./routes/chat-completions/route"
@@ -40,9 +40,8 @@ server.route("/api", oauthApiRoutes)
 server.use(apiKeyGuard)
 server.use("*", createAuthMiddleware())
 
-server.onError((err, c) => {
-  Sentry.captureException(err)
-  return c.json({ error: { message: err.message, type: "error" } }, 500)
+server.onError(async (err, c) => {
+  return await forwardError(c, err)
 })
 
 server.get("/", (c) => c.text("Server running"))

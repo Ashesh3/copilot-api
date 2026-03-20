@@ -8,7 +8,9 @@ export const createEmbeddings = async (payload: EmbeddingRequest) => {
     { modelId: payload.model },
   )
 
-  if (!response.ok) throw new HTTPError("Failed to create embeddings", response)
+  if (!response.ok) {
+    throw new HTTPError("Failed to create embeddings", response, payload)
+  }
 
   return (await response.json()) as EmbeddingResponse
 }
