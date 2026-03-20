@@ -1,5 +1,7 @@
 import type { Context, Next } from "hono"
 
+import * as Sentry from "@sentry/bun"
+
 import { state } from "./state"
 import { recordUsage } from "./usage-tracker"
 
@@ -214,6 +216,89 @@ function buildModificationsLine(ctx: RequestContext): string | undefined {
 }
 
 /**
+ * Build a plain-text model line for Sentry (no ANSI codes)
+ */
+function buildPlainModelLine(ctx: RequestContext): string {
+  const parts: Array<string> = []
+
+  if (ctx.requestedModel && ctx.requestedModel !== ctx.model) {
+    parts.push(`${ctx.requestedModel} → ${ctx.model}`)
+  } else {
+    parts.push(ctx.model ?? "unknown")
+  }
+
+  if (ctx.accountId !== undefined) {
+    parts.push(`[Account #${ctx.accountId}]`)
+  }
+
+  if (ctx.provider) {
+    parts.push(`via ${ctx.provider}`)
+  }
+
+  if (ctx.inputLength !== undefined) {
+    parts.push(`· ${formatInputSize(ctx.inputLength)}`)
+  }
+
+  return parts.join(" ")
+}
+
+/**
+ * Build a plain-text modifications line for Sentry (no ANSI codes)
+ */
+function buildPlainModificationsLine(ctx: RequestContext): string | undefined {
+  const modParts: Array<string> = []
+
+  if (ctx.reasoningEffort) {
+    modParts.push(`effort=${ctx.reasoningEffort}`)
+  }
+
+  if (ctx.replacements && ctx.replacements.length > 0) {
+    modParts.push(`replace: ${ctx.replacements.join(", ")}`)
+  }
+
+  if (ctx.inputTokens !== undefined) {
+    modParts.push(`${ctx.inputTokens.toLocaleString()} tokens`)
+  }
+
+  if (modParts.length === 0) return undefined
+  return modParts.join(" · ")
+}
+
+/**
+ * Send enriched request log to Sentry (plain text, no ANSI codes)
+ */
+function sendRequestLogToSentry(opts: {
+  method: string
+  path: string
+  status: number
+  duration: string
+  ctx: RequestContext | undefined
+}): void {
+  const { method, path, status, duration, ctx } = opts
+  const sentryParts: Array<string> = [
+    `${method} ${path} ${status} ${duration}s`,
+  ]
+  if (ctx?.model) {
+    sentryParts.push(buildPlainModelLine(ctx))
+  }
+  if (ctx) {
+    const modsLine = buildPlainModificationsLine(ctx)
+    if (modsLine) sentryParts.push(modsLine)
+  }
+  Sentry.logger.info(sentryParts.join(" | "), {
+    method,
+    path,
+    status,
+    duration: Number(duration),
+    model: ctx?.model,
+    requestedModel: ctx?.requestedModel,
+    provider: ctx?.provider,
+    inputTokens: ctx?.inputTokens,
+    accountId: ctx?.accountId,
+  })
+}
+
+/**
  * Custom request logger middleware
  */
 export async function requestLogger(c: Context, next: Next): Promise<void> {
@@ -278,8 +363,11 @@ export async function requestLogger(c: Context, next: Next): Promise<void> {
     recordUsage(ctx.inputTokens ?? 0, ctx.outputTokens ?? 0, ctx.model)
   }
 
-  // Print all lines
+  // Print all lines to terminal
   console.log(lines.join("\n"))
+
+  // Send enriched log to Sentry
+  sendRequestLogToSentry({ method, path, status, duration, ctx })
 }
 
 /**
@@ -291,4 +379,9 @@ export function logTokenUsage(inputTokens: number, outputTokens: number): void {
     `  ${colors.gray}Tokens:${colors.reset} ${colors.yellow}${inputTokens.toLocaleString()} in${colors.reset} ${colors.gray}/${colors.reset} ${colors.green}${outputTokens.toLocaleString()} out${colors.reset}`,
   )
   console.log(parts.join(""))
+
+  Sentry.logger.info(
+    `Tokens: ${inputTokens.toLocaleString()} in / ${outputTokens.toLocaleString()} out`,
+    { inputTokens, outputTokens },
+  )
 }
