@@ -35,7 +35,91 @@ function isContentFilterError(obj: unknown): obj is ContentFilterError {
   )
 }
 
+const SENSITIVE_HEADER_PATTERNS = [
+  "authorization",
+  "api-key",
+  "cookie",
+  "x-api-key",
+  "set-cookie",
+]
+
+function extractResponseHeaders(response: Response): Record<string, string> {
+  const headers: Record<string, string> = {}
+  for (const [key, value] of response.headers.entries()) {
+    const lower = key.toLowerCase()
+    if (!SENSITIVE_HEADER_PATTERNS.some((p) => lower.includes(p))) {
+      headers[key] = value
+    }
+  }
+  return headers
+}
+
 export async function forwardError(c: Context, error: unknown) {
+  if (error instanceof HTTPError) {
+    let responseBody: string
+    try {
+      responseBody = await error.response.text()
+    } catch {
+      responseBody = "(unable to read response body)"
+    }
+
+    let parsedBody: unknown
+    try {
+      parsedBody = JSON.parse(responseBody)
+    } catch {
+      parsedBody = responseBody
+    }
+
+    const responseHeaders = extractResponseHeaders(error.response)
+
+    consola.error(
+      `[${error.response.status} ${error.response.statusText}] ${error.message}`,
+    )
+    consola.error("Response body:", parsedBody)
+    consola.error("Response headers:", responseHeaders)
+    if (error.requestPayload) {
+      consola.error("Request payload:", error.requestPayload)
+    }
+
+    // Check for content filter error and log full details
+    if (isContentFilterError(parsedBody)) {
+      consola.box("CONTENT FILTER TRIGGERED")
+      consola.error("Full error response:")
+      console.log(JSON.stringify(parsedBody, null, 2))
+
+      if (error.requestPayload) {
+        consola.error("Request payload that triggered the filter:")
+        console.log(JSON.stringify(error.requestPayload, null, 2))
+      }
+    }
+
+    Sentry.captureException(error, {
+      tags: {
+        path: c.req.path,
+        method: c.req.method,
+        status: String(error.response.status),
+      },
+      extra: {
+        status: error.response.status,
+        statusText: error.response.statusText,
+        responseUrl: error.response.url || undefined,
+        responseBody: parsedBody,
+        responseHeaders,
+        requestPayload: error.requestPayload,
+      },
+    })
+
+    return c.json(
+      {
+        error: {
+          message: responseBody,
+          type: "error",
+        },
+      },
+      error.response.status as ContentfulStatusCode,
+    )
+  }
+
   consola.error("Error occurred:", error)
 
   Sentry.captureException(error, {
@@ -44,42 +128,10 @@ export async function forwardError(c: Context, error: unknown) {
       method: c.req.method,
     },
     extra: {
-      status: error instanceof HTTPError ? error.response.status : 500,
+      errorMessage: (error as Error).message,
+      errorStack: (error as Error).stack,
     },
   })
-
-  if (error instanceof HTTPError) {
-    const errorText = await error.response.text()
-    let errorJson: unknown
-    try {
-      errorJson = JSON.parse(errorText)
-    } catch {
-      errorJson = errorText
-    }
-    consola.error("HTTP error:", errorJson)
-
-    // Check for content filter error and log full details
-    if (isContentFilterError(errorJson)) {
-      consola.box("CONTENT FILTER TRIGGERED")
-      consola.error("Full error response:")
-      console.log(JSON.stringify(errorJson, null, 2))
-
-      if (error.requestPayload) {
-        consola.error("Request payload that triggered the filter:")
-        console.log(JSON.stringify(error.requestPayload, null, 2))
-      }
-    }
-
-    return c.json(
-      {
-        error: {
-          message: errorText,
-          type: "error",
-        },
-      },
-      error.response.status as ContentfulStatusCode,
-    )
-  }
 
   return c.json(
     {

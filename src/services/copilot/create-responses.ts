@@ -359,7 +359,7 @@ export const createResponses = async (
 
   if (!response.ok) {
     consola.error("Failed to create responses", response)
-    throw new HTTPError("Failed to create responses", response)
+    throw new HTTPError("Failed to create responses", response, payload)
   }
 
   if (payload.stream) {

@@ -139,10 +139,10 @@ async function handleResponse(
     const errorBody = await response.clone().text()
     consola.error(
       "Failed to create chat completions",
-      `Status: ${response.status}`,
+      `Status: ${response.status} ${response.statusText}`,
       errorBody,
     )
-    throw new HTTPError("Failed to create chat completions", response)
+    throw new HTTPError("Failed to create chat completions", response, payload)
   }
 
   if (payload.stream) {
@@ -155,6 +155,7 @@ async function handleResponse(
     throw new HTTPError(
       "Empty response body from upstream",
       new Response("", { status: 502 }),
+      payload,
     )
   }
 
@@ -169,6 +170,7 @@ async function handleResponse(
     throw new HTTPError(
       "Invalid JSON response from upstream",
       new Response(text, { status: 502 }),
+      payload,
     )
   }
 }
