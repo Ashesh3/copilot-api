@@ -17,6 +17,10 @@ import { state } from "./lib/state"
 import { setupCopilotToken, setupGitHubToken } from "./lib/token"
 import { tokenPool } from "./lib/token-pool"
 import { cacheModels } from "./lib/utils"
+import {
+  tryUpgradeResponsesWebSocket,
+  responsesWebSocket,
+} from "./routes/responses/websocket"
 import { tryUpgradeVoiceWebSocket, voiceWebSocket } from "./routes/voice/route"
 import { server } from "./server"
 import { getVSCodeVersion } from "./services/get-vscode-version"
@@ -197,6 +201,48 @@ async function initializeTokens(options: RunServerOptions): Promise<void> {
   await cacheModels()
 }
 
+// Combined WebSocket handler that dispatches to voice or responses based on connection type
+const combinedWebSocket = {
+  open(ws: { data: { type: string } }) {
+    if (ws.data.type === "voice") {
+      voiceWebSocket.open(ws as Parameters<typeof voiceWebSocket.open>[0])
+    } else if (ws.data.type === "responses") {
+      responsesWebSocket.open(
+        ws as Parameters<typeof responsesWebSocket.open>[0],
+      )
+    }
+  },
+  message(
+    ws: {
+      data: { type: string }
+      send: (data: string | ArrayBuffer | Uint8Array) => void
+      close: (code?: number, reason?: string) => void
+    },
+    message: string | Buffer | Uint8Array,
+  ) {
+    if (ws.data.type === "voice") {
+      voiceWebSocket.message(
+        ws as Parameters<typeof voiceWebSocket.message>[0],
+        message,
+      )
+    } else if (ws.data.type === "responses") {
+      void responsesWebSocket.message(
+        ws as Parameters<typeof responsesWebSocket.message>[0],
+        message,
+      )
+    }
+  },
+  close(ws: { data: { type: string } }) {
+    if (ws.data.type === "voice") {
+      voiceWebSocket.close(ws as Parameters<typeof voiceWebSocket.close>[0])
+    } else if (ws.data.type === "responses") {
+      responsesWebSocket.close(
+        ws as Parameters<typeof responsesWebSocket.close>[0],
+      )
+    }
+  },
+}
+
 export async function runServer(options: RunServerOptions): Promise<void> {
   initSentry()
 
@@ -267,15 +313,21 @@ export async function runServer(options: RunServerOptions): Promise<void> {
     idleTimeout: 255,
     fetch(req, bunServer) {
       // WebSocket upgrade must happen before Hono routing
-      if (
-        req.headers.get("upgrade")?.toLowerCase() === "websocket"
-        && tryUpgradeVoiceWebSocket(req, bunServer)
-      ) {
-        return undefined as unknown as Response
+      if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
+        if (tryUpgradeVoiceWebSocket(req, bunServer)) {
+          return undefined as unknown as Response
+        }
+        const wsResult = tryUpgradeResponsesWebSocket(req, bunServer)
+        if (wsResult === "upgraded") {
+          return undefined as unknown as Response
+        }
+        if (wsResult === "auth_failed") {
+          return new Response("Unauthorized", { status: 401 })
+        }
       }
       return server.fetch(req)
     },
-    websocket: voiceWebSocket,
+    websocket: combinedWebSocket,
   })
 
   consola.info(

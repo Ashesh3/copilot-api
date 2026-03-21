@@ -59,7 +59,7 @@ function isResponsesReasoningEffort(
   )
 }
 
-function normalizeResponsesReasoning(
+export function normalizeResponsesReasoning(
   payload: ResponsesPayload,
   suffixEffort?: "low" | "medium" | "high" | "xhigh",
 ): ResponsesReasoningEffort | undefined {
@@ -261,7 +261,7 @@ const isAsyncIterable = <T>(value: unknown): value is AsyncIterable<T> =>
 const isStreamingRequested = (payload: ResponsesPayload): boolean =>
   Boolean(payload.stream)
 
-const useFunctionApplyPatch = (payload: ResponsesPayload): void => {
+export const useFunctionApplyPatch = (payload: ResponsesPayload): void => {
   const config = getConfig()
   const useFunctionApplyPatch = config.useFunctionApplyPatch ?? true
   if (useFunctionApplyPatch) {
@@ -293,7 +293,7 @@ const useFunctionApplyPatch = (payload: ResponsesPayload): void => {
   }
 }
 
-const convertWebSearchTool = (payload: ResponsesPayload): void => {
+export const convertWebSearchTool = (payload: ResponsesPayload): void => {
   if (!Array.isArray(payload.tools) || payload.tools.length === 0) return
 
   payload.tools = payload.tools.map((t) => {
@@ -469,7 +469,7 @@ const convertToolChoiceForCC = (
   return undefined
 }
 
-const responsesToChatCompletions = (
+export const responsesToChatCompletions = (
   payload: ResponsesPayload,
 ): ChatCompletionsPayload => {
   const messages = convertInputToMessages(payload.input)
@@ -849,7 +849,7 @@ const emitResponseCompleted = async (
   })
 }
 
-const streamChatCompletionsAsResponses = async (
+export const streamChatCompletionsAsResponses = async (
   stream: {
     writeSSE: (data: { event?: string; data: string }) => Promise<void>
   },

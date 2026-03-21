@@ -136,5 +136,5 @@ export function tryUpgradeVoiceWebSocket(
   const language = url.searchParams.get("language") ?? "en"
   const session = createSession(language)
 
-  return server.upgrade(req, { data: { session } })
+  return server.upgrade(req, { data: { type: "voice" as const, session } })
 }
