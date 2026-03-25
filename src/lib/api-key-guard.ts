@@ -1,5 +1,8 @@
 import type { Context, Next } from "hono"
 
+import * as Sentry from "@sentry/bun"
+import consola from "consola"
+
 import { extractClientIp, isIpBlocked, recordFailedAttempt } from "./ip-blocker"
 import { extractRequestApiKey } from "./request-auth"
 import { state } from "./state"
@@ -33,6 +36,13 @@ export async function apiKeyGuard(c: Context, next: Next): Promise<void> {
   const clientIp = extractClientIp(c)
 
   if (clientIp !== null && isIpBlocked(clientIp)) {
+    consola.warn(
+      `[api-key-guard] Blocked request from banned IP ${clientIp} → ${c.req.method} ${c.req.path}`,
+    )
+    Sentry.captureMessage(`Blocked banned IP: ${clientIp}`, {
+      level: "warning",
+      extra: { ip: clientIp, method: c.req.method, path: c.req.path },
+    })
     // Silent drop: never resolves, client gets no response
     await new Promise(() => {})
     return
@@ -47,7 +57,19 @@ export async function apiKeyGuard(c: Context, next: Next): Promise<void> {
 
   // Only count failed attempts on copilot-proxying endpoints
   if (clientIp !== null && IP_BAN_PATHS.has(c.req.path)) {
-    recordFailedAttempt(clientIp)
+    const attempts = recordFailedAttempt(clientIp)
+    consola.warn(
+      `[api-key-guard] Failed auth from ${clientIp} → ${c.req.method} ${c.req.path} (attempt ${attempts}/3)`,
+    )
+    if (attempts >= 3) {
+      consola.error(
+        `[api-key-guard] IP ${clientIp} banned after ${attempts} failed attempts`,
+      )
+      Sentry.captureMessage(`IP banned: ${clientIp}`, {
+        level: "error",
+        extra: { ip: clientIp, attempts, path: c.req.path },
+      })
+    }
   }
 
   // Silent drop: never resolves, client gets no response

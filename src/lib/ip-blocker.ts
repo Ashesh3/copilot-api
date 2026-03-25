@@ -56,22 +56,25 @@ export function isIpBlocked(ip: string): boolean {
 /**
  * Records a failed authentication attempt for an IP.
  * Increments count if entry exists for today, otherwise creates new entry.
+ * Returns the current attempt count after recording.
  */
-export function recordFailedAttempt(ip: string): void {
+export function recordFailedAttempt(ip: string): number {
   const today = getUtcDateString()
   const entry = ipTracker.get(ip)
 
   if (!entry) {
     // New entry
     ipTracker.set(ip, { count: 1, date: today })
-    return
+    return 1
   }
 
   if (entry.date === today) {
     // Same day: increment count
     entry.count += 1
+    return entry.count
   } else {
     // Different day: reset to 1
     ipTracker.set(ip, { count: 1, date: today })
+    return 1
   }
 }
