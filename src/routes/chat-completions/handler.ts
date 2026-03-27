@@ -85,7 +85,7 @@ export async function handleCompletion(c: Context) {
     traceRecorder.startTrace({
       id: currentTraceId,
       name: `POST ${c.req.path}`,
-      input: JSON.stringify(rawPayload).slice(0, 10000),
+      input: JSON.stringify(rawPayload).slice(0, 500000),
       meta: { environment: process.env.NODE_ENV },
     }),
   )
@@ -119,8 +119,8 @@ export async function handleCompletion(c: Context) {
       type: "step",
       startTime: parseStart,
       endTime: traceNow(),
-      input: JSON.stringify({ model: requestedModel }).slice(0, 5000),
-      output: JSON.stringify({ model: payload.model }).slice(0, 5000),
+      input: JSON.stringify({ model: requestedModel }).slice(0, 500000),
+      output: JSON.stringify({ model: payload.model }).slice(0, 500000),
     }),
   )
 
@@ -234,7 +234,7 @@ const handleNonStreamingResponse = (
     recordLlmSpan(ctx, llmSpanStart, {
       inputTokens: response.usage?.prompt_tokens ?? 0,
       outputTokens: response.usage?.completion_tokens ?? 0,
-      output: JSON.stringify(response).slice(0, 10000),
+      output: JSON.stringify(response).slice(0, 500000),
     }),
   )
 

@@ -146,7 +146,7 @@ export async function handleCompletion(c: Context) {
     traceRecorder.startTrace({
       id: currentTraceId,
       name: `POST ${c.req.path}`,
-      input: JSON.stringify(anthropicPayload).slice(0, 10000),
+      input: JSON.stringify(anthropicPayload).slice(0, 500000),
       meta: { environment: process.env.NODE_ENV },
     }),
   )
@@ -194,11 +194,11 @@ export async function handleCompletion(c: Context) {
       type: "step",
       startTime: parseStart,
       endTime: traceNow(),
-      input: JSON.stringify({ model: requestedModel }).slice(0, 5000),
+      input: JSON.stringify({ model: requestedModel }).slice(0, 500000),
       output: JSON.stringify({
         model: anthropicPayload.model,
         isCompact,
-      }).slice(0, 5000),
+      }).slice(0, 500000),
     }),
   )
 
@@ -479,8 +479,8 @@ const executeChatCompletions = async (
           outputTokens,
           inputCostUsd: cost.inputCostUsd,
           outputCostUsd: cost.outputCostUsd,
-          input: JSON.stringify(finalPayload.messages).slice(0, 10000),
-          output: JSON.stringify(finalResponse).slice(0, 10000),
+          input: JSON.stringify(finalPayload.messages).slice(0, 500000),
+          output: JSON.stringify(finalResponse).slice(0, 500000),
         })
       })
     }
@@ -524,7 +524,7 @@ const executeChatCompletions = async (
             endTime: traceNow(),
             provider: "ChatCompletions",
             model: finalPayload.model,
-            input: JSON.stringify(finalPayload.messages).slice(0, 10000),
+            input: JSON.stringify(finalPayload.messages).slice(0, 500000),
           }),
         )
       }
@@ -589,7 +589,7 @@ const executeChatCompletions = async (
           outputTokens: streamOutputTokens,
           inputCostUsd: cost.inputCostUsd,
           outputCostUsd: cost.outputCostUsd,
-          input: JSON.stringify(finalPayload.messages).slice(0, 10000),
+          input: JSON.stringify(finalPayload.messages).slice(0, 500000),
         })
       })
     }
@@ -917,7 +917,7 @@ const executeResponsesApi = async (
               outputTokens: wsUsage.outputTokens,
               inputCostUsd: cost.inputCostUsd,
               outputCostUsd: cost.outputCostUsd,
-              input: JSON.stringify(anthropicPayload.messages).slice(0, 10000),
+              input: JSON.stringify(anthropicPayload.messages).slice(0, 500000),
             })
           })
         }
@@ -947,7 +947,7 @@ const executeResponsesApi = async (
             outputTokens: directUsage.outputTokens,
             inputCostUsd: cost.inputCostUsd,
             outputCostUsd: cost.outputCostUsd,
-            input: JSON.stringify(anthropicPayload.messages).slice(0, 10000),
+            input: JSON.stringify(anthropicPayload.messages).slice(0, 500000),
           })
         })
       }
@@ -991,8 +991,8 @@ const executeResponsesApi = async (
         outputTokens,
         inputCostUsd: cost.inputCostUsd,
         outputCostUsd: cost.outputCostUsd,
-        input: JSON.stringify(anthropicPayload.messages).slice(0, 10000),
-        output: JSON.stringify(resolved).slice(0, 10000),
+        input: JSON.stringify(anthropicPayload.messages).slice(0, 500000),
+        output: JSON.stringify(resolved).slice(0, 500000),
       })
     })
   }
