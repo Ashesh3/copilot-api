@@ -6,36 +6,33 @@ export interface ModelPricing {
 }
 
 /**
- * Cache of model name -> pricing data from PricePerToken API.
+ * Cache of model slug -> pricing data from PricePerToken API.
  */
 export const pricingCache = new Map<string, ModelPricing>()
 
 /**
- * Maps copilot-api model names to PricePerToken API identifiers.
- * Only needed when the copilot name differs from what PricePerToken uses.
+ * Maps copilot-api model names to PricePerToken API slugs.
  */
 const MODEL_NAME_MAP: Record<string, string> = {
-  // Claude models - Copilot uses shortened names
-  "claude-sonnet-4.6": "claude-sonnet-4-5-20250514",
-  "claude-opus-4.6": "claude-opus-4-20250514",
-  "claude-opus-4.6-fast": "claude-opus-4-20250514",
-  "claude-opus-4.6-1m": "claude-opus-4-20250514",
-  "claude-sonnet-4": "claude-sonnet-4-20250514",
-  // GPT models
-  "gpt-4.1": "gpt-4.1-2025-04-14",
-  "gpt-4.1-mini": "gpt-4.1-mini-2025-04-14",
-  "gpt-4.1-nano": "gpt-4.1-nano-2025-04-14",
-  "gpt-4o": "gpt-4o-2024-08-06",
-  "gpt-4o-mini": "gpt-4o-mini-2024-07-18",
-  // o-series reasoning models
-  "o3-mini": "o3-mini-2025-01-31",
-  "o4-mini": "o4-mini-2025-04-16",
+  "claude-sonnet-4.6": "anthropic-claude-sonnet-4.6",
+  "claude-opus-4.6": "anthropic-claude-opus-4.6",
+  "claude-opus-4.6-fast": "anthropic-claude-opus-4.6",
+  "claude-opus-4.6-1m": "anthropic-claude-opus-4.6",
+  "claude-sonnet-4": "anthropic-claude-sonnet-4",
+  "claude-sonnet-4.5": "anthropic-claude-sonnet-4.5",
+  "claude-opus-4": "anthropic-claude-opus-4",
+  "claude-opus-4.5": "anthropic-claude-opus-4.5",
+  "claude-haiku-4.5": "anthropic-claude-haiku-4.5",
+  "claude-haiku-3.5": "anthropic-claude-3.5-haiku",
+  "claude-3.5-haiku": "anthropic-claude-3.5-haiku",
 }
 
 interface PricePerTokenModel {
-  model_id: string
-  input_price_per_token: number
-  output_price_per_token: number
+  slug: string
+  author_name: string
+  model_name: string
+  input_per_1m: number
+  output_per_1m: number
 }
 
 interface JsonRpcResponse {
@@ -57,11 +54,12 @@ interface JsonRpcResponse {
  */
 export async function refreshPricingCache(): Promise<void> {
   try {
-    consola.debug("Refreshing pricing cache from PricePerToken API")
-
     const response = await fetch("https://api.pricepertoken.com/mcp/mcp", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
       body: JSON.stringify({
         jsonrpc: "2.0",
         id: 1,
@@ -99,13 +97,13 @@ export async function refreshPricingCache(): Promise<void> {
 
     pricingCache.clear()
     for (const model of models) {
-      pricingCache.set(model.model_id, {
-        inputPricePerToken: model.input_price_per_token,
-        outputPricePerToken: model.output_price_per_token,
+      pricingCache.set(model.slug, {
+        inputPricePerToken: model.input_per_1m / 1_000_000,
+        outputPricePerToken: model.output_per_1m / 1_000_000,
       })
     }
 
-    consola.debug(`Pricing cache loaded with ${pricingCache.size} models`)
+    consola.info(`Pricing cache loaded: ${pricingCache.size} models`)
   } catch (error) {
     consola.debug(
       `Failed to refresh pricing cache: ${error instanceof Error ? error.message : String(error)}`,
@@ -117,18 +115,16 @@ export async function refreshPricingCache(): Promise<void> {
  * Look up pricing for a model. Tries direct lookup, mapped name, then fuzzy match.
  */
 export function getModelPricing(modelName: string): ModelPricing | undefined {
-  // 1. Direct cache lookup
   const direct = pricingCache.get(modelName)
   if (direct) return direct
 
-  // 2. Mapped name lookup
   const mappedName = MODEL_NAME_MAP[modelName]
   if (mappedName) {
     const mapped = pricingCache.get(mappedName)
     if (mapped) return mapped
   }
 
-  // 3. Fuzzy match - find a cached key that contains the model name or vice versa
+  // Fuzzy match
   const lowerName = modelName.toLowerCase()
   for (const [key, pricing] of pricingCache) {
     const lowerKey = key.toLowerCase()
