@@ -286,9 +286,9 @@ export async function runServer(options: RunServerOptions): Promise<void> {
     websocket: voiceWebSocket,
   })
 
-  consola.info(
-    `Listening on: http://${options.host ?? "localhost"}:${options.port}/`,
-  )
+  const host = options.host ?? "localhost"
+  consola.info(`Listening on: http://${host}:${options.port}/`)
+  consola.info(`Traces UI available at http://${host}:${options.port}/traces`)
 
   setupSentryShutdown()
 
