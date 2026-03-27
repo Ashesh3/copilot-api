@@ -711,11 +711,14 @@ const streamResponsesWithWebSearch = async (
     requestOptions: { vision: boolean; initiator: "agent" | "user" }
     requestedModel?: string
   },
-): Promise<void> => {
+): Promise<{ inputTokens: number; outputTokens: number }> => {
   const { events, hasWebSearch, completedResult } = await bufferResponsesStream(
     stream,
     response,
   )
+
+  const inputTokens = completedResult?.usage?.input_tokens ?? 0
+  const outputTokens = completedResult?.usage?.output_tokens ?? 0
 
   if (hasWebSearch && completedResult) {
     const resolved = await resolveResponsesWebSearchCalls(
@@ -726,17 +729,20 @@ const streamResponsesWithWebSearch = async (
     const anthropicResponse = translateResponsesResultToAnthropic(resolved)
     if (ctx.requestedModel) anthropicResponse.model = ctx.requestedModel
     await emitAnthropicResponseAsStream(stream, anthropicResponse)
-    return
+    return { inputTokens, outputTokens }
   }
 
   await replayBufferedEvents(stream, events)
+  return { inputTokens, outputTokens }
 }
 
 const streamResponsesDirect = async (
   stream: SSEStream,
   response: ResponsesStream,
-): Promise<void> => {
+): Promise<{ inputTokens: number; outputTokens: number }> => {
   const streamState = createResponsesStreamState()
+  let streamInputTokens = 0
+  let streamOutputTokens = 0
 
   for await (const chunk of response) {
     if (chunk.event === "ping") {
@@ -756,6 +762,12 @@ const streamResponsesDirect = async (
       continue
     }
 
+    // Capture usage from response.completed events
+    if (isResponseCompleted(parsed) && parsed.response.usage) {
+      streamInputTokens = parsed.response.usage.input_tokens
+      streamOutputTokens = parsed.response.usage.output_tokens ?? 0
+    }
+
     await writeResponsesEvents(stream, parsed, streamState)
     if (streamState.messageCompleted) break
   }
@@ -772,6 +784,8 @@ const streamResponsesDirect = async (
       data: JSON.stringify(errorEvent),
     })
   }
+
+  return { inputTokens: streamInputTokens, outputTokens: streamOutputTokens }
 }
 
 const handleWithResponsesApi = async (
@@ -873,14 +887,19 @@ const executeResponsesApi = async (
       const llmSpanStart = traceNow()
 
       if (needsWebSearchBuffering) {
-        await streamResponsesWithWebSearch(stream, response, {
+        const wsUsage = await streamResponsesWithWebSearch(stream, response, {
           responsesPayload,
           requestOptions: { vision, initiator: initiatorOverride ?? initiator },
           requestedModel,
         })
 
         if (traceId) {
-          safeTrace(() =>
+          safeTrace(() => {
+            const cost = calculateCost(
+              anthropicPayload.model,
+              wsUsage.inputTokens,
+              wsUsage.outputTokens,
+            )
             traceRecorder.recordSpan({
               id: traceSpanId(),
               traceId,
@@ -891,16 +910,25 @@ const executeResponsesApi = async (
               endTime: traceNow(),
               provider: "Responses",
               model: anthropicPayload.model,
-            }),
-          )
+              inputTokens: wsUsage.inputTokens,
+              outputTokens: wsUsage.outputTokens,
+              inputCostUsd: cost.inputCostUsd,
+              outputCostUsd: cost.outputCostUsd,
+            })
+          })
         }
         return
       }
 
-      await streamResponsesDirect(stream, response)
+      const directUsage = await streamResponsesDirect(stream, response)
 
       if (traceId) {
-        safeTrace(() =>
+        safeTrace(() => {
+          const cost = calculateCost(
+            anthropicPayload.model,
+            directUsage.inputTokens,
+            directUsage.outputTokens,
+          )
           traceRecorder.recordSpan({
             id: traceSpanId(),
             traceId,
@@ -911,8 +939,12 @@ const executeResponsesApi = async (
             endTime: traceNow(),
             provider: "Responses",
             model: anthropicPayload.model,
-          }),
-        )
+            inputTokens: directUsage.inputTokens,
+            outputTokens: directUsage.outputTokens,
+            inputCostUsd: cost.inputCostUsd,
+            outputCostUsd: cost.outputCostUsd,
+          })
+        })
       }
     })
   }
