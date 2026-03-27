@@ -69,7 +69,7 @@ Copilot's API does not expose pricing data, but copilot-api knows the model name
 
 ### Pricing flow
 
-1. **On startup**: Fetch all model pricing via `GET https://api.pricepertoken.com/mcp/mcp` (or the equivalent REST endpoint from the MCP tools — `get_all_models`). Cache in memory.
+1. **On startup**: Fetch all model pricing from PricePerToken. The service exposes an MCP endpoint at `https://api.pricepertoken.com/mcp/mcp` which uses JSON-RPC over SSE (MCP protocol). During implementation, we will call the `get_all_models` tool via MCP protocol to get the full pricing list. Alternatively, if the MCP protocol adds too much complexity, we can use a simpler approach: maintain a local pricing JSON file that is periodically updated, or call the MCP endpoint using an MCP client library. Cache the result in memory.
 2. **Periodic refresh**: Re-fetch every 6 hours to pick up price changes.
 3. **Per request**: After token counting, look up the model in the pricing cache. Calculate:
    - `input_cost_usd = input_tokens * model.input_price_per_token`
@@ -99,6 +99,9 @@ copilot-api normalizes model names (e.g., `claude-opus-4-6-1m` → `claude-opus-
 - Docs app (Next.js marketing site)
 - SDK packages (not needed — copilot-api writes directly to SQLite)
 - `insightsRouter` (spanSample, loopbackRate, topFailingSpans, topSlowestSpans, modelBreakdown)
+- `statsRouter` procedures: `dailyCostByName`, `qualityTimeline` (complex ClickHouse-specific queries not worth porting)
+- Overview/Insights tab in `traces.tsx` — the `InsightsSection` component depends on stripped `insightsRouter` procedures (`spanSample`, `loopbackRate`) and `statsRouter` procedures (`qualityTimeline`). Remove the Overview tab entirely.
+- Project-level Overview page (`$projectId/index.tsx`) — depends on `explores.listStarred`, `observations["findings.listNew"]`, `qualityTimeline`, `topFailingSpans`, `topSlowestSpans`. Not applicable in single-tenant mode.
 
 ### Kept and modified
 
@@ -113,10 +116,10 @@ copilot-api normalizes model names (e.g., `claude-opus-4-6-1m` → `claude-opus-
 | tRPC procedures | `traces.models` | SQLite queries |
 | tRPC procedures | `traces.names` | SQLite queries |
 | tRPC procedures | `traces.dailyCount` | SQLite queries |
-| tRPC procedures | `traces.stats` | SQLite queries (used by Overview section) |
+| tRPC procedures | `traces.stats` | SQLite queries (trace count, error count, total tokens, total cost, avg duration) |
 | tRPC procedures | `traces.dailyMetrics` | SQLite queries |
 | Span tree utils | `buildTree()`, `collapseTree()` | Unchanged |
-| Trace list UI | Filters, table, pagination, Overview tab | Keep Overview + Raw tabs, remove Observations tab |
+| Trace list UI | Filters, table, pagination | Keep Raw traces tab only, remove Overview and Observations tabs |
 | Trace detail UI | Span tree, detail panel, I/O | Keep, remove AI summary panel |
 
 ### tRPC procedure base migration
@@ -170,8 +173,10 @@ This subquery is used as a LEFT JOIN in `traces.list` and `traces.stats` queries
 - Root route goes directly to trace list
 - Strip `projectId` param from all tRPC calls (single-tenant)
 - Remove `observations.unreadCount` query from `traces.tsx`
-- Remove Observations tab from `SIDEBAR_ITEMS` array in `traces.tsx`
-- Remove `ObservationsSection` import and render
+- Remove Overview and Observations tabs from `SIDEBAR_ITEMS` array in `traces.tsx`
+- Remove `ObservationsSection` and `InsightsSection` imports and renders
+- Remove all `insightsRouter` procedure calls (`spanSample`, `loopbackRate`)
+- Remove `qualityTimeline`, `topFailingSpans`, `topSlowestSpans` calls from Overview page
 - Remove `TraceSummary` component, `analyzeMut` mutation, Analyze button, and auto-analyze effect from `trace.$traceId.tsx`
 - Remove `trpc.projects.get.useQuery()` call from `trace.$traceId.tsx`
 - Replace `useAuth()` hook with a stub that always returns `{ isViewer: false, role: "admin" }` (since auth is handled at the middleware level, all users who reach the UI are authorized)
@@ -346,8 +351,8 @@ This is implemented as a new `/traces`-specific auth middleware, separate from `
 ```typescript
 // Mount BEFORE apiKeyGuard and createAuthMiddleware
 // (traces routes have their own auth middleware)
-server.route("/traces/api/trpc", trpcHandler);
-server.use("/traces/*", tracesAuthMiddleware);  // cookie/query-param auth
+server.use("/traces/*", tracesAuthMiddleware);  // cookie/query-param auth (runs first)
+server.route("/traces/api/trpc", trpcHandler);  // tRPC API (auth already validated)
 server.get("/traces/assets/*", serveStatic({ root: breadcrumbStaticPath }));
 server.get("/traces/*", serveSPA);  // SPA fallback → index.html
 server.get("/traces", serveSPA);
@@ -451,7 +456,7 @@ Dependencies: `superjson`, `@trpc/server`, `zod`.
 | UI hosting | Same process/port at `/traces` |
 | Auth (API) | Existing `COPILOT_API_KEY_AUTH` |
 | Auth (UI) | Query-param key → HttpOnly cookie |
-| Feature scope | Core — trace list, detail, span tree, filters, overview stats |
+| Feature scope | Core — trace list, detail, span tree, filters, stats |
 | Tracing | Always on, stored in `traces.db` |
 | Packaging | Breadcrumb fork as npm package with router + static exports |
 | Cost tracking | PricePerToken API for model pricing, calculated per-request |
