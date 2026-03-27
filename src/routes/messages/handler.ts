@@ -1,3 +1,4 @@
+/* eslint-disable max-lines, max-lines-per-function */
 import type { Context } from "hono"
 
 import { streamSSE } from "hono/streaming"
@@ -11,10 +12,12 @@ import { HTTPError } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
 import { normalizeModelName } from "~/lib/model-resolver"
 import { parseModelSuffix } from "~/lib/model-suffix"
+import { calculateCost } from "~/lib/pricing-cache"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { setRequestContext } from "~/lib/request-logger"
 import { state } from "~/lib/state"
 import { getTokenCount } from "~/lib/tokenizer"
+import { traceRecorder } from "~/lib/trace-recorder"
 import {
   buildErrorEvent,
   createResponsesStreamState,
@@ -56,6 +59,27 @@ import {
   resolveResponsesWebSearchCalls,
   resolveWebSearchCalls,
 } from "./web-search-helpers"
+
+// ─── Trace helpers ───
+
+function traceSpanId(): string {
+  return crypto.randomUUID().replaceAll("-", "").slice(0, 16)
+}
+function newTraceId(): string {
+  return crypto.randomUUID().replaceAll("-", "")
+}
+function traceNow(): string {
+  return new Date().toISOString()
+}
+
+/** Safe wrapper - tracing never breaks the proxy */
+const safeTrace = (fn: () => void): void => {
+  try {
+    fn()
+  } catch {
+    // Tracing is best-effort
+  }
+}
 
 /**
  * Strip thinking blocks from all assistant messages in the payload.
@@ -112,8 +136,23 @@ const hasWebSearchToolInPayload = (
 export async function handleCompletion(c: Context) {
   await checkRateLimit(state)
 
+  const currentTraceId = newTraceId()
+  const rootSpanId = traceSpanId()
+
   const anthropicPayload = await c.req.json<AnthropicMessagesPayload>()
   logger.debug("Anthropic request payload:", JSON.stringify(anthropicPayload))
+
+  safeTrace(() =>
+    traceRecorder.startTrace({
+      id: currentTraceId,
+      name: `POST ${c.req.path}`,
+      input: JSON.stringify(anthropicPayload).slice(0, 10000),
+      meta: { environment: process.env.NODE_ENV },
+    }),
+  )
+
+  // Record parse-request span
+  const parseStart = traceNow()
 
   // Capture the originally requested model before any manipulation
   const requestedModel = anthropicPayload.model
@@ -143,13 +182,25 @@ export async function handleCompletion(c: Context) {
   if (isCompact) {
     logger.debug("Is compact request:", isCompact)
   } else {
-    // Merge tool_result and text blocks into tool_result to avoid consuming premium requests
-    // (caused by skill invocations, edit hooks, plan or to do reminders)
-    // e.g. {"role":"user","content":[{"type":"tool_result","content":"Launching skill: xxx"},{"type":"text","text":"xxx"}]}
-    // not only for claude, but also for opencode
-    // compact requests are excluded from this processing
     mergeToolResultForClaude(anthropicPayload)
   }
+
+  safeTrace(() =>
+    traceRecorder.recordSpan({
+      id: traceSpanId(),
+      traceId: currentTraceId,
+      parentSpanId: rootSpanId,
+      name: "parse-request",
+      type: "step",
+      startTime: parseStart,
+      endTime: traceNow(),
+      input: JSON.stringify({ model: requestedModel }).slice(0, 5000),
+      output: JSON.stringify({
+        model: anthropicPayload.model,
+        isCompact,
+      }).slice(0, 5000),
+    }),
+  )
 
   if (state.manualApprove) {
     await awaitApproval()
@@ -166,7 +217,6 @@ export async function handleCompletion(c: Context) {
   }
 
   // Determine effective reasoning effort for logging
-  // Priority: suffix > body thinking config
   const bodyEffort = getBodyReasoningEffort(anthropicPayload)
   const effectiveEffort = suffixEffort ?? bodyEffort
 
@@ -177,18 +227,37 @@ export async function handleCompletion(c: Context) {
     reasoningEffort: effectiveEffort,
   })
 
-  if (shouldUseResponsesApi(selectedModel)) {
-    return await handleWithResponsesApi(c, anthropicPayload, {
-      initiatorOverride,
-      effortOverride: suffixEffort,
-      requestedModel,
-    })
-  }
+  const traceCtx = { traceId: currentTraceId, rootSpanId }
 
-  return await handleWithChatCompletions(c, anthropicPayload, {
-    initiatorOverride,
-    requestedModel,
-  })
+  try {
+    const result =
+      shouldUseResponsesApi(selectedModel) ?
+        await handleWithResponsesApi(c, anthropicPayload, {
+          initiatorOverride,
+          effortOverride: suffixEffort,
+          requestedModel,
+          ...traceCtx,
+        })
+      : await handleWithChatCompletions(c, anthropicPayload, {
+          initiatorOverride,
+          requestedModel,
+          ...traceCtx,
+        })
+
+    safeTrace(() =>
+      traceRecorder.endTrace({ id: currentTraceId, status: "ok" }),
+    )
+    return result
+  } catch (error) {
+    safeTrace(() =>
+      traceRecorder.endTrace({
+        id: currentTraceId,
+        status: "error",
+        statusMessage: error instanceof Error ? error.message : String(error),
+      }),
+    )
+    throw error
+  }
 }
 
 const RESPONSES_ENDPOINT = "/responses"
@@ -275,6 +344,8 @@ const handleWithChatCompletions = async (
   options?: {
     initiatorOverride?: "agent" | "user"
     requestedModel?: string
+    traceId?: string
+    rootSpanId?: string
   },
 ) => {
   try {
@@ -303,9 +374,12 @@ const executeChatCompletions = async (
   options?: {
     initiatorOverride?: "agent" | "user"
     requestedModel?: string
+    traceId?: string
+    rootSpanId?: string
   },
 ) => {
-  const { initiatorOverride, requestedModel } = options ?? {}
+  const { initiatorOverride, requestedModel, traceId, rootSpanId } =
+    options ?? {}
   stripThinkingBlocksForMultiToken(anthropicPayload)
   const openAIPayload = translateToOpenAI(anthropicPayload)
 
@@ -340,6 +414,8 @@ const executeChatCompletions = async (
     JSON.stringify(finalPayload),
   )
 
+  // Record select-token span
+  const selectTokenStart = traceNow()
   const response = await createChatCompletions(finalPayload, {
     initiator: initiatorOverride,
   })
@@ -350,7 +426,24 @@ const executeChatCompletions = async (
     setRequestContext(c, { accountId })
   }
 
+  if (traceId) {
+    safeTrace(() =>
+      traceRecorder.recordSpan({
+        id: traceSpanId(),
+        traceId,
+        parentSpanId: rootSpanId,
+        name: "select-token",
+        type: "step",
+        startTime: selectTokenStart,
+        endTime: traceNow(),
+        output: JSON.stringify({ accountId }),
+      }),
+    )
+  }
+
   if (isNonStreaming(response)) {
+    const llmSpanStart = traceNow()
+
     // Check for web_search tool calls and execute them in a loop
     const finalResponse = await resolveWebSearchCalls(
       response,
@@ -362,6 +455,35 @@ const executeChatCompletions = async (
       "Non-streaming response from Copilot:",
       JSON.stringify(finalResponse).slice(-400),
     )
+
+    if (traceId) {
+      safeTrace(() => {
+        const inputTokens = finalResponse.usage?.prompt_tokens ?? 0
+        const outputTokens = finalResponse.usage?.completion_tokens ?? 0
+        const cost = calculateCost(
+          finalPayload.model,
+          inputTokens,
+          outputTokens,
+        )
+        traceRecorder.recordSpan({
+          id: traceSpanId(),
+          traceId,
+          parentSpanId: rootSpanId,
+          name: "copilot-api-call",
+          type: "llm",
+          startTime: llmSpanStart,
+          endTime: traceNow(),
+          provider: "ChatCompletions",
+          model: finalPayload.model,
+          inputTokens,
+          outputTokens,
+          inputCostUsd: cost.inputCostUsd,
+          outputCostUsd: cost.outputCostUsd,
+          output: JSON.stringify(finalResponse).slice(0, 10000),
+        })
+      })
+    }
+
     const anthropicResponse = translateToAnthropic(
       finalResponse,
       requestedModel,
@@ -380,12 +502,30 @@ const executeChatCompletions = async (
 
   logger.debug("Streaming response from Copilot")
   return streamSSE(c, async (stream) => {
+    const llmSpanStart = traceNow()
+
     if (needsWebSearchBuffering) {
       await streamChatCompletionsWithWebSearch(stream, response, {
         finalPayload,
         initiatorOverride,
         requestedModel,
       })
+
+      if (traceId) {
+        safeTrace(() =>
+          traceRecorder.recordSpan({
+            id: traceSpanId(),
+            traceId,
+            parentSpanId: rootSpanId,
+            name: "copilot-api-call",
+            type: "llm",
+            startTime: llmSpanStart,
+            endTime: traceNow(),
+            provider: "ChatCompletions",
+            model: finalPayload.model,
+          }),
+        )
+      }
       return
     }
 
@@ -397,11 +537,21 @@ const executeChatCompletions = async (
       toolCalls: {},
     }
 
+    let streamInputTokens = 0
+    let streamOutputTokens = 0
+
     for await (const rawEvent of response) {
       if (rawEvent.data === "[DONE]") break
       if (!rawEvent.data) continue
 
       const chunk = JSON.parse(rawEvent.data) as ChatCompletionChunk
+
+      // Capture usage from chunks
+      if (chunk.usage) {
+        streamInputTokens = chunk.usage.prompt_tokens
+        streamOutputTokens = chunk.usage.completion_tokens
+      }
+
       const events = translateChunkToAnthropicEvents(
         chunk,
         streamState,
@@ -413,6 +563,32 @@ const executeChatCompletions = async (
           data: JSON.stringify(event),
         })
       }
+    }
+
+    // Record copilot-api-call span after streaming completes
+    if (traceId) {
+      safeTrace(() => {
+        const cost = calculateCost(
+          finalPayload.model,
+          streamInputTokens,
+          streamOutputTokens,
+        )
+        traceRecorder.recordSpan({
+          id: traceSpanId(),
+          traceId,
+          parentSpanId: rootSpanId,
+          name: "copilot-api-call",
+          type: "llm",
+          startTime: llmSpanStart,
+          endTime: traceNow(),
+          provider: "ChatCompletions",
+          model: finalPayload.model,
+          inputTokens: streamInputTokens,
+          outputTokens: streamOutputTokens,
+          inputCostUsd: cost.inputCostUsd,
+          outputCostUsd: cost.outputCostUsd,
+        })
+      })
     }
   })
 }
@@ -605,6 +781,8 @@ const handleWithResponsesApi = async (
     initiatorOverride?: "agent" | "user"
     effortOverride?: "low" | "medium" | "high" | "xhigh"
     requestedModel?: string
+    traceId?: string
+    rootSpanId?: string
   },
 ) => {
   try {
@@ -634,9 +812,17 @@ const executeResponsesApi = async (
     initiatorOverride?: "agent" | "user"
     effortOverride?: "low" | "medium" | "high" | "xhigh"
     requestedModel?: string
+    traceId?: string
+    rootSpanId?: string
   },
 ) => {
-  const { initiatorOverride, effortOverride, requestedModel } = options ?? {}
+  const {
+    initiatorOverride,
+    effortOverride,
+    requestedModel,
+    traceId,
+    rootSpanId,
+  } = options ?? {}
   stripThinkingBlocksForMultiToken(anthropicPayload)
   const responsesPayload = translateAnthropicMessagesToResponsesPayload(
     anthropicPayload,
@@ -648,6 +834,9 @@ const executeResponsesApi = async (
   )
 
   const { vision, initiator } = getResponsesRequestOptions(responsesPayload)
+
+  // Record select-token span
+  const selectTokenStart = traceNow()
   const response = await createResponses(responsesPayload, {
     vision,
     initiator: initiatorOverride ?? initiator,
@@ -659,6 +848,21 @@ const executeResponsesApi = async (
     setRequestContext(c, { accountId: responsesAccountId })
   }
 
+  if (traceId) {
+    safeTrace(() =>
+      traceRecorder.recordSpan({
+        id: traceSpanId(),
+        traceId,
+        parentSpanId: rootSpanId,
+        name: "select-token",
+        type: "step",
+        startTime: selectTokenStart,
+        endTime: traceNow(),
+        output: JSON.stringify({ accountId: responsesAccountId }),
+      }),
+    )
+  }
+
   const needsWebSearchBuffering = hasWebSearchToolInPayload(
     anthropicPayload.tools,
   )
@@ -666,20 +870,55 @@ const executeResponsesApi = async (
   if (responsesPayload.stream && isAsyncIterable(response)) {
     logger.debug("Streaming response from Copilot (Responses API)")
     return streamSSE(c, async (stream) => {
+      const llmSpanStart = traceNow()
+
       if (needsWebSearchBuffering) {
         await streamResponsesWithWebSearch(stream, response, {
           responsesPayload,
           requestOptions: { vision, initiator: initiatorOverride ?? initiator },
           requestedModel,
         })
+
+        if (traceId) {
+          safeTrace(() =>
+            traceRecorder.recordSpan({
+              id: traceSpanId(),
+              traceId,
+              parentSpanId: rootSpanId,
+              name: "copilot-api-call",
+              type: "llm",
+              startTime: llmSpanStart,
+              endTime: traceNow(),
+              provider: "Responses",
+              model: anthropicPayload.model,
+            }),
+          )
+        }
         return
       }
 
       await streamResponsesDirect(stream, response)
+
+      if (traceId) {
+        safeTrace(() =>
+          traceRecorder.recordSpan({
+            id: traceSpanId(),
+            traceId,
+            parentSpanId: rootSpanId,
+            name: "copilot-api-call",
+            type: "llm",
+            startTime: llmSpanStart,
+            endTime: traceNow(),
+            provider: "Responses",
+            model: anthropicPayload.model,
+          }),
+        )
+      }
     })
   }
 
   // Non-streaming: check for web_search calls
+  const llmSpanStart = traceNow()
   const result = response as ResponsesResult
   const resolved = await resolveResponsesWebSearchCalls(
     result,
@@ -691,6 +930,35 @@ const executeResponsesApi = async (
     "Non-streaming Responses result:",
     JSON.stringify(resolved).slice(-400),
   )
+
+  if (traceId) {
+    safeTrace(() => {
+      const inputTokens = resolved.usage?.input_tokens ?? 0
+      const outputTokens = resolved.usage?.output_tokens ?? 0
+      const cost = calculateCost(
+        anthropicPayload.model,
+        inputTokens,
+        outputTokens,
+      )
+      traceRecorder.recordSpan({
+        id: traceSpanId(),
+        traceId,
+        parentSpanId: rootSpanId,
+        name: "copilot-api-call",
+        type: "llm",
+        startTime: llmSpanStart,
+        endTime: traceNow(),
+        provider: "Responses",
+        model: anthropicPayload.model,
+        inputTokens,
+        outputTokens,
+        inputCostUsd: cost.inputCostUsd,
+        outputCostUsd: cost.outputCostUsd,
+        output: JSON.stringify(resolved).slice(0, 10000),
+      })
+    })
+  }
+
   const anthropicResponse = translateResponsesResultToAnthropic(resolved)
   if (requestedModel) anthropicResponse.model = requestedModel
   logger.debug(
