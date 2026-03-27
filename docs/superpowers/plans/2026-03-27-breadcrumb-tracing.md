@@ -1103,8 +1103,7 @@ git commit -m "feat: add TraceRecorder module with SQLite storage"
 
 **Files:**
 - Modify: `F:\Projects\copilot-api\src\lib\trace-recorder.ts`
-- Modify: `F:\Projects\copilot-api\src\start.ts` (add CLI flag)
-- Modify: `F:\Projects\copilot-api\src\main.ts` (add CLI arg)
+- Modify: `F:\Projects\copilot-api\src\start.ts` (add CLI flag, RunServerOptions, periodic cleanup)
 
 - [ ] **Step 1: Add cleanup method to TraceRecorder**
 
@@ -1132,22 +1131,22 @@ cleanup(retentionDays: number): number {
 
 - [ ] **Step 2: Add `--trace-retention-days` CLI arg and wire to RunServerOptions**
 
-In `src/main.ts`, add to the start command args:
+In `src/start.ts` (where the start command args and `run()` function are defined), add to the args object:
 
 ```typescript
-traceRetentionDays: {
+"trace-retention-days": {
   type: "string",
   description: "Number of days to retain traces (0 = unlimited)",
   default: "30",
 },
 ```
 
-In `src/start.ts`, add `traceRetentionDays?: number` to the `RunServerOptions` interface (around line 29-44).
+Add `traceRetentionDays?: number` to the `RunServerOptions` interface (around line 29-44).
 
-In the start command's `run()` function in `src/main.ts`, add the mapping:
+In the `run()` function in `src/start.ts`, add the mapping (following the kebab-case pattern used by other args like `rate-limit`):
 
 ```typescript
-traceRetentionDays: Number(args.traceRetentionDays ?? 30),
+traceRetentionDays: Number(args["trace-retention-days"] ?? 30),
 ```
 
 - [ ] **Step 3: Start periodic cleanup in start.ts**
