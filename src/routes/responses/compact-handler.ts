@@ -22,7 +22,7 @@ import {
 } from "~/services/copilot/create-responses"
 
 import { getCompactionPrompt } from "./compact-prompt"
-import { getResponsesRequestOptions } from "./utils"
+import { expandCompactionItems, getResponsesRequestOptions } from "./utils"
 
 const logger = createHandlerLogger("compact-handler")
 
@@ -217,6 +217,12 @@ export const handleCompact = async (c: Context) => {
     compactionUserMessage,
   ]
 
+  // Expand any previous compaction items so the upstream API doesn't
+  // try to decrypt our fake base64 encrypted_content
+  const tempPayload = { input, model } as ResponsesPayload
+  expandCompactionItems(tempPayload)
+  const expandedInput = tempPayload.input as Array<ResponseInputItem>
+
   // Check if the model supports native /responses
   const selectedModel = state.models?.data.find((m) => m.id === model)
   const supportsResponses =
@@ -230,7 +236,7 @@ export const handleCompact = async (c: Context) => {
     const responsesPayload: ResponsesPayload = {
       model,
       instructions: compactionPrompt,
-      input,
+      input: expandedInput,
       stream: false,
       tool_choice: "none",
       store: false,
@@ -256,7 +262,7 @@ export const handleCompact = async (c: Context) => {
 
     const messages: ChatCompletionsPayload["messages"] = [
       { role: "system", content: compactionPrompt },
-      ...convertInputToMessages(input),
+      ...convertInputToMessages(expandedInput),
     ]
 
     const ccPayload: ChatCompletionsPayload = {
