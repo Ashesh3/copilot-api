@@ -1,5 +1,6 @@
 import type { Context } from "hono"
 
+import * as Sentry from "@sentry/bun"
 import consola from "consola"
 import { streamSSE, type SSEMessage } from "hono/streaming"
 
@@ -8,12 +9,10 @@ import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
 import { normalizeModelName } from "~/lib/model-resolver"
 import { parseModelSuffix } from "~/lib/model-suffix"
-import { calculateCost } from "~/lib/pricing-cache"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { setRequestContext } from "~/lib/request-logger"
 import { state } from "~/lib/state"
 import { getTokenCount } from "~/lib/tokenizer"
-import { traceRecorder } from "~/lib/trace-recorder"
 import { isNullish } from "~/lib/utils"
 import {
   createChatCompletions,
@@ -22,76 +21,10 @@ import {
   type ChatCompletionsPayload,
 } from "~/services/copilot/create-chat-completions"
 
-// ─── Trace helpers ───
-
-function traceSpanId(): string {
-  return crypto.randomUUID().replaceAll("-", "").slice(0, 16)
-}
-function newTraceId(): string {
-  return crypto.randomUUID().replaceAll("-", "")
-}
-function traceNow(): string {
-  return new Date().toISOString()
-}
-
-/** Safe wrapper - tracing never breaks the proxy */
-const safeTrace = (fn: () => void): void => {
-  try {
-    fn()
-  } catch {
-    // Tracing is best-effort
-  }
-}
-
-interface TraceCtx {
-  traceId: string
-  rootSpanId: string
-  model: string
-}
-
-const recordLlmSpan = (
-  ctx: TraceCtx,
-  startTime: string,
-  opts: { inputTokens: number; outputTokens: number; output?: string },
-): void => {
-  const cost = calculateCost(ctx.model, opts.inputTokens, opts.outputTokens)
-  traceRecorder.recordSpan({
-    id: traceSpanId(),
-    traceId: ctx.traceId,
-    parentSpanId: ctx.rootSpanId,
-    name: "copilot-api-call",
-    type: "llm",
-    startTime,
-    endTime: traceNow(),
-    provider: "ChatCompletions",
-    model: ctx.model,
-    inputTokens: opts.inputTokens,
-    outputTokens: opts.outputTokens,
-    inputCostUsd: cost.inputCostUsd,
-    outputCostUsd: cost.outputCostUsd,
-    output: opts.output,
-  })
-}
-
 export async function handleCompletion(c: Context) {
   await checkRateLimit(state)
 
-  const currentTraceId = newTraceId()
-  const rootSpanId = traceSpanId()
-
   const rawPayload = await c.req.json<ChatCompletionsPayload>()
-
-  safeTrace(() =>
-    traceRecorder.startTrace({
-      id: currentTraceId,
-      name: `POST ${c.req.path}`,
-      input: JSON.stringify(rawPayload).slice(0, 500000),
-      meta: { environment: process.env.NODE_ENV },
-    }),
-  )
-
-  // Record parse-request span
-  const parseStart = traceNow()
 
   // Capture the originally requested model before any manipulation
   const requestedModel = rawPayload.model
@@ -109,20 +42,6 @@ export async function handleCompletion(c: Context) {
     ...replacedPayload,
     model: normalizeModelName(replacedPayload.model),
   }
-
-  safeTrace(() =>
-    traceRecorder.recordSpan({
-      id: traceSpanId(),
-      traceId: currentTraceId,
-      parentSpanId: rootSpanId,
-      name: "parse-request",
-      type: "step",
-      startTime: parseStart,
-      endTime: traceNow(),
-      input: JSON.stringify({ model: requestedModel }).slice(0, 500000),
-      output: JSON.stringify({ model: payload.model }).slice(0, 500000),
-    }),
-  )
 
   consola.debug("Request payload:", JSON.stringify(payload).slice(-400))
 
@@ -159,69 +78,45 @@ export async function handleCompletion(c: Context) {
     consola.debug("Set max_tokens to:", JSON.stringify(payload.max_tokens))
   }
 
-  try {
-    return await executeRequest(c, payload, {
-      traceId: currentTraceId,
-      rootSpanId,
-    })
-  } catch (error) {
-    safeTrace(() =>
-      traceRecorder.endTrace({
-        id: currentTraceId,
-        status: "error",
-        statusMessage: error instanceof Error ? error.message : String(error),
-      }),
-    )
-    throw error
-  }
+  return await executeRequest(c, payload)
 }
 
 const executeRequest = async (
   c: Context,
   payload: ChatCompletionsPayload & { model: string },
-  traceCtx: { traceId: string; rootSpanId: string },
 ) => {
-  const { traceId, rootSpanId } = traceCtx
+  return await Sentry.startSpan(
+    {
+      op: "gen_ai.request",
+      name: `request ${payload.model}`,
+      attributes: {
+        "gen_ai.request.model": payload.model,
+        "gen_ai.request.messages": JSON.stringify(payload.messages),
+      },
+    },
+    async (span) => {
+      const response = await createChatCompletions(payload)
 
-  // Record select-token span
-  const selectTokenStart = traceNow()
-  const response = await createChatCompletions(payload)
+      // Track which account handled this request (multi-token mode)
+      const accountId = getLastUsedAccountId()
+      if (accountId !== undefined) {
+        setRequestContext(c, { accountId })
+      }
 
-  // Track which account handled this request (multi-token mode)
-  const accountId = getLastUsedAccountId()
-  if (accountId !== undefined) {
-    setRequestContext(c, { accountId })
-  }
+      if (isNonStreaming(response)) {
+        return handleNonStreamingResponse(c, response, span)
+      }
 
-  safeTrace(() =>
-    traceRecorder.recordSpan({
-      id: traceSpanId(),
-      traceId,
-      parentSpanId: rootSpanId,
-      name: "select-token",
-      type: "step",
-      startTime: selectTokenStart,
-      endTime: traceNow(),
-      output: JSON.stringify({ accountId }),
-    }),
+      return handleStreamingResponse(c, response, span)
+    },
   )
-
-  const ctx: TraceCtx = { traceId, rootSpanId, model: payload.model }
-
-  if (isNonStreaming(response)) {
-    return handleNonStreamingResponse(c, response, ctx)
-  }
-
-  return handleStreamingResponse(c, response, ctx)
 }
 
 const handleNonStreamingResponse = (
   c: Context,
   response: ChatCompletionResponse,
-  ctx: TraceCtx,
+  span: Sentry.Span,
 ) => {
-  const llmSpanStart = traceNow()
-
   consola.debug("Non-streaming response:", JSON.stringify(response))
   if (response.usage) {
     setRequestContext(c, {
@@ -230,26 +125,29 @@ const handleNonStreamingResponse = (
     })
   }
 
-  safeTrace(() =>
-    recordLlmSpan(ctx, llmSpanStart, {
-      inputTokens: response.usage?.prompt_tokens ?? 0,
-      outputTokens: response.usage?.completion_tokens ?? 0,
-      output: JSON.stringify(response).slice(0, 500000),
-    }),
+  span.setAttribute(
+    "gen_ai.usage.input_tokens",
+    response.usage?.prompt_tokens ?? 0,
+  )
+  span.setAttribute(
+    "gen_ai.usage.output_tokens",
+    response.usage?.completion_tokens ?? 0,
+  )
+  span.setAttribute(
+    "gen_ai.response.text",
+    JSON.stringify([response.choices[0]?.message?.content ?? ""]),
   )
 
-  safeTrace(() => traceRecorder.endTrace({ id: ctx.traceId, status: "ok" }))
   return c.json(response)
 }
 
 const handleStreamingResponse = (
   c: Context,
   response: AsyncIterable<{ data?: string; event?: string }>,
-  ctx: TraceCtx,
+  span: Sentry.Span,
 ) => {
   consola.debug("Streaming response")
   return streamSSE(c, async (stream) => {
-    const llmSpanStart = traceNow()
     let streamInputTokens = 0
     let streamOutputTokens = 0
 
@@ -270,15 +168,9 @@ const handleStreamingResponse = (
       await stream.writeSSE(chunk as SSEMessage)
     }
 
-    // Record copilot-api-call span after streaming completes
-    safeTrace(() =>
-      recordLlmSpan(ctx, llmSpanStart, {
-        inputTokens: streamInputTokens,
-        outputTokens: streamOutputTokens,
-      }),
-    )
-
-    safeTrace(() => traceRecorder.endTrace({ id: ctx.traceId, status: "ok" }))
+    // Set token attributes after streaming completes
+    span.setAttribute("gen_ai.usage.input_tokens", streamInputTokens)
+    span.setAttribute("gen_ai.usage.output_tokens", streamOutputTokens)
   })
 }
 

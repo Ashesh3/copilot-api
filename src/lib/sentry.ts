@@ -11,6 +11,7 @@ export function initSentry(): void {
     dsn,
     release: `copilot-api@${packageJson.version}`,
     environment: process.env.NODE_ENV ?? "development",
+    tracesSampleRate: 1.0,
     enableLogs: true,
     integrations: [
       Sentry.consoleLoggingIntegration({ levels: ["warn", "error"] }),

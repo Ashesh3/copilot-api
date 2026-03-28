@@ -1,6 +1,7 @@
 /* eslint-disable max-lines, max-lines-per-function, complexity */
 import type { Context } from "hono"
 
+import * as Sentry from "@sentry/bun"
 import consola from "consola"
 import { streamSSE } from "hono/streaming"
 
@@ -9,11 +10,9 @@ import { awaitApproval } from "~/lib/approval"
 import { getConfig } from "~/lib/config"
 import { createHandlerLogger } from "~/lib/logger"
 import { parseModelSuffix } from "~/lib/model-suffix"
-import { calculateCost } from "~/lib/pricing-cache"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { setRequestContext } from "~/lib/request-logger"
 import { state } from "~/lib/state"
-import { traceRecorder } from "~/lib/trace-recorder"
 import {
   createChatCompletions,
   type ChatCompletionChunk,
@@ -41,27 +40,6 @@ import { createStreamIdTracker, fixStreamIds } from "./stream-id-sync"
 import { expandCompactionItems, getResponsesRequestOptions } from "./utils"
 
 const logger = createHandlerLogger("responses-handler")
-
-// ─── Trace helpers ───
-
-function traceSpanId(): string {
-  return crypto.randomUUID().replaceAll("-", "").slice(0, 16)
-}
-function newTraceId(): string {
-  return crypto.randomUUID().replaceAll("-", "")
-}
-function traceNow(): string {
-  return new Date().toISOString()
-}
-
-/** Safe wrapper - tracing never breaks the proxy */
-const safeTrace = (fn: () => void): void => {
-  try {
-    fn()
-  } catch {
-    // Tracing is best-effort
-  }
-}
 
 const RESPONSES_ENDPOINT = "/responses"
 
@@ -121,22 +99,7 @@ function normalizeResponsesReasoning(
 export const handleResponses = async (c: Context) => {
   await checkRateLimit(state)
 
-  const currentTraceId = newTraceId()
-  const rootSpanId = traceSpanId()
-
   const payload = await c.req.json<ResponsesPayload>()
-
-  safeTrace(() =>
-    traceRecorder.startTrace({
-      id: currentTraceId,
-      name: `POST ${c.req.path}`,
-      input: JSON.stringify(payload).slice(0, 500000),
-      meta: { environment: process.env.NODE_ENV },
-    }),
-  )
-
-  // Record parse-request span
-  const parseStart = traceNow()
 
   // Capture the originally requested model before any manipulation
   const requestedModel = payload.model
@@ -164,20 +127,6 @@ export const handleResponses = async (c: Context) => {
   // Expand compaction items back into regular messages
   expandCompactionItems(payload)
 
-  safeTrace(() =>
-    traceRecorder.recordSpan({
-      id: traceSpanId(),
-      traceId: currentTraceId,
-      parentSpanId: rootSpanId,
-      name: "parse-request",
-      type: "step",
-      startTime: parseStart,
-      endTime: traceNow(),
-      input: JSON.stringify({ model: requestedModel }).slice(0, 500000),
-      output: JSON.stringify({ model: payload.model }).slice(0, 500000),
-    }),
-  )
-
   const selectedModel = state.models?.data.find(
     (model) => model.id === payload.model,
   )
@@ -189,25 +138,7 @@ export const handleResponses = async (c: Context) => {
       `[responses] Model ${payload.model} does not support /responses, falling back to ChatCompletions`,
     )
     setRequestContext(c, { provider: "Responses→ChatCompletions" })
-    try {
-      const result = await handleWithChatCompletions(c, payload, {
-        traceId: currentTraceId,
-        rootSpanId,
-      })
-      safeTrace(() =>
-        traceRecorder.endTrace({ id: currentTraceId, status: "ok" }),
-      )
-      return result
-    } catch (error) {
-      safeTrace(() =>
-        traceRecorder.endTrace({
-          id: currentTraceId,
-          status: "error",
-          statusMessage: error instanceof Error ? error.message : String(error),
-        }),
-      )
-      throw error
-    }
+    return await handleWithChatCompletions(c, payload)
   }
 
   const { vision, initiator } = getResponsesRequestOptions(payload)
@@ -216,211 +147,153 @@ export const handleResponses = async (c: Context) => {
     await awaitApproval()
   }
 
-  const selectTokenStart = traceNow()
-  const response = await createResponses(payload, { vision, initiator })
+  // Extract messages for Sentry span attribute
+  const inputMessages =
+    typeof payload.input === "string" ?
+      payload.input
+    : JSON.stringify(payload.input)
 
-  // Track which account handled this request (multi-token mode)
-  const accountId = getLastUsedAccountId()
-  if (accountId !== undefined) {
-    setRequestContext(c, { accountId })
-  }
+  return await Sentry.startSpan(
+    {
+      op: "gen_ai.request",
+      name: `request ${payload.model}`,
+      attributes: {
+        "gen_ai.request.model": payload.model,
+        "gen_ai.request.messages": inputMessages,
+      },
+    },
+    async (span) => {
+      const response = await createResponses(payload, { vision, initiator })
 
-  safeTrace(() =>
-    traceRecorder.recordSpan({
-      id: traceSpanId(),
-      traceId: currentTraceId,
-      parentSpanId: rootSpanId,
-      name: "select-token",
-      type: "step",
-      startTime: selectTokenStart,
-      endTime: traceNow(),
-      output: JSON.stringify({ accountId }),
-    }),
-  )
+      // Track which account handled this request (multi-token mode)
+      const accountId = getLastUsedAccountId()
+      if (accountId !== undefined) {
+        setRequestContext(c, { accountId })
+      }
 
-  if (isStreamingRequested(payload) && isAsyncIterable(response)) {
-    logger.debug("Forwarding native Responses stream")
-    return streamSSE(c, async (stream) => {
-      const llmSpanStart = traceNow()
+      if (isStreamingRequested(payload) && isAsyncIterable(response)) {
+        logger.debug("Forwarding native Responses stream")
+        return streamSSE(c, async (stream) => {
+          // Buffer stream events to check for web_search calls
+          const bufferedChunks: Array<{
+            id?: string
+            event?: string
+            data?: string
+          }> = []
+          let hasWebSearchCall = false
+          let completedResult: ResponsesResult | null = null
+          let streamInputTokens = 0
+          let streamOutputTokens = 0
 
-      // Buffer stream events to check for web_search calls
-      const bufferedChunks: Array<{
-        id?: string
-        event?: string
-        data?: string
-      }> = []
-      let hasWebSearchCall = false
-      let completedResult: ResponsesResult | null = null
-      let streamInputTokens = 0
-      let streamOutputTokens = 0
-
-      for await (const chunk of response) {
-        const chunkData = {
-          id: (chunk as { id?: string }).id,
-          event: (chunk as { event?: string }).event,
-          data: (chunk as { data?: string }).data ?? "",
-        }
-        bufferedChunks.push(chunkData)
-
-        // Check for web_search function calls in done events
-        if (chunkData.data && chunkData.event === "response.output_item.done") {
-          try {
-            const parsed = JSON.parse(chunkData.data) as {
-              item?: { type?: string; name?: string }
+          for await (const chunk of response) {
+            const chunkData = {
+              id: (chunk as { id?: string }).id,
+              event: (chunk as { event?: string }).event,
+              data: (chunk as { data?: string }).data ?? "",
             }
+            bufferedChunks.push(chunkData)
+
+            // Check for web_search function calls in done events
             if (
-              parsed.item?.type === "function_call"
-              && parsed.item.name === "web_search"
+              chunkData.data
+              && chunkData.event === "response.output_item.done"
             ) {
-              hasWebSearchCall = true
+              try {
+                const parsed = JSON.parse(chunkData.data) as {
+                  item?: { type?: string; name?: string }
+                }
+                if (
+                  parsed.item?.type === "function_call"
+                  && parsed.item.name === "web_search"
+                ) {
+                  hasWebSearchCall = true
+                }
+              } catch {
+                // ignore parse errors
+              }
             }
-          } catch {
-            // ignore parse errors
+
+            // Capture completed result and usage
+            if (
+              chunkData.data
+              && (chunkData.event === "response.completed"
+                || chunkData.event === "response.incomplete")
+            ) {
+              try {
+                const parsed = JSON.parse(chunkData.data) as {
+                  response?: ResponsesResult
+                }
+                if (parsed.response) {
+                  completedResult = parsed.response
+                  streamInputTokens = parsed.response.usage?.input_tokens ?? 0
+                  streamOutputTokens = parsed.response.usage?.output_tokens ?? 0
+                }
+              } catch {
+                // ignore parse errors
+              }
+            }
           }
-        }
 
-        // Capture completed result and usage
-        if (
-          chunkData.data
-          && (chunkData.event === "response.completed"
-            || chunkData.event === "response.incomplete")
-        ) {
-          try {
-            const parsed = JSON.parse(chunkData.data) as {
-              response?: ResponsesResult
-            }
-            if (parsed.response) {
-              completedResult = parsed.response
-              streamInputTokens = parsed.response.usage?.input_tokens ?? 0
-              streamOutputTokens = parsed.response.usage?.output_tokens ?? 0
-            }
-          } catch {
-            // ignore parse errors
+          if (hasWebSearchCall && completedResult) {
+            // Execute web searches, get final non-streaming response
+            const resolved = await resolveResponsesWebSearchCalls(
+              completedResult,
+              payload,
+              { vision, initiator },
+            )
+
+            // Emit the resolved result as a response.completed stream event
+            await emitResponsesResultAsStream(stream, resolved)
+
+            span.setAttribute("gen_ai.usage.input_tokens", streamInputTokens)
+            span.setAttribute("gen_ai.usage.output_tokens", streamOutputTokens)
+            return
           }
-        }
-      }
 
-      if (hasWebSearchCall && completedResult) {
-        // Execute web searches, get final non-streaming response
-        const resolved = await resolveResponsesWebSearchCalls(
-          completedResult,
-          payload,
-          { vision, initiator },
-        )
+          // No web_search calls — replay buffered chunks
+          const idTracker = createStreamIdTracker()
+          for (const chunk of bufferedChunks) {
+            const processedData = fixStreamIds(
+              chunk.data ?? "",
+              chunk.event,
+              idTracker,
+            )
+            await stream.writeSSE({
+              id: chunk.id,
+              event: chunk.event,
+              data: processedData,
+            })
+          }
 
-        // Emit the resolved result as a response.completed stream event
-        await emitResponsesResultAsStream(stream, resolved)
-
-        safeTrace(() => {
-          const cost = calculateCost(
-            payload.model,
-            streamInputTokens,
-            streamOutputTokens,
-          )
-          traceRecorder.recordSpan({
-            id: traceSpanId(),
-            traceId: currentTraceId,
-            parentSpanId: rootSpanId,
-            name: "copilot-api-call",
-            type: "llm",
-            startTime: llmSpanStart,
-            endTime: traceNow(),
-            provider: "Responses",
-            model: payload.model,
-            inputTokens: streamInputTokens,
-            outputTokens: streamOutputTokens,
-            inputCostUsd: cost.inputCostUsd,
-            outputCostUsd: cost.outputCostUsd,
-          })
-        })
-
-        safeTrace(() =>
-          traceRecorder.endTrace({ id: currentTraceId, status: "ok" }),
-        )
-        return
-      }
-
-      // No web_search calls — replay buffered chunks
-      const idTracker = createStreamIdTracker()
-      for (const chunk of bufferedChunks) {
-        const processedData = fixStreamIds(
-          chunk.data ?? "",
-          chunk.event,
-          idTracker,
-        )
-        await stream.writeSSE({
-          id: chunk.id,
-          event: chunk.event,
-          data: processedData,
+          span.setAttribute("gen_ai.usage.input_tokens", streamInputTokens)
+          span.setAttribute("gen_ai.usage.output_tokens", streamOutputTokens)
         })
       }
 
-      safeTrace(() => {
-        const cost = calculateCost(
-          payload.model,
-          streamInputTokens,
-          streamOutputTokens,
-        )
-        traceRecorder.recordSpan({
-          id: traceSpanId(),
-          traceId: currentTraceId,
-          parentSpanId: rootSpanId,
-          name: "copilot-api-call",
-          type: "llm",
-          startTime: llmSpanStart,
-          endTime: traceNow(),
-          provider: "Responses",
-          model: payload.model,
-          inputTokens: streamInputTokens,
-          outputTokens: streamOutputTokens,
-          inputCostUsd: cost.inputCostUsd,
-          outputCostUsd: cost.outputCostUsd,
-        })
+      // Non-streaming: check for web_search calls
+      const result = response as ResponsesResult
+      const resolved = await resolveResponsesWebSearchCalls(result, payload, {
+        vision,
+        initiator,
       })
 
-      safeTrace(() =>
-        traceRecorder.endTrace({ id: currentTraceId, status: "ok" }),
+      logger.debug(
+        "Forwarding native Responses result:",
+        JSON.stringify(resolved).slice(-400),
       )
-    })
-  }
 
-  // Non-streaming: check for web_search calls
-  const llmSpanStart = traceNow()
-  const result = response as ResponsesResult
-  const resolved = await resolveResponsesWebSearchCalls(result, payload, {
-    vision,
-    initiator,
-  })
+      const inputTokens = resolved.usage?.input_tokens ?? 0
+      const outputTokens = resolved.usage?.output_tokens ?? 0
+      span.setAttribute("gen_ai.usage.input_tokens", inputTokens)
+      span.setAttribute("gen_ai.usage.output_tokens", outputTokens)
+      span.setAttribute(
+        "gen_ai.response.text",
+        JSON.stringify([resolved.output_text]),
+      )
 
-  logger.debug(
-    "Forwarding native Responses result:",
-    JSON.stringify(resolved).slice(-400),
+      return c.json(resolved)
+    },
   )
-
-  safeTrace(() => {
-    const inputTokens = resolved.usage?.input_tokens ?? 0
-    const outputTokens = resolved.usage?.output_tokens ?? 0
-    const cost = calculateCost(payload.model, inputTokens, outputTokens)
-    traceRecorder.recordSpan({
-      id: traceSpanId(),
-      traceId: currentTraceId,
-      parentSpanId: rootSpanId,
-      name: "copilot-api-call",
-      type: "llm",
-      startTime: llmSpanStart,
-      endTime: traceNow(),
-      provider: "Responses",
-      model: payload.model,
-      inputTokens,
-      outputTokens,
-      inputCostUsd: cost.inputCostUsd,
-      outputCostUsd: cost.outputCostUsd,
-      output: JSON.stringify(resolved).slice(0, 500000),
-    })
-  })
-
-  safeTrace(() => traceRecorder.endTrace({ id: currentTraceId, status: "ok" }))
-  return c.json(resolved)
 }
 
 const isAsyncIterable = <T>(value: unknown): value is AsyncIterable<T> =>
@@ -1086,120 +959,87 @@ const streamChatCompletionsAsResponses = async (
 const handleWithChatCompletions = async (
   c: Context,
   payload: ResponsesPayload,
-  traceCtx?: { traceId: string; rootSpanId: string },
 ) => {
   const ccPayload = responsesToChatCompletions(payload)
   logger.debug("ChatCompletions fallback payload:", JSON.stringify(ccPayload))
 
-  const selectTokenStart = traceNow()
-  const response = await createChatCompletions(ccPayload)
+  return await Sentry.startSpan(
+    {
+      op: "gen_ai.request",
+      name: `request ${payload.model}`,
+      attributes: {
+        "gen_ai.request.model": payload.model,
+        "gen_ai.request.messages": JSON.stringify(ccPayload.messages),
+      },
+    },
+    async (span) => {
+      const response = await createChatCompletions(ccPayload)
 
-  // Track which account handled this request (multi-token mode)
-  const fallbackAccountId = getLastUsedAccountId()
-  if (fallbackAccountId !== undefined) {
-    setRequestContext(c, { accountId: fallbackAccountId })
-  }
+      // Track which account handled this request (multi-token mode)
+      const fallbackAccountId = getLastUsedAccountId()
+      if (fallbackAccountId !== undefined) {
+        setRequestContext(c, { accountId: fallbackAccountId })
+      }
 
-  if (traceCtx) {
-    safeTrace(() =>
-      traceRecorder.recordSpan({
-        id: traceSpanId(),
-        traceId: traceCtx.traceId,
-        parentSpanId: traceCtx.rootSpanId,
-        name: "select-token",
-        type: "step",
-        startTime: selectTokenStart,
-        endTime: traceNow(),
-        output: JSON.stringify({ accountId: fallbackAccountId }),
-      }),
-    )
-  }
+      // Non-streaming
+      if (!payload.stream) {
+        const ccResponse = response as ChatCompletionResponse
+        logger.debug(
+          "ChatCompletions fallback response:",
+          JSON.stringify(ccResponse).slice(-400),
+        )
 
-  // Non-streaming
-  if (!payload.stream) {
-    const llmSpanStart = traceNow()
-    const ccResponse = response as ChatCompletionResponse
-    logger.debug(
-      "ChatCompletions fallback response:",
-      JSON.stringify(ccResponse).slice(-400),
-    )
+        if (ccResponse.usage) {
+          setRequestContext(c, {
+            inputTokens: ccResponse.usage.prompt_tokens,
+            outputTokens: ccResponse.usage.completion_tokens,
+          })
+        }
 
-    if (ccResponse.usage) {
-      setRequestContext(c, {
-        inputTokens: ccResponse.usage.prompt_tokens,
-        outputTokens: ccResponse.usage.completion_tokens,
-      })
-    }
-
-    if (traceCtx) {
-      safeTrace(() => {
         const inputTokens = ccResponse.usage?.prompt_tokens ?? 0
         const outputTokens = ccResponse.usage?.completion_tokens ?? 0
-        const cost = calculateCost(payload.model, inputTokens, outputTokens)
-        traceRecorder.recordSpan({
-          id: traceSpanId(),
-          traceId: traceCtx.traceId,
-          parentSpanId: traceCtx.rootSpanId,
-          name: "copilot-api-call",
-          type: "llm",
-          startTime: llmSpanStart,
-          endTime: traceNow(),
-          provider: "Responses→ChatCompletions",
-          model: payload.model,
-          inputTokens,
-          outputTokens,
-          inputCostUsd: cost.inputCostUsd,
-          outputCostUsd: cost.outputCostUsd,
-          output: JSON.stringify(ccResponse).slice(0, 500000),
+        span.setAttribute("gen_ai.usage.input_tokens", inputTokens)
+        span.setAttribute("gen_ai.usage.output_tokens", outputTokens)
+        span.setAttribute(
+          "gen_ai.response.text",
+          JSON.stringify([ccResponse.choices[0]?.message?.content ?? ""]),
+        )
+
+        const result = chatCompletionToResponsesResult(
+          ccResponse,
+          payload.model,
+        )
+        return c.json(result)
+      }
+
+      // Streaming
+      logger.debug("ChatCompletions fallback streaming")
+
+      return streamSSE(c, async (sseStream) => {
+        const ccStream = response as AsyncIterable<{
+          data?: string
+          event?: string
+        }>
+        const streamUsage = await streamChatCompletionsAsResponses(
+          sseStream,
+          ccStream,
+          payload.model,
+        )
+
+        setRequestContext(c, {
+          inputTokens: streamUsage.inputTokens,
+          outputTokens: streamUsage.outputTokens,
         })
+
+        span.setAttribute(
+          "gen_ai.usage.input_tokens",
+          streamUsage.inputTokens ?? 0,
+        )
+        span.setAttribute(
+          "gen_ai.usage.output_tokens",
+          streamUsage.outputTokens ?? 0,
+        )
       })
-    }
-
-    const result = chatCompletionToResponsesResult(ccResponse, payload.model)
-    return c.json(result)
-  }
-
-  // Streaming
-  logger.debug("ChatCompletions fallback streaming")
-
-  return streamSSE(c, async (sseStream) => {
-    const llmSpanStart = traceNow()
-    const ccStream = response as AsyncIterable<{
-      data?: string
-      event?: string
-    }>
-    const streamUsage = await streamChatCompletionsAsResponses(
-      sseStream,
-      ccStream,
-      payload.model,
-    )
-
-    setRequestContext(c, {
-      inputTokens: streamUsage.inputTokens,
-      outputTokens: streamUsage.outputTokens,
-    })
-
-    if (traceCtx) {
-      safeTrace(() => {
-        const inputTokens = streamUsage.inputTokens ?? 0
-        const outputTokens = streamUsage.outputTokens ?? 0
-        const cost = calculateCost(payload.model, inputTokens, outputTokens)
-        traceRecorder.recordSpan({
-          id: traceSpanId(),
-          traceId: traceCtx.traceId,
-          parentSpanId: traceCtx.rootSpanId,
-          name: "copilot-api-call",
-          type: "llm",
-          startTime: llmSpanStart,
-          endTime: traceNow(),
-          provider: "Responses→ChatCompletions",
-          model: payload.model,
-          inputTokens,
-          outputTokens,
-          inputCostUsd: cost.inputCostUsd,
-          outputCostUsd: cost.outputCostUsd,
-        })
-      })
-    }
-  })
+    },
+  )
 }
