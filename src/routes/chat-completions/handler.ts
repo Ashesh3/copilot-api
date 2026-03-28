@@ -11,6 +11,7 @@ import { normalizeModelName } from "~/lib/model-resolver"
 import { parseModelSuffix } from "~/lib/model-suffix"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { setRequestContext } from "~/lib/request-logger"
+import { shouldRecordAiContent } from "~/lib/sentry"
 import { state } from "~/lib/state"
 import { getTokenCount } from "~/lib/tokenizer"
 import { isNullish } from "~/lib/utils"
@@ -91,7 +92,9 @@ const executeRequest = async (
       name: `request ${payload.model}`,
       attributes: {
         "gen_ai.request.model": payload.model,
-        "gen_ai.request.messages": JSON.stringify(payload.messages),
+        ...(shouldRecordAiContent() && {
+          "gen_ai.request.messages": JSON.stringify(payload.messages),
+        }),
       },
     },
     async (span) => {
@@ -136,10 +139,12 @@ const handleNonStreamingResponse = (
     "gen_ai.usage.output_tokens",
     response.usage?.completion_tokens ?? 0,
   )
-  span.setAttribute(
-    "gen_ai.response.text",
-    JSON.stringify([response.choices[0]?.message?.content ?? ""]),
-  )
+  if (shouldRecordAiContent()) {
+    span.setAttribute(
+      "gen_ai.response.text",
+      JSON.stringify([response.choices[0]?.message?.content ?? ""]),
+    )
+  }
 
   return c.json(response)
 }
@@ -157,7 +162,9 @@ const handleStreamingResponse = (
         name: `request ${payload.model}`,
         attributes: {
           "gen_ai.request.model": payload.model,
-          "gen_ai.request.messages": JSON.stringify(payload.messages),
+          ...(shouldRecordAiContent() && {
+            "gen_ai.request.messages": JSON.stringify(payload.messages),
+          }),
         },
       },
       async (span) => {

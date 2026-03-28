@@ -12,6 +12,7 @@ import { createHandlerLogger } from "~/lib/logger"
 import { parseModelSuffix } from "~/lib/model-suffix"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { setRequestContext } from "~/lib/request-logger"
+import { shouldRecordAiContent } from "~/lib/sentry"
 import { state } from "~/lib/state"
 import {
   createChatCompletions,
@@ -159,7 +160,9 @@ export const handleResponses = async (c: Context) => {
       name: `request ${payload.model}`,
       attributes: {
         "gen_ai.request.model": payload.model,
-        "gen_ai.request.messages": inputMessages,
+        ...(shouldRecordAiContent() && {
+          "gen_ai.request.messages": inputMessages,
+        }),
       },
     },
     async (span) => {
@@ -311,10 +314,12 @@ export const handleResponses = async (c: Context) => {
       const outputTokens = resolved.usage?.output_tokens ?? 0
       span.setAttribute("gen_ai.usage.input_tokens", inputTokens)
       span.setAttribute("gen_ai.usage.output_tokens", outputTokens)
-      span.setAttribute(
-        "gen_ai.response.text",
-        JSON.stringify([resolved.output_text]),
-      )
+      if (shouldRecordAiContent()) {
+        span.setAttribute(
+          "gen_ai.response.text",
+          JSON.stringify([resolved.output_text]),
+        )
+      }
 
       return c.json(resolved)
     },
@@ -996,7 +1001,9 @@ const handleWithChatCompletions = async (
         name: `request ${payload.model}`,
         attributes: {
           "gen_ai.request.model": payload.model,
-          "gen_ai.request.messages": JSON.stringify(ccPayload.messages),
+          ...(shouldRecordAiContent() && {
+            "gen_ai.request.messages": JSON.stringify(ccPayload.messages),
+          }),
         },
       },
       async (span) => {
@@ -1025,10 +1032,12 @@ const handleWithChatCompletions = async (
         const outputTokens = ccResponse.usage?.completion_tokens ?? 0
         span.setAttribute("gen_ai.usage.input_tokens", inputTokens)
         span.setAttribute("gen_ai.usage.output_tokens", outputTokens)
-        span.setAttribute(
-          "gen_ai.response.text",
-          JSON.stringify([ccResponse.choices[0]?.message?.content ?? ""]),
-        )
+        if (shouldRecordAiContent()) {
+          span.setAttribute(
+            "gen_ai.response.text",
+            JSON.stringify([ccResponse.choices[0]?.message?.content ?? ""]),
+          )
+        }
 
         const result = chatCompletionToResponsesResult(
           ccResponse,

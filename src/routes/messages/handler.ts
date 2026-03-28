@@ -15,6 +15,7 @@ import { normalizeModelName } from "~/lib/model-resolver"
 import { parseModelSuffix } from "~/lib/model-suffix"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { setRequestContext } from "~/lib/request-logger"
+import { shouldRecordAiContent } from "~/lib/sentry"
 import { state } from "~/lib/state"
 import { getTokenCount } from "~/lib/tokenizer"
 import {
@@ -343,7 +344,9 @@ const executeChatCompletions = async (
       name: `request ${finalPayload.model}`,
       attributes: {
         "gen_ai.request.model": finalPayload.model,
-        "gen_ai.request.messages": JSON.stringify(finalPayload.messages),
+        ...(shouldRecordAiContent() && {
+          "gen_ai.request.messages": JSON.stringify(finalPayload.messages),
+        }),
       },
     },
     async (span) => {
@@ -374,10 +377,12 @@ const executeChatCompletions = async (
         const outputTokens = finalResponse.usage?.completion_tokens ?? 0
         span.setAttribute("gen_ai.usage.input_tokens", inputTokens)
         span.setAttribute("gen_ai.usage.output_tokens", outputTokens)
-        span.setAttribute(
-          "gen_ai.response.text",
-          JSON.stringify([finalResponse.choices[0]?.message?.content ?? ""]),
-        )
+        if (shouldRecordAiContent()) {
+          span.setAttribute(
+            "gen_ai.response.text",
+            JSON.stringify([finalResponse.choices[0]?.message?.content ?? ""]),
+          )
+        }
 
         const anthropicResponse = translateToAnthropic(
           finalResponse,
@@ -719,7 +724,9 @@ const executeResponsesApi = async (
       name: `request ${anthropicPayload.model}`,
       attributes: {
         "gen_ai.request.model": anthropicPayload.model,
-        "gen_ai.request.messages": JSON.stringify(anthropicPayload.messages),
+        ...(shouldRecordAiContent() && {
+          "gen_ai.request.messages": JSON.stringify(anthropicPayload.messages),
+        }),
       },
     },
     async (span) => {
@@ -807,10 +814,12 @@ const executeResponsesApi = async (
       const outputTokens = resolved.usage?.output_tokens ?? 0
       span.setAttribute("gen_ai.usage.input_tokens", inputTokens)
       span.setAttribute("gen_ai.usage.output_tokens", outputTokens)
-      span.setAttribute(
-        "gen_ai.response.text",
-        JSON.stringify([resolved.output_text]),
-      )
+      if (shouldRecordAiContent()) {
+        span.setAttribute(
+          "gen_ai.response.text",
+          JSON.stringify([resolved.output_text]),
+        )
+      }
 
       const anthropicResponse = translateResponsesResultToAnthropic(resolved)
       if (requestedModel) anthropicResponse.model = requestedModel

@@ -3,15 +3,34 @@ import consola from "consola"
 
 import packageJson from "../../package.json" with { type: "json" }
 
+/**
+ * Check whether AI request/response content (prompts and completions)
+ * should be recorded in Sentry spans.
+ *
+ * Controlled by `SENTRY_AI_RECORD_INPUTS` env var (default: "true").
+ * Set to "false" to prevent `gen_ai.request.messages` and
+ * `gen_ai.response.text` from being sent to Sentry.
+ */
+export function shouldRecordAiContent(): boolean {
+  const value = process.env.SENTRY_AI_RECORD_INPUTS
+  if (value === undefined || value === "") return true
+  return value.toLowerCase() !== "false"
+}
+
 export function initSentry(): void {
   const dsn = process.env.SENTRY_DSN
   if (!dsn) return
+
+  const tracesSampleRate = Number.parseFloat(
+    process.env.SENTRY_TRACES_SAMPLE_RATE ?? "1.0",
+  )
 
   Sentry.init({
     dsn,
     release: `copilot-api@${packageJson.version}`,
     environment: process.env.NODE_ENV ?? "development",
-    tracesSampleRate: 1.0,
+    tracesSampleRate:
+      Number.isFinite(tracesSampleRate) ? tracesSampleRate : 1.0,
     enableLogs: true,
     integrations: [
       Sentry.consoleLoggingIntegration({ levels: ["warn", "error"] }),
