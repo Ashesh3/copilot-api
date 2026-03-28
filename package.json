@@ -1,6 +1,6 @@
 {
   "name": "@ashsec/copilot-api",
-  "version": "0.12.4",
+  "version": "0.13.0",
   "description": "Turn GitHub Copilot into OpenAI/Anthropic API compatible server. Usable with Claude Code!",
   "keywords": [
     "proxy",
