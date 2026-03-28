@@ -1,4 +1,4 @@
-/* eslint-disable max-lines, max-lines-per-function */
+/* eslint-disable max-lines, max-lines-per-function, complexity */
 import type { Context } from "hono"
 
 import * as Sentry from "@sentry/bun"
@@ -224,14 +224,30 @@ interface BufferedChatCompletionsResult {
   initialResponse: ChatCompletionResponse | null
 }
 
+function setOptionalTokenDetails(
+  span: Sentry.Span,
+  cachedTokens: number,
+  reasoningTokens = 0,
+): void {
+  if (cachedTokens > 0) {
+    span.setAttribute("gen_ai.usage.input_tokens.cached", cachedTokens)
+  }
+  if (reasoningTokens > 0) {
+    span.setAttribute("gen_ai.usage.output_tokens.reasoning", reasoningTokens)
+  }
+}
+
 function setChatCompletionSpanResult(
   span: Sentry.Span,
   response: ChatCompletionResponse | null,
 ): void {
   const inputTokens = response?.usage?.prompt_tokens ?? 0
   const outputTokens = response?.usage?.completion_tokens ?? 0
+  const cachedTokens =
+    response?.usage?.prompt_tokens_details?.cached_tokens ?? 0
   span.setAttribute("gen_ai.usage.input_tokens", inputTokens)
   span.setAttribute("gen_ai.usage.output_tokens", outputTokens)
+  setOptionalTokenDetails(span, cachedTokens)
   if (shouldRecordAiContent()) {
     span.setAttribute(
       "gen_ai.response.text",
@@ -295,6 +311,7 @@ const streamChatCompletionsDirect = async (
 ): Promise<{
   inputTokens: number
   outputTokens: number
+  cachedTokens: number
   responseText: string
 }> => {
   const streamState: AnthropicStreamState = {
@@ -306,6 +323,7 @@ const streamChatCompletionsDirect = async (
 
   let streamInputTokens = 0
   let streamOutputTokens = 0
+  let streamCachedTokens = 0
   let streamText = ""
 
   for await (const rawEvent of response) {
@@ -317,6 +335,7 @@ const streamChatCompletionsDirect = async (
     if (chunk.usage) {
       streamInputTokens = chunk.usage.prompt_tokens
       streamOutputTokens = chunk.usage.completion_tokens
+      streamCachedTokens = chunk.usage.prompt_tokens_details?.cached_tokens ?? 0
     }
     for (const choice of chunk.choices) {
       streamText += choice.delta.content ?? ""
@@ -338,6 +357,7 @@ const streamChatCompletionsDirect = async (
   return {
     inputTokens: streamInputTokens,
     outputTokens: streamOutputTokens,
+    cachedTokens: streamCachedTokens,
     responseText: streamText,
   }
 }
@@ -567,6 +587,7 @@ const executeChatCompletions = async (
                 "gen_ai.usage.output_tokens",
                 directResult.outputTokens,
               )
+              setOptionalTokenDetails(streamSpan, directResult.cachedTokens)
               if (shouldRecordAiContent()) {
                 streamSpan.setAttribute(
                   "gen_ai.response.text",
@@ -720,11 +741,15 @@ const streamResponsesDirect = async (
 ): Promise<{
   inputTokens: number
   outputTokens: number
+  cachedTokens: number
+  reasoningTokens: number
   responseText: string
 }> => {
   const streamState = createResponsesStreamState()
   let streamInputTokens = 0
   let streamOutputTokens = 0
+  let streamCachedTokens = 0
+  let streamReasoningTokens = 0
   let responseText = ""
 
   for await (const chunk of response) {
@@ -749,6 +774,10 @@ const streamResponsesDirect = async (
     if (isResponseCompleted(parsed) && parsed.response.usage) {
       streamInputTokens = parsed.response.usage.input_tokens
       streamOutputTokens = parsed.response.usage.output_tokens ?? 0
+      streamCachedTokens =
+        parsed.response.usage.input_tokens_details?.cached_tokens ?? 0
+      streamReasoningTokens =
+        parsed.response.usage.output_tokens_details?.reasoning_tokens ?? 0
       responseText = parsed.response.output_text
     }
 
@@ -772,6 +801,8 @@ const streamResponsesDirect = async (
   return {
     inputTokens: streamInputTokens,
     outputTokens: streamOutputTokens,
+    cachedTokens: streamCachedTokens,
+    reasoningTokens: streamReasoningTokens,
     responseText,
   }
 }
@@ -879,6 +910,12 @@ const executeResponsesApi = async (
                     buffered.initialResult?.usage?.input_tokens ?? 0
                   const outputTokens =
                     buffered.initialResult?.usage?.output_tokens ?? 0
+                  const cachedTokens =
+                    buffered.initialResult?.usage?.input_tokens_details
+                      ?.cached_tokens ?? 0
+                  const reasoningTokens =
+                    buffered.initialResult?.usage?.output_tokens_details
+                      ?.reasoning_tokens ?? 0
                   streamSpan.setAttribute(
                     "gen_ai.usage.input_tokens",
                     inputTokens,
@@ -886,6 +923,11 @@ const executeResponsesApi = async (
                   streamSpan.setAttribute(
                     "gen_ai.usage.output_tokens",
                     outputTokens,
+                  )
+                  setOptionalTokenDetails(
+                    streamSpan,
+                    cachedTokens,
+                    reasoningTokens,
                   )
                   if (shouldRecordAiContent()) {
                     streamSpan.setAttribute(
@@ -931,6 +973,11 @@ const executeResponsesApi = async (
                 streamSpan.setAttribute(
                   "gen_ai.usage.output_tokens",
                   directUsage.outputTokens,
+                )
+                setOptionalTokenDetails(
+                  streamSpan,
+                  directUsage.cachedTokens,
+                  directUsage.reasoningTokens,
                 )
                 if (shouldRecordAiContent()) {
                   streamSpan.setAttribute(
@@ -979,8 +1026,13 @@ const executeResponsesApi = async (
       )
       const inputTokens = result.usage?.input_tokens ?? 0
       const outputTokens = result.usage?.output_tokens ?? 0
+      const cachedTokens =
+        result.usage?.input_tokens_details?.cached_tokens ?? 0
+      const reasoningTokens =
+        result.usage?.output_tokens_details?.reasoning_tokens ?? 0
       span.setAttribute("gen_ai.usage.input_tokens", inputTokens)
       span.setAttribute("gen_ai.usage.output_tokens", outputTokens)
+      setOptionalTokenDetails(span, cachedTokens, reasoningTokens)
       if (shouldRecordAiContent()) {
         span.setAttribute(
           "gen_ai.response.text",

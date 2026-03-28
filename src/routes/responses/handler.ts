@@ -45,6 +45,58 @@ const logger = createHandlerLogger("responses-handler")
 
 const RESPONSES_ENDPOINT = "/responses"
 
+/**
+ * Extracts detailed token counts from a Responses API usage object,
+ * avoiding optional-chain branches in the caller.
+ */
+const extractDetailedUsage = (
+  usage: ResponseUsage | null | undefined,
+): {
+  inputTokens: number
+  outputTokens: number
+  cachedTokens: number
+  reasoningTokens: number
+} => ({
+  inputTokens: usage?.input_tokens ?? 0,
+  outputTokens: usage?.output_tokens ?? 0,
+  cachedTokens: usage?.input_tokens_details?.cached_tokens ?? 0,
+  reasoningTokens: usage?.output_tokens_details?.reasoning_tokens ?? 0,
+})
+
+/**
+ * Extracts usage from a ChatCompletionChunk usage object into the CCStreamState
+ * format, keeping optional-chain branches out of the caller.
+ */
+const extractCCUsage = (usage: {
+  prompt_tokens: number
+  completion_tokens: number
+  prompt_tokens_details?: { cached_tokens: number }
+}): { inputTokens: number; outputTokens: number; cachedTokens: number } => ({
+  inputTokens: usage.prompt_tokens,
+  outputTokens: usage.completion_tokens,
+  cachedTokens: usage.prompt_tokens_details?.cached_tokens ?? 0,
+})
+
+/**
+ * Sets optional cached input tokens and reasoning output tokens attributes on a
+ * Sentry span.  Extracting this avoids adding `if`-branches to already-complex
+ * handler functions.
+ */
+const setDetailedTokenAttributes = (
+  span: Sentry.Span,
+  opts: { cachedTokens?: number; reasoningTokens?: number },
+): void => {
+  if (opts.cachedTokens && opts.cachedTokens > 0) {
+    span.setAttribute("gen_ai.usage.input_tokens.cached", opts.cachedTokens)
+  }
+  if (opts.reasoningTokens && opts.reasoningTokens > 0) {
+    span.setAttribute(
+      "gen_ai.usage.output_tokens.reasoning",
+      opts.reasoningTokens,
+    )
+  }
+}
+
 const hasBufferedWebSearchCall = (chunkData: {
   event?: string
   data?: string
@@ -257,13 +309,19 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
                 (item: ResponseOutputItem) =>
                   item.type === "function_call" && item.name === "web_search",
               )
-              const inputTokens = response.usage?.input_tokens ?? 0
-              const outputTokens = response.usage?.output_tokens ?? 0
-              streamSpan.setAttribute("gen_ai.usage.input_tokens", inputTokens)
+              const du = extractDetailedUsage(response.usage)
+              streamSpan.setAttribute(
+                "gen_ai.usage.input_tokens",
+                du.inputTokens,
+              )
               streamSpan.setAttribute(
                 "gen_ai.usage.output_tokens",
-                outputTokens,
+                du.outputTokens,
               )
+              setDetailedTokenAttributes(streamSpan, {
+                cachedTokens: du.cachedTokens,
+                reasoningTokens: du.reasoningTokens,
+              })
               if (shouldRecordAiContent()) {
                 streamSpan.setAttribute(
                   "gen_ai.response.text",
@@ -296,8 +354,7 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
                 }> = []
                 let hasWebSearchCall = false
                 let completedResult: ResponsesResult | null = null
-                let streamInputTokens = 0
-                let streamOutputTokens = 0
+                let detailedUsage = extractDetailedUsage(null)
                 let responseText = ""
 
                 for await (const chunk of response) {
@@ -315,21 +372,23 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
                   const parsedResponse = getCompletedBufferedResponse(chunkData)
                   if (parsedResponse) {
                     completedResult = parsedResponse
-                    streamInputTokens = parsedResponse.usage?.input_tokens ?? 0
-                    streamOutputTokens =
-                      parsedResponse.usage?.output_tokens ?? 0
+                    detailedUsage = extractDetailedUsage(parsedResponse.usage)
                     responseText = parsedResponse.output_text
                   }
                 }
 
                 streamSpan.setAttribute(
                   "gen_ai.usage.input_tokens",
-                  streamInputTokens,
+                  detailedUsage.inputTokens,
                 )
                 streamSpan.setAttribute(
                   "gen_ai.usage.output_tokens",
-                  streamOutputTokens,
+                  detailedUsage.outputTokens,
                 )
+                setDetailedTokenAttributes(streamSpan, {
+                  cachedTokens: detailedUsage.cachedTokens,
+                  reasoningTokens: detailedUsage.reasoningTokens,
+                })
                 if (shouldRecordAiContent()) {
                   streamSpan.setAttribute(
                     "gen_ai.response.text",
@@ -406,6 +465,11 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
       const outputTokens = result.usage?.output_tokens ?? 0
       span.setAttribute("gen_ai.usage.input_tokens", inputTokens)
       span.setAttribute("gen_ai.usage.output_tokens", outputTokens)
+      const cachedTokens =
+        result.usage?.input_tokens_details?.cached_tokens ?? 0
+      const reasoningTokens =
+        result.usage?.output_tokens_details?.reasoning_tokens ?? 0
+      setDetailedTokenAttributes(span, { cachedTokens, reasoningTokens })
       if (shouldRecordAiContent()) {
         span.setAttribute(
           "gen_ai.response.text",
@@ -507,7 +571,7 @@ interface CCStreamState {
   messageItemId: string
   functionCalls: Map<number, CCFunctionCallState>
   nextOutputIndex: number
-  usage: { inputTokens?: number; outputTokens?: number }
+  usage: { inputTokens?: number; outputTokens?: number; cachedTokens?: number }
   responseCreated: boolean
 }
 
@@ -1041,6 +1105,7 @@ const streamChatCompletionsAsResponses = async (
 ): Promise<{
   inputTokens?: number
   outputTokens?: number
+  cachedTokens?: number
   responseText: string
 }> => {
   const s = createCCStreamState(model)
@@ -1059,10 +1124,7 @@ const streamChatCompletionsAsResponses = async (
     if (chunk.model) s.resolvedModel = chunk.model
 
     if (chunk.usage) {
-      s.usage = {
-        inputTokens: chunk.usage.prompt_tokens,
-        outputTokens: chunk.usage.completion_tokens,
-      }
+      s.usage = extractCCUsage(chunk.usage)
     }
 
     if (!s.responseCreated) {
@@ -1148,6 +1210,9 @@ const handleWithChatCompletions = async (
         const outputTokens = ccResponse.usage?.completion_tokens ?? 0
         span.setAttribute("gen_ai.usage.input_tokens", inputTokens)
         span.setAttribute("gen_ai.usage.output_tokens", outputTokens)
+        const cachedTokens =
+          ccResponse.usage?.prompt_tokens_details?.cached_tokens ?? 0
+        setDetailedTokenAttributes(span, { cachedTokens })
         if (shouldRecordAiContent()) {
           span.setAttribute(
             "gen_ai.response.text",
@@ -1211,6 +1276,9 @@ const handleWithChatCompletions = async (
               "gen_ai.usage.output_tokens",
               response.usage?.completion_tokens ?? 0,
             )
+            const cachedTokens =
+              response.usage?.prompt_tokens_details?.cached_tokens ?? 0
+            setDetailedTokenAttributes(streamSpan, { cachedTokens })
             if (shouldRecordAiContent()) {
               streamSpan.setAttribute(
                 "gen_ai.response.text",
@@ -1251,6 +1319,8 @@ const handleWithChatCompletions = async (
                 "gen_ai.usage.output_tokens",
                 streamUsage.outputTokens ?? 0,
               )
+              const cachedTokens = streamUsage.cachedTokens ?? 0
+              setDetailedTokenAttributes(streamSpan, { cachedTokens })
               if (shouldRecordAiContent()) {
                 streamSpan.setAttribute(
                   "gen_ai.response.text",

@@ -164,6 +164,10 @@ const handleNonStreamingResponse = (
     "gen_ai.usage.output_tokens",
     response.usage?.completion_tokens ?? 0,
   )
+  const cachedTokens = response.usage?.prompt_tokens_details?.cached_tokens ?? 0
+  if (cachedTokens > 0) {
+    span.setAttribute("gen_ai.usage.input_tokens.cached", cachedTokens)
+  }
   if (shouldRecordAiContent()) {
     span.setAttribute(
       "gen_ai.response.text",
@@ -219,6 +223,7 @@ const handleStreamingResponse = (
             try {
               let streamInputTokens = 0
               let streamOutputTokens = 0
+              let streamCachedTokens = 0
 
               for await (const chunk of response) {
                 consola.debug("Streaming chunk:", JSON.stringify(chunk))
@@ -228,6 +233,8 @@ const handleStreamingResponse = (
                   if (parsed.usage) {
                     streamInputTokens = parsed.usage.prompt_tokens
                     streamOutputTokens = parsed.usage.completion_tokens
+                    streamCachedTokens =
+                      parsed.usage.prompt_tokens_details?.cached_tokens ?? 0
                     setRequestContext(c, {
                       inputTokens: parsed.usage.prompt_tokens,
                       outputTokens: parsed.usage.completion_tokens,
@@ -243,6 +250,12 @@ const handleStreamingResponse = (
                 "gen_ai.usage.output_tokens",
                 streamOutputTokens,
               )
+              if (streamCachedTokens > 0) {
+                span.setAttribute(
+                  "gen_ai.usage.input_tokens.cached",
+                  streamCachedTokens,
+                )
+              }
             } finally {
               finishSpan()
             }
