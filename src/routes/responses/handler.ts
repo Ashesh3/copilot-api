@@ -145,6 +145,24 @@ export const handleResponses = async (c: Context) => {
 
   const payload = await c.req.json<ResponsesPayload>()
 
+  const model = parseModelSuffix(payload.model).baseModel
+
+  return await Sentry.startSpan(
+    {
+      op: "gen_ai.invoke_agent",
+      name: "invoke_agent copilot-proxy",
+      attributes: {
+        "gen_ai.agent.name": "copilot-proxy",
+        "gen_ai.request.model": model,
+      },
+    },
+    async () => {
+      return await handleResponsesInner(c, payload)
+    },
+  )
+}
+
+const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
   // Emit synthetic tool execution spans from tool results in input history
   emitResponsesToolSpans(payload.input)
 

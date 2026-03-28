@@ -28,6 +28,27 @@ export async function handleCompletion(c: Context) {
 
   const rawPayload = await c.req.json<ChatCompletionsPayload>()
 
+  const model = normalizeModelName(parseModelSuffix(rawPayload.model).baseModel)
+
+  return await Sentry.startSpan(
+    {
+      op: "gen_ai.invoke_agent",
+      name: "invoke_agent copilot-proxy",
+      attributes: {
+        "gen_ai.agent.name": "copilot-proxy",
+        "gen_ai.request.model": model,
+      },
+    },
+    async () => {
+      return await handleCompletionInner(c, rawPayload)
+    },
+  )
+}
+
+async function handleCompletionInner(
+  c: Context,
+  rawPayload: ChatCompletionsPayload,
+) {
   // Emit synthetic tool execution spans from tool results in message history
   emitChatCompletionsToolSpans(rawPayload.messages)
 

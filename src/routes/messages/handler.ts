@@ -120,6 +120,29 @@ export async function handleCompletion(c: Context) {
   const anthropicPayload = await c.req.json<AnthropicMessagesPayload>()
   logger.debug("Anthropic request payload:", JSON.stringify(anthropicPayload))
 
+  const model = normalizeModelName(
+    parseModelSuffix(anthropicPayload.model).baseModel,
+  )
+
+  return await Sentry.startSpan(
+    {
+      op: "gen_ai.invoke_agent",
+      name: "invoke_agent copilot-proxy",
+      attributes: {
+        "gen_ai.agent.name": "copilot-proxy",
+        "gen_ai.request.model": model,
+      },
+    },
+    async () => {
+      return await handleCompletionInner(c, anthropicPayload)
+    },
+  )
+}
+
+async function handleCompletionInner(
+  c: Context,
+  anthropicPayload: AnthropicMessagesPayload,
+) {
   // Emit synthetic tool execution spans from tool results in message history
   emitAnthropicToolSpans(anthropicPayload.messages)
 
