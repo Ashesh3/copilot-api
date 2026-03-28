@@ -86,36 +86,35 @@ const executeRequest = async (
   c: Context,
   payload: ChatCompletionsPayload & { model: string },
 ) => {
-  return await Sentry.startSpan(
-    {
-      op: "gen_ai.request",
-      name: `request ${payload.model}`,
-      attributes: {
-        "gen_ai.request.model": payload.model,
-        ...(shouldRecordAiContent() && {
-          "gen_ai.request.messages": JSON.stringify(payload.messages),
-        }),
+  const response = await createChatCompletions(payload)
+
+  // Track which account handled this request (multi-token mode)
+  const accountId = getLastUsedAccountId()
+  if (accountId !== undefined) {
+    setRequestContext(c, { accountId })
+  }
+
+  if (isNonStreaming(response)) {
+    return Sentry.startSpan(
+      {
+        op: "gen_ai.request",
+        name: `request ${payload.model}`,
+        attributes: {
+          "gen_ai.request.model": payload.model,
+          ...(shouldRecordAiContent() && {
+            "gen_ai.request.messages": JSON.stringify(payload.messages),
+          }),
+        },
       },
-    },
-    async (span) => {
-      const response = await createChatCompletions(payload)
-
-      // Track which account handled this request (multi-token mode)
-      const accountId = getLastUsedAccountId()
-      if (accountId !== undefined) {
-        setRequestContext(c, { accountId })
-      }
-
-      if (isNonStreaming(response)) {
+      (span) => {
         return handleNonStreamingResponse(c, response, span)
-      }
+      },
+    )
+  }
 
-      // For streaming, the span must live inside the streamSSE callback
-      // because streamSSE returns a Response immediately (before the stream body is consumed).
-      // We close the outer span here and open a new one inside the callback.
-      return handleStreamingResponse(c, response, payload)
-    },
-  )
+  // For streaming, the span must live inside the streamSSE callback
+  // because streamSSE returns a Response immediately (before the stream body is consumed).
+  return handleStreamingResponse(c, response, payload)
 }
 
 const handleNonStreamingResponse = (

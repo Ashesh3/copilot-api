@@ -154,6 +154,140 @@ export const handleResponses = async (c: Context) => {
       payload.input
     : JSON.stringify(payload.input)
 
+  const response = await createResponses(payload, { vision, initiator })
+
+  // Track which account handled this request (multi-token mode)
+  const accountId = getLastUsedAccountId()
+  if (accountId !== undefined) {
+    setRequestContext(c, { accountId })
+  }
+
+  if (isStreamingRequested(payload) && isAsyncIterable(response)) {
+    // Streaming path — only one span inside streamSSE callback (no outer span)
+    logger.debug("Forwarding native Responses stream")
+    return streamSSE(c, async (stream) => {
+      // Use startNewTrace to create an independent root span, detached from
+      // the http.server request span which ends when streamSSE returns the Response.
+      await Sentry.startNewTrace(() => {
+        return Sentry.startSpan(
+          {
+            op: "gen_ai.request",
+            name: `stream ${payload.model}`,
+            attributes: {
+              "gen_ai.request.model": payload.model,
+              ...(shouldRecordAiContent() && {
+                "gen_ai.request.messages": inputMessages,
+              }),
+            },
+          },
+          async (streamSpan) => {
+            // Buffer stream events to check for web_search calls
+            const bufferedChunks: Array<{
+              id?: string
+              event?: string
+              data?: string
+            }> = []
+            let hasWebSearchCall = false
+            let completedResult: ResponsesResult | null = null
+            let streamInputTokens = 0
+            let streamOutputTokens = 0
+
+            for await (const chunk of response) {
+              const chunkData = {
+                id: (chunk as { id?: string }).id,
+                event: (chunk as { event?: string }).event,
+                data: (chunk as { data?: string }).data ?? "",
+              }
+              bufferedChunks.push(chunkData)
+
+              // Check for web_search function calls in done events
+              if (
+                chunkData.data
+                && chunkData.event === "response.output_item.done"
+              ) {
+                try {
+                  const parsed = JSON.parse(chunkData.data) as {
+                    item?: { type?: string; name?: string }
+                  }
+                  if (
+                    parsed.item?.type === "function_call"
+                    && parsed.item.name === "web_search"
+                  ) {
+                    hasWebSearchCall = true
+                  }
+                } catch {
+                  // ignore parse errors
+                }
+              }
+
+              // Capture completed result and usage
+              if (
+                chunkData.data
+                && (chunkData.event === "response.completed"
+                  || chunkData.event === "response.incomplete")
+              ) {
+                try {
+                  const parsed = JSON.parse(chunkData.data) as {
+                    response?: ResponsesResult
+                  }
+                  if (parsed.response) {
+                    completedResult = parsed.response
+                    streamInputTokens = parsed.response.usage?.input_tokens ?? 0
+                    streamOutputTokens =
+                      parsed.response.usage?.output_tokens ?? 0
+                  }
+                } catch {
+                  // ignore parse errors
+                }
+              }
+            }
+
+            if (hasWebSearchCall && completedResult) {
+              // Execute web searches, get final non-streaming response
+              const resolved = await resolveResponsesWebSearchCalls(
+                completedResult,
+                payload,
+                { vision, initiator },
+              )
+
+              // Emit the resolved result as a response.completed stream event
+              await emitResponsesResultAsStream(stream, resolved)
+
+              // Usage is tracked by resolveResponsesWebSearchCalls child spans;
+              // don't double-count on the outer span.
+              return
+            }
+
+            // No web_search calls — replay buffered chunks
+            const idTracker = createStreamIdTracker()
+            for (const chunk of bufferedChunks) {
+              const processedData = fixStreamIds(
+                chunk.data ?? "",
+                chunk.event,
+                idTracker,
+              )
+              await stream.writeSSE({
+                id: chunk.id,
+                event: chunk.event,
+                data: processedData,
+              })
+            }
+
+            streamSpan.setAttribute(
+              "gen_ai.usage.input_tokens",
+              streamInputTokens,
+            )
+            streamSpan.setAttribute(
+              "gen_ai.usage.output_tokens",
+              streamOutputTokens,
+            )
+          },
+        )
+      })
+    })
+  }
+
+  // Non-streaming: wrap in a span
   return await Sentry.startSpan(
     {
       op: "gen_ai.request",
@@ -166,144 +300,11 @@ export const handleResponses = async (c: Context) => {
       },
     },
     async (span) => {
-      const response = await createResponses(payload, { vision, initiator })
-
-      // Track which account handled this request (multi-token mode)
-      const accountId = getLastUsedAccountId()
-      if (accountId !== undefined) {
-        setRequestContext(c, { accountId })
-      }
-
-      if (isStreamingRequested(payload) && isAsyncIterable(response)) {
-        logger.debug("Forwarding native Responses stream")
-        return streamSSE(c, async (stream) => {
-          // Use startNewTrace to create an independent root span, detached from
-          // the http.server request span which ends when streamSSE returns the Response.
-          await Sentry.startNewTrace(() => {
-            return Sentry.startSpan(
-              {
-                op: "gen_ai.request",
-                name: `stream ${payload.model}`,
-                attributes: {
-                  "gen_ai.request.model": payload.model,
-                },
-              },
-              async (streamSpan) => {
-                // Buffer stream events to check for web_search calls
-                const bufferedChunks: Array<{
-                  id?: string
-                  event?: string
-                  data?: string
-                }> = []
-                let hasWebSearchCall = false
-                let completedResult: ResponsesResult | null = null
-                let streamInputTokens = 0
-                let streamOutputTokens = 0
-
-                for await (const chunk of response) {
-                  const chunkData = {
-                    id: (chunk as { id?: string }).id,
-                    event: (chunk as { event?: string }).event,
-                    data: (chunk as { data?: string }).data ?? "",
-                  }
-                  bufferedChunks.push(chunkData)
-
-                  // Check for web_search function calls in done events
-                  if (
-                    chunkData.data
-                    && chunkData.event === "response.output_item.done"
-                  ) {
-                    try {
-                      const parsed = JSON.parse(chunkData.data) as {
-                        item?: { type?: string; name?: string }
-                      }
-                      if (
-                        parsed.item?.type === "function_call"
-                        && parsed.item.name === "web_search"
-                      ) {
-                        hasWebSearchCall = true
-                      }
-                    } catch {
-                      // ignore parse errors
-                    }
-                  }
-
-                  // Capture completed result and usage
-                  if (
-                    chunkData.data
-                    && (chunkData.event === "response.completed"
-                      || chunkData.event === "response.incomplete")
-                  ) {
-                    try {
-                      const parsed = JSON.parse(chunkData.data) as {
-                        response?: ResponsesResult
-                      }
-                      if (parsed.response) {
-                        completedResult = parsed.response
-                        streamInputTokens =
-                          parsed.response.usage?.input_tokens ?? 0
-                        streamOutputTokens =
-                          parsed.response.usage?.output_tokens ?? 0
-                      }
-                    } catch {
-                      // ignore parse errors
-                    }
-                  }
-                }
-
-                if (hasWebSearchCall && completedResult) {
-                  // Execute web searches, get final non-streaming response
-                  const resolved = await resolveResponsesWebSearchCalls(
-                    completedResult,
-                    payload,
-                    { vision, initiator },
-                  )
-
-                  // Emit the resolved result as a response.completed stream event
-                  await emitResponsesResultAsStream(stream, resolved)
-
-                  streamSpan.setAttribute(
-                    "gen_ai.usage.input_tokens",
-                    streamInputTokens,
-                  )
-                  streamSpan.setAttribute(
-                    "gen_ai.usage.output_tokens",
-                    streamOutputTokens,
-                  )
-                  return
-                }
-
-                // No web_search calls — replay buffered chunks
-                const idTracker = createStreamIdTracker()
-                for (const chunk of bufferedChunks) {
-                  const processedData = fixStreamIds(
-                    chunk.data ?? "",
-                    chunk.event,
-                    idTracker,
-                  )
-                  await stream.writeSSE({
-                    id: chunk.id,
-                    event: chunk.event,
-                    data: processedData,
-                  })
-                }
-
-                streamSpan.setAttribute(
-                  "gen_ai.usage.input_tokens",
-                  streamInputTokens,
-                )
-                streamSpan.setAttribute(
-                  "gen_ai.usage.output_tokens",
-                  streamOutputTokens,
-                )
-              },
-            )
-          })
-        })
-      }
-
-      // Non-streaming: check for web_search calls
       const result = response as ResponsesResult
+      const hadWebSearch = result.output.some(
+        (item: ResponseOutputItem) =>
+          item.type === "function_call" && item.name === "web_search",
+      )
       const resolved = await resolveResponsesWebSearchCalls(result, payload, {
         vision,
         initiator,
@@ -314,10 +315,14 @@ export const handleResponses = async (c: Context) => {
         JSON.stringify(resolved).slice(-400),
       )
 
-      const inputTokens = resolved.usage?.input_tokens ?? 0
-      const outputTokens = resolved.usage?.output_tokens ?? 0
-      span.setAttribute("gen_ai.usage.input_tokens", inputTokens)
-      span.setAttribute("gen_ai.usage.output_tokens", outputTokens)
+      // Only set token attributes on the outer span when web search was NOT
+      // involved — individual calls are tracked by the helper spans.
+      if (!hadWebSearch) {
+        const inputTokens = resolved.usage?.input_tokens ?? 0
+        const outputTokens = resolved.usage?.output_tokens ?? 0
+        span.setAttribute("gen_ai.usage.input_tokens", inputTokens)
+        span.setAttribute("gen_ai.usage.output_tokens", outputTokens)
+      }
       if (shouldRecordAiContent()) {
         span.setAttribute(
           "gen_ai.response.text",
@@ -1073,6 +1078,9 @@ const handleWithChatCompletions = async (
           name: `stream ${payload.model}`,
           attributes: {
             "gen_ai.request.model": payload.model,
+            ...(shouldRecordAiContent() && {
+              "gen_ai.request.messages": JSON.stringify(ccPayload.messages),
+            }),
           },
         },
         async (streamSpan) => {
