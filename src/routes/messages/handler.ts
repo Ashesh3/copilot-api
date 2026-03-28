@@ -15,7 +15,7 @@ import { normalizeModelName } from "~/lib/model-resolver"
 import { parseModelSuffix } from "~/lib/model-suffix"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { setRequestContext } from "~/lib/request-logger"
-import { shouldRecordAiContent } from "~/lib/sentry"
+import { getSentryModelName, shouldRecordAiContent } from "~/lib/sentry"
 import { state } from "~/lib/state"
 import { getTokenCount } from "~/lib/tokenizer"
 import {
@@ -192,10 +192,25 @@ export async function handleCompletion(c: Context) {
 
 const RESPONSES_ENDPOINT = "/responses"
 
-interface ChatCompletionsStreamContext {
-  finalPayload: ReturnType<typeof translateToOpenAI> & { model: string }
-  initiatorOverride?: "agent" | "user"
-  requestedModel?: string
+interface BufferedChatCompletionsResult {
+  hadWebSearch: boolean
+  initialResponse: ChatCompletionResponse | null
+}
+
+function setChatCompletionSpanResult(
+  span: Sentry.Span,
+  response: ChatCompletionResponse | null,
+): void {
+  const inputTokens = response?.usage?.prompt_tokens ?? 0
+  const outputTokens = response?.usage?.completion_tokens ?? 0
+  span.setAttribute("gen_ai.usage.input_tokens", inputTokens)
+  span.setAttribute("gen_ai.usage.output_tokens", outputTokens)
+  if (shouldRecordAiContent()) {
+    span.setAttribute(
+      "gen_ai.response.text",
+      JSON.stringify([response?.choices[0]?.message?.content ?? ""]),
+    )
+  }
 }
 
 const streamChatCompletionsWithWebSearch = async (
@@ -203,8 +218,8 @@ const streamChatCompletionsWithWebSearch = async (
     writeSSE: (data: { event: string; data: string }) => Promise<void>
   },
   response: AsyncIterable<{ data?: string }>,
-  ctx: ChatCompletionsStreamContext,
-): Promise<{ inputTokens: number; outputTokens: number }> => {
+  requestedModel?: string,
+): Promise<BufferedChatCompletionsResult> => {
   const bufferedChunks: Array<ChatCompletionChunk> = []
 
   for await (const rawEvent of response) {
@@ -213,23 +228,10 @@ const streamChatCompletionsWithWebSearch = async (
     bufferedChunks.push(JSON.parse(rawEvent.data) as ChatCompletionChunk)
   }
 
+  const initialResponse = reconstructFromChunks(bufferedChunks)
+
   if (hasWebSearchInChunks(bufferedChunks)) {
-    const reconstructed = reconstructFromChunks(bufferedChunks)
-    if (reconstructed) {
-      const resolved = await resolveWebSearchCalls(
-        reconstructed,
-        ctx.finalPayload,
-        ctx.initiatorOverride,
-      )
-      const anthropicResponse = translateToAnthropic(
-        resolved,
-        ctx.requestedModel,
-      )
-      await emitAnthropicResponseAsStream(stream, anthropicResponse)
-      // Usage is tracked by resolveWebSearchCalls child spans; return zeros
-      // so the outer span does not double-count.
-      return { inputTokens: 0, outputTokens: 0 }
-    }
+    return { hadWebSearch: true, initialResponse }
   }
 
   // No web_search calls — replay buffered chunks
@@ -240,20 +242,11 @@ const streamChatCompletionsWithWebSearch = async (
     toolCalls: {},
   }
 
-  let inputTokens = 0
-  let outputTokens = 0
-
   for (const chunk of bufferedChunks) {
-    // Capture usage from the last chunk
-    if (chunk.usage) {
-      inputTokens = chunk.usage.prompt_tokens
-      outputTokens = chunk.usage.completion_tokens
-    }
-
     const events = translateChunkToAnthropicEvents(
       chunk,
       streamState,
-      ctx.requestedModel,
+      requestedModel,
     )
     for (const event of events) {
       await stream.writeSSE({
@@ -263,7 +256,63 @@ const streamChatCompletionsWithWebSearch = async (
     }
   }
 
-  return { inputTokens, outputTokens }
+  return { hadWebSearch: false, initialResponse }
+}
+
+const streamChatCompletionsDirect = async (
+  stream: {
+    writeSSE: (data: { event: string; data: string }) => Promise<void>
+  },
+  response: AsyncIterable<{ data?: string }>,
+  requestedModel?: string,
+): Promise<{
+  inputTokens: number
+  outputTokens: number
+  responseText: string
+}> => {
+  const streamState: AnthropicStreamState = {
+    messageStartSent: false,
+    contentBlockIndex: 0,
+    contentBlockOpen: false,
+    toolCalls: {},
+  }
+
+  let streamInputTokens = 0
+  let streamOutputTokens = 0
+  let streamText = ""
+
+  for await (const rawEvent of response) {
+    if (rawEvent.data === "[DONE]") break
+    if (!rawEvent.data) continue
+
+    const chunk = JSON.parse(rawEvent.data) as ChatCompletionChunk
+
+    if (chunk.usage) {
+      streamInputTokens = chunk.usage.prompt_tokens
+      streamOutputTokens = chunk.usage.completion_tokens
+    }
+    for (const choice of chunk.choices) {
+      streamText += choice.delta.content ?? ""
+    }
+
+    const events = translateChunkToAnthropicEvents(
+      chunk,
+      streamState,
+      requestedModel,
+    )
+    for (const event of events) {
+      await stream.writeSSE({
+        event: event.type,
+        data: JSON.stringify(event),
+      })
+    }
+  }
+
+  return {
+    inputTokens: streamInputTokens,
+    outputTokens: streamOutputTokens,
+    responseText: streamText,
+  }
 }
 
 const tryCountTokens = async (
@@ -352,164 +401,162 @@ const executeChatCompletions = async (
     JSON.stringify(finalPayload),
   )
 
-  const response = await createChatCompletions(finalPayload, {
-    initiator: initiatorOverride,
-  })
-
-  // Track which account handled this request (multi-token mode)
-  const accountId = getLastUsedAccountId()
-  if (accountId !== undefined) {
-    setRequestContext(c, { accountId })
-  }
-
-  if (isNonStreaming(response)) {
-    return await Sentry.startSpan(
+  if (!finalPayload.stream) {
+    const { initialResponse, hadWebSearch } = await Sentry.startSpan(
       {
         op: "gen_ai.request",
         name: `request ${finalPayload.model}`,
         attributes: {
           "gen_ai.request.model": finalPayload.model,
+          "gen_ai.response.model": getSentryModelName(finalPayload.model),
           ...(shouldRecordAiContent() && {
             "gen_ai.request.messages": JSON.stringify(finalPayload.messages),
           }),
         },
       },
       async (span) => {
-        // Check for web_search tool calls and execute them in a loop
+        const response = (await createChatCompletions(finalPayload, {
+          initiator: initiatorOverride,
+        })) as ChatCompletionResponse
+
+        // Track which account handled this request (multi-token mode)
+        const accountId = getLastUsedAccountId()
+        if (accountId !== undefined) {
+          setRequestContext(c, { accountId })
+        }
+
         const hadWebSearch = extractWebSearchCalls(response).length > 0
-        const finalResponse = await resolveWebSearchCalls(
-          response,
+        setChatCompletionSpanResult(span, response)
+
+        return { initialResponse: response, hadWebSearch }
+      },
+    )
+
+    const finalResponse =
+      hadWebSearch ?
+        await resolveWebSearchCalls(
+          initialResponse,
           finalPayload,
           initiatorOverride,
         )
+      : initialResponse
 
-        logger.debug(
-          "Non-streaming response from Copilot:",
-          JSON.stringify(finalResponse).slice(-400),
-        )
-
-        // Only set token attributes on the outer span when web search was NOT
-        // involved — individual calls are tracked by the helper spans to avoid
-        // double-counting.
-        if (!hadWebSearch) {
-          const inputTokens = finalResponse.usage?.prompt_tokens ?? 0
-          const outputTokens = finalResponse.usage?.completion_tokens ?? 0
-          span.setAttribute("gen_ai.usage.input_tokens", inputTokens)
-          span.setAttribute("gen_ai.usage.output_tokens", outputTokens)
-        }
-        if (shouldRecordAiContent()) {
-          span.setAttribute(
-            "gen_ai.response.text",
-            JSON.stringify([finalResponse.choices[0]?.message?.content ?? ""]),
-          )
-        }
-
-        const anthropicResponse = translateToAnthropic(
-          finalResponse,
-          requestedModel,
-        )
-        logger.debug(
-          "Translated Anthropic response:",
-          JSON.stringify(anthropicResponse),
-        )
-        return c.json(anthropicResponse)
-      },
+    logger.debug(
+      "Non-streaming response from Copilot:",
+      JSON.stringify(finalResponse).slice(-400),
     )
+
+    const anthropicResponse = translateToAnthropic(
+      finalResponse,
+      requestedModel,
+    )
+    logger.debug(
+      "Translated Anthropic response:",
+      JSON.stringify(anthropicResponse),
+    )
+    return c.json(anthropicResponse)
   }
 
-  // Streaming path — only one span inside streamSSE callback (no outer span)
   const needsWebSearchBuffering = hasWebSearchToolInPayload(
     anthropicPayload.tools,
   )
 
   logger.debug("Streaming response from Copilot")
-  return streamSSE(c, async (stream) => {
-    // Use startNewTrace to create an independent root span, detached from
-    // the http.server request span which ends when streamSSE returns the Response.
-    await Sentry.startNewTrace(() => {
-      return Sentry.startSpan(
-        {
-          op: "gen_ai.request",
-          name: `stream ${finalPayload.model}`,
-          attributes: {
-            "gen_ai.request.model": finalPayload.model,
-            ...(shouldRecordAiContent() && {
-              "gen_ai.request.messages": JSON.stringify(finalPayload.messages),
-            }),
-          },
+  return await Sentry.startNewTrace(() =>
+    Sentry.startSpanManual(
+      {
+        op: "gen_ai.request",
+        name: `stream ${finalPayload.model}`,
+        attributes: {
+          "gen_ai.request.model": finalPayload.model,
+          "gen_ai.response.model": getSentryModelName(finalPayload.model),
+          ...(shouldRecordAiContent() && {
+            "gen_ai.request.messages": JSON.stringify(finalPayload.messages),
+          }),
         },
-        async (streamSpan) => {
-          if (needsWebSearchBuffering) {
-            const wsUsage = await streamChatCompletionsWithWebSearch(
-              stream,
-              response,
-              {
-                finalPayload,
-                initiatorOverride,
+      },
+      async (streamSpan, finish) => {
+        let spanFinished = false
+        const finishSpan = () => {
+          if (spanFinished) return
+          spanFinished = true
+          finish()
+        }
+
+        try {
+          const response = await createChatCompletions(finalPayload, {
+            initiator: initiatorOverride,
+          })
+
+          // Track which account handled this request (multi-token mode)
+          const accountId = getLastUsedAccountId()
+          if (accountId !== undefined) {
+            setRequestContext(c, { accountId })
+          }
+
+          return streamSSE(c, async (stream) => {
+            try {
+              if (needsWebSearchBuffering) {
+                const buffered = await streamChatCompletionsWithWebSearch(
+                  stream,
+                  response as AsyncIterable<{ data?: string }>,
+                  requestedModel,
+                )
+
+                setChatCompletionSpanResult(
+                  streamSpan,
+                  buffered.initialResponse,
+                )
+
+                if (buffered.hadWebSearch && buffered.initialResponse) {
+                  finishSpan()
+                  const resolved = await Sentry.withActiveSpan(null, () =>
+                    resolveWebSearchCalls(
+                      buffered.initialResponse,
+                      finalPayload,
+                      initiatorOverride,
+                    ),
+                  )
+                  const anthropicResponse = translateToAnthropic(
+                    resolved,
+                    requestedModel,
+                  )
+                  await emitAnthropicResponseAsStream(stream, anthropicResponse)
+                }
+                return
+              }
+
+              const directResult = await streamChatCompletionsDirect(
+                stream,
+                response as AsyncIterable<{ data?: string }>,
                 requestedModel,
-              },
-            )
+              )
 
-            streamSpan.setAttribute(
-              "gen_ai.usage.input_tokens",
-              wsUsage.inputTokens,
-            )
-            streamSpan.setAttribute(
-              "gen_ai.usage.output_tokens",
-              wsUsage.outputTokens,
-            )
-            return
-          }
-
-          // No web_search tool — stream directly without buffering
-          const streamState: AnthropicStreamState = {
-            messageStartSent: false,
-            contentBlockIndex: 0,
-            contentBlockOpen: false,
-            toolCalls: {},
-          }
-
-          let streamInputTokens = 0
-          let streamOutputTokens = 0
-
-          for await (const rawEvent of response) {
-            if (rawEvent.data === "[DONE]") break
-            if (!rawEvent.data) continue
-
-            const chunk = JSON.parse(rawEvent.data) as ChatCompletionChunk
-
-            // Capture usage from chunks
-            if (chunk.usage) {
-              streamInputTokens = chunk.usage.prompt_tokens
-              streamOutputTokens = chunk.usage.completion_tokens
+              streamSpan.setAttribute(
+                "gen_ai.usage.input_tokens",
+                directResult.inputTokens,
+              )
+              streamSpan.setAttribute(
+                "gen_ai.usage.output_tokens",
+                directResult.outputTokens,
+              )
+              if (shouldRecordAiContent()) {
+                streamSpan.setAttribute(
+                  "gen_ai.response.text",
+                  JSON.stringify([directResult.responseText]),
+                )
+              }
+            } finally {
+              finishSpan()
             }
-
-            const events = translateChunkToAnthropicEvents(
-              chunk,
-              streamState,
-              requestedModel,
-            )
-            for (const event of events) {
-              await stream.writeSSE({
-                event: event.type,
-                data: JSON.stringify(event),
-              })
-            }
-          }
-
-          // Set token attributes after streaming completes — span is still open
-          streamSpan.setAttribute(
-            "gen_ai.usage.input_tokens",
-            streamInputTokens,
-          )
-          streamSpan.setAttribute(
-            "gen_ai.usage.output_tokens",
-            streamOutputTokens,
-          )
-        },
-      )
-    })
-  })
+          })
+        } catch (error) {
+          finishSpan()
+          throw error
+        }
+      },
+    ),
+  )
 }
 
 type SSEStream = {
@@ -623,45 +670,35 @@ const replayBufferedEvents = async (
 const streamResponsesWithWebSearch = async (
   stream: SSEStream,
   response: ResponsesStream,
-  ctx: {
-    responsesPayload: ReturnType<
-      typeof translateAnthropicMessagesToResponsesPayload
-    >
-    requestOptions: { vision: boolean; initiator: "agent" | "user" }
-    requestedModel?: string
-  },
-): Promise<{ inputTokens: number; outputTokens: number }> => {
+): Promise<{
+  hadWebSearch: boolean
+  initialResult: ResponsesResult | null
+}> => {
   const { events, hasWebSearch, completedResult } = await bufferResponsesStream(
     stream,
     response,
   )
 
-  const inputTokens = completedResult?.usage?.input_tokens ?? 0
-  const outputTokens = completedResult?.usage?.output_tokens ?? 0
-
   if (hasWebSearch && completedResult) {
-    const resolved = await resolveResponsesWebSearchCalls(
-      completedResult,
-      ctx.responsesPayload,
-      ctx.requestOptions,
-    )
-    const anthropicResponse = translateResponsesResultToAnthropic(resolved)
-    if (ctx.requestedModel) anthropicResponse.model = ctx.requestedModel
-    await emitAnthropicResponseAsStream(stream, anthropicResponse)
-    return { inputTokens, outputTokens }
+    return { hadWebSearch: true, initialResult: completedResult }
   }
 
   await replayBufferedEvents(stream, events)
-  return { inputTokens, outputTokens }
+  return { hadWebSearch: false, initialResult: completedResult }
 }
 
 const streamResponsesDirect = async (
   stream: SSEStream,
   response: ResponsesStream,
-): Promise<{ inputTokens: number; outputTokens: number }> => {
+): Promise<{
+  inputTokens: number
+  outputTokens: number
+  responseText: string
+}> => {
   const streamState = createResponsesStreamState()
   let streamInputTokens = 0
   let streamOutputTokens = 0
+  let responseText = ""
 
   for await (const chunk of response) {
     if (chunk.event === "ping") {
@@ -685,6 +722,7 @@ const streamResponsesDirect = async (
     if (isResponseCompleted(parsed) && parsed.response.usage) {
       streamInputTokens = parsed.response.usage.input_tokens
       streamOutputTokens = parsed.response.usage.output_tokens ?? 0
+      responseText = parsed.response.output_text
     }
 
     await writeResponsesEvents(stream, parsed, streamState)
@@ -704,7 +742,11 @@ const streamResponsesDirect = async (
     })
   }
 
-  return { inputTokens: streamInputTokens, outputTokens: streamOutputTokens }
+  return {
+    inputTokens: streamInputTokens,
+    outputTokens: streamOutputTokens,
+    responseText,
+  }
 }
 
 const handleWithResponsesApi = async (
@@ -758,135 +800,191 @@ const executeResponsesApi = async (
 
   const { vision, initiator } = getResponsesRequestOptions(responsesPayload)
 
-  const response = await createResponses(responsesPayload, {
-    vision,
-    initiator: initiatorOverride ?? initiator,
-  })
-
-  // Track which account handled this request (multi-token mode)
-  const responsesAccountId = getLastUsedAccountId()
-  if (responsesAccountId !== undefined) {
-    setRequestContext(c, { accountId: responsesAccountId })
-  }
-
   const needsWebSearchBuffering = hasWebSearchToolInPayload(
     anthropicPayload.tools,
   )
 
-  if (responsesPayload.stream && isAsyncIterable(response)) {
-    // Streaming path — only one span inside streamSSE callback (no outer span)
+  if (responsesPayload.stream) {
     logger.debug("Streaming response from Copilot (Responses API)")
-    return streamSSE(c, async (stream) => {
-      // Use startNewTrace to create an independent root span, detached from
-      // the http.server request span which ends when streamSSE returns the Response.
-      await Sentry.startNewTrace(() => {
-        return Sentry.startSpan(
-          {
-            op: "gen_ai.request",
-            name: `stream ${anthropicPayload.model}`,
-            attributes: {
-              "gen_ai.request.model": anthropicPayload.model,
-              ...(shouldRecordAiContent() && {
-                "gen_ai.request.messages": JSON.stringify(
-                  anthropicPayload.messages,
-                ),
-              }),
-            },
+    return await Sentry.startNewTrace(() =>
+      Sentry.startSpanManual(
+        {
+          op: "gen_ai.request",
+          name: `stream ${anthropicPayload.model}`,
+          attributes: {
+            "gen_ai.request.model": anthropicPayload.model,
+            "gen_ai.response.model": getSentryModelName(anthropicPayload.model),
+            ...(shouldRecordAiContent() && {
+              "gen_ai.request.messages": JSON.stringify(
+                anthropicPayload.messages,
+              ),
+            }),
           },
-          async (streamSpan) => {
-            if (needsWebSearchBuffering) {
-              const wsUsage = await streamResponsesWithWebSearch(
-                stream,
-                response,
-                {
-                  responsesPayload,
-                  requestOptions: {
-                    vision,
-                    initiator: initiatorOverride ?? initiator,
-                  },
-                  requestedModel,
-                },
-              )
+        },
+        async (streamSpan, finish) => {
+          let spanFinished = false
+          const finishSpan = () => {
+            if (spanFinished) return
+            spanFinished = true
+            finish()
+          }
 
-              streamSpan.setAttribute(
-                "gen_ai.usage.input_tokens",
-                wsUsage.inputTokens,
-              )
-              streamSpan.setAttribute(
-                "gen_ai.usage.output_tokens",
-                wsUsage.outputTokens,
-              )
-              return
+          try {
+            const response = await createResponses(responsesPayload, {
+              vision,
+              initiator: initiatorOverride ?? initiator,
+            })
+
+            const responsesAccountId = getLastUsedAccountId()
+            if (responsesAccountId !== undefined) {
+              setRequestContext(c, { accountId: responsesAccountId })
             }
 
-            const directUsage = await streamResponsesDirect(stream, response)
+            return streamSSE(c, async (stream) => {
+              try {
+                if (needsWebSearchBuffering) {
+                  const buffered = await streamResponsesWithWebSearch(
+                    stream,
+                    response as ResponsesStream,
+                  )
 
-            streamSpan.setAttribute(
-              "gen_ai.usage.input_tokens",
-              directUsage.inputTokens,
-            )
-            streamSpan.setAttribute(
-              "gen_ai.usage.output_tokens",
-              directUsage.outputTokens,
-            )
-          },
-        )
-      })
-    })
+                  const inputTokens =
+                    buffered.initialResult?.usage?.input_tokens ?? 0
+                  const outputTokens =
+                    buffered.initialResult?.usage?.output_tokens ?? 0
+                  streamSpan.setAttribute(
+                    "gen_ai.usage.input_tokens",
+                    inputTokens,
+                  )
+                  streamSpan.setAttribute(
+                    "gen_ai.usage.output_tokens",
+                    outputTokens,
+                  )
+                  if (shouldRecordAiContent()) {
+                    streamSpan.setAttribute(
+                      "gen_ai.response.text",
+                      JSON.stringify([
+                        buffered.initialResult?.output_text ?? "",
+                      ]),
+                    )
+                  }
+
+                  if (buffered.hadWebSearch && buffered.initialResult) {
+                    finishSpan()
+                    const resolved = await Sentry.withActiveSpan(null, () =>
+                      resolveResponsesWebSearchCalls(
+                        buffered.initialResult,
+                        responsesPayload,
+                        {
+                          vision,
+                          initiator: initiatorOverride ?? initiator,
+                        },
+                      ),
+                    )
+                    const anthropicResponse =
+                      translateResponsesResultToAnthropic(resolved)
+                    if (requestedModel) anthropicResponse.model = requestedModel
+                    await emitAnthropicResponseAsStream(
+                      stream,
+                      anthropicResponse,
+                    )
+                  }
+                  return
+                }
+
+                const directUsage = await streamResponsesDirect(
+                  stream,
+                  response as ResponsesStream,
+                )
+
+                streamSpan.setAttribute(
+                  "gen_ai.usage.input_tokens",
+                  directUsage.inputTokens,
+                )
+                streamSpan.setAttribute(
+                  "gen_ai.usage.output_tokens",
+                  directUsage.outputTokens,
+                )
+                if (shouldRecordAiContent()) {
+                  streamSpan.setAttribute(
+                    "gen_ai.response.text",
+                    JSON.stringify([directUsage.responseText]),
+                  )
+                }
+              } finally {
+                finishSpan()
+              }
+            })
+          } catch (error) {
+            finishSpan()
+            throw error
+          }
+        },
+      ),
+    )
   }
 
-  // Non-streaming: wrap in a span
-  return await Sentry.startSpan(
+  const { initialResult, hadWebSearch } = await Sentry.startSpan(
     {
       op: "gen_ai.request",
       name: `request ${anthropicPayload.model}`,
       attributes: {
         "gen_ai.request.model": anthropicPayload.model,
+        "gen_ai.response.model": getSentryModelName(anthropicPayload.model),
         ...(shouldRecordAiContent() && {
           "gen_ai.request.messages": JSON.stringify(anthropicPayload.messages),
         }),
       },
     },
     async (span) => {
-      const result = response as ResponsesResult
+      const result = (await createResponses(responsesPayload, {
+        vision,
+        initiator: initiatorOverride ?? initiator,
+      })) as ResponsesResult
+
+      const responsesAccountId = getLastUsedAccountId()
+      if (responsesAccountId !== undefined) {
+        setRequestContext(c, { accountId: responsesAccountId })
+      }
+
       const hadWebSearch = result.output.some(
         (item) => item.type === "function_call" && item.name === "web_search",
       )
-      const resolved = await resolveResponsesWebSearchCalls(
-        result,
-        responsesPayload,
-        { vision, initiator: initiatorOverride ?? initiator },
-      )
-
-      logger.debug(
-        "Non-streaming Responses result:",
-        JSON.stringify(resolved).slice(-400),
-      )
-
-      // Only set token attributes on the outer span when web search was NOT
-      // involved — individual calls are tracked by the helper spans.
-      if (!hadWebSearch) {
-        const inputTokens = resolved.usage?.input_tokens ?? 0
-        const outputTokens = resolved.usage?.output_tokens ?? 0
-        span.setAttribute("gen_ai.usage.input_tokens", inputTokens)
-        span.setAttribute("gen_ai.usage.output_tokens", outputTokens)
-      }
+      const inputTokens = result.usage?.input_tokens ?? 0
+      const outputTokens = result.usage?.output_tokens ?? 0
+      span.setAttribute("gen_ai.usage.input_tokens", inputTokens)
+      span.setAttribute("gen_ai.usage.output_tokens", outputTokens)
       if (shouldRecordAiContent()) {
         span.setAttribute(
           "gen_ai.response.text",
-          JSON.stringify([resolved.output_text]),
+          JSON.stringify([result.output_text]),
         )
       }
 
-      const anthropicResponse = translateResponsesResultToAnthropic(resolved)
-      if (requestedModel) anthropicResponse.model = requestedModel
-      logger.debug(
-        "Translated Anthropic response:",
-        JSON.stringify(anthropicResponse),
-      )
-      return c.json(anthropicResponse)
+      return { initialResult: result, hadWebSearch }
     },
   )
+
+  const resolved =
+    hadWebSearch ?
+      await resolveResponsesWebSearchCalls(initialResult, responsesPayload, {
+        vision,
+        initiator: initiatorOverride ?? initiator,
+      })
+    : initialResult
+
+  logger.debug(
+    "Non-streaming Responses result:",
+    JSON.stringify(resolved).slice(-400),
+  )
+
+  const anthropicResponse = translateResponsesResultToAnthropic(resolved)
+  if (requestedModel) anthropicResponse.model = requestedModel
+  logger.debug(
+    "Translated Anthropic response:",
+    JSON.stringify(anthropicResponse),
+  )
+  return c.json(anthropicResponse)
 }
 
 const shouldUseResponsesApi = (selectedModel: Model | undefined): boolean => {
@@ -920,14 +1018,6 @@ function applyModelVariantRouting(
     delete payload.speed
   }
 }
-
-const isNonStreaming = (
-  response: Awaited<ReturnType<typeof createChatCompletions>>,
-): response is ChatCompletionResponse => Object.hasOwn(response, "choices")
-
-const isAsyncIterable = <T>(value: unknown): value is AsyncIterable<T> =>
-  Boolean(value)
-  && typeof (value as AsyncIterable<T>)[Symbol.asyncIterator] === "function"
 
 /**
  * Extract reasoning effort info from the Anthropic request body for logging.

@@ -1,7 +1,7 @@
 import * as Sentry from "@sentry/bun"
 import consola from "consola"
 
-import { shouldRecordAiContent } from "~/lib/sentry"
+import { getSentryModelName, shouldRecordAiContent } from "~/lib/sentry"
 import {
   createChatCompletions,
   type ChatCompletionChunk,
@@ -25,6 +25,9 @@ import { executeWebSearch } from "~/services/copilot/mcp-web-search"
 import type { AnthropicResponse } from "./anthropic-types"
 
 const MAX_WEB_SEARCH_ITERATIONS = 3
+
+const stringifyResponsesInput = (input: ResponsesPayload["input"]): string =>
+  typeof input === "string" ? input : JSON.stringify(input ?? [])
 
 // --- Safe argument parsing ---
 
@@ -59,31 +62,6 @@ export const resolveWebSearchCalls = async (
     const webSearchCalls = extractWebSearchCalls(current)
     if (webSearchCalls.length === 0) return current
 
-    // Record a span for the initial response (iteration 0) whose API call
-    // already happened before this helper was invoked.
-    if (i === 0) {
-      Sentry.startSpan(
-        {
-          op: "gen_ai.request",
-          name: `web_search initial ${currentPayload.model}`,
-          attributes: {
-            "gen_ai.request.model": currentPayload.model,
-            ...(shouldRecordAiContent() && {
-              "gen_ai.request.messages": JSON.stringify(
-                currentPayload.messages,
-              ),
-            }),
-          },
-        },
-        (span) => {
-          const inputTokens = current.usage?.prompt_tokens ?? 0
-          const outputTokens = current.usage?.completion_tokens ?? 0
-          span.setAttribute("gen_ai.usage.input_tokens", inputTokens)
-          span.setAttribute("gen_ai.usage.output_tokens", outputTokens)
-        },
-      )
-    }
-
     consola.info(
       `Executing ${webSearchCalls.length} web search(es), iteration ${i + 1}`,
     )
@@ -114,13 +92,13 @@ export const resolveWebSearchCalls = async (
       stream: false,
     }
 
-    // eslint-disable-next-line require-atomic-updates -- sequential loop, no race
     current = await Sentry.startSpan(
       {
         op: "gen_ai.request",
         name: `web_search followup ${currentPayload.model} #${i + 1}`,
         attributes: {
           "gen_ai.request.model": currentPayload.model,
+          "gen_ai.response.model": getSentryModelName(currentPayload.model),
           ...(shouldRecordAiContent() && {
             "gen_ai.request.messages": JSON.stringify(currentPayload.messages),
           }),
@@ -135,6 +113,12 @@ export const resolveWebSearchCalls = async (
         const outputTokens = result.usage?.completion_tokens ?? 0
         span.setAttribute("gen_ai.usage.input_tokens", inputTokens)
         span.setAttribute("gen_ai.usage.output_tokens", outputTokens)
+        if (shouldRecordAiContent()) {
+          span.setAttribute(
+            "gen_ai.response.text",
+            JSON.stringify([result.choices[0]?.message?.content ?? ""]),
+          )
+        }
 
         return result
       },
@@ -160,26 +144,6 @@ export const resolveResponsesWebSearchCalls = async (
         item.type === "function_call" && item.name === "web_search",
     )
     if (webSearchCalls.length === 0) return current
-
-    // Record a span for the initial response (iteration 0) whose API call
-    // already happened before this helper was invoked.
-    if (i === 0) {
-      Sentry.startSpan(
-        {
-          op: "gen_ai.request",
-          name: `web_search initial ${currentPayload.model}`,
-          attributes: {
-            "gen_ai.request.model": currentPayload.model,
-          },
-        },
-        (span) => {
-          const inputTokens = current.usage?.input_tokens ?? 0
-          const outputTokens = current.usage?.output_tokens ?? 0
-          span.setAttribute("gen_ai.usage.input_tokens", inputTokens)
-          span.setAttribute("gen_ai.usage.output_tokens", outputTokens)
-        },
-      )
-    }
 
     consola.info(
       `Executing ${webSearchCalls.length} web search(es) via Responses API, iteration ${i + 1}`,
@@ -214,13 +178,18 @@ export const resolveResponsesWebSearchCalls = async (
     ]
 
     currentPayload = { ...currentPayload, input: newInput, stream: false }
-    // eslint-disable-next-line require-atomic-updates -- sequential loop, no race
     current = await Sentry.startSpan(
       {
         op: "gen_ai.request",
         name: `web_search followup ${currentPayload.model} #${i + 1}`,
         attributes: {
           "gen_ai.request.model": currentPayload.model,
+          "gen_ai.response.model": getSentryModelName(currentPayload.model),
+          ...(shouldRecordAiContent() && {
+            "gen_ai.request.messages": stringifyResponsesInput(
+              currentPayload.input,
+            ),
+          }),
         },
       },
       async (span) => {
@@ -233,6 +202,12 @@ export const resolveResponsesWebSearchCalls = async (
         const outputTokens = result.usage?.output_tokens ?? 0
         span.setAttribute("gen_ai.usage.input_tokens", inputTokens)
         span.setAttribute("gen_ai.usage.output_tokens", outputTokens)
+        if (shouldRecordAiContent()) {
+          span.setAttribute(
+            "gen_ai.response.text",
+            JSON.stringify([result.output_text]),
+          )
+        }
 
         return result
       },

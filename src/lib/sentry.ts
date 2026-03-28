@@ -67,6 +67,39 @@ export function initSentry(): void {
   consola.info("Sentry initialized")
 }
 
+/**
+ * Map copilot-api model names to canonical model IDs recognized by
+ * Sentry's cost calculation (via models.dev / OpenRouter).
+ */
+const SENTRY_MODEL_MAP: Record<string, string> = {
+  // Claude models (copilot uses dots, models.dev uses hyphens)
+  "claude-opus-4.6": "claude-opus-4-6",
+  "claude-opus-4.6-1m": "claude-opus-4-6",
+  "claude-opus-4.6-fast": "claude-opus-4-6",
+  "claude-opus-4.5": "claude-opus-4-5",
+  "claude-opus-4": "claude-opus-4-0",
+  "claude-opus-4.1": "claude-opus-4-1",
+  "claude-sonnet-4.6": "claude-sonnet-4-6",
+  "claude-sonnet-4.5": "claude-sonnet-4-5",
+  "claude-sonnet-4": "claude-sonnet-4-0",
+  "claude-haiku-4.5": "claude-haiku-4-5",
+  "claude-haiku-3.5": "claude-3-5-haiku-20241022",
+  // GPT models
+  "gpt-4.1": "gpt-4.1-2025-04-14",
+  "gpt-4.1-mini": "gpt-4.1-mini-2025-04-14",
+  "gpt-4.1-nano": "gpt-4.1-nano-2025-04-14",
+  "gpt-4o": "gpt-4o-2024-08-06",
+  "gpt-4o-mini": "gpt-4o-mini-2024-07-18",
+  // o-series
+  o3: "o3-2025-04-16",
+  "o3-mini": "o3-mini-2025-01-31",
+  "o4-mini": "o4-mini-2025-04-16",
+}
+
+export function getSentryModelName(model: string): string {
+  return SENTRY_MODEL_MAP[model] ?? model
+}
+
 export function setupSentryShutdown(): void {
   process.on("SIGTERM", async () => {
     await Sentry.close(2000)
