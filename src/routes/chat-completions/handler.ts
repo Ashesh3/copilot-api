@@ -156,43 +156,47 @@ const handleStreamingResponse = (
 ) => {
   consola.debug("Streaming response")
   return streamSSE(c, async (stream) => {
-    await Sentry.startSpan(
-      {
-        op: "gen_ai.request",
-        name: `request ${payload.model}`,
-        attributes: {
-          "gen_ai.request.model": payload.model,
-          ...(shouldRecordAiContent() && {
-            "gen_ai.request.messages": JSON.stringify(payload.messages),
-          }),
+    // Use startNewTrace to create an independent root span, detached from
+    // the http.server request span which ends when streamSSE returns the Response.
+    await Sentry.startNewTrace(() => {
+      return Sentry.startSpan(
+        {
+          op: "gen_ai.request",
+          name: `request ${payload.model}`,
+          attributes: {
+            "gen_ai.request.model": payload.model,
+            ...(shouldRecordAiContent() && {
+              "gen_ai.request.messages": JSON.stringify(payload.messages),
+            }),
+          },
         },
-      },
-      async (span) => {
-        let streamInputTokens = 0
-        let streamOutputTokens = 0
+        async (span) => {
+          let streamInputTokens = 0
+          let streamOutputTokens = 0
 
-        for await (const chunk of response) {
-          consola.debug("Streaming chunk:", JSON.stringify(chunk))
-          // Capture usage from final chunk if available
-          if (chunk.data && chunk.data !== "[DONE]") {
-            const parsed = JSON.parse(chunk.data) as ChatCompletionChunk
-            if (parsed.usage) {
-              streamInputTokens = parsed.usage.prompt_tokens
-              streamOutputTokens = parsed.usage.completion_tokens
-              setRequestContext(c, {
-                inputTokens: parsed.usage.prompt_tokens,
-                outputTokens: parsed.usage.completion_tokens,
-              })
+          for await (const chunk of response) {
+            consola.debug("Streaming chunk:", JSON.stringify(chunk))
+            // Capture usage from final chunk if available
+            if (chunk.data && chunk.data !== "[DONE]") {
+              const parsed = JSON.parse(chunk.data) as ChatCompletionChunk
+              if (parsed.usage) {
+                streamInputTokens = parsed.usage.prompt_tokens
+                streamOutputTokens = parsed.usage.completion_tokens
+                setRequestContext(c, {
+                  inputTokens: parsed.usage.prompt_tokens,
+                  outputTokens: parsed.usage.completion_tokens,
+                })
+              }
             }
+            await stream.writeSSE(chunk as SSEMessage)
           }
-          await stream.writeSSE(chunk as SSEMessage)
-        }
 
-        // Set token attributes after streaming completes — span is still open
-        span.setAttribute("gen_ai.usage.input_tokens", streamInputTokens)
-        span.setAttribute("gen_ai.usage.output_tokens", streamOutputTokens)
-      },
-    )
+          // Set token attributes after streaming completes — span is still open
+          span.setAttribute("gen_ai.usage.input_tokens", streamInputTokens)
+          span.setAttribute("gen_ai.usage.output_tokens", streamOutputTokens)
+        },
+      )
+    })
   })
 }
 

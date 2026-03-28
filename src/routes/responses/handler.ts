@@ -177,87 +177,116 @@ export const handleResponses = async (c: Context) => {
       if (isStreamingRequested(payload) && isAsyncIterable(response)) {
         logger.debug("Forwarding native Responses stream")
         return streamSSE(c, async (stream) => {
-          await Sentry.startSpan(
-            {
-              op: "gen_ai.request",
-              name: `stream ${payload.model}`,
-              attributes: {
-                "gen_ai.request.model": payload.model,
+          // Use startNewTrace to create an independent root span, detached from
+          // the http.server request span which ends when streamSSE returns the Response.
+          await Sentry.startNewTrace(() => {
+            return Sentry.startSpan(
+              {
+                op: "gen_ai.request",
+                name: `stream ${payload.model}`,
+                attributes: {
+                  "gen_ai.request.model": payload.model,
+                },
               },
-            },
-            async (streamSpan) => {
-              // Buffer stream events to check for web_search calls
-              const bufferedChunks: Array<{
-                id?: string
-                event?: string
-                data?: string
-              }> = []
-              let hasWebSearchCall = false
-              let completedResult: ResponsesResult | null = null
-              let streamInputTokens = 0
-              let streamOutputTokens = 0
+              async (streamSpan) => {
+                // Buffer stream events to check for web_search calls
+                const bufferedChunks: Array<{
+                  id?: string
+                  event?: string
+                  data?: string
+                }> = []
+                let hasWebSearchCall = false
+                let completedResult: ResponsesResult | null = null
+                let streamInputTokens = 0
+                let streamOutputTokens = 0
 
-              for await (const chunk of response) {
-                const chunkData = {
-                  id: (chunk as { id?: string }).id,
-                  event: (chunk as { event?: string }).event,
-                  data: (chunk as { data?: string }).data ?? "",
-                }
-                bufferedChunks.push(chunkData)
+                for await (const chunk of response) {
+                  const chunkData = {
+                    id: (chunk as { id?: string }).id,
+                    event: (chunk as { event?: string }).event,
+                    data: (chunk as { data?: string }).data ?? "",
+                  }
+                  bufferedChunks.push(chunkData)
 
-                // Check for web_search function calls in done events
-                if (
-                  chunkData.data
-                  && chunkData.event === "response.output_item.done"
-                ) {
-                  try {
-                    const parsed = JSON.parse(chunkData.data) as {
-                      item?: { type?: string; name?: string }
+                  // Check for web_search function calls in done events
+                  if (
+                    chunkData.data
+                    && chunkData.event === "response.output_item.done"
+                  ) {
+                    try {
+                      const parsed = JSON.parse(chunkData.data) as {
+                        item?: { type?: string; name?: string }
+                      }
+                      if (
+                        parsed.item?.type === "function_call"
+                        && parsed.item.name === "web_search"
+                      ) {
+                        hasWebSearchCall = true
+                      }
+                    } catch {
+                      // ignore parse errors
                     }
-                    if (
-                      parsed.item?.type === "function_call"
-                      && parsed.item.name === "web_search"
-                    ) {
-                      hasWebSearchCall = true
+                  }
+
+                  // Capture completed result and usage
+                  if (
+                    chunkData.data
+                    && (chunkData.event === "response.completed"
+                      || chunkData.event === "response.incomplete")
+                  ) {
+                    try {
+                      const parsed = JSON.parse(chunkData.data) as {
+                        response?: ResponsesResult
+                      }
+                      if (parsed.response) {
+                        completedResult = parsed.response
+                        streamInputTokens =
+                          parsed.response.usage?.input_tokens ?? 0
+                        streamOutputTokens =
+                          parsed.response.usage?.output_tokens ?? 0
+                      }
+                    } catch {
+                      // ignore parse errors
                     }
-                  } catch {
-                    // ignore parse errors
                   }
                 }
 
-                // Capture completed result and usage
-                if (
-                  chunkData.data
-                  && (chunkData.event === "response.completed"
-                    || chunkData.event === "response.incomplete")
-                ) {
-                  try {
-                    const parsed = JSON.parse(chunkData.data) as {
-                      response?: ResponsesResult
-                    }
-                    if (parsed.response) {
-                      completedResult = parsed.response
-                      streamInputTokens =
-                        parsed.response.usage?.input_tokens ?? 0
-                      streamOutputTokens =
-                        parsed.response.usage?.output_tokens ?? 0
-                    }
-                  } catch {
-                    // ignore parse errors
-                  }
+                if (hasWebSearchCall && completedResult) {
+                  // Execute web searches, get final non-streaming response
+                  const resolved = await resolveResponsesWebSearchCalls(
+                    completedResult,
+                    payload,
+                    { vision, initiator },
+                  )
+
+                  // Emit the resolved result as a response.completed stream event
+                  await emitResponsesResultAsStream(stream, resolved)
+
+                  streamSpan.setAttribute(
+                    "gen_ai.usage.input_tokens",
+                    streamInputTokens,
+                  )
+                  streamSpan.setAttribute(
+                    "gen_ai.usage.output_tokens",
+                    streamOutputTokens,
+                  )
+                  return
                 }
-              }
 
-              if (hasWebSearchCall && completedResult) {
-                // Execute web searches, get final non-streaming response
-                const resolved = await resolveResponsesWebSearchCalls(
-                  completedResult,
-                  payload,
-                  { vision, initiator },
-                )
-
-                // Emit the resolved result as a response.completed stream event
-                await emitResponsesResultAsStream(stream, resolved)
+                // No web_search calls — replay buffered chunks
+                const idTracker = createStreamIdTracker()
+                for (const chunk of bufferedChunks) {
+                  const processedData = fixStreamIds(
+                    chunk.data ?? "",
+                    chunk.event,
+                    idTracker,
+                  )
+                  await stream.writeSSE({
+                    id: chunk.id,
+                    event: chunk.event,
+                    data: processedData,
+                  })
+                }
 
                 streamSpan.setAttribute(
                   "gen_ai.usage.input_tokens",
@@ -267,34 +296,9 @@ export const handleResponses = async (c: Context) => {
                   "gen_ai.usage.output_tokens",
                   streamOutputTokens,
                 )
-                return
-              }
-
-              // No web_search calls — replay buffered chunks
-              const idTracker = createStreamIdTracker()
-              for (const chunk of bufferedChunks) {
-                const processedData = fixStreamIds(
-                  chunk.data ?? "",
-                  chunk.event,
-                  idTracker,
-                )
-                await stream.writeSSE({
-                  id: chunk.id,
-                  event: chunk.event,
-                  data: processedData,
-                })
-              }
-
-              streamSpan.setAttribute(
-                "gen_ai.usage.input_tokens",
-                streamInputTokens,
-              )
-              streamSpan.setAttribute(
-                "gen_ai.usage.output_tokens",
-                streamOutputTokens,
-              )
-            },
-          )
+              },
+            )
+          })
         })
       }
 
@@ -1060,39 +1064,43 @@ const handleWithChatCompletions = async (
   logger.debug("ChatCompletions fallback streaming")
 
   return streamSSE(c, async (sseStream) => {
-    await Sentry.startSpan(
-      {
-        op: "gen_ai.request",
-        name: `stream ${payload.model}`,
-        attributes: {
-          "gen_ai.request.model": payload.model,
+    // Use startNewTrace to create an independent root span, detached from
+    // the http.server request span which ends when streamSSE returns the Response.
+    await Sentry.startNewTrace(() => {
+      return Sentry.startSpan(
+        {
+          op: "gen_ai.request",
+          name: `stream ${payload.model}`,
+          attributes: {
+            "gen_ai.request.model": payload.model,
+          },
         },
-      },
-      async (streamSpan) => {
-        const ccStream = response as AsyncIterable<{
-          data?: string
-          event?: string
-        }>
-        const streamUsage = await streamChatCompletionsAsResponses(
-          sseStream,
-          ccStream,
-          payload.model,
-        )
+        async (streamSpan) => {
+          const ccStream = response as AsyncIterable<{
+            data?: string
+            event?: string
+          }>
+          const streamUsage = await streamChatCompletionsAsResponses(
+            sseStream,
+            ccStream,
+            payload.model,
+          )
 
-        setRequestContext(c, {
-          inputTokens: streamUsage.inputTokens,
-          outputTokens: streamUsage.outputTokens,
-        })
+          setRequestContext(c, {
+            inputTokens: streamUsage.inputTokens,
+            outputTokens: streamUsage.outputTokens,
+          })
 
-        streamSpan.setAttribute(
-          "gen_ai.usage.input_tokens",
-          streamUsage.inputTokens ?? 0,
-        )
-        streamSpan.setAttribute(
-          "gen_ai.usage.output_tokens",
-          streamUsage.outputTokens ?? 0,
-        )
-      },
-    )
+          streamSpan.setAttribute(
+            "gen_ai.usage.input_tokens",
+            streamUsage.inputTokens ?? 0,
+          )
+          streamSpan.setAttribute(
+            "gen_ai.usage.output_tokens",
+            streamUsage.outputTokens ?? 0,
+          )
+        },
+      )
+    })
   })
 }
