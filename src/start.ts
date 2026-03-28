@@ -10,14 +10,12 @@ import { getStoredTokens } from "./lib/accounts-store"
 import { mergeConfigWithDefaults } from "./lib/config"
 import { generateVirtualModels } from "./lib/model-suffix"
 import { ensurePaths } from "./lib/paths"
-import { refreshPricingCache } from "./lib/pricing-cache"
 import { initProxyFromEnv } from "./lib/proxy"
 import { initSentry, setupSentryShutdown } from "./lib/sentry"
 import { generateEnvScript } from "./lib/shell"
 import { state } from "./lib/state"
 import { setupCopilotToken, setupGitHubToken } from "./lib/token"
 import { tokenPool } from "./lib/token-pool"
-import { traceRecorder } from "./lib/trace-recorder"
 import { cacheModels } from "./lib/utils"
 import { tryUpgradeVoiceWebSocket, voiceWebSocket } from "./routes/voice/route"
 import { server } from "./server"
@@ -43,7 +41,6 @@ interface RunServerOptions {
   debug: boolean
   apiKeyAuth?: string
   host?: string
-  traceRetentionDays?: number
 }
 
 function getAllModelIds(): Array<string> {
@@ -248,11 +245,6 @@ export async function runServer(options: RunServerOptions): Promise<void> {
 
   await initializeTokens(options)
 
-  // Fire-and-forget: load pricing data for cost estimation
-  void refreshPricingCache()
-  const SIX_HOURS_MS = 6 * 60 * 60 * 1000
-  setInterval(() => void refreshPricingCache(), SIX_HOURS_MS)
-
   const allModelIds = getAllModelIds()
 
   consola.info(
@@ -288,15 +280,8 @@ export async function runServer(options: RunServerOptions): Promise<void> {
 
   const host = options.host ?? "localhost"
   consola.info(`Listening on: http://${host}:${options.port}/`)
-  consola.info(`Traces UI available at http://${host}:${options.port}/traces`)
 
   setupSentryShutdown()
-
-  const retentionDays = options.traceRetentionDays ?? 30
-  if (retentionDays > 0) {
-    traceRecorder.cleanup(retentionDays)
-    setInterval(() => traceRecorder.cleanup(retentionDays), 60 * 60 * 1000)
-  }
 }
 
 /**
@@ -405,11 +390,6 @@ export const start = defineCommand({
       description:
         "Hostname/IP to bind the server to (e.g., 0.0.0.0 for all interfaces)",
     },
-    "trace-retention-days": {
-      type: "string",
-      default: "30",
-      description: "Number of days to retain trace data (0 to disable cleanup)",
-    },
   },
   run({ args }) {
     const rateLimitRaw = args["rate-limit"]
@@ -432,7 +412,6 @@ export const start = defineCommand({
       debug: args.debug,
       apiKeyAuth: resolveApiKeyAuth(args["api-key-auth"]),
       host: args.host,
-      traceRetentionDays: Number(args["trace-retention-days"]),
     })
   },
 })
