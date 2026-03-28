@@ -1,5 +1,7 @@
+import * as Sentry from "@sentry/bun"
 import consola from "consola"
 
+import { shouldRecordAiContent } from "~/lib/sentry"
 import {
   createChatCompletions,
   type ChatCompletionChunk,
@@ -87,9 +89,30 @@ export const resolveWebSearchCalls = async (
       stream: false,
     }
 
-    current = (await createChatCompletions(currentPayload, {
-      initiator: initiatorOverride,
-    })) as ChatCompletionResponse
+    current = await Sentry.startSpan(
+      {
+        op: "gen_ai.request",
+        name: `web_search followup ${currentPayload.model} #${i + 1}`,
+        attributes: {
+          "gen_ai.request.model": currentPayload.model,
+          ...(shouldRecordAiContent() && {
+            "gen_ai.request.messages": JSON.stringify(currentPayload.messages),
+          }),
+        },
+      },
+      async (span) => {
+        const result = (await createChatCompletions(currentPayload, {
+          initiator: initiatorOverride,
+        })) as ChatCompletionResponse
+
+        const inputTokens = result.usage?.prompt_tokens ?? 0
+        const outputTokens = result.usage?.completion_tokens ?? 0
+        span.setAttribute("gen_ai.usage.input_tokens", inputTokens)
+        span.setAttribute("gen_ai.usage.output_tokens", outputTokens)
+
+        return result
+      },
+    )
   }
 
   return current
@@ -145,8 +168,28 @@ export const resolveResponsesWebSearchCalls = async (
     ]
 
     currentPayload = { ...currentPayload, input: newInput, stream: false }
-    const response = await createResponses(currentPayload, requestOptions)
-    current = response as ResponsesResult
+    current = await Sentry.startSpan(
+      {
+        op: "gen_ai.request",
+        name: `web_search followup ${currentPayload.model} #${i + 1}`,
+        attributes: {
+          "gen_ai.request.model": currentPayload.model,
+        },
+      },
+      async (span) => {
+        const result = (await createResponses(
+          currentPayload,
+          requestOptions,
+        )) as ResponsesResult
+
+        const inputTokens = result.usage?.input_tokens ?? 0
+        const outputTokens = result.usage?.output_tokens ?? 0
+        span.setAttribute("gen_ai.usage.input_tokens", inputTokens)
+        span.setAttribute("gen_ai.usage.output_tokens", outputTokens)
+
+        return result
+      },
+    )
   }
 
   return current
