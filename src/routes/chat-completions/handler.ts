@@ -14,6 +14,7 @@ import { setRequestContext } from "~/lib/request-logger"
 import { getSentryModelName, shouldRecordAiContent } from "~/lib/sentry"
 import { state } from "~/lib/state"
 import { getTokenCount } from "~/lib/tokenizer"
+import { emitChatCompletionsToolSpans } from "~/lib/tool-spans"
 import { isNullish } from "~/lib/utils"
 import {
   createChatCompletions,
@@ -26,6 +27,9 @@ export async function handleCompletion(c: Context) {
   await checkRateLimit(state)
 
   const rawPayload = await c.req.json<ChatCompletionsPayload>()
+
+  // Emit synthetic tool execution spans from tool results in message history
+  emitChatCompletionsToolSpans(rawPayload.messages)
 
   // Capture the originally requested model before any manipulation
   const requestedModel = rawPayload.model

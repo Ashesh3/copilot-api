@@ -18,6 +18,7 @@ import { setRequestContext } from "~/lib/request-logger"
 import { getSentryModelName, shouldRecordAiContent } from "~/lib/sentry"
 import { state } from "~/lib/state"
 import { getTokenCount } from "~/lib/tokenizer"
+import { emitAnthropicToolSpans } from "~/lib/tool-spans"
 import {
   buildErrorEvent,
   createResponsesStreamState,
@@ -118,6 +119,9 @@ export async function handleCompletion(c: Context) {
 
   const anthropicPayload = await c.req.json<AnthropicMessagesPayload>()
   logger.debug("Anthropic request payload:", JSON.stringify(anthropicPayload))
+
+  // Emit synthetic tool execution spans from tool results in message history
+  emitAnthropicToolSpans(anthropicPayload.messages)
 
   // Capture the originally requested model before any manipulation
   const requestedModel = anthropicPayload.model

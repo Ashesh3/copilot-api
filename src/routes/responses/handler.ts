@@ -14,6 +14,7 @@ import { checkRateLimit } from "~/lib/rate-limit"
 import { setRequestContext } from "~/lib/request-logger"
 import { getSentryModelName, shouldRecordAiContent } from "~/lib/sentry"
 import { state } from "~/lib/state"
+import { emitResponsesToolSpans } from "~/lib/tool-spans"
 import {
   createChatCompletions,
   type ChatCompletionChunk,
@@ -143,6 +144,9 @@ export const handleResponses = async (c: Context) => {
   await checkRateLimit(state)
 
   const payload = await c.req.json<ResponsesPayload>()
+
+  // Emit synthetic tool execution spans from tool results in input history
+  emitResponsesToolSpans(payload.input)
 
   // Capture the originally requested model before any manipulation
   const requestedModel = payload.model
