@@ -5,7 +5,9 @@ import { broadcastEvents } from "~/routes/code-sessions/event-bus"
 import {
   archiveSession,
   getSession,
+  listSessions,
   addClientEvents,
+  updateSessionTitle,
 } from "~/routes/code-sessions/session-store"
 
 export const sessionsRoutes = new Hono()
@@ -39,6 +41,44 @@ function resolveSession(rawId: string) {
 
   return null
 }
+
+// GET / — List sessions
+sessionsRoutes.get("/", (c) => {
+  const sessions = listSessions()
+    .filter((s) => !s.archived)
+    .map((s) => ({
+      id: s.id,
+      title: s.title,
+      state: s.state,
+      created_at: new Date(s.createdAt).toISOString(),
+    }))
+  return c.json({ data: sessions })
+})
+
+// GET /:id — Get session details
+sessionsRoutes.get("/:id", (c) => {
+  const rawId = c.req.param("id")
+  const result = resolveSession(rawId)
+  if (!result) return c.json({ error: "Session not found" }, 404)
+  const s = result.session
+  return c.json({
+    id: s.id,
+    title: s.title,
+    state: s.state,
+    created_at: new Date(s.createdAt).toISOString(),
+    archived: s.archived,
+  })
+})
+
+// PATCH /:id — Update session (title)
+sessionsRoutes.patch("/:id", async (c) => {
+  const rawId = c.req.param("id")
+  const result = resolveSession(rawId)
+  if (!result) return c.json({ error: "Session not found" }, 404)
+  const body = (await c.req.json().catch(() => ({}))) as { title?: string }
+  if (body.title) updateSessionTitle(result.resolvedId, body.title)
+  return c.json({ ok: true })
+})
 
 // POST /:id/archive — Archive a session
 sessionsRoutes.post("/:id/archive", (c) => {

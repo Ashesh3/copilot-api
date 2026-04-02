@@ -55,6 +55,12 @@ server.route("/v1/oauth", oauthTokenRoutes)
 server.route("/api", oauthApiRoutes)
 // Code Sessions — Claude Code authenticates via its own bearer tokens
 server.route("/v1/code/sessions", codeSessionsRoutes)
+// Code triggers and GitHub import (siblings of /v1/code/sessions)
+server.get("/v1/code/triggers", (c) => c.json({ triggers: [] }))
+server.post("/v1/code/triggers", (c) => c.json({ triggers: [] }))
+server.post("/v1/code/github/import-token", (c) => {
+  return c.json({ github_username: "copilot-api-user" })
+})
 // Sessions compat layer — used by v1 and v2 bridges
 server.route("/v1/sessions", sessionsRoutes)
 // Bridge Environments — v1 poll-based Remote Control protocol
@@ -71,6 +77,17 @@ server.onError(async (err, c) => {
 })
 
 server.get("/", (c) => c.text("Server running"))
+
+// v1 stubs for endpoints Claude Code calls that don't need full implementations
+server.get("/v1/environment_providers", (c) => c.json({ environments: [] }))
+server.post("/v1/environment_providers/cloud/create", (c) =>
+  c.json({ environment: { id: "env_stub", status: "created" } }),
+)
+server.get("/v1/mcp_servers", (c) => c.json({ data: [] }))
+server.get("/v1/session_ingress/session/:id", (c) =>
+  c.json({ session_id: c.req.param("id"), status: "active" }),
+)
+server.get("/v1/ultrareview/quota", (c) => c.json({ remaining: 0, total: 0 }))
 
 server.route("/chat/completions", completionRoutes)
 server.route("/models", modelRoutes)

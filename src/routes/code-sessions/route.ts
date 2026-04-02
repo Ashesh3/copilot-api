@@ -323,3 +323,8 @@ codeSessionsRoutes.post("/:id/events", async (c) => {
 
   return c.json({ ok: true })
 })
+
+// GET /:id/teleport-events — Get teleport events for a session
+codeSessionsRoutes.get("/:id/teleport-events", (c) => {
+  return c.json({ events: [] })
+})

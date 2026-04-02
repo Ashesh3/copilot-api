@@ -326,6 +326,74 @@ oauthApiRoutes.patch("/claude_code/sessions/:id", (c) =>
   c.json({ success: true }),
 )
 
+// GET /api/claude_code/policy_limits (non-org path)
+oauthApiRoutes.get("/claude_code/policy_limits", (c) =>
+  c.json({ limits: {}, policies: [] }),
+)
+
+// GET /api/claude_code/settings
+oauthApiRoutes.get("/claude_code/settings", (c) => c.json({}))
+
+// PUT /api/claude_code/settings
+oauthApiRoutes.put("/claude_code/settings", (c) => c.json({ success: true }))
+
+// GET /api/claude_code/team_memory
+oauthApiRoutes.get("/claude_code/team_memory", (c) => c.json({ memories: [] }))
+
+// GET /api/claude_code_grove
+oauthApiRoutes.get("/claude_code_grove", (c) => c.json({}))
+
+// GET /api/claude_cli/bootstrap
+oauthApiRoutes.get("/claude_cli/bootstrap", (c) => c.json({}))
+
+// GET /api/oauth/account/settings
+oauthApiRoutes.get("/oauth/account/settings", (c) => c.json({}))
+
+// POST /api/oauth/account/grove_notice_viewed
+oauthApiRoutes.post("/oauth/account/grove_notice_viewed", (c) =>
+  c.json({ success: true }),
+)
+
+// GET /api/oauth/organizations/:orgId/* (various sub-routes)
+oauthApiRoutes.get("/oauth/organizations/:orgId/overage_credit_grant", (c) =>
+  c.json({ grants: [] }),
+)
+oauthApiRoutes.get("/oauth/organizations/:orgId/sync/github/auth", (c) =>
+  c.json({ authorized: false }),
+)
+oauthApiRoutes.get("/oauth/organizations/:orgId/code/repos/:owner/:repo", (c) =>
+  c.json({}),
+)
+oauthApiRoutes.get(
+  "/oauth/organizations/:orgId/admin_requests/eligibility",
+  (c) => c.json({ eligible: false }),
+)
+oauthApiRoutes.get("/oauth/organizations/:orgId/admin_requests", (c) =>
+  c.json({ requests: [] }),
+)
+oauthApiRoutes.post("/oauth/organizations/:orgId/admin_requests", (c) =>
+  c.json({ success: true }),
+)
+oauthApiRoutes.get("/oauth/organizations/:orgId/admin_requests/me", (c) =>
+  c.json({ requests: [] }),
+)
+oauthApiRoutes.get("/oauth/organizations/:orgId/referral/eligibility", (c) =>
+  c.json({ eligible: false }),
+)
+oauthApiRoutes.get("/oauth/organizations/:orgId/referral/redemptions", (c) =>
+  c.json({ redemptions: [] }),
+)
+
+// GET /api/organization/claude_code_first_token_date
+oauthApiRoutes.get("/organization/claude_code_first_token_date", (c) =>
+  c.json({ first_token_date: "2025-01-01T00:00:00Z" }),
+)
+
+// POST /api/organizations/:orgId/claude_code/buddy_react
+oauthApiRoutes.post("/organizations/:orgId/claude_code/buddy_react", (c) =>
+  c.json({ success: true }),
+)
+
 // --- Authorize page HTML ---
 
 function getAuthorizePage(queryString: string, error?: string): string {
