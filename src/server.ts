@@ -22,6 +22,7 @@ import {
   oauthBrowserRoutes,
   oauthTokenRoutes,
 } from "./routes/oauth/route"
+import { remoteRoutes } from "./routes/remote/route"
 import { replacementsRoute } from "./routes/replacements/route"
 import { responsesRoutes } from "./routes/responses/route"
 import { sessionsRoutes } from "./routes/sessions/route"
@@ -46,6 +47,8 @@ server.route("/api/eval", growthbookRoutes)
 server.route("/feature-flags", featureFlagsRoutes)
 // Dashboard admin page (HTML served unauthenticated; API sub-routes have their own auth)
 server.route("/dashboard", dashboardRoutes)
+// Remote Control page (HTML served unauthenticated; uses dashboard API for auth)
+server.route("/remote", remoteRoutes)
 // OAuth fake layer — authorize, token exchange, profile
 server.route("/oauth", oauthBrowserRoutes)
 server.route("/v1/oauth", oauthTokenRoutes)
