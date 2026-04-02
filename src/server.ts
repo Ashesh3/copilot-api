@@ -53,6 +53,9 @@ server.route("/v1/code/sessions", codeSessionsRoutes)
 server.route("/v1/sessions", sessionsRoutes)
 // Bridge Environments — v1 poll-based Remote Control protocol
 server.route("/v1/environments", environmentsRoutes)
+// Direct Connect — WebSocket session management for --server mode
+server.route("/sessions", directConnectRoutes)
+server.route("/health", directConnectRoutes)
 
 server.use(apiKeyGuard)
 server.use("*", createAuthMiddleware())

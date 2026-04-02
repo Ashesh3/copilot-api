@@ -18,6 +18,10 @@ import { setupCopilotToken, setupGitHubToken } from "./lib/token"
 import { tokenPool } from "./lib/token-pool"
 import { cacheModels } from "./lib/utils"
 import {
+  DIRECT_CONNECT_WS_PATH,
+  handleDirectConnectWebSocket,
+} from "./routes/direct-connect/ws-handler"
+import {
   tryUpgradeResponsesWebSocket,
   responsesWebSocket,
 } from "./routes/responses/websocket"
@@ -201,15 +205,41 @@ async function initializeTokens(options: RunServerOptions): Promise<void> {
   await cacheModels()
 }
 
-// Combined WebSocket handler that dispatches to voice or responses based on connection type
+// Combined WebSocket handler that dispatches to voice, responses, or direct-connect based on connection type
 const combinedWebSocket = {
   open(ws: { data: { type: string } }) {
-    if (ws.data.type === "voice") {
-      voiceWebSocket.open(ws as Parameters<typeof voiceWebSocket.open>[0])
-    } else if (ws.data.type === "responses") {
-      responsesWebSocket.open(
-        ws as Parameters<typeof responsesWebSocket.open>[0],
-      )
+    switch (ws.data.type) {
+      case "voice": {
+        voiceWebSocket.open(ws as Parameters<typeof voiceWebSocket.open>[0])
+
+        break
+      }
+      case "responses": {
+        responsesWebSocket.open(
+          ws as Parameters<typeof responsesWebSocket.open>[0],
+        )
+
+        break
+      }
+      case "direct-connect": {
+        const dcWs = ws as {
+          data: {
+            type: string
+            sessionId: string
+            dcHandlers?: {
+              onMessage: (message: string | Buffer | Uint8Array) => void
+              onClose: () => void
+            }
+          }
+          send(data: string | ArrayBuffer | Uint8Array): void
+          close(code?: number, reason?: string): void
+        }
+        const handlers = handleDirectConnectWebSocket(dcWs, dcWs.data.sessionId)
+        dcWs.data.dcHandlers = handlers
+
+        break
+      }
+      // No default
     }
   },
   message(
@@ -220,25 +250,69 @@ const combinedWebSocket = {
     },
     message: string | Buffer | Uint8Array,
   ) {
-    if (ws.data.type === "voice") {
-      voiceWebSocket.message(
-        ws as Parameters<typeof voiceWebSocket.message>[0],
-        message,
-      )
-    } else if (ws.data.type === "responses") {
-      void responsesWebSocket.message(
-        ws as Parameters<typeof responsesWebSocket.message>[0],
-        message,
-      )
+    switch (ws.data.type) {
+      case "voice": {
+        voiceWebSocket.message(
+          ws as Parameters<typeof voiceWebSocket.message>[0],
+          message,
+        )
+
+        break
+      }
+      case "responses": {
+        void responsesWebSocket.message(
+          ws as Parameters<typeof responsesWebSocket.message>[0],
+          message,
+        )
+
+        break
+      }
+      case "direct-connect": {
+        const dcWs = ws as {
+          data: {
+            type: string
+            dcHandlers?: {
+              onMessage: (message: string | Buffer | Uint8Array) => void
+              onClose: () => void
+            }
+          }
+        }
+        dcWs.data.dcHandlers?.onMessage(message)
+
+        break
+      }
+      // No default
     }
   },
   close(ws: { data: { type: string } }) {
-    if (ws.data.type === "voice") {
-      voiceWebSocket.close(ws as Parameters<typeof voiceWebSocket.close>[0])
-    } else if (ws.data.type === "responses") {
-      responsesWebSocket.close(
-        ws as Parameters<typeof responsesWebSocket.close>[0],
-      )
+    switch (ws.data.type) {
+      case "voice": {
+        voiceWebSocket.close(ws as Parameters<typeof voiceWebSocket.close>[0])
+
+        break
+      }
+      case "responses": {
+        responsesWebSocket.close(
+          ws as Parameters<typeof responsesWebSocket.close>[0],
+        )
+
+        break
+      }
+      case "direct-connect": {
+        const dcWs = ws as {
+          data: {
+            type: string
+            dcHandlers?: {
+              onMessage: (message: string | Buffer | Uint8Array) => void
+              onClose: () => void
+            }
+          }
+        }
+        dcWs.data.dcHandlers?.onClose()
+
+        break
+      }
+      // No default
     }
   },
 }
@@ -323,6 +397,22 @@ export async function runServer(options: RunServerOptions): Promise<void> {
         }
         if (wsResult === "auth_failed") {
           return new Response("Unauthorized", { status: 401 })
+        }
+        // Direct Connect WebSocket upgrade
+        const url = new URL(req.url)
+        if (url.pathname.startsWith(DIRECT_CONNECT_WS_PATH + "/")) {
+          const sessionId = url.pathname.slice(
+            DIRECT_CONNECT_WS_PATH.length + 1,
+          )
+          if (sessionId) {
+            bunServer.upgrade(req, {
+              data: {
+                type: "direct-connect" as const,
+                sessionId,
+              },
+            })
+            return undefined as unknown as Response
+          }
         }
       }
       return server.fetch(req)
