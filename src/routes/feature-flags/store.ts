@@ -9,6 +9,15 @@ export type FeatureFlagValue =
   | Record<string, unknown>
 export type FeatureFlags = Record<string, FeatureFlagValue>
 
+const DEFAULT_FLAGS: FeatureFlags = {
+  // Enable the env-less bridge (v2 protocol) for Remote Control
+  tengu_bridge_repl_v2: true,
+  // Enable voice mode
+  tengu_amber_quartz_disabled: false,
+  // Enable remote TUI backend
+  tengu_remote_backend: true,
+}
+
 let cachedFlags: FeatureFlags | null = null
 
 function readFlagsFromDisk(): FeatureFlags {
@@ -31,7 +40,7 @@ function writeFlagsToDisk(flags: FeatureFlags): void {
 }
 
 export function getFeatureFlags(): FeatureFlags {
-  cachedFlags ??= readFlagsFromDisk()
+  cachedFlags ??= { ...DEFAULT_FLAGS, ...readFlagsFromDisk() }
   return cachedFlags
 }
 
