@@ -253,6 +253,9 @@ codeSessionsRoutes.get("/:id/worker/internal-events", (c) => {
 // GET /:id/events/stream — SSE event stream
 codeSessionsRoutes.get("/:id/events/stream", (c) => {
   const id = c.req.param("id")
+  consola.info(
+    `[code-sessions] SSE stream subscriber connected — session=${id}`,
+  )
   const fromSeqNumStr = c.req.query("from_sequence_num")
   const fromSeqNum = fromSeqNumStr ? Number.parseInt(fromSeqNumStr, 10) : 0
 
@@ -304,6 +307,12 @@ codeSessionsRoutes.post("/:id/events", async (c) => {
   const id = c.req.param("id")
   const body = await c.req.json<{ payload: Record<string, unknown> }>()
 
+  const payloadType =
+    "type" in body.payload ? String(body.payload.type) : "unknown"
+  consola.info(
+    `[code-sessions] POST /:id/events — id=${id} payload.type=${payloadType}`,
+  )
+
   const session = getSession(id)
   if (!session) {
     return c.json({ error: "Session not found" }, 404)
@@ -319,6 +328,9 @@ codeSessionsRoutes.post("/:id/events", async (c) => {
     },
   ])
 
+  consola.info(
+    `[code-sessions] Broadcasting ${created.length} events to SSE subscribers`,
+  )
   broadcastEvents(id, created)
 
   return c.json({ ok: true })
