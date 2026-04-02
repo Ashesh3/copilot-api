@@ -59,6 +59,10 @@ export function getEnvironment(id: string): Environment | undefined {
   return environments.get(id)
 }
 
+export function listEnvironments(): Array<Environment> {
+  return Array.from(environments.values())
+}
+
 export function deregisterEnvironment(id: string): boolean {
   const deleted = environments.delete(id)
   if (deleted) {

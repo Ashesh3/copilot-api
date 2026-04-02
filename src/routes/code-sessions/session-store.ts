@@ -46,6 +46,10 @@ export function getSession(id: string): CodeSession | undefined {
   return sessions.get(id)
 }
 
+export function listSessions(): Array<CodeSession> {
+  return Array.from(sessions.values())
+}
+
 export function archiveSession(id: string): boolean {
   const session = sessions.get(id)
   if (!session || session.archived) return false
