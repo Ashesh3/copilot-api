@@ -7,7 +7,9 @@ import { createAuthMiddleware } from "./lib/request-auth"
 import { requestLogger } from "./lib/request-logger"
 import { clientSessionStorage } from "./lib/request-session"
 import { completionRoutes } from "./routes/chat-completions/route"
+import { codeSessionsRoutes } from "./routes/code-sessions/route"
 import { embeddingRoutes } from "./routes/embeddings/route"
+import { environmentsRoutes } from "./routes/environments/route"
 import { featureFlagsRoutes } from "./routes/feature-flags/route"
 import { googleAIRoutes } from "./routes/google-ai/route"
 import { growthbookRoutes } from "./routes/growthbook/route"
@@ -43,6 +45,10 @@ server.route("/feature-flags", featureFlagsRoutes)
 server.route("/oauth", oauthBrowserRoutes)
 server.route("/v1/oauth", oauthTokenRoutes)
 server.route("/api", oauthApiRoutes)
+// Code Sessions — Claude Code authenticates via its own bearer tokens
+server.route("/v1/code/sessions", codeSessionsRoutes)
+// Bridge Environments — v1 poll-based Remote Control protocol
+server.route("/v1/environments", environmentsRoutes)
 
 server.use(apiKeyGuard)
 server.use("*", createAuthMiddleware())
