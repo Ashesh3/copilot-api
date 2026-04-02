@@ -370,20 +370,33 @@ function addReplacement() {
 }
 
 function loadUsage() { apiFetch('GET', '/dashboard/api/usage').then(function(r) { if (r.ok) return r.json() }).then(function(d) { if (d) renderUsage(d) }).catch(function() { showToast('Failed to load usage', 'error') }) }
+function formatLabel(key) { return key.split('_').map(function(w) { return w.charAt(0).toUpperCase() + w.slice(1) }).join(' ') }
+function formatNumber(n) { if (n == null) return '-'; if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M'; if (n >= 1000) return (n / 1000).toFixed(1) + 'K'; return String(n) }
+function formatResetTime(ts) { if (!ts) return ''; var d = new Date(ts * 1000); var now = new Date(); var diff = d.getTime() - now.getTime(); if (diff <= 0) return 'now'; var h = Math.floor(diff / 3600000); var m = Math.floor((diff % 3600000) / 60000); if (h > 24) return Math.floor(h / 24) + 'd ' + (h % 24) + 'h'; if (h > 0) return h + 'h ' + m + 'm'; return m + 'm' }
 function renderUsage(data) {
   if (!data || Object.keys(data).length === 0) { document.getElementById('usage-content').innerHTML = '<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg><p>No usage data available.</p></div>'; return }
-  var html = '<div class="stat-grid">'
+  var html = ''
   Object.keys(data).forEach(function(key) {
-    var val = data[key]
-    if (val && typeof val === 'object' && val.used != null && val.limit != null) {
-      var pct = val.limit > 0 ? Math.min(100, Math.round((val.used / val.limit) * 100)) : 0
+    var section = data[key]
+    if (!section || typeof section !== 'object') return
+    var sectionLabel = formatLabel(key)
+    html += '<div style="margin-bottom:24px"><h3 style="font-size:1rem;color:#F8FAFC;margin-bottom:12px">' + esc(sectionLabel) + '</h3>'
+    if (section.utilization != null) {
+      var pct = Math.round(section.utilization * 100)
       var color = pct > 90 ? '#EF4444' : pct > 70 ? '#F97316' : '#22C55E'
-      html += '<div class="stat-card blue"><div class="label">' + esc(key) + '</div><div class="value">' + esc(val.used) + ' / ' + esc(val.limit) + '</div><div class="progress-bar"><div class="progress-fill" style="width:' + pct + '%;background:' + color + '"></div></div></div>'
-    } else {
-      html += '<div class="stat-card blue"><div class="label">' + esc(key) + '</div><div class="value">' + esc(typeof val === 'object' ? JSON.stringify(val) : val) + '</div></div>'
+      html += '<div class="stat-card blue" style="margin-bottom:10px"><div class="label">Utilization</div><div class="value">' + pct + '%</div><div class="progress-bar"><div class="progress-fill" style="width:' + pct + '%;background:' + color + '"></div></div></div>'
     }
+    html += '<div class="stat-grid">'
+    if (section.tokens_used != null) html += '<div class="stat-card green"><div class="label">Tokens Used</div><div class="value">' + formatNumber(section.tokens_used) + '</div></div>'
+    if (section.request_count != null) html += '<div class="stat-card blue"><div class="label">Requests</div><div class="value">' + formatNumber(section.request_count) + '</div></div>'
+    if (section.resets_at) html += '<div class="stat-card orange"><div class="label">Resets In</div><div class="value">' + formatResetTime(section.resets_at) + '</div></div>'
+    if (section.total_tokens != null) html += '<div class="stat-card green"><div class="label">Total Tokens</div><div class="value">' + formatNumber(section.total_tokens) + '</div></div>'
+    if (section.total_input_tokens != null) html += '<div class="stat-card blue"><div class="label">Input Tokens</div><div class="value">' + formatNumber(section.total_input_tokens) + '</div></div>'
+    if (section.total_output_tokens != null) html += '<div class="stat-card purple"><div class="label">Output Tokens</div><div class="value">' + formatNumber(section.total_output_tokens) + '</div></div>'
+    if (section.total_requests != null) html += '<div class="stat-card blue"><div class="label">Total Requests</div><div class="value">' + formatNumber(section.total_requests) + '</div></div>'
+    if (section.first_request_at) html += '<div class="stat-card orange"><div class="label">First Request</div><div class="value">' + timeAgo(section.first_request_at * 1000) + '</div></div>'
+    html += '</div></div>'
   })
-  html += '</div>'
   document.getElementById('usage-content').innerHTML = html
 }
 
