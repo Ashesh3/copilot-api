@@ -8,6 +8,7 @@ import { requestLogger } from "./lib/request-logger"
 import { clientSessionStorage } from "./lib/request-session"
 import { completionRoutes } from "./routes/chat-completions/route"
 import { codeSessionsRoutes } from "./routes/code-sessions/route"
+import { dashboardRoutes } from "./routes/dashboard/route"
 import { directConnectRoutes } from "./routes/direct-connect/route"
 import { embeddingRoutes } from "./routes/embeddings/route"
 import { environmentsRoutes } from "./routes/environments/route"
@@ -43,6 +44,8 @@ server.use("*", async (c, next) => {
 server.route("/api/eval", growthbookRoutes)
 // Feature flags admin page (HTML served unauthenticated; API sub-routes have their own auth)
 server.route("/feature-flags", featureFlagsRoutes)
+// Dashboard admin page (HTML served unauthenticated; API sub-routes have their own auth)
+server.route("/dashboard", dashboardRoutes)
 // OAuth fake layer — authorize, token exchange, profile
 server.route("/oauth", oauthBrowserRoutes)
 server.route("/v1/oauth", oauthTokenRoutes)
