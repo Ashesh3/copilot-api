@@ -267,6 +267,65 @@ oauthApiRoutes.get("/organization/:id", (c) =>
   }),
 )
 
+// GET /api/oauth/claude_cli/organizations — organization list
+oauthApiRoutes.get("/oauth/claude_cli/organizations", (c) =>
+  c.json([
+    {
+      uuid: "00000000-0000-4000-8000-000000000002",
+      name: "Copilot API",
+      organization_type: "claude_max",
+      rate_limit_tier: "max",
+      billing_type: "self-serve",
+    },
+  ]),
+)
+
+// GET /api/claude_code/organizations/:orgId/mcp_servers
+oauthApiRoutes.get("/claude_code/organizations/:orgId/mcp_servers", (c) =>
+  c.json({ mcp_servers: [] }),
+)
+
+// POST /api/claude_code/organizations/:orgId/mcp_servers
+oauthApiRoutes.post("/claude_code/organizations/:orgId/mcp_servers", (c) =>
+  c.json({ success: true }),
+)
+
+// GET /api/claude_code/organizations/:orgId/integrations
+oauthApiRoutes.get("/claude_code/organizations/:orgId/integrations", (c) =>
+  c.json({ integrations: [] }),
+)
+
+// GET /api/claude_code/task_runners
+oauthApiRoutes.get("/claude_code/task_runners", (c) =>
+  c.json({ task_runners: [] }),
+)
+
+// POST /api/claude_code/tasks
+oauthApiRoutes.post("/claude_code/tasks", (c) => c.json({ success: true }))
+
+// GET /api/claude_code/environments
+oauthApiRoutes.get("/claude_code/environments", (c) =>
+  c.json({ environments: [] }),
+)
+
+// POST /api/claude_code/organizations/:orgId/file_upload
+oauthApiRoutes.post("/claude_code/organizations/:orgId/file_upload", (c) =>
+  c.json({ success: true }),
+)
+
+// GET /api/claude_code/organizations/:orgId/policy_limits
+oauthApiRoutes.get("/claude_code/organizations/:orgId/policy_limits", (c) =>
+  c.json({ limits: {}, policies: [] }),
+)
+
+// GET /api/claude_code/skill_search
+oauthApiRoutes.get("/claude_code/skill_search", (c) => c.json({ results: [] }))
+
+// PATCH /api/claude_code/sessions/:id
+oauthApiRoutes.patch("/claude_code/sessions/:id", (c) =>
+  c.json({ success: true }),
+)
+
 // --- Authorize page HTML ---
 
 function getAuthorizePage(queryString: string, error?: string): string {
