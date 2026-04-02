@@ -557,9 +557,10 @@ const executeChatCompletions = async (
 
                 if (buffered.hadWebSearch && buffered.initialResponse) {
                   finishSpan()
+                  const initialResp = buffered.initialResponse
                   const resolved = await Sentry.withActiveSpan(null, () =>
                     resolveWebSearchCalls(
-                      buffered.initialResponse,
+                      initialResp,
                       finalPayload,
                       initiatorOverride,
                     ),
@@ -940,9 +941,10 @@ const executeResponsesApi = async (
 
                   if (buffered.hadWebSearch && buffered.initialResult) {
                     finishSpan()
+                    const initialRes = buffered.initialResult
                     const resolved = await Sentry.withActiveSpan(null, () =>
                       resolveResponsesWebSearchCalls(
-                        buffered.initialResult,
+                        initialRes,
                         responsesPayload,
                         {
                           vision,

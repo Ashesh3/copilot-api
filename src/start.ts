@@ -210,13 +210,15 @@ const combinedWebSocket = {
   open(ws: { data: { type: string } }) {
     switch (ws.data.type) {
       case "voice": {
-        voiceWebSocket.open(ws as Parameters<typeof voiceWebSocket.open>[0])
+        voiceWebSocket.open(
+          ws as unknown as Parameters<typeof voiceWebSocket.open>[0],
+        )
 
         break
       }
       case "responses": {
         responsesWebSocket.open(
-          ws as Parameters<typeof responsesWebSocket.open>[0],
+          ws as unknown as Parameters<typeof responsesWebSocket.open>[0],
         )
 
         break
@@ -253,7 +255,7 @@ const combinedWebSocket = {
     switch (ws.data.type) {
       case "voice": {
         voiceWebSocket.message(
-          ws as Parameters<typeof voiceWebSocket.message>[0],
+          ws as unknown as Parameters<typeof voiceWebSocket.message>[0],
           message,
         )
 
@@ -261,7 +263,7 @@ const combinedWebSocket = {
       }
       case "responses": {
         void responsesWebSocket.message(
-          ws as Parameters<typeof responsesWebSocket.message>[0],
+          ws as unknown as Parameters<typeof responsesWebSocket.message>[0],
           message,
         )
 
@@ -287,13 +289,15 @@ const combinedWebSocket = {
   close(ws: { data: { type: string } }) {
     switch (ws.data.type) {
       case "voice": {
-        voiceWebSocket.close(ws as Parameters<typeof voiceWebSocket.close>[0])
+        voiceWebSocket.close(
+          ws as unknown as Parameters<typeof voiceWebSocket.close>[0],
+        )
 
         break
       }
       case "responses": {
         responsesWebSocket.close(
-          ws as Parameters<typeof responsesWebSocket.close>[0],
+          ws as unknown as Parameters<typeof responsesWebSocket.close>[0],
         )
 
         break
