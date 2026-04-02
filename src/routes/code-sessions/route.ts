@@ -302,6 +302,58 @@ codeSessionsRoutes.get("/:id/events/stream", (c) => {
   })
 })
 
+// GET /:id/worker/events/stream — SSE stream for workers (same as events/stream)
+codeSessionsRoutes.get("/:id/worker/events/stream", (c) => {
+  const id = c.req.param("id")
+  consola.info(
+    `[code-sessions] SSE worker stream subscriber connected — session=${id}`,
+  )
+  const fromSeqNumStr = c.req.query("from_sequence_num")
+  const fromSeqNum = fromSeqNumStr ? Number.parseInt(fromSeqNumStr, 10) : 0
+
+  const session = getSession(id)
+  if (!session) {
+    return c.json({ error: "Session not found" }, 404)
+  }
+
+  const stream = new ReadableStream({
+    start(controller) {
+      const encoder = new TextEncoder()
+
+      // Send any missed events first
+      const missed = getClientEvents(id, fromSeqNum)
+      for (const event of missed) {
+        const frame = `event: client_event\nid: ${event.sequence_num}\ndata: ${JSON.stringify(event)}\n\n`
+        controller.enqueue(encoder.encode(frame))
+      }
+
+      // Subscribe for future events
+      const sub = subscribe(id, controller, fromSeqNum)
+
+      consola.debug(`SSE worker subscriber connected for session ${id}`)
+
+      // Handle client disconnect
+      c.req.raw.signal.addEventListener("abort", () => {
+        consola.debug(`SSE worker subscriber disconnected for session ${id}`)
+        unsubscribe(sub)
+        try {
+          controller.close()
+        } catch {
+          // Already closed
+        }
+      })
+    },
+  })
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    },
+  })
+})
+
 // POST /:id/events — Post event to session
 codeSessionsRoutes.post("/:id/events", async (c) => {
   const id = c.req.param("id")

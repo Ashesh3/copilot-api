@@ -167,7 +167,7 @@ export function getRemoteControlPage(): string {
 <script>
 var apiKey = sessionStorage.getItem('dashboard_api_key') || ''
 var currentSessionId = null
-var eventSource = null
+var ws = null
 var autoScrollEnabled = true
 
 function esc(s) {
@@ -304,9 +304,9 @@ function connectToSession(sessionId) {
 }
 
 function disconnect() {
-  if (eventSource) {
-    eventSource.close()
-    eventSource = null
+  if (ws) {
+    ws.close()
+    ws = null
   }
   currentSessionId = null
   document.getElementById('chat-view').classList.remove('active')
@@ -329,39 +329,37 @@ function updateStatusDot(state) {
   else dot.classList.add('idle')
 }
 
-/* SSE event stream */
+/* WebSocket event stream */
 function startEventStream(sessionId) {
-  if (eventSource) {
-    eventSource.close()
-    eventSource = null
+  if (ws) { ws.close(); ws = null }
+
+  var protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  var wsUrl = protocol + '//' + window.location.host + '/ws/remote/' + encodeURIComponent(sessionId)
+  ws = new WebSocket(wsUrl)
+
+  ws.onopen = function() {
+    var msgs = document.getElementById('chat-messages')
+    var loadingRow = msgs.querySelector('.loading-row')
+    if (loadingRow) loadingRow.remove()
   }
 
-  var url = '/v1/code/sessions/' + encodeURIComponent(sessionId) + '/events/stream'
-  if (apiKey) url += '?api_key=' + encodeURIComponent(apiKey)
-  eventSource = new EventSource(url)
-
-  eventSource.addEventListener('client_event', function(e) {
+  ws.onmessage = function(e) {
     try {
       var data = JSON.parse(e.data)
       handleClientEvent(data)
-    } catch (err) {
-      console.error('Failed to parse event:', err)
+    } catch(err) {
+      console.error('Failed to parse:', err)
     }
-  })
+  }
 
-  eventSource.addEventListener('open', function() {
-    var msgs = document.getElementById('chat-messages')
-    // Clear the connecting message
-    var loadingRow = msgs.querySelector('.loading-row')
-    if (loadingRow) loadingRow.remove()
-  })
+  ws.onclose = function() {
+    showToast('Connection closed', 'error')
+    updateStatusDot('idle')
+  }
 
-  eventSource.addEventListener('error', function() {
-    if (eventSource && eventSource.readyState === EventSource.CLOSED) {
-      showToast('Connection to session lost', 'error')
-      updateStatusDot('idle')
-    }
-  })
+  ws.onerror = function() {
+    showToast('Connection error', 'error')
+  }
 }
 
 function handleClientEvent(data) {
@@ -530,21 +528,15 @@ function sendMessage() {
 }
 
 function sendMessageText(text) {
-  if (!currentSessionId) return
-  var url = '/v1/code/sessions/' + encodeURIComponent(currentSessionId) + '/events'
-  apiFetch('POST', url, {
-    payload: {
-      type: 'user',
-      message: { role: 'user', content: text },
-      session_id: ''
-    }
-  }).then(function(r) {
-    if (!r.ok) {
-      showToast('Failed to send message', 'error')
-    }
-  }).catch(function() {
-    showToast('Failed to send message', 'error')
-  })
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    showToast('Not connected', 'error')
+    return
+  }
+  ws.send(JSON.stringify({
+    type: 'user',
+    message: { role: 'user', content: text },
+    session_id: currentSessionId
+  }))
 }
 
 /* Input handling */

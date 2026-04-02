@@ -5,6 +5,8 @@ import clipboard from "clipboardy"
 import consola from "consola"
 import invariant from "tiny-invariant"
 
+import type { CallbackSubscriber } from "./routes/code-sessions/event-bus"
+
 import packageJson from "../package.json" with { type: "json" }
 import { getStoredTokens } from "./lib/accounts-store"
 import { mergeConfigWithDefaults } from "./lib/config"
@@ -17,6 +19,16 @@ import { state } from "./lib/state"
 import { setupCopilotToken, setupGitHubToken } from "./lib/token"
 import { tokenPool } from "./lib/token-pool"
 import { cacheModels } from "./lib/utils"
+import {
+  subscribeWithCallback,
+  unsubscribeCallback,
+  broadcastEvents,
+} from "./routes/code-sessions/event-bus"
+import {
+  getSession,
+  getClientEvents,
+  addClientEvents,
+} from "./routes/code-sessions/session-store"
 import {
   DIRECT_CONNECT_WS_PATH,
   handleDirectConnectWebSocket,
@@ -241,6 +253,38 @@ const combinedWebSocket = {
 
         break
       }
+      case "remote-control": {
+        const rcWs = ws as {
+          data: {
+            type: string
+            sessionId: string
+            rcSubscriber?: CallbackSubscriber
+          }
+          send(data: string): void
+          close(code?: number, reason?: string): void
+        }
+        const sid = rcWs.data.sessionId
+        const session = getSession(sid)
+        if (!session) {
+          rcWs.close(4004, "Session not found")
+          break
+        }
+        // Send catchup events
+        const catchup = getClientEvents(sid, 0)
+        for (const event of catchup) {
+          rcWs.send(JSON.stringify(event))
+        }
+        // Subscribe for future events
+        rcWs.data.rcSubscriber = subscribeWithCallback(sid, (event) => {
+          try {
+            rcWs.send(JSON.stringify(event))
+          } catch {
+            // WebSocket may have closed
+          }
+        })
+
+        break
+      }
       // No default
     }
   },
@@ -283,6 +327,36 @@ const combinedWebSocket = {
 
         break
       }
+      case "remote-control": {
+        const rcWs = ws as unknown as {
+          data: { type: string; sessionId: string }
+        }
+        try {
+          const parsed = JSON.parse(
+            typeof message === "string" ? message : (
+              new TextDecoder().decode(message as Uint8Array)
+            ),
+          ) as {
+            type: string
+            message: { role: string; content: string }
+            session_id: string
+          }
+          const now = new Date().toISOString()
+          const created = addClientEvents(rcWs.data.sessionId, [
+            {
+              event_type: "client_event",
+              source: "client",
+              payload: parsed as unknown as Record<string, unknown>,
+              created_at: now,
+            },
+          ])
+          broadcastEvents(rcWs.data.sessionId, created)
+        } catch {
+          // Ignore malformed messages
+        }
+
+        break
+      }
       // No default
     }
   },
@@ -313,6 +387,20 @@ const combinedWebSocket = {
           }
         }
         dcWs.data.dcHandlers?.onClose()
+
+        break
+      }
+      case "remote-control": {
+        const rcWs = ws as {
+          data: {
+            type: string
+            sessionId: string
+            rcSubscriber?: CallbackSubscriber
+          }
+        }
+        if (rcWs.data.rcSubscriber) {
+          unsubscribeCallback(rcWs.data.rcSubscriber)
+        }
 
         break
       }
@@ -414,6 +502,16 @@ export async function runServer(options: RunServerOptions): Promise<void> {
                 type: "direct-connect" as const,
                 sessionId,
               },
+            })
+            return undefined as unknown as Response
+          }
+        }
+        // Remote Control WebSocket upgrade
+        if (url.pathname.startsWith("/ws/remote/")) {
+          const sessionId = url.pathname.slice("/ws/remote/".length)
+          if (sessionId) {
+            bunServer.upgrade(req, {
+              data: { type: "remote-control" as const, sessionId },
             })
             return undefined as unknown as Response
           }

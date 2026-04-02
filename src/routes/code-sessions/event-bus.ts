@@ -8,7 +8,13 @@ export type Subscriber = {
   fromSeqNum: number
 }
 
+export type CallbackSubscriber = {
+  sessionId: string
+  callback: (event: ClientEvent) => void
+}
+
 const subscribers = new Map<string, Set<Subscriber>>()
+const callbackSubscribers = new Map<string, Set<CallbackSubscriber>>()
 const keepaliveTimers = new Map<string, ReturnType<typeof setInterval>>()
 
 const KEEPALIVE_INTERVAL = 15_000
@@ -64,23 +70,60 @@ export function unsubscribe(sub: Subscriber): void {
   }
 }
 
+export function subscribeWithCallback(
+  sessionId: string,
+  callback: (event: ClientEvent) => void,
+): CallbackSubscriber {
+  const sub: CallbackSubscriber = { sessionId, callback }
+  let subs = callbackSubscribers.get(sessionId)
+  if (!subs) {
+    subs = new Set()
+    callbackSubscribers.set(sessionId, subs)
+  }
+  subs.add(sub)
+  return sub
+}
+
+export function unsubscribeCallback(sub: CallbackSubscriber): void {
+  const subs = callbackSubscribers.get(sub.sessionId)
+  if (subs) {
+    subs.delete(sub)
+  }
+}
+
 export function broadcastEvents(
   sessionId: string,
   events: Array<ClientEvent>,
 ): void {
   const subs = subscribers.get(sessionId)
-  if (!subs || subs.size === 0) return
-  const encoder = new TextEncoder()
-  for (const event of events) {
-    const frame = `event: client_event\nid: ${event.sequence_num}\ndata: ${JSON.stringify(event)}\n\n`
-    const encoded = encoder.encode(frame)
-    for (const sub of subs) {
-      try {
-        sub.controller.enqueue(encoded)
-      } catch {
-        consola.debug(
-          `Failed to send event to subscriber on session ${sessionId}`,
-        )
+  if (subs && subs.size > 0) {
+    const encoder = new TextEncoder()
+    for (const event of events) {
+      const frame = `event: client_event\nid: ${event.sequence_num}\ndata: ${JSON.stringify(event)}\n\n`
+      const encoded = encoder.encode(frame)
+      for (const sub of subs) {
+        try {
+          sub.controller.enqueue(encoded)
+        } catch {
+          consola.debug(
+            `Failed to send event to subscriber on session ${sessionId}`,
+          )
+        }
+      }
+    }
+  }
+
+  const cbSubs = callbackSubscribers.get(sessionId)
+  if (cbSubs && cbSubs.size > 0) {
+    for (const event of events) {
+      for (const sub of cbSubs) {
+        try {
+          sub.callback(event)
+        } catch {
+          consola.debug(
+            `Failed to send event to callback subscriber on session ${sessionId}`,
+          )
+        }
       }
     }
   }
