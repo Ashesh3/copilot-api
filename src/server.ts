@@ -8,6 +8,7 @@ import { requestLogger } from "./lib/request-logger"
 import { clientSessionStorage } from "./lib/request-session"
 import { completionRoutes } from "./routes/chat-completions/route"
 import { codeSessionsRoutes } from "./routes/code-sessions/route"
+import { directConnectRoutes } from "./routes/direct-connect/route"
 import { embeddingRoutes } from "./routes/embeddings/route"
 import { environmentsRoutes } from "./routes/environments/route"
 import { featureFlagsRoutes } from "./routes/feature-flags/route"
@@ -22,6 +23,7 @@ import {
 } from "./routes/oauth/route"
 import { replacementsRoute } from "./routes/replacements/route"
 import { responsesRoutes } from "./routes/responses/route"
+import { sessionsRoutes } from "./routes/sessions/route"
 import { usageRoute } from "./routes/usage/route"
 
 export const server = new Hono()
@@ -47,6 +49,8 @@ server.route("/v1/oauth", oauthTokenRoutes)
 server.route("/api", oauthApiRoutes)
 // Code Sessions — Claude Code authenticates via its own bearer tokens
 server.route("/v1/code/sessions", codeSessionsRoutes)
+// Sessions compat layer — used by v1 and v2 bridges
+server.route("/v1/sessions", sessionsRoutes)
 // Bridge Environments — v1 poll-based Remote Control protocol
 server.route("/v1/environments", environmentsRoutes)
 
