@@ -3,6 +3,7 @@ import consola from "consola"
 import type { Account } from "~/lib/token-pool"
 import type { CopilotHeaderOptions } from "~/services/copilot/copilot-client"
 
+import { getClientSessionId } from "~/lib/request-session"
 import { state } from "~/lib/state"
 import { tokenPool } from "~/lib/token-pool"
 import { copilotFetch, copilotHeaders } from "~/services/copilot/copilot-client"
@@ -57,7 +58,11 @@ export async function routedFetch(
     return { response, account: undefined }
   }
 
-  const account = tokenPool.getAccountForModel(modelId)
+  const clientSessionId = getClientSessionId()
+  const account = tokenPool.getAccountForModelBySession(
+    modelId,
+    clientSessionId,
+  )
   if (!account) {
     consola.warn(
       `No account found for model "${modelId}", falling back to default`,
@@ -72,7 +77,9 @@ export async function routedFetch(
   })
   const baseUrl = tokenPool.getBaseUrl(account)
 
-  consola.debug(`[Account #${account.id}] ${path} (model: ${modelId})`)
+  consola.debug(
+    `[Account #${account.id}] ${path} (model: ${modelId}, session: ${clientSessionId ? "sticky" : "default"})`,
+  )
   _lastUsedAccountId = account.id
 
   try {

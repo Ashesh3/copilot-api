@@ -151,6 +151,33 @@ export class TokenPool {
   }
 
   /**
+   * Session-affinity selection of an account for a given model.
+   *
+   * When a clientSessionId is provided, hashes it to deterministically pick
+   * the same account for every request in that session.  This prevents
+   * mid-conversation account switches that break cryptographic signatures
+   * on thinking/memory blocks.
+   *
+   * When no clientSessionId is provided, always returns the first eligible
+   * account (stable default).
+   */
+  getAccountForModelBySession(
+    modelId: string,
+    clientSessionId?: string,
+  ): Account | undefined {
+    const eligible = this.modelIndex.get(modelId)
+    if (!eligible || eligible.length === 0) return undefined
+
+    if (!clientSessionId) {
+      return eligible[0]
+    }
+
+    const hash = this.hashString(clientSessionId)
+    const index = hash % eligible.length
+    return eligible[index]
+  }
+
+  /**
    * Failover: pick the next account for a model, excluding the failed one.
    * Returns undefined if no alternative is available.
    */
@@ -238,6 +265,17 @@ export class TokenPool {
   }
 
   // --- Private helpers ---
+
+  /**
+   * djb2 hash — fast, deterministic, and sufficient for load distribution.
+   */
+  private hashString(str: string): number {
+    let hash = 5381
+    for (let i = 0; i < str.length; i++) {
+      hash = ((hash << 5) + hash + (str.codePointAt(i) ?? 0)) >>> 0
+    }
+    return hash
+  }
 
   private getHealthyCount(): number {
     let count = 0

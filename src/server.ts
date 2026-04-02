@@ -5,6 +5,7 @@ import { apiKeyGuard } from "./lib/api-key-guard"
 import { forwardError } from "./lib/error"
 import { createAuthMiddleware } from "./lib/request-auth"
 import { requestLogger } from "./lib/request-logger"
+import { clientSessionStorage } from "./lib/request-session"
 import { completionRoutes } from "./routes/chat-completions/route"
 import { embeddingRoutes } from "./routes/embeddings/route"
 import { featureFlagsRoutes } from "./routes/feature-flags/route"
@@ -26,6 +27,12 @@ export const server = new Hono()
 // Global middleware — applied to ALL routes including pre-auth ones
 server.use(requestLogger)
 server.use(cors())
+
+// Capture X-Claude-Code-Session-Id for session-affinity routing in multi-token mode
+server.use("*", async (c, next) => {
+  const sessionId = c.req.header("x-claude-code-session-id")
+  await clientSessionStorage.run(sessionId, next)
+})
 
 // Routes that bypass apiKeyGuard and auth middleware
 // GrowthBook remote eval — Claude Code's SDK calls this for feature flags
