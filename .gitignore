@@ -14,8 +14,8 @@ node_modules/
 # build output
 dist/
 
-# plans / design docs
-docs/plans/
+# docs
+docs/
 
 # sisyphus
 .sisyphus/
