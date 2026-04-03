@@ -98,6 +98,25 @@ codeSessionsRoutes.patch("/:id", async (c) => {
   return c.json({ ok: true })
 })
 
+// POST /:id/worker/register — Register a worker for a session (CCR v2)
+codeSessionsRoutes.post("/:id/worker/register", (c) => {
+  const id = c.req.param("id")
+  const session = getSession(id)
+
+  if (!session) {
+    return c.json({ error: "Session not found" }, 404)
+  }
+
+  if (session.archived) {
+    return c.json({ error: "Session is archived" }, 410)
+  }
+
+  const epoch = bumpWorkerEpoch(id) as number
+  consola.info(`Worker registered for session ${id}, epoch ${epoch}`)
+
+  return c.json({ worker_epoch: epoch })
+})
+
 // PUT /:id/worker — Report worker state
 codeSessionsRoutes.put("/:id/worker", async (c) => {
   const id = c.req.param("id")
