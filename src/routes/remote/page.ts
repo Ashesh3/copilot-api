@@ -338,26 +338,31 @@ function startEventStream(sessionId) {
   ws = new WebSocket(wsUrl)
 
   ws.onopen = function() {
+    console.log('[remote] WebSocket connected')
     var msgs = document.getElementById('chat-messages')
     var loadingRow = msgs.querySelector('.loading-row')
     if (loadingRow) loadingRow.remove()
   }
 
   ws.onmessage = function(e) {
+    console.log('[remote] WS message received:', e.data.substring(0, 200))
     try {
       var data = JSON.parse(e.data)
+      console.log('[remote] Parsed type:', data.payload ? data.payload.type : data.type)
       handleClientEvent(data)
     } catch(err) {
-      console.error('Failed to parse:', err)
+      console.error('[remote] Failed to parse:', err)
     }
   }
 
-  ws.onclose = function() {
+  ws.onclose = function(e) {
+    console.log('[remote] WebSocket closed, code:', e.code, 'reason:', e.reason)
     showToast('Connection closed', 'error')
     updateStatusDot('idle')
   }
 
-  ws.onerror = function() {
+  ws.onerror = function(e) {
+    console.error('[remote] WebSocket error:', e)
     showToast('Connection error', 'error')
   }
 }
