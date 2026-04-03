@@ -4,11 +4,12 @@ export function getDashboardPage(): string {
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Dashboard</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0 }
-  body { font-family: system-ui, -apple-system, sans-serif; background: #0F172A; color: #F8FAFC; display: flex; min-height: 100vh; overflow-x: hidden }
+  html { height: 100% }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #0F172A; color: #F8FAFC; display: flex; min-height: 100vh; min-height: 100dvh; overflow-x: hidden }
   code, .mono { font-family: monospace }
   .sidebar { width: 60px; background: #1E293B; border-right: 1px solid #334155; display: flex; flex-direction: column; align-items: center; padding: 12px 0; position: fixed; top: 0; left: 0; bottom: 0; z-index: 100 }
   .sidebar a { width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; border-radius: 8px; color: #94A3B8; text-decoration: none; position: relative; margin-bottom: 4px; border-left: 3px solid transparent; transition: all 0.15s }
@@ -93,11 +94,13 @@ export function getDashboardPage(): string {
   @keyframes slideIn { from { transform: translateX(100%); opacity: 0 } to { transform: translateX(0); opacity: 1 } }
   .empty-state { text-align: center; padding: 48px 20px; color: #94A3B8 }
   .empty-state svg { width: 48px; height: 48px; margin-bottom: 16px; opacity: 0.4 } .empty-state p { margin-top: 8px; font-size: 0.9rem }
+  .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch }
   @media (max-width: 1023px) { .stat-grid { grid-template-columns: repeat(2, 1fr) } }
-  @media (max-width: 767px) { .sidebar { display: none } .main { margin-left: 0; padding: 16px; padding-bottom: 72px } .stat-grid { grid-template-columns: 1fr } .settings-grid { grid-template-columns: 1fr } .setting-row { display: flex; flex-direction: column } .bottom-nav { display: flex !important } }
-  .bottom-nav { display: none; position: fixed; bottom: 0; left: 0; right: 0; background: #1E293B; border-top: 1px solid #334155; justify-content: space-around; padding: 6px 0; z-index: 100 }
-  .bottom-nav a { display: flex; flex-direction: column; align-items: center; gap: 2px; color: #94A3B8; text-decoration: none; font-size: 10px; padding: 4px 8px; border-radius: 6px }
+  @media (max-width: 767px) { .sidebar { display: none } .main { margin-left: 0; padding: 16px; padding-bottom: 90px } .stat-grid { grid-template-columns: 1fr } .settings-grid { grid-template-columns: 1fr } .setting-row { display: flex; flex-direction: column } .bottom-nav { display: flex !important } .form-row { flex-direction: column; align-items: stretch } .form-row .form-input { width: 100% !important; min-width: 0 !important; flex: none !important } .form-row .checkbox-label { justify-content: flex-start } .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 0 -16px; padding: 0 16px } .section-header h2 { font-size: 1.1rem } }
+  .bottom-nav { display: none; position: fixed; bottom: 0; left: 0; right: 0; background: #1E293B; border-top: 1px solid #334155; justify-content: space-around; padding: 8px 0; padding-bottom: max(8px, env(safe-area-inset-bottom)); z-index: 100 }
+  .bottom-nav a { display: flex; flex-direction: column; align-items: center; gap: 3px; color: #94A3B8; text-decoration: none; font-size: 10px; padding: 4px 6px; border-radius: 6px; min-width: 44px; min-height: 44px; justify-content: center }
   .bottom-nav a.active { color: #22C55E } .bottom-nav a svg { width: 20px; height: 20px }
+  .bottom-nav a .nav-label { font-size: 9px; line-height: 1; letter-spacing: 0.3px }
 </style>
 </head>
 <body>
@@ -114,13 +117,11 @@ export function getDashboardPage(): string {
   <a href="#settings" data-section="settings" onclick="navigate('settings')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span class="tip">Settings</span></a>
 </nav>
 <nav class="bottom-nav" id="bottom-nav">
-  <a href="#overview" data-section="overview" onclick="navigate('overview')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></a>
-  <a href="#sessions" data-section="sessions" onclick="navigate('sessions')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg></a>
-  <a href="#environments" data-section="environments" onclick="navigate('environments')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></a>
-  <a href="#flags" data-section="flags" onclick="navigate('flags')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg></a>
-  <a href="#replacements" data-section="replacements" onclick="navigate('replacements')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg></a>
-  <a href="#usage" data-section="usage" onclick="navigate('usage')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg></a>
-  <a href="#settings" data-section="settings" onclick="navigate('settings')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></a>
+  <a href="#overview" data-section="overview" onclick="navigate('overview')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg><span class="nav-label">Overview</span></a>
+  <a href="#sessions" data-section="sessions" onclick="navigate('sessions')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg><span class="nav-label">Sessions</span></a>
+  <a href="#flags" data-section="flags" onclick="navigate('flags')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg><span class="nav-label">Flags</span></a>
+  <a href="#usage" data-section="usage" onclick="navigate('usage')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg><span class="nav-label">Usage</span></a>
+  <a href="#settings" data-section="settings" onclick="navigate('settings')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span class="nav-label">Settings</span></a>
 </nav>
 <div class="main" id="main-content">
   <div class="section" id="sec-overview"><div class="section-header"><h2>Overview</h2></div><div class="stat-grid" id="overview-grid"></div></div>
@@ -294,11 +295,11 @@ function loadEnvironments() {
 }
 function renderEnvironments(envs) {
   if (!envs || envs.length === 0) { document.getElementById('environments-content').innerHTML = '<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg><p>No environments registered. Use claude remote-control to register.</p></div>'; return }
-  var html = '<table><thead><tr><th>ID</th><th>Machine</th><th>Directory</th><th>Branch</th><th>Max Sessions</th><th>Pending</th><th>Created</th><th></th></tr></thead><tbody>'
+  var html = '<div class="table-scroll"><table><thead><tr><th>ID</th><th>Machine</th><th>Directory</th><th>Branch</th><th>Max Sessions</th><th>Pending</th><th>Created</th><th></th></tr></thead><tbody>'
   envs.forEach(function(env) {
     html += '<tr><td class="mono" style="font-size:11px">' + esc(env.id) + '</td><td>' + esc(env.machineName) + '</td><td class="mono" style="font-size:12px">' + esc(env.directory) + '</td><td>' + esc(env.branch || '-') + '</td><td>' + esc(env.maxSessions) + '</td><td>' + esc(env.pendingWorkCount) + '</td><td>' + timeAgo(env.createdAt) + '</td><td><button class="btn btn-danger" style="font-size:0.78rem;padding:4px 10px" onclick="deregisterEnv(\\'' + esc(env.id) + '\\')">Deregister</button></td></tr>'
   })
-  html += '</tbody></table>'
+  html += '</tbody></table></div>'
   document.getElementById('environments-content').innerHTML = html
 }
 function deregisterEnv(id) {
@@ -313,7 +314,7 @@ function renderFlags() {
   var entries = Object.entries(flagsData)
   if (entries.length === 0) { document.getElementById('flags-content').innerHTML = '<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg><p>No feature flags configured.</p></div>'; return }
   entries.sort(function(a, b) { return a[0].localeCompare(b[0]) })
-  var html = '<table><thead><tr><th>Flag</th><th>Value</th><th>Actions</th></tr></thead><tbody>'
+  var html = '<div class="table-scroll"><table><thead><tr><th>Flag</th><th>Value</th><th>Actions</th></tr></thead><tbody>'
   entries.forEach(function(entry) {
     var name = entry[0], value = entry[1], isBool = typeof value === 'boolean'
     var displayVal = typeof value === 'object' ? JSON.stringify(value) : String(value)
@@ -321,7 +322,7 @@ function renderFlags() {
     if (isBool) html += '<button class="toggle ' + (value ? 'on' : 'off') + '" onclick="toggleFlag(\\'' + esc(name) + '\\')"></button> '
     html += '<button class="btn btn-danger" style="font-size:0.78rem;padding:4px 10px" onclick="deleteFlag(\\'' + esc(name) + '\\')">Delete</button></td></tr>'
   })
-  html += '</tbody></table>'
+  html += '</tbody></table></div>'
   document.getElementById('flags-content').innerHTML = html
 }
 function toggleFlag(name) { flagsData[name] = !flagsData[name]; renderFlags(); apiFetch('POST', '/dashboard/api/flags', { name: name, value: flagsData[name] }).catch(function() { showToast('Failed to toggle flag', 'error') }) }
@@ -345,7 +346,7 @@ function loadReplacements() {
 }
 function renderReplacements() {
   if (!replacementsData || replacementsData.length === 0) { document.getElementById('replacements-content').innerHTML = '<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg><p>No replacements configured.</p></div>'; return }
-  var html = '<table><thead><tr><th>Name</th><th>Pattern</th><th>Replacement</th><th>Type</th><th>Enabled</th><th>Actions</th></tr></thead><tbody>'
+  var html = '<div class="table-scroll"><table><thead><tr><th>Name</th><th>Pattern</th><th>Replacement</th><th>Type</th><th>Enabled</th><th>Actions</th></tr></thead><tbody>'
   replacementsData.forEach(function(r) {
     var isSys = r.isSystem, typeBadge = r.isRegex ? '<span class="badge badge-purple">regex</span>' : '<span class="badge badge-blue">string</span>'
     html += '<tr><td>' + esc(r.name || '-') + (isSys ? ' <span class="badge badge-gray">system</span>' : '') + '</td><td class="mono" style="font-size:12px">' + esc(r.pattern) + '</td><td style="font-size:0.85rem">' + esc(r.replacement || '') + '</td><td>' + typeBadge + '</td><td>'
@@ -356,7 +357,7 @@ function renderReplacements() {
     else html += '<button class="btn btn-danger" style="font-size:0.78rem;padding:4px 10px" onclick="deleteReplacement(\\'' + esc(r.id) + '\\')">Delete</button>'
     html += '</td></tr>'
   })
-  html += '</tbody></table>'
+  html += '</tbody></table></div>'
   document.getElementById('replacements-content').innerHTML = html
 }
 function toggleReplacement(id) { apiFetch('PATCH', '/dashboard/api/replacements/' + encodeURIComponent(id)).then(function(r) { if (r.ok) { showToast('Toggled', 'success'); loadReplacements() } else showToast('Failed to toggle', 'error') }).catch(function() { showToast('Failed to toggle', 'error') }) }

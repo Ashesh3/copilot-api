@@ -4,10 +4,11 @@ export function getRemoteControlPage(): string {
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>Remote Control</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0 }
+  html { height: 100% }
   body { font-family: system-ui, -apple-system, sans-serif; background: #0F172A; color: #F8FAFC; min-height: 100vh; min-height: 100dvh; display: flex; flex-direction: column }
   code, .mono { font-family: monospace }
 
@@ -60,7 +61,7 @@ export function getRemoteControlPage(): string {
   #session-picker.hidden { display: none }
 
   /* Chat header */
-  .chat-header { display: flex; align-items: center; gap: 10px; padding: 12px 16px; background: #1B2336; border-bottom: 1px solid #272F42; flex-shrink: 0 }
+  .chat-header { display: flex; align-items: center; gap: 10px; padding: 12px 16px; padding-top: max(12px, env(safe-area-inset-top)); background: #1B2336; border-bottom: 1px solid #272F42; flex-shrink: 0 }
   .chat-header .ch-info { flex: 1; min-width: 0 }
   .chat-header .ch-title { font-weight: 600; font-size: 0.95rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
   .chat-header .ch-id { font-family: monospace; font-size: 11px; color: #64748B }
@@ -104,7 +105,7 @@ export function getRemoteControlPage(): string {
   .msg-badge { align-self: center; background: #272F42; color: #94A3B8; padding: 3px 10px; border-radius: 12px; font-size: 0.72rem; font-family: monospace }
 
   /* Chat input */
-  .chat-input { display: flex; gap: 8px; padding: 12px 16px; background: #1B2336; border-top: 1px solid #272F42; flex-shrink: 0 }
+  .chat-input { display: flex; gap: 8px; padding: 12px 16px; padding-bottom: max(12px, env(safe-area-inset-bottom)); background: #1B2336; border-top: 1px solid #272F42; flex-shrink: 0 }
   .chat-input input { flex: 1; background: #0F172A; border: 1px solid #272F42; color: #F8FAFC; padding: 10px 14px; border-radius: 20px; font-size: 0.9rem; outline: none; font-family: inherit }
   .chat-input input:focus { border-color: #3B82F6 }
   .chat-input button { background: #3B82F6; border: none; color: #fff; width: 40px; height: 40px; border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0 }
@@ -121,6 +122,8 @@ export function getRemoteControlPage(): string {
     #session-picker { padding: 16px }
     .msg { max-width: 92% }
     .chat-input { padding: 8px 12px; padding-bottom: max(8px, env(safe-area-inset-bottom)) }
+    .chat-input input { font-size: 16px }
+    .chat-header { padding-left: 12px; padding-right: 12px }
   }
 </style>
 </head>
