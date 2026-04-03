@@ -21,6 +21,9 @@ This document covers every feature copilot-api supports beyond basic LLM proxyin
 - [Sentry Integration](#sentry-integration)
 - [Proxy Support](#proxy-support)
 - [API Stubs (Claude Code Compatibility)](#api-stubs-claude-code-compatibility)
+- [Remote Control Web UI](#remote-control-web-ui)
+- [Admin Dashboard](#admin-dashboard)
+- [Deployment Guide](#deployment-guide)
 
 ---
 
@@ -561,3 +564,253 @@ These endpoints return mock/empty data to prevent Claude Code from erroring on m
 | POST | `/api/event_logging/batch` | `{ success: true }` (telemetry sink) |
 | GET | `/api/web/domain_info?domain=X` | `{ domain, can_fetch: true }` |
 | GET | `/api/hello` | `{ status: "ok" }` |
+
+---
+
+## Remote Control Web UI
+
+A chat-style web interface for interacting with Claude Code sessions remotely from any device — phone, tablet, or another computer.
+
+### How It Works
+
+1. Start a Remote Control session in Claude Code: `/remote-control` or `claude --remote-control`
+2. Claude Code creates a session on the copilot-api server and shows a URL
+3. Open the URL or go to `/remote` — the web UI connects via WebSocket and shows the live conversation
+4. Type messages from the web UI — they flow to Claude Code's worker, which processes them and streams responses back
+
+### Endpoints
+
+| Path | Description |
+|------|-------------|
+| `/remote` | Remote Control web UI (session picker) |
+| `/remote?session=cse_xxx` | Direct connect to a specific session |
+| `/code/session_xxx` | Redirects to `/remote?session=cse_xxx` (the URL Claude Code prints) |
+| `wss://host/ws/remote/:sessionId` | WebSocket connection for live events |
+
+### Features
+
+- **Session picker** — lists all active code sessions, click to connect
+- **Chat interface** — iMessage-style dark theme with user (blue) and assistant (gray) bubbles
+- **Live streaming** — sees tool use, assistant responses, and turn completions in real-time
+- **Permission requests** — shows tool approval cards with Allow/Deny buttons
+- **Mobile-friendly** — designed for phone use with safe-area support
+- **WebSocket-based** — works through Cloudflare and reverse proxies (not SSE)
+- **Keepalive** — server sends ping every 30s to prevent proxy idle timeouts
+- **Auth** — same API key auth as dashboard, persisted in localStorage
+
+### Accessing from Claude Code
+
+When you run `/remote-control`, Claude Code prints:
+```
+/remote-control is active · Code in CLI or at https://claude.ai/code/session_xxx
+```
+
+If your hosts file points `claude.ai` to your copilot-api server, clicking that URL automatically redirects to the remote control chat page. The `session_` prefix is mapped to `cse_` internally.
+
+---
+
+## Admin Dashboard
+
+A single-page admin dashboard at `/dashboard` for managing all copilot-api features.
+
+### Sections
+
+| Section | Description |
+|---------|-------------|
+| Overview | Server health, active session counts, uptime |
+| Sessions | List all code sessions + direct-connect sessions, with Remote Control button to open chat UI |
+| Environments | Registered bridge environments (v1 protocol) |
+| Feature Flags | Toggle/add/remove GrowthBook feature flags |
+| Replacements | Manage auto-replacement rules |
+| Usage | Copilot usage/quota with progress bars |
+| Settings | Read-only server configuration display |
+
+### Design
+
+- Dark developer theme (slate blue palette)
+- Icon sidebar navigation (60px, collapses to bottom nav on mobile)
+- Auto-refresh for sessions (10s) and overview/environments (30s)
+- Toast notifications for actions
+- API key auth persisted in localStorage
+
+### Session Management
+
+Each session card shows:
+- Status dot (green = running, orange = requires action, gray = idle)
+- Session title, type badge, ID, epoch, time since creation
+- **Remote Control button** (green chat icon) — opens `/remote?session=cse_xxx` in new tab
+- **View events** button — expands inline event viewer
+- **Archive/Destroy** button — removes the session
+
+---
+
+## Deployment Guide
+
+### Local Development
+
+```bash
+# Start copilot-api
+cd copilot-api
+bun run dev
+
+# Access at http://localhost:4141
+# Dashboard: http://localhost:4141/dashboard
+# Remote Control: http://localhost:4141/remote
+```
+
+### Local with HTTPS (for Claude Code Remote Control)
+
+Claude Code connects to `api.anthropic.com` for Remote Control. To redirect it to your local server, you need HTTPS with domain spoofing.
+
+**Option A: Using the built-in HTTPS proxy**
+
+```bash
+# 1. Generate or place certs in scripts/certs/
+#    Files needed: api.anthropic.com.crt, api.anthropic.com.key,
+#                  claude.ai.crt, claude.ai.key
+
+# 2. Add to hosts file (as admin):
+#    127.0.0.1 api.anthropic.com
+#    127.0.0.1 claude.ai
+
+# 3. Start copilot-api + HTTPS proxy
+bun run dev                          # Terminal 1: HTTP on :4141
+node scripts/https-proxy.mjs         # Terminal 2: HTTPS on :443 (needs admin)
+
+# 4. Trust the CA cert for Claude Code (Bun's fetch)
+#    Set NODE_EXTRA_CA_CERTS as an OS-level env var (not in settings.json):
+export NODE_EXTRA_CA_CERTS=/path/to/your/ca-cert.pem
+```
+
+**Option B: Using mitmproxy**
+
+If you use mitmproxy for HTTPS interception, point `NODE_EXTRA_CA_CERTS` to mitmproxy's CA cert. Important: this must be set as an **OS environment variable** before launching Claude Code, not in `.claude/settings.json`, because Bun's native `fetch()` reads it at process startup.
+
+### Production with Nginx
+
+For remote access (e.g., from your phone), deploy behind nginx with proper WebSocket support.
+
+**Nginx configuration:**
+
+```nginx
+# Required: WebSocket upgrade mapping (place in http {} block or before server block)
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    '' close;
+}
+
+server {
+    listen 443 ssl;
+    server_name your-domain.com;
+
+    ssl_certificate /path/to/cert.crt;
+    ssl_certificate_key /path/to/cert.key;
+
+    location / {
+        proxy_pass http://localhost:4141;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # WebSocket support (required for Remote Control and Voice)
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+
+        # SSE/streaming support
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 300s;
+        chunked_transfer_encoding on;
+    }
+}
+```
+
+**Critical nginx settings:**
+
+| Setting | Why |
+|---------|-----|
+| `proxy_set_header Upgrade $http_upgrade` | Forwards WebSocket upgrade header to backend |
+| `proxy_set_header Connection $connection_upgrade` | Sets `Connection: upgrade` for WebSocket, `close` for HTTP |
+| `proxy_buffering off` | Required for SSE streaming (event streams, usage data) |
+| `proxy_read_timeout 300s` | Prevents nginx from killing long-lived connections |
+| `map $http_upgrade $connection_upgrade` | Conditionally sets Connection header based on request type |
+
+**Common mistake:** Setting `proxy_set_header Connection ''` or omitting the Upgrade/Connection headers entirely. This strips the WebSocket handshake and causes `1006` close errors.
+
+### Nginx for Claude Code API Spoofing
+
+If you want Claude Code to connect through your remote server (instead of local HTTPS proxy), you need an additional nginx server block that spoofs `api.anthropic.com`:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name api.anthropic.com claude.ai;
+
+    ssl_certificate /path/to/spoofed-cert.crt;
+    ssl_certificate_key /path/to/spoofed-cert.key;
+
+    location / {
+        proxy_pass http://localhost:4141;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 300s;
+        chunked_transfer_encoding on;
+    }
+}
+```
+
+Then point your hosts file to the nginx server's IP and trust the spoofed cert via `NODE_EXTRA_CA_CERTS`.
+
+### Cloudflare
+
+If using Cloudflare in front of nginx:
+
+1. **Enable WebSockets** in Cloudflare dashboard: Network > WebSockets > ON
+2. **Keepalive** is handled automatically — the server sends WebSocket pings every 30s to prevent Cloudflare's idle timeout
+3. **SSL mode** should be Full (strict) if your origin has a valid cert, or Full if self-signed
+
+### TLS Certificate Troubleshooting
+
+Claude Code uses two different HTTP clients:
+- **axios** (for API calls like `/v1/messages`, `/worker/events`, heartbeats) — respects `NODE_EXTRA_CA_CERTS` set at any time
+- **Bun's native `fetch()`** (for SSE stream at `/worker/events/stream`) — reads `NODE_EXTRA_CA_CERTS` **only at process startup**
+
+If Remote Control sessions create but the worker never connects to the SSE stream (you see `0 SSE subscribers` in logs), the issue is almost certainly TLS:
+
+```bash
+# Wrong: setting in .claude/settings.json (too late for Bun's fetch)
+{
+  "env": {
+    "NODE_EXTRA_CA_CERTS": "/path/to/ca.pem"
+  }
+}
+
+# Right: set as OS environment variable before launching claude
+export NODE_EXTRA_CA_CERTS=/path/to/ca.pem
+claude
+```
+
+Alternatively, set `NODE_TLS_REJECT_UNAUTHORIZED=0` in settings.json for testing (disables all cert verification).
+
+### Feature Flags for Remote Control
+
+These GrowthBook flags must be `true` for Remote Control to work:
+
+| Flag | Purpose | Default |
+|------|---------|---------|
+| `tengu_ccr_bridge` | Enable Remote Control entitlement | `true` |
+| `tengu_bridge_repl_v2` | Enable v2 (env-less) bridge protocol | `true` |
+| `tengu_remote_backend` | Enable remote TUI backend | `true` |
+
+These are set as defaults in copilot-api and served via the GrowthBook endpoint at `/api/eval/:clientKey`. You can toggle them in the dashboard or Feature Flags admin page.
+
+**Important:** `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` disables GrowthBook entirely, which prevents flag evaluation and blocks Remote Control. Do not set this env var if you want Remote Control.
