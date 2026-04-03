@@ -1,5 +1,7 @@
 import type { Context } from "hono"
 
+import consola from "consola"
+
 interface IpEntry {
   count: number
   date: string
@@ -50,7 +52,11 @@ export function isIpBlocked(ip: string): boolean {
   }
 
   // Check if count meets or exceeds threshold
-  return entry.count >= 3
+  if (entry.count >= 3) {
+    consola.debug(`[security] Blocked request from banned IP ${ip}`)
+    return true
+  }
+  return false
 }
 
 /**
@@ -65,16 +71,25 @@ export function recordFailedAttempt(ip: string): number {
   if (!entry) {
     // New entry
     ipTracker.set(ip, { count: 1, date: today })
+    consola.warn(`[security] Failed auth attempt from ${ip} (1/3)`)
     return 1
   }
 
   if (entry.date === today) {
     // Same day: increment count
     entry.count += 1
+    if (entry.count === 3) {
+      consola.warn(`[security] IP ${ip} banned — 3 failed auth attempts today`)
+    } else {
+      consola.warn(
+        `[security] Failed auth attempt from ${ip} (${entry.count}/3)`,
+      )
+    }
     return entry.count
   } else {
     // Different day: reset to 1
     ipTracker.set(ip, { count: 1, date: today })
+    consola.warn(`[security] Failed auth attempt from ${ip} (1/3)`)
     return 1
   }
 }
