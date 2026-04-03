@@ -174,6 +174,8 @@ var ws = null
 var autoScrollEnabled = true
 var sentMessageIds = new Set()
 var isConnected = false
+var seenSeqNums = new Set()
+var lastRenderedAssistantId = null
 
 function esc(s) {
   if (s == null) return ''
@@ -316,6 +318,8 @@ function disconnect() {
   }
   currentSessionId = null
   sentMessageIds.clear()
+  seenSeqNums.clear()
+  lastRenderedAssistantId = null
   isConnected = false
   document.getElementById('chat-view').classList.remove('active')
   document.getElementById('session-picker').classList.remove('hidden')
@@ -379,6 +383,13 @@ function handleClientEvent(data) {
   // Skip keepalive pings
   if (data.type === 'ping') return
 
+  // Deduplicate by sequence number (catchup + live subscription overlap)
+  var seqNum = data.sequence_num
+  if (seqNum != null) {
+    if (seenSeqNums.has(seqNum)) return
+    seenSeqNums.add(seqNum)
+  }
+
   var payload = data.payload || data
   var type = payload.type
 
@@ -419,6 +430,8 @@ function handleClientEvent(data) {
       addAssistantMessage(payload)
       break
     case 'stream_event':
+    case 'system':
+    case 'rate_limit_event':
       break
     case 'result':
       addTurnSeparator()
@@ -427,7 +440,6 @@ function handleClientEvent(data) {
       addControlRequest(payload)
       break
     default:
-      if (type) addEventBadge(type)
       break
   }
 }
@@ -455,6 +467,13 @@ function addAssistantMessage(payload) {
   var msgs = document.getElementById('chat-messages')
   var content = payload.message ? payload.message.content : null
   if (!content) return
+
+  // Deduplicate: skip if we already rendered a message with the same uuid
+  var msgId = payload.uuid || (payload.message && payload.message.id)
+  if (msgId) {
+    if (msgId === lastRenderedAssistantId) return
+    lastRenderedAssistantId = msgId
+  }
 
   if (typeof content === 'string') {
     var div = document.createElement('div')
