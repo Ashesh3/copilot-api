@@ -7,6 +7,7 @@ import { createAuthMiddleware } from "./lib/request-auth"
 import { requestLogger } from "./lib/request-logger"
 import { clientSessionStorage } from "./lib/request-session"
 import { completionRoutes } from "./routes/chat-completions/route"
+import { getCodeLauncherPage } from "./routes/code-launcher/page"
 import { codeSessionsRoutes } from "./routes/code-sessions/route"
 import { dashboardRoutes } from "./routes/dashboard/route"
 import { directConnectRoutes } from "./routes/direct-connect/route"
@@ -86,6 +87,15 @@ server.get("/code/:sessionKey", (c) => {
       `cse_${sessionKey.slice("session_".length)}`
     : sessionKey
   return c.redirect(`/remote?session=${sessionId}`)
+})
+
+// Environment launcher at /code?environment=env_xxx (URL Claude Code prints)
+server.get("/code", (c) => {
+  const envId = c.req.query("environment")
+  if (!envId) {
+    return c.redirect("/dashboard#environments")
+  }
+  return c.html(getCodeLauncherPage(envId))
 })
 
 // v1 stubs for endpoints Claude Code calls that don't need full implementations

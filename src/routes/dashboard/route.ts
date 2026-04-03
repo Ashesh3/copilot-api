@@ -24,6 +24,7 @@ import {
   handleListSessions,
   handleOverview,
   handleSetFlag,
+  handleStartEnvironmentSession,
   handleToggleReplacement,
 } from "./api"
 import { getDashboardPage } from "./page"
@@ -78,6 +79,10 @@ dashboardRoutes.get("/api/sessions/:id/events", handleGetSessionEvents)
 // Environments
 dashboardRoutes.get("/api/environments", handleListEnvironments)
 dashboardRoutes.delete("/api/environments/:id", handleDeregisterEnvironment)
+dashboardRoutes.post(
+  "/api/environments/:id/start",
+  handleStartEnvironmentSession,
+)
 
 // Feature Flags
 dashboardRoutes.get("/api/flags", handleListFlags)

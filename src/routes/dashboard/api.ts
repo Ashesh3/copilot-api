@@ -11,6 +11,7 @@ import { state } from "~/lib/state"
 import { getUsageResponse } from "~/lib/usage-tracker"
 import {
   archiveSession,
+  createSession,
   getClientEvents,
   listSessions,
 } from "~/routes/code-sessions/session-store"
@@ -20,6 +21,8 @@ import {
 } from "~/routes/direct-connect/ws-handler"
 import {
   deregisterEnvironment,
+  enqueueWork,
+  getEnvironment,
   listEnvironments,
 } from "~/routes/environments/environment-store"
 import {
@@ -231,5 +234,32 @@ export function handleGetSettings(c: Context) {
     dataDir: PATHS.APP_DIR,
     debug: state.debug,
     verbose: state.verbose,
+  })
+}
+
+export function handleStartEnvironmentSession(c: Context) {
+  const envId = c.req.param("id")
+  const env = getEnvironment(envId)
+  if (!env) {
+    return c.json({ error: "Environment not found" }, 404)
+  }
+
+  const session = createSession(`Session in ${env.machineName}`, [])
+
+  const protocol =
+    c.req.header("x-forwarded-proto")
+    ?? (c.req.url.startsWith("https") ? "https" : "https")
+  const host = c.req.header("host") ?? "localhost"
+  const apiBaseUrl = `${protocol}://${host}`
+
+  const workItem = enqueueWork({ envId, sessionId: session.id, apiBaseUrl })
+  if (!workItem) {
+    return c.json({ error: "Failed to enqueue work" }, 500)
+  }
+
+  return c.json({
+    sessionId: session.id,
+    workId: workItem.id,
+    success: true,
   })
 }

@@ -96,34 +96,39 @@ export function stopWork(envId: string, workId: string): boolean {
   return true
 }
 
-export function enqueueWork(
-  envId: string,
-  sessionId: string,
-  type: "session" | "healthcheck" = "session",
-): WorkItem | null {
-  const env = environments.get(envId)
+export function enqueueWork(opts: {
+  envId: string
+  sessionId: string
+  apiBaseUrl: string
+  type?: "session" | "healthcheck"
+}): WorkItem | null {
+  const env = environments.get(opts.envId)
   if (!env) return null
 
+  const workType = opts.type ?? "session"
   const secretPayload = JSON.stringify({
+    version: 1,
     session_ingress_token: randomUUID(),
-    api_base_url: `/v1/environments/${envId}`,
-    session_id: sessionId,
+    api_base_url: opts.apiBaseUrl,
+    sources: [],
+    auth: [],
+    use_code_sessions: true,
   })
   const encodedSecret = Buffer.from(secretPayload).toString("base64url")
 
   const item: WorkItem = {
     id: randomUUID(),
     type: "work",
-    environment_id: envId,
+    environment_id: opts.envId,
     state: "pending",
     data: {
-      type,
-      id: sessionId,
+      type: workType,
+      id: opts.sessionId,
     },
     secret: encodedSecret,
     created_at: new Date().toISOString(),
   }
   env.workQueue.push(item)
-  consola.debug(`Enqueued work ${item.id} for environment ${envId}`)
+  consola.info(`Enqueued work ${item.id} for environment ${opts.envId}`)
   return item
 }

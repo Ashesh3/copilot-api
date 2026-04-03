@@ -1,8 +1,11 @@
 import { Hono } from "hono"
 
+import { createSession } from "../code-sessions/session-store"
 import {
   acknowledgeWork,
   deregisterEnvironment,
+  enqueueWork,
+  getEnvironment,
   pollForWork,
   registerEnvironment,
   stopWork,
@@ -73,4 +76,37 @@ environmentsRoutes.post("/:id/work/:workId/heartbeat", (c) => {
 // POST /:id/bridge/reconnect — Reconnect session
 environmentsRoutes.post("/:id/bridge/reconnect", (c) => {
   return c.json({ ok: true })
+})
+
+// POST /:id/work — Enqueue work (start a session in the environment)
+environmentsRoutes.post("/:id/work", async (c) => {
+  const envId = c.req.param("id")
+  const env = getEnvironment(envId)
+  if (!env) {
+    return c.json({ error: "Environment not found" }, 404)
+  }
+
+  const body = await c.req
+    .json<{ title?: string }>()
+    .catch(() => ({ title: undefined }))
+  const session = createSession(
+    body.title ?? `Session in ${env.machineName}`,
+    [],
+  )
+
+  const protocol =
+    c.req.header("x-forwarded-proto")
+    ?? (c.req.url.startsWith("https") ? "https" : "https")
+  const host = c.req.header("host") ?? "localhost"
+  const apiBaseUrl = `${protocol}://${host}`
+
+  const workItem = enqueueWork({ envId, sessionId: session.id, apiBaseUrl })
+  if (!workItem) {
+    return c.json({ error: "Failed to enqueue work" }, 500)
+  }
+
+  return c.json({
+    work: workItem,
+    session: { id: session.id, title: session.title },
+  })
 })

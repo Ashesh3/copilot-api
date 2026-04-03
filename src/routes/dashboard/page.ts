@@ -297,7 +297,7 @@ function renderEnvironments(envs) {
   if (!envs || envs.length === 0) { document.getElementById('environments-content').innerHTML = '<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg><p>No environments registered. Use claude remote-control to register.</p></div>'; return }
   var html = '<div class="table-scroll"><table><thead><tr><th>ID</th><th>Machine</th><th>Directory</th><th>Branch</th><th>Max Sessions</th><th>Pending</th><th>Created</th><th></th></tr></thead><tbody>'
   envs.forEach(function(env) {
-    html += '<tr><td class="mono" style="font-size:11px">' + esc(env.id) + '</td><td>' + esc(env.machineName) + '</td><td class="mono" style="font-size:12px">' + esc(env.directory) + '</td><td>' + esc(env.branch || '-') + '</td><td>' + esc(env.maxSessions) + '</td><td>' + esc(env.pendingWorkCount) + '</td><td>' + timeAgo(env.createdAt) + '</td><td><button class="btn btn-danger" style="font-size:0.78rem;padding:4px 10px" onclick="deregisterEnv(\\'' + esc(env.id) + '\\')">Deregister</button></td></tr>'
+    html += '<tr><td class="mono" style="font-size:11px">' + esc(env.id) + '</td><td>' + esc(env.machineName) + '</td><td class="mono" style="font-size:12px">' + esc(env.directory) + '</td><td>' + esc(env.branch || '-') + '</td><td>' + esc(env.maxSessions) + '</td><td>' + esc(env.pendingWorkCount) + '</td><td>' + timeAgo(env.createdAt) + '</td><td style="white-space:nowrap"><button class="btn btn-primary" style="font-size:0.78rem;padding:4px 10px;margin-right:4px" onclick="startEnvSession(\\'' + esc(env.id) + '\\')">Start Session</button><button class="btn btn-danger" style="font-size:0.78rem;padding:4px 10px" onclick="deregisterEnv(\\'' + esc(env.id) + '\\')">Deregister</button></td></tr>'
   })
   html += '</tbody></table></div>'
   document.getElementById('environments-content').innerHTML = html
@@ -305,6 +305,13 @@ function renderEnvironments(envs) {
 function deregisterEnv(id) {
   if (!confirm('Deregister this environment?')) return
   apiFetch('DELETE', '/dashboard/api/environments/' + encodeURIComponent(id)).then(function(r) { if (r.ok) { showToast('Environment deregistered', 'success'); loadEnvironments() } else showToast('Failed to deregister', 'error') }).catch(function() { showToast('Failed to deregister', 'error') })
+}
+function startEnvSession(envId) {
+  apiFetch('POST', '/dashboard/api/environments/' + encodeURIComponent(envId) + '/start').then(function(r) { if (r.ok) return r.json(); throw new Error('Failed') }).then(function(d) {
+    showToast('Session started: ' + d.sessionId, 'success')
+    loadEnvironments()
+    window.open('/remote?session=' + encodeURIComponent(d.sessionId), '_blank')
+  }).catch(function() { showToast('Failed to start session', 'error') })
 }
 
 function loadFlags() {
