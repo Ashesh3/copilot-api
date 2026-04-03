@@ -406,9 +406,7 @@ function handleClientEvent(data) {
 
   switch (type) {
     case 'user':
-      // Skip user messages from source=client (our own echoes from event bus)
-      if (data.source === 'client') return
-      addUserMessage(payload)
+      // We already render user messages locally on send — skip all echoes
       break
     case 'assistant':
       addAssistantMessage(payload)
