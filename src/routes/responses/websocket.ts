@@ -145,9 +145,14 @@ async function handleResponseCreate(
 ): Promise<void> {
   await checkRateLimit(state)
 
-  // Strip the "type" field — the rest is the ResponsesPayload
-  const { type: _type, ...rest } = message
-  const payload = rest as unknown as ResponsesPayload
+  // Codex CLI sends { type: "response.create", response: { ...payload } }
+  // Extract the nested "response" object, or fall back to top-level fields
+  const nested = message.response as Record<string, unknown> | undefined
+  const payload = (nested
+    ?? (() => {
+      const { type: _type, ...rest } = message
+      return rest
+    })()) as unknown as ResponsesPayload
 
   // Force streaming for WebSocket mode
   payload.stream = true
