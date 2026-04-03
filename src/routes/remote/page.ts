@@ -175,7 +175,8 @@ var autoScrollEnabled = true
 var sentMessageIds = new Set()
 var isConnected = false
 var seenSeqNums = new Set()
-var lastRenderedAssistantId = null
+var currentAssistantEl = null
+var currentToolEls = {}
 
 function esc(s) {
   if (s == null) return ''
@@ -319,7 +320,8 @@ function disconnect() {
   currentSessionId = null
   sentMessageIds.clear()
   seenSeqNums.clear()
-  lastRenderedAssistantId = null
+  currentAssistantEl = null
+  currentToolEls = {}
   isConnected = false
   document.getElementById('chat-view').classList.remove('active')
   document.getElementById('session-picker').classList.remove('hidden')
@@ -468,41 +470,55 @@ function addAssistantMessage(payload) {
   var content = payload.message ? payload.message.content : null
   if (!content) return
 
-  // Deduplicate: skip if we already rendered a message with the same uuid
-  var msgId = payload.uuid || (payload.message && payload.message.id)
-  if (msgId) {
-    if (msgId === lastRenderedAssistantId) return
-    lastRenderedAssistantId = msgId
-  }
-
+  // Extract text content from the message
+  var textContent = ''
+  var toolBlocks = []
   if (typeof content === 'string') {
-    var div = document.createElement('div')
-    div.className = 'msg msg-assistant'
-    div.innerHTML = renderMarkdownBasic(content)
-    msgs.appendChild(div)
+    textContent = content
   } else if (Array.isArray(content)) {
     content.forEach(function(block) {
       if (block.type === 'text') {
-        var div = document.createElement('div')
-        div.className = 'msg msg-assistant'
-        div.innerHTML = renderMarkdownBasic(block.text || '')
-        msgs.appendChild(div)
+        textContent += block.text || ''
       } else if (block.type === 'tool_use') {
-        var toolDiv = document.createElement('div')
-        toolDiv.className = 'msg-tool'
-        var inputStr = ''
-        try { inputStr = JSON.stringify(block.input, null, 2) } catch(e) { inputStr = String(block.input || '') }
-        toolDiv.innerHTML = '<div class="tool-label">Tool Use</div>'
-          + '<div class="tool-name">' + esc(block.name || 'unknown') + '</div>'
-          + (inputStr ? '<div class="tool-input">' + esc(inputStr) + '</div>' : '')
-        msgs.appendChild(toolDiv)
+        toolBlocks.push(block)
       }
     })
   }
+
+  // Update existing assistant bubble or create new one
+  if (textContent) {
+    if (currentAssistantEl) {
+      currentAssistantEl.innerHTML = renderMarkdownBasic(textContent)
+    } else {
+      var div = document.createElement('div')
+      div.className = 'msg msg-assistant'
+      div.innerHTML = renderMarkdownBasic(textContent)
+      msgs.appendChild(div)
+      currentAssistantEl = div
+    }
+  }
+
+  // Render tool_use blocks (update existing or create new)
+  toolBlocks.forEach(function(block) {
+    var toolId = block.id || block.name
+    if (currentToolEls[toolId]) return // already rendered
+    var toolDiv = document.createElement('div')
+    toolDiv.className = 'msg-tool'
+    var inputStr = ''
+    try { inputStr = JSON.stringify(block.input, null, 2) } catch(e) { inputStr = String(block.input || '') }
+    toolDiv.innerHTML = '<div class="tool-label">Tool Use</div>'
+      + '<div class="tool-name">' + esc(block.name || 'unknown') + '</div>'
+      + (inputStr ? '<div class="tool-input">' + esc(inputStr) + '</div>' : '')
+    msgs.appendChild(toolDiv)
+    currentToolEls[toolId] = toolDiv
+  })
+
   scrollToBottom()
 }
 
 function addTurnSeparator() {
+  currentAssistantEl = null
+  currentToolEls = {}
   var msgs = document.getElementById('chat-messages')
   var div = document.createElement('div')
   div.className = 'turn-sep'
@@ -595,6 +611,9 @@ function sendMessageText(text) {
     showToast('Not connected', 'error')
     return
   }
+  // Reset assistant bubble for next response
+  currentAssistantEl = null
+  currentToolEls = {}
   // Show the message locally immediately
   var msgs = document.getElementById('chat-messages')
   var div = document.createElement('div')
