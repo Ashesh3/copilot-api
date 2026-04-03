@@ -373,6 +373,9 @@ function startEventStream(sessionId) {
 }
 
 function handleClientEvent(data) {
+  // Skip keepalive pings
+  if (data.type === 'ping') return
+
   var payload = data.payload || data
   var type = payload.type
 

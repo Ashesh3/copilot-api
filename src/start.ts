@@ -259,6 +259,7 @@ const combinedWebSocket = {
             type: string
             sessionId: string
             rcSubscriber?: CallbackSubscriber
+            rcKeepalive?: ReturnType<typeof setInterval>
           }
           send(data: string): void
           close(code?: number, reason?: string): void
@@ -282,6 +283,14 @@ const combinedWebSocket = {
             // WebSocket may have closed
           }
         })
+        // Keepalive ping every 30s to prevent Cloudflare idle timeout
+        rcWs.data.rcKeepalive = setInterval(() => {
+          try {
+            rcWs.send(JSON.stringify({ type: "ping" }))
+          } catch {
+            // WebSocket closed
+          }
+        }, 30_000)
 
         break
       }
@@ -396,7 +405,11 @@ const combinedWebSocket = {
             type: string
             sessionId: string
             rcSubscriber?: CallbackSubscriber
+            rcKeepalive?: ReturnType<typeof setInterval>
           }
+        }
+        if (rcWs.data.rcKeepalive) {
+          clearInterval(rcWs.data.rcKeepalive)
         }
         if (rcWs.data.rcSubscriber) {
           unsubscribeCallback(rcWs.data.rcSubscriber)
