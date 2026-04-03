@@ -63,7 +63,9 @@ codeSessionsRoutes.post("/:id/bridge", (c) => {
   // Session exists (checked above), so bumpWorkerEpoch will always return a number
   const epoch = bumpWorkerEpoch(id) as number
 
-  const protocol = c.req.header("x-forwarded-proto") ?? "http"
+  const protocol =
+    c.req.header("x-forwarded-proto")
+    ?? (c.req.url.startsWith("https") ? "https" : "https")
   const host = c.req.header("host") ?? "localhost"
   const apiBaseUrl = `${protocol}://${host}`
 
