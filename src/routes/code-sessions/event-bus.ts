@@ -119,10 +119,10 @@ export function broadcastEvents(
     }
   }
 
-  const cbSubs = callbackSubscribers.get(sessionId)
-  if (cbSubs && cbSubs.size > 0) {
+  const cbSubs2 = callbackSubscribers.get(sessionId)
+  if (cbSubs2 && cbSubs2.size > 0) {
     for (const event of events) {
-      for (const sub of cbSubs) {
+      for (const sub of cbSubs2) {
         try {
           sub.callback(event)
         } catch {
