@@ -96,6 +96,12 @@ export function broadcastEvents(
   events: Array<ClientEvent>,
 ): void {
   const subs = subscribers.get(sessionId)
+  const cbSubs = callbackSubscribers.get(sessionId)
+  const sseCount = subs?.size ?? 0
+  const cbCount = cbSubs?.size ?? 0
+  consola.info(
+    `[event-bus] Broadcasting ${events.length} event(s) to session ${sessionId} — ${sseCount} SSE + ${cbCount} WS subscribers`,
+  )
   if (subs && subs.size > 0) {
     const encoder = new TextEncoder()
     for (const event of events) {
