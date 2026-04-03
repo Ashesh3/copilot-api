@@ -169,6 +169,8 @@ var apiKey = sessionStorage.getItem('dashboard_api_key') || ''
 var currentSessionId = null
 var ws = null
 var autoScrollEnabled = true
+var sentMessageIds = new Set()
+var isConnected = false
 
 function esc(s) {
   if (s == null) return ''
@@ -309,6 +311,8 @@ function disconnect() {
     ws = null
   }
   currentSessionId = null
+  sentMessageIds.clear()
+  isConnected = false
   document.getElementById('chat-view').classList.remove('active')
   document.getElementById('session-picker').classList.remove('hidden')
   document.getElementById('chat-messages').innerHTML = ''
@@ -371,15 +375,45 @@ function handleClientEvent(data) {
   var payload = data.payload || data
   var type = payload.type
 
+  // Skip echo of messages we sent
+  var eventId = data.event_id || payload.uuid
+  if (eventId && sentMessageIds.has(eventId)) {
+    sentMessageIds.delete(eventId)
+    return
+  }
+
+  // Skip the synthetic "Remote Control connecting" message
+  if (type === 'assistant' && payload.message && payload.message.model === '<synthetic>') {
+    // Mark as connected and remove loading state
+    if (!isConnected) {
+      isConnected = true
+      var msgs = document.getElementById('chat-messages')
+      var loadingRow = msgs.querySelector('.loading-row')
+      if (loadingRow) loadingRow.remove()
+      updateStatusDot('running')
+    }
+    return
+  }
+
+  // First real message means we're connected
+  if (!isConnected) {
+    isConnected = true
+    var msgs2 = document.getElementById('chat-messages')
+    var loadingRow2 = msgs2.querySelector('.loading-row')
+    if (loadingRow2) loadingRow2.remove()
+    updateStatusDot('running')
+  }
+
   switch (type) {
     case 'user':
+      // Skip user messages from source=client (our own echoes from event bus)
+      if (data.source === 'client') return
       addUserMessage(payload)
       break
     case 'assistant':
       addAssistantMessage(payload)
       break
     case 'stream_event':
-      // Ignore streaming deltas -- we show the final assistant message
       break
     case 'result':
       addTurnSeparator()
@@ -537,6 +571,14 @@ function sendMessageText(text) {
     showToast('Not connected', 'error')
     return
   }
+  // Show the message locally immediately
+  var msgs = document.getElementById('chat-messages')
+  var div = document.createElement('div')
+  div.className = 'msg msg-user'
+  div.textContent = text
+  msgs.appendChild(div)
+  scrollToBottom()
+  // Send via WebSocket
   ws.send(JSON.stringify({
     type: 'user',
     message: { role: 'user', content: text },
