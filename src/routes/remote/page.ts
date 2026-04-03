@@ -165,7 +165,7 @@ export function getRemoteControlPage(): string {
 </div>
 
 <script>
-var apiKey = sessionStorage.getItem('dashboard_api_key') || ''
+var apiKey = sessionStorage.getItem('dashboard_api_key') || localStorage.getItem('dashboard_api_key') || ''
 var currentSessionId = null
 var ws = null
 var autoScrollEnabled = true
@@ -227,6 +227,7 @@ function doLogin() {
   if (!key) return
   apiKey = key
   sessionStorage.setItem('dashboard_api_key', key)
+  localStorage.setItem('dashboard_api_key', key)
   apiFetch('GET', '/dashboard/api/sessions').then(function(res) {
     if (res.ok) { hideLogin(); loadSessions(); checkAutoConnect() }
     else { sessionStorage.removeItem('dashboard_api_key'); apiKey = ''; showToast('Invalid API key', 'error') }

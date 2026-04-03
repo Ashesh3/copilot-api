@@ -132,7 +132,7 @@ export function getDashboardPage(): string {
   <div class="section" id="sec-settings"><div class="section-header"><h2>Settings</h2></div><div id="settings-content"></div></div>
 </div>
 <script>
-var apiKey = sessionStorage.getItem('dashboard_api_key') || ''
+var apiKey = sessionStorage.getItem('dashboard_api_key') || localStorage.getItem('dashboard_api_key') || ''
 var currentSection = 'overview'
 var refreshTimers = {}
 var expandedSessions = {}
@@ -180,6 +180,7 @@ function doLogin() {
   if (!key) return
   apiKey = key
   sessionStorage.setItem('dashboard_api_key', key)
+  localStorage.setItem('dashboard_api_key', key)
   apiFetch('GET', '/dashboard/api/overview').then(function(res) {
     if (res.ok) { hideLogin(); navigate(window.location.hash.slice(1) || 'overview') }
     else { sessionStorage.removeItem('dashboard_api_key'); apiKey = ''; showToast('Invalid API key', 'error') }
@@ -235,6 +236,7 @@ function renderSessions(sessions) {
   if (sessions.length === 0) { document.getElementById('sessions-list').innerHTML = '<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg><p>No active sessions. Sessions are created when Claude Code connects.</p></div>'; return }
   var eyeSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>'
   var trashSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>'
+  var rcSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>'
   var html = '<div class="session-list">'
   sessions.forEach(function(s) {
     var dotClass = s.state === 'running' ? 'running' : s.state === 'requires_action' ? 'requires_action' : s.state === 'connected' ? 'connected' : 'idle'
@@ -246,6 +248,7 @@ function renderSessions(sessions) {
     html += '<span class="badge ' + stateBadge + '">' + esc(s.state || 'unknown') + '</span>'
     html += '<span class="badge ' + typeBadge + '">' + esc(s.type) + '</span>'
     html += '<span class="session-actions">'
+    if (s.type === 'code-session') html += '<button class="icon-btn" onclick="window.open(\\'/remote?session=' + esc(s.id) + '\\',\\'_blank\\')" title="Remote Control" style="color:#22C55E;border-color:#22C55E40">' + rcSvg + '</button>'
     if (s.type === 'code-session') html += '<button class="icon-btn" onclick="toggleEvents(\\'' + esc(s.id) + '\\')" title="View events">' + eyeSvg + '</button>'
     html += '<button class="icon-btn danger" onclick="destroySession(\\'' + esc(s.id) + '\\',\\'' + esc(s.type) + '\\')" title="Remove">' + trashSvg + '</button>'
     html += '</span></div><div class="session-meta"><span class="session-id">' + esc(s.id) + '</span>'

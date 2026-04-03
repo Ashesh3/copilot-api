@@ -78,6 +78,16 @@ server.onError(async (err, c) => {
 
 server.get("/", (c) => c.text("Server running"))
 
+// Redirect /code/session_* URLs (from Claude Code's remote-control output) to the remote control page
+server.get("/code/:sessionKey", (c) => {
+  const sessionKey = c.req.param("sessionKey")
+  const sessionId =
+    sessionKey.startsWith("session_") ?
+      `cse_${sessionKey.slice("session_".length)}`
+    : sessionKey
+  return c.redirect(`/remote?session=${sessionId}`)
+})
+
 // v1 stubs for endpoints Claude Code calls that don't need full implementations
 server.get("/v1/environment_providers", (c) => c.json({ environments: [] }))
 server.post("/v1/environment_providers/cloud/create", (c) =>
