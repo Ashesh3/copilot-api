@@ -102,7 +102,13 @@ describe("isDeterministic400", () => {
     expect(isDeterministic400("")).toBe(false)
   })
 
-  test("should handle non-JSON body", () => {
-    expect(isDeterministic400("Bad Request")).toBe(false)
+  test("should flag generic 'Bad Request' body as deterministic", () => {
+    expect(isDeterministic400("Bad Request")).toBe(true)
+    expect(isDeterministic400("Bad Request\n")).toBe(true)
+  })
+
+  test("should NOT flag 'Bad Request' embedded in other error messages", () => {
+    const body = '{"error":"Bad Request: rate limit exceeded"}'
+    expect(isDeterministic400(body)).toBe(false)
   })
 })

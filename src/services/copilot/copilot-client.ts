@@ -111,7 +111,13 @@ export function isDeterministic400(body: string): boolean {
     "messages must be non-empty",
     "invalid_request_body",
   ]
-  return patterns.some((pattern) => body.includes(pattern))
+  if (patterns.some((pattern) => body.includes(pattern))) return true
+
+  // Copilot's generic "Bad Request\n" response indicates a payload structure issue
+  // (e.g. null max_tokens) that won't resolve on retry
+  if (body.trim() === "Bad Request") return true
+
+  return false
 }
 
 async function isDeterministic400Response(

@@ -185,6 +185,13 @@ async function handleCompletionInner(
     (m) => m.id === anthropicPayload.model,
   )
 
+  // Fill in default max_tokens if null/undefined (Copilot rejects null max_tokens with 400)
+  // Type says `number` but clients may send null at runtime
+  if (!anthropicPayload.max_tokens && selectedModel) {
+    anthropicPayload.max_tokens =
+      selectedModel.capabilities.limits.max_output_tokens
+  }
+
   // Log the requested vs routed model
   let apiType = "ChatCompletions"
   if (shouldUseResponsesApi(selectedModel)) {
