@@ -6,6 +6,8 @@
  *       "gpt-4-1" -> "gpt-4.1"
  *       "gpt-5-1-codex" -> "gpt-5.1-codex"
  *       "claude-opus-4.6-1m" -> "claude-opus-4.6-1m" (preserved)
+ *       "gpt-4o-mini-2024-07-18" -> "gpt-4o-mini-2024-07-18" (date preserved)
+ *       "gpt-4.1-2025-04-14" -> "gpt-4.1-2025-04-14" (date preserved)
  */
 export function normalizeModelName(model: string): string {
   // Convert Anthropic's [1m] context suffix to Copilot's -1m format
@@ -22,8 +24,18 @@ export function normalizeModelName(model: string): string {
     normalized = normalized.slice(0, -suffix.length)
   }
 
-  // Replace dash with dot only between two digits: "4-5" -> "4.5"
-  normalized = normalized.replaceAll(/(\d)-(\d)/g, (_, p1, p2) => `${p1}.${p2}`)
+  // Protect date suffixes (e.g., "-2024-07-18", "-2025-04-14") from digit-dash-digit conversion.
+  // These are real Copilot model IDs and must be preserved as-is.
+  let dateSuffix = ""
+  const dateMatch = normalized.match(/-(\d{4}-\d{2}-\d{2})$/)
+  if (dateMatch) {
+    dateSuffix = `-${dateMatch[1]}`
+    normalized = normalized.slice(0, -dateSuffix.length)
+  }
 
-  return normalized + suffix
+  // Replace dash with dot only between two single digits: "4-5" -> "4.5"
+  // Multi-digit sequences like "4-0613" or "2024-07" are model IDs, not versions.
+  normalized = normalized.replaceAll(/(?<!\d)(\d)-(\d)(?!\d)/g, (_, p1, p2) => `${p1}.${p2}`)
+
+  return normalized + dateSuffix + suffix
 }
