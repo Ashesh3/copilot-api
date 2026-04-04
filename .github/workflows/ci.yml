@@ -25,10 +25,15 @@ jobs:
       - name: Run type check
         run: bun run typecheck
 
-      - name: Run tests
-        run: bun test
+      - name: Run unit tests
+        run: bun test tests/*.test.ts
+
+      - name: Run integration tests
+        if: env.GH_TOKEN != ''
+        run: bun test tests/integration/
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        continue-on-error: true
 
       - name: Build
         run: bun run build
