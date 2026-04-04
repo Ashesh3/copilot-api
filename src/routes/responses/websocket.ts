@@ -24,6 +24,9 @@ const RESPONSES_ENDPOINT = "/responses"
 // Paths that trigger WebSocket upgrade for responses
 const WS_PATHS = new Set(["/v1/responses", "/responses"])
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null
+
 /**
  * Check if a request is a responses WebSocket upgrade and handle it.
  * Returns "upgraded" if the upgrade was handled, "auth_failed" if auth failed,
@@ -145,14 +148,7 @@ async function handleResponseCreate(
 ): Promise<void> {
   await checkRateLimit(state)
 
-  // Codex CLI sends { type: "response.create", response: { ...payload } }
-  // Extract the nested "response" object, or fall back to top-level fields
-  const nested = message.response as Record<string, unknown> | undefined
-  const payload = (nested
-    ?? (() => {
-      const { type: _type, ...rest } = message
-      return rest
-    })()) as unknown as ResponsesPayload
+  const payload = extractResponsesPayload(message)
 
   // Force streaming for WebSocket mode
   payload.stream = true
@@ -202,6 +198,24 @@ async function handleResponseCreate(
     const processed = fixStreamIds(data, event, idTracker)
     ws.send(processed)
   }
+}
+
+export function extractResponsesPayload(
+  message: Record<string, unknown>,
+): ResponsesPayload {
+  const { type: _type, response, ...topLevel } = message
+
+  if (!isRecord(response)) {
+    return topLevel as ResponsesPayload
+  }
+
+  // Some clients split fields between top-level and nested response payload.
+  // Merge both so required continuation fields (e.g. previous_response_id)
+  // are preserved regardless of where they're sent.
+  return {
+    ...topLevel,
+    ...response,
+  } as ResponsesPayload
 }
 
 async function streamChatCompletionsOverWs(

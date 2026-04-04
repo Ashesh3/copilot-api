@@ -92,6 +92,35 @@ test("preserves previous_response_id when sending Responses API requests", async
   expect(lastRequestBody?.previous_response_id).toBe("resp_previous")
 })
 
+test("preserves prompt and conversation_id when sending Responses API requests", async () => {
+  const prompt = {
+    id: "pmpt_123",
+    variables: { task: "greeting" },
+  }
+
+  await createResponses(
+    {
+      model: "gpt-4o",
+      prompt,
+      conversation_id: "conv_abc",
+    } as {
+      model: string
+      prompt: {
+        id: string
+        variables: { task: string }
+      }
+      conversation_id: string
+    },
+    {
+      vision: false,
+      initiator: "user",
+    },
+  )
+
+  expect(lastRequestBody?.prompt).toEqual(prompt)
+  expect(lastRequestBody?.conversation_id).toBe("conv_abc")
+})
+
 test("injects runtime-style default reasoning settings for direct Responses requests", async () => {
   await createResponses(
     {
