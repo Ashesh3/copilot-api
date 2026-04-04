@@ -9,6 +9,8 @@ export interface ResponsesPayload {
   model: string
   instructions?: string | null
   input?: string | Array<ResponseInputItem>
+  prompt?: string | Record<string, unknown> | null
+  conversation_id?: string | null
   tools?: Array<Tool> | null
   tool_choice?: ToolChoiceOptions | ToolChoiceFunction
   temperature?: number | null
@@ -394,6 +396,9 @@ const KNOWN_RESPONSES_FIELDS = new Set([
   "model",
   "instructions",
   "input",
+  "prompt",
+  "conversation_id",
+  "generate",
   "tools",
   "tool_choice",
   "temperature",
