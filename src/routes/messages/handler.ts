@@ -513,12 +513,10 @@ const executeChatCompletions = async (
 
     const finalResponse =
       hadWebSearch ?
-        await resolveWebSearchCalls(
-          initialResponse,
-          finalPayload,
+        await resolveWebSearchCalls(initialResponse, finalPayload, {
           initiatorOverride,
-          c.req.raw.signal,
-        )
+          abortSignal: c.req.raw.signal,
+        })
       : initialResponse
 
     logger.debug(
@@ -593,12 +591,10 @@ const executeChatCompletions = async (
                   finishSpan()
                   const initialResp = buffered.initialResponse
                   const resolved = await Sentry.withActiveSpan(null, () =>
-                    resolveWebSearchCalls(
-                      initialResp,
-                      finalPayload,
+                    resolveWebSearchCalls(initialResp, finalPayload, {
                       initiatorOverride,
-                      c.req.raw.signal,
-                    ),
+                      abortSignal: c.req.raw.signal,
+                    }),
                   )
                   const anthropicResponse = translateToAnthropic(
                     resolved,

@@ -8,10 +8,16 @@ import { server } from "../src/server"
 const originalFetch = globalThis.fetch
 let lastUpstreamPayload: ChatCompletionsPayload | undefined
 
+function parseRequestBody(init?: RequestInit): ChatCompletionsPayload {
+  if (typeof init?.body !== "string") {
+    return {} as ChatCompletionsPayload
+  }
+
+  return JSON.parse(init.body) as ChatCompletionsPayload
+}
+
 const fetchMock = mock((_url: string, init?: RequestInit) => {
-  lastUpstreamPayload = JSON.parse(
-    String(init?.body ?? "{}"),
-  ) as ChatCompletionsPayload
+  lastUpstreamPayload = parseRequestBody(init)
 
   return new Response(
     JSON.stringify({

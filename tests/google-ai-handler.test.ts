@@ -11,6 +11,22 @@ const originalFetch = globalThis.fetch
 let lastResponsesPayload: ResponsesPayload | undefined
 let lastHeaders: Record<string, string> | undefined
 
+function parseRequestBody(init?: RequestInit): ResponsesPayload {
+  if (typeof init?.body !== "string") {
+    return {} as ResponsesPayload
+  }
+
+  return JSON.parse(init.body) as ResponsesPayload
+}
+
+function hasEphemeralCacheControl(value: unknown): boolean {
+  return (
+    typeof value === "object"
+    && value !== null
+    && (value as { type?: unknown }).type === "ephemeral"
+  )
+}
+
 const responsesResult = {
   id: "resp_1",
   object: "response" as const,
@@ -68,9 +84,7 @@ const responsesCapableModels: ModelsResponse = {
 }
 
 const fetchMock = mock((_url: string, init?: RequestInit) => {
-  lastResponsesPayload = JSON.parse(
-    String(init?.body ?? "{}"),
-  ) as ResponsesPayload
+  lastResponsesPayload = parseRequestBody(init)
   lastHeaders = init?.headers as Record<string, string> | undefined
 
   return new Response(JSON.stringify(responsesResult), {
@@ -116,11 +130,12 @@ test("adds reasoning defaults on the Google AI responses path", async () => {
   )
 
   expect(response.status).toBe(200)
-  expect(lastResponsesPayload?.reasoning).toEqual(
-    expect.objectContaining({
-      summary: "auto",
-    }),
-  )
+  const reasoning = lastResponsesPayload?.reasoning
+  expect(reasoning).toBeTruthy()
+  if (!reasoning) {
+    throw new Error("Expected reasoning defaults on responses payload")
+  }
+  expect(reasoning.summary).toBe("auto")
   expect(lastResponsesPayload?.include).toContain("reasoning.encrypted_content")
 })
 
@@ -159,21 +174,34 @@ test("adds prompt caching markers on the Google AI responses path", async () => 
   )
 
   expect(response.status).toBe(200)
-  expect(lastResponsesPayload?.input).toEqual(
-    expect.arrayContaining([
-      expect.objectContaining({
-        role: "assistant",
-        copilot_cache_control: { type: "ephemeral" },
-      }),
-    ]),
-  )
-  expect(lastResponsesPayload?.tools).toEqual(
-    expect.arrayContaining([
-      expect.objectContaining({
-        copilot_cache_control: { type: "ephemeral" },
-      }),
-    ]),
-  )
+  const inputItems = lastResponsesPayload?.input
+  expect(Array.isArray(inputItems)).toBe(true)
+  if (!Array.isArray(inputItems)) {
+    throw new TypeError("Expected input array on responses payload")
+  }
+  const hasAssistantCacheMarker = inputItems.some((item) => {
+    const record = item as {
+      role?: unknown
+      copilot_cache_control?: unknown
+    }
+    return (
+      record.role === "assistant"
+      && hasEphemeralCacheControl(record.copilot_cache_control)
+    )
+  })
+  expect(hasAssistantCacheMarker).toBe(true)
+
+  const tools = lastResponsesPayload?.tools
+  expect(Array.isArray(tools)).toBe(true)
+  if (!Array.isArray(tools)) {
+    throw new TypeError("Expected tools array on responses payload")
+  }
+  const hasToolCacheMarker = tools.some((tool) => {
+    return hasEphemeralCacheControl(
+      (tool as { copilot_cache_control?: unknown }).copilot_cache_control,
+    )
+  })
+  expect(hasToolCacheMarker).toBe(true)
 })
 
 test("detects vision and initiator headers on the Google AI responses path", async () => {
@@ -226,7 +254,8 @@ test("rejects unsupported Google root request fields instead of silently droppin
   )
 
   expect(response.status).toBe(400)
-  await expect(response.json()).resolves.toEqual({
+  const body = await response.json()
+  expect(body).toEqual({
     error: {
       code: 400,
       message: "Unsupported Google AI request field(s): cachedContent",
@@ -251,7 +280,8 @@ test("rejects unsupported non-function Google tools instead of dropping them", a
   )
 
   expect(response.status).toBe(400)
-  await expect(response.json()).resolves.toEqual({
+  const body = await response.json()
+  expect(body).toEqual({
     error: {
       code: 400,
       message: "Unsupported Google AI tool type(s): googleSearch",

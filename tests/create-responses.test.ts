@@ -37,11 +37,16 @@ function createSuccessResponse(): Response {
   )
 }
 
+function parseRequestBody(init?: RequestInit): Record<string, unknown> {
+  if (typeof init?.body !== "string") {
+    return {}
+  }
+
+  return JSON.parse(init.body) as Record<string, unknown>
+}
+
 const fetchMock = mock((_url: string, init?: RequestInit) => {
-  lastRequestBody = JSON.parse(String(init?.body ?? "{}")) as Record<
-    string,
-    unknown
-  >
+  lastRequestBody = parseRequestBody(init)
   requestBodies.push(lastRequestBody)
 
   return queuedResponses.shift() ?? createSuccessResponse()

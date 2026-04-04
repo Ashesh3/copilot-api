@@ -6,7 +6,10 @@ import type {
   ChatCompletionResponse,
 } from "~/services/copilot/create-chat-completions"
 
-import { type AnthropicStreamState } from "~/routes/messages/anthropic-types"
+import {
+  type AnthropicMessageDeltaEvent,
+  type AnthropicStreamState,
+} from "~/routes/messages/anthropic-types"
 import { translateToAnthropic } from "~/routes/messages/non-stream-translation"
 import * as streamTranslation from "~/routes/messages/stream-translation"
 import { translateChunkToAnthropicEvents } from "~/routes/messages/stream-translation"
@@ -192,6 +195,7 @@ describe("OpenAI to Anthropic Non-Streaming Response Translation", () => {
   })
 })
 
+// eslint-disable-next-line max-lines-per-function
 describe("OpenAI to Anthropic Streaming Response Translation", () => {
   test("extracts Copilot-specific chunk metadata for telemetry", () => {
     const chunk = {
@@ -207,7 +211,7 @@ describe("OpenAI to Anthropic Streaming Response Translation", () => {
       copilot_usage: { completion_tokens: number }
     }
 
-    expect(streamTranslation.extractCopilotChunkMetadata?.(chunk)).toEqual({
+    expect(streamTranslation.extractCopilotChunkMetadata(chunk)).toEqual({
       annotations: [{ type: "citation", title: "doc" }],
       usage: { completion_tokens: 12 },
     })
@@ -443,16 +447,12 @@ describe("OpenAI to Anthropic Streaming Response Translation", () => {
     )
 
     const messageDelta = translatedStream.find(
-      (event) => event.type === "message_delta",
+      (event): event is AnthropicMessageDeltaEvent =>
+        event.type === "message_delta",
     )
 
-    expect(messageDelta).toEqual(
-      expect.objectContaining({
-        delta: expect.objectContaining({
-          stop_reason: "tool_use",
-        }),
-      }),
-    )
+    expect(messageDelta).toBeDefined()
+    expect(messageDelta?.delta.stop_reason).toBe("tool_use")
   })
 
   test("closes an open tool block before fallback terminal events", () => {

@@ -35,8 +35,8 @@ afterAll(() => {
 test("allows a short burst before rejecting when the token bucket is exhausted", async () => {
   const limiterState = createState({ rateLimitSeconds: 5 })
 
-  await expect(checkRateLimit(limiterState)).resolves.toBeUndefined()
-  await expect(checkRateLimit(limiterState)).resolves.toBeUndefined()
+  await checkRateLimit(limiterState)
+  await checkRateLimit(limiterState)
 
   try {
     await checkRateLimit(limiterState)
@@ -55,5 +55,5 @@ test("refills a token after the configured interval elapses", async () => {
 
   currentTime += 5_000
 
-  await expect(checkRateLimit(limiterState)).resolves.toBeUndefined()
+  await checkRateLimit(limiterState)
 })

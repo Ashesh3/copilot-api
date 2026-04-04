@@ -45,9 +45,7 @@ export function translateToOpenAI(
     temperature: payload.temperature,
     top_p: payload.top_p,
     user: payload.metadata?.user_id,
-    response_format: translateOutputFormatToOpenAI(
-      payload.output_config?.format,
-    ),
+    response_format: translateOutputFormatToOpenAI(payload.output_config),
     tools: translateAnthropicToolsToOpenAI(payload.tools),
     tool_choice: translateAnthropicToolChoiceToOpenAI(payload.tool_choice),
     snippy: { enabled: false },
@@ -56,12 +54,9 @@ export function translateToOpenAI(
 }
 
 function translateOutputFormatToOpenAI(
-  format: AnthropicMessagesPayload["output_config"] extends (
-    { format?: infer T }
-  ) ?
-    T
-  : never,
+  outputConfig: AnthropicMessagesPayload["output_config"],
 ): ChatCompletionsPayload["response_format"] | undefined {
+  const format = outputConfig?.format
   if (!format) {
     return undefined
   }

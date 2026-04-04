@@ -28,9 +28,10 @@ test("returns a clear quota exhausted message for upstream 402 responses", async
   })
 
   const response = await app.request("/quota")
+  const body = await response.json()
 
   expect(response.status).toBe(402)
-  await expect(response.json()).resolves.toEqual({
+  expect(body).toEqual({
     error: {
       message: "Copilot quota exhausted",
       type: "error",
@@ -56,9 +57,10 @@ test("returns a clear version compatibility message for upstream 466 responses",
   })
 
   const response = await app.request("/compatibility")
+  const body = await response.json()
 
   expect(response.status).toBe(466)
-  await expect(response.json()).resolves.toEqual({
+  expect(body).toEqual({
     error: {
       message: "Copilot client version mismatch",
       type: "error",
@@ -84,9 +86,10 @@ test("does not forward raw upstream error bodies to clients", async () => {
   })
 
   const response = await app.request("/internal-error")
+  const body = await response.json()
 
   expect(response.status).toBe(500)
-  await expect(response.json()).resolves.toEqual({
+  expect(body).toEqual({
     error: {
       message: "Failed to create chat completions",
       type: "error",

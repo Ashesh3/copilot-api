@@ -20,7 +20,8 @@ modelRoutes.get("/", async (c) => {
       await cacheModels()
     }
 
-    const visibleModels = state.models?.data.filter(isModelVisible) ?? []
+    const visibleModels =
+      state.models?.data.filter((model) => isModelVisible(model)) ?? []
 
     // Copilot models
     const copilotModels = visibleModels.map((model) => ({

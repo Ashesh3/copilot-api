@@ -238,6 +238,31 @@ function setAuthorizationHeader(
   return nextHeaders
 }
 
+function shouldRefreshSingleToken401(
+  response: Response,
+  attempt: number,
+  maxAttempts: number,
+): boolean {
+  return (
+    response.status === 401
+    && !state.isMultiToken
+    && Boolean(state.githubToken)
+    && attempt < maxAttempts - 1
+  )
+}
+
+function shouldRetryHttpStatus(
+  response: Response,
+  attempt: number,
+  maxAttempts: number,
+): boolean {
+  return RETRYABLE_STATUSES.has(response.status) && attempt < maxAttempts - 1
+}
+
+function setCurrentCopilotToken(token: string): void {
+  state.copilotToken = token
+}
+
 // --- Retry Delay Calculation ---
 
 function parseRetryAfterSeconds(
@@ -288,17 +313,18 @@ export async function copilotFetch(
   const url = `${fetchOptions?.baseUrl ?? copilotBaseUrl()}${path}`
   const maxAttempts = MAX_RETRIES + 1
   let retryBackoffExtraSeconds = INITIAL_RETRY_BACKOFF_EXTRA_SECONDS
+  let requestInit = init
 
   let lastError: Error | undefined
   let lastResponse: Response | undefined
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
-      const headers = toHeaderRecord(init?.headers)
+      const headers = toHeaderRecord(requestInit?.headers)
       clearQuotaHeaders()
 
       const response = await fetch(url, {
-        ...init,
+        ...requestInit,
         headers,
       })
 
@@ -309,17 +335,12 @@ export async function copilotFetch(
       }
       captureQuotaHeaders(response)
 
-      if (
-        response.status === 401
-        && !state.isMultiToken
-        && state.githubToken
-        && attempt < maxAttempts - 1
-      ) {
+      if (shouldRefreshSingleToken401(response, attempt, maxAttempts)) {
         consola.warn(`HTTP 401 on ${path}, refreshing Copilot token`)
         const tokenData = await getCopilotToken()
-        state.copilotToken = tokenData.token
-        init = {
-          ...init,
+        setCurrentCopilotToken(tokenData.token)
+        requestInit = {
+          ...requestInit,
           headers: setAuthorizationHeader(headers, tokenData.token),
         }
         continue
@@ -331,10 +352,7 @@ export async function copilotFetch(
       }
 
       // Check for retryable HTTP status codes
-      if (
-        RETRYABLE_STATUSES.has(response.status)
-        && attempt < maxAttempts - 1
-      ) {
+      if (shouldRetryHttpStatus(response, attempt, maxAttempts)) {
         lastResponse = response
         const rawDelaySeconds = calculateHttpRetryDelay(
           response.headers.get("retry-after"),

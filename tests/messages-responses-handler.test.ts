@@ -9,6 +9,14 @@ import { server } from "../src/server"
 const originalFetch = globalThis.fetch
 let lastResponsesPayload: ResponsesPayload | undefined
 
+function parseRequestBody(init?: RequestInit): ResponsesPayload {
+  if (typeof init?.body !== "string") {
+    return {} as ResponsesPayload
+  }
+
+  return JSON.parse(init.body) as ResponsesPayload
+}
+
 const responsesCapableModels: ModelsResponse = {
   object: "list",
   data: [
@@ -66,9 +74,7 @@ const responsesResult = {
 }
 
 const fetchMock = mock((_url: string, init?: RequestInit) => {
-  lastResponsesPayload = JSON.parse(
-    String(init?.body ?? "{}"),
-  ) as ResponsesPayload
+  lastResponsesPayload = parseRequestBody(init)
 
   return new Response(JSON.stringify(responsesResult), {
     status: 200,

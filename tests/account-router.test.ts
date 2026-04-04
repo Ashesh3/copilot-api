@@ -10,12 +10,23 @@ const originalFetch = globalThis.fetch
 const queuedResults: Array<Error | Response> = []
 const capturedRequests: Array<{ url: string; init?: RequestInit }> = []
 
+function getRequestUrl(url: string | URL | Request): string {
+  if (typeof url === "string") {
+    return url
+  }
+  if (url instanceof URL) {
+    return url.toString()
+  }
+  return url.url
+}
+
 const fetchMock = mock((url: string | URL | Request, init?: RequestInit) => {
-  capturedRequests.push({ url: String(url), init })
+  const requestUrl = getRequestUrl(url)
+  capturedRequests.push({ url: requestUrl, init })
 
   const next = queuedResults.shift()
   if (!next) {
-    throw new Error(`Unexpected fetch: ${String(url)}`)
+    throw new Error(`Unexpected fetch: ${requestUrl}`)
   }
 
   if (next instanceof Error) {
@@ -116,9 +127,17 @@ test("does not fail over aborted multi-token requests", async () => {
     new Response("{}", { status: 200 }),
   )
 
-  await expect(
-    routedFetch("/chat/completions", { method: "POST" }, { modelId }),
-  ).rejects.toThrow("The operation was aborted")
+  let thrownError: unknown
+  try {
+    await routedFetch("/chat/completions", { method: "POST" }, { modelId })
+  } catch (error) {
+    thrownError = error
+  }
+  expect(thrownError).toBeInstanceOf(Error)
+  if (!(thrownError instanceof Error)) {
+    throw new TypeError("Expected routedFetch to throw an Error")
+  }
+  expect(thrownError.message).toContain("aborted")
 
   expect(capturedRequests).toHaveLength(1)
   expect(capturedRequests[0]?.init?.headers).toMatchObject({

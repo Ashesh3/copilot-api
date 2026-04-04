@@ -53,9 +53,12 @@ export const extractWebSearchCalls = (
 export const resolveWebSearchCalls = async (
   response: ChatCompletionResponse,
   payload: ChatCompletionsPayload,
-  initiatorOverride?: "agent" | "user",
-  abortSignal?: AbortSignal,
+  options: {
+    initiatorOverride?: "agent" | "user"
+    abortSignal?: AbortSignal
+  } = {},
 ): Promise<ChatCompletionResponse> => {
+  const { initiatorOverride, abortSignal } = options
   let current = response
   let currentPayload = payload
 

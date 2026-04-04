@@ -43,7 +43,7 @@ export function clearQuotaHeaders(): void {
   }
 
   for (const key of Object.keys(headers)) {
-    delete headers[key]
+    Reflect.deleteProperty(headers, key)
   }
 }
 

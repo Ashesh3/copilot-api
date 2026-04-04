@@ -677,10 +677,12 @@ const parseUserId = (
   try {
     const parsed = JSON.parse(userId) as unknown
     if (isRecord(parsed)) {
-      const safetyIdentifier =
-        typeof parsed.account_uuid === "string" ? parsed.account_uuid
-        : typeof parsed.device_id === "string" ? parsed.device_id
-        : null
+      let safetyIdentifier: string | null = null
+      if (typeof parsed.account_uuid === "string") {
+        safetyIdentifier = parsed.account_uuid
+      } else if (typeof parsed.device_id === "string") {
+        safetyIdentifier = parsed.device_id
+      }
       const promptCacheKey =
         typeof parsed.session_id === "string" ? parsed.session_id : null
 

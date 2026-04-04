@@ -11,8 +11,19 @@ const queuedResponses: Array<Response> = []
 const queuedFailures: Array<Error> = []
 const capturedRequests: Array<{ url: string; init?: RequestInit }> = []
 
+function getRequestUrl(url: string | URL | Request): string {
+  if (typeof url === "string") {
+    return url
+  }
+  if (url instanceof URL) {
+    return url.toString()
+  }
+  return url.url
+}
+
 const fetchMock = mock((url: string | URL | Request, init?: RequestInit) => {
-  capturedRequests.push({ url: String(url), init })
+  const requestUrl = getRequestUrl(url)
+  capturedRequests.push({ url: requestUrl, init })
 
   const failure = queuedFailures.shift()
   if (failure) {
@@ -21,7 +32,7 @@ const fetchMock = mock((url: string | URL | Request, init?: RequestInit) => {
 
   const next = queuedResponses.shift()
   if (!next) {
-    throw new Error(`Unexpected fetch: ${String(url)}`)
+    throw new Error(`Unexpected fetch: ${requestUrl}`)
   }
 
   return next
@@ -171,15 +182,23 @@ test("does not retry unknown upstream 400 responses", async () => {
 test("does not retry aborted upstream fetches", async () => {
   queuedFailures.push(new Error("The operation was aborted"))
 
-  await expect(
-    copilotFetch("/chat/completions", {
+  let thrownError: unknown
+  try {
+    await copilotFetch("/chat/completions", {
       method: "POST",
       headers: {
         Authorization: "Bearer expired-copilot-token",
         "content-type": "application/json",
       },
-    }),
-  ).rejects.toThrow("The operation was aborted")
+    })
+  } catch (error) {
+    thrownError = error
+  }
+  expect(thrownError).toBeInstanceOf(Error)
+  if (!(thrownError instanceof Error)) {
+    throw new TypeError("Expected copilotFetch to throw an Error")
+  }
+  expect(thrownError.message).toContain("aborted")
 
   expect(capturedRequests).toHaveLength(1)
 })

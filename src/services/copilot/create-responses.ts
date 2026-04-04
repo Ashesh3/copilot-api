@@ -121,33 +121,51 @@ export interface ResponseInputImage {
   detail: "low" | "high" | "auto"
 }
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null
+
+function isInputImage(value: unknown): value is ResponseInputImage {
+  return isRecord(value) && value.type === "input_image"
+}
+
+function hasArrayContent(
+  item: ResponseInputItem,
+): item is ResponseInputMessage & { content: Array<ResponseInputContent> } {
+  return isRecord(item) && Array.isArray(item.content)
+}
+
 function removeInputImages(payload: ResponsesPayload): boolean {
   if (!Array.isArray(payload.input)) {
     return false
   }
 
   let removedImages = false
-
-  payload.input = payload.input.filter((item) => {
-    if (item.type === "input_image") {
+  const filteredInput: Array<ResponseInputItem> = []
+  for (const item of payload.input) {
+    if (isInputImage(item)) {
       removedImages = true
-      return false
+      continue
     }
 
-    if (Array.isArray(item.content)) {
-      item.content = item.content.filter((part) => {
-        if (part.type === "input_image") {
+    if (hasArrayContent(item)) {
+      const filteredContent: Array<ResponseInputContent> = []
+      for (const part of item.content) {
+        if (isInputImage(part)) {
           removedImages = true
-          return false
+          continue
         }
-
-        return true
-      })
-      return item.content.length > 0
+        filteredContent.push(part)
+      }
+      if (filteredContent.length === 0) {
+        continue
+      }
+      filteredInput.push({ ...item, content: filteredContent })
+      continue
     }
 
-    return true
-  })
+    filteredInput.push(item)
+  }
+  payload.input = filteredInput
 
   return removedImages && payload.input.length > 0
 }

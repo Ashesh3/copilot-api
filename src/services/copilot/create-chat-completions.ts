@@ -19,6 +19,9 @@ type StreamEvent = {
   retry?: number
 }
 
+const hasOverloadText = (value: unknown): boolean =>
+  typeof value === "string" && value.toLowerCase().includes("overloaded")
+
 const normalizeFunctionTool = (tool: unknown): void => {
   if (!isRecord(tool) || tool.type !== "function") {
     return
@@ -210,21 +213,16 @@ const isOverloadStreamEvent = (event: StreamEvent | undefined): boolean => {
     return false
   }
 
-  const hasOverloadText = (value: unknown): boolean =>
-    typeof value === "string" && value.toLowerCase().includes("overloaded")
-
-  if (hasOverloadText(data)) {
-    return true
-  }
-
   try {
     const parsed = JSON.parse(data) as unknown
     if (!isRecord(parsed)) {
       return false
     }
-    if (hasOverloadText(parsed.message)) {
+
+    if (event.event === "error" && hasOverloadText(parsed.message)) {
       return true
     }
+
     const error = parsed.error
     if (isRecord(error) && hasOverloadText(error.message)) {
       return true
@@ -254,12 +252,17 @@ const createBufferedEventStream = (
   },
 })
 
+interface StreamingRetryOptions {
+  payload: ChatCompletionsPayload
+  retry: () => Promise<Response>
+  retriesRemaining?: number
+}
+
 const handleStreamingResponse = async (
   response: Response,
-  payload: ChatCompletionsPayload,
-  retry: () => Promise<Response>,
-  retriesRemaining = 1,
+  options: StreamingRetryOptions,
 ): Promise<AsyncIterable<StreamEvent>> => {
+  const { payload, retry, retriesRemaining = 1 } = options
   if (!response.ok) {
     await throwFailedResponse(response, payload)
   }
@@ -280,12 +283,10 @@ const handleStreamingResponse = async (
   await iterator.return?.()
 
   const retryResponse = await retry()
-  return handleStreamingResponse(
-    retryResponse,
-    payload,
-    retry,
-    retriesRemaining - 1,
-  )
+  return handleStreamingResponse(retryResponse, {
+    ...options,
+    retriesRemaining: retriesRemaining - 1,
+  })
 }
 
 export const createChatCompletions = async (
@@ -297,7 +298,8 @@ export const createChatCompletions = async (
 ) => {
   const vision = hasVisionContent(payload.messages)
   const initiator = detectInitiator(payload.messages, options?.initiator)
-  let headerOpts = { vision, initiator }
+  const headerOpts = { vision, initiator }
+  const nonVisionHeaderOpts = { vision: false, initiator }
 
   normalizePayload(payload)
   injectJsonInstruction(payload)
@@ -308,9 +310,10 @@ export const createChatCompletions = async (
     { method: "POST", body: JSON.stringify(payload), signal: options?.signal },
     { modelId: payload.model, headerOptions: headerOpts },
   )
+  const shouldRetryWithoutImages = response.status === 413 && vision
 
   // 413 image fallback: if request has images and response is 413, remove images and retry
-  if (response.status === 413 && vision) {
+  if (shouldRetryWithoutImages) {
     consola.warn("413 Payload Too Large with images, retrying without images")
     removeImages(payload)
     const { response: retryResponse } = await routedFetch(
@@ -320,24 +323,29 @@ export const createChatCompletions = async (
         body: JSON.stringify(payload),
         signal: options?.signal,
       },
-      { modelId: payload.model, headerOptions: { vision: false, initiator } },
+      { modelId: payload.model, headerOptions: nonVisionHeaderOpts },
     )
-    headerOpts = { vision: false, initiator }
     response = retryResponse
   }
 
+  const streamHeaderOpts =
+    shouldRetryWithoutImages ? nonVisionHeaderOpts : headerOpts
+
   if (payload.stream) {
-    return handleStreamingResponse(response, payload, async () => {
-      const { response: retryResponse } = await routedFetch(
-        "/chat/completions",
-        {
-          method: "POST",
-          body: JSON.stringify(payload),
-          signal: options?.signal,
-        },
-        { modelId: payload.model, headerOptions: headerOpts },
-      )
-      return retryResponse
+    return handleStreamingResponse(response, {
+      payload,
+      retry: async () => {
+        const { response: retryResponse } = await routedFetch(
+          "/chat/completions",
+          {
+            method: "POST",
+            body: JSON.stringify(payload),
+            signal: options?.signal,
+          },
+          { modelId: payload.model, headerOptions: streamHeaderOpts },
+        )
+        return retryResponse
+      },
     })
   }
 

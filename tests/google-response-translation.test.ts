@@ -91,6 +91,7 @@ test("preserves modelVersion and promptFeedback on streaming Responses translati
   const translated = translateResponsesStreamEventToGoogle(
     {
       type: "response.incomplete",
+      sequence_number: 1,
       response: {
         id: "resp_1",
         object: "response",

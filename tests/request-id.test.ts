@@ -103,6 +103,9 @@ test("generates a request ID when the client does not supply one", async () => {
 
   expect(response.status).toBe(200)
   expect(generatedRequestId).toBeTruthy()
+  if (!generatedRequestId) {
+    throw new TypeError("Expected x-request-id header to be present")
+  }
   expect(lastHeaders?.["X-Request-Id"]).toBe(generatedRequestId)
 })
 
