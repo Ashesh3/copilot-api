@@ -297,6 +297,7 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
             const response = await createResponses(payload, {
               vision,
               initiator,
+              signal: c.req.raw.signal,
             })
 
             const accountId = getLastUsedAccountId()
@@ -335,6 +336,7 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
                   await resolveResponsesWebSearchCalls(response, payload, {
                     vision,
                     initiator,
+                    signal: c.req.raw.signal,
                   })
                 : response
 
@@ -402,6 +404,7 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
                     resolveResponsesWebSearchCalls(completedResult, payload, {
                       vision,
                       initiator,
+                      signal: c.req.raw.signal,
                     }),
                   )
                   await emitResponsesResultAsStream(stream, resolved)
@@ -450,6 +453,7 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
       const result = (await createResponses(payload, {
         vision,
         initiator,
+        signal: c.req.raw.signal,
       })) as ResponsesResult
 
       const accountId = getLastUsedAccountId()
@@ -486,6 +490,7 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
       await resolveResponsesWebSearchCalls(initialResult, payload, {
         vision,
         initiator,
+        signal: c.req.raw.signal,
       })
     : initialResult
 
@@ -517,7 +522,11 @@ export const useFunctionApplyPatch = (payload: ResponsesPayload): void => {
       const toolsArr = payload.tools
       for (let i = 0; i < toolsArr.length; i++) {
         const t = toolsArr[i]
-        if (t.type === "custom" && t.name === "apply_patch") {
+        if (t.type !== "custom" || typeof t.name !== "string") {
+          continue
+        }
+
+        if (t.name === "apply_patch") {
           toolsArr[i] = {
             type: "function",
             name: t.name,
@@ -1185,7 +1194,9 @@ const handleWithChatCompletions = async (
         },
       },
       async (span) => {
-        const response = await createChatCompletions(ccPayload)
+        const response = await createChatCompletions(ccPayload, {
+          signal: c.req.raw.signal,
+        })
 
         // Track which account handled this request (multi-token mode)
         const fallbackAccountId = getLastUsedAccountId()
@@ -1253,7 +1264,9 @@ const handleWithChatCompletions = async (
         }
 
         try {
-          const response = await createChatCompletions(ccPayload)
+          const response = await createChatCompletions(ccPayload, {
+            signal: c.req.raw.signal,
+          })
 
           const fallbackAccountId = getLastUsedAccountId()
           if (fallbackAccountId !== undefined) {

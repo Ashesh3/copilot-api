@@ -125,9 +125,9 @@ const executeRequest = async (
         },
       },
       async (span) => {
-        const response = (await createChatCompletions(
-          payload,
-        )) as ChatCompletionResponse
+        const response = (await createChatCompletions(payload, {
+          signal: c.req.raw.signal,
+        })) as ChatCompletionResponse
 
         // Track which account handled this request (multi-token mode)
         const accountId = getLastUsedAccountId()
@@ -205,7 +205,9 @@ const handleStreamingResponse = (
         }
 
         try {
-          const response = await createChatCompletions(payload)
+          const response = await createChatCompletions(payload, {
+            signal: c.req.raw.signal,
+          })
 
           // Track which account handled this request (multi-token mode)
           const accountId = getLastUsedAccountId()

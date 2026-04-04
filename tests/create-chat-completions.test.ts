@@ -7,6 +7,26 @@ import { createChatCompletions } from "../src/services/copilot/create-chat-compl
 
 // Save and restore original fetch so integration tests aren't affected
 const originalFetch = globalThis.fetch
+const queuedResponses: Array<Response> = []
+
+const createDefaultResponse = () =>
+  new Response(
+    JSON.stringify({
+      id: "123",
+      object: "chat.completion",
+      choices: [],
+    }),
+    {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    },
+  )
+
+const createSSEStreamResponse = (messages: Array<string>) =>
+  new Response(`${messages.join("\n\n")}\n\n`, {
+    status: 200,
+    headers: { "content-type": "text/event-stream" },
+  })
 
 // Mock state
 state.copilotToken = "test-token"
@@ -15,25 +35,8 @@ state.accountType = "individual"
 // Helper to mock fetch
 const fetchMock = mock(
   (_url: string, opts: { headers: Record<string, string> }) => {
-    const responseHeaders = new Headers()
-    return {
-      ok: true,
-      status: 200,
-      json: () => ({ id: "123", object: "chat.completion", choices: [] }),
-      text: () =>
-        Promise.resolve(
-          JSON.stringify({
-            id: "123",
-            object: "chat.completion",
-            choices: [],
-          }),
-        ),
-      clone: () => ({
-        text: () => Promise.resolve(""),
-      }),
-      headers: responseHeaders,
-      _requestHeaders: opts.headers,
-    }
+    void opts
+    return queuedResponses.shift() ?? createDefaultResponse()
   },
 )
 
@@ -60,6 +63,7 @@ test("sets X-Initiator to agent if tool/assistant present", async () => {
     fetchMock.mock.calls[0][1] as { headers: Record<string, string> }
   ).headers
   expect(headers["X-Initiator"]).toBe("agent")
+  expect(headers["X-Interaction-Type"]).toBe("conversation-agent")
 })
 
 test("sets X-Initiator to user if only user present", async () => {
@@ -76,6 +80,7 @@ test("sets X-Initiator to user if only user present", async () => {
     fetchMock.mock.calls[1][1] as { headers: Record<string, string> }
   ).headers
   expect(headers["X-Initiator"]).toBe("user")
+  expect(headers["X-Interaction-Type"]).toBe("conversation-user")
 })
 
 test("skips non-function tools during payload normalization", async () => {
@@ -103,4 +108,84 @@ test("skips non-function tools during payload normalization", async () => {
     (sentBody.tools[1]?.function as { parameters?: Record<string, unknown> })
       .parameters,
   ).toEqual({ type: "object", properties: {} })
+})
+
+test("retries streamed chat completions when the first SSE event is an overload error", async () => {
+  const overloadEvent = 'data: {"error":{"message":"Overloaded"}}'
+  const successChunk = JSON.stringify({
+    id: "chunk-1",
+    object: "chat.completion.chunk",
+    created: 1,
+    model: "gpt-test",
+    choices: [
+      {
+        index: 0,
+        delta: { content: "hello" },
+        finish_reason: null,
+        logprobs: null,
+      },
+    ],
+  })
+
+  queuedResponses.push(
+    createSSEStreamResponse([overloadEvent]),
+    createSSEStreamResponse([`data: ${successChunk}`, "data: [DONE]"]),
+  )
+
+  const startCallCount = fetchMock.mock.calls.length
+  const payload: ChatCompletionsPayload = {
+    model: "gpt-test",
+    stream: true,
+    messages: [{ role: "user", content: "hello" }],
+  }
+
+  const response = await createChatCompletions(payload)
+  const receivedEvents: Array<string> = []
+
+  for await (const chunk of response as AsyncIterable<{ data?: string }>) {
+    if (chunk.data) {
+      receivedEvents.push(chunk.data)
+    }
+  }
+
+  expect(fetchMock.mock.calls.length - startCallCount).toBe(2)
+  expect(receivedEvents).toEqual([successChunk, "[DONE]"])
+})
+
+test("defaults stream_options.include_usage for direct streaming chat completions", async () => {
+  const payload: ChatCompletionsPayload = {
+    model: "gpt-test",
+    stream: true,
+    messages: [{ role: "user", content: "hello" }],
+  }
+
+  queuedResponses.push(createSSEStreamResponse(["data: [DONE]"]))
+
+  await createChatCompletions(payload)
+
+  const lastCall = fetchMock.mock.calls.at(-1)?.[1] as unknown as {
+    body: string
+  }
+  const sentBody = JSON.parse(lastCall.body) as ChatCompletionsPayload
+
+  expect(sentBody.stream_options).toEqual({ include_usage: true })
+})
+
+test("rewrites upstream chat completions 404 responses to 502", async () => {
+  queuedResponses.push(
+    new Response("model not found", {
+      status: 404,
+      headers: { "content-type": "text/plain" },
+    }),
+  )
+
+  try {
+    await createChatCompletions({
+      model: "gpt-test",
+      messages: [{ role: "user", content: "hello" }],
+    })
+    throw new Error("Expected createChatCompletions to reject")
+  } catch (error) {
+    expect(error).toHaveProperty("response.status", 502)
+  }
 })

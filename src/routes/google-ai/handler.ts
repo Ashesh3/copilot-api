@@ -14,6 +14,7 @@ import { streamSSE } from "hono/streaming"
 import { getLastUsedAccountId } from "~/lib/account-router"
 import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
+import { getReasoningEffortForModel } from "~/lib/config"
 import { createHandlerLogger } from "~/lib/logger"
 import { normalizeModelName } from "~/lib/model-resolver"
 import { checkRateLimit } from "~/lib/rate-limit"
@@ -21,6 +22,11 @@ import { setRequestContext } from "~/lib/request-logger"
 import { state } from "~/lib/state"
 import { getTokenCount } from "~/lib/tokenizer"
 import { isNullish } from "~/lib/utils"
+import {
+  addPromptCaching,
+  detectInitiator,
+  hasVisionContent,
+} from "~/services/copilot/copilot-client"
 import {
   createChatCompletions,
   type ChatCompletionChunk,
@@ -53,6 +59,57 @@ import {
 const logger = createHandlerLogger("google-ai-handler")
 
 const RESPONSES_ENDPOINT = "/responses"
+
+function getCopilotCacheControl(
+  value: unknown,
+): { type: "ephemeral" } | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined
+  }
+
+  const cacheControl = (value as Record<string, unknown>).copilot_cache_control
+  if (!cacheControl || typeof cacheControl !== "object") {
+    return undefined
+  }
+
+  const type = (cacheControl as Record<string, unknown>).type
+  return type === "ephemeral" ? { type } : undefined
+}
+
+function getUnsupportedGoogleRootFields(
+  payload: GoogleAIRequest,
+): Array<string> {
+  const unsupported: Array<string> = []
+
+  if (payload.cachedContent !== undefined) {
+    unsupported.push("cachedContent")
+  }
+  if (payload.labels !== undefined) {
+    unsupported.push("labels")
+  }
+  if (payload.safetySettings !== undefined) {
+    unsupported.push("safetySettings")
+  }
+
+  return unsupported
+}
+
+function getUnsupportedGoogleToolTypes(
+  payload: GoogleAIRequest,
+): Array<string> {
+  const unsupported = new Set<string>()
+
+  for (const tool of payload.tools ?? []) {
+    if (tool.googleSearch) {
+      unsupported.add("googleSearch")
+    }
+    if (tool.codeExecution) {
+      unsupported.add("codeExecution")
+    }
+  }
+
+  return [...unsupported]
+}
 
 /**
  * Parse model name and action from the URL path segment.
@@ -125,6 +182,34 @@ export async function handleGoogleAI(c: Context) {
   const googlePayload = await c.req.json<GoogleAIRequest>()
   logger.debug("Google AI request payload:", JSON.stringify(googlePayload))
 
+  const unsupportedRootFields = getUnsupportedGoogleRootFields(googlePayload)
+  if (unsupportedRootFields.length > 0) {
+    return c.json(
+      {
+        error: {
+          code: 400,
+          message: `Unsupported Google AI request field(s): ${unsupportedRootFields.join(", ")}`,
+          status: "INVALID_ARGUMENT",
+        },
+      },
+      400,
+    )
+  }
+
+  const unsupportedToolTypes = getUnsupportedGoogleToolTypes(googlePayload)
+  if (unsupportedToolTypes.length > 0) {
+    return c.json(
+      {
+        error: {
+          code: 400,
+          message: `Unsupported Google AI tool type(s): ${unsupportedToolTypes.join(", ")}`,
+          status: "INVALID_ARGUMENT",
+        },
+      },
+      400,
+    )
+  }
+
   // Translate Google → OpenAI ChatCompletions format
   const openAIPayload = translateGoogleToOpenAI(googlePayload, model, isStream)
 
@@ -192,7 +277,9 @@ async function handleWithChatCompletions(
   c: Context,
   finalPayload: ChatCompletionsPayload,
 ) {
-  const response = await createChatCompletions(finalPayload)
+  const response = await createChatCompletions(finalPayload, {
+    signal: c.req.raw.signal,
+  })
 
   // Track which account handled this request (multi-token mode)
   const ccAccountId = getLastUsedAccountId()
@@ -283,6 +370,11 @@ function openAIPayloadToResponses(
     stream: payload.stream,
     store: false,
     parallel_tool_calls: true,
+    reasoning: {
+      effort: getReasoningEffortForModel(payload.model),
+      summary: "auto",
+    },
+    include: ["reasoning.encrypted_content"],
   }
 }
 
@@ -301,6 +393,7 @@ function convertMessagesToInput(
           createResponseMessage(
             "user",
             typeof msg.content === "string" ? msg.content : "",
+            getCopilotCacheControl(msg),
           ),
         )
         break
@@ -311,6 +404,7 @@ function convertMessagesToInput(
             createResponseMessage(
               "assistant",
               typeof msg.content === "string" ? msg.content : "",
+              getCopilotCacheControl(msg),
             ),
           )
         }
@@ -358,6 +452,9 @@ function convertToolsToResponses(
       description: t.function.description ?? null,
       parameters: t.function.parameters,
       strict: false,
+      ...(getCopilotCacheControl(t) ?
+        { copilot_cache_control: getCopilotCacheControl(t) }
+      : {}),
     })) ?? null
   )
 }
@@ -387,8 +484,16 @@ function convertToolChoiceToResponses(
 function createResponseMessage(
   role: "user" | "assistant",
   content: string,
+  copilotCacheControl?: { type: "ephemeral" },
 ): ResponseInputMessage {
-  return { type: "message", role, content }
+  return {
+    type: "message",
+    role,
+    content,
+    ...(copilotCacheControl ?
+      { copilot_cache_control: copilotCacheControl }
+    : {}),
+  } as ResponseInputMessage
 }
 
 async function handleWithResponsesApi(
@@ -396,15 +501,19 @@ async function handleWithResponsesApi(
   payload: ChatCompletionsPayload,
   isStream: boolean,
 ) {
+  addPromptCaching(payload.messages, payload.tools ?? undefined)
   const responsesPayload = openAIPayloadToResponses(payload)
+  const vision = hasVisionContent(payload.messages)
+  const initiator = detectInitiator(payload.messages)
   logger.debug(
     "Translated Responses payload:",
     JSON.stringify(responsesPayload),
   )
 
   const response = await createResponses(responsesPayload, {
-    vision: false,
-    initiator: "user",
+    vision,
+    initiator,
+    signal: c.req.raw.signal,
   })
 
   // Track which account handled this request (multi-token mode)

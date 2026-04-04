@@ -8,7 +8,61 @@ import { AsyncLocalStorage } from "node:async_hooks"
  * threading it through every function signature.
  */
 export const clientSessionStorage = new AsyncLocalStorage<string | undefined>()
+export const requestIdStorage = new AsyncLocalStorage<string | undefined>()
+export const quotaHeadersStorage = new AsyncLocalStorage<
+  Record<string, string>
+>()
+export const routedAccountStorage = new AsyncLocalStorage<{
+  lastUsedAccountId?: number
+}>()
 
 export function getClientSessionId(): string | undefined {
   return clientSessionStorage.getStore()
+}
+
+export function getRequestId(): string | undefined {
+  return requestIdStorage.getStore()
+}
+
+export function getQuotaHeaders(): Record<string, string> {
+  return quotaHeadersStorage.getStore() ?? {}
+}
+
+export function setQuotaHeader(name: string, value: string): void {
+  const headers = quotaHeadersStorage.getStore()
+  if (!headers) {
+    return
+  }
+  headers[name] = value
+}
+
+export function clearQuotaHeaders(): void {
+  const headers = quotaHeadersStorage.getStore()
+  if (!headers) {
+    return
+  }
+
+  for (const key of Object.keys(headers)) {
+    delete headers[key]
+  }
+}
+
+export function getLastUsedRoutedAccountId(): number | undefined {
+  return routedAccountStorage.getStore()?.lastUsedAccountId
+}
+
+export function setLastUsedRoutedAccountId(
+  accountId: number | undefined,
+): void {
+  const routingState = routedAccountStorage.getStore()
+  if (!routingState) {
+    return
+  }
+
+  if (accountId === undefined) {
+    delete routingState.lastUsedAccountId
+    return
+  }
+
+  routingState.lastUsedAccountId = accountId
 }

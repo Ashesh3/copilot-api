@@ -5,24 +5,57 @@ import type { State } from "./state"
 import { HTTPError } from "./error"
 import { sleep } from "./utils"
 
+const RATE_LIMIT_BURST_WINDOW_SECONDS = 10
+
+function getRateLimitBucketCapacity(rateLimitSeconds: number): number {
+  return Math.max(
+    1,
+    Math.ceil(RATE_LIMIT_BURST_WINDOW_SECONDS / rateLimitSeconds),
+  )
+}
+
+function getRefilledBucketTokens(
+  state: State,
+  now: number,
+): {
+  tokens: number
+  refillRatePerSecond: number
+} {
+  const rateLimitSeconds = state.rateLimitSeconds
+  if (rateLimitSeconds === undefined || rateLimitSeconds <= 0) {
+    return { tokens: Infinity, refillRatePerSecond: Infinity }
+  }
+
+  const capacity = getRateLimitBucketCapacity(rateLimitSeconds)
+  const refillRatePerSecond = 1 / rateLimitSeconds
+  const previousTokens = state.rateLimitBucketTokens ?? capacity
+  const previousUpdatedAt = state.rateLimitBucketUpdatedAt ?? now
+  const elapsedSeconds = Math.max(0, (now - previousUpdatedAt) / 1000)
+
+  return {
+    tokens: Math.min(
+      capacity,
+      previousTokens + elapsedSeconds * refillRatePerSecond,
+    ),
+    refillRatePerSecond,
+  }
+}
+
 export async function checkRateLimit(state: State) {
-  if (state.rateLimitSeconds === undefined) return
+  if (state.rateLimitSeconds === undefined || state.rateLimitSeconds <= 0)
+    return
 
   const now = Date.now()
+  const { tokens, refillRatePerSecond } = getRefilledBucketTokens(state, now)
 
-  if (!state.lastRequestTimestamp) {
+  if (tokens >= 1) {
+    state.rateLimitBucketTokens = tokens - 1
+    state.rateLimitBucketUpdatedAt = now
     state.lastRequestTimestamp = now
     return
   }
 
-  const elapsedSeconds = (now - state.lastRequestTimestamp) / 1000
-
-  if (elapsedSeconds > state.rateLimitSeconds) {
-    state.lastRequestTimestamp = now
-    return
-  }
-
-  const waitTimeSeconds = Math.ceil(state.rateLimitSeconds - elapsedSeconds)
+  const waitTimeSeconds = Math.ceil((1 - tokens) / refillRatePerSecond)
 
   if (!state.rateLimitWait) {
     consola.warn(
@@ -39,8 +72,12 @@ export async function checkRateLimit(state: State) {
     `Rate limit reached. Waiting ${waitTimeSeconds} seconds before proceeding...`,
   )
   await sleep(waitTimeMs)
-  // eslint-disable-next-line require-atomic-updates
-  state.lastRequestTimestamp = now
+
+  const readyAt = Date.now()
+  const nextBucket = getRefilledBucketTokens(state, readyAt)
+  state.rateLimitBucketTokens = Math.max(0, nextBucket.tokens - 1)
+  state.rateLimitBucketUpdatedAt = readyAt
+  state.lastRequestTimestamp = readyAt
   consola.info("Rate limit wait completed, proceeding with request")
   return
 }

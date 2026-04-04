@@ -2,6 +2,7 @@ import consola from "consola"
 import { events } from "fetch-event-stream"
 
 import { routedFetch } from "~/lib/account-router"
+import { getReasoningEffortForModel } from "~/lib/config"
 import { HTTPError } from "~/lib/error"
 
 export interface ResponsesPayload {
@@ -19,6 +20,15 @@ export interface ResponsesPayload {
   prompt_cache_key?: string | null
   parallel_tool_calls?: boolean | null
   store?: boolean | null
+  text?: {
+    format?: { type: string; [key: string]: unknown } | null
+  } | null
+  task_budget?: {
+    type: "tokens"
+    total: number
+    remaining?: number
+  } | null
+  previous_response_id?: string | null
   reasoning?: Reasoning | null
   include?: Array<ResponseIncludable>
   service_tier?: string | null // NOTE: Unsupported by GitHub Copilot
@@ -109,6 +119,37 @@ export interface ResponseInputImage {
   image_url?: string | null
   file_id?: string | null
   detail: "low" | "high" | "auto"
+}
+
+function removeInputImages(payload: ResponsesPayload): boolean {
+  if (!Array.isArray(payload.input)) {
+    return false
+  }
+
+  let removedImages = false
+
+  payload.input = payload.input.filter((item) => {
+    if (item.type === "input_image") {
+      removedImages = true
+      return false
+    }
+
+    if (Array.isArray(item.content)) {
+      item.content = item.content.filter((part) => {
+        if (part.type === "input_image") {
+          removedImages = true
+          return false
+        }
+
+        return true
+      })
+      return item.content.length > 0
+    }
+
+    return true
+  })
+
+  return removedImages && payload.input.length > 0
 }
 
 export interface ResponsesResult {
@@ -324,6 +365,7 @@ export type CreateResponsesReturn = ResponsesResult | ResponsesStream
 interface ResponsesRequestOptions {
   vision: boolean
   initiator: "agent" | "user"
+  signal?: AbortSignal
 }
 
 /**
@@ -345,6 +387,9 @@ const KNOWN_RESPONSES_FIELDS = new Set([
   "prompt_cache_key",
   "parallel_tool_calls",
   "store",
+  "text",
+  "task_budget",
+  "previous_response_id",
   "reasoning",
   "include",
   "copilot_cache_control",
@@ -364,9 +409,9 @@ function sanitizeResponsesPayload(
 
 export const createResponses = async (
   payload: ResponsesPayload,
-  { vision, initiator }: ResponsesRequestOptions,
+  { vision, initiator, signal }: ResponsesRequestOptions,
 ): Promise<CreateResponsesReturn> => {
-  const headerOpts = { vision, initiator }
+  let headerOpts = { vision, initiator }
 
   // service_tier is not supported by github copilot
   delete payload.service_tier
@@ -374,29 +419,40 @@ export const createResponses = async (
   // Zero-data retention enforcement
   payload.store = false
 
-  // Ensure reasoning includes encrypted_content and defaults summary to "auto"
-  if (payload.reasoning) {
-    if (!payload.include) {
-      payload.include = []
-    }
-    if (!payload.include.includes("reasoning.encrypted_content")) {
-      payload.include.push("reasoning.encrypted_content")
-    }
-    if (!payload.reasoning.summary) {
-      payload.reasoning.summary = "auto"
-    }
+  // Match runtime defaults for direct Responses requests.
+  payload.reasoning ??= {}
+  payload.reasoning.effort ??= getReasoningEffortForModel(payload.model)
+  payload.reasoning.summary ??= "auto"
+
+  if (!payload.include) {
+    payload.include = []
+  }
+  if (!payload.include.includes("reasoning.encrypted_content")) {
+    payload.include.push("reasoning.encrypted_content")
   }
 
   // Strip unknown fields — only forward fields the Copilot API recognizes.
   // The [key: string]: unknown index signature on ResponsesPayload allows
   // arbitrary client fields to leak through; sanitize before forwarding.
-  const sanitizedPayload = sanitizeResponsesPayload(payload)
+  let sanitizedPayload = sanitizeResponsesPayload(payload)
 
-  const { response } = await routedFetch(
+  let { response } = await routedFetch(
     "/responses",
-    { method: "POST", body: JSON.stringify(sanitizedPayload) },
+    { method: "POST", body: JSON.stringify(sanitizedPayload), signal },
     { modelId: payload.model, headerOptions: headerOpts },
   )
+
+  if (response.status === 413 && vision && removeInputImages(payload)) {
+    consola.warn("413 Payload Too Large with images, retrying without images")
+    sanitizedPayload = sanitizeResponsesPayload(payload)
+    headerOpts = { vision: false, initiator }
+    const { response: retryResponse } = await routedFetch(
+      "/responses",
+      { method: "POST", body: JSON.stringify(sanitizedPayload), signal },
+      { modelId: payload.model, headerOptions: headerOpts },
+    )
+    response = retryResponse
+  }
 
   if (!response.ok) {
     consola.error("Failed to create responses", response)

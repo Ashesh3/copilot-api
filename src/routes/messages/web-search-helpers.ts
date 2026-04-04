@@ -54,6 +54,7 @@ export const resolveWebSearchCalls = async (
   response: ChatCompletionResponse,
   payload: ChatCompletionsPayload,
   initiatorOverride?: "agent" | "user",
+  abortSignal?: AbortSignal,
 ): Promise<ChatCompletionResponse> => {
   let current = response
   let currentPayload = payload
@@ -107,6 +108,7 @@ export const resolveWebSearchCalls = async (
       async (span) => {
         const result = (await createChatCompletions(currentPayload, {
           initiator: initiatorOverride,
+          signal: abortSignal,
         })) as ChatCompletionResponse
 
         const inputTokens = result.usage?.prompt_tokens ?? 0
@@ -133,7 +135,11 @@ export const resolveWebSearchCalls = async (
 export const resolveResponsesWebSearchCalls = async (
   result: ResponsesResult,
   payload: ResponsesPayload,
-  requestOptions: { vision: boolean; initiator: "agent" | "user" },
+  requestOptions: {
+    vision: boolean
+    initiator: "agent" | "user"
+    signal?: AbortSignal
+  },
 ): Promise<ResponsesResult> => {
   let current = result
   let currentPayload = payload

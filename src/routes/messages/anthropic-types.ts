@@ -25,6 +25,15 @@ export interface AnthropicMessagesPayload {
   service_tier?: "auto" | "standard_only"
   output_config?: {
     effort?: "low" | "medium" | "high" | "max"
+    format?: {
+      type: string
+      [key: string]: unknown
+    }
+    task_budget?: {
+      type: "tokens"
+      total: number
+      remaining?: number
+    }
   }
   speed?: "fast"
 }
@@ -209,6 +218,7 @@ export interface AnthropicStreamState {
       anthropicBlockIndex: number
     }
   }
+  toolCallIndexOffset?: 0 | 1
   // Track usage from chunks (may come separately from finish_reason)
   pendingUsage?: {
     prompt_tokens: number

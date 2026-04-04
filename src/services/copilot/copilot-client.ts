@@ -2,19 +2,27 @@ import * as Sentry from "@sentry/bun"
 import consola from "consola"
 import { randomUUID } from "node:crypto"
 
+import {
+  clearQuotaHeaders,
+  getRequestId,
+  setQuotaHeader,
+} from "~/lib/request-session"
 import { state } from "~/lib/state"
 import { sleep } from "~/lib/utils"
+import { getCopilotToken } from "~/services/github/get-copilot-token"
 
 // --- Constants ---
 
 export const API_VERSION = "2026-01-09"
+// Intentionally reuse the VS Code chat integration bucket unless a separate
+// Copilot rate-limit bucket is explicitly needed for this proxy.
 export const INTEGRATION_ID = "vscode-chat"
-export const MAX_RETRIES = 5
+export const MAX_RETRIES = 1
 export const BASE_DELAY_SECONDS = 5
 export const BACKOFF_FACTOR = 2
 export const INITIAL_RETRY_BACKOFF_EXTRA_SECONDS = 1
 export const MAX_DELAY_SECONDS = 180
-export const RETRYABLE_STATUSES = new Set([400, 429, 500, 502, 503])
+export const RETRYABLE_STATUSES = new Set([408, 429, 500, 502, 503, 504])
 
 // --- Base URL ---
 
@@ -40,19 +48,24 @@ export function copilotHeaders(
     throw new Error("Copilot token is not set. Cannot build request headers.")
   }
 
+  const initiator = options?.initiator ?? "user"
+
   const headers: Record<string, string> = {
     "content-type": "application/json",
     accept: "application/json",
     Authorization: `Bearer ${token}`,
+    "User-Agent": "copilot-api",
     "Copilot-Integration-Id": INTEGRATION_ID,
     "editor-version": `vscode/${state.vsCodeVersion ?? "1.104.3"}`,
     "Openai-Intent": "conversation-agent",
     "X-GitHub-Api-Version": API_VERSION,
-    "X-Initiator": options?.initiator ?? "user",
-    "X-Request-Id": randomUUID(),
+    "X-Initiator": initiator,
+    "X-Request-Id": getRequestId() ?? randomUUID(),
     "X-Interaction-Id": state.sessionId,
     "X-Client-Session-Id": state.sessionId,
-    "X-Interaction-Type": "conversation-agent",
+    "X-Agent-Task-Id": state.sessionId,
+    "X-Interaction-Type":
+      initiator === "user" ? "conversation-user" : "conversation-agent",
   }
 
   if (options?.vision) {
@@ -95,6 +108,14 @@ export function parseQuotaHeaders(
   }
 
   return found ? result : undefined
+}
+
+function captureQuotaHeaders(response: Response): void {
+  for (const [key, value] of response.headers.entries()) {
+    if (key.toLowerCase().startsWith("x-quota-snapshot-")) {
+      setQuotaHeader(key, value)
+    }
+  }
 }
 
 // --- Deterministic 400 Detection ---
@@ -145,6 +166,14 @@ function isRetryableError(error: unknown): boolean {
   const causeMessage =
     error.cause instanceof Error ? error.cause.message.toLowerCase() : ""
 
+  if (
+    error.name === "AbortError"
+    || message.includes("aborted")
+    || causeMessage.includes("aborted")
+  ) {
+    return false
+  }
+
   const retryablePatterns = [
     "fetch failed",
     "connection reset",
@@ -193,6 +222,20 @@ function toHeaderRecord(
     }
   }
   return headers
+}
+
+function setAuthorizationHeader(
+  headers: Record<string, string>,
+  token: string,
+): Record<string, string> {
+  const value = `Bearer ${token}`
+  const nextHeaders = { ...headers, Authorization: value }
+
+  if ("authorization" in nextHeaders) {
+    nextHeaders.authorization = value
+  }
+
+  return nextHeaders
 }
 
 // --- Retry Delay Calculation ---
@@ -252,6 +295,7 @@ export async function copilotFetch(
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
       const headers = toHeaderRecord(init?.headers)
+      clearQuotaHeaders()
 
       const response = await fetch(url, {
         ...init,
@@ -263,20 +307,34 @@ export async function copilotFetch(
       if (quota) {
         consola.debug("Copilot quota snapshot:", quota)
       }
+      captureQuotaHeaders(response)
+
+      if (
+        response.status === 401
+        && !state.isMultiToken
+        && state.githubToken
+        && attempt < maxAttempts - 1
+      ) {
+        consola.warn(`HTTP 401 on ${path}, refreshing Copilot token`)
+        const tokenData = await getCopilotToken()
+        state.copilotToken = tokenData.token
+        init = {
+          ...init,
+          headers: setAuthorizationHeader(headers, tokenData.token),
+        }
+        continue
+      }
+
+      if (response.status === 400) {
+        await isDeterministic400Response(response)
+        return response
+      }
 
       // Check for retryable HTTP status codes
       if (
         RETRYABLE_STATUSES.has(response.status)
         && attempt < maxAttempts - 1
       ) {
-        // Don't retry deterministic 400 errors (e.g. invalid thinking block signatures)
-        if (
-          response.status === 400
-          && (await isDeterministic400Response(response))
-        ) {
-          return response
-        }
-
         lastResponse = response
         const rawDelaySeconds = calculateHttpRetryDelay(
           response.headers.get("retry-after"),

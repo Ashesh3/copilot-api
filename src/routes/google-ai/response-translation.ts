@@ -55,6 +55,12 @@ function mapFinishReason(
   }
 }
 
+function getPromptFeedback(
+  finishReason: GoogleCandidate["finishReason"],
+): Record<string, unknown> | undefined {
+  return finishReason === "SAFETY" ? { blockReason: "SAFETY" } : undefined
+}
+
 // ─── Usage Translation ───
 
 function translateUsage(
@@ -134,9 +140,20 @@ export function translateOpenAIToGoogle(
     }
   })
 
+  const promptFeedback =
+    (
+      response.choices.some(
+        (choice) => choice.finish_reason === "content_filter",
+      )
+    ) ?
+      { blockReason: "SAFETY" }
+    : undefined
+
   return {
     candidates,
     usageMetadata: translateUsage(response.usage),
+    modelVersion: response.model,
+    promptFeedback,
   }
 }
 
@@ -222,23 +239,27 @@ function buildStreamChunk(options: {
   finishReason: OpenAIFinishReason
   index: number
   usage: ChatCompletionChunk["usage"]
+  modelVersion?: string
 }): GoogleStreamChunk {
-  const { parts, finishReason, index, usage } = options
+  const { parts, finishReason, index, usage, modelVersion } = options
   // Ensure at least empty text for non-tool-call finish
   if (parts.length === 0 && finishReason) {
     parts.push({ text: "" })
   }
+  const mappedFinishReason = finishReason ? mapFinishReason(finishReason) : null
   const candidate: GoogleCandidate = {
     content: {
       role: "model",
       parts,
     },
-    finishReason: finishReason ? mapFinishReason(finishReason) : null,
+    finishReason: mappedFinishReason,
     index,
   }
   return {
     candidates: [candidate],
     usageMetadata: usage ? translateUsage(usage) : undefined,
+    modelVersion,
+    promptFeedback: getPromptFeedback(mappedFinishReason),
   }
 }
 
@@ -256,6 +277,7 @@ export function translateChunkToGoogle(
       return {
         candidates: [],
         usageMetadata: translateUsage(chunk.usage),
+        modelVersion: chunk.model,
       }
     }
     return null
@@ -290,6 +312,7 @@ export function translateChunkToGoogle(
     finishReason: choice.finish_reason,
     index: choice.index,
     usage: chunk.usage,
+    modelVersion: chunk.model,
   })
 }
 
@@ -386,6 +409,8 @@ export function translateResponsesResultToGoogle(
       },
     ],
     usageMetadata: translateResponsesUsage(result.usage),
+    modelVersion: result.model,
+    promptFeedback: getPromptFeedback(finishReason),
   }
 }
 
@@ -447,6 +472,8 @@ export function translateResponsesStreamEventToGoogle(
           },
         ],
         usageMetadata: translateResponsesUsage(event.response.usage),
+        modelVersion: event.response.model,
+        promptFeedback: getPromptFeedback(finishReason),
       }
     }
 

@@ -173,7 +173,7 @@ export function getReasoningEffortForModel(
 ): "none" | "minimal" | "low" | "medium" | "high" | "xhigh" {
   if (override) return override
   const config = getConfig()
-  return config.modelReasoningEfforts?.[model] ?? "high"
+  return config.modelReasoningEfforts?.[model] ?? "medium"
 }
 
 export function shouldCompactUseSmallModel(): boolean {

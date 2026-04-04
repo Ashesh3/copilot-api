@@ -1,11 +1,18 @@
 import { Hono } from "hono"
 import { cors } from "hono/cors"
+import { randomUUID } from "node:crypto"
 
 import { apiKeyGuard } from "./lib/api-key-guard"
 import { forwardError } from "./lib/error"
 import { createAuthMiddleware } from "./lib/request-auth"
 import { requestLogger } from "./lib/request-logger"
-import { clientSessionStorage } from "./lib/request-session"
+import {
+  clientSessionStorage,
+  getQuotaHeaders,
+  quotaHeadersStorage,
+  requestIdStorage,
+  routedAccountStorage,
+} from "./lib/request-session"
 import { completionRoutes } from "./routes/chat-completions/route"
 import { getCodeLauncherPage } from "./routes/code-launcher/page"
 import { codeSessionsRoutes } from "./routes/code-sessions/route"
@@ -38,7 +45,23 @@ server.use(cors())
 // Capture X-Claude-Code-Session-Id for session-affinity routing in multi-token mode
 server.use("*", async (c, next) => {
   const sessionId = c.req.header("x-claude-code-session-id")
-  await clientSessionStorage.run(sessionId, next)
+  const requestId = c.req.header("x-request-id") ?? randomUUID()
+
+  await requestIdStorage.run(requestId, async () => {
+    await clientSessionStorage.run(sessionId, async () => {
+      await quotaHeadersStorage.run({}, async () => {
+        await routedAccountStorage.run({}, async () => {
+          await next()
+
+          for (const [key, value] of Object.entries(getQuotaHeaders())) {
+            c.header(key, value)
+          }
+        })
+      })
+    })
+  })
+
+  c.header("x-request-id", requestId)
 })
 
 // Routes that bypass apiKeyGuard and auth middleware

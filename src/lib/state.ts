@@ -24,6 +24,8 @@ export interface State {
   // Rate limiting configuration
   rateLimitSeconds?: number
   lastRequestTimestamp?: number
+  rateLimitBucketTokens?: number
+  rateLimitBucketUpdatedAt?: number
 }
 
 export const state: State = {

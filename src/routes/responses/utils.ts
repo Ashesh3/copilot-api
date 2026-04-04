@@ -13,10 +13,9 @@ export const getResponsesRequestOptions = (
 }
 
 /**
- * Expand compaction items back into regular conversation messages.
- * Codex CLI sends back compacted content as { type: "compaction", encrypted_content: base64(summary) }.
- * The upstream API cannot decrypt our fake encrypted_content, so we decode it and
- * replace the compaction item with an assistant message containing the summary.
+ * Expand proxy-generated compaction compatibility items back into regular messages.
+ * Native Codex compaction items should be preserved as-is; only the proxy's own
+ * synthetic "cmp_" items use base64 summaries that upstream cannot decrypt.
  */
 export const expandCompactionItems = (payload: ResponsesPayload): void => {
   if (!Array.isArray(payload.input)) return
@@ -26,6 +25,8 @@ export const expandCompactionItems = (payload: ResponsesPayload): void => {
     if (
       record.type !== "compaction"
       || typeof record.encrypted_content !== "string"
+      || typeof record.id !== "string"
+      || !record.id.startsWith("cmp_")
     ) {
       return item
     }

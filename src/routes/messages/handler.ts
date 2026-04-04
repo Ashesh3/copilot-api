@@ -12,7 +12,7 @@ import { applyReplacementsToPayload } from "~/lib/auto-replace"
 import { HTTPError } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
 import { normalizeModelName } from "~/lib/model-resolver"
-import { parseModelSuffix } from "~/lib/model-suffix"
+import { type ReasoningEffort, parseModelSuffix } from "~/lib/model-suffix"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { setRequestContext } from "~/lib/request-logger"
 import { getSentryModelName, shouldRecordAiContent } from "~/lib/sentry"
@@ -52,7 +52,10 @@ import {
   translateToAnthropic,
   translateToOpenAI,
 } from "./non-stream-translation"
-import { translateChunkToAnthropicEvents } from "./stream-translation"
+import {
+  createFallbackMessageDeltaEvents,
+  translateChunkToAnthropicEvents,
+} from "./stream-translation"
 import { parseSubagentMarkerFromFirstUser } from "./subagent-marker"
 import {
   emitAnthropicResponseAsStream,
@@ -202,6 +205,8 @@ async function handleCompletionInner(
   // Determine effective reasoning effort for logging
   const bodyEffort = getBodyReasoningEffort(anthropicPayload)
   const effectiveEffort = suffixEffort ?? bodyEffort
+  const effortOverride =
+    suffixEffort ?? getOutputConfigReasoningEffort(anthropicPayload)
 
   setRequestContext(c, {
     requestedModel,
@@ -214,11 +219,12 @@ async function handleCompletionInner(
     shouldUseResponsesApi(selectedModel) ?
       await handleWithResponsesApi(c, anthropicPayload, {
         initiatorOverride,
-        effortOverride: suffixEffort,
+        effortOverride,
         requestedModel,
       })
     : await handleWithChatCompletions(c, anthropicPayload, {
         initiatorOverride,
+        effortOverride,
         requestedModel,
       })
 
@@ -307,6 +313,13 @@ const streamChatCompletionsWithWebSearch = async (
     }
   }
 
+  for (const event of createFallbackMessageDeltaEvents(streamState)) {
+    await stream.writeSSE({
+      event: event.type,
+      data: JSON.stringify(event),
+    })
+  }
+
   return { hadWebSearch: false, initialResponse }
 }
 
@@ -362,6 +375,13 @@ const streamChatCompletionsDirect = async (
     }
   }
 
+  for (const event of createFallbackMessageDeltaEvents(streamState)) {
+    await stream.writeSSE({
+      event: event.type,
+      data: JSON.stringify(event),
+    })
+  }
+
   return {
     inputTokens: streamInputTokens,
     outputTokens: streamOutputTokens,
@@ -390,6 +410,7 @@ const handleWithChatCompletions = async (
   anthropicPayload: AnthropicMessagesPayload,
   options?: {
     initiatorOverride?: "agent" | "user"
+    effortOverride?: ReasoningEffort
     requestedModel?: string
   },
 ) => {
@@ -418,10 +439,11 @@ const executeChatCompletions = async (
   anthropicPayload: AnthropicMessagesPayload,
   options?: {
     initiatorOverride?: "agent" | "user"
+    effortOverride?: ReasoningEffort
     requestedModel?: string
   },
 ) => {
-  const { initiatorOverride, requestedModel } = options ?? {}
+  const { initiatorOverride, effortOverride, requestedModel } = options ?? {}
   stripThinkingBlocksForMultiToken(anthropicPayload)
   const openAIPayload = translateToOpenAI(anthropicPayload)
 
@@ -430,12 +452,13 @@ const executeChatCompletions = async (
   // thinking_budget is also sent for models that support explicit budget control
   if (anthropicPayload.thinking) {
     const extra = openAIPayload as unknown as Record<string, unknown>
-    extra.reasoning_effort = "high"
+    extra.reasoning_effort = effortOverride ?? "medium"
     if (anthropicPayload.thinking.budget_tokens) {
       extra.thinking_budget = anthropicPayload.thinking.budget_tokens
     }
     // Claude requires temperature=1 when thinking is enabled
     openAIPayload.temperature = 1
+    delete openAIPayload.top_p
   }
 
   const { payload: replacedPayload, appliedRules } =
@@ -472,6 +495,7 @@ const executeChatCompletions = async (
       async (span) => {
         const response = (await createChatCompletions(finalPayload, {
           initiator: initiatorOverride,
+          signal: c.req.raw.signal,
         })) as ChatCompletionResponse
 
         // Track which account handled this request (multi-token mode)
@@ -493,6 +517,7 @@ const executeChatCompletions = async (
           initialResponse,
           finalPayload,
           initiatorOverride,
+          c.req.raw.signal,
         )
       : initialResponse
 
@@ -541,6 +566,7 @@ const executeChatCompletions = async (
         try {
           const response = await createChatCompletions(finalPayload, {
             initiator: initiatorOverride,
+            signal: c.req.raw.signal,
           })
 
           // Track which account handled this request (multi-token mode)
@@ -571,6 +597,7 @@ const executeChatCompletions = async (
                       initialResp,
                       finalPayload,
                       initiatorOverride,
+                      c.req.raw.signal,
                     ),
                   )
                   const anthropicResponse = translateToAnthropic(
@@ -900,6 +927,7 @@ const executeResponsesApi = async (
             const response = await createResponses(responsesPayload, {
               vision,
               initiator: initiatorOverride ?? initiator,
+              signal: c.req.raw.signal,
             })
 
             const responsesAccountId = getLastUsedAccountId()
@@ -957,6 +985,7 @@ const executeResponsesApi = async (
                         {
                           vision,
                           initiator: initiatorOverride ?? initiator,
+                          signal: c.req.raw.signal,
                         },
                       ),
                     )
@@ -1024,6 +1053,7 @@ const executeResponsesApi = async (
       const result = (await createResponses(responsesPayload, {
         vision,
         initiator: initiatorOverride ?? initiator,
+        signal: c.req.raw.signal,
       })) as ResponsesResult
 
       const responsesAccountId = getLastUsedAccountId()
@@ -1059,6 +1089,7 @@ const executeResponsesApi = async (
       await resolveResponsesWebSearchCalls(initialResult, responsesPayload, {
         vision,
         initiator: initiatorOverride ?? initiator,
+        signal: c.req.raw.signal,
       })
     : initialResult
 
@@ -1112,7 +1143,7 @@ function applyModelVariantRouting(
  * Extract reasoning effort info from the Anthropic request body for logging.
  * Claude Code sends effort as `output_config.effort` (low/medium/high/max)
  * and thinking mode as `thinking.type` (enabled/adaptive).
- * When effort is "high" (the default), Claude Code omits output_config.effort entirely.
+ * When effort is omitted, this proxy defaults the effective value to "medium".
  */
 function getBodyReasoningEffort(
   payload: AnthropicMessagesPayload,
@@ -1123,9 +1154,9 @@ function getBodyReasoningEffort(
   const parts: Array<string> = []
 
   // output_config.effort is the actual effort level (low/medium/high/max)
-  // Claude Code omits this field when effort is "high" (the API default)
+  // When omitted, align the log context with the proxy's runtime default.
   const effort =
-    payload.output_config?.effort ?? (payload.thinking ? "high" : undefined)
+    payload.output_config?.effort ?? (payload.thinking ? "medium" : undefined)
   if (effort) {
     parts.push(effort)
   }
@@ -1139,6 +1170,28 @@ function getBodyReasoningEffort(
   }
 
   return parts.length > 0 ? parts.join(", ") : undefined
+}
+
+function getOutputConfigReasoningEffort(
+  payload: AnthropicMessagesPayload,
+): ReasoningEffort | undefined {
+  switch (payload.output_config?.effort) {
+    case "low": {
+      return "low"
+    }
+    case "medium": {
+      return "medium"
+    }
+    case "high": {
+      return "high"
+    }
+    case "max": {
+      return "xhigh"
+    }
+    default: {
+      return undefined
+    }
+  }
 }
 
 const isCompactRequest = (

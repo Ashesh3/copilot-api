@@ -1,3 +1,5 @@
+import consola from "consola"
+
 import {
   type ChatCompletionChunk,
   type ChatCompletionResponse,
@@ -17,6 +19,43 @@ function isToolBlockOpen(state: AnthropicStreamState): boolean {
   return Object.values(state.toolCalls).some(
     (tc) => tc.anthropicBlockIndex === state.contentBlockIndex,
   )
+}
+
+function normalizeToolCallIndex(
+  index: number,
+  state: AnthropicStreamState,
+): number {
+  if (state.toolCallIndexOffset === undefined) {
+    state.toolCallIndexOffset = index === 0 ? 0 : 1
+  }
+
+  return Math.max(0, index - state.toolCallIndexOffset)
+}
+
+export function extractCopilotChunkMetadata(chunk: ChatCompletionChunk):
+  | {
+      annotations?: unknown
+      usage?: unknown
+    }
+  | undefined {
+  const metadataChunk = chunk as ChatCompletionChunk & {
+    copilot_annotations?: unknown
+    copilot_usage?: unknown
+  }
+
+  const metadata: {
+    annotations?: unknown
+    usage?: unknown
+  } = {}
+
+  if (metadataChunk.copilot_annotations !== undefined) {
+    metadata.annotations = metadataChunk.copilot_annotations
+  }
+  if (metadataChunk.copilot_usage !== undefined) {
+    metadata.usage = metadataChunk.copilot_usage
+  }
+
+  return Object.keys(metadata).length > 0 ? metadata : undefined
 }
 
 // Helper to create message_delta and message_stop events
@@ -61,17 +100,34 @@ export function createFallbackMessageDeltaEvents(
     return []
   }
 
-  // If we have a pending finish_reason, send message_delta with whatever usage we have
-  if (state.pendingFinishReason) {
-    const usage = state.pendingUsage ?? {
-      prompt_tokens: 0,
-      completion_tokens: 0,
-      cached_tokens: 0,
-    }
-    return createMessageDeltaEvents(state.pendingFinishReason, usage)
+  const events: Array<AnthropicStreamEventData> = []
+
+  if (isToolBlockOpen(state)) {
+    events.push({
+      type: "content_block_stop",
+      index: state.contentBlockIndex,
+    })
+    state.contentBlockOpen = false
   }
 
-  return []
+  const usage = state.pendingUsage ?? {
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    cached_tokens: 0,
+  }
+
+  // If we have a pending finish_reason, send message_delta with whatever usage we have
+  if (state.pendingFinishReason) {
+    events.push(...createMessageDeltaEvents(state.pendingFinishReason, usage))
+    return events
+  }
+
+  if (Object.keys(state.toolCalls).length > 0) {
+    events.push(...createMessageDeltaEvents("tool_calls", usage))
+    return events
+  }
+
+  return events
 }
 
 // eslint-disable-next-line max-lines-per-function, complexity
@@ -81,6 +137,11 @@ export function translateChunkToAnthropicEvents(
   originalModel?: string,
 ): Array<AnthropicStreamEventData> {
   const events: Array<AnthropicStreamEventData> = []
+  const copilotMetadata = extractCopilotChunkMetadata(chunk)
+
+  if (copilotMetadata) {
+    consola.debug("Copilot chunk metadata:", copilotMetadata)
+  }
 
   // Capture usage from any chunk that has it (may come before, with, or after finish_reason)
   if (chunk.usage) {
@@ -235,6 +296,8 @@ export function translateChunkToAnthropicEvents(
 
   if (delta.tool_calls) {
     for (const toolCall of delta.tool_calls) {
+      const normalizedToolIndex = normalizeToolCallIndex(toolCall.index, state)
+
       if (toolCall.id && toolCall.function?.name) {
         // New tool call starting.
         if (state.contentBlockOpen) {
@@ -248,7 +311,7 @@ export function translateChunkToAnthropicEvents(
         }
 
         const anthropicBlockIndex = state.contentBlockIndex
-        state.toolCalls[toolCall.index] = {
+        state.toolCalls[normalizedToolIndex] = {
           id: toolCall.id,
           name: toolCall.function.name,
           anthropicBlockIndex,
@@ -268,7 +331,7 @@ export function translateChunkToAnthropicEvents(
       }
 
       if (toolCall.function?.arguments) {
-        const toolCallInfo = state.toolCalls[toolCall.index]
+        const toolCallInfo = state.toolCalls[normalizedToolIndex]
         // Tool call can still be empty
         // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
         if (toolCallInfo) {

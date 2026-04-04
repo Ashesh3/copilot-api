@@ -246,6 +246,7 @@ export const handleCompact = async (c: Context) => {
     const response = await createResponses(responsesPayload, {
       vision,
       initiator,
+      signal: c.req.raw.signal,
     })
 
     const result = response as ResponsesResult
@@ -272,7 +273,9 @@ export const handleCompact = async (c: Context) => {
       temperature: 0,
     }
 
-    const response = await createChatCompletions(ccPayload)
+    const response = await createChatCompletions(ccPayload, {
+      signal: c.req.raw.signal,
+    })
     const result = response as ChatCompletionResponse
     summaryText = extractTextFromCCResult(result)
     usage = mapCCUsage(result.usage)

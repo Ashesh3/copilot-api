@@ -31,6 +31,17 @@ interface CopilotTokenResponse {
   token: string
 }
 
+export function getTokenRefreshIntervalMs(refreshInSeconds: number): number {
+  return Math.max((refreshInSeconds - 120) * 1000, 60_000)
+}
+
+export function maskTokenForLog(token: string): string {
+  if (token.length <= 8) {
+    return token
+  }
+  return `${token.slice(0, 4)}...${token.slice(-4)}`
+}
+
 // --- TokenPool ---
 
 export class TokenPool {
@@ -86,7 +97,9 @@ export class TokenPool {
     account.healthy = true
 
     if (showToken) {
-      consola.info(`Account #${account.id} Copilot token: ${tokenData.token}`)
+      consola.info(
+        `Account #${account.id} Copilot token: ${maskTokenForLog(tokenData.token)}`,
+      )
     }
 
     consola.debug(
@@ -109,7 +122,7 @@ export class TokenPool {
     this.rebuildModelIndex()
 
     // Set up auto-refresh timer
-    const refreshMs = Math.max((tokenData.refresh_in - 60) * 1000, 60_000)
+    const refreshMs = getTokenRefreshIntervalMs(tokenData.refresh_in)
     this.setupRefreshTimer(account, refreshMs, showToken)
   }
 
@@ -375,7 +388,7 @@ export class TokenPool {
 
         if (showToken) {
           consola.info(
-            `Account #${account.id} refreshed Copilot token: ${tokenData.token}`,
+            `Account #${account.id} refreshed Copilot token: ${maskTokenForLog(tokenData.token)}`,
           )
         }
 

@@ -84,6 +84,11 @@ export const translateAnthropicMessagesToResponsesPayload = (
     stream: payload.stream,
     store: false,
     parallel_tool_calls: true,
+    text:
+      payload.output_config?.format ?
+        { format: payload.output_config.format }
+      : undefined,
+    task_budget: payload.output_config?.task_budget,
     reasoning: {
       effort: getReasoningEffortForModel(payload.model, effortOverride),
       summary: "auto",
@@ -667,6 +672,24 @@ const parseUserId = (
 ): { safetyIdentifier: string | null; promptCacheKey: string | null } => {
   if (!userId || typeof userId !== "string") {
     return { safetyIdentifier: null, promptCacheKey: null }
+  }
+
+  try {
+    const parsed = JSON.parse(userId) as unknown
+    if (isRecord(parsed)) {
+      const safetyIdentifier =
+        typeof parsed.account_uuid === "string" ? parsed.account_uuid
+        : typeof parsed.device_id === "string" ? parsed.device_id
+        : null
+      const promptCacheKey =
+        typeof parsed.session_id === "string" ? parsed.session_id : null
+
+      if (safetyIdentifier || promptCacheKey) {
+        return { safetyIdentifier, promptCacheKey }
+      }
+    }
+  } catch {
+    // Fall back to the legacy string format below.
   }
 
   // Parse safety_identifier: content between "user_" and "_account"

@@ -216,6 +216,7 @@ function findToolCallId(
  */
 function translateTools(
   tools: GoogleAIRequest["tools"],
+  allowedFunctionNames?: ReadonlySet<string>,
 ): Array<Tool> | undefined {
   if (!tools || tools.length === 0) return undefined
 
@@ -224,6 +225,13 @@ function translateTools(
   for (const tool of tools) {
     if (tool.functionDeclarations) {
       for (const decl of tool.functionDeclarations) {
+        if (
+          allowedFunctionNames
+          && allowedFunctionNames.size > 0
+          && !allowedFunctionNames.has(decl.name)
+        ) {
+          continue
+        }
         openAITools.push({
           type: "function",
           function: {
@@ -362,11 +370,22 @@ export function translateGoogleToOpenAI(
   // Contents → messages
   messages.push(...translateContents(googlePayload.contents))
 
+  const allowedFunctionNames =
+    (
+      googlePayload.toolConfig?.functionCallingConfig?.mode === "ANY"
+      && googlePayload.toolConfig.functionCallingConfig.allowedFunctionNames
+    ) ?
+      new Set(
+        googlePayload.toolConfig.functionCallingConfig.allowedFunctionNames,
+      )
+    : undefined
+
   return {
     model,
     messages,
     ...translateGenerationConfig(googlePayload.generationConfig, stream),
-    tools: translateTools(googlePayload.tools),
+    tools: translateTools(googlePayload.tools, allowedFunctionNames),
     tool_choice: translateToolChoice(googlePayload.toolConfig),
+    snippy: { enabled: false },
   }
 }

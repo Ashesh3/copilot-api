@@ -109,10 +109,15 @@ export async function forwardError(c: Context, error: unknown) {
       },
     })
 
+    const clientMessage =
+      error.response.status === 402 ? "Copilot quota exhausted"
+      : error.response.status === 466 ? "Copilot client version mismatch"
+      : error.message
+
     return c.json(
       {
         error: {
-          message: responseBody,
+          message: clientMessage,
           type: "error",
         },
       },

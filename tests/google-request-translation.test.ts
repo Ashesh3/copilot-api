@@ -57,3 +57,46 @@ test("translates inlineData and fileData parts instead of dropping them", () => 
     ),
   ).toBe(true)
 })
+
+test("disables snippy on translated Google chat completions payloads", () => {
+  const translated = translateGoogleToOpenAI(
+    {
+      contents: [{ role: "user", parts: [{ text: "Hello" }] }],
+    },
+    "gpt-4o-mini",
+    false,
+  ) as { snippy?: { enabled: boolean } }
+
+  expect(translated.snippy).toEqual({ enabled: false })
+})
+
+test("preserves multi-function Google ANY allowlists by filtering translated tools", () => {
+  const translated = translateGoogleToOpenAI(
+    {
+      contents: [{ role: "user", parts: [{ text: "Call an allowed tool." }] }],
+      tools: [
+        {
+          functionDeclarations: [
+            { name: "get_weather", parameters: { type: "object" } },
+            { name: "get_time", parameters: { type: "object" } },
+            { name: "delete_file", parameters: { type: "object" } },
+          ],
+        },
+      ],
+      toolConfig: {
+        functionCallingConfig: {
+          mode: "ANY",
+          allowedFunctionNames: ["get_time", "get_weather"],
+        },
+      },
+    },
+    "gpt-4o-mini",
+    false,
+  )
+
+  expect(translated.tool_choice).toBe("required")
+  expect(translated.tools?.map((tool) => tool.function.name)).toEqual([
+    "get_weather",
+    "get_time",
+  ])
+})

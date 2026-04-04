@@ -114,6 +114,60 @@ describe("Anthropic to OpenAI translation logic", () => {
     expect(isValidChatCompletionRequest(openAIPayload)).toBe(true)
   })
 
+  test("should disable snippy in translated chat completions payloads", () => {
+    const anthropicPayload: AnthropicMessagesPayload = {
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "Hello!" }],
+      max_tokens: 32,
+    }
+
+    const openAIPayload = translateToOpenAI(anthropicPayload) as {
+      snippy?: { enabled: boolean }
+    }
+
+    expect(openAIPayload.snippy).toEqual({ enabled: false })
+  })
+
+  test("should map output_config.format to response_format", () => {
+    const anthropicPayload = {
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "Return JSON." }],
+      max_tokens: 32,
+      output_config: {
+        format: {
+          type: "json_schema",
+          schema: {
+            type: "object",
+            properties: {
+              answer: { type: "string" },
+            },
+          },
+        },
+      },
+    } as AnthropicMessagesPayload & {
+      output_config: {
+        format: {
+          type: "json_schema"
+          schema: Record<string, unknown>
+        }
+      }
+    }
+
+    const openAIPayload = translateToOpenAI(anthropicPayload)
+
+    expect(openAIPayload.response_format).toEqual({
+      type: "json_schema",
+      json_schema: {
+        schema: {
+          type: "object",
+          properties: {
+            answer: { type: "string" },
+          },
+        },
+      },
+    })
+  })
+
   test("should handle invalid types in Anthropic payload", () => {
     const anthropicPayload = {
       model: "gpt-4o",

@@ -3,7 +3,11 @@ import consola from "consola"
 import type { Account } from "~/lib/token-pool"
 import type { CopilotHeaderOptions } from "~/services/copilot/copilot-client"
 
-import { getClientSessionId } from "~/lib/request-session"
+import {
+  getClientSessionId,
+  getLastUsedRoutedAccountId,
+  setLastUsedRoutedAccountId,
+} from "~/lib/request-session"
 import { state } from "~/lib/state"
 import { tokenPool } from "~/lib/token-pool"
 import { copilotFetch, copilotHeaders } from "~/services/copilot/copilot-client"
@@ -12,16 +16,47 @@ import { copilotFetch, copilotHeaders } from "~/services/copilot/copilot-client"
 
 const FAILOVER_STATUSES = new Set([401, 403, 429])
 
-// --- Last used account tracking ---
+function isAbortError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false
+  }
 
-let _lastUsedAccountId: number | undefined
+  const message = error.message.toLowerCase()
+  const causeMessage =
+    error.cause instanceof Error ? error.cause.message.toLowerCase() : ""
+
+  return (
+    error.name === "AbortError"
+    || message.includes("aborted")
+    || causeMessage.includes("aborted")
+  )
+}
+
+function mergeHeaders(
+  baseHeaders: Record<string, string>,
+  overrideHeaders: RequestInit["headers"],
+): Record<string, string> {
+  const merged = { ...baseHeaders }
+  if (!overrideHeaders) {
+    return merged
+  }
+
+  const overrides = new Headers(overrideHeaders)
+  for (const [key, value] of overrides.entries()) {
+    merged[key] = value
+  }
+
+  return merged
+}
+
+// --- Last used account tracking ---
 
 /**
  * Get the account ID used by the most recent routedFetch call.
  * Useful for logging without changing service return types.
  */
 export function getLastUsedAccountId(): number | undefined {
-  return _lastUsedAccountId
+  return getLastUsedRoutedAccountId()
 }
 
 // --- Fetch routing with failover ---
@@ -50,7 +85,7 @@ export async function routedFetch(
   options: RoutedFetchOptions,
 ): Promise<{ response: Response; account: Account | undefined }> {
   const { modelId, headerOptions } = options
-  _lastUsedAccountId = undefined
+  setLastUsedRoutedAccountId(undefined)
 
   if (!state.isMultiToken) {
     const headers = copilotHeaders(headerOptions)
@@ -67,7 +102,16 @@ export async function routedFetch(
     consola.warn(
       `No account found for model "${modelId}", falling back to default`,
     )
-    const response = await copilotFetch(path, init)
+
+    const fallbackHeaders =
+      state.copilotToken ?
+        mergeHeaders(copilotHeaders(headerOptions), init?.headers)
+      : init?.headers
+
+    const response = await copilotFetch(path, {
+      ...init,
+      ...(fallbackHeaders ? { headers: fallbackHeaders } : {}),
+    })
     return { response, account: undefined }
   }
 
@@ -80,7 +124,7 @@ export async function routedFetch(
   consola.debug(
     `[Account #${account.id}] ${path} (model: ${modelId}, session: ${clientSessionId ? "sticky" : "default"})`,
   )
-  _lastUsedAccountId = account.id
+  setLastUsedRoutedAccountId(account.id)
 
   try {
     const response = await copilotFetch(path, { ...init, headers }, { baseUrl })
@@ -94,7 +138,7 @@ export async function routedFetch(
         if (response.status === 401 || response.status === 403) {
           tokenPool.markUnhealthy(account)
         }
-        _lastUsedAccountId = next.id
+        setLastUsedRoutedAccountId(next.id)
 
         const retryHeaders = copilotHeaders({
           ...headerOptions,
@@ -115,13 +159,17 @@ export async function routedFetch(
 
     return { response, account }
   } catch (error) {
+    if (isAbortError(error)) {
+      throw error
+    }
+
     // Network error — attempt failover
     const next = tokenPool.getNextAccountForModel(modelId, account)
     if (next) {
       consola.warn(
         `[Account #${account.id}] Network error on ${path}, failing over to Account #${next.id}: ${(error as Error).message}`,
       )
-      _lastUsedAccountId = next.id
+      setLastUsedRoutedAccountId(next.id)
 
       const retryHeaders = copilotHeaders({
         ...headerOptions,

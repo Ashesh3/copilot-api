@@ -45,10 +45,36 @@ export function translateToOpenAI(
     temperature: payload.temperature,
     top_p: payload.top_p,
     user: payload.metadata?.user_id,
+    response_format: translateOutputFormatToOpenAI(
+      payload.output_config?.format,
+    ),
     tools: translateAnthropicToolsToOpenAI(payload.tools),
     tool_choice: translateAnthropicToolChoiceToOpenAI(payload.tool_choice),
+    snippy: { enabled: false },
     ...(payload.stream ? { stream_options: { include_usage: true } } : {}),
   }
+}
+
+function translateOutputFormatToOpenAI(
+  format: AnthropicMessagesPayload["output_config"] extends (
+    { format?: infer T }
+  ) ?
+    T
+  : never,
+): ChatCompletionsPayload["response_format"] | undefined {
+  if (!format) {
+    return undefined
+  }
+
+  if (format.type === "json_schema") {
+    const { type, ...jsonSchema } = format
+    return {
+      type,
+      json_schema: jsonSchema,
+    }
+  }
+
+  return format
 }
 
 function translateModelName(model: string): string {

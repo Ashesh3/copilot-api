@@ -8,6 +8,7 @@ import type {
 
 import { type AnthropicStreamState } from "~/routes/messages/anthropic-types"
 import { translateToAnthropic } from "~/routes/messages/non-stream-translation"
+import * as streamTranslation from "~/routes/messages/stream-translation"
 import { translateChunkToAnthropicEvents } from "~/routes/messages/stream-translation"
 
 const anthropicUsageSchema = z.object({
@@ -192,6 +193,26 @@ describe("OpenAI to Anthropic Non-Streaming Response Translation", () => {
 })
 
 describe("OpenAI to Anthropic Streaming Response Translation", () => {
+  test("extracts Copilot-specific chunk metadata for telemetry", () => {
+    const chunk = {
+      id: "cmpl-meta",
+      object: "chat.completion.chunk",
+      created: 1677652288,
+      model: "gpt-4o-2024-05-13",
+      choices: [],
+      copilot_annotations: [{ type: "citation", title: "doc" }],
+      copilot_usage: { completion_tokens: 12 },
+    } as ChatCompletionChunk & {
+      copilot_annotations: Array<{ type: string; title: string }>
+      copilot_usage: { completion_tokens: number }
+    }
+
+    expect(streamTranslation.extractCopilotChunkMetadata?.(chunk)).toEqual({
+      annotations: [{ type: "citation", title: "doc" }],
+      usage: { completion_tokens: 12 },
+    })
+  })
+
   test("should translate a simple text stream correctly", () => {
     const openAIStream: Array<ChatCompletionChunk> = [
       {
@@ -361,5 +382,154 @@ describe("OpenAI to Anthropic Streaming Response Translation", () => {
     for (const event of translatedStream) {
       expect(isValidAnthropicStreamEvent(event)).toBe(true)
     }
+  })
+
+  test("normalizes missing finish_reason to tool_use when a tool-call stream ends", () => {
+    const openAIStream: Array<ChatCompletionChunk> = [
+      {
+        id: "cmpl-tool-null-finish",
+        object: "chat.completion.chunk",
+        created: 1677652288,
+        model: "gpt-4o-2024-05-13",
+        choices: [
+          {
+            index: 0,
+            delta: { role: "assistant" },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      },
+      {
+        id: "cmpl-tool-null-finish",
+        object: "chat.completion.chunk",
+        created: 1677652288,
+        model: "gpt-4o-2024-05-13",
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id: "call_weather",
+                  type: "function",
+                  function: {
+                    name: "get_weather",
+                    arguments: '{"location":"Paris"}',
+                  },
+                },
+              ],
+            },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      },
+    ]
+
+    const streamState: AnthropicStreamState = {
+      messageStartSent: false,
+      contentBlockIndex: 0,
+      contentBlockOpen: false,
+      toolCalls: {},
+    }
+
+    const translatedStream = openAIStream.flatMap((chunk) =>
+      translateChunkToAnthropicEvents(chunk, streamState),
+    )
+    translatedStream.push(
+      ...streamTranslation.createFallbackMessageDeltaEvents(streamState),
+    )
+
+    const messageDelta = translatedStream.find(
+      (event) => event.type === "message_delta",
+    )
+
+    expect(messageDelta).toEqual(
+      expect.objectContaining({
+        delta: expect.objectContaining({
+          stop_reason: "tool_use",
+        }),
+      }),
+    )
+  })
+
+  test("closes an open tool block before fallback terminal events", () => {
+    const streamState: AnthropicStreamState = {
+      messageStartSent: true,
+      contentBlockIndex: 0,
+      contentBlockOpen: true,
+      toolCalls: {
+        0: {
+          id: "call_weather",
+          name: "get_weather",
+          anthropicBlockIndex: 0,
+        },
+      },
+      pendingUsage: {
+        prompt_tokens: 12,
+        completion_tokens: 4,
+        cached_tokens: 0,
+      },
+    }
+
+    const fallbackEvents =
+      streamTranslation.createFallbackMessageDeltaEvents(streamState)
+
+    expect(fallbackEvents.map((event) => event.type)).toEqual([
+      "content_block_stop",
+      "message_delta",
+      "message_stop",
+    ])
+    expect(fallbackEvents[0]).toEqual({
+      type: "content_block_stop",
+      index: 0,
+    })
+  })
+
+  test("normalizes 1-based tool call indices to 0-based stream state entries", () => {
+    const chunk: ChatCompletionChunk = {
+      id: "cmpl-gcp",
+      object: "chat.completion.chunk",
+      created: 1677652288,
+      model: "gpt-4o-2024-05-13",
+      choices: [
+        {
+          index: 0,
+          delta: {
+            tool_calls: [
+              {
+                index: 1,
+                id: "call_gcp",
+                type: "function",
+                function: {
+                  name: "get_weather",
+                  arguments: "",
+                },
+              },
+            ],
+          },
+          finish_reason: null,
+          logprobs: null,
+        },
+      ],
+    }
+
+    const streamState: AnthropicStreamState = {
+      messageStartSent: false,
+      contentBlockIndex: 0,
+      contentBlockOpen: false,
+      toolCalls: {},
+    }
+
+    translateChunkToAnthropicEvents(chunk, streamState)
+
+    expect(streamState.toolCalls[0]).toEqual({
+      id: "call_gcp",
+      name: "get_weather",
+      anthropicBlockIndex: 0,
+    })
+    expect(streamState.toolCalls[1]).toBeUndefined()
   })
 })

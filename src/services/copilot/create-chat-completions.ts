@@ -12,6 +12,13 @@ import {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null
 
+type StreamEvent = {
+  data?: string
+  event?: string
+  id?: string | number
+  retry?: number
+}
+
 const normalizeFunctionTool = (tool: unknown): void => {
   if (!isRecord(tool) || tool.type !== "function") {
     return
@@ -43,6 +50,10 @@ const normalizeFunctionTool = (tool: unknown): void => {
  *   and stash the schema so injectJsonInstruction can reference it
  */
 const normalizePayload = (payload: ChatCompletionsPayload): void => {
+  if (payload.stream && !payload.stream_options) {
+    payload.stream_options = { include_usage: true }
+  }
+
   if (payload.tools) {
     for (const tool of payload.tools) {
       normalizeFunctionTool(tool)
@@ -136,13 +147,7 @@ async function handleResponse(
   payload: ChatCompletionsPayload,
 ) {
   if (!response.ok) {
-    const errorBody = await response.clone().text()
-    consola.error(
-      "Failed to create chat completions",
-      `Status: ${response.status} ${response.statusText}`,
-      errorBody,
-    )
-    throw new HTTPError("Failed to create chat completions", response, payload)
+    await throwFailedResponse(response, payload)
   }
 
   if (payload.stream) {
@@ -175,23 +180,132 @@ async function handleResponse(
   }
 }
 
+const throwFailedResponse = async (
+  response: Response,
+  payload: ChatCompletionsPayload,
+): Promise<never> => {
+  const errorBody = await response.clone().text()
+  const clientResponse =
+    response.status === 404 ?
+      new Response(errorBody, {
+        status: 502,
+        headers: response.headers,
+      })
+    : response
+  consola.error(
+    "Failed to create chat completions",
+    `Status: ${response.status} ${response.statusText}`,
+    errorBody,
+  )
+  throw new HTTPError(
+    "Failed to create chat completions",
+    clientResponse,
+    payload,
+  )
+}
+
+const isOverloadStreamEvent = (event: StreamEvent | undefined): boolean => {
+  const data = event?.data
+  if (!data || data === "[DONE]") {
+    return false
+  }
+
+  const hasOverloadText = (value: unknown): boolean =>
+    typeof value === "string" && value.toLowerCase().includes("overloaded")
+
+  if (hasOverloadText(data)) {
+    return true
+  }
+
+  try {
+    const parsed = JSON.parse(data) as unknown
+    if (!isRecord(parsed)) {
+      return false
+    }
+    if (hasOverloadText(parsed.message)) {
+      return true
+    }
+    const error = parsed.error
+    if (isRecord(error) && hasOverloadText(error.message)) {
+      return true
+    }
+  } catch {
+    return false
+  }
+
+  return false
+}
+
+const createBufferedEventStream = (
+  firstEvent: StreamEvent | undefined,
+  iterator: AsyncIterator<StreamEvent>,
+): AsyncIterable<StreamEvent> => ({
+  async *[Symbol.asyncIterator]() {
+    if (firstEvent) {
+      yield firstEvent
+    }
+    while (true) {
+      const next = await iterator.next()
+      if (next.done) {
+        return
+      }
+      yield next.value
+    }
+  },
+})
+
+const handleStreamingResponse = async (
+  response: Response,
+  payload: ChatCompletionsPayload,
+  retry: () => Promise<Response>,
+  retriesRemaining = 1,
+): Promise<AsyncIterable<StreamEvent>> => {
+  if (!response.ok) {
+    await throwFailedResponse(response, payload)
+  }
+
+  const stream = events(response) as AsyncIterable<StreamEvent>
+  const iterator = stream[Symbol.asyncIterator]()
+  const first = await iterator.next()
+
+  if (first.done) {
+    return createBufferedEventStream(undefined, iterator)
+  }
+
+  if (!isOverloadStreamEvent(first.value) || retriesRemaining === 0) {
+    return createBufferedEventStream(first.value, iterator)
+  }
+
+  consola.warn("Stream overload detected on first event, retrying")
+  await iterator.return?.()
+
+  const retryResponse = await retry()
+  return handleStreamingResponse(
+    retryResponse,
+    payload,
+    retry,
+    retriesRemaining - 1,
+  )
+}
+
 export const createChatCompletions = async (
   payload: ChatCompletionsPayload,
   options?: {
     initiator?: "agent" | "user"
+    signal?: AbortSignal
   },
 ) => {
   const vision = hasVisionContent(payload.messages)
   const initiator = detectInitiator(payload.messages, options?.initiator)
-  const headerOpts = { vision, initiator }
+  let headerOpts = { vision, initiator }
 
   normalizePayload(payload)
   injectJsonInstruction(payload)
   addPromptCaching(payload.messages, payload.tools ?? undefined)
 
-  const { response } = await routedFetch(
+  let { response } = await routedFetch(
     "/chat/completions",
-    { method: "POST", body: JSON.stringify(payload) },
+    { method: "POST", body: JSON.stringify(payload), signal: options?.signal },
     { modelId: payload.model, headerOptions: headerOpts },
   )
 
@@ -201,10 +315,30 @@ export const createChatCompletions = async (
     removeImages(payload)
     const { response: retryResponse } = await routedFetch(
       "/chat/completions",
-      { method: "POST", body: JSON.stringify(payload) },
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+        signal: options?.signal,
+      },
       { modelId: payload.model, headerOptions: { vision: false, initiator } },
     )
-    return handleResponse(retryResponse, payload)
+    headerOpts = { vision: false, initiator }
+    response = retryResponse
+  }
+
+  if (payload.stream) {
+    return handleStreamingResponse(response, payload, async () => {
+      const { response: retryResponse } = await routedFetch(
+        "/chat/completions",
+        {
+          method: "POST",
+          body: JSON.stringify(payload),
+          signal: options?.signal,
+        },
+        { modelId: payload.model, headerOptions: headerOpts },
+      )
+      return retryResponse
+    })
   }
 
   return handleResponse(response, payload)
@@ -317,6 +451,7 @@ export interface ChatCompletionsPayload {
     | { type: "function"; function: { name: string } }
     | null
   user?: string | null
+  snippy?: { enabled: boolean } | null
 }
 
 export interface Tool {
