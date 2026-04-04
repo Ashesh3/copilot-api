@@ -35,7 +35,10 @@ export function normalizeModelName(model: string): string {
 
   // Replace dash with dot only between two single digits: "4-5" -> "4.5"
   // Multi-digit sequences like "4-0613" or "2024-07" are model IDs, not versions.
-  normalized = normalized.replaceAll(/(?<!\d)(\d)-(\d)(?!\d)/g, (_, p1, p2) => `${p1}.${p2}`)
+  normalized = normalized.replaceAll(
+    /(?<!\d)(\d)-(\d)(?!\d)/g,
+    (_, p1, p2) => `${p1}.${p2}`,
+  )
 
   return normalized + dateSuffix + suffix
 }
