@@ -7,7 +7,7 @@ import { GITHUB_API_BASE_URL } from "~/lib/api-config"
 import { HTTPError } from "~/lib/error"
 
 // Inline constants from copilot-client to avoid circular dependencies
-const API_VERSION = "2025-05-01"
+const API_VERSION = "2026-01-09"
 const INTEGRATION_ID = "vscode-chat"
 
 // --- Account ---
@@ -349,6 +349,7 @@ export class TokenPool {
       "X-Request-Id": randomUUID(),
       "X-Interaction-Id": this.sessionId,
       "X-Client-Session-Id": this.sessionId,
+      "X-Interaction-Type": "conversation-agent",
     }
   }
 

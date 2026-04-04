@@ -7,7 +7,7 @@ import { sleep } from "~/lib/utils"
 
 // --- Constants ---
 
-export const API_VERSION = "2025-05-01"
+export const API_VERSION = "2026-01-09"
 export const INTEGRATION_ID = "vscode-chat"
 export const MAX_RETRIES = 5
 export const BASE_DELAY_SECONDS = 5
@@ -52,6 +52,7 @@ export function copilotHeaders(
     "X-Request-Id": randomUUID(),
     "X-Interaction-Id": state.sessionId,
     "X-Client-Session-Id": state.sessionId,
+    "X-Interaction-Type": "conversation-agent",
   }
 
   if (options?.vision) {
@@ -110,6 +111,12 @@ export function isDeterministic400(body: string): boolean {
     "model is not supported",
     "messages must be non-empty",
     "invalid_request_body",
+    "invalid_type",
+    "invalid_value",
+    "unexpected_field",
+    "unknown_field",
+    "not_supported",
+    "unrecognized_field",
   ]
   if (patterns.some((pattern) => body.includes(pattern))) return true
 
@@ -245,12 +252,10 @@ export async function copilotFetch(
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
       const headers = toHeaderRecord(init?.headers)
-      headers["Connection"] = "close"
 
       const response = await fetch(url, {
         ...init,
         headers,
-        keepalive: false,
       })
 
       // Log quota headers

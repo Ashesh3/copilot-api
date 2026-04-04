@@ -326,6 +326,42 @@ interface ResponsesRequestOptions {
   initiator: "agent" | "user"
 }
 
+/**
+ * Known fields accepted by the Copilot Responses API.
+ * Any field not in this set is stripped before forwarding to prevent 400 errors.
+ */
+const KNOWN_RESPONSES_FIELDS = new Set([
+  "model",
+  "instructions",
+  "input",
+  "tools",
+  "tool_choice",
+  "temperature",
+  "top_p",
+  "max_output_tokens",
+  "metadata",
+  "stream",
+  "safety_identifier",
+  "prompt_cache_key",
+  "parallel_tool_calls",
+  "store",
+  "reasoning",
+  "include",
+  "copilot_cache_control",
+])
+
+function sanitizeResponsesPayload(
+  payload: ResponsesPayload,
+): Record<string, unknown> {
+  const result: Record<string, unknown> = {}
+  for (const key of KNOWN_RESPONSES_FIELDS) {
+    if (key in payload && payload[key] !== undefined) {
+      result[key] = payload[key]
+    }
+  }
+  return result
+}
+
 export const createResponses = async (
   payload: ResponsesPayload,
   { vision, initiator }: ResponsesRequestOptions,
@@ -333,7 +369,7 @@ export const createResponses = async (
   const headerOpts = { vision, initiator }
 
   // service_tier is not supported by github copilot
-  payload.service_tier = null
+  delete payload.service_tier
 
   // Zero-data retention enforcement
   payload.store = false
@@ -351,9 +387,14 @@ export const createResponses = async (
     }
   }
 
+  // Strip unknown fields — only forward fields the Copilot API recognizes.
+  // The [key: string]: unknown index signature on ResponsesPayload allows
+  // arbitrary client fields to leak through; sanitize before forwarding.
+  const sanitizedPayload = sanitizeResponsesPayload(payload)
+
   const { response } = await routedFetch(
     "/responses",
-    { method: "POST", body: JSON.stringify(payload) },
+    { method: "POST", body: JSON.stringify(sanitizedPayload) },
     { modelId: payload.model, headerOptions: headerOpts },
   )
 

@@ -19,6 +19,7 @@ import { getSentryModelName, shouldRecordAiContent } from "~/lib/sentry"
 import { state } from "~/lib/state"
 import { getTokenCount } from "~/lib/tokenizer"
 import { emitAnthropicToolSpans } from "~/lib/tool-spans"
+import { isNullish } from "~/lib/utils"
 import {
   buildErrorEvent,
   createResponsesStreamState,
@@ -187,9 +188,9 @@ async function handleCompletionInner(
 
   // Fill in default max_tokens if null/undefined (Copilot rejects null max_tokens with 400)
   // Type says `number` but clients may send null at runtime
-  if (!anthropicPayload.max_tokens && selectedModel) {
+  if (isNullish(anthropicPayload.max_tokens)) {
     anthropicPayload.max_tokens =
-      selectedModel.capabilities.limits.max_output_tokens
+      selectedModel?.capabilities.limits.max_output_tokens ?? 16384
   }
 
   // Log the requested vs routed model
