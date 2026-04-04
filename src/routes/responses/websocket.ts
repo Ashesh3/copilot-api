@@ -1,4 +1,5 @@
 import consola from "consola"
+import { randomUUID } from "node:crypto"
 
 import { parseModelSuffix } from "~/lib/model-suffix"
 import { checkRateLimit } from "~/lib/rate-limit"
@@ -27,6 +28,11 @@ const WS_PATHS = new Set(["/v1/responses", "/responses"])
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null
 
+interface ResponsesWebSocketData {
+  type: "responses"
+  syntheticWarmups: Map<string, ResponsesPayload>
+}
+
 /**
  * Check if a request is a responses WebSocket upgrade and handle it.
  * Returns "upgraded" if the upgrade was handled, "auth_failed" if auth failed,
@@ -48,7 +54,12 @@ export function tryUpgradeResponsesWebSocket(
     }
   }
 
-  server.upgrade(req, { data: { type: "responses" as const } })
+  server.upgrade(req, {
+    data: {
+      type: "responses" as const,
+      syntheticWarmups: new Map<string, ResponsesPayload>(),
+    } satisfies ResponsesWebSocketData,
+  })
   return "upgraded"
 }
 
@@ -67,13 +78,13 @@ function extractApiKeyFromRequest(req: Request): string | null {
 
 // Bun WebSocket handler for responses
 export const responsesWebSocket = {
-  open(_ws: { data: { type: "responses" } }) {
+  open(_ws: { data: ResponsesWebSocketData }) {
     consola.debug("[responses-ws] WebSocket connected")
   },
 
   async message(
     ws: {
-      data: { type: "responses" }
+      data: ResponsesWebSocketData
       send(data: string | ArrayBuffer | Uint8Array): void
       close(code?: number, reason?: string): void
     },
@@ -137,18 +148,19 @@ export const responsesWebSocket = {
     }
   },
 
-  close(_ws: { data: { type: "responses" } }) {
+  close(ws: { data: ResponsesWebSocketData }) {
+    ws.data.syntheticWarmups.clear()
     consola.debug("[responses-ws] WebSocket closed")
   },
 }
 
 async function handleResponseCreate(
-  ws: { send(data: string): void },
+  ws: { data: ResponsesWebSocketData; send(data: string): void },
   message: Record<string, unknown>,
 ): Promise<void> {
   await checkRateLimit(state)
 
-  const payload = extractResponsesPayload(message)
+  let payload = extractResponsesPayload(message)
 
   // Force streaming for WebSocket mode
   payload.stream = true
@@ -163,6 +175,15 @@ async function handleResponseCreate(
   useFunctionApplyPatch(payload)
   convertWebSearchTool(payload)
   expandCompactionItems(payload)
+
+  payload =
+    rehydrateSyntheticWarmupPayload(ws.data.syntheticWarmups, payload)
+    ?? payload
+
+  if (isSyntheticWarmupRequest(payload)) {
+    handleSyntheticWarmupRequest(ws, payload)
+    return
+  }
 
   const selectedModel = state.models?.data.find(
     (model) => model.id === payload.model,
@@ -216,6 +237,117 @@ export function extractResponsesPayload(
     ...topLevel,
     ...response,
   } as ResponsesPayload
+}
+
+export function isSyntheticWarmupRequest(payload: ResponsesPayload): boolean {
+  return (payload as Record<string, unknown>).generate === false
+}
+
+export function rehydrateWarmupPayload(
+  warmupPayload: ResponsesPayload,
+  payload: ResponsesPayload,
+): ResponsesPayload {
+  const mergedInput = mergeWarmupInput(warmupPayload.input, payload.input)
+
+  return {
+    ...payload,
+    ...(mergedInput !== undefined ? { input: mergedInput } : {}),
+    ...(payload.prompt === undefined && warmupPayload.prompt !== undefined ?
+      { prompt: warmupPayload.prompt }
+    : {}),
+    ...((
+      payload.conversation_id === undefined
+      && warmupPayload.conversation_id !== undefined
+    ) ?
+      { conversation_id: warmupPayload.conversation_id }
+    : {}),
+    previous_response_id: undefined,
+  }
+}
+
+function rehydrateSyntheticWarmupPayload(
+  syntheticWarmups: Map<string, ResponsesPayload>,
+  payload: ResponsesPayload,
+): ResponsesPayload | undefined {
+  if (!payload.previous_response_id) {
+    return undefined
+  }
+
+  const warmupPayload = syntheticWarmups.get(payload.previous_response_id)
+  if (!warmupPayload) {
+    return undefined
+  }
+
+  return rehydrateWarmupPayload(warmupPayload, payload)
+}
+
+function mergeWarmupInput(
+  warmupInput: ResponsesPayload["input"],
+  input: ResponsesPayload["input"],
+): ResponsesPayload["input"] {
+  if (Array.isArray(warmupInput) && Array.isArray(input)) {
+    return [...warmupInput, ...input]
+  }
+  if (Array.isArray(warmupInput) && input === undefined) {
+    return [...warmupInput]
+  }
+  if (Array.isArray(input)) {
+    return [...input]
+  }
+  if (typeof input === "string") {
+    return input.length > 0 ? input : warmupInput
+  }
+  return warmupInput
+}
+
+function handleSyntheticWarmupRequest(
+  ws: { data: ResponsesWebSocketData; send(data: string): void },
+  payload: ResponsesPayload,
+): void {
+  const responseId = `warmup_${randomUUID().replaceAll("-", "")}`
+  ws.data.syntheticWarmups.set(responseId, payload)
+
+  const createdAt = Math.floor(Date.now() / 1000)
+  const baseResponse = {
+    id: responseId,
+    object: "response",
+    created_at: createdAt,
+    model: payload.model,
+    output: [],
+    output_text: "",
+    usage: null,
+    error: null,
+    incomplete_details: null,
+    instructions: payload.instructions ?? null,
+    metadata: payload.metadata ?? null,
+    parallel_tool_calls: payload.parallel_tool_calls ?? false,
+    temperature: payload.temperature ?? null,
+    tool_choice: payload.tool_choice ?? "auto",
+    tools: payload.tools ?? [],
+    top_p: payload.top_p ?? null,
+  }
+
+  ws.send(
+    JSON.stringify({
+      type: "response.created",
+      sequence_number: 0,
+      response: {
+        ...baseResponse,
+        status: "in_progress",
+      },
+    }),
+  )
+
+  ws.send(
+    JSON.stringify({
+      type: "response.completed",
+      sequence_number: 1,
+      response: {
+        ...baseResponse,
+        status: "completed",
+      },
+    }),
+  )
 }
 
 async function streamChatCompletionsOverWs(

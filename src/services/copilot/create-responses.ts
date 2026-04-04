@@ -25,6 +25,7 @@ export interface ResponsesPayload {
   text?: {
     format?: { type: string; [key: string]: unknown } | null
   } | null
+  generate?: boolean | null
   task_budget?: {
     type: "tokens"
     total: number
