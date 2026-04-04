@@ -399,6 +399,7 @@ const KNOWN_RESPONSES_FIELDS = new Set([
   "prompt",
   "conversation_id",
   "generate",
+  "client_metadata",
   "tools",
   "tool_choice",
   "temperature",
