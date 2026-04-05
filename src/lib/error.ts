@@ -4,6 +4,16 @@ import type { ContentfulStatusCode } from "hono/utils/http-status"
 import * as Sentry from "@sentry/bun"
 import consola from "consola"
 
+/**
+ * Check if an error is an AbortError (client disconnected during streaming).
+ * These are expected and should not be logged or reported to Sentry.
+ */
+export function isAbortError(error: unknown): boolean {
+  if (error instanceof DOMException && error.name === "AbortError") return true
+  if (error instanceof Error && error.name === "AbortError") return true
+  return false
+}
+
 export class HTTPError extends Error {
   response: Response
   requestPayload?: unknown
@@ -55,6 +65,12 @@ function extractResponseHeaders(response: Response): Record<string, string> {
 }
 
 export async function forwardError(c: Context, error: unknown) {
+  // Client disconnected — nothing to send back, don't log as error
+  if (isAbortError(error)) {
+    consola.debug("Client disconnected (AbortError)")
+    return c.body(null, 499)
+  }
+
   if (error instanceof HTTPError) {
     let responseBody: string
     try {

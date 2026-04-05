@@ -7,6 +7,7 @@ import { streamSSE, type SSEMessage } from "hono/streaming"
 import { getLastUsedAccountId } from "~/lib/account-router"
 import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
+import { isAbortError } from "~/lib/error"
 import { normalizeModelName } from "~/lib/model-resolver"
 import { parseModelSuffix } from "~/lib/model-suffix"
 import { checkRateLimit } from "~/lib/rate-limit"
@@ -258,6 +259,9 @@ const handleStreamingResponse = (
                   streamCachedTokens,
                 )
               }
+            } catch (error) {
+              if (isAbortError(error)) return
+              throw error
             } finally {
               finishSpan()
             }

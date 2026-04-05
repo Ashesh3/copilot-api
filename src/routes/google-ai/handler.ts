@@ -15,6 +15,7 @@ import { getLastUsedAccountId } from "~/lib/account-router"
 import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
 import { getReasoningEffortForModel } from "~/lib/config"
+import { isAbortError } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
 import { normalizeModelName } from "~/lib/model-resolver"
 import { checkRateLimit } from "~/lib/rate-limit"
@@ -309,34 +310,39 @@ async function handleWithChatCompletions(
   logger.debug("Streaming response from Copilot")
 
   return streamSSE(c, async (stream) => {
-    const streamState = createGoogleStreamState()
+    try {
+      const streamState = createGoogleStreamState()
 
-    for await (const rawEvent of response) {
-      logger.debug("Copilot raw stream event:", JSON.stringify(rawEvent))
-      if (rawEvent.data === "[DONE]") {
-        break
+      for await (const rawEvent of response) {
+        logger.debug("Copilot raw stream event:", JSON.stringify(rawEvent))
+        if (rawEvent.data === "[DONE]") {
+          break
+        }
+
+        if (!rawEvent.data) {
+          continue
+        }
+
+        const chunk = JSON.parse(rawEvent.data) as ChatCompletionChunk
+
+        // Capture usage for logging
+        if (chunk.usage) {
+          setRequestContext(c, {
+            inputTokens: chunk.usage.prompt_tokens,
+            outputTokens: chunk.usage.completion_tokens,
+          })
+        }
+
+        const googleChunk = translateChunkToGoogle(chunk, streamState)
+        if (googleChunk) {
+          await stream.writeSSE({
+            data: JSON.stringify(googleChunk),
+          })
+        }
       }
-
-      if (!rawEvent.data) {
-        continue
-      }
-
-      const chunk = JSON.parse(rawEvent.data) as ChatCompletionChunk
-
-      // Capture usage for logging
-      if (chunk.usage) {
-        setRequestContext(c, {
-          inputTokens: chunk.usage.prompt_tokens,
-          outputTokens: chunk.usage.completion_tokens,
-        })
-      }
-
-      const googleChunk = translateChunkToGoogle(chunk, streamState)
-      if (googleChunk) {
-        await stream.writeSSE({
-          data: JSON.stringify(googleChunk),
-        })
-      }
+    } catch (error) {
+      if (isAbortError(error)) return
+      throw error
     }
   })
 }
@@ -545,42 +551,44 @@ async function handleWithResponsesApi(
   logger.debug("Streaming response from Copilot (Responses API)")
 
   return streamSSE(c, async (stream) => {
-    const streamState = createGoogleStreamState()
+    try {
+      const streamState = createGoogleStreamState()
 
-    for await (const chunk of response) {
-      const eventName = chunk.event
-      if (eventName === "ping") continue
+      for await (const chunk of response) {
+        const eventName = chunk.event
+        if (eventName === "ping") continue
 
-      const data = chunk.data
-      if (!data) continue
+        const data = chunk.data
+        if (!data) continue
 
-      logger.debug("Responses raw stream event:", data)
+        logger.debug("Responses raw stream event:", data)
 
-      const parsed = JSON.parse(data) as ResponseStreamEvent
-      const googleChunk = translateResponsesStreamEventToGoogle(
-        parsed,
-        streamState,
-      )
+        const parsed = JSON.parse(data) as ResponseStreamEvent
+        const googleChunk = translateResponsesStreamEventToGoogle(
+          parsed,
+          streamState,
+        )
 
-      if (googleChunk) {
+        if (!googleChunk) continue
+
         // Capture usage from completed response
-        if (
+        const isCompleted =
           parsed.type === "response.completed"
           || parsed.type === "response.incomplete"
-        ) {
-          const usage = parsed.response.usage
-          if (usage) {
-            setRequestContext(c, {
-              inputTokens: usage.input_tokens,
-              outputTokens: usage.output_tokens,
-            })
-          }
+        if (isCompleted && parsed.response.usage) {
+          setRequestContext(c, {
+            inputTokens: parsed.response.usage.input_tokens,
+            outputTokens: parsed.response.usage.output_tokens,
+          })
         }
 
         await stream.writeSSE({
           data: JSON.stringify(googleChunk),
         })
       }
+    } catch (error) {
+      if (isAbortError(error)) return
+      throw error
     }
   })
 }

@@ -9,7 +9,7 @@ import type { Model } from "~/services/copilot/get-models"
 import { getLastUsedAccountId } from "~/lib/account-router"
 import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
-import { HTTPError } from "~/lib/error"
+import { HTTPError, isAbortError } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
 import { normalizeModelName } from "~/lib/model-resolver"
 import { type ReasoningEffort, parseModelSuffix } from "~/lib/model-suffix"
@@ -626,6 +626,9 @@ const executeChatCompletions = async (
                   JSON.stringify([directResult.responseText]),
                 )
               }
+            } catch (error) {
+              if (isAbortError(error)) return
+              throw error
             } finally {
               finishSpan()
             }
@@ -1020,6 +1023,9 @@ const executeResponsesApi = async (
                     JSON.stringify([directUsage.responseText]),
                   )
                 }
+              } catch (error) {
+                if (isAbortError(error)) return
+                throw error
               } finally {
                 finishSpan()
               }

@@ -8,6 +8,7 @@ import { streamSSE } from "hono/streaming"
 import { getLastUsedAccountId } from "~/lib/account-router"
 import { awaitApproval } from "~/lib/approval"
 import { getConfig } from "~/lib/config"
+import { isAbortError } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
 import { parseModelSuffix } from "~/lib/model-suffix"
 import { checkRateLimit } from "~/lib/rate-limit"
@@ -424,6 +425,9 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
                     data: processedData,
                   })
                 }
+              } catch (error) {
+                if (isAbortError(error)) return
+                throw error
               } finally {
                 finishSpan()
               }
@@ -1340,6 +1344,9 @@ const handleWithChatCompletions = async (
                   JSON.stringify([streamUsage.responseText]),
                 )
               }
+            } catch (error) {
+              if (isAbortError(error)) return
+              throw error
             } finally {
               finishSpan()
             }
