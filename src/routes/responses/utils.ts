@@ -16,12 +16,23 @@ export const getResponsesRequestOptions = (
  * Expand proxy-generated compaction compatibility items back into regular messages.
  * Native Codex compaction items should be preserved as-is; only the proxy's own
  * synthetic "cmp_" items use base64 summaries that upstream cannot decrypt.
+ *
+ * Also strips encrypted_content from reasoning items — these are cryptographically
+ * tied to the specific Copilot token that generated them and will cause 400 errors
+ * if sent to a different token (common in multi-token mode or across sessions).
  */
 export const expandCompactionItems = (payload: ResponsesPayload): void => {
   if (!Array.isArray(payload.input)) return
 
   payload.input = payload.input.map((item) => {
     const record = item as Record<string, unknown>
+
+    // Strip encrypted_content from reasoning items — upstream can't verify it
+    if (record.type === "reasoning" && "encrypted_content" in record) {
+      const { encrypted_content: _, ...rest } = record
+      return rest as ResponseInputItem
+    }
+
     if (
       record.type !== "compaction"
       || typeof record.encrypted_content !== "string"
