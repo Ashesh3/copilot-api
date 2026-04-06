@@ -22,8 +22,8 @@ import { expandCompactionItems, getResponsesRequestOptions } from "./utils"
 
 const RESPONSES_ENDPOINT = "/responses"
 
-// Paths that trigger WebSocket upgrade for responses
-const WS_PATHS = new Set(["/v1/responses", "/responses"])
+// Paths that trigger WebSocket upgrade for responses (currently disabled)
+const _WS_PATHS = new Set(["/v1/responses", "/responses"])
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null
@@ -37,33 +37,19 @@ interface ResponsesWebSocketData {
  * Check if a request is a responses WebSocket upgrade and handle it.
  * Returns "upgraded" if the upgrade was handled, "auth_failed" if auth failed,
  * or "no_match" if the path didn't match.
+ *
+ * NOTE: Responses WebSocket is disabled — Codex CLI and other clients that
+ * attempt WebSocket will receive no upgrade and fall back to HTTP/SSE, which
+ * is more reliable and provides proper request logging.
  */
 export function tryUpgradeResponsesWebSocket(
-  req: Request,
-  server: { upgrade(req: Request, opts?: object): boolean },
+  _req: Request,
+  _server: { upgrade(req: Request, opts?: object): boolean },
 ): "upgraded" | "auth_failed" | "no_match" {
-  const url = new URL(req.url)
-  if (!WS_PATHS.has(url.pathname)) return "no_match"
-
-  // Validate API key auth if enabled
-  if (state.apiKeyAuth) {
-    const apiKey = extractApiKeyFromRequest(req)
-    if (apiKey !== state.apiKeyAuth) {
-      consola.debug("[responses-ws] Rejected: invalid API key")
-      return "auth_failed"
-    }
-  }
-
-  server.upgrade(req, {
-    data: {
-      type: "responses" as const,
-      syntheticWarmups: new Map<string, ResponsesPayload>(),
-    } satisfies ResponsesWebSocketData,
-  })
-  return "upgraded"
+  return "no_match"
 }
 
-function extractApiKeyFromRequest(req: Request): string | null {
+function _extractApiKeyFromRequest(req: Request): string | null {
   const xApiKey = req.headers.get("x-api-key")?.trim()
   if (xApiKey) return xApiKey
 
