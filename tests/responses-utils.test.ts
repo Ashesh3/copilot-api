@@ -4,7 +4,7 @@ import type { ResponsesPayload } from "../src/services/copilot/create-responses"
 
 import { expandCompactionItems } from "../src/routes/responses/utils"
 
-test("strips encrypted_content from native compaction items", () => {
+test("converts native compaction items into plain messages", () => {
   const payload = {
     model: "gpt-4o",
     input: [
@@ -19,7 +19,10 @@ test("strips encrypted_content from native compaction items", () => {
 
   expect(payload.input).toEqual([
     {
-      type: "compaction",
+      type: "message",
+      role: "assistant",
+      content:
+        "[Previous conversation summary]\n[Previous conversation context was compacted]",
     },
   ])
 })
