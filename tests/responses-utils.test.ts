@@ -4,7 +4,7 @@ import type { ResponsesPayload } from "../src/services/copilot/create-responses"
 
 import { expandCompactionItems } from "../src/routes/responses/utils"
 
-test("preserves native compaction items by default", () => {
+test("strips encrypted_content from native compaction items", () => {
   const payload = {
     model: "gpt-4o",
     input: [
@@ -20,7 +20,6 @@ test("preserves native compaction items by default", () => {
   expect(payload.input).toEqual([
     {
       type: "compaction",
-      encrypted_content: "opaque-native-compaction",
     },
   ])
 })
