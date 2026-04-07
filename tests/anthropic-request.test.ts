@@ -254,6 +254,113 @@ describe("Anthropic to OpenAI translation logic", () => {
   })
 })
 
+describe("Claude Code compatibility filtering", () => {
+  test("should omit Claude Code harness-only context from translated payloads", () => {
+    const anthropicPayload: AnthropicMessagesPayload = {
+      model: "claude-sonnet-4.6",
+      messages: [
+        {
+          role: "user",
+          content:
+            "<available-deferred-tools>\nAskUserQuestion\nTaskCreate\n</available-deferred-tools>",
+        },
+        {
+          role: "user",
+          content:
+            "<system-reminder>\nThe following skills are available for use with the Skill tool:\n\n- brainstorming\n</system-reminder>",
+        },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "tooluse_skill",
+              name: "Skill",
+              input: { skill: "brainstorming" },
+            },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "tooluse_skill",
+              content: "Tool loaded.",
+            },
+          ],
+        },
+        { role: "user", content: "Help me write an implementation plan." },
+      ],
+      max_tokens: 100,
+    }
+
+    const openAIPayload = translateToOpenAI(anthropicPayload)
+
+    expect(openAIPayload.messages).toEqual([
+      { role: "user", content: "Help me write an implementation plan." },
+    ])
+  })
+
+  test("should preserve normal tool interactions that happen to say Tool loaded.", () => {
+    const anthropicPayload: AnthropicMessagesPayload = {
+      model: "claude-sonnet-4.6",
+      messages: [
+        { role: "user", content: "Load the parser before answering." },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "tooluse_loader",
+              name: "load_parser",
+              input: {},
+            },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "tooluse_loader",
+              content: "Tool loaded.",
+            },
+          ],
+        },
+        { role: "assistant", content: "The parser is ready." },
+      ],
+      max_tokens: 100,
+    }
+
+    const openAIPayload = translateToOpenAI(anthropicPayload)
+
+    expect(openAIPayload.messages).toEqual([
+      { role: "user", content: "Load the parser before answering." },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "tooluse_loader",
+            type: "function",
+            function: {
+              name: "load_parser",
+              arguments: "{}",
+            },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        tool_call_id: "tooluse_loader",
+        content: "Tool loaded.",
+      },
+      { role: "assistant", content: "The parser is ready." },
+    ])
+  })
+})
+
 describe("OpenAI Chat Completion v1 Request Payload Validation with Zod", () => {
   test("should return true for a minimal valid request payload", () => {
     const validPayload = {

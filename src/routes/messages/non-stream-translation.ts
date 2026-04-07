@@ -84,13 +84,160 @@ function translateModelName(model: string): string {
   return model
 }
 
+const HARNESS_USER_PREFIXES = [
+  "<available-deferred-tools>",
+  "<system-reminder>\nSessionStart hook additional context:",
+  "<system-reminder>\n# MCP Server Instructions",
+  "<system-reminder>\nThe following skills are available for use with the Skill tool:",
+  "<system-reminder>\nThe task tools haven't been used recently.",
+]
+
+const HARNESS_TOOL_RESULT_MARKERS = [
+  "IMPORTANT: This message and these instructions are NOT part of the actual user conversation.",
+  String.raw`\session-memory\summary.md`,
+  "The task tools haven't been used recently.",
+]
+
+const HARNESS_TOOL_USE_NAMES = new Set([
+  "AskUserQuestion",
+  "CronCreate",
+  "CronDelete",
+  "CronList",
+  "EnterPlanMode",
+  "EnterWorktree",
+  "ExitPlanMode",
+  "ExitWorktree",
+  "LSP",
+  "ListMcpResourcesTool",
+  "NotebookEdit",
+  "ReadMcpResourceTool",
+  "SendMessage",
+  "Skill",
+  "TaskCreate",
+  "TaskGet",
+  "TaskList",
+  "TaskOutput",
+  "TaskStop",
+  "TaskUpdate",
+  "TeamCreate",
+  "TeamDelete",
+  "WebFetch",
+  "WebSearch",
+])
+
+function isClaudeCodeHarnessUserMessage(
+  message: AnthropicUserMessage,
+): boolean {
+  if (typeof message.content !== "string") {
+    return false
+  }
+
+  const content = message.content.trimStart()
+  return HARNESS_USER_PREFIXES.some((prefix) => content.startsWith(prefix))
+}
+
+function getToolResultText(
+  content: AnthropicToolResultBlock["content"],
+): string | null {
+  if (typeof content === "string") {
+    return content
+  }
+
+  const textBlocks = content.filter(
+    (block): block is AnthropicTextBlock => block.type === "text",
+  )
+  if (textBlocks.length !== content.length) {
+    return null
+  }
+
+  return textBlocks.map((block) => block.text).join("\n\n")
+}
+
+function isClaudeCodeHarnessToolResult(
+  block: AnthropicToolResultBlock,
+): boolean {
+  const text = getToolResultText(block.content)?.trim()
+  if (!text) {
+    return false
+  }
+
+  if (text === "Tool loaded.") {
+    return true
+  }
+
+  if (
+    text.startsWith("only Edit on ")
+    && text.includes(String.raw`\session-memory\summary.md is allowed`)
+  ) {
+    return true
+  }
+
+  return HARNESS_TOOL_RESULT_MARKERS.some((marker) => text.includes(marker))
+}
+
+function isHarnessOnlyToolResultMessage(
+  message: AnthropicMessage | undefined,
+): message is AnthropicUserMessage {
+  if (!message || message.role !== "user" || !Array.isArray(message.content)) {
+    return false
+  }
+
+  return (
+    message.content.length > 0
+    && message.content.every(
+      (block) =>
+        block.type === "tool_result" && isClaudeCodeHarnessToolResult(block),
+    )
+  )
+}
+
+function isHarnessOnlyAssistantToolUseMessage(
+  message: AnthropicMessage,
+): message is AnthropicAssistantMessage {
+  return (
+    message.role === "assistant"
+    && Array.isArray(message.content)
+    && message.content.length > 0
+    && message.content.every(
+      (block) =>
+        block.type === "tool_use" && HARNESS_TOOL_USE_NAMES.has(block.name),
+    )
+  )
+}
+
+export function sanitizeAnthropicMessages(
+  messages: Array<AnthropicMessage>,
+): Array<AnthropicMessage> {
+  const sanitized: Array<AnthropicMessage> = []
+
+  for (let index = 0; index < messages.length; index++) {
+    const message = messages[index]
+
+    if (message.role === "user" && isClaudeCodeHarnessUserMessage(message)) {
+      continue
+    }
+
+    if (
+      isHarnessOnlyAssistantToolUseMessage(message)
+      && isHarnessOnlyToolResultMessage(messages[index + 1])
+    ) {
+      index++
+      continue
+    }
+    sanitized.push(message)
+  }
+
+  return sanitized
+}
+
 function translateAnthropicMessagesToOpenAI(
   anthropicMessages: Array<AnthropicMessage>,
   system: string | Array<AnthropicTextBlock> | undefined,
 ): Array<Message> {
   const systemMessages = handleSystemPrompt(system)
+  const sanitizedMessages = sanitizeAnthropicMessages(anthropicMessages)
 
-  const otherMessages = anthropicMessages.flatMap((message) =>
+  const otherMessages = sanitizedMessages.flatMap((message) =>
     message.role === "user" ?
       handleUserMessage(message)
     : handleAssistantMessage(message),

@@ -46,6 +46,7 @@ import {
   type AnthropicUserContentBlock,
   type AnthropicUserMessage,
 } from "./anthropic-types"
+import { sanitizeAnthropicMessages } from "./non-stream-translation"
 
 const MESSAGE_TYPE = "message"
 const CODEX_PHASE_MODEL = "gpt-5.3-codex"
@@ -57,8 +58,9 @@ export const translateAnthropicMessagesToResponsesPayload = (
   effortOverride?: "low" | "medium" | "high" | "xhigh",
 ): ResponsesPayload => {
   const input: Array<ResponseInputItem> = []
+  const sanitizedMessages = sanitizeAnthropicMessages(payload.messages)
 
-  for (const message of payload.messages) {
+  for (const message of sanitizedMessages) {
     input.push(...translateMessage(message, payload.model))
   }
 
