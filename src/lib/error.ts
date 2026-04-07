@@ -68,7 +68,8 @@ export async function forwardError(c: Context, error: unknown) {
   // Client disconnected — nothing to send back, don't log as error
   if (isAbortError(error)) {
     consola.debug("Client disconnected (AbortError)")
-    return c.body(null, 499)
+    // 499 = client closed request (nginx convention), not in Hono's StatusCode union
+    return c.body(null, 499 as ContentfulStatusCode)
   }
 
   if (error instanceof HTTPError) {

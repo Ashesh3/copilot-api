@@ -23,7 +23,7 @@ import { expandCompactionItems, getResponsesRequestOptions } from "./utils"
 const RESPONSES_ENDPOINT = "/responses"
 
 // Paths that trigger WebSocket upgrade for responses (currently disabled)
-const _WS_PATHS = new Set(["/v1/responses", "/responses"])
+// const WS_PATHS = new Set(["/v1/responses", "/responses"])
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null
@@ -49,18 +49,15 @@ export function tryUpgradeResponsesWebSocket(
   return "no_match"
 }
 
-function _extractApiKeyFromRequest(req: Request): string | null {
-  const xApiKey = req.headers.get("x-api-key")?.trim()
-  if (xApiKey) return xApiKey
-
-  const authorization = req.headers.get("authorization")
-  if (!authorization) return null
-
-  const [scheme, ...rest] = authorization.trim().split(/\s+/)
-  if (scheme.toLowerCase() !== "bearer") return null
-
-  return rest.join(" ").trim() || null
-}
+// function extractApiKeyFromRequest(req: Request): string | null {
+//   const xApiKey = req.headers.get("x-api-key")?.trim()
+//   if (xApiKey) return xApiKey
+//   const authorization = req.headers.get("authorization")
+//   if (!authorization) return null
+//   const [scheme, ...rest] = authorization.trim().split(/\s+/)
+//   if (scheme.toLowerCase() !== "bearer") return null
+//   return rest.join(" ").trim() || null
+// }
 
 // Bun WebSocket handler for responses
 export const responsesWebSocket = {
