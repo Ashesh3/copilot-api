@@ -3,7 +3,12 @@ import type { Context, Next } from "hono"
 import * as Sentry from "@sentry/bun"
 import consola from "consola"
 
-import { extractClientIp, isIpBlocked, recordFailedAttempt } from "./ip-blocker"
+import {
+  extractClientIp,
+  isIpBlocked,
+  recordFailedAttempt,
+  whitelistIp,
+} from "./ip-blocker"
 import { extractRequestApiKey } from "./request-auth"
 import { state } from "./state"
 
@@ -51,6 +56,9 @@ export async function apiKeyGuard(c: Context, next: Next): Promise<void> {
   const requestApiKey = extractRequestApiKey(c)
 
   if (requestApiKey === state.apiKeyAuth) {
+    if (clientIp !== null) {
+      whitelistIp(clientIp)
+    }
     await next()
     return
   }

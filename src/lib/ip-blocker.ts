@@ -8,6 +8,7 @@ interface IpEntry {
 }
 
 const ipTracker = new Map<string, IpEntry>()
+const whitelistedIps = new Set<string>()
 
 /**
  * Extracts the client IP from the x-forwarded-for header.
@@ -34,10 +35,28 @@ function getUtcDateString(): string {
 }
 
 /**
+ * Whitelists an IP for the lifetime of the server process.
+ * Once whitelisted, the IP will never be blocked regardless of failed attempts.
+ */
+export function whitelistIp(ip: string): void {
+  if (!whitelistedIps.has(ip)) {
+    whitelistedIps.add(ip)
+    // Clear any existing failed attempts
+    ipTracker.delete(ip)
+    consola.info(`[security] IP ${ip} whitelisted after successful auth`)
+  }
+}
+
+/**
  * Checks if an IP is blocked due to 3+ failed attempts today (UTC).
+ * Whitelisted IPs are never blocked.
  * Cleans up stale entries (entries from previous days).
  */
 export function isIpBlocked(ip: string): boolean {
+  if (whitelistedIps.has(ip)) {
+    return false
+  }
+
   const today = getUtcDateString()
   const entry = ipTracker.get(ip)
 

@@ -4,6 +4,7 @@ import {
   extractClientIp,
   isIpBlocked,
   recordFailedAttempt,
+  whitelistIp,
 } from "~/lib/ip-blocker"
 import { extractRequestApiKey } from "~/lib/request-auth"
 import { state } from "~/lib/state"
@@ -53,6 +54,9 @@ dashboardRoutes.use("/api/*", async (c, next) => {
   const requestApiKey = extractRequestApiKey(c)
 
   if (requestApiKey === state.apiKeyAuth) {
+    if (clientIp !== null) {
+      whitelistIp(clientIp)
+    }
     await next()
     return
   }
