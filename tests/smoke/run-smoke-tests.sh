@@ -111,7 +111,7 @@ if command -v codex &>/dev/null; then
 
   cleanup_smoke_file
   run_test "codex:tool-calling" '
-    output=$(codex exec --full-auto "Create a file called smoke.txt with the content: hello" 2>&1)
+    output=$(codex exec --dangerously-bypass-approvals-and-sandbox "Create a file called smoke.txt with the content: hello" 2>&1)
     echo "$output"
     test -f smoke.txt
   '
