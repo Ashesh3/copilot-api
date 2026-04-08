@@ -70,6 +70,21 @@ async function handleCompletionInner(
     model: normalizeModelName(replacedPayload.model),
   }
 
+  // Fallback: if the base model doesn't exist but the -1m variant does,
+  // auto-route to it (subagents/skills may omit the beta header).
+  if (
+    !payload.model.endsWith("-1m")
+    && !state.models?.data.some((m) => m.id === payload.model)
+  ) {
+    const candidate = `${payload.model}-1m`
+    if (state.models?.data.some((m) => m.id === candidate)) {
+      consola.debug(
+        `Model ${payload.model} not found, falling back to ${candidate}`,
+      )
+      payload = { ...payload, model: candidate }
+    }
+  }
+
   consola.debug("Request payload:", JSON.stringify(payload).slice(-400))
 
   setRequestContext(c, {

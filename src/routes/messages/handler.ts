@@ -1115,6 +1115,9 @@ const shouldUseResponsesApi = (selectedModel: Model | undefined): boolean => {
   )
 }
 
+const modelExists = (id: string) =>
+  state.models?.data.some((m) => m.id === id) ?? false
+
 /**
  * Route to model variants based on client signals (1m context, fast mode).
  * Mutates the payload in place.
@@ -1126,7 +1129,21 @@ function applyModelVariantRouting(
   // 1M context via beta header → route to -1m model variant
   if (anthropicBeta?.includes("context-1m")) {
     const candidate = `${payload.model}-1m`
-    if (state.models?.data.some((m) => m.id === candidate)) {
+    if (modelExists(candidate)) {
+      payload.model = candidate
+    }
+  }
+
+  // Fallback: if the base model doesn't exist but the -1m variant does,
+  // auto-route to it. Subagents and skills often omit the anthropic-beta
+  // header, causing requests to target a non-existent base model (e.g.
+  // claude-opus-4.6) when only the -1m variant is available.
+  if (!modelExists(payload.model) && !payload.model.endsWith("-1m")) {
+    const candidate = `${payload.model}-1m`
+    if (modelExists(candidate)) {
+      logger.debug(
+        `Model ${payload.model} not found, falling back to ${candidate}`,
+      )
       payload.model = candidate
     }
   }
@@ -1134,7 +1151,7 @@ function applyModelVariantRouting(
   // Fast mode → route to -fast model variant, strip unsupported field
   if (payload.speed === "fast") {
     const candidate = `${payload.model}-fast`
-    if (state.models?.data.some((m) => m.id === candidate)) {
+    if (modelExists(candidate)) {
       payload.model = candidate
     }
     delete payload.speed
