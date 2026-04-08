@@ -459,6 +459,14 @@ const executeChatCompletions = async (
     // Claude requires temperature=1 when thinking is enabled
     openAIPayload.temperature = 1
     delete openAIPayload.top_p
+  } else if (effortOverride) {
+    // Subagent/skill requests may set output_config.effort without a thinking
+    // block. Forward reasoning_effort so Copilot enables extended thinking;
+    // also pin temperature=1 and drop top_p as the model requires.
+    const extra = openAIPayload as unknown as Record<string, unknown>
+    extra.reasoning_effort = effortOverride
+    openAIPayload.temperature = 1
+    delete openAIPayload.top_p
   }
 
   const { payload: replacedPayload, appliedRules } =
