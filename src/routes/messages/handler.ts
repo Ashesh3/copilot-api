@@ -17,6 +17,7 @@ import { checkRateLimit } from "~/lib/rate-limit"
 import { setRequestContext } from "~/lib/request-logger"
 import { getSentryModelName, shouldRecordAiContent } from "~/lib/sentry"
 import { state } from "~/lib/state"
+import { tokenPool } from "~/lib/token-pool"
 import { getTokenCount } from "~/lib/tokenizer"
 import { emitAnthropicToolSpans } from "~/lib/tool-spans"
 import { isNullish } from "~/lib/utils"
@@ -419,15 +420,30 @@ const handleWithChatCompletions = async (
   } catch (error) {
     if (error instanceof HTTPError && error.response.status === 400) {
       const body = await error.response.clone().text()
+      const isSignatureError =
+        body.includes("Invalid signature")
+        || body.includes("Invalid `signature`")
+      // Generic "Bad Request" with reasoning enabled means CAPI rejected
+      // because reasoning_opaque was missing or invalid on prior turns.
+      const isReasoningBadRequest =
+        body.trim() === "Bad Request"
+        && Boolean(options?.effortOverride || anthropicPayload.thinking)
+
       if (
-        (body.includes("Invalid signature")
-          || body.includes("Invalid `signature`"))
+        (isSignatureError || isReasoningBadRequest)
         && stripThinkingBlocks(anthropicPayload)
       ) {
         logger.warn(
-          "Stripped thinking blocks due to invalid signature, retrying",
+          `Stripped thinking blocks due to ${isSignatureError ? "invalid signature" : "Bad Request with reasoning"}, retrying without reasoning`,
         )
-        return await executeChatCompletions(c, anthropicPayload, options)
+        // Fully downgrade reasoning: clear thinking config AND effortOverride.
+        // Clearing effortOverride alone is insufficient — executeChatCompletions
+        // re-adds reasoning_effort when anthropicPayload.thinking is present.
+        delete anthropicPayload.thinking
+        return await executeChatCompletions(c, anthropicPayload, {
+          ...options,
+          effortOverride: undefined,
+        })
       }
     }
     throw error
@@ -444,7 +460,19 @@ const executeChatCompletions = async (
   },
 ) => {
   const { initiatorOverride, effortOverride, requestedModel } = options ?? {}
-  stripThinkingBlocksForMultiToken(anthropicPayload)
+  const reasoningEnabled = Boolean(effortOverride || anthropicPayload.thinking)
+
+  // In multi-token mode, reasoning_opaque is cryptographically tied to a
+  // specific Copilot token. Stripping thinking blocks destroys reasoning_opaque,
+  // but CAPI requires it when reasoning is enabled — missing it causes 400.
+  // Preserve thinking blocks when reasoning is enabled so reasoning_opaque
+  // flows through; session routing keeps requests on the same account.
+  // If the signature IS invalid (wrong account), CAPI returns "Invalid
+  // signature" and the retry in handleWithChatCompletions handles it.
+  if (!reasoningEnabled) {
+    stripThinkingBlocksForMultiToken(anthropicPayload)
+  }
+
   const openAIPayload = translateToOpenAI(anthropicPayload)
 
   // Enable thinking/reasoning on the ChatCompletions path
@@ -864,15 +892,25 @@ const handleWithResponsesApi = async (
   } catch (error) {
     if (error instanceof HTTPError && error.response.status === 400) {
       const body = await error.response.clone().text()
+      const isSignatureError =
+        body.includes("Invalid signature")
+        || body.includes("Invalid `signature`")
+      const isReasoningBadRequest =
+        body.trim() === "Bad Request"
+        && Boolean(options?.effortOverride || anthropicPayload.thinking)
+
       if (
-        (body.includes("Invalid signature")
-          || body.includes("Invalid `signature`"))
+        (isSignatureError || isReasoningBadRequest)
         && stripThinkingBlocks(anthropicPayload)
       ) {
         logger.warn(
-          "Stripped thinking blocks due to invalid signature (Responses API), retrying",
+          `Stripped thinking blocks due to ${isSignatureError ? "invalid signature" : "Bad Request with reasoning"} (Responses API), retrying without reasoning`,
         )
-        return await executeResponsesApi(c, anthropicPayload, options)
+        delete anthropicPayload.thinking
+        return await executeResponsesApi(c, anthropicPayload, {
+          ...options,
+          effortOverride: undefined,
+        })
       }
     }
     throw error
@@ -889,7 +927,10 @@ const executeResponsesApi = async (
   },
 ) => {
   const { initiatorOverride, effortOverride, requestedModel } = options ?? {}
-  stripThinkingBlocksForMultiToken(anthropicPayload)
+  const reasoningEnabled = Boolean(effortOverride || anthropicPayload.thinking)
+  if (!reasoningEnabled) {
+    stripThinkingBlocksForMultiToken(anthropicPayload)
+  }
   const responsesPayload = translateAnthropicMessagesToResponsesPayload(
     anthropicPayload,
     effortOverride,
@@ -1142,17 +1183,20 @@ function applyModelVariantRouting(
     }
   }
 
-  // Fallback: if the base model doesn't exist but the -1m variant does,
-  // auto-route to it. Subagents and skills often omit the anthropic-beta
-  // header, causing requests to target a non-existent base model (e.g.
-  // claude-opus-4.6) when only the -1m variant is available.
-  if (!modelExists(payload.model) && !payload.model.endsWith("-1m")) {
-    const candidate = `${payload.model}-1m`
-    if (modelExists(candidate)) {
-      logger.debug(
-        `Model ${payload.model} not found, falling back to ${candidate}`,
-      )
-      payload.model = candidate
+  // Fallback: if the base model has no routable account but the -1m variant
+  // does, auto-route to it. The merged model list (state.models) may include
+  // models that no individual account can serve via the token pool, causing
+  // routedFetch to fall back to the legacy single-token path which often 400s.
+  if (!payload.model.endsWith("-1m")) {
+    const hasAccount = Boolean(tokenPool.getAccountForModel(payload.model))
+    if (!hasAccount) {
+      const candidate = `${payload.model}-1m`
+      if (modelExists(candidate)) {
+        logger.debug(
+          `No routable account for ${payload.model}, falling back to ${candidate}`,
+        )
+        payload.model = candidate
+      }
     }
   }
 

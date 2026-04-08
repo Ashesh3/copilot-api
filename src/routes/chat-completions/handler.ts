@@ -14,6 +14,7 @@ import { checkRateLimit } from "~/lib/rate-limit"
 import { setRequestContext } from "~/lib/request-logger"
 import { getSentryModelName, shouldRecordAiContent } from "~/lib/sentry"
 import { state } from "~/lib/state"
+import { tokenPool } from "~/lib/token-pool"
 import { getTokenCount } from "~/lib/tokenizer"
 import { emitChatCompletionsToolSpans } from "~/lib/tool-spans"
 import { isNullish } from "~/lib/utils"
@@ -70,16 +71,17 @@ async function handleCompletionInner(
     model: normalizeModelName(replacedPayload.model),
   }
 
-  // Fallback: if the base model doesn't exist but the -1m variant does,
-  // auto-route to it (subagents/skills may omit the beta header).
+  // Fallback: if the base model has no routable account but the -1m variant
+  // does, auto-route to it. The merged model list may include models that no
+  // individual account can serve, causing routedFetch to use the legacy path.
   if (
     !payload.model.endsWith("-1m")
-    && !state.models?.data.some((m) => m.id === payload.model)
+    && !tokenPool.getAccountForModel(payload.model)
   ) {
     const candidate = `${payload.model}-1m`
     if (state.models?.data.some((m) => m.id === candidate)) {
       consola.debug(
-        `Model ${payload.model} not found, falling back to ${candidate}`,
+        `No routable account for ${payload.model}, falling back to ${candidate}`,
       )
       payload = { ...payload, model: candidate }
     }
