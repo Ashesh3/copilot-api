@@ -1,7 +1,7 @@
 import consola from "consola"
 import fs from "node:fs/promises"
 
-import { PATHS } from "~/lib/paths"
+import { isEnvOnlyTokens, PATHS } from "~/lib/paths"
 
 /**
  * Persistent storage for GitHub account tokens.
@@ -43,6 +43,8 @@ async function readLegacyToken(): Promise<string | undefined> {
  * Load all stored accounts. Migrates legacy single-token file if needed.
  */
 export async function loadAccounts(): Promise<Array<StoredAccount>> {
+  if (isEnvOnlyTokens()) return []
+
   const raw = await readFile()
 
   if (raw) {
@@ -71,6 +73,10 @@ export async function loadAccounts(): Promise<Array<StoredAccount>> {
 export async function saveAccounts(
   accounts: Array<StoredAccount>,
 ): Promise<void> {
+  if (isEnvOnlyTokens()) {
+    consola.debug("Env-only token mode: skipping accounts file write")
+    return
+  }
   await fs.writeFile(
     PATHS.GITHUB_TOKENS_PATH,
     JSON.stringify(accounts, null, 2),

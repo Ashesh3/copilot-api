@@ -8,6 +8,7 @@ import { getLastUsedAccountId } from "~/lib/account-router"
 import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
 import { isAbortError } from "~/lib/error"
+import { applyModelRedirect } from "~/lib/model-redirect"
 import { normalizeModelName } from "~/lib/model-resolver"
 import { parseModelSuffix } from "~/lib/model-suffix"
 import { checkRateLimit } from "~/lib/rate-limit"
@@ -65,10 +66,13 @@ async function handleCompletionInner(
   const { payload: replacedPayload, appliedRules } =
     await applyReplacementsToPayload(rawPayload)
 
+  // Apply user-configured silent model redirect (e.g. opus-4-7 -> opus-4-6)
+  const redirect = await applyModelRedirect(replacedPayload.model)
+
   // Normalize model name (e.g., claude-opus-4-5 -> claude-opus-4.5)
   let payload = {
     ...replacedPayload,
-    model: normalizeModelName(replacedPayload.model),
+    model: normalizeModelName(redirect.model),
   }
 
   // Fallback: if the base model has no routable account but the -1m variant
@@ -122,12 +126,13 @@ async function handleCompletionInner(
     consola.debug("Set max_tokens to:", JSON.stringify(payload.max_tokens))
   }
 
-  return await executeRequest(c, payload)
+  return await executeRequest(c, payload, requestedModel)
 }
 
 const executeRequest = async (
   c: Context,
   payload: ChatCompletionsPayload & { model: string },
+  requestedModel?: string,
 ) => {
   if (!payload.stream) {
     return await Sentry.startSpan(
@@ -153,19 +158,20 @@ const executeRequest = async (
           setRequestContext(c, { accountId })
         }
 
-        return handleNonStreamingResponse(c, response, span)
+        return handleNonStreamingResponse(c, response, { span, requestedModel })
       },
     )
   }
 
-  return await handleStreamingResponse(c, payload)
+  return await handleStreamingResponse(c, payload, requestedModel)
 }
 
 const handleNonStreamingResponse = (
   c: Context,
   response: ChatCompletionResponse,
-  span: Sentry.Span,
+  context: { span: Sentry.Span; requestedModel?: string },
 ) => {
+  const { span, requestedModel } = context
   consola.debug("Non-streaming response:", JSON.stringify(response))
   if (response.usage) {
     setRequestContext(c, {
@@ -193,12 +199,16 @@ const handleNonStreamingResponse = (
     )
   }
 
+  if (requestedModel) {
+    return c.json({ ...response, model: requestedModel })
+  }
   return c.json(response)
 }
 
 const handleStreamingResponse = (
   c: Context,
   payload: ChatCompletionsPayload & { model: string },
+  requestedModel?: string,
 ) => {
   consola.debug("Streaming response")
   return Sentry.startNewTrace(() =>
@@ -234,7 +244,10 @@ const handleStreamingResponse = (
           }
 
           if (isNonStreaming(response)) {
-            const result = handleNonStreamingResponse(c, response, span)
+            const result = handleNonStreamingResponse(c, response, {
+              span,
+              requestedModel,
+            })
             finishSpan()
             return result
           }
@@ -247,6 +260,7 @@ const handleStreamingResponse = (
 
               for await (const chunk of response) {
                 consola.debug("Streaming chunk:", JSON.stringify(chunk))
+                let outChunk = chunk
                 // Capture usage from final chunk if available
                 if (chunk.data && chunk.data !== "[DONE]") {
                   const parsed = JSON.parse(chunk.data) as ChatCompletionChunk
@@ -260,8 +274,12 @@ const handleStreamingResponse = (
                       outputTokens: parsed.usage.completion_tokens,
                     })
                   }
+                  if (requestedModel && parsed.model !== requestedModel) {
+                    parsed.model = requestedModel
+                    outChunk = { ...chunk, data: JSON.stringify(parsed) }
+                  }
                 }
-                await stream.writeSSE(chunk as SSEMessage)
+                await stream.writeSSE(outChunk as SSEMessage)
               }
 
               // Set token attributes after streaming completes — span is still open

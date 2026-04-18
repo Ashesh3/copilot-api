@@ -112,6 +112,7 @@ export function getDashboardPage(): string {
   <a href="#environments" data-section="environments" onclick="navigate('environments')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg><span class="tip">Environments</span></a>
   <a href="#flags" data-section="flags" onclick="navigate('flags')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg><span class="tip">Feature Flags</span></a>
   <a href="#replacements" data-section="replacements" onclick="navigate('replacements')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg><span class="tip">Replacements</span></a>
+  <a href="#model-redirects" data-section="model-redirects" onclick="navigate('model-redirects')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h13"/><path d="M16 6l6 6-6 6"/><path d="M3 6v12"/></svg><span class="tip">Model Redirects</span></a>
   <a href="#usage" data-section="usage" onclick="navigate('usage')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg><span class="tip">Usage</span></a>
   <div class="spacer"></div>
   <a href="#settings" data-section="settings" onclick="navigate('settings')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span class="tip">Settings</span></a>
@@ -129,6 +130,7 @@ export function getDashboardPage(): string {
   <div class="section" id="sec-environments"><div class="section-header"><h2>Environments</h2></div><div id="environments-content"></div></div>
   <div class="section" id="sec-flags"><div class="section-header"><h2>Feature Flags</h2></div><div id="flags-content"></div><div class="form-row" id="flag-form"><input class="form-input mono" name="flag-name" placeholder="flag_name" style="flex:2;min-width:180px"><input class="form-input" name="flag-value" placeholder="true" style="flex:1;min-width:100px"><button class="btn btn-primary" onclick="addFlag()">Add</button></div></div>
   <div class="section" id="sec-replacements"><div class="section-header"><h2>Replacements</h2></div><div id="replacements-content"></div><div class="form-row" id="replacement-form"><input class="form-input" name="repl-name" placeholder="Name (optional)" style="min-width:120px"><input class="form-input mono" name="repl-pattern" placeholder="Pattern" style="flex:2;min-width:140px"><input class="form-input" name="repl-replacement" placeholder="Replacement" style="flex:2;min-width:140px"><label class="checkbox-label"><input type="checkbox" name="repl-regex"> Regex</label><button class="btn btn-primary" onclick="addReplacement()">Add</button></div></div>
+  <div class="section" id="sec-model-redirects"><div class="section-header"><h2>Model Redirects</h2><span class="badge badge-gray">Silent — clients see the original model</span></div><div id="model-redirects-content"></div><div class="form-row" id="model-redirect-form"><input class="form-input" name="mr-name" placeholder="Name (optional)" style="min-width:120px"><input class="form-input mono" name="mr-source" placeholder="Source model (e.g. claude-opus-4.7)" style="flex:2;min-width:200px"><input class="form-input mono" name="mr-target" placeholder="Target model (e.g. claude-opus-4.6)" style="flex:2;min-width:200px"><button class="btn btn-primary" onclick="addModelRedirect()">Add</button></div></div>
   <div class="section" id="sec-usage"><div class="section-header"><h2>Usage</h2></div><div id="usage-content"></div></div>
   <div class="section" id="sec-settings"><div class="section-header"><h2>Settings</h2></div><div id="settings-content"></div></div>
 </div>
@@ -140,6 +142,7 @@ var expandedSessions = {}
 var eventTimers = {}
 var flagsData = {}
 var replacementsData = []
+var modelRedirectsData = []
 
 function apiFetch(method, path, body) {
   var opts = { method: method, headers: { 'Content-Type': 'application/json' } }
@@ -189,7 +192,7 @@ function doLogin() {
 }
 
 function navigate(section) {
-  var sections = ['overview','sessions','environments','flags','replacements','usage','settings']
+  var sections = ['overview','sessions','environments','flags','replacements','model-redirects','usage','settings']
   if (sections.indexOf(section) === -1) section = 'overview'
   Object.keys(refreshTimers).forEach(function(k) { clearInterval(refreshTimers[k]); delete refreshTimers[k] })
   Object.keys(eventTimers).forEach(function(k) { clearInterval(eventTimers[k]); delete eventTimers[k] })
@@ -203,7 +206,7 @@ function navigate(section) {
 function loadSection(section) {
   switch (section) {
     case 'overview': loadOverview(); break; case 'sessions': loadSessions(); break; case 'environments': loadEnvironments(); break
-    case 'flags': loadFlags(); break; case 'replacements': loadReplacements(); break; case 'usage': loadUsage(); break; case 'settings': loadSettings(); break
+    case 'flags': loadFlags(); break; case 'replacements': loadReplacements(); break; case 'model-redirects': loadModelRedirects(); break; case 'usage': loadUsage(); break; case 'settings': loadSettings(); break
   }
 }
 
@@ -378,6 +381,35 @@ function addReplacement() {
   var pattern = patEl.value.trim(); if (!pattern) return
   var body = { pattern: pattern, replacement: replEl.value, isRegex: regexEl.checked, name: nameEl.value.trim() || undefined }
   apiFetch('POST', '/dashboard/api/replacements', body).then(function(r) { if (r.ok) { nameEl.value = ''; patEl.value = ''; replEl.value = ''; regexEl.checked = false; showToast('Added', 'success'); loadReplacements() } else r.json().catch(function() { return {} }).then(function(d) { showToast(d.error || 'Failed', 'error') }) }).catch(function() { showToast('Failed to add', 'error') })
+}
+
+function loadModelRedirects() {
+  apiFetch('GET', '/dashboard/api/model-redirects').then(function(r) { if (r.ok) return r.json() }).then(function(d) { if (d) { modelRedirectsData = d; renderModelRedirects() } }).catch(function() { showToast('Failed to load model redirects', 'error') })
+}
+function renderModelRedirects() {
+  if (!modelRedirectsData || modelRedirectsData.length === 0) { document.getElementById('model-redirects-content').innerHTML = '<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 12h13"/><path d="M16 6l6 6-6 6"/><path d="M3 6v12"/></svg><p>No model redirects configured.</p><p style="font-size:0.8rem;margin-top:6px">Add a redirect to silently route a requested model to another (e.g. claude-opus-4.7 to claude-opus-4.6).</p></div>'; return }
+  var html = '<div class="table-scroll"><table><thead><tr><th>Name</th><th>Source Model</th><th></th><th>Target Model</th><th>Enabled</th><th>Actions</th></tr></thead><tbody>'
+  modelRedirectsData.forEach(function(r) {
+    html += '<tr><td>' + esc(r.name || '-') + '</td><td class="mono" style="font-size:12px">' + esc(r.sourceModel) + '</td><td style="color:#94A3B8">&rarr;</td><td class="mono" style="font-size:12px">' + esc(r.targetModel) + '</td><td>'
+    html += '<button class="toggle ' + (r.enabled !== false ? 'on' : 'off') + '" onclick="toggleModelRedirect(\\'' + esc(r.id) + '\\')"></button>'
+    html += '</td><td><button class="btn btn-danger" style="font-size:0.78rem;padding:4px 10px" onclick="deleteModelRedirect(\\'' + esc(r.id) + '\\')">Delete</button></td></tr>'
+  })
+  html += '</tbody></table></div>'
+  document.getElementById('model-redirects-content').innerHTML = html
+}
+function toggleModelRedirect(id) { apiFetch('PATCH', '/dashboard/api/model-redirects/' + encodeURIComponent(id) + '/toggle').then(function(r) { if (r.ok) { showToast('Toggled', 'success'); loadModelRedirects() } else showToast('Failed to toggle', 'error') }).catch(function() { showToast('Failed to toggle', 'error') }) }
+function deleteModelRedirect(id) {
+  if (!confirm('Delete this model redirect?')) return
+  apiFetch('DELETE', '/dashboard/api/model-redirects/' + encodeURIComponent(id)).then(function(r) { if (r.ok) { showToast('Deleted', 'success'); loadModelRedirects() } else showToast('Failed to delete', 'error') }).catch(function() { showToast('Failed to delete', 'error') })
+}
+function addModelRedirect() {
+  var nameEl = document.querySelector('#model-redirect-form input[name="mr-name"]')
+  var srcEl = document.querySelector('#model-redirect-form input[name="mr-source"]')
+  var tgtEl = document.querySelector('#model-redirect-form input[name="mr-target"]')
+  var src = srcEl.value.trim(), tgt = tgtEl.value.trim()
+  if (!src || !tgt) { showToast('Source and target models are required', 'error'); return }
+  var body = { sourceModel: src, targetModel: tgt, name: nameEl.value.trim() || undefined }
+  apiFetch('POST', '/dashboard/api/model-redirects', body).then(function(r) { if (r.ok) { nameEl.value = ''; srcEl.value = ''; tgtEl.value = ''; showToast('Added', 'success'); loadModelRedirects() } else r.json().catch(function() { return {} }).then(function(d) { showToast(d.error || 'Failed', 'error') }) }).catch(function() { showToast('Failed to add', 'error') })
 }
 
 function loadUsage() { apiFetch('GET', '/dashboard/api/usage').then(function(r) { if (r.ok) return r.json() }).then(function(d) { if (d) renderUsage(d) }).catch(function() { showToast('Failed to load usage', 'error') }) }

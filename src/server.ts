@@ -24,6 +24,7 @@ import { featureFlagsRoutes } from "./routes/feature-flags/route"
 import { googleAIRoutes } from "./routes/google-ai/route"
 import { growthbookRoutes } from "./routes/growthbook/route"
 import { messageRoutes } from "./routes/messages/route"
+import { modelRedirectsRoute } from "./routes/model-redirects/route"
 import { modelRoutes } from "./routes/models/route"
 import {
   oauthApiRoutes,
@@ -137,6 +138,7 @@ server.route("/models", modelRoutes)
 server.route("/embeddings", embeddingRoutes)
 server.route("/usage", usageRoute)
 server.route("/replacements", replacementsRoute)
+server.route("/model-redirects", modelRedirectsRoute)
 server.route("/responses", responsesRoutes)
 
 // Compatibility with tools that expect v1/ prefix

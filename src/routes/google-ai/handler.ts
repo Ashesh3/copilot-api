@@ -17,6 +17,7 @@ import { applyReplacementsToPayload } from "~/lib/auto-replace"
 import { getReasoningEffortForModel } from "~/lib/config"
 import { isAbortError } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
+import { applyModelRedirect } from "~/lib/model-redirect"
 import { normalizeModelName } from "~/lib/model-resolver"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { setRequestContext } from "~/lib/request-logger"
@@ -175,7 +176,12 @@ export async function handleGoogleAI(c: Context) {
   const isStream = action === "streamGenerateContent"
 
   // Normalize model name (e.g., gemini-3-flash-preview stays as-is for Copilot)
-  const model = normalizeModelName(rawModel)
+  const normalizedModel = normalizeModelName(rawModel)
+
+  // Apply silent model redirect — google-ai response format does not include
+  // a model field, so client-facing transparency is automatic.
+  const redirect = await applyModelRedirect(normalizedModel)
+  const model = redirect.model
 
   logger.debug(`Google AI request: model=${model}, action=${action}`)
 

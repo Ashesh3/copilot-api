@@ -11,7 +11,7 @@ import packageJson from "../package.json" with { type: "json" }
 import { getStoredTokens } from "./lib/accounts-store"
 import { mergeConfigWithDefaults } from "./lib/config"
 import { generateVirtualModels } from "./lib/model-suffix"
-import { ensurePaths } from "./lib/paths"
+import { ensurePaths, setEnvOnlyTokens } from "./lib/paths"
 import { initProxyFromEnv } from "./lib/proxy"
 import { initSentry, setupSentryShutdown } from "./lib/sentry"
 import { generateEnvScript } from "./lib/shell"
@@ -138,6 +138,9 @@ async function initializeMultiToken(
 
   if (tokens.length === 0) {
     tokens = await getStoredTokens()
+  } else {
+    // Env vars supplied tokens — never touch token files in this process
+    setEnvOnlyTokens(true)
   }
 
   // Need at least 2 tokens for multi-token mode
@@ -204,9 +207,11 @@ async function initializeTokens(options: RunServerOptions): Promise<void> {
     .filter((t) => t.length > 0)
   if (envTokens && envTokens.length === 1) {
     state.githubToken = envTokens[0]
+    setEnvOnlyTokens(true)
     consola.info("Using GitHub token from GITHUB_TOKENS")
   } else if (options.githubToken) {
     state.githubToken = options.githubToken
+    setEnvOnlyTokens(true)
     consola.info("Using provided GitHub token")
   } else {
     await setupGitHubToken()
@@ -464,6 +469,12 @@ export async function runServer(options: RunServerOptions): Promise<void> {
   if (options.debug) {
     consola.info("Debug mode enabled - raw HTTP requests will be logged")
   }
+
+  // Detect env-supplied tokens up front so ensurePaths can skip creating
+  // the legacy github_token file when tokens are not file-backed.
+  const envHasTokens =
+    Boolean(process.env.GITHUB_TOKENS?.trim()) || Boolean(options.githubToken)
+  if (envHasTokens) setEnvOnlyTokens(true)
 
   await ensurePaths()
   mergeConfigWithDefaults()

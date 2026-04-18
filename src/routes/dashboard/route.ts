@@ -10,9 +10,11 @@ import { extractRequestApiKey } from "~/lib/request-auth"
 import { state } from "~/lib/state"
 
 import {
+  handleAddModelRedirect,
   handleAddReplacement,
   handleArchiveSession,
   handleDeleteFlag,
+  handleDeleteModelRedirect,
   handleDeleteReplacement,
   handleDeregisterEnvironment,
   handleDestroySession,
@@ -21,12 +23,15 @@ import {
   handleGetUsage,
   handleListEnvironments,
   handleListFlags,
+  handleListModelRedirects,
   handleListReplacements,
   handleListSessions,
   handleOverview,
   handleSetFlag,
   handleStartEnvironmentSession,
+  handleToggleModelRedirect,
   handleToggleReplacement,
+  handleUpdateModelRedirect,
 } from "./api"
 import { getDashboardPage } from "./page"
 
@@ -98,6 +103,16 @@ dashboardRoutes.get("/api/replacements", handleListReplacements)
 dashboardRoutes.post("/api/replacements", handleAddReplacement)
 dashboardRoutes.delete("/api/replacements/:id", handleDeleteReplacement)
 dashboardRoutes.patch("/api/replacements/:id", handleToggleReplacement)
+
+// Model Redirects
+dashboardRoutes.get("/api/model-redirects", handleListModelRedirects)
+dashboardRoutes.post("/api/model-redirects", handleAddModelRedirect)
+dashboardRoutes.delete("/api/model-redirects/:id", handleDeleteModelRedirect)
+dashboardRoutes.patch("/api/model-redirects/:id", handleUpdateModelRedirect)
+dashboardRoutes.patch(
+  "/api/model-redirects/:id/toggle",
+  handleToggleModelRedirect,
+)
 
 // Usage
 dashboardRoutes.get("/api/usage", handleGetUsage)

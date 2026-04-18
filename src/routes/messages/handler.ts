@@ -11,6 +11,7 @@ import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
 import { HTTPError, isAbortError } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
+import { applyModelRedirect } from "~/lib/model-redirect"
 import { normalizeModelName } from "~/lib/model-resolver"
 import { type ReasoningEffort, parseModelSuffix } from "~/lib/model-suffix"
 import { checkRateLimit } from "~/lib/rate-limit"
@@ -159,7 +160,12 @@ async function handleCompletionInner(
     anthropicPayload.model,
   )
   // Normalize model name (e.g. "claude-opus-4-6[1m]" → "claude-opus-4.6-1m")
-  anthropicPayload.model = normalizeModelName(baseModel)
+  const normalized = normalizeModelName(baseModel)
+
+  // Apply silent model redirect (response will still report requestedModel)
+  const redirect = await applyModelRedirect(normalized)
+  // eslint-disable-next-line require-atomic-updates
+  anthropicPayload.model = redirect.model
 
   const subagentMarker = parseSubagentMarkerFromFirstUser(anthropicPayload)
   const initiatorOverride = subagentMarker ? "agent" : undefined

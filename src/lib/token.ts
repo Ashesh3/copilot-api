@@ -2,7 +2,7 @@ import consola from "consola"
 import fs from "node:fs/promises"
 
 import { addAccount, getStoredTokens } from "~/lib/accounts-store"
-import { PATHS } from "~/lib/paths"
+import { isEnvOnlyTokens, PATHS } from "~/lib/paths"
 import { getCopilotToken } from "~/services/github/get-copilot-token"
 import { getDeviceCode } from "~/services/github/get-device-code"
 import { getGitHubUser } from "~/services/github/get-user"
@@ -49,6 +49,16 @@ interface SetupGitHubTokenOptions {
 export async function setupGitHubToken(
   options?: SetupGitHubTokenOptions,
 ): Promise<void> {
+  if (isEnvOnlyTokens()) {
+    // Tokens came from env vars; never read or write token files.
+    if (state.githubToken) {
+      await logUser()
+      return
+    }
+    throw new Error(
+      "Env-only token mode set but no token configured in state.githubToken",
+    )
+  }
   try {
     // Try stored accounts first, then legacy file
     const storedTokens = await getStoredTokens()

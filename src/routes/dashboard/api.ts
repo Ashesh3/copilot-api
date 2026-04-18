@@ -6,6 +6,13 @@ import {
   removeReplacement,
   toggleReplacement,
 } from "~/lib/auto-replace"
+import {
+  addModelRedirect,
+  getAllModelRedirects,
+  removeModelRedirect,
+  toggleModelRedirect,
+  updateModelRedirect,
+} from "~/lib/model-redirect"
 import { PATHS } from "~/lib/paths"
 import { state } from "~/lib/state"
 import { getUsageResponse } from "~/lib/usage-tracker"
@@ -214,6 +221,52 @@ export async function handleToggleReplacement(c: Context) {
   if (!rule) {
     return c.json({ error: "Replacement not found or is a system rule" }, 404)
   }
+  return c.json(rule)
+}
+
+export async function handleListModelRedirects(c: Context) {
+  return c.json(await getAllModelRedirects())
+}
+
+export async function handleAddModelRedirect(c: Context) {
+  const body = await c.req.json<{
+    sourceModel: string
+    targetModel: string
+    name?: string
+  }>()
+  if (!body.sourceModel || !body.targetModel) {
+    return c.json({ error: "sourceModel and targetModel are required" }, 400)
+  }
+  const rule = await addModelRedirect(body.sourceModel, body.targetModel, {
+    name: body.name,
+  })
+  return c.json(rule)
+}
+
+export async function handleDeleteModelRedirect(c: Context) {
+  const id = c.req.param("id")
+  const removed = await removeModelRedirect(id)
+  if (!removed) return c.json({ error: "Redirect not found" }, 404)
+  return c.json({ success: true })
+}
+
+export async function handleToggleModelRedirect(c: Context) {
+  const id = c.req.param("id")
+  const rule = await toggleModelRedirect(id)
+  if (!rule) return c.json({ error: "Redirect not found" }, 404)
+  return c.json(rule)
+}
+
+export async function handleUpdateModelRedirect(c: Context) {
+  const id = c.req.param("id")
+  const body = await c.req.json<{
+    name?: string
+    sourceModel?: string
+    targetModel?: string
+    enabled?: boolean
+  }>()
+  const rule = await updateModelRedirect(id, body)
+  if (!rule) return c.json({ error: "Redirect not found" }, 404)
   return c.json(rule)
 }
 
