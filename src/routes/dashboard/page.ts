@@ -139,7 +139,7 @@ export function getDashboardPage(): string {
   <div class="section" id="sec-environments"><div class="section-header"><h2>Environments</h2></div><div id="environments-content"></div></div>
   <div class="section" id="sec-flags"><div class="section-header"><h2>Feature Flags</h2></div><div id="flags-content"></div><div class="form-row" id="flag-form"><input class="form-input mono" name="flag-name" placeholder="flag_name" style="flex:2;min-width:180px"><input class="form-input" name="flag-value" placeholder="true" style="flex:1;min-width:100px"><button class="btn btn-primary" onclick="addFlag()">Add</button></div></div>
   <div class="section" id="sec-replacements"><div class="section-header"><h2>Replacements</h2></div><div id="replacements-content"></div><div class="form-row" id="replacement-form"><input class="form-input" name="repl-name" placeholder="Name (optional)" style="min-width:120px"><input class="form-input mono" name="repl-pattern" placeholder="Pattern" style="flex:2;min-width:140px"><input class="form-input" name="repl-replacement" placeholder="Replacement" style="flex:2;min-width:140px"><label class="checkbox-label"><input type="checkbox" name="repl-regex"> Regex</label><button class="btn btn-primary" onclick="addReplacement()">Add</button></div></div>
-  <div class="section" id="sec-model-redirects"><div class="section-header"><h2>Model Redirects</h2><span class="badge badge-gray">Silent - clients see the original model</span></div><div id="model-redirects-content"></div><div class="form-row" id="model-redirect-form"><input class="form-input" name="mr-name" placeholder="Name (optional)" style="min-width:120px"><input class="form-input mono" name="mr-source" placeholder="Source model (e.g. claude-opus-4.7-1m)" style="flex:2;min-width:200px"><select class="form-input" name="mr-source-effort"><option value="all">All effort levels</option><option value="default">Default/no effort</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="max">max</option></select><input class="form-input mono" name="mr-target" placeholder="Target model (e.g. claude-opus-4.6-1m)" style="flex:2;min-width:200px"><select class="form-input" name="mr-target-effort"><option value="">Preserve effort</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="max">max</option></select><button class="btn btn-primary" onclick="addModelRedirect()">Add</button></div></div>
+  <div class="section" id="sec-model-redirects"><div class="section-header"><h2>Model Redirects</h2><span class="badge badge-gray">Silent - clients see the original model</span></div><div id="model-redirects-content"></div><div class="form-row" id="model-redirect-form"><input class="form-input" name="mr-name" placeholder="Name (optional)" style="min-width:120px"><input class="form-input mono" name="mr-source" placeholder="Source model (e.g. claude-opus-4.7-1m)" style="flex:2;min-width:200px"><select class="form-input" name="mr-source-effort"><option value="all">All effort levels</option><option value="default">Default/no effort</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select><input class="form-input mono" name="mr-target" placeholder="Target model (e.g. claude-opus-4.6-1m)" style="flex:2;min-width:200px"><select class="form-input" name="mr-target-effort"><option value="">Preserve effort</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select><button class="btn btn-primary" onclick="addModelRedirect()">Add</button></div></div>
   <div class="section" id="sec-model-routing"><div class="section-header"><h2>Model Routing</h2><span class="badge badge-gray" id="model-routing-count">0 models</span><input class="form-input model-filter" id="model-routing-filter" placeholder="Filter models" oninput="renderModelRouting()"></div><div id="model-routing-content"></div></div>
   <div class="section" id="sec-usage"><div class="section-header"><h2>Usage</h2></div><div id="usage-content"></div></div>
   <div class="section" id="sec-settings"><div class="section-header"><h2>Settings</h2></div><div id="settings-content"></div></div>
@@ -402,12 +402,10 @@ function effortLabel(effort, isTarget) {
   if (!effort && isTarget) return 'Preserve'
   if (effort === 'all') return 'All effort levels'
   if (effort === 'default') return 'Default/no effort'
-  if (effort === 'xhigh') return 'max'
   return effort || 'All effort levels'
 }
 function effortValue(effort, isTarget) {
   if (!effort && isTarget) return ''
-  if (effort === 'xhigh') return 'max'
   return effort || 'all'
 }
 function optionHtml(value, label, selectedValue) {
@@ -415,11 +413,11 @@ function optionHtml(value, label, selectedValue) {
 }
 function sourceEffortSelect(name, value) {
   var selected = effortValue(value, false)
-  return '<select class="form-input" name="' + name + '">' + optionHtml('all', 'All effort levels', selected) + optionHtml('default', 'Default/no effort', selected) + optionHtml('low', 'low', selected) + optionHtml('medium', 'medium', selected) + optionHtml('high', 'high', selected) + optionHtml('max', 'max', selected) + '</select>'
+  return '<select class="form-input" name="' + name + '">' + optionHtml('all', 'All effort levels', selected) + optionHtml('default', 'Default/no effort', selected) + optionHtml('low', 'low', selected) + optionHtml('medium', 'medium', selected) + optionHtml('high', 'high', selected) + optionHtml('xhigh', 'xhigh', selected) + optionHtml('max', 'max', selected) + '</select>'
 }
 function targetEffortSelect(name, value) {
   var selected = effortValue(value, true)
-  return '<select class="form-input" name="' + name + '">' + optionHtml('', 'Preserve effort', selected) + optionHtml('low', 'low', selected) + optionHtml('medium', 'medium', selected) + optionHtml('high', 'high', selected) + optionHtml('max', 'max', selected) + '</select>'
+  return '<select class="form-input" name="' + name + '">' + optionHtml('', 'Preserve effort', selected) + optionHtml('low', 'low', selected) + optionHtml('medium', 'medium', selected) + optionHtml('high', 'high', selected) + optionHtml('xhigh', 'xhigh', selected) + optionHtml('max', 'max', selected) + '</select>'
 }
 function conflictLabel(conflicts) {
   if (!conflicts || conflicts.length === 0) return '<span class="badge badge-green">clear</span>'

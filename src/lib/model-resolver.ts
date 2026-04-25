@@ -6,6 +6,7 @@
  *       "gpt-4-1" -> "gpt-4.1"
  *       "gpt-5-1-codex" -> "gpt-5.1-codex"
  *       "claude-opus-4.6-1m" -> "claude-opus-4.6-1m" (preserved)
+ *       "claude-opus-4.7-1m-internal" -> "claude-opus-4.7-1m-internal" (preserved)
  *       "gpt-4o-mini-2024-07-18" -> "gpt-4o-mini-2024-07-18" (date preserved)
  *       "gpt-4.1-2025-04-14" -> "gpt-4.1-2025-04-14" (date preserved)
  */
@@ -16,9 +17,10 @@ export function normalizeModelName(model: string): string {
   // Strip Anthropic date suffixes (e.g., "-20251001") — Copilot doesn't support them
   normalized = normalized.replace(/-\d{8}$/, "")
 
-  // Strip known suffixes before digit-dash-digit conversion to avoid mangling them
+  // Strip known suffixes before digit-dash-digit conversion to avoid mangling them.
+  // Preserve -1m even when followed by another Copilot qualifier such as -internal.
   let suffix = ""
-  const suffixMatch = normalized.match(/(?:-1m|-fast)$/)
+  const suffixMatch = normalized.match(/(?:-1m(?:-.+)?|-fast)$/)
   if (suffixMatch) {
     suffix = suffixMatch[0]
     normalized = normalized.slice(0, -suffix.length)
