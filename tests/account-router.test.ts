@@ -3,6 +3,7 @@ import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
 import type { Model } from "../src/services/copilot/get-models"
 
 import { getLastUsedAccountId, routedFetch } from "../src/lib/account-router"
+import { setModelRoutingOverridesForTest } from "../src/lib/model-routing"
 import { state } from "../src/lib/state"
 import { tokenPool } from "../src/lib/token-pool"
 
@@ -74,6 +75,8 @@ beforeAll(() => {
 })
 
 afterAll(() => {
+  setModelRoutingOverridesForTest({})
+  tokenPool.rebuildModelIndex()
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
 })
 
@@ -81,6 +84,7 @@ beforeEach(() => {
   fetchMock.mockClear()
   queuedResults.length = 0
   capturedRequests.length = 0
+  setModelRoutingOverridesForTest({})
   state.isMultiToken = true
   state.sessionId = "router-test-session"
 })
@@ -189,4 +193,70 @@ test("does not expose last used account globally outside request context", async
   expect(response.status).toBe(200)
   expect(account?.id).toBe(1005)
   expect(getLastUsedAccountId()).toBeUndefined()
+})
+
+test("routes a model only to accounts where the model is enabled", async () => {
+  const modelId = "router-model-disabled-primary"
+  registerAccount(1006, modelId, "disabled-account-token")
+  registerAccount(1007, modelId, "enabled-account-token")
+  setModelRoutingOverridesForTest({ [modelId]: { "1006": false } })
+  tokenPool.rebuildModelIndex()
+
+  queuedResults.push(new Response("{}", { status: 200 }))
+
+  const { response, account } = await routedFetch(
+    "/chat/completions",
+    { method: "POST" },
+    { modelId },
+  )
+
+  expect(response.status).toBe(200)
+  expect(account?.id).toBe(1007)
+  expect(capturedRequests).toHaveLength(1)
+  expect(capturedRequests[0]?.init?.headers).toMatchObject({
+    Authorization: "Bearer enabled-account-token",
+  })
+})
+
+test("does not fail over to an account where the model is disabled", async () => {
+  const modelId = "router-model-disabled-failover"
+  registerAccount(1008, modelId, "enabled-failover-primary")
+  registerAccount(1009, modelId, "disabled-failover-secondary")
+  setModelRoutingOverridesForTest({ [modelId]: { "1009": false } })
+  tokenPool.rebuildModelIndex()
+
+  queuedResults.push(new Response("Unauthorized", { status: 401 }))
+
+  const { response, account } = await routedFetch(
+    "/chat/completions",
+    { method: "POST" },
+    { modelId },
+  )
+
+  expect(response.status).toBe(401)
+  expect(account?.id).toBe(1008)
+  expect(capturedRequests).toHaveLength(1)
+  expect(capturedRequests[0]?.init?.headers).toMatchObject({
+    Authorization: "Bearer enabled-failover-primary",
+  })
+})
+
+test("returns a routing error when every known account for a model is disabled", async () => {
+  const modelId = "router-model-all-disabled"
+  registerAccount(1010, modelId, "disabled-only-token")
+  setModelRoutingOverridesForTest({ [modelId]: { "1010": false } })
+  tokenPool.rebuildModelIndex()
+
+  const { response, account } = await routedFetch(
+    "/chat/completions",
+    { method: "POST" },
+    { modelId },
+  )
+
+  expect(response.status).toBe(403)
+  expect(account).toBeUndefined()
+  expect(capturedRequests).toHaveLength(0)
+
+  const body = (await response.json()) as { error: { type: string } }
+  expect(body.error.type).toBe("model_routing_error")
 })

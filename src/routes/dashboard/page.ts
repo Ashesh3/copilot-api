@@ -78,6 +78,11 @@ export function getDashboardPage(): string {
   .toggle { width: 40px; height: 22px; border-radius: 11px; border: none; position: relative; cursor: pointer; padding: 0; transition: background 0.2s }
   .toggle::after { content: ''; position: absolute; width: 16px; height: 16px; border-radius: 50%; background: #fff; top: 3px; left: 3px; transition: transform 0.2s }
   .toggle.on { background: #22C55E } .toggle.on::after { transform: translateX(18px) } .toggle.off { background: #484f58 } .toggle.disabled { opacity: 0.4; cursor: not-allowed }
+  .model-filter { flex: 1; min-width: 220px; max-width: 420px }
+  .model-name { font-weight: 600; margin-bottom: 3px }
+  .model-meta { color: #94A3B8; font-size: 0.78rem }
+  .account-toggle-cell { text-align: center; min-width: 120px }
+  .account-toggle-cell .badge { margin-top: 6px }
   .checkbox-label { display: flex; align-items: center; gap: 6px; font-size: 0.85rem; color: #94A3B8; cursor: pointer }
   .checkbox-label input { accent-color: #3B82F6 }
   .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0; margin-top: 12px; background: #1B2336; border: 1px solid #272F42; border-radius: 10px; overflow: hidden }
@@ -113,6 +118,7 @@ export function getDashboardPage(): string {
   <a href="#flags" data-section="flags" onclick="navigate('flags')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg><span class="tip">Feature Flags</span></a>
   <a href="#replacements" data-section="replacements" onclick="navigate('replacements')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg><span class="tip">Replacements</span></a>
   <a href="#model-redirects" data-section="model-redirects" onclick="navigate('model-redirects')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h13"/><path d="M16 6l6 6-6 6"/><path d="M3 6v12"/></svg><span class="tip">Model Redirects</span></a>
+  <a href="#model-routing" data-section="model-routing" onclick="navigate('model-routing')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20"/><path d="M2 12h20"/><path d="M4 4h6v6H4z"/><path d="M14 14h6v6h-6z"/></svg><span class="tip">Model Routing</span></a>
   <a href="#usage" data-section="usage" onclick="navigate('usage')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg><span class="tip">Usage</span></a>
   <div class="spacer"></div>
   <a href="#settings" data-section="settings" onclick="navigate('settings')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span class="tip">Settings</span></a>
@@ -121,6 +127,7 @@ export function getDashboardPage(): string {
   <a href="#overview" data-section="overview" onclick="navigate('overview')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg><span class="nav-label">Overview</span></a>
   <a href="#sessions" data-section="sessions" onclick="navigate('sessions')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg><span class="nav-label">Sessions</span></a>
   <a href="#flags" data-section="flags" onclick="navigate('flags')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg><span class="nav-label">Flags</span></a>
+  <a href="#model-routing" data-section="model-routing" onclick="navigate('model-routing')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20"/><path d="M2 12h20"/><path d="M4 4h6v6H4z"/><path d="M14 14h6v6h-6z"/></svg><span class="nav-label">Routing</span></a>
   <a href="#usage" data-section="usage" onclick="navigate('usage')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg><span class="nav-label">Usage</span></a>
   <a href="#settings" data-section="settings" onclick="navigate('settings')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span class="nav-label">Settings</span></a>
 </nav>
@@ -131,6 +138,7 @@ export function getDashboardPage(): string {
   <div class="section" id="sec-flags"><div class="section-header"><h2>Feature Flags</h2></div><div id="flags-content"></div><div class="form-row" id="flag-form"><input class="form-input mono" name="flag-name" placeholder="flag_name" style="flex:2;min-width:180px"><input class="form-input" name="flag-value" placeholder="true" style="flex:1;min-width:100px"><button class="btn btn-primary" onclick="addFlag()">Add</button></div></div>
   <div class="section" id="sec-replacements"><div class="section-header"><h2>Replacements</h2></div><div id="replacements-content"></div><div class="form-row" id="replacement-form"><input class="form-input" name="repl-name" placeholder="Name (optional)" style="min-width:120px"><input class="form-input mono" name="repl-pattern" placeholder="Pattern" style="flex:2;min-width:140px"><input class="form-input" name="repl-replacement" placeholder="Replacement" style="flex:2;min-width:140px"><label class="checkbox-label"><input type="checkbox" name="repl-regex"> Regex</label><button class="btn btn-primary" onclick="addReplacement()">Add</button></div></div>
   <div class="section" id="sec-model-redirects"><div class="section-header"><h2>Model Redirects</h2><span class="badge badge-gray">Silent — clients see the original model</span></div><div id="model-redirects-content"></div><div class="form-row" id="model-redirect-form"><input class="form-input" name="mr-name" placeholder="Name (optional)" style="min-width:120px"><input class="form-input mono" name="mr-source" placeholder="Source model (e.g. claude-opus-4.7)" style="flex:2;min-width:200px"><input class="form-input mono" name="mr-target" placeholder="Target model (e.g. claude-opus-4.6)" style="flex:2;min-width:200px"><button class="btn btn-primary" onclick="addModelRedirect()">Add</button></div></div>
+  <div class="section" id="sec-model-routing"><div class="section-header"><h2>Model Routing</h2><span class="badge badge-gray" id="model-routing-count">0 models</span><input class="form-input model-filter" id="model-routing-filter" placeholder="Filter models" oninput="renderModelRouting()"></div><div id="model-routing-content"></div></div>
   <div class="section" id="sec-usage"><div class="section-header"><h2>Usage</h2></div><div id="usage-content"></div></div>
   <div class="section" id="sec-settings"><div class="section-header"><h2>Settings</h2></div><div id="settings-content"></div></div>
 </div>
@@ -143,6 +151,7 @@ var eventTimers = {}
 var flagsData = {}
 var replacementsData = []
 var modelRedirectsData = []
+var modelRoutingData = { accounts: [], models: [], multiToken: false }
 
 function apiFetch(method, path, body) {
   var opts = { method: method, headers: { 'Content-Type': 'application/json' } }
@@ -192,7 +201,7 @@ function doLogin() {
 }
 
 function navigate(section) {
-  var sections = ['overview','sessions','environments','flags','replacements','model-redirects','usage','settings']
+  var sections = ['overview','sessions','environments','flags','replacements','model-redirects','model-routing','usage','settings']
   if (sections.indexOf(section) === -1) section = 'overview'
   Object.keys(refreshTimers).forEach(function(k) { clearInterval(refreshTimers[k]); delete refreshTimers[k] })
   Object.keys(eventTimers).forEach(function(k) { clearInterval(eventTimers[k]); delete eventTimers[k] })
@@ -206,7 +215,7 @@ function navigate(section) {
 function loadSection(section) {
   switch (section) {
     case 'overview': loadOverview(); break; case 'sessions': loadSessions(); break; case 'environments': loadEnvironments(); break
-    case 'flags': loadFlags(); break; case 'replacements': loadReplacements(); break; case 'model-redirects': loadModelRedirects(); break; case 'usage': loadUsage(); break; case 'settings': loadSettings(); break
+    case 'flags': loadFlags(); break; case 'replacements': loadReplacements(); break; case 'model-redirects': loadModelRedirects(); break; case 'model-routing': loadModelRouting(); break; case 'usage': loadUsage(); break; case 'settings': loadSettings(); break
   }
 }
 
@@ -410,6 +419,55 @@ function addModelRedirect() {
   if (!src || !tgt) { showToast('Source and target models are required', 'error'); return }
   var body = { sourceModel: src, targetModel: tgt, name: nameEl.value.trim() || undefined }
   apiFetch('POST', '/dashboard/api/model-redirects', body).then(function(r) { if (r.ok) { nameEl.value = ''; srcEl.value = ''; tgtEl.value = ''; showToast('Added', 'success'); loadModelRedirects() } else r.json().catch(function() { return {} }).then(function(d) { showToast(d.error || 'Failed', 'error') }) }).catch(function() { showToast('Failed to add', 'error') })
+}
+
+function loadModelRouting() {
+  apiFetch('GET', '/dashboard/api/model-routing').then(function(r) { if (r.ok) return r.json() }).then(function(d) { if (d) { modelRoutingData = d; renderModelRouting() } }).catch(function() { showToast('Failed to load model routing', 'error') })
+}
+function modelAccountState(model, accountId) {
+  for (var i = 0; i < model.accounts.length; i++) {
+    if (model.accounts[i].accountId === accountId) return model.accounts[i]
+  }
+  return null
+}
+function renderModelRouting() {
+  var content = document.getElementById('model-routing-content')
+  var count = document.getElementById('model-routing-count')
+  var filterEl = document.getElementById('model-routing-filter')
+  var query = filterEl ? filterEl.value.trim().toLowerCase() : ''
+  var accounts = modelRoutingData.accounts || []
+  var models = modelRoutingData.models || []
+  if (count) count.textContent = models.length + ' models'
+  if (!modelRoutingData.multiToken) { content.innerHTML = '<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 2v20"/><path d="M2 12h20"/></svg><p>Model routing controls are available in multi-token mode.</p></div>'; return }
+  if (accounts.length === 0 || models.length === 0) { content.innerHTML = '<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 2v20"/><path d="M2 12h20"/></svg><p>No account model data is available yet.</p></div>'; return }
+  var filtered = models.filter(function(model) { return !query || model.id.toLowerCase().indexOf(query) !== -1 || (model.name || '').toLowerCase().indexOf(query) !== -1 || (model.vendor || '').toLowerCase().indexOf(query) !== -1 })
+  if (filtered.length === 0) { content.innerHTML = '<div class="empty-state"><p>No models match this filter.</p></div>'; return }
+  var html = '<div class="table-scroll"><table><thead><tr><th>Model</th>'
+  accounts.forEach(function(account) { html += '<th class="account-toggle-cell">Account #' + esc(account.id) + '<div class="model-meta">' + esc(account.accountType) + '</div></th>' })
+  html += '</tr></thead><tbody>'
+  filtered.forEach(function(model) {
+    html += '<tr><td><div class="model-name mono">' + esc(model.id) + '</div><div class="model-meta">' + esc(model.name || model.vendor || '') + (model.preview ? ' <span class="badge badge-orange">preview</span>' : '') + '</div></td>'
+    accounts.forEach(function(account) {
+      var state = modelAccountState(model, account.id)
+      if (!state) { html += '<td class="account-toggle-cell"><span class="badge badge-gray">unavailable</span></td>'; return }
+      var disabled = !state.healthy ? ' disabled' : ''
+      var title = state.healthy ? 'Toggle routing for this account' : 'Account is unhealthy'
+      var modelIdArg = esc(JSON.stringify(model.id))
+      html += '<td class="account-toggle-cell"><button title="' + title + '" class="toggle ' + (state.enabled ? 'on' : 'off') + (!state.healthy ? ' disabled' : '') + '"' + disabled + ' onclick="setModelRouting(' + modelIdArg + ',' + account.id + ',' + (!state.enabled) + ')"></button>'
+      if (!state.healthy) html += '<div class="badge badge-orange">unhealthy</div>'
+      else if (state.overridden) html += '<div class="badge badge-blue">custom</div>'
+      html += '</td>'
+    })
+    html += '</tr>'
+  })
+  html += '</tbody></table></div>'
+  content.innerHTML = html
+}
+function setModelRouting(modelId, accountId, enabled) {
+  apiFetch('POST', '/dashboard/api/model-routing', { modelId: modelId, accountId: accountId, enabled: enabled }).then(function(r) {
+    if (r.ok) { showToast('Routing updated', 'success'); loadModelRouting(); return }
+    r.json().catch(function() { return {} }).then(function(d) { showToast(d.error || 'Failed to update routing', 'error') })
+  }).catch(function() { showToast('Failed to update routing', 'error') })
 }
 
 function loadUsage() { apiFetch('GET', '/dashboard/api/usage').then(function(r) { if (r.ok) return r.json() }).then(function(d) { if (d) renderUsage(d) }).catch(function() { showToast('Failed to load usage', 'error') }) }

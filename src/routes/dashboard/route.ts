@@ -24,10 +24,12 @@ import {
   handleListEnvironments,
   handleListFlags,
   handleListModelRedirects,
+  handleListModelRouting,
   handleListReplacements,
   handleListSessions,
   handleOverview,
   handleSetFlag,
+  handleSetModelRouting,
   handleStartEnvironmentSession,
   handleToggleModelRedirect,
   handleToggleReplacement,
@@ -113,6 +115,10 @@ dashboardRoutes.patch(
   "/api/model-redirects/:id/toggle",
   handleToggleModelRedirect,
 )
+
+// Model Routing
+dashboardRoutes.get("/api/model-routing", handleListModelRouting)
+dashboardRoutes.post("/api/model-routing", handleSetModelRouting)
 
 // Usage
 dashboardRoutes.get("/api/usage", handleGetUsage)

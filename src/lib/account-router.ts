@@ -49,6 +49,21 @@ function mergeHeaders(
   return merged
 }
 
+function createNoEnabledAccountResponse(modelId: string): Response {
+  return new Response(
+    JSON.stringify({
+      error: {
+        message: `No enabled account is available for model "${modelId}"`,
+        type: "model_routing_error",
+      },
+    }),
+    {
+      status: 403,
+      headers: { "content-type": "application/json" },
+    },
+  )
+}
+
 // --- Last used account tracking ---
 
 /**
@@ -99,6 +114,11 @@ export async function routedFetch(
     clientSessionId,
   )
   if (!account) {
+    if (tokenPool.hasKnownModel(modelId)) {
+      const response = createNoEnabledAccountResponse(modelId)
+      return { response, account: undefined }
+    }
+
     consola.warn(
       `No account found for model "${modelId}", falling back to default`,
     )

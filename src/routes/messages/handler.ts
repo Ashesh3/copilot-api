@@ -1194,8 +1194,10 @@ function applyModelVariantRouting(
   // models that no individual account can serve via the token pool, causing
   // routedFetch to fall back to the legacy single-token path which often 400s.
   if (!payload.model.endsWith("-1m")) {
-    const hasAccount = Boolean(tokenPool.getAccountForModel(payload.model))
-    if (!hasAccount) {
+    const hasEnabledAccount = tokenPool.hasEnabledAccountForKnownModel(
+      payload.model,
+    )
+    if (hasEnabledAccount === undefined) {
       const candidate = `${payload.model}-1m`
       if (modelExists(candidate)) {
         logger.debug(

@@ -13,8 +13,10 @@ import {
   toggleModelRedirect,
   updateModelRedirect,
 } from "~/lib/model-redirect"
+import { setModelRoutingOverride } from "~/lib/model-routing"
 import { PATHS } from "~/lib/paths"
 import { state } from "~/lib/state"
+import { tokenPool } from "~/lib/token-pool"
 import { getUsageResponse } from "~/lib/usage-tracker"
 import {
   archiveSession,
@@ -268,6 +270,66 @@ export async function handleUpdateModelRedirect(c: Context) {
   const rule = await updateModelRedirect(id, body)
   if (!rule) return c.json({ error: "Redirect not found" }, 404)
   return c.json(rule)
+}
+
+export function handleListModelRouting(c: Context) {
+  const accounts = tokenPool.getAllAccounts().map((account) => ({
+    id: account.id,
+    accountType: account.accountType,
+    healthy: account.healthy,
+    modelsCount: account.models.size,
+  }))
+
+  const models = tokenPool.getModelAccountAvailability().map((entry) => ({
+    id: entry.model.id,
+    name: entry.model.name,
+    vendor: entry.model.vendor,
+    preview: entry.model.preview,
+    accounts: entry.accounts,
+  }))
+
+  return c.json({
+    multiToken: state.isMultiToken,
+    accounts,
+    models,
+  })
+}
+
+export async function handleSetModelRouting(c: Context) {
+  const body = await c.req.json<{
+    modelId?: string
+    accountId?: number
+    enabled?: boolean
+  }>()
+
+  if (!body.modelId || typeof body.modelId !== "string") {
+    return c.json({ error: "modelId is required" }, 400)
+  }
+  if (typeof body.accountId !== "number" || !Number.isInteger(body.accountId)) {
+    return c.json({ error: "accountId is required" }, 400)
+  }
+  if (typeof body.enabled !== "boolean") {
+    return c.json({ error: "enabled is required" }, 400)
+  }
+
+  const account = tokenPool
+    .getAllAccounts()
+    .find((item) => item.id === body.accountId)
+  if (!account) {
+    return c.json({ error: "Account not found" }, 404)
+  }
+  if (!account.models.has(body.modelId)) {
+    return c.json({ error: "Model is not available on this account" }, 400)
+  }
+
+  const override = await setModelRoutingOverride(
+    body.modelId,
+    body.accountId,
+    body.enabled,
+  )
+  tokenPool.rebuildModelIndex()
+
+  return c.json(override)
 }
 
 export function handleGetUsage(c: Context) {

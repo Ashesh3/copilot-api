@@ -10,6 +10,7 @@ import type { CallbackSubscriber } from "./routes/code-sessions/event-bus"
 import packageJson from "../package.json" with { type: "json" }
 import { getStoredTokens } from "./lib/accounts-store"
 import { mergeConfigWithDefaults } from "./lib/config"
+import { ensureModelRoutingOverridesLoaded } from "./lib/model-routing"
 import { generateVirtualModels } from "./lib/model-suffix"
 import { ensurePaths, setEnvOnlyTokens } from "./lib/paths"
 import { initProxyFromEnv } from "./lib/proxy"
@@ -478,6 +479,7 @@ export async function runServer(options: RunServerOptions): Promise<void> {
 
   await ensurePaths()
   mergeConfigWithDefaults()
+  await ensureModelRoutingOverridesLoaded()
 
   await initializeTokens(options)
 

@@ -235,7 +235,7 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
   // individual account can serve, causing routedFetch to use the legacy path.
   if (
     !payload.model.endsWith("-1m")
-    && !tokenPool.getAccountForModel(payload.model)
+    && tokenPool.hasEnabledAccountForKnownModel(payload.model) === undefined
   ) {
     const candidate = `${payload.model}-1m`
     if (state.models?.data.some((m) => m.id === candidate)) {

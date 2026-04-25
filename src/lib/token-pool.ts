@@ -5,6 +5,10 @@ import type { Model, ModelsResponse } from "~/services/copilot/get-models"
 
 import { GITHUB_API_BASE_URL } from "~/lib/api-config"
 import { HTTPError } from "~/lib/error"
+import {
+  hasModelRoutingOverride,
+  isModelEnabledForAccount,
+} from "~/lib/model-routing"
 
 // Inline constants from copilot-client to avoid circular dependencies
 const API_VERSION = "2026-01-09"
@@ -136,6 +140,8 @@ export class TokenPool {
       if (!account.healthy) continue
 
       for (const modelId of account.models) {
+        if (!isModelEnabledForAccount(modelId, account.id)) continue
+
         let list = this.modelIndex.get(modelId)
         if (!list) {
           list = []
@@ -275,6 +281,67 @@ export class TokenPool {
    */
   getAllAccounts(): Array<Account> {
     return [...this.accounts.values()]
+  }
+
+  hasKnownModel(modelId: string): boolean {
+    for (const account of this.accounts.values()) {
+      if (account.models.has(modelId)) return true
+    }
+    return false
+  }
+
+  hasEnabledAccountForKnownModel(modelId: string): boolean | undefined {
+    const eligible = this.modelIndex.get(modelId)
+    if (eligible && eligible.length > 0) return true
+    return this.hasKnownModel(modelId) ? false : undefined
+  }
+
+  getModelAccountAvailability(): Array<{
+    model: Model
+    accounts: Array<{
+      accountId: number
+      accountType: string
+      enabled: boolean
+      healthy: boolean
+      overridden: boolean
+    }>
+  }> {
+    const models = new Map<
+      string,
+      {
+        model: Model
+        accounts: Array<{
+          accountId: number
+          accountType: string
+          enabled: boolean
+          healthy: boolean
+          overridden: boolean
+        }>
+      }
+    >()
+
+    for (const account of this.accounts.values()) {
+      for (const model of account.modelsData) {
+        let entry = models.get(model.id)
+        if (!entry) {
+          entry = { model, accounts: [] }
+          models.set(model.id, entry)
+        }
+
+        const enabled = isModelEnabledForAccount(model.id, account.id)
+        entry.accounts.push({
+          accountId: account.id,
+          accountType: account.accountType,
+          enabled,
+          healthy: account.healthy,
+          overridden: hasModelRoutingOverride(model.id, account.id),
+        })
+      }
+    }
+
+    return [...models.values()].sort((a, b) =>
+      a.model.id.localeCompare(b.model.id),
+    )
   }
 
   // --- Private helpers ---
