@@ -153,6 +153,7 @@ var eventTimers = {}
 var flagsData = {}
 var replacementsData = []
 var modelRedirectsData = []
+var editingModelRedirectId = null
 var modelRoutingData = { accounts: [], models: [], multiToken: false }
 
 function apiFetch(method, path, body) {
@@ -404,6 +405,22 @@ function effortLabel(effort, isTarget) {
   if (effort === 'xhigh') return 'max'
   return effort || 'All effort levels'
 }
+function effortValue(effort, isTarget) {
+  if (!effort && isTarget) return ''
+  if (effort === 'xhigh') return 'max'
+  return effort || 'all'
+}
+function optionHtml(value, label, selectedValue) {
+  return '<option value="' + esc(value) + '"' + (value === selectedValue ? ' selected' : '') + '>' + esc(label) + '</option>'
+}
+function sourceEffortSelect(name, value) {
+  var selected = effortValue(value, false)
+  return '<select class="form-input" name="' + name + '">' + optionHtml('all', 'All effort levels', selected) + optionHtml('default', 'Default/no effort', selected) + optionHtml('low', 'low', selected) + optionHtml('medium', 'medium', selected) + optionHtml('high', 'high', selected) + optionHtml('max', 'max', selected) + '</select>'
+}
+function targetEffortSelect(name, value) {
+  var selected = effortValue(value, true)
+  return '<select class="form-input" name="' + name + '">' + optionHtml('', 'Preserve effort', selected) + optionHtml('low', 'low', selected) + optionHtml('medium', 'medium', selected) + optionHtml('high', 'high', selected) + optionHtml('max', 'max', selected) + '</select>'
+}
 function conflictLabel(conflicts) {
   if (!conflicts || conflicts.length === 0) return '<span class="badge badge-green">clear</span>'
   var names = conflicts.map(function(c) { return c.name || c.id }).join(', ')
@@ -413,15 +430,39 @@ function renderModelRedirects() {
   if (!modelRedirectsData || modelRedirectsData.length === 0) { document.getElementById('model-redirects-content').innerHTML = '<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 12h13"/><path d="M16 6l6 6-6 6"/><path d="M3 6v12"/></svg><p>No model redirects configured.</p><p style="font-size:0.8rem;margin-top:6px">Add a redirect to silently route a requested model to another (e.g. claude-opus-4.7 to claude-opus-4.6).</p></div>'; return }
   var html = '<div class="table-scroll"><table><thead><tr><th>Order</th><th>Name</th><th>Source</th><th></th><th>Target</th><th>Conflicts</th><th>Enabled</th><th>Actions</th></tr></thead><tbody>'
   modelRedirectsData.forEach(function(r, index) {
+    if (editingModelRedirectId === r.id) {
+      html += '<tr id="model-redirect-edit-' + esc(r.id) + '"><td style="white-space:nowrap"><button class="btn" title="Move up" style="font-size:0.78rem;padding:4px 8px" disabled>&uarr;</button> <button class="btn" title="Move down" style="font-size:0.78rem;padding:4px 8px" disabled>&darr;</button></td>'
+      html += '<td><input class="form-input" name="mr-edit-name" value="' + esc(r.name || '') + '" placeholder="Name" style="min-width:120px;width:100%"></td>'
+      html += '<td><input class="form-input mono" name="mr-edit-source" value="' + esc(r.sourceModel) + '" placeholder="Source model" style="min-width:200px;width:100%;margin-bottom:6px">' + sourceEffortSelect('mr-edit-source-effort', r.sourceEffort) + '</td>'
+      html += '<td style="color:#94A3B8">&rarr;</td><td><input class="form-input mono" name="mr-edit-target" value="' + esc(r.targetModel) + '" placeholder="Target model" style="min-width:200px;width:100%;margin-bottom:6px">' + targetEffortSelect('mr-edit-target-effort', r.targetEffort) + '</td>'
+      html += '<td>' + conflictLabel(r.conflicts) + '</td><td><button class="toggle ' + (r.enabled !== false ? 'on' : 'off') + '" onclick="toggleModelRedirect(\\'' + esc(r.id) + '\\')"></button></td>'
+      html += '<td style="white-space:nowrap"><button class="btn btn-primary" style="font-size:0.78rem;padding:4px 10px" onclick="saveModelRedirect(\\'' + esc(r.id) + '\\')">Save</button> <button class="btn" style="font-size:0.78rem;padding:4px 10px" onclick="cancelModelRedirectEdit()">Cancel</button></td></tr>'
+      return
+    }
     var upDisabled = index === 0 ? ' disabled' : ''
     var downDisabled = index === modelRedirectsData.length - 1 ? ' disabled' : ''
     html += '<tr><td style="white-space:nowrap"><button class="btn" title="Move up" style="font-size:0.78rem;padding:4px 8px"' + upDisabled + ' onclick="moveModelRedirect(&quot;' + esc(r.id) + '&quot;,&quot;up&quot;)">&uarr;</button> <button class="btn" title="Move down" style="font-size:0.78rem;padding:4px 8px"' + downDisabled + ' onclick="moveModelRedirect(&quot;' + esc(r.id) + '&quot;,&quot;down&quot;)">&darr;</button></td>'
     html += '<td>' + esc(r.name || '-') + '</td><td><div class="mono" style="font-size:12px">' + esc(r.sourceModel) + '</div><span class="badge badge-blue">' + esc(effortLabel(r.sourceEffort, false)) + '</span></td><td style="color:#94A3B8">&rarr;</td><td><div class="mono" style="font-size:12px">' + esc(r.targetModel) + '</div><span class="badge badge-purple">' + esc(effortLabel(r.targetEffort, true)) + '</span></td><td>' + conflictLabel(r.conflicts) + '</td><td>'
     html += '<button class="toggle ' + (r.enabled !== false ? 'on' : 'off') + '" onclick="toggleModelRedirect(\\'' + esc(r.id) + '\\')"></button>'
-    html += '</td><td><button class="btn btn-danger" style="font-size:0.78rem;padding:4px 10px" onclick="deleteModelRedirect(\\'' + esc(r.id) + '\\')">Delete</button></td></tr>'
+    html += '</td><td style="white-space:nowrap"><button class="btn" style="font-size:0.78rem;padding:4px 10px" onclick="editModelRedirect(\\'' + esc(r.id) + '\\')">Edit</button> <button class="btn btn-danger" style="font-size:0.78rem;padding:4px 10px" onclick="deleteModelRedirect(\\'' + esc(r.id) + '\\')">Delete</button></td></tr>'
   })
   html += '</tbody></table></div>'
   document.getElementById('model-redirects-content').innerHTML = html
+}
+function editModelRedirect(id) { editingModelRedirectId = id; renderModelRedirects() }
+function cancelModelRedirectEdit() { editingModelRedirectId = null; renderModelRedirects() }
+function saveModelRedirect(id) {
+  var row = document.getElementById('model-redirect-edit-' + id)
+  if (!row) return
+  var nameEl = row.querySelector('input[name="mr-edit-name"]')
+  var srcEl = row.querySelector('input[name="mr-edit-source"]')
+  var srcEffortEl = row.querySelector('select[name="mr-edit-source-effort"]')
+  var tgtEl = row.querySelector('input[name="mr-edit-target"]')
+  var tgtEffortEl = row.querySelector('select[name="mr-edit-target-effort"]')
+  var src = srcEl.value.trim(), tgt = tgtEl.value.trim()
+  if (!src || !tgt) { showToast('Source and target models are required', 'error'); return }
+  var body = { name: nameEl.value.trim(), sourceModel: src, sourceEffort: srcEffortEl.value, targetModel: tgt, targetEffort: tgtEffortEl.value || null }
+  apiFetch('PATCH', '/dashboard/api/model-redirects/' + encodeURIComponent(id), body).then(function(r) { if (r.ok) { editingModelRedirectId = null; showToast('Updated', 'success'); loadModelRedirects() } else r.json().catch(function() { return {} }).then(function(d) { showToast(d.error || 'Failed to update', 'error') }) }).catch(function() { showToast('Failed to update', 'error') })
 }
 function toggleModelRedirect(id) { apiFetch('PATCH', '/dashboard/api/model-redirects/' + encodeURIComponent(id) + '/toggle').then(function(r) { if (r.ok) { showToast('Toggled', 'success'); loadModelRedirects() } else showToast('Failed to toggle', 'error') }).catch(function() { showToast('Failed to toggle', 'error') }) }
 function moveModelRedirect(id, direction) {
