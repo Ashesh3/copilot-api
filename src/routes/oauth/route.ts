@@ -187,8 +187,8 @@ export const oauthApiRoutes = new Hono()
 // GET /api/hello — connectivity check (no auth)
 oauthApiRoutes.get("/hello", (c) => c.json({ status: "ok" }))
 
-// POST /api/event_logging/batch — silently accept telemetry (no auth)
-oauthApiRoutes.post("/event_logging/batch", (c) => c.json({ success: true }))
+// /api/event_logging/* — silently accept telemetry (no auth)
+oauthApiRoutes.all("/event_logging/*", (c) => c.body(null, 200))
 
 // GET /api/web/domain_info — domain safety check, allow all (no auth)
 oauthApiRoutes.get("/web/domain_info", (c) => {
@@ -196,11 +196,11 @@ oauthApiRoutes.get("/web/domain_info", (c) => {
   return c.json({ domain, can_fetch: true })
 })
 
-// All remaining API routes require valid Bearer token / x-api-key
-oauthApiRoutes.use("*", oauthAuthGuard)
+// Defined compatibility routes require valid Bearer token / x-api-key.
+// Unknown /api/* routes fall through to the sink at the end of this router.
 
 // GET /api/oauth/profile — fake profile
-oauthApiRoutes.get("/oauth/profile", (c) => {
+oauthApiRoutes.get("/oauth/profile", oauthAuthGuard, (c) => {
   return c.json({
     account: {
       uuid: "00000000-0000-4000-8000-000000000001",
@@ -219,51 +219,65 @@ oauthApiRoutes.get("/oauth/profile", (c) => {
 })
 
 // GET /api/oauth/claude_cli/roles
-oauthApiRoutes.get("/oauth/claude_cli/roles", (c) => c.json([]))
+oauthApiRoutes.get("/oauth/claude_cli/roles", oauthAuthGuard, (c) => c.json([]))
 
 // GET /api/claude_code_penguin_mode
-oauthApiRoutes.get("/claude_code_penguin_mode", (c) => c.json({}))
+oauthApiRoutes.get("/claude_code_penguin_mode", oauthAuthGuard, (c) =>
+  c.json({}),
+)
 
 // GET /api/claude_cli_profile
-oauthApiRoutes.get("/claude_cli_profile", (c) => c.json({}))
+oauthApiRoutes.get("/claude_cli_profile", oauthAuthGuard, (c) => c.json({}))
 
 // GET /api/oauth/usage — usage data for settings panel
-oauthApiRoutes.get("/oauth/usage", (c) => c.json(getUsageResponse()))
+oauthApiRoutes.get("/oauth/usage", oauthAuthGuard, (c) =>
+  c.json(getUsageResponse()),
+)
 
 // GET /api/oauth/claude_cli/client_data
-oauthApiRoutes.get("/oauth/claude_cli/client_data", (c) => c.json({}))
+oauthApiRoutes.get("/oauth/claude_cli/client_data", oauthAuthGuard, (c) =>
+  c.json({}),
+)
 
 // POST /api/oauth/claude_cli/create_api_key
-oauthApiRoutes.post("/oauth/claude_cli/create_api_key", (c) =>
+oauthApiRoutes.post("/oauth/claude_cli/create_api_key", oauthAuthGuard, (c) =>
   c.json({ api_key: getAccessToken() }),
 )
 
 // POST /api/claude_cli_feedback
-oauthApiRoutes.post("/claude_cli_feedback", (c) => c.json({ success: true }))
+oauthApiRoutes.post("/claude_cli_feedback", oauthAuthGuard, (c) =>
+  c.json({ success: true }),
+)
 
 // POST /api/claude_code/metrics
-oauthApiRoutes.post("/claude_code/metrics", (c) => c.json({ success: true }))
+oauthApiRoutes.post("/claude_code/metrics", oauthAuthGuard, (c) =>
+  c.json({ success: true }),
+)
 
 // GET /api/claude_code/organizations/metrics_enabled
-oauthApiRoutes.get("/claude_code/organizations/metrics_enabled", (c) =>
-  c.json({ enabled: false }),
+oauthApiRoutes.get(
+  "/claude_code/organizations/metrics_enabled",
+  oauthAuthGuard,
+  (c) => c.json({ enabled: false }),
 )
 
 // POST /api/claude_code/link_vcs_account
-oauthApiRoutes.post("/claude_code/link_vcs_account", (c) =>
+oauthApiRoutes.post("/claude_code/link_vcs_account", oauthAuthGuard, (c) =>
   c.json({ success: true }),
 )
 
 // GET /api/claude_code/user_settings
-oauthApiRoutes.get("/claude_code/user_settings", (c) => c.json({}))
+oauthApiRoutes.get("/claude_code/user_settings", oauthAuthGuard, (c) =>
+  c.json({}),
+)
 
 // PUT /api/claude_code/user_settings
-oauthApiRoutes.put("/claude_code/user_settings", (c) =>
+oauthApiRoutes.put("/claude_code/user_settings", oauthAuthGuard, (c) =>
   c.json({ success: true }),
 )
 
 // GET /api/organization
-oauthApiRoutes.get("/organization/:id", (c) =>
+oauthApiRoutes.get("/organization/:id", oauthAuthGuard, (c) =>
   c.json({
     uuid: c.req.param("id"),
     name: "Copilot API",
@@ -272,7 +286,7 @@ oauthApiRoutes.get("/organization/:id", (c) =>
 )
 
 // GET /api/oauth/claude_cli/organizations — organization list
-oauthApiRoutes.get("/oauth/claude_cli/organizations", (c) =>
+oauthApiRoutes.get("/oauth/claude_cli/organizations", oauthAuthGuard, (c) =>
   c.json([
     {
       uuid: "00000000-0000-4000-8000-000000000002",
@@ -285,118 +299,160 @@ oauthApiRoutes.get("/oauth/claude_cli/organizations", (c) =>
 )
 
 // GET /api/claude_code/organizations/:orgId/mcp_servers
-oauthApiRoutes.get("/claude_code/organizations/:orgId/mcp_servers", (c) =>
-  c.json({ mcp_servers: [] }),
+oauthApiRoutes.get(
+  "/claude_code/organizations/:orgId/mcp_servers",
+  oauthAuthGuard,
+  (c) => c.json({ mcp_servers: [] }),
 )
 
 // POST /api/claude_code/organizations/:orgId/mcp_servers
-oauthApiRoutes.post("/claude_code/organizations/:orgId/mcp_servers", (c) =>
-  c.json({ success: true }),
+oauthApiRoutes.post(
+  "/claude_code/organizations/:orgId/mcp_servers",
+  oauthAuthGuard,
+  (c) => c.json({ success: true }),
 )
 
 // GET /api/claude_code/organizations/:orgId/integrations
-oauthApiRoutes.get("/claude_code/organizations/:orgId/integrations", (c) =>
-  c.json({ integrations: [] }),
+oauthApiRoutes.get(
+  "/claude_code/organizations/:orgId/integrations",
+  oauthAuthGuard,
+  (c) => c.json({ integrations: [] }),
 )
 
 // GET /api/claude_code/task_runners
-oauthApiRoutes.get("/claude_code/task_runners", (c) =>
+oauthApiRoutes.get("/claude_code/task_runners", oauthAuthGuard, (c) =>
   c.json({ task_runners: [] }),
 )
 
 // POST /api/claude_code/tasks
-oauthApiRoutes.post("/claude_code/tasks", (c) => c.json({ success: true }))
+oauthApiRoutes.post("/claude_code/tasks", oauthAuthGuard, (c) =>
+  c.json({ success: true }),
+)
 
 // GET /api/claude_code/environments
-oauthApiRoutes.get("/claude_code/environments", (c) =>
+oauthApiRoutes.get("/claude_code/environments", oauthAuthGuard, (c) =>
   c.json({ environments: [] }),
 )
 
 // POST /api/claude_code/organizations/:orgId/file_upload
-oauthApiRoutes.post("/claude_code/organizations/:orgId/file_upload", (c) =>
-  c.json({ success: true }),
+oauthApiRoutes.post(
+  "/claude_code/organizations/:orgId/file_upload",
+  oauthAuthGuard,
+  (c) => c.json({ success: true }),
 )
 
 // GET /api/claude_code/organizations/:orgId/policy_limits
-oauthApiRoutes.get("/claude_code/organizations/:orgId/policy_limits", (c) =>
-  c.json({ limits: {}, policies: [] }),
+oauthApiRoutes.get(
+  "/claude_code/organizations/:orgId/policy_limits",
+  oauthAuthGuard,
+  (c) => c.json({ limits: {}, policies: [] }),
 )
 
 // GET /api/claude_code/skill_search
-oauthApiRoutes.get("/claude_code/skill_search", (c) => c.json({ results: [] }))
+oauthApiRoutes.get("/claude_code/skill_search", oauthAuthGuard, (c) =>
+  c.json({ results: [] }),
+)
 
 // PATCH /api/claude_code/sessions/:id
-oauthApiRoutes.patch("/claude_code/sessions/:id", (c) =>
+oauthApiRoutes.patch("/claude_code/sessions/:id", oauthAuthGuard, (c) =>
   c.json({ success: true }),
 )
 
 // GET /api/claude_code/policy_limits (non-org path)
-oauthApiRoutes.get("/claude_code/policy_limits", (c) =>
+oauthApiRoutes.get("/claude_code/policy_limits", oauthAuthGuard, (c) =>
   c.json({ limits: {}, policies: [] }),
 )
 
 // GET /api/claude_code/settings
-oauthApiRoutes.get("/claude_code/settings", (c) => c.json({}))
+oauthApiRoutes.get("/claude_code/settings", oauthAuthGuard, (c) => c.json({}))
 
 // PUT /api/claude_code/settings
-oauthApiRoutes.put("/claude_code/settings", (c) => c.json({ success: true }))
+oauthApiRoutes.put("/claude_code/settings", oauthAuthGuard, (c) =>
+  c.json({ success: true }),
+)
 
 // GET /api/claude_code/team_memory
-oauthApiRoutes.get("/claude_code/team_memory", (c) => c.json({ memories: [] }))
+oauthApiRoutes.get("/claude_code/team_memory", oauthAuthGuard, (c) =>
+  c.json({ memories: [] }),
+)
 
 // GET /api/claude_code_grove
-oauthApiRoutes.get("/claude_code_grove", (c) => c.json({}))
+oauthApiRoutes.get("/claude_code_grove", oauthAuthGuard, (c) => c.json({}))
 
 // GET /api/claude_cli/bootstrap
-oauthApiRoutes.get("/claude_cli/bootstrap", (c) => c.json({}))
+oauthApiRoutes.get("/claude_cli/bootstrap", oauthAuthGuard, (c) => c.json({}))
 
 // GET /api/oauth/account/settings
-oauthApiRoutes.get("/oauth/account/settings", (c) => c.json({}))
+oauthApiRoutes.get("/oauth/account/settings", oauthAuthGuard, (c) => c.json({}))
 
 // POST /api/oauth/account/grove_notice_viewed
-oauthApiRoutes.post("/oauth/account/grove_notice_viewed", (c) =>
+oauthApiRoutes.post("/oauth/account/grove_notice_viewed", oauthAuthGuard, (c) =>
   c.json({ success: true }),
 )
 
 // GET /api/oauth/organizations/:orgId/* (various sub-routes)
-oauthApiRoutes.get("/oauth/organizations/:orgId/overage_credit_grant", (c) =>
-  c.json({ grants: [] }),
+oauthApiRoutes.get(
+  "/oauth/organizations/:orgId/overage_credit_grant",
+  oauthAuthGuard,
+  (c) => c.json({ grants: [] }),
 )
-oauthApiRoutes.get("/oauth/organizations/:orgId/sync/github/auth", (c) =>
-  c.json({ authorized: false }),
+oauthApiRoutes.get(
+  "/oauth/organizations/:orgId/sync/github/auth",
+  oauthAuthGuard,
+  (c) => c.json({ authorized: false }),
 )
-oauthApiRoutes.get("/oauth/organizations/:orgId/code/repos/:owner/:repo", (c) =>
-  c.json({}),
+oauthApiRoutes.get(
+  "/oauth/organizations/:orgId/code/repos/:owner/:repo",
+  oauthAuthGuard,
+  (c) => c.json({}),
 )
 oauthApiRoutes.get(
   "/oauth/organizations/:orgId/admin_requests/eligibility",
+  oauthAuthGuard,
   (c) => c.json({ eligible: false }),
 )
-oauthApiRoutes.get("/oauth/organizations/:orgId/admin_requests", (c) =>
-  c.json({ requests: [] }),
+oauthApiRoutes.get(
+  "/oauth/organizations/:orgId/admin_requests",
+  oauthAuthGuard,
+  (c) => c.json({ requests: [] }),
 )
-oauthApiRoutes.post("/oauth/organizations/:orgId/admin_requests", (c) =>
-  c.json({ success: true }),
+oauthApiRoutes.post(
+  "/oauth/organizations/:orgId/admin_requests",
+  oauthAuthGuard,
+  (c) => c.json({ success: true }),
 )
-oauthApiRoutes.get("/oauth/organizations/:orgId/admin_requests/me", (c) =>
-  c.json({ requests: [] }),
+oauthApiRoutes.get(
+  "/oauth/organizations/:orgId/admin_requests/me",
+  oauthAuthGuard,
+  (c) => c.json({ requests: [] }),
 )
-oauthApiRoutes.get("/oauth/organizations/:orgId/referral/eligibility", (c) =>
-  c.json({ eligible: false }),
+oauthApiRoutes.get(
+  "/oauth/organizations/:orgId/referral/eligibility",
+  oauthAuthGuard,
+  (c) => c.json({ eligible: false }),
 )
-oauthApiRoutes.get("/oauth/organizations/:orgId/referral/redemptions", (c) =>
-  c.json({ redemptions: [] }),
+oauthApiRoutes.get(
+  "/oauth/organizations/:orgId/referral/redemptions",
+  oauthAuthGuard,
+  (c) => c.json({ redemptions: [] }),
 )
 
 // GET /api/organization/claude_code_first_token_date
-oauthApiRoutes.get("/organization/claude_code_first_token_date", (c) =>
-  c.json({ first_token_date: "2025-01-01T00:00:00Z" }),
+oauthApiRoutes.get(
+  "/organization/claude_code_first_token_date",
+  oauthAuthGuard,
+  (c) => c.json({ first_token_date: "2025-01-01T00:00:00Z" }),
 )
 
 // POST /api/organizations/:orgId/claude_code/buddy_react
-oauthApiRoutes.post("/organizations/:orgId/claude_code/buddy_react", (c) =>
-  c.json({ success: true }),
+oauthApiRoutes.post(
+  "/organizations/:orgId/claude_code/buddy_react",
+  oauthAuthGuard,
+  (c) => c.json({ success: true }),
 )
+
+// Unknown /api/* compatibility calls are noise; acknowledge without auth.
+oauthApiRoutes.all("*", (c) => c.body(null, 200))
 
 // --- Authorize page HTML ---
 
