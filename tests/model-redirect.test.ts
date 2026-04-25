@@ -145,7 +145,43 @@ test("first matching rule wins until precedence is changed", async () => {
   })
 })
 
-test("reports enabled overlapping redirect conflicts", async () => {
+test("does not report conflicts when specific effort rules precede catch-all fallback", async () => {
+  setModelRedirectsForTest([
+    {
+      id: "medium-rule",
+      name: "Medium",
+      sourceModel: "claude-opus-4.7",
+      sourceEffort: "medium",
+      targetModel: "claude-opus-4.7-1m-internal",
+      enabled: true,
+    },
+    {
+      id: "all-rule",
+      name: "All",
+      sourceModel: "claude-opus-4.7",
+      sourceEffort: "all",
+      targetModel: "claude-opus-4.6-1m",
+      enabled: true,
+    },
+    {
+      id: "disabled-rule",
+      sourceModel: "claude-opus-4.7",
+      sourceEffort: "medium",
+      targetModel: "ignored",
+      enabled: false,
+    },
+  ])
+
+  const rules = await getAllModelRedirects()
+
+  expect(rules.find((rule) => rule.id === "medium-rule")?.conflicts).toEqual([])
+  expect(rules.find((rule) => rule.id === "all-rule")?.conflicts).toEqual([])
+  expect(rules.find((rule) => rule.id === "disabled-rule")?.conflicts).toEqual(
+    [],
+  )
+})
+
+test("reports conflicts when earlier rules fully shadow a later rule", async () => {
   setModelRedirectsForTest([
     {
       id: "all-rule",
@@ -163,26 +199,14 @@ test("reports enabled overlapping redirect conflicts", async () => {
       targetModel: "claude-opus-4.6-high",
       enabled: true,
     },
-    {
-      id: "disabled-rule",
-      sourceModel: "claude-opus-4.7",
-      sourceEffort: "high",
-      targetModel: "ignored",
-      enabled: false,
-    },
   ])
 
   const rules = await getAllModelRedirects()
 
-  expect(rules.find((rule) => rule.id === "all-rule")?.conflicts).toEqual([
-    { id: "high-rule", name: "High" },
-  ])
+  expect(rules.find((rule) => rule.id === "all-rule")?.conflicts).toEqual([])
   expect(rules.find((rule) => rule.id === "high-rule")?.conflicts).toEqual([
     { id: "all-rule", name: "All" },
   ])
-  expect(rules.find((rule) => rule.id === "disabled-rule")?.conflicts).toEqual(
-    [],
-  )
 })
 
 test("parses max suffixes for unknown models so redirects can match them", () => {

@@ -16,6 +16,16 @@ export const MODEL_REDIRECT_EFFORT_FILTERS: Array<ModelRedirectEffortFilter> = [
   "xhigh",
 ]
 
+const REDIRECT_EFFORT_CASES = [
+  "default",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+] as const
+
+type RedirectEffortCase = (typeof REDIRECT_EFFORT_CASES)[number]
+
 export interface ModelRedirectRule {
   id: string
   name?: string
@@ -96,35 +106,54 @@ function normalizeRules(raw: unknown): Array<ModelRedirectRule> {
   })
 }
 
-function effortsOverlap(
-  left: ModelRedirectEffortFilter,
-  right: ModelRedirectEffortFilter,
-): boolean {
-  return left === "all" || right === "all" || left === right
+function effortCases(
+  filter: ModelRedirectEffortFilter,
+): Array<RedirectEffortCase> {
+  if (filter === "all") return [...REDIRECT_EFFORT_CASES]
+  return [filter]
 }
 
-function rulesConflict(
-  left: ModelRedirectRule,
-  right: ModelRedirectRule,
-): boolean {
-  return (
-    left.enabled
-    && right.enabled
-    && left.sourceModel === right.sourceModel
-    && effortsOverlap(left.sourceEffort, right.sourceEffort)
-  )
+function getShadowingRules(
+  rule: ModelRedirectRule,
+  priorRules: Array<ModelRedirectRule>,
+): Array<ModelRedirectRule> {
+  if (!rule.enabled) return []
+
+  const remaining = new Set(effortCases(rule.sourceEffort))
+  const shadowingRules: Array<ModelRedirectRule> = []
+
+  for (const candidate of priorRules) {
+    if (!candidate.enabled || candidate.sourceModel !== rule.sourceModel) {
+      continue
+    }
+
+    let coversAnyRemainingCase = false
+    for (const effort of effortCases(candidate.sourceEffort)) {
+      if (!remaining.has(effort)) continue
+      remaining.delete(effort)
+      coversAnyRemainingCase = true
+    }
+
+    if (coversAnyRemainingCase) shadowingRules.push(candidate)
+    if (remaining.size === 0) return shadowingRules
+  }
+
+  return []
 }
 
 function withConflicts(
   rules: Array<ModelRedirectRule>,
 ): Array<ModelRedirectRuleWithConflicts> {
-  return rules.map((rule) => ({
-    ...rule,
-    conflicts: rules
-      .filter((candidate) => candidate.id !== rule.id)
-      .filter((candidate) => rulesConflict(rule, candidate))
-      .map((candidate) => ({ id: candidate.id, name: candidate.name })),
-  }))
+  return rules.map((rule, index) => {
+    const shadowingRules = getShadowingRules(rule, rules.slice(0, index))
+    return {
+      ...rule,
+      conflicts: shadowingRules.map((candidate) => ({
+        id: candidate.id,
+        name: candidate.name,
+      })),
+    }
+  })
 }
 
 export async function loadModelRedirects(): Promise<void> {
