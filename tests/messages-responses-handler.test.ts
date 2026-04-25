@@ -3,6 +3,7 @@ import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
 import type { ResponsesPayload } from "../src/services/copilot/create-responses"
 import type { ModelsResponse } from "../src/services/copilot/get-models"
 
+import { setModelRedirectsForTest } from "../src/lib/model-redirect"
 import { state } from "../src/lib/state"
 import { server } from "../src/server"
 
@@ -31,6 +32,24 @@ const responsesCapableModels: ModelsResponse = {
       supported_endpoints: ["/responses"],
       capabilities: {
         family: "gpt",
+        limits: { max_output_tokens: 1024 },
+        object: "model_capabilities",
+        supports: {},
+        tokenizer: "cl100k_base",
+        type: "chat",
+      },
+    },
+    {
+      id: "claude-opus-4.6-1m",
+      name: "Claude Opus 4.6 1M",
+      object: "model",
+      preview: false,
+      vendor: "anthropic",
+      version: "1",
+      model_picker_enabled: true,
+      supported_endpoints: ["/responses"],
+      capabilities: {
+        family: "claude",
         limits: { max_output_tokens: 1024 },
         object: "model_capabilities",
         supports: {},
@@ -100,6 +119,7 @@ beforeEach(() => {
   state.isMultiToken = false
   state.manualApprove = false
   state.models = responsesCapableModels
+  setModelRedirectsForTest([])
 })
 
 test("preserves output_config.format on the Anthropic responses path", async () => {
@@ -209,4 +229,36 @@ test("defaults reasoning effort to medium on the Anthropic responses path", asyn
 
   expect(response.status).toBe(200)
   expect(lastResponsesPayload?.reasoning?.effort).toBe("medium")
+})
+
+test("redirects Anthropic max output_config effort on the responses path", async () => {
+  setModelRedirectsForTest([
+    {
+      id: "opus-max",
+      sourceModel: "claude-opus-4.7-1m",
+      sourceEffort: "max",
+      targetModel: "claude-opus-4.6-1m",
+      targetEffort: "high",
+      enabled: true,
+    },
+  ])
+
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "claude-opus-4.7-1m",
+      messages: [{ role: "user", content: "Think carefully." }],
+      max_tokens: 32,
+      output_config: {
+        effort: "max",
+      },
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastResponsesPayload?.model).toBe("claude-opus-4.6-1m")
+  expect(lastResponsesPayload?.reasoning?.effort).toBe("high")
 })

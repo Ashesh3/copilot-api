@@ -9,6 +9,7 @@ import {
 import {
   addModelRedirect,
   getAllModelRedirects,
+  moveModelRedirect,
   removeModelRedirect,
   toggleModelRedirect,
   updateModelRedirect,
@@ -43,6 +44,17 @@ import {
 import packageJson from "../../../package.json" with { type: "json" }
 
 const serverStartTime = Date.now()
+
+type RedirectSourceEffort =
+  | "all"
+  | "default"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max"
+
+type RedirectTargetEffort = "low" | "medium" | "high" | "xhigh" | "max"
 
 function formatUptime(ms: number): string {
   const totalSeconds = Math.floor(ms / 1000)
@@ -235,12 +247,16 @@ export async function handleAddModelRedirect(c: Context) {
     sourceModel: string
     targetModel: string
     name?: string
+    sourceEffort?: RedirectSourceEffort
+    targetEffort?: RedirectTargetEffort
   }>()
   if (!body.sourceModel || !body.targetModel) {
     return c.json({ error: "sourceModel and targetModel are required" }, 400)
   }
   const rule = await addModelRedirect(body.sourceModel, body.targetModel, {
     name: body.name,
+    sourceEffort: body.sourceEffort,
+    targetEffort: body.targetEffort,
   })
   return c.json(rule)
 }
@@ -264,10 +280,23 @@ export async function handleUpdateModelRedirect(c: Context) {
   const body = await c.req.json<{
     name?: string
     sourceModel?: string
+    sourceEffort?: RedirectSourceEffort
     targetModel?: string
+    targetEffort?: RedirectTargetEffort | null
     enabled?: boolean
   }>()
   const rule = await updateModelRedirect(id, body)
+  if (!rule) return c.json({ error: "Redirect not found" }, 404)
+  return c.json(rule)
+}
+
+export async function handleMoveModelRedirect(c: Context) {
+  const id = c.req.param("id")
+  const body = await c.req.json<{ direction?: "up" | "down" }>()
+  if (body.direction !== "up" && body.direction !== "down") {
+    return c.json({ error: "direction must be up or down" }, 400)
+  }
+  const rule = await moveModelRedirect(id, body.direction)
   if (!rule) return c.json({ error: "Redirect not found" }, 404)
   return c.json(rule)
 }

@@ -162,8 +162,14 @@ async function handleCompletionInner(
   // Normalize model name (e.g. "claude-opus-4-6[1m]" → "claude-opus-4.6-1m")
   const normalized = normalizeModelName(baseModel)
 
+  const bodyEffortOverride = getOutputConfigReasoningEffort(anthropicPayload)
+  const redirectEffort = suffixEffort ?? bodyEffortOverride
+
   // Apply silent model redirect (response will still report requestedModel)
-  const redirect = await applyModelRedirect(normalized)
+  const redirect = await applyModelRedirect({
+    model: normalized,
+    effort: redirectEffort,
+  })
   // eslint-disable-next-line require-atomic-updates
   anthropicPayload.model = redirect.model
 
@@ -211,9 +217,8 @@ async function handleCompletionInner(
 
   // Determine effective reasoning effort for logging
   const bodyEffort = getBodyReasoningEffort(anthropicPayload)
-  const effectiveEffort = suffixEffort ?? bodyEffort
-  const effortOverride =
-    suffixEffort ?? getOutputConfigReasoningEffort(anthropicPayload)
+  const effectiveEffort = redirect.effort ?? bodyEffort
+  const effortOverride = redirect.effort
 
   setRequestContext(c, {
     requestedModel,

@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
 
 import type { ChatCompletionsPayload } from "../src/services/copilot/create-chat-completions"
 
+import { setModelRedirectsForTest } from "../src/lib/model-redirect"
 import { state } from "../src/lib/state"
 import { server } from "../src/server"
 
@@ -67,6 +68,7 @@ beforeEach(() => {
   state.isMultiToken = false
   state.manualApprove = false
   state.models = undefined
+  setModelRedirectsForTest([])
 })
 
 test("removes top_p when thinking is enabled on the chat completions path", async () => {
@@ -130,4 +132,36 @@ test("defaults chat completions reasoning_effort to medium when thinking is enab
     (lastUpstreamPayload as Record<string, unknown> | undefined)
       ?.reasoning_effort,
   ).toBe("medium")
+})
+
+test("redirects unsupported Anthropic high-effort model suffixes before upstream", async () => {
+  setModelRedirectsForTest([
+    {
+      id: "opus-high",
+      sourceModel: "claude-opus-4.7-1m",
+      sourceEffort: "high",
+      targetModel: "claude-opus-4.6-1m",
+      targetEffort: "high",
+      enabled: true,
+    },
+  ])
+
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "claude-opus-4.7-1m:high",
+      messages: [{ role: "user", content: "Think carefully." }],
+      max_tokens: 32,
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPayload?.model).toBe("claude-opus-4.6-1m")
+  expect(
+    (lastUpstreamPayload as Record<string, unknown> | undefined)
+      ?.reasoning_effort,
+  ).toBe("high")
 })

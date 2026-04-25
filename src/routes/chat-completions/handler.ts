@@ -10,7 +10,7 @@ import { applyReplacementsToPayload } from "~/lib/auto-replace"
 import { isAbortError } from "~/lib/error"
 import { applyModelRedirect } from "~/lib/model-redirect"
 import { normalizeModelName } from "~/lib/model-resolver"
-import { parseModelSuffix } from "~/lib/model-suffix"
+import { type ReasoningEffort, parseModelSuffix } from "~/lib/model-suffix"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { setRequestContext } from "~/lib/request-logger"
 import { getSentryModelName, shouldRecordAiContent } from "~/lib/sentry"
@@ -59,15 +59,25 @@ async function handleCompletionInner(
   const requestedModel = rawPayload.model
 
   // Parse model suffix to strip reasoning effort suffix (e.g. "gpt-5.3-codex:high" -> "gpt-5.3-codex")
-  const { baseModel, reasoningEffort } = parseModelSuffix(rawPayload.model)
+  const { baseModel, reasoningEffort: suffixEffort } = parseModelSuffix(
+    rawPayload.model,
+  )
   rawPayload.model = baseModel
 
   // Apply auto-replacements to the payload
   const { payload: replacedPayload, appliedRules } =
     await applyReplacementsToPayload(rawPayload)
 
+  const payloadEffort = getPayloadReasoningEffort(replacedPayload)
+  const requestedEffort = suffixEffort ?? payloadEffort
+
   // Apply user-configured silent model redirect (e.g. opus-4-7 -> opus-4-6)
-  const redirect = await applyModelRedirect(replacedPayload.model)
+  const redirect = await applyModelRedirect({
+    model: normalizeModelName(replacedPayload.model),
+    effort: requestedEffort,
+  })
+  const reasoningEffort = redirect.effort
+  applyRedirectedReasoningEffort(replacedPayload, reasoningEffort)
 
   // Normalize model name (e.g., claude-opus-4-5 -> claude-opus-4.5)
   let payload = {
@@ -164,6 +174,31 @@ const executeRequest = async (
   }
 
   return await handleStreamingResponse(c, payload, requestedModel)
+}
+
+function getPayloadReasoningEffort(
+  payload: ChatCompletionsPayload,
+): ReasoningEffort | undefined {
+  const effort = (payload as unknown as Record<string, unknown>)
+    .reasoning_effort
+  if (
+    effort === "low"
+    || effort === "medium"
+    || effort === "high"
+    || effort === "xhigh"
+  ) {
+    return effort
+  }
+  if (effort === "max") return "xhigh"
+  return undefined
+}
+
+function applyRedirectedReasoningEffort(
+  payload: ChatCompletionsPayload,
+  effort: ReasoningEffort | undefined,
+): void {
+  if (!effort) return
+  ;(payload as unknown as Record<string, unknown>).reasoning_effort = effort
 }
 
 const handleNonStreamingResponse = (

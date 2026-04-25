@@ -10,7 +10,9 @@ import { awaitApproval } from "~/lib/approval"
 import { getConfig } from "~/lib/config"
 import { isAbortError } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
-import { parseModelSuffix } from "~/lib/model-suffix"
+import { applyModelRedirect } from "~/lib/model-redirect"
+import { normalizeModelName } from "~/lib/model-resolver"
+import { type ReasoningEffort, parseModelSuffix } from "~/lib/model-suffix"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { setRequestContext } from "~/lib/request-logger"
 import { getSentryModelName, shouldRecordAiContent } from "~/lib/sentry"
@@ -160,7 +162,7 @@ function isResponsesReasoningEffort(
 
 export function normalizeResponsesReasoning(
   payload: ResponsesPayload,
-  suffixEffort?: "low" | "medium" | "high" | "xhigh",
+  suffixEffort?: ReasoningEffort,
 ): ResponsesReasoningEffort | undefined {
   // Accept OpenAI-compatible top-level aliases and normalize to reasoning.effort
   const topLevelEffortRaw = payload.reasoningEffort ?? payload.reasoning_effort
@@ -192,6 +194,52 @@ export function normalizeResponsesReasoning(
   }
 
   return payload.reasoning?.effort ?? undefined
+}
+
+function getRedirectReasoningEffort(
+  effort: ResponsesReasoningEffort | undefined,
+): ReasoningEffort | undefined {
+  if (
+    effort === "low"
+    || effort === "medium"
+    || effort === "high"
+    || effort === "xhigh"
+  ) {
+    return effort
+  }
+  return undefined
+}
+
+function applyRedirectedResponsesEffort(
+  payload: ResponsesPayload,
+  effort: ReasoningEffort | undefined,
+): void {
+  if (!effort) return
+  payload.reasoning =
+    payload.reasoning ? { ...payload.reasoning, effort } : { effort }
+}
+
+function withRequestedResponseModel(
+  result: ResponsesResult,
+  requestedModel: string,
+): ResponsesResult {
+  return { ...result, model: requestedModel }
+}
+
+function rewriteResponseModelInEvent(
+  data: string,
+  requestedModel: string,
+): string {
+  try {
+    const parsed = JSON.parse(data) as { response?: { model?: string } }
+    if (parsed.response?.model) {
+      parsed.response.model = requestedModel
+      return JSON.stringify(parsed)
+    }
+  } catch {
+    return data
+  }
+  return data
 }
 
 export const handleResponses = async (c: Context) => {
@@ -227,8 +275,18 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
   const { baseModel, reasoningEffort: suffixEffort } = parseModelSuffix(
     payload.model,
   )
-  payload.model = baseModel
+
+  payload.model = normalizeModelName(baseModel)
   const effectiveEffort = normalizeResponsesReasoning(payload, suffixEffort)
+
+  const redirect = await applyModelRedirect({
+    model: payload.model,
+    effort: getRedirectReasoningEffort(effectiveEffort),
+  })
+  // eslint-disable-next-line require-atomic-updates
+  payload.model = normalizeModelName(redirect.model)
+  applyRedirectedResponsesEffort(payload, redirect.effort)
+  const finalEffort = redirect.effort ?? effectiveEffort
 
   // Fallback: if the base model has no routable account but the -1m variant
   // does, auto-route to it. The merged model list may include models that no
@@ -250,7 +308,7 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
     requestedModel,
     provider: "Responses",
     model: payload.model,
-    reasoningEffort: effectiveEffort,
+    reasoningEffort: finalEffort,
   })
   logger.debug("Responses request payload:", JSON.stringify(payload))
 
@@ -273,7 +331,7 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
       `[responses] Model ${payload.model} does not support /responses, falling back to ChatCompletions`,
     )
     setRequestContext(c, { provider: "Responses→ChatCompletions" })
-    return await handleWithChatCompletions(c, payload)
+    return await handleWithChatCompletions(c, payload, requestedModel)
   }
 
   const { vision, initiator } = getResponsesRequestOptions(payload)
@@ -362,7 +420,9 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
                 "Forwarding native Responses result:",
                 JSON.stringify(resolved).slice(-400),
               )
-              return c.json(resolved)
+              return c.json(
+                withRequestedResponseModel(resolved, requestedModel),
+              )
             }
 
             return streamSSE(c, async (stream) => {
@@ -425,14 +485,21 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
                       signal: c.req.raw.signal,
                     }),
                   )
-                  await emitResponsesResultAsStream(stream, resolved)
+                  await emitResponsesResultAsStream(
+                    stream,
+                    withRequestedResponseModel(resolved, requestedModel),
+                  )
                   return
                 }
 
                 const idTracker = createStreamIdTracker()
                 for (const chunk of bufferedChunks) {
-                  const processedData = fixStreamIds(
+                  const restoredData = rewriteResponseModelInEvent(
                     chunk.data ?? "",
+                    requestedModel,
+                  )
+                  const processedData = fixStreamIds(
+                    restoredData,
                     chunk.event,
                     idTracker,
                   )
@@ -520,7 +587,7 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
     JSON.stringify(resolved).slice(-400),
   )
 
-  return c.json(resolved)
+  return c.json(withRequestedResponseModel(resolved, requestedModel))
 }
 
 const isAsyncIterable = <T>(value: unknown): value is AsyncIterable<T> =>
@@ -1196,8 +1263,10 @@ export const streamChatCompletionsAsResponses = async (
 const handleWithChatCompletions = async (
   c: Context,
   payload: ResponsesPayload,
+  requestedModel?: string,
 ) => {
   const ccPayload = responsesToChatCompletions(payload)
+  const responseModel = requestedModel ?? payload.model
   logger.debug("ChatCompletions fallback payload:", JSON.stringify(ccPayload))
 
   // Non-streaming: span wraps the entire call + response processing
@@ -1254,7 +1323,7 @@ const handleWithChatCompletions = async (
 
         const result = chatCompletionToResponsesResult(
           ccResponse,
-          payload.model,
+          responseModel,
         )
         return c.json(result)
       },
@@ -1323,7 +1392,7 @@ const handleWithChatCompletions = async (
 
             const result = chatCompletionToResponsesResult(
               response,
-              payload.model,
+              responseModel,
             )
             return c.json(result)
           }
@@ -1337,7 +1406,7 @@ const handleWithChatCompletions = async (
               const streamUsage = await streamChatCompletionsAsResponses(
                 sseStream,
                 ccStream,
-                payload.model,
+                responseModel,
               )
 
               setRequestContext(c, {

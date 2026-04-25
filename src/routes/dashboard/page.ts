@@ -41,6 +41,7 @@ export function getDashboardPage(): string {
   .section-header h2 { font-size: 1.3rem }
   .badge { display: inline-block; padding: 3px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: 600 }
   .badge-green { background: #22C55E22; color: #22C55E } .badge-gray { background: #94A3B822; color: #94A3B8 }
+  .badge-red { background: #EF444422; color: #F87171 }
   .badge-orange { background: #F9731622; color: #F97316 } .badge-blue { background: #3B82F622; color: #3B82F6 } .badge-purple { background: #A78BFA22; color: #A78BFA }
   table { width: 100%; border-collapse: collapse; margin-top: 12px }
   th { text-align: left; padding: 10px 12px; border-bottom: 1px solid #272F42; color: #94A3B8; font-weight: 500; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.5px }
@@ -75,6 +76,7 @@ export function getDashboardPage(): string {
   .form-row { display: flex; gap: 10px; align-items: center; margin-top: 16px; flex-wrap: wrap }
   .form-input { background: #0F172A; border: 1px solid #272F42; color: #F8FAFC; padding: 8px 12px; border-radius: 8px; font-size: 0.85rem; outline: none; font-family: inherit }
   .form-input:focus { border-color: #3B82F6 } .form-input.mono { font-family: monospace }
+  select.form-input { min-height: 36px }
   .toggle { width: 40px; height: 22px; border-radius: 11px; border: none; position: relative; cursor: pointer; padding: 0; transition: background 0.2s }
   .toggle::after { content: ''; position: absolute; width: 16px; height: 16px; border-radius: 50%; background: #fff; top: 3px; left: 3px; transition: transform 0.2s }
   .toggle.on { background: #22C55E } .toggle.on::after { transform: translateX(18px) } .toggle.off { background: #484f58 } .toggle.disabled { opacity: 0.4; cursor: not-allowed }
@@ -137,7 +139,7 @@ export function getDashboardPage(): string {
   <div class="section" id="sec-environments"><div class="section-header"><h2>Environments</h2></div><div id="environments-content"></div></div>
   <div class="section" id="sec-flags"><div class="section-header"><h2>Feature Flags</h2></div><div id="flags-content"></div><div class="form-row" id="flag-form"><input class="form-input mono" name="flag-name" placeholder="flag_name" style="flex:2;min-width:180px"><input class="form-input" name="flag-value" placeholder="true" style="flex:1;min-width:100px"><button class="btn btn-primary" onclick="addFlag()">Add</button></div></div>
   <div class="section" id="sec-replacements"><div class="section-header"><h2>Replacements</h2></div><div id="replacements-content"></div><div class="form-row" id="replacement-form"><input class="form-input" name="repl-name" placeholder="Name (optional)" style="min-width:120px"><input class="form-input mono" name="repl-pattern" placeholder="Pattern" style="flex:2;min-width:140px"><input class="form-input" name="repl-replacement" placeholder="Replacement" style="flex:2;min-width:140px"><label class="checkbox-label"><input type="checkbox" name="repl-regex"> Regex</label><button class="btn btn-primary" onclick="addReplacement()">Add</button></div></div>
-  <div class="section" id="sec-model-redirects"><div class="section-header"><h2>Model Redirects</h2><span class="badge badge-gray">Silent — clients see the original model</span></div><div id="model-redirects-content"></div><div class="form-row" id="model-redirect-form"><input class="form-input" name="mr-name" placeholder="Name (optional)" style="min-width:120px"><input class="form-input mono" name="mr-source" placeholder="Source model (e.g. claude-opus-4.7)" style="flex:2;min-width:200px"><input class="form-input mono" name="mr-target" placeholder="Target model (e.g. claude-opus-4.6)" style="flex:2;min-width:200px"><button class="btn btn-primary" onclick="addModelRedirect()">Add</button></div></div>
+  <div class="section" id="sec-model-redirects"><div class="section-header"><h2>Model Redirects</h2><span class="badge badge-gray">Silent - clients see the original model</span></div><div id="model-redirects-content"></div><div class="form-row" id="model-redirect-form"><input class="form-input" name="mr-name" placeholder="Name (optional)" style="min-width:120px"><input class="form-input mono" name="mr-source" placeholder="Source model (e.g. claude-opus-4.7-1m)" style="flex:2;min-width:200px"><select class="form-input" name="mr-source-effort"><option value="all">All effort levels</option><option value="default">Default/no effort</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="max">max</option></select><input class="form-input mono" name="mr-target" placeholder="Target model (e.g. claude-opus-4.6-1m)" style="flex:2;min-width:200px"><select class="form-input" name="mr-target-effort"><option value="">Preserve effort</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="max">max</option></select><button class="btn btn-primary" onclick="addModelRedirect()">Add</button></div></div>
   <div class="section" id="sec-model-routing"><div class="section-header"><h2>Model Routing</h2><span class="badge badge-gray" id="model-routing-count">0 models</span><input class="form-input model-filter" id="model-routing-filter" placeholder="Filter models" oninput="renderModelRouting()"></div><div id="model-routing-content"></div></div>
   <div class="section" id="sec-usage"><div class="section-header"><h2>Usage</h2></div><div id="usage-content"></div></div>
   <div class="section" id="sec-settings"><div class="section-header"><h2>Settings</h2></div><div id="settings-content"></div></div>
@@ -395,11 +397,26 @@ function addReplacement() {
 function loadModelRedirects() {
   apiFetch('GET', '/dashboard/api/model-redirects').then(function(r) { if (r.ok) return r.json() }).then(function(d) { if (d) { modelRedirectsData = d; renderModelRedirects() } }).catch(function() { showToast('Failed to load model redirects', 'error') })
 }
+function effortLabel(effort, isTarget) {
+  if (!effort && isTarget) return 'Preserve'
+  if (effort === 'all') return 'All effort levels'
+  if (effort === 'default') return 'Default/no effort'
+  if (effort === 'xhigh') return 'max'
+  return effort || 'All effort levels'
+}
+function conflictLabel(conflicts) {
+  if (!conflicts || conflicts.length === 0) return '<span class="badge badge-green">clear</span>'
+  var names = conflicts.map(function(c) { return c.name || c.id }).join(', ')
+  return '<span class="badge badge-red" title="Conflicts with: ' + esc(names) + '">' + conflicts.length + ' conflict' + (conflicts.length === 1 ? '' : 's') + '</span>'
+}
 function renderModelRedirects() {
   if (!modelRedirectsData || modelRedirectsData.length === 0) { document.getElementById('model-redirects-content').innerHTML = '<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 12h13"/><path d="M16 6l6 6-6 6"/><path d="M3 6v12"/></svg><p>No model redirects configured.</p><p style="font-size:0.8rem;margin-top:6px">Add a redirect to silently route a requested model to another (e.g. claude-opus-4.7 to claude-opus-4.6).</p></div>'; return }
-  var html = '<div class="table-scroll"><table><thead><tr><th>Name</th><th>Source Model</th><th></th><th>Target Model</th><th>Enabled</th><th>Actions</th></tr></thead><tbody>'
-  modelRedirectsData.forEach(function(r) {
-    html += '<tr><td>' + esc(r.name || '-') + '</td><td class="mono" style="font-size:12px">' + esc(r.sourceModel) + '</td><td style="color:#94A3B8">&rarr;</td><td class="mono" style="font-size:12px">' + esc(r.targetModel) + '</td><td>'
+  var html = '<div class="table-scroll"><table><thead><tr><th>Order</th><th>Name</th><th>Source</th><th></th><th>Target</th><th>Conflicts</th><th>Enabled</th><th>Actions</th></tr></thead><tbody>'
+  modelRedirectsData.forEach(function(r, index) {
+    var upDisabled = index === 0 ? ' disabled' : ''
+    var downDisabled = index === modelRedirectsData.length - 1 ? ' disabled' : ''
+    html += '<tr><td style="white-space:nowrap"><button class="btn" title="Move up" style="font-size:0.78rem;padding:4px 8px"' + upDisabled + ' onclick="moveModelRedirect(&quot;' + esc(r.id) + '&quot;,&quot;up&quot;)">&uarr;</button> <button class="btn" title="Move down" style="font-size:0.78rem;padding:4px 8px"' + downDisabled + ' onclick="moveModelRedirect(&quot;' + esc(r.id) + '&quot;,&quot;down&quot;)">&darr;</button></td>'
+    html += '<td>' + esc(r.name || '-') + '</td><td><div class="mono" style="font-size:12px">' + esc(r.sourceModel) + '</div><span class="badge badge-blue">' + esc(effortLabel(r.sourceEffort, false)) + '</span></td><td style="color:#94A3B8">&rarr;</td><td><div class="mono" style="font-size:12px">' + esc(r.targetModel) + '</div><span class="badge badge-purple">' + esc(effortLabel(r.targetEffort, true)) + '</span></td><td>' + conflictLabel(r.conflicts) + '</td><td>'
     html += '<button class="toggle ' + (r.enabled !== false ? 'on' : 'off') + '" onclick="toggleModelRedirect(\\'' + esc(r.id) + '\\')"></button>'
     html += '</td><td><button class="btn btn-danger" style="font-size:0.78rem;padding:4px 10px" onclick="deleteModelRedirect(\\'' + esc(r.id) + '\\')">Delete</button></td></tr>'
   })
@@ -407,6 +424,9 @@ function renderModelRedirects() {
   document.getElementById('model-redirects-content').innerHTML = html
 }
 function toggleModelRedirect(id) { apiFetch('PATCH', '/dashboard/api/model-redirects/' + encodeURIComponent(id) + '/toggle').then(function(r) { if (r.ok) { showToast('Toggled', 'success'); loadModelRedirects() } else showToast('Failed to toggle', 'error') }).catch(function() { showToast('Failed to toggle', 'error') }) }
+function moveModelRedirect(id, direction) {
+  apiFetch('POST', '/dashboard/api/model-redirects/' + encodeURIComponent(id) + '/move', { direction: direction }).then(function(r) { if (r.ok) { showToast('Order updated', 'success'); loadModelRedirects() } else showToast('Failed to move', 'error') }).catch(function() { showToast('Failed to move', 'error') })
+}
 function deleteModelRedirect(id) {
   if (!confirm('Delete this model redirect?')) return
   apiFetch('DELETE', '/dashboard/api/model-redirects/' + encodeURIComponent(id)).then(function(r) { if (r.ok) { showToast('Deleted', 'success'); loadModelRedirects() } else showToast('Failed to delete', 'error') }).catch(function() { showToast('Failed to delete', 'error') })
@@ -414,11 +434,13 @@ function deleteModelRedirect(id) {
 function addModelRedirect() {
   var nameEl = document.querySelector('#model-redirect-form input[name="mr-name"]')
   var srcEl = document.querySelector('#model-redirect-form input[name="mr-source"]')
+  var srcEffortEl = document.querySelector('#model-redirect-form select[name="mr-source-effort"]')
   var tgtEl = document.querySelector('#model-redirect-form input[name="mr-target"]')
+  var tgtEffortEl = document.querySelector('#model-redirect-form select[name="mr-target-effort"]')
   var src = srcEl.value.trim(), tgt = tgtEl.value.trim()
   if (!src || !tgt) { showToast('Source and target models are required', 'error'); return }
-  var body = { sourceModel: src, targetModel: tgt, name: nameEl.value.trim() || undefined }
-  apiFetch('POST', '/dashboard/api/model-redirects', body).then(function(r) { if (r.ok) { nameEl.value = ''; srcEl.value = ''; tgtEl.value = ''; showToast('Added', 'success'); loadModelRedirects() } else r.json().catch(function() { return {} }).then(function(d) { showToast(d.error || 'Failed', 'error') }) }).catch(function() { showToast('Failed to add', 'error') })
+  var body = { sourceModel: src, sourceEffort: srcEffortEl.value, targetModel: tgt, targetEffort: tgtEffortEl.value || undefined, name: nameEl.value.trim() || undefined }
+  apiFetch('POST', '/dashboard/api/model-redirects', body).then(function(r) { if (r.ok) { nameEl.value = ''; srcEl.value = ''; srcEffortEl.value = 'all'; tgtEl.value = ''; tgtEffortEl.value = ''; showToast('Added', 'success'); loadModelRedirects() } else r.json().catch(function() { return {} }).then(function(d) { showToast(d.error || 'Failed', 'error') }) }).catch(function() { showToast('Failed to add', 'error') })
 }
 
 function loadModelRouting() {

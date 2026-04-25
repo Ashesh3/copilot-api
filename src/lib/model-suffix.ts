@@ -62,7 +62,13 @@ const MODEL_REASONING_CONFIG: Partial<Record<string, ModelReasoningConfig>> = {
   },
 }
 
-const VALID_EFFORTS = new Set<string>(["low", "medium", "high", "xhigh"])
+const EFFORT_ALIASES: Record<string, ReasoningEffort> = {
+  low: "low",
+  medium: "medium",
+  high: "high",
+  xhigh: "xhigh",
+  max: "xhigh",
+}
 
 export interface ParsedModel {
   baseModel: string
@@ -73,8 +79,10 @@ export interface ParsedModel {
  * Parse a model string that may contain a reasoning effort suffix.
  * Format: "model-name:effort" (e.g. "claude-sonnet-4.6:high")
  *
- * If the suffix is not a valid effort level or the model doesn't support it,
- * the suffix is ignored and the full string is treated as the model name.
+ * If the suffix is not a valid effort level, the suffix is ignored and the
+ * full string is treated as the model name. For models not present in the
+ * local reasoning config, keep the parsed effort so redirect rules can still
+ * route newly released model IDs before account routing sees them.
  */
 export function parseModelSuffix(model: string): ParsedModel {
   const colonIndex = model.lastIndexOf(":")
@@ -85,16 +93,15 @@ export function parseModelSuffix(model: string): ParsedModel {
   const potentialBase = model.slice(0, colonIndex)
   const potentialEffort = model.slice(colonIndex + 1)
 
-  if (!VALID_EFFORTS.has(potentialEffort)) {
+  if (!Object.hasOwn(EFFORT_ALIASES, potentialEffort)) {
     return { baseModel: model }
   }
+  const effort = EFFORT_ALIASES[potentialEffort]
 
-  const effort = potentialEffort as ReasoningEffort
   const config = MODEL_REASONING_CONFIG[potentialBase]
 
   if (!config) {
-    // Model not in our reasoning config — treat suffix as part of model name
-    return { baseModel: model }
+    return { baseModel: potentialBase, reasoningEffort: effort }
   }
 
   if (!config.supportedEfforts.includes(effort)) {

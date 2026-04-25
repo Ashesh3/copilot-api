@@ -19,6 +19,7 @@ import { isAbortError } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
 import { applyModelRedirect } from "~/lib/model-redirect"
 import { normalizeModelName } from "~/lib/model-resolver"
+import { type ReasoningEffort, parseModelSuffix } from "~/lib/model-suffix"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { setRequestContext } from "~/lib/request-logger"
 import { state } from "~/lib/state"
@@ -153,6 +154,19 @@ function capMaxTokens(
   }
 }
 
+async function resolveGoogleModelRedirect(rawModel: string): Promise<{
+  model: string
+  reasoningEffort?: ReasoningEffort
+}> {
+  const { baseModel, reasoningEffort: suffixEffort } =
+    parseModelSuffix(rawModel)
+  const redirect = await applyModelRedirect({
+    model: normalizeModelName(baseModel),
+    effort: suffixEffort,
+  })
+  return { model: redirect.model, reasoningEffort: redirect.effort }
+}
+
 export async function handleGoogleAI(c: Context) {
   await checkRateLimit(state)
 
@@ -175,13 +189,9 @@ export async function handleGoogleAI(c: Context) {
   const { model: rawModel, action } = parseModelAction(modelAction)
   const isStream = action === "streamGenerateContent"
 
-  // Normalize model name (e.g., gemini-3-flash-preview stays as-is for Copilot)
-  const normalizedModel = normalizeModelName(rawModel)
-
   // Apply silent model redirect — google-ai response format does not include
   // a model field, so client-facing transparency is automatic.
-  const redirect = await applyModelRedirect(normalizedModel)
-  const model = redirect.model
+  const { model, reasoningEffort } = await resolveGoogleModelRedirect(rawModel)
 
   logger.debug(`Google AI request: model=${model}, action=${action}`)
 
@@ -219,6 +229,7 @@ export async function handleGoogleAI(c: Context) {
 
   // Translate Google → OpenAI ChatCompletions format
   const openAIPayload = translateGoogleToOpenAI(googlePayload, model, isStream)
+  applyGoogleReasoningEffort(openAIPayload, reasoningEffort)
 
   // Apply auto-replacements
   const { payload: replacedPayload, appliedRules } =
@@ -243,6 +254,7 @@ export async function handleGoogleAI(c: Context) {
     provider:
       useResponsesApi ? "GoogleAI→Responses" : "GoogleAI→ChatCompletions",
     replacements: appliedRules,
+    reasoningEffort,
   })
 
   // Calculate token count
@@ -269,13 +281,24 @@ export async function handleGoogleAI(c: Context) {
   // Route to the correct API based on model capabilities
   if (useResponsesApi) {
     consola.debug(`[google-ai] Using Responses API for ${finalPayload.model}`)
-    return handleWithResponsesApi(c, finalPayload, isStream)
+    return handleWithResponsesApi(c, finalPayload, {
+      isStream,
+      effortOverride: reasoningEffort,
+    })
   }
 
   consola.debug(
     `[google-ai] Using ChatCompletions API for ${finalPayload.model}`,
   )
   return handleWithChatCompletions(c, finalPayload)
+}
+
+function applyGoogleReasoningEffort(
+  payload: ChatCompletionsPayload,
+  effort: ReasoningEffort | undefined,
+): void {
+  if (!effort) return
+  ;(payload as unknown as Record<string, unknown>).reasoning_effort = effort
 }
 
 // ─── ChatCompletions path ───
@@ -360,6 +383,7 @@ async function handleWithChatCompletions(
  */
 function openAIPayloadToResponses(
   payload: ChatCompletionsPayload,
+  effortOverride?: ReasoningEffort,
 ): ResponsesPayload {
   // Extract system messages → instructions
   const systemMessages = payload.messages.filter((m) => m.role === "system")
@@ -383,7 +407,7 @@ function openAIPayloadToResponses(
     store: false,
     parallel_tool_calls: true,
     reasoning: {
-      effort: getReasoningEffortForModel(payload.model),
+      effort: getReasoningEffortForModel(payload.model, effortOverride),
       summary: "auto",
     },
     include: ["reasoning.encrypted_content"],
@@ -511,10 +535,11 @@ function createResponseMessage(
 async function handleWithResponsesApi(
   c: Context,
   payload: ChatCompletionsPayload,
-  isStream: boolean,
+  options: { isStream: boolean; effortOverride?: ReasoningEffort },
 ) {
+  const { isStream, effortOverride } = options
   addPromptCaching(payload.messages, payload.tools ?? undefined)
-  const responsesPayload = openAIPayloadToResponses(payload)
+  const responsesPayload = openAIPayloadToResponses(payload, effortOverride)
   const vision = hasVisionContent(payload.messages)
   const initiator = detectInitiator(payload.messages)
   logger.debug(

@@ -27,6 +27,7 @@ import {
   handleListModelRouting,
   handleListReplacements,
   handleListSessions,
+  handleMoveModelRedirect,
   handleOverview,
   handleSetFlag,
   handleSetModelRouting,
@@ -115,6 +116,7 @@ dashboardRoutes.patch(
   "/api/model-redirects/:id/toggle",
   handleToggleModelRedirect,
 )
+dashboardRoutes.post("/api/model-redirects/:id/move", handleMoveModelRedirect)
 
 // Model Routing
 dashboardRoutes.get("/api/model-routing", handleListModelRouting)

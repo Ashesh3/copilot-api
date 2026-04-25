@@ -1,7 +1,9 @@
 import consola from "consola"
 import { randomUUID } from "node:crypto"
 
-import { parseModelSuffix } from "~/lib/model-suffix"
+import { applyModelRedirect } from "~/lib/model-redirect"
+import { normalizeModelName } from "~/lib/model-resolver"
+import { type ReasoningEffort, parseModelSuffix } from "~/lib/model-suffix"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { state } from "~/lib/state"
 import { createChatCompletions } from "~/services/copilot/create-chat-completions"
@@ -152,8 +154,16 @@ async function handleResponseCreate(
   const { baseModel, reasoningEffort: suffixEffort } = parseModelSuffix(
     payload.model,
   )
-  payload.model = baseModel
-  normalizeResponsesReasoning(payload, suffixEffort)
+
+  payload.model = normalizeModelName(baseModel)
+  const effectiveEffort = normalizeResponsesReasoning(payload, suffixEffort)
+  const redirect = await applyModelRedirect({
+    model: payload.model,
+    effort: getRedirectReasoningEffort(effectiveEffort),
+  })
+  // eslint-disable-next-line require-atomic-updates
+  payload.model = normalizeModelName(redirect.model)
+  applyRedirectedResponsesEffort(payload, redirect.effort)
 
   useFunctionApplyPatch(payload)
   convertWebSearchTool(payload)
@@ -202,6 +212,29 @@ async function handleResponseCreate(
     const processed = fixStreamIds(data, event, idTracker)
     ws.send(processed)
   }
+}
+
+function getRedirectReasoningEffort(
+  effort: NonNullable<ResponsesPayload["reasoning"]>["effort"] | undefined,
+): ReasoningEffort | undefined {
+  if (
+    effort === "low"
+    || effort === "medium"
+    || effort === "high"
+    || effort === "xhigh"
+  ) {
+    return effort
+  }
+  return undefined
+}
+
+function applyRedirectedResponsesEffort(
+  payload: ResponsesPayload,
+  effort: ReasoningEffort | undefined,
+): void {
+  if (!effort) return
+  payload.reasoning =
+    payload.reasoning ? { ...payload.reasoning, effort } : { effort }
 }
 
 export function extractResponsesPayload(
