@@ -10,7 +10,12 @@ import { applyReplacementsToPayload } from "~/lib/auto-replace"
 import { isAbortError } from "~/lib/error"
 import { applyModelRedirect } from "~/lib/model-redirect"
 import { normalizeModelName } from "~/lib/model-resolver"
-import { type ReasoningEffort, parseModelSuffix } from "~/lib/model-suffix"
+import {
+  type ReasoningEffort,
+  normalizeReasoningEffortForModel,
+  parseModelSuffix,
+  usesImplicitReasoningDefault,
+} from "~/lib/model-suffix"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { setRequestContext } from "~/lib/request-logger"
 import { getSentryModelName, shouldRecordAiContent } from "~/lib/sentry"
@@ -68,21 +73,29 @@ async function handleCompletionInner(
   const { payload: replacedPayload, appliedRules } =
     await applyReplacementsToPayload(rawPayload)
 
+  const normalizedModel = normalizeModelName(replacedPayload.model)
   const payloadEffort = getPayloadReasoningEffort(replacedPayload)
-  const requestedEffort = suffixEffort ?? payloadEffort
+  const requestedEffort = normalizeReasoningEffortForModel(
+    normalizedModel,
+    suffixEffort ?? payloadEffort,
+  )
 
   // Apply user-configured silent model redirect (e.g. opus-4-7 -> opus-4-6)
   const redirect = await applyModelRedirect({
-    model: normalizeModelName(replacedPayload.model),
+    model: normalizedModel,
     effort: requestedEffort,
   })
-  const reasoningEffort = redirect.effort
-  applyRedirectedReasoningEffort(replacedPayload, reasoningEffort)
+  const targetModel = normalizeModelName(redirect.model)
+  const reasoningEffort = normalizeReasoningEffortForModel(
+    targetModel,
+    redirect.effort,
+  )
+  applyRedirectedReasoningEffort(replacedPayload, targetModel, reasoningEffort)
 
   // Normalize model name (e.g., claude-opus-4-5 -> claude-opus-4.5)
   let payload = {
     ...replacedPayload,
-    model: normalizeModelName(redirect.model),
+    model: targetModel,
   }
 
   // Fallback: if the base model has no routable account but the -1m variant
@@ -195,10 +208,15 @@ function getPayloadReasoningEffort(
 
 function applyRedirectedReasoningEffort(
   payload: ChatCompletionsPayload,
+  model: string,
   effort: ReasoningEffort | undefined,
 ): void {
-  if (!effort) return
-  ;(payload as unknown as Record<string, unknown>).reasoning_effort = effort
+  const extra = payload as unknown as Record<string, unknown>
+  if (!effort || usesImplicitReasoningDefault(model)) {
+    delete extra.reasoning_effort
+    return
+  }
+  extra.reasoning_effort = effort
 }
 
 const handleNonStreamingResponse = (

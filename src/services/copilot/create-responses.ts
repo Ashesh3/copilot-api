@@ -4,6 +4,7 @@ import { events } from "fetch-event-stream"
 import { routedFetch } from "~/lib/account-router"
 import { getReasoningEffortForModel } from "~/lib/config"
 import { HTTPError } from "~/lib/error"
+import { usesImplicitReasoningDefault } from "~/lib/model-suffix"
 
 export interface ResponsesPayload {
   model: string
@@ -446,7 +447,11 @@ export const createResponses = async (
 
   // Match runtime defaults for direct Responses requests.
   payload.reasoning ??= {}
-  payload.reasoning.effort ??= getReasoningEffortForModel(payload.model)
+  if (usesImplicitReasoningDefault(payload.model)) {
+    delete payload.reasoning.effort
+  } else {
+    payload.reasoning.effort ??= getReasoningEffortForModel(payload.model)
+  }
   payload.reasoning.summary ??= "auto"
 
   if (!payload.include) {

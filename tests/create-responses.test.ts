@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
 
 import { HTTPError } from "../src/lib/error"
+import { setModelSettingsForTest } from "../src/lib/model-settings"
 import { state } from "../src/lib/state"
 import { createResponses } from "../src/services/copilot/create-responses"
 
@@ -70,6 +71,7 @@ beforeEach(() => {
   state.copilotToken = "copilot-token"
   state.githubToken = "github-token"
   state.isMultiToken = false
+  setModelSettingsForTest([])
 })
 
 test("preserves previous_response_id when sending Responses API requests", async () => {
@@ -142,6 +144,37 @@ test("injects runtime-style default reasoning settings for direct Responses requ
     summary: "auto",
   })
   expect(lastRequestBody?.include).toEqual(["reasoning.encrypted_content"])
+})
+
+test("does not send configurable effort for implicit-default Responses models", async () => {
+  setModelSettingsForTest([
+    {
+      model: "claude-implicit-medium",
+      supportedReasoningEfforts: ["medium"],
+      defaultReasoningEffort: "medium",
+      implicitReasoningDefault: true,
+    },
+  ])
+
+  await createResponses(
+    {
+      model: "claude-implicit-medium",
+      input: "Hello",
+      reasoning: { effort: "high" },
+    } as {
+      model: string
+      input: string
+      reasoning: { effort: "high" }
+    },
+    {
+      vision: false,
+      initiator: "user",
+    },
+  )
+
+  expect(lastRequestBody?.reasoning).toEqual({
+    summary: "auto",
+  })
 })
 
 test("retries 413 Responses requests without input images", async () => {

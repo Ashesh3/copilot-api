@@ -15,6 +15,12 @@ import {
   updateModelRedirect,
 } from "~/lib/model-redirect"
 import { setModelRoutingOverride } from "~/lib/model-routing"
+import {
+  getAllModelSettings,
+  isReasoningEffort,
+  removeModelSettings,
+  setModelSettings,
+} from "~/lib/model-settings"
 import { PATHS } from "~/lib/paths"
 import { state } from "~/lib/state"
 import { tokenPool } from "~/lib/token-pool"
@@ -55,6 +61,8 @@ type RedirectSourceEffort =
   | "max"
 
 type RedirectTargetEffort = "low" | "medium" | "high" | "xhigh" | "max"
+
+type ModelSettingsEffort = "low" | "medium" | "high" | "xhigh" | "max"
 
 function formatUptime(ms: number): string {
   const totalSeconds = Math.floor(ms / 1000)
@@ -299,6 +307,67 @@ export async function handleMoveModelRedirect(c: Context) {
   const rule = await moveModelRedirect(id, body.direction)
   if (!rule) return c.json({ error: "Redirect not found" }, 404)
   return c.json(rule)
+}
+
+export async function handleListModelSettings(c: Context) {
+  return c.json(await getAllModelSettings())
+}
+
+export async function handleSetModelSettings(c: Context) {
+  const body = await c.req.json<{
+    model?: string
+    supportedReasoningEfforts?: Array<ModelSettingsEffort> | null
+    defaultReasoningEffort?: ModelSettingsEffort | null
+    implicitReasoningDefault?: boolean | null
+    exposeVirtualReasoningModels?: boolean | null
+  }>()
+
+  if (!body.model || typeof body.model !== "string") {
+    return c.json({ error: "model is required" }, 400)
+  }
+
+  if (
+    body.supportedReasoningEfforts !== undefined
+    && body.supportedReasoningEfforts !== null
+    && (!Array.isArray(body.supportedReasoningEfforts)
+      || body.supportedReasoningEfforts.some(
+        (effort) => effort !== "max" && !isReasoningEffort(effort),
+      ))
+  ) {
+    return c.json({ error: "supportedReasoningEfforts is invalid" }, 400)
+  }
+
+  if (
+    body.defaultReasoningEffort !== undefined
+    && body.defaultReasoningEffort !== null
+    && body.defaultReasoningEffort !== "max"
+    && !isReasoningEffort(body.defaultReasoningEffort)
+  ) {
+    return c.json({ error: "defaultReasoningEffort is invalid" }, 400)
+  }
+
+  const settings = await setModelSettings(body.model, {
+    ...(body.supportedReasoningEfforts !== undefined ?
+      { supportedReasoningEfforts: body.supportedReasoningEfforts }
+    : {}),
+    ...(body.defaultReasoningEffort !== undefined ?
+      { defaultReasoningEffort: body.defaultReasoningEffort }
+    : {}),
+    ...(body.implicitReasoningDefault !== undefined ?
+      { implicitReasoningDefault: body.implicitReasoningDefault }
+    : {}),
+    ...(body.exposeVirtualReasoningModels !== undefined ?
+      { exposeVirtualReasoningModels: body.exposeVirtualReasoningModels }
+    : {}),
+  })
+  return c.json(settings)
+}
+
+export async function handleDeleteModelSettings(c: Context) {
+  const model = c.req.param("model")
+  const removed = await removeModelSettings(model)
+  if (!removed) return c.json({ error: "Model settings not found" }, 404)
+  return c.json({ success: true })
 }
 
 export function handleListModelRouting(c: Context) {

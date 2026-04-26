@@ -15,6 +15,7 @@ import {
   handleArchiveSession,
   handleDeleteFlag,
   handleDeleteModelRedirect,
+  handleDeleteModelSettings,
   handleDeleteReplacement,
   handleDeregisterEnvironment,
   handleDestroySession,
@@ -25,11 +26,13 @@ import {
   handleListFlags,
   handleListModelRedirects,
   handleListModelRouting,
+  handleListModelSettings,
   handleListReplacements,
   handleListSessions,
   handleMoveModelRedirect,
   handleOverview,
   handleSetFlag,
+  handleSetModelSettings,
   handleSetModelRouting,
   handleStartEnvironmentSession,
   handleToggleModelRedirect,
@@ -117,6 +120,11 @@ dashboardRoutes.patch(
   handleToggleModelRedirect,
 )
 dashboardRoutes.post("/api/model-redirects/:id/move", handleMoveModelRedirect)
+
+// Model Settings
+dashboardRoutes.get("/api/model-settings", handleListModelSettings)
+dashboardRoutes.post("/api/model-settings", handleSetModelSettings)
+dashboardRoutes.delete("/api/model-settings/:model", handleDeleteModelSettings)
 
 // Model Routing
 dashboardRoutes.get("/api/model-routing", handleListModelRouting)

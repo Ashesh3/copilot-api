@@ -13,7 +13,12 @@ import { HTTPError, isAbortError } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
 import { applyModelRedirect } from "~/lib/model-redirect"
 import { normalizeModelName } from "~/lib/model-resolver"
-import { type ReasoningEffort, parseModelSuffix } from "~/lib/model-suffix"
+import {
+  type ReasoningEffort,
+  normalizeReasoningEffortForModel,
+  parseModelSuffix,
+  usesImplicitReasoningDefault,
+} from "~/lib/model-suffix"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { setRequestContext } from "~/lib/request-logger"
 import { getSentryModelName, shouldRecordAiContent } from "~/lib/sentry"
@@ -163,13 +168,20 @@ async function handleCompletionInner(
   const normalized = normalizeModelName(baseModel)
 
   const bodyEffortOverride = getOutputConfigReasoningEffort(anthropicPayload)
-  const redirectEffort = suffixEffort ?? bodyEffortOverride
+  const requestedEffort = normalizeReasoningEffortForModel(
+    normalized,
+    suffixEffort ?? bodyEffortOverride,
+  )
 
   // Apply silent model redirect (response will still report requestedModel)
   const redirect = await applyModelRedirect({
     model: normalized,
-    effort: redirectEffort,
+    effort: requestedEffort,
   })
+  const redirectEffort = normalizeReasoningEffortForModel(
+    redirect.model,
+    redirect.effort,
+  )
   // eslint-disable-next-line require-atomic-updates
   anthropicPayload.model = redirect.model
 
@@ -217,8 +229,8 @@ async function handleCompletionInner(
 
   // Determine effective reasoning effort for logging
   const bodyEffort = getBodyReasoningEffort(anthropicPayload)
-  const effectiveEffort = redirect.effort ?? bodyEffort
-  const effortOverride = redirect.effort
+  const effectiveEffort = redirectEffort ?? bodyEffort
+  const effortOverride = redirectEffort
 
   setRequestContext(c, {
     requestedModel,
@@ -491,14 +503,22 @@ const executeChatCompletions = async (
   // thinking_budget is also sent for models that support explicit budget control
   if (anthropicPayload.thinking) {
     const extra = openAIPayload as unknown as Record<string, unknown>
-    extra.reasoning_effort = effortOverride ?? "medium"
-    if (anthropicPayload.thinking.budget_tokens) {
+    const usesImplicitDefault = usesImplicitReasoningDefault(
+      normalizeModelName(openAIPayload.model),
+    )
+    if (!usesImplicitDefault) {
+      extra.reasoning_effort = effortOverride ?? "medium"
+    }
+    if (anthropicPayload.thinking.budget_tokens && !usesImplicitDefault) {
       extra.thinking_budget = anthropicPayload.thinking.budget_tokens
     }
     // Claude requires temperature=1 when thinking is enabled
     openAIPayload.temperature = 1
     delete openAIPayload.top_p
-  } else if (effortOverride) {
+  } else if (
+    effortOverride
+    && !usesImplicitReasoningDefault(normalizeModelName(openAIPayload.model))
+  ) {
     // Subagent/skill requests may set output_config.effort without a thinking
     // block. Forward reasoning_effort so Copilot enables extended thinking;
     // also pin temperature=1 and drop top_p as the model requires.

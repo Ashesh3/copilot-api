@@ -3,6 +3,7 @@ import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
 import type { ChatCompletionsPayload } from "../src/services/copilot/create-chat-completions"
 
 import { setModelRedirectsForTest } from "../src/lib/model-redirect"
+import { setModelSettingsForTest } from "../src/lib/model-settings"
 import { state } from "../src/lib/state"
 import { server } from "../src/server"
 
@@ -69,6 +70,7 @@ beforeEach(() => {
   state.manualApprove = false
   state.models = undefined
   setModelRedirectsForTest([])
+  setModelSettingsForTest([])
 })
 
 test("removes top_p when thinking is enabled on the chat completions path", async () => {
@@ -137,10 +139,10 @@ test("defaults chat completions reasoning_effort to medium when thinking is enab
 test("redirects unsupported Anthropic high-effort model suffixes before upstream", async () => {
   setModelRedirectsForTest([
     {
-      id: "opus-high",
-      sourceModel: "claude-opus-4.7-1m",
+      id: "source-high",
+      sourceModel: "claude-source-1m",
       sourceEffort: "high",
-      targetModel: "claude-opus-4.6-1m",
+      targetModel: "claude-target-1m",
       targetEffort: "high",
       enabled: true,
     },
@@ -152,16 +154,79 @@ test("redirects unsupported Anthropic high-effort model suffixes before upstream
       "content-type": "application/json",
     },
     body: JSON.stringify({
-      model: "claude-opus-4.7-1m:high",
+      model: "claude-source-1m:high",
       messages: [{ role: "user", content: "Think carefully." }],
       max_tokens: 32,
     }),
   })
 
   expect(response.status).toBe(200)
-  expect(lastUpstreamPayload?.model).toBe("claude-opus-4.6-1m")
+  expect(lastUpstreamPayload?.model).toBe("claude-target-1m")
   expect(
     (lastUpstreamPayload as Record<string, unknown> | undefined)
       ?.reasoning_effort,
   ).toBe("high")
+})
+
+test("does not send custom reasoning effort for implicit-default models", async () => {
+  setModelSettingsForTest([
+    {
+      model: "claude-implicit-medium",
+      supportedReasoningEfforts: ["medium"],
+      defaultReasoningEffort: "medium",
+      implicitReasoningDefault: true,
+    },
+  ])
+
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "claude-implicit-medium:high",
+      messages: [{ role: "user", content: "Think carefully." }],
+      max_tokens: 32,
+      thinking: { type: "adaptive" },
+      output_config: { effort: "high" },
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPayload?.model).toBe("claude-implicit-medium")
+  expect(lastUpstreamPayload?.temperature).toBe(1)
+  expect(
+    (lastUpstreamPayload as Record<string, unknown> | undefined)
+      ?.reasoning_effort,
+  ).toBeUndefined()
+})
+
+test("strips custom reasoning effort for direct implicit-default chat completions", async () => {
+  setModelSettingsForTest([
+    {
+      model: "claude-implicit-medium",
+      supportedReasoningEfforts: ["medium"],
+      defaultReasoningEffort: "medium",
+      implicitReasoningDefault: true,
+    },
+  ])
+
+  const response = await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "claude-implicit-medium:high",
+      messages: [{ role: "user", content: "Think carefully." }],
+      reasoning_effort: "high",
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPayload?.model).toBe("claude-implicit-medium")
+  expect(
+    (lastUpstreamPayload as Record<string, unknown> | undefined)
+      ?.reasoning_effort,
+  ).toBeUndefined()
 })

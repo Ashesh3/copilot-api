@@ -120,6 +120,7 @@ export function getDashboardPage(): string {
   <a href="#flags" data-section="flags" onclick="navigate('flags')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg><span class="tip">Feature Flags</span></a>
   <a href="#replacements" data-section="replacements" onclick="navigate('replacements')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg><span class="tip">Replacements</span></a>
   <a href="#model-redirects" data-section="model-redirects" onclick="navigate('model-redirects')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h13"/><path d="M16 6l6 6-6 6"/><path d="M3 6v12"/></svg><span class="tip">Model Redirects</span></a>
+  <a href="#model-settings" data-section="model-settings" onclick="navigate('model-settings')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 8h10"/><path d="M7 12h4"/><path d="M13 12h4"/><path d="M7 16h10"/></svg><span class="tip">Model Settings</span></a>
   <a href="#model-routing" data-section="model-routing" onclick="navigate('model-routing')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20"/><path d="M2 12h20"/><path d="M4 4h6v6H4z"/><path d="M14 14h6v6h-6z"/></svg><span class="tip">Model Routing</span></a>
   <a href="#usage" data-section="usage" onclick="navigate('usage')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg><span class="tip">Usage</span></a>
   <div class="spacer"></div>
@@ -129,6 +130,7 @@ export function getDashboardPage(): string {
   <a href="#overview" data-section="overview" onclick="navigate('overview')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg><span class="nav-label">Overview</span></a>
   <a href="#sessions" data-section="sessions" onclick="navigate('sessions')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg><span class="nav-label">Sessions</span></a>
   <a href="#flags" data-section="flags" onclick="navigate('flags')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg><span class="nav-label">Flags</span></a>
+  <a href="#model-settings" data-section="model-settings" onclick="navigate('model-settings')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 8h10"/><path d="M7 12h4"/><path d="M13 12h4"/><path d="M7 16h10"/></svg><span class="nav-label">Models</span></a>
   <a href="#model-routing" data-section="model-routing" onclick="navigate('model-routing')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20"/><path d="M2 12h20"/><path d="M4 4h6v6H4z"/><path d="M14 14h6v6h-6z"/></svg><span class="nav-label">Routing</span></a>
   <a href="#usage" data-section="usage" onclick="navigate('usage')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg><span class="nav-label">Usage</span></a>
   <a href="#settings" data-section="settings" onclick="navigate('settings')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span class="nav-label">Settings</span></a>
@@ -139,7 +141,8 @@ export function getDashboardPage(): string {
   <div class="section" id="sec-environments"><div class="section-header"><h2>Environments</h2></div><div id="environments-content"></div></div>
   <div class="section" id="sec-flags"><div class="section-header"><h2>Feature Flags</h2></div><div id="flags-content"></div><div class="form-row" id="flag-form"><input class="form-input mono" name="flag-name" placeholder="flag_name" style="flex:2;min-width:180px"><input class="form-input" name="flag-value" placeholder="true" style="flex:1;min-width:100px"><button class="btn btn-primary" onclick="addFlag()">Add</button></div></div>
   <div class="section" id="sec-replacements"><div class="section-header"><h2>Replacements</h2></div><div id="replacements-content"></div><div class="form-row" id="replacement-form"><input class="form-input" name="repl-name" placeholder="Name (optional)" style="min-width:120px"><input class="form-input mono" name="repl-pattern" placeholder="Pattern" style="flex:2;min-width:140px"><input class="form-input" name="repl-replacement" placeholder="Replacement" style="flex:2;min-width:140px"><label class="checkbox-label"><input type="checkbox" name="repl-regex"> Regex</label><button class="btn btn-primary" onclick="addReplacement()">Add</button></div></div>
-  <div class="section" id="sec-model-redirects"><div class="section-header"><h2>Model Redirects</h2><span class="badge badge-gray">Silent - clients see the original model</span></div><div id="model-redirects-content"></div><div class="form-row" id="model-redirect-form"><input class="form-input" name="mr-name" placeholder="Name (optional)" style="min-width:120px"><input class="form-input mono" name="mr-source" placeholder="Source model (e.g. claude-opus-4.7-1m)" style="flex:2;min-width:200px"><select class="form-input" name="mr-source-effort"><option value="all">All effort levels</option><option value="default">Default/no effort</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select><input class="form-input mono" name="mr-target" placeholder="Target model (e.g. claude-opus-4.6-1m)" style="flex:2;min-width:200px"><select class="form-input" name="mr-target-effort"><option value="">Preserve effort</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select><button class="btn btn-primary" onclick="addModelRedirect()">Add</button></div></div>
+  <div class="section" id="sec-model-redirects"><div class="section-header"><h2>Model Redirects</h2><span class="badge badge-gray">Silent - clients see the original model</span></div><div id="model-redirects-content"></div><div class="form-row" id="model-redirect-form"><input class="form-input" name="mr-name" placeholder="Name (optional)" style="min-width:120px"><input class="form-input mono" name="mr-source" placeholder="Source model" style="flex:2;min-width:200px"><select class="form-input" name="mr-source-effort"><option value="all">All effort levels</option><option value="default">Default/no effort</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select><input class="form-input mono" name="mr-target" placeholder="Target model" style="flex:2;min-width:200px"><select class="form-input" name="mr-target-effort"><option value="">Preserve effort</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select><button class="btn btn-primary" onclick="addModelRedirect()">Add</button></div></div>
+  <div class="section" id="sec-model-settings"><div class="section-header"><h2>Model Settings</h2><span class="badge badge-gray">Reasoning overrides</span></div><div id="model-settings-content"></div><div class="form-row" id="model-settings-form"><input class="form-input mono" name="ms-model" placeholder="Model ID" style="flex:2;min-width:220px"><select class="form-input" name="ms-efforts" multiple size="4" style="min-width:140px"><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option></select><select class="form-input" name="ms-default"><option value="">Default effort</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option></select><label class="checkbox-label"><input type="checkbox" name="ms-implicit"> Implicit default</label><label class="checkbox-label"><input type="checkbox" name="ms-virtual"> Show variants</label><button class="btn btn-primary" onclick="addModelSettings()">Save</button></div></div>
   <div class="section" id="sec-model-routing"><div class="section-header"><h2>Model Routing</h2><span class="badge badge-gray" id="model-routing-count">0 models</span><input class="form-input model-filter" id="model-routing-filter" placeholder="Filter models" oninput="renderModelRouting()"></div><div id="model-routing-content"></div></div>
   <div class="section" id="sec-usage"><div class="section-header"><h2>Usage</h2></div><div id="usage-content"></div></div>
   <div class="section" id="sec-settings"><div class="section-header"><h2>Settings</h2></div><div id="settings-content"></div></div>
@@ -154,6 +157,8 @@ var flagsData = {}
 var replacementsData = []
 var modelRedirectsData = []
 var editingModelRedirectId = null
+var modelSettingsData = []
+var editingModelSettingsModel = null
 var modelRoutingData = { accounts: [], models: [], multiToken: false }
 
 function apiFetch(method, path, body) {
@@ -204,7 +209,7 @@ function doLogin() {
 }
 
 function navigate(section) {
-  var sections = ['overview','sessions','environments','flags','replacements','model-redirects','model-routing','usage','settings']
+  var sections = ['overview','sessions','environments','flags','replacements','model-redirects','model-settings','model-routing','usage','settings']
   if (sections.indexOf(section) === -1) section = 'overview'
   Object.keys(refreshTimers).forEach(function(k) { clearInterval(refreshTimers[k]); delete refreshTimers[k] })
   Object.keys(eventTimers).forEach(function(k) { clearInterval(eventTimers[k]); delete eventTimers[k] })
@@ -218,7 +223,7 @@ function navigate(section) {
 function loadSection(section) {
   switch (section) {
     case 'overview': loadOverview(); break; case 'sessions': loadSessions(); break; case 'environments': loadEnvironments(); break
-    case 'flags': loadFlags(); break; case 'replacements': loadReplacements(); break; case 'model-redirects': loadModelRedirects(); break; case 'model-routing': loadModelRouting(); break; case 'usage': loadUsage(); break; case 'settings': loadSettings(); break
+    case 'flags': loadFlags(); break; case 'replacements': loadReplacements(); break; case 'model-redirects': loadModelRedirects(); break; case 'model-settings': loadModelSettings(); break; case 'model-routing': loadModelRouting(); break; case 'usage': loadUsage(); break; case 'settings': loadSettings(); break
   }
 }
 
@@ -425,7 +430,7 @@ function conflictLabel(conflicts) {
   return '<span class="badge badge-red" title="Conflicts with: ' + esc(names) + '">' + conflicts.length + ' conflict' + (conflicts.length === 1 ? '' : 's') + '</span>'
 }
 function renderModelRedirects() {
-  if (!modelRedirectsData || modelRedirectsData.length === 0) { document.getElementById('model-redirects-content').innerHTML = '<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 12h13"/><path d="M16 6l6 6-6 6"/><path d="M3 6v12"/></svg><p>No model redirects configured.</p><p style="font-size:0.8rem;margin-top:6px">Add a redirect to silently route a requested model to another (e.g. claude-opus-4.7 to claude-opus-4.6).</p></div>'; return }
+  if (!modelRedirectsData || modelRedirectsData.length === 0) { document.getElementById('model-redirects-content').innerHTML = '<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 12h13"/><path d="M16 6l6 6-6 6"/><path d="M3 6v12"/></svg><p>No model redirects configured.</p><p style="font-size:0.8rem;margin-top:6px">Add a redirect to silently route one requested model to another.</p></div>'; return }
   var html = '<div class="table-scroll"><table><thead><tr><th>Order</th><th>Name</th><th>Source</th><th></th><th>Target</th><th>Conflicts</th><th>Enabled</th><th>Actions</th></tr></thead><tbody>'
   modelRedirectsData.forEach(function(r, index) {
     if (editingModelRedirectId === r.id) {
@@ -480,6 +485,79 @@ function addModelRedirect() {
   if (!src || !tgt) { showToast('Source and target models are required', 'error'); return }
   var body = { sourceModel: src, sourceEffort: srcEffortEl.value, targetModel: tgt, targetEffort: tgtEffortEl.value || undefined, name: nameEl.value.trim() || undefined }
   apiFetch('POST', '/dashboard/api/model-redirects', body).then(function(r) { if (r.ok) { nameEl.value = ''; srcEl.value = ''; srcEffortEl.value = 'all'; tgtEl.value = ''; tgtEffortEl.value = ''; showToast('Added', 'success'); loadModelRedirects() } else r.json().catch(function() { return {} }).then(function(d) { showToast(d.error || 'Failed', 'error') }) }).catch(function() { showToast('Failed to add', 'error') })
+}
+
+function loadModelSettings() {
+  apiFetch('GET', '/dashboard/api/model-settings').then(function(r) { if (r.ok) return r.json() }).then(function(d) { if (d) { modelSettingsData = d; renderModelSettings() } }).catch(function() { showToast('Failed to load model settings', 'error') })
+}
+function selectedOptions(selectEl) {
+  return Array.prototype.slice.call(selectEl.options).filter(function(o) { return o.selected }).map(function(o) { return o.value })
+}
+function effortListLabel(efforts) {
+  if (!efforts || efforts.length === 0) return '<span class="badge badge-gray">not set</span>'
+  return efforts.map(function(e) { return '<span class="badge badge-blue">' + esc(e) + '</span>' }).join(' ')
+}
+function boolBadge(value) {
+  if (value === true) return '<span class="bool-yes">Yes</span>'
+  if (value === false) return '<span class="bool-no">No</span>'
+  return '<span class="badge badge-gray">not set</span>'
+}
+function effortMultiSelect(name, values) {
+  var selected = values || []
+  return '<select class="form-input" name="' + name + '" multiple size="4" style="min-width:130px">' + optionHtml('low', 'low', selected.indexOf('low') !== -1 ? 'low' : '') + optionHtml('medium', 'medium', selected.indexOf('medium') !== -1 ? 'medium' : '') + optionHtml('high', 'high', selected.indexOf('high') !== -1 ? 'high' : '') + optionHtml('xhigh', 'xhigh', selected.indexOf('xhigh') !== -1 ? 'xhigh' : '') + '</select>'
+}
+function defaultEffortSelect(name, value) {
+  var selected = value || ''
+  return '<select class="form-input" name="' + name + '">' + optionHtml('', 'Default effort', selected) + optionHtml('low', 'low', selected) + optionHtml('medium', 'medium', selected) + optionHtml('high', 'high', selected) + optionHtml('xhigh', 'xhigh', selected) + '</select>'
+}
+function renderModelSettings() {
+  var content = document.getElementById('model-settings-content')
+  if (!modelSettingsData || modelSettingsData.length === 0) { content.innerHTML = '<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 8h10"/><path d="M7 12h4"/><path d="M13 12h4"/><path d="M7 16h10"/></svg><p>No per-model settings configured.</p></div>'; return }
+  var html = '<div class="table-scroll"><table><thead><tr><th>Model</th><th>Supported Efforts</th><th>Default</th><th>Implicit Default</th><th>Virtual Variants</th><th>Actions</th></tr></thead><tbody>'
+  modelSettingsData.forEach(function(s) {
+    if (editingModelSettingsModel === s.model) {
+      html += '<tr id="model-settings-edit-' + esc(s.model) + '"><td><div class="mono" style="font-size:12px">' + esc(s.model) + '</div></td>'
+      html += '<td>' + effortMultiSelect('ms-edit-efforts', s.supportedReasoningEfforts || []) + '</td><td>' + defaultEffortSelect('ms-edit-default', s.defaultReasoningEffort) + '</td>'
+      html += '<td><label class="checkbox-label"><input type="checkbox" name="ms-edit-implicit"' + (s.implicitReasoningDefault === true ? ' checked' : '') + '> Enabled</label></td>'
+      html += '<td><label class="checkbox-label"><input type="checkbox" name="ms-edit-virtual"' + (s.exposeVirtualReasoningModels === true ? ' checked' : '') + '> Show</label></td>'
+      html += '<td style="white-space:nowrap"><button class="btn btn-primary" style="font-size:0.78rem;padding:4px 10px" onclick="saveModelSettings(&quot;' + esc(s.model) + '&quot;)">Save</button> <button class="btn" style="font-size:0.78rem;padding:4px 10px" onclick="cancelModelSettingsEdit()">Cancel</button></td></tr>'
+      return
+    }
+    html += '<tr><td><div class="model-name mono">' + esc(s.model) + '</div></td><td>' + effortListLabel(s.supportedReasoningEfforts) + '</td><td>' + (s.defaultReasoningEffort ? '<span class="badge badge-purple">' + esc(s.defaultReasoningEffort) + '</span>' : '<span class="badge badge-gray">not set</span>') + '</td><td>' + boolBadge(s.implicitReasoningDefault) + '</td><td>' + boolBadge(s.exposeVirtualReasoningModels) + '</td>'
+    html += '<td style="white-space:nowrap"><button class="btn" style="font-size:0.78rem;padding:4px 10px" onclick="editModelSettings(&quot;' + esc(s.model) + '&quot;)">Edit</button> <button class="btn btn-danger" style="font-size:0.78rem;padding:4px 10px" onclick="deleteModelSettings(&quot;' + esc(s.model) + '&quot;)">Delete</button></td></tr>'
+  })
+  html += '</tbody></table></div>'
+  content.innerHTML = html
+}
+function editModelSettings(model) { editingModelSettingsModel = model; renderModelSettings() }
+function cancelModelSettingsEdit() { editingModelSettingsModel = null; renderModelSettings() }
+function modelSettingsBody(model, effortsEl, defaultEl, implicitEl, virtualEl) {
+  var efforts = selectedOptions(effortsEl)
+  return { model: model, supportedReasoningEfforts: efforts, defaultReasoningEffort: defaultEl.value || null, implicitReasoningDefault: implicitEl.checked, exposeVirtualReasoningModels: virtualEl.checked }
+}
+function saveModelSettings(model) {
+  var row = document.getElementById('model-settings-edit-' + model)
+  if (!row) return
+  var body = modelSettingsBody(model, row.querySelector('select[name="ms-edit-efforts"]'), row.querySelector('select[name="ms-edit-default"]'), row.querySelector('input[name="ms-edit-implicit"]'), row.querySelector('input[name="ms-edit-virtual"]'))
+  if (body.supportedReasoningEfforts.length === 0) { showToast('Select at least one supported effort', 'error'); return }
+  apiFetch('POST', '/dashboard/api/model-settings', body).then(function(r) { if (r.ok) { editingModelSettingsModel = null; showToast('Saved', 'success'); loadModelSettings() } else r.json().catch(function() { return {} }).then(function(d) { showToast(d.error || 'Failed to save', 'error') }) }).catch(function() { showToast('Failed to save', 'error') })
+}
+function deleteModelSettings(model) {
+  if (!confirm('Delete settings for ' + model + '?')) return
+  apiFetch('DELETE', '/dashboard/api/model-settings/' + encodeURIComponent(model)).then(function(r) { if (r.ok) { showToast('Deleted', 'success'); loadModelSettings() } else showToast('Failed to delete', 'error') }).catch(function() { showToast('Failed to delete', 'error') })
+}
+function addModelSettings() {
+  var form = document.getElementById('model-settings-form')
+  var modelEl = form.querySelector('input[name="ms-model"]')
+  var effortsEl = form.querySelector('select[name="ms-efforts"]')
+  var defaultEl = form.querySelector('select[name="ms-default"]')
+  var implicitEl = form.querySelector('input[name="ms-implicit"]')
+  var virtualEl = form.querySelector('input[name="ms-virtual"]')
+  var model = modelEl.value.trim()
+  if (!model) { showToast('Model ID is required', 'error'); return }
+  var body = modelSettingsBody(model, effortsEl, defaultEl, implicitEl, virtualEl)
+  if (body.supportedReasoningEfforts.length === 0) { showToast('Select at least one supported effort', 'error'); return }
+  apiFetch('POST', '/dashboard/api/model-settings', body).then(function(r) { if (r.ok) { modelEl.value = ''; defaultEl.value = ''; implicitEl.checked = false; virtualEl.checked = false; Array.prototype.forEach.call(effortsEl.options, function(o) { o.selected = false }); showToast('Saved', 'success'); loadModelSettings() } else r.json().catch(function() { return {} }).then(function(d) { showToast(d.error || 'Failed to save', 'error') }) }).catch(function() { showToast('Failed to save', 'error') })
 }
 
 function loadModelRouting() {

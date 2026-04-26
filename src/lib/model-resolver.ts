@@ -6,7 +6,6 @@
  *       "gpt-4-1" -> "gpt-4.1"
  *       "gpt-5-1-codex" -> "gpt-5.1-codex"
  *       "claude-opus-4.6-1m" -> "claude-opus-4.6-1m" (preserved)
- *       "claude-opus-4.7-1m-internal" -> "claude-opus-4.7-1m-internal" (preserved)
  *       "gpt-4o-mini-2024-07-18" -> "gpt-4o-mini-2024-07-18" (date preserved)
  *       "gpt-4.1-2025-04-14" -> "gpt-4.1-2025-04-14" (date preserved)
  */

@@ -1,17 +1,23 @@
 import type { Model } from "~/services/copilot/get-models"
 
+import { getModelSettings } from "~/lib/model-settings"
+
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh"
 
 interface ModelReasoningConfig {
   supportedEfforts: Array<ReasoningEffort>
   defaultEffort: ReasoningEffort
+  implicitReasoningDefault?: boolean
+  exposeVirtualReasoningModels?: boolean
 }
 
 /**
- * Hardcoded reasoning config per model, derived from Copilot CLI v0.0.414.
+ * Default reasoning config per public model, derived from Copilot CLI v0.0.414.
  * Models not in this map do not support per-request reasoning effort control.
  */
-const MODEL_REASONING_CONFIG: Partial<Record<string, ModelReasoningConfig>> = {
+const DEFAULT_MODEL_REASONING_CONFIG: Partial<
+  Record<string, ModelReasoningConfig>
+> = {
   "claude-sonnet-4.6": {
     supportedEfforts: ["low", "medium", "high"],
     defaultEffort: "medium",
@@ -98,18 +104,10 @@ export function parseModelSuffix(model: string): ParsedModel {
   }
   const effort = EFFORT_ALIASES[potentialEffort]
 
-  const config = MODEL_REASONING_CONFIG[potentialBase]
-
-  if (!config) {
-    return { baseModel: potentialBase, reasoningEffort: effort }
+  return {
+    baseModel: potentialBase,
+    reasoningEffort: normalizeReasoningEffortForModel(potentialBase, effort),
   }
-
-  if (!config.supportedEfforts.includes(effort)) {
-    // Effort not supported for this model — use default for that model
-    return { baseModel: potentialBase, reasoningEffort: config.defaultEffort }
-  }
-
-  return { baseModel: potentialBase, reasoningEffort: effort }
 }
 
 /**
@@ -118,7 +116,82 @@ export function parseModelSuffix(model: string): ParsedModel {
 export function getModelReasoningConfig(
   model: string,
 ): ModelReasoningConfig | undefined {
-  return MODEL_REASONING_CONFIG[model]
+  const defaults = DEFAULT_MODEL_REASONING_CONFIG[model]
+  const settings = getModelSettings(model)
+
+  if (!defaults && !settings) return undefined
+
+  return buildModelReasoningConfig(defaults, settings)
+}
+
+function buildModelReasoningConfig(
+  defaults: ModelReasoningConfig | undefined,
+  settings: ReturnType<typeof getModelSettings>,
+): ModelReasoningConfig | undefined {
+  const supportedEfforts = resolveSupportedEfforts(defaults, settings)
+  const configuredDefaultEffort = resolveDefaultEffort(
+    supportedEfforts,
+    defaults,
+    settings,
+  )
+
+  if (!supportedEfforts || !configuredDefaultEffort) return undefined
+
+  const defaultEffort =
+    supportedEfforts.includes(configuredDefaultEffort) ?
+      configuredDefaultEffort
+    : supportedEfforts[0]
+
+  return {
+    supportedEfforts,
+    defaultEffort,
+    implicitReasoningDefault:
+      settings?.implicitReasoningDefault ?? defaults?.implicitReasoningDefault,
+    exposeVirtualReasoningModels:
+      settings?.exposeVirtualReasoningModels
+      ?? defaults?.exposeVirtualReasoningModels,
+  }
+}
+
+function resolveSupportedEfforts(
+  defaults: ModelReasoningConfig | undefined,
+  settings: ReturnType<typeof getModelSettings>,
+): Array<ReasoningEffort> | undefined {
+  const supportedEfforts =
+    settings?.supportedReasoningEfforts ?? defaults?.supportedEfforts
+  return supportedEfforts && supportedEfforts.length > 0 ?
+      supportedEfforts
+    : undefined
+}
+
+function resolveDefaultEffort(
+  supportedEfforts: Array<ReasoningEffort> | undefined,
+  defaults: ModelReasoningConfig | undefined,
+  settings: ReturnType<typeof getModelSettings>,
+): ReasoningEffort | undefined {
+  return (
+    settings?.defaultReasoningEffort
+    ?? defaults?.defaultEffort
+    ?? supportedEfforts?.[0]
+  )
+}
+
+export function normalizeReasoningEffortForModel(
+  model: string,
+  effort: ReasoningEffort | undefined,
+): ReasoningEffort | undefined {
+  if (!effort) return undefined
+
+  const config = getModelReasoningConfig(model)
+  if (!config) return effort
+
+  return config.supportedEfforts.includes(effort) ?
+      effort
+    : config.defaultEffort
+}
+
+export function usesImplicitReasoningDefault(model: string): boolean {
+  return getModelReasoningConfig(model)?.implicitReasoningDefault === true
 }
 
 interface VirtualModel {
@@ -141,8 +214,14 @@ export function generateVirtualModels(
   const virtualModels: Array<VirtualModel> = []
 
   for (const model of models) {
-    const config = MODEL_REASONING_CONFIG[model.id]
+    const config = getModelReasoningConfig(model.id)
     if (!config) continue
+    if (
+      config.implicitReasoningDefault
+      && config.exposeVirtualReasoningModels !== true
+    ) {
+      continue
+    }
 
     for (const effort of config.supportedEfforts) {
       virtualModels.push({

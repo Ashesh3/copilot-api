@@ -2,9 +2,9 @@ import { expect, test } from "bun:test"
 
 import { normalizeModelName } from "../src/lib/model-resolver"
 
-test("normalizes anthropic version dashes while preserving 1m internal model IDs", () => {
-  expect(normalizeModelName("claude-opus-4-7")).toBe("claude-opus-4.7")
-  expect(normalizeModelName("claude-opus-4.7-1m-internal")).toBe(
-    "claude-opus-4.7-1m-internal",
+test("normalizes version dashes while preserving 1m internal model IDs", () => {
+  expect(normalizeModelName("claude-example-8-9")).toBe("claude-example-8.9")
+  expect(normalizeModelName("claude-example-8.9-1m-internal")).toBe(
+    "claude-example-8.9-1m-internal",
   )
 })

@@ -19,7 +19,12 @@ import { isAbortError } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
 import { applyModelRedirect } from "~/lib/model-redirect"
 import { normalizeModelName } from "~/lib/model-resolver"
-import { type ReasoningEffort, parseModelSuffix } from "~/lib/model-suffix"
+import {
+  type ReasoningEffort,
+  normalizeReasoningEffortForModel,
+  parseModelSuffix,
+  usesImplicitReasoningDefault,
+} from "~/lib/model-suffix"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { setRequestContext } from "~/lib/request-logger"
 import { state } from "~/lib/state"
@@ -160,11 +165,20 @@ async function resolveGoogleModelRedirect(rawModel: string): Promise<{
 }> {
   const { baseModel, reasoningEffort: suffixEffort } =
     parseModelSuffix(rawModel)
+  const model = normalizeModelName(baseModel)
+  const requestedEffort = normalizeReasoningEffortForModel(model, suffixEffort)
   const redirect = await applyModelRedirect({
-    model: normalizeModelName(baseModel),
-    effort: suffixEffort,
+    model,
+    effort: requestedEffort,
   })
-  return { model: redirect.model, reasoningEffort: redirect.effort }
+  const targetModel = normalizeModelName(redirect.model)
+  return {
+    model: targetModel,
+    reasoningEffort: normalizeReasoningEffortForModel(
+      targetModel,
+      redirect.effort,
+    ),
+  }
 }
 
 export async function handleGoogleAI(c: Context) {
@@ -297,8 +311,12 @@ function applyGoogleReasoningEffort(
   payload: ChatCompletionsPayload,
   effort: ReasoningEffort | undefined,
 ): void {
-  if (!effort) return
-  ;(payload as unknown as Record<string, unknown>).reasoning_effort = effort
+  const extra = payload as unknown as Record<string, unknown>
+  if (!effort || usesImplicitReasoningDefault(payload.model)) {
+    delete extra.reasoning_effort
+    return
+  }
+  extra.reasoning_effort = effort
 }
 
 // ─── ChatCompletions path ───

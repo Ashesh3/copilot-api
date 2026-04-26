@@ -4,6 +4,7 @@ import type { ResponsesPayload } from "../src/services/copilot/create-responses"
 import type { ModelsResponse } from "../src/services/copilot/get-models"
 
 import { setModelRedirectsForTest } from "../src/lib/model-redirect"
+import { setModelSettingsForTest } from "../src/lib/model-settings"
 import { state } from "../src/lib/state"
 import { server } from "../src/server"
 
@@ -40,8 +41,26 @@ const responsesCapableModels: ModelsResponse = {
       },
     },
     {
-      id: "claude-opus-4.6-1m",
-      name: "Claude Opus 4.6 1M",
+      id: "claude-implicit-medium",
+      name: "Claude Implicit Medium",
+      object: "model",
+      preview: false,
+      vendor: "anthropic",
+      version: "1",
+      model_picker_enabled: true,
+      supported_endpoints: ["/responses"],
+      capabilities: {
+        family: "claude",
+        limits: { max_output_tokens: 1024 },
+        object: "model_capabilities",
+        supports: {},
+        tokenizer: "cl100k_base",
+        type: "chat",
+      },
+    },
+    {
+      id: "claude-target-1m",
+      name: "Claude Target 1M",
       object: "model",
       preview: false,
       vendor: "anthropic",
@@ -120,6 +139,7 @@ beforeEach(() => {
   state.manualApprove = false
   state.models = responsesCapableModels
   setModelRedirectsForTest([])
+  setModelSettingsForTest([])
 })
 
 test("preserves output_config.format on the Anthropic responses path", async () => {
@@ -234,10 +254,10 @@ test("defaults reasoning effort to medium on the Anthropic responses path", asyn
 test("redirects Anthropic max output_config effort on the responses path", async () => {
   setModelRedirectsForTest([
     {
-      id: "opus-max",
-      sourceModel: "claude-opus-4.7-1m",
+      id: "source-max",
+      sourceModel: "claude-source-1m",
       sourceEffort: "max",
-      targetModel: "claude-opus-4.6-1m",
+      targetModel: "claude-target-1m",
       targetEffort: "high",
       enabled: true,
     },
@@ -249,7 +269,7 @@ test("redirects Anthropic max output_config effort on the responses path", async
       "content-type": "application/json",
     },
     body: JSON.stringify({
-      model: "claude-opus-4.7-1m",
+      model: "claude-source-1m",
       messages: [{ role: "user", content: "Think carefully." }],
       max_tokens: 32,
       output_config: {
@@ -259,6 +279,37 @@ test("redirects Anthropic max output_config effort on the responses path", async
   })
 
   expect(response.status).toBe(200)
-  expect(lastResponsesPayload?.model).toBe("claude-opus-4.6-1m")
+  expect(lastResponsesPayload?.model).toBe("claude-target-1m")
   expect(lastResponsesPayload?.reasoning?.effort).toBe("high")
+})
+
+test("does not send configurable effort for implicit-default models on the responses path", async () => {
+  setModelSettingsForTest([
+    {
+      model: "claude-implicit-medium",
+      supportedReasoningEfforts: ["medium"],
+      defaultReasoningEffort: "medium",
+      implicitReasoningDefault: true,
+    },
+  ])
+
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "claude-implicit-medium:high",
+      messages: [{ role: "user", content: "Think carefully." }],
+      max_tokens: 32,
+      output_config: {
+        effort: "high",
+      },
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastResponsesPayload?.model).toBe("claude-implicit-medium")
+  expect(lastResponsesPayload?.reasoning?.effort).toBeUndefined()
+  expect(lastResponsesPayload?.reasoning?.summary).toBe("auto")
 })

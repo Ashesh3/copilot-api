@@ -11,6 +11,7 @@ import packageJson from "../package.json" with { type: "json" }
 import { getStoredTokens } from "./lib/accounts-store"
 import { mergeConfigWithDefaults } from "./lib/config"
 import { ensureModelRoutingOverridesLoaded } from "./lib/model-routing"
+import { ensureModelSettingsLoaded } from "./lib/model-settings"
 import { generateVirtualModels } from "./lib/model-suffix"
 import { ensurePaths, setEnvOnlyTokens } from "./lib/paths"
 import { initProxyFromEnv } from "./lib/proxy"
@@ -221,6 +222,13 @@ async function initializeTokens(options: RunServerOptions): Promise<void> {
   await setupCopilotToken()
   await cacheVSCodeVersion()
   await cacheModels()
+}
+
+async function initializePersistentConfig(): Promise<void> {
+  await ensurePaths()
+  mergeConfigWithDefaults()
+  await ensureModelSettingsLoaded()
+  await ensureModelRoutingOverridesLoaded()
 }
 
 // Combined WebSocket handler that dispatches to voice, responses, or direct-connect based on connection type
@@ -477,9 +485,7 @@ export async function runServer(options: RunServerOptions): Promise<void> {
     Boolean(process.env.GITHUB_TOKENS?.trim()) || Boolean(options.githubToken)
   if (envHasTokens) setEnvOnlyTokens(true)
 
-  await ensurePaths()
-  mergeConfigWithDefaults()
-  await ensureModelRoutingOverridesLoaded()
+  await initializePersistentConfig()
 
   await initializeTokens(options)
 

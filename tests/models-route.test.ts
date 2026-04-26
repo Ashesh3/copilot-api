@@ -2,6 +2,7 @@ import { afterAll, beforeEach, expect, test } from "bun:test"
 
 import type { ModelsResponse } from "../src/services/copilot/get-models"
 
+import { setModelSettingsForTest } from "../src/lib/model-settings"
 import { state } from "../src/lib/state"
 import { server } from "../src/server"
 
@@ -50,6 +51,23 @@ beforeEach(() => {
         },
       },
       {
+        id: "claude-implicit-medium",
+        name: "Claude Implicit Medium",
+        object: "model",
+        preview: false,
+        vendor: "anthropic",
+        version: "1",
+        model_picker_enabled: true,
+        capabilities: {
+          family: "claude",
+          limits: {},
+          object: "model_capabilities",
+          supports: {},
+          tokenizer: "cl100k_base",
+          type: "chat",
+        },
+      },
+      {
         id: "gpt-5-mini",
         name: "GPT-5 Mini",
         object: "model",
@@ -72,6 +90,7 @@ beforeEach(() => {
       },
     ],
   } satisfies ModelsResponse
+  setModelSettingsForTest([])
 })
 
 afterAll(() => {
@@ -94,4 +113,24 @@ test("filters /models to picker-enabled or policy-enabled entries before adding 
   expect(ids).toContain("gpt-5.2:medium")
   expect(ids).not.toContain("gpt-5-mini")
   expect(ids).not.toContain("gpt-5-mini:high")
+})
+
+test("uses model settings to hide virtual variants for implicit reasoning defaults", async () => {
+  setModelSettingsForTest([
+    {
+      model: "claude-implicit-medium",
+      supportedReasoningEfforts: ["medium"],
+      defaultReasoningEffort: "medium",
+      implicitReasoningDefault: true,
+    },
+  ])
+
+  const response = await server.request("/v1/models")
+  const body = (await response.json()) as {
+    data: Array<{ id: string }>
+  }
+  const ids = body.data.map((model) => model.id)
+
+  expect(ids).toContain("claude-implicit-medium")
+  expect(ids).not.toContain("claude-implicit-medium:medium")
 })

@@ -6,36 +6,38 @@ import {
   moveModelRedirect,
   setModelRedirectsForTest,
 } from "../src/lib/model-redirect"
+import { setModelSettingsForTest } from "../src/lib/model-settings"
 import { parseModelSuffix } from "../src/lib/model-suffix"
 
 beforeEach(() => {
   setModelRedirectsForTest([])
+  setModelSettingsForTest([])
 })
 
 test("matches exact reasoning effort and applies target effort override", async () => {
   setModelRedirectsForTest([
     {
-      id: "high-opus",
-      sourceModel: "claude-opus-4.7-1m",
+      id: "high-source",
+      sourceModel: "claude-source-1m",
       sourceEffort: "high",
-      targetModel: "claude-opus-4.6-1m",
+      targetModel: "claude-target-1m",
       targetEffort: "high",
       enabled: true,
     },
   ])
 
   const redirect = await applyModelRedirect({
-    model: "claude-opus-4.7-1m",
+    model: "claude-source-1m",
     effort: "high",
   })
 
   expect(redirect).toMatchObject({
-    model: "claude-opus-4.6-1m",
+    model: "claude-target-1m",
     effort: "high",
     redirected: true,
-    originalModel: "claude-opus-4.7-1m",
+    originalModel: "claude-source-1m",
     originalEffort: "high",
-    ruleId: "high-opus",
+    ruleId: "high-source",
   })
 })
 
@@ -43,19 +45,19 @@ test("all effort catch-all preserves requested effort", async () => {
   setModelRedirectsForTest([
     {
       id: "all-opus",
-      sourceModel: "claude-opus-4.7",
+      sourceModel: "claude-source",
       sourceEffort: "all",
-      targetModel: "claude-opus-4.6",
+      targetModel: "claude-target",
       enabled: true,
     },
   ])
 
   const redirect = await applyModelRedirect({
-    model: "claude-opus-4.7",
+    model: "claude-source",
     effort: "medium",
   })
 
-  expect(redirect.model).toBe("claude-opus-4.6")
+  expect(redirect.model).toBe("claude-target")
   expect(redirect.effort).toBe("medium")
 })
 
@@ -89,20 +91,20 @@ test("max aliases normalize to xhigh for matching and target effort", async () =
   setModelRedirectsForTest([
     {
       id: "max-opus",
-      sourceModel: "claude-opus-4.7-1m",
+      sourceModel: "claude-source-1m",
       sourceEffort: "max",
-      targetModel: "claude-opus-4.6-1m",
+      targetModel: "claude-target-1m",
       targetEffort: "max",
       enabled: true,
     },
   ])
 
   const redirect = await applyModelRedirect({
-    model: "claude-opus-4.7-1m",
+    model: "claude-source-1m",
     effort: "xhigh",
   })
 
-  expect(redirect.model).toBe("claude-opus-4.6-1m")
+  expect(redirect.model).toBe("claude-target-1m")
   expect(redirect.effort).toBe("xhigh")
 })
 
@@ -110,38 +112,38 @@ test("first matching rule wins until precedence is changed", async () => {
   setModelRedirectsForTest([
     {
       id: "catch-all",
-      sourceModel: "claude-opus-4.7",
+      sourceModel: "claude-source",
       sourceEffort: "all",
-      targetModel: "claude-opus-4.6-medium",
+      targetModel: "claude-target-medium",
       targetEffort: "medium",
       enabled: true,
     },
     {
       id: "high-rule",
-      sourceModel: "claude-opus-4.7",
+      sourceModel: "claude-source",
       sourceEffort: "high",
-      targetModel: "claude-opus-4.6-high",
+      targetModel: "claude-target-high",
       targetEffort: "high",
       enabled: true,
     },
   ])
 
   const initialRedirect = await applyModelRedirect({
-    model: "claude-opus-4.7",
+    model: "claude-source",
     effort: "high",
   })
   expect(initialRedirect).toMatchObject({
-    model: "claude-opus-4.6-medium",
+    model: "claude-target-medium",
   })
 
   await moveModelRedirect("high-rule", "up")
 
   const reorderedRedirect = await applyModelRedirect({
-    model: "claude-opus-4.7",
+    model: "claude-source",
     effort: "high",
   })
   expect(reorderedRedirect).toMatchObject({
-    model: "claude-opus-4.6-high",
+    model: "claude-target-high",
   })
 })
 
@@ -150,22 +152,22 @@ test("does not report conflicts when specific effort rules precede catch-all fal
     {
       id: "medium-rule",
       name: "Medium",
-      sourceModel: "claude-opus-4.7",
+      sourceModel: "claude-source",
       sourceEffort: "medium",
-      targetModel: "claude-opus-4.7-1m-internal",
+      targetModel: "claude-implicit-medium",
       enabled: true,
     },
     {
       id: "all-rule",
       name: "All",
-      sourceModel: "claude-opus-4.7",
+      sourceModel: "claude-source",
       sourceEffort: "all",
-      targetModel: "claude-opus-4.6-1m",
+      targetModel: "claude-target-1m",
       enabled: true,
     },
     {
       id: "disabled-rule",
-      sourceModel: "claude-opus-4.7",
+      sourceModel: "claude-source",
       sourceEffort: "medium",
       targetModel: "ignored",
       enabled: false,
@@ -186,17 +188,17 @@ test("reports conflicts when earlier rules fully shadow a later rule", async () 
     {
       id: "all-rule",
       name: "All",
-      sourceModel: "claude-opus-4.7",
+      sourceModel: "claude-source",
       sourceEffort: "all",
-      targetModel: "claude-opus-4.6",
+      targetModel: "claude-target",
       enabled: true,
     },
     {
       id: "high-rule",
       name: "High",
-      sourceModel: "claude-opus-4.7",
+      sourceModel: "claude-source",
       sourceEffort: "high",
-      targetModel: "claude-opus-4.6-high",
+      targetModel: "claude-target-high",
       enabled: true,
     },
   ])
@@ -210,8 +212,24 @@ test("reports conflicts when earlier rules fully shadow a later rule", async () 
 })
 
 test("parses max suffixes for unknown models so redirects can match them", () => {
-  expect(parseModelSuffix("claude-opus-4.7-1m:max")).toEqual({
-    baseModel: "claude-opus-4.7-1m",
+  expect(parseModelSuffix("claude-source-1m:max")).toEqual({
+    baseModel: "claude-source-1m",
     reasoningEffort: "xhigh",
+  })
+})
+
+test("clamps configurable implicit-default model suffixes to medium", () => {
+  setModelSettingsForTest([
+    {
+      model: "claude-implicit-medium",
+      supportedReasoningEfforts: ["medium"],
+      defaultReasoningEffort: "medium",
+      implicitReasoningDefault: true,
+    },
+  ])
+
+  expect(parseModelSuffix("claude-implicit-medium:high")).toEqual({
+    baseModel: "claude-implicit-medium",
+    reasoningEffort: "medium",
   })
 })

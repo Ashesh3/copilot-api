@@ -3,7 +3,12 @@ import { randomUUID } from "node:crypto"
 
 import { applyModelRedirect } from "~/lib/model-redirect"
 import { normalizeModelName } from "~/lib/model-resolver"
-import { type ReasoningEffort, parseModelSuffix } from "~/lib/model-suffix"
+import {
+  type ReasoningEffort,
+  normalizeReasoningEffortForModel,
+  parseModelSuffix,
+  usesImplicitReasoningDefault,
+} from "~/lib/model-suffix"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { state } from "~/lib/state"
 import { createChatCompletions } from "~/services/copilot/create-chat-completions"
@@ -157,13 +162,21 @@ async function handleResponseCreate(
 
   payload.model = normalizeModelName(baseModel)
   const effectiveEffort = normalizeResponsesReasoning(payload, suffixEffort)
+  const requestedEffort = normalizeReasoningEffortForModel(
+    payload.model,
+    getRedirectReasoningEffort(effectiveEffort),
+  )
   const redirect = await applyModelRedirect({
     model: payload.model,
-    effort: getRedirectReasoningEffort(effectiveEffort),
+    effort: requestedEffort,
   })
   // eslint-disable-next-line require-atomic-updates
   payload.model = normalizeModelName(redirect.model)
-  applyRedirectedResponsesEffort(payload, redirect.effort)
+  const redirectedEffort = normalizeReasoningEffortForModel(
+    payload.model,
+    redirect.effort,
+  )
+  applyRedirectedResponsesEffort(payload, payload.model, redirectedEffort)
 
   useFunctionApplyPatch(payload)
   convertWebSearchTool(payload)
@@ -230,9 +243,17 @@ function getRedirectReasoningEffort(
 
 function applyRedirectedResponsesEffort(
   payload: ResponsesPayload,
+  model: string,
   effort: ReasoningEffort | undefined,
 ): void {
-  if (!effort) return
+  if (!effort) {
+    if (usesImplicitReasoningDefault(model)) delete payload.reasoning
+    return
+  }
+  if (usesImplicitReasoningDefault(model)) {
+    delete payload.reasoning
+    return
+  }
   payload.reasoning =
     payload.reasoning ? { ...payload.reasoning, effort } : { effort }
 }

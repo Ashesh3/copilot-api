@@ -12,7 +12,12 @@ import { isAbortError } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
 import { applyModelRedirect } from "~/lib/model-redirect"
 import { normalizeModelName } from "~/lib/model-resolver"
-import { type ReasoningEffort, parseModelSuffix } from "~/lib/model-suffix"
+import {
+  type ReasoningEffort,
+  normalizeReasoningEffortForModel,
+  parseModelSuffix,
+  usesImplicitReasoningDefault,
+} from "~/lib/model-suffix"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { setRequestContext } from "~/lib/request-logger"
 import { getSentryModelName, shouldRecordAiContent } from "~/lib/sentry"
@@ -212,9 +217,17 @@ function getRedirectReasoningEffort(
 
 function applyRedirectedResponsesEffort(
   payload: ResponsesPayload,
+  model: string,
   effort: ReasoningEffort | undefined,
 ): void {
-  if (!effort) return
+  if (!effort) {
+    if (usesImplicitReasoningDefault(model)) delete payload.reasoning
+    return
+  }
+  if (usesImplicitReasoningDefault(model)) {
+    delete payload.reasoning
+    return
+  }
   payload.reasoning =
     payload.reasoning ? { ...payload.reasoning, effort } : { effort }
 }
@@ -278,15 +291,23 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
 
   payload.model = normalizeModelName(baseModel)
   const effectiveEffort = normalizeResponsesReasoning(payload, suffixEffort)
+  const requestedEffort = normalizeReasoningEffortForModel(
+    payload.model,
+    getRedirectReasoningEffort(effectiveEffort),
+  )
 
   const redirect = await applyModelRedirect({
     model: payload.model,
-    effort: getRedirectReasoningEffort(effectiveEffort),
+    effort: requestedEffort,
   })
   // eslint-disable-next-line require-atomic-updates
   payload.model = normalizeModelName(redirect.model)
-  applyRedirectedResponsesEffort(payload, redirect.effort)
-  const finalEffort = redirect.effort ?? effectiveEffort
+  const redirectedEffort = normalizeReasoningEffortForModel(
+    payload.model,
+    redirect.effort,
+  )
+  applyRedirectedResponsesEffort(payload, payload.model, redirectedEffort)
+  const finalEffort = redirectedEffort ?? effectiveEffort
 
   // Fallback: if the base model has no routable account but the -1m variant
   // does, auto-route to it. The merged model list may include models that no
