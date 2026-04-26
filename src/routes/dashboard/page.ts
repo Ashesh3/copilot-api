@@ -87,6 +87,26 @@ export function getDashboardPage(): string {
   .account-toggle-cell .badge { margin-top: 6px }
   .checkbox-label { display: flex; align-items: center; gap: 6px; font-size: 0.85rem; color: #94A3B8; cursor: pointer }
   .checkbox-label input { accent-color: #3B82F6 }
+  .model-settings-layout { display: grid; grid-template-columns: minmax(320px, 480px) minmax(0, 1fr); gap: 18px; align-items: start }
+  .model-settings-panel { background: #111A2E; border: 1px solid #273349; border-radius: 10px; padding: 18px; min-width: 0 }
+  .model-settings-panel h3 { font-size: 0.95rem; margin-bottom: 14px }
+  .field-stack { display: flex; flex-direction: column; gap: 14px }
+  .field-label { display: block; color: #CBD5E1; font-size: 0.78rem; font-weight: 600; margin-bottom: 7px }
+  .field-label .optional { color: #64748B; font-weight: 500 }
+  .full-input { width: 100%; min-height: 38px }
+  .effort-picker { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px }
+  .choice-pill { position: relative; display: block; cursor: pointer }
+  .choice-pill input { position: absolute; opacity: 0; pointer-events: none }
+  .choice-pill span { display: flex; align-items: center; justify-content: center; min-height: 36px; border: 1px solid #273349; border-radius: 8px; background: #0F172A; color: #CBD5E1; font-size: 0.82rem; font-weight: 600 }
+  .choice-pill input:checked + span { border-color: #3B82F6; background: #1D4ED826; color: #DBEAFE }
+  .settings-options { display: grid; grid-template-columns: 1fr 1fr; gap: 10px }
+  .switch-row { display: flex; align-items: center; gap: 10px; min-height: 42px; padding: 10px 12px; border: 1px solid #273349; border-radius: 8px; background: #0F172A; color: #CBD5E1; font-size: 0.84rem; cursor: pointer }
+  .switch-row input { accent-color: #3B82F6 }
+  .model-settings-actions { display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; padding-top: 2px }
+  .model-settings-actions .btn { min-width: 120px }
+  .model-settings-list .empty-state { padding: 28px 16px }
+  .model-settings-list .empty-state svg { width: 36px; height: 36px; margin-bottom: 10px }
+  .model-settings-edit { display: flex; flex-direction: column; gap: 10px; min-width: 300px }
   .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0; margin-top: 12px; background: #1B2336; border: 1px solid #272F42; border-radius: 10px; overflow: hidden }
   .setting-row { display: contents }
   .setting-key { padding: 14px 18px; font-size: 0.85rem; color: #94A3B8; border-bottom: 1px solid #272F42 }
@@ -103,7 +123,8 @@ export function getDashboardPage(): string {
   .empty-state svg { width: 48px; height: 48px; margin-bottom: 16px; opacity: 0.4 } .empty-state p { margin-top: 8px; font-size: 0.9rem }
   .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch }
   @media (max-width: 1023px) { .stat-grid { grid-template-columns: repeat(2, 1fr) } }
-  @media (max-width: 767px) { .sidebar { display: none } .main { margin-left: 0; padding: 16px; padding-bottom: 90px } .stat-grid { grid-template-columns: 1fr } .settings-grid { grid-template-columns: 1fr } .setting-row { display: flex; flex-direction: column } .bottom-nav { display: flex !important } .form-row { flex-direction: column; align-items: stretch } .form-row .form-input { width: 100% !important; min-width: 0 !important; flex: none !important } .form-row .checkbox-label { justify-content: flex-start } .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 0 -16px; padding: 0 16px } .section-header h2 { font-size: 1.1rem } }
+  @media (max-width: 1023px) { .model-settings-layout { grid-template-columns: 1fr } }
+  @media (max-width: 767px) { .sidebar { display: none } .main { margin-left: 0; padding: 16px; padding-bottom: 90px } .stat-grid { grid-template-columns: 1fr } .settings-grid { grid-template-columns: 1fr } .setting-row { display: flex; flex-direction: column } .bottom-nav { display: flex !important } .form-row { flex-direction: column; align-items: stretch } .form-row .form-input { width: 100% !important; min-width: 0 !important; flex: none !important } .form-row .checkbox-label { justify-content: flex-start } .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 0 -16px; padding: 0 16px } .section-header h2 { font-size: 1.1rem } .effort-picker { grid-template-columns: repeat(2, minmax(0, 1fr)) } .settings-options { grid-template-columns: 1fr } .model-settings-actions { justify-content: stretch } .model-settings-actions .btn { flex: 1 } }
   .bottom-nav { display: none; position: fixed; bottom: 0; left: 0; right: 0; background: #1E293B; border-top: 1px solid #334155; justify-content: space-around; padding: 8px 0; padding-bottom: max(8px, env(safe-area-inset-bottom)); z-index: 100 }
   .bottom-nav a { display: flex; flex-direction: column; align-items: center; gap: 3px; color: #94A3B8; text-decoration: none; font-size: 10px; padding: 4px 6px; border-radius: 6px; min-width: 44px; min-height: 44px; justify-content: center }
   .bottom-nav a.active { color: #22C55E } .bottom-nav a svg { width: 20px; height: 20px }
@@ -142,7 +163,7 @@ export function getDashboardPage(): string {
   <div class="section" id="sec-flags"><div class="section-header"><h2>Feature Flags</h2></div><div id="flags-content"></div><div class="form-row" id="flag-form"><input class="form-input mono" name="flag-name" placeholder="flag_name" style="flex:2;min-width:180px"><input class="form-input" name="flag-value" placeholder="true" style="flex:1;min-width:100px"><button class="btn btn-primary" onclick="addFlag()">Add</button></div></div>
   <div class="section" id="sec-replacements"><div class="section-header"><h2>Replacements</h2></div><div id="replacements-content"></div><div class="form-row" id="replacement-form"><input class="form-input" name="repl-name" placeholder="Name (optional)" style="min-width:120px"><input class="form-input mono" name="repl-pattern" placeholder="Pattern" style="flex:2;min-width:140px"><input class="form-input" name="repl-replacement" placeholder="Replacement" style="flex:2;min-width:140px"><label class="checkbox-label"><input type="checkbox" name="repl-regex"> Regex</label><button class="btn btn-primary" onclick="addReplacement()">Add</button></div></div>
   <div class="section" id="sec-model-redirects"><div class="section-header"><h2>Model Redirects</h2><span class="badge badge-gray">Silent - clients see the original model</span></div><div id="model-redirects-content"></div><div class="form-row" id="model-redirect-form"><input class="form-input" name="mr-name" placeholder="Name (optional)" style="min-width:120px"><input class="form-input mono" name="mr-source" placeholder="Source model" style="flex:2;min-width:200px"><select class="form-input" name="mr-source-effort"><option value="all">All effort levels</option><option value="default">Default/no effort</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select><input class="form-input mono" name="mr-target" placeholder="Target model" style="flex:2;min-width:200px"><select class="form-input" name="mr-target-effort"><option value="">Preserve effort</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select><button class="btn btn-primary" onclick="addModelRedirect()">Add</button></div></div>
-  <div class="section" id="sec-model-settings"><div class="section-header"><h2>Model Settings</h2><span class="badge badge-gray">Reasoning overrides</span></div><div id="model-settings-content"></div><div class="form-row" id="model-settings-form"><input class="form-input mono" name="ms-model" placeholder="Model ID" style="flex:2;min-width:220px"><select class="form-input" name="ms-efforts" multiple size="4" style="min-width:140px"><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option></select><select class="form-input" name="ms-default"><option value="">Default effort</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option></select><label class="checkbox-label"><input type="checkbox" name="ms-implicit"> Implicit default</label><label class="checkbox-label"><input type="checkbox" name="ms-virtual"> Show variants</label><button class="btn btn-primary" onclick="addModelSettings()">Save</button></div></div>
+  <div class="section" id="sec-model-settings"><div class="section-header"><h2>Model Settings</h2><span class="badge badge-gray">Reasoning overrides</span></div><div class="model-settings-layout"><div class="model-settings-panel"><h3>Add setting</h3><div class="field-stack" id="model-settings-form"><label><span class="field-label">Model ID</span><input class="form-input mono full-input" name="ms-model" placeholder="provider-model-id" autocomplete="off"></label><div><span class="field-label">Supported efforts</span><div class="effort-picker" data-efforts="ms-efforts"><label class="choice-pill"><input type="checkbox" name="ms-effort" value="low"><span>low</span></label><label class="choice-pill"><input type="checkbox" name="ms-effort" value="medium" checked><span>medium</span></label><label class="choice-pill"><input type="checkbox" name="ms-effort" value="high"><span>high</span></label><label class="choice-pill"><input type="checkbox" name="ms-effort" value="xhigh"><span>xhigh</span></label></div></div><label><span class="field-label">Default effort</span><select class="form-input full-input" name="ms-default"><option value="">None</option><option value="low">low</option><option value="medium" selected>medium</option><option value="high">high</option><option value="xhigh">xhigh</option></select></label><div class="settings-options"><label class="switch-row"><input type="checkbox" name="ms-implicit" checked><span>Implicit default</span></label><label class="switch-row"><input type="checkbox" name="ms-virtual"><span>Show variants</span></label></div><div class="model-settings-actions"><button class="btn" onclick="applyImplicitMediumPreset()">Implicit medium</button><button class="btn btn-primary" onclick="addModelSettings()">Save setting</button></div></div></div><div class="model-settings-panel model-settings-list"><h3>Configured models</h3><div id="model-settings-content"></div></div></div></div>
   <div class="section" id="sec-model-routing"><div class="section-header"><h2>Model Routing</h2><span class="badge badge-gray" id="model-routing-count">0 models</span><input class="form-input model-filter" id="model-routing-filter" placeholder="Filter models" oninput="renderModelRouting()"></div><div id="model-routing-content"></div></div>
   <div class="section" id="sec-usage"><div class="section-header"><h2>Usage</h2></div><div id="usage-content"></div></div>
   <div class="section" id="sec-settings"><div class="section-header"><h2>Settings</h2></div><div id="settings-content"></div></div>
@@ -493,6 +514,13 @@ function loadModelSettings() {
 function selectedOptions(selectEl) {
   return Array.prototype.slice.call(selectEl.options).filter(function(o) { return o.selected }).map(function(o) { return o.value })
 }
+function selectedEffortChecks(root) {
+  return Array.prototype.slice.call(root.querySelectorAll('input[name="ms-effort"]')).filter(function(o) { return o.checked }).map(function(o) { return o.value })
+}
+function setEffortChecks(root, efforts) {
+  var selected = efforts || []
+  Array.prototype.forEach.call(root.querySelectorAll('input[name="ms-effort"]'), function(o) { o.checked = selected.indexOf(o.value) !== -1 })
+}
 function effortListLabel(efforts) {
   if (!efforts || efforts.length === 0) return '<span class="badge badge-gray">not set</span>'
   return efforts.map(function(e) { return '<span class="badge badge-blue">' + esc(e) + '</span>' }).join(' ')
@@ -504,7 +532,7 @@ function boolBadge(value) {
 }
 function effortMultiSelect(name, values) {
   var selected = values || []
-  return '<select class="form-input" name="' + name + '" multiple size="4" style="min-width:130px">' + optionHtml('low', 'low', selected.indexOf('low') !== -1 ? 'low' : '') + optionHtml('medium', 'medium', selected.indexOf('medium') !== -1 ? 'medium' : '') + optionHtml('high', 'high', selected.indexOf('high') !== -1 ? 'high' : '') + optionHtml('xhigh', 'xhigh', selected.indexOf('xhigh') !== -1 ? 'xhigh' : '') + '</select>'
+  return '<div class="effort-picker" data-efforts="' + name + '"><label class="choice-pill"><input type="checkbox" name="ms-effort" value="low"' + (selected.indexOf('low') !== -1 ? ' checked' : '') + '><span>low</span></label><label class="choice-pill"><input type="checkbox" name="ms-effort" value="medium"' + (selected.indexOf('medium') !== -1 ? ' checked' : '') + '><span>medium</span></label><label class="choice-pill"><input type="checkbox" name="ms-effort" value="high"' + (selected.indexOf('high') !== -1 ? ' checked' : '') + '><span>high</span></label><label class="choice-pill"><input type="checkbox" name="ms-effort" value="xhigh"' + (selected.indexOf('xhigh') !== -1 ? ' checked' : '') + '><span>xhigh</span></label></div>'
 }
 function defaultEffortSelect(name, value) {
   var selected = value || ''
@@ -532,13 +560,13 @@ function renderModelSettings() {
 function editModelSettings(model) { editingModelSettingsModel = model; renderModelSettings() }
 function cancelModelSettingsEdit() { editingModelSettingsModel = null; renderModelSettings() }
 function modelSettingsBody(model, effortsEl, defaultEl, implicitEl, virtualEl) {
-  var efforts = selectedOptions(effortsEl)
+  var efforts = effortsEl.tagName === 'SELECT' ? selectedOptions(effortsEl) : selectedEffortChecks(effortsEl)
   return { model: model, supportedReasoningEfforts: efforts, defaultReasoningEffort: defaultEl.value || null, implicitReasoningDefault: implicitEl.checked, exposeVirtualReasoningModels: virtualEl.checked }
 }
 function saveModelSettings(model) {
   var row = document.getElementById('model-settings-edit-' + model)
   if (!row) return
-  var body = modelSettingsBody(model, row.querySelector('select[name="ms-edit-efforts"]'), row.querySelector('select[name="ms-edit-default"]'), row.querySelector('input[name="ms-edit-implicit"]'), row.querySelector('input[name="ms-edit-virtual"]'))
+  var body = modelSettingsBody(model, row.querySelector('[data-efforts="ms-edit-efforts"]'), row.querySelector('select[name="ms-edit-default"]'), row.querySelector('input[name="ms-edit-implicit"]'), row.querySelector('input[name="ms-edit-virtual"]'))
   if (body.supportedReasoningEfforts.length === 0) { showToast('Select at least one supported effort', 'error'); return }
   apiFetch('POST', '/dashboard/api/model-settings', body).then(function(r) { if (r.ok) { editingModelSettingsModel = null; showToast('Saved', 'success'); loadModelSettings() } else r.json().catch(function() { return {} }).then(function(d) { showToast(d.error || 'Failed to save', 'error') }) }).catch(function() { showToast('Failed to save', 'error') })
 }
@@ -549,7 +577,7 @@ function deleteModelSettings(model) {
 function addModelSettings() {
   var form = document.getElementById('model-settings-form')
   var modelEl = form.querySelector('input[name="ms-model"]')
-  var effortsEl = form.querySelector('select[name="ms-efforts"]')
+  var effortsEl = form.querySelector('[data-efforts="ms-efforts"]')
   var defaultEl = form.querySelector('select[name="ms-default"]')
   var implicitEl = form.querySelector('input[name="ms-implicit"]')
   var virtualEl = form.querySelector('input[name="ms-virtual"]')
@@ -557,7 +585,14 @@ function addModelSettings() {
   if (!model) { showToast('Model ID is required', 'error'); return }
   var body = modelSettingsBody(model, effortsEl, defaultEl, implicitEl, virtualEl)
   if (body.supportedReasoningEfforts.length === 0) { showToast('Select at least one supported effort', 'error'); return }
-  apiFetch('POST', '/dashboard/api/model-settings', body).then(function(r) { if (r.ok) { modelEl.value = ''; defaultEl.value = ''; implicitEl.checked = false; virtualEl.checked = false; Array.prototype.forEach.call(effortsEl.options, function(o) { o.selected = false }); showToast('Saved', 'success'); loadModelSettings() } else r.json().catch(function() { return {} }).then(function(d) { showToast(d.error || 'Failed to save', 'error') }) }).catch(function() { showToast('Failed to save', 'error') })
+  apiFetch('POST', '/dashboard/api/model-settings', body).then(function(r) { if (r.ok) { modelEl.value = ''; applyImplicitMediumPreset(); showToast('Saved', 'success'); loadModelSettings() } else r.json().catch(function() { return {} }).then(function(d) { showToast(d.error || 'Failed to save', 'error') }) }).catch(function() { showToast('Failed to save', 'error') })
+}
+function applyImplicitMediumPreset() {
+  var form = document.getElementById('model-settings-form')
+  setEffortChecks(form, ['medium'])
+  form.querySelector('select[name="ms-default"]').value = 'medium'
+  form.querySelector('input[name="ms-implicit"]').checked = true
+  form.querySelector('input[name="ms-virtual"]').checked = false
 }
 
 function loadModelRouting() {
