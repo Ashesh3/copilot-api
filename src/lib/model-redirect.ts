@@ -47,6 +47,7 @@ export interface ModelRedirectRuleWithConflicts extends ModelRedirectRule {
 
 let redirects: Array<ModelRedirectRule> = []
 let isLoaded = false
+let skipPersistForTest = false
 
 function isReasoningEffort(value: unknown): value is ReasoningEffort {
   return (
@@ -157,6 +158,8 @@ function withConflicts(
 }
 
 export async function loadModelRedirects(): Promise<void> {
+  skipPersistForTest = false
+
   try {
     const data = await fs.readFile(PATHS.MODEL_REDIRECTS_CONFIG_PATH)
     redirects = normalizeRules(JSON.parse(data.toString()) as unknown)
@@ -169,7 +172,10 @@ export async function loadModelRedirects(): Promise<void> {
 }
 
 export async function saveModelRedirects(): Promise<void> {
+  if (skipPersistForTest) return
+
   try {
+    await fs.mkdir(PATHS.APP_DIR, { recursive: true })
     await fs.writeFile(
       PATHS.MODEL_REDIRECTS_CONFIG_PATH,
       JSON.stringify(redirects, null, 2),
@@ -358,4 +364,5 @@ export async function applyModelRedirect(
 export function setModelRedirectsForTest(rules: Array<unknown>): void {
   redirects = normalizeRules(rules)
   isLoaded = true
+  skipPersistForTest = true
 }
