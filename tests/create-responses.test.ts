@@ -3,7 +3,10 @@ import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
 import { HTTPError } from "../src/lib/error"
 import { setModelSettingsForTest } from "../src/lib/model-settings"
 import { state } from "../src/lib/state"
-import { createResponses } from "../src/services/copilot/create-responses"
+import {
+  createResponses,
+  type ResponsesPayload,
+} from "../src/services/copilot/create-responses"
 
 const originalFetch = globalThis.fetch
 let lastRequestBody: Record<string, unknown> | undefined
@@ -175,6 +178,49 @@ test("does not send configurable effort for implicit-default Responses models", 
   expect(lastRequestBody?.reasoning).toEqual({
     summary: "auto",
   })
+})
+
+test("normalizes Responses function tool parameter schemas before forwarding", async () => {
+  const payload: ResponsesPayload = {
+    model: "gpt-4o",
+    input: "Hello",
+    tools: [
+      {
+        type: "function",
+        name: "mcp__pencil__get_style_guide_tags",
+        description: "Fetch style guide tags",
+        parameters: {},
+        strict: false,
+      },
+      {
+        type: "function",
+        name: "mcp__pencil__get_style_guide",
+        parameters: { type: "object" },
+        strict: false,
+      },
+    ],
+  }
+
+  await createResponses(payload, {
+    vision: false,
+    initiator: "user",
+  })
+
+  expect(lastRequestBody?.tools).toEqual([
+    {
+      type: "function",
+      name: "mcp__pencil__get_style_guide_tags",
+      description: "Fetch style guide tags",
+      parameters: { type: "object", properties: {} },
+      strict: false,
+    },
+    {
+      type: "function",
+      name: "mcp__pencil__get_style_guide",
+      parameters: { type: "object", properties: {} },
+      strict: false,
+    },
+  ])
 })
 
 test("retries 413 Responses requests without input images", async () => {

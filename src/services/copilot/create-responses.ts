@@ -424,6 +424,8 @@ const KNOWN_RESPONSES_FIELDS = new Set([
 function sanitizeResponsesPayload(
   payload: ResponsesPayload,
 ): Record<string, unknown> {
+  normalizeFunctionToolParameters(payload)
+
   const result: Record<string, unknown> = {}
   for (const key of KNOWN_RESPONSES_FIELDS) {
     if (key in payload && payload[key] !== undefined) {
@@ -431,6 +433,24 @@ function sanitizeResponsesPayload(
     }
   }
   return result
+}
+
+function normalizeFunctionToolParameters(payload: ResponsesPayload): void {
+  if (!Array.isArray(payload.tools)) return
+
+  for (const tool of payload.tools) {
+    if (!isRecord(tool) || tool.type !== "function") continue
+
+    if (!isRecord(tool.parameters) || Array.isArray(tool.parameters)) {
+      tool.parameters = { type: "object", properties: {} }
+      continue
+    }
+
+    tool.parameters.type ??= "object"
+    if (!isRecord(tool.parameters.properties)) {
+      tool.parameters.properties = {}
+    }
+  }
 }
 
 export const createResponses = async (
