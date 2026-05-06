@@ -3,6 +3,11 @@ import type { Context } from "hono"
 import consola from "consola"
 
 import { normalizeModelName } from "~/lib/model-resolver"
+import {
+  normalizeReasoningEffortForModel,
+  parseModelSuffix,
+} from "~/lib/model-suffix"
+import { setRequestContext } from "~/lib/request-logger"
 import { state } from "~/lib/state"
 import { getTokenCount } from "~/lib/tokenizer"
 
@@ -17,18 +22,39 @@ export async function handleCountTokens(c: Context) {
     const anthropicBeta = c.req.header("anthropic-beta")
 
     const anthropicPayload = await c.req.json<AnthropicMessagesPayload>()
+    const requestedModel = anthropicPayload.model
+
+    const { baseModel, reasoningEffort: suffixEffort } =
+      parseModelSuffix(requestedModel)
+    const normalizedModel = normalizeModelName(baseModel)
+    const requestedEffort = normalizeReasoningEffortForModel(
+      normalizedModel,
+      suffixEffort,
+    )
+
+    setRequestContext(c, {
+      requestedModel,
+      model: normalizedModel,
+      provider: "TokenCount",
+      reasoningEffort: requestedEffort,
+    })
 
     const openAIPayload = translateToOpenAI(anthropicPayload)
-
-    // Normalize model name (e.g., claude-opus-4-5 -> claude-opus-4.5) before lookup
-    const normalizedModel = normalizeModelName(anthropicPayload.model)
 
     const selectedModel = state.models?.data.find(
       (model) => model.id === normalizedModel,
     )
 
     if (!selectedModel) {
-      consola.warn("Model not found, returning default token count")
+      consola.warn("Model not found for count_tokens, returning default", {
+        requestedModel,
+        baseModel,
+        normalizedModel,
+        reasoningEffort: requestedEffort,
+        modelsLoaded: Boolean(state.models),
+        knownModelCount: state.models?.data.length ?? 0,
+      })
+      setRequestContext(c, { inputTokens: 1 })
       return c.json({
         input_tokens: 1,
       })
@@ -44,23 +70,24 @@ export async function handleCountTokens(c: Context) {
         )
       }
       if (!mcpToolExist) {
-        if (anthropicPayload.model.startsWith("claude")) {
+        if (normalizedModel.startsWith("claude")) {
           // https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/overview#pricing
           tokenCount.input = tokenCount.input + 346
-        } else if (anthropicPayload.model.startsWith("grok")) {
+        } else if (normalizedModel.startsWith("grok")) {
           tokenCount.input = tokenCount.input + 480
         }
       }
     }
 
     let finalTokenCount = tokenCount.input + tokenCount.output
-    if (anthropicPayload.model.startsWith("claude")) {
+    if (normalizedModel.startsWith("claude")) {
       finalTokenCount = Math.round(finalTokenCount * 1.15)
-    } else if (anthropicPayload.model.startsWith("grok")) {
+    } else if (normalizedModel.startsWith("grok")) {
       finalTokenCount = Math.round(finalTokenCount * 1.03)
     }
 
-    consola.info(`Token count: ${finalTokenCount} (${anthropicPayload.model})`)
+    setRequestContext(c, { inputTokens: finalTokenCount })
+    consola.info(`Token count: ${finalTokenCount} (${requestedModel})`)
 
     return c.json({
       input_tokens: finalTokenCount,

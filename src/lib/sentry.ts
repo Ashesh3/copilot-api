@@ -17,6 +17,61 @@ export function shouldRecordAiContent(): boolean {
   return value.toLowerCase() !== "false"
 }
 
+const SENSITIVE_HEADER_PATTERNS = [
+  "authorization",
+  "api-key",
+  "cookie",
+  "x-api-key",
+]
+
+type HeaderTuple = [string, unknown]
+
+function isSensitiveHeader(key: string): boolean {
+  const lower = key.toLowerCase()
+  return SENSITIVE_HEADER_PATTERNS.some((pattern) => lower.includes(pattern))
+}
+
+function scrubRequestHeaders(event: Sentry.Event): void {
+  const request = event.request as { headers?: unknown } | undefined
+  if (!request) return
+
+  const { headers } = request
+  if (!headers) return
+
+  if (Array.isArray(headers)) {
+    const scrubbedHeaders: Array<unknown> = []
+    for (const entry of headers) {
+      if (!isHeaderTuple(entry)) {
+        scrubbedHeaders.push(entry)
+        continue
+      }
+
+      scrubbedHeaders.push(
+        isSensitiveHeader(entry[0]) ? [entry[0], "[Filtered]"] : entry,
+      )
+    }
+    request.headers = scrubbedHeaders
+    return
+  }
+
+  if (typeof headers !== "object") return
+
+  const scrubbed: Record<string, string> = {}
+  for (const [key, value] of Object.entries(headers)) {
+    scrubbed[key] = isSensitiveHeader(key) ? "[Filtered]" : String(value)
+  }
+  request.headers = scrubbed
+}
+
+function isHeaderTuple(entry: unknown): entry is HeaderTuple {
+  return Array.isArray(entry) && typeof entry[0] === "string"
+}
+
+function scrubSensitiveData<T extends Sentry.Event>(event: T): T {
+  scrubRequestHeaders(event)
+  return event
+}
+
 export function initSentry(): void {
   const dsn = process.env.SENTRY_DSN
   if (!dsn) return
@@ -36,24 +91,10 @@ export function initSentry(): void {
       Sentry.consoleLoggingIntegration({ levels: ["warn", "error"] }),
     ],
     beforeSend(event) {
-      // Scrub sensitive headers
-      if (event.request?.headers) {
-        const sensitivePatterns = [
-          "authorization",
-          "api-key",
-          "cookie",
-          "x-api-key",
-        ]
-        const scrubbed: Record<string, string> = {}
-        for (const [key, value] of Object.entries(event.request.headers)) {
-          const lower = key.toLowerCase()
-          if (!sensitivePatterns.some((p) => lower.includes(p))) {
-            scrubbed[key] = value
-          }
-        }
-        event.request.headers = scrubbed
-      }
-      return event
+      return scrubSensitiveData(event)
+    },
+    beforeSendTransaction(event) {
+      return scrubSensitiveData(event)
     },
   })
 
