@@ -12,6 +12,11 @@ import {
 } from "~/lib/ip-blocker"
 import { extractRequestApiKey } from "~/lib/request-auth"
 import { state } from "~/lib/state"
+import {
+  isAllowedTransparentProxyRequest,
+  isTransparentProxyClientWhitelisted,
+  transparentProxy,
+} from "~/lib/transparent-proxy"
 import { getUsageResponse } from "~/lib/usage-tracker"
 
 const SCOPES =
@@ -187,8 +192,18 @@ export const oauthApiRoutes = new Hono()
 // GET /api/hello — connectivity check (no auth)
 oauthApiRoutes.get("/hello", (c) => c.json({ status: "ok" }))
 
-// /api/event_logging/* — silently accept telemetry (no auth)
-oauthApiRoutes.all("/event_logging/*", (c) => c.body(null, 200))
+// /api/event_logging/* — proxy redirected Claude hosts after whitelist; otherwise
+// silently accept telemetry for compatibility.
+oauthApiRoutes.all("/event_logging/*", async (c) => {
+  if (
+    isAllowedTransparentProxyRequest(c)
+    && isTransparentProxyClientWhitelisted(c)
+  ) {
+    return await transparentProxy(c)
+  }
+
+  return c.body(null, 200)
+})
 
 // GET /api/web/domain_info — domain safety check, allow all (no auth)
 oauthApiRoutes.get("/web/domain_info", (c) => {
@@ -451,8 +466,18 @@ oauthApiRoutes.post(
   (c) => c.json({ success: true }),
 )
 
-// Unknown /api/* compatibility calls are noise; acknowledge without auth.
-oauthApiRoutes.all("*", (c) => c.body(null, 200))
+// Unknown /api/* calls from redirected Claude/Anthropic hosts are proxied once
+// the source IP has authenticated. Other compatibility noise is acknowledged.
+oauthApiRoutes.all("*", async (c) => {
+  if (
+    isAllowedTransparentProxyRequest(c)
+    && isTransparentProxyClientWhitelisted(c)
+  ) {
+    return await transparentProxy(c)
+  }
+
+  return c.body(null, 200)
+})
 
 // --- Authorize page HTML ---
 

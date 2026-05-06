@@ -6,11 +6,13 @@ import consola from "consola"
 import {
   extractClientIp,
   isIpBlocked,
+  isIpWhitelisted,
   recordFailedAttempt,
   whitelistIp,
 } from "./ip-blocker"
 import { extractRequestApiKey } from "./request-auth"
 import { state } from "./state"
+import { isAllowedTransparentProxyRequest } from "./transparent-proxy"
 
 /**
  * Paths that proxy to Copilot and should count toward IP banning on auth failure.
@@ -39,6 +41,15 @@ export async function apiKeyGuard(c: Context, next: Next): Promise<void> {
   }
 
   const clientIp = extractClientIp(c)
+
+  if (
+    clientIp !== null
+    && isIpWhitelisted(clientIp)
+    && isAllowedTransparentProxyRequest(c)
+  ) {
+    await next()
+    return
+  }
 
   if (clientIp !== null && isIpBlocked(clientIp)) {
     consola.warn(

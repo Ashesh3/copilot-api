@@ -47,6 +47,10 @@ export function whitelistIp(ip: string): void {
   }
 }
 
+export function isIpWhitelisted(ip: string): boolean {
+  return whitelistedIps.has(ip)
+}
+
 /**
  * Checks if an IP is blocked due to 3+ failed attempts today (UTC).
  * Whitelisted IPs are never blocked.

@@ -13,6 +13,7 @@ import {
   requestIdStorage,
   routedAccountStorage,
 } from "./lib/request-session"
+import { transparentProxy } from "./lib/transparent-proxy"
 import { completionRoutes } from "./routes/chat-completions/route"
 import { getCodeLauncherPage } from "./routes/code-launcher/page"
 import { codeSessionsRoutes } from "./routes/code-sessions/route"
@@ -154,3 +155,5 @@ server.route("/v1/messages", messageRoutes)
 server.route("/v1/models", googleAIRoutes)
 server.route("/v1beta/models", googleAIRoutes)
 server.route("/models", googleAIRoutes)
+
+server.all("*", transparentProxy)
