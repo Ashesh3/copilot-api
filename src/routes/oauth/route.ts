@@ -192,18 +192,8 @@ export const oauthApiRoutes = new Hono()
 // GET /api/hello — connectivity check (no auth)
 oauthApiRoutes.get("/hello", (c) => c.json({ status: "ok" }))
 
-// /api/event_logging/* — proxy redirected Claude hosts after whitelist; otherwise
-// silently accept telemetry for compatibility.
-oauthApiRoutes.all("/event_logging/*", async (c) => {
-  if (
-    isAllowedTransparentProxyRequest(c)
-    && isTransparentProxyClientWhitelisted(c)
-  ) {
-    return await transparentProxy(c)
-  }
-
-  return c.body(null, 200)
-})
+// /api/event_logging/* — block telemetry upstream while keeping clients happy.
+oauthApiRoutes.all("/event_logging/*", (c) => c.body(null, 200))
 
 // GET /api/web/domain_info — domain safety check, allow all (no auth)
 oauthApiRoutes.get("/web/domain_info", (c) => {

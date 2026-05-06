@@ -79,7 +79,7 @@ test("proxies unknown /api routes for whitelisted redirected Claude hosts", asyn
   expect(fetchMock).toHaveBeenCalledTimes(1)
 })
 
-test("proxies event logging for whitelisted redirected Claude hosts", async () => {
+test("blocks event logging for whitelisted redirected Claude hosts", async () => {
   const ip = "198.51.100.13"
   await whitelistIp(ip)
 
@@ -91,11 +91,9 @@ test("proxies event logging for whitelisted redirected Claude hosts", async () =
     },
   })
 
-  expect(response.status).toBe(202)
-  expect(await response.text()).toBe(
-    "proxied:https://claude.ai/api/event_logging/v2/batch",
-  )
-  expect(fetchMock).toHaveBeenCalledTimes(1)
+  expect(response.status).toBe(200)
+  expect(await response.text()).toBe("")
+  expect(fetchMock).not.toHaveBeenCalled()
 })
 
 test("does not proxy fallback routes for non-redirected hosts", async () => {
