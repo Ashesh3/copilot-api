@@ -21,6 +21,12 @@ const HOP_BY_HOP_HEADERS = new Set([
   "upgrade",
 ])
 
+const DECODED_BODY_HEADERS = [
+  "content-encoding",
+  "content-length",
+  "content-md5",
+]
+
 const OWNED_ROUTE_PREFIXES = [
   "/api/claude_cli",
   "/api/claude_code",
@@ -100,22 +106,41 @@ function isOwnedRoutePath(path: string): boolean {
   return OWNED_ROUTE_PREFIXES.some((prefix) => pathMatchesPrefix(path, prefix))
 }
 
-function createProxyHeaders(request: Request): Headers {
-  const headers = new Headers(request.headers)
+function deleteHopByHopHeaders(headers: Headers): void {
+  const connectionHeader = headers.get("connection")
+  if (connectionHeader) {
+    for (const header of connectionHeader.split(",")) {
+      const trimmed = header.trim()
+      if (trimmed) headers.delete(trimmed)
+    }
+  }
 
   for (const header of HOP_BY_HOP_HEADERS) {
     headers.delete(header)
   }
+}
+
+function createProxyHeaders(request: Request): Headers {
+  const headers = new Headers(request.headers)
+
+  deleteHopByHopHeaders(headers)
 
   headers.delete("content-length")
+  headers.delete("host")
+  headers.set("accept-encoding", "identity")
   return headers
 }
 
 function createResponseHeaders(headers: Headers): Headers {
   const responseHeaders = new Headers(headers)
+  const hasEncodedBody = responseHeaders.has("content-encoding")
 
-  for (const header of HOP_BY_HOP_HEADERS) {
-    responseHeaders.delete(header)
+  deleteHopByHopHeaders(responseHeaders)
+
+  if (hasEncodedBody) {
+    for (const header of DECODED_BODY_HEADERS) {
+      responseHeaders.delete(header)
+    }
   }
 
   return responseHeaders
@@ -167,6 +192,7 @@ export async function transparentProxy(c: Context): Promise<Response> {
       method,
       headers: createProxyHeaders(c.req.raw),
       body: method === "GET" || method === "HEAD" ? undefined : c.req.raw.body,
+      redirect: "manual",
       signal: c.req.raw.signal,
     })
 

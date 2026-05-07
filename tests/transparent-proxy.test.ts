@@ -12,7 +12,7 @@ function getFetchUrl(url: string | URL | Request): string {
   return url.url
 }
 
-const fetchMock = mock((url: string | URL | Request) => {
+const fetchMock = mock((url: string | URL | Request, _init?: RequestInit) => {
   return new Response(`proxied:${getFetchUrl(url)}`, {
     status: 202,
     headers: { "x-upstream": "anthropic" },
@@ -59,6 +59,108 @@ test("proxies unknown routes for whitelisted redirected Anthropic hosts", async 
     "proxied:https://api.anthropic.com/random-endpoint?channel=stable",
   )
   expect(fetchMock).toHaveBeenCalledTimes(1)
+})
+
+test("passes upstream redirects through without following them", async () => {
+  fetchMock.mockImplementationOnce(
+    (_url: string | URL | Request, _init?: RequestInit) => {
+      return new Response(null, {
+        status: 302,
+        headers: { location: "https://claude.ai/download/latest" },
+      })
+    },
+  )
+
+  const ip = "198.51.100.16"
+  await whitelistIp(ip)
+
+  const response = await server.request("/api/desktop/update", {
+    headers: {
+      host: "claude.ai",
+      "x-forwarded-for": ip,
+    },
+  })
+
+  const requestInit = fetchMock.mock.calls.at(-1)?.[1] as
+    | { redirect?: string }
+    | undefined
+
+  expect(response.status).toBe(302)
+  expect(response.headers.get("location")).toBe(
+    "https://claude.ai/download/latest",
+  )
+  expect(requestInit?.redirect).toBe("manual")
+})
+
+test("strips compressed body headers from transparent proxy responses", async () => {
+  fetchMock.mockImplementationOnce(
+    (_url: string | URL | Request, _init?: RequestInit) => {
+      return new Response('{"servers":[]}', {
+        status: 200,
+        headers: {
+          "content-encoding": "br",
+          "content-length": "128",
+          "content-type": "application/json",
+        },
+      })
+    },
+  )
+
+  const ip = "198.51.100.15"
+  await whitelistIp(ip)
+
+  const response = await server.request(
+    "/mcp-registry/v0/servers?version=latest&limit=100",
+    {
+      headers: {
+        host: "api.anthropic.com",
+        "x-forwarded-for": ip,
+      },
+    },
+  )
+
+  const requestInit = fetchMock.mock.calls.at(-1)?.[1] as
+    | { headers?: Headers }
+    | undefined
+
+  expect(response.status).toBe(200)
+  expect(response.headers.get("content-encoding")).toBeNull()
+  expect(response.headers.get("content-length")).toBeNull()
+  expect(response.headers.get("content-type")).toBe("application/json")
+  expect(await response.text()).toBe('{"servers":[]}')
+  expect(requestInit?.headers?.get("accept-encoding")).toBe("identity")
+  expect(requestInit?.headers?.has("host")).toBe(false)
+})
+
+test("strips dynamic hop-by-hop headers from transparent proxy responses", async () => {
+  fetchMock.mockImplementationOnce(
+    (_url: string | URL | Request, _init?: RequestInit) => {
+      return new Response("ok", {
+        headers: {
+          connection: "x-internal-hop",
+          "content-length": "2",
+          "x-internal-hop": "remove-me",
+          "x-visible": "keep-me",
+        },
+      })
+    },
+  )
+
+  const ip = "198.51.100.17"
+  await whitelistIp(ip)
+
+  const response = await server.request("/mcp-registry/v0/servers", {
+    headers: {
+      host: "api.anthropic.com",
+      "x-forwarded-for": ip,
+    },
+  })
+
+  expect(response.status).toBe(200)
+  expect(response.headers.get("connection")).toBeNull()
+  expect(response.headers.get("x-internal-hop")).toBeNull()
+  expect(response.headers.get("x-visible")).toBe("keep-me")
+  expect(response.headers.get("content-length")).toBe("2")
 })
 
 test("proxies unknown /api routes for whitelisted redirected Claude hosts", async () => {
