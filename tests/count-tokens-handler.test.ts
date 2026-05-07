@@ -2,6 +2,7 @@ import { afterAll, beforeEach, expect, test } from "bun:test"
 
 import type { ModelsResponse } from "../src/services/copilot/get-models"
 
+import { setModelRedirectsForTest } from "../src/lib/model-redirect"
 import { state } from "../src/lib/state"
 import { server } from "../src/server"
 
@@ -27,10 +28,28 @@ const models: ModelsResponse = {
         type: "chat",
       },
     },
+    {
+      id: "gpt-5.5",
+      name: "GPT 5.5",
+      object: "model",
+      preview: false,
+      vendor: "openai",
+      version: "1",
+      model_picker_enabled: true,
+      capabilities: {
+        family: "gpt-5.5",
+        limits: {},
+        object: "model_capabilities",
+        supports: {},
+        tokenizer: "o200k_base",
+        type: "chat",
+      },
+    },
   ],
 }
 
 beforeEach(() => {
+  setModelRedirectsForTest([])
   state.models = models
   state.accountType = "individual"
   state.copilotToken = "copilot-token"
@@ -51,6 +70,34 @@ test("count_tokens strips reasoning effort suffix before model lookup", async ()
     },
     body: JSON.stringify({
       model: "claude-opus-4.7-1m-internal:xhigh",
+      messages: [{ role: "user", content: "Hello" }],
+      max_tokens: 32,
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  const body = (await response.json()) as { input_tokens: number }
+  expect(body.input_tokens).toBeGreaterThan(1)
+})
+
+test("count_tokens uses redirected target model for model lookup", async () => {
+  setModelRedirectsForTest([
+    {
+      id: "claude-gpt-to-gpt",
+      sourceModel: "claude-gpt-5.5",
+      sourceEffort: "all",
+      targetModel: "gpt-5.5",
+      enabled: true,
+    },
+  ])
+
+  const response = await server.request("/v1/messages/count_tokens", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "claude-gpt-5.5:xhigh",
       messages: [{ role: "user", content: "Hello" }],
       max_tokens: 32,
     }),

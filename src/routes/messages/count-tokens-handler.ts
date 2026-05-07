@@ -2,6 +2,7 @@ import type { Context } from "hono"
 
 import consola from "consola"
 
+import { applyModelRedirect } from "~/lib/model-redirect"
 import { normalizeModelName } from "~/lib/model-resolver"
 import {
   normalizeReasoningEffortForModel,
@@ -31,18 +32,28 @@ export async function handleCountTokens(c: Context) {
       normalizedModel,
       suffixEffort,
     )
+    const redirect = await applyModelRedirect({
+      model: normalizedModel,
+      effort: requestedEffort,
+    })
+    const targetModel = normalizeModelName(redirect.model)
+    const targetEffort = normalizeReasoningEffortForModel(
+      targetModel,
+      redirect.effort,
+    )
+    anthropicPayload.model = targetModel
 
     setRequestContext(c, {
       requestedModel,
-      model: normalizedModel,
+      model: targetModel,
       provider: "TokenCount",
-      reasoningEffort: requestedEffort,
+      reasoningEffort: targetEffort,
     })
 
     const openAIPayload = translateToOpenAI(anthropicPayload)
 
     const selectedModel = state.models?.data.find(
-      (model) => model.id === normalizedModel,
+      (model) => model.id === targetModel,
     )
 
     if (!selectedModel) {
@@ -50,7 +61,8 @@ export async function handleCountTokens(c: Context) {
         requestedModel,
         baseModel,
         normalizedModel,
-        reasoningEffort: requestedEffort,
+        targetModel,
+        reasoningEffort: targetEffort,
         modelsLoaded: Boolean(state.models),
         knownModelCount: state.models?.data.length ?? 0,
       })
@@ -70,19 +82,19 @@ export async function handleCountTokens(c: Context) {
         )
       }
       if (!mcpToolExist) {
-        if (normalizedModel.startsWith("claude")) {
+        if (targetModel.startsWith("claude")) {
           // https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/overview#pricing
           tokenCount.input = tokenCount.input + 346
-        } else if (normalizedModel.startsWith("grok")) {
+        } else if (targetModel.startsWith("grok")) {
           tokenCount.input = tokenCount.input + 480
         }
       }
     }
 
     let finalTokenCount = tokenCount.input + tokenCount.output
-    if (normalizedModel.startsWith("claude")) {
+    if (targetModel.startsWith("claude")) {
       finalTokenCount = Math.round(finalTokenCount * 1.15)
-    } else if (normalizedModel.startsWith("grok")) {
+    } else if (targetModel.startsWith("grok")) {
       finalTokenCount = Math.round(finalTokenCount * 1.03)
     }
 
