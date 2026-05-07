@@ -141,7 +141,7 @@ export async function handleCompletion(c: Context) {
       name: "invoke_agent copilot-proxy",
       attributes: {
         "gen_ai.agent.name": "copilot-proxy",
-        "gen_ai.request.model": model,
+        "gen_ai.request.model": getSentryModelName(model),
       },
     },
     async () => {
@@ -552,7 +552,7 @@ const executeChatCompletions = async (
         op: "gen_ai.request",
         name: `request ${finalPayload.model}`,
         attributes: {
-          "gen_ai.request.model": finalPayload.model,
+          "gen_ai.request.model": getSentryModelName(finalPayload.model),
           "gen_ai.response.model": getSentryModelName(finalPayload.model),
           ...(shouldRecordAiContent() && {
             "gen_ai.request.messages": JSON.stringify(finalPayload.messages),
@@ -613,7 +613,7 @@ const executeChatCompletions = async (
         op: "gen_ai.request",
         name: `stream ${finalPayload.model}`,
         attributes: {
-          "gen_ai.request.model": finalPayload.model,
+          "gen_ai.request.model": getSentryModelName(finalPayload.model),
           "gen_ai.response.model": getSentryModelName(finalPayload.model),
           ...(shouldRecordAiContent() && {
             "gen_ai.request.messages": JSON.stringify(finalPayload.messages),
@@ -985,7 +985,7 @@ const executeResponsesApi = async (
           op: "gen_ai.request",
           name: `stream ${anthropicPayload.model}`,
           attributes: {
-            "gen_ai.request.model": anthropicPayload.model,
+            "gen_ai.request.model": getSentryModelName(anthropicPayload.model),
             "gen_ai.response.model": getSentryModelName(anthropicPayload.model),
             ...(shouldRecordAiContent() && {
               "gen_ai.request.messages": JSON.stringify(
@@ -1124,7 +1124,7 @@ const executeResponsesApi = async (
       op: "gen_ai.request",
       name: `request ${anthropicPayload.model}`,
       attributes: {
-        "gen_ai.request.model": anthropicPayload.model,
+        "gen_ai.request.model": getSentryModelName(anthropicPayload.model),
         "gen_ai.response.model": getSentryModelName(anthropicPayload.model),
         ...(shouldRecordAiContent() && {
           "gen_ai.request.messages": JSON.stringify(anthropicPayload.messages),

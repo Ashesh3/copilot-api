@@ -44,7 +44,7 @@ export async function handleCompletion(c: Context) {
       name: "invoke_agent copilot-proxy",
       attributes: {
         "gen_ai.agent.name": "copilot-proxy",
-        "gen_ai.request.model": model,
+        "gen_ai.request.model": getSentryModelName(model),
       },
     },
     async () => {
@@ -163,7 +163,7 @@ const executeRequest = async (
         op: "gen_ai.request",
         name: `request ${payload.model}`,
         attributes: {
-          "gen_ai.request.model": payload.model,
+          "gen_ai.request.model": getSentryModelName(payload.model),
           "gen_ai.response.model": getSentryModelName(payload.model),
           ...(shouldRecordAiContent() && {
             "gen_ai.request.messages": JSON.stringify(payload.messages),
@@ -270,7 +270,7 @@ const handleStreamingResponse = (
         op: "gen_ai.request",
         name: `request ${payload.model}`,
         attributes: {
-          "gen_ai.request.model": payload.model,
+          "gen_ai.request.model": getSentryModelName(payload.model),
           "gen_ai.response.model": getSentryModelName(payload.model),
           ...(shouldRecordAiContent() && {
             "gen_ai.request.messages": JSON.stringify(payload.messages),

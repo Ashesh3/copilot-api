@@ -1,6 +1,8 @@
 import * as Sentry from "@sentry/bun"
 import consola from "consola"
 
+import { getModelSettings } from "~/lib/model-settings"
+
 import packageJson from "../../package.json" with { type: "json" }
 
 /**
@@ -137,8 +139,29 @@ const SENTRY_MODEL_MAP: Record<string, string> = {
   "o4-mini": "o4-mini-2025-04-16",
 }
 
+const REASONING_SUFFIXES = new Set(["low", "medium", "high", "xhigh", "max"])
+
 export function getSentryModelName(model: string): string {
+  const configuredName = getModelSettings(model)?.sentryModelName
+  if (configuredName) return configuredName
+
+  const baseModel = getModelWithoutReasoningSuffix(model)
+  const configuredBaseName = getModelSettings(baseModel)?.sentryModelName
+  if (configuredBaseName) return configuredBaseName
+
+  if (Object.hasOwn(SENTRY_MODEL_MAP, baseModel)) {
+    return SENTRY_MODEL_MAP[baseModel]
+  }
+
   return SENTRY_MODEL_MAP[model] ?? model
+}
+
+function getModelWithoutReasoningSuffix(model: string): string {
+  const colonIndex = model.lastIndexOf(":")
+  if (colonIndex === -1) return model
+
+  const suffix = model.slice(colonIndex + 1)
+  return REASONING_SUFFIXES.has(suffix) ? model.slice(0, colonIndex) : model
 }
 
 export function setupSentryShutdown(): void {

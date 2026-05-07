@@ -2,6 +2,7 @@ import type { Context, Next } from "hono"
 
 import * as Sentry from "@sentry/bun"
 
+import { getSentryModelName } from "./sentry"
 import { state } from "./state"
 import { recordUsage } from "./usage-tracker"
 
@@ -220,11 +221,14 @@ function buildModificationsLine(ctx: RequestContext): string | undefined {
  */
 function buildPlainModelLine(ctx: RequestContext): string {
   const parts: Array<string> = []
+  const model = ctx.model ? getSentryModelName(ctx.model) : "unknown"
+  const requestedModel =
+    ctx.requestedModel ? getSentryModelName(ctx.requestedModel) : undefined
 
-  if (ctx.requestedModel && ctx.requestedModel !== ctx.model) {
-    parts.push(`${ctx.requestedModel} → ${ctx.model}`)
+  if (requestedModel && requestedModel !== model) {
+    parts.push(`${requestedModel} → ${model}`)
   } else {
-    parts.push(ctx.model ?? "unknown")
+    parts.push(model)
   }
 
   if (ctx.accountId !== undefined) {
@@ -290,8 +294,9 @@ function sendRequestLogToSentry(opts: {
     path,
     status,
     duration: Number(duration),
-    model: ctx?.model,
-    requestedModel: ctx?.requestedModel,
+    model: ctx?.model ? getSentryModelName(ctx.model) : undefined,
+    requestedModel:
+      ctx?.requestedModel ? getSentryModelName(ctx.requestedModel) : undefined,
     provider: ctx?.provider,
     inputTokens: ctx?.inputTokens,
     accountId: ctx?.accountId,

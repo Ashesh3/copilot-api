@@ -101,7 +101,7 @@ export const resolveWebSearchCalls = async (
         op: "gen_ai.request",
         name: `web_search followup ${currentPayload.model} #${i + 1}`,
         attributes: {
-          "gen_ai.request.model": currentPayload.model,
+          "gen_ai.request.model": getSentryModelName(currentPayload.model),
           "gen_ai.response.model": getSentryModelName(currentPayload.model),
           ...(shouldRecordAiContent() && {
             "gen_ai.request.messages": JSON.stringify(currentPayload.messages),
@@ -192,7 +192,7 @@ export const resolveResponsesWebSearchCalls = async (
         op: "gen_ai.request",
         name: `web_search followup ${currentPayload.model} #${i + 1}`,
         attributes: {
-          "gen_ai.request.model": currentPayload.model,
+          "gen_ai.request.model": getSentryModelName(currentPayload.model),
           "gen_ai.response.model": getSentryModelName(currentPayload.model),
           ...(shouldRecordAiContent() && {
             "gen_ai.request.messages": stringifyResponsesInput(

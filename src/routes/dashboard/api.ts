@@ -64,6 +64,15 @@ type RedirectTargetEffort = "low" | "medium" | "high" | "xhigh" | "max"
 
 type ModelSettingsEffort = "low" | "medium" | "high" | "xhigh" | "max"
 
+interface ModelSettingsRequestBody {
+  model?: string
+  sentryModelName?: string | null
+  supportedReasoningEfforts?: Array<ModelSettingsEffort> | null
+  defaultReasoningEffort?: ModelSettingsEffort | null
+  implicitReasoningDefault?: boolean | null
+  exposeVirtualReasoningModels?: boolean | null
+}
+
 function formatUptime(ms: number): string {
   const totalSeconds = Math.floor(ms / 1000)
   const days = Math.floor(totalSeconds / 86400)
@@ -314,39 +323,66 @@ export async function handleListModelSettings(c: Context) {
 }
 
 export async function handleSetModelSettings(c: Context) {
-  const body = await c.req.json<{
-    model?: string
-    supportedReasoningEfforts?: Array<ModelSettingsEffort> | null
-    defaultReasoningEffort?: ModelSettingsEffort | null
-    implicitReasoningDefault?: boolean | null
-    exposeVirtualReasoningModels?: boolean | null
-  }>()
+  const body = await c.req.json<ModelSettingsRequestBody>()
 
   if (!body.model || typeof body.model !== "string") {
     return c.json({ error: "model is required" }, 400)
   }
 
-  if (
-    body.supportedReasoningEfforts !== undefined
-    && body.supportedReasoningEfforts !== null
-    && (!Array.isArray(body.supportedReasoningEfforts)
-      || body.supportedReasoningEfforts.some(
-        (effort) => effort !== "max" && !isReasoningEffort(effort),
-      ))
-  ) {
-    return c.json({ error: "supportedReasoningEfforts is invalid" }, 400)
+  const validationError = validateModelSettingsBody(body)
+  if (validationError) return c.json({ error: validationError }, 400)
+
+  const settings = await setModelSettings(body.model, modelSettingsUpdate(body))
+  return c.json(settings)
+}
+
+function validateModelSettingsBody(
+  body: ModelSettingsRequestBody,
+): string | undefined {
+  if (!isValidSentryModelName(body.sentryModelName)) {
+    return "sentryModelName is invalid"
   }
 
-  if (
-    body.defaultReasoningEffort !== undefined
-    && body.defaultReasoningEffort !== null
-    && body.defaultReasoningEffort !== "max"
-    && !isReasoningEffort(body.defaultReasoningEffort)
-  ) {
-    return c.json({ error: "defaultReasoningEffort is invalid" }, 400)
+  if (!isValidSupportedReasoningEfforts(body.supportedReasoningEfforts)) {
+    return "supportedReasoningEfforts is invalid"
   }
 
-  const settings = await setModelSettings(body.model, {
+  if (!isValidModelSettingsEffort(body.defaultReasoningEffort)) {
+    return "defaultReasoningEffort is invalid"
+  }
+
+  return undefined
+}
+
+function isValidSentryModelName(value: unknown): boolean {
+  return value === undefined || value === null || typeof value === "string"
+}
+
+function isValidSupportedReasoningEfforts(value: unknown): boolean {
+  return (
+    value === undefined
+    || value === null
+    || (Array.isArray(value)
+      && value.every((effort) => isValidModelSettingsEffort(effort)))
+  )
+}
+
+function isValidModelSettingsEffort(
+  effort: unknown,
+): effort is ModelSettingsEffort | null | undefined {
+  return (
+    effort === undefined
+    || effort === null
+    || effort === "max"
+    || isReasoningEffort(effort)
+  )
+}
+
+function modelSettingsUpdate(body: ModelSettingsRequestBody) {
+  return {
+    ...(body.sentryModelName !== undefined ?
+      { sentryModelName: body.sentryModelName }
+    : {}),
     ...(body.supportedReasoningEfforts !== undefined ?
       { supportedReasoningEfforts: body.supportedReasoningEfforts }
     : {}),
@@ -359,8 +395,7 @@ export async function handleSetModelSettings(c: Context) {
     ...(body.exposeVirtualReasoningModels !== undefined ?
       { exposeVirtualReasoningModels: body.exposeVirtualReasoningModels }
     : {}),
-  })
-  return c.json(settings)
+  }
 }
 
 export async function handleDeleteModelSettings(c: Context) {

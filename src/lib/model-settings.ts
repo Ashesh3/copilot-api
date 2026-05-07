@@ -7,6 +7,7 @@ import { PATHS } from "./paths"
 
 export interface ModelSettings {
   model: string
+  sentryModelName?: string
   supportedReasoningEfforts?: Array<ReasoningEffort>
   defaultReasoningEffort?: ReasoningEffort
   implicitReasoningDefault?: boolean
@@ -14,6 +15,7 @@ export interface ModelSettings {
 }
 
 export interface ModelSettingsUpdate {
+  sentryModelName?: string | null
   supportedReasoningEfforts?: Array<ReasoningEffort | "max"> | null
   defaultReasoningEffort?: ReasoningEffort | "max" | null
   implicitReasoningDefault?: boolean | null
@@ -67,6 +69,10 @@ function normalizeModelSettings(raw: unknown): ModelSettings | undefined {
   const supportedReasoningEfforts = normalizeSupportedReasoningEfforts(
     value.supportedReasoningEfforts,
   )
+  const sentryModelName =
+    typeof value.sentryModelName === "string" ?
+      value.sentryModelName.trim()
+    : undefined
   const defaultReasoningEffort = normalizeReasoningEffort(
     value.defaultReasoningEffort,
   )
@@ -81,6 +87,9 @@ function normalizeModelSettings(raw: unknown): ModelSettings | undefined {
 
   const normalized: ModelSettings = { model: value.model.trim() }
 
+  if (sentryModelName) {
+    normalized.sentryModelName = sentryModelName
+  }
   if (supportedReasoningEfforts && supportedReasoningEfforts.length > 0) {
     normalized.supportedReasoningEfforts = supportedReasoningEfforts
   }
@@ -121,7 +130,8 @@ function getSettingsItems(raw: unknown): Array<unknown> {
 
 function hasCustomModelSettings(settings: ModelSettings): boolean {
   return (
-    settings.supportedReasoningEfforts !== undefined
+    settings.sentryModelName !== undefined
+    || settings.supportedReasoningEfforts !== undefined
     || settings.defaultReasoningEffort !== undefined
     || settings.implicitReasoningDefault !== undefined
     || settings.exposeVirtualReasoningModels !== undefined
@@ -183,6 +193,15 @@ export async function setModelSettings(
   }
   const next: ModelSettings = { ...current }
 
+  if (updates.sentryModelName !== undefined) {
+    const sentryModelName = updates.sentryModelName?.trim()
+    if (sentryModelName) {
+      next.sentryModelName = sentryModelName
+    } else {
+      delete next.sentryModelName
+    }
+  }
+
   if (updates.supportedReasoningEfforts !== undefined) {
     const supportedReasoningEfforts = normalizeSupportedReasoningEfforts(
       updates.supportedReasoningEfforts,
@@ -219,6 +238,14 @@ export async function setModelSettings(
     } else {
       delete next.exposeVirtualReasoningModels
     }
+  }
+
+  if (!hasCustomModelSettings(next)) {
+    modelSettings = Object.fromEntries(
+      Object.entries(modelSettings).filter(([key]) => key !== trimmedModel),
+    )
+    await saveModelSettings()
+    return { model: trimmedModel }
   }
 
   modelSettings[trimmedModel] = next

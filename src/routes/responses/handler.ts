@@ -268,7 +268,7 @@ export const handleResponses = async (c: Context) => {
       name: "invoke_agent copilot-proxy",
       attributes: {
         "gen_ai.agent.name": "copilot-proxy",
-        "gen_ai.request.model": model,
+        "gen_ai.request.model": getSentryModelName(model),
       },
     },
     async () => {
@@ -375,7 +375,7 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
           op: "gen_ai.request",
           name: `stream ${payload.model}`,
           attributes: {
-            "gen_ai.request.model": payload.model,
+            "gen_ai.request.model": getSentryModelName(payload.model),
             "gen_ai.response.model": getSentryModelName(payload.model),
             ...(shouldRecordAiContent() && {
               "gen_ai.request.messages": inputMessages,
@@ -551,7 +551,7 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
       op: "gen_ai.request",
       name: `request ${payload.model}`,
       attributes: {
-        "gen_ai.request.model": payload.model,
+        "gen_ai.request.model": getSentryModelName(payload.model),
         "gen_ai.response.model": getSentryModelName(payload.model),
         ...(shouldRecordAiContent() && {
           "gen_ai.request.messages": inputMessages,
@@ -1297,7 +1297,7 @@ const handleWithChatCompletions = async (
         op: "gen_ai.request",
         name: `request ${payload.model}`,
         attributes: {
-          "gen_ai.request.model": payload.model,
+          "gen_ai.request.model": getSentryModelName(payload.model),
           "gen_ai.response.model": getSentryModelName(payload.model),
           ...(shouldRecordAiContent() && {
             "gen_ai.request.messages": JSON.stringify(ccPayload.messages),
@@ -1359,7 +1359,7 @@ const handleWithChatCompletions = async (
         op: "gen_ai.request",
         name: `stream ${payload.model}`,
         attributes: {
-          "gen_ai.request.model": payload.model,
+          "gen_ai.request.model": getSentryModelName(payload.model),
           "gen_ai.response.model": getSentryModelName(payload.model),
           ...(shouldRecordAiContent() && {
             "gen_ai.request.messages": JSON.stringify(ccPayload.messages),
