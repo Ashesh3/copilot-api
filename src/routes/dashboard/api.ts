@@ -7,6 +7,11 @@ import {
   toggleReplacement,
 } from "~/lib/auto-replace"
 import {
+  clearLlmDebugLogs,
+  getLlmDebugLog,
+  listLlmDebugLogs,
+} from "~/lib/llm-debug-log"
+import {
   addModelRedirect,
   getAllModelRedirects,
   moveModelRedirect,
@@ -467,6 +472,22 @@ export async function handleSetModelRouting(c: Context) {
 
 export function handleGetUsage(c: Context) {
   return c.json(getUsageResponse())
+}
+
+export function handleListLlmDebugLogs(c: Context) {
+  return c.json(listLlmDebugLogs())
+}
+
+export function handleGetLlmDebugLog(c: Context) {
+  const id = c.req.param("id")
+  const entry = getLlmDebugLog(id)
+  if (!entry) return c.json({ error: "Debug log not found" }, 404)
+  return c.json(entry)
+}
+
+export function handleClearLlmDebugLogs(c: Context) {
+  clearLlmDebugLogs()
+  return c.json({ success: true })
 }
 
 export function handleGetSettings(c: Context) {

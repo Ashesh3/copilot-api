@@ -3,6 +3,12 @@ import consola from "consola"
 import { randomUUID } from "node:crypto"
 
 import {
+  failLlmDebugLog,
+  finishLlmDebugLog,
+  startLlmDebugLog,
+  type LlmDebugLogError,
+} from "~/lib/llm-debug-log"
+import {
   clearQuotaHeaders,
   getRequestId,
   setQuotaHeader,
@@ -224,6 +230,103 @@ function toHeaderRecord(
   return headers
 }
 
+function isLlmDebugPath(path: string): boolean {
+  return (
+    path === "/chat/completions"
+    || path === "/responses"
+    || path === "/embeddings"
+  )
+}
+
+type DebuggableBody = RequestInit["body"]
+
+function isTypedArrayBody(value: unknown): value is NodeJS.TypedArray {
+  return ArrayBuffer.isView(value)
+}
+
+function getBodyTypeName(body: object): string {
+  return body.constructor.name || "object"
+}
+
+function bodyToDebugString(body: DebuggableBody): string | null {
+  if (body === null || body === undefined) return null
+  if (typeof body === "string") return body
+  if (body instanceof URLSearchParams) return body.toString()
+  if (body instanceof ArrayBuffer) return new TextDecoder().decode(body)
+  if (isTypedArrayBody(body)) {
+    return new TextDecoder().decode(body)
+  }
+  return `[unavailable body type: ${getBodyTypeName(body)}]`
+}
+
+function toLlmDebugLogError(error: unknown): LlmDebugLogError {
+  if (error instanceof Error) {
+    return {
+      message: error.message,
+      name: error.name || "Error",
+      ...(error.stack ? { stack: error.stack } : {}),
+    }
+  }
+
+  return { message: String(error), name: "Error" }
+}
+
+async function captureLlmDebugResponse(
+  logId: string,
+  response: Response,
+): Promise<void> {
+  const responseHeaders = Object.fromEntries(response.headers.entries())
+  try {
+    const body = await response.clone().text()
+    finishLlmDebugLog(logId, {
+      body,
+      headers: responseHeaders,
+      status: response.status,
+      statusText: response.statusText,
+    })
+  } catch (error) {
+    finishLlmDebugLog(logId, {
+      body: null,
+      bodyReadError: toLlmDebugLogError(error),
+      headers: responseHeaders,
+      status: response.status,
+      statusText: response.statusText,
+    })
+  }
+}
+
+function startLlmDebugAttempt(opts: {
+  headers: Record<string, string>
+  path: string
+  requestInit: RequestInit | undefined
+  url: string
+}): string | undefined {
+  const { headers, path, requestInit, url } = opts
+  if (!isLlmDebugPath(path)) return undefined
+
+  return startLlmDebugLog({
+    method: requestInit?.method ?? "GET",
+    path,
+    requestBody: bodyToDebugString(requestInit?.body),
+    requestHeaders: headers,
+    requestId: headers["X-Request-Id"] ?? headers["x-request-id"],
+    url,
+  })
+}
+
+function captureLlmDebugAttemptResponse(
+  logId: string | undefined,
+  response: Response,
+): void {
+  if (!logId) return
+  void captureLlmDebugResponse(logId, response)
+}
+
+function failLlmDebugAttempt(logId: string | undefined, error: unknown): void {
+  if (!logId) return
+  failLlmDebugLog(logId, error)
+}
+
 function setAuthorizationHeader(
   headers: Record<string, string>,
   token: string,
@@ -319,14 +422,20 @@ export async function copilotFetch(
   let lastResponse: Response | undefined
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    let debugLogId: string | undefined
+
     try {
       const headers = toHeaderRecord(requestInit?.headers)
       clearQuotaHeaders()
+
+      debugLogId = startLlmDebugAttempt({ headers, path, requestInit, url })
 
       const response = await fetch(url, {
         ...requestInit,
         headers,
       })
+
+      captureLlmDebugAttemptResponse(debugLogId, response)
 
       // Log quota headers
       const quota = parseQuotaHeaders(response)
@@ -380,6 +489,8 @@ export async function copilotFetch(
       return response
     } catch (error) {
       lastError = error as Error
+
+      failLlmDebugAttempt(debugLogId, error)
 
       if (!isRetryableError(error) || attempt === maxAttempts - 1) {
         throw error

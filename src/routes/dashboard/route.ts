@@ -13,17 +13,20 @@ import {
   handleAddModelRedirect,
   handleAddReplacement,
   handleArchiveSession,
+  handleClearLlmDebugLogs,
   handleDeleteFlag,
   handleDeleteModelRedirect,
   handleDeleteModelSettings,
   handleDeleteReplacement,
   handleDeregisterEnvironment,
   handleDestroySession,
+  handleGetLlmDebugLog,
   handleGetSessionEvents,
   handleGetSettings,
   handleGetUsage,
   handleListEnvironments,
   handleListFlags,
+  handleListLlmDebugLogs,
   handleListModelRedirects,
   handleListModelRouting,
   handleListModelSettings,
@@ -132,6 +135,11 @@ dashboardRoutes.post("/api/model-routing", handleSetModelRouting)
 
 // Usage
 dashboardRoutes.get("/api/usage", handleGetUsage)
+
+// LLM Debug Logs
+dashboardRoutes.get("/api/llm-debug", handleListLlmDebugLogs)
+dashboardRoutes.get("/api/llm-debug/:id", handleGetLlmDebugLog)
+dashboardRoutes.delete("/api/llm-debug", handleClearLlmDebugLogs)
 
 // Settings
 dashboardRoutes.get("/api/settings", handleGetSettings)

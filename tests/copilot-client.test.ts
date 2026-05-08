@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
 
+import { clearLlmDebugLogs, listLlmDebugLogs } from "../src/lib/llm-debug-log"
 import { state } from "../src/lib/state"
 import {
   copilotFetch,
@@ -52,6 +53,7 @@ beforeEach(() => {
   queuedResponses.length = 0
   queuedFailures.length = 0
   capturedRequests.length = 0
+  clearLlmDebugLogs()
   state.accountType = "individual"
   state.githubToken = "github-token"
   state.copilotToken = "expired-copilot-token"
@@ -201,4 +203,37 @@ test("does not retry aborted upstream fetches", async () => {
   expect(thrownError.message).toContain("aborted")
 
   expect(capturedRequests).toHaveLength(1)
+})
+
+test("captures raw LLM request and response attempts for dashboard debugging", async () => {
+  queuedResponses.push(
+    new Response('{"choices":[]}', {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }),
+  )
+
+  const requestBody = JSON.stringify({
+    messages: [{ role: "user", content: "debug capture" }],
+    model: "gpt-debug",
+  })
+  const response = await copilotFetch("/chat/completions", {
+    body: requestBody,
+    headers: {
+      Authorization: "Bearer expired-copilot-token",
+      "content-type": "application/json",
+      "X-Request-Id": "req-capture",
+    },
+    method: "POST",
+  })
+  await response.text()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+
+  const logs = listLlmDebugLogs()
+  expect(logs.count).toBe(1)
+  expect(logs.entries[0]?.model).toBe("gpt-debug")
+  expect(logs.entries[0]?.requestId).toBe("req-capture")
+  expect(logs.entries[0]?.requestPreview).toContain("debug capture")
+  expect(logs.entries[0]?.responseStatus).toBe(200)
+  expect(logs.entries[0]?.responsePreview).toContain("choices")
 })
