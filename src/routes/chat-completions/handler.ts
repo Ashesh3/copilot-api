@@ -17,7 +17,10 @@ import {
   usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
 import { checkRateLimit } from "~/lib/rate-limit"
-import { setRequestContext } from "~/lib/request-logger"
+import {
+  recordNonDefaultBehavior,
+  setRequestContext,
+} from "~/lib/request-logger"
 import { getSentryModelName, shouldRecordAiContent } from "~/lib/sentry"
 import { state } from "~/lib/state"
 import { tokenPool } from "~/lib/token-pool"
@@ -75,22 +78,23 @@ async function handleCompletionInner(
 
   const normalizedModel = normalizeModelName(replacedPayload.model)
   const payloadEffort = getPayloadReasoningEffort(replacedPayload)
-  const requestedEffort = normalizeReasoningEffortForModel(
-    normalizedModel,
-    suffixEffort ?? payloadEffort,
-  )
+  const requestedEffort = getNormalizedRequestedEffort(c, {
+    model: normalizedModel,
+    suffixEffort,
+    payloadEffort,
+  })
 
   // Apply user-configured silent model redirect (e.g. opus-4-7 -> opus-4-6)
-  const redirect = await applyModelRedirect({
+  const { targetModel, reasoningEffort } = await resolveRedirectedModel(c, {
     model: normalizedModel,
     effort: requestedEffort,
   })
-  const targetModel = normalizeModelName(redirect.model)
-  const reasoningEffort = normalizeReasoningEffortForModel(
-    targetModel,
-    redirect.effort,
-  )
-  applyRedirectedReasoningEffort(replacedPayload, targetModel, reasoningEffort)
+  applyRedirectedReasoningEffort({
+    c,
+    payload: replacedPayload,
+    model: targetModel,
+    effort: reasoningEffort,
+  })
 
   // Normalize model name (e.g., claude-opus-4-5 -> claude-opus-4.5)
   let payload = {
@@ -98,21 +102,7 @@ async function handleCompletionInner(
     model: targetModel,
   }
 
-  // Fallback: if the base model has no routable account but the -1m variant
-  // does, auto-route to it. The merged model list may include models that no
-  // individual account can serve, causing routedFetch to use the legacy path.
-  if (
-    !payload.model.endsWith("-1m")
-    && tokenPool.hasEnabledAccountForKnownModel(payload.model) === undefined
-  ) {
-    const candidate = `${payload.model}-1m`
-    if (state.models?.data.some((m) => m.id === candidate)) {
-      consola.debug(
-        `No routable account for ${payload.model}, falling back to ${candidate}`,
-      )
-      payload = { ...payload, model: candidate }
-    }
-  }
+  payload = applyRoutableModelFallback(c, payload)
 
   consola.debug("Request payload:", JSON.stringify(payload).slice(-400))
 
@@ -206,17 +196,140 @@ function getPayloadReasoningEffort(
   return undefined
 }
 
-function applyRedirectedReasoningEffort(
-  payload: ChatCompletionsPayload,
-  model: string,
-  effort: ReasoningEffort | undefined,
+function getNormalizedRequestedEffort(
+  c: Context,
+  options: {
+    model: string
+    suffixEffort?: ReasoningEffort
+    payloadEffort?: ReasoningEffort
+  },
+): ReasoningEffort | undefined {
+  const requestedRawEffort = options.suffixEffort ?? options.payloadEffort
+  const requestedEffort = normalizeReasoningEffortForModel(
+    options.model,
+    requestedRawEffort,
+  )
+  if (requestedRawEffort && requestedEffort !== requestedRawEffort) {
+    recordNonDefaultBehavior(c, {
+      kind: "reasoning_effort_clamped",
+      message: `Requested effort ${requestedRawEffort} for ${options.model} was clamped to ${requestedEffort}`,
+      data: {
+        model: options.model,
+        requestedEffort: requestedRawEffort,
+        effectiveEffort: requestedEffort,
+      },
+    })
+  }
+  return requestedEffort
+}
+
+async function resolveRedirectedModel(
+  c: Context,
+  request: { model: string; effort?: ReasoningEffort },
+): Promise<{ targetModel: string; reasoningEffort?: ReasoningEffort }> {
+  const redirect = await applyModelRedirect(request)
+  if (redirect.redirected) {
+    recordNonDefaultBehavior(c, {
+      kind: "model_redirect",
+      message: `Requested ${request.model}${request.effort ? `:${request.effort}` : ""} was routed to ${redirect.model}${redirect.effort ? `:${redirect.effort}` : ""}`,
+      data: {
+        sourceModel: request.model,
+        sourceEffort: request.effort,
+        targetModel: redirect.model,
+        targetEffort: redirect.effort,
+        ruleId: redirect.ruleId,
+      },
+    })
+  }
+
+  const targetModel = normalizeModelName(redirect.model)
+  const reasoningEffort = normalizeReasoningEffortForModel(
+    targetModel,
+    redirect.effort,
+  )
+  reportClampedRedirectEffort(c, {
+    model: targetModel,
+    requestedEffort: redirect.effort,
+    effectiveEffort: reasoningEffort,
+  })
+  return { targetModel, reasoningEffort }
+}
+
+function reportClampedRedirectEffort(
+  c: Context,
+  options: {
+    model: string
+    requestedEffort?: ReasoningEffort
+    effectiveEffort?: ReasoningEffort
+  },
 ): void {
-  const extra = payload as unknown as Record<string, unknown>
-  if (!effort || usesImplicitReasoningDefault(model)) {
+  if (
+    !options.requestedEffort
+    || options.effectiveEffort === options.requestedEffort
+  ) {
+    return
+  }
+  recordNonDefaultBehavior(c, {
+    kind: "reasoning_effort_clamped",
+    message: `Requested redirected effort ${options.requestedEffort} for ${options.model} was clamped to ${options.effectiveEffort}`,
+    data: {
+      model: options.model,
+      requestedEffort: options.requestedEffort,
+      effectiveEffort: options.effectiveEffort,
+    },
+  })
+}
+
+function applyRoutableModelFallback(
+  c: Context,
+  payload: ChatCompletionsPayload & { model: string },
+): ChatCompletionsPayload & { model: string } {
+  if (
+    payload.model.endsWith("-1m")
+    || tokenPool.hasEnabledAccountForKnownModel(payload.model) !== undefined
+  ) {
+    return payload
+  }
+
+  const candidate = `${payload.model}-1m`
+  if (!state.models?.data.some((m) => m.id === candidate)) return payload
+
+  recordNonDefaultBehavior(c, {
+    kind: "model_fallback",
+    message: `No enabled account can serve ${payload.model}; falling back to ${candidate}`,
+    data: {
+      sourceModel: payload.model,
+      targetModel: candidate,
+      reason: "no routable account for known model",
+    },
+  })
+  return { ...payload, model: candidate }
+}
+
+function applyRedirectedReasoningEffort(options: {
+  c: Context
+  payload: ChatCompletionsPayload
+  model: string
+  effort: ReasoningEffort | undefined
+}): void {
+  const extra = options.payload as unknown as Record<string, unknown>
+  if (!options.effort) {
     delete extra.reasoning_effort
     return
   }
-  extra.reasoning_effort = effort
+  if (usesImplicitReasoningDefault(options.model)) {
+    recordNonDefaultBehavior(options.c, {
+      kind: "reasoning_effort_implicit_default",
+      message: `${options.model} is configured for implicit reasoning defaults; removing explicit reasoning_effort=${options.effort}`,
+      data: {
+        model: options.model,
+        requestedEffort: options.effort,
+      },
+    })
+    delete extra.reasoning_effort
+    return
+  }
+  extra.reasoning_effort = options.effort
 }
 
 const handleNonStreamingResponse = (

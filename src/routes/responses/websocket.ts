@@ -10,6 +10,7 @@ import {
   usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
 import { checkRateLimit } from "~/lib/rate-limit"
+import { reportNonDefaultBehavior } from "~/lib/request-logger"
 import { state } from "~/lib/state"
 import { createChatCompletions } from "~/services/copilot/create-chat-completions"
 import {
@@ -154,29 +155,7 @@ async function handleResponseCreate(
 
   // Force streaming for WebSocket mode
   payload.stream = true
-
-  // Apply same transformations as HTTP handler
-  const { baseModel, reasoningEffort: suffixEffort } = parseModelSuffix(
-    payload.model,
-  )
-
-  payload.model = normalizeModelName(baseModel)
-  const effectiveEffort = normalizeResponsesReasoning(payload, suffixEffort)
-  const requestedEffort = normalizeReasoningEffortForModel(
-    payload.model,
-    getRedirectReasoningEffort(effectiveEffort),
-  )
-  const redirect = await applyModelRedirect({
-    model: payload.model,
-    effort: requestedEffort,
-  })
-  // eslint-disable-next-line require-atomic-updates
-  payload.model = normalizeModelName(redirect.model)
-  const redirectedEffort = normalizeReasoningEffortForModel(
-    payload.model,
-    redirect.effort,
-  )
-  applyRedirectedResponsesEffort(payload, payload.model, redirectedEffort)
+  await applyResponsesWebSocketRouting(payload)
 
   useFunctionApplyPatch(payload)
   convertWebSearchTool(payload)
@@ -200,9 +179,7 @@ async function handleResponseCreate(
   const { vision, initiator } = getResponsesRequestOptions(payload)
 
   if (!supportsResponses) {
-    consola.debug(
-      `[responses-ws] Model ${payload.model} does not support /responses, falling back to ChatCompletions`,
-    )
+    reportResponsesWebSocketEndpointFallback(payload.model)
     await streamChatCompletionsOverWs(ws, payload)
     return
   }
@@ -241,16 +218,133 @@ function getRedirectReasoningEffort(
   return undefined
 }
 
+async function applyResponsesWebSocketRouting(
+  payload: ResponsesPayload,
+): Promise<void> {
+  const { baseModel, reasoningEffort: suffixEffort } = parseModelSuffix(
+    payload.model,
+  )
+  payload.model = normalizeModelName(baseModel)
+  const effectiveEffort = normalizeResponsesReasoning(payload, suffixEffort)
+  const redirect = await resolveResponsesWebSocketRedirect(
+    payload.model,
+    effectiveEffort,
+  )
+
+  // eslint-disable-next-line require-atomic-updates
+  payload.model = normalizeModelName(redirect.model)
+  const redirectedEffort = normalizeReasoningEffortForModel(
+    payload.model,
+    redirect.effort,
+  )
+  reportClampedWebSocketEffort({
+    model: payload.model,
+    requestedEffort: redirect.effort,
+    effectiveEffort: redirectedEffort,
+    redirected: true,
+  })
+  applyRedirectedResponsesEffort(payload, payload.model, redirectedEffort)
+}
+
+async function resolveResponsesWebSocketRedirect(
+  model: string,
+  effectiveEffort:
+    | NonNullable<ResponsesPayload["reasoning"]>["effort"]
+    | undefined,
+): Promise<Awaited<ReturnType<typeof applyModelRedirect>>> {
+  const redirectRawEffort = getRedirectReasoningEffort(effectiveEffort)
+  const requestedEffort = normalizeReasoningEffortForModel(
+    model,
+    redirectRawEffort,
+  )
+  reportClampedWebSocketEffort({
+    model,
+    requestedEffort: redirectRawEffort,
+    effectiveEffort: requestedEffort,
+  })
+
+  const redirect = await applyModelRedirect({ model, effort: requestedEffort })
+  if (redirect.redirected) {
+    reportNonDefaultBehavior({
+      kind: "model_redirect",
+      message: `Responses WebSocket requested ${model}${requestedEffort ? `:${requestedEffort}` : ""} was routed to ${redirect.model}${redirect.effort ? `:${redirect.effort}` : ""}`,
+      data: {
+        sourceModel: model,
+        sourceEffort: requestedEffort,
+        targetModel: redirect.model,
+        targetEffort: redirect.effort,
+        ruleId: redirect.ruleId,
+        transport: "websocket",
+      },
+    })
+  }
+  return redirect
+}
+
+function reportClampedWebSocketEffort(options: {
+  model: string
+  requestedEffort?: ReasoningEffort
+  effectiveEffort?: ReasoningEffort
+  redirected?: boolean
+}): void {
+  if (
+    !options.requestedEffort
+    || options.effectiveEffort === options.requestedEffort
+  ) {
+    return
+  }
+  const prefix = options.redirected ? "redirected" : "requested"
+  reportNonDefaultBehavior({
+    kind: "reasoning_effort_clamped",
+    message: `Responses WebSocket ${prefix} effort ${options.requestedEffort} for ${options.model} was clamped to ${options.effectiveEffort}`,
+    data: {
+      model: options.model,
+      requestedEffort: options.requestedEffort,
+      effectiveEffort: options.effectiveEffort,
+      transport: "websocket",
+    },
+  })
+}
+
+function reportResponsesWebSocketEndpointFallback(model: string): void {
+  reportNonDefaultBehavior({
+    kind: "endpoint_fallback",
+    message: `Responses WebSocket model ${model} does not support /responses; falling back to ChatCompletions`,
+    data: {
+      model,
+      sourceEndpoint: "Responses WebSocket",
+      targetEndpoint: "ChatCompletions",
+      transport: "websocket",
+    },
+  })
+}
+
 function applyRedirectedResponsesEffort(
   payload: ResponsesPayload,
   model: string,
   effort: ReasoningEffort | undefined,
 ): void {
   if (!effort) {
-    if (usesImplicitReasoningDefault(model)) delete payload.reasoning
+    if (usesImplicitReasoningDefault(model) && payload.reasoning) {
+      reportNonDefaultBehavior({
+        kind: "reasoning_effort_implicit_default",
+        message: `Responses WebSocket ${model} is configured for implicit reasoning defaults; removing explicit reasoning config`,
+        data: { model, transport: "websocket" },
+      })
+      delete payload.reasoning
+    }
     return
   }
   if (usesImplicitReasoningDefault(model)) {
+    reportNonDefaultBehavior({
+      kind: "reasoning_effort_implicit_default",
+      message: `Responses WebSocket ${model} is configured for implicit reasoning defaults; removing explicit reasoning.effort=${effort}`,
+      data: {
+        model,
+        requestedEffort: effort,
+        transport: "websocket",
+      },
+    })
     delete payload.reasoning
     return
   }

@@ -20,7 +20,10 @@ import {
   usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
 import { checkRateLimit } from "~/lib/rate-limit"
-import { setRequestContext } from "~/lib/request-logger"
+import {
+  recordNonDefaultBehavior,
+  setRequestContext,
+} from "~/lib/request-logger"
 import { getSentryModelName, shouldRecordAiContent } from "~/lib/sentry"
 import { state } from "~/lib/state"
 import { tokenPool } from "~/lib/token-pool"
@@ -168,20 +171,56 @@ async function handleCompletionInner(
   const normalized = normalizeModelName(baseModel)
 
   const bodyEffortOverride = getOutputConfigReasoningEffort(anthropicPayload)
+  const requestedRawEffort = suffixEffort ?? bodyEffortOverride
   const requestedEffort = normalizeReasoningEffortForModel(
     normalized,
-    suffixEffort ?? bodyEffortOverride,
+    requestedRawEffort,
   )
+  if (requestedRawEffort && requestedEffort !== requestedRawEffort) {
+    recordNonDefaultBehavior(c, {
+      kind: "reasoning_effort_clamped",
+      message: `Requested effort ${requestedRawEffort} for ${normalized} was clamped to ${requestedEffort}`,
+      data: {
+        model: normalized,
+        requestedEffort: requestedRawEffort,
+        effectiveEffort: requestedEffort,
+      },
+    })
+  }
 
   // Apply silent model redirect (response will still report requestedModel)
   const redirect = await applyModelRedirect({
     model: normalized,
     effort: requestedEffort,
   })
+  if (redirect.redirected) {
+    recordNonDefaultBehavior(c, {
+      kind: "model_redirect",
+      message: `Requested ${normalized}${requestedEffort ? `:${requestedEffort}` : ""} was routed to ${redirect.model}${redirect.effort ? `:${redirect.effort}` : ""}`,
+      data: {
+        sourceModel: normalized,
+        sourceEffort: requestedEffort,
+        targetModel: redirect.model,
+        targetEffort: redirect.effort,
+        ruleId: redirect.ruleId,
+      },
+    })
+  }
   const redirectEffort = normalizeReasoningEffortForModel(
     redirect.model,
     redirect.effort,
   )
+  if (redirect.effort && redirectEffort !== redirect.effort) {
+    recordNonDefaultBehavior(c, {
+      kind: "reasoning_effort_clamped",
+      message: `Requested redirected effort ${redirect.effort} for ${redirect.model} was clamped to ${redirectEffort}`,
+      data: {
+        model: redirect.model,
+        requestedEffort: redirect.effort,
+        effectiveEffort: redirectEffort,
+      },
+    })
+  }
   // eslint-disable-next-line require-atomic-updates
   anthropicPayload.model = redirect.model
 
@@ -198,7 +237,7 @@ async function handleCompletionInner(
   logger.debug("Anthropic Beta header:", anthropicBeta)
 
   // Route to model variants based on client signals
-  applyModelVariantRouting(anthropicPayload, anthropicBeta)
+  applyModelVariantRouting(c, anthropicPayload, anthropicBeta)
 
   if (isCompact) {
     logger.debug("Is compact request:", isCompact)
@@ -456,9 +495,17 @@ const handleWithChatCompletions = async (
         (isSignatureError || isReasoningBadRequest)
         && stripThinkingBlocks(anthropicPayload)
       ) {
-        logger.warn(
-          `Stripped thinking blocks due to ${isSignatureError ? "invalid signature" : "Bad Request with reasoning"}, retrying without reasoning`,
-        )
+        const reason =
+          isSignatureError ? "invalid signature" : "Bad Request with reasoning"
+        recordNonDefaultBehavior(c, {
+          kind: "reasoning_retry_without_thinking",
+          message: `Stripped thinking blocks due to ${reason}, retrying ChatCompletions without reasoning`,
+          data: {
+            model: anthropicPayload.model,
+            reason,
+            endpoint: "ChatCompletions",
+          },
+        })
         // Fully downgrade reasoning: clear thinking config AND effortOverride.
         // Clearing effortOverride alone is insufficient — executeChatCompletions
         // re-adds reasoning_effort when anthropicPayload.thinking is present.
@@ -507,7 +554,28 @@ const executeChatCompletions = async (
       normalizeModelName(openAIPayload.model),
     )
     if (!usesImplicitDefault) {
-      extra.reasoning_effort = effortOverride ?? "medium"
+      const upstreamEffort = effortOverride ?? "medium"
+      if (!effortOverride) {
+        recordNonDefaultBehavior(c, {
+          kind: "reasoning_effort_default",
+          message: `Thinking is enabled for ${openAIPayload.model}, but no explicit effort survived parsing/redirect; sending upstream reasoning_effort=${upstreamEffort}`,
+          data: {
+            model: openAIPayload.model,
+            defaultEffort: upstreamEffort,
+            thinkingType: anthropicPayload.thinking.type,
+          },
+        })
+      }
+      extra.reasoning_effort = upstreamEffort
+    } else if (effortOverride) {
+      recordNonDefaultBehavior(c, {
+        kind: "reasoning_effort_implicit_default",
+        message: `${openAIPayload.model} is configured for implicit reasoning defaults; removing explicit reasoning_effort=${effortOverride}`,
+        data: {
+          model: openAIPayload.model,
+          requestedEffort: effortOverride,
+        },
+      })
     }
     if (anthropicPayload.thinking.budget_tokens && !usesImplicitDefault) {
       extra.thinking_budget = anthropicPayload.thinking.budget_tokens
@@ -934,9 +1002,17 @@ const handleWithResponsesApi = async (
         (isSignatureError || isReasoningBadRequest)
         && stripThinkingBlocks(anthropicPayload)
       ) {
-        logger.warn(
-          `Stripped thinking blocks due to ${isSignatureError ? "invalid signature" : "Bad Request with reasoning"} (Responses API), retrying without reasoning`,
-        )
+        const reason =
+          isSignatureError ? "invalid signature" : "Bad Request with reasoning"
+        recordNonDefaultBehavior(c, {
+          kind: "reasoning_retry_without_thinking",
+          message: `Stripped thinking blocks due to ${reason}, retrying Responses without reasoning`,
+          data: {
+            model: anthropicPayload.model,
+            reason,
+            endpoint: "Responses",
+          },
+        })
         delete anthropicPayload.thinking
         return await executeResponsesApi(c, anthropicPayload, {
           ...options,
@@ -1203,6 +1279,7 @@ const modelExists = (id: string) =>
  * Mutates the payload in place.
  */
 function applyModelVariantRouting(
+  c: Context,
   payload: AnthropicMessagesPayload,
   anthropicBeta: string | undefined,
 ): void {
@@ -1210,6 +1287,15 @@ function applyModelVariantRouting(
   if (anthropicBeta?.includes("context-1m")) {
     const candidate = `${payload.model}-1m`
     if (modelExists(candidate)) {
+      recordNonDefaultBehavior(c, {
+        kind: "model_variant_routing",
+        message: `anthropic-beta context-1m routed ${payload.model} to ${candidate}`,
+        data: {
+          sourceModel: payload.model,
+          targetModel: candidate,
+          reason: "context-1m beta header",
+        },
+      })
       payload.model = candidate
     }
   }
@@ -1225,9 +1311,15 @@ function applyModelVariantRouting(
     if (hasEnabledAccount === undefined) {
       const candidate = `${payload.model}-1m`
       if (modelExists(candidate)) {
-        logger.debug(
-          `No routable account for ${payload.model}, falling back to ${candidate}`,
-        )
+        recordNonDefaultBehavior(c, {
+          kind: "model_fallback",
+          message: `No enabled account can serve ${payload.model}; falling back to ${candidate}`,
+          data: {
+            sourceModel: payload.model,
+            targetModel: candidate,
+            reason: "no routable account for known model",
+          },
+        })
         payload.model = candidate
       }
     }
@@ -1237,8 +1329,26 @@ function applyModelVariantRouting(
   if (payload.speed === "fast") {
     const candidate = `${payload.model}-fast`
     if (modelExists(candidate)) {
+      recordNonDefaultBehavior(c, {
+        kind: "model_variant_routing",
+        message: `speed=fast routed ${payload.model} to ${candidate}`,
+        data: {
+          sourceModel: payload.model,
+          targetModel: candidate,
+          reason: "speed=fast",
+        },
+      })
       payload.model = candidate
     }
+    recordNonDefaultBehavior(c, {
+      kind: "request_field_stripped",
+      message: `Removed unsupported speed=${payload.speed} before forwarding ${payload.model}`,
+      data: {
+        model: payload.model,
+        field: "speed",
+        value: payload.speed,
+      },
+    })
     delete payload.speed
   }
 }
@@ -1289,6 +1399,7 @@ function getOutputConfigReasoningEffort(
     case "high": {
       return "high"
     }
+    case "xhigh":
     case "max": {
       return "xhigh"
     }

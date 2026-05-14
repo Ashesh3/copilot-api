@@ -20,6 +20,18 @@ export interface RequestContext {
   replacements?: Array<string>
   reasoningEffort?: string
   accountId?: number
+  nonDefaultBehaviors?: Array<RequestBehavior>
+}
+
+type RequestBehaviorData = Record<
+  string,
+  string | number | boolean | null | undefined
+>
+
+export interface RequestBehavior {
+  kind: string
+  message: string
+  data?: RequestBehaviorData
 }
 
 const REQUEST_CONTEXT_KEY = "requestContext"
@@ -146,6 +158,53 @@ export function setRequestContext(
   }
 }
 
+export function recordNonDefaultBehavior(
+  c: Context,
+  behavior: RequestBehavior,
+): void {
+  const existing = c.get(REQUEST_CONTEXT_KEY) as RequestContext | undefined
+  const nonDefaultBehaviors = [
+    ...(existing?.nonDefaultBehaviors ?? []),
+    behavior,
+  ]
+
+  c.set(REQUEST_CONTEXT_KEY, {
+    ...(existing ?? { startTime: Date.now() }),
+    nonDefaultBehaviors,
+  } as RequestContext)
+
+  reportNonDefaultBehavior(behavior)
+}
+
+export function reportNonDefaultBehavior(behavior: RequestBehavior): void {
+  const consoleLine = `${colors.yellow}${colors.bold}[NON-DEFAULT]${colors.reset} ${colors.yellow}${behavior.kind}: ${behavior.message}${colors.reset}`
+  console.warn(consoleLine)
+
+  Sentry.addBreadcrumb({
+    category: "copilot-api.non_default_behavior",
+    level: "warning",
+    message: behavior.message,
+    data: { kind: behavior.kind, ...behavior.data },
+  })
+  Sentry.getActiveSpan()?.setAttribute(
+    `copilot_api.non_default.${behavior.kind}`,
+    behavior.message,
+  )
+  Sentry.logger.warn(`[NON-DEFAULT] ${behavior.kind}: ${behavior.message}`, {
+    kind: behavior.kind,
+    ...behavior.data,
+  })
+  Sentry.withScope((scope) => {
+    scope.setLevel("warning")
+    scope.setTag("copilot_api.non_default_behavior", behavior.kind)
+    scope.setContext("non_default_behavior", {
+      message: behavior.message,
+      ...behavior.data,
+    })
+    Sentry.captureMessage(`[NON-DEFAULT] ${behavior.kind}: ${behavior.message}`)
+  })
+}
+
 /**
  * Format the input size for display
  */
@@ -216,6 +275,13 @@ function buildModificationsLine(ctx: RequestContext): string | undefined {
   return `  ${modParts.join(` ${colors.dim}·${colors.reset} `)}`
 }
 
+function buildNonDefaultBehaviorLines(ctx: RequestContext): Array<string> {
+  return (ctx.nonDefaultBehaviors ?? []).map(
+    (behavior) =>
+      `  ${colors.yellow}${colors.bold}! ${behavior.kind}${colors.reset} ${colors.yellow}${behavior.message}${colors.reset}`,
+  )
+}
+
 /**
  * Build a plain-text model line for Sentry (no ANSI codes)
  */
@@ -268,6 +334,16 @@ function buildPlainModificationsLine(ctx: RequestContext): string | undefined {
   return modParts.join(" · ")
 }
 
+function buildPlainNonDefaultBehaviors(
+  ctx: RequestContext,
+): string | undefined {
+  const behaviors = ctx.nonDefaultBehaviors ?? []
+  if (behaviors.length === 0) return undefined
+  return behaviors
+    .map((behavior) => `${behavior.kind}: ${behavior.message}`)
+    .join(" ; ")
+}
+
 /**
  * Send enriched request log to Sentry (plain text, no ANSI codes)
  */
@@ -288,6 +364,8 @@ function sendRequestLogToSentry(opts: {
   if (ctx) {
     const modsLine = buildPlainModificationsLine(ctx)
     if (modsLine) sentryParts.push(modsLine)
+    const behaviorLine = buildPlainNonDefaultBehaviors(ctx)
+    if (behaviorLine) sentryParts.push(`NON-DEFAULT: ${behaviorLine}`)
   }
   Sentry.logger.info(sentryParts.join(" | "), {
     method,
@@ -300,6 +378,9 @@ function sendRequestLogToSentry(opts: {
     provider: ctx?.provider,
     inputTokens: ctx?.inputTokens,
     accountId: ctx?.accountId,
+    nonDefaultBehaviors: ctx?.nonDefaultBehaviors?.map(
+      (behavior) => `${behavior.kind}: ${behavior.message}`,
+    ),
   })
 }
 
@@ -358,6 +439,7 @@ export async function requestLogger(c: Context, next: Next): Promise<void> {
   if (ctx) {
     const modsLine = buildModificationsLine(ctx)
     if (modsLine) lines.push(modsLine)
+    lines.push(...buildNonDefaultBehaviorLines(ctx))
   }
 
   // Timestamp

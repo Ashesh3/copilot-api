@@ -26,7 +26,10 @@ import {
   usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
 import { checkRateLimit } from "~/lib/rate-limit"
-import { setRequestContext } from "~/lib/request-logger"
+import {
+  recordNonDefaultBehavior,
+  setRequestContext,
+} from "~/lib/request-logger"
 import { state } from "~/lib/state"
 import { getTokenCount } from "~/lib/tokenizer"
 import { isNullish } from "~/lib/utils"
@@ -141,6 +144,7 @@ function parseModelAction(modelAction: string): {
  * Cap max_tokens at the model's advertised limit to prevent 400 errors.
  */
 function capMaxTokens(
+  c: Context,
   payload: ChatCompletionsPayload,
   selectedModel:
     | { capabilities: { limits: { max_output_tokens?: number } } }
@@ -152,14 +156,23 @@ function capMaxTokens(
   if (isNullish(payload.max_tokens)) {
     payload.max_tokens = maxAllowed
   } else if (payload.max_tokens > maxAllowed) {
-    consola.debug(
-      `Capping max_tokens from ${payload.max_tokens} to ${maxAllowed} for ${payload.model}`,
-    )
+    recordNonDefaultBehavior(c, {
+      kind: "max_tokens_capped",
+      message: `Capping max_tokens from ${payload.max_tokens} to ${maxAllowed} for ${payload.model}`,
+      data: {
+        model: payload.model,
+        requestedMaxTokens: payload.max_tokens,
+        effectiveMaxTokens: maxAllowed,
+      },
+    })
     payload.max_tokens = maxAllowed
   }
 }
 
-async function resolveGoogleModelRedirect(rawModel: string): Promise<{
+async function resolveGoogleModelRedirect(
+  c: Context,
+  rawModel: string,
+): Promise<{
   model: string
   reasoningEffort?: ReasoningEffort
 }> {
@@ -167,17 +180,53 @@ async function resolveGoogleModelRedirect(rawModel: string): Promise<{
     parseModelSuffix(rawModel)
   const model = normalizeModelName(baseModel)
   const requestedEffort = normalizeReasoningEffortForModel(model, suffixEffort)
+  if (suffixEffort && requestedEffort !== suffixEffort) {
+    recordNonDefaultBehavior(c, {
+      kind: "reasoning_effort_clamped",
+      message: `Requested effort ${suffixEffort} for ${model} was clamped to ${requestedEffort}`,
+      data: {
+        model,
+        requestedEffort: suffixEffort,
+        effectiveEffort: requestedEffort,
+      },
+    })
+  }
   const redirect = await applyModelRedirect({
     model,
     effort: requestedEffort,
   })
+  if (redirect.redirected) {
+    recordNonDefaultBehavior(c, {
+      kind: "model_redirect",
+      message: `Requested ${model}${requestedEffort ? `:${requestedEffort}` : ""} was routed to ${redirect.model}${redirect.effort ? `:${redirect.effort}` : ""}`,
+      data: {
+        sourceModel: model,
+        sourceEffort: requestedEffort,
+        targetModel: redirect.model,
+        targetEffort: redirect.effort,
+        ruleId: redirect.ruleId,
+      },
+    })
+  }
   const targetModel = normalizeModelName(redirect.model)
+  const reasoningEffort = normalizeReasoningEffortForModel(
+    targetModel,
+    redirect.effort,
+  )
+  if (redirect.effort && reasoningEffort !== redirect.effort) {
+    recordNonDefaultBehavior(c, {
+      kind: "reasoning_effort_clamped",
+      message: `Requested redirected effort ${redirect.effort} for ${targetModel} was clamped to ${reasoningEffort}`,
+      data: {
+        model: targetModel,
+        requestedEffort: redirect.effort,
+        effectiveEffort: reasoningEffort,
+      },
+    })
+  }
   return {
     model: targetModel,
-    reasoningEffort: normalizeReasoningEffortForModel(
-      targetModel,
-      redirect.effort,
-    ),
+    reasoningEffort,
   }
 }
 
@@ -205,7 +254,10 @@ export async function handleGoogleAI(c: Context) {
 
   // Apply silent model redirect — google-ai response format does not include
   // a model field, so client-facing transparency is automatic.
-  const { model, reasoningEffort } = await resolveGoogleModelRedirect(rawModel)
+  const { model, reasoningEffort } = await resolveGoogleModelRedirect(
+    c,
+    rawModel,
+  )
 
   logger.debug(`Google AI request: model=${model}, action=${action}`)
 
@@ -243,7 +295,7 @@ export async function handleGoogleAI(c: Context) {
 
   // Translate Google → OpenAI ChatCompletions format
   const openAIPayload = translateGoogleToOpenAI(googlePayload, model, isStream)
-  applyGoogleReasoningEffort(openAIPayload, reasoningEffort)
+  applyGoogleReasoningEffort(c, openAIPayload, reasoningEffort)
 
   // Apply auto-replacements
   const { payload: replacedPayload, appliedRules } =
@@ -285,7 +337,7 @@ export async function handleGoogleAI(c: Context) {
     await awaitApproval()
   }
 
-  capMaxTokens(finalPayload, selectedModel)
+  capMaxTokens(c, finalPayload, selectedModel)
 
   consola.debug(
     `[google-ai] Translated payload: model=${finalPayload.model}, max_tokens=${finalPayload.max_tokens}, stream=${finalPayload.stream}, tools=${finalPayload.tools?.length ?? 0}, messages=${finalPayload.messages.length}`,
@@ -308,11 +360,24 @@ export async function handleGoogleAI(c: Context) {
 }
 
 function applyGoogleReasoningEffort(
+  c: Context,
   payload: ChatCompletionsPayload,
   effort: ReasoningEffort | undefined,
 ): void {
   const extra = payload as unknown as Record<string, unknown>
-  if (!effort || usesImplicitReasoningDefault(payload.model)) {
+  if (!effort) {
+    delete extra.reasoning_effort
+    return
+  }
+  if (usesImplicitReasoningDefault(payload.model)) {
+    recordNonDefaultBehavior(c, {
+      kind: "reasoning_effort_implicit_default",
+      message: `${payload.model} is configured for implicit reasoning defaults; removing explicit reasoning_effort=${effort}`,
+      data: {
+        model: payload.model,
+        requestedEffort: effort,
+      },
+    })
     delete extra.reasoning_effort
     return
   }

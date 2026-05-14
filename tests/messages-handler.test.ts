@@ -115,6 +115,28 @@ test("maps output_config.effort onto chat completions reasoning_effort", async (
   ).toBe("xhigh")
 })
 
+test("maps literal xhigh output_config.effort onto chat completions reasoning_effort", async () => {
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "Think carefully." }],
+      max_tokens: 32,
+      thinking: { type: "enabled" },
+      output_config: { effort: "xhigh" },
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(
+    (lastUpstreamPayload as Record<string, unknown> | undefined)
+      ?.reasoning_effort,
+  ).toBe("xhigh")
+})
+
 test("defaults chat completions reasoning_effort to medium when thinking is enabled", async () => {
   const response = await server.request("/v1/messages", {
     method: "POST",

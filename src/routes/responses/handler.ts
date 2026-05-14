@@ -2,7 +2,6 @@
 import type { Context } from "hono"
 
 import * as Sentry from "@sentry/bun"
-import consola from "consola"
 import { streamSSE } from "hono/streaming"
 
 import { getLastUsedAccountId } from "~/lib/account-router"
@@ -19,7 +18,10 @@ import {
   usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
 import { checkRateLimit } from "~/lib/rate-limit"
-import { setRequestContext } from "~/lib/request-logger"
+import {
+  recordNonDefaultBehavior,
+  setRequestContext,
+} from "~/lib/request-logger"
 import { getSentryModelName, shouldRecordAiContent } from "~/lib/sentry"
 import { state } from "~/lib/state"
 import { tokenPool } from "~/lib/token-pool"
@@ -215,21 +217,144 @@ function getRedirectReasoningEffort(
   return undefined
 }
 
-function applyRedirectedResponsesEffort(
-  payload: ResponsesPayload,
-  model: string,
-  effort: ReasoningEffort | undefined,
+function applyRedirectedResponsesEffort(options: {
+  c: Context
+  payload: ResponsesPayload
+  model: string
+  effort: ReasoningEffort | undefined
+}): void {
+  if (!options.effort) {
+    if (
+      usesImplicitReasoningDefault(options.model)
+      && options.payload.reasoning
+    ) {
+      recordNonDefaultBehavior(options.c, {
+        kind: "reasoning_effort_implicit_default",
+        message: `${options.model} is configured for implicit reasoning defaults; removing explicit reasoning config`,
+        data: {
+          model: options.model,
+        },
+      })
+      delete options.payload.reasoning
+    }
+    return
+  }
+  if (usesImplicitReasoningDefault(options.model)) {
+    recordNonDefaultBehavior(options.c, {
+      kind: "reasoning_effort_implicit_default",
+      message: `${options.model} is configured for implicit reasoning defaults; removing explicit reasoning.effort=${options.effort}`,
+      data: {
+        model: options.model,
+        requestedEffort: options.effort,
+      },
+    })
+    delete options.payload.reasoning
+    return
+  }
+  options.payload.reasoning =
+    options.payload.reasoning ?
+      { ...options.payload.reasoning, effort: options.effort }
+    : { effort: options.effort }
+}
+
+async function resolveResponsesRedirect(
+  c: Context,
+  request: { model: string; effectiveEffort?: ResponsesReasoningEffort },
+): Promise<Awaited<ReturnType<typeof applyModelRedirect>>> {
+  const redirectRawEffort = getRedirectReasoningEffort(request.effectiveEffort)
+  const requestedEffort = normalizeReasoningEffortForModel(
+    request.model,
+    redirectRawEffort,
+  )
+  reportClampedResponsesEffort(c, {
+    model: request.model,
+    requestedEffort: redirectRawEffort,
+    effectiveEffort: requestedEffort,
+  })
+
+  const redirect = await applyModelRedirect({
+    model: request.model,
+    effort: requestedEffort,
+  })
+  if (redirect.redirected) {
+    recordNonDefaultBehavior(c, {
+      kind: "model_redirect",
+      message: `Requested ${request.model}${requestedEffort ? `:${requestedEffort}` : ""} was routed to ${redirect.model}${redirect.effort ? `:${redirect.effort}` : ""}`,
+      data: {
+        sourceModel: request.model,
+        sourceEffort: requestedEffort,
+        targetModel: redirect.model,
+        targetEffort: redirect.effort,
+        ruleId: redirect.ruleId,
+      },
+    })
+  }
+  return redirect
+}
+
+function reportClampedResponsesEffort(
+  c: Context,
+  options: {
+    model: string
+    requestedEffort?: ReasoningEffort
+    effectiveEffort?: ReasoningEffort
+    redirected?: boolean
+  },
 ): void {
-  if (!effort) {
-    if (usesImplicitReasoningDefault(model)) delete payload.reasoning
+  if (
+    !options.requestedEffort
+    || options.effectiveEffort === options.requestedEffort
+  ) {
     return
   }
-  if (usesImplicitReasoningDefault(model)) {
-    delete payload.reasoning
+  const prefix = options.redirected ? "Requested redirected" : "Requested"
+  recordNonDefaultBehavior(c, {
+    kind: "reasoning_effort_clamped",
+    message: `${prefix} effort ${options.requestedEffort} for ${options.model} was clamped to ${options.effectiveEffort}`,
+    data: {
+      model: options.model,
+      requestedEffort: options.requestedEffort,
+      effectiveEffort: options.effectiveEffort,
+    },
+  })
+}
+
+function applyResponsesModelFallback(
+  c: Context,
+  payload: ResponsesPayload,
+): void {
+  if (
+    payload.model.endsWith("-1m")
+    || tokenPool.hasEnabledAccountForKnownModel(payload.model) !== undefined
+  ) {
     return
   }
-  payload.reasoning =
-    payload.reasoning ? { ...payload.reasoning, effort } : { effort }
+
+  const candidate = `${payload.model}-1m`
+  if (!state.models?.data.some((m) => m.id === candidate)) return
+
+  recordNonDefaultBehavior(c, {
+    kind: "model_fallback",
+    message: `No enabled account can serve ${payload.model}; falling back to ${candidate}`,
+    data: {
+      sourceModel: payload.model,
+      targetModel: candidate,
+      reason: "no routable account for known model",
+    },
+  })
+  payload.model = candidate
+}
+
+function reportResponsesEndpointFallback(c: Context, model: string): void {
+  recordNonDefaultBehavior(c, {
+    kind: "endpoint_fallback",
+    message: `Model ${model} does not support /responses; falling back to ChatCompletions`,
+    data: {
+      model,
+      sourceEndpoint: "Responses",
+      targetEndpoint: "ChatCompletions",
+    },
+  })
 }
 
 function withRequestedResponseModel(
@@ -291,14 +416,9 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
 
   payload.model = normalizeModelName(baseModel)
   const effectiveEffort = normalizeResponsesReasoning(payload, suffixEffort)
-  const requestedEffort = normalizeReasoningEffortForModel(
-    payload.model,
-    getRedirectReasoningEffort(effectiveEffort),
-  )
-
-  const redirect = await applyModelRedirect({
+  const redirect = await resolveResponsesRedirect(c, {
     model: payload.model,
-    effort: requestedEffort,
+    effectiveEffort,
   })
   // eslint-disable-next-line require-atomic-updates
   payload.model = normalizeModelName(redirect.model)
@@ -306,24 +426,21 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
     payload.model,
     redirect.effort,
   )
-  applyRedirectedResponsesEffort(payload, payload.model, redirectedEffort)
+  reportClampedResponsesEffort(c, {
+    model: payload.model,
+    requestedEffort: redirect.effort,
+    effectiveEffort: redirectedEffort,
+    redirected: true,
+  })
+  applyRedirectedResponsesEffort({
+    c,
+    payload,
+    model: payload.model,
+    effort: redirectedEffort,
+  })
   const finalEffort = redirectedEffort ?? effectiveEffort
 
-  // Fallback: if the base model has no routable account but the -1m variant
-  // does, auto-route to it. The merged model list may include models that no
-  // individual account can serve, causing routedFetch to use the legacy path.
-  if (
-    !payload.model.endsWith("-1m")
-    && tokenPool.hasEnabledAccountForKnownModel(payload.model) === undefined
-  ) {
-    const candidate = `${payload.model}-1m`
-    if (state.models?.data.some((m) => m.id === candidate)) {
-      consola.debug(
-        `No routable account for ${payload.model}, falling back to ${candidate}`,
-      )
-      payload.model = candidate
-    }
-  }
+  applyResponsesModelFallback(c, payload)
 
   setRequestContext(c, {
     requestedModel,
@@ -348,9 +465,7 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
     selectedModel?.supported_endpoints?.includes(RESPONSES_ENDPOINT) ?? false
 
   if (!supportsResponses) {
-    consola.debug(
-      `[responses] Model ${payload.model} does not support /responses, falling back to ChatCompletions`,
-    )
+    reportResponsesEndpointFallback(c, payload.model)
     setRequestContext(c, { provider: "Responses→ChatCompletions" })
     return await handleWithChatCompletions(c, payload, requestedModel)
   }
