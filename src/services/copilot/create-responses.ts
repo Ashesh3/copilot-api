@@ -221,6 +221,7 @@ export interface ResponseOutputReasoning {
   id: string
   type: "reasoning"
   summary?: Array<ResponseReasoningBlock>
+  content?: Array<ResponseReasoningBlock>
   encrypted_content?: string
   status?: "completed" | "in_progress" | "incomplete"
 }
@@ -277,6 +278,7 @@ export type ResponseStreamEvent =
   | ResponseFailedEvent
   | ResponseOutputItemAddedEvent
   | ResponseOutputItemDoneEvent
+  | ResponseReasoningTextDeltaEvent
   | ResponseReasoningSummaryTextDeltaEvent
   | ResponseReasoningSummaryTextDoneEvent
   | ResponseTextDeltaEvent
@@ -352,6 +354,15 @@ export interface ResponseReasoningSummaryTextDeltaEvent {
   sequence_number: number
   summary_index: number
   type: "response.reasoning_summary_text.delta"
+}
+
+export interface ResponseReasoningTextDeltaEvent {
+  content_index: number
+  delta: string
+  item_id?: string
+  output_index?: number
+  sequence_number: number
+  type: "response.reasoning_text.delta"
 }
 
 export interface ResponseReasoningSummaryTextDoneEvent {

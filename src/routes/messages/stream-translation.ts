@@ -32,6 +32,37 @@ function normalizeToolCallIndex(
   return Math.max(0, index - state.toolCallIndexOffset)
 }
 
+function closeThinkingBlockIfOpen(
+  state: AnthropicStreamState,
+  events: Array<AnthropicStreamEventData>,
+): void {
+  if (!state.thinkingBlockOpen) return
+
+  const thinkingIdx = state.thinkingBlockIndex ?? state.contentBlockIndex
+  if (state.pendingSignature) {
+    events.push({
+      type: "content_block_delta",
+      index: thinkingIdx,
+      delta: {
+        type: "signature_delta",
+        signature: state.pendingSignature,
+      },
+    })
+    state.pendingSignature = undefined
+  }
+  events.push({
+    type: "content_block_stop",
+    index: thinkingIdx,
+  })
+  state.thinkingBlockOpen = false
+  state.thinkingBlockIndex = undefined
+
+  if (state.contentBlockIndex === thinkingIdx) {
+    state.contentBlockIndex++
+  }
+  state.contentBlockOpen = false
+}
+
 export function extractCopilotChunkMetadata(chunk: ChatCompletionChunk):
   | {
       annotations?: unknown
@@ -239,28 +270,7 @@ export function translateChunkToAnthropicEvents(
 
   if (delta.content) {
     // Close thinking block if it was open before starting text
-    if (state.thinkingBlockOpen) {
-      const thinkingIdx = state.thinkingBlockIndex ?? state.contentBlockIndex
-      // Emit signature_delta if we have a pending signature
-      if (state.pendingSignature) {
-        events.push({
-          type: "content_block_delta",
-          index: thinkingIdx,
-          delta: {
-            type: "signature_delta",
-            signature: state.pendingSignature,
-          },
-        })
-        state.pendingSignature = undefined
-      }
-      events.push({
-        type: "content_block_stop",
-        index: thinkingIdx,
-      })
-      state.thinkingBlockOpen = false
-      state.contentBlockIndex++
-      state.contentBlockOpen = false
-    }
+    closeThinkingBlockIfOpen(state, events)
 
     if (isToolBlockOpen(state)) {
       // A tool block was open, so close it before starting a text block.
@@ -300,6 +310,8 @@ export function translateChunkToAnthropicEvents(
 
       if (toolCall.id && toolCall.function?.name) {
         // New tool call starting.
+        closeThinkingBlockIfOpen(state, events)
+
         if (state.contentBlockOpen) {
           // Close any previously open block.
           events.push({
@@ -350,33 +362,7 @@ export function translateChunkToAnthropicEvents(
 
   if (choice.finish_reason) {
     // Close thinking block if still open
-    if (state.thinkingBlockOpen) {
-      const thinkingIdx = state.thinkingBlockIndex ?? state.contentBlockIndex
-      // Emit signature_delta if we have a pending signature
-      if (state.pendingSignature) {
-        events.push({
-          type: "content_block_delta",
-          index: thinkingIdx,
-          delta: {
-            type: "signature_delta",
-            signature: state.pendingSignature,
-          },
-        })
-        state.pendingSignature = undefined
-      }
-      events.push({
-        type: "content_block_stop",
-        index: thinkingIdx,
-      })
-      state.thinkingBlockOpen = false
-      if (
-        !state.contentBlockOpen
-        || state.contentBlockIndex === state.thinkingBlockIndex
-      ) {
-        state.contentBlockIndex++
-        state.contentBlockOpen = false
-      }
-    }
+    closeThinkingBlockIfOpen(state, events)
 
     if (state.contentBlockOpen) {
       events.push({

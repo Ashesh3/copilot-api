@@ -8,6 +8,7 @@ import {
   type ResponseIncompleteEvent,
   type ResponseOutputItemAddedEvent,
   type ResponseOutputItemDoneEvent,
+  type ResponseReasoningTextDeltaEvent,
   type ResponseReasoningSummaryTextDeltaEvent,
   type ResponseReasoningSummaryTextDoneEvent,
   type ResponsesResult,
@@ -100,6 +101,10 @@ export const translateResponsesStreamEvent = (
 
     case "response.reasoning_summary_text.delta": {
       return handleReasoningSummaryTextDelta(rawEvent, state)
+    }
+
+    case "response.reasoning_text.delta": {
+      return handleReasoningTextDelta(rawEvent, state)
     }
 
     case "response.output_text.delta": {
@@ -355,6 +360,28 @@ const handleReasoningSummaryTextDelta = (
   const outputIndex = rawEvent.output_index
   const deltaText = rawEvent.delta
   const events = new Array<AnthropicStreamEventData>()
+  const blockIndex = openThinkingBlockIfNeeded(state, outputIndex, events)
+
+  events.push({
+    type: "content_block_delta",
+    index: blockIndex,
+    delta: {
+      type: "thinking_delta",
+      thinking: deltaText,
+    },
+  })
+  state.blockHasDelta.add(blockIndex)
+
+  return events
+}
+
+const handleReasoningTextDelta = (
+  rawEvent: ResponseReasoningTextDeltaEvent,
+  state: ResponsesStreamState,
+): Array<AnthropicStreamEventData> => {
+  const deltaText = rawEvent.delta
+  const events = new Array<AnthropicStreamEventData>()
+  const outputIndex = rawEvent.output_index ?? 0
   const blockIndex = openThinkingBlockIfNeeded(state, outputIndex, events)
 
   events.push({

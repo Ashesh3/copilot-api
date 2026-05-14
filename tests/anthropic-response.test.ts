@@ -388,6 +388,88 @@ describe("OpenAI to Anthropic Streaming Response Translation", () => {
     }
   })
 
+  test("preserves reasoning signature when a tool call follows thinking", () => {
+    const openAIStream: Array<ChatCompletionChunk> = [
+      {
+        id: "cmpl-reasoning-tool",
+        object: "chat.completion.chunk",
+        created: 1677652288,
+        model: "gemini-3-pro-preview",
+        choices: [
+          {
+            index: 0,
+            delta: {
+              role: "assistant",
+              reasoning_text: "I should fetch repository details first.",
+            },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      },
+      {
+        id: "cmpl-reasoning-tool",
+        object: "chat.completion.chunk",
+        created: 1677652288,
+        model: "gemini-3-pro-preview",
+        choices: [
+          {
+            index: 0,
+            delta: {
+              reasoning_opaque: "opaque-thinking-state",
+              tool_calls: [
+                {
+                  index: 0,
+                  id: "call_repo",
+                  type: "function",
+                  function: {
+                    name: "get_repo",
+                    arguments: '{"repo":"github/github"}',
+                  },
+                },
+              ],
+            },
+            finish_reason: "tool_calls",
+            logprobs: null,
+          },
+        ],
+        usage: {
+          prompt_tokens: 20,
+          completion_tokens: 8,
+          total_tokens: 28,
+          prompt_tokens_details: { cached_tokens: 0 },
+        },
+      },
+    ]
+
+    const streamState: AnthropicStreamState = {
+      messageStartSent: false,
+      contentBlockIndex: 0,
+      contentBlockOpen: false,
+      toolCalls: {},
+    }
+
+    const translatedStream = openAIStream.flatMap((chunk) =>
+      translateChunkToAnthropicEvents(chunk, streamState),
+    )
+
+    const signatureIndex = translatedStream.findIndex(
+      (event) =>
+        event.type === "content_block_delta"
+        && event.delta.type === "signature_delta"
+        && event.delta.signature === "opaque-thinking-state",
+    )
+    const toolStartIndex = translatedStream.findIndex(
+      (event) =>
+        event.type === "content_block_start"
+        && event.content_block.type === "tool_use",
+    )
+
+    expect(signatureIndex).toBeGreaterThan(-1)
+    expect(toolStartIndex).toBeGreaterThan(-1)
+    expect(signatureIndex).toBeLessThan(toolStartIndex)
+  })
+
   test("normalizes missing finish_reason to tool_use when a tool-call stream ends", () => {
     const openAIStream: Array<ChatCompletionChunk> = [
       {

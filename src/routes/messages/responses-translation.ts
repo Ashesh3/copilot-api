@@ -541,14 +541,12 @@ const extractReasoningText = (item: ResponseOutputReasoning): string => {
     }
   }
 
-  // Compatible with opencode, it will filter out blocks where the thinking text is empty, so we add a default thinking text here
-  if (!item.summary || item.summary.length === 0) {
-    return THINKING_TEXT
-  }
-
   collectFromBlocks(item.summary)
+  collectFromBlocks(item.content)
 
-  return segments.join("").trim()
+  const text = segments.join("").trim()
+  // Compatible with opencode, it will filter out blocks where the thinking text is empty, so we add a default thinking text here
+  return text.length > 0 ? text : THINKING_TEXT
 }
 
 const createToolUseContentBlock = (
