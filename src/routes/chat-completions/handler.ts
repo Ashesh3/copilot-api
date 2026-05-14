@@ -8,7 +8,10 @@ import { getLastUsedAccountId } from "~/lib/account-router"
 import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
 import { isAbortError } from "~/lib/error"
-import { applyModelRedirect } from "~/lib/model-redirect"
+import {
+  applyModelRedirect,
+  formatModelRedirectResult,
+} from "~/lib/model-redirect"
 import { normalizeModelName } from "~/lib/model-resolver"
 import {
   type ReasoningEffort,
@@ -231,13 +234,14 @@ async function resolveRedirectedModel(
   if (redirect.redirected) {
     recordNonDefaultBehavior(c, {
       kind: "model_redirect",
-      message: `Requested ${request.model}${request.effort ? `:${request.effort}` : ""} was routed to ${redirect.model}${redirect.effort ? `:${redirect.effort}` : ""}`,
+      message: `Model redirect chain: ${formatModelRedirectResult(redirect)}`,
       data: {
         sourceModel: request.model,
         sourceEffort: request.effort,
         targetModel: redirect.model,
         targetEffort: redirect.effort,
         ruleId: redirect.ruleId,
+        ruleIds: redirect.ruleIds?.join(","),
       },
     })
   }

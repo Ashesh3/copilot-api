@@ -309,12 +309,25 @@ export interface ModelRedirectResult {
   originalModel?: string
   originalEffort?: ReasoningEffort
   ruleId?: string
+  ruleIds?: Array<string>
+  redirectChain?: Array<ModelRedirectStep>
 }
 
 export interface ModelRedirectRequest {
   model: string
   effort?: ReasoningEffort
 }
+
+export interface ModelRedirectStep {
+  ruleId: string
+  ruleName?: string
+  sourceModel: string
+  sourceEffort?: ReasoningEffort
+  targetModel: string
+  targetEffort?: ReasoningEffort
+}
+
+const MAX_REDIRECT_CHAIN_LENGTH = 10
 
 function matchesEffort(
   filter: ModelRedirectEffortFilter,
@@ -323,6 +336,63 @@ function matchesEffort(
   if (filter === "all") return true
   if (filter === "default") return effort === undefined
   return filter === effort
+}
+
+function findMatchingRedirectRule(
+  model: string,
+  effort: ReasoningEffort | undefined,
+): ModelRedirectRule | undefined {
+  return redirects.find(
+    (rule) =>
+      rule.enabled
+      && rule.sourceModel === model
+      && matchesEffort(rule.sourceEffort, effort),
+  )
+}
+
+function formatModelWithEffort(
+  model: string,
+  effort: ReasoningEffort | undefined,
+): string {
+  return effort ? `${model}:${effort}` : model
+}
+
+function getRedirectStateKey(
+  model: string,
+  effort: ReasoningEffort | undefined,
+): string {
+  return formatModelWithEffort(model, effort ?? undefined)
+}
+
+function createRedirectStep(
+  rule: ModelRedirectRule,
+  sourceModel: string,
+  sourceEffort: ReasoningEffort | undefined,
+): ModelRedirectStep {
+  return {
+    ruleId: rule.id,
+    ruleName: rule.name,
+    sourceModel,
+    sourceEffort,
+    targetModel: rule.targetModel,
+    targetEffort: rule.targetEffort ?? sourceEffort,
+  }
+}
+
+export function formatModelRedirectResult(
+  redirect: ModelRedirectResult,
+): string {
+  const chain = redirect.redirectChain
+  if (!chain || chain.length === 0) {
+    return formatModelWithEffort(redirect.model, redirect.effort)
+  }
+
+  return [
+    formatModelWithEffort(chain[0].sourceModel, chain[0].sourceEffort),
+    ...chain.map((step) =>
+      formatModelWithEffort(step.targetModel, step.targetEffort),
+    ),
+  ].join(" -> ")
 }
 
 /**
@@ -336,29 +406,57 @@ export async function applyModelRedirect(
   input: string | ModelRedirectRequest,
 ): Promise<ModelRedirectResult> {
   await ensureLoaded()
-  const model = typeof input === "string" ? input : input.model
-  const effort = typeof input === "string" ? undefined : input.effort
-  for (const rule of redirects) {
-    if (!rule.enabled) continue
-    if (
-      rule.sourceModel === model
-      && matchesEffort(rule.sourceEffort, effort)
-    ) {
-      const targetEffort = rule.targetEffort ?? effort
-      consola.debug(
-        `Model redirect: "${model}"${effort ? `:${effort}` : ""} -> "${rule.targetModel}"${targetEffort ? `:${targetEffort}` : ""} (rule: ${rule.name || rule.id})`,
+  const originalModel = typeof input === "string" ? input : input.model
+  const originalEffort = typeof input === "string" ? undefined : input.effort
+  let model = originalModel
+  let effort = originalEffort
+  const redirectChain: Array<ModelRedirectStep> = []
+  const seen = new Set<string>()
+
+  while (redirectChain.length < MAX_REDIRECT_CHAIN_LENGTH) {
+    seen.add(getRedirectStateKey(model, effort))
+
+    const rule = findMatchingRedirectRule(model, effort)
+    if (!rule) break
+
+    const step = createRedirectStep(rule, model, effort)
+    const nextKey = getRedirectStateKey(step.targetModel, step.targetEffort)
+    if (seen.has(nextKey)) {
+      consola.warn(
+        `Model redirect loop detected, stopping at ${formatModelWithEffort(model, effort)} before rule ${rule.name || rule.id}`,
       )
-      return {
-        model: rule.targetModel,
-        effort: targetEffort,
-        redirected: true,
-        originalModel: model,
-        originalEffort: effort,
-        ruleId: rule.id,
-      }
+      break
     }
+
+    redirectChain.push(step)
+    model = step.targetModel
+    effort = step.targetEffort
   }
-  return { model, effort, redirected: false }
+
+  if (redirectChain.length === 0) {
+    return { model, effort, redirected: false }
+  }
+
+  if (redirectChain.length >= MAX_REDIRECT_CHAIN_LENGTH) {
+    consola.warn(
+      `Model redirect chain exceeded ${MAX_REDIRECT_CHAIN_LENGTH} hops, stopping at ${formatModelWithEffort(model, effort)}`,
+    )
+  }
+
+  const result: ModelRedirectResult = {
+    model,
+    effort,
+    redirected: true,
+    originalModel,
+    originalEffort,
+    ruleId: redirectChain[0]?.ruleId,
+    ruleIds: redirectChain.map((step) => step.ruleId),
+    redirectChain,
+  }
+  consola.debug(
+    `Model redirect chain: ${formatModelRedirectResult(result)} (rules: ${result.ruleIds?.join(", ")})`,
+  )
+  return result
 }
 
 export function setModelRedirectsForTest(rules: Array<unknown>): void {

@@ -2,13 +2,19 @@ import type { Context } from "hono"
 
 import consola from "consola"
 
-import { applyModelRedirect } from "~/lib/model-redirect"
+import {
+  applyModelRedirect,
+  formatModelRedirectResult,
+} from "~/lib/model-redirect"
 import { normalizeModelName } from "~/lib/model-resolver"
 import {
   normalizeReasoningEffortForModel,
   parseModelSuffix,
 } from "~/lib/model-suffix"
-import { setRequestContext } from "~/lib/request-logger"
+import {
+  recordNonDefaultBehavior,
+  setRequestContext,
+} from "~/lib/request-logger"
 import { state } from "~/lib/state"
 import { getTokenCount } from "~/lib/tokenizer"
 
@@ -35,6 +41,11 @@ export async function handleCountTokens(c: Context) {
     const redirect = await applyModelRedirect({
       model: normalizedModel,
       effort: requestedEffort,
+    })
+    reportCountTokensRedirect(c, {
+      sourceModel: normalizedModel,
+      sourceEffort: requestedEffort,
+      redirect,
     })
     const targetModel = normalizeModelName(redirect.model)
     const targetEffort = normalizeReasoningEffortForModel(
@@ -110,4 +121,27 @@ export async function handleCountTokens(c: Context) {
       input_tokens: 1,
     })
   }
+}
+
+function reportCountTokensRedirect(
+  c: Context,
+  options: {
+    sourceModel: string
+    sourceEffort: ReturnType<typeof normalizeReasoningEffortForModel>
+    redirect: Awaited<ReturnType<typeof applyModelRedirect>>
+  },
+): void {
+  if (!options.redirect.redirected) return
+  recordNonDefaultBehavior(c, {
+    kind: "model_redirect",
+    message: `Model redirect chain: ${formatModelRedirectResult(options.redirect)}`,
+    data: {
+      sourceModel: options.sourceModel,
+      sourceEffort: options.sourceEffort,
+      targetModel: options.redirect.model,
+      targetEffort: options.redirect.effort,
+      ruleId: options.redirect.ruleId,
+      ruleIds: options.redirect.ruleIds?.join(","),
+    },
+  })
 }

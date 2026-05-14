@@ -17,7 +17,10 @@ import { applyReplacementsToPayload } from "~/lib/auto-replace"
 import { getReasoningEffortForModel } from "~/lib/config"
 import { isAbortError } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
-import { applyModelRedirect } from "~/lib/model-redirect"
+import {
+  applyModelRedirect,
+  formatModelRedirectResult,
+} from "~/lib/model-redirect"
 import { normalizeModelName } from "~/lib/model-resolver"
 import {
   type ReasoningEffort,
@@ -198,13 +201,14 @@ async function resolveGoogleModelRedirect(
   if (redirect.redirected) {
     recordNonDefaultBehavior(c, {
       kind: "model_redirect",
-      message: `Requested ${model}${requestedEffort ? `:${requestedEffort}` : ""} was routed to ${redirect.model}${redirect.effort ? `:${redirect.effort}` : ""}`,
+      message: `Model redirect chain: ${formatModelRedirectResult(redirect)}`,
       data: {
         sourceModel: model,
         sourceEffort: requestedEffort,
         targetModel: redirect.model,
         targetEffort: redirect.effort,
         ruleId: redirect.ruleId,
+        ruleIds: redirect.ruleIds?.join(","),
       },
     })
   }

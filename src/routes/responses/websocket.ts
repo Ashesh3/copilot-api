@@ -1,7 +1,10 @@
 import consola from "consola"
 import { randomUUID } from "node:crypto"
 
-import { applyModelRedirect } from "~/lib/model-redirect"
+import {
+  applyModelRedirect,
+  formatModelRedirectResult,
+} from "~/lib/model-redirect"
 import { normalizeModelName } from "~/lib/model-resolver"
 import {
   type ReasoningEffort,
@@ -267,13 +270,14 @@ async function resolveResponsesWebSocketRedirect(
   if (redirect.redirected) {
     reportNonDefaultBehavior({
       kind: "model_redirect",
-      message: `Responses WebSocket requested ${model}${requestedEffort ? `:${requestedEffort}` : ""} was routed to ${redirect.model}${redirect.effort ? `:${redirect.effort}` : ""}`,
+      message: `Responses WebSocket model redirect chain: ${formatModelRedirectResult(redirect)}`,
       data: {
         sourceModel: model,
         sourceEffort: requestedEffort,
         targetModel: redirect.model,
         targetEffort: redirect.effort,
         ruleId: redirect.ruleId,
+        ruleIds: redirect.ruleIds?.join(","),
         transport: "websocket",
       },
     })

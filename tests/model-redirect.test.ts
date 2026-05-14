@@ -2,6 +2,7 @@ import { beforeEach, expect, test } from "bun:test"
 
 import {
   applyModelRedirect,
+  formatModelRedirectResult,
   getAllModelRedirects,
   moveModelRedirect,
   setModelRedirectsForTest,
@@ -59,6 +60,67 @@ test("all effort catch-all preserves requested effort", async () => {
 
   expect(redirect.model).toBe("claude-target")
   expect(redirect.effort).toBe("medium")
+})
+
+test("follows chained redirects and applies final target effort", async () => {
+  setModelRedirectsForTest([
+    {
+      id: "opus-to-1m",
+      sourceModel: "claude-opus-4.6",
+      sourceEffort: "all",
+      targetModel: "claude-opus-4.6-1m",
+      enabled: true,
+    },
+    {
+      id: "1m-to-internal",
+      sourceModel: "claude-opus-4.6-1m",
+      sourceEffort: "all",
+      targetModel: "claude-opus-4.7-1m-internal",
+      targetEffort: "xhigh",
+      enabled: true,
+    },
+  ])
+
+  const redirect = await applyModelRedirect("claude-opus-4.6")
+
+  expect(redirect).toMatchObject({
+    model: "claude-opus-4.7-1m-internal",
+    effort: "xhigh",
+    redirected: true,
+    originalModel: "claude-opus-4.6",
+    ruleId: "opus-to-1m",
+    ruleIds: ["opus-to-1m", "1m-to-internal"],
+  })
+  expect(formatModelRedirectResult(redirect)).toBe(
+    "claude-opus-4.6 -> claude-opus-4.6-1m -> claude-opus-4.7-1m-internal:xhigh",
+  )
+})
+
+test("stops chained redirects before loops", async () => {
+  setModelRedirectsForTest([
+    {
+      id: "a-to-b",
+      sourceModel: "model-a",
+      sourceEffort: "all",
+      targetModel: "model-b",
+      enabled: true,
+    },
+    {
+      id: "b-to-a",
+      sourceModel: "model-b",
+      sourceEffort: "all",
+      targetModel: "model-a",
+      enabled: true,
+    },
+  ])
+
+  const redirect = await applyModelRedirect("model-a")
+
+  expect(redirect).toMatchObject({
+    model: "model-b",
+    redirected: true,
+    ruleIds: ["a-to-b"],
+  })
 })
 
 test("default effort filter only matches requests without explicit effort", async () => {
