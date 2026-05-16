@@ -32,6 +32,7 @@ export interface RequestBehavior {
   kind: string
   message: string
   data?: RequestBehaviorData
+  sentryLevel?: "info" | "warning"
 }
 
 const REQUEST_CONTEXT_KEY = "requestContext"
@@ -177,12 +178,17 @@ export function recordNonDefaultBehavior(
 }
 
 export function reportNonDefaultBehavior(behavior: RequestBehavior): void {
+  const sentryLevel = behavior.sentryLevel ?? "info"
   const consoleLine = `${colors.yellow}${colors.bold}[NON-DEFAULT]${colors.reset} ${colors.yellow}${behavior.kind}: ${behavior.message}${colors.reset}`
-  console.warn(consoleLine)
+  if (sentryLevel === "warning") {
+    console.warn(consoleLine)
+  } else {
+    console.info(consoleLine)
+  }
 
   Sentry.addBreadcrumb({
     category: "copilot-api.non_default_behavior",
-    level: "warning",
+    level: sentryLevel,
     message: behavior.message,
     data: { kind: behavior.kind, ...behavior.data },
   })
@@ -190,18 +196,34 @@ export function reportNonDefaultBehavior(behavior: RequestBehavior): void {
     `copilot_api.non_default.${behavior.kind}`,
     behavior.message,
   )
-  Sentry.logger.warn(`[NON-DEFAULT] ${behavior.kind}: ${behavior.message}`, {
+  const logContext = {
     kind: behavior.kind,
+    sentryLevel,
     ...behavior.data,
-  })
+  }
+  const logMessage = `[NON-DEFAULT] ${behavior.kind}: ${behavior.message}`
+  if (sentryLevel === "warning") {
+    Sentry.logger.warn(logMessage, logContext)
+    Sentry.withScope((scope) => {
+      scope.setLevel("warning")
+      scope.setTag("copilot_api.non_default_behavior", behavior.kind)
+      scope.setContext("non_default_behavior", {
+        message: behavior.message,
+        ...behavior.data,
+      })
+      Sentry.captureMessage(logMessage)
+    })
+    return
+  }
+
+  Sentry.logger.info(logMessage, logContext)
   Sentry.withScope((scope) => {
-    scope.setLevel("warning")
     scope.setTag("copilot_api.non_default_behavior", behavior.kind)
     scope.setContext("non_default_behavior", {
+      level: sentryLevel,
       message: behavior.message,
       ...behavior.data,
     })
-    Sentry.captureMessage(`[NON-DEFAULT] ${behavior.kind}: ${behavior.message}`)
   })
 }
 
