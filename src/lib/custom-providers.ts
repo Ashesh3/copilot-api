@@ -1,0 +1,661 @@
+import consola from "consola"
+import { events } from "fetch-event-stream"
+
+import type {
+  AppConfig,
+  CustomProviderConfig,
+  CustomProviderModelConfig,
+} from "~/lib/config"
+import type { ReasoningEffort } from "~/lib/model-suffix"
+import type {
+  ChatCompletionResponse,
+  ChatCompletionsPayload,
+} from "~/services/copilot/create-chat-completions"
+import type { EmbeddingResponse } from "~/services/copilot/create-embeddings"
+
+import { getConfig, updateConfig } from "~/lib/config"
+import { HTTPError } from "~/lib/error"
+
+export type CustomProviderModelKind = "chat" | "embedding"
+
+export interface CustomProviderModelReference {
+  provider: CustomProviderConfig
+  model: CustomProviderModelConfig
+  requestedModel: string
+  upstreamModel: string
+  matchedAlias: boolean
+}
+
+export interface CustomProviderModelListing {
+  id: string
+  object: "model"
+  type: CustomProviderModelKind
+  kind: CustomProviderModelKind
+  created: number
+  created_at: string
+  owned_by: string
+  provider: string
+  provider_id: string
+  display_name: string
+  canonical_id?: string
+  alias?: boolean
+  aliases?: Array<string>
+  dimensions?: number
+  supports_streaming?: boolean
+}
+
+export interface CustomProviderRequestOptions {
+  signal?: AbortSignal
+  reasoningEffort?: ReasoningEffort
+}
+
+interface ModelListingOptions {
+  provider: CustomProviderConfig
+  model: CustomProviderModelConfig
+  id: string
+  alias?: boolean
+}
+
+interface CustomProviderFetchRequest {
+  reference: CustomProviderModelReference
+  path: "/chat/completions" | "/embeddings"
+  payload: Record<string, unknown>
+  options?: CustomProviderRequestOptions
+}
+
+interface CustomProviderErrorContext {
+  response: Response
+  reference: CustomProviderModelReference
+  path: string
+  payload: unknown
+}
+
+interface RequiredProviderFields {
+  id: string
+  name: string
+  baseUrl: string
+  apiKeyEnv: string
+  models: Array<unknown>
+}
+
+const DEFAULT_TIMEOUT_MS = 120_000
+const OPENAI_COMPATIBLE_TYPE = "openai-compatible"
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
+
+function normalizeHeaders(value: unknown): Record<string, string> | undefined {
+  if (!isRecord(value)) return undefined
+
+  const headers: Record<string, string> = {}
+  for (const [key, headerValue] of Object.entries(value)) {
+    if (typeof headerValue !== "string") continue
+    const normalizedKey = key.trim()
+    if (!normalizedKey) continue
+    headers[normalizedKey] = headerValue
+  }
+  return Object.keys(headers).length > 0 ? headers : undefined
+}
+
+function normalizeModel(raw: unknown): CustomProviderModelConfig | undefined {
+  if (!isRecord(raw)) return undefined
+  if (typeof raw.id !== "string" || raw.id.trim().length === 0) {
+    return undefined
+  }
+  if (raw.kind !== "chat" && raw.kind !== "embedding") return undefined
+
+  const aliases =
+    Array.isArray(raw.aliases) ?
+      raw.aliases
+        .filter((alias): alias is string => typeof alias === "string")
+        .map((alias) => alias.trim())
+        .filter((alias) => alias.length > 0 && alias !== raw.id)
+    : undefined
+
+  const dimensions =
+    (
+      typeof raw.dimensions === "number"
+      && Number.isInteger(raw.dimensions)
+      && raw.dimensions > 0
+    ) ?
+      raw.dimensions
+    : undefined
+
+  return {
+    id: raw.id.trim(),
+    kind: raw.kind,
+    ...(aliases && aliases.length > 0 ?
+      { aliases: [...new Set(aliases)] }
+    : {}),
+    ...(dimensions ? { dimensions } : {}),
+    ...(typeof raw.supportsStreaming === "boolean" ?
+      { supportsStreaming: raw.supportsStreaming }
+    : {}),
+    ...(typeof raw.passReasoningEffort === "boolean" ?
+      { passReasoningEffort: raw.passReasoningEffort }
+    : {}),
+  }
+}
+
+function getRequiredProviderFields(
+  raw: unknown,
+): RequiredProviderFields | undefined {
+  if (!isRecord(raw)) return undefined
+  const { id, name, type, baseUrl, apiKeyEnv, models } = raw
+
+  if (type !== OPENAI_COMPATIBLE_TYPE || !Array.isArray(models)) {
+    return undefined
+  }
+
+  if (
+    typeof id !== "string"
+    || typeof name !== "string"
+    || typeof baseUrl !== "string"
+    || typeof apiKeyEnv !== "string"
+  ) {
+    return undefined
+  }
+
+  const normalized = {
+    id: id.trim(),
+    name: name.trim(),
+    baseUrl: baseUrl.trim(),
+    apiKeyEnv: apiKeyEnv.trim(),
+  }
+  if (Object.values(normalized).some((value) => value.length === 0)) {
+    return undefined
+  }
+
+  return { ...normalized, models }
+}
+
+function normalizeProvider(raw: unknown): CustomProviderConfig | undefined {
+  const fields = getRequiredProviderFields(raw)
+  if (!fields) return undefined
+
+  const models = fields.models.flatMap((model) => {
+    const normalized = normalizeModel(model)
+    return normalized ? [normalized] : []
+  })
+  if (models.length === 0) return undefined
+
+  const rawRecord = raw as Record<string, unknown>
+  const timeoutMs =
+    (
+      typeof rawRecord.timeoutMs === "number"
+      && Number.isInteger(rawRecord.timeoutMs)
+      && rawRecord.timeoutMs > 0
+    ) ?
+      rawRecord.timeoutMs
+    : undefined
+  const headers = normalizeHeaders(rawRecord.headers)
+
+  return {
+    id: fields.id,
+    name: fields.name,
+    type: OPENAI_COMPATIBLE_TYPE,
+    baseUrl: fields.baseUrl.replace(/\/+$/, ""),
+    apiKeyEnv: fields.apiKeyEnv,
+    ...(headers ? { headers } : {}),
+    models,
+    ...(timeoutMs ? { timeoutMs } : {}),
+    ...(typeof rawRecord.passReasoningEffort === "boolean" ?
+      { passReasoningEffort: rawRecord.passReasoningEffort }
+    : {}),
+  }
+}
+
+export function normalizeCustomProviders(
+  providers: unknown,
+): Array<CustomProviderConfig> {
+  if (!Array.isArray(providers)) return []
+  return providers.flatMap((provider) => {
+    const normalized = normalizeProvider(provider)
+    return normalized ? [normalized] : []
+  })
+}
+
+export function getCustomProviders(): Array<CustomProviderConfig> {
+  return normalizeCustomProviders(getConfig().customProviders)
+}
+
+export function getCustomProviderModels(): Array<CustomProviderModelListing> {
+  return getCustomProviders().flatMap((provider) =>
+    provider.models.flatMap((model) => [
+      toModelListing({ provider, model, id: model.id }),
+      ...(model.aliases ?? []).map((alias) =>
+        toModelListing({ provider, model, id: alias, alias: true }),
+      ),
+    ]),
+  )
+}
+
+function toModelListing(
+  options: ModelListingOptions,
+): CustomProviderModelListing {
+  const { provider, model, id, alias = false } = options
+  return {
+    id,
+    object: "model",
+    type: model.kind,
+    kind: model.kind,
+    created: 0,
+    created_at: new Date(0).toISOString(),
+    owned_by: provider.name,
+    provider: provider.name,
+    provider_id: provider.id,
+    display_name: alias ? `${id} (${model.id})` : model.id,
+    ...(alias ? { alias: true, canonical_id: model.id } : {}),
+    ...(model.aliases && model.aliases.length > 0 && !alias ?
+      { aliases: model.aliases }
+    : {}),
+    ...(model.dimensions ? { dimensions: model.dimensions } : {}),
+    ...(model.supportsStreaming !== undefined ?
+      { supports_streaming: model.supportsStreaming }
+    : {}),
+  }
+}
+
+function findModelReference(options: {
+  model: string
+  kind?: CustomProviderModelKind
+  exactOnly?: boolean
+}): CustomProviderModelReference | undefined {
+  for (const provider of getCustomProviders()) {
+    for (const model of provider.models) {
+      if (options.kind && model.kind !== options.kind) continue
+      if (model.id === options.model) {
+        return {
+          provider,
+          model,
+          requestedModel: options.model,
+          upstreamModel: model.id,
+          matchedAlias: false,
+        }
+      }
+    }
+  }
+
+  if (options.exactOnly) return undefined
+
+  for (const provider of getCustomProviders()) {
+    for (const model of provider.models) {
+      if (options.kind && model.kind !== options.kind) continue
+      if (!model.aliases?.includes(options.model)) continue
+      return {
+        provider,
+        model,
+        requestedModel: options.model,
+        upstreamModel: model.id,
+        matchedAlias: true,
+      }
+    }
+  }
+
+  return undefined
+}
+
+export function resolveCustomProviderModel(options: {
+  model: string
+  kind?: CustomProviderModelKind
+  copilotModelIds?: Set<string>
+}): CustomProviderModelReference | undefined {
+  const aliasMatch = findModelReference({
+    model: options.model,
+    kind: options.kind,
+  })
+  if (aliasMatch?.matchedAlias) return aliasMatch
+
+  if (options.copilotModelIds?.has(options.model)) return undefined
+
+  return findModelReference({
+    model: options.model,
+    kind: options.kind,
+    exactOnly: true,
+  })
+}
+
+export function resolveCustomProviderAlias(options: {
+  model: string
+  kind?: CustomProviderModelKind
+}): CustomProviderModelReference | undefined {
+  const match = findModelReference({ model: options.model, kind: options.kind })
+  return match?.matchedAlias ? match : undefined
+}
+
+function shouldPassReasoningEffort(
+  reference: CustomProviderModelReference,
+): boolean {
+  return (
+    reference.model.passReasoningEffort
+    ?? reference.provider.passReasoningEffort
+    ?? false
+  )
+}
+
+function getProviderApiKey(provider: CustomProviderConfig): string {
+  const apiKey = process.env[provider.apiKeyEnv]?.trim()
+  if (!apiKey) {
+    throw new HTTPError(
+      `Missing API key for custom provider ${provider.name}. Set ${provider.apiKeyEnv}.`,
+      new Response(
+        JSON.stringify({
+          error: {
+            message: `Missing API key for custom provider ${provider.name}. Set ${provider.apiKeyEnv}.`,
+            type: "configuration_error",
+            provider: provider.id,
+          },
+        }),
+        {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        },
+      ),
+    )
+  }
+  return apiKey
+}
+
+function mergeAbortSignals(
+  signals: Array<AbortSignal | undefined>,
+): AbortSignal | undefined {
+  const activeSignals = signals.filter(
+    (signal): signal is AbortSignal => signal !== undefined,
+  )
+  if (activeSignals.length === 0) return undefined
+  if (activeSignals.length === 1) return activeSignals[0]
+
+  const controller = new AbortController()
+  const abort = () => controller.abort()
+
+  for (const signal of activeSignals) {
+    if (signal.aborted) {
+      controller.abort()
+      break
+    }
+    signal.addEventListener("abort", abort, { once: true })
+  }
+
+  return controller.signal
+}
+
+function buildHeaders(provider: CustomProviderConfig): Record<string, string> {
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    accept: "application/json",
+    ...provider.headers,
+    Authorization: `Bearer ${getProviderApiKey(provider)}`,
+  }
+  return headers
+}
+
+function providerUrl(
+  provider: CustomProviderConfig,
+  path: "/chat/completions" | "/embeddings",
+): string {
+  return `${provider.baseUrl}${path}`
+}
+
+async function fetchCustomProvider(
+  request: CustomProviderFetchRequest,
+): Promise<Response> {
+  const { reference, path, payload, options } = request
+  const timeoutSignal = AbortSignal.timeout(
+    reference.provider.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+  )
+  const signal = mergeAbortSignals([options?.signal, timeoutSignal])
+  const url = providerUrl(reference.provider, path)
+
+  consola.debug(
+    `Custom provider request: ${reference.provider.id}/${reference.upstreamModel} ${path}`,
+  )
+
+  try {
+    return await fetch(url, {
+      method: "POST",
+      headers: buildHeaders(reference.provider),
+      body: JSON.stringify(payload),
+      signal,
+    })
+  } catch (error) {
+    if (options?.signal?.aborted) throw error
+    if (timeoutSignal.aborted) {
+      throw new HTTPError(
+        `Custom provider ${reference.provider.name} timed out for model ${reference.upstreamModel}`,
+        new Response(
+          JSON.stringify({
+            error: {
+              message: `Custom provider ${reference.provider.name} timed out for model ${reference.upstreamModel}`,
+              type: "timeout_error",
+              provider: reference.provider.id,
+              model: reference.upstreamModel,
+            },
+          }),
+          {
+            status: 504,
+            headers: { "content-type": "application/json" },
+          },
+        ),
+        redactProviderRequestPayload(payload),
+      )
+    }
+    throw error
+  }
+}
+
+function createUpstreamErrorMessage(
+  reference: CustomProviderModelReference,
+  path: string,
+  response?: Response,
+): string {
+  const status = response ? `: ${response.status} ${response.statusText}` : ""
+  return `Custom provider ${reference.provider.name} failed ${path} for model ${reference.upstreamModel}${status}`
+}
+
+async function throwCustomProviderError(
+  context: CustomProviderErrorContext,
+): Promise<never> {
+  const { response, reference, path, payload } = context
+  const body = await response.clone().text()
+  consola.error(
+    createUpstreamErrorMessage(reference, path, response),
+    `Status: ${response.status} ${response.statusText}`,
+    body,
+  )
+  throw new HTTPError(
+    createUpstreamErrorMessage(reference, path, response),
+    new Response(body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    }),
+    payload,
+  )
+}
+
+function buildChatPayload(
+  reference: CustomProviderModelReference,
+  payload: ChatCompletionsPayload,
+  options?: CustomProviderRequestOptions,
+): Record<string, unknown> {
+  const outgoing: Record<string, unknown> = {
+    ...(payload as unknown as Record<string, unknown>),
+    model: reference.upstreamModel,
+  }
+
+  if (options?.reasoningEffort && shouldPassReasoningEffort(reference)) {
+    outgoing.reasoning_effort = options.reasoningEffort
+  } else if (!shouldPassReasoningEffort(reference)) {
+    delete outgoing.reasoning_effort
+  }
+
+  if (outgoing.stream && !outgoing.stream_options) {
+    outgoing.stream_options = { include_usage: true }
+  }
+
+  return outgoing
+}
+
+export async function createCustomProviderChatCompletions(
+  reference: CustomProviderModelReference,
+  payload: ChatCompletionsPayload,
+  options?: CustomProviderRequestOptions,
+) {
+  const outgoing = buildChatPayload(reference, payload, options)
+  const response = await fetchCustomProvider({
+    reference,
+    path: "/chat/completions",
+    payload: outgoing,
+    options,
+  })
+
+  if (!response.ok) {
+    await throwCustomProviderError({
+      response,
+      reference,
+      path: "/chat/completions",
+      payload: redactProviderRequestPayload(outgoing),
+    })
+  }
+
+  if (payload.stream) {
+    return events(response)
+  }
+
+  return (await response.json()) as ChatCompletionResponse
+}
+
+function validateEmbeddingResponse(
+  response: EmbeddingResponse,
+  reference: CustomProviderModelReference,
+): void {
+  if (!reference.model.dimensions) return
+
+  for (const item of response.data) {
+    if (item.embedding.length !== reference.model.dimensions) {
+      throw new HTTPError(
+        `Custom provider ${reference.provider.name} returned embedding dimension ${item.embedding.length}; expected ${reference.model.dimensions}`,
+        new Response(
+          JSON.stringify({
+            error: {
+              message: `Embedding dimension mismatch for ${reference.upstreamModel}: expected ${reference.model.dimensions}, got ${item.embedding.length}`,
+              type: "upstream_response_error",
+              provider: reference.provider.id,
+              model: reference.upstreamModel,
+            },
+          }),
+          {
+            status: 502,
+            headers: { "content-type": "application/json" },
+          },
+        ),
+      )
+    }
+  }
+}
+
+function normalizeEmbeddingIndexes(
+  response: EmbeddingResponse,
+): EmbeddingResponse {
+  return {
+    ...response,
+    data: [...response.data].sort((a, b) => a.index - b.index),
+  }
+}
+
+export async function createCustomProviderEmbeddings(
+  reference: CustomProviderModelReference,
+  payload: { input: string | Array<string>; model: string },
+  options?: CustomProviderRequestOptions,
+): Promise<EmbeddingResponse> {
+  const outgoing = {
+    ...(payload as unknown as Record<string, unknown>),
+    model: reference.upstreamModel,
+  }
+  const response = await fetchCustomProvider({
+    reference,
+    path: "/embeddings",
+    payload: outgoing,
+    options,
+  })
+
+  if (!response.ok) {
+    await throwCustomProviderError({
+      response,
+      reference,
+      path: "/embeddings",
+      payload: redactProviderRequestPayload(outgoing),
+    })
+  }
+
+  const body = normalizeEmbeddingIndexes(
+    (await response.json()) as EmbeddingResponse,
+  )
+  validateEmbeddingResponse(body, reference)
+  return body
+}
+
+function redactProviderRequestPayload(
+  payload: Record<string, unknown>,
+): Record<string, unknown> {
+  const redacted = { ...payload }
+  delete redacted.api_key
+  return redacted
+}
+
+export function listCustomProvidersForDashboard(): Array<CustomProviderConfig> {
+  return getCustomProviders()
+}
+
+export function upsertCustomProvider(
+  provider: CustomProviderConfig,
+): Array<CustomProviderConfig> {
+  const normalized = normalizeProvider(provider)
+  if (!normalized) {
+    throw new Error("Invalid custom provider config")
+  }
+
+  let nextProviders: Array<CustomProviderConfig> = []
+  updateConfig((config: AppConfig) => {
+    const providers = normalizeCustomProviders(config.customProviders)
+    const index = providers.findIndex((item) => item.id === normalized.id)
+    nextProviders =
+      index === -1 ?
+        [...providers, normalized]
+      : providers.map((item) => (item.id === normalized.id ? normalized : item))
+    return { ...config, customProviders: nextProviders }
+  })
+  return nextProviders
+}
+
+export function removeCustomProvider(providerId: string): boolean {
+  let removed = false
+  updateConfig((config: AppConfig) => {
+    const providers = normalizeCustomProviders(config.customProviders)
+    const nextProviders = providers.filter(
+      (provider) => provider.id !== providerId,
+    )
+    removed = nextProviders.length !== providers.length
+    return { ...config, customProviders: nextProviders }
+  })
+  return removed
+}
+
+export function createNebiusQwen3EmbeddingProvider(): CustomProviderConfig {
+  return {
+    id: "nebius",
+    name: "Nebius",
+    type: OPENAI_COMPATIBLE_TYPE,
+    baseUrl: "https://api.studio.nebius.com/v1",
+    apiKeyEnv: "NEBIUS_API_KEY",
+    headers: {},
+    models: [
+      {
+        id: "Qwen/Qwen3-Embedding-8B",
+        aliases: ["qwen3-embedding-8b"],
+        kind: "embedding",
+        dimensions: 4096,
+      },
+    ],
+  }
+}

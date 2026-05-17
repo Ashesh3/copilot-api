@@ -11,9 +11,11 @@ import { state } from "~/lib/state"
 
 import {
   handleAddModelRedirect,
+  handleAddNebiusCustomProvider,
   handleAddReplacement,
   handleArchiveSession,
   handleClearLlmDebugLogs,
+  handleDeleteCustomProvider,
   handleDeleteFlag,
   handleDeleteModelRedirect,
   handleDeleteModelSettings,
@@ -24,6 +26,7 @@ import {
   handleGetSessionEvents,
   handleGetSettings,
   handleGetUsage,
+  handleListCustomProviders,
   handleListEnvironments,
   handleListFlags,
   handleListLlmDebugLogs,
@@ -41,6 +44,7 @@ import {
   handleToggleModelRedirect,
   handleToggleReplacement,
   handleUpdateModelRedirect,
+  handleUpsertCustomProvider,
 } from "./api"
 import { getDashboardPage } from "./page"
 
@@ -128,6 +132,15 @@ dashboardRoutes.post("/api/model-redirects/:id/move", handleMoveModelRedirect)
 dashboardRoutes.get("/api/model-settings", handleListModelSettings)
 dashboardRoutes.post("/api/model-settings", handleSetModelSettings)
 dashboardRoutes.delete("/api/model-settings/:model", handleDeleteModelSettings)
+
+// Custom Providers
+dashboardRoutes.get("/api/custom-providers", handleListCustomProviders)
+dashboardRoutes.post("/api/custom-providers", handleUpsertCustomProvider)
+dashboardRoutes.post(
+  "/api/custom-providers/nebius-qwen3",
+  handleAddNebiusCustomProvider,
+)
+dashboardRoutes.delete("/api/custom-providers/:id", handleDeleteCustomProvider)
 
 // Model Routing
 dashboardRoutes.get("/api/model-routing", handleListModelRouting)

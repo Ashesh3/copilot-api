@@ -2,6 +2,7 @@ import { Hono } from "hono"
 
 import type { Model } from "~/services/copilot/get-models"
 
+import { getCustomProviderModels } from "~/lib/custom-providers"
 import { forwardError } from "~/lib/error"
 import { generateVirtualModels } from "~/lib/model-suffix"
 import { state } from "~/lib/state"
@@ -11,6 +12,10 @@ export const modelRoutes = new Hono()
 
 function isModelVisible(model: Model): boolean {
   return model.model_picker_enabled || model.policy?.state === "enabled"
+}
+
+function getCopilotModelIds(models: Array<{ id: string }>): Set<string> {
+  return new Set(models.map((model) => model.id))
 }
 
 modelRoutes.get("/", async (c) => {
@@ -36,10 +41,17 @@ modelRoutes.get("/", async (c) => {
 
     // Virtual models for reasoning effort variants (e.g. "claude-sonnet-4.6:high")
     const virtualModels = generateVirtualModels(visibleModels)
+    const copilotModelIds = getCopilotModelIds([
+      ...copilotModels,
+      ...virtualModels,
+    ])
+    const customModels = getCustomProviderModels().filter(
+      (model) => model.alias || !copilotModelIds.has(model.id),
+    )
 
     return c.json({
       object: "list",
-      data: [...copilotModels, ...virtualModels],
+      data: [...copilotModels, ...virtualModels, ...customModels],
       has_more: false,
     })
   } catch (error) {

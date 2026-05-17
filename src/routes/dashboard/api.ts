@@ -7,6 +7,12 @@ import {
   toggleReplacement,
 } from "~/lib/auto-replace"
 import {
+  createNebiusQwen3EmbeddingProvider,
+  listCustomProvidersForDashboard,
+  removeCustomProvider,
+  upsertCustomProvider,
+} from "~/lib/custom-providers"
+import {
   clearLlmDebugLogs,
   getLlmDebugLog,
   listLlmDebugLogs,
@@ -77,6 +83,47 @@ interface ModelSettingsRequestBody {
   implicitReasoningDefault?: boolean | null
   exposeVirtualReasoningModels?: boolean | null
 }
+
+interface CustomProviderRequestBody {
+  id?: string
+  name?: string
+  type?: "openai-compatible"
+  baseUrl?: string
+  apiKeyEnv?: string
+  headers?: Record<string, string>
+  timeoutMs?: number | null
+  passReasoningEffort?: boolean | null
+  models?: Array<{
+    id?: string
+    aliases?: Array<string>
+    kind?: "chat" | "embedding"
+    dimensions?: number | null
+    supportsStreaming?: boolean | null
+    passReasoningEffort?: boolean | null
+  }>
+}
+
+interface ValidCustomProviderBody {
+  id: string
+  name: string
+  baseUrl: string
+  apiKeyEnv: string
+  headers?: Record<string, string>
+  timeoutMs?: number
+  passReasoningEffort?: boolean
+  models: Array<{
+    id: string
+    kind: "chat" | "embedding"
+    aliases?: Array<string>
+    dimensions?: number
+    supportsStreaming?: boolean
+    passReasoningEffort?: boolean
+  }>
+}
+
+type CustomProviderParseResult =
+  | { ok: true; body: ValidCustomProviderBody }
+  | { ok: false; error: string }
 
 function formatUptime(ms: number): string {
   const totalSeconds = Math.floor(ms / 1000)
@@ -431,6 +478,196 @@ export function handleListModelRouting(c: Context) {
     accounts,
     models,
   })
+}
+
+export function handleListCustomProviders(c: Context) {
+  return c.json(listCustomProvidersForDashboard())
+}
+
+export async function handleUpsertCustomProvider(c: Context) {
+  const parsed = parseCustomProviderBody(
+    await c.req.json<CustomProviderRequestBody>(),
+  )
+  if (!parsed.ok) return c.json({ error: parsed.error }, 400)
+
+  const { body } = parsed
+
+  const providers = upsertCustomProvider({
+    id: body.id,
+    name: body.name,
+    type: "openai-compatible",
+    baseUrl: body.baseUrl,
+    apiKeyEnv: body.apiKeyEnv,
+    ...(body.headers ? { headers: body.headers } : {}),
+    models: body.models,
+    ...(body.timeoutMs ? { timeoutMs: body.timeoutMs } : {}),
+    ...(body.passReasoningEffort !== undefined ?
+      { passReasoningEffort: body.passReasoningEffort }
+    : {}),
+  })
+
+  return c.json(providers.find((provider) => provider.id === body.id))
+}
+
+function parseCustomProviderBody(
+  body: CustomProviderRequestBody,
+): CustomProviderParseResult {
+  const base = parseCustomProviderBase(body)
+  if (!base.ok) return base
+  const models = parseCustomProviderModels(body.models)
+  if (!models.ok) return models
+
+  return {
+    ok: true,
+    body: {
+      ...base.body,
+      models: models.models,
+    },
+  }
+}
+
+function parseCustomProviderBase(
+  body: CustomProviderRequestBody,
+):
+  | { ok: true; body: Omit<ValidCustomProviderBody, "models"> }
+  | { ok: false; error: string } {
+  const id = getRequiredString(body.id, "id")
+  if (!id.ok) return id
+  const name = getRequiredString(body.name, "name")
+  if (!name.ok) return name
+  const baseUrl = getRequiredString(body.baseUrl, "baseUrl")
+  if (!baseUrl.ok) return baseUrl
+  const apiKeyEnv = getRequiredString(body.apiKeyEnv, "apiKeyEnv")
+  if (!apiKeyEnv.ok) return apiKeyEnv
+
+  if (body.headers !== undefined && !isStringRecord(body.headers)) {
+    return { ok: false, error: "headers must be an object of strings" }
+  }
+  if (!isPositiveOptionalInteger(body.timeoutMs)) {
+    return { ok: false, error: "timeoutMs must be a positive integer" }
+  }
+
+  return {
+    ok: true,
+    body: {
+      id: id.value,
+      name: name.value,
+      baseUrl: baseUrl.value,
+      apiKeyEnv: apiKeyEnv.value,
+      ...(body.headers ? { headers: body.headers } : {}),
+      ...(typeof body.timeoutMs === "number" ?
+        { timeoutMs: body.timeoutMs }
+      : {}),
+      ...(typeof body.passReasoningEffort === "boolean" ?
+        { passReasoningEffort: body.passReasoningEffort }
+      : {}),
+    },
+  }
+}
+
+function parseCustomProviderModels(
+  models: CustomProviderRequestBody["models"],
+):
+  | { ok: true; models: ValidCustomProviderBody["models"] }
+  | { ok: false; error: string } {
+  if (!Array.isArray(models) || models.length === 0) {
+    return { ok: false, error: "models must contain at least one model" }
+  }
+
+  const parsedModels: ValidCustomProviderBody["models"] = []
+  for (const model of models) {
+    const parsed = parseCustomProviderModel(model)
+    if (!parsed.ok) return parsed
+    parsedModels.push(parsed.model)
+  }
+
+  return { ok: true, models: parsedModels }
+}
+
+function parseCustomProviderModel(
+  model: NonNullable<CustomProviderRequestBody["models"]>[number],
+):
+  | { ok: true; model: ValidCustomProviderBody["models"][number] }
+  | { ok: false; error: string } {
+  const id = getRequiredString(model.id, "model id")
+  if (!id.ok) return id
+  if (model.kind !== "chat" && model.kind !== "embedding") {
+    return { ok: false, error: "model kind must be chat or embedding" }
+  }
+  if (!isStringArray(model.aliases)) {
+    return { ok: false, error: "model aliases must be strings" }
+  }
+  if (!isPositiveOptionalInteger(model.dimensions)) {
+    return { ok: false, error: "model dimensions must be a positive integer" }
+  }
+
+  return {
+    ok: true,
+    model: {
+      id: id.value,
+      kind: model.kind,
+      ...(model.aliases && model.aliases.length > 0 ?
+        { aliases: model.aliases }
+      : {}),
+      ...(typeof model.dimensions === "number" ?
+        { dimensions: model.dimensions }
+      : {}),
+      ...(typeof model.supportsStreaming === "boolean" ?
+        { supportsStreaming: model.supportsStreaming }
+      : {}),
+      ...(typeof model.passReasoningEffort === "boolean" ?
+        { passReasoningEffort: model.passReasoningEffort }
+      : {}),
+    },
+  }
+}
+
+function getRequiredString(
+  value: unknown,
+  field: string,
+): { ok: true; value: string } | { ok: false; error: string } {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return { ok: false, error: `${field} is required` }
+  }
+  return { ok: true, value: value.trim() }
+}
+
+function isPositiveOptionalInteger(value: unknown): boolean {
+  return (
+    value === undefined
+    || value === null
+    || (typeof value === "number" && Number.isInteger(value) && value > 0)
+  )
+}
+
+function isStringArray(value: unknown): boolean {
+  return (
+    value === undefined
+    || (Array.isArray(value) && value.every((item) => typeof item === "string"))
+  )
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return (
+    typeof value === "object"
+    && value !== null
+    && !Array.isArray(value)
+    && Object.values(value).every((item) => typeof item === "string")
+  )
+}
+
+export function handleAddNebiusCustomProvider(c: Context) {
+  const provider = createNebiusQwen3EmbeddingProvider()
+  upsertCustomProvider(provider)
+  return c.json(provider)
+}
+
+export function handleDeleteCustomProvider(c: Context) {
+  const id = c.req.param("id")
+  if (!removeCustomProvider(id)) {
+    return c.json({ error: "Custom provider not found" }, 404)
+  }
+  return c.json({ success: true })
 }
 
 export async function handleSetModelRouting(c: Context) {

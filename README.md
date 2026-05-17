@@ -30,6 +30,7 @@ A reverse-engineered proxy for the GitHub Copilot API that exposes it as an Open
 ## Features
 
 - **OpenAI & Anthropic Compatibility**: Exposes GitHub Copilot as an OpenAI-compatible (`/v1/chat/completions`, `/v1/models`, `/v1/embeddings`) and Anthropic-compatible (`/v1/messages`) API.
+- **Custom OpenAI-Compatible Providers**: Add extra chat or embedding providers while keeping the same `/v1/models`, `/v1/chat/completions`, and `/v1/embeddings` API surface.
 - **Claude Code Integration**: Easily configure and launch [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) to use Copilot as its backend with a simple command-line flag (`--claude-code`).
 - **Usage Dashboard**: A web-based dashboard to monitor your Copilot API usage, view quotas, and see detailed statistics.
 - **Rate Limit Control**: Manage API usage with rate-limiting options (`--rate-limit`) and a waiting mechanism (`--wait`) to prevent errors from rapid requests.
@@ -181,13 +182,49 @@ The server exposes several endpoints to interact with the Copilot API. It provid
 
 ### OpenAI Compatible Endpoints
 
-These endpoints mimic the OpenAI API structure.
+These endpoints mimic the OpenAI API structure. By default they proxy Copilot models; configured custom provider models are exposed through the same endpoints and routed by `model`.
 
 | Endpoint                    | Method | Description                                               |
 | --------------------------- | ------ | --------------------------------------------------------- |
 | `POST /v1/chat/completions` | `POST` | Creates a model response for the given chat conversation. |
 | `GET /v1/models`            | `GET`  | Lists the currently available models.                     |
 | `POST /v1/embeddings`       | `POST` | Creates an embedding vector representing the input text.  |
+
+### Custom OpenAI-Compatible Providers
+
+Add `customProviders` to `~/.local/share/copilot-api/config.json`, or manage them from `/dashboard` under Custom Providers. Provider API keys are read from environment variables and are never stored in the config file.
+
+```json
+{
+  "customProviders": [
+    {
+      "id": "nebius",
+      "name": "Nebius",
+      "type": "openai-compatible",
+      "baseUrl": "https://api.studio.nebius.com/v1",
+      "apiKeyEnv": "NEBIUS_API_KEY",
+      "headers": {},
+      "models": [
+        {
+          "id": "Qwen/Qwen3-Embedding-8B",
+          "aliases": ["qwen3-embedding-8b"],
+          "kind": "embedding",
+          "dimensions": 4096
+        }
+      ]
+    }
+  ]
+}
+```
+
+Clients keep using this server as the OpenAI base URL:
+
+```sh
+OPENAI_BASE_URL=https://ai.ashesh.dev/v1
+OPENAI_API_KEY=<gateway key>
+```
+
+Routing precedence is deterministic: custom aliases route to their provider first; exact Copilot model IDs stay on Copilot if a custom provider uses the same ID. Use an alias when you want to force a custom provider model in a collision.
 
 ### Anthropic Compatible Endpoints
 

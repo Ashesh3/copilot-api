@@ -17,6 +17,7 @@ This document covers every feature copilot-api supports beyond basic LLM proxyin
 - [Usage Tracking](#usage-tracking)
 - [Multi-Token Mode & Session Affinity](#multi-token-mode--session-affinity)
 - [Rate Limiting & Manual Approval](#rate-limiting--manual-approval)
+- [Custom Providers](#custom-providers)
 - [Model Resolution & Reasoning Effort](#model-resolution--reasoning-effort)
 - [Sentry Integration](#sentry-integration)
 - [Proxy Support](#proxy-support)
@@ -448,6 +449,85 @@ Every incoming request shows an interactive prompt: `Accept incoming request? (Y
 
 ---
 
+## Custom Providers
+
+copilot-api can expose additional OpenAI-compatible providers through the same OpenAI endpoints while keeping Copilot as the default backend.
+
+### Supported Surfaces
+
+| Method | Path | Behavior |
+|--------|------|----------|
+| GET | `/v1/models` | Lists Copilot models plus configured custom provider models and aliases |
+| POST | `/v1/chat/completions` | Routes configured custom chat models to `{baseUrl}/chat/completions` |
+| POST | `/v1/embeddings` | Routes configured custom embedding models to `{baseUrl}/embeddings` |
+
+### Configuration
+
+Custom providers live in `~/.local/share/copilot-api/config.json` under `customProviders`. They can also be managed in the admin dashboard at `/dashboard` > Custom Providers, or seeded from `copilot-api config` with the Nebius Qwen3 embedding preset.
+
+```json
+{
+  "customProviders": [
+    {
+      "id": "nebius",
+      "name": "Nebius",
+      "type": "openai-compatible",
+      "baseUrl": "https://api.studio.nebius.com/v1",
+      "apiKeyEnv": "NEBIUS_API_KEY",
+      "headers": {},
+      "models": [
+        {
+          "id": "Qwen/Qwen3-Embedding-8B",
+          "aliases": ["qwen3-embedding-8b"],
+          "kind": "embedding",
+          "dimensions": 4096
+        }
+      ]
+    },
+    {
+      "id": "openai-compatible-example",
+      "name": "Custom OpenAI Compatible",
+      "type": "openai-compatible",
+      "baseUrl": "https://example.com/v1",
+      "apiKeyEnv": "CUSTOM_PROVIDER_API_KEY",
+      "models": [
+        {
+          "id": "custom-chat-model",
+          "kind": "chat",
+          "supportsStreaming": true
+        }
+      ]
+    }
+  ]
+}
+```
+
+Provider requests use `Authorization: Bearer <api key>` plus any static `headers`. Set the named environment variable before starting the server; missing keys return a clear configuration error and are not logged.
+
+### Routing Rules
+
+- Custom aliases route to their provider before any Copilot fallback.
+- Exact Copilot model IDs stay on Copilot if a custom provider defines the same ID.
+- Exact custom model IDs route to the provider when no Copilot model with that ID is available.
+- Aliases are rewritten to the provider's canonical model ID upstream, while responses keep the client-requested model name.
+
+### Nebius Qwen3 Embeddings
+
+```bash
+NEBIUS_API_KEY=... copilot-api start
+```
+
+```json
+{
+  "model": "qwen3-embedding-8b",
+  "input": ["incident cpu saturation", "postgres connection timeout"]
+}
+```
+
+The response is OpenAI-compatible, preserves input order, and validates the configured `dimensions` value when provided.
+
+---
+
 ## Model Resolution & Reasoning Effort
 
 ### Reasoning Effort Suffixes
@@ -622,6 +702,7 @@ A single-page admin dashboard at `/dashboard` for managing all copilot-api featu
 | Environments | Registered bridge environments (v1 protocol) |
 | Feature Flags | Toggle/add/remove GrowthBook feature flags |
 | Replacements | Manage auto-replacement rules |
+| Custom Providers | Manage OpenAI-compatible chat and embedding providers |
 | Usage | Copilot usage/quota with progress bars |
 | Settings | Read-only server configuration display |
 

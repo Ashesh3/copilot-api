@@ -1,4 +1,4 @@
-// eslint-disable-next-line max-lines-per-function
+/* eslint-disable max-lines, max-lines-per-function */
 export function getDashboardPage(): string {
   return `<!DOCTYPE html>
 <html lang="en">
@@ -85,6 +85,8 @@ export function getDashboardPage(): string {
   .form-row { display: flex; gap: 10px; align-items: center; margin-top: 16px; flex-wrap: wrap }
   .form-input { background: #0F172A; border: 1px solid #272F42; color: #F8FAFC; padding: 8px 12px; border-radius: 8px; font-size: 0.85rem; outline: none; font-family: inherit }
   .form-input:focus { border-color: #3B82F6 } .form-input.mono { font-family: monospace }
+  .form-textarea { background: #0F172A; border: 1px solid #272F42; color: #F8FAFC; padding: 8px 12px; border-radius: 8px; font-size: 0.85rem; outline: none; font-family: monospace; width: 100%; min-height: 96px; resize: vertical }
+  .form-textarea:focus { border-color: #3B82F6 }
   select.form-input { min-height: 36px }
   .toggle { width: 40px; height: 22px; border-radius: 11px; border: none; position: relative; cursor: pointer; padding: 0; transition: background 0.2s }
   .toggle::after { content: ''; position: absolute; width: 16px; height: 16px; border-radius: 50%; background: #fff; top: 3px; left: 3px; transition: transform 0.2s }
@@ -152,6 +154,7 @@ export function getDashboardPage(): string {
   <a href="#replacements" data-section="replacements" onclick="navigate('replacements')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg><span class="tip">Replacements</span></a>
   <a href="#model-redirects" data-section="model-redirects" onclick="navigate('model-redirects')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h13"/><path d="M16 6l6 6-6 6"/><path d="M3 6v12"/></svg><span class="tip">Model Redirects</span></a>
   <a href="#model-settings" data-section="model-settings" onclick="navigate('model-settings')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 8h10"/><path d="M7 12h4"/><path d="M13 12h4"/><path d="M7 16h10"/></svg><span class="tip">Model Settings</span></a>
+  <a href="#custom-providers" data-section="custom-providers" onclick="navigate('custom-providers')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18"/><path d="M3 8h18"/><path d="M3 16h18"/><path d="M7 3c2 4 2 14 0 18"/><path d="M17 3c-2 4-2 14 0 18"/></svg><span class="tip">Custom Providers</span></a>
   <a href="#model-routing" data-section="model-routing" onclick="navigate('model-routing')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20"/><path d="M2 12h20"/><path d="M4 4h6v6H4z"/><path d="M14 14h6v6h-6z"/></svg><span class="tip">Model Routing</span></a>
   <a href="#llm-debug" data-section="llm-debug" onclick="navigate('llm-debug')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h6"/><path d="M8 9h2"/></svg><span class="tip">LLM Debug</span></a>
   <a href="#usage" data-section="usage" onclick="navigate('usage')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg><span class="tip">Usage</span></a>
@@ -163,6 +166,7 @@ export function getDashboardPage(): string {
   <a href="#sessions" data-section="sessions" onclick="navigate('sessions')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg><span class="nav-label">Sessions</span></a>
   <a href="#flags" data-section="flags" onclick="navigate('flags')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg><span class="nav-label">Flags</span></a>
   <a href="#model-settings" data-section="model-settings" onclick="navigate('model-settings')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 8h10"/><path d="M7 12h4"/><path d="M13 12h4"/><path d="M7 16h10"/></svg><span class="nav-label">Models</span></a>
+  <a href="#custom-providers" data-section="custom-providers" onclick="navigate('custom-providers')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v18"/><path d="M3 8h18"/><path d="M3 16h18"/><path d="M7 3c2 4 2 14 0 18"/><path d="M17 3c-2 4-2 14 0 18"/></svg><span class="nav-label">Providers</span></a>
   <a href="#model-routing" data-section="model-routing" onclick="navigate('model-routing')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20"/><path d="M2 12h20"/><path d="M4 4h6v6H4z"/><path d="M14 14h6v6h-6z"/></svg><span class="nav-label">Routing</span></a>
   <a href="#llm-debug" data-section="llm-debug" onclick="navigate('llm-debug')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h6"/></svg><span class="nav-label">Debug</span></a>
   <a href="#usage" data-section="usage" onclick="navigate('usage')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg><span class="nav-label">Usage</span></a>
@@ -176,6 +180,7 @@ export function getDashboardPage(): string {
   <div class="section" id="sec-replacements"><div class="section-header"><h2>Replacements</h2></div><div id="replacements-content"></div><div class="form-row" id="replacement-form"><input class="form-input" name="repl-name" placeholder="Name (optional)" style="min-width:120px"><input class="form-input mono" name="repl-pattern" placeholder="Pattern" style="flex:2;min-width:140px"><input class="form-input" name="repl-replacement" placeholder="Replacement" style="flex:2;min-width:140px"><label class="checkbox-label"><input type="checkbox" name="repl-regex"> Regex</label><button class="btn btn-primary" onclick="addReplacement()">Add</button></div></div>
   <div class="section" id="sec-model-redirects"><div class="section-header"><h2>Model Redirects</h2><span class="badge badge-gray">Silent - clients see the original model</span></div><div id="model-redirects-content"></div><div class="form-row" id="model-redirect-form"><input class="form-input" name="mr-name" placeholder="Name (optional)" style="min-width:120px"><input class="form-input mono" name="mr-source" placeholder="Source model" style="flex:2;min-width:200px"><select class="form-input" name="mr-source-effort"><option value="all">All effort levels</option><option value="default">Default/no effort</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select><input class="form-input mono" name="mr-target" placeholder="Target model" style="flex:2;min-width:200px"><select class="form-input" name="mr-target-effort"><option value="">Preserve effort</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select><button class="btn btn-primary" onclick="addModelRedirect()">Add</button></div></div>
   <div class="section" id="sec-model-settings"><div class="section-header"><h2>Model Settings</h2><span class="badge badge-gray">Reasoning and Sentry</span></div><div class="model-settings-layout"><div class="model-settings-panel"><h3>Add setting</h3><div class="field-stack" id="model-settings-form"><label><span class="field-label">Model ID</span><input class="form-input mono full-input" name="ms-model" placeholder="provider-model-id" autocomplete="off"></label><label><span class="field-label">Sentry reported name <span class="optional">optional</span></span><input class="form-input mono full-input" name="ms-sentry-model" placeholder="sentry-model-id" autocomplete="off"></label><div><span class="field-label">Supported efforts <span class="optional">optional</span></span><div class="effort-picker" data-efforts="ms-efforts"><label class="choice-pill"><input type="checkbox" name="ms-effort" value="low"><span>low</span></label><label class="choice-pill"><input type="checkbox" name="ms-effort" value="medium"><span>medium</span></label><label class="choice-pill"><input type="checkbox" name="ms-effort" value="high"><span>high</span></label><label class="choice-pill"><input type="checkbox" name="ms-effort" value="xhigh"><span>xhigh</span></label></div></div><label><span class="field-label">Default effort <span class="optional">optional</span></span><select class="form-input full-input" name="ms-default"><option value="">None</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option></select></label><div class="settings-options"><label><span class="field-label">Implicit default <span class="optional">optional</span></span><select class="form-input full-input" name="ms-implicit"><option value="">Not set</option><option value="true">Enabled</option><option value="false">Disabled</option></select></label><label><span class="field-label">Virtual variants <span class="optional">optional</span></span><select class="form-input full-input" name="ms-virtual"><option value="">Not set</option><option value="true">Show</option><option value="false">Hide</option></select></label></div><div class="model-settings-actions"><button class="btn" onclick="applyImplicitMediumPreset()">Implicit medium</button><button class="btn btn-primary" onclick="addModelSettings()">Save setting</button></div></div></div><div class="model-settings-panel model-settings-list"><h3>Configured models</h3><div id="model-settings-content"></div></div></div></div>
+  <div class="section" id="sec-custom-providers"><div class="section-header"><h2>Custom Providers</h2><span class="badge badge-gray" id="custom-provider-count">0 providers</span><button class="btn" onclick="addNebiusProvider()">Add Nebius Qwen3</button></div><div class="model-settings-layout"><div class="model-settings-panel"><h3 id="custom-provider-form-title">Add provider</h3><div class="field-stack" id="custom-provider-form"><div class="settings-options"><label><span class="field-label">Provider ID</span><input class="form-input mono full-input" name="cp-id" placeholder="nebius" autocomplete="off"></label><label><span class="field-label">Name</span><input class="form-input full-input" name="cp-name" placeholder="Nebius" autocomplete="off"></label></div><label><span class="field-label">Base URL</span><input class="form-input mono full-input" name="cp-base-url" placeholder="https://api.example.com/v1" autocomplete="off"></label><div class="settings-options"><label><span class="field-label">API key env</span><input class="form-input mono full-input" name="cp-api-key-env" placeholder="CUSTOM_PROVIDER_API_KEY" autocomplete="off"></label><label><span class="field-label">Timeout ms <span class="optional">optional</span></span><input class="form-input mono full-input" name="cp-timeout" placeholder="120000" autocomplete="off"></label></div><label class="switch-row"><input type="checkbox" name="cp-pass-reasoning"> Pass reasoning_effort</label><label><span class="field-label">Headers JSON <span class="optional">optional</span></span><textarea class="form-textarea" name="cp-headers" spellcheck="false">{}</textarea></label><label><span class="field-label">Models JSON</span><textarea class="form-textarea" name="cp-models" spellcheck="false">[{"id":"custom-chat-model","kind":"chat","supportsStreaming":true}]</textarea></label><div class="model-settings-actions"><button class="btn" onclick="clearCustomProviderForm()">Clear</button><button class="btn btn-primary" onclick="saveCustomProvider()">Save provider</button></div></div></div><div class="model-settings-panel model-settings-list"><h3>Configured providers</h3><div id="custom-providers-content"></div></div></div></div>
   <div class="section" id="sec-model-routing"><div class="section-header"><h2>Model Routing</h2><span class="badge badge-gray" id="model-routing-count">0 models</span><input class="form-input model-filter" id="model-routing-filter" placeholder="Filter models" oninput="renderModelRouting()"></div><div id="model-routing-content"></div></div>
   <div class="section" id="sec-llm-debug"><div class="section-header"><h2>LLM Debug</h2><span class="badge badge-gray" id="llm-debug-count">0 calls</span><span class="badge badge-orange">Memory only</span></div><div class="llm-debug-toolbar"><input class="form-input llm-debug-search" id="llm-debug-filter" placeholder="Filter model, path, request, response, error" oninput="renderLlmDebugLogs()"><select class="form-input" id="llm-debug-status" onchange="renderLlmDebugLogs()"><option value="all">All statuses</option><option value="error">Errors</option><option value="pending">Pending</option><option value="complete">Complete</option></select><select class="form-input" id="llm-debug-path" onchange="renderLlmDebugLogs()"><option value="all">All endpoints</option><option value="/chat/completions">Chat completions</option><option value="/responses">Responses</option><option value="/embeddings">Embeddings</option></select><button class="btn" onclick="loadLlmDebugLogs()">Refresh</button><button class="btn btn-danger" onclick="clearLlmDebugLogs()">Clear</button></div><div id="llm-debug-content"></div></div>
   <div class="section" id="sec-usage"><div class="section-header"><h2>Usage</h2></div><div id="usage-content"></div></div>
@@ -193,6 +198,8 @@ var modelRedirectsData = []
 var editingModelRedirectId = null
 var modelSettingsData = []
 var editingModelSettingsModel = null
+var customProvidersData = []
+var editingCustomProviderId = null
 var modelRoutingData = { accounts: [], models: [], multiToken: false }
 var llmDebugData = { entries: [], count: 0, retentionMs: 600000 }
 var expandedLlmDebug = {}
@@ -251,7 +258,7 @@ function doLogin() {
 }
 
 function navigate(section) {
-  var sections = ['overview','sessions','environments','flags','replacements','model-redirects','model-settings','model-routing','llm-debug','usage','settings']
+  var sections = ['overview','sessions','environments','flags','replacements','model-redirects','model-settings','custom-providers','model-routing','llm-debug','usage','settings']
   if (sections.indexOf(section) === -1) section = 'overview'
   Object.keys(refreshTimers).forEach(function(k) { clearInterval(refreshTimers[k]); delete refreshTimers[k] })
   Object.keys(eventTimers).forEach(function(k) { clearInterval(eventTimers[k]); delete eventTimers[k] })
@@ -265,7 +272,7 @@ function navigate(section) {
 function loadSection(section) {
   switch (section) {
     case 'overview': loadOverview(); break; case 'sessions': loadSessions(); break; case 'environments': loadEnvironments(); break
-    case 'flags': loadFlags(); break; case 'replacements': loadReplacements(); break; case 'model-redirects': loadModelRedirects(); break; case 'model-settings': loadModelSettings(); break; case 'model-routing': loadModelRouting(); break; case 'llm-debug': loadLlmDebugLogs(); break; case 'usage': loadUsage(); break; case 'settings': loadSettings(); break
+    case 'flags': loadFlags(); break; case 'replacements': loadReplacements(); break; case 'model-redirects': loadModelRedirects(); break; case 'model-settings': loadModelSettings(); break; case 'custom-providers': loadCustomProviders(); break; case 'model-routing': loadModelRouting(); break; case 'llm-debug': loadLlmDebugLogs(); break; case 'usage': loadUsage(); break; case 'settings': loadSettings(); break
   }
 }
 
@@ -640,6 +647,85 @@ function applyImplicitMediumPreset() {
   form.querySelector('select[name="ms-default"]').value = 'medium'
   form.querySelector('select[name="ms-implicit"]').value = 'true'
   form.querySelector('select[name="ms-virtual"]').value = 'false'
+}
+
+function loadCustomProviders() {
+  apiFetch('GET', '/dashboard/api/custom-providers').then(function(r) { if (r.ok) return r.json() }).then(function(d) { if (d) { customProvidersData = d; renderCustomProviders() } }).catch(function() { showToast('Failed to load custom providers', 'error') })
+}
+function renderCustomProviders() {
+  var content = document.getElementById('custom-providers-content')
+  var count = document.getElementById('custom-provider-count')
+  if (count) count.textContent = customProvidersData.length + ' provider' + (customProvidersData.length === 1 ? '' : 's')
+  if (!customProvidersData || customProvidersData.length === 0) { content.innerHTML = '<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 3v18"/><path d="M3 8h18"/><path d="M3 16h18"/></svg><p>No custom providers configured.</p></div>'; return }
+  var html = '<div class="table-scroll"><table><thead><tr><th>Provider</th><th>Base URL</th><th>API Key Env</th><th>Models</th><th>Actions</th></tr></thead><tbody>'
+  customProvidersData.forEach(function(provider) {
+    var models = (provider.models || []).map(function(model) { var details = [model.kind]; if (model.aliases && model.aliases.length) details.push('aliases: ' + model.aliases.join(', ')); if (model.dimensions) details.push(model.dimensions + ' dims'); return '<div class="mono" style="font-size:12px;margin-bottom:4px">' + esc(model.id) + ' <span class="badge badge-blue">' + esc(details.join(' | ')) + '</span></div>' }).join('')
+    html += '<tr><td><div class="model-name">' + esc(provider.name) + '</div><div class="model-meta mono">' + esc(provider.id) + '</div></td><td class="mono" style="font-size:12px">' + esc(provider.baseUrl) + '</td><td class="mono" style="font-size:12px">' + esc(provider.apiKeyEnv) + '</td><td>' + models + '</td><td style="white-space:nowrap"><button class="btn" style="font-size:0.78rem;padding:4px 10px" onclick="editCustomProvider(&quot;' + esc(provider.id) + '&quot;)">Edit</button> <button class="btn btn-danger" style="font-size:0.78rem;padding:4px 10px" onclick="deleteCustomProvider(&quot;' + esc(provider.id) + '&quot;)">Delete</button></td></tr>'
+  })
+  html += '</tbody></table></div>'
+  content.innerHTML = html
+}
+function parseJsonField(text, fallback) {
+  var trimmed = text.trim()
+  if (!trimmed) return fallback
+  return JSON.parse(trimmed)
+}
+function customProviderFormBody() {
+  var form = document.getElementById('custom-provider-form')
+  var id = form.querySelector('input[name="cp-id"]').value.trim()
+  var name = form.querySelector('input[name="cp-name"]').value.trim()
+  var baseUrl = form.querySelector('input[name="cp-base-url"]').value.trim()
+  var apiKeyEnv = form.querySelector('input[name="cp-api-key-env"]').value.trim()
+  var timeoutRaw = form.querySelector('input[name="cp-timeout"]').value.trim()
+  var headers = parseJsonField(form.querySelector('textarea[name="cp-headers"]').value, {})
+  var models = parseJsonField(form.querySelector('textarea[name="cp-models"]').value, [])
+  var body = { id: id, name: name, type: 'openai-compatible', baseUrl: baseUrl, apiKeyEnv: apiKeyEnv, headers: headers, models: models, passReasoningEffort: form.querySelector('input[name="cp-pass-reasoning"]').checked }
+  if (timeoutRaw) body.timeoutMs = Number(timeoutRaw)
+  return body
+}
+function saveCustomProvider() {
+  var body
+  try { body = customProviderFormBody() } catch(e) { showToast('Provider JSON is invalid', 'error'); return }
+  if (!body.id || !body.name || !body.baseUrl || !body.apiKeyEnv) { showToast('Provider ID, name, base URL, and API key env are required', 'error'); return }
+  if (!Array.isArray(body.models) || body.models.length === 0) { showToast('Add at least one model', 'error'); return }
+  apiFetch('POST', '/dashboard/api/custom-providers', body).then(function(r) { if (r.ok) { clearCustomProviderForm(); showToast('Provider saved', 'success'); loadCustomProviders(); return } r.json().catch(function() { return {} }).then(function(d) { showToast(d.error || 'Failed to save provider', 'error') }) }).catch(function() { showToast('Failed to save provider', 'error') })
+}
+function clearCustomProviderForm() {
+  editingCustomProviderId = null
+  document.getElementById('custom-provider-form-title').textContent = 'Add provider'
+  var form = document.getElementById('custom-provider-form')
+  form.querySelector('input[name="cp-id"]').value = ''
+  form.querySelector('input[name="cp-id"]').disabled = false
+  form.querySelector('input[name="cp-name"]').value = ''
+  form.querySelector('input[name="cp-base-url"]').value = ''
+  form.querySelector('input[name="cp-api-key-env"]').value = ''
+  form.querySelector('input[name="cp-timeout"]').value = ''
+  form.querySelector('input[name="cp-pass-reasoning"]').checked = false
+  form.querySelector('textarea[name="cp-headers"]').value = '{}'
+  form.querySelector('textarea[name="cp-models"]').value = '[{"id":"custom-chat-model","kind":"chat","supportsStreaming":true}]'
+}
+function editCustomProvider(id) {
+  var provider = customProvidersData.find(function(item) { return item.id === id })
+  if (!provider) return
+  editingCustomProviderId = id
+  document.getElementById('custom-provider-form-title').textContent = 'Edit provider'
+  var form = document.getElementById('custom-provider-form')
+  form.querySelector('input[name="cp-id"]').value = provider.id
+  form.querySelector('input[name="cp-id"]').disabled = true
+  form.querySelector('input[name="cp-name"]').value = provider.name || ''
+  form.querySelector('input[name="cp-base-url"]').value = provider.baseUrl || ''
+  form.querySelector('input[name="cp-api-key-env"]').value = provider.apiKeyEnv || ''
+  form.querySelector('input[name="cp-timeout"]').value = provider.timeoutMs || ''
+  form.querySelector('input[name="cp-pass-reasoning"]').checked = provider.passReasoningEffort === true
+  form.querySelector('textarea[name="cp-headers"]').value = JSON.stringify(provider.headers || {}, null, 2)
+  form.querySelector('textarea[name="cp-models"]').value = JSON.stringify(provider.models || [], null, 2)
+}
+function deleteCustomProvider(id) {
+  if (!confirm('Delete custom provider ' + id + '?')) return
+  apiFetch('DELETE', '/dashboard/api/custom-providers/' + encodeURIComponent(id)).then(function(r) { if (r.ok) { if (editingCustomProviderId === id) clearCustomProviderForm(); showToast('Provider deleted', 'success'); loadCustomProviders() } else showToast('Failed to delete provider', 'error') }).catch(function() { showToast('Failed to delete provider', 'error') })
+}
+function addNebiusProvider() {
+  apiFetch('POST', '/dashboard/api/custom-providers/nebius-qwen3').then(function(r) { if (r.ok) { showToast('Nebius provider saved', 'success'); loadCustomProviders() } else r.json().catch(function() { return {} }).then(function(d) { showToast(d.error || 'Failed to add Nebius provider', 'error') }) }).catch(function() { showToast('Failed to add Nebius provider', 'error') })
 }
 
 function loadModelRouting() {

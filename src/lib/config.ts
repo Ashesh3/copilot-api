@@ -7,6 +7,7 @@ export interface AppConfig {
   auth?: {
     apiKeys?: Array<string>
   }
+  customProviders?: Array<CustomProviderConfig>
   extraPrompts?: Record<string, string>
   smallModel?: string
   modelReasoningEfforts?: Record<
@@ -17,6 +18,27 @@ export interface AppConfig {
   compactUseSmallModel?: boolean
   groqApiKey?: string
   groqModel?: string
+}
+
+export interface CustomProviderModelConfig {
+  id: string
+  aliases?: Array<string>
+  kind: "chat" | "embedding"
+  dimensions?: number
+  supportsStreaming?: boolean
+  passReasoningEffort?: boolean
+}
+
+export interface CustomProviderConfig {
+  id: string
+  name: string
+  type: "openai-compatible"
+  baseUrl: string
+  apiKeyEnv: string
+  headers?: Record<string, string>
+  models: Array<CustomProviderModelConfig>
+  timeoutMs?: number
+  passReasoningEffort?: boolean
 }
 
 const gpt5ExplorationPrompt = `## Exploration and reading files
@@ -150,6 +172,28 @@ export function mergeConfigWithDefaults(): AppConfig {
 
   cachedConfig = mergedConfig
   return mergedConfig
+}
+
+export function writeConfig(config: AppConfig): void {
+  ensureConfigFile()
+  fs.writeFileSync(
+    PATHS.CONFIG_PATH,
+    `${JSON.stringify(config, null, 2)}\n`,
+    "utf8",
+  )
+  cachedConfig = config
+}
+
+export function updateConfig(
+  updater: (config: AppConfig) => AppConfig,
+): AppConfig {
+  const nextConfig = updater(getConfig())
+  writeConfig(nextConfig)
+  return nextConfig
+}
+
+export function setConfigForTest(config: AppConfig | null): void {
+  cachedConfig = config
 }
 
 export function getConfig(): AppConfig {

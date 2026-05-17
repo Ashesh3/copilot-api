@@ -18,6 +18,12 @@ import {
   updateReplacement,
   type ReplacementRule,
 } from "~/lib/auto-replace"
+import {
+  createNebiusQwen3EmbeddingProvider,
+  listCustomProvidersForDashboard,
+  removeCustomProvider,
+  upsertCustomProvider,
+} from "~/lib/custom-providers"
 import { ensurePaths, PATHS } from "~/lib/paths"
 import { tokenPool } from "~/lib/token-pool"
 import { getDeviceCode } from "~/services/github/get-device-code"
@@ -35,6 +41,9 @@ type MenuAction =
   | "account-details"
   | "add-account"
   | "remove-account"
+  | "list-custom-providers"
+  | "add-nebius-provider"
+  | "remove-custom-provider"
   | "exit"
 
 function formatRule(rule: ReplacementRule, index: number): string {
@@ -576,6 +585,120 @@ async function removeAccountMenu(): Promise<void> {
   consola.success(`Account removed. (${remaining.length} remaining)`)
 }
 
+type DashboardCustomProvider = ReturnType<
+  typeof listCustomProvidersForDashboard
+>[number]
+
+function formatCustomProvider(provider: DashboardCustomProvider): string {
+  return `${provider.name} (${provider.id}) - ${provider.models.length} model${provider.models.length === 1 ? "" : "s"} - ${provider.baseUrl} - env ${provider.apiKeyEnv}`
+}
+
+function listCustomProvidersMenu(): void {
+  const providers = listCustomProvidersForDashboard()
+  if (providers.length === 0) {
+    consola.info("No custom providers configured.")
+    return
+  }
+
+  consola.info("\nCustom providers:\n")
+  for (const [index, provider] of providers.entries()) {
+    console.log(`${index + 1}. ${formatCustomProvider(provider)}`)
+    for (const model of provider.models) {
+      const aliases =
+        model.aliases?.length ? ` aliases: ${model.aliases.join(", ")}` : ""
+      const dimensions =
+        model.dimensions ? ` dimensions: ${model.dimensions}` : ""
+      console.log(`   - ${model.id} (${model.kind})${aliases}${dimensions}`)
+    }
+  }
+  console.log()
+}
+
+function addNebiusProviderMenu(): void {
+  const provider = createNebiusQwen3EmbeddingProvider()
+  upsertCustomProvider(provider)
+  consola.success(
+    `Saved ${provider.name}. Set ${provider.apiKeyEnv} before using ${provider.models[0]?.aliases?.[0] ?? provider.models[0]?.id}.`,
+  )
+}
+
+async function removeCustomProviderMenu(): Promise<void> {
+  const providers = listCustomProvidersForDashboard()
+  if (providers.length === 0) {
+    consola.info("No custom providers configured.")
+    return
+  }
+
+  const selected = await consola.prompt("Select provider to remove:", {
+    type: "select",
+    options: providers.map((provider) => ({
+      label: formatCustomProvider(provider),
+      value: provider.id,
+    })),
+  })
+
+  if (typeof selected === "symbol") {
+    consola.info("Cancelled.")
+    return
+  }
+
+  const provider = providers.find((item) => item.id === selected)
+  const confirm = await consola.prompt(
+    `Remove custom provider ${provider?.name ?? selected}?`,
+    { type: "confirm", initial: false },
+  )
+
+  if (!confirm) {
+    consola.info("Cancelled.")
+    return
+  }
+
+  if (removeCustomProvider(selected)) {
+    consola.success("Custom provider removed.")
+  } else {
+    consola.error("Custom provider not found.")
+  }
+}
+
+const MENU_ACTION_HANDLERS: Partial<
+  Record<MenuAction, () => Promise<void> | void>
+> = {
+  list: listReplacements,
+  add: addNewReplacement,
+  edit: editExistingReplacement,
+  remove: removeExistingReplacement,
+  toggle: toggleExistingReplacement,
+  test: testReplacements,
+  clear: clearAllReplacements,
+  "list-accounts": listAccounts,
+  "account-details": showAccountDetails,
+  "add-account": addAccountMenu,
+  "remove-account": removeAccountMenu,
+  "list-custom-providers": listCustomProvidersMenu,
+  "add-nebius-provider": addNebiusProviderMenu,
+  "remove-custom-provider": removeCustomProviderMenu,
+}
+
+function getMenuOptions(): Array<{ label: string; value: MenuAction }> {
+  return [
+    { label: "📋 List all rules", value: "list" },
+    { label: "➕ Add new rule", value: "add" },
+    { label: "✏️  Edit rule", value: "edit" },
+    { label: "➖ Remove rule", value: "remove" },
+    { label: "🔄 Toggle rule on/off", value: "toggle" },
+    { label: "🧪 Test replacements", value: "test" },
+    { label: "🗑️  Clear all user rules", value: "clear" },
+    { label: "👤 List accounts", value: "list-accounts" },
+    { label: "🔍 Account details", value: "account-details" },
+    { label: "➕ Add account", value: "add-account" },
+    { label: "➖ Remove account", value: "remove-account" },
+    { label: "🌐 List custom providers", value: "list-custom-providers" },
+    { label: "➕ Add Nebius Qwen3 embeddings", value: "add-nebius-provider" },
+    { label: "➖ Remove custom provider", value: "remove-custom-provider" },
+    { label: "🚪 Exit", value: "exit" },
+  ]
+}
+
 async function mainMenu(): Promise<void> {
   consola.info(`\n🔧 Copilot API - Replacement Configuration`)
   consola.info(`Config file: ${PATHS.REPLACEMENTS_CONFIG_PATH}\n`)
@@ -585,85 +708,19 @@ async function mainMenu(): Promise<void> {
   while (running) {
     const action = await consola.prompt("What would you like to do?", {
       type: "select",
-      options: [
-        { label: "📋 List all rules", value: "list" as MenuAction },
-        { label: "➕ Add new rule", value: "add" as MenuAction },
-        { label: "✏️  Edit rule", value: "edit" as MenuAction },
-        { label: "➖ Remove rule", value: "remove" as MenuAction },
-        { label: "🔄 Toggle rule on/off", value: "toggle" as MenuAction },
-        { label: "🧪 Test replacements", value: "test" as MenuAction },
-        { label: "🗑️  Clear all user rules", value: "clear" as MenuAction },
-        { label: "👤 List accounts", value: "list-accounts" as MenuAction },
-        { label: "🔍 Account details", value: "account-details" as MenuAction },
-        {
-          label: "➕ Add account",
-          value: "add-account" as MenuAction,
-        },
-        {
-          label: "➖ Remove account",
-          value: "remove-account" as MenuAction,
-        },
-        { label: "🚪 Exit", value: "exit" as MenuAction },
-      ],
+      options: getMenuOptions(),
     })
 
     if (typeof action === "symbol") {
       break
     }
 
-    switch (action) {
-      case "list": {
-        await listReplacements()
-        break
-      }
-      case "add": {
-        await addNewReplacement()
-        break
-      }
-      case "edit": {
-        await editExistingReplacement()
-        break
-      }
-      case "remove": {
-        await removeExistingReplacement()
-        break
-      }
-      case "toggle": {
-        await toggleExistingReplacement()
-        break
-      }
-      case "test": {
-        await testReplacements()
-        break
-      }
-      case "clear": {
-        await clearAllReplacements()
-        break
-      }
-      case "list-accounts": {
-        await listAccounts()
-        break
-      }
-      case "account-details": {
-        await showAccountDetails()
-        break
-      }
-      case "add-account": {
-        await addAccountMenu()
-        break
-      }
-      case "remove-account": {
-        await removeAccountMenu()
-        break
-      }
-      case "exit": {
-        running = false
-        break
-      }
-      default: {
-        break
-      }
+    if (action === "exit") {
+      running = false
+      continue
     }
+
+    await MENU_ACTION_HANDLERS[action]?.()
   }
 
   consola.info("Goodbye! 👋")

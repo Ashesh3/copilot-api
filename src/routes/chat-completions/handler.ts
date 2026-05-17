@@ -7,6 +7,11 @@ import { streamSSE, type SSEMessage } from "hono/streaming"
 import { getLastUsedAccountId } from "~/lib/account-router"
 import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
+import {
+  createCustomProviderChatCompletions,
+  resolveCustomProviderModel,
+  type CustomProviderModelReference,
+} from "~/lib/custom-providers"
 import { isAbortError } from "~/lib/error"
 import {
   applyModelRedirect,
@@ -79,13 +84,33 @@ async function handleCompletionInner(
   const { payload: replacedPayload, appliedRules } =
     await applyReplacementsToPayload(rawPayload)
 
-  const normalizedModel = normalizeModelName(replacedPayload.model)
+  const unnormalizedModel = replacedPayload.model
+  const customReferenceBeforeCopilot = resolveCustomProviderModel({
+    model: unnormalizedModel,
+    kind: "chat",
+    copilotModelIds: getCopilotModelIds(),
+  })
+  const normalizedModel = normalizeModelName(unnormalizedModel)
   const payloadEffort = getPayloadReasoningEffort(replacedPayload)
   const requestedEffort = getNormalizedRequestedEffort(c, {
     model: normalizedModel,
     suffixEffort,
     payloadEffort,
   })
+
+  if (customReferenceBeforeCopilot) {
+    const customPayload = {
+      ...replacedPayload,
+      model: unnormalizedModel,
+    }
+    return await executeCustomProviderRequest(c, {
+      reference: customReferenceBeforeCopilot,
+      payload: customPayload,
+      requestedModel,
+      appliedRules,
+      reasoningEffort: requestedEffort,
+    })
+  }
 
   // Apply user-configured silent model redirect (e.g. opus-4-7 -> opus-4-6)
   const { targetModel, reasoningEffort } = await resolveRedirectedModel(c, {
@@ -103,6 +128,21 @@ async function handleCompletionInner(
   let payload = {
     ...replacedPayload,
     model: targetModel,
+  }
+
+  const customReference = resolveCustomProviderModel({
+    model: payload.model,
+    kind: "chat",
+    copilotModelIds: getCopilotModelIds(),
+  })
+  if (customReference) {
+    return await executeCustomProviderRequest(c, {
+      reference: customReference,
+      payload,
+      requestedModel,
+      appliedRules,
+      reasoningEffort,
+    })
   }
 
   payload = applyRoutableModelFallback(c, payload)
@@ -143,6 +183,118 @@ async function handleCompletionInner(
   }
 
   return await executeRequest(c, payload, requestedModel)
+}
+
+function getCopilotModelIds(): Set<string> {
+  return new Set(state.models?.data.map((model) => model.id) ?? [])
+}
+
+async function executeCustomProviderRequest(
+  c: Context,
+  options: {
+    reference: CustomProviderModelReference
+    payload: ChatCompletionsPayload & { model: string }
+    requestedModel: string
+    appliedRules: Array<string>
+    reasoningEffort?: ReasoningEffort
+  },
+) {
+  const { reference, payload, requestedModel, appliedRules, reasoningEffort } =
+    options
+
+  consola.debug(
+    `Routing custom chat model ${requestedModel} to ${reference.provider.id}/${reference.upstreamModel}`,
+  )
+
+  setRequestContext(c, {
+    requestedModel,
+    provider: reference.provider.name,
+    model: reference.upstreamModel,
+    replacements: appliedRules,
+    reasoningEffort,
+  })
+
+  if (state.manualApprove) await awaitApproval()
+
+  if (payload.stream) {
+    return await handleCustomProviderStreamingResponse(c, {
+      reference,
+      payload,
+      requestedModel,
+      reasoningEffort,
+    })
+  }
+
+  const response = (await createCustomProviderChatCompletions(
+    reference,
+    payload,
+    { signal: c.req.raw.signal, reasoningEffort },
+  )) as ChatCompletionResponse
+
+  return handleCustomProviderNonStreamingResponse(c, response, requestedModel)
+}
+
+function handleCustomProviderNonStreamingResponse(
+  c: Context,
+  response: ChatCompletionResponse,
+  requestedModel: string,
+) {
+  if (response.usage) {
+    setRequestContext(c, {
+      inputTokens: response.usage.prompt_tokens,
+      outputTokens: response.usage.completion_tokens,
+    })
+  }
+  return c.json({ ...response, model: requestedModel })
+}
+
+async function handleCustomProviderStreamingResponse(
+  c: Context,
+  options: {
+    reference: CustomProviderModelReference
+    payload: ChatCompletionsPayload & { model: string }
+    requestedModel: string
+    reasoningEffort?: ReasoningEffort
+  },
+) {
+  const response = await createCustomProviderChatCompletions(
+    options.reference,
+    options.payload,
+    { signal: c.req.raw.signal, reasoningEffort: options.reasoningEffort },
+  )
+
+  if (isNonStreaming(response)) {
+    return handleCustomProviderNonStreamingResponse(
+      c,
+      response,
+      options.requestedModel,
+    )
+  }
+
+  return streamSSE(c, async (stream) => {
+    try {
+      for await (const chunk of response) {
+        let outChunk = chunk
+        if (chunk.data && chunk.data !== "[DONE]") {
+          const parsed = JSON.parse(chunk.data) as ChatCompletionChunk
+          if (parsed.usage) {
+            setRequestContext(c, {
+              inputTokens: parsed.usage.prompt_tokens,
+              outputTokens: parsed.usage.completion_tokens,
+            })
+          }
+          if (parsed.model !== options.requestedModel) {
+            parsed.model = options.requestedModel
+            outChunk = { ...chunk, data: JSON.stringify(parsed) }
+          }
+        }
+        await stream.writeSSE(outChunk as SSEMessage)
+      }
+    } catch (error) {
+      if (isAbortError(error)) return
+      throw error
+    }
+  })
 }
 
 const executeRequest = async (
@@ -481,5 +633,8 @@ const handleStreamingResponse = (
 }
 
 const isNonStreaming = (
-  response: Awaited<ReturnType<typeof createChatCompletions>>,
-): response is ChatCompletionResponse => Object.hasOwn(response, "choices")
+  response: unknown,
+): response is ChatCompletionResponse =>
+  typeof response === "object"
+  && response !== null
+  && Object.hasOwn(response, "choices")

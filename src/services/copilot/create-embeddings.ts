@@ -1,10 +1,13 @@
 import { routedFetch } from "~/lib/account-router"
 import { HTTPError } from "~/lib/error"
 
-export const createEmbeddings = async (payload: EmbeddingRequest) => {
+export const createEmbeddings = async (
+  payload: EmbeddingRequest,
+  options?: { signal?: AbortSignal },
+) => {
   const { response } = await routedFetch(
     "/embeddings",
-    { method: "POST", body: JSON.stringify(payload) },
+    { method: "POST", body: JSON.stringify(payload), signal: options?.signal },
     { modelId: payload.model },
   )
 
