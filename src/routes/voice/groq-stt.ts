@@ -4,12 +4,21 @@ export interface TranscriptionResult {
   text: string
 }
 
+export interface TranscribeOptions {
+  contentType?: string
+  filename?: string
+  timeoutMs?: number
+}
+
 /**
- * Sends a WAV audio buffer to Groq's Whisper API for transcription.
+ * Sends an audio buffer to Groq's Whisper API for transcription.
+ * Defaults to a WAV envelope (used by the streaming voice WebSocket).
+ * Pass `contentType`/`filename` to forward other formats (e.g. WebM from Codex Desktop dictation).
  */
 export async function transcribe(
-  wavData: Uint8Array,
+  audio: Uint8Array,
   language?: string,
+  options: TranscribeOptions = {},
 ): Promise<TranscriptionResult> {
   const config = getConfig()
   const apiKey = config.groqApiKey ?? process.env.GROQ_API_KEY
@@ -20,13 +29,11 @@ export async function transcribe(
 
   const model = config.groqModel ?? "whisper-large-v3-turbo"
   const url = "https://api.groq.com/openai/v1/audio/transcriptions"
+  const contentType = options.contentType ?? "audio/wav"
+  const filename = options.filename ?? "audio.wav"
 
   const formData = new FormData()
-  formData.append(
-    "file",
-    new Blob([wavData], { type: "audio/wav" }),
-    "audio.wav",
-  )
+  formData.append("file", new Blob([audio], { type: contentType }), filename)
   formData.append("model", model)
   formData.append("response_format", "json")
 
@@ -40,7 +47,7 @@ export async function transcribe(
       Authorization: `Bearer ${apiKey}`,
     },
     body: formData,
-    signal: AbortSignal.timeout(10000),
+    signal: AbortSignal.timeout(options.timeoutMs ?? 10000),
   })
 
   if (!response.ok) {

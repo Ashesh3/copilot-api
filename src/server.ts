@@ -17,6 +17,7 @@ import { transparentProxy } from "./lib/transparent-proxy"
 import { completionRoutes } from "./routes/chat-completions/route"
 import { getCodeLauncherPage } from "./routes/code-launcher/page"
 import { codeSessionsRoutes } from "./routes/code-sessions/route"
+import { codexResponsesRoutes } from "./routes/codex-responses/route"
 import { dashboardRoutes } from "./routes/dashboard/route"
 import { directConnectRoutes } from "./routes/direct-connect/route"
 import { embeddingRoutes } from "./routes/embeddings/route"
@@ -36,6 +37,7 @@ import { remoteRoutes } from "./routes/remote/route"
 import { replacementsRoute } from "./routes/replacements/route"
 import { responsesRoutes } from "./routes/responses/route"
 import { sessionsRoutes } from "./routes/sessions/route"
+import { transcribeRoutes } from "./routes/transcribe/route"
 import { usageRoute } from "./routes/usage/route"
 
 export const server = new Hono()
@@ -94,6 +96,10 @@ server.route("/v1/environments", environmentsRoutes)
 // Direct Connect — WebSocket session management for --server mode
 server.route("/sessions", directConnectRoutes)
 server.route("/health", directConnectRoutes)
+// Codex Desktop dictation — auth via IP whitelist (see route file)
+server.route("/transcribe", transcribeRoutes)
+// Codex Desktop dictation transcript cleanup — auth via IP whitelist
+server.route("/codex/responses", codexResponsesRoutes)
 
 server.use(apiKeyGuard)
 server.use("*", createAuthMiddleware())

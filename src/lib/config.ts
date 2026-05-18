@@ -18,6 +18,7 @@ export interface AppConfig {
   compactUseSmallModel?: boolean
   groqApiKey?: string
   groqModel?: string
+  codexCleanupModel?: string
 }
 
 export interface CustomProviderModelConfig {
@@ -231,4 +232,20 @@ export function getReasoningEffortForModel(
 export function shouldCompactUseSmallModel(): boolean {
   const config = getConfig()
   return config.compactUseSmallModel ?? false
+}
+
+export function getCodexCleanupModel(): string {
+  const config = getConfig()
+  const configured = config.codexCleanupModel?.trim()
+  return configured && configured.length > 0 ? configured : getSmallModel()
+}
+
+export function setCodexCleanupModel(model: string | null): AppConfig {
+  return updateConfig((config) => {
+    if (model === null || model.trim().length === 0) {
+      const { codexCleanupModel: _omit, ...rest } = config
+      return rest
+    }
+    return { ...config, codexCleanupModel: model.trim() }
+  })
 }

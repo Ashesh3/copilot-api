@@ -840,8 +840,10 @@ function renderUsage(data) {
 function loadSettings() { apiFetch('GET', '/dashboard/api/settings').then(function(r) { if (r.ok) return r.json() }).then(function(d) { if (d) renderSettings(d) }).catch(function() { showToast('Failed to load settings', 'error') }) }
 function renderSettings(data) {
   var labels = { version:'Version', port:'Port', host:'Host', authEnabled:'API Key Configured', multiToken:'Multi-Token Mode', rateLimitSeconds:'Rate Limit (seconds)', sentryEnabled:'Sentry Enabled', groqEnabled:'Groq Enabled', dataDir:'Data Directory', debug:'Debug Mode', verbose:'Verbose Logging' }
+  var skip = { codexCleanupModel:1, codexCleanupModelDefault:1, availableModels:1 }
   var html = '<div class="settings-grid">'
   Object.keys(data).forEach(function(key) {
+    if (skip[key]) return
     var val = data[key], label = labels[key] || key, display
     if (typeof val === 'boolean') display = val ? '<span class="bool-yes">Yes</span>' : '<span class="bool-no">No</span>'
     else if (val == null) display = '<span style="color:#94A3B8">-</span>'
@@ -849,7 +851,37 @@ function renderSettings(data) {
     html += '<div class="setting-row"><div class="setting-key">' + esc(label) + '</div><div class="setting-val">' + display + '</div></div>'
   })
   html += '</div>'
+
+  var current = data.codexCleanupModel || ''
+  var fallback = data.codexCleanupModelDefault || ''
+  var models = Array.isArray(data.availableModels) ? data.availableModels : []
+  var hasCurrentInList = current === '' || models.indexOf(current) !== -1
+  var defaultOptionLabel = fallback ? 'Use default (' + fallback + ')' : 'Use default'
+  html += '<div class="section-header" style="margin-top:24px"><h2>Codex Dictation Cleanup</h2><span class="badge badge-gray">Used by /codex/responses</span></div>'
+  html += '<div class="settings-grid"><div class="setting-row"><div class="setting-key">Cleanup Model</div><div class="setting-val">'
+  html += '<select class="form-input mono" id="codex-cleanup-model-select" style="min-width:280px">'
+  html += '<option value="">' + esc(defaultOptionLabel) + '</option>'
+  if (!hasCurrentInList) {
+    html += '<option value="' + escAttr(current) + '" selected>' + esc(current) + ' (not in current model list)</option>'
+  }
+  models.forEach(function(id) {
+    var sel = id === current ? ' selected' : ''
+    html += '<option value="' + escAttr(id) + '"' + sel + '>' + esc(id) + '</option>'
+  })
+  html += '</select> '
+  html += '<button class="btn btn-primary" onclick="saveCodexCleanupModel()" style="margin-left:8px">Save</button>'
+  html += '</div></div></div>'
+
   document.getElementById('settings-content').innerHTML = html
+}
+function saveCodexCleanupModel() {
+  var sel = document.getElementById('codex-cleanup-model-select')
+  if (!sel) return
+  var value = sel.value || null
+  apiFetch('POST', '/dashboard/api/settings/codex-cleanup-model', { model: value }).then(function(r) {
+    if (r.ok) { showToast('Cleanup model saved', 'success'); loadSettings() }
+    else { r.json().then(function(e) { showToast('Save failed: ' + (e && e.error || r.status), 'error') }).catch(function() { showToast('Save failed: ' + r.status, 'error') }) }
+  }).catch(function() { showToast('Save failed', 'error') })
 }
 
 document.getElementById('login-key').addEventListener('keydown', function(e) { if (e.key === 'Enter') doLogin() })

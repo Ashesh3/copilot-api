@@ -38,6 +38,7 @@ import {
   handleMoveModelRedirect,
   handleOverview,
   handleSetFlag,
+  handleSetCodexCleanupModel,
   handleSetModelSettings,
   handleSetModelRouting,
   handleStartEnvironmentSession,
@@ -156,3 +157,7 @@ dashboardRoutes.delete("/api/llm-debug", handleClearLlmDebugLogs)
 
 // Settings
 dashboardRoutes.get("/api/settings", handleGetSettings)
+dashboardRoutes.post(
+  "/api/settings/codex-cleanup-model",
+  handleSetCodexCleanupModel,
+)

@@ -7,6 +7,11 @@ import {
   toggleReplacement,
 } from "~/lib/auto-replace"
 import {
+  getCodexCleanupModel,
+  getSmallModel,
+  setCodexCleanupModel,
+} from "~/lib/config"
+import {
   createNebiusQwen3EmbeddingProvider,
   listCustomProvidersForDashboard,
   removeCustomProvider,
@@ -748,6 +753,12 @@ export function handleClearLlmDebugLogs(c: Context) {
 }
 
 export function handleGetSettings(c: Context) {
+  const availableModels =
+    state.models?.data
+      .map((model) => model.id)
+      .filter((id) => typeof id === "string" && id.length > 0)
+      .sort() ?? []
+
   return c.json({
     version: packageJson.version,
     port: process.env.PORT ?? "4141",
@@ -760,6 +771,37 @@ export function handleGetSettings(c: Context) {
     dataDir: PATHS.APP_DIR,
     debug: state.debug,
     verbose: state.verbose,
+    codexCleanupModel: getCodexCleanupModel(),
+    codexCleanupModelDefault: getSmallModel(),
+    availableModels,
+  })
+}
+
+export async function handleSetCodexCleanupModel(c: Context) {
+  const body = await c.req.json<{ model?: string | null }>().catch(() => null)
+  if (body === null) {
+    return c.json({ error: "Invalid JSON body" }, 400)
+  }
+
+  const raw = body.model
+  if (raw !== null && raw !== undefined && typeof raw !== "string") {
+    return c.json({ error: "model must be a string or null" }, 400)
+  }
+
+  const trimmed =
+    typeof raw === "string" && raw.trim().length > 0 ? raw.trim() : null
+
+  if (trimmed !== null) {
+    const allowed = new Set(state.models?.data.map((m) => m.id) ?? [])
+    if (allowed.size > 0 && !allowed.has(trimmed)) {
+      return c.json({ error: `Unknown model: ${trimmed}` }, 400)
+    }
+  }
+
+  setCodexCleanupModel(trimmed)
+  return c.json({
+    codexCleanupModel: getCodexCleanupModel(),
+    codexCleanupModelDefault: getSmallModel(),
   })
 }
 
