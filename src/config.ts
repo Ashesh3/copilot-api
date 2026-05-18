@@ -590,7 +590,13 @@ type DashboardCustomProvider = ReturnType<
 >[number]
 
 function formatCustomProvider(provider: DashboardCustomProvider): string {
-  return `${provider.name} (${provider.id}) - ${provider.models.length} model${provider.models.length === 1 ? "" : "s"} - ${provider.baseUrl} - env ${provider.apiKeyEnv}`
+  let keySource = "missing api key"
+  if (provider.apiKey) {
+    keySource = "stored api key"
+  } else if (provider.apiKeyEnv) {
+    keySource = `env ${provider.apiKeyEnv}`
+  }
+  return `${provider.name} (${provider.id}) - ${provider.models.length} model${provider.models.length === 1 ? "" : "s"} - ${provider.baseUrl} - ${keySource}`
 }
 
 function listCustomProvidersMenu(): void {
@@ -614,11 +620,20 @@ function listCustomProvidersMenu(): void {
   console.log()
 }
 
-function addNebiusProviderMenu(): void {
-  const provider = createNebiusQwen3EmbeddingProvider()
+async function addNebiusProviderMenu(): Promise<void> {
+  const apiKey = await consola.prompt("Nebius API key:", {
+    type: "text",
+  })
+
+  if (typeof apiKey === "symbol" || !apiKey.trim()) {
+    consola.info("Cancelled.")
+    return
+  }
+
+  const provider = createNebiusQwen3EmbeddingProvider(apiKey.trim())
   upsertCustomProvider(provider)
   consola.success(
-    `Saved ${provider.name}. Set ${provider.apiKeyEnv} before using ${provider.models[0]?.aliases?.[0] ?? provider.models[0]?.id}.`,
+    `Saved ${provider.name}. Use ${provider.models[0]?.aliases?.[0] ?? provider.models[0]?.id} for embeddings.`,
   )
 }
 

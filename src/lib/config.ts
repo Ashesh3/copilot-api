@@ -34,7 +34,8 @@ export interface CustomProviderConfig {
   name: string
   type: "openai-compatible"
   baseUrl: string
-  apiKeyEnv: string
+  apiKey?: string
+  apiKeyEnv?: string
   headers?: Record<string, string>
   models: Array<CustomProviderModelConfig>
   timeoutMs?: number
@@ -86,6 +87,7 @@ const defaultConfig: AppConfig = {
 }
 
 let cachedConfig: AppConfig | null = null
+let useInMemoryConfigForTest = false
 
 function ensureConfigFile(): void {
   try {
@@ -175,6 +177,11 @@ export function mergeConfigWithDefaults(): AppConfig {
 }
 
 export function writeConfig(config: AppConfig): void {
+  if (useInMemoryConfigForTest) {
+    cachedConfig = config
+    return
+  }
+
   ensureConfigFile()
   fs.writeFileSync(
     PATHS.CONFIG_PATH,
@@ -193,6 +200,7 @@ export function updateConfig(
 }
 
 export function setConfigForTest(config: AppConfig | null): void {
+  useInMemoryConfigForTest = config !== null
   cachedConfig = config
 }
 

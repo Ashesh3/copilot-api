@@ -89,6 +89,7 @@ interface CustomProviderRequestBody {
   name?: string
   type?: "openai-compatible"
   baseUrl?: string
+  apiKey?: string
   apiKeyEnv?: string
   headers?: Record<string, string>
   timeoutMs?: number | null
@@ -107,7 +108,8 @@ interface ValidCustomProviderBody {
   id: string
   name: string
   baseUrl: string
-  apiKeyEnv: string
+  apiKey?: string
+  apiKeyEnv?: string
   headers?: Record<string, string>
   timeoutMs?: number
   passReasoningEffort?: boolean
@@ -497,7 +499,8 @@ export async function handleUpsertCustomProvider(c: Context) {
     name: body.name,
     type: "openai-compatible",
     baseUrl: body.baseUrl,
-    apiKeyEnv: body.apiKeyEnv,
+    ...(body.apiKey ? { apiKey: body.apiKey } : {}),
+    ...(body.apiKeyEnv ? { apiKeyEnv: body.apiKeyEnv } : {}),
     ...(body.headers ? { headers: body.headers } : {}),
     models: body.models,
     ...(body.timeoutMs ? { timeoutMs: body.timeoutMs } : {}),
@@ -537,8 +540,12 @@ function parseCustomProviderBase(
   if (!name.ok) return name
   const baseUrl = getRequiredString(body.baseUrl, "baseUrl")
   if (!baseUrl.ok) return baseUrl
-  const apiKeyEnv = getRequiredString(body.apiKeyEnv, "apiKeyEnv")
-  if (!apiKeyEnv.ok) return apiKeyEnv
+  const apiKey = getOptionalString(body.apiKey)
+  const apiKeyEnv = getOptionalString(body.apiKeyEnv)
+
+  if (!apiKey && !apiKeyEnv) {
+    return { ok: false, error: "apiKey or apiKeyEnv is required" }
+  }
 
   if (body.headers !== undefined && !isStringRecord(body.headers)) {
     return { ok: false, error: "headers must be an object of strings" }
@@ -553,7 +560,8 @@ function parseCustomProviderBase(
       id: id.value,
       name: name.value,
       baseUrl: baseUrl.value,
-      apiKeyEnv: apiKeyEnv.value,
+      ...(apiKey ? { apiKey } : {}),
+      ...(apiKeyEnv ? { apiKeyEnv } : {}),
       ...(body.headers ? { headers: body.headers } : {}),
       ...(typeof body.timeoutMs === "number" ?
         { timeoutMs: body.timeoutMs }
@@ -632,6 +640,12 @@ function getRequiredString(
   return { ok: true, value: value.trim() }
 }
 
+function getOptionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ?
+      value.trim()
+    : undefined
+}
+
 function isPositiveOptionalInteger(value: unknown): boolean {
   return (
     value === undefined
@@ -656,8 +670,14 @@ function isStringRecord(value: unknown): value is Record<string, string> {
   )
 }
 
-export function handleAddNebiusCustomProvider(c: Context) {
-  const provider = createNebiusQwen3EmbeddingProvider()
+export async function handleAddNebiusCustomProvider(c: Context) {
+  const body: { apiKey?: string } = await c.req
+    .json<{ apiKey?: string }>()
+    .catch(() => ({}))
+  const apiKey = getRequiredString(body.apiKey, "apiKey")
+  if (!apiKey.ok) return c.json({ error: apiKey.error }, 400)
+
+  const provider = createNebiusQwen3EmbeddingProvider(apiKey.value)
   upsertCustomProvider(provider)
   return c.json(provider)
 }

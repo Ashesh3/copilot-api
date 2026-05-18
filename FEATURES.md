@@ -464,6 +464,7 @@ copilot-api can expose additional OpenAI-compatible providers through the same O
 ### Configuration
 
 Custom providers live in `~/.local/share/copilot-api/config.json` under `customProviders`. They can also be managed in the admin dashboard at `/dashboard` > Custom Providers, or seeded from `copilot-api config` with the Nebius Qwen3 embedding preset.
+The dashboard stores provider API keys directly in the same config file used for other persistent settings. Manual config files may use `apiKeyEnv` instead of `apiKey` when an environment variable is preferred.
 
 ```json
 {
@@ -473,7 +474,7 @@ Custom providers live in `~/.local/share/copilot-api/config.json` under `customP
       "name": "Nebius",
       "type": "openai-compatible",
       "baseUrl": "https://api.studio.nebius.com/v1",
-      "apiKeyEnv": "NEBIUS_API_KEY",
+      "apiKey": "<nebius api key>",
       "headers": {},
       "models": [
         {
@@ -489,7 +490,7 @@ Custom providers live in `~/.local/share/copilot-api/config.json` under `customP
       "name": "Custom OpenAI Compatible",
       "type": "openai-compatible",
       "baseUrl": "https://example.com/v1",
-      "apiKeyEnv": "CUSTOM_PROVIDER_API_KEY",
+      "apiKey": "<provider api key>",
       "models": [
         {
           "id": "custom-chat-model",
@@ -502,7 +503,7 @@ Custom providers live in `~/.local/share/copilot-api/config.json` under `customP
 }
 ```
 
-Provider requests use `Authorization: Bearer <api key>` plus any static `headers`. Set the named environment variable before starting the server; missing keys return a clear configuration error and are not logged.
+Provider requests use `Authorization: Bearer <api key>` plus any static `headers`. Missing keys return a clear configuration error and are not logged.
 
 ### Routing Rules
 
@@ -512,10 +513,6 @@ Provider requests use `Authorization: Bearer <api key>` plus any static `headers
 - Aliases are rewritten to the provider's canonical model ID upstream, while responses keep the client-requested model name.
 
 ### Nebius Qwen3 Embeddings
-
-```bash
-NEBIUS_API_KEY=... copilot-api start
-```
 
 ```json
 {

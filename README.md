@@ -192,7 +192,7 @@ These endpoints mimic the OpenAI API structure. By default they proxy Copilot mo
 
 ### Custom OpenAI-Compatible Providers
 
-Add `customProviders` to `~/.local/share/copilot-api/config.json`, or manage them from `/dashboard` under Custom Providers. Provider API keys are read from environment variables and are never stored in the config file.
+Add `customProviders` to `~/.local/share/copilot-api/config.json`, or manage them from `/dashboard` under Custom Providers. The dashboard stores provider API keys in this config file, alongside the other persistent settings.
 
 ```json
 {
@@ -202,7 +202,7 @@ Add `customProviders` to `~/.local/share/copilot-api/config.json`, or manage the
       "name": "Nebius",
       "type": "openai-compatible",
       "baseUrl": "https://api.studio.nebius.com/v1",
-      "apiKeyEnv": "NEBIUS_API_KEY",
+      "apiKey": "<nebius api key>",
       "headers": {},
       "models": [
         {
@@ -216,6 +216,8 @@ Add `customProviders` to `~/.local/share/copilot-api/config.json`, or manage the
   ]
 }
 ```
+
+Manual config files may use `apiKeyEnv` instead of `apiKey` if you prefer to resolve the provider key from an environment variable.
 
 Clients keep using this server as the OpenAI base URL:
 

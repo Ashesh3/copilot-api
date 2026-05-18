@@ -7,7 +7,6 @@ import { state } from "../src/lib/state"
 import { server } from "../src/server"
 
 const originalFetch = globalThis.fetch
-const originalNebiusApiKey = process.env.NEBIUS_API_KEY
 const originalCustomApiKey = process.env.CUSTOM_PROVIDER_API_KEY
 const originalModels = state.models
 const originalCopilotToken = state.copilotToken
@@ -114,7 +113,6 @@ beforeAll(() => {
 
 afterAll(() => {
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
-  restoreEnv("NEBIUS_API_KEY", originalNebiusApiKey)
   restoreEnv("CUSTOM_PROVIDER_API_KEY", originalCustomApiKey)
   setConfigForTest(null)
   state.models = originalModels
@@ -127,7 +125,6 @@ afterAll(() => {
 beforeEach(() => {
   fetchMock.mockClear()
   requests = []
-  process.env.NEBIUS_API_KEY = "nebius-key"
   process.env.CUSTOM_PROVIDER_API_KEY = "custom-key"
   state.models = models
   state.copilotToken = "copilot-token"
@@ -142,7 +139,7 @@ beforeEach(() => {
         name: "Nebius",
         type: "openai-compatible",
         baseUrl: "https://api.studio.nebius.com/v1",
-        apiKeyEnv: "NEBIUS_API_KEY",
+        apiKey: "nebius-key",
         headers: { "X-Provider": "nebius" },
         models: [
           {
@@ -266,7 +263,27 @@ test("embeddings request routes to Nebius config by alias", async () => {
 })
 
 test("missing custom provider API key returns a clear error", async () => {
-  delete process.env.NEBIUS_API_KEY
+  setConfigForTest({
+    auth: { apiKeys: [] },
+    customProviders: [
+      {
+        id: "nebius",
+        name: "Nebius",
+        type: "openai-compatible",
+        baseUrl: "https://api.studio.nebius.com/v1",
+        apiKeyEnv: "NEBIUS_API_KEY",
+        models: [
+          {
+            id: "Qwen/Qwen3-Embedding-8B",
+            aliases: ["qwen3-embedding-8b"],
+            kind: "embedding",
+            dimensions: 4096,
+          },
+        ],
+      },
+    ],
+  })
+  clearEnv("NEBIUS_API_KEY")
 
   const response = await server.request("/v1/embeddings", {
     method: "POST",
@@ -281,6 +298,41 @@ test("missing custom provider API key returns a clear error", async () => {
   expect(response.status).toBe(500)
   expect(body.error.message).toContain("NEBIUS_API_KEY")
   expect(requests).toHaveLength(0)
+})
+
+test("dashboard can store provider API key directly", async () => {
+  const response = await server.request("/dashboard/api/custom-providers", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      id: "dashboard-provider",
+      name: "Dashboard Provider",
+      type: "openai-compatible",
+      baseUrl: "https://dashboard.example/v1",
+      apiKey: "dashboard-key",
+      models: [{ id: "dashboard-chat", kind: "chat" }],
+    }),
+  })
+  const body = (await response.json()) as {
+    apiKey?: string
+    apiKeyEnv?: string
+  }
+
+  expect(response.status).toBe(200)
+  expect(body.apiKey).toBe("dashboard-key")
+  expect(body.apiKeyEnv).toBeUndefined()
+
+  const chatResponse = await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "dashboard-chat",
+      messages: [{ role: "user", content: "hello" }],
+    }),
+  })
+
+  expect(chatResponse.status).toBe(200)
+  expect(requests[0]?.headers.get("authorization")).toBe("Bearer dashboard-key")
 })
 
 test("Copilot models still route through the existing path", async () => {

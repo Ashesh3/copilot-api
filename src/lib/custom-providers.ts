@@ -74,7 +74,8 @@ interface RequiredProviderFields {
   id: string
   name: string
   baseUrl: string
-  apiKeyEnv: string
+  apiKey?: string
+  apiKeyEnv?: string
   models: Array<unknown>
 }
 
@@ -137,11 +138,17 @@ function normalizeModel(raw: unknown): CustomProviderModelConfig | undefined {
   }
 }
 
+function normalizeOptionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ?
+      value.trim()
+    : undefined
+}
+
 function getRequiredProviderFields(
   raw: unknown,
 ): RequiredProviderFields | undefined {
   if (!isRecord(raw)) return undefined
-  const { id, name, type, baseUrl, apiKeyEnv, models } = raw
+  const { id, name, type, baseUrl, apiKey, apiKeyEnv, models } = raw
 
   if (type !== OPENAI_COMPATIBLE_TYPE || !Array.isArray(models)) {
     return undefined
@@ -151,18 +158,26 @@ function getRequiredProviderFields(
     typeof id !== "string"
     || typeof name !== "string"
     || typeof baseUrl !== "string"
-    || typeof apiKeyEnv !== "string"
   ) {
     return undefined
   }
+
+  const normalizedApiKey = normalizeOptionalString(apiKey)
+  const normalizedApiKeyEnv = normalizeOptionalString(apiKeyEnv)
+  if (!normalizedApiKey && !normalizedApiKeyEnv) return undefined
 
   const normalized = {
     id: id.trim(),
     name: name.trim(),
     baseUrl: baseUrl.trim(),
-    apiKeyEnv: apiKeyEnv.trim(),
+    apiKey: normalizedApiKey,
+    apiKeyEnv: normalizedApiKeyEnv,
   }
-  if (Object.values(normalized).some((value) => value.length === 0)) {
+  if (
+    normalized.id.length === 0
+    || normalized.name.length === 0
+    || normalized.baseUrl.length === 0
+  ) {
     return undefined
   }
 
@@ -195,7 +210,8 @@ function normalizeProvider(raw: unknown): CustomProviderConfig | undefined {
     name: fields.name,
     type: OPENAI_COMPATIBLE_TYPE,
     baseUrl: fields.baseUrl.replace(/\/+$/, ""),
-    apiKeyEnv: fields.apiKeyEnv,
+    ...(fields.apiKey ? { apiKey: fields.apiKey } : {}),
+    ...(fields.apiKeyEnv ? { apiKeyEnv: fields.apiKeyEnv } : {}),
     ...(headers ? { headers } : {}),
     models,
     ...(timeoutMs ? { timeoutMs } : {}),
@@ -334,14 +350,15 @@ function shouldPassReasoningEffort(
 }
 
 function getProviderApiKey(provider: CustomProviderConfig): string {
-  const apiKey = process.env[provider.apiKeyEnv]?.trim()
+  const apiKey = provider.apiKey?.trim() ?? getProviderApiKeyFromEnv(provider)
   if (!apiKey) {
+    const fallback = provider.apiKeyEnv ? ` or set ${provider.apiKeyEnv}` : ""
     throw new HTTPError(
-      `Missing API key for custom provider ${provider.name}. Set ${provider.apiKeyEnv}.`,
+      `Missing API key for custom provider ${provider.name}. Configure apiKey${fallback}.`,
       new Response(
         JSON.stringify({
           error: {
-            message: `Missing API key for custom provider ${provider.name}. Set ${provider.apiKeyEnv}.`,
+            message: `Missing API key for custom provider ${provider.name}. Configure apiKey${fallback}.`,
             type: "configuration_error",
             provider: provider.id,
           },
@@ -354,6 +371,12 @@ function getProviderApiKey(provider: CustomProviderConfig): string {
     )
   }
   return apiKey
+}
+
+function getProviderApiKeyFromEnv(provider: CustomProviderConfig): string {
+  return provider.apiKeyEnv ?
+      (process.env[provider.apiKeyEnv]?.trim() ?? "")
+    : ""
 }
 
 function mergeAbortSignals(
@@ -641,13 +664,15 @@ export function removeCustomProvider(providerId: string): boolean {
   return removed
 }
 
-export function createNebiusQwen3EmbeddingProvider(): CustomProviderConfig {
+export function createNebiusQwen3EmbeddingProvider(
+  apiKey?: string,
+): CustomProviderConfig {
   return {
     id: "nebius",
     name: "Nebius",
     type: OPENAI_COMPATIBLE_TYPE,
     baseUrl: "https://api.studio.nebius.com/v1",
-    apiKeyEnv: "NEBIUS_API_KEY",
+    ...(apiKey ? { apiKey } : { apiKeyEnv: "NEBIUS_API_KEY" }),
     headers: {},
     models: [
       {
