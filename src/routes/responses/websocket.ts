@@ -160,7 +160,6 @@ async function handleResponseCreate(
   payload.stream = true
   await applyResponsesWebSocketRouting(payload)
 
-  useFunctionApplyPatch(payload)
   convertWebSearchTool(payload)
   expandCompactionItems(payload)
 
@@ -182,6 +181,9 @@ async function handleResponseCreate(
   const { vision, initiator } = getResponsesRequestOptions(payload)
 
   if (!supportsResponses) {
+    // Rewrite custom apply_patch to a function tool only for the CC
+    // fallback. Native /responses must keep the freeform tool intact.
+    useFunctionApplyPatch(payload)
     reportResponsesWebSocketEndpointFallback(payload.model)
     await streamChatCompletionsOverWs(ws, payload)
     return

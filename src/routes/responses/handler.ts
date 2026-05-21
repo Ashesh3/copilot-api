@@ -454,8 +454,6 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
   })
   logger.debug("Responses request payload:", JSON.stringify(payload))
 
-  useFunctionApplyPatch(payload)
-
   // Convert web_search tool to a function tool for MCP-based execution
   convertWebSearchTool(payload)
 
@@ -469,6 +467,11 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
     selectedModel?.supported_endpoints?.includes(RESPONSES_ENDPOINT) ?? false
 
   if (!supportsResponses) {
+    // ChatCompletions can't accept custom (freeform) tools, so rewrite
+    // apply_patch into a function tool only on this fallback path. The
+    // native /responses path supports custom tools and must pass them
+    // through unchanged (Codex Desktop aborts otherwise).
+    useFunctionApplyPatch(payload)
     reportResponsesEndpointFallback(c, payload.model)
     setRequestContext(c, { provider: "Responses→ChatCompletions" })
     return await handleWithChatCompletions(c, payload, requestedModel)
