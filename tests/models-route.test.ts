@@ -28,6 +28,7 @@ beforeEach(() => {
           tokenizer: "cl100k_base",
           type: "chat",
         },
+        supported_endpoints: ["/responses"],
       },
       {
         id: "gpt-5.2",
@@ -49,6 +50,7 @@ beforeEach(() => {
           tokenizer: "cl100k_base",
           type: "chat",
         },
+        supported_endpoints: ["/responses", "ws:/responses"],
       },
       {
         id: "claude-implicit-medium",
@@ -66,6 +68,7 @@ beforeEach(() => {
           tokenizer: "cl100k_base",
           type: "chat",
         },
+        supported_endpoints: ["/chat/completions"],
       },
       {
         id: "gpt-5-mini",
@@ -133,4 +136,33 @@ test("uses model settings to hide virtual variants for implicit reasoning defaul
 
   expect(ids).toContain("claude-implicit-medium")
   expect(ids).not.toContain("claude-implicit-medium:medium")
+})
+
+test("advertises ws:/responses only for native Responses models", async () => {
+  const response = await server.request("/v1/models")
+  const body = (await response.json()) as {
+    data: Array<{ id: string; supported_endpoints?: Array<string> }>
+  }
+
+  const claude = body.data.find((model) => model.id === "claude-sonnet-4.6")
+  const claudeHigh = body.data.find(
+    (model) => model.id === "claude-sonnet-4.6:high",
+  )
+  const gpt = body.data.find((model) => model.id === "gpt-5.2")
+  const gptMedium = body.data.find((model) => model.id === "gpt-5.2:medium")
+  const chatOnly = body.data.find(
+    (model) => model.id === "claude-implicit-medium",
+  )
+
+  expect(claude?.supported_endpoints).toEqual(["/responses", "ws:/responses"])
+  expect(claudeHigh?.supported_endpoints).toEqual([
+    "/responses",
+    "ws:/responses",
+  ])
+  expect(gpt?.supported_endpoints).toEqual(["/responses", "ws:/responses"])
+  expect(gptMedium?.supported_endpoints).toEqual([
+    "/responses",
+    "ws:/responses",
+  ])
+  expect(chatOnly?.supported_endpoints).toEqual(["/chat/completions"])
 })

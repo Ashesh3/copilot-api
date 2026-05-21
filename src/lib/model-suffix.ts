@@ -202,6 +202,7 @@ interface VirtualModel {
   created_at: string
   owned_by: string
   display_name: string
+  supported_endpoints?: Array<string>
 }
 
 /**
@@ -232,6 +233,7 @@ export function generateVirtualModels(
         created_at: new Date(0).toISOString(),
         owned_by: model.vendor,
         display_name: `${model.name} (${effort} thinking)`,
+        supported_endpoints: model.supported_endpoints,
       })
     }
   }

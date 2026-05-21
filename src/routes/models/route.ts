@@ -18,6 +18,15 @@ function getCopilotModelIds(models: Array<{ id: string }>): Set<string> {
   return new Set(models.map((model) => model.id))
 }
 
+function supportedEndpointsForClient(model: {
+  supported_endpoints?: Array<string>
+}): Array<string> | undefined {
+  const endpoints = model.supported_endpoints
+  if (!endpoints) return undefined
+  if (!endpoints.includes("/responses")) return endpoints
+  return [...new Set([...endpoints, "ws:/responses"])]
+}
+
 modelRoutes.get("/", async (c) => {
   try {
     if (!state.models) {
@@ -29,18 +38,32 @@ modelRoutes.get("/", async (c) => {
       state.models?.data.filter((model) => isModelVisible(model)) ?? []
 
     // Copilot models
-    const copilotModels = visibleModels.map((model) => ({
-      id: model.id,
-      object: "model",
-      type: "model",
-      created: 0, // No date available from source
-      created_at: new Date(0).toISOString(), // No date available from source
-      owned_by: model.vendor,
-      display_name: model.name,
-    }))
+    const copilotModels = visibleModels.map((model) => {
+      const supportedEndpoints = supportedEndpointsForClient(model)
+      return {
+        id: model.id,
+        object: "model",
+        type: "model",
+        created: 0, // No date available from source
+        created_at: new Date(0).toISOString(), // No date available from source
+        owned_by: model.vendor,
+        display_name: model.name,
+        ...(supportedEndpoints ?
+          { supported_endpoints: supportedEndpoints }
+        : {}),
+      }
+    })
 
     // Virtual models for reasoning effort variants (e.g. "claude-sonnet-4.6:high")
-    const virtualModels = generateVirtualModels(visibleModels)
+    const virtualModels = generateVirtualModels(visibleModels).map((model) => {
+      const supportedEndpoints = supportedEndpointsForClient(model)
+      return {
+        ...model,
+        ...(supportedEndpoints ?
+          { supported_endpoints: supportedEndpoints }
+        : {}),
+      }
+    })
     const copilotModelIds = getCopilotModelIds([
       ...copilotModels,
       ...virtualModels,

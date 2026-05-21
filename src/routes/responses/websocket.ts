@@ -13,7 +13,14 @@ import {
   usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
 import { checkRateLimit } from "~/lib/rate-limit"
+import { getConfiguredApiKeys } from "~/lib/request-auth"
 import { reportNonDefaultBehavior } from "~/lib/request-logger"
+import {
+  clientSessionStorage,
+  quotaHeadersStorage,
+  requestIdStorage,
+  routedAccountStorage,
+} from "~/lib/request-session"
 import { state } from "~/lib/state"
 import { createChatCompletions } from "~/services/copilot/create-chat-completions"
 import {
@@ -33,42 +40,117 @@ import { expandCompactionItems, getResponsesRequestOptions } from "./utils"
 
 const RESPONSES_ENDPOINT = "/responses"
 
-// Paths that trigger WebSocket upgrade for responses (currently disabled)
-// const WS_PATHS = new Set(["/v1/responses", "/responses"])
+const WS_PATHS = new Set(["/v1/responses", "/responses"])
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null
 
-interface ResponsesWebSocketData {
+export interface ResponsesWebSocketData {
   type: "responses"
-  syntheticWarmups: Map<string, ResponsesPayload>
+  requestId: string
+  sessionId?: string
+  responseSnapshots: Map<string, ResponsesPayload>
+}
+
+export interface ResponsesWebSocketState {
+  data: ResponsesWebSocketData
+  send(data: string): void
+  close(code?: number, reason?: string): void
+}
+
+export interface WebSocketErrorFrameOptions {
+  code: string
+  message: string
+  status: number
+  requestId?: string
+  type?: string
+}
+
+interface ResponseCompletedFrame {
+  response?: {
+    id?: unknown
+    output?: unknown
+  }
+  type?: string
+}
+
+interface ContinuationResolutionResult {
+  payload?: ResponsesPayload
+  shouldStop: boolean
 }
 
 /**
  * Check if a request is a responses WebSocket upgrade and handle it.
  * Returns "upgraded" if the upgrade was handled, "auth_failed" if auth failed,
  * or "no_match" if the path didn't match.
- *
- * NOTE: Responses WebSocket is disabled — Codex CLI and other clients that
- * attempt WebSocket will receive no upgrade and fall back to HTTP/SSE, which
- * is more reliable and provides proper request logging.
  */
 export function tryUpgradeResponsesWebSocket(
-  _req: Request,
-  _server: { upgrade(req: Request, opts?: object): boolean },
+  req: Request,
+  server: { upgrade(req: Request, opts?: object): boolean },
 ): "upgraded" | "auth_failed" | "no_match" {
-  return "no_match"
+  const url = new URL(req.url)
+  if (!WS_PATHS.has(url.pathname)) {
+    return "no_match"
+  }
+
+  if (!isAuthorizedResponsesWebSocketUpgrade(req)) {
+    return "auth_failed"
+  }
+
+  const requestId =
+    req.headers.get("x-request-id")
+    ?? req.headers.get("x-client-request-id")
+    ?? randomUUID()
+  const sessionId =
+    req.headers.get("x-claude-code-session-id")
+    ?? req.headers.get("session-id")
+    ?? undefined
+
+  return (
+      server.upgrade(req, {
+        data: {
+          type: "responses" as const,
+          requestId,
+          sessionId,
+          responseSnapshots: new Map<string, ResponsesPayload>(),
+        },
+      })
+    ) ?
+      "upgraded"
+    : "no_match"
 }
 
-// function extractApiKeyFromRequest(req: Request): string | null {
-//   const xApiKey = req.headers.get("x-api-key")?.trim()
-//   if (xApiKey) return xApiKey
-//   const authorization = req.headers.get("authorization")
-//   if (!authorization) return null
-//   const [scheme, ...rest] = authorization.trim().split(/\s+/)
-//   if (scheme.toLowerCase() !== "bearer") return null
-//   return rest.join(" ").trim() || null
-// }
+function isAuthorizedResponsesWebSocketUpgrade(req: Request): boolean {
+  const requestApiKey = extractApiKeyFromRequest(req)
+
+  if (state.apiKeyAuth && requestApiKey !== state.apiKeyAuth) {
+    return false
+  }
+
+  const configuredApiKeys = getConfiguredApiKeys()
+  if (
+    configuredApiKeys.length > 0
+    && (!requestApiKey || !configuredApiKeys.includes(requestApiKey))
+  ) {
+    return false
+  }
+
+  return true
+}
+
+function extractApiKeyFromRequest(req: Request): string | null {
+  const xApiKey = req.headers.get("x-api-key")?.trim()
+  if (xApiKey) return xApiKey
+
+  const googleApiKey = req.headers.get("x-goog-api-key")?.trim()
+  if (googleApiKey) return googleApiKey
+
+  const authorization = req.headers.get("authorization")
+  if (!authorization) return null
+  const [scheme, ...rest] = authorization.trim().split(/\s+/)
+  if (scheme.toLowerCase() !== "bearer") return null
+  return rest.join(" ").trim() || null
+}
 
 // Bun WebSocket handler for responses
 export const responsesWebSocket = {
@@ -77,23 +159,16 @@ export const responsesWebSocket = {
   },
 
   async message(
-    ws: {
-      data: ResponsesWebSocketData
-      send(data: string | ArrayBuffer | Uint8Array): void
-      close(code?: number, reason?: string): void
-    },
+    ws: ResponsesWebSocketState,
     message: string | Buffer | Uint8Array,
   ) {
     if (typeof message !== "string") {
-      ws.send(
-        JSON.stringify({
-          type: "error",
-          error: {
-            message: "Binary frames not supported",
-            code: "invalid_request",
-          },
-        }),
-      )
+      sendWebSocketError(ws, {
+        code: "bad_request",
+        message: "Binary frames not supported",
+        status: 400,
+        type: "invalid_request_error",
+      })
       return
     }
 
@@ -101,41 +176,39 @@ export const responsesWebSocket = {
     try {
       parsed = JSON.parse(message) as { type?: string; [key: string]: unknown }
     } catch {
-      ws.send(
-        JSON.stringify({
-          type: "error",
-          error: { message: "Invalid JSON", code: "invalid_request" },
-        }),
-      )
+      sendWebSocketError(ws, {
+        code: "bad_request",
+        message: "Invalid JSON",
+        status: 400,
+        type: "invalid_request_error",
+      })
+      return
+    }
+
+    if (parsed.type === "response.processed") {
       return
     }
 
     if (parsed.type !== "response.create") {
-      ws.send(
-        JSON.stringify({
-          type: "error",
-          error: {
-            message: `Unsupported message type: ${parsed.type}`,
-            code: "invalid_request",
-          },
-        }),
-      )
+      sendWebSocketError(ws, {
+        code: "bad_request",
+        message: `Unsupported message type: ${String(parsed.type)}`,
+        status: 400,
+        type: "invalid_request_error",
+      })
       return
     }
 
     try {
-      await handleResponseCreate(ws, parsed)
+      await runWithWebSocketRequestContext(ws, async () => {
+        await handleResponseCreate(ws, parsed)
+      })
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : "Internal server error"
       consola.error("[responses-ws] Error:", errorMessage)
       try {
-        ws.send(
-          JSON.stringify({
-            type: "error",
-            error: { message: errorMessage, code: "server_error" },
-          }),
-        )
+        sendWebSocketError(ws, normalizeWebSocketError(error, errorMessage))
       } catch {
         // Client already disconnected, nothing to do
       }
@@ -143,29 +216,55 @@ export const responsesWebSocket = {
   },
 
   close(ws: { data: ResponsesWebSocketData }) {
-    ws.data.syntheticWarmups.clear()
+    ws.data.responseSnapshots.clear()
     consola.debug("[responses-ws] WebSocket closed")
   },
 }
 
+async function runWithWebSocketRequestContext(
+  ws: ResponsesWebSocketState,
+  callback: () => Promise<void>,
+): Promise<void> {
+  await requestIdStorage.run(ws.data.requestId, async () => {
+    await clientSessionStorage.run(ws.data.sessionId, async () => {
+      await quotaHeadersStorage.run({}, async () => {
+        await routedAccountStorage.run({}, callback)
+      })
+    })
+  })
+}
+
 async function handleResponseCreate(
-  ws: { data: ResponsesWebSocketData; send(data: string): void },
+  ws: ResponsesWebSocketState,
   message: Record<string, unknown>,
 ): Promise<void> {
   await checkRateLimit(state)
 
+  const requestedModel = getRequestedModel(message)
   let payload = extractResponsesPayload(message)
 
   // Force streaming for WebSocket mode
   payload.stream = true
-  await applyResponsesWebSocketRouting(payload)
+  const reasoningEffort = await applyResponsesWebSocketRouting(payload)
+
+  logResponsesWebSocketRequest({
+    requestedModel,
+    model: payload.model,
+    reasoningEffort,
+  })
+
+  const continuationResolution = resolveWebSocketContinuationPayload(
+    ws,
+    payload,
+  )
+  if (continuationResolution.shouldStop) {
+    return
+  }
+  payload = continuationResolution.payload ?? payload
+  payload.previous_response_id = undefined
 
   convertWebSearchTool(payload)
   expandCompactionItems(payload)
-
-  payload =
-    rehydrateSyntheticWarmupPayload(ws.data.syntheticWarmups, payload)
-    ?? payload
 
   if (isSyntheticWarmupRequest(payload)) {
     handleSyntheticWarmupRequest(ws, payload)
@@ -205,8 +304,89 @@ async function handleResponseCreate(
 
     const event = (chunk as { event?: string }).event
     const processed = fixStreamIds(data, event, idTracker)
+    recordResponseSnapshotFromFrame(
+      ws.data.responseSnapshots,
+      payload,
+      processed,
+    )
     ws.send(processed)
   }
+}
+
+function resolveWebSocketContinuationPayload(
+  ws: ResponsesWebSocketState,
+  payload: ResponsesPayload,
+): ContinuationResolutionResult {
+  const previousResponseId = (payload as Record<string, unknown>)
+    .previous_response_id
+
+  if (
+    previousResponseId !== undefined
+    && previousResponseId !== null
+    && typeof previousResponseId !== "string"
+  ) {
+    sendWebSocketError(ws, {
+      code: "bad_request",
+      message: "previous_response_id must be a string",
+      status: 400,
+      type: "invalid_request_error",
+    })
+    return { shouldStop: true }
+  }
+
+  if (previousResponseId === "") {
+    sendWebSocketError(ws, {
+      code: "bad_request",
+      message: "previous_response_id must not be empty",
+      status: 400,
+      type: "invalid_request_error",
+    })
+    return { shouldStop: true }
+  }
+
+  if (typeof previousResponseId !== "string") {
+    return { shouldStop: false }
+  }
+
+  const rehydratedPayload = rehydrateContinuationPayload(
+    ws.data.responseSnapshots,
+    payload,
+  )
+  if (rehydratedPayload) {
+    return { payload: rehydratedPayload, shouldStop: false }
+  }
+
+  sendWebSocketError(ws, {
+    code: "bad_request",
+    message: `Unknown previous_response_id: ${previousResponseId}`,
+    status: 400,
+    type: "invalid_request_error",
+  })
+  return { shouldStop: true }
+}
+
+function getRequestedModel(
+  message: Record<string, unknown>,
+): string | undefined {
+  const response = message.response
+  if (isRecord(response) && typeof response.model === "string") {
+    return response.model
+  }
+  return typeof message.model === "string" ? message.model : undefined
+}
+
+function logResponsesWebSocketRequest(options: {
+  model: string
+  reasoningEffort?: ReasoningEffort
+  requestedModel?: string
+}): void {
+  const routing =
+    options.requestedModel && options.requestedModel !== options.model ?
+      `${options.requestedModel} -> ${options.model}`
+    : options.model
+  const effort =
+    options.reasoningEffort ? ` effort=${options.reasoningEffort}` : ""
+  consola.debug(`[responses-ws] response.create ${routing}${effort}`)
 }
 
 function getRedirectReasoningEffort(
@@ -225,7 +405,7 @@ function getRedirectReasoningEffort(
 
 async function applyResponsesWebSocketRouting(
   payload: ResponsesPayload,
-): Promise<void> {
+): Promise<ReasoningEffort | undefined> {
   const { baseModel, reasoningEffort: suffixEffort } = parseModelSuffix(
     payload.model,
   )
@@ -249,6 +429,7 @@ async function applyResponsesWebSocketRouting(
     redirected: true,
   })
   applyRedirectedResponsesEffort(payload, payload.model, redirectedEffort)
+  return redirectedEffort ?? effectiveEffort
 }
 
 async function resolveResponsesWebSocketRedirect(
@@ -384,41 +565,44 @@ export function rehydrateWarmupPayload(
   warmupPayload: ResponsesPayload,
   payload: ResponsesPayload,
 ): ResponsesPayload {
-  const mergedInput = mergeWarmupInput(warmupPayload.input, payload.input)
+  return rehydrateContinuationPayloadFromSnapshot(warmupPayload, payload)
+}
+
+export function rehydrateContinuationPayloadFromSnapshot(
+  snapshotPayload: ResponsesPayload,
+  payload: ResponsesPayload,
+): ResponsesPayload {
+  const mergedInput = mergeContinuationInput(
+    snapshotPayload.input,
+    payload.input,
+  )
 
   return {
+    ...snapshotPayload,
     ...payload,
     ...(mergedInput !== undefined ? { input: mergedInput } : {}),
-    ...(payload.prompt === undefined && warmupPayload.prompt !== undefined ?
-      { prompt: warmupPayload.prompt }
-    : {}),
-    ...((
-      payload.conversation_id === undefined
-      && warmupPayload.conversation_id !== undefined
-    ) ?
-      { conversation_id: warmupPayload.conversation_id }
-    : {}),
     previous_response_id: undefined,
+    generate: undefined,
   }
 }
 
-function rehydrateSyntheticWarmupPayload(
-  syntheticWarmups: Map<string, ResponsesPayload>,
+export function rehydrateContinuationPayload(
+  responseSnapshots: Map<string, ResponsesPayload>,
   payload: ResponsesPayload,
 ): ResponsesPayload | undefined {
   if (!payload.previous_response_id) {
     return undefined
   }
 
-  const warmupPayload = syntheticWarmups.get(payload.previous_response_id)
-  if (!warmupPayload) {
+  const snapshotPayload = responseSnapshots.get(payload.previous_response_id)
+  if (!snapshotPayload) {
     return undefined
   }
 
-  return rehydrateWarmupPayload(warmupPayload, payload)
+  return rehydrateContinuationPayloadFromSnapshot(snapshotPayload, payload)
 }
 
-function mergeWarmupInput(
+function mergeContinuationInput(
   warmupInput: ResponsesPayload["input"],
   input: ResponsesPayload["input"],
 ): ResponsesPayload["input"] {
@@ -438,11 +622,11 @@ function mergeWarmupInput(
 }
 
 function handleSyntheticWarmupRequest(
-  ws: { data: ResponsesWebSocketData; send(data: string): void },
+  ws: ResponsesWebSocketState,
   payload: ResponsesPayload,
 ): void {
   const responseId = `warmup_${randomUUID().replaceAll("-", "")}`
-  ws.data.syntheticWarmups.set(responseId, payload)
+  ws.data.responseSnapshots.set(responseId, payload)
 
   const createdAt = Math.floor(Date.now() / 1000)
   const baseResponse = {
@@ -488,7 +672,7 @@ function handleSyntheticWarmupRequest(
 }
 
 async function streamChatCompletionsOverWs(
-  ws: { send(data: string): void },
+  ws: ResponsesWebSocketState,
   payload: ResponsesPayload,
 ): Promise<void> {
   const ccPayload = responsesToChatCompletions(payload)
@@ -502,11 +686,122 @@ async function streamChatCompletionsOverWs(
   const wsStream = {
     // eslint-disable-next-line @typescript-eslint/require-await
     writeSSE: async (data: { event?: string; data: string }) => {
+      recordResponseSnapshotFromFrame(
+        ws.data.responseSnapshots,
+        payload,
+        data.data,
+      )
       ws.send(data.data)
     },
   }
 
   await streamChatCompletionsAsResponses(wsStream, ccStream, payload.model)
+}
+
+export function recordResponseSnapshotFromFrame(
+  responseSnapshots: Map<string, ResponsesPayload>,
+  payload: ResponsesPayload,
+  frame: string,
+): void {
+  let parsed: ResponseCompletedFrame
+  try {
+    parsed = JSON.parse(frame) as ResponseCompletedFrame
+  } catch {
+    return
+  }
+
+  if (parsed.type !== "response.completed") return
+  const responseId = parsed.response?.id
+  if (typeof responseId !== "string" || !responseId) return
+
+  responseSnapshots.set(
+    responseId,
+    createCompletedResponseSnapshot(payload, parsed),
+  )
+}
+
+function createCompletedResponseSnapshot(
+  payload: ResponsesPayload,
+  frame: ResponseCompletedFrame,
+): ResponsesPayload {
+  const output = frame.response?.output
+  const completedInput =
+    Array.isArray(output) ?
+      mergeContinuationInput(payload.input, output)
+    : payload.input
+
+  return {
+    ...payload,
+    input: completedInput,
+    previous_response_id: undefined,
+    generate: undefined,
+  }
+}
+
+export function sendWebSocketError(
+  ws: Pick<ResponsesWebSocketState, "data" | "send">,
+  options: WebSocketErrorFrameOptions,
+): void {
+  ws.send(
+    JSON.stringify({
+      type: "error",
+      status: options.status,
+      error: {
+        code: options.code,
+        message: options.message,
+        type: options.type ?? "websocket_error",
+        request_id: options.requestId ?? ws.data.requestId,
+      },
+    }),
+  )
+}
+
+function normalizeWebSocketError(
+  error: unknown,
+  fallbackMessage: string,
+): WebSocketErrorFrameOptions {
+  if (isHTTPErrorLike(error)) {
+    return {
+      code: mapHttpStatusToWebSocketErrorCode(error.response.status),
+      message: fallbackMessage,
+      status: error.response.status,
+      type: "websocket_error",
+    }
+  }
+
+  return {
+    code: "internal_error",
+    message: fallbackMessage,
+    status: 500,
+    type: "websocket_error",
+  }
+}
+
+function isHTTPErrorLike(error: unknown): error is { response: Response } {
+  return isRecord(error) && error.response instanceof Response
+}
+
+function mapHttpStatusToWebSocketErrorCode(status: number): string {
+  switch (status) {
+    case 400: {
+      return "bad_request"
+    }
+    case 404: {
+      return "not_found"
+    }
+    case 413: {
+      return "request_too_large"
+    }
+    case 429: {
+      return "rate_limited"
+    }
+    case 503: {
+      return "service_unavailable"
+    }
+    default: {
+      return status >= 500 ? "internal_error" : "bad_request"
+    }
+  }
 }
 
 const isAsyncIterable = <T>(value: unknown): value is AsyncIterable<T> =>
