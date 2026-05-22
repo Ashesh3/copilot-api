@@ -3,6 +3,8 @@ import type { Context, MiddlewareHandler } from "hono"
 import consola from "consola"
 
 import { getConfig } from "./config"
+import { extractClientIp, whitelistIp } from "./ip-blocker"
+import { state } from "./state"
 
 interface AuthMiddlewareOptions {
   getApiKeys?: () => Array<string>
@@ -37,6 +39,11 @@ export function getConfiguredApiKeys(): Array<string> {
   return normalizeApiKeys(config.auth?.apiKeys)
 }
 
+export function getActiveApiKeys(): Array<string> {
+  if (state.apiKeyAuth) return [state.apiKeyAuth]
+  return getConfiguredApiKeys()
+}
+
 export function extractRequestApiKey(c: Context): string | null {
   const xApiKey = c.req.header("x-api-key")?.trim()
   if (xApiKey) {
@@ -61,6 +68,13 @@ export function extractRequestApiKey(c: Context): string | null {
 
   const bearerToken = rest.join(" ").trim()
   return bearerToken || null
+}
+
+export function whitelistAuthenticatedClient(c: Context): void {
+  const clientIp = extractClientIp(c)
+  if (clientIp !== null) {
+    whitelistIp(clientIp)
+  }
 }
 
 function createUnauthorizedResponse(c: Context): Response {
@@ -102,6 +116,7 @@ export function createAuthMiddleware(
       return createUnauthorizedResponse(c)
     }
 
+    whitelistAuthenticatedClient(c)
     return next()
   }
 }

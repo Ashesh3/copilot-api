@@ -8,9 +8,12 @@ import {
   extractClientIp,
   isIpBlocked,
   recordFailedAttempt,
-  whitelistIp,
 } from "~/lib/ip-blocker"
-import { extractRequestApiKey } from "~/lib/request-auth"
+import {
+  extractRequestApiKey,
+  getActiveApiKeys,
+  whitelistAuthenticatedClient,
+} from "~/lib/request-auth"
 import { state } from "~/lib/state"
 import {
   isAllowedTransparentProxyRequest,
@@ -40,7 +43,8 @@ async function oauthAuthGuard(
   c: Context,
   next: Next,
 ): Promise<Response | undefined> {
-  if (!state.apiKeyAuth) {
+  const apiKeys = getActiveApiKeys()
+  if (apiKeys.length === 0) {
     await next()
     return
   }
@@ -54,16 +58,14 @@ async function oauthAuthGuard(
 
   const requestApiKey = extractRequestApiKey(c)
 
-  if (requestApiKey === state.apiKeyAuth) {
-    if (clientIp !== null) {
-      whitelistIp(clientIp)
-    }
+  if (requestApiKey !== null && apiKeys.includes(requestApiKey)) {
+    whitelistAuthenticatedClient(c)
     await next()
     return
   }
 
   const maskedGot = requestApiKey ? `...${requestApiKey.slice(-10)}` : "(none)"
-  const maskedExpected = `...${state.apiKeyAuth.slice(-10)}`
+  const maskedExpected = apiKeys.map((key) => `...${key.slice(-10)}`).join(", ")
   consola.warn(
     `[oauth-guard] Auth failed: ${c.req.method} ${c.req.path} — got ${maskedGot}, expected ${maskedExpected}`,
   )

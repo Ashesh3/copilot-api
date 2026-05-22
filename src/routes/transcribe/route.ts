@@ -21,10 +21,10 @@ function silentDrop(): Response {
  *   - language   (optional, e.g. "en")
  *
  * Auth model: IP whitelist only. The whitelist is populated when an IP
- * successfully authenticates against any apiKeyGuard-protected endpoint
- * (chat/completions, messages, responses). So a machine that already has
- * Claude Code / another client authenticated against this gateway can
- * dictate via Codex without sending an API key.
+ * successfully authenticates against this gateway, including model endpoints
+ * protected by configured API keys. So a machine that already has Claude Code
+ * / another client authenticated against this gateway can dictate via Codex
+ * without sending an API key.
  *
  * Codex MAY or MAY NOT attach `originator: Codex Desktop` and a
  * `User-Agent: Codex Desktop/...` header depending on whether the gateway
