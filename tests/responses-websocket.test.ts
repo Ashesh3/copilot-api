@@ -8,7 +8,10 @@ import {
   test,
 } from "bun:test"
 
-import type { ResponsesPayload } from "../src/services/copilot/create-responses"
+import type {
+  ResponseInputItem,
+  ResponsesPayload,
+} from "../src/services/copilot/create-responses"
 import type { ModelsResponse } from "../src/services/copilot/get-models"
 
 import { setConfigForTest } from "../src/lib/config"
@@ -617,13 +620,13 @@ describe("responses websocket continuation handling", () => {
     expect(rehydrated?.instructions).toBe("You are Codex.")
     expect(rehydrated?.tools).toEqual(priorPayload.tools)
     expect(rehydrated?.input).toEqual([
-      ...(priorPayload.input as Array<unknown>),
+      ...(priorPayload.input as Array<ResponseInputItem>),
       {
         type: "message",
         role: "assistant",
         content: [{ type: "output_text", text: "Done" }],
       },
-      ...(followUpPayload.input as Array<unknown>),
+      ...(followUpPayload.input as Array<ResponseInputItem>),
     ])
   })
 

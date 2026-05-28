@@ -429,7 +429,7 @@ async function applyResponsesWebSocketRouting(
     redirected: true,
   })
   applyRedirectedResponsesEffort(payload, payload.model, redirectedEffort)
-  return redirectedEffort ?? effectiveEffort
+  return redirectedEffort ?? getRedirectReasoningEffort(effectiveEffort)
 }
 
 async function resolveResponsesWebSocketRedirect(

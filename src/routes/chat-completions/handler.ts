@@ -42,6 +42,11 @@ import {
   type ChatCompletionsPayload,
 } from "~/services/copilot/create-chat-completions"
 
+import {
+  executeResponsesFallback,
+  shouldUseResponsesFallback,
+} from "./responses-fallback-executor"
+
 export async function handleCompletion(c: Context) {
   await checkRateLimit(state)
 
@@ -162,24 +167,18 @@ async function handleCompletionInner(
     (model) => model.id === payload.model,
   )
 
-  // Calculate and display token count
-  try {
-    if (selectedModel) {
-      const tokenCount = await getTokenCount(payload, selectedModel)
-      setRequestContext(c, { inputTokens: tokenCount.input })
-    }
-  } catch (error) {
-    consola.warn("Failed to calculate token count:", error)
-  }
+  await setInputTokenContext(c, payload, selectedModel)
 
   if (state.manualApprove) await awaitApproval()
 
-  if (isNullish(payload.max_tokens)) {
-    payload = {
-      ...payload,
-      max_tokens: selectedModel?.capabilities.limits.max_output_tokens,
-    }
-    consola.debug("Set max_tokens to:", JSON.stringify(payload.max_tokens))
+  payload = applyDefaultMaxTokens(payload, selectedModel)
+
+  if (shouldUseResponsesFallback(selectedModel)) {
+    return await executeResponsesFallback(c, {
+      payload,
+      requestedModel,
+      reasoningEffort,
+    })
   }
 
   return await executeRequest(c, payload, requestedModel)
@@ -187,6 +186,35 @@ async function handleCompletionInner(
 
 function getCopilotModelIds(): Set<string> {
   return new Set(state.models?.data.map((model) => model.id) ?? [])
+}
+
+async function setInputTokenContext(
+  c: Context,
+  payload: ChatCompletionsPayload,
+  selectedModel: Parameters<typeof getTokenCount>[1] | undefined,
+): Promise<void> {
+  if (!selectedModel) return
+
+  try {
+    const tokenCount = await getTokenCount(payload, selectedModel)
+    setRequestContext(c, { inputTokens: tokenCount.input })
+  } catch (error) {
+    consola.warn("Failed to calculate token count:", error)
+  }
+}
+
+function applyDefaultMaxTokens(
+  payload: ChatCompletionsPayload & { model: string },
+  selectedModel: Parameters<typeof getTokenCount>[1] | undefined,
+): ChatCompletionsPayload & { model: string } {
+  if (!isNullish(payload.max_tokens)) return payload
+
+  const nextPayload = {
+    ...payload,
+    max_tokens: selectedModel?.capabilities.limits.max_output_tokens,
+  }
+  consola.debug("Set max_tokens to:", JSON.stringify(nextPayload.max_tokens))
+  return nextPayload
 }
 
 async function executeCustomProviderRequest(
