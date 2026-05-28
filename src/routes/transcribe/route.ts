@@ -1,7 +1,10 @@
 import consola from "consola"
 import { Hono } from "hono"
 
-import { extractClientIp, isIpWhitelisted } from "~/lib/ip-blocker"
+import {
+  extractClientIp,
+  isIpAllowedForWhitelistedRoute,
+} from "~/lib/ip-blocker"
 import { transcribe } from "~/routes/voice/groq-stt"
 
 export const transcribeRoutes = new Hono()
@@ -22,9 +25,9 @@ function silentDrop(): Response {
  *
  * Auth model: IP whitelist only. The whitelist is populated when an IP
  * successfully authenticates against this gateway, including model endpoints
- * protected by configured API keys. So a machine that already has Claude Code
- * / another client authenticated against this gateway can dictate via Codex
- * without sending an API key.
+ * protected by configured API keys, and can also be managed from the dashboard.
+ * So a machine that already has Claude Code / another client authenticated
+ * against this gateway can dictate via Codex without sending an API key.
  *
  * Codex MAY or MAY NOT attach `originator: Codex Desktop` and a
  * `User-Agent: Codex Desktop/...` header depending on whether the gateway
@@ -36,7 +39,10 @@ function silentDrop(): Response {
  */
 transcribeRoutes.post("/", async (c) => {
   const clientIp = extractClientIp(c)
-  if (clientIp === null || !isIpWhitelisted(clientIp)) {
+  const isAllowed =
+    clientIp !== null && (await isIpAllowedForWhitelistedRoute(clientIp))
+
+  if (!isAllowed) {
     consola.warn(
       `[transcribe] Rejected: IP ${clientIp ?? "(unknown)"} not whitelisted`,
     )

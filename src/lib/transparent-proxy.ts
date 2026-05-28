@@ -2,7 +2,7 @@ import type { Context } from "hono"
 
 import consola from "consola"
 
-import { extractClientIp, isIpWhitelisted } from "./ip-blocker"
+import { extractClientIp, isIpAllowedForWhitelistedRoute } from "./ip-blocker"
 
 const TRANSPARENT_PROXY_HOSTS = new Set([
   "api.anthropic.com",
@@ -161,9 +161,11 @@ export function isAllowedTransparentProxyRequest(c: Context): boolean {
   return shouldProxyPath(host)
 }
 
-export function isTransparentProxyClientWhitelisted(c: Context): boolean {
+export async function isTransparentProxyClientWhitelisted(
+  c: Context,
+): Promise<boolean> {
   const clientIp = extractClientIp(c)
-  return clientIp !== null && isIpWhitelisted(clientIp)
+  return clientIp !== null && (await isIpAllowedForWhitelistedRoute(clientIp))
 }
 
 export async function transparentProxy(c: Context): Promise<Response> {
@@ -176,7 +178,7 @@ export async function transparentProxy(c: Context): Promise<Response> {
     return c.notFound()
   }
 
-  if (!isTransparentProxyClientWhitelisted(c)) {
+  if (!(await isTransparentProxyClientWhitelisted(c))) {
     return c.notFound()
   }
 

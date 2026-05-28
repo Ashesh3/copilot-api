@@ -3,7 +3,10 @@ import { Hono } from "hono"
 import { streamSSE } from "hono/streaming"
 
 import { getCodexCleanupModel } from "~/lib/config"
-import { extractClientIp, isIpWhitelisted } from "~/lib/ip-blocker"
+import {
+  extractClientIp,
+  isIpAllowedForWhitelistedRoute,
+} from "~/lib/ip-blocker"
 import {
   createChatCompletions,
   type ChatCompletionResponse,
@@ -66,7 +69,10 @@ function extractUserText(body: CodexResponsesBody): string {
  */
 codexResponsesRoutes.post("/", async (c) => {
   const clientIp = extractClientIp(c)
-  if (clientIp === null || !isIpWhitelisted(clientIp)) {
+  const isAllowed =
+    clientIp !== null && (await isIpAllowedForWhitelistedRoute(clientIp))
+
+  if (!isAllowed) {
     consola.warn(
       `[codex-responses] Rejected: IP ${clientIp ?? "(unknown)"} not whitelisted`,
     )

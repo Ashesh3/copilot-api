@@ -202,6 +202,8 @@ var customProvidersData = []
 var editingCustomProviderId = null
 var modelRoutingData = { accounts: [], models: [], multiToken: false }
 var llmDebugData = { entries: [], count: 0, retentionMs: 600000 }
+var settingsData = null
+var ipAllowlistData = []
 var expandedLlmDebug = {}
 var llmDebugDetails = {}
 var llmDebugDetailLoading = {}
@@ -241,7 +243,7 @@ function hideLogin() { document.getElementById('login-screen').classList.remove(
 function authenticate() {
   apiFetch('GET', '/dashboard/api/overview').then(function(res) {
     if (res.status === 401) { showLogin(); return }
-    if (res.ok) { hideLogin(); navigate(window.location.hash.slice(1) || 'overview'); return }
+    if (res.ok) { hideLogin(); discoverPublicIps(false); navigate(window.location.hash.slice(1) || 'overview'); return }
     showLogin()
   }).catch(function() { showLogin() })
 }
@@ -252,7 +254,7 @@ function doLogin() {
   sessionStorage.setItem('dashboard_api_key', key)
   localStorage.setItem('dashboard_api_key', key)
   apiFetch('GET', '/dashboard/api/overview').then(function(res) {
-    if (res.ok) { hideLogin(); navigate(window.location.hash.slice(1) || 'overview') }
+    if (res.ok) { hideLogin(); discoverPublicIps(false); navigate(window.location.hash.slice(1) || 'overview') }
     else { sessionStorage.removeItem('dashboard_api_key'); apiKey = ''; showToast('Invalid API key', 'error') }
   }).catch(function() { showToast('Connection failed', 'error') })
 }
@@ -837,7 +839,16 @@ function renderUsage(data) {
   document.getElementById('usage-content').innerHTML = html
 }
 
-function loadSettings() { apiFetch('GET', '/dashboard/api/settings').then(function(r) { if (r.ok) return r.json() }).then(function(d) { if (d) renderSettings(d) }).catch(function() { showToast('Failed to load settings', 'error') }) }
+function loadSettings() {
+  Promise.all([
+    apiFetch('GET', '/dashboard/api/settings').then(function(r) { if (r.ok) return r.json(); throw new Error('settings') }),
+    apiFetch('GET', '/dashboard/api/ip-allowlist').then(function(r) { if (r.ok) return r.json(); throw new Error('ip-allowlist') })
+  ]).then(function(results) {
+    settingsData = results[0]
+    ipAllowlistData = Array.isArray(results[1]) ? results[1] : []
+    renderSettings(settingsData)
+  }).catch(function() { showToast('Failed to load settings', 'error') })
+}
 function renderSettings(data) {
   var labels = { version:'Version', port:'Port', host:'Host', authEnabled:'API Key Configured', multiToken:'Multi-Token Mode', rateLimitSeconds:'Rate Limit (seconds)', sentryEnabled:'Sentry Enabled', groqEnabled:'Groq Enabled', dataDir:'Data Directory', debug:'Debug Mode', verbose:'Verbose Logging' }
   var skip = { codexCleanupModel:1, codexCleanupModelDefault:1, availableModels:1 }
@@ -872,6 +883,8 @@ function renderSettings(data) {
   html += '<button class="btn btn-primary" onclick="saveCodexCleanupModel()" style="margin-left:8px">Save</button>'
   html += '</div></div></div>'
 
+  html += renderIpAllowlistSection()
+
   document.getElementById('settings-content').innerHTML = html
 }
 function saveCodexCleanupModel() {
@@ -882,6 +895,100 @@ function saveCodexCleanupModel() {
     if (r.ok) { showToast('Cleanup model saved', 'success'); loadSettings() }
     else { r.json().then(function(e) { showToast('Save failed: ' + (e && e.error || r.status), 'error') }).catch(function() { showToast('Save failed: ' + r.status, 'error') }) }
   }).catch(function() { showToast('Save failed', 'error') })
+}
+
+function renderIpAllowlistSection() {
+  var html = '<div class="section-header" style="margin-top:24px"><h2>IP Allowlist</h2><span class="badge badge-gray">Used by /transcribe</span><button class="btn" onclick="discoverPublicIps(true)">Detect public IPs</button></div>'
+  html += '<div class="model-settings-panel"><div class="form-row" style="margin-top:0"><input class="form-input mono" id="ip-allowlist-input" placeholder="IPv4 or IPv6 address" style="flex:1;min-width:260px"><button class="btn btn-primary" onclick="addIpAllowlistEntry()">Add IP</button></div><div id="ip-allowlist-detected" style="margin-top:12px;color:#94A3B8;font-size:0.82rem"></div>'
+  if (!ipAllowlistData.length) {
+    html += '<div class="empty-state" style="padding:28px 16px"><p>No managed IPs yet.</p></div></div>'
+    return html
+  }
+  html += '<div class="table-scroll"><table><thead><tr><th>IP Address</th><th>Status</th><th>Source</th><th>Last Seen</th><th>Actions</th></tr></thead><tbody>'
+  ipAllowlistData.forEach(function(entry) {
+    html += '<tr><td class="mono">' + esc(entry.ip) + '</td>'
+    html += '<td>' + (entry.enabled ? '<span class="badge badge-green">enabled</span>' : '<span class="badge badge-red">disabled</span>') + '</td>'
+    html += '<td>' + esc(entry.source || 'manual') + '</td>'
+    html += '<td>' + (entry.lastSeenAt ? timeAgo(entry.lastSeenAt) : '-') + '</td>'
+    html += '<td><button class="btn" style="font-size:0.78rem;padding:5px 10px" onclick="setIpAllowlistEnabled(&quot;' + escAttr(entry.ip) + '&quot;,' + (!entry.enabled) + ')">' + (entry.enabled ? 'Disable' : 'Enable') + '</button> <button class="btn btn-danger" style="font-size:0.78rem;padding:5px 10px" onclick="removeIpAllowlistEntry(&quot;' + escAttr(entry.ip) + '&quot;)">Remove</button></td></tr>'
+  })
+  html += '</tbody></table></div></div>'
+  return html
+}
+function reloadIpAllowlist() {
+  return apiFetch('GET', '/dashboard/api/ip-allowlist').then(function(r) {
+    if (r.ok) return r.json()
+    throw new Error('Failed')
+}).then(function(d) {
+    ipAllowlistData = Array.isArray(d) ? d : []
+    renderSettingsIfOpen()
+  })
+}
+function saveDetectedIp(ip, label) {
+  if (!ip) return Promise.resolve(false)
+  return apiFetch('POST', '/dashboard/api/ip-allowlist', { ip: ip, enabled: true }).then(function(r) {
+    if (!r.ok) return false
+    return true
+  }).catch(function() { return false })
+}
+function fetchIpText(url) {
+  return fetch(url, { cache: 'no-store' }).then(function(r) {
+    if (!r.ok) throw new Error('failed')
+    return r.text()
+}).then(function(text) { return text.trim() })
+}
+function renderSettingsIfOpen() {
+  if (currentSection === 'settings' && settingsData) renderSettings(settingsData)
+}
+function discoverPublicIps(showResult) {
+  var sources = [
+    { label: 'IPv4', url: 'https://api4.ipify.org' },
+    { label: 'IPv6', url: 'https://api6.ipify.org' }
+  ]
+  return Promise.allSettled(sources.map(function(source) {
+    return fetchIpText(source.url).then(function(ip) {
+      return saveDetectedIp(ip, source.label).then(function(saved) {
+        return { label: source.label, ip: ip, saved: saved }
+      })
+    })
+  })).then(function(results) {
+    var found = []
+    results.forEach(function(result) {
+      if (result.status === 'fulfilled' && result.value.ip) found.push(result.value)
+    })
+    var target = document.getElementById('ip-allowlist-detected')
+    if (target) {
+      target.textContent = found.length ? 'Detected ' + found.map(function(item) { return item.label + ' ' + item.ip }).join(', ') : 'No public IPs detected by the browser.'
+    }
+    if (found.length) {
+      reloadIpAllowlist().catch(function(){})
+      if (showResult) showToast('Detected IPs added', 'success')
+    } else if (showResult) {
+      showToast('No public IPs detected', 'error')
+    }
+  })
+}
+function addIpAllowlistEntry() {
+  var input = document.getElementById('ip-allowlist-input')
+  var ip = input ? input.value.trim() : ''
+  if (!ip) { showToast('Enter an IP address', 'error'); return }
+  apiFetch('POST', '/dashboard/api/ip-allowlist', { ip: ip, enabled: true }).then(function(r) {
+    if (r.ok) { if (input) input.value = ''; showToast('IP added', 'success'); reloadIpAllowlist().catch(function() { showToast('Failed to refresh IP list', 'error') }); return }
+    r.json().catch(function() { return {} }).then(function(d) { showToast(d.error || 'Failed to add IP', 'error') })
+  }).catch(function() { showToast('Failed to add IP', 'error') })
+}
+function setIpAllowlistEnabled(ip, enabled) {
+  apiFetch('PATCH', '/dashboard/api/ip-allowlist/' + encodeURIComponent(ip), { enabled: enabled }).then(function(r) {
+    if (r.ok) { showToast(enabled ? 'IP enabled' : 'IP disabled', 'success'); reloadIpAllowlist().catch(function() { showToast('Failed to refresh IP list', 'error') }); return }
+    r.json().catch(function() { return {} }).then(function(d) { showToast(d.error || 'Failed to update IP', 'error') })
+  }).catch(function() { showToast('Failed to update IP', 'error') })
+}
+function removeIpAllowlistEntry(ip) {
+  if (!confirm('Remove ' + ip + ' from the managed allowlist?')) return
+  apiFetch('DELETE', '/dashboard/api/ip-allowlist/' + encodeURIComponent(ip)).then(function(r) {
+    if (r.ok) { showToast('IP removed', 'success'); reloadIpAllowlist().catch(function() { showToast('Failed to refresh IP list', 'error') }); return }
+    r.json().catch(function() { return {} }).then(function(d) { showToast(d.error || 'Failed to remove IP', 'error') })
+  }).catch(function() { showToast('Failed to remove IP', 'error') })
 }
 
 document.getElementById('login-key').addEventListener('keydown', function(e) { if (e.key === 'Enter') doLogin() })

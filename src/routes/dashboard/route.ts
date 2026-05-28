@@ -1,5 +1,6 @@
 import { Hono } from "hono"
 
+import { upsertIpAllowlistEntry } from "~/lib/ip-allowlist"
 import {
   extractClientIp,
   isIpBlocked,
@@ -17,6 +18,7 @@ import {
   handleClearLlmDebugLogs,
   handleDeleteCustomProvider,
   handleDeleteFlag,
+  handleDeleteIpAllowlistEntry,
   handleDeleteModelRedirect,
   handleDeleteModelSettings,
   handleDeleteReplacement,
@@ -29,6 +31,7 @@ import {
   handleListCustomProviders,
   handleListEnvironments,
   handleListFlags,
+  handleListIpAllowlist,
   handleListLlmDebugLogs,
   handleListModelRedirects,
   handleListModelRouting,
@@ -38,6 +41,7 @@ import {
   handleMoveModelRedirect,
   handleOverview,
   handleSetFlag,
+  handleSetIpAllowlistEntry,
   handleSetCodexCleanupModel,
   handleSetModelSettings,
   handleSetModelRouting,
@@ -55,6 +59,16 @@ export const dashboardRoutes = new Hono()
 dashboardRoutes.get("/", (c) => {
   return c.html(getDashboardPage())
 })
+
+function shouldAutoAllowlistDashboardIp(c: {
+  req: { method: string; path: string }
+}): boolean {
+  return (
+    c.req.method === "GET"
+    && (c.req.path === "/dashboard/api/overview"
+      || c.req.path === "/api/overview")
+  )
+}
 
 // Auth guard for API routes -- reuses the same apiKeyAuth + IP ban mechanism
 dashboardRoutes.use("/api/*", async (c, next) => {
@@ -75,6 +89,12 @@ dashboardRoutes.use("/api/*", async (c, next) => {
   if (requestApiKey === state.apiKeyAuth) {
     if (clientIp !== null) {
       whitelistIp(clientIp)
+      if (shouldAutoAllowlistDashboardIp(c)) {
+        await upsertIpAllowlistEntry(clientIp, {
+          source: "dashboard",
+          seen: true,
+        })
+      }
     }
     await next()
     return
@@ -149,6 +169,12 @@ dashboardRoutes.post("/api/model-routing", handleSetModelRouting)
 
 // Usage
 dashboardRoutes.get("/api/usage", handleGetUsage)
+
+// IP Allowlist
+dashboardRoutes.get("/api/ip-allowlist", handleListIpAllowlist)
+dashboardRoutes.post("/api/ip-allowlist", handleSetIpAllowlistEntry)
+dashboardRoutes.patch("/api/ip-allowlist/:ip", handleSetIpAllowlistEntry)
+dashboardRoutes.delete("/api/ip-allowlist/:ip", handleDeleteIpAllowlistEntry)
 
 // LLM Debug Logs
 dashboardRoutes.get("/api/llm-debug", handleListLlmDebugLogs)

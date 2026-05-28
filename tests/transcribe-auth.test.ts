@@ -1,6 +1,7 @@
 import { afterAll, beforeEach, expect, mock, test } from "bun:test"
 
 import { setConfigForTest } from "../src/lib/config"
+import { setIpAllowlistForTest } from "../src/lib/ip-allowlist"
 import { isIpWhitelisted } from "../src/lib/ip-blocker"
 import { state } from "../src/lib/state"
 import { server } from "../src/server"
@@ -22,6 +23,7 @@ beforeEach(() => {
     auth: { apiKeys: ["config-secret"] },
     groqApiKey: "groq-secret",
   })
+  setIpAllowlistForTest([])
   fetchMock.mockClear()
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch =
     fetchMock as unknown as typeof fetch
@@ -74,4 +76,38 @@ test("transcribe still rejects an IP that has not authenticated", async () => {
 
   expect(response.status).toBe(404)
   expect(fetchMock).not.toHaveBeenCalled()
+})
+
+test("managed allowlist accepts a different IPv6 address for transcribe", async () => {
+  const ipv4 = "203.0.113.46"
+  const ipv6 = "2406:7400:63:c69b:78ad:65b1:41f5:ccce"
+
+  const modelsResponse = await server.request("/v1/models", {
+    headers: {
+      authorization: "Bearer config-secret",
+      "x-forwarded-for": ipv4,
+    },
+  })
+  expect(modelsResponse.status).toBe(200)
+
+  setIpAllowlistForTest([
+    {
+      ip: ipv6,
+      enabled: true,
+      source: "manual",
+      createdAt: "2026-05-28T00:00:00.000Z",
+      updatedAt: "2026-05-28T00:00:00.000Z",
+    },
+  ])
+
+  const formData = new FormData()
+  formData.append("file", new Blob(["audio"], { type: "audio/webm" }), "a.webm")
+
+  const response = await server.request("/transcribe", {
+    method: "POST",
+    headers: { "x-forwarded-for": ipv6 },
+    body: formData,
+  })
+
+  expect(response.status).toBe(200)
 })

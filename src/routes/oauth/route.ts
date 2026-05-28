@@ -463,7 +463,7 @@ oauthApiRoutes.post(
 oauthApiRoutes.all("*", async (c) => {
   if (
     isAllowedTransparentProxyRequest(c)
-    && isTransparentProxyClientWhitelisted(c)
+    && (await isTransparentProxyClientWhitelisted(c))
   ) {
     return await transparentProxy(c)
   }

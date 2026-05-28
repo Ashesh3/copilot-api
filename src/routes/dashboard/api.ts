@@ -18,6 +18,14 @@ import {
   upsertCustomProvider,
 } from "~/lib/custom-providers"
 import {
+  isValidIpAddress,
+  listIpAllowlist,
+  removeIpAllowlistEntry,
+  setIpAllowlistEntryEnabled,
+  upsertIpAllowlistEntry,
+} from "~/lib/ip-allowlist"
+import { unwhitelistIp } from "~/lib/ip-blocker"
+import {
   clearLlmDebugLogs,
   getLlmDebugLog,
   listLlmDebugLogs,
@@ -126,6 +134,11 @@ interface ValidCustomProviderBody {
     supportsStreaming?: boolean
     passReasoningEffort?: boolean
   }>
+}
+
+interface IpAllowlistRequestBody {
+  ip?: string
+  enabled?: boolean
 }
 
 type CustomProviderParseResult =
@@ -734,6 +747,42 @@ export async function handleSetModelRouting(c: Context) {
 
 export function handleGetUsage(c: Context) {
   return c.json(getUsageResponse())
+}
+
+export async function handleListIpAllowlist(c: Context) {
+  return c.json(await listIpAllowlist())
+}
+
+export async function handleSetIpAllowlistEntry(c: Context) {
+  const body = await c.req.json<IpAllowlistRequestBody>().catch(() => null)
+  if (body === null) return c.json({ error: "Invalid JSON body" }, 400)
+
+  const ip = c.req.param("ip") || body.ip
+  if (!ip || !isValidIpAddress(ip)) {
+    return c.json({ error: "Valid IP address is required" }, 400)
+  }
+
+  const enabled = body.enabled
+  if (enabled !== undefined && typeof enabled !== "boolean") {
+    return c.json({ error: "enabled must be boolean" }, 400)
+  }
+
+  const entry =
+    enabled === undefined ?
+      await upsertIpAllowlistEntry(ip, { source: "manual" })
+    : await setIpAllowlistEntryEnabled(ip, enabled)
+
+  if (entry === null)
+    return c.json({ error: "Valid IP address is required" }, 400)
+  return c.json(entry)
+}
+
+export async function handleDeleteIpAllowlistEntry(c: Context) {
+  const ip = c.req.param("ip")
+  const removed = await removeIpAllowlistEntry(ip)
+  if (!removed) return c.json({ error: "IP address not found" }, 404)
+  unwhitelistIp(ip)
+  return c.json({ success: true })
 }
 
 export function handleListLlmDebugLogs(c: Context) {

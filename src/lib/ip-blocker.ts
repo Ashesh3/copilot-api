@@ -2,6 +2,8 @@ import type { Context } from "hono"
 
 import consola from "consola"
 
+import { isManagedIpAllowed, isManagedIpDisabled } from "./ip-allowlist"
+
 interface IpEntry {
   count: number
   date: string
@@ -49,6 +51,17 @@ export function whitelistIp(ip: string): void {
 
 export function isIpWhitelisted(ip: string): boolean {
   return whitelistedIps.has(ip)
+}
+
+export function unwhitelistIp(ip: string): boolean {
+  return whitelistedIps.delete(ip)
+}
+
+export async function isIpAllowedForWhitelistedRoute(
+  ip: string,
+): Promise<boolean> {
+  if (await isManagedIpDisabled(ip)) return false
+  return whitelistedIps.has(ip) || (await isManagedIpAllowed(ip))
 }
 
 /**

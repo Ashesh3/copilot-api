@@ -6,7 +6,7 @@ import consola from "consola"
 import {
   extractClientIp,
   isIpBlocked,
-  isIpWhitelisted,
+  isIpAllowedForWhitelistedRoute,
   recordFailedAttempt,
   whitelistIp,
 } from "./ip-blocker"
@@ -44,7 +44,7 @@ export async function apiKeyGuard(c: Context, next: Next): Promise<void> {
 
   if (
     clientIp !== null
-    && isIpWhitelisted(clientIp)
+    && (await isIpAllowedForWhitelistedRoute(clientIp))
     && isAllowedTransparentProxyRequest(c)
   ) {
     await next()
