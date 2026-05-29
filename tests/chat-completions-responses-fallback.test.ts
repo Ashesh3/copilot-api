@@ -83,6 +83,26 @@ const responsesResult = {
   top_p: null,
 }
 
+const emptyOutputTextResponsesResult = {
+  ...responsesResult,
+  output: [
+    {
+      id: "msg_1",
+      type: "message",
+      role: "assistant",
+      status: "completed",
+      content: [
+        {
+          type: "output_text",
+          text: '{"intent":"hybrid"}',
+          annotations: [],
+        },
+      ],
+    },
+  ],
+  output_text: "",
+}
+
 const responsesCreatedEvent = {
   type: "response.created",
   sequence_number: 0,
@@ -269,6 +289,70 @@ test("omits unsupported sampling parameters for responses-only fallback models",
   expect(lastUpstreamPath).toBe("/responses")
   expect(lastUpstreamPayload).not.toHaveProperty("temperature")
   expect(lastUpstreamPayload).not.toHaveProperty("top_p")
+})
+
+test("routes chat json_schema as json_object with schema instruction for responses fallback", async () => {
+  const response = await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-5.5",
+      messages: [
+        { role: "system", content: "Return only JSON." },
+        { role: "user", content: "Classify this." },
+      ],
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: "RouteDecision",
+          schema: {
+            type: "object",
+            properties: {
+              intent: { type: "string" },
+            },
+            required: ["intent"],
+          },
+        },
+      },
+      stream: false,
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/responses")
+  expect(lastUpstreamPayload?.text).toEqual({
+    format: { type: "json_object" },
+  })
+  expect(lastUpstreamPayload?.instructions).toContain("Return only JSON.")
+  expect(lastUpstreamPayload?.instructions).toContain(
+    "You MUST conform to this JSON schema",
+  )
+  expect(lastUpstreamPayload?.instructions).toContain('"intent"')
+})
+
+test("uses Responses output message text when output_text is empty", async () => {
+  const originalResponsesResult = { ...responsesResult }
+  Object.assign(responsesResult, emptyOutputTextResponsesResult)
+
+  try {
+    const response = await server.request("/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-5.5",
+        messages: [{ role: "user", content: "Return JSON." }],
+        stream: false,
+      }),
+    })
+
+    expect(response.status).toBe(200)
+    const body = (await response.json()) as {
+      choices: Array<{ message: { content: string } }>
+    }
+    expect(body.choices[0]?.message.content).toBe('{"intent":"hybrid"}')
+  } finally {
+    Object.assign(responsesResult, originalResponsesResult)
+  }
 })
 
 test("streams responses-only models back as chat completion chunks", async () => {

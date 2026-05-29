@@ -56,6 +56,7 @@ type ResponseMessageWithEncryptedContent = ResponseMessage & {
 
 interface StreamState {
   completed: boolean
+  accumulatedText: string
   created: number
   id: string
   model: string
@@ -75,11 +76,12 @@ export function chatCompletionsToResponses(
   reasoningEffort?: ReasoningEffort,
 ): ResponsesPayload {
   const input = convertMessagesToResponsesInput(payload.messages)
+  const instructions = createResponsesInstructions(payload)
 
   return {
     model: payload.model,
     input,
-    instructions: extractInstructions(payload.messages),
+    instructions,
     temperature: payload.temperature,
     top_p: payload.top_p,
     max_output_tokens: payload.max_tokens,
@@ -362,19 +364,66 @@ function convertResponseFormatToResponsesText(
 ): Pick<ResponsesPayload, "text"> {
   if (!responseFormat) return {}
 
-  if (responseFormat.type === "json_object") {
+  if (
+    responseFormat.type === "json_object"
+    || responseFormat.type === "json_schema"
+  ) {
     return { text: { format: { type: "json_object" } } }
   }
 
-  if (responseFormat.type !== "json_schema") return {}
+  return {}
+}
 
-  const jsonSchema = responseFormat.json_schema
-  const format =
-    isRecord(jsonSchema) ?
-      { type: "json_schema", ...jsonSchema }
-    : { type: "json_schema" }
+function createResponsesInstructions(
+  payload: ChatCompletionsPayload,
+): string | null {
+  const instructions = extractInstructions(payload.messages)
+  const jsonInstruction = createJsonResponseInstruction(payload.response_format)
+  const parts = [instructions, jsonInstruction].filter(Boolean)
 
-  return { text: { format } }
+  return parts.length > 0 ? parts.join("\n\n") : null
+}
+
+function createJsonResponseInstruction(
+  responseFormat: ChatCompletionsPayload["response_format"],
+): string | null {
+  if (!responseFormat || !isJsonChatResponseFormat(responseFormat)) {
+    return null
+  }
+
+  let instruction =
+    "IMPORTANT: You MUST respond with valid JSON only. No markdown, no code fences, no explanation - just raw JSON."
+
+  if (responseFormat.type === "json_schema") {
+    const schemaWrapper = responseFormat.json_schema
+    const schema =
+      isRecord(schemaWrapper) && schemaWrapper.schema !== undefined ?
+        schemaWrapper.schema
+      : schemaWrapper
+    if (schema !== undefined) {
+      instruction += `\nYou MUST conform to this JSON schema:\n${JSON.stringify(schema)}`
+    }
+  }
+
+  return instruction
+}
+
+function isJsonChatResponseFormat(
+  responseFormat: ChatCompletionsPayload["response_format"],
+): responseFormat is { type: "json_object" | "json_schema" } & Record<
+  string,
+  unknown
+> {
+  return (
+    responseFormat?.type === "json_object"
+    || responseFormat?.type === "json_schema"
+  )
+}
+
+export function getResponsesResultOutputText(
+  response: Pick<ResponsesResult, "output" | "output_text">,
+): string {
+  return collectMessageText(response.output) || response.output_text || ""
 }
 
 function buildChatMessage(
@@ -383,7 +432,8 @@ function buildChatMessage(
 ): ResponseMessageWithEncryptedContent {
   const message: ResponseMessageWithEncryptedContent = {
     role: "assistant" as const,
-    content: collectMessageText(output) || outputText || null,
+    content:
+      getResponsesResultOutputText({ output, output_text: outputText }) || null,
   }
 
   const toolCalls = collectToolCalls(output)
@@ -517,6 +567,11 @@ function mapResponsesUsageToChatStream(
   }
 }
 
+function setTextDeltaState(state: StreamState, delta: string): void {
+  state.accumulatedText += delta
+  state.textEmitted = true
+}
+
 async function emitTranslatedEvent(
   stream: WriteSseStream,
   event: ResponseStreamEvent,
@@ -533,9 +588,8 @@ async function emitTranslatedEvent(
       return null
     }
     case "response.output_text.delta": {
+      setTextDeltaState(state, event.delta)
       await emitDelta(stream, state, { content: event.delta })
-      // eslint-disable-next-line require-atomic-updates
-      state.textEmitted = true
       return null
     }
     case "response.reasoning_text.delta":
@@ -546,14 +600,7 @@ async function emitTranslatedEvent(
       return null
     }
     case "response.output_item.added": {
-      if (event.item.type === "function_call") {
-        await emitFunctionCallStart({
-          stream,
-          state,
-          outputIndex: event.output_index,
-          item: event.item,
-        })
-      }
+      await emitOutputItemAdded({ stream, state, event })
       return null
     }
     case "response.function_call_arguments.delta": {
@@ -589,7 +636,8 @@ async function emitTranslatedEvent(
       state.completed = true
       return {
         ...extractUsage(event.response.usage),
-        responseText: event.response.output_text,
+        responseText:
+          getResponsesResultOutputText(event.response) || state.accumulatedText,
       }
     }
     case "response.failed": {
@@ -609,6 +657,7 @@ async function emitTranslatedEvent(
 function createStreamState(model: string): StreamState {
   return {
     completed: false,
+    accumulatedText: "",
     created: DEFAULT_CREATED_AT,
     id: "chatcmpl_responses_fallback",
     model,
@@ -721,6 +770,22 @@ async function emitFunctionCallArgumentsDone(
   })
 }
 
+async function emitOutputItemAdded(options: {
+  event: Extract<ResponseStreamEvent, { type: "response.output_item.added" }>
+  state: StreamState
+  stream: WriteSseStream
+}): Promise<void> {
+  const { event, state, stream } = options
+  if (event.item.type !== "function_call") return
+
+  await emitFunctionCallStart({
+    stream,
+    state,
+    outputIndex: event.output_index,
+    item: event.item,
+  })
+}
+
 async function emitOutputItemDone(options: {
   item: ResponseOutputItem
   outputIndex: number
@@ -774,9 +839,8 @@ async function synthesizeMissingOutput(
   }
 
   if (!state.textEmitted && response.output_text) {
+    setTextDeltaState(state, response.output_text)
     await emitDelta(stream, state, { content: response.output_text })
-    // eslint-disable-next-line require-atomic-updates
-    state.textEmitted = true
   }
 
   for (const [outputIndex, item] of response.output.entries()) {

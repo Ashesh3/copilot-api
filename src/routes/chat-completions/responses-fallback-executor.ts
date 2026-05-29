@@ -32,6 +32,7 @@ import {
 
 import {
   chatCompletionsToResponses,
+  getResponsesResultOutputText,
   responsesResultToChatCompletion,
   streamResponsesAsChatCompletions,
 } from "./responses-fallback"
@@ -131,7 +132,7 @@ async function executeNonStreamingResponsesFallback(
       recordAccountContext(c)
       setResponsesUsageContext(c, result.usage)
       setResponsesUsageSpanAttributes(span, result.usage)
-      setSentryOutputMessages(span, result.output_text)
+      setSentryOutputMessages(span, getResponsesResultOutputText(result))
 
       return c.json(
         responsesResultToChatCompletion(result, options.requestedModel),
@@ -227,6 +228,7 @@ function handleUnexpectedNonStream({
   )
   setResponsesUsageContext(c, response.usage)
   setResponsesUsageSpanAttributes(span, response.usage)
+  setSentryOutputMessages(span, getResponsesResultOutputText(response))
   finishSpan()
   return c.json(result)
 }
