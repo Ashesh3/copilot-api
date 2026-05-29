@@ -190,6 +190,48 @@ test("redirects unsupported Anthropic high-effort model suffixes before upstream
   ).toBe("high")
 })
 
+test("omits deferred tool assistant notices after model redirects", async () => {
+  setModelRedirectsForTest([
+    {
+      id: "opus-48-to-47",
+      sourceModel: "claude-opus-4.8",
+      sourceEffort: "all",
+      targetModel: "claude-opus-4.7-1m-internal",
+      targetEffort: "xhigh",
+      enabled: true,
+    },
+  ])
+
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "claude-opus-4.8",
+      messages: [
+        { role: "user", content: "Help me investigate an error." },
+        {
+          role: "assistant",
+          content:
+            "The following deferred tools are now available via ToolSearch. Their schemas are NOT loaded - calling them directly will fail with InputValidationError.",
+        },
+      ],
+      max_tokens: 32,
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPayload?.model).toBe("claude-opus-4.7-1m-internal")
+  expect(lastUpstreamPayload?.messages).toEqual([
+    { role: "user", content: "Help me investigate an error." },
+  ])
+  expect(
+    (lastUpstreamPayload as Record<string, unknown> | undefined)
+      ?.reasoning_effort,
+  ).toBe("xhigh")
+})
+
 test("does not send custom reasoning effort for implicit-default models", async () => {
   setModelSettingsForTest([
     {

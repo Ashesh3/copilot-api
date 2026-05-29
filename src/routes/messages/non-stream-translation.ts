@@ -98,6 +98,10 @@ const HARNESS_TOOL_RESULT_MARKERS = [
   "The task tools haven't been used recently.",
 ]
 
+const HARNESS_ASSISTANT_PREFIXES = [
+  "The following deferred tools are now available via ToolSearch.",
+]
+
 const HARNESS_TOOL_USE_NAMES = new Set([
   "AskUserQuestion",
   "CronCreate",
@@ -134,6 +138,17 @@ function isClaudeCodeHarnessUserMessage(
 
   const content = message.content.trimStart()
   return HARNESS_USER_PREFIXES.some((prefix) => content.startsWith(prefix))
+}
+
+function isClaudeCodeHarnessAssistantMessage(
+  message: AnthropicAssistantMessage,
+): boolean {
+  if (typeof message.content !== "string") {
+    return false
+  }
+
+  const content = message.content.trimStart()
+  return HARNESS_ASSISTANT_PREFIXES.some((prefix) => content.startsWith(prefix))
 }
 
 function getToolResultText(
@@ -214,6 +229,13 @@ export function sanitizeAnthropicMessages(
     const message = messages[index]
 
     if (message.role === "user" && isClaudeCodeHarnessUserMessage(message)) {
+      continue
+    }
+
+    if (
+      message.role === "assistant"
+      && isClaudeCodeHarnessAssistantMessage(message)
+    ) {
       continue
     }
 

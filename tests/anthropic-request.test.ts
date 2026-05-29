@@ -359,6 +359,28 @@ describe("Claude Code compatibility filtering", () => {
       { role: "assistant", content: "The parser is ready." },
     ])
   })
+
+  test("should omit deferred tool availability assistant notices", () => {
+    const anthropicPayload: AnthropicMessagesPayload = {
+      model: "claude-opus-4.8",
+      messages: [
+        { role: "user", content: "Help me investigate an error." },
+        {
+          role: "assistant",
+          content:
+            'The following deferred tools are now available via ToolSearch. Their schemas are NOT loaded - calling them directly will fail with InputValidationError. Use ToolSearch with query "select:<name>[,<name>...]" to load tool schemas before calling them:\nCronCreate\nTaskCreate',
+        },
+      ],
+      max_tokens: 100,
+      stream: true,
+    }
+
+    const openAIPayload = translateToOpenAI(anthropicPayload)
+
+    expect(openAIPayload.messages).toEqual([
+      { role: "user", content: "Help me investigate an error." },
+    ])
+  })
 })
 
 describe("OpenAI Chat Completion v1 Request Payload Validation with Zod", () => {
