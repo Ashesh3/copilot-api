@@ -360,7 +360,7 @@ describe("Claude Code compatibility filtering", () => {
     ])
   })
 
-  test("should omit deferred tool availability assistant notices", () => {
+  test("should preserve deferred tool availability assistant notices for model policy handling", () => {
     const anthropicPayload: AnthropicMessagesPayload = {
       model: "claude-opus-4.8",
       messages: [
@@ -379,6 +379,42 @@ describe("Claude Code compatibility filtering", () => {
 
     expect(openAIPayload.messages).toEqual([
       { role: "user", content: "Help me investigate an error." },
+      {
+        role: "assistant",
+        content:
+          'The following deferred tools are now available via ToolSearch. Their schemas are NOT loaded - calling them directly will fail with InputValidationError. Use ToolSearch with query "select:<name>[,<name>...]" to load tool schemas before calling them:\nCronCreate\nTaskCreate',
+      },
+    ])
+  })
+
+  test("should preserve deferred tool availability assistant text blocks for model policy handling", () => {
+    const anthropicPayload: AnthropicMessagesPayload = {
+      model: "claude-opus-4.8",
+      messages: [
+        { role: "user", content: "Help me investigate an error." },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "text",
+              text: "The following deferred tools are now available via ToolSearch. Their schemas are NOT loaded - calling them directly will fail with InputValidationError.",
+            },
+          ],
+        },
+      ],
+      max_tokens: 100,
+      stream: true,
+    }
+
+    const openAIPayload = translateToOpenAI(anthropicPayload)
+
+    expect(openAIPayload.messages).toEqual([
+      { role: "user", content: "Help me investigate an error." },
+      {
+        role: "assistant",
+        content:
+          "The following deferred tools are now available via ToolSearch. Their schemas are NOT loaded - calling them directly will fail with InputValidationError.",
+      },
     ])
   })
 })

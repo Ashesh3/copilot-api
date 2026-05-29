@@ -2,6 +2,7 @@ import { beforeEach, expect, test } from "bun:test"
 
 import {
   getAllModelSettings,
+  modelSupportsAssistantPrefill,
   setModelSettingsForTest,
 } from "../src/lib/model-settings"
 import {
@@ -49,6 +50,30 @@ test("persists unsupported request parameter model settings", async () => {
       unsupportedRequestParameters: ["temperature", "top_p"],
     },
   ])
+})
+
+test("persists assistant prefill support model settings", async () => {
+  setModelSettingsForTest([
+    {
+      model: "claude-no-prefill",
+      supportsAssistantPrefill: false,
+    },
+    {
+      model: "claude-default-prefill",
+      supportsAssistantPrefill: "false",
+    },
+  ])
+
+  const settings = await getAllModelSettings()
+  expect(settings).toEqual([
+    {
+      model: "claude-no-prefill",
+      supportsAssistantPrefill: false,
+    },
+  ])
+  expect(modelSupportsAssistantPrefill("claude-no-prefill")).toBe(false)
+  expect(modelSupportsAssistantPrefill("claude-default-prefill")).toBe(true)
+  expect(modelSupportsAssistantPrefill("unset-model")).toBe(true)
 })
 
 test("falls back to built-in Sentry model names", () => {

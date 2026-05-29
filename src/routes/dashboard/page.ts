@@ -538,7 +538,17 @@ function addModelRedirect() {
   apiFetch('POST', '/dashboard/api/model-redirects', body).then(function(r) { if (r.ok) { nameEl.value = ''; srcEl.value = ''; srcEffortEl.value = 'all'; tgtEl.value = ''; tgtEffortEl.value = ''; showToast('Added', 'success'); loadModelRedirects() } else r.json().catch(function() { return {} }).then(function(d) { showToast(d.error || 'Failed', 'error') }) }).catch(function() { showToast('Failed to add', 'error') })
 }
 
+function ensureModelSettingsPrefillControl() {
+  var form = document.getElementById('model-settings-form')
+  if (!form || form.querySelector('select[name="ms-prefill"]')) return
+  var options = form.querySelector('.settings-options')
+  if (!options) return
+  var label = document.createElement('label')
+  label.innerHTML = '<span class="field-label">Assistant prefill <span class="optional">optional</span></span><select class="form-input full-input" name="ms-prefill"><option value="">Not set</option><option value="true">Supported</option><option value="false">Unsupported</option></select>'
+  options.appendChild(label)
+}
 function loadModelSettings() {
+  ensureModelSettingsPrefillControl()
   apiFetch('GET', '/dashboard/api/model-settings').then(function(r) { if (r.ok) return r.json() }).then(function(d) { if (d) { modelSettingsData = d; renderModelSettings() } }).catch(function() { showToast('Failed to load model settings', 'error') })
 }
 function selectedOptions(selectEl) {
@@ -571,6 +581,11 @@ function boolBadge(value) {
   if (value === false) return '<span class="bool-no">No</span>'
   return '<span class="badge badge-gray">not set</span>'
 }
+function assistantPrefillBadge(value) {
+  if (value === true) return '<span class="bool-yes">Supported</span>'
+  if (value === false) return '<span class="bool-no">Unsupported</span>'
+  return '<span class="badge badge-gray">not set</span>'
+}
 function boolSelect(name, value, trueLabel, falseLabel) {
   var selected = value === undefined ? '' : String(value)
   return '<select class="form-input" name="' + name + '">' + optionHtml('', 'Not set', selected) + optionHtml('true', trueLabel, selected) + optionHtml('false', falseLabel, selected) + '</select>'
@@ -590,7 +605,7 @@ function requestParamMultiSelect(name, values) {
 function renderModelSettings() {
   var content = document.getElementById('model-settings-content')
   if (!modelSettingsData || modelSettingsData.length === 0) { content.innerHTML = '<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 8h10"/><path d="M7 12h4"/><path d="M13 12h4"/><path d="M7 16h10"/></svg><p>No per-model settings configured.</p></div>'; return }
-  var html = '<div class="table-scroll"><table><thead><tr><th>Model</th><th>Sentry Name</th><th>Supported Efforts</th><th>Default</th><th>Implicit Default</th><th>Virtual Variants</th><th>Omit Params</th><th>Actions</th></tr></thead><tbody>'
+  var html = '<div class="table-scroll"><table><thead><tr><th>Model</th><th>Sentry Name</th><th>Supported Efforts</th><th>Default</th><th>Implicit Default</th><th>Virtual Variants</th><th>Assistant Prefill</th><th>Omit Params</th><th>Actions</th></tr></thead><tbody>'
   modelSettingsData.forEach(function(s) {
     if (editingModelSettingsModel === s.model) {
       html += '<tr id="model-settings-edit-' + esc(s.model) + '"><td><div class="mono" style="font-size:12px">' + esc(s.model) + '</div></td>'
@@ -598,11 +613,12 @@ function renderModelSettings() {
       html += '<td>' + effortMultiSelect('ms-edit-efforts', s.supportedReasoningEfforts || []) + '</td><td>' + defaultEffortSelect('ms-edit-default', s.defaultReasoningEffort) + '</td>'
       html += '<td>' + boolSelect('ms-edit-implicit', s.implicitReasoningDefault, 'Enabled', 'Disabled') + '</td>'
       html += '<td>' + boolSelect('ms-edit-virtual', s.exposeVirtualReasoningModels, 'Show', 'Hide') + '</td>'
+      html += '<td>' + boolSelect('ms-edit-prefill', s.supportsAssistantPrefill, 'Supported', 'Unsupported') + '</td>'
       html += '<td>' + requestParamMultiSelect('ms-edit-unsupported-params', s.unsupportedRequestParameters || []) + '</td>'
       html += '<td style="white-space:nowrap"><button class="btn btn-primary" style="font-size:0.78rem;padding:4px 10px" onclick="saveModelSettings(&quot;' + esc(s.model) + '&quot;)">Save</button> <button class="btn" style="font-size:0.78rem;padding:4px 10px" onclick="cancelModelSettingsEdit()">Cancel</button></td></tr>'
       return
     }
-    html += '<tr><td><div class="model-name mono">' + esc(s.model) + '</div></td><td>' + (s.sentryModelName ? '<span class="badge badge-blue mono">' + esc(s.sentryModelName) + '</span>' : '<span class="badge badge-gray">not set</span>') + '</td><td>' + effortListLabel(s.supportedReasoningEfforts) + '</td><td>' + (s.defaultReasoningEffort ? '<span class="badge badge-purple">' + esc(s.defaultReasoningEffort) + '</span>' : '<span class="badge badge-gray">not set</span>') + '</td><td>' + boolBadge(s.implicitReasoningDefault) + '</td><td>' + boolBadge(s.exposeVirtualReasoningModels) + '</td><td>' + requestParamListLabel(s.unsupportedRequestParameters) + '</td>'
+    html += '<tr><td><div class="model-name mono">' + esc(s.model) + '</div></td><td>' + (s.sentryModelName ? '<span class="badge badge-blue mono">' + esc(s.sentryModelName) + '</span>' : '<span class="badge badge-gray">not set</span>') + '</td><td>' + effortListLabel(s.supportedReasoningEfforts) + '</td><td>' + (s.defaultReasoningEffort ? '<span class="badge badge-purple">' + esc(s.defaultReasoningEffort) + '</span>' : '<span class="badge badge-gray">not set</span>') + '</td><td>' + boolBadge(s.implicitReasoningDefault) + '</td><td>' + boolBadge(s.exposeVirtualReasoningModels) + '</td><td>' + assistantPrefillBadge(s.supportsAssistantPrefill) + '</td><td>' + requestParamListLabel(s.unsupportedRequestParameters) + '</td>'
     html += '<td style="white-space:nowrap"><button class="btn" style="font-size:0.78rem;padding:4px 10px" onclick="editModelSettings(&quot;' + esc(s.model) + '&quot;)">Edit</button> <button class="btn btn-danger" style="font-size:0.78rem;padding:4px 10px" onclick="deleteModelSettings(&quot;' + esc(s.model) + '&quot;)">Delete</button></td></tr>'
   })
   html += '</tbody></table></div>'
@@ -615,25 +631,27 @@ function boolSettingValue(selectEl) {
   if (selectEl.value === 'false') return false
   return null
 }
-function modelSettingsBody(model, sentryEl, effortsEl, defaultEl, implicitEl, virtualEl, paramsEl, includeUnset) {
+function modelSettingsBody(model, sentryEl, effortsEl, defaultEl, implicitEl, virtualEl, prefillEl, paramsEl, includeUnset) {
   var efforts = effortsEl.tagName === 'SELECT' ? selectedOptions(effortsEl) : selectedEffortChecks(effortsEl)
   var params = selectedParamChecks(paramsEl)
   var body = { model: model }
   var sentryModelName = sentryEl.value.trim()
   var implicit = boolSettingValue(implicitEl)
   var virtual = boolSettingValue(virtualEl)
+  var prefill = boolSettingValue(prefillEl)
   if (sentryModelName || includeUnset) body.sentryModelName = sentryModelName || null
   if (efforts.length > 0 || includeUnset) body.supportedReasoningEfforts = efforts.length > 0 ? efforts : null
   if (defaultEl.value || includeUnset) body.defaultReasoningEffort = defaultEl.value || null
   if (implicit !== null || includeUnset) body.implicitReasoningDefault = implicit
   if (virtual !== null || includeUnset) body.exposeVirtualReasoningModels = virtual
+  if (prefill !== null || includeUnset) body.supportsAssistantPrefill = prefill
   if (params.length > 0 || includeUnset) body.unsupportedRequestParameters = params.length > 0 ? params : null
   return body
 }
 function saveModelSettings(model) {
   var row = document.getElementById('model-settings-edit-' + model)
   if (!row) return
-  var body = modelSettingsBody(model, row.querySelector('input[name="ms-edit-sentry-model"]'), row.querySelector('[data-efforts="ms-edit-efforts"]'), row.querySelector('select[name="ms-edit-default"]'), row.querySelector('select[name="ms-edit-implicit"]'), row.querySelector('select[name="ms-edit-virtual"]'), row.querySelector('[data-params="ms-edit-unsupported-params"]'), true)
+  var body = modelSettingsBody(model, row.querySelector('input[name="ms-edit-sentry-model"]'), row.querySelector('[data-efforts="ms-edit-efforts"]'), row.querySelector('select[name="ms-edit-default"]'), row.querySelector('select[name="ms-edit-implicit"]'), row.querySelector('select[name="ms-edit-virtual"]'), row.querySelector('select[name="ms-edit-prefill"]'), row.querySelector('[data-params="ms-edit-unsupported-params"]'), true)
   apiFetch('POST', '/dashboard/api/model-settings', body).then(function(r) { if (r.ok) { editingModelSettingsModel = null; showToast('Saved', 'success'); loadModelSettings() } else r.json().catch(function() { return {} }).then(function(d) { showToast(d.error || 'Failed to save', 'error') }) }).catch(function() { showToast('Failed to save', 'error') })
 }
 function deleteModelSettings(model) {
@@ -641,6 +659,7 @@ function deleteModelSettings(model) {
   apiFetch('DELETE', '/dashboard/api/model-settings/' + encodeURIComponent(model)).then(function(r) { if (r.ok) { showToast('Deleted', 'success'); loadModelSettings() } else showToast('Failed to delete', 'error') }).catch(function() { showToast('Failed to delete', 'error') })
 }
 function addModelSettings() {
+  ensureModelSettingsPrefillControl()
   var form = document.getElementById('model-settings-form')
   var modelEl = form.querySelector('input[name="ms-model"]')
   var sentryEl = form.querySelector('input[name="ms-sentry-model"]')
@@ -648,19 +667,22 @@ function addModelSettings() {
   var defaultEl = form.querySelector('select[name="ms-default"]')
   var implicitEl = form.querySelector('select[name="ms-implicit"]')
   var virtualEl = form.querySelector('select[name="ms-virtual"]')
+  var prefillEl = form.querySelector('select[name="ms-prefill"]')
   var paramsEl = form.querySelector('[data-params="ms-unsupported-params"]')
   var model = modelEl.value.trim()
   if (!model) { showToast('Model ID is required', 'error'); return }
-  var body = modelSettingsBody(model, sentryEl, effortsEl, defaultEl, implicitEl, virtualEl, paramsEl, false)
+  var body = modelSettingsBody(model, sentryEl, effortsEl, defaultEl, implicitEl, virtualEl, prefillEl, paramsEl, false)
   if (Object.keys(body).length === 1) { showToast('Set a Sentry name or another model setting', 'error'); return }
   apiFetch('POST', '/dashboard/api/model-settings', body).then(function(r) { if (r.ok) { modelEl.value = ''; sentryEl.value = ''; clearModelSettingsForm(); showToast('Saved', 'success'); loadModelSettings() } else r.json().catch(function() { return {} }).then(function(d) { showToast(d.error || 'Failed to save', 'error') }) }).catch(function() { showToast('Failed to save', 'error') })
 }
 function clearModelSettingsForm() {
+  ensureModelSettingsPrefillControl()
   var form = document.getElementById('model-settings-form')
   setEffortChecks(form, [])
   form.querySelector('select[name="ms-default"]').value = ''
   form.querySelector('select[name="ms-implicit"]').value = ''
   form.querySelector('select[name="ms-virtual"]').value = ''
+  form.querySelector('select[name="ms-prefill"]').value = ''
   setParamChecks(form, [])
 }
 function applyImplicitMediumPreset() {

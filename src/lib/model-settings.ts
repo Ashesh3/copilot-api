@@ -12,6 +12,7 @@ export interface ModelSettings {
   defaultReasoningEffort?: ReasoningEffort
   implicitReasoningDefault?: boolean
   exposeVirtualReasoningModels?: boolean
+  supportsAssistantPrefill?: boolean
   unsupportedRequestParameters?: Array<ModelRequestParameter>
 }
 
@@ -21,10 +22,16 @@ export interface ModelSettingsUpdate {
   defaultReasoningEffort?: ReasoningEffort | "max" | null
   implicitReasoningDefault?: boolean | null
   exposeVirtualReasoningModels?: boolean | null
+  supportsAssistantPrefill?: boolean | null
   unsupportedRequestParameters?: Array<ModelRequestParameter> | null
 }
 
 export type ModelRequestParameter = "temperature" | "top_p"
+
+type BooleanModelSetting =
+  | "implicitReasoningDefault"
+  | "exposeVirtualReasoningModels"
+  | "supportsAssistantPrefill"
 
 const REASONING_EFFORTS = new Set<ReasoningEffort>([
   "low",
@@ -41,6 +48,20 @@ const DEFAULT_UNSUPPORTED_REQUEST_PARAMETERS: Record<
   Array<ModelRequestParameter>
 > = {
   "gpt-5.5": ["temperature", "top_p"],
+}
+const DELETE_BOOLEAN_MODEL_SETTING: Record<
+  BooleanModelSetting,
+  (settings: ModelSettings) => void
+> = {
+  implicitReasoningDefault: (settings) => {
+    delete settings.implicitReasoningDefault
+  },
+  exposeVirtualReasoningModels: (settings) => {
+    delete settings.exposeVirtualReasoningModels
+  },
+  supportsAssistantPrefill: (settings) => {
+    delete settings.supportsAssistantPrefill
+  },
 }
 
 let modelSettings: Record<string, ModelSettings> = {}
@@ -90,6 +111,20 @@ function normalizeUnsupportedRequestParameters(
   return [...new Set(parameters)]
 }
 
+function normalizeOptionalBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined
+}
+
+function applyNormalizedBoolean(
+  settings: ModelSettings,
+  key: BooleanModelSetting,
+  value: boolean | undefined,
+): void {
+  if (value !== undefined) {
+    settings[key] = value
+  }
+}
+
 function normalizeModelSettings(raw: unknown): ModelSettings | undefined {
   if (!isSettingsRecord(raw)) return undefined
 
@@ -108,14 +143,15 @@ function normalizeModelSettings(raw: unknown): ModelSettings | undefined {
   const defaultReasoningEffort = normalizeReasoningEffort(
     value.defaultReasoningEffort,
   )
-  const implicitReasoningDefault =
-    typeof value.implicitReasoningDefault === "boolean" ?
-      value.implicitReasoningDefault
-    : undefined
-  const exposeVirtualReasoningModels =
-    typeof value.exposeVirtualReasoningModels === "boolean" ?
-      value.exposeVirtualReasoningModels
-    : undefined
+  const implicitReasoningDefault = normalizeOptionalBoolean(
+    value.implicitReasoningDefault,
+  )
+  const exposeVirtualReasoningModels = normalizeOptionalBoolean(
+    value.exposeVirtualReasoningModels,
+  )
+  const supportsAssistantPrefill = normalizeOptionalBoolean(
+    value.supportsAssistantPrefill,
+  )
   const unsupportedRequestParameters = normalizeUnsupportedRequestParameters(
     value.unsupportedRequestParameters,
   )
@@ -131,12 +167,21 @@ function normalizeModelSettings(raw: unknown): ModelSettings | undefined {
   if (defaultReasoningEffort) {
     normalized.defaultReasoningEffort = defaultReasoningEffort
   }
-  if (implicitReasoningDefault !== undefined) {
-    normalized.implicitReasoningDefault = implicitReasoningDefault
-  }
-  if (exposeVirtualReasoningModels !== undefined) {
-    normalized.exposeVirtualReasoningModels = exposeVirtualReasoningModels
-  }
+  applyNormalizedBoolean(
+    normalized,
+    "implicitReasoningDefault",
+    implicitReasoningDefault,
+  )
+  applyNormalizedBoolean(
+    normalized,
+    "exposeVirtualReasoningModels",
+    exposeVirtualReasoningModels,
+  )
+  applyNormalizedBoolean(
+    normalized,
+    "supportsAssistantPrefill",
+    supportsAssistantPrefill,
+  )
   if (unsupportedRequestParameters && unsupportedRequestParameters.length > 0) {
     normalized.unsupportedRequestParameters = unsupportedRequestParameters
   }
@@ -173,6 +218,7 @@ function hasCustomModelSettings(settings: ModelSettings): boolean {
     || settings.defaultReasoningEffort !== undefined
     || settings.implicitReasoningDefault !== undefined
     || settings.exposeVirtualReasoningModels !== undefined
+    || settings.supportsAssistantPrefill !== undefined
     || settings.unsupportedRequestParameters !== undefined
   )
 }
@@ -263,21 +309,21 @@ export async function setModelSettings(
     }
   }
 
-  if (updates.implicitReasoningDefault !== undefined) {
-    if (typeof updates.implicitReasoningDefault === "boolean") {
-      next.implicitReasoningDefault = updates.implicitReasoningDefault
-    } else {
-      delete next.implicitReasoningDefault
-    }
-  }
-
-  if (updates.exposeVirtualReasoningModels !== undefined) {
-    if (typeof updates.exposeVirtualReasoningModels === "boolean") {
-      next.exposeVirtualReasoningModels = updates.exposeVirtualReasoningModels
-    } else {
-      delete next.exposeVirtualReasoningModels
-    }
-  }
+  applyBooleanModelSettingUpdate(
+    next,
+    "implicitReasoningDefault",
+    updates.implicitReasoningDefault,
+  )
+  applyBooleanModelSettingUpdate(
+    next,
+    "exposeVirtualReasoningModels",
+    updates.exposeVirtualReasoningModels,
+  )
+  applyBooleanModelSettingUpdate(
+    next,
+    "supportsAssistantPrefill",
+    updates.supportsAssistantPrefill,
+  )
 
   applyUnsupportedRequestParametersUpdate(
     next,
@@ -327,6 +373,20 @@ function applyUnsupportedRequestParametersUpdate(
   }
 }
 
+function applyBooleanModelSettingUpdate(
+  settings: ModelSettings,
+  key: BooleanModelSetting,
+  value: boolean | null | undefined,
+): void {
+  if (value === undefined) return
+
+  if (typeof value === "boolean") {
+    settings[key] = value
+  } else {
+    DELETE_BOOLEAN_MODEL_SETTING[key](settings)
+  }
+}
+
 export function getUnsupportedRequestParameters(
   model: string,
 ): Array<ModelRequestParameter> {
@@ -336,4 +396,8 @@ export function getUnsupportedRequestParameters(
       ...(getModelSettings(model)?.unsupportedRequestParameters ?? []),
     ]),
   ]
+}
+
+export function modelSupportsAssistantPrefill(model: string): boolean {
+  return getModelSettings(model)?.supportsAssistantPrefill !== false
 }

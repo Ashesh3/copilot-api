@@ -190,7 +190,7 @@ test("redirects unsupported Anthropic high-effort model suffixes before upstream
   ).toBe("high")
 })
 
-test("omits deferred tool assistant notices after model redirects", async () => {
+test("rewrites final assistant message after model redirects when prefill is unsupported", async () => {
   setModelRedirectsForTest([
     {
       id: "opus-48-to-47",
@@ -206,6 +206,12 @@ test("omits deferred tool assistant notices after model redirects", async () => 
       targetModel: "claude-opus-4.7-1m-internal",
       targetEffort: "xhigh",
       enabled: true,
+    },
+  ])
+  setModelSettingsForTest([
+    {
+      model: "claude-opus-4.7-1m-internal",
+      supportsAssistantPrefill: false,
     },
   ])
 
@@ -232,6 +238,11 @@ test("omits deferred tool assistant notices after model redirects", async () => 
   expect(lastUpstreamPayload?.model).toBe("claude-opus-4.7-1m-internal")
   expect(lastUpstreamPayload?.messages).toEqual([
     { role: "user", content: "Help me investigate an error." },
+    {
+      role: "user",
+      content:
+        "The following deferred tools are now available via ToolSearch. Their schemas are NOT loaded - calling them directly will fail with InputValidationError.",
+    },
   ])
   expect(
     (lastUpstreamPayload as Record<string, unknown> | undefined)

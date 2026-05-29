@@ -96,6 +96,7 @@ interface ModelSettingsRequestBody {
   defaultReasoningEffort?: ModelSettingsEffort | null
   implicitReasoningDefault?: boolean | null
   exposeVirtualReasoningModels?: boolean | null
+  supportsAssistantPrefill?: boolean | null
   unsupportedRequestParameters?: Array<ModelRequestParameter> | null
 }
 
@@ -429,6 +430,10 @@ function validateModelSettingsBody(
     return "unsupportedRequestParameters is invalid"
   }
 
+  if (!isValidOptionalBoolean(body.supportsAssistantPrefill)) {
+    return "supportsAssistantPrefill is invalid"
+  }
+
   return undefined
 }
 
@@ -467,6 +472,10 @@ function isValidUnsupportedRequestParameters(value: unknown): boolean {
   )
 }
 
+function isValidOptionalBoolean(value: unknown): boolean {
+  return value === undefined || value === null || typeof value === "boolean"
+}
+
 function modelSettingsUpdate(body: ModelSettingsRequestBody) {
   return {
     ...(body.sentryModelName !== undefined ?
@@ -483,6 +492,9 @@ function modelSettingsUpdate(body: ModelSettingsRequestBody) {
     : {}),
     ...(body.exposeVirtualReasoningModels !== undefined ?
       { exposeVirtualReasoningModels: body.exposeVirtualReasoningModels }
+    : {}),
+    ...(body.supportsAssistantPrefill !== undefined ?
+      { supportsAssistantPrefill: body.supportsAssistantPrefill }
     : {}),
     ...(body.unsupportedRequestParameters !== undefined ?
       { unsupportedRequestParameters: body.unsupportedRequestParameters }

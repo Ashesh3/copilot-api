@@ -3,6 +3,7 @@ import { events } from "fetch-event-stream"
 
 import { routedFetch } from "~/lib/account-router"
 import { HTTPError } from "~/lib/error"
+import { modelSupportsAssistantPrefill } from "~/lib/model-settings"
 import {
   hasVisionContent,
   detectInitiator,
@@ -21,6 +22,21 @@ type StreamEvent = {
 
 const hasOverloadText = (value: unknown): boolean =>
   typeof value === "string" && value.toLowerCase().includes("overloaded")
+
+const rewriteUnsupportedAssistantPrefill = (
+  payload: ChatCompletionsPayload,
+): void => {
+  if (modelSupportsAssistantPrefill(payload.model)) return
+
+  const lastMessage = payload.messages.at(-1)
+  if (!lastMessage || lastMessage.role !== "assistant") return
+
+  payload.messages[payload.messages.length - 1] = {
+    role: "user",
+    content: lastMessage.content,
+    ...(lastMessage.name ? { name: lastMessage.name } : {}),
+  }
+}
 
 const normalizeFunctionTool = (tool: unknown): void => {
   if (!isRecord(tool) || tool.type !== "function") {
@@ -296,6 +312,7 @@ export const createChatCompletions = async (
     signal?: AbortSignal
   },
 ) => {
+  rewriteUnsupportedAssistantPrefill(payload)
   const vision = hasVisionContent(payload.messages)
   const initiator = detectInitiator(payload.messages, options?.initiator)
   const headerOpts = { vision, initiator }

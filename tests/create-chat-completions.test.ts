@@ -1,7 +1,8 @@
-import { test, expect, mock, beforeAll, afterAll } from "bun:test"
+import { test, expect, mock, beforeAll, afterAll, beforeEach } from "bun:test"
 
 import type { ChatCompletionsPayload } from "../src/services/copilot/create-chat-completions"
 
+import { setModelSettingsForTest } from "../src/lib/model-settings"
 import { state } from "../src/lib/state"
 import { createChatCompletions } from "../src/services/copilot/create-chat-completions"
 
@@ -49,6 +50,12 @@ afterAll(() => {
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
 })
 
+beforeEach(() => {
+  fetchMock.mockClear()
+  queuedResponses.length = 0
+  setModelSettingsForTest([])
+})
+
 test("sets X-Initiator to agent if tool/assistant present", async () => {
   const payload: ChatCompletionsPayload = {
     messages: [
@@ -60,7 +67,7 @@ test("sets X-Initiator to agent if tool/assistant present", async () => {
   await createChatCompletions(payload)
   expect(fetchMock).toHaveBeenCalled()
   const headers = (
-    fetchMock.mock.calls[0][1] as { headers: Record<string, string> }
+    fetchMock.mock.calls.at(-1)?.[1] as { headers: Record<string, string> }
   ).headers
   expect(headers["X-Initiator"]).toBe("agent")
   expect(headers["X-Interaction-Type"]).toBe("conversation-agent")
@@ -77,7 +84,7 @@ test("sets X-Initiator to user if only user present", async () => {
   await createChatCompletions(payload)
   expect(fetchMock).toHaveBeenCalled()
   const headers = (
-    fetchMock.mock.calls[1][1] as { headers: Record<string, string> }
+    fetchMock.mock.calls.at(-1)?.[1] as { headers: Record<string, string> }
   ).headers
   expect(headers["X-Initiator"]).toBe("user")
   expect(headers["X-Interaction-Type"]).toBe("conversation-user")
@@ -169,6 +176,78 @@ test("defaults stream_options.include_usage for direct streaming chat completion
   const sentBody = JSON.parse(lastCall.body) as ChatCompletionsPayload
 
   expect(sentBody.stream_options).toEqual({ include_usage: true })
+})
+
+test("rewrites final assistant messages for models without assistant prefill", async () => {
+  setModelSettingsForTest([
+    {
+      model: "claude-no-prefill",
+      supportsAssistantPrefill: false,
+    },
+  ])
+
+  const payload: ChatCompletionsPayload = {
+    model: "claude-no-prefill",
+    stream: true,
+    messages: [
+      { role: "user", content: "Help me investigate an error." },
+      {
+        role: "assistant",
+        content: "I have enough context to continue.",
+        reasoning_text: "Private assistant reasoning",
+        tool_calls: [
+          {
+            id: "call_1",
+            type: "function",
+            function: {
+              name: "lookup",
+              arguments: "{}",
+            },
+          },
+        ],
+      },
+    ],
+  }
+
+  queuedResponses.push(createSSEStreamResponse(["data: [DONE]"]))
+
+  await createChatCompletions(payload)
+
+  const lastCall = fetchMock.mock.calls.at(-1)?.[1] as unknown as {
+    body: string
+  }
+  const sentBody = JSON.parse(lastCall.body) as ChatCompletionsPayload
+
+  expect(sentBody.messages).toEqual([
+    { role: "user", content: "Help me investigate an error." },
+    { role: "user", content: "I have enough context to continue." },
+  ])
+})
+
+test("preserves final assistant messages when assistant prefill is unset", async () => {
+  const payload: ChatCompletionsPayload = {
+    model: "gpt-test",
+    messages: [
+      { role: "user", content: "Help me investigate an error." },
+      { role: "assistant", content: "I have enough context to continue." },
+    ],
+  }
+
+  await createChatCompletions(payload)
+
+  const lastCall = fetchMock.mock.calls.at(-1)?.[1] as unknown as {
+    body: string
+  }
+  const sentBody = JSON.parse(lastCall.body) as ChatCompletionsPayload
+
+  expect(sentBody.messages[0]).toEqual({
+    role: "user",
+    content: "Help me investigate an error.",
+  })
+  expect(sentBody.messages[1]?.role).toBe("assistant")
+  expect(sentBody.messages[1]?.content).toBe(
+    "I have enough context to continue.",
+  )
 })
 
 test("rewrites upstream chat completions 404 responses to 502", async () => {
