@@ -266,6 +266,68 @@ test("normalizes Responses function tool parameter schemas before forwarding", a
   ])
 })
 
+test("normalizes json_schema response format object schemas before forwarding", async () => {
+  await createResponses(
+    {
+      model: "gpt-4o",
+      input: "Extract entities.",
+      text: {
+        format: {
+          type: "json_schema",
+          name: "ExtractedEntities",
+          schema: {
+            type: "object",
+            properties: {
+              entities: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    name: { type: "string" },
+                    type: { type: "string" },
+                  },
+                  required: ["name", "type"],
+                },
+              },
+            },
+            required: ["entities"],
+          },
+        },
+      },
+    },
+    {
+      vision: false,
+      initiator: "user",
+    },
+  )
+
+  expect(lastRequestBody?.text).toEqual({
+    format: {
+      type: "json_schema",
+      name: "ExtractedEntities",
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          entities: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                name: { type: "string" },
+                type: { type: "string" },
+              },
+              required: ["name", "type"],
+            },
+          },
+        },
+        required: ["entities"],
+      },
+    },
+  })
+})
+
 test("retries 413 Responses requests without input images", async () => {
   queuedResponses.push(
     new Response("payload too large", {

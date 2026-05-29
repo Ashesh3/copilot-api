@@ -437,6 +437,7 @@ function sanitizeResponsesPayload(
   payload: ResponsesPayload,
 ): Record<string, unknown> {
   normalizeFunctionToolParameters(payload)
+  normalizeJsonSchemaResponseFormat(payload)
   removeUnsupportedRequestParameters(payload)
 
   const result: Record<string, unknown> = {}
@@ -464,6 +465,70 @@ function normalizeFunctionToolParameters(payload: ResponsesPayload): void {
       tool.parameters.properties = {}
     }
   }
+}
+
+function normalizeJsonSchemaResponseFormat(payload: ResponsesPayload): void {
+  const format = payload.text?.format
+  if (!isRecord(format) || format.type !== "json_schema") return
+
+  normalizeJsonSchemaObject(format.schema)
+}
+
+function normalizeJsonSchemaObject(
+  schema: unknown,
+  seen = new Set<object>(),
+): void {
+  if (!isRecord(schema)) return
+  if (seen.has(schema)) return
+  seen.add(schema)
+
+  if (
+    (schema.type === "object" || isRecord(schema.properties))
+    && schema.additionalProperties === undefined
+  ) {
+    schema.additionalProperties = false
+  }
+
+  normalizeSchemaMap(schema.properties, seen)
+  normalizeSchemaMap(schema.patternProperties, seen)
+  normalizeSchemaMap(schema.$defs, seen)
+  normalizeSchemaMap(schema.definitions, seen)
+  normalizeSchemaValue(schema.items, seen)
+  normalizeSchemaValue(schema.additionalItems, seen)
+  normalizeSchemaValue(schema.contains, seen)
+  normalizeSchemaValue(schema.propertyNames, seen)
+  normalizeSchemaValue(schema.not, seen)
+  normalizeSchemaValue(schema.if, seen)
+  normalizeSchemaValue(schema.then, seen)
+  normalizeSchemaValue(schema.else, seen)
+  normalizeSchemaArray(schema.anyOf, seen)
+  normalizeSchemaArray(schema.oneOf, seen)
+  normalizeSchemaArray(schema.allOf, seen)
+}
+
+function normalizeSchemaMap(value: unknown, seen: Set<object>): void {
+  if (!isRecord(value)) return
+
+  for (const schema of Object.values(value)) {
+    normalizeJsonSchemaObject(schema, seen)
+  }
+}
+
+function normalizeSchemaArray(value: unknown, seen: Set<object>): void {
+  if (!Array.isArray(value)) return
+
+  for (const schema of value) {
+    normalizeJsonSchemaObject(schema, seen)
+  }
+}
+
+function normalizeSchemaValue(value: unknown, seen: Set<object>): void {
+  if (Array.isArray(value)) {
+    normalizeSchemaArray(value, seen)
+    return
+  }
+
+  normalizeJsonSchemaObject(value, seen)
 }
 
 function removeUnsupportedRequestParameters(payload: ResponsesPayload): void {
