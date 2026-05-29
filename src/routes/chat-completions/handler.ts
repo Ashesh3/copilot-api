@@ -30,9 +30,10 @@ import {
   setRequestContext,
 } from "~/lib/request-logger"
 import {
-  getSentryModelName,
+  createSentryChatSpanOptions,
+  createSentryInvokeAgentSpanOptions,
+  setSentryOutputMessages,
   setSentryConversationIdFromRequest,
-  shouldRecordAiContent,
 } from "~/lib/sentry"
 import { state } from "~/lib/state"
 import { tokenPool } from "~/lib/token-pool"
@@ -60,17 +61,7 @@ export async function handleCompletion(c: Context) {
   const model = normalizeModelName(parseModelSuffix(rawPayload.model).baseModel)
 
   return await Sentry.startSpan(
-    {
-      op: "gen_ai.invoke_agent",
-      name: "invoke_agent copilot-proxy",
-      attributes: {
-        "gen_ai.agent.name": "copilot-proxy",
-        "gen_ai.request.model": getSentryModelName(model),
-        ...(conversationId && {
-          "gen_ai.conversation.id": conversationId,
-        }),
-      },
-    },
+    createSentryInvokeAgentSpanOptions(model, conversationId),
     async () => {
       return await handleCompletionInner(c, rawPayload)
     },
@@ -340,17 +331,10 @@ const executeRequest = async (
 ) => {
   if (!payload.stream) {
     return await Sentry.startSpan(
-      {
-        op: "gen_ai.request",
-        name: `request ${payload.model}`,
-        attributes: {
-          "gen_ai.request.model": getSentryModelName(payload.model),
-          "gen_ai.response.model": getSentryModelName(payload.model),
-          ...(shouldRecordAiContent() && {
-            "gen_ai.request.messages": JSON.stringify(payload.messages),
-          }),
-        },
-      },
+      createSentryChatSpanOptions({
+        inputMessages: payload.messages,
+        model: payload.model,
+      }),
       async (span) => {
         const response = (await createChatCompletions(payload, {
           signal: c.req.raw.signal,
@@ -550,12 +534,7 @@ const handleNonStreamingResponse = (
   if (cachedTokens > 0) {
     span.setAttribute("gen_ai.usage.input_tokens.cached", cachedTokens)
   }
-  if (shouldRecordAiContent()) {
-    span.setAttribute(
-      "gen_ai.response.text",
-      JSON.stringify([response.choices[0]?.message?.content ?? ""]),
-    )
-  }
+  setSentryOutputMessages(span, response.choices[0]?.message?.content ?? "")
 
   if (requestedModel) {
     return c.json({ ...response, model: requestedModel })
@@ -569,102 +548,91 @@ const handleStreamingResponse = (
   requestedModel?: string,
 ) => {
   consola.debug("Streaming response")
-  return Sentry.startNewTrace(() =>
-    Sentry.startSpanManual(
-      {
-        op: "gen_ai.request",
-        name: `request ${payload.model}`,
-        attributes: {
-          "gen_ai.request.model": getSentryModelName(payload.model),
-          "gen_ai.response.model": getSentryModelName(payload.model),
-          ...(shouldRecordAiContent() && {
-            "gen_ai.request.messages": JSON.stringify(payload.messages),
-          }),
-        },
-      },
-      async (span, finish) => {
-        let spanFinished = false
-        const finishSpan = () => {
-          if (spanFinished) return
-          spanFinished = true
-          finish()
+  return Sentry.startSpanManual(
+    createSentryChatSpanOptions({
+      inputMessages: payload.messages,
+      model: payload.model,
+      streaming: true,
+    }),
+    async (span, finish) => {
+      let spanFinished = false
+      const finishSpan = () => {
+        if (spanFinished) return
+        spanFinished = true
+        finish()
+      }
+
+      try {
+        const response = await createChatCompletions(payload, {
+          signal: c.req.raw.signal,
+        })
+
+        // Track which account handled this request (multi-token mode)
+        const accountId = getLastUsedAccountId()
+        if (accountId !== undefined) {
+          setRequestContext(c, { accountId })
         }
 
-        try {
-          const response = await createChatCompletions(payload, {
-            signal: c.req.raw.signal,
+        if (isNonStreaming(response)) {
+          const result = handleNonStreamingResponse(c, response, {
+            span,
+            requestedModel,
           })
-
-          // Track which account handled this request (multi-token mode)
-          const accountId = getLastUsedAccountId()
-          if (accountId !== undefined) {
-            setRequestContext(c, { accountId })
-          }
-
-          if (isNonStreaming(response)) {
-            const result = handleNonStreamingResponse(c, response, {
-              span,
-              requestedModel,
-            })
-            finishSpan()
-            return result
-          }
-
-          return streamSSE(c, async (stream) => {
-            try {
-              let streamInputTokens = 0
-              let streamOutputTokens = 0
-              let streamCachedTokens = 0
-
-              for await (const chunk of response) {
-                consola.debug("Streaming chunk:", JSON.stringify(chunk))
-                let outChunk = chunk
-                // Capture usage from final chunk if available
-                if (chunk.data && chunk.data !== "[DONE]") {
-                  const parsed = JSON.parse(chunk.data) as ChatCompletionChunk
-                  if (parsed.usage) {
-                    streamInputTokens = parsed.usage.prompt_tokens
-                    streamOutputTokens = parsed.usage.completion_tokens
-                    streamCachedTokens =
-                      parsed.usage.prompt_tokens_details?.cached_tokens ?? 0
-                    setRequestContext(c, {
-                      inputTokens: parsed.usage.prompt_tokens,
-                      outputTokens: parsed.usage.completion_tokens,
-                    })
-                  }
-                  if (requestedModel && parsed.model !== requestedModel) {
-                    parsed.model = requestedModel
-                    outChunk = { ...chunk, data: JSON.stringify(parsed) }
-                  }
-                }
-                await stream.writeSSE(outChunk as SSEMessage)
-              }
-
-              // Set token attributes after streaming completes — span is still open
-              span.setAttribute("gen_ai.usage.input_tokens", streamInputTokens)
-              span.setAttribute(
-                "gen_ai.usage.output_tokens",
-                streamOutputTokens,
-              )
-              if (streamCachedTokens > 0) {
-                span.setAttribute(
-                  "gen_ai.usage.input_tokens.cached",
-                  streamCachedTokens,
-                )
-              }
-            } catch (error) {
-              if (isAbortError(error)) return
-              throw error
-            } finally {
-              finishSpan()
-            }
-          })
-        } catch (error) {
           finishSpan()
-          throw error
+          return result
         }
-      },
-    ),
+
+        return streamSSE(c, async (stream) => {
+          try {
+            let streamInputTokens = 0
+            let streamOutputTokens = 0
+            let streamCachedTokens = 0
+
+            for await (const chunk of response) {
+              consola.debug("Streaming chunk:", JSON.stringify(chunk))
+              let outChunk = chunk
+              // Capture usage from final chunk if available
+              if (chunk.data && chunk.data !== "[DONE]") {
+                const parsed = JSON.parse(chunk.data) as ChatCompletionChunk
+                if (parsed.usage) {
+                  streamInputTokens = parsed.usage.prompt_tokens
+                  streamOutputTokens = parsed.usage.completion_tokens
+                  streamCachedTokens =
+                    parsed.usage.prompt_tokens_details?.cached_tokens ?? 0
+                  setRequestContext(c, {
+                    inputTokens: parsed.usage.prompt_tokens,
+                    outputTokens: parsed.usage.completion_tokens,
+                  })
+                }
+                if (requestedModel && parsed.model !== requestedModel) {
+                  parsed.model = requestedModel
+                  outChunk = { ...chunk, data: JSON.stringify(parsed) }
+                }
+              }
+              await stream.writeSSE(outChunk as SSEMessage)
+            }
+
+            // Set token attributes after streaming completes - span is still open.
+            span.setAttribute("gen_ai.usage.input_tokens", streamInputTokens)
+            span.setAttribute("gen_ai.usage.output_tokens", streamOutputTokens)
+            if (streamCachedTokens > 0) {
+              span.setAttribute(
+                "gen_ai.usage.input_tokens.cached",
+                streamCachedTokens,
+              )
+            }
+          } catch (error) {
+            if (isAbortError(error)) return
+            throw error
+          } finally {
+            finishSpan()
+          }
+        })
+      } catch (error) {
+        finishSpan()
+        throw error
+      }
+    },
   )
 }
 

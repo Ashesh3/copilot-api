@@ -14,7 +14,10 @@ import {
   recordNonDefaultBehavior,
   setRequestContext,
 } from "~/lib/request-logger"
-import { getSentryModelName, shouldRecordAiContent } from "~/lib/sentry"
+import {
+  createSentryChatSpanOptions,
+  setSentryOutputMessages,
+} from "~/lib/sentry"
 import {
   addPromptCaching,
   detectInitiator,
@@ -128,12 +131,7 @@ async function executeNonStreamingResponsesFallback(
       recordAccountContext(c)
       setResponsesUsageContext(c, result.usage)
       setResponsesUsageSpanAttributes(span, result.usage)
-      if (shouldRecordAiContent()) {
-        span.setAttribute(
-          "gen_ai.response.text",
-          JSON.stringify([result.output_text]),
-        )
-      }
+      setSentryOutputMessages(span, result.output_text)
 
       return c.json(
         responsesResultToChatCompletion(result, options.requestedModel),
@@ -146,52 +144,50 @@ function executeStreamingResponsesFallback(
   c: Context,
   options: PreparedResponsesFallback,
 ): Promise<Response> {
-  return Sentry.startNewTrace(() =>
-    Sentry.startSpanManual(
-      createSentrySpanOptions(options),
-      async (span, finish) => {
-        const finishSpan = createSingleFinish(finish)
+  return Sentry.startSpanManual(
+    createSentrySpanOptions(options),
+    async (span, finish) => {
+      const finishSpan = createSingleFinish(finish)
 
-        try {
-          const response = await createResponses(options.payload, {
-            vision: options.vision,
-            initiator: options.initiator,
-            signal: c.req.raw.signal,
+      try {
+        const response = await createResponses(options.payload, {
+          vision: options.vision,
+          initiator: options.initiator,
+          signal: c.req.raw.signal,
+        })
+
+        recordAccountContext(c)
+
+        if (!isAsyncIterable(response)) {
+          return handleUnexpectedNonStream({
+            c,
+            options,
+            response,
+            span,
+            finishSpan,
           })
-
-          recordAccountContext(c)
-
-          if (!isAsyncIterable(response)) {
-            return handleUnexpectedNonStream({
-              c,
-              options,
-              response,
-              span,
-              finishSpan,
-            })
-          }
-
-          return streamSSE(c, async (stream) => {
-            try {
-              const usage = await streamResponsesAsChatCompletions(
-                stream,
-                response,
-                options.requestedModel,
-              )
-              setStreamUsage(c, span, usage)
-            } catch (error) {
-              if (isAbortError(error)) return
-              throw error
-            } finally {
-              finishSpan()
-            }
-          })
-        } catch (error) {
-          finishSpan()
-          throw error
         }
-      },
-    ),
+
+        return streamSSE(c, async (stream) => {
+          try {
+            const usage = await streamResponsesAsChatCompletions(
+              stream,
+              response,
+              options.requestedModel,
+            )
+            setStreamUsage(c, span, usage)
+          } catch (error) {
+            if (isAbortError(error)) return
+            throw error
+          } finally {
+            finishSpan()
+          }
+        })
+      } catch (error) {
+        finishSpan()
+        throw error
+      }
+    },
   )
 }
 
@@ -201,17 +197,11 @@ function createSentrySpanOptions(options: PreparedResponsesFallback): {
   op: string
 } {
   return {
-    op: "gen_ai.request",
-    name: `request ${options.payload.model}`,
-    attributes: {
-      "gen_ai.request.model": getSentryModelName(options.payload.model),
-      "gen_ai.response.model": getSentryModelName(options.payload.model),
-      ...(shouldRecordAiContent() && {
-        "gen_ai.request.messages": JSON.stringify(
-          options.originalPayload.messages,
-        ),
-      }),
-    },
+    ...createSentryChatSpanOptions({
+      inputMessages: options.originalPayload.messages,
+      model: options.payload.model,
+      streaming: options.payload.stream === true,
+    }),
   }
 }
 
@@ -289,12 +279,7 @@ function setStreamUsage(
   span.setAttribute("gen_ai.usage.input_tokens", usage.inputTokens)
   span.setAttribute("gen_ai.usage.output_tokens", usage.outputTokens)
   setOptionalTokenDetails(span, usage)
-  if (shouldRecordAiContent()) {
-    span.setAttribute(
-      "gen_ai.response.text",
-      JSON.stringify([usage.responseText]),
-    )
-  }
+  setSentryOutputMessages(span, usage.responseText)
 }
 
 function setOptionalTokenDetails(

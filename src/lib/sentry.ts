@@ -1,4 +1,4 @@
-import type { Client } from "@sentry/core"
+import type { Client, SpanAttributes } from "@sentry/core"
 import type { Context } from "hono"
 
 import * as Sentry from "@sentry/bun"
@@ -14,8 +14,8 @@ import packageJson from "../../package.json" with { type: "json" }
  * should be recorded in Sentry spans.
  *
  * Controlled by `SENTRY_AI_RECORD_INPUTS` env var (default: "true").
- * Set to "false" to prevent `gen_ai.request.messages` and
- * `gen_ai.response.text` from being sent to Sentry.
+ * Set to "false" to prevent `gen_ai.input.messages` and
+ * `gen_ai.output.messages` from being sent to Sentry.
  */
 export function shouldRecordAiContent(): boolean {
   const value = process.env.SENTRY_AI_RECORD_INPUTS
@@ -78,18 +78,27 @@ function scrubSensitiveData<T extends Sentry.Event>(event: T): T {
   return event
 }
 
-function sentryConversationIdIntegration() {
+function sentryAiSpanDefaultsIntegration() {
   return {
-    name: "ConversationId",
+    name: "CopilotApiAiSpanDefaults",
     setup(client: Client) {
       client.on("spanStart", (span) => {
+        const { data = {}, description, op } = Sentry.spanToJSON(span)
+        const operationName = getGenAiOperationName(op, description, data)
+
+        if (operationName && data["gen_ai.operation.name"] === undefined) {
+          span.setAttribute("gen_ai.operation.name", operationName)
+        }
+        if (operationName && data["gen_ai.agent.name"] === undefined) {
+          span.setAttribute("gen_ai.agent.name", SENTRY_AGENT_NAME)
+        }
+
         const conversationId =
           Sentry.getCurrentScope().getScopeData().conversationId
           ?? Sentry.getIsolationScope().getScopeData().conversationId
         if (!conversationId) return
 
-        const { data: attributes, description, op } = Sentry.spanToJSON(span)
-        const hasAiOperationId = attributes["ai.operationId"] !== undefined
+        const hasAiOperationId = data["ai.operationId"] !== undefined
         if (
           !op?.startsWith("gen_ai.")
           && !hasAiOperationId
@@ -102,6 +111,130 @@ function sentryConversationIdIntegration() {
       })
     },
   }
+}
+
+const SENTRY_AGENT_NAME = "copilot-proxy"
+
+function getGenAiOperationName(
+  op: string | undefined,
+  description: string | undefined,
+  attributes: SpanAttributes,
+): string | undefined {
+  if (op?.startsWith("gen_ai.")) return op.slice("gen_ai.".length)
+  if (attributes["ai.operationId"] !== undefined) {
+    return description?.startsWith("ai.") ? description.slice(3) : undefined
+  }
+  return undefined
+}
+
+export function createSentryInvokeAgentSpanOptions(
+  model: string,
+  conversationId?: string,
+): { attributes: SpanAttributes; name: string; op: string } {
+  return {
+    op: "gen_ai.invoke_agent",
+    name: `invoke_agent ${SENTRY_AGENT_NAME}`,
+    attributes: {
+      "gen_ai.operation.name": "invoke_agent",
+      "gen_ai.agent.name": SENTRY_AGENT_NAME,
+      "gen_ai.request.model": getSentryModelName(model),
+      ...(conversationId && {
+        "gen_ai.conversation.id": conversationId,
+      }),
+    },
+  }
+}
+
+export function createSentryChatSpanOptions(options: {
+  inputMessages?: unknown
+  model: string
+  streaming?: boolean
+}): { attributes: SpanAttributes; name: string; op: string } {
+  const model = getSentryModelName(options.model)
+  return {
+    op: "gen_ai.chat",
+    name: `chat ${model}`,
+    attributes: {
+      "gen_ai.operation.name": "chat",
+      "gen_ai.agent.name": SENTRY_AGENT_NAME,
+      "gen_ai.request.model": model,
+      "gen_ai.response.model": model,
+      ...(options.streaming && {
+        "gen_ai.response.streaming": true,
+      }),
+      ...(shouldRecordAiContent()
+        && options.inputMessages !== undefined && {
+          "gen_ai.input.messages": getSentryInputMessages(
+            options.inputMessages,
+          ),
+        }),
+    },
+  }
+}
+
+export function createSentryToolSpanOptions(options: {
+  isError?: boolean
+  toolArguments?: unknown
+  toolName: string
+  toolResult?: unknown
+  toolType?: string
+}): { attributes: SpanAttributes; name: string; op: string } {
+  return {
+    op: "gen_ai.execute_tool",
+    name: `execute_tool ${options.toolName}`,
+    attributes: {
+      "gen_ai.operation.name": "execute_tool",
+      "gen_ai.tool.name": options.toolName,
+      "gen_ai.tool.type": options.toolType ?? "function",
+      ...(shouldRecordAiContent() && {
+        ...(options.toolArguments !== undefined && {
+          "gen_ai.tool.call.arguments": stringifySentryContent(
+            options.toolArguments,
+          ),
+        }),
+        ...(options.toolResult !== undefined && {
+          "gen_ai.tool.call.result": stringifySentryContent(
+            options.toolResult,
+          ).slice(0, 10000),
+        }),
+      }),
+      ...(options.isError && { "gen_ai.tool.error": "true" }),
+    },
+  }
+}
+
+function getSentryInputMessages(messages: unknown): string {
+  return typeof messages === "string" ? messages : JSON.stringify(messages)
+}
+
+function stringifySentryContent(content: unknown): string {
+  if (typeof content === "string") return content
+  return JSON.stringify(content ?? "")
+}
+
+export function createSentryOutputMessages(content: unknown): string {
+  return JSON.stringify([
+    {
+      role: "assistant",
+      parts: [
+        {
+          type: "text",
+          content: stringifySentryContent(content),
+        },
+      ],
+    },
+  ])
+}
+
+export function setSentryOutputMessages(
+  span: Sentry.Span,
+  content: unknown,
+): void {
+  if (!shouldRecordAiContent()) return
+  span.setAttribute(
+    "gen_ai.output.messages",
+    createSentryOutputMessages(content),
+  )
 }
 
 export function initSentry(): void {
@@ -123,12 +256,7 @@ export function initSentry(): void {
       Number.isFinite(tracesSampleRate) ? tracesSampleRate : 1.0,
     enableLogs: true,
     integrations: [
-      sentryConversationIdIntegration(),
-      Sentry.vercelAIIntegration({
-        force: true,
-        recordInputs: recordAiContent,
-        recordOutputs: recordAiContent,
-      }),
+      sentryAiSpanDefaultsIntegration(),
       Sentry.consoleLoggingIntegration({ levels: ["warn", "error"] }),
     ],
     beforeSend(event) {

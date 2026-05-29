@@ -1,7 +1,10 @@
 import * as Sentry from "@sentry/bun"
 import consola from "consola"
 
-import { getSentryModelName, shouldRecordAiContent } from "~/lib/sentry"
+import {
+  createSentryChatSpanOptions,
+  setSentryOutputMessages,
+} from "~/lib/sentry"
 import {
   createChatCompletions,
   type ChatCompletionChunk,
@@ -97,17 +100,10 @@ export const resolveWebSearchCalls = async (
     }
 
     current = await Sentry.startSpan(
-      {
-        op: "gen_ai.request",
-        name: `web_search followup ${currentPayload.model} #${i + 1}`,
-        attributes: {
-          "gen_ai.request.model": getSentryModelName(currentPayload.model),
-          "gen_ai.response.model": getSentryModelName(currentPayload.model),
-          ...(shouldRecordAiContent() && {
-            "gen_ai.request.messages": JSON.stringify(currentPayload.messages),
-          }),
-        },
-      },
+      createSentryChatSpanOptions({
+        inputMessages: currentPayload.messages,
+        model: currentPayload.model,
+      }),
       async (span) => {
         const result = (await createChatCompletions(currentPayload, {
           initiator: initiatorOverride,
@@ -118,12 +114,7 @@ export const resolveWebSearchCalls = async (
         const outputTokens = result.usage?.completion_tokens ?? 0
         span.setAttribute("gen_ai.usage.input_tokens", inputTokens)
         span.setAttribute("gen_ai.usage.output_tokens", outputTokens)
-        if (shouldRecordAiContent()) {
-          span.setAttribute(
-            "gen_ai.response.text",
-            JSON.stringify([result.choices[0]?.message?.content ?? ""]),
-          )
-        }
+        setSentryOutputMessages(span, result.choices[0]?.message?.content ?? "")
 
         return result
       },
@@ -188,19 +179,10 @@ export const resolveResponsesWebSearchCalls = async (
 
     currentPayload = { ...currentPayload, input: newInput, stream: false }
     current = await Sentry.startSpan(
-      {
-        op: "gen_ai.request",
-        name: `web_search followup ${currentPayload.model} #${i + 1}`,
-        attributes: {
-          "gen_ai.request.model": getSentryModelName(currentPayload.model),
-          "gen_ai.response.model": getSentryModelName(currentPayload.model),
-          ...(shouldRecordAiContent() && {
-            "gen_ai.request.messages": stringifyResponsesInput(
-              currentPayload.input,
-            ),
-          }),
-        },
-      },
+      createSentryChatSpanOptions({
+        inputMessages: stringifyResponsesInput(currentPayload.input),
+        model: currentPayload.model,
+      }),
       async (span) => {
         const result = (await createResponses(
           currentPayload,
@@ -211,12 +193,7 @@ export const resolveResponsesWebSearchCalls = async (
         const outputTokens = result.usage?.output_tokens ?? 0
         span.setAttribute("gen_ai.usage.input_tokens", inputTokens)
         span.setAttribute("gen_ai.usage.output_tokens", outputTokens)
-        if (shouldRecordAiContent()) {
-          span.setAttribute(
-            "gen_ai.response.text",
-            JSON.stringify([result.output_text]),
-          )
-        }
+        setSentryOutputMessages(span, result.output_text)
 
         return result
       },

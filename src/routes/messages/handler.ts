@@ -28,9 +28,10 @@ import {
   setRequestContext,
 } from "~/lib/request-logger"
 import {
-  getSentryModelName,
+  createSentryChatSpanOptions,
+  createSentryInvokeAgentSpanOptions,
+  setSentryOutputMessages,
   setSentryConversationIdFromRequest,
-  shouldRecordAiContent,
 } from "~/lib/sentry"
 import { state } from "~/lib/state"
 import { tokenPool } from "~/lib/token-pool"
@@ -147,17 +148,7 @@ export async function handleCompletion(c: Context) {
   )
 
   return await Sentry.startSpan(
-    {
-      op: "gen_ai.invoke_agent",
-      name: "invoke_agent copilot-proxy",
-      attributes: {
-        "gen_ai.agent.name": "copilot-proxy",
-        "gen_ai.request.model": getSentryModelName(model),
-        ...(conversationId && {
-          "gen_ai.conversation.id": conversationId,
-        }),
-      },
-    },
+    createSentryInvokeAgentSpanOptions(model, conversationId),
     async () => {
       return await handleCompletionInner(c, anthropicPayload)
     },
@@ -337,12 +328,7 @@ function setChatCompletionSpanResult(
   span.setAttribute("gen_ai.usage.input_tokens", inputTokens)
   span.setAttribute("gen_ai.usage.output_tokens", outputTokens)
   setOptionalTokenDetails(span, cachedTokens)
-  if (shouldRecordAiContent()) {
-    span.setAttribute(
-      "gen_ai.response.text",
-      JSON.stringify([response?.choices[0]?.message?.content ?? ""]),
-    )
-  }
+  setSentryOutputMessages(span, response?.choices[0]?.message?.content ?? "")
 }
 
 const streamChatCompletionsWithWebSearch = async (
@@ -628,17 +614,10 @@ const executeChatCompletions = async (
 
   if (!finalPayload.stream) {
     const { initialResponse, hadWebSearch } = await Sentry.startSpan(
-      {
-        op: "gen_ai.request",
-        name: `request ${finalPayload.model}`,
-        attributes: {
-          "gen_ai.request.model": getSentryModelName(finalPayload.model),
-          "gen_ai.response.model": getSentryModelName(finalPayload.model),
-          ...(shouldRecordAiContent() && {
-            "gen_ai.request.messages": JSON.stringify(finalPayload.messages),
-          }),
-        },
-      },
+      createSentryChatSpanOptions({
+        inputMessages: finalPayload.messages,
+        model: finalPayload.model,
+      }),
       async (span) => {
         const response = (await createChatCompletions(finalPayload, {
           initiator: initiatorOverride,
@@ -687,105 +666,89 @@ const executeChatCompletions = async (
   )
 
   logger.debug("Streaming response from Copilot")
-  return await Sentry.startNewTrace(() =>
-    Sentry.startSpanManual(
-      {
-        op: "gen_ai.request",
-        name: `stream ${finalPayload.model}`,
-        attributes: {
-          "gen_ai.request.model": getSentryModelName(finalPayload.model),
-          "gen_ai.response.model": getSentryModelName(finalPayload.model),
-          ...(shouldRecordAiContent() && {
-            "gen_ai.request.messages": JSON.stringify(finalPayload.messages),
-          }),
-        },
-      },
-      async (streamSpan, finish) => {
-        let spanFinished = false
-        const finishSpan = () => {
-          if (spanFinished) return
-          spanFinished = true
-          finish()
+  return await Sentry.startSpanManual(
+    createSentryChatSpanOptions({
+      inputMessages: finalPayload.messages,
+      model: finalPayload.model,
+      streaming: true,
+    }),
+    async (streamSpan, finish) => {
+      let spanFinished = false
+      const finishSpan = () => {
+        if (spanFinished) return
+        spanFinished = true
+        finish()
+      }
+
+      try {
+        const response = await createChatCompletions(finalPayload, {
+          initiator: initiatorOverride,
+          signal: c.req.raw.signal,
+        })
+
+        // Track which account handled this request (multi-token mode)
+        const accountId = getLastUsedAccountId()
+        if (accountId !== undefined) {
+          setRequestContext(c, { accountId })
         }
 
-        try {
-          const response = await createChatCompletions(finalPayload, {
-            initiator: initiatorOverride,
-            signal: c.req.raw.signal,
-          })
-
-          // Track which account handled this request (multi-token mode)
-          const accountId = getLastUsedAccountId()
-          if (accountId !== undefined) {
-            setRequestContext(c, { accountId })
-          }
-
-          return streamSSE(c, async (stream) => {
-            try {
-              if (needsWebSearchBuffering) {
-                const buffered = await streamChatCompletionsWithWebSearch(
-                  stream,
-                  response as AsyncIterable<{ data?: string }>,
-                  requestedModel,
-                )
-
-                setChatCompletionSpanResult(
-                  streamSpan,
-                  buffered.initialResponse,
-                )
-
-                if (buffered.hadWebSearch && buffered.initialResponse) {
-                  finishSpan()
-                  const initialResp = buffered.initialResponse
-                  const resolved = await Sentry.withActiveSpan(null, () =>
-                    resolveWebSearchCalls(initialResp, finalPayload, {
-                      initiatorOverride,
-                      abortSignal: c.req.raw.signal,
-                    }),
-                  )
-                  const anthropicResponse = translateToAnthropic(
-                    resolved,
-                    requestedModel,
-                  )
-                  await emitAnthropicResponseAsStream(stream, anthropicResponse)
-                }
-                return
-              }
-
-              const directResult = await streamChatCompletionsDirect(
+        return streamSSE(c, async (stream) => {
+          try {
+            if (needsWebSearchBuffering) {
+              const buffered = await streamChatCompletionsWithWebSearch(
                 stream,
                 response as AsyncIterable<{ data?: string }>,
                 requestedModel,
               )
 
-              streamSpan.setAttribute(
-                "gen_ai.usage.input_tokens",
-                directResult.inputTokens,
-              )
-              streamSpan.setAttribute(
-                "gen_ai.usage.output_tokens",
-                directResult.outputTokens,
-              )
-              setOptionalTokenDetails(streamSpan, directResult.cachedTokens)
-              if (shouldRecordAiContent()) {
-                streamSpan.setAttribute(
-                  "gen_ai.response.text",
-                  JSON.stringify([directResult.responseText]),
+              setChatCompletionSpanResult(streamSpan, buffered.initialResponse)
+
+              if (buffered.hadWebSearch && buffered.initialResponse) {
+                finishSpan()
+                const initialResp = buffered.initialResponse
+                const resolved = await Sentry.withActiveSpan(null, () =>
+                  resolveWebSearchCalls(initialResp, finalPayload, {
+                    initiatorOverride,
+                    abortSignal: c.req.raw.signal,
+                  }),
                 )
+                const anthropicResponse = translateToAnthropic(
+                  resolved,
+                  requestedModel,
+                )
+                await emitAnthropicResponseAsStream(stream, anthropicResponse)
               }
-            } catch (error) {
-              if (isAbortError(error)) return
-              throw error
-            } finally {
-              finishSpan()
+              return
             }
-          })
-        } catch (error) {
-          finishSpan()
-          throw error
-        }
-      },
-    ),
+
+            const directResult = await streamChatCompletionsDirect(
+              stream,
+              response as AsyncIterable<{ data?: string }>,
+              requestedModel,
+            )
+
+            streamSpan.setAttribute(
+              "gen_ai.usage.input_tokens",
+              directResult.inputTokens,
+            )
+            streamSpan.setAttribute(
+              "gen_ai.usage.output_tokens",
+              directResult.outputTokens,
+            )
+            setOptionalTokenDetails(streamSpan, directResult.cachedTokens)
+            setSentryOutputMessages(streamSpan, directResult.responseText)
+          } catch (error) {
+            if (isAbortError(error)) return
+            throw error
+          } finally {
+            finishSpan()
+          }
+        })
+      } catch (error) {
+        finishSpan()
+        throw error
+      }
+    },
   )
 }
 
@@ -1067,158 +1030,129 @@ const executeResponsesApi = async (
 
   if (responsesPayload.stream) {
     logger.debug("Streaming response from Copilot (Responses API)")
-    return await Sentry.startNewTrace(() =>
-      Sentry.startSpanManual(
-        {
-          op: "gen_ai.request",
-          name: `stream ${anthropicPayload.model}`,
-          attributes: {
-            "gen_ai.request.model": getSentryModelName(anthropicPayload.model),
-            "gen_ai.response.model": getSentryModelName(anthropicPayload.model),
-            ...(shouldRecordAiContent() && {
-              "gen_ai.request.messages": JSON.stringify(
-                anthropicPayload.messages,
-              ),
-            }),
-          },
-        },
-        async (streamSpan, finish) => {
-          let spanFinished = false
-          const finishSpan = () => {
-            if (spanFinished) return
-            spanFinished = true
-            finish()
+    return await Sentry.startSpanManual(
+      createSentryChatSpanOptions({
+        inputMessages: anthropicPayload.messages,
+        model: anthropicPayload.model,
+        streaming: true,
+      }),
+      async (streamSpan, finish) => {
+        let spanFinished = false
+        const finishSpan = () => {
+          if (spanFinished) return
+          spanFinished = true
+          finish()
+        }
+
+        try {
+          const response = await createResponses(responsesPayload, {
+            vision,
+            initiator: initiatorOverride ?? initiator,
+            signal: c.req.raw.signal,
+          })
+
+          const responsesAccountId = getLastUsedAccountId()
+          if (responsesAccountId !== undefined) {
+            setRequestContext(c, { accountId: responsesAccountId })
           }
 
-          try {
-            const response = await createResponses(responsesPayload, {
-              vision,
-              initiator: initiatorOverride ?? initiator,
-              signal: c.req.raw.signal,
-            })
-
-            const responsesAccountId = getLastUsedAccountId()
-            if (responsesAccountId !== undefined) {
-              setRequestContext(c, { accountId: responsesAccountId })
-            }
-
-            return streamSSE(c, async (stream) => {
-              try {
-                if (needsWebSearchBuffering) {
-                  const buffered = await streamResponsesWithWebSearch(
-                    stream,
-                    response as ResponsesStream,
-                  )
-
-                  const inputTokens =
-                    buffered.initialResult?.usage?.input_tokens ?? 0
-                  const outputTokens =
-                    buffered.initialResult?.usage?.output_tokens ?? 0
-                  const cachedTokens =
-                    buffered.initialResult?.usage?.input_tokens_details
-                      ?.cached_tokens ?? 0
-                  const reasoningTokens =
-                    buffered.initialResult?.usage?.output_tokens_details
-                      ?.reasoning_tokens ?? 0
-                  streamSpan.setAttribute(
-                    "gen_ai.usage.input_tokens",
-                    inputTokens,
-                  )
-                  streamSpan.setAttribute(
-                    "gen_ai.usage.output_tokens",
-                    outputTokens,
-                  )
-                  setOptionalTokenDetails(
-                    streamSpan,
-                    cachedTokens,
-                    reasoningTokens,
-                  )
-                  if (shouldRecordAiContent()) {
-                    streamSpan.setAttribute(
-                      "gen_ai.response.text",
-                      JSON.stringify([
-                        buffered.initialResult?.output_text ?? "",
-                      ]),
-                    )
-                  }
-
-                  if (buffered.hadWebSearch && buffered.initialResult) {
-                    finishSpan()
-                    const initialRes = buffered.initialResult
-                    const resolved = await Sentry.withActiveSpan(null, () =>
-                      resolveResponsesWebSearchCalls(
-                        initialRes,
-                        responsesPayload,
-                        {
-                          vision,
-                          initiator: initiatorOverride ?? initiator,
-                          signal: c.req.raw.signal,
-                        },
-                      ),
-                    )
-                    const anthropicResponse =
-                      translateResponsesResultToAnthropic(resolved)
-                    if (requestedModel) anthropicResponse.model = requestedModel
-                    await emitAnthropicResponseAsStream(
-                      stream,
-                      anthropicResponse,
-                    )
-                  }
-                  return
-                }
-
-                const directUsage = await streamResponsesDirect(
+          return streamSSE(c, async (stream) => {
+            try {
+              if (needsWebSearchBuffering) {
+                const buffered = await streamResponsesWithWebSearch(
                   stream,
                   response as ResponsesStream,
                 )
 
+                const inputTokens =
+                  buffered.initialResult?.usage?.input_tokens ?? 0
+                const outputTokens =
+                  buffered.initialResult?.usage?.output_tokens ?? 0
+                const cachedTokens =
+                  buffered.initialResult?.usage?.input_tokens_details
+                    ?.cached_tokens ?? 0
+                const reasoningTokens =
+                  buffered.initialResult?.usage?.output_tokens_details
+                    ?.reasoning_tokens ?? 0
                 streamSpan.setAttribute(
                   "gen_ai.usage.input_tokens",
-                  directUsage.inputTokens,
+                  inputTokens,
                 )
                 streamSpan.setAttribute(
                   "gen_ai.usage.output_tokens",
-                  directUsage.outputTokens,
+                  outputTokens,
                 )
                 setOptionalTokenDetails(
                   streamSpan,
-                  directUsage.cachedTokens,
-                  directUsage.reasoningTokens,
+                  cachedTokens,
+                  reasoningTokens,
                 )
-                if (shouldRecordAiContent()) {
-                  streamSpan.setAttribute(
-                    "gen_ai.response.text",
-                    JSON.stringify([directUsage.responseText]),
+                setSentryOutputMessages(
+                  streamSpan,
+                  buffered.initialResult?.output_text ?? "",
+                )
+
+                if (buffered.hadWebSearch && buffered.initialResult) {
+                  finishSpan()
+                  const initialRes = buffered.initialResult
+                  const resolved = await Sentry.withActiveSpan(null, () =>
+                    resolveResponsesWebSearchCalls(
+                      initialRes,
+                      responsesPayload,
+                      {
+                        vision,
+                        initiator: initiatorOverride ?? initiator,
+                        signal: c.req.raw.signal,
+                      },
+                    ),
                   )
+                  const anthropicResponse =
+                    translateResponsesResultToAnthropic(resolved)
+                  if (requestedModel) anthropicResponse.model = requestedModel
+                  await emitAnthropicResponseAsStream(stream, anthropicResponse)
                 }
-              } catch (error) {
-                if (isAbortError(error)) return
-                throw error
-              } finally {
-                finishSpan()
+                return
               }
-            })
-          } catch (error) {
-            finishSpan()
-            throw error
-          }
-        },
-      ),
+
+              const directUsage = await streamResponsesDirect(
+                stream,
+                response as ResponsesStream,
+              )
+
+              streamSpan.setAttribute(
+                "gen_ai.usage.input_tokens",
+                directUsage.inputTokens,
+              )
+              streamSpan.setAttribute(
+                "gen_ai.usage.output_tokens",
+                directUsage.outputTokens,
+              )
+              setOptionalTokenDetails(
+                streamSpan,
+                directUsage.cachedTokens,
+                directUsage.reasoningTokens,
+              )
+              setSentryOutputMessages(streamSpan, directUsage.responseText)
+            } catch (error) {
+              if (isAbortError(error)) return
+              throw error
+            } finally {
+              finishSpan()
+            }
+          })
+        } catch (error) {
+          finishSpan()
+          throw error
+        }
+      },
     )
   }
 
   const { initialResult, hadWebSearch } = await Sentry.startSpan(
-    {
-      op: "gen_ai.request",
-      name: `request ${anthropicPayload.model}`,
-      attributes: {
-        "gen_ai.request.model": getSentryModelName(anthropicPayload.model),
-        "gen_ai.response.model": getSentryModelName(anthropicPayload.model),
-        ...(shouldRecordAiContent() && {
-          "gen_ai.request.messages": JSON.stringify(anthropicPayload.messages),
-        }),
-      },
-    },
+    createSentryChatSpanOptions({
+      inputMessages: anthropicPayload.messages,
+      model: anthropicPayload.model,
+    }),
     async (span) => {
       const result = (await createResponses(responsesPayload, {
         vision,
@@ -1243,12 +1177,7 @@ const executeResponsesApi = async (
       span.setAttribute("gen_ai.usage.input_tokens", inputTokens)
       span.setAttribute("gen_ai.usage.output_tokens", outputTokens)
       setOptionalTokenDetails(span, cachedTokens, reasoningTokens)
-      if (shouldRecordAiContent()) {
-        span.setAttribute(
-          "gen_ai.response.text",
-          JSON.stringify([result.output_text]),
-        )
-      }
+      setSentryOutputMessages(span, result.output_text)
 
       return { initialResult: result, hadWebSearch }
     },

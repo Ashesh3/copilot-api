@@ -1,12 +1,6 @@
 import * as Sentry from "@sentry/bun"
 
-import { shouldRecordAiContent } from "./sentry"
-
-const serializeToolOutput = (content: unknown): string => {
-  if (typeof content === "string") return content
-  if (Array.isArray(content)) return JSON.stringify(content)
-  return JSON.stringify(content ?? "")
-}
+import { createSentryToolSpanOptions } from "./sentry"
 
 /**
  * Build a map of tool_use id -> {name, input} from Anthropic assistant messages.
@@ -58,21 +52,13 @@ export function emitAnthropicToolSpans(messages: Array<unknown>): void {
       const toolUse = toolUseMap.get(b.tool_use_id)
       if (!toolUse) continue
 
-      const toolOutput = serializeToolOutput(b.content)
-
       Sentry.startSpan(
-        {
-          op: "gen_ai.execute_tool",
-          name: `execute_tool ${toolUse.name}`,
-          attributes: {
-            "gen_ai.tool.name": toolUse.name,
-            ...(shouldRecordAiContent() && {
-              "gen_ai.tool.input": JSON.stringify(toolUse.input),
-              "gen_ai.tool.output": toolOutput.slice(0, 10000),
-            }),
-            ...(b.is_error && { "gen_ai.tool.error": "true" }),
-          },
-        },
+        createSentryToolSpanOptions({
+          isError: b.is_error,
+          toolArguments: toolUse.input,
+          toolName: toolUse.name,
+          toolResult: b.content,
+        }),
         () => {
           // Span is zero-duration — we don't know actual execution time
         },
@@ -116,17 +102,11 @@ export function emitChatCompletionsToolSpans(messages: Array<unknown>): void {
     if (!toolCall) continue
 
     Sentry.startSpan(
-      {
-        op: "gen_ai.execute_tool",
-        name: `execute_tool ${toolCall.name}`,
-        attributes: {
-          "gen_ai.tool.name": toolCall.name,
-          ...(shouldRecordAiContent() && {
-            "gen_ai.tool.input": toolCall.arguments,
-            "gen_ai.tool.output": (m.content ?? "").slice(0, 10000),
-          }),
-        },
-      },
+      createSentryToolSpanOptions({
+        toolArguments: toolCall.arguments,
+        toolName: toolCall.name,
+        toolResult: m.content ?? "",
+      }),
       () => {},
     )
   }
@@ -162,17 +142,11 @@ export function emitResponsesToolSpans(input: unknown): void {
     if (!call) continue
 
     Sentry.startSpan(
-      {
-        op: "gen_ai.execute_tool",
-        name: `execute_tool ${call.name}`,
-        attributes: {
-          "gen_ai.tool.name": call.name,
-          ...(shouldRecordAiContent() && {
-            "gen_ai.tool.input": call.arguments,
-            "gen_ai.tool.output": (i.output ?? "").slice(0, 10000),
-          }),
-        },
-      },
+      createSentryToolSpanOptions({
+        toolArguments: call.arguments,
+        toolName: call.name,
+        toolResult: i.output ?? "",
+      }),
       () => {},
     )
   }
