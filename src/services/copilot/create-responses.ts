@@ -482,11 +482,11 @@ function normalizeJsonSchemaObject(
   if (seen.has(schema)) return
   seen.add(schema)
 
-  if (
-    (schema.type === "object" || isRecord(schema.properties))
-    && schema.additionalProperties === undefined
-  ) {
-    schema.additionalProperties = false
+  if (schema.type === "object" || isRecord(schema.properties)) {
+    if (schema.additionalProperties === undefined) {
+      schema.additionalProperties = false
+    }
+    normalizeJsonSchemaRequired(schema)
   }
 
   normalizeSchemaMap(schema.properties, seen)
@@ -504,6 +504,25 @@ function normalizeJsonSchemaObject(
   normalizeSchemaArray(schema.anyOf, seen)
   normalizeSchemaArray(schema.oneOf, seen)
   normalizeSchemaArray(schema.allOf, seen)
+}
+
+function normalizeJsonSchemaRequired(schema: Record<string, unknown>): void {
+  if (!isRecord(schema.properties)) return
+
+  const propertyKeys = Object.keys(schema.properties)
+  if (propertyKeys.length === 0) return
+
+  const existingRequired =
+    Array.isArray(schema.required) ?
+      schema.required.filter((key): key is string => typeof key === "string")
+    : []
+  const required = new Set(existingRequired)
+
+  for (const key of propertyKeys) {
+    required.add(key)
+  }
+
+  schema.required = [...required]
 }
 
 function normalizeSchemaMap(value: unknown, seen: Set<object>): void {

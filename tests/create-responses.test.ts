@@ -278,6 +278,10 @@ test("normalizes json_schema response format object schemas before forwarding", 
           schema: {
             type: "object",
             properties: {
+              episode_indices: {
+                type: "array",
+                items: { type: "number" },
+              },
               entities: {
                 type: "array",
                 items: {
@@ -309,6 +313,10 @@ test("normalizes json_schema response format object schemas before forwarding", 
         type: "object",
         additionalProperties: false,
         properties: {
+          episode_indices: {
+            type: "array",
+            items: { type: "number" },
+          },
           entities: {
             type: "array",
             items: {
@@ -322,7 +330,7 @@ test("normalizes json_schema response format object schemas before forwarding", 
             },
           },
         },
-        required: ["entities"],
+        required: ["entities", "episode_indices"],
       },
     },
   })
