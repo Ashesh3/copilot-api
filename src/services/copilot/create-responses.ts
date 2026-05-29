@@ -4,6 +4,7 @@ import { events } from "fetch-event-stream"
 import { routedFetch } from "~/lib/account-router"
 import { getReasoningEffortForModel } from "~/lib/config"
 import { HTTPError } from "~/lib/error"
+import { getUnsupportedRequestParameters } from "~/lib/model-settings"
 import { usesImplicitReasoningDefault } from "~/lib/model-suffix"
 
 export interface ResponsesPayload {
@@ -436,6 +437,7 @@ function sanitizeResponsesPayload(
   payload: ResponsesPayload,
 ): Record<string, unknown> {
   normalizeFunctionToolParameters(payload)
+  removeUnsupportedRequestParameters(payload)
 
   const result: Record<string, unknown> = {}
   for (const key of KNOWN_RESPONSES_FIELDS) {
@@ -460,6 +462,24 @@ function normalizeFunctionToolParameters(payload: ResponsesPayload): void {
     tool.parameters.type ??= "object"
     if (!isRecord(tool.parameters.properties)) {
       tool.parameters.properties = {}
+    }
+  }
+}
+
+function removeUnsupportedRequestParameters(payload: ResponsesPayload): void {
+  for (const parameter of getUnsupportedRequestParameters(payload.model)) {
+    switch (parameter) {
+      case "temperature": {
+        delete payload.temperature
+        break
+      }
+      case "top_p": {
+        delete payload.top_p
+        break
+      }
+      default: {
+        break
+      }
     }
   }
 }

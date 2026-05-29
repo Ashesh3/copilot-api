@@ -179,7 +179,7 @@ export function getDashboardPage(): string {
   <div class="section" id="sec-flags"><div class="section-header"><h2>Feature Flags</h2></div><div id="flags-content"></div><div class="form-row" id="flag-form"><input class="form-input mono" name="flag-name" placeholder="flag_name" style="flex:2;min-width:180px"><input class="form-input" name="flag-value" placeholder="true" style="flex:1;min-width:100px"><button class="btn btn-primary" onclick="addFlag()">Add</button></div></div>
   <div class="section" id="sec-replacements"><div class="section-header"><h2>Replacements</h2></div><div id="replacements-content"></div><div class="form-row" id="replacement-form"><input class="form-input" name="repl-name" placeholder="Name (optional)" style="min-width:120px"><input class="form-input mono" name="repl-pattern" placeholder="Pattern" style="flex:2;min-width:140px"><input class="form-input" name="repl-replacement" placeholder="Replacement" style="flex:2;min-width:140px"><label class="checkbox-label"><input type="checkbox" name="repl-regex"> Regex</label><button class="btn btn-primary" onclick="addReplacement()">Add</button></div></div>
   <div class="section" id="sec-model-redirects"><div class="section-header"><h2>Model Redirects</h2><span class="badge badge-gray">Silent - clients see the original model</span></div><div id="model-redirects-content"></div><div class="form-row" id="model-redirect-form"><input class="form-input" name="mr-name" placeholder="Name (optional)" style="min-width:120px"><input class="form-input mono" name="mr-source" placeholder="Source model" style="flex:2;min-width:200px"><select class="form-input" name="mr-source-effort"><option value="all">All effort levels</option><option value="default">Default/no effort</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select><input class="form-input mono" name="mr-target" placeholder="Target model" style="flex:2;min-width:200px"><select class="form-input" name="mr-target-effort"><option value="">Preserve effort</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select><button class="btn btn-primary" onclick="addModelRedirect()">Add</button></div></div>
-  <div class="section" id="sec-model-settings"><div class="section-header"><h2>Model Settings</h2><span class="badge badge-gray">Reasoning and Sentry</span></div><div class="model-settings-layout"><div class="model-settings-panel"><h3>Add setting</h3><div class="field-stack" id="model-settings-form"><label><span class="field-label">Model ID</span><input class="form-input mono full-input" name="ms-model" placeholder="provider-model-id" autocomplete="off"></label><label><span class="field-label">Sentry reported name <span class="optional">optional</span></span><input class="form-input mono full-input" name="ms-sentry-model" placeholder="sentry-model-id" autocomplete="off"></label><div><span class="field-label">Supported efforts <span class="optional">optional</span></span><div class="effort-picker" data-efforts="ms-efforts"><label class="choice-pill"><input type="checkbox" name="ms-effort" value="low"><span>low</span></label><label class="choice-pill"><input type="checkbox" name="ms-effort" value="medium"><span>medium</span></label><label class="choice-pill"><input type="checkbox" name="ms-effort" value="high"><span>high</span></label><label class="choice-pill"><input type="checkbox" name="ms-effort" value="xhigh"><span>xhigh</span></label></div></div><label><span class="field-label">Default effort <span class="optional">optional</span></span><select class="form-input full-input" name="ms-default"><option value="">None</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option></select></label><div class="settings-options"><label><span class="field-label">Implicit default <span class="optional">optional</span></span><select class="form-input full-input" name="ms-implicit"><option value="">Not set</option><option value="true">Enabled</option><option value="false">Disabled</option></select></label><label><span class="field-label">Virtual variants <span class="optional">optional</span></span><select class="form-input full-input" name="ms-virtual"><option value="">Not set</option><option value="true">Show</option><option value="false">Hide</option></select></label></div><div class="model-settings-actions"><button class="btn" onclick="applyImplicitMediumPreset()">Implicit medium</button><button class="btn btn-primary" onclick="addModelSettings()">Save setting</button></div></div></div><div class="model-settings-panel model-settings-list"><h3>Configured models</h3><div id="model-settings-content"></div></div></div></div>
+  <div class="section" id="sec-model-settings"><div class="section-header"><h2>Model Settings</h2><span class="badge badge-gray">Reasoning, Sentry, and request params</span></div><div class="model-settings-layout"><div class="model-settings-panel"><h3>Add setting</h3><div class="field-stack" id="model-settings-form"><label><span class="field-label">Model ID</span><input class="form-input mono full-input" name="ms-model" placeholder="provider-model-id" autocomplete="off"></label><label><span class="field-label">Sentry reported name <span class="optional">optional</span></span><input class="form-input mono full-input" name="ms-sentry-model" placeholder="sentry-model-id" autocomplete="off"></label><div><span class="field-label">Supported efforts <span class="optional">optional</span></span><div class="effort-picker" data-efforts="ms-efforts"><label class="choice-pill"><input type="checkbox" name="ms-effort" value="low"><span>low</span></label><label class="choice-pill"><input type="checkbox" name="ms-effort" value="medium"><span>medium</span></label><label class="choice-pill"><input type="checkbox" name="ms-effort" value="high"><span>high</span></label><label class="choice-pill"><input type="checkbox" name="ms-effort" value="xhigh"><span>xhigh</span></label></div></div><label><span class="field-label">Default effort <span class="optional">optional</span></span><select class="form-input full-input" name="ms-default"><option value="">None</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option></select></label><div class="settings-options"><label><span class="field-label">Implicit default <span class="optional">optional</span></span><select class="form-input full-input" name="ms-implicit"><option value="">Not set</option><option value="true">Enabled</option><option value="false">Disabled</option></select></label><label><span class="field-label">Virtual variants <span class="optional">optional</span></span><select class="form-input full-input" name="ms-virtual"><option value="">Not set</option><option value="true">Show</option><option value="false">Hide</option></select></label></div><div><span class="field-label">Omit request params <span class="optional">optional</span></span><div class="effort-picker" data-params="ms-unsupported-params"><label class="choice-pill"><input type="checkbox" name="ms-param" value="temperature"><span>temperature</span></label><label class="choice-pill"><input type="checkbox" name="ms-param" value="top_p"><span>top_p</span></label></div></div><div class="model-settings-actions"><button class="btn" onclick="applyImplicitMediumPreset()">Implicit medium</button><button class="btn" onclick="applyNoSamplingPreset()">No sampling</button><button class="btn btn-primary" onclick="addModelSettings()">Save setting</button></div></div></div><div class="model-settings-panel model-settings-list"><h3>Configured models</h3><div id="model-settings-content"></div></div></div></div>
   <div class="section" id="sec-custom-providers"><div class="section-header"><h2>Custom Providers</h2><span class="badge badge-gray" id="custom-provider-count">0 providers</span><button class="btn" onclick="addNebiusProvider()">Add Nebius Qwen3</button></div><div class="model-settings-layout"><div class="model-settings-panel"><h3 id="custom-provider-form-title">Add provider</h3><div class="field-stack" id="custom-provider-form"><div class="settings-options"><label><span class="field-label">Provider ID</span><input class="form-input mono full-input" name="cp-id" placeholder="nebius" autocomplete="off"></label><label><span class="field-label">Name</span><input class="form-input full-input" name="cp-name" placeholder="Nebius" autocomplete="off"></label></div><label><span class="field-label">Base URL</span><input class="form-input mono full-input" name="cp-base-url" placeholder="https://api.example.com/v1" autocomplete="off"></label><div class="settings-options"><label><span class="field-label">API key</span><input class="form-input mono full-input" name="cp-api-key" type="password" placeholder="Provider API key" autocomplete="off"></label><label><span class="field-label">Timeout ms <span class="optional">optional</span></span><input class="form-input mono full-input" name="cp-timeout" placeholder="120000" autocomplete="off"></label></div><label class="switch-row"><input type="checkbox" name="cp-pass-reasoning"> Pass reasoning_effort</label><label><span class="field-label">Headers JSON <span class="optional">optional</span></span><textarea class="form-textarea" name="cp-headers" spellcheck="false">{}</textarea></label><label><span class="field-label">Models JSON</span><textarea class="form-textarea" name="cp-models" spellcheck="false">[{"id":"custom-chat-model","kind":"chat","supportsStreaming":true}]</textarea></label><div class="model-settings-actions"><button class="btn" onclick="clearCustomProviderForm()">Clear</button><button class="btn btn-primary" onclick="saveCustomProvider()">Save provider</button></div></div></div><div class="model-settings-panel model-settings-list"><h3>Configured providers</h3><div id="custom-providers-content"></div></div></div></div>
   <div class="section" id="sec-model-routing"><div class="section-header"><h2>Model Routing</h2><span class="badge badge-gray" id="model-routing-count">0 models</span><input class="form-input model-filter" id="model-routing-filter" placeholder="Filter models" oninput="renderModelRouting()"></div><div id="model-routing-content"></div></div>
   <div class="section" id="sec-llm-debug"><div class="section-header"><h2>LLM Debug</h2><span class="badge badge-gray" id="llm-debug-count">0 calls</span><span class="badge badge-orange">Memory only</span></div><div class="llm-debug-toolbar"><input class="form-input llm-debug-search" id="llm-debug-filter" placeholder="Filter model, path, request, response, error" oninput="renderLlmDebugLogs()"><select class="form-input" id="llm-debug-status" onchange="renderLlmDebugLogs()"><option value="all">All statuses</option><option value="error">Errors</option><option value="pending">Pending</option><option value="complete">Complete</option></select><select class="form-input" id="llm-debug-path" onchange="renderLlmDebugLogs()"><option value="all">All endpoints</option><option value="/chat/completions">Chat completions</option><option value="/responses">Responses</option><option value="/embeddings">Embeddings</option></select><button class="btn" onclick="loadLlmDebugLogs()">Refresh</button><button class="btn btn-danger" onclick="clearLlmDebugLogs()">Clear</button></div><div id="llm-debug-content"></div></div>
@@ -551,9 +551,20 @@ function setEffortChecks(root, efforts) {
   var selected = efforts || []
   Array.prototype.forEach.call(root.querySelectorAll('input[name="ms-effort"]'), function(o) { o.checked = selected.indexOf(o.value) !== -1 })
 }
+function selectedParamChecks(root) {
+  return Array.prototype.slice.call(root.querySelectorAll('input[name="ms-param"]')).filter(function(o) { return o.checked }).map(function(o) { return o.value })
+}
+function setParamChecks(root, params) {
+  var selected = params || []
+  Array.prototype.forEach.call(root.querySelectorAll('input[name="ms-param"]'), function(o) { o.checked = selected.indexOf(o.value) !== -1 })
+}
 function effortListLabel(efforts) {
   if (!efforts || efforts.length === 0) return '<span class="badge badge-gray">not set</span>'
   return efforts.map(function(e) { return '<span class="badge badge-blue">' + esc(e) + '</span>' }).join(' ')
+}
+function requestParamListLabel(params) {
+  if (!params || params.length === 0) return '<span class="badge badge-gray">not set</span>'
+  return params.map(function(p) { return '<span class="badge badge-orange">' + esc(p) + '</span>' }).join(' ')
 }
 function boolBadge(value) {
   if (value === true) return '<span class="bool-yes">Yes</span>'
@@ -572,10 +583,14 @@ function defaultEffortSelect(name, value) {
   var selected = value || ''
   return '<select class="form-input" name="' + name + '">' + optionHtml('', 'Default effort', selected) + optionHtml('low', 'low', selected) + optionHtml('medium', 'medium', selected) + optionHtml('high', 'high', selected) + optionHtml('xhigh', 'xhigh', selected) + '</select>'
 }
+function requestParamMultiSelect(name, values) {
+  var selected = values || []
+  return '<div class="effort-picker" data-params="' + name + '"><label class="choice-pill"><input type="checkbox" name="ms-param" value="temperature"' + (selected.indexOf('temperature') !== -1 ? ' checked' : '') + '><span>temperature</span></label><label class="choice-pill"><input type="checkbox" name="ms-param" value="top_p"' + (selected.indexOf('top_p') !== -1 ? ' checked' : '') + '><span>top_p</span></label></div>'
+}
 function renderModelSettings() {
   var content = document.getElementById('model-settings-content')
   if (!modelSettingsData || modelSettingsData.length === 0) { content.innerHTML = '<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 8h10"/><path d="M7 12h4"/><path d="M13 12h4"/><path d="M7 16h10"/></svg><p>No per-model settings configured.</p></div>'; return }
-  var html = '<div class="table-scroll"><table><thead><tr><th>Model</th><th>Sentry Name</th><th>Supported Efforts</th><th>Default</th><th>Implicit Default</th><th>Virtual Variants</th><th>Actions</th></tr></thead><tbody>'
+  var html = '<div class="table-scroll"><table><thead><tr><th>Model</th><th>Sentry Name</th><th>Supported Efforts</th><th>Default</th><th>Implicit Default</th><th>Virtual Variants</th><th>Omit Params</th><th>Actions</th></tr></thead><tbody>'
   modelSettingsData.forEach(function(s) {
     if (editingModelSettingsModel === s.model) {
       html += '<tr id="model-settings-edit-' + esc(s.model) + '"><td><div class="mono" style="font-size:12px">' + esc(s.model) + '</div></td>'
@@ -583,10 +598,11 @@ function renderModelSettings() {
       html += '<td>' + effortMultiSelect('ms-edit-efforts', s.supportedReasoningEfforts || []) + '</td><td>' + defaultEffortSelect('ms-edit-default', s.defaultReasoningEffort) + '</td>'
       html += '<td>' + boolSelect('ms-edit-implicit', s.implicitReasoningDefault, 'Enabled', 'Disabled') + '</td>'
       html += '<td>' + boolSelect('ms-edit-virtual', s.exposeVirtualReasoningModels, 'Show', 'Hide') + '</td>'
+      html += '<td>' + requestParamMultiSelect('ms-edit-unsupported-params', s.unsupportedRequestParameters || []) + '</td>'
       html += '<td style="white-space:nowrap"><button class="btn btn-primary" style="font-size:0.78rem;padding:4px 10px" onclick="saveModelSettings(&quot;' + esc(s.model) + '&quot;)">Save</button> <button class="btn" style="font-size:0.78rem;padding:4px 10px" onclick="cancelModelSettingsEdit()">Cancel</button></td></tr>'
       return
     }
-    html += '<tr><td><div class="model-name mono">' + esc(s.model) + '</div></td><td>' + (s.sentryModelName ? '<span class="badge badge-blue mono">' + esc(s.sentryModelName) + '</span>' : '<span class="badge badge-gray">not set</span>') + '</td><td>' + effortListLabel(s.supportedReasoningEfforts) + '</td><td>' + (s.defaultReasoningEffort ? '<span class="badge badge-purple">' + esc(s.defaultReasoningEffort) + '</span>' : '<span class="badge badge-gray">not set</span>') + '</td><td>' + boolBadge(s.implicitReasoningDefault) + '</td><td>' + boolBadge(s.exposeVirtualReasoningModels) + '</td>'
+    html += '<tr><td><div class="model-name mono">' + esc(s.model) + '</div></td><td>' + (s.sentryModelName ? '<span class="badge badge-blue mono">' + esc(s.sentryModelName) + '</span>' : '<span class="badge badge-gray">not set</span>') + '</td><td>' + effortListLabel(s.supportedReasoningEfforts) + '</td><td>' + (s.defaultReasoningEffort ? '<span class="badge badge-purple">' + esc(s.defaultReasoningEffort) + '</span>' : '<span class="badge badge-gray">not set</span>') + '</td><td>' + boolBadge(s.implicitReasoningDefault) + '</td><td>' + boolBadge(s.exposeVirtualReasoningModels) + '</td><td>' + requestParamListLabel(s.unsupportedRequestParameters) + '</td>'
     html += '<td style="white-space:nowrap"><button class="btn" style="font-size:0.78rem;padding:4px 10px" onclick="editModelSettings(&quot;' + esc(s.model) + '&quot;)">Edit</button> <button class="btn btn-danger" style="font-size:0.78rem;padding:4px 10px" onclick="deleteModelSettings(&quot;' + esc(s.model) + '&quot;)">Delete</button></td></tr>'
   })
   html += '</tbody></table></div>'
@@ -599,8 +615,9 @@ function boolSettingValue(selectEl) {
   if (selectEl.value === 'false') return false
   return null
 }
-function modelSettingsBody(model, sentryEl, effortsEl, defaultEl, implicitEl, virtualEl, includeUnset) {
+function modelSettingsBody(model, sentryEl, effortsEl, defaultEl, implicitEl, virtualEl, paramsEl, includeUnset) {
   var efforts = effortsEl.tagName === 'SELECT' ? selectedOptions(effortsEl) : selectedEffortChecks(effortsEl)
+  var params = selectedParamChecks(paramsEl)
   var body = { model: model }
   var sentryModelName = sentryEl.value.trim()
   var implicit = boolSettingValue(implicitEl)
@@ -610,12 +627,13 @@ function modelSettingsBody(model, sentryEl, effortsEl, defaultEl, implicitEl, vi
   if (defaultEl.value || includeUnset) body.defaultReasoningEffort = defaultEl.value || null
   if (implicit !== null || includeUnset) body.implicitReasoningDefault = implicit
   if (virtual !== null || includeUnset) body.exposeVirtualReasoningModels = virtual
+  if (params.length > 0 || includeUnset) body.unsupportedRequestParameters = params.length > 0 ? params : null
   return body
 }
 function saveModelSettings(model) {
   var row = document.getElementById('model-settings-edit-' + model)
   if (!row) return
-  var body = modelSettingsBody(model, row.querySelector('input[name="ms-edit-sentry-model"]'), row.querySelector('[data-efforts="ms-edit-efforts"]'), row.querySelector('select[name="ms-edit-default"]'), row.querySelector('select[name="ms-edit-implicit"]'), row.querySelector('select[name="ms-edit-virtual"]'), true)
+  var body = modelSettingsBody(model, row.querySelector('input[name="ms-edit-sentry-model"]'), row.querySelector('[data-efforts="ms-edit-efforts"]'), row.querySelector('select[name="ms-edit-default"]'), row.querySelector('select[name="ms-edit-implicit"]'), row.querySelector('select[name="ms-edit-virtual"]'), row.querySelector('[data-params="ms-edit-unsupported-params"]'), true)
   apiFetch('POST', '/dashboard/api/model-settings', body).then(function(r) { if (r.ok) { editingModelSettingsModel = null; showToast('Saved', 'success'); loadModelSettings() } else r.json().catch(function() { return {} }).then(function(d) { showToast(d.error || 'Failed to save', 'error') }) }).catch(function() { showToast('Failed to save', 'error') })
 }
 function deleteModelSettings(model) {
@@ -630,9 +648,10 @@ function addModelSettings() {
   var defaultEl = form.querySelector('select[name="ms-default"]')
   var implicitEl = form.querySelector('select[name="ms-implicit"]')
   var virtualEl = form.querySelector('select[name="ms-virtual"]')
+  var paramsEl = form.querySelector('[data-params="ms-unsupported-params"]')
   var model = modelEl.value.trim()
   if (!model) { showToast('Model ID is required', 'error'); return }
-  var body = modelSettingsBody(model, sentryEl, effortsEl, defaultEl, implicitEl, virtualEl, false)
+  var body = modelSettingsBody(model, sentryEl, effortsEl, defaultEl, implicitEl, virtualEl, paramsEl, false)
   if (Object.keys(body).length === 1) { showToast('Set a Sentry name or another model setting', 'error'); return }
   apiFetch('POST', '/dashboard/api/model-settings', body).then(function(r) { if (r.ok) { modelEl.value = ''; sentryEl.value = ''; clearModelSettingsForm(); showToast('Saved', 'success'); loadModelSettings() } else r.json().catch(function() { return {} }).then(function(d) { showToast(d.error || 'Failed to save', 'error') }) }).catch(function() { showToast('Failed to save', 'error') })
 }
@@ -642,6 +661,7 @@ function clearModelSettingsForm() {
   form.querySelector('select[name="ms-default"]').value = ''
   form.querySelector('select[name="ms-implicit"]').value = ''
   form.querySelector('select[name="ms-virtual"]').value = ''
+  setParamChecks(form, [])
 }
 function applyImplicitMediumPreset() {
   var form = document.getElementById('model-settings-form')
@@ -649,6 +669,10 @@ function applyImplicitMediumPreset() {
   form.querySelector('select[name="ms-default"]').value = 'medium'
   form.querySelector('select[name="ms-implicit"]').value = 'true'
   form.querySelector('select[name="ms-virtual"]').value = 'false'
+}
+function applyNoSamplingPreset() {
+  var form = document.getElementById('model-settings-form')
+  setParamChecks(form, ['temperature', 'top_p'])
 }
 
 function loadCustomProviders() {

@@ -34,6 +34,23 @@ test("uses configured Sentry model name without reasoning settings", async () =>
   ])
 })
 
+test("persists unsupported request parameter model settings", async () => {
+  setModelSettingsForTest([
+    {
+      model: "no-temperature-model",
+      unsupportedRequestParameters: ["temperature", "top_p", "invalid"],
+    },
+  ])
+
+  const settings = await getAllModelSettings()
+  expect(settings).toEqual([
+    {
+      model: "no-temperature-model",
+      unsupportedRequestParameters: ["temperature", "top_p"],
+    },
+  ])
+})
+
 test("falls back to built-in Sentry model names", () => {
   expect(getSentryModelName("claude-opus-4.6")).toBe("claude-opus-4-6")
   expect(getSentryModelName("claude-opus-4.6:high")).toBe("claude-opus-4-6")

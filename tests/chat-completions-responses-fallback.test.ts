@@ -252,6 +252,25 @@ test("routes legacy chat completions requests for responses-only models through 
   })
 })
 
+test("omits unsupported sampling parameters for responses-only fallback models", async () => {
+  const response = await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "Return JSON." }],
+      temperature: 0.3,
+      top_p: 0.8,
+      stream: false,
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/responses")
+  expect(lastUpstreamPayload).not.toHaveProperty("temperature")
+  expect(lastUpstreamPayload).not.toHaveProperty("top_p")
+})
+
 test("streams responses-only models back as chat completion chunks", async () => {
   const response = await server.request("/v1/chat/completions", {
     method: "POST",

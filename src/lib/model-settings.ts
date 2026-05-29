@@ -12,6 +12,7 @@ export interface ModelSettings {
   defaultReasoningEffort?: ReasoningEffort
   implicitReasoningDefault?: boolean
   exposeVirtualReasoningModels?: boolean
+  unsupportedRequestParameters?: Array<ModelRequestParameter>
 }
 
 export interface ModelSettingsUpdate {
@@ -20,7 +21,10 @@ export interface ModelSettingsUpdate {
   defaultReasoningEffort?: ReasoningEffort | "max" | null
   implicitReasoningDefault?: boolean | null
   exposeVirtualReasoningModels?: boolean | null
+  unsupportedRequestParameters?: Array<ModelRequestParameter> | null
 }
+
+export type ModelRequestParameter = "temperature" | "top_p"
 
 const REASONING_EFFORTS = new Set<ReasoningEffort>([
   "low",
@@ -28,6 +32,16 @@ const REASONING_EFFORTS = new Set<ReasoningEffort>([
   "high",
   "xhigh",
 ])
+const REQUEST_PARAMETERS = new Set<ModelRequestParameter>([
+  "temperature",
+  "top_p",
+])
+const DEFAULT_UNSUPPORTED_REQUEST_PARAMETERS: Record<
+  string,
+  Array<ModelRequestParameter>
+> = {
+  "gpt-5.5": ["temperature", "top_p"],
+}
 
 let modelSettings: Record<string, ModelSettings> = {}
 let isLoaded = false
@@ -58,6 +72,24 @@ function normalizeSupportedReasoningEfforts(
   return [...new Set(efforts)]
 }
 
+function isModelRequestParameter(
+  value: unknown,
+): value is ModelRequestParameter {
+  return REQUEST_PARAMETERS.has(value as ModelRequestParameter)
+}
+
+function normalizeUnsupportedRequestParameters(
+  value: unknown,
+): Array<ModelRequestParameter> | undefined {
+  if (!Array.isArray(value)) return undefined
+
+  const parameters = value.flatMap((item) =>
+    isModelRequestParameter(item) ? [item] : [],
+  )
+
+  return [...new Set(parameters)]
+}
+
 function normalizeModelSettings(raw: unknown): ModelSettings | undefined {
   if (!isSettingsRecord(raw)) return undefined
 
@@ -84,6 +116,9 @@ function normalizeModelSettings(raw: unknown): ModelSettings | undefined {
     typeof value.exposeVirtualReasoningModels === "boolean" ?
       value.exposeVirtualReasoningModels
     : undefined
+  const unsupportedRequestParameters = normalizeUnsupportedRequestParameters(
+    value.unsupportedRequestParameters,
+  )
 
   const normalized: ModelSettings = { model: value.model.trim() }
 
@@ -101,6 +136,9 @@ function normalizeModelSettings(raw: unknown): ModelSettings | undefined {
   }
   if (exposeVirtualReasoningModels !== undefined) {
     normalized.exposeVirtualReasoningModels = exposeVirtualReasoningModels
+  }
+  if (unsupportedRequestParameters && unsupportedRequestParameters.length > 0) {
+    normalized.unsupportedRequestParameters = unsupportedRequestParameters
   }
 
   return hasCustomModelSettings(normalized) ? normalized : undefined
@@ -135,6 +173,7 @@ function hasCustomModelSettings(settings: ModelSettings): boolean {
     || settings.defaultReasoningEffort !== undefined
     || settings.implicitReasoningDefault !== undefined
     || settings.exposeVirtualReasoningModels !== undefined
+    || settings.unsupportedRequestParameters !== undefined
   )
 }
 
@@ -240,6 +279,11 @@ export async function setModelSettings(
     }
   }
 
+  applyUnsupportedRequestParametersUpdate(
+    next,
+    updates.unsupportedRequestParameters,
+  )
+
   if (!hasCustomModelSettings(next)) {
     modelSettings = Object.fromEntries(
       Object.entries(modelSettings).filter(([key]) => key !== trimmedModel),
@@ -266,4 +310,30 @@ export async function removeModelSettings(model: string): Promise<boolean> {
 export function setModelSettingsForTest(settings: Array<unknown>): void {
   modelSettings = normalizeSettings(settings)
   isLoaded = true
+}
+
+function applyUnsupportedRequestParametersUpdate(
+  settings: ModelSettings,
+  value: ModelSettingsUpdate["unsupportedRequestParameters"] | undefined,
+): void {
+  if (value === undefined) return
+
+  const unsupportedRequestParameters =
+    normalizeUnsupportedRequestParameters(value)
+  if (unsupportedRequestParameters && unsupportedRequestParameters.length > 0) {
+    settings.unsupportedRequestParameters = unsupportedRequestParameters
+  } else {
+    delete settings.unsupportedRequestParameters
+  }
+}
+
+export function getUnsupportedRequestParameters(
+  model: string,
+): Array<ModelRequestParameter> {
+  return [
+    ...new Set([
+      ...(DEFAULT_UNSUPPORTED_REQUEST_PARAMETERS[model] ?? []),
+      ...(getModelSettings(model)?.unsupportedRequestParameters ?? []),
+    ]),
+  ]
 }

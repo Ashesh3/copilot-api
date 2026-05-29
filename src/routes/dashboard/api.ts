@@ -42,6 +42,7 @@ import { setModelRoutingOverride } from "~/lib/model-routing"
 import {
   getAllModelSettings,
   isReasoningEffort,
+  type ModelRequestParameter,
   removeModelSettings,
   setModelSettings,
 } from "~/lib/model-settings"
@@ -95,6 +96,7 @@ interface ModelSettingsRequestBody {
   defaultReasoningEffort?: ModelSettingsEffort | null
   implicitReasoningDefault?: boolean | null
   exposeVirtualReasoningModels?: boolean | null
+  unsupportedRequestParameters?: Array<ModelRequestParameter> | null
 }
 
 interface CustomProviderRequestBody {
@@ -423,6 +425,10 @@ function validateModelSettingsBody(
     return "defaultReasoningEffort is invalid"
   }
 
+  if (!isValidUnsupportedRequestParameters(body.unsupportedRequestParameters)) {
+    return "unsupportedRequestParameters is invalid"
+  }
+
   return undefined
 }
 
@@ -450,6 +456,17 @@ function isValidModelSettingsEffort(
   )
 }
 
+function isValidUnsupportedRequestParameters(value: unknown): boolean {
+  return (
+    value === undefined
+    || value === null
+    || (Array.isArray(value)
+      && value.every(
+        (parameter) => parameter === "temperature" || parameter === "top_p",
+      ))
+  )
+}
+
 function modelSettingsUpdate(body: ModelSettingsRequestBody) {
   return {
     ...(body.sentryModelName !== undefined ?
@@ -466,6 +483,9 @@ function modelSettingsUpdate(body: ModelSettingsRequestBody) {
     : {}),
     ...(body.exposeVirtualReasoningModels !== undefined ?
       { exposeVirtualReasoningModels: body.exposeVirtualReasoningModels }
+    : {}),
+    ...(body.unsupportedRequestParameters !== undefined ?
+      { unsupportedRequestParameters: body.unsupportedRequestParameters }
     : {}),
   }
 }

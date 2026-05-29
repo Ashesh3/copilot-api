@@ -180,6 +180,49 @@ test("does not send configurable effort for implicit-default Responses models", 
   })
 })
 
+test("omits built-in unsupported request parameters for Responses models", async () => {
+  await createResponses(
+    {
+      model: "gpt-5.5",
+      input: "Hello",
+      temperature: 0.3,
+      top_p: 0.8,
+    },
+    {
+      vision: false,
+      initiator: "user",
+    },
+  )
+
+  expect(lastRequestBody).not.toHaveProperty("temperature")
+  expect(lastRequestBody).not.toHaveProperty("top_p")
+})
+
+test("omits configured unsupported request parameters for Responses models", async () => {
+  setModelSettingsForTest([
+    {
+      model: "no-temperature-model",
+      unsupportedRequestParameters: ["temperature"],
+    },
+  ])
+
+  await createResponses(
+    {
+      model: "no-temperature-model",
+      input: "Hello",
+      temperature: 0.3,
+      top_p: 0.8,
+    },
+    {
+      vision: false,
+      initiator: "user",
+    },
+  )
+
+  expect(lastRequestBody).not.toHaveProperty("temperature")
+  expect(lastRequestBody?.top_p).toBe(0.8)
+})
+
 test("normalizes Responses function tool parameter schemas before forwarding", async () => {
   const payload: ResponsesPayload = {
     model: "gpt-4o",
