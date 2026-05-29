@@ -117,6 +117,10 @@ export function getDashboardPage(): string {
   .model-settings-actions .btn { min-width: 120px }
   .model-settings-list .empty-state { padding: 28px 16px }
   .model-settings-list .empty-state svg { width: 36px; height: 36px; margin-bottom: 10px }
+  .model-settings-list table { min-width: 1180px }
+  .model-settings-list .effort-picker { display: flex; flex-wrap: wrap; gap: 6px; min-width: 178px }
+  .model-settings-list .choice-pill { flex: 0 0 84px }
+  .model-settings-list .choice-pill span { min-height: 32px; padding: 0 10px; white-space: nowrap }
   .model-settings-edit { display: flex; flex-direction: column; gap: 10px; min-width: 300px }
   .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0; margin-top: 12px; background: #1B2336; border: 1px solid #272F42; border-radius: 10px; overflow: hidden }
   .setting-row { display: contents }
