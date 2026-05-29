@@ -419,8 +419,12 @@ export async function applyModelRedirect(
     const rule = findMatchingRedirectRule(model, effort)
     if (!rule) break
 
+    const currentKey = getRedirectStateKey(model, effort)
     const step = createRedirectStep(rule, model, effort)
     const nextKey = getRedirectStateKey(step.targetModel, step.targetEffort)
+    if (nextKey === currentKey) {
+      break
+    }
     if (seen.has(nextKey)) {
       consola.warn(
         `Model redirect loop detected, stopping at ${formatModelWithEffort(model, effort)} before rule ${rule.name || rule.id}`,

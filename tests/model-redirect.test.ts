@@ -96,6 +96,73 @@ test("follows chained redirects and applies final target effort", async () => {
   )
 })
 
+test("enforces final self-redirect target effort across exact opus chain", async () => {
+  setModelRedirectsForTest([
+    {
+      id: "redirect-1777093942724-pakt7nd",
+      sourceModel: "claude-opus-4.6",
+      sourceEffort: "all",
+      targetModel: "claude-opus-4.6-1m",
+      enabled: true,
+    },
+    {
+      id: "redirect-1778731468704-u0w3ipk",
+      sourceModel: "claude-opus-4.6-1m",
+      sourceEffort: "all",
+      targetModel: "claude-opus-4.7-1m-internal",
+      enabled: true,
+    },
+    {
+      id: "redirect-1777095881291-wrcxhk0",
+      sourceModel: "claude-opus-4.7",
+      sourceEffort: "all",
+      targetModel: "claude-opus-4.7-1m-internal",
+      enabled: true,
+    },
+    {
+      id: "redirect-1780035339134-4mw4r33",
+      sourceModel: "claude-opus-4.8",
+      sourceEffort: "all",
+      targetModel: "claude-opus-4.7-1m-internal",
+      enabled: true,
+    },
+    {
+      id: "redirect-1780042585759-nay35pf",
+      sourceModel: "claude-opus-4.7-1m-internal",
+      sourceEffort: "all",
+      targetModel: "claude-opus-4.7-1m-internal",
+      targetEffort: "xhigh",
+      enabled: true,
+    },
+  ])
+
+  for (const input of [
+    "claude-opus-4.6",
+    "claude-opus-4.6-1m",
+    "claude-opus-4.7",
+    "claude-opus-4.8",
+  ]) {
+    const redirect = await applyModelRedirect(input)
+    expect(redirect.model).toBe("claude-opus-4.7-1m-internal")
+    expect(redirect.effort).toBe("xhigh")
+    expect(redirect.ruleIds?.at(-1)).toBe("redirect-1780042585759-nay35pf")
+  }
+
+  const directLow = await applyModelRedirect({
+    model: "claude-opus-4.7-1m-internal",
+    effort: "low",
+  })
+  expect(directLow.model).toBe("claude-opus-4.7-1m-internal")
+  expect(directLow.effort).toBe("xhigh")
+
+  const directXhigh = await applyModelRedirect({
+    model: "claude-opus-4.7-1m-internal",
+    effort: "xhigh",
+  })
+  expect(directXhigh.model).toBe("claude-opus-4.7-1m-internal")
+  expect(directXhigh.effort).toBe("xhigh")
+})
+
 test("stops chained redirects before loops", async () => {
   setModelRedirectsForTest([
     {

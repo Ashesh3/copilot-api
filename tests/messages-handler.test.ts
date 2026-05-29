@@ -197,6 +197,13 @@ test("omits deferred tool assistant notices after model redirects", async () => 
       sourceModel: "claude-opus-4.8",
       sourceEffort: "all",
       targetModel: "claude-opus-4.7-1m-internal",
+      enabled: true,
+    },
+    {
+      id: "internal-xhigh",
+      sourceModel: "claude-opus-4.7-1m-internal",
+      sourceEffort: "all",
+      targetModel: "claude-opus-4.7-1m-internal",
       targetEffort: "xhigh",
       enabled: true,
     },
@@ -226,6 +233,44 @@ test("omits deferred tool assistant notices after model redirects", async () => 
   expect(lastUpstreamPayload?.messages).toEqual([
     { role: "user", content: "Help me investigate an error." },
   ])
+  expect(
+    (lastUpstreamPayload as Record<string, unknown> | undefined)
+      ?.reasoning_effort,
+  ).toBe("xhigh")
+})
+
+test("applies final self-redirect effort on direct chat completions requests", async () => {
+  setModelRedirectsForTest([
+    {
+      id: "opus-47-to-internal",
+      sourceModel: "claude-opus-4.7",
+      sourceEffort: "all",
+      targetModel: "claude-opus-4.7-1m-internal",
+      enabled: true,
+    },
+    {
+      id: "internal-xhigh",
+      sourceModel: "claude-opus-4.7-1m-internal",
+      sourceEffort: "all",
+      targetModel: "claude-opus-4.7-1m-internal",
+      targetEffort: "xhigh",
+      enabled: true,
+    },
+  ])
+
+  const response = await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "claude-opus-4.7:low",
+      messages: [{ role: "user", content: "Think carefully." }],
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPayload?.model).toBe("claude-opus-4.7-1m-internal")
   expect(
     (lastUpstreamPayload as Record<string, unknown> | undefined)
       ?.reasoning_effort,
