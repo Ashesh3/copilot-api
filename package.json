@@ -1,6 +1,6 @@
 {
   "name": "@ashsec/copilot-api",
-  "version": "0.19.4",
+  "version": "0.19.5",
   "description": "Turn GitHub Copilot into OpenAI/Anthropic API compatible server. Usable with Claude Code!",
   "keywords": [
     "proxy",
@@ -40,7 +40,7 @@
     "*": "bun run lint --fix"
   },
   "dependencies": {
-    "@sentry/bun": "^10.40.0",
+    "@sentry/bun": "^10.55.0",
     "@varlock/1password-plugin": "^0.2.3",
     "citty": "^0.1.6",
     "clipboardy": "^5.0.0",

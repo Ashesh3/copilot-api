@@ -29,7 +29,11 @@ import {
   recordNonDefaultBehavior,
   setRequestContext,
 } from "~/lib/request-logger"
-import { getSentryModelName, shouldRecordAiContent } from "~/lib/sentry"
+import {
+  getSentryModelName,
+  setSentryConversationIdFromRequest,
+  shouldRecordAiContent,
+} from "~/lib/sentry"
 import { state } from "~/lib/state"
 import { tokenPool } from "~/lib/token-pool"
 import { getTokenCount } from "~/lib/tokenizer"
@@ -51,6 +55,7 @@ export async function handleCompletion(c: Context) {
   await checkRateLimit(state)
 
   const rawPayload = await c.req.json<ChatCompletionsPayload>()
+  const conversationId = setSentryConversationIdFromRequest(c, rawPayload)
 
   const model = normalizeModelName(parseModelSuffix(rawPayload.model).baseModel)
 
@@ -61,6 +66,9 @@ export async function handleCompletion(c: Context) {
       attributes: {
         "gen_ai.agent.name": "copilot-proxy",
         "gen_ai.request.model": getSentryModelName(model),
+        ...(conversationId && {
+          "gen_ai.conversation.id": conversationId,
+        }),
       },
     },
     async () => {

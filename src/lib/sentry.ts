@@ -1,7 +1,11 @@
+import type { Client } from "@sentry/core"
+import type { Context } from "hono"
+
 import * as Sentry from "@sentry/bun"
 import consola from "consola"
 
 import { getModelSettings } from "~/lib/model-settings"
+import { getClientSessionId, getRequestId } from "~/lib/request-session"
 
 import packageJson from "../../package.json" with { type: "json" }
 
@@ -74,10 +78,37 @@ function scrubSensitiveData<T extends Sentry.Event>(event: T): T {
   return event
 }
 
+function sentryConversationIdIntegration() {
+  return {
+    name: "ConversationId",
+    setup(client: Client) {
+      client.on("spanStart", (span) => {
+        const conversationId =
+          Sentry.getCurrentScope().getScopeData().conversationId
+          ?? Sentry.getIsolationScope().getScopeData().conversationId
+        if (!conversationId) return
+
+        const { data: attributes, description, op } = Sentry.spanToJSON(span)
+        const hasAiOperationId = attributes["ai.operationId"] !== undefined
+        if (
+          !op?.startsWith("gen_ai.")
+          && !hasAiOperationId
+          && !description?.startsWith("ai.")
+        ) {
+          return
+        }
+
+        span.setAttribute("gen_ai.conversation.id", conversationId)
+      })
+    },
+  }
+}
+
 export function initSentry(): void {
   const dsn = process.env.SENTRY_DSN
   if (!dsn) return
 
+  const recordAiContent = shouldRecordAiContent()
   const tracesSampleRate = Number.parseFloat(
     process.env.SENTRY_TRACES_SAMPLE_RATE ?? "1.0",
   )
@@ -86,10 +117,18 @@ export function initSentry(): void {
     dsn,
     release: `copilot-api@${packageJson.version}`,
     environment: process.env.NODE_ENV ?? "development",
+    sendDefaultPii: recordAiContent,
+    streamGenAiSpans: true,
     tracesSampleRate:
       Number.isFinite(tracesSampleRate) ? tracesSampleRate : 1.0,
     enableLogs: true,
     integrations: [
+      sentryConversationIdIntegration(),
+      Sentry.vercelAIIntegration({
+        force: true,
+        recordInputs: recordAiContent,
+        recordOutputs: recordAiContent,
+      }),
       Sentry.consoleLoggingIntegration({ levels: ["warn", "error"] }),
     ],
     beforeSend(event) {
@@ -108,6 +147,119 @@ export function initSentry(): void {
   consola.addReporter(Sentry.createConsolaReporter())
 
   consola.info("Sentry initialized")
+}
+
+const CONVERSATION_ID_PAYLOAD_KEYS = [
+  "conversation_id",
+  "conversationId",
+  "thread_id",
+  "threadId",
+  "session_id",
+  "sessionId",
+  "prompt_cache_key",
+]
+
+const CONVERSATION_ID_METADATA_KEYS = [
+  "conversation_id",
+  "conversationId",
+  "thread_id",
+  "threadId",
+  "session_id",
+  "sessionId",
+]
+
+const CONVERSATION_ID_HEADERS = [
+  "x-sentry-conversation-id",
+  "x-conversation-id",
+  "x-thread-id",
+  "x-session-id",
+  "x-claude-code-session-id",
+]
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null
+
+function normalizeConversationId(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined
+
+  const trimmed = value.trim()
+  return trimmed.length > 0 ? trimmed : undefined
+}
+
+function getFirstStringValue(
+  source: Record<string, unknown>,
+  keys: Array<string>,
+): string | undefined {
+  for (const key of keys) {
+    const value = normalizeConversationId(source[key])
+    if (value) return value
+  }
+
+  return undefined
+}
+
+function getConversationIdFromUserId(userId: unknown): string | undefined {
+  if (typeof userId !== "string" || userId.length === 0) return undefined
+
+  try {
+    const parsed = JSON.parse(userId) as unknown
+    if (isRecord(parsed)) {
+      const sessionId = normalizeConversationId(parsed.session_id)
+      if (sessionId) return sessionId
+    }
+  } catch {
+    // Fall through to the legacy Claude Code string format.
+  }
+
+  const sessionMatch = userId.match(/_session_(.+)$/)
+  return normalizeConversationId(sessionMatch?.[1])
+}
+
+function getConversationIdFromMetadata(metadata: unknown): string | undefined {
+  if (!isRecord(metadata)) return undefined
+
+  return (
+    getFirstStringValue(metadata, CONVERSATION_ID_METADATA_KEYS)
+    ?? getConversationIdFromUserId(metadata.user_id)
+  )
+}
+
+export function getSentryConversationIdFromPayload(
+  payload: unknown,
+): string | undefined {
+  if (!isRecord(payload)) return undefined
+
+  return (
+    getFirstStringValue(payload, CONVERSATION_ID_PAYLOAD_KEYS)
+    ?? getConversationIdFromMetadata(payload.metadata)
+  )
+}
+
+export function getSentryConversationIdFromHeaders(
+  headers: Headers,
+): string | undefined {
+  for (const header of CONVERSATION_ID_HEADERS) {
+    const value = normalizeConversationId(headers.get(header))
+    if (value) return value
+  }
+
+  return undefined
+}
+
+export function setSentryConversationIdFromRequest(
+  c: Context,
+  payload?: unknown,
+): string | undefined {
+  const conversationId =
+    getSentryConversationIdFromPayload(payload)
+    ?? getSentryConversationIdFromHeaders(c.req.raw.headers)
+    ?? getClientSessionId()
+    ?? getRequestId()
+
+  if (!conversationId) return undefined
+
+  Sentry.setConversationId(conversationId)
+  return conversationId
 }
 
 /**

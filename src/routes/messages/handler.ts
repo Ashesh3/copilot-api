@@ -27,7 +27,11 @@ import {
   recordNonDefaultBehavior,
   setRequestContext,
 } from "~/lib/request-logger"
-import { getSentryModelName, shouldRecordAiContent } from "~/lib/sentry"
+import {
+  getSentryModelName,
+  setSentryConversationIdFromRequest,
+  shouldRecordAiContent,
+} from "~/lib/sentry"
 import { state } from "~/lib/state"
 import { tokenPool } from "~/lib/token-pool"
 import { getTokenCount } from "~/lib/tokenizer"
@@ -135,6 +139,7 @@ export async function handleCompletion(c: Context) {
   await checkRateLimit(state)
 
   const anthropicPayload = await c.req.json<AnthropicMessagesPayload>()
+  const conversationId = setSentryConversationIdFromRequest(c, anthropicPayload)
   logger.debug("Anthropic request payload:", JSON.stringify(anthropicPayload))
 
   const model = normalizeModelName(
@@ -148,6 +153,9 @@ export async function handleCompletion(c: Context) {
       attributes: {
         "gen_ai.agent.name": "copilot-proxy",
         "gen_ai.request.model": getSentryModelName(model),
+        ...(conversationId && {
+          "gen_ai.conversation.id": conversationId,
+        }),
       },
     },
     async () => {
