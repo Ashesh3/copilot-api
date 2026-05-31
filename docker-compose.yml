@@ -21,3 +21,8 @@ services:
 
 volumes:
   copilot-data:
+    # Volume was created manually before first `compose up` (see setup.md §5)
+    # so compose treats it as external — won't try to create or delete it,
+    # and won't warn about the missing compose labels.
+    name: copilot-api_copilot-data
+    external: true
