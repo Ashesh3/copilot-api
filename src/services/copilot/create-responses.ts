@@ -129,6 +129,8 @@ export interface ResponseInputImage {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null
 
+const JSON_OBJECT_INPUT_INSTRUCTION = "Respond with JSON."
+
 function isInputImage(value: unknown): value is ResponseInputImage {
   return isRecord(value) && value.type === "input_image"
 }
@@ -436,6 +438,7 @@ const KNOWN_RESPONSES_FIELDS = new Set([
 function sanitizeResponsesPayload(
   payload: ResponsesPayload,
 ): Record<string, unknown> {
+  ensureJsonObjectInputMentionsJson(payload)
   normalizeFunctionToolParameters(payload)
   normalizeJsonSchemaResponseFormat(payload)
   removeUnsupportedRequestParameters(payload)
@@ -447,6 +450,57 @@ function sanitizeResponsesPayload(
     }
   }
   return result
+}
+
+function ensureJsonObjectInputMentionsJson(payload: ResponsesPayload): void {
+  if (payload.text?.format?.type !== "json_object") return
+  if (inputMentionsJson(payload.input)) return
+
+  const instruction: ResponseInputMessage = {
+    type: "message",
+    role: "developer",
+    content: JSON_OBJECT_INPUT_INSTRUCTION,
+  }
+
+  if (Array.isArray(payload.input)) {
+    payload.input = [instruction, ...payload.input]
+    return
+  }
+
+  if (typeof payload.input === "string") {
+    payload.input = [
+      instruction,
+      { type: "message", role: "user", content: payload.input },
+    ]
+    return
+  }
+
+  payload.input = [instruction]
+}
+
+function inputMentionsJson(input: ResponsesPayload["input"]): boolean {
+  if (typeof input === "string") return containsJson(input)
+  if (!Array.isArray(input)) return false
+
+  return input.some((item) => {
+    if (!isRecord(item)) return false
+    if (!("content" in item)) return false
+    return contentMentionsJson(item.content)
+  })
+}
+
+function contentMentionsJson(content: unknown): boolean {
+  if (typeof content === "string") return containsJson(content)
+  if (!Array.isArray(content)) return false
+
+  return content.some((part) => {
+    if (typeof part === "string") return containsJson(part)
+    return isRecord(part) && containsJson(part.text)
+  })
+}
+
+function containsJson(value: unknown): boolean {
+  return typeof value === "string" && value.toLowerCase().includes("json")
 }
 
 function normalizeFunctionToolParameters(payload: ResponsesPayload): void {

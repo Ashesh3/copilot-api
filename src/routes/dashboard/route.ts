@@ -53,6 +53,7 @@ import {
   handleUpsertCustomProvider,
 } from "./api"
 import { getDashboardPage } from "./page"
+import { handleExportSettings } from "./settings-export"
 
 export const dashboardRoutes = new Hono()
 
@@ -188,6 +189,7 @@ dashboardRoutes.delete("/api/llm-debug", handleClearLlmDebugLogs)
 
 // Settings
 dashboardRoutes.get("/api/settings", handleGetSettings)
+dashboardRoutes.get("/api/settings/export", handleExportSettings)
 dashboardRoutes.post(
   "/api/settings/codex-cleanup-model",
   handleSetCodexCleanupModel,

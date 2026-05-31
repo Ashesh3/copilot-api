@@ -323,6 +323,18 @@ test("routes chat json_schema as json_object with schema instruction for respons
   expect(lastUpstreamPayload?.text).toEqual({
     format: { type: "json_object" },
   })
+  expect(lastUpstreamPayload?.input).toEqual([
+    {
+      type: "message",
+      role: "developer",
+      content: "Respond with JSON.",
+    },
+    {
+      type: "message",
+      role: "user",
+      content: "Classify this.",
+    },
+  ])
   expect(lastUpstreamPayload?.instructions).toContain("Return only JSON.")
   expect(lastUpstreamPayload?.instructions).toContain(
     "You MUST conform to this JSON schema",

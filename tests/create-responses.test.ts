@@ -336,6 +336,67 @@ test("normalizes json_schema response format object schemas before forwarding", 
   })
 })
 
+test("adds JSON mode input instruction when input lacks json", async () => {
+  await createResponses(
+    {
+      model: "gpt-4o",
+      input: "Extract entities.",
+      instructions: "Return only JSON.",
+      text: {
+        format: { type: "json_object" },
+      },
+    },
+    {
+      vision: false,
+      initiator: "user",
+    },
+  )
+
+  expect(lastRequestBody?.input).toEqual([
+    {
+      type: "message",
+      role: "developer",
+      content: "Respond with JSON.",
+    },
+    {
+      type: "message",
+      role: "user",
+      content: "Extract entities.",
+    },
+  ])
+  expect(lastRequestBody?.instructions).toBe("Return only JSON.")
+})
+
+test("does not add JSON mode input instruction when input already mentions json", async () => {
+  await createResponses(
+    {
+      model: "gpt-4o",
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: "Return JSON.",
+        },
+      ],
+      text: {
+        format: { type: "json_object" },
+      },
+    },
+    {
+      vision: false,
+      initiator: "user",
+    },
+  )
+
+  expect(lastRequestBody?.input).toEqual([
+    {
+      type: "message",
+      role: "user",
+      content: "Return JSON.",
+    },
+  ])
+})
+
 test("retries 413 Responses requests without input images", async () => {
   queuedResponses.push(
     new Response("payload too large", {

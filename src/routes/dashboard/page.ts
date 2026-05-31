@@ -188,7 +188,7 @@ export function getDashboardPage(): string {
   <div class="section" id="sec-model-routing"><div class="section-header"><h2>Model Routing</h2><span class="badge badge-gray" id="model-routing-count">0 models</span><input class="form-input model-filter" id="model-routing-filter" placeholder="Filter models" oninput="renderModelRouting()"></div><div id="model-routing-content"></div></div>
   <div class="section" id="sec-llm-debug"><div class="section-header"><h2>LLM Debug</h2><span class="badge badge-gray" id="llm-debug-count">0 calls</span><span class="badge badge-orange">Memory only</span></div><div class="llm-debug-toolbar"><input class="form-input llm-debug-search" id="llm-debug-filter" placeholder="Filter model, path, request, response, error" oninput="renderLlmDebugLogs()"><select class="form-input" id="llm-debug-status" onchange="renderLlmDebugLogs()"><option value="all">All statuses</option><option value="error">Errors</option><option value="pending">Pending</option><option value="complete">Complete</option></select><select class="form-input" id="llm-debug-path" onchange="renderLlmDebugLogs()"><option value="all">All endpoints</option><option value="/chat/completions">Chat completions</option><option value="/responses">Responses</option><option value="/embeddings">Embeddings</option></select><button class="btn" onclick="loadLlmDebugLogs()">Refresh</button><button class="btn btn-danger" onclick="clearLlmDebugLogs()">Clear</button></div><div id="llm-debug-content"></div></div>
   <div class="section" id="sec-usage"><div class="section-header"><h2>Usage</h2></div><div id="usage-content"></div></div>
-  <div class="section" id="sec-settings"><div class="section-header"><h2>Settings</h2></div><div id="settings-content"></div></div>
+  <div class="section" id="sec-settings"><div class="section-header"><h2>Settings</h2><button class="btn btn-primary" onclick="exportConfig()">Export Config</button></div><div id="settings-content"></div></div>
 </div>
 <script>
 var apiKey = sessionStorage.getItem('dashboard_api_key') || localStorage.getItem('dashboard_api_key') || ''
@@ -945,6 +945,28 @@ function saveCodexCleanupModel() {
     if (r.ok) { showToast('Cleanup model saved', 'success'); loadSettings() }
     else { r.json().then(function(e) { showToast('Save failed: ' + (e && e.error || r.status), 'error') }).catch(function() { showToast('Save failed: ' + r.status, 'error') }) }
   }).catch(function() { showToast('Save failed', 'error') })
+}
+function getExportFilename(response) {
+  var disposition = response.headers.get('content-disposition') || ''
+  var match = disposition.match(/filename="([^"]+)"/) || disposition.match(/filename=([^;]+)/)
+  return match && match[1] ? match[1].trim() : 'copilot-api-config.zip'
+}
+function exportConfig() {
+  apiFetch('GET', '/dashboard/api/settings/export').then(function(r) {
+    if (!r.ok) throw new Error('export failed')
+    var filename = getExportFilename(r)
+    return r.blob().then(function(blob) { return { blob: blob, filename: filename } })
+  }).then(function(result) {
+    var url = URL.createObjectURL(result.blob)
+    var link = document.createElement('a')
+    link.href = url
+    link.download = result.filename
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(url)
+    showToast('Config export started', 'success')
+  }).catch(function() { showToast('Failed to export config', 'error') })
 }
 
 function renderIpAllowlistSection() {
