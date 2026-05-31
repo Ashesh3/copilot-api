@@ -13,20 +13,38 @@ const ipTracker = new Map<string, IpEntry>()
 const whitelistedIps = new Set<string>()
 
 /**
- * Extracts the client IP from the x-forwarded-for header.
- * Returns the first IP in the comma-separated list, or null if header is absent.
+ * Extracts the client IP from the request, preferring trusted-proxy headers.
+ *
+ * Trust order (most trusted first):
+ *   1. `X-Real-IP` — set by our nginx vhost to `$remote_addr` (the real client
+ *      IP, after the realip module has resolved any `CF-Connecting-IP` hop).
+ *   2. `X-Forwarded-For` rightmost entry — the rightmost entry is the most
+ *      recently-appended hop, i.e. what our trusted proxy saw. The leftmost
+ *      (RFC-canonical "client") is attacker-supplied and MUST NOT be trusted.
+ *
+ * Returns `null` if no header is present (e.g. direct hit on :4141 inside
+ * the docker network) — callers should fail closed in that case.
+ *
+ * SECURITY NOTE: the nginx vhost ships with
+ *   `proxy_set_header X-Forwarded-For $remote_addr;`
+ * which OVERWRITES any client-supplied value, so the XFF chain is always a
+ * single trusted entry. The rightmost-preference defends against a future
+ * misconfiguration that switches back to `$proxy_add_x_forwarded_for`.
  */
 export function extractClientIp(c: Context): string | null {
-  const xForwardedFor = c.req.header("x-forwarded-for")
+  const xRealIp = c.req.header("x-real-ip")?.trim()
+  if (xRealIp) return xRealIp
 
+  const xForwardedFor = c.req.header("x-forwarded-for")
   if (!xForwardedFor) {
     return null
   }
 
-  const ips = xForwardedFor.split(",")
-  const firstIp = ips[0]?.trim()
-
-  return firstIp || null
+  const ips = xForwardedFor
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+  return ips.at(-1) ?? null
 }
 
 /**

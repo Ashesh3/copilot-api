@@ -2,6 +2,7 @@ import { Hono } from "hono"
 
 import {
   extractClientIp,
+  isIpAllowedForWhitelistedRoute,
   isIpBlocked,
   recordFailedAttempt,
   whitelistIp,
@@ -19,8 +20,12 @@ import {
 
 export const featureFlagsRoutes = new Hono()
 
-// Serve the admin page (no auth needed — the page handles auth via API calls)
-featureFlagsRoutes.get("/", (c) => {
+// Serve the admin page (IP-allowlist gated — the page handles further API auth)
+featureFlagsRoutes.get("/", async (c) => {
+  const clientIp = extractClientIp(c)
+  if (clientIp === null || !(await isIpAllowedForWhitelistedRoute(clientIp))) {
+    return c.notFound()
+  }
   return c.html(getFeatureFlagsPage())
 })
 
