@@ -1,8 +1,14 @@
 import { Hono } from "hono"
 
+import { requireIpAllowlist } from "~/lib/ip-allowlist-guard"
 import { getFeatureFlags } from "~/routes/feature-flags/store"
 
 export const growthbookRoutes = new Hono()
+
+// Feature-flag eval reveals every configured tengu_* override. Gate it on
+// the IP allowlist so an unauthenticated drive-by can't fingerprint the
+// admin's Claude-Code config.
+growthbookRoutes.use("*", requireIpAllowlist)
 
 // GrowthBook remote eval endpoint
 // Claude Code's GrowthBook SDK sends POST /api/eval/{clientKey}

@@ -1,5 +1,7 @@
 import { Hono } from "hono"
 
+import { requireIpAllowlist } from "~/lib/ip-allowlist-guard"
+
 import { createSession } from "../code-sessions/session-store"
 import {
   acknowledgeWork,
@@ -12,6 +14,11 @@ import {
 } from "./environment-store"
 
 export const environmentsRoutes = new Hono()
+
+// Bridge registration, work polling, and session enqueue all run pre-auth.
+// Gate the whole surface on the IP allowlist so only known machines can
+// register as a bridge or pull work items.
+environmentsRoutes.use("*", requireIpAllowlist)
 
 // POST /bridge — Register bridge environment
 environmentsRoutes.post("/bridge", async (c) => {

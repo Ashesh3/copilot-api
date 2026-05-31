@@ -1,6 +1,7 @@
 import consola from "consola"
 import { Hono } from "hono"
 
+import { requireIpAllowlist } from "~/lib/ip-allowlist-guard"
 import { broadcastEvents } from "~/routes/code-sessions/event-bus"
 import {
   archiveSession,
@@ -11,6 +12,10 @@ import {
 } from "~/routes/code-sessions/session-store"
 
 export const sessionsRoutes = new Hono()
+
+// Gate the entire compat-sessions surface on the IP allowlist — these
+// endpoints mutate session state without any API key check.
+sessionsRoutes.use("*", requireIpAllowlist)
 
 /**
  * Map a compat session ID (session_*) to the internal code-session ID (cse_*).

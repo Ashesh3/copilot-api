@@ -2,6 +2,8 @@ import consola from "consola"
 import { Hono } from "hono"
 import { randomUUID } from "node:crypto"
 
+import { requireIpAllowlist } from "~/lib/ip-allowlist-guard"
+
 import type { InternalEvent } from "./types"
 
 import { subscribe, unsubscribe, broadcastEvents } from "./event-bus"
@@ -20,6 +22,11 @@ import {
 } from "./session-store"
 
 export const codeSessionsRoutes = new Hono()
+
+// All code-session endpoints are pre-auth (Claude Code authenticates via its
+// own bearer tokens after this layer). Gate them on the IP allowlist so the
+// public internet can't create sessions, mint worker_jwts, or push events.
+codeSessionsRoutes.use("*", requireIpAllowlist)
 
 // POST / — Create a code session
 codeSessionsRoutes.post("/", async (c) => {
