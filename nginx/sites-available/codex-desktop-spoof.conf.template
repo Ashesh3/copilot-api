@@ -1,0 +1,60 @@
+# Codex Desktop dictation domain spoofing.
+#
+# Codex Desktop's renderer attaches `X-OpenAI-Attach-Auth` / `X-OpenAI-Attach-Integrity-State`
+# headers to ALL fetches, and the main process refuses to forward them unless
+# the host matches its built-in `isDesktopAuthAllowedUrl` allowlist
+# (`localhost`, `*.openai.com`, `*.chatgpt.com` minus `ab.`). Pointing
+# `CODEX_API_BASE_URL` at a plain custom hostname therefore breaks dictation
+# (`/transcribe`) and transcript cleanup (`/codex/responses`) with a
+# silent client-side `Refusing to attach … to non-OpenAI URL` throw, surfaced
+# as the "Unable to transcribe audio" toast.
+#
+# Workaround: spoof an `*.openai.com` hostname locally — pin it to this
+# gateway via DNS or `/etc/hosts`, terminate TLS here with a cert signed by
+# a CA the client trusts, and proxy to copilot-api on :4141. The renderer
+# will then attach `Authorization: Bearer <api-key>` from `~/.codex/auth.json`,
+# which our `/transcribe` and `/codex/responses` routes honor via
+# `authorizeCodexDesktopRequest` (lib/codex-desktop-auth.ts).
+#
+# Set on the client:
+#   CODEX_API_BASE_URL=https://{{CODEX_DESKTOP_SPOOF_PRIMARY_HOST}}
+#
+# Placeholders (substitute when rendering):
+#   {{CODEX_DESKTOP_SPOOF_PRIMARY_HOST}}  e.g. voice.openai.com
+#   {{CODEX_DESKTOP_SPOOF_SERVER_NAMES}}  e.g. voice.openai.com codex.openai.com gateway.openai.com
+#   {{CODEX_DESKTOP_SPOOF_SSL_CERTIFICATE_PATH}}      e.g. /root/certs/openai-spoof.crt
+#   {{CODEX_DESKTOP_SPOOF_SSL_CERTIFICATE_KEY_PATH}}  e.g. /root/certs/openai-spoof.key
+#   {{UPSTREAM_URL}}                       e.g. http://localhost:4141
+#   {{RATE_LIMIT_ZONE}} / {{RATE_LIMIT_BURST}}        from your global rate-limit setup
+#   {{PROXY_LIMITS_SNIPPET_PATH}}          path to snippets/proxy-limits.conf
+
+server {
+  listen 80;
+  server_name {{CODEX_DESKTOP_SPOOF_SERVER_NAMES}};
+  return 301 https://$host$request_uri;
+}
+
+server {
+  listen 443 ssl;
+  server_name {{CODEX_DESKTOP_SPOOF_SERVER_NAMES}};
+
+  ssl_certificate     {{CODEX_DESKTOP_SPOOF_SSL_CERTIFICATE_PATH}};
+  ssl_certificate_key {{CODEX_DESKTOP_SPOOF_SSL_CERTIFICATE_KEY_PATH}};
+
+  limit_req zone={{RATE_LIMIT_ZONE}} burst={{RATE_LIMIT_BURST}} nodelay;
+
+  location / {
+    proxy_pass {{UPSTREAM_URL}};
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    # OVERWRITE (not append) so clients can't spoof the leftmost entry.
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+
+    include {{PROXY_LIMITS_SNIPPET_PATH}};
+    chunked_transfer_encoding on;
+  }
+}
