@@ -2,7 +2,6 @@ import { Hono } from "hono"
 
 import {
   extractClientIp,
-  isIpAllowedForWhitelistedRoute,
   isIpBlocked,
   recordFailedAttempt,
   whitelistIp,
@@ -20,12 +19,10 @@ import {
 
 export const featureFlagsRoutes = new Hono()
 
-// Serve the admin page (IP-allowlist gated — the page handles further API auth)
-featureFlagsRoutes.get("/", async (c) => {
-  const clientIp = extractClientIp(c)
-  if (clientIp === null || !(await isIpAllowedForWhitelistedRoute(clientIp))) {
-    return c.notFound()
-  }
+// Serve the admin page (no auth on HTML; the page prompts for the API key
+// which gates every /feature-flags/api call. Brute-force is bounded by the
+// shared 3-strikes IP ban in apiKeyGuard.)
+featureFlagsRoutes.get("/", (c) => {
   return c.html(getFeatureFlagsPage())
 })
 

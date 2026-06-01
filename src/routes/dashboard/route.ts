@@ -3,7 +3,6 @@ import { Hono } from "hono"
 import { upsertIpAllowlistEntry } from "~/lib/ip-allowlist"
 import {
   extractClientIp,
-  isIpAllowedForWhitelistedRoute,
   isIpBlocked,
   recordFailedAttempt,
   whitelistIp,
@@ -57,12 +56,10 @@ import { handleExportSettings } from "./settings-export"
 
 export const dashboardRoutes = new Hono()
 
-// Serve the admin page (IP-allowlist gated -- the page handles further API auth)
-dashboardRoutes.get("/", async (c) => {
-  const clientIp = extractClientIp(c)
-  if (clientIp === null || !(await isIpAllowedForWhitelistedRoute(clientIp))) {
-    return c.notFound()
-  }
+// Serve the admin page (no auth on HTML; the page prompts for the API key
+// which gates every /dashboard/api/* call. Brute-force is bounded by the
+// shared 3-strikes IP ban in apiKeyGuard.)
+dashboardRoutes.get("/", (c) => {
   return c.html(getDashboardPage())
 })
 
