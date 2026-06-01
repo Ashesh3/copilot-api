@@ -46,3 +46,23 @@ test("still requires auth for defined OAuth API routes", async () => {
 
   expect(authorizedResponse.status).toBe(200)
 })
+
+test("manual OAuth callback displays code with state for Claude Code paste", async () => {
+  const response = await server.request(
+    "/oauth/code/callback?code=copilot-api-auth-code&state=test-state",
+  )
+
+  expect(response.status).toBe(200)
+  expect(await response.text()).toContain(
+    "<pre>copilot-api-auth-code#test-state</pre>",
+  )
+})
+
+test("manual OAuth callback escapes displayed code", async () => {
+  const response = await server.request(
+    "/oauth/code/callback?code=%3Ccode%3E&state=a%26b",
+  )
+
+  expect(response.status).toBe(200)
+  expect(await response.text()).toContain("<pre>&lt;code&gt;#a&amp;b</pre>")
+})

@@ -24,6 +24,7 @@ import { getUsageResponse } from "~/lib/usage-tracker"
 
 const SCOPES =
   "user:inference user:profile user:sessions:claude_code user:mcp_servers user:file_upload org:create_api_key"
+const AUTH_CODE = "copilot-api-auth-code"
 
 function getAccessToken(): string {
   // Use the --api-key-auth value if set (the key users authenticate with)
@@ -97,7 +98,7 @@ oauthBrowserRoutes.get("/authorize", (c) => {
   if (!state.apiKeyAuth) {
     const stateParam = c.req.query("state")
     const url = new URL(redirectUri)
-    url.searchParams.set("code", "copilot-api-auth-code")
+    url.searchParams.set("code", AUTH_CODE)
     if (stateParam) url.searchParams.set("state", stateParam)
     return c.redirect(url.toString(), 302)
   }
@@ -126,7 +127,7 @@ oauthBrowserRoutes.post("/authorize", async (c) => {
 
   if (!state.apiKeyAuth || apiKey === state.apiKeyAuth) {
     const url = new URL(redirectUri)
-    url.searchParams.set("code", "copilot-api-auth-code")
+    url.searchParams.set("code", AUTH_CODE)
     if (stateParam) url.searchParams.set("state", stateParam)
     return c.redirect(url.toString(), 302)
   }
@@ -148,8 +149,12 @@ oauthBrowserRoutes.get("/code/success", (c) => {
 
 // GET /oauth/code/callback — manual callback fallback
 oauthBrowserRoutes.get("/code/callback", (c) => {
+  const code = c.req.query("code") ?? AUTH_CODE
+  const stateParam = c.req.query("state")
+  const manualCode = stateParam ? `${code}#${stateParam}` : code
+
   return c.html(
-    "<html><body><h1>Authorization Code</h1><p>Copy this code into Claude Code:</p><pre>copilot-api-auth-code</pre></body></html>",
+    `<html><body><h1>Authorization Code</h1><p>Copy this code into Claude Code:</p><pre>${escapeHtml(manualCode)}</pre></body></html>`,
   )
 })
 
@@ -171,10 +176,7 @@ oauthTokenRoutes.post("/token", async (c) => {
   }
 
   // For authorization_code, verify the code matches what we issued
-  if (
-    grantType === "authorization_code"
-    && body.code !== "copilot-api-auth-code"
-  ) {
+  if (grantType === "authorization_code" && body.code !== AUTH_CODE) {
     return c.json({ error: "invalid_grant" }, 400)
   }
 
@@ -505,4 +507,13 @@ function getAuthorizePage(queryString: string, error?: string): string {
 </div>
 </body>
 </html>`
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;")
 }
