@@ -1,10 +1,7 @@
 import consola from "consola"
 import { Hono } from "hono"
 
-import {
-  extractClientIp,
-  isIpAllowedForWhitelistedRoute,
-} from "~/lib/ip-blocker"
+import { authorizeCodexDesktopRequest } from "~/lib/codex-desktop-auth"
 import { transcribe } from "~/routes/voice/groq-stt"
 
 export const transcribeRoutes = new Hono()
@@ -23,11 +20,12 @@ function silentDrop(): Response {
  *   - file       (audio blob, typically audio/webm)
  *   - language   (optional, e.g. "en")
  *
- * Auth model: IP whitelist only. The whitelist is populated when an IP
- * successfully authenticates against this gateway, including model endpoints
- * protected by configured API keys, and can also be managed from the dashboard.
- * So a machine that already has Claude Code / another client authenticated
- * against this gateway can dictate via Codex without sending an API key.
+ * Auth model: API key OR IP whitelist (see `authorizeCodexDesktopRequest`).
+ * When `CODEX_API_BASE_URL` is spoofed to an `*.openai.com` host (e.g.
+ * `https://voice.openai.com`), Codex Desktop's main process attaches
+ * `Authorization: Bearer <token>` from `~/.codex/auth.json` and we accept it
+ * if it matches an active gateway key. Otherwise we fall back to the IP
+ * whitelist (populated by other authenticated clients or the dashboard).
  *
  * Codex MAY or MAY NOT attach `originator: Codex Desktop` and a
  * `User-Agent: Codex Desktop/...` header depending on whether the gateway
@@ -38,16 +36,11 @@ function silentDrop(): Response {
  * Response shape required by Codex's renderer: { "text": "..." }
  */
 transcribeRoutes.post("/", async (c) => {
-  const clientIp = extractClientIp(c)
-  const isAllowed =
-    clientIp !== null && (await isIpAllowedForWhitelistedRoute(clientIp))
-
-  if (!isAllowed) {
-    consola.warn(
-      `[transcribe] Rejected: IP ${clientIp ?? "(unknown)"} not whitelisted`,
-    )
+  const auth = await authorizeCodexDesktopRequest(c, "transcribe")
+  if (!auth.allowed) {
     return silentDrop()
   }
+  const clientIp = auth.clientIp
 
   consola.debug(
     `[transcribe] ${clientIp} originator=${c.req.header("originator") ?? "(none)"} ua=${c.req.header("user-agent") ?? "(none)"}`,

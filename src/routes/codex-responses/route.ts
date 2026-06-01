@@ -2,11 +2,8 @@ import consola from "consola"
 import { Hono } from "hono"
 import { streamSSE } from "hono/streaming"
 
+import { authorizeCodexDesktopRequest } from "~/lib/codex-desktop-auth"
 import { getCodexCleanupModel } from "~/lib/config"
-import {
-  extractClientIp,
-  isIpAllowedForWhitelistedRoute,
-} from "~/lib/ip-blocker"
 import {
   createChatCompletions,
   type ChatCompletionResponse,
@@ -65,19 +62,15 @@ function extractUserText(body: CodexResponsesBody): string {
  * emit an error event — Codex's renderer wraps this in try/catch and falls
  * back to the raw transcript, so dictation still works.
  *
- * Auth: IP whitelist (same model as /transcribe).
+ * Auth: API key OR IP whitelist (same model as /transcribe — see
+ * `authorizeCodexDesktopRequest`).
  */
 codexResponsesRoutes.post("/", async (c) => {
-  const clientIp = extractClientIp(c)
-  const isAllowed =
-    clientIp !== null && (await isIpAllowedForWhitelistedRoute(clientIp))
-
-  if (!isAllowed) {
-    consola.warn(
-      `[codex-responses] Rejected: IP ${clientIp ?? "(unknown)"} not whitelisted`,
-    )
+  const auth = await authorizeCodexDesktopRequest(c, "codex-responses")
+  if (!auth.allowed) {
     return silentDrop()
   }
+  const clientIp = auth.clientIp
 
   let body: CodexResponsesBody
   try {
