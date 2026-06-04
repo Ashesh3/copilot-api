@@ -131,6 +131,35 @@ export class TokenPool {
   }
 
   /**
+   * Refresh a single account's Copilot token immediately.
+   */
+  async refreshAccountToken(
+    account: Account,
+    showToken = false,
+  ): Promise<void> {
+    const tokenData = await this.fetchCopilotToken(account)
+    // eslint-disable-next-line require-atomic-updates
+    account.copilotToken = tokenData.token
+    // eslint-disable-next-line require-atomic-updates
+    account.copilotTokenExpiry = tokenData.expires_at
+
+    if (showToken) {
+      consola.info(
+        `Account #${account.id} refreshed Copilot token: ${maskTokenForLog(tokenData.token)}`,
+      )
+    }
+
+    if (!account.healthy) {
+      account.healthy = true
+      consola.info(`Account #${account.id} recovered, marking healthy`)
+      this.rebuildModelIndex()
+    }
+
+    const refreshMs = getTokenRefreshIntervalMs(tokenData.refresh_in)
+    this.setupRefreshTimer(account, refreshMs, showToken)
+  }
+
+  /**
    * Rebuild the model-to-accounts index from all healthy accounts.
    */
   rebuildModelIndex(): void {

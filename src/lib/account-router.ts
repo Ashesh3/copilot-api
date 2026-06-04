@@ -16,6 +16,25 @@ import { copilotFetch, copilotHeaders } from "~/services/copilot/copilot-client"
 
 const FAILOVER_STATUSES = new Set([401, 403, 429])
 
+interface AccountFetchOptions {
+  account: Account
+  headerOptions: CopilotHeaderOptions | undefined
+  init: RequestInit | undefined
+  path: string
+}
+
+interface RoutedFetchContext {
+  headerOptions: CopilotHeaderOptions | undefined
+  init: RequestInit | undefined
+  modelId: string
+  path: string
+}
+
+type RoutedFetchResult = {
+  account: Account | undefined
+  response: Response
+}
+
 function isAbortError(error: unknown): boolean {
   if (!(error instanceof Error)) {
     return false
@@ -64,6 +83,138 @@ function createNoEnabledAccountResponse(modelId: string): Response {
   )
 }
 
+async function fetchWithAccount(
+  options: AccountFetchOptions,
+): Promise<Response> {
+  const { account, headerOptions, init, path } = options
+  const headers = copilotHeaders({
+    ...headerOptions,
+    copilotToken: account.copilotToken,
+  })
+  const baseUrl = tokenPool.getBaseUrl(account)
+
+  return await copilotFetch(path, { ...init, headers }, { baseUrl })
+}
+
+async function refreshAndRetryAccount(
+  options: AccountFetchOptions,
+): Promise<Response | undefined> {
+  const { account, path } = options
+  try {
+    consola.warn(
+      `[Account #${account.id}] HTTP 401 on ${path}, refreshing Copilot token`,
+    )
+    await tokenPool.refreshAccountToken(account, state.showToken)
+  } catch (error) {
+    consola.warn(
+      `[Account #${account.id}] Failed to refresh Copilot token after 401 on ${path}: ${error instanceof Error ? error.message : String(error)}`,
+    )
+    return undefined
+  }
+
+  return await fetchWithAccount(options)
+}
+
+async function fetchWithFallbackAccount(
+  context: RoutedFetchContext,
+): Promise<RoutedFetchResult> {
+  const { headerOptions, init, path } = context
+  const fallbackHeaders =
+    state.copilotToken ?
+      mergeHeaders(copilotHeaders(headerOptions), init?.headers)
+    : init?.headers
+
+  const response = await copilotFetch(path, {
+    ...init,
+    ...(fallbackHeaders ? { headers: fallbackHeaders } : {}),
+  })
+  return { response, account: undefined }
+}
+
+async function failoverToAccount(
+  context: RoutedFetchContext,
+  currentAccount: Account,
+  failedResponse: Response,
+): Promise<RoutedFetchResult | undefined> {
+  const { headerOptions, init, modelId, path } = context
+  const next = tokenPool.getNextAccountForModel(modelId, currentAccount)
+  if (!next) {
+    return undefined
+  }
+
+  consola.warn(
+    `[Account #${currentAccount.id}] HTTP ${failedResponse.status} on ${path}, failing over to Account #${next.id}`,
+  )
+  if (failedResponse.status === 401 || failedResponse.status === 403) {
+    tokenPool.markUnhealthy(currentAccount)
+  }
+  setLastUsedRoutedAccountId(next.id)
+
+  const response = await fetchWithAccount({
+    account: next,
+    headerOptions,
+    init,
+    path,
+  })
+  return { response, account: next }
+}
+
+async function fetchWithRoutedAccount(
+  context: RoutedFetchContext,
+  account: Account,
+): Promise<RoutedFetchResult> {
+  const { headerOptions, init, path } = context
+
+  let response = await fetchWithAccount({
+    account,
+    headerOptions,
+    init,
+    path,
+  })
+
+  if (response.status === 401) {
+    response =
+      (await refreshAndRetryAccount({ account, headerOptions, init, path }))
+      ?? response
+  }
+
+  if (!FAILOVER_STATUSES.has(response.status)) {
+    return { response, account }
+  }
+
+  return (
+    (await failoverToAccount(context, account, response)) ?? {
+      response,
+      account,
+    }
+  )
+}
+
+async function failoverAfterNetworkError(
+  context: RoutedFetchContext,
+  account: Account,
+  error: unknown,
+): Promise<RoutedFetchResult | undefined> {
+  const { headerOptions, init, modelId, path } = context
+  const next = tokenPool.getNextAccountForModel(modelId, account)
+  if (!next) {
+    return undefined
+  }
+
+  consola.warn(
+    `[Account #${account.id}] Network error on ${path}, failing over to Account #${next.id}: ${(error as Error).message}`,
+  )
+  setLastUsedRoutedAccountId(next.id)
+
+  const response = await fetchWithAccount({
+    account: next,
+    headerOptions,
+    init,
+    path,
+  })
+  return { response, account: next }
+}
+
 // --- Last used account tracking ---
 
 /**
@@ -100,6 +251,7 @@ export async function routedFetch(
   options: RoutedFetchOptions,
 ): Promise<{ response: Response; account: Account | undefined }> {
   const { modelId, headerOptions } = options
+  const context: RoutedFetchContext = { headerOptions, init, modelId, path }
   setLastUsedRoutedAccountId(undefined)
 
   if (!state.isMultiToken) {
@@ -123,23 +275,8 @@ export async function routedFetch(
       `No account found for model "${modelId}", falling back to default`,
     )
 
-    const fallbackHeaders =
-      state.copilotToken ?
-        mergeHeaders(copilotHeaders(headerOptions), init?.headers)
-      : init?.headers
-
-    const response = await copilotFetch(path, {
-      ...init,
-      ...(fallbackHeaders ? { headers: fallbackHeaders } : {}),
-    })
-    return { response, account: undefined }
+    return await fetchWithFallbackAccount(context)
   }
-
-  const headers = copilotHeaders({
-    ...headerOptions,
-    copilotToken: account.copilotToken,
-  })
-  const baseUrl = tokenPool.getBaseUrl(account)
 
   consola.debug(
     `[Account #${account.id}] ${path} (model: ${modelId}, session: ${clientSessionId ? "sticky" : "default"})`,
@@ -147,62 +284,14 @@ export async function routedFetch(
   setLastUsedRoutedAccountId(account.id)
 
   try {
-    const response = await copilotFetch(path, { ...init, headers }, { baseUrl })
-
-    if (FAILOVER_STATUSES.has(response.status)) {
-      const next = tokenPool.getNextAccountForModel(modelId, account)
-      if (next) {
-        consola.warn(
-          `[Account #${account.id}] HTTP ${response.status} on ${path}, failing over to Account #${next.id}`,
-        )
-        if (response.status === 401 || response.status === 403) {
-          tokenPool.markUnhealthy(account)
-        }
-        setLastUsedRoutedAccountId(next.id)
-
-        const retryHeaders = copilotHeaders({
-          ...headerOptions,
-          copilotToken: next.copilotToken,
-        })
-        const retryBaseUrl = tokenPool.getBaseUrl(next)
-        const retryResponse = await copilotFetch(
-          path,
-          { ...init, headers: retryHeaders },
-          { baseUrl: retryBaseUrl },
-        )
-        return { response: retryResponse, account: next }
-      }
-
-      // No alternative account available — return original response
-      return { response, account }
-    }
-
-    return { response, account }
+    return await fetchWithRoutedAccount(context, account)
   } catch (error) {
     if (isAbortError(error)) {
       throw error
     }
 
-    // Network error — attempt failover
-    const next = tokenPool.getNextAccountForModel(modelId, account)
-    if (next) {
-      consola.warn(
-        `[Account #${account.id}] Network error on ${path}, failing over to Account #${next.id}: ${(error as Error).message}`,
-      )
-      setLastUsedRoutedAccountId(next.id)
-
-      const retryHeaders = copilotHeaders({
-        ...headerOptions,
-        copilotToken: next.copilotToken,
-      })
-      const retryBaseUrl = tokenPool.getBaseUrl(next)
-      const retryResponse = await copilotFetch(
-        path,
-        { ...init, headers: retryHeaders },
-        { baseUrl: retryBaseUrl },
-      )
-      return { response: retryResponse, account: next }
-    }
+    const result = await failoverAfterNetworkError(context, account, error)
+    if (result) return result
 
     // No alternative — re-throw the original error
     throw error

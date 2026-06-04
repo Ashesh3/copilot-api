@@ -81,6 +81,7 @@ afterAll(() => {
 })
 
 beforeEach(() => {
+  tokenPool.dispose()
   fetchMock.mockClear()
   queuedResults.length = 0
   capturedRequests.length = 0
@@ -100,6 +101,21 @@ test("fails over to the next account immediately after a multi-token 401", async
       status: 401,
       headers: { "retry-after": "0" },
     }),
+    new Response(
+      JSON.stringify({
+        token: "fresh-primary-copilot-token",
+        expires_at: 1_900_000_000,
+        refresh_in: 1800,
+      }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      },
+    ),
+    new Response("Unauthorized", {
+      status: 401,
+      headers: { "retry-after": "0" },
+    }),
     new Response("{}", { status: 200 }),
   )
 
@@ -111,12 +127,61 @@ test("fails over to the next account immediately after a multi-token 401", async
 
   expect(response.status).toBe(200)
   expect(account?.id).toBe(1002)
-  expect(capturedRequests).toHaveLength(2)
+  expect(capturedRequests).toHaveLength(4)
   expect(capturedRequests[0]?.init?.headers).toMatchObject({
     Authorization: "Bearer primary-copilot-token",
   })
-  expect(capturedRequests[1]?.init?.headers).toMatchObject({
+  expect(capturedRequests[1]?.url).toContain("/copilot_internal/v2/token")
+  expect(capturedRequests[2]?.init?.headers).toMatchObject({
+    Authorization: "Bearer fresh-primary-copilot-token",
+  })
+  expect(capturedRequests[3]?.init?.headers).toMatchObject({
     Authorization: "Bearer secondary-copilot-token",
+  })
+})
+
+test("refreshes a multi-token account and retries after a 401", async () => {
+  const modelId = "router-401-refresh-test"
+  registerAccount(1011, modelId, "expired-copilot-token")
+  tokenPool.rebuildModelIndex()
+
+  queuedResults.push(
+    new Response("IDE token expired: unauthorized: token expired\n", {
+      status: 401,
+    }),
+    new Response(
+      JSON.stringify({
+        token: "fresh-copilot-token",
+        expires_at: 1_900_000_000,
+        refresh_in: 1800,
+      }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      },
+    ),
+    new Response("{}", { status: 200 }),
+  )
+
+  const { response, account } = await routedFetch(
+    "/chat/completions",
+    { method: "POST" },
+    { modelId },
+  )
+
+  expect(response.status).toBe(200)
+  expect(account?.id).toBe(1011)
+  expect(account?.copilotToken).toBe("fresh-copilot-token")
+  expect(capturedRequests).toHaveLength(3)
+  expect(capturedRequests[0]?.init?.headers).toMatchObject({
+    Authorization: "Bearer expired-copilot-token",
+  })
+  expect(capturedRequests[1]?.url).toContain("/copilot_internal/v2/token")
+  expect(capturedRequests[1]?.init?.headers).toMatchObject({
+    authorization: "token github-token-1011",
+  })
+  expect(capturedRequests[2]?.init?.headers).toMatchObject({
+    Authorization: "Bearer fresh-copilot-token",
   })
 })
 
@@ -225,7 +290,21 @@ test("does not fail over to an account where the model is disabled", async () =>
   setModelRoutingOverridesForTest({ [modelId]: { "1009": false } })
   tokenPool.rebuildModelIndex()
 
-  queuedResults.push(new Response("Unauthorized", { status: 401 }))
+  queuedResults.push(
+    new Response("Unauthorized", { status: 401 }),
+    new Response(
+      JSON.stringify({
+        token: "fresh-enabled-failover-primary",
+        expires_at: 1_900_000_000,
+        refresh_in: 1800,
+      }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      },
+    ),
+    new Response("Unauthorized", { status: 401 }),
+  )
 
   const { response, account } = await routedFetch(
     "/chat/completions",
@@ -235,9 +314,13 @@ test("does not fail over to an account where the model is disabled", async () =>
 
   expect(response.status).toBe(401)
   expect(account?.id).toBe(1008)
-  expect(capturedRequests).toHaveLength(1)
+  expect(capturedRequests).toHaveLength(3)
   expect(capturedRequests[0]?.init?.headers).toMatchObject({
     Authorization: "Bearer enabled-failover-primary",
+  })
+  expect(capturedRequests[1]?.url).toContain("/copilot_internal/v2/token")
+  expect(capturedRequests[2]?.init?.headers).toMatchObject({
+    Authorization: "Bearer fresh-enabled-failover-primary",
   })
 })
 
