@@ -73,6 +73,11 @@ export async function forwardError(c: Context, error: unknown) {
   }
 
   if (error instanceof HTTPError) {
+    if (error.response.status === 499) {
+      consola.debug("Client disconnected (upstream 499)")
+      return c.body(null, 499 as ContentfulStatusCode)
+    }
+
     let responseBody: string
     try {
       responseBody = await error.response.text()

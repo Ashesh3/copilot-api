@@ -96,3 +96,24 @@ test("does not forward raw upstream error bodies to clients", async () => {
     },
   })
 })
+
+test("returns an empty 499 response for upstream client disconnects", async () => {
+  const app = new Hono()
+
+  app.get("/client-disconnect", () => {
+    throw new HTTPError(
+      "Failed to create chat completions",
+      new Response("", { status: 499, statusText: "status code 499" }),
+    )
+  })
+
+  app.onError(async (error, c) => {
+    return await forwardError(c, error)
+  })
+
+  const response = await app.request("/client-disconnect")
+  const body = await response.text()
+
+  expect(response.status).toBe(499)
+  expect(body).toBe("")
+})
