@@ -217,6 +217,13 @@ test("does not fail over aborted multi-token requests", async () => {
 test("applies headerOptions when multi-token falls back with no matching account", async () => {
   state.copilotToken = "fallback-copilot-token"
   const modelId = "router-no-account-header-fallback"
+  registerAccount(1012, "different-known-model", "healthy-fallback-token")
+  tokenPool.rebuildModelIndex()
+  const expectedAccount = tokenPool.getFirstHealthyAccount()
+  if (!expectedAccount) {
+    throw new Error("Expected a healthy fallback account")
+  }
+  expectedAccount.copilotToken = "healthy-fallback-token"
 
   queuedResults.push(new Response("{}", { status: 200 }))
 
@@ -233,12 +240,59 @@ test("applies headerOptions when multi-token falls back with no matching account
   )
 
   expect(response.status).toBe(200)
-  expect(account).toBeUndefined()
+  expect(account?.id).toBe(expectedAccount.id)
   expect(capturedRequests).toHaveLength(1)
   expect(capturedRequests[0]?.init?.headers).toMatchObject({
-    Authorization: "Bearer fallback-copilot-token",
+    Authorization: "Bearer healthy-fallback-token",
     "X-Initiator": "agent",
     "Copilot-Vision-Request": "true",
+  })
+})
+
+test("refreshes the fallback account for unknown models after a 401", async () => {
+  const modelId = "gpt-4.1-mini"
+  registerAccount(1013, "different-known-model", "expired-fallback-token")
+  tokenPool.rebuildModelIndex()
+  const expectedAccount = tokenPool.getFirstHealthyAccount()
+  if (!expectedAccount) {
+    throw new Error("Expected a healthy fallback account")
+  }
+  expectedAccount.copilotToken = "expired-fallback-token"
+
+  queuedResults.push(
+    new Response("IDE token expired: unauthorized: token expired\n", {
+      status: 401,
+    }),
+    new Response(
+      JSON.stringify({
+        token: "fresh-fallback-token",
+        expires_at: 1_900_000_000,
+        refresh_in: 1800,
+      }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      },
+    ),
+    new Response("{}", { status: 200 }),
+  )
+
+  const { response, account } = await routedFetch(
+    "/chat/completions",
+    { method: "POST" },
+    { modelId },
+  )
+
+  expect(response.status).toBe(200)
+  expect(account?.id).toBe(expectedAccount.id)
+  expect(account?.copilotToken).toBe("fresh-fallback-token")
+  expect(capturedRequests).toHaveLength(3)
+  expect(capturedRequests[0]?.init?.headers).toMatchObject({
+    Authorization: "Bearer expired-fallback-token",
+  })
+  expect(capturedRequests[1]?.url).toContain("/copilot_internal/v2/token")
+  expect(capturedRequests[2]?.init?.headers).toMatchObject({
+    Authorization: "Bearer fresh-fallback-token",
   })
 })
 

@@ -119,6 +119,15 @@ async function fetchWithFallbackAccount(
   context: RoutedFetchContext,
 ): Promise<RoutedFetchResult> {
   const { headerOptions, init, path } = context
+  const account = tokenPool.getFirstHealthyAccount()
+  if (account) {
+    consola.warn(
+      `Using Account #${account.id} as fallback for model "${context.modelId}"`,
+    )
+    setLastUsedRoutedAccountId(account.id)
+    return await fetchWithRoutedAccount(context, account)
+  }
+
   const fallbackHeaders =
     state.copilotToken ?
       mergeHeaders(copilotHeaders(headerOptions), init?.headers)

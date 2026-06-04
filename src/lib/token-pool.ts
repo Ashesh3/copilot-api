@@ -312,6 +312,10 @@ export class TokenPool {
     return [...this.accounts.values()]
   }
 
+  getFirstHealthyAccount(): Account | undefined {
+    return this.getAllAccounts().find((account) => account.healthy)
+  }
+
   hasKnownModel(modelId: string): boolean {
     for (const account of this.accounts.values()) {
       if (account.models.has(modelId)) return true
