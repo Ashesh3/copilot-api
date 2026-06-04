@@ -33,6 +33,24 @@ const responsesOnlyModels: ModelsResponse = {
         type: "chat",
       },
     },
+    {
+      id: "gpt-5.4-mini",
+      name: "gpt-5.4-mini",
+      object: "model",
+      preview: false,
+      vendor: "openai",
+      version: "1",
+      model_picker_enabled: true,
+      supported_endpoints: ["/responses"],
+      capabilities: {
+        family: "gpt",
+        limits: { max_output_tokens: 1024 },
+        object: "model_capabilities",
+        supports: {},
+        tokenizer: "cl100k_base",
+        type: "chat",
+      },
+    },
   ],
 }
 
@@ -289,6 +307,37 @@ test("omits unsupported sampling parameters for responses-only fallback models",
   expect(lastUpstreamPath).toBe("/responses")
   expect(lastUpstreamPayload).not.toHaveProperty("temperature")
   expect(lastUpstreamPayload).not.toHaveProperty("top_p")
+})
+
+test("omits unsupported temperature for gpt-5.4-mini chat fallback", async () => {
+  const response = await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-5.4-mini",
+      messages: [
+        {
+          role: "user",
+          content:
+            'Rewrite this memory recall query into up to 3 concise search queries. Return JSON only: {"queries":[...]}.',
+        },
+      ],
+      temperature: 0,
+      max_tokens: 512,
+      response_format: { type: "json_object" },
+      stream: false,
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/responses")
+  expect(lastUpstreamPayload?.model).toBe("gpt-5.4-mini")
+  expect(lastUpstreamPayload?.max_output_tokens).toBe(512)
+  expect(lastUpstreamPayload?.text).toEqual({
+    format: { type: "json_object" },
+  })
+  expect(lastUpstreamPayload?.instructions).toContain("valid JSON only")
+  expect(lastUpstreamPayload).not.toHaveProperty("temperature")
 })
 
 test("routes chat json_schema as json_object with schema instruction for responses fallback", async () => {

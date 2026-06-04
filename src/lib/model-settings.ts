@@ -47,6 +47,7 @@ const DEFAULT_UNSUPPORTED_REQUEST_PARAMETERS: Record<
   string,
   Array<ModelRequestParameter>
 > = {
+  "gpt-5.4-mini": ["temperature", "top_p"],
   "gpt-5.5": ["temperature", "top_p"],
 }
 const DELETE_BOOLEAN_MODEL_SETTING: Record<

@@ -180,10 +180,30 @@ test("does not send configurable effort for implicit-default Responses models", 
   })
 })
 
-test("omits built-in unsupported request parameters for Responses models", async () => {
+for (const model of ["gpt-5.4-mini", "gpt-5.5"]) {
+  test(`omits built-in unsupported request parameters for ${model} Responses models`, async () => {
+    await createResponses(
+      {
+        model,
+        input: "Hello",
+        temperature: 0.3,
+        top_p: 0.8,
+      },
+      {
+        vision: false,
+        initiator: "user",
+      },
+    )
+
+    expect(lastRequestBody).not.toHaveProperty("temperature")
+    expect(lastRequestBody).not.toHaveProperty("top_p")
+  })
+}
+
+test("keeps supported request parameters for other Responses models", async () => {
   await createResponses(
     {
-      model: "gpt-5.5",
+      model: "gpt-4o",
       input: "Hello",
       temperature: 0.3,
       top_p: 0.8,
@@ -194,8 +214,8 @@ test("omits built-in unsupported request parameters for Responses models", async
     },
   )
 
-  expect(lastRequestBody).not.toHaveProperty("temperature")
-  expect(lastRequestBody).not.toHaveProperty("top_p")
+  expect(lastRequestBody?.temperature).toBe(0.3)
+  expect(lastRequestBody?.top_p).toBe(0.8)
 })
 
 test("omits configured unsupported request parameters for Responses models", async () => {
