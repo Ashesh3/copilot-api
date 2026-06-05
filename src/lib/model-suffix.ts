@@ -1,8 +1,16 @@
 import type { Model } from "~/services/copilot/get-models"
 
 import { getModelSettings } from "~/lib/model-settings"
+import { state } from "~/lib/state"
 
-export type ReasoningEffort = "low" | "medium" | "high" | "xhigh"
+export type ReasoningEffort =
+  | "none"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max"
 
 interface ModelReasoningConfig {
   supportedEfforts: Array<ReasoningEffort>
@@ -69,11 +77,13 @@ const DEFAULT_MODEL_REASONING_CONFIG: Partial<
 }
 
 const EFFORT_ALIASES: Record<string, ReasoningEffort> = {
+  none: "none",
+  minimal: "minimal",
   low: "low",
   medium: "medium",
   high: "high",
   xhigh: "xhigh",
-  max: "xhigh",
+  max: "max",
 }
 
 export interface ParsedModel {
@@ -99,15 +109,23 @@ export function parseModelSuffix(model: string): ParsedModel {
   const potentialBase = model.slice(0, colonIndex)
   const potentialEffort = model.slice(colonIndex + 1)
 
-  if (!Object.hasOwn(EFFORT_ALIASES, potentialEffort)) {
+  const effort = parseReasoningEffort(potentialEffort)
+  if (!effort) {
     return { baseModel: model }
   }
-  const effort = EFFORT_ALIASES[potentialEffort]
 
   return {
     baseModel: potentialBase,
     reasoningEffort: normalizeReasoningEffortForModel(potentialBase, effort),
   }
+}
+
+export function parseReasoningEffort(
+  value: unknown,
+): ReasoningEffort | undefined {
+  return typeof value === "string" && Object.hasOwn(EFFORT_ALIASES, value) ?
+      EFFORT_ALIASES[value]
+    : undefined
 }
 
 /**
@@ -118,17 +136,19 @@ export function getModelReasoningConfig(
 ): ModelReasoningConfig | undefined {
   const defaults = DEFAULT_MODEL_REASONING_CONFIG[model]
   const settings = getModelSettings(model)
+  const upstream = getUpstreamReasoningConfig(model)
 
-  if (!defaults && !settings) return undefined
+  if (!defaults && !settings && !upstream) return undefined
 
-  return buildModelReasoningConfig(defaults, settings)
+  return buildModelReasoningConfig(defaults, settings, upstream)
 }
 
 function buildModelReasoningConfig(
   defaults: ModelReasoningConfig | undefined,
   settings: ReturnType<typeof getModelSettings>,
+  upstream: Pick<ModelReasoningConfig, "supportedEfforts"> | undefined,
 ): ModelReasoningConfig | undefined {
-  const supportedEfforts = resolveSupportedEfforts(defaults, settings)
+  const supportedEfforts = resolveSupportedEfforts(defaults, settings, upstream)
   const configuredDefaultEffort = resolveDefaultEffort(
     supportedEfforts,
     defaults,
@@ -138,9 +158,8 @@ function buildModelReasoningConfig(
   if (!supportedEfforts || !configuredDefaultEffort) return undefined
 
   const defaultEffort =
-    supportedEfforts.includes(configuredDefaultEffort) ?
-      configuredDefaultEffort
-    : supportedEfforts[0]
+    coerceEffortToSupported(configuredDefaultEffort, supportedEfforts)
+    ?? supportedEfforts[0]
 
   return {
     supportedEfforts,
@@ -153,12 +172,42 @@ function buildModelReasoningConfig(
   }
 }
 
+function getUpstreamReasoningConfig(
+  model: string,
+): Pick<ModelReasoningConfig, "supportedEfforts"> | undefined {
+  const supportedEfforts = state.models?.data
+    .find((entry) => entry.id === model)
+    ?.capabilities.supports.reasoning_effort?.flatMap((effort) => {
+      const parsed = parseReasoningEffort(effort)
+      return parsed ? [parsed] : []
+    })
+
+  if (!supportedEfforts || supportedEfforts.length === 0) return undefined
+
+  return { supportedEfforts: [...new Set(supportedEfforts)] }
+}
+
+function coerceEffortToSupported(
+  effort: ReasoningEffort,
+  supportedEfforts: Array<ReasoningEffort>,
+): ReasoningEffort | undefined {
+  if (supportedEfforts.includes(effort)) return effort
+
+  if (effort === "max" && supportedEfforts.includes("xhigh")) return "xhigh"
+  if (effort === "xhigh" && supportedEfforts.includes("max")) return "max"
+
+  return undefined
+}
+
 function resolveSupportedEfforts(
   defaults: ModelReasoningConfig | undefined,
   settings: ReturnType<typeof getModelSettings>,
+  upstream: Pick<ModelReasoningConfig, "supportedEfforts"> | undefined,
 ): Array<ReasoningEffort> | undefined {
   const supportedEfforts =
-    settings?.supportedReasoningEfforts ?? defaults?.supportedEfforts
+    settings?.supportedReasoningEfforts
+    ?? upstream?.supportedEfforts
+    ?? defaults?.supportedEfforts
   return supportedEfforts && supportedEfforts.length > 0 ?
       supportedEfforts
     : undefined
@@ -183,11 +232,12 @@ export function normalizeReasoningEffortForModel(
   if (!effort) return undefined
 
   const config = getModelReasoningConfig(model)
-  if (!config) return effort
+  if (!config) return effort === "max" ? "xhigh" : effort
 
-  return config.supportedEfforts.includes(effort) ?
-      effort
-    : config.defaultEffort
+  return (
+    coerceEffortToSupported(effort, config.supportedEfforts)
+    ?? config.defaultEffort
+  )
 }
 
 export function usesImplicitReasoningDefault(model: string): boolean {
@@ -195,6 +245,7 @@ export function usesImplicitReasoningDefault(model: string): boolean {
 }
 
 interface VirtualModel {
+  capabilities: Model["capabilities"]
   id: string
   object: string
   type: string
@@ -202,7 +253,18 @@ interface VirtualModel {
   created_at: string
   owned_by: string
   display_name: string
+  name: string
+  vendor: string
+  version: string
+  preview: boolean
+  policy?: Model["policy"]
+  billing?: Model["billing"]
+  custom_model?: Model["custom_model"]
+  issues?: Model["issues"]
+  model_picker_category?: Model["model_picker_category"]
+  model_picker_price_category?: Model["model_picker_price_category"]
   supported_endpoints?: Array<string>
+  warning_messages?: Model["warning_messages"]
 }
 
 /**
@@ -225,6 +287,7 @@ export function generateVirtualModels(
     }
 
     for (const effort of config.supportedEfforts) {
+      const displayName = `${model.name} (${effort} thinking)`
       virtualModels.push({
         id: `${model.id}:${effort}`,
         object: "model",
@@ -232,7 +295,27 @@ export function generateVirtualModels(
         created: 0,
         created_at: new Date(0).toISOString(),
         owned_by: model.vendor,
-        display_name: `${model.name} (${effort} thinking)`,
+        display_name: displayName,
+        name: displayName,
+        vendor: model.vendor,
+        version: model.version,
+        preview: model.preview,
+        capabilities: model.capabilities,
+        ...(model.policy ? { policy: model.policy } : {}),
+        ...(model.billing ? { billing: model.billing } : {}),
+        ...(model.model_picker_category ?
+          { model_picker_category: model.model_picker_category }
+        : {}),
+        ...(model.model_picker_price_category ?
+          { model_picker_price_category: model.model_picker_price_category }
+        : {}),
+        ...(model.custom_model !== undefined ?
+          { custom_model: model.custom_model }
+        : {}),
+        ...(model.issues ? { issues: model.issues } : {}),
+        ...(model.warning_messages ?
+          { warning_messages: model.warning_messages }
+        : {}),
         supported_endpoints: model.supported_endpoints,
       })
     }

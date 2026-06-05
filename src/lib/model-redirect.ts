@@ -10,6 +10,8 @@ export type ModelRedirectEffortFilter = "all" | "default" | ReasoningEffort
 export const MODEL_REDIRECT_EFFORT_FILTERS: Array<ModelRedirectEffortFilter> = [
   "all",
   "default",
+  "none",
+  "minimal",
   "low",
   "medium",
   "high",
@@ -18,6 +20,8 @@ export const MODEL_REDIRECT_EFFORT_FILTERS: Array<ModelRedirectEffortFilter> = [
 
 const REDIRECT_EFFORT_CASES = [
   "default",
+  "none",
+  "minimal",
   "low",
   "medium",
   "high",
@@ -51,10 +55,13 @@ let skipPersistForTest = false
 
 function isReasoningEffort(value: unknown): value is ReasoningEffort {
   return (
-    value === "low"
+    value === "none"
+    || value === "minimal"
+    || value === "low"
     || value === "medium"
     || value === "high"
     || value === "xhigh"
+    || value === "max"
   )
 }
 
@@ -111,7 +118,8 @@ function effortCases(
   filter: ModelRedirectEffortFilter,
 ): Array<RedirectEffortCase> {
   if (filter === "all") return [...REDIRECT_EFFORT_CASES]
-  return [filter]
+  const normalized = normalizeEffortAlias(filter)
+  return normalized === "max" ? ["xhigh"] : [filter as RedirectEffortCase]
 }
 
 function getShadowingRules(

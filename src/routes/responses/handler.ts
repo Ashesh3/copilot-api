@@ -17,6 +17,7 @@ import { normalizeModelName } from "~/lib/model-resolver"
 import {
   type ReasoningEffort,
   normalizeReasoningEffortForModel,
+  parseReasoningEffort,
   parseModelSuffix,
   usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
@@ -214,15 +215,7 @@ export function normalizeResponsesReasoning(
 function getRedirectReasoningEffort(
   effort: ResponsesReasoningEffort | undefined,
 ): ReasoningEffort | undefined {
-  if (
-    effort === "low"
-    || effort === "medium"
-    || effort === "high"
-    || effort === "xhigh"
-  ) {
-    return effort
-  }
-  return undefined
+  return parseReasoningEffort(effort)
 }
 
 function applyRedirectedResponsesEffort(options: {

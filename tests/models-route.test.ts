@@ -8,6 +8,62 @@ import { server } from "../src/server"
 
 const originalModels = state.models
 
+interface ModelsRouteEntry {
+  id: string
+  billing?: {
+    token_prices?: {
+      long_context?: {
+        context_max?: number
+      }
+    }
+  }
+  capabilities?: {
+    limits?: {
+      max_context_window_tokens?: number
+      max_output_tokens?: number
+      max_prompt_tokens?: number
+    }
+  }
+  model_picker_category?: string
+  model_picker_price_category?: string
+  name?: string
+  preview?: boolean
+  vendor?: string
+  version?: string
+}
+
+async function getModelsRouteEntries(): Promise<Array<ModelsRouteEntry>> {
+  const response = await server.request("/v1/models")
+  const body = (await response.json()) as {
+    data: Array<ModelsRouteEntry>
+  }
+  return body.data
+}
+
+function requireModel(
+  models: Array<ModelsRouteEntry>,
+  id: string,
+): ModelsRouteEntry {
+  const model = models.find((entry) => entry.id === id)
+  expect(model).toBeDefined()
+  if (!model) {
+    throw new Error(`Expected model ${id} in /v1/models response`)
+  }
+  return model
+}
+
+function expectLongContextMetadata(model: ModelsRouteEntry): void {
+  expect(model.capabilities?.limits).toEqual({
+    max_context_window_tokens: 1_000_000,
+    max_output_tokens: 32_000,
+    max_prompt_tokens: 968_000,
+  })
+  expect(model.billing?.token_prices?.long_context?.context_max).toBe(968_000)
+  expect(model.vendor).toBe("anthropic")
+  expect(model.model_picker_category).toBe("powerful")
+  expect(model.model_picker_price_category).toBe("high")
+}
+
 beforeEach(() => {
   state.models = {
     object: "list",
@@ -22,12 +78,35 @@ beforeEach(() => {
         model_picker_enabled: true,
         capabilities: {
           family: "claude",
-          limits: {},
+          limits: {
+            max_context_window_tokens: 1_000_000,
+            max_output_tokens: 32_000,
+            max_prompt_tokens: 968_000,
+          },
           object: "model_capabilities",
-          supports: {},
+          supports: {
+            reasoning_effort: ["low", "medium", "high", "max"],
+          },
           tokenizer: "cl100k_base",
           type: "chat",
         },
+        billing: {
+          token_prices: {
+            batch_size: 1000,
+            default: {
+              context_max: 168_000,
+              input_price: 3,
+              output_price: 15,
+            },
+            long_context: {
+              context_max: 968_000,
+              input_price: 6,
+              output_price: 22.5,
+            },
+          },
+        },
+        model_picker_category: "powerful",
+        model_picker_price_category: "high",
         supported_endpoints: ["/responses"],
       },
       {
@@ -112,6 +191,7 @@ test("filters /models to picker-enabled or policy-enabled entries before adding 
 
   expect(ids).toContain("claude-sonnet-4.6")
   expect(ids).toContain("claude-sonnet-4.6:high")
+  expect(ids).toContain("claude-sonnet-4.6:max")
   expect(ids).toContain("gpt-5.2")
   expect(ids).toContain("gpt-5.2:medium")
   expect(ids).not.toContain("gpt-5-mini")
@@ -165,4 +245,21 @@ test("advertises ws:/responses only for native Responses models", async () => {
     "ws:/responses",
   ])
   expect(chatOnly?.supported_endpoints).toEqual(["/chat/completions"])
+})
+
+test("preserves Copilot model limits and long-context billing metadata", async () => {
+  const models = await getModelsRouteEntries()
+  const claude = requireModel(models, "claude-sonnet-4.6")
+
+  expectLongContextMetadata(claude)
+  expect(claude.version).toBe("1")
+  expect(claude.preview).toBe(false)
+  expect(claude.name).toBe("Claude Sonnet 4.6")
+})
+
+test("preserves Copilot metadata on virtual reasoning models", async () => {
+  const models = await getModelsRouteEntries()
+  const claudeHigh = requireModel(models, "claude-sonnet-4.6:high")
+
+  expectLongContextMetadata(claudeHigh)
 })

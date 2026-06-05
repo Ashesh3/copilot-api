@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
 
 import type { ChatCompletionsPayload } from "../src/services/copilot/create-chat-completions"
+import type { ModelsResponse } from "../src/services/copilot/get-models"
 
 import { setModelRedirectsForTest } from "../src/lib/model-redirect"
 import { setModelSettingsForTest } from "../src/lib/model-settings"
@@ -9,6 +10,30 @@ import { server } from "../src/server"
 
 const originalFetch = globalThis.fetch
 let lastUpstreamPayload: ChatCompletionsPayload | undefined
+
+const upstreamMaxReasoningModels: ModelsResponse = {
+  object: "list",
+  data: [
+    {
+      id: "claude-sonnet-4.6",
+      name: "Claude Sonnet 4.6",
+      object: "model",
+      preview: false,
+      vendor: "anthropic",
+      version: "1",
+      model_picker_enabled: true,
+      capabilities: {
+        family: "claude",
+        limits: { max_output_tokens: 1024 },
+        object: "model_capabilities",
+        supports: { reasoning_effort: ["low", "medium", "high", "max"] },
+        tokenizer: "cl100k_base",
+        type: "chat",
+      },
+      supported_endpoints: ["/chat/completions"],
+    },
+  ],
+}
 
 function parseRequestBody(init?: RequestInit): ChatCompletionsPayload {
   if (typeof init?.body !== "string") {
@@ -135,6 +160,30 @@ test("maps literal xhigh output_config.effort onto chat completions reasoning_ef
     (lastUpstreamPayload as Record<string, unknown> | undefined)
       ?.reasoning_effort,
   ).toBe("xhigh")
+})
+
+test("passes max reasoning through when upstream metadata advertises max", async () => {
+  state.models = upstreamMaxReasoningModels
+
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-4.6:max",
+      messages: [{ role: "user", content: "Think carefully." }],
+      max_tokens: 32,
+      thinking: { type: "enabled" },
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPayload?.model).toBe("claude-sonnet-4.6")
+  expect(
+    (lastUpstreamPayload as Record<string, unknown> | undefined)
+      ?.reasoning_effort,
+  ).toBe("max")
 })
 
 test("defaults chat completions reasoning_effort to medium when thinking is enabled", async () => {

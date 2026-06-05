@@ -12,7 +12,7 @@ export interface AppConfig {
   smallModel?: string
   modelReasoningEfforts?: Record<
     string,
-    "none" | "minimal" | "low" | "medium" | "high" | "xhigh"
+    "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
   >
   useFunctionApplyPatch?: boolean
   compactUseSmallModel?: boolean
@@ -222,8 +222,8 @@ export function getSmallModel(): string {
 
 export function getReasoningEffortForModel(
   model: string,
-  override?: "low" | "medium" | "high" | "xhigh",
-): "none" | "minimal" | "low" | "medium" | "high" | "xhigh" {
+  override?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max",
+): "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" {
   if (override) return override
   const config = getConfig()
   return config.modelReasoningEfforts?.[model] ?? "medium"

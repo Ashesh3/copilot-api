@@ -65,7 +65,15 @@ export type ResponseIncludable =
   | "code_interpreter_call.outputs"
 
 export interface Reasoning {
-  effort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | null
+  effort?:
+    | "none"
+    | "minimal"
+    | "low"
+    | "medium"
+    | "high"
+    | "xhigh"
+    | "max"
+    | null
   summary?: "auto" | "concise" | "detailed" | null
 }
 

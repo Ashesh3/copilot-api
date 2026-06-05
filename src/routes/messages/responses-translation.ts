@@ -1,5 +1,7 @@
 import consola from "consola"
 
+import type { ReasoningEffort } from "~/lib/model-suffix"
+
 import {
   getExtraPromptForModel,
   getReasoningEffortForModel,
@@ -55,7 +57,7 @@ export const THINKING_TEXT = "Thinking..."
 
 export const translateAnthropicMessagesToResponsesPayload = (
   payload: AnthropicMessagesPayload,
-  effortOverride?: "low" | "medium" | "high" | "xhigh",
+  effortOverride?: ReasoningEffort,
 ): ResponsesPayload => {
   const input: Array<ResponseInputItem> = []
   const sanitizedMessages = sanitizeAnthropicMessages(payload.messages)

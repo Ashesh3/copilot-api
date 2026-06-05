@@ -21,6 +21,7 @@ import { normalizeModelName } from "~/lib/model-resolver"
 import {
   type ReasoningEffort,
   normalizeReasoningEffortForModel,
+  parseReasoningEffort,
   parseModelSuffix,
   usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
@@ -359,16 +360,7 @@ function getPayloadReasoningEffort(
 ): ReasoningEffort | undefined {
   const effort = (payload as unknown as Record<string, unknown>)
     .reasoning_effort
-  if (
-    effort === "low"
-    || effort === "medium"
-    || effort === "high"
-    || effort === "xhigh"
-  ) {
-    return effort
-  }
-  if (effort === "max") return "xhigh"
-  return undefined
+  return parseReasoningEffort(effort)
 }
 
 function getNormalizedRequestedEffort(

@@ -1,11 +1,18 @@
 import consola from "consola"
 
 import { HTTPError } from "~/lib/error"
-import { copilotFetch, copilotHeaders } from "~/services/copilot/copilot-client"
+import {
+  MODELS_API_VERSION,
+  copilotFetch,
+  copilotHeaders,
+} from "~/services/copilot/copilot-client"
 
 export const getModels = async () => {
   const response = await copilotFetch("/models", {
-    headers: copilotHeaders(),
+    headers: {
+      ...copilotHeaders(),
+      "X-GitHub-Api-Version": MODELS_API_VERSION,
+    },
   })
 
   if (!response.ok) {
@@ -36,14 +43,21 @@ export interface ModelsResponse {
   object: string
 }
 
-interface ModelLimits {
+export interface ModelVisionLimits {
+  max_prompt_image_size?: number
+  max_prompt_images?: number
+  supported_media_types?: Array<string>
+}
+
+export interface ModelLimits {
   max_context_window_tokens?: number
   max_output_tokens?: number
   max_prompt_tokens?: number
   max_inputs?: number
+  vision?: ModelVisionLimits
 }
 
-interface ModelSupports {
+export interface ModelSupports {
   max_thinking_budget?: number
   min_thinking_budget?: number
   tool_calls?: boolean
@@ -53,15 +67,39 @@ interface ModelSupports {
   structured_outputs?: boolean
   vision?: boolean
   adaptive_thinking?: boolean
+  reasoning_effort?: Array<string>
 }
 
-interface ModelCapabilities {
+export interface ModelCapabilities {
   family: string
   limits: ModelLimits
   object: string
   supports: ModelSupports
   tokenizer: string
   type: string
+}
+
+export interface ModelTokenPriceTier {
+  cache_price?: number
+  context_max?: number
+  input_price?: number
+  output_price?: number
+}
+
+export interface FlatTokenPrices {
+  [key: string]: number | undefined
+}
+
+export interface TieredTokenPrices {
+  batch_size?: number
+  default: ModelTokenPriceTier
+  long_context?: ModelTokenPriceTier
+}
+
+export interface ModelBilling {
+  multiplier?: number
+  restricted_to?: Array<string>
+  token_prices?: FlatTokenPrices | TieredTokenPrices
 }
 
 export interface Model {
@@ -77,5 +115,11 @@ export interface Model {
     state: string
     terms: string
   }
+  billing?: ModelBilling
+  custom_model?: boolean
+  issues?: Array<unknown>
+  model_picker_category?: string
+  model_picker_price_category?: string
   supported_endpoints?: Array<string>
+  warning_messages?: Array<string>
 }

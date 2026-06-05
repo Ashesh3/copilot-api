@@ -34,10 +34,13 @@ type BooleanModelSetting =
   | "supportsAssistantPrefill"
 
 const REASONING_EFFORTS = new Set<ReasoningEffort>([
+  "none",
+  "minimal",
   "low",
   "medium",
   "high",
   "xhigh",
+  "max",
 ])
 const REQUEST_PARAMETERS = new Set<ModelRequestParameter>([
   "temperature",
@@ -77,7 +80,6 @@ function isSettingsRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function normalizeReasoningEffort(value: unknown): ReasoningEffort | undefined {
-  if (value === "max") return "xhigh"
   return isReasoningEffort(value) ? value : undefined
 }
 

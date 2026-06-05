@@ -9,6 +9,7 @@ import { normalizeModelName } from "~/lib/model-resolver"
 import {
   type ReasoningEffort,
   normalizeReasoningEffortForModel,
+  parseReasoningEffort,
   parseModelSuffix,
   usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
@@ -392,15 +393,7 @@ function logResponsesWebSocketRequest(options: {
 function getRedirectReasoningEffort(
   effort: NonNullable<ResponsesPayload["reasoning"]>["effort"] | undefined,
 ): ReasoningEffort | undefined {
-  if (
-    effort === "low"
-    || effort === "medium"
-    || effort === "high"
-    || effort === "xhigh"
-  ) {
-    return effort
-  }
-  return undefined
+  return parseReasoningEffort(effort)
 }
 
 async function applyResponsesWebSocketRouting(

@@ -20,6 +20,7 @@ import { getCopilotToken } from "~/services/github/get-copilot-token"
 // --- Constants ---
 
 export const API_VERSION = "2026-01-09"
+export const MODELS_API_VERSION = "2026-06-01"
 // Intentionally reuse the VS Code chat integration bucket unless a separate
 // Copilot rate-limit bucket is explicitly needed for this proxy.
 export const INTEGRATION_ID = "vscode-chat"

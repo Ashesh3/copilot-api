@@ -24,7 +24,7 @@ export interface AnthropicMessagesPayload {
   }
   service_tier?: "auto" | "standard_only"
   output_config?: {
-    effort?: "low" | "medium" | "high" | "max" | "xhigh"
+    effort?: "none" | "minimal" | "low" | "medium" | "high" | "max" | "xhigh"
     format?: {
       type: string
       [key: string]: unknown

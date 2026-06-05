@@ -41,6 +41,24 @@ const responsesCapableModels: ModelsResponse = {
       },
     },
     {
+      id: "claude-sonnet-4.6",
+      name: "Claude Sonnet 4.6",
+      object: "model",
+      preview: false,
+      vendor: "anthropic",
+      version: "1",
+      model_picker_enabled: true,
+      supported_endpoints: ["/responses"],
+      capabilities: {
+        family: "claude",
+        limits: { max_output_tokens: 1024 },
+        object: "model_capabilities",
+        supports: { reasoning_effort: ["low", "medium", "high", "max"] },
+        tokenizer: "cl100k_base",
+        type: "chat",
+      },
+    },
+    {
       id: "claude-implicit-medium",
       name: "Claude Implicit Medium",
       object: "model",
@@ -174,9 +192,11 @@ test("preserves output_config.format on the Anthropic responses path", async () 
       type: "json_schema",
       schema: {
         type: "object",
+        additionalProperties: false,
         properties: {
           answer: { type: "string" },
         },
+        required: ["answer"],
       },
     },
   })
@@ -232,6 +252,27 @@ test("maps output_config.effort onto the Anthropic responses path", async () => 
 
   expect(response.status).toBe(200)
   expect(lastResponsesPayload?.reasoning?.effort).toBe("medium")
+})
+
+test("passes max reasoning through on the Anthropic responses path when upstream advertises max", async () => {
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-4.6:max",
+      messages: [{ role: "user", content: "Think carefully." }],
+      max_tokens: 32,
+      output_config: {
+        effort: "max",
+      },
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastResponsesPayload?.model).toBe("claude-sonnet-4.6")
+  expect(lastResponsesPayload?.reasoning?.effort).toBe("max")
 })
 
 test("defaults reasoning effort to medium on the Anthropic responses path", async () => {

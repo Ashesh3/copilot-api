@@ -11,7 +11,7 @@ import {
 } from "~/lib/model-routing"
 
 // Inline constants from copilot-client to avoid circular dependencies
-const API_VERSION = "2026-01-09"
+const MODELS_API_VERSION = "2026-06-01"
 const INTEGRATION_ID = "vscode-chat"
 
 // --- Account ---
@@ -458,7 +458,7 @@ export class TokenPool {
       "Copilot-Integration-Id": INTEGRATION_ID,
       "editor-version": `vscode/${this.vsCodeVersion}`,
       "Openai-Intent": "conversation-agent",
-      "X-GitHub-Api-Version": API_VERSION,
+      "X-GitHub-Api-Version": MODELS_API_VERSION,
       "X-Request-Id": randomUUID(),
       "X-Interaction-Id": this.sessionId,
       "X-Client-Session-Id": this.sessionId,

@@ -19,6 +19,7 @@ import { normalizeModelName } from "~/lib/model-resolver"
 import {
   type ReasoningEffort,
   normalizeReasoningEffortForModel,
+  parseReasoningEffort,
   parseModelSuffix,
   usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
@@ -957,7 +958,7 @@ const handleWithResponsesApi = async (
   anthropicPayload: AnthropicMessagesPayload,
   options?: {
     initiatorOverride?: "agent" | "user"
-    effortOverride?: "low" | "medium" | "high" | "xhigh"
+    effortOverride?: ReasoningEffort
     requestedModel?: string
   },
 ) => {
@@ -1004,7 +1005,7 @@ const executeResponsesApi = async (
   anthropicPayload: AnthropicMessagesPayload,
   options?: {
     initiatorOverride?: "agent" | "user"
-    effortOverride?: "low" | "medium" | "high" | "xhigh"
+    effortOverride?: ReasoningEffort
     requestedModel?: string
   },
 ) => {
@@ -1330,24 +1331,7 @@ function getBodyReasoningEffort(
 function getOutputConfigReasoningEffort(
   payload: AnthropicMessagesPayload,
 ): ReasoningEffort | undefined {
-  switch (payload.output_config?.effort) {
-    case "low": {
-      return "low"
-    }
-    case "medium": {
-      return "medium"
-    }
-    case "high": {
-      return "high"
-    }
-    case "xhigh":
-    case "max": {
-      return "xhigh"
-    }
-    default: {
-      return undefined
-    }
-  }
+  return parseReasoningEffort(payload.output_config?.effort)
 }
 
 const isCompactRequest = (
