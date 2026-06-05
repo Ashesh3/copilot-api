@@ -53,6 +53,9 @@ const DEFAULT_UNSUPPORTED_REQUEST_PARAMETERS: Record<
   "gpt-5.4-mini": ["temperature", "top_p"],
   "gpt-5.5": ["temperature", "top_p"],
 }
+const DEFAULT_UNSUPPORTED_ASSISTANT_PREFILL_MODELS = new Set([
+  "claude-opus-4.8",
+])
 const DELETE_BOOLEAN_MODEL_SETTING: Record<
   BooleanModelSetting,
   (settings: ModelSettings) => void
@@ -402,5 +405,8 @@ export function getUnsupportedRequestParameters(
 }
 
 export function modelSupportsAssistantPrefill(model: string): boolean {
-  return getModelSettings(model)?.supportsAssistantPrefill !== false
+  const configured = getModelSettings(model)?.supportsAssistantPrefill
+  if (configured !== undefined) return configured
+
+  return !DEFAULT_UNSUPPORTED_ASSISTANT_PREFILL_MODELS.has(model)
 }

@@ -87,6 +87,19 @@ test("persists assistant prefill support model settings", async () => {
   expect(modelSupportsAssistantPrefill("unset-model")).toBe(true)
 })
 
+test("defaults known no-prefill models while allowing settings override", () => {
+  setModelSettingsForTest([])
+  expect(modelSupportsAssistantPrefill("claude-opus-4.8")).toBe(false)
+
+  setModelSettingsForTest([
+    {
+      model: "claude-opus-4.8",
+      supportsAssistantPrefill: true,
+    },
+  ])
+  expect(modelSupportsAssistantPrefill("claude-opus-4.8")).toBe(true)
+})
+
 test("falls back to built-in Sentry model names", () => {
   expect(getSentryModelName("claude-opus-4.6")).toBe("claude-opus-4-6")
   expect(getSentryModelName("claude-opus-4.6:high")).toBe("claude-opus-4-6")

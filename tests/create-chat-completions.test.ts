@@ -224,6 +224,34 @@ test("rewrites final assistant messages for models without assistant prefill", a
   ])
 })
 
+test("rewrites final assistant messages for built-in no-prefill models", async () => {
+  const payload: ChatCompletionsPayload = {
+    model: "claude-opus-4.8",
+    stream: true,
+    messages: [
+      { role: "user", content: "Help me investigate an error." },
+      {
+        role: "assistant",
+        content: "I have enough context to continue.",
+      },
+    ],
+  }
+
+  queuedResponses.push(createSSEStreamResponse(["data: [DONE]"]))
+
+  await createChatCompletions(payload)
+
+  const lastCall = fetchMock.mock.calls.at(-1)?.[1] as unknown as {
+    body: string
+  }
+  const sentBody = JSON.parse(lastCall.body) as ChatCompletionsPayload
+
+  expect(sentBody.messages).toEqual([
+    { role: "user", content: "Help me investigate an error." },
+    { role: "user", content: "I have enough context to continue." },
+  ])
+})
+
 test("preserves final assistant messages when assistant prefill is unset", async () => {
   const payload: ChatCompletionsPayload = {
     model: "gpt-test",
