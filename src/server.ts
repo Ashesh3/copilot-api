@@ -39,6 +39,7 @@ import { responsesRoutes } from "./routes/responses/route"
 import { sessionsRoutes } from "./routes/sessions/route"
 import { transcribeRoutes } from "./routes/transcribe/route"
 import { usageRoute } from "./routes/usage/route"
+import { whamRoutes } from "./routes/wham/route"
 
 export const server = new Hono()
 
@@ -100,6 +101,9 @@ server.route("/health", directConnectRoutes)
 server.route("/transcribe", transcribeRoutes)
 // Codex Desktop dictation transcript cleanup — auth via IP whitelist
 server.route("/codex/responses", codexResponsesRoutes)
+// Codex Desktop cloud-task endpoints. Returning a fast 404 lets Desktop fall
+// back to local-only views instead of hanging behind proxy/auth silent drops.
+server.route("/wham", whamRoutes)
 
 server.use(apiKeyGuard)
 server.use("*", createAuthMiddleware())
