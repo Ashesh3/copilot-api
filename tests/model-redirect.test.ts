@@ -216,7 +216,7 @@ test("default effort filter only matches requests without explicit effort", asyn
   })
 })
 
-test("max aliases normalize to xhigh for matching and target effort", async () => {
+test("max redirect filters match max as a first-class effort", async () => {
   setModelRedirectsForTest([
     {
       id: "max-opus",
@@ -230,11 +230,19 @@ test("max aliases normalize to xhigh for matching and target effort", async () =
 
   const redirect = await applyModelRedirect({
     model: "claude-source-1m",
-    effort: "xhigh",
+    effort: "max",
   })
 
   expect(redirect.model).toBe("claude-target-1m")
-  expect(redirect.effort).toBe("xhigh")
+  expect(redirect.effort).toBe("max")
+
+  const xhighRedirect = await applyModelRedirect({
+    model: "claude-source-1m",
+    effort: "xhigh",
+  })
+
+  expect(xhighRedirect.redirected).toBe(false)
+  expect(xhighRedirect.effort).toBe("xhigh")
 })
 
 test("first matching rule wins until precedence is changed", async () => {
@@ -343,7 +351,7 @@ test("reports conflicts when earlier rules fully shadow a later rule", async () 
 test("parses max suffixes for unknown models so redirects can match them", () => {
   expect(parseModelSuffix("claude-source-1m:max")).toEqual({
     baseModel: "claude-source-1m",
-    reasoningEffort: "xhigh",
+    reasoningEffort: "max",
   })
 })
 

@@ -20,26 +20,38 @@ interface ModelReasoningConfig {
 }
 
 /**
- * Default reasoning config per public model, derived from Copilot CLI v0.0.414.
- * Models not in this map do not support per-request reasoning effort control.
+ * Default reasoning config per public model. Live `/models` metadata overrides
+ * this map when available, so keep these as conservative startup fallbacks.
  */
 const DEFAULT_MODEL_REASONING_CONFIG: Partial<
   Record<string, ModelReasoningConfig>
 > = {
   "claude-sonnet-4.6": {
-    supportedEfforts: ["low", "medium", "high"],
+    supportedEfforts: ["low", "medium", "high", "max"],
     defaultEffort: "medium",
   },
   "claude-opus-4.6": {
-    supportedEfforts: ["low", "medium", "high"],
+    supportedEfforts: ["low", "medium", "high", "max"],
     defaultEffort: "high",
   },
   "claude-opus-4.6-fast": {
-    supportedEfforts: ["low", "medium", "high"],
+    supportedEfforts: ["low", "medium", "high", "max"],
     defaultEffort: "high",
   },
   "claude-opus-4.6-1m": {
-    supportedEfforts: ["low", "medium", "high"],
+    supportedEfforts: ["low", "medium", "high", "max"],
+    defaultEffort: "high",
+  },
+  "claude-opus-4.7": {
+    supportedEfforts: ["low", "medium", "high", "xhigh", "max"],
+    defaultEffort: "high",
+  },
+  "claude-opus-4.7-1m-internal": {
+    supportedEfforts: ["low", "medium", "high", "xhigh", "max"],
+    defaultEffort: "high",
+  },
+  "claude-opus-4.8": {
+    supportedEfforts: ["low", "medium", "high", "xhigh", "max"],
     defaultEffort: "high",
   },
   "gpt-5.3-codex": {
@@ -232,7 +244,7 @@ export function normalizeReasoningEffortForModel(
   if (!effort) return undefined
 
   const config = getModelReasoningConfig(model)
-  if (!config) return effort === "max" ? "xhigh" : effort
+  if (!config) return effort
 
   return (
     coerceEffortToSupported(effort, config.supportedEfforts)

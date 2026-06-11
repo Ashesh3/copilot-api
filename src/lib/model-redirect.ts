@@ -16,6 +16,7 @@ export const MODEL_REDIRECT_EFFORT_FILTERS: Array<ModelRedirectEffortFilter> = [
   "medium",
   "high",
   "xhigh",
+  "max",
 ]
 
 const REDIRECT_EFFORT_CASES = [
@@ -26,6 +27,7 @@ const REDIRECT_EFFORT_CASES = [
   "medium",
   "high",
   "xhigh",
+  "max",
 ] as const
 
 type RedirectEffortCase = (typeof REDIRECT_EFFORT_CASES)[number]
@@ -65,20 +67,14 @@ function isReasoningEffort(value: unknown): value is ReasoningEffort {
   )
 }
 
-function normalizeEffortAlias(value: unknown): unknown {
-  return value === "max" ? "xhigh" : value
-}
-
 function normalizeSourceEffort(value: unknown): ModelRedirectEffortFilter {
-  const normalized = normalizeEffortAlias(value)
-  if (normalized === "all" || normalized === "default") return normalized
-  if (isReasoningEffort(normalized)) return normalized
+  if (value === "all" || value === "default") return value
+  if (isReasoningEffort(value)) return value
   return "all"
 }
 
 function normalizeTargetEffort(value: unknown): ReasoningEffort | undefined {
-  const normalized = normalizeEffortAlias(value)
-  return isReasoningEffort(normalized) ? normalized : undefined
+  return isReasoningEffort(value) ? value : undefined
 }
 
 function normalizeRule(raw: unknown): ModelRedirectRule | undefined {
@@ -118,8 +114,7 @@ function effortCases(
   filter: ModelRedirectEffortFilter,
 ): Array<RedirectEffortCase> {
   if (filter === "all") return [...REDIRECT_EFFORT_CASES]
-  const normalized = normalizeEffortAlias(filter)
-  return normalized === "max" ? ["xhigh"] : [filter as RedirectEffortCase]
+  return [filter as RedirectEffortCase]
 }
 
 function getShadowingRules(

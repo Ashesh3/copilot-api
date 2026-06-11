@@ -137,7 +137,7 @@ test("maps output_config.effort onto chat completions reasoning_effort", async (
   expect(
     (lastUpstreamPayload as Record<string, unknown> | undefined)
       ?.reasoning_effort,
-  ).toBe("xhigh")
+  ).toBe("max")
 })
 
 test("maps literal xhigh output_config.effort onto chat completions reasoning_effort", async () => {

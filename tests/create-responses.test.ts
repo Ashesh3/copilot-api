@@ -3,6 +3,7 @@ import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
 import { HTTPError } from "../src/lib/error"
 import { setModelSettingsForTest } from "../src/lib/model-settings"
 import { state } from "../src/lib/state"
+import { normalizeResponsesReasoning } from "../src/routes/responses/handler"
 import {
   createResponses,
   type ResponsesPayload,
@@ -147,6 +148,20 @@ test("injects runtime-style default reasoning settings for direct Responses requ
     summary: "auto",
   })
   expect(lastRequestBody?.include).toEqual(["reasoning.encrypted_content"])
+})
+
+test("normalizes direct Responses max reasoning aliases", () => {
+  const payload = {
+    model: "claude-opus-4.8",
+    input: "Hello",
+    reasoning_effort: "max",
+  } as ResponsesPayload
+
+  const effort = normalizeResponsesReasoning(payload)
+
+  expect(effort).toBe("max")
+  expect(payload.reasoning?.effort).toBe("max")
+  expect((payload as Record<string, unknown>).reasoning_effort).toBeUndefined()
 })
 
 test("does not send configurable effort for implicit-default Responses models", async () => {

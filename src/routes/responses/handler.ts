@@ -173,6 +173,7 @@ function isResponsesReasoningEffort(
     || value === "medium"
     || value === "high"
     || value === "xhigh"
+    || value === "max"
   )
 }
 

@@ -529,12 +529,12 @@ The response is OpenAI-compatible, preserves input order, and validates the conf
 
 ### Reasoning Effort Suffixes
 
-Append `:low`, `:medium`, `:high`, or `:xhigh` to model names to control reasoning effort:
+Append `:low`, `:medium`, `:high`, `:xhigh`, or `:max` to model names to control reasoning effort when the upstream model advertises that level:
 
 ```
 claude-sonnet-4.6:high    → High reasoning effort
 gpt-5.3-codex:xhigh      → Extra-high reasoning effort
-claude-opus-4.6:low       → Low reasoning effort
+claude-opus-4.8:max       → Max reasoning effort
 ```
 
 Virtual models with these suffixes appear in `GET /v1/models`.
