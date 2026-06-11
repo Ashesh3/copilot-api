@@ -337,6 +337,29 @@ test("routes a model only to accounts where the model is enabled", async () => {
   })
 })
 
+test("routes a model that only one account advertises to that account", async () => {
+  const exclusiveModelId = "claude-fable-5"
+  registerAccount(1014, "claude-opus-4.8", "opus-account-token")
+  registerAccount(1015, exclusiveModelId, "fable-account-token")
+  registerAccount(1016, "claude-sonnet-4.6", "sonnet-account-token")
+  tokenPool.rebuildModelIndex()
+
+  queuedResults.push(new Response("{}", { status: 200 }))
+
+  const { response, account } = await routedFetch(
+    "/chat/completions",
+    { method: "POST" },
+    { modelId: exclusiveModelId },
+  )
+
+  expect(response.status).toBe(200)
+  expect(account?.id).toBe(1015)
+  expect(capturedRequests).toHaveLength(1)
+  expect(capturedRequests[0]?.init?.headers).toMatchObject({
+    Authorization: "Bearer fable-account-token",
+  })
+})
+
 test("does not fail over to an account where the model is disabled", async () => {
   const modelId = "router-model-disabled-failover"
   registerAccount(1008, modelId, "enabled-failover-primary")

@@ -30,6 +30,10 @@ const DEFAULT_MODEL_REASONING_CONFIG: Partial<
     supportedEfforts: ["low", "medium", "high", "max"],
     defaultEffort: "medium",
   },
+  "claude-fable-5": {
+    supportedEfforts: ["low", "medium", "high", "xhigh", "max"],
+    defaultEffort: "high",
+  },
   "claude-opus-4.6": {
     supportedEfforts: ["low", "medium", "high", "max"],
     defaultEffort: "high",
