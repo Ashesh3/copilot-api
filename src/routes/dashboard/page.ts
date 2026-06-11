@@ -5,190 +5,523 @@ export function getDashboardPage(): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Dashboard</title>
+<title>Copilot API Dashboard</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.13.1/font/bootstrap-icons.min.css">
 <style>
-  * { box-sizing: border-box; margin: 0; padding: 0 }
+  :root {
+    --bg: #f4f7fb;
+    --surface: #ffffff;
+    --surface-soft: #f8fafc;
+    --surface-muted: #eef2f7;
+    --border: #d8e1ec;
+    --border-strong: #b9c6d6;
+    --text: #111827;
+    --muted: #64748b;
+    --muted-strong: #475569;
+    --nav: #12151d;
+    --nav-soft: #1a1f2b;
+    --nav-text: #d5dce8;
+    --nav-muted: #8f9bad;
+    --blue: #2563eb;
+    --green: #15803d;
+    --amber: #b45309;
+    --red: #dc2626;
+    --purple: #7c3aed;
+    --cyan: #0e7490;
+    --shadow: 0 14px 34px rgba(15, 23, 42, 0.08);
+  }
+  * { box-sizing: border-box }
   html { height: 100% }
-  body { font-family: system-ui, -apple-system, sans-serif; background: #0F172A; color: #F8FAFC; display: flex; min-height: 100vh; min-height: 100dvh; overflow-x: hidden }
-  code, .mono { font-family: monospace }
-  .sidebar { width: 60px; background: #1E293B; border-right: 1px solid #334155; display: flex; flex-direction: column; align-items: center; padding: 12px 0; position: fixed; top: 0; left: 0; bottom: 0; z-index: 100 }
-  .sidebar a { width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; border-radius: 8px; color: #94A3B8; text-decoration: none; position: relative; margin-bottom: 4px; border-left: 3px solid transparent; transition: all 0.15s }
-  .sidebar a:hover { background: #272F42; color: #F8FAFC }
-  .sidebar a.active { background: #22C55E20; color: #22C55E; border-left-color: #22C55E }
-  .sidebar a svg { width: 20px; height: 20px }
-  .sidebar a .tip { display: none; position: absolute; left: 56px; background: #1B2336; color: #F8FAFC; padding: 4px 10px; border-radius: 6px; font-size: 12px; white-space: nowrap; pointer-events: none; border: 1px solid #272F42; z-index: 200 }
-  .sidebar a:hover .tip { display: block }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    min-height: 100dvh;
+    overflow-x: hidden;
+    background:
+      linear-gradient(180deg, rgba(37, 99, 235, 0.08), rgba(37, 99, 235, 0) 260px),
+      var(--bg);
+    color: var(--text);
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  code, .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace }
+  .sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 100;
+    width: 276px;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    padding: 20px 16px;
+    background: var(--nav);
+    border-right: 1px solid rgba(255, 255, 255, 0.08);
+    color: var(--nav-text);
+  }
+  .sidebar-brand { display: flex; align-items: center; gap: 12px; min-height: 44px; padding: 0 6px }
+  .brand-mark {
+    width: 38px;
+    height: 38px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 8px;
+    background: #16a34a;
+    color: #fff;
+    font-size: 20px;
+    box-shadow: 0 12px 28px rgba(22, 163, 74, 0.28);
+  }
+  .brand-copy strong { display: block; color: #fff; font-size: 0.98rem; line-height: 1.1 }
+  .brand-copy span { display: block; color: var(--nav-muted); font-size: 0.76rem; margin-top: 3px }
+  .brand-mark svg { width: 24px; height: 24px }
+  .sidebar-nav { display: flex; flex-direction: column; gap: 18px; min-height: 0; overflow-y: auto; padding-right: 2px }
+  .nav-section-label {
+    color: var(--nav-muted);
+    font-size: 0.68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    padding: 0 10px 6px;
+  }
+  .sidebar a {
+    min-height: 40px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    border-radius: 8px;
+    padding: 9px 10px;
+    color: var(--nav-text);
+    text-decoration: none;
+    font-size: 0.9rem;
+    font-weight: 600;
+    transition: background 0.15s ease, color 0.15s ease;
+  }
+  .sidebar a:hover { background: rgba(255, 255, 255, 0.07); color: #fff }
+  .sidebar a.active { background: #ffffff; color: var(--text); box-shadow: 0 10px 24px rgba(0, 0, 0, 0.18) }
+  .sidebar a i { width: 20px; text-align: center; font-size: 1rem }
+  .sidebar a .tip { display: inline }
   .sidebar .spacer { flex: 1 }
-  .main { margin-left: 60px; flex: 1; padding: 28px 32px; min-height: 100vh }
+  .main {
+    min-height: 100vh;
+    margin-left: 276px;
+    padding: 24px clamp(20px, 4vw, 48px) 44px;
+  }
+  .dashboard-topbar {
+    position: sticky;
+    top: 0;
+    z-index: 80;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 18px;
+    padding: 12px 0 18px;
+    margin-bottom: 8px;
+    background: linear-gradient(180deg, rgba(244, 247, 251, 0.96), rgba(244, 247, 251, 0.86));
+    backdrop-filter: blur(10px);
+  }
+  .page-kicker { margin: 0 0 4px; color: var(--muted); font-size: 0.78rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em }
+  .dashboard-topbar h1 { margin: 0; color: var(--text); font-size: clamp(1.45rem, 2.3vw, 2rem); line-height: 1.12; letter-spacing: 0 }
+  .topbar-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end }
+  .live-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 36px;
+    padding: 0 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--muted-strong);
+    font-size: 0.84rem;
+    font-weight: 700;
+  }
+  .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 4px rgba(21, 128, 61, 0.12) }
   .section { display: none }
   .section.active { display: block }
-  #login-screen { display: none; position: fixed; inset: 0; background: #0F172A; z-index: 500; align-items: center; justify-content: center }
+  .section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    margin-bottom: 18px;
+    flex-wrap: wrap;
+  }
+  .section-header h2 { margin: 0; font-size: 1.15rem; font-weight: 800; letter-spacing: 0 }
+  .section-header > span, .section-header > input, .section-header > button { margin-left: 0 }
+  #login-screen {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 500;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    background: #111827;
+  }
   #login-screen.visible { display: flex }
-  .login-card { background: #1B2336; border: 1px solid #272F42; border-radius: 12px; padding: 32px; width: 360px; max-width: 90vw }
-  .login-card h2 { font-size: 1.2rem; margin-bottom: 8px }
-  .login-card p { color: #94A3B8; font-size: 0.85rem; margin-bottom: 20px }
-  .login-card input { width: 100%; background: #0F172A; border: 1px solid #272F42; color: #F8FAFC; padding: 10px 14px; border-radius: 8px; font-size: 0.9rem; outline: none; margin-bottom: 14px }
-  .login-card input:focus { border-color: #3B82F6 }
-  .login-card button { width: 100%; padding: 10px; border: none; border-radius: 8px; background: #22C55E; color: #fff; font-weight: 600; cursor: pointer; font-size: 0.9rem }
-  .login-card button:hover { background: #16A34A }
-  .stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 20px }
-  .stat-card { background: #1B2336; border: 1px solid #272F42; border-radius: 10px; padding: 20px; border-left: 4px solid #3B82F6 }
-  .stat-card .label { color: #94A3B8; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px }
-  .stat-card .value { font-size: 1.6rem; font-weight: 700 }
-  .stat-card.green { border-left-color: #22C55E } .stat-card.purple { border-left-color: #A78BFA }
-  .stat-card.orange { border-left-color: #F97316 } .stat-card.red { border-left-color: #EF4444 } .stat-card.blue { border-left-color: #3B82F6 }
-  .section-header { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; flex-wrap: wrap }
-  .section-header h2 { font-size: 1.3rem }
-  .badge { display: inline-block; padding: 3px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: 600 }
-  .badge-green { background: #22C55E22; color: #22C55E } .badge-gray { background: #94A3B822; color: #94A3B8 }
-  .badge-red { background: #EF444422; color: #F87171 }
-  .badge-orange { background: #F9731622; color: #F97316 } .badge-blue { background: #3B82F622; color: #3B82F6 } .badge-purple { background: #A78BFA22; color: #A78BFA }
-  table { width: 100%; border-collapse: collapse; margin-top: 12px }
-  th { text-align: left; padding: 10px 12px; border-bottom: 1px solid #272F42; color: #94A3B8; font-weight: 500; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.5px }
-  td { padding: 10px 12px; border-bottom: 1px solid #1E293B; vertical-align: middle; font-size: 0.88rem }
-  tr:hover { background: #1B233680 }
-  .session-list { display: flex; flex-direction: column; gap: 10px; margin-top: 12px }
-  .session-card { background: #1B2336; border: 1px solid #272F42; border-radius: 10px; padding: 14px 18px; transition: border-color 0.15s }
-  .session-card:hover { border-color: #334155 }
+  .login-card {
+    width: 380px;
+    max-width: 100%;
+    padding: 30px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 8px;
+    background: #fff;
+    color: var(--text);
+    box-shadow: 0 24px 80px rgba(0, 0, 0, 0.28);
+  }
+  .login-card h2 { margin: 0 0 8px; font-size: 1.25rem }
+  .login-card p { color: var(--muted); font-size: 0.9rem; margin-bottom: 20px }
+  .login-card input {
+    width: 100%;
+    min-height: 42px;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    color: var(--text);
+    padding: 9px 12px;
+    outline: none;
+    margin-bottom: 14px;
+  }
+  .login-card input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.14) }
+  .login-card button {
+    width: 100%;
+    min-height: 42px;
+    border: 1px solid #15803d;
+    border-radius: 8px;
+    background: #15803d;
+    color: #fff;
+    font-weight: 800;
+    cursor: pointer;
+  }
+  .stat-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px }
+  .stat-card {
+    position: relative;
+    min-height: 132px;
+    padding: 18px;
+    border: 1px solid var(--border);
+    border-top: 4px solid var(--blue);
+    border-radius: 8px;
+    background: var(--surface);
+    box-shadow: var(--shadow);
+  }
+  .stat-card .label { color: var(--muted); font-size: 0.76rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 10px }
+  .stat-card .value { color: var(--text); font-size: clamp(1.55rem, 3vw, 2.15rem); font-weight: 850; line-height: 1 }
+  .stat-card .stat-icon {
+    position: absolute;
+    top: 16px;
+    right: 16px;
+    width: 34px;
+    height: 34px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 8px;
+    background: var(--surface-muted);
+    color: var(--blue);
+  }
+  .stat-card.green { border-top-color: var(--green) } .stat-card.green .stat-icon { color: var(--green) }
+  .stat-card.purple { border-top-color: var(--purple) } .stat-card.purple .stat-icon { color: var(--purple) }
+  .stat-card.orange { border-top-color: var(--amber) } .stat-card.orange .stat-icon { color: var(--amber) }
+  .stat-card.red { border-top-color: var(--red) } .stat-card.red .stat-icon { color: var(--red) }
+  .stat-card.blue { border-top-color: var(--blue) } .stat-card.blue .stat-icon { color: var(--blue) }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    min-height: 22px;
+    padding: 3px 9px;
+    border-radius: 999px;
+    font-size: 0.73rem;
+    font-weight: 800;
+    line-height: 1;
+  }
+  .badge-green { background: #dcfce7; color: #166534 } .badge-gray { background: #e2e8f0; color: #475569 }
+  .badge-red { background: #fee2e2; color: #b91c1c }
+  .badge-orange { background: #ffedd5; color: #9a3412 } .badge-blue { background: #dbeafe; color: #1d4ed8 } .badge-purple { background: #ede9fe; color: #6d28d9 }
+  .table-scroll {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    box-shadow: var(--shadow);
+  }
+  table { width: 100%; border-collapse: collapse; margin: 0 }
+  th {
+    text-align: left;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface-soft);
+    color: var(--muted);
+    font-weight: 800;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    white-space: nowrap;
+  }
+  td { padding: 12px 14px; border-bottom: 1px solid var(--border); vertical-align: middle; font-size: 0.88rem }
+  tr:last-child td { border-bottom: none }
+  tbody tr:hover { background: #f8fafc }
+  .session-list { display: grid; gap: 12px }
+  .session-card {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    background: var(--surface);
+    box-shadow: var(--shadow);
+    transition: border-color 0.15s ease, transform 0.15s ease;
+  }
+  .session-card:hover { border-color: var(--border-strong); transform: translateY(-1px) }
   .session-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap }
   .status-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0 }
-  .status-dot.running { background: #22C55E; box-shadow: 0 0 6px #22C55E80 }
-  .status-dot.idle { background: #94A3B8 } .status-dot.requires_action { background: #F97316; animation: pulse 1.5s infinite }
-  .status-dot.connected { background: #A78BFA; box-shadow: 0 0 6px #A78BFA80 }
-  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: 0.4 } }
-  .session-title { font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
-  .session-id { font-family: monospace; font-size: 11px; color: #94A3B8 }
-  .session-meta { color: #94A3B8; font-size: 0.8rem; display: flex; gap: 12px; margin-top: 6px; flex-wrap: wrap }
-  .session-actions { display: flex; gap: 6px; flex-shrink: 0 }
-  .action-desc { color: #F97316; font-size: 0.82rem; margin-top: 6px }
-  .icon-btn { width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; border-radius: 6px; border: 1px solid #272F42; background: transparent; color: #94A3B8; cursor: pointer }
-  .icon-btn:hover { background: #272F42; color: #F8FAFC } .icon-btn.danger:hover { background: #EF444420; color: #EF4444; border-color: #EF4444 }
-  .icon-btn svg { width: 16px; height: 16px }
-  .events-panel { margin-top: 12px; background: #0F172A; border: 1px solid #272F42; border-radius: 8px; padding: 12px; max-height: 400px; overflow-y: auto; font-size: 0.82rem }
-  .event-row { display: flex; gap: 10px; padding: 6px 0; border-bottom: 1px solid #1E293B; flex-wrap: wrap }
+  .status-dot.running { background: var(--green); box-shadow: 0 0 0 4px rgba(21, 128, 61, 0.12) }
+  .status-dot.idle { background: #94a3b8 } .status-dot.requires_action { background: var(--amber); animation: pulse 1.5s infinite }
+  .status-dot.connected { background: var(--purple); box-shadow: 0 0 0 4px rgba(124, 58, 237, 0.12) }
+  @keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.45 } }
+  .session-title { font-weight: 800; flex: 1; min-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+  .session-id { font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; color: var(--muted) }
+  .session-meta { color: var(--muted); font-size: 0.8rem; display: flex; gap: 12px; margin-top: 8px; flex-wrap: wrap }
+  .session-actions { display: flex; gap: 7px; flex-shrink: 0 }
+  .action-desc { color: var(--amber); font-size: 0.83rem; margin-top: 8px }
+  .icon-btn {
+    width: 34px;
+    height: 34px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--muted-strong);
+    cursor: pointer;
+  }
+  .icon-btn:hover { background: var(--surface-muted); color: var(--text) } .icon-btn.success { color: var(--green); border-color: rgba(21, 128, 61, 0.25) } .icon-btn.success:hover { background: #f0fdf4; color: var(--green); border-color: #bbf7d0 } .icon-btn.danger:hover { background: #fef2f2; color: var(--red); border-color: #fecaca }
+  .icon-btn svg { width: 16px; height: 16px } .icon-btn i { font-size: 1rem; line-height: 1 }
+  .events-panel {
+    margin-top: 14px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    max-height: 400px;
+    overflow-y: auto;
+    background: #0f172a;
+    color: #dbeafe;
+    font-size: 0.82rem;
+  }
+  .event-row { display: flex; gap: 10px; padding: 7px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.08); flex-wrap: wrap }
   .event-row:last-child { border-bottom: none }
-  .event-seq { color: #3B82F6; font-family: monospace; min-width: 30px } .event-type { color: #22C55E; font-family: monospace; min-width: 100px }
-  .event-source { color: #A78BFA; min-width: 60px } .event-time { color: #94A3B8; min-width: 80px; text-align: right; margin-left: auto }
-  .event-payload { color: #94A3B8; font-family: monospace; font-size: 11px; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100% }
+  .event-seq { color: #93c5fd; font-family: monospace; min-width: 32px } .event-type { color: #86efac; font-family: monospace; min-width: 100px }
+  .event-source { color: #c4b5fd; min-width: 60px } .event-time { color: #94a3b8; min-width: 80px; text-align: right; margin-left: auto }
+  .event-payload { color: #cbd5e1; font-family: monospace; font-size: 11px; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100% }
   .llm-debug-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px } .llm-debug-toolbar .form-input { min-width: 150px } .llm-debug-search { flex: 1; min-width: 260px }
-  .llm-debug-list { display: flex; flex-direction: column; gap: 10px } .llm-log-card { background: #1B2336; border: 1px solid #272F42; border-radius: 10px; padding: 14px 16px } .llm-log-card.open { border-color: #3B82F6 }
-  .llm-log-row { display: grid; grid-template-columns: minmax(120px, 170px) minmax(0, 1fr) auto; gap: 12px; align-items: center } .llm-log-main { min-width: 0 } .llm-log-actions { display: flex; gap: 6px; justify-content: flex-end }
-  .llm-log-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px } .llm-log-path { font-family: monospace; font-size: 12px; color: #CBD5E1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100% } .llm-log-model { font-weight: 600; color: #F8FAFC }
-  .llm-log-meta { color: #94A3B8; font-size: 0.78rem; display: flex; gap: 10px; flex-wrap: wrap } .llm-log-preview { color: #CBD5E1; font-family: monospace; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 8px } .llm-log-detail { margin-top: 14px; border-top: 1px solid #273349; padding-top: 14px }
-  .debug-detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px } .debug-panel { min-width: 0; background: #0F172A; border: 1px solid #273349; border-radius: 8px; overflow: hidden } .debug-panel.full { grid-column: 1 / -1 } .debug-panel summary { cursor: pointer; padding: 10px 12px; color: #F8FAFC; font-weight: 600; font-size: 0.84rem; background: #111A2E }
-  .debug-panel-body { padding: 12px } .debug-panel-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 8px; color: #94A3B8; font-size: 0.78rem } .debug-empty { color: #94A3B8; padding: 14px; text-align: center; font-size: 0.85rem }
-  .debug-kv { display: grid; grid-template-columns: minmax(110px, 180px) minmax(0, 1fr); border: 1px solid #273349; border-radius: 8px; overflow: hidden; margin-bottom: 12px } .debug-kv-key, .debug-kv-val { padding: 8px 10px; border-bottom: 1px solid #273349; font-size: 11px; word-break: break-word } .debug-kv-key { color: #94A3B8; background: #111A2E; font-family: monospace } .debug-kv-val { color: #CBD5E1; font-family: monospace } .debug-kv-key:nth-last-child(2), .debug-kv-val:last-child { border-bottom: none }
-  .debug-pre { max-height: 360px; overflow: auto; padding: 12px; background: #020617; border: 1px solid #273349; border-radius: 8px; color: #E2E8F0; font-family: monospace; font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word }
-  .btn { padding: 8px 16px; border-radius: 8px; border: 1px solid #272F42; background: #1B2336; color: #F8FAFC; cursor: pointer; font-size: 0.85rem; font-family: inherit; transition: background 0.15s }
-  .btn:hover { background: #272F42 } .btn-primary { background: #22C55E; border-color: #22C55E; color: #fff; font-weight: 600 }
-  .btn-primary:hover { background: #16A34A } .btn-danger { background: #EF4444; border-color: #EF4444; color: #fff } .btn-danger:hover { background: #DC2626 }
-  .form-row { display: flex; gap: 10px; align-items: center; margin-top: 16px; flex-wrap: wrap }
-  .form-input { background: #0F172A; border: 1px solid #272F42; color: #F8FAFC; padding: 8px 12px; border-radius: 8px; font-size: 0.85rem; outline: none; font-family: inherit }
-  .form-input:focus { border-color: #3B82F6 } .form-input.mono { font-family: monospace }
-  .form-textarea { background: #0F172A; border: 1px solid #272F42; color: #F8FAFC; padding: 8px 12px; border-radius: 8px; font-size: 0.85rem; outline: none; font-family: monospace; width: 100%; min-height: 96px; resize: vertical }
-  .form-textarea:focus { border-color: #3B82F6 }
-  select.form-input { min-height: 36px }
-  .toggle { width: 40px; height: 22px; border-radius: 11px; border: none; position: relative; cursor: pointer; padding: 0; transition: background 0.2s }
-  .toggle::after { content: ''; position: absolute; width: 16px; height: 16px; border-radius: 50%; background: #fff; top: 3px; left: 3px; transition: transform 0.2s }
-  .toggle.on { background: #22C55E } .toggle.on::after { transform: translateX(18px) } .toggle.off { background: #484f58 } .toggle.disabled { opacity: 0.4; cursor: not-allowed }
+  .llm-debug-list { display: flex; flex-direction: column; gap: 12px } .llm-log-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; box-shadow: var(--shadow) } .llm-log-card.open { border-color: #93c5fd }
+  .llm-log-row { display: grid; grid-template-columns: minmax(120px, 180px) minmax(0, 1fr) auto; gap: 12px; align-items: center } .llm-log-main { min-width: 0 } .llm-log-actions { display: flex; gap: 6px; justify-content: flex-end }
+  .llm-log-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px } .llm-log-path { font-family: monospace; font-size: 12px; color: var(--muted-strong); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100% } .llm-log-model { font-weight: 800; color: var(--text) }
+  .llm-log-meta { color: var(--muted); font-size: 0.78rem; display: flex; gap: 10px; flex-wrap: wrap } .llm-log-preview { color: var(--muted-strong); font-family: monospace; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 8px } .llm-log-detail { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 14px }
+  .debug-detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px } .debug-panel { min-width: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden } .debug-panel.full { grid-column: 1 / -1 } .debug-panel summary { cursor: pointer; padding: 10px 12px; color: var(--text); font-weight: 800; font-size: 0.84rem; background: var(--surface-soft) }
+  .debug-panel-body { padding: 12px } .debug-panel-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 8px; color: var(--muted); font-size: 0.78rem } .debug-empty { color: var(--muted); padding: 14px; text-align: center; font-size: 0.85rem }
+  .debug-kv { display: grid; grid-template-columns: minmax(110px, 180px) minmax(0, 1fr); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin-bottom: 12px } .debug-kv-key, .debug-kv-val { padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 11px; word-break: break-word } .debug-kv-key { color: var(--muted); background: var(--surface-soft); font-family: monospace } .debug-kv-val { color: var(--muted-strong); font-family: monospace } .debug-kv-key:nth-last-child(2), .debug-kv-val:last-child { border-bottom: none }
+  .debug-pre { max-height: 360px; overflow: auto; padding: 12px; background: #0f172a; border: 1px solid #273349; border-radius: 8px; color: #e2e8f0; font-family: monospace; font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word }
+  .btn {
+    min-height: 36px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    padding: 7px 13px;
+    border-radius: 8px;
+    border: 1px solid var(--border-strong);
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 800;
+    font-family: inherit;
+    text-decoration: none;
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  }
+  .btn:hover { background: var(--surface-muted); border-color: var(--border-strong) } .btn-primary { background: #15803d; border-color: #15803d; color: #fff }
+  .btn-primary:hover { background: #166534; border-color: #166534; color: #fff } .btn-danger { background: #dc2626; border-color: #dc2626; color: #fff } .btn-danger:hover { background: #b91c1c; border-color: #b91c1c; color: #fff }
+  .form-row {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-top: 16px;
+    padding: 16px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    box-shadow: var(--shadow);
+  }
+  .form-input {
+    min-height: 38px;
+    border: 1px solid var(--border-strong);
+    color: var(--text);
+    background: #fff;
+    padding: 8px 11px;
+    border-radius: 8px;
+    font-size: 0.86rem;
+    outline: none;
+    font-family: inherit;
+  }
+  .form-input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12) } .form-input.mono { font-family: monospace }
+  .form-textarea { background: #fff; border: 1px solid var(--border-strong); color: var(--text); padding: 9px 11px; border-radius: 8px; font-size: 0.85rem; outline: none; font-family: monospace; width: 100%; min-height: 108px; resize: vertical }
+  .form-textarea:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12) }
+  select.form-input { min-height: 38px }
+  .toggle { width: 42px; height: 24px; border-radius: 999px; border: none; position: relative; cursor: pointer; padding: 0; transition: background 0.2s }
+  .toggle::after { content: ''; position: absolute; width: 18px; height: 18px; border-radius: 50%; background: #fff; top: 3px; left: 3px; transition: transform 0.2s; box-shadow: 0 1px 3px rgba(15, 23, 42, 0.28) }
+  .toggle.on { background: var(--green) } .toggle.on::after { transform: translateX(18px) } .toggle.off { background: #94a3b8 } .toggle.disabled { opacity: 0.45; cursor: not-allowed }
   .model-filter { flex: 1; min-width: 220px; max-width: 420px }
-  .model-name { font-weight: 600; margin-bottom: 3px }
-  .model-meta { color: #94A3B8; font-size: 0.78rem }
+  .model-name { font-weight: 800; margin-bottom: 3px }
+  .model-meta { color: var(--muted); font-size: 0.78rem }
   .account-toggle-cell { text-align: center; min-width: 120px }
   .account-toggle-cell .badge { margin-top: 6px }
-  .checkbox-label { display: flex; align-items: center; gap: 6px; font-size: 0.85rem; color: #94A3B8; cursor: pointer }
-  .checkbox-label input { accent-color: #3B82F6 }
-  .model-settings-layout { display: grid; grid-template-columns: minmax(320px, 480px) minmax(0, 1fr); gap: 18px; align-items: start }
-  .model-settings-panel { background: #111A2E; border: 1px solid #273349; border-radius: 10px; padding: 18px; min-width: 0 }
-  .model-settings-panel h3 { font-size: 0.95rem; margin-bottom: 14px }
+  .checkbox-label { display: flex; align-items: center; gap: 7px; font-size: 0.86rem; color: var(--muted-strong); cursor: pointer }
+  .checkbox-label input, .switch-row input { accent-color: var(--blue) }
+  .model-settings-layout { display: grid; grid-template-columns: minmax(320px, 460px) minmax(0, 1fr); gap: 18px; align-items: start }
+  .model-settings-panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 18px; min-width: 0; box-shadow: var(--shadow) }
+  .model-settings-panel h3 { font-size: 0.96rem; margin: 0 0 14px; font-weight: 850 }
   .field-stack { display: flex; flex-direction: column; gap: 14px }
-  .field-label { display: block; color: #CBD5E1; font-size: 0.78rem; font-weight: 600; margin-bottom: 7px }
-  .field-label .optional { color: #64748B; font-weight: 500 }
+  .field-label { display: block; color: var(--muted-strong); font-size: 0.78rem; font-weight: 800; margin-bottom: 7px }
+  .field-label .optional { color: var(--muted); font-weight: 700 }
   .full-input { width: 100%; min-height: 38px }
   .effort-picker { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px }
   .choice-pill { position: relative; display: block; cursor: pointer }
   .choice-pill input { position: absolute; opacity: 0; pointer-events: none }
-  .choice-pill span { display: flex; align-items: center; justify-content: center; min-height: 36px; border: 1px solid #273349; border-radius: 8px; background: #0F172A; color: #CBD5E1; font-size: 0.82rem; font-weight: 600 }
-  .choice-pill input:checked + span { border-color: #3B82F6; background: #1D4ED826; color: #DBEAFE }
+  .choice-pill span { display: flex; align-items: center; justify-content: center; min-height: 36px; border: 1px solid var(--border-strong); border-radius: 8px; background: #fff; color: var(--muted-strong); font-size: 0.82rem; font-weight: 800 }
+  .choice-pill input:checked + span { border-color: #93c5fd; background: #eff6ff; color: #1d4ed8 }
   .settings-options { display: grid; grid-template-columns: 1fr 1fr; gap: 10px }
-  .switch-row { display: flex; align-items: center; gap: 10px; min-height: 42px; padding: 10px 12px; border: 1px solid #273349; border-radius: 8px; background: #0F172A; color: #CBD5E1; font-size: 0.84rem; cursor: pointer }
-  .switch-row input { accent-color: #3B82F6 }
+  .switch-row { display: flex; align-items: center; gap: 10px; min-height: 42px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-soft); color: var(--muted-strong); font-size: 0.84rem; cursor: pointer }
   .model-settings-actions { display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; padding-top: 2px }
   .model-settings-actions .btn { min-width: 120px }
-  .model-settings-list .empty-state { padding: 28px 16px }
-  .model-settings-list .empty-state svg { width: 36px; height: 36px; margin-bottom: 10px }
+  .model-settings-list .empty-state { padding: 28px 16px; box-shadow: none }
+  .model-settings-list .empty-state svg, .model-settings-list .empty-state i { width: 36px; height: 36px; margin-bottom: 10px }
   .model-settings-list table { min-width: 1180px }
   .model-settings-list .effort-picker { display: flex; flex-wrap: wrap; gap: 6px; min-width: 178px }
   .model-settings-list .choice-pill { flex: 0 0 84px }
   .model-settings-list .choice-pill span { min-height: 32px; padding: 0 10px; white-space: nowrap }
   .model-settings-edit { display: flex; flex-direction: column; gap: 10px; min-width: 300px }
-  .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0; margin-top: 12px; background: #1B2336; border: 1px solid #272F42; border-radius: 10px; overflow: hidden }
+  .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0; margin-top: 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; box-shadow: var(--shadow) }
   .setting-row { display: contents }
-  .setting-key { padding: 14px 18px; font-size: 0.85rem; color: #94A3B8; border-bottom: 1px solid #272F42 }
-  .setting-val { padding: 14px 18px; font-size: 0.85rem; border-bottom: 1px solid #272F42; word-break: break-all }
-  .bool-yes { display: inline-block; padding: 2px 10px; border-radius: 12px; background: #22C55E22; color: #22C55E; font-size: 0.8rem; font-weight: 600 }
-  .bool-no { display: inline-block; padding: 2px 10px; border-radius: 12px; background: #94A3B822; color: #94A3B8; font-size: 0.8rem; font-weight: 600 }
-  .progress-bar { width: 100%; height: 8px; background: #272F42; border-radius: 4px; overflow: hidden; margin-top: 6px }
-  .progress-fill { height: 100%; border-radius: 4px; transition: width 0.3s }
+  .setting-key { padding: 14px 18px; font-size: 0.85rem; color: var(--muted); border-bottom: 1px solid var(--border); background: var(--surface-soft) }
+  .setting-val { padding: 14px 18px; font-size: 0.85rem; border-bottom: 1px solid var(--border); word-break: break-all }
+  .bool-yes { display: inline-flex; align-items: center; min-height: 22px; padding: 3px 9px; border-radius: 999px; background: #dcfce7; color: #166534; font-size: 0.76rem; font-weight: 800 }
+  .bool-no { display: inline-flex; align-items: center; min-height: 22px; padding: 3px 9px; border-radius: 999px; background: #e2e8f0; color: #475569; font-size: 0.76rem; font-weight: 800 }
+  .progress-bar { width: 100%; height: 8px; background: #e2e8f0; border-radius: 999px; overflow: hidden; margin-top: 12px }
+  .progress-fill { height: 100%; border-radius: 999px; transition: width 0.3s }
   .toast-container { position: fixed; top: 20px; right: 20px; z-index: 1000; display: flex; flex-direction: column; gap: 8px }
-  .toast { padding: 12px 20px; border-radius: 8px; font-size: 0.85rem; color: #fff; animation: slideIn 0.2s ease-out; max-width: 360px }
-  .toast.success { background: #22C55E } .toast.error { background: #EF4444 }
+  .toast { display: block; padding: 12px 18px; border-radius: 8px; font-size: 0.86rem; color: #fff; animation: slideIn 0.2s ease-out; max-width: 360px; opacity: 1 }
+  .toast.success { background: #15803d } .toast.error { background: #dc2626 }
   @keyframes slideIn { from { transform: translateX(100%); opacity: 0 } to { transform: translateX(0); opacity: 1 } }
-  .empty-state { text-align: center; padding: 48px 20px; color: #94A3B8 }
-  .empty-state svg { width: 48px; height: 48px; margin-bottom: 16px; opacity: 0.4 } .empty-state p { margin-top: 8px; font-size: 0.9rem }
-  .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch }
-  @media (max-width: 1023px) { .stat-grid { grid-template-columns: repeat(2, 1fr) } }
-  @media (max-width: 1023px) { .model-settings-layout { grid-template-columns: 1fr } }
-  @media (max-width: 767px) { .sidebar { display: none } .main { margin-left: 0; padding: 16px; padding-bottom: 90px } .stat-grid { grid-template-columns: 1fr } .settings-grid { grid-template-columns: 1fr } .setting-row { display: flex; flex-direction: column } .bottom-nav { display: flex !important } .form-row { flex-direction: column; align-items: stretch } .form-row .form-input { width: 100% !important; min-width: 0 !important; flex: none !important } .form-row .checkbox-label { justify-content: flex-start } .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 0 -16px; padding: 0 16px } .section-header h2 { font-size: 1.1rem } .effort-picker { grid-template-columns: repeat(2, minmax(0, 1fr)) } .settings-options { grid-template-columns: 1fr } .model-settings-actions { justify-content: stretch } .model-settings-actions .btn { flex: 1 } }
-  .bottom-nav { display: none; position: fixed; bottom: 0; left: 0; right: 0; background: #1E293B; border-top: 1px solid #334155; justify-content: space-around; padding: 8px 0; padding-bottom: max(8px, env(safe-area-inset-bottom)); z-index: 100 }
-  .bottom-nav a { display: flex; flex-direction: column; align-items: center; gap: 3px; color: #94A3B8; text-decoration: none; font-size: 10px; padding: 4px 6px; border-radius: 6px; min-width: 44px; min-height: 44px; justify-content: center }
-  .bottom-nav a.active { color: #22C55E } .bottom-nav a svg { width: 20px; height: 20px }
-  .bottom-nav a .nav-label { font-size: 9px; line-height: 1; letter-spacing: 0.3px }
-  @media (max-width: 767px) { .llm-debug-toolbar { flex-direction: column; align-items: stretch } .llm-debug-toolbar .form-input, .llm-debug-search { width: 100%; min-width: 0 } .llm-log-row { grid-template-columns: 1fr } .llm-log-actions { justify-content: flex-start } .debug-detail-grid { grid-template-columns: 1fr } .debug-panel.full { grid-column: auto } .debug-kv { grid-template-columns: 1fr } }
+  .empty-state {
+    text-align: center;
+    padding: 42px 20px;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    box-shadow: var(--shadow);
+  }
+  .empty-state svg { width: 44px; height: 44px; margin-bottom: 14px; opacity: 0.45 }
+  .empty-state i { display: block; font-size: 2rem; margin-bottom: 12px; color: var(--muted) }
+  .empty-state p { margin: 8px 0 0; font-size: 0.9rem }
+  .bottom-nav { display: none; position: fixed; bottom: 0; left: 0; right: 0; z-index: 100; gap: 4px; overflow-x: auto; padding: 8px 10px; padding-bottom: max(8px, env(safe-area-inset-bottom)); background: rgba(255, 255, 255, 0.96); border-top: 1px solid var(--border); box-shadow: 0 -10px 28px rgba(15, 23, 42, 0.08); backdrop-filter: blur(10px) }
+  .bottom-nav a { min-width: 68px; min-height: 48px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; color: var(--muted); text-decoration: none; font-size: 10px; padding: 4px 6px; border-radius: 8px; font-weight: 800 }
+  .bottom-nav a.active { color: #15803d; background: #dcfce7 } .bottom-nav a i { font-size: 1.05rem }
+  .bottom-nav a .nav-label { font-size: 9px; line-height: 1; letter-spacing: 0 }
+  @media (max-width: 1180px) {
+    .stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) }
+    .model-settings-layout { grid-template-columns: 1fr }
+  }
+  @media (max-width: 900px) {
+    .sidebar { display: none }
+    .main { margin-left: 0; padding: 18px 16px 92px }
+    .bottom-nav { display: flex !important }
+    .dashboard-topbar { position: static; align-items: flex-start; flex-direction: column }
+    .topbar-actions { justify-content: flex-start }
+  }
+  @media (max-width: 767px) {
+    .stat-grid { grid-template-columns: 1fr }
+    .settings-grid { grid-template-columns: 1fr }
+    .setting-row { display: flex; flex-direction: column }
+    .form-row { flex-direction: column; align-items: stretch }
+    .form-row .form-input { width: 100% !important; min-width: 0 !important; flex: none !important }
+    .form-row .checkbox-label { justify-content: flex-start }
+    .table-scroll { margin: 0 -8px; border-radius: 0; border-left: 0; border-right: 0 }
+    .section-header h2 { font-size: 1.05rem }
+    .effort-picker { grid-template-columns: repeat(2, minmax(0, 1fr)) }
+    .settings-options { grid-template-columns: 1fr }
+    .model-settings-actions { justify-content: stretch }
+    .model-settings-actions .btn { flex: 1 }
+    .llm-debug-toolbar { flex-direction: column; align-items: stretch }
+    .llm-debug-toolbar .form-input, .llm-debug-search { width: 100%; min-width: 0 }
+    .llm-log-row { grid-template-columns: 1fr }
+    .llm-log-actions { justify-content: flex-start }
+    .debug-detail-grid { grid-template-columns: 1fr }
+    .debug-panel.full { grid-column: auto }
+    .debug-kv { grid-template-columns: 1fr }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: 0.01ms !important; scroll-behavior: auto !important; transition-duration: 0.01ms !important }
+  }
 </style>
 </head>
 <body>
-<div id="login-screen"><div class="login-card"><h2>Dashboard Login</h2><p>Enter your API key to access the admin dashboard.</p><input type="password" id="login-key" placeholder="API Key" autocomplete="off"><button onclick="doLogin()">Login</button></div></div>
+<div id="login-screen"><form class="login-card" onsubmit="doLogin();return false"><h2>Dashboard Login</h2><p>Enter your API key to access the admin dashboard.</p><input type="password" id="login-key" placeholder="API Key" autocomplete="off"><button type="submit"><i class="bi bi-shield-lock"></i> Login</button></form></div>
 <div class="toast-container" id="toasts"></div>
 <nav class="sidebar" id="sidebar">
-  <a href="#overview" data-section="overview" onclick="navigate('overview')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg><span class="tip">Overview</span></a>
-  <a href="#sessions" data-section="sessions" onclick="navigate('sessions')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg><span class="tip">Sessions</span></a>
-  <a href="#environments" data-section="environments" onclick="navigate('environments')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg><span class="tip">Environments</span></a>
-  <a href="#flags" data-section="flags" onclick="navigate('flags')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg><span class="tip">Feature Flags</span></a>
-  <a href="#replacements" data-section="replacements" onclick="navigate('replacements')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg><span class="tip">Replacements</span></a>
-  <a href="#model-redirects" data-section="model-redirects" onclick="navigate('model-redirects')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h13"/><path d="M16 6l6 6-6 6"/><path d="M3 6v12"/></svg><span class="tip">Model Redirects</span></a>
-  <a href="#model-settings" data-section="model-settings" onclick="navigate('model-settings')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 8h10"/><path d="M7 12h4"/><path d="M13 12h4"/><path d="M7 16h10"/></svg><span class="tip">Model Settings</span></a>
-  <a href="#custom-providers" data-section="custom-providers" onclick="navigate('custom-providers')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18"/><path d="M3 8h18"/><path d="M3 16h18"/><path d="M7 3c2 4 2 14 0 18"/><path d="M17 3c-2 4-2 14 0 18"/></svg><span class="tip">Custom Providers</span></a>
-  <a href="#model-routing" data-section="model-routing" onclick="navigate('model-routing')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20"/><path d="M2 12h20"/><path d="M4 4h6v6H4z"/><path d="M14 14h6v6h-6z"/></svg><span class="tip">Model Routing</span></a>
-  <a href="#llm-debug" data-section="llm-debug" onclick="navigate('llm-debug')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h6"/><path d="M8 9h2"/></svg><span class="tip">LLM Debug</span></a>
-  <a href="#usage" data-section="usage" onclick="navigate('usage')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg><span class="tip">Usage</span></a>
+  <div class="sidebar-brand"><span class="brand-mark"><svg aria-hidden="true" fill="currentColor" fill-rule="evenodd" viewBox="0 0 24 24"><path d="M19.245 5.364c1.322 1.36 1.877 3.216 2.11 5.817.622 0 1.2.135 1.592.654l.73.964c.21.278.323.61.323.955v2.62c0 .339-.173.669-.453.868C20.239 19.602 16.157 21.5 12 21.5c-4.6 0-9.205-2.583-11.547-4.258-.28-.2-.452-.53-.453-.868v-2.62c0-.345.113-.679.321-.956l.73-.963c.392-.517.974-.654 1.593-.654l.029-.297c.25-2.446.81-4.213 2.082-5.52 2.461-2.54 5.71-2.851 7.146-2.864h.198c1.436.013 4.685.323 7.146 2.864zm-7.244 4.328c-.284 0-.613.016-.962.05-.123.447-.305.85-.57 1.108-1.05 1.023-2.316 1.18-2.994 1.18-.638 0-1.306-.13-1.851-.464-.516.165-1.012.403-1.044.996a65.882 65.882 0 00-.063 2.884l-.002.48c-.002.563-.005 1.126-.013 1.69.002.326.204.63.51.765 2.482 1.102 4.83 1.657 6.99 1.657 2.156 0 4.504-.555 6.985-1.657a.854.854 0 00.51-.766c.03-1.682.006-3.372-.076-5.053-.031-.596-.528-.83-1.046-.996-.546.333-1.212.464-1.85.464-.677 0-1.942-.157-2.993-1.18-.266-.258-.447-.661-.57-1.108-.32-.032-.64-.049-.96-.05zm-2.525 4.013c.539 0 .976.426.976.95v1.753c0 .525-.437.95-.976.95a.964.964 0 01-.976-.95v-1.752c0-.525.437-.951.976-.951zm5 0c.539 0 .976.426.976.95v1.753c0 .525-.437.95-.976.95a.964.964 0 01-.976-.95v-1.752c0-.525.437-.951.976-.951zM7.635 5.087c-1.05.102-1.935.438-2.385.906-.975 1.037-.765 3.668-.21 4.224.405.394 1.17.657 1.995.657h.09c.649-.013 1.785-.176 2.73-1.11.435-.41.705-1.433.675-2.47-.03-.834-.27-1.52-.63-1.813-.39-.336-1.275-.482-2.265-.394zm6.465.394c-.36.292-.6.98-.63 1.813-.03 1.037.24 2.06.675 2.47.968.957 2.136 1.104 2.776 1.11h.044c.825 0 1.59-.263 1.995-.657.555-.556.765-3.187-.21-4.224-.45-.468-1.335-.804-2.385-.906-.99-.088-1.875.058-2.265.394zM12 7.615c-.24 0-.525.015-.84.044.03.16.045.336.06.526l-.001.159a2.94 2.94 0 01-.014.25c.225-.022.425-.027.612-.028h.366c.187 0 .387.006.612.028-.015-.146-.015-.277-.015-.409.015-.19.03-.365.06-.526a9.29 9.29 0 00-.84-.044z"></path></svg></span><div class="brand-copy"><strong>Copilot API</strong><span>Admin console</span></div></div>
+  <div class="sidebar-nav">
+    <div>
+      <div class="nav-section-label">Monitor</div>
+      <a href="#overview" data-section="overview" onclick="navigate('overview')"><i class="bi bi-grid-1x2"></i><span class="tip">Overview</span></a>
+      <a href="#sessions" data-section="sessions" onclick="navigate('sessions')"><i class="bi bi-terminal"></i><span class="tip">Sessions</span></a>
+      <a href="#environments" data-section="environments" onclick="navigate('environments')"><i class="bi bi-hdd-network"></i><span class="tip">Environments</span></a>
+      <a href="#llm-debug" data-section="llm-debug" onclick="navigate('llm-debug')"><i class="bi bi-file-earmark-code"></i><span class="tip">LLM Debug</span></a>
+      <a href="#usage" data-section="usage" onclick="navigate('usage')"><i class="bi bi-bar-chart"></i><span class="tip">Usage</span></a>
+    </div>
+    <div>
+      <div class="nav-section-label">Control</div>
+      <a href="#flags" data-section="flags" onclick="navigate('flags')"><i class="bi bi-flag"></i><span class="tip">Feature Flags</span></a>
+      <a href="#replacements" data-section="replacements" onclick="navigate('replacements')"><i class="bi bi-arrow-left-right"></i><span class="tip">Replacements</span></a>
+      <a href="#model-redirects" data-section="model-redirects" onclick="navigate('model-redirects')"><i class="bi bi-signpost-split"></i><span class="tip">Model Redirects</span></a>
+      <a href="#model-settings" data-section="model-settings" onclick="navigate('model-settings')"><i class="bi bi-sliders"></i><span class="tip">Model Settings</span></a>
+      <a href="#custom-providers" data-section="custom-providers" onclick="navigate('custom-providers')"><i class="bi bi-plugin"></i><span class="tip">Custom Providers</span></a>
+      <a href="#model-routing" data-section="model-routing" onclick="navigate('model-routing')"><i class="bi bi-diagram-3"></i><span class="tip">Model Routing</span></a>
+    </div>
+    <div>
+      <div class="nav-section-label">System</div>
+      <a href="#settings" data-section="settings" onclick="navigate('settings')"><i class="bi bi-gear"></i><span class="tip">Settings</span></a>
+    </div>
+  </div>
   <div class="spacer"></div>
-  <a href="#settings" data-section="settings" onclick="navigate('settings')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span class="tip">Settings</span></a>
 </nav>
 <nav class="bottom-nav" id="bottom-nav">
-  <a href="#overview" data-section="overview" onclick="navigate('overview')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg><span class="nav-label">Overview</span></a>
-  <a href="#sessions" data-section="sessions" onclick="navigate('sessions')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg><span class="nav-label">Sessions</span></a>
-  <a href="#flags" data-section="flags" onclick="navigate('flags')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg><span class="nav-label">Flags</span></a>
-  <a href="#model-settings" data-section="model-settings" onclick="navigate('model-settings')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 8h10"/><path d="M7 12h4"/><path d="M13 12h4"/><path d="M7 16h10"/></svg><span class="nav-label">Models</span></a>
-  <a href="#custom-providers" data-section="custom-providers" onclick="navigate('custom-providers')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v18"/><path d="M3 8h18"/><path d="M3 16h18"/><path d="M7 3c2 4 2 14 0 18"/><path d="M17 3c-2 4-2 14 0 18"/></svg><span class="nav-label">Providers</span></a>
-  <a href="#model-routing" data-section="model-routing" onclick="navigate('model-routing')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20"/><path d="M2 12h20"/><path d="M4 4h6v6H4z"/><path d="M14 14h6v6h-6z"/></svg><span class="nav-label">Routing</span></a>
-  <a href="#llm-debug" data-section="llm-debug" onclick="navigate('llm-debug')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h6"/></svg><span class="nav-label">Debug</span></a>
-  <a href="#usage" data-section="usage" onclick="navigate('usage')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg><span class="nav-label">Usage</span></a>
-  <a href="#settings" data-section="settings" onclick="navigate('settings')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span class="nav-label">Settings</span></a>
+  <a href="#overview" data-section="overview" onclick="navigate('overview')"><i class="bi bi-grid-1x2"></i><span class="nav-label">Overview</span></a>
+  <a href="#sessions" data-section="sessions" onclick="navigate('sessions')"><i class="bi bi-terminal"></i><span class="nav-label">Sessions</span></a>
+  <a href="#flags" data-section="flags" onclick="navigate('flags')"><i class="bi bi-flag"></i><span class="nav-label">Flags</span></a>
+  <a href="#model-settings" data-section="model-settings" onclick="navigate('model-settings')"><i class="bi bi-sliders"></i><span class="nav-label">Models</span></a>
+  <a href="#custom-providers" data-section="custom-providers" onclick="navigate('custom-providers')"><i class="bi bi-plugin"></i><span class="nav-label">Providers</span></a>
+  <a href="#model-routing" data-section="model-routing" onclick="navigate('model-routing')"><i class="bi bi-diagram-3"></i><span class="nav-label">Routing</span></a>
+  <a href="#llm-debug" data-section="llm-debug" onclick="navigate('llm-debug')"><i class="bi bi-file-earmark-code"></i><span class="nav-label">Debug</span></a>
+  <a href="#usage" data-section="usage" onclick="navigate('usage')"><i class="bi bi-bar-chart"></i><span class="nav-label">Usage</span></a>
+  <a href="#settings" data-section="settings" onclick="navigate('settings')"><i class="bi bi-gear"></i><span class="nav-label">Settings</span></a>
 </nav>
 <div class="main" id="main-content">
-  <div class="section" id="sec-overview"><div class="section-header"><h2>Overview</h2></div><div class="stat-grid" id="overview-grid"></div></div>
-  <div class="section" id="sec-sessions"><div class="section-header"><h2>Sessions</h2><span id="session-badges"></span></div><div id="sessions-list"></div></div>
-  <div class="section" id="sec-environments"><div class="section-header"><h2>Environments</h2></div><div id="environments-content"></div></div>
-  <div class="section" id="sec-flags"><div class="section-header"><h2>Feature Flags</h2></div><div id="flags-content"></div><div class="form-row" id="flag-form"><input class="form-input mono" name="flag-name" placeholder="flag_name" style="flex:2;min-width:180px"><input class="form-input" name="flag-value" placeholder="true" style="flex:1;min-width:100px"><button class="btn btn-primary" onclick="addFlag()">Add</button></div></div>
-  <div class="section" id="sec-replacements"><div class="section-header"><h2>Replacements</h2></div><div id="replacements-content"></div><div class="form-row" id="replacement-form"><input class="form-input" name="repl-name" placeholder="Name (optional)" style="min-width:120px"><input class="form-input mono" name="repl-pattern" placeholder="Pattern" style="flex:2;min-width:140px"><input class="form-input" name="repl-replacement" placeholder="Replacement" style="flex:2;min-width:140px"><label class="checkbox-label"><input type="checkbox" name="repl-regex"> Regex</label><button class="btn btn-primary" onclick="addReplacement()">Add</button></div></div>
-  <div class="section" id="sec-model-redirects"><div class="section-header"><h2>Model Redirects</h2><span class="badge badge-gray">Silent - clients see the original model</span></div><div id="model-redirects-content"></div><div class="form-row" id="model-redirect-form"><input class="form-input" name="mr-name" placeholder="Name (optional)" style="min-width:120px"><input class="form-input mono" name="mr-source" placeholder="Source model" style="flex:2;min-width:200px"><select class="form-input" name="mr-source-effort"><option value="all">All effort levels</option><option value="default">Default/no effort</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select><input class="form-input mono" name="mr-target" placeholder="Target model" style="flex:2;min-width:200px"><select class="form-input" name="mr-target-effort"><option value="">Preserve effort</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select><button class="btn btn-primary" onclick="addModelRedirect()">Add</button></div></div>
-  <div class="section" id="sec-model-settings"><div class="section-header"><h2>Model Settings</h2><span class="badge badge-gray">Reasoning, Sentry, and request params</span></div><div class="model-settings-layout"><div class="model-settings-panel"><h3>Add setting</h3><div class="field-stack" id="model-settings-form"><label><span class="field-label">Model ID</span><input class="form-input mono full-input" name="ms-model" placeholder="provider-model-id" autocomplete="off"></label><label><span class="field-label">Sentry reported name <span class="optional">optional</span></span><input class="form-input mono full-input" name="ms-sentry-model" placeholder="sentry-model-id" autocomplete="off"></label><div><span class="field-label">Supported efforts <span class="optional">optional</span></span><div class="effort-picker" data-efforts="ms-efforts"><label class="choice-pill"><input type="checkbox" name="ms-effort" value="low"><span>low</span></label><label class="choice-pill"><input type="checkbox" name="ms-effort" value="medium"><span>medium</span></label><label class="choice-pill"><input type="checkbox" name="ms-effort" value="high"><span>high</span></label><label class="choice-pill"><input type="checkbox" name="ms-effort" value="xhigh"><span>xhigh</span></label><label class="choice-pill"><input type="checkbox" name="ms-effort" value="max"><span>max</span></label></div></div><label><span class="field-label">Default effort <span class="optional">optional</span></span><select class="form-input full-input" name="ms-default"><option value="">None</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select></label><div class="settings-options"><label><span class="field-label">Implicit default <span class="optional">optional</span></span><select class="form-input full-input" name="ms-implicit"><option value="">Not set</option><option value="true">Enabled</option><option value="false">Disabled</option></select></label><label><span class="field-label">Virtual variants <span class="optional">optional</span></span><select class="form-input full-input" name="ms-virtual"><option value="">Not set</option><option value="true">Show</option><option value="false">Hide</option></select></label></div><div><span class="field-label">Omit request params <span class="optional">optional</span></span><div class="effort-picker" data-params="ms-unsupported-params"><label class="choice-pill"><input type="checkbox" name="ms-param" value="temperature"><span>temperature</span></label><label class="choice-pill"><input type="checkbox" name="ms-param" value="top_p"><span>top_p</span></label></div></div><div class="model-settings-actions"><button class="btn" onclick="applyImplicitMediumPreset()">Implicit medium</button><button class="btn" onclick="applyNoSamplingPreset()">No sampling</button><button class="btn btn-primary" onclick="addModelSettings()">Save setting</button></div></div></div><div class="model-settings-panel model-settings-list"><h3>Configured models</h3><div id="model-settings-content"></div></div></div></div>
-  <div class="section" id="sec-custom-providers"><div class="section-header"><h2>Custom Providers</h2><span class="badge badge-gray" id="custom-provider-count">0 providers</span><button class="btn" onclick="addNebiusProvider()">Add Nebius Qwen3</button></div><div class="model-settings-layout"><div class="model-settings-panel"><h3 id="custom-provider-form-title">Add provider</h3><div class="field-stack" id="custom-provider-form"><div class="settings-options"><label><span class="field-label">Provider ID</span><input class="form-input mono full-input" name="cp-id" placeholder="nebius" autocomplete="off"></label><label><span class="field-label">Name</span><input class="form-input full-input" name="cp-name" placeholder="Nebius" autocomplete="off"></label></div><label><span class="field-label">Base URL</span><input class="form-input mono full-input" name="cp-base-url" placeholder="https://api.example.com/v1" autocomplete="off"></label><div class="settings-options"><label><span class="field-label">API key</span><input class="form-input mono full-input" name="cp-api-key" type="password" placeholder="Provider API key" autocomplete="off"></label><label><span class="field-label">Timeout ms <span class="optional">optional</span></span><input class="form-input mono full-input" name="cp-timeout" placeholder="120000" autocomplete="off"></label></div><label class="switch-row"><input type="checkbox" name="cp-pass-reasoning"> Pass reasoning_effort</label><label><span class="field-label">Headers JSON <span class="optional">optional</span></span><textarea class="form-textarea" name="cp-headers" spellcheck="false">{}</textarea></label><label><span class="field-label">Models JSON</span><textarea class="form-textarea" name="cp-models" spellcheck="false">[{"id":"custom-chat-model","kind":"chat","supportsStreaming":true}]</textarea></label><div class="model-settings-actions"><button class="btn" onclick="clearCustomProviderForm()">Clear</button><button class="btn btn-primary" onclick="saveCustomProvider()">Save provider</button></div></div></div><div class="model-settings-panel model-settings-list"><h3>Configured providers</h3><div id="custom-providers-content"></div></div></div></div>
+  <header class="dashboard-topbar"><div><p class="page-kicker" id="page-kicker">Monitor</p><h1 id="page-title">Overview</h1></div><div class="topbar-actions"><span class="live-chip"><span class="live-dot"></span> Connected</span><button class="btn" onclick="loadSection(currentSection)"><i class="bi bi-arrow-clockwise"></i> Refresh</button></div></header>
+  <div class="section" id="sec-overview"><div class="section-header"><h2>System Overview</h2></div><div class="stat-grid" id="overview-grid"></div></div>
+  <div class="section" id="sec-sessions"><div class="section-header"><h2>Active Sessions</h2><span id="session-badges"></span></div><div id="sessions-list"></div></div>
+  <div class="section" id="sec-environments"><div class="section-header"><h2>Registered Environments</h2></div><div id="environments-content"></div></div>
+  <div class="section" id="sec-flags"><div class="section-header"><h2>Feature Flags</h2></div><div id="flags-content"></div><div class="form-row" id="flag-form"><input class="form-input mono" name="flag-name" placeholder="flag_name" style="flex:2;min-width:180px"><input class="form-input" name="flag-value" placeholder="true" style="flex:1;min-width:100px"><button class="btn btn-primary" onclick="addFlag()"><i class="bi bi-plus-lg"></i> Add</button></div></div>
+  <div class="section" id="sec-replacements"><div class="section-header"><h2>Replacement Rules</h2></div><div id="replacements-content"></div><div class="form-row" id="replacement-form"><input class="form-input" name="repl-name" placeholder="Name (optional)" style="min-width:120px"><input class="form-input mono" name="repl-pattern" placeholder="Pattern" style="flex:2;min-width:140px"><input class="form-input" name="repl-replacement" placeholder="Replacement" style="flex:2;min-width:140px"><label class="checkbox-label"><input type="checkbox" name="repl-regex"> Regex</label><button class="btn btn-primary" onclick="addReplacement()"><i class="bi bi-plus-lg"></i> Add</button></div></div>
+  <div class="section" id="sec-model-redirects"><div class="section-header"><h2>Model Redirects</h2><span class="badge badge-gray">Silent - clients see the original model</span></div><div id="model-redirects-content"></div><div class="form-row" id="model-redirect-form"><input class="form-input" name="mr-name" placeholder="Name (optional)" style="min-width:120px"><input class="form-input mono" name="mr-source" placeholder="Source model" style="flex:2;min-width:200px"><select class="form-input" name="mr-source-effort"><option value="all">All effort levels</option><option value="default">Default/no effort</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select><input class="form-input mono" name="mr-target" placeholder="Target model" style="flex:2;min-width:200px"><select class="form-input" name="mr-target-effort"><option value="">Preserve effort</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select><button class="btn btn-primary" onclick="addModelRedirect()"><i class="bi bi-plus-lg"></i> Add</button></div></div>
+  <div class="section" id="sec-model-settings"><div class="section-header"><h2>Model Settings</h2><span class="badge badge-gray">Reasoning, Sentry, and request params</span></div><div class="model-settings-layout"><div class="model-settings-panel"><h3>Add setting</h3><div class="field-stack" id="model-settings-form"><label><span class="field-label">Model ID</span><input class="form-input mono full-input" name="ms-model" placeholder="provider-model-id" autocomplete="off"></label><label><span class="field-label">Sentry reported name <span class="optional">optional</span></span><input class="form-input mono full-input" name="ms-sentry-model" placeholder="sentry-model-id" autocomplete="off"></label><div><span class="field-label">Supported efforts <span class="optional">optional</span></span><div class="effort-picker" data-efforts="ms-efforts"><label class="choice-pill"><input type="checkbox" name="ms-effort" value="low"><span>low</span></label><label class="choice-pill"><input type="checkbox" name="ms-effort" value="medium"><span>medium</span></label><label class="choice-pill"><input type="checkbox" name="ms-effort" value="high"><span>high</span></label><label class="choice-pill"><input type="checkbox" name="ms-effort" value="xhigh"><span>xhigh</span></label><label class="choice-pill"><input type="checkbox" name="ms-effort" value="max"><span>max</span></label></div></div><label><span class="field-label">Default effort <span class="optional">optional</span></span><select class="form-input full-input" name="ms-default"><option value="">None</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select></label><div class="settings-options"><label><span class="field-label">Implicit default <span class="optional">optional</span></span><select class="form-input full-input" name="ms-implicit"><option value="">Not set</option><option value="true">Enabled</option><option value="false">Disabled</option></select></label><label><span class="field-label">Virtual variants <span class="optional">optional</span></span><select class="form-input full-input" name="ms-virtual"><option value="">Not set</option><option value="true">Show</option><option value="false">Hide</option></select></label></div><div><span class="field-label">Omit request params <span class="optional">optional</span></span><div class="effort-picker" data-params="ms-unsupported-params"><label class="choice-pill"><input type="checkbox" name="ms-param" value="temperature"><span>temperature</span></label><label class="choice-pill"><input type="checkbox" name="ms-param" value="top_p"><span>top_p</span></label></div></div><div class="model-settings-actions"><button class="btn" onclick="applyImplicitMediumPreset()">Implicit medium</button><button class="btn" onclick="applyNoSamplingPreset()">No sampling</button><button class="btn btn-primary" onclick="addModelSettings()"><i class="bi bi-check2"></i> Save setting</button></div></div></div><div class="model-settings-panel model-settings-list"><h3>Configured models</h3><div id="model-settings-content"></div></div></div></div>
+  <div class="section" id="sec-custom-providers"><div class="section-header"><h2>Custom Providers</h2><span class="badge badge-gray" id="custom-provider-count">0 providers</span><button class="btn" onclick="addNebiusProvider()"><i class="bi bi-plus-lg"></i> Add Nebius Qwen3</button></div><div class="model-settings-layout"><div class="model-settings-panel"><h3 id="custom-provider-form-title">Add provider</h3><div class="field-stack" id="custom-provider-form"><div class="settings-options"><label><span class="field-label">Provider ID</span><input class="form-input mono full-input" name="cp-id" placeholder="nebius" autocomplete="off"></label><label><span class="field-label">Name</span><input class="form-input full-input" name="cp-name" placeholder="Nebius" autocomplete="off"></label></div><label><span class="field-label">Base URL</span><input class="form-input mono full-input" name="cp-base-url" placeholder="https://api.example.com/v1" autocomplete="off"></label><div class="settings-options"><label><span class="field-label">API key</span><input class="form-input mono full-input" name="cp-api-key" type="password" placeholder="Provider API key" autocomplete="off"></label><label><span class="field-label">Timeout ms <span class="optional">optional</span></span><input class="form-input mono full-input" name="cp-timeout" placeholder="120000" autocomplete="off"></label></div><label class="switch-row"><input type="checkbox" name="cp-pass-reasoning"> Pass reasoning_effort</label><label><span class="field-label">Headers JSON <span class="optional">optional</span></span><textarea class="form-textarea" name="cp-headers" spellcheck="false">{}</textarea></label><label><span class="field-label">Models JSON</span><textarea class="form-textarea" name="cp-models" spellcheck="false">[{"id":"custom-chat-model","kind":"chat","supportsStreaming":true}]</textarea></label><div class="model-settings-actions"><button class="btn" onclick="clearCustomProviderForm()">Clear</button><button class="btn btn-primary" onclick="saveCustomProvider()"><i class="bi bi-check2"></i> Save provider</button></div></div></div><div class="model-settings-panel model-settings-list"><h3>Configured providers</h3><div id="custom-providers-content"></div></div></div></div>
   <div class="section" id="sec-model-routing"><div class="section-header"><h2>Model Routing</h2><span class="badge badge-gray" id="model-routing-count">0 models</span><input class="form-input model-filter" id="model-routing-filter" placeholder="Filter models" oninput="renderModelRouting()"></div><div id="model-routing-content"></div></div>
-  <div class="section" id="sec-llm-debug"><div class="section-header"><h2>LLM Debug</h2><span class="badge badge-gray" id="llm-debug-count">0 calls</span><span class="badge badge-orange">Memory only</span></div><div class="llm-debug-toolbar"><input class="form-input llm-debug-search" id="llm-debug-filter" placeholder="Filter model, path, request, response, error" oninput="renderLlmDebugLogs()"><select class="form-input" id="llm-debug-status" onchange="renderLlmDebugLogs()"><option value="all">All statuses</option><option value="error">Errors</option><option value="pending">Pending</option><option value="complete">Complete</option></select><select class="form-input" id="llm-debug-path" onchange="renderLlmDebugLogs()"><option value="all">All endpoints</option><option value="/chat/completions">Chat completions</option><option value="/responses">Responses</option><option value="/embeddings">Embeddings</option></select><button class="btn" onclick="loadLlmDebugLogs()">Refresh</button><button class="btn btn-danger" onclick="clearLlmDebugLogs()">Clear</button></div><div id="llm-debug-content"></div></div>
+  <div class="section" id="sec-llm-debug"><div class="section-header"><h2>LLM Debug</h2><span class="badge badge-gray" id="llm-debug-count">0 calls</span><span class="badge badge-orange">Memory only</span></div><div class="llm-debug-toolbar"><input class="form-input llm-debug-search" id="llm-debug-filter" placeholder="Filter model, path, request, response, error" oninput="renderLlmDebugLogs()"><select class="form-input" id="llm-debug-status" onchange="renderLlmDebugLogs()"><option value="all">All statuses</option><option value="error">Errors</option><option value="pending">Pending</option><option value="complete">Complete</option></select><select class="form-input" id="llm-debug-path" onchange="renderLlmDebugLogs()"><option value="all">All endpoints</option><option value="/chat/completions">Chat completions</option><option value="/responses">Responses</option><option value="/embeddings">Embeddings</option></select><button class="btn" onclick="loadLlmDebugLogs()"><i class="bi bi-arrow-clockwise"></i> Refresh</button><button class="btn btn-danger" onclick="clearLlmDebugLogs()"><i class="bi bi-trash"></i> Clear</button></div><div id="llm-debug-content"></div></div>
   <div class="section" id="sec-usage"><div class="section-header"><h2>Usage</h2></div><div id="usage-content"></div></div>
-  <div class="section" id="sec-settings"><div class="section-header"><h2>Settings</h2><button class="btn btn-primary" onclick="exportConfig()">Export Config</button></div><div id="settings-content"></div></div>
+  <div class="section" id="sec-settings"><div class="section-header"><h2>Settings</h2><button class="btn btn-primary" onclick="exportConfig()"><i class="bi bi-download"></i> Export Config</button></div><div id="settings-content"></div></div>
 </div>
 <script>
 var apiKey = sessionStorage.getItem('dashboard_api_key') || localStorage.getItem('dashboard_api_key') || ''
@@ -214,6 +547,20 @@ var llmDebugDetailLoading = {}
 var llmDebugListSignature = ''
 var llmDebugPanelState = {}
 var llmDebugPreScrollState = {}
+var sectionMeta = {
+  overview: { title: 'Overview', group: 'Monitor' },
+  sessions: { title: 'Sessions', group: 'Monitor' },
+  environments: { title: 'Environments', group: 'Monitor' },
+  flags: { title: 'Feature Flags', group: 'Control' },
+  replacements: { title: 'Replacements', group: 'Control' },
+  'model-redirects': { title: 'Model Redirects', group: 'Control' },
+  'model-settings': { title: 'Model Settings', group: 'Control' },
+  'custom-providers': { title: 'Custom Providers', group: 'Control' },
+  'model-routing': { title: 'Model Routing', group: 'Control' },
+  'llm-debug': { title: 'LLM Debug', group: 'Monitor' },
+  usage: { title: 'Usage', group: 'Monitor' },
+  settings: { title: 'Settings', group: 'System' },
+}
 
 function apiFetch(method, path, body) {
   var opts = { method: method, headers: { 'Content-Type': 'application/json' } }
@@ -223,6 +570,9 @@ function apiFetch(method, path, body) {
 }
 function esc(s) { if (s == null) return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;') }
 function escAttr(s) { return esc(s).replace(/'/g,'&#39;') }
+function emptyState(icon, message, detail) {
+  return '<div class="empty-state"><i class="bi ' + icon + '"></i><p>' + esc(message) + '</p>' + (detail ? '<p style="font-size:0.8rem;margin-top:6px">' + esc(detail) + '</p>' : '') + '</div>'
+}
 function timeAgo(ts) {
   if (!ts) return ''
   var diff = Date.now() - new Date(ts).getTime()
@@ -241,8 +591,9 @@ function showToast(message, type) {
   container.appendChild(el)
   setTimeout(function() { el.remove() }, type === 'error' ? 5000 : 3000)
 }
-function showLogin() { document.getElementById('login-screen').classList.add('visible'); document.getElementById('sidebar').style.display = 'none'; document.getElementById('main-content').style.display = 'none' }
-function hideLogin() { document.getElementById('login-screen').classList.remove('visible'); document.getElementById('sidebar').style.display = ''; document.getElementById('main-content').style.display = '' }
+function setElementDisplay(id, value) { var el = document.getElementById(id); if (el) el.style.display = value }
+function showLogin() { document.getElementById('login-screen').classList.add('visible'); setElementDisplay('sidebar', 'none'); setElementDisplay('main-content', 'none'); setElementDisplay('bottom-nav', 'none') }
+function hideLogin() { document.getElementById('login-screen').classList.remove('visible'); setElementDisplay('sidebar', ''); setElementDisplay('main-content', ''); setElementDisplay('bottom-nav', '') }
 
 function authenticate() {
   apiFetch('GET', '/dashboard/api/overview').then(function(res) {
@@ -269,6 +620,11 @@ function navigate(section) {
   Object.keys(refreshTimers).forEach(function(k) { clearInterval(refreshTimers[k]); delete refreshTimers[k] })
   Object.keys(eventTimers).forEach(function(k) { clearInterval(eventTimers[k]); delete eventTimers[k] })
   currentSection = section
+  var meta = sectionMeta[section] || sectionMeta.overview
+  var titleEl = document.getElementById('page-title')
+  var kickerEl = document.getElementById('page-kicker')
+  if (titleEl) titleEl.textContent = meta.title
+  if (kickerEl) kickerEl.textContent = meta.group
   document.querySelectorAll('.section').forEach(function(el) { el.classList.remove('active') })
   var secEl = document.getElementById('sec-' + section)
   if (secEl) secEl.classList.add('active')
@@ -288,12 +644,12 @@ function loadOverview() {
 }
 function renderOverview(d) {
   document.getElementById('overview-grid').innerHTML =
-    '<div class="stat-card green"><div class="label">Active Sessions</div><div class="value">' + esc(d.activeSessions) + '</div></div>' +
-    '<div class="stat-card purple"><div class="label">Direct Connect</div><div class="value">' + esc(d.directConnectCount) + '</div></div>' +
-    '<div class="stat-card blue"><div class="label">Environments</div><div class="value">' + esc(d.environmentsCount) + '</div></div>' +
-    '<div class="stat-card blue"><div class="label">Feature Flags</div><div class="value">' + esc(d.flagsCount) + '</div></div>' +
-    '<div class="stat-card orange"><div class="label">Server Uptime</div><div class="value">' + esc(d.uptime) + '</div></div>' +
-    '<div class="stat-card ' + (d.health === 'ok' ? 'green' : 'red') + '"><div class="label">Health</div><div class="value">' + esc(d.health) + '</div></div>'
+    '<div class="stat-card green"><span class="stat-icon"><i class="bi bi-terminal"></i></span><div class="label">Active Sessions</div><div class="value">' + esc(d.activeSessions) + '</div></div>' +
+    '<div class="stat-card purple"><span class="stat-icon"><i class="bi bi-plug"></i></span><div class="label">Direct Connect</div><div class="value">' + esc(d.directConnectCount) + '</div></div>' +
+    '<div class="stat-card blue"><span class="stat-icon"><i class="bi bi-hdd-network"></i></span><div class="label">Environments</div><div class="value">' + esc(d.environmentsCount) + '</div></div>' +
+    '<div class="stat-card blue"><span class="stat-icon"><i class="bi bi-flag"></i></span><div class="label">Feature Flags</div><div class="value">' + esc(d.flagsCount) + '</div></div>' +
+    '<div class="stat-card orange"><span class="stat-icon"><i class="bi bi-clock-history"></i></span><div class="label">Server Uptime</div><div class="value">' + esc(d.uptime) + '</div></div>' +
+    '<div class="stat-card ' + (d.health === 'ok' ? 'green' : 'red') + '"><span class="stat-icon"><i class="bi bi-activity"></i></span><div class="label">Health</div><div class="value">' + esc(d.health) + '</div></div>'
 }
 
 function loadSessions() {
@@ -309,10 +665,7 @@ function renderSessions(sessions) {
   if (idle > 0) bh += '<span class="badge badge-gray">' + idle + ' Idle</span> '
   if (action > 0) bh += '<span class="badge badge-orange">' + action + ' Action</span> '
   document.getElementById('session-badges').innerHTML = bh
-  if (sessions.length === 0) { document.getElementById('sessions-list').innerHTML = '<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg><p>No active sessions. Sessions are created when Claude Code connects.</p></div>'; return }
-  var eyeSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>'
-  var trashSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>'
-  var rcSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>'
+  if (sessions.length === 0) { document.getElementById('sessions-list').innerHTML = emptyState('bi-terminal', 'No active sessions. Sessions are created when Claude Code connects.'); return }
   var html = '<div class="session-list">'
   sessions.forEach(function(s) {
     var dotClass = s.state === 'running' ? 'running' : s.state === 'requires_action' ? 'requires_action' : s.state === 'connected' ? 'connected' : 'idle'
@@ -324,9 +677,9 @@ function renderSessions(sessions) {
     html += '<span class="badge ' + stateBadge + '">' + esc(s.state || 'unknown') + '</span>'
     html += '<span class="badge ' + typeBadge + '">' + esc(s.type) + '</span>'
     html += '<span class="session-actions">'
-    if (s.type === 'code-session') html += '<button class="icon-btn" onclick="window.open(\\'/remote?session=' + esc(s.id) + '\\',\\'_blank\\')" title="Remote Control" style="color:#22C55E;border-color:#22C55E40">' + rcSvg + '</button>'
-    if (s.type === 'code-session') html += '<button class="icon-btn" onclick="toggleEvents(\\'' + esc(s.id) + '\\')" title="View events">' + eyeSvg + '</button>'
-    html += '<button class="icon-btn danger" onclick="destroySession(\\'' + esc(s.id) + '\\',\\'' + esc(s.type) + '\\')" title="Remove">' + trashSvg + '</button>'
+    if (s.type === 'code-session') html += '<button class="icon-btn success" onclick="window.open(\\'/remote?session=' + esc(s.id) + '\\',\\'_blank\\')" title="Remote Control"><i class="bi bi-display"></i></button>'
+    if (s.type === 'code-session') html += '<button class="icon-btn" onclick="toggleEvents(\\'' + esc(s.id) + '\\')" title="View events"><i class="bi bi-eye"></i></button>'
+    html += '<button class="icon-btn danger" onclick="destroySession(\\'' + esc(s.id) + '\\',\\'' + esc(s.type) + '\\')" title="Remove"><i class="bi bi-trash"></i></button>'
     html += '</span></div><div class="session-meta"><span class="session-id">' + esc(s.id) + '</span>'
     if (s.createdAt) html += '<span>' + timeAgo(s.createdAt) + '</span>'
     html += '</div>'
@@ -345,7 +698,7 @@ function toggleEvents(id) {
 function loadEvents(id) { apiFetch('GET', '/dashboard/api/sessions/' + encodeURIComponent(id) + '/events').then(function(r) { if (r.ok) return r.json() }).then(function(ev) { if (ev) renderEvents(id, ev) }).catch(function(){}) }
 function renderEvents(id, events) {
   var panel = document.getElementById('events-' + id); if (!panel) return
-  if (!events || events.length === 0) { panel.innerHTML = '<div style="color:#94A3B8;text-align:center;padding:12px">No events yet</div>'; return }
+  if (!events || events.length === 0) { panel.innerHTML = '<div style="color:#94a3b8;text-align:center;padding:12px">No events yet</div>'; return }
   var html = ''
   events.forEach(function(ev, i) {
     var payload = ''
@@ -369,7 +722,7 @@ function loadEnvironments() {
   refreshTimers.environments = setInterval(function() { if (currentSection !== 'environments') return; apiFetch('GET', '/dashboard/api/environments').then(function(r) { if (r.ok) return r.json() }).then(function(d) { if (d) renderEnvironments(d) }).catch(function(){}) }, 30000)
 }
 function renderEnvironments(envs) {
-  if (!envs || envs.length === 0) { document.getElementById('environments-content').innerHTML = '<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg><p>No environments registered. Use claude remote-control to register.</p></div>'; return }
+  if (!envs || envs.length === 0) { document.getElementById('environments-content').innerHTML = emptyState('bi-hdd-network', 'No environments registered. Use claude remote-control to register.'); return }
   var html = '<div class="table-scroll"><table><thead><tr><th>ID</th><th>Machine</th><th>Directory</th><th>Branch</th><th>Max Sessions</th><th>Pending</th><th>Created</th><th></th></tr></thead><tbody>'
   envs.forEach(function(env) {
     html += '<tr><td class="mono" style="font-size:11px">' + esc(env.id) + '</td><td>' + esc(env.machineName) + '</td><td class="mono" style="font-size:12px">' + esc(env.directory) + '</td><td>' + esc(env.branch || '-') + '</td><td>' + esc(env.maxSessions) + '</td><td>' + esc(env.pendingWorkCount) + '</td><td>' + timeAgo(env.createdAt) + '</td><td style="white-space:nowrap"><button class="btn btn-primary" style="font-size:0.78rem;padding:4px 10px;margin-right:4px" onclick="startEnvSession(\\'' + esc(env.id) + '\\')">Start Session</button><button class="btn btn-danger" style="font-size:0.78rem;padding:4px 10px" onclick="deregisterEnv(\\'' + esc(env.id) + '\\')">Deregister</button></td></tr>'
@@ -394,13 +747,13 @@ function loadFlags() {
 }
 function renderFlags() {
   var entries = Object.entries(flagsData)
-  if (entries.length === 0) { document.getElementById('flags-content').innerHTML = '<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg><p>No feature flags configured.</p></div>'; return }
+  if (entries.length === 0) { document.getElementById('flags-content').innerHTML = emptyState('bi-flag', 'No feature flags configured.'); return }
   entries.sort(function(a, b) { return a[0].localeCompare(b[0]) })
   var html = '<div class="table-scroll"><table><thead><tr><th>Flag</th><th>Value</th><th>Actions</th></tr></thead><tbody>'
   entries.forEach(function(entry) {
     var name = entry[0], value = entry[1], isBool = typeof value === 'boolean'
     var displayVal = typeof value === 'object' ? JSON.stringify(value) : String(value)
-    html += '<tr><td class="mono" style="font-size:0.85rem">' + esc(name) + '</td><td style="font-size:0.85rem;color:#94A3B8">' + esc(displayVal) + '</td><td style="white-space:nowrap">'
+    html += '<tr><td class="mono" style="font-size:0.85rem">' + esc(name) + '</td><td style="font-size:0.85rem;color:var(--muted)">' + esc(displayVal) + '</td><td style="white-space:nowrap">'
     if (isBool) html += '<button class="toggle ' + (value ? 'on' : 'off') + '" onclick="toggleFlag(\\'' + esc(name) + '\\')"></button> '
     html += '<button class="btn btn-danger" style="font-size:0.78rem;padding:4px 10px" onclick="deleteFlag(\\'' + esc(name) + '\\')">Delete</button></td></tr>'
   })
@@ -427,7 +780,7 @@ function loadReplacements() {
   apiFetch('GET', '/dashboard/api/replacements').then(function(r) { if (r.ok) return r.json() }).then(function(d) { if (d) { replacementsData = d; renderReplacements() } }).catch(function() { showToast('Failed to load replacements', 'error') })
 }
 function renderReplacements() {
-  if (!replacementsData || replacementsData.length === 0) { document.getElementById('replacements-content').innerHTML = '<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg><p>No replacements configured.</p></div>'; return }
+  if (!replacementsData || replacementsData.length === 0) { document.getElementById('replacements-content').innerHTML = emptyState('bi-arrow-left-right', 'No replacements configured.'); return }
   var html = '<div class="table-scroll"><table><thead><tr><th>Name</th><th>Pattern</th><th>Replacement</th><th>Type</th><th>Enabled</th><th>Actions</th></tr></thead><tbody>'
   replacementsData.forEach(function(r) {
     var isSys = r.isSystem, typeBadge = r.isRegex ? '<span class="badge badge-purple">regex</span>' : '<span class="badge badge-blue">string</span>'
@@ -485,22 +838,22 @@ function conflictLabel(conflicts) {
   return '<span class="badge badge-red" title="Conflicts with: ' + esc(names) + '">' + conflicts.length + ' conflict' + (conflicts.length === 1 ? '' : 's') + '</span>'
 }
 function renderModelRedirects() {
-  if (!modelRedirectsData || modelRedirectsData.length === 0) { document.getElementById('model-redirects-content').innerHTML = '<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 12h13"/><path d="M16 6l6 6-6 6"/><path d="M3 6v12"/></svg><p>No model redirects configured.</p><p style="font-size:0.8rem;margin-top:6px">Add a redirect to silently route one requested model to another.</p></div>'; return }
+  if (!modelRedirectsData || modelRedirectsData.length === 0) { document.getElementById('model-redirects-content').innerHTML = emptyState('bi-signpost-split', 'No model redirects configured.', 'Add a redirect to silently route one requested model to another.'); return }
   var html = '<div class="table-scroll"><table><thead><tr><th>Order</th><th>Name</th><th>Source</th><th></th><th>Target</th><th>Conflicts</th><th>Enabled</th><th>Actions</th></tr></thead><tbody>'
   modelRedirectsData.forEach(function(r, index) {
     if (editingModelRedirectId === r.id) {
-      html += '<tr id="model-redirect-edit-' + esc(r.id) + '"><td style="white-space:nowrap"><button class="btn" title="Move up" style="font-size:0.78rem;padding:4px 8px" disabled>&uarr;</button> <button class="btn" title="Move down" style="font-size:0.78rem;padding:4px 8px" disabled>&darr;</button></td>'
+      html += '<tr id="model-redirect-edit-' + esc(r.id) + '"><td style="white-space:nowrap"><button class="btn" title="Move up" style="font-size:0.78rem;padding:4px 8px" disabled><i class="bi bi-arrow-up"></i></button> <button class="btn" title="Move down" style="font-size:0.78rem;padding:4px 8px" disabled><i class="bi bi-arrow-down"></i></button></td>'
       html += '<td><input class="form-input" name="mr-edit-name" value="' + esc(r.name || '') + '" placeholder="Name" style="min-width:120px;width:100%"></td>'
       html += '<td><input class="form-input mono" name="mr-edit-source" value="' + esc(r.sourceModel) + '" placeholder="Source model" style="min-width:200px;width:100%;margin-bottom:6px">' + sourceEffortSelect('mr-edit-source-effort', r.sourceEffort) + '</td>'
-      html += '<td style="color:#94A3B8">&rarr;</td><td><input class="form-input mono" name="mr-edit-target" value="' + esc(r.targetModel) + '" placeholder="Target model" style="min-width:200px;width:100%;margin-bottom:6px">' + targetEffortSelect('mr-edit-target-effort', r.targetEffort) + '</td>'
+      html += '<td style="color:var(--muted)"><i class="bi bi-arrow-right"></i></td><td><input class="form-input mono" name="mr-edit-target" value="' + esc(r.targetModel) + '" placeholder="Target model" style="min-width:200px;width:100%;margin-bottom:6px">' + targetEffortSelect('mr-edit-target-effort', r.targetEffort) + '</td>'
       html += '<td>' + conflictLabel(r.conflicts) + '</td><td><button class="toggle ' + (r.enabled !== false ? 'on' : 'off') + '" onclick="toggleModelRedirect(\\'' + esc(r.id) + '\\')"></button></td>'
       html += '<td style="white-space:nowrap"><button class="btn btn-primary" style="font-size:0.78rem;padding:4px 10px" onclick="saveModelRedirect(\\'' + esc(r.id) + '\\')">Save</button> <button class="btn" style="font-size:0.78rem;padding:4px 10px" onclick="cancelModelRedirectEdit()">Cancel</button></td></tr>'
       return
     }
     var upDisabled = index === 0 ? ' disabled' : ''
     var downDisabled = index === modelRedirectsData.length - 1 ? ' disabled' : ''
-    html += '<tr><td style="white-space:nowrap"><button class="btn" title="Move up" style="font-size:0.78rem;padding:4px 8px"' + upDisabled + ' onclick="moveModelRedirect(&quot;' + esc(r.id) + '&quot;,&quot;up&quot;)">&uarr;</button> <button class="btn" title="Move down" style="font-size:0.78rem;padding:4px 8px"' + downDisabled + ' onclick="moveModelRedirect(&quot;' + esc(r.id) + '&quot;,&quot;down&quot;)">&darr;</button></td>'
-    html += '<td>' + esc(r.name || '-') + '</td><td><div class="mono" style="font-size:12px">' + esc(r.sourceModel) + '</div><span class="badge badge-blue">' + esc(effortLabel(r.sourceEffort, false)) + '</span></td><td style="color:#94A3B8">&rarr;</td><td><div class="mono" style="font-size:12px">' + esc(r.targetModel) + '</div><span class="badge badge-purple">' + esc(effortLabel(r.targetEffort, true)) + '</span></td><td>' + conflictLabel(r.conflicts) + '</td><td>'
+    html += '<tr><td style="white-space:nowrap"><button class="btn" title="Move up" style="font-size:0.78rem;padding:4px 8px"' + upDisabled + ' onclick="moveModelRedirect(&quot;' + esc(r.id) + '&quot;,&quot;up&quot;)"><i class="bi bi-arrow-up"></i></button> <button class="btn" title="Move down" style="font-size:0.78rem;padding:4px 8px"' + downDisabled + ' onclick="moveModelRedirect(&quot;' + esc(r.id) + '&quot;,&quot;down&quot;)"><i class="bi bi-arrow-down"></i></button></td>'
+    html += '<td>' + esc(r.name || '-') + '</td><td><div class="mono" style="font-size:12px">' + esc(r.sourceModel) + '</div><span class="badge badge-blue">' + esc(effortLabel(r.sourceEffort, false)) + '</span></td><td style="color:var(--muted)"><i class="bi bi-arrow-right"></i></td><td><div class="mono" style="font-size:12px">' + esc(r.targetModel) + '</div><span class="badge badge-purple">' + esc(effortLabel(r.targetEffort, true)) + '</span></td><td>' + conflictLabel(r.conflicts) + '</td><td>'
     html += '<button class="toggle ' + (r.enabled !== false ? 'on' : 'off') + '" onclick="toggleModelRedirect(\\'' + esc(r.id) + '\\')"></button>'
     html += '</td><td style="white-space:nowrap"><button class="btn" style="font-size:0.78rem;padding:4px 10px" onclick="editModelRedirect(\\'' + esc(r.id) + '\\')">Edit</button> <button class="btn btn-danger" style="font-size:0.78rem;padding:4px 10px" onclick="deleteModelRedirect(\\'' + esc(r.id) + '\\')">Delete</button></td></tr>'
   })
@@ -608,7 +961,7 @@ function requestParamMultiSelect(name, values) {
 }
 function renderModelSettings() {
   var content = document.getElementById('model-settings-content')
-  if (!modelSettingsData || modelSettingsData.length === 0) { content.innerHTML = '<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 8h10"/><path d="M7 12h4"/><path d="M13 12h4"/><path d="M7 16h10"/></svg><p>No per-model settings configured.</p></div>'; return }
+  if (!modelSettingsData || modelSettingsData.length === 0) { content.innerHTML = emptyState('bi-sliders', 'No per-model settings configured.'); return }
   var html = '<div class="table-scroll"><table><thead><tr><th>Model</th><th>Sentry Name</th><th>Supported Efforts</th><th>Default</th><th>Implicit Default</th><th>Virtual Variants</th><th>Assistant Prefill</th><th>Omit Params</th><th>Actions</th></tr></thead><tbody>'
   modelSettingsData.forEach(function(s) {
     if (editingModelSettingsModel === s.model) {
@@ -708,7 +1061,7 @@ function renderCustomProviders() {
   var content = document.getElementById('custom-providers-content')
   var count = document.getElementById('custom-provider-count')
   if (count) count.textContent = customProvidersData.length + ' provider' + (customProvidersData.length === 1 ? '' : 's')
-  if (!customProvidersData || customProvidersData.length === 0) { content.innerHTML = '<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 3v18"/><path d="M3 8h18"/><path d="M3 16h18"/></svg><p>No custom providers configured.</p></div>'; return }
+  if (!customProvidersData || customProvidersData.length === 0) { content.innerHTML = emptyState('bi-plugin', 'No custom providers configured.'); return }
   var html = '<div class="table-scroll"><table><thead><tr><th>Provider</th><th>Base URL</th><th>API Key</th><th>Models</th><th>Actions</th></tr></thead><tbody>'
   customProvidersData.forEach(function(provider) {
     var models = (provider.models || []).map(function(model) { var details = [model.kind]; if (model.aliases && model.aliases.length) details.push('aliases: ' + model.aliases.join(', ')); if (model.dimensions) details.push(model.dimensions + ' dims'); return '<div class="mono" style="font-size:12px;margin-bottom:4px">' + esc(model.id) + ' <span class="badge badge-blue">' + esc(details.join(' | ')) + '</span></div>' }).join('')
@@ -800,8 +1153,8 @@ function renderModelRouting() {
   var accounts = modelRoutingData.accounts || []
   var models = modelRoutingData.models || []
   if (count) count.textContent = models.length + ' models'
-  if (!modelRoutingData.multiToken) { content.innerHTML = '<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 2v20"/><path d="M2 12h20"/></svg><p>Model routing controls are available in multi-token mode.</p></div>'; return }
-  if (accounts.length === 0 || models.length === 0) { content.innerHTML = '<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 2v20"/><path d="M2 12h20"/></svg><p>No account model data is available yet.</p></div>'; return }
+  if (!modelRoutingData.multiToken) { content.innerHTML = emptyState('bi-diagram-3', 'Model routing controls are available in multi-token mode.'); return }
+  if (accounts.length === 0 || models.length === 0) { content.innerHTML = emptyState('bi-diagram-3', 'No account model data is available yet.'); return }
   var filtered = models.filter(function(model) { return !query || model.id.toLowerCase().indexOf(query) !== -1 || (model.name || '').toLowerCase().indexOf(query) !== -1 || (model.vendor || '').toLowerCase().indexOf(query) !== -1 })
   if (filtered.length === 0) { content.innerHTML = '<div class="empty-state"><p>No models match this filter.</p></div>'; return }
   var html = '<div class="table-scroll"><table><thead><tr><th>Model</th>'
@@ -863,16 +1216,16 @@ function formatLabel(key) { return key.split('_').map(function(w) { return w.cha
 function formatNumber(n) { if (n == null) return '-'; if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M'; if (n >= 1000) return (n / 1000).toFixed(1) + 'K'; return String(n) }
 function formatResetTime(ts) { if (!ts) return ''; var d = new Date(ts * 1000); var now = new Date(); var diff = d.getTime() - now.getTime(); if (diff <= 0) return 'now'; var h = Math.floor(diff / 3600000); var m = Math.floor((diff % 3600000) / 60000); if (h > 24) return Math.floor(h / 24) + 'd ' + (h % 24) + 'h'; if (h > 0) return h + 'h ' + m + 'm'; return m + 'm' }
 function renderUsage(data) {
-  if (!data || Object.keys(data).length === 0) { document.getElementById('usage-content').innerHTML = '<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg><p>No usage data available.</p></div>'; return }
+  if (!data || Object.keys(data).length === 0) { document.getElementById('usage-content').innerHTML = emptyState('bi-bar-chart', 'No usage data available.'); return }
   var html = ''
   Object.keys(data).forEach(function(key) {
     var section = data[key]
     if (!section || typeof section !== 'object') return
     var sectionLabel = formatLabel(key)
-    html += '<div style="margin-bottom:24px"><h3 style="font-size:1rem;color:#F8FAFC;margin-bottom:12px">' + esc(sectionLabel) + '</h3>'
+    html += '<div style="margin-bottom:24px"><h3 style="font-size:1rem;color:var(--text);margin-bottom:12px">' + esc(sectionLabel) + '</h3>'
     if (section.utilization != null) {
       var pct = Math.round(section.utilization * 100)
-      var color = pct > 90 ? '#EF4444' : pct > 70 ? '#F97316' : '#22C55E'
+      var color = pct > 90 ? 'var(--red)' : pct > 70 ? 'var(--amber)' : 'var(--green)'
       html += '<div class="stat-card blue" style="margin-bottom:10px"><div class="label">Utilization</div><div class="value">' + pct + '%</div><div class="progress-bar"><div class="progress-fill" style="width:' + pct + '%;background:' + color + '"></div></div></div>'
     }
     html += '<div class="stat-grid">'
@@ -907,7 +1260,7 @@ function renderSettings(data) {
     if (skip[key]) return
     var val = data[key], label = labels[key] || key, display
     if (typeof val === 'boolean') display = val ? '<span class="bool-yes">Yes</span>' : '<span class="bool-no">No</span>'
-    else if (val == null) display = '<span style="color:#94A3B8">-</span>'
+    else if (val == null) display = '<span style="color:var(--muted)">-</span>'
     else display = esc(String(val))
     html += '<div class="setting-row"><div class="setting-key">' + esc(label) + '</div><div class="setting-val">' + display + '</div></div>'
   })
@@ -971,7 +1324,7 @@ function exportConfig() {
 
 function renderIpAllowlistSection() {
   var html = '<div class="section-header" style="margin-top:24px"><h2>IP Allowlist</h2><span class="badge badge-gray">Used by /transcribe</span><button class="btn" onclick="discoverPublicIps(true)">Detect public IPs</button></div>'
-  html += '<div class="model-settings-panel"><div class="form-row" style="margin-top:0"><input class="form-input mono" id="ip-allowlist-input" placeholder="IPv4 or IPv6 address" style="flex:1;min-width:260px"><button class="btn btn-primary" onclick="addIpAllowlistEntry()">Add IP</button></div><div id="ip-allowlist-detected" style="margin-top:12px;color:#94A3B8;font-size:0.82rem"></div>'
+  html += '<div class="model-settings-panel"><div class="form-row" style="margin-top:0"><input class="form-input mono" id="ip-allowlist-input" placeholder="IPv4 or IPv6 address" style="flex:1;min-width:260px"><button class="btn btn-primary" onclick="addIpAllowlistEntry()"><i class="bi bi-plus-lg"></i> Add IP</button></div><div id="ip-allowlist-detected" style="margin-top:12px;color:var(--muted);font-size:0.82rem"></div>'
   if (!ipAllowlistData.length) {
     html += '<div class="empty-state" style="padding:28px 16px"><p>No managed IPs yet.</p></div></div>'
     return html
