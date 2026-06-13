@@ -51,6 +51,7 @@ import {
   handleUpdateModelRedirect,
   handleUpsertCustomProvider,
 } from "./api"
+import { handleReplayLlmDebugLog } from "./llm-debug-replay"
 import { getDashboardPage } from "./page"
 import { handleExportSettings } from "./settings-export"
 
@@ -181,6 +182,7 @@ dashboardRoutes.delete("/api/ip-allowlist/:ip", handleDeleteIpAllowlistEntry)
 
 // LLM Debug Logs
 dashboardRoutes.get("/api/llm-debug", handleListLlmDebugLogs)
+dashboardRoutes.post("/api/llm-debug/:id/replay", handleReplayLlmDebugLog)
 dashboardRoutes.get("/api/llm-debug/:id", handleGetLlmDebugLog)
 dashboardRoutes.delete("/api/llm-debug", handleClearLlmDebugLogs)
 

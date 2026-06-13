@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, expect, test } from "bun:test"
+import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
 
 import { clearLlmDebugLogs, startLlmDebugLog } from "../src/lib/llm-debug-log"
 import { state } from "../src/lib/state"
@@ -6,14 +6,39 @@ import { getDashboardPage } from "../src/routes/dashboard/page"
 import { server } from "../src/server"
 
 const originalApiKeyAuth = state.apiKeyAuth
+const originalFetch = globalThis.fetch
+
+const fetchMock = mock((_url: string | URL | Request, _init?: RequestInit) => {
+  return new Response(
+    [
+      'data: {"choices":[{"finish_reason":"content_filter","index":0,"delta":{"content":null}}],"id":"msg_replay","usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}',
+      "data: [DONE]",
+    ].join("\n\n") + "\n\n",
+    {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    },
+  )
+})
+
+beforeAll(() => {
+  ;(globalThis as unknown as { fetch: typeof fetch }).fetch =
+    fetchMock as unknown as typeof fetch
+})
 
 beforeEach(() => {
+  fetchMock.mockClear()
   clearLlmDebugLogs()
   state.apiKeyAuth = undefined
+  state.accountType = "individual"
+  state.copilotToken = "fresh-copilot-token"
+  state.githubToken = "github-token"
+  state.isMultiToken = false
 })
 
 afterAll(() => {
   state.apiKeyAuth = originalApiKeyAuth
+  ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
 })
 
 test("serves LLM debug logs through dashboard API", async () => {
@@ -56,4 +81,120 @@ test("renders LLM debug copy helper without an inline script syntax break", () =
 
   expect(page).toContain("rows.join(String.fromCharCode(10))")
   expect(page).not.toContain("rows.join('\n')")
+})
+
+test("replays a chat completions debug log with fresh auth and parses SSE metadata", async () => {
+  const id = startLlmDebugLog({
+    method: "POST",
+    path: "/chat/completions",
+    requestBody: JSON.stringify({
+      messages: [{ role: "user", content: "Hello" }],
+      model: "claude-fable-5",
+      stream: true,
+    }),
+    requestHeaders: { authorization: "Bearer captured-token" },
+    requestId: "req-replay",
+    url: "https://api.githubcopilot.com/chat/completions",
+  })
+
+  const response = await server.request(
+    `/dashboard/api/llm-debug/${id}/replay`,
+    {
+      body: JSON.stringify({
+        body: {
+          messages: [{ role: "user", content: "Hello edited" }],
+          model: "claude-fable-5",
+          stream: true,
+        },
+      }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    },
+  )
+
+  expect(response.status).toBe(200)
+  const body = (await response.json()) as {
+    finishReason: string
+    responseId: string
+    streamEvents: Array<unknown>
+    usage: { prompt_tokens: number }
+  }
+  expect(body.finishReason).toBe("content_filter")
+  expect(body.responseId).toBe("msg_replay")
+  expect(body.usage.prompt_tokens).toBe(10)
+  expect(body.streamEvents.length).toBeGreaterThan(0)
+
+  const upstreamInit = fetchMock.mock.calls[0]?.[1] as
+    | { body?: string; headers?: Record<string, string> }
+    | undefined
+  expect(upstreamInit?.headers?.Authorization).toBe(
+    "Bearer fresh-copilot-token",
+  )
+  expect(upstreamInit?.headers?.Authorization).not.toBe("Bearer captured-token")
+  expect(upstreamInit?.body).toContain("Hello edited")
+})
+
+test("rejects invalid replay requests", async () => {
+  const missingResponse = await server.request(
+    "/dashboard/api/llm-debug/missing/replay",
+    {
+      body: JSON.stringify({ body: {} }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    },
+  )
+  expect(missingResponse.status).toBe(404)
+
+  const embeddingsId = startLlmDebugLog({
+    method: "POST",
+    path: "/embeddings",
+    requestBody: JSON.stringify({ input: "hello", model: "embed" }),
+    requestHeaders: {},
+    url: "https://api.githubcopilot.com/embeddings",
+  })
+  const unsupportedResponse = await server.request(
+    `/dashboard/api/llm-debug/${embeddingsId}/replay`,
+    {
+      body: JSON.stringify({ body: { input: "hello", model: "embed" } }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    },
+  )
+  expect(unsupportedResponse.status).toBe(400)
+
+  const chatId = startLlmDebugLog({
+    method: "POST",
+    path: "/chat/completions",
+    requestBody: JSON.stringify({ messages: [], model: "gpt" }),
+    requestHeaders: {},
+    url: "https://api.githubcopilot.com/chat/completions",
+  })
+  const invalidJsonResponse = await server.request(
+    `/dashboard/api/llm-debug/${chatId}/replay`,
+    {
+      body: JSON.stringify({ body: "{nope" }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    },
+  )
+  expect(invalidJsonResponse.status).toBe(400)
+
+  const missingModelResponse = await server.request(
+    `/dashboard/api/llm-debug/${chatId}/replay`,
+    {
+      body: JSON.stringify({ body: { messages: [] } }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    },
+  )
+  expect(missingModelResponse.status).toBe(400)
+})
+
+test("renders LLM replay UI helpers", () => {
+  const page = getDashboardPage()
+
+  expect(page).toContain("Replay")
+  expect(page).toContain("openLlmReplay")
+  expect(page).toContain("runLlmReplay")
+  expect(page).toContain("sec-llm-replay")
 })

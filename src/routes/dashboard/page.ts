@@ -322,6 +322,33 @@ export function getDashboardPage(): string {
   .debug-panel-body { padding: 12px } .debug-panel-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 8px; color: var(--muted); font-size: 0.78rem } .debug-empty { color: var(--muted); padding: 14px; text-align: center; font-size: 0.85rem }
   .debug-kv { display: grid; grid-template-columns: minmax(110px, 180px) minmax(0, 1fr); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin-bottom: 12px } .debug-kv-key, .debug-kv-val { padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 11px; word-break: break-word } .debug-kv-key { color: var(--muted); background: var(--surface-soft); font-family: monospace } .debug-kv-val { color: var(--muted-strong); font-family: monospace } .debug-kv-key:nth-last-child(2), .debug-kv-val:last-child { border-bottom: none }
   .debug-pre { max-height: 360px; overflow: auto; padding: 12px; background: #0f172a; border: 1px solid #273349; border-radius: 8px; color: #e2e8f0; font-family: monospace; font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word }
+  .replay-layout { display: grid; grid-template-columns: minmax(360px, 1.15fr) minmax(320px, 0.85fr); gap: 16px; align-items: start }
+  .replay-panel { min-width: 0; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); box-shadow: var(--shadow); overflow: hidden }
+  .replay-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; padding: 12px 14px; border-bottom: 1px solid var(--border); background: var(--surface-soft) }
+  .replay-panel-head h3 { margin: 0; font-size: 0.95rem; font-weight: 850 }
+  .replay-panel-body { padding: 14px; min-width: 0 }
+  .replay-tabs { display: inline-flex; gap: 6px; padding: 4px; border: 1px solid var(--border); border-radius: 8px; background: #fff }
+  .replay-tab { min-height: 30px; border: 0; border-radius: 6px; padding: 5px 10px; background: transparent; color: var(--muted-strong); font-size: 0.78rem; font-weight: 850; cursor: pointer }
+  .replay-tab.active { background: #dbeafe; color: #1d4ed8 }
+  .replay-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px }
+  .replay-field { display: flex; flex-direction: column; gap: 6px; min-width: 0 }
+  .replay-field > span { color: var(--muted-strong); font-size: 0.76rem; font-weight: 850 }
+  .replay-editor { display: flex; flex-direction: column; gap: 12px }
+  .replay-message { border: 1px solid var(--border); border-radius: 8px; background: var(--surface-soft); padding: 12px }
+  .replay-message-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px }
+  .replay-message-head select { max-width: 150px }
+  .replay-message textarea, .replay-json-editor, .replay-response-pre { width: 100%; min-height: 120px; border: 1px solid var(--border-strong); border-radius: 8px; padding: 10px; background: #fff; color: var(--text); font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; line-height: 1.45; resize: vertical; outline: none }
+  .replay-json-editor { min-height: 560px; background: #0f172a; color: #e2e8f0; border-color: #273349 }
+  .replay-response-pre { min-height: 260px; max-height: 560px; overflow: auto; background: #0f172a; color: #e2e8f0; border-color: #273349; white-space: pre-wrap; word-break: break-word }
+  .replay-summary-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px }
+  .replay-summary-card { border: 1px solid var(--border); border-radius: 8px; padding: 10px; background: var(--surface-soft); min-width: 0 }
+  .replay-summary-card span { display: block; color: var(--muted); font-size: 0.7rem; font-weight: 850; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 5px }
+  .replay-summary-card strong { display: block; color: var(--text); font-size: 0.86rem; font-family: "SFMono-Regular", Consolas, monospace; overflow-wrap: anywhere }
+  .replay-history { display: flex; flex-direction: column; gap: 8px; margin-top: 12px }
+  .replay-history-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; border: 1px solid var(--border); border-radius: 8px; padding: 10px; background: var(--surface-soft); font-size: 0.82rem }
+  .replay-history-item .mono { color: var(--muted-strong); font-size: 0.76rem }
+  .replay-action-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-top: 12px }
+  .replay-muted { color: var(--muted); font-size: 0.82rem }
   .btn {
     min-height: 36px;
     display: inline-flex;
@@ -520,6 +547,7 @@ export function getDashboardPage(): string {
   <div class="section" id="sec-custom-providers"><div class="section-header"><h2>Custom Providers</h2><span class="badge badge-gray" id="custom-provider-count">0 providers</span><button class="btn" onclick="addNebiusProvider()"><i class="bi bi-plus-lg"></i> Add Nebius Qwen3</button></div><div class="model-settings-layout"><div class="model-settings-panel"><h3 id="custom-provider-form-title">Add provider</h3><div class="field-stack" id="custom-provider-form"><div class="settings-options"><label><span class="field-label">Provider ID</span><input class="form-input mono full-input" name="cp-id" placeholder="nebius" autocomplete="off"></label><label><span class="field-label">Name</span><input class="form-input full-input" name="cp-name" placeholder="Nebius" autocomplete="off"></label></div><label><span class="field-label">Base URL</span><input class="form-input mono full-input" name="cp-base-url" placeholder="https://api.example.com/v1" autocomplete="off"></label><div class="settings-options"><label><span class="field-label">API key</span><input class="form-input mono full-input" name="cp-api-key" type="password" placeholder="Provider API key" autocomplete="off"></label><label><span class="field-label">Timeout ms <span class="optional">optional</span></span><input class="form-input mono full-input" name="cp-timeout" placeholder="120000" autocomplete="off"></label></div><label class="switch-row"><input type="checkbox" name="cp-pass-reasoning"> Pass reasoning_effort</label><label><span class="field-label">Headers JSON <span class="optional">optional</span></span><textarea class="form-textarea" name="cp-headers" spellcheck="false">{}</textarea></label><label><span class="field-label">Models JSON</span><textarea class="form-textarea" name="cp-models" spellcheck="false">[{"id":"custom-chat-model","kind":"chat","supportsStreaming":true}]</textarea></label><div class="model-settings-actions"><button class="btn" onclick="clearCustomProviderForm()">Clear</button><button class="btn btn-primary" onclick="saveCustomProvider()"><i class="bi bi-check2"></i> Save provider</button></div></div></div><div class="model-settings-panel model-settings-list"><h3>Configured providers</h3><div id="custom-providers-content"></div></div></div></div>
   <div class="section" id="sec-model-routing"><div class="section-header"><h2>Model Routing</h2><span class="badge badge-gray" id="model-routing-count">0 models</span><input class="form-input model-filter" id="model-routing-filter" placeholder="Filter models" oninput="renderModelRouting()"></div><div id="model-routing-content"></div></div>
   <div class="section" id="sec-llm-debug"><div class="section-header"><h2>LLM Debug</h2><span class="badge badge-gray" id="llm-debug-count">0 calls</span><span class="badge badge-orange">Memory only</span></div><div class="llm-debug-toolbar"><input class="form-input llm-debug-search" id="llm-debug-filter" placeholder="Filter model, path, request, response, error" oninput="renderLlmDebugLogs()"><select class="form-input" id="llm-debug-status" onchange="renderLlmDebugLogs()"><option value="all">All statuses</option><option value="error">Errors</option><option value="pending">Pending</option><option value="complete">Complete</option></select><select class="form-input" id="llm-debug-path" onchange="renderLlmDebugLogs()"><option value="all">All endpoints</option><option value="/chat/completions">Chat completions</option><option value="/responses">Responses</option><option value="/embeddings">Embeddings</option></select><button class="btn" onclick="loadLlmDebugLogs()"><i class="bi bi-arrow-clockwise"></i> Refresh</button><button class="btn btn-danger" onclick="clearLlmDebugLogs()"><i class="bi bi-trash"></i> Clear</button></div><div id="llm-debug-content"></div></div>
+  <div class="section" id="sec-llm-replay"><div class="section-header"><h2>Replay LLM Request</h2><span class="badge badge-gray" id="llm-replay-source">No request selected</span><button class="btn" onclick="navigate('llm-debug')"><i class="bi bi-arrow-left"></i> Back to Debug</button></div><div id="llm-replay-content"></div></div>
   <div class="section" id="sec-usage"><div class="section-header"><h2>Usage</h2></div><div id="usage-content"></div></div>
   <div class="section" id="sec-settings"><div class="section-header"><h2>Settings</h2><button class="btn btn-primary" onclick="exportConfig()"><i class="bi bi-download"></i> Export Config</button></div><div id="settings-content"></div></div>
 </div>
@@ -547,6 +575,12 @@ var llmDebugDetailLoading = {}
 var llmDebugListSignature = ''
 var llmDebugPanelState = {}
 var llmDebugPreScrollState = {}
+var llmReplayCurrentId = null
+var llmReplayDetail = null
+var llmReplayPayload = null
+var llmReplayMode = 'structured'
+var llmReplayHistory = {}
+var llmReplayLastResult = null
 var sectionMeta = {
   overview: { title: 'Overview', group: 'Monitor' },
   sessions: { title: 'Sessions', group: 'Monitor' },
@@ -558,6 +592,7 @@ var sectionMeta = {
   'custom-providers': { title: 'Custom Providers', group: 'Control' },
   'model-routing': { title: 'Model Routing', group: 'Control' },
   'llm-debug': { title: 'LLM Debug', group: 'Monitor' },
+  'llm-replay': { title: 'Replay Request', group: 'Monitor' },
   usage: { title: 'Usage', group: 'Monitor' },
   settings: { title: 'Settings', group: 'System' },
 }
@@ -615,7 +650,8 @@ function doLogin() {
 }
 
 function navigate(section) {
-  var sections = ['overview','sessions','environments','flags','replacements','model-redirects','model-settings','custom-providers','model-routing','llm-debug','usage','settings']
+  if (section && section.indexOf('llm-replay:') === 0) { openLlmReplay(section.slice('llm-replay:'.length)); return }
+  var sections = ['overview','sessions','environments','flags','replacements','model-redirects','model-settings','custom-providers','model-routing','llm-debug','llm-replay','usage','settings']
   if (sections.indexOf(section) === -1) section = 'overview'
   Object.keys(refreshTimers).forEach(function(k) { clearInterval(refreshTimers[k]); delete refreshTimers[k] })
   Object.keys(eventTimers).forEach(function(k) { clearInterval(eventTimers[k]); delete eventTimers[k] })
@@ -634,7 +670,7 @@ function navigate(section) {
 function loadSection(section) {
   switch (section) {
     case 'overview': loadOverview(); break; case 'sessions': loadSessions(); break; case 'environments': loadEnvironments(); break
-    case 'flags': loadFlags(); break; case 'replacements': loadReplacements(); break; case 'model-redirects': loadModelRedirects(); break; case 'model-settings': loadModelSettings(); break; case 'custom-providers': loadCustomProviders(); break; case 'model-routing': loadModelRouting(); break; case 'llm-debug': loadLlmDebugLogs(); break; case 'usage': loadUsage(); break; case 'settings': loadSettings(); break
+    case 'flags': loadFlags(); break; case 'replacements': loadReplacements(); break; case 'model-redirects': loadModelRedirects(); break; case 'model-settings': loadModelSettings(); break; case 'custom-providers': loadCustomProviders(); break; case 'model-routing': loadModelRouting(); break; case 'llm-debug': loadLlmDebugLogs(); break; case 'llm-replay': renderLlmReplay(); break; case 'usage': loadUsage(); break; case 'settings': loadSettings(); break
   }
 }
 
@@ -1199,7 +1235,8 @@ function captureLlmDebugViewState(container) { if (!container) return null; cont
 function getLlmDebugViewportAnchor(container) { var cards = container ? container.querySelectorAll('.llm-log-card') : []; for (var i = 0; i < cards.length; i++) { var rect = cards[i].getBoundingClientRect(); if (rect.bottom > 0 && rect.top < window.innerHeight) return { id: cards[i].id, top: rect.top } } return null }
 function restoreLlmDebugViewState(container, anchor) { if (!container) return; container.querySelectorAll('.llm-log-card .debug-panel').forEach(function(panel) { var key = llmDebugPanelKey(panel); if (key && Object.prototype.hasOwnProperty.call(llmDebugPanelState, key)) panel.open = llmDebugPanelState[key] }); container.querySelectorAll('.llm-log-card .debug-pre').forEach(function(pre) { var key = llmDebugPanelKey(pre.closest('.debug-panel')), pos = key ? llmDebugPreScrollState[key] : null; if (pos) { pre.scrollTop = pos.top; pre.scrollLeft = pos.left } }); if (anchor) { var el = document.getElementById(anchor.id); if (el) window.scrollBy(0, el.getBoundingClientRect().top - anchor.top) } }
 function renderLlmDebugLogs(force) { var c = document.getElementById('llm-debug-content'), n = document.getElementById('llm-debug-count'), qEl = document.getElementById('llm-debug-filter'), sEl = document.getElementById('llm-debug-status'), pEl = document.getElementById('llm-debug-path'); var entries = llmDebugData.entries || [], q = qEl ? qEl.value.trim().toLowerCase() : '', s = sEl ? sEl.value : 'all', p = pEl ? pEl.value : 'all', filtered = entries.filter(function(e) { return llmEntryMatches(e, q, s, p) }), signature = llmDebugRenderSignature(filtered, q, s, p); if (n) n.textContent = filtered.length + ' of ' + (llmDebugData.count || 0) + ' calls'; pruneLlmDebugUiState(entries); if (!force && signature === llmDebugListSignature && c.firstChild) return; var anchor = captureLlmDebugViewState(c); llmDebugListSignature = signature; if (!entries.length) { c.innerHTML = '<div class="empty-state"><p>No LLM calls captured in the last 10 minutes.</p></div>'; return } if (!filtered.length) { c.innerHTML = '<div class="empty-state"><p>No debug logs match this filter.</p></div>'; return } var html = '<div class="llm-debug-list">'; filtered.forEach(function(e) { html += renderLlmDebugRow(e) }); c.innerHTML = html + '</div>'; restoreLlmDebugViewState(c, anchor) }
-function renderLlmDebugRow(e) { var open = !!expandedLlmDebug[e.id], html = '<div class="llm-log-card' + (open ? ' open' : '') + '" id="llm-log-' + escAttr(e.id) + '">'; html += '<div class="llm-log-row"><div><div class="llm-log-path">' + esc(e.path) + '</div><div class="llm-log-meta"><span>' + timeAgo(e.startedAt) + '</span><span>' + formatDurationMs(e.durationMs) + '</span><span>' + formatBytes(e.requestBodyBytes) + ' req</span>' + (e.responseBodyBytes != null ? '<span>' + formatBytes(e.responseBodyBytes) + ' resp</span>' : '') + '</div></div>'; html += '<div class="llm-log-main"><div class="llm-log-title">' + llmStatusBadge(e) + '<span class="badge badge-blue">' + esc(e.method) + '</span>' + (e.stream ? '<span class="badge badge-purple">stream</span>' : '') + '<span class="llm-log-model mono">' + esc(e.model || 'unknown model') + '</span></div><div class="llm-log-preview" title="' + escAttr(e.requestPreview || '') + '">' + esc(e.requestPreview || e.errorMessage || 'No request body preview') + '</div></div>'; html += '<div class="llm-log-actions"><button class="btn" style="font-size:0.78rem;padding:5px 10px" onclick="toggleLlmDebugDetail(&quot;' + escAttr(e.id) + '&quot;)">' + (open ? 'Collapse' : 'Expand') + '</button></div></div>'; if (open) html += '<div class="llm-log-detail" id="llm-detail-' + escAttr(e.id) + '">' + renderLlmDebugDetail(e.id) + '</div>'; return html + '</div>' }
+function isReplayableLlmPath(path) { return path === '/chat/completions' || path === '/responses' }
+function renderLlmDebugRow(e) { var open = !!expandedLlmDebug[e.id], replayable = isReplayableLlmPath(e.path), html = '<div class="llm-log-card' + (open ? ' open' : '') + '" id="llm-log-' + escAttr(e.id) + '">'; html += '<div class="llm-log-row"><div><div class="llm-log-path">' + esc(e.path) + '</div><div class="llm-log-meta"><span>' + timeAgo(e.startedAt) + '</span><span>' + formatDurationMs(e.durationMs) + '</span><span>' + formatBytes(e.requestBodyBytes) + ' req</span>' + (e.responseBodyBytes != null ? '<span>' + formatBytes(e.responseBodyBytes) + ' resp</span>' : '') + '</div></div>'; html += '<div class="llm-log-main"><div class="llm-log-title">' + llmStatusBadge(e) + '<span class="badge badge-blue">' + esc(e.method) + '</span>' + (e.stream ? '<span class="badge badge-purple">stream</span>' : '') + '<span class="llm-log-model mono">' + esc(e.model || 'unknown model') + '</span></div><div class="llm-log-preview" title="' + escAttr(e.requestPreview || '') + '">' + esc(e.requestPreview || e.errorMessage || 'No request body preview') + '</div></div>'; html += '<div class="llm-log-actions">' + (replayable ? '<button class="btn btn-primary" style="font-size:0.78rem;padding:5px 10px" onclick="openLlmReplay(&quot;' + escAttr(e.id) + '&quot;)"><i class="bi bi-play-fill"></i> Replay</button>' : '') + '<button class="btn" style="font-size:0.78rem;padding:5px 10px" onclick="toggleLlmDebugDetail(&quot;' + escAttr(e.id) + '&quot;)">' + (open ? 'Collapse' : 'Expand') + '</button></div></div>'; if (open) html += '<div class="llm-log-detail" id="llm-detail-' + escAttr(e.id) + '">' + renderLlmDebugDetail(e.id) + '</div>'; return html + '</div>' }
 function toggleLlmDebugDetail(id) { expandedLlmDebug[id] = !expandedLlmDebug[id]; renderLlmDebugLogs(true); if (expandedLlmDebug[id] && !llmDebugDetails[id]) loadLlmDebugDetail(id) }
 function loadLlmDebugDetail(id) { if (llmDebugDetailLoading[id]) return; llmDebugDetailLoading[id] = true; apiFetch('GET', '/dashboard/api/llm-debug/' + encodeURIComponent(id)).then(function(r) { if (r.ok) return r.json(); throw new Error('not found') }).then(function(d) { delete llmDebugDetailLoading[id]; llmDebugDetails[id] = d; var c = document.getElementById('llm-debug-content'), anchor = captureLlmDebugViewState(c), el = document.getElementById('llm-detail-' + id); if (el) { el.innerHTML = renderLlmDebugDetail(id); restoreLlmDebugViewState(c, anchor) } }).catch(function() { delete llmDebugDetailLoading[id]; showToast('Failed to load debug log', 'error') }) }
 function renderHeaderTable(headers) { if (!headers || Object.keys(headers).length === 0) return '<div class="debug-empty">No headers</div>'; var html = '<div class="debug-kv">'; Object.keys(headers).sort().forEach(function(k) { html += '<div class="debug-kv-key">' + esc(k) + '</div><div class="debug-kv-val">' + esc(headers[k]) + '</div>' }); return html + '</div>' }
@@ -1210,6 +1247,200 @@ function headersPanel(title, headers) { return '<details class="debug-panel"><su
 function llmPanelText(button) { var panel = button.closest('.debug-panel'); if (!panel) return ''; var pre = panel.querySelector('pre'); if (pre) return pre.textContent || ''; var rows = []; panel.querySelectorAll('.debug-kv-key').forEach(function(k) { var v = k.nextElementSibling; rows.push((k.textContent || '') + ': ' + (v ? v.textContent || '' : '')) }); return rows.join(String.fromCharCode(10)) }
 function renderLlmDebugDetail(id) { var d = llmDebugDetails[id]; if (!d) return '<div class="debug-empty">Loading full raw request and response...</div>'; var r = d.response, html = '<div class="debug-detail-grid"><details class="debug-panel full" open><summary>Call Metadata</summary><div class="debug-panel-body"><div class="debug-kv">'; var meta = { id: d.id, requestId: d.requestId || '', model: d.model || '', status: d.status, startedAt: d.startedAt, duration: formatDurationMs(d.durationMs), method: d.request.method, url: d.request.url, responseStatus: r ? r.status + ' ' + r.statusText : '' }; Object.keys(meta).forEach(function(k) { html += '<div class="debug-kv-key">' + esc(k) + '</div><div class="debug-kv-val">' + esc(meta[k]) + '</div>' }); html += '</div></div></details>' + bodyPanel('Request Body', d.request.body, d.request.bodyBytes) + bodyPanel('Response Body', r ? r.body : null, r ? r.bodyBytes : 0) + headersPanel('Request Headers', d.request.headers) + headersPanel('Response Headers', r ? r.headers : {}); if (d.error || (r && r.bodyReadError)) html += '<details class="debug-panel full" open><summary>Error</summary><div class="debug-panel-body"><pre class="debug-pre">' + esc(JSON.stringify(d.error || r.bodyReadError, null, 2)) + '</pre></div></details>'; return html + '</div>' }
 function clearLlmDebugLogs() { if (!confirm('Clear in-memory LLM debug logs?')) return; apiFetch('DELETE', '/dashboard/api/llm-debug').then(function(r) { if (r.ok) { llmDebugData = { entries: [], count: 0, retentionMs: 600000 }; expandedLlmDebug = {}; llmDebugDetails = {}; llmDebugDetailLoading = {}; llmDebugPanelState = {}; llmDebugPreScrollState = {}; llmDebugListSignature = ''; renderLlmDebugLogs(true); showToast('Cleared', 'success') } else showToast('Failed to clear logs', 'error') }).catch(function() { showToast('Failed to clear logs', 'error') }) }
+
+function openLlmReplay(id) {
+  if (!id) return
+  llmReplayCurrentId = id
+  llmReplayDetail = null
+  llmReplayPayload = null
+  llmReplayLastResult = null
+  llmReplayMode = 'structured'
+  currentSection = 'llm-replay'
+  window.location.hash = 'llm-replay:' + encodeURIComponent(id)
+  document.querySelectorAll('.section').forEach(function(el) { el.classList.remove('active') })
+  var secEl = document.getElementById('sec-llm-replay')
+  if (secEl) secEl.classList.add('active')
+  document.querySelectorAll('.sidebar a, .bottom-nav a').forEach(function(a) { a.classList.toggle('active', a.getAttribute('data-section') === 'llm-debug') })
+  var titleEl = document.getElementById('page-title')
+  var kickerEl = document.getElementById('page-kicker')
+  if (titleEl) titleEl.textContent = 'Replay Request'
+  if (kickerEl) kickerEl.textContent = 'Monitor'
+  Object.keys(refreshTimers).forEach(function(k) { clearInterval(refreshTimers[k]); delete refreshTimers[k] })
+  renderLlmReplayLoading()
+  apiFetch('GET', '/dashboard/api/llm-debug/' + encodeURIComponent(id)).then(function(r) { if (r.ok) return r.json(); throw new Error('not found') }).then(function(d) {
+    llmReplayDetail = d
+    try { llmReplayPayload = JSON.parse(d.request.body || '{}') } catch(e) { llmReplayPayload = null; showToast('Captured request body is not valid JSON', 'error') }
+    renderLlmReplay()
+  }).catch(function() { showToast('Failed to load replay request', 'error'); navigate('llm-debug') })
+}
+function renderLlmReplayLoading() { var c = document.getElementById('llm-replay-content'); if (c) c.innerHTML = '<div class="empty-state"><p>Loading replay request...</p></div>' }
+function replayPathKind() { return llmReplayDetail && llmReplayDetail.request ? llmReplayDetail.request.path : '' }
+function replayHistoryItems() { return llmReplayHistory[llmReplayCurrentId || ''] || [] }
+function setReplayHistoryItems(items) { if (llmReplayCurrentId) llmReplayHistory[llmReplayCurrentId] = items }
+function prettyJsonValue(value) { try { return JSON.stringify(value, null, 2) } catch(e) { return '' } }
+function renderLlmReplay() {
+  var c = document.getElementById('llm-replay-content'), source = document.getElementById('llm-replay-source')
+  if (!c) return
+  if (!llmReplayCurrentId) { c.innerHTML = '<div class="empty-state"><p>No LLM debug request selected.</p></div>'; return }
+  if (!llmReplayDetail) { renderLlmReplayLoading(); return }
+  if (source) source.textContent = (replayPathKind() || 'unknown') + ' · ' + (llmReplayDetail.model || 'unknown model')
+  if (!llmReplayPayload) { c.innerHTML = '<div class="empty-state"><p>This request body cannot be parsed as JSON.</p></div>'; return }
+  var path = replayPathKind(), mode = llmReplayMode === 'json' ? 'json' : 'structured'
+  var html = '<div class="replay-layout"><div class="replay-panel"><div class="replay-panel-head"><h3>Editable Request</h3><div class="replay-tabs"><button class="replay-tab ' + (mode === 'structured' ? 'active' : '') + '" onclick="setLlmReplayMode(&quot;structured&quot;)">Structured</button><button class="replay-tab ' + (mode === 'json' ? 'active' : '') + '" onclick="setLlmReplayMode(&quot;json&quot;)">Advanced JSON</button></div></div><div class="replay-panel-body">'
+  html += mode === 'json' ? renderReplayJsonEditor() : renderReplayStructuredEditor(path)
+  html += '<div class="replay-action-row"><span class="replay-muted">Replay sends this edited body to Copilot with fresh server-side auth.</span><button class="btn btn-primary" id="llm-replay-run" onclick="runLlmReplay()"><i class="bi bi-play-fill"></i> Play</button></div></div></div>'
+  html += '<div class="replay-panel"><div class="replay-panel-head"><h3>Replay Response</h3><button class="btn" onclick="copyReplayResponse()"><i class="bi bi-copy"></i> Copy</button></div><div class="replay-panel-body">' + renderReplayResult() + renderReplayHistory() + '</div></div></div>'
+  c.innerHTML = html
+}
+function setLlmReplayMode(mode) {
+  if (mode === 'json') syncReplayStructuredToPayload()
+  if (llmReplayMode === 'json') syncReplayJsonToPayload()
+  llmReplayMode = mode
+  renderLlmReplay()
+}
+function renderReplayJsonEditor() {
+  return '<textarea class="replay-json-editor" id="llm-replay-json" spellcheck="false" oninput="markReplayJsonDirty()">' + esc(prettyJsonValue(llmReplayPayload)) + '</textarea><div class="replay-action-row"><button class="btn" onclick="formatReplayJson()">Format JSON</button><span class="replay-muted" id="llm-replay-json-status">Advanced JSON is authoritative for fields not shown in structured controls.</span></div>'
+}
+function markReplayJsonDirty() { var el = document.getElementById('llm-replay-json-status'); if (el) el.textContent = 'JSON edited. Click Play or switch tabs to validate.' }
+function formatReplayJson() { if (syncReplayJsonToPayload()) renderLlmReplay() }
+function syncReplayJsonToPayload() {
+  var el = document.getElementById('llm-replay-json')
+  if (!el) return true
+  try { llmReplayPayload = JSON.parse(el.value); return true } catch(e) { showToast('Replay JSON is invalid', 'error'); return false }
+}
+function renderReplayStructuredEditor(path) {
+  if (path === '/responses') return renderResponsesReplayEditor()
+  return renderChatReplayEditor()
+}
+function renderCommonReplayFields(maxTokenKey) {
+  var streamChecked = llmReplayPayload.stream === true ? ' checked' : ''
+  return '<div class="replay-grid"><label class="replay-field"><span>Model</span><input class="form-input mono full-input" id="replay-model" value="' + escAttr(llmReplayPayload.model || '') + '" oninput="syncReplayStructuredToPayload()"></label><label class="replay-field"><span>' + esc(maxTokenKey) + '</span><input class="form-input mono full-input" id="replay-max-tokens" value="' + escAttr(llmReplayPayload[maxTokenKey] == null ? '' : llmReplayPayload[maxTokenKey]) + '" oninput="syncReplayStructuredToPayload()"></label><label class="replay-field"><span>Temperature</span><input class="form-input mono full-input" id="replay-temperature" value="' + escAttr(llmReplayPayload.temperature == null ? '' : llmReplayPayload.temperature) + '" oninput="syncReplayStructuredToPayload()"></label><label class="switch-row" style="margin-top:22px"><input type="checkbox" id="replay-stream" ' + streamChecked + ' onchange="syncReplayStructuredToPayload()"> Stream</label></div>'
+}
+function renderChatReplayEditor() {
+  var messages = Array.isArray(llmReplayPayload.messages) ? llmReplayPayload.messages : []
+  var html = '<div class="replay-editor">' + renderCommonReplayFields('max_tokens') + '<div class="replay-muted">Tools: ' + (Array.isArray(llmReplayPayload.tools) ? llmReplayPayload.tools.length : 0) + ' · edit full tool schemas in Advanced JSON.</div>'
+  messages.forEach(function(m, i) {
+    html += '<div class="replay-message"><div class="replay-message-head"><span class="badge badge-gray">message ' + (i + 1) + '</span><select class="form-input" id="replay-message-role-' + i + '" onchange="syncReplayStructuredToPayload()">' + roleOptions(m && m.role) + '</select></div><textarea id="replay-message-content-' + i + '" spellcheck="false" oninput="syncReplayStructuredToPayload()">' + esc(contentToEditorText(m ? m.content : '')) + '</textarea></div>'
+  })
+  if (!messages.length) html += '<div class="debug-empty">No messages array found. Use Advanced JSON for this payload.</div>'
+  return html + '</div>'
+}
+function renderResponsesReplayEditor() {
+  var html = '<div class="replay-editor">' + renderCommonReplayFields('max_output_tokens') + '<div class="replay-muted">Tools: ' + (Array.isArray(llmReplayPayload.tools) ? llmReplayPayload.tools.length : 0) + ' · edit full tool schemas in Advanced JSON.</div>'
+  html += '<label class="replay-field"><span>Instructions</span><textarea id="replay-instructions" spellcheck="false" oninput="syncReplayStructuredToPayload()">' + esc(llmReplayPayload.instructions || '') + '</textarea></label>'
+  if (typeof llmReplayPayload.input === 'string') {
+    html += '<label class="replay-field"><span>Input</span><textarea id="replay-input-string" spellcheck="false" oninput="syncReplayStructuredToPayload()">' + esc(llmReplayPayload.input) + '</textarea></label>'
+  } else if (Array.isArray(llmReplayPayload.input)) {
+    llmReplayPayload.input.forEach(function(item, i) {
+      var role = item && item.role ? item.role : item && item.type ? item.type : 'item'
+      html += '<div class="replay-message"><div class="replay-message-head"><span class="badge badge-gray">input ' + (i + 1) + '</span><span class="mono">' + esc(role) + '</span></div><textarea id="replay-input-item-' + i + '" spellcheck="false" oninput="syncReplayStructuredToPayload()">' + esc(contentToEditorText(item && item.content !== undefined ? item.content : item)) + '</textarea></div>'
+    })
+  } else {
+    html += '<div class="debug-empty">No editable input found. Use Advanced JSON for this payload.</div>'
+  }
+  return html + '</div>'
+}
+function roleOptions(selected) {
+  return ['system','developer','user','assistant','tool'].map(function(role) { return '<option value="' + role + '"' + (role === selected ? ' selected' : '') + '>' + role + '</option>' }).join('')
+}
+function contentToEditorText(content) {
+  if (typeof content === 'string') return content
+  if (content == null) return ''
+  return prettyJsonValue(content)
+}
+function parseEditorContent(original, text) {
+  if (Array.isArray(original) || (original && typeof original === 'object')) {
+    try { return JSON.parse(text) } catch(e) { return text }
+  }
+  return text
+}
+function parseOptionalNumber(value) {
+  if (value == null || String(value).trim() === '') return undefined
+  var n = Number(value)
+  return Number.isFinite(n) ? n : undefined
+}
+function syncReplayStructuredToPayload() {
+  if (!llmReplayPayload) return false
+  var modelEl = document.getElementById('replay-model'), maxEl = document.getElementById('replay-max-tokens'), tempEl = document.getElementById('replay-temperature'), streamEl = document.getElementById('replay-stream')
+  if (modelEl) llmReplayPayload.model = modelEl.value.trim()
+  var maxKey = replayPathKind() === '/responses' ? 'max_output_tokens' : 'max_tokens'
+  if (maxEl) { var max = parseOptionalNumber(maxEl.value); if (max === undefined) delete llmReplayPayload[maxKey]; else llmReplayPayload[maxKey] = max }
+  if (tempEl) { var temp = parseOptionalNumber(tempEl.value); if (temp === undefined) delete llmReplayPayload.temperature; else llmReplayPayload.temperature = temp }
+  if (streamEl) llmReplayPayload.stream = !!streamEl.checked
+  if (replayPathKind() === '/responses') syncResponsesStructuredPayload(); else syncChatStructuredPayload()
+  return true
+}
+function syncChatStructuredPayload() {
+  if (!Array.isArray(llmReplayPayload.messages)) return
+  llmReplayPayload.messages.forEach(function(m, i) {
+    var roleEl = document.getElementById('replay-message-role-' + i), contentEl = document.getElementById('replay-message-content-' + i)
+    if (roleEl) m.role = roleEl.value
+    if (contentEl) m.content = parseEditorContent(m.content, contentEl.value)
+  })
+}
+function syncResponsesStructuredPayload() {
+  var instructionsEl = document.getElementById('replay-instructions'), inputStringEl = document.getElementById('replay-input-string')
+  if (instructionsEl) llmReplayPayload.instructions = instructionsEl.value
+  if (inputStringEl) llmReplayPayload.input = inputStringEl.value
+  if (Array.isArray(llmReplayPayload.input)) {
+    llmReplayPayload.input.forEach(function(item, i) {
+      var el = document.getElementById('replay-input-item-' + i)
+      if (!el) return
+      if (item && typeof item === 'object' && Object.prototype.hasOwnProperty.call(item, 'content')) item.content = parseEditorContent(item.content, el.value)
+      else llmReplayPayload.input[i] = parseEditorContent(item, el.value)
+    })
+  }
+}
+function runLlmReplay() {
+  if (llmReplayMode === 'json') { if (!syncReplayJsonToPayload()) return } else syncReplayStructuredToPayload()
+  if (!llmReplayCurrentId || !llmReplayPayload) return
+  var btn = document.getElementById('llm-replay-run')
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="bi bi-hourglass-split"></i> Running' }
+  var started = Date.now()
+  apiFetch('POST', '/dashboard/api/llm-debug/' + encodeURIComponent(llmReplayCurrentId) + '/replay', { body: llmReplayPayload }).then(function(r) {
+    return r.json().catch(function() { return {} }).then(function(d) { if (!r.ok) throw new Error(d.error || 'Replay failed'); return d })
+  }).then(function(result) {
+    result.clientStartedAt = new Date(started).toISOString()
+    llmReplayLastResult = result
+    var history = replayHistoryItems()
+    history.unshift({ at: result.clientStartedAt, status: result.status, finishReason: result.finishReason, durationMs: result.durationMs, responseId: result.responseId })
+    setReplayHistoryItems(history.slice(0, 20))
+    renderLlmReplay()
+    showToast('Replay complete', 'success')
+  }).catch(function(error) {
+    llmReplayLastResult = { error: error.message, clientStartedAt: new Date(started).toISOString() }
+    renderLlmReplay()
+    showToast(error.message || 'Replay failed', 'error')
+  }).finally(function() {
+    var runBtn = document.getElementById('llm-replay-run')
+    if (runBtn) { runBtn.disabled = false; runBtn.innerHTML = '<i class="bi bi-play-fill"></i> Play' }
+  })
+}
+function renderReplayResult() {
+  var r = llmReplayLastResult
+  if (!r) return '<div class="debug-empty">Run a replay to see the parsed response here.</div>'
+  if (r.error) return '<div class="debug-empty">Replay failed: ' + esc(r.error) + '</div>'
+  var html = '<div class="replay-summary-grid">'
+  var summary = { status: (r.status || '-') + ' ' + (r.statusText || ''), finish: r.finishReason || '-', duration: formatDurationMs(r.durationMs), responseId: r.responseId || '-', usage: r.usage ? JSON.stringify(r.usage) : '-' }
+  Object.keys(summary).forEach(function(k) { html += '<div class="replay-summary-card"><span>' + esc(k) + '</span><strong>' + esc(summary[k]) + '</strong></div>' })
+  html += '</div><div class="replay-response-pre" id="llm-replay-response-text">' + esc(replayResponseText(r)) + '</div>'
+  if (Array.isArray(r.streamEvents) && r.streamEvents.length) html += '<div class="replay-muted" style="margin-top:8px">' + r.streamEvents.length + ' stream events parsed.</div>'
+  return html
+}
+function replayResponseText(r) {
+  if (!r) return ''
+  if (r.parsed && typeof r.parsed !== 'string') return prettyJsonValue(r.parsed)
+  if (Array.isArray(r.streamEvents) && r.streamEvents.length) return prettyJsonValue(r.streamEvents)
+  return r.body || ''
+}
+function copyReplayResponse() { copyText(replayResponseText(llmReplayLastResult)) }
+function renderReplayHistory() {
+  var history = replayHistoryItems()
+  if (!history.length) return '<div class="replay-history"><div class="debug-empty">Replay attempt history is kept only on this page.</div></div>'
+  var html = '<div class="replay-history"><h3 style="font-size:0.9rem;margin:4px 0">Attempt History</h3>'
+  history.forEach(function(item) { html += '<div class="replay-history-item"><div><strong>' + esc(item.status || 'error') + '</strong> <span class="mono">' + esc(item.finishReason || '-') + '</span><div class="mono">' + esc(item.responseId || '') + '</div></div><span>' + formatDurationMs(item.durationMs) + '</span></div>' })
+  return html + '</div>'
+}
 
 function loadUsage() { apiFetch('GET', '/dashboard/api/usage').then(function(r) { if (r.ok) return r.json() }).then(function(d) { if (d) renderUsage(d) }).catch(function() { showToast('Failed to load usage', 'error') }) }
 function formatLabel(key) { return key.split('_').map(function(w) { return w.charAt(0).toUpperCase() + w.slice(1) }).join(' ') }
