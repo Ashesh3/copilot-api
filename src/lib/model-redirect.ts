@@ -330,6 +330,11 @@ export interface ModelRedirectStep {
   targetEffort?: ReasoningEffort
 }
 
+interface MatchedRedirectRule {
+  index: number
+  rule: ModelRedirectRule
+}
+
 const MAX_REDIRECT_CHAIN_LENGTH = 10
 
 function matchesEffort(
@@ -344,13 +349,20 @@ function matchesEffort(
 function findMatchingRedirectRule(
   model: string,
   effort: ReasoningEffort | undefined,
-): ModelRedirectRule | undefined {
-  return redirects.find(
-    (rule) =>
+  startIndex = 0,
+): MatchedRedirectRule | undefined {
+  for (let index = startIndex; index < redirects.length; index += 1) {
+    const rule = redirects[index]
+    if (
       rule.enabled
       && rule.sourceModel === model
-      && matchesEffort(rule.sourceEffort, effort),
-  )
+      && matchesEffort(rule.sourceEffort, effort)
+    ) {
+      return { index, rule }
+    }
+  }
+
+  return undefined
 }
 
 function formatModelWithEffort(
@@ -415,22 +427,23 @@ export async function applyModelRedirect(
   let effort = originalEffort
   const redirectChain: Array<ModelRedirectStep> = []
   const seen = new Set<string>()
+  let nextRuleIndex = 0
 
   while (redirectChain.length < MAX_REDIRECT_CHAIN_LENGTH) {
     seen.add(getRedirectStateKey(model, effort))
 
-    const rule = findMatchingRedirectRule(model, effort)
-    if (!rule) break
+    const match = findMatchingRedirectRule(model, effort, nextRuleIndex)
+    if (!match) break
 
     const currentKey = getRedirectStateKey(model, effort)
-    const step = createRedirectStep(rule, model, effort)
+    const step = createRedirectStep(match.rule, model, effort)
     const nextKey = getRedirectStateKey(step.targetModel, step.targetEffort)
     if (nextKey === currentKey) {
       break
     }
     if (seen.has(nextKey)) {
       consola.warn(
-        `Model redirect loop detected, stopping at ${formatModelWithEffort(model, effort)} before rule ${rule.name || rule.id}`,
+        `Model redirect loop detected, stopping at ${formatModelWithEffort(model, effort)} before rule ${match.rule.name || match.rule.id}`,
       )
       break
     }
@@ -438,6 +451,7 @@ export async function applyModelRedirect(
     redirectChain.push(step)
     model = step.targetModel
     effort = step.targetEffort
+    nextRuleIndex = match.index + 1
   }
 
   if (redirectChain.length === 0) {

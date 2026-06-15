@@ -96,6 +96,66 @@ test("follows chained redirects and applies final target effort", async () => {
   )
 })
 
+test("continues chained redirects only through lower priority rules", async () => {
+  setModelRedirectsForTest([
+    {
+      id: "opus-46-to-1m",
+      sourceModel: "claude-opus-4.6",
+      sourceEffort: "all",
+      targetModel: "claude-opus-4.6-1m",
+      enabled: true,
+    },
+    {
+      id: "opus-46-1m-to-internal",
+      sourceModel: "claude-opus-4.6-1m",
+      sourceEffort: "all",
+      targetModel: "claude-opus-4.7-1m-internal",
+      enabled: true,
+    },
+    {
+      id: "opus-47-to-internal",
+      sourceModel: "claude-opus-4.7",
+      sourceEffort: "all",
+      targetModel: "claude-opus-4.7-1m-internal",
+      enabled: true,
+    },
+    {
+      id: "claude-gpt-to-gpt",
+      sourceModel: "claude-gpt-5.5",
+      sourceEffort: "all",
+      targetModel: "gpt-5.5",
+      enabled: true,
+    },
+    {
+      id: "internal-to-opus-48",
+      sourceModel: "claude-opus-4.7-1m-internal",
+      sourceEffort: "all",
+      targetModel: "claude-opus-4.8",
+      targetEffort: "max",
+      enabled: true,
+    },
+    {
+      id: "fallback-to-internal",
+      sourceModel: "fallback-opus-4.7",
+      sourceEffort: "all",
+      targetModel: "claude-opus-4.7-1m-internal",
+      enabled: true,
+    },
+  ])
+
+  const redirect = await applyModelRedirect({
+    model: "fallback-opus-4.7",
+    effort: "max",
+  })
+
+  expect(redirect.model).toBe("claude-opus-4.7-1m-internal")
+  expect(redirect.effort).toBe("max")
+  expect(redirect.ruleIds).toEqual(["fallback-to-internal"])
+  expect(formatModelRedirectResult(redirect)).toBe(
+    "fallback-opus-4.7:max -> claude-opus-4.7-1m-internal:max",
+  )
+})
+
 test("enforces final self-redirect target effort across exact opus chain", async () => {
   setModelRedirectsForTest([
     {
