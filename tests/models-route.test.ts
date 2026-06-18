@@ -2,6 +2,7 @@ import { afterAll, beforeEach, expect, test } from "bun:test"
 
 import type { ModelsResponse } from "../src/services/copilot/get-models"
 
+import { setModelRedirectsForTest } from "../src/lib/model-redirect"
 import { setModelSettingsForTest } from "../src/lib/model-settings"
 import { state } from "../src/lib/state"
 import { server } from "../src/server"
@@ -10,6 +11,7 @@ const originalModels = state.models
 
 interface ModelsRouteEntry {
   id: string
+  alias?: boolean
   billing?: {
     token_prices?: {
       long_context?: {
@@ -24,6 +26,7 @@ interface ModelsRouteEntry {
       max_prompt_tokens?: number
     }
   }
+  canonical_id?: string
   model_picker_category?: string
   model_picker_price_category?: string
   name?: string
@@ -110,6 +113,60 @@ beforeEach(() => {
         supported_endpoints: ["/responses"],
       },
       {
+        id: "claude-opus-4.8",
+        name: "Claude Opus 4.8",
+        object: "model",
+        preview: false,
+        vendor: "anthropic",
+        version: "1",
+        model_picker_enabled: true,
+        capabilities: {
+          family: "claude",
+          limits: {},
+          object: "model_capabilities",
+          supports: {
+            reasoning_effort: ["low", "medium", "high", "xhigh", "max"],
+          },
+          tokenizer: "cl100k_base",
+          type: "chat",
+        },
+        supported_endpoints: ["/responses"],
+      },
+      {
+        id: "claude-haiku-4.5",
+        name: "Claude Haiku 4.5",
+        object: "model",
+        preview: false,
+        vendor: "anthropic",
+        version: "1",
+        model_picker_enabled: true,
+        capabilities: {
+          family: "claude",
+          limits: {},
+          object: "model_capabilities",
+          supports: {},
+          tokenizer: "cl100k_base",
+          type: "chat",
+        },
+      },
+      {
+        id: "gpt-5.5",
+        name: "GPT-5.5",
+        object: "model",
+        preview: false,
+        vendor: "openai",
+        version: "1",
+        model_picker_enabled: true,
+        capabilities: {
+          family: "gpt",
+          limits: {},
+          object: "model_capabilities",
+          supports: {},
+          tokenizer: "cl100k_base",
+          type: "chat",
+        },
+      },
+      {
         id: "gpt-5.2",
         name: "GPT-5.2",
         object: "model",
@@ -173,10 +230,12 @@ beforeEach(() => {
     ],
   } satisfies ModelsResponse
   setModelSettingsForTest([])
+  setModelRedirectsForTest([])
 })
 
 afterAll(() => {
   state.models = originalModels
+  setModelRedirectsForTest([])
 })
 
 test("filters /models to picker-enabled or policy-enabled entries before adding virtual variants", async () => {
@@ -262,4 +321,86 @@ test("preserves Copilot metadata on virtual reasoning models", async () => {
   const claudeHigh = requireModel(models, "claude-sonnet-4.6:high")
 
   expectLongContextMetadata(claudeHigh)
+})
+
+test("advertises enabled redirect source models using resolved target metadata", async () => {
+  setModelRedirectsForTest([
+    {
+      id: "gpet-to-alias",
+      sourceModel: "claude-gpet-5.5",
+      sourceEffort: "all",
+      targetModel: "gpt-5.5-alias",
+      enabled: true,
+    },
+    {
+      id: "alias-to-gpt",
+      sourceModel: "gpt-5.5-alias",
+      sourceEffort: "all",
+      targetModel: "gpt-5.5",
+      enabled: true,
+    },
+    {
+      id: "fallback-to-opus",
+      sourceModel: "fallback-opus-4.7",
+      sourceEffort: "all",
+      targetModel: "claude-opus-4.8",
+      targetEffort: "max",
+      enabled: true,
+    },
+    {
+      id: "disabled-custom",
+      sourceModel: "disabled-custom-model",
+      sourceEffort: "all",
+      targetModel: "gpt-5.5",
+      enabled: false,
+    },
+  ])
+
+  const models = await getModelsRouteEntries()
+  const ids = models.map((model) => model.id)
+  const gpet = requireModel(models, "claude-gpet-5.5")
+  const fallback = requireModel(models, "fallback-opus-4.7")
+
+  expect(gpet).toMatchObject({
+    alias: true,
+    canonical_id: "gpt-5.5",
+    name: "GPT-5.5",
+    vendor: "openai",
+  })
+  expect(fallback).toMatchObject({
+    alias: true,
+    canonical_id: "claude-opus-4.8:max",
+    name: "Claude Opus 4.8 (max thinking)",
+    vendor: "anthropic",
+  })
+  expect(ids).not.toContain("disabled-custom-model")
+})
+
+test("advertises Claude dash aliases for dotted Claude model IDs", async () => {
+  const models = await getModelsRouteEntries()
+  const sonnet = requireModel(models, "claude-sonnet-4-6")
+  const sonnetHigh = requireModel(models, "claude-sonnet-4-6:high")
+  const opus = requireModel(models, "claude-opus-4-8")
+  const haiku = requireModel(models, "claude-haiku-4-5")
+
+  expect(sonnet).toMatchObject({
+    alias: true,
+    canonical_id: "claude-sonnet-4.6",
+    name: "Claude Sonnet 4.6",
+  })
+  expect(sonnetHigh).toMatchObject({
+    alias: true,
+    canonical_id: "claude-sonnet-4.6:high",
+    name: "Claude Sonnet 4.6 (high thinking)",
+  })
+  expect(opus).toMatchObject({
+    alias: true,
+    canonical_id: "claude-opus-4.8",
+    name: "Claude Opus 4.8",
+  })
+  expect(haiku).toMatchObject({
+    alias: true,
+    canonical_id: "claude-haiku-4.5",
+    name: "Claude Haiku 4.5",
+  })
 })

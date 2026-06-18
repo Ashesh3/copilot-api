@@ -4,7 +4,9 @@ import type { Model } from "~/services/copilot/get-models"
 
 import { getCustomProviderModels } from "~/lib/custom-providers"
 import { forwardError } from "~/lib/error"
-import { generateVirtualModels } from "~/lib/model-suffix"
+import { applyModelRedirect, getAllModelRedirects } from "~/lib/model-redirect"
+import { normalizeModelName } from "~/lib/model-resolver"
+import { type ReasoningEffort, generateVirtualModels } from "~/lib/model-suffix"
 import { state } from "~/lib/state"
 import { cacheModels } from "~/lib/utils"
 
@@ -18,6 +20,36 @@ function getCopilotModelIds(models: Array<{ id: string }>): Set<string> {
   return new Set(models.map((model) => model.id))
 }
 
+interface ModelDiscoveryListing {
+  id: string
+  alias?: boolean
+  aliases?: Array<string>
+  billing?: Model["billing"]
+  capabilities?: Model["capabilities"]
+  canonical_id?: string
+  created: number
+  created_at: string
+  dimensions?: number
+  display_name?: string
+  issues?: Model["issues"]
+  kind?: string
+  model_picker_category?: Model["model_picker_category"]
+  model_picker_price_category?: Model["model_picker_price_category"]
+  name?: string
+  object: string
+  owned_by: string
+  policy?: Model["policy"]
+  preview?: Model["preview"]
+  provider?: string
+  provider_id?: string
+  supports_streaming?: boolean
+  supported_endpoints?: Array<string>
+  type: string
+  vendor?: Model["vendor"]
+  version?: Model["version"]
+  warning_messages?: Model["warning_messages"]
+}
+
 function supportedEndpointsForClient(model: {
   supported_endpoints?: Array<string>
 }): Array<string> | undefined {
@@ -27,7 +59,7 @@ function supportedEndpointsForClient(model: {
   return [...new Set([...endpoints, "ws:/responses"])]
 }
 
-function toCopilotModelListing(model: Model) {
+function toCopilotModelListing(model: Model): ModelDiscoveryListing {
   const supportedEndpoints = supportedEndpointsForClient(model)
   return {
     id: model.id,
@@ -61,6 +93,120 @@ function toCopilotModelListing(model: Model) {
   }
 }
 
+function modelIdWithEffort(
+  model: string,
+  effort: ReasoningEffort | undefined,
+): string {
+  return effort ? `${model}:${effort}` : model
+}
+
+function cloneAliasedListing(
+  source: ModelDiscoveryListing,
+  options: { canonicalId: string; id: string },
+): ModelDiscoveryListing {
+  return {
+    ...source,
+    id: options.id,
+    alias: true,
+    canonical_id: options.canonicalId,
+  }
+}
+
+function addUniqueListings(
+  target: Array<ModelDiscoveryListing>,
+  ids: Set<string>,
+  listings: Array<ModelDiscoveryListing>,
+): void {
+  for (const listing of listings) {
+    if (ids.has(listing.id)) continue
+    ids.add(listing.id)
+    target.push(listing)
+  }
+}
+
+function toListingById(
+  listings: Array<ModelDiscoveryListing>,
+): Map<string, ModelDiscoveryListing> {
+  return new Map(listings.map((model) => [model.id, model]))
+}
+
+async function getRedirectSourceListing(options: {
+  sourceModel: string
+  sourceEffort?: ReasoningEffort
+  listingsById: Map<string, ModelDiscoveryListing>
+}): Promise<ModelDiscoveryListing | undefined> {
+  const redirect = await applyModelRedirect({
+    model: options.sourceModel,
+    effort: options.sourceEffort,
+  })
+  if (!redirect.redirected) return undefined
+
+  const targetWithEffort = modelIdWithEffort(redirect.model, redirect.effort)
+  const targetListing =
+    options.listingsById.get(targetWithEffort)
+    ?? options.listingsById.get(redirect.model)
+  if (!targetListing) return undefined
+
+  const sourceId = modelIdWithEffort(options.sourceModel, options.sourceEffort)
+  return cloneAliasedListing(targetListing, {
+    id: sourceId,
+    canonicalId: targetListing.id,
+  })
+}
+
+async function getRedirectSourceModels(
+  listingsById: Map<string, ModelDiscoveryListing>,
+): Promise<Array<ModelDiscoveryListing>> {
+  const redirectRules = await getAllModelRedirects()
+  const models: Array<ModelDiscoveryListing> = []
+
+  for (const rule of redirectRules) {
+    if (!rule.enabled) continue
+
+    const sourceEfforts =
+      rule.sourceEffort === "all" || rule.sourceEffort === "default" ?
+        [undefined]
+      : [rule.sourceEffort]
+
+    for (const sourceEffort of sourceEfforts) {
+      const listing = await getRedirectSourceListing({
+        sourceModel: rule.sourceModel,
+        sourceEffort,
+        listingsById,
+      })
+      if (listing) models.push(listing)
+    }
+  }
+
+  return models
+}
+
+function getClaudeDashAliasId(id: string): string | undefined {
+  const [baseModel, effort] = id.split(":", 2)
+  if (!baseModel.startsWith("claude-")) return undefined
+
+  const dashed = baseModel.replaceAll(
+    /(?<!\d)(\d)\.(\d)(?!\d)/g,
+    (_, major: string, minor: string) => `${major}-${minor}`,
+  )
+  if (dashed === baseModel || normalizeModelName(dashed) !== baseModel) {
+    return undefined
+  }
+
+  return effort ? `${dashed}:${effort}` : dashed
+}
+
+function getClaudeDashAliasModels(
+  listings: Array<ModelDiscoveryListing>,
+): Array<ModelDiscoveryListing> {
+  return listings.flatMap((model) => {
+    const aliasId = getClaudeDashAliasId(model.id)
+    return aliasId ?
+        [cloneAliasedListing(model, { id: aliasId, canonicalId: model.id })]
+      : []
+  })
+}
+
 modelRoutes.get("/", async (c) => {
   try {
     if (!state.models) {
@@ -86,17 +232,36 @@ modelRoutes.get("/", async (c) => {
         : {}),
       }
     })
-    const copilotModelIds = getCopilotModelIds([
+
+    const discoveryModels: Array<ModelDiscoveryListing> = [
       ...copilotModels,
       ...virtualModels,
+    ]
+    const copilotModelIds = getCopilotModelIds(discoveryModels)
+    const customProviderModelCandidates = getCustomProviderModels()
+    const listingsById = toListingById([
+      ...discoveryModels,
+      ...customProviderModelCandidates,
     ])
+
+    addUniqueListings(
+      discoveryModels,
+      copilotModelIds,
+      await getRedirectSourceModels(listingsById),
+    )
+    addUniqueListings(
+      discoveryModels,
+      copilotModelIds,
+      getClaudeDashAliasModels(discoveryModels),
+    )
+
     const customModels = getCustomProviderModels().filter(
       (model) => model.alias || !copilotModelIds.has(model.id),
     )
 
     return c.json({
       object: "list",
-      data: [...copilotModels, ...virtualModels, ...customModels],
+      data: [...discoveryModels, ...customModels],
       has_more: false,
     })
   } catch (error) {
