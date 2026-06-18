@@ -250,6 +250,25 @@ function getClaudeDashAliasModels(
   })
 }
 
+function getOneMillionContextAliasModels(
+  listings: Array<ModelDiscoveryListing>,
+): Array<ModelDiscoveryListing> {
+  return listings.flatMap((model) => {
+    if (!model.supports_1m_context) return []
+    if (model.id.includes(":") || model.id.endsWith("[1m]")) return []
+
+    const displayName = `${model.name ?? model.display_name ?? model.id} (1M context)`
+    const alias = cloneAliasedListing(model, {
+      id: `${model.id}[1m]`,
+      canonicalId: model.id,
+    })
+    delete alias.supports_1m_context
+    alias.name = displayName
+    alias.display_name = displayName
+    return [alias]
+  })
+}
+
 modelRoutes.get("/", async (c) => {
   try {
     if (!state.models) {
@@ -296,6 +315,11 @@ modelRoutes.get("/", async (c) => {
       discoveryModels,
       copilotModelIds,
       getClaudeDashAliasModels(discoveryModels),
+    )
+    addUniqueListings(
+      discoveryModels,
+      copilotModelIds,
+      getOneMillionContextAliasModels(discoveryModels),
     )
 
     const customModels = getCustomProviderModels().filter(

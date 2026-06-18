@@ -338,11 +338,19 @@ test("preserves Copilot metadata on virtual reasoning models", async () => {
 test("advertises Cowork 1M and reasoning metadata for Claude models", async () => {
   const models = await getModelsRouteEntries()
   const sonnet = requireModel(models, "claude-sonnet-4.6")
+  const sonnet1m = requireModel(models, "claude-sonnet-4.6[1m]")
   const opus = requireModel(models, "claude-opus-4.8")
   const opusDash = requireModel(models, "claude-opus-4-8")
+  const opusDash1m = requireModel(models, "claude-opus-4-8[1m]")
   const haiku = requireModel(models, "claude-haiku-4.5")
 
   expect(sonnet.supports_1m_context).toBe(true)
+  expect(sonnet1m).toMatchObject({
+    alias: true,
+    canonical_id: "claude-sonnet-4.6",
+    name: "Claude Sonnet 4.6 (1M context)",
+  })
+  expect(sonnet1m.supports_1m_context).toBeUndefined()
   expect(sonnet.thinking?.effort_options).toContainEqual({
     id: "medium",
     name: "medium",
@@ -367,6 +375,12 @@ test("advertises Cowork 1M and reasoning metadata for Claude models", async () =
     supports_1m_context: true,
     thinking: opus.thinking,
   })
+  expect(opusDash1m).toMatchObject({
+    alias: true,
+    canonical_id: "claude-opus-4-8",
+    name: "Claude Opus 4.8 (1M context)",
+  })
+  expect(opusDash1m.supports_1m_context).toBeUndefined()
   expect(haiku.supports_1m_context).toBeUndefined()
 })
 
