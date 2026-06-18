@@ -4,9 +4,14 @@ import type { Model } from "~/services/copilot/get-models"
 
 import { getCustomProviderModels } from "~/lib/custom-providers"
 import { forwardError } from "~/lib/error"
+import { modelHasOneMillionContext } from "~/lib/model-capabilities"
 import { applyModelRedirect, getAllModelRedirects } from "~/lib/model-redirect"
 import { normalizeModelName } from "~/lib/model-resolver"
-import { type ReasoningEffort, generateVirtualModels } from "~/lib/model-suffix"
+import {
+  type ReasoningEffort,
+  generateVirtualModels,
+  getModelReasoningConfig,
+} from "~/lib/model-suffix"
 import { state } from "~/lib/state"
 import { cacheModels } from "~/lib/utils"
 
@@ -44,10 +49,22 @@ interface ModelDiscoveryListing {
   provider_id?: string
   supports_streaming?: boolean
   supported_endpoints?: Array<string>
+  supports_1m_context?: boolean
+  thinking?: ModelDiscoveryThinking
   type: string
   vendor?: Model["vendor"]
   version?: Model["version"]
   warning_messages?: Model["warning_messages"]
+}
+
+interface ModelDiscoveryThinking {
+  effort_options?: Array<ModelDiscoveryThinkingOption>
+}
+
+interface ModelDiscoveryThinkingOption {
+  id: ReasoningEffort
+  name: string
+  recommended?: boolean
 }
 
 function supportedEndpointsForClient(model: {
@@ -59,8 +76,32 @@ function supportedEndpointsForClient(model: {
   return [...new Set([...endpoints, "ws:/responses"])]
 }
 
+function toThinkingOption(
+  effort: ReasoningEffort,
+  defaultEffort: ReasoningEffort | undefined,
+): ModelDiscoveryThinkingOption {
+  return {
+    id: effort,
+    name: effort,
+    ...(effort === defaultEffort ? { recommended: true } : {}),
+  }
+}
+
+function toDiscoveryThinking(model: Model): ModelDiscoveryThinking | undefined {
+  const config = getModelReasoningConfig(model.id)
+  if (!config) return undefined
+
+  const uniqueEfforts = [...new Set(config.supportedEfforts)]
+  return {
+    effort_options: uniqueEfforts.map((effort) =>
+      toThinkingOption(effort, config.defaultEffort),
+    ),
+  }
+}
+
 function toCopilotModelListing(model: Model): ModelDiscoveryListing {
   const supportedEndpoints = supportedEndpointsForClient(model)
+  const thinking = toDiscoveryThinking(model)
   return {
     id: model.id,
     object: "model",
@@ -90,6 +131,8 @@ function toCopilotModelListing(model: Model): ModelDiscoveryListing {
       { warning_messages: model.warning_messages }
     : {}),
     ...(supportedEndpoints ? { supported_endpoints: supportedEndpoints } : {}),
+    ...(modelHasOneMillionContext(model) ? { supports_1m_context: true } : {}),
+    ...(thinking ? { thinking } : {}),
   }
 }
 

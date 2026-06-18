@@ -31,6 +31,14 @@ interface ModelsRouteEntry {
   model_picker_price_category?: string
   name?: string
   preview?: boolean
+  supports_1m_context?: boolean
+  thinking?: {
+    effort_options?: Array<{
+      id: string
+      name: string
+      recommended?: boolean
+    }>
+  }
   vendor?: string
   version?: string
 }
@@ -122,7 +130,11 @@ beforeEach(() => {
         model_picker_enabled: true,
         capabilities: {
           family: "claude",
-          limits: {},
+          limits: {
+            max_context_window_tokens: 1_000_000,
+            max_output_tokens: 32_000,
+            max_prompt_tokens: 968_000,
+          },
           object: "model_capabilities",
           supports: {
             reasoning_effort: ["low", "medium", "high", "xhigh", "max"],
@@ -321,6 +333,41 @@ test("preserves Copilot metadata on virtual reasoning models", async () => {
   const claudeHigh = requireModel(models, "claude-sonnet-4.6:high")
 
   expectLongContextMetadata(claudeHigh)
+})
+
+test("advertises Cowork 1M and reasoning metadata for Claude models", async () => {
+  const models = await getModelsRouteEntries()
+  const sonnet = requireModel(models, "claude-sonnet-4.6")
+  const opus = requireModel(models, "claude-opus-4.8")
+  const opusDash = requireModel(models, "claude-opus-4-8")
+  const haiku = requireModel(models, "claude-haiku-4.5")
+
+  expect(sonnet.supports_1m_context).toBe(true)
+  expect(sonnet.thinking?.effort_options).toContainEqual({
+    id: "medium",
+    name: "medium",
+    recommended: true,
+  })
+  expect(opus.supports_1m_context).toBe(true)
+  expect(opus.thinking?.effort_options?.map((option) => option.id)).toEqual([
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+  ])
+  expect(opus.thinking?.effort_options).toContainEqual({
+    id: "high",
+    name: "high",
+    recommended: true,
+  })
+  expect(opusDash).toMatchObject({
+    alias: true,
+    canonical_id: "claude-opus-4.8",
+    supports_1m_context: true,
+    thinking: opus.thinking,
+  })
+  expect(haiku.supports_1m_context).toBeUndefined()
 })
 
 test("advertises enabled redirect source models using resolved target metadata", async () => {

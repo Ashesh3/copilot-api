@@ -1,3 +1,6 @@
+import { modelHasOneMillionContext } from "~/lib/model-capabilities"
+import { state } from "~/lib/state"
+
 /**
  * Normalize a model name by converting dashes to dots between numbers
  * and converting Anthropic's [1m] suffix to Copilot's -1m suffix.
@@ -10,6 +13,8 @@
  *       "gpt-4.1-2025-04-14" -> "gpt-4.1-2025-04-14" (date preserved)
  */
 export function normalizeModelName(model: string): string {
+  const requestedOneMillionContext = model.endsWith("[1m]")
+
   // Convert Anthropic's [1m] context suffix to Copilot's -1m format
   let normalized = model.replace("[1m]", "-1m")
 
@@ -41,5 +46,23 @@ export function normalizeModelName(model: string): string {
     (_, p1, p2) => `${p1}.${p2}`,
   )
 
-  return normalized + dateSuffix + suffix
+  const normalizedModel = normalized + dateSuffix + suffix
+  if (!requestedOneMillionContext) return normalizedModel
+
+  return resolveOneMillionContextAlias(normalizedModel)
+}
+
+function resolveOneMillionContextAlias(model: string): string {
+  if (!model.endsWith("-1m")) return model
+
+  const baseModel = model.slice(0, -"-1m".length)
+  if (state.models?.data.some((entry) => entry.id === model)) return model
+
+  const baseModelEntry = state.models?.data.find(
+    (entry) => entry.id === baseModel,
+  )
+  if (baseModelEntry && modelHasOneMillionContext(baseModelEntry)) {
+    return baseModel
+  }
+  return model
 }
