@@ -258,14 +258,16 @@ function getOneMillionContextAliasModels(
     if (model.id.includes(":") || model.id.endsWith("[1m]")) return []
 
     const displayName = `${model.name ?? model.display_name ?? model.id} (1M context)`
-    const alias = cloneAliasedListing(model, {
+    const oneMillionContextModel: ModelDiscoveryListing = {
+      ...model,
       id: `${model.id}[1m]`,
-      canonicalId: model.id,
-    })
-    delete alias.supports_1m_context
-    alias.name = displayName
-    alias.display_name = displayName
-    return [alias]
+      canonical_id: model.id,
+      name: displayName,
+      display_name: displayName,
+    }
+    delete oneMillionContextModel.alias
+    delete oneMillionContextModel.supports_1m_context
+    return [oneMillionContextModel]
   })
 }
 

@@ -346,10 +346,10 @@ test("advertises Cowork 1M and reasoning metadata for Claude models", async () =
 
   expect(sonnet.supports_1m_context).toBe(true)
   expect(sonnet1m).toMatchObject({
-    alias: true,
     canonical_id: "claude-sonnet-4.6",
     name: "Claude Sonnet 4.6 (1M context)",
   })
+  expect(sonnet1m.alias).toBeUndefined()
   expect(sonnet1m.supports_1m_context).toBeUndefined()
   expect(sonnet.thinking?.effort_options).toContainEqual({
     id: "medium",
@@ -376,10 +376,10 @@ test("advertises Cowork 1M and reasoning metadata for Claude models", async () =
     thinking: opus.thinking,
   })
   expect(opusDash1m).toMatchObject({
-    alias: true,
     canonical_id: "claude-opus-4-8",
     name: "Claude Opus 4.8 (1M context)",
   })
+  expect(opusDash1m.alias).toBeUndefined()
   expect(opusDash1m.supports_1m_context).toBeUndefined()
   expect(haiku.supports_1m_context).toBeUndefined()
 })
