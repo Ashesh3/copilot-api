@@ -163,6 +163,12 @@ beforeEach(() => {
             kind: "chat",
             supportsStreaming: true,
           },
+          {
+            id: "glm-5.2",
+            kind: "chat",
+            supportsStreaming: true,
+            passReasoningEffort: true,
+          },
         ],
       },
     ],
@@ -231,6 +237,35 @@ test("chat request routes to custom provider by model id", async () => {
   expect(requests[0]?.url).toBe("https://custom.example/v1/chat/completions")
   expect(requests[0]?.body.model).toBe("custom-chat-model")
   expect(requests[0]?.body.temperature).toBe(0.2)
+  expect(requests[0]?.headers.get("authorization")).toBe("Bearer custom-key")
+})
+
+test("Anthropic messages request routes to custom chat provider by model id", async () => {
+  const response = await server.request("/v1/messages?beta=true", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "glm-5.2",
+      messages: [{ role: "user", content: "hello" }],
+      max_tokens: 1,
+      output_config: {
+        effort: "high",
+      },
+    }),
+  })
+  const body = (await response.json()) as {
+    content: Array<{ type: string; text?: string }>
+    model: string
+  }
+
+  expect(response.status).toBe(200)
+  expect(body.model).toBe("glm-5.2")
+  expect(body.content).toEqual([{ type: "text", text: "custom" }])
+  expect(requests).toHaveLength(1)
+  expect(requests[0]?.url).toBe("https://custom.example/v1/chat/completions")
+  expect(requests[0]?.body.model).toBe("glm-5.2")
+  expect(requests[0]?.body.max_tokens).toBe(1)
+  expect(requests[0]?.body.reasoning_effort).toBe("high")
   expect(requests[0]?.headers.get("authorization")).toBe("Bearer custom-key")
 })
 

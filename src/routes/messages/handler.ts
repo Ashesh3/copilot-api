@@ -9,6 +9,11 @@ import type { Model } from "~/services/copilot/get-models"
 import { getLastUsedAccountId } from "~/lib/account-router"
 import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
+import {
+  createCustomProviderChatCompletions,
+  resolveCustomProviderModel,
+  type CustomProviderModelReference,
+} from "~/lib/custom-providers"
 import { HTTPError, isAbortError } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
 import {
@@ -53,6 +58,7 @@ import {
   createChatCompletions,
   type ChatCompletionChunk,
   type ChatCompletionResponse,
+  type ChatCompletionsPayload,
 } from "~/services/copilot/create-chat-completions"
 import {
   createResponses,
@@ -467,6 +473,31 @@ const tryCountTokens = async (
   }
 }
 
+function getCopilotModelIds(): Set<string> {
+  return new Set(state.models?.data.map((model) => model.id) ?? [])
+}
+
+function resolveCustomChatModel(
+  model: string,
+): CustomProviderModelReference | undefined {
+  const copilotModelIds = getCopilotModelIds()
+  const unnormalizedReference = resolveCustomProviderModel({
+    model,
+    kind: "chat",
+    copilotModelIds,
+  })
+  if (unnormalizedReference) return unnormalizedReference
+
+  const normalizedModel = normalizeModelName(model)
+  if (normalizedModel === model) return undefined
+
+  return resolveCustomProviderModel({
+    model: normalizedModel,
+    kind: "chat",
+    copilotModelIds,
+  })
+}
+
 const handleWithChatCompletions = async (
   c: Context,
   anthropicPayload: AnthropicMessagesPayload,
@@ -597,6 +628,21 @@ const executeChatCompletions = async (
 
   const { payload: replacedPayload, appliedRules } =
     await applyReplacementsToPayload(openAIPayload)
+  const customReference = resolveCustomChatModel(replacedPayload.model)
+  if (customReference) {
+    const customPayload = {
+      ...replacedPayload,
+      model: customReference.requestedModel,
+    }
+    return await executeCustomProviderChatCompletions(c, {
+      reference: customReference,
+      payload: customPayload,
+      requestedModel,
+      appliedRules,
+      reasoningEffort: effortOverride,
+    })
+  }
+
   const finalPayload = {
     ...replacedPayload,
     model: normalizeModelName(replacedPayload.model),
@@ -728,6 +774,141 @@ const executeChatCompletions = async (
               requestedModel,
             )
 
+            streamSpan.setAttribute(
+              "gen_ai.usage.input_tokens",
+              directResult.inputTokens,
+            )
+            streamSpan.setAttribute(
+              "gen_ai.usage.output_tokens",
+              directResult.outputTokens,
+            )
+            setOptionalTokenDetails(streamSpan, directResult.cachedTokens)
+            setSentryOutputMessages(streamSpan, directResult.responseText)
+          } catch (error) {
+            if (isAbortError(error)) return
+            throw error
+          } finally {
+            finishSpan()
+          }
+        })
+      } catch (error) {
+        finishSpan()
+        throw error
+      }
+    },
+  )
+}
+
+async function executeCustomProviderChatCompletions(
+  c: Context,
+  options: {
+    reference: CustomProviderModelReference
+    payload: ChatCompletionsPayload
+    requestedModel?: string
+    appliedRules: Array<string>
+    reasoningEffort?: ReasoningEffort
+  },
+) {
+  const { reference, payload, requestedModel, appliedRules, reasoningEffort } =
+    options
+  const responseModel = requestedModel ?? payload.model
+
+  logger.debug(
+    `Routing Anthropic custom chat model ${responseModel} to ${reference.provider.id}/${reference.upstreamModel}`,
+  )
+
+  setRequestContext(c, {
+    requestedModel,
+    provider: reference.provider.name,
+    model: reference.upstreamModel,
+    replacements: appliedRules,
+    reasoningEffort,
+  })
+
+  if (!payload.stream) {
+    return await Sentry.startSpan(
+      createSentryChatSpanOptions({
+        inputMessages: payload.messages,
+        model: reference.upstreamModel,
+      }),
+      async (span) => {
+        const response = (await createCustomProviderChatCompletions(
+          reference,
+          payload,
+          { signal: c.req.raw.signal, reasoningEffort },
+        )) as ChatCompletionResponse
+
+        if (response.usage) {
+          setRequestContext(c, {
+            inputTokens: response.usage.prompt_tokens,
+            outputTokens: response.usage.completion_tokens,
+          })
+        }
+        setChatCompletionSpanResult(span, response)
+
+        const anthropicResponse = translateToAnthropic(response, responseModel)
+        logger.debug(
+          "Translated custom provider Anthropic response:",
+          JSON.stringify(anthropicResponse),
+        )
+        return c.json(anthropicResponse)
+      },
+    )
+  }
+
+  return await handleCustomProviderChatCompletionStream(c, {
+    reference,
+    payload,
+    responseModel,
+    reasoningEffort,
+  })
+}
+
+async function handleCustomProviderChatCompletionStream(
+  c: Context,
+  options: {
+    reference: CustomProviderModelReference
+    payload: ChatCompletionsPayload
+    responseModel: string
+    reasoningEffort?: ReasoningEffort
+  },
+) {
+  return await Sentry.startSpanManual(
+    createSentryChatSpanOptions({
+      inputMessages: options.payload.messages,
+      model: options.reference.upstreamModel,
+      streaming: true,
+    }),
+    async (streamSpan, finish) => {
+      let spanFinished = false
+      const finishSpan = () => {
+        if (spanFinished) return
+        spanFinished = true
+        finish()
+      }
+
+      try {
+        const response = await createCustomProviderChatCompletions(
+          options.reference,
+          options.payload,
+          {
+            signal: c.req.raw.signal,
+            reasoningEffort: options.reasoningEffort,
+          },
+        )
+
+        return streamSSE(c, async (stream) => {
+          try {
+            const directResult = await streamChatCompletionsDirect(
+              stream,
+              response as AsyncIterable<{ data?: string }>,
+              options.responseModel,
+            )
+
+            setRequestContext(c, {
+              inputTokens: directResult.inputTokens,
+              outputTokens: directResult.outputTokens,
+            })
             streamSpan.setAttribute(
               "gen_ai.usage.input_tokens",
               directResult.inputTokens,
