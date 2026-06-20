@@ -41,6 +41,24 @@ const responsesCapableModels: ModelsResponse = {
       },
     },
     {
+      id: "gpt-5.5",
+      name: "GPT-5.5",
+      object: "model",
+      preview: false,
+      vendor: "openai",
+      version: "1",
+      model_picker_enabled: true,
+      supported_endpoints: ["/responses"],
+      capabilities: {
+        family: "gpt",
+        limits: { max_output_tokens: 1024 },
+        object: "model_capabilities",
+        supports: {},
+        tokenizer: "cl100k_base",
+        type: "chat",
+      },
+    },
+    {
       id: "claude-sonnet-4.6",
       name: "Claude Sonnet 4.6",
       object: "model",
@@ -322,6 +340,34 @@ test("redirects Anthropic max output_config effort on the responses path", async
   expect(response.status).toBe(200)
   expect(lastResponsesPayload?.model).toBe("claude-target-1m")
   expect(lastResponsesPayload?.reasoning?.effort).toBe("high")
+})
+
+test("clamps redirected Anthropic Responses probes to Copilot's minimum output tokens", async () => {
+  setModelRedirectsForTest([
+    {
+      id: "claude-gpt-to-gpt",
+      sourceModel: "claude-gpt-5.5",
+      sourceEffort: "all",
+      targetModel: "gpt-5.5",
+      enabled: true,
+    },
+  ])
+
+  const response = await server.request("/v1/messages?beta=true", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "claude-gpt-5.5",
+      messages: [{ role: "user", content: "Hi" }],
+      max_tokens: 1,
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastResponsesPayload?.model).toBe("gpt-5.5")
+  expect(lastResponsesPayload?.max_output_tokens).toBe(16)
 })
 
 test("does not send configurable effort for implicit-default models on the responses path", async () => {

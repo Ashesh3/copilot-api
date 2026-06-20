@@ -150,6 +150,22 @@ test("injects runtime-style default reasoning settings for direct Responses requ
   expect(lastRequestBody?.include).toEqual(["reasoning.encrypted_content"])
 })
 
+test("clamps Responses max_output_tokens to Copilot's minimum", async () => {
+  await createResponses(
+    {
+      model: "gpt-5.5",
+      input: "Probe the selected model.",
+      max_output_tokens: 1,
+    },
+    {
+      vision: false,
+      initiator: "user",
+    },
+  )
+
+  expect(lastRequestBody?.max_output_tokens).toBe(16)
+})
+
 test("normalizes direct Responses max reasoning aliases", () => {
   const payload = {
     model: "claude-opus-4.8",

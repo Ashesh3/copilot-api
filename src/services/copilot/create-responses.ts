@@ -138,6 +138,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null
 
 const JSON_OBJECT_INPUT_INSTRUCTION = "Respond with JSON."
+const MIN_MAX_OUTPUT_TOKENS = 16
 
 function isInputImage(value: unknown): value is ResponseInputImage {
   return isRecord(value) && value.type === "input_image"
@@ -449,6 +450,7 @@ function sanitizeResponsesPayload(
   ensureJsonObjectInputMentionsJson(payload)
   normalizeFunctionToolParameters(payload)
   normalizeJsonSchemaResponseFormat(payload)
+  clampMaxOutputTokens(payload)
   removeUnsupportedRequestParameters(payload)
 
   const result: Record<string, unknown> = {}
@@ -458,6 +460,15 @@ function sanitizeResponsesPayload(
     }
   }
   return result
+}
+
+function clampMaxOutputTokens(payload: ResponsesPayload): void {
+  if (
+    typeof payload.max_output_tokens === "number"
+    && payload.max_output_tokens < MIN_MAX_OUTPUT_TOKENS
+  ) {
+    payload.max_output_tokens = MIN_MAX_OUTPUT_TOKENS
+  }
 }
 
 function ensureJsonObjectInputMentionsJson(payload: ResponsesPayload): void {
