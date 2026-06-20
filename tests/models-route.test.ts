@@ -145,6 +145,30 @@ beforeEach(() => {
         supported_endpoints: ["/responses"],
       },
       {
+        id: "claude-opus-4.7-1m-internal",
+        name: "Claude Opus 4.7 1M Internal",
+        object: "model",
+        preview: false,
+        vendor: "anthropic",
+        version: "1",
+        model_picker_enabled: false,
+        capabilities: {
+          family: "claude",
+          limits: {
+            max_context_window_tokens: 1_000_000,
+            max_output_tokens: 32_000,
+            max_prompt_tokens: 968_000,
+          },
+          object: "model_capabilities",
+          supports: {
+            reasoning_effort: ["low", "medium", "high", "xhigh", "max"],
+          },
+          tokenizer: "cl100k_base",
+          type: "chat",
+        },
+        supported_endpoints: ["/chat/completions"],
+      },
+      {
         id: "claude-haiku-4.5",
         name: "Claude Haiku 4.5",
         object: "model",
@@ -265,6 +289,8 @@ test("filters /models to picker-enabled or policy-enabled entries before adding 
   expect(ids).toContain("claude-sonnet-4.6:max")
   expect(ids).toContain("gpt-5.2")
   expect(ids).toContain("gpt-5.2:medium")
+  expect(ids).not.toContain("claude-opus-4.7-1m-internal")
+  expect(ids).not.toContain("claude-opus-4.7-1m-internal:high")
   expect(ids).not.toContain("gpt-5-mini")
   expect(ids).not.toContain("gpt-5-mini:high")
 })
@@ -435,6 +461,35 @@ test("advertises enabled redirect source models using resolved target metadata",
     vendor: "anthropic",
   })
   expect(ids).not.toContain("disabled-custom-model")
+})
+
+test("advertises redirect sources that resolve to hidden Copilot target models", async () => {
+  setModelRedirectsForTest([
+    {
+      id: "fallback-to-hidden",
+      sourceModel: "fallback-opus-4.7",
+      sourceEffort: "all",
+      targetModel: "claude-opus-4.7-1m-internal",
+      enabled: true,
+    },
+  ])
+
+  const models = await getModelsRouteEntries()
+  const ids = models.map((model) => model.id)
+  const fallback = requireModel(models, "fallback-opus-4.7")
+
+  expect(fallback).toMatchObject({
+    alias: true,
+    canonical_id: "claude-opus-4.7-1m-internal",
+    name: "Claude Opus 4.7 1M Internal",
+    supports_1m_context: true,
+    vendor: "anthropic",
+  })
+  expect(fallback.thinking?.effort_options?.map((option) => option.id)).toEqual(
+    ["low", "medium", "high", "xhigh", "max"],
+  )
+  expect(ids).not.toContain("claude-opus-4.7-1m-internal")
+  expect(ids).not.toContain("fallback-opus-4.7[1m]")
 })
 
 test("advertises Claude dash aliases for dotted Claude model IDs", async () => {

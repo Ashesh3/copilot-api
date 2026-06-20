@@ -173,6 +173,20 @@ function toListingById(
   return new Map(listings.map((model) => [model.id, model]))
 }
 
+function toVirtualModelListings(
+  models: Array<Model>,
+): Array<ModelDiscoveryListing> {
+  return generateVirtualModels(models).map((model) => {
+    const supportedEndpoints = supportedEndpointsForClient(model)
+    return {
+      ...model,
+      ...(supportedEndpoints ?
+        { supported_endpoints: supportedEndpoints }
+      : {}),
+    }
+  })
+}
+
 async function getRedirectSourceListing(options: {
   sourceModel: string
   sourceEffort?: ReasoningEffort
@@ -250,12 +264,26 @@ function getClaudeDashAliasModels(
   })
 }
 
+function canRequestOneMillionContextAlias(
+  model: ModelDiscoveryListing,
+  listingsById: Map<string, ModelDiscoveryListing>,
+): boolean {
+  const normalizedAliasTarget = normalizeModelName(`${model.id}[1m]`)
+  return (
+    normalizedAliasTarget === model.id
+    || normalizedAliasTarget === model.canonical_id
+    || listingsById.has(normalizedAliasTarget)
+  )
+}
+
 function getOneMillionContextAliasModels(
   listings: Array<ModelDiscoveryListing>,
+  listingsById: Map<string, ModelDiscoveryListing>,
 ): Array<ModelDiscoveryListing> {
   return listings.flatMap((model) => {
     if (!model.supports_1m_context) return []
     if (model.id.includes(":") || model.id.endsWith("[1m]")) return []
+    if (!canRequestOneMillionContextAlias(model, listingsById)) return []
 
     const displayName = `${model.name ?? model.display_name ?? model.id} (1M context)`
     const oneMillionContextModel: ModelDiscoveryListing = {
@@ -281,21 +309,19 @@ modelRoutes.get("/", async (c) => {
     const visibleModels =
       state.models?.data.filter((model) => isModelVisible(model)) ?? []
 
+    const allModels = state.models?.data ?? []
+    const allCopilotModels = allModels.map((model) =>
+      toCopilotModelListing(model),
+    )
+    const allVirtualModels = toVirtualModelListings(allModels)
+
     // Copilot models
     const copilotModels = visibleModels.map((model) =>
       toCopilotModelListing(model),
     )
 
     // Virtual models for reasoning effort variants (e.g. "claude-sonnet-4.6:high")
-    const virtualModels = generateVirtualModels(visibleModels).map((model) => {
-      const supportedEndpoints = supportedEndpointsForClient(model)
-      return {
-        ...model,
-        ...(supportedEndpoints ?
-          { supported_endpoints: supportedEndpoints }
-        : {}),
-      }
-    })
+    const virtualModels = toVirtualModelListings(visibleModels)
 
     const discoveryModels: Array<ModelDiscoveryListing> = [
       ...copilotModels,
@@ -304,7 +330,8 @@ modelRoutes.get("/", async (c) => {
     const copilotModelIds = getCopilotModelIds(discoveryModels)
     const customProviderModelCandidates = getCustomProviderModels()
     const listingsById = toListingById([
-      ...discoveryModels,
+      ...allCopilotModels,
+      ...allVirtualModels,
       ...customProviderModelCandidates,
     ])
 
@@ -321,7 +348,7 @@ modelRoutes.get("/", async (c) => {
     addUniqueListings(
       discoveryModels,
       copilotModelIds,
-      getOneMillionContextAliasModels(discoveryModels),
+      getOneMillionContextAliasModels(discoveryModels, listingsById),
     )
 
     const customModels = getCustomProviderModels().filter(
