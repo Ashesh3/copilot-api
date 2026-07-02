@@ -498,6 +498,38 @@ function resolveCustomChatModel(
   })
 }
 
+const getThinkingBudgetLimits = (
+  model: string,
+): {
+  max?: number
+  min?: number
+} => {
+  const supports = state.models?.data.find((entry) => entry.id === model)
+    ?.capabilities.supports
+  return {
+    max: supports?.max_thinking_budget,
+    min: supports?.min_thinking_budget,
+  }
+}
+
+function applyThinkingBudget(
+  payload: ChatCompletionsPayload,
+  budgetTokens: number | undefined,
+): void {
+  const extra = payload as unknown as Record<string, unknown>
+  delete extra.thinking_budget
+  if (!budgetTokens) return
+  if (usesImplicitReasoningDefault(normalizeModelName(payload.model))) return
+
+  const { max, min } = getThinkingBudgetLimits(payload.model)
+  if (typeof max !== "number") return
+
+  extra.thinking_budget = Math.min(
+    Math.max(budgetTokens, min ?? budgetTokens),
+    max,
+  )
+}
+
 const handleWithChatCompletions = async (
   c: Context,
   anthropicPayload: AnthropicMessagesPayload,
@@ -607,9 +639,6 @@ const executeChatCompletions = async (
         },
       })
     }
-    if (anthropicPayload.thinking.budget_tokens && !usesImplicitDefault) {
-      extra.thinking_budget = anthropicPayload.thinking.budget_tokens
-    }
     // Claude requires temperature=1 when thinking is enabled
     openAIPayload.temperature = 1
     delete openAIPayload.top_p
@@ -628,6 +657,12 @@ const executeChatCompletions = async (
 
   const { payload: replacedPayload, appliedRules } =
     await applyReplacementsToPayload(openAIPayload)
+  if (anthropicPayload.thinking) {
+    applyThinkingBudget(
+      replacedPayload,
+      anthropicPayload.thinking.budget_tokens,
+    )
+  }
   const customReference = resolveCustomChatModel(replacedPayload.model)
   if (customReference) {
     const customPayload = {

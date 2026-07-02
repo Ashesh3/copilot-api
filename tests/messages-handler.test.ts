@@ -35,6 +35,34 @@ const upstreamMaxReasoningModels: ModelsResponse = {
   ],
 }
 
+const upstreamThinkingBudgetModels: ModelsResponse = {
+  object: "list",
+  data: [
+    {
+      id: "claude-sonnet-4.6",
+      name: "Claude Sonnet 4.6",
+      object: "model",
+      preview: false,
+      vendor: "anthropic",
+      version: "1",
+      model_picker_enabled: true,
+      capabilities: {
+        family: "claude",
+        limits: { max_output_tokens: 64000 },
+        object: "model_capabilities",
+        supports: {
+          max_thinking_budget: 32000,
+          min_thinking_budget: 1024,
+          reasoning_effort: ["low", "medium", "high", "max"],
+        },
+        tokenizer: "cl100k_base",
+        type: "chat",
+      },
+      supported_endpoints: ["/chat/completions"],
+    },
+  ],
+}
+
 function parseRequestBody(init?: RequestInit): ChatCompletionsPayload {
   if (typeof init?.body !== "string") {
     return {} as ChatCompletionsPayload
@@ -205,6 +233,50 @@ test("defaults chat completions reasoning_effort to medium when thinking is enab
     (lastUpstreamPayload as Record<string, unknown> | undefined)
       ?.reasoning_effort,
   ).toBe("medium")
+})
+
+test("clamps chat completions thinking budget to upstream model limits", async () => {
+  state.models = upstreamThinkingBudgetModels
+
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-4.6",
+      messages: [{ role: "user", content: "Think carefully." }],
+      max_tokens: 64000,
+      thinking: { type: "enabled", budget_tokens: 63999 },
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(
+    (lastUpstreamPayload as Record<string, unknown> | undefined)
+      ?.thinking_budget,
+  ).toBe(32000)
+})
+
+test("drops chat completions thinking budget when upstream limits are unknown", async () => {
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "Think carefully." }],
+      max_tokens: 64000,
+      thinking: { type: "enabled", budget_tokens: 63999 },
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(
+    (lastUpstreamPayload as Record<string, unknown> | undefined)
+      ?.thinking_budget,
+  ).toBeUndefined()
 })
 
 test("redirects unsupported Anthropic high-effort model suffixes before upstream", async () => {
