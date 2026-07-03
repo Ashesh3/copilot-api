@@ -295,6 +295,35 @@ test("filters /models to picker-enabled or policy-enabled entries before adding 
   expect(ids).not.toContain("gpt-5-mini:high")
 })
 
+test("handles visible Copilot models without limits metadata", async () => {
+  state.models?.data.push({
+    id: "gpt-no-limits",
+    name: "GPT No Limits",
+    object: "model",
+    preview: false,
+    vendor: "openai",
+    version: "1",
+    model_picker_enabled: true,
+    capabilities: {
+      family: "gpt",
+      object: "model_capabilities",
+      supports: {},
+      tokenizer: "cl100k_base",
+      type: "chat",
+    },
+  })
+
+  const response = await server.request("/v1/models")
+  const body = (await response.json()) as {
+    data: Array<{ id: string; supports_1m_context?: boolean }>
+  }
+  const model = body.data.find((entry) => entry.id === "gpt-no-limits")
+
+  expect(response.status).toBe(200)
+  expect(model).toBeDefined()
+  expect(model?.supports_1m_context).toBeUndefined()
+})
+
 test("uses model settings to hide virtual variants for implicit reasoning defaults", async () => {
   setModelSettingsForTest([
     {

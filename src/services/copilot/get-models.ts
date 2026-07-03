@@ -72,7 +72,7 @@ export interface ModelSupports {
 
 export interface ModelCapabilities {
   family: string
-  limits: ModelLimits
+  limits?: ModelLimits
   object: string
   supports: ModelSupports
   tokenizer: string

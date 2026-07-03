@@ -6,7 +6,7 @@ const ONE_MILLION_PROMPT_TOKENS = 900_000
 export function modelHasOneMillionContext(
   model: Pick<Model, "billing" | "capabilities">,
 ): boolean {
-  const limits = model.capabilities.limits
+  const limits = model.capabilities.limits ?? {}
   if ((limits.max_context_window_tokens ?? 0) >= ONE_MILLION_CONTEXT_TOKENS) {
     return true
   }
