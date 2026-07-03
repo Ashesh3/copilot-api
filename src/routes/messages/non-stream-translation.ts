@@ -373,8 +373,10 @@ function mapContent(
     return null
   }
 
-  const hasImage = content.some((block) => block.type === "image")
-  if (!hasImage) {
+  const hasAttachment = content.some(
+    (block) => block.type === "image" || block.type === "document",
+  )
+  if (!hasAttachment) {
     return content
       .filter(
         (block): block is AnthropicTextBlock | AnthropicThinkingBlock =>
@@ -398,12 +400,33 @@ function mapContent(
         break
       }
       case "image": {
-        contentParts.push({
-          type: "image_url",
-          image_url: {
-            url: `data:${block.source.media_type};base64,${block.source.data}`,
-          },
-        })
+        // url sources are inlined to base64 by normalizeAnthropicAttachments
+        if (block.source.type === "base64") {
+          contentParts.push({
+            type: "image_url",
+            image_url: {
+              url: `data:${block.source.media_type};base64,${block.source.data}`,
+            },
+          })
+        }
+
+        break
+      }
+      case "document": {
+        // Base64 PDFs become OpenAI `file` parts: custom providers accept
+        // them natively; the Copilot /chat/completions path downgrades them
+        // to a text note in normalizeChatAttachments. PDF-capable Copilot
+        // models are routed to /v1/messages or /responses before this
+        // translation runs.
+        if (block.source.type === "base64") {
+          contentParts.push({
+            type: "file",
+            file: {
+              filename: block.title ?? "document.pdf",
+              file_data: `data:${block.source.media_type};base64,${block.source.data}`,
+            },
+          })
+        }
 
         break
       }

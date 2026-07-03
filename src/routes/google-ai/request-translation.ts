@@ -10,6 +10,8 @@ import type {
   Tool,
 } from "~/services/copilot/create-chat-completions"
 
+import { fetchUrlAsDataUri, isHttpUrl, isPdfMediaType } from "~/lib/attachments"
+
 import type {
   GoogleAIRequest,
   GoogleContent,
@@ -20,6 +22,34 @@ import type {
   GooglePart,
   GoogleTextPart,
 } from "./google-ai-types"
+
+/**
+ * Fetch http(s) fileData parts and inline them as inlineData so the sync
+ * translation (and upstream, which rejects external URLs) only ever sees
+ * base64 payloads.
+ */
+export async function inlineGoogleFileData(
+  payload: GoogleAIRequest,
+): Promise<void> {
+  for (const content of payload.contents) {
+    for (const [index, part] of content.parts.entries()) {
+      if (!isFileDataPart(part)) continue
+
+      const uri = part.fileData.fileUri
+      if (!isHttpUrl(uri)) continue
+
+      const inlined = await fetchUrlAsDataUri(uri, {
+        expectPdf: isPdfMediaType(part.fileData.mimeType),
+      })
+      content.parts[index] =
+        inlined ?
+          { inlineData: { mimeType: inlined.mediaType, data: inlined.data } }
+        : {
+            text: `[file attachment ${uri.slice(0, 200)} omitted: the URL could not be fetched by the proxy]`,
+          }
+    }
+  }
+}
 
 let toolCallCounter = 0
 
@@ -94,11 +124,20 @@ function translateContentParts(
     }
 
     if (isInlineDataPart(part)) {
-      if (isImageMimeType(part.inlineData.mimeType)) {
+      const mimeType = part.inlineData.mimeType.toLowerCase()
+      if (isImageMimeType(mimeType)) {
         contentParts.push({
           type: "image_url",
           image_url: {
             url: `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`,
+          },
+        })
+      } else if (mimeType.startsWith("application/pdf")) {
+        contentParts.push({
+          type: "file",
+          file: {
+            filename: "document.pdf",
+            file_data: `data:application/pdf;base64,${part.inlineData.data}`,
           },
         })
       } else {

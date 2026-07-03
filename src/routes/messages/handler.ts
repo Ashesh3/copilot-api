@@ -54,6 +54,7 @@ import {
   translateResponsesResultToAnthropic,
 } from "~/routes/messages/responses-translation"
 import { getResponsesRequestOptions } from "~/routes/responses/utils"
+import { modelSupportsNativeMessages } from "~/services/copilot/create-anthropic-messages"
 import {
   createChatCompletions,
   type ChatCompletionChunk,
@@ -73,6 +74,11 @@ import {
   type AnthropicTextBlock,
   type AnthropicToolResultBlock,
 } from "./anthropic-types"
+import {
+  normalizeAnthropicAttachments,
+  payloadHasPdfDocuments,
+} from "./attachment-normalization"
+import { handleWithNativeMessages } from "./native-handler"
 import {
   translateToAnthropic,
   translateToOpenAI,
@@ -249,6 +255,10 @@ async function handleCompletionInner(
   // Route to model variants based on client signals
   applyModelVariantRouting(c, anthropicPayload, anthropicBeta)
 
+  // Inline URL/text attachment sources so only base64 images and base64 PDF
+  // documents remain (upstream rejects external URLs and text documents)
+  await normalizeAnthropicAttachments(anthropicPayload)
+
   if (isCompact) {
     logger.debug("Is compact request:", isCompact)
   } else {
@@ -267,12 +277,29 @@ async function handleCompletionInner(
   // Type says `number` but clients may send null at runtime
   if (isNullish(anthropicPayload.max_tokens)) {
     anthropicPayload.max_tokens =
-      selectedModel?.capabilities.limits.max_output_tokens ?? 16384
+      selectedModel?.capabilities.limits?.max_output_tokens ?? 16384
   }
 
   // Log the requested vs routed model
+  // Base64 PDF documents can only reach claude models through the native
+  // /v1/messages endpoint (chat/completions cannot carry them)
+  const usesNativeMessages =
+    payloadHasPdfDocuments(anthropicPayload)
+    && modelSupportsNativeMessages(selectedModel)
+
   let apiType = "ChatCompletions"
-  if (shouldUseResponsesApi(selectedModel)) {
+  if (usesNativeMessages) {
+    apiType = "AnthropicMessages"
+    recordNonDefaultBehavior(c, {
+      kind: "endpoint_fallback",
+      message: `PDF document attachment routed ${anthropicPayload.model} to native /v1/messages`,
+      data: {
+        model: anthropicPayload.model,
+        sourceEndpoint: "ChatCompletions",
+        targetEndpoint: "AnthropicMessages",
+      },
+    })
+  } else if (shouldUseResponsesApi(selectedModel)) {
     apiType = "Responses"
   }
 
@@ -288,20 +315,27 @@ async function handleCompletionInner(
     reasoningEffort: effectiveEffort,
   })
 
-  const result =
-    shouldUseResponsesApi(selectedModel) ?
-      await handleWithResponsesApi(c, anthropicPayload, {
-        initiatorOverride,
-        effortOverride,
-        requestedModel,
-      })
-    : await handleWithChatCompletions(c, anthropicPayload, {
-        initiatorOverride,
-        effortOverride,
-        requestedModel,
-      })
+  if (usesNativeMessages) {
+    return await handleWithNativeMessages(c, anthropicPayload, {
+      initiatorOverride,
+      requestedModel,
+      selectedModel,
+    })
+  }
 
-  return result
+  if (shouldUseResponsesApi(selectedModel)) {
+    return await handleWithResponsesApi(c, anthropicPayload, {
+      initiatorOverride,
+      effortOverride,
+      requestedModel,
+    })
+  }
+
+  return await handleWithChatCompletions(c, anthropicPayload, {
+    initiatorOverride,
+    effortOverride,
+    requestedModel,
+  })
 }
 
 const RESPONSES_ENDPOINT = "/responses"

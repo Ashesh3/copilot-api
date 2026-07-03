@@ -2,6 +2,15 @@ import consola from "consola"
 import { events } from "fetch-event-stream"
 
 import { routedFetch } from "~/lib/account-router"
+import {
+  attachmentOmittedNote,
+  fetchUrlAsDataUri,
+  isDataUri,
+  isHttpUrl,
+  isLikelyBase64,
+  mediaTypeFromFilename,
+  toDataUri,
+} from "~/lib/attachments"
 import { getReasoningEffortForModel } from "~/lib/config"
 import { HTTPError } from "~/lib/error"
 import { getUnsupportedRequestParameters } from "~/lib/model-settings"
@@ -120,6 +129,7 @@ export type ResponseInputItem =
 export type ResponseInputContent =
   | ResponseInputText
   | ResponseInputImage
+  | ResponseInputFile
   | Record<string, unknown>
 
 export interface ResponseInputText {
@@ -134,6 +144,20 @@ export interface ResponseInputImage {
   detail: "low" | "high" | "auto"
 }
 
+/**
+ * Responses API file content part (PDF attachments). Copilot requires
+ * file_data to be a base64 data URI; raw base64 and external file_url
+ * values are rejected upstream (verified 2026-07-03).
+ */
+export interface ResponseInputFile {
+  type: "input_file"
+  filename?: string | null
+  /** base64 data URI ("data:application/pdf;base64,...") */
+  file_data?: string | null
+  file_id?: string | null
+  file_url?: string | null
+}
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null
 
@@ -142,6 +166,136 @@ const MIN_MAX_OUTPUT_TOKENS = 16
 
 function isInputImage(value: unknown): value is ResponseInputImage {
   return isRecord(value) && value.type === "input_image"
+}
+
+function isInputFile(value: unknown): value is ResponseInputFile {
+  return isRecord(value) && value.type === "input_file"
+}
+
+function isAttachmentPart(value: unknown): boolean {
+  return isInputImage(value) || isInputFile(value)
+}
+
+/**
+ * Normalize attachment parts to the shapes Copilot's /responses endpoint
+ * accepts (verified 2026-07-03):
+ *   - input_image.image_url must be a data URI (external URLs rejected)
+ *   - input_file.file_data must be a data URI (raw base64 and file_url
+ *     values rejected)
+ * External URLs are fetched and inlined by the proxy; failures downgrade to
+ * an explanatory input_text part.
+ */
+export async function normalizeResponsesAttachments(
+  payload: ResponsesPayload,
+): Promise<void> {
+  if (!Array.isArray(payload.input)) return
+
+  const normalizedInput: Array<ResponseInputItem> = []
+  for (const item of payload.input) {
+    if (isAttachmentPart(item)) {
+      normalizedInput.push(
+        (await normalizeResponsesContentPart(
+          item as ResponseInputContent,
+        )) as ResponseInputItem,
+      )
+      continue
+    }
+
+    if (isRecord(item) && Array.isArray(item.content)) {
+      const content: Array<ResponseInputContent> = []
+      for (const part of item.content as Array<ResponseInputContent>) {
+        content.push(await normalizeResponsesContentPart(part))
+      }
+      normalizedInput.push({ ...item, content })
+      continue
+    }
+
+    // function_call_output items carry content in `output`
+    if (isRecord(item) && Array.isArray(item.output)) {
+      const output: Array<ResponseInputContent> = []
+      for (const part of item.output as Array<ResponseInputContent>) {
+        output.push(await normalizeResponsesContentPart(part))
+      }
+      normalizedInput.push({ ...item, output })
+      continue
+    }
+
+    normalizedInput.push(item)
+  }
+  payload.input = normalizedInput
+}
+
+async function normalizeResponsesContentPart(
+  part: ResponseInputContent,
+): Promise<ResponseInputContent> {
+  if (isInputImage(part) && part.image_url && isHttpUrl(part.image_url)) {
+    const inlined = await fetchUrlAsDataUri(part.image_url)
+    if (inlined) {
+      return { ...part, image_url: toDataUri(inlined.mediaType, inlined.data) }
+    }
+    return {
+      type: "input_text",
+      text: attachmentOmittedNote({
+        kind: "image",
+        name: part.image_url.slice(0, 200),
+        reason: "the URL could not be fetched by the proxy",
+      }),
+    }
+  }
+
+  if (isInputFile(part)) {
+    return await normalizeInputFile(part)
+  }
+
+  return part
+}
+
+async function normalizeInputFile(
+  part: ResponseInputFile,
+): Promise<ResponseInputContent> {
+  const { file_url: fileUrl, file_data: fileData } = part
+
+  if (fileData) {
+    if (isDataUri(fileData)) return stripFileUrl(part)
+    if (isLikelyBase64(fileData)) {
+      const mediaType =
+        mediaTypeFromFilename(part.filename) ?? "application/pdf"
+      return stripFileUrl({
+        ...part,
+        file_data: toDataUri(mediaType, fileData),
+      })
+    }
+    return stripFileUrl(part)
+  }
+
+  if (fileUrl && isHttpUrl(fileUrl)) {
+    const inlined = await fetchUrlAsDataUri(fileUrl, { expectPdf: true })
+    if (inlined) {
+      const { file_url: _fileUrl, ...rest } = part
+      return {
+        ...rest,
+        filename:
+          part.filename ?? new URL(fileUrl).pathname.split("/").pop() ?? null,
+        file_data: toDataUri(inlined.mediaType, inlined.data),
+      }
+    }
+    return {
+      type: "input_text",
+      text: attachmentOmittedNote({
+        kind: "file",
+        name: part.filename ?? fileUrl.slice(0, 200),
+        reason: "the URL could not be fetched by the proxy",
+      }),
+    }
+  }
+
+  return part
+}
+
+function stripFileUrl(part: ResponseInputFile): ResponseInputFile {
+  if (part.file_url === undefined || part.file_url === null) return part
+  const { file_url: _fileUrl, ...rest } = part
+  return rest
 }
 
 function hasArrayContent(
@@ -158,7 +312,7 @@ function removeInputImages(payload: ResponsesPayload): boolean {
   let removedImages = false
   const filteredInput: Array<ResponseInputItem> = []
   for (const item of payload.input) {
-    if (isInputImage(item)) {
+    if (isAttachmentPart(item)) {
       removedImages = true
       continue
     }
@@ -166,7 +320,7 @@ function removeInputImages(payload: ResponsesPayload): boolean {
     if (hasArrayContent(item)) {
       const filteredContent: Array<ResponseInputContent> = []
       for (const part of item.content) {
-        if (isInputImage(part)) {
+        if (isAttachmentPart(part)) {
           removedImages = true
           continue
         }
@@ -652,6 +806,9 @@ export const createResponses = async (
 
   // Zero-data retention enforcement
   payload.store = false
+
+  // Inline external attachment URLs / normalize file_data to data URIs
+  await normalizeResponsesAttachments(payload)
 
   // Match runtime defaults for direct Responses requests.
   payload.reasoning ??= {}

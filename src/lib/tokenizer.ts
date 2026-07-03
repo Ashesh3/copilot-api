@@ -54,6 +54,9 @@ const calculateContentPartsTokens = (
   for (const part of contentParts) {
     if (part.type === "image_url") {
       tokens += encoder.encode(part.image_url.url).length + 85
+    } else if (part.type === "file") {
+      // Rough estimate for PDF attachments — actual cost depends on pages
+      tokens += Math.ceil((part.file.file_data?.length ?? 0) / 4)
     } else if (part.text) {
       tokens += encoder.encode(part.text).length
     }
@@ -371,6 +374,8 @@ export const estimateTokenCount = async (
         } else if (part.type === "image_url") {
           // Rough estimate for images
           tokens += 85
+        } else if (part.type === "file") {
+          tokens += Math.ceil((part.file.file_data?.length ?? 0) / 4)
         }
       }
     }

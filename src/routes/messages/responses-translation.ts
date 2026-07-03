@@ -9,6 +9,7 @@ import {
 import {
   type ResponsesPayload,
   type ResponseInputContent,
+  type ResponseInputFile,
   type ResponseInputImage,
   type ResponseInputItem,
   type ResponseInputMessage,
@@ -37,6 +38,7 @@ import {
   type AnthropicAssistantContentBlock,
   type AnthropicAssistantMessage,
   type AnthropicResponse,
+  type AnthropicDocumentBlock,
   type AnthropicImageBlock,
   type AnthropicMessage,
   type AnthropicMessagesPayload,
@@ -210,6 +212,9 @@ const translateUserContentBlock = (
     case "image": {
       return createImageContent(block)
     }
+    case "document": {
+      return createFileContent(block)
+    }
     default: {
       return undefined
     }
@@ -297,9 +302,34 @@ const createImageContent = (
   block: AnthropicImageBlock,
 ): ResponseInputImage => ({
   type: "input_image",
-  image_url: `data:${block.source.media_type};base64,${block.source.data}`,
+  // url sources are inlined to base64 by normalizeAnthropicAttachments;
+  // pass through defensively if one slips past.
+  image_url:
+    block.source.type === "base64" ?
+      `data:${block.source.media_type};base64,${block.source.data}`
+    : block.source.url,
   detail: "auto",
 })
+
+/**
+ * Anthropic document block → Responses input_file. Only base64 PDFs reach
+ * this point (normalizeAnthropicAttachments inlines text/url sources).
+ * Copilot requires file_data as a base64 data URI.
+ */
+const createFileContent = (
+  block: AnthropicDocumentBlock,
+): ResponseInputFile | ResponseInputText => {
+  if (block.source.type === "base64") {
+    return {
+      type: "input_file",
+      filename: block.title ?? "document.pdf",
+      file_data: `data:${block.source.media_type};base64,${block.source.data}`,
+    }
+  }
+  return createTextContent(
+    `[document attachment${block.title ? ` "${block.title}"` : ""} omitted]`,
+  )
+}
 
 const createReasoningContent = (
   block: AnthropicThinkingBlock,
@@ -708,7 +738,7 @@ const parseUserId = (
 }
 
 const convertToolResultContent = (
-  content: string | Array<AnthropicTextBlock | AnthropicImageBlock>,
+  content: AnthropicToolResultBlock["content"],
 ): string | Array<ResponseInputContent> => {
   if (typeof content === "string") {
     return content
@@ -724,6 +754,10 @@ const convertToolResultContent = (
         }
         case "image": {
           result.push(createImageContent(block))
+          break
+        }
+        case "document": {
+          result.push(createFileContent(block))
           break
         }
         default: {

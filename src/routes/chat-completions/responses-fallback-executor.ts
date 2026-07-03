@@ -41,6 +41,8 @@ interface ResponsesFallbackOptions {
   payload: ChatCompletionsPayload & { model: string }
   requestedModel: string
   reasoningEffort?: ReasoningEffort
+  /** Override for the fallback log message (default: endpoint capability). */
+  reason?: string
 }
 
 interface PreparedResponsesFallback {
@@ -71,7 +73,7 @@ export async function executeResponsesFallback(
   c: Context,
   options: ResponsesFallbackOptions,
 ): Promise<Response> {
-  reportEndpointFallback(c, options.payload.model)
+  reportEndpointFallback(c, options.payload.model, options.reason)
   setRequestContext(c, { provider: "ChatCompletions→Responses" })
 
   const prepared = prepareResponsesFallback(options)
@@ -104,14 +106,22 @@ function prepareResponsesFallback(
   }
 }
 
-function reportEndpointFallback(c: Context, model: string): void {
+function reportEndpointFallback(
+  c: Context,
+  model: string,
+  reason?: string,
+): void {
   recordNonDefaultBehavior(c, {
     kind: "endpoint_fallback",
-    message: `Model ${model} does not support /chat/completions; falling back to Responses`,
+    message:
+      reason ?
+        `${reason} routed ${model} to Responses`
+      : `Model ${model} does not support /chat/completions; falling back to Responses`,
     data: {
       model,
       sourceEndpoint: "ChatCompletions",
       targetEndpoint: "Responses",
+      ...(reason ? { reason } : {}),
     },
   })
 }

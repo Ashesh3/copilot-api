@@ -14,6 +14,7 @@ import type {
   ResponseFunctionCallOutputItem,
   ResponseFunctionToolCallItem,
   ResponseInputContent,
+  ResponseInputFile,
   ResponseInputImage,
   ResponseInputItem,
   ResponseInputMessage,
@@ -200,7 +201,7 @@ function convertMessageToResponsesItems(
         {
           type: "function_call_output",
           call_id: message.tool_call_id ?? "",
-          output: contentToText(message.content),
+          output: convertToolOutput(message.content),
         } satisfies ResponseFunctionCallOutputItem,
       ]
     }
@@ -307,10 +308,38 @@ function convertContentPart(
         } satisfies ResponseInputImage,
       ]
     }
+    case "file": {
+      if (role !== "user") return []
+      return [
+        {
+          type: "input_file",
+          filename: part.file.filename ?? "document.pdf",
+          ...(part.file.file_data ? { file_data: part.file.file_data } : {}),
+          ...(part.file.file_id ? { file_id: part.file.file_id } : {}),
+        } satisfies ResponseInputFile,
+      ]
+    }
     default: {
       return []
     }
   }
+}
+
+/**
+ * Tool results may carry images/files (e.g. screenshot tools); the Copilot
+ * Responses endpoint accepts structured function_call_output content.
+ */
+function convertToolOutput(
+  content: Message["content"],
+): string | Array<ResponseInputContent> {
+  if (typeof content === "string") return content
+  if (!Array.isArray(content)) return ""
+
+  if (content.every((part) => part.type === "text")) {
+    return contentToText(content)
+  }
+
+  return content.flatMap((part) => convertContentPart(part, "user"))
 }
 
 function extractInstructions(

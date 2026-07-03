@@ -45,17 +45,43 @@ export interface AnthropicTextBlock {
 
 export interface AnthropicImageBlock {
   type: "image"
-  source: {
-    type: "base64"
-    media_type: "image/jpeg" | "image/png" | "image/gif" | "image/webp"
-    data: string
-  }
+  source:
+    | {
+        type: "base64"
+        media_type: "image/jpeg" | "image/png" | "image/gif" | "image/webp"
+        data: string
+      }
+    | {
+        type: "url"
+        url: string
+      }
+}
+
+/**
+ * Anthropic document block — how Claude Code attaches PDFs (base64 source),
+ * plain text files (text source) and remote documents (url source).
+ */
+export interface AnthropicDocumentBlock {
+  type: "document"
+  source:
+    | { type: "base64"; media_type: string; data: string }
+    | { type: "text"; media_type?: string; data: string }
+    | { type: "url"; url: string }
+    | {
+        type: "content"
+        content: string | Array<AnthropicTextBlock | AnthropicImageBlock>
+      }
+  title?: string | null
+  context?: string | null
+  citations?: { enabled?: boolean } | null
 }
 
 export interface AnthropicToolResultBlock {
   type: "tool_result"
   tool_use_id: string
-  content: string | Array<AnthropicTextBlock | AnthropicImageBlock>
+  content:
+    | string
+    | Array<AnthropicTextBlock | AnthropicImageBlock | AnthropicDocumentBlock>
   is_error?: boolean
 }
 
@@ -75,6 +101,7 @@ export interface AnthropicThinkingBlock {
 export type AnthropicUserContentBlock =
   | AnthropicTextBlock
   | AnthropicImageBlock
+  | AnthropicDocumentBlock
   | AnthropicToolResultBlock
 
 export type AnthropicAssistantContentBlock =

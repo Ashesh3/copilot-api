@@ -4,6 +4,8 @@ import * as Sentry from "@sentry/bun"
 import consola from "consola"
 import { streamSSE, type SSEMessage } from "hono/streaming"
 
+import type { Model } from "~/services/copilot/get-models"
+
 import { getLastUsedAccountId } from "~/lib/account-router"
 import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
@@ -41,6 +43,7 @@ import { tokenPool } from "~/lib/token-pool"
 import { getTokenCount } from "~/lib/tokenizer"
 import { emitChatCompletionsToolSpans } from "~/lib/tool-spans"
 import { isNullish } from "~/lib/utils"
+import { modelSupportsNativeMessages } from "~/services/copilot/create-anthropic-messages"
 import {
   createChatCompletions,
   type ChatCompletionChunk,
@@ -48,6 +51,7 @@ import {
   type ChatCompletionsPayload,
 } from "~/services/copilot/create-chat-completions"
 
+import { executeAnthropicBridge } from "./anthropic-bridge"
 import {
   executeResponsesFallback,
   shouldUseResponsesFallback,
@@ -173,15 +177,66 @@ async function handleCompletionInner(
 
   payload = applyDefaultMaxTokens(payload, selectedModel)
 
-  if (shouldUseResponsesFallback(selectedModel)) {
+  return await dispatchCopilotCompletion(c, {
+    payload,
+    requestedModel,
+    reasoningEffort,
+    selectedModel,
+  })
+}
+
+/**
+ * Pick the upstream endpoint. PDF file parts cannot ride /chat/completions
+ * upstream, so file-bearing payloads route to /responses or native
+ * /v1/messages when the model supports one of them.
+ */
+async function dispatchCopilotCompletion(
+  c: Context,
+  options: {
+    payload: ChatCompletionsPayload & { model: string }
+    requestedModel: string
+    reasoningEffort?: ReasoningEffort
+    selectedModel: Model | undefined
+  },
+) {
+  const { payload, requestedModel, reasoningEffort, selectedModel } = options
+  const hasFileParts = payloadHasFileParts(payload)
+
+  if (
+    shouldUseResponsesFallback(selectedModel)
+    || (hasFileParts && supportsResponsesEndpoint(selectedModel))
+  ) {
     return await executeResponsesFallback(c, {
       payload,
       requestedModel,
       reasoningEffort,
+      ...(hasFileParts ? { reason: "PDF file attachment" } : {}),
+    })
+  }
+
+  if (hasFileParts && modelSupportsNativeMessages(selectedModel)) {
+    return await executeAnthropicBridge(c, {
+      payload,
+      requestedModel,
+      selectedModel,
     })
   }
 
   return await executeRequest(c, payload, requestedModel)
+}
+
+function payloadHasFileParts(payload: ChatCompletionsPayload): boolean {
+  return payload.messages.some(
+    (message) =>
+      Array.isArray(message.content)
+      && message.content.some((part) => part.type === "file"),
+  )
+}
+
+function supportsResponsesEndpoint(
+  selectedModel: { supported_endpoints?: Array<string> } | undefined,
+): boolean {
+  return selectedModel?.supported_endpoints?.includes("/responses") ?? false
 }
 
 function getCopilotModelIds(): Set<string> {
@@ -211,7 +266,7 @@ function applyDefaultMaxTokens(
 
   const nextPayload = {
     ...payload,
-    max_tokens: selectedModel?.capabilities.limits.max_output_tokens,
+    max_tokens: selectedModel?.capabilities.limits?.max_output_tokens,
   }
   consola.debug("Set max_tokens to:", JSON.stringify(nextPayload.max_tokens))
   return nextPayload

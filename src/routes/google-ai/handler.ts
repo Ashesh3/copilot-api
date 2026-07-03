@@ -11,10 +11,11 @@ import type { Context } from "hono"
 import consola from "consola"
 import { streamSSE } from "hono/streaming"
 
+import type { Model } from "~/services/copilot/get-models"
+
 import { getLastUsedAccountId } from "~/lib/account-router"
 import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
-import { getReasoningEffortForModel } from "~/lib/config"
 import { isAbortError } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
 import {
@@ -42,6 +43,11 @@ import {
   hasVisionContent,
 } from "~/services/copilot/copilot-client"
 import {
+  createAnthropicMessages,
+  modelSupportsNativeMessages,
+  type AnthropicStreamChunk,
+} from "~/services/copilot/create-anthropic-messages"
+import {
   createChatCompletions,
   type ChatCompletionChunk,
   type ChatCompletionResponse,
@@ -49,19 +55,23 @@ import {
 } from "~/services/copilot/create-chat-completions"
 import {
   createResponses,
-  type ResponseInputItem,
-  type ResponseInputMessage,
-  type ResponseFunctionToolCallItem,
-  type ResponseFunctionCallOutputItem,
-  type ResponsesPayload,
   type ResponsesResult,
   type ResponseStreamEvent,
-  type FunctionTool,
 } from "~/services/copilot/create-responses"
 
+import type { AnthropicResponse } from "../messages/anthropic-types"
 import type { GoogleAIRequest } from "./google-ai-types"
 
-import { translateGoogleToOpenAI } from "./request-translation"
+import {
+  chatPayloadToAnthropic,
+  streamAnthropicAsChatCompletions,
+  anthropicResponseToChat,
+} from "../chat-completions/anthropic-bridge"
+import { chatCompletionsToResponses } from "../chat-completions/responses-fallback"
+import {
+  inlineGoogleFileData,
+  translateGoogleToOpenAI,
+} from "./request-translation"
 import {
   createGoogleStreamState,
   translateChunkToGoogle,
@@ -73,22 +83,6 @@ import {
 const logger = createHandlerLogger("google-ai-handler")
 
 const RESPONSES_ENDPOINT = "/responses"
-
-function getCopilotCacheControl(
-  value: unknown,
-): { type: "ephemeral" } | undefined {
-  if (!value || typeof value !== "object") {
-    return undefined
-  }
-
-  const cacheControl = (value as Record<string, unknown>).copilot_cache_control
-  if (!cacheControl || typeof cacheControl !== "object") {
-    return undefined
-  }
-
-  const type = (cacheControl as Record<string, unknown>).type
-  return type === "ephemeral" ? { type } : undefined
-}
 
 function getUnsupportedGoogleRootFields(
   payload: GoogleAIRequest,
@@ -149,11 +143,9 @@ function parseModelAction(modelAction: string): {
 function capMaxTokens(
   c: Context,
   payload: ChatCompletionsPayload,
-  selectedModel:
-    | { capabilities: { limits: { max_output_tokens?: number } } }
-    | undefined,
+  selectedModel: Model | undefined,
 ): void {
-  const maxAllowed = selectedModel?.capabilities.limits.max_output_tokens
+  const maxAllowed = selectedModel?.capabilities.limits?.max_output_tokens
   if (!maxAllowed) return
 
   if (isNullish(payload.max_tokens)) {
@@ -269,6 +261,9 @@ export async function handleGoogleAI(c: Context) {
   const googlePayload = await c.req.json<GoogleAIRequest>()
   logger.debug("Google AI request payload:", JSON.stringify(googlePayload))
 
+  // Inline http(s) fileData attachments (upstream rejects external URLs)
+  await inlineGoogleFileData(googlePayload)
+
   const unsupportedRootFields = getUnsupportedGoogleRootFields(googlePayload)
   if (unsupportedRootFields.length > 0) {
     return c.json(
@@ -348,19 +343,63 @@ export async function handleGoogleAI(c: Context) {
   )
   logger.debug("Translated OpenAI payload:", JSON.stringify(finalPayload))
 
-  // Route to the correct API based on model capabilities
+  return await dispatchGoogleRequest(c, {
+    finalPayload,
+    selectedModel,
+    useResponsesApi,
+    isStream,
+    reasoningEffort,
+  })
+}
+
+/** Route to the correct upstream API based on model capabilities. */
+async function dispatchGoogleRequest(
+  c: Context,
+  options: {
+    finalPayload: ChatCompletionsPayload & { model: string }
+    selectedModel: Model | undefined
+    useResponsesApi: boolean
+    isStream: boolean
+    reasoningEffort?: ReasoningEffort
+  },
+) {
+  const { finalPayload, selectedModel, useResponsesApi, isStream } = options
+
   if (useResponsesApi) {
     consola.debug(`[google-ai] Using Responses API for ${finalPayload.model}`)
-    return handleWithResponsesApi(c, finalPayload, {
+    return await handleWithResponsesApi(c, finalPayload, {
       isStream,
-      effortOverride: reasoningEffort,
+      effortOverride: options.reasoningEffort,
+    })
+  }
+
+  // PDF file parts cannot ride /chat/completions upstream; claude models
+  // accept them natively via /v1/messages
+  if (
+    payloadHasFileParts(finalPayload)
+    && modelSupportsNativeMessages(selectedModel)
+  ) {
+    consola.debug(
+      `[google-ai] Using native /v1/messages for ${finalPayload.model} (PDF attachment)`,
+    )
+    return await handleWithAnthropicMessages(c, finalPayload, {
+      selectedModel,
+      isStream,
     })
   }
 
   consola.debug(
     `[google-ai] Using ChatCompletions API for ${finalPayload.model}`,
   )
-  return handleWithChatCompletions(c, finalPayload)
+  return await handleWithChatCompletions(c, finalPayload)
+}
+
+function payloadHasFileParts(payload: ChatCompletionsPayload): boolean {
+  return payload.messages.some(
+    (message) =>
+      Array.isArray(message.content)
+      && message.content.some((part) => part.type === "file"),
+  )
 }
 
 function applyGoogleReasoningEffort(
@@ -463,170 +502,96 @@ async function handleWithChatCompletions(
   })
 }
 
-// ─── Responses API path ───
+// ─── Native /v1/messages path (claude models with PDF attachments) ───
 
-/**
- * Convert an OpenAI ChatCompletions payload to a Responses API payload.
- */
-function openAIPayloadToResponses(
-  payload: ChatCompletionsPayload,
-  effortOverride?: ReasoningEffort,
-): ResponsesPayload {
-  // Extract system messages → instructions
-  const systemMessages = payload.messages.filter((m) => m.role === "system")
-  const instructions =
-    systemMessages
-      .map((m) => (typeof m.content === "string" ? m.content : ""))
-      .join("\n") || null
-  const input = convertMessagesToInput(payload.messages)
-  const tools = convertToolsToResponses(payload.tools)
-  const toolChoice = convertToolChoiceToResponses(payload.tool_choice)
-  return {
-    model: payload.model,
-    input,
-    instructions,
-    temperature: payload.temperature,
-    top_p: payload.top_p,
-    max_output_tokens: payload.max_tokens,
-    tools,
-    tool_choice: toolChoice,
-    stream: payload.stream,
-    store: false,
-    parallel_tool_calls: true,
-    reasoning: {
-      effort: getReasoningEffortForModel(payload.model, effortOverride),
-      summary: "auto",
+async function handleWithAnthropicMessages(
+  c: Context,
+  payload: ChatCompletionsPayload & { model: string },
+  options: { selectedModel?: Model; isStream: boolean },
+) {
+  recordNonDefaultBehavior(c, {
+    kind: "endpoint_fallback",
+    message: `PDF file attachment routed ${payload.model} to native /v1/messages`,
+    data: {
+      model: payload.model,
+      sourceEndpoint: "ChatCompletions",
+      targetEndpoint: "AnthropicMessages",
     },
-    include: ["reasoning.encrypted_content"],
-  }
-}
+  })
+  setRequestContext(c, { provider: "GoogleAI→AnthropicMessages" })
 
-/**
- * Convert OpenAI messages to Responses API input items.
- */
-function convertMessagesToInput(
-  messages: ChatCompletionsPayload["messages"],
-): Array<ResponseInputItem> {
-  const input: Array<ResponseInputItem> = []
-  for (const msg of messages) {
-    if (msg.role === "system") continue
-    switch (msg.role) {
-      case "user": {
-        input.push(
-          createResponseMessage(
-            "user",
-            typeof msg.content === "string" ? msg.content : "",
-            getCopilotCacheControl(msg),
-          ),
-        )
-        break
-      }
-      case "assistant": {
-        if (msg.content) {
-          input.push(
-            createResponseMessage(
-              "assistant",
-              typeof msg.content === "string" ? msg.content : "",
-              getCopilotCacheControl(msg),
-            ),
-          )
-        }
-        if (msg.tool_calls) {
-          for (const tc of msg.tool_calls) {
-            input.push({
-              type: "function_call",
-              call_id: tc.id,
-              name: tc.function.name,
-              arguments: tc.function.arguments,
-              status: "completed",
-            } satisfies ResponseFunctionToolCallItem)
-          }
-        }
-        break
-      }
-      case "tool": {
-        input.push({
-          type: "function_call_output",
-          call_id: msg.tool_call_id ?? "",
-          output:
-            typeof msg.content === "string" ?
-              msg.content
-            : JSON.stringify(msg.content),
-        } satisfies ResponseFunctionCallOutputItem)
-        break
-      }
-      // No default
-    }
-  }
-
-  return input
-}
-
-/**
- * Convert OpenAI tools to Responses API tools.
- */
-function convertToolsToResponses(
-  tools: ChatCompletionsPayload["tools"],
-): Array<FunctionTool> | null {
-  return (
-    tools?.map((t) => ({
-      type: "function" as const,
-      name: t.function.name,
-      description: t.function.description ?? null,
-      parameters: t.function.parameters,
-      strict: false,
-      ...(getCopilotCacheControl(t) ?
-        { copilot_cache_control: getCopilotCacheControl(t) }
-      : {}),
-    })) ?? null
+  const anthropicPayload = await chatPayloadToAnthropic(
+    payload,
+    options.selectedModel,
   )
-}
+  const response = await createAnthropicMessages(anthropicPayload, {
+    signal: c.req.raw.signal,
+  })
 
-/**
- * Convert OpenAI tool_choice to Responses API tool_choice.
- */
-function convertToolChoiceToResponses(
-  toolChoice: ChatCompletionsPayload["tool_choice"],
-): ResponsesPayload["tool_choice"] {
-  if (typeof toolChoice === "string") {
-    return toolChoice
+  const nativeAccountId = getLastUsedAccountId()
+  if (nativeAccountId !== undefined) {
+    setRequestContext(c, { accountId: nativeAccountId })
   }
-  if (
-    toolChoice
-    && typeof toolChoice === "object"
-    && "function" in toolChoice
-  ) {
-    return {
-      type: "function",
-      name: toolChoice.function.name,
+
+  if (!options.isStream || !isAsyncIterable(response)) {
+    const chatResponse = anthropicResponseToChat(
+      response as AnthropicResponse,
+      payload.model,
+    )
+    if (chatResponse.usage) {
+      setRequestContext(c, {
+        inputTokens: chatResponse.usage.prompt_tokens,
+        outputTokens: chatResponse.usage.completion_tokens,
+      })
     }
+    return c.json(translateOpenAIToGoogle(chatResponse))
   }
-  return "auto"
+
+  // Anthropic SSE → ChatCompletions chunks → Google chunks
+  return streamSSE(c, async (stream) => {
+    try {
+      const googleState = createGoogleStreamState()
+      const chunkShim = {
+        writeSSE: async ({ data }: { data: string }) => {
+          if (data === "[DONE]") return
+          const chunk = JSON.parse(data) as ChatCompletionChunk
+          if (!Array.isArray(chunk.choices)) return
+          if (chunk.usage) {
+            setRequestContext(c, {
+              inputTokens: chunk.usage.prompt_tokens,
+              outputTokens: chunk.usage.completion_tokens,
+            })
+          }
+          const googleChunk = translateChunkToGoogle(chunk, googleState)
+          if (googleChunk) {
+            await stream.writeSSE({ data: JSON.stringify(googleChunk) })
+          }
+        },
+      }
+      await streamAnthropicAsChatCompletions(
+        chunkShim,
+        response as AsyncIterable<AnthropicStreamChunk>,
+        payload.model,
+      )
+    } catch (error) {
+      if (isAbortError(error)) return
+      throw error
+    }
+  })
 }
 
-function createResponseMessage(
-  role: "user" | "assistant",
-  content: string,
-  copilotCacheControl?: { type: "ephemeral" },
-): ResponseInputMessage {
-  return {
-    type: "message",
-    role,
-    content,
-    ...(copilotCacheControl ?
-      { copilot_cache_control: copilotCacheControl }
-    : {}),
-  } as ResponseInputMessage
-}
+// ─── Responses API path ───
 
 async function handleWithResponsesApi(
   c: Context,
-  payload: ChatCompletionsPayload,
+  payload: ChatCompletionsPayload & { model: string },
   options: { isStream: boolean; effortOverride?: ReasoningEffort },
 ) {
   const { isStream, effortOverride } = options
   addPromptCaching(payload.messages, payload.tools ?? undefined)
-  const responsesPayload = openAIPayloadToResponses(payload, effortOverride)
+  // Shared converter carries image_url and file parts through to
+  // input_image/input_file (the local converter used to drop them)
+  const responsesPayload = chatCompletionsToResponses(payload, effortOverride)
   const vision = hasVisionContent(payload.messages)
   const initiator = detectInitiator(payload.messages)
   logger.debug(

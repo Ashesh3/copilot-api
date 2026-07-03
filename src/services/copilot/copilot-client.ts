@@ -45,6 +45,8 @@ export interface CopilotHeaderOptions {
   vision?: boolean
   initiator?: "agent" | "user"
   copilotToken?: string
+  /** Set the anthropic-version header (native /v1/messages requests). */
+  anthropicVersion?: string
 }
 
 export function copilotHeaders(
@@ -77,6 +79,10 @@ export function copilotHeaders(
 
   if (options?.vision) {
     headers["Copilot-Vision-Request"] = "true"
+  }
+
+  if (options?.anthropicVersion) {
+    headers["anthropic-version"] = options.anthropicVersion
   }
 
   return headers
@@ -236,6 +242,7 @@ function isLlmDebugPath(path: string): boolean {
     path === "/chat/completions"
     || path === "/responses"
     || path === "/embeddings"
+    || path === "/v1/messages"
   )
 }
 
@@ -532,13 +539,22 @@ export function hasVisionContent(
     content?: string | ReadonlyArray<ContentPart> | null
   }>,
 ): boolean {
-  const imageTypes = new Set(["image_url", "image", "input_image"])
+  // Image parts across dialects, plus file/document attachment parts (PDFs)
+  // which also ride the vision pipeline upstream.
+  const attachmentTypes = new Set([
+    "image_url",
+    "image",
+    "input_image",
+    "file",
+    "input_file",
+    "document",
+  ])
 
   for (const message of messages) {
     if (Array.isArray(message.content)) {
       const parts = message.content as ReadonlyArray<ContentPart>
       for (const part of parts) {
-        if (imageTypes.has(part.type)) {
+        if (attachmentTypes.has(part.type)) {
           return true
         }
       }

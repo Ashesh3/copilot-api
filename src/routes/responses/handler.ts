@@ -4,6 +4,9 @@ import type { Context } from "hono"
 import * as Sentry from "@sentry/bun"
 import { streamSSE } from "hono/streaming"
 
+import type { AnthropicResponse } from "~/routes/messages/anthropic-types"
+import type { Model } from "~/services/copilot/get-models"
+
 import { getLastUsedAccountId } from "~/lib/account-router"
 import { awaitApproval } from "~/lib/approval"
 import { getConfig } from "~/lib/config"
@@ -36,10 +39,15 @@ import { state } from "~/lib/state"
 import { tokenPool } from "~/lib/token-pool"
 import { emitResponsesToolSpans } from "~/lib/tool-spans"
 import {
+  createAnthropicMessages,
+  modelSupportsNativeMessages,
+} from "~/services/copilot/create-anthropic-messages"
+import {
   createChatCompletions,
   type ChatCompletionChunk,
   type ChatCompletionResponse,
   type ChatCompletionsPayload,
+  type ContentPart,
 } from "~/services/copilot/create-chat-completions"
 import {
   createResponses,
@@ -54,6 +62,10 @@ import {
 } from "~/services/copilot/create-responses"
 import { WEB_SEARCH_RESPONSES_TOOL } from "~/services/copilot/mcp-web-search"
 
+import {
+  anthropicResponseToChat,
+  chatPayloadToAnthropic,
+} from "../chat-completions/anthropic-bridge"
 import {
   emitResponsesResultAsStream,
   resolveResponsesWebSearchCalls,
@@ -835,10 +847,7 @@ const convertInputToMessages = (
       const fco = item as { call_id: string; output: unknown }
       messages.push({
         role: "tool",
-        content:
-          typeof fco.output === "string" ?
-            fco.output
-          : JSON.stringify(fco.output),
+        content: convertFunctionCallOutputToCC(fco.output),
         tool_call_id: fco.call_id,
       })
       continue
@@ -852,23 +861,74 @@ const convertInputToMessages = (
   return messages
 }
 
+const convertResponsesContentToCC = (
+  content: Array<Record<string, unknown>>,
+): Array<ContentPart> => {
+  const parts: Array<ContentPart> = []
+  for (const part of content) {
+    if (part.type === "input_image" && typeof part.image_url === "string") {
+      parts.push({ type: "image_url", image_url: { url: part.image_url } })
+      continue
+    }
+    if (part.type === "input_file") {
+      parts.push({
+        type: "file",
+        file: {
+          ...(typeof part.filename === "string" ?
+            { filename: part.filename }
+          : {}),
+          ...(typeof part.file_data === "string" ?
+            { file_data: part.file_data }
+          : {}),
+          ...(typeof part.file_id === "string" ?
+            { file_id: part.file_id }
+          : {}),
+        },
+      })
+      continue
+    }
+    if (typeof part.text === "string") {
+      parts.push({ type: "text", text: part.text })
+    }
+  }
+  return parts
+}
+
+const flattenTextParts = (
+  parts: Array<ContentPart>,
+): string | Array<ContentPart> =>
+  parts.every((part) => part.type === "text") ?
+    parts.map((part) => (part as { text: string }).text).join("")
+  : parts
+
+const convertFunctionCallOutputToCC = (
+  output: unknown,
+): string | Array<ContentPart> => {
+  if (typeof output === "string") return output
+  if (Array.isArray(output)) {
+    const parts = convertResponsesContentToCC(
+      output as Array<Record<string, unknown>>,
+    )
+    if (parts.length > 0) return flattenTextParts(parts)
+  }
+  return JSON.stringify(output)
+}
+
 const convertMessageItem = (
   item: unknown,
   messages: ChatCompletionsPayload["messages"],
 ): void => {
   const msg = item as {
     role: "user" | "assistant" | "system" | "developer"
-    content?: string | Array<{ type?: string; text?: string }>
+    content?: string | Array<Record<string, unknown>>
   }
   const role = msg.role === "developer" ? "developer" : msg.role
-  let content: string
+  let content: string | Array<ContentPart>
 
   if (typeof msg.content === "string") {
     content = msg.content
   } else if (Array.isArray(msg.content)) {
-    content = msg.content
-      .map((c) => (typeof c.text === "string" ? c.text : ""))
-      .join("")
+    content = flattenTextParts(convertResponsesContentToCC(msg.content))
   } else {
     content = ""
   }
@@ -1361,6 +1421,81 @@ export const streamChatCompletionsAsResponses = async (
   return { ...s.usage, responseText: s.accumulatedText }
 }
 
+const ccPayloadHasFileParts = (payload: ChatCompletionsPayload): boolean =>
+  payload.messages.some(
+    (message) =>
+      Array.isArray(message.content)
+      && message.content.some((part) => part.type === "file"),
+  )
+
+/**
+ * Bridge the ChatCompletions fallback to native /v1/messages for claude
+ * models when the payload carries PDF attachments. The response is buffered
+ * and re-emitted as a Responses stream when streaming was requested (same
+ * pattern as web-search resolution).
+ */
+const handleFallbackViaNativeMessages = async (
+  c: Context,
+  options: {
+    ccPayload: ChatCompletionsPayload & { model: string }
+    isStream: boolean
+    responseModel: string
+    selectedModel?: Model
+  },
+) => {
+  recordNonDefaultBehavior(c, {
+    kind: "endpoint_fallback",
+    message: `PDF file attachment routed ${options.ccPayload.model} to native /v1/messages`,
+    data: {
+      model: options.ccPayload.model,
+      sourceEndpoint: "Responses",
+      targetEndpoint: "AnthropicMessages",
+    },
+  })
+  setRequestContext(c, { provider: "Responses→AnthropicMessages" })
+
+  const anthropicPayload = await chatPayloadToAnthropic(
+    options.ccPayload,
+    options.selectedModel,
+  )
+  anthropicPayload.stream = false
+
+  const response = (await createAnthropicMessages(anthropicPayload, {
+    signal: c.req.raw.signal,
+  })) as AnthropicResponse
+
+  const nativeAccountId = getLastUsedAccountId()
+  if (nativeAccountId !== undefined) {
+    setRequestContext(c, { accountId: nativeAccountId })
+  }
+
+  const ccResponse = anthropicResponseToChat(response, options.responseModel)
+  if (ccResponse.usage) {
+    setRequestContext(c, {
+      inputTokens: ccResponse.usage.prompt_tokens,
+      outputTokens: ccResponse.usage.completion_tokens,
+    })
+  }
+
+  const result = chatCompletionToResponsesResult(
+    ccResponse,
+    options.responseModel,
+  )
+
+  if (!options.isStream) {
+    return c.json(result)
+  }
+
+  return streamSSE(c, async (stream) => {
+    try {
+      await emitResponsesResultAsStream(stream, result)
+    } catch (error) {
+      if (isAbortError(error)) return
+      throw error
+    }
+  })
+}
+
 const handleWithChatCompletions = async (
   c: Context,
   payload: ResponsesPayload,
@@ -1369,6 +1504,22 @@ const handleWithChatCompletions = async (
   const ccPayload = responsesToChatCompletions(payload)
   const responseModel = requestedModel ?? payload.model
   logger.debug("ChatCompletions fallback payload:", JSON.stringify(ccPayload))
+
+  // PDF file parts cannot ride /chat/completions upstream; claude models
+  // accept them natively via /v1/messages
+  if (ccPayloadHasFileParts(ccPayload)) {
+    const selectedModel = state.models?.data.find(
+      (model) => model.id === payload.model,
+    )
+    if (modelSupportsNativeMessages(selectedModel)) {
+      return await handleFallbackViaNativeMessages(c, {
+        ccPayload: { ...ccPayload, model: payload.model },
+        isStream: Boolean(payload.stream),
+        responseModel,
+        selectedModel,
+      })
+    }
+  }
 
   // Non-streaming: span wraps the entire call + response processing
   if (!payload.stream) {

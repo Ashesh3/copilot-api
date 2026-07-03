@@ -196,12 +196,16 @@ const containsVisionContent = (value: unknown): boolean => {
   const type =
     typeof record.type === "string" ? record.type.toLowerCase() : undefined
 
-  if (type === "input_image") {
+  if (type === "input_image" || type === "input_file") {
     return true
   }
 
   if (Array.isArray(record.content)) {
     return record.content.some((entry) => containsVisionContent(entry))
+  }
+
+  if (Array.isArray(record.output)) {
+    return record.output.some((entry) => containsVisionContent(entry))
   }
 
   return false

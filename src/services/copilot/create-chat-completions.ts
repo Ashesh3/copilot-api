@@ -2,6 +2,13 @@ import consola from "consola"
 import { events } from "fetch-event-stream"
 
 import { routedFetch } from "~/lib/account-router"
+import {
+  attachmentOmittedNote,
+  fetchUrlAsDataUri,
+  isHttpUrl,
+  pdfUnsupportedByModelNote,
+  toDataUri,
+} from "~/lib/attachments"
 import { HTTPError } from "~/lib/error"
 import { modelSupportsAssistantPrefill } from "~/lib/model-settings"
 import {
@@ -148,17 +155,81 @@ const injectJsonInstruction = (payload: ChatCompletionsPayload): void => {
 }
 
 const imageTypes = new Set(["image_url", "image", "input_image"])
+const attachmentTypes = new Set([...imageTypes, "file", "input_file"])
 
 function removeImages(payload: ChatCompletionsPayload): void {
   for (const msg of payload.messages) {
     if (Array.isArray(msg.content)) {
-      msg.content = msg.content.filter((part) => !imageTypes.has(part.type))
+      msg.content = msg.content.filter(
+        (part) => !attachmentTypes.has(part.type),
+      )
       if (msg.content.length === 1) {
         const first = msg.content[0] as TextPart
         msg.content = first.text
       }
     }
   }
+}
+
+/**
+ * The Copilot /chat/completions endpoint only accepts `text` and `image_url`
+ * content parts, and image URLs must be data URIs ("external image URLs are
+ * not supported"). Fetch external image URLs and inline them; downgrade
+ * anything that cannot be carried (PDF `file` parts, failed fetches) to an
+ * explanatory text note. PDF-capable models are routed to /responses or
+ * /v1/messages before reaching this function; this is the safety net.
+ */
+export async function normalizeChatAttachments(
+  payload: ChatCompletionsPayload,
+): Promise<void> {
+  for (const message of payload.messages) {
+    if (!Array.isArray(message.content)) continue
+
+    const normalized: Array<ContentPart> = []
+    for (const part of message.content) {
+      normalized.push(await normalizeChatContentPart(part, payload.model))
+    }
+    message.content = normalized
+  }
+}
+
+async function normalizeChatContentPart(
+  part: ContentPart,
+  model: string,
+): Promise<ContentPart> {
+  if (part.type === "image_url" && isHttpUrl(part.image_url.url)) {
+    const inlined = await fetchUrlAsDataUri(part.image_url.url)
+    if (inlined) {
+      return {
+        ...part,
+        image_url: {
+          ...part.image_url,
+          url: toDataUri(inlined.mediaType, inlined.data),
+        },
+      }
+    }
+    consola.warn(`Failed to inline external image URL for ${model}`)
+    return {
+      type: "text",
+      text: attachmentOmittedNote({
+        kind: "image",
+        name: part.image_url.url.slice(0, 200),
+        reason: "the URL could not be fetched by the proxy",
+      }),
+    }
+  }
+
+  if (part.type === "file") {
+    consola.warn(
+      `Downgrading PDF file part for ${model}: /chat/completions cannot carry file attachments`,
+    )
+    return {
+      type: "text",
+      text: pdfUnsupportedByModelNote(model, part.file.filename),
+    }
+  }
+
+  return part
 }
 
 async function handleResponse(
@@ -313,6 +384,7 @@ export const createChatCompletions = async (
   },
 ) => {
   rewriteUnsupportedAssistantPrefill(payload)
+  await normalizeChatAttachments(payload)
   const vision = hasVisionContent(payload.messages)
   const initiator = detectInitiator(payload.messages, options?.initiator)
   const headerOpts = { vision, initiator }
@@ -509,7 +581,7 @@ export interface ToolCall {
   }
 }
 
-export type ContentPart = TextPart | ImagePart
+export type ContentPart = TextPart | ImagePart | FilePart
 
 export interface TextPart {
   type: "text"
@@ -521,5 +593,21 @@ export interface ImagePart {
   image_url: {
     url: string
     detail?: "low" | "high" | "auto"
+  }
+}
+
+/**
+ * OpenAI Chat Completions file content part (PDF attachments).
+ * Copilot's /chat/completions endpoint rejects this type; the proxy routes
+ * file-bearing payloads to /responses (input_file) or /v1/messages
+ * (document blocks) instead, or forwards it verbatim to custom providers.
+ */
+export interface FilePart {
+  type: "file"
+  file: {
+    filename?: string
+    /** base64 data URI (e.g. "data:application/pdf;base64,...") */
+    file_data?: string
+    file_id?: string
   }
 }
