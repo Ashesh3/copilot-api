@@ -1,4 +1,4 @@
-import { Hono } from "hono"
+import { Hono, type Context } from "hono"
 
 import { upsertIpAllowlistEntry } from "~/lib/ip-allowlist"
 import {
@@ -49,10 +49,11 @@ import {
   handleToggleModelRedirect,
   handleToggleReplacement,
   handleUpdateModelRedirect,
+  handleUpdateReplacement,
   handleUpsertCustomProvider,
 } from "./api"
 import { handleReplayLlmDebugLog } from "./llm-debug-replay"
-import { getDashboardPage } from "./page"
+import { DASHBOARD_HTML } from "./page-generated"
 import { handleExportSettings } from "./settings-export"
 
 export const dashboardRoutes = new Hono()
@@ -61,7 +62,7 @@ export const dashboardRoutes = new Hono()
 // which gates every /dashboard/api/* call. Brute-force is bounded by the
 // shared 3-strikes IP ban in apiKeyGuard.)
 dashboardRoutes.get("/", (c) => {
-  return c.html(getDashboardPage())
+  return c.html(DASHBOARD_HTML)
 })
 
 function shouldAutoAllowlistDashboardIp(c: {
@@ -75,7 +76,7 @@ function shouldAutoAllowlistDashboardIp(c: {
 }
 
 // Auth guard for API routes -- reuses the same apiKeyAuth + IP ban mechanism
-dashboardRoutes.use("/api/*", async (c, next) => {
+dashboardRoutes.use("/api/*", async (c: Context, next) => {
   const clientIp = extractClientIp(c)
 
   if (clientIp !== null && isIpBlocked(clientIp)) {
@@ -141,6 +142,7 @@ dashboardRoutes.get("/api/replacements", handleListReplacements)
 dashboardRoutes.post("/api/replacements", handleAddReplacement)
 dashboardRoutes.delete("/api/replacements/:id", handleDeleteReplacement)
 dashboardRoutes.patch("/api/replacements/:id", handleToggleReplacement)
+dashboardRoutes.put("/api/replacements/:id", handleUpdateReplacement)
 
 // Model Redirects
 dashboardRoutes.get("/api/model-redirects", handleListModelRedirects)

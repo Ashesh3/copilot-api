@@ -1,4 +1,4 @@
-import { Hono } from "hono"
+import { Hono, type Context } from "hono"
 
 import {
   extractClientIp,
@@ -27,7 +27,7 @@ featureFlagsRoutes.get("/", (c) => {
 })
 
 // Auth guard for API routes — reuses the same apiKeyAuth + IP ban mechanism
-featureFlagsRoutes.use("/api", async (c, next) => {
+featureFlagsRoutes.use("/api", async (c: Context, next) => {
   const clientIp = extractClientIp(c)
 
   if (clientIp !== null && isIpBlocked(clientIp)) {

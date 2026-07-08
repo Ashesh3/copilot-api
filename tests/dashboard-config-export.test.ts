@@ -9,7 +9,7 @@ import {
   getConfigExportFilename,
 } from "../src/lib/config-export"
 import { state } from "../src/lib/state"
-import { getDashboardPage } from "../src/routes/dashboard/page"
+import { DASHBOARD_HTML } from "../src/routes/dashboard/page-generated"
 import { server } from "../src/server"
 
 const originalApiKeyAuth = state.apiKeyAuth
@@ -93,10 +93,7 @@ test("dashboard config export endpoint is authenticated and returns a zip", asyn
   expect(() => unzipSync(zipBytes)).not.toThrow()
 })
 
-test("dashboard settings page renders config export controls", () => {
-  const page = getDashboardPage()
-
-  expect(page).toContain("Export Config")
-  expect(page).toContain("exportConfig()")
-  expect(page).toContain("/dashboard/api/settings/export")
+test("dashboard bundle ships the config export controls", () => {
+  expect(DASHBOARD_HTML).toContain("Export Config")
+  expect(DASHBOARD_HTML).toContain("/dashboard/api/settings/export")
 })

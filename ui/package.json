@@ -1,0 +1,28 @@
+{
+  "name": "copilot-api-dashboard",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Admin dashboard for copilot-api, built with the Astryx design system. `npm run build` emits src/routes/dashboard/page-generated.ts.",
+  "type": "module",
+  "scripts": {
+    "build": "vite build && node scripts/emit-page.mjs",
+    "dev": "vite",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@astryxdesign/core": "^0.1.3",
+    "@astryxdesign/theme-neutral": "^0.1.3",
+    "react": "^19",
+    "react-dom": "^19",
+    "recharts": "^2"
+  },
+  "devDependencies": {
+    "@stylexjs/stylex": "^0.18.3",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@vitejs/plugin-react": "^4",
+    "typescript": "^5.9.3",
+    "vite": "^6",
+    "vite-plugin-singlefile": "^2"
+  }
+}

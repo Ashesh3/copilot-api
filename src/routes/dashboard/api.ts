@@ -5,6 +5,7 @@ import {
   getAllReplacements,
   removeReplacement,
   toggleReplacement,
+  updateReplacement,
 } from "~/lib/auto-replace"
 import {
   getCodexCleanupModel,
@@ -324,6 +325,26 @@ export async function handleDeleteReplacement(c: Context) {
 export async function handleToggleReplacement(c: Context) {
   const id = c.req.param("id")
   const rule = await toggleReplacement(id)
+  if (!rule) {
+    return c.json({ error: "Replacement not found or is a system rule" }, 404)
+  }
+  return c.json(rule)
+}
+
+export async function handleUpdateReplacement(c: Context) {
+  const id = c.req.param("id")
+  const body = await c.req.json<{
+    name?: string
+    pattern?: string
+    replacement?: string
+    isRegex?: boolean
+  }>()
+  const rule = await updateReplacement(id, {
+    name: body.name,
+    pattern: body.pattern,
+    replacement: body.replacement,
+    isRegex: body.isRegex,
+  })
   if (!rule) {
     return c.json({ error: "Replacement not found or is a system rule" }, 404)
   }

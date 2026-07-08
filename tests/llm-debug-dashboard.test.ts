@@ -2,7 +2,7 @@ import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
 
 import { clearLlmDebugLogs, startLlmDebugLog } from "../src/lib/llm-debug-log"
 import { state } from "../src/lib/state"
-import { getDashboardPage } from "../src/routes/dashboard/page"
+import { DASHBOARD_HTML } from "../src/routes/dashboard/page-generated"
 import { server } from "../src/server"
 
 const originalApiKeyAuth = state.apiKeyAuth
@@ -76,11 +76,9 @@ test("serves LLM debug logs through dashboard API", async () => {
   expect(afterClearBody.count).toBe(0)
 })
 
-test("renders LLM debug copy helper without an inline script syntax break", () => {
-  const page = getDashboardPage()
-
-  expect(page).toContain("rows.join(String.fromCharCode(10))")
-  expect(page).not.toContain("rows.join('\n')")
+test("dashboard bundle ships the LLM debug UI", () => {
+  expect(DASHBOARD_HTML).toContain("LLM Debug")
+  expect(DASHBOARD_HTML).toContain("/dashboard/api/llm-debug")
 })
 
 test("replays a chat completions debug log with fresh auth and parses SSE metadata", async () => {
@@ -190,11 +188,7 @@ test("rejects invalid replay requests", async () => {
   expect(missingModelResponse.status).toBe(400)
 })
 
-test("renders LLM replay UI helpers", () => {
-  const page = getDashboardPage()
-
-  expect(page).toContain("Replay")
-  expect(page).toContain("openLlmReplay")
-  expect(page).toContain("runLlmReplay")
-  expect(page).toContain("sec-llm-replay")
+test("dashboard bundle ships the LLM replay UI", () => {
+  expect(DASHBOARD_HTML).toContain("Replay")
+  expect(DASHBOARD_HTML).toContain("Back to Debug")
 })

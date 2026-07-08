@@ -2,7 +2,7 @@ import { afterAll, beforeEach, expect, test } from "bun:test"
 
 import { setIpAllowlistForTest } from "../src/lib/ip-allowlist"
 import { state } from "../src/lib/state"
-import { getDashboardPage } from "../src/routes/dashboard/page"
+import { DASHBOARD_HTML } from "../src/routes/dashboard/page-generated"
 import { server } from "../src/server"
 
 const originalApiKeyAuth = state.apiKeyAuth
@@ -92,11 +92,9 @@ test("dashboard can add, disable, enable, and remove IPv6 allowlist entries", as
   expect(deleteResponse.status).toBe(200)
 })
 
-test("dashboard renders IP allowlist controls and public IP detection", () => {
-  const page = getDashboardPage()
-
-  expect(page).toContain("IP Allowlist")
-  expect(page).toContain("api4.ipify.org")
-  expect(page).toContain("api6.ipify.org")
-  expect(page).toContain("setIpAllowlistEnabled")
+test("dashboard bundle ships IP allowlist controls and public IP detection", () => {
+  expect(DASHBOARD_HTML).toContain("IP Allowlist")
+  expect(DASHBOARD_HTML).toContain("api4.ipify.org")
+  expect(DASHBOARD_HTML).toContain("api6.ipify.org")
+  expect(DASHBOARD_HTML).toContain("/dashboard/api/ip-allowlist")
 })

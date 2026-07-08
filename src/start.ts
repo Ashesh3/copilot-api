@@ -233,7 +233,7 @@ async function initializePersistentConfig(): Promise<void> {
 
 // Combined WebSocket handler that dispatches to voice, responses, or direct-connect based on connection type
 const combinedWebSocket = {
-  open(ws: { data: { type: string } }) {
+  open(ws: { data: { type: string; sessionId?: string } }) {
     switch (ws.data.type) {
       case "voice": {
         voiceWebSocket.open(
@@ -313,7 +313,7 @@ const combinedWebSocket = {
   },
   message(
     ws: {
-      data: { type: string }
+      data: { type: string; sessionId?: string }
       send: (data: string | ArrayBuffer | Uint8Array) => void
       close: (code?: number, reason?: string) => void
     },
@@ -383,7 +383,7 @@ const combinedWebSocket = {
       // No default
     }
   },
-  close(ws: { data: { type: string } }) {
+  close(ws: { data: { type: string; sessionId?: string } }) {
     switch (ws.data.type) {
       case "voice": {
         voiceWebSocket.close(
