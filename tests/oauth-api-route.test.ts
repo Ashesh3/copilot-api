@@ -2,6 +2,10 @@ import { afterAll, beforeEach, expect, mock, test } from "bun:test"
 import consola from "consola"
 
 import { state } from "../src/lib/state"
+import {
+  removeFeatureFlag,
+  setFeatureFlag,
+} from "../src/routes/feature-flags/store"
 import { server } from "../src/server"
 
 const originalApiKeyAuth = state.apiKeyAuth
@@ -15,6 +19,7 @@ beforeEach(() => {
 afterAll(() => {
   state.apiKeyAuth = originalApiKeyAuth
   consola.warn = originalWarn
+  removeFeatureFlag("claude_code_penguin_mode")
 })
 
 test("accepts versioned telemetry calls without auth", async () => {
@@ -45,6 +50,35 @@ test("still requires auth for defined OAuth API routes", async () => {
   })
 
   expect(authorizedResponse.status).toBe(200)
+})
+
+test("penguin mode reports fast mode enabled by default", async () => {
+  removeFeatureFlag("claude_code_penguin_mode")
+
+  const response = await server.request("/api/claude_code_penguin_mode", {
+    headers: { authorization: "Bearer test-secret-key" },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({ enabled: true })
+})
+
+test("penguin mode honors the claude_code_penguin_mode flag when disabled", async () => {
+  setFeatureFlag("claude_code_penguin_mode", false)
+
+  try {
+    const response = await server.request("/api/claude_code_penguin_mode", {
+      headers: { authorization: "Bearer test-secret-key" },
+    })
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({
+      enabled: false,
+      disabled_reason: "preference",
+    })
+  } finally {
+    removeFeatureFlag("claude_code_penguin_mode")
+  }
 })
 
 test("manual OAuth callback displays code with state for Claude Code paste", async () => {

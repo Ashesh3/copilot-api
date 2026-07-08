@@ -21,6 +21,7 @@ import {
   transparentProxy,
 } from "~/lib/transparent-proxy"
 import { getUsageResponse } from "~/lib/usage-tracker"
+import { getFeatureFlags } from "~/routes/feature-flags/store"
 
 const SCOPES =
   "user:inference user:profile user:sessions:claude_code user:mcp_servers user:file_upload org:create_api_key"
@@ -230,10 +231,21 @@ oauthApiRoutes.get("/oauth/profile", oauthAuthGuard, (c) => {
 // GET /api/oauth/claude_cli/roles
 oauthApiRoutes.get("/oauth/claude_cli/roles", oauthAuthGuard, (c) => c.json([]))
 
-// GET /api/claude_code_penguin_mode
-oauthApiRoutes.get("/claude_code_penguin_mode", oauthAuthGuard, (c) =>
-  c.json({}),
-)
+// GET /api/claude_code_penguin_mode — org fast-mode ("penguin mode") status.
+// Claude Code fetches this directly (NOT via GrowthBook) to decide whether
+// `/fast` is allowed. It reads `enabled`; a missing/false value is treated as
+// disabled with reason "preference" → "Fast mode has been disabled by your
+// organization". Controlled by the `claude_code_penguin_mode` feature flag,
+// which defaults to enabled — flip it to false to turn fast mode off.
+oauthApiRoutes.get("/claude_code_penguin_mode", oauthAuthGuard, (c) => {
+  const flag = getFeatureFlags().claude_code_penguin_mode
+  const enabled = flag !== false && flag !== "false"
+  return c.json(
+    enabled ?
+      { enabled: true }
+    : { enabled: false, disabled_reason: "preference" },
+  )
+})
 
 // GET /api/claude_cli_profile
 oauthApiRoutes.get("/claude_cli_profile", oauthAuthGuard, (c) => c.json({}))
