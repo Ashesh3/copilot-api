@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto"
 import fs from "node:fs"
 import path from "node:path"
 
@@ -235,6 +236,38 @@ function isMissingFileError(error: unknown): boolean {
   )
 }
 
+function createTemporaryFilePath(filePath: string): string {
+  return path.join(
+    path.dirname(filePath),
+    `${path.basename(filePath)}.${randomUUID()}.tmp`,
+  )
+}
+
+function persistOverridesToDisk(
+  filePath: string,
+  overrides: StatsigOverrides,
+): void {
+  const nextFileContents = `${JSON.stringify(cloneOverrides(overrides), null, 2)}\n`
+  const temporaryFilePath = createTemporaryFilePath(filePath)
+
+  fs.mkdirSync(path.dirname(filePath), { recursive: true })
+
+  try {
+    fs.writeFileSync(temporaryFilePath, nextFileContents, "utf8")
+    fs.renameSync(temporaryFilePath, filePath)
+  } catch (error) {
+    try {
+      fs.rmSync(temporaryFilePath, { force: true })
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        "failed to persist statsig overrides",
+      )
+    }
+    throw error
+  }
+}
+
 export function createStatsigOverrideStore(
   filePath = PATHS.STATSIG_OVERRIDES_PATH,
 ): StatsigOverrideStore {
@@ -261,12 +294,7 @@ export function createStatsigOverrideStore(
   function persist(overrides: StatsigOverrides): void {
     if (!persistenceEnabled) return
 
-    fs.mkdirSync(path.dirname(filePath), { recursive: true })
-    fs.writeFileSync(
-      filePath,
-      `${JSON.stringify(cloneOverrides(overrides), null, 2)}\n`,
-      "utf8",
-    )
+    persistOverridesToDisk(filePath, overrides)
   }
 
   return {

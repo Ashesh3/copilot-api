@@ -1,5 +1,6 @@
-import { expect, test } from "bun:test"
+import { expect, mock, test } from "bun:test"
 import { randomUUID } from "node:crypto"
+import nodeFs from "node:fs"
 import fs from "node:fs/promises"
 import path from "node:path"
 
@@ -357,17 +358,58 @@ test("replaceForTest swaps the cache and disables persistence", async () => {
 test("set leaves the cache unchanged when persistence fails", async () => {
   await withTestDir(async (directory) => {
     const blockedParent = path.join(directory, "blocked-parent")
-    await fs.writeFile(blockedParent, "not a directory")
-
     const store = createStatsigOverrideStore(
       path.join(blockedParent, "statsig_overrides.json"),
     )
+
+    expect(store.get()).toEqual({
+      featureGates: {},
+      dynamicConfigs: {},
+    })
+    await fs.writeFile(blockedParent, "not a directory")
 
     expect(() => store.set("featureGate", "should-not-stick", true)).toThrow()
     expect(store.get()).toEqual({
       featureGates: {},
       dynamicConfigs: {},
     })
+  })
+})
+
+test("set preserves the prior file and cache when atomic replacement fails", async () => {
+  await withTestDir(async (directory) => {
+    const filePath = path.join(directory, "statsig_overrides.json")
+    const store = createStatsigOverrideStore(filePath)
+
+    store.set("featureGate", "persisted", true)
+
+    const originalRenameSync = nodeFs.renameSync
+    nodeFs.renameSync = mock(() => {
+      throw new Error("rename failed")
+    }) as typeof nodeFs.renameSync
+
+    try {
+      expect(() => store.set("featureGate", "next-value", false)).toThrow(
+        "rename failed",
+      )
+    } finally {
+      nodeFs.renameSync = originalRenameSync
+    }
+
+    expect(await fs.readFile(filePath, "utf8")).toBe(`{
+  "featureGates": {
+    "persisted": true
+  },
+  "dynamicConfigs": {}
+}
+`)
+    expect(store.get()).toEqual({
+      featureGates: { persisted: true },
+      dynamicConfigs: {},
+    })
+    expect(
+      (await fs.readdir(directory)).filter((entry) => entry.endsWith(".tmp")),
+    ).toEqual([])
   })
 })
 
@@ -385,5 +427,8 @@ test("remove leaves the cache unchanged when persistence fails", async () => {
       featureGates: { persisted: true },
       dynamicConfigs: {},
     })
+    expect(
+      (await fs.readdir(directory)).filter((entry) => entry.endsWith(".tmp")),
+    ).toEqual([])
   })
 })
