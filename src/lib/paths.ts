@@ -13,6 +13,7 @@ const MODEL_REDIRECTS_CONFIG_PATH = path.join(APP_DIR, "model_redirects.json")
 const MODEL_SETTINGS_CONFIG_PATH = path.join(APP_DIR, "model_settings.json")
 const MODEL_ROUTING_CONFIG_PATH = path.join(APP_DIR, "model_routing.json")
 const FEATURE_FLAGS_PATH = path.join(APP_DIR, "feature_flags.json")
+const STATSIG_OVERRIDES_PATH = path.join(APP_DIR, "statsig_overrides.json")
 const IP_ALLOWLIST_PATH = path.join(APP_DIR, "ip_allowlist.json")
 const USAGE_PATH = path.join(APP_DIR, "usage.json")
 
@@ -26,6 +27,7 @@ export const PATHS = {
   MODEL_SETTINGS_CONFIG_PATH,
   MODEL_ROUTING_CONFIG_PATH,
   FEATURE_FLAGS_PATH,
+  STATSIG_OVERRIDES_PATH,
   IP_ALLOWLIST_PATH,
   USAGE_PATH,
 }
