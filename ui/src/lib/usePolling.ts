@@ -38,6 +38,11 @@ export interface UseAsyncDataResult<T> {
   error: Error | undefined
   loading: boolean
   reload: () => void
+  /**
+   * Reload without toggling `loading`. For background polling that shouldn't
+   * flash the refresh spinner on a calm surface.
+   */
+  reloadSilently: () => void
 }
 
 export function useAsyncData<T>(
@@ -50,10 +55,15 @@ export function useAsyncData<T>(
   const loaderRef = useRef(loader)
   loaderRef.current = loader
   const [reloadToken, setReloadToken] = useState(0)
+  const silentRef = useRef(false)
 
   useEffect(() => {
     let cancelled = false
-    setLoading(true)
+    if (silentRef.current) {
+      silentRef.current = false
+    } else {
+      setLoading(true)
+    }
 
     loaderRef
       .current()
@@ -77,6 +87,10 @@ export function useAsyncData<T>(
   }, [reloadToken, ...deps])
 
   const reload = useCallback(() => setReloadToken((token) => token + 1), [])
+  const reloadSilently = useCallback(() => {
+    silentRef.current = true
+    setReloadToken((token) => token + 1)
+  }, [])
 
-  return { data, error, loading, reload }
+  return { data, error, loading, reload, reloadSilently }
 }
