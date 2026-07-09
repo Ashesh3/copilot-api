@@ -509,22 +509,19 @@ function PayloadBlock({
   const reformatted = viewMode === "pretty" && pretty !== body
 
   return (
-    <VStack gap={1}>
-      <HStack gap={2} vAlign="center">
-        <Text type="label" color="secondary">
-          {label}
-        </Text>
+    <Collapsible defaultIsOpen trigger={label}>
+      <VStack gap={1}>
         {reformatted ?
           <Badge variant="neutral" label="Reformatted, not exact bytes" />
         : null}
-      </HStack>
-      <CodeBlock
-        code={reformatted ? pretty : body}
-        language="json"
-        isWrapped={wrap}
-        onCopy={onCopy}
-      />
-    </VStack>
+        <CodeBlock
+          code={reformatted ? pretty : body}
+          language="json"
+          isWrapped={wrap}
+          onCopy={onCopy}
+        />
+      </VStack>
+    </Collapsible>
   )
 }
 

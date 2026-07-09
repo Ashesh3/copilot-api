@@ -7,7 +7,7 @@ import { Card } from "@astryxdesign/core/Card"
 import { Dialog, DialogHeader } from "@astryxdesign/core/Dialog"
 import { Layout, LayoutContent, LayoutFooter } from "@astryxdesign/core/Layout"
 import { Skeleton } from "@astryxdesign/core/Skeleton"
-import { HStack, VStack } from "@astryxdesign/core/Stack"
+import { HStack, StackItem, VStack } from "@astryxdesign/core/Stack"
 import { Switch } from "@astryxdesign/core/Switch"
 import { pixel, proportional } from "@astryxdesign/core/Table"
 import { Text } from "@astryxdesign/core/Text"
@@ -271,9 +271,13 @@ export default function ReplacementsScreen() {
       width: proportional(1),
       renderCell: (row) => (
         <HStack gap={2} vAlign="center">
-          <Text>{row.name ?? "—"}</Text>
+          <StackItem size="fill">
+            <Text maxLines={1}>{row.name ?? "—"}</Text>
+          </StackItem>
           {row.isSystem ?
-            <Badge variant="neutral" label="System" />
+            <StackItem>
+              <Badge variant="neutral" label="System" />
+            </StackItem>
           : null}
         </HStack>
       ),
