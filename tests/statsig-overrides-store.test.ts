@@ -108,6 +108,88 @@ test("persists overrides across store instances", async () => {
   })
 })
 
+test("loads a missing override file as empty overrides", async () => {
+  await withTestDir((directory) => {
+    const filePath = path.join(directory, "nested", "statsig_overrides.json")
+    const store = createStatsigOverrideStore(filePath)
+
+    expect(store.get()).toEqual({
+      featureGates: {},
+      dynamicConfigs: {},
+    })
+    expect(store.count()).toBe(0)
+  })
+})
+
+test("throws for invalid JSON in an existing override file", async () => {
+  await withTestDir(async (directory) => {
+    const filePath = path.join(directory, "statsig_overrides.json")
+    await fs.writeFile(filePath, "{ invalid json", "utf8")
+
+    const store = createStatsigOverrideStore(filePath)
+
+    expect(() => store.get()).toThrow(SyntaxError)
+  })
+})
+
+test("throws validation errors for invalid persisted override maps and values", async () => {
+  await withTestDir(async (directory) => {
+    const cases = [
+      {
+        name: "invalid feature gate map",
+        fileContents: {
+          featureGates: "not-an-object",
+          dynamicConfigs: {},
+        },
+        message: "featureGates must be an object",
+      },
+      {
+        name: "invalid feature gate value",
+        fileContents: {
+          featureGates: { gate: "true" },
+          dynamicConfigs: {},
+        },
+        message: "feature gate value must be boolean",
+      },
+      {
+        name: "invalid dynamic config map",
+        fileContents: {
+          featureGates: {},
+          dynamicConfigs: [],
+        },
+        message: "dynamicConfigs must be an object",
+      },
+      {
+        name: "invalid dynamic config value",
+        fileContents: {
+          featureGates: {},
+          dynamicConfigs: { config: [] },
+        },
+        message: "dynamic config value must be a JSON object",
+      },
+    ]
+
+    for (const [index, testCase] of cases.entries()) {
+      const filePath = path.join(directory, `invalid-${index}.json`)
+      await fs.writeFile(
+        filePath,
+        `${JSON.stringify(testCase.fileContents, null, 2)}\n`,
+        "utf8",
+      )
+
+      const store = createStatsigOverrideStore(filePath)
+
+      try {
+        store.get()
+        expect.unreachable(`Expected validation error for ${testCase.name}`)
+      } catch (error) {
+        expect(error).toBeInstanceOf(StatsigOverrideValidationError)
+        expect((error as Error).message).toBe(testCase.message)
+      }
+    }
+  })
+})
+
 test("rejects invalid feature gate values", async () => {
   await withTestDir((directory) => {
     const store = createStatsigOverrideStore(
@@ -223,6 +305,24 @@ test("removal is isolated by override kind", async () => {
       dynamicConfigs: {},
     })
     expect(store.count()).toBe(0)
+  })
+})
+
+test("remove persists the deleted entry without affecting the other override kind", async () => {
+  await withTestDir((directory) => {
+    const filePath = path.join(directory, "statsig_overrides.json")
+    const store = createStatsigOverrideStore(filePath)
+
+    store.set("featureGate", "shared-name", true)
+    store.set("dynamicConfig", "shared-name", { enabled: true })
+
+    expect(store.remove("featureGate", "shared-name")).toBe(true)
+
+    const reloadedStore = createStatsigOverrideStore(filePath)
+    expect(reloadedStore.get()).toEqual({
+      featureGates: {},
+      dynamicConfigs: { "shared-name": { enabled: true } },
+    })
   })
 })
 
