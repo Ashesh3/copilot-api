@@ -316,6 +316,24 @@ async function handleCompletionInner(
   })
 
   if (usesNativeMessages) {
+    // The native /v1/messages endpoint validates assistant thinking-block
+    // signatures as genuine Anthropic signatures. In a mixed session, prior
+    // turns were served by the OpenAI-format /chat/completions and /responses
+    // endpoints, whose opaque reasoning signatures are NOT valid here — CAPI
+    // rejects them with 400 "Invalid signature in thinking block". Drop the
+    // history thinking blocks before dispatching; they aren't needed to read
+    // the attachment, and the current turn still reasons via `thinking`.
+    if (stripThinkingBlocks(anthropicPayload)) {
+      recordNonDefaultBehavior(c, {
+        kind: "reasoning_retry_without_thinking",
+        message: `Stripped foreign-endpoint thinking blocks before native /v1/messages for ${anthropicPayload.model}`,
+        data: {
+          model: anthropicPayload.model,
+          reason: "thinking signatures not valid on /v1/messages",
+          endpoint: "AnthropicMessages",
+        },
+      })
+    }
     return await handleWithNativeMessages(c, anthropicPayload, {
       initiatorOverride,
       requestedModel,

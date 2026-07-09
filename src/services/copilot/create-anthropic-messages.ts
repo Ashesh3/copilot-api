@@ -129,6 +129,23 @@ export function detectAnthropicInitiator(
   return "user"
 }
 
+/**
+ * Pull the human-readable message out of CAPI's Anthropic-format error body
+ * (`{ error: { message } }`), falling back to a generic string. Used so the
+ * client sees the real upstream reason instead of an opaque wrapper message.
+ */
+function extractUpstreamErrorMessage(errorBody: string): string {
+  try {
+    const parsed = JSON.parse(errorBody) as { error?: { message?: string } }
+    if (typeof parsed.error?.message === "string" && parsed.error.message) {
+      return parsed.error.message
+    }
+  } catch {
+    /* not JSON — fall through */
+  }
+  return "Failed to create native Anthropic messages"
+}
+
 export const createAnthropicMessages = async (
   payload: AnthropicMessagesPayload,
   options?: {
@@ -162,11 +179,10 @@ export const createAnthropicMessages = async (
       `Status: ${response.status} ${response.statusText}`,
       errorBody.slice(0, 500),
     )
-    throw new HTTPError(
-      "Failed to create native Anthropic messages",
-      response,
-      body,
-    )
+    // Surface CAPI's actual Anthropic error to the client instead of a generic
+    // message, so failures like "Invalid signature in thinking block" are
+    // visible rather than a bare "Failed to create native Anthropic messages".
+    throw new HTTPError(extractUpstreamErrorMessage(errorBody), response, body)
   }
 
   if (payload.stream) {

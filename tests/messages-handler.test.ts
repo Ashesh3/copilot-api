@@ -10,6 +10,7 @@ import { server } from "../src/server"
 
 const originalFetch = globalThis.fetch
 let lastUpstreamPayload: ChatCompletionsPayload | undefined
+let lastUpstreamUrl: string | undefined
 
 const upstreamMaxReasoningModels: ModelsResponse = {
   object: "list",
@@ -63,6 +64,30 @@ const upstreamThinkingBudgetModels: ModelsResponse = {
   ],
 }
 
+const nativeMessagesModels: ModelsResponse = {
+  object: "list",
+  data: [
+    {
+      id: "claude-opus-4.8",
+      name: "Claude Opus 4.8",
+      object: "model",
+      preview: false,
+      vendor: "anthropic",
+      version: "1",
+      model_picker_enabled: true,
+      capabilities: {
+        family: "claude",
+        limits: { max_output_tokens: 64000 },
+        object: "model_capabilities",
+        supports: { reasoning_effort: ["low", "medium", "high", "max"] },
+        tokenizer: "cl100k_base",
+        type: "chat",
+      },
+      supported_endpoints: ["/v1/messages", "/chat/completions"],
+    },
+  ],
+}
+
 function parseRequestBody(init?: RequestInit): ChatCompletionsPayload {
   if (typeof init?.body !== "string") {
     return {} as ChatCompletionsPayload
@@ -71,8 +96,30 @@ function parseRequestBody(init?: RequestInit): ChatCompletionsPayload {
   return JSON.parse(init.body) as ChatCompletionsPayload
 }
 
-const fetchMock = mock((_url: string, init?: RequestInit) => {
+const fetchMock = mock((url: string, init?: RequestInit) => {
+  lastUpstreamUrl = url
   lastUpstreamPayload = parseRequestBody(init)
+
+  // The native Anthropic endpoint returns Messages-shaped bodies; every other
+  // path returns chat.completion. Match on URL so both routes parse cleanly.
+  if (typeof url === "string" && url.includes("/v1/messages")) {
+    return new Response(
+      JSON.stringify({
+        id: "msg_1",
+        type: "message",
+        role: "assistant",
+        model: "claude-opus-4.8",
+        content: [{ type: "text", text: "hello" }],
+        stop_reason: "end_turn",
+        stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      },
+    )
+  }
 
   return new Response(
     JSON.stringify({
@@ -116,6 +163,7 @@ afterAll(() => {
 beforeEach(() => {
   fetchMock.mockClear()
   lastUpstreamPayload = undefined
+  lastUpstreamUrl = undefined
   state.accountType = "individual"
   state.copilotToken = "copilot-token"
   state.githubToken = "github-token"
@@ -144,6 +192,66 @@ test("removes top_p when thinking is enabled on the chat completions path", asyn
   expect(response.status).toBe(200)
   expect(lastUpstreamPayload?.temperature).toBe(1)
   expect(lastUpstreamPayload?.top_p).toBeUndefined()
+})
+
+test("routes PDF documents to native /v1/messages and strips foreign thinking blocks", async () => {
+  state.models = nativeMessagesModels
+  const pdfB64 = Buffer.from("%PDF-1.4 regression test").toString("base64")
+
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-opus-4.8",
+      max_tokens: 64,
+      thinking: { type: "enabled" },
+      messages: [
+        { role: "user", content: "Hi, I have a document." },
+        {
+          role: "assistant",
+          content: [
+            // Foreign (OpenAI-format) signature from a prior /chat/completions
+            // turn — invalid on the native Anthropic endpoint.
+            {
+              type: "thinking",
+              thinking: "hmm",
+              signature: "b2FpX2ZvcmVpZ24=",
+            },
+            { type: "text", text: "Sure, share it." },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Summarize this." },
+            {
+              type: "document",
+              source: {
+                type: "base64",
+                media_type: "application/pdf",
+                data: pdfB64,
+              },
+            },
+          ],
+        },
+      ],
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  // Routed to the native Anthropic endpoint, not /chat/completions
+  expect(lastUpstreamUrl).toContain("/v1/messages")
+
+  const messages =
+    (lastUpstreamPayload as { messages?: Array<{ content?: unknown }> })
+      .messages ?? []
+  const blocks = messages.flatMap((m) =>
+    Array.isArray(m.content) ? (m.content as Array<{ type?: string }>) : [],
+  )
+  // Foreign thinking blocks removed from history…
+  expect(blocks.some((b) => b.type === "thinking")).toBe(false)
+  // …but the PDF document block is preserved.
+  expect(blocks.some((b) => b.type === "document")).toBe(true)
 })
 
 test("maps output_config.effort onto chat completions reasoning_effort", async () => {
