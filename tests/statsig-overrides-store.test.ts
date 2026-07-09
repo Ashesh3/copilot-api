@@ -138,6 +138,31 @@ test("rejects invalid dynamic config values", async () => {
   })
 })
 
+test("rejects nested non-JSON dynamic config values", async () => {
+  await withTestDir((directory) => {
+    const store = createStatsigOverrideStore(
+      path.join(directory, "statsig_overrides.json"),
+    )
+    const cyclicValue: Record<string, unknown> = { nested: { enabled: true } }
+    cyclicValue.self = cyclicValue
+    const sparseArray: Array<unknown> = Array(2)
+    sparseArray[1] = 1
+
+    for (const value of [
+      { nested: { updatedAt: new Date() } },
+      { nested: { missing: undefined } },
+      { nested: { sampleRate: Number.POSITIVE_INFINITY } },
+      { nested: sparseArray },
+      cyclicValue,
+    ]) {
+      expectValidationError(
+        () => store.set("dynamicConfig", "config", value),
+        "dynamic config value must be a JSON object",
+      )
+    }
+  })
+})
+
 test("rejects unsafe override names", async () => {
   await withTestDir((directory) => {
     const store = createStatsigOverrideStore(
