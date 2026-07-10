@@ -38,6 +38,7 @@ import {
 } from "../components/common"
 import { JsonTreeViewer } from "../components/JsonTreeViewer"
 import { Page } from "../components/Page"
+import { ResponsesBodyViewer } from "../components/ResponsesBodyViewer"
 import { ResponsivePair } from "../components/ResponsivePair"
 import {
   BugIcon,
@@ -51,6 +52,7 @@ import {
 } from "../icons"
 import { ApiError, del, get } from "../lib/api"
 import { parseJsonBody } from "../lib/json-tree"
+import { parseResponsesBody } from "../lib/responses-body"
 import { navigate, useHashRoute } from "../lib/router"
 import { useToast } from "../lib/toast"
 import { useAsyncData, usePolling } from "../lib/usePolling"
@@ -486,6 +488,7 @@ function PayloadBlock({
   label,
   body,
   emptyText,
+  kind,
   viewMode,
   wrap,
   onCopy,
@@ -493,11 +496,16 @@ function PayloadBlock({
   label: string
   body: string | null
   emptyText: string
+  kind: "request" | "response"
   viewMode: "pretty" | "raw"
   wrap: boolean
   onCopy: () => void
 }) {
   const parsed = useMemo(() => (body ? parseJsonBody(body) : null), [body])
+  const parsedResponse = useMemo(
+    () => (body && kind === "response" ? parseResponsesBody(body) : null),
+    [body, kind],
+  )
 
   if (body === null) {
     return (
@@ -512,25 +520,43 @@ function PayloadBlock({
     )
   }
 
+  let content: React.ReactNode
+  if (viewMode === "pretty" && parsedResponse) {
+    content = (
+      <ResponsesBodyViewer
+        key={`${label}:${body}`}
+        labelId="llm-debug-response-output"
+        parsed={parsedResponse}
+        wrap={wrap}
+        onCopy={onCopy}
+      />
+    )
+  } else if (viewMode === "pretty" && parsed) {
+    content = (
+      <JsonTreeViewer
+        key={`${label}:${body}`}
+        formatted={parsed.formatted}
+        label={label}
+        value={parsed.value}
+        wrap={wrap}
+        onCopy={onCopy}
+      />
+    )
+  } else {
+    content = (
+      <CodeBlock
+        code={body}
+        language="json"
+        isWrapped={wrap}
+        width="100%"
+        onCopy={onCopy}
+      />
+    )
+  }
+
   return (
     <Collapsible defaultIsOpen trigger={label}>
-      {viewMode === "pretty" && parsed ?
-        <JsonTreeViewer
-          key={`${label}:${body}`}
-          formatted={parsed.formatted}
-          label={label}
-          value={parsed.value}
-          wrap={wrap}
-          onCopy={onCopy}
-        />
-      : <CodeBlock
-          code={body}
-          language="json"
-          isWrapped={wrap}
-          width="100%"
-          onCopy={onCopy}
-        />
-      }
+      {content}
     </Collapsible>
   )
 }
@@ -701,6 +727,7 @@ function LlmDebugDetailView({ id }: { id: string }) {
                   label="Request Body"
                   body={data.request.body}
                   emptyText="No request body"
+                  kind="request"
                   viewMode={viewMode}
                   wrap={wrap}
                   onCopy={() => toast.success("Copied")}
@@ -733,6 +760,7 @@ function LlmDebugDetailView({ id }: { id: string }) {
                       label="Response Body"
                       body={data.response.body}
                       emptyText="No response body"
+                      kind="response"
                       viewMode={viewMode}
                       wrap={wrap}
                       onCopy={() => toast.success("Copied")}
