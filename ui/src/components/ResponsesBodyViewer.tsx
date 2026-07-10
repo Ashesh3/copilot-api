@@ -61,6 +61,8 @@ function metadataItems(parsed: ParsedResponsesBody): Array<MetadataItem> {
 
   const items: Array<{ label: string; value: string | null }> = [
     { label: "Status", value: textValue(response.status) ?? parsed.status },
+    { label: "Finish reason", value: textValue(response.finish_reason) },
+    { label: "Error", value: textValue(response.error_message) },
     { label: "Model", value: textValue(response.model) },
     { label: "Response ID", value: textValue(response.id) },
     { label: "Service tier", value: textValue(response.service_tier) },
@@ -68,6 +70,10 @@ function metadataItems(parsed: ParsedResponsesBody): Array<MetadataItem> {
     { label: "Completed", value: formatTimestamp(response.completed_at) },
     { label: "Reasoning effort", value: textValue(reasoning?.effort) },
     { label: "Reasoning mode", value: textValue(reasoning?.mode) },
+    {
+      label: "System fingerprint",
+      value: textValue(response.system_fingerprint),
+    },
     {
       label: "Tool calls",
       value: parsed.toolCallCount > 0 ? String(parsed.toolCallCount) : null,
@@ -94,6 +100,14 @@ function usageItems(usage: JsonRecord | null): Array<MetadataItem> {
     },
     { label: "Output", value: formatCount(usage.output_tokens) },
     { label: "Reasoning", value: formatCount(outputDetails?.reasoning_tokens) },
+    {
+      label: "Accepted prediction",
+      value: formatCount(outputDetails?.accepted_prediction_tokens),
+    },
+    {
+      label: "Rejected prediction",
+      value: formatCount(outputDetails?.rejected_prediction_tokens),
+    },
     { label: "Total", value: formatCount(usage.total_tokens) },
   ]
   return items.flatMap((item) =>
@@ -115,6 +129,13 @@ function copilotUsageItems(usage: JsonRecord | null): Array<MetadataItem> {
     })
   const totalNanoAiu = formatCount(usage.total_nano_aiu)
   if (totalNanoAiu) items.push({ label: "Total nano AIU", value: totalNanoAiu })
+  for (const [key, value] of Object.entries(usage)) {
+    if (key === "token_details" || key === "total_nano_aiu") continue
+    const formatted = formatCount(value)
+    if (formatted) {
+      items.push({ label: key.replaceAll("_", " "), value: formatted })
+    }
+  }
   return items
 }
 
@@ -200,7 +221,7 @@ export function ResponsesBodyViewer({
         <Banner
           status="info"
           title="Partial response capture"
-          description="The terminal response event has not been captured yet. The assembled output below uses only the available stream events."
+          description="The terminal stream marker has not been captured yet. The assembled output below uses only the available events."
         />
       : null}
 
@@ -252,7 +273,7 @@ export function ResponsesBodyViewer({
       />
 
       {parsed.reasoningText ?
-        <Collapsible defaultIsOpen={false} trigger="Reasoning summary">
+        <Collapsible defaultIsOpen={false} trigger="Reasoning">
           <CodeBlock
             code={parsed.reasoningText}
             language="markdown"

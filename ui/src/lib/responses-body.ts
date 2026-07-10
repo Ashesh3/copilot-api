@@ -77,6 +77,12 @@ function parseSseFrames(raw: string): Array<ParsedFrame> {
     }
 
     const rawData = dataLines.join("\n")
+    if (rawData.trim() === "[DONE]") {
+      frames.push({ data: "[DONE]", event: event ?? "done", rawData })
+      dataLines = []
+      event = undefined
+      return
+    }
     const data = parseJson(rawData)
     if (data !== null) frames.push({ data, event, rawData })
     dataLines = []
@@ -122,6 +128,26 @@ function looksLikeResponsesEvent(value: JsonRecord): boolean {
   )
 }
 
+function looksLikeChatCompletion(value: JsonRecord): boolean {
+  if (!Array.isArray(value.choices)) return false
+  if (
+    value.object === "chat.completion"
+    || value.object === "chat.completion.chunk"
+  ) {
+    return true
+  }
+  if (typeof value.id !== "string" || typeof value.model !== "string") {
+    return false
+  }
+  if (value.choices.length === 0) {
+    return isRecord(value.usage) || isRecord(value.copilot_usage)
+  }
+  return value.choices.some(
+    (choice) =>
+      isRecord(choice) && (isRecord(choice.delta) || isRecord(choice.message)),
+  )
+}
+
 function directJsonFrame(raw: string): ParsedFrame | null {
   const data = parseJson(raw.trim())
   if (!isRecord(data)) return null
@@ -131,14 +157,29 @@ function directJsonFrame(raw: string): ParsedFrame | null {
   if (looksLikeResponse(data)) {
     return { data, event: "response", rawData: raw.trim() }
   }
+  if (looksLikeChatCompletion(data)) {
+    return {
+      data,
+      event: stringValue(data.object) ?? "chat.completion",
+      rawData: raw.trim(),
+    }
+  }
   return null
 }
 
 function eventType(frame: ParsedFrame): string {
   if (frame.event) return frame.event
+  if (frame.data === "[DONE]") return "done"
   if (isRecord(frame.data) && typeof frame.data.type === "string") {
     return frame.data.type
   }
+  if (isRecord(frame.data) && typeof frame.data.object === "string") {
+    return frame.data.object
+  }
+  if (isRecord(frame.data) && Array.isArray(frame.data.choices)) {
+    return "chat.completion.chunk"
+  }
+  if (isRecord(frame.data) && isRecord(frame.data.error)) return "error"
   return "response"
 }
 
@@ -327,11 +368,255 @@ function frameRank(frame: ParsedFrame, index: number): number {
   return eventSequence(frame) ?? index
 }
 
+function chatChoiceRecords(data: JsonRecord): Array<JsonRecord> {
+  if (!Array.isArray(data.choices)) return []
+  return data.choices.filter((choice) => isRecord(choice))
+}
+
+function chatText(value: JsonValue | undefined): string {
+  if (typeof value === "string") return value
+  if (!Array.isArray(value)) return ""
+  return value
+    .filter((part) => isRecord(part))
+    .map(
+      (part) =>
+        stringValue(part.text)
+        ?? stringValue(part.content)
+        ?? stringValue(part.refusal)
+        ?? "",
+    )
+    .join("")
+}
+
+function chatReasoning(message: JsonRecord): string {
+  return (
+    stringValue(message.reasoning_text)
+    ?? stringValue(message.reasoning_content)
+    ?? ""
+  )
+}
+
+function addChatToolCalls(
+  value: JsonValue | undefined,
+  choiceIndex: number,
+  ids: Set<string>,
+): void {
+  if (!Array.isArray(value)) return
+  for (const [listIndex, tool] of value.entries()) {
+    if (!isRecord(tool)) continue
+    const toolIndex = numberValue(tool.index) ?? listIndex
+    ids.add(`${choiceIndex}:${toolIndex}`)
+  }
+}
+
+function normalizeChatUsage(value: JsonValue | undefined): JsonRecord | null {
+  if (!isRecord(value)) return null
+  const inputTokens =
+    numberValue(value.prompt_tokens) ?? numberValue(value.input_tokens)
+  const outputTokens =
+    numberValue(value.completion_tokens) ?? numberValue(value.output_tokens)
+  const totalTokens = numberValue(value.total_tokens)
+  const promptDetails =
+    isRecord(value.prompt_tokens_details) ? value.prompt_tokens_details : null
+  const completionDetails =
+    isRecord(value.completion_tokens_details) ?
+      value.completion_tokens_details
+    : null
+
+  const usage: JsonRecord = {}
+  if (inputTokens !== undefined) usage.input_tokens = inputTokens
+  if (outputTokens !== undefined) usage.output_tokens = outputTokens
+  if (totalTokens !== undefined) usage.total_tokens = totalTokens
+  if (promptDetails) {
+    const cachedTokens = numberValue(promptDetails.cached_tokens)
+    if (cachedTokens !== undefined) {
+      usage.input_tokens_details = { cached_tokens: cachedTokens }
+    }
+  }
+  if (completionDetails) {
+    usage.output_tokens_details = completionDetails
+  }
+  return Object.keys(usage).length > 0 ? usage : null
+}
+
+interface ChatResponseSummary {
+  errorMessage: string | null
+  finishReason: string | null
+  status: string
+  toolCallCount: number
+}
+
+function chatResponseMetadata(
+  metadata: JsonRecord,
+  summary: ChatResponseSummary,
+): JsonRecord {
+  const response: JsonRecord = {
+    object: stringValue(metadata.object) ?? "chat.completion",
+    status: summary.status,
+  }
+  const id = stringValue(metadata.id)
+  const model = stringValue(metadata.model)
+  const created = numberValue(metadata.created)
+  const serviceTier = stringValue(metadata.service_tier)
+  const systemFingerprint = stringValue(metadata.system_fingerprint)
+  if (id) response.id = id
+  if (model) response.model = model
+  if (created !== undefined) response.created_at = created
+  if (serviceTier) response.service_tier = serviceTier
+  if (systemFingerprint) response.system_fingerprint = systemFingerprint
+  if (summary.finishReason) response.finish_reason = summary.finishReason
+  if (summary.errorMessage) response.error_message = summary.errorMessage
+  if (summary.toolCallCount > 0) {
+    response.tool_call_count = summary.toolCallCount
+  }
+  return response
+}
+
+function mergeChatMetadata(target: JsonRecord, data: JsonRecord): void {
+  const id = stringValue(data.id)
+  const object = stringValue(data.object)
+  const model = stringValue(data.model)
+  const created = numberValue(data.created)
+  const serviceTier = stringValue(data.service_tier)
+  const systemFingerprint = stringValue(data.system_fingerprint)
+  if (id) target.id = id
+  if (object) target.object = object
+  if (model) target.model = model
+  if (created !== undefined) target.created = created
+  if (serviceTier) target.service_tier = serviceTier
+  if (systemFingerprint) target.system_fingerprint = systemFingerprint
+}
+
+function chatErrorMessage(data: JsonRecord): string | null {
+  if (!isRecord(data.error)) return null
+  return (
+    stringValue(data.error.message)
+    ?? stringValue(data.error.code)
+    ?? "The stream ended with an error."
+  )
+}
+
+// Chat Completions uses choices[].delta instead of response.* event objects.
+// Its metadata and terminal markers can arrive in separate chunks.
+// eslint-disable-next-line complexity, max-lines-per-function
+function parseChatCompletionFrames(
+  parsedFrames: Array<ParsedFrame>,
+): ParsedResponsesBody | null {
+  const hasChatFrame = parsedFrames.some(
+    (frame) => isRecord(frame.data) && looksLikeChatCompletion(frame.data),
+  )
+  if (!hasChatFrame) return null
+
+  const frames = parsedFrames.filter(
+    (frame) => frame.data === "[DONE]" || isRecord(frame.data),
+  )
+  const assistantByChoice = new Map<number, string>()
+  const reasoningByChoice = new Map<number, string>()
+  const toolCallIds = new Set<string>()
+  const metadata: JsonRecord = {}
+  let foundChatData = false
+  let usage: JsonRecord | null = null
+  let copilotUsage: JsonRecord | null = null
+  let finishReason: string | null = null
+  let errorMessage: string | null = null
+  let hasTerminalMarker = false
+
+  for (const frame of frames) {
+    if (frame.data === "[DONE]") {
+      hasTerminalMarker = true
+      continue
+    }
+    if (!isRecord(frame.data)) continue
+    const isChatData = looksLikeChatCompletion(frame.data)
+    if (isChatData) foundChatData = true
+    mergeChatMetadata(metadata, frame.data)
+    usage = normalizeChatUsage(frame.data.usage) ?? usage
+    if (isRecord(frame.data.copilot_usage)) {
+      copilotUsage = frame.data.copilot_usage
+    }
+    const frameError = chatErrorMessage(frame.data)
+    if (frameError) {
+      errorMessage = frameError
+      hasTerminalMarker = true
+    }
+    if (frame.data.object === "chat.completion") hasTerminalMarker = true
+
+    for (const choice of chatChoiceRecords(frame.data)) {
+      const choiceIndex = numberValue(choice.index) ?? 0
+      const delta = isRecord(choice.delta) ? choice.delta : null
+      const message = isRecord(choice.message) ? choice.message : null
+      const content = chatText(
+        delta?.content
+          ?? delta?.refusal
+          ?? message?.content
+          ?? message?.refusal,
+      )
+      let reasoning = ""
+      if (delta) reasoning = chatReasoning(delta)
+      else if (message) reasoning = chatReasoning(message)
+      if (content) {
+        const current =
+          message ? "" : (assistantByChoice.get(choiceIndex) ?? "")
+        assistantByChoice.set(choiceIndex, `${current}${content}`)
+      }
+      if (reasoning) {
+        const current =
+          message ? "" : (reasoningByChoice.get(choiceIndex) ?? "")
+        reasoningByChoice.set(choiceIndex, `${current}${reasoning}`)
+      }
+      addChatToolCalls(
+        delta?.tool_calls ?? message?.tool_calls,
+        choiceIndex,
+        toolCallIds,
+      )
+      const choiceFinishReason = stringValue(choice.finish_reason)
+      if (choiceFinishReason) {
+        finishReason = choiceFinishReason
+        hasTerminalMarker = true
+      }
+    }
+  }
+
+  if (!foundChatData) return null
+  let status = "in_progress"
+  if (errorMessage) status = "error"
+  else if (hasTerminalMarker) status = "completed"
+  const joinChoices = (values: Map<number, string>) =>
+    [...values.entries()]
+      .sort(([left], [right]) => left - right)
+      .map(([, value]) => value)
+      .filter(Boolean)
+      .join("\n\n")
+
+  return {
+    assistantText: joinChoices(assistantByChoice),
+    copilotUsage,
+    events: frames.map((frame) => ({
+      data: frame.data,
+      rawData: frame.rawData,
+      type: eventType(frame),
+    })),
+    isPartial: !hasTerminalMarker,
+    reasoningText: joinChoices(reasoningByChoice),
+    response: chatResponseMetadata(metadata, {
+      errorMessage,
+      finishReason,
+      status,
+      toolCallCount: toolCallIds.size,
+    }),
+    status,
+    toolCallCount: toolCallIds.size,
+    usage,
+  }
+}
+
 // The capture format has several optional fallbacks; keep its branches local.
 // eslint-disable-next-line complexity
 export function parseResponsesBody(raw: string): ParsedResponsesBody | null {
   const direct = directJsonFrame(raw)
   const parsedFrames = direct ? [direct] : parseSseFrames(raw)
+  const chatCompletion = parseChatCompletionFrames(parsedFrames)
+  if (chatCompletion) return chatCompletion
   const frames = parsedFrames.filter((frame) => {
     if (!isRecord(frame.data)) return false
     return looksLikeResponsesEvent(frame.data) || looksLikeResponse(frame.data)
