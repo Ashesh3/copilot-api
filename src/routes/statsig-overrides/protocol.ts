@@ -13,6 +13,8 @@ const INVALID_RESPONSE_SHAPE_ERROR_MESSAGE =
   "Statsig initialization response must be a full init-v1 response"
 const INVALID_EVALUATION_MAPS_ERROR_MESSAGE =
   "Statsig initialization response must include feature_gates and dynamic_configs maps"
+const STANDARD_BASE64_RE =
+  /^(?:[a-z0-9+/]{4})*(?:[a-z0-9+/]{2}==|[a-z0-9+/]{3}=)?$/i
 
 export class StatsigProtocolError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -33,6 +35,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function reverseString(value: string): string {
   return value.split("").reverse().join("")
+}
+
+function isCanonicalBase64(value: string): boolean {
+  return value.length % 4 === 0 && STANDARD_BASE64_RE.test(value)
 }
 
 function formatResponseFormat(value: unknown): string {
@@ -70,7 +76,12 @@ export function decodeStatsigInitializeBody(
     let bodyText = strFromU8(decodedBytes)
 
     if (options.encoded) {
-      bodyText = Buffer.from(reverseString(bodyText), "base64").toString("utf8")
+      const base64Body = reverseString(bodyText)
+      if (!isCanonicalBase64(base64Body)) {
+        throw new Error("Invalid reversed-base64 Statsig initialization body")
+      }
+
+      bodyText = Buffer.from(base64Body, "base64").toString("utf8")
     }
 
     const parsedBody = JSON.parse(bodyText) as unknown

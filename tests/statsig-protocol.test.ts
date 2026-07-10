@@ -180,14 +180,16 @@ describe("decodeStatsigInitializeBody", () => {
       "Invalid Statsig initialization body",
     )
 
-    expectProtocolError(
-      () =>
-        decodeStatsigInitializeBody(Buffer.from("====", "utf8"), {
-          encoded: true,
-          gzipped: false,
-        }),
-      "Invalid Statsig initialization body",
-    )
+    for (const encodedBody of ["", "====", "=03e!", "A=AA"]) {
+      expectProtocolError(
+        () =>
+          decodeStatsigInitializeBody(Buffer.from(encodedBody, "utf8"), {
+            encoded: true,
+            gzipped: false,
+          }),
+        "Invalid Statsig initialization body",
+      )
+    }
 
     for (const payload of [null, [], true, "text"]) {
       expectProtocolError(
