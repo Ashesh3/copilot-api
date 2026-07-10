@@ -1,3 +1,4 @@
+import type { BunOptions } from "@sentry/bun"
 import type { Client, SpanAttributes } from "@sentry/core"
 import type { Context } from "hono"
 
@@ -44,8 +45,17 @@ function isSensitiveHeader(key: string): boolean {
   return SENSITIVE_HEADER_PATTERNS.some((pattern) => lower.includes(pattern))
 }
 
+function escapeRegExp(value: string): string {
+  return value.replaceAll(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`)
+}
+
+const STATSIG_HOST_REFERENCE_RE = new RegExp(
+  String.raw`(^|[^a-z0-9.-])${escapeRegExp(STATSIG_PROXY_HOST)}(?::\d+)?(?=$|[/?#\s"'<>])`,
+  "i",
+)
+
 function containsStatsigHost(value: string): boolean {
-  return value.toLowerCase().includes(STATSIG_PROXY_HOST)
+  return STATSIG_HOST_REFERENCE_RE.test(value)
 }
 
 function hasDirectStatsigHostString(value: unknown): boolean {
@@ -327,12 +337,29 @@ export function initSentry(): void {
   const dsn = process.env.SENTRY_DSN
   if (!dsn) return
 
+  Sentry.init(createSentryInitOptions(dsn))
+
+  process.on("unhandledRejection", (reason) => {
+    Sentry.captureException(reason)
+  })
+
+  // Pipe consola logs to Sentry
+  consola.addReporter(Sentry.createConsolaReporter())
+
+  consola.info("Sentry initialized")
+}
+
+export type CopilotApiSentryInitOptions = BunOptions
+
+export function createSentryInitOptions(
+  dsn: string,
+): CopilotApiSentryInitOptions {
   const recordAiContent = shouldRecordAiContent()
   const tracesSampleRate = Number.parseFloat(
     process.env.SENTRY_TRACES_SAMPLE_RATE ?? "1.0",
   )
 
-  Sentry.init({
+  return {
     dsn,
     release: `copilot-api@${packageJson.version}`,
     environment: process.env.NODE_ENV ?? "development",
@@ -357,16 +384,7 @@ export function initSentry(): void {
     beforeSendLog(log) {
       return scrubSensitiveData(log)
     },
-  })
-
-  process.on("unhandledRejection", (reason) => {
-    Sentry.captureException(reason)
-  })
-
-  // Pipe consola logs to Sentry
-  consola.addReporter(Sentry.createConsolaReporter())
-
-  consola.info("Sentry initialized")
+  }
 }
 
 const CONVERSATION_ID_PAYLOAD_KEYS = [
