@@ -21,6 +21,7 @@ import {
   handleDeleteIpAllowlistEntry,
   handleDeleteModelRedirect,
   handleDeleteModelSettings,
+  handleDeleteStatsigOverride,
   handleDeleteReplacement,
   handleDeregisterEnvironment,
   handleDestroySession,
@@ -37,6 +38,7 @@ import {
   handleListModelRouting,
   handleListModelSettings,
   handleListReplacements,
+  handleListStatsigOverrides,
   handleListSessions,
   handleMoveModelRedirect,
   handleOverview,
@@ -45,6 +47,7 @@ import {
   handleSetCodexCleanupModel,
   handleSetModelSettings,
   handleSetModelRouting,
+  handleSetStatsigOverride,
   handleStartEnvironmentSession,
   handleToggleModelRedirect,
   handleToggleReplacement,
@@ -136,6 +139,9 @@ dashboardRoutes.post(
 dashboardRoutes.get("/api/flags", handleListFlags)
 dashboardRoutes.post("/api/flags", handleSetFlag)
 dashboardRoutes.delete("/api/flags", handleDeleteFlag)
+dashboardRoutes.get("/api/statsig-overrides", handleListStatsigOverrides)
+dashboardRoutes.post("/api/statsig-overrides", handleSetStatsigOverride)
+dashboardRoutes.delete("/api/statsig-overrides", handleDeleteStatsigOverride)
 
 // Replacements
 dashboardRoutes.get("/api/replacements", handleListReplacements)
