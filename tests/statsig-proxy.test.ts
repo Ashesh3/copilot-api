@@ -32,7 +32,7 @@ const originalConsoleLog = console.log
 const originalConsolaError = consola.error
 
 const consoleLogMock = mock(() => {})
-const consolaErrorMock = mock(() => {})
+const consolaErrorMock = mock((..._arguments: Array<unknown>) => {})
 const globalFetchMock = mock(
   (_url: string | URL | Request, _init?: RequestInit) =>
     new Response("global fetch response", { status: 202 }),
@@ -417,7 +417,7 @@ test("normalizes encoded initialize requests, strips se and gz, and overlays ove
   })
 })
 
-test("returns 400 without fetching when the initialize request body is invalid", async () => {
+test("returns 400 with safe logs when the initialize request body is invalid", async () => {
   allowManagedIp(TEST_IPS[5])
 
   const fetchMock = mock(
@@ -428,17 +428,37 @@ test("returns 400 without fetching when the initialize request body is invalid",
     getOverrides: createEmptyOverrides,
   })
 
-  const response = await app.request("http://localhost/v1/initialize?se=1", {
-    method: "POST",
-    headers: {
-      host: "ab.chatgpt.com",
-      "x-forwarded-for": TEST_IPS[5],
+  const response = await app.request(
+    "http://localhost/v1/initialize?se=1&k=decode-client-secret",
+    {
+      method: "POST",
+      headers: {
+        host: "ab.chatgpt.com",
+        "x-forwarded-for": TEST_IPS[5],
+      },
+      body: "=03e!decode-body-secret",
     },
-    body: "=03e!",
-  })
+  )
 
   expect(response.status).toBe(400)
   expect(fetchMock).not.toHaveBeenCalled()
+  expect(consolaErrorMock).toHaveBeenCalledTimes(1)
+  expect(consolaErrorMock.mock.calls[0]).toEqual([
+    "[statsig-proxy] Request failed",
+    {
+      stage: "request_decode",
+      method: "POST",
+      pathname: "/v1/initialize",
+      errorName: "StatsigProtocolError",
+    },
+  ])
+  const loggedCalls = JSON.stringify(consolaErrorMock.mock.calls)
+  expect(loggedCalls).not.toContain("decode-client-secret")
+  expect(loggedCalls).not.toContain("decode-body-secret")
+  expect(loggedCalls).not.toContain("Invalid Statsig initialization body")
+  expect(loggedCalls).not.toContain(
+    "Invalid reversed-base64 Statsig initialization body",
+  )
 })
 
 test("returns 502 with safe logs when the upstream fetch fails", async () => {
@@ -467,15 +487,15 @@ test("returns 502 with safe logs when the upstream fetch fails", async () => {
   expect(response.status).toBe(502)
   expect(await response.text()).toBe("Bad Gateway")
   expect(consolaErrorMock).toHaveBeenCalledTimes(1)
-  const loggedCall = consolaErrorMock.mock.calls[0] as
-    | Array<unknown>
-    | undefined
-  expect(loggedCall?.[0]).toBe("[statsig-proxy] Upstream request failed")
-  expect(loggedCall?.[1]).toEqual({
-    method: "GET",
-    path: "/v1/download",
-    errorName: "TypeError",
-  })
+  expect(consolaErrorMock.mock.calls[0]).toEqual([
+    "[statsig-proxy] Request failed",
+    {
+      stage: "upstream_request",
+      method: "GET",
+      pathname: "/v1/download",
+      errorName: "TypeError",
+    },
+  ])
   expect(JSON.stringify(consolaErrorMock.mock.calls)).not.toContain(
     "client-secret",
   )
@@ -556,7 +576,7 @@ test("passes upstream redirects through unchanged for initialize requests", asyn
   expect(await response.text()).toBe("redirect")
 })
 
-test("returns 502 for malformed successful initialize responses even without overrides", async () => {
+test("returns 502 with safe logs for malformed successful initialize responses", async () => {
   allowManagedIp(TEST_IPS[9])
 
   const fetchMock = mock(
@@ -567,6 +587,7 @@ test("returns 502 for malformed successful initialize responses even without ove
           is_delta: true,
           feature_gates: {},
           dynamic_configs: {},
+          diagnostic: "overlay-response-body-secret",
         }),
         {
           status: 200,
@@ -582,7 +603,7 @@ test("returns 502 for malformed successful initialize responses even without ove
   })
 
   const response = await app.request(
-    "http://localhost/v1/initialize?k=client-key",
+    "http://localhost/v1/initialize?k=overlay-client-secret",
     {
       method: "POST",
       headers: {
@@ -590,11 +611,30 @@ test("returns 502 for malformed successful initialize responses even without ove
         "content-type": "application/json",
         "x-forwarded-for": TEST_IPS[9],
       },
-      body: JSON.stringify({ user: { userID: "user-123" } }),
+      body: JSON.stringify({
+        user: { userID: "overlay-request-body-secret" },
+      }),
     },
   )
 
   expect(response.status).toBe(502)
+  expect(consolaErrorMock).toHaveBeenCalledTimes(1)
+  expect(consolaErrorMock.mock.calls[0]).toEqual([
+    "[statsig-proxy] Request failed",
+    {
+      stage: "response_overlay",
+      method: "POST",
+      pathname: "/v1/initialize",
+      errorName: "StatsigProtocolError",
+    },
+  ])
+  const loggedCalls = JSON.stringify(consolaErrorMock.mock.calls)
+  expect(loggedCalls).not.toContain("overlay-client-secret")
+  expect(loggedCalls).not.toContain("overlay-request-body-secret")
+  expect(loggedCalls).not.toContain("overlay-response-body-secret")
+  expect(loggedCalls).not.toContain(
+    "Statsig delta responses cannot be overridden",
+  )
 })
 
 test("returns valid initialize responses byte-for-byte when no overrides are configured", async () => {

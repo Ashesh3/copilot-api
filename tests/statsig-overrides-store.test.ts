@@ -355,6 +355,41 @@ test("replaceForTest swaps the cache and disables persistence", async () => {
   })
 })
 
+test("resetAfterTest reloads disk and restores persistence", async () => {
+  await withTestDir(async (directory) => {
+    const filePath = path.join(directory, "statsig_overrides.json")
+    const store = createStatsigOverrideStore(filePath)
+
+    store.set("featureGate", "persisted", true)
+    store.replaceForTest({
+      featureGates: { ephemeral: false },
+      dynamicConfigs: {},
+    })
+    store.set("dynamicConfig", "runtime-only", { cohort: "beta" })
+
+    store.resetAfterTest()
+
+    expect(await fs.readFile(filePath, "utf8")).toBe(`{
+  "featureGates": {
+    "persisted": true
+  },
+  "dynamicConfigs": {}
+}
+`)
+    expect(store.get()).toEqual({
+      featureGates: { persisted: true },
+      dynamicConfigs: {},
+    })
+
+    store.set("dynamicConfig", "after-reset", { enabled: true })
+
+    expect(createStatsigOverrideStore(filePath).get()).toEqual({
+      featureGates: { persisted: true },
+      dynamicConfigs: { "after-reset": { enabled: true } },
+    })
+  })
+})
+
 test("set leaves the cache unchanged when persistence fails", async () => {
   await withTestDir(async (directory) => {
     const blockedParent = path.join(directory, "blocked-parent")

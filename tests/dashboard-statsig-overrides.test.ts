@@ -59,6 +59,7 @@ afterAll(() => {
   state.apiKeyAuth = originalApiKeyAuth
   removeFeatureFlag(TEST_CLAUDE_FLAG)
   statsigOverrideStore.replaceForTest(createEmptyOverrides())
+  statsigOverrideStore.resetAfterTest()
 })
 
 test("dashboard statsig overrides require authentication", async () => {

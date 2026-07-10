@@ -78,14 +78,25 @@ function getSafeErrorName(error: unknown): string {
   return "UnknownError"
 }
 
+type StatsigProxyFailureStage =
+  | "request_decode"
+  | "upstream_request"
+  | "response_overlay"
+
+interface StatsigProxyFailureDetails {
+  stage: StatsigProxyFailureStage
+  method: string
+  pathname: string
+}
+
 function logSafeProxyFailure(
-  method: string,
-  path: string,
+  { stage, method, pathname }: StatsigProxyFailureDetails,
   error: unknown,
 ): void {
-  consola.error("[statsig-proxy] Upstream request failed", {
+  consola.error("[statsig-proxy] Request failed", {
+    stage,
     method,
-    path,
+    pathname,
     errorName: getSafeErrorName(error),
   })
 }
@@ -106,7 +117,14 @@ async function fetchStatsigUpstream({
   try {
     return await fetchImpl(upstreamUrl, init)
   } catch (error) {
-    logSafeProxyFailure(init.method ?? "GET", sourceUrl.pathname, error)
+    logSafeProxyFailure(
+      {
+        stage: "upstream_request",
+        method: init.method ?? "GET",
+        pathname: sourceUrl.pathname,
+      },
+      error,
+    )
     return null
   }
 }
@@ -137,7 +155,15 @@ async function proxyStatsigInitializeRequest({
     fullRequestBody = JSON.stringify(
       createFullStatsigInitializeRequest(decodedBody),
     )
-  } catch {
+  } catch (error) {
+    logSafeProxyFailure(
+      {
+        stage: "request_decode",
+        method: c.req.method.toUpperCase(),
+        pathname: sourceUrl.pathname,
+      },
+      error,
+    )
     return c.text("Bad Request", 400)
   }
 
@@ -194,7 +220,15 @@ async function proxyStatsigInitializeRequest({
       statusText: upstreamResponse.statusText,
       headers: responseHeaders,
     })
-  } catch {
+  } catch (error) {
+    logSafeProxyFailure(
+      {
+        stage: "response_overlay",
+        method: c.req.method.toUpperCase(),
+        pathname: sourceUrl.pathname,
+      },
+      error,
+    )
     return c.text("Bad Gateway", 502)
   }
 }

@@ -29,6 +29,7 @@ export interface StatsigOverrideStore {
   remove(kind: StatsigOverrideKind, name: string): boolean
   count(): number
   replaceForTest(overrides: StatsigOverrides): void
+  resetAfterTest(): void
 }
 
 export class StatsigOverrideValidationError extends Error {
@@ -362,6 +363,10 @@ export function createStatsigOverrideStore(
     replaceForTest(overrides: StatsigOverrides): void {
       cachedOverrides = validateOverrides(overrides)
       persistenceEnabled = false
+    },
+    resetAfterTest(): void {
+      cachedOverrides = null
+      persistenceEnabled = true
     },
   }
 }
