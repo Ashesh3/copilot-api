@@ -3,29 +3,17 @@ import type { Context } from "hono"
 import consola from "consola"
 
 import { extractClientIp, isIpAllowedForWhitelistedRoute } from "./ip-blocker"
+import {
+  createProxyRequestHeaders,
+  createProxyResponseHeaders,
+  normalizeProxyHost,
+} from "./proxy-http"
 
 const TRANSPARENT_PROXY_HOSTS = new Set([
   "api.anthropic.com",
   "claude.ai",
   "platform.claude.com",
 ])
-
-const HOP_BY_HOP_HEADERS = new Set([
-  "connection",
-  "keep-alive",
-  "proxy-authenticate",
-  "proxy-authorization",
-  "te",
-  "trailer",
-  "transfer-encoding",
-  "upgrade",
-])
-
-const DECODED_BODY_HEADERS = [
-  "content-encoding",
-  "content-length",
-  "content-md5",
-]
 
 const OWNED_ROUTE_PREFIXES = [
   "/api/claude_cli",
@@ -66,20 +54,6 @@ const OWNED_ROUTE_PREFIXES = [
 
 const OWNED_EXACT_ROUTES = new Set(["/", "/api/hello", "/models", "/v1/models"])
 
-function normalizeHost(host: string | undefined): string | null {
-  if (!host) return null
-
-  const trimmed = host.trim().toLowerCase()
-  if (!trimmed) return null
-
-  if (trimmed.startsWith("[")) {
-    const end = trimmed.indexOf("]")
-    return end === -1 ? trimmed : trimmed.slice(1, end)
-  }
-
-  return trimmed.split(":")[0] ?? null
-}
-
 function shouldProxyPath(host: string): boolean {
   return TRANSPARENT_PROXY_HOSTS.has(host)
 }
@@ -108,53 +82,13 @@ function isOwnedRoutePath(path: string): boolean {
   return OWNED_ROUTE_PREFIXES.some((prefix) => pathMatchesPrefix(path, prefix))
 }
 
-function deleteHopByHopHeaders(headers: Headers): void {
-  const connectionHeader = headers.get("connection")
-  if (connectionHeader) {
-    for (const header of connectionHeader.split(",")) {
-      const trimmed = header.trim()
-      if (trimmed) headers.delete(trimmed)
-    }
-  }
-
-  for (const header of HOP_BY_HOP_HEADERS) {
-    headers.delete(header)
-  }
-}
-
-function createProxyHeaders(request: Request): Headers {
-  const headers = new Headers(request.headers)
-
-  deleteHopByHopHeaders(headers)
-
-  headers.delete("content-length")
-  headers.delete("host")
-  headers.set("accept-encoding", "identity")
-  return headers
-}
-
-function createResponseHeaders(headers: Headers): Headers {
-  const responseHeaders = new Headers(headers)
-  const hasEncodedBody = responseHeaders.has("content-encoding")
-
-  deleteHopByHopHeaders(responseHeaders)
-
-  if (hasEncodedBody) {
-    for (const header of DECODED_BODY_HEADERS) {
-      responseHeaders.delete(header)
-    }
-  }
-
-  return responseHeaders
-}
-
 export function isTransparentProxyHost(host: string | undefined): boolean {
-  const normalizedHost = normalizeHost(host)
+  const normalizedHost = normalizeProxyHost(host)
   return normalizedHost !== null && TRANSPARENT_PROXY_HOSTS.has(normalizedHost)
 }
 
 export function isAllowedTransparentProxyRequest(c: Context): boolean {
-  const host = normalizeHost(c.req.header("host"))
+  const host = normalizeProxyHost(c.req.header("host"))
   if (host === null || !TRANSPARENT_PROXY_HOSTS.has(host)) return false
   if (isOwnedRoutePath(c.req.path)) return false
 
@@ -169,7 +103,7 @@ export async function isTransparentProxyClientWhitelisted(
 }
 
 export async function transparentProxy(c: Context): Promise<Response> {
-  const host = normalizeHost(c.req.header("host"))
+  const host = normalizeProxyHost(c.req.header("host"))
   if (host === null || !TRANSPARENT_PROXY_HOSTS.has(host)) {
     return c.notFound()
   }
@@ -194,7 +128,7 @@ export async function transparentProxy(c: Context): Promise<Response> {
   try {
     const upstreamResponse = await fetch(targetUrl, {
       method,
-      headers: createProxyHeaders(c.req.raw),
+      headers: createProxyRequestHeaders(c.req.raw),
       body: method === "GET" || method === "HEAD" ? undefined : c.req.raw.body,
       redirect: "manual",
       signal: c.req.raw.signal,
@@ -203,7 +137,7 @@ export async function transparentProxy(c: Context): Promise<Response> {
     return new Response(upstreamResponse.body, {
       status: upstreamResponse.status,
       statusText: upstreamResponse.statusText,
-      headers: createResponseHeaders(upstreamResponse.headers),
+      headers: createProxyResponseHeaders(upstreamResponse.headers),
     })
   } catch (error) {
     consola.error(
