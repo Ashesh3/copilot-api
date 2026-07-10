@@ -12,6 +12,25 @@ body {
   margin: 0;
 }
 
+.confirm-dialog {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.confirm-dialog .astryx-layout-content {
+  min-width: 0;
+  overflow-x: hidden;
+}
+
+.confirm-dialog .astryx-heading,
+.confirm-dialog .astryx-text {
+  display: block;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .responsive-pair {
   display: grid;
   grid-template-columns: repeat(

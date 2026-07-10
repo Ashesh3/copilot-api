@@ -125,6 +125,7 @@ export function ConfirmButton({
         onClick={() => setIsOpen(true)}
       />
       <AlertDialog
+        className="confirm-dialog"
         isOpen={isOpen}
         onOpenChange={setIsOpen}
         title={confirmTitle}
@@ -133,6 +134,7 @@ export function ConfirmButton({
         actionVariant={variant}
         isActionLoading={isLoading}
         onAction={handleConfirm}
+        width="min(400px, calc(100vw - 32px))"
       />
     </>
   )
