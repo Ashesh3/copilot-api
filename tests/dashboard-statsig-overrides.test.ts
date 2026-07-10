@@ -11,6 +11,7 @@ import {
   type StatsigOverrides,
 } from "../src/routes/statsig-overrides/store"
 import { server } from "../src/server"
+import { parseDynamicConfig } from "../ui/src/lib/dynamicConfig"
 
 const DASHBOARD_API_KEY = "dashboard-secret"
 const TEST_CLAUDE_FLAG = "dashboard_statsig_overrides_test_flag"
@@ -274,6 +275,50 @@ test("dashboard bundle ships ChatGPT/Codex feature flag controls", () => {
   expect(DASHBOARD_HTML).toContain("/dashboard/api/statsig-overrides")
   expect(DASHBOARD_HTML).toContain("ab.chatgpt.com")
   expect(DASHBOARD_HTML).toContain("api.anthropic.com")
+})
+
+test("dashboard dynamic config parser preserves existing errors", () => {
+  expect(parseDynamicConfig("{")).toEqual({
+    ok: false,
+    error: "Enter valid JSON",
+  })
+  expect(parseDynamicConfig("[]")).toEqual({
+    ok: false,
+    error: "Dynamic config must be a JSON object",
+  })
+})
+
+test("dashboard dynamic config parser accepts JSON-compatible values", () => {
+  expect(
+    parseDynamicConfig(
+      '{"null":null,"boolean":true,"string":"value","number":1.5,"array":[false,2,{"nested":null}]}',
+    ),
+  ).toEqual({
+    ok: true,
+    value: {
+      null: null,
+      boolean: true,
+      string: "value",
+      number: 1.5,
+      array: [false, 2, { nested: null }],
+    },
+  })
+})
+
+test("dashboard dynamic config parser rejects exponent overflow", () => {
+  expect(parseDynamicConfig('{"x":1e400}')).toEqual({
+    ok: false,
+    error: "Dynamic config numbers must be finite",
+  })
+})
+
+test("dashboard dynamic config parser rejects nested array exponent overflow", () => {
+  expect(
+    parseDynamicConfig('{"nested":{"values":[1,{"limit":-1e400}]}}'),
+  ).toEqual({
+    ok: false,
+    error: "Dynamic config numbers must be finite",
+  })
 })
 
 test("dashboard claude flags endpoint remains unchanged alongside statsig overrides", async () => {

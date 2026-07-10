@@ -37,6 +37,7 @@ import {
 import { Page } from "../components/Page"
 import { FlagIcon, PencilIcon, PlusIcon, Trash2Icon } from "../icons"
 import { del, get, post } from "../lib/api"
+import { parseDynamicConfig } from "../lib/dynamicConfig"
 import { useToast } from "../lib/toast"
 import { useAsyncData } from "../lib/usePolling"
 
@@ -202,29 +203,6 @@ function prettyDynamicConfig(value: StatsigDynamicConfig): string {
 
 function kindLabel(kind: StatsigOverrideKind): string {
   return kind === "featureGate" ? "Feature gate" : "Dynamic config"
-}
-
-function parseDynamicConfig(value: string):
-  | {
-      ok: true
-      value: StatsigDynamicConfig
-    }
-  | {
-      ok: false
-      error: string
-    } {
-  try {
-    const parsed: unknown = JSON.parse(value)
-    if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
-      return { ok: false, error: "Dynamic config must be a JSON object" }
-    }
-    return {
-      ok: true,
-      value: parsed as StatsigDynamicConfig,
-    }
-  } catch {
-    return { ok: false, error: "Enter valid JSON" }
-  }
 }
 
 function buildClaudeRows(flags: FlagsMap): Array<ClaudeFlagRow> {
