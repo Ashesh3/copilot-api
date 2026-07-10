@@ -170,6 +170,17 @@ describe("decodeStatsigInitializeBody", () => {
     ).toEqual(payload)
   })
 
+  test("rejects reversed-base64 aliases with non-canonical padding bits", () => {
+    expectProtocolError(
+      () =>
+        decodeStatsigInitializeBody(Buffer.from("=13e", "utf8"), {
+          encoded: true,
+          gzipped: false,
+        }),
+      "Invalid Statsig initialization body",
+    )
+  })
+
   test("rejects malformed bodies and non-object JSON payloads", () => {
     expectProtocolError(
       () =>

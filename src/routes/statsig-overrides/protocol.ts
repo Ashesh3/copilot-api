@@ -41,6 +41,19 @@ function isCanonicalBase64(value: string): boolean {
   return value.length % 4 === 0 && STANDARD_BASE64_RE.test(value)
 }
 
+function decodeCanonicalBase64(value: string): Buffer {
+  if (!isCanonicalBase64(value)) {
+    throw new Error("Invalid reversed-base64 Statsig initialization body")
+  }
+
+  const decoded = Buffer.from(value, "base64")
+  if (decoded.toString("base64") !== value) {
+    throw new Error("Invalid reversed-base64 Statsig initialization body")
+  }
+
+  return decoded
+}
+
 function formatResponseFormat(value: unknown): string {
   if (typeof value === "string") {
     return value
@@ -77,11 +90,7 @@ export function decodeStatsigInitializeBody(
 
     if (options.encoded) {
       const base64Body = reverseString(bodyText)
-      if (!isCanonicalBase64(base64Body)) {
-        throw new Error("Invalid reversed-base64 Statsig initialization body")
-      }
-
-      bodyText = Buffer.from(base64Body, "base64").toString("utf8")
+      bodyText = decodeCanonicalBase64(base64Body).toString("utf8")
     }
 
     const parsedBody = JSON.parse(bodyText) as unknown
