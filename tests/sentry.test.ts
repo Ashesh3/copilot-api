@@ -13,6 +13,7 @@ import {
   getSentryConversationIdFromHeaders,
   getSentryConversationIdFromPayload,
   getSentryModelName,
+  scrubStatsigClientKeyData,
 } from "../src/lib/sentry"
 
 const originalSentryAiRecordInputs = process.env.SENTRY_AI_RECORD_INPUTS
@@ -242,4 +243,93 @@ test("extracts Sentry conversation ID from supported headers", () => {
   })
 
   expect(getSentryConversationIdFromHeaders(headers)).toBe("session_header")
+})
+
+test("scrubs Statsig client keys from full URLs and breadcrumb data", () => {
+  const event = {
+    request: {
+      url: "https://ab.chatgpt.com/v1/initialize?k=client-secret&foo=bar",
+    },
+    breadcrumbs: [
+      {
+        data: {
+          url: "https://ab.chatgpt.com/v1/initialize?k=breadcrumb-secret",
+        },
+      },
+      {
+        data: {
+          url: "https://example.com/?k=keep-me&foo=bar",
+        },
+      },
+    ],
+  }
+
+  scrubStatsigClientKeyData(event)
+
+  expect(event.request.url).toBe(
+    "https://ab.chatgpt.com/v1/initialize?k=[Filtered]&foo=bar",
+  )
+  expect(event.breadcrumbs[0]?.data.url).toBe(
+    "https://ab.chatgpt.com/v1/initialize?k=[Filtered]",
+  )
+  expect(event.breadcrumbs[1]?.data.url).toBe(
+    "https://example.com/?k=keep-me&foo=bar",
+  )
+})
+
+test("scrubs Statsig span data within local context without leaking to siblings", () => {
+  const payload = {
+    span: {
+      description:
+        "https://ab.chatgpt.com/v1/initialize?k=span-secret#fragment",
+      data: {
+        server: { address: "ab.chatgpt.com" },
+        url: { query: "k=query-secret&foo=bar" },
+      },
+    },
+    unrelated: {
+      url: {
+        query: "k=keep-me&foo=bar",
+      },
+    },
+  }
+
+  scrubStatsigClientKeyData(payload)
+
+  expect(payload.span.description).toBe(
+    "https://ab.chatgpt.com/v1/initialize?k=[Filtered]#fragment",
+  )
+  expect(payload.span.data.url.query).toBe("k=[Filtered]&foo=bar")
+  expect(payload.unrelated.url.query).toBe("k=keep-me&foo=bar")
+})
+
+test("scrubs inherited Statsig context in arrays and handles cycles", () => {
+  const payload: {
+    items: Array<{ request: { url: string } } | { url: { query: string } }>
+    self?: unknown
+    server: { address: string }
+  } = {
+    server: { address: "ab.chatgpt.com" },
+    items: [
+      { url: { query: "k=array-secret&foo=bar" } },
+      {
+        request: {
+          url: "https://ab.chatgpt.com/v1/initialize?k=nested-secret",
+        },
+      },
+    ],
+  }
+  payload.self = payload
+
+  scrubStatsigClientKeyData(payload)
+
+  expect(payload.items[0]).toEqual({
+    url: { query: "k=[Filtered]&foo=bar" },
+  })
+  expect(payload.items[1]).toEqual({
+    request: {
+      url: "https://ab.chatgpt.com/v1/initialize?k=[Filtered]",
+    },
+  })
+  expect(payload.self).toBe(payload)
 })

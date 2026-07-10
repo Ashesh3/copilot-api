@@ -37,6 +37,7 @@ import { remoteRoutes } from "./routes/remote/route"
 import { replacementsRoute } from "./routes/replacements/route"
 import { responsesRoutes } from "./routes/responses/route"
 import { sessionsRoutes } from "./routes/sessions/route"
+import { statsigProxyMiddleware } from "./routes/statsig-overrides/proxy"
 import { transcribeRoutes } from "./routes/transcribe/route"
 import { usageRoute } from "./routes/usage/route"
 import { whamRoutes } from "./routes/wham/route"
@@ -44,6 +45,7 @@ import { whamRoutes } from "./routes/wham/route"
 export const server = new Hono()
 
 // Global middleware — applied to ALL routes including pre-auth ones
+server.use("*", statsigProxyMiddleware)
 server.use(requestLogger)
 server.use(cors())
 

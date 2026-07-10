@@ -29,12 +29,94 @@ const SENSITIVE_HEADER_PATTERNS = [
   "cookie",
   "x-api-key",
 ]
+const FILTERED_VALUE = "[Filtered]"
+const STATSIG_PROXY_HOST = "ab.chatgpt.com"
+const STATSIG_CLIENT_KEY_RE = /(^|[?&])k=[^&#\s"'<>]*/g
 
 type HeaderTuple = [string, unknown]
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null
+}
 
 function isSensitiveHeader(key: string): boolean {
   const lower = key.toLowerCase()
   return SENSITIVE_HEADER_PATTERNS.some((pattern) => lower.includes(pattern))
+}
+
+function containsStatsigHost(value: string): boolean {
+  return value.toLowerCase().includes(STATSIG_PROXY_HOST)
+}
+
+function hasDirectStatsigHostString(value: unknown): boolean {
+  if (!isRecord(value)) return false
+
+  return Object.values(value).some(
+    (entry) => typeof entry === "string" && containsStatsigHost(entry),
+  )
+}
+
+function objectCreatesLocalStatsigContext(
+  value: Record<string, unknown>,
+): boolean {
+  return (
+    Object.values(value).some(
+      (entry) => typeof entry === "string" && containsStatsigHost(entry),
+    ) || hasDirectStatsigHostString(value.server)
+  )
+}
+
+function scrubStatsigClientKeyString(
+  value: string,
+  inheritedStatsigContext: boolean,
+): string {
+  const isStatsigContext = inheritedStatsigContext || containsStatsigHost(value)
+  if (!isStatsigContext) return value
+
+  return value.replaceAll(
+    STATSIG_CLIENT_KEY_RE,
+    (_match, prefix: string) => `${prefix}k=${FILTERED_VALUE}`,
+  )
+}
+
+export function scrubStatsigClientKeyData(
+  value: unknown,
+  seen: WeakSet<object> = new WeakSet<object>(),
+  inheritedStatsigContext = false,
+): void {
+  if (!isRecord(value)) return
+  if (seen.has(value)) return
+
+  seen.add(value)
+
+  if (Array.isArray(value)) {
+    const arrayValue = value as Array<unknown>
+    for (let index = 0; index < arrayValue.length; index += 1) {
+      const entry = arrayValue[index]
+      if (typeof entry === "string") {
+        arrayValue[index] = scrubStatsigClientKeyString(
+          entry,
+          inheritedStatsigContext,
+        )
+        continue
+      }
+
+      scrubStatsigClientKeyData(entry, seen, inheritedStatsigContext)
+    }
+    return
+  }
+
+  const localStatsigContext =
+    inheritedStatsigContext || objectCreatesLocalStatsigContext(value)
+
+  for (const [key, nestedValue] of Object.entries(value)) {
+    if (typeof nestedValue === "string") {
+      value[key] = scrubStatsigClientKeyString(nestedValue, localStatsigContext)
+      continue
+    }
+
+    scrubStatsigClientKeyData(nestedValue, seen, localStatsigContext)
+  }
 }
 
 function scrubRequestHeaders(event: Sentry.Event): void {
@@ -53,7 +135,7 @@ function scrubRequestHeaders(event: Sentry.Event): void {
       }
 
       scrubbedHeaders.push(
-        isSensitiveHeader(entry[0]) ? [entry[0], "[Filtered]"] : entry,
+        isSensitiveHeader(entry[0]) ? [entry[0], FILTERED_VALUE] : entry,
       )
     }
     request.headers = scrubbedHeaders
@@ -64,7 +146,7 @@ function scrubRequestHeaders(event: Sentry.Event): void {
 
   const scrubbed: Record<string, string> = {}
   for (const [key, value] of Object.entries(headers)) {
-    scrubbed[key] = isSensitiveHeader(key) ? "[Filtered]" : String(value)
+    scrubbed[key] = isSensitiveHeader(key) ? FILTERED_VALUE : String(value)
   }
   request.headers = scrubbed
 }
@@ -73,8 +155,12 @@ function isHeaderTuple(entry: unknown): entry is HeaderTuple {
   return Array.isArray(entry) && typeof entry[0] === "string"
 }
 
-function scrubSensitiveData<T extends Sentry.Event>(event: T): T {
-  scrubRequestHeaders(event)
+function scrubSensitiveData<T>(event: T): T {
+  if (isRecord(event)) {
+    scrubRequestHeaders(event as Sentry.Event)
+    scrubStatsigClientKeyData(event)
+  }
+
   return event
 }
 
@@ -265,6 +351,12 @@ export function initSentry(): void {
     beforeSendTransaction(event) {
       return scrubSensitiveData(event)
     },
+    beforeSendSpan(span) {
+      return scrubSensitiveData(span)
+    },
+    beforeSendLog(log) {
+      return scrubSensitiveData(log)
+    },
   })
 
   process.on("unhandledRejection", (reason) => {
@@ -303,9 +395,6 @@ const CONVERSATION_ID_HEADERS = [
   "x-session-id",
   "x-claude-code-session-id",
 ]
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null
 
 function normalizeConversationId(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined
