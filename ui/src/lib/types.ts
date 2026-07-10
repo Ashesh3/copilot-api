@@ -47,8 +47,16 @@ export interface Environment {
   pendingWorkCount: number
 }
 
+export type FlagApplication = "claudeCode" | "chatgptCodex"
 export type FlagValue = boolean | string | number | Record<string, unknown>
 export type FlagsMap = Record<string, FlagValue>
+export type StatsigOverrideKind = "featureGate" | "dynamicConfig"
+export type StatsigDynamicConfig = Record<string, unknown>
+
+export interface StatsigOverrides {
+  featureGates: Record<string, boolean>
+  dynamicConfigs: Record<string, StatsigDynamicConfig>
+}
 
 export interface Replacement {
   id: string

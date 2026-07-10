@@ -1,6 +1,7 @@
 import { afterAll, beforeEach, expect, test } from "bun:test"
 
 import { state } from "../src/lib/state"
+import { DASHBOARD_HTML } from "../src/routes/dashboard/page-generated"
 import {
   getFeatureFlags,
   removeFeatureFlag,
@@ -266,6 +267,13 @@ test("dashboard overview counts claude flags and statsig overrides together", as
 
   expect(response.status).toBe(200)
   expect(body.flagsCount).toBe(baselineFlagsCount + 3)
+})
+
+test("dashboard bundle ships ChatGPT/Codex feature flag controls", () => {
+  expect(DASHBOARD_HTML).toContain("ChatGPT / Codex")
+  expect(DASHBOARD_HTML).toContain("/dashboard/api/statsig-overrides")
+  expect(DASHBOARD_HTML).toContain("ab.chatgpt.com")
+  expect(DASHBOARD_HTML).toContain("api.anthropic.com")
 })
 
 test("dashboard claude flags endpoint remains unchanged alongside statsig overrides", async () => {
