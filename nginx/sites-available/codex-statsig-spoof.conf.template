@@ -1,0 +1,59 @@
+# Codex Desktop Statsig feature-flag spoofing.
+#
+# Add the hosts mapping only on each Codex Desktop client:
+#   <server-ip> ab.chatgpt.com
+# Keep public DNS on the copilot-api server so its upstream connection still
+# resolves the real ab.chatgpt.com and cannot loop back into this vhost.
+#
+# The TLS certificate must contain ab.chatgpt.com in its SANs and be signed by
+# a CA trusted by Windows and Codex Desktop.
+#
+# Statsig sends its public client key in the `k` query parameter. copilot-api
+# forwards that key automatically and scrubs it at the application and Sentry
+# boundaries. Suppress both nginx access and error logs because nginx may
+# otherwise record the request line, including the key.
+#
+# Placeholders:
+#   {{CODEX_STATSIG_SPOOF_SERVER_NAME}}               e.g. ab.chatgpt.com
+#   {{CODEX_STATSIG_SPOOF_SSL_CERTIFICATE_PATH}}      e.g. /root/certs/ab.chatgpt.com.crt
+#   {{CODEX_STATSIG_SPOOF_SSL_CERTIFICATE_KEY_PATH}}  e.g. /root/certs/ab.chatgpt.com.key
+#   {{UPSTREAM_URL}}                                  e.g. http://localhost:4141
+#   {{RATE_LIMIT_ZONE}} / {{RATE_LIMIT_BURST}}        from your global rate-limit setup
+#   {{PROXY_LIMITS_SNIPPET_PATH}}                     path to snippets/proxy-limits.conf
+
+server {
+  listen 80;
+  server_name {{CODEX_STATSIG_SPOOF_SERVER_NAME}};
+
+  access_log off;
+  error_log /dev/null emerg;
+
+  return 301 https://$host$request_uri;
+}
+
+server {
+  listen 443 ssl;
+  server_name {{CODEX_STATSIG_SPOOF_SERVER_NAME}};
+
+  ssl_certificate     {{CODEX_STATSIG_SPOOF_SSL_CERTIFICATE_PATH}};
+  ssl_certificate_key {{CODEX_STATSIG_SPOOF_SSL_CERTIFICATE_KEY_PATH}};
+
+  access_log off;
+  error_log /dev/null emerg;
+
+  limit_req zone={{RATE_LIMIT_ZONE}} burst={{RATE_LIMIT_BURST}} nodelay;
+
+  location / {
+    proxy_pass {{UPSTREAM_URL}};
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    # OVERWRITE (not append) so clients cannot spoof the forwarded address.
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+
+    # Also disables request/response buffering and proxy caching.
+    include {{PROXY_LIMITS_SNIPPET_PATH}};
+    chunked_transfer_encoding on;
+  }
+}
