@@ -35,6 +35,29 @@ export interface RequestBehavior {
   sentryLevel?: "info" | "warning"
 }
 
+export type LogicalRequestTerminalStatus =
+  | "COMPLETE"
+  | "ERROR"
+  | "REJECTED"
+  | "ABORTED"
+
+export interface LogicalRequestTerminalOptions {
+  accountId?: number
+  error?: unknown
+  status: number
+  terminalStatus: LogicalRequestTerminalStatus
+}
+
+export interface LogicalRequestLifecycle {
+  finalize(options: LogicalRequestTerminalOptions): boolean
+  isFinalized(): boolean
+  update(
+    options: Partial<
+      Pick<RequestContext, "model" | "reasoningEffort" | "requestedModel">
+    >,
+  ): void
+}
+
 const REQUEST_CONTEXT_KEY = "requestContext"
 
 // ANSI color codes
@@ -72,6 +95,151 @@ function getStatusColor(status: number): string {
   if (status >= 400) return colors.yellow
   if (status >= 300) return colors.cyan
   return colors.green
+}
+
+function getLogicalStatusColor(status: LogicalRequestTerminalStatus): string {
+  switch (status) {
+    case "COMPLETE": {
+      return colors.green
+    }
+    case "REJECTED": {
+      return colors.yellow
+    }
+    case "ABORTED": {
+      return colors.cyan
+    }
+    case "ERROR": {
+      return colors.red
+    }
+    default: {
+      return colors.white
+    }
+  }
+}
+
+function getErrorMessage(error: unknown): string | undefined {
+  if (error instanceof Error) return error.message
+  if (error === undefined) return undefined
+  if (typeof error === "string") return error
+  if (
+    typeof error === "number"
+    || typeof error === "bigint"
+    || typeof error === "boolean"
+  ) {
+    return error.toString()
+  }
+  try {
+    return JSON.stringify(error)
+  } catch {
+    return "Unknown error"
+  }
+}
+
+/**
+ * Log a request lifecycle that does not pass through Hono middleware, such as
+ * a logical request carried by a long-lived WebSocket connection.
+ */
+export function startLogicalRequestLog(options: {
+  inputLength: number
+  method: string
+  model: string
+  path: string
+  reasoningEffort?: string
+  requestedModel?: string
+  transport: string
+  turnId: string
+}): LogicalRequestLifecycle {
+  const startedAt = Date.now()
+  const requestContext: RequestContext = {
+    inputLength: options.inputLength,
+    model: options.model,
+    reasoningEffort: options.reasoningEffort,
+    requestedModel: options.requestedModel,
+    startTime: startedAt,
+  }
+  let finalized = false
+
+  const startedLines = [
+    `${colors.dim}${"─".repeat(60)}${colors.reset}`,
+    `${colors.blue}${colors.bold}STARTED${colors.reset} ${colors.bold}${options.method}${colors.reset} ${options.path} ${colors.dim}[${options.transport} · ${options.turnId}]${colors.reset}`,
+    buildModelLine(requestContext),
+  ]
+  const modificationsLine = buildModificationsLine(requestContext)
+  if (modificationsLine) startedLines.push(modificationsLine)
+  startedLines.push(`  ${colors.dim}${getTimeString()}${colors.reset}`)
+  console.info(startedLines.join("\n"))
+  Sentry.logger.info(
+    `STARTED ${options.method} ${options.path} | ${buildPlainModelLine(requestContext)} | ${options.transport} | ${options.turnId}`,
+    {
+      inputLength: options.inputLength,
+      method: options.method,
+      model: getSentryModelName(options.model),
+      path: options.path,
+      reasoningEffort: options.reasoningEffort,
+      requestedModel:
+        options.requestedModel ?
+          getSentryModelName(options.requestedModel)
+        : undefined,
+      transport: options.transport,
+      turnId: options.turnId,
+    },
+  )
+
+  return {
+    finalize(terminalOptions): boolean {
+      if (finalized) return false
+      finalized = true
+
+      const duration = ((Date.now() - startedAt) / 1000).toFixed(1)
+      const ctx = { ...requestContext, accountId: terminalOptions.accountId }
+      const terminalColor = getLogicalStatusColor(
+        terminalOptions.terminalStatus,
+      )
+      const lines = [
+        `${colors.dim}${"─".repeat(60)}${colors.reset}`,
+        `${terminalColor}${colors.bold}${terminalOptions.terminalStatus}${colors.reset} ${colors.bold}${options.method}${colors.reset} ${options.path} ${getStatusColor(terminalOptions.status)}${terminalOptions.status}${colors.reset} ${colors.cyan}${duration}s${colors.reset} ${colors.dim}[${options.transport} · ${options.turnId}]${colors.reset}`,
+        buildModelLine(ctx),
+      ]
+      const terminalModificationsLine = buildModificationsLine(ctx)
+      if (terminalModificationsLine) lines.push(terminalModificationsLine)
+      const errorMessage = getErrorMessage(terminalOptions.error)
+      if (errorMessage) {
+        lines.push(`  ${colors.red}${errorMessage}${colors.reset}`)
+      }
+      lines.push(`  ${colors.dim}${getTimeString()}${colors.reset}`)
+      console.info(lines.join("\n"))
+
+      Sentry.logger.info(
+        `${terminalOptions.terminalStatus} ${options.method} ${options.path} ${terminalOptions.status} ${duration}s | ${buildPlainModelLine(ctx)} | ${options.transport} | ${options.turnId}`,
+        {
+          accountId: terminalOptions.accountId,
+          duration: Number(duration),
+          error: errorMessage,
+          inputLength: options.inputLength,
+          method: options.method,
+          model: ctx.model ? getSentryModelName(ctx.model) : undefined,
+          path: options.path,
+          reasoningEffort: ctx.reasoningEffort,
+          requestedModel:
+            ctx.requestedModel ?
+              getSentryModelName(ctx.requestedModel)
+            : undefined,
+          status: terminalOptions.status,
+          terminalStatus: terminalOptions.terminalStatus,
+          transport: options.transport,
+          turnId: options.turnId,
+        },
+      )
+      return true
+    },
+    isFinalized(): boolean {
+      return finalized
+    },
+    update(next): void {
+      if (finalized) return
+      Object.assign(requestContext, next)
+    },
+  }
 }
 
 /**

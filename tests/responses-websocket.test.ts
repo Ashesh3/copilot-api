@@ -1,3 +1,4 @@
+/* eslint-disable max-lines, max-lines-per-function */
 import {
   afterAll,
   afterEach,
@@ -32,6 +33,9 @@ const originalApiKeyAuth = state.apiKeyAuth
 const originalFetch = globalThis.fetch
 const originalModels = state.models
 const queuedResponses: Array<Response> = []
+const queuedFetchHandlers: Array<
+  (init?: RequestInit) => Promise<Response> | Response
+> = []
 let lastRequestBody: Record<string, unknown> | undefined
 
 const responsesCapableModels: ModelsResponse = {
@@ -63,7 +67,12 @@ const fetchMock = mock((_url: string, init?: RequestInit) => {
     typeof init?.body === "string" ?
       (JSON.parse(init.body) as Record<string, unknown>)
     : undefined
-  return queuedResponses.shift() ?? createResponsesSseResponse("resp_default")
+  const handler = queuedFetchHandlers.shift()
+  return (
+    handler?.(init)
+    ?? queuedResponses.shift()
+    ?? createResponsesSseResponse("resp_default")
+  )
 })
 
 beforeAll(() => {
@@ -79,6 +88,7 @@ afterEach(() => {
   fetchMock.mockClear()
   lastRequestBody = undefined
   queuedResponses.length = 0
+  queuedFetchHandlers.length = 0
   state.apiKeyAuth = originalApiKeyAuth
   state.accountType = "individual"
   state.copilotToken = "copilot-token"
@@ -86,6 +96,10 @@ afterEach(() => {
   state.isMultiToken = false
   state.manualApprove = false
   state.models = originalModels
+  state.rateLimitBucketTokens = undefined
+  state.rateLimitBucketUpdatedAt = undefined
+  state.rateLimitSeconds = undefined
+  state.rateLimitWait = true
   setConfigForTest(null)
 })
 
@@ -313,6 +327,260 @@ describe("responses websocket message handling", () => {
     expect(eventTypes).toEqual(["response.created", "response.completed"])
     expect(lastRequestBody?.previous_response_id).toBeUndefined()
     expect(ws.data.responseSnapshots.has("resp_ws")).toBe(true)
+    expect(ws.data.activeTurns.size).toBe(0)
+  })
+
+  test("streams the Chat Completions fallback with a per-turn abort signal", async () => {
+    state.accountType = "individual"
+    state.copilotToken = "copilot-token"
+    state.models = {
+      ...responsesCapableModels,
+      data: responsesCapableModels.data.map((model) => ({
+        ...model,
+        supported_endpoints: ["/chat/completions"],
+      })),
+    }
+    let upstreamSignal: AbortSignal | null | undefined
+    queuedFetchHandlers.push((init) => {
+      upstreamSignal = init?.signal
+      return createChatCompletionsSseResponse()
+    })
+    const ws = createTestWebSocket()
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "Hello",
+        tools: [],
+      }),
+    )
+
+    expect(upstreamSignal).toBeInstanceOf(AbortSignal)
+    expect(
+      ws.sent.some(
+        (frame) =>
+          (JSON.parse(frame) as { type?: string }).type
+          === "response.completed",
+      ),
+    ).toBe(true)
+    expect(ws.data.activeTurns.size).toBe(0)
+  })
+
+  test("tracks concurrent turns independently", async () => {
+    state.models = responsesCapableModels
+    const resolvers: Array<(response: Response) => void> = []
+    const upstreamSignals: Array<AbortSignal | null | undefined> = []
+    for (let index = 0; index < 2; index++) {
+      queuedFetchHandlers.push(
+        (init) =>
+          new Promise<Response>((resolve) => {
+            upstreamSignals.push(init?.signal)
+            resolvers.push(resolve)
+          }),
+      )
+    }
+    const ws = createTestWebSocket()
+
+    const first = responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "first",
+        tools: [],
+      }),
+    )
+    const second = responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "second",
+        tools: [],
+      }),
+    )
+    await waitFor(() => resolvers.length === 2)
+
+    expect(ws.data.activeTurns.size).toBe(2)
+    expect(upstreamSignals[0]).not.toBe(upstreamSignals[1])
+    resolvers[1]?.(createResponsesSseResponse("resp_second"))
+    resolvers[0]?.(createResponsesSseResponse("resp_first"))
+    await Promise.all([first, second])
+
+    expect(ws.data.activeTurns.size).toBe(0)
+    expect(ws.data.responseSnapshots.has("resp_first")).toBe(true)
+    expect(ws.data.responseSnapshots.has("resp_second")).toBe(true)
+  })
+
+  test("aborts and finalizes active turns exactly once when the socket closes", async () => {
+    state.models = responsesCapableModels
+    let upstreamSignal: AbortSignal | null | undefined
+    queuedFetchHandlers.push(
+      (init) =>
+        new Promise<Response>((_resolve, reject) => {
+          upstreamSignal = init?.signal
+          init?.signal?.addEventListener("abort", () => {
+            const error = new Error("upstream fetch aborted")
+            error.name = "AbortError"
+            reject(error)
+          })
+        }),
+    )
+    const ws = createTestWebSocket()
+    const infoLines: Array<string> = []
+    const originalConsoleInfo = console.info
+    console.info = (...args: Array<unknown>) => {
+      infoLines.push(args.map(String).join(" "))
+    }
+
+    try {
+      const pending = responsesWebSocket.message(
+        ws,
+        JSON.stringify({
+          type: "response.create",
+          model: "gpt-5.4",
+          input: "keep streaming",
+          tools: [],
+        }),
+      )
+      await waitFor(() => upstreamSignal !== undefined)
+
+      responsesWebSocket.close(ws)
+      await pending
+
+      expect(upstreamSignal?.aborted).toBe(true)
+      expect(ws.data.closed).toBe(true)
+      expect(ws.data.activeTurns.size).toBe(0)
+      expect(infoLines.filter((line) => line.includes("STARTED"))).toHaveLength(
+        1,
+      )
+      expect(infoLines.filter((line) => line.includes("ABORTED"))).toHaveLength(
+        1,
+      )
+      expect(infoLines.some((line) => line.includes("499"))).toBe(true)
+      expect(
+        ws.sent.some(
+          (frame) => (JSON.parse(frame) as { type?: string }).type === "error",
+        ),
+      ).toBe(false)
+    } finally {
+      // eslint-disable-next-line require-atomic-updates
+      console.info = originalConsoleInfo
+    }
+  })
+
+  test("logs STARTED immediately and does not fetch after close during a prefetch wait", async () => {
+    state.models = responsesCapableModels
+    state.rateLimitSeconds = 60
+    state.rateLimitBucketTokens = 0
+    state.rateLimitBucketUpdatedAt = Date.now()
+    state.rateLimitWait = true
+    const ws = createTestWebSocket()
+    const infoLines: Array<string> = []
+    const originalConsoleInfo = console.info
+    console.info = (...args: Array<unknown>) => {
+      infoLines.push(args.map(String).join(" "))
+    }
+
+    try {
+      const pending = responsesWebSocket.message(
+        ws,
+        JSON.stringify({
+          type: "response.create",
+          model: "gpt-5.4",
+          input: "wait",
+          tools: [],
+        }),
+      )
+      expect(infoLines.some((line) => line.includes("STARTED"))).toBe(true)
+      await waitFor(() => ws.data.activeTurns.size === 1)
+      responsesWebSocket.close(ws)
+      await pending
+
+      expect(fetchMock).not.toHaveBeenCalled()
+      expect(infoLines.filter((line) => line.includes("ABORTED"))).toHaveLength(
+        1,
+      )
+    } finally {
+      // eslint-disable-next-line require-atomic-updates
+      console.info = originalConsoleInfo
+    }
+  })
+
+  test.each([
+    ["response.failed", "failed upstream"],
+    ["response.incomplete", "incomplete upstream"],
+    ["error", "stream error"],
+  ])("logs native %s terminal frames as errors", async (type, message) => {
+    state.models = responsesCapableModels
+    queuedResponses.push(createResponsesTerminalSseResponse(type, message))
+    const ws = createTestWebSocket()
+    const infoLines: Array<string> = []
+    const originalConsoleInfo = console.info
+    console.info = (...args: Array<unknown>) => {
+      infoLines.push(args.map(String).join(" "))
+    }
+
+    try {
+      await responsesWebSocket.message(
+        ws,
+        JSON.stringify({
+          type: "response.create",
+          model: "gpt-5.4",
+          input: "fail",
+          tools: [],
+        }),
+      )
+      expect(infoLines.filter((line) => line.includes("ERROR"))).toHaveLength(1)
+      expect(infoLines.some((line) => line.includes("COMPLETE"))).toBe(false)
+    } finally {
+      // eslint-disable-next-line require-atomic-updates
+      console.info = originalConsoleInfo
+    }
+  })
+
+  test("keeps a delivered completed frame COMPLETE when the socket closes", async () => {
+    state.models = responsesCapableModels
+    const ws = createTestWebSocket()
+    const infoLines: Array<string> = []
+    const originalConsoleInfo = console.info
+    console.info = (...args: Array<unknown>) => {
+      infoLines.push(args.map(String).join(" "))
+    }
+    queuedFetchHandlers.push(() =>
+      createResponsesSseResponse("resp_close_after_complete"),
+    )
+    const originalSend = ws.send.bind(ws)
+    ws.send = (data: string) => {
+      originalSend(data)
+      if (
+        (JSON.parse(data) as { type?: string }).type === "response.completed"
+      ) {
+        queueMicrotask(() => responsesWebSocket.close(ws))
+      }
+    }
+
+    try {
+      await responsesWebSocket.message(
+        ws,
+        JSON.stringify({
+          type: "response.create",
+          model: "gpt-5.4",
+          input: "finish",
+          tools: [],
+        }),
+      )
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(
+        infoLines.filter((line) => line.includes("COMPLETE")),
+      ).toHaveLength(1)
+      expect(infoLines.some((line) => line.includes("ABORTED"))).toBe(false)
+    } finally {
+      // eslint-disable-next-line require-atomic-updates
+      console.info = originalConsoleInfo
+    }
   })
 
   test("does not forward unknown previous_response_id upstream", async () => {
@@ -650,6 +918,9 @@ function createTestWebSocket(): {
   const sent: Array<string> = []
   return {
     data: {
+      activeTurns: new Map(),
+      closed: false,
+      nextTurnSequence: 0,
       type: "responses",
       requestId: "req-test",
       sessionId: "session-test",
@@ -719,4 +990,62 @@ function createResponsesSseResponse(responseId: string): Response {
       headers: { "content-type": "text/event-stream" },
     },
   )
+}
+
+function createChatCompletionsSseResponse(): Response {
+  const content = JSON.stringify({
+    id: "chatcmpl_ws",
+    object: "chat.completion.chunk",
+    created: 1,
+    model: "gpt-5.4",
+    choices: [
+      {
+        index: 0,
+        delta: { role: "assistant", content: "Hello" },
+        finish_reason: null,
+      },
+    ],
+  })
+  const done = JSON.stringify({
+    id: "chatcmpl_ws",
+    object: "chat.completion.chunk",
+    created: 1,
+    model: "gpt-5.4",
+    choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+  })
+  return new Response(`data: ${content}\n\ndata: ${done}\n\ndata: [DONE]\n\n`, {
+    headers: { "content-type": "text/event-stream" },
+    status: 200,
+  })
+}
+
+function createResponsesTerminalSseResponse(
+  type: string,
+  message: string,
+): Response {
+  const frame =
+    type === "error" ?
+      { type, message, code: "upstream_error", param: null, sequence_number: 1 }
+    : {
+        type,
+        sequence_number: 1,
+        response: {
+          id: "resp_terminal",
+          object: "response",
+          status: type === "response.failed" ? "failed" : "incomplete",
+          error: { message },
+        },
+      }
+  return new Response(`event: ${type}\ndata: ${JSON.stringify(frame)}\n\n`, {
+    headers: { "content-type": "text/event-stream" },
+    status: 200,
+  })
+}
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if (predicate()) return
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  }
+  throw new Error("Timed out waiting for test condition")
 }

@@ -1,7 +1,9 @@
 import { beforeEach, expect, test } from "bun:test"
 
 import {
+  abortLlmDebugLog,
   clearLlmDebugLogs,
+  failLlmDebugLog,
   finishLlmDebugLog,
   getLlmDebugLog,
   LLM_DEBUG_LOG_RETENTION_MS,
@@ -77,4 +79,66 @@ test("prunes entries older than the retention window", () => {
   expect(list.count).toBe(1)
   expect(list.entries[0]?.id).toBe(freshId)
   expect(list.entries[0]?.model).toBe("fresh-model")
+})
+
+test("keeps aborted requests terminal when late response work finishes", () => {
+  const startedAtMs = Date.now()
+  const id = startLlmDebugLog({
+    method: "POST",
+    path: "/responses",
+    requestBody: JSON.stringify({ model: "gpt-abort" }),
+    requestHeaders: {},
+    startedAtMs,
+    url: "https://example.test/responses",
+  })
+  const abortError = new Error("client disconnected")
+  abortError.name = "AbortError"
+
+  abortLlmDebugLog(id, { error: abortError, endedAtMs: startedAtMs + 25 })
+  finishLlmDebugLog(
+    id,
+    {
+      body: '{"late":true}',
+      headers: { "content-type": "application/json" },
+      status: 200,
+      statusText: "OK",
+    },
+    startedAtMs + 50,
+  )
+  failLlmDebugLog(id, new Error("late failure"), startedAtMs + 75)
+
+  const detail = getLlmDebugLog(id)
+  expect(detail?.status).toBe("aborted")
+  expect(detail?.durationMs).toBe(25)
+  expect(detail?.error?.name).toBe("AbortError")
+  expect(detail?.response).toBeUndefined()
+})
+
+test("does not let an abort overwrite a completed request", () => {
+  const startedAtMs = Date.now()
+  const id = startLlmDebugLog({
+    method: "POST",
+    path: "/responses",
+    requestBody: JSON.stringify({ model: "gpt-complete" }),
+    requestHeaders: {},
+    startedAtMs,
+    url: "https://example.test/responses",
+  })
+  finishLlmDebugLog(
+    id,
+    {
+      body: "{}",
+      headers: {},
+      status: 200,
+      statusText: "OK",
+    },
+    startedAtMs + 10,
+  )
+  abortLlmDebugLog(id, {
+    error: new Error("late abort"),
+    endedAtMs: startedAtMs + 20,
+  })
+
+  expect(getLlmDebugLog(id)?.status).toBe("complete")
+  expect(getLlmDebugLog(id)?.durationMs).toBe(10)
 })

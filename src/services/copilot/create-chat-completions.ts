@@ -383,8 +383,10 @@ export const createChatCompletions = async (
     signal?: AbortSignal
   },
 ) => {
+  options?.signal?.throwIfAborted()
   rewriteUnsupportedAssistantPrefill(payload)
   await normalizeChatAttachments(payload)
+  options?.signal?.throwIfAborted()
   const vision = hasVisionContent(payload.messages)
   const initiator = detectInitiator(payload.messages, options?.initiator)
   const headerOpts = { vision, initiator }

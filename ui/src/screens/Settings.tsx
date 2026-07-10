@@ -5,7 +5,7 @@ import { Badge } from "@astryxdesign/core/Badge"
 import { Banner } from "@astryxdesign/core/Banner"
 import { Button } from "@astryxdesign/core/Button"
 import { Card } from "@astryxdesign/core/Card"
-import { Grid } from "@astryxdesign/core/Grid"
+import { Divider } from "@astryxdesign/core/Divider"
 import { MetadataList, MetadataListItem } from "@astryxdesign/core/MetadataList"
 import { Selector } from "@astryxdesign/core/Selector"
 import { Skeleton } from "@astryxdesign/core/Skeleton"
@@ -13,7 +13,7 @@ import { HStack, VStack } from "@astryxdesign/core/Stack"
 import { pixel, proportional } from "@astryxdesign/core/Table"
 import { Heading, Text } from "@astryxdesign/core/Text"
 import { TextInput } from "@astryxdesign/core/TextInput"
-import { useEffect, useState } from "react"
+import { useState } from "react"
 
 import type { IpAllowlistEntry, SettingsData } from "../lib/types"
 
@@ -26,6 +26,7 @@ import {
   TogglePill,
 } from "../components/common"
 import { Page } from "../components/Page"
+import { ResponsivePair } from "../components/ResponsivePair"
 import { DownloadIcon, PlusIcon, RadioTowerIcon, Trash2Icon } from "../icons"
 import { ApiError, del, get, getApiKey, patch, post } from "../lib/api"
 import { useToast } from "../lib/toast"
@@ -80,14 +81,12 @@ export default function SettingsScreen() {
   const { data, error, loading, reload } = useAsyncData(loadBundle, [])
   const toast = useToast()
 
-  const [cleanupValue, setCleanupValue] = useState("")
+  const [cleanupDraft, setCleanupDraft] = useState<string>()
   const [isSavingCleanup, setIsSavingCleanup] = useState(false)
   const [newIp, setNewIp] = useState("")
   const [isDetecting, setIsDetecting] = useState(false)
 
-  useEffect(() => {
-    if (data) setCleanupValue(data.settings.codexCleanupModel ?? "")
-  }, [data])
+  const cleanupValue = cleanupDraft ?? data?.settings.codexCleanupModel ?? ""
 
   const handleExport = async () => {
     try {
@@ -125,6 +124,7 @@ export default function SettingsScreen() {
         model: cleanupValue || null,
       })
       toast.success("Codex cleanup model updated")
+      setCleanupDraft(undefined)
       reload()
     } catch (caught) {
       toast.error(errorMessage(caught, "Failed to update cleanup model"))
@@ -308,62 +308,60 @@ export default function SettingsScreen() {
       : null}
 
       {data ?
-        <VStack gap={4}>
-          <Grid columns={{ minWidth: 420, max: 2 }} gap={4} align="start">
-            <Card>
-              <VStack gap={4}>
-                <Heading level={3}>Server Configuration</Heading>
-                <MetadataList columns={2}>
-                  <MetadataListItem label="Version">
-                    {data.settings.version}
-                  </MetadataListItem>
-                  <MetadataListItem label="Port">
-                    {data.settings.port}
-                  </MetadataListItem>
-                  <MetadataListItem label="Host">
-                    {data.settings.host}
-                  </MetadataListItem>
-                  <MetadataListItem label="API Key Configured">
-                    {boolBadge(data.settings.authEnabled)}
-                  </MetadataListItem>
-                  <MetadataListItem label="Multi-Token Mode">
-                    {boolBadge(data.settings.multiToken)}
-                  </MetadataListItem>
-                  <MetadataListItem label="Rate Limit">
-                    {data.settings.rateLimitSeconds != null ?
-                      `${data.settings.rateLimitSeconds}s`
-                    : "Disabled"}
-                  </MetadataListItem>
-                  <MetadataListItem label="Sentry Enabled">
-                    {boolBadge(data.settings.sentryEnabled)}
-                  </MetadataListItem>
-                  <MetadataListItem label="Groq Enabled">
-                    {boolBadge(data.settings.groqEnabled)}
-                  </MetadataListItem>
-                  <MetadataListItem label="Data Directory">
-                    <MonoText>{data.settings.dataDir}</MonoText>
-                  </MetadataListItem>
-                  <MetadataListItem label="Debug Mode">
-                    {boolBadge(data.settings.debug)}
-                  </MetadataListItem>
-                  <MetadataListItem label="Verbose Logging">
-                    {boolBadge(data.settings.verbose)}
-                  </MetadataListItem>
-                </MetadataList>
-              </VStack>
-            </Card>
+        <ResponsivePair minWidth={540}>
+          <Card>
+            <VStack gap={4}>
+              <Heading level={3}>Server Configuration</Heading>
+              <MetadataList columns={2}>
+                <MetadataListItem label="Version">
+                  {data.settings.version}
+                </MetadataListItem>
+                <MetadataListItem label="Port">
+                  {data.settings.port}
+                </MetadataListItem>
+                <MetadataListItem label="Host">
+                  {data.settings.host}
+                </MetadataListItem>
+                <MetadataListItem label="API Key Configured">
+                  {boolBadge(data.settings.authEnabled)}
+                </MetadataListItem>
+                <MetadataListItem label="Multi-Token Mode">
+                  {boolBadge(data.settings.multiToken)}
+                </MetadataListItem>
+                <MetadataListItem label="Rate Limit">
+                  {data.settings.rateLimitSeconds != null ?
+                    `${data.settings.rateLimitSeconds}s`
+                  : "Disabled"}
+                </MetadataListItem>
+                <MetadataListItem label="Sentry Enabled">
+                  {boolBadge(data.settings.sentryEnabled)}
+                </MetadataListItem>
+                <MetadataListItem label="Groq Enabled">
+                  {boolBadge(data.settings.groqEnabled)}
+                </MetadataListItem>
+                <MetadataListItem label="Data Directory">
+                  <MonoText>{data.settings.dataDir}</MonoText>
+                </MetadataListItem>
+                <MetadataListItem label="Debug Mode">
+                  {boolBadge(data.settings.debug)}
+                </MetadataListItem>
+                <MetadataListItem label="Verbose Logging">
+                  {boolBadge(data.settings.verbose)}
+                </MetadataListItem>
+              </MetadataList>
 
-            <Card>
+              <Divider />
+
               <VStack gap={4}>
-                <HStack gap={2} vAlign="center">
-                  <Heading level={3}>Codex Dictation Cleanup</Heading>
+                <HStack gap={2} vAlign="center" wrap="wrap">
+                  <Heading level={4}>Codex Dictation Cleanup</Heading>
                   <Badge variant="neutral" label="Used by /codex/responses" />
                 </HStack>
                 <Selector
                   label="Cleanup model"
                   options={cleanupOptions}
                   value={cleanupValue}
-                  onChange={setCleanupValue}
+                  onChange={setCleanupDraft}
                 />
                 <HStack hAlign="end">
                   <Button
@@ -374,16 +372,16 @@ export default function SettingsScreen() {
                   />
                 </HStack>
               </VStack>
-            </Card>
-          </Grid>
+            </VStack>
+          </Card>
 
           <Card>
             <VStack gap={4}>
-              <HStack gap={2} vAlign="center">
+              <HStack gap={2} vAlign="center" wrap="wrap">
                 <Heading level={3}>IP Allowlist</Heading>
                 <Badge variant="neutral" label="Used by /transcribe" />
               </HStack>
-              <HStack gap={2}>
+              <HStack gap={2} wrap="wrap">
                 <Button
                   label="Detect public IPs"
                   variant="secondary"
@@ -392,12 +390,13 @@ export default function SettingsScreen() {
                   onClick={handleDetectIps}
                 />
               </HStack>
-              <HStack gap={2} vAlign="end">
+              <HStack gap={2} vAlign="end" wrap="wrap">
                 <TextInput
                   label="IP address"
                   value={newIp}
                   onChange={setNewIp}
                   placeholder="203.0.113.10"
+                  width="min(100%, 320px)"
                 />
                 <Button
                   label="Add"
@@ -419,7 +418,7 @@ export default function SettingsScreen() {
               }
             </VStack>
           </Card>
-        </VStack>
+        </ResponsivePair>
       : null}
     </Page>
   )

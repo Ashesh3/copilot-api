@@ -199,7 +199,7 @@ export interface LlmDebugEntry {
   startedAt: string
   durationMs?: number
   endedAt?: string
-  status: "pending" | "complete" | "error"
+  status: "pending" | "complete" | "error" | "aborted"
   stream?: boolean
 }
 
@@ -238,7 +238,7 @@ export interface LlmDebugDetail {
   startedAtMs: number
   durationMs?: number
   endedAt?: string
-  status: "pending" | "complete" | "error"
+  status: "pending" | "complete" | "error" | "aborted"
   stream?: boolean
 }
 

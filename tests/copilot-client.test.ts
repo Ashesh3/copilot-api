@@ -203,6 +203,40 @@ test("does not retry aborted upstream fetches", async () => {
   expect(thrownError.message).toContain("aborted")
 
   expect(capturedRequests).toHaveLength(1)
+  expect(listLlmDebugLogs().entries[0]?.status).toBe("aborted")
+})
+
+test("marks an aborted debug clone-body read as aborted", async () => {
+  const abortError = new Error("response body was aborted")
+  abortError.name = "AbortError"
+  const response = new Response("stream body", {
+    headers: { "content-type": "text/event-stream" },
+    status: 200,
+  })
+  Object.defineProperty(response, "clone", {
+    configurable: true,
+    value: () =>
+      ({
+        text: () => Promise.reject(abortError),
+      }) as unknown as Response,
+  })
+  queuedResponses.push(response)
+
+  await copilotFetch("/responses", {
+    body: JSON.stringify({ model: "gpt-aborted-stream", stream: true }),
+    headers: {
+      Authorization: "Bearer expired-copilot-token",
+      "content-type": "application/json",
+    },
+    method: "POST",
+  })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+
+  const entry = listLlmDebugLogs().entries[0]
+  expect(entry).toBeDefined()
+  expect(entry.status).toBe("aborted")
+  expect(entry.responseStatus).toBe(200)
+  expect(entry.errorMessage).toBe("response body was aborted")
 })
 
 test("captures raw LLM request and response attempts for dashboard debugging", async () => {

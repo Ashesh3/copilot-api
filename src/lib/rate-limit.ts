@@ -41,7 +41,7 @@ function getRefilledBucketTokens(
   }
 }
 
-export async function checkRateLimit(state: State) {
+export async function checkRateLimit(state: State, signal?: AbortSignal) {
   if (state.rateLimitSeconds === undefined || state.rateLimitSeconds <= 0)
     return
 
@@ -71,7 +71,35 @@ export async function checkRateLimit(state: State) {
   consola.warn(
     `Rate limit reached. Waiting ${waitTimeSeconds} seconds before proceeding...`,
   )
-  await sleep(waitTimeMs)
+  if (signal) {
+    let rejectAbort: (() => void) | undefined
+    try {
+      await Promise.race([
+        sleep(waitTimeMs),
+        new Promise<never>((_resolve, reject) => {
+          rejectAbort = () => {
+            const reason: unknown = signal.reason
+            if (reason instanceof Error) {
+              reject(reason)
+              return
+            }
+            const error = new Error("Rate-limit wait aborted")
+            error.name = "AbortError"
+            reject(error)
+          }
+          if (signal.aborted) {
+            rejectAbort()
+            return
+          }
+          signal.addEventListener("abort", rejectAbort, { once: true })
+        }),
+      ])
+    } finally {
+      if (rejectAbort) signal.removeEventListener("abort", rejectAbort)
+    }
+  } else {
+    await sleep(waitTimeMs)
+  }
 
   const readyAt = Date.now()
   const nextBucket = getRefilledBucketTokens(state, readyAt)

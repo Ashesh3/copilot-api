@@ -27,14 +27,14 @@ export function Page({
   return (
     <VStack height="100%" gap={0}>
       <Section dividers={["bottom"]} padding={4}>
-        <HStack hAlign="between" vAlign="center">
+        <HStack hAlign="between" vAlign="center" wrap="wrap">
           <VStack gap={0.5}>
             <Text type="label" color="secondary">
               {kicker}
             </Text>
             <Heading level={1}>{title}</Heading>
           </VStack>
-          <HStack gap={2} vAlign="center">
+          <HStack gap={2} vAlign="center" wrap="wrap">
             {actions}
             {onRefresh ?
               <IconButton

@@ -39,7 +39,7 @@ export interface LlmDebugLogEntry {
   response?: LlmDebugLogResponse
   startedAt: string
   startedAtMs: number
-  status: "pending" | "complete" | "error"
+  status: "pending" | "complete" | "error" | "aborted"
   stream?: boolean
 }
 
@@ -69,6 +69,12 @@ export interface LlmDebugLogListResponse {
   entries: Array<LlmDebugLogSummary>
   generatedAt: string
   retentionMs: number
+}
+
+interface AbortLlmDebugLogOptions {
+  endedAtMs?: number
+  error: unknown
+  response?: Omit<LlmDebugLogResponse, "bodyBytes">
 }
 
 interface StartLlmDebugLogInput {
@@ -307,7 +313,7 @@ export function finishLlmDebugLog(
 ): void {
   prune(endedAtMs)
   const entry = getEntry(id)
-  if (!entry) return
+  if (!entry || entry.status !== "pending") return
 
   entry.endedAt = new Date(endedAtMs).toISOString()
   entry.durationMs = endedAtMs - entry.startedAtMs
@@ -326,12 +332,34 @@ export function failLlmDebugLog(
 ): void {
   prune(endedAtMs)
   const entry = getEntry(id)
-  if (!entry) return
+  if (!entry || entry.status !== "pending") return
 
   entry.endedAt = new Date(endedAtMs).toISOString()
   entry.durationMs = endedAtMs - entry.startedAtMs
   entry.error = normalizeError(error)
   entry.status = "error"
+}
+
+export function abortLlmDebugLog(
+  id: string,
+  options: AbortLlmDebugLogOptions,
+): void {
+  const endedAtMs = options.endedAtMs ?? Date.now()
+  prune(endedAtMs)
+  const entry = getEntry(id)
+  if (!entry || entry.status !== "pending") return
+
+  entry.endedAt = new Date(endedAtMs).toISOString()
+  entry.durationMs = endedAtMs - entry.startedAtMs
+  entry.error = normalizeError(options.error)
+  if (options.response) {
+    entry.response = {
+      ...options.response,
+      headers: { ...options.response.headers },
+      bodyBytes: byteLength(options.response.body),
+    }
+  }
+  entry.status = "aborted"
 }
 
 export function listLlmDebugLogs(): LlmDebugLogListResponse {

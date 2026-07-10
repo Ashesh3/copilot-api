@@ -3,7 +3,6 @@ import type { TableColumn } from "@astryxdesign/core/Table"
 import { Badge } from "@astryxdesign/core/Badge"
 import { Banner } from "@astryxdesign/core/Banner"
 import { Button } from "@astryxdesign/core/Button"
-import { List, ListItem } from "@astryxdesign/core/List"
 import { Skeleton } from "@astryxdesign/core/Skeleton"
 import { HStack, VStack } from "@astryxdesign/core/Stack"
 import { StatusDot } from "@astryxdesign/core/StatusDot"
@@ -88,10 +87,27 @@ export default function ModelRoutingScreen() {
             </VStack>
           ),
         },
-        ...data.accounts.map(
-          (account): TableColumn<ModelRow> => ({
+        ...data.accounts.map((account): TableColumn<ModelRow> => {
+          const health = account.healthy ? "Healthy" : "Unhealthy"
+          const accountSummary = `Account #${account.id}, ${account.accountType}, ${health}`
+
+          return {
             key: `account-${account.id}`,
-            header: `Account #${account.id}`,
+            header: (
+              <div aria-label={accountSummary} title={accountSummary}>
+                <HStack gap={1.5} vAlign="center" hAlign="center" width="100%">
+                  <StatusDot
+                    variant={account.healthy ? "success" : "error"}
+                    label={accountSummary}
+                    tooltip={accountSummary}
+                  />
+                  <VStack gap={0} hAlign="start">
+                    <Text weight="medium">Account #{account.id}</Text>
+                    <Text type="supporting">{account.modelsCount} models</Text>
+                  </VStack>
+                </HStack>
+              </div>
+            ),
             width: pixel(140),
             align: "center",
             renderCell: (item) => {
@@ -110,8 +126,8 @@ export default function ModelRoutingScreen() {
                 />
               )
             },
-          }),
-        ),
+          }
+        }),
       ]
     : []
 
@@ -159,30 +175,6 @@ export default function ModelRoutingScreen() {
           title="Multi-token routing is off"
           description="These per-account overrides have limited effect until multi-token mode is enabled."
         />
-      : null}
-
-      {data && data.accounts.length > 0 ?
-        <List header={<Text weight="medium">Accounts</Text>} hasDividers>
-          {data.accounts.map((account) => (
-            <ListItem
-              key={account.id}
-              label={`Account #${account.id}`}
-              description={account.accountType}
-              startContent={
-                <StatusDot
-                  variant={account.healthy ? "success" : "error"}
-                  label={account.healthy ? "Healthy" : "Unhealthy"}
-                />
-              }
-              endContent={
-                <Badge
-                  variant="neutral"
-                  label={`${account.modelsCount} models`}
-                />
-              }
-            />
-          ))}
-        </List>
       : null}
 
       {data && models.length === 0 ?

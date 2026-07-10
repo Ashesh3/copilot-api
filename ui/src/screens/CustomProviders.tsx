@@ -35,13 +35,7 @@ import {
   RowActions,
 } from "../components/common"
 import { Page } from "../components/Page"
-import {
-  KeyRoundIcon,
-  PencilIcon,
-  PlugIcon,
-  PlusIcon,
-  Trash2Icon,
-} from "../icons"
+import { PencilIcon, PlugIcon, PlusIcon, Trash2Icon } from "../icons"
 import { ApiError, del, get, post } from "../lib/api"
 import { useToast } from "../lib/toast"
 import { useAsyncData } from "../lib/usePolling"
@@ -190,10 +184,6 @@ export default function CustomProvidersScreen() {
   const [form, setForm] = useState<ProviderFormState>(emptyForm)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [isSaving, setIsSaving] = useState(false)
-
-  const [isNebiusOpen, setIsNebiusOpen] = useState(false)
-  const [nebiusApiKey, setNebiusApiKey] = useState("")
-  const [isNebiusSaving, setIsNebiusSaving] = useState(false)
 
   function openCreate() {
     setForm(emptyForm())
@@ -365,27 +355,6 @@ export default function CustomProvidersScreen() {
     }
   }
 
-  async function handleNebiusAdd() {
-    if (!nebiusApiKey.trim()) {
-      toast.error("API key is required")
-      return
-    }
-    setIsNebiusSaving(true)
-    try {
-      await post("/dashboard/api/custom-providers/nebius-qwen3", {
-        apiKey: nebiusApiKey.trim(),
-      })
-      toast.success("Nebius Qwen3 provider added")
-      setNebiusApiKey("")
-      setIsNebiusOpen(false)
-      reload()
-    } catch (caught) {
-      toast.error(errorMessage(caught, "Failed to add provider"))
-    } finally {
-      setIsNebiusSaving(false)
-    }
-  }
-
   const columns: Array<TableColumn<ProviderRow>> = [
     {
       key: "provider",
@@ -449,20 +418,12 @@ export default function CustomProvidersScreen() {
       onRefresh={reload}
       isRefreshing={loading}
       actions={
-        <HStack gap={2} vAlign="center">
-          <Button
-            label="Quick Add: Nebius Qwen3 Embedding"
-            variant="secondary"
-            icon={<KeyRoundIcon />}
-            onClick={() => setIsNebiusOpen(true)}
-          />
-          <Button
-            label="Add Custom Provider"
-            variant="primary"
-            icon={<PlusIcon />}
-            onClick={openCreate}
-          />
-        </HStack>
+        <Button
+          label="Add Custom Provider"
+          variant="primary"
+          icon={<PlusIcon />}
+          onClick={openCreate}
+        />
       }
     >
       {error ?
@@ -731,41 +692,6 @@ export default function CustomProvidersScreen() {
               variant="primary"
               isLoading={isSaving}
               onClick={handleSave}
-            />
-          </HStack>
-        </VStack>
-      </Dialog>
-
-      <Dialog
-        isOpen={isNebiusOpen}
-        onOpenChange={setIsNebiusOpen}
-        purpose="form"
-        width={420}
-      >
-        <DialogHeader
-          title="Quick Add: Nebius Qwen3 Embedding"
-          onOpenChange={setIsNebiusOpen}
-        />
-        <VStack gap={4} padding={4}>
-          <TextInput
-            type="password"
-            label="API key"
-            value={nebiusApiKey}
-            onChange={setNebiusApiKey}
-            placeholder="Nebius API key"
-            isRequired
-          />
-          <HStack gap={2} hAlign="end">
-            <Button
-              label="Cancel"
-              variant="secondary"
-              onClick={() => setIsNebiusOpen(false)}
-            />
-            <Button
-              label="Add provider"
-              variant="primary"
-              isLoading={isNebiusSaving}
-              onClick={handleNebiusAdd}
             />
           </HStack>
         </VStack>

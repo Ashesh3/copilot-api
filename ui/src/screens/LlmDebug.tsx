@@ -1,14 +1,13 @@
 import type { StatusDotProps } from "@astryxdesign/core/StatusDot"
 import type { TableColumn } from "@astryxdesign/core/Table"
 
-import { Badge } from "@astryxdesign/core/Badge"
 import { Banner } from "@astryxdesign/core/Banner"
 import { Button } from "@astryxdesign/core/Button"
+import { Card } from "@astryxdesign/core/Card"
 import { CodeBlock } from "@astryxdesign/core/CodeBlock"
 import { Collapsible } from "@astryxdesign/core/Collapsible"
 import { IconButton } from "@astryxdesign/core/IconButton"
 import { List, ListItem } from "@astryxdesign/core/List"
-import { Section } from "@astryxdesign/core/Section"
 import {
   SegmentedControl,
   SegmentedControlItem,
@@ -24,7 +23,7 @@ import {
   useTableSortable,
   useTableSortableState,
 } from "@astryxdesign/core/Table"
-import { Text } from "@astryxdesign/core/Text"
+import { Heading, Text } from "@astryxdesign/core/Text"
 import { TextInput } from "@astryxdesign/core/TextInput"
 import { useMemo, useState } from "react"
 
@@ -37,7 +36,9 @@ import {
   MonoText,
   RelTime,
 } from "../components/common"
+import { JsonTreeViewer } from "../components/JsonTreeViewer"
 import { Page } from "../components/Page"
+import { ResponsivePair } from "../components/ResponsivePair"
 import {
   BugIcon,
   ChevronRightIcon,
@@ -49,6 +50,7 @@ import {
   Trash2Icon,
 } from "../icons"
 import { ApiError, del, get } from "../lib/api"
+import { parseJsonBody } from "../lib/json-tree"
 import { navigate, useHashRoute } from "../lib/router"
 import { useToast } from "../lib/toast"
 import { useAsyncData, usePolling } from "../lib/usePolling"
@@ -99,14 +101,6 @@ function fmtDuration(ms: number): string {
   return `${Math.round(hr / 24)}d`
 }
 
-function prettyJson(raw: string): string {
-  try {
-    return JSON.stringify(JSON.parse(raw), null, 2)
-  } catch {
-    return raw
-  }
-}
-
 function buildCurl(request: LlmDebugDetail["request"]): string {
   const lines = [
     `curl -X ${request.method.toUpperCase()} ${JSON.stringify(request.url)}`,
@@ -129,7 +123,24 @@ function statusDotVariant(
 ): StatusDotProps["variant"] {
   if (status === "complete") return "success"
   if (status === "error") return "error"
+  if (status === "aborted") return "warning"
   return "accent"
+}
+
+function statusTextStyle(
+  status: LlmDebugEntry["status"],
+): React.CSSProperties | undefined {
+  if (status === "error") return { color: "var(--color-error)" }
+  if (status === "aborted") return { color: "var(--color-warning)" }
+  return undefined
+}
+
+function missingResponseText(status: LlmDebugEntry["status"]): string {
+  if (status === "pending") return "Awaiting response…"
+  if (status === "aborted") {
+    return "The request was aborted before the response completed."
+  }
+  return "No response was received."
 }
 
 function canReplay(request: LlmDebugDetail["request"]): boolean {
@@ -225,14 +236,7 @@ function LlmDebugListView() {
             label={row.status}
             isPulsing={row.status === "pending"}
           />
-          <Text
-            type="supporting"
-            style={
-              row.status === "error" ?
-                { color: "var(--color-error)" }
-              : undefined
-            }
-          >
+          <Text type="supporting" style={statusTextStyle(row.status)}>
             {capitalize(row.status)}
           </Text>
         </HStack>
@@ -386,6 +390,7 @@ function LlmDebugListView() {
             >
               <SegmentedControlItem value="all" label="All" />
               <SegmentedControlItem value="error" label="Errors" />
+              <SegmentedControlItem value="aborted" label="Aborted" />
               <SegmentedControlItem value="pending" label="Pending" />
               <SegmentedControlItem value="complete" label="Complete" />
             </SegmentedControl>
@@ -492,6 +497,8 @@ function PayloadBlock({
   wrap: boolean
   onCopy: () => void
 }) {
+  const parsed = useMemo(() => (body ? parseJsonBody(body) : null), [body])
+
   if (body === null) {
     return (
       <VStack gap={1}>
@@ -505,22 +512,25 @@ function PayloadBlock({
     )
   }
 
-  const pretty = prettyJson(body)
-  const reformatted = viewMode === "pretty" && pretty !== body
-
   return (
     <Collapsible defaultIsOpen trigger={label}>
-      <VStack gap={1}>
-        {reformatted ?
-          <Badge variant="neutral" label="Reformatted, not exact bytes" />
-        : null}
-        <CodeBlock
-          code={reformatted ? pretty : body}
-          language="json"
-          isWrapped={wrap}
+      {viewMode === "pretty" && parsed ?
+        <JsonTreeViewer
+          key={`${label}:${body}`}
+          formatted={parsed.formatted}
+          label={label}
+          value={parsed.value}
+          wrap={wrap}
           onCopy={onCopy}
         />
-      </VStack>
+      : <CodeBlock
+          code={body}
+          language="json"
+          isWrapped={wrap}
+          width="100%"
+          onCopy={onCopy}
+        />
+      }
     </Collapsible>
   )
 }
@@ -557,7 +567,7 @@ function LlmDebugDetailView({ id }: { id: string }) {
       onRefresh={reload}
       isRefreshing={loading}
       actions={
-        <HStack gap={2}>
+        <HStack gap={2} wrap="wrap">
           <Button
             label="Copy as cURL"
             variant="ghost"
@@ -630,7 +640,7 @@ function LlmDebugDetailView({ id }: { id: string }) {
 
       {data ?
         <VStack gap={4}>
-          <HStack gap={3} vAlign="center" hAlign="end">
+          <HStack gap={3} vAlign="center" hAlign="end" wrap="wrap">
             <SegmentedControl
               label="Body format"
               size="sm"
@@ -662,83 +672,86 @@ function LlmDebugDetailView({ id }: { id: string }) {
             </Banner>
           : null}
 
-          <Section dividers={["bottom"]}>
-            <VStack gap={3}>
-              <HStack gap={3} vAlign="center">
-                <MonoText>{data.request.method}</MonoText>
-                <MonoText>{data.request.path}</MonoText>
-                <RelTime ts={data.startedAt} />
-                {data.durationMs === undefined ? null : (
-                  <Text type="supporting" color="secondary">
-                    {data.durationMs} ms
-                  </Text>
-                )}
-              </HStack>
-              <Text type="code" color="secondary">
-                {data.request.url}
-              </Text>
-
-              <Collapsible
-                trigger={`Request Headers (${Object.keys(data.request.headers).length})`}
-                defaultIsOpen={false}
-              >
-                <HeaderList headers={data.request.headers} onCopy={copy} />
-              </Collapsible>
-
-              <PayloadBlock
-                label="Request Body"
-                body={data.request.body}
-                emptyText="No request body"
-                viewMode={viewMode}
-                wrap={wrap}
-                onCopy={() => toast.success("Copied")}
-              />
-            </VStack>
-          </Section>
-
-          {data.response ?
-            <Section>
+          <ResponsivePair minWidth={420}>
+            <Card>
               <VStack gap={3}>
-                <HStack gap={3} vAlign="center">
-                  <MonoText>
-                    {data.response.status} {data.response.statusText}
-                  </MonoText>
+                <Heading level={3}>Request</Heading>
+                <HStack gap={3} vAlign="center" wrap="wrap">
+                  <MonoText>{data.request.method}</MonoText>
+                  <MonoText>{data.request.path}</MonoText>
+                  <RelTime ts={data.startedAt} />
+                  {data.durationMs === undefined ? null : (
+                    <Text type="supporting" color="secondary">
+                      {data.durationMs} ms
+                    </Text>
+                  )}
                 </HStack>
+                <Text type="code" color="secondary">
+                  {data.request.url}
+                </Text>
 
                 <Collapsible
-                  trigger={`Response Headers (${Object.keys(data.response.headers).length})`}
+                  trigger={`Request Headers (${Object.keys(data.request.headers).length})`}
                   defaultIsOpen={false}
                 >
-                  <HeaderList headers={data.response.headers} onCopy={copy} />
+                  <HeaderList headers={data.request.headers} onCopy={copy} />
                 </Collapsible>
 
-                <VStack gap={1}>
-                  <PayloadBlock
-                    label="Response Body"
-                    body={data.response.body}
-                    emptyText="No response body"
-                    viewMode={viewMode}
-                    wrap={wrap}
-                    onCopy={() => toast.success("Copied")}
-                  />
-                  {data.response.bodyReadError ?
-                    <Banner
-                      status="warning"
-                      title="Response body read error"
-                      description={data.response.bodyReadError.message}
-                    />
-                  : null}
-                </VStack>
+                <PayloadBlock
+                  label="Request Body"
+                  body={data.request.body}
+                  emptyText="No request body"
+                  viewMode={viewMode}
+                  wrap={wrap}
+                  onCopy={() => toast.success("Copied")}
+                />
               </VStack>
-            </Section>
-          : <Section>
-              <Text type="supporting" color="secondary">
-                {data.status === "pending" ?
-                  "Awaiting response…"
-                : "No response was received."}
-              </Text>
-            </Section>
-          }
+            </Card>
+
+            <Card>
+              <VStack gap={3}>
+                <Heading level={3}>Response</Heading>
+                {data.response ?
+                  <>
+                    <HStack gap={3} vAlign="center">
+                      <MonoText>
+                        {data.response.status} {data.response.statusText}
+                      </MonoText>
+                    </HStack>
+
+                    <Collapsible
+                      trigger={`Response Headers (${Object.keys(data.response.headers).length})`}
+                      defaultIsOpen={false}
+                    >
+                      <HeaderList
+                        headers={data.response.headers}
+                        onCopy={copy}
+                      />
+                    </Collapsible>
+
+                    <PayloadBlock
+                      label="Response Body"
+                      body={data.response.body}
+                      emptyText="No response body"
+                      viewMode={viewMode}
+                      wrap={wrap}
+                      onCopy={() => toast.success("Copied")}
+                    />
+                    {data.response.bodyReadError ?
+                      <Banner
+                        status="warning"
+                        title="Response body read error"
+                        description={data.response.bodyReadError.message}
+                      />
+                    : null}
+                  </>
+                : <Text type="supporting" color="secondary">
+                    {missingResponseText(data.status)}
+                  </Text>
+                }
+              </VStack>
+            </Card>
+          </ResponsivePair>
         </VStack>
       : null}
     </Page>

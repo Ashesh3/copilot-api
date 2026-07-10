@@ -79,6 +79,10 @@ test("serves LLM debug logs through dashboard API", async () => {
 test("dashboard bundle ships the LLM debug UI", () => {
   expect(DASHBOARD_HTML).toContain("LLM Debug")
   expect(DASHBOARD_HTML).toContain("/dashboard/api/llm-debug")
+  expect(DASHBOARD_HTML).toContain("Expand all")
+  expect(DASHBOARD_HTML).toContain("Collapse all")
+  expect(DASHBOARD_HTML).not.toContain("Reformatted, not exact bytes")
+  expect(DASHBOARD_HTML).not.toContain("Quick Add: Nebius Qwen3 Embedding")
 })
 
 test("replays a chat completions debug log with fresh auth and parses SSE metadata", async () => {

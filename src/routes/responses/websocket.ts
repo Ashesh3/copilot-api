@@ -1,3 +1,4 @@
+/* eslint-disable max-lines */
 import consola from "consola"
 import { randomUUID } from "node:crypto"
 
@@ -16,12 +17,6 @@ import {
 import { checkRateLimit } from "~/lib/rate-limit"
 import { getConfiguredApiKeys } from "~/lib/request-auth"
 import { reportNonDefaultBehavior } from "~/lib/request-logger"
-import {
-  clientSessionStorage,
-  quotaHeadersStorage,
-  requestIdStorage,
-  routedAccountStorage,
-} from "~/lib/request-session"
 import { state } from "~/lib/state"
 import { createChatCompletions } from "~/services/copilot/create-chat-completions"
 import {
@@ -38,6 +33,16 @@ import {
 } from "./handler"
 import { createStreamIdTracker, fixStreamIds } from "./stream-id-sync"
 import { expandCompactionItems, getResponsesRequestOptions } from "./utils"
+import {
+  classifyWebSocketTerminal,
+  createResponsesWebSocketTurn,
+  ensureResponsesWebSocketLifecycle,
+  finalizeResponsesWebSocketTurn,
+  type ResponsesWebSocketTurn,
+  runWithWebSocketRequestContext,
+  throwIfWebSocketTurnAborted,
+  WebSocketRequestError,
+} from "./websocket-lifecycle"
 
 const RESPONSES_ENDPOINT = "/responses"
 
@@ -47,6 +52,9 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null
 
 export interface ResponsesWebSocketData {
+  activeTurns: Map<number, ResponsesWebSocketTurn>
+  closed: boolean
+  nextTurnSequence: number
   type: "responses"
   requestId: string
   sessionId?: string
@@ -76,8 +84,10 @@ interface ResponseCompletedFrame {
 }
 
 interface ContinuationResolutionResult {
+  message?: string
   payload?: ResponsesPayload
   shouldStop: boolean
+  status?: number
 }
 
 /**
@@ -111,6 +121,9 @@ export function tryUpgradeResponsesWebSocket(
       server.upgrade(req, {
         data: {
           type: "responses" as const,
+          activeTurns: new Map<number, ResponsesWebSocketTurn>(),
+          closed: false,
+          nextTurnSequence: 0,
           requestId,
           sessionId,
           responseSnapshots: new Map<string, ResponsesPayload>(),
@@ -163,6 +176,8 @@ export const responsesWebSocket = {
     ws: ResponsesWebSocketState,
     message: string | Buffer | Uint8Array,
   ) {
+    if (ws.data.closed) return
+
     if (typeof message !== "string") {
       sendWebSocketError(ws, {
         code: "bad_request",
@@ -200,16 +215,50 @@ export const responsesWebSocket = {
       return
     }
 
+    const turn = createResponsesWebSocketTurn(ws.data, message)
+    const requestedModel = getRequestedModel(parsed)
+    turn.requestedModel = requestedModel
+    turn.model = requestedModel
+    ensureResponsesWebSocketLifecycle(turn, {
+      model: requestedModel ?? "unknown",
+      requestedModel,
+    })
+
     try {
-      await runWithWebSocketRequestContext(ws, async () => {
-        await handleResponseCreate(ws, parsed)
-      })
+      await runWithWebSocketRequestContext(
+        ws.data.sessionId,
+        turn,
+        async () => {
+          await handleResponseCreate(ws, parsed, turn)
+        },
+      )
+      if (!turn.finalized) {
+        throw new WebSocketRequestError(
+          "Responses stream ended without a terminal frame",
+          502,
+          "server_error",
+        )
+      }
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : "Internal server error"
-      consola.error("[responses-ws] Error:", errorMessage)
+      const terminal = classifyWebSocketTerminal(error, turn)
+      finalizeResponsesWebSocketTurn(ws.data, turn, {
+        error,
+        ...terminal,
+      })
+      if (terminal.terminalStatus === "ABORTED") {
+        consola.debug(`[responses-ws] ${turn.turnId} aborted`)
+        return
+      }
+      consola.error(`[responses-ws] ${turn.turnId} error:`, errorMessage)
       try {
-        sendWebSocketError(ws, normalizeWebSocketError(error, errorMessage))
+        sendWebSocketError(ws, {
+          ...normalizeWebSocketError(error, errorMessage),
+          ...(error instanceof WebSocketRequestError ?
+            { type: error.errorType }
+          : {}),
+        })
       } catch {
         // Client already disconnected, nothing to do
       }
@@ -217,58 +266,74 @@ export const responsesWebSocket = {
   },
 
   close(ws: { data: ResponsesWebSocketData }) {
+    ws.data.closed = true
+    for (const turn of ws.data.activeTurns.values()) {
+      const abortError = new Error("Responses WebSocket closed")
+      abortError.name = "AbortError"
+      turn.abortController.abort(abortError)
+      ensureResponsesWebSocketLifecycle(turn)
+      finalizeResponsesWebSocketTurn(ws.data, turn, {
+        error: abortError,
+        status: 499,
+        terminalStatus: "ABORTED",
+      })
+    }
     ws.data.responseSnapshots.clear()
     consola.debug("[responses-ws] WebSocket closed")
   },
 }
 
-async function runWithWebSocketRequestContext(
-  ws: ResponsesWebSocketState,
-  callback: () => Promise<void>,
-): Promise<void> {
-  await requestIdStorage.run(ws.data.requestId, async () => {
-    await clientSessionStorage.run(ws.data.sessionId, async () => {
-      await quotaHeadersStorage.run({}, async () => {
-        await routedAccountStorage.run({}, callback)
-      })
-    })
-  })
-}
-
 async function handleResponseCreate(
   ws: ResponsesWebSocketState,
   message: Record<string, unknown>,
+  turn: ResponsesWebSocketTurn,
 ): Promise<void> {
-  await checkRateLimit(state)
-
   const requestedModel = getRequestedModel(message)
+  turn.requestedModel = requestedModel
+  turn.model = requestedModel
   let payload = extractResponsesPayload(message)
 
   // Force streaming for WebSocket mode
   payload.stream = true
-  const reasoningEffort = await applyResponsesWebSocketRouting(payload)
-
-  logResponsesWebSocketRequest({
-    requestedModel,
+  const reasoningEffort = await waitForWebSocketTurn(
+    applyResponsesWebSocketRouting(payload),
+    turn,
+  )
+  throwIfWebSocketTurnAborted(turn)
+  turn.model = payload.model
+  turn.reasoningEffort = reasoningEffort
+  ensureResponsesWebSocketLifecycle(turn, {
     model: payload.model,
     reasoningEffort,
+    requestedModel,
   })
 
+  await waitForWebSocketTurn(
+    checkRateLimit(state, turn.abortController.signal),
+    turn,
+  )
+  throwIfWebSocketTurnAborted(turn)
+
   const continuationResolution = resolveWebSocketContinuationPayload(
-    ws,
+    ws.data.responseSnapshots,
     payload,
   )
   if (continuationResolution.shouldStop) {
-    return
+    throw new WebSocketRequestError(
+      continuationResolution.message ?? "Invalid continuation request",
+      continuationResolution.status ?? 400,
+      "invalid_request_error",
+    )
   }
   payload = continuationResolution.payload ?? payload
   payload.previous_response_id = undefined
 
   convertWebSearchTool(payload)
   expandCompactionItems(payload)
+  throwIfWebSocketTurnAborted(turn)
 
   if (isSyntheticWarmupRequest(payload)) {
-    handleSyntheticWarmupRequest(ws, payload)
+    handleSyntheticWarmupRequest(ws, payload, turn)
     return
   }
 
@@ -285,16 +350,28 @@ async function handleResponseCreate(
     // fallback. Native /responses must keep the freeform tool intact.
     useFunctionApplyPatch(payload)
     reportResponsesWebSocketEndpointFallback(payload.model)
-    await streamChatCompletionsOverWs(ws, payload)
+    await streamChatCompletionsOverWs(ws, payload, turn)
     return
   }
 
   // Native responses streaming
-  const response = await createResponses(payload, { vision, initiator })
+  const response = await waitForWebSocketTurn(
+    createResponses(payload, {
+      vision,
+      initiator,
+      signal: turn.abortController.signal,
+    }),
+    turn,
+  )
+  throwIfWebSocketTurnAborted(turn)
 
   if (!isAsyncIterable(response)) {
     // Shouldn't happen since we forced stream: true, but handle gracefully
     ws.send(JSON.stringify({ type: "response.completed", response }))
+    finalizeResponsesWebSocketTurn(ws.data, turn, {
+      status: 200,
+      terminalStatus: "COMPLETE",
+    })
     return
   }
 
@@ -311,11 +388,102 @@ async function handleResponseCreate(
       processed,
     )
     ws.send(processed)
+    finalizeFromResponsesFrame(ws.data, turn, processed)
+    if (turn.lifecycle?.isFinalized()) break
+  }
+}
+
+async function waitForWebSocketTurn<T>(
+  promise: Promise<T>,
+  turn: ResponsesWebSocketTurn,
+): Promise<T> {
+  throwIfWebSocketTurnAborted(turn)
+  const signal = turn.abortController.signal
+  let abortListener: (() => void) | undefined
+  const aborted = new Promise<never>((_resolve, reject) => {
+    abortListener = () => {
+      const reason: unknown = signal.reason
+      if (reason instanceof Error) {
+        reject(reason)
+        return
+      }
+      const error = new Error("Responses WebSocket request aborted")
+      error.name = "AbortError"
+      reject(error)
+    }
+    signal.addEventListener("abort", abortListener, { once: true })
+  })
+  try {
+    return await Promise.race([promise, aborted])
+  } finally {
+    if (abortListener) signal.removeEventListener("abort", abortListener)
+  }
+}
+
+// Terminal frame classification has intentionally explicit branches so close
+// races cannot overwrite a client-visible completion.
+// eslint-disable-next-line complexity
+function finalizeFromResponsesFrame(
+  data: ResponsesWebSocketData,
+  turn: ResponsesWebSocketTurn,
+  frame: string,
+): void {
+  let parsed: {
+    message?: unknown
+    response?: { error?: { message?: unknown } | null; status?: unknown }
+    type?: unknown
+  }
+  try {
+    parsed = JSON.parse(frame) as typeof parsed
+  } catch {
+    return
+  }
+
+  if (parsed.type === "response.completed") {
+    const responseStatus = parsed.response?.status
+    if (responseStatus === "failed" || responseStatus === "incomplete") {
+      const message =
+        parsed.response?.error?.message
+        ?? `Responses stream ended with status ${responseStatus}`
+      finalizeResponsesWebSocketTurn(data, turn, {
+        error:
+          typeof message === "string" ? message : "Responses stream failed",
+        status: 502,
+        terminalStatus: "ERROR",
+      })
+      return
+    }
+    finalizeResponsesWebSocketTurn(data, turn, {
+      status: 200,
+      terminalStatus: "COMPLETE",
+    })
+    return
+  }
+
+  if (parsed.type === "response.incomplete") {
+    finalizeResponsesWebSocketTurn(data, turn, {
+      error: "Responses stream ended incomplete",
+      status: 502,
+      terminalStatus: "ERROR",
+    })
+    return
+  }
+
+  if (parsed.type === "response.failed" || parsed.type === "error") {
+    const message =
+      parsed.response?.error?.message
+      ?? (typeof parsed.message === "string" ? parsed.message : undefined)
+      ?? `Responses stream emitted ${parsed.type}`
+    finalizeResponsesWebSocketTurn(data, turn, {
+      error: message,
+      status: 502,
+      terminalStatus: "ERROR",
+    })
   }
 }
 
 function resolveWebSocketContinuationPayload(
-  ws: ResponsesWebSocketState,
+  responseSnapshots: Map<string, ResponsesPayload>,
   payload: ResponsesPayload,
 ): ContinuationResolutionResult {
   const previousResponseId = (payload as Record<string, unknown>)
@@ -326,23 +494,19 @@ function resolveWebSocketContinuationPayload(
     && previousResponseId !== null
     && typeof previousResponseId !== "string"
   ) {
-    sendWebSocketError(ws, {
-      code: "bad_request",
+    return {
       message: "previous_response_id must be a string",
+      shouldStop: true,
       status: 400,
-      type: "invalid_request_error",
-    })
-    return { shouldStop: true }
+    }
   }
 
   if (previousResponseId === "") {
-    sendWebSocketError(ws, {
-      code: "bad_request",
+    return {
       message: "previous_response_id must not be empty",
+      shouldStop: true,
       status: 400,
-      type: "invalid_request_error",
-    })
-    return { shouldStop: true }
+    }
   }
 
   if (typeof previousResponseId !== "string") {
@@ -350,20 +514,18 @@ function resolveWebSocketContinuationPayload(
   }
 
   const rehydratedPayload = rehydrateContinuationPayload(
-    ws.data.responseSnapshots,
+    responseSnapshots,
     payload,
   )
   if (rehydratedPayload) {
     return { payload: rehydratedPayload, shouldStop: false }
   }
 
-  sendWebSocketError(ws, {
-    code: "bad_request",
+  return {
     message: `Unknown previous_response_id: ${previousResponseId}`,
+    shouldStop: true,
     status: 400,
-    type: "invalid_request_error",
-  })
-  return { shouldStop: true }
+  }
 }
 
 function getRequestedModel(
@@ -374,20 +536,6 @@ function getRequestedModel(
     return response.model
   }
   return typeof message.model === "string" ? message.model : undefined
-}
-
-function logResponsesWebSocketRequest(options: {
-  model: string
-  reasoningEffort?: ReasoningEffort
-  requestedModel?: string
-}): void {
-  const routing =
-    options.requestedModel && options.requestedModel !== options.model ?
-      `${options.requestedModel} -> ${options.model}`
-    : options.model
-  const effort =
-    options.reasoningEffort ? ` effort=${options.reasoningEffort}` : ""
-  consola.debug(`[responses-ws] response.create ${routing}${effort}`)
 }
 
 function getRedirectReasoningEffort(
@@ -617,6 +765,7 @@ function mergeContinuationInput(
 function handleSyntheticWarmupRequest(
   ws: ResponsesWebSocketState,
   payload: ResponsesPayload,
+  turn: ResponsesWebSocketTurn,
 ): void {
   const responseId = `warmup_${randomUUID().replaceAll("-", "")}`
   ws.data.responseSnapshots.set(responseId, payload)
@@ -652,27 +801,34 @@ function handleSyntheticWarmupRequest(
     }),
   )
 
-  ws.send(
-    JSON.stringify({
-      type: "response.completed",
-      sequence_number: 1,
-      response: {
-        ...baseResponse,
-        status: "completed",
-      },
-    }),
-  )
+  const completedFrame = JSON.stringify({
+    type: "response.completed",
+    sequence_number: 1,
+    response: {
+      ...baseResponse,
+      status: "completed",
+    },
+  })
+  ws.send(completedFrame)
+  finalizeFromResponsesFrame(ws.data, turn, completedFrame)
 }
 
 async function streamChatCompletionsOverWs(
   ws: ResponsesWebSocketState,
   payload: ResponsesPayload,
+  turn: ResponsesWebSocketTurn,
 ): Promise<void> {
   const ccPayload = responsesToChatCompletions(payload)
   ccPayload.stream = true
   ccPayload.stream_options = { include_usage: true }
 
-  const response = await createChatCompletions(ccPayload)
+  const response = await waitForWebSocketTurn(
+    createChatCompletions(ccPayload, {
+      signal: turn.abortController.signal,
+    }),
+    turn,
+  )
+  throwIfWebSocketTurnAborted(turn)
   const ccStream = response as AsyncIterable<{ data?: string; event?: string }>
 
   // Reuse the CC→Responses streaming translator with a WebSocket-backed writer
@@ -685,6 +841,7 @@ async function streamChatCompletionsOverWs(
         data.data,
       )
       ws.send(data.data)
+      finalizeFromResponsesFrame(ws.data, turn, data.data)
     },
   }
 

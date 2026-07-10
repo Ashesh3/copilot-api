@@ -3,6 +3,7 @@ import consola from "consola"
 import { randomUUID } from "node:crypto"
 
 import {
+  abortLlmDebugLog,
   failLlmDebugLog,
   finishLlmDebugLog,
   startLlmDebugLog,
@@ -279,6 +280,18 @@ function toLlmDebugLogError(error: unknown): LlmDebugLogError {
   return { message: String(error), name: "Error" }
 }
 
+function isAbortLikeError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  const message = error.message.toLowerCase()
+  const causeMessage =
+    error.cause instanceof Error ? error.cause.message.toLowerCase() : ""
+  return (
+    error.name === "AbortError"
+    || message.includes("aborted")
+    || causeMessage.includes("aborted")
+  )
+}
+
 async function captureLlmDebugResponse(
   logId: string,
   response: Response,
@@ -293,13 +306,18 @@ async function captureLlmDebugResponse(
       statusText: response.statusText,
     })
   } catch (error) {
-    finishLlmDebugLog(logId, {
+    const debugResponse = {
       body: null,
       bodyReadError: toLlmDebugLogError(error),
       headers: responseHeaders,
       status: response.status,
       statusText: response.statusText,
-    })
+    }
+    if (isAbortLikeError(error)) {
+      abortLlmDebugLog(logId, { error, response: debugResponse })
+      return
+    }
+    finishLlmDebugLog(logId, debugResponse)
   }
 }
 
@@ -332,6 +350,10 @@ function captureLlmDebugAttemptResponse(
 
 function failLlmDebugAttempt(logId: string | undefined, error: unknown): void {
   if (!logId) return
+  if (isAbortLikeError(error)) {
+    abortLlmDebugLog(logId, { error })
+    return
+  }
   failLlmDebugLog(logId, error)
 }
 

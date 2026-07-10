@@ -11,3 +11,172 @@ html {
 body {
   margin: 0;
 }
+
+.responsive-pair {
+  display: grid;
+  grid-template-columns: repeat(
+    auto-fit,
+    minmax(min(100%, var(--responsive-pair-min)), 1fr)
+  );
+  gap: var(--spacing-4);
+  align-items: start;
+  width: 100%;
+}
+
+.responsive-pair > * {
+  min-width: 0;
+}
+
+.json-tree-viewer {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--spacing-1);
+}
+
+.json-tree {
+  max-height: min(65vh, 720px);
+  overflow: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-element);
+  background: var(--color-syntax-background);
+  color: var(--color-text-primary);
+  font-family: var(--font-family-code);
+  font-size: var(--text-code-size);
+  line-height: var(--text-code-leading);
+}
+
+.json-tree-content {
+  width: max-content;
+  min-width: 100%;
+  padding-block: var(--spacing-2);
+}
+
+.json-tree-row,
+.json-tree-closing-row,
+.json-tree-load-more {
+  display: flex;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: max-content;
+  min-height: 24px;
+  align-items: flex-start;
+  padding-block: 2px;
+  padding-inline-start: calc(
+    var(--spacing-2) + var(--json-depth) * var(--spacing-4)
+  );
+  padding-inline-end: var(--spacing-3);
+}
+
+.json-tree-typeahead-prefix {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.json-tree-row {
+  outline: none;
+}
+
+.json-tree-row-toggle {
+  cursor: pointer;
+}
+
+.json-tree-row-toggle:hover {
+  background: var(--color-overlay-hover);
+}
+
+.json-tree-node:focus-visible {
+  outline: none;
+}
+
+.json-tree-row:focus-visible,
+.json-tree-node:focus-visible > .json-tree-row {
+  background: var(--color-accent-muted);
+  box-shadow: var(--shadow-inset-selected);
+}
+
+.json-tree-row code,
+.json-tree-closing-row code,
+.json-tree-load-more button {
+  font: inherit;
+  white-space: pre;
+}
+
+.json-tree-load-more button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-accent);
+  cursor: pointer;
+}
+
+.json-tree-load-more:focus-visible {
+  outline: none;
+  background: var(--color-accent-muted);
+  box-shadow: var(--shadow-inset-selected);
+}
+
+.json-tree.is-wrapped .json-tree-content {
+  width: 100%;
+}
+
+.json-tree.is-wrapped .json-tree-row,
+.json-tree.is-wrapped .json-tree-closing-row {
+  min-width: 0;
+}
+
+.json-tree.is-wrapped code,
+.json-tree.is-wrapped code span {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.json-tree-chevron-slot {
+  display: inline-flex;
+  width: 16px;
+  height: 20px;
+  flex: 0 0 16px;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-icon-secondary);
+  transition: transform var(--duration-fast) var(--ease-standard);
+}
+
+.json-tree-chevron-slot svg {
+  width: 14px;
+  height: 14px;
+}
+
+.json-tree-chevron-slot.is-expanded {
+  transform: rotate(90deg);
+}
+
+.json-tree-property {
+  color: var(--color-syntax-property);
+}
+
+.json-tree-string {
+  color: var(--color-syntax-string);
+}
+
+.json-tree-number {
+  color: var(--color-syntax-number);
+}
+
+.json-tree-constant {
+  color: var(--color-syntax-constant);
+}
+
+.json-tree-punctuation {
+  color: var(--color-syntax-punctuation);
+}
+
+.json-tree-count {
+  margin-inline-start: var(--spacing-2);
+  color: var(--color-syntax-comment);
+  font-size: var(--text-supporting-size);
+}

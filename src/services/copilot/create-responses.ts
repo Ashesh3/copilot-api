@@ -799,6 +799,7 @@ export const createResponses = async (
   payload: ResponsesPayload,
   { vision, initiator, signal }: ResponsesRequestOptions,
 ): Promise<CreateResponsesReturn> => {
+  signal?.throwIfAborted()
   let headerOpts = { vision, initiator }
 
   // service_tier is not supported by github copilot
@@ -809,6 +810,7 @@ export const createResponses = async (
 
   // Inline external attachment URLs / normalize file_data to data URIs
   await normalizeResponsesAttachments(payload)
+  signal?.throwIfAborted()
 
   // Match runtime defaults for direct Responses requests.
   payload.reasoning ??= {}
