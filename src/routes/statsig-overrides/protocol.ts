@@ -170,7 +170,7 @@ export function applyStatsigOverrides(
       name,
       value,
       rule_id: "copilot-api-override",
-      exposures: [],
+      secondary_exposures: [],
     }
   }
   for (const [name, value] of Object.entries(overrides.dynamicConfigs)) {
@@ -184,7 +184,7 @@ export function applyStatsigOverrides(
       name,
       value: nextValue,
       rule_id: "copilot-api-override",
-      exposures: [],
+      secondary_exposures: [],
     }
   }
 

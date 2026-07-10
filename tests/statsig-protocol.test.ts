@@ -305,7 +305,7 @@ describe("applyStatsigOverrides", () => {
       name: "missing_gate",
       value: false,
       rule_id: "copilot-api-override",
-      exposures: [],
+      secondary_exposures: [],
     })
     expect(output.dynamic_configs.missing_config).toEqual({
       name: "missing_config",
@@ -314,8 +314,12 @@ describe("applyStatsigOverrides", () => {
         nested: { enabled: true },
       },
       rule_id: "copilot-api-override",
-      exposures: [],
+      secondary_exposures: [],
     })
+    expect(output.feature_gates.missing_gate).not.toHaveProperty("exposures")
+    expect(output.dynamic_configs.missing_config).not.toHaveProperty(
+      "exposures",
+    )
     expect(output.feature_gates.untouched_gate).toEqual(
       originalInput.feature_gates.untouched_gate,
     )
