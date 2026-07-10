@@ -7,6 +7,7 @@ import { PATHS } from "~/lib/paths"
 export const CONFIG_EXPORT_FILENAMES = [
   "config.json",
   "feature_flags.json",
+  "statsig_overrides.json",
   "model_redirects.json",
   "model_settings.json",
   "model_routing.json",

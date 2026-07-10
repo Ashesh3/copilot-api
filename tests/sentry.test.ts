@@ -6,6 +6,7 @@ import {
   setModelSettingsForTest,
 } from "../src/lib/model-settings"
 import {
+  createSentryInitOptions,
   createSentryChatSpanOptions,
   createSentryInvokeAgentSpanOptions,
   createSentryOutputMessages,
@@ -13,6 +14,7 @@ import {
   getSentryConversationIdFromHeaders,
   getSentryConversationIdFromPayload,
   getSentryModelName,
+  scrubStatsigClientKeyData,
 } from "../src/lib/sentry"
 
 const originalSentryAiRecordInputs = process.env.SENTRY_AI_RECORD_INPUTS
@@ -242,4 +244,206 @@ test("extracts Sentry conversation ID from supported headers", () => {
   })
 
   expect(getSentryConversationIdFromHeaders(headers)).toBe("session_header")
+})
+
+test("scrubs Statsig client keys from full URLs and breadcrumb data", () => {
+  const event = {
+    request: {
+      url: "https://ab.chatgpt.com/v1/initialize?k=client-secret&foo=bar",
+    },
+    breadcrumbs: [
+      {
+        data: {
+          url: "https://ab.chatgpt.com/v1/initialize?k=breadcrumb-secret",
+        },
+      },
+      {
+        data: {
+          url: "https://example.com/?k=keep-me&foo=bar",
+        },
+      },
+    ],
+  }
+
+  scrubStatsigClientKeyData(event)
+
+  expect(event.request.url).toBe(
+    "https://ab.chatgpt.com/v1/initialize?k=[Filtered]&foo=bar",
+  )
+  expect(event.breadcrumbs[0]?.data.url).toBe(
+    "https://ab.chatgpt.com/v1/initialize?k=[Filtered]",
+  )
+  expect(event.breadcrumbs[1]?.data.url).toBe(
+    "https://example.com/?k=keep-me&foo=bar",
+  )
+})
+
+test("scrubs Statsig span data within local context without leaking to siblings", () => {
+  const payload = {
+    span: {
+      description:
+        "POST https://ab.chatgpt.com:443/v1/initialize?k=span-secret#fragment",
+      data: {
+        server: { address: "ab.chatgpt.com:443" },
+        url: { query: "k=query-secret&foo=bar" },
+      },
+    },
+    unrelated: {
+      url: {
+        query: "k=keep-me&foo=bar",
+      },
+    },
+  }
+
+  scrubStatsigClientKeyData(payload)
+
+  expect(payload.span.description).toBe(
+    "POST https://ab.chatgpt.com:443/v1/initialize?k=[Filtered]#fragment",
+  )
+  expect(payload.span.data.url.query).toBe("k=[Filtered]&foo=bar")
+  expect(payload.unrelated.url.query).toBe("k=keep-me&foo=bar")
+})
+
+test("does not treat lookalike hosts as Statsig context", () => {
+  const payload = {
+    deceptiveUrl: {
+      description:
+        "POST https://ab.chatgpt.com.evil/v1/initialize?k=deceptive-secret",
+      data: {
+        url: { query: "k=deceptive-query&foo=bar" },
+      },
+    },
+    prefixedHost: {
+      description:
+        "POST https://notab.chatgpt.com/v1/initialize?k=prefixed-secret",
+      data: {
+        url: { query: "k=prefixed-query&foo=bar" },
+      },
+    },
+    lookalikeServer: {
+      data: {
+        server: { address: "ab.chatgpt.com.evil:443" },
+        url: { query: "k=server-query&foo=bar" },
+      },
+    },
+  }
+
+  scrubStatsigClientKeyData(payload)
+
+  expect(payload.deceptiveUrl.description).toBe(
+    "POST https://ab.chatgpt.com.evil/v1/initialize?k=deceptive-secret",
+  )
+  expect(payload.deceptiveUrl.data.url.query).toBe("k=deceptive-query&foo=bar")
+  expect(payload.prefixedHost.description).toBe(
+    "POST https://notab.chatgpt.com/v1/initialize?k=prefixed-secret",
+  )
+  expect(payload.prefixedHost.data.url.query).toBe("k=prefixed-query&foo=bar")
+  expect(payload.lookalikeServer.data.url.query).toBe("k=server-query&foo=bar")
+})
+
+test("scrubs inherited Statsig context in arrays and handles cycles", () => {
+  const payload: {
+    items: Array<{ request: { url: string } } | { url: { query: string } }>
+    self?: unknown
+    server: { address: string }
+  } = {
+    server: { address: "ab.chatgpt.com" },
+    items: [
+      { url: { query: "k=array-secret&foo=bar" } },
+      {
+        request: {
+          url: "https://ab.chatgpt.com/v1/initialize?k=nested-secret",
+        },
+      },
+    ],
+  }
+  payload.self = payload
+
+  scrubStatsigClientKeyData(payload)
+
+  expect(payload.items[0]).toEqual({
+    url: { query: "k=[Filtered]&foo=bar" },
+  })
+  expect(payload.items[1]).toEqual({
+    request: {
+      url: "https://ab.chatgpt.com/v1/initialize?k=[Filtered]",
+    },
+  })
+  expect(payload.self).toBe(payload)
+})
+
+test("registers Statsig redaction hooks for all Sentry send callbacks", () => {
+  const options = createSentryInitOptions(
+    "https://public@example.ingest.sentry.io/1",
+  )
+
+  expect(typeof options.beforeSend).toBe("function")
+  expect(typeof options.beforeSendTransaction).toBe("function")
+  expect(typeof options.beforeSendSpan).toBe("function")
+  expect(typeof options.beforeSendLog).toBe("function")
+
+  const beforeSendEvent = {
+    request: {
+      url: "https://ab.chatgpt.com/v1/initialize?k=event-secret&foo=bar",
+    },
+  }
+  const beforeSendTransactionEvent = {
+    contexts: { trace: { trace_id: "abc", span_id: "def" } },
+    request: {
+      url: "https://ab.chatgpt.com/v1/initialize?k=transaction-secret",
+    },
+  }
+  const beforeSendSpanPayload = {
+    description: "POST https://ab.chatgpt.com:8443/v1/initialize?k=span-secret",
+    data: {
+      url: { query: "k=span-query&foo=bar" },
+    },
+  }
+  const beforeSendLogPayload = {
+    attributes: {
+      request: {
+        url: "https://ab.chatgpt.com/v1/initialize?k=log-secret",
+      },
+    },
+  }
+
+  const beforeSend = options.beforeSend as
+    | ((event: typeof beforeSendEvent) => typeof beforeSendEvent | null)
+    | undefined
+  const beforeSendTransaction = options.beforeSendTransaction as
+    | ((
+        event: typeof beforeSendTransactionEvent,
+      ) => typeof beforeSendTransactionEvent | null)
+    | undefined
+  const beforeSendSpan = options.beforeSendSpan as
+    | ((
+        span: typeof beforeSendSpanPayload,
+      ) => typeof beforeSendSpanPayload | null)
+    | undefined
+  const beforeSendLog = options.beforeSendLog as
+    | ((log: typeof beforeSendLogPayload) => typeof beforeSendLogPayload | null)
+    | undefined
+
+  expect(beforeSend?.(beforeSendEvent)).toBe(beforeSendEvent)
+  expect(beforeSendEvent.request.url).toBe(
+    "https://ab.chatgpt.com/v1/initialize?k=[Filtered]&foo=bar",
+  )
+
+  expect(beforeSendTransaction?.(beforeSendTransactionEvent)).toBe(
+    beforeSendTransactionEvent,
+  )
+  expect(beforeSendTransactionEvent.request.url).toBe(
+    "https://ab.chatgpt.com/v1/initialize?k=[Filtered]",
+  )
+
+  expect(beforeSendSpan?.(beforeSendSpanPayload)).toBe(beforeSendSpanPayload)
+  expect(beforeSendSpanPayload.description).toBe(
+    "POST https://ab.chatgpt.com:8443/v1/initialize?k=[Filtered]",
+  )
+  expect(beforeSendSpanPayload.data.url.query).toBe("k=[Filtered]&foo=bar")
+
+  expect(beforeSendLog?.(beforeSendLogPayload)).toBe(beforeSendLogPayload)
+  expect(beforeSendLogPayload.attributes.request.url).toBe(
+    "https://ab.chatgpt.com/v1/initialize?k=[Filtered]",
+  )
 })

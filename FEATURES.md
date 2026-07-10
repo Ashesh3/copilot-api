@@ -697,7 +697,7 @@ A single-page admin dashboard at `/dashboard` for managing all copilot-api featu
 | Overview | Server health, active session counts, uptime |
 | Sessions | List all code sessions + direct-connect sessions, with Remote Control button to open chat UI |
 | Environments | Registered bridge environments (v1 protocol) |
-| Feature Flags | Toggle/add/remove GrowthBook feature flags |
+| Feature Flags | Manage Claude GrowthBook flags and ChatGPT / Codex Statsig overrides |
 | Replacements | Manage auto-replacement rules |
 | Custom Providers | Manage OpenAI-compatible chat and embedding providers |
 | Usage | Copilot usage/quota with progress bars |
@@ -847,6 +847,84 @@ server {
 ```
 
 Then point your hosts file to the nginx server's IP and trust the spoofed cert via `NODE_EXTRA_CA_CERTS`.
+
+### Codex Desktop Statsig feature flags
+
+Codex Desktop reads its ChatGPT / Codex feature gates and dynamic configs from `ab.chatgpt.com`. To overlay selected values through copilot-api:
+
+1. On the **Codex Desktop client only**, add this hosts entry:
+
+   ```text
+   <server-ip> ab.chatgpt.com
+   ```
+
+2. Terminate HTTPS on the server with a certificate whose SAN contains `ab.chatgpt.com`. The issuing CA must be trusted by Windows and Codex Desktop.
+3. Do **not** add the hosts override on the copilot-api server. The server must resolve the real public `ab.chatgpt.com` address for its upstream request; overriding it there creates a proxy loop.
+4. Add the redirected client's IP address to the dashboard IP allowlist.
+5. Open **Feature Flags -> ChatGPT / Codex** in the dashboard to configure overrides.
+
+The Statsig client key in the public `k` query parameter is forwarded automatically. This flow does not need an OpenAI API key or ChatGPT token. copilot-api overlays only the gate and config names configured in the dashboard; all other upstream values pass through unchanged.
+
+Use [`nginx/sites-available/codex-statsig-spoof.conf.template`](nginx/sites-available/codex-statsig-spoof.conf.template) for the complete deployment vhost. The essential equivalent is:
+
+```nginx
+server {
+    listen 80;
+    server_name ab.chatgpt.com;
+    access_log off;
+    error_log /dev/null emerg;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name ab.chatgpt.com;
+
+    ssl_certificate /path/to/ab.chatgpt.com.crt;
+    ssl_certificate_key /path/to/ab.chatgpt.com.key;
+
+    access_log off;
+    error_log /dev/null emerg;
+
+    location / {
+        proxy_pass http://localhost:4141;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_request_buffering off;
+        proxy_buffering off;
+        proxy_cache off;
+        chunked_transfer_encoding on;
+    }
+}
+```
+
+Preserving `Host` lets the Statsig middleware recognize `ab.chatgpt.com`. Both nginx access and error logs are disabled because the request line can contain the public Statsig client key. The application and Sentry integrations also scrub that query parameter rather than logging or persisting it.
+
+Initial known overrides:
+
+```json
+{
+  "featureGates": { "824038554": true },
+  "dynamicConfigs": {
+    "107580212": {
+      "default_model": "gpt-5.6-sol",
+      "available_models": [
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.5",
+        "gpt-5.4"
+      ],
+      "use_hidden_models": true
+    }
+  }
+}
+```
+
+Gate `824038554` enables the power-slider model picker. Dynamic config `107580212` allowlists the GPT-5.6 variants (plus the listed fallback models); the effort choices shown for those models come from Codex Desktop metadata.
 
 ### Cloudflare
 

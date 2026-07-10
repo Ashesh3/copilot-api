@@ -41,6 +41,10 @@ test("config export zips only app config files that exist", async () => {
       path.join(directory, "config.json"),
       JSON.stringify({ customProviders: [{ apiKey: "secret" }] }),
     )
+    await fs.writeFile(
+      path.join(directory, "statsig_overrides.json"),
+      '{"featureGates":{},"dynamicConfigs":{}}\n',
+    )
     await fs.writeFile(path.join(directory, "model_settings.json"), "[]\n")
     await fs.writeFile(path.join(directory, "ip_allowlist.json"), "[]\n")
     await fs.writeFile(path.join(directory, "usage.json"), '{"records":[]}\n')
@@ -58,8 +62,12 @@ test("config export zips only app config files that exist", async () => {
       "config.json",
       "ip_allowlist.json",
       "model_settings.json",
+      "statsig_overrides.json",
     ])
     expect(decodeEntry(entries["config.json"])).toContain("secret")
+    expect(decodeEntry(entries["statsig_overrides.json"])).toContain(
+      '"featureGates"',
+    )
     expect(entries["usage.json"]).toBeUndefined()
     expect(entries["github_token"]).toBeUndefined()
     expect(entries["logs/messages.log"]).toBeUndefined()

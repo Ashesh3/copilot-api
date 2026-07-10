@@ -72,6 +72,11 @@ import {
   removeFeatureFlag,
   setFeatureFlag,
 } from "~/routes/feature-flags/store"
+import {
+  statsigOverrideStore,
+  StatsigOverrideValidationError,
+  type StatsigOverrideKind,
+} from "~/routes/statsig-overrides/store"
 
 import packageJson from "../../../package.json" with { type: "json" }
 
@@ -119,6 +124,10 @@ interface CustomProviderRequestBody {
     supportsStreaming?: boolean | null
     passReasoningEffort?: boolean | null
   }>
+}
+
+function isStatsigOverrideKind(value: unknown): value is StatsigOverrideKind {
+  return value === "featureGate" || value === "dynamicConfig"
 }
 
 interface ValidCustomProviderBody {
@@ -176,7 +185,7 @@ export function handleOverview(c: Context) {
     codeSessionsCount: codeSessions.length,
     directConnectCount: directConnectSessions.length,
     environmentsCount: environments.length,
-    flagsCount: Object.keys(flags).length,
+    flagsCount: Object.keys(flags).length + statsigOverrideStore.count(),
     uptime: formatUptime(uptimeMs),
     health: "ok",
   })
@@ -289,6 +298,62 @@ export async function handleDeleteFlag(c: Context) {
     return c.json({ error: "Flag not found" }, 404)
   }
   return c.json({ success: true })
+}
+
+export function handleListStatsigOverrides(c: Context) {
+  return c.json(statsigOverrideStore.get())
+}
+
+export async function handleSetStatsigOverride(c: Context) {
+  const body = await c.req.json<{
+    kind?: unknown
+    name?: unknown
+    value?: unknown
+  }>()
+
+  if (!isStatsigOverrideKind(body.kind)) {
+    return c.json({ error: "kind must be featureGate or dynamicConfig" }, 400)
+  }
+  if (typeof body.name !== "string") {
+    return c.json({ error: "name is required" }, 400)
+  }
+
+  try {
+    statsigOverrideStore.set(body.kind, body.name, body.value)
+    return c.json({ success: true })
+  } catch (error) {
+    if (error instanceof StatsigOverrideValidationError) {
+      return c.json({ error: error.message }, 400)
+    }
+    throw error
+  }
+}
+
+export async function handleDeleteStatsigOverride(c: Context) {
+  const body = await c.req.json<{
+    kind?: unknown
+    name?: unknown
+  }>()
+
+  if (!isStatsigOverrideKind(body.kind)) {
+    return c.json({ error: "kind must be featureGate or dynamicConfig" }, 400)
+  }
+  if (typeof body.name !== "string") {
+    return c.json({ error: "name is required" }, 400)
+  }
+
+  try {
+    const removed = statsigOverrideStore.remove(body.kind, body.name)
+    if (!removed) {
+      return c.json({ error: "Override not found" }, 404)
+    }
+    return c.json({ success: true })
+  } catch (error) {
+    if (error instanceof StatsigOverrideValidationError) {
+      return c.json({ error: error.message }, 400)
+    }
+    throw error
+  }
 }
 
 export async function handleListReplacements(c: Context) {
