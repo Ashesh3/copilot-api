@@ -81,6 +81,7 @@ test("dashboard bundle ships the LLM debug UI", () => {
   expect(DASHBOARD_HTML).toContain("/dashboard/api/llm-debug")
   expect(DASHBOARD_HTML).toContain("Expand all")
   expect(DASHBOARD_HTML).toContain("Collapse all")
+  expect(DASHBOARD_HTML).toContain("contain:layout paint")
   expect(DASHBOARD_HTML).not.toContain("Reformatted, not exact bytes")
   expect(DASHBOARD_HTML).not.toContain("Quick Add: Nebius Qwen3 Embedding")
 })
