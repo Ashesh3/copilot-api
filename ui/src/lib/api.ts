@@ -1,19 +1,19 @@
-const STORAGE_KEY = "dashboard_api_key"
+const LEGACY_STORAGE_KEYS = ["dashboard_api_key", "ff_api_key"]
 
-export function getApiKey(): string | null {
-  return (
-    sessionStorage.getItem(STORAGE_KEY) ?? localStorage.getItem(STORAGE_KEY)
-  )
+export function clearLegacyCredentials(): void {
+  for (const key of LEGACY_STORAGE_KEYS) {
+    sessionStorage.removeItem(key)
+    localStorage.removeItem(key)
+  }
 }
 
-export function setApiKey(key: string): void {
-  sessionStorage.setItem(STORAGE_KEY, key)
-  localStorage.setItem(STORAGE_KEY, key)
-}
-
-export function clearApiKey(): void {
-  sessionStorage.removeItem(STORAGE_KEY)
-  localStorage.removeItem(STORAGE_KEY)
+function getCookie(name: string): string | null {
+  const prefix = `${name}=`
+  for (const segment of document.cookie.split(";")) {
+    const value = segment.trim()
+    if (value.startsWith(prefix)) return value.slice(prefix.length)
+  }
+  return null
 }
 
 export class ApiError extends Error {
@@ -57,16 +57,59 @@ export async function api<T>(
   path: string,
   body?: unknown,
 ): Promise<T> {
-  const apiKey = getApiKey()
-  const headers: Record<string, string> = {}
-  if (apiKey) headers["x-api-key"] = apiKey
-  if (body !== undefined) headers["content-type"] = "application/json"
+  return await executeApi<T>({
+    method,
+    path,
+    body,
+    allowReauthentication: true,
+  })
+}
 
-  const response = await fetch(path, {
+interface ApiExecutionOptions {
+  method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE"
+  path: string
+  body?: unknown
+  allowReauthentication: boolean
+}
+
+async function executeApi<T>(options: ApiExecutionOptions): Promise<T> {
+  const { method, path, body, allowReauthentication } = options
+  const headers: Record<string, string> = {}
+  if (body !== undefined) headers["content-type"] = "application/json"
+  if (!["GET"].includes(method)) {
+    const csrfToken = getCookie("__Host-copilot_admin_csrf")
+    if (csrfToken) headers["x-copilot-csrf"] = csrfToken
+  }
+
+  let response = await fetch(path, {
     method,
     headers,
+    credentials: "same-origin",
     body: body === undefined ? undefined : JSON.stringify(body),
   })
+
+  if (response.status === 403 && allowReauthentication) {
+    const responseBody = await response.clone().text()
+    if (responseBody.includes("Privileged reauthentication required")) {
+      const password = globalThis.prompt(
+        "Enter your administrator password to continue:",
+      )
+      if (password) {
+        await executeApi({
+          method: "POST",
+          path: "/dashboard/auth/reauth",
+          body: { password },
+          allowReauthentication: false,
+        })
+        response = await fetch(path, {
+          method,
+          headers,
+          credentials: "same-origin",
+          body: body === undefined ? undefined : JSON.stringify(body),
+        })
+      }
+    }
+  }
 
   if (!response.ok) {
     const message = await extractErrorMessage(
@@ -105,5 +148,5 @@ export function del<T>(path: string, body?: unknown): Promise<T> {
 }
 
 export async function authProbe(): Promise<unknown> {
-  return get("/dashboard/api/overview")
+  return get("/dashboard/auth/session")
 }

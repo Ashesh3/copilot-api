@@ -1,12 +1,18 @@
 import { Hono } from "hono"
 
-import { requireIpAllowlist } from "~/lib/ip-allowlist-guard"
+import {
+  authorizeEnvironmentCapability,
+  issueEnvironmentCapability,
+  revokeEnvironmentCapabilities,
+} from "~/lib/bridge-capabilities"
+import { resolveRequestCredential } from "~/lib/credential-resolver"
 
 import { createSession } from "../code-sessions/session-store"
 import {
   acknowledgeWork,
   deregisterEnvironment,
   enqueueWork,
+  generateEnvironmentId,
   getEnvironment,
   pollForWork,
   registerEnvironment,
@@ -15,13 +21,19 @@ import {
 
 export const environmentsRoutes = new Hono()
 
-// Bridge registration, work polling, and session enqueue all run pre-auth.
-// Gate the whole surface on the IP allowlist so only known machines can
-// register as a bridge or pull work items.
-environmentsRoutes.use("*", requireIpAllowlist)
+function unauthorized(c: {
+  json(value: unknown, status: 401): Response
+}): Response {
+  return c.json({ error: "Unauthorized" }, 401)
+}
+
+async function requireOAuth(c: Parameters<typeof resolveRequestCredential>[0]) {
+  return await resolveRequestCredential(c, ["user:sessions:claude_code"])
+}
 
 // POST /bridge — Register bridge environment
 environmentsRoutes.post("/bridge", async (c) => {
+  if (!(await requireOAuth(c.req.raw))) return unauthorized(c)
   const body = await c.req.json<{
     machine_name: string
     directory: string
@@ -32,20 +44,31 @@ environmentsRoutes.post("/bridge", async (c) => {
     environment_id?: string
   }>()
 
-  const result = registerEnvironment(body)
+  const environmentId = body.environment_id ?? generateEnvironmentId()
+  const secret = issueEnvironmentCapability(environmentId)
+  const result = registerEnvironment({
+    ...body,
+    environment_id: environmentId,
+    secret,
+  })
   return c.json(result)
 })
 
 // DELETE /bridge/:id — Deregister environment
-environmentsRoutes.delete("/bridge/:id", (c) => {
+environmentsRoutes.delete("/bridge/:id", async (c) => {
   const id = c.req.param("id")
+  if (!(await requireOAuth(c.req.raw))) return unauthorized(c)
   deregisterEnvironment(id)
+  revokeEnvironmentCapabilities(id)
   return c.body(null, 204)
 })
 
 // GET /:id/work/poll — Poll for work
-environmentsRoutes.get("/:id/work/poll", (c) => {
+environmentsRoutes.get("/:id/work/poll", async (c) => {
   const id = c.req.param("id")
+  if (!(await authorizeEnvironmentCapability(c.req.raw, id))) {
+    return unauthorized(c)
+  }
   const item = pollForWork(id)
   if (!item) {
     return c.body(null, 204)
@@ -54,8 +77,11 @@ environmentsRoutes.get("/:id/work/poll", (c) => {
 })
 
 // POST /:id/work/:workId/ack — Acknowledge work
-environmentsRoutes.post("/:id/work/:workId/ack", (c) => {
+environmentsRoutes.post("/:id/work/:workId/ack", async (c) => {
   const id = c.req.param("id")
+  if (!(await authorizeEnvironmentCapability(c.req.raw, id))) {
+    return unauthorized(c)
+  }
   const workId = c.req.param("workId")
   const ok = acknowledgeWork(id, workId)
   if (!ok) {
@@ -65,8 +91,11 @@ environmentsRoutes.post("/:id/work/:workId/ack", (c) => {
 })
 
 // POST /:id/work/:workId/stop — Stop work
-environmentsRoutes.post("/:id/work/:workId/stop", (c) => {
+environmentsRoutes.post("/:id/work/:workId/stop", async (c) => {
   const id = c.req.param("id")
+  if (!(await authorizeEnvironmentCapability(c.req.raw, id))) {
+    return unauthorized(c)
+  }
   const workId = c.req.param("workId")
   const ok = stopWork(id, workId)
   if (!ok) {
@@ -76,18 +105,25 @@ environmentsRoutes.post("/:id/work/:workId/stop", (c) => {
 })
 
 // POST /:id/work/:workId/heartbeat — Heartbeat
-environmentsRoutes.post("/:id/work/:workId/heartbeat", (c) => {
+environmentsRoutes.post("/:id/work/:workId/heartbeat", async (c) => {
+  if (!(await authorizeEnvironmentCapability(c.req.raw, c.req.param("id")))) {
+    return unauthorized(c)
+  }
   return c.json({ lease_extended: true, state: "active", ttl_seconds: 60 })
 })
 
 // POST /:id/bridge/reconnect — Reconnect session
-environmentsRoutes.post("/:id/bridge/reconnect", (c) => {
+environmentsRoutes.post("/:id/bridge/reconnect", async (c) => {
+  if (!(await authorizeEnvironmentCapability(c.req.raw, c.req.param("id")))) {
+    return unauthorized(c)
+  }
   return c.json({ ok: true })
 })
 
 // POST /:id/work — Enqueue work (start a session in the environment)
 environmentsRoutes.post("/:id/work", async (c) => {
   const envId = c.req.param("id")
+  if (!(await requireOAuth(c.req.raw))) return unauthorized(c)
   const env = getEnvironment(envId)
   if (!env) {
     return c.json({ error: "Environment not found" }, 404)

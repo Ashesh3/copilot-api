@@ -1,40 +1,41 @@
-import { afterAll, beforeEach, expect, test } from "bun:test"
+import { afterEach, beforeEach, expect, test } from "bun:test"
 
 import { setIpAllowlistForTest } from "../src/lib/ip-allowlist"
-import { state } from "../src/lib/state"
 import { DASHBOARD_HTML } from "../src/routes/dashboard/page-generated"
 import { server } from "../src/server"
+import {
+  adminHeaders,
+  createTestAdminSession,
+  resetTestAdminSession,
+  type TestAdminSession,
+} from "./helpers/admin-session"
 
-const originalApiKeyAuth = state.apiKeyAuth
+let admin: TestAdminSession
 
-beforeEach(() => {
-  state.apiKeyAuth = "dashboard-secret"
+beforeEach(async () => {
   setIpAllowlistForTest([])
+  admin = await createTestAdminSession(true)
 })
 
-afterAll(() => {
-  state.apiKeyAuth = originalApiKeyAuth
+afterEach(() => {
+  resetTestAdminSession()
 })
 
-test("dashboard auth auto-adds the observed client IP", async () => {
+test("dashboard login does not automatically trust the observed IP", async () => {
   const overviewResponse = await server.request("/dashboard/api/overview", {
     headers: {
-      "x-api-key": "dashboard-secret",
+      cookie: admin.cookie,
+      "x-copilot-peer-ip": "127.0.0.1",
       "x-forwarded-for": "198.51.100.20",
     },
   })
   expect(overviewResponse.status).toBe(200)
 
   const response = await server.request("/dashboard/api/ip-allowlist", {
-    headers: { "x-api-key": "dashboard-secret" },
+    headers: adminHeaders(admin, false),
   })
   expect(response.status).toBe(200)
-  const body = (await response.json()) as Array<{
-    ip: string
-    enabled: boolean
-  }>
-  const entry = body.find((item) => item.ip === "198.51.100.20")
-  expect(entry?.enabled).toBe(true)
+  expect(await response.json()).toEqual([])
 })
 
 test("dashboard can add, disable, enable, and remove IPv6 allowlist entries", async () => {
@@ -42,10 +43,7 @@ test("dashboard can add, disable, enable, and remove IPv6 allowlist entries", as
 
   const addResponse = await server.request("/dashboard/api/ip-allowlist", {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": "dashboard-secret",
-    },
+    headers: adminHeaders(admin),
     body: JSON.stringify({ ip: ipv6 }),
   })
   expect(addResponse.status).toBe(200)
@@ -54,47 +52,34 @@ test("dashboard can add, disable, enable, and remove IPv6 allowlist entries", as
     `/dashboard/api/ip-allowlist/${encodeURIComponent(ipv6)}`,
     {
       method: "PATCH",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": "dashboard-secret",
-      },
+      headers: adminHeaders(admin),
       body: JSON.stringify({ enabled: false }),
     },
   )
   expect(disableResponse.status).toBe(200)
-  expect((await disableResponse.json()) as { enabled: boolean }).toMatchObject({
-    enabled: false,
-  })
+  expect(await disableResponse.json()).toMatchObject({ enabled: false })
 
   const enableResponse = await server.request(
     `/dashboard/api/ip-allowlist/${encodeURIComponent(ipv6)}`,
     {
       method: "PATCH",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": "dashboard-secret",
-      },
+      headers: adminHeaders(admin),
       body: JSON.stringify({ enabled: true }),
     },
   )
   expect(enableResponse.status).toBe(200)
-  expect((await enableResponse.json()) as { enabled: boolean }).toMatchObject({
-    enabled: true,
-  })
+  expect(await enableResponse.json()).toMatchObject({ enabled: true })
 
   const deleteResponse = await server.request(
     `/dashboard/api/ip-allowlist/${encodeURIComponent(ipv6)}`,
-    {
-      method: "DELETE",
-      headers: { "x-api-key": "dashboard-secret" },
-    },
+    { method: "DELETE", headers: adminHeaders(admin) },
   )
   expect(deleteResponse.status).toBe(200)
 })
 
-test("dashboard bundle ships IP allowlist controls and public IP detection", () => {
+test("dashboard bundle ships manual IP allowlist controls only", () => {
   expect(DASHBOARD_HTML).toContain("IP Allowlist")
-  expect(DASHBOARD_HTML).toContain("api4.ipify.org")
-  expect(DASHBOARD_HTML).toContain("api6.ipify.org")
+  expect(DASHBOARD_HTML).not.toContain("api4.ipify.org")
+  expect(DASHBOARD_HTML).not.toContain("api6.ipify.org")
   expect(DASHBOARD_HTML).toContain("/dashboard/api/ip-allowlist")
 })

@@ -1,0 +1,72 @@
+import type { Context, MiddlewareHandler } from "hono"
+
+import { Hono } from "hono"
+
+import { resolveRequestCredentialKind } from "~/lib/credential-resolver"
+
+type OAuthScope = "user:mcp_servers" | "user:sessions:claude_code"
+
+export const claudeCompatibilityRoutes = new Hono()
+
+function unauthorized(c: Context): Response {
+  c.header("Cache-Control", "no-store")
+  c.header("WWW-Authenticate", 'Bearer realm="copilot-api"')
+  return c.json(
+    { error: { message: "Unauthorized", type: "authentication_error" } },
+    401,
+  )
+}
+
+function requireScopedOAuth(scope: OAuthScope): MiddlewareHandler {
+  return async (c, next) => {
+    const credential = await resolveRequestCredentialKind(c.req.raw, "oauth", {
+      requiredScopes: [scope],
+    })
+    if (!credential) return unauthorized(c)
+    await next()
+  }
+}
+
+const requireSessionOAuth = requireScopedOAuth("user:sessions:claude_code")
+const requireMcpOAuth = requireScopedOAuth("user:mcp_servers")
+
+// Register both the collection path and descendants so unimplemented
+// compatibility methods cannot fall through to gateway/inference auth.
+claudeCompatibilityRoutes.use("/code/triggers", requireSessionOAuth)
+claudeCompatibilityRoutes.use("/code/triggers/*", requireSessionOAuth)
+claudeCompatibilityRoutes.get("/code/triggers", (c) => c.json({ triggers: [] }))
+claudeCompatibilityRoutes.post("/code/triggers", (c) =>
+  c.json({ triggers: [] }),
+)
+claudeCompatibilityRoutes.all("/code/triggers/*", (c) => c.notFound())
+
+claudeCompatibilityRoutes.post(
+  "/code/github/import-token",
+  requireSessionOAuth,
+  (c) => c.json({ github_username: "copilot-api-user" }),
+)
+
+claudeCompatibilityRoutes.get(
+  "/environment_providers",
+  requireSessionOAuth,
+  (c) => c.json({ environments: [] }),
+)
+claudeCompatibilityRoutes.post(
+  "/environment_providers/cloud/create",
+  requireSessionOAuth,
+  (c) => c.json({ environment: { id: "env_stub", status: "created" } }),
+)
+
+claudeCompatibilityRoutes.get("/mcp_servers", requireMcpOAuth, (c) =>
+  c.json({ data: [] }),
+)
+
+claudeCompatibilityRoutes.get(
+  "/session_ingress/session/:id",
+  requireSessionOAuth,
+  (c) => c.json({ session_id: c.req.param("id"), status: "active" }),
+)
+
+claudeCompatibilityRoutes.get("/ultrareview/quota", requireSessionOAuth, (c) =>
+  c.json({ remaining: 0, total: 0 }),
+)

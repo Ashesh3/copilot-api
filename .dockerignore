@@ -1,5 +1,19 @@
 node_modules
 
+.env
+.env.*
+!.env.schema
+*.crt
+*.key
+*.pem
+*.p12
+*.pfx
+certs/
+secrets/
+data/
+logs/
+*.log
+
 .vscode/
 
 .git/

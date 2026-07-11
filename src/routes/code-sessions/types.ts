@@ -13,6 +13,8 @@ export type CodeSession = {
   createdAt: number
   lastHeartbeat: number
   archived: boolean
+  workerCapabilityHash?: string
+  workerCapabilityExpiresAt?: number
 }
 
 export type RequiresActionDetails = {

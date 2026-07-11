@@ -1,5 +1,7 @@
 import consola from "consola"
+import { randomUUID } from "node:crypto"
 import fs from "node:fs/promises"
+import { isIP } from "node:net"
 
 import { PATHS } from "./paths"
 
@@ -12,26 +14,42 @@ export interface IpAllowlistEntry {
   lastSeenAt?: string
 }
 
-const ipv4Pattern =
-  /^(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}$/
-const ipv6Pattern = /^(?=.*:)[0-9a-f:]+(?:%\w+)?$/i
+const IPV4_MAPPED_PREFIX = "::ffff:"
 
 let entries: Array<IpAllowlistEntry> = []
 let isLoaded = false
 let skipPersistForTest = false
 
-function normalizeIp(ip: string): string | null {
-  const trimmed = ip.trim()
-  if (!trimmed) return null
+/** Canonicalize a literal IPv4/IPv6 address. Hostnames and zone IDs are rejected. */
+export function normalizeIpAddress(ip: string): string | null {
+  let candidate = ip.trim()
+  if (!candidate) return null
 
-  const withoutBrackets =
-    trimmed.startsWith("[") && trimmed.endsWith("]") ?
-      trimmed.slice(1, -1)
-    : trimmed
+  if (candidate.startsWith("[") && candidate.endsWith("]")) {
+    candidate = candidate.slice(1, -1)
+  }
+  if (candidate.includes("%")) return null
 
-  if (ipv4Pattern.test(withoutBrackets)) return withoutBrackets
-  if (ipv6Pattern.test(withoutBrackets)) return withoutBrackets.toLowerCase()
-  return null
+  const family = isIP(candidate)
+  if (family === 4) return candidate
+  if (family !== 6) return null
+
+  if (candidate.toLowerCase().startsWith(IPV4_MAPPED_PREFIX)) {
+    const mapped = candidate.slice(IPV4_MAPPED_PREFIX.length)
+    if (isIP(mapped) === 4) return mapped
+  }
+
+  try {
+    const hostname = new URL(`http://[${candidate}]/`).hostname
+    const normalized = hostname.slice(1, -1).toLowerCase()
+    if (normalized.startsWith(IPV4_MAPPED_PREFIX)) {
+      const mapped = normalized.slice(IPV4_MAPPED_PREFIX.length)
+      if (isIP(mapped) === 4) return mapped
+    }
+    return normalized
+  } catch {
+    return null
+  }
 }
 
 function normalizeEntry(raw: unknown): IpAllowlistEntry | undefined {
@@ -40,7 +58,7 @@ function normalizeEntry(raw: unknown): IpAllowlistEntry | undefined {
   }
 
   const value = raw as Record<string, unknown>
-  const ip = typeof value.ip === "string" ? normalizeIp(value.ip) : null
+  const ip = typeof value.ip === "string" ? normalizeIpAddress(value.ip) : null
   if (ip === null) return undefined
 
   const now = new Date().toISOString()
@@ -70,7 +88,7 @@ async function loadAllowlist(): Promise<void> {
   skipPersistForTest = false
   try {
     const raw = await fs.readFile(PATHS.IP_ALLOWLIST_PATH)
-    entries = normalizeEntries(JSON.parse(raw as unknown as string) as unknown)
+    entries = normalizeEntries(JSON.parse(raw.toString("utf8")) as unknown)
   } catch {
     entries = []
   }
@@ -80,14 +98,19 @@ async function loadAllowlist(): Promise<void> {
 async function saveAllowlist(): Promise<void> {
   if (skipPersistForTest) return
 
+  const temporaryPath = `${PATHS.IP_ALLOWLIST_PATH}.${process.pid}.${randomUUID()}.tmp`
   try {
-    await fs.mkdir(PATHS.APP_DIR, { recursive: true })
-    await fs.writeFile(
-      PATHS.IP_ALLOWLIST_PATH,
-      `${JSON.stringify(entries, null, 2)}\n`,
-      "utf8",
-    )
+    await fs.mkdir(PATHS.APP_DIR, { recursive: true, mode: 0o700 })
+    await fs.chmod(PATHS.APP_DIR, 0o700)
+    await fs.writeFile(temporaryPath, `${JSON.stringify(entries, null, 2)}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+    })
+    await fs.chmod(temporaryPath, 0o600)
+    await fs.rename(temporaryPath, PATHS.IP_ALLOWLIST_PATH)
+    await fs.chmod(PATHS.IP_ALLOWLIST_PATH, 0o600)
   } catch (error) {
+    await fs.rm(temporaryPath, { force: true }).catch(() => {})
     consola.error("Failed to save IP allowlist:", error)
     throw error
   }
@@ -98,7 +121,7 @@ async function ensureLoaded(): Promise<void> {
 }
 
 export function isValidIpAddress(ip: string): boolean {
-  return normalizeIp(ip) !== null
+  return normalizeIpAddress(ip) !== null
 }
 
 export async function listIpAllowlist(): Promise<Array<IpAllowlistEntry>> {
@@ -116,7 +139,7 @@ export async function upsertIpAllowlistEntry(
 ): Promise<IpAllowlistEntry | null> {
   await ensureLoaded()
 
-  const normalizedIp = normalizeIp(ip)
+  const normalizedIp = normalizeIpAddress(ip)
   if (normalizedIp === null) return null
 
   const now = new Date().toISOString()
@@ -149,7 +172,7 @@ export async function upsertIpAllowlistEntry(
 export async function removeIpAllowlistEntry(ip: string): Promise<boolean> {
   await ensureLoaded()
 
-  const normalizedIp = normalizeIp(ip)
+  const normalizedIp = normalizeIpAddress(ip)
   if (normalizedIp === null) return false
 
   const before = entries.length
@@ -170,7 +193,7 @@ export async function setIpAllowlistEntryEnabled(
 
 export async function isManagedIpAllowed(ip: string): Promise<boolean> {
   await ensureLoaded()
-  const normalizedIp = normalizeIp(ip)
+  const normalizedIp = normalizeIpAddress(ip)
   if (normalizedIp === null) return false
 
   return entries.some((entry) => entry.ip === normalizedIp && entry.enabled)
@@ -178,7 +201,7 @@ export async function isManagedIpAllowed(ip: string): Promise<boolean> {
 
 export async function isManagedIpDisabled(ip: string): Promise<boolean> {
   await ensureLoaded()
-  const normalizedIp = normalizeIp(ip)
+  const normalizedIp = normalizeIpAddress(ip)
   if (normalizedIp === null) return false
 
   return entries.some((entry) => entry.ip === normalizedIp && !entry.enabled)

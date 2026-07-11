@@ -2,12 +2,8 @@ import type { Context } from "hono"
 
 import consola from "consola"
 
+import { resolveRequestCredential } from "./credential-resolver"
 import { extractClientIp, isIpAllowedForWhitelistedRoute } from "./ip-blocker"
-import {
-  extractRequestApiKey,
-  getActiveApiKeys,
-  whitelistAuthenticatedClient,
-} from "./request-auth"
 
 export interface CodexDesktopAuthResult {
   allowed: boolean
@@ -26,13 +22,11 @@ export interface CodexDesktopAuthResult {
  *      main process passes `isDesktopAuthAllowedUrl()` and attaches
  *      `Authorization: Bearer <token>` automatically. We accept the request
  *      if that bearer (or `x-api-key` / `x-goog-api-key`) matches an active
- *      gateway key. Successful key auth also whitelists the client IP so
- *      subsequent calls from the same source don't have to re-check.
+ *      gateway key. Successful authentication never mutates IP policy.
  *
  *   2. **IP whitelist fallback.** Preserves the original behavior for callers
  *      that hit these endpoints without an API key — e.g. a machine where
- *      another client (Claude Code, etc.) has already authenticated against
- *      this gateway, or an IP added from the dashboard.
+ *      an IP explicitly added from the dashboard.
  *
  * Returns `{ allowed: false }` with a `consola.warn` log when neither path
  * succeeds; the caller is expected to silently 404 in that case (consistent
@@ -44,14 +38,9 @@ export async function authorizeCodexDesktopRequest(
 ): Promise<CodexDesktopAuthResult> {
   const clientIp = extractClientIp(c)
 
-  // Path 1: API key auth (only attempt if keys are actually configured).
-  const activeApiKeys = getActiveApiKeys()
-  if (activeApiKeys.length > 0) {
-    const requestApiKey = extractRequestApiKey(c)
-    if (requestApiKey !== null && activeApiKeys.includes(requestApiKey)) {
-      whitelistAuthenticatedClient(c)
-      return { allowed: true, clientIp }
-    }
+  // Path 1: any centrally resolved inference credential.
+  if (await resolveRequestCredential(c.req.raw, ["user:inference"])) {
+    return { allowed: true, clientIp }
   }
 
   // Path 2: IP whitelist fallback.

@@ -18,19 +18,10 @@ export function getRemoteControlPage(): string {
   .toast.success { background: #22C55E } .toast.error { background: #EF4444 }
   @keyframes slideIn { from { transform: translateX(100%); opacity: 0 } to { transform: translateX(0); opacity: 1 } }
 
-  /* Login screen */
-  #login-screen { display: none; position: fixed; inset: 0; background: #0F172A; z-index: 500; align-items: center; justify-content: center }
-  #login-screen.visible { display: flex }
-  .login-card { background: #1B2336; border: 1px solid #272F42; border-radius: 12px; padding: 32px; width: 360px; max-width: 90vw }
-  .login-card h2 { font-size: 1.2rem; margin-bottom: 8px }
-  .login-card p { color: #94A3B8; font-size: 0.85rem; margin-bottom: 20px }
-  .login-card input { width: 100%; background: #0F172A; border: 1px solid #272F42; color: #F8FAFC; padding: 10px 14px; border-radius: 8px; font-size: 0.9rem; outline: none; margin-bottom: 14px }
-  .login-card input:focus { border-color: #3B82F6 }
-  .login-card button { width: 100%; padding: 10px; border: none; border-radius: 8px; background: #3B82F6; color: #fff; font-weight: 600; cursor: pointer; font-size: 0.9rem }
-  .login-card button:hover { background: #2563EB }
-
   /* Session picker */
   #session-picker { flex: 1; padding: 20px; max-width: 600px; margin: 0 auto; width: 100% }
+  .session-heading { display: flex; align-items: center; gap: 12px; margin-bottom: 6px }
+  .session-heading h1 { flex: 1 }
   #session-picker h1 { font-size: 1.3rem; margin-bottom: 6px }
   #session-picker .subtitle { color: #94A3B8; font-size: 0.85rem; margin-bottom: 20px }
   .session-card { background: #1B2336; border: 1px solid #272F42; border-radius: 10px; padding: 14px 18px; margin-bottom: 10px; cursor: pointer; transition: border-color 0.15s, background 0.15s }
@@ -52,6 +43,8 @@ export function getRemoteControlPage(): string {
   .badge-gray { background: #94A3B822; color: #94A3B8 }
   .empty-state { text-align: center; padding: 48px 20px; color: #94A3B8 }
   .empty-state p { margin-top: 8px; font-size: 0.9rem }
+  .empty-state .empty-hint { font-size: 0.8rem; margin-top: 12px; color: #64748B }
+  .empty-state code { color: #3B82F6 }
   .refresh-btn { background: none; border: 1px solid #272F42; color: #94A3B8; padding: 6px 14px; border-radius: 8px; cursor: pointer; font-size: 0.82rem; font-family: inherit }
   .refresh-btn:hover { background: #272F42; color: #F8FAFC }
 
@@ -96,6 +89,11 @@ export function getRemoteControlPage(): string {
   .ctrl-btn-allow:hover { background: #16A34A }
   .ctrl-btn-deny { background: #EF4444; color: #fff }
   .ctrl-btn-deny:hover { background: #DC2626 }
+  .ctrl-btn-disabled { opacity: 0.5 }
+  .msg-control.allowed { border-color: #22C55E }
+  .msg-control.denied { border-color: #EF4444 }
+  .msg-control.allowed .ctrl-label { color: #22C55E }
+  .msg-control.denied .ctrl-label { color: #EF4444 }
 
   /* Turn separator */
   .turn-sep { display: flex; align-items: center; gap: 12px; padding: 4px 0; color: #64748B; font-size: 0.75rem }
@@ -129,21 +127,12 @@ export function getRemoteControlPage(): string {
 </head>
 <body>
 
-<div id="login-screen">
-  <div class="login-card">
-    <h2>Remote Control</h2>
-    <p>Enter your API key to access remote sessions.</p>
-    <input type="password" id="login-key" placeholder="API Key" autocomplete="off">
-    <button onclick="doLogin()">Login</button>
-  </div>
-</div>
-
 <div class="toast-container" id="toasts"></div>
 
 <div id="session-picker">
-  <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px">
-    <h1 style="flex:1">Remote Control</h1>
-    <button class="refresh-btn" onclick="loadSessions()">Refresh</button>
+  <div class="session-heading">
+    <h1>Remote Control</h1>
+    <button class="refresh-btn" id="refresh-btn">Refresh</button>
   </div>
   <p class="subtitle">Select a session to connect</p>
   <div id="sessions-list"></div>
@@ -156,19 +145,18 @@ export function getRemoteControlPage(): string {
       <div class="ch-title" id="chat-title"></div>
       <div class="ch-id" id="chat-session-id"></div>
     </div>
-    <button class="disconnect-btn" onclick="disconnect()">Disconnect</button>
+    <button class="disconnect-btn" id="disconnect-btn">Disconnect</button>
   </div>
   <div class="chat-messages" id="chat-messages"></div>
   <div class="chat-input">
     <input type="text" id="chat-input" placeholder="Type a message..." autocomplete="off">
-    <button id="send-btn" onclick="sendMessage()">
+    <button id="send-btn">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
     </button>
   </div>
 </div>
 
 <script>
-var apiKey = sessionStorage.getItem('dashboard_api_key') || localStorage.getItem('dashboard_api_key') || ''
 var currentSessionId = null
 var ws = null
 var autoScrollEnabled = true
@@ -203,40 +191,31 @@ function showToast(message, type) {
   setTimeout(function() { el.remove() }, type === 'error' ? 5000 : 3000)
 }
 
+function readCookie(name) {
+  var prefix = name + '='
+  var parts = document.cookie.split(';')
+  for (var i = 0; i < parts.length; i++) {
+    var part = parts[i].trim()
+    if (part.indexOf(prefix) === 0) return decodeURIComponent(part.slice(prefix.length))
+  }
+  return ''
+}
+
 function apiFetch(method, path, body) {
-  var opts = { method: method, headers: { 'Content-Type': 'application/json' } }
-  if (apiKey) opts.headers['x-api-key'] = apiKey
+  var opts = { method: method, credentials: 'same-origin', headers: { 'Content-Type': 'application/json' } }
+  if (method !== 'GET' && method !== 'HEAD') {
+    opts.headers['x-copilot-csrf'] = readCookie('__Host-copilot_admin_csrf')
+  }
   if (body) opts.body = JSON.stringify(body)
   return fetch(path, opts)
 }
 
 /* Auth */
-function showLogin() {
-  document.getElementById('login-screen').classList.add('visible')
-  document.getElementById('session-picker').style.display = 'none'
-}
-function hideLogin() {
-  document.getElementById('login-screen').classList.remove('visible')
-  document.getElementById('session-picker').style.display = ''
-}
-
 function authenticate() {
   apiFetch('GET', '/dashboard/api/sessions').then(function(res) {
-    if (res.status === 401) { showLogin(); return }
-    if (res.ok) { hideLogin(); loadSessions(); checkAutoConnect(); return }
-    showLogin()
-  }).catch(function() { showLogin() })
-}
-
-function doLogin() {
-  var key = document.getElementById('login-key').value.trim()
-  if (!key) return
-  apiKey = key
-  sessionStorage.setItem('dashboard_api_key', key)
-  localStorage.setItem('dashboard_api_key', key)
-  apiFetch('GET', '/dashboard/api/sessions').then(function(res) {
-    if (res.ok) { hideLogin(); loadSessions(); checkAutoConnect() }
-    else { sessionStorage.removeItem('dashboard_api_key'); apiKey = ''; showToast('Invalid API key', 'error') }
+    if (res.status === 401) { window.location.assign('/dashboard'); return }
+    if (res.ok) { loadSessions(); checkAutoConnect(); return }
+    showToast('Failed to authenticate', 'error')
   }).catch(function() { showToast('Connection failed', 'error') })
 }
 
@@ -256,14 +235,14 @@ function loadSessions() {
 function renderSessionList(sessions) {
   var container = document.getElementById('sessions-list')
   if (sessions.length === 0) {
-    container.innerHTML = '<div class="empty-state"><p>No active code sessions found.</p><p style="font-size:0.8rem;margin-top:12px;color:#64748B">Run <code style="color:#3B82F6">claude --remote-control</code> to start a session.</p></div>'
+    container.innerHTML = '<div class="empty-state"><p>No active code sessions found.</p><p class="empty-hint">Run <code>claude --remote-control</code> to start a session.</p></div>'
     return
   }
   var html = ''
   sessions.forEach(function(s) {
     var dotClass = s.state === 'running' ? 'running' : s.state === 'requires_action' ? 'requires_action' : s.state === 'connected' ? 'connected' : 'idle'
     var stateBadge = (s.state === 'running' || s.state === 'connected') ? 'badge-green' : s.state === 'requires_action' ? 'badge-orange' : 'badge-gray'
-    html += '<div class="session-card" onclick="connectToSession(\\'' + esc(s.id) + '\\')">'
+    html += '<div class="session-card" data-session-id="' + esc(s.id) + '">'
     html += '<div class="sc-row"><span class="status-dot ' + dotClass + '"></span>'
     html += '<span class="sc-title">' + esc(s.title || 'Untitled Session') + '</span>'
     html += '<span class="badge ' + stateBadge + '">' + esc(s.state || 'unknown') + '</span></div>'
@@ -347,38 +326,41 @@ function updateStatusDot(state) {
 function startEventStream(sessionId) {
   if (ws) { ws.close(); ws = null }
 
-  var protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  var wsUrl = protocol + '//' + window.location.host + '/ws/remote/' + encodeURIComponent(sessionId)
-  ws = new WebSocket(wsUrl)
+  apiFetch('POST', '/dashboard/api/sessions/' + encodeURIComponent(sessionId) + '/websocket-ticket').then(function(res) {
+    if (res.status === 401) { window.location.assign('/dashboard'); return null }
+    if (!res.ok) throw new Error('Unable to create WebSocket ticket')
+    return res.json()
+  }).then(function(result) {
+    if (!result || currentSessionId !== sessionId) return
+    var protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    var wsUrl = protocol + '//' + window.location.host + '/ws/remote/' + encodeURIComponent(sessionId)
+    ws = new WebSocket(wsUrl, ['copilot-remote', 'copilot-ticket.' + result.ticket])
 
-  ws.onopen = function() {
-    console.log('[remote] WebSocket connected')
-    var msgs = document.getElementById('chat-messages')
-    var loadingRow = msgs.querySelector('.loading-row')
-    if (loadingRow) loadingRow.remove()
-  }
-
-  ws.onmessage = function(e) {
-    console.log('[remote] WS message received:', e.data.substring(0, 200))
-    try {
-      var data = JSON.parse(e.data)
-      console.log('[remote] Parsed type:', data.payload ? data.payload.type : data.type)
-      handleClientEvent(data)
-    } catch(err) {
-      console.error('[remote] Failed to parse:', err)
+    ws.onopen = function() {
+      var msgs = document.getElementById('chat-messages')
+      var loadingRow = msgs.querySelector('.loading-row')
+      if (loadingRow) loadingRow.remove()
     }
-  }
 
-  ws.onclose = function(e) {
-    console.log('[remote] WebSocket closed, code:', e.code, 'reason:', e.reason)
-    showToast('Connection closed', 'error')
+    ws.onmessage = function(e) {
+      try {
+        var data = JSON.parse(e.data)
+        handleClientEvent(data)
+      } catch(err) {
+        console.error('[remote] Failed to parse:', err)
+      }
+    }
+
+    ws.onclose = function() {
+      showToast('Connection closed', 'error')
+      updateStatusDot('idle')
+    }
+
+    ws.onerror = function() { showToast('Connection error', 'error') }
+  }).catch(function(error) {
+    showToast(error.message || 'Connection failed', 'error')
     updateStatusDot('idle')
-  }
-
-  ws.onerror = function(e) {
-    console.error('[remote] WebSocket error:', e)
-    showToast('Connection error', 'error')
-  }
+  })
 }
 
 function handleClientEvent(data) {
@@ -536,8 +518,8 @@ function addControlRequest(payload) {
   div.innerHTML = '<div class="ctrl-label">Permission Request</div>'
     + '<div class="ctrl-desc">' + esc(toolName) + ': ' + esc(desc) + '</div>'
     + '<div class="ctrl-actions">'
-    + '<button class="ctrl-btn ctrl-btn-allow" onclick="respondControl(this, true)">Allow</button>'
-    + '<button class="ctrl-btn ctrl-btn-deny" onclick="respondControl(this, false)">Deny</button>'
+    + '<button class="ctrl-btn ctrl-btn-allow">Allow</button>'
+    + '<button class="ctrl-btn ctrl-btn-deny">Deny</button>'
     + '</div>'
   msgs.appendChild(div)
   scrollToBottom()
@@ -546,13 +528,12 @@ function addControlRequest(payload) {
 function respondControl(btnEl, allow) {
   var card = btnEl.closest('.msg-control')
   var buttons = card.querySelectorAll('.ctrl-btn')
-  buttons.forEach(function(b) { b.disabled = true; b.style.opacity = '0.5' })
+  buttons.forEach(function(b) { b.disabled = true; b.classList.add('ctrl-btn-disabled') })
   var responseText = allow ? 'yes' : 'no'
   sendMessageText(responseText)
-  card.style.borderColor = allow ? '#22C55E' : '#EF4444'
+  card.classList.add(allow ? 'allowed' : 'denied')
   var label = card.querySelector('.ctrl-label')
   label.textContent = allow ? 'Allowed' : 'Denied'
-  label.style.color = allow ? '#22C55E' : '#EF4444'
 }
 
 function addEventBadge(type) {
@@ -637,8 +618,16 @@ document.getElementById('chat-input').addEventListener('keydown', function(e) {
   }
 })
 
-document.getElementById('login-key').addEventListener('keydown', function(e) {
-  if (e.key === 'Enter') doLogin()
+document.getElementById('refresh-btn').addEventListener('click', loadSessions)
+document.getElementById('disconnect-btn').addEventListener('click', disconnect)
+document.getElementById('send-btn').addEventListener('click', sendMessage)
+document.getElementById('sessions-list').addEventListener('click', function(e) {
+  var card = e.target.closest('.session-card')
+  if (card && card.dataset.sessionId) connectToSession(card.dataset.sessionId)
+})
+document.getElementById('chat-messages').addEventListener('click', function(e) {
+  var button = e.target.closest('.ctrl-btn')
+  if (button) respondControl(button, button.classList.contains('ctrl-btn-allow'))
 })
 
 /* Init */

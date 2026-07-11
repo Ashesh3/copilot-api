@@ -21,6 +21,10 @@ import {
   extractResponsesPayload,
   isSyntheticWarmupRequest,
   recordResponseSnapshotFromFrame,
+  RESPONSES_WS_MAX_ACTIVE_TURNS,
+  RESPONSES_WS_MAX_FRAME_BYTES,
+  RESPONSES_WS_MAX_SNAPSHOTS,
+  resetResponsesWebSocketLimitsForTest,
   rehydrateContinuationPayload,
   type ResponsesWebSocketData,
   responsesWebSocket,
@@ -37,6 +41,12 @@ const queuedFetchHandlers: Array<
   (init?: RequestInit) => Promise<Response> | Response
 > = []
 let lastRequestBody: Record<string, unknown> | undefined
+
+function authenticatedResponsesRequest(): Request {
+  return new Request("http://localhost/responses", {
+    headers: { authorization: "Bearer cli-secret" },
+  })
+}
 
 const responsesCapableModels: ModelsResponse = {
   object: "list",
@@ -101,6 +111,7 @@ afterEach(() => {
   state.rateLimitSeconds = undefined
   state.rateLimitWait = true
   setConfigForTest(null)
+  resetResponsesWebSocketLimitsForTest()
 })
 
 describe("extractResponsesPayload", () => {
@@ -148,7 +159,8 @@ describe("extractResponsesPayload", () => {
 })
 
 describe("responses websocket upgrade handling", () => {
-  test("matches /responses and /v1/responses upgrade paths", () => {
+  test("matches /responses and /v1/responses upgrade paths", async () => {
+    state.apiKeyAuth = "route-secret"
     const upgraded: Array<ResponsesWebSocketData> = []
     const server = {
       upgrade(_req: Request, opts?: object): boolean {
@@ -161,23 +173,30 @@ describe("responses websocket upgrade handling", () => {
     }
 
     expect(
-      tryUpgradeResponsesWebSocket(
+      await tryUpgradeResponsesWebSocket(
         new Request("http://localhost/responses", {
-          headers: { upgrade: "websocket", "x-client-request-id": "req-1" },
+          headers: {
+            authorization: "Bearer route-secret",
+            upgrade: "websocket",
+            "x-client-request-id": "req-1",
+          },
         }),
         server,
       ),
     ).toBe("upgraded")
     expect(
-      tryUpgradeResponsesWebSocket(
+      await tryUpgradeResponsesWebSocket(
         new Request("http://localhost/v1/responses", {
-          headers: { upgrade: "websocket" },
+          headers: {
+            authorization: "Bearer route-secret",
+            upgrade: "websocket",
+          },
         }),
         server,
       ),
     ).toBe("upgraded")
     expect(
-      tryUpgradeResponsesWebSocket(
+      await tryUpgradeResponsesWebSocket(
         new Request("http://localhost/v1/chat/completions", {
           headers: { upgrade: "websocket" },
         }),
@@ -188,7 +207,7 @@ describe("responses websocket upgrade handling", () => {
     expect(upgraded[0]?.responseSnapshots).toBeInstanceOf(Map)
   })
 
-  test("enforces cli and config api keys before upgrade", () => {
+  test("enforces cli and config api keys before upgrade", async () => {
     const server = {
       upgrade(): boolean {
         return true
@@ -197,7 +216,7 @@ describe("responses websocket upgrade handling", () => {
 
     state.apiKeyAuth = "cli-secret"
     expect(
-      tryUpgradeResponsesWebSocket(
+      await tryUpgradeResponsesWebSocket(
         new Request("http://localhost/responses", {
           headers: { upgrade: "websocket" },
         }),
@@ -205,7 +224,7 @@ describe("responses websocket upgrade handling", () => {
       ),
     ).toBe("auth_failed")
     expect(
-      tryUpgradeResponsesWebSocket(
+      await tryUpgradeResponsesWebSocket(
         new Request("http://localhost/responses", {
           headers: {
             authorization: "Bearer cli-secret",
@@ -219,7 +238,7 @@ describe("responses websocket upgrade handling", () => {
     state.apiKeyAuth = undefined
     setConfigForTest({ auth: { apiKeys: ["config-secret"] } })
     expect(
-      tryUpgradeResponsesWebSocket(
+      await tryUpgradeResponsesWebSocket(
         new Request("http://localhost/responses", {
           headers: { upgrade: "websocket", "x-api-key": "wrong" },
         }),
@@ -227,13 +246,36 @@ describe("responses websocket upgrade handling", () => {
       ),
     ).toBe("auth_failed")
     expect(
-      tryUpgradeResponsesWebSocket(
+      await tryUpgradeResponsesWebSocket(
         new Request("http://localhost/responses", {
           headers: { upgrade: "websocket", "x-api-key": "config-secret" },
         }),
         server,
       ),
     ).toBe("upgraded")
+  })
+
+  test("caps concurrent connections per authenticated principal", async () => {
+    state.apiKeyAuth = "cli-secret"
+    const server = { upgrade: () => true }
+    expect(
+      await tryUpgradeResponsesWebSocket(
+        authenticatedResponsesRequest(),
+        server,
+      ),
+    ).toBe("upgraded")
+    expect(
+      await tryUpgradeResponsesWebSocket(
+        authenticatedResponsesRequest(),
+        server,
+      ),
+    ).toBe("upgraded")
+    expect(
+      await tryUpgradeResponsesWebSocket(
+        authenticatedResponsesRequest(),
+        server,
+      ),
+    ).toBe("limit_reached")
   })
 })
 
@@ -247,6 +289,64 @@ describe("responses websocket message handling", () => {
     )
 
     expect(ws.sent).toEqual([])
+  })
+
+  test("releases connection accounting idempotently on close", async () => {
+    state.apiKeyAuth = "cli-secret"
+    let upgraded: ResponsesWebSocketData | undefined
+    const server = {
+      upgrade(_request: Request, options?: object): boolean {
+        upgraded = (options as { data: ResponsesWebSocketData }).data
+        return true
+      },
+    }
+    expect(
+      await tryUpgradeResponsesWebSocket(
+        authenticatedResponsesRequest(),
+        server,
+      ),
+    ).toBe("upgraded")
+    if (!upgraded) throw new Error("Expected upgraded socket data")
+    responsesWebSocket.close({ data: upgraded })
+    responsesWebSocket.close({ data: upgraded })
+    expect(
+      await tryUpgradeResponsesWebSocket(
+        authenticatedResponsesRequest(),
+        server,
+      ),
+    ).toBe("upgraded")
+  })
+
+  test("rejects oversized frames before parsing", async () => {
+    const ws = createTestWebSocket()
+    await responsesWebSocket.message(
+      ws,
+      `{"type":"response.create","input":"${"x".repeat(RESPONSES_WS_MAX_FRAME_BYTES)}"}`,
+    )
+    const error = JSON.parse(ws.sent[0] ?? "{}") as { status?: number }
+    expect(error.status).toBe(413)
+    expect(ws.data.activeTurns.size).toBe(0)
+  })
+
+  test("rejects new turns when the concurrent-turn cap is reached", async () => {
+    const ws = createTestWebSocket()
+    for (let index = 0; index < RESPONSES_WS_MAX_ACTIVE_TURNS; index += 1) {
+      ws.data.activeTurns.set(index, {
+        abortController: new AbortController(),
+        finalized: false,
+        inputLength: 0,
+        routingState: {},
+        sequence: index,
+        turnId: `test:${index}`,
+      })
+    }
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({ type: "response.create", model: "gpt-5.4" }),
+    )
+    const error = JSON.parse(ws.sent[0] ?? "{}") as { status?: number }
+    expect(error.status).toBe(429)
+    expect(ws.data.activeTurns.size).toBe(RESPONSES_WS_MAX_ACTIVE_TURNS)
   })
 
   test("sends terminal error frames for invalid client messages", async () => {
@@ -907,6 +1007,23 @@ describe("responses websocket continuation handling", () => {
       }),
     ).toBeUndefined()
   })
+
+  test("bounds continuation snapshot history", () => {
+    const snapshots = new Map<string, ResponsesPayload>()
+    for (let index = 0; index < RESPONSES_WS_MAX_SNAPSHOTS + 2; index += 1) {
+      recordResponseSnapshotFromFrame(
+        snapshots,
+        { input: `input-${index}`, model: "gpt-5.4" },
+        JSON.stringify({
+          type: "response.completed",
+          response: { id: `resp_${index}`, output: [] },
+        }),
+      )
+    }
+    expect(snapshots).toHaveLength(RESPONSES_WS_MAX_SNAPSHOTS)
+    expect(snapshots.has("resp_0")).toBe(false)
+    expect(snapshots.has(`resp_${RESPONSES_WS_MAX_SNAPSHOTS + 1}`)).toBe(true)
+  })
 })
 
 function createTestWebSocket(): {
@@ -920,7 +1037,9 @@ function createTestWebSocket(): {
     data: {
       activeTurns: new Map(),
       closed: false,
+      connectionReleased: false,
       nextTurnSequence: 0,
+      principalId: "gateway:test",
       type: "responses",
       requestId: "req-test",
       sessionId: "session-test",

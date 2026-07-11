@@ -15,7 +15,7 @@ beforeEach(() => {
   clearLlmDebugLogs()
 })
 
-test("stores raw request and response details in memory", () => {
+test("stores request details with sensitive headers redacted", () => {
   const startedAtMs = Date.now()
   const requestBody = JSON.stringify({
     messages: [{ role: "user", content: "Find this request" }],
@@ -52,8 +52,32 @@ test("stores raw request and response details in memory", () => {
 
   const detail = getLlmDebugLog(id)
   expect(detail?.request.body).toBe(requestBody)
-  expect(detail?.request.headers.authorization).toBe("Bearer raw-token")
+  expect(detail?.request.headers.authorization).toBe("[REDACTED]")
   expect(detail?.response?.body).toBe('{"ok":true}')
+})
+
+test("redacts credentials from stored debug URLs and structured bodies", () => {
+  const id = startLlmDebugLog({
+    method: "POST",
+    path: "/responses",
+    requestBody: JSON.stringify({
+      api_key: "body-secret",
+      nested: { refresh_token: "refresh-secret" },
+    }),
+    requestHeaders: {
+      cookie: "session=secret",
+      "x-api-key": "header-secret",
+    },
+    url: "https://example.test/responses?api_key=query-secret&safe=value",
+  })
+
+  const detail = getLlmDebugLog(id)
+  expect(detail?.request.url).not.toContain("query-secret")
+  expect(detail?.request.url).toContain("safe=value")
+  expect(detail?.request.body).not.toContain("body-secret")
+  expect(detail?.request.body).not.toContain("refresh-secret")
+  expect(detail?.request.headers.cookie).toBe("[REDACTED]")
+  expect(detail?.request.headers["x-api-key"]).toBe("[REDACTED]")
 })
 
 test("prunes entries older than the retention window", () => {

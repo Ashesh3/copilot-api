@@ -4,6 +4,7 @@ node_modules/
 # local env
 *.local
 .env
+secrets/
 
 # aider
 .aider*

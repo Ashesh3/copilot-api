@@ -4,9 +4,16 @@ import { clearLlmDebugLogs, startLlmDebugLog } from "../src/lib/llm-debug-log"
 import { state } from "../src/lib/state"
 import { DASHBOARD_HTML } from "../src/routes/dashboard/page-generated"
 import { server } from "../src/server"
+import {
+  adminHeaders,
+  createTestAdminSession,
+  resetTestAdminSession,
+  type TestAdminSession,
+} from "./helpers/admin-session"
 
 const originalApiKeyAuth = state.apiKeyAuth
 const originalFetch = globalThis.fetch
+let adminSession: TestAdminSession
 
 const fetchMock = mock((_url: string | URL | Request, _init?: RequestInit) => {
   return new Response(
@@ -26,18 +33,19 @@ beforeAll(() => {
     fetchMock as unknown as typeof fetch
 })
 
-beforeEach(() => {
+beforeEach(async () => {
   fetchMock.mockClear()
   clearLlmDebugLogs()
-  state.apiKeyAuth = undefined
   state.accountType = "individual"
   state.copilotToken = "fresh-copilot-token"
   state.githubToken = "github-token"
   state.isMultiToken = false
+  adminSession = await createTestAdminSession(true)
 })
 
 afterAll(() => {
   state.apiKeyAuth = originalApiKeyAuth
+  resetTestAdminSession()
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
 })
 
@@ -51,7 +59,9 @@ test("serves LLM debug logs through dashboard API", async () => {
     url: "https://example.test/responses",
   })
 
-  const listResponse = await server.request("/dashboard/api/llm-debug")
+  const listResponse = await server.request("/dashboard/api/llm-debug", {
+    headers: adminHeaders(adminSession, false),
+  })
   expect(listResponse.status).toBe(200)
   const listBody = (await listResponse.json()) as {
     entries: Array<{ id: string; requestPreview: string }>
@@ -59,19 +69,27 @@ test("serves LLM debug logs through dashboard API", async () => {
   expect(listBody.entries[0]?.id).toBe(id)
   expect(listBody.entries[0]?.requestPreview).toContain("dashboard lookup")
 
-  const detailResponse = await server.request(`/dashboard/api/llm-debug/${id}`)
+  const detailResponse = await server.request(
+    `/dashboard/api/llm-debug/${id}`,
+    {
+      headers: adminHeaders(adminSession, false),
+    },
+  )
   expect(detailResponse.status).toBe(200)
   const detailBody = (await detailResponse.json()) as {
     request: { headers: Record<string, string> }
   }
-  expect(detailBody.request.headers.authorization).toBe("Bearer raw-token")
+  expect(detailBody.request.headers.authorization).toBe("[REDACTED]")
 
   const clearResponse = await server.request("/dashboard/api/llm-debug", {
+    headers: adminHeaders(adminSession),
     method: "DELETE",
   })
   expect(clearResponse.status).toBe(200)
 
-  const afterClearResponse = await server.request("/dashboard/api/llm-debug")
+  const afterClearResponse = await server.request("/dashboard/api/llm-debug", {
+    headers: adminHeaders(adminSession, false),
+  })
   const afterClearBody = (await afterClearResponse.json()) as { count: number }
   expect(afterClearBody.count).toBe(0)
 })
@@ -110,7 +128,7 @@ test("replays a chat completions debug log with fresh auth and parses SSE metada
           stream: true,
         },
       }),
-      headers: { "content-type": "application/json" },
+      headers: adminHeaders(adminSession),
       method: "POST",
     },
   )
@@ -142,7 +160,7 @@ test("rejects invalid replay requests", async () => {
     "/dashboard/api/llm-debug/missing/replay",
     {
       body: JSON.stringify({ body: {} }),
-      headers: { "content-type": "application/json" },
+      headers: adminHeaders(adminSession),
       method: "POST",
     },
   )
@@ -159,7 +177,7 @@ test("rejects invalid replay requests", async () => {
     `/dashboard/api/llm-debug/${embeddingsId}/replay`,
     {
       body: JSON.stringify({ body: { input: "hello", model: "embed" } }),
-      headers: { "content-type": "application/json" },
+      headers: adminHeaders(adminSession),
       method: "POST",
     },
   )
@@ -176,7 +194,7 @@ test("rejects invalid replay requests", async () => {
     `/dashboard/api/llm-debug/${chatId}/replay`,
     {
       body: JSON.stringify({ body: "{nope" }),
-      headers: { "content-type": "application/json" },
+      headers: adminHeaders(adminSession),
       method: "POST",
     },
   )
@@ -186,7 +204,7 @@ test("rejects invalid replay requests", async () => {
     `/dashboard/api/llm-debug/${chatId}/replay`,
     {
       body: JSON.stringify({ body: { messages: [] } }),
-      headers: { "content-type": "application/json" },
+      headers: adminHeaders(adminSession),
       method: "POST",
     },
   )

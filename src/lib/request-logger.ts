@@ -250,10 +250,24 @@ function sanitizeRequestBody(
 ): Record<string, unknown> {
   const sanitized: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(parsed)) {
-    sanitized[key] =
-      key === "messages" || key === "prompt" ?
-        `[${Array.isArray(value) ? value.length : 1} items omitted]`
-      : value
+    const sensitive =
+      /password|secret|api[_-]?key|authorization|cookie|access[_-]?token|refresh[_-]?token|code[_-]?verifier|client[_-]?secret/i.test(
+        key,
+      )
+    if (sensitive) {
+      sanitized[key] = "[REDACTED]"
+    } else if (key === "messages" || key === "prompt") {
+      const itemCount = Array.isArray(value) ? value.length : 1
+      sanitized[key] = `[${itemCount} items omitted]`
+    } else if (
+      typeof value === "object"
+      && value !== null
+      && !Array.isArray(value)
+    ) {
+      sanitized[key] = sanitizeRequestBody(value as Record<string, unknown>)
+    } else {
+      sanitized[key] = value
+    }
   }
   return sanitized
 }
@@ -263,7 +277,7 @@ function sanitizeRequestBody(
  */
 async function logRawRequest(c: Context): Promise<void> {
   const method = c.req.method
-  const url = c.req.url
+  const url = redactRequestUrl(c.req.url)
   const headers = Object.fromEntries(c.req.raw.headers.entries())
 
   const lines: Array<string> = []
@@ -274,13 +288,10 @@ async function logRawRequest(c: Context): Promise<void> {
   )
 
   for (const [key, value] of Object.entries(headers)) {
-    // Mask authorization headers
+    // Never print secret-bearing header values, even partially.
     const displayValue =
-      (
-        key.toLowerCase().includes("authorization")
-        || key.toLowerCase().includes("api-key")
-      ) ?
-        `${value.slice(0, 20)}...`
+      /authorization|api-key|x-goog-api-key|cookie|token|secret/i.test(key) ?
+        "[REDACTED]"
       : value
     lines.push(`  ${colors.gray}${key}:${colors.reset} ${displayValue}`)
   }
@@ -312,6 +323,20 @@ async function logRawRequest(c: Context): Promise<void> {
 
   lines.push(`${colors.dim}${"─".repeat(60)}${colors.reset}`)
   console.log(lines.join("\n"))
+}
+
+function redactRequestUrl(value: string): string {
+  try {
+    const url = new URL(value)
+    for (const key of url.searchParams.keys()) {
+      if (/key|token|secret|password|credential/i.test(key)) {
+        url.searchParams.set(key, "[REDACTED]")
+      }
+    }
+    return url.toString()
+  } catch {
+    return value
+  }
 }
 
 /**

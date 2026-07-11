@@ -1,5 +1,6 @@
 import { afterAll, beforeEach, expect, mock, test } from "bun:test"
 
+import { setIpAllowlistForTest } from "../src/lib/ip-allowlist"
 import { state } from "../src/lib/state"
 import { server } from "../src/server"
 
@@ -31,25 +32,22 @@ afterAll(() => {
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
 })
 
-async function whitelistIp(ip: string): Promise<void> {
-  const response = await server.request("/api/oauth/profile", {
-    headers: {
-      authorization: "Bearer test-secret-key",
-      "x-forwarded-for": ip,
-    },
-  })
+function whitelistIp(ip: string): void {
+  setIpAllowlistForTest([{ ip, enabled: true, source: "manual" }])
+}
 
-  expect(response.status).toBe(200)
+function trustedHeaders(ip: string): Record<string, string> {
+  return { "x-copilot-peer-ip": "127.0.0.1", "x-forwarded-for": ip }
 }
 
 test("proxies unknown routes for whitelisted redirected Anthropic hosts", async () => {
   const ip = "198.51.100.10"
-  await whitelistIp(ip)
+  whitelistIp(ip)
 
   const response = await server.request("/random-endpoint?channel=stable", {
     headers: {
       host: "api.anthropic.com",
-      "x-forwarded-for": ip,
+      ...trustedHeaders(ip),
     },
   })
 
@@ -72,12 +70,12 @@ test("passes upstream redirects through without following them", async () => {
   )
 
   const ip = "198.51.100.16"
-  await whitelistIp(ip)
+  whitelistIp(ip)
 
   const response = await server.request("/api/desktop/update", {
     headers: {
       host: "claude.ai",
-      "x-forwarded-for": ip,
+      ...trustedHeaders(ip),
     },
   })
 
@@ -107,14 +105,14 @@ test("strips compressed body headers from transparent proxy responses", async ()
   )
 
   const ip = "198.51.100.15"
-  await whitelistIp(ip)
+  whitelistIp(ip)
 
   const response = await server.request(
     "/mcp-registry/v0/servers?version=latest&limit=100",
     {
       headers: {
         host: "api.anthropic.com",
-        "x-forwarded-for": ip,
+        ...trustedHeaders(ip),
       },
     },
   )
@@ -147,12 +145,12 @@ test("strips dynamic hop-by-hop headers from transparent proxy responses", async
   )
 
   const ip = "198.51.100.17"
-  await whitelistIp(ip)
+  whitelistIp(ip)
 
   const response = await server.request("/mcp-registry/v0/servers", {
     headers: {
       host: "api.anthropic.com",
-      "x-forwarded-for": ip,
+      ...trustedHeaders(ip),
     },
   })
 
@@ -165,12 +163,12 @@ test("strips dynamic hop-by-hop headers from transparent proxy responses", async
 
 test("proxies unknown /api routes for whitelisted redirected Claude hosts", async () => {
   const ip = "198.51.100.11"
-  await whitelistIp(ip)
+  whitelistIp(ip)
 
   const response = await server.request("/api/desktop/update", {
     headers: {
       host: "claude.ai",
-      "x-forwarded-for": ip,
+      ...trustedHeaders(ip),
     },
   })
 
@@ -183,13 +181,13 @@ test("proxies unknown /api routes for whitelisted redirected Claude hosts", asyn
 
 test("blocks event logging for whitelisted redirected Claude hosts", async () => {
   const ip = "198.51.100.13"
-  await whitelistIp(ip)
+  whitelistIp(ip)
 
   const response = await server.request("/api/event_logging/v2/batch", {
     method: "POST",
     headers: {
       host: "claude.ai",
-      "x-forwarded-for": ip,
+      ...trustedHeaders(ip),
     },
   })
 
@@ -213,23 +211,13 @@ test("does not proxy fallback routes for non-redirected hosts", async () => {
 
 test("does not let whitelisted redirected hosts bypass owned API route auth", async () => {
   const ip = "198.51.100.14"
-  await whitelistIp(ip)
+  whitelistIp(ip)
 
-  const result = await Promise.race([
-    Promise.resolve(
-      server.request("/v1/messages", {
-        method: "POST",
-        headers: {
-          host: "api.anthropic.com",
-          "x-forwarded-for": ip,
-        },
-      }),
-    ).then(() => "completed" as const),
-    new Promise<"pending">((resolve) => {
-      setTimeout(() => resolve("pending"), 25)
-    }),
-  ])
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { host: "api.anthropic.com", ...trustedHeaders(ip) },
+  })
 
-  expect(result).toBe("pending")
+  expect(response.status).toBe(401)
   expect(fetchMock).not.toHaveBeenCalled()
 })

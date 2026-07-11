@@ -5,6 +5,12 @@ import type { ModelsResponse } from "../src/services/copilot/get-models"
 import { setConfigForTest } from "../src/lib/config"
 import { state } from "../src/lib/state"
 import { server } from "../src/server"
+import {
+  adminHeaders,
+  createTestAdminSession,
+  resetTestAdminSession,
+  TEST_GATEWAY_KEY,
+} from "./helpers/admin-session"
 
 const originalFetch = globalThis.fetch
 const originalCustomApiKey = process.env.CUSTOM_PROVIDER_API_KEY
@@ -120,6 +126,7 @@ afterAll(() => {
   state.apiKeyAuth = originalApiKeyAuth
   state.rateLimitSeconds = originalRateLimitSeconds
   state.isMultiToken = originalIsMultiToken
+  resetTestAdminSession()
 })
 
 beforeEach(() => {
@@ -335,10 +342,11 @@ test("missing custom provider API key returns a clear error", async () => {
   expect(requests).toHaveLength(0)
 })
 
-test("dashboard can store provider API key directly", async () => {
+test("dashboard stores provider API key without returning it", async () => {
+  const admin = await createTestAdminSession(true)
   const response = await server.request("/dashboard/api/custom-providers", {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: adminHeaders(admin),
     body: JSON.stringify({
       id: "dashboard-provider",
       name: "Dashboard Provider",
@@ -350,16 +358,21 @@ test("dashboard can store provider API key directly", async () => {
   })
   const body = (await response.json()) as {
     apiKey?: string
+    apiKeyConfigured?: boolean
     apiKeyEnv?: string
   }
 
   expect(response.status).toBe(200)
-  expect(body.apiKey).toBe("dashboard-key")
+  expect(body.apiKey).toBeUndefined()
+  expect(body.apiKeyConfigured).toBe(true)
   expect(body.apiKeyEnv).toBeUndefined()
 
   const chatResponse = await server.request("/v1/chat/completions", {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${TEST_GATEWAY_KEY}`,
+    },
     body: JSON.stringify({
       model: "dashboard-chat",
       messages: [{ role: "user", content: "hello" }],
@@ -368,6 +381,28 @@ test("dashboard can store provider API key directly", async () => {
 
   expect(chatResponse.status).toBe(200)
   expect(requests[0]?.headers.get("authorization")).toBe("Bearer dashboard-key")
+})
+
+test("Nebius dashboard shortcut never returns the submitted API key", async () => {
+  const admin = await createTestAdminSession(true)
+  const response = await server.request(
+    "/dashboard/api/custom-providers/nebius-qwen3",
+    {
+      method: "POST",
+      headers: adminHeaders(admin),
+      body: JSON.stringify({ apiKey: "nebius-dashboard-secret" }),
+    },
+  )
+  const body = (await response.json()) as {
+    apiKey?: string
+    apiKeyConfigured?: boolean
+    headerNames?: Array<string>
+  }
+
+  expect(response.status).toBe(200)
+  expect(body.apiKey).toBeUndefined()
+  expect(body.apiKeyConfigured).toBe(true)
+  expect(body.headerNames).toEqual([])
 })
 
 test("Copilot models still route through the existing path", async () => {

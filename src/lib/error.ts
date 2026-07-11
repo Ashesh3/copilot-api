@@ -52,6 +52,24 @@ const SENSITIVE_HEADER_PATTERNS = [
   "x-api-key",
   "set-cookie",
 ]
+const SENSITIVE_FIELD_PATTERN =
+  /password|secret|api[_-]?key|authorization|cookie|access[_-]?token|refresh[_-]?token|client[_-]?secret|code[_-]?verifier/i
+
+function redactSensitiveValue(value: unknown, key = ""): unknown {
+  if (SENSITIVE_FIELD_PATTERN.test(key)) return "[REDACTED]"
+  if (Array.isArray(value)) {
+    return value.map((item) => redactSensitiveValue(item))
+  }
+  if (typeof value === "object" && value !== null) {
+    return Object.fromEntries(
+      Object.entries(value).map(([nestedKey, nestedValue]) => [
+        nestedKey,
+        redactSensitiveValue(nestedValue, nestedKey),
+      ]),
+    )
+  }
+  return value
+}
 
 function extractResponseHeaders(response: Response): Record<string, string> {
   const headers: Record<string, string> = {}
@@ -97,10 +115,12 @@ export async function forwardError(c: Context, error: unknown) {
     consola.error(
       `[${error.response.status} ${error.response.statusText}] ${error.message}`,
     )
+    parsedBody = redactSensitiveValue(parsedBody)
+    const requestPayload = redactSensitiveValue(error.requestPayload)
     consola.error("Response body:", parsedBody)
     consola.error("Response headers:", responseHeaders)
-    if (error.requestPayload) {
-      consola.error("Request payload:", error.requestPayload)
+    if (requestPayload) {
+      consola.error("Request payload:", requestPayload)
     }
 
     // Check for content filter error and log full details
@@ -109,9 +129,9 @@ export async function forwardError(c: Context, error: unknown) {
       consola.error("Full error response:")
       console.log(JSON.stringify(parsedBody, null, 2))
 
-      if (error.requestPayload) {
+      if (requestPayload) {
         consola.error("Request payload that triggered the filter:")
-        console.log(JSON.stringify(error.requestPayload, null, 2))
+        console.log(JSON.stringify(requestPayload, null, 2))
       }
     }
 
@@ -127,7 +147,7 @@ export async function forwardError(c: Context, error: unknown) {
         responseUrl: error.response.url || undefined,
         responseBody: parsedBody,
         responseHeaders,
-        requestPayload: error.requestPayload,
+        requestPayload,
       },
     })
 

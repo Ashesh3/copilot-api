@@ -27,8 +27,8 @@ import {
 } from "../components/common"
 import { Page } from "../components/Page"
 import { ResponsivePair } from "../components/ResponsivePair"
-import { DownloadIcon, PlusIcon, RadioTowerIcon, Trash2Icon } from "../icons"
-import { ApiError, del, get, getApiKey, patch, post } from "../lib/api"
+import { DownloadIcon, PlusIcon, Trash2Icon } from "../icons"
+import { ApiError, api, del, get, patch, post } from "../lib/api"
 import { useToast } from "../lib/toast"
 import { useAsyncData } from "../lib/usePolling"
 
@@ -59,24 +59,6 @@ function boolBadge(value: boolean, trueLabel = "Yes", falseLabel = "No") {
   )
 }
 
-async function detectPublicIps(): Promise<Array<string>> {
-  const urls = ["https://api4.ipify.org", "https://api6.ipify.org"]
-  const found: Array<string> = []
-  await Promise.all(
-    urls.map(async (url) => {
-      try {
-        const response = await fetch(url)
-        if (!response.ok) return
-        const ip = (await response.text()).trim()
-        if (ip) found.push(ip)
-      } catch {
-        // ignore individual lookup failures
-      }
-    }),
-  )
-  return Array.from(new Set(found))
-}
-
 export default function SettingsScreen() {
   const { data, error, loading, reload } = useAsyncData(loadBundle, [])
   const toast = useToast()
@@ -84,17 +66,23 @@ export default function SettingsScreen() {
   const [cleanupDraft, setCleanupDraft] = useState<string>()
   const [isSavingCleanup, setIsSavingCleanup] = useState(false)
   const [newIp, setNewIp] = useState("")
-  const [isDetecting, setIsDetecting] = useState(false)
+  const [reauthPassword, setReauthPassword] = useState("")
+  const [currentPassword, setCurrentPassword] = useState("")
+  const [newPassword, setNewPassword] = useState("")
+  const [confirmPassword, setConfirmPassword] = useState("")
+  const [isChangingPassword, setIsChangingPassword] = useState(false)
 
   const cleanupValue = cleanupDraft ?? data?.settings.codexCleanupModel ?? ""
 
   const handleExport = async () => {
     try {
-      const apiKey = getApiKey()
-      const headers: Record<string, string> = {}
-      if (apiKey) headers["x-api-key"] = apiKey
+      if (!reauthPassword) {
+        toast.error("Enter your admin password to authorize the export")
+        return
+      }
+      await post("/dashboard/auth/reauth", { password: reauthPassword })
       const response = await fetch("/dashboard/api/settings/export", {
-        headers,
+        credentials: "same-origin",
       })
       if (!response.ok) {
         throw new Error(`Export failed with status ${response.status}`)
@@ -110,10 +98,33 @@ export default function SettingsScreen() {
       link.click()
       URL.revokeObjectURL(url)
       toast.success("Config exported")
+      setReauthPassword("")
     } catch (caught) {
       toast.error(
         caught instanceof Error ? caught.message : "Failed to export config",
       )
+    }
+  }
+
+  const handleChangePassword = async () => {
+    if (newPassword !== confirmPassword) {
+      toast.error("New passwords do not match")
+      return
+    }
+    setIsChangingPassword(true)
+    try {
+      await api("PUT", "/dashboard/auth/password", {
+        currentPassword,
+        newPassword,
+      })
+      setCurrentPassword("")
+      setNewPassword("")
+      setConfirmPassword("")
+      toast.success("Administrator password changed; other sessions revoked")
+    } catch (caught) {
+      toast.error(errorMessage(caught, "Failed to change password"))
+    } finally {
+      setIsChangingPassword(false)
     }
   }
 
@@ -130,30 +141,6 @@ export default function SettingsScreen() {
       toast.error(errorMessage(caught, "Failed to update cleanup model"))
     } finally {
       setIsSavingCleanup(false)
-    }
-  }
-
-  const handleDetectIps = async () => {
-    setIsDetecting(true)
-    try {
-      const found = await detectPublicIps()
-      if (found.length === 0) {
-        toast.error("Could not detect any public IPs")
-        return
-      }
-      let added = 0
-      for (const ip of found) {
-        try {
-          await post("/dashboard/api/ip-allowlist", { ip, enabled: true })
-          added += 1
-        } catch {
-          // ignore duplicates or per-ip failures
-        }
-      }
-      toast.success(`Added ${added} detected IP${added === 1 ? "" : "s"}`)
-      reload()
-    } finally {
-      setIsDetecting(false)
     }
   }
 
@@ -283,14 +270,6 @@ export default function SettingsScreen() {
       title="Settings"
       onRefresh={reload}
       isRefreshing={loading}
-      actions={
-        <Button
-          label="Export Config"
-          variant="secondary"
-          icon={<DownloadIcon />}
-          onClick={handleExport}
-        />
-      }
     >
       {error ?
         <Banner
@@ -377,18 +356,54 @@ export default function SettingsScreen() {
 
           <Card>
             <VStack gap={4}>
+              <Heading level={3}>Administrator Security</Heading>
+              <TextInput
+                type="password"
+                label="Admin password for privileged actions"
+                value={reauthPassword}
+                onChange={setReauthPassword}
+              />
+              <Button
+                label="Export sanitized config"
+                variant="secondary"
+                icon={<DownloadIcon />}
+                onClick={() => void handleExport()}
+              />
+              <TextInput
+                type="password"
+                label="Current admin password"
+                value={currentPassword}
+                onChange={setCurrentPassword}
+              />
+              <TextInput
+                type="password"
+                label="New admin password"
+                value={newPassword}
+                onChange={setNewPassword}
+              />
+              <TextInput
+                type="password"
+                label="Confirm new password"
+                value={confirmPassword}
+                onChange={setConfirmPassword}
+              />
+              <Button
+                label="Change administrator password"
+                variant="primary"
+                isLoading={isChangingPassword}
+                isDisabled={
+                  !currentPassword || !newPassword || !confirmPassword
+                }
+                onClick={() => void handleChangePassword()}
+              />
+            </VStack>
+          </Card>
+
+          <Card>
+            <VStack gap={4}>
               <HStack gap={2} vAlign="center" wrap="wrap">
                 <Heading level={3}>IP Allowlist</Heading>
                 <Badge variant="neutral" label="Used by /transcribe" />
-              </HStack>
-              <HStack gap={2} wrap="wrap">
-                <Button
-                  label="Detect public IPs"
-                  variant="secondary"
-                  icon={<RadioTowerIcon />}
-                  isLoading={isDetecting}
-                  onClick={handleDetectIps}
-                />
               </HStack>
               <HStack gap={2} vAlign="end" wrap="wrap">
                 <TextInput

@@ -1,7 +1,8 @@
 import consola from "consola"
 import { Hono } from "hono"
+import { bodyLimit } from "hono/body-limit"
 
-import { requireIpAllowlist } from "~/lib/ip-allowlist-guard"
+import { resolveRequestCredential } from "~/lib/credential-resolver"
 import { broadcastEvents } from "~/routes/code-sessions/event-bus"
 import {
   archiveSession,
@@ -13,9 +14,23 @@ import {
 
 export const sessionsRoutes = new Hono()
 
-// Gate the entire compat-sessions surface on the IP allowlist — these
-// endpoints mutate session state without any API key check.
-sessionsRoutes.use("*", requireIpAllowlist)
+export const SESSION_COMPAT_MAX_BODY_BYTES = 1024 * 1024
+export const SESSION_COMPAT_MAX_EVENTS_PER_REQUEST = 100
+
+sessionsRoutes.use("*", async (c, next) => {
+  const credential = await resolveRequestCredential(c.req.raw, [
+    "user:sessions:claude_code",
+  ])
+  if (!credential) return c.json({ error: "Unauthorized" }, 401)
+  await next()
+})
+sessionsRoutes.use(
+  "*",
+  bodyLimit({
+    maxSize: SESSION_COMPAT_MAX_BODY_BYTES,
+    onError: (c) => c.json({ error: "Payload too large" }, 413),
+  }),
+)
 
 /**
  * Map a compat session ID (session_*) to the internal code-session ID (cse_*).
@@ -124,6 +139,12 @@ sessionsRoutes.post("/:id/events", async (c) => {
   }>()
 
   const events = body.events ?? []
+  if (
+    !Array.isArray(events)
+    || events.length > SESSION_COMPAT_MAX_EVENTS_PER_REQUEST
+  ) {
+    return c.json({ error: "Invalid event batch" }, 400)
+  }
 
   if (events.length > 0) {
     const now = new Date().toISOString()

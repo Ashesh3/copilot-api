@@ -16,6 +16,9 @@ const FEATURE_FLAGS_PATH = path.join(APP_DIR, "feature_flags.json")
 const STATSIG_OVERRIDES_PATH = path.join(APP_DIR, "statsig_overrides.json")
 const IP_ALLOWLIST_PATH = path.join(APP_DIR, "ip_allowlist.json")
 const USAGE_PATH = path.join(APP_DIR, "usage.json")
+const OAUTH_STORE_PATH = path.join(APP_DIR, "oauth_tokens.json")
+const ADMIN_AUTH_PATH = path.join(APP_DIR, "admin_auth.json")
+const ADMIN_SESSIONS_PATH = path.join(APP_DIR, "admin_sessions.json")
 
 export const PATHS = {
   APP_DIR,
@@ -30,6 +33,9 @@ export const PATHS = {
   STATSIG_OVERRIDES_PATH,
   IP_ALLOWLIST_PATH,
   USAGE_PATH,
+  OAUTH_STORE_PATH,
+  ADMIN_AUTH_PATH,
+  ADMIN_SESSIONS_PATH,
 }
 
 /**
@@ -47,7 +53,8 @@ export function isEnvOnlyTokens(): boolean {
 }
 
 export async function ensurePaths(): Promise<void> {
-  await fs.mkdir(PATHS.APP_DIR, { recursive: true })
+  await fs.mkdir(PATHS.APP_DIR, { recursive: true, mode: 0o700 })
+  await fs.chmod(PATHS.APP_DIR, 0o700)
   if (!envOnlyTokens) {
     await ensureFile(PATHS.GITHUB_TOKEN_PATH)
   }

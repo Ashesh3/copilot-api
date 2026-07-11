@@ -1,9 +1,13 @@
 import type { Context, MiddlewareHandler } from "hono"
 
 import consola from "consola"
+import { createHash, timingSafeEqual } from "node:crypto"
 
 import { getConfig } from "./config"
-import { extractClientIp, whitelistIp } from "./ip-blocker"
+import {
+  extractRequestCredential,
+  resolveRequestCredential,
+} from "./credential-resolver"
 import { state } from "./state"
 
 interface AuthMiddlewareOptions {
@@ -45,39 +49,11 @@ export function getActiveApiKeys(): Array<string> {
 }
 
 export function extractRequestApiKey(c: Context): string | null {
-  const xApiKey = c.req.header("x-api-key")?.trim()
-  if (xApiKey) {
-    return xApiKey
-  }
-
-  // Google AI SDK sends API key via x-goog-api-key header
-  const googleApiKey = c.req.header("x-goog-api-key")?.trim()
-  if (googleApiKey) {
-    return googleApiKey
-  }
-
-  const authorization = c.req.header("authorization")
-  if (!authorization) {
-    return null
-  }
-
-  const [scheme, ...rest] = authorization.trim().split(/\s+/)
-  if (scheme.toLowerCase() !== "bearer") {
-    return null
-  }
-
-  const bearerToken = rest.join(" ").trim()
-  return bearerToken || null
-}
-
-export function whitelistAuthenticatedClient(c: Context): void {
-  const clientIp = extractClientIp(c)
-  if (clientIp !== null) {
-    whitelistIp(clientIp)
-  }
+  return extractRequestCredential(c.req.raw)
 }
 
 function createUnauthorizedResponse(c: Context): Response {
+  c.header("Cache-Control", "no-store")
   c.header("WWW-Authenticate", 'Bearer realm="copilot-api"')
   return c.json(
     {
@@ -95,7 +71,7 @@ export function createAuthMiddleware(
 ): MiddlewareHandler {
   const getApiKeys = options.getApiKeys ?? getConfiguredApiKeys
   const allowUnauthenticatedPaths = options.allowUnauthenticatedPaths ?? ["/"]
-  const allowOptionsBypass = options.allowOptionsBypass ?? true
+  const allowOptionsBypass = options.allowOptionsBypass ?? false
 
   return async (c, next) => {
     if (allowOptionsBypass && c.req.method === "OPTIONS") {
@@ -111,12 +87,26 @@ export function createAuthMiddleware(
       return next()
     }
 
-    const requestApiKey = extractRequestApiKey(c)
-    if (!requestApiKey || !apiKeys.includes(requestApiKey)) {
+    const credential =
+      options.getApiKeys ?
+        resolveCustomApiKeys(c, apiKeys)
+      : await resolveRequestCredential(c.req.raw, ["user:inference"])
+    if (!credential) {
       return createUnauthorizedResponse(c)
     }
 
-    whitelistAuthenticatedClient(c)
     return next()
   }
+}
+
+function resolveCustomApiKeys(c: Context, apiKeys: Array<string>): boolean {
+  const requestApiKey = extractRequestApiKey(c)
+  if (!requestApiKey) return false
+  const requestDigest = createHash("sha256").update(requestApiKey).digest()
+  return apiKeys.some((apiKey) =>
+    timingSafeEqual(
+      requestDigest,
+      createHash("sha256").update(apiKey).digest(),
+    ),
+  )
 }

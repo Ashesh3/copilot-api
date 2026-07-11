@@ -2,148 +2,213 @@ import type { Context } from "hono"
 
 import consola from "consola"
 
-import { isManagedIpAllowed, isManagedIpDisabled } from "./ip-allowlist"
+import {
+  isManagedIpAllowed,
+  isManagedIpDisabled,
+  normalizeIpAddress,
+} from "./ip-allowlist"
 
 interface IpEntry {
   count: number
   date: string
 }
 
-const ipTracker = new Map<string, IpEntry>()
-const whitelistedIps = new Set<string>()
+interface IpLease {
+  expiresAt: number
+}
 
-/**
- * Extracts the client IP from the request, preferring trusted-proxy headers.
- *
- * Trust order (most trusted first):
- *   1. `X-Real-IP` — set by our nginx vhost to `$remote_addr` (the real client
- *      IP, after the realip module has resolved any `CF-Connecting-IP` hop).
- *   2. `X-Forwarded-For` rightmost entry — the rightmost entry is the most
- *      recently-appended hop, i.e. what our trusted proxy saw. The leftmost
- *      (RFC-canonical "client") is attacker-supplied and MUST NOT be trusted.
- *
- * Returns `null` if no header is present (e.g. direct hit on :4141 inside
- * the docker network) — callers should fail closed in that case.
- *
- * SECURITY NOTE: the nginx vhost ships with
- *   `proxy_set_header X-Forwarded-For $remote_addr;`
- * which OVERWRITES any client-supplied value, so the XFF chain is always a
- * single trusted entry. The rightmost-preference defends against a future
- * misconfiguration that switches back to `$proxy_add_x_forwarded_for`.
- */
-export function extractClientIp(c: Context): string | null {
-  const xRealIp = c.req.header("x-real-ip")?.trim()
+interface CidrRange {
+  family: 4 | 6
+  network: bigint
+  prefix: number
+}
+
+const PEER_IP_HEADER = "x-copilot-peer-ip"
+const DEFAULT_TRUSTED_PROXY_CIDRS = "127.0.0.1/32,::1/128"
+const ipTracker = new Map<string, IpEntry>()
+const ipLeases = new Map<string, IpLease>()
+let trustedProxyCache: { raw: string; ranges: Array<CidrRange> } | undefined
+
+function ipv4ToBigInt(ip: string): bigint {
+  return ip
+    .split(".")
+    .reduce((value, octet) => (value << 8n) | BigInt(octet), 0n)
+}
+
+function ipv6ToBigInt(ip: string): bigint {
+  const [leftRaw, rightRaw = ""] = ip.split("::", 2)
+  const left = leftRaw ? leftRaw.split(":") : []
+  const right = rightRaw ? rightRaw.split(":") : []
+  const missing = 8 - left.length - right.length
+  const groups = [
+    ...left,
+    ...Array.from({ length: missing }, () => "0"),
+    ...right,
+  ]
+  return groups.reduce(
+    (value, group) => (value << 16n) | BigInt(Number.parseInt(group, 16)),
+    0n,
+  )
+}
+
+function ipToBigInt(ip: string): { family: 4 | 6; value: bigint } | null {
+  const normalized = normalizeIpAddress(ip)
+  if (!normalized) return null
+  return normalized.includes(":") ?
+      { family: 6, value: ipv6ToBigInt(normalized) }
+    : { family: 4, value: ipv4ToBigInt(normalized) }
+}
+
+function parseCidr(value: string): CidrRange | null {
+  const [address, prefixRaw] = value.trim().split("/", 2)
+  if (!address) return null
+
+  const parsed = ipToBigInt(address)
+  if (!parsed) return null
+  const bits = parsed.family === 4 ? 32 : 128
+  const prefix = prefixRaw ? Number(prefixRaw) : bits
+  if (!Number.isInteger(prefix) || prefix < 0 || prefix > bits) return null
+
+  const shift = BigInt(bits - prefix)
+  const network = shift === 0n ? parsed.value : (parsed.value >> shift) << shift
+  return { family: parsed.family, network, prefix }
+}
+
+function getTrustedProxyRanges(): Array<CidrRange> {
+  const raw =
+    process.env.COPILOT_TRUSTED_PROXY_CIDRS ?? DEFAULT_TRUSTED_PROXY_CIDRS
+  if (trustedProxyCache?.raw === raw) return trustedProxyCache.ranges
+
+  const ranges = raw
+    .split(",")
+    .map((value) => parseCidr(value))
+    .filter((range): range is CidrRange => range !== null)
+  trustedProxyCache = { raw, ranges }
+  return ranges
+}
+
+function isInCidr(ip: string, range: CidrRange): boolean {
+  const parsed = ipToBigInt(ip)
+  if (!parsed || parsed.family !== range.family) return false
+  const bits = parsed.family === 4 ? 32 : 128
+  const shift = BigInt(bits - range.prefix)
+  const network = shift === 0n ? parsed.value : (parsed.value >> shift) << shift
+  return network === range.network
+}
+
+export function isTrustedProxyPeer(ip: string): boolean {
+  return getTrustedProxyRanges().some((range) => isInCidr(ip, range))
+}
+
+function getForwardedClientIp(headers: Headers): string | null {
+  const xRealIp = normalizeIpAddress(headers.get("x-real-ip") ?? "")
   if (xRealIp) return xRealIp
 
-  const xForwardedFor = c.req.header("x-forwarded-for")
-  if (!xForwardedFor) {
-    return null
-  }
-
-  const ips = xForwardedFor
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean)
-  return ips.at(-1) ?? null
+  const forwarded = headers.get("x-forwarded-for")
+  if (!forwarded) return null
+  const first = forwarded.split(",", 1)[0]
+  return first ? normalizeIpAddress(first) : null
 }
 
 /**
- * Gets the current UTC date as YYYY-MM-DD string.
+ * Resolve the client address using socket metadata injected by Bun. Forwarding
+ * headers are considered only when that actual socket peer is an approved
+ * proxy. Direct requests use the socket peer and cannot spoof this header
+ * because `start.ts` overwrites it before Hono receives the request.
  */
+export function extractClientIp(c: Context): string | null {
+  return extractClientIpFromHeaders(c.req.raw.headers)
+}
+
+export function extractClientIpFromHeaders(headers: Headers): string | null {
+  const peerIp = normalizeIpAddress(headers.get(PEER_IP_HEADER) ?? "")
+  if (!peerIp) return null
+  if (!isTrustedProxyPeer(peerIp)) return peerIp
+  return getForwardedClientIp(headers)
+}
+
 function getUtcDateString(): string {
   return new Date().toISOString().slice(0, 10)
 }
 
-/**
- * Whitelists an IP for the lifetime of the server process.
- * Once whitelisted, the IP will never be blocked regardless of failed attempts.
- */
-export function whitelistIp(ip: string): void {
-  if (!whitelistedIps.has(ip)) {
-    whitelistedIps.add(ip)
-    // Clear any existing failed attempts
-    ipTracker.delete(ip)
-    consola.info(`[security] IP ${ip} whitelisted after successful auth`)
-  }
+/** Create an explicit, expiring IP lease. This is never called after auth. */
+export function leaseIp(ip: string, ttlMs: number): boolean {
+  const normalized = normalizeIpAddress(ip)
+  if (!normalized || !Number.isFinite(ttlMs) || ttlMs <= 0) return false
+  ipLeases.set(normalized, { expiresAt: Date.now() + ttlMs })
+  ipTracker.delete(normalized)
+  return true
 }
 
 export function isIpWhitelisted(ip: string): boolean {
-  return whitelistedIps.has(ip)
+  const normalized = normalizeIpAddress(ip)
+  if (!normalized) return false
+  const lease = ipLeases.get(normalized)
+  if (!lease) return false
+  if (lease.expiresAt <= Date.now()) {
+    ipLeases.delete(normalized)
+    return false
+  }
+  return true
 }
 
 export function unwhitelistIp(ip: string): boolean {
-  return whitelistedIps.delete(ip)
+  const normalized = normalizeIpAddress(ip)
+  return normalized ? ipLeases.delete(normalized) : false
 }
 
 export async function isIpAllowedForWhitelistedRoute(
   ip: string,
 ): Promise<boolean> {
-  if (await isManagedIpDisabled(ip)) return false
-  return whitelistedIps.has(ip) || (await isManagedIpAllowed(ip))
+  const normalized = normalizeIpAddress(ip)
+  if (!normalized || (await isManagedIpDisabled(normalized))) return false
+  return isIpWhitelisted(normalized) || (await isManagedIpAllowed(normalized))
 }
 
-/**
- * Checks if an IP is blocked due to 3+ failed attempts today (UTC).
- * Whitelisted IPs are never blocked.
- * Cleans up stale entries (entries from previous days).
- */
 export function isIpBlocked(ip: string): boolean {
-  if (whitelistedIps.has(ip)) {
-    return false
-  }
+  const normalized = normalizeIpAddress(ip)
+  if (!normalized) return true
+  if (isIpWhitelisted(normalized)) return false
 
   const today = getUtcDateString()
-  const entry = ipTracker.get(ip)
-
-  if (!entry) {
-    return false
-  }
-
-  // Stale entry cleanup: if date doesn't match today, delete and return false
+  const entry = ipTracker.get(normalized)
+  if (!entry) return false
   if (entry.date !== today) {
-    ipTracker.delete(ip)
+    ipTracker.delete(normalized)
     return false
   }
-
-  // Check if count meets or exceeds threshold
   if (entry.count >= 3) {
-    consola.debug(`[security] Blocked request from banned IP ${ip}`)
+    consola.debug(`[security] Blocked request from banned IP ${normalized}`)
     return true
   }
   return false
 }
 
-/**
- * Records a failed authentication attempt for an IP.
- * Increments count if entry exists for today, otherwise creates new entry.
- * Returns the current attempt count after recording.
- */
 export function recordFailedAttempt(ip: string): number {
+  const normalized = normalizeIpAddress(ip)
+  if (!normalized) return 3
+
   const today = getUtcDateString()
-  const entry = ipTracker.get(ip)
-
-  if (!entry) {
-    // New entry
-    ipTracker.set(ip, { count: 1, date: today })
-    consola.warn(`[security] Failed auth attempt from ${ip} (1/3)`)
+  const entry = ipTracker.get(normalized)
+  if (!entry || entry.date !== today) {
+    ipTracker.set(normalized, { count: 1, date: today })
+    consola.warn(`[security] Failed auth attempt from ${normalized} (1/3)`)
     return 1
   }
 
-  if (entry.date === today) {
-    // Same day: increment count
-    entry.count += 1
-    if (entry.count === 3) {
-      consola.warn(`[security] IP ${ip} banned — 3 failed auth attempts today`)
-    } else {
-      consola.warn(
-        `[security] Failed auth attempt from ${ip} (${entry.count}/3)`,
-      )
-    }
-    return entry.count
+  entry.count += 1
+  if (entry.count === 3) {
+    consola.warn(
+      `[security] IP ${normalized} banned after repeated auth failures`,
+    )
   } else {
-    // Different day: reset to 1
-    ipTracker.set(ip, { count: 1, date: today })
-    consola.warn(`[security] Failed auth attempt from ${ip} (1/3)`)
-    return 1
+    consola.warn(`[security] Failed auth attempt from ${normalized}`)
   }
+  return entry.count
+}
+
+export function resetIpSecurityForTest(): void {
+  ipTracker.clear()
+  ipLeases.clear()
+  trustedProxyCache = undefined
 }

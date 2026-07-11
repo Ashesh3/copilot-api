@@ -1,29 +1,133 @@
+# Render one server block per hostname. Do not combine Claude API, platform,
+# and UI hostnames: each has a different compatibility allowlist.
+
 server {
   listen 80;
-  server_name {{SPOOF_SERVER_NAMES}};
+  server_name {{CLAUDE_API_SERVER_NAME}};
   return 301 https://$host$request_uri;
 }
 
 server {
   listen 443 ssl;
-  server_name {{SPOOF_SERVER_NAMES}};
-
-  ssl_certificate     {{SPOOF_SSL_CERTIFICATE_PATH}};
+  server_name {{CLAUDE_API_SERVER_NAME}};
+  client_header_timeout 10s;
+  client_body_timeout 30s;
+  client_max_body_size 32m;
+  ssl_certificate {{SPOOF_SSL_CERTIFICATE_PATH}};
   ssl_certificate_key {{SPOOF_SSL_CERTIFICATE_KEY_PATH}};
-
   limit_req zone={{RATE_LIMIT_ZONE}} burst={{RATE_LIMIT_BURST}} nodelay;
 
-  location / {
+  proxy_set_header Host $host;
+  proxy_set_header X-Real-IP $remote_addr;
+  proxy_set_header X-Forwarded-For $remote_addr;
+  proxy_set_header X-Forwarded-Proto $scheme;
+
+  location ~ ^/v1/(?:messages(?:/count_tokens)?|models)/?$ {
+    limit_except GET POST { deny all; }
+    proxy_pass {{UPSTREAM_URL}};
+    include {{PROXY_LIMITS_SNIPPET_PATH}};
+  }
+  location ~ ^/api/eval/[^/]+/?$ {
+    limit_except POST { deny all; }
+    proxy_pass {{UPSTREAM_URL}};
+    include {{PROXY_LIMITS_SNIPPET_PATH}};
+  }
+  location ~ ^/api/ws/speech_to_text/voice_stream/?$ {
+    limit_except GET { deny all; }
     proxy_pass {{UPSTREAM_URL}};
     proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $remote_addr;
-    proxy_set_header X-Forwarded-Proto $scheme;
     proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Connection "upgrade";
-
-    include {{PROXY_LIMITS_SNIPPET_PATH}};
-    chunked_transfer_encoding on;
+    proxy_set_header Connection upgrade;
+    proxy_request_buffering off;
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 3m;
+    proxy_send_timeout 3m;
   }
+  location ~ ^/api/(?:oauth|claude_code|claude_cli|organization|organizations)(?:/.*)?$ {
+    proxy_pass {{UPSTREAM_URL}};
+    include {{PROXY_LIMITS_SNIPPET_PATH}};
+  }
+  location ~ ^/v1/code/sessions(?:/.*)?$ {
+    proxy_pass {{UPSTREAM_URL}};
+    include {{PROXY_LIMITS_SNIPPET_PATH}};
+  }
+  location ~ ^/v1/code/triggers(?:/[^/]+(?:/run)?)?/?$ {
+    limit_except GET POST { deny all; }
+    client_max_body_size 64k;
+    proxy_pass {{UPSTREAM_URL}};
+    include {{PROXY_LIMITS_SNIPPET_PATH}};
+  }
+  location = /v1/code/github/import-token {
+    limit_except POST { deny all; }
+    client_max_body_size 64k;
+    proxy_pass {{UPSTREAM_URL}};
+    include {{PROXY_LIMITS_SNIPPET_PATH}};
+  }
+  location = /v1/environment_providers {
+    limit_except GET { deny all; }
+    proxy_pass {{UPSTREAM_URL}};
+    include {{PROXY_LIMITS_SNIPPET_PATH}};
+  }
+  location = /v1/environment_providers/cloud/create {
+    limit_except POST { deny all; }
+    client_max_body_size 64k;
+    proxy_pass {{UPSTREAM_URL}};
+    include {{PROXY_LIMITS_SNIPPET_PATH}};
+  }
+  location = /v1/mcp_servers {
+    limit_except GET { deny all; }
+    proxy_pass {{UPSTREAM_URL}};
+    include {{PROXY_LIMITS_SNIPPET_PATH}};
+  }
+  location ~ ^/v1/session_ingress/session/[^/]+/?$ {
+    limit_except GET { deny all; }
+    proxy_pass {{UPSTREAM_URL}};
+    include {{PROXY_LIMITS_SNIPPET_PATH}};
+  }
+  location = /v1/ultrareview/quota {
+    limit_except GET { deny all; }
+    proxy_pass {{UPSTREAM_URL}};
+    include {{PROXY_LIMITS_SNIPPET_PATH}};
+  }
+  location ~ ^/v1/(?:sessions|environments)(?:/.*)?$ {
+    proxy_pass {{UPSTREAM_URL}};
+    include {{PROXY_LIMITS_SNIPPET_PATH}};
+  }
+  location / { return 404; }
+}
+
+server {
+  listen 443 ssl;
+  server_name {{CLAUDE_PLATFORM_SERVER_NAMES}};
+  client_header_timeout 10s;
+  client_body_timeout 30s;
+  client_max_body_size 64k;
+  ssl_certificate {{SPOOF_SSL_CERTIFICATE_PATH}};
+  ssl_certificate_key {{SPOOF_SSL_CERTIFICATE_KEY_PATH}};
+
+  proxy_set_header Host $host;
+  proxy_set_header X-Real-IP $remote_addr;
+  proxy_set_header X-Forwarded-For $remote_addr;
+  proxy_set_header X-Forwarded-Proto $scheme;
+
+  location ~ ^/oauth/(?:authorize|code/(?:success|callback))/?$ {
+    limit_except GET POST { deny all; }
+    client_max_body_size 64k;
+    proxy_pass {{UPSTREAM_URL}};
+    include {{PROXY_LIMITS_SNIPPET_PATH}};
+  }
+  location = /v1/oauth/token {
+    limit_except POST { deny all; }
+    client_max_body_size 64k;
+    proxy_pass {{UPSTREAM_URL}};
+    include {{PROXY_LIMITS_SNIPPET_PATH}};
+  }
+  location = /v1/oauth/revoke {
+    limit_except POST { deny all; }
+    client_max_body_size 64k;
+    proxy_pass {{UPSTREAM_URL}};
+    include {{PROXY_LIMITS_SNIPPET_PATH}};
+  }
+  location / { return 404; }
 }

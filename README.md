@@ -115,15 +115,16 @@ Responses compaction.
   replay, model redirects/settings/routing, custom providers, replacements,
   feature flags, IP allowlists, and configuration export.
 - Current GitHub Copilot quota reporting through both the CLI and `GET /usage`.
-- Local request/token tracking for dashboard utilization views.
+- Seven-day local request/token aggregates plus separate lifetime totals for
+  dashboard utilization views.
 - Manual approval for primary generation endpoints and token-bucket rate
   limiting for supported generation and compaction transports.
 - Optional Sentry tracing.
 
 ### Client compatibility
 
-- Claude Code Messages, OAuth compatibility, Remote Control, environments,
-  sessions, feature flags, and Direct Connect compatibility stubs.
+- Claude Code Messages, scoped OAuth, authenticated Remote Control,
+  environments, sessions, feature flags, and opt-in Direct Connect stubs.
 - Codex Desktop dictation, transcript cleanup, and Statsig override support.
 - Groq-backed speech-to-text for voice and dictation endpoints.
 
@@ -219,13 +220,22 @@ currently translated.
 
 ## Authentication and network exposure
 
-Copilot API has two separate credentials:
+Copilot API separates these credential boundaries:
 
 1. **GitHub credentials** authenticate the server to GitHub Copilot. Obtain one
    through device authentication, `auth`, `--github-token`, stored accounts, or
    `GITHUB_TOKENS`.
-2. **Gateway credentials** authenticate clients to this server. Enable this
-   boundary with `--api-key-auth` or, in Docker, `COPILOT_API_KEY_AUTH`.
+2. **Gateway credentials** authenticate trusted data-plane clients and bootstrap
+   OAuth and the administrator account. Enable this boundary with
+   `--api-key-auth` or, in Docker, `COPILOT_API_KEY_AUTH`.
+3. **OAuth and inference credentials** are independent, scoped credentials.
+   The OAuth flow never returns the gateway key. Claude Code receives a
+   one-hour opaque access token and a rotating 30-day refresh token; an API key
+   created through OAuth is a separate inference-only credential.
+4. **Administrator sessions** are server-side sessions established with both
+   the gateway key and an administrator password. The browser stores a Secure,
+   HttpOnly session cookie and a separate SameSite-strict CSRF cookie, not the
+   gateway key.
 
 For any non-loopback deployment, enable a long random startup gateway key:
 
@@ -249,35 +259,37 @@ x-api-key: replace-with-gateway-key
 x-goog-api-key: replace-with-gateway-key
 ```
 
-HTTP requests passing through the startup key guard are deliberately held open
-when the key is wrong rather than receiving a normal API response. This can look
-like a timeout. When a trusted reverse proxy supplies an IP header, three failed
-guarded LLM-route attempts block a resolvable, non-whitelisted source IP until
-the process restarts or the UTC date changes. Direct clients without those
-headers are not strike-tracked, and dashboard/WebSocket auth failures use
-different responses.
+Missing, invalid, expired, and blocked data-plane credentials receive a bounded
+`401` response with `Cache-Control: no-store`. Repeated failed authentication on
+the main LLM routes is strike-tracked by normalized client IP. Authentication
+success does not automatically add that IP to the managed allowlist.
 
 `config.json` also supports `auth.apiKeys`. When no startup key is active, those
-keys produce conventional `401` responses on globally protected API routes.
-They do not supplement a startup key and do not protect pre-auth compatibility
-surfaces.
+keys protect globally guarded API routes. If neither source configures a gateway
+credential, the normal inference routes remain open; use that mode only on a
+trusted loopback network.
 
-The dashboard HTML shell is served without authentication. Its data and mutation
-APIs are protected only when startup `--api-key-auth` is enabled. Do not expose
-an unprotected dashboard to an untrusted network.
+OAuth authorization accepts Claude Code's registered production client, exact
+manual or localhost callback URI, requested scopes, and S256 PKCE parameters.
+After the gateway key is entered in the browser, the server issues a random,
+one-use, two-minute authorization code bound to the client, redirect URI, state,
+scope, and PKCE challenge. Access, refresh, authorization-code, and generated
+inference secrets are persisted only as SHA-256 digests in
+`oauth_tokens.json`. Refresh tokens rotate on every use; replay revokes the
+entire token family. Revocation is available at `POST /v1/oauth/revoke`.
 
-> [!CAUTION]
-> A startup key does not make every route safe for direct public exposure. The
-> OAuth compatibility token exchange and some compatibility routes are mounted
-> before the global key guards. In particular, the current OAuth flow can return
-> the active gateway key through an unauthenticated refresh-token exchange, and
-> Direct Connect session routes/WebSockets and selected code stubs are not
-> key- or IP-guarded. Until those runtime limitations are fixed, keep the app on
-> loopback or a private network. If it must sit behind a remote reverse proxy,
-> use a strict path allowlist and block `/oauth*`, `/v1/oauth*`, `/sessions*`,
-> `/ws/direct*`, `/health/`, `/health/api/*`, and every unused pre-auth
-> compatibility path. If health monitoring is required, allow only the exact
-> `/health/health` path.
+The dashboard shell can be loaded before login, but every dashboard API requires
+an administrator session. First-time setup requires the gateway key and an
+administrator password of at least 16 characters. Normal login requires both.
+Sessions have a 30-day absolute lifetime and 12-hour idle lifetime; mutations
+also require a CSRF token and an approved `Origin`. Sensitive operations require
+recent password reauthentication, and a password change revokes other sessions.
+
+Keep the application bound to loopback or a private container network even with
+these controls. Publish only the exact hostname/path set required by the clients
+you use. The sole public liveness route is exact `GET /health/health`; no session
+router is mounted below `/health`. Direct Connect is disabled unless
+`COPILOT_API_ENABLE_DIRECT_CONNECT=true`, and remains authenticated when enabled.
 
 ## Models, routing, and providers
 
@@ -409,19 +421,38 @@ Open `/dashboard` on the same host as the API. The dashboard includes:
 - managed IP allowlists; and
 - settings inspection and ZIP export.
 
-LLM Debug records raw outbound Copilot attempts, including complete request
-bodies and upstream authorization headers, plus raw upstream responses. Entries
-expire after ten minutes and are pruned on the next debug-store operation; an
-idle process may retain expired entries longer. It observes Chat Completions,
-Responses, Embeddings, and Messages attempts. Replay is narrower and supports
-logged Chat Completions and Responses attempts only.
+On first use, the dashboard prompts for the gateway key and a new administrator
+password. Later logins require both. The browser receives a Secure, HttpOnly,
+SameSite-strict session cookie plus a separate SameSite-strict CSRF cookie; it
+does not persist either login credential in `localStorage`. Set
+`COPILOT_ADMIN_ORIGIN` to the exact external dashboard origin before serving
+the dashboard through a reverse proxy.
+
+If the administrator password is lost, run `copilot-api admin --reset` from the
+trusted host console. The command requires interactive confirmation, removes
+the password verifier, and revokes all administrator sessions; the next
+dashboard visit performs first-use setup again with the gateway key. This is
+the recovery path—there is deliberately no public password-reset endpoint.
+
+LLM Debug records outbound Copilot attempts with authorization, cookies, API
+keys, tokens, and secret-like JSON properties redacted before storage. Entries
+expire after ten minutes and are pruned during debug-store operations. It
+observes Chat Completions, Responses, Embeddings, and Messages attempts. Replay
+is narrower and supports logged Chat Completions and Responses attempts only.
+Debug detail, replay, provider-secret changes, configuration export, and other
+sensitive operations require a recent password reauthentication.
 
 `GET /usage` returns current GitHub Copilot quota data. The dashboard's local
-usage view is a different, persisted request/token tracker.
+usage view is a different tracker: minute/model aggregates are retained for
+seven days, while separate lifetime counters remain cumulative. Storage is
+pruned on load, record, and read and is written atomically.
 
-Configuration exports omit GitHub token files, the startup gateway key, and
-local usage history, but they can still contain `auth.apiKeys`, provider keys,
-and custom headers. Treat every export as a secret.
+Configuration exports omit GitHub token files, OAuth/admin stores, the startup
+gateway key, and local usage history. Secret-like keys and values in exported
+configuration—including provider keys, authorization headers, cookies, tokens,
+passwords, and credentials—are replaced with `[REDACTED]`. Provider secrets are
+also write-only through dashboard APIs: listings report whether a key is
+configured without returning the key or sensitive custom headers.
 
 ## Claude Code and Codex integrations
 
@@ -430,23 +461,26 @@ These are compatibility implementations, not hosted identity or cloud services.
 ### Claude Code
 
 - The Anthropic Messages endpoint supports normal Claude Code model traffic.
-- The local OAuth facade emulates endpoints Claude Code expects. Its browser
-  login form is gated only by startup `--api-key-auth`; it is not GitHub or
-  Anthropic identity.
-- Code Sessions and SSE endpoints support the newer Remote Control protocol.
-- Environments and session routes support the polling compatibility bridge.
-- Direct Connect compatibility stubs expose in-memory session management and
-  `/ws/direct/:sessionId`; they do not implement a full terminal bridge.
-- `/remote` provides a browser interface for compatible remote sessions.
+- The local OAuth facade implements opaque, scoped Claude Code credentials with
+  one-use authorization codes, S256 PKCE, refresh rotation, and revocation. It
+  is local gateway identity, not GitHub or Anthropic identity.
+- Code-session creation, bridge setup, session APIs, and user actions require an
+  OAuth credential with the Claude Code session scope.
+- Worker endpoints and SSE use random, expiring capabilities bound to one
+  session and worker epoch. Environment poll, acknowledgement, heartbeat, and
+  reconnect calls use separate expiring capabilities bound to one environment.
+- `/remote` uses the administrator session plus a one-use, short-lived,
+  session-bound WebSocket ticket; a session ID is not authorization.
+- Direct Connect compatibility stubs are disabled by default. When explicitly
+  enabled for private development, `/sessions` and `/ws/direct/:sessionId`
+  require an inference-capable credential and remain resource-limited.
 - GrowthBook feature evaluation and the feature-flag UI support client behavior
   overrides.
 
-Several compatibility surfaces exist before the global API-key middleware.
-`/v1/code/sessions`, `/v1/environments`, `/v1/sessions`, and `/api/eval` use the
-managed IP allowlist. Direct Connect session creation/list/deletion and its
-WebSocket, `/ws/remote/*`, the voice WebSocket, and selected code stubs currently
-use neither the global startup-key guard nor the managed IP allowlist. Keep them
-unreachable except through a trusted, path-restricting reverse proxy.
+The OAuth and bridge credentials above are the primary authorization boundary.
+Managed IP policy remains defense in depth for compatibility calls that need it;
+successful gateway or OAuth authentication never permanently promotes a source
+IP into that policy.
 
 ### Codex Desktop
 
@@ -457,7 +491,11 @@ unreachable except through a trusted, path-restricting reverse proxy.
 
 Set `GROQ_API_KEY` or the equivalent `groqApiKey` config field to enable speech
 transcription. The voice WebSocket endpoint is
-`/api/ws/speech_to_text/voice_stream`.
+`/api/ws/speech_to_text/voice_stream`. It authenticates the upgrade with an
+OAuth `voice:transcribe` entitlement (derived for Claude Code from
+`user:inference`) before allocating audio state. It also validates any supplied
+Origin and enforces frame, total-audio, duration, idle, connection, and
+per-principal transcription-budget limits.
 
 Codex Desktop calls must also satisfy gateway-key or managed/session-IP
 authorization. For authenticated non-local Desktop routing, use the supplied
@@ -497,7 +535,7 @@ Run a command with `--help` to inspect the installed version's current options.
 | `--proxy-env` |  | off | Reserved proxy initializer; currently ineffective because the supported Bun server path skips it |
 | `--insecure` |  | off | Disable TLS certificate verification; unsafe outside controlled debugging |
 | `--debug` | `-d` | off | Log raw incoming URLs, headers, and most top-level JSON fields; sensitive troubleshooting only |
-| `--api-key-auth <key>` |  | unset | Enable the startup gateway-key guard for the main API and dashboard/feature-flag APIs; review pre-auth routes separately |
+| `--api-key-auth <key>` |  | unset | Enable the startup gateway credential for data-plane auth, OAuth authorization, and administrator bootstrap/login |
 
 ### Other command options
 
@@ -524,7 +562,10 @@ The default data directory is `~/.local/share/copilot-api`. Override it with
 | `feature_flags.json` | GrowthBook/Claude Code flag overrides |
 | `statsig_overrides.json` | Codex/ChatGPT Statsig overrides |
 | `ip_allowlist.json` | Managed IP allowlist entries |
-| `usage.json` | Local request and token history |
+| `oauth_tokens.json` | SHA-256 digests and metadata for OAuth codes, token families, and generated inference credentials |
+| `admin_auth.json` | Argon2id administrator password hash and session version |
+| `admin_sessions.json` | Digested server-side administrator sessions and CSRF state |
+| `usage.json` | Seven-day minute/model aggregates and separate lifetime totals |
 
 When GitHub tokens come from environment variables or `--github-token`, the
 process uses environment-only token mode and does not read or write GitHub token
@@ -537,6 +578,11 @@ files.
 | `GITHUB_TOKENS` | Direct and Docker | Comma-separated GitHub tokens; two or more enable multi-account mode |
 | `DATA_DIR` | Direct and Docker | Override the persistent data directory |
 | `COPILOT_API_KEY_AUTH` | Direct and Docker | Gateway key; direct usage also requires the `--api-key-auth` flag without a value |
+| `COPILOT_API_KEY_AUTH_FILE` | Direct and Docker | Root-only mounted file containing the gateway key; takes precedence over the environment value |
+| `COPILOT_ADMIN_ORIGIN` | Direct and Docker | Exact browser origin allowed for dashboard mutations; set this explicitly for a proxied deployment |
+| `COPILOT_TRUSTED_PROXY_CIDRS` | Direct and Docker | Comma-separated socket-peer CIDRs allowed to supply forwarding headers; defaults to loopback only |
+| `COPILOT_API_ENABLE_DIRECT_CONNECT` | Direct and Docker | Set to `true` only to enable the authenticated experimental Direct Connect routes; disabled by default |
+| `COPILOT_INFERENCE_CORS_ORIGINS` | Direct and Docker | Optional comma-separated exact browser origins for inference-only CORS; disabled by default |
 | `SENTRY_DSN` | Direct and Docker | Enable Sentry tracing and error reporting |
 | `SENTRY_TRACES_SAMPLE_RATE` | Direct and Docker | Sentry trace sample rate |
 | `SENTRY_AI_RECORD_INPUTS` | Direct and Docker | Set to `false` to stop recording AI inputs/outputs in Sentry spans |
@@ -579,6 +625,8 @@ Create an environment file outside the repository/build context, for example
 ```dotenv
 COPILOT_HOST=0.0.0.0
 COPILOT_API_KEY_AUTH=replace-with-a-long-random-key
+COPILOT_ADMIN_ORIGIN=https://your-domain.example
+COPILOT_TRUSTED_PROXY_CIDRS=172.19.0.1/32,127.0.0.1/32,::1/128
 ```
 
 Then start the container with the host port restricted to loopback:
@@ -587,14 +635,14 @@ Then start the container with the host port restricted to loopback:
 docker run -d --name copilot-api --restart unless-stopped -p 127.0.0.1:4141:4141 --env-file ../copilot-api.env -v copilot-api-data:/app/data --health-cmd="wget --spider -q http://127.0.0.1:4141/health/health || exit 1" --health-interval=30s --health-timeout=5s --health-start-period=10s --health-retries=3 copilot-api
 ```
 
-The explicit health command matters: the image's built-in healthcheck probes
-the startup-key-protected root route, while `/health/health` is the
-unauthenticated container-health route.
+`GET /health/health` is the intentionally unauthenticated, metadata-free
+liveness route. No other health API or session route exists under `/health`.
+The image and Compose healthchecks both use this exact path.
 
 ### Docker Compose
 
-The tracked Compose file expects an external volume with a fixed name and a
-local `.env` file:
+The tracked Compose file expects an external volume with a fixed name, a local
+`.env` file, and a gateway-key file at `./secrets/copilot-api-key` by default:
 
 ```sh
 docker volume create copilot-api_copilot-data
@@ -606,23 +654,23 @@ At minimum, `.env` must provide:
 
 ```dotenv
 COPILOT_HOST=0.0.0.0
-COPILOT_API_KEY_AUTH=replace-with-a-long-random-key
+COPILOT_ADMIN_ORIGIN=https://your-domain.example
+# Set this to the exact host-side Docker bridge address observed by the app.
+COPILOT_TRUSTED_PROXY_CIDRS=172.19.0.1/32,127.0.0.1/32,::1/128
 ```
+
+Write the long random gateway key to `./secrets/copilot-api-key` with owner-only
+permissions, or set `COPILOT_API_KEY_AUTH_FILE_HOST` to a root-owned file outside
+the repository. Do not also put that key in `.env`.
 
 `OP_TOKEN` and `OP_ENV_ID` are optional and should be supplied together only
 when using the 1Password/Varlock integration.
 
-> [!WARNING]
-> The current `.dockerignore` does not exclude `.env`, and the Dockerfile copies
-> the repository into the builder stage. A repository-local `.env` can therefore
-> enter the Docker build context/cache during `docker compose up --build`. Keep
-> its values non-sensitive, add a local Docker-ignore rule before building, or
-> provide Compose secrets from outside the build context.
-
-The Compose healthcheck already uses `/health/health`. Its tracked port mapping
-publishes on all host interfaces; change it to
-`127.0.0.1:4141:4141` before starting Compose if the gateway should be reachable
-only through a local reverse proxy.
+The tracked `.dockerignore` excludes environment files, certificates, keys,
+the local `secrets/` directory, logs, and local data from the build context.
+The Compose healthcheck uses `/health/health`, and its port mapping binds to
+`127.0.0.1:4141` so the service is reachable only through the local host or
+reverse proxy.
 
 Do not put GitHub tokens into image build arguments. Supply them at runtime or
 persist them with the authentication step.
@@ -638,21 +686,28 @@ actually needs.
 The proxy must:
 
 - preserve the request `Host` as required by the selected deployment mode;
-- set trusted `X-Real-IP`, `X-Forwarded-For`, and `X-Forwarded-Proto` values;
+- overwrite `X-Real-IP`, `X-Forwarded-For`, and `X-Forwarded-Proto` rather than
+  appending or preserving client-supplied values;
+- have its exact socket-peer address or CIDR listed in
+  `COPILOT_TRUSTED_PROXY_CIDRS`;
 - support WebSocket upgrades;
 - disable request/response buffering for streaming;
 - allow long-lived SSE and WebSocket connections;
-- permit the required request body size; and
+- apply finite, route-specific body and I/O limits; and
 - forward the gateway credential without logging it.
 
-Explicitly deny the OAuth, Direct Connect, code-stub, admin, and other pre-auth
-paths identified in [Authentication and network exposure](#authentication-and-network-exposure)
-unless that client workflow truly needs them and an equivalent proxy-side
-authorization control is in place.
+The application reads forwarding headers only when the actual Bun socket peer
+falls within a configured trusted CIDR. Direct clients are identified by their
+socket address and cannot gain allowlist status by supplying `X-Real-IP` or
+`X-Forwarded-For`. Keep the trusted list exact: do not use a broad private range
+when only one local proxy address is required.
 
-The Direct Connect router is also mounted under `/health`. Expose only the exact
-`/health/health` probe; deny `/health/` and `/health/api/*`, which otherwise
-create or manage unauthenticated in-memory sessions.
+Use hostname-specific, default-deny locations. Publish the inference routes,
+the exact OAuth/Claude compatibility paths required by your clients, the
+dashboard only on its intended administrator hostname, and exact
+`GET /health/health`. Leave unused code stubs and Direct Connect unpublished;
+setting `COPILOT_API_ENABLE_DIRECT_CONNECT=true` does not make it appropriate
+for a public hostname.
 
 Templates are provided in `nginx/sites-available/` and
 `nginx/snippets/proxy-limits.conf.template`. Replace every template placeholder,
@@ -664,26 +719,32 @@ before exposing it.
 - **Bind explicitly.** Use `--host 127.0.0.1` for local-only use. Bun otherwise
   listens on all interfaces by default.
 - **Layer remote controls.** Use startup `--api-key-auth` or Docker's
-  `COPILOT_API_KEY_AUTH` for the main API, and enforce reverse-proxy path and
-  authentication controls for every required pre-auth compatibility route.
-- **Trust IP headers only from your proxy.** The strike tracker and managed
-  allowlist depend on `X-Real-IP` or the rightmost `X-Forwarded-For`; overwrite
-  client-supplied values at the trusted proxy.
+  `COPILOT_API_KEY_AUTH` for the data plane and OAuth/bootstrap boundary. Use
+  scoped OAuth, administrator sessions, WebSocket tickets, and bridge
+  capabilities for their respective routes.
+- **Trust IP headers only from exact proxy peers.** Configure
+  `COPILOT_TRUSTED_PROXY_CIDRS` with the actual socket peers. Forwarding headers
+  from every other peer are ignored, and successful authentication does not
+  create a permanent IP allowlist entry.
 - **Protect the data directory.** It can contain GitHub tokens, gateway/provider
-  keys, custom headers, routing policy, allowlists, and request history.
-- **Protect exports.** Dashboard ZIP exports can contain config-file API keys
-  and provider secrets even though GitHub token files, the startup gateway key,
-  and usage history are excluded.
-- **Treat LLM Debug as sensitive.** Raw outbound bodies, upstream authorization
-  headers, and responses expire after ten minutes but are pruned lazily, so an
-  idle process can retain them longer.
+  keys, OAuth/admin digests, custom headers, routing policy, allowlists, and
+  request history. Sensitive files and the directory are created with
+  restrictive permissions where the platform supports them.
+- **Exports are sanitized, not backups.** Dashboard ZIP exports redact
+  secret-like configuration and require recent administrator reauthentication.
+  Preserve full recovery backups through a separately protected filesystem
+  process.
+- **Treat LLM Debug as sensitive.** Credentials and secret-like JSON fields are
+  redacted before storage, but prompts, responses, and operational metadata can
+  still be sensitive. Records expire after ten minutes.
 - **Use Sentry deliberately.** When `SENTRY_DSN` is set, AI prompt and completion
   content is recorded by default. Set `SENTRY_AI_RECORD_INPUTS=false` before
   handling sensitive data.
-- **Avoid sensitive logging.** `--show-token` prints complete tokens. `--debug`
-  logs full URLs/query strings, every header (only authorization/API-key names
-  are prefix-masked), and every top-level JSON field except `messages` and
-  `prompt`; cookies and other secret-bearing fields are not masked.
+- **Avoid sensitive logging.** `--show-token` prints complete tokens. Debug
+  request logging redacts authorization, cookie, API-key, token, and secret
+  headers plus secret-like structured body fields, but it still prints the full
+  request URL and can expose other prompt or operational content. Do not place
+  credentials in query parameters, and keep debug logs private.
 - **Keep TLS verification enabled.** Use `--insecure` only for controlled,
   temporary diagnosis of a trusted interception proxy.
 - **Use environment references.** Prefer custom-provider `apiKeyEnv` over
@@ -693,11 +754,12 @@ before exposing it.
 
 ## Troubleshooting
 
-### Requests time out instead of returning `401`
+### Requests return `401`
 
-The startup API-key guard intentionally holds unauthorized LLM requests open.
-Check the Bearer, `x-api-key`, or `x-goog-api-key` value and verify that the
-source IP has not accumulated failed attempts.
+Check whether the route expects the gateway key, a scoped OAuth/inference
+credential, an administrator session, or a worker/environment capability.
+Expired OAuth access tokens must be refreshed with the latest rotated refresh
+token; replaying an older refresh token revokes its token family.
 
 ### A model is missing or rejected
 

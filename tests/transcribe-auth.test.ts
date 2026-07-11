@@ -67,32 +67,33 @@ afterAll(() => {
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
 })
 
-test("configured API-key auth whitelists the IP for transcribe", async () => {
+test("configured API-key auth does not permanently whitelist transcribe IP", async () => {
   const clientIp = "203.0.113.44"
 
   const modelsResponse = await server.request("/v1/models", {
     headers: {
       authorization: "Bearer config-secret",
+      "x-copilot-peer-ip": "127.0.0.1",
       "x-forwarded-for": clientIp,
     },
   })
 
   expect(modelsResponse.status).toBe(200)
-  expect(isIpWhitelisted(clientIp)).toBe(true)
+  expect(isIpWhitelisted(clientIp)).toBe(false)
 
   const formData = new FormData()
   formData.append("file", new Blob(["audio"], { type: "audio/webm" }), "a.webm")
 
   const transcribeResponse = await server.request("/transcribe", {
     method: "POST",
-    headers: { "x-forwarded-for": clientIp },
+    headers: {
+      "x-copilot-peer-ip": "127.0.0.1",
+      "x-forwarded-for": clientIp,
+    },
     body: formData,
   })
 
-  expect(transcribeResponse.status).toBe(200)
-  expect(await transcribeResponse.json()).toEqual({
-    text: "hello from dictation",
-  })
+  expect(transcribeResponse.status).toBe(404)
 })
 
 test("transcribe still rejects an IP that has not authenticated", async () => {
@@ -101,7 +102,10 @@ test("transcribe still rejects an IP that has not authenticated", async () => {
 
   const response = await server.request("/transcribe", {
     method: "POST",
-    headers: { "x-forwarded-for": "203.0.113.45" },
+    headers: {
+      "x-copilot-peer-ip": "127.0.0.1",
+      "x-forwarded-for": "203.0.113.45",
+    },
     body: formData,
   })
 
@@ -116,6 +120,7 @@ test("managed allowlist accepts a different IPv6 address for transcribe", async 
   const modelsResponse = await server.request("/v1/models", {
     headers: {
       authorization: "Bearer config-secret",
+      "x-copilot-peer-ip": "127.0.0.1",
       "x-forwarded-for": ipv4,
     },
   })
@@ -136,7 +141,10 @@ test("managed allowlist accepts a different IPv6 address for transcribe", async 
 
   const response = await server.request("/transcribe", {
     method: "POST",
-    headers: { "x-forwarded-for": ipv6 },
+    headers: {
+      "x-copilot-peer-ip": "127.0.0.1",
+      "x-forwarded-for": ipv6,
+    },
     body: formData,
   })
 
@@ -149,9 +157,9 @@ test("managed allowlist accepts a different IPv6 address for transcribe", async 
 // Codex Desktop's main process attaches `Authorization: Bearer <key>` to
 // the very first /transcribe (or /codex/responses) call, BEFORE the IP has
 // authed against any other route. The endpoints accept that bearer directly
-// and whitelist the IP for follow-up calls.
+// without converting that request into permanent IP trust.
 
-test("transcribe: direct Authorization Bearer is accepted and whitelists the IP", async () => {
+test("transcribe: direct Authorization Bearer is accepted without whitelisting", async () => {
   const clientIp = "203.0.113.50"
   expect(isIpWhitelisted(clientIp)).toBe(false)
 
@@ -162,6 +170,7 @@ test("transcribe: direct Authorization Bearer is accepted and whitelists the IP"
     method: "POST",
     headers: {
       authorization: "Bearer config-secret",
+      "x-copilot-peer-ip": "127.0.0.1",
       "x-forwarded-for": clientIp,
     },
     body: formData,
@@ -170,15 +179,17 @@ test("transcribe: direct Authorization Bearer is accepted and whitelists the IP"
   expect(response.status).toBe(200)
   expect(await response.json()).toEqual({ text: "hello from dictation" })
   expect(fetchMock).toHaveBeenCalledTimes(1)
-  // IP should now be whitelisted so subsequent calls (with no bearer) work.
-  expect(isIpWhitelisted(clientIp)).toBe(true)
+  expect(isIpWhitelisted(clientIp)).toBe(false)
 
   const followup = await server.request("/transcribe", {
     method: "POST",
-    headers: { "x-forwarded-for": clientIp },
+    headers: {
+      "x-copilot-peer-ip": "127.0.0.1",
+      "x-forwarded-for": clientIp,
+    },
     body: formData,
   })
-  expect(followup.status).toBe(200)
+  expect(followup.status).toBe(404)
 })
 
 test("transcribe: direct x-api-key header is accepted", async () => {
@@ -191,13 +202,14 @@ test("transcribe: direct x-api-key header is accepted", async () => {
     method: "POST",
     headers: {
       "x-api-key": "config-secret",
+      "x-copilot-peer-ip": "127.0.0.1",
       "x-forwarded-for": clientIp,
     },
     body: formData,
   })
 
   expect(response.status).toBe(200)
-  expect(isIpWhitelisted(clientIp)).toBe(true)
+  expect(isIpWhitelisted(clientIp)).toBe(false)
 })
 
 test("transcribe: wrong bearer is silently dropped (no IP whitelisted)", async () => {
@@ -210,6 +222,7 @@ test("transcribe: wrong bearer is silently dropped (no IP whitelisted)", async (
     method: "POST",
     headers: {
       authorization: "Bearer wrong-key",
+      "x-copilot-peer-ip": "127.0.0.1",
       "x-forwarded-for": clientIp,
     },
     body: formData,
@@ -232,7 +245,10 @@ test("transcribe: when no API keys are configured, only IP whitelist gates the r
   // Without any auth at all, a fresh IP is rejected.
   const reject = await server.request("/transcribe", {
     method: "POST",
-    headers: { "x-forwarded-for": clientIp },
+    headers: {
+      "x-copilot-peer-ip": "127.0.0.1",
+      "x-forwarded-for": clientIp,
+    },
     body: formData,
   })
   expect(reject.status).toBe(404)
@@ -243,6 +259,7 @@ test("transcribe: when no API keys are configured, only IP whitelist gates the r
     method: "POST",
     headers: {
       authorization: "Bearer anything",
+      "x-copilot-peer-ip": "127.0.0.1",
       "x-forwarded-for": clientIp,
     },
     body: formData,
@@ -261,6 +278,7 @@ test("codex-responses: direct Authorization Bearer is accepted", async () => {
     method: "POST",
     headers: {
       authorization: "Bearer config-secret",
+      "x-copilot-peer-ip": "127.0.0.1",
       "x-forwarded-for": clientIp,
       "content-type": "application/json",
     },
@@ -278,7 +296,7 @@ test("codex-responses: direct Authorization Bearer is accepted", async () => {
   // Hono streamSSE wraps each writeSSE in `data: ...\n\n`.
   expect(text).toContain('"type":"response.output_text.done"')
   expect(text).toContain('"text":"cleaned text"')
-  expect(isIpWhitelisted(clientIp)).toBe(true)
+  expect(isIpWhitelisted(clientIp)).toBe(false)
 })
 
 test("codex-responses: wrong bearer is silently dropped", async () => {
@@ -291,6 +309,7 @@ test("codex-responses: wrong bearer is silently dropped", async () => {
     method: "POST",
     headers: {
       authorization: "Bearer wrong-key",
+      "x-copilot-peer-ip": "127.0.0.1",
       "x-forwarded-for": clientIp,
       "content-type": "application/json",
     },
@@ -316,11 +335,12 @@ test("transcribe: --api-key-auth CLI key is honored as a direct bearer", async (
     method: "POST",
     headers: {
       authorization: "Bearer cli-secret",
+      "x-copilot-peer-ip": "127.0.0.1",
       "x-forwarded-for": clientIp,
     },
     body: formData,
   })
 
   expect(response.status).toBe(200)
-  expect(isIpWhitelisted(clientIp)).toBe(true)
+  expect(isIpWhitelisted(clientIp)).toBe(false)
 })

@@ -1,4 +1,4 @@
-import { afterAll, expect, test } from "bun:test"
+import { afterEach, expect, test } from "bun:test"
 import { unzipSync } from "fflate"
 import fs from "node:fs/promises"
 import os from "node:os"
@@ -8,15 +8,18 @@ import {
   createConfigExportZip,
   getConfigExportFilename,
 } from "../src/lib/config-export"
-import { state } from "../src/lib/state"
 import { DASHBOARD_HTML } from "../src/routes/dashboard/page-generated"
 import { server } from "../src/server"
+import {
+  adminHeaders,
+  createTestAdminSession,
+  resetTestAdminSession,
+} from "./helpers/admin-session"
 
-const originalApiKeyAuth = state.apiKeyAuth
 const textDecoder = new TextDecoder()
 
-afterAll(() => {
-  state.apiKeyAuth = originalApiKeyAuth
+afterEach(() => {
+  resetTestAdminSession()
 })
 
 async function withTempDir<T>(
@@ -64,7 +67,8 @@ test("config export zips only app config files that exist", async () => {
       "model_settings.json",
       "statsig_overrides.json",
     ])
-    expect(decodeEntry(entries["config.json"])).toContain("secret")
+    expect(decodeEntry(entries["config.json"])).not.toContain('"secret"')
+    expect(decodeEntry(entries["config.json"])).toContain("[REDACTED]")
     expect(decodeEntry(entries["statsig_overrides.json"])).toContain(
       '"featureGates"',
     )
@@ -81,15 +85,14 @@ test("config export filename uses zero-padded local date parts", () => {
 })
 
 test("dashboard config export endpoint is authenticated and returns a zip", async () => {
-  state.apiKeyAuth = "dashboard-secret"
-
   const unauthorizedResponse = await server.request(
     "/dashboard/api/settings/export",
   )
   expect(unauthorizedResponse.status).toBe(401)
 
+  const admin = await createTestAdminSession(true)
   const response = await server.request("/dashboard/api/settings/export", {
-    headers: { "x-api-key": "dashboard-secret" },
+    headers: adminHeaders(admin, false),
   })
 
   expect(response.status).toBe(200)
@@ -102,6 +105,6 @@ test("dashboard config export endpoint is authenticated and returns a zip", asyn
 })
 
 test("dashboard bundle ships the config export controls", () => {
-  expect(DASHBOARD_HTML).toContain("Export Config")
+  expect(DASHBOARD_HTML).toContain("Export sanitized config")
   expect(DASHBOARD_HTML).toContain("/dashboard/api/settings/export")
 })

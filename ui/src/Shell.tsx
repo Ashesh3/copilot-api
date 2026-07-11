@@ -26,6 +26,7 @@ import {
   SlidersHorizontalIcon,
   SunIcon,
 } from "./icons"
+import { post } from "./lib/api"
 import { useHashRoute } from "./lib/router"
 import { useThemeMode } from "./lib/theme-mode"
 
@@ -86,6 +87,14 @@ function NavItems({
   )
 }
 
+async function logout(): Promise<void> {
+  try {
+    await post("/dashboard/auth/logout")
+  } finally {
+    globalThis.location.reload()
+  }
+}
+
 export function Shell({ children }: { children: ReactNode }) {
   const { section } = useHashRoute()
   const { mode, toggle } = useThemeMode()
@@ -107,15 +116,26 @@ export function Shell({ children }: { children: ReactNode }) {
             />
           }
           footerIcons={
-            <IconButton
-              label={
-                mode === "dark" ? "Switch to light mode" : "Switch to dark mode"
-              }
-              tooltip={mode === "dark" ? "Light mode" : "Dark mode"}
-              variant="ghost"
-              icon={mode === "dark" ? <SunIcon /> : <MoonIcon />}
-              onClick={toggle}
-            />
+            <>
+              <IconButton
+                label={
+                  mode === "dark" ?
+                    "Switch to light mode"
+                  : "Switch to dark mode"
+                }
+                tooltip={mode === "dark" ? "Light mode" : "Dark mode"}
+                variant="ghost"
+                icon={mode === "dark" ? <SunIcon /> : <MoonIcon />}
+                onClick={toggle}
+              />
+              <IconButton
+                label="Sign out"
+                tooltip="Sign out"
+                variant="ghost"
+                icon={<SettingsIcon />}
+                onClick={() => void logout()}
+              />
+            </>
           }
         >
           <SideNavSection title="Monitor">

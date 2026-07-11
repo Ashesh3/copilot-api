@@ -7,6 +7,7 @@ import {
   toggleReplacement,
   updateReplacement,
 } from "~/lib/auto-replace"
+import { revokeEnvironmentCapabilities } from "~/lib/bridge-capabilities"
 import {
   getCodexCleanupModel,
   getSmallModel,
@@ -14,6 +15,7 @@ import {
 } from "~/lib/config"
 import {
   createNebiusQwen3EmbeddingProvider,
+  getCustomProviders,
   listCustomProvidersForDashboard,
   removeCustomProvider,
   upsertCustomProvider,
@@ -218,7 +220,7 @@ export function handleListSessions(c: Context) {
 }
 
 export function handleArchiveSession(c: Context) {
-  const id = c.req.param("id")
+  const id = c.req.param("id") ?? ""
   const success = archiveSession(id)
   if (!success) {
     return c.json({ error: "Session not found or already archived" }, 404)
@@ -227,7 +229,7 @@ export function handleArchiveSession(c: Context) {
 }
 
 export function handleDestroySession(c: Context) {
-  const id = c.req.param("id")
+  const id = c.req.param("id") ?? ""
 
   // Try direct-connect first
   if (destroyDirectConnectSession(id)) {
@@ -243,7 +245,7 @@ export function handleDestroySession(c: Context) {
 }
 
 export function handleGetSessionEvents(c: Context) {
-  const id = c.req.param("id")
+  const id = c.req.param("id") ?? ""
   const allEvents = getClientEvents(id, 0)
   const last20 = allEvents.slice(-20)
   return c.json(last20)
@@ -264,11 +266,12 @@ export function handleListEnvironments(c: Context) {
 }
 
 export function handleDeregisterEnvironment(c: Context) {
-  const id = c.req.param("id")
+  const id = c.req.param("id") ?? ""
   const success = deregisterEnvironment(id)
   if (!success) {
     return c.json({ error: "Environment not found" }, 404)
   }
+  revokeEnvironmentCapabilities(id)
   return c.json({ success: true })
 }
 
@@ -379,7 +382,7 @@ export async function handleAddReplacement(c: Context) {
 }
 
 export async function handleDeleteReplacement(c: Context) {
-  const id = c.req.param("id")
+  const id = c.req.param("id") ?? ""
   const removed = await removeReplacement(id)
   if (!removed) {
     return c.json({ error: "Replacement not found" }, 404)
@@ -388,7 +391,7 @@ export async function handleDeleteReplacement(c: Context) {
 }
 
 export async function handleToggleReplacement(c: Context) {
-  const id = c.req.param("id")
+  const id = c.req.param("id") ?? ""
   const rule = await toggleReplacement(id)
   if (!rule) {
     return c.json({ error: "Replacement not found or is a system rule" }, 404)
@@ -397,7 +400,7 @@ export async function handleToggleReplacement(c: Context) {
 }
 
 export async function handleUpdateReplacement(c: Context) {
-  const id = c.req.param("id")
+  const id = c.req.param("id") ?? ""
   const body = await c.req.json<{
     name?: string
     pattern?: string
@@ -440,21 +443,21 @@ export async function handleAddModelRedirect(c: Context) {
 }
 
 export async function handleDeleteModelRedirect(c: Context) {
-  const id = c.req.param("id")
+  const id = c.req.param("id") ?? ""
   const removed = await removeModelRedirect(id)
   if (!removed) return c.json({ error: "Redirect not found" }, 404)
   return c.json({ success: true })
 }
 
 export async function handleToggleModelRedirect(c: Context) {
-  const id = c.req.param("id")
+  const id = c.req.param("id") ?? ""
   const rule = await toggleModelRedirect(id)
   if (!rule) return c.json({ error: "Redirect not found" }, 404)
   return c.json(rule)
 }
 
 export async function handleUpdateModelRedirect(c: Context) {
-  const id = c.req.param("id")
+  const id = c.req.param("id") ?? ""
   const body = await c.req.json<{
     name?: string
     sourceModel?: string
@@ -469,7 +472,7 @@ export async function handleUpdateModelRedirect(c: Context) {
 }
 
 export async function handleMoveModelRedirect(c: Context) {
-  const id = c.req.param("id")
+  const id = c.req.param("id") ?? ""
   const body = await c.req.json<{ direction?: "up" | "down" }>()
   if (body.direction !== "up" && body.direction !== "down") {
     return c.json({ error: "direction must be up or down" }, 400)
@@ -589,7 +592,7 @@ function modelSettingsUpdate(body: ModelSettingsRequestBody) {
 }
 
 export async function handleDeleteModelSettings(c: Context) {
-  const model = c.req.param("model")
+  const model = c.req.param("model") ?? ""
   const removed = await removeModelSettings(model)
   if (!removed) return c.json({ error: "Model settings not found" }, 404)
   return c.json({ success: true })
@@ -629,15 +632,25 @@ export async function handleUpsertCustomProvider(c: Context) {
   if (!parsed.ok) return c.json({ error: parsed.error }, 400)
 
   const { body } = parsed
+  const existing = getCustomProviders().find(
+    (provider) => provider.id === body.id,
+  )
+  const resolvedApiKey = body.apiKey ?? existing?.apiKey
+  const resolvedApiKeyEnv = body.apiKeyEnv ?? existing?.apiKeyEnv
+  const resolvedHeaders = body.headers ?? existing?.headers
 
-  const providers = upsertCustomProvider({
+  if (!resolvedApiKey && !resolvedApiKeyEnv) {
+    return c.json({ error: "apiKey or apiKeyEnv is required" }, 400)
+  }
+
+  upsertCustomProvider({
     id: body.id,
     name: body.name,
     type: "openai-compatible",
     baseUrl: body.baseUrl,
-    ...(body.apiKey ? { apiKey: body.apiKey } : {}),
-    ...(body.apiKeyEnv ? { apiKeyEnv: body.apiKeyEnv } : {}),
-    ...(body.headers ? { headers: body.headers } : {}),
+    ...(resolvedApiKey ? { apiKey: resolvedApiKey } : {}),
+    ...(resolvedApiKeyEnv ? { apiKeyEnv: resolvedApiKeyEnv } : {}),
+    ...(resolvedHeaders ? { headers: resolvedHeaders } : {}),
     models: body.models,
     ...(body.timeoutMs ? { timeoutMs: body.timeoutMs } : {}),
     ...(body.passReasoningEffort !== undefined ?
@@ -645,7 +658,11 @@ export async function handleUpsertCustomProvider(c: Context) {
     : {}),
   })
 
-  return c.json(providers.find((provider) => provider.id === body.id))
+  return c.json(
+    listCustomProvidersForDashboard().find(
+      (provider) => provider.id === body.id,
+    ),
+  )
 }
 
 function parseCustomProviderBody(
@@ -678,10 +695,6 @@ function parseCustomProviderBase(
   if (!baseUrl.ok) return baseUrl
   const apiKey = getOptionalString(body.apiKey)
   const apiKeyEnv = getOptionalString(body.apiKeyEnv)
-
-  if (!apiKey && !apiKeyEnv) {
-    return { ok: false, error: "apiKey or apiKeyEnv is required" }
-  }
 
   if (body.headers !== undefined && !isStringRecord(body.headers)) {
     return { ok: false, error: "headers must be an object of strings" }
@@ -815,11 +828,15 @@ export async function handleAddNebiusCustomProvider(c: Context) {
 
   const provider = createNebiusQwen3EmbeddingProvider(apiKey.value)
   upsertCustomProvider(provider)
-  return c.json(provider)
+  return c.json(
+    listCustomProvidersForDashboard().find(
+      (candidate) => candidate.id === provider.id,
+    ),
+  )
 }
 
 export function handleDeleteCustomProvider(c: Context) {
-  const id = c.req.param("id")
+  const id = c.req.param("id") ?? ""
   if (!removeCustomProvider(id)) {
     return c.json({ error: "Custom provider not found" }, 404)
   }
@@ -896,7 +913,7 @@ export async function handleSetIpAllowlistEntry(c: Context) {
 }
 
 export async function handleDeleteIpAllowlistEntry(c: Context) {
-  const ip = c.req.param("ip")
+  const ip = c.req.param("ip") ?? ""
   const removed = await removeIpAllowlistEntry(ip)
   if (!removed) return c.json({ error: "IP address not found" }, 404)
   unwhitelistIp(ip)
@@ -908,7 +925,7 @@ export function handleListLlmDebugLogs(c: Context) {
 }
 
 export function handleGetLlmDebugLog(c: Context) {
-  const id = c.req.param("id")
+  const id = c.req.param("id") ?? ""
   const entry = getLlmDebugLog(id)
   if (!entry) return c.json({ error: "Debug log not found" }, 404)
   return c.json(entry)
@@ -973,7 +990,7 @@ export async function handleSetCodexCleanupModel(c: Context) {
 }
 
 export function handleStartEnvironmentSession(c: Context) {
-  const envId = c.req.param("id")
+  const envId = c.req.param("id") ?? ""
   const env = getEnvironment(envId)
   if (!env) {
     return c.json({ error: "Environment not found" }, 404)

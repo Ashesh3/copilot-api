@@ -3,6 +3,7 @@ import config from "@echristian/eslint-config"
 export default config(
   {
     ignores: [
+      "env.d.ts",
       "src/routes/dashboard/page-generated.ts",
       "ui/dist",
       "ui/scripts",
@@ -15,6 +16,19 @@ export default config(
     },
     prettier: {
       plugins: ["prettier-plugin-packagejson"],
+    },
+  },
+  {
+    rules: {
+      "prettier/prettier": [
+        "error",
+        {
+          endOfLine: "auto",
+          semi: false,
+          experimentalOperatorPosition: "start",
+          experimentalTernaries: true,
+        },
+      ],
     },
   },
   {

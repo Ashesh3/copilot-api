@@ -40,6 +40,25 @@ describe("Middleware", () => {
       },
       TEST_TIMEOUT,
     )
+
+    test(
+      "request with a wrong API key receives a bounded uniform denial",
+      async () => {
+        state.apiKeyAuth = "test-secret-key-12345"
+        const res = await request("/v1/models", {
+          headers: { Authorization: "Bearer definitely-wrong" },
+        })
+        expect(res.status).toBe(401)
+        expect(res.headers.get("cache-control")).toBe("no-store")
+        expect(await res.json()).toEqual({
+          error: {
+            message: "Unauthorized",
+            type: "authentication_error",
+          },
+        })
+      },
+      TEST_TIMEOUT,
+    )
   })
 
   describe("Config-based auth", () => {

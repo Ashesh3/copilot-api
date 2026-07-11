@@ -8,6 +8,7 @@ export interface TranscribeOptions {
   contentType?: string
   filename?: string
   timeoutMs?: number
+  signal?: AbortSignal
 }
 
 /**
@@ -41,13 +42,18 @@ export async function transcribe(
     formData.append("language", language)
   }
 
+  const timeoutSignal = AbortSignal.timeout(options.timeoutMs ?? 10000)
+  const signal =
+    options.signal ?
+      AbortSignal.any([options.signal, timeoutSignal])
+    : timeoutSignal
   const response = await fetch(url, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
     },
     body: formData,
-    signal: AbortSignal.timeout(options.timeoutMs ?? 10000),
+    signal,
   })
 
   if (!response.ok) {

@@ -1,5 +1,7 @@
 import { Hono } from "hono"
 
+import { resolveRequestCredential } from "~/lib/credential-resolver"
+
 import {
   createDirectConnectSession,
   destroyDirectConnectSession,
@@ -7,6 +9,26 @@ import {
 } from "./ws-handler"
 
 export const directConnectRoutes = new Hono()
+
+export function isDirectConnectEnabled(): boolean {
+  return process.env.COPILOT_API_ENABLE_DIRECT_CONNECT === "true"
+}
+
+// Direct Connect is an experimental private-development surface. Even when a
+// caller imports this router directly, keep it unavailable unless explicitly
+// enabled. The server mounts it behind the normal API authentication guards.
+directConnectRoutes.use("*", async (c, next) => {
+  if (!isDirectConnectEnabled()) {
+    return c.json({ error: "Not found" }, 404)
+  }
+
+  if (!(await resolveRequestCredential(c.req.raw, ["user:inference"]))) {
+    c.header("Cache-Control", "no-store")
+    return c.json({ error: "Unauthorized" }, 401)
+  }
+
+  await next()
+})
 
 // POST / — Create a direct-connect session
 directConnectRoutes.post("/", async (c) => {
@@ -18,12 +40,6 @@ directConnectRoutes.post("/", async (c) => {
   const sessionInfo = createDirectConnectSession(body.cwd)
 
   return c.json(sessionInfo, 201)
-})
-
-// GET /health — Server health check
-directConnectRoutes.get("/health", (c) => {
-  const sessions = listDirectConnectSessions()
-  return c.json({ status: "ok", activeSessions: sessions.length })
 })
 
 // GET /api/sessions — List all sessions

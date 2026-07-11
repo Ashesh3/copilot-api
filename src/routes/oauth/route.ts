@@ -1,20 +1,22 @@
 import type { Context, Next } from "hono"
 
-import consola from "consola"
 import { Hono } from "hono"
+import { bodyLimit } from "hono/body-limit"
 
-import { getConfig } from "~/lib/config"
+import type { IssuedOAuthTokens } from "~/lib/oauth-store"
+
+import {
+  credentialHasScopes,
+  resolveCredential,
+  resolveRequestCredential,
+} from "~/lib/credential-resolver"
 import {
   extractClientIp,
   isIpBlocked,
   recordFailedAttempt,
 } from "~/lib/ip-blocker"
-import {
-  extractRequestApiKey,
-  getActiveApiKeys,
-  whitelistAuthenticatedClient,
-} from "~/lib/request-auth"
-import { state } from "~/lib/state"
+import { getOAuthStore } from "~/lib/oauth-store"
+import { secureHtml } from "~/lib/secure-html"
 import {
   isAllowedTransparentProxyRequest,
   isTransparentProxyClientWhitelisted,
@@ -23,113 +25,352 @@ import {
 import { getUsageResponse } from "~/lib/usage-tracker"
 import { getFeatureFlags } from "~/routes/feature-flags/store"
 
-const SCOPES =
-  "user:inference user:profile user:sessions:claude_code user:mcp_servers user:file_upload org:create_api_key"
-const AUTH_CODE = "copilot-api-auth-code"
+const CLAUDE_CODE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+const MANUAL_REDIRECT_URI = "https://platform.claude.com/oauth/code/callback"
+const MAX_OAUTH_QUERY_LENGTH = 4096
+const MAX_OAUTH_BODY_BYTES = 16 * 1024
+const MAX_OAUTH_FIELD_LENGTH = 2048
+const ALLOWED_SCOPES = new Set([
+  "user:inference",
+  "user:profile",
+  "user:sessions:claude_code",
+  "user:mcp_servers",
+  "user:file_upload",
+  "org:create_api_key",
+])
 
-function getAccessToken(): string {
-  // Use the --api-key-auth value if set (the key users authenticate with)
-  if (state.apiKeyAuth) return state.apiKeyAuth
-  const config = getConfig()
-  const keys = config.auth?.apiKeys ?? []
-  if (keys.length > 0) return keys[0]
-  return "copilot-api-token"
+interface AuthorizationRequest {
+  clientId: string
+  redirectUri: string
+  scopes: Array<string>
+  state: string
+  codeChallenge: string
 }
 
-/**
- * Auth guard for OAuth API routes.
- * Checks Bearer token or x-api-key against state.apiKeyAuth.
- * Applies IP banning on failures (same as apiKeyGuard).
- */
-async function oauthAuthGuard(
+function parseScopes(scope: string): Array<string> {
+  return [...new Set(scope.split(/\s+/).filter(Boolean))]
+}
+
+function areAllowedScopes(scopes: ReadonlyArray<string>): boolean {
+  return scopes.length > 0 && scopes.every((scope) => ALLOWED_SCOPES.has(scope))
+}
+
+function isAllowedRedirectUri(value: string): boolean {
+  if (value === MANUAL_REDIRECT_URI) return true
+
+  try {
+    const redirect = new URL(value)
+    const port = Number(redirect.port)
+    return (
+      redirect.protocol === "http:"
+      && redirect.hostname === "localhost"
+      && redirect.pathname === "/callback"
+      && redirect.username === ""
+      && redirect.password === ""
+      && redirect.search === ""
+      && redirect.hash === ""
+      && Number.isInteger(port)
+      && port > 0
+      && port <= 65_535
+    )
+  } catch {
+    return false
+  }
+}
+
+// Validation deliberately checks the complete OAuth binding in one place.
+// eslint-disable-next-line complexity
+function parseAuthorizationRequest(c: Context): AuthorizationRequest | null {
+  const url = new URL(c.req.url)
+  if (url.search.length > MAX_OAUTH_QUERY_LENGTH) return null
+  const requiredParameters = [
+    "client_id",
+    "redirect_uri",
+    "response_type",
+    "scope",
+    "state",
+    "code_challenge",
+    "code_challenge_method",
+  ]
+  if (
+    requiredParameters.some(
+      (name) => url.searchParams.getAll(name).length !== 1,
+    )
+  ) {
+    return null
+  }
+  const clientId = url.searchParams.get("client_id") ?? ""
+  const redirectUri = url.searchParams.get("redirect_uri") ?? ""
+  const responseType = url.searchParams.get("response_type") ?? ""
+  const scope = url.searchParams.get("scope") ?? ""
+  const stateParam = url.searchParams.get("state") ?? ""
+  const codeChallenge = url.searchParams.get("code_challenge") ?? ""
+  const codeChallengeMethod =
+    url.searchParams.get("code_challenge_method") ?? ""
+  const scopes = parseScopes(scope)
+
+  if (
+    clientId !== CLAUDE_CODE_CLIENT_ID
+    || responseType !== "code"
+    || !isAllowedRedirectUri(redirectUri)
+    || !areAllowedScopes(scopes)
+    || stateParam.length < 16
+    || stateParam.length > 512
+    || codeChallengeMethod !== "S256"
+    || !/^[\w-]{43}$/.test(codeChallenge)
+  ) {
+    return null
+  }
+
+  return {
+    clientId,
+    redirectUri,
+    scopes,
+    state: stateParam,
+    codeChallenge,
+  }
+}
+
+async function readOAuthBody(
   c: Context,
-  next: Next,
-): Promise<Response | undefined> {
-  const apiKeys = getActiveApiKeys()
-  if (apiKeys.length === 0) {
-    await next()
-    return
+): Promise<Record<string, string> | null> {
+  const contentLength = Number(c.req.header("content-length") ?? "0")
+  if (Number.isFinite(contentLength) && contentLength > MAX_OAUTH_BODY_BYTES) {
+    return null
   }
 
-  const clientIp = extractClientIp(c)
-
-  if (clientIp !== null && isIpBlocked(clientIp)) {
-    await new Promise(() => {})
-    return
+  const rawBody = await c.req.text().catch(() => "")
+  if (new TextEncoder().encode(rawBody).byteLength > MAX_OAUTH_BODY_BYTES) {
+    return null
+  }
+  const contentType = c.req.header("content-type")?.toLowerCase() ?? ""
+  if (contentType.includes("application/x-www-form-urlencoded")) {
+    const parameters = new URLSearchParams(rawBody)
+    const names = [...parameters.keys()]
+    if (new Set(names).size !== names.length) return null
+    return filterOAuthFields(Object.fromEntries(parameters))
   }
 
-  const requestApiKey = extractRequestApiKey(c)
-
-  if (requestApiKey !== null && apiKeys.includes(requestApiKey)) {
-    whitelistAuthenticatedClient(c)
-    await next()
-    return
+  if (!contentType.includes("application/json")) return null
+  const parsed: unknown = (() => {
+    try {
+      return JSON.parse(rawBody) as unknown
+    } catch {
+      return null
+    }
+  })()
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return null
   }
-
-  const maskedGot = requestApiKey ? `...${requestApiKey.slice(-10)}` : "(none)"
-  const maskedExpected = apiKeys.map((key) => `...${key.slice(-10)}`).join(", ")
-  consola.warn(
-    `[oauth-guard] Auth failed: ${c.req.method} ${c.req.path} — got ${maskedGot}, expected ${maskedExpected}`,
+  return filterOAuthFields(
+    Object.fromEntries(
+      Object.entries(parsed).filter(
+        (entry): entry is [string, string] => typeof entry[1] === "string",
+      ),
+    ),
   )
+}
 
-  if (clientIp !== null) {
-    recordFailedAttempt(clientIp)
+function filterOAuthFields(
+  fields: Record<string, string>,
+): Record<string, string> | null {
+  const entries = Object.entries(fields)
+  if (
+    entries.length > 16
+    || entries.some(
+      ([key, value]) =>
+        key.length > 64 || value.length > MAX_OAUTH_FIELD_LENGTH,
+    )
+  ) {
+    return null
   }
+  return Object.fromEntries(entries)
+}
 
+function oauthError(
+  c: Context,
+  error: string,
+  status: 400 | 401 = 400,
+): Response {
+  c.header("Cache-Control", "no-store")
+  c.header("Pragma", "no-cache")
+  return c.json({ error }, status)
+}
+
+function oauthTextError(c: Context, message: string): Response {
+  c.header("Cache-Control", "no-store")
+  c.header("Pragma", "no-cache")
+  return c.text(message, 400)
+}
+
+function oauthUnauthorized(c: Context): Response {
+  c.header("Cache-Control", "no-store")
+  c.header("Pragma", "no-cache")
+  c.header("WWW-Authenticate", 'Bearer realm="copilot-api"')
   return c.json(
     { error: { message: "Unauthorized", type: "authentication_error" } },
     401,
   )
 }
 
+function tokenResponse(c: Context, tokens: IssuedOAuthTokens): Response {
+  c.header("Cache-Control", "no-store")
+  c.header("Pragma", "no-cache")
+  return c.json({
+    access_token: tokens.accessToken,
+    refresh_token: tokens.refreshToken,
+    expires_in: tokens.expiresIn,
+    scope: tokens.scopes.join(" "),
+    token_type: "bearer",
+  })
+}
+
+function requireOAuthScopes(scopes: ReadonlyArray<string>) {
+  return async (c: Context, next: Next): Promise<Response | undefined> => {
+    const credential = await resolveRequestCredential(c.req.raw)
+    if (
+      credential?.kind !== "oauth"
+      || !credentialHasScopes(credential, scopes)
+    ) {
+      return oauthUnauthorized(c)
+    }
+    await next()
+    c.header("Cache-Control", "no-store")
+  }
+}
+
+async function handleAuthorizationCodeGrant(
+  c: Context,
+  body: Record<string, string>,
+): Promise<Response> {
+  if (
+    !body.code
+    || !body.redirect_uri
+    || !body.state
+    || !body.code_verifier
+    || !/^[\w.~-]{43,128}$/.test(body.code_verifier)
+  ) {
+    return oauthError(c, "invalid_grant")
+  }
+
+  const exchange = await getOAuthStore().exchangeAuthorizationCode({
+    code: body.code,
+    clientId: body.client_id,
+    redirectUri: body.redirect_uri,
+    state: body.state,
+    codeVerifier: body.code_verifier,
+  })
+  if (exchange.status !== "ok") return oauthError(c, "invalid_grant")
+  return tokenResponse(c, exchange.tokens)
+}
+
+async function handleRefreshTokenGrant(
+  c: Context,
+  body: Record<string, string>,
+): Promise<Response> {
+  if (!body.refresh_token) return oauthError(c, "invalid_grant")
+  const requestedScopes = body.scope ? parseScopes(body.scope) : undefined
+  if (requestedScopes !== undefined && !areAllowedScopes(requestedScopes)) {
+    return oauthError(c, "invalid_scope")
+  }
+
+  const refresh = await getOAuthStore().refreshAccessToken({
+    refreshToken: body.refresh_token,
+    clientId: body.client_id,
+    scopes: requestedScopes,
+  })
+  if (refresh.status === "invalid_scope") {
+    return oauthError(c, "invalid_scope")
+  }
+  if (refresh.status !== "ok") return oauthError(c, "invalid_grant")
+  return tokenResponse(c, refresh.tokens)
+}
+
+/**
+ * Auth guard for OAuth API routes.
+ * Requires a scoped OAuth token (or the operator gateway credential).
+ */
+function oauthScopeGuard(...scopes: Array<string>) {
+  return async (c: Context, next: Next): Promise<Response | undefined> => {
+    const clientIp = extractClientIp(c)
+
+    if (clientIp !== null && isIpBlocked(clientIp)) {
+      return oauthUnauthorized(c)
+    }
+
+    const credential = await resolveRequestCredential(c.req.raw)
+    if (
+      credential?.kind === "oauth"
+      && credentialHasScopes(credential, scopes)
+    ) {
+      await next()
+      c.header("Cache-Control", "no-store")
+      return
+    }
+
+    if (!credential && clientIp !== null) {
+      recordFailedAttempt(clientIp)
+    }
+
+    return oauthUnauthorized(c)
+  }
+}
+
+const oauthProfileGuard = oauthScopeGuard("user:profile")
+const oauthInferenceGuard = oauthScopeGuard("user:inference")
+const oauthSessionGuard = oauthScopeGuard("user:sessions:claude_code")
+const oauthMcpGuard = oauthScopeGuard("user:mcp_servers")
+const oauthFileUploadGuard = oauthScopeGuard("user:file_upload")
+
 // --- Browser routes: mounted at /oauth ---
 
 export const oauthBrowserRoutes = new Hono()
+oauthBrowserRoutes.use(
+  "/authorize",
+  bodyLimit({
+    maxSize: MAX_OAUTH_BODY_BYTES,
+    onError: (c) => oauthTextError(c, "Invalid OAuth authorization request"),
+  }),
+)
 
 // GET /oauth/authorize — show login form requiring API key
 oauthBrowserRoutes.get("/authorize", (c) => {
-  const redirectUri = c.req.query("redirect_uri")
+  const authorizationRequest = parseAuthorizationRequest(c)
   const queryString = new URL(c.req.url).search
 
-  if (!redirectUri) {
-    return c.text("Missing redirect_uri", 400)
+  if (!authorizationRequest) {
+    return oauthTextError(c, "Invalid OAuth authorization request")
   }
 
-  // If no apiKeyAuth is configured, auto-redirect
-  if (!state.apiKeyAuth) {
-    const stateParam = c.req.query("state")
-    const url = new URL(redirectUri)
-    url.searchParams.set("code", AUTH_CODE)
-    if (stateParam) url.searchParams.set("state", stateParam)
-    return c.redirect(url.toString(), 302)
-  }
-
-  return c.html(getAuthorizePage(queryString))
+  return secureHtml(c, getAuthorizePage(queryString))
 })
 
 // POST /oauth/authorize — validate API key, then redirect
 oauthBrowserRoutes.post("/authorize", async (c) => {
-  const redirectUri = c.req.query("redirect_uri")
-  const stateParam = c.req.query("state")
-
-  if (!redirectUri) {
-    return c.text("Missing redirect_uri", 400)
+  const authorizationRequest = parseAuthorizationRequest(c)
+  if (!authorizationRequest) {
+    return oauthTextError(c, "Invalid OAuth authorization request")
   }
 
   const clientIp = extractClientIp(c)
 
   if (clientIp !== null && isIpBlocked(clientIp)) {
-    await new Promise(() => {})
-    return
+    return oauthUnauthorized(c)
   }
 
-  const body = await c.req.parseBody()
-  const apiKey = typeof body.api_key === "string" ? body.api_key.trim() : ""
+  const body = await readOAuthBody(c)
+  const apiKey = body?.api_key.trim() ?? ""
 
-  if (!state.apiKeyAuth || apiKey === state.apiKeyAuth) {
-    const url = new URL(redirectUri)
-    url.searchParams.set("code", AUTH_CODE)
-    if (stateParam) url.searchParams.set("state", stateParam)
+  const credential = apiKey ? await resolveCredential(apiKey) : null
+  if (credential?.kind === "gateway") {
+    const code = await getOAuthStore().issueAuthorizationCode({
+      ...authorizationRequest,
+    })
+    const url = new URL(authorizationRequest.redirectUri)
+    url.searchParams.set("code", code)
+    url.searchParams.set("state", authorizationRequest.state)
+    c.header("Cache-Control", "no-store")
+    c.header("Pragma", "no-cache")
     return c.redirect(url.toString(), 302)
   }
 
@@ -138,23 +379,32 @@ oauthBrowserRoutes.post("/authorize", async (c) => {
   }
 
   const queryString = new URL(c.req.url).search
-  return c.html(getAuthorizePage(queryString, "Invalid API key"), 401)
+  const response = secureHtml(
+    c,
+    getAuthorizePage(queryString, "Invalid API key"),
+  )
+  return new Response(response.body, { status: 401, headers: response.headers })
 })
 
 // GET /oauth/code/success — success page
 oauthBrowserRoutes.get("/code/success", (c) => {
-  return c.html(
+  return secureHtml(
+    c,
     "<html><body><h1>Login successful</h1><p>You can close this tab.</p></body></html>",
   )
 })
 
 // GET /oauth/code/callback — manual callback fallback
 oauthBrowserRoutes.get("/code/callback", (c) => {
-  const code = c.req.query("code") ?? AUTH_CODE
+  const code = c.req.query("code") ?? ""
   const stateParam = c.req.query("state")
+  if (code.length > MAX_OAUTH_FIELD_LENGTH || (stateParam?.length ?? 0) > 512) {
+    return oauthTextError(c, "Invalid OAuth callback")
+  }
   const manualCode = stateParam ? `${code}#${stateParam}` : code
 
-  return c.html(
+  return secureHtml(
+    c,
     `<html><body><h1>Authorization Code</h1><p>Copy this code into Claude Code:</p><pre>${escapeHtml(manualCode)}</pre></body></html>`,
   )
 })
@@ -162,6 +412,13 @@ oauthBrowserRoutes.get("/code/callback", (c) => {
 // --- Token routes: mounted at /v1/oauth ---
 
 export const oauthTokenRoutes = new Hono()
+oauthTokenRoutes.use(
+  "*",
+  bodyLimit({
+    maxSize: MAX_OAUTH_BODY_BYTES,
+    onError: (c) => oauthError(c, "invalid_request"),
+  }),
+)
 
 // GET /v1/oauth/hello — connectivity check
 oauthTokenRoutes.get("/hello", (c) => c.json({ status: "ok" }))
@@ -169,25 +426,32 @@ oauthTokenRoutes.get("/hello", (c) => c.json({ status: "ok" }))
 // Auth guard — Claude Code sends the code + code_verifier, no API key.
 // Validate the auth code matches what we issued.
 oauthTokenRoutes.post("/token", async (c) => {
-  const body = (await c.req.json().catch(() => ({}))) as Record<string, string>
+  const body = await readOAuthBody(c)
+  if (!body) return oauthError(c, "invalid_request")
   const grantType = body.grant_type
 
   if (grantType !== "authorization_code" && grantType !== "refresh_token") {
-    return c.json({ error: "unsupported_grant_type" }, 400)
+    return oauthError(c, "unsupported_grant_type")
   }
 
-  // For authorization_code, verify the code matches what we issued
-  if (grantType === "authorization_code" && body.code !== AUTH_CODE) {
-    return c.json({ error: "invalid_grant" }, 400)
+  if (body.client_id !== CLAUDE_CODE_CLIENT_ID) {
+    return oauthError(c, "invalid_client", 401)
   }
 
-  return c.json({
-    access_token: getAccessToken(),
-    refresh_token: "ref-copilot-api",
-    expires_in: 86400,
-    scope: SCOPES,
-    token_type: "bearer",
-  })
+  if (grantType === "authorization_code") {
+    return await handleAuthorizationCodeGrant(c, body)
+  }
+  return await handleRefreshTokenGrant(c, body)
+})
+
+oauthTokenRoutes.post("/revoke", async (c) => {
+  const body = await readOAuthBody(c)
+  if (body?.client_id === CLAUDE_CODE_CLIENT_ID && body.token) {
+    await getOAuthStore().revokeToken(body.token)
+  }
+  c.header("Cache-Control", "no-store")
+  c.header("Pragma", "no-cache")
+  return c.body(null, 200)
 })
 
 // --- API routes: mounted at /api ---
@@ -210,7 +474,7 @@ oauthApiRoutes.get("/web/domain_info", (c) => {
 // Unknown /api/* routes fall through to the sink at the end of this router.
 
 // GET /api/oauth/profile — fake profile
-oauthApiRoutes.get("/oauth/profile", oauthAuthGuard, (c) => {
+oauthApiRoutes.get("/oauth/profile", oauthProfileGuard, (c) => {
   return c.json({
     account: {
       uuid: "00000000-0000-4000-8000-000000000001",
@@ -229,7 +493,9 @@ oauthApiRoutes.get("/oauth/profile", oauthAuthGuard, (c) => {
 })
 
 // GET /api/oauth/claude_cli/roles
-oauthApiRoutes.get("/oauth/claude_cli/roles", oauthAuthGuard, (c) => c.json([]))
+oauthApiRoutes.get("/oauth/claude_cli/roles", oauthProfileGuard, (c) =>
+  c.json([]),
+)
 
 // GET /api/claude_code_penguin_mode — org fast-mode ("penguin mode") status.
 // Claude Code fetches this directly (NOT via GrowthBook) to decide whether
@@ -237,7 +503,7 @@ oauthApiRoutes.get("/oauth/claude_cli/roles", oauthAuthGuard, (c) => c.json([]))
 // disabled with reason "preference" → "Fast mode has been disabled by your
 // organization". Controlled by the `claude_code_penguin_mode` feature flag,
 // which defaults to enabled — flip it to false to turn fast mode off.
-oauthApiRoutes.get("/claude_code_penguin_mode", oauthAuthGuard, (c) => {
+oauthApiRoutes.get("/claude_code_penguin_mode", oauthInferenceGuard, (c) => {
   const flag = getFeatureFlags().claude_code_penguin_mode
   const enabled = flag !== false && flag !== "false"
   return c.json(
@@ -248,57 +514,64 @@ oauthApiRoutes.get("/claude_code_penguin_mode", oauthAuthGuard, (c) => {
 })
 
 // GET /api/claude_cli_profile
-oauthApiRoutes.get("/claude_cli_profile", oauthAuthGuard, (c) => c.json({}))
+oauthApiRoutes.get("/claude_cli_profile", oauthProfileGuard, (c) => c.json({}))
 
 // GET /api/oauth/usage — usage data for settings panel
-oauthApiRoutes.get("/oauth/usage", oauthAuthGuard, (c) =>
+oauthApiRoutes.get("/oauth/usage", oauthProfileGuard, (c) =>
   c.json(getUsageResponse()),
 )
 
 // GET /api/oauth/claude_cli/client_data
-oauthApiRoutes.get("/oauth/claude_cli/client_data", oauthAuthGuard, (c) =>
+oauthApiRoutes.get("/oauth/claude_cli/client_data", oauthProfileGuard, (c) =>
   c.json({}),
 )
 
 // POST /api/oauth/claude_cli/create_api_key
-oauthApiRoutes.post("/oauth/claude_cli/create_api_key", oauthAuthGuard, (c) =>
-  c.json({ api_key: getAccessToken() }),
+oauthApiRoutes.post(
+  "/oauth/claude_cli/create_api_key",
+  requireOAuthScopes(["org:create_api_key"]),
+  async (c) => {
+    const rawKey = await getOAuthStore().mintInferenceCredential()
+    c.header("Cache-Control", "no-store")
+    c.header("Pragma", "no-cache")
+    return c.json({ raw_key: rawKey })
+  },
 )
 
 // POST /api/claude_cli_feedback
-oauthApiRoutes.post("/claude_cli_feedback", oauthAuthGuard, (c) =>
+oauthApiRoutes.post("/claude_cli_feedback", oauthInferenceGuard, (c) =>
   c.json({ success: true }),
 )
 
 // POST /api/claude_code/metrics
-oauthApiRoutes.post("/claude_code/metrics", oauthAuthGuard, (c) =>
+oauthApiRoutes.post("/claude_code/metrics", oauthInferenceGuard, (c) =>
   c.json({ success: true }),
 )
 
 // GET /api/claude_code/organizations/metrics_enabled
 oauthApiRoutes.get(
   "/claude_code/organizations/metrics_enabled",
-  oauthAuthGuard,
+  oauthInferenceGuard,
   (c) => c.json({ enabled: false }),
 )
 
 // POST /api/claude_code/link_vcs_account
-oauthApiRoutes.post("/claude_code/link_vcs_account", oauthAuthGuard, (c) =>
+oauthApiRoutes.post("/claude_code/link_vcs_account", oauthProfileGuard, (c) =>
   c.json({ success: true }),
 )
 
 // GET /api/claude_code/user_settings
-oauthApiRoutes.get("/claude_code/user_settings", oauthAuthGuard, (c) =>
+oauthApiRoutes.get("/claude_code/user_settings", oauthProfileGuard, (c) =>
   c.json({}),
 )
 
 // PUT /api/claude_code/user_settings
-oauthApiRoutes.put("/claude_code/user_settings", oauthAuthGuard, (c) =>
+oauthApiRoutes.put("/claude_code/user_settings", oauthProfileGuard, (c) =>
   c.json({ success: true }),
 )
 
 // GET /api/organization
-oauthApiRoutes.get("/organization/:id", oauthAuthGuard, (c) =>
+oauthApiRoutes.get("/organization/:id", oauthProfileGuard, (c) =>
   c.json({
     uuid: c.req.param("id"),
     name: "Copilot API",
@@ -307,7 +580,7 @@ oauthApiRoutes.get("/organization/:id", oauthAuthGuard, (c) =>
 )
 
 // GET /api/oauth/claude_cli/organizations — organization list
-oauthApiRoutes.get("/oauth/claude_cli/organizations", oauthAuthGuard, (c) =>
+oauthApiRoutes.get("/oauth/claude_cli/organizations", oauthProfileGuard, (c) =>
   c.json([
     {
       uuid: "00000000-0000-4000-8000-000000000002",
@@ -322,158 +595,166 @@ oauthApiRoutes.get("/oauth/claude_cli/organizations", oauthAuthGuard, (c) =>
 // GET /api/claude_code/organizations/:orgId/mcp_servers
 oauthApiRoutes.get(
   "/claude_code/organizations/:orgId/mcp_servers",
-  oauthAuthGuard,
+  oauthMcpGuard,
   (c) => c.json({ mcp_servers: [] }),
 )
 
 // POST /api/claude_code/organizations/:orgId/mcp_servers
 oauthApiRoutes.post(
   "/claude_code/organizations/:orgId/mcp_servers",
-  oauthAuthGuard,
+  oauthMcpGuard,
   (c) => c.json({ success: true }),
 )
 
 // GET /api/claude_code/organizations/:orgId/integrations
 oauthApiRoutes.get(
   "/claude_code/organizations/:orgId/integrations",
-  oauthAuthGuard,
+  oauthMcpGuard,
   (c) => c.json({ integrations: [] }),
 )
 
 // GET /api/claude_code/task_runners
-oauthApiRoutes.get("/claude_code/task_runners", oauthAuthGuard, (c) =>
+oauthApiRoutes.get("/claude_code/task_runners", oauthSessionGuard, (c) =>
   c.json({ task_runners: [] }),
 )
 
 // POST /api/claude_code/tasks
-oauthApiRoutes.post("/claude_code/tasks", oauthAuthGuard, (c) =>
+oauthApiRoutes.post("/claude_code/tasks", oauthSessionGuard, (c) =>
   c.json({ success: true }),
 )
 
 // GET /api/claude_code/environments
-oauthApiRoutes.get("/claude_code/environments", oauthAuthGuard, (c) =>
+oauthApiRoutes.get("/claude_code/environments", oauthSessionGuard, (c) =>
   c.json({ environments: [] }),
 )
 
 // POST /api/claude_code/organizations/:orgId/file_upload
 oauthApiRoutes.post(
   "/claude_code/organizations/:orgId/file_upload",
-  oauthAuthGuard,
+  oauthFileUploadGuard,
   (c) => c.json({ success: true }),
 )
 
 // GET /api/claude_code/organizations/:orgId/policy_limits
 oauthApiRoutes.get(
   "/claude_code/organizations/:orgId/policy_limits",
-  oauthAuthGuard,
+  oauthSessionGuard,
   (c) => c.json({ limits: {}, policies: [] }),
 )
 
 // GET /api/claude_code/skill_search
-oauthApiRoutes.get("/claude_code/skill_search", oauthAuthGuard, (c) =>
+oauthApiRoutes.get("/claude_code/skill_search", oauthSessionGuard, (c) =>
   c.json({ results: [] }),
 )
 
 // PATCH /api/claude_code/sessions/:id
-oauthApiRoutes.patch("/claude_code/sessions/:id", oauthAuthGuard, (c) =>
+oauthApiRoutes.patch("/claude_code/sessions/:id", oauthSessionGuard, (c) =>
   c.json({ success: true }),
 )
 
 // GET /api/claude_code/policy_limits (non-org path)
-oauthApiRoutes.get("/claude_code/policy_limits", oauthAuthGuard, (c) =>
+oauthApiRoutes.get("/claude_code/policy_limits", oauthSessionGuard, (c) =>
   c.json({ limits: {}, policies: [] }),
 )
 
 // GET /api/claude_code/settings
-oauthApiRoutes.get("/claude_code/settings", oauthAuthGuard, (c) => c.json({}))
+oauthApiRoutes.get("/claude_code/settings", oauthSessionGuard, (c) =>
+  c.json({}),
+)
 
 // PUT /api/claude_code/settings
-oauthApiRoutes.put("/claude_code/settings", oauthAuthGuard, (c) =>
+oauthApiRoutes.put("/claude_code/settings", oauthSessionGuard, (c) =>
   c.json({ success: true }),
 )
 
 // GET /api/claude_code/team_memory
-oauthApiRoutes.get("/claude_code/team_memory", oauthAuthGuard, (c) =>
+oauthApiRoutes.get("/claude_code/team_memory", oauthSessionGuard, (c) =>
   c.json({ memories: [] }),
 )
 
 // GET /api/claude_code_grove
-oauthApiRoutes.get("/claude_code_grove", oauthAuthGuard, (c) => c.json({}))
+oauthApiRoutes.get("/claude_code_grove", oauthSessionGuard, (c) => c.json({}))
 
 // GET /api/claude_cli/bootstrap
-oauthApiRoutes.get("/claude_cli/bootstrap", oauthAuthGuard, (c) => c.json({}))
+oauthApiRoutes.get("/claude_cli/bootstrap", oauthProfileGuard, (c) =>
+  c.json({}),
+)
 
 // GET /api/oauth/account/settings
-oauthApiRoutes.get("/oauth/account/settings", oauthAuthGuard, (c) => c.json({}))
+oauthApiRoutes.get("/oauth/account/settings", oauthProfileGuard, (c) =>
+  c.json({}),
+)
 
 // POST /api/oauth/account/grove_notice_viewed
-oauthApiRoutes.post("/oauth/account/grove_notice_viewed", oauthAuthGuard, (c) =>
-  c.json({ success: true }),
+oauthApiRoutes.post(
+  "/oauth/account/grove_notice_viewed",
+  oauthProfileGuard,
+  (c) => c.json({ success: true }),
 )
 
 // GET /api/oauth/organizations/:orgId/* (various sub-routes)
 oauthApiRoutes.get(
   "/oauth/organizations/:orgId/overage_credit_grant",
-  oauthAuthGuard,
+  oauthProfileGuard,
   (c) => c.json({ grants: [] }),
 )
 oauthApiRoutes.get(
   "/oauth/organizations/:orgId/sync/github/auth",
-  oauthAuthGuard,
+  oauthProfileGuard,
   (c) => c.json({ authorized: false }),
 )
 oauthApiRoutes.get(
   "/oauth/organizations/:orgId/code/repos/:owner/:repo",
-  oauthAuthGuard,
+  oauthProfileGuard,
   (c) => c.json({}),
 )
 oauthApiRoutes.get(
   "/oauth/organizations/:orgId/admin_requests/eligibility",
-  oauthAuthGuard,
+  oauthProfileGuard,
   (c) => c.json({ eligible: false }),
 )
 oauthApiRoutes.get(
   "/oauth/organizations/:orgId/admin_requests",
-  oauthAuthGuard,
+  oauthProfileGuard,
   (c) => c.json({ requests: [] }),
 )
 oauthApiRoutes.post(
   "/oauth/organizations/:orgId/admin_requests",
-  oauthAuthGuard,
+  oauthProfileGuard,
   (c) => c.json({ success: true }),
 )
 oauthApiRoutes.get(
   "/oauth/organizations/:orgId/admin_requests/me",
-  oauthAuthGuard,
+  oauthProfileGuard,
   (c) => c.json({ requests: [] }),
 )
 oauthApiRoutes.get(
   "/oauth/organizations/:orgId/referral/eligibility",
-  oauthAuthGuard,
+  oauthProfileGuard,
   (c) => c.json({ eligible: false }),
 )
 oauthApiRoutes.get(
   "/oauth/organizations/:orgId/referral/redemptions",
-  oauthAuthGuard,
+  oauthProfileGuard,
   (c) => c.json({ redemptions: [] }),
 )
 
 // GET /api/organization/claude_code_first_token_date
 oauthApiRoutes.get(
   "/organization/claude_code_first_token_date",
-  oauthAuthGuard,
+  oauthProfileGuard,
   (c) => c.json({ first_token_date: "2025-01-01T00:00:00Z" }),
 )
 
 // POST /api/organizations/:orgId/claude_code/buddy_react
 oauthApiRoutes.post(
   "/organizations/:orgId/claude_code/buddy_react",
-  oauthAuthGuard,
+  oauthProfileGuard,
   (c) => c.json({ success: true }),
 )
 
 // Unknown /api/* calls from redirected Claude/Anthropic hosts are proxied once
-// the source IP has authenticated. Other compatibility noise is acknowledged.
+// the source IP has authenticated. Every other unknown route is denied.
 oauthApiRoutes.all("*", async (c) => {
   if (
     isAllowedTransparentProxyRequest(c)
@@ -482,7 +763,7 @@ oauthApiRoutes.all("*", async (c) => {
     return await transparentProxy(c)
   }
 
-  return c.body(null, 200)
+  return c.notFound()
 })
 
 // --- Authorize page HTML ---
@@ -512,7 +793,7 @@ function getAuthorizePage(queryString: string, error?: string): string {
   <h1>Authorize Claude Code</h1>
   <p>Enter your API key to continue.</p>
   ${error ? `<div class="error">${error}</div>` : ""}
-  <form method="POST" action="/oauth/authorize${queryString}">
+  <form method="POST" action="/oauth/authorize${escapeHtml(queryString)}">
     <input type="password" name="api_key" placeholder="API key" autofocus required>
     <button type="submit">Authorize</button>
   </form>

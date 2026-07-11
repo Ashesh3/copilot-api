@@ -1,37 +1,126 @@
 map $http_upgrade $connection_upgrade {
-    default upgrade;
-    ''      close;
+  default upgrade;
+  '' close;
 }
 
 server {
-   listen 80;
-   server_name {{PUBLIC_SERVER_NAME}};
-   return 301 https://$host$request_uri;
+  listen 80;
+  server_name {{PUBLIC_SERVER_NAME}};
+  return 301 https://$host$request_uri;
 }
 
 server {
-   listen 443 ssl;
-   server_name {{PUBLIC_SERVER_NAME}};
+  listen 443 ssl;
+  server_name {{PUBLIC_SERVER_NAME}};
 
-   ssl_certificate     {{PUBLIC_SSL_CERTIFICATE_PATH}};
-   ssl_certificate_key {{PUBLIC_SSL_CERTIFICATE_KEY_PATH}};
+  client_header_timeout 10s;
+  client_body_timeout 30s;
+  client_max_body_size 32m;
 
-   if ($host != "{{PUBLIC_SERVER_NAME}}") { return 444; }
+  ssl_certificate     {{PUBLIC_SSL_CERTIFICATE_PATH}};
+  ssl_certificate_key {{PUBLIC_SSL_CERTIFICATE_KEY_PATH}};
 
-   limit_req zone={{RATE_LIMIT_ZONE}} burst={{RATE_LIMIT_BURST}} nodelay;
+  # Trust CF-Connecting-IP only after nginx has verified the TCP peer against
+  # Cloudflare's exact published ranges in this snippet.
+  include {{CLOUDFLARE_REAL_IP_SNIPPET_PATH}};
 
-   location / {
-     proxy_pass {{UPSTREAM_URL}};
-     proxy_http_version 1.1;
-     proxy_set_header Host $host;
-     proxy_set_header X-Real-IP $remote_addr;
-     proxy_set_header X-Forwarded-For $remote_addr;
-     proxy_set_header X-Forwarded-Proto $scheme;
+  if ($host != "{{PUBLIC_SERVER_NAME}}") { return 444; }
+  limit_req zone={{RATE_LIMIT_ZONE}} burst={{RATE_LIMIT_BURST}} nodelay;
 
-     proxy_set_header Upgrade $http_upgrade;
-     proxy_set_header Connection $connection_upgrade;
+  proxy_set_header Host $host;
+  proxy_set_header X-Real-IP $remote_addr;
+  proxy_set_header X-Forwarded-For $remote_addr;
+  proxy_set_header X-Forwarded-Proto $scheme;
 
-     include {{PROXY_LIMITS_SNIPPET_PATH}};
-     chunked_transfer_encoding on;
-   }
+  # This template intentionally has no catch-all proxy. Add only routes that
+  # the public hostname is expected to serve.
+  location = /health/health {
+    limit_except GET { deny all; }
+    proxy_pass {{UPSTREAM_URL}};
+    include {{PROXY_LIMITS_SNIPPET_PATH}};
+  }
+
+  location ~ ^/(?:v1/)?models/?$ {
+    limit_except GET { deny all; }
+    proxy_pass {{UPSTREAM_URL}};
+    include {{PROXY_LIMITS_SNIPPET_PATH}};
+  }
+
+  location ~ ^/(?:v1/)?(?:chat/completions|embeddings|messages|responses(?:/compact)?)/?$ {
+    limit_except POST { deny all; }
+    client_max_body_size 32m;
+    proxy_pass {{UPSTREAM_URL}};
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+    include {{PROXY_LIMITS_SNIPPET_PATH}};
+  }
+
+  location ~ ^/v1/messages/count_tokens/?$ {
+    limit_except POST { deny all; }
+    proxy_pass {{UPSTREAM_URL}};
+    include {{PROXY_LIMITS_SNIPPET_PATH}};
+  }
+
+  location ~ ^/oauth/(?:authorize|code/(?:success|callback))/?$ {
+    limit_except GET POST { deny all; }
+    client_max_body_size 64k;
+    proxy_pass {{UPSTREAM_URL}};
+    include {{PROXY_LIMITS_SNIPPET_PATH}};
+  }
+
+  location = /v1/oauth/revoke {
+    limit_except POST { deny all; }
+    client_max_body_size 64k;
+    proxy_pass {{UPSTREAM_URL}};
+    include {{PROXY_LIMITS_SNIPPET_PATH}};
+  }
+
+  location = /v1/oauth/token {
+    limit_except POST { deny all; }
+    client_max_body_size 64k;
+    proxy_pass {{UPSTREAM_URL}};
+    include {{PROXY_LIMITS_SNIPPET_PATH}};
+  }
+
+  location = /dashboard {
+    limit_except GET { deny all; }
+    client_max_body_size 64k;
+    proxy_pass {{UPSTREAM_URL}};
+    include {{PROXY_LIMITS_SNIPPET_PATH}};
+  }
+
+  location ~ ^/dashboard/(?:auth|api)(?:/.*)?$ {
+    client_max_body_size 64k;
+    proxy_pass {{UPSTREAM_URL}};
+    proxy_http_version 1.1;
+    include {{PROXY_LIMITS_SNIPPET_PATH}};
+  }
+
+  location = /remote {
+    limit_except GET { deny all; }
+    proxy_pass {{UPSTREAM_URL}};
+    include {{PROXY_LIMITS_SNIPPET_PATH}};
+  }
+
+  location ~ ^/code(?:/[^/]+)?$ {
+    limit_except GET { deny all; }
+    proxy_pass {{UPSTREAM_URL}};
+    include {{PROXY_LIMITS_SNIPPET_PATH}};
+  }
+
+  location ~ ^/ws/remote/ {
+    limit_except GET { deny all; }
+    proxy_pass {{UPSTREAM_URL}};
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection upgrade;
+    proxy_request_buffering off;
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 1h;
+    proxy_send_timeout 1h;
+  }
+
+  location / { return 404; }
 }

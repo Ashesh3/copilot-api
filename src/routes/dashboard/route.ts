@@ -1,14 +1,9 @@
-import { Hono, type Context } from "hono"
+import { Hono, type Context, type Next } from "hono"
 
-import { upsertIpAllowlistEntry } from "~/lib/ip-allowlist"
-import {
-  extractClientIp,
-  isIpBlocked,
-  recordFailedAttempt,
-  whitelistIp,
-} from "~/lib/ip-blocker"
-import { extractRequestApiKey } from "~/lib/request-auth"
-import { state } from "~/lib/state"
+import { authenticateAdminRequest } from "~/lib/admin-auth"
+import { secureHtml } from "~/lib/secure-html"
+import { getSession } from "~/routes/code-sessions/session-store"
+import { mintRemoteWebSocketTicket } from "~/routes/remote/ws-security"
 
 import {
   handleAddModelRedirect,
@@ -55,6 +50,7 @@ import {
   handleUpdateReplacement,
   handleUpsertCustomProvider,
 } from "./api"
+import { dashboardAuthRoutes } from "./auth-route"
 import { handleReplayLlmDebugLog } from "./llm-debug-replay"
 import { DASHBOARD_HTML } from "./page-generated"
 import { handleExportSettings } from "./settings-export"
@@ -65,58 +61,36 @@ export const dashboardRoutes = new Hono()
 // which gates every /dashboard/api/* call. Brute-force is bounded by the
 // shared 3-strikes IP ban in apiKeyGuard.)
 dashboardRoutes.get("/", (c) => {
-  return c.html(DASHBOARD_HTML)
+  return secureHtml(c, DASHBOARD_HTML)
 })
 
-function shouldAutoAllowlistDashboardIp(c: {
-  req: { method: string; path: string }
-}): boolean {
-  return (
-    c.req.method === "GET"
-    && (c.req.path === "/dashboard/api/overview"
-      || c.req.path === "/api/overview")
-  )
+dashboardRoutes.route("/auth", dashboardAuthRoutes)
+
+dashboardRoutes.use("/api/*", async (c, next) => {
+  const mutating = !["GET", "HEAD", "OPTIONS"].includes(c.req.method)
+  const session = await authenticateAdminRequest(c.req.raw, {
+    requireCsrf: mutating,
+  })
+  if (!session) {
+    c.header("Cache-Control", "no-store")
+    return c.json(
+      { error: { message: "Unauthorized", type: "authentication_error" } },
+      401,
+    )
+  }
+  await next()
+})
+
+async function requireReauthentication(c: Context, next: Next) {
+  const session = await authenticateAdminRequest(c.req.raw, {
+    requireCsrf: !["GET", "HEAD"].includes(c.req.method),
+    requireReauth: true,
+  })
+  if (!session) {
+    return c.json({ error: "Privileged reauthentication required" }, 403)
+  }
+  await next()
 }
-
-// Auth guard for API routes -- reuses the same apiKeyAuth + IP ban mechanism
-dashboardRoutes.use("/api/*", async (c: Context, next) => {
-  const clientIp = extractClientIp(c)
-
-  if (clientIp !== null && isIpBlocked(clientIp)) {
-    await new Promise(() => {})
-    return
-  }
-
-  if (!state.apiKeyAuth) {
-    await next()
-    return
-  }
-
-  const requestApiKey = extractRequestApiKey(c)
-
-  if (requestApiKey === state.apiKeyAuth) {
-    if (clientIp !== null) {
-      whitelistIp(clientIp)
-      if (shouldAutoAllowlistDashboardIp(c)) {
-        await upsertIpAllowlistEntry(clientIp, {
-          source: "dashboard",
-          seen: true,
-        })
-      }
-    }
-    await next()
-    return
-  }
-
-  if (clientIp !== null) {
-    recordFailedAttempt(clientIp)
-  }
-
-  return c.json(
-    { error: { message: "Unauthorized", type: "authentication_error" } },
-    401,
-  )
-})
 
 // Overview
 dashboardRoutes.get("/api/overview", handleOverview)
@@ -126,6 +100,20 @@ dashboardRoutes.get("/api/sessions", handleListSessions)
 dashboardRoutes.post("/api/sessions/:id/archive", handleArchiveSession)
 dashboardRoutes.delete("/api/sessions/:id", handleDestroySession)
 dashboardRoutes.get("/api/sessions/:id/events", handleGetSessionEvents)
+dashboardRoutes.post("/api/sessions/:id/websocket-ticket", async (c) => {
+  const sessionId = c.req.param("id")
+  const codeSession = getSession(sessionId)
+  if (!codeSession || codeSession.archived) {
+    return c.json({ error: "Session not found" }, 404)
+  }
+  const adminSession = await authenticateAdminRequest(c.req.raw, {
+    requireCsrf: true,
+  })
+  if (!adminSession) {
+    return c.json({ error: "Unauthorized" }, 401)
+  }
+  return c.json(mintRemoteWebSocketTicket(adminSession.tokenHash, sessionId))
+})
 
 // Environments
 dashboardRoutes.get("/api/environments", handleListEnvironments)
@@ -168,12 +156,21 @@ dashboardRoutes.delete("/api/model-settings/:model", handleDeleteModelSettings)
 
 // Custom Providers
 dashboardRoutes.get("/api/custom-providers", handleListCustomProviders)
-dashboardRoutes.post("/api/custom-providers", handleUpsertCustomProvider)
+dashboardRoutes.post(
+  "/api/custom-providers",
+  requireReauthentication,
+  handleUpsertCustomProvider,
+)
 dashboardRoutes.post(
   "/api/custom-providers/nebius-qwen3",
+  requireReauthentication,
   handleAddNebiusCustomProvider,
 )
-dashboardRoutes.delete("/api/custom-providers/:id", handleDeleteCustomProvider)
+dashboardRoutes.delete(
+  "/api/custom-providers/:id",
+  requireReauthentication,
+  handleDeleteCustomProvider,
+)
 
 // Model Routing
 dashboardRoutes.get("/api/model-routing", handleListModelRouting)
@@ -184,19 +181,43 @@ dashboardRoutes.get("/api/usage", handleGetUsage)
 
 // IP Allowlist
 dashboardRoutes.get("/api/ip-allowlist", handleListIpAllowlist)
-dashboardRoutes.post("/api/ip-allowlist", handleSetIpAllowlistEntry)
-dashboardRoutes.patch("/api/ip-allowlist/:ip", handleSetIpAllowlistEntry)
-dashboardRoutes.delete("/api/ip-allowlist/:ip", handleDeleteIpAllowlistEntry)
+dashboardRoutes.post(
+  "/api/ip-allowlist",
+  requireReauthentication,
+  handleSetIpAllowlistEntry,
+)
+dashboardRoutes.patch(
+  "/api/ip-allowlist/:ip",
+  requireReauthentication,
+  handleSetIpAllowlistEntry,
+)
+dashboardRoutes.delete(
+  "/api/ip-allowlist/:ip",
+  requireReauthentication,
+  handleDeleteIpAllowlistEntry,
+)
 
 // LLM Debug Logs
 dashboardRoutes.get("/api/llm-debug", handleListLlmDebugLogs)
-dashboardRoutes.post("/api/llm-debug/:id/replay", handleReplayLlmDebugLog)
-dashboardRoutes.get("/api/llm-debug/:id", handleGetLlmDebugLog)
+dashboardRoutes.post(
+  "/api/llm-debug/:id/replay",
+  requireReauthentication,
+  handleReplayLlmDebugLog,
+)
+dashboardRoutes.get(
+  "/api/llm-debug/:id",
+  requireReauthentication,
+  handleGetLlmDebugLog,
+)
 dashboardRoutes.delete("/api/llm-debug", handleClearLlmDebugLogs)
 
 // Settings
 dashboardRoutes.get("/api/settings", handleGetSettings)
-dashboardRoutes.get("/api/settings/export", handleExportSettings)
+dashboardRoutes.get(
+  "/api/settings/export",
+  requireReauthentication,
+  handleExportSettings,
+)
 dashboardRoutes.post(
   "/api/settings/codex-cleanup-model",
   handleSetCodexCleanupModel,

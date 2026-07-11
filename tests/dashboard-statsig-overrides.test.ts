@@ -1,6 +1,5 @@
 import { afterAll, beforeEach, expect, test } from "bun:test"
 
-import { state } from "../src/lib/state"
 import { DASHBOARD_HTML } from "../src/routes/dashboard/page-generated"
 import {
   getFeatureFlags,
@@ -12,10 +11,15 @@ import {
 } from "../src/routes/statsig-overrides/store"
 import { server } from "../src/server"
 import { parseDynamicConfig } from "../ui/src/lib/dynamicConfig"
+import {
+  adminHeaders,
+  createTestAdminSession,
+  resetTestAdminSession,
+  type TestAdminSession,
+} from "./helpers/admin-session"
 
-const DASHBOARD_API_KEY = "dashboard-secret"
 const TEST_CLAUDE_FLAG = "dashboard_statsig_overrides_test_flag"
-const originalApiKeyAuth = state.apiKeyAuth
+let adminSession: TestAdminSession
 
 function createEmptyOverrides(): StatsigOverrides {
   return {
@@ -29,7 +33,11 @@ async function requestDashboard(
   init?: RequestInit,
 ): Promise<Response> {
   const headers = new Headers(init?.headers)
-  headers.set("x-api-key", DASHBOARD_API_KEY)
+  for (const [name, value] of Object.entries(
+    adminHeaders(adminSession, init?.method !== undefined),
+  )) {
+    headers.set(name, value)
+  }
 
   return server.request(path, {
     ...init,
@@ -49,14 +57,14 @@ async function requestDashboardJson(
   })
 }
 
-beforeEach(() => {
-  state.apiKeyAuth = DASHBOARD_API_KEY
+beforeEach(async () => {
+  adminSession = await createTestAdminSession()
   removeFeatureFlag(TEST_CLAUDE_FLAG)
   statsigOverrideStore.replaceForTest(createEmptyOverrides())
 })
 
 afterAll(() => {
-  state.apiKeyAuth = originalApiKeyAuth
+  resetTestAdminSession()
   removeFeatureFlag(TEST_CLAUDE_FLAG)
   statsigOverrideStore.replaceForTest(createEmptyOverrides())
   statsigOverrideStore.resetAfterTest()

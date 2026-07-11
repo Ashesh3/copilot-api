@@ -2,6 +2,7 @@
 import consola from "consola"
 import { randomUUID } from "node:crypto"
 
+import { resolveRequestCredential } from "~/lib/credential-resolver"
 import {
   applyModelRedirect,
   formatModelRedirectResult,
@@ -15,7 +16,6 @@ import {
   usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
 import { checkRateLimit } from "~/lib/rate-limit"
-import { getConfiguredApiKeys } from "~/lib/request-auth"
 import { reportNonDefaultBehavior } from "~/lib/request-logger"
 import { state } from "~/lib/state"
 import { createChatCompletions } from "~/services/copilot/create-chat-completions"
@@ -48,13 +48,27 @@ const RESPONSES_ENDPOINT = "/responses"
 
 const WS_PATHS = new Set(["/v1/responses", "/responses"])
 
+export const RESPONSES_WS_MAX_FRAME_BYTES = 4 * 1024 * 1024
+export const RESPONSES_WS_MAX_ACTIVE_TURNS = 4
+export const RESPONSES_WS_MAX_SNAPSHOTS = 32
+export const RESPONSES_WS_MAX_SNAPSHOT_BYTES = 16 * 1024 * 1024
+export const RESPONSES_WS_MAX_CONNECTIONS_PER_PRINCIPAL = 2
+export const RESPONSES_WS_MAX_CONNECTIONS_GLOBAL = 20
+export const RESPONSES_WS_MAX_LIFETIME_MS = 12 * 60 * 60 * 1000
+
+const activeConnections = new Map<string, number>()
+let activeConnectionCount = 0
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null
 
 export interface ResponsesWebSocketData {
   activeTurns: Map<number, ResponsesWebSocketTurn>
   closed: boolean
+  connectionReleased: boolean
   nextTurnSequence: number
+  principalId: string
+  lifetimeTimer?: ReturnType<typeof setTimeout>
   type: "responses"
   requestId: string
   sessionId?: string
@@ -95,17 +109,25 @@ interface ContinuationResolutionResult {
  * Returns "upgraded" if the upgrade was handled, "auth_failed" if auth failed,
  * or "no_match" if the path didn't match.
  */
-export function tryUpgradeResponsesWebSocket(
+export async function tryUpgradeResponsesWebSocket(
   req: Request,
   server: { upgrade(req: Request, opts?: object): boolean },
-): "upgraded" | "auth_failed" | "no_match" {
+): Promise<"upgraded" | "auth_failed" | "limit_reached" | "no_match"> {
   const url = new URL(req.url)
   if (!WS_PATHS.has(url.pathname)) {
     return "no_match"
   }
 
-  if (!isAuthorizedResponsesWebSocketUpgrade(req)) {
-    return "auth_failed"
+  const credential = await resolveRequestCredential(req, ["user:inference"])
+  if (!credential) return "auth_failed"
+
+  const principalConnections =
+    activeConnections.get(credential.principalId) ?? 0
+  if (
+    principalConnections >= RESPONSES_WS_MAX_CONNECTIONS_PER_PRINCIPAL
+    || activeConnectionCount >= RESPONSES_WS_MAX_CONNECTIONS_GLOBAL
+  ) {
+    return "limit_reached"
   }
 
   const requestId =
@@ -117,61 +139,40 @@ export function tryUpgradeResponsesWebSocket(
     ?? req.headers.get("session-id")
     ?? undefined
 
-  return (
-      server.upgrade(req, {
-        data: {
-          type: "responses" as const,
-          activeTurns: new Map<number, ResponsesWebSocketTurn>(),
-          closed: false,
-          nextTurnSequence: 0,
-          requestId,
-          sessionId,
-          responseSnapshots: new Map<string, ResponsesPayload>(),
-        },
-      })
-    ) ?
-      "upgraded"
-    : "no_match"
-}
-
-function isAuthorizedResponsesWebSocketUpgrade(req: Request): boolean {
-  const requestApiKey = extractApiKeyFromRequest(req)
-
-  if (state.apiKeyAuth && requestApiKey !== state.apiKeyAuth) {
-    return false
+  const data: ResponsesWebSocketData = {
+    type: "responses",
+    activeTurns: new Map<number, ResponsesWebSocketTurn>(),
+    closed: false,
+    connectionReleased: false,
+    nextTurnSequence: 0,
+    principalId: credential.principalId,
+    requestId,
+    sessionId,
+    responseSnapshots: new Map<string, ResponsesPayload>(),
   }
-
-  const configuredApiKeys = getConfiguredApiKeys()
-  if (
-    configuredApiKeys.length > 0
-    && (!requestApiKey || !configuredApiKeys.includes(requestApiKey))
-  ) {
-    return false
+  activeConnections.set(credential.principalId, principalConnections + 1)
+  activeConnectionCount += 1
+  if (!server.upgrade(req, { data })) {
+    releaseResponsesConnection(data)
+    return "no_match"
   }
-
-  return true
-}
-
-function extractApiKeyFromRequest(req: Request): string | null {
-  const xApiKey = req.headers.get("x-api-key")?.trim()
-  if (xApiKey) return xApiKey
-
-  const googleApiKey = req.headers.get("x-goog-api-key")?.trim()
-  if (googleApiKey) return googleApiKey
-
-  const authorization = req.headers.get("authorization")
-  if (!authorization) return null
-  const [scheme, ...rest] = authorization.trim().split(/\s+/)
-  if (scheme.toLowerCase() !== "bearer") return null
-  return rest.join(" ").trim() || null
+  return "upgraded"
 }
 
 // Bun WebSocket handler for responses
 export const responsesWebSocket = {
-  open(_ws: { data: ResponsesWebSocketData }) {
+  open(ws: {
+    data: ResponsesWebSocketData
+    close(code?: number, reason?: string): void
+  }) {
+    ws.data.lifetimeTimer = setTimeout(() => {
+      ws.close(4008, "Responses WebSocket lifetime exceeded")
+    }, RESPONSES_WS_MAX_LIFETIME_MS)
     consola.debug("[responses-ws] WebSocket connected")
   },
 
+  // Protocol validation and turn lifecycle intentionally share one dispatcher.
+  // eslint-disable-next-line max-lines-per-function
   async message(
     ws: ResponsesWebSocketState,
     message: string | Buffer | Uint8Array,
@@ -183,6 +184,18 @@ export const responsesWebSocket = {
         code: "bad_request",
         message: "Binary frames not supported",
         status: 400,
+        type: "invalid_request_error",
+      })
+      return
+    }
+
+    if (
+      new TextEncoder().encode(message).length > RESPONSES_WS_MAX_FRAME_BYTES
+    ) {
+      sendWebSocketError(ws, {
+        code: "request_too_large",
+        message: "WebSocket request exceeds the maximum frame size",
+        status: 413,
         type: "invalid_request_error",
       })
       return
@@ -211,6 +224,16 @@ export const responsesWebSocket = {
         message: `Unsupported message type: ${String(parsed.type)}`,
         status: 400,
         type: "invalid_request_error",
+      })
+      return
+    }
+
+    if (ws.data.activeTurns.size >= RESPONSES_WS_MAX_ACTIVE_TURNS) {
+      sendWebSocketError(ws, {
+        code: "too_many_requests",
+        message: "Too many concurrent Responses WebSocket turns",
+        status: 429,
+        type: "rate_limit_error",
       })
       return
     }
@@ -266,6 +289,7 @@ export const responsesWebSocket = {
   },
 
   close(ws: { data: ResponsesWebSocketData }) {
+    if (ws.data.lifetimeTimer) clearTimeout(ws.data.lifetimeTimer)
     ws.data.closed = true
     for (const turn of ws.data.activeTurns.values()) {
       const abortError = new Error("Responses WebSocket closed")
@@ -279,8 +303,46 @@ export const responsesWebSocket = {
       })
     }
     ws.data.responseSnapshots.clear()
+    releaseResponsesConnection(ws.data)
     consola.debug("[responses-ws] WebSocket closed")
   },
+}
+
+function releaseResponsesConnection(data: ResponsesWebSocketData): void {
+  if (data.connectionReleased) return
+  data.connectionReleased = true
+  const count = activeConnections.get(data.principalId) ?? 0
+  if (count <= 1) activeConnections.delete(data.principalId)
+  else activeConnections.set(data.principalId, count - 1)
+  activeConnectionCount = Math.max(0, activeConnectionCount - 1)
+}
+
+function storeResponseSnapshot(
+  snapshots: Map<string, ResponsesPayload>,
+  responseId: string,
+  payload: ResponsesPayload,
+): void {
+  const payloadBytes = new TextEncoder().encode(JSON.stringify(payload)).length
+  if (payloadBytes > RESPONSES_WS_MAX_SNAPSHOT_BYTES) return
+  if (!snapshots.has(responseId)) {
+    let storedBytes = 0
+    for (const snapshot of snapshots.values()) {
+      storedBytes += new TextEncoder().encode(JSON.stringify(snapshot)).length
+    }
+    while (
+      snapshots.size >= RESPONSES_WS_MAX_SNAPSHOTS
+      || storedBytes + payloadBytes > RESPONSES_WS_MAX_SNAPSHOT_BYTES
+    ) {
+      const oldest = snapshots.keys().next().value
+      if (!oldest) break
+      const removed = snapshots.get(oldest)
+      if (removed) {
+        storedBytes -= new TextEncoder().encode(JSON.stringify(removed)).length
+      }
+      snapshots.delete(oldest)
+    }
+  }
+  snapshots.set(responseId, payload)
 }
 
 async function handleResponseCreate(
@@ -768,7 +830,7 @@ function handleSyntheticWarmupRequest(
   turn: ResponsesWebSocketTurn,
 ): void {
   const responseId = `warmup_${randomUUID().replaceAll("-", "")}`
-  ws.data.responseSnapshots.set(responseId, payload)
+  storeResponseSnapshot(ws.data.responseSnapshots, responseId, payload)
 
   const createdAt = Math.floor(Date.now() / 1000)
   const baseResponse = {
@@ -864,10 +926,16 @@ export function recordResponseSnapshotFromFrame(
   const responseId = parsed.response?.id
   if (typeof responseId !== "string" || !responseId) return
 
-  responseSnapshots.set(
+  storeResponseSnapshot(
+    responseSnapshots,
     responseId,
     createCompletedResponseSnapshot(payload, parsed),
   )
+}
+
+export function resetResponsesWebSocketLimitsForTest(): void {
+  activeConnections.clear()
+  activeConnectionCount = 0
 }
 
 function createCompletedResponseSnapshot(

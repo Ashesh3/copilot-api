@@ -1,16 +1,14 @@
 import consola from "consola"
 import { randomUUID } from "node:crypto"
 
+import { issueWorkerCapability } from "~/lib/bridge-capabilities"
+
 import type { Environment, WorkItem } from "./types"
 
 const environments = new Map<string, Environment>()
 
-function generateId(): string {
+export function generateEnvironmentId(): string {
   return `env_${randomUUID().replaceAll("-", "").slice(0, 24)}`
-}
-
-function generateSecret(): string {
-  return randomUUID()
 }
 
 export function registerEnvironment(params: {
@@ -21,8 +19,9 @@ export function registerEnvironment(params: {
   max_sessions?: number
   metadata?: Record<string, unknown>
   environment_id?: string
+  secret: string
 }): { environment_id: string; environment_secret: string } {
-  const id = params.environment_id ?? generateId()
+  const id = params.environment_id ?? generateEnvironmentId()
 
   // If re-registering with the same id, reuse it
   const existing = environments.get(id)
@@ -34,13 +33,11 @@ export function registerEnvironment(params: {
     existing.gitRepoUrl = params.git_repo_url ?? null
     existing.maxSessions = params.max_sessions ?? 1
     existing.metadata = params.metadata ?? {}
-    return { environment_id: id, environment_secret: existing.secret }
+    return { environment_id: id, environment_secret: params.secret }
   }
 
-  const secret = generateSecret()
   const env: Environment = {
     id,
-    secret,
     machineName: params.machine_name,
     directory: params.directory,
     branch: params.branch,
@@ -52,7 +49,7 @@ export function registerEnvironment(params: {
   }
   environments.set(id, env)
   consola.info(`Registered environment ${id}`)
-  return { environment_id: id, environment_secret: secret }
+  return { environment_id: id, environment_secret: params.secret }
 }
 
 export function getEnvironment(id: string): Environment | undefined {
@@ -108,7 +105,7 @@ export function enqueueWork(opts: {
   const workType = opts.type ?? "session"
   const secretPayload = JSON.stringify({
     version: 1,
-    session_ingress_token: randomUUID(),
+    session_ingress_token: issueWorkerCapability(opts.sessionId),
     api_base_url: opts.apiBaseUrl,
     sources: [],
     auth: [],

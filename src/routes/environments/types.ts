@@ -1,6 +1,5 @@
 export type Environment = {
   id: string
-  secret: string
   machineName: string
   directory: string
   branch: string

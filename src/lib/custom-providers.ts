@@ -626,8 +626,18 @@ function redactProviderRequestPayload(
   return redacted
 }
 
-export function listCustomProvidersForDashboard(): Array<CustomProviderConfig> {
-  return getCustomProviders()
+export interface DashboardCustomProvider
+  extends Omit<CustomProviderConfig, "apiKey" | "headers"> {
+  apiKeyConfigured: boolean
+  headerNames: Array<string>
+}
+
+export function listCustomProvidersForDashboard(): Array<DashboardCustomProvider> {
+  return getCustomProviders().map(({ apiKey, headers, ...provider }) => ({
+    ...provider,
+    apiKeyConfigured: Boolean(apiKey),
+    headerNames: Object.keys(headers ?? {}),
+  }))
 }
 
 export function upsertCustomProvider(

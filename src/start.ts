@@ -3,13 +3,13 @@
 import { defineCommand } from "citty"
 import clipboard from "clipboardy"
 import consola from "consola"
+import fs from "node:fs"
 import invariant from "tiny-invariant"
-
-import type { CallbackSubscriber } from "./routes/code-sessions/event-bus"
 
 import packageJson from "../package.json" with { type: "json" }
 import { getStoredTokens } from "./lib/accounts-store"
 import { mergeConfigWithDefaults } from "./lib/config"
+import { resolveRequestCredential } from "./lib/credential-resolver"
 import { ensureModelRoutingOverridesLoaded } from "./lib/model-routing"
 import { ensureModelSettingsLoaded } from "./lib/model-settings"
 import { generateVirtualModels } from "./lib/model-suffix"
@@ -21,20 +21,15 @@ import { state } from "./lib/state"
 import { setupCopilotToken, setupGitHubToken } from "./lib/token"
 import { tokenPool } from "./lib/token-pool"
 import { cacheModels } from "./lib/utils"
-import {
-  subscribeWithCallback,
-  unsubscribeCallback,
-  broadcastEvents,
-} from "./routes/code-sessions/event-bus"
-import {
-  getSession,
-  getClientEvents,
-  addClientEvents,
-} from "./routes/code-sessions/session-store"
+import { isDirectConnectEnabled } from "./routes/direct-connect/route"
 import {
   DIRECT_CONNECT_WS_PATH,
   handleDirectConnectWebSocket,
+  releaseDirectConnectConnection,
+  reserveDirectConnectConnection,
 } from "./routes/direct-connect/ws-handler"
+import { remoteWebSocket } from "./routes/remote/websocket"
+import { tryUpgradeRemoteWebSocket } from "./routes/remote/ws-security"
 import {
   tryUpgradeResponsesWebSocket,
   responsesWebSocket,
@@ -231,7 +226,23 @@ async function initializePersistentConfig(): Promise<void> {
   await ensureModelRoutingOverridesLoaded()
 }
 
-// Combined WebSocket handler that dispatches to voice, responses, or direct-connect based on connection type
+async function isDirectConnectUpgradeAuthorized(
+  request: Request,
+): Promise<boolean> {
+  if (!isDirectConnectEnabled()) return false
+  return (await resolveRequestCredential(request, ["user:inference"])) !== null
+}
+
+function setTrustedPeerIp(
+  request: Request,
+  bunServer: { requestIP(req: Request): { address: string } | null },
+): void {
+  const peerIp = bunServer.requestIP(request)?.address
+  request.headers.delete("x-copilot-peer-ip")
+  if (peerIp) request.headers.set("x-copilot-peer-ip", peerIp)
+}
+
+// Combined WebSocket handler that dispatches by the authenticated connection type.
 const combinedWebSocket = {
   open(ws: { data: { type: string; sessionId?: string } }) {
     switch (ws.data.type) {
@@ -268,43 +279,9 @@ const combinedWebSocket = {
         break
       }
       case "remote-control": {
-        const rcWs = ws as {
-          data: {
-            type: string
-            sessionId: string
-            rcSubscriber?: CallbackSubscriber
-            rcKeepalive?: ReturnType<typeof setInterval>
-          }
-          send(data: string): void
-          close(code?: number, reason?: string): void
-        }
-        const sid = rcWs.data.sessionId
-        const session = getSession(sid)
-        if (!session) {
-          rcWs.close(4004, "Session not found")
-          break
-        }
-        // Send catchup events
-        const catchup = getClientEvents(sid, 0)
-        for (const event of catchup) {
-          rcWs.send(JSON.stringify(event))
-        }
-        // Subscribe for future events
-        rcWs.data.rcSubscriber = subscribeWithCallback(sid, (event) => {
-          try {
-            rcWs.send(JSON.stringify(event))
-          } catch {
-            // WebSocket may have closed
-          }
-        })
-        // Keepalive ping every 30s to prevent Cloudflare idle timeout
-        rcWs.data.rcKeepalive = setInterval(() => {
-          try {
-            rcWs.send(JSON.stringify({ type: "ping" }))
-          } catch {
-            // WebSocket closed
-          }
-        }, 30_000)
+        remoteWebSocket.open(
+          ws as unknown as Parameters<typeof remoteWebSocket.open>[0],
+        )
 
         break
       }
@@ -351,32 +328,10 @@ const combinedWebSocket = {
         break
       }
       case "remote-control": {
-        const rcWs = ws as unknown as {
-          data: { type: string; sessionId: string }
-        }
-        try {
-          const parsed = JSON.parse(
-            typeof message === "string" ? message : (
-              new TextDecoder().decode(message as Uint8Array)
-            ),
-          ) as {
-            type: string
-            message: { role: string; content: string }
-            session_id: string
-          }
-          const now = new Date().toISOString()
-          const created = addClientEvents(rcWs.data.sessionId, [
-            {
-              event_type: "client_event",
-              source: "client",
-              payload: parsed as unknown as Record<string, unknown>,
-              created_at: now,
-            },
-          ])
-          broadcastEvents(rcWs.data.sessionId, created)
-        } catch {
-          // Ignore malformed messages
-        }
+        remoteWebSocket.message(
+          ws as unknown as Parameters<typeof remoteWebSocket.message>[0],
+          message,
+        )
 
         break
       }
@@ -414,20 +369,9 @@ const combinedWebSocket = {
         break
       }
       case "remote-control": {
-        const rcWs = ws as {
-          data: {
-            type: string
-            sessionId: string
-            rcSubscriber?: CallbackSubscriber
-            rcKeepalive?: ReturnType<typeof setInterval>
-          }
-        }
-        if (rcWs.data.rcKeepalive) {
-          clearInterval(rcWs.data.rcKeepalive)
-        }
-        if (rcWs.data.rcSubscriber) {
-          unsubscribeCallback(rcWs.data.rcSubscriber)
-        }
+        remoteWebSocket.close(
+          ws as unknown as Parameters<typeof remoteWebSocket.close>[0],
+        )
 
         break
       }
@@ -436,6 +380,7 @@ const combinedWebSocket = {
   },
 }
 
+// eslint-disable-next-line max-lines-per-function
 export async function runServer(options: RunServerOptions): Promise<void> {
   initSentry()
 
@@ -471,7 +416,7 @@ export async function runServer(options: RunServerOptions): Promise<void> {
 
   if (options.apiKeyAuth)
     consola.info(
-      "API key authentication enabled - unauthorized requests will be silently dropped",
+      "API key authentication enabled - unauthorized requests receive a bounded denial",
     )
   if (options.host) consola.info(`Binding to host: ${options.host}`)
 
@@ -509,49 +454,74 @@ export async function runServer(options: RunServerOptions): Promise<void> {
     port: options.port,
     hostname: options.host,
     idleTimeout: 255,
-    fetch(req, bunServer) {
+    // Upgrade dispatch covers four independently secured WebSocket protocols.
+    // eslint-disable-next-line complexity
+    async fetch(req, bunServer) {
+      // Never trust this internal header from a client. Derive it from Bun's
+      // socket peer for HTTP and WebSocket requests alike.
+      setTrustedPeerIp(req, bunServer)
       // WebSocket upgrade must happen before Hono routing
       if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
-        if (tryUpgradeVoiceWebSocket(req, bunServer)) {
+        const voiceResult = await tryUpgradeVoiceWebSocket(req, bunServer)
+        if (voiceResult === "upgraded") {
           return undefined as unknown as Response
         }
-        const wsResult = tryUpgradeResponsesWebSocket(req, bunServer)
+        if (voiceResult === "auth_failed") {
+          return new Response("Unauthorized", { status: 401 })
+        }
+        if (voiceResult === "limit_reached") {
+          return new Response("Too Many Requests", { status: 429 })
+        }
+        const wsResult = await tryUpgradeResponsesWebSocket(req, bunServer)
         if (wsResult === "upgraded") {
           return undefined as unknown as Response
         }
         if (wsResult === "auth_failed") {
           return new Response("Unauthorized", { status: 401 })
         }
+        if (wsResult === "limit_reached") {
+          return new Response("Too Many Requests", { status: 429 })
+        }
         // Direct Connect WebSocket upgrade
         const url = new URL(req.url)
         if (url.pathname.startsWith(DIRECT_CONNECT_WS_PATH + "/")) {
+          if (!(await isDirectConnectUpgradeAuthorized(req))) {
+            return new Response("Not Found", { status: 404 })
+          }
           const sessionId = url.pathname.slice(
             DIRECT_CONNECT_WS_PATH.length + 1,
           )
-          if (sessionId) {
-            bunServer.upgrade(req, {
+          if (sessionId && reserveDirectConnectConnection(sessionId)) {
+            const upgraded = bunServer.upgrade(req, {
               data: {
                 type: "direct-connect" as const,
                 sessionId,
               },
             })
-            return undefined as unknown as Response
+            if (upgraded) return undefined as unknown as Response
+            releaseDirectConnectConnection(sessionId)
           }
+          return new Response("Not Found", { status: 404 })
         }
-        // Remote Control WebSocket upgrade
-        if (url.pathname.startsWith("/ws/remote/")) {
-          const sessionId = url.pathname.slice("/ws/remote/".length)
-          if (sessionId) {
-            bunServer.upgrade(req, {
-              data: { type: "remote-control" as const, sessionId },
-            })
-            return undefined as unknown as Response
-          }
+        const remoteResult = await tryUpgradeRemoteWebSocket(req, bunServer)
+        if (remoteResult === "upgraded") {
+          return undefined as unknown as Response
+        }
+        if (remoteResult === "auth_failed") {
+          return new Response("Unauthorized", { status: 401 })
+        }
+        if (remoteResult === "limit_reached") {
+          return new Response("Too Many Requests", { status: 429 })
         }
       }
       return server.fetch(req)
     },
-    websocket: combinedWebSocket,
+    websocket: {
+      ...combinedWebSocket,
+      maxPayloadLength: 4 * 1024 * 1024,
+      backpressureLimit: 1024 * 1024,
+      closeOnBackpressureLimit: true,
+    },
   })
 
   const host = options.host ?? "localhost"
@@ -568,6 +538,15 @@ function resolveApiKeyAuth(cliValue: string | undefined): string | undefined {
 
   // If a non-empty value was provided via CLI, use it
   if (cliValue !== "" && cliValue !== "true") return cliValue
+
+  // A mounted secret file takes precedence over environment-loaded values.
+  const filePath = process.env.COPILOT_API_KEY_AUTH_FILE?.trim()
+  if (filePath) {
+    const fileValue = fs.readFileSync(filePath, "utf8").trim()
+    if (fileValue) return fileValue
+    consola.error("COPILOT_API_KEY_AUTH_FILE is empty")
+    process.exit(1)
+  }
 
   // Flag was provided but no value — fall back to env
   const envValue = process.env.COPILOT_API_KEY_AUTH
@@ -659,7 +638,7 @@ export const start = defineCommand({
     "api-key-auth": {
       type: "string",
       description:
-        "API key for incoming request authentication. Requests with mismatched keys are silently dropped.",
+        "API key for incoming request authentication. Mismatched keys receive a bounded denial.",
     },
     host: {
       type: "string",

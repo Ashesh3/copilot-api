@@ -57,6 +57,13 @@ function allowManagedIp(ip: string): void {
   ])
 }
 
+function trustedProxyHeaders(ip: string): Record<string, string> {
+  return {
+    "x-copilot-peer-ip": "127.0.0.1",
+    "x-forwarded-for": ip,
+  }
+}
+
 function createTestApp(dependencies: StatsigProxyDependencies = {}): Hono {
   const app = new Hono()
   app.use("*", createStatsigProxyMiddleware(dependencies))
@@ -170,7 +177,7 @@ test("ignores other hosts and calls downstream", async () => {
       method: "POST",
       headers: {
         host: "example.com",
-        "x-forwarded-for": TEST_IPS[0],
+        ...trustedProxyHeaders(TEST_IPS[0]),
       },
       body: JSON.stringify({ user: { userID: "user-123" } }),
     },
@@ -194,7 +201,7 @@ test("returns 404 without fetching for non-allowlisted Statsig clients", async (
   const response = await app.request("http://localhost/v1/download?k=secret", {
     headers: {
       host: "ab.chatgpt.com",
-      "x-forwarded-for": TEST_IPS[1],
+      ...trustedProxyHeaders(TEST_IPS[1]),
     },
   })
 
@@ -226,7 +233,7 @@ test("normalizes host case and port and proxies raw non-initialize requests", as
       host: "AB.ChatGPT.com:443",
       "content-length": "999",
       "content-type": "application/octet-stream",
-      "x-forwarded-for": TEST_IPS[2],
+      ...trustedProxyHeaders(TEST_IPS[2]),
     },
     body: "client payload",
   })
@@ -267,7 +274,7 @@ test("keeps protocol-relative paths on the fixed Statsig origin", async () => {
   await app.request("http://localhost//evil.example/v1/initialize?foo=bar", {
     headers: {
       host: "ab.chatgpt.com",
-      "x-forwarded-for": TEST_IPS[3],
+      ...trustedProxyHeaders(TEST_IPS[3]),
     },
   })
 
@@ -322,7 +329,7 @@ test("normalizes encoded initialize requests, strips se and gz, and overlays ove
         "content-encoding": "gzip",
         "content-length": "999",
         "content-type": "application/octet-stream",
-        "x-forwarded-for": TEST_IPS[4],
+        ...trustedProxyHeaders(TEST_IPS[4]),
       },
       body: encodeInitializeBody(
         {
@@ -434,7 +441,7 @@ test("returns 400 with safe logs when the initialize request body is invalid", a
       method: "POST",
       headers: {
         host: "ab.chatgpt.com",
-        "x-forwarded-for": TEST_IPS[5],
+        ...trustedProxyHeaders(TEST_IPS[5]),
       },
       body: "=03e!decode-body-secret",
     },
@@ -479,7 +486,7 @@ test("returns 502 with safe logs when the upstream fetch fails", async () => {
     {
       headers: {
         host: "ab.chatgpt.com",
-        "x-forwarded-for": TEST_IPS[6],
+        ...trustedProxyHeaders(TEST_IPS[6]),
       },
     },
   )
@@ -527,7 +534,7 @@ test("passes upstream 401 responses through unchanged for initialize requests", 
       headers: {
         host: "ab.chatgpt.com",
         "content-type": "application/json",
-        "x-forwarded-for": TEST_IPS[7],
+        ...trustedProxyHeaders(TEST_IPS[7]),
       },
       body: JSON.stringify({ user: { userID: "user-123" } }),
     },
@@ -563,7 +570,7 @@ test("passes upstream redirects through unchanged for initialize requests", asyn
       headers: {
         host: "ab.chatgpt.com",
         "content-type": "application/json",
-        "x-forwarded-for": TEST_IPS[8],
+        ...trustedProxyHeaders(TEST_IPS[8]),
       },
       body: JSON.stringify({ user: { userID: "user-123" } }),
     },
@@ -609,7 +616,7 @@ test("returns 502 with safe logs for malformed successful initialize responses",
       headers: {
         host: "ab.chatgpt.com",
         "content-type": "application/json",
-        "x-forwarded-for": TEST_IPS[9],
+        ...trustedProxyHeaders(TEST_IPS[9]),
       },
       body: JSON.stringify({
         user: { userID: "overlay-request-body-secret" },
@@ -672,7 +679,7 @@ test("returns valid initialize responses byte-for-byte when no overrides are con
       headers: {
         host: "ab.chatgpt.com",
         "content-type": "application/json",
-        "x-forwarded-for": TEST_IPS[9],
+        ...trustedProxyHeaders(TEST_IPS[9]),
       },
       body: JSON.stringify({ user: { userID: "user-123" } }),
     },
@@ -703,7 +710,7 @@ test("actual server wiring handles Statsig requests before auth guard and reques
       headers: {
         host: "ab.chatgpt.com",
         "content-type": "text/plain",
-        "x-forwarded-for": TEST_IPS[8],
+        ...trustedProxyHeaders(TEST_IPS[8]),
       },
       body: "request-body-secret",
     }),

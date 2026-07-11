@@ -125,9 +125,9 @@ export interface CustomProvider {
   name: string
   type: "openai-compatible"
   baseUrl: string
-  apiKey?: string
+  apiKeyConfigured: boolean
   apiKeyEnv?: string
-  headers?: Record<string, string>
+  headerNames: Array<string>
   models: Array<CustomProviderModel>
   timeoutMs?: number
   passReasoningEffort?: boolean

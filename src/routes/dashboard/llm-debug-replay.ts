@@ -233,7 +233,7 @@ function parseReplayResponse(body: string): {
 }
 
 export async function handleReplayLlmDebugLog(c: Context) {
-  const id = c.req.param("id")
+  const id = c.req.param("id") ?? ""
   const entry = getLlmDebugLog(id)
   if (!entry) return c.json({ error: "Debug log not found" }, 404)
 

@@ -94,7 +94,8 @@ function ensureConfigFile(): void {
   try {
     fs.accessSync(PATHS.CONFIG_PATH, fs.constants.R_OK | fs.constants.W_OK)
   } catch {
-    fs.mkdirSync(PATHS.APP_DIR, { recursive: true })
+    fs.mkdirSync(PATHS.APP_DIR, { recursive: true, mode: 0o700 })
+    fs.chmodSync(PATHS.APP_DIR, 0o700)
     fs.writeFileSync(
       PATHS.CONFIG_PATH,
       `${JSON.stringify(defaultConfig, null, 2)}\n`,
@@ -116,8 +117,9 @@ function readConfigFromDisk(): AppConfig {
       fs.writeFileSync(
         PATHS.CONFIG_PATH,
         `${JSON.stringify(defaultConfig, null, 2)}\n`,
-        "utf8",
+        { encoding: "utf8", mode: 0o600 },
       )
+      fs.chmodSync(PATHS.CONFIG_PATH, 0o600)
       return defaultConfig
     }
     return JSON.parse(raw) as AppConfig
@@ -163,8 +165,9 @@ export function mergeConfigWithDefaults(): AppConfig {
       fs.writeFileSync(
         PATHS.CONFIG_PATH,
         `${JSON.stringify(mergedConfig, null, 2)}\n`,
-        "utf8",
+        { encoding: "utf8", mode: 0o600 },
       )
+      fs.chmodSync(PATHS.CONFIG_PATH, 0o600)
     } catch (writeError) {
       consola.warn(
         "Failed to write merged extraPrompts to config file",
@@ -189,6 +192,7 @@ export function writeConfig(config: AppConfig): void {
     `${JSON.stringify(config, null, 2)}\n`,
     "utf8",
   )
+  fs.chmodSync(PATHS.CONFIG_PATH, 0o600)
   cachedConfig = config
 }
 

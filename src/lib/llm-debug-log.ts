@@ -89,6 +89,64 @@ interface StartLlmDebugLogInput {
 
 const logs: Array<LlmDebugLogEntry> = []
 
+const SENSITIVE_HEADER_PATTERN =
+  /^(?:authorization|proxy-authorization|cookie|set-cookie|x-api-key|x-goog-api-key|x-auth-token)$/i
+const SENSITIVE_FIELD_PATTERN =
+  /api[_-]?key|authorization|cookie|password|secret|access[_-]?token|refresh[_-]?token|client[_-]?secret|code[_-]?verifier/i
+
+function redactHeaders(headers: HeaderRecord): HeaderRecord {
+  return Object.fromEntries(
+    Object.entries(headers).map(([key, value]) => [
+      key,
+      SENSITIVE_HEADER_PATTERN.test(key) ? "[REDACTED]" : value,
+    ]),
+  )
+}
+
+function redactJsonValue(value: unknown, key = ""): unknown {
+  if (SENSITIVE_FIELD_PATTERN.test(key)) return "[REDACTED]"
+  if (Array.isArray(value)) {
+    return value.map((item) => redactJsonValue(item))
+  }
+  if (isRecord(value)) {
+    return Object.fromEntries(
+      Object.entries(value).map(([nestedKey, nestedValue]) => [
+        nestedKey,
+        redactJsonValue(nestedValue, nestedKey),
+      ]),
+    )
+  }
+  return value
+}
+
+function redactBody(body: string | null): string | null {
+  if (!body) return body
+  try {
+    return JSON.stringify(redactJsonValue(JSON.parse(body) as unknown))
+  } catch {
+    return body
+  }
+}
+
+function redactUrl(value: string): string {
+  try {
+    const url = new URL(value)
+    for (const key of url.searchParams.keys()) {
+      if (SENSITIVE_FIELD_PATTERN.test(key)) {
+        url.searchParams.set(key, "[REDACTED]")
+      }
+    }
+    url.username = ""
+    url.password = ""
+    return url.toString()
+  } catch {
+    return value.replaceAll(
+      /([?&][^=&]*(?:key|token|secret|password|credential)[^=&]*=)[^&]*/gi,
+      "$1[REDACTED]",
+    )
+  }
+}
+
 function byteLength(value: string | null): number {
   if (value === null) return 0
   return new TextEncoder().encode(value).byteLength
@@ -284,23 +342,25 @@ export function startLlmDebugLog(input: StartLlmDebugLogInput): string {
   const startedAtMs = input.startedAtMs ?? Date.now()
   prune(startedAtMs)
 
+  const requestBody = redactBody(input.requestBody)
+
   const id = randomUUID()
   logs.push({
     id,
-    model: inferModel(input.requestBody),
+    model: inferModel(requestBody),
     request: {
-      body: input.requestBody,
-      bodyBytes: byteLength(input.requestBody),
-      headers: { ...input.requestHeaders },
+      body: requestBody,
+      bodyBytes: byteLength(requestBody),
+      headers: redactHeaders(input.requestHeaders),
       method: input.method,
       path: input.path,
-      url: input.url,
+      url: redactUrl(input.url),
     },
     requestId: input.requestId,
     startedAt: new Date(startedAtMs).toISOString(),
     startedAtMs,
     status: "pending",
-    stream: inferStream(input.requestBody),
+    stream: inferStream(requestBody),
   })
 
   return id
@@ -319,8 +379,9 @@ export function finishLlmDebugLog(
   entry.durationMs = endedAtMs - entry.startedAtMs
   entry.response = {
     ...response,
-    headers: { ...response.headers },
-    bodyBytes: byteLength(response.body),
+    body: redactBody(response.body),
+    headers: redactHeaders(response.headers),
+    bodyBytes: byteLength(redactBody(response.body)),
   }
   entry.status = response.bodyReadError ? "error" : "complete"
 }
@@ -355,8 +416,9 @@ export function abortLlmDebugLog(
   if (options.response) {
     entry.response = {
       ...options.response,
-      headers: { ...options.response.headers },
-      bodyBytes: byteLength(options.response.body),
+      body: redactBody(options.response.body),
+      headers: redactHeaders(options.response.headers),
+      bodyBytes: byteLength(redactBody(options.response.body)),
     }
   }
   entry.status = "aborted"

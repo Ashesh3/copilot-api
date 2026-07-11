@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto"
 import fs from "node:fs"
 
 import { PATHS } from "~/lib/paths"
@@ -8,6 +9,57 @@ export type FeatureFlagValue =
   | number
   | Record<string, unknown>
 export type FeatureFlags = Record<string, FeatureFlagValue>
+
+const MAX_FLAG_NAME_LENGTH = 128
+const MAX_FLAG_COUNT = 200
+const MAX_SERIALIZED_VALUE_LENGTH = 65_536
+const FORBIDDEN_FLAG_NAMES = new Set(["__proto__", "constructor", "prototype"])
+
+export class FeatureFlagValidationError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "FeatureFlagValidationError"
+  }
+}
+
+export function isValidFeatureFlagName(name: string): boolean {
+  return (
+    name.length > 0
+    && name.length <= MAX_FLAG_NAME_LENGTH
+    && /^[\w.-]+$/.test(name)
+    && !FORBIDDEN_FLAG_NAMES.has(name)
+  )
+}
+
+function createFlagMap(): FeatureFlags {
+  return Object.create(null) as FeatureFlags
+}
+
+function normalizeFlags(raw: unknown): FeatureFlags {
+  const result = createFlagMap()
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return result
+  }
+
+  for (const [name, value] of Object.entries(raw).slice(0, MAX_FLAG_COUNT)) {
+    if (!isValidFeatureFlagName(name)) continue
+    if (
+      typeof value !== "boolean"
+      && typeof value !== "string"
+      && typeof value !== "number"
+      && (typeof value !== "object" || value === null || Array.isArray(value))
+    ) {
+      continue
+    }
+    try {
+      if (JSON.stringify(value).length > MAX_SERIALIZED_VALUE_LENGTH) continue
+    } catch {
+      continue
+    }
+    result[name] = value as FeatureFlagValue
+  }
+  return result
+}
 
 const DEFAULT_FLAGS: FeatureFlags = {
   // Enable the env-less bridge (v2 protocol) for Remote Control
@@ -21,29 +73,50 @@ const DEFAULT_FLAGS: FeatureFlags = {
 }
 
 let cachedFlags: FeatureFlags | null = null
+let skipPersistForTest = false
+
+function cloneFlags(flags: FeatureFlags): FeatureFlags {
+  return Object.assign(createFlagMap(), flags)
+}
 
 function readFlagsFromDisk(): FeatureFlags {
   try {
     const raw = fs.readFileSync(PATHS.FEATURE_FLAGS_PATH, "utf8")
-    if (!raw.trim()) return {}
-    return JSON.parse(raw) as FeatureFlags
+    if (!raw.trim()) return createFlagMap()
+    return normalizeFlags(JSON.parse(raw) as unknown)
   } catch {
-    return {}
+    return createFlagMap()
   }
 }
 
 function writeFlagsToDisk(flags: FeatureFlags): void {
-  fs.mkdirSync(PATHS.APP_DIR, { recursive: true })
-  fs.writeFileSync(
-    PATHS.FEATURE_FLAGS_PATH,
-    `${JSON.stringify(flags, null, 2)}\n`,
-    "utf8",
-  )
+  if (skipPersistForTest) return
+  const temporaryPath = `${PATHS.FEATURE_FLAGS_PATH}.${process.pid}.${randomUUID()}.tmp`
+  fs.mkdirSync(PATHS.APP_DIR, { recursive: true, mode: 0o700 })
+  fs.chmodSync(PATHS.APP_DIR, 0o700)
+  try {
+    fs.writeFileSync(temporaryPath, `${JSON.stringify(flags, null, 2)}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+    })
+    fs.chmodSync(temporaryPath, 0o600)
+    fs.renameSync(temporaryPath, PATHS.FEATURE_FLAGS_PATH)
+    fs.chmodSync(PATHS.FEATURE_FLAGS_PATH, 0o600)
+  } catch (error) {
+    fs.rmSync(temporaryPath, { force: true })
+    throw error
+  }
 }
 
 export function getFeatureFlags(): FeatureFlags {
-  cachedFlags ??= { ...DEFAULT_FLAGS, ...readFlagsFromDisk() }
-  return cachedFlags
+  if (!cachedFlags) {
+    cachedFlags = Object.assign(
+      createFlagMap(),
+      DEFAULT_FLAGS,
+      readFlagsFromDisk(),
+    )
+  }
+  return cloneFlags(cachedFlags)
 }
 
 export function setFeatureFlag(
@@ -51,17 +124,49 @@ export function setFeatureFlag(
   value: FeatureFlagValue,
 ): FeatureFlags {
   const flags = getFeatureFlags()
+  if (!isValidFeatureFlagName(name)) {
+    throw new FeatureFlagValidationError("Invalid feature flag name")
+  }
+  if (
+    !Object.hasOwn(flags, name)
+    && Object.keys(flags).length >= MAX_FLAG_COUNT
+  ) {
+    throw new FeatureFlagValidationError("Maximum feature flag count reached")
+  }
+  let serialized: string
+  try {
+    serialized = JSON.stringify(value)
+  } catch {
+    throw new FeatureFlagValidationError(
+      "Feature flag value is not serializable",
+    )
+  }
+  if (serialized.length > MAX_SERIALIZED_VALUE_LENGTH) {
+    throw new FeatureFlagValidationError("Feature flag value is too large")
+  }
   flags[name] = value
-  cachedFlags = flags
   writeFlagsToDisk(flags)
-  return flags
+  cachedFlags = flags
+  return cloneFlags(flags)
 }
 
 export function removeFeatureFlag(name: string): boolean {
+  if (!isValidFeatureFlagName(name)) return false
   const flags = getFeatureFlags()
   if (!Object.hasOwn(flags, name)) return false
   const { [name]: _, ...rest } = flags
-  cachedFlags = rest
   writeFlagsToDisk(rest)
+  cachedFlags = rest
   return true
+}
+
+export function setFeatureFlagsForTest(
+  flags: FeatureFlags = createFlagMap(),
+): void {
+  cachedFlags = Object.assign(
+    createFlagMap(),
+    DEFAULT_FLAGS,
+    normalizeFlags(flags),
+  )
+  skipPersistForTest = true
 }

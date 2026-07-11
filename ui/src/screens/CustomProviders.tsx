@@ -129,12 +129,12 @@ function formFromProvider(provider: CustomProvider): ProviderFormState {
     name: provider.name,
     baseUrl: provider.baseUrl,
     authMode: provider.apiKeyEnv ? "env" : "key",
-    apiKey: provider.apiKey ?? "",
+    apiKey: "",
     apiKeyEnv: provider.apiKeyEnv ?? "",
-    headers: Object.entries(provider.headers ?? {}).map(([key, value]) => ({
+    headers: provider.headerNames.map((key) => ({
       rowId: makeRowId(),
       key,
-      value,
+      value: "",
     })),
     timeoutMs: provider.timeoutMs != null ? String(provider.timeoutMs) : "",
     passReasoningEffort: provider.passReasoningEffort ?? false,
@@ -155,7 +155,8 @@ function errorMessage(caught: unknown, fallback: string): string {
 
 function authIndicator(provider: CustomProvider) {
   if (provider.apiKeyEnv) return <Badge variant="info" label="Env" />
-  if (provider.apiKey) return <Badge variant="neutral" label="Stored" />
+  if (provider.apiKeyConfigured)
+    return <Badge variant="neutral" label="Stored" />
   return <Badge variant="error" label="Missing" />
 }
 
@@ -268,7 +269,13 @@ export default function CustomProvidersScreen() {
       toast.error("Base URL is required")
       return
     }
-    if (form.authMode === "key" && !form.apiKey.trim()) {
+    if (
+      form.authMode === "key"
+      && !form.apiKey.trim()
+      && (!editingId
+        || !data?.find((provider) => provider.id === editingId)
+          ?.apiKeyConfigured)
+    ) {
       toast.error("API key is required")
       return
     }

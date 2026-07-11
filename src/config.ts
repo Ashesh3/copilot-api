@@ -591,7 +591,7 @@ type DashboardCustomProvider = ReturnType<
 
 function formatCustomProvider(provider: DashboardCustomProvider): string {
   let keySource = "missing api key"
-  if (provider.apiKey) {
+  if (provider.apiKeyConfigured) {
     keySource = "stored api key"
   } else if (provider.apiKeyEnv) {
     keySource = `env ${provider.apiKeyEnv}`
