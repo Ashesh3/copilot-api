@@ -6,7 +6,7 @@ product
 
 ## Users
 
-A single expert operator (the person who runs this proxy, e.g. `ai.ashesh.dev`). They know the internals cold — model IDs, wire formats, the Copilot ⇄ OpenAI/Anthropic translation. They arrive at the dashboard already in a task, hands on keyboard: something looks off in a request, a routing rule needs changing, a new provider needs wiring up. This is not a passive dashboard-glancer — it's a hands-on power user who drills into individual requests and expects the tool to keep up.
+A single expert operator who runs and maintains this proxy. They know the internals cold — model IDs, wire formats, the Copilot ⇄ OpenAI/Anthropic translation. They arrive at the dashboard already in a task, hands on keyboard: something looks off in a request, a routing rule needs changing, a new provider needs wiring up. This is not a passive dashboard-glancer — it's a hands-on power user who drills into individual requests and expects the tool to keep up.
 
 The job to be done, in order of how often it happens:
 
