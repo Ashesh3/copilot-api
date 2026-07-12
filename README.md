@@ -226,8 +226,9 @@ Copilot API separates these credential boundaries:
    through device authentication, `auth`, `--github-token`, stored accounts, or
    `GITHUB_TOKENS`.
 2. **Gateway credentials** authenticate trusted data-plane clients and bootstrap
-   OAuth and the administrator account. Enable this boundary with
-   `--api-key-auth` or, in Docker, `COPILOT_API_KEY_AUTH`.
+   OAuth and the administrator account. `COPILOT_API_KEY_AUTH` is the gateway
+   key and sole environment-based gateway credential. Direct usage requires
+   `--api-key-auth` without a value; the Docker entrypoint supplies that flag.
 3. **OAuth and inference credentials** are independent, scoped credentials.
    The OAuth flow never returns the gateway key. Claude Code receives a
    one-hour opaque access token and a rotating 30-day refresh token; an API key
@@ -577,8 +578,7 @@ files.
 | --- | --- | --- |
 | `GITHUB_TOKENS` | Direct and Docker | Comma-separated GitHub tokens; two or more enable multi-account mode |
 | `DATA_DIR` | Direct and Docker | Override the persistent data directory |
-| `COPILOT_API_KEY_AUTH` | Direct and Docker | Gateway key; direct usage also requires the `--api-key-auth` flag without a value |
-| `COPILOT_API_KEY_AUTH_FILE` | Direct and Docker | Root-only mounted file containing the gateway key; takes precedence over the environment value |
+| `COPILOT_API_KEY_AUTH` | Direct and Docker | Gateway key and sole environment-based gateway credential; direct usage also requires the `--api-key-auth` flag without a value |
 | `COPILOT_ADMIN_ORIGIN` | Direct and Docker | Exact browser origin allowed for dashboard mutations; set this explicitly for a proxied deployment |
 | `COPILOT_TRUSTED_PROXY_CIDRS` | Direct and Docker | Comma-separated socket-peer CIDRs allowed to supply forwarding headers; defaults to loopback only |
 | `COPILOT_API_ENABLE_DIRECT_CONNECT` | Direct and Docker | Set to `true` only to enable the authenticated experimental Direct Connect routes; disabled by default |
@@ -641,8 +641,9 @@ The image and Compose healthchecks both use this exact path.
 
 ### Docker Compose
 
-The tracked Compose file expects an external volume with a fixed name, a local
-`.env` file, and a gateway-key file at `./secrets/copilot-api-key` by default:
+The tracked Compose file expects the fixed external
+`copilot-api_copilot-data` volume and a local `.env` file used by the existing
+automatic secret-management flow:
 
 ```sh
 docker volume create copilot-api_copilot-data
@@ -650,21 +651,21 @@ docker compose run --rm copilot-api --auth
 docker compose up -d --build
 ```
 
-At minimum, `.env` must provide:
+The resolved container environment must include `COPILOT_API_KEY_AUTH` as well
+as the deployment settings:
 
 ```dotenv
 COPILOT_HOST=0.0.0.0
+COPILOT_API_KEY_AUTH=replace-with-a-long-random-key
 COPILOT_ADMIN_ORIGIN=https://your-domain.example
 # Set this to the exact host-side Docker bridge address observed by the app.
 COPILOT_TRUSTED_PROXY_CIDRS=172.19.0.1/32,127.0.0.1/32,::1/128
 ```
 
-Write the long random gateway key to `./secrets/copilot-api-key` with owner-only
-permissions, or set `COPILOT_API_KEY_AUTH_FILE_HOST` to a root-owned file outside
-the repository. Do not also put that key in `.env`.
-
 `OP_TOKEN` and `OP_ENV_ID` are optional and should be supplied together only
-when using the 1Password/Varlock integration.
+when using the 1Password/Varlock integration. `COPILOT_API_KEY_AUTH` comes
+through this existing environment/secret-management flow; gateway-key file
+mounts are not supported.
 
 The tracked `.dockerignore` excludes environment files, certificates, keys,
 the local `secrets/` directory, logs, and local data from the build context.
@@ -718,8 +719,9 @@ before exposing it.
 
 - **Bind explicitly.** Use `--host 127.0.0.1` for local-only use. Bun otherwise
   listens on all interfaces by default.
-- **Layer remote controls.** Use startup `--api-key-auth` or Docker's
-  `COPILOT_API_KEY_AUTH` for the data plane and OAuth/bootstrap boundary. Use
+- **Layer remote controls.** Use startup `--api-key-auth`, with either a direct
+  value or the sole environment-based gateway credential
+  `COPILOT_API_KEY_AUTH`, for the data plane and OAuth/bootstrap boundary. Use
   scoped OAuth, administrator sessions, WebSocket tickets, and bridge
   capabilities for their respective routes.
 - **Trust IP headers only from exact proxy peers.** Configure
