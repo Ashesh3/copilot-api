@@ -447,9 +447,7 @@ export async function runServer(options: RunServerOptions): Promise<void> {
     await promptClaudeCodeSetup(serverUrl, allModelIds)
   }
 
-  consola.box(
-    `🌐 Usage Viewer: https://ericc-ch.github.io/copilot-api?endpoint=${serverUrl}/usage`,
-  )
+  consola.box(`🌐 Operator Dashboard: ${serverUrl}/dashboard`)
 
   Bun.serve({
     port: options.port,

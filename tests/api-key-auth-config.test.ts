@@ -72,6 +72,75 @@ test("Docker Compose preserves automatic secret-management integration", async (
   expect(envFile).toContain(".env")
 })
 
+test("deployment defaults contain no private hostname or obsolete setup guide", async () => {
+  const [
+    compose,
+    schema,
+    readme,
+    security,
+    nginxReadme,
+    updater,
+    adminAuth,
+    startSource,
+    windowsLauncher,
+  ] = await Promise.all([
+    readRepositoryFile("docker-compose.yml"),
+    readRepositoryFile(".env.schema"),
+    readRepositoryFile("README.md"),
+    readRepositoryFile("SECURITY.md"),
+    readRepositoryFile("nginx/README.md"),
+    readRepositoryFile("update.sh"),
+    readRepositoryFile("src/lib/admin-auth.ts"),
+    readRepositoryFile("src/start.ts"),
+    readRepositoryFile("start.bat"),
+  ])
+
+  expect(compose).not.toContain("ai.ashesh.dev")
+  expect(compose).not.toContain("172.19.0.1")
+  expect(compose).not.toContain("setup.md")
+  expect(compose).toContain("COPILOT_ADMIN_ORIGIN=${COPILOT_ADMIN_ORIGIN:-}")
+  expect(schema).not.toContain("COPILOT_PORT")
+  expect(schema).toContain("bounded, no-store 401 response")
+  expect(readme).not.toContain("recent password reauthentication")
+  expect(security).toContain("2026 public-exposure remediation")
+  expect(nginxReadme).toContain("Upgrade: websocket")
+  expect(updater).toContain("git pull --ff-only")
+  expect(updater).toContain("Refusing to update outside the master branch")
+  expect(updater).toContain(
+    "Refusing to update a checkout with tracked changes",
+  )
+  expect(updater).toContain("docker compose config --quiet")
+  expect(updater).toContain("preserve_running_setting COPILOT_ADMIN_ORIGIN")
+  expect(updater).toContain(
+    "preserve_running_setting COPILOT_TRUSTED_PROXY_CIDRS",
+  )
+  expect(updater).toContain('if [ "${health:-none}" != "healthy" ]')
+  expect(adminAuth).not.toContain("ai.ashesh.dev")
+  expect(startSource).not.toContain("ericc-ch.github.io")
+  expect(startSource).toContain("Operator Dashboard")
+  expect(windowsLauncher).toContain(
+    "bun run dev start --host 127.0.0.1 --api-key-auth",
+  )
+  expect(windowsLauncher).toContain("if not defined COPILOT_API_KEY_AUTH")
+  expect(windowsLauncher).not.toContain("ericc-ch.github.io")
+})
+
+test("package support links point to this fork", async () => {
+  const packageJson = JSON.parse(await readRepositoryFile("package.json")) as {
+    bugs?: string
+    homepage?: string
+    repository?: { url?: string }
+  }
+
+  expect(packageJson.homepage).toBe(
+    "https://github.com/Ashesh3/copilot-api#readme",
+  )
+  expect(packageJson.bugs).toBe("https://github.com/Ashesh3/copilot-api/issues")
+  expect(packageJson.repository?.url).toBe(
+    "git+https://github.com/Ashesh3/copilot-api.git",
+  )
+})
+
 test("leaves API key authentication disabled when the CLI flag is omitted", () => {
   expect(resolveApiKeyAuth(undefined, "environment-secret")).toBeUndefined()
 })

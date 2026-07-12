@@ -38,6 +38,7 @@ workflows.
 - [Docker](#docker)
 - [Reverse proxy deployment](#reverse-proxy-deployment)
 - [Security and privacy](#security-and-privacy)
+- [Security policy and remediation record](SECURITY.md)
 - [Troubleshooting](#troubleshooting)
 - [Development](#development)
 - [Attribution and license](#attribution-and-license)
@@ -135,10 +136,13 @@ Responses compaction.
 - A GitHub account with an active Copilot subscription.
 - Bun for package and source usage. Docker is an alternative.
 
-Start the published package on loopback:
+Choose a long random gateway key and start the published package on loopback.
+The valueless `--api-key-auth` flag reads the key from
+`COPILOT_API_KEY_AUTH`:
 
 ```sh
-bunx --bun @ashsec/copilot-api@latest start --host 127.0.0.1
+export COPILOT_API_KEY_AUTH='replace-with-a-long-random-key'
+bunx --bun @ashsec/copilot-api@latest start --host 127.0.0.1 --api-key-auth
 ```
 
 On the first run, follow the GitHub device-authentication prompt. The resulting
@@ -147,18 +151,21 @@ token and configuration are stored under the application data directory.
 List the models available to that account:
 
 ```sh
-curl http://127.0.0.1:4141/v1/models
+curl http://127.0.0.1:4141/v1/models \
+  -H "Authorization: Bearer replace-with-a-long-random-key"
 ```
 
 Choose an ID returned by that endpoint and make a request:
 
 ```sh
 curl http://127.0.0.1:4141/v1/chat/completions \
+  -H "Authorization: Bearer replace-with-a-long-random-key" \
   -H "Content-Type: application/json" \
   -d '{"model":"MODEL_ID_FROM_V1_MODELS","messages":[{"role":"user","content":"Hello"}],"stream":false}'
 ```
 
-Open the operator dashboard at `http://127.0.0.1:4141/dashboard`.
+Open the operator dashboard at `http://127.0.0.1:4141/dashboard`. First-time
+setup uses the same gateway key plus a new administrator password.
 
 > [!CAUTION]
 > Always pass `--host 127.0.0.1` for a local-only server. If `--host` is
@@ -587,6 +594,8 @@ files.
 | `COPILOT_TRUSTED_PROXY_CIDRS` | Direct and Docker | Comma-separated socket-peer CIDRs allowed to supply forwarding headers; defaults to loopback only |
 | `COPILOT_API_ENABLE_DIRECT_CONNECT` | Direct and Docker | Set to `true` only to enable the authenticated experimental Direct Connect routes; disabled by default |
 | `COPILOT_INFERENCE_CORS_ORIGINS` | Direct and Docker | Optional comma-separated exact browser origins for inference-only CORS; disabled by default |
+| `COPILOT_VOICE_ORIGIN` | Direct and Docker | Optional exact browser Origin for the Claude voice WebSocket; supplied Origins must match |
+| `COPILOT_VOICE_BUDGET_BYTES_PER_HOUR` | Direct and Docker | Optional per-principal hourly voice-audio allowance in bytes |
 | `SENTRY_DSN` | Direct and Docker | Enable Sentry tracing and error reporting |
 | `SENTRY_TRACES_SAMPLE_RATE` | Direct and Docker | Sentry trace sample rate |
 | `SENTRY_AI_RECORD_INPUTS` | Direct and Docker | Set to `false` to stop recording AI inputs/outputs in Sentry spans |
@@ -603,8 +612,7 @@ Custom providers can reference any process environment variable through
 `apiKeyEnv`. Although `--proxy-env` is present in the CLI, it is currently a
 no-op in the supported Bun runtime; do not rely on it for outbound proxying.
 
-Although it is present in `.env.schema`, `COPILOT_PORT` is currently unused. Use
-`--port` and update the container port mapping when changing the port.
+Use `--port` and update the container port mapping when changing the port.
 
 ## Docker
 
@@ -671,6 +679,11 @@ when using the 1Password/Varlock integration. `COPILOT_API_KEY_AUTH` comes
 through this existing environment/secret-management flow; gateway-key file
 mounts are not supported.
 
+For an externally proxied dashboard, set `COPILOT_ADMIN_ORIGIN` explicitly in
+the Compose environment. The tracked default leaves it unset, so only
+`localhost` and `127.0.0.1` browser origins are accepted. An external HTTPS
+dashboard origin is rejected until its exact origin is configured.
+
 The tracked `.dockerignore` excludes environment files, certificates, keys,
 the local `secrets/` directory, logs, and local data from the build context.
 The Compose healthcheck uses `/health/health`, and its port mapping binds to
@@ -679,6 +692,27 @@ reverse proxy.
 
 Do not put GitHub tokens into image build arguments. Supply them at runtime or
 persist them with the authentication step.
+
+### Updating a Compose checkout
+
+Run the checked-in updater only from a clean `master` checkout:
+
+```sh
+./update.sh
+```
+
+It performs a fast-forward-only pull, validates the resolved Compose file,
+rebuilds/recreates the service, waits for the exact healthcheck to become
+healthy, and only then prunes dangling images. It does not migrate or rotate
+credentials. When the invoking shell omits the external admin origin or trusted
+proxy CIDRs, the updater preserves those two non-secret values from the running
+container. Review upstream changes before running it; do not use it to erase
+local deployment edits.
+
+On Windows, `start.bat` starts the development server on `127.0.0.1` and opens
+the same-origin operator dashboard. Set `COPILOT_API_KEY_AUTH` in the invoking
+environment first; the launcher refuses to start without it. It no longer opens
+the inherited external usage viewer.
 
 ## Reverse proxy deployment
 
@@ -695,7 +729,8 @@ The proxy must:
   appending or preserving client-supplied values;
 - have its exact socket-peer address or CIDR listed in
   `COPILOT_TRUSTED_PROXY_CIDRS`;
-- support WebSocket upgrades;
+- support WebSocket upgrades, including authenticated `GET` upgrades on
+  `/responses` and `/v1/responses` while retaining normal `POST` handling;
 - disable request/response buffering for streaming;
 - allow long-lived SSE and WebSocket connections;
 - apply finite, route-specific body and I/O limits; and
@@ -725,7 +760,8 @@ for a public hostname.
 Templates are provided in `nginx/sites-available/` and
 `nginx/snippets/proxy-limits.conf.template`. Replace every template placeholder,
 keep `--api-key-auth` enabled, and validate the generated server configuration
-before exposing it.
+before exposing it. See [nginx/README.md](nginx/README.md) for the template
+matrix, installation checks, Cloudflare CIDR maintenance, and WebSocket probes.
 
 ## Security and privacy
 
@@ -774,6 +810,31 @@ Check whether the route expects the gateway key, a scoped OAuth/inference
 credential, an administrator session, or a worker/environment capability.
 Expired OAuth access tokens must be refreshed with the latest rotated refresh
 token; replaying an older refresh token revokes its token family.
+
+### Responses WebSocket gets an nginx `403`
+
+A WebSocket handshake is an authenticated `GET`, not a `POST`. Do not place
+`/responses` or `/v1/responses` behind a POST-only `limit_except` block. Render
+the current `nginx/sites-available/public-domain.conf.template`, which allows
+normal Responses POSTs and allows GET only when `Upgrade: websocket` is
+present. Expected probes are application `401` without a credential and `101`
+with a valid inference-capable credential.
+
+### Claude Code reports `Connection closed mid-response`
+
+Check the Nginx error log for `upstream timed out` on `POST /v1/messages`. The
+shared proxy snippet intentionally uses short timeouts for ordinary APIs, but
+the current public and Claude hostname templates give authenticated generation
+streams a finite one-hour idle window. Do not collapse those locations back
+into the shared two-minute proxy block.
+
+### The dashboard asks for the administrator password again
+
+Current builds require the gateway key and administrator password only when
+creating or signing into the dashboard session. LLM Debug, sanitized export,
+provider management, and IP policy then use that session without a second
+password prompt. Hard-refresh the dashboard if an older bundled script is still
+cached. A current bundle contains no `/dashboard/auth/reauth` request.
 
 ### A model is missing or rejected
 
