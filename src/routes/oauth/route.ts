@@ -342,7 +342,11 @@ oauthBrowserRoutes.get("/authorize", (c) => {
     return oauthTextError(c, "Invalid OAuth authorization request")
   }
 
-  return secureHtml(c, getAuthorizePage(queryString))
+  return secureHtml(
+    c,
+    getAuthorizePage(queryString),
+    new URL(authorizationRequest.redirectUri),
+  )
 })
 
 // POST /oauth/authorize — validate API key, then redirect
@@ -382,6 +386,7 @@ oauthBrowserRoutes.post("/authorize", async (c) => {
   const response = secureHtml(
     c,
     getAuthorizePage(queryString, "Invalid API key"),
+    new URL(authorizationRequest.redirectUri),
   )
   return new Response(response.body, { status: 401, headers: response.headers })
 })

@@ -28,6 +28,20 @@ const oauthState = "state-with-enough-entropy-123456789"
 let temporaryDirectory: string | undefined
 let oauthStorePath: string | undefined
 
+function authorizationQuery(
+  redirectUri: string = oauthRedirectUri,
+): URLSearchParams {
+  return new URLSearchParams({
+    client_id: oauthClientId,
+    response_type: "code",
+    redirect_uri: redirectUri,
+    scope: oauthScopes,
+    code_challenge: createPkceChallenge(oauthVerifier),
+    code_challenge_method: "S256",
+    state: oauthState,
+  })
+}
+
 beforeEach(async () => {
   state.apiKeyAuth = "test-secret-key"
   consola.warn = mock(() => {}) as unknown as typeof consola.warn
@@ -134,6 +148,45 @@ test("manual OAuth callback escapes displayed code", async () => {
   expect(await response.text()).toContain("<pre>&lt;code&gt;#a&amp;b</pre>")
 })
 
+test("OAuth authorize page allows the exact local callback origin", async () => {
+  const response = await server.request(
+    `/oauth/authorize?${authorizationQuery("http://localhost:43123/callback").toString()}`,
+  )
+
+  expect(response.status).toBe(200)
+  const csp = response.headers.get("content-security-policy")
+  expect(csp).toContain("form-action 'self' http://localhost:43123;")
+  expect(csp).not.toContain("localhost:*")
+  expect(csp).not.toContain("http://localhost;")
+})
+
+test("OAuth authorize page allows the exact manual callback origin", async () => {
+  const response = await server.request(
+    `/oauth/authorize?${authorizationQuery().toString()}`,
+  )
+
+  expect(response.status).toBe(200)
+  expect(response.headers.get("content-security-policy")).toContain(
+    "form-action 'self' https://platform.claude.com;",
+  )
+})
+
+test("invalid OAuth API key response retains the callback origin", async () => {
+  const response = await server.request(
+    `/oauth/authorize?${authorizationQuery("http://localhost:43124/callback").toString()}`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ api_key: "invalid-key" }).toString(),
+    },
+  )
+
+  expect(response.status).toBe(401)
+  expect(response.headers.get("content-security-policy")).toContain(
+    "form-action 'self' http://localhost:43124;",
+  )
+})
+
 async function authorizeAndExchange(): Promise<{
   access_token: string
   refresh_token: string
@@ -141,15 +194,7 @@ async function authorizeAndExchange(): Promise<{
   scope: string
   token_type: string
 }> {
-  const query = new URLSearchParams({
-    client_id: oauthClientId,
-    response_type: "code",
-    redirect_uri: oauthRedirectUri,
-    scope: oauthScopes,
-    code_challenge: createPkceChallenge(oauthVerifier),
-    code_challenge_method: "S256",
-    state: oauthState,
-  })
+  const query = authorizationQuery()
   const authorizeResponse = await server.request(
     `/oauth/authorize?${query.toString()}`,
     {
@@ -237,15 +282,7 @@ test("rejects conflicting credential headers", async () => {
 })
 
 test("binds one-use authorization codes to client, redirect, state, and S256 PKCE", async () => {
-  const query = new URLSearchParams({
-    client_id: oauthClientId,
-    response_type: "code",
-    redirect_uri: oauthRedirectUri,
-    scope: oauthScopes,
-    code_challenge: createPkceChallenge(oauthVerifier),
-    code_challenge_method: "S256",
-    state: oauthState,
-  })
+  const query = authorizationQuery()
   const authorizeResponse = await server.request(
     `/oauth/authorize?${query.toString()}`,
     {
