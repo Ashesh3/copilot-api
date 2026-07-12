@@ -1,4 +1,4 @@
-import { Hono, type Context, type Next } from "hono"
+import { Hono } from "hono"
 
 import { authenticateAdminRequest } from "~/lib/admin-auth"
 import { secureHtml } from "~/lib/secure-html"
@@ -81,17 +81,6 @@ dashboardRoutes.use("/api/*", async (c, next) => {
   await next()
 })
 
-async function requireReauthentication(c: Context, next: Next) {
-  const session = await authenticateAdminRequest(c.req.raw, {
-    requireCsrf: !["GET", "HEAD"].includes(c.req.method),
-    requireReauth: true,
-  })
-  if (!session) {
-    return c.json({ error: "Privileged reauthentication required" }, 403)
-  }
-  await next()
-}
-
 // Overview
 dashboardRoutes.get("/api/overview", handleOverview)
 
@@ -156,21 +145,12 @@ dashboardRoutes.delete("/api/model-settings/:model", handleDeleteModelSettings)
 
 // Custom Providers
 dashboardRoutes.get("/api/custom-providers", handleListCustomProviders)
-dashboardRoutes.post(
-  "/api/custom-providers",
-  requireReauthentication,
-  handleUpsertCustomProvider,
-)
+dashboardRoutes.post("/api/custom-providers", handleUpsertCustomProvider)
 dashboardRoutes.post(
   "/api/custom-providers/nebius-qwen3",
-  requireReauthentication,
   handleAddNebiusCustomProvider,
 )
-dashboardRoutes.delete(
-  "/api/custom-providers/:id",
-  requireReauthentication,
-  handleDeleteCustomProvider,
-)
+dashboardRoutes.delete("/api/custom-providers/:id", handleDeleteCustomProvider)
 
 // Model Routing
 dashboardRoutes.get("/api/model-routing", handleListModelRouting)
@@ -181,43 +161,19 @@ dashboardRoutes.get("/api/usage", handleGetUsage)
 
 // IP Allowlist
 dashboardRoutes.get("/api/ip-allowlist", handleListIpAllowlist)
-dashboardRoutes.post(
-  "/api/ip-allowlist",
-  requireReauthentication,
-  handleSetIpAllowlistEntry,
-)
-dashboardRoutes.patch(
-  "/api/ip-allowlist/:ip",
-  requireReauthentication,
-  handleSetIpAllowlistEntry,
-)
-dashboardRoutes.delete(
-  "/api/ip-allowlist/:ip",
-  requireReauthentication,
-  handleDeleteIpAllowlistEntry,
-)
+dashboardRoutes.post("/api/ip-allowlist", handleSetIpAllowlistEntry)
+dashboardRoutes.patch("/api/ip-allowlist/:ip", handleSetIpAllowlistEntry)
+dashboardRoutes.delete("/api/ip-allowlist/:ip", handleDeleteIpAllowlistEntry)
 
 // LLM Debug Logs
 dashboardRoutes.get("/api/llm-debug", handleListLlmDebugLogs)
-dashboardRoutes.post(
-  "/api/llm-debug/:id/replay",
-  requireReauthentication,
-  handleReplayLlmDebugLog,
-)
-dashboardRoutes.get(
-  "/api/llm-debug/:id",
-  requireReauthentication,
-  handleGetLlmDebugLog,
-)
+dashboardRoutes.post("/api/llm-debug/:id/replay", handleReplayLlmDebugLog)
+dashboardRoutes.get("/api/llm-debug/:id", handleGetLlmDebugLog)
 dashboardRoutes.delete("/api/llm-debug", handleClearLlmDebugLogs)
 
 // Settings
 dashboardRoutes.get("/api/settings", handleGetSettings)
-dashboardRoutes.get(
-  "/api/settings/export",
-  requireReauthentication,
-  handleExportSettings,
-)
+dashboardRoutes.get("/api/settings/export", handleExportSettings)
 dashboardRoutes.post(
   "/api/settings/codex-cleanup-model",
   handleSetCodexCleanupModel,

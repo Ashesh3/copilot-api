@@ -343,7 +343,7 @@ test("missing custom provider API key returns a clear error", async () => {
 })
 
 test("dashboard stores provider API key without returning it", async () => {
-  const admin = await createTestAdminSession(true)
+  const admin = await createTestAdminSession()
   const response = await server.request("/dashboard/api/custom-providers", {
     method: "POST",
     headers: adminHeaders(admin),
@@ -384,7 +384,7 @@ test("dashboard stores provider API key without returning it", async () => {
 })
 
 test("Nebius dashboard shortcut never returns the submitted API key", async () => {
-  const admin = await createTestAdminSession(true)
+  const admin = await createTestAdminSession()
   const response = await server.request(
     "/dashboard/api/custom-providers/nebius-qwen3",
     {

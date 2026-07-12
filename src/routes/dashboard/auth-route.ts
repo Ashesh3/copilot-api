@@ -3,7 +3,6 @@ import { deleteCookie, setCookie } from "hono/cookie"
 
 import {
   ADMIN_CSRF_COOKIE,
-  ADMIN_REAUTH_MS,
   ADMIN_SESSION_ABSOLUTE_MS,
   ADMIN_SESSION_COOKIE,
   authenticateAdminRequest,
@@ -15,7 +14,6 @@ import {
   clearAdminLoginFailures,
   isAdminLoginRateLimited,
   recordAdminLoginFailure,
-  reauthenticateAdmin,
   setupAdminAuth,
   type CreatedAdminSession,
 } from "~/lib/admin-auth"
@@ -92,7 +90,6 @@ dashboardAuthRoutes.get("/session", async (c) => {
   return c.json({
     authenticated: true,
     expiresAt: session.expiresAt,
-    reauthenticatedUntil: session.reauthenticatedUntil ?? null,
   })
 })
 
@@ -152,21 +149,6 @@ dashboardAuthRoutes.post("/logout", async (c) => {
   await logoutAdmin(c.req.raw)
   clearSessionCookies(c)
   return c.json({ authenticated: false })
-})
-
-dashboardAuthRoutes.post("/reauth", async (c) => {
-  noStore(c)
-  if (isAdminLoginRateLimited(c.req.raw)) return authenticationFailed(c)
-  const body = await c.req.json<{ password?: unknown }>().catch(() => null)
-  if (!body || typeof body.password !== "string") {
-    return authenticationFailed(c)
-  }
-  if (!(await reauthenticateAdmin(c.req.raw, body.password))) {
-    recordAdminLoginFailure(c.req.raw)
-    return authenticationFailed(c)
-  }
-  clearAdminLoginFailures(c.req.raw)
-  return c.json({ reauthenticatedUntil: Date.now() + ADMIN_REAUTH_MS })
 })
 
 dashboardAuthRoutes.put("/password", async (c) => {

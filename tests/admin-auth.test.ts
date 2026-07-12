@@ -2,7 +2,6 @@ import { afterEach, beforeEach, expect, test } from "bun:test"
 
 import {
   ADMIN_CSRF_COOKIE,
-  ADMIN_REAUTH_MS,
   ADMIN_SESSION_ABSOLUTE_MS,
   ADMIN_SESSION_IDLE_MS,
   ADMIN_SESSION_COOKIE,
@@ -236,29 +235,12 @@ test("admin session accesses reads and mutations require CSRF and Origin", async
   expect(mutation.status).toBe(200)
 })
 
-test("privileged routes require recent password reauthentication", async () => {
+test("admin sessions can access sensitive dashboard routes without reauthentication", async () => {
   const cookies = await setup()
-  const denied = await server.request("/dashboard/api/settings/export", {
+  const response = await server.request("/dashboard/api/settings/export", {
     headers: { cookie: cookies.cookie },
   })
-  expect(denied.status).toBe(403)
-
-  const reauth = await server.request("/dashboard/auth/reauth", {
-    method: "POST",
-    headers: {
-      cookie: cookies.cookie,
-      "content-type": "application/json",
-      origin: ORIGIN,
-      "x-copilot-csrf": cookies.csrf,
-    },
-    body: JSON.stringify({ password: ADMIN_PASSWORD }),
-  })
-  expect(reauth.status).toBe(200)
-
-  const allowed = await server.request("/dashboard/api/settings/export", {
-    headers: { cookie: cookies.cookie },
-  })
-  expect(allowed.status).toBe(200)
+  expect(response.status).toBe(200)
 })
 
 test("admin password change revokes prior sessions", async () => {
@@ -338,29 +320,6 @@ test("administrator sessions enforce idle and absolute expiry", async () => {
     headers: { cookie: absoluteCookies.cookie },
   })
   expect(absoluteExpired.status).toBe(401)
-})
-
-test("privileged reauthentication expires after five minutes", async () => {
-  let currentTime = Date.UTC(2026, 6, 12)
-  setAdminAuthClockForTest({ now: () => currentTime })
-  const cookies = await setup()
-  const reauth = await server.request("/dashboard/auth/reauth", {
-    method: "POST",
-    headers: {
-      cookie: cookies.cookie,
-      "content-type": "application/json",
-      origin: ORIGIN,
-      "x-copilot-csrf": cookies.csrf,
-    },
-    body: JSON.stringify({ password: ADMIN_PASSWORD }),
-  })
-  expect(reauth.status).toBe(200)
-
-  currentTime += ADMIN_REAUTH_MS + 1
-  const denied = await server.request("/dashboard/api/settings/export", {
-    headers: { cookie: cookies.cookie },
-  })
-  expect(denied.status).toBe(403)
 })
 
 test("dashboard responses carry hardening headers and no wildcard CORS", async () => {

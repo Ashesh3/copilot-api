@@ -57,23 +57,6 @@ export async function api<T>(
   path: string,
   body?: unknown,
 ): Promise<T> {
-  return await executeApi<T>({
-    method,
-    path,
-    body,
-    allowReauthentication: true,
-  })
-}
-
-interface ApiExecutionOptions {
-  method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE"
-  path: string
-  body?: unknown
-  allowReauthentication: boolean
-}
-
-async function executeApi<T>(options: ApiExecutionOptions): Promise<T> {
-  const { method, path, body, allowReauthentication } = options
   const headers: Record<string, string> = {}
   if (body !== undefined) headers["content-type"] = "application/json"
   if (!["GET"].includes(method)) {
@@ -81,35 +64,12 @@ async function executeApi<T>(options: ApiExecutionOptions): Promise<T> {
     if (csrfToken) headers["x-copilot-csrf"] = csrfToken
   }
 
-  let response = await fetch(path, {
+  const response = await fetch(path, {
     method,
     headers,
     credentials: "same-origin",
     body: body === undefined ? undefined : JSON.stringify(body),
   })
-
-  if (response.status === 403 && allowReauthentication) {
-    const responseBody = await response.clone().text()
-    if (responseBody.includes("Privileged reauthentication required")) {
-      const password = globalThis.prompt(
-        "Enter your administrator password to continue:",
-      )
-      if (password) {
-        await executeApi({
-          method: "POST",
-          path: "/dashboard/auth/reauth",
-          body: { password },
-          allowReauthentication: false,
-        })
-        response = await fetch(path, {
-          method,
-          headers,
-          credentials: "same-origin",
-          body: body === undefined ? undefined : JSON.stringify(body),
-        })
-      }
-    }
-  }
 
   if (!response.ok) {
     const message = await extractErrorMessage(

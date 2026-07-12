@@ -155,6 +155,16 @@ test("WebSocket locations have exact methods and dedicated finite lifetimes", as
   expect(publicTemplate).toMatch(
     /location ~ \^\/ws\/remote\/ \{[\s\S]*?limit_except GET \{ deny all; \}[\s\S]*?proxy_read_timeout 1h;/,
   )
+  expect(publicTemplate).toContain(
+    'map "$request_method:$http_upgrade" $responses_route_allowed {',
+  )
+  expect(publicTemplate).toContain("~*^GET:websocket$ 1;")
+  expect(publicTemplate).toMatch(
+    /location ~ \^\/\(\?:v1\/\)\?responses\/\?\$ \{[\s\S]*?limit_except GET POST \{ deny all; \}[\s\S]*?if \(\$responses_route_allowed = 0\) \{ return 404; \}[\s\S]*?proxy_read_timeout 12h;/,
+  )
+  expect(publicTemplate).toMatch(
+    /location ~ \^\/\(\?:v1\/\)\?\(\?:chat\/completions\|embeddings\|messages\|responses\/compact\)\/\?\$ \{[\s\S]*?limit_except POST \{ deny all; \}/,
+  )
   expect(spoofTemplate).toMatch(
     /location ~ \^\/api\/ws\/speech_to_text\/voice_stream\/\??[\s\S]*?limit_except GET \{ deny all; \}[\s\S]*?proxy_read_timeout 3m;/,
   )

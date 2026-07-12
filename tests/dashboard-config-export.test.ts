@@ -90,7 +90,7 @@ test("dashboard config export endpoint is authenticated and returns a zip", asyn
   )
   expect(unauthorizedResponse.status).toBe(401)
 
-  const admin = await createTestAdminSession(true)
+  const admin = await createTestAdminSession()
   const response = await server.request("/dashboard/api/settings/export", {
     headers: adminHeaders(admin, false),
   })

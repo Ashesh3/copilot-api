@@ -14,7 +14,6 @@ export const ADMIN_CSRF_COOKIE = "__Host-copilot_admin_csrf"
 export const ADMIN_PASSWORD_MIN_LENGTH = 16
 export const ADMIN_SESSION_ABSOLUTE_MS = 30 * 24 * 60 * 60 * 1000
 export const ADMIN_SESSION_IDLE_MS = 12 * 60 * 60 * 1000
-export const ADMIN_REAUTH_MS = 5 * 60 * 1000
 
 const MAX_PASSWORD_LENGTH = 256
 const MAX_ADMIN_SESSIONS = 10
@@ -36,7 +35,6 @@ interface AdminSessionRecord {
   createdAt: number
   lastSeenAt: number
   expiresAt: number
-  reauthenticatedUntil?: number
 }
 
 interface AdminSessionsData {
@@ -53,7 +51,6 @@ export interface AuthenticatedAdminSession {
   tokenHash: string
   csrfToken: string
   expiresAt: number
-  reauthenticatedUntil?: number
 }
 
 export interface AdminAuthClock {
@@ -361,11 +358,11 @@ function parseCookieHeader(header: string | null): Record<string, string> {
 }
 
 // Authentication deliberately evaluates cookie, CSRF, origin, expiry, idle,
-// session-version and step-up state in one place.
-// eslint-disable-next-line complexity
+// and session version in one place.
+
 async function resolveAdminSession(
   request: Request,
-  options: { requireCsrf?: boolean; requireReauth?: boolean } = {},
+  options: { requireCsrf?: boolean } = {},
 ): Promise<AuthenticatedAdminSession | null> {
   const current = await loadAuthData()
   if (!current) return null
@@ -400,13 +397,6 @@ async function resolveAdminSession(
       return null
     }
   }
-  if (
-    options.requireReauth
-    && (session.reauthenticatedUntil ?? 0) <= currentTime
-  ) {
-    return null
-  }
-
   const shouldPersist =
     currentTime - session.lastSeenAt >= LAST_SEEN_WRITE_INTERVAL_MS
   if (shouldPersist) session.lastSeenAt = currentTime
@@ -418,22 +408,19 @@ async function resolveAdminSession(
     tokenHash,
     csrfToken,
     expiresAt: session.expiresAt,
-    reauthenticatedUntil: session.reauthenticatedUntil,
   }
 }
 
 export async function authenticateAdminRequest(
   request: Request,
-  options: { requireCsrf?: boolean; requireReauth?: boolean } = {},
+  options: { requireCsrf?: boolean } = {},
 ): Promise<AuthenticatedAdminSession | null> {
   const credential = await resolveRequestCredentialKind(request, "admin", {
     requireCsrf: options.requireCsrf,
-    requireReauth: options.requireReauth,
   })
   const tokenHash = credential?.metadata?.tokenHash
   const csrfToken = credential?.metadata?.csrfToken
   const expiresAt = credential?.metadata?.expiresAt
-  const reauthenticatedUntil = credential?.metadata?.reauthenticatedUntil
   if (
     typeof tokenHash !== "string"
     || typeof csrfToken !== "string"
@@ -445,9 +432,6 @@ export async function authenticateAdminRequest(
     tokenHash,
     csrfToken,
     expiresAt,
-    ...(typeof reauthenticatedUntil === "number" ?
-      { reauthenticatedUntil }
-    : {}),
   }
 }
 
@@ -479,27 +463,6 @@ export async function logoutAdmin(request: Request): Promise<void> {
     )
     sessionsData = data
     await enqueueWrite(PATHS.ADMIN_SESSIONS_PATH, data)
-  })
-}
-
-export async function reauthenticateAdmin(
-  request: Request,
-  password: string,
-): Promise<boolean> {
-  return await serializeAuthMutation(async () => {
-    const session = await authenticateAdminRequest(request, {
-      requireCsrf: true,
-    })
-    if (!session || !(await verifyPassword(password))) return false
-    const data = await loadSessionsData()
-    const record = data.sessions.find((entry) =>
-      safeEqual(entry.tokenHash, session.tokenHash),
-    )
-    if (!record) return false
-    record.reauthenticatedUntil = now() + ADMIN_REAUTH_MS
-    sessionsData = data
-    await enqueueWrite(PATHS.ADMIN_SESSIONS_PATH, data)
-    return true
   })
 }
 
@@ -563,7 +526,6 @@ export function setAdminAuthClockForTest(testClock?: AdminAuthClock): void {
 registerCredentialProvider("admin", async (request, context) => {
   const session = await resolveAdminSession(request, {
     requireCsrf: context.requireCsrf,
-    requireReauth: context.requireReauth,
   })
   return session ?
       {
@@ -571,9 +533,6 @@ registerCredentialProvider("admin", async (request, context) => {
         metadata: {
           csrfToken: session.csrfToken,
           expiresAt: session.expiresAt,
-          ...(session.reauthenticatedUntil === undefined ?
-            {}
-          : { reauthenticatedUntil: session.reauthenticatedUntil }),
           tokenHash: session.tokenHash,
         },
         principalId: `admin:${session.tokenHash.slice(0, 16)}`,
