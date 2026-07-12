@@ -1,3 +1,4 @@
+import { YAML } from "bun"
 import { expect, test } from "bun:test"
 import fs from "node:fs/promises"
 import path from "node:path"
@@ -8,6 +9,32 @@ const repositoryRoot = path.join(import.meta.dir, "..")
 
 async function readRepositoryFile(relativePath: string): Promise<string> {
   return await fs.readFile(path.join(repositoryRoot, relativePath), "utf8")
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function requireRecord(value: unknown, description: string) {
+  if (!isRecord(value)) {
+    throw new TypeError(`${description} must be a mapping`)
+  }
+
+  return value
+}
+
+function requireStringArray(
+  value: unknown,
+  description: string,
+): Array<string> {
+  if (
+    !Array.isArray(value)
+    || !value.every((item) => typeof item === "string")
+  ) {
+    throw new TypeError(`${description} must be a string array`)
+  }
+
+  return value
 }
 
 test("repository configuration does not support a gateway key file", async () => {
@@ -24,12 +51,25 @@ test("repository configuration does not support a gateway key file", async () =>
 })
 
 test("Docker Compose preserves automatic secret-management integration", async () => {
-  const compose = await readRepositoryFile("docker-compose.yml")
+  const compose = YAML.parse(await readRepositoryFile("docker-compose.yml"))
+  const root = requireRecord(compose, "Docker Compose document")
+  const services = requireRecord(root.services, "services")
+  const copilotApi = requireRecord(
+    services["copilot-api"],
+    "services.copilot-api",
+  )
+  const environment = requireStringArray(
+    copilotApi.environment,
+    "services.copilot-api.environment",
+  )
+  const envFile = requireStringArray(
+    copilotApi.env_file,
+    "services.copilot-api.env_file",
+  )
 
-  expect(compose).toContain("OP_TOKEN")
-  expect(compose).toContain("OP_ENV_ID")
-  expect(compose).toContain("env_file")
-  expect(compose).toContain("- .env")
+  expect(environment).toContain("OP_TOKEN=${OP_TOKEN}")
+  expect(environment).toContain("OP_ENV_ID=${OP_ENV_ID}")
+  expect(envFile).toContain(".env")
 })
 
 test("leaves API key authentication disabled when the CLI flag is omitted", () => {
