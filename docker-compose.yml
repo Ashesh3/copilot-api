@@ -8,13 +8,11 @@ services:
       - "127.0.0.1:4141:4141"
     volumes:
       - copilot-data:/app/data
-      - ${COPILOT_API_KEY_AUTH_FILE_HOST:-./secrets/copilot-api-key}:/run/secrets/copilot-api-key:ro
     environment:
       - OP_TOKEN=${OP_TOKEN}
       - OP_ENV_ID=${OP_ENV_ID}
       # Exact Docker bridge gateway used by host nginx on this deployment.
       - COPILOT_TRUSTED_PROXY_CIDRS=${COPILOT_TRUSTED_PROXY_CIDRS:-172.19.0.1/32,127.0.0.1/32,::1/128}
-      - COPILOT_API_KEY_AUTH_FILE=/run/secrets/copilot-api-key
       - COPILOT_ADMIN_ORIGIN=${COPILOT_ADMIN_ORIGIN:-https://ai.ashesh.dev}
     env_file:
       - .env
