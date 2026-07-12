@@ -3,8 +3,9 @@
 import { defineCommand } from "citty"
 import clipboard from "clipboardy"
 import consola from "consola"
-import fs from "node:fs"
 import invariant from "tiny-invariant"
+
+import { resolveApiKeyAuth } from "~/lib/api-key-auth-config"
 
 import packageJson from "../package.json" with { type: "json" }
 import { getStoredTokens } from "./lib/accounts-store"
@@ -530,32 +531,15 @@ export async function runServer(options: RunServerOptions): Promise<void> {
   setupSentryShutdown()
 }
 
-/**
- * Resolve --api-key-auth value: use provided value, fall back to env, or error if flag used without value.
- */
-function resolveApiKeyAuth(cliValue: string | undefined): string | undefined {
-  if (cliValue === undefined) return undefined
-
-  // If a non-empty value was provided via CLI, use it
-  if (cliValue !== "" && cliValue !== "true") return cliValue
-
-  // A mounted secret file takes precedence over environment-loaded values.
-  const filePath = process.env.COPILOT_API_KEY_AUTH_FILE?.trim()
-  if (filePath) {
-    const fileValue = fs.readFileSync(filePath, "utf8").trim()
-    if (fileValue) return fileValue
-    consola.error("COPILOT_API_KEY_AUTH_FILE is empty")
+function resolveStartupApiKeyAuth(
+  cliValue: string | undefined,
+): string | undefined {
+  try {
+    return resolveApiKeyAuth(cliValue, process.env.COPILOT_API_KEY_AUTH)
+  } catch (error) {
+    consola.error(error instanceof Error ? error.message : String(error))
     process.exit(1)
   }
-
-  // Flag was provided but no value — fall back to env
-  const envValue = process.env.COPILOT_API_KEY_AUTH
-  if (envValue) return envValue
-
-  consola.error(
-    "--api-key-auth requires a value or COPILOT_API_KEY_AUTH environment variable",
-  )
-  process.exit(1)
 }
 
 export const start = defineCommand({
@@ -665,7 +649,7 @@ export const start = defineCommand({
       proxyEnv: args["proxy-env"],
       insecure: args.insecure,
       debug: args.debug,
-      apiKeyAuth: resolveApiKeyAuth(args["api-key-auth"]),
+      apiKeyAuth: resolveStartupApiKeyAuth(args["api-key-auth"]),
       host: args.host,
     })
   },
