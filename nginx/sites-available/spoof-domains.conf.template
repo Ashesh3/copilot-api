@@ -27,11 +27,9 @@ server {
     proxy_pass {{UPSTREAM_URL}};
     include {{PROXY_LIMITS_SNIPPET_PATH}};
   }
-  location ~ ^/api/eval/[^/]+/?$ {
-    limit_except POST { deny all; }
-    proxy_pass {{UPSTREAM_URL}};
-    include {{PROXY_LIMITS_SNIPPET_PATH}};
-  }
+  # /api/eval is intentionally not published here. Its application-level
+  # compatibility fallback is IP-only, which is unsafe behind a proxy or load
+  # balancer that does not preserve an authenticated client source address.
   location ~ ^/api/ws/speech_to_text/voice_stream/?$ {
     limit_except GET { deny all; }
     proxy_pass {{UPSTREAM_URL}};

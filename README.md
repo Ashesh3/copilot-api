@@ -476,7 +476,7 @@ These are compatibility implementations, not hosted identity or cloud services.
   enabled for private development, `/sessions` and `/ws/direct/:sessionId`
   require an inference-capable credential and remain resource-limited.
 - GrowthBook feature evaluation and the feature-flag UI support client behavior
-  overrides.
+  overrides on private networks where the client source address is preserved.
 
 The OAuth and bridge credentials above are the primary authorization boundary.
 Managed IP policy remains defense in depth for compatibility calls that need it;
@@ -488,7 +488,9 @@ IP into that policy.
 - `POST /transcribe` provides dictation through Groq speech-to-text.
 - `POST /codex/responses` provides configurable transcript cleanup.
 - Statsig overrides can be managed in the dashboard and applied through the
-  Statsig proxy middleware and bundled nginx template.
+  Statsig proxy middleware on a private network with authenticated source-IP
+  preservation. The public nginx template is default-deny for this IP-only
+  compatibility surface.
 
 Set `GROQ_API_KEY` or the equivalent `groqApiKey` config field to enable speech
 transcription. The voice WebSocket endpoint is
@@ -501,6 +503,8 @@ per-principal transcription-budget limits.
 Codex Desktop calls must also satisfy gateway-key or managed/session-IP
 authorization. For authenticated non-local Desktop routing, use the supplied
 trusted-host/TLS template and an intentional client-side host mapping.
+The public Codex template requires a bearer before proxying; IP-only fallback
+is reserved for private networks with trustworthy source addresses.
 
 Advanced TLS and proxy templates live under `nginx/`, including WebSocket
 upgrade headers, disabled response buffering, and long streaming timeouts.
@@ -702,6 +706,14 @@ falls within a configured trusted CIDR. Direct clients are identified by their
 socket address and cannot gain allowlist status by supplying `X-Real-IP` or
 `X-Forwarded-For`. Keep the trusted list exact: do not use a broad private range
 when only one local proxy address is required.
+
+An exact trusted peer is insufficient when an upstream TCP load balancer
+source-NATs every client to that peer. Do not publish IP-only compatibility
+routes such as GrowthBook `/api/eval/*` or the Statsig proxy through that
+topology. First enable an authenticated source-address transport such as PROXY
+protocol end to end, restrict the load-balancer listener to trusted ingress, and
+configure nginx to consume that verified address. The bundled public templates
+therefore leave those IP-only routes default-denied.
 
 Use hostname-specific, default-deny locations. Publish the inference routes,
 the exact OAuth/Claude compatibility paths required by your clients, the

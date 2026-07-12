@@ -233,6 +233,27 @@ test("transcribe: wrong bearer is silently dropped (no IP whitelisted)", async (
   expect(isIpWhitelisted(clientIp)).toBe(false)
 })
 
+test("transcribe: invalid bearer cannot fall through to an allowed IP", async () => {
+  const clientIp = "203.0.113.52"
+  setIpAllowlistForTest([{ ip: clientIp, enabled: true }])
+
+  const formData = new FormData()
+  formData.append("file", new Blob(["audio"], { type: "audio/webm" }), "a.webm")
+
+  const response = await server.request("/transcribe", {
+    method: "POST",
+    headers: {
+      authorization: "Bearer wrong-key",
+      "x-copilot-peer-ip": "127.0.0.1",
+      "x-forwarded-for": clientIp,
+    },
+    body: formData,
+  })
+
+  expect(response.status).toBe(404)
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
 test("transcribe: when no API keys are configured, only IP whitelist gates the route", async () => {
   // Strip all configured API keys to simulate a deployment that's relying on
   // IP whitelist alone (the pre-change behavior of the route).
@@ -319,6 +340,28 @@ test("codex-responses: wrong bearer is silently dropped", async () => {
   expect(response.status).toBe(404)
   expect(chatCompletionsMock).not.toHaveBeenCalled()
   expect(isIpWhitelisted(clientIp)).toBe(false)
+})
+
+test("codex-responses: invalid bearer cannot fall through to an allowed IP", async () => {
+  ;(globalThis as unknown as { fetch: typeof fetch }).fetch =
+    chatCompletionsMock as unknown as typeof fetch
+
+  const clientIp = "203.0.113.55"
+  setIpAllowlistForTest([{ ip: clientIp, enabled: true }])
+
+  const response = await server.request("/codex/responses", {
+    method: "POST",
+    headers: {
+      authorization: "Bearer wrong-key",
+      "x-copilot-peer-ip": "127.0.0.1",
+      "x-forwarded-for": clientIp,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ instructions: "x", input: [] }),
+  })
+
+  expect(response.status).toBe(404)
+  expect(chatCompletionsMock).not.toHaveBeenCalled()
 })
 
 test("transcribe: --api-key-auth CLI key is honored as a direct bearer", async () => {

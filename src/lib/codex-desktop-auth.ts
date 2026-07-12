@@ -37,10 +37,24 @@ export async function authorizeCodexDesktopRequest(
   routeName: string,
 ): Promise<CodexDesktopAuthResult> {
   const clientIp = extractClientIp(c)
+  const credentialSupplied = [
+    "authorization",
+    "x-api-key",
+    "x-goog-api-key",
+  ].some((header) => c.req.raw.headers.has(header))
 
   // Path 1: any centrally resolved inference credential.
   if (await resolveRequestCredential(c.req.raw, ["user:inference"])) {
     return { allowed: true, clientIp }
+  }
+
+  // An invalid or conflicting credential must never fall through to the IP
+  // compatibility path merely because the apparent address is allowlisted.
+  if (credentialSupplied) {
+    consola.warn(
+      `[${routeName}] Rejected: invalid credential from IP ${clientIp ?? "(unknown)"}`,
+    )
+    return { allowed: false, clientIp }
   }
 
   // Path 2: IP whitelist fallback.

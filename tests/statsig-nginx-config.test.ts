@@ -10,14 +10,6 @@ const templatePath = path.join(
   "codex-statsig-spoof.conf.template",
 )
 
-const proxyLimitsTemplatePath = path.join(
-  import.meta.dir,
-  "..",
-  "nginx",
-  "snippets",
-  "proxy-limits.conf.template",
-)
-
 function stripComments(config: string): string {
   return config.replaceAll(/#.*$/gm, "")
 }
@@ -88,13 +80,9 @@ function findServerBlock(
   return matches[0]
 }
 
-test("Statsig spoof template preserves routing and suppresses request logs", async () => {
-  const [template, proxyLimitsTemplate] = await Promise.all([
-    fs.readFile(templatePath, "utf8"),
-    fs.readFile(proxyLimitsTemplatePath, "utf8"),
-  ])
+test("Statsig spoof template is default-deny and suppresses request logs", async () => {
+  const template = await fs.readFile(templatePath, "utf8")
   const activeTemplate = stripComments(template)
-  const activeProxyLimitsTemplate = stripComments(proxyLimitsTemplate)
   const serverBlocks = extractTopLevelServerBlocks(activeTemplate)
 
   expect(activeTemplate.trimEnd().endsWith("}")).toBe(true)
@@ -131,23 +119,10 @@ test("Statsig spoof template preserves routing and suppresses request logs", asy
   expect(httpsBlock).toContain("proxy_set_header X-Real-IP $remote_addr;")
   expect(httpsBlock).toContain("proxy_set_header X-Forwarded-For $remote_addr;")
   expect(httpsBlock).toContain("proxy_set_header X-Forwarded-Proto $scheme;")
-  expect(httpsBlock).toContain("proxy_pass {{UPSTREAM_URL}};")
-  expect(
-    countActiveDirective(httpsBlock, "include {{PROXY_LIMITS_SNIPPET_PATH}};"),
-  ).toBe(1)
+  expect(httpsBlock).not.toContain("proxy_pass {{UPSTREAM_URL}};")
+  expect(httpsBlock).not.toContain("include {{PROXY_LIMITS_SNIPPET_PATH}};")
+  expect(httpsBlock).toContain("location / { return 404; }")
   expect(httpsBlock).toContain(
     "limit_req zone={{RATE_LIMIT_ZONE}} burst={{RATE_LIMIT_BURST}} nodelay;",
   )
-
-  const effectiveHttpsBlock = httpsBlock.replaceAll(
-    "include {{PROXY_LIMITS_SNIPPET_PATH}};",
-    activeProxyLimitsTemplate,
-  )
-  expect(
-    countActiveDirective(effectiveHttpsBlock, "proxy_request_buffering off;"),
-  ).toBe(1)
-  expect(
-    countActiveDirective(effectiveHttpsBlock, "proxy_buffering off;"),
-  ).toBe(1)
-  expect(countActiveDirective(effectiveHttpsBlock, "proxy_cache off;")).toBe(1)
 })
