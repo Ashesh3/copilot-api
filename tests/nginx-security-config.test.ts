@@ -71,6 +71,20 @@ test("public templates do not publish IP-only compatibility routes", async () =>
   expect(statsigTemplate).toContain("location / { return 404; }")
 })
 
+test("Codex public dictation paths require a bearer before proxying", async () => {
+  const template = await read(
+    "sites-available/codex-desktop-spoof.conf.template",
+  )
+
+  for (const path of ["/transcribe", "/codex/responses"]) {
+    expect(template).toMatch(
+      new RegExp(
+        `location = ${path.replaceAll("/", String.raw`\/`)} \\{[\\s\\S]*?if \\(\\$http_authorization = ""\\) \\{ return 404; \\}`,
+      ),
+    )
+  }
+})
+
 test("Claude subscriber compatibility routes have exact methods and write caps", async () => {
   const template = await read("sites-available/spoof-domains.conf.template")
 

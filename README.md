@@ -503,6 +503,8 @@ per-principal transcription-budget limits.
 Codex Desktop calls must also satisfy gateway-key or managed/session-IP
 authorization. For authenticated non-local Desktop routing, use the supplied
 trusted-host/TLS template and an intentional client-side host mapping.
+The public Codex template requires a bearer before proxying; IP-only fallback
+is reserved for private networks with trustworthy source addresses.
 
 Advanced TLS and proxy templates live under `nginx/`, including WebSocket
 upgrade headers, disabled response buffering, and long streaming timeouts.

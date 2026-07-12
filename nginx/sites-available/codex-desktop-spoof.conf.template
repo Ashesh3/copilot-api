@@ -54,6 +54,9 @@ server {
 
   location = /transcribe {
     limit_except POST { deny all; }
+    # Codex Desktop sends its configured API key as a bearer. Do not expose
+    # the application IP-only fallback through a source-NATing public edge.
+    if ($http_authorization = "") { return 404; }
     client_max_body_size 4m;
     proxy_pass {{UPSTREAM_URL}};
     proxy_http_version 1.1;
@@ -63,6 +66,7 @@ server {
 
   location = /codex/responses {
     limit_except POST { deny all; }
+    if ($http_authorization = "") { return 404; }
     client_max_body_size 64k;
     proxy_pass {{UPSTREAM_URL}};
     proxy_http_version 1.1;
