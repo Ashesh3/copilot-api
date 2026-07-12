@@ -24,7 +24,6 @@ export interface ResolvedCredential {
 export interface CredentialResolutionContext {
   environmentId?: string
   requireCsrf?: boolean
-  requireReauth?: boolean
   requiredScopes?: ReadonlyArray<string>
   sessionId?: string
 }

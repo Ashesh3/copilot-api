@@ -40,7 +40,7 @@ beforeEach(async () => {
   state.copilotToken = "fresh-copilot-token"
   state.githubToken = "github-token"
   state.isMultiToken = false
-  adminSession = await createTestAdminSession(true)
+  adminSession = await createTestAdminSession()
 })
 
 afterAll(() => {

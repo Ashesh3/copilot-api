@@ -14,7 +14,7 @@ let admin: TestAdminSession
 
 beforeEach(async () => {
   setIpAllowlistForTest([])
-  admin = await createTestAdminSession(true)
+  admin = await createTestAdminSession()
 })
 
 afterEach(() => {

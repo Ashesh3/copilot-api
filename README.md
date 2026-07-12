@@ -283,8 +283,8 @@ The dashboard shell can be loaded before login, but every dashboard API requires
 an administrator session. First-time setup requires the gateway key and an
 administrator password of at least 16 characters. Normal login requires both.
 Sessions have a 30-day absolute lifetime and 12-hour idle lifetime; mutations
-also require a CSRF token and an approved `Origin`. Sensitive operations require
-recent password reauthentication, and a password change revokes other sessions.
+also require a CSRF token and an approved `Origin`. A password change revokes
+other sessions.
 
 Keep the application bound to loopback or a private container network even with
 these controls. Publish only the exact hostname/path set required by the clients
@@ -441,7 +441,7 @@ expire after ten minutes and are pruned during debug-store operations. It
 observes Chat Completions, Responses, Embeddings, and Messages attempts. Replay
 is narrower and supports logged Chat Completions and Responses attempts only.
 Debug detail, replay, provider-secret changes, configuration export, and other
-sensitive operations require a recent password reauthentication.
+sensitive operations require the authenticated administrator session.
 
 `GET /usage` returns current GitHub Copilot quota data. The dashboard's local
 usage view is a different tracker: minute/model aggregates are retained for
@@ -745,7 +745,7 @@ before exposing it.
   request history. Sensitive files and the directory are created with
   restrictive permissions where the platform supports them.
 - **Exports are sanitized, not backups.** Dashboard ZIP exports redact
-  secret-like configuration and require recent administrator reauthentication.
+  secret-like configuration and require an authenticated administrator session.
   Preserve full recovery backups through a separately protected filesystem
   process.
 - **Treat LLM Debug as sensitive.** Credentials and secret-like JSON fields are

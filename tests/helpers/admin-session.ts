@@ -24,9 +24,7 @@ function setCookies(response: Response): Array<string> {
     : [response.headers.get("set-cookie") ?? ""]
 }
 
-export async function createTestAdminSession(
-  reauthenticate = false,
-): Promise<TestAdminSession> {
+export async function createTestAdminSession(): Promise<TestAdminSession> {
   setAdminAuthTestMode(true)
   state.apiKeyAuth = TEST_GATEWAY_KEY
   process.env.COPILOT_ADMIN_ORIGIN = TEST_ADMIN_ORIGIN
@@ -52,16 +50,7 @@ export async function createTestAdminSession(
   expect(session).toBeTruthy()
   expect(csrfCookie).toBeTruthy()
   const csrf = csrfCookie?.slice(`${ADMIN_CSRF_COOKIE}=`.length) ?? ""
-  const result = { cookie: `${session}; ${csrfCookie}`, csrf }
-  if (reauthenticate) {
-    const response = await server.request("/dashboard/auth/reauth", {
-      method: "POST",
-      headers: adminHeaders(result),
-      body: JSON.stringify({ password: TEST_ADMIN_PASSWORD }),
-    })
-    expect(response.status).toBe(200)
-  }
-  return result
+  return { cookie: `${session}; ${csrfCookie}`, csrf }
 }
 
 export function adminHeaders(

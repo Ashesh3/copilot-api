@@ -66,7 +66,6 @@ export default function SettingsScreen() {
   const [cleanupDraft, setCleanupDraft] = useState<string>()
   const [isSavingCleanup, setIsSavingCleanup] = useState(false)
   const [newIp, setNewIp] = useState("")
-  const [reauthPassword, setReauthPassword] = useState("")
   const [currentPassword, setCurrentPassword] = useState("")
   const [newPassword, setNewPassword] = useState("")
   const [confirmPassword, setConfirmPassword] = useState("")
@@ -76,11 +75,6 @@ export default function SettingsScreen() {
 
   const handleExport = async () => {
     try {
-      if (!reauthPassword) {
-        toast.error("Enter your admin password to authorize the export")
-        return
-      }
-      await post("/dashboard/auth/reauth", { password: reauthPassword })
       const response = await fetch("/dashboard/api/settings/export", {
         credentials: "same-origin",
       })
@@ -98,7 +92,6 @@ export default function SettingsScreen() {
       link.click()
       URL.revokeObjectURL(url)
       toast.success("Config exported")
-      setReauthPassword("")
     } catch (caught) {
       toast.error(
         caught instanceof Error ? caught.message : "Failed to export config",
@@ -357,12 +350,6 @@ export default function SettingsScreen() {
           <Card>
             <VStack gap={4}>
               <Heading level={3}>Administrator Security</Heading>
-              <TextInput
-                type="password"
-                label="Admin password for privileged actions"
-                value={reauthPassword}
-                onChange={setReauthPassword}
-              />
               <Button
                 label="Export sanitized config"
                 variant="secondary"
