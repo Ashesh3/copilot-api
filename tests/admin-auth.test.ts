@@ -365,7 +365,11 @@ test("privileged reauthentication expires after five minutes", async () => {
 
 test("dashboard responses carry hardening headers and no wildcard CORS", async () => {
   const response = await server.request("/dashboard")
-  expect(response.headers.get("content-security-policy")).toContain("nonce-")
+  const csp = response.headers.get("content-security-policy")
+  expect(csp).toContain("nonce-")
+  expect(csp).toContain("form-action 'self';")
+  expect(csp).not.toContain("http://localhost")
+  expect(csp).not.toContain("https://platform.claude.com")
   expect(response.headers.get("x-frame-options")).toBe("DENY")
   expect(response.headers.get("x-content-type-options")).toBe("nosniff")
   expect(response.headers.get("access-control-allow-origin")).toBeNull()
