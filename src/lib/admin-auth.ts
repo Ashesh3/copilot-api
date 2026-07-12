@@ -439,7 +439,6 @@ export function isAllowedAdminOrigin(origin: string | null): boolean {
   if (!origin) return false
   const configured = process.env.COPILOT_ADMIN_ORIGIN?.trim()
   if (configured) return origin === configured
-  if (origin === "https://ai.ashesh.dev") return true
   try {
     const url = new URL(origin)
     return (

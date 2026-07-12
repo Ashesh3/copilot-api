@@ -36,6 +36,8 @@ import {
 
 const originalGatewayKey = state.apiKeyAuth
 const originalDirectConnect = process.env.COPILOT_API_ENABLE_DIRECT_CONNECT
+const originalAdminOrigin = process.env.COPILOT_ADMIN_ORIGIN
+const TEST_ADMIN_ORIGIN = "https://admin.example.test"
 let adminCookie = ""
 
 function voiceUpgradeRequest(): Request {
@@ -46,6 +48,7 @@ function voiceUpgradeRequest(): Request {
 
 beforeEach(async () => {
   state.apiKeyAuth = "gateway-secret"
+  process.env.COPILOT_ADMIN_ORIGIN = TEST_ADMIN_ORIGIN
   setAdminAuthTestMode(true)
   const setup = await setupAdminAuth(
     "gateway-secret",
@@ -66,6 +69,11 @@ afterEach(() => {
     delete process.env.COPILOT_API_ENABLE_DIRECT_CONNECT
   } else {
     process.env.COPILOT_API_ENABLE_DIRECT_CONNECT = originalDirectConnect
+  }
+  if (originalAdminOrigin === undefined) {
+    delete process.env.COPILOT_ADMIN_ORIGIN
+  } else {
+    process.env.COPILOT_ADMIN_ORIGIN = originalAdminOrigin
   }
 })
 
@@ -193,7 +201,7 @@ describe("Remote Control WebSocket tickets", () => {
   test("tickets are session-bound and single-use", async () => {
     const codeSession = createSession("Audit", [])
     const admin = await authenticateAdminRequest(
-      new Request("https://ai.ashesh.dev/dashboard", {
+      new Request(`${TEST_ADMIN_ORIGIN}/dashboard`, {
         headers: { cookie: adminCookie },
       }),
     )
@@ -204,10 +212,10 @@ describe("Remote Control WebSocket tickets", () => {
     )
     const upgrade = mock(() => true)
     const request = () =>
-      new Request(`https://ai.ashesh.dev/ws/remote/${codeSession.id}`, {
+      new Request(`${TEST_ADMIN_ORIGIN}/ws/remote/${codeSession.id}`, {
         headers: {
           cookie: adminCookie,
-          origin: "https://ai.ashesh.dev",
+          origin: TEST_ADMIN_ORIGIN,
           "sec-websocket-protocol": `copilot-remote, copilot-ticket.${ticket}`,
         },
       })

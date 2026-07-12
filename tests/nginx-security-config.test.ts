@@ -163,10 +163,34 @@ test("WebSocket locations have exact methods and dedicated finite lifetimes", as
     /location ~ \^\/\(\?:v1\/\)\?responses\/\?\$ \{[\s\S]*?limit_except GET POST \{ deny all; \}[\s\S]*?if \(\$responses_route_allowed = 0\) \{ return 404; \}[\s\S]*?proxy_read_timeout 12h;/,
   )
   expect(publicTemplate).toMatch(
-    /location ~ \^\/\(\?:v1\/\)\?\(\?:chat\/completions\|embeddings\|messages\|responses\/compact\)\/\?\$ \{[\s\S]*?limit_except POST \{ deny all; \}/,
+    /location ~ \^\/\(\?:v1\/\)\?\(\?:embeddings\|responses\/compact\)\/\?\$ \{[\s\S]*?limit_except POST \{ deny all; \}/,
   )
   expect(spoofTemplate).toMatch(
     /location ~ \^\/api\/ws\/speech_to_text\/voice_stream\/\??[\s\S]*?limit_except GET \{ deny all; \}[\s\S]*?proxy_read_timeout 3m;/,
+  )
+})
+
+test("authenticated generation streams allow long finite idle periods", async () => {
+  const [publicTemplate, spoofTemplate] = await Promise.all([
+    read("sites-available/public-domain.conf.template"),
+    read("sites-available/spoof-domains.conf.template"),
+  ])
+
+  expect(publicTemplate).toMatch(
+    /location ~ \^\/\(\?:v1\/\)\?\(\?:chat\/completions\|messages\)\/\?\$ \{[\s\S]*?limit_except POST \{ deny all; \}[\s\S]*?proxy_http_version 1\.1;[\s\S]*?proxy_read_timeout 1h;[\s\S]*?send_timeout 1h;/,
+  )
+  expect(spoofTemplate).toMatch(
+    /location ~ \^\/v1\/messages\/\?\$ \{[\s\S]*?limit_except POST \{ deny all; \}[\s\S]*?proxy_http_version 1\.1;[\s\S]*?proxy_read_timeout 1h;[\s\S]*?send_timeout 1h;/,
+  )
+  const messagesLocation = spoofTemplate.match(
+    /location ~ \^\/v1\/messages\/\?\$ \{([\s\S]*?)\n {2}\}/,
+  )?.[1]
+  expect(messagesLocation).toBeDefined()
+  expect(messagesLocation).not.toContain(
+    "include {{PROXY_LIMITS_SNIPPET_PATH}}",
+  )
+  expect(spoofTemplate).toMatch(
+    /location ~ \^\/v1\/\(\?:messages\/count_tokens\|models\)\/\?\$ \{[\s\S]*?include \{\{PROXY_LIMITS_SNIPPET_PATH\}\};/,
   )
 })
 
@@ -182,4 +206,19 @@ test("Cloudflare real-IP policy trusts exact published ranges only", async () =>
   expect(publicTemplate).toContain(
     "include {{CLOUDFLARE_REAL_IP_SNIPPET_PATH}};",
   )
+})
+
+test("public nginx denials retain browser hardening headers", async () => {
+  const template = await read("sites-available/public-domain.conf.template")
+
+  for (const header of [
+    "Strict-Transport-Security",
+    "X-Content-Type-Options",
+    "X-Frame-Options",
+    "Referrer-Policy",
+    "Permissions-Policy",
+  ]) {
+    expect(template).toMatch(new RegExp(`add_header ${header} .* always;`))
+  }
+  expect(template).not.toMatch(/add_header Content-Security-Policy/)
 })

@@ -3,9 +3,9 @@
 ## Build, Lint, and Test Commands
 
 - **Build:**  
-  `bun run build` (uses tsup)
+  `bun run build` (uses tsdown)
 - **Dev:**  
-  `bun run dev`
+  `bun run dev start --host 127.0.0.1`
 - **Lint:**  
   `bun run lint` (uses @echristian/eslint-config)
 - **Lint & Fix staged files:**  
@@ -13,16 +13,16 @@
 - **Test all:**  
    `bun test`
 - **Test single file:**  
-   `bun test tests/claude-request.test.ts`
+   `bun test tests/anthropic-request.test.ts`
 - **Start (prod):**  
-  `bun run start`
+  `bun run start start --host 127.0.0.1`
 
 ## Code Style Guidelines
 
 - **Imports:**  
   Use ESNext syntax. Prefer absolute imports via `~/*` for `src/*` (see `tsconfig.json`).
 - **Formatting:**  
-  Follows Prettier (with `prettier-plugin-packagejson`). Run `bun run lint` to auto-fix.
+  Follows Prettier (with `prettier-plugin-packagejson`). Run `bun run lint:all` to check everything or `bun run lint -- --fix <files>` to fix selected files.
 - **Types:**  
   Strict TypeScript (`strict: true`). Avoid `any`; use explicit types and interfaces.
 - **Naming:**  

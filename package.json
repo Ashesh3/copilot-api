@@ -1,17 +1,17 @@
 {
   "name": "@ashsec/copilot-api",
   "version": "2.0.1",
-  "description": "Turn GitHub Copilot into OpenAI/Anthropic API compatible server. Usable with Claude Code!",
+  "description": "Self-hosted GitHub Copilot compatibility gateway for OpenAI, Anthropic, Google AI, Claude Code, and Codex clients.",
   "keywords": [
     "proxy",
     "github-copilot",
     "openai-compatible"
   ],
-  "homepage": "https://github.com/ericc-ch/copilot-api",
-  "bugs": "https://github.com/ericc-ch/copilot-api/issues",
+  "homepage": "https://github.com/Ashesh3/copilot-api#readme",
+  "bugs": "https://github.com/Ashesh3/copilot-api/issues",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ericc-ch/copilot-api.git"
+    "url": "git+https://github.com/Ashesh3/copilot-api.git"
   },
   "author": "Erick Christian <erickchristian48@gmail.com>",
   "type": "module",

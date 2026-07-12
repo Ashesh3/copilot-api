@@ -131,6 +131,27 @@ test("administrator auth mutations require the configured browser Origin", async
   expect((await server.request("/dashboard/auth/status")).status).toBe(200)
 })
 
+test("external dashboard origins require explicit configuration", async () => {
+  delete process.env.COPILOT_ADMIN_ORIGIN
+
+  const external = await server.request("/dashboard/auth/setup", {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: ORIGIN },
+    body: JSON.stringify({ gatewayKey: GATEWAY_KEY, password: ADMIN_PASSWORD }),
+  })
+  expect(external.status).toBe(401)
+
+  const local = await server.request("/dashboard/auth/setup", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      origin: "http://127.0.0.1:4141",
+    },
+    body: JSON.stringify({ gatewayKey: GATEWAY_KEY, password: ADMIN_PASSWORD }),
+  })
+  expect(local.status).toBe(201)
+})
+
 test("concurrent first-time setup creates only one administrator", async () => {
   const requests = await Promise.all(
     [ADMIN_PASSWORD, "another secure administrator password"].map((password) =>

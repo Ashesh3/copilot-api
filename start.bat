@@ -1,6 +1,6 @@
 @echo off
 echo ================================================
-echo GitHub Copilot API Server with Usage Viewer
+echo GitHub Copilot API Server with Operator Dashboard
 echo ================================================
 echo.
 
@@ -10,11 +10,17 @@ if not exist node_modules (
     echo.
 )
 
+if not defined COPILOT_API_KEY_AUTH (
+    echo COPILOT_API_KEY_AUTH is required for dashboard setup.
+    echo Set it to a long random value in this terminal, then run start.bat again.
+    exit /b 1
+)
+
 echo Starting server...
-echo The usage viewer page will open automatically after the server starts
+echo The operator dashboard will open automatically after the server starts
 echo.
 
-start "" "https://ericc-ch.github.io/copilot-api?endpoint=http://localhost:4141/usage"
-bun run dev
+start "" "http://127.0.0.1:4141/dashboard"
+bun run dev start --host 127.0.0.1 --api-key-auth
 
 pause
