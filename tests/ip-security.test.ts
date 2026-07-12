@@ -82,8 +82,8 @@ test("normalizes addresses and gives disabled managed entries precedence", async
 
 test("temporary leases expire and do not create persistent allowlist entries", async () => {
   setIpAllowlistForTest([])
-  expect(leaseIp("198.51.100.40", 1)).toBe(true)
+  expect(leaseIp("198.51.100.40", 50)).toBe(true)
   expect(await isIpAllowedForWhitelistedRoute("198.51.100.40")).toBe(true)
-  await Bun.sleep(5)
+  await Bun.sleep(75)
   expect(await isIpAllowedForWhitelistedRoute("198.51.100.40")).toBe(false)
 })
