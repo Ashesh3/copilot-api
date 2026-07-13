@@ -38,6 +38,7 @@ import {
 } from "../components/common"
 import { JsonTreeViewer } from "../components/JsonTreeViewer"
 import { Page } from "../components/Page"
+import { RequestExportMenu } from "../components/RequestExportMenu"
 import { ResponsesBodyViewer } from "../components/ResponsesBodyViewer"
 import { ResponsivePair } from "../components/ResponsivePair"
 import {
@@ -90,19 +91,6 @@ function fmtBytes(bytes: number | undefined): string {
 
 function totalBytes(entry: LlmDebugEntry): number {
   return entry.requestBodyBytes + (entry.responseBodyBytes ?? 0)
-}
-
-function buildCurl(request: LlmDebugDetail["request"]): string {
-  const lines = [
-    `curl -X ${request.method.toUpperCase()} ${JSON.stringify(request.url)}`,
-  ]
-  for (const [key, value] of Object.entries(request.headers)) {
-    lines.push(`  -H ${JSON.stringify(`${key}: ${value}`)}`)
-  }
-  if (request.body) {
-    lines.push(`  --data-raw ${JSON.stringify(request.body)}`)
-  }
-  return lines.join(" \\\n")
 }
 
 function capitalize(value: string): string {
@@ -577,15 +565,10 @@ function LlmDebugDetailView({ id }: { id: string }) {
       isRefreshing={loading}
       actions={
         <HStack gap={2} wrap="wrap">
-          <Button
-            label="Copy as cURL"
-            variant="ghost"
-            size="sm"
-            icon={<CopyIcon />}
-            isDisabled={!data}
-            onClick={() => {
-              if (data) copy(buildCurl(data.request))
-            }}
+          <RequestExportMenu
+            id={id}
+            request={data?.request}
+            onExport={(format) => toast.success(`Exported ${format}`)}
           />
           <Button
             label="Copy link"
