@@ -40,7 +40,6 @@ test("application source contains no local traffic or resource limits", () => {
     "maxPayloadLength",
     "backpressureLimit",
     "closeOnBackpressureLimit",
-    "idleTimeout",
     "AbortSignal.timeout",
     "hono/body-limit",
     "timeoutMs",
@@ -66,6 +65,7 @@ test("application source contains no local traffic or resource limits", () => {
     "utf8",
   )
   expect(startSource).not.toMatch(/\b429\b|Too Many Requests/)
+  expect(startSource).toMatch(/Bun\.serve\(\{[\s\S]*?idleTimeout:\s*0,/)
   const routeSource = readFiles(
     path.join(root, "src", "routes"),
     new Set([".ts", ".tsx"]),

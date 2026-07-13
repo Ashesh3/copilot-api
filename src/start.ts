@@ -518,6 +518,7 @@ export async function runServer(options: RunServerOptions): Promise<void> {
   Bun.serve({
     port: options.port,
     hostname: options.host,
+    idleTimeout: 0,
     fetch: handleStartFetch,
     websocket: combinedWebSocket,
   })
