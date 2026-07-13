@@ -155,7 +155,7 @@ test("leases bypass a ban without clearing its failure history", () => {
   expect(isIpBlocked(ip)).toBe(true)
 })
 
-test("keeps banning when additional leased failures remain in the window", () => {
+test("does not extend an active ban after a fourth failure", () => {
   const ip = "198.51.100.54"
   setCurrentTime(Date.UTC(2026, 0, 1, 12))
 
@@ -164,12 +164,10 @@ test("keeps banning when additional leased failures remain in the window", () =>
   recordFailedAttempt(ip)
 
   currentTime += 12 * 60 * 60 * 1000
-  expect(leaseIp(ip, 60_000)).toBe(true)
   recordFailedAttempt(ip)
-  recordFailedAttempt(ip)
-  recordFailedAttempt(ip)
-  expect(unwhitelistIp(ip)).toBe(true)
 
-  currentTime += 12 * 60 * 60 * 1000
+  currentTime += 12 * 60 * 60 * 1000 - 1
   expect(isIpBlocked(ip)).toBe(true)
+  currentTime += 1
+  expect(isIpBlocked(ip)).toBe(false)
 })

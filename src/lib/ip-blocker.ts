@@ -204,7 +204,10 @@ export function recordFailedAttempt(ip: string): number {
   ipTracker.set(normalized, entry)
 
   const failureCount = entry.failures.length
-  if (failureCount >= AUTH_FAILURE_THRESHOLD) {
+  if (
+    failureCount === AUTH_FAILURE_THRESHOLD
+    && entry.bannedUntil === undefined
+  ) {
     entry.bannedUntil = currentTime + IP_BAN_DURATION_MS
   }
   if (failureCount === AUTH_FAILURE_THRESHOLD) {
