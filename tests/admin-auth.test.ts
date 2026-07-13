@@ -81,7 +81,7 @@ afterEach(() => {
   resetIpSecurityForTest()
 })
 
-test("first admin setup requires gateway key and a strong password", async () => {
+test("first admin setup requires the gateway key and a four-character password", async () => {
   const wrongKey = await server.request("/dashboard/auth/setup", {
     method: "POST",
     headers: { "content-type": "application/json", origin: ORIGIN },
@@ -89,12 +89,22 @@ test("first admin setup requires gateway key and a strong password", async () =>
   })
   expect(wrongKey.status).toBe(401)
 
-  const weakPassword = await server.request("/dashboard/auth/setup", {
+  const shortPassword = await server.request("/dashboard/auth/setup", {
     method: "POST",
     headers: { "content-type": "application/json", origin: ORIGIN },
-    body: JSON.stringify({ gatewayKey: GATEWAY_KEY, password: "too-short" }),
+    body: JSON.stringify({ gatewayKey: GATEWAY_KEY, password: "123" }),
   })
-  expect(weakPassword.status).toBe(401)
+  expect(shortPassword.status).toBe(401)
+
+  const numericPassword = await server.request("/dashboard/auth/setup", {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: ORIGIN },
+    body: JSON.stringify({ gatewayKey: GATEWAY_KEY, password: "1234" }),
+  })
+  expect(numericPassword.status).toBe(201)
+
+  setAdminAuthTestMode(true)
+  state.apiKeyAuth = GATEWAY_KEY
 
   const cookies = await setup()
   const setCookies = readSetCookies(
@@ -567,6 +577,32 @@ test("environment Argon2id hash is the authoritative admin password", async () =
   expect(settingsBody.passwordManagedExternally).toBe(true)
 })
 
+test("environment-backed login enforces the four-character minimum", async () => {
+  process.env.COPILOT_ADMIN_PASSWORD_HASH = await Bun.password.hash("123", {
+    algorithm: "argon2id",
+    memoryCost: 65_536,
+    timeCost: 3,
+  })
+  const short = await server.request("/dashboard/auth/login", {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: ORIGIN },
+    body: JSON.stringify({ gatewayKey: GATEWAY_KEY, password: "123" }),
+  })
+  expect(short.status).toBe(401)
+
+  process.env.COPILOT_ADMIN_PASSWORD_HASH = await Bun.password.hash("1234", {
+    algorithm: "argon2id",
+    memoryCost: 65_536,
+    timeCost: 3,
+  })
+  const numeric = await server.request("/dashboard/auth/login", {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: ORIGIN },
+    body: JSON.stringify({ gatewayKey: GATEWAY_KEY, password: "1234" }),
+  })
+  expect(numeric.status).toBe(200)
+})
+
 test("environment password hash overrides an existing local verifier", async () => {
   await setup()
   process.env.COPILOT_ADMIN_PASSWORD_HASH = await Bun.password.hash(
@@ -798,29 +834,45 @@ test("wrong current admin passwords count toward the shared IP ban", async () =>
   expect(isIpBlocked(clientIp)).toBe(true)
 })
 
-test("new admin password validation errors are 400 and do not count", async () => {
+test("admin password changes accept numeric values and reject fewer than four characters", async () => {
   const cookies = await setup()
   const clientIp = "198.51.100.87"
 
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const response = await server.request("/dashboard/auth/password", {
-      method: "PUT",
-      headers: {
-        cookie: cookies.cookie,
-        "content-type": "application/json",
-        origin: ORIGIN,
-        "x-copilot-csrf": cookies.csrf,
-        "x-copilot-peer-ip": clientIp,
-      },
-      body: JSON.stringify({
-        currentPassword: ADMIN_PASSWORD,
-        newPassword: "too-short",
-      }),
-    })
-    expect(response.status).toBe(400)
+  const headers = {
+    cookie: cookies.cookie,
+    "content-type": "application/json",
+    origin: ORIGIN,
+    "x-copilot-csrf": cookies.csrf,
+    "x-copilot-peer-ip": clientIp,
   }
+  const short = await server.request("/dashboard/auth/password", {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({
+      currentPassword: ADMIN_PASSWORD,
+      newPassword: "123",
+    }),
+  })
+  expect(short.status).toBe(400)
 
   expect(isIpBlocked(clientIp)).toBe(false)
+
+  const numeric = await server.request("/dashboard/auth/password", {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({
+      currentPassword: ADMIN_PASSWORD,
+      newPassword: "1234",
+    }),
+  })
+  expect(numeric.status).toBe(200)
+
+  const numericLogin = await server.request("/dashboard/auth/login", {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: ORIGIN },
+    body: JSON.stringify({ gatewayKey: GATEWAY_KEY, password: "1234" }),
+  })
+  expect(numericLogin.status).toBe(200)
 })
 
 test("logout revokes the current server-side session and expires cookies", async () => {

@@ -289,9 +289,10 @@ inference secrets are persisted only as SHA-256 digests in
 entire token family. Revocation is available at `POST /v1/oauth/revoke`.
 
 The dashboard shell can be loaded before login, but every dashboard API requires
-an administrator session. First-time setup requires the gateway key and an
-administrator password of at least 16 characters unless
-`COPILOT_ADMIN_PASSWORD_HASH` supplies a precomputed Argon2id verifier. Normal
+an administrator session. Administrator passwords must be at least 4 characters
+and have no other content rules; numeric-only passwords are accepted. First-time
+local setup requires the gateway key and password, while
+`COPILOT_ADMIN_PASSWORD_HASH` can supply a precomputed Argon2id verifier. Normal
 login requires both the gateway key and password. Sessions have a 30-day
 absolute lifetime and 12-hour idle lifetime; mutations also require a CSRF token
 and an approved `Origin`. A local password change or environment-hash rotation
