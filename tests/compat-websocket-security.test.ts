@@ -161,6 +161,50 @@ describe("health and Direct Connect exposure", () => {
     ).toBe("blocked")
   })
 
+  test("start fetch returns uniform Direct Connect upgrade denials without breaking authorized upgrades", async () => {
+    process.env.COPILOT_API_ENABLE_DIRECT_CONNECT = "true"
+    const clientIp = "198.51.100.95"
+    const session = createDirectConnectSession()
+    const startModule = (await import("../src/start")) as Record<
+      string,
+      unknown
+    >
+    const handleStartFetch = startModule.handleStartFetch
+    expect(typeof handleStartFetch).toBe("function")
+    if (typeof handleStartFetch !== "function") return
+
+    const upgrade = mock(() => true)
+    const bunServer = {
+      requestIP: () => ({ address: clientIp }),
+      upgrade,
+    }
+    const fetchUpgrade = (apiKey?: string) => {
+      const headers = new Headers({ upgrade: "websocket" })
+      if (apiKey) headers.set("x-api-key", apiKey)
+      return (
+        handleStartFetch as (
+          request: Request,
+          server: typeof bunServer,
+        ) => Promise<Response>
+      )(
+        new Request(`http://localhost/ws/direct/${session.session_id}`, {
+          headers,
+        }),
+        bunServer,
+      )
+    }
+
+    expect((await fetchUpgrade()).status).toBe(401)
+    expect((await fetchUpgrade("wrong-key")).status).toBe(401)
+    expect(await fetchUpgrade("gateway-secret")).toBeUndefined()
+    expect(upgrade).toHaveBeenCalledTimes(1)
+
+    expect((await fetchUpgrade()).status).toBe(401)
+    expect(isIpBlocked(clientIp)).toBe(true)
+    expect((await fetchUpgrade("gateway-secret")).status).toBe(401)
+    expect(upgrade).toHaveBeenCalledTimes(1)
+  })
+
   test("Direct Connect reserves only existing sessions and caps controllers", () => {
     expect(reserveDirectConnectConnection("dc_missing")).toBe(false)
     const session = createDirectConnectSession()

@@ -249,6 +249,82 @@ function setTrustedPeerIp(
   if (peerIp) request.headers.set("x-copilot-peer-ip", peerIp)
 }
 
+interface StartFetchServer {
+  requestIP(req: Request): { address: string } | null
+  upgrade(req: Request, options?: object): boolean
+}
+
+// Upgrade dispatch covers four independently secured WebSocket protocols.
+// eslint-disable-next-line complexity
+export async function handleStartFetch(
+  req: Request,
+  bunServer: StartFetchServer,
+): Promise<Response> {
+  // Never trust this internal header from a client. Derive it from Bun's
+  // socket peer for HTTP and WebSocket requests alike.
+  setTrustedPeerIp(req, bunServer)
+  // WebSocket upgrade must happen before Hono routing
+  if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
+    const voiceResult = await tryUpgradeVoiceWebSocket(req, bunServer)
+    if (voiceResult === "upgraded") {
+      return undefined as unknown as Response
+    }
+    if (voiceResult === "auth_failed") {
+      return new Response("Unauthorized", { status: 401 })
+    }
+    if (voiceResult === "limit_reached") {
+      return new Response("Too Many Requests", { status: 429 })
+    }
+    const wsResult = await tryUpgradeResponsesWebSocket(req, bunServer)
+    if (wsResult === "upgraded") {
+      return undefined as unknown as Response
+    }
+    if (wsResult === "auth_failed") {
+      return new Response("Unauthorized", { status: 401 })
+    }
+    if (wsResult === "limit_reached") {
+      return new Response("Too Many Requests", { status: 429 })
+    }
+    // Direct Connect WebSocket upgrade
+    const url = new URL(req.url)
+    if (url.pathname.startsWith(DIRECT_CONNECT_WS_PATH + "/")) {
+      const directConnectAuth = await isDirectConnectUpgradeAuthorized(req)
+      if (
+        directConnectAuth === "blocked"
+        || directConnectAuth === "unauthorized"
+      ) {
+        return new Response("Unauthorized", { status: 401 })
+      }
+      if (directConnectAuth !== "authorized") {
+        return new Response("Not Found", { status: 404 })
+      }
+      const sessionId = url.pathname.slice(DIRECT_CONNECT_WS_PATH.length + 1)
+      if (sessionId && reserveDirectConnectConnection(sessionId)) {
+        const upgraded = bunServer.upgrade(req, {
+          data: {
+            type: "direct-connect" as const,
+            sessionId,
+          },
+        })
+        if (upgraded) return undefined as unknown as Response
+        releaseDirectConnectConnection(sessionId)
+      }
+      return new Response("Not Found", { status: 404 })
+    }
+    const remoteResult = await tryUpgradeRemoteWebSocket(req, bunServer)
+    if (remoteResult === "upgraded") {
+      return undefined as unknown as Response
+    }
+    if (remoteResult === "auth_failed") {
+      return new Response("Unauthorized", { status: 401 })
+    }
+    if (remoteResult === "limit_reached") {
+      return new Response("Too Many Requests", { status: 429 })
+    }
+  }
+  return server.fetch(req)
+}
+
 // Combined WebSocket handler that dispatches by the authenticated connection type.
 const combinedWebSocket = {
   open(ws: { data: { type: string; sessionId?: string } }) {
@@ -387,7 +463,6 @@ const combinedWebSocket = {
   },
 }
 
-// eslint-disable-next-line max-lines-per-function
 export async function runServer(options: RunServerOptions): Promise<void> {
   initSentry()
 
@@ -459,72 +534,7 @@ export async function runServer(options: RunServerOptions): Promise<void> {
     port: options.port,
     hostname: options.host,
     idleTimeout: 255,
-    // Upgrade dispatch covers four independently secured WebSocket protocols.
-    // eslint-disable-next-line complexity
-    async fetch(req, bunServer) {
-      // Never trust this internal header from a client. Derive it from Bun's
-      // socket peer for HTTP and WebSocket requests alike.
-      setTrustedPeerIp(req, bunServer)
-      // WebSocket upgrade must happen before Hono routing
-      if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
-        const voiceResult = await tryUpgradeVoiceWebSocket(req, bunServer)
-        if (voiceResult === "upgraded") {
-          return undefined as unknown as Response
-        }
-        if (voiceResult === "auth_failed") {
-          return new Response("Unauthorized", { status: 401 })
-        }
-        if (voiceResult === "limit_reached") {
-          return new Response("Too Many Requests", { status: 429 })
-        }
-        const wsResult = await tryUpgradeResponsesWebSocket(req, bunServer)
-        if (wsResult === "upgraded") {
-          return undefined as unknown as Response
-        }
-        if (wsResult === "auth_failed") {
-          return new Response("Unauthorized", { status: 401 })
-        }
-        if (wsResult === "limit_reached") {
-          return new Response("Too Many Requests", { status: 429 })
-        }
-        // Direct Connect WebSocket upgrade
-        const url = new URL(req.url)
-        if (url.pathname.startsWith(DIRECT_CONNECT_WS_PATH + "/")) {
-          const directConnectAuth = await isDirectConnectUpgradeAuthorized(req)
-          if (directConnectAuth === "blocked") {
-            return new Response("Unauthorized", { status: 401 })
-          }
-          if (directConnectAuth !== "authorized") {
-            return new Response("Not Found", { status: 404 })
-          }
-          const sessionId = url.pathname.slice(
-            DIRECT_CONNECT_WS_PATH.length + 1,
-          )
-          if (sessionId && reserveDirectConnectConnection(sessionId)) {
-            const upgraded = bunServer.upgrade(req, {
-              data: {
-                type: "direct-connect" as const,
-                sessionId,
-              },
-            })
-            if (upgraded) return undefined as unknown as Response
-            releaseDirectConnectConnection(sessionId)
-          }
-          return new Response("Not Found", { status: 404 })
-        }
-        const remoteResult = await tryUpgradeRemoteWebSocket(req, bunServer)
-        if (remoteResult === "upgraded") {
-          return undefined as unknown as Response
-        }
-        if (remoteResult === "auth_failed") {
-          return new Response("Unauthorized", { status: 401 })
-        }
-        if (remoteResult === "limit_reached") {
-          return new Response("Too Many Requests", { status: 429 })
-        }
-      }
-      return server.fetch(req)
-    },
+    fetch: handleStartFetch,
     websocket: {
       ...combinedWebSocket,
       maxPayloadLength: 4 * 1024 * 1024,
