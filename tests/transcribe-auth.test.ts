@@ -5,6 +5,7 @@ import { setIpAllowlistForTest } from "../src/lib/ip-allowlist"
 import {
   isIpBlocked,
   isIpWhitelisted,
+  leaseIp,
   recordFailedAttempt,
   resetIpSecurityForTest,
   unwhitelistIp,
@@ -354,6 +355,40 @@ test("Codex allowlist bypass does not record a failure", async () => {
 
   setIpAllowlistForTest([])
   expect(isIpBlocked(clientIp)).toBe(false)
+})
+
+test("Codex active ban wins over allowlist and lease fallback", async () => {
+  const managedIp = "203.0.113.60"
+  const leasedIp = "203.0.113.61"
+
+  for (const clientIp of [managedIp, leasedIp]) {
+    recordFailedAttempt(clientIp)
+    recordFailedAttempt(clientIp)
+    recordFailedAttempt(clientIp)
+  }
+  setIpAllowlistForTest([{ ip: managedIp, enabled: true }])
+  leaseIp(leasedIp, 60_000)
+
+  for (const clientIp of [managedIp, leasedIp]) {
+    const formData = new FormData()
+    formData.append(
+      "file",
+      new Blob(["audio"], { type: "audio/webm" }),
+      "a.webm",
+    )
+    const response = await server.request("/transcribe", {
+      method: "POST",
+      headers: {
+        "x-copilot-peer-ip": "127.0.0.1",
+        "x-forwarded-for": clientIp,
+      },
+      body: formData,
+    })
+
+    expect(response.status).toBe(401)
+    expect(response.headers.get("cache-control")).toBe("no-store")
+  }
+  expect(fetchMock).not.toHaveBeenCalled()
 })
 
 test("transcribe: when no API keys are configured, only IP whitelist gates the route", async () => {

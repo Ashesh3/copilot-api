@@ -173,11 +173,7 @@ export async function isIpAllowedForWhitelistedRoute(
   return isIpWhitelisted(normalized) || (await isManagedIpAllowed(normalized))
 }
 
-export function isIpBlocked(ip: string): boolean {
-  const normalized = normalizeIpAddress(ip)
-  if (!normalized) return true
-  if (isIpWhitelisted(normalized)) return false
-
+function hasActiveBan(normalized: string): boolean {
   const entry = ipTracker.get(normalized)
   if (!entry) return false
   const currentTime = Date.now()
@@ -191,6 +187,18 @@ export function isIpBlocked(ip: string): boolean {
     return true
   }
   return false
+}
+
+export function isIpBanned(ip: string): boolean {
+  const normalized = normalizeIpAddress(ip)
+  return normalized === null || hasActiveBan(normalized)
+}
+
+export function isIpBlocked(ip: string): boolean {
+  const normalized = normalizeIpAddress(ip)
+  if (!normalized) return true
+  if (isIpWhitelisted(normalized)) return false
+  return hasActiveBan(normalized)
 }
 
 export function recordFailedAttempt(ip: string): number {

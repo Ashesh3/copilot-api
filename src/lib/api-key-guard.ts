@@ -6,8 +6,8 @@ import consola from "consola"
 import { resolveRequestCredential } from "./credential-resolver"
 import {
   extractClientIp,
-  isIpBlocked,
   isIpAllowedForWhitelistedRoute,
+  isIpBanned,
   recordFailedAttempt,
 } from "./ip-blocker"
 import { state } from "./state"
@@ -29,17 +29,13 @@ export async function apiKeyGuard(
   }
 
   const clientIp = extractClientIp(c)
+  const credentialSupplied = [
+    "authorization",
+    "x-api-key",
+    "x-goog-api-key",
+  ].some((header) => c.req.raw.headers.has(header))
 
-  if (
-    clientIp !== null
-    && (await isIpAllowedForWhitelistedRoute(clientIp))
-    && isAllowedTransparentProxyRequest(c)
-  ) {
-    await next()
-    return
-  }
-
-  if (clientIp !== null && isIpBlocked(clientIp)) {
+  if (clientIp !== null && isIpBanned(clientIp)) {
     consola.warn(
       `[api-key-guard] Blocked request from banned IP ${clientIp} → ${c.req.method} ${c.req.path}`,
     )
@@ -50,10 +46,19 @@ export async function apiKeyGuard(
     return unauthorizedResponse(c)
   }
 
-  const credential = await resolveRequestCredential(c.req.raw, [
-    "user:inference",
-  ])
-  if (credential) {
+  if (credentialSupplied) {
+    const credential = await resolveRequestCredential(c.req.raw, [
+      "user:inference",
+    ])
+    if (credential) {
+      await next()
+      return
+    }
+  } else if (
+    clientIp !== null
+    && (await isIpAllowedForWhitelistedRoute(clientIp))
+    && isAllowedTransparentProxyRequest(c)
+  ) {
     await next()
     return
   }

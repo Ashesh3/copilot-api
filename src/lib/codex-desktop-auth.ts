@@ -6,7 +6,7 @@ import { resolveRequestCredential } from "./credential-resolver"
 import {
   extractClientIp,
   isIpAllowedForWhitelistedRoute,
-  isIpBlocked,
+  isIpBanned,
   recordFailedAttempt,
 } from "./ip-blocker"
 
@@ -49,31 +49,24 @@ export async function authorizeCodexDesktopRequest(
     "x-goog-api-key",
   ].some((header) => c.req.raw.headers.has(header))
 
-  if (
-    !credentialSupplied
-    && clientIp !== null
-    && (await isIpAllowedForWhitelistedRoute(clientIp))
-  ) {
-    return { allowed: true, banned: false, clientIp }
-  }
-
-  if (clientIp !== null && isIpBlocked(clientIp)) {
+  if (clientIp !== null && isIpBanned(clientIp)) {
     return { allowed: false, banned: true, clientIp }
   }
 
-  // Path 1: any centrally resolved inference credential.
-  if (await resolveRequestCredential(c.req.raw, ["user:inference"])) {
-    return { allowed: true, banned: false, clientIp }
-  }
-
-  // An invalid or conflicting credential must never fall through to the IP
-  // compatibility path merely because the apparent address is allowlisted.
   if (credentialSupplied) {
+    if (await resolveRequestCredential(c.req.raw, ["user:inference"])) {
+      return { allowed: true, banned: false, clientIp }
+    }
+
     if (clientIp !== null) recordFailedAttempt(clientIp)
     consola.warn(
       `[${routeName}] Rejected: invalid credential from IP ${clientIp ?? "(unknown)"}`,
     )
     return { allowed: false, banned: false, clientIp }
+  }
+
+  if (clientIp !== null && (await isIpAllowedForWhitelistedRoute(clientIp))) {
+    return { allowed: true, banned: false, clientIp }
   }
 
   if (clientIp !== null) recordFailedAttempt(clientIp)

@@ -203,6 +203,64 @@ test("route-permitted allowlist bypass does not record a failure", async () => {
   expect(isIpBlocked(ip)).toBe(false)
 })
 
+test("active ban wins over transparent-proxy allowlist and lease bypasses", async () => {
+  const managedIp = "198.51.100.57"
+  const leasedIp = "198.51.100.58"
+  state.apiKeyAuth = "gateway-secret"
+
+  for (const ip of [managedIp, leasedIp]) {
+    recordFailedAttempt(ip)
+    recordFailedAttempt(ip)
+    recordFailedAttempt(ip)
+  }
+  setIpAllowlistForTest([{ ip: managedIp, enabled: true }])
+  leaseIp(leasedIp, 60_000)
+
+  const app = new Hono()
+  app.use("*", apiKeyGuard)
+  app.all("*", (c) => c.json({ ok: true }))
+
+  for (const ip of [managedIp, leasedIp]) {
+    const response = await app.request(
+      "https://api.anthropic.com/upstream/path",
+      {
+        headers: {
+          host: "api.anthropic.com",
+          "x-copilot-peer-ip": ip,
+        },
+      },
+    )
+    expect(response.status).toBe(401)
+  }
+})
+
+test("invalid supplied credential cannot use transparent-proxy allowlist", async () => {
+  const ip = "198.51.100.59"
+  state.apiKeyAuth = "gateway-secret"
+  setIpAllowlistForTest([{ ip, enabled: true }])
+
+  const app = new Hono()
+  app.use("*", apiKeyGuard)
+  app.all("*", (c) => c.json({ ok: true }))
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const response = await app.request(
+      "https://api.anthropic.com/upstream/path",
+      {
+        headers: {
+          host: "api.anthropic.com",
+          "x-api-key": "wrong-key",
+          "x-copilot-peer-ip": ip,
+        },
+      },
+    )
+    expect(response.status).toBe(401)
+  }
+
+  setIpAllowlistForTest([])
+  expect(isIpBlocked(ip)).toBe(true)
+})
+
 test("config-based global auth records failed credentials", async () => {
   const ip = "198.51.100.56"
   const app = new Hono()
