@@ -203,7 +203,7 @@ test("route-permitted allowlist bypass does not record a failure", async () => {
   expect(isIpBlocked(ip)).toBe(false)
 })
 
-test("active ban wins over transparent-proxy allowlist and lease bypasses", async () => {
+test("credential-free transparent proxy allowlists bypass bans without clearing history", async () => {
   const managedIp = "198.51.100.57"
   const leasedIp = "198.51.100.58"
   state.apiKeyAuth = "gateway-secret"
@@ -230,8 +230,13 @@ test("active ban wins over transparent-proxy allowlist and lease bypasses", asyn
         },
       },
     )
-    expect(response.status).toBe(401)
+    expect(response.status).toBe(200)
   }
+
+  setIpAllowlistForTest([])
+  expect(unwhitelistIp(leasedIp)).toBe(true)
+  expect(isIpBlocked(managedIp)).toBe(true)
+  expect(isIpBlocked(leasedIp)).toBe(true)
 })
 
 test("invalid supplied credential cannot use transparent-proxy allowlist", async () => {

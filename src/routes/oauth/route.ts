@@ -12,6 +12,7 @@ import {
 } from "~/lib/credential-resolver"
 import {
   extractClientIp,
+  isIpBanned,
   isIpBlocked,
   recordFailedAttempt,
 } from "~/lib/ip-blocker"
@@ -22,6 +23,7 @@ import {
   isAllowedTransparentProxyRequest,
   isTransparentProxyClientWhitelisted,
   transparentProxy,
+  transparentProxyWithCredential,
 } from "~/lib/transparent-proxy"
 import { getUsageResponse } from "~/lib/usage-tracker"
 import { getFeatureFlags } from "~/routes/feature-flags/store"
@@ -755,17 +757,42 @@ oauthApiRoutes.post(
   (c) => c.json({ success: true }),
 )
 
-// Unknown /api/* calls from redirected Claude/Anthropic hosts are proxied once
-// the source IP has authenticated. Every other unknown route is denied.
+// Unknown /api/* calls from redirected Claude/Anthropic hosts require an
+// inference credential or credential-free IP authorization.
 oauthApiRoutes.all("*", async (c) => {
-  if (
-    isAllowedTransparentProxyRequest(c)
-    && (await isTransparentProxyClientWhitelisted(c))
-  ) {
+  if (!isAllowedTransparentProxyRequest(c)) {
+    return c.notFound()
+  }
+
+  const clientIp = extractClientIp(c)
+  const credentialSupplied = [
+    "authorization",
+    "x-api-key",
+    "x-goog-api-key",
+  ].some((header) => c.req.raw.headers.has(header))
+
+  if (credentialSupplied) {
+    const credential = await resolveRequestCredential(c.req.raw, [
+      "user:inference",
+    ])
+    if (!credential) {
+      if (clientIp !== null) recordFailedAttempt(clientIp)
+      return oauthUnauthorized(c)
+    }
+    if (clientIp !== null && isIpBanned(clientIp)) {
+      return oauthUnauthorized(c)
+    }
+    return await transparentProxyWithCredential(c)
+  }
+
+  if (await isTransparentProxyClientWhitelisted(c)) {
     return await transparentProxy(c)
   }
 
-  return c.notFound()
+  if (clientIp !== null && !isIpBanned(clientIp)) {
+    recordFailedAttempt(clientIp)
+  }
+  return oauthUnauthorized(c)
 })
 
 // --- Authorize page HTML ---

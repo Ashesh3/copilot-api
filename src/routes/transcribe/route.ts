@@ -8,10 +8,6 @@ export const transcribeRoutes = new Hono()
 
 const CODEX_TRANSCRIBE_TIMEOUT_MS = 30_000
 
-function silentDrop(): Response {
-  return new Response(null, { status: 404 })
-}
-
 function unauthorized(c: {
   header(name: string, value: string): void
   json(value: unknown, status: 401): Response
@@ -50,7 +46,7 @@ function unauthorized(c: {
 transcribeRoutes.post("/", async (c) => {
   const auth = await authorizeCodexDesktopRequest(c, "transcribe")
   if (!auth.allowed) {
-    return auth.banned ? unauthorized(c) : silentDrop()
+    return unauthorized(c)
   }
   const clientIp = auth.clientIp
 

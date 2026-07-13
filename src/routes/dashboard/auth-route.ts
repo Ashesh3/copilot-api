@@ -101,17 +101,16 @@ dashboardAuthRoutes.post("/setup", async (c) => {
   if (clientIp !== null && isIpBlocked(clientIp)) {
     return authenticationFailed(c)
   }
-  const body = await c.req
-    .json<{ gatewayKey?: unknown; password?: unknown }>()
-    .catch(() => null)
-  if (
-    !body
-    || typeof body.gatewayKey !== "string"
-    || typeof body.password !== "string"
-  ) {
+  const body = await c.req.json<unknown>().catch(() => null)
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
     return c.json({ error: "Invalid request" }, 400)
   }
-  const result = await setupAdminAuth(body.gatewayKey, body.password)
+  const { gatewayKey, password } = body as Record<string, unknown>
+  if (typeof gatewayKey !== "string" || typeof password !== "string") {
+    if (clientIp !== null) recordFailedAttempt(clientIp)
+    return c.json({ error: "Invalid request" }, 400)
+  }
+  const result = await setupAdminAuth(gatewayKey, password)
   if ("error" in result) {
     if (result.error === "Authentication failed" && clientIp !== null) {
       recordFailedAttempt(clientIp)
@@ -129,17 +128,16 @@ dashboardAuthRoutes.post("/login", async (c) => {
   if (clientIp !== null && isIpBlocked(clientIp)) {
     return authenticationFailed(c)
   }
-  const body = await c.req
-    .json<{ gatewayKey?: unknown; password?: unknown }>()
-    .catch(() => null)
-  if (
-    !body
-    || typeof body.gatewayKey !== "string"
-    || typeof body.password !== "string"
-  ) {
+  const body = await c.req.json<unknown>().catch(() => null)
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
     return authenticationFailed(c)
   }
-  const session = await loginAdmin(body.gatewayKey, body.password)
+  const { gatewayKey, password } = body as Record<string, unknown>
+  if (typeof gatewayKey !== "string" || typeof password !== "string") {
+    if (clientIp !== null) recordFailedAttempt(clientIp)
+    return authenticationFailed(c)
+  }
+  const session = await loginAdmin(gatewayKey, password)
   if (!session) {
     if (clientIp !== null) recordFailedAttempt(clientIp)
     return authenticationFailed(c)

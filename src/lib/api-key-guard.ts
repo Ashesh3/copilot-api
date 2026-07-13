@@ -35,6 +35,53 @@ export async function apiKeyGuard(
     "x-goog-api-key",
   ].some((header) => c.req.raw.headers.has(header))
 
+  if (credentialSupplied) {
+    const credential = await resolveRequestCredential(c.req.raw, [
+      "user:inference",
+    ])
+    if (credential) {
+      if (clientIp !== null && isIpBanned(clientIp)) {
+        consola.warn(
+          `[api-key-guard] Blocked request from banned IP ${clientIp} → ${c.req.method} ${c.req.path}`,
+        )
+        Sentry.captureMessage(`Blocked banned IP: ${clientIp}`, {
+          level: "warning",
+          extra: { ip: clientIp, method: c.req.method, path: c.req.path },
+        })
+        return unauthorizedResponse(c)
+      }
+      await next()
+      return
+    }
+
+    if (clientIp !== null) {
+      const alreadyBanned = isIpBanned(clientIp)
+      const attempts = recordFailedAttempt(clientIp)
+      consola.warn(
+        `[api-key-guard] Failed auth from ${clientIp} → ${c.req.method} ${c.req.path} (attempt ${attempts}/3)`,
+      )
+      if (attempts >= 3 && !alreadyBanned) {
+        consola.error(
+          `[api-key-guard] IP ${clientIp} banned after ${attempts} failed attempts`,
+        )
+        Sentry.captureMessage(`IP banned: ${clientIp}`, {
+          level: "error",
+          extra: { ip: clientIp, attempts, path: c.req.path },
+        })
+      }
+    }
+    return unauthorizedResponse(c)
+  }
+
+  if (
+    clientIp !== null
+    && (await isIpAllowedForWhitelistedRoute(clientIp))
+    && isAllowedTransparentProxyRequest(c)
+  ) {
+    await next()
+    return
+  }
+
   if (clientIp !== null && isIpBanned(clientIp)) {
     consola.warn(
       `[api-key-guard] Blocked request from banned IP ${clientIp} → ${c.req.method} ${c.req.path}`,
@@ -44,23 +91,6 @@ export async function apiKeyGuard(
       extra: { ip: clientIp, method: c.req.method, path: c.req.path },
     })
     return unauthorizedResponse(c)
-  }
-
-  if (credentialSupplied) {
-    const credential = await resolveRequestCredential(c.req.raw, [
-      "user:inference",
-    ])
-    if (credential) {
-      await next()
-      return
-    }
-  } else if (
-    clientIp !== null
-    && (await isIpAllowedForWhitelistedRoute(clientIp))
-    && isAllowedTransparentProxyRequest(c)
-  ) {
-    await next()
-    return
   }
 
   if (clientIp !== null) {

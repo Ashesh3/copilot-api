@@ -102,7 +102,7 @@ test("configured API-key auth does not permanently whitelist transcribe IP", asy
     body: formData,
   })
 
-  expect(transcribeResponse.status).toBe(404)
+  expect(transcribeResponse.status).toBe(401)
 })
 
 test("transcribe still rejects an IP that has not authenticated", async () => {
@@ -118,7 +118,7 @@ test("transcribe still rejects an IP that has not authenticated", async () => {
     body: formData,
   })
 
-  expect(response.status).toBe(404)
+  expect(response.status).toBe(401)
   expect(fetchMock).not.toHaveBeenCalled()
 })
 
@@ -198,7 +198,7 @@ test("transcribe: direct Authorization Bearer is accepted without whitelisting",
     },
     body: formData,
   })
-  expect(followup.status).toBe(404)
+  expect(followup.status).toBe(401)
 })
 
 test("transcribe: direct x-api-key header is accepted", async () => {
@@ -221,7 +221,7 @@ test("transcribe: direct x-api-key header is accepted", async () => {
   expect(isIpWhitelisted(clientIp)).toBe(false)
 })
 
-test("transcribe: wrong bearer is silently dropped (no IP whitelisted)", async () => {
+test("transcribe: wrong bearer returns a uniform authentication response", async () => {
   const clientIp = "203.0.113.52"
 
   const formData = new FormData()
@@ -237,7 +237,14 @@ test("transcribe: wrong bearer is silently dropped (no IP whitelisted)", async (
     body: formData,
   })
 
-  expect(response.status).toBe(404)
+  expect(response.status).toBe(401)
+  expect(response.headers.get("cache-control")).toBe("no-store")
+  expect(response.headers.get("www-authenticate")).toBe(
+    "Be" + 'arer realm="copilot-api"',
+  )
+  expect(await response.json()).toEqual({
+    error: { message: "Unauthorized", type: "authentication_error" },
+  })
   expect(fetchMock).not.toHaveBeenCalled()
   expect(isIpWhitelisted(clientIp)).toBe(false)
 })
@@ -259,7 +266,7 @@ test("transcribe: invalid bearer cannot fall through to an allowed IP", async ()
     body: formData,
   })
 
-  expect(response.status).toBe(404)
+  expect(response.status).toBe(401)
   expect(fetchMock).not.toHaveBeenCalled()
 })
 
@@ -283,7 +290,7 @@ test("Codex invalid credentials record failures even for an allowed IP", async (
       },
       body: formData,
     })
-    expect(response.status).toBe(404)
+    expect(response.status).toBe(401)
   }
   expect(isIpBlocked(clientIp)).toBe(true)
 
@@ -326,7 +333,7 @@ test("Codex missing credentials count when no allowlist applies", async () => {
           body: formData,
         })
       ).status,
-    ).toBe(404)
+    ).toBe(401)
   }
 
   expect(isIpBlocked(clientIp)).toBe(true)
@@ -357,7 +364,7 @@ test("Codex allowlist bypass does not record a failure", async () => {
   expect(isIpBlocked(clientIp)).toBe(false)
 })
 
-test("Codex active ban wins over allowlist and lease fallback", async () => {
+test("Codex credential-free allowlists bypass bans without clearing history", async () => {
   const managedIp = "203.0.113.60"
   const leasedIp = "203.0.113.61"
 
@@ -385,10 +392,14 @@ test("Codex active ban wins over allowlist and lease fallback", async () => {
       body: formData,
     })
 
-    expect(response.status).toBe(401)
-    expect(response.headers.get("cache-control")).toBe("no-store")
+    expect(response.status).toBe(200)
   }
-  expect(fetchMock).not.toHaveBeenCalled()
+  expect(fetchMock).toHaveBeenCalledTimes(2)
+
+  setIpAllowlistForTest([])
+  expect(unwhitelistIp(leasedIp)).toBe(true)
+  expect(isIpBlocked(managedIp)).toBe(true)
+  expect(isIpBlocked(leasedIp)).toBe(true)
 })
 
 test("transcribe: when no API keys are configured, only IP whitelist gates the route", async () => {
@@ -409,7 +420,7 @@ test("transcribe: when no API keys are configured, only IP whitelist gates the r
     },
     body: formData,
   })
-  expect(reject.status).toBe(404)
+  expect(reject.status).toBe(401)
 
   // A bearer that would have been valid in a key-configured deployment is
   // also rejected — the route MUST NOT trust headers when no keys exist.
@@ -422,7 +433,7 @@ test("transcribe: when no API keys are configured, only IP whitelist gates the r
     },
     body: formData,
   })
-  expect(rejectBearer.status).toBe(404)
+  expect(rejectBearer.status).toBe(401)
   expect(isIpWhitelisted(clientIp)).toBe(false)
 })
 
@@ -457,7 +468,7 @@ test("codex-responses: direct Authorization Bearer is accepted", async () => {
   expect(isIpWhitelisted(clientIp)).toBe(false)
 })
 
-test("codex-responses: wrong bearer is silently dropped", async () => {
+test("codex-responses: wrong bearer returns a uniform authentication response", async () => {
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch =
     chatCompletionsMock as unknown as typeof fetch
 
@@ -474,7 +485,14 @@ test("codex-responses: wrong bearer is silently dropped", async () => {
     body: JSON.stringify({ instructions: "x", input: [] }),
   })
 
-  expect(response.status).toBe(404)
+  expect(response.status).toBe(401)
+  expect(response.headers.get("cache-control")).toBe("no-store")
+  expect(response.headers.get("www-authenticate")).toBe(
+    "Be" + 'arer realm="copilot-api"',
+  )
+  expect(await response.json()).toEqual({
+    error: { message: "Unauthorized", type: "authentication_error" },
+  })
   expect(chatCompletionsMock).not.toHaveBeenCalled()
   expect(isIpWhitelisted(clientIp)).toBe(false)
 })
@@ -497,8 +515,47 @@ test("codex-responses: invalid bearer cannot fall through to an allowed IP", asy
     body: JSON.stringify({ instructions: "x", input: [] }),
   })
 
-  expect(response.status).toBe(404)
+  expect(response.status).toBe(401)
   expect(chatCompletionsMock).not.toHaveBeenCalled()
+})
+
+test("codex-responses: missing credentials return 401 and count failures", async () => {
+  const clientIp = "203.0.113.62"
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const response = await server.request("/codex/responses", {
+      method: "POST",
+      headers: {
+        "x-copilot-peer-ip": "127.0.0.1",
+        "x-forwarded-for": clientIp,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ instructions: "x", input: [] }),
+    })
+    expect(response.status).toBe(401)
+  }
+
+  expect(isIpBlocked(clientIp)).toBe(true)
+})
+
+test("codex-responses: an active ban returns 401 for a valid credential", async () => {
+  const clientIp = "203.0.113.63"
+  recordFailedAttempt(clientIp)
+  recordFailedAttempt(clientIp)
+  recordFailedAttempt(clientIp)
+
+  const response = await server.request("/codex/responses", {
+    method: "POST",
+    headers: {
+      authorization: "******",
+      "x-copilot-peer-ip": "127.0.0.1",
+      "x-forwarded-for": clientIp,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ instructions: "x", input: [] }),
+  })
+
+  expect(response.status).toBe(401)
 })
 
 test("transcribe: --api-key-auth CLI key is honored as a direct bearer", async () => {

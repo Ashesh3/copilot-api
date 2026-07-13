@@ -241,6 +241,111 @@ test("setup and login credential failures share the IP tracker", async () => {
   expect(correctButBanned.status).toBe(401)
 })
 
+test("missing setup credential fields count as failed attempts", async () => {
+  for (const [clientIp, body] of [
+    ["198.51.100.79", { password: ADMIN_PASSWORD }],
+    ["198.51.100.80", { gatewayKey: GATEWAY_KEY }],
+  ] as const) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const response = await server.request("/dashboard/auth/setup", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: ORIGIN,
+          "x-copilot-peer-ip": clientIp,
+        },
+        body: JSON.stringify(body),
+      })
+      expect(response.status).toBe(400)
+    }
+    expect(isIpBlocked(clientIp)).toBe(true)
+  }
+})
+
+test("missing login password counts as a failed attempt", async () => {
+  await setup()
+  const clientIp = "198.51.100.81"
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const response = await server.request("/dashboard/auth/login", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: ORIGIN,
+        "x-copilot-peer-ip": clientIp,
+      },
+      body: JSON.stringify({ gatewayKey: GATEWAY_KEY }),
+    })
+    expect(response.status).toBe(401)
+  }
+  expect(isIpBlocked(clientIp)).toBe(true)
+})
+
+test("malformed setup JSON does not count as a credential attempt", async () => {
+  const clientIp = "198.51.100.83"
+  const headers = {
+    "content-type": "application/json",
+    origin: ORIGIN,
+    "x-copilot-peer-ip": clientIp,
+  }
+
+  for (const body of ["null", "[]", '"text"']) {
+    expect(
+      (
+        await server.request("/dashboard/auth/setup", {
+          method: "POST",
+          headers,
+          body,
+        })
+      ).status,
+    ).toBe(400)
+  }
+  expect(isIpBlocked(clientIp)).toBe(false)
+
+  const valid = await server.request("/dashboard/auth/setup", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      gatewayKey: GATEWAY_KEY,
+      password: ADMIN_PASSWORD,
+    }),
+  })
+  expect(valid.status).toBe(201)
+})
+
+test("malformed dashboard auth JSON does not count as a credential attempt", async () => {
+  await setup()
+  const clientIp = "198.51.100.82"
+  const headers = {
+    "content-type": "application/json",
+    origin: ORIGIN,
+    "x-copilot-peer-ip": clientIp,
+  }
+
+  for (const body of ["null", "[]", '"text"']) {
+    expect(
+      (
+        await server.request("/dashboard/auth/login", {
+          method: "POST",
+          headers,
+          body,
+        })
+      ).status,
+    ).toBe(401)
+  }
+  expect(isIpBlocked(clientIp)).toBe(false)
+
+  const valid = await server.request("/dashboard/auth/login", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      gatewayKey: GATEWAY_KEY,
+      password: ADMIN_PASSWORD,
+    }),
+  })
+  expect(valid.status).toBe(200)
+})
+
 test("session and CSRF failures do not count as password attempts", async () => {
   const cookies = await setup()
   const clientIp = "198.51.100.78"

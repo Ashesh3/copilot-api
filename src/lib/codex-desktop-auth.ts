@@ -35,8 +35,7 @@ export interface CodexDesktopAuthResult {
  *      an IP explicitly added from the dashboard.
  *
  * Returns `{ allowed: false }` with a `consola.warn` log when neither path
- * succeeds. Invalid credentials retain the silent 404 behavior; active bans
- * are identified separately so callers can return the uniform 401 response.
+ * succeeds. Active bans are identified separately for logging and policy.
  */
 export async function authorizeCodexDesktopRequest(
   c: Context,
@@ -49,12 +48,11 @@ export async function authorizeCodexDesktopRequest(
     "x-goog-api-key",
   ].some((header) => c.req.raw.headers.has(header))
 
-  if (clientIp !== null && isIpBanned(clientIp)) {
-    return { allowed: false, banned: true, clientIp }
-  }
-
   if (credentialSupplied) {
     if (await resolveRequestCredential(c.req.raw, ["user:inference"])) {
+      if (clientIp !== null && isIpBanned(clientIp)) {
+        return { allowed: false, banned: true, clientIp }
+      }
       return { allowed: true, banned: false, clientIp }
     }
 
@@ -67,6 +65,10 @@ export async function authorizeCodexDesktopRequest(
 
   if (clientIp !== null && (await isIpAllowedForWhitelistedRoute(clientIp))) {
     return { allowed: true, banned: false, clientIp }
+  }
+
+  if (clientIp !== null && isIpBanned(clientIp)) {
+    return { allowed: false, banned: true, clientIp }
   }
 
   if (clientIp !== null) recordFailedAttempt(clientIp)

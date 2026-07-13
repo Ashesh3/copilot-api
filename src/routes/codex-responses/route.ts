@@ -29,10 +29,6 @@ interface CodexResponsesBody {
   input?: Array<CodexResponsesInput>
 }
 
-function silentDrop(): Response {
-  return new Response(null, { status: 404 })
-}
-
 function unauthorized(c: {
   header(name: string, value: string): void
   json(value: unknown, status: 401): Response
@@ -80,7 +76,7 @@ function extractUserText(body: CodexResponsesBody): string {
 codexResponsesRoutes.post("/", async (c) => {
   const auth = await authorizeCodexDesktopRequest(c, "codex-responses")
   if (!auth.allowed) {
-    return auth.banned ? unauthorized(c) : silentDrop()
+    return unauthorized(c)
   }
   const clientIp = auth.clientIp
 
