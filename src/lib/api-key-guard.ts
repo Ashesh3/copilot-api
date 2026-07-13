@@ -8,6 +8,7 @@ import {
   extractClientIp,
   isIpAllowedForWhitelistedRoute,
   isIpBanned,
+  isIpBlocked,
   recordFailedAttempt,
 } from "./ip-blocker"
 import { state } from "./state"
@@ -40,7 +41,7 @@ export async function apiKeyGuard(
       "user:inference",
     ])
     if (credential) {
-      if (clientIp !== null && isIpBanned(clientIp)) {
+      if (clientIp !== null && isIpBlocked(clientIp)) {
         consola.warn(
           `[api-key-guard] Blocked request from banned IP ${clientIp} → ${c.req.method} ${c.req.path}`,
         )

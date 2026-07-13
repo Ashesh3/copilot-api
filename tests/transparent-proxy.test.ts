@@ -266,6 +266,25 @@ test("OAuth proxy sink accepts a valid explicit credential unless the IP is bann
   expect(banned.status).toBe(401)
 })
 
+test("OAuth proxy sink accepts a valid explicit credential from an actively leased banned IP", async () => {
+  const ip = "198.51.100.24"
+  recordFailedAttempt(ip)
+  recordFailedAttempt(ip)
+  recordFailedAttempt(ip)
+  leaseIp(ip, 60_000)
+
+  const response = await server.request("/api/desktop/update", {
+    headers: {
+      host: "claude.ai",
+      "x-api-key": "test-secret-key",
+      ...trustedHeaders(ip),
+    },
+  })
+
+  expect(response.status).toBe(202)
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+})
+
 test("OAuth proxy sink records missing credentials from a non-allowlisted IP", async () => {
   const ip = "198.51.100.21"
 

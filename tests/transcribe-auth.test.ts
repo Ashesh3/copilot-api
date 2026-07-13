@@ -558,6 +558,26 @@ test("codex-responses: an active ban returns 401 for a valid credential", async 
   expect(response.status).toBe(401)
 })
 
+test("codex-responses: an active lease suppresses a ban after valid credential authentication", async () => {
+  const clientIp = "203.0.113.64"
+  recordFailedAttempt(clientIp)
+  recordFailedAttempt(clientIp)
+  recordFailedAttempt(clientIp)
+  leaseIp(clientIp, 60_000)
+
+  const response = await server.request("/codex/responses", {
+    method: "POST",
+    headers: {
+      "x-api-key": "config-secret",
+      "x-copilot-peer-ip": "127.0.0.1",
+      "x-forwarded-for": clientIp,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ instructions: "x", input: [] }),
+  })
+  expect(response.status).toBe(200)
+})
+
 test("transcribe: --api-key-auth CLI key is honored as a direct bearer", async () => {
   // Single-key mode (state.apiKeyAuth) — must work the same as the multi-key
   // config.auth.apiKeys path because getActiveApiKeys() promotes it.

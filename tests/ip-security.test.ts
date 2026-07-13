@@ -239,6 +239,28 @@ test("credential-free transparent proxy allowlists bypass bans without clearing 
   expect(isIpBlocked(leasedIp)).toBe(true)
 })
 
+test("global API-key guard accepts a valid credential from an actively leased banned IP", async () => {
+  const ip = "198.51.100.60"
+  state.apiKeyAuth = "gateway-secret"
+  recordFailedAttempt(ip)
+  recordFailedAttempt(ip)
+  recordFailedAttempt(ip)
+  leaseIp(ip, 60_000)
+
+  const app = new Hono()
+  app.use("*", apiKeyGuard)
+  app.get("/protected", (c) => c.json({ ok: true }))
+
+  const response = await app.request("http://localhost/protected", {
+    headers: {
+      "x-api-key": "gateway-secret",
+      "x-copilot-peer-ip": ip,
+    },
+  })
+
+  expect(response.status).toBe(200)
+})
+
 test("invalid supplied credential cannot use transparent-proxy allowlist", async () => {
   const ip = "198.51.100.59"
   state.apiKeyAuth = "gateway-secret"

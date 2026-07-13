@@ -779,7 +779,7 @@ oauthApiRoutes.all("*", async (c) => {
       if (clientIp !== null) recordFailedAttempt(clientIp)
       return oauthUnauthorized(c)
     }
-    if (clientIp !== null && isIpBanned(clientIp)) {
+    if (clientIp !== null && isIpBlocked(clientIp)) {
       return oauthUnauthorized(c)
     }
     return await transparentProxyWithCredential(c)

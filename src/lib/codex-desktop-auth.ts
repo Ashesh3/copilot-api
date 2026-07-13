@@ -7,6 +7,7 @@ import {
   extractClientIp,
   isIpAllowedForWhitelistedRoute,
   isIpBanned,
+  isIpBlocked,
   recordFailedAttempt,
 } from "./ip-blocker"
 
@@ -50,7 +51,7 @@ export async function authorizeCodexDesktopRequest(
 
   if (credentialSupplied) {
     if (await resolveRequestCredential(c.req.raw, ["user:inference"])) {
-      if (clientIp !== null && isIpBanned(clientIp)) {
+      if (clientIp !== null && isIpBlocked(clientIp)) {
         return { allowed: false, banned: true, clientIp }
       }
       return { allowed: true, banned: false, clientIp }
