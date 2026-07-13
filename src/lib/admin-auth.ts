@@ -11,7 +11,7 @@ import { getActiveApiKeys } from "./request-auth"
 
 export const ADMIN_SESSION_COOKIE = "__Host-copilot_admin"
 export const ADMIN_CSRF_COOKIE = "__Host-copilot_admin_csrf"
-export const ADMIN_PASSWORD_MIN_LENGTH = 16
+export const ADMIN_PASSWORD_MIN_LENGTH = 4
 export const ADMIN_SESSION_ABSOLUTE_MS = 30 * 24 * 60 * 60 * 1000
 export const ADMIN_SESSION_IDLE_MS = 12 * 60 * 60 * 1000
 
@@ -461,7 +461,13 @@ export async function loginAdmin(
   password: string,
 ): Promise<CreatedAdminSession | null> {
   const [validPassword] = await Promise.all([verifyPassword(password)])
-  if (!gatewayKeyMatches(gatewayKey) || !validPassword) return null
+  if (
+    !gatewayKeyMatches(gatewayKey)
+    || !validPassword
+    || validatePassword(password) !== null
+  ) {
+    return null
+  }
   const environmentHash = getEnvironmentAdminPasswordHash()
   if (environmentHash) {
     await ensureEnvironmentAdminAuthInitialized(digest(environmentHash))

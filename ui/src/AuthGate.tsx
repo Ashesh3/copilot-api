@@ -126,7 +126,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
             value={password}
             onChange={setPassword}
             placeholder={
-              status === "setup" ? "At least 16 characters" : "Enter password"
+              status === "setup" ? "At least 4 characters" : "Enter password"
             }
           />
           {status === "setup" ?
