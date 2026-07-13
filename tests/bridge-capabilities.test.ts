@@ -96,6 +96,72 @@ test("worker capability failures record missing credentials", async () => {
   expect(isIpBlocked(clientIp)).toBe(true)
 })
 
+test("stale worker epochs count toward the shared IP ban", async () => {
+  const sessionResponse = await server.request("/v1/code/sessions", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(GATEWAY_KEY) },
+    body: JSON.stringify({ title: "Stale worker epoch" }),
+  })
+  const sessionId = (
+    (await sessionResponse.json()) as { session: { id: string } }
+  ).session.id
+  const firstBridge = await server.request(
+    `/v1/code/sessions/${sessionId}/bridge`,
+    {
+      method: "POST",
+      headers: bearer(GATEWAY_KEY),
+    },
+  )
+  const firstWorker = (await firstBridge.json()) as {
+    worker_jwt: string
+    worker_epoch: number
+  }
+  expect(firstWorker.worker_epoch).toBe(1)
+  const secondBridge = await server.request(
+    `/v1/code/sessions/${sessionId}/bridge`,
+    {
+      method: "POST",
+      headers: bearer(GATEWAY_KEY),
+    },
+  )
+  const secondWorker = (await secondBridge.json()) as { worker_epoch: number }
+  expect(secondWorker.worker_epoch).toBe(2)
+
+  const clientIp = "198.51.100.101"
+  const clientHeaders = {
+    ...bearer(firstWorker.worker_jwt),
+    "x-copilot-peer-ip": "127.0.0.1",
+    "x-forwarded-for": clientIp,
+  }
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const response = await server.request(
+      `/v1/code/sessions/${sessionId}/worker`,
+      { headers: clientHeaders },
+    )
+    expect(response.status).toBe(401)
+  }
+  expect(isIpBlocked(clientIp)).toBe(true)
+})
+
+test("missing worker sessions do not count as credential failures", async () => {
+  const sessionId = "cse_missing"
+  const clientIp = "198.51.100.102"
+  const headers = {
+    ...bearer(issueWorkerCapability(sessionId, 1)),
+    "x-copilot-peer-ip": "127.0.0.1",
+    "x-forwarded-for": clientIp,
+  }
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const response = await server.request(
+      `/v1/code/sessions/${sessionId}/worker`,
+      { headers },
+    )
+    expect(response.status).toBe(401)
+  }
+  expect(isIpBlocked(clientIp)).toBe(false)
+})
+
 test("environment OAuth and capability guards record failures", async () => {
   for (const [clientIp, path, method] of [
     ["198.51.100.99", "/v1/environments/bridge", "POST"],
@@ -238,22 +304,28 @@ test("code-session writes reject oversized bodies and event batches", async () =
     worker_epoch: number
     worker_jwt: string
   }
-  const workerBatch = await server.request(
-    `/v1/code/sessions/${sessionId}/worker/events`,
-    {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...bearer(worker.worker_jwt),
+  const clientIp = "198.51.100.103"
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const workerBatch = await server.request(
+      `/v1/code/sessions/${sessionId}/worker/events`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...bearer(worker.worker_jwt),
+          "x-copilot-peer-ip": "127.0.0.1",
+          "x-forwarded-for": clientIp,
+        },
+        body: JSON.stringify({
+          worker_epoch: worker.worker_epoch,
+          events: Array.from(
+            { length: CODE_SESSION_MAX_EVENTS_PER_REQUEST + 1 },
+            () => ({ payload: {} }),
+          ),
+        }),
       },
-      body: JSON.stringify({
-        worker_epoch: worker.worker_epoch,
-        events: Array.from(
-          { length: CODE_SESSION_MAX_EVENTS_PER_REQUEST + 1 },
-          () => ({ payload: {} }),
-        ),
-      }),
-    },
-  )
-  expect(workerBatch.status).toBe(400)
+    )
+    expect(workerBatch.status).toBe(400)
+  }
+  expect(isIpBlocked(clientIp)).toBe(false)
 })

@@ -9,6 +9,7 @@ import {
   issueWorkerCapability,
 } from "~/lib/bridge-capabilities"
 import { resolveRequestCredential } from "~/lib/credential-resolver"
+import { recordFailedAttempt } from "~/lib/ip-blocker"
 import { resolveProtectedCredential } from "~/lib/protected-credential"
 
 import type { InternalEvent } from "./types"
@@ -51,11 +52,12 @@ async function requireWorkerCapability(
   if (auth.status !== "authorized") return unauthorized(c)
   const { credential: capability } = auth
   const session = getSession(id)
+  if (!session) return unauthorized(c)
   if (
-    !session
-    || (capability.workerEpoch !== undefined
-      && capability.workerEpoch !== session.workerEpoch)
+    capability.workerEpoch !== undefined
+    && capability.workerEpoch !== session.workerEpoch
   ) {
+    if (auth.clientIp !== null) recordFailedAttempt(auth.clientIp)
     return unauthorized(c)
   }
   await next()
@@ -179,6 +181,9 @@ codeSessionsRoutes.post("/:id/worker/register", async (c) => {
   const { credential: capability } = capabilityAuth
   const epoch = bumpWorkerEpoch(id) as number
   if (!bindWorkerCapability(capability.rawCredential, id, epoch)) {
+    if (capabilityAuth.clientIp !== null) {
+      recordFailedAttempt(capabilityAuth.clientIp)
+    }
     return unauthorized(c)
   }
   consola.info(`Worker registered for session ${id}, epoch ${epoch}`)
