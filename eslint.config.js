@@ -57,4 +57,12 @@ export default config(
       "max-lines": ["error", 1200],
     },
   },
+  {
+    // The administrator security suite intentionally keeps the complete auth
+    // boundary, failure accounting, and session lifecycle in one test file.
+    files: ["tests/admin-auth.test.ts"],
+    rules: {
+      "max-lines": ["error", 1000],
+    },
+  },
 )

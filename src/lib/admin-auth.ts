@@ -16,18 +16,43 @@ export const ADMIN_SESSION_ABSOLUTE_MS = 30 * 24 * 60 * 60 * 1000
 export const ADMIN_SESSION_IDLE_MS = 12 * 60 * 60 * 1000
 
 const LAST_SEEN_WRITE_INTERVAL_MS = 5 * 60 * 1000
+const ENV_ADMIN_SESSION_VERSION_PREFIX = "env:"
+const ARGON2ID_HASH_PATTERN =
+  /^\$argon2id\$v=19\$m=(\d+),t=(\d+),p=(\d+)\$([A-Za-z0-9+/]+)\$([A-Za-z0-9+/]+)$/
+const ARGON2ID_MIN_MEMORY_COST = 65_536
+const ARGON2ID_MAX_MEMORY_COST = 1_048_576
+const ARGON2ID_MIN_TIME_COST = 3
+const ARGON2ID_MAX_TIME_COST = 10
+const ARGON2ID_MIN_PARALLELISM = 1
+const ARGON2ID_MAX_PARALLELISM = 16
+const ARGON2ID_MIN_SALT_BYTES = 16
+const ARGON2ID_MIN_HASH_BYTES = 32
 
-interface AdminAuthData {
+type AdminSessionVersion =
+  | number
+  | `${typeof ENV_ADMIN_SESSION_VERSION_PREFIX}${string}`
+
+interface LocalAdminAuthData {
   passwordHash: string
   sessionVersion: number
   createdAt: number
   updatedAt: number
 }
 
+interface EnvironmentAdminAuthData {
+  source: "environment"
+  credentialFingerprint: string
+  sessionVersion: number
+  createdAt: number
+  updatedAt: number
+}
+
+type AdminAuthData = EnvironmentAdminAuthData | LocalAdminAuthData
+
 interface AdminSessionRecord {
   tokenHash: string
   csrfHash: string
-  sessionVersion: number
+  sessionVersion: AdminSessionVersion
   createdAt: number
   lastSeenAt: number
   expiresAt: number
@@ -55,8 +80,15 @@ export interface AdminAuthClock {
 
 type ChangeAdminPasswordError =
   | { error: string; reason: "credential" }
+  | { error: string; reason: "managed" }
   | { error: string; reason: "session" }
   | { error: string; reason: "validation" }
+
+interface EffectiveAdminCredential {
+  passwordHash: string
+  sessionVersion: AdminSessionVersion
+  source: "environment" | "local"
+}
 
 let authData: AdminAuthData | null | undefined
 let sessionsData: AdminSessionsData | undefined
@@ -99,6 +131,86 @@ function safeEqual(left: string, right: string): boolean {
   const leftDigest = createHash("sha256").update(left).digest()
   const rightDigest = createHash("sha256").update(right).digest()
   return timingSafeEqual(leftDigest, rightDigest)
+}
+
+export function validateAdminPasswordHash(hash: string): string {
+  const configured = hash.trim()
+  if (!configured) {
+    throw new Error("Administrator password hash cannot be empty")
+  }
+
+  const match = ARGON2ID_HASH_PATTERN.exec(configured)
+  if (!match) {
+    throw new Error(
+      "Administrator password hash must be a valid Argon2id PHC string",
+    )
+  }
+  const memoryCost = Number(match[1])
+  const timeCost = Number(match[2])
+  const parallelism = Number(match[3])
+  const saltBytes = decodeCanonicalBase64(match[4])
+  const hashBytes = decodeCanonicalBase64(match[5])
+  if (
+    memoryCost < ARGON2ID_MIN_MEMORY_COST
+    || memoryCost > ARGON2ID_MAX_MEMORY_COST
+    || timeCost < ARGON2ID_MIN_TIME_COST
+    || timeCost > ARGON2ID_MAX_TIME_COST
+    || parallelism < ARGON2ID_MIN_PARALLELISM
+    || parallelism > ARGON2ID_MAX_PARALLELISM
+    || saltBytes < ARGON2ID_MIN_SALT_BYTES
+    || hashBytes < ARGON2ID_MIN_HASH_BYTES
+  ) {
+    throw new Error(
+      "Administrator password hash has unsupported Argon2id parameters",
+    )
+  }
+  return configured
+}
+
+function decodeCanonicalBase64(value: string): number {
+  const decoded = Buffer.from(value, "base64")
+  const canonical = decoded.toString("base64").replace(/=+$/, "")
+  if (canonical !== value) {
+    throw new Error("Administrator password hash has invalid Base64 encoding")
+  }
+  return decoded.byteLength
+}
+
+function getEnvironmentAdminPasswordHash(): string | null {
+  const configured = process.env.COPILOT_ADMIN_PASSWORD_HASH?.trim()
+  if (!configured) return null
+
+  try {
+    return validateAdminPasswordHash(configured)
+  } catch (error) {
+    throw new Error(
+      `COPILOT_ADMIN_PASSWORD_HASH: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    )
+  }
+}
+
+async function getEffectiveAdminCredential(): Promise<EffectiveAdminCredential | null> {
+  const environmentHash = getEnvironmentAdminPasswordHash()
+  if (environmentHash) {
+    return {
+      passwordHash: environmentHash,
+      sessionVersion: `${ENV_ADMIN_SESSION_VERSION_PREFIX}${digest(environmentHash)}`,
+      source: "environment",
+    }
+  }
+  const local = await loadAuthData()
+  if (!local) return null
+  if (isEnvironmentAdminAuthData(local)) {
+    throw new Error(
+      "COPILOT_ADMIN_PASSWORD_HASH is required because administrator authentication is environment-managed",
+    )
+  }
+  return {
+    passwordHash: local.passwordHash,
+    sessionVersion: local.sessionVersion,
+    source: "local",
+  }
 }
 
 async function readJson<T>(filePath: string): Promise<T | null> {
@@ -144,17 +256,26 @@ async function loadAuthData(): Promise<AdminAuthData | null> {
     return authData
   }
   if (
-    typeof loaded.passwordHash !== "string"
-    || !Number.isInteger(loaded.sessionVersion)
+    !Number.isInteger(loaded.sessionVersion)
     || loaded.sessionVersion <= 0
     || !Number.isFinite(loaded.createdAt)
     || !Number.isFinite(loaded.updatedAt)
+    || (isEnvironmentAdminAuthData(loaded)
+      && !/^[\w-]{43}$/.test(loaded.credentialFingerprint))
+    || (!isEnvironmentAdminAuthData(loaded)
+      && typeof loaded.passwordHash !== "string")
   ) {
     throw new Error("Invalid administrator authentication store")
   }
   // eslint-disable-next-line require-atomic-updates
   authData = loaded
   return authData
+}
+
+function isEnvironmentAdminAuthData(
+  value: AdminAuthData,
+): value is EnvironmentAdminAuthData {
+  return "source" in value && "credentialFingerprint" in value
 }
 
 async function loadSessionsData(): Promise<AdminSessionsData> {
@@ -178,10 +299,17 @@ function isSession(value: unknown): value is AdminSessionRecord {
   return (
     typeof record.tokenHash === "string"
     && typeof record.csrfHash === "string"
-    && Number.isInteger(record.sessionVersion)
+    && isAdminSessionVersion(record.sessionVersion)
     && typeof record.createdAt === "number"
     && typeof record.lastSeenAt === "number"
     && typeof record.expiresAt === "number"
+  )
+}
+
+function isAdminSessionVersion(value: unknown): value is AdminSessionVersion {
+  return (
+    (Number.isInteger(value) && (value as number) > 0)
+    || (typeof value === "string" && /^env:[\w-]{43}$/.test(value))
   )
 }
 
@@ -204,11 +332,81 @@ function gatewayKeyMatches(candidate: string): boolean {
 export async function getAdminAuthStatus(): Promise<{
   configured: boolean
   gatewayConfigured: boolean
+  passwordManagedExternally: boolean
 }> {
+  const credential = await getEffectiveAdminCredential()
   return {
-    configured: (await loadAuthData()) !== null,
+    configured: credential !== null,
     gatewayConfigured: getActiveApiKeys().length > 0,
+    passwordManagedExternally: credential?.source === "environment",
   }
+}
+
+export async function initializeAdminAuth(): Promise<void> {
+  await serializeAuthMutation(async () => {
+    const environmentHash = getEnvironmentAdminPasswordHash()
+    const existing = await loadAuthData()
+    if (!environmentHash) {
+      if (existing && isEnvironmentAdminAuthData(existing)) {
+        throw new Error(
+          "COPILOT_ADMIN_PASSWORD_HASH is required because administrator authentication is environment-managed",
+        )
+      }
+      return
+    }
+    const credentialFingerprint = digest(environmentHash)
+    if (
+      existing
+      && isEnvironmentAdminAuthData(existing)
+      && safeEqual(existing.credentialFingerprint, credentialFingerprint)
+    ) {
+      return
+    }
+
+    await persistEnvironmentAdminAuth(existing, credentialFingerprint)
+  })
+}
+
+async function ensureEnvironmentAdminAuthInitialized(
+  credentialFingerprint: string,
+): Promise<void> {
+  const existing = await loadAuthData()
+  if (
+    existing
+    && isEnvironmentAdminAuthData(existing)
+    && safeEqual(existing.credentialFingerprint, credentialFingerprint)
+  ) {
+    return
+  }
+
+  await serializeAuthMutation(async () => {
+    const current = await loadAuthData()
+    if (
+      current
+      && isEnvironmentAdminAuthData(current)
+      && safeEqual(current.credentialFingerprint, credentialFingerprint)
+    ) {
+      return
+    }
+    await persistEnvironmentAdminAuth(current, credentialFingerprint)
+  })
+}
+
+async function persistEnvironmentAdminAuth(
+  existing: AdminAuthData | null,
+  credentialFingerprint: string,
+): Promise<void> {
+  const currentTime = now()
+  authData = {
+    source: "environment",
+    credentialFingerprint,
+    sessionVersion: (existing?.sessionVersion ?? 0) + 1,
+    createdAt: existing?.createdAt ?? currentTime,
+    updatedAt: currentTime,
+  }
+  sessionsData = { sessions: [] }
+  await enqueueWrite(PATHS.ADMIN_AUTH_PATH, authData)
+  await enqueueWrite(PATHS.ADMIN_SESSIONS_PATH, sessionsData)
 }
 
 export async function setupAdminAuth(
@@ -216,7 +414,7 @@ export async function setupAdminAuth(
   password: string,
 ): Promise<{ session: CreatedAdminSession } | { error: string }> {
   return await serializeAuthMutation(async () => {
-    if ((await loadAuthData()) !== null) {
+    if ((await getEffectiveAdminCredential()) !== null) {
       return { error: "Administrator authentication is already configured" }
     }
     if (!gatewayKeyMatches(gatewayKey)) {
@@ -242,7 +440,7 @@ export async function setupAdminAuth(
 }
 
 async function verifyPassword(password: string): Promise<boolean> {
-  const current = await loadAuthData()
+  const current = await getEffectiveAdminCredential()
   if (!current) {
     await Bun.password.hash(password || "invalid-admin-password", {
       algorithm: "argon2id",
@@ -251,7 +449,11 @@ async function verifyPassword(password: string): Promise<boolean> {
     })
     return false
   }
-  return await Bun.password.verify(password, current.passwordHash)
+  try {
+    return await Bun.password.verify(password, current.passwordHash)
+  } catch {
+    return false
+  }
 }
 
 export async function loginAdmin(
@@ -260,11 +462,15 @@ export async function loginAdmin(
 ): Promise<CreatedAdminSession | null> {
   const [validPassword] = await Promise.all([verifyPassword(password)])
   if (!gatewayKeyMatches(gatewayKey) || !validPassword) return null
+  const environmentHash = getEnvironmentAdminPasswordHash()
+  if (environmentHash) {
+    await ensureEnvironmentAdminAuthInitialized(digest(environmentHash))
+  }
   return await serializeAuthMutation(async () => await createAdminSession())
 }
 
 async function createAdminSession(): Promise<CreatedAdminSession> {
-  const current = await loadAuthData()
+  const current = await getEffectiveAdminCredential()
   if (!current)
     throw new Error("Administrator authentication is not configured")
   const data = await loadSessionsData()
@@ -290,7 +496,7 @@ async function createAdminSession(): Promise<CreatedAdminSession> {
 
 function pruneSessions(
   data: AdminSessionsData,
-  version: number,
+  version: AdminSessionVersion,
   now: number,
 ): boolean {
   const before = data.sessions.length
@@ -326,7 +532,7 @@ async function resolveAdminSession(
   request: Request,
   options: { requireCsrf?: boolean } = {},
 ): Promise<AuthenticatedAdminSession | null> {
-  const current = await loadAuthData()
+  const current = await getEffectiveAdminCredential()
   if (!current) return null
   const data = await loadSessionsData()
   const currentTime = now()
@@ -445,12 +651,20 @@ export async function changeAdminPassword(
     if (!(await verifyPassword(currentPassword))) {
       return { error: "Authentication failed", reason: "credential" }
     }
+    const effective = await getEffectiveAdminCredential()
+    if (effective?.source === "environment") {
+      return {
+        error:
+          "Administrator password is managed by COPILOT_ADMIN_PASSWORD_HASH",
+        reason: "managed",
+      }
+    }
     const passwordError = validatePassword(newPassword)
     if (passwordError) {
       return { error: passwordError, reason: "validation" }
     }
     const current = await loadAuthData()
-    if (!current) {
+    if (!current || isEnvironmentAdminAuthData(current)) {
       return { error: "Authentication failed", reason: "session" }
     }
     current.passwordHash = await Bun.password.hash(newPassword, {

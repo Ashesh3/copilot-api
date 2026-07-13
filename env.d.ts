@@ -49,6 +49,13 @@ export type CoercedEnvSchema = {
   COPILOT_API_KEY_AUTH?: string;
 
   /**
+   * **COPILOT_ADMIN_PASSWORD_HASH** 🔐 _sensitive_
+   * Precomputed Argon2id PHC string for the administrator password. When set,
+   * this is authoritative and the dashboard cannot change the password locally.
+   */
+  COPILOT_ADMIN_PASSWORD_HASH?: string;
+
+  /**
    * **COPILOT_TRUSTED_PROXY_CIDRS**
    * Comma-separated CIDRs for reverse proxies whose forwarding headers may be
    * trusted. The Bun socket peer must fall inside one of these ranges.

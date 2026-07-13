@@ -25,6 +25,7 @@ function setCookies(response: Response): Array<string> {
 }
 
 export async function createTestAdminSession(): Promise<TestAdminSession> {
+  delete process.env.COPILOT_ADMIN_PASSWORD_HASH
   setAdminAuthTestMode(true)
   state.apiKeyAuth = TEST_GATEWAY_KEY
   process.env.COPILOT_ADMIN_ORIGIN = TEST_ADMIN_ORIGIN
@@ -73,4 +74,5 @@ export function resetTestAdminSession(): void {
   setAdminAuthTestMode(false)
   state.apiKeyAuth = undefined
   delete process.env.COPILOT_ADMIN_ORIGIN
+  delete process.env.COPILOT_ADMIN_PASSWORD_HASH
 }

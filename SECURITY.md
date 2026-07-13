@@ -24,9 +24,12 @@ affected, include its exact version or digest.
   returns the gateway key. Claude's `create_api_key` compatibility route mints a
   separate inference-only credential.
 - The dashboard requires the gateway key plus an Argon2id administrator
-  password at login. A server-side Secure/HttpOnly session is then sufficient
-  for dashboard workflows; there is no second password prompt. Mutations still
-  require the SameSite CSRF cookie, matching header, and approved Origin.
+  password at login. The verifier can be stored locally or supplied
+  authoritatively through `COPILOT_ADMIN_PASSWORD_HASH`; environment rotations
+  revoke existing sessions. A server-side Secure/HttpOnly session is then
+  sufficient for dashboard workflows; there is no second password prompt.
+  Mutations still require the SameSite CSRF cookie, matching header, and
+  approved Origin.
 - Provider keys and sensitive custom headers are write-only through dashboard
   APIs. Configuration export, debug storage, and request logging redact
   recognized secret fields and headers.

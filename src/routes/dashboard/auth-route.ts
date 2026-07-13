@@ -179,7 +179,9 @@ dashboardAuthRoutes.put("/password", async (c) => {
     if (result.reason === "credential" && clientIp !== null) {
       recordFailedAttempt(clientIp)
     }
-    const status = result.reason === "validation" ? 400 : 401
+    let status: 400 | 401 | 409 = 401
+    if (result.reason === "validation") status = 400
+    if (result.reason === "managed") status = 409
     return c.json({ error: result.error }, status)
   }
   setSessionCookies(c, result)

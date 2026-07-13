@@ -290,10 +290,12 @@ entire token family. Revocation is available at `POST /v1/oauth/revoke`.
 
 The dashboard shell can be loaded before login, but every dashboard API requires
 an administrator session. First-time setup requires the gateway key and an
-administrator password of at least 16 characters. Normal login requires both.
-Sessions have a 30-day absolute lifetime and 12-hour idle lifetime; mutations
-also require a CSRF token and an approved `Origin`. A password change revokes
-other sessions.
+administrator password of at least 16 characters unless
+`COPILOT_ADMIN_PASSWORD_HASH` supplies a precomputed Argon2id verifier. Normal
+login requires both the gateway key and password. Sessions have a 30-day
+absolute lifetime and 12-hour idle lifetime; mutations also require a CSRF token
+and an approved `Origin`. A local password change or environment-hash rotation
+revokes other sessions.
 
 Keep the application bound to loopback or a private container network even with
 these controls. Publish only the exact hostname/path set required by the clients
@@ -437,11 +439,23 @@ does not persist either login credential in `localStorage`. Set
 `COPILOT_ADMIN_ORIGIN` to the exact external dashboard origin before serving
 the dashboard through a reverse proxy.
 
-If the administrator password is lost, run `copilot-api admin --reset` from the
-trusted host console. The command requires interactive confirmation, removes
-the password verifier, and revokes all administrator sessions; the next
-dashboard visit performs first-use setup again with the gateway key. This is
-the recovery path—there is deliberately no public password-reset endpoint.
+If the locally stored administrator password is lost, stop the running server,
+run `copilot-api admin --reset` from the trusted host console, and restart it.
+The command requires interactive confirmation, removes the local password
+verifier, and revokes all administrator sessions; the next dashboard visit
+performs first-use setup again with the gateway key. In environment-managed
+mode, update `COPILOT_ADMIN_PASSWORD_HASH` in the secret manager and restart the
+server instead; `admin --reset` also removes the environment-management marker
+and therefore returns the deployment to first-use setup if the variable is
+subsequently removed. There is deliberately no public password-reset endpoint.
+
+With the tracked Compose service, use:
+
+```sh
+docker compose stop copilot-api
+docker compose run --rm --no-deps --entrypoint bun copilot-api run dist/main.js admin --reset
+docker compose up -d copilot-api
+```
 
 LLM Debug records outbound Copilot attempts with authorization, cookies, API
 keys, tokens, and secret-like JSON properties redacted before storage. Entries
@@ -526,6 +540,7 @@ request pacing, body caps, or proxy timeouts.
 | --- | --- |
 | `auth` | Run GitHub device authentication without starting the server |
 | `start` | Authenticate if needed and start the gateway |
+| `admin` | Reset local administrator auth or generate an environment verifier |
 | `check-usage` | Print current GitHub Copilot quota information |
 | `debug` | Print version, runtime, data paths, and token-file status |
 | `config` | Interactively manage replacements, stored accounts, and custom providers |
@@ -555,6 +570,8 @@ Run a command with `--help` to inspect the installed version's current options.
 | --- | --- | --- |
 | `auth` | `--verbose`, `-v` | Enable verbose authentication logs |
 | `auth` | `--show-token` | Print the full GitHub token after authentication |
+| `admin` | `--reset` | Interactively remove local admin auth and revoke every dashboard session |
+| `admin` | `--hash-password` | Prompt twice with hidden input and print an Argon2id verifier for `COPILOT_ADMIN_PASSWORD_HASH` |
 | `debug` | `--json` | Emit diagnostic information as JSON |
 
 ## Configuration and persistent data
@@ -575,7 +592,7 @@ The default data directory is `~/.local/share/copilot-api`. Override it with
 | `statsig_overrides.json` | Codex/ChatGPT Statsig overrides |
 | `ip_allowlist.json` | Managed IP allowlist entries |
 | `oauth_tokens.json` | SHA-256 digests and metadata for OAuth codes, token families, and generated inference credentials |
-| `admin_auth.json` | Argon2id administrator password hash and session version |
+| `admin_auth.json` | Locally managed Argon2id verifier, or a non-secret marker that permanently records migration to environment-managed auth |
 | `admin_sessions.json` | Digested server-side administrator sessions and CSRF state |
 | `usage.json` | Complete minute/model aggregates and separate lifetime totals |
 
@@ -590,6 +607,7 @@ files.
 | `GITHUB_TOKENS` | Direct and Docker | Comma-separated GitHub tokens; two or more enable multi-account mode |
 | `DATA_DIR` | Direct and Docker | Override the persistent data directory |
 | `COPILOT_API_KEY_AUTH` | Direct and Docker | Gateway key and sole environment-based gateway credential; direct usage also requires the `--api-key-auth` flag without a value |
+| `COPILOT_ADMIN_PASSWORD_HASH` | Direct and Docker | Optional authoritative Argon2id PHC verifier for the administrator password; suitable for 1Password/Varlock |
 | `COPILOT_ADMIN_ORIGIN` | Direct and Docker | Exact browser origin allowed for dashboard mutations; set this explicitly for a proxied deployment |
 | `COPILOT_TRUSTED_PROXY_CIDRS` | Direct and Docker | Comma-separated socket-peer CIDRs allowed to supply forwarding headers; defaults to loopback only |
 | `COPILOT_API_ENABLE_DIRECT_CONNECT` | Direct and Docker | Set to `true` only to enable the authenticated experimental Direct Connect routes; disabled by default |
@@ -677,6 +695,31 @@ COPILOT_TRUSTED_PROXY_CIDRS=172.19.0.1/32,127.0.0.1/32,::1/128
 when using the 1Password/Varlock integration. `COPILOT_API_KEY_AUTH` comes
 through this existing environment/secret-management flow; gateway-key file
 mounts are not supported.
+
+To keep the administrator verifier in the same 1Password Environment, generate
+an Argon2id PHC string locally and store the exact output as
+`COPILOT_ADMIN_PASSWORD_HASH`:
+
+```sh
+copilot-api admin --hash-password > admin-password.phc
+```
+
+This command prints only the PHC verifier. Copy `admin-password.phc` into
+1Password, then securely delete the temporary file. The password prompts use
+hidden interactive input and the verifier is written to stdout.
+
+The plaintext password is still what you enter in the dashboard. The PHC hash
+is authoritative, is never copied to `admin_auth.json`, and cannot be changed in
+the dashboard. To rotate it, replace the 1Password value and recreate/restart
+the service; existing administrator sessions then become invalid. On the first
+environment-managed startup, any old local verifier is replaced with a
+non-secret fingerprint marker. Removing or failing to inject the environment
+variable then fails closed instead of restoring that old password. The marker
+also makes hash rotations durable across restarts. Imported PHC
+strings must use Argon2id v19 with memory cost 65,536–1,048,576 KiB, time cost
+3–10, parallelism 1–16, a salt of at least 16 bytes, and a digest of at least 32
+bytes. If placing a PHC string in a Compose env file instead, single-quote the
+value so its `$` segments remain literal.
 
 For an externally proxied dashboard, set `COPILOT_ADMIN_ORIGIN` explicitly in
 the Compose environment. The tracked default leaves it unset, so only

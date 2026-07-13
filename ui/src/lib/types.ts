@@ -273,6 +273,7 @@ export interface SettingsData {
   dataDir: string
   debug: boolean
   verbose: boolean
+  passwordManagedExternally: boolean
   codexCleanupModel: string | null
   codexCleanupModelDefault: string | undefined
   availableModels: Array<string>

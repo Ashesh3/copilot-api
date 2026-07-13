@@ -351,33 +351,42 @@ export default function SettingsScreen() {
                 icon={<DownloadIcon />}
                 onClick={() => void handleExport()}
               />
-              <TextInput
-                type="password"
-                label="Current admin password"
-                value={currentPassword}
-                onChange={setCurrentPassword}
-              />
-              <TextInput
-                type="password"
-                label="New admin password"
-                value={newPassword}
-                onChange={setNewPassword}
-              />
-              <TextInput
-                type="password"
-                label="Confirm new password"
-                value={confirmPassword}
-                onChange={setConfirmPassword}
-              />
-              <Button
-                label="Change administrator password"
-                variant="primary"
-                isLoading={isChangingPassword}
-                isDisabled={
-                  !currentPassword || !newPassword || !confirmPassword
-                }
-                onClick={() => void handleChangePassword()}
-              />
+              {data.settings.passwordManagedExternally ?
+                <Banner
+                  status="info"
+                  title="Password managed by the environment"
+                  description="Update COPILOT_ADMIN_PASSWORD_HASH in the secret manager and restart the server to rotate it."
+                />
+              : <>
+                  <TextInput
+                    type="password"
+                    label="Current admin password"
+                    value={currentPassword}
+                    onChange={setCurrentPassword}
+                  />
+                  <TextInput
+                    type="password"
+                    label="New admin password"
+                    value={newPassword}
+                    onChange={setNewPassword}
+                  />
+                  <TextInput
+                    type="password"
+                    label="Confirm new password"
+                    value={confirmPassword}
+                    onChange={setConfirmPassword}
+                  />
+                  <Button
+                    label="Change administrator password"
+                    variant="primary"
+                    isLoading={isChangingPassword}
+                    isDisabled={
+                      !currentPassword || !newPassword || !confirmPassword
+                    }
+                    onClick={() => void handleChangePassword()}
+                  />
+                </>
+              }
             </VStack>
           </Card>
 

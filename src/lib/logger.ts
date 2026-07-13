@@ -88,7 +88,7 @@ const appendLine = (filePath: string, line: string) => {
   }
 }
 
-setInterval(flushAllBuffers, FLUSH_INTERVAL_MS)
+setInterval(flushAllBuffers, FLUSH_INTERVAL_MS).unref()
 
 const cleanup = () => {
   flushAllBuffers()

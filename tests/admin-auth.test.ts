@@ -7,6 +7,8 @@ import {
   ADMIN_SESSION_COOKIE,
   setAdminAuthTestMode,
   setAdminAuthClockForTest,
+  initializeAdminAuth,
+  validateAdminPasswordHash,
 } from "../src/lib/admin-auth"
 import {
   isIpBlocked,
@@ -19,7 +21,10 @@ import { server } from "../src/server"
 
 const GATEWAY_KEY = "test-gateway-key-that-is-long-and-random"
 const ADMIN_PASSWORD = "correct horse battery staple"
+const ROTATED_ADMIN_PASSWORD = "rotated administrator password"
 const ORIGIN = "https://ai.ashesh.dev"
+
+let originalAdminPasswordHash: string | undefined
 
 interface AdminCookies {
   cookie: string
@@ -55,6 +60,8 @@ async function setup(): Promise<AdminCookies> {
 }
 
 beforeEach(() => {
+  originalAdminPasswordHash = process.env.COPILOT_ADMIN_PASSWORD_HASH
+  delete process.env.COPILOT_ADMIN_PASSWORD_HASH
   setAdminAuthTestMode(true)
   resetIpSecurityForTest()
   state.apiKeyAuth = GATEWAY_KEY
@@ -65,6 +72,11 @@ afterEach(() => {
   setAdminAuthTestMode(false)
   state.apiKeyAuth = undefined
   delete process.env.COPILOT_ADMIN_ORIGIN
+  if (originalAdminPasswordHash === undefined) {
+    delete process.env.COPILOT_ADMIN_PASSWORD_HASH
+  } else {
+    process.env.COPILOT_ADMIN_PASSWORD_HASH = originalAdminPasswordHash
+  }
   setAdminAuthClockForTest()
   resetIpSecurityForTest()
 })
@@ -502,6 +514,263 @@ test("admin password change revokes prior sessions", async () => {
     headers: { cookie: cookies.cookie },
   })
   expect(oldSession.status).toBe(401)
+})
+
+test("environment Argon2id hash is the authoritative admin password", async () => {
+  process.env.COPILOT_ADMIN_PASSWORD_HASH = await Bun.password.hash(
+    ADMIN_PASSWORD,
+    {
+      algorithm: "argon2id",
+      memoryCost: 65_536,
+      timeCost: 3,
+    },
+  )
+
+  expect(await (await server.request("/dashboard/auth/status")).json()).toEqual(
+    {
+      configured: true,
+      gatewayConfigured: true,
+      passwordManagedExternally: true,
+    },
+  )
+
+  const setupAttempt = await server.request("/dashboard/auth/setup", {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: ORIGIN },
+    body: JSON.stringify({ gatewayKey: GATEWAY_KEY, password: ADMIN_PASSWORD }),
+  })
+  expect(setupAttempt.status).toBe(409)
+
+  const wrongLogin = await server.request("/dashboard/auth/login", {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: ORIGIN },
+    body: JSON.stringify({ gatewayKey: GATEWAY_KEY, password: "wrong" }),
+  })
+  expect(wrongLogin.status).toBe(401)
+
+  const login = await server.request("/dashboard/auth/login", {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: ORIGIN },
+    body: JSON.stringify({ gatewayKey: GATEWAY_KEY, password: ADMIN_PASSWORD }),
+  })
+  expect(login.status).toBe(200)
+  const cookies = cookiesFrom(login)
+  expect(cookies.cookie).toContain(ADMIN_SESSION_COOKIE)
+
+  const settings = await server.request("/dashboard/api/settings", {
+    headers: { cookie: cookies.cookie },
+  })
+  expect(settings.status).toBe(200)
+  const settingsBody = (await settings.json()) as {
+    passwordManagedExternally?: boolean
+  }
+  expect(settingsBody.passwordManagedExternally).toBe(true)
+})
+
+test("environment password hash overrides an existing local verifier", async () => {
+  await setup()
+  process.env.COPILOT_ADMIN_PASSWORD_HASH = await Bun.password.hash(
+    ROTATED_ADMIN_PASSWORD,
+    {
+      algorithm: "argon2id",
+      memoryCost: 65_536,
+      timeCost: 3,
+    },
+  )
+
+  const localPassword = await server.request("/dashboard/auth/login", {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: ORIGIN },
+    body: JSON.stringify({ gatewayKey: GATEWAY_KEY, password: ADMIN_PASSWORD }),
+  })
+  expect(localPassword.status).toBe(401)
+
+  const environmentPassword = await server.request("/dashboard/auth/login", {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: ORIGIN },
+    body: JSON.stringify({
+      gatewayKey: GATEWAY_KEY,
+      password: ROTATED_ADMIN_PASSWORD,
+    }),
+  })
+  expect(environmentPassword.status).toBe(200)
+})
+
+test("environment migration prevents a stale local password from returning", async () => {
+  await setup()
+  process.env.COPILOT_ADMIN_PASSWORD_HASH = await Bun.password.hash(
+    ROTATED_ADMIN_PASSWORD,
+    {
+      algorithm: "argon2id",
+      memoryCost: 65_536,
+      timeCost: 3,
+    },
+  )
+  await initializeAdminAuth()
+  delete process.env.COPILOT_ADMIN_PASSWORD_HASH
+
+  expect(initializeAdminAuth()).rejects.toThrow(
+    "COPILOT_ADMIN_PASSWORD_HASH is required",
+  )
+  const login = await server.request("/dashboard/auth/login", {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: ORIGIN },
+    body: JSON.stringify({
+      gatewayKey: GATEWAY_KEY,
+      password: ADMIN_PASSWORD,
+    }),
+  })
+  expect(login.status).toBe(500)
+})
+
+test("successful environment login persists the fail-closed migration marker", async () => {
+  await setup()
+  process.env.COPILOT_ADMIN_PASSWORD_HASH = await Bun.password.hash(
+    ROTATED_ADMIN_PASSWORD,
+    {
+      algorithm: "argon2id",
+      memoryCost: 65_536,
+      timeCost: 3,
+    },
+  )
+
+  const environmentLogin = await server.request("/dashboard/auth/login", {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: ORIGIN },
+    body: JSON.stringify({
+      gatewayKey: GATEWAY_KEY,
+      password: ROTATED_ADMIN_PASSWORD,
+    }),
+  })
+  expect(environmentLogin.status).toBe(200)
+  delete process.env.COPILOT_ADMIN_PASSWORD_HASH
+
+  expect(initializeAdminAuth()).rejects.toThrow(
+    "COPILOT_ADMIN_PASSWORD_HASH is required",
+  )
+})
+
+test("environment password rotation revokes existing admin sessions", async () => {
+  process.env.COPILOT_ADMIN_PASSWORD_HASH = await Bun.password.hash(
+    ADMIN_PASSWORD,
+    {
+      algorithm: "argon2id",
+      memoryCost: 65_536,
+      timeCost: 3,
+    },
+  )
+  const login = await server.request("/dashboard/auth/login", {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: ORIGIN },
+    body: JSON.stringify({ gatewayKey: GATEWAY_KEY, password: ADMIN_PASSWORD }),
+  })
+  const cookies = cookiesFrom(login)
+
+  process.env.COPILOT_ADMIN_PASSWORD_HASH = await Bun.password.hash(
+    ROTATED_ADMIN_PASSWORD,
+    {
+      algorithm: "argon2id",
+      memoryCost: 65_536,
+      timeCost: 3,
+    },
+  )
+  await initializeAdminAuth()
+
+  const oldSession = await server.request("/dashboard/api/overview", {
+    headers: { cookie: cookies.cookie },
+  })
+  expect(oldSession.status).toBe(401)
+  const oldPassword = await server.request("/dashboard/auth/login", {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: ORIGIN },
+    body: JSON.stringify({ gatewayKey: GATEWAY_KEY, password: ADMIN_PASSWORD }),
+  })
+  expect(oldPassword.status).toBe(401)
+  const rotatedPassword = await server.request("/dashboard/auth/login", {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: ORIGIN },
+    body: JSON.stringify({
+      gatewayKey: GATEWAY_KEY,
+      password: ROTATED_ADMIN_PASSWORD,
+    }),
+  })
+  expect(rotatedPassword.status).toBe(200)
+})
+
+test("environment-managed password cannot be changed through the dashboard", async () => {
+  process.env.COPILOT_ADMIN_PASSWORD_HASH = await Bun.password.hash(
+    ADMIN_PASSWORD,
+    {
+      algorithm: "argon2id",
+      memoryCost: 65_536,
+      timeCost: 3,
+    },
+  )
+  const login = await server.request("/dashboard/auth/login", {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: ORIGIN },
+    body: JSON.stringify({ gatewayKey: GATEWAY_KEY, password: ADMIN_PASSWORD }),
+  })
+  const cookies = cookiesFrom(login)
+  const changed = await server.request("/dashboard/auth/password", {
+    method: "PUT",
+    headers: {
+      cookie: cookies.cookie,
+      "content-type": "application/json",
+      origin: ORIGIN,
+      "x-copilot-csrf": cookies.csrf,
+    },
+    body: JSON.stringify({
+      currentPassword: ADMIN_PASSWORD,
+      newPassword: ROTATED_ADMIN_PASSWORD,
+    }),
+  })
+  expect(changed.status).toBe(409)
+  expect(await changed.json()).toEqual({
+    error: "Administrator password is managed by COPILOT_ADMIN_PASSWORD_HASH",
+  })
+})
+
+test("invalid environment admin password hashes fail closed", async () => {
+  process.env.COPILOT_ADMIN_PASSWORD_HASH = "$argon2id$invalid"
+  const response = await server.request("/dashboard/auth/status")
+  expect(response.status).toBe(500)
+  expect(await response.json()).toEqual({
+    error: {
+      message:
+        "COPILOT_ADMIN_PASSWORD_HASH: Administrator password hash must be a valid Argon2id PHC string",
+      type: "error",
+    },
+  })
+})
+
+test("environment admin hashes reject unsafe Argon2id parameters", () => {
+  expect(() =>
+    validateAdminPasswordHash(
+      "$argon2id$v=19$m=1024,t=1,p=1$MTIzNDU2Nzg5MDEyMzQ1Ng$MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI",
+    ),
+  ).toThrow("unsupported Argon2id parameters")
+})
+
+test("environment admin hashes reject invalid Base64 encodings", () => {
+  expect(() =>
+    validateAdminPasswordHash(
+      `$argon2id$v=19$m=65536,t=3,p=1$${"A".repeat(25)}$${"A".repeat(45)}`,
+    ),
+  ).toThrow("invalid Base64 encoding")
+})
+
+test("environment admin hashes reject padded PHC segments", async () => {
+  const valid = await Bun.password.hash(ADMIN_PASSWORD, {
+    algorithm: "argon2id",
+    memoryCost: 65_536,
+    timeCost: 3,
+  })
+  const segments = valid.split("$")
+  segments[4] += "="
+  expect(() => validateAdminPasswordHash(segments.join("$"))).toThrow(
+    "valid Argon2id PHC string",
+  )
 })
 
 test("wrong current admin passwords count toward the shared IP ban", async () => {

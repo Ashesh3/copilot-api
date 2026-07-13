@@ -83,6 +83,7 @@ test("deployment defaults contain no private hostname or obsolete setup guide", 
     adminAuth,
     startSource,
     windowsLauncher,
+    generatedEnvTypes,
   ] = await Promise.all([
     readRepositoryFile("docker-compose.yml"),
     readRepositoryFile(".env.schema"),
@@ -93,6 +94,7 @@ test("deployment defaults contain no private hostname or obsolete setup guide", 
     readRepositoryFile("src/lib/admin-auth.ts"),
     readRepositoryFile("src/start.ts"),
     readRepositoryFile("start.bat"),
+    readRepositoryFile("env.d.ts"),
   ])
 
   expect(compose).not.toContain("ai.ashesh.dev")
@@ -101,6 +103,8 @@ test("deployment defaults contain no private hostname or obsolete setup guide", 
   expect(compose).toContain("COPILOT_ADMIN_ORIGIN=${COPILOT_ADMIN_ORIGIN:-}")
   expect(schema).not.toContain("COPILOT_PORT")
   expect(schema).toContain("uniform, no-store 401 response")
+  expect(schema).toContain("COPILOT_ADMIN_PASSWORD_HASH")
+  expect(generatedEnvTypes).toContain("COPILOT_ADMIN_PASSWORD_HASH?: string")
   expect(readme).not.toContain("recent password reauthentication")
   expect(security).toContain("2026 public-exposure remediation")
   expect(nginxReadme).toContain("Upgrade: websocket")
