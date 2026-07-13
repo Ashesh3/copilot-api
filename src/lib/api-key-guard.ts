@@ -83,7 +83,7 @@ export async function apiKeyGuard(
     return
   }
 
-  if (clientIp !== null && isIpBanned(clientIp)) {
+  if (clientIp !== null && isIpBlocked(clientIp)) {
     consola.warn(
       `[api-key-guard] Blocked request from banned IP ${clientIp} → ${c.req.method} ${c.req.path}`,
     )

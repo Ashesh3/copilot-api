@@ -261,6 +261,27 @@ test("global API-key guard accepts a valid credential from an actively leased ba
   expect(response.status).toBe(200)
 })
 
+test("global API-key guard records missing credentials from an actively leased banned IP", async () => {
+  const ip = "198.51.100.61"
+  state.apiKeyAuth = "gateway-secret"
+  recordFailedAttempt(ip)
+  recordFailedAttempt(ip)
+  recordFailedAttempt(ip)
+  leaseIp(ip, 60_000)
+  expect(isIpBlocked(ip)).toBe(false)
+
+  const app = new Hono()
+  app.use("*", apiKeyGuard)
+  app.get("/protected", (c) => c.json({ ok: true }))
+
+  const response = await app.request("http://localhost/protected", {
+    headers: { "x-copilot-peer-ip": ip },
+  })
+
+  expect(response.status).toBe(401)
+  expect(recordFailedAttempt(ip)).toBe(5)
+})
+
 test("invalid supplied credential cannot use transparent-proxy allowlist", async () => {
   const ip = "198.51.100.59"
   state.apiKeyAuth = "gateway-secret"
