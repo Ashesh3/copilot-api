@@ -12,6 +12,10 @@ affected, include its exact version or digest.
 
 ## Current security boundaries
 
+- Traffic-shaping configuration (`replacements` and `model-redirects`) is
+  mutable only through `/dashboard/api/*` under an administrator session cookie
+  plus CSRF/Origin checks. Inference credentials cannot list or rewrite those
+  rules (CS-02).
 - The gateway key protects normal inference traffic and bootstraps OAuth and
   administrator login. `COPILOT_API_KEY_AUTH` is the only environment-based
   gateway-key source.

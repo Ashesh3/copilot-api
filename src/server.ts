@@ -27,7 +27,6 @@ import { googleAIRoutes } from "./routes/google-ai/route"
 import { growthbookRoutes } from "./routes/growthbook/route"
 import { healthRoutes } from "./routes/health/route"
 import { messageRoutes } from "./routes/messages/route"
-import { modelRedirectsRoute } from "./routes/model-redirects/route"
 import { modelRoutes } from "./routes/models/route"
 import {
   oauthApiRoutes,
@@ -35,7 +34,6 @@ import {
   oauthTokenRoutes,
 } from "./routes/oauth/route"
 import { remoteRoutes } from "./routes/remote/route"
-import { replacementsRoute } from "./routes/replacements/route"
 import { responsesRoutes } from "./routes/responses/route"
 import { sessionsRoutes } from "./routes/sessions/route"
 import { statsigProxyMiddleware } from "./routes/statsig-overrides/proxy"
@@ -158,8 +156,9 @@ server.route("/chat/completions", completionRoutes)
 server.route("/models", modelRoutes)
 server.route("/embeddings", embeddingRoutes)
 server.route("/usage", usageRoute)
-server.route("/replacements", replacementsRoute)
-server.route("/model-redirects", modelRedirectsRoute)
+// Traffic-shaping config (replacements / model-redirects) is admin-only via
+// /dashboard/api/* (admin session cookie + CSRF). Do not re-expose under
+// inference credentials — that was CS-02 (cross-client integrity).
 server.route("/responses", responsesRoutes)
 
 // Compatibility with tools that expect v1/ prefix
