@@ -1,15 +1,30 @@
 import { afterEach, expect, test } from "bun:test"
 import { Hono } from "hono"
 
+import { apiKeyGuard } from "~/lib/api-key-guard"
 import { normalizeIpAddress, setIpAllowlistForTest } from "~/lib/ip-allowlist"
 import {
   extractClientIp,
+  isIpBlocked,
   isIpAllowedForWhitelistedRoute,
   leaseIp,
+  recordFailedAttempt,
   resetIpSecurityForTest,
+  unwhitelistIp,
 } from "~/lib/ip-blocker"
+import { createAuthMiddleware } from "~/lib/request-auth"
+import { state } from "~/lib/state"
 
 const originalTrustedProxies = process.env.COPILOT_TRUSTED_PROXY_CIDRS
+const originalDateNow = Date.now
+const originalApiKeyAuth = state.apiKeyAuth
+const DAY_MS = 24 * 60 * 60 * 1000
+let currentTime = 0
+
+function setCurrentTime(timestamp: number): void {
+  currentTime = timestamp
+  Date.now = () => currentTime
+}
 
 function createIpApp(): Hono {
   const app = new Hono()
@@ -18,6 +33,7 @@ function createIpApp(): Hono {
 }
 
 afterEach(() => {
+  Date.now = originalDateNow
   if (originalTrustedProxies === undefined) {
     delete process.env.COPILOT_TRUSTED_PROXY_CIDRS
   } else {
@@ -25,6 +41,7 @@ afterEach(() => {
   }
   resetIpSecurityForTest()
   setIpAllowlistForTest([])
+  state.apiKeyAuth = originalApiKeyAuth
 })
 
 test("fails closed without Bun socket-peer metadata", async () => {
@@ -86,4 +103,245 @@ test("temporary leases expire and do not create persistent allowlist entries", a
   expect(await isIpAllowedForWhitelistedRoute("198.51.100.40")).toBe(true)
   await Bun.sleep(75)
   expect(await isIpAllowedForWhitelistedRoute("198.51.100.40")).toBe(false)
+})
+
+test("bans an IP after its third failure inside a rolling 24-hour window", () => {
+  const ip = "198.51.100.50"
+  setCurrentTime(Date.UTC(2026, 0, 1, 12))
+
+  expect(recordFailedAttempt(ip)).toBe(1)
+  currentTime += 12 * 60 * 60 * 1000
+  expect(recordFailedAttempt(ip)).toBe(2)
+  currentTime += 11 * 60 * 60 * 1000
+  expect(recordFailedAttempt(ip)).toBe(3)
+
+  expect(isIpBlocked(ip)).toBe(true)
+})
+
+test("keeps a ban active until exactly 24 hours after the third failure", () => {
+  const ip = "198.51.100.51"
+  setCurrentTime(Date.UTC(2026, 0, 1, 12))
+
+  recordFailedAttempt(ip)
+  recordFailedAttempt(ip)
+  recordFailedAttempt(ip)
+
+  currentTime += DAY_MS - 1
+  expect(isIpBlocked(ip)).toBe(true)
+  currentTime += 1
+  expect(isIpBlocked(ip)).toBe(false)
+})
+
+test("prunes failures that are at least 24 hours old", () => {
+  const ip = "198.51.100.52"
+  setCurrentTime(Date.UTC(2026, 0, 1, 12))
+
+  expect(recordFailedAttempt(ip)).toBe(1)
+  expect(recordFailedAttempt(ip)).toBe(2)
+  currentTime += DAY_MS
+
+  expect(recordFailedAttempt(ip)).toBe(1)
+  expect(isIpBlocked(ip)).toBe(false)
+})
+
+test("leases bypass a ban without clearing its failure history", () => {
+  const ip = "198.51.100.53"
+  setCurrentTime(Date.UTC(2026, 0, 1, 12))
+
+  recordFailedAttempt(ip)
+  recordFailedAttempt(ip)
+  recordFailedAttempt(ip)
+  expect(isIpBlocked(ip)).toBe(true)
+
+  expect(leaseIp(ip, 60_000)).toBe(true)
+  expect(isIpBlocked(ip)).toBe(false)
+
+  expect(unwhitelistIp(ip)).toBe(true)
+  expect(isIpBlocked(ip)).toBe(true)
+})
+
+test("does not extend an active ban after a fourth failure", () => {
+  const ip = "198.51.100.54"
+  setCurrentTime(Date.UTC(2026, 0, 1, 12))
+
+  recordFailedAttempt(ip)
+  recordFailedAttempt(ip)
+  recordFailedAttempt(ip)
+
+  currentTime += 12 * 60 * 60 * 1000
+  recordFailedAttempt(ip)
+
+  currentTime += 12 * 60 * 60 * 1000 - 1
+  expect(isIpBlocked(ip)).toBe(true)
+  currentTime += 1
+  expect(isIpBlocked(ip)).toBe(false)
+})
+
+test("route-permitted allowlist bypass does not record a failure", async () => {
+  const ip = "198.51.100.55"
+  state.apiKeyAuth = "gateway-secret"
+  setIpAllowlistForTest([{ ip, enabled: true }])
+  recordFailedAttempt(ip)
+  recordFailedAttempt(ip)
+
+  const app = new Hono()
+  app.use("*", apiKeyGuard)
+  app.all("*", (c) => c.json({ ok: true }))
+
+  const response = await app.request(
+    "https://api.anthropic.com/upstream/path",
+    {
+      headers: {
+        host: "api.anthropic.com",
+        "x-copilot-peer-ip": ip,
+      },
+    },
+  )
+  expect(response.status).toBe(200)
+
+  setIpAllowlistForTest([])
+  expect(isIpBlocked(ip)).toBe(false)
+})
+
+test("credential-free transparent proxy allowlists bypass bans without clearing history", async () => {
+  const managedIp = "198.51.100.57"
+  const leasedIp = "198.51.100.58"
+  state.apiKeyAuth = "gateway-secret"
+
+  for (const ip of [managedIp, leasedIp]) {
+    recordFailedAttempt(ip)
+    recordFailedAttempt(ip)
+    recordFailedAttempt(ip)
+  }
+  setIpAllowlistForTest([{ ip: managedIp, enabled: true }])
+  leaseIp(leasedIp, 60_000)
+
+  const app = new Hono()
+  app.use("*", apiKeyGuard)
+  app.all("*", (c) => c.json({ ok: true }))
+
+  for (const ip of [managedIp, leasedIp]) {
+    const response = await app.request(
+      "https://api.anthropic.com/upstream/path",
+      {
+        headers: {
+          host: "api.anthropic.com",
+          "x-copilot-peer-ip": ip,
+        },
+      },
+    )
+    expect(response.status).toBe(200)
+  }
+
+  setIpAllowlistForTest([])
+  expect(unwhitelistIp(leasedIp)).toBe(true)
+  expect(isIpBlocked(managedIp)).toBe(true)
+  expect(isIpBlocked(leasedIp)).toBe(true)
+})
+
+test("global API-key guard accepts a valid credential from an actively leased banned IP", async () => {
+  const ip = "198.51.100.60"
+  state.apiKeyAuth = "gateway-secret"
+  recordFailedAttempt(ip)
+  recordFailedAttempt(ip)
+  recordFailedAttempt(ip)
+  leaseIp(ip, 60_000)
+
+  const app = new Hono()
+  app.use("*", apiKeyGuard)
+  app.get("/protected", (c) => c.json({ ok: true }))
+
+  const response = await app.request("http://localhost/protected", {
+    headers: {
+      "x-api-key": "gateway-secret",
+      "x-copilot-peer-ip": ip,
+    },
+  })
+
+  expect(response.status).toBe(200)
+})
+
+test("global API-key guard records missing credentials from an actively leased banned IP", async () => {
+  const ip = "198.51.100.61"
+  state.apiKeyAuth = "gateway-secret"
+  recordFailedAttempt(ip)
+  recordFailedAttempt(ip)
+  recordFailedAttempt(ip)
+  leaseIp(ip, 60_000)
+  expect(isIpBlocked(ip)).toBe(false)
+
+  const app = new Hono()
+  app.use("*", apiKeyGuard)
+  app.get("/protected", (c) => c.json({ ok: true }))
+
+  const response = await app.request("http://localhost/protected", {
+    headers: { "x-copilot-peer-ip": ip },
+  })
+
+  expect(response.status).toBe(401)
+  expect(recordFailedAttempt(ip)).toBe(5)
+})
+
+test("invalid supplied credential cannot use transparent-proxy allowlist", async () => {
+  const ip = "198.51.100.59"
+  state.apiKeyAuth = "gateway-secret"
+  setIpAllowlistForTest([{ ip, enabled: true }])
+
+  const app = new Hono()
+  app.use("*", apiKeyGuard)
+  app.all("*", (c) => c.json({ ok: true }))
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const response = await app.request(
+      "https://api.anthropic.com/upstream/path",
+      {
+        headers: {
+          host: "api.anthropic.com",
+          "x-api-key": "wrong-key",
+          "x-copilot-peer-ip": ip,
+        },
+      },
+    )
+    expect(response.status).toBe(401)
+  }
+
+  setIpAllowlistForTest([])
+  expect(isIpBlocked(ip)).toBe(true)
+})
+
+test("config-based global auth records failed credentials", async () => {
+  const ip = "198.51.100.56"
+  const app = new Hono()
+  app.use(
+    "*",
+    createAuthMiddleware({
+      getApiKeys: () => ["config-secret"],
+      allowUnauthenticatedPaths: [],
+    }),
+  )
+  app.get("/protected", (c) => c.json({ ok: true }))
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    expect(
+      (
+        await app.request("http://localhost/protected", {
+          headers: {
+            "x-api-key": "wrong-key",
+            "x-copilot-peer-ip": ip,
+          },
+        })
+      ).status,
+    ).toBe(401)
+  }
+  expect(isIpBlocked(ip)).toBe(true)
+  expect(
+    (
+      await app.request("http://localhost/protected", {
+        headers: {
+          "x-api-key": "config-secret",
+          "x-copilot-peer-ip": ip,
+        },
+      })
+    ).status,
+  ).toBe(401)
 })

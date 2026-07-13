@@ -27,8 +27,6 @@ import { executeWebSearch } from "~/services/copilot/mcp-web-search"
 
 import type { AnthropicResponse } from "./anthropic-types"
 
-const MAX_WEB_SEARCH_ITERATIONS = 3
-
 const stringifyResponsesInput = (input: ResponsesPayload["input"]): string =>
   typeof input === "string" ? input : JSON.stringify(input ?? [])
 
@@ -64,13 +62,15 @@ export const resolveWebSearchCalls = async (
   const { initiatorOverride, abortSignal } = options
   let current = response
   let currentPayload = payload
+  let iteration = 0
 
-  for (let i = 0; i < MAX_WEB_SEARCH_ITERATIONS; i++) {
+  while (true) {
+    iteration += 1
     const webSearchCalls = extractWebSearchCalls(current)
     if (webSearchCalls.length === 0) return current
 
     consola.info(
-      `Executing ${webSearchCalls.length} web search(es), iteration ${i + 1}`,
+      `Executing ${webSearchCalls.length} web search(es), iteration ${iteration}`,
     )
 
     const results = await Promise.all(
@@ -120,8 +120,6 @@ export const resolveWebSearchCalls = async (
       },
     )
   }
-
-  return current
 }
 
 // --- Responses API web search resolution ---
@@ -137,8 +135,10 @@ export const resolveResponsesWebSearchCalls = async (
 ): Promise<ResponsesResult> => {
   let current = result
   let currentPayload = payload
+  let iteration = 0
 
-  for (let i = 0; i < MAX_WEB_SEARCH_ITERATIONS; i++) {
+  while (true) {
+    iteration += 1
     const webSearchCalls = current.output.filter(
       (item): item is ResponseOutputFunctionCall =>
         item.type === "function_call" && item.name === "web_search",
@@ -146,7 +146,7 @@ export const resolveResponsesWebSearchCalls = async (
     if (webSearchCalls.length === 0) return current
 
     consola.info(
-      `Executing ${webSearchCalls.length} web search(es) via Responses API, iteration ${i + 1}`,
+      `Executing ${webSearchCalls.length} web search(es) via Responses API, iteration ${iteration}`,
     )
 
     const searchResults = await Promise.all(
@@ -199,8 +199,6 @@ export const resolveResponsesWebSearchCalls = async (
       },
     )
   }
-
-  return current
 }
 
 // --- Stream chunk reconstruction ---

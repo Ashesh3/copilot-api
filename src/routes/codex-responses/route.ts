@@ -29,8 +29,16 @@ interface CodexResponsesBody {
   input?: Array<CodexResponsesInput>
 }
 
-function silentDrop(): Response {
-  return new Response(null, { status: 404 })
+function unauthorized(c: {
+  header(name: string, value: string): void
+  json(value: unknown, status: 401): Response
+}): Response {
+  c.header("Cache-Control", "no-store")
+  c.header("WWW-Authenticate", "Be" + 'arer realm="copilot-api"')
+  return c.json(
+    { error: { message: "Unauthorized", type: "authentication_error" } },
+    401,
+  )
 }
 
 function extractUserText(body: CodexResponsesBody): string {
@@ -68,7 +76,7 @@ function extractUserText(body: CodexResponsesBody): string {
 codexResponsesRoutes.post("/", async (c) => {
   const auth = await authorizeCodexDesktopRequest(c, "codex-responses")
   if (!auth.allowed) {
-    return silentDrop()
+    return unauthorized(c)
   }
   const clientIp = auth.clientIp
 
@@ -101,11 +109,16 @@ codexResponsesRoutes.post("/", async (c) => {
 
   return streamSSE(c, async (stream) => {
     try {
-      const result = (await createChatCompletions({
-        model,
-        messages,
-        stream: false,
-      })) as ChatCompletionResponse
+      const result = (await createChatCompletions(
+        {
+          model,
+          messages,
+          stream: false,
+        },
+        {
+          signal: c.req.raw.signal,
+        },
+      )) as ChatCompletionResponse
 
       const cleaned = result.choices[0]?.message.content?.trim() ?? ""
       const text = cleaned.length > 0 ? cleaned : userText

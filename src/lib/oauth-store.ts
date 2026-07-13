@@ -7,11 +7,6 @@ import { PATHS } from "./paths"
 export const OAUTH_ACCESS_TOKEN_TTL_MS = 60 * 60 * 1000
 export const OAUTH_REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000
 export const OAUTH_AUTHORIZATION_CODE_TTL_MS = 2 * 60 * 1000
-const MAX_AUTHORIZATION_CODES = 512
-const MAX_TOKEN_FAMILIES = 32
-const MAX_REFRESH_TOKENS_PER_FAMILY = 1024
-const MAX_INFERENCE_CREDENTIALS = 1024
-const MAX_STORE_FILE_BYTES = 16 * 1024 * 1024
 const KNOWN_OAUTH_SCOPES = new Set([
   "user:inference",
   "user:profile",
@@ -222,20 +217,15 @@ function isTokenFamilyRecord(value: unknown): value is TokenFamilyRecord {
 function parseRecordMap<T>(
   value: unknown,
   validator: (entry: unknown) => entry is T,
-  options: { field: string; maximum: number },
+  field: string,
 ): Partial<Record<string, T>> {
-  const { field, maximum } = options
   if (!isRecord(value)) {
     throw new Error(`Invalid OAuth token store field: ${field}`)
   }
   const output: Partial<Record<string, T>> = Object.create(null) as Partial<
     Record<string, T>
   >
-  const entries = Object.entries(value)
-  if (entries.length > maximum) {
-    throw new Error(`OAuth token store field exceeds its limit: ${field}`)
-  }
-  for (const [key, entry] of entries) {
+  for (const [key, entry] of Object.entries(value)) {
     if (!/^[\w-]{20,128}$/.test(key) || !validator(entry)) {
       throw new Error(`Invalid OAuth token store record: ${field}`)
     }
@@ -255,28 +245,28 @@ function parseStore(raw: string): OAuthStoreData {
     authorizationCodes: parseRecordMap(
       parsed.authorizationCodes,
       isAuthorizationCodeRecord,
-      { field: "authorizationCodes", maximum: MAX_AUTHORIZATION_CODES },
+      "authorizationCodes",
     ),
-    accessTokens: parseRecordMap(parsed.accessTokens, isAccessTokenRecord, {
-      field: "accessTokens",
-      maximum: MAX_TOKEN_FAMILIES * MAX_REFRESH_TOKENS_PER_FAMILY,
-    }),
-    refreshTokens: parseRecordMap(parsed.refreshTokens, isRefreshTokenRecord, {
-      field: "refreshTokens",
-      maximum: MAX_TOKEN_FAMILIES * MAX_REFRESH_TOKENS_PER_FAMILY,
-    }),
+    accessTokens: parseRecordMap(
+      parsed.accessTokens,
+      isAccessTokenRecord,
+      "accessTokens",
+    ),
+    refreshTokens: parseRecordMap(
+      parsed.refreshTokens,
+      isRefreshTokenRecord,
+      "refreshTokens",
+    ),
     inferenceCredentials: parseRecordMap(
       parsed.inferenceCredentials,
       isInferenceCredentialRecord,
-      {
-        field: "inferenceCredentials",
-        maximum: MAX_INFERENCE_CREDENTIALS,
-      },
+      "inferenceCredentials",
     ),
-    tokenFamilies: parseRecordMap(parsed.tokenFamilies, isTokenFamilyRecord, {
-      field: "tokenFamilies",
-      maximum: MAX_TOKEN_FAMILIES,
-    }),
+    tokenFamilies: parseRecordMap(
+      parsed.tokenFamilies,
+      isTokenFamilyRecord,
+      "tokenFamilies",
+    ),
   }
 }
 
@@ -321,10 +311,6 @@ export class OAuthStore {
     return await this.mutate((data) => {
       const now = input.now ?? Date.now()
       const code = randomSecret("cc_code_")
-      this.evictOldestRecords(
-        data.authorizationCodes,
-        MAX_AUTHORIZATION_CODES - 1,
-      )
       data.authorizationCodes[hashOAuthSecret(code)] = {
         clientId: input.clientId,
         redirectUri: input.redirectUri,
@@ -428,14 +414,6 @@ export class OAuthStore {
         return unchanged<RefreshAccessTokenResult>({ status: "invalid_scope" })
       }
 
-      const familyRefreshCount = Object.values(data.refreshTokens).filter(
-        (record) => record?.familyId === refreshRecord.familyId,
-      ).length
-      if (familyRefreshCount >= MAX_REFRESH_TOKENS_PER_FAMILY) {
-        this.revokeFamily(data, refreshRecord.familyId, now)
-        return changed<RefreshAccessTokenResult>({ status: "invalid_grant" })
-      }
-
       refreshRecord.consumedAt = now
       return changed<RefreshAccessTokenResult>({
         status: "ok",
@@ -455,10 +433,6 @@ export class OAuthStore {
   async mintInferenceCredential(now = Date.now()): Promise<string> {
     return await this.mutate((data) => {
       const rawKey = randomSecret("sk-copilot-")
-      this.evictOldestRecords(
-        data.inferenceCredentials,
-        MAX_INFERENCE_CREDENTIALS - 1,
-      )
       data.inferenceCredentials[hashOAuthSecret(rawKey)] = {
         principalId: `inference:${randomUUID()}`,
         scopes: ["user:inference"],
@@ -545,9 +519,6 @@ export class OAuthStore {
       input.familyExpiresAt ?? input.now + OAUTH_REFRESH_TOKEN_TTL_MS
     const scopes = uniqueScopes(input.scopes)
 
-    if (!input.familyId) {
-      this.evictOldestFamilies(data, MAX_TOKEN_FAMILIES - 1)
-    }
     data.tokenFamilies[familyId] ??= {
       createdAt: input.now,
       expiresAt: familyExpiresAt,
@@ -636,9 +607,6 @@ export class OAuthStore {
   private async readFromDisk(): Promise<OAuthStoreData> {
     try {
       const raw = await fs.readFile(this.filePath, "utf8")
-      if (Buffer.byteLength(raw, "utf8") > MAX_STORE_FILE_BYTES) {
-        throw new Error("OAuth token store exceeds the maximum size")
-      }
       return raw.trim() ? parseStore(raw) : createEmptyStore()
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
@@ -681,50 +649,12 @@ export class OAuthStore {
     return changed
   }
 
-  private evictOldestRecords<T extends { createdAt: number }>(
-    records: Partial<Record<string, T>>,
-    maximum: number,
-  ): void {
-    while (Object.keys(records).length > maximum) {
-      const oldest = Object.entries(records)
-        .filter((entry): entry is [string, T] => entry[1] !== undefined)
-        .sort((left, right) => left[1].createdAt - right[1].createdAt)[0]
-      Reflect.deleteProperty(records, oldest[0])
-    }
-  }
-
-  private evictOldestFamilies(data: OAuthStoreData, maximum: number): void {
-    while (Object.keys(data.tokenFamilies).length > maximum) {
-      const oldest = Object.entries(data.tokenFamilies)
-        .filter(
-          (entry): entry is [string, TokenFamilyRecord] =>
-            entry[1] !== undefined,
-        )
-        .sort((left, right) => left[1].createdAt - right[1].createdAt)[0]
-      const familyId = oldest[0]
-      Reflect.deleteProperty(data.tokenFamilies, familyId)
-      for (const [digest, record] of Object.entries(data.accessTokens)) {
-        if (record?.familyId === familyId) {
-          Reflect.deleteProperty(data.accessTokens, digest)
-        }
-      }
-      for (const [digest, record] of Object.entries(data.refreshTokens)) {
-        if (record?.familyId === familyId) {
-          Reflect.deleteProperty(data.refreshTokens, digest)
-        }
-      }
-    }
-  }
-
   private async writeToDisk(data: OAuthStoreData): Promise<void> {
     const directory = path.dirname(this.filePath)
     await fs.mkdir(directory, { recursive: true, mode: 0o700 })
     await fs.chmod(directory, 0o700).catch(() => undefined)
 
     const serialized = `${JSON.stringify(data, null, 2)}\n`
-    if (Buffer.byteLength(serialized, "utf8") > MAX_STORE_FILE_BYTES) {
-      throw new Error("OAuth token store exceeds the maximum size")
-    }
     const temporaryPath = `${this.filePath}.${process.pid}.${randomUUID()}.tmp`
     try {
       await fs.writeFile(temporaryPath, serialized, {

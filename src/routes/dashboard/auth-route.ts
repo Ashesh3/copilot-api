@@ -11,12 +11,14 @@ import {
   isAllowedAdminOrigin,
   loginAdmin,
   logoutAdmin,
-  clearAdminLoginFailures,
-  isAdminLoginRateLimited,
-  recordAdminLoginFailure,
   setupAdminAuth,
   type CreatedAdminSession,
 } from "~/lib/admin-auth"
+import {
+  extractClientIp,
+  isIpBlocked,
+  recordFailedAttempt,
+} from "~/lib/ip-blocker"
 
 export const dashboardAuthRoutes = new Hono()
 
@@ -95,47 +97,51 @@ dashboardAuthRoutes.get("/session", async (c) => {
 
 dashboardAuthRoutes.post("/setup", async (c) => {
   noStore(c)
-  if (isAdminLoginRateLimited(c.req.raw)) return authenticationFailed(c)
-  const body = await c.req
-    .json<{ gatewayKey?: unknown; password?: unknown }>()
-    .catch(() => null)
-  if (
-    !body
-    || typeof body.gatewayKey !== "string"
-    || typeof body.password !== "string"
-  ) {
+  const clientIp = extractClientIp(c)
+  if (clientIp !== null && isIpBlocked(clientIp)) {
+    return authenticationFailed(c)
+  }
+  const body = await c.req.json<unknown>().catch(() => null)
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
     return c.json({ error: "Invalid request" }, 400)
   }
-  const result = await setupAdminAuth(body.gatewayKey, body.password)
+  const { gatewayKey, password } = body as Record<string, unknown>
+  if (typeof gatewayKey !== "string" || typeof password !== "string") {
+    if (clientIp !== null) recordFailedAttempt(clientIp)
+    return c.json({ error: "Invalid request" }, 400)
+  }
+  const result = await setupAdminAuth(gatewayKey, password)
   if ("error" in result) {
-    recordAdminLoginFailure(c.req.raw)
+    if (result.error === "Authentication failed" && clientIp !== null) {
+      recordFailedAttempt(clientIp)
+    }
     const status = result.error.includes("already configured") ? 409 : 401
     return c.json({ error: result.error }, status)
   }
-  clearAdminLoginFailures(c.req.raw)
   setSessionCookies(c, result.session)
   return c.json({ authenticated: true }, 201)
 })
 
 dashboardAuthRoutes.post("/login", async (c) => {
   noStore(c)
-  if (isAdminLoginRateLimited(c.req.raw)) return authenticationFailed(c)
-  const body = await c.req
-    .json<{ gatewayKey?: unknown; password?: unknown }>()
-    .catch(() => null)
-  if (
-    !body
-    || typeof body.gatewayKey !== "string"
-    || typeof body.password !== "string"
-  ) {
+  const clientIp = extractClientIp(c)
+  if (clientIp !== null && isIpBlocked(clientIp)) {
     return authenticationFailed(c)
   }
-  const session = await loginAdmin(body.gatewayKey, body.password)
+  const body = await c.req.json<unknown>().catch(() => null)
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return authenticationFailed(c)
+  }
+  const { gatewayKey, password } = body as Record<string, unknown>
+  if (typeof gatewayKey !== "string" || typeof password !== "string") {
+    if (clientIp !== null) recordFailedAttempt(clientIp)
+    return authenticationFailed(c)
+  }
+  const session = await loginAdmin(gatewayKey, password)
   if (!session) {
-    recordAdminLoginFailure(c.req.raw)
+    if (clientIp !== null) recordFailedAttempt(clientIp)
     return authenticationFailed(c)
   }
-  clearAdminLoginFailures(c.req.raw)
   setSessionCookies(c, session)
   return c.json({ authenticated: true })
 })
@@ -153,6 +159,7 @@ dashboardAuthRoutes.post("/logout", async (c) => {
 
 dashboardAuthRoutes.put("/password", async (c) => {
   noStore(c)
+  const clientIp = extractClientIp(c)
   const body = await c.req
     .json<{ currentPassword?: unknown; newPassword?: unknown }>()
     .catch(() => null)
@@ -169,7 +176,11 @@ dashboardAuthRoutes.put("/password", async (c) => {
     body.newPassword,
   )
   if ("error" in result) {
-    return c.json({ error: result.error }, 401)
+    if (result.reason === "credential" && clientIp !== null) {
+      recordFailedAttempt(clientIp)
+    }
+    const status = result.reason === "validation" ? 400 : 401
+    return c.json({ error: result.error }, status)
   }
   setSessionCookies(c, result)
   return c.json({ authenticated: true })

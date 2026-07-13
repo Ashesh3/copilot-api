@@ -57,12 +57,12 @@ describe("JSON tree helpers", () => {
     expect(collectJsonContainerPaths(empty.value).size).toBe(0)
   })
 
-  test("does not auto-expand high-cardinality containers", () => {
+  test("auto-expands high-cardinality containers", () => {
     const parsed = parseJsonBody(JSON.stringify(Array.from({ length: 101 })))
     expect(parsed).not.toBeNull()
     if (!parsed) throw new Error("Expected valid JSON")
 
-    expect([...collectJsonContainerPaths(parsed.value, 1, 100)]).toEqual([])
+    expect([...collectJsonContainerPaths(parsed.value, 1)]).toEqual(["#"])
     expect([...collectJsonContainerPaths(parsed.value)]).toEqual(["#"])
   })
 })

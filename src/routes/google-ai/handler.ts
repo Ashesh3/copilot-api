@@ -29,14 +29,12 @@ import {
   parseModelSuffix,
   usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
-import { checkRateLimit } from "~/lib/rate-limit"
 import {
   recordNonDefaultBehavior,
   setRequestContext,
 } from "~/lib/request-logger"
 import { state } from "~/lib/state"
 import { getTokenCount } from "~/lib/tokenizer"
-import { isNullish } from "~/lib/utils"
 import {
   addPromptCaching,
   detectInitiator,
@@ -137,33 +135,6 @@ function parseModelAction(modelAction: string): {
   }
 }
 
-/**
- * Cap max_tokens at the model's advertised limit to prevent 400 errors.
- */
-function capMaxTokens(
-  c: Context,
-  payload: ChatCompletionsPayload,
-  selectedModel: Model | undefined,
-): void {
-  const maxAllowed = selectedModel?.capabilities.limits?.max_output_tokens
-  if (!maxAllowed) return
-
-  if (isNullish(payload.max_tokens)) {
-    payload.max_tokens = maxAllowed
-  } else if (payload.max_tokens > maxAllowed) {
-    recordNonDefaultBehavior(c, {
-      kind: "max_tokens_capped",
-      message: `Capping max_tokens from ${payload.max_tokens} to ${maxAllowed} for ${payload.model}`,
-      data: {
-        model: payload.model,
-        requestedMaxTokens: payload.max_tokens,
-        effectiveMaxTokens: maxAllowed,
-      },
-    })
-    payload.max_tokens = maxAllowed
-  }
-}
-
 async function resolveGoogleModelRedirect(
   c: Context,
   rawModel: string,
@@ -227,8 +198,6 @@ async function resolveGoogleModelRedirect(
 }
 
 export async function handleGoogleAI(c: Context) {
-  await checkRateLimit(state)
-
   // Extract model and action from URL path
   // URL path: /v1/models/{model}:{action} or /models/{model}:{action}
   const modelAction = c.req.param("modelAction")
@@ -262,7 +231,7 @@ export async function handleGoogleAI(c: Context) {
   logger.debug("Google AI request payload:", JSON.stringify(googlePayload))
 
   // Inline http(s) fileData attachments (upstream rejects external URLs)
-  await inlineGoogleFileData(googlePayload)
+  await inlineGoogleFileData(googlePayload, c.req.raw.signal)
 
   const unsupportedRootFields = getUnsupportedGoogleRootFields(googlePayload)
   if (unsupportedRootFields.length > 0) {
@@ -335,8 +304,6 @@ export async function handleGoogleAI(c: Context) {
   if (state.manualApprove) {
     await awaitApproval()
   }
-
-  capMaxTokens(c, finalPayload, selectedModel)
 
   consola.debug(
     `[google-ai] Translated payload: model=${finalPayload.model}, max_tokens=${finalPayload.max_tokens}, stream=${finalPayload.stream}, tools=${finalPayload.tools?.length ?? 0}, messages=${finalPayload.messages.length}`,
@@ -523,6 +490,7 @@ async function handleWithAnthropicMessages(
   const anthropicPayload = await chatPayloadToAnthropic(
     payload,
     options.selectedModel,
+    c.req.raw.signal,
   )
   const response = await createAnthropicMessages(anthropicPayload, {
     signal: c.req.raw.signal,
@@ -614,10 +582,7 @@ async function handleWithResponsesApi(
   // ─── Non-streaming ───
   if (!isStream || !isAsyncIterable(response)) {
     const result = response as ResponsesResult
-    logger.debug(
-      "Non-streaming Responses result:",
-      JSON.stringify(result).slice(-400),
-    )
+    logger.debug("Non-streaming Responses result:", JSON.stringify(result))
 
     if (result.usage) {
       setRequestContext(c, {

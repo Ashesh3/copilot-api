@@ -12,32 +12,7 @@ const sessions = new Map<string, CodeSession>()
 const clientEvents = new Map<string, Array<ClientEvent>>()
 const internalEvents = new Map<string, Array<InternalEvent>>()
 
-export const SESSION_EVENT_HISTORY_MAX_EVENTS = 2000
-export const SESSION_EVENT_HISTORY_MAX_BYTES = 4 * 1024 * 1024
-
 let globalSeqNum = 0
-
-function serializedSize(value: unknown): number {
-  return new TextEncoder().encode(JSON.stringify(value)).length
-}
-
-function trimEventHistory(list: Array<unknown>): void {
-  let firstRetained = Math.max(
-    0,
-    list.length - SESSION_EVENT_HISTORY_MAX_EVENTS,
-  )
-  let retainedBytes = 0
-  for (let index = list.length - 1; index >= firstRetained; index -= 1) {
-    const entry = list[index]
-    const entryBytes = serializedSize(entry)
-    if (retainedBytes + entryBytes > SESSION_EVENT_HISTORY_MAX_BYTES) {
-      firstRetained = index + 1
-      break
-    }
-    retainedBytes += entryBytes
-  }
-  if (firstRetained > 0) list.splice(0, firstRetained)
-}
 
 function generateId(): string {
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789"
@@ -148,7 +123,6 @@ export function addClientEvents(
     list.push(clientEvent)
     created.push(clientEvent)
   }
-  trimEventHistory(list)
   return created
 }
 
@@ -168,7 +142,6 @@ export function addInternalEvents(
   const list = internalEvents.get(id)
   if (!list) return
   list.push(...events)
-  trimEventHistory(list)
 }
 
 export function getInternalEvents(

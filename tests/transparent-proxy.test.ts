@@ -1,6 +1,13 @@
 import { afterAll, beforeEach, expect, mock, test } from "bun:test"
 
 import { setIpAllowlistForTest } from "../src/lib/ip-allowlist"
+import {
+  isIpBlocked,
+  leaseIp,
+  recordFailedAttempt,
+  resetIpSecurityForTest,
+  unwhitelistIp,
+} from "../src/lib/ip-blocker"
 import { state } from "../src/lib/state"
 import { server } from "../src/server"
 
@@ -22,12 +29,16 @@ const fetchMock = mock((url: string | URL | Request, _init?: RequestInit) => {
 
 beforeEach(() => {
   state.apiKeyAuth = "test-secret-key"
+  resetIpSecurityForTest()
+  setIpAllowlistForTest([])
   fetchMock.mockClear()
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch =
     fetchMock as unknown as typeof fetch
 })
 
 afterAll(() => {
+  resetIpSecurityForTest()
+  setIpAllowlistForTest([])
   state.apiKeyAuth = originalApiKeyAuth
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
 })
@@ -177,6 +188,118 @@ test("proxies unknown /api routes for whitelisted redirected Claude hosts", asyn
     "proxied:https://claude.ai/api/desktop/update",
   )
   expect(fetchMock).toHaveBeenCalledTimes(1)
+})
+
+test("OAuth proxy sink permits credential-free managed and leased IPs despite bans", async () => {
+  const managedIp = "198.51.100.18"
+  const leasedIp = "198.51.100.19"
+  for (const ip of [managedIp, leasedIp]) {
+    recordFailedAttempt(ip)
+    recordFailedAttempt(ip)
+    recordFailedAttempt(ip)
+  }
+  whitelistIp(managedIp)
+  leaseIp(leasedIp, 60_000)
+
+  for (const ip of [managedIp, leasedIp]) {
+    const response = await server.request("/api/desktop/update", {
+      headers: {
+        host: "claude.ai",
+        ...trustedHeaders(ip),
+      },
+    })
+    expect(response.status).toBe(202)
+  }
+
+  setIpAllowlistForTest([])
+  expect(unwhitelistIp(leasedIp)).toBe(true)
+  expect(isIpBlocked(managedIp)).toBe(true)
+  expect(isIpBlocked(leasedIp)).toBe(true)
+})
+
+test("OAuth proxy sink rejects and records an explicitly invalid credential", async () => {
+  const ip = "198.51.100.20"
+  whitelistIp(ip)
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const response = await server.request("/api/desktop/update", {
+      headers: {
+        host: "claude.ai",
+        "x-api-key": "wrong-key",
+        ...trustedHeaders(ip),
+      },
+    })
+    expect(response.status).toBe(401)
+    expect(response.headers.get("cache-control")).toBe("no-store")
+    expect(await response.json()).toEqual({
+      error: { message: "Unauthorized", type: "authentication_error" },
+    })
+  }
+
+  setIpAllowlistForTest([])
+  expect(isIpBlocked(ip)).toBe(true)
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
+test("OAuth proxy sink accepts a valid explicit credential unless the IP is banned", async () => {
+  const allowedIp = "198.51.100.22"
+  const allowed = await server.request("/api/desktop/update", {
+    headers: {
+      host: "claude.ai",
+      "x-api-key": "test-secret-key",
+      ...trustedHeaders(allowedIp),
+    },
+  })
+  expect(allowed.status).toBe(202)
+
+  const bannedIp = "198.51.100.23"
+  recordFailedAttempt(bannedIp)
+  recordFailedAttempt(bannedIp)
+  recordFailedAttempt(bannedIp)
+  const banned = await server.request("/api/desktop/update", {
+    headers: {
+      host: "claude.ai",
+      "x-api-key": "test-secret-key",
+      ...trustedHeaders(bannedIp),
+    },
+  })
+  expect(banned.status).toBe(401)
+})
+
+test("OAuth proxy sink accepts a valid explicit credential from an actively leased banned IP", async () => {
+  const ip = "198.51.100.24"
+  recordFailedAttempt(ip)
+  recordFailedAttempt(ip)
+  recordFailedAttempt(ip)
+  leaseIp(ip, 60_000)
+
+  const response = await server.request("/api/desktop/update", {
+    headers: {
+      host: "claude.ai",
+      "x-api-key": "test-secret-key",
+      ...trustedHeaders(ip),
+    },
+  })
+
+  expect(response.status).toBe(202)
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+})
+
+test("OAuth proxy sink records missing credentials from a non-allowlisted IP", async () => {
+  const ip = "198.51.100.21"
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const response = await server.request("/api/desktop/update", {
+      headers: {
+        host: "claude.ai",
+        ...trustedHeaders(ip),
+      },
+    })
+    expect(response.status).toBe(401)
+  }
+
+  expect(isIpBlocked(ip)).toBe(true)
+  expect(fetchMock).not.toHaveBeenCalled()
 })
 
 test("blocks event logging for whitelisted redirected Claude hosts", async () => {

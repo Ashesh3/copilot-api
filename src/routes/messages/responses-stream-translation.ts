@@ -23,39 +23,11 @@ import {
   translateResponsesResultToAnthropic,
 } from "./responses-translation"
 
-const MAX_CONSECUTIVE_FUNCTION_CALL_WHITESPACE = 20
-
 class FunctionCallArgumentsValidationError extends Error {
   constructor(message: string) {
     super(message)
     this.name = "FunctionCallArgumentsValidationError"
   }
-}
-
-const updateWhitespaceRunState = (
-  previousCount: number,
-  chunk: string,
-): {
-  nextCount: number
-  exceeded: boolean
-} => {
-  let count = previousCount
-
-  for (const char of chunk) {
-    if (char === "\r" || char === "\n" || char === "\t") {
-      count += 1
-      if (count > MAX_CONSECUTIVE_FUNCTION_CALL_WHITESPACE) {
-        return { nextCount: count, exceeded: true }
-      }
-      continue
-    }
-
-    if (char !== " ") {
-      count = 0
-    }
-  }
-
-  return { nextCount: count, exceeded: false }
 }
 
 export interface ResponsesStreamState {
@@ -72,7 +44,6 @@ type FunctionCallStreamState = {
   blockIndex: number
   toolCallId: string
   name: string
-  consecutiveWhitespaceCount: number
 }
 
 export const createResponsesStreamState = (): ResponsesStreamState => ({
@@ -260,23 +231,6 @@ const handleFunctionCallArgumentsDelta = (
       events,
     )
   }
-
-  // fix: copolit function call returning infinite line breaks until max_tokens limit
-  // "arguments": "{\"path\":\"xxx\",\"pattern\":\"**/*.ts\",\"} }? Wait extra braces. Need correct. I should run? Wait overcame. Need proper JSON with pattern \"\n\n\n\n\n\n\n\n...
-  const { nextCount, exceeded } = updateWhitespaceRunState(
-    functionCallState.consecutiveWhitespaceCount,
-    deltaText,
-  )
-  if (exceeded) {
-    return handleFunctionCallArgumentsValidationError(
-      new FunctionCallArgumentsValidationError(
-        "Received function call arguments delta containing more than 20 consecutive whitespace characters.",
-      ),
-      state,
-      events,
-    )
-  }
-  functionCallState.consecutiveWhitespaceCount = nextCount
 
   events.push({
     type: "content_block_delta",
@@ -681,7 +635,6 @@ const openFunctionCallBlock = (
       blockIndex,
       toolCallId: resolvedToolCallId,
       name: resolvedName,
-      consecutiveWhitespaceCount: 0,
     }
 
     state.functionCallStateByOutputIndex.set(outputIndex, functionCallState)

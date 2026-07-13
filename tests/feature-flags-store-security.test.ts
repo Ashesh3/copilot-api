@@ -17,11 +17,22 @@ test("rejects prototype-polluting and malformed feature flag names", () => {
   expect(Object.getPrototypeOf(getFeatureFlags())).toBeNull()
 })
 
-test("accepts bounded ordinary feature flag names", () => {
+test("accepts safe feature flag names without a length cap", () => {
   setFeatureFlagsForTest()
-  const name = `security_safe_flag_${Date.now()}`
+  const name = `security_safe_flag_${"x".repeat(256)}`
   expect(isValidFeatureFlagName(name)).toBe(true)
   expect(setFeatureFlag(name, true)[name]).toBe(true)
+})
+
+test("accepts large feature flag collections and values", () => {
+  const flags = Object.fromEntries(
+    Array.from({ length: 205 }, (_, index) => [`flag_${index}`, index]),
+  )
+  setFeatureFlagsForTest(flags)
+  expect(Object.keys(getFeatureFlags()).length).toBeGreaterThanOrEqual(205)
+
+  const largeValue = "x".repeat(70_000)
+  expect(setFeatureFlag("large_value", largeValue).large_value).toBe(largeValue)
 })
 
 test("does not expose the mutable feature flag store to callers", () => {

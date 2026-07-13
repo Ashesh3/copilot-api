@@ -5,7 +5,7 @@ import {
   registerCredentialProvider,
   resolveRequestCredentialKind,
 } from "./credential-resolver"
-import { extractClientIpFromHeaders } from "./ip-blocker"
+import { extractClientIpFromHeaders, isIpBlocked } from "./ip-blocker"
 import { PATHS } from "./paths"
 import { getActiveApiKeys } from "./request-auth"
 
@@ -15,11 +15,7 @@ export const ADMIN_PASSWORD_MIN_LENGTH = 16
 export const ADMIN_SESSION_ABSOLUTE_MS = 30 * 24 * 60 * 60 * 1000
 export const ADMIN_SESSION_IDLE_MS = 12 * 60 * 60 * 1000
 
-const MAX_PASSWORD_LENGTH = 256
-const MAX_ADMIN_SESSIONS = 10
 const LAST_SEEN_WRITE_INTERVAL_MS = 5 * 60 * 1000
-const LOGIN_WINDOW_MS = 15 * 60 * 1000
-const LOGIN_MAX_FAILURES = 5
 
 interface AdminAuthData {
   passwordHash: string
@@ -57,16 +53,17 @@ export interface AdminAuthClock {
   now(): number
 }
 
+type ChangeAdminPasswordError =
+  | { error: string; reason: "credential" }
+  | { error: string; reason: "session" }
+  | { error: string; reason: "validation" }
+
 let authData: AdminAuthData | null | undefined
 let sessionsData: AdminSessionsData | undefined
 let writeQueue: Promise<void> = Promise.resolve()
 let authMutationQueue: Promise<void> = Promise.resolve()
 let inMemoryTestMode = false
 let clock: AdminAuthClock = { now: () => Date.now() }
-const failedLogins = new Map<
-  string,
-  { count: number; windowStartedAt: number }
->()
 
 function noop(): void {}
 
@@ -170,8 +167,7 @@ async function loadSessionsData(): Promise<AdminSessionsData> {
   sessionsData = {
     sessions: (loaded?.sessions ?? [])
       .filter((session) => isSession(session))
-      .sort((a, b) => b.lastSeenAt - a.lastSeenAt)
-      .slice(0, MAX_ADMIN_SESSIONS),
+      .sort((a, b) => b.lastSeenAt - a.lastSeenAt),
   }
   return sessionsData
 }
@@ -193,9 +189,6 @@ function validatePassword(password: string): string | null {
   if (password.length < ADMIN_PASSWORD_MIN_LENGTH) {
     return `Admin password must be at least ${ADMIN_PASSWORD_MIN_LENGTH} characters`
   }
-  if (password.length > MAX_PASSWORD_LENGTH) {
-    return `Admin password must be at most ${MAX_PASSWORD_LENGTH} characters`
-  }
   return null
 }
 
@@ -206,36 +199,6 @@ function gatewayKeyMatches(candidate: string): boolean {
     matched = safeEqual(candidate, key) || matched
   }
   return activeKeys.length > 0 && matched
-}
-
-function loginRateLimitKey(request: Request): string {
-  return extractClientIpFromHeaders(request.headers) ?? "unknown"
-}
-
-export function isAdminLoginRateLimited(request: Request): boolean {
-  const key = loginRateLimitKey(request)
-  const entry = failedLogins.get(key)
-  if (!entry) return false
-  if (now() - entry.windowStartedAt >= LOGIN_WINDOW_MS) {
-    failedLogins.delete(key)
-    return false
-  }
-  return entry.count >= LOGIN_MAX_FAILURES
-}
-
-export function recordAdminLoginFailure(request: Request): void {
-  const key = loginRateLimitKey(request)
-  const currentTime = now()
-  const entry = failedLogins.get(key)
-  if (!entry || currentTime - entry.windowStartedAt >= LOGIN_WINDOW_MS) {
-    failedLogins.set(key, { count: 1, windowStartedAt: currentTime })
-    return
-  }
-  entry.count += 1
-}
-
-export function clearAdminLoginFailures(request: Request): void {
-  failedLogins.delete(loginRateLimitKey(request))
 }
 
 export async function getAdminAuthStatus(): Promise<{
@@ -320,7 +283,6 @@ async function createAdminSession(): Promise<CreatedAdminSession> {
   }
   data.sessions.push(record)
   data.sessions.sort((a, b) => b.lastSeenAt - a.lastSeenAt)
-  data.sessions = data.sessions.slice(0, MAX_ADMIN_SESSIONS)
   sessionsData = data
   await enqueueWrite(PATHS.ADMIN_SESSIONS_PATH, data)
   return { token, csrfToken, expiresAt: record.expiresAt }
@@ -415,6 +377,9 @@ export async function authenticateAdminRequest(
   request: Request,
   options: { requireCsrf?: boolean } = {},
 ): Promise<AuthenticatedAdminSession | null> {
+  const clientIp = extractClientIpFromHeaders(request.headers)
+  if (clientIp !== null && isIpBlocked(clientIp)) return null
+
   const credential = await resolveRequestCredentialKind(request, "admin", {
     requireCsrf: options.requireCsrf,
   })
@@ -469,18 +434,25 @@ export async function changeAdminPassword(
   request: Request,
   currentPassword: string,
   newPassword: string,
-): Promise<CreatedAdminSession | { error: string }> {
+): Promise<CreatedAdminSession | ChangeAdminPasswordError> {
   return await serializeAuthMutation(async () => {
     const session = await authenticateAdminRequest(request, {
       requireCsrf: true,
     })
-    if (!session || !(await verifyPassword(currentPassword))) {
-      return { error: "Authentication failed" }
+    if (!session) {
+      return { error: "Authentication failed", reason: "session" }
+    }
+    if (!(await verifyPassword(currentPassword))) {
+      return { error: "Authentication failed", reason: "credential" }
     }
     const passwordError = validatePassword(newPassword)
-    if (passwordError) return { error: passwordError }
+    if (passwordError) {
+      return { error: passwordError, reason: "validation" }
+    }
     const current = await loadAuthData()
-    if (!current) return { error: "Authentication failed" }
+    if (!current) {
+      return { error: "Authentication failed", reason: "session" }
+    }
     current.passwordHash = await Bun.password.hash(newPassword, {
       algorithm: "argon2id",
       memoryCost: 65_536,
@@ -514,7 +486,6 @@ export function setAdminAuthTestMode(enabled: boolean): void {
   sessionsData = { sessions: [] }
   writeQueue = Promise.resolve()
   authMutationQueue = Promise.resolve()
-  failedLogins.clear()
   clock = { now: () => Date.now() }
 }
 

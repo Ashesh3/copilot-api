@@ -300,11 +300,6 @@ export default function SettingsScreen() {
                 <MetadataListItem label="Multi-Token Mode">
                   {boolBadge(data.settings.multiToken)}
                 </MetadataListItem>
-                <MetadataListItem label="Rate Limit">
-                  {data.settings.rateLimitSeconds != null ?
-                    `${data.settings.rateLimitSeconds}s`
-                  : "Disabled"}
-                </MetadataListItem>
                 <MetadataListItem label="Sentry Enabled">
                   {boolBadge(data.settings.sentryEnabled)}
                 </MetadataListItem>

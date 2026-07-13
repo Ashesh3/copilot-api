@@ -162,7 +162,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null
 
 const JSON_OBJECT_INPUT_INSTRUCTION = "Respond with JSON."
-const MIN_MAX_OUTPUT_TOKENS = 16
+const COPILOT_RESPONSES_MIN_OUTPUT_TOKENS = 16
 
 function isInputImage(value: unknown): value is ResponseInputImage {
   return isRecord(value) && value.type === "input_image"
@@ -187,6 +187,7 @@ function isAttachmentPart(value: unknown): boolean {
  */
 export async function normalizeResponsesAttachments(
   payload: ResponsesPayload,
+  signal?: AbortSignal,
 ): Promise<void> {
   if (!Array.isArray(payload.input)) return
 
@@ -196,6 +197,7 @@ export async function normalizeResponsesAttachments(
       normalizedInput.push(
         (await normalizeResponsesContentPart(
           item as ResponseInputContent,
+          signal,
         )) as ResponseInputItem,
       )
       continue
@@ -204,7 +206,7 @@ export async function normalizeResponsesAttachments(
     if (isRecord(item) && Array.isArray(item.content)) {
       const content: Array<ResponseInputContent> = []
       for (const part of item.content as Array<ResponseInputContent>) {
-        content.push(await normalizeResponsesContentPart(part))
+        content.push(await normalizeResponsesContentPart(part, signal))
       }
       normalizedInput.push({ ...item, content })
       continue
@@ -214,7 +216,7 @@ export async function normalizeResponsesAttachments(
     if (isRecord(item) && Array.isArray(item.output)) {
       const output: Array<ResponseInputContent> = []
       for (const part of item.output as Array<ResponseInputContent>) {
-        output.push(await normalizeResponsesContentPart(part))
+        output.push(await normalizeResponsesContentPart(part, signal))
       }
       normalizedInput.push({ ...item, output })
       continue
@@ -227,9 +229,10 @@ export async function normalizeResponsesAttachments(
 
 async function normalizeResponsesContentPart(
   part: ResponseInputContent,
+  signal?: AbortSignal,
 ): Promise<ResponseInputContent> {
   if (isInputImage(part) && part.image_url && isHttpUrl(part.image_url)) {
-    const inlined = await fetchUrlAsDataUri(part.image_url)
+    const inlined = await fetchUrlAsDataUri(part.image_url, { signal })
     if (inlined) {
       return { ...part, image_url: toDataUri(inlined.mediaType, inlined.data) }
     }
@@ -237,14 +240,14 @@ async function normalizeResponsesContentPart(
       type: "input_text",
       text: attachmentOmittedNote({
         kind: "image",
-        name: part.image_url.slice(0, 200),
+        name: part.image_url,
         reason: "the URL could not be fetched by the proxy",
       }),
     }
   }
 
   if (isInputFile(part)) {
-    return await normalizeInputFile(part)
+    return await normalizeInputFile(part, signal)
   }
 
   return part
@@ -252,6 +255,7 @@ async function normalizeResponsesContentPart(
 
 async function normalizeInputFile(
   part: ResponseInputFile,
+  signal?: AbortSignal,
 ): Promise<ResponseInputContent> {
   const { file_url: fileUrl, file_data: fileData } = part
 
@@ -269,7 +273,10 @@ async function normalizeInputFile(
   }
 
   if (fileUrl && isHttpUrl(fileUrl)) {
-    const inlined = await fetchUrlAsDataUri(fileUrl, { expectPdf: true })
+    const inlined = await fetchUrlAsDataUri(fileUrl, {
+      expectPdf: true,
+      signal,
+    })
     if (inlined) {
       const { file_url: _fileUrl, ...rest } = part
       return {
@@ -283,7 +290,7 @@ async function normalizeInputFile(
       type: "input_text",
       text: attachmentOmittedNote({
         kind: "file",
-        name: part.filename ?? fileUrl.slice(0, 200),
+        name: part.filename ?? fileUrl,
         reason: "the URL could not be fetched by the proxy",
       }),
     }
@@ -619,9 +626,9 @@ function sanitizeResponsesPayload(
 function clampMaxOutputTokens(payload: ResponsesPayload): void {
   if (
     typeof payload.max_output_tokens === "number"
-    && payload.max_output_tokens < MIN_MAX_OUTPUT_TOKENS
+    && payload.max_output_tokens < COPILOT_RESPONSES_MIN_OUTPUT_TOKENS
   ) {
-    payload.max_output_tokens = MIN_MAX_OUTPUT_TOKENS
+    payload.max_output_tokens = COPILOT_RESPONSES_MIN_OUTPUT_TOKENS
   }
 }
 
@@ -809,7 +816,7 @@ export const createResponses = async (
   payload.store = false
 
   // Inline external attachment URLs / normalize file_data to data URIs
-  await normalizeResponsesAttachments(payload)
+  await normalizeResponsesAttachments(payload, signal)
   signal?.throwIfAborted()
 
   // Match runtime defaults for direct Responses requests.

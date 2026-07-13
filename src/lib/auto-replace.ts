@@ -17,15 +17,6 @@ export interface ReplacementRule {
   isSystem?: boolean // System rules cannot be deleted by user
 }
 
-export const REPLACEMENT_LIMITS = {
-  maxInputLength: 1_000_000,
-  maxNameLength: 128,
-  maxOutputLength: 2_000_000,
-  maxPatternLength: 1_024,
-  maxReplacementLength: 16_384,
-  maxRules: 100,
-} as const
-
 export class ReplacementValidationError extends Error {
   constructor(message: string) {
     super(message)
@@ -35,20 +26,10 @@ export class ReplacementValidationError extends Error {
 
 function validateRuleFields(
   pattern: string,
-  replacement: string,
-  options: { isRegex: boolean; name?: string },
+  options: { isRegex: boolean },
 ): void {
   if (typeof pattern !== "string" || pattern.length === 0) {
     throw new ReplacementValidationError("Pattern is required")
-  }
-  if (pattern.length > REPLACEMENT_LIMITS.maxPatternLength) {
-    throw new ReplacementValidationError("Pattern is too long")
-  }
-  if (replacement.length > REPLACEMENT_LIMITS.maxReplacementLength) {
-    throw new ReplacementValidationError("Replacement is too long")
-  }
-  if (options.name && options.name.length > REPLACEMENT_LIMITS.maxNameLength) {
-    throw new ReplacementValidationError("Rule name is too long")
   }
   if (options.isRegex) {
     try {
@@ -77,15 +58,12 @@ function normalizeStoredRule(value: unknown): ReplacementRule | null {
   }
   const name = typeof raw.name === "string" ? raw.name : undefined
   try {
-    validateRuleFields(raw.pattern, raw.replacement, {
-      isRegex: raw.isRegex,
-      name,
-    })
+    validateRuleFields(raw.pattern, { isRegex: raw.isRegex })
   } catch {
     return null
   }
   return {
-    id: raw.id.slice(0, 128),
+    id: raw.id,
     pattern: raw.pattern,
     replacement: raw.replacement,
     isRegex: raw.isRegex,
@@ -141,7 +119,6 @@ export async function loadReplacements(): Promise<void> {
     userReplacements =
       Array.isArray(parsed) ?
         parsed
-          .slice(0, REPLACEMENT_LIMITS.maxRules)
           .map((value) => normalizeStoredRule(value))
           .filter((rule): rule is ReplacementRule => rule !== null)
       : []
@@ -215,12 +192,7 @@ export async function addReplacement(
   return await serializeMutation(async () => {
     const { isRegex = false, name } = options ?? {}
     await ensureLoaded()
-    if (userReplacements.length >= REPLACEMENT_LIMITS.maxRules) {
-      throw new ReplacementValidationError(
-        "Maximum replacement rule count reached",
-      )
-    }
-    validateRuleFields(pattern, replacement, { isRegex, name })
+    validateRuleFields(pattern, { isRegex })
     const rule: ReplacementRule = {
       id: `user-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
       name,
@@ -281,13 +253,8 @@ export async function updateReplacement(
     }
 
     const nextPattern = updates.pattern ?? rule.pattern
-    const nextReplacement = updates.replacement ?? rule.replacement
     const nextIsRegex = updates.isRegex ?? rule.isRegex
-    const nextName = updates.name ?? rule.name
-    validateRuleFields(nextPattern, nextReplacement, {
-      isRegex: nextIsRegex,
-      name: nextName,
-    })
+    validateRuleFields(nextPattern, { isRegex: nextIsRegex })
 
     if (updates.name !== undefined) rule.name = updates.name
     if (updates.pattern !== undefined) rule.pattern = updates.pattern
@@ -352,7 +319,6 @@ function applyRule(
       const matcher = regex.matcher(text)
       const chunks: Array<string> = []
       let cursor = 0
-      let outputLength = 0
       let matched = false
 
       while (matcher.find()) {
@@ -365,21 +331,12 @@ function applyRule(
           input: text,
           span: { start, end },
         })
-        outputLength += prefix.length + replacement.length
-        if (outputLength > REPLACEMENT_LIMITS.maxOutputLength) {
-          consola.warn(`Replacement output limit exceeded for rule ${rule.id}`)
-          return { result: text, matched: false }
-        }
         chunks.push(prefix, replacement)
         cursor = end
       }
 
       if (!matched) return { result: text, matched: false }
       const suffix = text.slice(cursor)
-      if (outputLength + suffix.length > REPLACEMENT_LIMITS.maxOutputLength) {
-        consola.warn(`Replacement output limit exceeded for rule ${rule.id}`)
-        return { result: text, matched: false }
-      }
       chunks.push(suffix)
       return { result: chunks.join(""), matched: true }
     } catch {
@@ -388,28 +345,11 @@ function applyRule(
     }
   }
 
-  const chunks: Array<string> = []
-  let cursor = 0
-  let matchAt = text.indexOf(rule.pattern)
-  let outputLength = 0
-  if (matchAt === -1) return { result: text, matched: false }
-  while (matchAt !== -1) {
-    const prefix = text.slice(cursor, matchAt)
-    outputLength += prefix.length + rule.replacement.length
-    if (outputLength > REPLACEMENT_LIMITS.maxOutputLength) {
-      consola.warn(`Replacement output limit exceeded for rule ${rule.id}`)
-      return { result: text, matched: false }
-    }
-    chunks.push(prefix, rule.replacement)
-    cursor = matchAt + rule.pattern.length
-    matchAt = text.indexOf(rule.pattern, cursor)
+  if (!text.includes(rule.pattern)) return { result: text, matched: false }
+  return {
+    result: text.replaceAll(rule.pattern, rule.replacement),
+    matched: true,
   }
-  const suffix = text.slice(cursor)
-  if (outputLength + suffix.length > REPLACEMENT_LIMITS.maxOutputLength) {
-    return { result: text, matched: false }
-  }
-  chunks.push(suffix)
-  return { result: chunks.join(""), matched: true }
 }
 
 interface ReplacementMatcher {
@@ -457,10 +397,6 @@ export interface ReplacementResult {
 export async function applyReplacements(
   text: string,
 ): Promise<ReplacementResult> {
-  if (text.length > REPLACEMENT_LIMITS.maxInputLength) {
-    consola.warn("Skipping replacement rules for oversized input")
-    return { text, appliedRules: [] }
-  }
   let result = text
   const allRules = await getAllReplacements()
   const appliedRules: Array<string> = []

@@ -79,7 +79,6 @@ interface RequiredProviderFields {
   models: Array<unknown>
 }
 
-const DEFAULT_TIMEOUT_MS = 120_000
 const OPENAI_COMPATIBLE_TYPE = "openai-compatible"
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -195,14 +194,6 @@ function normalizeProvider(raw: unknown): CustomProviderConfig | undefined {
   if (models.length === 0) return undefined
 
   const rawRecord = raw as Record<string, unknown>
-  const timeoutMs =
-    (
-      typeof rawRecord.timeoutMs === "number"
-      && Number.isInteger(rawRecord.timeoutMs)
-      && rawRecord.timeoutMs > 0
-    ) ?
-      rawRecord.timeoutMs
-    : undefined
   const headers = normalizeHeaders(rawRecord.headers)
 
   return {
@@ -214,7 +205,6 @@ function normalizeProvider(raw: unknown): CustomProviderConfig | undefined {
     ...(fields.apiKeyEnv ? { apiKeyEnv: fields.apiKeyEnv } : {}),
     ...(headers ? { headers } : {}),
     models,
-    ...(timeoutMs ? { timeoutMs } : {}),
     ...(typeof rawRecord.passReasoningEffort === "boolean" ?
       { passReasoningEffort: rawRecord.passReasoningEffort }
     : {}),
@@ -379,29 +369,6 @@ function getProviderApiKeyFromEnv(provider: CustomProviderConfig): string {
     : ""
 }
 
-function mergeAbortSignals(
-  signals: Array<AbortSignal | undefined>,
-): AbortSignal | undefined {
-  const activeSignals = signals.filter(
-    (signal): signal is AbortSignal => signal !== undefined,
-  )
-  if (activeSignals.length === 0) return undefined
-  if (activeSignals.length === 1) return activeSignals[0]
-
-  const controller = new AbortController()
-  const abort = () => controller.abort()
-
-  for (const signal of activeSignals) {
-    if (signal.aborted) {
-      controller.abort()
-      break
-    }
-    signal.addEventListener("abort", abort, { once: true })
-  }
-
-  return controller.signal
-}
-
 function buildHeaders(provider: CustomProviderConfig): Record<string, string> {
   const headers: Record<string, string> = {
     "content-type": "application/json",
@@ -423,47 +390,18 @@ async function fetchCustomProvider(
   request: CustomProviderFetchRequest,
 ): Promise<Response> {
   const { reference, path, payload, options } = request
-  const timeoutSignal = AbortSignal.timeout(
-    reference.provider.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-  )
-  const signal = mergeAbortSignals([options?.signal, timeoutSignal])
   const url = providerUrl(reference.provider, path)
 
   consola.debug(
     `Custom provider request: ${reference.provider.id}/${reference.upstreamModel} ${path}`,
   )
 
-  try {
-    return await fetch(url, {
-      method: "POST",
-      headers: buildHeaders(reference.provider),
-      body: JSON.stringify(payload),
-      signal,
-    })
-  } catch (error) {
-    if (options?.signal?.aborted) throw error
-    if (timeoutSignal.aborted) {
-      throw new HTTPError(
-        `Custom provider ${reference.provider.name} timed out for model ${reference.upstreamModel}`,
-        new Response(
-          JSON.stringify({
-            error: {
-              message: `Custom provider ${reference.provider.name} timed out for model ${reference.upstreamModel}`,
-              type: "timeout_error",
-              provider: reference.provider.id,
-              model: reference.upstreamModel,
-            },
-          }),
-          {
-            status: 504,
-            headers: { "content-type": "application/json" },
-          },
-        ),
-        redactProviderRequestPayload(payload),
-      )
-    }
-    throw error
-  }
+  return await fetch(url, {
+    method: "POST",
+    headers: buildHeaders(reference.provider),
+    body: JSON.stringify(payload),
+    signal: options?.signal,
+  })
 }
 
 function createUpstreamErrorMessage(

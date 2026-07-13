@@ -6,26 +6,13 @@ import consola from "consola"
 import { resolveRequestCredential } from "./credential-resolver"
 import {
   extractClientIp,
-  isIpBlocked,
   isIpAllowedForWhitelistedRoute,
+  isIpBanned,
+  isIpBlocked,
   recordFailedAttempt,
 } from "./ip-blocker"
 import { state } from "./state"
 import { isAllowedTransparentProxyRequest } from "./transparent-proxy"
-
-/**
- * Paths that proxy to Copilot and should count toward IP banning on auth failure.
- * Failed auth on other endpoints (models, usage, etc.) does not record a strike
- * against the IP.
- */
-const IP_BAN_PATHS = new Set([
-  "/chat/completions",
-  "/v1/chat/completions",
-  "/messages",
-  "/v1/messages",
-  "/responses",
-  "/v1/responses",
-])
 
 /**
  * API key guard middleware. Invalid credentials receive a small, bounded and
@@ -43,6 +30,49 @@ export async function apiKeyGuard(
   }
 
   const clientIp = extractClientIp(c)
+  const credentialSupplied = [
+    "authorization",
+    "x-api-key",
+    "x-goog-api-key",
+  ].some((header) => c.req.raw.headers.has(header))
+
+  if (credentialSupplied) {
+    const credential = await resolveRequestCredential(c.req.raw, [
+      "user:inference",
+    ])
+    if (credential) {
+      if (clientIp !== null && isIpBlocked(clientIp)) {
+        consola.warn(
+          `[api-key-guard] Blocked request from banned IP ${clientIp} → ${c.req.method} ${c.req.path}`,
+        )
+        Sentry.captureMessage(`Blocked banned IP: ${clientIp}`, {
+          level: "warning",
+          extra: { ip: clientIp, method: c.req.method, path: c.req.path },
+        })
+        return unauthorizedResponse(c)
+      }
+      await next()
+      return
+    }
+
+    if (clientIp !== null) {
+      const alreadyBanned = isIpBanned(clientIp)
+      const attempts = recordFailedAttempt(clientIp)
+      consola.warn(
+        `[api-key-guard] Failed auth from ${clientIp} → ${c.req.method} ${c.req.path} (attempt ${attempts}/3)`,
+      )
+      if (attempts >= 3 && !alreadyBanned) {
+        consola.error(
+          `[api-key-guard] IP ${clientIp} banned after ${attempts} failed attempts`,
+        )
+        Sentry.captureMessage(`IP banned: ${clientIp}`, {
+          level: "error",
+          extra: { ip: clientIp, attempts, path: c.req.path },
+        })
+      }
+    }
+    return unauthorizedResponse(c)
+  }
 
   if (
     clientIp !== null
@@ -64,16 +94,7 @@ export async function apiKeyGuard(
     return unauthorizedResponse(c)
   }
 
-  const credential = await resolveRequestCredential(c.req.raw, [
-    "user:inference",
-  ])
-  if (credential) {
-    await next()
-    return
-  }
-
-  // Only count failed attempts on copilot-proxying endpoints
-  if (clientIp !== null && IP_BAN_PATHS.has(c.req.path)) {
+  if (clientIp !== null) {
     const attempts = recordFailedAttempt(clientIp)
     consola.warn(
       `[api-key-guard] Failed auth from ${clientIp} → ${c.req.method} ${c.req.path} (attempt ${attempts}/3)`,

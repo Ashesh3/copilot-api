@@ -1,7 +1,5 @@
 import { randomUUID } from "node:crypto"
 
-export const LLM_DEBUG_LOG_RETENTION_MS = 10 * 60 * 1000
-
 type HeaderRecord = Record<string, string>
 
 export interface LlmDebugLogError {
@@ -68,7 +66,6 @@ export interface LlmDebugLogListResponse {
   count: number
   entries: Array<LlmDebugLogSummary>
   generatedAt: string
-  retentionMs: number
 }
 
 interface AbortLlmDebugLogOptions {
@@ -150,11 +147,6 @@ function redactUrl(value: string): string {
 function byteLength(value: string | null): number {
   if (value === null) return 0
   return new TextEncoder().encode(value).byteLength
-}
-
-function truncate(value: string, maxLength: number): string {
-  if (value.length <= maxLength) return value
-  return `${value.slice(0, maxLength - 3)}...`
 }
 
 function compactWhitespace(value: string): string {
@@ -260,19 +252,12 @@ function inferStream(body: string | null): boolean | undefined {
 function buildRequestPreview(body: string | null): string {
   if (!body) return ""
   const jsonPreview = previewFromJsonBody(body)
-  return truncate(compactWhitespace(jsonPreview ?? body), 320)
+  return compactWhitespace(jsonPreview ?? body)
 }
 
 function buildResponsePreview(body: string | null): string | undefined {
   if (!body) return undefined
-  return truncate(compactWhitespace(body), 320)
-}
-
-function prune(nowMs = Date.now()): void {
-  const cutoff = nowMs - LLM_DEBUG_LOG_RETENTION_MS
-  while (logs.length > 0 && logs[0]?.startedAtMs < cutoff) {
-    logs.shift()
-  }
+  return compactWhitespace(body)
 }
 
 function cloneEntry(entry: LlmDebugLogEntry): LlmDebugLogEntry {
@@ -340,7 +325,6 @@ function getEntry(id: string): LlmDebugLogEntry | undefined {
 
 export function startLlmDebugLog(input: StartLlmDebugLogInput): string {
   const startedAtMs = input.startedAtMs ?? Date.now()
-  prune(startedAtMs)
 
   const requestBody = redactBody(input.requestBody)
 
@@ -371,7 +355,6 @@ export function finishLlmDebugLog(
   response: Omit<LlmDebugLogResponse, "bodyBytes">,
   endedAtMs = Date.now(),
 ): void {
-  prune(endedAtMs)
   const entry = getEntry(id)
   if (!entry || entry.status !== "pending") return
 
@@ -391,7 +374,6 @@ export function failLlmDebugLog(
   error: unknown,
   endedAtMs = Date.now(),
 ): void {
-  prune(endedAtMs)
   const entry = getEntry(id)
   if (!entry || entry.status !== "pending") return
 
@@ -406,7 +388,6 @@ export function abortLlmDebugLog(
   options: AbortLlmDebugLogOptions,
 ): void {
   const endedAtMs = options.endedAtMs ?? Date.now()
-  prune(endedAtMs)
   const entry = getEntry(id)
   if (!entry || entry.status !== "pending") return
 
@@ -425,17 +406,14 @@ export function abortLlmDebugLog(
 }
 
 export function listLlmDebugLogs(): LlmDebugLogListResponse {
-  prune()
   return {
     count: logs.length,
     entries: logs.map((entry) => toSummary(entry)).reverse(),
     generatedAt: new Date().toISOString(),
-    retentionMs: LLM_DEBUG_LOG_RETENTION_MS,
   }
 }
 
 export function getLlmDebugLog(id: string): LlmDebugLogEntry | undefined {
-  prune()
   const entry = getEntry(id)
   return entry ? cloneEntry(entry) : undefined
 }

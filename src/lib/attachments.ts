@@ -14,10 +14,6 @@ import consola from "consola"
  *   sources are rejected.
  */
 
-// Matches CAPI capabilities.limits.vision.max_prompt_image_size
-export const MAX_ATTACHMENT_BYTES = 3_145_728
-const FETCH_TIMEOUT_MS = 15_000
-
 export interface ParsedDataUri {
   mediaType: string
   /** base64 payload (without the data: prefix) */
@@ -88,41 +84,23 @@ export function mediaTypeFromFilename(
  */
 export async function fetchUrlAsDataUri(
   url: string,
-  options?: { expectPdf?: boolean },
+  options?: { expectPdf?: boolean; signal?: AbortSignal },
 ): Promise<ParsedDataUri | null> {
   if (!isHttpUrl(url)) return null
 
   try {
     const response = await fetch(url, {
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
       headers: { accept: "*/*" },
+      signal: options?.signal,
     })
     if (!response.ok) {
       consola.warn(
-        `Attachment fetch failed: ${response.status} ${response.statusText} for ${url.slice(0, 200)}`,
-      )
-      return null
-    }
-
-    const declaredLength = Number(response.headers.get("content-length"))
-    if (
-      Number.isFinite(declaredLength)
-      && declaredLength > MAX_ATTACHMENT_BYTES
-    ) {
-      consola.warn(
-        `Attachment at ${url.slice(0, 200)} exceeds ${MAX_ATTACHMENT_BYTES} bytes (${declaredLength})`,
+        `Attachment fetch failed: ${response.status} ${response.statusText} for ${url}`,
       )
       return null
     }
 
     const buffer = await response.arrayBuffer()
-    if (buffer.byteLength > MAX_ATTACHMENT_BYTES) {
-      consola.warn(
-        `Attachment at ${url.slice(0, 200)} exceeds ${MAX_ATTACHMENT_BYTES} bytes (${buffer.byteLength})`,
-      )
-      return null
-    }
-
     const headerMediaType = response.headers
       .get("content-type")
       ?.split(";")[0]
@@ -140,7 +118,8 @@ export async function fetchUrlAsDataUri(
       data: Buffer.from(buffer).toString("base64"),
     }
   } catch (error) {
-    consola.warn(`Attachment fetch error for ${url.slice(0, 200)}:`, error)
+    if (options?.signal?.aborted) throw error
+    consola.warn(`Attachment fetch error for ${url}:`, error)
     return null
   }
 }

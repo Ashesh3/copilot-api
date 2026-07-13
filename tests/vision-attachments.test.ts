@@ -392,6 +392,15 @@ describe("normalizeAnthropicAttachments", () => {
 // ─── OpenAI CC → Anthropic bridge ───
 
 describe("chatPayloadToAnthropic bridge", () => {
+  test("does not invent a local max_tokens default", async () => {
+    const anthropic = await chatPayloadToAnthropic({
+      model: "claude-sonnet-4.6",
+      messages: [{ role: "user", content: "hello" }],
+    })
+
+    expect(anthropic.max_tokens).toBeUndefined()
+  })
+
   test("maps file parts to document blocks and images to image blocks", async () => {
     const payload: ChatCompletionsPayload & { model: string } = {
       model: "claude-sonnet-4.6",

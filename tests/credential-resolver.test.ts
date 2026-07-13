@@ -88,7 +88,7 @@ test("distinguishes gateway, OAuth, and inference-client credentials", async () 
   ).toBeNull()
 })
 
-test("rejects ambiguous and oversized credential envelopes", () => {
+test("rejects ambiguous credentials and accepts long credential values", () => {
   expect(
     extractRequestCredential(
       new Request("http://localhost", {
@@ -99,13 +99,14 @@ test("rejects ambiguous and oversized credential envelopes", () => {
       }),
     ),
   ).toBeNull()
+  const longCredential = "x".repeat(4097)
   expect(
     extractRequestCredential(
       new Request("http://localhost", {
-        headers: { authorization: `Bearer ${"x".repeat(4097)}` },
+        headers: { authorization: `Bearer ${longCredential}` },
       }),
     ),
-  ).toBeNull()
+  ).toBe(longCredential)
 })
 
 test("dispatches worker, environment, and admin through typed providers", async () => {

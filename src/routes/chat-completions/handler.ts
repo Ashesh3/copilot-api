@@ -27,7 +27,6 @@ import {
   parseModelSuffix,
   usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
-import { checkRateLimit } from "~/lib/rate-limit"
 import {
   recordNonDefaultBehavior,
   setRequestContext,
@@ -42,7 +41,6 @@ import { state } from "~/lib/state"
 import { tokenPool } from "~/lib/token-pool"
 import { getTokenCount } from "~/lib/tokenizer"
 import { emitChatCompletionsToolSpans } from "~/lib/tool-spans"
-import { isNullish } from "~/lib/utils"
 import { modelSupportsNativeMessages } from "~/services/copilot/create-anthropic-messages"
 import {
   createChatCompletions,
@@ -58,8 +56,6 @@ import {
 } from "./responses-fallback-executor"
 
 export async function handleCompletion(c: Context) {
-  await checkRateLimit(state)
-
   const rawPayload = await c.req.json<ChatCompletionsPayload>()
   const conversationId = setSentryConversationIdFromRequest(c, rawPayload)
 
@@ -156,7 +152,7 @@ async function handleCompletionInner(
 
   payload = applyRoutableModelFallback(c, payload)
 
-  consola.debug("Request payload:", JSON.stringify(payload).slice(-400))
+  consola.debug("Request payload:", JSON.stringify(payload))
 
   setRequestContext(c, {
     requestedModel,
@@ -174,8 +170,6 @@ async function handleCompletionInner(
   await setInputTokenContext(c, payload, selectedModel)
 
   if (state.manualApprove) await awaitApproval()
-
-  payload = applyDefaultMaxTokens(payload, selectedModel)
 
   return await dispatchCopilotCompletion(c, {
     payload,
@@ -256,20 +250,6 @@ async function setInputTokenContext(
   } catch (error) {
     consola.warn("Failed to calculate token count:", error)
   }
-}
-
-function applyDefaultMaxTokens(
-  payload: ChatCompletionsPayload & { model: string },
-  selectedModel: Parameters<typeof getTokenCount>[1] | undefined,
-): ChatCompletionsPayload & { model: string } {
-  if (!isNullish(payload.max_tokens)) return payload
-
-  const nextPayload = {
-    ...payload,
-    max_tokens: selectedModel?.capabilities.limits?.max_output_tokens,
-  }
-  consola.debug("Set max_tokens to:", JSON.stringify(nextPayload.max_tokens))
-  return nextPayload
 }
 
 async function executeCustomProviderRequest(

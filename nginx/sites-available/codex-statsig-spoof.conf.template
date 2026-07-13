@@ -18,8 +18,6 @@
 #   {{CODEX_STATSIG_SPOOF_SSL_CERTIFICATE_PATH}}      e.g. /root/certs/ab.chatgpt.com.crt
 #   {{CODEX_STATSIG_SPOOF_SSL_CERTIFICATE_KEY_PATH}}  e.g. /root/certs/ab.chatgpt.com.key
 #   {{UPSTREAM_URL}}                                  e.g. http://localhost:4141
-#   {{RATE_LIMIT_ZONE}} / {{RATE_LIMIT_BURST}}        from your global rate-limit setup
-#   {{PROXY_LIMITS_SNIPPET_PATH}}                     path to snippets/proxy-limits.conf
 
 server {
   listen 80;
@@ -35,17 +33,13 @@ server {
   listen 443 ssl;
   server_name {{CODEX_STATSIG_SPOOF_SERVER_NAME}};
 
-  client_header_timeout 10s;
-  client_body_timeout 30s;
-  client_max_body_size 1m;
+  client_max_body_size 0;
 
   ssl_certificate     {{CODEX_STATSIG_SPOOF_SSL_CERTIFICATE_PATH}};
   ssl_certificate_key {{CODEX_STATSIG_SPOOF_SSL_CERTIFICATE_KEY_PATH}};
 
   access_log off;
   error_log /dev/null emerg;
-
-  limit_req zone={{RATE_LIMIT_ZONE}} burst={{RATE_LIMIT_BURST}} nodelay;
 
   proxy_set_header Host $host;
   proxy_set_header X-Real-IP $remote_addr;

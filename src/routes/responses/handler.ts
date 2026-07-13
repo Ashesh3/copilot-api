@@ -24,7 +24,6 @@ import {
   parseModelSuffix,
   usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
-import { checkRateLimit } from "~/lib/rate-limit"
 import {
   recordNonDefaultBehavior,
   setRequestContext,
@@ -396,8 +395,6 @@ function rewriteResponseModelInEvent(
 }
 
 export const handleResponses = async (c: Context) => {
-  await checkRateLimit(state)
-
   const payload = await c.req.json<ResponsesPayload>()
   const conversationId = setSentryConversationIdFromRequest(c, payload)
 
@@ -551,7 +548,7 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
 
             logger.debug(
               "Forwarding native Responses result:",
-              JSON.stringify(resolved).slice(-400),
+              JSON.stringify(resolved),
             )
             return c.json(withRequestedResponseModel(resolved, requestedModel))
           }
@@ -695,10 +692,7 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
       })
     : initialResult
 
-  logger.debug(
-    "Forwarding native Responses result:",
-    JSON.stringify(resolved).slice(-400),
-  )
+  logger.debug("Forwarding native Responses result:", JSON.stringify(resolved))
 
   return c.json(withRequestedResponseModel(resolved, requestedModel))
 }
@@ -1457,6 +1451,7 @@ const handleFallbackViaNativeMessages = async (
   const anthropicPayload = await chatPayloadToAnthropic(
     options.ccPayload,
     options.selectedModel,
+    c.req.raw.signal,
   )
   anthropicPayload.stream = false
 
@@ -1542,7 +1537,7 @@ const handleWithChatCompletions = async (
         const ccResponse = response as ChatCompletionResponse
         logger.debug(
           "ChatCompletions fallback response:",
-          JSON.stringify(ccResponse).slice(-400),
+          JSON.stringify(ccResponse),
         )
 
         if (ccResponse.usage) {

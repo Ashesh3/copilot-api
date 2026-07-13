@@ -6,10 +6,16 @@ import { transcribe } from "~/routes/voice/groq-stt"
 
 export const transcribeRoutes = new Hono()
 
-const CODEX_TRANSCRIBE_TIMEOUT_MS = 30_000
-
-function silentDrop(): Response {
-  return new Response(null, { status: 404 })
+function unauthorized(c: {
+  header(name: string, value: string): void
+  json(value: unknown, status: 401): Response
+}): Response {
+  c.header("Cache-Control", "no-store")
+  c.header("WWW-Authenticate", "Be" + 'arer realm="copilot-api"')
+  return c.json(
+    { error: { message: "Unauthorized", type: "authentication_error" } },
+    401,
+  )
 }
 
 /**
@@ -38,7 +44,7 @@ function silentDrop(): Response {
 transcribeRoutes.post("/", async (c) => {
   const auth = await authorizeCodexDesktopRequest(c, "transcribe")
   if (!auth.allowed) {
-    return silentDrop()
+    return unauthorized(c)
   }
   const clientIp = auth.clientIp
 
@@ -73,12 +79,10 @@ transcribeRoutes.post("/", async (c) => {
     const result = await transcribe(bytes, language, {
       contentType,
       filename,
-      timeoutMs: CODEX_TRANSCRIBE_TIMEOUT_MS,
+      signal: c.req.raw.signal,
     })
-    const preview =
-      result.text.length > 60 ? `${result.text.slice(0, 60)}…` : result.text
     consola.info(
-      `[transcribe] ${clientIp} → ${bytes.length}B ${contentType} → "${preview}"`,
+      `[transcribe] ${clientIp} → ${bytes.length}B ${contentType} → "${result.text}"`,
     )
     return c.json({ text: result.text })
   } catch (error) {

@@ -32,15 +32,19 @@ affected, include its exact version or digest.
   recognized secret fields and headers.
 - Remote Control uses short-lived, one-use, administrator/session-bound
   WebSocket tickets. Voice and Responses WebSockets authenticate before upgrade
-  and apply connection, frame, lifetime, backpressure, and workload limits.
+  and retain protocol validation without local traffic or resource limits.
 - Direct Connect is disabled by default. The only public health route is exact
   `GET /health/health`.
 - Forwarding headers are honored only when the actual socket peer is in
   `COPILOT_TRUSTED_PROXY_CIDRS`. Successful authentication never permanently
   adds a client IP to the managed allowlist.
-- User regular expressions run through RE2-compatible matching with bounded
-  rule/input schemas. Usage details retain seven days of minute/model aggregates
-  while lifetime totals remain cumulative.
+- Every failed protected credential check uses one shared rolling 24-hour IP
+  tracker. The third failure bans the source for 24 hours and all denials remain
+  uniform `401` responses. Public routes and session/CSRF semantic failures do
+  not record credential failures.
+- User regular expressions run through RE2-compatible matching. Usage details
+  retain complete minute/model aggregates while lifetime totals remain
+  cumulative.
 
 ## 2026 public-exposure remediation
 
@@ -48,18 +52,18 @@ affected, include its exact version or digest.
 | --- | --- | --- |
 | F-01 | Resolved | OAuth refresh no longer returns the gateway key. Opaque scoped access/refresh tokens, PKCE-bound one-use codes, rotation, replay-family revocation, and digested persistence replaced the simulated bearer exchange. |
 | F-02 | Resolved | Dashboard authority moved to gateway-plus-password cookie sessions. Gateway credentials alone cannot access dashboard APIs; provider secrets are write-only and debug/export paths redact recognized secrets. |
-| F-03 | Resolved | Remote Control requires short-lived, one-use, administrator/session-bound WebSocket tickets with Origin and resource limits. |
-| F-04 | Resolved | Only exact metadata-free `GET /health/health` remains public. Direct Connect is disabled by default and authenticated/resource-limited when explicitly enabled. |
-| F-05 | Resolved | Voice WebSockets authenticate before upgrade and enforce Origin (when supplied), frame/audio/duration/idle/concurrency/cost limits, cleanup, and backpressure. |
+| F-03 | Resolved | Remote Control requires short-lived, one-use, administrator/session-bound WebSocket tickets with Origin validation. |
+| F-04 | Resolved | Only exact metadata-free `GET /health/health` remains public. Direct Connect is disabled by default and authenticated when explicitly enabled. |
+| F-05 | Resolved | Voice WebSockets authenticate before upgrade, enforce Origin when supplied, validate protocol messages, and cancel transcription when callers disconnect. |
 | F-06 | Resolved in supplied application/edge policy | Forwarded headers are accepted only from configured socket peers; Compose binds the backend to loopback; auth does not auto-promote IPs; source-NAT public templates do not publish IP-only fallbacks. |
 | F-07 | Resolved | Nginx templates use hostname-specific route/method allowlists and a final default denial instead of catch-all proxying. |
-| F-08 | Resolved | Authentication failures return bounded uniform no-store responses; proxy body, connection, and I/O limits are finite. |
+| F-08 | Resolved | Protected credential failures share a rolling three-strike, 24-hour IP ban and return uniform no-store `401` responses. Supplied Nginx policy adds no pacing, connection, finite body, or I/O timeout controls. |
 | F-11 | Resolved for the tracked dependency baseline | Hono, Undici, Sentry, Bun, and related runtime dependencies were upgraded; `srvx` was removed; the Bun image is digest-pinned; production audit is a CI gate. |
 | F-12 | Resolved | Global wildcard CORS was removed. Optional CORS is restricted to configured exact origins and inference-only paths. |
 | F-13 | Resolved | Dashboard login uses server-side Secure/HttpOnly sessions instead of browser bearer storage. Nonce CSP and browser-hardening headers protect application responses; the public Nginx template applies baseline headers to edge denials. |
 | F-15 | Partially addressed; host/container scope remains operator-owned | The tracked Compose bind is loopback-only, build context excludes common secret material, and application data files use restrictive modes. Rootless/read-only filesystem, capability drops, and host resource policy are not claimed by this application audit. |
-| F-17 | Resolved in application/deployment assets | Usage details retain seven-day minute/model aggregates with separate lifetime totals and coalesced atomic writes. A bounded Nginx logrotate policy is supplied and must be installed by the operator. |
-| F-18 | Resolved | Replacements use RE2-compatible matching with bounded schemas; unsafe object names are rejected; the legacy inline-handler feature page was removed. |
+| F-17 | Resolved in application/deployment assets | Usage details retain complete minute/model aggregates with separate lifetime totals and coalesced atomic writes. An optional Nginx logrotate policy is supplied for operator-managed logs. |
+| F-18 | Resolved | Replacements use RE2-compatible matching; unsafe object names are rejected; the legacy inline-handler feature page was removed. |
 | F-20 | Resolved for current repository settings/workflows | Runtime audit, CodeQL, dependency review, image scanning, SBOM, SHA-pinned actions, Dependabot, secret scanning/push protection, and read-only workflow defaults are enabled. Branch review count is zero for the sole maintainer; CI/CodeQL still run on pull requests. |
 
 ## Regression fixes after hardening
@@ -74,12 +78,9 @@ affected, include its exact version or digest.
 - The public Nginx policy treats Responses HTTP and WebSocket transports
   separately. `POST` remains the normal API method; authenticated `GET` upgrades
   on `/responses` and `/v1/responses` are forwarded, while plain GET is denied.
-- Authenticated Chat Completions and Messages generation streams use a finite
-  one-hour idle timeout. This fixes Claude Code disconnections caused by the
-  initial hardening's two-minute shared timeout without weakening the shorter
-  OAuth, admin, token-count, and other ordinary API limits. Live Nginx logs
-  showed repeated `upstream timed out` entries on `POST /v1/messages` at the old
-  timeout boundary; after the route-specific reload, that signature stopped.
+- Supplied Nginx templates define no project-specific client, proxy, send,
+  streaming, idle, or lifetime timeout. Streaming locations retain only the
+  buffering and WebSocket directives needed by their protocols.
 - Administrator step-up reauthentication was removed. One valid dashboard
   session covers LLM Debug, sanitized export, provider changes, and IP policy;
   CSRF, Origin, expiry, logout, and password-change revocation remain enforced.

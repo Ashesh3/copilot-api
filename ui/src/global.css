@@ -73,8 +73,7 @@ body {
 }
 
 .json-tree-row,
-.json-tree-closing-row,
-.json-tree-load-more {
+.json-tree-closing-row {
   display: flex;
   box-sizing: border-box;
   width: 100%;
@@ -120,24 +119,9 @@ body {
 }
 
 .json-tree-row code,
-.json-tree-closing-row code,
-.json-tree-load-more button {
+.json-tree-closing-row code {
   font: inherit;
   white-space: pre;
-}
-
-.json-tree-load-more button {
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--color-text-accent);
-  cursor: pointer;
-}
-
-.json-tree-load-more:focus-visible {
-  outline: none;
-  background: var(--color-accent-muted);
-  box-shadow: var(--shadow-inset-selected);
 }
 
 .json-tree.is-wrapped .json-tree-content {

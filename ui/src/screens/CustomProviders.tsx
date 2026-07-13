@@ -68,7 +68,6 @@ interface ProviderFormState {
   apiKey: string
   apiKeyEnv: string
   headers: Array<HeaderRow>
-  timeoutMs: string
   passReasoningEffort: boolean
   models: Array<ModelFormRow>
 }
@@ -105,7 +104,6 @@ function emptyForm(): ProviderFormState {
     apiKey: "",
     apiKeyEnv: "",
     headers: [],
-    timeoutMs: "",
     passReasoningEffort: false,
     models: [emptyModelRow()],
   }
@@ -136,7 +134,6 @@ function formFromProvider(provider: CustomProvider): ProviderFormState {
       key,
       value: "",
     })),
-    timeoutMs: provider.timeoutMs != null ? String(provider.timeoutMs) : "",
     passReasoningEffort: provider.passReasoningEffort ?? false,
     models:
       provider.models.length > 0 ?
@@ -294,16 +291,6 @@ export default function CustomProvidersScreen() {
       }
     }
 
-    let timeoutMs: number | undefined
-    if (form.timeoutMs.trim()) {
-      const parsed = Number(form.timeoutMs.trim())
-      if (!Number.isFinite(parsed)) {
-        toast.error("Timeout must be a number")
-        return
-      }
-      timeoutMs = parsed
-    }
-
     const models: Array<CustomProviderModel> = []
     for (const row of form.models) {
       let dimensions: number | undefined
@@ -347,7 +334,6 @@ export default function CustomProvidersScreen() {
     if (form.authMode === "key") payload.apiKey = form.apiKey.trim()
     if (form.authMode === "env") payload.apiKeyEnv = form.apiKeyEnv.trim()
     if (Object.keys(headers).length > 0) payload.headers = headers
-    if (timeoutMs !== undefined) payload.timeoutMs = timeoutMs
 
     setIsSaving(true)
     try {
@@ -592,13 +578,6 @@ export default function CustomProvidersScreen() {
             </VStack>
           </Card>
 
-          <TextInput
-            label="Timeout (ms)"
-            value={form.timeoutMs}
-            onChange={(value) => setForm((f) => ({ ...f, timeoutMs: value }))}
-            placeholder="30000"
-            isOptional
-          />
           <Switch
             label="Pass reasoning effort to this provider"
             value={form.passReasoningEffort}

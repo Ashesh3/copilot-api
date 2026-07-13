@@ -77,10 +77,7 @@ export async function executeResponsesFallback(
   setRequestContext(c, { provider: "ChatCompletions→Responses" })
 
   const prepared = prepareResponsesFallback(options)
-  consola.debug(
-    "Responses fallback payload:",
-    JSON.stringify(prepared.payload).slice(-400),
-  )
+  consola.debug("Responses fallback payload:", JSON.stringify(prepared.payload))
 
   if (!prepared.payload.stream) {
     return await executeNonStreamingResponsesFallback(c, prepared)

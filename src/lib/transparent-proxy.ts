@@ -103,6 +103,19 @@ export async function isTransparentProxyClientWhitelisted(
 }
 
 export async function transparentProxy(c: Context): Promise<Response> {
+  return await proxyRequest(c, true)
+}
+
+export async function transparentProxyWithCredential(
+  c: Context,
+): Promise<Response> {
+  return await proxyRequest(c, false)
+}
+
+async function proxyRequest(
+  c: Context,
+  requireIpAuthorization: boolean,
+): Promise<Response> {
   const host = normalizeProxyHost(c.req.header("host"))
   if (host === null || !TRANSPARENT_PROXY_HOSTS.has(host)) {
     return c.notFound()
@@ -112,7 +125,10 @@ export async function transparentProxy(c: Context): Promise<Response> {
     return c.notFound()
   }
 
-  if (!(await isTransparentProxyClientWhitelisted(c))) {
+  if (
+    requireIpAuthorization
+    && !(await isTransparentProxyClientWhitelisted(c))
+  ) {
     return c.notFound()
   }
 

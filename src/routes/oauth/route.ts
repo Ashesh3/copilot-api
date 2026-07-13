@@ -1,7 +1,6 @@
 import type { Context, Next } from "hono"
 
 import { Hono } from "hono"
-import { bodyLimit } from "hono/body-limit"
 
 import type { IssuedOAuthTokens } from "~/lib/oauth-store"
 
@@ -12,24 +11,24 @@ import {
 } from "~/lib/credential-resolver"
 import {
   extractClientIp,
+  isIpBanned,
   isIpBlocked,
   recordFailedAttempt,
 } from "~/lib/ip-blocker"
 import { getOAuthStore } from "~/lib/oauth-store"
+import { resolveProtectedCredential } from "~/lib/protected-credential"
 import { secureHtml } from "~/lib/secure-html"
 import {
   isAllowedTransparentProxyRequest,
   isTransparentProxyClientWhitelisted,
   transparentProxy,
+  transparentProxyWithCredential,
 } from "~/lib/transparent-proxy"
 import { getUsageResponse } from "~/lib/usage-tracker"
 import { getFeatureFlags } from "~/routes/feature-flags/store"
 
 const CLAUDE_CODE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 const MANUAL_REDIRECT_URI = "https://platform.claude.com/oauth/code/callback"
-const MAX_OAUTH_QUERY_LENGTH = 4096
-const MAX_OAUTH_BODY_BYTES = 16 * 1024
-const MAX_OAUTH_FIELD_LENGTH = 2048
 const ALLOWED_SCOPES = new Set([
   "user:inference",
   "user:profile",
@@ -79,10 +78,9 @@ function isAllowedRedirectUri(value: string): boolean {
 }
 
 // Validation deliberately checks the complete OAuth binding in one place.
-// eslint-disable-next-line complexity
+
 function parseAuthorizationRequest(c: Context): AuthorizationRequest | null {
   const url = new URL(c.req.url)
-  if (url.search.length > MAX_OAUTH_QUERY_LENGTH) return null
   const requiredParameters = [
     "client_id",
     "redirect_uri",
@@ -115,7 +113,6 @@ function parseAuthorizationRequest(c: Context): AuthorizationRequest | null {
     || !isAllowedRedirectUri(redirectUri)
     || !areAllowedScopes(scopes)
     || stateParam.length < 16
-    || stateParam.length > 512
     || codeChallengeMethod !== "S256"
     || !/^[\w-]{43}$/.test(codeChallenge)
   ) {
@@ -134,15 +131,7 @@ function parseAuthorizationRequest(c: Context): AuthorizationRequest | null {
 async function readOAuthBody(
   c: Context,
 ): Promise<Record<string, string> | null> {
-  const contentLength = Number(c.req.header("content-length") ?? "0")
-  if (Number.isFinite(contentLength) && contentLength > MAX_OAUTH_BODY_BYTES) {
-    return null
-  }
-
   const rawBody = await c.req.text().catch(() => "")
-  if (new TextEncoder().encode(rawBody).byteLength > MAX_OAUTH_BODY_BYTES) {
-    return null
-  }
   const contentType = c.req.header("content-type")?.toLowerCase() ?? ""
   if (contentType.includes("application/x-www-form-urlencoded")) {
     const parameters = new URLSearchParams(rawBody)
@@ -173,18 +162,8 @@ async function readOAuthBody(
 
 function filterOAuthFields(
   fields: Record<string, string>,
-): Record<string, string> | null {
-  const entries = Object.entries(fields)
-  if (
-    entries.length > 16
-    || entries.some(
-      ([key, value]) =>
-        key.length > 64 || value.length > MAX_OAUTH_FIELD_LENGTH,
-    )
-  ) {
-    return null
-  }
-  return Object.fromEntries(entries)
+): Record<string, string> {
+  return Object.fromEntries(Object.entries(fields))
 }
 
 function oauthError(
@@ -225,15 +204,25 @@ function tokenResponse(c: Context, tokens: IssuedOAuthTokens): Response {
   })
 }
 
+async function resolveScopedOAuthCredential(
+  request: Request,
+  scopes: ReadonlyArray<string>,
+) {
+  const credential = await resolveRequestCredential(request)
+  return (
+      credential?.kind === "oauth" && credentialHasScopes(credential, scopes)
+    ) ?
+      credential
+    : null
+}
+
 function requireOAuthScopes(scopes: ReadonlyArray<string>) {
   return async (c: Context, next: Next): Promise<Response | undefined> => {
-    const credential = await resolveRequestCredential(c.req.raw)
-    if (
-      credential?.kind !== "oauth"
-      || !credentialHasScopes(credential, scopes)
-    ) {
-      return oauthUnauthorized(c)
-    }
+    const auth = await resolveProtectedCredential(
+      c.req.raw,
+      async () => await resolveScopedOAuthCredential(c.req.raw, scopes),
+    )
+    if (auth.status !== "authorized") return oauthUnauthorized(c)
     await next()
     c.header("Cache-Control", "no-store")
   }
@@ -292,27 +281,13 @@ async function handleRefreshTokenGrant(
  */
 function oauthScopeGuard(...scopes: Array<string>) {
   return async (c: Context, next: Next): Promise<Response | undefined> => {
-    const clientIp = extractClientIp(c)
-
-    if (clientIp !== null && isIpBlocked(clientIp)) {
-      return oauthUnauthorized(c)
-    }
-
-    const credential = await resolveRequestCredential(c.req.raw)
-    if (
-      credential?.kind === "oauth"
-      && credentialHasScopes(credential, scopes)
-    ) {
-      await next()
-      c.header("Cache-Control", "no-store")
-      return
-    }
-
-    if (!credential && clientIp !== null) {
-      recordFailedAttempt(clientIp)
-    }
-
-    return oauthUnauthorized(c)
+    const auth = await resolveProtectedCredential(
+      c.req.raw,
+      async () => await resolveScopedOAuthCredential(c.req.raw, scopes),
+    )
+    if (auth.status !== "authorized") return oauthUnauthorized(c)
+    await next()
+    c.header("Cache-Control", "no-store")
   }
 }
 
@@ -325,13 +300,6 @@ const oauthFileUploadGuard = oauthScopeGuard("user:file_upload")
 // --- Browser routes: mounted at /oauth ---
 
 export const oauthBrowserRoutes = new Hono()
-oauthBrowserRoutes.use(
-  "/authorize",
-  bodyLimit({
-    maxSize: MAX_OAUTH_BODY_BYTES,
-    onError: (c) => oauthTextError(c, "Invalid OAuth authorization request"),
-  }),
-)
 
 // GET /oauth/authorize — show login form requiring API key
 oauthBrowserRoutes.get("/authorize", (c) => {
@@ -403,9 +371,6 @@ oauthBrowserRoutes.get("/code/success", (c) => {
 oauthBrowserRoutes.get("/code/callback", (c) => {
   const code = c.req.query("code") ?? ""
   const stateParam = c.req.query("state")
-  if (code.length > MAX_OAUTH_FIELD_LENGTH || (stateParam?.length ?? 0) > 512) {
-    return oauthTextError(c, "Invalid OAuth callback")
-  }
   const manualCode = stateParam ? `${code}#${stateParam}` : code
 
   return secureHtml(
@@ -417,13 +382,6 @@ oauthBrowserRoutes.get("/code/callback", (c) => {
 // --- Token routes: mounted at /v1/oauth ---
 
 export const oauthTokenRoutes = new Hono()
-oauthTokenRoutes.use(
-  "*",
-  bodyLimit({
-    maxSize: MAX_OAUTH_BODY_BYTES,
-    onError: (c) => oauthError(c, "invalid_request"),
-  }),
-)
 
 // GET /v1/oauth/hello — connectivity check
 oauthTokenRoutes.get("/hello", (c) => c.json({ status: "ok" }))
@@ -758,17 +716,42 @@ oauthApiRoutes.post(
   (c) => c.json({ success: true }),
 )
 
-// Unknown /api/* calls from redirected Claude/Anthropic hosts are proxied once
-// the source IP has authenticated. Every other unknown route is denied.
+// Unknown /api/* calls from redirected Claude/Anthropic hosts require an
+// inference credential or credential-free IP authorization.
 oauthApiRoutes.all("*", async (c) => {
-  if (
-    isAllowedTransparentProxyRequest(c)
-    && (await isTransparentProxyClientWhitelisted(c))
-  ) {
+  if (!isAllowedTransparentProxyRequest(c)) {
+    return c.notFound()
+  }
+
+  const clientIp = extractClientIp(c)
+  const credentialSupplied = [
+    "authorization",
+    "x-api-key",
+    "x-goog-api-key",
+  ].some((header) => c.req.raw.headers.has(header))
+
+  if (credentialSupplied) {
+    const credential = await resolveRequestCredential(c.req.raw, [
+      "user:inference",
+    ])
+    if (!credential) {
+      if (clientIp !== null) recordFailedAttempt(clientIp)
+      return oauthUnauthorized(c)
+    }
+    if (clientIp !== null && isIpBlocked(clientIp)) {
+      return oauthUnauthorized(c)
+    }
+    return await transparentProxyWithCredential(c)
+  }
+
+  if (await isTransparentProxyClientWhitelisted(c)) {
     return await transparentProxy(c)
   }
 
-  return c.notFound()
+  if (clientIp !== null && !isIpBanned(clientIp)) {
+    recordFailedAttempt(clientIp)
+  }
+  return oauthUnauthorized(c)
 })
 
 // --- Authorize page HTML ---

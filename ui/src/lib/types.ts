@@ -129,7 +129,6 @@ export interface CustomProvider {
   apiKeyEnv?: string
   headerNames: Array<string>
   models: Array<CustomProviderModel>
-  timeoutMs?: number
   passReasoningEffort?: boolean
 }
 
@@ -269,7 +268,6 @@ export interface SettingsData {
   host: string
   authEnabled: boolean
   multiToken: boolean
-  rateLimitSeconds: number | null
   sentryEnabled: boolean
   groqEnabled: boolean
   dataDir: string

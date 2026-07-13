@@ -15,6 +15,7 @@ import { ensureModelRoutingOverridesLoaded } from "./lib/model-routing"
 import { ensureModelSettingsLoaded } from "./lib/model-settings"
 import { generateVirtualModels } from "./lib/model-suffix"
 import { ensurePaths, setEnvOnlyTokens } from "./lib/paths"
+import { resolveProtectedCredential } from "./lib/protected-credential"
 import { initProxyFromEnv } from "./lib/proxy"
 import { initSentry, setupSentryShutdown } from "./lib/sentry"
 import { generateEnvScript } from "./lib/shell"
@@ -25,9 +26,8 @@ import { cacheModels } from "./lib/utils"
 import { isDirectConnectEnabled } from "./routes/direct-connect/route"
 import {
   DIRECT_CONNECT_WS_PATH,
+  getDirectConnectSession,
   handleDirectConnectWebSocket,
-  releaseDirectConnectConnection,
-  reserveDirectConnectConnection,
 } from "./routes/direct-connect/ws-handler"
 import { remoteWebSocket } from "./routes/remote/websocket"
 import { tryUpgradeRemoteWebSocket } from "./routes/remote/ws-security"
@@ -49,8 +49,6 @@ interface RunServerOptions {
   verbose: boolean
   accountType: string
   manual: boolean
-  rateLimit?: number
-  rateLimitWait: boolean
   githubToken?: string
   claudeCode: boolean
   showToken: boolean
@@ -227,11 +225,16 @@ async function initializePersistentConfig(): Promise<void> {
   await ensureModelRoutingOverridesLoaded()
 }
 
-async function isDirectConnectUpgradeAuthorized(
+export async function isDirectConnectUpgradeAuthorized(
   request: Request,
-): Promise<boolean> {
-  if (!isDirectConnectEnabled()) return false
-  return (await resolveRequestCredential(request, ["user:inference"])) !== null
+): Promise<"authorized" | "blocked" | "disabled" | "unauthorized"> {
+  if (!isDirectConnectEnabled()) return "disabled"
+  const auth = await resolveProtectedCredential(
+    request,
+    async () => await resolveRequestCredential(request, ["user:inference"]),
+  )
+  if (auth.status === "authorized") return "authorized"
+  return auth.status === "blocked" ? "blocked" : "unauthorized"
 }
 
 function setTrustedPeerIp(
@@ -241,6 +244,72 @@ function setTrustedPeerIp(
   const peerIp = bunServer.requestIP(request)?.address
   request.headers.delete("x-copilot-peer-ip")
   if (peerIp) request.headers.set("x-copilot-peer-ip", peerIp)
+}
+
+interface StartFetchServer {
+  requestIP(req: Request): { address: string } | null
+  upgrade(req: Request, options?: object): boolean
+}
+
+// Upgrade dispatch covers four independently secured WebSocket protocols.
+
+export async function handleStartFetch(
+  req: Request,
+  bunServer: StartFetchServer,
+): Promise<Response> {
+  // Never trust this internal header from a client. Derive it from Bun's
+  // socket peer for HTTP and WebSocket requests alike.
+  setTrustedPeerIp(req, bunServer)
+  // WebSocket upgrade must happen before Hono routing
+  if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
+    const voiceResult = await tryUpgradeVoiceWebSocket(req, bunServer)
+    if (voiceResult === "upgraded") {
+      return undefined as unknown as Response
+    }
+    if (voiceResult === "auth_failed") {
+      return new Response("Unauthorized", { status: 401 })
+    }
+    const wsResult = await tryUpgradeResponsesWebSocket(req, bunServer)
+    if (wsResult === "upgraded") {
+      return undefined as unknown as Response
+    }
+    if (wsResult === "auth_failed") {
+      return new Response("Unauthorized", { status: 401 })
+    }
+    // Direct Connect WebSocket upgrade
+    const url = new URL(req.url)
+    if (url.pathname.startsWith(DIRECT_CONNECT_WS_PATH + "/")) {
+      const directConnectAuth = await isDirectConnectUpgradeAuthorized(req)
+      if (
+        directConnectAuth === "blocked"
+        || directConnectAuth === "unauthorized"
+      ) {
+        return new Response("Unauthorized", { status: 401 })
+      }
+      if (directConnectAuth !== "authorized") {
+        return new Response("Not Found", { status: 404 })
+      }
+      const sessionId = url.pathname.slice(DIRECT_CONNECT_WS_PATH.length + 1)
+      if (sessionId && getDirectConnectSession(sessionId)) {
+        const upgraded = bunServer.upgrade(req, {
+          data: {
+            type: "direct-connect" as const,
+            sessionId,
+          },
+        })
+        if (upgraded) return undefined as unknown as Response
+      }
+      return new Response("Not Found", { status: 404 })
+    }
+    const remoteResult = await tryUpgradeRemoteWebSocket(req, bunServer)
+    if (remoteResult === "upgraded") {
+      return undefined as unknown as Response
+    }
+    if (remoteResult === "auth_failed") {
+      return new Response("Unauthorized", { status: 401 })
+    }
+  }
+  return server.fetch(req)
 }
 
 // Combined WebSocket handler that dispatches by the authenticated connection type.
@@ -381,7 +450,6 @@ const combinedWebSocket = {
   },
 }
 
-// eslint-disable-next-line max-lines-per-function
 export async function runServer(options: RunServerOptions): Promise<void> {
   initSentry()
 
@@ -408,8 +476,6 @@ export async function runServer(options: RunServerOptions): Promise<void> {
   }
 
   state.manualApprove = options.manual
-  state.rateLimitSeconds = options.rateLimit
-  state.rateLimitWait = options.rateLimitWait
   state.showToken = options.showToken
   state.debug = options.debug
   state.verbose = options.verbose
@@ -452,75 +518,8 @@ export async function runServer(options: RunServerOptions): Promise<void> {
   Bun.serve({
     port: options.port,
     hostname: options.host,
-    idleTimeout: 255,
-    // Upgrade dispatch covers four independently secured WebSocket protocols.
-    // eslint-disable-next-line complexity
-    async fetch(req, bunServer) {
-      // Never trust this internal header from a client. Derive it from Bun's
-      // socket peer for HTTP and WebSocket requests alike.
-      setTrustedPeerIp(req, bunServer)
-      // WebSocket upgrade must happen before Hono routing
-      if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
-        const voiceResult = await tryUpgradeVoiceWebSocket(req, bunServer)
-        if (voiceResult === "upgraded") {
-          return undefined as unknown as Response
-        }
-        if (voiceResult === "auth_failed") {
-          return new Response("Unauthorized", { status: 401 })
-        }
-        if (voiceResult === "limit_reached") {
-          return new Response("Too Many Requests", { status: 429 })
-        }
-        const wsResult = await tryUpgradeResponsesWebSocket(req, bunServer)
-        if (wsResult === "upgraded") {
-          return undefined as unknown as Response
-        }
-        if (wsResult === "auth_failed") {
-          return new Response("Unauthorized", { status: 401 })
-        }
-        if (wsResult === "limit_reached") {
-          return new Response("Too Many Requests", { status: 429 })
-        }
-        // Direct Connect WebSocket upgrade
-        const url = new URL(req.url)
-        if (url.pathname.startsWith(DIRECT_CONNECT_WS_PATH + "/")) {
-          if (!(await isDirectConnectUpgradeAuthorized(req))) {
-            return new Response("Not Found", { status: 404 })
-          }
-          const sessionId = url.pathname.slice(
-            DIRECT_CONNECT_WS_PATH.length + 1,
-          )
-          if (sessionId && reserveDirectConnectConnection(sessionId)) {
-            const upgraded = bunServer.upgrade(req, {
-              data: {
-                type: "direct-connect" as const,
-                sessionId,
-              },
-            })
-            if (upgraded) return undefined as unknown as Response
-            releaseDirectConnectConnection(sessionId)
-          }
-          return new Response("Not Found", { status: 404 })
-        }
-        const remoteResult = await tryUpgradeRemoteWebSocket(req, bunServer)
-        if (remoteResult === "upgraded") {
-          return undefined as unknown as Response
-        }
-        if (remoteResult === "auth_failed") {
-          return new Response("Unauthorized", { status: 401 })
-        }
-        if (remoteResult === "limit_reached") {
-          return new Response("Too Many Requests", { status: 429 })
-        }
-      }
-      return server.fetch(req)
-    },
-    websocket: {
-      ...combinedWebSocket,
-      maxPayloadLength: 4 * 1024 * 1024,
-      backpressureLimit: 1024 * 1024,
-      closeOnBackpressureLimit: true,
-    },
+    fetch: handleStartFetch,
+    websocket: combinedWebSocket,
   })
 
   const host = options.host ?? "localhost"
@@ -568,18 +567,6 @@ export const start = defineCommand({
       type: "boolean",
       default: false,
       description: "Enable manual request approval",
-    },
-    "rate-limit": {
-      alias: "r",
-      type: "string",
-      description: "Rate limit in seconds between requests",
-    },
-    wait: {
-      alias: "w",
-      type: "boolean",
-      default: false,
-      description:
-        "Wait instead of error when rate limit is hit. Has no effect if rate limit is not set",
     },
     "github-token": {
       alias: "g",
@@ -629,18 +616,11 @@ export const start = defineCommand({
     },
   },
   run({ args }) {
-    const rateLimitRaw = args["rate-limit"]
-    const rateLimit =
-      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-      rateLimitRaw === undefined ? undefined : Number.parseInt(rateLimitRaw, 10)
-
     return runServer({
       port: Number.parseInt(args.port, 10),
       verbose: args.verbose,
       accountType: args["account-type"],
       manual: args.manual,
-      rateLimit,
-      rateLimitWait: args.wait,
       githubToken: args["github-token"],
       claudeCode: args["claude-code"],
       showToken: args["show-token"],

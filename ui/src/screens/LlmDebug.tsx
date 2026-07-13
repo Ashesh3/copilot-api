@@ -67,7 +67,6 @@ interface LlmDebugListResponse {
   count: number
   entries: Array<LlmDebugEntry>
   generatedAt: string
-  retentionMs: number
 }
 
 type DebugRow = LlmDebugEntry & Record<string, unknown>
@@ -91,16 +90,6 @@ function fmtBytes(bytes: number | undefined): string {
 
 function totalBytes(entry: LlmDebugEntry): number {
   return entry.requestBodyBytes + (entry.responseBodyBytes ?? 0)
-}
-
-function fmtDuration(ms: number): string {
-  const sec = Math.round(ms / 1000)
-  if (sec < 60) return `${sec}s`
-  const min = Math.round(sec / 60)
-  if (min < 60) return `${min}m`
-  const hr = Math.round(min / 60)
-  if (hr < 48) return `${hr}h`
-  return `${Math.round(hr / 24)}d`
 }
 
 function buildCurl(request: LlmDebugDetail["request"]): string {
@@ -171,7 +160,6 @@ function LlmDebugListView() {
   const [isExporting, setIsExporting] = useState(false)
 
   const entries = useMemo(() => data?.entries ?? [], [data])
-  const retentionMs = data?.retentionMs
 
   const filtered = useMemo<Array<DebugRow>>(() => {
     const needle = query.trim().toLowerCase()
@@ -404,11 +392,6 @@ function LlmDebugListView() {
                 `${entries.length} ${entries.length === 1 ? "entry" : "entries"}`
               : `${filtered.length} of ${entries.length} entries`}
             </Text>
-            {retentionMs === undefined ? null : (
-              <Text type="supporting" color="secondary">
-                Retained for {fmtDuration(retentionMs)}
-              </Text>
-            )}
           </HStack>
 
           {filtered.length === 0 ?

@@ -139,6 +139,28 @@ test("adds reasoning defaults on the Google AI responses path", async () => {
   expect(lastResponsesPayload?.include).toContain("reasoning.encrypted_content")
 })
 
+test("forwards Google maxOutputTokens above the advertised model limit", async () => {
+  const response = await server.request(
+    "/v1/models/gpt-4o-mini:generateContent",
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: "Hello" }] }],
+        generationConfig: { maxOutputTokens: 2048 },
+      }),
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(
+    (lastResponsesPayload as Record<string, unknown> | undefined)
+      ?.max_output_tokens,
+  ).toBe(2048)
+})
+
 test("adds prompt caching markers on the Google AI responses path", async () => {
   const response = await server.request(
     "/v1/models/gpt-4o-mini:generateContent",

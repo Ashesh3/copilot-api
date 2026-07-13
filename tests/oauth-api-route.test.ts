@@ -5,6 +5,7 @@ import os from "node:os"
 import path from "node:path"
 
 import { resolveCredential } from "../src/lib/credential-resolver"
+import { isIpBlocked, resetIpSecurityForTest } from "../src/lib/ip-blocker"
 import {
   createPkceChallenge,
   OAuthStore,
@@ -44,6 +45,7 @@ function authorizationQuery(
 
 beforeEach(async () => {
   state.apiKeyAuth = "test-secret-key"
+  resetIpSecurityForTest()
   consola.warn = mock(() => {}) as unknown as typeof consola.warn
   temporaryDirectory = await fs.mkdtemp(
     path.join(os.tmpdir(), "copilot-oauth-"),
@@ -53,6 +55,7 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  resetIpSecurityForTest()
   setOAuthStoreForTest(null)
   const directory = temporaryDirectory
   temporaryDirectory = undefined
@@ -187,6 +190,45 @@ test("invalid OAuth API key response retains the callback origin", async () => {
   )
 })
 
+test("OAuth gateway and scope failures share the IP tracker", async () => {
+  const clientIp = "198.51.100.90"
+  const peer = { "x-copilot-peer-ip": clientIp }
+  const query = authorizationQuery()
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const response = await server.request(
+      `/oauth/authorize?${query.toString()}`,
+      {
+        method: "POST",
+        headers: {
+          ...peer,
+          "content-type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({ api_key: "invalid-key" }).toString(),
+      },
+    )
+    expect(response.status).toBe(401)
+  }
+
+  const wrongScope = await server.request("/api/oauth/profile", {
+    headers: {
+      ...peer,
+      "x-api-key": "test-secret-key",
+    },
+  })
+  expect(wrongScope.status).toBe(401)
+  expect(isIpBlocked(clientIp)).toBe(true)
+
+  const tokens = await authorizeAndExchange()
+  const banned = await server.request("/api/oauth/profile", {
+    headers: {
+      ...peer,
+      "x-api-key": tokens.access_token,
+    },
+  })
+  expect(banned.status).toBe(401)
+})
+
 async function authorizeAndExchange(): Promise<{
   access_token: string
   refresh_token: string
@@ -248,8 +290,8 @@ test("rejects arbitrary refresh tokens without disclosing the gateway key", asyn
   expect(text).not.toContain("test-secret-key")
 })
 
-test("rejects oversized or unsupported OAuth token requests before parsing", async () => {
-  const oversizedResponse = await server.request("/v1/oauth/token", {
+test("parses large OAuth fields and still rejects unsupported content types", async () => {
+  const largeFieldResponse = await server.request("/v1/oauth/token", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -258,9 +300,9 @@ test("rejects oversized or unsupported OAuth token requests before parsing", asy
       client_id: oauthClientId,
     }),
   })
-  expect(oversizedResponse.status).toBe(400)
-  expect(await oversizedResponse.json()).toEqual({ error: "invalid_request" })
-  expect(oversizedResponse.headers.get("cache-control")).toBe("no-store")
+  expect(largeFieldResponse.status).toBe(400)
+  expect(await largeFieldResponse.json()).toEqual({ error: "invalid_grant" })
+  expect(largeFieldResponse.headers.get("cache-control")).toBe("no-store")
 
   const unsupportedResponse = await server.request("/v1/oauth/token", {
     method: "POST",

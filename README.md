@@ -19,8 +19,8 @@ workflows.
 > Automated or high-volume Copilot traffic can trigger abuse controls or account
 > restrictions. Follow [GitHub's Acceptable Use Policies](https://docs.github.com/site-policy/acceptable-use-policies/github-acceptable-use-policies)
 > and [GitHub's terms for Copilot](https://docs.github.com/site-policy/github-terms/github-terms-for-additional-products-and-features),
-> apply conservative rate limits, and do not use this project to evade service
-> limits.
+> respect upstream service policies, and do not use this project to evade
+> upstream restrictions.
 
 ## Contents
 
@@ -108,7 +108,8 @@ Responses compaction.
 - Uses multiple GitHub accounts only when at least two tokens are configured.
 - Builds a per-model eligible-account index, supports per-account model
   enablement, keeps Claude Code sessions on a stable account, refreshes tokens,
-  and performs bounded failover for authentication, quota, and network errors.
+  and performs one alternate-account failover for upstream authentication,
+  quota, and network errors.
 
 ### Operations
 
@@ -116,10 +117,9 @@ Responses compaction.
   replay, model redirects/settings/routing, custom providers, replacements,
   feature flags, IP allowlists, and configuration export.
 - Current GitHub Copilot quota reporting through both the CLI and `GET /usage`.
-- Seven-day local request/token aggregates plus separate lifetime totals for
-  dashboard utilization views.
-- Manual approval for primary generation endpoints and token-bucket rate
-  limiting for supported generation and compaction transports.
+- Complete local minute/model request and token aggregates plus lifetime totals
+  for dashboard utilization views.
+- Manual approval for primary generation endpoints.
 - Optional Sentry tracing.
 
 ### Client compatibility
@@ -267,10 +267,12 @@ x-api-key: replace-with-gateway-key
 x-goog-api-key: replace-with-gateway-key
 ```
 
-Missing, invalid, expired, and blocked data-plane credentials receive a bounded
-`401` response with `Cache-Control: no-store`. Repeated failed authentication on
-the main LLM routes is strike-tracked by normalized client IP. Authentication
-success does not automatically add that IP to the managed allowlist.
+Missing, invalid, expired, and blocked data-plane credentials receive a uniform
+`401` response with `Cache-Control: no-store`. Every failed protected credential
+check is recorded by normalized client IP. The third failure in a rolling
+24-hour window bans that IP for 24 hours; banned requests still receive `401`.
+Successful authentication does not erase prior failures or add the IP to the
+managed allowlist.
 
 `config.json` also supports `auth.apiKeys`. When no startup key is active, those
 keys protect globally guarded API routes. If neither source configures a gateway
@@ -349,7 +351,6 @@ environment-variable reference over storing a provider key directly:
       "baseUrl": "https://your-domain.example/v1",
       "apiKeyEnv": "CUSTOM_PROVIDER_API_KEY",
       "headers": {},
-      "timeoutMs": 120000,
       "models": [
         {
           "id": "example-chat-model",
@@ -369,7 +370,7 @@ environment-variable reference over storing a provider key directly:
 }
 ```
 
-Provider coverage is intentionally limited:
+Provider coverage is intentionally scoped:
 
 | Provider model kind | Client-facing routes |
 | --- | --- |
@@ -481,7 +482,7 @@ These are compatibility implementations, not hosted identity or cloud services.
   session-bound WebSocket ticket; a session ID is not authorization.
 - Direct Connect compatibility stubs are disabled by default. When explicitly
   enabled for private development, `/sessions` and `/ws/direct/:sessionId`
-  require an inference-capable credential and remain resource-limited.
+  require an inference-capable credential.
 - GrowthBook feature evaluation and the feature-flag UI support client behavior
   overrides on private networks where the client source address is preserved.
 
@@ -504,8 +505,8 @@ transcription. The voice WebSocket endpoint is
 `/api/ws/speech_to_text/voice_stream`. It authenticates the upgrade with an
 OAuth `voice:transcribe` entitlement (derived for Claude Code from
 `user:inference`) before allocating audio state. It also validates any supplied
-Origin and enforces frame, total-audio, duration, idle, connection, and
-per-principal transcription-budget limits.
+Origin. The gateway does not impose voice frame, audio, duration, idle,
+connection, or hourly traffic caps.
 
 Codex Desktop calls must also satisfy gateway-key or managed/session-IP
 authorization. For authenticated non-local Desktop routing, use the supplied
@@ -514,7 +515,8 @@ The public Codex template requires a bearer before proxying; IP-only fallback
 is reserved for private networks with trustworthy source addresses.
 
 Advanced TLS and proxy templates live under `nginx/`, including WebSocket
-upgrade headers, disabled response buffering, and long streaming timeouts.
+upgrade headers and disabled response buffering without project-defined
+request pacing, body caps, or proxy timeouts.
 
 ## CLI reference
 
@@ -539,8 +541,6 @@ Run a command with `--help` to inspect the installed version's current options.
 | `--verbose` | `-v` | off | Enable verbose logging |
 | `--account-type <type>` | `-a` | `individual` | `individual`, `business`, or `enterprise` Copilot routing |
 | `--manual` |  | off | Prompt before forwarding Chat Completions, Messages, Responses HTTP, and Google requests |
-| `--rate-limit <seconds>` | `-r` | unset | Token-bucket pacing for Chat Completions, Messages, Responses HTTP/compact/WebSocket, and Google requests |
-| `--wait` | `-w` | off | Wait instead of erroring when the configured rate limit is hit |
 | `--github-token <token>` | `-g` | unset | Use an existing GitHub token for this process |
 | `--claude-code` | `-c` | off | Generate a Claude Code launch command from the current model list |
 | `--show-token` |  | off | Print full GitHub and Copilot tokens; sensitive troubleshooting only |
@@ -577,7 +577,7 @@ The default data directory is `~/.local/share/copilot-api`. Override it with
 | `oauth_tokens.json` | SHA-256 digests and metadata for OAuth codes, token families, and generated inference credentials |
 | `admin_auth.json` | Argon2id administrator password hash and session version |
 | `admin_sessions.json` | Digested server-side administrator sessions and CSRF state |
-| `usage.json` | Seven-day minute/model aggregates and separate lifetime totals |
+| `usage.json` | Complete minute/model aggregates and separate lifetime totals |
 
 When GitHub tokens come from environment variables or `--github-token`, the
 process uses environment-only token mode and does not read or write GitHub token
@@ -595,7 +595,6 @@ files.
 | `COPILOT_API_ENABLE_DIRECT_CONNECT` | Direct and Docker | Set to `true` only to enable the authenticated experimental Direct Connect routes; disabled by default |
 | `COPILOT_INFERENCE_CORS_ORIGINS` | Direct and Docker | Optional comma-separated exact browser origins for inference-only CORS; disabled by default |
 | `COPILOT_VOICE_ORIGIN` | Direct and Docker | Optional exact browser Origin for the Claude voice WebSocket; supplied Origins must match |
-| `COPILOT_VOICE_BUDGET_BYTES_PER_HOUR` | Direct and Docker | Optional per-principal hourly voice-audio allowance in bytes |
 | `SENTRY_DSN` | Direct and Docker | Enable Sentry tracing and error reporting |
 | `SENTRY_TRACES_SAMPLE_RATE` | Direct and Docker | Sentry trace sample rate |
 | `SENTRY_AI_RECORD_INPUTS` | Direct and Docker | Set to `false` to stop recording AI inputs/outputs in Sentry spans |
@@ -733,7 +732,8 @@ The proxy must:
   `/responses` and `/v1/responses` while retaining normal `POST` handling;
 - disable request/response buffering for streaming;
 - allow long-lived SSE and WebSocket connections;
-- apply finite, route-specific body and I/O limits; and
+- avoid local request pacing, connection caps, finite body caps, and
+  client/proxy/send timeouts; and
 - forward the gateway credential without logging it.
 
 The application reads forwarding headers only when the actual Bun socket peer
@@ -757,11 +757,11 @@ dashboard only on its intended administrator hostname, and exact
 setting `COPILOT_API_ENABLE_DIRECT_CONNECT=true` does not make it appropriate
 for a public hostname.
 
-Templates are provided in `nginx/sites-available/` and
-`nginx/snippets/proxy-limits.conf.template`. Replace every template placeholder,
-keep `--api-key-auth` enabled, and validate the generated server configuration
-before exposing it. See [nginx/README.md](nginx/README.md) for the template
-matrix, installation checks, Cloudflare CIDR maintenance, and WebSocket probes.
+Templates are provided in `nginx/sites-available/`. Replace every template
+placeholder, keep `--api-key-auth` enabled, and validate the generated server
+configuration before exposing it. See [nginx/README.md](nginx/README.md) for
+the template matrix, installation checks, Cloudflare CIDR maintenance, and
+WebSocket probes.
 
 ## Security and privacy
 
@@ -822,11 +822,10 @@ with a valid inference-capable credential.
 
 ### Claude Code reports `Connection closed mid-response`
 
-Check the Nginx error log for `upstream timed out` on `POST /v1/messages`. The
-shared proxy snippet intentionally uses short timeouts for ordinary APIs, but
-the current public and Claude hostname templates give authenticated generation
-streams a finite one-hour idle window. Do not collapse those locations back
-into the shared two-minute proxy block.
+Check the Nginx error log for `upstream timed out` on `POST /v1/messages`.
+Current templates define no project-specific client, proxy, send, idle, or
+lifetime timeout. If that message appears, remove stale timeout directives from
+the rendered configuration and reload Nginx.
 
 ### The dashboard asks for the administrator password again
 

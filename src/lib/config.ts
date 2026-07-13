@@ -39,7 +39,6 @@ export interface CustomProviderConfig {
   apiKeyEnv?: string
   headers?: Record<string, string>
   models: Array<CustomProviderModelConfig>
-  timeoutMs?: number
   passReasoningEffort?: boolean
 }
 

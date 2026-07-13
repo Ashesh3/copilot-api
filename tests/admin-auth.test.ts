@@ -6,9 +6,14 @@ import {
   ADMIN_SESSION_IDLE_MS,
   ADMIN_SESSION_COOKIE,
   setAdminAuthTestMode,
-  isAdminLoginRateLimited,
   setAdminAuthClockForTest,
 } from "../src/lib/admin-auth"
+import {
+  isIpBlocked,
+  leaseIp,
+  recordFailedAttempt,
+  resetIpSecurityForTest,
+} from "../src/lib/ip-blocker"
 import { state } from "../src/lib/state"
 import { server } from "../src/server"
 
@@ -51,6 +56,7 @@ async function setup(): Promise<AdminCookies> {
 
 beforeEach(() => {
   setAdminAuthTestMode(true)
+  resetIpSecurityForTest()
   state.apiKeyAuth = GATEWAY_KEY
   process.env.COPILOT_ADMIN_ORIGIN = ORIGIN
 })
@@ -60,6 +66,7 @@ afterEach(() => {
   state.apiKeyAuth = undefined
   delete process.env.COPILOT_ADMIN_ORIGIN
   setAdminAuthClockForTest()
+  resetIpSecurityForTest()
 })
 
 test("first admin setup requires gateway key and a strong password", async () => {
@@ -197,30 +204,240 @@ test("remote and code launcher pages require the administrator cookie", async ()
   expect(sessionLink.headers.get("location")).toBe("/remote?session=cse_abc123")
 })
 
-test("repeated failed admin logins are bounded by a per-peer lockout", async () => {
-  await setup()
+test("setup and login credential failures share the IP tracker", async () => {
   const headers = {
     "content-type": "application/json",
     origin: ORIGIN,
     "x-copilot-peer-ip": "198.51.100.77",
   }
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    const response = await server.request("/dashboard/auth/login", {
+
+  const wrongSetup = await server.request("/dashboard/auth/setup", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ gatewayKey: "wrong", password: ADMIN_PASSWORD }),
+  })
+  expect(wrongSetup.status).toBe(401)
+
+  const configured = await server.request("/dashboard/auth/setup", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      gatewayKey: GATEWAY_KEY,
+      password: ADMIN_PASSWORD,
+    }),
+  })
+  expect(configured.status).toBe(201)
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const wrongLogin = await server.request("/dashboard/auth/login", {
       method: "POST",
       headers,
       body: JSON.stringify({ gatewayKey: GATEWAY_KEY, password: "wrong" }),
     })
-    expect(response.status).toBe(401)
+    expect(wrongLogin.status).toBe(401)
   }
-  expect(
-    isAdminLoginRateLimited(new Request("https://example.test", { headers })),
-  ).toBe(true)
-  const correctButLocked = await server.request("/dashboard/auth/login", {
+
+  expect(isIpBlocked("198.51.100.77")).toBe(true)
+  const correctButBanned = await server.request("/dashboard/auth/login", {
     method: "POST",
     headers,
     body: JSON.stringify({ gatewayKey: GATEWAY_KEY, password: ADMIN_PASSWORD }),
   })
-  expect(correctButLocked.status).toBe(401)
+  expect(correctButBanned.status).toBe(401)
+})
+
+test("missing setup credential fields count as failed attempts", async () => {
+  for (const [clientIp, body] of [
+    ["198.51.100.79", { password: ADMIN_PASSWORD }],
+    ["198.51.100.80", { gatewayKey: GATEWAY_KEY }],
+  ] as const) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const response = await server.request("/dashboard/auth/setup", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: ORIGIN,
+          "x-copilot-peer-ip": clientIp,
+        },
+        body: JSON.stringify(body),
+      })
+      expect(response.status).toBe(400)
+    }
+    expect(isIpBlocked(clientIp)).toBe(true)
+  }
+})
+
+test("missing login password counts as a failed attempt", async () => {
+  await setup()
+  const clientIp = "198.51.100.81"
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const response = await server.request("/dashboard/auth/login", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: ORIGIN,
+        "x-copilot-peer-ip": clientIp,
+      },
+      body: JSON.stringify({ gatewayKey: GATEWAY_KEY }),
+    })
+    expect(response.status).toBe(401)
+  }
+  expect(isIpBlocked(clientIp)).toBe(true)
+})
+
+test("malformed setup JSON does not count as a credential attempt", async () => {
+  const clientIp = "198.51.100.83"
+  const headers = {
+    "content-type": "application/json",
+    origin: ORIGIN,
+    "x-copilot-peer-ip": clientIp,
+  }
+
+  for (const body of ["null", "[]", '"text"']) {
+    expect(
+      (
+        await server.request("/dashboard/auth/setup", {
+          method: "POST",
+          headers,
+          body,
+        })
+      ).status,
+    ).toBe(400)
+  }
+  expect(isIpBlocked(clientIp)).toBe(false)
+
+  const valid = await server.request("/dashboard/auth/setup", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      gatewayKey: GATEWAY_KEY,
+      password: ADMIN_PASSWORD,
+    }),
+  })
+  expect(valid.status).toBe(201)
+})
+
+test("malformed dashboard auth JSON does not count as a credential attempt", async () => {
+  await setup()
+  const clientIp = "198.51.100.82"
+  const headers = {
+    "content-type": "application/json",
+    origin: ORIGIN,
+    "x-copilot-peer-ip": clientIp,
+  }
+
+  for (const body of ["null", "[]", '"text"']) {
+    expect(
+      (
+        await server.request("/dashboard/auth/login", {
+          method: "POST",
+          headers,
+          body,
+        })
+      ).status,
+    ).toBe(401)
+  }
+  expect(isIpBlocked(clientIp)).toBe(false)
+
+  const valid = await server.request("/dashboard/auth/login", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      gatewayKey: GATEWAY_KEY,
+      password: ADMIN_PASSWORD,
+    }),
+  })
+  expect(valid.status).toBe(200)
+})
+
+test("session and CSRF failures do not count as password attempts", async () => {
+  const cookies = await setup()
+  const clientIp = "198.51.100.78"
+  const peer = { "x-copilot-peer-ip": clientIp }
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    expect(
+      (
+        await server.request("/dashboard/auth/session", {
+          headers: {
+            ...peer,
+            cookie: `${ADMIN_SESSION_COOKIE}=expired`,
+          },
+        })
+      ).status,
+    ).toBe(401)
+  }
+  expect(
+    (
+      await server.request("/dashboard/auth/logout", {
+        method: "POST",
+        headers: {
+          ...peer,
+          cookie: cookies.cookie,
+          origin: ORIGIN,
+        },
+      })
+    ).status,
+  ).toBe(401)
+  expect(isIpBlocked(clientIp)).toBe(false)
+
+  const login = await server.request("/dashboard/auth/login", {
+    method: "POST",
+    headers: {
+      ...peer,
+      "content-type": "application/json",
+      origin: ORIGIN,
+    },
+    body: JSON.stringify({ gatewayKey: GATEWAY_KEY, password: ADMIN_PASSWORD }),
+  })
+  expect(login.status).toBe(200)
+})
+
+test("banned IPs cannot use valid admin sessions on browser surfaces", async () => {
+  const cookies = await setup()
+  const clientIp = "198.51.100.84"
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    recordFailedAttempt(clientIp)
+  }
+
+  const headers = {
+    cookie: cookies.cookie,
+    "x-copilot-peer-ip": "127.0.0.1",
+    "x-forwarded-for": clientIp,
+  }
+  expect(
+    (await server.request("/dashboard/auth/session", { headers })).status,
+  ).toBe(401)
+  expect(
+    (await server.request("/dashboard/api/overview", { headers })).status,
+  ).toBe(401)
+
+  const remote = await server.request("/remote", { headers })
+  expect(remote.status).toBe(302)
+  expect(remote.headers.get("location")).toBe("/dashboard")
+})
+
+test("an explicit lease lets a banned IP use its valid admin session", async () => {
+  const cookies = await setup()
+  const clientIp = "198.51.100.85"
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    recordFailedAttempt(clientIp)
+  }
+  expect(leaseIp(clientIp, 60_000)).toBe(true)
+
+  const headers = {
+    cookie: cookies.cookie,
+    "x-copilot-peer-ip": "127.0.0.1",
+    "x-forwarded-for": clientIp,
+  }
+  expect(
+    (await server.request("/dashboard/auth/session", { headers })).status,
+  ).toBe(200)
+  expect(
+    (await server.request("/dashboard/api/overview", { headers })).status,
+  ).toBe(200)
+  expect((await server.request("/remote", { headers })).status).toBe(200)
 })
 
 test("admin session accesses reads and mutations require CSRF and Origin", async () => {
@@ -285,6 +502,56 @@ test("admin password change revokes prior sessions", async () => {
     headers: { cookie: cookies.cookie },
   })
   expect(oldSession.status).toBe(401)
+})
+
+test("wrong current admin passwords count toward the shared IP ban", async () => {
+  const cookies = await setup()
+  const clientIp = "198.51.100.86"
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const response = await server.request("/dashboard/auth/password", {
+      method: "PUT",
+      headers: {
+        cookie: cookies.cookie,
+        "content-type": "application/json",
+        origin: ORIGIN,
+        "x-copilot-csrf": cookies.csrf,
+        "x-copilot-peer-ip": clientIp,
+      },
+      body: JSON.stringify({
+        currentPassword: "incorrect administrator password",
+        newPassword: "a valid replacement administrator password",
+      }),
+    })
+    expect(response.status).toBe(401)
+  }
+
+  expect(isIpBlocked(clientIp)).toBe(true)
+})
+
+test("new admin password validation errors are 400 and do not count", async () => {
+  const cookies = await setup()
+  const clientIp = "198.51.100.87"
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const response = await server.request("/dashboard/auth/password", {
+      method: "PUT",
+      headers: {
+        cookie: cookies.cookie,
+        "content-type": "application/json",
+        origin: ORIGIN,
+        "x-copilot-csrf": cookies.csrf,
+        "x-copilot-peer-ip": clientIp,
+      },
+      body: JSON.stringify({
+        currentPassword: ADMIN_PASSWORD,
+        newPassword: "too-short",
+      }),
+    })
+    expect(response.status).toBe(400)
+  }
+
+  expect(isIpBlocked(clientIp)).toBe(false)
 })
 
 test("logout revokes the current server-side session and expires cookies", async () => {

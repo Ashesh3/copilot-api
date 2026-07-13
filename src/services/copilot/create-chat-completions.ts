@@ -181,13 +181,16 @@ function removeImages(payload: ChatCompletionsPayload): void {
  */
 export async function normalizeChatAttachments(
   payload: ChatCompletionsPayload,
+  signal?: AbortSignal,
 ): Promise<void> {
   for (const message of payload.messages) {
     if (!Array.isArray(message.content)) continue
 
     const normalized: Array<ContentPart> = []
     for (const part of message.content) {
-      normalized.push(await normalizeChatContentPart(part, payload.model))
+      normalized.push(
+        await normalizeChatContentPart(part, payload.model, signal),
+      )
     }
     message.content = normalized
   }
@@ -196,9 +199,10 @@ export async function normalizeChatAttachments(
 async function normalizeChatContentPart(
   part: ContentPart,
   model: string,
+  signal?: AbortSignal,
 ): Promise<ContentPart> {
   if (part.type === "image_url" && isHttpUrl(part.image_url.url)) {
-    const inlined = await fetchUrlAsDataUri(part.image_url.url)
+    const inlined = await fetchUrlAsDataUri(part.image_url.url, { signal })
     if (inlined) {
       return {
         ...part,
@@ -213,7 +217,7 @@ async function normalizeChatContentPart(
       type: "text",
       text: attachmentOmittedNote({
         kind: "image",
-        name: part.image_url.url.slice(0, 200),
+        name: part.image_url.url,
         reason: "the URL could not be fetched by the proxy",
       }),
     }
@@ -261,7 +265,7 @@ async function handleResponse(
     }
     return result
   } catch {
-    consola.error("Invalid JSON from Copilot:", text.slice(0, 200))
+    consola.error("Invalid JSON from Copilot:", text)
     throw new HTTPError(
       "Invalid JSON response from upstream",
       new Response(text, { status: 502 }),
@@ -385,7 +389,7 @@ export const createChatCompletions = async (
 ) => {
   options?.signal?.throwIfAborted()
   rewriteUnsupportedAssistantPrefill(payload)
-  await normalizeChatAttachments(payload)
+  await normalizeChatAttachments(payload, options?.signal)
   options?.signal?.throwIfAborted()
   const vision = hasVisionContent(payload.messages)
   const initiator = detectInitiator(payload.messages, options?.initiator)

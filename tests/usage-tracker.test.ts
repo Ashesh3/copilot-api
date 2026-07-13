@@ -4,7 +4,7 @@ import { parseUsageData } from "~/lib/usage-tracker"
 
 const DAY_MS = 24 * 60 * 60 * 1000
 
-test("migrates legacy records into seven-day minute/model buckets and lifetime totals", () => {
+test("migrates all legacy records into minute/model buckets and lifetime totals", () => {
   const now = Date.UTC(2026, 6, 12, 12, 0, 0)
   const data = parseUsageData(
     {
@@ -33,8 +33,8 @@ test("migrates legacy records into seven-day minute/model buckets and lifetime t
   )
 
   expect(data.version).toBe(2)
-  expect(data.buckets).toHaveLength(1)
-  expect(data.buckets[0]).toMatchObject({
+  expect(data.buckets).toHaveLength(2)
+  expect(data.buckets[1]).toMatchObject({
     inputTokens: 4,
     outputTokens: 6,
     requestCount: 2,
@@ -48,7 +48,7 @@ test("migrates legacy records into seven-day minute/model buckets and lifetime t
   })
 })
 
-test("prunes v2 buckets at the seven-day cutoff but retains lifetime totals", () => {
+test("retains v2 buckets beyond the seven-day reporting window", () => {
   const now = Date.UTC(2026, 6, 12, 12, 0, 0)
   const data = parseUsageData(
     {
@@ -77,7 +77,7 @@ test("prunes v2 buckets at the seven-day cutoff but retains lifetime totals", ()
     now,
   )
 
-  expect(data.buckets).toHaveLength(1)
+  expect(data.buckets).toHaveLength(2)
   expect(data.lifetime.requestCount).toBe(3)
   expect(data.lifetime.inputTokens).toBe(105)
 })
@@ -119,4 +119,24 @@ test("keeps records exactly on the seven-day cutoff", () => {
   )
   expect(data.buckets).toHaveLength(1)
   expect(data.lifetime.requestCount).toBe(1)
+})
+
+test("retains long model identifiers", () => {
+  const now = Date.UTC(2026, 6, 12, 12, 0, 0)
+  const model = `provider/${"x".repeat(256)}`
+  const data = parseUsageData(
+    {
+      records: [
+        {
+          timestamp: now,
+          inputTokens: 1,
+          outputTokens: 1,
+          model,
+        },
+      ],
+    },
+    now,
+  )
+
+  expect(data.buckets[0]?.model).toBe(model)
 })

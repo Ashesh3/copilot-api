@@ -6,12 +6,9 @@ import util from "node:util"
 import { PATHS } from "./paths"
 import { state } from "./state"
 
-const LOG_RETENTION_DAYS = 7
-const LOG_RETENTION_MS = LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000
-const CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000
 const LOG_DIR = path.join(PATHS.APP_DIR, "logs")
 const FLUSH_INTERVAL_MS = 1000
-const MAX_BUFFER_SIZE = 100
+const BUFFER_FLUSH_BATCH_SIZE = 100
 
 const logStreams = new Map<string, fs.WriteStream>()
 const logBuffers = new Map<string, Array<string>>()
@@ -19,37 +16,6 @@ const logBuffers = new Map<string, Array<string>>()
 const ensureLogDirectory = () => {
   if (!fs.existsSync(LOG_DIR)) {
     fs.mkdirSync(LOG_DIR, { recursive: true })
-  }
-}
-
-const cleanupOldLogs = () => {
-  if (!fs.existsSync(LOG_DIR)) {
-    return
-  }
-
-  const now = Date.now()
-
-  for (const entry of fs.readdirSync(LOG_DIR)) {
-    const filePath = path.join(LOG_DIR, entry)
-
-    let stats: fs.Stats
-    try {
-      stats = fs.statSync(filePath)
-    } catch {
-      continue
-    }
-
-    if (!stats.isFile()) {
-      continue
-    }
-
-    if (now - stats.mtimeMs > LOG_RETENTION_MS) {
-      try {
-        fs.rmSync(filePath)
-      } catch {
-        continue
-      }
-    }
   }
 }
 
@@ -117,7 +83,7 @@ const appendLine = (filePath: string, line: string) => {
 
   buffer.push(line)
 
-  if (buffer.length >= MAX_BUFFER_SIZE) {
+  if (buffer.length >= BUFFER_FLUSH_BATCH_SIZE) {
     flushBuffer(filePath)
   }
 }
@@ -143,8 +109,6 @@ process.on("SIGTERM", () => {
   process.exit(0)
 })
 
-let lastCleanup = 0
-
 export const createHandlerLogger = (name: string): ConsolaInstance => {
   ensureLogDirectory()
 
@@ -159,11 +123,6 @@ export const createHandlerLogger = (name: string): ConsolaInstance => {
   instance.addReporter({
     log(logObj) {
       ensureLogDirectory()
-
-      if (Date.now() - lastCleanup > CLEANUP_INTERVAL_MS) {
-        cleanupOldLogs()
-        lastCleanup = Date.now()
-      }
 
       const date = logObj.date
       const dateKey = date.toLocaleDateString("sv-SE")

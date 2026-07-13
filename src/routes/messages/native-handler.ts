@@ -3,8 +3,6 @@ import type { Context } from "hono"
 import * as Sentry from "@sentry/bun"
 import { streamSSE } from "hono/streaming"
 
-import type { Model } from "~/services/copilot/get-models"
-
 import { getLastUsedAccountId } from "~/lib/account-router"
 import { isAbortError } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
@@ -37,12 +35,10 @@ export async function handleWithNativeMessages(
   options?: {
     initiatorOverride?: "agent" | "user"
     requestedModel?: string
-    selectedModel?: Model
   },
 ) {
-  const { initiatorOverride, requestedModel, selectedModel } = options ?? {}
+  const { initiatorOverride, requestedModel } = options ?? {}
 
-  clampNativeThinkingBudget(anthropicPayload, selectedModel)
   dropToolsWithoutSchema(anthropicPayload)
 
   if (!anthropicPayload.stream) {
@@ -69,10 +65,7 @@ export async function handleWithNativeMessages(
           ...response,
           model: requestedModel ?? response.model,
         }
-        logger.debug(
-          "Native /v1/messages response:",
-          JSON.stringify(result).slice(-400),
-        )
+        logger.debug("Native /v1/messages response:", JSON.stringify(result))
         return c.json(result)
       },
     )
@@ -184,24 +177,6 @@ async function streamNativeMessages(
         throw error
       }
     },
-  )
-}
-
-function clampNativeThinkingBudget(
-  payload: AnthropicMessagesPayload,
-  selectedModel: Model | undefined,
-): void {
-  const budget = payload.thinking?.budget_tokens
-  if (!payload.thinking || !budget) return
-
-  const supports = selectedModel?.capabilities.supports
-  const max = supports?.max_thinking_budget
-  const min = supports?.min_thinking_budget
-  if (typeof max !== "number") return
-
-  payload.thinking.budget_tokens = Math.min(
-    Math.max(budget, min ?? budget),
-    max,
   )
 }
 

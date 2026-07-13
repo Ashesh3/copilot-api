@@ -1,6 +1,5 @@
 import consola from "consola"
 import { Hono, type Context, type Next } from "hono"
-import { bodyLimit } from "hono/body-limit"
 import { randomUUID } from "node:crypto"
 
 import {
@@ -9,6 +8,8 @@ import {
   issueWorkerCapability,
 } from "~/lib/bridge-capabilities"
 import { resolveRequestCredential } from "~/lib/credential-resolver"
+import { recordFailedAttempt } from "~/lib/ip-blocker"
+import { resolveProtectedCredential } from "~/lib/protected-credential"
 
 import type { InternalEvent } from "./types"
 
@@ -29,9 +30,6 @@ import {
 
 export const codeSessionsRoutes = new Hono()
 
-export const CODE_SESSION_MAX_BODY_BYTES = 1024 * 1024
-export const CODE_SESSION_MAX_EVENTS_PER_REQUEST = 100
-
 function unauthorized(c: {
   json(value: unknown, status: 401): Response
 }): Response {
@@ -43,37 +41,41 @@ async function requireWorkerCapability(
   next: Next,
 ): Promise<Response | undefined> {
   const id = c.req.param("id") ?? ""
-  const capability = await authorizeWorkerCapability(c.req.raw, id)
+  const auth = await resolveProtectedCredential(
+    c.req.raw,
+    async () => await authorizeWorkerCapability(c.req.raw, id),
+  )
+  if (auth.status !== "authorized") return unauthorized(c)
+  const { credential: capability } = auth
   const session = getSession(id)
+  if (!session) return unauthorized(c)
   if (
-    !capability
-    || !session
-    || (capability.workerEpoch !== undefined
-      && capability.workerEpoch !== session.workerEpoch)
+    capability.workerEpoch !== undefined
+    && capability.workerEpoch !== session.workerEpoch
   ) {
+    if (auth.clientIp !== null) recordFailedAttempt(auth.clientIp)
     return unauthorized(c)
   }
   await next()
 }
 
 codeSessionsRoutes.use("*", async (c, next) => {
-  if (/\/worker(?:\/|$)/.test(c.req.path)) return next()
-  const credential = await resolveRequestCredential(c.req.raw, [
-    "user:sessions:claude_code",
-  ])
-  if (!credential) return unauthorized(c)
+  if (
+    /\/worker(?:\/|$)/.test(c.req.path)
+    || /\/[^/]+\/events\/stream\/?$/.test(c.req.path)
+  ) {
+    return next()
+  }
+  const auth = await resolveProtectedCredential(
+    c.req.raw,
+    async () =>
+      await resolveRequestCredential(c.req.raw, ["user:sessions:claude_code"]),
+  )
+  if (auth.status !== "authorized") return unauthorized(c)
   await next()
 })
 codeSessionsRoutes.use("/:id/worker", requireWorkerCapability)
 codeSessionsRoutes.use("/:id/worker/*", requireWorkerCapability)
-codeSessionsRoutes.use(
-  "*",
-  bodyLimit({
-    maxSize: CODE_SESSION_MAX_BODY_BYTES,
-    onError: (c) => c.json({ error: "Payload too large" }, 413),
-  }),
-)
-
 // POST / — Create a code session
 codeSessionsRoutes.post("/", async (c) => {
   const body = await c.req.json<{
@@ -164,10 +166,17 @@ codeSessionsRoutes.post("/:id/worker/register", async (c) => {
     return c.json({ error: "Session is archived" }, 410)
   }
 
-  const capability = await authorizeWorkerCapability(c.req.raw, id)
-  if (!capability) return unauthorized(c)
+  const capabilityAuth = await resolveProtectedCredential(
+    c.req.raw,
+    async () => await authorizeWorkerCapability(c.req.raw, id),
+  )
+  if (capabilityAuth.status !== "authorized") return unauthorized(c)
+  const { credential: capability } = capabilityAuth
   const epoch = bumpWorkerEpoch(id) as number
   if (!bindWorkerCapability(capability.rawCredential, id, epoch)) {
+    if (capabilityAuth.clientIp !== null) {
+      recordFailedAttempt(capabilityAuth.clientIp)
+    }
     return unauthorized(c)
   }
   consola.info(`Worker registered for session ${id}, epoch ${epoch}`)
@@ -243,10 +252,7 @@ codeSessionsRoutes.post("/:id/worker/events", async (c) => {
     worker_epoch: number
     events: Array<{ payload: Record<string, unknown>; ephemeral?: boolean }>
   }>()
-  if (
-    !Array.isArray(body.events)
-    || body.events.length > CODE_SESSION_MAX_EVENTS_PER_REQUEST
-  ) {
+  if (!Array.isArray(body.events)) {
     return c.json({ error: "Invalid event batch" }, 400)
   }
 
@@ -291,10 +297,7 @@ codeSessionsRoutes.post("/:id/worker/internal-events", async (c) => {
       agent_id?: string
     }>
   }>()
-  if (
-    !Array.isArray(body.events)
-    || body.events.length > CODE_SESSION_MAX_EVENTS_PER_REQUEST
-  ) {
+  if (!Array.isArray(body.events)) {
     return c.json({ error: "Invalid event batch" }, 400)
   }
 
@@ -344,8 +347,11 @@ codeSessionsRoutes.get("/:id/worker/internal-events", (c) => {
 // GET /:id/events/stream — SSE event stream
 codeSessionsRoutes.get("/:id/events/stream", async (c) => {
   const id = c.req.param("id")
-  const capability = await authorizeWorkerCapability(c.req.raw, id)
-  if (!capability) return unauthorized(c)
+  const auth = await resolveProtectedCredential(
+    c.req.raw,
+    async () => await authorizeWorkerCapability(c.req.raw, id),
+  )
+  if (auth.status !== "authorized") return unauthorized(c)
   consola.info(
     `[code-sessions] SSE stream subscriber connected — session=${id}`,
   )

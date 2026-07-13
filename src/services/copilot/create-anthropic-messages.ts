@@ -177,7 +177,7 @@ export const createAnthropicMessages = async (
     consola.error(
       "Failed to create native Anthropic messages",
       `Status: ${response.status} ${response.statusText}`,
-      errorBody.slice(0, 500),
+      errorBody,
     )
     // Surface CAPI's actual Anthropic error to the client instead of a generic
     // message, so failures like "Invalid signature in thinking block" are
