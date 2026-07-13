@@ -90,6 +90,9 @@ test("Claude subscriber compatibility routes keep exact methods", async () => {
   const template = await read("sites-available/spoof-domains.conf.template")
 
   expect(template).toMatch(
+    /location ~ \^\/redirect\/claudeai\\\.v1\\\.\[0-9a-f-\]\+\/oauth\/authorize\/\?\$ \{[\s\S]*?limit_except GET \{ deny all; \}[\s\S]*?rewrite \^ \/oauth\/authorize last;/,
+  )
+  expect(template).toMatch(
     /location ~ \^\/v1\/code\/triggers[\s\S]*?limit_except GET POST \{ deny all; \}/,
   )
   expect(template).toMatch(

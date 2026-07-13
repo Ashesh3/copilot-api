@@ -113,6 +113,12 @@ server {
   proxy_set_header X-Forwarded-For $remote_addr;
   proxy_set_header X-Forwarded-Proto $scheme;
 
+  # Claude subscription login redirects through a versioned claude.ai path.
+  # Keep the query string while sending it to the canonical OAuth handler.
+  location ~ ^/redirect/claudeai\.v1\.[0-9a-f-]+/oauth/authorize/?$ {
+    limit_except GET { deny all; }
+    rewrite ^ /oauth/authorize last;
+  }
   location ~ ^/oauth/(?:authorize|code/(?:success|callback))/?$ {
     limit_except GET POST { deny all; }
     proxy_pass {{UPSTREAM_URL}};
