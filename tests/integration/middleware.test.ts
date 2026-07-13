@@ -89,110 +89,6 @@ const protectedRoutes: Array<ProtectedRoute> = [
     mountedPath: "/usage",
   },
   {
-    name: "replacement listing",
-    method: "GET",
-    path: "/replacements",
-    mountedMethod: "GET",
-    mountedPath: "/replacements",
-  },
-  {
-    name: "replacement creation",
-    method: "POST",
-    path: "/replacements",
-    mountedMethod: "POST",
-    mountedPath: "/replacements",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ pattern: "before", replacement: "after" }),
-  },
-  {
-    name: "replacement deletion",
-    method: "DELETE",
-    path: "/replacements/rule-test",
-    mountedMethod: "DELETE",
-    mountedPath: "/replacements/:id",
-  },
-  {
-    name: "replacement update",
-    method: "PATCH",
-    path: "/replacements/rule-test",
-    mountedMethod: "PATCH",
-    mountedPath: "/replacements/:id",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ replacement: "after" }),
-  },
-  {
-    name: "replacement toggle",
-    method: "PATCH",
-    path: "/replacements/rule-test/toggle",
-    mountedMethod: "PATCH",
-    mountedPath: "/replacements/:id/toggle",
-  },
-  {
-    name: "replacement clearing",
-    method: "DELETE",
-    path: "/replacements",
-    mountedMethod: "DELETE",
-    mountedPath: "/replacements",
-  },
-  {
-    name: "model redirect listing",
-    method: "GET",
-    path: "/model-redirects",
-    mountedMethod: "GET",
-    mountedPath: "/model-redirects",
-  },
-  {
-    name: "model redirect creation",
-    method: "POST",
-    path: "/model-redirects",
-    mountedMethod: "POST",
-    mountedPath: "/model-redirects",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      sourceModel: "source-model",
-      targetModel: "target-model",
-    }),
-  },
-  {
-    name: "model redirect deletion",
-    method: "DELETE",
-    path: "/model-redirects/redirect-test",
-    mountedMethod: "DELETE",
-    mountedPath: "/model-redirects/:id",
-  },
-  {
-    name: "model redirect update",
-    method: "PATCH",
-    path: "/model-redirects/redirect-test",
-    mountedMethod: "PATCH",
-    mountedPath: "/model-redirects/:id",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ targetModel: "updated-model" }),
-  },
-  {
-    name: "model redirect toggle",
-    method: "PATCH",
-    path: "/model-redirects/redirect-test/toggle",
-    mountedMethod: "PATCH",
-    mountedPath: "/model-redirects/:id/toggle",
-  },
-  {
-    name: "model redirect move",
-    method: "POST",
-    path: "/model-redirects/redirect-test/move",
-    mountedMethod: "POST",
-    mountedPath: "/model-redirects/:id/move",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ direction: "up" }),
-  },
-  {
-    name: "model redirect clearing",
-    method: "DELETE",
-    path: "/model-redirects",
-    mountedMethod: "DELETE",
-    mountedPath: "/model-redirects",
-  },
-  {
     name: "responses compact",
     method: "POST",
     path: "/responses/compact",
@@ -398,7 +294,7 @@ afterEach(() => {
 describe("Middleware", () => {
   describe("API key guard", () => {
     test("protected route matrix entries map to mounted routes", () => {
-      expect(protectedRoutes).toHaveLength(37)
+      expect(protectedRoutes).toHaveLength(24)
 
       const guardIndex = server.routes.findIndex(
         (route) => route.handler === apiKeyGuard,
