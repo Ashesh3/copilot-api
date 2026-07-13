@@ -116,7 +116,7 @@ test("Claude subscriber compatibility routes keep exact methods", async () => {
   )
 })
 
-test("nginx templates disable body limits and define no local timeouts", async () => {
+test("nginx templates disable body limits and maximize inherited proxy timeouts", async () => {
   const [publicTemplate, spoofTemplate, codexTemplate, statsigTemplate] =
     await Promise.all([
       read("sites-available/public-domain.conf.template"),
@@ -134,9 +134,12 @@ test("nginx templates disable body limits and define no local timeouts", async (
     statsigTemplate,
   ]) {
     expect(template).toContain("client_max_body_size 0;")
-    expect(template).not.toMatch(
-      /(?:client_(?:header|body)|proxy_(?:connect|send|read)|send)_timeout/,
-    )
+    expect(template).toContain("client_header_timeout 2147483647s;")
+    expect(template).toContain("client_body_timeout 2147483647s;")
+    expect(template).toContain("proxy_connect_timeout 75s;")
+    expect(template).toContain("proxy_send_timeout 2147483647s;")
+    expect(template).toContain("proxy_read_timeout 2147483647s;")
+    expect(template).toContain("send_timeout 2147483647s;")
     expect(template).not.toContain("limit_req")
     expect(template).not.toContain("limit_conn")
     expect(template).not.toContain("PROXY_LIMITS_SNIPPET_PATH")

@@ -15,6 +15,12 @@ server {
   listen 443 ssl;
   server_name {{CLAUDE_API_SERVER_NAME}};
   client_max_body_size 0;
+  client_header_timeout 2147483647s;
+  client_body_timeout 2147483647s;
+  proxy_connect_timeout 75s;
+  proxy_send_timeout 2147483647s;
+  proxy_read_timeout 2147483647s;
+  send_timeout 2147483647s;
   ssl_certificate {{SPOOF_SSL_CERTIFICATE_PATH}};
   ssl_certificate_key {{SPOOF_SSL_CERTIFICATE_KEY_PATH}};
 
@@ -93,6 +99,12 @@ server {
   listen 443 ssl;
   server_name {{CLAUDE_PLATFORM_SERVER_NAMES}};
   client_max_body_size 0;
+  client_header_timeout 2147483647s;
+  client_body_timeout 2147483647s;
+  proxy_connect_timeout 75s;
+  proxy_send_timeout 2147483647s;
+  proxy_read_timeout 2147483647s;
+  send_timeout 2147483647s;
   ssl_certificate {{SPOOF_SSL_CERTIFICATE_PATH}};
   ssl_certificate_key {{SPOOF_SSL_CERTIFICATE_KEY_PATH}};
 

@@ -78,9 +78,10 @@ affected, include its exact version or digest.
 - The public Nginx policy treats Responses HTTP and WebSocket transports
   separately. `POST` remains the normal API method; authenticated `GET` upgrades
   on `/responses` and `/v1/responses` are forwarded, while plain GET is denied.
-- Supplied Nginx templates define no project-specific client, proxy, send,
-  streaming, idle, or lifetime timeout. Streaming locations retain only the
-  buffering and WebSocket directives needed by their protocols.
+- Supplied Nginx templates disable body limits and use the maximum accepted
+  client/read/send durations, preventing Nginx's 60-second defaults from
+  terminating quiet model streams. Streaming locations retain the buffering
+  and WebSocket directives needed by their protocols.
 - Administrator step-up reauthentication was removed. One valid dashboard
   session covers LLM Debug, sanitized export, provider changes, and IP policy;
   CSRF, Origin, expiry, logout, and password-change revocation remain enforced.

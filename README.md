@@ -823,9 +823,9 @@ with a valid inference-capable credential.
 ### Claude Code reports `Connection closed mid-response`
 
 Check the Nginx error log for `upstream timed out` on `POST /v1/messages`.
-Current templates define no project-specific client, proxy, send, idle, or
-lifetime timeout. If that message appears, remove stale timeout directives from
-the rendered configuration and reload Nginx.
+The templates use Nginx's maximum accepted client/read/send durations to avoid
+its 60-second defaults. If that message appears, verify that the rendered
+configuration inherited those maximum-duration directives and reload Nginx.
 
 ### The dashboard asks for the administrator password again
 

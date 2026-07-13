@@ -21,9 +21,12 @@ catch-all `proxy_pass`.
 
 ## Shared prerequisites
 
-The supplied templates do not pace requests, cap connections, bound request
-bodies, or set client/proxy/send timeouts. `client_max_body_size 0` is explicit
-so Nginx's default body limit is disabled. Install
+The supplied templates do not pace requests, cap connections, or bound request
+bodies. `client_max_body_size 0` is explicit so Nginx's default body limit is
+disabled. Nginx cannot represent an infinite upstream-read timeout, so every
+TLS server uses its maximum accepted client/read/send duration
+(`2147483647s`) and its 75-second maximum connect duration. This prevents the
+60-second Nginx defaults from closing quiet model streams. Install
 `logrotate/copilot-api-nginx` under `/etc/logrotate.d/` if the deployment uses
 the matching Nginx log paths.
 
@@ -50,7 +53,8 @@ Codex Desktop opens an authenticated WebSocket with `GET` and
 application can authenticate the socket. Plain GET remains denied.
 
 Generation and WebSocket locations disable request and response buffering for
-streaming, but define no project-specific timeout.
+streaming and inherit the maximum-duration server settings so a quiet upstream
+does not fall back to Nginx's 60-second default.
 
 The public template adds baseline browser headers with `always`, including to
 Nginx-generated denials. It deliberately does not set Content Security Policy;
@@ -95,8 +99,8 @@ Then verify the boundary from outside the origin:
 6. A normal authenticated `POST /v1/responses` still works.
 7. Spoofed `X-Real-IP`, `X-Forwarded-For`, and `CF-Connecting-IP` headers from a
    non-trusted TCP peer do not authorize IP-gated routes.
-8. `nginx -T` contains no `limit_req`, `limit_req_zone`, `limit_conn`, or
-   project-defined client/proxy/send timeout directives.
+8. `nginx -T` contains no `limit_req`, `limit_req_zone`, or `limit_conn`, and
+   each TLS proxy server has the maximum-duration client/read/send directives.
 
 Keep origin ports firewalled or loopback-bound. The public hostname policy does
 not protect a separately reachable backend listener.
