@@ -35,7 +35,6 @@ import {
 } from "~/lib/request-logger"
 import { state } from "~/lib/state"
 import { getTokenCount } from "~/lib/tokenizer"
-import { isNullish } from "~/lib/utils"
 import {
   addPromptCaching,
   detectInitiator,
@@ -133,31 +132,6 @@ function parseModelAction(modelAction: string): {
   return {
     model: modelAction.slice(0, colonIdx),
     action: modelAction.slice(colonIdx + 1),
-  }
-}
-
-/**
- * Cap max_tokens at the model's advertised limit to prevent 400 errors.
- */
-function capMaxTokens(
-  c: Context,
-  payload: ChatCompletionsPayload,
-  selectedModel: Model | undefined,
-): void {
-  const maxAllowed = selectedModel?.capabilities.limits?.max_output_tokens
-  if (!maxAllowed) return
-
-  if (!isNullish(payload.max_tokens) && payload.max_tokens > maxAllowed) {
-    recordNonDefaultBehavior(c, {
-      kind: "max_tokens_capped",
-      message: `Capping max_tokens from ${payload.max_tokens} to ${maxAllowed} for ${payload.model}`,
-      data: {
-        model: payload.model,
-        requestedMaxTokens: payload.max_tokens,
-        effectiveMaxTokens: maxAllowed,
-      },
-    })
-    payload.max_tokens = maxAllowed
   }
 }
 
@@ -330,8 +304,6 @@ export async function handleGoogleAI(c: Context) {
   if (state.manualApprove) {
     await awaitApproval()
   }
-
-  capMaxTokens(c, finalPayload, selectedModel)
 
   consola.debug(
     `[google-ai] Translated payload: model=${finalPayload.model}, max_tokens=${finalPayload.max_tokens}, stream=${finalPayload.stream}, tools=${finalPayload.tools?.length ?? 0}, messages=${finalPayload.messages.length}`,

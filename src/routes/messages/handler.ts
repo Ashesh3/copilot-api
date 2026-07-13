@@ -326,7 +326,6 @@ async function handleCompletionInner(
     return await handleWithNativeMessages(c, anthropicPayload, {
       initiatorOverride,
       requestedModel,
-      selectedModel,
     })
   }
 
@@ -539,20 +538,6 @@ function resolveCustomChatModel(
   })
 }
 
-const getThinkingBudgetLimits = (
-  model: string,
-): {
-  max?: number
-  min?: number
-} => {
-  const supports = state.models?.data.find((entry) => entry.id === model)
-    ?.capabilities.supports
-  return {
-    max: supports?.max_thinking_budget,
-    min: supports?.min_thinking_budget,
-  }
-}
-
 function applyThinkingBudget(
   payload: ChatCompletionsPayload,
   budgetTokens: number | undefined,
@@ -562,13 +547,7 @@ function applyThinkingBudget(
   if (!budgetTokens) return
   if (usesImplicitReasoningDefault(normalizeModelName(payload.model))) return
 
-  const { max, min } = getThinkingBudgetLimits(payload.model)
-  if (typeof max !== "number") return
-
-  extra.thinking_budget = Math.min(
-    Math.max(budgetTokens, min ?? budgetTokens),
-    max,
-  )
+  extra.thinking_budget = budgetTokens
 }
 
 const handleWithChatCompletions = async (

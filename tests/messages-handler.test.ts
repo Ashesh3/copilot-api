@@ -27,7 +27,11 @@ const upstreamMaxReasoningModels: ModelsResponse = {
         family: "claude",
         limits: { max_output_tokens: 1024 },
         object: "model_capabilities",
-        supports: { reasoning_effort: ["low", "medium", "high", "max"] },
+        supports: {
+          max_thinking_budget: 32000,
+          min_thinking_budget: 1024,
+          reasoning_effort: ["low", "medium", "high", "max"],
+        },
         tokenizer: "cl100k_base",
         type: "chat",
       },
@@ -79,7 +83,11 @@ const nativeMessagesModels: ModelsResponse = {
         family: "claude",
         limits: { max_output_tokens: 64000 },
         object: "model_capabilities",
-        supports: { reasoning_effort: ["low", "medium", "high", "max"] },
+        supports: {
+          max_thinking_budget: 32000,
+          min_thinking_budget: 1024,
+          reasoning_effort: ["low", "medium", "high", "max"],
+        },
         tokenizer: "cl100k_base",
         type: "chat",
       },
@@ -254,6 +262,88 @@ test("routes PDF documents to native /v1/messages and strips foreign thinking bl
   expect(blocks.some((b) => b.type === "document")).toBe(true)
 })
 
+test("forwards native thinking budgets above the advertised model limit", async () => {
+  state.models = nativeMessagesModels
+  const pdfB64 = Buffer.from("%PDF-1.4 regression test").toString("base64")
+
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-opus-4.8",
+      max_tokens: 64000,
+      thinking: { type: "enabled", budget_tokens: 63999 },
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Summarize this." },
+            {
+              type: "document",
+              source: {
+                type: "base64",
+                media_type: "application/pdf",
+                data: pdfB64,
+              },
+            },
+          ],
+        },
+      ],
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamUrl).toContain("/v1/messages")
+  expect(
+    (
+      lastUpstreamPayload as
+        | { thinking?: { budget_tokens?: number } }
+        | undefined
+    )?.thinking?.budget_tokens,
+  ).toBe(63999)
+})
+
+test("forwards native thinking budgets below the advertised model minimum", async () => {
+  state.models = nativeMessagesModels
+  const pdfB64 = Buffer.from("%PDF-1.4 regression test").toString("base64")
+
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-opus-4.8",
+      max_tokens: 64000,
+      thinking: { type: "enabled", budget_tokens: 1 },
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Summarize this." },
+            {
+              type: "document",
+              source: {
+                type: "base64",
+                media_type: "application/pdf",
+                data: pdfB64,
+              },
+            },
+          ],
+        },
+      ],
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamUrl).toContain("/v1/messages")
+  expect(
+    (
+      lastUpstreamPayload as
+        | { thinking?: { budget_tokens?: number } }
+        | undefined
+    )?.thinking?.budget_tokens,
+  ).toBe(1)
+})
+
 test("maps output_config.effort onto chat completions reasoning_effort", async () => {
   const response = await server.request("/v1/messages", {
     method: "POST",
@@ -343,7 +433,7 @@ test("defaults chat completions reasoning_effort to medium when thinking is enab
   ).toBe("medium")
 })
 
-test("clamps chat completions thinking budget to upstream model limits", async () => {
+test("forwards chat completions thinking budgets above the advertised model limit", async () => {
   state.models = upstreamThinkingBudgetModels
 
   const response = await server.request("/v1/messages", {
@@ -363,10 +453,33 @@ test("clamps chat completions thinking budget to upstream model limits", async (
   expect(
     (lastUpstreamPayload as Record<string, unknown> | undefined)
       ?.thinking_budget,
-  ).toBe(32000)
+  ).toBe(63999)
 })
 
-test("drops chat completions thinking budget when upstream limits are unknown", async () => {
+test("forwards chat completions thinking budgets below the advertised model minimum", async () => {
+  state.models = upstreamThinkingBudgetModels
+
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-4.6",
+      messages: [{ role: "user", content: "Think carefully." }],
+      max_tokens: 64000,
+      thinking: { type: "enabled", budget_tokens: 1 },
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(
+    (lastUpstreamPayload as Record<string, unknown> | undefined)
+      ?.thinking_budget,
+  ).toBe(1)
+})
+
+test("forwards chat completions thinking budgets when upstream limits are unknown", async () => {
   const response = await server.request("/v1/messages", {
     method: "POST",
     headers: {
@@ -384,7 +497,7 @@ test("drops chat completions thinking budget when upstream limits are unknown", 
   expect(
     (lastUpstreamPayload as Record<string, unknown> | undefined)
       ?.thinking_budget,
-  ).toBeUndefined()
+  ).toBe(63999)
 })
 
 test("redirects unsupported Anthropic high-effort model suffixes before upstream", async () => {
