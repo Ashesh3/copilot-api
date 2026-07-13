@@ -8,9 +8,13 @@ import {
   normalizeIpAddress,
 } from "./ip-allowlist"
 
+export const AUTH_FAILURE_WINDOW_MS = 24 * 60 * 60 * 1000
+export const IP_BAN_DURATION_MS = 24 * 60 * 60 * 1000
+export const AUTH_FAILURE_THRESHOLD = 3
+
 interface IpEntry {
-  count: number
-  date: string
+  failures: Array<number>
+  bannedUntil?: number
 }
 
 interface IpLease {
@@ -127,8 +131,13 @@ export function extractClientIpFromHeaders(headers: Headers): string | null {
   return getForwardedClientIp(headers)
 }
 
-function getUtcDateString(): string {
-  return new Date().toISOString().slice(0, 10)
+function pruneEntry(entry: IpEntry, currentTime: number): void {
+  entry.failures = entry.failures.filter(
+    (timestamp) => currentTime - timestamp < AUTH_FAILURE_WINDOW_MS,
+  )
+  if (entry.bannedUntil !== undefined && entry.bannedUntil <= currentTime) {
+    delete entry.bannedUntil
+  }
 }
 
 /** Create an explicit, expiring IP lease. This is never called after auth. */
@@ -136,7 +145,6 @@ export function leaseIp(ip: string, ttlMs: number): boolean {
   const normalized = normalizeIpAddress(ip)
   if (!normalized || !Number.isFinite(ttlMs) || ttlMs <= 0) return false
   ipLeases.set(normalized, { expiresAt: Date.now() + ttlMs })
-  ipTracker.delete(normalized)
   return true
 }
 
@@ -170,14 +178,15 @@ export function isIpBlocked(ip: string): boolean {
   if (!normalized) return true
   if (isIpWhitelisted(normalized)) return false
 
-  const today = getUtcDateString()
   const entry = ipTracker.get(normalized)
   if (!entry) return false
-  if (entry.date !== today) {
+  const currentTime = Date.now()
+  pruneEntry(entry, currentTime)
+  if (entry.failures.length === 0 && entry.bannedUntil === undefined) {
     ipTracker.delete(normalized)
     return false
   }
-  if (entry.count >= 3) {
+  if (entry.bannedUntil !== undefined && entry.bannedUntil > currentTime) {
     consola.debug(`[security] Blocked request from banned IP ${normalized}`)
     return true
   }
@@ -186,25 +195,30 @@ export function isIpBlocked(ip: string): boolean {
 
 export function recordFailedAttempt(ip: string): number {
   const normalized = normalizeIpAddress(ip)
-  if (!normalized) return 3
+  if (!normalized) return AUTH_FAILURE_THRESHOLD
 
-  const today = getUtcDateString()
-  const entry = ipTracker.get(normalized)
-  if (!entry || entry.date !== today) {
-    ipTracker.set(normalized, { count: 1, date: today })
-    consola.warn(`[security] Failed auth attempt from ${normalized} (1/3)`)
-    return 1
+  const currentTime = Date.now()
+  const entry = ipTracker.get(normalized) ?? { failures: [] }
+  pruneEntry(entry, currentTime)
+  entry.failures.push(currentTime)
+  ipTracker.set(normalized, entry)
+
+  const failureCount = entry.failures.length
+  if (failureCount >= AUTH_FAILURE_THRESHOLD) {
+    entry.bannedUntil = currentTime + IP_BAN_DURATION_MS
   }
-
-  entry.count += 1
-  if (entry.count === 3) {
+  if (failureCount === AUTH_FAILURE_THRESHOLD) {
     consola.warn(
       `[security] IP ${normalized} banned after repeated auth failures`,
+    )
+  } else if (failureCount === 1) {
+    consola.warn(
+      `[security] Failed auth attempt from ${normalized} (1/${AUTH_FAILURE_THRESHOLD})`,
     )
   } else {
     consola.warn(`[security] Failed auth attempt from ${normalized}`)
   }
-  return entry.count
+  return failureCount
 }
 
 export function resetIpSecurityForTest(): void {

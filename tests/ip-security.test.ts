@@ -4,12 +4,23 @@ import { Hono } from "hono"
 import { normalizeIpAddress, setIpAllowlistForTest } from "~/lib/ip-allowlist"
 import {
   extractClientIp,
+  isIpBlocked,
   isIpAllowedForWhitelistedRoute,
   leaseIp,
+  recordFailedAttempt,
   resetIpSecurityForTest,
+  unwhitelistIp,
 } from "~/lib/ip-blocker"
 
 const originalTrustedProxies = process.env.COPILOT_TRUSTED_PROXY_CIDRS
+const originalDateNow = Date.now
+const DAY_MS = 24 * 60 * 60 * 1000
+let currentTime = 0
+
+function setCurrentTime(timestamp: number): void {
+  currentTime = timestamp
+  Date.now = () => currentTime
+}
 
 function createIpApp(): Hono {
   const app = new Hono()
@@ -18,6 +29,7 @@ function createIpApp(): Hono {
 }
 
 afterEach(() => {
+  Date.now = originalDateNow
   if (originalTrustedProxies === undefined) {
     delete process.env.COPILOT_TRUSTED_PROXY_CIDRS
   } else {
@@ -86,4 +98,78 @@ test("temporary leases expire and do not create persistent allowlist entries", a
   expect(await isIpAllowedForWhitelistedRoute("198.51.100.40")).toBe(true)
   await Bun.sleep(75)
   expect(await isIpAllowedForWhitelistedRoute("198.51.100.40")).toBe(false)
+})
+
+test("bans an IP after its third failure inside a rolling 24-hour window", () => {
+  const ip = "198.51.100.50"
+  setCurrentTime(Date.UTC(2026, 0, 1, 12))
+
+  expect(recordFailedAttempt(ip)).toBe(1)
+  currentTime += 12 * 60 * 60 * 1000
+  expect(recordFailedAttempt(ip)).toBe(2)
+  currentTime += 11 * 60 * 60 * 1000
+  expect(recordFailedAttempt(ip)).toBe(3)
+
+  expect(isIpBlocked(ip)).toBe(true)
+})
+
+test("keeps a ban active until exactly 24 hours after the third failure", () => {
+  const ip = "198.51.100.51"
+  setCurrentTime(Date.UTC(2026, 0, 1, 12))
+
+  recordFailedAttempt(ip)
+  recordFailedAttempt(ip)
+  recordFailedAttempt(ip)
+
+  currentTime += DAY_MS - 1
+  expect(isIpBlocked(ip)).toBe(true)
+  currentTime += 1
+  expect(isIpBlocked(ip)).toBe(false)
+})
+
+test("prunes failures that are at least 24 hours old", () => {
+  const ip = "198.51.100.52"
+  setCurrentTime(Date.UTC(2026, 0, 1, 12))
+
+  expect(recordFailedAttempt(ip)).toBe(1)
+  expect(recordFailedAttempt(ip)).toBe(2)
+  currentTime += DAY_MS
+
+  expect(recordFailedAttempt(ip)).toBe(1)
+  expect(isIpBlocked(ip)).toBe(false)
+})
+
+test("leases bypass a ban without clearing its failure history", () => {
+  const ip = "198.51.100.53"
+  setCurrentTime(Date.UTC(2026, 0, 1, 12))
+
+  recordFailedAttempt(ip)
+  recordFailedAttempt(ip)
+  recordFailedAttempt(ip)
+  expect(isIpBlocked(ip)).toBe(true)
+
+  expect(leaseIp(ip, 60_000)).toBe(true)
+  expect(isIpBlocked(ip)).toBe(false)
+
+  expect(unwhitelistIp(ip)).toBe(true)
+  expect(isIpBlocked(ip)).toBe(true)
+})
+
+test("keeps banning when additional leased failures remain in the window", () => {
+  const ip = "198.51.100.54"
+  setCurrentTime(Date.UTC(2026, 0, 1, 12))
+
+  recordFailedAttempt(ip)
+  recordFailedAttempt(ip)
+  recordFailedAttempt(ip)
+
+  currentTime += 12 * 60 * 60 * 1000
+  expect(leaseIp(ip, 60_000)).toBe(true)
+  recordFailedAttempt(ip)
+  recordFailedAttempt(ip)
+  recordFailedAttempt(ip)
+  expect(unwhitelistIp(ip)).toBe(true)
+
+  currentTime += 12 * 60 * 60 * 1000
+  expect(isIpBlocked(ip)).toBe(true)
 })
