@@ -108,16 +108,20 @@ test("nginx templates are unlimited and contain no pacing or timeout policy", ()
     "RATE_LIMIT",
     "PROXY_LIMITS",
     "PROXY_CONNECT_TIMEOUT",
-    "client_header_timeout",
-    "client_body_timeout",
-    "proxy_connect_timeout",
-    "proxy_send_timeout",
-    "proxy_read_timeout",
-    "send_timeout",
   ]) {
     expect(templates).not.toContain(forbidden)
   }
   expect(templates).not.toMatch(/client_max_body_size\s+(?!0;)/)
+  for (const directive of [
+    "client_header_timeout 2147483647s;",
+    "client_body_timeout 2147483647s;",
+    "proxy_connect_timeout 75s;",
+    "proxy_send_timeout 2147483647s;",
+    "proxy_read_timeout 2147483647s;",
+    "send_timeout 2147483647s;",
+  ]) {
+    expect(templates).toContain(directive)
+  }
 })
 
 test("active documentation exposes no local limit configuration", () => {
