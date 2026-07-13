@@ -5,6 +5,7 @@ import {
   registerCredentialProvider,
   resolveRequestCredentialKind,
 } from "./credential-resolver"
+import { extractClientIpFromHeaders, isIpBlocked } from "./ip-blocker"
 import { PATHS } from "./paths"
 import { getActiveApiKeys } from "./request-auth"
 
@@ -378,6 +379,9 @@ export async function authenticateAdminRequest(
   request: Request,
   options: { requireCsrf?: boolean } = {},
 ): Promise<AuthenticatedAdminSession | null> {
+  const clientIp = extractClientIpFromHeaders(request.headers)
+  if (clientIp !== null && isIpBlocked(clientIp)) return null
+
   const credential = await resolveRequestCredentialKind(request, "admin", {
     requireCsrf: options.requireCsrf,
   })

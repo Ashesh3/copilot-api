@@ -8,7 +8,12 @@ import {
   setAdminAuthTestMode,
   setAdminAuthClockForTest,
 } from "../src/lib/admin-auth"
-import { isIpBlocked, resetIpSecurityForTest } from "../src/lib/ip-blocker"
+import {
+  isIpBlocked,
+  leaseIp,
+  recordFailedAttempt,
+  resetIpSecurityForTest,
+} from "../src/lib/ip-blocker"
 import { state } from "../src/lib/state"
 import { server } from "../src/server"
 
@@ -387,6 +392,52 @@ test("session and CSRF failures do not count as password attempts", async () => 
     body: JSON.stringify({ gatewayKey: GATEWAY_KEY, password: ADMIN_PASSWORD }),
   })
   expect(login.status).toBe(200)
+})
+
+test("banned IPs cannot use valid admin sessions on browser surfaces", async () => {
+  const cookies = await setup()
+  const clientIp = "198.51.100.84"
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    recordFailedAttempt(clientIp)
+  }
+
+  const headers = {
+    cookie: cookies.cookie,
+    "x-copilot-peer-ip": "127.0.0.1",
+    "x-forwarded-for": clientIp,
+  }
+  expect(
+    (await server.request("/dashboard/auth/session", { headers })).status,
+  ).toBe(401)
+  expect(
+    (await server.request("/dashboard/api/overview", { headers })).status,
+  ).toBe(401)
+
+  const remote = await server.request("/remote", { headers })
+  expect(remote.status).toBe(302)
+  expect(remote.headers.get("location")).toBe("/dashboard")
+})
+
+test("an explicit lease lets a banned IP use its valid admin session", async () => {
+  const cookies = await setup()
+  const clientIp = "198.51.100.85"
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    recordFailedAttempt(clientIp)
+  }
+  expect(leaseIp(clientIp, 60_000)).toBe(true)
+
+  const headers = {
+    cookie: cookies.cookie,
+    "x-copilot-peer-ip": "127.0.0.1",
+    "x-forwarded-for": clientIp,
+  }
+  expect(
+    (await server.request("/dashboard/auth/session", { headers })).status,
+  ).toBe(200)
+  expect(
+    (await server.request("/dashboard/api/overview", { headers })).status,
+  ).toBe(200)
+  expect((await server.request("/remote", { headers })).status).toBe(200)
 })
 
 test("admin session accesses reads and mutations require CSRF and Origin", async () => {

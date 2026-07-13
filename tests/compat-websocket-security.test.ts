@@ -5,7 +5,12 @@ import {
   setAdminAuthTestMode,
   setupAdminAuth,
 } from "../src/lib/admin-auth"
-import { isIpBlocked, resetIpSecurityForTest } from "../src/lib/ip-blocker"
+import {
+  isIpBlocked,
+  leaseIp,
+  recordFailedAttempt,
+  resetIpSecurityForTest,
+} from "../src/lib/ip-blocker"
 import { state } from "../src/lib/state"
 import {
   addClientEvents,
@@ -351,6 +356,75 @@ describe("Remote Control WebSocket tickets", () => {
     )
     expect(result.ticket).toHaveLength(43)
     expect(result.ticket).not.toContain("admin-session-hash")
+  })
+
+  test("rejects a valid admin session from a banned IP", async () => {
+    const codeSession = createSession("Banned admin", [])
+    const admin = await authenticateAdminRequest(
+      new Request(`${TEST_ADMIN_ORIGIN}/dashboard`, {
+        headers: { cookie: adminCookie },
+      }),
+    )
+    if (!admin) throw new Error("Expected authenticated admin session")
+    const { ticket } = mintRemoteWebSocketTicket(
+      admin.tokenHash,
+      codeSession.id,
+    )
+    const clientIp = "198.51.100.96"
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      recordFailedAttempt(clientIp)
+    }
+    const upgrade = mock(() => true)
+
+    expect(
+      await tryUpgradeRemoteWebSocket(
+        new Request(`${TEST_ADMIN_ORIGIN}/ws/remote/${codeSession.id}`, {
+          headers: {
+            cookie: adminCookie,
+            origin: TEST_ADMIN_ORIGIN,
+            "sec-websocket-protocol": `copilot-remote, copilot-ticket.${ticket}`,
+            "x-copilot-peer-ip": clientIp,
+          },
+        }),
+        { upgrade },
+      ),
+    ).toBe("auth_failed")
+    expect(upgrade).not.toHaveBeenCalled()
+  })
+
+  test("accepts a valid admin session from a leased banned IP", async () => {
+    const codeSession = createSession("Leased admin", [])
+    const admin = await authenticateAdminRequest(
+      new Request(`${TEST_ADMIN_ORIGIN}/dashboard`, {
+        headers: { cookie: adminCookie },
+      }),
+    )
+    if (!admin) throw new Error("Expected authenticated admin session")
+    const { ticket } = mintRemoteWebSocketTicket(
+      admin.tokenHash,
+      codeSession.id,
+    )
+    const clientIp = "198.51.100.97"
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      recordFailedAttempt(clientIp)
+    }
+    expect(leaseIp(clientIp, 60_000)).toBe(true)
+    const upgrade = mock(() => true)
+
+    expect(
+      await tryUpgradeRemoteWebSocket(
+        new Request(`${TEST_ADMIN_ORIGIN}/ws/remote/${codeSession.id}`, {
+          headers: {
+            cookie: adminCookie,
+            origin: TEST_ADMIN_ORIGIN,
+            "sec-websocket-protocol": `copilot-remote, copilot-ticket.${ticket}`,
+            "x-copilot-peer-ip": clientIp,
+          },
+        }),
+        { upgrade },
+      ),
+    ).toBe("upgraded")
+    expect(upgrade).toHaveBeenCalledTimes(1)
   })
 
   test("session replay history retains only the newest bounded events", () => {
