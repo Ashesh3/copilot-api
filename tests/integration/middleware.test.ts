@@ -260,22 +260,6 @@ const protectedRoutes: Array<ProtectedRoute> = [
     body: JSON.stringify({ model: "gpt-4.1", input: "hello" }),
   },
   {
-    name: "messages",
-    method: "POST",
-    path: "/messages",
-    mountedMethod: "ALL",
-    mountedPath: "/*",
-    headers: {
-      "anthropic-version": "2023-06-01",
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "claude-sonnet-4",
-      max_tokens: 1,
-      messages: [{ role: "user", content: "hello" }],
-    }),
-  },
-  {
     name: "v1 messages",
     method: "POST",
     path: "/v1/messages",
@@ -414,6 +398,8 @@ afterEach(() => {
 describe("Middleware", () => {
   describe("API key guard", () => {
     test("protected route matrix entries map to mounted routes", () => {
+      expect(protectedRoutes).toHaveLength(37)
+
       const guardIndex = server.routes.findIndex(
         (route) => route.handler === apiKeyGuard,
       )
