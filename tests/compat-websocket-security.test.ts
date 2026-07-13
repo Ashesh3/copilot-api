@@ -40,6 +40,7 @@ import {
 const originalGatewayKey = state.apiKeyAuth
 const originalDirectConnect = process.env.COPILOT_API_ENABLE_DIRECT_CONNECT
 const originalAdminOrigin = process.env.COPILOT_ADMIN_ORIGIN
+const originalAdminPasswordHash = process.env.COPILOT_ADMIN_PASSWORD_HASH
 const TEST_ADMIN_ORIGIN = "https://admin.example.test"
 let adminCookie = ""
 
@@ -50,6 +51,7 @@ function voiceUpgradeRequest(): Request {
 }
 
 beforeEach(async () => {
+  delete process.env.COPILOT_ADMIN_PASSWORD_HASH
   state.apiKeyAuth = "gateway-secret"
   process.env.COPILOT_ADMIN_ORIGIN = TEST_ADMIN_ORIGIN
   setAdminAuthTestMode(true)
@@ -78,6 +80,11 @@ afterEach(() => {
     delete process.env.COPILOT_ADMIN_ORIGIN
   } else {
     process.env.COPILOT_ADMIN_ORIGIN = originalAdminOrigin
+  }
+  if (originalAdminPasswordHash === undefined) {
+    delete process.env.COPILOT_ADMIN_PASSWORD_HASH
+  } else {
+    process.env.COPILOT_ADMIN_PASSWORD_HASH = originalAdminPasswordHash
   }
 })
 

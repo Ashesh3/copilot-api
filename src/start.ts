@@ -9,6 +9,7 @@ import { resolveApiKeyAuth } from "~/lib/api-key-auth-config"
 
 import packageJson from "../package.json" with { type: "json" }
 import { getStoredTokens } from "./lib/accounts-store"
+import { initializeAdminAuth } from "./lib/admin-auth"
 import { mergeConfigWithDefaults } from "./lib/config"
 import { resolveRequestCredential } from "./lib/credential-resolver"
 import { ensureModelRoutingOverridesLoaded } from "./lib/model-routing"
@@ -451,6 +452,7 @@ const combinedWebSocket = {
 }
 
 export async function runServer(options: RunServerOptions): Promise<void> {
+  await initializeAdminAuth()
   initSentry()
 
   consola.info(`copilot-api v${packageJson.version}`)

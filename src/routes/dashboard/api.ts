@@ -1,5 +1,6 @@
 import type { Context } from "hono"
 
+import { getAdminAuthStatus } from "~/lib/admin-auth"
 import {
   addReplacement,
   getAllReplacements,
@@ -925,12 +926,14 @@ export function handleClearLlmDebugLogs(c: Context) {
   return c.json({ success: true })
 }
 
-export function handleGetSettings(c: Context) {
+export async function handleGetSettings(c: Context) {
   const availableModels =
     state.models?.data
       .map((model) => model.id)
       .filter((id) => typeof id === "string" && id.length > 0)
       .sort() ?? []
+
+  const adminAuthStatus = await getAdminAuthStatus()
 
   return c.json({
     version: packageJson.version,
@@ -943,6 +946,7 @@ export function handleGetSettings(c: Context) {
     dataDir: PATHS.APP_DIR,
     debug: state.debug,
     verbose: state.verbose,
+    passwordManagedExternally: adminAuthStatus.passwordManagedExternally,
     codexCleanupModel: getCodexCleanupModel(),
     codexCleanupModelDefault: getSmallModel(),
     availableModels,

@@ -14,6 +14,7 @@ import { api, authProbe, clearLegacyCredentials } from "./lib/api"
 interface AdminAuthStatus {
   configured: boolean
   gatewayConfigured: boolean
+  passwordManagedExternally: boolean
 }
 
 type GateStatus = "checking" | "authed" | "login" | "setup"
