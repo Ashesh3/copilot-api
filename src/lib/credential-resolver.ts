@@ -38,7 +38,6 @@ const externalCredentialProviders = new Map<
   ExternalCredentialProvider
 >()
 
-const MAX_CREDENTIAL_LENGTH = 4096
 const OAUTH_SCOPES = new Set([
   "user:inference",
   "user:profile",
@@ -104,18 +103,14 @@ export function extractRequestCredential(request: Request): string | null {
 
   const uniqueCandidates = [...new Set(candidates)]
   if (uniqueCandidates.length !== 1) return null
-  const credential = uniqueCandidates[0]
-  return credential && credential.length <= MAX_CREDENTIAL_LENGTH ?
-      credential
-    : null
+  return uniqueCandidates[0] ?? null
 }
 
 export async function resolveCredential(
   rawCredential: string,
   requiredScopes: ReadonlyArray<string> = [],
 ): Promise<ResolvedCredential | null> {
-  if (!rawCredential || rawCredential.length > MAX_CREDENTIAL_LENGTH)
-    return null
+  if (!rawCredential) return null
   for (const gatewayKey of configuredGatewayKeys()) {
     if (!secretEquals(rawCredential, gatewayKey)) continue
     const credential: ResolvedCredential = {

@@ -504,6 +504,56 @@ test("admin password change revokes prior sessions", async () => {
   expect(oldSession.status).toBe(401)
 })
 
+test("wrong current admin passwords count toward the shared IP ban", async () => {
+  const cookies = await setup()
+  const clientIp = "198.51.100.86"
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const response = await server.request("/dashboard/auth/password", {
+      method: "PUT",
+      headers: {
+        cookie: cookies.cookie,
+        "content-type": "application/json",
+        origin: ORIGIN,
+        "x-copilot-csrf": cookies.csrf,
+        "x-copilot-peer-ip": clientIp,
+      },
+      body: JSON.stringify({
+        currentPassword: "incorrect administrator password",
+        newPassword: "a valid replacement administrator password",
+      }),
+    })
+    expect(response.status).toBe(401)
+  }
+
+  expect(isIpBlocked(clientIp)).toBe(true)
+})
+
+test("new admin password validation errors are 400 and do not count", async () => {
+  const cookies = await setup()
+  const clientIp = "198.51.100.87"
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const response = await server.request("/dashboard/auth/password", {
+      method: "PUT",
+      headers: {
+        cookie: cookies.cookie,
+        "content-type": "application/json",
+        origin: ORIGIN,
+        "x-copilot-csrf": cookies.csrf,
+        "x-copilot-peer-ip": clientIp,
+      },
+      body: JSON.stringify({
+        currentPassword: ADMIN_PASSWORD,
+        newPassword: "too-short",
+      }),
+    })
+    expect(response.status).toBe(400)
+  }
+
+  expect(isIpBlocked(clientIp)).toBe(false)
+})
+
 test("logout revokes the current server-side session and expires cookies", async () => {
   const cookies = await setup()
   const logout = await server.request("/dashboard/auth/logout", {

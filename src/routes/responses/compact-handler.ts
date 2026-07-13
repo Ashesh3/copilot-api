@@ -5,7 +5,6 @@ import { randomUUID } from "node:crypto"
 
 import { createHandlerLogger } from "~/lib/logger"
 import { parseModelSuffix } from "~/lib/model-suffix"
-import { checkRateLimit } from "~/lib/rate-limit"
 import { setRequestContext } from "~/lib/request-logger"
 import { state } from "~/lib/state"
 import {
@@ -190,8 +189,6 @@ const convertSpecialItem = (
 }
 
 export const handleCompact = async (c: Context) => {
-  await checkRateLimit(state)
-
   const body = await c.req.json<CompactRequestBody>()
 
   const { baseModel } = parseModelSuffix(body.model)
@@ -253,7 +250,7 @@ export const handleCompact = async (c: Context) => {
     summaryText = extractTextFromResponsesResult(result)
     usage = result.usage ?? null
 
-    logger.debug("Compact result (Responses):", summaryText.slice(0, 200))
+    logger.debug("Compact result (Responses):", summaryText)
   } else {
     // Fall back to ChatCompletions
     consola.debug(
@@ -280,7 +277,7 @@ export const handleCompact = async (c: Context) => {
     summaryText = extractTextFromCCResult(result)
     usage = mapCCUsage(result.usage)
 
-    logger.debug("Compact result (ChatCompletions):", summaryText.slice(0, 200))
+    logger.debug("Compact result (ChatCompletions):", summaryText)
   }
 
   if (usage) {

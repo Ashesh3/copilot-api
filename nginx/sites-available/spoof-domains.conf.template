@@ -1,8 +1,6 @@
 # Render one server block per hostname. Do not combine Claude API, platform,
 # and UI hostnames: each has a different compatibility allowlist.
-# Required shared placeholders include {{UPSTREAM_URL}},
-# {{PROXY_LIMITS_SNIPPET_PATH}}, {{PROXY_CONNECT_TIMEOUT}},
-# {{RATE_LIMIT_ZONE}}, and {{RATE_LIMIT_BURST}}.
+# Required shared placeholders include {{UPSTREAM_URL}}.
 # Host/certificate placeholders are {{CLAUDE_API_SERVER_NAME}},
 # {{CLAUDE_PLATFORM_SERVER_NAMES}}, {{SPOOF_SSL_CERTIFICATE_PATH}}, and
 # {{SPOOF_SSL_CERTIFICATE_KEY_PATH}}.
@@ -16,28 +14,20 @@ server {
 server {
   listen 443 ssl;
   server_name {{CLAUDE_API_SERVER_NAME}};
-  client_header_timeout 10s;
-  client_body_timeout 30s;
-  client_max_body_size 32m;
+  client_max_body_size 0;
   ssl_certificate {{SPOOF_SSL_CERTIFICATE_PATH}};
   ssl_certificate_key {{SPOOF_SSL_CERTIFICATE_KEY_PATH}};
-  limit_req zone={{RATE_LIMIT_ZONE}} burst={{RATE_LIMIT_BURST}} nodelay;
 
   proxy_set_header Host $host;
   proxy_set_header X-Real-IP $remote_addr;
   proxy_set_header X-Forwarded-For $remote_addr;
   proxy_set_header X-Forwarded-Proto $scheme;
 
-  # Claude can spend more than two minutes reasoning without emitting an SSE
-  # event. Keep this authenticated generation stream finite but long-lived.
+  # Keep request and response buffering disabled for generation streams.
   location ~ ^/v1/messages/?$ {
     limit_except POST { deny all; }
     proxy_pass {{UPSTREAM_URL}};
     proxy_http_version 1.1;
-    proxy_connect_timeout {{PROXY_CONNECT_TIMEOUT}};
-    proxy_send_timeout 1h;
-    proxy_read_timeout 1h;
-    send_timeout 1h;
     proxy_request_buffering off;
     proxy_buffering off;
     proxy_cache off;
@@ -45,7 +35,6 @@ server {
   location ~ ^/v1/(?:messages/count_tokens|models)/?$ {
     limit_except GET POST { deny all; }
     proxy_pass {{UPSTREAM_URL}};
-    include {{PROXY_LIMITS_SNIPPET_PATH}};
   }
   # /api/eval is intentionally not published here. Its application-level
   # compatibility fallback is IP-only, which is unsafe behind a proxy or load
@@ -59,58 +48,43 @@ server {
     proxy_request_buffering off;
     proxy_buffering off;
     proxy_cache off;
-    proxy_read_timeout 3m;
-    proxy_send_timeout 3m;
   }
   location ~ ^/api/(?:oauth|claude_code|claude_cli|organization|organizations)(?:/.*)?$ {
     proxy_pass {{UPSTREAM_URL}};
-    include {{PROXY_LIMITS_SNIPPET_PATH}};
   }
   location ~ ^/v1/code/sessions(?:/.*)?$ {
     proxy_pass {{UPSTREAM_URL}};
-    include {{PROXY_LIMITS_SNIPPET_PATH}};
   }
   location ~ ^/v1/code/triggers(?:/[^/]+(?:/run)?)?/?$ {
     limit_except GET POST { deny all; }
-    client_max_body_size 64k;
     proxy_pass {{UPSTREAM_URL}};
-    include {{PROXY_LIMITS_SNIPPET_PATH}};
   }
   location = /v1/code/github/import-token {
     limit_except POST { deny all; }
-    client_max_body_size 64k;
     proxy_pass {{UPSTREAM_URL}};
-    include {{PROXY_LIMITS_SNIPPET_PATH}};
   }
   location = /v1/environment_providers {
     limit_except GET { deny all; }
     proxy_pass {{UPSTREAM_URL}};
-    include {{PROXY_LIMITS_SNIPPET_PATH}};
   }
   location = /v1/environment_providers/cloud/create {
     limit_except POST { deny all; }
-    client_max_body_size 64k;
     proxy_pass {{UPSTREAM_URL}};
-    include {{PROXY_LIMITS_SNIPPET_PATH}};
   }
   location = /v1/mcp_servers {
     limit_except GET { deny all; }
     proxy_pass {{UPSTREAM_URL}};
-    include {{PROXY_LIMITS_SNIPPET_PATH}};
   }
   location ~ ^/v1/session_ingress/session/[^/]+/?$ {
     limit_except GET { deny all; }
     proxy_pass {{UPSTREAM_URL}};
-    include {{PROXY_LIMITS_SNIPPET_PATH}};
   }
   location = /v1/ultrareview/quota {
     limit_except GET { deny all; }
     proxy_pass {{UPSTREAM_URL}};
-    include {{PROXY_LIMITS_SNIPPET_PATH}};
   }
   location ~ ^/v1/(?:sessions|environments)(?:/.*)?$ {
     proxy_pass {{UPSTREAM_URL}};
-    include {{PROXY_LIMITS_SNIPPET_PATH}};
   }
   location / { return 404; }
 }
@@ -118,9 +92,7 @@ server {
 server {
   listen 443 ssl;
   server_name {{CLAUDE_PLATFORM_SERVER_NAMES}};
-  client_header_timeout 10s;
-  client_body_timeout 30s;
-  client_max_body_size 64k;
+  client_max_body_size 0;
   ssl_certificate {{SPOOF_SSL_CERTIFICATE_PATH}};
   ssl_certificate_key {{SPOOF_SSL_CERTIFICATE_KEY_PATH}};
 
@@ -131,21 +103,15 @@ server {
 
   location ~ ^/oauth/(?:authorize|code/(?:success|callback))/?$ {
     limit_except GET POST { deny all; }
-    client_max_body_size 64k;
     proxy_pass {{UPSTREAM_URL}};
-    include {{PROXY_LIMITS_SNIPPET_PATH}};
   }
   location = /v1/oauth/token {
     limit_except POST { deny all; }
-    client_max_body_size 64k;
     proxy_pass {{UPSTREAM_URL}};
-    include {{PROXY_LIMITS_SNIPPET_PATH}};
   }
   location = /v1/oauth/revoke {
     limit_except POST { deny all; }
-    client_max_body_size 64k;
     proxy_pass {{UPSTREAM_URL}};
-    include {{PROXY_LIMITS_SNIPPET_PATH}};
   }
   location / { return 404; }
 }

@@ -1,6 +1,5 @@
 import consola from "consola"
 import { Hono, type Context, type Next } from "hono"
-import { bodyLimit } from "hono/body-limit"
 import { randomUUID } from "node:crypto"
 
 import {
@@ -30,9 +29,6 @@ import {
 } from "./session-store"
 
 export const codeSessionsRoutes = new Hono()
-
-export const CODE_SESSION_MAX_BODY_BYTES = 1024 * 1024
-export const CODE_SESSION_MAX_EVENTS_PER_REQUEST = 100
 
 function unauthorized(c: {
   json(value: unknown, status: 401): Response
@@ -64,7 +60,12 @@ async function requireWorkerCapability(
 }
 
 codeSessionsRoutes.use("*", async (c, next) => {
-  if (/\/worker(?:\/|$)/.test(c.req.path)) return next()
+  if (
+    /\/worker(?:\/|$)/.test(c.req.path)
+    || /\/[^/]+\/events\/stream\/?$/.test(c.req.path)
+  ) {
+    return next()
+  }
   const auth = await resolveProtectedCredential(
     c.req.raw,
     async () =>
@@ -75,14 +76,6 @@ codeSessionsRoutes.use("*", async (c, next) => {
 })
 codeSessionsRoutes.use("/:id/worker", requireWorkerCapability)
 codeSessionsRoutes.use("/:id/worker/*", requireWorkerCapability)
-codeSessionsRoutes.use(
-  "*",
-  bodyLimit({
-    maxSize: CODE_SESSION_MAX_BODY_BYTES,
-    onError: (c) => c.json({ error: "Payload too large" }, 413),
-  }),
-)
-
 // POST / — Create a code session
 codeSessionsRoutes.post("/", async (c) => {
   const body = await c.req.json<{
@@ -259,10 +252,7 @@ codeSessionsRoutes.post("/:id/worker/events", async (c) => {
     worker_epoch: number
     events: Array<{ payload: Record<string, unknown>; ephemeral?: boolean }>
   }>()
-  if (
-    !Array.isArray(body.events)
-    || body.events.length > CODE_SESSION_MAX_EVENTS_PER_REQUEST
-  ) {
+  if (!Array.isArray(body.events)) {
     return c.json({ error: "Invalid event batch" }, 400)
   }
 
@@ -307,10 +297,7 @@ codeSessionsRoutes.post("/:id/worker/internal-events", async (c) => {
       agent_id?: string
     }>
   }>()
-  if (
-    !Array.isArray(body.events)
-    || body.events.length > CODE_SESSION_MAX_EVENTS_PER_REQUEST
-  ) {
+  if (!Array.isArray(body.events)) {
     return c.json({ error: "Invalid event batch" }, 400)
   }
 

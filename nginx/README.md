@@ -21,14 +21,9 @@ catch-all `proxy_pass`.
 
 ## Shared prerequisites
 
-Define the request-rate zone once in the Nginx `http` context, for example:
-
-```nginx
-limit_req_zone $binary_remote_addr zone=copilot:10m rate=20r/s;
-```
-
-Render `snippets/proxy-limits.conf.template` to a normal snippet, substituting a
-finite `PROXY_CONNECT_TIMEOUT` such as `15s`. Install
+The supplied templates do not pace requests, cap connections, bound request
+bodies, or set client/proxy/send timeouts. `client_max_body_size 0` is explicit
+so Nginx's default body limit is disabled. Install
 `logrotate/copilot-api-nginx` under `/etc/logrotate.d/` if the deployment uses
 the matching Nginx log paths.
 
@@ -42,11 +37,7 @@ the matching Nginx log paths.
 | `PUBLIC_SSL_CERTIFICATE_PATH`     | `/etc/ssl/api.example.com/fullchain.pem`              |
 | `PUBLIC_SSL_CERTIFICATE_KEY_PATH` | `/etc/ssl/api.example.com/privkey.pem`                |
 | `CLOUDFLARE_REAL_IP_SNIPPET_PATH` | `/etc/nginx/snippets/copilot-cloudflare-real-ip.conf` |
-| `RATE_LIMIT_ZONE`                 | `copilot`                                             |
-| `RATE_LIMIT_BURST`                | `40`                                                  |
 | `UPSTREAM_URL`                    | `http://127.0.0.1:4141`                               |
-| `PROXY_LIMITS_SNIPPET_PATH`       | `/etc/nginx/snippets/copilot-proxy-limits.conf`       |
-| `PROXY_CONNECT_TIMEOUT`           | `15s`                                                 |
 
 The other hostname templates enumerate their placeholders in comments at the
 top of each file. Render every placeholder; a value left in `{{BRACES}}` should
@@ -58,12 +49,8 @@ Codex Desktop opens an authenticated WebSocket with `GET` and
 `Upgrade: websocket`. A POST-only location causes an Nginx `403` before the
 application can authenticate the socket. Plain GET remains denied.
 
-Authenticated generation streams (`/chat/completions` and `/messages`) use a
-finite one-hour idle timeout. Do not replace it with the shared two-minute API
-timeout: reasoning models can remain quiet for longer than two minutes before
-the next SSE event, and Nginx will otherwise terminate Claude Code with
-`Connection closed mid-response`. OAuth, dashboard, token-count, embedding, and
-other short operations retain the tighter shared timeout.
+Generation and WebSocket locations disable request and response buffering for
+streaming, but define no project-specific timeout.
 
 The public template adds baseline browser headers with `always`, including to
 Nginx-generated denials. It deliberately does not set Content Security Policy;
@@ -108,6 +95,8 @@ Then verify the boundary from outside the origin:
 6. A normal authenticated `POST /v1/responses` still works.
 7. Spoofed `X-Real-IP`, `X-Forwarded-For`, and `CF-Connecting-IP` headers from a
    non-trusted TCP peer do not authorize IP-gated routes.
+8. `nginx -T` contains no `limit_req`, `limit_req_zone`, `limit_conn`, or
+   project-defined client/proxy/send timeout directives.
 
 Keep origin ports firewalled or loopback-bound. The public hostname policy does
 not protect a separately reachable backend listener.

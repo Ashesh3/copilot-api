@@ -123,9 +123,7 @@ const initializeSession = async (): Promise<string> => {
 
   if (!response.ok) {
     const errorText = await response.text()
-    throw new Error(
-      `MCP initialize failed: ${response.status} ${errorText.slice(0, 200)}`,
-    )
+    throw new Error(`MCP initialize failed: ${response.status} ${errorText}`)
   }
 
   // Extract session ID from response header
@@ -209,14 +207,14 @@ export const executeWebSearch = async (query: string): Promise<string> => {
         const retryResponse = await mcpFetch(request, newSessionId)
         if (!retryResponse.ok) {
           const errorText = await retryResponse.text()
-          consola.error("MCP web_search retry failed:", errorText.slice(0, 200))
+          consola.error("MCP web_search retry failed:", errorText)
           return `Web search failed: ${retryResponse.status}`
         }
         return parseSearchResponse(await parseResponseBody(retryResponse))
       }
 
       const errorText = await response.text()
-      consola.error("MCP web_search failed:", errorText.slice(0, 200))
+      consola.error("MCP web_search failed:", errorText)
       return `Web search failed: ${response.status}`
     }
 

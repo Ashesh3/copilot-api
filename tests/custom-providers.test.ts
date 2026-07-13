@@ -17,7 +17,6 @@ const originalCustomApiKey = process.env.CUSTOM_PROVIDER_API_KEY
 const originalModels = state.models
 const originalCopilotToken = state.copilotToken
 const originalApiKeyAuth = state.apiKeyAuth
-const originalRateLimitSeconds = state.rateLimitSeconds
 const originalIsMultiToken = state.isMultiToken
 
 let fetchMock: ReturnType<typeof mock>
@@ -124,7 +123,6 @@ afterAll(() => {
   state.models = originalModels
   state.copilotToken = originalCopilotToken
   state.apiKeyAuth = originalApiKeyAuth
-  state.rateLimitSeconds = originalRateLimitSeconds
   state.isMultiToken = originalIsMultiToken
   resetTestAdminSession()
 })
@@ -136,7 +134,6 @@ beforeEach(() => {
   state.models = models
   state.copilotToken = "copilot-token"
   state.apiKeyAuth = undefined
-  state.rateLimitSeconds = undefined
   state.isMultiToken = false
   setConfigForTest({
     auth: { apiKeys: [] },

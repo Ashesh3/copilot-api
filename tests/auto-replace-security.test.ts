@@ -4,7 +4,6 @@ import {
   addReplacement,
   applyReplacements,
   getUserReplacements,
-  REPLACEMENT_LIMITS,
   ReplacementValidationError,
   setReplacementsForTest,
 } from "~/lib/auto-replace"
@@ -27,26 +26,23 @@ test("applies nested-quantifier patterns with the linear-time engine", async () 
   expect(result.text).toBe("safe")
 })
 
-test("enforces pattern and input bounds", async () => {
+test("accepts large replacement rules and inputs", async () => {
   setReplacementsForTest([])
-  expect(
-    addReplacement("a".repeat(REPLACEMENT_LIMITS.maxPatternLength + 1), "x"),
-  ).rejects.toBeInstanceOf(ReplacementValidationError)
-
-  await addReplacement("secret", "redacted")
-  const input = `secret${"x".repeat(REPLACEMENT_LIMITS.maxInputLength)}`
-  expect(await applyReplacements(input)).toEqual({
-    text: input,
-    appliedRules: [],
-  })
+  const pattern = "a".repeat(2048)
+  const replacement = "b".repeat(20_000)
+  await addReplacement(pattern, replacement)
+  const input = `${pattern}${"x".repeat(1_000_001)}`
+  const result = await applyReplacements(input)
+  expect(result.text).toBe(`${replacement}${"x".repeat(1_000_001)}`)
+  expect(result.appliedRules).toHaveLength(1)
 })
 
 test("serializes concurrent replacement mutations", async () => {
   setReplacementsForTest([])
   await Promise.all(
-    Array.from({ length: 20 }, (_, index) =>
+    Array.from({ length: 120 }, (_, index) =>
       addReplacement(`needle-${index}`, `replacement-${index}`),
     ),
   )
-  expect(await getUserReplacements()).toHaveLength(20)
+  expect(await getUserReplacements()).toHaveLength(120)
 })

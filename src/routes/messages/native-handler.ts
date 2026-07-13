@@ -69,10 +69,7 @@ export async function handleWithNativeMessages(
           ...response,
           model: requestedModel ?? response.model,
         }
-        logger.debug(
-          "Native /v1/messages response:",
-          JSON.stringify(result).slice(-400),
-        )
+        logger.debug("Native /v1/messages response:", JSON.stringify(result))
         return c.json(result)
       },
     )

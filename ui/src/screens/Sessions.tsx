@@ -136,7 +136,7 @@ function SessionEventsDetail({
       : null}
 
       {data && data.length > 0 ?
-        <List hasDividers header={<Heading level={3}>Recent Events</Heading>}>
+        <List hasDividers header={<Heading level={3}>Session Events</Heading>}>
           {data.map((event) => (
             <ListItem
               key={event.event_id}

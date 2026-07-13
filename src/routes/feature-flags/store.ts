@@ -10,9 +10,6 @@ export type FeatureFlagValue =
   | Record<string, unknown>
 export type FeatureFlags = Record<string, FeatureFlagValue>
 
-const MAX_FLAG_NAME_LENGTH = 128
-const MAX_FLAG_COUNT = 200
-const MAX_SERIALIZED_VALUE_LENGTH = 65_536
 const FORBIDDEN_FLAG_NAMES = new Set(["__proto__", "constructor", "prototype"])
 
 export class FeatureFlagValidationError extends Error {
@@ -24,10 +21,7 @@ export class FeatureFlagValidationError extends Error {
 
 export function isValidFeatureFlagName(name: string): boolean {
   return (
-    name.length > 0
-    && name.length <= MAX_FLAG_NAME_LENGTH
-    && /^[\w.-]+$/.test(name)
-    && !FORBIDDEN_FLAG_NAMES.has(name)
+    name.length > 0 && /^[\w.-]+$/.test(name) && !FORBIDDEN_FLAG_NAMES.has(name)
   )
 }
 
@@ -41,7 +35,7 @@ function normalizeFlags(raw: unknown): FeatureFlags {
     return result
   }
 
-  for (const [name, value] of Object.entries(raw).slice(0, MAX_FLAG_COUNT)) {
+  for (const [name, value] of Object.entries(raw)) {
     if (!isValidFeatureFlagName(name)) continue
     if (
       typeof value !== "boolean"
@@ -52,7 +46,7 @@ function normalizeFlags(raw: unknown): FeatureFlags {
       continue
     }
     try {
-      if (JSON.stringify(value).length > MAX_SERIALIZED_VALUE_LENGTH) continue
+      JSON.stringify(value)
     } catch {
       continue
     }
@@ -127,22 +121,12 @@ export function setFeatureFlag(
   if (!isValidFeatureFlagName(name)) {
     throw new FeatureFlagValidationError("Invalid feature flag name")
   }
-  if (
-    !Object.hasOwn(flags, name)
-    && Object.keys(flags).length >= MAX_FLAG_COUNT
-  ) {
-    throw new FeatureFlagValidationError("Maximum feature flag count reached")
-  }
-  let serialized: string
   try {
-    serialized = JSON.stringify(value)
+    JSON.stringify(value)
   } catch {
     throw new FeatureFlagValidationError(
       "Feature flag value is not serializable",
     )
-  }
-  if (serialized.length > MAX_SERIALIZED_VALUE_LENGTH) {
-    throw new FeatureFlagValidationError("Feature flag value is too large")
   }
   flags[name] = value
   writeFlagsToDisk(flags)

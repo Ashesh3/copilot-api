@@ -26,9 +26,8 @@ import { cacheModels } from "./lib/utils"
 import { isDirectConnectEnabled } from "./routes/direct-connect/route"
 import {
   DIRECT_CONNECT_WS_PATH,
+  getDirectConnectSession,
   handleDirectConnectWebSocket,
-  releaseDirectConnectConnection,
-  reserveDirectConnectConnection,
 } from "./routes/direct-connect/ws-handler"
 import { remoteWebSocket } from "./routes/remote/websocket"
 import { tryUpgradeRemoteWebSocket } from "./routes/remote/ws-security"
@@ -50,8 +49,6 @@ interface RunServerOptions {
   verbose: boolean
   accountType: string
   manual: boolean
-  rateLimit?: number
-  rateLimitWait: boolean
   githubToken?: string
   claudeCode: boolean
   showToken: boolean
@@ -255,7 +252,7 @@ interface StartFetchServer {
 }
 
 // Upgrade dispatch covers four independently secured WebSocket protocols.
-// eslint-disable-next-line complexity
+
 export async function handleStartFetch(
   req: Request,
   bunServer: StartFetchServer,
@@ -272,18 +269,12 @@ export async function handleStartFetch(
     if (voiceResult === "auth_failed") {
       return new Response("Unauthorized", { status: 401 })
     }
-    if (voiceResult === "limit_reached") {
-      return new Response("Too Many Requests", { status: 429 })
-    }
     const wsResult = await tryUpgradeResponsesWebSocket(req, bunServer)
     if (wsResult === "upgraded") {
       return undefined as unknown as Response
     }
     if (wsResult === "auth_failed") {
       return new Response("Unauthorized", { status: 401 })
-    }
-    if (wsResult === "limit_reached") {
-      return new Response("Too Many Requests", { status: 429 })
     }
     // Direct Connect WebSocket upgrade
     const url = new URL(req.url)
@@ -299,7 +290,7 @@ export async function handleStartFetch(
         return new Response("Not Found", { status: 404 })
       }
       const sessionId = url.pathname.slice(DIRECT_CONNECT_WS_PATH.length + 1)
-      if (sessionId && reserveDirectConnectConnection(sessionId)) {
+      if (sessionId && getDirectConnectSession(sessionId)) {
         const upgraded = bunServer.upgrade(req, {
           data: {
             type: "direct-connect" as const,
@@ -307,7 +298,6 @@ export async function handleStartFetch(
           },
         })
         if (upgraded) return undefined as unknown as Response
-        releaseDirectConnectConnection(sessionId)
       }
       return new Response("Not Found", { status: 404 })
     }
@@ -317,9 +307,6 @@ export async function handleStartFetch(
     }
     if (remoteResult === "auth_failed") {
       return new Response("Unauthorized", { status: 401 })
-    }
-    if (remoteResult === "limit_reached") {
-      return new Response("Too Many Requests", { status: 429 })
     }
   }
   return server.fetch(req)
@@ -489,8 +476,6 @@ export async function runServer(options: RunServerOptions): Promise<void> {
   }
 
   state.manualApprove = options.manual
-  state.rateLimitSeconds = options.rateLimit
-  state.rateLimitWait = options.rateLimitWait
   state.showToken = options.showToken
   state.debug = options.debug
   state.verbose = options.verbose
@@ -533,14 +518,8 @@ export async function runServer(options: RunServerOptions): Promise<void> {
   Bun.serve({
     port: options.port,
     hostname: options.host,
-    idleTimeout: 255,
     fetch: handleStartFetch,
-    websocket: {
-      ...combinedWebSocket,
-      maxPayloadLength: 4 * 1024 * 1024,
-      backpressureLimit: 1024 * 1024,
-      closeOnBackpressureLimit: true,
-    },
+    websocket: combinedWebSocket,
   })
 
   const host = options.host ?? "localhost"
@@ -588,18 +567,6 @@ export const start = defineCommand({
       type: "boolean",
       default: false,
       description: "Enable manual request approval",
-    },
-    "rate-limit": {
-      alias: "r",
-      type: "string",
-      description: "Rate limit in seconds between requests",
-    },
-    wait: {
-      alias: "w",
-      type: "boolean",
-      default: false,
-      description:
-        "Wait instead of error when rate limit is hit. Has no effect if rate limit is not set",
     },
     "github-token": {
       alias: "g",
@@ -649,18 +616,11 @@ export const start = defineCommand({
     },
   },
   run({ args }) {
-    const rateLimitRaw = args["rate-limit"]
-    const rateLimit =
-      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-      rateLimitRaw === undefined ? undefined : Number.parseInt(rateLimitRaw, 10)
-
     return runServer({
       port: Number.parseInt(args.port, 10),
       verbose: args.verbose,
       accountType: args["account-type"],
       manual: args.manual,
-      rateLimit,
-      rateLimitWait: args.wait,
       githubToken: args["github-token"],
       claudeCode: args["claude-code"],
       showToken: args["show-token"],

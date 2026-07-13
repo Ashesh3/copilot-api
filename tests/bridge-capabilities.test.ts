@@ -11,10 +11,6 @@ import {
 import { isIpBlocked, resetIpSecurityForTest } from "../src/lib/ip-blocker"
 import { OAuthStore, setOAuthStoreForTest } from "../src/lib/oauth-store"
 import { state } from "../src/lib/state"
-import {
-  CODE_SESSION_MAX_BODY_BYTES,
-  CODE_SESSION_MAX_EVENTS_PER_REQUEST,
-} from "../src/routes/code-sessions/route"
 import { server } from "../src/server"
 
 const GATEWAY_KEY = "bridge-test-gateway-key-with-enough-entropy"
@@ -259,6 +255,30 @@ test("worker HTTP routes reject user and cross-session credentials", async () =>
   ).toBe(200)
 })
 
+test("worker capability can open the client event SSE stream", async () => {
+  const sessionResponse = await server.request("/v1/code/sessions", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(GATEWAY_KEY) },
+    body: JSON.stringify({ title: "Worker SSE" }),
+  })
+  const sessionId = (
+    (await sessionResponse.json()) as { session: { id: string } }
+  ).session.id
+  const bridge = await server.request(`/v1/code/sessions/${sessionId}/bridge`, {
+    method: "POST",
+    headers: bearer(GATEWAY_KEY),
+  })
+  const token = ((await bridge.json()) as { worker_jwt: string }).worker_jwt
+
+  const response = await server.request(
+    `/v1/code/sessions/${sessionId}/events/stream`,
+    { headers: bearer(token) },
+  )
+
+  expect(response.status).toBe(200)
+  await response.body?.cancel()
+})
+
 test("environment capabilities are opaque and environment-bound", async () => {
   const first = issueEnvironmentCapability("env_first")
   const second = issueEnvironmentCapability("env_second")
@@ -277,21 +297,46 @@ test("environment capabilities are opaque and environment-bound", async () => {
   ).toBe(false)
 })
 
-test("code-session writes reject oversized bodies and event batches", async () => {
-  const oversized = await server.request("/v1/code/sessions", {
+test("bridge capability stores do not evict active credentials by count", async () => {
+  const workerSessionId = "cse_capacity"
+  const worker = issueWorkerCapability(workerSessionId)
+  for (let index = 0; index < 600; index += 1) {
+    issueWorkerCapability(`cse_other_${index}`)
+  }
+  expect(
+    await authorizeWorkerCapability(
+      new Request("https://example.test", { headers: bearer(worker) }),
+      workerSessionId,
+    ),
+  ).not.toBeNull()
+
+  const environment = issueEnvironmentCapability("env_capacity")
+  for (let index = 0; index < 150; index += 1) {
+    issueEnvironmentCapability(`env_other_${index}`)
+  }
+  expect(
+    await authorizeEnvironmentCapability(
+      new Request("https://example.test", { headers: bearer(environment) }),
+      "env_capacity",
+    ),
+  ).toBe(true)
+})
+
+test("code-session writes accept large bodies and event batches", async () => {
+  const largeSession = await server.request("/v1/code/sessions", {
     method: "POST",
     headers: {
       "content-type": "application/json",
       ...bearer(GATEWAY_KEY),
     },
-    body: JSON.stringify({ title: "x".repeat(CODE_SESSION_MAX_BODY_BYTES) }),
+    body: JSON.stringify({ title: "x".repeat(1024 * 1024 + 1) }),
   })
-  expect(oversized.status).toBe(413)
+  expect(largeSession.status).toBe(201)
 
   const sessionResponse = await server.request("/v1/code/sessions", {
     method: "POST",
     headers: { "content-type": "application/json", ...bearer(GATEWAY_KEY) },
-    body: JSON.stringify({ title: "Bounded events" }),
+    body: JSON.stringify({ title: "Complete events" }),
   })
   const sessionId = (
     (await sessionResponse.json()) as { session: { id: string } }
@@ -305,27 +350,22 @@ test("code-session writes reject oversized bodies and event batches", async () =
     worker_jwt: string
   }
   const clientIp = "198.51.100.103"
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const workerBatch = await server.request(
-      `/v1/code/sessions/${sessionId}/worker/events`,
-      {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          ...bearer(worker.worker_jwt),
-          "x-copilot-peer-ip": "127.0.0.1",
-          "x-forwarded-for": clientIp,
-        },
-        body: JSON.stringify({
-          worker_epoch: worker.worker_epoch,
-          events: Array.from(
-            { length: CODE_SESSION_MAX_EVENTS_PER_REQUEST + 1 },
-            () => ({ payload: {} }),
-          ),
-        }),
+  const workerBatch = await server.request(
+    `/v1/code/sessions/${sessionId}/worker/events`,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...bearer(worker.worker_jwt),
+        "x-copilot-peer-ip": "127.0.0.1",
+        "x-forwarded-for": clientIp,
       },
-    )
-    expect(workerBatch.status).toBe(400)
-  }
+      body: JSON.stringify({
+        worker_epoch: worker.worker_epoch,
+        events: Array.from({ length: 101 }, () => ({ payload: {} })),
+      }),
+    },
+  )
+  expect(workerBatch.status).toBe(200)
   expect(isIpBlocked(clientIp)).toBe(false)
 })

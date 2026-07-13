@@ -29,6 +29,7 @@ import {
  */
 export async function normalizeAnthropicAttachments(
   payload: AnthropicMessagesPayload,
+  signal?: AbortSignal,
 ): Promise<void> {
   for (const message of payload.messages) {
     if (message.role !== "user" || !Array.isArray(message.content)) continue
@@ -41,7 +42,7 @@ export async function normalizeAnthropicAttachments(
         > = []
         for (const innerBlock of block.content) {
           inner.push(
-            ...((await normalizeBlock(innerBlock)) as Array<
+            ...((await normalizeBlock(innerBlock, signal)) as Array<
               AnthropicTextBlock | AnthropicImageBlock | AnthropicDocumentBlock
             >),
           )
@@ -50,7 +51,7 @@ export async function normalizeAnthropicAttachments(
         continue
       }
 
-      normalized.push(...(await normalizeBlock(block)))
+      normalized.push(...(await normalizeBlock(block, signal)))
     }
     message.content = normalized
   }
@@ -63,22 +64,24 @@ type NormalizableBlock =
 
 async function normalizeBlock<T extends AnthropicUserContentBlock>(
   block: T | NormalizableBlock,
+  signal?: AbortSignal,
 ): Promise<Array<T | NormalizableBlock>> {
   if (block.type === "image") {
-    return [await normalizeImageBlock(block)]
+    return [await normalizeImageBlock(block, signal)]
   }
   if (block.type === "document") {
-    return await normalizeDocumentBlock(block)
+    return await normalizeDocumentBlock(block, signal)
   }
   return [block]
 }
 
 async function normalizeImageBlock(
   block: AnthropicImageBlock,
+  signal?: AbortSignal,
 ): Promise<AnthropicImageBlock | AnthropicTextBlock> {
   if (block.source.type !== "url") return block
 
-  const inlined = await fetchUrlAsDataUri(block.source.url)
+  const inlined = await fetchUrlAsDataUri(block.source.url, { signal })
   if (inlined && isImageMediaType(inlined.mediaType)) {
     return {
       type: "image",
@@ -94,12 +97,12 @@ async function normalizeImageBlock(
     }
   }
 
-  consola.warn(`Could not inline image URL: ${block.source.url.slice(0, 200)}`)
+  consola.warn(`Could not inline image URL: ${block.source.url}`)
   return {
     type: "text",
     text: attachmentOmittedNote({
       kind: "image",
-      name: block.source.url.slice(0, 200),
+      name: block.source.url,
       reason: "the URL could not be fetched by the proxy",
     }),
   }
@@ -107,6 +110,7 @@ async function normalizeImageBlock(
 
 async function normalizeDocumentBlock(
   block: AnthropicDocumentBlock,
+  signal?: AbortSignal,
 ): Promise<Array<NormalizableBlock>> {
   const source = block.source
 
@@ -134,7 +138,7 @@ async function normalizeDocumentBlock(
     }
 
     case "url": {
-      return await normalizeUrlDocument(block, source.url)
+      return await normalizeUrlDocument(block, source.url, signal)
     }
 
     case "content": {
@@ -148,7 +152,7 @@ async function normalizeDocumentBlock(
           if (inner.type === "text") {
             texts.push(inner.text)
           } else {
-            blocks.push(await normalizeImageBlock(inner))
+            blocks.push(await normalizeImageBlock(inner, signal))
           }
         }
       }
@@ -167,8 +171,9 @@ async function normalizeDocumentBlock(
 async function normalizeUrlDocument(
   block: AnthropicDocumentBlock,
   url: string,
+  signal?: AbortSignal,
 ): Promise<Array<NormalizableBlock>> {
-  const inlined = await fetchUrlAsDataUri(url, { expectPdf: true })
+  const inlined = await fetchUrlAsDataUri(url, { expectPdf: true, signal })
 
   if (inlined && isPdfMediaType(inlined.mediaType)) {
     return [
@@ -208,12 +213,12 @@ async function normalizeUrlDocument(
     return [wrapDocumentText(block, decodedText)]
   }
 
-  consola.warn(`Could not inline document URL: ${url.slice(0, 200)}`)
+  consola.warn(`Could not inline document URL: ${url}`)
   return [
     omittedDocumentNote(
       block,
       "the URL could not be fetched by the proxy",
-      url.slice(0, 200),
+      url,
     ),
   ]
 }

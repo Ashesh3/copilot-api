@@ -28,7 +28,6 @@ import {
   parseModelSuffix,
   usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
-import { checkRateLimit } from "~/lib/rate-limit"
 import {
   recordNonDefaultBehavior,
   setRequestContext,
@@ -43,7 +42,6 @@ import { state } from "~/lib/state"
 import { tokenPool } from "~/lib/token-pool"
 import { getTokenCount } from "~/lib/tokenizer"
 import { emitAnthropicToolSpans } from "~/lib/tool-spans"
-import { isNullish } from "~/lib/utils"
 import {
   buildErrorEvent,
   createResponsesStreamState,
@@ -150,8 +148,6 @@ const hasWebSearchToolInPayload = (
 }
 
 export async function handleCompletion(c: Context) {
-  await checkRateLimit(state)
-
   const anthropicPayload = await c.req.json<AnthropicMessagesPayload>()
   const conversationId = setSentryConversationIdFromRequest(c, anthropicPayload)
   logger.debug("Anthropic request payload:", JSON.stringify(anthropicPayload))
@@ -257,7 +253,7 @@ async function handleCompletionInner(
 
   // Inline URL/text attachment sources so only base64 images and base64 PDF
   // documents remain (upstream rejects external URLs and text documents)
-  await normalizeAnthropicAttachments(anthropicPayload)
+  await normalizeAnthropicAttachments(anthropicPayload, c.req.raw.signal)
 
   if (isCompact) {
     logger.debug("Is compact request:", isCompact)
@@ -272,13 +268,6 @@ async function handleCompletionInner(
   const selectedModel = state.models?.data.find(
     (m) => m.id === anthropicPayload.model,
   )
-
-  // Fill in default max_tokens if null/undefined (Copilot rejects null max_tokens with 400)
-  // Type says `number` but clients may send null at runtime
-  if (isNullish(anthropicPayload.max_tokens)) {
-    anthropicPayload.max_tokens =
-      selectedModel?.capabilities.limits?.max_output_tokens ?? 16384
-  }
 
   // Log the requested vs routed model
   // Base64 PDF documents can only reach claude models through the native
@@ -781,7 +770,7 @@ const executeChatCompletions = async (
 
     logger.debug(
       "Non-streaming response from Copilot:",
-      JSON.stringify(finalResponse).slice(-400),
+      JSON.stringify(finalResponse),
     )
 
     const anthropicResponse = translateToAnthropic(
@@ -1461,10 +1450,7 @@ const executeResponsesApi = async (
       })
     : initialResult
 
-  logger.debug(
-    "Non-streaming Responses result:",
-    JSON.stringify(resolved).slice(-400),
-  )
+  logger.debug("Non-streaming Responses result:", JSON.stringify(resolved))
 
   const anthropicResponse = translateResponsesResultToAnthropic(resolved)
   if (requestedModel) anthropicResponse.model = requestedModel

@@ -6,7 +6,6 @@ import {
   failLlmDebugLog,
   finishLlmDebugLog,
   getLlmDebugLog,
-  LLM_DEBUG_LOG_RETENTION_MS,
   listLlmDebugLogs,
   startLlmDebugLog,
 } from "../src/lib/llm-debug-log"
@@ -80,14 +79,15 @@ test("redacts credentials from stored debug URLs and structured bodies", () => {
   expect(detail?.request.headers["x-api-key"]).toBe("[REDACTED]")
 })
 
-test("prunes entries older than the retention window", () => {
+test("retains old entries and complete previews", () => {
   const now = Date.now()
-  startLlmDebugLog({
+  const longPrompt = "x".repeat(400)
+  const oldId = startLlmDebugLog({
     method: "POST",
     path: "/responses",
-    requestBody: JSON.stringify({ model: "old-model" }),
+    requestBody: JSON.stringify({ model: "old-model", input: longPrompt }),
     requestHeaders: {},
-    startedAtMs: now - LLM_DEBUG_LOG_RETENTION_MS - 1,
+    startedAtMs: now - 24 * 60 * 60 * 1000,
     url: "https://example.test/responses",
   })
   const freshId = startLlmDebugLog({
@@ -100,9 +100,11 @@ test("prunes entries older than the retention window", () => {
   })
 
   const list = listLlmDebugLogs()
-  expect(list.count).toBe(1)
+  expect(list.count).toBe(2)
   expect(list.entries[0]?.id).toBe(freshId)
   expect(list.entries[0]?.model).toBe("fresh-model")
+  const oldEntry = list.entries.find((entry) => entry.id === oldId)
+  expect(oldEntry?.requestPreview).toContain(longPrompt)
 })
 
 test("keeps aborted requests terminal when late response work finishes", () => {

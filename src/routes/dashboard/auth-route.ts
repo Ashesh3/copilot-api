@@ -159,6 +159,7 @@ dashboardAuthRoutes.post("/logout", async (c) => {
 
 dashboardAuthRoutes.put("/password", async (c) => {
   noStore(c)
+  const clientIp = extractClientIp(c)
   const body = await c.req
     .json<{ currentPassword?: unknown; newPassword?: unknown }>()
     .catch(() => null)
@@ -175,7 +176,11 @@ dashboardAuthRoutes.put("/password", async (c) => {
     body.newPassword,
   )
   if ("error" in result) {
-    return c.json({ error: result.error }, 401)
+    if (result.reason === "credential" && clientIp !== null) {
+      recordFailedAttempt(clientIp)
+    }
+    const status = result.reason === "validation" ? 400 : 401
+    return c.json({ error: result.error }, status)
   }
   setSessionCookies(c, result)
   return c.json({ authenticated: true })

@@ -11,8 +11,6 @@ export interface ParsedJsonBody {
   value: JsonValue
 }
 
-export const JSON_TREE_AUTO_EXPAND_LIMIT = 100
-
 export function parseJsonBody(raw: string): ParsedJsonBody | null {
   try {
     const value = JSON.parse(raw) as JsonValue
@@ -46,14 +44,13 @@ export function jsonEntries(value: JsonValue): Array<[string, JsonValue]> {
 export function collectJsonContainerPaths(
   value: JsonValue,
   maxDepth = Number.POSITIVE_INFINITY,
-  maxChildren = Number.POSITIVE_INFINITY,
 ): Set<string> {
   const paths = new Set<string>()
 
   function visit(node: JsonValue, path: string, depth: number): void {
     const entries = jsonEntries(node)
     if (!isJsonContainer(node) || entries.length === 0) return
-    if (depth <= maxDepth && entries.length <= maxChildren) paths.add(path)
+    if (depth <= maxDepth) paths.add(path)
     if (depth >= maxDepth) return
 
     for (const [key, child] of entries) {

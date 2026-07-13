@@ -5,9 +5,8 @@ import { PATHS } from "~/lib/paths"
 
 const STORAGE_VERSION = 2
 const MINUTE_MS = 60_000
-const RETENTION_MS = 7 * 24 * 60 * MINUTE_MS
+const SEVEN_DAY_MS = 7 * 24 * 60 * MINUTE_MS
 const WRITE_DELAY_MS = 250
-const MAX_MODEL_LENGTH = 128
 
 interface LegacyUsageRecord {
   timestamp: number
@@ -58,7 +57,7 @@ function finiteNonnegative(value: unknown): number | null {
 function normalizeModel(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined
   const model = value.trim()
-  return model && model.length <= MAX_MODEL_LENGTH ? model : undefined
+  return model || undefined
 }
 
 function normalizeTimestamp(value: unknown, now = Date.now()): number | null {
@@ -84,11 +83,9 @@ function bucketKey(timestamp: number, model?: string): string {
 
 function aggregateRecords(
   records: Array<LegacyUsageRecord>,
-  cutoff: number,
 ): Array<UsageBucket> {
   const buckets = new Map<string, UsageBucket>()
   for (const record of records) {
-    if (record.timestamp < cutoff) continue
     const timestamp = minuteFor(record.timestamp)
     const key = bucketKey(timestamp, record.model)
     const existing = buckets.get(key)
@@ -144,11 +141,7 @@ function parseLegacyRecords(
   return records.sort((a, b) => a.timestamp - b.timestamp)
 }
 
-function normalizeBuckets(
-  raw: unknown,
-  cutoff: number,
-  now: number,
-): Array<UsageBucket> {
+function normalizeBuckets(raw: unknown, now: number): Array<UsageBucket> {
   if (!Array.isArray(raw)) return []
   const buckets = new Map<string, UsageBucket>()
   for (const item of raw) {
@@ -160,7 +153,6 @@ function normalizeBuckets(
     const requestCount = finiteNonnegative(value.requestCount)
     if (
       timestampRaw === null
-      || timestampRaw < cutoff
       || inputTokens === null
       || outputTokens === null
       || requestCount === null
@@ -212,7 +204,6 @@ function normalizeLifetime(raw: unknown, now: number): LifetimeUsage {
 
 /** Parse v2 storage or migrate the old unbounded record list. */
 export function parseUsageData(raw: unknown, now = Date.now()): UsageData {
-  const cutoff = minuteFor(now - RETENTION_MS)
   if (
     typeof raw === "object"
     && raw !== null
@@ -222,7 +213,7 @@ export function parseUsageData(raw: unknown, now = Date.now()): UsageData {
     const value = raw as Record<string, unknown>
     return {
       version: STORAGE_VERSION,
-      buckets: normalizeBuckets(value.buckets, cutoff, now),
+      buckets: normalizeBuckets(value.buckets, now),
       lifetime: normalizeLifetime(value.lifetime, now),
     }
   }
@@ -231,7 +222,7 @@ export function parseUsageData(raw: unknown, now = Date.now()): UsageData {
   if (records.length === 0) return emptyUsageData()
   return {
     version: STORAGE_VERSION,
-    buckets: aggregateRecords(records, cutoff),
+    buckets: aggregateRecords(records),
     lifetime: {
       inputTokens: records.reduce((sum, record) => sum + record.inputTokens, 0),
       outputTokens: records.reduce(
@@ -319,15 +310,6 @@ export function flushUsage(): void {
   }
 }
 
-function prune(data: UsageData, now: number): void {
-  const cutoff = minuteFor(now - RETENTION_MS)
-  const retained = data.buckets.filter((bucket) => bucket.timestamp >= cutoff)
-  if (retained.length !== data.buckets.length) {
-    data.buckets = retained
-    scheduleWrite()
-  }
-}
-
 export function recordUsage(
   inputTokens: number,
   outputTokens: number,
@@ -339,7 +321,6 @@ export function recordUsage(
 
   const now = Date.now()
   const data = getData()
-  prune(data, now)
   const timestamp = minuteFor(now)
   const normalizedModel = normalizeModel(model)
   const existing = data.buckets.find(
@@ -383,10 +364,9 @@ function sumBuckets(buckets: Array<UsageBucket>): {
 export function getUsageResponse(): Record<string, unknown> {
   const data = getData()
   const now = Date.now()
-  prune(data, now)
 
   const fiveHoursAgo = minuteFor(now - 5 * 60 * MINUTE_MS)
-  const sevenDaysAgo = minuteFor(now - RETENTION_MS)
+  const sevenDaysAgo = minuteFor(now - SEVEN_DAY_MS)
   const fiveHour = sumBuckets(
     data.buckets.filter((bucket) => bucket.timestamp >= fiveHoursAgo),
   )
@@ -397,14 +377,14 @@ export function getUsageResponse(): Record<string, unknown> {
 
   return {
     five_hour: {
-      utilization: Math.min(fiveHour.tokens / 10_000_000, 0.99),
+      utilization: fiveHour.tokens / 10_000_000,
       resets_at: Math.floor((now + 5 * 60 * MINUTE_MS) / 1000),
       tokens_used: fiveHour.tokens,
       request_count: fiveHour.requests,
     },
     seven_day: {
-      utilization: Math.min(sevenDay.tokens / 50_000_000, 0.99),
-      resets_at: Math.floor((now + RETENTION_MS) / 1000),
+      utilization: sevenDay.tokens / 50_000_000,
+      resets_at: Math.floor((now + SEVEN_DAY_MS) / 1000),
       tokens_used: sevenDay.tokens,
       request_count: sevenDay.requests,
     },

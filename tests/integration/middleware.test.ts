@@ -444,7 +444,7 @@ describe("Middleware", () => {
     )
 
     test(
-      "request with a wrong API key receives a bounded uniform denial",
+      "request with a wrong API key receives a uniform denial",
       async () => {
         state.apiKeyAuth = "test-secret-key-12345"
         const res = await request("/v1/models", {

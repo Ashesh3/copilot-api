@@ -9,12 +9,9 @@ import { ChevronRightIcon, CopyIcon } from "../icons"
 import {
   collectJsonContainerPaths,
   isJsonContainer,
-  JSON_TREE_AUTO_EXPAND_LIMIT,
   jsonEntries,
   jsonPointerPath,
 } from "../lib/json-tree"
-
-const JSON_TREE_CHILD_CHUNK = 200
 
 interface JsonTreeViewerProps {
   formatted: string
@@ -30,9 +27,7 @@ interface JsonTreeNodeProps {
   isLast: boolean
   path: string
   propertyName?: string
-  visibleCounts: Map<string, number>
   value: JsonValue
-  onShowMore: (path: string, total: number) => void
   onToggle: (path: string) => void
 }
 
@@ -71,9 +66,7 @@ function JsonTreeNode({
   isLast,
   path,
   propertyName,
-  visibleCounts,
   value,
-  onShowMore,
   onToggle,
 }: JsonTreeNodeProps) {
   const entries = jsonEntries(value)
@@ -155,47 +148,18 @@ function JsonTreeNode({
 
       {isExpanded ?
         <div role="group">
-          {entries
-            .slice(0, visibleCounts.get(path) ?? JSON_TREE_CHILD_CHUNK)
-            .map(([key, child], index) => (
-              <JsonTreeNode
-                key={jsonPointerPath(path, key)}
-                depth={depth + 1}
-                expandedPaths={expandedPaths}
-                isLast={index === entries.length - 1}
-                path={jsonPointerPath(path, key)}
-                propertyName={Array.isArray(value) ? undefined : key}
-                visibleCounts={visibleCounts}
-                value={child}
-                onShowMore={onShowMore}
-                onToggle={onToggle}
-              />
-            ))}
-          {(visibleCounts.get(path) ?? JSON_TREE_CHILD_CHUNK) < entries.length ?
-            <div
-              role="treeitem"
-              aria-level={depth + 2}
-              data-tree-id={`${path}/~more`}
-              tabIndex={-1}
-              className="json-tree-load-more"
-              style={{ "--json-depth": depth + 1 } as NodeStyle}
-            >
-              <span className="json-tree-chevron-slot" aria-hidden="true" />
-              <button
-                type="button"
-                tabIndex={-1}
-                onClick={() => onShowMore(path, entries.length)}
-              >
-                Show next{" "}
-                {Math.min(
-                  JSON_TREE_CHILD_CHUNK,
-                  entries.length
-                    - (visibleCounts.get(path) ?? JSON_TREE_CHILD_CHUNK),
-                )}{" "}
-                of {entries.length}
-              </button>
-            </div>
-          : null}
+          {entries.map(([key, child], index) => (
+            <JsonTreeNode
+              key={jsonPointerPath(path, key)}
+              depth={depth + 1}
+              expandedPaths={expandedPaths}
+              isLast={index === entries.length - 1}
+              path={jsonPointerPath(path, key)}
+              propertyName={Array.isArray(value) ? undefined : key}
+              value={child}
+              onToggle={onToggle}
+            />
+          ))}
           <div
             className="json-tree-closing-row"
             style={style}
@@ -221,28 +185,16 @@ export function JsonTreeViewer({
   onCopy,
 }: JsonTreeViewerProps) {
   const initiallyExpanded = useMemo(
-    () => collectJsonContainerPaths(value, 1, JSON_TREE_AUTO_EXPAND_LIMIT),
+    () => collectJsonContainerPaths(value, 1),
     [value],
   )
   const [expandedPaths, setExpandedPaths] = useState(initiallyExpanded)
-  const [visibleCounts, setVisibleCounts] = useState(
-    () => new Map<string, number>(),
-  )
 
   const toggle = useCallback((path: string) => {
     setExpandedPaths((current) => {
       const next = new Set(current)
       if (next.has(path)) next.delete(path)
       else next.add(path)
-      return next
-    })
-  }, [])
-
-  const showMore = useCallback((path: string, total: number) => {
-    setVisibleCounts((current) => {
-      const next = new Map(current)
-      const visible = current.get(path) ?? JSON_TREE_CHILD_CHUNK
-      next.set(path, Math.min(total, visible + JSON_TREE_CHILD_CHUNK))
       return next
     })
   }, [])
@@ -311,9 +263,7 @@ export function JsonTreeViewer({
             expandedPaths={expandedPaths}
             isLast
             path="#"
-            visibleCounts={visibleCounts}
             value={value}
-            onShowMore={showMore}
             onToggle={toggle}
           />
         </div>

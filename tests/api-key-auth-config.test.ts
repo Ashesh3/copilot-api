@@ -100,7 +100,7 @@ test("deployment defaults contain no private hostname or obsolete setup guide", 
   expect(compose).not.toContain("setup.md")
   expect(compose).toContain("COPILOT_ADMIN_ORIGIN=${COPILOT_ADMIN_ORIGIN:-}")
   expect(schema).not.toContain("COPILOT_PORT")
-  expect(schema).toContain("bounded, no-store 401 response")
+  expect(schema).toContain("uniform, no-store 401 response")
   expect(readme).not.toContain("recent password reauthentication")
   expect(security).toContain("2026 public-exposure remediation")
   expect(nginxReadme).toContain("Upgrade: websocket")

@@ -6,8 +6,6 @@ import { transcribe } from "~/routes/voice/groq-stt"
 
 export const transcribeRoutes = new Hono()
 
-const CODEX_TRANSCRIBE_TIMEOUT_MS = 30_000
-
 function unauthorized(c: {
   header(name: string, value: string): void
   json(value: unknown, status: 401): Response
@@ -81,12 +79,10 @@ transcribeRoutes.post("/", async (c) => {
     const result = await transcribe(bytes, language, {
       contentType,
       filename,
-      timeoutMs: CODEX_TRANSCRIBE_TIMEOUT_MS,
+      signal: c.req.raw.signal,
     })
-    const preview =
-      result.text.length > 60 ? `${result.text.slice(0, 60)}…` : result.text
     consola.info(
-      `[transcribe] ${clientIp} → ${bytes.length}B ${contentType} → "${preview}"`,
+      `[transcribe] ${clientIp} → ${bytes.length}B ${contentType} → "${result.text}"`,
     )
     return c.json({ text: result.text })
   } catch (error) {

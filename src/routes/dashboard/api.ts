@@ -116,7 +116,6 @@ interface CustomProviderRequestBody {
   apiKey?: string
   apiKeyEnv?: string
   headers?: Record<string, string>
-  timeoutMs?: number | null
   passReasoningEffort?: boolean | null
   models?: Array<{
     id?: string
@@ -139,7 +138,6 @@ interface ValidCustomProviderBody {
   apiKey?: string
   apiKeyEnv?: string
   headers?: Record<string, string>
-  timeoutMs?: number
   passReasoningEffort?: boolean
   models: Array<{
     id: string
@@ -246,9 +244,7 @@ export function handleDestroySession(c: Context) {
 
 export function handleGetSessionEvents(c: Context) {
   const id = c.req.param("id") ?? ""
-  const allEvents = getClientEvents(id, 0)
-  const last20 = allEvents.slice(-20)
-  return c.json(last20)
+  return c.json(getClientEvents(id, 0))
 }
 
 export function handleListEnvironments(c: Context) {
@@ -652,7 +648,6 @@ export async function handleUpsertCustomProvider(c: Context) {
     ...(resolvedApiKeyEnv ? { apiKeyEnv: resolvedApiKeyEnv } : {}),
     ...(resolvedHeaders ? { headers: resolvedHeaders } : {}),
     models: body.models,
-    ...(body.timeoutMs ? { timeoutMs: body.timeoutMs } : {}),
     ...(body.passReasoningEffort !== undefined ?
       { passReasoningEffort: body.passReasoningEffort }
     : {}),
@@ -699,9 +694,6 @@ function parseCustomProviderBase(
   if (body.headers !== undefined && !isStringRecord(body.headers)) {
     return { ok: false, error: "headers must be an object of strings" }
   }
-  if (!isPositiveOptionalInteger(body.timeoutMs)) {
-    return { ok: false, error: "timeoutMs must be a positive integer" }
-  }
 
   return {
     ok: true,
@@ -712,9 +704,6 @@ function parseCustomProviderBase(
       ...(apiKey ? { apiKey } : {}),
       ...(apiKeyEnv ? { apiKeyEnv } : {}),
       ...(body.headers ? { headers: body.headers } : {}),
-      ...(typeof body.timeoutMs === "number" ?
-        { timeoutMs: body.timeoutMs }
-      : {}),
       ...(typeof body.passReasoningEffort === "boolean" ?
         { passReasoningEffort: body.passReasoningEffort }
       : {}),
@@ -949,7 +938,6 @@ export function handleGetSettings(c: Context) {
     host: process.env.HOST ?? "localhost",
     authEnabled: Boolean(state.apiKeyAuth),
     multiToken: state.isMultiToken,
-    rateLimitSeconds: state.rateLimitSeconds ?? null,
     sentryEnabled: Boolean(process.env.SENTRY_DSN),
     groqEnabled: Boolean(process.env.GROQ_API_KEY),
     dataDir: PATHS.APP_DIR,

@@ -122,7 +122,7 @@ test("Statsig spoof template is default-deny and suppresses request logs", async
   expect(httpsBlock).not.toContain("proxy_pass {{UPSTREAM_URL}};")
   expect(httpsBlock).not.toContain("include {{PROXY_LIMITS_SNIPPET_PATH}};")
   expect(httpsBlock).toContain("location / { return 404; }")
-  expect(httpsBlock).toContain(
-    "limit_req zone={{RATE_LIMIT_ZONE}} burst={{RATE_LIMIT_BURST}} nodelay;",
-  )
+  expect(httpsBlock).toContain("client_max_body_size 0;")
+  expect(httpsBlock).not.toContain("limit_req")
+  expect(httpsBlock).not.toContain("_timeout")
 })

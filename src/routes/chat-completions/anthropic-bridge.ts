@@ -53,8 +53,6 @@ import {
 
 const logger = createHandlerLogger("anthropic-bridge")
 
-const DEFAULT_MAX_TOKENS = 16384
-
 /**
  * Bridge OpenAI Chat Completions payloads to Copilot's native /v1/messages
  * endpoint. Used when an OpenAI-dialect request carries PDF `file` parts and
@@ -82,11 +80,12 @@ export async function executeAnthropicBridge(
   })
   setRequestContext(c, { provider: "ChatCompletions→AnthropicMessages" })
 
-  const anthropicPayload = await chatPayloadToAnthropic(payload, selectedModel)
-  logger.debug(
-    "Bridged Anthropic payload:",
-    JSON.stringify(anthropicPayload).slice(-400),
+  const anthropicPayload = await chatPayloadToAnthropic(
+    payload,
+    selectedModel,
+    c.req.raw.signal,
   )
+  logger.debug("Bridged Anthropic payload:", JSON.stringify(anthropicPayload))
 
   if (!anthropicPayload.stream) {
     return await Sentry.startSpan(
@@ -216,18 +215,20 @@ function recordAccountContext(c: Context): void {
 export async function chatPayloadToAnthropic(
   payload: ChatCompletionsPayload & { model: string },
   selectedModel?: Model,
+  signal?: AbortSignal,
 ): Promise<AnthropicMessagesPayload> {
-  const { systemTexts, messages } = await convertChatMessages(payload.messages)
+  const { systemTexts, messages } = await convertChatMessages(
+    payload.messages,
+    signal,
+  )
 
   const maxTokens =
-    payload.max_tokens
-    ?? selectedModel?.capabilities.limits?.max_output_tokens
-    ?? DEFAULT_MAX_TOKENS
+    payload.max_tokens ?? selectedModel?.capabilities.limits?.max_output_tokens
 
   return {
     model: payload.model,
     messages,
-    max_tokens: maxTokens,
+    ...(maxTokens === undefined ? {} : { max_tokens: maxTokens }),
     ...(systemTexts.length > 0 ? { system: systemTexts.join("\n\n") } : {}),
     ...convertSamplingOptions(payload),
     ...(payload.stream ? { stream: true } : {}),
@@ -240,6 +241,7 @@ export async function chatPayloadToAnthropic(
 
 async function convertChatMessages(
   chatMessages: Array<Message>,
+  signal?: AbortSignal,
 ): Promise<{ systemTexts: Array<string>; messages: Array<AnthropicMessage> }> {
   const systemTexts: Array<string> = []
   const messages: Array<AnthropicMessage> = []
@@ -262,7 +264,7 @@ async function convertChatMessages(
       pendingToolResults.push({
         type: "tool_result",
         tool_use_id: message.tool_call_id ?? "",
-        content: await convertToolResultContent(message.content),
+        content: await convertToolResultContent(message.content, signal),
       })
       continue
     }
@@ -270,7 +272,7 @@ async function convertChatMessages(
     flushToolResults()
 
     if (message.role === "user") {
-      const blocks = await convertUserContent(message.content)
+      const blocks = await convertUserContent(message.content, signal)
       if (blocks.length > 0 || typeof message.content === "string") {
         messages.push({
           role: "user",
@@ -352,6 +354,7 @@ function contentToPlainText(content: Message["content"]): string {
 
 async function convertUserContent(
   content: Message["content"],
+  signal?: AbortSignal,
 ): Promise<Array<AnthropicUserContentBlock>> {
   if (typeof content === "string") {
     return content ? [{ type: "text", text: content }] : []
@@ -360,13 +363,14 @@ async function convertUserContent(
 
   const blocks: Array<AnthropicUserContentBlock> = []
   for (const part of content) {
-    blocks.push(...(await convertContentPart(part)))
+    blocks.push(...(await convertContentPart(part, signal)))
   }
   return blocks
 }
 
 async function convertToolResultContent(
   content: Message["content"],
+  signal?: AbortSignal,
 ): Promise<AnthropicToolResultBlock["content"]> {
   if (typeof content === "string") return content
   if (!Array.isArray(content)) return ""
@@ -376,7 +380,7 @@ async function convertToolResultContent(
   > = []
   for (const part of content) {
     blocks.push(
-      ...((await convertContentPart(part)) as Array<
+      ...((await convertContentPart(part, signal)) as Array<
         AnthropicTextBlock | AnthropicImageBlock | AnthropicDocumentBlock
       >),
     )
@@ -386,13 +390,14 @@ async function convertToolResultContent(
 
 async function convertContentPart(
   part: ContentPart,
+  signal?: AbortSignal,
 ): Promise<Array<AnthropicUserContentBlock>> {
   switch (part.type) {
     case "text": {
       return [{ type: "text", text: part.text }]
     }
     case "image_url": {
-      return [await convertImagePart(part.image_url.url)]
+      return [await convertImagePart(part.image_url.url, signal)]
     }
     case "file": {
       return [convertFilePart(part)]
@@ -405,10 +410,11 @@ async function convertContentPart(
 
 async function convertImagePart(
   url: string,
+  signal?: AbortSignal,
 ): Promise<AnthropicImageBlock | AnthropicTextBlock> {
   let parsed = parseDataUri(url)
   if (!parsed && isHttpUrl(url)) {
-    parsed = await fetchUrlAsDataUri(url)
+    parsed = await fetchUrlAsDataUri(url, { signal })
   }
 
   if (parsed && isImageMediaType(parsed.mediaType)) {
@@ -430,7 +436,7 @@ async function convertImagePart(
     type: "text",
     text: attachmentOmittedNote({
       kind: "image",
-      name: url.slice(0, 200),
+      name: url,
       reason: "the image could not be decoded or fetched by the proxy",
     }),
   }

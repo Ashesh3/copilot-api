@@ -8,8 +8,6 @@ import {
 
 const WORKER_CAPABILITY_TTL_MS = 60 * 60 * 1000
 const ENVIRONMENT_CAPABILITY_TTL_MS = 30 * 24 * 60 * 60 * 1000
-const MAX_WORKER_CAPABILITIES = 512
-const MAX_ENVIRONMENT_CAPABILITIES = 128
 
 interface WorkerCapability {
   sessionId: string
@@ -47,23 +45,11 @@ function pruneExpired<T extends { expiresAt: number }>(
   }
 }
 
-function enforceCap<T extends { expiresAt: number }>(
-  records: Map<string, T>,
-  maximum: number,
-): void {
-  if (records.size < maximum) return
-  const oldest = [...records.entries()].sort(
-    (left, right) => left[1].expiresAt - right[1].expiresAt,
-  )[0]
-  records.delete(oldest[0])
-}
-
 export function issueWorkerCapability(
   sessionId: string,
   workerEpoch?: number,
 ): string {
   pruneExpired(workerCapabilities)
-  enforceCap(workerCapabilities, MAX_WORKER_CAPABILITIES)
   const capability = randomCapability("worker_")
   workerCapabilities.set(digest(capability), {
     sessionId,
@@ -127,7 +113,6 @@ export function revokeSessionCapabilities(sessionId: string): void {
 export function issueEnvironmentCapability(environmentId: string): string {
   revokeEnvironmentCapabilities(environmentId)
   pruneExpired(environmentCapabilities)
-  enforceCap(environmentCapabilities, MAX_ENVIRONMENT_CAPABILITIES)
   const capability = randomCapability("environment_")
   environmentCapabilities.set(digest(capability), {
     environmentId,

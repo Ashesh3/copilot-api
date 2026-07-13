@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test"
+import { existsSync } from "node:fs"
 import fs from "node:fs/promises"
 import path from "node:path"
 
@@ -85,20 +86,20 @@ test("Codex public dictation paths require a bearer before proxying", async () =
   }
 })
 
-test("Claude subscriber compatibility routes have exact methods and write caps", async () => {
+test("Claude subscriber compatibility routes keep exact methods", async () => {
   const template = await read("sites-available/spoof-domains.conf.template")
 
   expect(template).toMatch(
-    /location ~ \^\/v1\/code\/triggers[\s\S]*?limit_except GET POST \{ deny all; \}[\s\S]*?client_max_body_size 64k;/,
+    /location ~ \^\/v1\/code\/triggers[\s\S]*?limit_except GET POST \{ deny all; \}/,
   )
   expect(template).toMatch(
-    /location = \/v1\/code\/github\/import-token \{[\s\S]*?limit_except POST \{ deny all; \}[\s\S]*?client_max_body_size 64k;/,
+    /location = \/v1\/code\/github\/import-token \{[\s\S]*?limit_except POST \{ deny all; \}/,
   )
   expect(template).toMatch(
     /location = \/v1\/environment_providers \{[\s\S]*?limit_except GET \{ deny all; \}/,
   )
   expect(template).toMatch(
-    /location = \/v1\/environment_providers\/cloud\/create \{[\s\S]*?limit_except POST \{ deny all; \}[\s\S]*?client_max_body_size 64k;/,
+    /location = \/v1\/environment_providers\/cloud\/create \{[\s\S]*?limit_except POST \{ deny all; \}/,
   )
   for (const getOnlyPath of ["/v1/mcp_servers", "/v1/ultrareview/quota"]) {
     expect(template).toMatch(
@@ -115,83 +116,73 @@ test("Claude subscriber compatibility routes have exact methods and write caps",
   )
 })
 
-test("proxy limits are finite and bodies are bounded", async () => {
-  const [
-    snippet,
-    publicTemplate,
-    spoofTemplate,
-    codexTemplate,
-    statsigTemplate,
-  ] = await Promise.all([
-    read("snippets/proxy-limits.conf.template"),
-    read("sites-available/public-domain.conf.template"),
-    read("sites-available/spoof-domains.conf.template"),
-    read("sites-available/codex-desktop-spoof.conf.template"),
-    read("sites-available/codex-statsig-spoof.conf.template"),
-  ])
+test("nginx templates disable body limits and define no local timeouts", async () => {
+  const [publicTemplate, spoofTemplate, codexTemplate, statsigTemplate] =
+    await Promise.all([
+      read("sites-available/public-domain.conf.template"),
+      read("sites-available/spoof-domains.conf.template"),
+      read("sites-available/codex-desktop-spoof.conf.template"),
+      read("sites-available/codex-statsig-spoof.conf.template"),
+    ])
+  expect(
+    existsSync(path.join(nginxRoot, "snippets/proxy-limits.conf.template")),
+  ).toBe(false)
   for (const template of [
     publicTemplate,
     spoofTemplate,
     codexTemplate,
     statsigTemplate,
   ]) {
-    expect(template).toContain("client_header_timeout 10s;")
-    expect(template).toContain("client_body_timeout 30s;")
-    expect(template).not.toContain("client_max_body_size 0")
+    expect(template).toContain("client_max_body_size 0;")
+    expect(template).not.toMatch(
+      /(?:client_(?:header|body)|proxy_(?:connect|send|read)|send)_timeout/,
+    )
+    expect(template).not.toContain("limit_req")
+    expect(template).not.toContain("limit_conn")
+    expect(template).not.toContain("PROXY_LIMITS_SNIPPET_PATH")
   }
-  expect(publicTemplate).toContain("client_max_body_size 32m;")
-  expect(codexTemplate).toContain("client_max_body_size 4m;")
-  expect(statsigTemplate).toContain("client_max_body_size 1m;")
-  expect(snippet).not.toContain("client_header_timeout")
-  expect(snippet).not.toContain("client_max_body_size")
-  expect(snippet).not.toContain("1d")
 })
 
-test("WebSocket locations have exact methods and dedicated finite lifetimes", async () => {
+test("WebSocket locations keep exact methods without local lifetimes", async () => {
   const [publicTemplate, spoofTemplate] = await Promise.all([
     read("sites-available/public-domain.conf.template"),
     read("sites-available/spoof-domains.conf.template"),
   ])
   expect(publicTemplate).toMatch(
-    /location ~ \^\/ws\/remote\/ \{[\s\S]*?limit_except GET \{ deny all; \}[\s\S]*?proxy_read_timeout 1h;/,
+    /location ~ \^\/ws\/remote\/ \{[\s\S]*?limit_except GET \{ deny all; \}/,
   )
   expect(publicTemplate).toContain(
     'map "$request_method:$http_upgrade" $responses_route_allowed {',
   )
   expect(publicTemplate).toContain("~*^GET:websocket$ 1;")
   expect(publicTemplate).toMatch(
-    /location ~ \^\/\(\?:v1\/\)\?responses\/\?\$ \{[\s\S]*?limit_except GET POST \{ deny all; \}[\s\S]*?if \(\$responses_route_allowed = 0\) \{ return 404; \}[\s\S]*?proxy_read_timeout 12h;/,
+    /location ~ \^\/\(\?:v1\/\)\?responses\/\?\$ \{[\s\S]*?limit_except GET POST \{ deny all; \}[\s\S]*?if \(\$responses_route_allowed = 0\) \{ return 404; \}/,
   )
   expect(publicTemplate).toMatch(
     /location ~ \^\/\(\?:v1\/\)\?\(\?:embeddings\|responses\/compact\)\/\?\$ \{[\s\S]*?limit_except POST \{ deny all; \}/,
   )
   expect(spoofTemplate).toMatch(
-    /location ~ \^\/api\/ws\/speech_to_text\/voice_stream\/\??[\s\S]*?limit_except GET \{ deny all; \}[\s\S]*?proxy_read_timeout 3m;/,
+    /location ~ \^\/api\/ws\/speech_to_text\/voice_stream\/\??[\s\S]*?limit_except GET \{ deny all; \}/,
   )
 })
 
-test("authenticated generation streams allow long finite idle periods", async () => {
+test("authenticated generation streams disable buffering without timeouts", async () => {
   const [publicTemplate, spoofTemplate] = await Promise.all([
     read("sites-available/public-domain.conf.template"),
     read("sites-available/spoof-domains.conf.template"),
   ])
 
   expect(publicTemplate).toMatch(
-    /location ~ \^\/\(\?:v1\/\)\?\(\?:chat\/completions\|messages\)\/\?\$ \{[\s\S]*?limit_except POST \{ deny all; \}[\s\S]*?proxy_http_version 1\.1;[\s\S]*?proxy_read_timeout 1h;[\s\S]*?send_timeout 1h;/,
+    /location ~ \^\/\(\?:v1\/\)\?\(\?:chat\/completions\|messages\)\/\?\$ \{[\s\S]*?limit_except POST \{ deny all; \}[\s\S]*?proxy_http_version 1\.1;[\s\S]*?proxy_buffering off;/,
   )
   expect(spoofTemplate).toMatch(
-    /location ~ \^\/v1\/messages\/\?\$ \{[\s\S]*?limit_except POST \{ deny all; \}[\s\S]*?proxy_http_version 1\.1;[\s\S]*?proxy_read_timeout 1h;[\s\S]*?send_timeout 1h;/,
+    /location ~ \^\/v1\/messages\/\?\$ \{[\s\S]*?limit_except POST \{ deny all; \}[\s\S]*?proxy_http_version 1\.1;[\s\S]*?proxy_buffering off;/,
   )
   const messagesLocation = spoofTemplate.match(
     /location ~ \^\/v1\/messages\/\?\$ \{([\s\S]*?)\n {2}\}/,
   )?.[1]
   expect(messagesLocation).toBeDefined()
-  expect(messagesLocation).not.toContain(
-    "include {{PROXY_LIMITS_SNIPPET_PATH}}",
-  )
-  expect(spoofTemplate).toMatch(
-    /location ~ \^\/v1\/\(\?:messages\/count_tokens\|models\)\/\?\$ \{[\s\S]*?include \{\{PROXY_LIMITS_SNIPPET_PATH\}\};/,
-  )
+  expect(messagesLocation).not.toContain("_timeout")
 })
 
 test("Cloudflare real-IP policy trusts exact published ranges only", async () => {

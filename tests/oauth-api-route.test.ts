@@ -290,8 +290,8 @@ test("rejects arbitrary refresh tokens without disclosing the gateway key", asyn
   expect(text).not.toContain("test-secret-key")
 })
 
-test("rejects oversized or unsupported OAuth token requests before parsing", async () => {
-  const oversizedResponse = await server.request("/v1/oauth/token", {
+test("parses large OAuth fields and still rejects unsupported content types", async () => {
+  const largeFieldResponse = await server.request("/v1/oauth/token", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -300,9 +300,9 @@ test("rejects oversized or unsupported OAuth token requests before parsing", asy
       client_id: oauthClientId,
     }),
   })
-  expect(oversizedResponse.status).toBe(400)
-  expect(await oversizedResponse.json()).toEqual({ error: "invalid_request" })
-  expect(oversizedResponse.headers.get("cache-control")).toBe("no-store")
+  expect(largeFieldResponse.status).toBe(400)
+  expect(await largeFieldResponse.json()).toEqual({ error: "invalid_grant" })
+  expect(largeFieldResponse.headers.get("cache-control")).toBe("no-store")
 
   const unsupportedResponse = await server.request("/v1/oauth/token", {
     method: "POST",

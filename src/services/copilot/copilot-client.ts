@@ -22,8 +22,7 @@ import { getCopilotToken } from "~/services/github/get-copilot-token"
 
 export const API_VERSION = "2026-01-09"
 export const MODELS_API_VERSION = "2026-06-01"
-// Intentionally reuse the VS Code chat integration bucket unless a separate
-// Copilot rate-limit bucket is explicitly needed for this proxy.
+// Intentionally reuse the VS Code chat integration identifier.
 export const INTEGRATION_ID = "vscode-chat"
 export const MAX_RETRIES = 1
 export const BASE_DELAY_SECONDS = 5
@@ -167,7 +166,7 @@ async function isDeterministic400Response(
 ): Promise<boolean> {
   const body = await response.clone().text()
   if (!isDeterministic400(body)) return false
-  consola.warn(`Deterministic HTTP 400, skipping retry: ${body.slice(0, 200)}`)
+  consola.warn(`Deterministic HTTP 400, skipping retry: ${body}`)
   return true
 }
 

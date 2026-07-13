@@ -16,27 +16,24 @@ import {
   addClientEvents,
   createSession,
   getClientEvents,
-  SESSION_EVENT_HISTORY_MAX_EVENTS,
 } from "../src/routes/code-sessions/session-store"
 import { directConnectRoutes } from "../src/routes/direct-connect/route"
 import {
   createDirectConnectSession,
   handleDirectConnectWebSocket,
-  releaseDirectConnectConnection,
-  reserveDirectConnectConnection,
+  listDirectConnectSessions,
   resetDirectConnectForTest,
 } from "../src/routes/direct-connect/ws-handler"
 import { healthRoutes } from "../src/routes/health/route"
+import { remoteWebSocket } from "../src/routes/remote/websocket"
 import {
   mintRemoteWebSocketTicket,
   resetRemoteWebSocketSecurityForTest,
   tryUpgradeRemoteWebSocket,
 } from "../src/routes/remote/ws-security"
 import {
-  resetVoiceConnectionsForTest,
   tryUpgradeVoiceWebSocket,
   type VoiceSession,
-  VOICE_MAX_AUDIO_BYTES,
   voiceWebSocket,
 } from "../src/routes/voice/route"
 
@@ -63,7 +60,6 @@ beforeEach(async () => {
   if ("error" in setup) throw new Error(setup.error)
   adminCookie = `__Host-copilot_admin=${setup.session.token}; __Host-copilot_admin_csrf=${setup.session.csrfToken}`
   resetRemoteWebSocketSecurityForTest()
-  resetVoiceConnectionsForTest()
   resetDirectConnectForTest()
   resetIpSecurityForTest()
   delete process.env.COPILOT_API_ENABLE_DIRECT_CONNECT
@@ -210,18 +206,43 @@ describe("health and Direct Connect exposure", () => {
     expect(upgrade).toHaveBeenCalledTimes(1)
   })
 
-  test("Direct Connect reserves only existing sessions and caps controllers", () => {
-    expect(reserveDirectConnectConnection("dc_missing")).toBe(false)
+  test("Direct Connect allows multiple handlers for one session", () => {
     const session = createDirectConnectSession()
-    expect(reserveDirectConnectConnection(session.session_id)).toBe(true)
-    expect(reserveDirectConnectConnection(session.session_id)).toBe(false)
-    releaseDirectConnectConnection(session.session_id)
-    expect(reserveDirectConnectConnection(session.session_id)).toBe(true)
+    const firstSend = mock(() => {})
+    const secondSend = mock(() => {})
+    const firstClose = mock(() => {})
+    const secondClose = mock(() => {})
+
+    handleDirectConnectWebSocket(
+      { send: firstSend, close: firstClose },
+      session.session_id,
+    )
+    handleDirectConnectWebSocket(
+      { send: secondSend, close: secondClose },
+      session.session_id,
+    )
+
+    expect(firstSend).toHaveBeenCalledTimes(1)
+    expect(secondSend).toHaveBeenCalledTimes(1)
+    expect(firstClose).not.toHaveBeenCalled()
+    expect(secondClose).not.toHaveBeenCalled()
+  })
+
+  test("Direct Connect retains sessions without count eviction", () => {
+    const first = createDirectConnectSession()
+    for (let index = 0; index < 20; index += 1) {
+      createDirectConnectSession()
+    }
+    expect(listDirectConnectSessions()).toHaveLength(21)
+    expect(
+      listDirectConnectSessions().some(
+        (session) => session.id === first.session_id,
+      ),
+    ).toBe(true)
   })
 
   test("Direct Connect closes binary frames without logging their contents", () => {
     const session = createDirectConnectSession()
-    expect(reserveDirectConnectConnection(session.session_id)).toBe(true)
     const close = mock(() => {})
     const handlers = handleDirectConnectWebSocket(
       { send: () => {}, close },
@@ -263,37 +284,45 @@ describe("voice WebSocket security", () => {
     expect(upgrade).not.toHaveBeenCalled()
   })
 
-  test("accepts a scoped gateway principal and applies the connection cap", async () => {
+  test("accepts multiple voice connections for one gateway principal", async () => {
     const upgrade = mock(() => true)
-    expect(
-      await tryUpgradeVoiceWebSocket(voiceUpgradeRequest(), { upgrade }),
-    ).toBe("upgraded")
-    expect(
-      await tryUpgradeVoiceWebSocket(voiceUpgradeRequest(), { upgrade }),
-    ).toBe("upgraded")
-    expect(
-      await tryUpgradeVoiceWebSocket(voiceUpgradeRequest(), { upgrade }),
-    ).toBe("limit_reached")
-    expect(upgrade).toHaveBeenCalledTimes(2)
+    for (let index = 0; index < 5; index += 1) {
+      expect(
+        await tryUpgradeVoiceWebSocket(voiceUpgradeRequest(), { upgrade }),
+      ).toBe("upgraded")
+    }
+    expect(upgrade).toHaveBeenCalledTimes(5)
   })
 
-  test("closes and clears a stream that exceeds the aggregate audio cap", () => {
+  test("accepts audio beyond the former aggregate boundary", () => {
     const close = mock(() => {})
     const session: VoiceSession = {
-      pcmChunks: [new Uint8Array(VOICE_MAX_AUDIO_BYTES)],
-      totalBytes: VOICE_MAX_AUDIO_BYTES,
+      pcmChunks: [],
+      totalBytes: 0,
       language: "en",
-      principalId: "test",
-      startedAt: Date.now(),
+      finalized: false,
+      released: false,
+    }
+    const audio = new Uint8Array(4 * 1024 * 1024 + 1)
+    voiceWebSocket.message({ data: { session }, send: () => {}, close }, audio)
+    expect(close).not.toHaveBeenCalled()
+    expect(session.totalBytes).toBe(audio.length)
+  })
+
+  test("accepts large voice control frames", () => {
+    const close = mock(() => {})
+    const session: VoiceSession = {
+      pcmChunks: [],
+      totalBytes: 0,
+      language: "en",
       finalized: false,
       released: false,
     }
     voiceWebSocket.message(
       { data: { session }, send: () => {}, close },
-      new Uint8Array(1),
+      JSON.stringify({ type: "KeepAlive", padding: "x".repeat(70_000) }),
     )
-    expect(close).toHaveBeenCalledWith(4009, "Voice stream size limit exceeded")
-    expect(session.totalBytes).toBe(0)
+    expect(close).not.toHaveBeenCalled()
   })
 
   test("finalizes an empty stream only once and closes it", () => {
@@ -303,8 +332,6 @@ describe("voice WebSocket security", () => {
       pcmChunks: [],
       totalBytes: 0,
       language: "en",
-      principalId: "test-finalize",
-      startedAt: Date.now(),
       finalized: false,
       released: false,
     }
@@ -346,6 +373,82 @@ describe("Remote Control WebSocket tickets", () => {
       "auth_failed",
     )
     expect(upgrade).toHaveBeenCalledTimes(1)
+  })
+
+  test("retains pending tickets and allows multiple controllers", async () => {
+    const codeSession = createSession("Many controllers", [])
+    const admin = await authenticateAdminRequest(
+      new Request(`${TEST_ADMIN_ORIGIN}/dashboard`, {
+        headers: { cookie: adminCookie },
+      }),
+    )
+    if (!admin) throw new Error("Expected authenticated admin session")
+
+    const first = mintRemoteWebSocketTicket(admin.tokenHash, codeSession.id)
+    for (let index = 0; index < 520; index += 1) {
+      mintRemoteWebSocketTicket(admin.tokenHash, codeSession.id)
+    }
+
+    const upgrade = mock(() => true)
+    const requestFor = (ticket: string) =>
+      new Request(`${TEST_ADMIN_ORIGIN}/ws/remote/${codeSession.id}`, {
+        headers: {
+          cookie: adminCookie,
+          origin: TEST_ADMIN_ORIGIN,
+          "sec-websocket-protocol": `copilot-remote, copilot-ticket.${ticket}`,
+        },
+      })
+
+    expect(
+      await tryUpgradeRemoteWebSocket(requestFor(first.ticket), { upgrade }),
+    ).toBe("upgraded")
+    for (let index = 0; index < 4; index += 1) {
+      const { ticket } = mintRemoteWebSocketTicket(
+        admin.tokenHash,
+        codeSession.id,
+      )
+      expect(
+        await tryUpgradeRemoteWebSocket(requestFor(ticket), { upgrade }),
+      ).toBe("upgraded")
+    }
+    expect(upgrade).toHaveBeenCalledTimes(5)
+  })
+
+  test("Remote Control sends complete catchup and accepts large messages", () => {
+    const codeSession = createSession("Complete catchup", [])
+    addClientEvents(
+      codeSession.id,
+      Array.from({ length: 600 }, (_, index) => ({
+        event_type: "client_event",
+        source: "worker",
+        payload: { index },
+        created_at: new Date(index).toISOString(),
+      })),
+    )
+    const sent: Array<string> = []
+    const close = mock(() => {})
+    const socket = {
+      data: {
+        type: "remote-control" as const,
+        sessionId: codeSession.id,
+      },
+      send: (data: string) => sent.push(data),
+      close,
+    }
+
+    remoteWebSocket.open(socket)
+    expect(sent).toHaveLength(600)
+    remoteWebSocket.message(
+      socket,
+      JSON.stringify({
+        type: "user",
+        session_id: codeSession.id,
+        message: { role: "user", content: "x".repeat(70_000) },
+      }),
+    )
+    expect(close).not.toHaveBeenCalled()
+    expect(getClientEvents(codeSession.id, 0)).toHaveLength(601)
+    remoteWebSocket.close(socket)
   })
 
   test("does not expose raw admin session identifiers in minted tickets", () => {
@@ -427,20 +530,17 @@ describe("Remote Control WebSocket tickets", () => {
     expect(upgrade).toHaveBeenCalledTimes(1)
   })
 
-  test("session replay history retains only the newest bounded events", () => {
-    const codeSession = createSession("Bounded history", [])
-    const events = Array.from(
-      { length: SESSION_EVENT_HISTORY_MAX_EVENTS + 25 },
-      (_, index) => ({
-        event_type: "client_event",
-        source: "worker",
-        payload: { type: "message", index },
-        created_at: new Date(index).toISOString(),
-      }),
-    )
+  test("session replay history retains all events", () => {
+    const codeSession = createSession("Complete history", [])
+    const events = Array.from({ length: 2025 }, (_, index) => ({
+      event_type: "client_event",
+      source: "worker",
+      payload: { type: "message", index },
+      created_at: new Date(index).toISOString(),
+    }))
     addClientEvents(codeSession.id, events)
     const retained = getClientEvents(codeSession.id, 0)
-    expect(retained).toHaveLength(SESSION_EVENT_HISTORY_MAX_EVENTS)
-    expect(retained[0]?.payload.index).toBe(25)
+    expect(retained).toHaveLength(2025)
+    expect(retained[0]?.payload.index).toBe(0)
   })
 })

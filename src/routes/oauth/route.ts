@@ -1,7 +1,6 @@
 import type { Context, Next } from "hono"
 
 import { Hono } from "hono"
-import { bodyLimit } from "hono/body-limit"
 
 import type { IssuedOAuthTokens } from "~/lib/oauth-store"
 
@@ -30,9 +29,6 @@ import { getFeatureFlags } from "~/routes/feature-flags/store"
 
 const CLAUDE_CODE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 const MANUAL_REDIRECT_URI = "https://platform.claude.com/oauth/code/callback"
-const MAX_OAUTH_QUERY_LENGTH = 4096
-const MAX_OAUTH_BODY_BYTES = 16 * 1024
-const MAX_OAUTH_FIELD_LENGTH = 2048
 const ALLOWED_SCOPES = new Set([
   "user:inference",
   "user:profile",
@@ -82,10 +78,9 @@ function isAllowedRedirectUri(value: string): boolean {
 }
 
 // Validation deliberately checks the complete OAuth binding in one place.
-// eslint-disable-next-line complexity
+
 function parseAuthorizationRequest(c: Context): AuthorizationRequest | null {
   const url = new URL(c.req.url)
-  if (url.search.length > MAX_OAUTH_QUERY_LENGTH) return null
   const requiredParameters = [
     "client_id",
     "redirect_uri",
@@ -118,7 +113,6 @@ function parseAuthorizationRequest(c: Context): AuthorizationRequest | null {
     || !isAllowedRedirectUri(redirectUri)
     || !areAllowedScopes(scopes)
     || stateParam.length < 16
-    || stateParam.length > 512
     || codeChallengeMethod !== "S256"
     || !/^[\w-]{43}$/.test(codeChallenge)
   ) {
@@ -137,15 +131,7 @@ function parseAuthorizationRequest(c: Context): AuthorizationRequest | null {
 async function readOAuthBody(
   c: Context,
 ): Promise<Record<string, string> | null> {
-  const contentLength = Number(c.req.header("content-length") ?? "0")
-  if (Number.isFinite(contentLength) && contentLength > MAX_OAUTH_BODY_BYTES) {
-    return null
-  }
-
   const rawBody = await c.req.text().catch(() => "")
-  if (new TextEncoder().encode(rawBody).byteLength > MAX_OAUTH_BODY_BYTES) {
-    return null
-  }
   const contentType = c.req.header("content-type")?.toLowerCase() ?? ""
   if (contentType.includes("application/x-www-form-urlencoded")) {
     const parameters = new URLSearchParams(rawBody)
@@ -176,18 +162,8 @@ async function readOAuthBody(
 
 function filterOAuthFields(
   fields: Record<string, string>,
-): Record<string, string> | null {
-  const entries = Object.entries(fields)
-  if (
-    entries.length > 16
-    || entries.some(
-      ([key, value]) =>
-        key.length > 64 || value.length > MAX_OAUTH_FIELD_LENGTH,
-    )
-  ) {
-    return null
-  }
-  return Object.fromEntries(entries)
+): Record<string, string> {
+  return Object.fromEntries(Object.entries(fields))
 }
 
 function oauthError(
@@ -324,13 +300,6 @@ const oauthFileUploadGuard = oauthScopeGuard("user:file_upload")
 // --- Browser routes: mounted at /oauth ---
 
 export const oauthBrowserRoutes = new Hono()
-oauthBrowserRoutes.use(
-  "/authorize",
-  bodyLimit({
-    maxSize: MAX_OAUTH_BODY_BYTES,
-    onError: (c) => oauthTextError(c, "Invalid OAuth authorization request"),
-  }),
-)
 
 // GET /oauth/authorize — show login form requiring API key
 oauthBrowserRoutes.get("/authorize", (c) => {
@@ -402,9 +371,6 @@ oauthBrowserRoutes.get("/code/success", (c) => {
 oauthBrowserRoutes.get("/code/callback", (c) => {
   const code = c.req.query("code") ?? ""
   const stateParam = c.req.query("state")
-  if (code.length > MAX_OAUTH_FIELD_LENGTH || (stateParam?.length ?? 0) > 512) {
-    return oauthTextError(c, "Invalid OAuth callback")
-  }
   const manualCode = stateParam ? `${code}#${stateParam}` : code
 
   return secureHtml(
@@ -416,13 +382,6 @@ oauthBrowserRoutes.get("/code/callback", (c) => {
 // --- Token routes: mounted at /v1/oauth ---
 
 export const oauthTokenRoutes = new Hono()
-oauthTokenRoutes.use(
-  "*",
-  bodyLimit({
-    maxSize: MAX_OAUTH_BODY_BYTES,
-    onError: (c) => oauthError(c, "invalid_request"),
-  }),
-)
 
 // GET /v1/oauth/hello — connectivity check
 oauthTokenRoutes.get("/hello", (c) => c.json({ status: "ok" }))

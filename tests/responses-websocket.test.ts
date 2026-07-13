@@ -22,10 +22,6 @@ import {
   extractResponsesPayload,
   isSyntheticWarmupRequest,
   recordResponseSnapshotFromFrame,
-  RESPONSES_WS_MAX_ACTIVE_TURNS,
-  RESPONSES_WS_MAX_FRAME_BYTES,
-  RESPONSES_WS_MAX_SNAPSHOTS,
-  resetResponsesWebSocketLimitsForTest,
   rehydrateContinuationPayload,
   type ResponsesWebSocketData,
   responsesWebSocket,
@@ -107,12 +103,7 @@ afterEach(() => {
   state.isMultiToken = false
   state.manualApprove = false
   state.models = originalModels
-  state.rateLimitBucketTokens = undefined
-  state.rateLimitBucketUpdatedAt = undefined
-  state.rateLimitSeconds = undefined
-  state.rateLimitWait = true
   setConfigForTest(null)
-  resetResponsesWebSocketLimitsForTest()
   resetIpSecurityForTest()
 })
 
@@ -291,27 +282,17 @@ describe("responses websocket upgrade handling", () => {
     ).toBe("auth_failed")
   })
 
-  test("caps concurrent connections per authenticated principal", async () => {
+  test("allows multiple connections for one authenticated principal", async () => {
     state.apiKeyAuth = "cli-secret"
     const server = { upgrade: () => true }
-    expect(
-      await tryUpgradeResponsesWebSocket(
-        authenticatedResponsesRequest(),
-        server,
-      ),
-    ).toBe("upgraded")
-    expect(
-      await tryUpgradeResponsesWebSocket(
-        authenticatedResponsesRequest(),
-        server,
-      ),
-    ).toBe("upgraded")
-    expect(
-      await tryUpgradeResponsesWebSocket(
-        authenticatedResponsesRequest(),
-        server,
-      ),
-    ).toBe("limit_reached")
+    for (let index = 0; index < 5; index += 1) {
+      expect(
+        await tryUpgradeResponsesWebSocket(
+          authenticatedResponsesRequest(),
+          server,
+        ),
+      ).toBe("upgraded")
+    }
   })
 })
 
@@ -327,7 +308,7 @@ describe("responses websocket message handling", () => {
     expect(ws.sent).toEqual([])
   })
 
-  test("releases connection accounting idempotently on close", async () => {
+  test("closing a socket does not affect later upgrades", async () => {
     state.apiKeyAuth = "cli-secret"
     let upgraded: ResponsesWebSocketData | undefined
     const server = {
@@ -353,20 +334,32 @@ describe("responses websocket message handling", () => {
     ).toBe("upgraded")
   })
 
-  test("rejects oversized frames before parsing", async () => {
+  test("accepts frames larger than the former local frame boundary", async () => {
     const ws = createTestWebSocket()
     await responsesWebSocket.message(
       ws,
-      `{"type":"response.create","input":"${"x".repeat(RESPONSES_WS_MAX_FRAME_BYTES)}"}`,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "x".repeat(4 * 1024 * 1024 + 1),
+        generate: false,
+      }),
     )
-    const error = JSON.parse(ws.sent[0] ?? "{}") as { status?: number }
-    expect(error.status).toBe(413)
+
+    expect(
+      ws.sent.some(
+        (frame) =>
+          (JSON.parse(frame) as { type?: string }).type
+          === "response.completed",
+      ),
+    ).toBe(true)
     expect(ws.data.activeTurns.size).toBe(0)
   })
 
-  test("rejects new turns when the concurrent-turn cap is reached", async () => {
+  test("accepts a new turn while other turns are active", async () => {
     const ws = createTestWebSocket()
-    for (let index = 0; index < RESPONSES_WS_MAX_ACTIVE_TURNS; index += 1) {
+    ws.data.nextTurnSequence = 5
+    for (let index = 1; index <= 5; index += 1) {
       ws.data.activeTurns.set(index, {
         abortController: new AbortController(),
         finalized: false,
@@ -378,11 +371,21 @@ describe("responses websocket message handling", () => {
     }
     await responsesWebSocket.message(
       ws,
-      JSON.stringify({ type: "response.create", model: "gpt-5.4" }),
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        generate: false,
+      }),
     )
-    const error = JSON.parse(ws.sent[0] ?? "{}") as { status?: number }
-    expect(error.status).toBe(429)
-    expect(ws.data.activeTurns.size).toBe(RESPONSES_WS_MAX_ACTIVE_TURNS)
+
+    expect(
+      ws.sent.some(
+        (frame) =>
+          (JSON.parse(frame) as { type?: string }).type
+          === "response.completed",
+      ),
+    ).toBe(true)
+    expect(ws.data.activeTurns.size).toBe(5)
   })
 
   test("sends terminal error frames for invalid client messages", async () => {
@@ -417,17 +420,17 @@ describe("responses websocket message handling", () => {
     const ws = createTestWebSocket()
 
     sendWebSocketError(ws, {
-      code: "rate_limited",
-      message: "slow down",
-      status: 429,
+      code: "server_error",
+      message: "upstream failed",
+      status: 502,
     })
 
     expect(JSON.parse(ws.sent[0] ?? "{}")).toEqual({
       type: "error",
-      status: 429,
+      status: 502,
       error: {
-        code: "rate_limited",
-        message: "slow down",
+        code: "server_error",
+        message: "upstream failed",
         type: "websocket_error",
         request_id: "req-test",
       },
@@ -601,44 +604,6 @@ describe("responses websocket message handling", () => {
           (frame) => (JSON.parse(frame) as { type?: string }).type === "error",
         ),
       ).toBe(false)
-    } finally {
-      // eslint-disable-next-line require-atomic-updates
-      console.info = originalConsoleInfo
-    }
-  })
-
-  test("logs STARTED immediately and does not fetch after close during a prefetch wait", async () => {
-    state.models = responsesCapableModels
-    state.rateLimitSeconds = 60
-    state.rateLimitBucketTokens = 0
-    state.rateLimitBucketUpdatedAt = Date.now()
-    state.rateLimitWait = true
-    const ws = createTestWebSocket()
-    const infoLines: Array<string> = []
-    const originalConsoleInfo = console.info
-    console.info = (...args: Array<unknown>) => {
-      infoLines.push(args.map(String).join(" "))
-    }
-
-    try {
-      const pending = responsesWebSocket.message(
-        ws,
-        JSON.stringify({
-          type: "response.create",
-          model: "gpt-5.4",
-          input: "wait",
-          tools: [],
-        }),
-      )
-      expect(infoLines.some((line) => line.includes("STARTED"))).toBe(true)
-      await waitFor(() => ws.data.activeTurns.size === 1)
-      responsesWebSocket.close(ws)
-      await pending
-
-      expect(fetchMock).not.toHaveBeenCalled()
-      expect(infoLines.filter((line) => line.includes("ABORTED"))).toHaveLength(
-        1,
-      )
     } finally {
       // eslint-disable-next-line require-atomic-updates
       console.info = originalConsoleInfo
@@ -1044,9 +1009,9 @@ describe("responses websocket continuation handling", () => {
     ).toBeUndefined()
   })
 
-  test("bounds continuation snapshot history", () => {
+  test("retains continuation snapshots without local eviction", () => {
     const snapshots = new Map<string, ResponsesPayload>()
-    for (let index = 0; index < RESPONSES_WS_MAX_SNAPSHOTS + 2; index += 1) {
+    for (let index = 0; index < 34; index += 1) {
       recordResponseSnapshotFromFrame(
         snapshots,
         { input: `input-${index}`, model: "gpt-5.4" },
@@ -1056,9 +1021,9 @@ describe("responses websocket continuation handling", () => {
         }),
       )
     }
-    expect(snapshots).toHaveLength(RESPONSES_WS_MAX_SNAPSHOTS)
-    expect(snapshots.has("resp_0")).toBe(false)
-    expect(snapshots.has(`resp_${RESPONSES_WS_MAX_SNAPSHOTS + 1}`)).toBe(true)
+    expect(snapshots).toHaveLength(34)
+    expect(snapshots.has("resp_0")).toBe(true)
+    expect(snapshots.has("resp_33")).toBe(true)
   })
 })
 
@@ -1073,9 +1038,7 @@ function createTestWebSocket(): {
     data: {
       activeTurns: new Map(),
       closed: false,
-      connectionReleased: false,
       nextTurnSequence: 0,
-      principalId: "gateway:test",
       type: "responses",
       requestId: "req-test",
       sessionId: "session-test",
