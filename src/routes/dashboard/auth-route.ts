@@ -11,12 +11,14 @@ import {
   isAllowedAdminOrigin,
   loginAdmin,
   logoutAdmin,
-  clearAdminLoginFailures,
-  isAdminLoginRateLimited,
-  recordAdminLoginFailure,
   setupAdminAuth,
   type CreatedAdminSession,
 } from "~/lib/admin-auth"
+import {
+  extractClientIp,
+  isIpBlocked,
+  recordFailedAttempt,
+} from "~/lib/ip-blocker"
 
 export const dashboardAuthRoutes = new Hono()
 
@@ -95,7 +97,10 @@ dashboardAuthRoutes.get("/session", async (c) => {
 
 dashboardAuthRoutes.post("/setup", async (c) => {
   noStore(c)
-  if (isAdminLoginRateLimited(c.req.raw)) return authenticationFailed(c)
+  const clientIp = extractClientIp(c)
+  if (clientIp !== null && isIpBlocked(clientIp)) {
+    return authenticationFailed(c)
+  }
   const body = await c.req
     .json<{ gatewayKey?: unknown; password?: unknown }>()
     .catch(() => null)
@@ -108,18 +113,22 @@ dashboardAuthRoutes.post("/setup", async (c) => {
   }
   const result = await setupAdminAuth(body.gatewayKey, body.password)
   if ("error" in result) {
-    recordAdminLoginFailure(c.req.raw)
+    if (result.error === "Authentication failed" && clientIp !== null) {
+      recordFailedAttempt(clientIp)
+    }
     const status = result.error.includes("already configured") ? 409 : 401
     return c.json({ error: result.error }, status)
   }
-  clearAdminLoginFailures(c.req.raw)
   setSessionCookies(c, result.session)
   return c.json({ authenticated: true }, 201)
 })
 
 dashboardAuthRoutes.post("/login", async (c) => {
   noStore(c)
-  if (isAdminLoginRateLimited(c.req.raw)) return authenticationFailed(c)
+  const clientIp = extractClientIp(c)
+  if (clientIp !== null && isIpBlocked(clientIp)) {
+    return authenticationFailed(c)
+  }
   const body = await c.req
     .json<{ gatewayKey?: unknown; password?: unknown }>()
     .catch(() => null)
@@ -132,10 +141,9 @@ dashboardAuthRoutes.post("/login", async (c) => {
   }
   const session = await loginAdmin(body.gatewayKey, body.password)
   if (!session) {
-    recordAdminLoginFailure(c.req.raw)
+    if (clientIp !== null) recordFailedAttempt(clientIp)
     return authenticationFailed(c)
   }
-  clearAdminLoginFailures(c.req.raw)
   setSessionCookies(c, session)
   return c.json({ authenticated: true })
 })

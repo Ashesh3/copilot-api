@@ -8,6 +8,7 @@ import {
   extractRequestCredential,
   resolveRequestCredential,
 } from "./credential-resolver"
+import { resolveProtectedCredential } from "./protected-credential"
 import { state } from "./state"
 
 interface AuthMiddlewareOptions {
@@ -87,11 +88,17 @@ export function createAuthMiddleware(
       return next()
     }
 
-    const credential =
-      options.getApiKeys ?
-        resolveCustomApiKeys(c, apiKeys)
-      : await resolveRequestCredential(c.req.raw, ["user:inference"])
-    if (!credential) {
+    const auth = await resolveProtectedCredential<unknown>(
+      c.req.raw,
+      async () => {
+        const credential =
+          options.getApiKeys ?
+            resolveCustomApiKeys(c, apiKeys)
+          : await resolveRequestCredential(c.req.raw, ["user:inference"])
+        return credential || null
+      },
+    )
+    if (auth.status !== "authorized") {
       return createUnauthorizedResponse(c)
     }
 

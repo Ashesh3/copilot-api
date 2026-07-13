@@ -5,6 +5,7 @@ import {
   setAdminAuthTestMode,
   setupAdminAuth,
 } from "../src/lib/admin-auth"
+import { isIpBlocked, resetIpSecurityForTest } from "../src/lib/ip-blocker"
 import { state } from "../src/lib/state"
 import {
   addClientEvents,
@@ -59,12 +60,14 @@ beforeEach(async () => {
   resetRemoteWebSocketSecurityForTest()
   resetVoiceConnectionsForTest()
   resetDirectConnectForTest()
+  resetIpSecurityForTest()
   delete process.env.COPILOT_API_ENABLE_DIRECT_CONNECT
 })
 
 afterEach(() => {
   state.apiKeyAuth = originalGatewayKey
   setAdminAuthTestMode(false)
+  resetIpSecurityForTest()
   if (originalDirectConnect === undefined) {
     delete process.env.COPILOT_API_ENABLE_DIRECT_CONNECT
   } else {
@@ -109,6 +112,55 @@ describe("health and Direct Connect exposure", () => {
     ).toBe(200)
   })
 
+  test("Direct Connect HTTP auth failures count toward the shared ban", async () => {
+    process.env.COPILOT_API_ENABLE_DIRECT_CONNECT = "true"
+    const clientIp = "198.51.100.92"
+    const headers = { "x-copilot-peer-ip": clientIp }
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      expect(
+        (
+          await directConnectRoutes.request("http://localhost/api/sessions", {
+            headers,
+          })
+        ).status,
+      ).toBe(401)
+    }
+    expect(isIpBlocked(clientIp)).toBe(true)
+  })
+
+  test("Direct Connect WebSocket auth rejects banned IPs", async () => {
+    process.env.COPILOT_API_ENABLE_DIRECT_CONNECT = "true"
+    const clientIp = "198.51.100.93"
+    const startModule = (await import("../src/start")) as Record<
+      string,
+      unknown
+    >
+    const authorize = startModule.isDirectConnectUpgradeAuthorized
+    expect(typeof authorize).toBe("function")
+    if (typeof authorize !== "function") return
+
+    const request = new Request("http://localhost/ws/direct/dc_test", {
+      headers: {
+        "x-api-key": "gateway-secret",
+        "x-copilot-peer-ip": clientIp,
+      },
+    })
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      expect(
+        await (authorize as (request: Request) => Promise<string>)(
+          new Request("http://localhost/ws/direct/dc_test", {
+            headers: { "x-copilot-peer-ip": clientIp },
+          }),
+        ),
+      ).toBe("unauthorized")
+    }
+    expect(isIpBlocked(clientIp)).toBe(true)
+    expect(
+      await (authorize as (request: Request) => Promise<string>)(request),
+    ).toBe("blocked")
+  })
+
   test("Direct Connect reserves only existing sessions and caps controllers", () => {
     expect(reserveDirectConnectConnection("dc_missing")).toBe(false)
     const session = createDirectConnectSession()
@@ -140,6 +192,25 @@ describe("voice WebSocket security", () => {
       { upgrade },
     )
     expect(result).toBe("auth_failed")
+    expect(upgrade).not.toHaveBeenCalled()
+  })
+
+  test("records missing and invalid voice upgrade credentials", async () => {
+    const clientIp = "198.51.100.94"
+    const upgrade = mock(() => true)
+    for (const apiKey of [undefined, undefined, "wrong-key"]) {
+      const headers = new Headers({ "x-copilot-peer-ip": clientIp })
+      if (apiKey) headers.set("x-api-key", apiKey)
+      expect(
+        await tryUpgradeVoiceWebSocket(
+          new Request("http://localhost/api/ws/speech_to_text/voice_stream", {
+            headers,
+          }),
+          { upgrade },
+        ),
+      ).toBe("auth_failed")
+    }
+    expect(isIpBlocked(clientIp)).toBe(true)
     expect(upgrade).not.toHaveBeenCalled()
   })
 

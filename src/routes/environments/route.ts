@@ -6,6 +6,7 @@ import {
   revokeEnvironmentCapabilities,
 } from "~/lib/bridge-capabilities"
 import { resolveRequestCredential } from "~/lib/credential-resolver"
+import { resolveProtectedCredential } from "~/lib/protected-credential"
 
 import { createSession } from "../code-sessions/session-store"
 import {
@@ -27,8 +28,24 @@ function unauthorized(c: {
   return c.json({ error: "Unauthorized" }, 401)
 }
 
-async function requireOAuth(c: Parameters<typeof resolveRequestCredential>[0]) {
-  return await resolveRequestCredential(c, ["user:sessions:claude_code"])
+async function requireOAuth(request: Request): Promise<boolean> {
+  const auth = await resolveProtectedCredential(
+    request,
+    async () =>
+      await resolveRequestCredential(request, ["user:sessions:claude_code"]),
+  )
+  return auth.status === "authorized"
+}
+
+async function requireEnvironmentCapability(
+  request: Request,
+  environmentId: string,
+): Promise<boolean> {
+  const auth = await resolveProtectedCredential(request, async () => {
+    const allowed = await authorizeEnvironmentCapability(request, environmentId)
+    return allowed ? true : null
+  })
+  return auth.status === "authorized"
 }
 
 // POST /bridge — Register bridge environment
@@ -66,7 +83,7 @@ environmentsRoutes.delete("/bridge/:id", async (c) => {
 // GET /:id/work/poll — Poll for work
 environmentsRoutes.get("/:id/work/poll", async (c) => {
   const id = c.req.param("id")
-  if (!(await authorizeEnvironmentCapability(c.req.raw, id))) {
+  if (!(await requireEnvironmentCapability(c.req.raw, id))) {
     return unauthorized(c)
   }
   const item = pollForWork(id)
@@ -79,7 +96,7 @@ environmentsRoutes.get("/:id/work/poll", async (c) => {
 // POST /:id/work/:workId/ack — Acknowledge work
 environmentsRoutes.post("/:id/work/:workId/ack", async (c) => {
   const id = c.req.param("id")
-  if (!(await authorizeEnvironmentCapability(c.req.raw, id))) {
+  if (!(await requireEnvironmentCapability(c.req.raw, id))) {
     return unauthorized(c)
   }
   const workId = c.req.param("workId")
@@ -93,7 +110,7 @@ environmentsRoutes.post("/:id/work/:workId/ack", async (c) => {
 // POST /:id/work/:workId/stop — Stop work
 environmentsRoutes.post("/:id/work/:workId/stop", async (c) => {
   const id = c.req.param("id")
-  if (!(await authorizeEnvironmentCapability(c.req.raw, id))) {
+  if (!(await requireEnvironmentCapability(c.req.raw, id))) {
     return unauthorized(c)
   }
   const workId = c.req.param("workId")
@@ -106,7 +123,7 @@ environmentsRoutes.post("/:id/work/:workId/stop", async (c) => {
 
 // POST /:id/work/:workId/heartbeat — Heartbeat
 environmentsRoutes.post("/:id/work/:workId/heartbeat", async (c) => {
-  if (!(await authorizeEnvironmentCapability(c.req.raw, c.req.param("id")))) {
+  if (!(await requireEnvironmentCapability(c.req.raw, c.req.param("id")))) {
     return unauthorized(c)
   }
   return c.json({ lease_extended: true, state: "active", ttl_seconds: 60 })
@@ -114,7 +131,7 @@ environmentsRoutes.post("/:id/work/:workId/heartbeat", async (c) => {
 
 // POST /:id/bridge/reconnect — Reconnect session
 environmentsRoutes.post("/:id/bridge/reconnect", async (c) => {
-  if (!(await authorizeEnvironmentCapability(c.req.raw, c.req.param("id")))) {
+  if (!(await requireEnvironmentCapability(c.req.raw, c.req.param("id")))) {
     return unauthorized(c)
   }
   return c.json({ ok: true })

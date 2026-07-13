@@ -33,6 +33,18 @@ function silentDrop(): Response {
   return new Response(null, { status: 404 })
 }
 
+function unauthorized(c: {
+  header(name: string, value: string): void
+  json(value: unknown, status: 401): Response
+}): Response {
+  c.header("Cache-Control", "no-store")
+  c.header("WWW-Authenticate", "Be" + 'arer realm="copilot-api"')
+  return c.json(
+    { error: { message: "Unauthorized", type: "authentication_error" } },
+    401,
+  )
+}
+
 function extractUserText(body: CodexResponsesBody): string {
   const parts: Array<string> = []
   for (const item of body.input ?? []) {
@@ -68,7 +80,7 @@ function extractUserText(body: CodexResponsesBody): string {
 codexResponsesRoutes.post("/", async (c) => {
   const auth = await authorizeCodexDesktopRequest(c, "codex-responses")
   if (!auth.allowed) {
-    return silentDrop()
+    return auth.banned ? unauthorized(c) : silentDrop()
   }
   const clientIp = auth.clientIp
 

@@ -2,7 +2,13 @@ import { afterAll, beforeEach, expect, mock, test } from "bun:test"
 
 import { setConfigForTest } from "../src/lib/config"
 import { setIpAllowlistForTest } from "../src/lib/ip-allowlist"
-import { isIpWhitelisted, unwhitelistIp } from "../src/lib/ip-blocker"
+import {
+  isIpBlocked,
+  isIpWhitelisted,
+  recordFailedAttempt,
+  resetIpSecurityForTest,
+  unwhitelistIp,
+} from "../src/lib/ip-blocker"
 import { state } from "../src/lib/state"
 import { server } from "../src/server"
 
@@ -29,6 +35,7 @@ const chatCompletionsMock = mock(
 )
 
 beforeEach(() => {
+  resetIpSecurityForTest()
   state.apiKeyAuth = undefined
   state.models = { object: "list", data: [] }
   state.copilotToken = "copilot-token"
@@ -60,6 +67,7 @@ beforeEach(() => {
 })
 
 afterAll(() => {
+  resetIpSecurityForTest()
   state.apiKeyAuth = originalApiKeyAuth
   state.models = originalModels
   state.copilotToken = originalCopilotToken
@@ -252,6 +260,100 @@ test("transcribe: invalid bearer cannot fall through to an allowed IP", async ()
 
   expect(response.status).toBe(404)
   expect(fetchMock).not.toHaveBeenCalled()
+})
+
+test("Codex invalid credentials record failures even for an allowed IP", async () => {
+  const clientIp = "203.0.113.57"
+  setIpAllowlistForTest([{ ip: clientIp, enabled: true }])
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const formData = new FormData()
+    formData.append(
+      "file",
+      new Blob(["audio"], { type: "audio/webm" }),
+      "a.webm",
+    )
+    const response = await server.request("/transcribe", {
+      method: "POST",
+      headers: {
+        "x-api-key": "wrong-key",
+        "x-copilot-peer-ip": "127.0.0.1",
+        "x-forwarded-for": clientIp,
+      },
+      body: formData,
+    })
+    expect(response.status).toBe(404)
+  }
+  expect(isIpBlocked(clientIp)).toBe(true)
+
+  const bannedFormData = new FormData()
+  bannedFormData.append(
+    "file",
+    new Blob(["audio"], { type: "audio/webm" }),
+    "a.webm",
+  )
+  const banned = await server.request("/transcribe", {
+    method: "POST",
+    headers: {
+      "x-api-key": "config-secret",
+      "x-copilot-peer-ip": "127.0.0.1",
+      "x-forwarded-for": clientIp,
+    },
+    body: bannedFormData,
+  })
+  expect(banned.status).toBe(401)
+})
+
+test("Codex missing credentials count when no allowlist applies", async () => {
+  const clientIp = "203.0.113.58"
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const formData = new FormData()
+    formData.append(
+      "file",
+      new Blob(["audio"], { type: "audio/webm" }),
+      "a.webm",
+    )
+    expect(
+      (
+        await server.request("/transcribe", {
+          method: "POST",
+          headers: {
+            "x-copilot-peer-ip": "127.0.0.1",
+            "x-forwarded-for": clientIp,
+          },
+          body: formData,
+        })
+      ).status,
+    ).toBe(404)
+  }
+
+  expect(isIpBlocked(clientIp)).toBe(true)
+})
+
+test("Codex allowlist bypass does not record a failure", async () => {
+  const clientIp = "203.0.113.59"
+  recordFailedAttempt(clientIp)
+  recordFailedAttempt(clientIp)
+  setIpAllowlistForTest([{ ip: clientIp, enabled: true }])
+
+  const formData = new FormData()
+  formData.append("file", new Blob(["audio"], { type: "audio/webm" }), "a.webm")
+  expect(
+    (
+      await server.request("/transcribe", {
+        method: "POST",
+        headers: {
+          "x-copilot-peer-ip": "127.0.0.1",
+          "x-forwarded-for": clientIp,
+        },
+        body: formData,
+      })
+    ).status,
+  ).toBe(200)
+
+  setIpAllowlistForTest([])
+  expect(isIpBlocked(clientIp)).toBe(false)
 })
 
 test("transcribe: when no API keys are configured, only IP whitelist gates the route", async () => {

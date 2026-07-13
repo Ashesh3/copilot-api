@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test"
 
+import { isIpBlocked, resetIpSecurityForTest } from "../src/lib/ip-blocker"
 import {
   createPkceChallenge,
   OAuthStore,
@@ -15,11 +16,13 @@ let oauthStore: OAuthStore
 
 beforeEach(() => {
   state.apiKeyAuth = GATEWAY_KEY
+  resetIpSecurityForTest()
   oauthStore = new OAuthStore()
   setOAuthStoreForTest(oauthStore)
 })
 
 afterEach(() => {
+  resetIpSecurityForTest()
   state.apiKeyAuth = undefined
   setOAuthStoreForTest(null)
 })
@@ -133,4 +136,31 @@ test("unimplemented trigger descendants remain behind OAuth", async () => {
       })
     ).status,
   ).toBe(404)
+})
+
+test("compatibility scope failures count toward the shared ban", async () => {
+  const clientIp = "198.51.100.95"
+  const headers = {
+    ...bearer(GATEWAY_KEY),
+    "x-copilot-peer-ip": clientIp,
+  }
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    expect(
+      (await server.request("/v1/code/triggers", { headers })).status,
+    ).toBe(401)
+  }
+
+  expect(isIpBlocked(clientIp)).toBe(true)
+  const accessToken = await issueOAuthAccessToken(["user:sessions:claude_code"])
+  expect(
+    (
+      await server.request("/v1/code/triggers", {
+        headers: {
+          ...bearer(accessToken),
+          "x-copilot-peer-ip": clientIp,
+        },
+      })
+    ).status,
+  ).toBe(401)
 })

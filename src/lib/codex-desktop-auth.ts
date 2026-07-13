@@ -3,10 +3,16 @@ import type { Context } from "hono"
 import consola from "consola"
 
 import { resolveRequestCredential } from "./credential-resolver"
-import { extractClientIp, isIpAllowedForWhitelistedRoute } from "./ip-blocker"
+import {
+  extractClientIp,
+  isIpAllowedForWhitelistedRoute,
+  isIpBlocked,
+  recordFailedAttempt,
+} from "./ip-blocker"
 
 export interface CodexDesktopAuthResult {
   allowed: boolean
+  banned: boolean
   clientIp: string | null
 }
 
@@ -29,8 +35,8 @@ export interface CodexDesktopAuthResult {
  *      an IP explicitly added from the dashboard.
  *
  * Returns `{ allowed: false }` with a `consola.warn` log when neither path
- * succeeds; the caller is expected to silently 404 in that case (consistent
- * with the rest of the dictation surface).
+ * succeeds. Invalid credentials retain the silent 404 behavior; active bans
+ * are identified separately so callers can return the uniform 401 response.
  */
 export async function authorizeCodexDesktopRequest(
   c: Context,
@@ -43,27 +49,36 @@ export async function authorizeCodexDesktopRequest(
     "x-goog-api-key",
   ].some((header) => c.req.raw.headers.has(header))
 
+  if (
+    !credentialSupplied
+    && clientIp !== null
+    && (await isIpAllowedForWhitelistedRoute(clientIp))
+  ) {
+    return { allowed: true, banned: false, clientIp }
+  }
+
+  if (clientIp !== null && isIpBlocked(clientIp)) {
+    return { allowed: false, banned: true, clientIp }
+  }
+
   // Path 1: any centrally resolved inference credential.
   if (await resolveRequestCredential(c.req.raw, ["user:inference"])) {
-    return { allowed: true, clientIp }
+    return { allowed: true, banned: false, clientIp }
   }
 
   // An invalid or conflicting credential must never fall through to the IP
   // compatibility path merely because the apparent address is allowlisted.
   if (credentialSupplied) {
+    if (clientIp !== null) recordFailedAttempt(clientIp)
     consola.warn(
       `[${routeName}] Rejected: invalid credential from IP ${clientIp ?? "(unknown)"}`,
     )
-    return { allowed: false, clientIp }
+    return { allowed: false, banned: false, clientIp }
   }
 
-  // Path 2: IP whitelist fallback.
-  if (clientIp !== null && (await isIpAllowedForWhitelistedRoute(clientIp))) {
-    return { allowed: true, clientIp }
-  }
-
+  if (clientIp !== null) recordFailedAttempt(clientIp)
   consola.warn(
     `[${routeName}] Rejected: IP ${clientIp ?? "(unknown)"} not whitelisted and no valid API key`,
   )
-  return { allowed: false, clientIp }
+  return { allowed: false, banned: false, clientIp }
 }

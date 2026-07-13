@@ -5,6 +5,7 @@ import os from "node:os"
 import path from "node:path"
 
 import { resolveCredential } from "../src/lib/credential-resolver"
+import { isIpBlocked, resetIpSecurityForTest } from "../src/lib/ip-blocker"
 import {
   createPkceChallenge,
   OAuthStore,
@@ -44,6 +45,7 @@ function authorizationQuery(
 
 beforeEach(async () => {
   state.apiKeyAuth = "test-secret-key"
+  resetIpSecurityForTest()
   consola.warn = mock(() => {}) as unknown as typeof consola.warn
   temporaryDirectory = await fs.mkdtemp(
     path.join(os.tmpdir(), "copilot-oauth-"),
@@ -53,6 +55,7 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  resetIpSecurityForTest()
   setOAuthStoreForTest(null)
   const directory = temporaryDirectory
   temporaryDirectory = undefined
@@ -185,6 +188,45 @@ test("invalid OAuth API key response retains the callback origin", async () => {
   expect(response.headers.get("content-security-policy")).toContain(
     "form-action 'self' http://localhost:43124;",
   )
+})
+
+test("OAuth gateway and scope failures share the IP tracker", async () => {
+  const clientIp = "198.51.100.90"
+  const peer = { "x-copilot-peer-ip": clientIp }
+  const query = authorizationQuery()
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const response = await server.request(
+      `/oauth/authorize?${query.toString()}`,
+      {
+        method: "POST",
+        headers: {
+          ...peer,
+          "content-type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({ api_key: "invalid-key" }).toString(),
+      },
+    )
+    expect(response.status).toBe(401)
+  }
+
+  const wrongScope = await server.request("/api/oauth/profile", {
+    headers: {
+      ...peer,
+      "x-api-key": "test-secret-key",
+    },
+  })
+  expect(wrongScope.status).toBe(401)
+  expect(isIpBlocked(clientIp)).toBe(true)
+
+  const tokens = await authorizeAndExchange()
+  const banned = await server.request("/api/oauth/profile", {
+    headers: {
+      ...peer,
+      "x-api-key": tokens.access_token,
+    },
+  })
+  expect(banned.status).toBe(401)
 })
 
 async function authorizeAndExchange(): Promise<{

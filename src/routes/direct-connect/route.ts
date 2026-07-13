@@ -1,6 +1,7 @@
 import { Hono } from "hono"
 
 import { resolveRequestCredential } from "~/lib/credential-resolver"
+import { resolveProtectedCredential } from "~/lib/protected-credential"
 
 import {
   createDirectConnectSession,
@@ -22,7 +23,11 @@ directConnectRoutes.use("*", async (c, next) => {
     return c.json({ error: "Not found" }, 404)
   }
 
-  if (!(await resolveRequestCredential(c.req.raw, ["user:inference"]))) {
+  const auth = await resolveProtectedCredential(
+    c.req.raw,
+    async () => await resolveRequestCredential(c.req.raw, ["user:inference"]),
+  )
+  if (auth.status !== "authorized") {
     c.header("Cache-Control", "no-store")
     return c.json({ error: "Unauthorized" }, 401)
   }

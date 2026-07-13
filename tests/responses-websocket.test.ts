@@ -16,6 +16,7 @@ import type {
 import type { ModelsResponse } from "../src/services/copilot/get-models"
 
 import { setConfigForTest } from "../src/lib/config"
+import { isIpBlocked, resetIpSecurityForTest } from "../src/lib/ip-blocker"
 import { state } from "../src/lib/state"
 import {
   extractResponsesPayload,
@@ -112,6 +113,7 @@ afterEach(() => {
   state.rateLimitWait = true
   setConfigForTest(null)
   resetResponsesWebSocketLimitsForTest()
+  resetIpSecurityForTest()
 })
 
 describe("extractResponsesPayload", () => {
@@ -253,6 +255,40 @@ describe("responses websocket upgrade handling", () => {
         server,
       ),
     ).toBe("upgraded")
+  })
+
+  test("records missing and invalid upgrade credentials", async () => {
+    state.apiKeyAuth = "cli-secret"
+    const clientIp = "198.51.100.91"
+    const server = { upgrade: () => true }
+
+    for (const apiKey of [undefined, undefined, "wrong-key"]) {
+      const headers = new Headers({
+        upgrade: "websocket",
+        "x-copilot-peer-ip": clientIp,
+      })
+      if (apiKey) headers.set("x-api-key", apiKey)
+      expect(
+        await tryUpgradeResponsesWebSocket(
+          new Request("http://localhost/responses", { headers }),
+          server,
+        ),
+      ).toBe("auth_failed")
+    }
+
+    expect(isIpBlocked(clientIp)).toBe(true)
+    expect(
+      await tryUpgradeResponsesWebSocket(
+        new Request("http://localhost/responses", {
+          headers: {
+            "x-api-key": "cli-secret",
+            upgrade: "websocket",
+            "x-copilot-peer-ip": clientIp,
+          },
+        }),
+        server,
+      ),
+    ).toBe("auth_failed")
   })
 
   test("caps concurrent connections per authenticated principal", async () => {

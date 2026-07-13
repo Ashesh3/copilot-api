@@ -5,7 +5,6 @@ import {
   registerCredentialProvider,
   resolveRequestCredentialKind,
 } from "./credential-resolver"
-import { extractClientIpFromHeaders } from "./ip-blocker"
 import { PATHS } from "./paths"
 import { getActiveApiKeys } from "./request-auth"
 
@@ -18,8 +17,6 @@ export const ADMIN_SESSION_IDLE_MS = 12 * 60 * 60 * 1000
 const MAX_PASSWORD_LENGTH = 256
 const MAX_ADMIN_SESSIONS = 10
 const LAST_SEEN_WRITE_INTERVAL_MS = 5 * 60 * 1000
-const LOGIN_WINDOW_MS = 15 * 60 * 1000
-const LOGIN_MAX_FAILURES = 5
 
 interface AdminAuthData {
   passwordHash: string
@@ -63,10 +60,6 @@ let writeQueue: Promise<void> = Promise.resolve()
 let authMutationQueue: Promise<void> = Promise.resolve()
 let inMemoryTestMode = false
 let clock: AdminAuthClock = { now: () => Date.now() }
-const failedLogins = new Map<
-  string,
-  { count: number; windowStartedAt: number }
->()
 
 function noop(): void {}
 
@@ -206,36 +199,6 @@ function gatewayKeyMatches(candidate: string): boolean {
     matched = safeEqual(candidate, key) || matched
   }
   return activeKeys.length > 0 && matched
-}
-
-function loginRateLimitKey(request: Request): string {
-  return extractClientIpFromHeaders(request.headers) ?? "unknown"
-}
-
-export function isAdminLoginRateLimited(request: Request): boolean {
-  const key = loginRateLimitKey(request)
-  const entry = failedLogins.get(key)
-  if (!entry) return false
-  if (now() - entry.windowStartedAt >= LOGIN_WINDOW_MS) {
-    failedLogins.delete(key)
-    return false
-  }
-  return entry.count >= LOGIN_MAX_FAILURES
-}
-
-export function recordAdminLoginFailure(request: Request): void {
-  const key = loginRateLimitKey(request)
-  const currentTime = now()
-  const entry = failedLogins.get(key)
-  if (!entry || currentTime - entry.windowStartedAt >= LOGIN_WINDOW_MS) {
-    failedLogins.set(key, { count: 1, windowStartedAt: currentTime })
-    return
-  }
-  entry.count += 1
-}
-
-export function clearAdminLoginFailures(request: Request): void {
-  failedLogins.delete(loginRateLimitKey(request))
 }
 
 export async function getAdminAuthStatus(): Promise<{
@@ -514,7 +477,6 @@ export function setAdminAuthTestMode(enabled: boolean): void {
   sessionsData = { sessions: [] }
   writeQueue = Promise.resolve()
   authMutationQueue = Promise.resolve()
-  failedLogins.clear()
   clock = { now: () => Date.now() }
 }
 

@@ -15,6 +15,7 @@ import { ensureModelRoutingOverridesLoaded } from "./lib/model-routing"
 import { ensureModelSettingsLoaded } from "./lib/model-settings"
 import { generateVirtualModels } from "./lib/model-suffix"
 import { ensurePaths, setEnvOnlyTokens } from "./lib/paths"
+import { resolveProtectedCredential } from "./lib/protected-credential"
 import { initProxyFromEnv } from "./lib/proxy"
 import { initSentry, setupSentryShutdown } from "./lib/sentry"
 import { generateEnvScript } from "./lib/shell"
@@ -227,11 +228,16 @@ async function initializePersistentConfig(): Promise<void> {
   await ensureModelRoutingOverridesLoaded()
 }
 
-async function isDirectConnectUpgradeAuthorized(
+export async function isDirectConnectUpgradeAuthorized(
   request: Request,
-): Promise<boolean> {
-  if (!isDirectConnectEnabled()) return false
-  return (await resolveRequestCredential(request, ["user:inference"])) !== null
+): Promise<"authorized" | "blocked" | "disabled" | "unauthorized"> {
+  if (!isDirectConnectEnabled()) return "disabled"
+  const auth = await resolveProtectedCredential(
+    request,
+    async () => await resolveRequestCredential(request, ["user:inference"]),
+  )
+  if (auth.status === "authorized") return "authorized"
+  return auth.status === "blocked" ? "blocked" : "unauthorized"
 }
 
 function setTrustedPeerIp(
@@ -484,7 +490,11 @@ export async function runServer(options: RunServerOptions): Promise<void> {
         // Direct Connect WebSocket upgrade
         const url = new URL(req.url)
         if (url.pathname.startsWith(DIRECT_CONNECT_WS_PATH + "/")) {
-          if (!(await isDirectConnectUpgradeAuthorized(req))) {
+          const directConnectAuth = await isDirectConnectUpgradeAuthorized(req)
+          if (directConnectAuth === "blocked") {
+            return new Response("Unauthorized", { status: 401 })
+          }
+          if (directConnectAuth !== "authorized") {
             return new Response("Not Found", { status: 404 })
           }
           const sessionId = url.pathname.slice(

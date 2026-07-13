@@ -9,6 +9,7 @@ import {
   issueWorkerCapability,
 } from "~/lib/bridge-capabilities"
 import { resolveRequestCredential } from "~/lib/credential-resolver"
+import { resolveProtectedCredential } from "~/lib/protected-credential"
 
 import type { InternalEvent } from "./types"
 
@@ -43,11 +44,15 @@ async function requireWorkerCapability(
   next: Next,
 ): Promise<Response | undefined> {
   const id = c.req.param("id") ?? ""
-  const capability = await authorizeWorkerCapability(c.req.raw, id)
+  const auth = await resolveProtectedCredential(
+    c.req.raw,
+    async () => await authorizeWorkerCapability(c.req.raw, id),
+  )
+  if (auth.status !== "authorized") return unauthorized(c)
+  const { credential: capability } = auth
   const session = getSession(id)
   if (
-    !capability
-    || !session
+    !session
     || (capability.workerEpoch !== undefined
       && capability.workerEpoch !== session.workerEpoch)
   ) {
@@ -58,10 +63,12 @@ async function requireWorkerCapability(
 
 codeSessionsRoutes.use("*", async (c, next) => {
   if (/\/worker(?:\/|$)/.test(c.req.path)) return next()
-  const credential = await resolveRequestCredential(c.req.raw, [
-    "user:sessions:claude_code",
-  ])
-  if (!credential) return unauthorized(c)
+  const auth = await resolveProtectedCredential(
+    c.req.raw,
+    async () =>
+      await resolveRequestCredential(c.req.raw, ["user:sessions:claude_code"]),
+  )
+  if (auth.status !== "authorized") return unauthorized(c)
   await next()
 })
 codeSessionsRoutes.use("/:id/worker", requireWorkerCapability)
@@ -164,8 +171,12 @@ codeSessionsRoutes.post("/:id/worker/register", async (c) => {
     return c.json({ error: "Session is archived" }, 410)
   }
 
-  const capability = await authorizeWorkerCapability(c.req.raw, id)
-  if (!capability) return unauthorized(c)
+  const capabilityAuth = await resolveProtectedCredential(
+    c.req.raw,
+    async () => await authorizeWorkerCapability(c.req.raw, id),
+  )
+  if (capabilityAuth.status !== "authorized") return unauthorized(c)
+  const { credential: capability } = capabilityAuth
   const epoch = bumpWorkerEpoch(id) as number
   if (!bindWorkerCapability(capability.rawCredential, id, epoch)) {
     return unauthorized(c)
@@ -344,8 +355,11 @@ codeSessionsRoutes.get("/:id/worker/internal-events", (c) => {
 // GET /:id/events/stream — SSE event stream
 codeSessionsRoutes.get("/:id/events/stream", async (c) => {
   const id = c.req.param("id")
-  const capability = await authorizeWorkerCapability(c.req.raw, id)
-  if (!capability) return unauthorized(c)
+  const auth = await resolveProtectedCredential(
+    c.req.raw,
+    async () => await authorizeWorkerCapability(c.req.raw, id),
+  )
+  if (auth.status !== "authorized") return unauthorized(c)
   consola.info(
     `[code-sessions] SSE stream subscriber connected — session=${id}`,
   )

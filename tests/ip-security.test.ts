@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from "bun:test"
 import { Hono } from "hono"
 
+import { apiKeyGuard } from "~/lib/api-key-guard"
 import { normalizeIpAddress, setIpAllowlistForTest } from "~/lib/ip-allowlist"
 import {
   extractClientIp,
@@ -11,9 +12,12 @@ import {
   resetIpSecurityForTest,
   unwhitelistIp,
 } from "~/lib/ip-blocker"
+import { createAuthMiddleware } from "~/lib/request-auth"
+import { state } from "~/lib/state"
 
 const originalTrustedProxies = process.env.COPILOT_TRUSTED_PROXY_CIDRS
 const originalDateNow = Date.now
+const originalApiKeyAuth = state.apiKeyAuth
 const DAY_MS = 24 * 60 * 60 * 1000
 let currentTime = 0
 
@@ -37,6 +41,7 @@ afterEach(() => {
   }
   resetIpSecurityForTest()
   setIpAllowlistForTest([])
+  state.apiKeyAuth = originalApiKeyAuth
 })
 
 test("fails closed without Bun socket-peer metadata", async () => {
@@ -170,4 +175,67 @@ test("does not extend an active ban after a fourth failure", () => {
   expect(isIpBlocked(ip)).toBe(true)
   currentTime += 1
   expect(isIpBlocked(ip)).toBe(false)
+})
+
+test("route-permitted allowlist bypass does not record a failure", async () => {
+  const ip = "198.51.100.55"
+  state.apiKeyAuth = "gateway-secret"
+  setIpAllowlistForTest([{ ip, enabled: true }])
+  recordFailedAttempt(ip)
+  recordFailedAttempt(ip)
+
+  const app = new Hono()
+  app.use("*", apiKeyGuard)
+  app.all("*", (c) => c.json({ ok: true }))
+
+  const response = await app.request(
+    "https://api.anthropic.com/upstream/path",
+    {
+      headers: {
+        host: "api.anthropic.com",
+        "x-copilot-peer-ip": ip,
+      },
+    },
+  )
+  expect(response.status).toBe(200)
+
+  setIpAllowlistForTest([])
+  expect(isIpBlocked(ip)).toBe(false)
+})
+
+test("config-based global auth records failed credentials", async () => {
+  const ip = "198.51.100.56"
+  const app = new Hono()
+  app.use(
+    "*",
+    createAuthMiddleware({
+      getApiKeys: () => ["config-secret"],
+      allowUnauthenticatedPaths: [],
+    }),
+  )
+  app.get("/protected", (c) => c.json({ ok: true }))
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    expect(
+      (
+        await app.request("http://localhost/protected", {
+          headers: {
+            "x-api-key": "wrong-key",
+            "x-copilot-peer-ip": ip,
+          },
+        })
+      ).status,
+    ).toBe(401)
+  }
+  expect(isIpBlocked(ip)).toBe(true)
+  expect(
+    (
+      await app.request("http://localhost/protected", {
+        headers: {
+          "x-api-key": "config-secret",
+          "x-copilot-peer-ip": ip,
+        },
+      })
+    ).status,
+  ).toBe(401)
 })

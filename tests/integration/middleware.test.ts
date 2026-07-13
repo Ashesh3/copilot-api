@@ -1,5 +1,6 @@
 import { describe, test, expect, beforeAll, afterEach } from "bun:test"
 
+import { isIpBlocked, resetIpSecurityForTest } from "~/lib/ip-blocker"
 import { state } from "~/lib/state"
 
 import { initializeTestState, request, TEST_TIMEOUT } from "./setup"
@@ -13,6 +14,7 @@ beforeAll(async () => {
 
 afterEach(() => {
   state.apiKeyAuth = originalApiKeyAuth
+  resetIpSecurityForTest()
 })
 
 describe("Middleware", () => {
@@ -56,6 +58,88 @@ describe("Middleware", () => {
             type: "authentication_error",
           },
         })
+      },
+      TEST_TIMEOUT,
+    )
+
+    test(
+      "records failed credentials on every protected route",
+      async () => {
+        state.apiKeyAuth = "test-secret-key-12345"
+        const clientIp = "198.51.100.80"
+        const headers = {
+          "x-api-key": "wrong-key",
+          "x-copilot-peer-ip": clientIp,
+        }
+
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          expect((await request("/v1/models", { headers })).status).toBe(401)
+        }
+
+        expect(isIpBlocked(clientIp)).toBe(true)
+        const banned = await request("/v1/models", {
+          headers: {
+            "x-api-key": "test-secret-key-12345",
+            "x-copilot-peer-ip": clientIp,
+          },
+        })
+        expect(banned.status).toBe(401)
+      },
+      TEST_TIMEOUT,
+    )
+
+    test(
+      "missing credentials count on protected routes but health stays public",
+      async () => {
+        state.apiKeyAuth = "test-secret-key-12345"
+        const clientIp = "198.51.100.81"
+        const headers = { "x-copilot-peer-ip": clientIp }
+
+        expect((await request("/v1/models", { headers })).status).toBe(401)
+        expect((await request("/health/health", { headers })).status).toBe(200)
+        expect((await request("/v1/models", { headers })).status).toBe(401)
+        expect(isIpBlocked(clientIp)).toBe(false)
+
+        expect((await request("/v1/models", { headers })).status).toBe(401)
+        expect(isIpBlocked(clientIp)).toBe(true)
+      },
+      TEST_TIMEOUT,
+    )
+
+    test(
+      "successful authentication does not clear prior failures",
+      async () => {
+        state.apiKeyAuth = "test-secret-key-12345"
+        const clientIp = "198.51.100.82"
+        const peer = { "x-copilot-peer-ip": clientIp }
+
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          expect(
+            (
+              await request("/v1/models", {
+                headers: { ...peer, "x-api-key": "wrong-key" },
+              })
+            ).status,
+          ).toBe(401)
+        }
+        expect(
+          (
+            await request("/v1/models", {
+              headers: {
+                ...peer,
+                "x-api-key": "test-secret-key-12345",
+              },
+            })
+          ).status,
+        ).toBe(200)
+        expect(
+          (
+            await request("/v1/models", {
+              headers: { ...peer, "x-api-key": "wrong-key" },
+            })
+          ).status,
+        ).toBe(401)
+        expect(isIpBlocked(clientIp)).toBe(true)
       },
       TEST_TIMEOUT,
     )

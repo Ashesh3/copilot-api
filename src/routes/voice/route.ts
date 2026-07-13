@@ -1,6 +1,7 @@
 import consola from "consola"
 
 import { resolveRequestCredential } from "~/lib/credential-resolver"
+import { resolveProtectedCredential } from "~/lib/protected-credential"
 
 import { transcribe } from "./groq-stt"
 import { pcmToWav } from "./pcm-to-wav"
@@ -276,8 +277,12 @@ export async function tryUpgradeVoiceWebSocket(
   const url = new URL(req.url)
   if (url.pathname !== VOICE_WS_PATH) return "no_match"
 
-  const credential = await resolveRequestCredential(req, ["voice:transcribe"])
-  if (!credential) return "auth_failed"
+  const auth = await resolveProtectedCredential(
+    req,
+    async () => await resolveRequestCredential(req, ["voice:transcribe"]),
+  )
+  if (auth.status !== "authorized") return "auth_failed"
+  const { credential } = auth
 
   const origin = req.headers.get("origin")
   const configuredOrigin = process.env.COPILOT_VOICE_ORIGIN?.trim()

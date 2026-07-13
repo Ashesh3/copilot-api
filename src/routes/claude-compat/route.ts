@@ -3,6 +3,7 @@ import type { Context, MiddlewareHandler } from "hono"
 import { Hono } from "hono"
 
 import { resolveRequestCredentialKind } from "~/lib/credential-resolver"
+import { resolveProtectedCredential } from "~/lib/protected-credential"
 
 type OAuthScope = "user:mcp_servers" | "user:sessions:claude_code"
 
@@ -19,10 +20,14 @@ function unauthorized(c: Context): Response {
 
 function requireScopedOAuth(scope: OAuthScope): MiddlewareHandler {
   return async (c, next) => {
-    const credential = await resolveRequestCredentialKind(c.req.raw, "oauth", {
-      requiredScopes: [scope],
-    })
-    if (!credential) return unauthorized(c)
+    const auth = await resolveProtectedCredential(
+      c.req.raw,
+      async () =>
+        await resolveRequestCredentialKind(c.req.raw, "oauth", {
+          requiredScopes: [scope],
+        }),
+    )
+    if (auth.status !== "authorized") return unauthorized(c)
     await next()
   }
 }

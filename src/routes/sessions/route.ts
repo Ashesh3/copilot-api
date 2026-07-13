@@ -3,6 +3,7 @@ import { Hono } from "hono"
 import { bodyLimit } from "hono/body-limit"
 
 import { resolveRequestCredential } from "~/lib/credential-resolver"
+import { resolveProtectedCredential } from "~/lib/protected-credential"
 import { broadcastEvents } from "~/routes/code-sessions/event-bus"
 import {
   archiveSession,
@@ -18,10 +19,14 @@ export const SESSION_COMPAT_MAX_BODY_BYTES = 1024 * 1024
 export const SESSION_COMPAT_MAX_EVENTS_PER_REQUEST = 100
 
 sessionsRoutes.use("*", async (c, next) => {
-  const credential = await resolveRequestCredential(c.req.raw, [
-    "user:sessions:claude_code",
-  ])
-  if (!credential) return c.json({ error: "Unauthorized" }, 401)
+  const auth = await resolveProtectedCredential(
+    c.req.raw,
+    async () =>
+      await resolveRequestCredential(c.req.raw, ["user:sessions:claude_code"]),
+  )
+  if (auth.status !== "authorized") {
+    return c.json({ error: "Unauthorized" }, 401)
+  }
   await next()
 })
 sessionsRoutes.use(

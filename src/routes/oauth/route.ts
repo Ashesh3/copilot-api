@@ -16,6 +16,7 @@ import {
   recordFailedAttempt,
 } from "~/lib/ip-blocker"
 import { getOAuthStore } from "~/lib/oauth-store"
+import { resolveProtectedCredential } from "~/lib/protected-credential"
 import { secureHtml } from "~/lib/secure-html"
 import {
   isAllowedTransparentProxyRequest,
@@ -225,15 +226,25 @@ function tokenResponse(c: Context, tokens: IssuedOAuthTokens): Response {
   })
 }
 
+async function resolveScopedOAuthCredential(
+  request: Request,
+  scopes: ReadonlyArray<string>,
+) {
+  const credential = await resolveRequestCredential(request)
+  return (
+      credential?.kind === "oauth" && credentialHasScopes(credential, scopes)
+    ) ?
+      credential
+    : null
+}
+
 function requireOAuthScopes(scopes: ReadonlyArray<string>) {
   return async (c: Context, next: Next): Promise<Response | undefined> => {
-    const credential = await resolveRequestCredential(c.req.raw)
-    if (
-      credential?.kind !== "oauth"
-      || !credentialHasScopes(credential, scopes)
-    ) {
-      return oauthUnauthorized(c)
-    }
+    const auth = await resolveProtectedCredential(
+      c.req.raw,
+      async () => await resolveScopedOAuthCredential(c.req.raw, scopes),
+    )
+    if (auth.status !== "authorized") return oauthUnauthorized(c)
     await next()
     c.header("Cache-Control", "no-store")
   }
@@ -292,27 +303,13 @@ async function handleRefreshTokenGrant(
  */
 function oauthScopeGuard(...scopes: Array<string>) {
   return async (c: Context, next: Next): Promise<Response | undefined> => {
-    const clientIp = extractClientIp(c)
-
-    if (clientIp !== null && isIpBlocked(clientIp)) {
-      return oauthUnauthorized(c)
-    }
-
-    const credential = await resolveRequestCredential(c.req.raw)
-    if (
-      credential?.kind === "oauth"
-      && credentialHasScopes(credential, scopes)
-    ) {
-      await next()
-      c.header("Cache-Control", "no-store")
-      return
-    }
-
-    if (!credential && clientIp !== null) {
-      recordFailedAttempt(clientIp)
-    }
-
-    return oauthUnauthorized(c)
+    const auth = await resolveProtectedCredential(
+      c.req.raw,
+      async () => await resolveScopedOAuthCredential(c.req.raw, scopes),
+    )
+    if (auth.status !== "authorized") return oauthUnauthorized(c)
+    await next()
+    c.header("Cache-Control", "no-store")
   }
 }
 

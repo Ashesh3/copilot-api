@@ -12,6 +12,18 @@ function silentDrop(): Response {
   return new Response(null, { status: 404 })
 }
 
+function unauthorized(c: {
+  header(name: string, value: string): void
+  json(value: unknown, status: 401): Response
+}): Response {
+  c.header("Cache-Control", "no-store")
+  c.header("WWW-Authenticate", "Be" + 'arer realm="copilot-api"')
+  return c.json(
+    { error: { message: "Unauthorized", type: "authentication_error" } },
+    401,
+  )
+}
+
 /**
  * Codex Desktop dictation endpoint.
  *
@@ -38,7 +50,7 @@ function silentDrop(): Response {
 transcribeRoutes.post("/", async (c) => {
   const auth = await authorizeCodexDesktopRequest(c, "transcribe")
   if (!auth.allowed) {
-    return silentDrop()
+    return auth.banned ? unauthorized(c) : silentDrop()
   }
   const clientIp = auth.clientIp
 

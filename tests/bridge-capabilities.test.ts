@@ -8,6 +8,7 @@ import {
   issueWorkerCapability,
   resetBridgeCapabilitiesForTest,
 } from "../src/lib/bridge-capabilities"
+import { isIpBlocked, resetIpSecurityForTest } from "../src/lib/ip-blocker"
 import { OAuthStore, setOAuthStoreForTest } from "../src/lib/oauth-store"
 import { state } from "../src/lib/state"
 import {
@@ -24,11 +25,13 @@ function bearer(value: string): { authorization: string } {
 
 beforeEach(() => {
   state.apiKeyAuth = GATEWAY_KEY
+  resetIpSecurityForTest()
   setOAuthStoreForTest(new OAuthStore())
   resetBridgeCapabilitiesForTest()
 })
 
 afterEach(() => {
+  resetIpSecurityForTest()
   state.apiKeyAuth = undefined
   setOAuthStoreForTest(null)
   resetBridgeCapabilitiesForTest()
@@ -48,6 +51,69 @@ test("code sessions require a scoped user credential", async () => {
     body: JSON.stringify({ title: "Allowed" }),
   })
   expect(allowed.status).toBe(201)
+})
+
+test("code-session and session guards record missing credentials", async () => {
+  for (const [clientIp, path, method] of [
+    ["198.51.100.96", "/v1/code/sessions", "POST"],
+    ["198.51.100.97", "/v1/sessions", "GET"],
+  ] as const) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const response = await server.request(path, {
+        method,
+        headers: {
+          "content-type": "application/json",
+          "x-copilot-peer-ip": clientIp,
+        },
+        ...(method === "POST" ? { body: JSON.stringify({ title: "x" }) } : {}),
+      })
+      expect(response.status).toBe(401)
+    }
+    expect(isIpBlocked(clientIp)).toBe(true)
+  }
+})
+
+test("worker capability failures record missing credentials", async () => {
+  const sessionResponse = await server.request("/v1/code/sessions", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(GATEWAY_KEY) },
+    body: JSON.stringify({ title: "Worker failures" }),
+  })
+  const sessionId = (
+    (await sessionResponse.json()) as { session: { id: string } }
+  ).session.id
+  const clientIp = "198.51.100.98"
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    expect(
+      (
+        await server.request(`/v1/code/sessions/${sessionId}/worker`, {
+          headers: { "x-copilot-peer-ip": clientIp },
+        })
+      ).status,
+    ).toBe(401)
+  }
+  expect(isIpBlocked(clientIp)).toBe(true)
+})
+
+test("environment OAuth and capability guards record failures", async () => {
+  for (const [clientIp, path, method] of [
+    ["198.51.100.99", "/v1/environments/bridge", "POST"],
+    ["198.51.100.100", "/v1/environments/env_missing/work/poll", "GET"],
+  ] as const) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const response = await server.request(path, {
+        method,
+        headers: {
+          "content-type": "application/json",
+          "x-copilot-peer-ip": clientIp,
+        },
+        ...(method === "POST" ? { body: JSON.stringify({}) } : {}),
+      })
+      expect(response.status).toBe(401)
+    }
+    expect(isIpBlocked(clientIp)).toBe(true)
+  }
 })
 
 test("worker capabilities are opaque, session-bound and epoch-bound", async () => {

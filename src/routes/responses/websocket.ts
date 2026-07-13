@@ -15,6 +15,7 @@ import {
   parseModelSuffix,
   usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
+import { resolveProtectedCredential } from "~/lib/protected-credential"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { reportNonDefaultBehavior } from "~/lib/request-logger"
 import { state } from "~/lib/state"
@@ -118,8 +119,12 @@ export async function tryUpgradeResponsesWebSocket(
     return "no_match"
   }
 
-  const credential = await resolveRequestCredential(req, ["user:inference"])
-  if (!credential) return "auth_failed"
+  const auth = await resolveProtectedCredential(
+    req,
+    async () => await resolveRequestCredential(req, ["user:inference"]),
+  )
+  if (auth.status !== "authorized") return "auth_failed"
+  const { credential } = auth
 
   const principalConnections =
     activeConnections.get(credential.principalId) ?? 0
