@@ -89,6 +89,13 @@ server {
     proxy_pass {{UPSTREAM_URL}};
   }
 
+  # Codex Desktop's standalone web.run tool uses the typed alpha/search API
+  # instead of embedding a hosted web_search tool in a Responses request.
+  location ~ ^/(?:v1/)?alpha/search/?$ {
+    limit_except POST { deny all; }
+    proxy_pass {{UPSTREAM_URL}};
+  }
+
   location ~ ^/(?:v1/)?responses/?$ {
     limit_except GET POST { deny all; }
     if ($responses_route_allowed = 0) { return 404; }
