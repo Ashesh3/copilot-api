@@ -90,6 +90,16 @@ test("Codex dictation uses app IP auth while cleanup requires a bearer", async (
   )
 })
 
+test("Codex Computer Use policy is an exact GET-only spoof route", async () => {
+  const template = await read(
+    "sites-available/codex-desktop-spoof.conf.template",
+  )
+
+  expect(template).toMatch(
+    /location = \/backend-api\/aura\/site_status \{[\s\S]*?limit_except GET \{ deny all; \}[\s\S]*?proxy_pass \{\{UPSTREAM_URL\}\};/,
+  )
+})
+
 test("Claude subscriber compatibility routes keep exact methods", async () => {
   const template = await read("sites-available/spoof-domains.conf.template")
 
