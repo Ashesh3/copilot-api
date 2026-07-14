@@ -156,6 +156,19 @@ const protectedRoutes: Array<ProtectedRoute> = [
     body: JSON.stringify({ model: "gpt-4.1", input: "hello" }),
   },
   {
+    name: "Codex standalone web search",
+    method: "POST",
+    path: "/v1/alpha/search",
+    mountedMethod: "POST",
+    mountedPath: "/v1/alpha/search",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      id: "search-session",
+      model: "gpt-4.1",
+      commands: { search_query: [{ q: "current news" }] },
+    }),
+  },
+  {
     name: "v1 messages",
     method: "POST",
     path: "/v1/messages",
@@ -294,7 +307,7 @@ afterEach(() => {
 describe("Middleware", () => {
   describe("API key guard", () => {
     test("protected route matrix entries map to mounted routes", () => {
-      expect(protectedRoutes).toHaveLength(24)
+      expect(protectedRoutes).toHaveLength(25)
 
       const guardIndex = server.routes.findIndex(
         (route) => route.handler === apiKeyGuard,
