@@ -139,6 +139,25 @@ test("adds reasoning defaults on the Google AI responses path", async () => {
   expect(lastResponsesPayload?.include).toContain("reasoning.encrypted_content")
 })
 
+test("routes Google googleSearch through Copilot native Responses web search", async () => {
+  const response = await server.request(
+    "/v1/models/gpt-4o-mini:generateContent",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: "What changed today?" }] }],
+        tools: [{ googleSearch: {} }],
+      }),
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(lastResponsesPayload?.tools?.[0]).toMatchObject({
+    type: "web_search",
+  })
+})
+
 test("forwards Google maxOutputTokens above the advertised model limit", async () => {
   const response = await server.request(
     "/v1/models/gpt-4o-mini:generateContent",
@@ -286,7 +305,7 @@ test("rejects unsupported Google root request fields instead of silently droppin
   })
 })
 
-test("rejects unsupported non-function Google tools instead of dropping them", async () => {
+test("rejects unsupported Google code execution instead of dropping it", async () => {
   const response = await server.request(
     "/v1/models/gpt-4o-mini:generateContent",
     {
@@ -295,8 +314,8 @@ test("rejects unsupported non-function Google tools instead of dropping them", a
         "content-type": "application/json",
       },
       body: JSON.stringify({
-        contents: [{ role: "user", parts: [{ text: "Search the web." }] }],
-        tools: [{ googleSearch: {} }],
+        contents: [{ role: "user", parts: [{ text: "Run code." }] }],
+        tools: [{ codeExecution: {} }],
       }),
     },
   )
@@ -306,7 +325,7 @@ test("rejects unsupported non-function Google tools instead of dropping them", a
   expect(body).toEqual({
     error: {
       code: 400,
-      message: "Unsupported Google AI tool type(s): googleSearch",
+      message: "Unsupported Google AI tool type(s): codeExecution",
       status: "INVALID_ARGUMENT",
     },
   })

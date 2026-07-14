@@ -48,7 +48,16 @@ import {
   type ChatCompletionResponse,
   type ChatCompletionsPayload,
 } from "~/services/copilot/create-chat-completions"
+import {
+  createWebSearchFunctionTool,
+  isChatWebSearchFunctionTool,
+  isWebSearchToolType,
+} from "~/services/copilot/mcp-web-search"
 
+import {
+  emitChatCompletionResponseAsStream,
+  resolveWebSearchCalls,
+} from "../messages/web-search-helpers"
 import { executeAnthropicBridge } from "./anthropic-bridge"
 import {
   executeResponsesFallback,
@@ -104,6 +113,7 @@ async function handleCompletionInner(
   })
 
   if (customReferenceBeforeCopilot) {
+    convertHostedWebSearchTools(replacedPayload)
     const customPayload = {
       ...replacedPayload,
       model: unnormalizedModel,
@@ -134,6 +144,7 @@ async function handleCompletionInner(
     ...replacedPayload,
     model: targetModel,
   }
+  disableParallelWebSearch(payload)
 
   const customReference = resolveCustomProviderModel({
     model: payload.model,
@@ -141,6 +152,7 @@ async function handleCompletionInner(
     copilotModelIds: getCopilotModelIds(),
   })
   if (customReference) {
+    convertHostedWebSearchTools(payload)
     return await executeCustomProviderRequest(c, {
       reference: customReference,
       payload,
@@ -195,9 +207,12 @@ async function dispatchCopilotCompletion(
 ) {
   const { payload, requestedModel, reasoningEffort, selectedModel } = options
   const hasFileParts = payloadHasFileParts(payload)
+  const hasNativeWebSearch =
+    payload.tools?.some((tool) => isWebSearchToolType(tool)) ?? false
 
   if (
     shouldUseResponsesFallback(selectedModel)
+    || (hasNativeWebSearch && supportsResponsesEndpoint(selectedModel))
     || (hasFileParts && supportsResponsesEndpoint(selectedModel))
   ) {
     return await executeResponsesFallback(c, {
@@ -205,7 +220,14 @@ async function dispatchCopilotCompletion(
       requestedModel,
       reasoningEffort,
       ...(hasFileParts ? { reason: "PDF file attachment" } : {}),
+      ...(!hasFileParts && hasNativeWebSearch ?
+        { reason: "Hosted web search" }
+      : {}),
     })
+  }
+
+  if (hasNativeWebSearch) {
+    convertHostedWebSearchTools(payload)
   }
 
   if (hasFileParts && modelSupportsNativeMessages(selectedModel)) {
@@ -278,6 +300,15 @@ async function executeCustomProviderRequest(
   })
 
   if (state.manualApprove) await awaitApproval()
+
+  if (payload.tools?.some((tool) => isChatWebSearchFunctionTool(tool))) {
+    return await executeCustomProviderWebSearchRequest(c, {
+      reference,
+      payload,
+      requestedModel,
+      reasoningEffort,
+    })
+  }
 
   if (payload.stream) {
     return await handleCustomProviderStreamingResponse(c, {
@@ -365,6 +396,8 @@ const executeRequest = async (
   payload: ChatCompletionsPayload & { model: string },
   requestedModel?: string,
 ) => {
+  const needsWebSearch =
+    payload.tools?.some((tool) => isChatWebSearchFunctionTool(tool)) ?? false
   if (!payload.stream) {
     return await Sentry.startSpan(
       createSentryChatSpanOptions({
@@ -382,12 +415,131 @@ const executeRequest = async (
           setRequestContext(c, { accountId })
         }
 
-        return handleNonStreamingResponse(c, response, { span, requestedModel })
+        const finalResponse =
+          needsWebSearch ?
+            await resolveWebSearchCalls(response, payload, {
+              abortSignal: c.req.raw.signal,
+            })
+          : response
+
+        return handleNonStreamingResponse(c, finalResponse, {
+          span,
+          requestedModel,
+        })
       },
     )
   }
 
+  if (needsWebSearch) {
+    return await executeStreamingWebSearchRequest(c, payload, requestedModel)
+  }
+
   return await handleStreamingResponse(c, payload, requestedModel)
+}
+
+async function executeCustomProviderWebSearchRequest(
+  c: Context,
+  options: {
+    reference: CustomProviderModelReference
+    payload: ChatCompletionsPayload & { model: string }
+    requestedModel: string
+    reasoningEffort?: ReasoningEffort
+  },
+) {
+  const requestedStream = Boolean(options.payload.stream)
+  const payload = { ...options.payload, stream: false, stream_options: null }
+  const createCompletion = async (
+    currentPayload: ChatCompletionsPayload,
+  ): Promise<ChatCompletionResponse> =>
+    (await createCustomProviderChatCompletions(
+      options.reference,
+      currentPayload,
+      {
+        signal: c.req.raw.signal,
+        reasoningEffort: options.reasoningEffort,
+      },
+    )) as ChatCompletionResponse
+
+  const initial = await createCompletion(payload)
+  const resolved = await resolveWebSearchCalls(initial, payload, {
+    abortSignal: c.req.raw.signal,
+    createCompletion,
+  })
+  const result = { ...resolved, model: options.requestedModel }
+
+  if (result.usage) {
+    setRequestContext(c, {
+      inputTokens: result.usage.prompt_tokens,
+      outputTokens: result.usage.completion_tokens,
+    })
+  }
+
+  if (!requestedStream) return c.json(result)
+  return streamSSE(c, async (stream) => {
+    await emitChatCompletionResponseAsStream(stream, result)
+  })
+}
+
+function convertHostedWebSearchTools(payload: ChatCompletionsPayload): void {
+  if (!payload.tools) return
+  payload.tools = payload.tools.map((tool) =>
+    isWebSearchToolType(tool) ? createWebSearchFunctionTool(tool) : tool,
+  )
+  payload.parallel_tool_calls = false
+}
+
+function disableParallelWebSearch(payload: ChatCompletionsPayload): void {
+  if (payload.tools?.some((tool) => isChatWebSearchFunctionTool(tool))) {
+    payload.parallel_tool_calls = false
+  }
+}
+
+async function executeStreamingWebSearchRequest(
+  c: Context,
+  payload: ChatCompletionsPayload & { model: string },
+  requestedModel?: string,
+) {
+  const bufferedPayload = { ...payload, stream: false }
+  return await Sentry.startSpan(
+    createSentryChatSpanOptions({
+      inputMessages: payload.messages,
+      model: payload.model,
+      streaming: true,
+    }),
+    async (span) => {
+      const initial = (await createChatCompletions(bufferedPayload, {
+        signal: c.req.raw.signal,
+      })) as ChatCompletionResponse
+      const finalResponse = await resolveWebSearchCalls(
+        initial,
+        bufferedPayload,
+        { abortSignal: c.req.raw.signal },
+      )
+      const response =
+        requestedModel ?
+          { ...finalResponse, model: requestedModel }
+        : finalResponse
+      setChatCompletionSpanResult(span, response)
+      return streamSSE(c, async (stream) => {
+        await emitChatCompletionResponseAsStream(stream, response)
+      })
+    },
+  )
+}
+
+function setChatCompletionSpanResult(
+  span: Sentry.Span,
+  response: ChatCompletionResponse,
+): void {
+  span.setAttribute(
+    "gen_ai.usage.input_tokens",
+    response.usage?.prompt_tokens ?? 0,
+  )
+  span.setAttribute(
+    "gen_ai.usage.output_tokens",
+    response.usage?.completion_tokens ?? 0,
+  )
+  setSentryOutputMessages(span, response.choices[0]?.message?.content ?? "")
 }
 
 function getPayloadReasoningEffort(

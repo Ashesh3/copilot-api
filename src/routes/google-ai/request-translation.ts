@@ -11,6 +11,7 @@ import type {
 } from "~/services/copilot/create-chat-completions"
 
 import { fetchUrlAsDataUri, isHttpUrl, isPdfMediaType } from "~/lib/attachments"
+import { createWebSearchFunctionTool } from "~/services/copilot/mcp-web-search"
 
 import type {
   GoogleAIRequest,
@@ -283,7 +284,10 @@ function translateTools(
         })
       }
     }
-    // googleSearch and codeExecution tools are not translatable to OpenAI format
+    if (tool.googleSearch) {
+      openAITools.push(createWebSearchFunctionTool(tool.googleSearch))
+    }
+    // codeExecution has no equivalent on the ChatCompletions compatibility path.
   }
 
   return openAITools.length > 0 ? openAITools : undefined
@@ -420,13 +424,16 @@ export function translateGoogleToOpenAI(
         googlePayload.toolConfig.functionCallingConfig.allowedFunctionNames,
       )
     : undefined
+  const tools = translateTools(googlePayload.tools, allowedFunctionNames)
 
   return {
     model,
     messages,
     ...translateGenerationConfig(googlePayload.generationConfig, stream),
-    tools: translateTools(googlePayload.tools, allowedFunctionNames),
+    tools,
     tool_choice: translateToolChoice(googlePayload.toolConfig),
+    parallel_tool_calls:
+      tools?.some((tool) => tool.function.name === "web_search") ? false : true,
     snippy: { enabled: false },
   }
 }

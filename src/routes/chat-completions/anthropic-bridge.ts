@@ -38,6 +38,7 @@ import {
   createSentryChatSpanOptions,
   setSentryOutputMessages,
 } from "~/lib/sentry"
+import { resolveNativeWebSearch } from "~/routes/messages/native-handler"
 import {
   createAnthropicMessages,
   type AnthropicStreamChunk,
@@ -87,6 +88,14 @@ export async function executeAnthropicBridge(
   )
   logger.debug("Bridged Anthropic payload:", JSON.stringify(anthropicPayload))
 
+  if (anthropicPayload.tools?.some((tool) => tool.name === "web_search")) {
+    return await executeBridgeWebSearch(c, {
+      payload,
+      anthropicPayload,
+      requestedModel,
+    })
+  }
+
   if (!anthropicPayload.stream) {
     return await Sentry.startSpan(
       createSentryChatSpanOptions({
@@ -128,6 +137,50 @@ export async function executeAnthropicBridge(
     payload,
     anthropicPayload,
     requestedModel,
+  })
+}
+
+async function executeBridgeWebSearch(
+  c: Context,
+  options: {
+    payload: ChatCompletionsPayload & { model: string }
+    anthropicPayload: AnthropicMessagesPayload
+    requestedModel: string
+  },
+): Promise<Response> {
+  const requestedStream = Boolean(options.anthropicPayload.stream)
+  options.anthropicPayload.stream = false
+  const response = await resolveNativeWebSearch(options.anthropicPayload, {
+    signal: c.req.raw.signal,
+  })
+  recordAccountContext(c)
+  const result = anthropicResponseToChat(response, options.requestedModel)
+
+  if (!requestedStream) return c.json(result)
+  return streamSSE(c, async (stream) => {
+    const chunk: ChatCompletionChunk = {
+      id: result.id,
+      object: "chat.completion.chunk",
+      created: result.created,
+      model: result.model,
+      choices: result.choices.map((choice) => ({
+        index: choice.index,
+        delta: {
+          role: "assistant",
+          content: choice.message.content,
+          reasoning_text: choice.message.reasoning_text,
+          tool_calls: choice.message.tool_calls?.map((toolCall, index) => ({
+            ...toolCall,
+            index,
+          })),
+        },
+        finish_reason: choice.finish_reason,
+        logprobs: choice.logprobs,
+      })),
+      usage: result.usage,
+    }
+    await stream.writeSSE({ data: JSON.stringify(chunk) })
+    await stream.writeSSE({ data: "[DONE]" })
   })
 }
 
@@ -505,7 +558,14 @@ function convertToolChoice(
   if (toolChoice === "auto") return { tool_choice: { type: "auto" } }
   if (toolChoice === "required") return { tool_choice: { type: "any" } }
   if (toolChoice === "none") return { tool_choice: { type: "none" } }
-  if (typeof toolChoice === "object") {
+  if (
+    typeof toolChoice === "object"
+    && "function" in toolChoice
+    && typeof toolChoice.function === "object"
+    && toolChoice.function !== null
+    && "name" in toolChoice.function
+    && typeof toolChoice.function.name === "string"
+  ) {
     return {
       tool_choice: { type: "tool", name: toolChoice.function.name },
     }
