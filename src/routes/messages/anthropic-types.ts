@@ -17,6 +17,7 @@ export interface AnthropicMessagesPayload {
   tool_choice?: {
     type: "auto" | "any" | "tool" | "none"
     name?: string
+    disable_parallel_tool_use?: boolean
   }
   thinking?: {
     type: "enabled" | "adaptive"
@@ -126,6 +127,9 @@ export interface AnthropicTool {
   name: string
   description?: string
   input_schema?: Record<string, unknown>
+  allowed_domains?: Array<string>
+  blocked_domains?: Array<string>
+  max_uses?: number
 }
 
 export interface AnthropicResponse {

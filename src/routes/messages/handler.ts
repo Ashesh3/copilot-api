@@ -880,6 +880,15 @@ async function executeCustomProviderChatCompletions(
     reasoningEffort,
   })
 
+  if (payload.tools?.some((tool) => tool.function.name === "web_search")) {
+    return await executeCustomProviderWebSearch(c, {
+      reference,
+      payload,
+      responseModel,
+      reasoningEffort,
+    })
+  }
+
   if (!payload.stream) {
     return await Sentry.startSpan(
       createSentryChatSpanOptions({
@@ -916,6 +925,46 @@ async function executeCustomProviderChatCompletions(
     payload,
     responseModel,
     reasoningEffort,
+  })
+}
+
+async function executeCustomProviderWebSearch(
+  c: Context,
+  options: {
+    reference: CustomProviderModelReference
+    payload: ChatCompletionsPayload
+    responseModel: string
+    reasoningEffort?: ReasoningEffort
+  },
+) {
+  const requestedStream = Boolean(options.payload.stream)
+  const payload = { ...options.payload, stream: false, stream_options: null }
+  const createCompletion = async (
+    currentPayload: ChatCompletionsPayload,
+  ): Promise<ChatCompletionResponse> =>
+    (await createCustomProviderChatCompletions(
+      options.reference,
+      currentPayload,
+      {
+        signal: c.req.raw.signal,
+        reasoningEffort: options.reasoningEffort,
+      },
+    )) as ChatCompletionResponse
+
+  const initial = await createCompletion(payload)
+  const resolved = await resolveWebSearchCalls(initial, payload, {
+    abortSignal: c.req.raw.signal,
+    createCompletion,
+  })
+  setRequestContext(c, {
+    inputTokens: resolved.usage?.prompt_tokens,
+    outputTokens: resolved.usage?.completion_tokens,
+  })
+  const result = translateToAnthropic(resolved, options.responseModel)
+
+  if (!requestedStream) return c.json(result)
+  return streamSSE(c, async (stream) => {
+    await emitAnthropicResponseAsStream(stream, result)
   })
 }
 

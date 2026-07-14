@@ -59,7 +59,10 @@ import {
   type ResponsesResult,
   type ResponseUsage,
 } from "~/services/copilot/create-responses"
-import { WEB_SEARCH_RESPONSES_TOOL } from "~/services/copilot/mcp-web-search"
+import {
+  createWebSearchResponsesTool,
+  isResponsesWebSearchFunctionTool,
+} from "~/services/copilot/mcp-web-search"
 
 import {
   anthropicResponseToChat,
@@ -68,6 +71,7 @@ import {
 import {
   emitResponsesResultAsStream,
   resolveResponsesWebSearchCalls,
+  resolveWebSearchCalls,
 } from "../messages/web-search-helpers"
 import { createStreamIdTracker, fixStreamIds } from "./stream-id-sync"
 import { expandCompactionItems, getResponsesRequestOptions } from "./utils"
@@ -456,11 +460,9 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
   })
   logger.debug("Responses request payload:", JSON.stringify(payload))
 
-  // Convert web_search tool to a function tool for MCP-based execution
-  convertWebSearchTool(payload)
-
   // Expand compaction items back into regular messages
   expandCompactionItems(payload)
+  disableParallelWebSearch(payload)
 
   const selectedModel = state.models?.data.find(
     (model) => model.id === payload.model,
@@ -469,6 +471,9 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
     selectedModel?.supported_endpoints?.includes(RESPONSES_ENDPOINT) ?? false
 
   if (!supportsResponses) {
+    // ChatCompletions has no hosted web-search tool. Downgrade it to the
+    // shared MCP-backed function loop only on this fallback path.
+    convertWebSearchTool(payload)
     // ChatCompletions can't accept custom (freeform) tools, so rewrite
     // apply_patch into a function tool only on this fallback path. The
     // native /responses path supports custom tools and must pass them
@@ -748,11 +753,31 @@ export const convertWebSearchTool = (payload: ResponsesPayload): void => {
   if (!Array.isArray(payload.tools) || payload.tools.length === 0) return
 
   payload.tools = payload.tools.map((t) => {
-    if ((t as { type?: string }).type === "web_search") {
-      return WEB_SEARCH_RESPONSES_TOOL
+    const type = (t as { type?: string }).type
+    if (
+      typeof type === "string"
+      && (type === "web_search" || type.startsWith("web_search_"))
+    ) {
+      return createWebSearchResponsesTool(t)
     }
     return t
   })
+  payload.parallel_tool_calls = false
+
+  const choice = payload.tool_choice as { type?: string } | undefined
+  if (
+    choice
+    && typeof choice.type === "string"
+    && (choice.type === "web_search" || choice.type.startsWith("web_search_"))
+  ) {
+    payload.tool_choice = { type: "function", name: "web_search" }
+  }
+}
+
+export const disableParallelWebSearch = (payload: ResponsesPayload): void => {
+  if (payload.tools?.some((tool) => isResponsesWebSearchFunctionTool(tool))) {
+    payload.parallel_tool_calls = false
+  }
 }
 
 // ─── ChatCompletions fallback for models without /responses support ───
@@ -1498,6 +1523,9 @@ const handleWithChatCompletions = async (
 ) => {
   const ccPayload = responsesToChatCompletions(payload)
   const responseModel = requestedModel ?? payload.model
+  const needsWebSearch =
+    ccPayload.tools?.some((tool) => tool.function.name === "web_search")
+    ?? false
   logger.debug("ChatCompletions fallback payload:", JSON.stringify(ccPayload))
 
   // PDF file parts cannot ride /chat/completions upstream; claude models
@@ -1534,7 +1562,13 @@ const handleWithChatCompletions = async (
           setRequestContext(c, { accountId: fallbackAccountId })
         }
 
-        const ccResponse = response as ChatCompletionResponse
+        const initialResponse = response as ChatCompletionResponse
+        const ccResponse =
+          needsWebSearch ?
+            await resolveWebSearchCalls(initialResponse, ccPayload, {
+              abortSignal: c.req.raw.signal,
+            })
+          : initialResponse
         logger.debug(
           "ChatCompletions fallback response:",
           JSON.stringify(ccResponse),
@@ -1569,6 +1603,13 @@ const handleWithChatCompletions = async (
   }
 
   logger.debug("ChatCompletions fallback streaming")
+
+  if (needsWebSearch) {
+    return await handleStreamingChatFallbackWebSearch(c, {
+      ccPayload,
+      responseModel,
+    })
+  }
 
   return await Sentry.startSpanManual(
     createSentryChatSpanOptions({
@@ -1667,4 +1708,28 @@ const handleWithChatCompletions = async (
       }
     },
   )
+}
+
+async function handleStreamingChatFallbackWebSearch(
+  c: Context,
+  options: {
+    ccPayload: ChatCompletionsPayload
+    responseModel: string
+  },
+): Promise<Response> {
+  const payload = { ...options.ccPayload, stream: false, stream_options: null }
+  const initial = (await createChatCompletions(payload, {
+    signal: c.req.raw.signal,
+  })) as ChatCompletionResponse
+  const response = await resolveWebSearchCalls(initial, payload, {
+    abortSignal: c.req.raw.signal,
+  })
+  const result = chatCompletionToResponsesResult(
+    response,
+    options.responseModel,
+  )
+
+  return streamSSE(c, async (stream) => {
+    await emitResponsesResultAsStream(stream, result)
+  })
 }

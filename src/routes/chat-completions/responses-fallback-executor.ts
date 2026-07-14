@@ -19,6 +19,10 @@ import {
   setSentryOutputMessages,
 } from "~/lib/sentry"
 import {
+  emitChatCompletionResponseAsStream,
+  resolveResponsesWebSearchCalls,
+} from "~/routes/messages/web-search-helpers"
+import {
   addPromptCaching,
   detectInitiator,
   hasVisionContent,
@@ -29,6 +33,7 @@ import {
   type ResponsesPayload,
   type ResponsesResult,
 } from "~/services/copilot/create-responses"
+import { isResponsesWebSearchFunctionTool } from "~/services/copilot/mcp-web-search"
 
 import {
   chatCompletionsToResponses,
@@ -130,11 +135,23 @@ async function executeNonStreamingResponsesFallback(
   return await Sentry.startSpan(
     createSentrySpanOptions(options),
     async (span) => {
-      const result = (await createResponses(options.payload, {
+      const requestOptions = {
         vision: options.vision,
         initiator: options.initiator,
         signal: c.req.raw.signal,
-      })) as ResponsesResult
+      }
+      const initial = (await createResponses(
+        options.payload,
+        requestOptions,
+      )) as ResponsesResult
+      const result =
+        hasMcpWebSearch(options.payload) ?
+          await resolveResponsesWebSearchCalls(
+            initial,
+            options.payload,
+            requestOptions,
+          )
+        : initial
 
       recordAccountContext(c)
       setResponsesUsageContext(c, result.usage)
@@ -152,6 +169,10 @@ function executeStreamingResponsesFallback(
   c: Context,
   options: PreparedResponsesFallback,
 ): Promise<Response> {
+  if (hasMcpWebSearch(options.payload)) {
+    return executeStreamingMcpWebSearchFallback(c, options)
+  }
+
   return Sentry.startSpanManual(
     createSentrySpanOptions(options),
     async (span, finish) => {
@@ -197,6 +218,44 @@ function executeStreamingResponsesFallback(
       }
     },
   )
+}
+
+function hasMcpWebSearch(payload: ResponsesPayload): boolean {
+  return (
+    payload.tools?.some((tool) => isResponsesWebSearchFunctionTool(tool))
+    ?? false
+  )
+}
+
+async function executeStreamingMcpWebSearchFallback(
+  c: Context,
+  options: PreparedResponsesFallback,
+): Promise<Response> {
+  const payload = { ...options.payload, stream: false }
+  const requestOptions = {
+    vision: options.vision,
+    initiator: options.initiator,
+    signal: c.req.raw.signal,
+  }
+  const initial = (await createResponses(
+    payload,
+    requestOptions,
+  )) as ResponsesResult
+  const response = await resolveResponsesWebSearchCalls(
+    initial,
+    payload,
+    requestOptions,
+  )
+  recordAccountContext(c)
+  setResponsesUsageContext(c, response.usage)
+  const result = responsesResultToChatCompletion(
+    response,
+    options.requestedModel,
+  )
+
+  return streamSSE(c, async (stream) => {
+    await emitChatCompletionResponseAsStream(stream, result)
+  })
 }
 
 function createSentrySpanOptions(options: PreparedResponsesFallback): {

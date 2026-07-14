@@ -53,9 +53,14 @@ import {
 } from "~/services/copilot/create-chat-completions"
 import {
   createResponses,
+  type ResponsesPayload,
   type ResponsesResult,
   type ResponseStreamEvent,
 } from "~/services/copilot/create-responses"
+import {
+  isChatWebSearchFunctionTool,
+  isResponsesWebSearchFunctionTool,
+} from "~/services/copilot/mcp-web-search"
 
 import type { AnthropicResponse } from "../messages/anthropic-types"
 import type { GoogleAIRequest } from "./google-ai-types"
@@ -66,6 +71,10 @@ import {
   anthropicResponseToChat,
 } from "../chat-completions/anthropic-bridge"
 import { chatCompletionsToResponses } from "../chat-completions/responses-fallback"
+import {
+  resolveResponsesWebSearchCalls,
+  resolveWebSearchCalls,
+} from "../messages/web-search-helpers"
 import {
   inlineGoogleFileData,
   translateGoogleToOpenAI,
@@ -106,9 +115,6 @@ function getUnsupportedGoogleToolTypes(
   const unsupported = new Set<string>()
 
   for (const tool of payload.tools ?? []) {
-    if (tool.googleSearch) {
-      unsupported.add("googleSearch")
-    }
     if (tool.codeExecution) {
       unsupported.add("codeExecution")
     }
@@ -400,6 +406,13 @@ async function handleWithChatCompletions(
   c: Context,
   finalPayload: ChatCompletionsPayload,
 ) {
+  const needsWebSearch =
+    finalPayload.tools?.some((tool) => isChatWebSearchFunctionTool(tool))
+    ?? false
+  if (needsWebSearch) {
+    return await handleChatCompletionsWithWebSearch(c, finalPayload)
+  }
+
   const response = await createChatCompletions(finalPayload, {
     signal: c.req.raw.signal,
   })
@@ -465,6 +478,62 @@ async function handleWithChatCompletions(
     } catch (error) {
       if (isAbortError(error)) return
       throw error
+    }
+  })
+}
+
+async function handleChatCompletionsWithWebSearch(
+  c: Context,
+  payload: ChatCompletionsPayload,
+) {
+  const requestedStream = Boolean(payload.stream)
+  const bufferedPayload = { ...payload, stream: false }
+  const initial = (await createChatCompletions(bufferedPayload, {
+    signal: c.req.raw.signal,
+  })) as ChatCompletionResponse
+  const result = await resolveWebSearchCalls(initial, bufferedPayload, {
+    abortSignal: c.req.raw.signal,
+  })
+
+  if (result.usage) {
+    setRequestContext(c, {
+      inputTokens: result.usage.prompt_tokens,
+      outputTokens: result.usage.completion_tokens,
+    })
+  }
+
+  if (!requestedStream) return c.json(translateOpenAIToGoogle(result))
+
+  return streamSSE(c, async (stream) => {
+    const streamState = createGoogleStreamState()
+    for (const choice of result.choices) {
+      const chunk: ChatCompletionChunk = {
+        id: result.id,
+        object: "chat.completion.chunk",
+        created: result.created,
+        model: result.model,
+        choices: [
+          {
+            index: choice.index,
+            delta: {
+              role: "assistant",
+              content: choice.message.content,
+              reasoning_text: choice.message.reasoning_text,
+              reasoning_opaque: choice.message.reasoning_opaque,
+              tool_calls: choice.message.tool_calls?.map((toolCall, index) => ({
+                ...toolCall,
+                index,
+              })),
+            },
+            finish_reason: choice.finish_reason,
+            logprobs: choice.logprobs,
+          },
+        ],
+      }
+      const googleChunk = translateChunkToGoogle(chunk, streamState)
+      if (googleChunk) {
+        await stream.writeSSE({ data: JSON.stringify(googleChunk) })
+      }
     }
   })
 }
@@ -567,6 +636,18 @@ async function handleWithResponsesApi(
     JSON.stringify(responsesPayload),
   )
 
+  if (
+    responsesPayload.tools?.some((tool) =>
+      isResponsesWebSearchFunctionTool(tool),
+    )
+  ) {
+    return await handleResponsesMcpWebSearch(c, responsesPayload, {
+      isStream,
+      vision,
+      initiator,
+    })
+  }
+
   const response = await createResponses(responsesPayload, {
     vision,
     initiator,
@@ -638,6 +719,47 @@ async function handleWithResponsesApi(
       if (isAbortError(error)) return
       throw error
     }
+  })
+}
+
+async function handleResponsesMcpWebSearch(
+  c: Context,
+  payload: ResponsesPayload,
+  options: {
+    isStream: boolean
+    vision: boolean
+    initiator: "agent" | "user"
+  },
+) {
+  payload.stream = false
+  const requestOptions = {
+    vision: options.vision,
+    initiator: options.initiator,
+    signal: c.req.raw.signal,
+  }
+  const initial = (await createResponses(
+    payload,
+    requestOptions,
+  )) as ResponsesResult
+  const result = await resolveResponsesWebSearchCalls(
+    initial,
+    payload,
+    requestOptions,
+  )
+
+  const accountId = getLastUsedAccountId()
+  if (accountId !== undefined) setRequestContext(c, { accountId })
+  if (result.usage) {
+    setRequestContext(c, {
+      inputTokens: result.usage.input_tokens,
+      outputTokens: result.usage.output_tokens,
+    })
+  }
+  const googleResponse = translateResponsesResultToGoogle(result)
+  if (!options.isStream) return c.json(googleResponse)
+
+  return streamSSE(c, async (stream) => {
+    await stream.writeSSE({ data: JSON.stringify(googleResponse) })
   })
 }
 

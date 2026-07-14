@@ -154,6 +154,41 @@ test("passes the client abort signal to responses upstream requests", async () =
   expect(lastSignal).toBeInstanceOf(AbortSignal)
 })
 
+test("preserves native Codex web search on the Responses path", async () => {
+  state.models = responsesCapableModels
+
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      input: "What changed today?",
+      tools: [
+        {
+          type: "web_search",
+          external_web_access: true,
+          search_context_size: "high",
+          filters: { allowed_domains: ["example.com"] },
+        },
+      ],
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  const request = fetchMock.mock.calls.at(-1)?.[1] as RequestInit
+  const body = JSON.parse(
+    typeof request.body === "string" ? request.body : "{}",
+  ) as {
+    tools?: Array<Record<string, unknown>>
+  }
+  expect(body.tools?.[0]).toEqual({
+    type: "web_search",
+    external_web_access: true,
+    search_context_size: "high",
+    filters: { allowed_domains: ["example.com"] },
+  })
+})
+
 test("passes the client abort signal to Google AI upstream requests", async () => {
   state.models = responsesCapableModels
 

@@ -18,7 +18,11 @@ import {
 import { resolveProtectedCredential } from "~/lib/protected-credential"
 import { reportNonDefaultBehavior } from "~/lib/request-logger"
 import { state } from "~/lib/state"
-import { createChatCompletions } from "~/services/copilot/create-chat-completions"
+import { resolveWebSearchCalls } from "~/routes/messages/web-search-helpers"
+import {
+  createChatCompletions,
+  type ChatCompletionResponse,
+} from "~/services/copilot/create-chat-completions"
 import {
   createResponses,
   type ResponsesPayload,
@@ -26,6 +30,7 @@ import {
 
 import {
   convertWebSearchTool,
+  disableParallelWebSearch,
   normalizeResponsesReasoning,
   responsesToChatCompletions,
   streamChatCompletionsAsResponses,
@@ -298,8 +303,8 @@ async function handleResponseCreate(
   payload = continuationResolution.payload ?? payload
   payload.previous_response_id = undefined
 
-  convertWebSearchTool(payload)
   expandCompactionItems(payload)
+  disableParallelWebSearch(payload)
   throwIfWebSocketTurnAborted(turn)
 
   if (isSyntheticWarmupRequest(payload)) {
@@ -316,6 +321,7 @@ async function handleResponseCreate(
   const { vision, initiator } = getResponsesRequestOptions(payload)
 
   if (!supportsResponses) {
+    convertWebSearchTool(payload)
     // Rewrite custom apply_patch to a function tool only for the CC
     // fallback. Native /responses must keep the freeform tool intact.
     useFunctionApplyPatch(payload)
@@ -789,6 +795,13 @@ async function streamChatCompletionsOverWs(
   turn: ResponsesWebSocketTurn,
 ): Promise<void> {
   const ccPayload = responsesToChatCompletions(payload)
+  const needsWebSearch =
+    ccPayload.tools?.some((tool) => tool.function.name === "web_search")
+    ?? false
+  if (needsWebSearch) {
+    await streamChatWebSearchOverWs({ ws, payload, ccPayload, turn })
+    return
+  }
   ccPayload.stream = true
   ccPayload.stream_options = { include_usage: true }
 
@@ -816,6 +829,85 @@ async function streamChatCompletionsOverWs(
   }
 
   await streamChatCompletionsAsResponses(wsStream, ccStream, payload.model)
+}
+
+async function streamChatWebSearchOverWs(options: {
+  ws: ResponsesWebSocketState
+  payload: ResponsesPayload
+  ccPayload: ReturnType<typeof responsesToChatCompletions>
+  turn: ResponsesWebSocketTurn
+}): Promise<void> {
+  const { ws, payload, ccPayload, turn } = options
+  ccPayload.stream = false
+  ccPayload.stream_options = null
+  const initial = (await waitForWebSocketTurn(
+    createChatCompletions(ccPayload, {
+      signal: turn.abortController.signal,
+    }),
+    turn,
+  )) as ChatCompletionResponse
+  const response = await resolveWebSearchCalls(initial, ccPayload, {
+    abortSignal: turn.abortController.signal,
+  })
+  const wsStream = {
+    // eslint-disable-next-line @typescript-eslint/require-await
+    writeSSE: async (data: { event?: string; data: string }) => {
+      recordResponseSnapshotFromFrame(
+        ws.data.responseSnapshots,
+        payload,
+        data.data,
+      )
+      ws.send(data.data)
+      finalizeFromResponsesFrame(ws.data, turn, data.data)
+    },
+  }
+  await streamChatCompletionsAsResponses(
+    wsStream,
+    chatResponseAsStream(response),
+    payload.model,
+  )
+}
+
+function chatResponseAsStream(
+  response: ChatCompletionResponse,
+): AsyncIterable<{ data: string }> {
+  return {
+    async *[Symbol.asyncIterator]() {
+      // Keep this a real async iterable so it matches live SSE streams.
+      await Promise.resolve()
+      for (const choice of response.choices) {
+        yield {
+          data: JSON.stringify({
+            id: response.id,
+            object: "chat.completion.chunk",
+            created: response.created,
+            model: response.model,
+            choices: [
+              {
+                index: choice.index,
+                delta: {
+                  role: "assistant",
+                  content: choice.message.content,
+                  reasoning_text: choice.message.reasoning_text,
+                  reasoning_opaque: choice.message.reasoning_opaque,
+                  tool_calls: choice.message.tool_calls?.map(
+                    (toolCall, index) => ({
+                      ...toolCall,
+                      index,
+                    }),
+                  ),
+                },
+                finish_reason: choice.finish_reason,
+                logprobs: choice.logprobs,
+              },
+            ],
+            usage: response.usage,
+          }),
+        }
+      }
+      yield { data: "[DONE]" }
+    },
+  }
 }
 
 export function recordResponseSnapshotFromFrame(

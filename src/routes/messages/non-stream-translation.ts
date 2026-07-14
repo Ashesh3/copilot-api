@@ -8,8 +8,8 @@ import {
   type ToolCall,
 } from "~/services/copilot/create-chat-completions"
 import {
+  createWebSearchFunctionTool,
   isWebSearchToolType,
-  WEB_SEARCH_FUNCTION_TOOL,
 } from "~/services/copilot/mcp-web-search"
 
 import {
@@ -33,6 +33,7 @@ import { mapOpenAIStopReasonToAnthropic } from "./utils"
 export function translateToOpenAI(
   payload: AnthropicMessagesPayload,
 ): ChatCompletionsPayload {
+  const tools = translateAnthropicToolsToOpenAI(payload.tools)
   return {
     model: translateModelName(payload.model),
     messages: translateAnthropicMessagesToOpenAI(
@@ -46,8 +47,10 @@ export function translateToOpenAI(
     top_p: payload.top_p,
     user: payload.metadata?.user_id,
     response_format: translateOutputFormatToOpenAI(payload.output_config),
-    tools: translateAnthropicToolsToOpenAI(payload.tools),
+    tools,
     tool_choice: translateAnthropicToolChoiceToOpenAI(payload.tool_choice),
+    parallel_tool_calls:
+      tools?.some((tool) => tool.function.name === "web_search") ? false : true,
     snippy: { enabled: false },
     ...(payload.stream ? { stream_options: { include_usage: true } } : {}),
   }
@@ -448,7 +451,7 @@ function translateAnthropicToolsToOpenAI(
   for (const tool of anthropicTools) {
     // Convert web_search server-side tool to a function tool
     if (isWebSearchToolType(tool)) {
-      result.push(WEB_SEARCH_FUNCTION_TOOL)
+      result.push(createWebSearchFunctionTool(tool))
       continue
     }
 

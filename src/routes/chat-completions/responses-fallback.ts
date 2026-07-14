@@ -31,6 +31,12 @@ import type {
   ResponseUsage,
 } from "~/services/copilot/create-responses"
 
+import {
+  createHostedWebSearchTool,
+  isChatWebSearchFunctionTool,
+  isWebSearchToolType,
+} from "~/services/copilot/mcp-web-search"
+
 type WriteSseStream = {
   writeSSE: (data: { data: string }) => Promise<void>
 }
@@ -78,6 +84,7 @@ export function chatCompletionsToResponses(
 ): ResponsesPayload {
   const input = convertMessagesToResponsesInput(payload.messages)
   const instructions = createResponsesInstructions(payload)
+  const tools = convertToolsToResponses(payload.tools)
 
   return {
     model: payload.model,
@@ -86,11 +93,11 @@ export function chatCompletionsToResponses(
     temperature: payload.temperature,
     top_p: payload.top_p,
     max_output_tokens: payload.max_tokens,
-    tools: convertToolsToResponses(payload.tools),
-    tool_choice: convertToolChoiceToResponses(payload.tool_choice),
+    tools,
+    tool_choice: convertToolChoiceToResponses(payload.tool_choice, tools),
     stream: payload.stream,
     store: false,
-    parallel_tool_calls: true,
+    parallel_tool_calls: payload.parallel_tool_calls ?? true,
     reasoning: {
       ...(reasoningEffort ? { effort: reasoningEffort } : {}),
       summary: "auto",
@@ -358,34 +365,85 @@ function extractInstructions(
 
 function convertToolsToResponses(
   tools: ChatCompletionsPayload["tools"],
-): Array<FunctionTool> | null {
+): ResponsesPayload["tools"] {
   const converted =
-    tools?.map((tool) => ({
-      type: "function" as const,
-      name: tool.function.name,
-      description: tool.function.description ?? null,
-      parameters: tool.function.parameters,
-      strict: false,
-      ...(getCopilotCacheControl(tool) ?
-        { copilot_cache_control: getCopilotCacheControl(tool) }
-      : {}),
-    })) ?? []
+    tools?.map((tool) => {
+      if (isWebSearchToolType(tool)) {
+        return (
+          createHostedWebSearchTool(tool)
+          ?? (tool as unknown as Record<string, unknown>)
+        )
+      }
+      if (isChatWebSearchFunctionTool(tool)) {
+        const hosted = createHostedWebSearchTool(tool)
+        if (hosted) return hosted
+      }
+      if ((tool as { type?: string }).type !== "function") {
+        return tool as unknown as Record<string, unknown>
+      }
+      return {
+        type: "function" as const,
+        name: tool.function.name,
+        description: tool.function.description ?? null,
+        parameters: tool.function.parameters,
+        strict: false,
+        ...(getCopilotCacheControl(tool) ?
+          { copilot_cache_control: getCopilotCacheControl(tool) }
+        : {}),
+      } satisfies FunctionTool
+    }) ?? []
 
   return converted.length > 0 ? converted : null
 }
 
 function convertToolChoiceToResponses(
   toolChoice: ChatCompletionsPayload["tool_choice"],
+  tools: ResponsesPayload["tools"],
 ): ResponsesPayload["tool_choice"] {
   if (typeof toolChoice === "string") return toolChoice
-  if (
-    toolChoice
-    && typeof toolChoice === "object"
-    && "function" in toolChoice
-  ) {
-    return { type: "function", name: toolChoice.function.name }
+  const functionName = getToolChoiceFunctionName(toolChoice)
+  if (functionName) {
+    if (
+      functionName === "web_search"
+      && tools?.some((tool) => isWebSearchToolType(tool))
+    ) {
+      return {
+        type: "web_search",
+      } as unknown as ResponsesPayload["tool_choice"]
+    }
+    return { type: "function", name: functionName }
+  }
+  if (isWebSearchToolChoice(toolChoice)) {
+    return toolChoice as unknown as ResponsesPayload["tool_choice"]
   }
   return "auto"
+}
+
+function getToolChoiceFunctionName(
+  toolChoice: ChatCompletionsPayload["tool_choice"],
+): string | undefined {
+  if (!toolChoice || typeof toolChoice !== "object") return undefined
+  if (!("function" in toolChoice)) return undefined
+  if (!toolChoice.function || typeof toolChoice.function !== "object") {
+    return undefined
+  }
+  if (!("name" in toolChoice.function)) return undefined
+  return typeof toolChoice.function.name === "string" ?
+      toolChoice.function.name
+    : undefined
+}
+
+function isWebSearchToolChoice(
+  toolChoice: ChatCompletionsPayload["tool_choice"],
+): boolean {
+  if (!toolChoice || typeof toolChoice !== "object") return false
+  if (!("type" in toolChoice) || typeof toolChoice.type !== "string") {
+    return false
+  }
+  return (
+    toolChoice.type === "web_search"
+    || toolChoice.type.startsWith("web_search_")
+  )
 }
 
 function convertResponseFormatToResponsesText(

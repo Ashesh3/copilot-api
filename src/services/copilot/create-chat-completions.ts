@@ -539,6 +539,7 @@ export interface ChatCompletionsPayload {
   n?: number | null
   stream?: boolean | null
   stream_options?: { include_usage?: boolean } | null
+  parallel_tool_calls?: boolean | null
 
   frequency_penalty?: number | null
   presence_penalty?: number | null
@@ -552,6 +553,7 @@ export interface ChatCompletionsPayload {
     | "auto"
     | "required"
     | { type: "function"; function: { name: string } }
+    | { type: string; [key: string]: unknown }
     | null
   user?: string | null
   snippy?: { enabled: boolean } | null
