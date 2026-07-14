@@ -19,6 +19,7 @@ import { completionRoutes } from "./routes/chat-completions/route"
 import { claudeCompatibilityRoutes } from "./routes/claude-compat/route"
 import { codeSessionsRoutes } from "./routes/code-sessions/route"
 import { codexResponsesRoutes } from "./routes/codex-responses/route"
+import { computerUsePolicyRoutes } from "./routes/computer-use-policy/route"
 import { dashboardRoutes } from "./routes/dashboard/route"
 import { directConnectRoutes } from "./routes/direct-connect/route"
 import { embeddingRoutes } from "./routes/embeddings/route"
@@ -138,6 +139,10 @@ server.route("/codex/responses", codexResponsesRoutes)
 // Codex Desktop cloud-task endpoints. Returning a fast 404 lets Desktop fall
 // back to local-only views instead of hanging behind proxy/auth silent drops.
 server.route("/wham", whamRoutes)
+// Computer Use URL policy compatibility. The helper may call this with the
+// ChatGPT backend prefix or directly against the custom Codex API base.
+server.route("/backend-api", computerUsePolicyRoutes)
+server.route("", computerUsePolicyRoutes)
 
 server.use(apiKeyGuard)
 server.use("*", createAuthMiddleware())

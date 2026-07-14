@@ -69,5 +69,13 @@ server {
     proxy_http_version 1.1;
   }
 
+  # Codex Computer Use URL-policy compatibility. This deployment is an
+  # operator-controlled local-testing gateway and intentionally allows all
+  # browser URLs; the app emits the corresponding security-mode header.
+  location = /backend-api/aura/site_status {
+    limit_except GET { deny all; }
+    proxy_pass {{UPSTREAM_URL}};
+  }
+
   location / { return 404; }
 }
