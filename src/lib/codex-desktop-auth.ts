@@ -18,9 +18,8 @@ export interface CodexDesktopAuthResult {
 }
 
 /**
- * Auth for endpoints that Codex Desktop calls without going through the
- * standard `apiKeyGuard` middleware (currently `/transcribe` and
- * `/codex/responses`).
+ * Credential-aware auth for Codex Desktop endpoints that do not go through the
+ * standard `apiKeyGuard` middleware (currently `/codex/responses`).
  *
  * Two paths are accepted:
  *
@@ -75,6 +74,36 @@ export async function authorizeCodexDesktopRequest(
   if (clientIp !== null) recordFailedAttempt(clientIp)
   consola.warn(
     `[${routeName}] Rejected: IP ${clientIp ?? "(unknown)"} not whitelisted and no valid API key`,
+  )
+  return { allowed: false, banned: false, clientIp }
+}
+
+/**
+ * IP-only authorization for Codex Desktop dictation.
+ *
+ * `/transcribe` deliberately ignores credentials because current Desktop
+ * builds do not attach the API-key credential to this request reliably. Only
+ * an enabled managed allowlist entry or an active session lease can authorize
+ * the resolved client IP. Forwarding headers remain trusted only when the
+ * actual socket peer is configured as a trusted proxy.
+ */
+export async function authorizeCodexDesktopIpRequest(
+  c: Context,
+  routeName: string,
+): Promise<CodexDesktopAuthResult> {
+  const clientIp = extractClientIp(c)
+
+  if (clientIp !== null && (await isIpAllowedForWhitelistedRoute(clientIp))) {
+    return { allowed: true, banned: false, clientIp }
+  }
+
+  if (clientIp !== null && isIpBanned(clientIp)) {
+    return { allowed: false, banned: true, clientIp }
+  }
+
+  if (clientIp !== null) recordFailedAttempt(clientIp)
+  consola.warn(
+    `[${routeName}] Rejected: IP ${clientIp ?? "(unknown)"} not whitelisted`,
   )
   return { allowed: false, banned: false, clientIp }
 }
