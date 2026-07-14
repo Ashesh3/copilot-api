@@ -70,8 +70,9 @@ function extractUserText(body: CodexResponsesBody): string {
  * emit an error event — Codex's renderer wraps this in try/catch and falls
  * back to the raw transcript, so dictation still works.
  *
- * Auth: API key OR IP whitelist (same model as /transcribe — see
- * `authorizeCodexDesktopRequest`).
+ * Auth: API key or its existing IP compatibility fallback through
+ * `authorizeCodexDesktopRequest`. Unlike `/transcribe`, this route is not
+ * intentionally IP-only and the supplied public edge requires a bearer.
  */
 codexResponsesRoutes.post("/", async (c) => {
   const auth = await authorizeCodexDesktopRequest(c, "codex-responses")

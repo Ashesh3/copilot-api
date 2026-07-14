@@ -1,7 +1,7 @@
 import consola from "consola"
 import { Hono } from "hono"
 
-import { authorizeCodexDesktopRequest } from "~/lib/codex-desktop-auth"
+import { authorizeCodexDesktopIpRequest } from "~/lib/codex-desktop-auth"
 import { transcribe } from "~/routes/voice/groq-stt"
 
 export const transcribeRoutes = new Hono()
@@ -11,7 +11,6 @@ function unauthorized(c: {
   json(value: unknown, status: 401): Response
 }): Response {
   c.header("Cache-Control", "no-store")
-  c.header("WWW-Authenticate", "Be" + 'arer realm="copilot-api"')
   return c.json(
     { error: { message: "Unauthorized", type: "authentication_error" } },
     401,
@@ -26,12 +25,10 @@ function unauthorized(c: {
  *   - file       (audio blob, typically audio/webm)
  *   - language   (optional, e.g. "en")
  *
- * Auth model: API key OR IP whitelist (see `authorizeCodexDesktopRequest`).
- * When `CODEX_API_BASE_URL` is spoofed to an `*.openai.com` host (e.g.
- * `https://voice.openai.com`), Codex Desktop's main process attaches
- * `Authorization: Bearer <token>` from `~/.codex/auth.json` and we accept it
- * if it matches an active gateway key. Otherwise we fall back to the IP
- * whitelist (populated by other authenticated clients or the dashboard).
+ * Auth model: managed/session IP allowlist only. Credentials do not authorize
+ * this route. Current Codex Desktop builds request auth attachment but do not
+ * provide an API-key bearer for `/transcribe`, so the resolved client IP must
+ * be explicitly enabled through the dashboard or covered by an active lease.
  *
  * Codex MAY or MAY NOT attach `originator: Codex Desktop` and a
  * `User-Agent: Codex Desktop/...` header depending on whether the gateway
@@ -42,7 +39,7 @@ function unauthorized(c: {
  * Response shape required by Codex's renderer: { "text": "..." }
  */
 transcribeRoutes.post("/", async (c) => {
-  const auth = await authorizeCodexDesktopRequest(c, "transcribe")
+  const auth = await authorizeCodexDesktopIpRequest(c, "transcribe")
   if (!auth.allowed) {
     return unauthorized(c)
   }

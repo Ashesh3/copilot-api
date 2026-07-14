@@ -523,11 +523,13 @@ OAuth `voice:transcribe` entitlement (derived for Claude Code from
 Origin. The gateway does not impose voice frame, audio, duration, idle,
 connection, or hourly traffic caps.
 
-Codex Desktop calls must also satisfy gateway-key or managed/session-IP
-authorization. For authenticated non-local Desktop routing, use the supplied
-trusted-host/TLS template and an intentional client-side host mapping.
-The public Codex template requires a bearer before proxying; IP-only fallback
-is reserved for private networks with trustworthy source addresses.
+Codex Desktop dictation at `POST /transcribe` is authorized only by the
+resolved managed/session-allowlisted client IP; a gateway credential does not
+grant access to that route. Current Desktop builds do not reliably attach their
+API-key credential to dictation. Add the source address observed by the gateway
+to the dashboard allowlist, then use the supplied trusted-host/TLS template and
+an intentional client-side host mapping. Transcript cleanup at
+`/codex/responses` remains credential-authenticated.
 
 Advanced TLS and proxy templates live under `nginx/`, including WebSocket
 upgrade headers and disabled response buffering without project-defined
