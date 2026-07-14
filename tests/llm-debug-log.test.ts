@@ -1,4 +1,4 @@
-import { beforeEach, expect, test } from "bun:test"
+import { afterEach, beforeEach, expect, jest, test } from "bun:test"
 
 import {
   abortLlmDebugLog,
@@ -6,12 +6,18 @@ import {
   failLlmDebugLog,
   finishLlmDebugLog,
   getLlmDebugLog,
+  LLM_DEBUG_HISTORY_WINDOW_MS,
   listLlmDebugLogs,
   startLlmDebugLog,
 } from "../src/lib/llm-debug-log"
 
 beforeEach(() => {
   clearLlmDebugLogs()
+})
+
+afterEach(() => {
+  clearLlmDebugLogs()
+  jest.useRealTimers()
 })
 
 test("stores request details with sensitive headers redacted", () => {
@@ -79,15 +85,14 @@ test("redacts credentials from stored debug URLs and structured bodies", () => {
   expect(detail?.request.headers["x-api-key"]).toBe("[REDACTED]")
 })
 
-test("retains old entries and complete previews", () => {
+test("prunes entries older than the retention window", () => {
   const now = Date.now()
-  const longPrompt = "x".repeat(400)
-  const oldId = startLlmDebugLog({
+  startLlmDebugLog({
     method: "POST",
     path: "/responses",
-    requestBody: JSON.stringify({ model: "old-model", input: longPrompt }),
+    requestBody: JSON.stringify({ model: "old-model" }),
     requestHeaders: {},
-    startedAtMs: now - 24 * 60 * 60 * 1000,
+    startedAtMs: now - LLM_DEBUG_HISTORY_WINDOW_MS - 1,
     url: "https://example.test/responses",
   })
   const freshId = startLlmDebugLog({
@@ -100,11 +105,43 @@ test("retains old entries and complete previews", () => {
   })
 
   const list = listLlmDebugLogs()
-  expect(list.count).toBe(2)
+  expect(list.count).toBe(1)
   expect(list.entries[0]?.id).toBe(freshId)
   expect(list.entries[0]?.model).toBe("fresh-model")
-  const oldEntry = list.entries.find((entry) => entry.id === oldId)
-  expect(oldEntry?.requestPreview).toContain(longPrompt)
+})
+
+test("retains complete previews inside the retention window", () => {
+  const longPrompt = "x".repeat(400)
+  const id = startLlmDebugLog({
+    method: "POST",
+    path: "/responses",
+    requestBody: JSON.stringify({ model: "fresh-model", input: longPrompt }),
+    requestHeaders: {},
+    url: "https://example.test/responses",
+  })
+
+  const entry = listLlmDebugLogs().entries.find((item) => item.id === id)
+  expect(entry?.requestPreview).toContain(longPrompt)
+})
+
+test("evicts expired entries while idle and releases the backing store", () => {
+  jest.useFakeTimers()
+  const startedAtMs = Date.now()
+  startLlmDebugLog({
+    method: "POST",
+    path: "/responses",
+    requestBody: JSON.stringify({ model: "idle-model", input: "retained" }),
+    requestHeaders: {},
+    startedAtMs,
+    url: "https://example.test/responses",
+  })
+
+  jest.advanceTimersByTime(LLM_DEBUG_HISTORY_WINDOW_MS)
+  jest.setSystemTime(startedAtMs)
+
+  // Moving the clock back proves the timer removed the entry; a read-time
+  // prune alone would keep it at this timestamp.
+  expect(listLlmDebugLogs().count).toBe(0)
 })
 
 test("keeps aborted requests terminal when late response work finishes", () => {
