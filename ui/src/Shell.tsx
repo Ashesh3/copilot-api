@@ -16,6 +16,7 @@ import {
   CopilotIcon,
   FlagIcon,
   GaugeIcon,
+  LogOutIcon,
   MessageSquareIcon,
   MonitorIcon,
   MoonIcon,
@@ -132,7 +133,7 @@ export function Shell({ children }: { children: ReactNode }) {
                 label="Sign out"
                 tooltip="Sign out"
                 variant="ghost"
-                icon={<SettingsIcon />}
+                icon={<LogOutIcon />}
                 onClick={() => void logout()}
               />
             </>
