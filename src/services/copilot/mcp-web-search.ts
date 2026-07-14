@@ -2,6 +2,10 @@ import consola from "consola"
 import { randomUUID } from "node:crypto"
 
 import { getLastUsedAccountId } from "~/lib/account-router"
+import {
+  getClientSessionId,
+  setLastUsedRoutedAccountId,
+} from "~/lib/request-session"
 import { state } from "~/lib/state"
 import { tokenPool } from "~/lib/token-pool"
 import { copilotBaseUrl } from "~/services/copilot/copilot-client"
@@ -58,6 +62,11 @@ interface McpFetchOptions {
   signal?: AbortSignal
 }
 
+export interface WebSearchExecutionOptions {
+  modelId?: string
+  sessionId?: string
+}
+
 export interface WebSearchToolOptions {
   allowedDomains?: Array<string>
   blockedDomains?: Array<string>
@@ -65,14 +74,38 @@ export interface WebSearchToolOptions {
   userLocation?: Record<string, unknown>
 }
 
-const getMcpCredentials = (): McpCredentials => {
+const getMcpCredentials = (
+  options: WebSearchExecutionOptions,
+): McpCredentials => {
   const routedAccountId = getLastUsedAccountId()
-  const routedAccount =
+  let routedAccount =
     routedAccountId === undefined ? undefined : (
       tokenPool
         .getAllAccounts()
         .find((account) => account.id === routedAccountId)
     )
+
+  if (!routedAccount && state.isMultiToken) {
+    routedAccount =
+      options.modelId ?
+        tokenPool.getAccountForModelBySession(
+          options.modelId,
+          options.sessionId ?? getClientSessionId(),
+        )
+      : undefined
+
+    if (
+      !routedAccount
+      && options.modelId
+      && tokenPool.hasKnownModel(options.modelId)
+    ) {
+      throw new Error(
+        `No enabled account is available for model "${options.modelId}"`,
+      )
+    }
+    routedAccount ??= tokenPool.getFirstHealthyAccount()
+    if (routedAccount) setLastUsedRoutedAccountId(routedAccount.id)
+  }
 
   const githubToken = routedAccount?.githubToken ?? state.githubToken
   if (!githubToken) {
@@ -251,10 +284,11 @@ const invalidateSession = (
 export const executeWebSearch = async (
   query: string,
   signal?: AbortSignal,
+  options: WebSearchExecutionOptions = {},
 ): Promise<string> => {
   try {
     signal?.throwIfAborted()
-    const credentials = getMcpCredentials()
+    const credentials = getMcpCredentials(options)
     // Capture session ID locally so concurrent calls don't interfere
     const sessionId = await ensureSession(credentials)
 

@@ -19,6 +19,7 @@ import { completionRoutes } from "./routes/chat-completions/route"
 import { claudeCompatibilityRoutes } from "./routes/claude-compat/route"
 import { codeSessionsRoutes } from "./routes/code-sessions/route"
 import { codexResponsesRoutes } from "./routes/codex-responses/route"
+import { codexSearchRoutes } from "./routes/codex-search/route"
 import { computerUsePolicyRoutes } from "./routes/computer-use-policy/route"
 import { dashboardRoutes } from "./routes/dashboard/route"
 import { directConnectRoutes } from "./routes/direct-connect/route"
@@ -165,12 +166,14 @@ server.route("/usage", usageRoute)
 // /dashboard/api/* (admin session cookie + CSRF). Do not re-expose under
 // inference credentials — that was CS-02 (cross-client integrity).
 server.route("/responses", responsesRoutes)
+server.route("/alpha/search", codexSearchRoutes)
 
 // Compatibility with tools that expect v1/ prefix
 server.route("/v1/chat/completions", completionRoutes)
 server.route("/v1/models", modelRoutes)
 server.route("/v1/embeddings", embeddingRoutes)
 server.route("/v1/responses", responsesRoutes)
+server.route("/v1/alpha/search", codexSearchRoutes)
 
 // Anthropic compatible endpoints
 server.route("/v1/messages", messageRoutes)

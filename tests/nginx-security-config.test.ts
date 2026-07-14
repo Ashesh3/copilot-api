@@ -39,6 +39,7 @@ test("public nginx template denies known pre-auth compatibility surfaces", async
   expect(template).toContain("location = /health/health")
   expect(template).toContain("location = /v1/oauth/token")
   expect(template).toContain("location = /v1/oauth/revoke")
+  expect(template).toContain("^/(?:v1/)?alpha/search/?$")
 })
 
 test("Claude spoof template exposes only authenticated compatibility families", async () => {
@@ -179,6 +180,9 @@ test("WebSocket locations keep exact methods without local lifetimes", async () 
   )
   expect(publicTemplate).toMatch(
     /location ~ \^\/\(\?:v1\/\)\?\(\?:embeddings\|responses\/compact\)\/\?\$ \{[\s\S]*?limit_except POST \{ deny all; \}/,
+  )
+  expect(publicTemplate).toMatch(
+    /location ~ \^\/\(\?:v1\/\)\?alpha\/search\/\?\$ \{[\s\S]*?limit_except POST \{ deny all; \}/,
   )
   expect(spoofTemplate).toMatch(
     /location ~ \^\/api\/ws\/speech_to_text\/voice_stream\/\??[\s\S]*?limit_except GET \{ deny all; \}/,
