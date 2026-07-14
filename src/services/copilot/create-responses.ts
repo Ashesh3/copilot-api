@@ -381,6 +381,14 @@ export type ResponseOutputItem =
   | ResponseOutputMessage
   | ResponseOutputReasoning
   | ResponseOutputFunctionCall
+  | ResponseOutputWebSearchCall
+
+export interface ResponseOutputWebSearchCall {
+  id: string
+  type: "web_search_call"
+  status: "in_progress" | "searching" | "completed" | "failed"
+  action?: Record<string, unknown>
+}
 
 export interface ResponseOutputMessage {
   id: string

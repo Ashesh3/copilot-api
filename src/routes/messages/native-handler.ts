@@ -15,11 +15,19 @@ import {
   createAnthropicMessages,
   type AnthropicStreamChunk,
 } from "~/services/copilot/create-anthropic-messages"
+import {
+  buildWebSearchQuery,
+  createWebSearchAnthropicTool,
+  executeWebSearch,
+  isWebSearchToolType,
+} from "~/services/copilot/mcp-web-search"
 
 import {
   type AnthropicMessagesPayload,
   type AnthropicResponse,
+  type AnthropicToolUseBlock,
 } from "./anthropic-types"
+import { emitAnthropicResponseAsStream } from "./web-search-helpers"
 
 const logger = createHandlerLogger("messages-native-handler")
 
@@ -39,7 +47,14 @@ export async function handleWithNativeMessages(
 ) {
   const { initiatorOverride, requestedModel } = options ?? {}
 
-  dropToolsWithoutSchema(anthropicPayload)
+  const usesWebSearch = prepareNativeTools(anthropicPayload)
+
+  if (usesWebSearch) {
+    return await handleWithMcpWebSearch(c, anthropicPayload, {
+      initiatorOverride,
+      requestedModel,
+    })
+  }
 
   if (!anthropicPayload.stream) {
     return await Sentry.startSpan(
@@ -180,17 +195,126 @@ async function streamNativeMessages(
   )
 }
 
-function dropToolsWithoutSchema(payload: AnthropicMessagesPayload): void {
-  if (!payload.tools) return
-  const kept = payload.tools.filter(
-    (tool) => tool.input_schema !== undefined || !tool.type,
-  )
+function prepareNativeTools(payload: AnthropicMessagesPayload): boolean {
+  if (!payload.tools) return false
+  const usesWebSearch = payload.tools.some((tool) => isWebSearchToolType(tool))
+  const kept = payload.tools.flatMap((tool) => {
+    if (isWebSearchToolType(tool)) {
+      return [createWebSearchAnthropicTool(tool)]
+    }
+    return tool.input_schema !== undefined || !tool.type ? [tool] : []
+  })
   if (kept.length < payload.tools.length) {
     logger.debug(
       `Dropped ${payload.tools.length - kept.length} server-side tool(s) without input_schema on native /v1/messages path`,
     )
   }
   payload.tools = kept.length > 0 ? kept : undefined
+  if (usesWebSearch) {
+    payload.tool_choice = {
+      ...(payload.tool_choice ?? { type: "auto" }),
+      disable_parallel_tool_use: true,
+    }
+  }
+  return usesWebSearch
+}
+
+async function handleWithMcpWebSearch(
+  c: Context,
+  payload: AnthropicMessagesPayload,
+  options: {
+    initiatorOverride?: "agent" | "user"
+    requestedModel?: string
+  },
+) {
+  const requestedStream = Boolean(payload.stream)
+  payload.stream = false
+
+  return await Sentry.startSpan(
+    createSentryChatSpanOptions({
+      inputMessages: payload.messages,
+      model: payload.model,
+      streaming: requestedStream,
+    }),
+    async (span) => {
+      const response = await resolveNativeWebSearch(payload, {
+        initiatorOverride: options.initiatorOverride,
+        signal: c.req.raw.signal,
+      })
+
+      const accountId = getLastUsedAccountId()
+      if (accountId !== undefined) {
+        setRequestContext(c, { accountId })
+      }
+
+      recordUsage(c, span, response.usage)
+      setSentryOutputMessages(span, collectResponseText(response))
+      const result = {
+        ...response,
+        model: options.requestedModel ?? response.model,
+      }
+
+      if (!requestedStream) return c.json(result)
+
+      return streamSSE(c, async (stream) => {
+        await emitAnthropicResponseAsStream(stream, result)
+      })
+    },
+  )
+}
+
+export async function resolveNativeWebSearch(
+  initialPayload: AnthropicMessagesPayload,
+  options: { initiatorOverride?: "agent" | "user"; signal: AbortSignal },
+): Promise<AnthropicResponse> {
+  let payload = initialPayload
+  let iteration = 0
+
+  while (true) {
+    iteration += 1
+    const response = (await createAnthropicMessages(payload, {
+      initiator: options.initiatorOverride,
+      signal: options.signal,
+    })) as AnthropicResponse
+    const calls = response.content.filter(
+      (block): block is AnthropicToolUseBlock =>
+        block.type === "tool_use" && block.name === "web_search",
+    )
+    if (calls.length === 0) return response
+
+    logger.info(
+      `Executing ${calls.length} web search(es) from native Messages, iteration ${iteration}`,
+    )
+    const tool = payload.tools?.find(
+      (candidate) => candidate.name === "web_search",
+    )
+    const results = await Promise.all(
+      calls.map(async (call) => ({
+        tool_use_id: call.id,
+        type: "tool_result" as const,
+        content: await executeWebSearch(
+          buildWebSearchQuery(JSON.stringify(call.input), tool),
+          options.signal,
+        ),
+      })),
+    )
+
+    payload = {
+      ...payload,
+      stream: false,
+      tool_choice: { type: "auto", disable_parallel_tool_use: true },
+      messages: [
+        ...payload.messages,
+        {
+          role: "assistant",
+          content: response.content.filter(
+            (block) => block.type !== "tool_use" || block.name === "web_search",
+          ),
+        },
+        { role: "user", content: results },
+      ],
+    }
+  }
 }
 
 function recordUsage(

@@ -30,8 +30,8 @@ import {
   type ToolChoiceOptions,
 } from "~/services/copilot/create-responses"
 import {
+  createWebSearchResponsesTool,
   isWebSearchToolType,
-  WEB_SEARCH_RESPONSES_TOOL,
 } from "~/services/copilot/mcp-web-search"
 
 import {
@@ -89,7 +89,16 @@ export const translateAnthropicMessagesToResponsesPayload = (
     prompt_cache_key: promptCacheKey ?? undefined,
     stream: payload.stream,
     store: false,
-    parallel_tool_calls: true,
+    parallel_tool_calls:
+      (
+        translatedTools?.some(
+          (tool) =>
+            (tool as { type?: string; name?: string }).type === "function"
+            && (tool as { name?: string }).name === "web_search",
+        )
+      ) ?
+        false
+      : true,
     text:
       payload.output_config?.format ?
         { format: payload.output_config.format }
@@ -405,7 +414,7 @@ const convertAnthropicTools = (
   for (const tool of tools) {
     // Convert web_search server-side tool to a function tool
     if (isWebSearchToolType(tool)) {
-      result.push(WEB_SEARCH_RESPONSES_TOOL)
+      result.push(createWebSearchResponsesTool(tool))
       continue
     }
 

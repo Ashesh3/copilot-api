@@ -23,23 +23,27 @@ import {
   type ResponsesPayload,
   type ResponsesResult,
 } from "~/services/copilot/create-responses"
-import { executeWebSearch } from "~/services/copilot/mcp-web-search"
+import {
+  buildWebSearchQuery,
+  executeWebSearch,
+} from "~/services/copilot/mcp-web-search"
 
 import type { AnthropicResponse } from "./anthropic-types"
 
 const stringifyResponsesInput = (input: ResponsesPayload["input"]): string =>
   typeof input === "string" ? input : JSON.stringify(input ?? [])
 
-// --- Safe argument parsing ---
+const findChatWebSearchTool = (payload: ChatCompletionsPayload): unknown =>
+  payload.tools?.find(
+    (tool) => "function" in tool && tool.function.name === "web_search",
+  )
 
-export const parseWebSearchQuery = (rawArguments: string): string => {
-  try {
-    const args = JSON.parse(rawArguments) as { query?: string }
-    return args.query ?? rawArguments
-  } catch {
-    return rawArguments
-  }
-}
+const findResponsesWebSearchTool = (payload: ResponsesPayload): unknown =>
+  payload.tools?.find(
+    (tool) =>
+      (tool as { type?: string; name?: string }).type === "function"
+      && (tool as { name?: string }).name === "web_search",
+  )
 
 // --- ChatCompletions web search resolution ---
 
@@ -57,9 +61,12 @@ export const resolveWebSearchCalls = async (
   options: {
     initiatorOverride?: "agent" | "user"
     abortSignal?: AbortSignal
+    createCompletion?: (
+      payload: ChatCompletionsPayload,
+    ) => Promise<ChatCompletionResponse>
   } = {},
 ): Promise<ChatCompletionResponse> => {
-  const { initiatorOverride, abortSignal } = options
+  const { initiatorOverride, abortSignal, createCompletion } = options
   let current = response
   let currentPayload = payload
   let iteration = 0
@@ -75,8 +82,11 @@ export const resolveWebSearchCalls = async (
 
     const results = await Promise.all(
       webSearchCalls.map(async (tc) => {
-        const query = parseWebSearchQuery(tc.function.arguments)
-        const result = await executeWebSearch(query)
+        const query = buildWebSearchQuery(
+          tc.function.arguments,
+          findChatWebSearchTool(currentPayload),
+        )
+        const result = await executeWebSearch(query, abortSignal)
         return { callId: tc.id, result }
       }),
     )
@@ -84,7 +94,7 @@ export const resolveWebSearchCalls = async (
     const assistantMessage: Message = {
       role: "assistant",
       content: current.choices[0]?.message.content ?? null,
-      tool_calls: current.choices[0]?.message.tool_calls,
+      tool_calls: webSearchCalls,
     }
 
     const toolMessages: Array<Message> = results.map((r) => ({
@@ -97,6 +107,10 @@ export const resolveWebSearchCalls = async (
       ...currentPayload,
       messages: [...currentPayload.messages, assistantMessage, ...toolMessages],
       stream: false,
+      // A client may force the first web_search call. Once its result is in
+      // context the model must be allowed to answer instead of being forced
+      // into an endless search loop.
+      tool_choice: "auto",
     }
 
     current = await Sentry.startSpan(
@@ -105,10 +119,13 @@ export const resolveWebSearchCalls = async (
         model: currentPayload.model,
       }),
       async (span) => {
-        const result = (await createChatCompletions(currentPayload, {
-          initiator: initiatorOverride,
-          signal: abortSignal,
-        })) as ChatCompletionResponse
+        const result =
+          createCompletion ?
+            await createCompletion(currentPayload)
+          : ((await createChatCompletions(currentPayload, {
+              initiator: initiatorOverride,
+              signal: abortSignal,
+            })) as ChatCompletionResponse)
 
         const inputTokens = result.usage?.prompt_tokens ?? 0
         const outputTokens = result.usage?.completion_tokens ?? 0
@@ -131,6 +148,7 @@ export const resolveResponsesWebSearchCalls = async (
     vision: boolean
     initiator: "agent" | "user"
     signal?: AbortSignal
+    createResponse?: (payload: ResponsesPayload) => Promise<ResponsesResult>
   },
 ): Promise<ResponsesResult> => {
   let current = result
@@ -151,25 +169,38 @@ export const resolveResponsesWebSearchCalls = async (
 
     const searchResults = await Promise.all(
       webSearchCalls.map(async (item) => {
-        const query = parseWebSearchQuery(item.arguments)
-        const searchResult = await executeWebSearch(query)
+        const query = buildWebSearchQuery(
+          item.arguments,
+          findResponsesWebSearchTool(currentPayload),
+        )
+        const searchResult = await executeWebSearch(
+          query,
+          requestOptions.signal,
+        )
         return { callId: item.call_id, result: searchResult }
       }),
     )
 
-    const newInput: Array<ResponseInputItem> = [
-      ...(Array.isArray(currentPayload.input) ? currentPayload.input : []),
-      ...current.output.map((item) =>
-        item.type === "function_call" ?
-          {
-            type: "function_call" as const,
+    const resolvedOutputItems: Array<ResponseInputItem> = []
+    for (const item of current.output) {
+      if (item.type === "function_call") {
+        if (item.name === "web_search") {
+          resolvedOutputItems.push({
+            type: "function_call",
             call_id: item.call_id,
             name: item.name,
             arguments: item.arguments,
-            status: "completed" as const,
-          }
-        : (item as ResponseInputItem),
-      ),
+            status: "completed",
+          })
+        }
+        continue
+      }
+      resolvedOutputItems.push(item as ResponseInputItem)
+    }
+
+    const newInput: Array<ResponseInputItem> = [
+      ...(Array.isArray(currentPayload.input) ? currentPayload.input : []),
+      ...resolvedOutputItems,
       ...searchResults.map((r) => ({
         type: "function_call_output" as const,
         call_id: r.callId,
@@ -177,17 +208,25 @@ export const resolveResponsesWebSearchCalls = async (
       })),
     ]
 
-    currentPayload = { ...currentPayload, input: newInput, stream: false }
+    currentPayload = {
+      ...currentPayload,
+      input: newInput,
+      stream: false,
+      tool_choice: "auto",
+    }
     current = await Sentry.startSpan(
       createSentryChatSpanOptions({
         inputMessages: stringifyResponsesInput(currentPayload.input),
         model: currentPayload.model,
       }),
       async (span) => {
-        const result = (await createResponses(
-          currentPayload,
-          requestOptions,
-        )) as ResponsesResult
+        const result =
+          requestOptions.createResponse ?
+            await requestOptions.createResponse(currentPayload)
+          : ((await createResponses(
+              currentPayload,
+              requestOptions,
+            )) as ResponsesResult)
 
         const inputTokens = result.usage?.input_tokens ?? 0
         const outputTokens = result.usage?.output_tokens ?? 0
@@ -334,6 +373,67 @@ export const emitAnthropicResponseAsStream = async (
   }
 
   await emitMessageEnd(stream, response)
+}
+
+export const emitChatCompletionResponseAsStream = async (
+  stream: {
+    writeSSE: (data: { event?: string; data: string }) => Promise<void>
+  },
+  response: ChatCompletionResponse,
+): Promise<void> => {
+  for (const choice of response.choices) {
+    await stream.writeSSE({
+      data: JSON.stringify({
+        id: response.id,
+        object: "chat.completion.chunk",
+        created: response.created,
+        model: response.model,
+        choices: [
+          {
+            index: choice.index,
+            delta: {
+              role: "assistant",
+              ...(choice.message.content ?
+                { content: choice.message.content }
+              : {}),
+              ...(choice.message.reasoning_text ?
+                { reasoning_text: choice.message.reasoning_text }
+              : {}),
+              ...(choice.message.reasoning_opaque ?
+                { reasoning_opaque: choice.message.reasoning_opaque }
+              : {}),
+              ...(choice.message.tool_calls ?
+                {
+                  tool_calls: choice.message.tool_calls.map(
+                    (toolCall, index) => ({
+                      ...toolCall,
+                      index,
+                    }),
+                  ),
+                }
+              : {}),
+            },
+            finish_reason: choice.finish_reason,
+            logprobs: choice.logprobs,
+          },
+        ],
+      }),
+    })
+  }
+
+  if (response.usage) {
+    await stream.writeSSE({
+      data: JSON.stringify({
+        id: response.id,
+        object: "chat.completion.chunk",
+        created: response.created,
+        model: response.model,
+        choices: [],
+        usage: response.usage,
+      }),
+    })
+  }
+  await stream.writeSSE({ data: "[DONE]" })
 }
 
 const emitMessageStart = async (

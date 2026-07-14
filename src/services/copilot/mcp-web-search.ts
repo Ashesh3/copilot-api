@@ -1,13 +1,19 @@
 import consola from "consola"
 import { randomUUID } from "node:crypto"
 
+import { getLastUsedAccountId } from "~/lib/account-router"
 import { state } from "~/lib/state"
+import { tokenPool } from "~/lib/token-pool"
 import { copilotBaseUrl } from "~/services/copilot/copilot-client"
 
 // --- MCP Session State ---
 
-let mcpSessionId: string | null = null
-let mcpSessionPromise: Promise<string> | null = null
+interface McpSessionState {
+  id: string | null
+  promise: Promise<string> | null
+}
+
+const mcpSessions = new Map<string, McpSessionState>()
 
 // --- JSON-RPC Helpers ---
 
@@ -36,19 +42,70 @@ interface JsonRpcResponse {
 }
 
 const MCP_PATH = "/mcp/readonly"
+const MCP_PROTOCOL_VERSION = "2025-03-26"
+const MCP_WEB_SEARCH_TOOL = "web_search"
+const MCP_SESSION_RETRY_STATUSES = new Set([401, 403, 404])
 
-const mcpHeaders = (sessionId?: string | null): Record<string, string> => {
-  if (!state.githubToken) {
+interface McpCredentials {
+  baseUrl: string
+  cacheKey: string
+  githubToken: string
+}
+
+interface McpFetchOptions {
+  credentials: McpCredentials
+  sessionId: string | null
+  signal?: AbortSignal
+}
+
+export interface WebSearchToolOptions {
+  allowedDomains?: Array<string>
+  blockedDomains?: Array<string>
+  searchContextSize?: string
+  userLocation?: Record<string, unknown>
+}
+
+const getMcpCredentials = (): McpCredentials => {
+  const routedAccountId = getLastUsedAccountId()
+  const routedAccount =
+    routedAccountId === undefined ? undefined : (
+      tokenPool
+        .getAllAccounts()
+        .find((account) => account.id === routedAccountId)
+    )
+
+  const githubToken = routedAccount?.githubToken ?? state.githubToken
+  if (!githubToken) {
     throw new Error("GitHub token is not set. Cannot call MCP endpoint.")
   }
 
+  return {
+    githubToken,
+    baseUrl:
+      routedAccount ? tokenPool.getBaseUrl(routedAccount) : copilotBaseUrl(),
+    cacheKey: routedAccount ? `account:${routedAccount.id}` : "default",
+  }
+}
+
+const getSessionState = (cacheKey: string): McpSessionState => {
+  let session = mcpSessions.get(cacheKey)
+  if (!session) {
+    session = { id: null, promise: null }
+    mcpSessions.set(cacheKey, session)
+  }
+  return session
+}
+
+const mcpHeaders = (
+  credentials: McpCredentials,
+  sessionId?: string | null,
+): Record<string, string> => {
   const headers: Record<string, string> = {
     "content-type": "application/json",
     accept: "application/json, text/event-stream",
-    Authorization: `Bearer ${state.githubToken}`,
-    "X-MCP-Toolsets": "web_search",
-    "X-MCP-Host": "github-coding-agent",
-    "Copilot-Integration-Id": "vscode-chat",
+    Authorization: `Bearer ${credentials.githubToken}`,
+    "X-MCP-Host": "copilot-cli",
+    "X-MCP-Tools": MCP_WEB_SEARCH_TOOL,
   }
 
   if (sessionId) {
@@ -60,13 +117,14 @@ const mcpHeaders = (sessionId?: string | null): Record<string, string> => {
 
 const mcpFetch = async (
   body: JsonRpcRequest,
-  sessionId: string | null,
+  options: McpFetchOptions,
 ): Promise<Response> => {
-  const url = `${copilotBaseUrl()}${MCP_PATH}`
+  const url = `${options.credentials.baseUrl}${MCP_PATH}`
   return fetch(url, {
     method: "POST",
-    headers: mcpHeaders(sessionId),
+    headers: mcpHeaders(options.credentials, options.sessionId),
     body: JSON.stringify(body),
+    signal: options.signal,
   })
 }
 
@@ -104,12 +162,14 @@ const parseResponseBody = async (response: Response): Promise<unknown> => {
 
 // --- MCP Session Initialization ---
 
-const initializeSession = async (): Promise<string> => {
+const initializeSession = async (
+  credentials: McpCredentials,
+): Promise<string> => {
   const request: JsonRpcRequest = {
     jsonrpc: "2.0",
     method: "initialize",
     params: {
-      protocolVersion: "2025-03-26",
+      protocolVersion: MCP_PROTOCOL_VERSION,
       capabilities: {},
       clientInfo: {
         name: "copilot-api",
@@ -119,7 +179,10 @@ const initializeSession = async (): Promise<string> => {
     id: randomUUID(),
   }
 
-  const response = await mcpFetch(request, null)
+  const response = await mcpFetch(request, {
+    credentials,
+    sessionId: null,
+  })
 
   if (!response.ok) {
     const errorText = await response.text()
@@ -144,27 +207,28 @@ const initializeSession = async (): Promise<string> => {
  * Ensure an MCP session exists. Serializes concurrent callers so only one
  * initialization request is made, and all callers receive the same session ID.
  */
-const ensureSession = async (): Promise<string> => {
-  if (mcpSessionId) {
-    return mcpSessionId
+const ensureSession = async (credentials: McpCredentials): Promise<string> => {
+  const session = getSessionState(credentials.cacheKey)
+  if (session.id) {
+    return session.id
   }
 
-  if (mcpSessionPromise) {
-    return mcpSessionPromise
+  if (session.promise) {
+    return session.promise
   }
 
-  mcpSessionPromise = initializeSession()
+  session.promise = initializeSession(credentials)
     .then((id) => {
-      mcpSessionId = id
-      mcpSessionPromise = null
+      session.id = id
+      session.promise = null
       return id
     })
     .catch((error: unknown) => {
-      mcpSessionPromise = null
+      session.promise = null
       throw error
     })
 
-  return mcpSessionPromise
+  return session.promise
 }
 
 /**
@@ -172,39 +236,56 @@ const ensureSession = async (): Promise<string> => {
  * the current global one. This prevents a stale caller from resetting a
  * freshly-initialized session obtained by another concurrent call.
  */
-const invalidateSession = (callerSessionId: string): void => {
-  if (mcpSessionId === callerSessionId) {
-    mcpSessionId = null
+const invalidateSession = (
+  credentials: McpCredentials,
+  callerSessionId: string,
+): void => {
+  const session = getSessionState(credentials.cacheKey)
+  if (session.id === callerSessionId) {
+    session.id = null
   }
 }
 
 // --- Web Search Execution ---
 
-export const executeWebSearch = async (query: string): Promise<string> => {
+export const executeWebSearch = async (
+  query: string,
+  signal?: AbortSignal,
+): Promise<string> => {
   try {
+    signal?.throwIfAborted()
+    const credentials = getMcpCredentials()
     // Capture session ID locally so concurrent calls don't interfere
-    const sessionId = await ensureSession()
+    const sessionId = await ensureSession(credentials)
 
     const request: JsonRpcRequest = {
       jsonrpc: "2.0",
       method: "tools/call",
       params: {
-        name: "web_search",
+        name: MCP_WEB_SEARCH_TOOL,
         arguments: { query },
       },
       id: randomUUID(),
     }
 
-    const response = await mcpFetch(request, sessionId)
+    const response = await mcpFetch(request, {
+      credentials,
+      sessionId,
+      signal,
+    })
 
     if (!response.ok) {
       // Session may have expired — invalidate and retry once
-      if (response.status === 401 || response.status === 403) {
+      if (MCP_SESSION_RETRY_STATUSES.has(response.status)) {
         consola.warn("MCP session expired, re-initializing")
-        invalidateSession(sessionId)
-        const newSessionId = await ensureSession()
+        invalidateSession(credentials, sessionId)
+        const newSessionId = await ensureSession(credentials)
 
-        const retryResponse = await mcpFetch(request, newSessionId)
+        const retryResponse = await mcpFetch(request, {
+          credentials,
+          sessionId: newSessionId,
+          signal,
+        })
         if (!retryResponse.ok) {
           const errorText = await retryResponse.text()
           consola.error("MCP web_search retry failed:", errorText)
@@ -220,12 +301,16 @@ export const executeWebSearch = async (query: string): Promise<string> => {
 
     return parseSearchResponse(await parseResponseBody(response))
   } catch (error: unknown) {
+    if (
+      signal?.aborted
+      || (error instanceof Error && error.name === "AbortError")
+    ) {
+      throw error
+    }
     const message = error instanceof Error ? error.message : "Unknown MCP error"
     consola.error("MCP web search error:", message)
-    // Reset session on error so next attempt re-initializes
-    // Use a sentinel to invalidate — safe since we don't have the caller's ID here
-    mcpSessionId = null
-    mcpSessionPromise = null
+    // Reset sessions on transport/protocol errors so the next attempt re-initializes.
+    mcpSessions.clear()
     return `Web search failed: ${message}`
   }
 }
@@ -250,50 +335,259 @@ const parseSearchResponse = (json: unknown): string => {
     return "No search results found."
   }
 
-  return textParts.join("\n\n")
+  const text = textParts.join("\n\n")
+  return rpcResponse.result.isError ? `Web search error: ${text}` : text
 }
 
 // --- Web Search Tool Definition ---
 
-/** OpenAI function tool definition for web_search (ChatCompletions format) */
-export const WEB_SEARCH_FUNCTION_TOOL = {
-  type: "function" as const,
-  function: {
-    name: "web_search",
-    description: "Search the web for current information",
-    parameters: {
-      type: "object",
-      properties: {
-        query: {
-          type: "string",
-          description: "The search query",
-        },
-      },
-      required: ["query"],
-    },
-  },
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null
+
+const stringArray = (value: unknown): Array<string> | undefined => {
+  if (!Array.isArray(value)) return undefined
+  const strings = value.filter(
+    (item): item is string => typeof item === "string" && item.length > 0,
+  )
+  return strings.length > 0 ? strings : undefined
 }
 
-/** Responses API function tool definition for web_search */
-export const WEB_SEARCH_RESPONSES_TOOL = {
-  type: "function" as const,
-  name: "web_search",
-  description: "Search the web for current information",
-  parameters: {
-    type: "object",
-    properties: {
-      query: {
-        type: "string",
-        description: "The search query",
-      },
+const firstStringArray = (
+  values: Array<unknown>,
+): Array<string> | undefined => {
+  for (const value of values) {
+    const strings = stringArray(value)
+    if (strings) return strings
+  }
+  return undefined
+}
+
+const getFunctionParameters = (
+  tool: unknown,
+): Record<string, unknown> | undefined => {
+  if (!isRecord(tool)) return undefined
+  const definition = isRecord(tool.function) ? tool.function : tool
+  if (isRecord(definition.parameters)) return definition.parameters
+  return isRecord(definition.input_schema) ? definition.input_schema : undefined
+}
+
+const getDefaultDomains = (
+  parameters: Record<string, unknown> | undefined,
+  name: "allowed_domains" | "blocked_domains",
+): Array<string> | undefined => {
+  if (!parameters || !isRecord(parameters.properties)) return undefined
+  const property = parameters.properties[name]
+  return isRecord(property) ? stringArray(property.default) : undefined
+}
+
+export const getWebSearchToolOptions = (
+  tool: unknown,
+): WebSearchToolOptions => {
+  if (!isRecord(tool)) return {}
+
+  const filters = isRecord(tool.filters) ? tool.filters : undefined
+  const parameters = getFunctionParameters(tool)
+  const allowedDomains =
+    firstStringArray([
+      tool.allowed_domains,
+      tool.allowedDomains,
+      filters?.allowed_domains,
+      filters?.allowedDomains,
+    ]) ?? getDefaultDomains(parameters, "allowed_domains")
+  const blockedDomains =
+    firstStringArray([
+      tool.blocked_domains,
+      tool.blockedDomains,
+      tool.exclude_domains,
+      tool.excludeDomains,
+      filters?.blocked_domains,
+      filters?.blockedDomains,
+    ]) ?? getDefaultDomains(parameters, "blocked_domains")
+  const userLocation =
+    isRecord(tool.user_location) ? tool.user_location : undefined
+  const searchContextSize =
+    typeof tool.search_context_size === "string" ?
+      tool.search_context_size
+    : undefined
+
+  return {
+    ...(allowedDomains ? { allowedDomains } : {}),
+    ...(blockedDomains ? { blockedDomains } : {}),
+    ...(userLocation ? { userLocation } : {}),
+    ...(searchContextSize ? { searchContextSize } : {}),
+  }
+}
+
+const describeWebSearch = (options: WebSearchToolOptions): string => {
+  const constraints: Array<string> = []
+  if (options.allowedDomains) {
+    constraints.push(
+      `Only use these domains: ${options.allowedDomains.join(", ")}.`,
+    )
+  }
+  if (options.blockedDomains) {
+    constraints.push(
+      `Do not use these domains: ${options.blockedDomains.join(", ")}.`,
+    )
+  }
+  if (options.userLocation) {
+    constraints.push(
+      `Use this approximate user location when relevant: ${JSON.stringify(options.userLocation)}.`,
+    )
+  }
+
+  return [
+    "Search the web for current information. Always include the source URLs as markdown hyperlinks in the answer.",
+    ...constraints,
+  ].join(" ")
+}
+
+const createWebSearchParameters = (
+  options: WebSearchToolOptions,
+): Record<string, unknown> => {
+  const properties: Record<string, unknown> = {
+    query: {
+      type: "string",
+      description: "A clear, standalone natural-language search request",
     },
+  }
+
+  if (options.allowedDomains) {
+    properties.allowed_domains = {
+      type: "array",
+      items: { type: "string" },
+      default: options.allowedDomains,
+      description: "Domains the caller requires the search to use",
+    }
+  }
+  if (options.blockedDomains) {
+    properties.blocked_domains = {
+      type: "array",
+      items: { type: "string" },
+      default: options.blockedDomains,
+      description: "Domains the caller requires the search to avoid",
+    }
+  }
+
+  return {
+    type: "object",
+    properties,
     required: ["query"],
-  },
-  strict: false,
+  }
+}
+
+export const createWebSearchFunctionTool = (tool?: unknown) => {
+  const options = getWebSearchToolOptions(tool)
+  return {
+    type: "function" as const,
+    function: {
+      name: MCP_WEB_SEARCH_TOOL,
+      description: describeWebSearch(options),
+      parameters: createWebSearchParameters(options),
+    },
+  }
+}
+
+export const createWebSearchResponsesTool = (tool?: unknown) => {
+  const functionTool = createWebSearchFunctionTool(tool).function
+  return {
+    type: "function" as const,
+    name: functionTool.name,
+    description: functionTool.description,
+    parameters: functionTool.parameters,
+    strict: false,
+  }
+}
+
+export const createHostedWebSearchTool = (
+  tool?: unknown,
+): Record<string, unknown> | null => {
+  const source = isRecord(tool) ? tool : {}
+  const options = getWebSearchToolOptions(source)
+  // Copilot's hosted Responses schema supports an allowlist but not a
+  // blocklist. Keep blocked-domain searches on the MCP-backed function path.
+  if (options.blockedDomains) return null
+
+  return {
+    type: "web_search",
+    ...(typeof source.external_web_access === "boolean" ?
+      { external_web_access: source.external_web_access }
+    : {}),
+    ...(options.allowedDomains ?
+      { filters: { allowed_domains: options.allowedDomains } }
+    : {}),
+    ...(options.userLocation ? { user_location: options.userLocation } : {}),
+    ...(options.searchContextSize ?
+      { search_context_size: options.searchContextSize }
+    : {}),
+  }
+}
+
+export const createWebSearchAnthropicTool = (tool?: unknown) => {
+  const functionTool = createWebSearchFunctionTool(tool).function
+  return {
+    name: functionTool.name,
+    description: functionTool.description,
+    input_schema: functionTool.parameters,
+  }
+}
+
+export const isChatWebSearchFunctionTool = (tool: unknown): boolean =>
+  isRecord(tool)
+  && tool.type === "function"
+  && isRecord(tool.function)
+  && tool.function.name === MCP_WEB_SEARCH_TOOL
+
+export const isResponsesWebSearchFunctionTool = (tool: unknown): boolean =>
+  isRecord(tool)
+  && tool.type === "function"
+  && tool.name === MCP_WEB_SEARCH_TOOL
+
+export const buildWebSearchQuery = (
+  rawArguments: string,
+  functionTool?: unknown,
+): string => {
+  let query = rawArguments
+  let argumentOptions: WebSearchToolOptions = {}
+  try {
+    const args = JSON.parse(rawArguments) as Record<string, unknown>
+    if (typeof args.query === "string" && args.query.length > 0) {
+      query = args.query
+    }
+    argumentOptions = getWebSearchToolOptions(args)
+  } catch {
+    // Some providers return the query as a bare string. Keep it verbatim.
+  }
+
+  const parameters = getFunctionParameters(functionTool)
+  const allowedDomains =
+    getDefaultDomains(parameters, "allowed_domains")
+    ?? argumentOptions.allowedDomains
+  const blockedDomains =
+    getDefaultDomains(parameters, "blocked_domains")
+    ?? argumentOptions.blockedDomains
+  const constraints: Array<string> = []
+  if (allowedDomains) {
+    constraints.push(`Only use sources from: ${allowedDomains.join(", ")}.`)
+  }
+  if (blockedDomains) {
+    constraints.push(`Do not use sources from: ${blockedDomains.join(", ")}.`)
+  }
+
+  return constraints.length > 0 ?
+      `${query}\n\nSearch constraints: ${constraints.join(" ")}`
+    : query
 }
 
 // --- Helpers for detecting web_search tool calls ---
 
 export const isWebSearchToolType = (tool: { type?: string }): boolean => {
-  return typeof tool.type === "string" && tool.type.startsWith("web_search")
+  return (
+    typeof tool.type === "string"
+    && (tool.type === "web_search" || tool.type.startsWith("web_search_"))
+  )
+}
+
+export const resetWebSearchSessionsForTest = (): void => {
+  mcpSessions.clear()
 }
