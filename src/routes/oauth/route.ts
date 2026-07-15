@@ -10,6 +10,7 @@ import {
   resolveRequestCredential,
 } from "~/lib/credential-resolver"
 import {
+  clearFailedAttempts,
   extractClientIp,
   isIpBanned,
   isIpBlocked,
@@ -199,6 +200,7 @@ function tokenResponse(c: Context, tokens: IssuedOAuthTokens): Response {
     access_token: tokens.accessToken,
     refresh_token: tokens.refreshToken,
     expires_in: tokens.expiresIn,
+    refresh_token_expires_in: tokens.refreshTokenExpiresIn,
     scope: tokens.scopes.join(" "),
     token_type: "bearer",
   })
@@ -326,15 +328,12 @@ oauthBrowserRoutes.post("/authorize", async (c) => {
 
   const clientIp = extractClientIp(c)
 
-  if (clientIp !== null && isIpBlocked(clientIp)) {
-    return oauthUnauthorized(c)
-  }
-
   const body = await readOAuthBody(c)
   const apiKey = body?.api_key.trim() ?? ""
 
   const credential = apiKey ? await resolveCredential(apiKey) : null
   if (credential?.kind === "gateway") {
+    if (clientIp !== null) clearFailedAttempts(clientIp)
     const code = await getOAuthStore().issueAuthorizationCode({
       ...authorizationRequest,
     })
@@ -344,6 +343,10 @@ oauthBrowserRoutes.post("/authorize", async (c) => {
     c.header("Cache-Control", "no-store")
     c.header("Pragma", "no-cache")
     return c.redirect(url.toString(), 302)
+  }
+
+  if (clientIp !== null && isIpBlocked(clientIp)) {
+    return oauthUnauthorized(c)
   }
 
   if (clientIp !== null) {

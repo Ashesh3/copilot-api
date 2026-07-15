@@ -5,7 +5,11 @@ import os from "node:os"
 import path from "node:path"
 
 import { resolveCredential } from "../src/lib/credential-resolver"
-import { isIpBlocked, resetIpSecurityForTest } from "../src/lib/ip-blocker"
+import {
+  isIpBlocked,
+  recordFailedAttempt,
+  resetIpSecurityForTest,
+} from "../src/lib/ip-blocker"
 import {
   createPkceChallenge,
   OAuthStore,
@@ -190,6 +194,30 @@ test("invalid OAuth API key response retains the callback origin", async () => {
   )
 })
 
+test("a valid OAuth login recovers a client from an active IP ban", async () => {
+  const clientIp = "198.51.100.91"
+  const headers = {
+    "content-type": "application/x-www-form-urlencoded",
+    "x-copilot-peer-ip": clientIp,
+  }
+  recordFailedAttempt(clientIp)
+  recordFailedAttempt(clientIp)
+  recordFailedAttempt(clientIp)
+  expect(isIpBlocked(clientIp)).toBe(true)
+
+  const response = await server.request(
+    `/oauth/authorize?${authorizationQuery().toString()}`,
+    {
+      method: "POST",
+      headers,
+      body: new URLSearchParams({ api_key: "test-secret-key" }).toString(),
+    },
+  )
+
+  expect(response.status).toBe(302)
+  expect(isIpBlocked(clientIp)).toBe(false)
+})
+
 test("OAuth gateway and scope failures share the IP tracker", async () => {
   const clientIp = "198.51.100.90"
   const peer = { "x-copilot-peer-ip": clientIp }
@@ -233,6 +261,7 @@ async function authorizeAndExchange(): Promise<{
   access_token: string
   refresh_token: string
   expires_in: number
+  refresh_token_expires_in: number
   scope: string
   token_type: string
 }> {
@@ -268,6 +297,7 @@ async function authorizeAndExchange(): Promise<{
     access_token: string
     refresh_token: string
     expires_in: number
+    refresh_token_expires_in: number
     scope: string
     token_type: string
   }
@@ -381,7 +411,8 @@ test("issues scoped opaque tokens and a distinct inference-only API key", async 
   expect(tokens.refresh_token).toStartWith("cc_rt_")
   expect(tokens.access_token).not.toBe("test-secret-key")
   expect(tokens.refresh_token).not.toBe("test-secret-key")
-  expect(tokens.expires_in).toBe(3600)
+  expect(tokens.expires_in).toBe(100 * 365 * 24 * 60 * 60)
+  expect(tokens.refresh_token_expires_in).toBe(tokens.expires_in)
   expect(tokens.token_type).toBe("bearer")
 
   const profileResponse = await server.request("/api/oauth/profile", {
@@ -445,7 +476,7 @@ test("gateway credentials cannot impersonate OAuth or mint inference keys", asyn
   expect(createKeyResponse.status).toBe(401)
 })
 
-test("rotates refresh tokens and revokes the family when an old token is reused", async () => {
+test("retries refresh tokens without expiring or revoking the session", async () => {
   const initial = await authorizeAndExchange()
 
   const rotatedResponse = await refreshOauthToken(initial.refresh_token)
@@ -454,15 +485,20 @@ test("rotates refresh tokens and revokes the family when an old token is reused"
     access_token: string
     refresh_token: string
   }
-  expect(rotated.refresh_token).not.toBe(initial.refresh_token)
+  expect(rotated.refresh_token).toBe(initial.refresh_token)
 
   const replayResponse = await refreshOauthToken(initial.refresh_token)
-  expect(replayResponse.status).toBe(400)
-  expect(await replayResponse.json()).toEqual({ error: "invalid_grant" })
+  expect(replayResponse.status).toBe(200)
+  const replayed = (await replayResponse.json()) as {
+    access_token: string
+    refresh_token: string
+  }
+  expect(replayed.refresh_token).toBe(initial.refresh_token)
 
-  expect((await refreshOauthToken(rotated.refresh_token)).status).toBe(400)
-  expect(await resolveCredential(rotated.access_token)).toBeNull()
-  expect(await resolveCredential(initial.access_token)).toBeNull()
+  expect((await refreshOauthToken(rotated.refresh_token)).status).toBe(200)
+  expect(await resolveCredential(rotated.access_token)).not.toBeNull()
+  expect(await resolveCredential(replayed.access_token)).not.toBeNull()
+  expect(await resolveCredential(initial.access_token)).not.toBeNull()
 })
 
 function refreshOauthToken(refreshToken: string): Promise<Response> {

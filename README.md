@@ -285,8 +285,9 @@ After the gateway key is entered in the browser, the server issues a random,
 one-use, two-minute authorization code bound to the client, redirect URI, state,
 scope, and PKCE challenge. Access, refresh, authorization-code, and generated
 inference secrets are persisted only as SHA-256 digests in
-`oauth_tokens.json`. Refresh tokens rotate on every use; replay revokes the
-entire token family. Revocation is available at `POST /v1/oauth/revoke`.
+`oauth_tokens.json`. Issued access and refresh credentials do not expire;
+refresh is repeatable and race-safe, while explicit revocation remains
+available at `POST /v1/oauth/revoke`.
 
 The dashboard shell can be loaded before login, but every dashboard API requires
 an administrator session. Administrator passwords must be at least 4 characters

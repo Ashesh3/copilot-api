@@ -5,8 +5,9 @@ import path from "node:path"
 
 import {
   createPkceChallenge,
-  OAUTH_ACCESS_TOKEN_TTL_MS,
+  hashOAuthSecret,
   OAUTH_AUTHORIZATION_CODE_TTL_MS,
+  OAUTH_CLIENT_TOKEN_LIFETIME_SECONDS,
   OAuthStore,
 } from "../src/lib/oauth-store"
 
@@ -70,7 +71,7 @@ test("persists only token digests and resolves credentials after restart", async
   expect(refresh.status).toBe("ok")
 })
 
-test("rejects expired authorization codes and access tokens", async () => {
+test("expires authorization codes but keeps access tokens valid", async () => {
   const store = new OAuthStore(storePath)
   const now = Date.now()
   const expiredCode = await issueCode(store, now)
@@ -99,9 +100,60 @@ test("rejects expired authorization codes and access tokens", async () => {
   expect(
     await store.resolveAccessToken(
       exchange.tokens.accessToken,
-      now + OAUTH_ACCESS_TOKEN_TTL_MS + 1,
+      now + (OAUTH_CLIENT_TOKEN_LIFETIME_SECONDS + 1) * 1000,
     ),
-  ).toBeNull()
+  ).toMatchObject({ scopes })
+})
+
+test("honors legacy token records after their old expiry timestamps", async () => {
+  const createdAt = 1_000
+  const expiresAt = 2_000
+  const familyId = "legacy-family-id-1234567890"
+  const accessToken = "legacy-access-token"
+  const refreshToken = "legacy-refresh-token"
+  await fs.writeFile(
+    storePath,
+    JSON.stringify({
+      version: 1,
+      authorizationCodes: {},
+      accessTokens: {
+        [hashOAuthSecret(accessToken)]: {
+          principalId: "oauth:legacy",
+          familyId,
+          clientId,
+          scopes,
+          createdAt,
+          expiresAt,
+        },
+      },
+      refreshTokens: {
+        [hashOAuthSecret(refreshToken)]: {
+          principalId: "oauth:legacy",
+          familyId,
+          clientId,
+          scopes,
+          createdAt,
+          expiresAt,
+        },
+      },
+      inferenceCredentials: {},
+      tokenFamilies: {
+        [familyId]: { createdAt, expiresAt },
+      },
+    }),
+  )
+
+  const store = new OAuthStore(storePath)
+  expect(
+    await store.resolveAccessToken(accessToken, expiresAt + 1),
+  ).toMatchObject({ scopes })
+  expect(
+    await store.refreshAccessToken({
+      refreshToken,
+      clientId,
+      now: expiresAt + 1,
+    }),
+  ).toMatchObject({ status: "ok" })
 })
 
 test("keeps a code usable after a mismatched binding but consumes it once valid", async () => {
@@ -135,7 +187,7 @@ test("keeps a code usable after a mismatched binding but consumes it once valid"
   expect(replay).toEqual({ status: "invalid_grant" })
 })
 
-test("refresh-token reuse revokes the entire persisted token family", async () => {
+test("refresh tokens are repeatable without revoking the token family", async () => {
   const store = new OAuthStore(storePath)
   const code = await issueCode(store)
   const exchange = await store.exchangeAuthorizationCode({
@@ -155,26 +207,28 @@ test("refresh-token reuse revokes the entire persisted token family", async () =
   expect(rotation.status).toBe("ok")
   if (rotation.status !== "ok") return
 
-  expect(
-    await store.refreshAccessToken({
-      refreshToken: exchange.tokens.refreshToken,
-      clientId,
-    }),
-  ).toEqual({ status: "reuse_detected" })
+  const retry = await store.refreshAccessToken({
+    refreshToken: exchange.tokens.refreshToken,
+    clientId,
+  })
+  expect(retry.status).toBe("ok")
+  if (retry.status !== "ok") return
+  expect(retry.tokens.refreshToken).toBe(exchange.tokens.refreshToken)
+  expect(rotation.tokens.refreshToken).toBe(exchange.tokens.refreshToken)
 
   const restartedStore = new OAuthStore(storePath)
   expect(
     await restartedStore.resolveAccessToken(rotation.tokens.accessToken),
-  ).toBeNull()
+  ).not.toBeNull()
   expect(
     await restartedStore.refreshAccessToken({
-      refreshToken: rotation.tokens.refreshToken,
+      refreshToken: exchange.tokens.refreshToken,
       clientId,
     }),
-  ).toEqual({ status: "invalid_grant" })
+  ).toMatchObject({ status: "ok" })
 })
 
-test("concurrent refresh attempts rotate once and revoke the raced family", async () => {
+test("concurrent refresh attempts both succeed without revoking the family", async () => {
   const store = new OAuthStore(storePath)
   const code = await issueCode(store)
   const exchange = await store.exchangeAuthorizationCode({
@@ -197,17 +251,14 @@ test("concurrent refresh attempts rotate once and revoke the raced family", asyn
       clientId,
     }),
   ])
-  expect(results.map((result) => result.status).sort()).toEqual([
-    "ok",
-    "reuse_detected",
-  ])
-
-  const successful = results.find((result) => result.status === "ok")
-  expect(successful?.status).toBe("ok")
-  if (successful?.status !== "ok") return
-  expect(
-    await store.resolveAccessToken(successful.tokens.accessToken),
-  ).toBeNull()
+  expect(results.map((result) => result.status)).toEqual(["ok", "ok"])
+  for (const result of results) {
+    if (result.status !== "ok") continue
+    expect(result.tokens.refreshToken).toBe(exchange.tokens.refreshToken)
+    expect(
+      await store.resolveAccessToken(result.tokens.accessToken),
+    ).not.toBeNull()
+  }
 })
 
 test("invalid refresh and unknown revocation do not rewrite the store", async () => {
