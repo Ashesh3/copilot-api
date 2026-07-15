@@ -232,6 +232,12 @@ export function recordFailedAttempt(ip: string): number {
   return failureCount
 }
 
+/** Clear volatile failure history after a client proves a valid credential. */
+export function clearFailedAttempts(ip: string): boolean {
+  const normalized = normalizeIpAddress(ip)
+  return normalized ? ipTracker.delete(normalized) : false
+}
+
 export function resetIpSecurityForTest(): void {
   ipTracker.clear()
   ipLeases.clear()

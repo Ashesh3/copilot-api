@@ -4,9 +4,11 @@ import path from "node:path"
 
 import { PATHS } from "./paths"
 
-export const OAUTH_ACCESS_TOKEN_TTL_MS = 60 * 60 * 1000
-export const OAUTH_REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000
 export const OAUTH_AUTHORIZATION_CODE_TTL_MS = 2 * 60 * 1000
+// OAuth requires a finite `expires_in` value. Advertise a century to keep
+// clients from refreshing routinely; server-side tokens remain valid until
+// explicit revocation, regardless of this compatibility horizon.
+export const OAUTH_CLIENT_TOKEN_LIFETIME_SECONDS = 100 * 365 * 24 * 60 * 60
 const KNOWN_OAUTH_SCOPES = new Set([
   "user:inference",
   "user:profile",
@@ -32,7 +34,8 @@ interface AccessTokenRecord {
   clientId: string
   scopes: Array<string>
   createdAt: number
-  expiresAt: number
+  /** Legacy metadata from the expiring-token implementation. */
+  expiresAt?: number
   revokedAt?: number
 }
 
@@ -49,7 +52,8 @@ interface InferenceCredentialRecord {
 
 interface TokenFamilyRecord {
   createdAt: number
-  expiresAt: number
+  /** Legacy metadata from the expiring-token implementation. */
+  expiresAt?: number
   revokedAt?: number
 }
 
@@ -96,6 +100,7 @@ export interface IssuedOAuthTokens {
   accessToken: string
   refreshToken: string
   expiresIn: number
+  refreshTokenExpiresIn: number
   scopes: Array<string>
 }
 
@@ -105,7 +110,7 @@ export type AuthorizationCodeExchangeResult =
 
 export type RefreshAccessTokenResult =
   | { status: "ok"; tokens: IssuedOAuthTokens }
-  | { status: "invalid_grant" | "invalid_scope" | "reuse_detected" }
+  | { status: "invalid_grant" | "invalid_scope" }
 
 export interface StoredCredential {
   principalId: string
@@ -137,9 +142,9 @@ function isFiniteTimestamp(value: unknown): value is number {
 
 function hasValidLifetime(value: {
   createdAt: number
-  expiresAt: number
+  expiresAt?: number
 }): boolean {
-  return value.expiresAt >= value.createdAt
+  return value.expiresAt === undefined || value.expiresAt >= value.createdAt
 }
 
 function hasKnownScopes(value: unknown): value is Array<string> {
@@ -176,7 +181,7 @@ function isAccessTokenRecord(value: unknown): value is AccessTokenRecord {
     && typeof value.clientId === "string"
     && hasKnownScopes(value.scopes)
     && isFiniteTimestamp(value.createdAt)
-    && isFiniteTimestamp(value.expiresAt)
+    && (value.expiresAt === undefined || isFiniteTimestamp(value.expiresAt))
     && (value.revokedAt === undefined || isFiniteTimestamp(value.revokedAt))
     && hasValidLifetime(value as unknown as AccessTokenRecord)
   )
@@ -208,7 +213,7 @@ function isTokenFamilyRecord(value: unknown): value is TokenFamilyRecord {
   if (!isRecord(value)) return false
   return (
     isFiniteTimestamp(value.createdAt)
-    && isFiniteTimestamp(value.expiresAt)
+    && (value.expiresAt === undefined || isFiniteTimestamp(value.expiresAt))
     && (value.revokedAt === undefined || isFiniteTimestamp(value.revokedAt))
     && hasValidLifetime(value as unknown as TokenFamilyRecord)
   )
@@ -389,16 +394,10 @@ export class OAuthStore {
       if (
         !family
         || family.revokedAt !== undefined
-        || family.expiresAt <= now
         || refreshRecord.revokedAt !== undefined
-        || refreshRecord.expiresAt <= now
+        || refreshRecord.consumedAt !== undefined
       ) {
         return unchanged<RefreshAccessTokenResult>({ status: "invalid_grant" })
-      }
-
-      if (refreshRecord.consumedAt !== undefined) {
-        this.revokeFamily(data, refreshRecord.familyId, now)
-        return changed<RefreshAccessTokenResult>({ status: "reuse_detected" })
       }
 
       const requestedScopes =
@@ -414,17 +413,18 @@ export class OAuthStore {
         return unchanged<RefreshAccessTokenResult>({ status: "invalid_scope" })
       }
 
-      refreshRecord.consumedAt = now
+      // Refresh tokens are deliberately reusable. Claude Code can race or retry
+      // a refresh request; treating reuse as theft revoked healthy automation.
+      // Return the same refresh token so the store does not grow on every use.
       return changed<RefreshAccessTokenResult>({
         status: "ok",
-        tokens: this.issueTokenPair(data, {
+        tokens: this.issueAccessToken(data, {
           clientId: refreshRecord.clientId,
           scopes: requestedScopes,
-          refreshScopes: refreshRecord.scopes,
           now,
           familyId: refreshRecord.familyId,
           principalId: refreshRecord.principalId,
-          familyExpiresAt: family.expiresAt,
+          refreshToken: input.refreshToken,
         }),
       })
     })
@@ -444,15 +444,15 @@ export class OAuthStore {
 
   async resolveAccessToken(
     rawToken: string,
-    now = Date.now(),
+    _now = Date.now(),
   ): Promise<StoredCredential | null> {
     const data = await this.read()
     const record = data.accessTokens[hashOAuthSecret(rawToken)]
-    if (!record || record.revokedAt !== undefined || record.expiresAt <= now) {
+    if (!record || record.revokedAt !== undefined) {
       return null
     }
     const family = data.tokenFamilies[record.familyId]
-    if (!family || family.revokedAt !== undefined || family.expiresAt <= now) {
+    if (!family || family.revokedAt !== undefined) {
       return null
     }
     return { principalId: record.principalId, scopes: [...record.scopes] }
@@ -507,7 +507,6 @@ export class OAuthStore {
       now: number
       familyId?: string
       principalId?: string
-      familyExpiresAt?: number
       refreshScopes?: ReadonlyArray<string>
     },
   ): IssuedOAuthTokens {
@@ -515,13 +514,10 @@ export class OAuthStore {
     const refreshToken = randomSecret("cc_rt_")
     const familyId = input.familyId ?? randomUUID()
     const principalId = input.principalId ?? `oauth:${randomUUID()}`
-    const familyExpiresAt =
-      input.familyExpiresAt ?? input.now + OAUTH_REFRESH_TOKEN_TTL_MS
     const scopes = uniqueScopes(input.scopes)
 
     data.tokenFamilies[familyId] ??= {
       createdAt: input.now,
-      expiresAt: familyExpiresAt,
     }
     data.accessTokens[hashOAuthSecret(accessToken)] = {
       principalId,
@@ -529,7 +525,6 @@ export class OAuthStore {
       clientId: input.clientId,
       scopes,
       createdAt: input.now,
-      expiresAt: input.now + OAUTH_ACCESS_TOKEN_TTL_MS,
     }
     data.refreshTokens[hashOAuthSecret(refreshToken)] = {
       principalId,
@@ -537,18 +532,42 @@ export class OAuthStore {
       clientId: input.clientId,
       scopes: uniqueScopes(input.refreshScopes ?? scopes),
       createdAt: input.now,
-      expiresAt: familyExpiresAt,
     }
 
     return {
       accessToken,
       refreshToken,
-      expiresIn: Math.floor(
-        Math.min(
-          OAUTH_ACCESS_TOKEN_TTL_MS,
-          Math.max(0, familyExpiresAt - input.now),
-        ) / 1000,
-      ),
+      expiresIn: OAUTH_CLIENT_TOKEN_LIFETIME_SECONDS,
+      refreshTokenExpiresIn: OAUTH_CLIENT_TOKEN_LIFETIME_SECONDS,
+      scopes,
+    }
+  }
+
+  private issueAccessToken(
+    data: OAuthStoreData,
+    input: {
+      clientId: string
+      scopes: ReadonlyArray<string>
+      now: number
+      familyId: string
+      principalId: string
+      refreshToken: string
+    },
+  ): IssuedOAuthTokens {
+    const accessToken = randomSecret("cc_at_")
+    const scopes = uniqueScopes(input.scopes)
+    data.accessTokens[hashOAuthSecret(accessToken)] = {
+      principalId: input.principalId,
+      familyId: input.familyId,
+      clientId: input.clientId,
+      scopes,
+      createdAt: input.now,
+    }
+    return {
+      accessToken,
+      refreshToken: input.refreshToken,
+      expiresIn: OAUTH_CLIENT_TOKEN_LIFETIME_SECONDS,
+      refreshTokenExpiresIn: OAUTH_CLIENT_TOKEN_LIFETIME_SECONDS,
       scopes,
     }
   }
@@ -622,27 +641,6 @@ export class OAuthStore {
       if (!record) continue
       if (record.expiresAt <= now) {
         Reflect.deleteProperty(data.authorizationCodes, digest)
-        changed = true
-      }
-    }
-    for (const [digest, record] of Object.entries(data.accessTokens)) {
-      if (!record) continue
-      if (record.expiresAt <= now) {
-        Reflect.deleteProperty(data.accessTokens, digest)
-        changed = true
-      }
-    }
-    for (const [digest, record] of Object.entries(data.refreshTokens)) {
-      if (!record) continue
-      if (record.expiresAt <= now) {
-        Reflect.deleteProperty(data.refreshTokens, digest)
-        changed = true
-      }
-    }
-    for (const [familyId, family] of Object.entries(data.tokenFamilies)) {
-      if (!family) continue
-      if (family.expiresAt <= now) {
-        Reflect.deleteProperty(data.tokenFamilies, familyId)
         changed = true
       }
     }
