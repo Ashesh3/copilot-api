@@ -22,7 +22,7 @@ jobs:
         with:
           bun-version: 1.3.14
 
-      - uses: actions/setup-node@04be95cf3511ea51ebf9f224ddfb99cc7ab87cd4 # v6
+      - uses: actions/setup-node@b789df37d6b7526a863bf51b65df64f3f56ffe4f # v6
         with:
           node-version: "22"
 
