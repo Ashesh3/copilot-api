@@ -53,6 +53,6 @@ jobs:
       pull-requests: read
     steps:
       - uses: actions/checkout@e8d4307400f9427dba7cb98e488d6ab85f1cec5f # v6
-      - uses: actions/dependency-review-action@da6b129d277471d01428781accece1bd831a8b0d # v4
+      - uses: actions/dependency-review-action@1e966ba708e4b64bb0c9bfb7abb5a232840be16a # v4
         with:
           fail-on-severity: high
