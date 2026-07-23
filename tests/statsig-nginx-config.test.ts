@@ -80,7 +80,7 @@ function findServerBlock(
   return matches[0]
 }
 
-test("Statsig spoof template is default-deny and suppresses request logs", async () => {
+test("Statsig spoof template publishes only the Statsig route family and suppresses request logs", async () => {
   const template = await fs.readFile(templatePath, "utf8")
   const activeTemplate = stripComments(template)
   const serverBlocks = extractTopLevelServerBlocks(activeTemplate)
@@ -119,7 +119,17 @@ test("Statsig spoof template is default-deny and suppresses request logs", async
   expect(httpsBlock).toContain("proxy_set_header X-Real-IP $remote_addr;")
   expect(httpsBlock).toContain("proxy_set_header X-Forwarded-For $remote_addr;")
   expect(httpsBlock).toContain("proxy_set_header X-Forwarded-Proto $scheme;")
-  expect(httpsBlock).not.toContain("proxy_pass {{UPSTREAM_URL}};")
+  expect(httpsBlock).toContain(
+    "location ~ ^/v1/(?:initialize|download|check)/?$ {",
+  )
+  expect(httpsBlock).toContain("limit_except POST GET { deny all; }")
+  expect(countActiveDirective(httpsBlock, "proxy_pass {{UPSTREAM_URL}};")).toBe(
+    1,
+  )
+  expect(httpsBlock).toContain("proxy_http_version 1.1;")
+  expect(httpsBlock).toContain("proxy_request_buffering off;")
+  expect(httpsBlock).toContain("proxy_buffering off;")
+  expect(httpsBlock).toContain("proxy_cache off;")
   expect(httpsBlock).not.toContain("include {{PROXY_LIMITS_SNIPPET_PATH}};")
   expect(httpsBlock).toContain("location / { return 404; }")
   expect(httpsBlock).toContain("client_max_body_size 0;")

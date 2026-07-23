@@ -512,9 +512,9 @@ IP into that policy.
 - `POST /transcribe` provides dictation through Groq speech-to-text.
 - `POST /codex/responses` provides configurable transcript cleanup.
 - Statsig overrides can be managed in the dashboard and applied through the
-  Statsig proxy middleware on a private network with authenticated source-IP
-  preservation. The public nginx template is default-deny for this IP-only
-  compatibility surface.
+  Statsig proxy middleware. The dedicated nginx template publishes only
+  `/v1/initialize`, `/v1/download`, and `/v1/check`; every other path remains
+  default-denied.
 
 Set `GROQ_API_KEY` or the equivalent `groqApiKey` config field to enable speech
 transcription. The voice WebSocket endpoint is
@@ -790,12 +790,13 @@ socket address and cannot gain allowlist status by supplying `X-Real-IP` or
 when only one local proxy address is required.
 
 An exact trusted peer is insufficient when an upstream TCP load balancer
-source-NATs every client to that peer. Do not publish IP-only compatibility
-routes such as GrowthBook `/api/eval/*` or the Statsig proxy through that
-topology. First enable an authenticated source-address transport such as PROXY
-protocol end to end, restrict the load-balancer listener to trusted ingress, and
-configure nginx to consume that verified address. The bundled public templates
-therefore leave those IP-only routes default-denied.
+source-NATs every client to that peer: every caller then shares the load
+balancer's authorization identity. GrowthBook `/api/eval/*` remains
+unpublished. The dedicated Statsig template can be deployed through that
+topology only when the operator explicitly accepts that callers reaching the
+listener can share or spoof access to the three published Statsig endpoints.
+Use authenticated source-address transport such as PROXY protocol when that
+risk is not acceptable.
 
 Use hostname-specific, default-deny locations. Publish the inference routes,
 the exact OAuth/Claude compatibility paths required by your clients, the

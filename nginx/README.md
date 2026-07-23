@@ -14,10 +14,17 @@ The canonical application and Docker setup remains in the repository
 | `sites-available/public-domain.conf.template`       | Normal public API/dashboard hostname            | Inference APIs, scoped OAuth, dashboard, Remote Control, exact health         |
 | `sites-available/spoof-domains.conf.template`       | Claude API and platform compatibility hostnames | Claude API/OAuth/session compatibility allowlists                             |
 | `sites-available/codex-desktop-spoof.conf.template` | Locally mapped trusted `*.openai.com` hostname  | Authenticated Codex dictation and transcript cleanup only                     |
-| `sites-available/codex-statsig-spoof.conf.template` | Locally mapped `ab.chatgpt.com`                 | Default-deny placeholder; IP-only Statsig is not published through source NAT |
+| `sites-available/codex-statsig-spoof.conf.template` | Locally mapped `ab.chatgpt.com`                 | Exact Statsig initialize/download/check routes; all other paths denied         |
 
 Do not combine these server blocks onto one broad hostname. Do not add a
 catch-all `proxy_pass`.
+
+The Statsig application boundary authorizes managed client IPs. If a shared
+load balancer source-NATs clients, the application sees the load balancer as the
+caller and cannot distinguish downstream clients. Deploying the Statsig
+template in that topology explicitly accepts cross-client access and source-IP
+spoofing risk for its three published endpoints. Use source preservation or
+PROXY protocol when that risk is unacceptable.
 
 ## Shared prerequisites
 
@@ -101,6 +108,8 @@ Then verify the boundary from outside the origin:
    non-trusted TCP peer do not authorize IP-gated routes.
 8. `nginx -T` contains no `limit_req`, `limit_req_zone`, or `limit_conn`, and
    each TLS proxy server has the maximum-duration client/read/send directives.
+9. The Statsig hostname proxies only `/v1/initialize`, `/v1/download`, and
+   `/v1/check`; an unrelated path returns `404`.
 
 Keep origin ports firewalled or loopback-bound. The public hostname policy does
 not protect a separately reachable backend listener.
