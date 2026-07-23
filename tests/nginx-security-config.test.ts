@@ -62,14 +62,19 @@ test("Claude spoof template exposes only authenticated compatibility families", 
   expect(template).not.toMatch(/location\s+~\s+\^\/api\/eval/)
 })
 
-test("public templates do not publish IP-only compatibility routes", async () => {
+test("public templates keep IP-only compatibility routes narrowly scoped", async () => {
   const [claudeTemplate, statsigTemplate] = await Promise.all([
     read("sites-available/spoof-domains.conf.template"),
     read("sites-available/codex-statsig-spoof.conf.template"),
   ])
 
   expect(claudeTemplate).not.toMatch(/location\s+~\s+\^\/api\/eval/)
-  expect(statsigTemplate).not.toContain("proxy_pass {{UPSTREAM_URL}}")
+  expect(statsigTemplate).toContain(
+    "location ~ ^/v1/(?:initialize|download|check)/?$ {",
+  )
+  expect(
+    statsigTemplate.match(/proxy_pass \{\{UPSTREAM_URL\}\};/g),
+  ).toHaveLength(1)
   expect(statsigTemplate).toContain("location / { return 404; }")
 })
 
