@@ -18,6 +18,9 @@ function unauthorized(c: Context): Response {
   )
 }
 
+// Compatibility stubs: deny without an OAuth scope, but never record a
+// credential failure. Clients poll these unprompted, so a wrong-kind or
+// stale credential must not ban the caller (see protected-credential).
 function requireScopedOAuth(scope: OAuthScope): MiddlewareHandler {
   return async (c, next) => {
     const auth = await resolveProtectedCredential(
@@ -26,6 +29,7 @@ function requireScopedOAuth(scope: OAuthScope): MiddlewareHandler {
         await resolveRequestCredentialKind(c.req.raw, "oauth", {
           requiredScopes: [scope],
         }),
+      { recordFailures: false },
     )
     if (auth.status !== "authorized") return unauthorized(c)
     await next()

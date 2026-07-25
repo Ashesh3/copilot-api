@@ -218,7 +218,7 @@ test("a valid OAuth login recovers a client from an active IP ban", async () => 
   expect(isIpBlocked(clientIp)).toBe(false)
 })
 
-test("OAuth gateway and scope failures share the IP tracker", async () => {
+test("unknown credentials across surfaces share the IP tracker", async () => {
   const clientIp = "198.51.100.90"
   const peer = { "x-copilot-peer-ip": clientIp }
   const query = authorizationQuery()
@@ -238,13 +238,17 @@ test("OAuth gateway and scope failures share the IP tracker", async () => {
     expect(response.status).toBe(401)
   }
 
-  const wrongScope = await server.request("/api/oauth/profile", {
-    headers: {
-      ...peer,
-      "x-api-key": "test-secret-key",
+  const unknownToken = await server.request(
+    "/api/oauth/claude_cli/create_api_key",
+    {
+      method: "POST",
+      headers: {
+        ...peer,
+        "x-api-key": "cc_at_not-a-real-token",
+      },
     },
-  })
-  expect(wrongScope.status).toBe(401)
+  )
+  expect(unknownToken.status).toBe(401)
   expect(isIpBlocked(clientIp)).toBe(true)
 
   const tokens = await authorizeAndExchange()
@@ -255,6 +259,58 @@ test("OAuth gateway and scope failures share the IP tracker", async () => {
     },
   })
   expect(banned.status).toBe(401)
+})
+
+test("compatibility stub routes never feed the IP ban tracker", async () => {
+  const clientIp = "198.51.100.77"
+  const peer = { "x-copilot-peer-ip": clientIp }
+  const stubPaths = [
+    "/api/claude_code/organizations/metrics_enabled",
+    "/api/claude_cli/bootstrap?entrypoint=claude-desktop-3p",
+    "/api/oauth/profile",
+    "/v1/mcp_servers",
+  ]
+
+  for (const stubPath of stubPaths) {
+    const response = await server.request(stubPath, {
+      headers: { ...peer, authorization: "Bearer cc_at_not-a-real-token" },
+    })
+    expect(response.status, stubPath).toBe(401)
+  }
+
+  expect(isIpBlocked(clientIp)).toBe(false)
+})
+
+test("a recognized credential denied for scope never feeds the IP ban tracker", async () => {
+  const tokens = await authorizeAndExchange()
+  const mintResponse = await server.request(
+    "/api/oauth/claude_cli/create_api_key",
+    {
+      method: "POST",
+      headers: { authorization: `Bearer ${tokens.access_token}` },
+    },
+  )
+  expect(mintResponse.status).toBe(200)
+  const { raw_key: inferenceKey } = (await mintResponse.json()) as {
+    raw_key: string
+  }
+
+  const clientIp = "198.51.100.78"
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const response = await server.request(
+      "/api/oauth/claude_cli/create_api_key",
+      {
+        method: "POST",
+        headers: {
+          "x-copilot-peer-ip": clientIp,
+          authorization: `Bearer ${inferenceKey}`,
+        },
+      },
+    )
+    expect(response.status).toBe(401)
+  }
+
+  expect(isIpBlocked(clientIp)).toBe(false)
 })
 
 async function authorizeAndExchange(): Promise<{

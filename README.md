@@ -268,9 +268,13 @@ x-goog-api-key: replace-with-gateway-key
 ```
 
 Missing, invalid, expired, and blocked data-plane credentials receive a uniform
-`401` response with `Cache-Control: no-store`. Every failed protected credential
-check is recorded by normalized client IP. The third failure in a rolling
+`401` response with `Cache-Control: no-store`. Failed protected credential
+checks are recorded by normalized client IP. The third failure in a rolling
 24-hour window bans that IP for 24 hours; banned requests still receive `401`.
+Two denials are never recorded: a credential that resolves to a known principal
+but lacks the required kind or scope, and the Claude Code compatibility stubs
+that clients poll unprompted (telemetry, bootstrap, settings). Both still return
+`401`, and a ban earned on another surface still applies to them.
 Successful authentication does not erase prior failures or add the IP to the
 managed allowlist.
 

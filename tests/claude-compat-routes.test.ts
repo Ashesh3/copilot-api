@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, expect, test } from "bun:test"
 
-import { isIpBlocked, resetIpSecurityForTest } from "../src/lib/ip-blocker"
+import {
+  isIpBlocked,
+  recordFailedAttempt,
+  resetIpSecurityForTest,
+} from "../src/lib/ip-blocker"
 import {
   createPkceChallenge,
   OAuthStore,
@@ -138,7 +142,7 @@ test("unimplemented trigger descendants remain behind OAuth", async () => {
   ).toBe(404)
 })
 
-test("compatibility scope failures count toward the shared ban", async () => {
+test("compatibility scope failures never count toward the shared ban", async () => {
   const clientIp = "198.51.100.95"
   const headers = {
     ...bearer(GATEWAY_KEY),
@@ -151,7 +155,16 @@ test("compatibility scope failures count toward the shared ban", async () => {
     ).toBe(401)
   }
 
+  expect(isIpBlocked(clientIp)).toBe(false)
+})
+
+test("compatibility routes still deny a client banned elsewhere", async () => {
+  const clientIp = "198.51.100.96"
+  recordFailedAttempt(clientIp)
+  recordFailedAttempt(clientIp)
+  recordFailedAttempt(clientIp)
   expect(isIpBlocked(clientIp)).toBe(true)
+
   const accessToken = await issueOAuthAccessToken(["user:sessions:claude_code"])
   expect(
     (
