@@ -280,12 +280,16 @@ async function handleRefreshTokenGrant(
 /**
  * Auth guard for OAuth API routes.
  * Requires a scoped OAuth token (or the operator gateway credential).
+ * These routes are compatibility stubs, so denials never feed the IP ban
+ * tracker — Claude Code polls them in the background and API-key clients
+ * (third-party-provider mode) legitimately hold a non-OAuth credential.
  */
 function oauthScopeGuard(...scopes: Array<string>) {
   return async (c: Context, next: Next): Promise<Response | undefined> => {
     const auth = await resolveProtectedCredential(
       c.req.raw,
       async () => await resolveScopedOAuthCredential(c.req.raw, scopes),
+      { recordFailures: false },
     )
     if (auth.status !== "authorized") return oauthUnauthorized(c)
     await next()
