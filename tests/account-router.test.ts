@@ -420,3 +420,137 @@ test("returns a routing error when every known account for a model is disabled",
   const body = (await response.json()) as { error: { type: string } }
   expect(body.error.type).toBe("model_routing_error")
 })
+
+test("does not switch accounts on a transport connection error", async () => {
+  const modelId = "router-network-error"
+  registerAccount(1101, modelId, "network-primary-token")
+  registerAccount(1102, modelId, "network-secondary-token")
+  tokenPool.rebuildModelIndex()
+
+  // Both sends come from copilotFetch's own bounded retry, on one account.
+  const socketError = () =>
+    Object.assign(
+      new Error(
+        "The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()",
+      ),
+      { code: "ECONNRESET", errno: 0 },
+    )
+  queuedResults.push(socketError(), socketError())
+
+  let thrownError: unknown
+  try {
+    await routedFetch("/chat/completions", { method: "POST" }, { modelId })
+  } catch (error) {
+    thrownError = error
+  }
+
+  expect((thrownError as Error | undefined)?.message).toContain(
+    "socket connection",
+  )
+  expect(capturedRequests).toHaveLength(2)
+  for (const request of capturedRequests) {
+    expect(request.init?.headers).toMatchObject({
+      Authorization: "Bearer network-primary-token",
+    })
+  }
+})
+
+test("caps sends across a 401 refresh-resend and a failover transport retry", async () => {
+  // Exact repro: 401 -> refresh -> 401 -> failover -> ECONNRESET -> would-be
+  // success. The fourth LLM send must never be issued.
+  const modelId = "router-401-refresh-then-failover"
+  registerAccount(1105, modelId, "expired-primary-token")
+  registerAccount(1106, modelId, "budget-failover-token")
+  tokenPool.rebuildModelIndex()
+
+  const tokenResponse = () =>
+    new Response(
+      JSON.stringify({
+        token: "fresh-copilot-token",
+        expires_at: 1_900_000_000,
+        refresh_in: 1800,
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    )
+
+  queuedResults.push(
+    new Response("unauthorized: token expired\n", { status: 401 }),
+    tokenResponse(),
+    new Response("unauthorized: token expired\n", { status: 401 }),
+    Object.assign(
+      new Error(
+        "The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()",
+      ),
+      { code: "ECONNRESET", errno: 0 },
+    ),
+    // A fourth LLM send would consume this; the budget must prevent it.
+    new Response("{}", { status: 200 }),
+  )
+
+  let thrownError: unknown
+  try {
+    await routedFetch("/chat/completions", { method: "POST" }, { modelId })
+  } catch (error) {
+    thrownError = error
+  }
+
+  expect((thrownError as Error | undefined)?.message).toContain(
+    "socket connection",
+  )
+
+  const llmSends = capturedRequests.filter(
+    (request) => !request.url.includes("/copilot_internal/"),
+  )
+  expect(llmSends).toHaveLength(3)
+  expect(llmSends[0]?.init?.headers).toMatchObject({
+    Authorization: "Bearer expired-primary-token",
+  })
+  expect(llmSends[1]?.init?.headers).toMatchObject({
+    Authorization: "Bearer fresh-copilot-token",
+  })
+  expect(llmSends[2]?.init?.headers).toMatchObject({
+    Authorization: "Bearer budget-failover-token",
+  })
+})
+
+test("caps total sends across a 429 failover and a transport retry", async () => {
+  const modelId = "router-429-then-network"
+  registerAccount(1103, modelId, "budget-primary-token")
+  registerAccount(1104, modelId, "budget-secondary-token")
+  tokenPool.rebuildModelIndex()
+
+  // Account A 429s and the failover each draw one of the routed call's two
+  // extra sends, so the ECONNRESET on account B cannot buy a fourth send.
+  const retryAfterZero = { "retry-after": "0" }
+  queuedResults.push(
+    new Response("Too Many Requests", { status: 429, headers: retryAfterZero }),
+    new Response("Too Many Requests", { status: 429, headers: retryAfterZero }),
+    Object.assign(
+      new Error(
+        "The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()",
+      ),
+      { code: "ECONNRESET", errno: 0 },
+    ),
+  )
+
+  let thrownError: unknown
+  try {
+    await routedFetch("/chat/completions", { method: "POST" }, { modelId })
+  } catch (error) {
+    thrownError = error
+  }
+
+  expect((thrownError as Error | undefined)?.message).toContain(
+    "socket connection",
+  )
+  expect(capturedRequests).toHaveLength(3)
+  expect(capturedRequests[0]?.init?.headers).toMatchObject({
+    Authorization: "Bearer budget-primary-token",
+  })
+  expect(capturedRequests[1]?.init?.headers).toMatchObject({
+    Authorization: "Bearer budget-primary-token",
+  })
+  expect(capturedRequests[2]?.init?.headers).toMatchObject({
+    Authorization: "Bearer budget-secondary-token",
+  })
+})

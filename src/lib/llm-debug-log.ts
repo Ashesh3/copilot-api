@@ -5,8 +5,13 @@ export const LLM_DEBUG_HISTORY_WINDOW_MS = 10 * 60 * 1000
 type HeaderRecord = Record<string, string>
 
 export interface LlmDebugLogError {
+  /** Transport error code (e.g. Bun's `ECONNRESET`), when the runtime sets one. */
+  code?: string
+  errno?: number
   message: string
   name: string
+  /** Upstream URL stripped of query string and credentials. */
+  path?: string
   stack?: string
 }
 
@@ -354,12 +359,48 @@ function cloneEntry(entry: LlmDebugLogEntry): LlmDebugLogEntry {
   return structuredClone(entry)
 }
 
+/**
+ * Read a runtime-attached diagnostic field, falling back to the cause. Wrapped
+ * errors (`new Error(msg, { cause: bunError })`) carry these on the cause only.
+ */
+function readErrorField(error: Error, key: string): unknown {
+  const own = (error as unknown as Record<string, unknown>)[key]
+  if (own !== undefined) return own
+
+  const cause = error.cause
+  if (cause instanceof Error) {
+    return (cause as unknown as Record<string, unknown>)[key]
+  }
+
+  return undefined
+}
+
+/** Strip query string and credentials before storing an upstream URL. */
+function sanitizeErrorPath(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length === 0) return undefined
+
+  try {
+    const parsed = new URL(value)
+    return `${parsed.origin}${parsed.pathname}`
+  } catch {
+    return undefined
+  }
+}
+
 function normalizeError(error: unknown): LlmDebugLogError {
   if (error instanceof Error) {
+    const codeValue = readErrorField(error, "code")
+    const code = typeof codeValue === "string" ? codeValue : undefined
+    const errnoValue = readErrorField(error, "errno")
+    const path = sanitizeErrorPath(readErrorField(error, "path"))
+
     return {
       message: error.message,
       name: error.name || "Error",
       ...(error.stack ? { stack: error.stack } : {}),
+      ...(code === undefined ? {} : { code }),
+      ...(typeof errnoValue === "number" ? { errno: errnoValue } : {}),
+      ...(path === undefined ? {} : { path }),
     }
   }
 
@@ -367,6 +408,11 @@ function normalizeError(error: unknown): LlmDebugLogError {
     message: String(error),
     name: "Error",
   }
+}
+
+/** Normalize an arbitrary throwable into the stored debug-log error shape. */
+export function toLlmDebugLogError(error: unknown): LlmDebugLogError {
+  return normalizeError(error)
 }
 
 function toSummary(entry: LlmDebugLogEntry): LlmDebugLogSummary {
