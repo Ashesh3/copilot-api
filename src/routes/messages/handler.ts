@@ -38,6 +38,12 @@ import {
   setSentryOutputMessages,
   setSentryConversationIdFromRequest,
 } from "~/lib/sentry"
+import {
+  raceSsePreflush,
+  withHeartbeatWhilePending,
+  withSseHeartbeat,
+  writeSseHeartbeat,
+} from "~/lib/sse-lifecycle"
 import { state } from "~/lib/state"
 import { tokenPool } from "~/lib/token-pool"
 import { getTokenCount } from "~/lib/tokenizer"
@@ -83,6 +89,7 @@ import {
 } from "./non-stream-translation"
 import {
   createFallbackMessageDeltaEvents,
+  emitAnthropicStreamError,
   translateChunkToAnthropicEvents,
 } from "./stream-translation"
 import { parseSubagentMarkerFromFirstUser } from "./subagent-marker"
@@ -783,23 +790,46 @@ const executeChatCompletions = async (
       }
 
       try {
-        const response = await createChatCompletions(finalPayload, {
-          initiator: initiatorOverride,
-          signal: c.req.raw.signal,
-        })
-
-        // Track which account handled this request (multi-token mode)
-        const accountId = getLastUsedAccountId()
-        if (accountId !== undefined) {
-          setRequestContext(c, { accountId })
-        }
+        const downstreamAbort = new AbortController()
+        const upstreamSignal = AbortSignal.any([
+          c.req.raw.signal,
+          downstreamAbort.signal,
+        ])
+        const preflush = await raceSsePreflush(
+          createChatCompletions(finalPayload, {
+            initiator: initiatorOverride,
+            signal: upstreamSignal,
+          }),
+        )
 
         return streamSSE(c, async (stream) => {
+          stream.onAbort(() => downstreamAbort.abort())
+
           try {
+            if (preflush.kind === "pending") {
+              // Returning the SSE response is not enough to reset an edge read
+              // timer: write one comment immediately so headers and a body byte
+              // are committed while the upstream first-event probe continues.
+              await writeSseHeartbeat(stream)
+            }
+            const response =
+              preflush.kind === "settled" ?
+                preflush.value
+              : await withHeartbeatWhilePending(preflush.pending, stream)
+
+            // Track which account handled this request (multi-token mode)
+            const accountId = getLastUsedAccountId()
+            if (accountId !== undefined) {
+              setRequestContext(c, { accountId })
+            }
+
             if (needsWebSearchBuffering) {
               const buffered = await streamChatCompletionsWithWebSearch(
                 stream,
-                response as AsyncIterable<{ data?: string }>,
+                withSseHeartbeat(
+                  response as AsyncIterable<{ data?: string }>,
+                  stream,
+                ),
                 requestedModel,
               )
 
@@ -808,11 +838,17 @@ const executeChatCompletions = async (
               if (buffered.hadWebSearch && buffered.initialResponse) {
                 finishSpan()
                 const initialResp = buffered.initialResponse
-                const resolved = await Sentry.withActiveSpan(null, () =>
-                  resolveWebSearchCalls(initialResp, finalPayload, {
-                    initiatorOverride,
-                    abortSignal: c.req.raw.signal,
-                  }),
+                // Runs inside the already-open stream, so heartbeating it
+                // forfeits no HTTP status. The resolver loops full generations
+                // plus live web fetches — easily past Cloudflare's budget.
+                const resolved = await withHeartbeatWhilePending(
+                  Sentry.withActiveSpan(null, () =>
+                    resolveWebSearchCalls(initialResp, finalPayload, {
+                      initiatorOverride,
+                      abortSignal: upstreamSignal,
+                    }),
+                  ),
+                  stream,
                 )
                 const anthropicResponse = translateToAnthropic(
                   resolved,
@@ -825,7 +861,10 @@ const executeChatCompletions = async (
 
             const directResult = await streamChatCompletionsDirect(
               stream,
-              response as AsyncIterable<{ data?: string }>,
+              withSseHeartbeat(
+                response as AsyncIterable<{ data?: string }>,
+                stream,
+              ),
               requestedModel,
             )
 
@@ -841,7 +880,8 @@ const executeChatCompletions = async (
             setSentryOutputMessages(streamSpan, directResult.responseText)
           } catch (error) {
             if (isAbortError(error)) return
-            throw error
+            // Headers are already committed, so this must travel in-band.
+            await emitAnthropicStreamError(stream, error)
           } finally {
             finishSpan()
           }
@@ -1005,7 +1045,10 @@ async function handleCustomProviderChatCompletionStream(
           try {
             const directResult = await streamChatCompletionsDirect(
               stream,
-              response as AsyncIterable<{ data?: string }>,
+              withSseHeartbeat(
+                response as AsyncIterable<{ data?: string }>,
+                stream,
+              ),
               options.responseModel,
             )
 
@@ -1025,7 +1068,8 @@ async function handleCustomProviderChatCompletionStream(
             setSentryOutputMessages(streamSpan, directResult.responseText)
           } catch (error) {
             if (isAbortError(error)) return
-            throw error
+            // Headers are already committed, so this must travel in-band.
+            await emitAnthropicStreamError(stream, error)
           } finally {
             finishSpan()
           }
@@ -1347,7 +1391,7 @@ const executeResponsesApi = async (
               if (needsWebSearchBuffering) {
                 const buffered = await streamResponsesWithWebSearch(
                   stream,
-                  response as ResponsesStream,
+                  withSseHeartbeat(response as ResponsesStream, stream),
                 )
 
                 const inputTokens =
@@ -1381,16 +1425,21 @@ const executeResponsesApi = async (
                 if (buffered.hadWebSearch && buffered.initialResult) {
                   finishSpan()
                   const initialRes = buffered.initialResult
-                  const resolved = await Sentry.withActiveSpan(null, () =>
-                    resolveResponsesWebSearchCalls(
-                      initialRes,
-                      responsesPayload,
-                      {
-                        vision,
-                        initiator: initiatorOverride ?? initiator,
-                        signal: c.req.raw.signal,
-                      },
+                  // Inside the open stream — see the note on the Chat
+                  // Completions web-search path above.
+                  const resolved = await withHeartbeatWhilePending(
+                    Sentry.withActiveSpan(null, () =>
+                      resolveResponsesWebSearchCalls(
+                        initialRes,
+                        responsesPayload,
+                        {
+                          vision,
+                          initiator: initiatorOverride ?? initiator,
+                          signal: c.req.raw.signal,
+                        },
+                      ),
                     ),
+                    stream,
                   )
                   const anthropicResponse =
                     translateResponsesResultToAnthropic(resolved)
@@ -1402,7 +1451,7 @@ const executeResponsesApi = async (
 
               const directUsage = await streamResponsesDirect(
                 stream,
-                response as ResponsesStream,
+                withSseHeartbeat(response as ResponsesStream, stream),
               )
 
               streamSpan.setAttribute(
@@ -1421,7 +1470,8 @@ const executeResponsesApi = async (
               setSentryOutputMessages(streamSpan, directUsage.responseText)
             } catch (error) {
               if (isAbortError(error)) return
-              throw error
+              // Headers are already committed, so this must travel in-band.
+              await emitAnthropicStreamError(stream, error)
             } finally {
               finishSpan()
             }

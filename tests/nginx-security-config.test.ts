@@ -213,6 +213,24 @@ test("authenticated generation streams disable buffering without timeouts", asyn
   expect(messagesLocation).not.toContain("_timeout")
 })
 
+test("codex desktop /codex/responses location disables proxy buffering", async () => {
+  const template = await read(
+    "sites-available/codex-desktop-spoof.conf.template",
+  )
+
+  // /codex/responses is an SSE route. Without these, nginx buffers the whole
+  // response and swallows the keep-alive frames that keep Cloudflare's origin
+  // inactivity timer from firing.
+  const location = template.match(
+    /location = \/codex\/responses \{([\s\S]*?)\n {2}\}/,
+  )?.[1]
+
+  expect(location).toBeDefined()
+  expect(location).toContain("proxy_request_buffering off;")
+  expect(location).toContain("proxy_buffering off;")
+  expect(location).toContain("proxy_cache off;")
+})
+
 test("Cloudflare real-IP policy trusts exact published ranges only", async () => {
   const [template, publicTemplate] = await Promise.all([
     read("snippets/cloudflare-real-ip.conf"),

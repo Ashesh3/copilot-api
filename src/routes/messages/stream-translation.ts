@@ -1,3 +1,4 @@
+import * as Sentry from "@sentry/bun"
 import consola from "consola"
 
 import {
@@ -609,5 +610,38 @@ export function translateErrorToAnthropicErrorEvent(): AnthropicStreamEventData 
       type: "api_error",
       message: "An unexpected error occurred during streaming.",
     },
+  }
+}
+
+/**
+ * Report a mid-stream failure to the client as an Anthropic `error` event.
+ *
+ * Once `streamSSE` has committed its `200` the HTTP status can no longer
+ * change, so a late failure has to travel in-band. Rethrowing instead is not a
+ * safe default: Hono's `run()` only writes an `error` frame when a third
+ * `onError` argument was supplied — otherwise it logs to the console and closes
+ * the stream cleanly. A clean close that never sent `message_start` makes the
+ * Anthropic client fall back to a *non-streaming retry*, silently duplicating
+ * the whole generation. One explicit frame avoids that.
+ *
+ * We emit the frame here rather than via Hono's `onError` hook because that
+ * hook appends its own `event: error` carrying the raw `Error.message`, which
+ * would both duplicate the frame and leak upstream internals to the client.
+ * The real error still reaches Sentry.
+ */
+export async function emitAnthropicStreamError(
+  stream: {
+    writeSSE: (data: { event: string; data: string }) => Promise<void>
+  },
+  error: unknown,
+): Promise<void> {
+  Sentry.captureException(error)
+  consola.error("Anthropic stream failed after headers were sent:", error)
+
+  const event = translateErrorToAnthropicErrorEvent()
+  try {
+    await stream.writeSSE({ event: event.type, data: JSON.stringify(event) })
+  } catch {
+    // The client is already gone; there is nobody left to inform.
   }
 }

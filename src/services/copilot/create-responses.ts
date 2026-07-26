@@ -15,6 +15,7 @@ import { getReasoningEffortForModel } from "~/lib/config"
 import { HTTPError } from "~/lib/error"
 import { getUnsupportedRequestParameters } from "~/lib/model-settings"
 import { usesImplicitReasoningDefault } from "~/lib/model-suffix"
+import { PRE_HEADER_MAX_DELAY_SECONDS } from "~/services/copilot/transport-retry"
 
 export interface ResponsesPayload {
   model: string
@@ -851,7 +852,12 @@ export const createResponses = async (
   let { response } = await routedFetch(
     "/responses",
     { method: "POST", body: JSON.stringify(sanitizedPayload), signal },
-    { modelId: payload.model, headerOptions: headerOpts },
+    {
+      modelId: payload.model,
+      headerOptions: headerOpts,
+      maxHttpRetryDelaySeconds:
+        payload.stream ? PRE_HEADER_MAX_DELAY_SECONDS : undefined,
+    },
   )
 
   if (response.status === 413 && vision && removeInputImages(payload)) {
@@ -861,7 +867,12 @@ export const createResponses = async (
     const { response: retryResponse } = await routedFetch(
       "/responses",
       { method: "POST", body: JSON.stringify(sanitizedPayload), signal },
-      { modelId: payload.model, headerOptions: headerOpts },
+      {
+        modelId: payload.model,
+        headerOptions: headerOpts,
+        maxHttpRetryDelaySeconds:
+          payload.stream ? PRE_HEADER_MAX_DELAY_SECONDS : undefined,
+      },
     )
     response = retryResponse
   }

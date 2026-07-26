@@ -10,6 +10,7 @@ import type {
 import { routedFetch } from "~/lib/account-router"
 import { HTTPError } from "~/lib/error"
 import { state } from "~/lib/state"
+import { PRE_HEADER_MAX_DELAY_SECONDS } from "~/services/copilot/transport-retry"
 
 import { hasVisionContent } from "./copilot-client"
 
@@ -169,6 +170,8 @@ export const createAnthropicMessages = async (
     {
       modelId: payload.model,
       headerOptions: { vision, initiator, anthropicVersion: "2023-06-01" },
+      maxHttpRetryDelaySeconds:
+        payload.stream ? PRE_HEADER_MAX_DELAY_SECONDS : undefined,
     },
   )
 

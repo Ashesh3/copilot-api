@@ -44,3 +44,10 @@ test("does not expose the mutable feature flag store to callers", () => {
   expect(Object.hasOwn(getFeatureFlags(), "__proto__")).toBe(false)
   expect(Object.hasOwn(getFeatureFlags(), "caller_mutation")).toBe(false)
 })
+
+test("disables Claude Code non-streaming fallback after a stream error", () => {
+  setFeatureFlagsForTest()
+  expect(
+    getFeatureFlags().tengu_disable_streaming_to_non_streaming_fallback,
+  ).toBe(true)
+})

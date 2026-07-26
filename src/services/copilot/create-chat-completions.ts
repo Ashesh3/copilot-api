@@ -16,6 +16,7 @@ import {
   detectInitiator,
   addPromptCaching,
 } from "~/services/copilot/copilot-client"
+import { PRE_HEADER_MAX_DELAY_SECONDS } from "~/services/copilot/transport-retry"
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null
@@ -403,7 +404,12 @@ export const createChatCompletions = async (
   let { response } = await routedFetch(
     "/chat/completions",
     { method: "POST", body: JSON.stringify(payload), signal: options?.signal },
-    { modelId: payload.model, headerOptions: headerOpts },
+    {
+      modelId: payload.model,
+      headerOptions: headerOpts,
+      maxHttpRetryDelaySeconds:
+        payload.stream ? PRE_HEADER_MAX_DELAY_SECONDS : undefined,
+    },
   )
   const shouldRetryWithoutImages = response.status === 413 && vision
 
@@ -418,7 +424,12 @@ export const createChatCompletions = async (
         body: JSON.stringify(payload),
         signal: options?.signal,
       },
-      { modelId: payload.model, headerOptions: nonVisionHeaderOpts },
+      {
+        modelId: payload.model,
+        headerOptions: nonVisionHeaderOpts,
+        maxHttpRetryDelaySeconds:
+          payload.stream ? PRE_HEADER_MAX_DELAY_SECONDS : undefined,
+      },
     )
     response = retryResponse
   }
@@ -437,7 +448,11 @@ export const createChatCompletions = async (
             body: JSON.stringify(payload),
             signal: options?.signal,
           },
-          { modelId: payload.model, headerOptions: streamHeaderOpts },
+          {
+            modelId: payload.model,
+            headerOptions: streamHeaderOpts,
+            maxHttpRetryDelaySeconds: PRE_HEADER_MAX_DELAY_SECONDS,
+          },
         )
         return retryResponse
       },

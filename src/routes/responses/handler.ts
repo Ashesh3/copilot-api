@@ -34,6 +34,10 @@ import {
   setSentryOutputMessages,
   setSentryConversationIdFromRequest,
 } from "~/lib/sentry"
+import {
+  withHeartbeatWhilePending,
+  withSseHeartbeat,
+} from "~/lib/sse-lifecycle"
 import { state } from "~/lib/state"
 import { tokenPool } from "~/lib/token-pool"
 import { emitResponsesToolSpans } from "~/lib/tool-spans"
@@ -570,7 +574,7 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
               let detailedUsage = extractDetailedUsage(null)
               let responseText = ""
 
-              for await (const chunk of response) {
+              for await (const chunk of withSseHeartbeat(response, stream)) {
                 const chunkData = {
                   id: (chunk as { id?: string }).id,
                   event: (chunk as { event?: string }).event,
@@ -606,12 +610,17 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
 
               if (hasWebSearchCall && completedResult) {
                 finishSpan()
-                const resolved = await Sentry.withActiveSpan(null, () =>
-                  resolveResponsesWebSearchCalls(completedResult, payload, {
-                    vision,
-                    initiator,
-                    signal: c.req.raw.signal,
-                  }),
+                // Inside the already-open stream: the resolver loops full
+                // generations plus live web fetches, so it needs keep-alives.
+                const resolved = await withHeartbeatWhilePending(
+                  Sentry.withActiveSpan(null, () =>
+                    resolveResponsesWebSearchCalls(completedResult, payload, {
+                      vision,
+                      initiator,
+                      signal: c.req.raw.signal,
+                    }),
+                  ),
+                  stream,
                 )
                 await emitResponsesResultAsStream(
                   stream,
@@ -1675,7 +1684,7 @@ const handleWithChatCompletions = async (
             }>
             const streamUsage = await streamChatCompletionsAsResponses(
               sseStream,
-              ccStream,
+              withSseHeartbeat(ccStream, sseStream),
               responseModel,
             )
 

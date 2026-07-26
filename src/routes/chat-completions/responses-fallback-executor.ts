@@ -19,6 +19,12 @@ import {
   setSentryOutputMessages,
 } from "~/lib/sentry"
 import {
+  raceSsePreflush,
+  withHeartbeatWhilePending,
+  withSseHeartbeat,
+  writeSseHeartbeat,
+} from "~/lib/sse-lifecycle"
+import {
   emitChatCompletionResponseAsStream,
   resolveResponsesWebSearchCalls,
 } from "~/routes/messages/web-search-helpers"
@@ -201,7 +207,7 @@ function executeStreamingResponsesFallback(
           try {
             const usage = await streamResponsesAsChatCompletions(
               stream,
-              response,
+              withSseHeartbeat(response, stream),
               options.requestedModel,
             )
             setStreamUsage(c, span, usage)
@@ -232,30 +238,69 @@ async function executeStreamingMcpWebSearchFallback(
   options: PreparedResponsesFallback,
 ): Promise<Response> {
   const payload = { ...options.payload, stream: false }
+  const downstreamAbort = new AbortController()
+  const upstreamSignal = AbortSignal.any([
+    c.req.raw.signal,
+    downstreamAbort.signal,
+  ])
   const requestOptions = {
     vision: options.vision,
     initiator: options.initiator,
-    signal: c.req.raw.signal,
+    signal: upstreamSignal,
   }
-  const initial = (await createResponses(
-    payload,
-    requestOptions,
-  )) as ResponsesResult
-  const response = await resolveResponsesWebSearchCalls(
-    initial,
-    payload,
-    requestOptions,
-  )
-  recordAccountContext(c)
-  setResponsesUsageContext(c, response.usage)
-  const result = responsesResultToChatCompletion(
-    response,
-    options.requestedModel,
+  const preflush = await raceSsePreflush(
+    createResponses(payload, requestOptions).then(async (initial) =>
+      resolveResponsesWebSearchCalls(
+        initial as ResponsesResult,
+        payload,
+        requestOptions,
+      ),
+    ),
   )
 
   return streamSSE(c, async (stream) => {
-    await emitChatCompletionResponseAsStream(stream, result)
+    stream.onAbort(() => downstreamAbort.abort())
+    try {
+      if (preflush.kind === "pending") await writeSseHeartbeat(stream)
+      const response =
+        preflush.kind === "settled" ?
+          preflush.value
+        : await withHeartbeatWhilePending(preflush.pending, stream)
+      recordAccountContext(c)
+      setResponsesUsageContext(c, response.usage)
+      const result = responsesResultToChatCompletion(
+        response,
+        options.requestedModel,
+      )
+      await emitChatCompletionResponseAsStream(stream, result)
+    } catch (error) {
+      if (isAbortError(error)) return
+      await emitOpenAiStreamError(stream, error)
+    }
   })
+}
+
+async function emitOpenAiStreamError(
+  stream: { writeSSE: (message: { data: string }) => Promise<void> },
+  error: unknown,
+): Promise<void> {
+  Sentry.captureException(error)
+  consola.error(
+    "Chat Completions stream failed after headers were sent:",
+    error,
+  )
+  try {
+    await stream.writeSSE({
+      data: JSON.stringify({
+        error: {
+          message: "An unexpected error occurred during streaming.",
+          type: "api_error",
+        },
+      }),
+    })
+  } catch {
+    // The client is already gone; there is nobody left to inform.
+  }
 }
 
 function createSentrySpanOptions(options: PreparedResponsesFallback): {

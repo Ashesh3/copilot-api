@@ -64,6 +64,9 @@ const DEFAULT_FLAGS: FeatureFlags = {
   tengu_amber_quartz_disabled: false,
   // Enable remote TUI backend
   tengu_remote_backend: true,
+  // A streamed API error is already the terminal outcome for that generation.
+  // Retrying the same turn non-streaming can duplicate model/tool work.
+  tengu_disable_streaming_to_non_streaming_fallback: true,
 }
 
 let cachedFlags: FeatureFlags | null = null
