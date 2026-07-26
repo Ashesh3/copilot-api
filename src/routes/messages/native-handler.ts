@@ -12,8 +12,15 @@ import {
   setSentryOutputMessages,
 } from "~/lib/sentry"
 import {
-  createAnthropicMessages,
+  raceSsePreflush,
+  type SseHeartbeatSink,
+  withHeartbeatWhilePending,
+  withSseHeartbeat,
+  writeSseHeartbeat,
+} from "~/lib/sse-lifecycle"
+import {
   type AnthropicStreamChunk,
+  createAnthropicMessages,
 } from "~/services/copilot/create-anthropic-messages"
 import {
   buildWebSearchQuery,
@@ -27,9 +34,60 @@ import {
   type AnthropicResponse,
   type AnthropicToolUseBlock,
 } from "./anthropic-types"
+import { emitAnthropicStreamError } from "./stream-translation"
 import { emitAnthropicResponseAsStream } from "./web-search-helpers"
 
 const logger = createHandlerLogger("messages-native-handler")
+
+function asAnthropicStream(
+  response: Awaited<ReturnType<typeof createAnthropicMessages>>,
+): AsyncIterable<AnthropicStreamChunk> {
+  if (Symbol.asyncIterator in response) return response
+  throw new TypeError("Expected a streaming Anthropic response")
+}
+
+async function consumeNativeMessageStream(
+  stream: SseHeartbeatSink & {
+    writeSSE: (data: { data: string; event?: string }) => Promise<void>
+  },
+  response: AsyncIterable<AnthropicStreamChunk>,
+  state: {
+    requestedModel: string | undefined
+    usage: { cached: number; input: number; output: number }
+  },
+): Promise<string> {
+  const { requestedModel, usage } = state
+  let responseText = ""
+  for await (const chunk of withSseHeartbeat(response, stream)) {
+    if (!chunk.data) continue
+    // CAPI appends an OpenAI-style bare [DONE] sentinel after message_stop;
+    // strict Anthropic SDK parsers do not expect it.
+    if (!chunk.event && chunk.data.trim() === "[DONE]") continue
+
+    let data = chunk.data
+    switch (chunk.event) {
+      case "message_start": {
+        data = rewriteMessageStart(data, requestedModel, usage)
+        break
+      }
+      case "message_delta": {
+        trackMessageDelta(data, usage)
+        break
+      }
+      case "content_block_delta": {
+        responseText += extractTextDelta(data)
+        break
+      }
+      // No default
+    }
+
+    await stream.writeSSE({
+      ...(chunk.event ? { event: chunk.event } : {}),
+      data,
+    })
+  }
+  return responseText
+}
 
 /**
  * Forward an Anthropic Messages request to Copilot's native /v1/messages
@@ -118,55 +176,45 @@ async function streamNativeMessages(
       }
 
       try {
-        const response = (await createAnthropicMessages(anthropicPayload, {
-          initiator: initiatorOverride,
-          signal: c.req.raw.signal,
-        })) as AsyncIterable<AnthropicStreamChunk>
-
-        const accountId = getLastUsedAccountId()
-        if (accountId !== undefined) {
-          setRequestContext(c, { accountId })
-        }
+        const downstreamAbort = new AbortController()
+        const upstreamSignal = AbortSignal.any([
+          c.req.raw.signal,
+          downstreamAbort.signal,
+        ])
+        const preflush = await raceSsePreflush(
+          createAnthropicMessages(anthropicPayload, {
+            initiator: initiatorOverride,
+            signal: upstreamSignal,
+          }),
+        )
 
         return streamSSE(c, async (stream) => {
+          stream.onAbort(() => downstreamAbort.abort())
           const usage = { input: 0, output: 0, cached: 0 }
           let responseText = ""
 
           try {
-            for await (const chunk of response) {
-              if (!chunk.data) continue
-              // CAPI appends an OpenAI-style bare [DONE] sentinel after
-              // message_stop; strict Anthropic SDK parsers do not expect it.
-              if (!chunk.event && chunk.data.trim() === "[DONE]") continue
-
-              let data = chunk.data
-              switch (chunk.event) {
-                case "message_start": {
-                  data = rewriteMessageStart(data, requestedModel, usage)
-
-                  break
-                }
-                case "message_delta": {
-                  trackMessageDelta(data, usage)
-
-                  break
-                }
-                case "content_block_delta": {
-                  responseText += extractTextDelta(data)
-
-                  break
-                }
-                // No default
-              }
-
-              await stream.writeSSE({
-                ...(chunk.event ? { event: chunk.event } : {}),
-                data,
-              })
+            if (preflush.kind === "pending") {
+              await writeSseHeartbeat(stream)
             }
+            const response =
+              preflush.kind === "settled" ?
+                preflush.value
+              : await withHeartbeatWhilePending(preflush.pending, stream)
+            const accountId = getLastUsedAccountId()
+            if (accountId !== undefined) {
+              setRequestContext(c, { accountId })
+            }
+
+            responseText = await consumeNativeMessageStream(
+              stream,
+              asAnthropicStream(response),
+              { requestedModel, usage },
+            )
           } catch (error) {
             if (isAbortError(error)) return
-            throw error
+            // Headers are already committed, so this must travel in-band.
+            await emitAnthropicStreamError(stream, error)
           } finally {
             setRequestContext(c, {
               inputTokens: usage.input + usage.cached,

@@ -1,9 +1,18 @@
-import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  expect,
+  mock,
+  test,
+} from "bun:test"
 
 import type { ModelsResponse } from "../src/services/copilot/get-models"
 
 import { setModelRedirectsForTest } from "../src/lib/model-redirect"
 import { setModelSettingsForTest } from "../src/lib/model-settings"
+import { setSsePreflushDeadlineForTest } from "../src/lib/sse-lifecycle"
 import { state } from "../src/lib/state"
 import { server } from "../src/server"
 
@@ -11,6 +20,10 @@ const originalFetch = globalThis.fetch
 
 let lastUpstreamPath: string | undefined
 let lastUpstreamPayload: Record<string, unknown> | undefined
+let delayBufferedWebSearchResponse = false
+let delayedResponsesController:
+  | ReadableStreamDefaultController<Uint8Array>
+  | undefined
 
 const responsesOnlyModels: ModelsResponse = {
   object: "list",
@@ -188,6 +201,19 @@ const fetchMock = mock((url: string, init?: RequestInit) => {
     : undefined
 
   if (lastUpstreamPath.endsWith("/responses")) {
+    if (
+      delayBufferedWebSearchResponse
+      && lastUpstreamPayload?.stream === false
+    ) {
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            delayedResponsesController = controller
+          },
+        }),
+        { headers: { "content-type": "application/json" } },
+      )
+    }
     if (lastUpstreamPayload?.stream === true) {
       return createResponsesSse()
     }
@@ -226,6 +252,8 @@ beforeEach(() => {
   fetchMock.mockClear()
   lastUpstreamPath = undefined
   lastUpstreamPayload = undefined
+  delayBufferedWebSearchResponse = false
+  delayedResponsesController = undefined
   state.accountType = "individual"
   state.copilotToken = "copilot-token"
   state.githubToken = "github-token"
@@ -234,6 +262,15 @@ beforeEach(() => {
   state.models = responsesOnlyModels
   setModelRedirectsForTest([])
   setModelSettingsForTest([])
+})
+
+afterEach(() => {
+  try {
+    delayedResponsesController?.close()
+  } catch {
+    // The downstream may already have cancelled the request.
+  }
+  setSsePreflushDeadlineForTest()
 })
 
 test("routes legacy chat completions requests for responses-only models through /responses", async () => {
@@ -471,4 +508,49 @@ test("streams responses-only models back as chat completion chunks", async () =>
       reasoning_tokens: 2,
     },
   })
+})
+
+test("commits a keepalive while the buffered web-search fallback is pending", async () => {
+  setSsePreflushDeadlineForTest(20)
+  delayBufferedWebSearchResponse = true
+  const response = await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "Search current news." }],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "web_search",
+            parameters: {
+              type: "object",
+              properties: {
+                blocked_domains: {
+                  type: "array",
+                  items: { type: "string" },
+                  default: ["example.com"],
+                },
+              },
+            },
+          },
+        },
+      ],
+      stream: true,
+    }),
+  })
+  const body = response.body
+  if (!body) throw new Error("Expected an SSE response body")
+  const reader = body.getReader()
+  const first = await reader.read()
+
+  expect(lastUpstreamPayload?.stream).toBe(false)
+  expect(first.done).toBe(false)
+  const firstBytes: unknown = first.value
+  if (!(firstBytes instanceof Uint8Array)) {
+    throw new TypeError("Expected the initial keepalive bytes")
+  }
+  expect(new TextDecoder().decode(firstBytes)).toBe(": keepalive\n\n")
+  await reader.cancel()
 })

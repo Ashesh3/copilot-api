@@ -9,8 +9,16 @@ import { state } from "../src/lib/state"
 import {
   copilotFetch,
   copilotHeaders,
+  setHttpRetrySleepForTest,
 } from "../src/services/copilot/copilot-client"
-import { setTransportEventSinkForTest } from "../src/services/copilot/transport-retry"
+import {
+  createRetryBudget,
+  MAX_DELAY_SECONDS,
+  MAX_RETRIES,
+  MAX_ROUTED_SENDS,
+  PRE_HEADER_MAX_DELAY_SECONDS,
+  setTransportEventSinkForTest,
+} from "../src/services/copilot/transport-retry"
 
 const originalFetch = globalThis.fetch
 const queuedResults: Array<Error | Response> = []
@@ -19,6 +27,7 @@ const transportEvents: Array<{
   attributes: Record<string, unknown>
   outcome: string
 }> = []
+const httpRetrySleeps: Array<number> = []
 
 function getRequestUrl(url: string | URL | Request): string {
   if (typeof url === "string") {
@@ -60,6 +69,7 @@ beforeAll(() => {
 afterAll(() => {
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
   setTransportEventSinkForTest()
+  setHttpRetrySleepForTest()
 })
 
 beforeEach(() => {
@@ -67,6 +77,11 @@ beforeEach(() => {
   queuedResults.length = 0
   capturedRequests.length = 0
   transportEvents.length = 0
+  httpRetrySleeps.length = 0
+  setHttpRetrySleepForTest((ms) => {
+    httpRetrySleeps.push(ms)
+    return Promise.resolve()
+  })
   clearLlmDebugLogs()
   state.accountType = "individual"
   state.githubToken = "github-token"
@@ -679,4 +694,63 @@ test("reports a retried chain that ends in 503 as response_received, not recover
     "response_received",
   ])
   expect(transportEvents[1]?.attributes.status).toBe(503)
+})
+
+test("bounds pre-header retry delay without weakening the send budget", () => {
+  // A `retry-after` large enough to clamp at MAX_DELAY_SECONDS sleeps 144-180s
+  // before any header is sent, which alone exceeds Cloudflare's ~120-125s
+  // origin inactivity budget and produces a deterministic 524.
+  expect(PRE_HEADER_MAX_DELAY_SECONDS).toBe(30)
+  expect(PRE_HEADER_MAX_DELAY_SECONDS).toBeLessThan(MAX_DELAY_SECONDS)
+
+  // MAX_ROUTED_SENDS permits at most two pre-header sleeps per routed call.
+  const worstCaseSilenceSeconds =
+    (MAX_ROUTED_SENDS - 1) * PRE_HEADER_MAX_DELAY_SECONDS
+  expect(worstCaseSilenceSeconds).toBeLessThan(120)
+
+  // The ceiling bounds delay duration only — the COPILOT-API-15 send-count
+  // invariants must be untouched.
+  expect(MAX_ROUTED_SENDS).toBe(3)
+  expect(MAX_RETRIES).toBe(1)
+  expect(createRetryBudget()).toEqual({ remaining: MAX_ROUTED_SENDS - 1 })
+})
+
+test("caps Retry-After only when the caller opts into the streaming pre-header ceiling", async () => {
+  queuedResults.push(
+    new Response("overloaded", {
+      status: 429,
+      headers: { "retry-after": "170" },
+    }),
+    new Response("{}", { status: 200 }),
+  )
+
+  const response = await copilotFetch(
+    "/chat/completions",
+    { method: "POST" },
+    { maxHttpRetryDelaySeconds: PRE_HEADER_MAX_DELAY_SECONDS },
+  )
+
+  expect(response.status).toBe(200)
+  expect(httpRetrySleeps).toEqual([PRE_HEADER_MAX_DELAY_SECONDS * 1000])
+  expect(capturedRequests).toHaveLength(2)
+})
+
+test("keeps the normal Retry-After delay for callers without a streaming ceiling", async () => {
+  queuedResults.push(
+    new Response("overloaded", {
+      status: 429,
+      headers: { "retry-after": "170" },
+    }),
+    new Response("{}", { status: 200 }),
+  )
+
+  const response = await copilotFetch("/chat/completions", { method: "POST" })
+
+  expect(response.status).toBe(200)
+  expect(httpRetrySleeps).toHaveLength(1)
+  expect(httpRetrySleeps[0]).toBeGreaterThan(
+    PRE_HEADER_MAX_DELAY_SECONDS * 1000,
+  )
+  expect(httpRetrySleeps[0]).toBeLessThanOrEqual(MAX_DELAY_SECONDS * 1000)
+  expect(capturedRequests).toHaveLength(2)
 })

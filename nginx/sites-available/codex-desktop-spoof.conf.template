@@ -67,6 +67,13 @@ server {
     if ($http_authorization = "") { return 404; }
     proxy_pass {{UPSTREAM_URL}};
     proxy_http_version 1.1;
+
+    # SSE route: nginx buffers responses by default, which would hold back the
+    # keep-alive comment frames this route emits during long upstream waits and
+    # let Cloudflare's origin inactivity timer fire anyway.
+    proxy_request_buffering off;
+    proxy_buffering off;
+    proxy_cache off;
   }
 
   # Codex Computer Use URL-policy compatibility. This deployment is an

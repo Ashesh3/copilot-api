@@ -615,3 +615,43 @@ describe("OpenAI to Anthropic Streaming Response Translation", () => {
     expect(streamState.toolCalls[1]).toBeUndefined()
   })
 })
+
+describe("Mid-stream error reporting", () => {
+  test("emits a well-formed Anthropic error event instead of closing silently", async () => {
+    const writes: Array<{ event: string; data: string }> = []
+    const stream = {
+      writeSSE: (data: { event: string; data: string }) => {
+        writes.push(data)
+        return Promise.resolve()
+      },
+    }
+
+    await streamTranslation.emitAnthropicStreamError(
+      stream,
+      new Error("upstream exploded"),
+    )
+
+    expect(writes).toHaveLength(1)
+    expect(writes[0]?.event).toBe("error")
+
+    const parsed = JSON.parse(writes[0]?.data ?? "{}") as {
+      type: string
+      error: { type: string; message: string }
+    }
+    expect(parsed.type).toBe("error")
+    expect(parsed.error.type).toBe("api_error")
+    expect(typeof parsed.error.message).toBe("string")
+
+    // The upstream message must not leak to the client; it goes to Sentry only.
+    expect(writes[0]?.data).not.toContain("upstream exploded")
+  })
+
+  test("swallows write failures when the client has already disconnected", async () => {
+    const stream = {
+      writeSSE: () => Promise.reject(new Error("socket closed")),
+    }
+
+    // Must not throw: there is nobody left to inform.
+    await streamTranslation.emitAnthropicStreamError(stream, new Error("boom"))
+  })
+})

@@ -26,6 +26,7 @@ interface AccountFetchOptions {
   headerOptions: CopilotHeaderOptions | undefined
   init: RequestInit | undefined
   path: string
+  maxHttpRetryDelaySeconds: number | undefined
   retryBudget: RetryBudget
 }
 
@@ -33,6 +34,7 @@ interface RoutedFetchContext {
   headerOptions: CopilotHeaderOptions | undefined
   init: RequestInit | undefined
   modelId: string
+  maxHttpRetryDelaySeconds: number | undefined
   path: string
   retryBudget: RetryBudget
 }
@@ -77,7 +79,14 @@ function createNoEnabledAccountResponse(modelId: string): Response {
 async function fetchWithAccount(
   options: AccountFetchOptions,
 ): Promise<Response> {
-  const { account, headerOptions, init, path, retryBudget } = options
+  const {
+    account,
+    headerOptions,
+    init,
+    maxHttpRetryDelaySeconds,
+    path,
+    retryBudget,
+  } = options
   const headers = copilotHeaders({
     ...headerOptions,
     copilotToken: account.copilotToken,
@@ -87,7 +96,7 @@ async function fetchWithAccount(
   return await copilotFetch(
     path,
     { ...init, headers },
-    { baseUrl, retryBudget },
+    { baseUrl, maxHttpRetryDelaySeconds, retryBudget },
   )
 }
 
@@ -121,7 +130,8 @@ async function refreshAndRetryAccount(
 async function fetchWithFallbackAccount(
   context: RoutedFetchContext,
 ): Promise<RoutedFetchResult> {
-  const { headerOptions, init, path, retryBudget } = context
+  const { headerOptions, init, maxHttpRetryDelaySeconds, path, retryBudget } =
+    context
   const account = tokenPool.getFirstHealthyAccount()
   if (account) {
     consola.warn(
@@ -142,7 +152,7 @@ async function fetchWithFallbackAccount(
       ...init,
       ...(fallbackHeaders ? { headers: fallbackHeaders } : {}),
     },
-    { retryBudget },
+    { maxHttpRetryDelaySeconds, retryBudget },
   )
   return { response, account: undefined }
 }
@@ -152,7 +162,14 @@ async function failoverToAccount(
   currentAccount: Account,
   failedResponse: Response,
 ): Promise<RoutedFetchResult | undefined> {
-  const { headerOptions, init, modelId, path, retryBudget } = context
+  const {
+    headerOptions,
+    init,
+    modelId,
+    maxHttpRetryDelaySeconds,
+    path,
+    retryBudget,
+  } = context
   const next = tokenPool.getNextAccountForModel(modelId, currentAccount)
   if (!next) {
     return undefined
@@ -179,6 +196,7 @@ async function failoverToAccount(
     account: next,
     headerOptions,
     init,
+    maxHttpRetryDelaySeconds,
     path,
     retryBudget,
   })
@@ -189,12 +207,14 @@ async function fetchWithRoutedAccount(
   context: RoutedFetchContext,
   account: Account,
 ): Promise<RoutedFetchResult> {
-  const { headerOptions, init, path, retryBudget } = context
+  const { headerOptions, init, maxHttpRetryDelaySeconds, path, retryBudget } =
+    context
 
   let response = await fetchWithAccount({
     account,
     headerOptions,
     init,
+    maxHttpRetryDelaySeconds,
     path,
     retryBudget,
   })
@@ -205,6 +225,7 @@ async function fetchWithRoutedAccount(
         account,
         headerOptions,
         init,
+        maxHttpRetryDelaySeconds,
         path,
         retryBudget,
       })) ?? response
@@ -237,6 +258,7 @@ export function getLastUsedAccountId(): number | undefined {
 export interface RoutedFetchOptions {
   modelId: string
   headerOptions?: CopilotHeaderOptions
+  maxHttpRetryDelaySeconds?: number
 }
 
 /**
@@ -260,7 +282,7 @@ export async function routedFetch(
   init: RequestInit | undefined,
   options: RoutedFetchOptions,
 ): Promise<{ response: Response; account: Account | undefined }> {
-  const { modelId, headerOptions } = options
+  const { modelId, headerOptions, maxHttpRetryDelaySeconds } = options
   // Two extra sends for the whole routed call (a three-send ceiling) so sends
   // cannot multiply across the initial account, a 401 refresh-and-retry, and a
   // 401/403/429 failover.
@@ -269,6 +291,7 @@ export async function routedFetch(
     headerOptions,
     init,
     modelId,
+    maxHttpRetryDelaySeconds,
     path,
     retryBudget,
   }
@@ -279,7 +302,7 @@ export async function routedFetch(
     const response = await copilotFetch(
       path,
       { ...init, headers },
-      { retryBudget },
+      { maxHttpRetryDelaySeconds, retryBudget },
     )
     return { response, account: undefined }
   }

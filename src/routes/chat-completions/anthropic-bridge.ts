@@ -38,6 +38,7 @@ import {
   createSentryChatSpanOptions,
   setSentryOutputMessages,
 } from "~/lib/sentry"
+import { withSseHeartbeat } from "~/lib/sse-lifecycle"
 import { resolveNativeWebSearch } from "~/routes/messages/native-handler"
 import {
   createAnthropicMessages,
@@ -219,7 +220,7 @@ async function executeBridgeStreaming(
           try {
             const usage = await streamAnthropicAsChatCompletions(
               stream,
-              response,
+              withSseHeartbeat(response, stream),
               requestedModel,
             )
             setRequestContext(c, {

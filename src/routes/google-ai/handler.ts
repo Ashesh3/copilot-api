@@ -33,6 +33,7 @@ import {
   recordNonDefaultBehavior,
   setRequestContext,
 } from "~/lib/request-logger"
+import { withSseHeartbeat } from "~/lib/sse-lifecycle"
 import { state } from "~/lib/state"
 import { getTokenCount } from "~/lib/tokenizer"
 import {
@@ -448,7 +449,7 @@ async function handleWithChatCompletions(
     try {
       const streamState = createGoogleStreamState()
 
-      for await (const rawEvent of response) {
+      for await (const rawEvent of withSseHeartbeat(response, stream)) {
         logger.debug("Copilot raw stream event:", JSON.stringify(rawEvent))
         if (rawEvent.data === "[DONE]") {
           break
@@ -607,7 +608,10 @@ async function handleWithAnthropicMessages(
       }
       await streamAnthropicAsChatCompletions(
         chunkShim,
-        response as AsyncIterable<AnthropicStreamChunk>,
+        withSseHeartbeat(
+          response as AsyncIterable<AnthropicStreamChunk>,
+          stream,
+        ),
         payload.model,
       )
     } catch (error) {
@@ -683,7 +687,7 @@ async function handleWithResponsesApi(
     try {
       const streamState = createGoogleStreamState()
 
-      for await (const chunk of response) {
+      for await (const chunk of withSseHeartbeat(response, stream)) {
         const eventName = chunk.event
         if (eventName === "ping") continue
 

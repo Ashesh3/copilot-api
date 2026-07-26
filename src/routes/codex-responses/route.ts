@@ -4,6 +4,7 @@ import { streamSSE } from "hono/streaming"
 
 import { authorizeCodexDesktopRequest } from "~/lib/codex-desktop-auth"
 import { getCodexCleanupModel } from "~/lib/config"
+import { withHeartbeatWhilePending } from "~/lib/sse-lifecycle"
 import {
   createChatCompletions,
   type ChatCompletionResponse,
@@ -110,15 +111,18 @@ codexResponsesRoutes.post("/", async (c) => {
 
   return streamSSE(c, async (stream) => {
     try {
-      const result = (await createChatCompletions(
-        {
-          model,
-          messages,
-          stream: false,
-        },
-        {
-          signal: c.req.raw.signal,
-        },
+      const result = (await withHeartbeatWhilePending(
+        createChatCompletions(
+          {
+            model,
+            messages,
+            stream: false,
+          },
+          {
+            signal: c.req.raw.signal,
+          },
+        ),
+        stream,
       )) as ChatCompletionResponse
 
       const cleaned = result.choices[0]?.message.content?.trim() ?? ""

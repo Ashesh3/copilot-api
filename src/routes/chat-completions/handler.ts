@@ -37,6 +37,7 @@ import {
   setSentryOutputMessages,
   setSentryConversationIdFromRequest,
 } from "~/lib/sentry"
+import { withSseHeartbeat } from "~/lib/sse-lifecycle"
 import { state } from "~/lib/state"
 import { tokenPool } from "~/lib/token-pool"
 import { getTokenCount } from "~/lib/tokenizer"
@@ -367,7 +368,7 @@ async function handleCustomProviderStreamingResponse(
 
   return streamSSE(c, async (stream) => {
     try {
-      for await (const chunk of response) {
+      for await (const chunk of withSseHeartbeat(response, stream)) {
         let outChunk = chunk
         if (chunk.data && chunk.data !== "[DONE]") {
           const parsed = JSON.parse(chunk.data) as ChatCompletionChunk
@@ -767,7 +768,7 @@ const handleStreamingResponse = (
             let streamOutputTokens = 0
             let streamCachedTokens = 0
 
-            for await (const chunk of response) {
+            for await (const chunk of withSseHeartbeat(response, stream)) {
               consola.debug("Streaming chunk:", JSON.stringify(chunk))
               let outChunk = chunk
               // Capture usage from final chunk if available

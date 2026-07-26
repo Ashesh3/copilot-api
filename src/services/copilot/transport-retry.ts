@@ -10,6 +10,24 @@ export const BASE_DELAY_SECONDS = 5
 export const BACKOFF_FACTOR = 2
 export const MAX_DELAY_SECONDS = 180
 
+/**
+ * Ceiling for a backoff that runs *before* any response header has been sent.
+ *
+ * Cloudflare's origin read timeout is a ~120-125s inactivity timer. A single
+ * `retry-after` large enough to clamp at `MAX_DELAY_SECONDS` therefore sleeps
+ * 144-180s with zero bytes on the wire and produces a deterministic 524 on its
+ * own. `MAX_ROUTED_SENDS` allows at most two such sleeps per routed call, so
+ * 30s each keeps the worst case at 60s and leaves ~60s of edge budget for the
+ * connect and TTFB of the remaining sends.
+ *
+ * This bounds *time-to-committed-headers* only. It is deliberately not a
+ * statement that a large upstream `retry-after` should be ignored: honouring
+ * the full duration is what the early-commit work (PR2) enables, by warming the
+ * wire first. Until then a clamp is strictly better than a guaranteed 524, and
+ * every clamp is logged so the shortfall is visible rather than silent.
+ */
+export const PRE_HEADER_MAX_DELAY_SECONDS = 30
+
 /** Positive jitter floor/ceiling for connection-level retries. */
 const CONNECTION_RETRY_MIN_DELAY_MS = 250
 const CONNECTION_RETRY_MAX_DELAY_MS = 1000

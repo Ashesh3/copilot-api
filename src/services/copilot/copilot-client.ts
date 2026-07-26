@@ -42,6 +42,17 @@ export const INTEGRATION_ID = "vscode-chat"
 export const INITIAL_RETRY_BACKOFF_EXTRA_SECONDS = 1
 export const RETRYABLE_STATUSES = new Set([408, 429, 500, 502, 503, 504])
 
+type HttpRetrySleep = (
+  ms: number,
+  signal: AbortSignal | null | undefined,
+) => Promise<void>
+
+let httpRetrySleep: HttpRetrySleep = abortableSleep
+
+export function setHttpRetrySleepForTest(sleep?: HttpRetrySleep): void {
+  httpRetrySleep = sleep ?? abortableSleep
+}
+
 // --- Base URL ---
 
 export function copilotBaseUrl(): string {
@@ -388,16 +399,23 @@ async function refreshTokenForRetry(
 
 function planHttpRetryDelaySeconds(options: {
   attempt: number
+  maxDelaySeconds: number
   path: string
   response: Response
   retryBackoffExtraSeconds: number
 }): number {
-  const { attempt, path, response, retryBackoffExtraSeconds } = options
+  const { attempt, maxDelaySeconds, path, response, retryBackoffExtraSeconds } =
+    options
   const rawDelaySeconds = calculateHttpRetryDelay(
     response.headers.get("retry-after"),
     retryBackoffExtraSeconds,
   )
-  const delaySeconds = applyRetryJitter(rawDelaySeconds)
+  const jitteredDelaySeconds = applyRetryJitter(rawDelaySeconds)
+  // This sleep runs before any response header is sent, so it counts directly
+  // against Cloudflare's ~120-125s origin inactivity budget.
+  const delaySeconds = Math.min(jitteredDelaySeconds, maxDelaySeconds)
+  const clampedSeconds =
+    delaySeconds < jitteredDelaySeconds ? jitteredDelaySeconds : undefined
 
   consola.warn(
     `HTTP ${response.status} on ${path} (attempt ${attempt + 1}), retrying in ${delaySeconds.toFixed(1)}s`,
@@ -410,6 +428,11 @@ function planHttpRetryDelaySeconds(options: {
       status: response.status,
       delay: delaySeconds,
       rawDelay: rawDelaySeconds,
+      // Present only when the pre-header ceiling actually shortened the wait,
+      // so an under-honoured `retry-after` is visible in production.
+      ...(clampedSeconds === undefined ?
+        {}
+      : { clampedFromDelay: clampedSeconds }),
     },
   })
 
@@ -433,12 +456,19 @@ type ResponseAction =
 async function classifyResponse(options: {
   attempt: number
   claimRetry: RetryClaim
+  maxHttpRetryDelaySeconds: number
   path: string
   response: Response
   retryBackoffExtraSeconds: number
 }): Promise<ResponseAction> {
-  const { attempt, claimRetry, path, response, retryBackoffExtraSeconds } =
-    options
+  const {
+    attempt,
+    claimRetry,
+    maxHttpRetryDelaySeconds,
+    path,
+    response,
+    retryBackoffExtraSeconds,
+  } = options
 
   if (canRefreshSingleToken401(response) && claimRetry()) {
     return { kind: "refresh-token" }
@@ -453,6 +483,7 @@ async function classifyResponse(options: {
     return {
       delaySeconds: planHttpRetryDelaySeconds({
         attempt,
+        maxDelaySeconds: maxHttpRetryDelaySeconds,
         path,
         response,
         retryBackoffExtraSeconds,
@@ -467,10 +498,16 @@ async function classifyResponse(options: {
 export async function copilotFetch(
   path: string,
   init?: RequestInit,
-  fetchOptions?: { baseUrl?: string; retryBudget?: RetryBudget },
+  fetchOptions?: {
+    baseUrl?: string
+    maxHttpRetryDelaySeconds?: number
+    retryBudget?: RetryBudget
+  },
 ): Promise<Response> {
   const url = `${fetchOptions?.baseUrl ?? copilotBaseUrl()}${path}`
   const budget = fetchOptions?.retryBudget ?? createRetryBudget()
+  const maxHttpRetryDelaySeconds =
+    fetchOptions?.maxHttpRetryDelaySeconds ?? MAX_DELAY_SECONDS
   // Both caps apply: the shared routed-call allowance and this invocation's
   // own limit, so one copilotFetch can never drain the whole budget.
   const claimRetry: RetryClaim = createRetryClaim(budget)
@@ -501,6 +538,7 @@ export async function copilotFetch(
       const action = await classifyResponse({
         attempt,
         claimRetry,
+        maxHttpRetryDelaySeconds,
         path,
         response,
         retryBackoffExtraSeconds,
@@ -514,7 +552,7 @@ export async function copilotFetch(
       if (action.kind === "retry-status") {
         lastResponse = response
         retryBackoffExtraSeconds *= BACKOFF_FACTOR
-        await abortableSleep(action.delaySeconds * 1000, requestInit?.signal)
+        await httpRetrySleep(action.delaySeconds * 1000, requestInit?.signal)
         continue
       }
 
