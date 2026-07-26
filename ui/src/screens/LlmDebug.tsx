@@ -651,16 +651,44 @@ function LlmDebugDetailView({ id }: { id: string }) {
               title={data.error.name}
               description={data.error.message}
             >
-              {data.error.stack ?
-                <CodeBlock
-                  code={data.error.stack}
-                  language="plaintext"
-                  container="section"
-                  title="Stack trace"
-                  isWrapped={wrap}
-                  onCopy={() => toast.success("Copied")}
-                />
-              : null}
+              <VStack gap={2}>
+                {(
+                  data.error.code !== undefined
+                  || data.error.errno !== undefined
+                  || data.error.path !== undefined
+                ) ?
+                  <HStack gap={3} wrap="wrap" vAlign="center">
+                    {data.error.code === undefined ? null : (
+                      <HStack gap={1} vAlign="center">
+                        <Text type="supporting">Code</Text>
+                        <MonoText>{data.error.code}</MonoText>
+                      </HStack>
+                    )}
+                    {data.error.errno === undefined ? null : (
+                      <HStack gap={1} vAlign="center">
+                        <Text type="supporting">Errno</Text>
+                        <MonoText>{String(data.error.errno)}</MonoText>
+                      </HStack>
+                    )}
+                    {data.error.path === undefined ? null : (
+                      <HStack gap={1} vAlign="center">
+                        <Text type="supporting">Upstream</Text>
+                        <MonoText>{data.error.path}</MonoText>
+                      </HStack>
+                    )}
+                  </HStack>
+                : null}
+                {data.error.stack ?
+                  <CodeBlock
+                    code={data.error.stack}
+                    language="plaintext"
+                    container="section"
+                    title="Stack trace"
+                    isWrapped={wrap}
+                    onCopy={() => toast.success("Copied")}
+                  />
+                : null}
+              </VStack>
             </Banner>
           : null}
 

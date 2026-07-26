@@ -7,7 +7,7 @@ import {
   failLlmDebugLog,
   finishLlmDebugLog,
   startLlmDebugLog,
-  type LlmDebugLogError,
+  toLlmDebugLogError,
 } from "~/lib/llm-debug-log"
 import {
   clearQuotaHeaders,
@@ -15,8 +15,23 @@ import {
   setQuotaHeader,
 } from "~/lib/request-session"
 import { state } from "~/lib/state"
-import { sleep } from "~/lib/utils"
 import { getCopilotToken } from "~/services/github/get-copilot-token"
+
+import type { RetryBudget, RetryClaim } from "./transport-retry"
+
+import {
+  abortableSleep,
+  BACKOFF_FACTOR,
+  BASE_DELAY_SECONDS,
+  createRetryBudget,
+  createRetryClaim,
+  createTransportChain,
+  handleTransportFailure,
+  isAbortLikeError,
+  logChainResponse,
+  MAX_DELAY_SECONDS,
+  MAX_RETRIES,
+} from "./transport-retry"
 
 // --- Constants ---
 
@@ -24,11 +39,7 @@ export const API_VERSION = "2026-01-09"
 export const MODELS_API_VERSION = "2026-06-01"
 // Intentionally reuse the VS Code chat integration identifier.
 export const INTEGRATION_ID = "vscode-chat"
-export const MAX_RETRIES = 1
-export const BASE_DELAY_SECONDS = 5
-export const BACKOFF_FACTOR = 2
 export const INITIAL_RETRY_BACKOFF_EXTRA_SECONDS = 1
-export const MAX_DELAY_SECONDS = 180
 export const RETRYABLE_STATUSES = new Set([408, 429, 500, 502, 503, 504])
 
 // --- Base URL ---
@@ -170,43 +181,6 @@ async function isDeterministic400Response(
   return true
 }
 
-// --- Retryable Error Detection ---
-
-function isRetryableError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false
-
-  const message = error.message.toLowerCase()
-  const causeMessage =
-    error.cause instanceof Error ? error.cause.message.toLowerCase() : ""
-
-  if (
-    error.name === "AbortError"
-    || message.includes("aborted")
-    || causeMessage.includes("aborted")
-  ) {
-    return false
-  }
-
-  const retryablePatterns = [
-    "fetch failed",
-    "connection reset",
-    "econnreset",
-    "socket hang up",
-    "etimedout",
-    "econnrefused",
-    "network error",
-    "aborted",
-    "timeout",
-    "terminated",
-    "goaway",
-    "other side closed",
-  ]
-
-  return retryablePatterns.some(
-    (pattern) => message.includes(pattern) || causeMessage.includes(pattern),
-  )
-}
-
 // --- Header Normalization ---
 
 function toHeaderRecord(
@@ -265,30 +239,6 @@ function bodyToDebugString(body: DebuggableBody): string | null {
     return new TextDecoder().decode(body)
   }
   return `[unavailable body type: ${getBodyTypeName(body)}]`
-}
-
-function toLlmDebugLogError(error: unknown): LlmDebugLogError {
-  if (error instanceof Error) {
-    return {
-      message: error.message,
-      name: error.name || "Error",
-      ...(error.stack ? { stack: error.stack } : {}),
-    }
-  }
-
-  return { message: String(error), name: "Error" }
-}
-
-function isAbortLikeError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false
-  const message = error.message.toLowerCase()
-  const causeMessage =
-    error.cause instanceof Error ? error.cause.message.toLowerCase() : ""
-  return (
-    error.name === "AbortError"
-    || message.includes("aborted")
-    || causeMessage.includes("aborted")
-  )
 }
 
 async function captureLlmDebugResponse(
@@ -370,25 +320,14 @@ function setAuthorizationHeader(
   return nextHeaders
 }
 
-function shouldRefreshSingleToken401(
-  response: Response,
-  attempt: number,
-  maxAttempts: number,
-): boolean {
+function canRefreshSingleToken401(response: Response): boolean {
   return (
-    response.status === 401
-    && !state.isMultiToken
-    && Boolean(state.githubToken)
-    && attempt < maxAttempts - 1
+    response.status === 401 && !state.isMultiToken && Boolean(state.githubToken)
   )
 }
 
-function shouldRetryHttpStatus(
-  response: Response,
-  attempt: number,
-  maxAttempts: number,
-): boolean {
-  return RETRYABLE_STATUSES.has(response.status) && attempt < maxAttempts - 1
+function isRetryableStatus(response: Response): boolean {
+  return RETRYABLE_STATUSES.has(response.status)
 }
 
 function setCurrentCopilotToken(token: string): void {
@@ -425,11 +364,6 @@ function calculateHttpRetryDelay(
   return Math.min(baseDelay + retryBackoffExtraSeconds, MAX_DELAY_SECONDS)
 }
 
-function calculateNetworkRetryDelay(attempt: number): number {
-  const exponentialDelay = BASE_DELAY_SECONDS * BACKOFF_FACTOR ** attempt
-  return Math.min(exponentialDelay, MAX_DELAY_SECONDS)
-}
-
 function applyRetryJitter(delaySeconds: number): number {
   const jitterMultiplier = 0.8 + Math.random() * 0.4
   return Math.min(delaySeconds * jitterMultiplier, MAX_DELAY_SECONDS)
@@ -437,12 +371,110 @@ function applyRetryJitter(delaySeconds: number): number {
 
 // --- Fetch with Retry ---
 
+async function refreshTokenForRetry(
+  headers: Record<string, string>,
+  requestInit: RequestInit | undefined,
+  path: string,
+): Promise<RequestInit> {
+  consola.warn(`HTTP 401 on ${path}, refreshing Copilot token`)
+  const tokenData = await getCopilotToken()
+  setCurrentCopilotToken(tokenData.token)
+
+  return {
+    ...requestInit,
+    headers: setAuthorizationHeader(headers, tokenData.token),
+  }
+}
+
+function planHttpRetryDelaySeconds(options: {
+  attempt: number
+  path: string
+  response: Response
+  retryBackoffExtraSeconds: number
+}): number {
+  const { attempt, path, response, retryBackoffExtraSeconds } = options
+  const rawDelaySeconds = calculateHttpRetryDelay(
+    response.headers.get("retry-after"),
+    retryBackoffExtraSeconds,
+  )
+  const delaySeconds = applyRetryJitter(rawDelaySeconds)
+
+  consola.warn(
+    `HTTP ${response.status} on ${path} (attempt ${attempt + 1}), retrying in ${delaySeconds.toFixed(1)}s`,
+  )
+  Sentry.addBreadcrumb({
+    category: "copilot",
+    message: `HTTP ${response.status} on ${path} (attempt ${attempt + 1})`,
+    level: "warning",
+    data: {
+      status: response.status,
+      delay: delaySeconds,
+      rawDelay: rawDelaySeconds,
+    },
+  })
+
+  return delaySeconds
+}
+
+function recordQuotaSnapshot(response: Response): void {
+  const quota = parseQuotaHeaders(response)
+  if (quota) {
+    consola.debug("Copilot quota snapshot:", quota)
+  }
+  captureQuotaHeaders(response)
+}
+
+type ResponseAction =
+  | { delaySeconds: number; kind: "retry-status" }
+  | { kind: "refresh-token" }
+  | { kind: "return" }
+
+/** Decide what an upstream response means, claiming budget for any resend. */
+async function classifyResponse(options: {
+  attempt: number
+  claimRetry: RetryClaim
+  path: string
+  response: Response
+  retryBackoffExtraSeconds: number
+}): Promise<ResponseAction> {
+  const { attempt, claimRetry, path, response, retryBackoffExtraSeconds } =
+    options
+
+  if (canRefreshSingleToken401(response) && claimRetry()) {
+    return { kind: "refresh-token" }
+  }
+
+  if (response.status === 400) {
+    await isDeterministic400Response(response)
+    return { kind: "return" }
+  }
+
+  if (isRetryableStatus(response) && claimRetry()) {
+    return {
+      delaySeconds: planHttpRetryDelaySeconds({
+        attempt,
+        path,
+        response,
+        retryBackoffExtraSeconds,
+      }),
+      kind: "retry-status",
+    }
+  }
+
+  return { kind: "return" }
+}
+
 export async function copilotFetch(
   path: string,
   init?: RequestInit,
-  fetchOptions?: { baseUrl?: string },
+  fetchOptions?: { baseUrl?: string; retryBudget?: RetryBudget },
 ): Promise<Response> {
   const url = `${fetchOptions?.baseUrl ?? copilotBaseUrl()}${path}`
+  const budget = fetchOptions?.retryBudget ?? createRetryBudget()
+  // Both caps apply: the shared routed-call allowance and this invocation's
+  // own limit, so one copilotFetch can never drain the whole budget.
+  const claimRetry: RetryClaim = createRetryClaim(budget)
+  const chain = createTransportChain(path, randomUUID())
   const maxAttempts = MAX_RETRIES + 1
   let retryBackoffExtraSeconds = INITIAL_RETRY_BACKOFF_EXTRA_SECONDS
   let requestInit = init
@@ -452,6 +484,8 @@ export async function copilotFetch(
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     let debugLogId: string | undefined
+    const attemptStartedAtMs = Date.now()
+    chain.attempt = attempt
 
     try {
       const headers = toHeaderRecord(requestInit?.headers)
@@ -459,84 +493,45 @@ export async function copilotFetch(
 
       debugLogId = startLlmDebugAttempt({ headers, path, requestInit, url })
 
-      const response = await fetch(url, {
-        ...requestInit,
-        headers,
-      })
+      const response = await fetch(url, { ...requestInit, headers })
 
       captureLlmDebugAttemptResponse(debugLogId, response)
+      recordQuotaSnapshot(response)
 
-      // Log quota headers
-      const quota = parseQuotaHeaders(response)
-      if (quota) {
-        consola.debug("Copilot quota snapshot:", quota)
-      }
-      captureQuotaHeaders(response)
+      const action = await classifyResponse({
+        attempt,
+        claimRetry,
+        path,
+        response,
+        retryBackoffExtraSeconds,
+      })
 
-      if (shouldRefreshSingleToken401(response, attempt, maxAttempts)) {
-        consola.warn(`HTTP 401 on ${path}, refreshing Copilot token`)
-        const tokenData = await getCopilotToken()
-        setCurrentCopilotToken(tokenData.token)
-        requestInit = {
-          ...requestInit,
-          headers: setAuthorizationHeader(headers, tokenData.token),
-        }
+      if (action.kind === "refresh-token") {
+        requestInit = await refreshTokenForRetry(headers, requestInit, path)
         continue
       }
 
-      if (response.status === 400) {
-        await isDeterministic400Response(response)
-        return response
-      }
-
-      // Check for retryable HTTP status codes
-      if (shouldRetryHttpStatus(response, attempt, maxAttempts)) {
+      if (action.kind === "retry-status") {
         lastResponse = response
-        const rawDelaySeconds = calculateHttpRetryDelay(
-          response.headers.get("retry-after"),
-          retryBackoffExtraSeconds,
-        )
         retryBackoffExtraSeconds *= BACKOFF_FACTOR
-        const delaySeconds = applyRetryJitter(rawDelaySeconds)
-        consola.warn(
-          `HTTP ${response.status} on ${path} (attempt ${attempt + 1}/${maxAttempts}), retrying in ${delaySeconds.toFixed(1)}s`,
-        )
-        Sentry.addBreadcrumb({
-          category: "copilot",
-          message: `HTTP ${response.status} on ${path} (attempt ${attempt + 1}/${maxAttempts})`,
-          level: "warning",
-          data: {
-            status: response.status,
-            delay: delaySeconds,
-            rawDelay: rawDelaySeconds,
-          },
-        })
-        await sleep(delaySeconds * 1000)
+        await abortableSleep(action.delaySeconds * 1000, requestInit?.signal)
         continue
       }
 
+      logChainResponse(chain, Date.now() - attemptStartedAtMs, response.status)
       return response
     } catch (error) {
       lastError = error as Error
-
       failLlmDebugAttempt(debugLogId, error)
 
-      if (!isRetryableError(error) || attempt === maxAttempts - 1) {
-        throw error
-      }
-
-      const delaySeconds = calculateNetworkRetryDelay(attempt)
-      consola.warn(
-        `Fetch failed on ${path} (attempt ${attempt + 1}/${maxAttempts}), retrying in ${delaySeconds}s:`,
-        lastError.message,
-      )
-      Sentry.addBreadcrumb({
-        category: "copilot",
-        message: `Fetch error on ${path} (attempt ${attempt + 1}/${maxAttempts})`,
-        level: "warning",
-        data: { error: lastError.message, delay: delaySeconds },
+      // Resolves once the backoff has elapsed; throws to end the chain.
+      await handleTransportFailure({
+        attemptMs: Date.now() - attemptStartedAtMs,
+        chain,
+        claimRetry,
+        error,
+        signal: requestInit?.signal,
       })
-      await sleep(delaySeconds * 1000)
     }
   }
 

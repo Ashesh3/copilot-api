@@ -203,8 +203,11 @@ export interface LlmDebugEntry {
 }
 
 export interface LlmDebugLogError {
+  code?: string
+  errno?: number
   message: string
   name: string
+  path?: string
   stack?: string
 }
 
