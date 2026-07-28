@@ -21,6 +21,7 @@ import {
   type AnthropicTextBlock,
   type AnthropicThinkingBlock,
   type AnthropicTool,
+  type AnthropicToolReferenceBlock,
   type AnthropicToolResultBlock,
   type AnthropicToolUseBlock,
   type AnthropicUserContentBlock,
@@ -367,7 +368,11 @@ function isValidReasoningSignature(
 function mapContent(
   content:
     | string
-    | Array<AnthropicUserContentBlock | AnthropicAssistantContentBlock>,
+    | Array<
+        | AnthropicUserContentBlock
+        | AnthropicAssistantContentBlock
+        | AnthropicToolReferenceBlock
+      >,
 ): string | Array<ContentPart> | null {
   if (typeof content === "string") {
     return content
@@ -382,10 +387,21 @@ function mapContent(
   if (!hasAttachment) {
     return content
       .filter(
-        (block): block is AnthropicTextBlock | AnthropicThinkingBlock =>
-          block.type === "text" || block.type === "thinking",
+        (
+          block,
+        ): block is
+          | AnthropicTextBlock
+          | AnthropicThinkingBlock
+          | AnthropicToolReferenceBlock =>
+          block.type === "text"
+          || block.type === "thinking"
+          || block.type === "tool_reference",
       )
-      .map((block) => (block.type === "text" ? block.text : block.thinking))
+      .map((block) => {
+        if (block.type === "text") return block.text
+        if (block.type === "thinking") return block.thinking
+        return JSON.stringify(block)
+      })
       .join("\n\n")
   }
 
@@ -431,6 +447,10 @@ function mapContent(
           })
         }
 
+        break
+      }
+      case "tool_reference": {
+        contentParts.push({ type: "text", text: JSON.stringify(block) })
         break
       }
       // No default

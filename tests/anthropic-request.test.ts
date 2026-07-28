@@ -75,6 +75,31 @@ describe("Anthropic to OpenAI translation logic", () => {
     expect(isValidChatCompletionRequest(openAIPayload)).toBe(true)
   })
 
+  test("preserves tool references as explicit text on Chat Completions", () => {
+    const openAIPayload = translateToOpenAI({
+      model: "gpt-4o",
+      max_tokens: 64,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "toolu_search",
+              content: [{ type: "tool_reference", tool_name: "Bash" }],
+            },
+          ],
+        },
+      ],
+    })
+
+    expect(openAIPayload.messages).toContainEqual({
+      role: "tool",
+      tool_call_id: "toolu_search",
+      content: '{"type":"tool_reference","tool_name":"Bash"}',
+    })
+  })
+
   test("should translate comprehensive Anthropic payload to valid OpenAI payload", () => {
     const anthropicPayload: AnthropicMessagesPayload = {
       model: "gpt-4o",

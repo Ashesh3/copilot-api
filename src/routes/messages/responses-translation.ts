@@ -769,6 +769,10 @@ const convertToolResultContent = (
           result.push(createFileContent(block))
           break
         }
+        case "tool_reference": {
+          result.push(createTextContent(JSON.stringify(block)))
+          break
+        }
         default: {
           break
         }

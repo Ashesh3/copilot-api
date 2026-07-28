@@ -276,11 +276,12 @@ async function handleCompletionInner(
     (m) => m.id === anthropicPayload.model,
   )
 
-  // Log the requested vs routed model
-  // Base64 PDF documents can only reach claude models through the native
-  // /v1/messages endpoint (chat/completions cannot carry them)
+  // Base64 PDFs and ToolSearch references can only remain structural on the
+  // native /v1/messages endpoint. Translated endpoints use a textual fallback.
+  const hasPdfDocuments = payloadHasPdfDocuments(anthropicPayload)
+  const hasToolReferences = payloadHasToolReference(anthropicPayload)
   const usesNativeMessages =
-    payloadHasPdfDocuments(anthropicPayload)
+    (hasPdfDocuments || hasToolReferences)
     && modelSupportsNativeMessages(selectedModel)
 
   let apiType = "ChatCompletions"
@@ -288,7 +289,7 @@ async function handleCompletionInner(
     apiType = "AnthropicMessages"
     recordNonDefaultBehavior(c, {
       kind: "endpoint_fallback",
-      message: `PDF document attachment routed ${anthropicPayload.model} to native /v1/messages`,
+      message: `${hasPdfDocuments ? "PDF document attachment" : "ToolSearch reference"} routed ${anthropicPayload.model} to native /v1/messages`,
       data: {
         model: anthropicPayload.model,
         sourceEndpoint: "ChatCompletions",
@@ -1714,6 +1715,19 @@ const mergeContentWithTexts = (
   return { ...tr, content: [...textBlocks] }
 }
 
+const hasToolReference = (toolResult: AnthropicToolResultBlock): boolean =>
+  Array.isArray(toolResult.content)
+  && toolResult.content.some((block) => block.type === "tool_reference")
+
+const payloadHasToolReference = (payload: AnthropicMessagesPayload): boolean =>
+  payload.messages.some(
+    (message) =>
+      Array.isArray(message.content)
+      && message.content.some(
+        (block) => block.type === "tool_result" && hasToolReference(block),
+      ),
+  )
+
 const mergeToolResultForClaude = (
   anthropicPayload: AnthropicMessagesPayload,
 ): void => {
@@ -1735,7 +1749,14 @@ const mergeToolResultForClaude = (
       }
     }
 
-    if (!valid || toolResults.length === 0 || textBlocks.length === 0) continue
+    if (
+      !valid
+      || toolResults.length === 0
+      || textBlocks.length === 0
+      || toolResults.some((toolResult) => hasToolReference(toolResult))
+    ) {
+      continue
+    }
 
     msg.content = mergeToolResult(toolResults, textBlocks)
   }

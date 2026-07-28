@@ -185,6 +185,29 @@ test("refreshes a multi-token account and retries after a 401", async () => {
   })
 })
 
+test("disables pooling for multi-token model discovery", async () => {
+  const account = tokenPool.addAccount("github-model-token", "individual", 1110)
+  queuedResults.push(
+    new Response(
+      JSON.stringify({
+        token: "copilot-model-token",
+        expires_at: 1_900_000_000,
+        refresh_in: 1800,
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    ),
+    new Response(JSON.stringify({ object: "list", data: [] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }),
+  )
+
+  await tokenPool.initializeAccount(account)
+
+  expect(capturedRequests[1]?.url).toContain("/models")
+  expect(capturedRequests[1]?.init?.keepalive).toBe(false)
+})
+
 test("does not fail over aborted multi-token requests", async () => {
   const modelId = "router-abort-test"
   registerAccount(1003, modelId, "abort-primary-token")

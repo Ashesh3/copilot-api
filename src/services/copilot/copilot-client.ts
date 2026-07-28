@@ -19,6 +19,7 @@ import { getCopilotToken } from "~/services/github/get-copilot-token"
 
 import type { RetryBudget, RetryClaim } from "./transport-retry"
 
+import { createCopilotTransportInit } from "./transport-options"
 import {
   abortableSleep,
   BACKOFF_FACTOR,
@@ -530,7 +531,11 @@ export async function copilotFetch(
 
       debugLogId = startLlmDebugAttempt({ headers, path, requestInit, url })
 
-      const response = await fetch(url, { ...requestInit, headers })
+      const transportInit = createCopilotTransportInit({
+        ...requestInit,
+        headers,
+      })
+      const response = await fetch(url, transportInit)
 
       captureLlmDebugAttemptResponse(debugLogId, response)
       recordQuotaSnapshot(response)

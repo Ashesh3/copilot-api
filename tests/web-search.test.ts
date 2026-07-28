@@ -19,6 +19,7 @@ import {
 } from "../src/services/copilot/mcp-web-search"
 
 const originalFetch = globalThis.fetch
+type BunTimeoutRequestInit = RequestInit & { timeout?: boolean | number }
 const fetchMock = mock((_url: string, init?: RequestInit) => {
   const body = JSON.parse(
     typeof init?.body === "string" ? init.body : "{}",
@@ -76,6 +77,25 @@ test("uses the current Copilot CLI MCP web-search contract and reuses its sessio
   expect(initializeHeaders.get("copilot-integration-id")).toBeNull()
   expect(firstHeaders.get("mcp-session-id")).toBe("session-1")
   expect(secondHeaders.get("mcp-session-id")).toBe("session-1")
+  expect(initialize.keepalive).toBe(false)
+  expect(firstCall.keepalive).toBe(false)
+  expect(secondCall.keepalive).toBe(false)
+  expect((initialize as BunTimeoutRequestInit).timeout).toBeUndefined()
+  expect((firstCall as BunTimeoutRequestInit).timeout).toBeUndefined()
+  expect((secondCall as BunTimeoutRequestInit).timeout).toBeUndefined()
+})
+
+test("replaces the MCP idle timeout only when caller cancellation exists", async () => {
+  const controller = new AbortController()
+
+  await executeWebSearch("signal query", controller.signal)
+
+  const initialize = fetchMock.mock.calls[0]?.[1] as BunTimeoutRequestInit
+  const toolCall = fetchMock.mock.calls[1]?.[1] as BunTimeoutRequestInit
+  expect(initialize.keepalive).toBe(false)
+  expect(initialize.timeout).toBeUndefined()
+  expect(toolCall.keepalive).toBe(false)
+  expect(toolCall.timeout).toBe(false)
 })
 
 test("converts Anthropic versioned web search and preserves domain constraints", () => {

@@ -96,6 +96,18 @@ const nativeMessagesModels: ModelsResponse = {
   ],
 }
 
+const toolReferenceTurn = {
+  role: "user",
+  content: [
+    {
+      type: "tool_result",
+      tool_use_id: "toolu_search",
+      content: [{ type: "tool_reference", tool_name: "Bash" }],
+    },
+    { type: "text", text: "Tool loaded." },
+  ],
+}
+
 function parseRequestBody(init?: RequestInit): ChatCompletionsPayload {
   if (typeof init?.body !== "string") {
     return {} as ChatCompletionsPayload
@@ -261,6 +273,173 @@ test("routes PDF documents to native /v1/messages and strips foreign thinking bl
   // …but the PDF document block is preserved.
   expect(blocks.some((b) => b.type === "document")).toBe(true)
 })
+
+test("preserves ToolSearch tool references on the native messages route", async () => {
+  state.models = nativeMessagesModels
+  const pdfB64 = Buffer.from("%PDF-1.4 tool reference regression").toString(
+    "base64",
+  )
+
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-opus-4.8",
+      max_tokens: 64,
+      tools: [
+        {
+          name: "Bash",
+          description: "Run a shell command",
+          input_schema: { type: "object", properties: {} },
+          defer_loading: true,
+        },
+        {
+          name: "ToolSearch",
+          description: "Load deferred tools",
+          input_schema: {
+            type: "object",
+            properties: { query: { type: "string" } },
+          },
+        },
+        {
+          name: "DeferredToolPlaceholder",
+          description: "Keep deferred tool loading active",
+          input_schema: { type: "object", properties: {} },
+          defer_loading: true,
+        },
+      ],
+      messages: [
+        { role: "user", content: "Load Bash before reading the document." },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "toolu_search",
+              name: "ToolSearch",
+              input: { query: "select:Bash" },
+            },
+          ],
+        },
+        toolReferenceTurn,
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Summarize this." },
+            {
+              type: "document",
+              source: {
+                type: "base64",
+                media_type: "application/pdf",
+                data: pdfB64,
+              },
+            },
+          ],
+        },
+      ],
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamUrl).toContain("/v1/messages")
+  const messages =
+    (
+      lastUpstreamPayload as unknown as {
+        messages?: Array<{ content?: unknown; role: string }>
+      }
+    ).messages ?? []
+  const toolSearchTurn = messages.find(
+    (message) =>
+      Array.isArray(message.content)
+      && message.content.some(
+        (block: unknown) =>
+          isToolResultBlock(block) && block.tool_use_id === "toolu_search",
+      ),
+  )
+
+  expect(toolSearchTurn?.content).toEqual([
+    {
+      type: "tool_result",
+      tool_use_id: "toolu_search",
+      content: [{ type: "tool_reference", tool_name: "Bash" }],
+    },
+    { type: "text", text: "Tool loaded." },
+  ])
+})
+
+test("routes ToolSearch references to native messages without a PDF", async () => {
+  state.models = nativeMessagesModels
+
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-opus-4.8",
+      max_tokens: 64,
+      messages: [toolReferenceTurn],
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamUrl).toContain("/v1/messages")
+})
+
+test("continues merging sibling text into ordinary tool results", async () => {
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-4o",
+      max_tokens: 32,
+      messages: [
+        { role: "user", content: "Run the parser." },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "toolu_parser",
+              name: "parse",
+              input: {},
+            },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "toolu_parser",
+              content: "parsed",
+            },
+            { type: "text", text: "Use that result." },
+          ],
+        },
+      ],
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  const messages = lastUpstreamPayload?.messages ?? []
+  const toolMessage = messages.find(
+    (message) =>
+      message.role === "tool" && message.tool_call_id === "toolu_parser",
+  )
+  expect(toolMessage?.content).toBe("parsed\n\nUse that result.")
+})
+
+function isToolResultBlock(
+  value: unknown,
+): value is { tool_use_id: string; type: "tool_result" } {
+  return (
+    typeof value === "object"
+    && value !== null
+    && "type" in value
+    && value.type === "tool_result"
+    && "tool_use_id" in value
+    && typeof value.tool_use_id === "string"
+  )
+}
 
 test("forwards native thinking budgets above the advertised model limit", async () => {
   state.models = nativeMessagesModels

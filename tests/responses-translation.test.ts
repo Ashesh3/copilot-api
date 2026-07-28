@@ -20,6 +20,37 @@ test("keeps Anthropics max_tokens when translating to Responses payload", () => 
   expect(translated.max_output_tokens).toBe(64)
 })
 
+test("preserves tool references as explicit text on Responses", () => {
+  const translated = translateAnthropicMessagesToResponsesPayload({
+    model: "gpt-5.4",
+    max_tokens: 64,
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "toolu_search",
+            content: [{ type: "tool_reference", tool_name: "Bash" }],
+          },
+        ],
+      },
+    ],
+  })
+
+  expect(translated.input).toContainEqual({
+    type: "function_call_output",
+    call_id: "toolu_search",
+    output: [
+      {
+        type: "input_text",
+        text: '{"type":"tool_reference","tool_name":"Bash"}',
+      },
+    ],
+    status: "completed",
+  })
+})
+
 test("derives safety and cache fields from Claude JSON metadata.user_id", () => {
   const payload: AnthropicMessagesPayload = {
     model: "gpt-4o-mini",
