@@ -77,12 +77,22 @@ export interface AnthropicDocumentBlock {
   citations?: { enabled?: boolean } | null
 }
 
+export interface AnthropicToolReferenceBlock {
+  type: "tool_reference"
+  tool_name: string
+}
+
 export interface AnthropicToolResultBlock {
   type: "tool_result"
   tool_use_id: string
   content:
     | string
-    | Array<AnthropicTextBlock | AnthropicImageBlock | AnthropicDocumentBlock>
+    | Array<
+        | AnthropicTextBlock
+        | AnthropicImageBlock
+        | AnthropicDocumentBlock
+        | AnthropicToolReferenceBlock
+      >
   is_error?: boolean
 }
 

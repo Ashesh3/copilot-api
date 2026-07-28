@@ -12,6 +12,8 @@ import {
   type AnthropicImageBlock,
   type AnthropicMessagesPayload,
   type AnthropicTextBlock,
+  type AnthropicToolReferenceBlock,
+  type AnthropicToolResultBlock,
   type AnthropicUserContentBlock,
 } from "./anthropic-types"
 
@@ -37,16 +39,7 @@ export async function normalizeAnthropicAttachments(
     const normalized: Array<AnthropicUserContentBlock> = []
     for (const block of message.content) {
       if (block.type === "tool_result" && Array.isArray(block.content)) {
-        const inner: Array<
-          AnthropicTextBlock | AnthropicImageBlock | AnthropicDocumentBlock
-        > = []
-        for (const innerBlock of block.content) {
-          inner.push(
-            ...((await normalizeBlock(innerBlock, signal)) as Array<
-              AnthropicTextBlock | AnthropicImageBlock | AnthropicDocumentBlock
-            >),
-          )
-        }
+        const inner = await normalizeToolResultContent(block.content, signal)
         normalized.push({ ...block, content: inner })
         continue
       }
@@ -61,6 +54,33 @@ type NormalizableBlock =
   | AnthropicTextBlock
   | AnthropicImageBlock
   | AnthropicDocumentBlock
+
+async function normalizeToolResultContent(
+  content: Exclude<AnthropicToolResultBlock["content"], string>,
+  signal?: AbortSignal,
+): Promise<
+  Array<
+    | AnthropicTextBlock
+    | AnthropicImageBlock
+    | AnthropicDocumentBlock
+    | AnthropicToolReferenceBlock
+  >
+> {
+  const normalized: Array<
+    | AnthropicTextBlock
+    | AnthropicImageBlock
+    | AnthropicDocumentBlock
+    | AnthropicToolReferenceBlock
+  > = []
+  for (const block of content) {
+    if (block.type === "tool_reference") {
+      normalized.push(block)
+      continue
+    }
+    normalized.push(...(await normalizeBlock(block, signal)))
+  }
+  return normalized
+}
 
 async function normalizeBlock<T extends AnthropicUserContentBlock>(
   block: T | NormalizableBlock,

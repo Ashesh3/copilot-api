@@ -29,6 +29,10 @@ const transportEvents: Array<{
 }> = []
 const httpRetrySleeps: Array<number> = []
 
+type BunTimeoutRequestInit = RequestInit & {
+  timeout?: boolean | number
+}
+
 function getRequestUrl(url: string | URL | Request): string {
   if (typeof url === "string") {
     return url
@@ -339,6 +343,52 @@ test("retries Bun's socket-closed ECONNRESET and returns the retried response", 
 
   expect(response.status).toBe(200)
   expect(capturedRequests).toHaveLength(2)
+})
+
+test("disables Bun pooling and replaces its idle deadline with caller cancellation", async () => {
+  queuedResults.push(
+    bunSocketClosedError(),
+    new Response("{}", { status: 200 }),
+  )
+  const abortController = new AbortController()
+  const requestInit: BunTimeoutRequestInit = {
+    method: "POST",
+    headers: AUTH_HEADERS,
+    keepalive: true,
+    signal: abortController.signal,
+    timeout: 1,
+  }
+
+  const response = await copilotFetch("/responses", requestInit)
+
+  expect(response.status).toBe(200)
+  expect(capturedRequests).toHaveLength(2)
+  expect(capturedRequests.map(({ init }) => init?.keepalive)).toEqual([
+    false,
+    false,
+  ])
+  expect(
+    capturedRequests.map(
+      ({ init }) => (init as BunTimeoutRequestInit | undefined)?.timeout,
+    ),
+  ).toEqual([false, false])
+})
+
+test("keeps Bun's runtime timeout on signal-less control-plane calls", async () => {
+  queuedResults.push(new Response("{}", { status: 200 }))
+  const requestInit: BunTimeoutRequestInit = {
+    method: "GET",
+    timeout: false,
+  }
+
+  const response = await copilotFetch("/models", requestInit)
+
+  expect(response.status).toBe(200)
+  expect(capturedRequests).toHaveLength(1)
+  expect(capturedRequests[0]?.init?.keepalive).toBe(false)
+  expect(
+    (capturedRequests[0]?.init as BunTimeoutRequestInit | undefined)?.timeout,
+  ).toBeUndefined()
 })
 
 test("retries when the connection code is only on error.cause", async () => {

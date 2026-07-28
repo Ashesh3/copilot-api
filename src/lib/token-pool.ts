@@ -9,6 +9,7 @@ import {
   hasModelRoutingOverride,
   isModelEnabledForAccount,
 } from "~/lib/model-routing"
+import { createCopilotTransportInit } from "~/services/copilot/transport-options"
 
 // Inline constants from copilot-client to avoid circular dependencies
 const MODELS_API_VERSION = "2026-06-01"
@@ -426,9 +427,12 @@ export class TokenPool {
     account: Account,
     baseUrl: string,
   ): Promise<ModelsResponse> {
-    const response = await fetch(`${baseUrl}/models`, {
-      headers: this.buildCopilotHeaders(account),
-    })
+    const response = await fetch(
+      `${baseUrl}/models`,
+      createCopilotTransportInit({
+        headers: this.buildCopilotHeaders(account),
+      }),
+    )
 
     if (!response.ok) {
       const errorBody = await response.text()

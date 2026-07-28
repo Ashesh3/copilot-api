@@ -9,6 +9,7 @@ import {
 import { state } from "~/lib/state"
 import { tokenPool } from "~/lib/token-pool"
 import { copilotBaseUrl } from "~/services/copilot/copilot-client"
+import { createCopilotTransportInit } from "~/services/copilot/transport-options"
 
 // --- MCP Session State ---
 
@@ -153,12 +154,15 @@ const mcpFetch = async (
   options: McpFetchOptions,
 ): Promise<Response> => {
   const url = `${options.credentials.baseUrl}${MCP_PATH}`
-  return fetch(url, {
-    method: "POST",
-    headers: mcpHeaders(options.credentials, options.sessionId),
-    body: JSON.stringify(body),
-    signal: options.signal,
-  })
+  return fetch(
+    url,
+    createCopilotTransportInit({
+      method: "POST",
+      headers: mcpHeaders(options.credentials, options.sessionId),
+      body: JSON.stringify(body),
+      signal: options.signal,
+    }),
+  )
 }
 
 /**
