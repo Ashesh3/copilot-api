@@ -34,6 +34,20 @@ cleanup_smoke_file() {
   rm -f smoke.txt
 }
 
+cleanup_codex_output() {
+  rm -f codex-output.txt
+}
+
+cleanup_claude_output() {
+  rm -f claude-output.json
+}
+
+cleanup_gemini_output() {
+  rm -f gemini-output.json
+}
+
+trap 'cleanup_smoke_file; cleanup_codex_output; cleanup_claude_output; cleanup_gemini_output' EXIT
+
 ###############################################################################
 # Direct API test (curl) to verify the Messages endpoint works
 ###############################################################################
@@ -53,8 +67,11 @@ run_test "api:messages-endpoint" '
       \"stream\": false,
       \"messages\": [{\"role\": \"user\", \"content\": \"Reply with exactly: SMOKE_TEST_OK\"}]
     }" 2>&1)
+  status=$?
   echo "$response"
-  echo "$response" | grep -q "SMOKE_TEST_OK"
+  test "$status" -eq 0 \
+    && echo "$response" | grep -q "HTTP_STATUS:200" \
+    && echo "$response" | grep -q "SMOKE_TEST_OK"
 '
 
 ###############################################################################
@@ -74,16 +91,23 @@ if command -v claude &>/dev/null; then
   export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1"
 
   run_test "claude-code:text-generation" '
-    output=$(claude -p "Reply with exactly: SMOKE_TEST_OK" --output-format json 2>&1)
+    output_file="claude-output.json"
+    rm -f "$output_file"
+    claude -p "Reply with exactly: SMOKE_TEST_OK" --output-format json \
+      > "$output_file"
+    status=$?
+    output=$(cat "$output_file")
     echo "$output"
-    echo "$output" | grep -q "SMOKE_TEST_OK"
+    test "$status" -eq 0 && python3 -c "import json, sys; payload = json.load(open(sys.argv[1])); raise SystemExit(0 if payload.get(\"result\", \"\").strip() == \"SMOKE_TEST_OK\" else \"Claude response did not match SMOKE_TEST_OK\")" "$output_file"
   '
+  cleanup_claude_output
 
   cleanup_smoke_file
   run_test "claude-code:tool-calling" '
     output=$(claude -p "Create a file called smoke.txt with the content: hello" --dangerously-skip-permissions --output-format json 2>&1)
+    status=$?
     echo "$output"
-    test -f smoke.txt && grep -q "hello" smoke.txt
+    test "$status" -eq 0 && test -f smoke.txt && grep -q "hello" smoke.txt
   '
   cleanup_smoke_file
 else
@@ -100,20 +124,32 @@ echo "  Codex CLI Tests"
 echo "==============================="
 
 if command -v codex &>/dev/null; then
-  export OPENAI_BASE_URL="$SERVER_URL/v1"
   export OPENAI_API_KEY="dummy"
+  CODEX_BASE_URL_CONFIG="openai_base_url=\"$SERVER_URL/v1\""
+  export CODEX_BASE_URL_CONFIG
 
   run_test "codex:text-generation" '
-    output=$(codex exec "Reply with exactly: SMOKE_TEST_OK" 2>&1)
+    output_file="codex-output.txt"
+    rm -f "$output_file"
+    output=$(codex exec --ignore-user-config --ephemeral \
+      --config "$CODEX_BASE_URL_CONFIG" \
+      --output-last-message "$output_file" \
+      "Reply with exactly: SMOKE_TEST_OK" 2>&1)
+    status=$?
     echo "$output"
-    echo "$output" | grep -q "SMOKE_TEST_OK"
+    test "$status" -eq 0 && test "$(tr -d "\r\n" < "$output_file")" = "SMOKE_TEST_OK"
   '
+  cleanup_codex_output
 
   cleanup_smoke_file
   run_test "codex:tool-calling" '
-    output=$(codex exec --dangerously-bypass-approvals-and-sandbox "Create a file called smoke.txt with the content: hello" 2>&1)
+    output=$(codex exec --ignore-user-config --ephemeral \
+      --config "$CODEX_BASE_URL_CONFIG" \
+      --dangerously-bypass-approvals-and-sandbox \
+      "Create a file called smoke.txt with the content: hello" 2>&1)
+    status=$?
     echo "$output"
-    test -f smoke.txt
+    test "$status" -eq 0 && test -f smoke.txt && grep -q "hello" smoke.txt
   '
   cleanup_smoke_file
 else
@@ -132,19 +168,30 @@ echo "==============================="
 if command -v gemini &>/dev/null; then
   export GEMINI_API_KEY="dummy"
   export GOOGLE_GEMINI_BASE_URL="$SERVER_URL"
+  export GEMINI_CLI_SYSTEM_SETTINGS_PATH="$PWD/tests/smoke/gemini-system-settings.json"
 
-  # Use --model to bypass Gemini CLI's internal classifier (which 404s on proxy)
+  # Explicit API-key auth avoids Gemini CLI treating the custom base URL as an
+  # invalid gateway auth method. The model bypasses its proxy-hosted classifier.
   run_test "gemini:text-generation" '
-    output=$(gemini --model gemini-2.5-pro -p "Reply with exactly: SMOKE_TEST_OK" 2>&1)
+    output_file="gemini-output.json"
+    rm -f "$output_file"
+    gemini --skip-trust --output-format json \
+      --model gemini-2.5-pro -p "Reply with exactly: SMOKE_TEST_OK" \
+      > "$output_file"
+    status=$?
+    output=$(cat "$output_file")
     echo "$output"
-    echo "$output" | grep -q "SMOKE_TEST_OK"
+    test "$status" -eq 0 && python3 -c "import json, sys; payload = json.load(open(sys.argv[1])); raise SystemExit(0 if payload.get(\"response\", \"\").strip() == \"SMOKE_TEST_OK\" else \"Gemini response did not match SMOKE_TEST_OK\")" "$output_file"
   '
+  cleanup_gemini_output
 
   cleanup_smoke_file
   run_test "gemini:tool-calling" '
-    output=$(gemini --model gemini-2.5-pro -p "Create a file called smoke.txt with the content: hello" -y 2>&1)
+    output=$(gemini --skip-trust --output-format json \
+      --model gemini-2.5-pro -p "Create a file called smoke.txt with the content: hello" -y 2>&1)
+    status=$?
     echo "$output"
-    test -f smoke.txt
+    test "$status" -eq 0 && test -f smoke.txt && grep -q "hello" smoke.txt
   '
   cleanup_smoke_file
 else
