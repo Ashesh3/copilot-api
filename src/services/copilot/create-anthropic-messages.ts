@@ -68,6 +68,33 @@ export type CreateAnthropicMessagesReturn =
   | AnthropicResponse
   | AsyncIterable<AnthropicStreamChunk>
 
+type NativeCacheControl = {
+  type: "ephemeral"
+  ttl?: "5m" | "1h"
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function serializeMessagesPayload(payload: Record<string, unknown>): string {
+  return JSON.stringify(payload, (key, value: unknown) => {
+    if (
+      key !== "cache_control"
+      || !isRecord(value)
+      || value.type !== "ephemeral"
+    ) {
+      return value
+    }
+
+    const cacheControl: NativeCacheControl = { type: "ephemeral" }
+    if (value.ttl === "5m" || value.ttl === "1h") {
+      cacheControl.ttl = value.ttl
+    }
+    return cacheControl
+  })
+}
+
 function sanitizeMessagesPayload(
   payload: AnthropicMessagesPayload,
 ): Record<string, unknown> {
@@ -164,7 +191,7 @@ export const createAnthropicMessages = async (
     ANTHROPIC_MESSAGES_ENDPOINT,
     {
       method: "POST",
-      body: JSON.stringify(body),
+      body: serializeMessagesPayload(body),
       signal: options?.signal,
     },
     {
