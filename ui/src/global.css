@@ -199,11 +199,6 @@ body {
   padding-inline-end: var(--spacing-3);
 }
 
-.responses-pretty-view,
-.responses-event-detail {
-  min-width: 0;
-}
-
 .response-inspector,
 .response-inspector-panel,
 .response-inspector-event-detail,

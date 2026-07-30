@@ -54,6 +54,7 @@ import {
 } from "../icons"
 import { ApiError, del, get } from "../lib/api"
 import { parseJsonBody } from "../lib/json-tree"
+import { requestPayloadView } from "../lib/llm-debug-detail-view"
 import { navigate, useHashRoute } from "../lib/router"
 import { useToast } from "../lib/toast"
 import { useAsyncData, usePolling } from "../lib/usePolling"
@@ -473,8 +474,9 @@ function PayloadBlock({
   wrap: boolean
 }) {
   const parsed = useMemo(() => (body ? parseJsonBody(body) : null), [body])
+  const payload = requestPayloadView(body, parsed, viewMode)
 
-  if (body === null) {
+  if (payload.kind === "empty") {
     return (
       <VStack gap={1}>
         <Text type="label" color="secondary">
@@ -488,20 +490,20 @@ function PayloadBlock({
   }
 
   const content: React.ReactNode =
-    viewMode === "pretty" && parsed ?
+    payload.kind === "tree" ?
       <JsonTreeViewer
         key={`${label}:${body}`}
-        formatted={parsed.formatted}
+        formatted={payload.formatted}
         label={label}
-        value={parsed.value}
+        value={payload.value}
         wrap={wrap}
         onCopy={onCopySuccess}
         onCopyError={onCopyError}
       />
     : <VirtualizedCodeViewer
         label={label}
-        language={parsed ? "json" : "text"}
-        value={body}
+        language={payload.language}
+        value={payload.value}
         wrap={wrap}
         onCopyError={onCopyError}
         onCopySuccess={onCopySuccess}
