@@ -1,4 +1,6 @@
 import { DropdownMenu, DropdownMenuItem } from "@astryxdesign/core/DropdownMenu"
+import { Text } from "@astryxdesign/core/Text"
+import { useState } from "react"
 
 import type { LlmDebugLogRequest } from "../lib/types"
 
@@ -36,6 +38,7 @@ export function RequestExportMenu({
   onError,
   onExport,
 }: RequestExportMenuProps) {
+  const [exportError, setExportError] = useState<string | null>(null)
   const exportRequest =
     request && body !== undefined ? { ...request, body } : request
   const requestJson =
@@ -50,70 +53,86 @@ export function RequestExportMenu({
         file.contents,
         file.type,
       )
-      onExport(file.format)
     } catch (error) {
-      reportExportError(onError, error)
+      const message = reportExportError(undefined, error)
+      setExportError(message)
+      onError?.(message)
+      return
     }
+    setExportError(null)
+    onExport(file.format)
   }
 
   return (
-    <DropdownMenu
-      button={{
-        label: "Export request",
-        variant: "secondary",
-        size: "sm",
-        icon: <DownloadIcon />,
-        isDisabled: !request,
-      }}
-      menuWidth={260}
-      placement="below"
-    >
-      <DropdownMenuItem
-        label="cURL command"
-        description="Portable shell command"
-        icon={<TerminalIcon />}
-        onClick={() => {
-          if (exportRequest) {
-            save({
-              contents: `${buildCurlRequest(exportRequest)}\n`,
-              extension: "curl",
-              format: "cURL",
-              type: REQUEST_EXPORT_MEDIA_TYPES.curl,
-            })
-          }
+    <div style={{ minWidth: 0 }}>
+      <DropdownMenu
+        button={{
+          label: "Export request",
+          variant: "secondary",
+          size: "sm",
+          icon: <DownloadIcon />,
+          isDisabled: !request,
         }}
-      />
-      <DropdownMenuItem
-        label="Request JSON"
-        description="Formatted request body"
-        icon={<DownloadIcon />}
-        isDisabled={requestJson === null}
-        onClick={() => {
-          if (requestJson !== null) {
-            save({
-              contents: requestJson,
-              extension: "json",
-              format: "JSON",
-              type: REQUEST_EXPORT_MEDIA_TYPES.json,
-            })
-          }
-        }}
-      />
-      <DropdownMenuItem
-        label="Raw HTTP request"
-        description="Request line, headers, and body"
-        icon={<CopyIcon />}
-        onClick={() => {
-          if (exportRequest) {
-            save({
-              contents: buildRawHttpRequest(exportRequest),
-              extension: "http",
-              format: "HTTP",
-              type: REQUEST_EXPORT_MEDIA_TYPES.http,
-            })
-          }
-        }}
-      />
-    </DropdownMenu>
+        menuWidth={260}
+        placement="below"
+      >
+        <DropdownMenuItem
+          label="cURL command"
+          description="POSIX shell command"
+          icon={<TerminalIcon />}
+          onClick={() => {
+            if (exportRequest) {
+              save({
+                contents: `${buildCurlRequest(exportRequest)}\n`,
+                extension: "curl",
+                format: "cURL",
+                type: REQUEST_EXPORT_MEDIA_TYPES.curl,
+              })
+            }
+          }}
+        />
+        <DropdownMenuItem
+          label="Request JSON"
+          description="Formatted request body"
+          icon={<DownloadIcon />}
+          isDisabled={requestJson === null}
+          onClick={() => {
+            if (requestJson !== null) {
+              save({
+                contents: requestJson,
+                extension: "json",
+                format: "JSON",
+                type: REQUEST_EXPORT_MEDIA_TYPES.json,
+              })
+            }
+          }}
+        />
+        <DropdownMenuItem
+          label="Raw HTTP request"
+          description="Request line, headers, and body"
+          icon={<CopyIcon />}
+          onClick={() => {
+            if (exportRequest) {
+              save({
+                contents: buildRawHttpRequest(exportRequest),
+                extension: "http",
+                format: "HTTP",
+                type: REQUEST_EXPORT_MEDIA_TYPES.http,
+              })
+            }
+          }}
+        />
+      </DropdownMenu>
+      {exportError ?
+        <div
+          role="alert"
+          style={{ color: "var(--color-error)", overflowWrap: "anywhere" }}
+        >
+          <Text type="supporting" color="inherit">
+            {exportError}
+          </Text>
+        </div>
+      : null}
+    </div>
   )
 }

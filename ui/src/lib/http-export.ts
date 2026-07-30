@@ -46,6 +46,14 @@ interface FormattedToolArguments {
   value: string
 }
 
+const STALE_BODY_HEADERS = new Set([
+  "content-encoding",
+  "content-length",
+  "content-md5",
+  "digest",
+  "transfer-encoding",
+])
+
 function formattedToolArguments(
   toolCall: ParsedToolCall,
 ): FormattedToolArguments {
@@ -58,17 +66,38 @@ function formattedToolArguments(
   return { language: "text", value: toolCall.arguments }
 }
 
+export function quotePosixShell(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`
+}
+
 export function buildCurlRequest(request: LlmDebugLogRequest): string {
   const lines = [
-    `curl -X ${request.method.toUpperCase()} ${JSON.stringify(request.url)}`,
+    `curl --request ${quotePosixShell(request.method.toUpperCase())}`,
+    `  --url ${quotePosixShell(request.url)}`,
   ]
   for (const [key, value] of Object.entries(request.headers)) {
-    lines.push(`  -H ${JSON.stringify(`${key}: ${value}`)}`)
+    lines.push(`  --header ${quotePosixShell(`${key}: ${value}`)}`)
   }
   if (request.body !== null) {
-    lines.push(`  --data-raw ${JSON.stringify(request.body)}`)
+    lines.push(`  --data-binary ${quotePosixShell(request.body)}`)
   }
   return lines.join(" \\\n")
+}
+
+function textualHttpHeaders(
+  headers: Record<string, string>,
+  body: string | null,
+): Array<[string, string]> {
+  const framed = Object.entries(headers).filter(
+    ([key]) => !STALE_BODY_HEADERS.has(key.toLowerCase()),
+  )
+  if (body) {
+    framed.push([
+      "Content-Length",
+      String(new TextEncoder().encode(body).byteLength),
+    ])
+  }
+  return framed
 }
 
 export function buildRawHttpRequest(request: LlmDebugLogRequest): string {
@@ -82,7 +111,7 @@ export function buildRawHttpRequest(request: LlmDebugLogRequest): string {
     // Preserve the captured path when the captured URL cannot be parsed.
   }
 
-  const headers = Object.entries(request.headers)
+  const headers = textualHttpHeaders(request.headers, request.body)
   const hasHost = headers.some(([key]) => key.toLowerCase() === "host")
   const lines = [`${request.method.toUpperCase()} ${target} HTTP/1.1`]
   if (host && !hasHost) lines.push(`Host: ${host}`)
@@ -100,18 +129,29 @@ export function formatRequestJson(body: string | null): string | null {
   }
 }
 
+function fencedCode(language: "json" | "text", value: string): string {
+  let longestBacktickRun = 0
+  for (const match of value.matchAll(/`+/g)) {
+    longestBacktickRun = Math.max(longestBacktickRun, match[0].length)
+  }
+  const fence = "`".repeat(Math.max(3, longestBacktickRun + 1))
+  return `${fence}${language}\n${value}\n${fence}`
+}
+
 function toolCallMarkdown(toolCall: ParsedToolCall, index: number): string {
-  const title = toolCall.name || `Tool call ${index + 1}`
   const metadata = [
-    toolCall.callId ? `Call ID: \`${toolCall.callId}\`` : null,
-    toolCall.id ? `Item ID: \`${toolCall.id}\`` : null,
+    toolCall.name ? `Name: ${toolCall.name}` : null,
+    toolCall.callId ? `Call ID: ${toolCall.callId}` : null,
+    toolCall.id ? `Item ID: ${toolCall.id}` : null,
   ].filter((line): line is string => line !== null)
   const formatted = formattedToolArguments(toolCall)
   return [
-    `### ${title}`,
-    ...metadata,
-    `\`\`\`${formatted.language}\n${formatted.value}\n\`\`\``,
-  ].join("\n\n")
+    `### Tool call ${index + 1}`,
+    metadata.length > 0 ? fencedCode("text", metadata.join("\n")) : null,
+    fencedCode(formatted.language, formatted.value),
+  ]
+    .filter((section): section is string => section !== null)
+    .join("\n\n")
 }
 
 export function buildAssistantOutputMarkdown(
@@ -183,7 +223,10 @@ export function buildRawHttpResponse(
   const statusLine =
     `HTTP/1.1 ${response.status} ${response.statusText}`.trimEnd()
   const lines = [statusLine]
-  for (const [key, value] of Object.entries(response.headers)) {
+  for (const [key, value] of textualHttpHeaders(
+    response.headers,
+    response.body,
+  )) {
     lines.push(`${key}: ${value}`)
   }
   lines.push("")
@@ -233,15 +276,17 @@ function defaultDownloadEnvironment(): DownloadEnvironment {
   }
 }
 
+export function exportErrorMessage(error: unknown): string {
+  return error instanceof Error && error.message ?
+      error.message
+    : "Export failed"
+}
+
 export function reportExportError(
   onError: ((message: string) => void) | undefined,
   error: unknown,
-): void {
-  if (onError) {
-    onError(
-      error instanceof Error && error.message ? error.message : "Export failed",
-    )
-    return
-  }
-  console.error("LLM export failed", error)
+): string {
+  const message = exportErrorMessage(error)
+  onError?.(message)
+  return message
 }
