@@ -1,4 +1,5 @@
 import { setDiagnostics } from "@codemirror/lint"
+import { openSearchPanel } from "@codemirror/search"
 import { EditorState } from "@codemirror/state"
 import { EditorView } from "@codemirror/view"
 import { forwardRef, useEffect, useImperativeHandle, useRef } from "react"
@@ -9,7 +10,9 @@ import type {
 } from "../lib/code-mirror-document"
 
 import {
-  codeDocumentExternalSync,
+  codeDocumentContentAttributes,
+  codeDocumentExternalSyncAnnotations,
+  codeDocumentHistoryExtension,
   codeDocumentLanguageExtension,
   codeDocumentWrapExtension,
   createCodeDocumentCompartments,
@@ -24,6 +27,7 @@ export interface CodeMirrorDocumentDiagnostic {
 }
 
 export interface CodeMirrorDocumentHandle {
+  find: () => void
   focus: () => void
 }
 
@@ -72,6 +76,7 @@ export const CodeMirrorDocument = forwardRef<
 ) {
   const hostRef = useRef<HTMLDivElement>(null)
   const viewRef = useRef<EditorView | null>(null)
+  const documentValueRef = useRef(value)
   const onChangeRef = useRef(onChange)
   const initialOptionsRef = useRef<InitialCodeMirrorOptions>({
     language,
@@ -96,7 +101,10 @@ export const CodeMirrorDocument = forwardRef<
         {
           doc: initial.value,
           language: initial.language,
-          onChange: (nextValue) => onChangeRef.current?.(nextValue),
+          onChange: (nextValue) => {
+            documentValueRef.current = nextValue
+            onChangeRef.current?.(nextValue)
+          },
           readOnly: initial.readOnly,
           wrap: initial.wrap,
         },
@@ -119,12 +127,13 @@ export const CodeMirrorDocument = forwardRef<
 
   useEffect(() => {
     const view = viewRef.current
-    if (!view || view.state.doc.toString() === value) return
+    if (!view || documentValueRef.current === value) return
 
     view.dispatch({
-      annotations: codeDocumentExternalSync.of(true),
+      annotations: codeDocumentExternalSyncAnnotations(),
       changes: { from: 0, insert: value, to: view.state.doc.length },
     })
+    documentValueRef.current = value
   }, [value])
 
   useEffect(() => {
@@ -134,7 +143,13 @@ export const CodeMirrorDocument = forwardRef<
 
     view.dispatch({
       effects: [
+        compartments.contentAttributes.reconfigure(
+          codeDocumentContentAttributes(readOnly),
+        ),
         compartments.editable.reconfigure(EditorView.editable.of(!readOnly)),
+        compartments.history.reconfigure(
+          codeDocumentHistoryExtension(readOnly),
+        ),
         compartments.language.reconfigure(
           codeDocumentLanguageExtension(language),
         ),
@@ -165,6 +180,10 @@ export const CodeMirrorDocument = forwardRef<
   useImperativeHandle(
     ref,
     () => ({
+      find: () => {
+        const view = viewRef.current
+        if (view) openSearchPanel(view)
+      },
       focus: () => viewRef.current?.focus(),
     }),
     [],

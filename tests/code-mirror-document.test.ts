@@ -1,8 +1,13 @@
 import { expect, test } from "bun:test"
 
+import { highlightingFor } from "../ui/node_modules/@codemirror/language"
 import { EditorView } from "../ui/node_modules/@codemirror/view"
+import { tags } from "../ui/node_modules/@lezer/highlight"
 import {
-  codeDocumentExternalSync,
+  codeDocumentAddToHistory,
+  codeDocumentExternalSyncAnnotations,
+  codeDocumentHighlightStyle,
+  createCodeDocumentCompartments,
   createCodeDocumentState,
   isCodeDocumentExternalSync,
   shouldNotifyCodeDocumentChange,
@@ -23,6 +28,50 @@ test("creates a wrapped read-only JSON document state", () => {
   expect(state.facet(EditorView.editable)).toBe(false)
 })
 
+test("makes read-only documents focusable without retaining edit history", () => {
+  const compartments = createCodeDocumentCompartments()
+  const state = createCodeDocumentState(
+    {
+      doc: "response body",
+      language: "text",
+      readOnly: true,
+      wrap: false,
+    },
+    compartments,
+  )
+  const hasTabIndex = state
+    .facet(EditorView.contentAttributes)
+    .some(
+      (attributes) =>
+        typeof attributes !== "function" && attributes.tabindex === "0",
+    )
+
+  expect(hasTabIndex).toBe(true)
+  expect(compartments.history.get(state)).toEqual([])
+})
+
+test("keeps editable documents in normal tab flow with edit history", () => {
+  const compartments = createCodeDocumentCompartments()
+  const state = createCodeDocumentState(
+    {
+      doc: "request body",
+      language: "text",
+      readOnly: false,
+      wrap: false,
+    },
+    compartments,
+  )
+  const hasForcedTabIndex = state
+    .facet(EditorView.contentAttributes)
+    .some(
+      (attributes) =>
+        typeof attributes !== "function" && attributes.tabindex === "0",
+    )
+
+  expect(hasForcedTabIndex).toBe(false)
+  expect(compartments.history.get(state)).not.toEqual([])
+})
+
 test("identifies controlled document synchronization transactions", () => {
   const state = createCodeDocumentState({
     doc: "before",
@@ -31,11 +80,12 @@ test("identifies controlled document synchronization transactions", () => {
     wrap: false,
   })
   const transaction = state.update({
-    annotations: codeDocumentExternalSync.of(true),
+    annotations: codeDocumentExternalSyncAnnotations(),
     changes: { from: 0, insert: "after", to: state.doc.length },
   })
 
   expect(isCodeDocumentExternalSync(transaction)).toBe(true)
+  expect(transaction.annotation(codeDocumentAddToHistory)).toBe(false)
   expect(shouldNotifyCodeDocumentChange(true, [transaction])).toBe(false)
 
   const userTransaction = state.update({
@@ -62,4 +112,27 @@ test("syncs accessible naming attributes on the editor target", () => {
 
   syncCodeDocumentAriaAttributes(target, "Replay body", undefined)
   expect(attributes.has("aria-describedby")).toBe(false)
+})
+
+test("uses theme syntax tokens for JSON highlighting", () => {
+  const state = createCodeDocumentState({
+    doc: '{"model":"gpt-test","count":2}',
+    language: "json",
+    readOnly: true,
+    wrap: false,
+  })
+
+  expect(highlightingFor(state, [tags.propertyName])).not.toBeNull()
+  expect(highlightingFor(state, [tags.string])).not.toBeNull()
+  expect(highlightingFor(state, [tags.number])).not.toBeNull()
+  expect(codeDocumentHighlightStyle.style(tags.propertyName.set)).not.toBeNull()
+  expect(codeDocumentHighlightStyle.specs[0]?.color).toBe(
+    "var(--color-syntax-property)",
+  )
+  expect(codeDocumentHighlightStyle.specs[1]?.color).toBe(
+    "var(--color-syntax-string)",
+  )
+  expect(codeDocumentHighlightStyle.specs[2]?.color).toBe(
+    "var(--color-syntax-number)",
+  )
 })

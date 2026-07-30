@@ -246,6 +246,7 @@ body {
   height: 100%;
   background: var(--color-syntax-background);
   color: var(--color-text-primary);
+  color-scheme: inherit;
   font-family: var(--font-family-code);
   font-size: var(--text-code-size);
   line-height: var(--text-code-leading);
@@ -273,6 +274,122 @@ body {
 .code-document .cm-activeLine,
 .code-document .cm-activeLineGutter {
   background: var(--color-overlay-hover);
+}
+
+.code-document .cm-selectionBackground,
+.code-document
+  .cm-editor.cm-focused
+  > .cm-scroller
+  > .cm-selectionLayer
+  .cm-selectionBackground,
+.code-document .cm-matchingBracket,
+.code-document .cm-selectionMatch {
+  background: var(--color-accent-muted);
+}
+
+.code-document .cm-nonmatchingBracket {
+  background: var(--color-error-muted);
+}
+
+.code-document .cm-cursor,
+.code-document .cm-dropCursor {
+  border-inline-start-color: var(--color-text-primary);
+}
+
+.code-document .cm-panels,
+.code-document .cm-panel.cm-search {
+  border-color: var(--color-border);
+  background: var(--color-background-body);
+  color: var(--color-text-primary);
+}
+
+.code-document .cm-textfield,
+.code-document .cm-button {
+  border: 1px solid var(--color-border);
+  background: var(--color-syntax-background);
+  background-image: none;
+  color: var(--color-text-primary);
+}
+
+.code-document .cm-textfield:focus-visible,
+.code-document .cm-button:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+.code-document .cm-tooltip,
+.code-document .cm-tooltip-lint {
+  border-color: var(--color-border);
+  background: var(--color-background-popover);
+  color: var(--color-text-primary);
+}
+
+.code-document .cm-diagnostic-error {
+  border-inline-start-color: var(--color-error);
+}
+
+.code-document .cm-diagnostic-warning {
+  border-inline-start-color: var(--color-warning);
+}
+
+.code-document .cm-diagnostic-info,
+.code-document .cm-diagnostic-hint {
+  border-inline-start-color: var(--color-text-secondary);
+}
+
+.code-document .cm-diagnosticAction {
+  background: var(--color-accent-muted);
+  color: var(--color-text-primary);
+}
+
+.code-document .cm-lintRange {
+  background-image: none;
+  text-decoration-line: underline;
+  text-decoration-style: wavy;
+  text-underline-offset: 2px;
+}
+
+.code-document .cm-lintRange-error {
+  text-decoration-color: var(--color-error);
+}
+
+.code-document .cm-lintRange-warning {
+  text-decoration-color: var(--color-warning);
+}
+
+.code-document .cm-lintRange-info,
+.code-document .cm-lintRange-hint {
+  text-decoration-color: var(--color-text-secondary);
+}
+
+.code-document .cm-lintRange-active {
+  background: var(--color-warning-muted);
+}
+
+.code-document .cm-lintPoint::after {
+  border-block-end-color: var(--color-error);
+}
+
+.code-document .cm-lintPoint-warning::after {
+  border-block-end-color: var(--color-warning);
+}
+
+.code-document .cm-lintPoint-info::after,
+.code-document .cm-lintPoint-hint::after {
+  border-block-end-color: var(--color-text-secondary);
+}
+
+.code-document .cm-panel.cm-panel-lint ul [aria-selected] {
+  background: var(--color-accent-muted);
+  color: var(--color-text-primary);
+}
+
+.code-document .cm-searchMatch {
+  background: var(--color-accent-muted);
+}
+
+.code-document .cm-searchMatch-selected {
+  background: var(--color-warning-muted);
 }
 
 .code-document:focus-within {
