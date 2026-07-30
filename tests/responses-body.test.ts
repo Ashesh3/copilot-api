@@ -442,6 +442,55 @@ describe("Responses debug body parser", () => {
     expect(parsed?.isPartial).toBe(true)
   })
 
+  test("assembles Chat Completions tool calls and partial captures", () => {
+    const raw = [
+      `data: ${JSON.stringify({
+        id: "msg_chat_2",
+        object: "chat.completion.chunk",
+        created: 1,
+        model: "gpt-test",
+        choices: [
+          {
+            index: 0,
+            delta: {
+              role: "assistant",
+              tool_calls: [
+                {
+                  index: 0,
+                  id: "call_1",
+                  type: "function",
+                  function: { name: "lookup", arguments: '{"id":' },
+                },
+              ],
+            },
+            finish_reason: null,
+          },
+        ],
+      })}`,
+      "\u200B",
+      `data: ${JSON.stringify({
+        id: "msg_chat_2",
+        object: "chat.completion.chunk",
+        created: 1,
+        model: "gpt-test",
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [{ index: 0, function: { arguments: "1}" } }],
+            },
+            finish_reason: null,
+          },
+        ],
+      })}`,
+    ].join("\n")
+
+    const parsed = parseResponsesBody(raw)
+    expect(parsed?.toolCalls.length).toBe(1)
+    expect(parsed?.status).toBe("in_progress")
+    expect(parsed?.isPartial).toBe(true)
+  })
+
   test("assembles Chat Completions tool call fragments", () => {
     const raw = [
       `data: ${JSON.stringify({
