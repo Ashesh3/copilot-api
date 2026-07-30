@@ -1,7 +1,7 @@
 import { Button } from "@astryxdesign/core/Button"
 import { useTreeFocus } from "@astryxdesign/core/hooks"
 import { HStack } from "@astryxdesign/core/Stack"
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useMemo, useState } from "react"
 
 import type { JsonValue } from "../lib/json-tree"
 
@@ -14,10 +14,10 @@ import {
   isJsonContainer,
   jsonCopyErrorMessage,
   jsonEntryPage,
-  jsonExpandedPathsAfterDocumentChange,
+  jsonExpandedPathsForDocument,
   jsonPaginationButtonForTreeItem,
   jsonPointerPath,
-  jsonVisibleCountAfterValueChange,
+  jsonVisibleCountForValue,
   measureJsonDocument,
 } from "../lib/json-tree"
 
@@ -78,17 +78,11 @@ function JsonTreeNode({
   value,
   onToggle,
 }: JsonTreeNodeProps) {
-  const [visibleCount, setVisibleCount] = useState(JSON_CHILD_PAGE_SIZE)
-  const previousValue = useRef(value)
-
-  useEffect(() => {
-    const previous = previousValue.current
-    // eslint-disable-next-line @eslint-react/hooks-extra/no-direct-set-state-in-use-effect -- Replacement JSON values must reset node-local pagination.
-    setVisibleCount((current) =>
-      jsonVisibleCountAfterValueChange(previous, value, current),
-    )
-    previousValue.current = value
-  }, [value])
+  const [pagingState, setPagingState] = useState({
+    value,
+    visibleCount: JSON_CHILD_PAGE_SIZE,
+  })
+  const visibleCount = jsonVisibleCountForValue(pagingState, value)
 
   const page = jsonEntryPage(value, visibleCount)
   const isContainer = isJsonContainer(value)
@@ -196,7 +190,12 @@ function JsonTreeNode({
                 size="sm"
                 tabIndex={-1}
                 onClick={() =>
-                  setVisibleCount((current) => current + JSON_CHILD_PAGE_SIZE)
+                  setPagingState((current) => ({
+                    value,
+                    visibleCount:
+                      jsonVisibleCountForValue(current, value)
+                      + JSON_CHILD_PAGE_SIZE,
+                  }))
                 }
               />
             </div>
@@ -238,41 +237,38 @@ export function JsonTreeViewer({
     () => initialJsonContainerPaths(value, documentScale.isLarge),
     [documentScale.isLarge, value],
   )
-  const [expandedPaths, setExpandedPaths] = useState(initiallyExpanded)
-  const previousDocument = useRef({
+  const document = useMemo(
+    () => ({ isLarge: documentScale.isLarge, value }),
+    [documentScale.isLarge, value],
+  )
+  const [disclosureState, setDisclosureState] = useState({
+    expandedPaths: initiallyExpanded,
     isLarge: documentScale.isLarge,
     value,
   })
+  const expandedPaths = jsonExpandedPathsForDocument(
+    disclosureState,
+    document,
+    initiallyExpanded,
+  )
   const [copyError, setCopyError] = useState<string | null>(null)
 
-  useEffect(() => {
-    const previous = previousDocument.current
-    // eslint-disable-next-line @eslint-react/hooks-extra/no-direct-set-state-in-use-effect -- Replacement JSON documents must reset disclosure to their computed initial paths.
-    setExpandedPaths((current) =>
-      jsonExpandedPathsAfterDocumentChange({
-        current,
-        currentDocument: {
-          isLarge: documentScale.isLarge,
-          value,
-        },
-        initial: initiallyExpanded,
-        previousDocument: previous,
-      }),
-    )
-    previousDocument.current = {
-      isLarge: documentScale.isLarge,
-      value,
-    }
-  }, [documentScale.isLarge, initiallyExpanded, value])
-
-  const toggle = useCallback((path: string) => {
-    setExpandedPaths((current) => {
-      const next = new Set(current)
-      if (next.has(path)) next.delete(path)
-      else next.add(path)
-      return next
-    })
-  }, [])
+  const toggle = useCallback(
+    (path: string) => {
+      setDisclosureState((current) => {
+        const currentPaths = jsonExpandedPathsForDocument(
+          current,
+          document,
+          initiallyExpanded,
+        )
+        const next = new Set(currentPaths)
+        if (next.has(path)) next.delete(path)
+        else next.add(path)
+        return { ...document, expandedPaths: next }
+      })
+    },
+    [document, initiallyExpanded],
+  )
 
   const { treeRef, handleFocus, handleKeyDown } = useTreeFocus<HTMLDivElement>({
     hasRovingTabIndex: true,
@@ -303,7 +299,10 @@ export function JsonTreeViewer({
 
   function expandAll() {
     if (documentScale.isLarge) return
-    setExpandedPaths(collectJsonContainerPaths(value))
+    setDisclosureState({
+      ...document,
+      expandedPaths: collectJsonContainerPaths(value),
+    })
   }
 
   return (
@@ -327,7 +326,10 @@ export function JsonTreeViewer({
           size="sm"
           isDisabled={!rootIsContainer}
           onClick={() =>
-            setExpandedPaths(rootIsContainer ? new Set(["#"]) : new Set())
+            setDisclosureState({
+              ...document,
+              expandedPaths: rootIsContainer ? new Set(["#"]) : new Set(),
+            })
           }
         />
         <Button

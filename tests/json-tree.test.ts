@@ -8,10 +8,10 @@ import {
   initialJsonContainerPaths,
   jsonCopyErrorMessage,
   jsonEntryPage,
-  jsonExpandedPathsAfterDocumentChange,
+  jsonExpandedPathsForDocument,
   jsonPaginationButtonForTreeItem,
   jsonPointerPath,
-  jsonVisibleCountAfterValueChange,
+  jsonVisibleCountForValue,
   measureJsonDocument,
   parseJsonBody,
 } from "../ui/src/lib/json-tree"
@@ -161,54 +161,55 @@ describe("JSON tree helpers", () => {
     expect(clicks).toBe(1)
   })
 
-  test("resets paging when the JSON value identity changes", () => {
-    const firstValue = Array.from({ length: 250 }, (_, index) => index)
-    const nextValue = Array.from({ length: 250 }, (_, index) => index)
+  test("derives paging synchronously from the JSON value identity", () => {
+    const storedValue = Array.from({ length: 600 }, (_, index) => index)
+    const nextValue = Array.from({ length: 600 }, (_, index) => index)
+    const storedState = { value: storedValue, visibleCount: 500 }
 
-    expect(jsonVisibleCountAfterValueChange(firstValue, firstValue, 200)).toBe(
-      200,
-    )
-    expect(jsonVisibleCountAfterValueChange(firstValue, nextValue, 200)).toBe(
+    expect(jsonVisibleCountForValue(storedState, storedValue)).toBe(500)
+    expect(jsonVisibleCountForValue(storedState, nextValue)).toBe(
       JSON_CHILD_PAGE_SIZE,
     )
   })
 
-  test("resets disclosure when the JSON document identity changes", () => {
+  test("derives disclosure synchronously from the document identity", () => {
     const firstValue = { input: [{ content: "first" }] }
     const nextValue = { input: [{ content: "next" }] }
     const currentPaths = new Set(["#", "#/input", "#/input/0"])
     const nextInitialPaths = initialJsonContainerPaths(nextValue, false)
+    const storedState = {
+      expandedPaths: currentPaths,
+      isLarge: false,
+      value: firstValue,
+    }
 
     expect(
-      jsonExpandedPathsAfterDocumentChange({
-        current: currentPaths,
-        currentDocument: { isLarge: false, value: firstValue },
-        initial: nextInitialPaths,
-        previousDocument: { isLarge: false, value: firstValue },
-      }),
+      jsonExpandedPathsForDocument(
+        storedState,
+        { isLarge: false, value: firstValue },
+        nextInitialPaths,
+      ),
     ).toBe(currentPaths)
     expect(
-      jsonExpandedPathsAfterDocumentChange({
-        current: currentPaths,
-        currentDocument: { isLarge: false, value: nextValue },
-        initial: nextInitialPaths,
-        previousDocument: { isLarge: false, value: firstValue },
-      }),
+      jsonExpandedPathsForDocument(
+        storedState,
+        { isLarge: false, value: nextValue },
+        nextInitialPaths,
+      ),
     ).toBe(nextInitialPaths)
   })
 
-  test("resets disclosure when the JSON document scale changes", () => {
+  test("derives disclosure synchronously from the document scale", () => {
     const value = { input: [{ content: "hello" }] }
     const currentPaths = new Set(["#", "#/input", "#/input/0"])
     const largeInitialPaths = initialJsonContainerPaths(value, true)
 
     expect(
-      jsonExpandedPathsAfterDocumentChange({
-        current: currentPaths,
-        currentDocument: { isLarge: true, value },
-        initial: largeInitialPaths,
-        previousDocument: { isLarge: false, value },
-      }),
+      jsonExpandedPathsForDocument(
+        { expandedPaths: currentPaths, isLarge: false, value },
+        { isLarge: true, value },
+        largeInitialPaths,
+      ),
     ).toBe(largeInitialPaths)
   })
 

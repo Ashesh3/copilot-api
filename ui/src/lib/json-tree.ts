@@ -42,11 +42,13 @@ export interface JsonDocumentIdentity {
   value: JsonValue
 }
 
-interface JsonExpandedPathsChange {
-  current: Set<string>
-  currentDocument: JsonDocumentIdentity
-  initial: Set<string>
-  previousDocument: JsonDocumentIdentity
+export interface JsonPagingState {
+  value: JsonValue
+  visibleCount: number
+}
+
+export interface JsonExpandedPathsState extends JsonDocumentIdentity {
+  expandedPaths: Set<string>
 }
 
 export interface ParsedJsonBody {
@@ -128,24 +130,21 @@ export function jsonPaginationButtonForTreeItem(
   return null
 }
 
-export function jsonVisibleCountAfterValueChange(
-  previousValue: JsonValue,
+export function jsonVisibleCountForValue(
+  state: JsonPagingState,
   value: JsonValue,
-  visibleCount: number,
 ): number {
-  return Object.is(previousValue, value) ? visibleCount : JSON_CHILD_PAGE_SIZE
+  return state.value === value ? state.visibleCount : JSON_CHILD_PAGE_SIZE
 }
 
-export function jsonExpandedPathsAfterDocumentChange(
-  change: JsonExpandedPathsChange,
+export function jsonExpandedPathsForDocument(
+  state: JsonExpandedPathsState,
+  document: JsonDocumentIdentity,
+  initiallyExpanded: Set<string>,
 ): Set<string> {
-  const { current, currentDocument, initial, previousDocument } = change
-  return (
-      Object.is(previousDocument.value, currentDocument.value)
-        && previousDocument.isLarge === currentDocument.isLarge
-    ) ?
-      current
-    : initial
+  return state.value === document.value && state.isLarge === document.isLarge ?
+      state.expandedPaths
+    : initiallyExpanded
 }
 
 export function jsonCopyErrorMessage(error: unknown): string {
