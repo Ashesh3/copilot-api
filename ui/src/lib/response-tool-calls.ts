@@ -20,6 +20,7 @@ interface MutableToolCall {
   arguments: string
   argumentsDone: boolean
   callId: string | null
+  choiceIndex: number
   id: string | null
   name: string | null
   order: number
@@ -39,6 +40,15 @@ const TOOL_CALL_ITEM_TYPES = new Set([
   "function_call",
   "mcp_call",
   "web_search_call",
+])
+
+const TOOL_CALL_METADATA_FIELDS = new Set([
+  "call_id",
+  "id",
+  "name",
+  "output_index",
+  "status",
+  "type",
 ])
 
 function isRecord(value: JsonValue | undefined): value is JsonRecord {
@@ -79,13 +89,21 @@ function ensureCall(
     identity.callId === null ?
       undefined
     : calls.find((item) => item.callId === identity.callId)
-  call ??= calls.find((item) => item.outputIndex === identity.outputIndex)
+  call ??= calls.find(
+    (item) =>
+      item.outputIndex === identity.outputIndex
+      && (identity.id === null || item.id === null || item.id === identity.id)
+      && (identity.callId === null
+        || item.callId === null
+        || item.callId === identity.callId),
+  )
 
   if (!call) {
     call = {
       arguments: "",
       argumentsDone: false,
       callId: identity.callId,
+      choiceIndex: 0,
       id: identity.id,
       name: null,
       order: calls.length,
@@ -114,21 +132,81 @@ function mergeArguments(
   }
 }
 
+function replaceMetadata(
+  call: MutableToolCall,
+  metadata: { callId?: string; id?: string; name?: string },
+  authoritative: boolean,
+): void {
+  if (metadata.id !== undefined && (authoritative || call.id === null)) {
+    call.id = metadata.id
+  }
+  if (
+    metadata.callId !== undefined
+    && (authoritative || call.callId === null)
+  ) {
+    call.callId = metadata.callId
+  }
+  if (metadata.name !== undefined && (authoritative || call.name === null)) {
+    call.name = metadata.name
+  }
+}
+
+function itemPayload(item: JsonRecord): JsonRecord {
+  const payload: JsonRecord = {}
+  for (const [key, value] of Object.entries(item)) {
+    if (!TOOL_CALL_METADATA_FIELDS.has(key)) payload[key] = value
+  }
+  return payload
+}
+
 function mergeItem(
   call: MutableToolCall,
   item: JsonRecord,
-  authoritativeArguments: boolean,
+  authoritative: boolean,
 ): void {
   const functionData = isRecord(item.function) ? item.function : null
-  call.id ??= stringValue(item.id) ?? null
-  call.callId ??= stringValue(item.call_id) ?? null
-  call.name ??=
-    stringValue(functionData?.name) ?? stringValue(item.name) ?? null
+  const type = stringValue(item.type)
+  const id = stringValue(item.id)
+  const callId = stringValue(item.call_id)
+  const name =
+    stringValue(functionData?.name)
+    ?? stringValue(item.name)
+    ?? (type === "function_call" ? undefined : type)
+  replaceMetadata(call, { callId, id, name }, authoritative)
+
+  if (type !== "function_call") {
+    if (authoritative || !call.argumentsDone) {
+      call.arguments = JSON.stringify(itemPayload(item))
+      call.argumentsDone = authoritative
+    }
+    return
+  }
   mergeArguments(
     call,
     stringValue(functionData?.arguments) ?? stringValue(item.arguments),
-    authoritativeArguments,
+    authoritative,
   )
+}
+
+function mergeFragment(
+  current: string | null,
+  fragment: string | undefined,
+): string | null {
+  return fragment === undefined ? current : `${current ?? ""}${fragment}`
+}
+
+function mergeChatMetadata(
+  call: MutableToolCall,
+  metadata: { callId?: string; id?: string; name?: string },
+  authoritative: boolean,
+): void {
+  if (authoritative) {
+    replaceMetadata(call, metadata, true)
+    return
+  }
+  call.id = mergeFragment(call.id, metadata.id)
+  call.callId = mergeFragment(call.callId, metadata.callId)
+  call.name = mergeFragment(call.name, metadata.name)
 }
 
 function finishCall(call: MutableToolCall): ParsedToolCall {
@@ -188,6 +266,8 @@ export function collectResponsesToolCalls(
       mergeArguments(call, stringValue(data.delta), false)
     } else if (frame.type === "response.function_call_arguments.done") {
       mergeArguments(call, stringValue(data.arguments), true)
+      const name = stringValue(data.name)
+      if (name !== undefined) call.name = name
     }
   }
 
@@ -240,6 +320,7 @@ export function collectChatToolCalls(
             arguments: "",
             argumentsDone: false,
             callId: null,
+            choiceIndex,
             id: null,
             name: null,
             order: calls.length,
@@ -251,10 +332,11 @@ export function collectChatToolCalls(
 
         const functionData =
           isRecord(toolValue.function) ? toolValue.function : null
-        call.id ??= stringValue(toolValue.id) ?? null
-        call.callId ??= stringValue(toolValue.call_id) ?? null
-        call.name ??=
-          stringValue(functionData?.name) ?? stringValue(toolValue.name) ?? null
+        const id = stringValue(toolValue.id)
+        const callId = stringValue(toolValue.call_id)
+        const name =
+          stringValue(functionData?.name) ?? stringValue(toolValue.name)
+        mergeChatMetadata(call, { callId, id, name }, message !== null)
         mergeArguments(
           call,
           stringValue(functionData?.arguments)
@@ -265,5 +347,12 @@ export function collectChatToolCalls(
     }
   }
 
-  return calls.map((call) => finishCall(call))
+  return [...calls]
+    .sort(
+      (left, right) =>
+        left.choiceIndex - right.choiceIndex
+        || left.outputIndex - right.outputIndex
+        || left.order - right.order,
+    )
+    .map((call) => finishCall(call))
 }

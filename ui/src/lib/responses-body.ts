@@ -35,6 +35,7 @@ interface ParsedFrame {
 }
 
 const TERMINAL_EVENT_TYPES = new Set([
+  "error",
   "response.cancelled",
   "response.completed",
   "response.failed",
@@ -120,17 +121,14 @@ function parseSseFrames(raw: string): Array<ParsedFrame> {
 }
 
 function looksLikeResponse(value: JsonRecord): boolean {
-  return (
-    value.object === "response"
-    || Array.isArray(value.output)
-    || typeof value.output_text === "string"
-  )
+  return value.object === "response"
 }
 
 function looksLikeResponsesEvent(value: JsonRecord): boolean {
   const type = stringValue(value.type)
   return (
-    type?.startsWith("response.") === true
+    type === "error"
+    || type?.startsWith("response.") === true
     || (isRecord(value.response) && looksLikeResponse(value.response))
   )
 }
@@ -580,7 +578,9 @@ function responseErrorMessage(
 
   for (const frame of [...frames].reverse()) {
     if (!isRecord(frame.data)) continue
-    const frameError = errorText(frame.data.error)
+    const frameError =
+      errorText(frame.data.error)
+      ?? (eventType(frame) === "error" ? errorText(frame.data) : null)
     if (frameError) return frameError
   }
   return null
@@ -640,8 +640,8 @@ export function parseResponsesBody(raw: string): ParsedResponsesBody | null {
     ?? [...frames]
       .reverse()
       .map((frame) => eventType(frame))
-      .find((type) => type.startsWith("response."))
-      ?.slice("response.".length)
+      .find((type) => type === "error" || type.startsWith("response."))
+      ?.replace(/^response\./, "")
     ?? null
 
   let assistantText = extractAssistantFromResponse(response)
