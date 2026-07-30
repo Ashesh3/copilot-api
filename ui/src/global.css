@@ -185,6 +185,15 @@ body {
   font-size: var(--text-supporting-size);
 }
 
+.json-tree-more {
+  box-sizing: border-box;
+  min-height: 28px;
+  padding-inline-start: calc(
+    var(--spacing-2) + (var(--json-depth) + 1) * var(--spacing-4)
+  );
+  padding-inline-end: var(--spacing-3);
+}
+
 .responses-pretty-view,
 .responses-event-detail {
   min-width: 0;
