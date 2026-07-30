@@ -2,7 +2,11 @@ import { describe, expect, test } from "bun:test"
 
 import {
   acceptReplayResult,
+  advanceReplayRun,
+  advanceReplaySource,
   classifyReplayResult,
+  initialReplayRunState,
+  isCurrentReplayRun,
   isSameReplaySource,
   replayErrorMessage,
   replayResponse,
@@ -86,5 +90,40 @@ describe("replay result helpers", () => {
       "Network unavailable",
     )
     expect(replayErrorMessage("failed")).toBe("Replay request failed")
+  })
+
+  test("rejects a run after the replay source changes", () => {
+    const replaySourceA = { body: '{"model":"a"}', id: "entry-a" }
+    const replaySourceB = { body: '{"model":"b"}', id: "entry-b" }
+    const sourceA = advanceReplaySource(initialReplayRunState())
+    const { state: runningA, token: runA } = advanceReplayRun(
+      sourceA,
+      replaySourceA,
+    )
+    const sourceB = advanceReplaySource(runningA)
+
+    expect(isCurrentReplayRun(runA, sourceB, replaySourceB)).toBe(false)
+    expect(isCurrentReplayRun(runA, runningA, replaySourceB)).toBe(false)
+  })
+
+  test("rejects an older overlapping run for the same source", () => {
+    const replaySource = { body: '{"model":"a"}', id: "entry-a" }
+    const source = advanceReplaySource(initialReplayRunState())
+    const { state: firstRunning, token: firstRun } = advanceReplayRun(
+      source,
+      replaySource,
+    )
+    const { state: secondRunning, token: secondRun } = advanceReplayRun(
+      firstRunning,
+      replaySource,
+    )
+
+    expect(isCurrentReplayRun(firstRun, secondRunning, replaySource)).toBe(
+      false,
+    )
+    expect(isCurrentReplayRun(secondRun, secondRunning, replaySource)).toBe(
+      true,
+    )
+    expect(secondRun.source).toBe(replaySource)
   })
 })

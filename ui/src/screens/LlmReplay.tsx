@@ -26,11 +26,16 @@ import {
 import { jsonCopyErrorMessage } from "../lib/json-tree"
 import {
   acceptReplayResult,
+  advanceReplayRun,
+  advanceReplaySource,
   classifyReplayResult,
+  initialReplayRunState,
+  isCurrentReplayRun,
   isSameReplaySource,
   replayErrorMessage,
   replayResponse,
   type AcceptedReplayResult,
+  type ReplayRunState,
   type ReplaySourceIdentity,
 } from "../lib/replay-result"
 import { navigate, useHashRoute } from "../lib/router"
@@ -63,7 +68,7 @@ export default function LlmReplayScreen() {
     )
   }
 
-  return <LlmReplayView id={param} />
+  return <LlmReplayView key={param} id={param} />
 }
 
 function LlmReplayView({ id }: { id: string }) {
@@ -77,6 +82,7 @@ function LlmReplayView({ id }: { id: string }) {
     undefined,
   )
   const acceptedResultRef = useRef<AcceptedReplayResult | undefined>(undefined)
+  const replayRunStateRef = useRef<ReplayRunState>(initialReplayRunState())
 
   const [body, setBody] = useState("")
   const [originalBody, setOriginalBody] = useState("")
@@ -87,6 +93,19 @@ function LlmReplayView({ id }: { id: string }) {
 
   const sourceBody = data?.request.body ?? ""
   const sourceId = data?.id
+  const renderedSource =
+    sourceId === undefined ? undefined : { body: sourceBody, id: sourceId }
+  const renderedSourceRef = useRef<ReplaySourceIdentity | undefined>(
+    renderedSource,
+  )
+  renderedSourceRef.current = renderedSource
+
+  useEffect(
+    () => () => {
+      replayRunStateRef.current = advanceReplaySource(replayRunStateRef.current)
+    },
+    [],
+  )
 
   useEffect(() => {
     if (
@@ -97,6 +116,7 @@ function LlmReplayView({ id }: { id: string }) {
     }
 
     initializedSourceRef.current = { body: sourceBody, id: sourceId }
+    replayRunStateRef.current = advanceReplaySource(replayRunStateRef.current)
     const preparedBody = prepareReplayDocument(sourceBody)
     // The source record is external state; initialize the local editor session
     // only when its stable id/body pair actually changes.
@@ -109,6 +129,8 @@ function LlmReplayView({ id }: { id: string }) {
     setResult(undefined)
     // eslint-disable-next-line @eslint-react/hooks-extra/no-direct-set-state-in-use-effect
     setReplayError(undefined)
+    // eslint-disable-next-line @eslint-react/hooks-extra/no-direct-set-state-in-use-effect
+    setIsRunning(false)
   }, [sourceBody, sourceId])
 
   const deferredBody = useDeferredValue(body)
@@ -121,6 +143,9 @@ function LlmReplayView({ id }: { id: string }) {
   const diagnostic =
     validationPending || validation.ok ? null : validation.diagnostic
   const dirty = body !== originalBody
+  const sourceReady =
+    sourceId === id
+    && isSameReplaySource(initializedSourceRef.current, sourceId, sourceBody)
 
   function formatBody(): void {
     const formatted = formatJsonDocument(body)
@@ -162,6 +187,31 @@ function LlmReplayView({ id }: { id: string }) {
       return
     }
 
+    const source = initializedSourceRef.current
+    const currentSource = renderedSourceRef.current
+    if (
+      !source
+      || !currentSource
+      || currentSource.id !== id
+      || !isSameReplaySource(source, currentSource.id, currentSource.body)
+    ) {
+      return
+    }
+
+    const run = advanceReplayRun(replayRunStateRef.current, source)
+    replayRunStateRef.current = run.state
+    const isCurrentRun = () => {
+      const latestSource = renderedSourceRef.current
+      return (
+        latestSource !== undefined
+        && isCurrentReplayRun(
+          run.token,
+          replayRunStateRef.current,
+          latestSource,
+        )
+      )
+    }
+
     setIsRunning(true)
     setReplayError(undefined)
     try {
@@ -169,6 +219,8 @@ function LlmReplayView({ id }: { id: string }) {
         `/dashboard/api/llm-debug/${id}/replay`,
         { body },
       )
+      if (!isCurrentRun()) return
+
       const classification = classifyReplayResult(replayResult)
       if (!classification.ok) {
         setReplayError(classification.message)
@@ -183,14 +235,18 @@ function LlmReplayView({ id }: { id: string }) {
       acceptedResultRef.current = accepted
       setResult(accepted)
     } catch (caught) {
+      if (!isCurrentRun()) return
+
       setReplayError(
         caught instanceof ApiError ?
           caught.message
         : replayErrorMessage(caught),
       )
     } finally {
-      setIsRunning(false)
-      editorRef.current?.focus()
+      if (isCurrentRun()) {
+        setIsRunning(false)
+        editorRef.current?.focus()
+      }
     }
   }
 
@@ -244,7 +300,7 @@ function LlmReplayView({ id }: { id: string }) {
               variant="primary"
               icon={<PlayIcon />}
               isLoading={isRunning}
-              isDisabled={!canRun}
+              isDisabled={!canRun || !sourceReady}
               onClick={() => void runReplay()}
             />
           </HStack>

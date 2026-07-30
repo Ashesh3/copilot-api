@@ -12,6 +12,15 @@ export interface ReplaySourceIdentity {
   id: string
 }
 
+export interface ReplayRunState {
+  runGeneration: number
+  sourceGeneration: number
+}
+
+export interface ReplayRunToken extends ReplayRunState {
+  source: ReplaySourceIdentity
+}
+
 export type ReplayResultClassification =
   | { ok: true }
   | { message: string; ok: false }
@@ -57,6 +66,40 @@ export function isSameReplaySource(
   body: string,
 ): boolean {
   return source?.id === id && source.body === body
+}
+
+export function initialReplayRunState(): ReplayRunState {
+  return { runGeneration: 0, sourceGeneration: 0 }
+}
+
+export function advanceReplaySource(state: ReplayRunState): ReplayRunState {
+  return {
+    runGeneration: state.runGeneration,
+    sourceGeneration: state.sourceGeneration + 1,
+  }
+}
+
+export function advanceReplayRun(
+  state: ReplayRunState,
+  source: ReplaySourceIdentity,
+): { state: ReplayRunState; token: ReplayRunToken } {
+  const nextState = {
+    runGeneration: state.runGeneration + 1,
+    sourceGeneration: state.sourceGeneration,
+  }
+  return { state: nextState, token: { ...nextState, source } }
+}
+
+export function isCurrentReplayRun(
+  token: ReplayRunToken,
+  state: ReplayRunState,
+  source: ReplaySourceIdentity,
+): boolean {
+  return (
+    token.runGeneration === state.runGeneration
+    && token.sourceGeneration === state.sourceGeneration
+    && isSameReplaySource(token.source, source.id, source.body)
+  )
 }
 
 export function replayErrorMessage(error: unknown): string {
