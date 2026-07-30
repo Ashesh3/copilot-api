@@ -5,6 +5,7 @@ import {
   buildAssistantOutputMarkdown,
   buildRawHttpResponse,
   buildResponseJson,
+  exportErrorMessage,
 } from "./http-export"
 import { responseBodyLanguage } from "./response-inspector"
 
@@ -23,6 +24,17 @@ export interface ResponseExportAvailability {
   assistantOutput: boolean
   rawHttpResponse: boolean
   responseJson: boolean
+}
+
+export type ResponseExportExecutionResult =
+  | { status: "success" }
+  | { message: string; status: "error" }
+
+export interface ResponseExportExecution {
+  build: () => string | null
+  download: (contents: string) => void
+  emptyMessage: string
+  onError: (message: string) => void
 }
 
 const defaultBuilders: ResponseExportBuilders = {
@@ -65,5 +77,23 @@ export function createResponseExportActions(
     buildRawHttpResponse: () =>
       response ? builders.buildRawHttpResponse(response) : null,
     buildResponseJson: () => builders.buildResponseJson(response, parsed),
+  }
+}
+
+export function executeResponseExport({
+  build,
+  download,
+  emptyMessage,
+  onError,
+}: ResponseExportExecution): ResponseExportExecutionResult {
+  try {
+    const contents = build()
+    if (contents === null) throw new Error(emptyMessage)
+    download(contents)
+    return { status: "success" }
+  } catch (error) {
+    const message = exportErrorMessage(error)
+    onError(message)
+    return { message, status: "error" }
   }
 }

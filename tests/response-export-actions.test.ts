@@ -4,6 +4,7 @@ import type { ParsedResponsesBody } from "../ui/src/lib/responses-body"
 
 import {
   createResponseExportActions,
+  executeResponseExport,
   responseExportAvailability,
 } from "../ui/src/lib/response-export-actions"
 
@@ -88,5 +89,62 @@ describe("response export actions", () => {
     expect(
       responseExportAvailability({ parsed, response: undefined }).responseJson,
     ).toBe(true)
+  })
+
+  test("reports a lazy builder exception through the activation path", () => {
+    const messages: Array<string> = []
+    const downloads: Array<string> = []
+
+    const result = executeResponseExport({
+      build: () => {
+        throw new Error("Response builder failed")
+      },
+      download: (contents) => downloads.push(contents),
+      emptyMessage: "Response JSON is unavailable",
+      onError: (message) => messages.push(message),
+    })
+
+    expect(result).toEqual({
+      message: "Response builder failed",
+      status: "error",
+    })
+    expect(messages).toEqual(["Response builder failed"])
+    expect(downloads).toEqual([])
+  })
+
+  test("reports an enabled action that builds no payload", () => {
+    const messages: Array<string> = []
+
+    const result = executeResponseExport({
+      build: () => null,
+      download: () => {
+        throw new Error("Download must not run")
+      },
+      emptyMessage: "Response JSON is unavailable",
+      onError: (message) => messages.push(message),
+    })
+
+    expect(result).toEqual({
+      message: "Response JSON is unavailable",
+      status: "error",
+    })
+    expect(messages).toEqual(["Response JSON is unavailable"])
+  })
+
+  test("builds and downloads only when activated successfully", () => {
+    const calls: Array<string> = []
+
+    const result = executeResponseExport({
+      build: () => {
+        calls.push("build")
+        return "payload"
+      },
+      download: (contents) => calls.push(`download:${contents}`),
+      emptyMessage: "Response JSON is unavailable",
+      onError: (message) => calls.push(`error:${message}`),
+    })
+
+    expect(result).toEqual({ status: "success" })
+    expect(calls).toEqual(["build", "download:payload"])
   })
 })

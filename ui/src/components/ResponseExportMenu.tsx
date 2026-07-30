@@ -9,10 +9,10 @@ import { CopyIcon, DownloadIcon } from "../icons"
 import {
   RESPONSE_EXPORT_MEDIA_TYPES,
   downloadTextFile,
-  reportExportError,
 } from "../lib/http-export"
 import {
   createResponseExportActions,
+  executeResponseExport,
   responseExportAvailability,
 } from "../lib/response-export-actions"
 
@@ -25,7 +25,8 @@ interface ResponseExportMenuProps {
 }
 
 interface ResponseExportFile {
-  contents: string
+  build: () => string | null
+  emptyMessage: string
   extension: "http" | "json" | "md"
   format: string
   type: string
@@ -44,16 +45,22 @@ export function ResponseExportMenu({
   const actions = createResponseExportActions(source)
 
   function save(file: ResponseExportFile): void {
-    try {
-      downloadTextFile(
-        `llm-response-${id}.${file.extension}`,
-        file.contents,
-        file.type,
-      )
-    } catch (error) {
-      const message = reportExportError(undefined, error)
+    const result = executeResponseExport({
+      build: file.build,
+      download: (contents) =>
+        downloadTextFile(
+          `llm-response-${id}.${file.extension}`,
+          contents,
+          file.type,
+        ),
+      emptyMessage: file.emptyMessage,
+      onError: (message) => {
+        onError?.(message)
+      },
+    })
+    if (result.status === "error") {
+      const { message } = result
       setExportError(message)
-      onError?.(message)
       return
     }
     setExportError(null)
@@ -79,15 +86,13 @@ export function ResponseExportMenu({
           icon={<DownloadIcon />}
           isDisabled={!availability.assistantOutput}
           onClick={() => {
-            const markdown = actions.buildAssistantOutput()
-            if (markdown !== null) {
-              save({
-                contents: markdown,
-                extension: "md",
-                format: "Markdown",
-                type: RESPONSE_EXPORT_MEDIA_TYPES.markdown,
-              })
-            }
+            save({
+              build: actions.buildAssistantOutput,
+              emptyMessage: "Assistant output is unavailable",
+              extension: "md",
+              format: "Markdown",
+              type: RESPONSE_EXPORT_MEDIA_TYPES.markdown,
+            })
           }}
         />
         <DropdownMenuItem
@@ -96,15 +101,13 @@ export function ResponseExportMenu({
           icon={<DownloadIcon />}
           isDisabled={!availability.responseJson}
           onClick={() => {
-            const responseJson = actions.buildResponseJson()
-            if (responseJson !== null) {
-              save({
-                contents: responseJson,
-                extension: "json",
-                format: "JSON",
-                type: RESPONSE_EXPORT_MEDIA_TYPES.json,
-              })
-            }
+            save({
+              build: actions.buildResponseJson,
+              emptyMessage: "Response JSON is unavailable",
+              extension: "json",
+              format: "JSON",
+              type: RESPONSE_EXPORT_MEDIA_TYPES.json,
+            })
           }}
         />
         <DropdownMenuItem
@@ -113,15 +116,13 @@ export function ResponseExportMenu({
           icon={<CopyIcon />}
           isDisabled={!availability.rawHttpResponse}
           onClick={() => {
-            const rawResponse = actions.buildRawHttpResponse()
-            if (rawResponse !== null) {
-              save({
-                contents: rawResponse,
-                extension: "http",
-                format: "HTTP",
-                type: RESPONSE_EXPORT_MEDIA_TYPES.http,
-              })
-            }
+            save({
+              build: actions.buildRawHttpResponse,
+              emptyMessage: "Raw HTTP response is unavailable",
+              extension: "http",
+              format: "HTTP",
+              type: RESPONSE_EXPORT_MEDIA_TYPES.http,
+            })
           }}
         />
       </DropdownMenu>
