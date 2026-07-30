@@ -16,9 +16,12 @@ export const getResponsesRequestOptions = (
  * Apply the latest compaction boundary, expand proxy-generated summaries,
  * and strip encrypted_content from reasoning items.
  *
- * A compaction item replaces all input that precedes it. Retaining that
- * superseded history defeats compaction and can make the wire payload grow
- * without bound, so only the latest compaction item and later input survive.
+ * A compaction item replaces historical input that precedes it. Retaining
+ * superseded turns defeats compaction and can make the wire payload grow
+ * without bound. Codex compacted windows intentionally prepend fresh
+ * bootstrap context before the marker, though: additional tool declarations
+ * plus developer/user records tagged with the active turn_id. Preserve that
+ * current-window prefix, the latest compaction item, and all later input.
  *
  * Proxy-generated "cmp_" items have base64-encoded summaries we can decode.
  * Native compaction items carry opaque, token-bound state and must remain
@@ -34,7 +37,7 @@ export const expandCompactionItems = (payload: ResponsesPayload): void => {
   const compactedInput =
     latestCompactionIndex === -1 ?
       payload.input
-    : payload.input.slice(latestCompactionIndex)
+    : preserveCompactionBootstrap(payload.input, latestCompactionIndex)
 
   payload.input = compactedInput.map((item) => {
     const record = item as Record<string, unknown>
@@ -69,6 +72,38 @@ const findLatestCompactionIndex = (input: Array<ResponseInputItem>): number => {
     if (item.type === "compaction") return index
   }
   return -1
+}
+
+const preserveCompactionBootstrap = (
+  input: Array<ResponseInputItem>,
+  compactionIndex: number,
+): Array<ResponseInputItem> => {
+  const prefix = input.slice(0, compactionIndex)
+  const latestTurnId = findLatestTurnId(prefix)
+  const bootstrap = prefix.filter((item) => {
+    const record = item as Record<string, unknown>
+    return (
+      record.type === "additional_tools"
+      || (latestTurnId !== null && getTurnId(record) === latestTurnId)
+    )
+  })
+
+  return [...bootstrap, ...input.slice(compactionIndex)]
+}
+
+const findLatestTurnId = (input: Array<ResponseInputItem>): string | null => {
+  for (let index = input.length - 1; index >= 0; index -= 1) {
+    const turnId = getTurnId(input[index] as Record<string, unknown>)
+    if (turnId !== null) return turnId
+  }
+  return null
+}
+
+const getTurnId = (record: Record<string, unknown>): string | null => {
+  const metadata = record.internal_chat_message_metadata_passthrough
+  if (typeof metadata !== "object" || metadata === null) return null
+  const turnId = (metadata as Record<string, unknown>).turn_id
+  return typeof turnId === "string" && turnId.length > 0 ? turnId : null
 }
 
 /**

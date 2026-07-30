@@ -119,3 +119,133 @@ test("drops superseded history before the latest compaction item", () => {
     },
   ])
 })
+
+test("preserves the latest compacted window bootstrap and tool declarations", () => {
+  const latestTurnId = "turn_latest"
+  const payload = {
+    model: "gpt-4o",
+    input: [
+      {
+        type: "additional_tools",
+        role: "developer",
+        tools: [{ type: "function", name: "exec" }],
+      },
+      {
+        type: "message",
+        role: "user",
+        content: "superseded conversation",
+        internal_chat_message_metadata_passthrough: { turn_id: "turn_old" },
+      },
+      {
+        type: "message",
+        role: "developer",
+        content: "current permissions, app, and skill instructions",
+        internal_chat_message_metadata_passthrough: {
+          turn_id: latestTurnId,
+        },
+      },
+      {
+        type: "message",
+        role: "developer",
+        content: "current collaboration instructions",
+        internal_chat_message_metadata_passthrough: {
+          turn_id: latestTurnId,
+        },
+      },
+      {
+        type: "message",
+        role: "developer",
+        content: "current multi-agent policy",
+        internal_chat_message_metadata_passthrough: {
+          turn_id: latestTurnId,
+        },
+      },
+      {
+        type: "message",
+        role: "user",
+        content: "current AGENTS and environment context",
+        internal_chat_message_metadata_passthrough: {
+          turn_id: latestTurnId,
+        },
+      },
+      {
+        type: "message",
+        role: "user",
+        content: "continue",
+        internal_chat_message_metadata_passthrough: {
+          turn_id: latestTurnId,
+        },
+      },
+      {
+        id: "cmp_native_latest",
+        type: "compaction",
+        encrypted_content: "opaque-native-compaction",
+      },
+      {
+        type: "message",
+        role: "user",
+        content: "post-compaction work",
+      },
+    ],
+  } as ResponsesPayload
+
+  expandCompactionItems(payload)
+
+  expect(payload.input).toEqual([
+    {
+      type: "additional_tools",
+      role: "developer",
+      tools: [{ type: "function", name: "exec" }],
+    },
+    {
+      type: "message",
+      role: "developer",
+      content: "current permissions, app, and skill instructions",
+      internal_chat_message_metadata_passthrough: {
+        turn_id: latestTurnId,
+      },
+    },
+    {
+      type: "message",
+      role: "developer",
+      content: "current collaboration instructions",
+      internal_chat_message_metadata_passthrough: {
+        turn_id: latestTurnId,
+      },
+    },
+    {
+      type: "message",
+      role: "developer",
+      content: "current multi-agent policy",
+      internal_chat_message_metadata_passthrough: {
+        turn_id: latestTurnId,
+      },
+    },
+    {
+      type: "message",
+      role: "user",
+      content: "current AGENTS and environment context",
+      internal_chat_message_metadata_passthrough: {
+        turn_id: latestTurnId,
+      },
+    },
+    {
+      type: "message",
+      role: "user",
+      content: "continue",
+      internal_chat_message_metadata_passthrough: {
+        turn_id: latestTurnId,
+      },
+    },
+    {
+      id: "cmp_native_latest",
+      type: "compaction",
+      encrypted_content: "opaque-native-compaction",
+    },
+    {
+      type: "message",
+      role: "user",
+      content: "post-compaction work",
+    },
+  ])
+})
