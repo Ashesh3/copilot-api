@@ -12,6 +12,50 @@ body {
   margin: 0;
 }
 
+.replay-header,
+.replay-workspace,
+.replay-pane,
+.replay-pane > * {
+  min-width: 0;
+}
+
+.replay-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+  gap: var(--spacing-4);
+  width: 100%;
+  max-width: 100%;
+}
+
+.replay-pane {
+  box-sizing: border-box;
+  max-height: min(76vh, 920px);
+  overflow: auto;
+}
+
+.replay-request-pane .json-code-editor {
+  min-height: 0;
+}
+
+.replay-request-pane .code-document.is-editable {
+  height: clamp(360px, 58vh, 760px);
+}
+
+.replay-result-pane .response-inspector {
+  min-width: 0;
+}
+
+@media (max-width: 960px) {
+  .replay-workspace {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .replay-pane {
+    max-height: none;
+    overflow: visible;
+  }
+}
+
 .confirm-dialog {
   overflow-wrap: anywhere;
   word-break: break-word;

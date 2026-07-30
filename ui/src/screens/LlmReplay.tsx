@@ -1,31 +1,44 @@
 import { Badge } from "@astryxdesign/core/Badge"
 import { Banner } from "@astryxdesign/core/Banner"
 import { Button } from "@astryxdesign/core/Button"
-import { CodeBlock } from "@astryxdesign/core/CodeBlock"
-import { List, ListItem } from "@astryxdesign/core/List"
-import { Section } from "@astryxdesign/core/Section"
+import { Card } from "@astryxdesign/core/Card"
 import { Skeleton } from "@astryxdesign/core/Skeleton"
 import { HStack, VStack } from "@astryxdesign/core/Stack"
-import { Text } from "@astryxdesign/core/Text"
-import { TextArea } from "@astryxdesign/core/TextArea"
-import { useEffect, useState } from "react"
+import { Switch } from "@astryxdesign/core/Switch"
+import { Heading, Text } from "@astryxdesign/core/Text"
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react"
 
+import type { CodeMirrorDocumentHandle } from "../components/CodeMirrorDocument"
 import type { LlmDebugDetail, ReplayResult } from "../lib/types"
 
-import { EmptyState, MonoText } from "../components/common"
+import { ConfirmButton, EmptyState, MonoText } from "../components/common"
+import { JsonCodeEditor } from "../components/JsonCodeEditor"
 import { Page } from "../components/Page"
-import { PlayIcon } from "../icons"
+import { RequestExportMenu } from "../components/RequestExportMenu"
+import { ResponseInspector } from "../components/ResponseInspector"
+import { CopyIcon, PlayIcon, RefreshCwIcon } from "../icons"
 import { ApiError, get, post } from "../lib/api"
+import {
+  formatJsonDocument,
+  prepareReplayDocument,
+  validateReplayDocument,
+} from "../lib/json-document"
+import { jsonCopyErrorMessage } from "../lib/json-tree"
+import {
+  acceptReplayResult,
+  classifyReplayResult,
+  isSameReplaySource,
+  replayErrorMessage,
+  replayResponse,
+  type AcceptedReplayResult,
+  type ReplaySourceIdentity,
+} from "../lib/replay-result"
 import { navigate, useHashRoute } from "../lib/router"
 import { useToast } from "../lib/toast"
 import { useAsyncData } from "../lib/usePolling"
 
 function loadDetail(id: string): Promise<LlmDebugDetail> {
   return get<LlmDebugDetail>(`/dashboard/api/llm-debug/${id}`)
-}
-
-function statusBadgeVariant(status: number): "success" | "error" {
-  return status >= 200 && status < 300 ? "success" : "error"
 }
 
 export default function LlmReplayScreen() {
@@ -59,17 +72,96 @@ function LlmReplayView({ id }: { id: string }) {
     [id],
   )
   const toast = useToast()
+  const editorRef = useRef<CodeMirrorDocumentHandle>(null)
+  const initializedSourceRef = useRef<ReplaySourceIdentity | undefined>(
+    undefined,
+  )
+  const acceptedResultRef = useRef<AcceptedReplayResult | undefined>(undefined)
 
   const [body, setBody] = useState("")
+  const [originalBody, setOriginalBody] = useState("")
   const [isRunning, setIsRunning] = useState(false)
-  const [result, setResult] = useState<ReplayResult>()
+  const [result, setResult] = useState<AcceptedReplayResult>()
   const [replayError, setReplayError] = useState<string>()
+  const [wrap, setWrap] = useState(false)
+
+  const sourceBody = data?.request.body ?? ""
+  const sourceId = data?.id
 
   useEffect(() => {
-    if (data) setBody(data.request.body ?? "")
-  }, [data])
+    if (
+      sourceId === undefined
+      || isSameReplaySource(initializedSourceRef.current, sourceId, sourceBody)
+    ) {
+      return
+    }
 
-  async function runReplay() {
+    initializedSourceRef.current = { body: sourceBody, id: sourceId }
+    const preparedBody = prepareReplayDocument(sourceBody)
+    // The source record is external state; initialize the local editor session
+    // only when its stable id/body pair actually changes.
+    // eslint-disable-next-line @eslint-react/hooks-extra/no-direct-set-state-in-use-effect
+    setBody(preparedBody)
+    // eslint-disable-next-line @eslint-react/hooks-extra/no-direct-set-state-in-use-effect
+    setOriginalBody(preparedBody)
+    acceptedResultRef.current = undefined
+    // eslint-disable-next-line @eslint-react/hooks-extra/no-direct-set-state-in-use-effect
+    setResult(undefined)
+    // eslint-disable-next-line @eslint-react/hooks-extra/no-direct-set-state-in-use-effect
+    setReplayError(undefined)
+  }, [sourceBody, sourceId])
+
+  const deferredBody = useDeferredValue(body)
+  const validation = useMemo(
+    () => validateReplayDocument(deferredBody),
+    [deferredBody],
+  )
+  const validationPending = deferredBody !== body
+  const canRun = validation.ok && !validationPending && !isRunning
+  const diagnostic =
+    validationPending || validation.ok ? null : validation.diagnostic
+  const dirty = body !== originalBody
+
+  function formatBody(): void {
+    const formatted = formatJsonDocument(body)
+    if (formatted === null) {
+      const currentValidation = validateReplayDocument(body)
+      setReplayError(
+        currentValidation.ok ?
+          "Request body could not be formatted."
+        : currentValidation.diagnostic.message,
+      )
+      editorRef.current?.focus()
+      return
+    }
+    setBody(formatted)
+    setReplayError(undefined)
+    editorRef.current?.focus()
+  }
+
+  function resetBody(): void {
+    setBody(originalBody)
+    setReplayError(undefined)
+    editorRef.current?.focus()
+  }
+
+  async function copyRequest(): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(body)
+      toast.success("Copied request")
+    } catch (caught) {
+      toast.error(jsonCopyErrorMessage(caught))
+    }
+  }
+
+  async function runReplay(): Promise<void> {
+    const currentValidation = validateReplayDocument(body)
+    if (!currentValidation.ok) {
+      setReplayError(currentValidation.diagnostic.message)
+      editorRef.current?.focus()
+      return
+    }
+
     setIsRunning(true)
     setReplayError(undefined)
     try {
@@ -77,19 +169,29 @@ function LlmReplayView({ id }: { id: string }) {
         `/dashboard/api/llm-debug/${id}/replay`,
         { body },
       )
-      setResult(replayResult)
+      const classification = classifyReplayResult(replayResult)
+      if (!classification.ok) {
+        setReplayError(classification.message)
+        return
+      }
+
+      const accepted = acceptReplayResult(
+        id,
+        replayResult,
+        acceptedResultRef.current,
+      )
+      acceptedResultRef.current = accepted
+      setResult(accepted)
     } catch (caught) {
       setReplayError(
-        caught instanceof ApiError ? caught.message : "Replay request failed",
+        caught instanceof ApiError ?
+          caught.message
+        : replayErrorMessage(caught),
       )
     } finally {
       setIsRunning(false)
+      editorRef.current?.focus()
     }
-  }
-
-  function copy(text: string) {
-    void navigator.clipboard.writeText(text)
-    toast.success("Copied")
   }
 
   return (
@@ -119,111 +221,128 @@ function LlmReplayView({ id }: { id: string }) {
 
       {!data && loading ?
         <VStack gap={4}>
-          <Skeleton height={200} />
+          <Skeleton height={120} />
+          <Skeleton height={420} index={1} />
         </VStack>
       : null}
 
       {data ?
         <VStack gap={4}>
-          <Section dividers={["bottom"]}>
-            <VStack gap={3}>
-              <HStack gap={3} vAlign="center">
-                <Badge variant="neutral" label={data.request.method} />
-                <MonoText>{data.request.path}</MonoText>
-              </HStack>
-
-              <TextArea
-                label="Request body"
-                value={body}
-                onChange={setBody}
-                rows={14}
-              />
-
-              <HStack hAlign="end">
-                <Button
-                  label="Run Replay"
-                  variant="primary"
-                  icon={<PlayIcon />}
-                  isLoading={isRunning}
-                  onClick={() => void runReplay()}
-                />
-              </HStack>
-            </VStack>
-          </Section>
-
-          {replayError ?
-            <Banner
-              status="error"
-              title="Replay failed"
-              description={replayError}
+          <HStack
+            className="replay-header"
+            gap={3}
+            hAlign="between"
+            vAlign="center"
+            wrap="wrap"
+          >
+            <HStack gap={3} vAlign="center" wrap="wrap">
+              <Badge variant="neutral" label={data.request.method} />
+              <MonoText>{data.request.path}</MonoText>
+            </HStack>
+            <Button
+              label="Run Replay"
+              variant="primary"
+              icon={<PlayIcon />}
+              isLoading={isRunning}
+              isDisabled={!canRun}
+              onClick={() => void runReplay()}
             />
-          : null}
+          </HStack>
 
-          {result ?
-            <Section>
-              <VStack gap={4}>
-                <HStack gap={3} vAlign="center">
-                  <Badge
-                    variant={statusBadgeVariant(result.status)}
-                    label={`${result.status} ${result.statusText}`}
+          <div className="replay-workspace">
+            <Card className="replay-pane replay-request-pane">
+              <VStack gap={3}>
+                <HStack hAlign="between" vAlign="center" wrap="wrap" gap={2}>
+                  <Heading level={3}>Request JSON</Heading>
+                  <RequestExportMenu
+                    body={body}
+                    id={id}
+                    isJsonValid={validation.ok && !validationPending}
+                    request={data.request}
+                    onError={toast.error}
+                    onExport={(format) => toast.success(`Exported ${format}`)}
                   />
-                  <Text type="supporting" color="secondary">
-                    {result.durationMs} ms
-                  </Text>
-                  {result.finishReason === null ? null : (
-                    <Text type="supporting" color="secondary">
-                      finish: {result.finishReason}
-                    </Text>
-                  )}
-                  {result.responseId === null ? null : (
-                    <MonoText>{result.responseId}</MonoText>
-                  )}
                 </HStack>
-
-                <VStack gap={1}>
-                  <Text type="label" color="secondary">
-                    Response Body
-                  </Text>
-                  <CodeBlock
-                    code={
-                      result.parsed === null || result.parsed === undefined ?
-                        result.body
-                      : JSON.stringify(result.parsed, null, 2)
-                    }
-                    language="json"
-                    maxHeight={400}
-                    onCopy={() => copy(result.body)}
+                <HStack gap={2} vAlign="center" wrap="wrap">
+                  <Button
+                    label="Format JSON"
+                    variant="secondary"
+                    size="sm"
+                    isDisabled={validationPending || !validation.ok}
+                    onClick={formatBody}
                   />
-                </VStack>
+                  <Button
+                    label="Copy request"
+                    variant="secondary"
+                    size="sm"
+                    icon={<CopyIcon />}
+                    onClick={() => void copyRequest()}
+                  />
+                  <ConfirmButton
+                    label="Reset request"
+                    confirmTitle="Reset request?"
+                    confirmDescription="Discard all edits and restore the captured request body?"
+                    confirmActionLabel="Reset"
+                    variant="secondary"
+                    size="sm"
+                    icon={<RefreshCwIcon />}
+                    isDisabled={!dirty}
+                    onConfirm={resetBody}
+                  />
+                  <Switch
+                    label="Wrap request"
+                    value={wrap}
+                    onChange={setWrap}
+                  />
+                </HStack>
+                <JsonCodeEditor
+                  ref={editorRef}
+                  diagnostic={diagnostic}
+                  label="Request JSON"
+                  value={body}
+                  wrap={wrap}
+                  onChange={setBody}
+                />
+              </VStack>
+            </Card>
 
-                {result.streamEvents.length > 0 ?
-                  <VStack gap={1}>
-                    <Text type="label" color="secondary">
-                      Stream Events ({result.streamEvents.length})
-                    </Text>
-                    <List hasDividers density="compact">
-                      {result.streamEvents.map((streamEvent, index) => (
-                        <ListItem
-                          key={streamEvent.id ?? index}
-                          label={streamEvent.event ?? "message"}
-                          description={
-                            <MonoText>
-                              {(
-                                streamEvent.data === null
-                                || streamEvent.data === undefined
-                              ) ?
-                                streamEvent.rawData
-                              : JSON.stringify(streamEvent.data)}
-                            </MonoText>
-                          }
-                        />
-                      ))}
-                    </List>
-                  </VStack>
+            <Card className="replay-pane replay-result-pane">
+              <VStack gap={3}>
+                <Heading level={3}>Replay result</Heading>
+                {replayError ?
+                  <Banner
+                    status="error"
+                    title="Replay failed"
+                    description={replayError}
+                  />
+                : null}
+                {replayError && result ?
+                  <Text type="label" color="secondary">
+                    Last successful result
+                  </Text>
+                : null}
+                {result ?
+                  <ResponseInspector
+                    durationMs={result.result.durationMs}
+                    id={`${id}-replay`}
+                    responseIdentity={result.responseIdentity}
+                    response={replayResponse(result.result)}
+                    onCopyError={toast.error}
+                    onCopySuccess={() => toast.success("Copied")}
+                    onExport={(format) => toast.success(`Exported ${format}`)}
+                    onExportError={toast.error}
+                  />
+                : null}
+                {!result && !replayError ?
+                  <EmptyState
+                    icon={<PlayIcon />}
+                    title="Ready to replay"
+                    description="Run the edited request to inspect the upstream response."
+                  />
                 : null}
               </VStack>
-            </Section>
-          : null}
+            </Card>
+          </div>
         </VStack>
       : null}
     </Page>
