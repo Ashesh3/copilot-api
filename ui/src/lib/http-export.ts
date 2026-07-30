@@ -2,11 +2,43 @@ import type { ParsedToolCall } from "./response-tool-calls"
 import type { ParsedResponsesBody } from "./responses-body"
 import type { LlmDebugLogRequest } from "./types"
 
+export const REQUEST_EXPORT_MEDIA_TYPES = {
+  curl: "text/plain;charset=utf-8",
+  http: "message/http;charset=utf-8",
+  json: "application/json;charset=utf-8",
+} as const
+
+export const RESPONSE_EXPORT_MEDIA_TYPES = {
+  http: "message/http;charset=utf-8",
+  json: "application/json;charset=utf-8",
+  markdown: "text/markdown;charset=utf-8",
+} as const
+
 export interface HttpResponseExportSource {
   body: string | null
   headers: Record<string, string>
   status: number
   statusText: string
+}
+
+interface DownloadAnchor {
+  click: () => void
+  download: string
+  href: string
+  remove: () => void
+}
+
+interface DownloadDocument {
+  body: {
+    append: (anchor: DownloadAnchor) => void
+  }
+  createElement: (tagName: "a") => DownloadAnchor
+}
+
+export interface DownloadEnvironment {
+  createObjectURL: (blob: Blob) => string
+  document: DownloadDocument
+  revokeObjectURL: (url: string) => void
 }
 
 interface FormattedToolArguments {
@@ -163,19 +195,41 @@ export function downloadTextFile(
   contents: string,
   type: string,
 ): void {
-  const objectUrl = URL.createObjectURL(new Blob([contents], { type }))
+  downloadTextFileWithEnvironment(
+    { contents, filename, type },
+    defaultDownloadEnvironment(),
+  )
+}
+
+export function downloadTextFileWithEnvironment(
+  file: { contents: string; filename: string; type: string },
+  environment: DownloadEnvironment,
+): void {
+  const { contents, filename, type } = file
+  const objectUrl = environment.createObjectURL(new Blob([contents], { type }))
   try {
-    const anchor = document.createElement("a")
+    const anchor = environment.document.createElement("a")
     anchor.href = objectUrl
     anchor.download = filename
-    document.body.append(anchor)
+    environment.document.body.append(anchor)
     try {
       anchor.click()
     } finally {
       anchor.remove()
     }
   } finally {
-    URL.revokeObjectURL(objectUrl)
+    environment.revokeObjectURL(objectUrl)
+  }
+}
+
+function defaultDownloadEnvironment(): DownloadEnvironment {
+  const globals = globalThis as typeof globalThis & {
+    document: DownloadDocument
+  }
+  return {
+    createObjectURL: (blob) => URL.createObjectURL(blob),
+    document: globals.document,
+    revokeObjectURL: (url) => URL.revokeObjectURL(url),
   }
 }
 

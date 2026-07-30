@@ -1,10 +1,11 @@
 import { DropdownMenu, DropdownMenuItem } from "@astryxdesign/core/DropdownMenu"
 
+import type { HttpResponseExportSource } from "../lib/http-export"
 import type { ParsedResponsesBody } from "../lib/responses-body"
-import type { LlmDebugLogResponse } from "../lib/types"
 
 import { CopyIcon, DownloadIcon } from "../icons"
 import {
+  RESPONSE_EXPORT_MEDIA_TYPES,
   buildAssistantOutputMarkdown,
   buildRawHttpResponse,
   buildResponseJson,
@@ -15,7 +16,7 @@ import {
 interface ResponseExportMenuProps {
   id: string
   parsed: ParsedResponsesBody | null
-  response?: LlmDebugLogResponse
+  response?: HttpResponseExportSource
   onError?: (message: string) => void
   onExport: (format: string) => void
 }
@@ -73,7 +74,7 @@ export function ResponseExportMenu({
               contents: markdown,
               extension: "md",
               format: "Markdown",
-              type: "text/markdown",
+              type: RESPONSE_EXPORT_MEDIA_TYPES.markdown,
             })
           }
         }}
@@ -89,7 +90,7 @@ export function ResponseExportMenu({
               contents: responseJson,
               extension: "json",
               format: "JSON",
-              type: "application/json",
+              type: RESPONSE_EXPORT_MEDIA_TYPES.json,
             })
           }
         }}
@@ -104,7 +105,7 @@ export function ResponseExportMenu({
               contents: buildRawHttpResponse(response),
               extension: "http",
               format: "HTTP",
-              type: "message/http",
+              type: RESPONSE_EXPORT_MEDIA_TYPES.http,
             })
           }
         }}

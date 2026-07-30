@@ -4,6 +4,7 @@ import type { LlmDebugLogRequest } from "../lib/types"
 
 import { CopyIcon, DownloadIcon, TerminalIcon } from "../icons"
 import {
+  REQUEST_EXPORT_MEDIA_TYPES,
   buildCurlRequest,
   buildRawHttpRequest,
   downloadTextFile,
@@ -77,7 +78,7 @@ export function RequestExportMenu({
               contents: `${buildCurlRequest(exportRequest)}\n`,
               extension: "curl",
               format: "cURL",
-              type: "text/plain",
+              type: REQUEST_EXPORT_MEDIA_TYPES.curl,
             })
           }
         }}
@@ -93,7 +94,7 @@ export function RequestExportMenu({
               contents: requestJson,
               extension: "json",
               format: "JSON",
-              type: "application/json",
+              type: REQUEST_EXPORT_MEDIA_TYPES.json,
             })
           }
         }}
@@ -108,7 +109,7 @@ export function RequestExportMenu({
               contents: buildRawHttpRequest(exportRequest),
               extension: "http",
               format: "HTTP",
-              type: "message/http",
+              type: REQUEST_EXPORT_MEDIA_TYPES.http,
             })
           }
         }}

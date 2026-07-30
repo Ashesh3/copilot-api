@@ -1,14 +1,18 @@
 import { describe, expect, test } from "bun:test"
 
+import type { DownloadEnvironment } from "../ui/src/lib/http-export"
 import type { ParsedResponsesBody } from "../ui/src/lib/responses-body"
 import type { LlmDebugLogRequest } from "../ui/src/lib/types"
 
 import {
+  REQUEST_EXPORT_MEDIA_TYPES,
+  RESPONSE_EXPORT_MEDIA_TYPES,
   buildAssistantOutputMarkdown,
   buildCurlRequest,
   buildRawHttpRequest,
   buildRawHttpResponse,
   buildResponseJson,
+  downloadTextFileWithEnvironment,
   formatRequestJson,
   reportExportError,
 } from "../ui/src/lib/http-export"
@@ -57,6 +61,19 @@ const parsed: ParsedResponsesBody = {
 }
 
 describe("HTTP exports", () => {
+  test("defines exact request and response export media types", () => {
+    expect(REQUEST_EXPORT_MEDIA_TYPES).toEqual({
+      curl: "text/plain;charset=utf-8",
+      http: "message/http;charset=utf-8",
+      json: "application/json;charset=utf-8",
+    })
+    expect(RESPONSE_EXPORT_MEDIA_TYPES).toEqual({
+      http: "message/http;charset=utf-8",
+      json: "application/json;charset=utf-8",
+      markdown: "text/markdown;charset=utf-8",
+    })
+  })
+
   test("builds a cURL request with method, URL, headers, and escaped body", () => {
     expect(buildCurlRequest(request)).toBe(
       [
@@ -177,5 +194,84 @@ describe("HTTP exports", () => {
     }, new Error("Download blocked"))
 
     expect(reported).toBe("Download blocked")
+  })
+
+  test("downloads through an injected environment and revokes the object URL", () => {
+    const actions: Array<string> = []
+    const anchor = {
+      click: () => actions.push("click"),
+      download: "",
+      href: "",
+      remove: () => actions.push("remove"),
+    }
+    const environment: DownloadEnvironment = {
+      createObjectURL: (blob) => {
+        actions.push(`${blob.type}:${blob.size}`)
+        return "blob:download"
+      },
+      document: {
+        body: { append: () => actions.push("append") },
+        createElement: () => anchor,
+      },
+      revokeObjectURL: (url) => actions.push(`revoke:${url}`),
+    }
+
+    downloadTextFileWithEnvironment(
+      {
+        contents: "{}",
+        filename: "response.json",
+        type: "application/json;charset=utf-8",
+      },
+      environment,
+    )
+
+    expect(anchor).toMatchObject({
+      download: "response.json",
+      href: "blob:download",
+    })
+    expect(actions).toEqual([
+      "application/json;charset=utf-8:2",
+      "append",
+      "click",
+      "remove",
+      "revoke:blob:download",
+    ])
+  })
+
+  test("removes the anchor and revokes the object URL when click throws", () => {
+    const actions: Array<string> = []
+    const environment: DownloadEnvironment = {
+      createObjectURL: () => "blob:failed-download",
+      document: {
+        body: { append: () => actions.push("append") },
+        createElement: () => ({
+          click: () => {
+            actions.push("click")
+            throw new Error("Download blocked")
+          },
+          download: "",
+          href: "",
+          remove: () => actions.push("remove"),
+        }),
+      },
+      revokeObjectURL: (url) => actions.push(`revoke:${url}`),
+    }
+
+    expect(() =>
+      downloadTextFileWithEnvironment(
+        {
+          contents: "{}",
+          filename: "response.json",
+          type: "application/json",
+        },
+        environment,
+      ),
+    ).toThrow("Download blocked")
+    expect(actions).toEqual([
+      "append",
+      "click",
+      "remove",
+      "revoke:blob:failed-download",
+    ])
   })
 })
