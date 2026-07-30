@@ -76,7 +76,8 @@ function metadataItems(parsed: ParsedResponsesBody): Array<MetadataItem> {
     },
     {
       label: "Tool calls",
-      value: parsed.toolCallCount > 0 ? String(parsed.toolCallCount) : null,
+      value:
+        parsed.toolCalls.length > 0 ? String(parsed.toolCalls.length) : null,
     },
   ]
   return items.flatMap((item) =>
