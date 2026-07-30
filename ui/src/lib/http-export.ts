@@ -79,7 +79,7 @@ export function buildCurlRequest(request: LlmDebugLogRequest): string {
     lines.push(`  --header ${quotePosixShell(`${key}: ${value}`)}`)
   }
   if (request.body !== null) {
-    lines.push(`  --data-binary ${quotePosixShell(request.body)}`)
+    lines.push(`  --data-raw ${quotePosixShell(request.body)}`)
   }
   return lines.join(" \\\n")
 }

@@ -82,9 +82,19 @@ describe("HTTP artifact formatting", () => {
         "  --url 'https://example.test/responses?mode=debug'",
         "  --header 'content-type: application/json'",
         "  --header 'x-debug: true'",
-        `  --data-binary '${requestBody}'`,
+        `  --data-raw '${requestBody}'`,
       ].join(" \\\n"),
     )
+  })
+
+  test("preserves an at-prefixed request body as literal cURL data", () => {
+    const command = buildCurlRequest({
+      ...request,
+      body: "@payload.json",
+    })
+
+    expect(command).toContain("--data-raw '@payload.json'")
+    expect(command).not.toContain("--data-binary")
   })
 
   test("quotes adversarial cURL values without allowing shell expansion", () => {
