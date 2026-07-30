@@ -204,6 +204,20 @@ body {
   min-width: 0;
 }
 
+.response-inspector,
+.response-inspector-panel,
+.response-inspector-event-detail,
+.response-inspector-tool-call {
+  min-width: 0;
+}
+
+.response-inspector-nav {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
 .responses-output {
   box-sizing: border-box;
   width: 100%;
@@ -258,6 +272,10 @@ body {
 
 .code-document.is-read-only {
   height: min(60vh, 720px);
+}
+
+.response-inspector .code-document.is-read-only {
+  height: min(50vh, 600px);
 }
 
 .code-document .cm-scroller {
