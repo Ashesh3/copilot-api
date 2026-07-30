@@ -1,0 +1,181 @@
+import { describe, expect, test } from "bun:test"
+
+import type { ParsedResponsesBody } from "../ui/src/lib/responses-body"
+import type { LlmDebugLogRequest } from "../ui/src/lib/types"
+
+import {
+  buildAssistantOutputMarkdown,
+  buildCurlRequest,
+  buildRawHttpRequest,
+  buildRawHttpResponse,
+  buildResponseJson,
+  formatRequestJson,
+  reportExportError,
+} from "../ui/src/lib/http-export"
+
+const requestBody = JSON.stringify({ model: "gpt-test", input: "Hello" })
+const escapedRequestBody = JSON.stringify(requestBody)
+const request: LlmDebugLogRequest = {
+  body: requestBody,
+  bodyBytes: requestBody.length,
+  headers: {
+    "content-type": "application/json",
+    "x-debug": "true",
+  },
+  method: "POST",
+  path: "/responses",
+  url: "https://example.test/responses?mode=debug",
+}
+
+const parsed: ParsedResponsesBody = {
+  assistantText: "Final answer",
+  copilotUsage: { total_nano_aiu: 3 },
+  errorMessage: null,
+  events: [
+    {
+      data: { sequence_number: 3, type: "response.completed" },
+      rawData: '{"type":"response.completed","sequence_number":3}',
+      sequenceNumber: 3,
+      type: "response.completed",
+    },
+  ],
+  isPartial: false,
+  reasoningText: "Private reasoning",
+  response: { id: "resp_1", object: "response", status: "completed" },
+  status: "completed",
+  toolCalls: [
+    {
+      arguments: '{"id":7}',
+      argumentsJson: { id: 7 },
+      callId: "call_1",
+      id: "item_1",
+      name: "lookup",
+      outputIndex: 0,
+    },
+  ],
+  usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+}
+
+describe("HTTP exports", () => {
+  test("builds a cURL request with method, URL, headers, and escaped body", () => {
+    expect(buildCurlRequest(request)).toBe(
+      [
+        'curl -X POST "https://example.test/responses?mode=debug"',
+        '  -H "content-type: application/json"',
+        '  -H "x-debug: true"',
+        `  --data-raw ${escapedRequestBody}`,
+      ].join(" \\\n"),
+    )
+  })
+
+  test("formats request JSON and rejects malformed bodies", () => {
+    expect(formatRequestJson(requestBody)).toBe(
+      '{\n  "model": "gpt-test",\n  "input": "Hello"\n}\n',
+    )
+    expect(formatRequestJson('{"model":')).toBeNull()
+  })
+
+  test("builds a raw HTTP request with CRLF framing", () => {
+    expect(buildRawHttpRequest(request)).toBe(
+      [
+        "POST /responses?mode=debug HTTP/1.1",
+        "Host: example.test",
+        "content-type: application/json",
+        "x-debug: true",
+        "",
+        requestBody,
+      ].join("\r\n"),
+    )
+  })
+
+  test("builds assistant Markdown with formatted tool calls but no reasoning", () => {
+    const markdown = buildAssistantOutputMarkdown(parsed)
+
+    expect(markdown).toContain("# Assistant output\n\nFinal answer")
+    expect(markdown).toContain("## Tool calls\n\n### lookup")
+    expect(markdown).toContain('```json\n{\n  "id": 7\n}\n```')
+    expect(markdown).not.toContain("Private reasoning")
+    expect(markdown?.endsWith("\n")).toBe(true)
+  })
+
+  test("describes tool-only output and includes the tool name", () => {
+    const markdown = buildAssistantOutputMarkdown({
+      ...parsed,
+      assistantText: "",
+      toolCalls: parsed.toolCalls.slice(0, 1),
+    })
+
+    expect(markdown).toContain(
+      "The model returned 1 tool call and no assistant message.",
+    )
+    expect(markdown).toContain("### lookup")
+  })
+
+  test("formats an ordinary direct JSON response without normalizing it", () => {
+    expect(
+      buildResponseJson(
+        {
+          body: '{"ok":true,"result":"hello"}',
+          headers: { "content-type": "application/json" },
+          status: 200,
+          statusText: "OK",
+        },
+        null,
+      ),
+    ).toBe('{\n  "ok": true,\n  "result": "hello"\n}\n')
+  })
+
+  test("normalizes a streamed response into stable response JSON", () => {
+    const exported = buildResponseJson(
+      {
+        body: 'event: response.completed\ndata: {"type":"response.completed"}\n\n',
+        headers: { "content-type": "text/event-stream" },
+        status: 200,
+        statusText: "OK",
+      },
+      parsed,
+    )
+
+    expect(exported).not.toBeNull()
+    if (exported === null) throw new Error("Expected normalized JSON")
+    expect(JSON.parse(exported)).toEqual({
+      status: parsed.status,
+      assistantText: parsed.assistantText,
+      toolCalls: parsed.toolCalls,
+      reasoningText: parsed.reasoningText,
+      errorMessage: parsed.errorMessage,
+      usage: parsed.usage,
+      copilotUsage: parsed.copilotUsage,
+      response: parsed.response,
+      events: parsed.events,
+    })
+  })
+
+  test("builds a raw HTTP response while preserving the exact LF body", () => {
+    const body = "first line\nsecond line\n"
+    expect(
+      buildRawHttpResponse({
+        body,
+        headers: {
+          "content-type": "text/event-stream",
+          "x-request-id": "req_1",
+        },
+        status: 200,
+        statusText: "OK   ",
+      }),
+    ).toBe(
+      "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nx-request-id: req_1\r\n\r\n"
+        + body,
+    )
+  })
+
+  test("reports an export error message through the supplied callback", () => {
+    let reported = ""
+
+    reportExportError((message) => {
+      reported = message
+    }, new Error("Download blocked"))
+
+    expect(reported).toBe("Download blocked")
+  })
+})
