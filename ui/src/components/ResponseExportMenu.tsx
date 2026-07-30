@@ -8,12 +8,13 @@ import type { ParsedResponsesBody } from "../lib/responses-body"
 import { CopyIcon, DownloadIcon } from "../icons"
 import {
   RESPONSE_EXPORT_MEDIA_TYPES,
-  buildAssistantOutputMarkdown,
-  buildRawHttpResponse,
-  buildResponseJson,
   downloadTextFile,
   reportExportError,
 } from "../lib/http-export"
+import {
+  createResponseExportActions,
+  responseExportAvailability,
+} from "../lib/response-export-actions"
 
 interface ResponseExportMenuProps {
   id: string
@@ -38,8 +39,9 @@ export function ResponseExportMenu({
   onExport,
 }: ResponseExportMenuProps) {
   const [exportError, setExportError] = useState<string | null>(null)
-  const markdown = buildAssistantOutputMarkdown(parsed)
-  const responseJson = buildResponseJson(response, parsed)
+  const source = { parsed, response }
+  const availability = responseExportAvailability(source)
+  const actions = createResponseExportActions(source)
 
   function save(file: ResponseExportFile): void {
     try {
@@ -75,8 +77,9 @@ export function ResponseExportMenu({
           label="Assistant output"
           description="Markdown output and tool calls"
           icon={<DownloadIcon />}
-          isDisabled={markdown === null}
+          isDisabled={!availability.assistantOutput}
           onClick={() => {
+            const markdown = actions.buildAssistantOutput()
             if (markdown !== null) {
               save({
                 contents: markdown,
@@ -91,8 +94,9 @@ export function ResponseExportMenu({
           label="Response JSON"
           description="Formatted or normalized response"
           icon={<DownloadIcon />}
-          isDisabled={responseJson === null}
+          isDisabled={!availability.responseJson}
           onClick={() => {
+            const responseJson = actions.buildResponseJson()
             if (responseJson !== null) {
               save({
                 contents: responseJson,
@@ -107,10 +111,12 @@ export function ResponseExportMenu({
           label="Raw HTTP response"
           description="Status, headers, and exact body"
           icon={<CopyIcon />}
+          isDisabled={!availability.rawHttpResponse}
           onClick={() => {
-            if (response) {
+            const rawResponse = actions.buildRawHttpResponse()
+            if (rawResponse !== null) {
               save({
-                contents: buildRawHttpResponse(response),
+                contents: rawResponse,
                 extension: "http",
                 format: "HTTP",
                 type: RESPONSE_EXPORT_MEDIA_TYPES.http,

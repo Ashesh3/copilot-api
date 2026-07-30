@@ -24,7 +24,7 @@ describe("response output descriptions", () => {
         ...completedResponse,
         assistantText: "Final answer",
       }),
-    ).toEqual({ kind: "assistant", message: null })
+    ).toEqual({ errorMessage: null, kind: "assistant", message: null })
   })
 
   test("describes a tool-only response", () => {
@@ -43,12 +43,13 @@ describe("response output descriptions", () => {
         ],
       }),
     ).toEqual({
+      errorMessage: null,
       kind: "tool-only",
       message: "The model returned 1 tool call and no assistant message.",
     })
   })
 
-  test("prefers an error over a partial-capture description", () => {
+  test("describes a terminal error without primary output", () => {
     expect(
       describeResponseOutput({
         ...completedResponse,
@@ -56,7 +57,50 @@ describe("response output descriptions", () => {
         isPartial: true,
         status: "error",
       }),
-    ).toEqual({ kind: "error", message: "Quota exceeded" })
+    ).toEqual({
+      errorMessage: "Quota exceeded",
+      kind: "error",
+      message: null,
+    })
+  })
+
+  test("retains a terminal error alongside assistant output", () => {
+    expect(
+      describeResponseOutput({
+        ...completedResponse,
+        assistantText: "Partial answer",
+        errorMessage: "Stream failed",
+        status: "error",
+      }),
+    ).toEqual({
+      errorMessage: "Stream failed",
+      kind: "assistant",
+      message: null,
+    })
+  })
+
+  test("retains a terminal error alongside tool-call output", () => {
+    expect(
+      describeResponseOutput({
+        ...completedResponse,
+        errorMessage: "Stream failed",
+        status: "error",
+        toolCalls: [
+          {
+            arguments: "{}",
+            argumentsJson: {},
+            callId: "call_1",
+            id: "item_1",
+            name: "lookup",
+            outputIndex: 0,
+          },
+        ],
+      }),
+    ).toEqual({
+      errorMessage: "Stream failed",
+      kind: "tool-only",
+      message: "The model returned 1 tool call and no assistant message.",
+    })
   })
 
   test("describes a partial capture without final output", () => {
@@ -67,6 +111,7 @@ describe("response output descriptions", () => {
         status: "in_progress",
       }),
     ).toEqual({
+      errorMessage: null,
       kind: "partial",
       message:
         "The capture ended before a final assistant output event was received.",
@@ -75,6 +120,7 @@ describe("response output descriptions", () => {
 
   test("describes a completed response with no output", () => {
     expect(describeResponseOutput(completedResponse)).toEqual({
+      errorMessage: null,
       kind: "empty",
       message:
         "The completed response contained no assistant message, tool call, refusal, or error.",

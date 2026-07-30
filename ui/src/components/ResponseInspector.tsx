@@ -8,10 +8,12 @@ import { HStack, VStack } from "@astryxdesign/core/Stack"
 import { Switch } from "@astryxdesign/core/Switch"
 import { Tab, TabList } from "@astryxdesign/core/TabList"
 import { Heading, Text } from "@astryxdesign/core/Text"
-import { useEffect, useMemo, useState, type ReactNode } from "react"
+import { useMemo, useState, type ReactNode } from "react"
 
+import type { CodeDocumentLanguage } from "../lib/code-mirror-document"
 import type { HttpResponseExportSource } from "../lib/http-export"
 import type { JsonValue } from "../lib/json-tree"
+import type { ResponseInspectorTab } from "../lib/response-inspector"
 import type { ParsedToolCall } from "../lib/response-tool-calls"
 import type {
   ParsedResponsesBody,
@@ -19,7 +21,13 @@ import type {
 } from "../lib/responses-body"
 
 import { CopyIcon } from "../icons"
-import { parseJsonBody, jsonCopyErrorMessage } from "../lib/json-tree"
+import { jsonCopyErrorMessage } from "../lib/json-tree"
+import {
+  initialResponseInspectorViewState,
+  metadataItemKey,
+  responseBodyLanguage,
+  responseInspectorViewState,
+} from "../lib/response-inspector"
 import { describeResponseOutput } from "../lib/response-output"
 import { parseResponsesBody } from "../lib/responses-body"
 import { JsonTreeViewer } from "./JsonTreeViewer"
@@ -29,6 +37,7 @@ import { VirtualizedCodeViewer } from "./VirtualizedCodeViewer"
 export interface ResponseInspectorProps {
   durationMs?: number
   id: string
+  responseIdentity: string
   response: HttpResponseExportSource
   onCopyError: (message: string) => void
   onCopySuccess: () => void
@@ -42,7 +51,6 @@ interface MetadataItem {
 }
 
 type JsonRecord = { [key: string]: JsonValue }
-type ResponseInspectorTab = "output" | "details" | "events" | "raw"
 
 function isRecord(value: JsonValue | undefined): value is JsonRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -163,9 +171,11 @@ function copilotUsageItems(usage: JsonRecord | null): Array<MetadataItem> {
 
 function MetadataSection({
   items,
+  source,
   title,
 }: {
   items: Array<MetadataItem>
+  source: string
   title: string
 }) {
   if (items.length === 0) return null
@@ -173,8 +183,11 @@ function MetadataSection({
     <VStack gap={2}>
       <Heading level={4}>{title}</Heading>
       <MetadataList columns="multi">
-        {items.map((item) => (
-          <MetadataListItem key={item.label} label={item.label}>
+        {items.map((item, index) => (
+          <MetadataListItem
+            key={metadataItemKey(source, item.label, index)}
+            label={item.label}
+          >
             <Text type="code">{item.value}</Text>
           </MetadataListItem>
         ))}
@@ -242,7 +255,11 @@ function ToolCallViewer({
   return (
     <Collapsible defaultIsOpen={false} trigger={trigger}>
       <VStack gap={3} className="response-inspector-tool-call">
-        <MetadataSection items={details} title="Call details" />
+        <MetadataSection
+          items={details}
+          source={`tool-call-${call.outputIndex}-${call.id ?? call.callId ?? index}`}
+          title="Call details"
+        />
         {call.argumentsJson === null ?
           <VirtualizedCodeViewer
             label={`${call.name ?? `Tool call ${index + 1}`} payload`}
@@ -268,21 +285,21 @@ function ToolCallViewer({
 
 function RawResponseBody({
   body,
+  language,
   wrap,
   onCopyError,
   onCopySuccess,
 }: {
   body: string
+  language: CodeDocumentLanguage
   wrap: boolean
   onCopyError: (message: string) => void
   onCopySuccess: () => void
 }) {
-  const parsed = useMemo(() => parseJsonBody(body), [body])
-
   return (
     <VirtualizedCodeViewer
       label="Raw response body"
-      language={parsed ? "json" : "text"}
+      language={language}
       value={body}
       wrap={wrap}
       onCopyError={onCopyError}
@@ -374,13 +391,7 @@ function OutputPanel({
       break
     }
     case "error": {
-      responseOutput = (
-        <Banner
-          status="error"
-          title="Response error"
-          description={description.message}
-        />
-      )
+      responseOutput = null
 
       break
     }
@@ -402,7 +413,15 @@ function OutputPanel({
         <Banner
           status="warning"
           title="Partial response capture"
-          description="The terminal stream marker has not been captured. Available events are shown below."
+          description="The terminal stream marker has not been captured. Open the Events tab to inspect the available events."
+        />
+      : null}
+
+      {description.errorMessage ?
+        <Banner
+          status="error"
+          title="Response error"
+          description={description.errorMessage}
         />
       : null}
 
@@ -440,9 +459,10 @@ function OutputPanel({
   )
 }
 
-export function ResponseInspector({
+function ResponseInspectorSession({
   durationMs,
   id,
+  responseIdentity,
   response,
   onCopyError,
   onCopySuccess,
@@ -453,17 +473,18 @@ export function ResponseInspector({
     () => (response.body ? parseResponsesBody(response.body) : null),
     [response.body],
   )
-  const [tab, setTab] = useState<ResponseInspectorTab>("output")
-  const [selectedEvent, setSelectedEvent] = useState(0)
+  const [storedViewState, setViewState] = useState(() =>
+    initialResponseInspectorViewState(responseIdentity),
+  )
+  const viewState = responseInspectorViewState(
+    storedViewState,
+    responseIdentity,
+  )
+  const { selectedEvent, tab } = viewState
+  const [rawLanguage] = useState(() =>
+    responseBodyLanguage(response.body ?? "", response.headers),
+  )
   const [wrap, setWrap] = useState(false)
-
-  useEffect(() => {
-    // A response replacement starts a fresh inspection session.
-    // eslint-disable-next-line @eslint-react/hooks-extra/no-direct-set-state-in-use-effect
-    setTab("output")
-    // eslint-disable-next-line @eslint-react/hooks-extra/no-direct-set-state-in-use-effect
-    setSelectedEvent(0)
-  }, [response.body, response.status])
 
   const events = parsed?.events ?? []
   const selectedIndex = Math.min(selectedEvent, Math.max(0, events.length - 1))
@@ -495,19 +516,26 @@ export function ResponseInspector({
             <>
               <MetadataSection
                 items={metadataItems(parsed)}
+                source="response-details"
                 title="Response details"
               />
               <MetadataSection
                 items={usageItems(parsed.usage)}
+                source="token-usage"
                 title="Token usage"
               />
               <MetadataSection
                 items={copilotUsageItems(parsed.copilotUsage)}
+                source="copilot-usage"
                 title="Copilot usage"
               />
             </>
           : null}
-          <MetadataSection items={headers} title="Response headers" />
+          <MetadataSection
+            items={headers}
+            source="response-headers"
+            title="Response headers"
+          />
         </VStack>
       )
 
@@ -527,7 +555,10 @@ export function ResponseInspector({
               }))}
               width="100%"
               onChange={(value) =>
-                setSelectedEvent(Number.parseInt(value, 10) || 0)
+                setViewState({
+                  ...viewState,
+                  selectedEvent: Number.parseInt(value, 10) || 0,
+                })
               }
             />
             <EventViewer
@@ -545,6 +576,7 @@ export function ResponseInspector({
       panel = (
         <RawResponseBody
           body={response.body ?? ""}
+          language={rawLanguage}
           wrap={wrap}
           onCopyError={onCopyError}
           onCopySuccess={onCopySuccess}
@@ -584,7 +616,9 @@ export function ResponseInspector({
         className="response-inspector-nav"
         hasDivider
         value={tab}
-        onChange={(value) => setTab(value as ResponseInspectorTab)}
+        onChange={(value) =>
+          setViewState({ ...viewState, tab: value as ResponseInspectorTab })
+        }
       >
         <Tab value="output" label="Output" />
         <Tab value="details" label="Details" />
@@ -594,11 +628,15 @@ export function ResponseInspector({
 
       <div
         className="response-inspector-panel"
-        role="tabpanel"
+        role="region"
         aria-label={`${tab} response view`}
       >
         {panel}
       </div>
     </VStack>
   )
+}
+
+export function ResponseInspector(props: ResponseInspectorProps) {
+  return <ResponseInspectorSession key={props.responseIdentity} {...props} />
 }
