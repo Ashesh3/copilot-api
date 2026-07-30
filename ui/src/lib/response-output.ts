@@ -32,6 +32,6 @@ export function describeResponseOutput(
   return {
     kind: "empty",
     message:
-      "The response completed without an assistant message, tool call, refusal, or error.",
+      "The completed response contained no assistant message, tool call, refusal, or error.",
   }
 }

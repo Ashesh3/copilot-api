@@ -211,6 +211,10 @@ body {
   min-width: 0;
 }
 
+.response-inspector > * {
+  min-width: 0;
+}
+
 .response-inspector-nav {
   min-width: 0;
   max-width: 100%;

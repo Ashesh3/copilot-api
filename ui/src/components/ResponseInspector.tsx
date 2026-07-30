@@ -27,7 +27,7 @@ import { ResponseExportMenu } from "./ResponseExportMenu"
 import { VirtualizedCodeViewer } from "./VirtualizedCodeViewer"
 
 export interface ResponseInspectorProps {
-  duration?: number
+  durationMs?: number
   id: string
   response: HttpResponseExportSource
   onCopyError: (message: string) => void
@@ -266,6 +266,31 @@ function ToolCallViewer({
   )
 }
 
+function RawResponseBody({
+  body,
+  wrap,
+  onCopyError,
+  onCopySuccess,
+}: {
+  body: string
+  wrap: boolean
+  onCopyError: (message: string) => void
+  onCopySuccess: () => void
+}) {
+  const parsed = useMemo(() => parseJsonBody(body), [body])
+
+  return (
+    <VirtualizedCodeViewer
+      label="Raw response body"
+      language={parsed ? "json" : "text"}
+      value={body}
+      wrap={wrap}
+      onCopyError={onCopyError}
+      onCopySuccess={onCopySuccess}
+    />
+  )
+}
+
 function OutputPanel({
   parsed,
   bodyIsEmpty,
@@ -416,7 +441,7 @@ function OutputPanel({
 }
 
 export function ResponseInspector({
-  duration,
+  durationMs,
   id,
   response,
   onCopyError,
@@ -426,10 +451,6 @@ export function ResponseInspector({
 }: ResponseInspectorProps) {
   const parsed = useMemo(
     () => (response.body ? parseResponsesBody(response.body) : null),
-    [response.body],
-  )
-  const parsedJson = useMemo(
-    () => parseJsonBody(response.body ?? ""),
     [response.body],
   )
   const [tab, setTab] = useState<ResponseInspectorTab>("output")
@@ -522,10 +543,8 @@ export function ResponseInspector({
     }
     default: {
       panel = (
-        <VirtualizedCodeViewer
-          label="Raw response body"
-          language={parsedJson ? "json" : "text"}
-          value={parsedJson?.formatted ?? response.body ?? ""}
+        <RawResponseBody
+          body={response.body ?? ""}
           wrap={wrap}
           onCopyError={onCopyError}
           onCopySuccess={onCopySuccess}
@@ -542,9 +561,9 @@ export function ResponseInspector({
           <Text type="code">
             {`${response.status} ${response.statusText}`.trim()}
           </Text>
-          {duration === undefined ? null : (
+          {durationMs === undefined ? null : (
             <Text type="supporting" color="secondary">
-              {duration.toLocaleString()} ms
+              {durationMs.toLocaleString()} ms
             </Text>
           )}
         </HStack>
