@@ -6,8 +6,12 @@ import {
   escapeJsonPointerSegment,
   hasJsonEntries,
   initialJsonContainerPaths,
+  jsonCopyErrorMessage,
   jsonEntryPage,
+  jsonExpandedPathsAfterDocumentChange,
+  jsonPaginationButtonForTreeItem,
   jsonPointerPath,
+  jsonVisibleCountAfterValueChange,
   measureJsonDocument,
   parseJsonBody,
 } from "../ui/src/lib/json-tree"
@@ -119,5 +123,102 @@ describe("JSON tree helpers", () => {
       "#",
       "#/input",
     ])
+  })
+
+  test("only activates a direct button on a marked pagination tree item", () => {
+    let clicks = 0
+    const directButton = {
+      click: () => {
+        clicks += 1
+      },
+      tagName: "BUTTON",
+    }
+    const nestedButton = {
+      children: [directButton],
+      tagName: "DIV",
+    }
+
+    expect(
+      jsonPaginationButtonForTreeItem({
+        children: [directButton],
+        dataset: {},
+      }),
+    ).toBeNull()
+    expect(
+      jsonPaginationButtonForTreeItem({
+        children: [nestedButton],
+        dataset: { jsonPagination: "true" },
+      }),
+    ).toBeNull()
+
+    const button = jsonPaginationButtonForTreeItem({
+      children: [directButton],
+      dataset: { jsonPagination: "true" },
+    })
+    expect(button).not.toBeNull()
+    if (!button) throw new Error("Expected direct pagination button")
+    button.click()
+    expect(clicks).toBe(1)
+  })
+
+  test("resets paging when the JSON value identity changes", () => {
+    const firstValue = Array.from({ length: 250 }, (_, index) => index)
+    const nextValue = Array.from({ length: 250 }, (_, index) => index)
+
+    expect(jsonVisibleCountAfterValueChange(firstValue, firstValue, 200)).toBe(
+      200,
+    )
+    expect(jsonVisibleCountAfterValueChange(firstValue, nextValue, 200)).toBe(
+      JSON_CHILD_PAGE_SIZE,
+    )
+  })
+
+  test("resets disclosure when the JSON document identity changes", () => {
+    const firstValue = { input: [{ content: "first" }] }
+    const nextValue = { input: [{ content: "next" }] }
+    const currentPaths = new Set(["#", "#/input", "#/input/0"])
+    const nextInitialPaths = initialJsonContainerPaths(nextValue, false)
+
+    expect(
+      jsonExpandedPathsAfterDocumentChange({
+        current: currentPaths,
+        currentDocument: { isLarge: false, value: firstValue },
+        initial: nextInitialPaths,
+        previousDocument: { isLarge: false, value: firstValue },
+      }),
+    ).toBe(currentPaths)
+    expect(
+      jsonExpandedPathsAfterDocumentChange({
+        current: currentPaths,
+        currentDocument: { isLarge: false, value: nextValue },
+        initial: nextInitialPaths,
+        previousDocument: { isLarge: false, value: firstValue },
+      }),
+    ).toBe(nextInitialPaths)
+  })
+
+  test("resets disclosure when the JSON document scale changes", () => {
+    const value = { input: [{ content: "hello" }] }
+    const currentPaths = new Set(["#", "#/input", "#/input/0"])
+    const largeInitialPaths = initialJsonContainerPaths(value, true)
+
+    expect(
+      jsonExpandedPathsAfterDocumentChange({
+        current: currentPaths,
+        currentDocument: { isLarge: true, value },
+        initial: largeInitialPaths,
+        previousDocument: { isLarge: false, value },
+      }),
+    ).toBe(largeInitialPaths)
+  })
+
+  test("normalizes clipboard failures for accessible feedback", () => {
+    expect(jsonCopyErrorMessage(new Error("Clipboard permission denied"))).toBe(
+      "Clipboard permission denied",
+    )
+    expect(jsonCopyErrorMessage(new Error(""))).toBe("Copy failed")
+    expect(jsonCopyErrorMessage("Clipboard permission denied")).toBe(
+      "Copy failed",
+    )
   })
 })

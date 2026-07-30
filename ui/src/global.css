@@ -53,6 +53,11 @@ body {
   gap: var(--spacing-1);
 }
 
+.json-tree-copy-error {
+  color: var(--color-error);
+  font-size: var(--text-supporting-size);
+}
+
 .json-tree {
   max-height: min(65vh, 720px);
   overflow: auto;

@@ -22,6 +22,33 @@ export interface JsonEntryPage {
   total: number
 }
 
+export interface JsonPaginationButton {
+  click: () => void
+  readonly tagName: string
+}
+
+export interface JsonPaginationTreeItem {
+  readonly children: ArrayLike<{
+    click?: () => void
+    readonly tagName: string
+  }>
+  readonly dataset: {
+    readonly jsonPagination?: string
+  }
+}
+
+export interface JsonDocumentIdentity {
+  isLarge: boolean
+  value: JsonValue
+}
+
+interface JsonExpandedPathsChange {
+  current: Set<string>
+  currentDocument: JsonDocumentIdentity
+  initial: Set<string>
+  previousDocument: JsonDocumentIdentity
+}
+
 export interface ParsedJsonBody {
   formatted: string
   value: JsonValue
@@ -85,6 +112,44 @@ export function jsonEntryPage(
   }
 
   return { entries: [], remaining: 0, total: 0 }
+}
+
+export function jsonPaginationButtonForTreeItem(
+  item: JsonPaginationTreeItem,
+): JsonPaginationButton | null {
+  if (item.dataset.jsonPagination !== "true") return null
+
+  for (let index = 0; index < item.children.length; index += 1) {
+    const child = item.children[index]
+    if (child.tagName === "BUTTON" && typeof child.click === "function") {
+      return child as JsonPaginationButton
+    }
+  }
+  return null
+}
+
+export function jsonVisibleCountAfterValueChange(
+  previousValue: JsonValue,
+  value: JsonValue,
+  visibleCount: number,
+): number {
+  return Object.is(previousValue, value) ? visibleCount : JSON_CHILD_PAGE_SIZE
+}
+
+export function jsonExpandedPathsAfterDocumentChange(
+  change: JsonExpandedPathsChange,
+): Set<string> {
+  const { current, currentDocument, initial, previousDocument } = change
+  return (
+      Object.is(previousDocument.value, currentDocument.value)
+        && previousDocument.isLarge === currentDocument.isLarge
+    ) ?
+      current
+    : initial
+}
+
+export function jsonCopyErrorMessage(error: unknown): string {
+  return error instanceof Error && error.message ? error.message : "Copy failed"
 }
 
 export function hasJsonEntries(value: JsonValue): boolean {

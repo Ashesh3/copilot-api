@@ -1,7 +1,7 @@
 import { Button } from "@astryxdesign/core/Button"
 import { useTreeFocus } from "@astryxdesign/core/hooks"
 import { HStack } from "@astryxdesign/core/Stack"
-import { useCallback, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import type { JsonValue } from "../lib/json-tree"
 
@@ -12,8 +12,12 @@ import {
   hasJsonEntries,
   initialJsonContainerPaths,
   isJsonContainer,
+  jsonCopyErrorMessage,
   jsonEntryPage,
+  jsonExpandedPathsAfterDocumentChange,
+  jsonPaginationButtonForTreeItem,
   jsonPointerPath,
+  jsonVisibleCountAfterValueChange,
   measureJsonDocument,
 } from "../lib/json-tree"
 
@@ -75,6 +79,17 @@ function JsonTreeNode({
   onToggle,
 }: JsonTreeNodeProps) {
   const [visibleCount, setVisibleCount] = useState(JSON_CHILD_PAGE_SIZE)
+  const previousValue = useRef(value)
+
+  useEffect(() => {
+    const previous = previousValue.current
+    // eslint-disable-next-line @eslint-react/hooks-extra/no-direct-set-state-in-use-effect -- Replacement JSON values must reset node-local pagination.
+    setVisibleCount((current) =>
+      jsonVisibleCountAfterValueChange(previous, value, current),
+    )
+    previousValue.current = value
+  }, [value])
+
   const page = jsonEntryPage(value, visibleCount)
   const isContainer = isJsonContainer(value)
   const isExpandable = isContainer && page.total > 0
@@ -170,6 +185,7 @@ function JsonTreeNode({
             <div
               role="treeitem"
               aria-level={depth + 2}
+              data-json-pagination="true"
               tabIndex={-1}
               className="json-tree-more"
               style={style}
@@ -178,6 +194,7 @@ function JsonTreeNode({
                 label={`Show ${Math.min(JSON_CHILD_PAGE_SIZE, page.remaining)} more (${page.remaining} remaining)`}
                 variant="ghost"
                 size="sm"
+                tabIndex={-1}
                 onClick={() =>
                   setVisibleCount((current) => current + JSON_CHILD_PAGE_SIZE)
                 }
@@ -222,6 +239,31 @@ export function JsonTreeViewer({
     [documentScale.isLarge, value],
   )
   const [expandedPaths, setExpandedPaths] = useState(initiallyExpanded)
+  const previousDocument = useRef({
+    isLarge: documentScale.isLarge,
+    value,
+  })
+  const [copyError, setCopyError] = useState<string | null>(null)
+
+  useEffect(() => {
+    const previous = previousDocument.current
+    // eslint-disable-next-line @eslint-react/hooks-extra/no-direct-set-state-in-use-effect -- Replacement JSON documents must reset disclosure to their computed initial paths.
+    setExpandedPaths((current) =>
+      jsonExpandedPathsAfterDocumentChange({
+        current,
+        currentDocument: {
+          isLarge: documentScale.isLarge,
+          value,
+        },
+        initial: initiallyExpanded,
+        previousDocument: previous,
+      }),
+    )
+    previousDocument.current = {
+      isLarge: documentScale.isLarge,
+      value,
+    }
+  }, [documentScale.isLarge, initiallyExpanded, value])
 
   const toggle = useCallback((path: string) => {
     setExpandedPaths((current) => {
@@ -235,7 +277,7 @@ export function JsonTreeViewer({
   const { treeRef, handleFocus, handleKeyDown } = useTreeFocus<HTMLDivElement>({
     hasRovingTabIndex: true,
     onActivate: (item) => {
-      const button = item.querySelector("button")
+      const button = jsonPaginationButtonForTreeItem(item)
       if (!button) return false
       button.click()
       return true
@@ -246,12 +288,15 @@ export function JsonTreeViewer({
   async function copyFormatted() {
     try {
       await navigator.clipboard.writeText(formatted)
-      onCopy()
     } catch (error) {
-      onCopyError?.(
-        error instanceof Error && error.message ? error.message : "Copy failed",
-      )
+      const message = jsonCopyErrorMessage(error)
+      setCopyError(message)
+      onCopyError?.(message)
+      return
     }
+
+    setCopyError(null)
+    onCopy()
   }
 
   const rootIsContainer = isJsonContainer(value) && hasJsonEntries(value)
@@ -293,6 +338,11 @@ export function JsonTreeViewer({
           onClick={copyFormatted}
         />
       </HStack>
+      {copyError ?
+        <div role="alert" className="json-tree-copy-error">
+          {copyError}
+        </div>
+      : null}
       <div
         ref={treeRef}
         role="tree"
