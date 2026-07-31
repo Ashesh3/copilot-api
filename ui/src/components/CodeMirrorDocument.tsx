@@ -11,6 +11,7 @@ import type {
 
 import {
   codeDocumentContentAttributes,
+  codeDocumentCspNonce,
   codeDocumentExternalSyncAnnotations,
   codeDocumentHistoryExtension,
   codeDocumentLanguageExtension,
@@ -99,6 +100,7 @@ export const CodeMirrorDocument = forwardRef<
       parent: host,
       state: createCodeDocumentState(
         {
+          cspNonce: codeDocumentCspNonce(document),
           doc: initial.value,
           language: initial.language,
           onChange: (nextValue) => {
