@@ -35,6 +35,15 @@ interface CodeDocumentAriaTarget {
   setAttribute: (name: string, value: string) => void
 }
 
+interface CodeDocumentNonceElement {
+  getAttribute: (name: string) => string | null
+  nonce?: string
+}
+
+interface CodeDocumentNonceDocument {
+  querySelector: (selector: string) => CodeDocumentNonceElement | null
+}
+
 export const codeDocumentExternalSync = Annotation.define<boolean>()
 export const codeDocumentAddToHistory = Transaction.addToHistory
 
@@ -147,11 +156,19 @@ export interface CodeDocumentCompartments {
 }
 
 export interface CreateCodeDocumentStateOptions {
+  cspNonce?: string
   doc: string
   language: CodeDocumentLanguage
   onChange?: (value: string) => void
   readOnly: boolean
   wrap: boolean
+}
+
+export function codeDocumentCspNonce(
+  documentRoot?: CodeDocumentNonceDocument,
+): string {
+  const script = documentRoot?.querySelector("script[nonce]")
+  return script?.nonce ?? script?.getAttribute("nonce") ?? ""
 }
 
 export function createCodeDocumentCompartments(): CodeDocumentCompartments {
@@ -229,6 +246,7 @@ export function createCodeDocumentState(
     drawSelection(),
     dropCursor(),
     EditorState.allowMultipleSelections.of(true),
+    EditorView.cspNonce.of(options.cspNonce ?? ""),
     codeDocumentTheme,
     indentOnInput(),
     bracketMatching(),

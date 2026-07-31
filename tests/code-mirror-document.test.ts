@@ -5,6 +5,7 @@ import { EditorView } from "../ui/node_modules/@codemirror/view"
 import { tags } from "../ui/node_modules/@lezer/highlight"
 import {
   codeDocumentAddToHistory,
+  codeDocumentCspNonce,
   codeDocumentExternalSyncAnnotations,
   codeDocumentHighlightStyle,
   createCodeDocumentCompartments,
@@ -13,6 +14,36 @@ import {
   shouldNotifyCodeDocumentChange,
   syncCodeDocumentAriaAttributes,
 } from "../ui/src/lib/code-mirror-document"
+
+test("passes the dashboard CSP nonce to CodeMirror styles", () => {
+  const cspNonce = codeDocumentCspNonce({
+    querySelector: () => ({
+      getAttribute: () => null,
+      nonce: "dashboard-nonce",
+    }),
+  })
+  const state = createCodeDocumentState({
+    cspNonce,
+    doc: "response body",
+    language: "text",
+    readOnly: true,
+    wrap: false,
+  })
+
+  expect(cspNonce).toBe("dashboard-nonce")
+  expect(state.facet(EditorView.cspNonce)).toBe("dashboard-nonce")
+})
+
+test("reads the CSP nonce attribute when the DOM property is unavailable", () => {
+  expect(
+    codeDocumentCspNonce({
+      querySelector: () => ({
+        getAttribute: (name) => (name === "nonce" ? "attribute-nonce" : null),
+      }),
+    }),
+  ).toBe("attribute-nonce")
+  expect(codeDocumentCspNonce({ querySelector: () => null })).toBe("")
+})
 
 test("creates a wrapped read-only JSON document state", () => {
   const document = '{"model":"gpt-test"}'
