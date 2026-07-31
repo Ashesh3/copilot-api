@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test"
 
 import { parseResponsesBody } from "../ui/src/lib/responses-body"
 
+/* eslint-disable max-lines -- protocol variants intentionally share fixtures */
+
 function sse(type: string, data: Record<string, unknown>): string {
   return `event: ${type}\ndata: ${JSON.stringify({ ...data, type })}\n\n`
 }
@@ -82,7 +84,7 @@ describe("Responses debug body parser", () => {
     expect(parsed).not.toBeNull()
     expect(parsed?.assistantText).toBe("Final answer")
     expect(parsed?.reasoningText).toBe("Checked the state.")
-    expect(parsed?.toolCallCount).toBe(1)
+    expect(parsed?.toolCalls.length).toBe(1)
     expect(parsed?.status).toBe("completed")
     expect(parsed?.isPartial).toBe(false)
     expect(parsed?.events).toHaveLength(3)
@@ -233,7 +235,374 @@ describe("Responses debug body parser", () => {
       }),
     ].join("")
 
-    expect(parseResponsesBody(raw)?.toolCallCount).toBe(1)
+    expect(parseResponsesBody(raw)?.toolCalls.length).toBe(1)
+  })
+
+  test("reconstructs one authoritative Responses tool call without duplication", () => {
+    const functionCall = {
+      id: "fc_1",
+      call_id: "call_1",
+      type: "function_call",
+      name: "lookup",
+      arguments: '{"id":7}',
+    }
+    const raw = [
+      sse("response.output_item.added", {
+        item: { ...functionCall, arguments: "" },
+        output_index: 0,
+      }),
+      sse("response.function_call_arguments.delta", {
+        item_id: "fc_1",
+        output_index: 0,
+        delta: '{"id":',
+      }),
+      sse("response.function_call_arguments.delta", {
+        item_id: "fc_1",
+        output_index: 0,
+        delta: "7}",
+      }),
+      sse("response.function_call_arguments.done", {
+        item_id: "fc_1",
+        output_index: 0,
+        arguments: '{"id":7}',
+      }),
+      sse("response.completed", {
+        response: {
+          object: "response",
+          status: "completed",
+          output: [functionCall],
+        },
+      }),
+    ].join("")
+
+    const parsed = parseResponsesBody(raw)
+    expect(parsed?.assistantText).toBe("")
+    expect(parsed?.toolCalls).toEqual([
+      {
+        arguments: '{"id":7}',
+        argumentsJson: { id: 7 },
+        callId: "call_1",
+        id: "fc_1",
+        name: "lookup",
+        outputIndex: 0,
+      },
+    ])
+  })
+
+  test("preserves malformed authoritative Responses tool arguments", () => {
+    const raw = sse("response.output_item.done", {
+      item: {
+        id: "fc_bad",
+        call_id: "call_bad",
+        type: "function_call",
+        name: "lookup",
+        arguments: '{"id":',
+      },
+      output_index: 0,
+    })
+
+    expect(parseResponsesBody(raw)?.toolCalls).toEqual([
+      {
+        arguments: '{"id":',
+        argumentsJson: null,
+        callId: "call_bad",
+        id: "fc_bad",
+        name: "lookup",
+        outputIndex: 0,
+      },
+    ])
+  })
+
+  test("uses top-level metadata from a done-only Responses argument event", () => {
+    const parsed = parseResponsesBody(
+      sse("response.function_call_arguments.done", {
+        item_id: "fc_done",
+        output_index: 0,
+        name: "lookup",
+        arguments: '{"id":3}',
+      }),
+    )
+
+    expect(parsed?.toolCalls).toEqual([
+      {
+        arguments: '{"id":3}',
+        argumentsJson: { id: 3 },
+        callId: null,
+        id: "fc_done",
+        name: "lookup",
+        outputIndex: 0,
+      },
+    ])
+  })
+
+  test("lets output_item.done correct metadata matched by stable id", () => {
+    const raw = [
+      sse("response.output_item.added", {
+        item: {
+          id: "fc_stable",
+          call_id: "call_wrong",
+          type: "function_call",
+          name: "wrong_name",
+          arguments: "",
+        },
+        output_index: 0,
+      }),
+      sse("response.output_item.done", {
+        item: {
+          id: "fc_stable",
+          call_id: "call_final",
+          type: "function_call",
+          name: "lookup",
+          arguments: "{}",
+        },
+        output_index: 0,
+      }),
+    ].join("")
+
+    expect(parseResponsesBody(raw)?.toolCalls[0]).toMatchObject({
+      callId: "call_final",
+      id: "fc_stable",
+      name: "lookup",
+    })
+  })
+
+  test("lets a terminal response correct metadata matched by stable call id", () => {
+    const raw = [
+      sse("response.output_item.added", {
+        item: {
+          id: "fc_wrong",
+          call_id: "call_stable",
+          type: "function_call",
+          name: "wrong_name",
+          arguments: "",
+        },
+        output_index: 0,
+      }),
+      sse("response.completed", {
+        response: {
+          object: "response",
+          status: "completed",
+          output: [
+            {
+              id: "fc_final",
+              call_id: "call_stable",
+              type: "function_call",
+              name: "lookup",
+              arguments: "{}",
+            },
+          ],
+        },
+      }),
+    ].join("")
+
+    expect(parseResponsesBody(raw)?.toolCalls[0]).toMatchObject({
+      callId: "call_stable",
+      id: "fc_final",
+      name: "lookup",
+    })
+  })
+
+  test("preserves payloads for admitted non-function Responses tools", () => {
+    const cases = [
+      {
+        item: {
+          id: "computer_1",
+          type: "computer_call",
+          action: { type: "click", x: 12, y: 34 },
+          status: "completed",
+        },
+        name: "computer_call",
+        payload: { action: { type: "click", x: 12, y: 34 } },
+      },
+      {
+        item: {
+          id: "custom_1",
+          type: "custom_tool_call",
+          name: "shell",
+          input: "pwd",
+        },
+        name: "shell",
+        payload: { input: "pwd" },
+      },
+      {
+        item: {
+          id: "file_1",
+          type: "file_search_call",
+          queries: ["incident"],
+          results: [{ file_id: "file_a", score: 0.9 }],
+        },
+        name: "file_search_call",
+        payload: {
+          queries: ["incident"],
+          results: [{ file_id: "file_a", score: 0.9 }],
+        },
+      },
+      {
+        item: {
+          id: "mcp_1",
+          type: "mcp_call",
+          name: "lookup",
+          arguments: '{"id":1}',
+          server_label: "inventory",
+          error: null,
+        },
+        name: "lookup",
+        payload: {
+          arguments: '{"id":1}',
+          server_label: "inventory",
+          error: null,
+        },
+      },
+      {
+        item: {
+          id: "web_1",
+          type: "web_search_call",
+          action: { type: "search", query: "status" },
+          output_index: 99,
+        },
+        name: "web_search_call",
+        payload: { action: { type: "search", query: "status" } },
+      },
+    ]
+
+    for (const [outputIndex, entry] of cases.entries()) {
+      const parsed = parseResponsesBody(
+        sse("response.output_item.done", {
+          item: entry.item,
+          output_index: outputIndex,
+        }),
+      )
+      expect(parsed?.toolCalls[0]).toMatchObject({
+        arguments: JSON.stringify(entry.payload),
+        argumentsJson: entry.payload,
+        name: entry.name,
+      })
+    }
+  })
+
+  test("uses an explicit empty payload for a non-function Responses tool", () => {
+    const parsed = parseResponsesBody(
+      sse("response.output_item.done", {
+        item: { id: "web_empty", type: "web_search_call" },
+        output_index: 0,
+      }),
+    )
+
+    expect(parsed?.toolCalls[0]).toMatchObject({
+      arguments: "{}",
+      argumentsJson: {},
+      name: "web_search_call",
+    })
+  })
+
+  test("keeps conflicting stable Responses calls at one output index separate", () => {
+    const raw = [
+      sse("response.output_item.done", {
+        item: {
+          id: "fc_first",
+          call_id: "call_first",
+          type: "function_call",
+          name: "first",
+          arguments: "{}",
+        },
+        output_index: 0,
+      }),
+      sse("response.output_item.done", {
+        item: {
+          id: "fc_second",
+          call_id: "call_second",
+          type: "function_call",
+          name: "second",
+          arguments: "{}",
+        },
+        output_index: 0,
+      }),
+    ].join("")
+
+    expect(parseResponsesBody(raw)?.toolCalls).toEqual([
+      {
+        arguments: "{}",
+        argumentsJson: {},
+        callId: "call_first",
+        id: "fc_first",
+        name: "first",
+        outputIndex: 0,
+      },
+      {
+        arguments: "{}",
+        argumentsJson: {},
+        callId: "call_second",
+        id: "fc_second",
+        name: "second",
+        outputIndex: 0,
+      },
+    ])
+  })
+
+  test("does not invent tool calls from ordinary output text events", () => {
+    const parsed = parseResponsesBody(
+      sse("response.output_text.done", {
+        text: "Final answer",
+        output_index: 0,
+        content_index: 0,
+      }),
+    )
+
+    expect(parsed?.assistantText).toBe("Final answer")
+    expect(parsed?.errorMessage).toBeNull()
+    expect(parsed?.toolCalls).toEqual([])
+  })
+
+  test("normalizes a response.failed error without a response snapshot", () => {
+    const parsed = parseResponsesBody(
+      sse("response.failed", {
+        error: { code: "server_error", message: "Generation failed" },
+      }),
+    )
+
+    expect(parsed?.errorMessage).toBe("Generation failed")
+    expect(parsed?.status).toBe("failed")
+    expect(parsed?.isPartial).toBe(false)
+  })
+
+  test("normalizes a top-level Responses error event", () => {
+    const parsed = parseResponsesBody(
+      sse("error", {
+        code: "server_error",
+        message: "Generation failed",
+        param: null,
+        sequence_number: 4,
+      }),
+    )
+
+    expect(parsed?.errorMessage).toBe("Generation failed")
+    expect(parsed?.status).toBe("error")
+    expect(parsed?.isPartial).toBe(false)
+    expect(parsed?.events).toHaveLength(1)
+    expect(parsed?.events[0]?.type).toBe("error")
+  })
+
+  test("retains output captured before a top-level Responses error", () => {
+    const raw = [
+      sse("response.output_text.delta", {
+        delta: "Partial answer",
+        output_index: 0,
+        content_index: 0,
+        sequence_number: 1,
+      }),
+      sse("error", {
+        code: "server_error",
+        message: "Stream failed",
+        param: null,
+        sequence_number: 2,
+      }),
+    ].join("")
+
+    const parsed = parseResponsesBody(raw)
+    expect(parsed?.assistantText).toBe("Partial answer")
+    expect(parsed?.errorMessage).toBe("Stream failed")
+    expect(parsed?.status).toBe("error")
+    expect(parsed?.isPartial).toBe(false)
   })
 
   test("separates multiple event-only assistant output parts", () => {
@@ -259,6 +628,15 @@ describe("Responses debug body parser", () => {
 
   test("does not claim ordinary JSON as a Responses body", () => {
     expect(parseResponsesBody('{"ok":true,"result":"hello"}')).toBeNull()
+    expect(
+      parseResponsesBody('{"error":{"message":"ordinary error"}}'),
+    ).toBeNull()
+    expect(parseResponsesBody('{"output":[]}')).toBeNull()
+    expect(
+      parseResponsesBody(
+        '{"output":[{"type":"message","content":[]}],"output_text":""}',
+      ),
+    ).toBeNull()
     expect(
       parseResponsesBody('{"id":"job_1","status":"completed","result":{}}'),
     ).toBeNull()
@@ -386,9 +764,209 @@ describe("Responses debug body parser", () => {
     ].join("\n")
 
     const parsed = parseResponsesBody(raw)
-    expect(parsed?.toolCallCount).toBe(1)
+    expect(parsed?.toolCalls.length).toBe(1)
     expect(parsed?.status).toBe("in_progress")
     expect(parsed?.isPartial).toBe(true)
+  })
+
+  test("assembles Chat Completions tool call fragments", () => {
+    const raw = [
+      `data: ${JSON.stringify({
+        id: "msg_chat_2",
+        object: "chat.completion.chunk",
+        created: 1,
+        model: "gpt-test",
+        choices: [
+          {
+            index: 0,
+            delta: {
+              role: "assistant",
+              tool_calls: [
+                {
+                  index: 0,
+                  id: "call_chat",
+                  type: "function",
+                  function: { name: "lookup", arguments: '{"id":' },
+                },
+              ],
+            },
+            finish_reason: null,
+          },
+        ],
+      })}`,
+      "\u200B",
+      `data: ${JSON.stringify({
+        id: "msg_chat_2",
+        object: "chat.completion.chunk",
+        created: 1,
+        model: "gpt-test",
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [{ index: 0, function: { arguments: "9}" } }],
+            },
+            finish_reason: "tool_calls",
+          },
+        ],
+      })}`,
+    ].join("\n")
+
+    const parsed = parseResponsesBody(raw)
+    expect(parsed?.toolCalls).toEqual([
+      {
+        arguments: '{"id":9}',
+        argumentsJson: { id: 9 },
+        callId: null,
+        id: "call_chat",
+        name: "lookup",
+        outputIndex: 0,
+      },
+    ])
+    expect(parsed?.status).toBe("completed")
+    expect(parsed?.isPartial).toBe(false)
+  })
+
+  test("concatenates fragmented Chat tool-call metadata", () => {
+    const raw = [
+      chatChunk({
+        tool_calls: [
+          {
+            index: 0,
+            id: "call_",
+            call_id: "provider_",
+            function: { name: "look", arguments: "{" },
+          },
+        ],
+      }),
+      chatChunk(
+        {
+          tool_calls: [
+            {
+              index: 0,
+              id: "chat",
+              call_id: "id",
+              function: { name: "up", arguments: "}" },
+            },
+          ],
+        },
+        "tool_calls",
+      ),
+    ].join("")
+
+    expect(parseResponsesBody(raw)?.toolCalls).toEqual([
+      {
+        arguments: "{}",
+        argumentsJson: {},
+        callId: "provider_id",
+        id: "call_chat",
+        name: "lookup",
+        outputIndex: 0,
+      },
+    ])
+  })
+
+  test("lets a Chat message replace partial tool-call metadata", () => {
+    const partial = chatChunk({
+      tool_calls: [
+        {
+          index: 0,
+          id: "call_wrong",
+          call_id: "provider_wrong",
+          function: { name: "wrong_name", arguments: '{"wrong":' },
+        },
+      ],
+    })
+    const terminal = `data: ${JSON.stringify({
+      id: "chatcmpl_final",
+      object: "chat.completion",
+      model: "gpt-test",
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                index: 0,
+                id: "call_final",
+                call_id: "provider_final",
+                function: { name: "lookup", arguments: '{"id":7}' },
+              },
+            ],
+          },
+          finish_reason: "tool_calls",
+        },
+      ],
+    })}\n\n`
+
+    expect(parseResponsesBody(`${partial}${terminal}`)?.toolCalls).toEqual([
+      {
+        arguments: '{"id":7}',
+        argumentsJson: { id: 7 },
+        callId: "provider_final",
+        id: "call_final",
+        name: "lookup",
+        outputIndex: 0,
+      },
+    ])
+  })
+
+  test("orders Chat tool calls by choice then tool index", () => {
+    const raw = [
+      `data: ${JSON.stringify({
+        id: "chat_order",
+        object: "chat.completion.chunk",
+        model: "gpt-test",
+        choices: [
+          {
+            index: 1,
+            delta: {
+              tool_calls: [
+                {
+                  index: 1,
+                  id: "choice_1_tool_1",
+                  function: { name: "late", arguments: "{}" },
+                },
+              ],
+            },
+            finish_reason: null,
+          },
+        ],
+      })}\n\n`,
+      `data: ${JSON.stringify({
+        id: "chat_order",
+        object: "chat.completion.chunk",
+        model: "gpt-test",
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  index: 2,
+                  id: "choice_0_tool_2",
+                  function: { name: "middle", arguments: "{}" },
+                },
+                {
+                  index: 0,
+                  id: "choice_0_tool_0",
+                  function: { name: "first", arguments: "{}" },
+                },
+              ],
+            },
+            finish_reason: "tool_calls",
+          },
+        ],
+      })}\n\n`,
+    ].join("")
+
+    expect(parseResponsesBody(raw)?.toolCalls.map((call) => call.id)).toEqual([
+      "choice_0_tool_0",
+      "choice_0_tool_2",
+      "choice_1_tool_1",
+    ])
   })
 
   test("assembles non-streaming Chat Completions responses", () => {
@@ -426,7 +1004,7 @@ describe("Responses debug body parser", () => {
 
     expect(parsed?.assistantText).toBe("Final answer")
     expect(parsed?.reasoningText).toBe("Private reasoning")
-    expect(parsed?.toolCallCount).toBe(1)
+    expect(parsed?.toolCalls.length).toBe(1)
     expect(parsed?.status).toBe("completed")
     expect(parsed?.response?.finish_reason).toBe("tool_calls")
     expect(parsed?.isPartial).toBe(false)

@@ -215,7 +215,15 @@ test("rejects invalid replay requests", async () => {
   expect(missingModelResponse.status).toBe(400)
 })
 
-test("dashboard bundle ships the LLM replay UI", () => {
-  expect(DASHBOARD_HTML).toContain("Replay")
-  expect(DASHBOARD_HTML).toContain("Back to Debug")
+test("dashboard bundle ships the LLM replay workspace", () => {
+  expect(DASHBOARD_HTML).toContain("LLM Replay")
+  expect(DASHBOARD_HTML).toContain("Request JSON")
+  expect(DASHBOARD_HTML).toContain("Format JSON")
+  expect(DASHBOARD_HTML).toContain("Reset request")
+  expect(DASHBOARD_HTML).toContain("Run Replay")
+  expect(DASHBOARD_HTML).toContain("Replay result")
+  expect(DASHBOARD_HTML).toContain("Last successful result")
+  expect(DASHBOARD_HTML).toContain("replay-workspace")
+  expect(DASHBOARD_HTML).toContain("Export request")
+  expect(DASHBOARD_HTML).toContain("Export response")
 })

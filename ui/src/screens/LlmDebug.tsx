@@ -39,8 +39,9 @@ import {
 import { JsonTreeViewer } from "../components/JsonTreeViewer"
 import { Page } from "../components/Page"
 import { RequestExportMenu } from "../components/RequestExportMenu"
-import { ResponsesBodyViewer } from "../components/ResponsesBodyViewer"
+import { ResponseInspector } from "../components/ResponseInspector"
 import { ResponsivePair } from "../components/ResponsivePair"
+import { VirtualizedCodeViewer } from "../components/VirtualizedCodeViewer"
 import {
   BugIcon,
   ChevronRightIcon,
@@ -53,7 +54,7 @@ import {
 } from "../icons"
 import { ApiError, del, get } from "../lib/api"
 import { parseJsonBody } from "../lib/json-tree"
-import { parseResponsesBody } from "../lib/responses-body"
+import { requestPayloadView } from "../lib/llm-debug-detail-view"
 import { navigate, useHashRoute } from "../lib/router"
 import { useToast } from "../lib/toast"
 import { useAsyncData, usePolling } from "../lib/usePolling"
@@ -456,29 +457,26 @@ function HeaderList({
 }
 
 function PayloadBlock({
-  label,
   body,
   emptyText,
-  kind,
+  label,
+  onCopyError,
+  onCopySuccess,
   viewMode,
   wrap,
-  onCopy,
 }: {
-  label: string
   body: string | null
   emptyText: string
-  kind: "request" | "response"
+  label: string
+  onCopyError: (message: string) => void
+  onCopySuccess: () => void
   viewMode: "pretty" | "raw"
   wrap: boolean
-  onCopy: () => void
 }) {
   const parsed = useMemo(() => (body ? parseJsonBody(body) : null), [body])
-  const parsedResponse = useMemo(
-    () => (body && kind === "response" ? parseResponsesBody(body) : null),
-    [body, kind],
-  )
+  const payload = requestPayloadView(body, parsed, viewMode)
 
-  if (body === null) {
+  if (payload.kind === "empty") {
     return (
       <VStack gap={1}>
         <Text type="label" color="secondary">
@@ -491,39 +489,25 @@ function PayloadBlock({
     )
   }
 
-  let content: React.ReactNode
-  if (viewMode === "pretty" && parsedResponse) {
-    content = (
-      <ResponsesBodyViewer
-        key={`${label}:${body}`}
-        labelId="llm-debug-response-output"
-        parsed={parsedResponse}
-        wrap={wrap}
-        onCopy={onCopy}
-      />
-    )
-  } else if (viewMode === "pretty" && parsed) {
-    content = (
+  const content: React.ReactNode =
+    payload.kind === "tree" ?
       <JsonTreeViewer
         key={`${label}:${body}`}
-        formatted={parsed.formatted}
+        formatted={payload.formatted}
         label={label}
-        value={parsed.value}
+        value={payload.value}
         wrap={wrap}
-        onCopy={onCopy}
+        onCopy={onCopySuccess}
+        onCopyError={onCopyError}
       />
-    )
-  } else {
-    content = (
-      <CodeBlock
-        code={body}
-        language="json"
-        isWrapped={wrap}
-        width="100%"
-        onCopy={onCopy}
+    : <VirtualizedCodeViewer
+        label={label}
+        language={payload.language}
+        value={payload.value}
+        wrap={wrap}
+        onCopyError={onCopyError}
+        onCopySuccess={onCopySuccess}
       />
-    )
-  }
 
   return (
     <Collapsible defaultIsOpen trigger={label}>
@@ -538,7 +522,9 @@ function LlmDebugDetailView({ id }: { id: string }) {
     [id],
   )
   const toast = useToast()
-  const [viewMode, setViewMode] = useState<"pretty" | "raw">("pretty")
+  const [requestViewMode, setRequestViewMode] = useState<"pretty" | "raw">(
+    "pretty",
+  )
   const [wrap, setWrap] = useState(false)
 
   usePolling(
@@ -565,11 +551,6 @@ function LlmDebugDetailView({ id }: { id: string }) {
       isRefreshing={loading}
       actions={
         <HStack gap={2} wrap="wrap">
-          <RequestExportMenu
-            id={id}
-            request={data?.request}
-            onExport={(format) => toast.success(`Exported ${format}`)}
-          />
           <Button
             label="Copy link"
             variant="ghost"
@@ -632,19 +613,6 @@ function LlmDebugDetailView({ id }: { id: string }) {
 
       {data ?
         <VStack gap={4}>
-          <HStack gap={3} vAlign="center" hAlign="end" wrap="wrap">
-            <SegmentedControl
-              label="Body format"
-              size="sm"
-              value={viewMode}
-              onChange={(value) => setViewMode(value as "pretty" | "raw")}
-            >
-              <SegmentedControlItem value="pretty" label="Pretty" />
-              <SegmentedControlItem value="raw" label="Raw" />
-            </SegmentedControl>
-            <Switch label="Wrap" value={wrap} onChange={setWrap} />
-          </HStack>
-
           {data.error ?
             <Banner
               status="error"
@@ -696,6 +664,32 @@ function LlmDebugDetailView({ id }: { id: string }) {
             <Card>
               <VStack gap={3}>
                 <Heading level={3}>Request</Heading>
+                <HStack gap={3} hAlign="between" vAlign="center" wrap="wrap">
+                  <RequestExportMenu
+                    id={id}
+                    request={data.request}
+                    onError={toast.error}
+                    onExport={(format) => toast.success(`Exported ${format}`)}
+                  />
+                  <HStack gap={2} vAlign="center" wrap="wrap">
+                    <SegmentedControl
+                      label="Request body format"
+                      size="sm"
+                      value={requestViewMode}
+                      onChange={(value) =>
+                        setRequestViewMode(value as "pretty" | "raw")
+                      }
+                    >
+                      <SegmentedControlItem value="pretty" label="Pretty" />
+                      <SegmentedControlItem value="raw" label="Raw" />
+                    </SegmentedControl>
+                    <Switch
+                      label="Wrap request"
+                      value={wrap}
+                      onChange={setWrap}
+                    />
+                  </HStack>
+                </HStack>
                 <HStack gap={3} vAlign="center" wrap="wrap">
                   <MonoText>{data.request.method}</MonoText>
                   <MonoText>{data.request.path}</MonoText>
@@ -721,10 +715,10 @@ function LlmDebugDetailView({ id }: { id: string }) {
                   label="Request Body"
                   body={data.request.body}
                   emptyText="No request body"
-                  kind="request"
-                  viewMode={viewMode}
+                  viewMode={requestViewMode}
                   wrap={wrap}
-                  onCopy={() => toast.success("Copied")}
+                  onCopyError={toast.error}
+                  onCopySuccess={() => toast.success("Copied")}
                 />
               </VStack>
             </Card>
@@ -734,30 +728,15 @@ function LlmDebugDetailView({ id }: { id: string }) {
                 <Heading level={3}>Response</Heading>
                 {data.response ?
                   <>
-                    <HStack gap={3} vAlign="center">
-                      <MonoText>
-                        {data.response.status} {data.response.statusText}
-                      </MonoText>
-                    </HStack>
-
-                    <Collapsible
-                      trigger={`Response Headers (${Object.keys(data.response.headers).length})`}
-                      defaultIsOpen={false}
-                    >
-                      <HeaderList
-                        headers={data.response.headers}
-                        onCopy={copy}
-                      />
-                    </Collapsible>
-
-                    <PayloadBlock
-                      label="Response Body"
-                      body={data.response.body}
-                      emptyText="No response body"
-                      kind="response"
-                      viewMode={viewMode}
-                      wrap={wrap}
-                      onCopy={() => toast.success("Copied")}
+                    <ResponseInspector
+                      durationMs={data.durationMs}
+                      id={id}
+                      responseIdentity={id}
+                      response={data.response}
+                      onCopyError={toast.error}
+                      onCopySuccess={() => toast.success("Copied")}
+                      onExport={(format) => toast.success(`Exported ${format}`)}
+                      onExportError={toast.error}
                     />
                     {data.response.bodyReadError ?
                       <Banner

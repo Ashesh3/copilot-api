@@ -7,10 +7,18 @@ import type { JsonValue } from "../lib/json-tree"
 
 import { ChevronRightIcon, CopyIcon } from "../icons"
 import {
+  JSON_CHILD_PAGE_SIZE,
   collectJsonContainerPaths,
+  hasJsonEntries,
+  initialJsonContainerPaths,
   isJsonContainer,
-  jsonEntries,
+  jsonCopyErrorMessage,
+  jsonEntryPage,
+  jsonExpandedPathsForDocument,
+  jsonPaginationButtonForTreeItem,
   jsonPointerPath,
+  jsonVisibleCountForValue,
+  measureJsonDocument,
 } from "../lib/json-tree"
 
 interface JsonTreeViewerProps {
@@ -19,6 +27,7 @@ interface JsonTreeViewerProps {
   value: JsonValue
   wrap: boolean
   onCopy: () => void
+  onCopyError?: (message: string) => void
 }
 
 interface JsonTreeNodeProps {
@@ -69,9 +78,15 @@ function JsonTreeNode({
   value,
   onToggle,
 }: JsonTreeNodeProps) {
-  const entries = jsonEntries(value)
+  const [pagingState, setPagingState] = useState({
+    value,
+    visibleCount: JSON_CHILD_PAGE_SIZE,
+  })
+  const visibleCount = jsonVisibleCountForValue(pagingState, value)
+
+  const page = jsonEntryPage(value, visibleCount)
   const isContainer = isJsonContainer(value)
-  const isExpandable = isContainer && entries.length > 0
+  const isExpandable = isContainer && page.total > 0
   const isExpanded = isExpandable && expandedPaths.has(path)
   const style: NodeStyle = { "--json-depth": depth }
 
@@ -101,7 +116,7 @@ function JsonTreeNode({
   }
 
   const { close, open, unit } = containerTokens(value)
-  const count = entries.length
+  const count = page.total
 
   return (
     <div
@@ -148,18 +163,43 @@ function JsonTreeNode({
 
       {isExpanded ?
         <div role="group">
-          {entries.map(([key, child], index) => (
+          {page.entries.map(([key, child], index) => (
             <JsonTreeNode
               key={jsonPointerPath(path, key)}
               depth={depth + 1}
               expandedPaths={expandedPaths}
-              isLast={index === entries.length - 1}
+              isLast={page.remaining === 0 && index === page.entries.length - 1}
               path={jsonPointerPath(path, key)}
               propertyName={Array.isArray(value) ? undefined : key}
               value={child}
               onToggle={onToggle}
             />
           ))}
+          {page.remaining > 0 ?
+            <div
+              role="treeitem"
+              aria-level={depth + 2}
+              data-json-pagination="true"
+              tabIndex={-1}
+              className="json-tree-more"
+              style={style}
+            >
+              <Button
+                label={`Show ${Math.min(JSON_CHILD_PAGE_SIZE, page.remaining)} more (${page.remaining} remaining)`}
+                variant="ghost"
+                size="sm"
+                tabIndex={-1}
+                onClick={() =>
+                  setPagingState((current) => ({
+                    value,
+                    visibleCount:
+                      jsonVisibleCountForValue(current, value)
+                      + JSON_CHILD_PAGE_SIZE,
+                  }))
+                }
+              />
+            </div>
+          : null}
           <div
             className="json-tree-closing-row"
             style={style}
@@ -183,26 +223,57 @@ export function JsonTreeViewer({
   value,
   wrap,
   onCopy,
+  onCopyError,
 }: JsonTreeViewerProps) {
-  const initiallyExpanded = useMemo(
-    () => collectJsonContainerPaths(value, 1),
-    [value],
+  const documentScale = useMemo(
+    () =>
+      measureJsonDocument(
+        value,
+        new TextEncoder().encode(formatted).byteLength,
+      ),
+    [formatted, value],
   )
-  const [expandedPaths, setExpandedPaths] = useState(initiallyExpanded)
+  const initiallyExpanded = useMemo(
+    () => initialJsonContainerPaths(value, documentScale.isLarge),
+    [documentScale.isLarge, value],
+  )
+  const document = useMemo(
+    () => ({ isLarge: documentScale.isLarge, value }),
+    [documentScale.isLarge, value],
+  )
+  const [disclosureState, setDisclosureState] = useState({
+    expandedPaths: initiallyExpanded,
+    isLarge: documentScale.isLarge,
+    value,
+  })
+  const expandedPaths = jsonExpandedPathsForDocument(
+    disclosureState,
+    document,
+    initiallyExpanded,
+  )
+  const [copyError, setCopyError] = useState<string | null>(null)
 
-  const toggle = useCallback((path: string) => {
-    setExpandedPaths((current) => {
-      const next = new Set(current)
-      if (next.has(path)) next.delete(path)
-      else next.add(path)
-      return next
-    })
-  }, [])
+  const toggle = useCallback(
+    (path: string) => {
+      setDisclosureState((current) => {
+        const currentPaths = jsonExpandedPathsForDocument(
+          current,
+          document,
+          initiallyExpanded,
+        )
+        const next = new Set(currentPaths)
+        if (next.has(path)) next.delete(path)
+        else next.add(path)
+        return { ...document, expandedPaths: next }
+      })
+    },
+    [document, initiallyExpanded],
+  )
 
   const { treeRef, handleFocus, handleKeyDown } = useTreeFocus<HTMLDivElement>({
     hasRovingTabIndex: true,
     onActivate: (item) => {
-      const button = item.querySelector("button")
+      const button = jsonPaginationButtonForTreeItem(item)
       if (!button) return false
       button.click()
       return true
@@ -211,15 +282,27 @@ export function JsonTreeViewer({
   })
 
   async function copyFormatted() {
-    await navigator.clipboard.writeText(formatted)
+    try {
+      await navigator.clipboard.writeText(formatted)
+    } catch (error) {
+      const message = jsonCopyErrorMessage(error)
+      setCopyError(message)
+      onCopyError?.(message)
+      return
+    }
+
+    setCopyError(null)
     onCopy()
   }
 
-  const rootIsContainer =
-    isJsonContainer(value) && jsonEntries(value).length > 0
+  const rootIsContainer = isJsonContainer(value) && hasJsonEntries(value)
 
   function expandAll() {
-    setExpandedPaths(collectJsonContainerPaths(value))
+    if (documentScale.isLarge) return
+    setDisclosureState({
+      ...document,
+      expandedPaths: collectJsonContainerPaths(value),
+    })
   }
 
   return (
@@ -229,7 +312,12 @@ export function JsonTreeViewer({
           label="Expand all"
           variant="ghost"
           size="sm"
-          isDisabled={!rootIsContainer}
+          isDisabled={!rootIsContainer || documentScale.isLarge}
+          tooltip={
+            documentScale.isLarge ?
+              "Expand all is disabled for large JSON documents. Expand individual paths instead."
+            : undefined
+          }
           onClick={expandAll}
         />
         <Button
@@ -238,7 +326,10 @@ export function JsonTreeViewer({
           size="sm"
           isDisabled={!rootIsContainer}
           onClick={() =>
-            setExpandedPaths(rootIsContainer ? new Set(["#"]) : new Set())
+            setDisclosureState({
+              ...document,
+              expandedPaths: rootIsContainer ? new Set(["#"]) : new Set(),
+            })
           }
         />
         <Button
@@ -249,6 +340,11 @@ export function JsonTreeViewer({
           onClick={copyFormatted}
         />
       </HStack>
+      {copyError ?
+        <div role="alert" className="json-tree-copy-error">
+          {copyError}
+        </div>
+      : null}
       <div
         ref={treeRef}
         role="tree"

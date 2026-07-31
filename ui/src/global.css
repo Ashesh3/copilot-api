@@ -12,6 +12,50 @@ body {
   margin: 0;
 }
 
+.replay-header,
+.replay-workspace,
+.replay-pane,
+.replay-pane > * {
+  min-width: 0;
+}
+
+.replay-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+  gap: var(--spacing-4);
+  width: 100%;
+  max-width: 100%;
+}
+
+.replay-pane {
+  box-sizing: border-box;
+  max-height: min(76vh, 920px);
+  overflow: auto;
+}
+
+.replay-request-pane .json-code-editor {
+  min-height: 0;
+}
+
+.replay-request-pane .code-document.is-editable {
+  height: clamp(360px, 58vh, 760px);
+}
+
+.replay-result-pane .response-inspector {
+  min-width: 0;
+}
+
+@media (max-width: 960px) {
+  .replay-workspace {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .replay-pane {
+    max-height: none;
+    overflow: visible;
+  }
+}
+
 .confirm-dialog {
   overflow-wrap: anywhere;
   word-break: break-word;
@@ -51,6 +95,11 @@ body {
   min-width: 0;
   flex-direction: column;
   gap: var(--spacing-1);
+}
+
+.json-tree-copy-error {
+  color: var(--color-error);
+  font-size: var(--text-supporting-size);
 }
 
 .json-tree {
@@ -185,9 +234,31 @@ body {
   font-size: var(--text-supporting-size);
 }
 
-.responses-pretty-view,
-.responses-event-detail {
+.json-tree-more {
+  box-sizing: border-box;
+  min-height: 28px;
+  padding-inline-start: calc(
+    var(--spacing-2) + (var(--json-depth) + 1) * var(--spacing-4)
+  );
+  padding-inline-end: var(--spacing-3);
+}
+
+.response-inspector,
+.response-inspector-panel,
+.response-inspector-event-detail,
+.response-inspector-tool-call {
   min-width: 0;
+}
+
+.response-inspector > * {
+  min-width: 0;
+}
+
+.response-inspector-nav {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .responses-output {
@@ -205,4 +276,198 @@ body {
 .responses-output:focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: 2px;
+}
+
+.json-code-editor,
+.virtualized-code-viewer {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--spacing-1);
+}
+
+.code-document-label {
+  color: var(--color-text-primary);
+  font-weight: 600;
+}
+
+.code-document {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-element);
+  background: var(--color-syntax-background);
+}
+
+.code-document .cm-editor {
+  height: 100%;
+  background: var(--color-syntax-background);
+  color: var(--color-text-primary);
+  color-scheme: inherit;
+  font-family: var(--font-family-code);
+  font-size: var(--text-code-size);
+  line-height: var(--text-code-leading);
+}
+
+.code-document.is-editable {
+  height: clamp(420px, 68vh, 860px);
+}
+
+.code-document.is-read-only {
+  height: min(60vh, 720px);
+}
+
+.response-inspector .code-document.is-read-only {
+  height: min(50vh, 600px);
+}
+
+.code-document .cm-scroller {
+  overflow: auto;
+  font-family: inherit;
+}
+
+.code-document .cm-gutters {
+  border-inline-end: 1px solid var(--color-border);
+  background: var(--color-syntax-background);
+  color: var(--color-text-secondary);
+}
+
+.code-document .cm-activeLine,
+.code-document .cm-activeLineGutter {
+  background: var(--color-overlay-hover);
+}
+
+.code-document .cm-selectionBackground,
+.code-document
+  .cm-editor.cm-focused
+  > .cm-scroller
+  > .cm-selectionLayer
+  .cm-selectionBackground,
+.code-document .cm-matchingBracket,
+.code-document .cm-selectionMatch {
+  background: var(--color-accent-muted);
+}
+
+.code-document .cm-nonmatchingBracket {
+  background: var(--color-error-muted);
+}
+
+.code-document .cm-cursor,
+.code-document .cm-dropCursor {
+  border-inline-start-color: var(--color-text-primary);
+}
+
+.code-document .cm-panels,
+.code-document .cm-panel.cm-search {
+  border-color: var(--color-border);
+  background: var(--color-background-body);
+  color: var(--color-text-primary);
+}
+
+.code-document .cm-textfield,
+.code-document .cm-button {
+  border: 1px solid var(--color-border);
+  background: var(--color-syntax-background);
+  background-image: none;
+  color: var(--color-text-primary);
+}
+
+.code-document .cm-textfield:focus-visible,
+.code-document .cm-button:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+.code-document .cm-tooltip,
+.code-document .cm-tooltip-lint {
+  border-color: var(--color-border);
+  background: var(--color-background-popover);
+  color: var(--color-text-primary);
+}
+
+.code-document .cm-diagnostic-error {
+  border-inline-start-color: var(--color-error);
+}
+
+.code-document .cm-diagnostic-warning {
+  border-inline-start-color: var(--color-warning);
+}
+
+.code-document .cm-diagnostic-info,
+.code-document .cm-diagnostic-hint {
+  border-inline-start-color: var(--color-text-secondary);
+}
+
+.code-document .cm-diagnosticAction {
+  background: var(--color-accent-muted);
+  color: var(--color-text-primary);
+}
+
+.code-document .cm-lintRange {
+  background-image: none;
+  text-decoration-line: underline;
+  text-decoration-style: wavy;
+  text-underline-offset: 2px;
+}
+
+.code-document .cm-lintRange-error {
+  text-decoration-color: var(--color-error);
+}
+
+.code-document .cm-lintRange-warning {
+  text-decoration-color: var(--color-warning);
+}
+
+.code-document .cm-lintRange-info,
+.code-document .cm-lintRange-hint {
+  text-decoration-color: var(--color-text-secondary);
+}
+
+.code-document .cm-lintRange-active {
+  background: var(--color-warning-muted);
+}
+
+.code-document .cm-lintPoint::after {
+  border-block-end-color: var(--color-error);
+}
+
+.code-document .cm-lintPoint-warning::after {
+  border-block-end-color: var(--color-warning);
+}
+
+.code-document .cm-lintPoint-info::after,
+.code-document .cm-lintPoint-hint::after {
+  border-block-end-color: var(--color-text-secondary);
+}
+
+.code-document .cm-panel.cm-panel-lint ul [aria-selected] {
+  background: var(--color-accent-muted);
+  color: var(--color-text-primary);
+}
+
+.code-document .cm-searchMatch {
+  background: var(--color-accent-muted);
+}
+
+.code-document .cm-searchMatch-selected {
+  background: var(--color-warning-muted);
+}
+
+.code-document:focus-within {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.code-document .cm-editor.cm-focused {
+  outline: none;
+}
+
+.json-code-diagnostic {
+  min-height: 1.25rem;
+  color: var(--color-text-secondary);
+  font-size: var(--text-supporting-size);
+}
+
+.json-code-diagnostic.is-visible {
+  color: var(--color-error);
 }

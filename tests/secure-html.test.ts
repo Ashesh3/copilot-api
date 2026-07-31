@@ -87,6 +87,6 @@ test("secureHtml preserves the generated dashboard bundle byte-for-byte", async 
       `<style nonce="${nonce}"`,
     ),
   )
-  expect(body).toContain(String.raw`f.innerHTML="<script><\/script>"`)
+  expect(body).toContain(String.raw`innerHTML="<script><\/script>"`)
   expect(body.match(/ nonce=/g)).toHaveLength(2)
 })

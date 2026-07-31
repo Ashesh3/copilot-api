@@ -1,4 +1,10 @@
 import type { JsonValue } from "./json-tree"
+import type { ParsedToolCall } from "./response-tool-calls"
+
+import {
+  collectChatToolCalls,
+  collectResponsesToolCalls,
+} from "./response-tool-calls"
 
 type JsonRecord = { [key: string]: JsonValue }
 
@@ -12,12 +18,13 @@ export interface ResponsesStreamEvent {
 export interface ParsedResponsesBody {
   assistantText: string
   copilotUsage: JsonRecord | null
+  errorMessage: string | null
   events: Array<ResponsesStreamEvent>
   isPartial: boolean
   reasoningText: string
   response: JsonRecord | null
   status: string | null
-  toolCallCount: number
+  toolCalls: Array<ParsedToolCall>
   usage: JsonRecord | null
 }
 
@@ -28,6 +35,7 @@ interface ParsedFrame {
 }
 
 const TERMINAL_EVENT_TYPES = new Set([
+  "error",
   "response.cancelled",
   "response.completed",
   "response.failed",
@@ -113,17 +121,14 @@ function parseSseFrames(raw: string): Array<ParsedFrame> {
 }
 
 function looksLikeResponse(value: JsonRecord): boolean {
-  return (
-    value.object === "response"
-    || Array.isArray(value.output)
-    || typeof value.output_text === "string"
-  )
+  return value.object === "response"
 }
 
 function looksLikeResponsesEvent(value: JsonRecord): boolean {
   const type = stringValue(value.type)
   return (
-    type?.startsWith("response.") === true
+    type === "error"
+    || type?.startsWith("response.") === true
     || (isRecord(value.response) && looksLikeResponse(value.response))
   )
 }
@@ -321,49 +326,6 @@ function extractDoneItems(
     .join(expectedType === "message" ? "\n\n" : "\n\n")
 }
 
-// Response snapshots and partial stream events use different call shapes.
-// eslint-disable-next-line complexity
-function countToolCalls(
-  response: JsonRecord | null,
-  frames: Array<ParsedFrame>,
-): number {
-  const ids = new Set<string>()
-  if (response && Array.isArray(response.output)) {
-    for (const [index, item] of response.output.entries()) {
-      if (
-        !isRecord(item)
-        || typeof item.type !== "string"
-        || (item.type !== "function_call" && !item.type.endsWith("_call"))
-      ) {
-        continue
-      }
-      ids.add(
-        stringValue(item.call_id)
-          ?? stringValue(item.id)
-          ?? `response-${index}`,
-      )
-    }
-  }
-
-  for (const [index, frame] of frames.entries()) {
-    if (!isRecord(frame.data)) continue
-    const item = isRecord(frame.data.item) ? frame.data.item : null
-    if (
-      !item
-      || typeof item.type !== "string"
-      || (item.type !== "function_call" && !item.type.endsWith("_call"))
-    ) {
-      continue
-    }
-    ids.add(
-      stringValue(item.call_id)
-        ?? stringValue(item.id)
-        ?? `${numberValue(frame.data.output_index) ?? index}`,
-    )
-  }
-  return ids.size
-}
-
 function frameRank(frame: ParsedFrame, index: number): number {
   return eventSequence(frame) ?? index
 }
@@ -394,19 +356,6 @@ function chatReasoning(message: JsonRecord): string {
     ?? stringValue(message.reasoning_content)
     ?? ""
   )
-}
-
-function addChatToolCalls(
-  value: JsonValue | undefined,
-  choiceIndex: number,
-  ids: Set<string>,
-): void {
-  if (!Array.isArray(value)) return
-  for (const [listIndex, tool] of value.entries()) {
-    if (!isRecord(tool)) continue
-    const toolIndex = numberValue(tool.index) ?? listIndex
-    ids.add(`${choiceIndex}:${toolIndex}`)
-  }
 }
 
 function normalizeChatUsage(value: JsonValue | undefined): JsonRecord | null {
@@ -510,9 +459,12 @@ function parseChatCompletionFrames(
   const frames = parsedFrames.filter(
     (frame) => frame.data === "[DONE]" || isRecord(frame.data),
   )
+  const recordFrames = frames.flatMap((frame) =>
+    isRecord(frame.data) ? [frame.data] : [],
+  )
+  const toolCalls = collectChatToolCalls(recordFrames)
   const assistantByChoice = new Map<number, string>()
   const reasoningByChoice = new Map<number, string>()
-  const toolCallIds = new Set<string>()
   const metadata: JsonRecord = {}
   let foundChatData = false
   let usage: JsonRecord | null = null
@@ -564,11 +516,6 @@ function parseChatCompletionFrames(
           message ? "" : (reasoningByChoice.get(choiceIndex) ?? "")
         reasoningByChoice.set(choiceIndex, `${current}${reasoning}`)
       }
-      addChatToolCalls(
-        delta?.tool_calls ?? message?.tool_calls,
-        choiceIndex,
-        toolCallIds,
-      )
       const choiceFinishReason = stringValue(choice.finish_reason)
       if (choiceFinishReason) {
         finishReason = choiceFinishReason
@@ -591,6 +538,7 @@ function parseChatCompletionFrames(
   return {
     assistantText: joinChoices(assistantByChoice),
     copilotUsage,
+    errorMessage,
     events: frames.map((frame) => ({
       data: frame.data,
       rawData: frame.rawData,
@@ -602,12 +550,40 @@ function parseChatCompletionFrames(
       errorMessage,
       finishReason,
       status,
-      toolCallCount: toolCallIds.size,
+      toolCallCount: toolCalls.length,
     }),
     status,
-    toolCallCount: toolCallIds.size,
+    toolCalls,
     usage,
   }
+}
+
+function errorText(value: JsonValue | undefined): string | null {
+  if (typeof value === "string") return value
+  if (!isRecord(value)) return null
+  return (
+    stringValue(value.message)
+    ?? stringValue(value.code)
+    ?? stringValue(value.type)
+    ?? null
+  )
+}
+
+function responseErrorMessage(
+  response: JsonRecord | null,
+  frames: Array<ParsedFrame>,
+): string | null {
+  const responseError = response ? errorText(response.error) : null
+  if (responseError) return responseError
+
+  for (const frame of [...frames].reverse()) {
+    if (!isRecord(frame.data)) continue
+    const frameError =
+      errorText(frame.data.error)
+      ?? (eventType(frame) === "error" ? errorText(frame.data) : null)
+    if (frameError) return frameError
+  }
+  return null
 }
 
 // The capture format has several optional fallbacks; keep its branches local.
@@ -664,8 +640,8 @@ export function parseResponsesBody(raw: string): ParsedResponsesBody | null {
     ?? [...frames]
       .reverse()
       .map((frame) => eventType(frame))
-      .find((type) => type.startsWith("response."))
-      ?.slice("response.".length)
+      .find((type) => type === "error" || type.startsWith("response."))
+      ?.replace(/^response\./, "")
     ?? null
 
   let assistantText = extractAssistantFromResponse(response)
@@ -693,16 +669,22 @@ export function parseResponsesBody(raw: string): ParsedResponsesBody | null {
       }),
     type: eventType(frame),
   }))
+  const toolCalls = collectResponsesToolCalls(
+    response,
+    frames.map((frame) => ({ data: frame.data, type: eventType(frame) })),
+  )
+  const errorMessage = responseErrorMessage(response, frames)
 
   return {
     assistantText,
     copilotUsage,
+    errorMessage,
     events,
     isPartial: !hasTerminalEvent,
     reasoningText,
     response,
     status,
-    toolCallCount: countToolCalls(response, frames),
+    toolCalls,
     usage: response && isRecord(response.usage) ? response.usage : null,
   }
 }
