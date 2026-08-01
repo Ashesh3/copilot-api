@@ -25,6 +25,13 @@ test("nightly smoke clients use explicit proxy and output contracts", async () =
   })
 })
 
+test("nightly smoke uses a supported Gemini model for both probes", async () => {
+  const script = await read("tests/smoke/run-smoke-tests.sh")
+
+  expect(script).not.toContain("--model gemini-2.5-pro")
+  expect(script.match(/--model gemini-3\.1-pro-preview/g)).toHaveLength(2)
+})
+
 test("nightly smoke generation assertions cannot pass on echoed prompts", async () => {
   const script = await read("tests/smoke/run-smoke-tests.sh")
 
