@@ -176,7 +176,7 @@ if command -v gemini &>/dev/null; then
     output_file="gemini-output.json"
     rm -f "$output_file"
     gemini --skip-trust --output-format json \
-      --model gemini-2.5-pro -p "Reply with exactly: SMOKE_TEST_OK" \
+      --model gemini-3.1-pro-preview -p "Reply with exactly: SMOKE_TEST_OK" \
       > "$output_file"
     status=$?
     output=$(cat "$output_file")
@@ -188,7 +188,7 @@ if command -v gemini &>/dev/null; then
   cleanup_smoke_file
   run_test "gemini:tool-calling" '
     output=$(gemini --skip-trust --output-format json \
-      --model gemini-2.5-pro -p "Create a file called smoke.txt with the content: hello" -y 2>&1)
+      --model gemini-3.1-pro-preview -p "Create a file called smoke.txt with the content: hello" -y 2>&1)
     status=$?
     echo "$output"
     test "$status" -eq 0 && test -f smoke.txt && grep -q "hello" smoke.txt
