@@ -303,6 +303,12 @@ function RoutingPulse({ data }: { data: RoutingTelemetrySnapshot }) {
               value={data.totals.failovers.toLocaleString()}
               supporting={`${fmtPercent(data.totals.requests > 0 ? data.totals.failovers / data.totals.requests : 0)} of requests`}
             />
+            <Text type="supporting" color="secondary">
+              Process lifetime: {data.lifetime.requests.toLocaleString()}{" "}
+              requests · {data.lifetime.upstreamCalls.toLocaleString()} calls ·{" "}
+              {data.lifetime.retries.toLocaleString()} retries ·{" "}
+              {data.lifetime.failovers.toLocaleString()} failovers
+            </Text>
           </Grid>
           <VStack gap={2}>
             <HStack gap={3} wrap="wrap">
@@ -390,6 +396,13 @@ function modelColumns(multiToken: boolean): Array<TableColumn<ModelUsageRow>> {
       width: pixel(76),
       align: "end",
       renderCell: (item) => item.upstreamCalls.toLocaleString(),
+    },
+    {
+      key: "share",
+      header: "Share",
+      width: pixel(76),
+      align: "end",
+      renderCell: (item) => fmtPercent(item.share),
     },
     {
       key: "amplification",
@@ -506,13 +519,21 @@ function AccountBalanceRow({ account }: { account: RoutingAccountUsage }) {
         <span style={{ width: fmtPercent(account.selectionShare, 2) }} />
       </div>
       <VStack gap={0} hAlign="end">
-        <Text weight="medium">{fmtPercent(account.selectionShare)}</Text>
+        <Text weight="medium">
+          {account.selected.toLocaleString()} selections
+        </Text>
         <Text type="supporting" color="secondary">
-          expected {fmtPercent(account.expectedShare)}
+          {fmtPercent(account.selectionShare)} actual · expected{" "}
+          {fmtPercent(account.expectedShare)}
         </Text>
       </VStack>
       <VStack gap={0} hAlign="end">
         <Text>{account.upstreamCalls.toLocaleString()} calls</Text>
+        <Text type="supporting" color="secondary">
+          {fmtPercent(account.callShare)} call share · delta{" "}
+          {account.selectionDelta >= 0 ? "+" : ""}
+          {fmtPercent(account.selectionDelta)}
+        </Text>
         <Badge
           variant={balanceVariant(account.balanceStatus)}
           label={balanceLabel(account.balanceStatus)}
