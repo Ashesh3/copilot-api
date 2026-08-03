@@ -1,4 +1,6 @@
-import { beforeEach, expect, test } from "bun:test"
+import * as Sentry from "@sentry/bun"
+import { beforeEach, expect, spyOn, test } from "bun:test"
+import { Hono } from "hono"
 
 import {
   getAllModelSettings,
@@ -14,7 +16,9 @@ import {
   getSentryConversationIdFromHeaders,
   getSentryConversationIdFromPayload,
   getSentryModelName,
+  pseudonymizeSentryConversationId,
   scrubStatsigClientKeyData,
+  setSentryConversationIdFromRequest,
 } from "../src/lib/sentry"
 
 const originalSentryAiRecordInputs = process.env.SENTRY_AI_RECORD_INPUTS
@@ -244,6 +248,41 @@ test("extracts Sentry conversation ID from supported headers", () => {
   })
 
   expect(getSentryConversationIdFromHeaders(headers)).toBe("session_header")
+})
+
+test("pseudonymizes Sentry conversation IDs stably without retaining raw input", () => {
+  const raw = "routing-session-private-value"
+  const first = pseudonymizeSentryConversationId(raw)
+  const second = pseudonymizeSentryConversationId(raw)
+  const different = pseudonymizeSentryConversationId("different-session")
+
+  expect(first).toBe(second)
+  expect(first).not.toBe(different)
+  expect(first).toMatch(/^sha256:[a-f0-9]{64}$/)
+  expect(first).not.toContain(raw)
+})
+
+test("sets and returns only a pseudonymous Sentry conversation ID", async () => {
+  const raw = "payload-session-private-value"
+  const setConversationId = spyOn(
+    Sentry,
+    "setConversationId",
+  ).mockImplementation(() => undefined)
+  const app = new Hono()
+  let returned: string | undefined
+  app.post("/", (c) => {
+    returned = setSentryConversationIdFromRequest(c, {
+      metadata: { session_id: raw },
+    })
+    return c.text("ok")
+  })
+
+  await app.request("/", { method: "POST" })
+
+  expect(returned).toBe(pseudonymizeSentryConversationId(raw))
+  expect(returned).not.toContain(raw)
+  expect(setConversationId).toHaveBeenCalledWith(returned)
+  setConversationId.mockRestore()
 })
 
 test("scrubs Statsig client keys from full URLs and breadcrumb data", () => {

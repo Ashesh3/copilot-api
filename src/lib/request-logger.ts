@@ -91,6 +91,23 @@ export const colors = {
   gray: "\x1b[90m",
 }
 
+const REDACTED_DEBUG_HEADERS = new Set([
+  "session-id",
+  "thread-id",
+  "x-claude-code-session-id",
+  "x-client-session-id",
+])
+
+function shouldRedactDebugHeader(name: string): boolean {
+  const normalized = name.toLowerCase()
+  return (
+    REDACTED_DEBUG_HEADERS.has(normalized)
+    || /authorization|api-key|x-goog-api-key|cookie|token|secret/i.test(
+      normalized,
+    )
+  )
+}
+
 /**
  * Get the current time formatted as HH:MM:SS
  */
@@ -334,10 +351,7 @@ async function logRawRequest(c: Context): Promise<void> {
 
   for (const [key, value] of Object.entries(headers)) {
     // Never print secret-bearing header values, even partially.
-    const displayValue =
-      /authorization|api-key|x-goog-api-key|cookie|token|secret/i.test(key) ?
-        "[REDACTED]"
-      : value
+    const displayValue = shouldRedactDebugHeader(key) ? "[REDACTED]" : value
     lines.push(`  ${colors.gray}${key}:${colors.reset} ${displayValue}`)
   }
 

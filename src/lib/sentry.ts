@@ -4,6 +4,7 @@ import type { Context } from "hono"
 
 import * as Sentry from "@sentry/bun"
 import consola from "consola"
+import { createHash } from "node:crypto"
 
 import { getModelSettings } from "~/lib/model-settings"
 import { getClientSessionId, getRequestId } from "~/lib/request-session"
@@ -481,6 +482,10 @@ export function getSentryConversationIdFromHeaders(
   return undefined
 }
 
+export function pseudonymizeSentryConversationId(value: string): string {
+  return `sha256:${createHash("sha256").update(value).digest("hex")}`
+}
+
 export function setSentryConversationIdFromRequest(
   c: Context,
   payload?: unknown,
@@ -493,8 +498,10 @@ export function setSentryConversationIdFromRequest(
 
   if (!conversationId) return undefined
 
-  Sentry.setConversationId(conversationId)
-  return conversationId
+  const pseudonymousConversationId =
+    pseudonymizeSentryConversationId(conversationId)
+  Sentry.setConversationId(pseudonymousConversationId)
+  return pseudonymousConversationId
 }
 
 /**

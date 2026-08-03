@@ -1,4 +1,12 @@
-import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  expect,
+  mock,
+  spyOn,
+  test,
+} from "bun:test"
 
 import { startLogicalRequestLog } from "../src/lib/request-logger"
 import { createRoutingTelemetryRequestState } from "../src/lib/request-session"
@@ -142,6 +150,47 @@ test("exposes Copilot client session affinity in the provider path", async () =>
     key: "copilot-conversation",
     source: "copilot_session",
   })
+})
+
+test("redacts routing affinity headers from debug request logs", async () => {
+  const rawAffinityIds = [
+    "claude-affinity-private",
+    "copilot-affinity-private",
+    "codex-affinity-private",
+    "thread-affinity-private",
+  ]
+  const consoleLog = spyOn(console, "log").mockImplementation(() => undefined)
+  state.debug = true
+  try {
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-claude-code-session-id": rawAffinityIds[0] ?? "",
+        "x-client-session-id": rawAffinityIds[1] ?? "",
+        "session-id": rawAffinityIds[2] ?? "",
+        "thread-id": rawAffinityIds[3] ?? "",
+        "x-harmless-debug-header": "harmless-visible-value",
+      },
+      body: JSON.stringify({
+        model: "gpt-4o",
+        messages: [{ role: "user", content: "Hello" }],
+        max_tokens: 32,
+      }),
+    })
+
+    expect(response.status).toBe(200)
+    const output = consoleLog.mock.calls.flat().join("\n")
+    for (const rawAffinityId of rawAffinityIds) {
+      expect(output).not.toContain(rawAffinityId)
+    }
+    expect(output).toContain("[REDACTED]")
+    expect(output).toContain("x-harmless-debug-header")
+    expect(output).toContain("harmless-visible-value")
+  } finally {
+    state.debug = false
+    consoleLog.mockRestore()
+  }
 })
 
 test("forwards upstream quota snapshot headers to the client response", async () => {
