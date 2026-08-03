@@ -18,6 +18,7 @@ import { runWithRoutingAffinity } from "../src/lib/routing-affinity"
 import {
   getRoutingAffinityLease,
   resetRoutingAffinityLeasesForTest,
+  setRoutingAffinityLease,
 } from "../src/lib/routing-affinity-leases"
 import { state } from "../src/lib/state"
 import { tokenPool } from "../src/lib/token-pool"
@@ -225,6 +226,33 @@ test("does not lease an unsuccessful failover response", async () => {
   expect(getRoutingAffinityLease(key)).toBeUndefined()
 })
 
+test("does not lease when the replacement failover throws", async () => {
+  const modelId = "router-throwing-failover-lease"
+  registerAccount(1213, modelId, "throw-primary")
+  registerAccount(1214, modelId, "throw-secondary")
+  tokenPool.rebuildModelIndex()
+  const key = "throwing-lease-session"
+  const transportError = Object.assign(new Error("replacement socket failed"), {
+    code: "ECONNRESET",
+  })
+  queuedResults.push(
+    new Response("forbidden", { status: 403 }),
+    transportError,
+    transportError,
+  )
+
+  let thrown: unknown
+  try {
+    await routedFetchWithAffinity(modelId, key)
+  } catch (error) {
+    thrown = error
+  }
+
+  expect(thrown).toBe(transportError)
+  expect(getRoutingAffinityLease(key)).toBeUndefined()
+  expect(capturedRequests).toHaveLength(3)
+})
+
 test("ignores an ineligible lease without deleting it and later reuses it", async () => {
   const modelA = "router-lease-model-a"
   const modelB = "router-lease-model-b"
@@ -279,6 +307,21 @@ test("does not create a lease for an unidentified request", async () => {
   await routedFetch("/chat/completions", { method: "POST" }, { modelId })
 
   expect(getRoutingAffinityLease("unidentified")).toBeUndefined()
+})
+
+test("does not create or change leases in single-token mode", async () => {
+  const key = "single-token-affinity"
+  setRoutingAffinityLease(key, 777)
+  state.isMultiToken = false
+  state.copilotToken = "single-token"
+  queuedResults.push(new Response("{}", { status: 200 }))
+
+  const result = await routedFetchWithAffinity("single-token-model", key)
+
+  expect(result.response.status).toBe(200)
+  expect(result.account).toBeUndefined()
+  expect(getRoutingAffinityLease(key)).toBe(777)
+  expect(getRoutingAffinityLease("single-token-model")).toBeUndefined()
 })
 
 test("fails over to the next account immediately after a multi-token 401", async () => {
