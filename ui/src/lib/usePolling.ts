@@ -78,6 +78,8 @@ export function useAsyncData<T>(
     if (silentRef.current) {
       silentRef.current = false
     } else {
+      // A dependency/reload change intentionally begins a foreground load.
+      // eslint-disable-next-line @eslint-react/hooks-extra/no-direct-set-state-in-use-effect
       setLoading(true)
     }
 
