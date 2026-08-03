@@ -24,6 +24,7 @@ import {
   handleGetSessionEvents,
   handleGetSettings,
   handleGetUsage,
+  handleGetUsageRouting,
   handleListCustomProviders,
   handleListEnvironments,
   handleListFlags,
@@ -158,6 +159,7 @@ dashboardRoutes.post("/api/model-routing", handleSetModelRouting)
 
 // Usage
 dashboardRoutes.get("/api/usage", handleGetUsage)
+dashboardRoutes.get("/api/usage-routing", handleGetUsageRouting)
 
 // IP Allowlist
 dashboardRoutes.get("/api/ip-allowlist", handleListIpAllowlist)

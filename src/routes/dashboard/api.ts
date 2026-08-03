@@ -51,6 +51,10 @@ import {
   setModelSettings,
 } from "~/lib/model-settings"
 import { PATHS } from "~/lib/paths"
+import {
+  getRoutingTelemetrySnapshot,
+  isRoutingWindow,
+} from "~/lib/routing-telemetry"
 import { state } from "~/lib/state"
 import { tokenPool } from "~/lib/token-pool"
 import { getUsageResponse } from "~/lib/usage-tracker"
@@ -873,6 +877,29 @@ export async function handleSetModelRouting(c: Context) {
 
 export function handleGetUsage(c: Context) {
   return c.json(getUsageResponse())
+}
+
+export function handleGetUsageRouting(c: Context) {
+  const windowValues = new URL(c.req.url).searchParams.getAll("window")
+  const window = windowValues.length === 0 ? "1h" : windowValues[0]
+  if (windowValues.length > 1 || !isRoutingWindow(window)) {
+    return c.json({ error: "window must be one of 15m, 1h, 6h, or 24h" }, 400)
+  }
+
+  return c.json(
+    getRoutingTelemetrySnapshot({
+      accounts: tokenPool.getAllAccounts().map((account) => ({
+        id: account.id,
+        accountType: account.accountType,
+        ...(account.githubUsername ?
+          { githubUsername: account.githubUsername }
+        : {}),
+        healthy: account.healthy,
+      })),
+      multiToken: state.isMultiToken,
+      window,
+    }),
+  )
 }
 
 export async function handleListIpAllowlist(c: Context) {
