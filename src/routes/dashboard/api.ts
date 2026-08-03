@@ -599,6 +599,7 @@ export function handleListModelRouting(c: Context) {
   const accounts = tokenPool.getAllAccounts().map((account) => ({
     id: account.id,
     accountType: account.accountType,
+    githubUsername: account.githubUsername,
     healthy: account.healthy,
     modelsCount: account.models.size,
   }))

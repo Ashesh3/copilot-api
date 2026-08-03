@@ -135,6 +135,7 @@ export interface CustomProvider {
 export interface ModelRoutingAccount {
   id: number
   accountType: string
+  githubUsername?: string
   healthy: boolean
   modelsCount: number
 }
