@@ -1,5 +1,11 @@
 import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
 
+import { startLogicalRequestLog } from "../src/lib/request-logger"
+import { createRoutingTelemetryRequestState } from "../src/lib/request-session"
+import {
+  getRoutingTelemetrySnapshot,
+  resetRoutingTelemetryForTest,
+} from "../src/lib/routing-telemetry"
 import { state } from "../src/lib/state"
 import { server } from "../src/server"
 
@@ -65,6 +71,7 @@ beforeEach(() => {
   state.isMultiToken = false
   state.manualApprove = false
   state.models = undefined
+  resetRoutingTelemetryForTest()
 })
 
 test("reuses an inbound request ID for both upstream and client responses", async () => {
@@ -159,4 +166,72 @@ test("does not forward stale quota headers from a failed upstream retry attempt"
 
   expect(response.status).toBe(200)
   expect(response.headers.get("x-quota-snapshot-chat")).toBeNull()
+})
+
+test("records one routed client request after HTTP model handling", async () => {
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      max_tokens: 32,
+      messages: [{ role: "user", content: "Hello" }],
+      model: "gpt-4o",
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  const snapshot = getRoutingTelemetrySnapshot({
+    accounts: [],
+    multiToken: false,
+    window: "1h",
+  })
+  expect(snapshot.totals.requests).toBe(1)
+  expect(snapshot.models[0]).toMatchObject({
+    model: "gpt-4o",
+    requests: 1,
+  })
+})
+
+test("does not record non-model dashboard traffic", async () => {
+  await server.request("/dashboard")
+
+  const snapshot = getRoutingTelemetrySnapshot({
+    accounts: [],
+    multiToken: false,
+    window: "1h",
+  })
+  expect(snapshot.totals.requests).toBe(0)
+})
+
+test("records a logical WebSocket turn exactly once", () => {
+  const telemetryState = createRoutingTelemetryRequestState(
+    "Responses WebSocket",
+  )
+  const lifecycle = startLogicalRequestLog({
+    inputLength: 10,
+    method: "POST",
+    model: "gpt-test",
+    path: "/responses",
+    telemetryState,
+    transport: "Responses WebSocket",
+    turnId: "turn-1",
+  })
+
+  expect(lifecycle.finalize({ status: 200, terminalStatus: "COMPLETE" })).toBe(
+    true,
+  )
+  expect(lifecycle.finalize({ status: 500, terminalStatus: "ERROR" })).toBe(
+    false,
+  )
+
+  const snapshot = getRoutingTelemetrySnapshot({
+    accounts: [],
+    multiToken: false,
+    window: "1h",
+  })
+  expect(snapshot.totals.requests).toBe(1)
+  expect(snapshot.models[0]).toMatchObject({
+    model: "gpt-test",
+    requests: 1,
+  })
 })
