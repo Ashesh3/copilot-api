@@ -15,6 +15,15 @@ import type { EmbeddingResponse } from "~/services/copilot/create-embeddings"
 
 import { getConfig, updateConfig } from "~/lib/config"
 import { HTTPError } from "~/lib/error"
+import {
+  getRoutingTelemetryRequestState,
+  updateRoutingTelemetryRequestState,
+} from "~/lib/request-session"
+import {
+  recordUpstreamCall,
+  type UpstreamOutcome,
+} from "~/lib/routing-telemetry"
+import { isAbortLikeError } from "~/services/copilot/transport-retry"
 
 export type CustomProviderModelKind = "chat" | "embedding"
 
@@ -386,6 +395,36 @@ function providerUrl(
   return `${provider.baseUrl}${path}`
 }
 
+function customProviderOutcome(response: Response): UpstreamOutcome {
+  if (response.status >= 500) return "server_error"
+  if (response.status >= 400) return "client_error"
+  return "success"
+}
+
+function recordCustomProviderCall(options: {
+  outcome: UpstreamOutcome
+  path: string
+  reference: CustomProviderModelReference
+}): void {
+  const { outcome, path, reference } = options
+  const requestState = getRoutingTelemetryRequestState()
+  updateRoutingTelemetryRequestState({
+    destination: reference.provider.name,
+    model: reference.upstreamModel,
+    provider: reference.provider.name,
+  })
+  recordUpstreamCall({
+    model: reference.upstreamModel,
+    outcome,
+    provider: reference.provider.name,
+    reason: "initial",
+    route:
+      requestState ?
+        `${requestState.sourceProtocol} -> ${reference.provider.name}`
+      : `${path} -> ${reference.provider.name}`,
+  })
+}
+
 async function fetchCustomProvider(
   request: CustomProviderFetchRequest,
 ): Promise<Response> {
@@ -396,12 +435,28 @@ async function fetchCustomProvider(
     `Custom provider request: ${reference.provider.id}/${reference.upstreamModel} ${path}`,
   )
 
-  return await fetch(url, {
-    method: "POST",
-    headers: buildHeaders(reference.provider),
-    body: JSON.stringify(payload),
-    signal: options?.signal,
-  })
+  const headers = buildHeaders(reference.provider)
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+      signal: options?.signal,
+    })
+    recordCustomProviderCall({
+      outcome: customProviderOutcome(response),
+      path,
+      reference,
+    })
+    return response
+  } catch (error) {
+    recordCustomProviderCall({
+      outcome: isAbortLikeError(error) ? "aborted" : "transport_error",
+      path,
+      reference,
+    })
+    throw error
+  }
 }
 
 function createUpstreamErrorMessage(

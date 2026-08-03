@@ -3,6 +3,10 @@ import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
 import type { ModelsResponse } from "../src/services/copilot/get-models"
 
 import { setConfigForTest } from "../src/lib/config"
+import {
+  getRoutingTelemetrySnapshot,
+  resetRoutingTelemetryForTest,
+} from "../src/lib/routing-telemetry"
 import { state } from "../src/lib/state"
 import { server } from "../src/server"
 import {
@@ -135,6 +139,7 @@ beforeEach(() => {
   state.copilotToken = "copilot-token"
   state.apiKeyAuth = undefined
   state.isMultiToken = false
+  resetRoutingTelemetryForTest()
   setConfigForTest({
     auth: { apiKeys: [] },
     customProviders: [
@@ -197,6 +202,14 @@ function clearEnv(name: string): void {
   }
 }
 
+function routingSnapshot() {
+  return getRoutingTelemetrySnapshot({
+    accounts: [],
+    multiToken: false,
+    window: "1h",
+  })
+}
+
 test("custom models appear in /v1/models with aliases and metadata", async () => {
   const response = await server.request("/v1/models")
   const body = (await response.json()) as {
@@ -242,6 +255,14 @@ test("chat request routes to custom provider by model id", async () => {
   expect(requests[0]?.body.model).toBe("custom-chat-model")
   expect(requests[0]?.body.temperature).toBe(0.2)
   expect(requests[0]?.headers.get("authorization")).toBe("Bearer custom-key")
+
+  expect(routingSnapshot().models[0]).toMatchObject({
+    accounts: [],
+    model: "custom-chat-model",
+    provider: "Custom Chat",
+    requests: 1,
+    upstreamCalls: 1,
+  })
 })
 
 test("Anthropic messages request routes to custom chat provider by model id", async () => {
@@ -299,6 +320,38 @@ test("embeddings request routes to Nebius config by alias", async () => {
   expect(requests[0]?.body.model).toBe("Qwen/Qwen3-Embedding-8B")
   expect(requests[0]?.headers.get("authorization")).toBe("Bearer nebius-key")
   expect(requests[0]?.headers.get("x-provider")).toBe("nebius")
+
+  expect(routingSnapshot().models[0]).toMatchObject({
+    accounts: [],
+    model: "Qwen/Qwen3-Embedding-8B",
+    provider: "Nebius",
+    requests: 1,
+    upstreamCalls: 1,
+  })
+})
+
+test("records custom-provider transport failures without swallowing them", async () => {
+  fetchMock.mockImplementationOnce(() => {
+    throw new Error("custom provider connection failed")
+  })
+
+  const response = await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      messages: [{ role: "user", content: "hello" }],
+      model: "custom-chat-model",
+    }),
+  })
+
+  expect(response.status).toBe(500)
+  expect(routingSnapshot().models[0]).toMatchObject({
+    accounts: [],
+    model: "custom-chat-model",
+    outcomes: { transportError: 1 },
+    provider: "Custom Chat",
+    upstreamCalls: 1,
+  })
 })
 
 test("missing custom provider API key returns a clear error", async () => {
