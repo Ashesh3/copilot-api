@@ -200,12 +200,79 @@ test("disables pooling for multi-token model discovery", async () => {
       status: 200,
       headers: { "content-type": "application/json" },
     }),
+    new Response(JSON.stringify({ login: "model-user" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }),
   )
 
   await tokenPool.initializeAccount(account)
 
   expect(capturedRequests[1]?.url).toContain("/models")
   expect(capturedRequests[1]?.init?.keepalive).toBe(false)
+})
+
+test("resolves the GitHub username during account initialization", async () => {
+  const account = tokenPool.addAccount(
+    "github-username-token",
+    "individual",
+    1111,
+  )
+  queuedResults.push(
+    new Response(
+      JSON.stringify({
+        token: "copilot-username-token",
+        expires_at: 1_900_000_000,
+        refresh_in: 1800,
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    ),
+    new Response(JSON.stringify({ object: "list", data: [] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }),
+    new Response(JSON.stringify({ login: "octocat" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }),
+  )
+
+  await tokenPool.initializeAccount(account)
+
+  expect(account.githubUsername).toBe("octocat")
+  expect(capturedRequests[2]?.url).toBe("https://api.github.com/user")
+  expect(capturedRequests[2]?.init?.headers).toMatchObject({
+    authorization: "token github-username-token",
+  })
+})
+
+test("keeps an account healthy when GitHub username lookup fails", async () => {
+  const account = tokenPool.addAccount(
+    "github-username-failure-token",
+    "individual",
+    1112,
+  )
+  queuedResults.push(
+    new Response(
+      JSON.stringify({
+        token: "copilot-username-failure-token",
+        expires_at: 1_900_000_000,
+        refresh_in: 1800,
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    ),
+    new Response(JSON.stringify({ object: "list", data: [] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }),
+    new Response("Service unavailable", { status: 503 }),
+  )
+
+  await tokenPool.initializeAccount(account)
+
+  expect(account.healthy).toBe(true)
+  expect(account.githubUsername).toBeUndefined()
+  expect(capturedRequests[2]?.url).toBe("https://api.github.com/user")
 })
 
 test("does not fail over aborted multi-token requests", async () => {

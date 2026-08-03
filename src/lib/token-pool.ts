@@ -10,6 +10,7 @@ import {
   isModelEnabledForAccount,
 } from "~/lib/model-routing"
 import { createCopilotTransportInit } from "~/services/copilot/transport-options"
+import { getGitHubUser } from "~/services/github/get-user"
 
 // Inline constants from copilot-client to avoid circular dependencies
 const MODELS_API_VERSION = "2026-06-01"
@@ -20,6 +21,7 @@ const INTEGRATION_ID = "vscode-chat"
 export interface Account {
   id: number
   githubToken: string
+  githubUsername?: string
   copilotToken?: string
   copilotTokenExpiry?: number
   models: Set<string>
@@ -118,6 +120,8 @@ export class TokenPool {
     account.modelsData = modelsResponse.data
     // eslint-disable-next-line require-atomic-updates
     account.models = new Set(modelsResponse.data.map((m) => m.id))
+
+    await this.resolveGitHubUsername(account)
 
     consola.info(
       `Account #${account.id} (${account.accountType}): ${account.models.size} models available`,
@@ -397,6 +401,18 @@ export class TokenPool {
       if (account.healthy) count++
     }
     return count
+  }
+
+  private async resolveGitHubUsername(account: Account): Promise<void> {
+    try {
+      const user = await getGitHubUser(account.githubToken)
+      // eslint-disable-next-line require-atomic-updates
+      account.githubUsername = user.login
+    } catch (error) {
+      consola.warn(
+        `Failed to resolve GitHub username for account #${account.id}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
   }
 
   private async fetchCopilotToken(
