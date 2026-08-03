@@ -18,6 +18,10 @@ import type { ModelsResponse } from "../src/services/copilot/get-models"
 import { setConfigForTest } from "../src/lib/config"
 import { isIpBlocked, resetIpSecurityForTest } from "../src/lib/ip-blocker"
 import { createRoutingTelemetryRequestState } from "../src/lib/request-session"
+import {
+  getRoutingAffinity,
+  type RoutingAffinity,
+} from "../src/lib/routing-affinity"
 import { state } from "../src/lib/state"
 import {
   extractResponsesPayload,
@@ -30,6 +34,10 @@ import {
   sendWebSocketError,
   tryUpgradeResponsesWebSocket,
 } from "../src/routes/responses/websocket"
+import {
+  createResponsesWebSocketTurn,
+  runWithWebSocketRequestContext,
+} from "../src/routes/responses/websocket-lifecycle"
 
 const originalApiKeyAuth = state.apiKeyAuth
 const originalFetch = globalThis.fetch
@@ -39,6 +47,7 @@ const queuedFetchHandlers: Array<
   (init?: RequestInit) => Promise<Response> | Response
 > = []
 let lastRequestBody: Record<string, unknown> | undefined
+let capturedAffinity: RoutingAffinity | undefined
 
 function authenticatedResponsesRequest(): Request {
   return new Request("http://localhost/responses", {
@@ -71,6 +80,7 @@ const responsesCapableModels: ModelsResponse = {
 }
 
 const fetchMock = mock((_url: string, init?: RequestInit) => {
+  capturedAffinity = getRoutingAffinity()
   lastRequestBody =
     typeof init?.body === "string" ?
       (JSON.parse(init.body) as Record<string, unknown>)
@@ -95,6 +105,7 @@ afterAll(() => {
 afterEach(() => {
   fetchMock.mockClear()
   lastRequestBody = undefined
+  capturedAffinity = undefined
   queuedResponses.length = 0
   queuedFetchHandlers.length = 0
   state.apiKeyAuth = originalApiKeyAuth
@@ -199,6 +210,92 @@ describe("responses websocket upgrade handling", () => {
     ).toBe("no_match")
     expect(upgraded[0]?.requestId).toBe("req-1")
     expect(upgraded[0]?.responseSnapshots).toBeInstanceOf(Map)
+  })
+
+  test("resolves every supported WebSocket upgrade affinity header", async () => {
+    state.apiKeyAuth = "route-secret"
+    for (const [header, key, source] of [
+      ["x-claude-code-session-id", "claude", "claude_session"],
+      ["x-client-session-id", "copilot", "copilot_session"],
+      ["session-id", "codex", "codex_session"],
+      ["thread-id", "thread", "codex_thread"],
+    ] as const) {
+      let upgraded: ResponsesWebSocketData | undefined
+      await tryUpgradeResponsesWebSocket(
+        new Request("http://localhost/responses", {
+          headers: {
+            authorization: "Bearer route-secret",
+            [header]: key,
+          },
+        }),
+        {
+          upgrade(_request, options): boolean {
+            upgraded = (options as { data: ResponsesWebSocketData }).data
+            return true
+          },
+        },
+      )
+      expect(upgraded?.affinity).toEqual({ key, source })
+    }
+  })
+
+  test("uses upgrade affinity precedence and ignores request identifiers", async () => {
+    state.apiKeyAuth = "route-secret"
+    let upgraded: ResponsesWebSocketData | undefined
+    const upgrade = async (headers: Record<string, string>) => {
+      await tryUpgradeResponsesWebSocket(
+        new Request("http://localhost/responses", {
+          headers: { authorization: "Bearer route-secret", ...headers },
+        }),
+        {
+          upgrade(_request, options): boolean {
+            upgraded = (options as { data: ResponsesWebSocketData }).data
+            return true
+          },
+        },
+      )
+      return upgraded
+    }
+
+    expect(
+      (
+        await upgrade({
+          "x-claude-code-session-id": "claude-wins",
+          "x-client-session-id": "copilot-loses",
+          "session-id": "session-loses",
+          "thread-id": "thread-loses",
+        })
+      )?.affinity,
+    ).toEqual({ key: "claude-wins", source: "claude_session" })
+    expect(
+      (
+        await upgrade({
+          "x-client-session-id": "copilot-wins",
+          "session-id": "session-loses",
+          "thread-id": "thread-loses",
+        })
+      )?.affinity,
+    ).toEqual({ key: "copilot-wins", source: "copilot_session" })
+    expect(
+      (
+        await upgrade({
+          "session-id": "session-wins",
+          "thread-id": "thread-loses",
+        })
+      )?.affinity,
+    ).toEqual({ key: "session-wins", source: "codex_session" })
+    expect((await upgrade({ "thread-id": "thread-wins" }))?.affinity).toEqual({
+      key: "thread-wins",
+      source: "codex_thread",
+    })
+    expect(
+      (
+        await upgrade({
+          "x-request-id": "request-not-affinity",
+          "x-client-request-id": "client-request-not-affinity",
+        })
+      )?.affinity,
+    ).toBeUndefined()
   })
 
   test("enforces cli and config api keys before upgrade", async () => {
@@ -471,6 +568,145 @@ describe("responses websocket message handling", () => {
     expect(lastRequestBody?.previous_response_id).toBeUndefined()
     expect(ws.data.responseSnapshots.has("resp_ws")).toBe(true)
     expect(ws.data.activeTurns.size).toBe(0)
+  })
+
+  test("uses per-frame metadata affinity and preserves handshake precedence", async () => {
+    state.models = responsesCapableModels
+    queuedResponses.push(
+      createResponsesSseResponse("resp_frame_affinity"),
+      createResponsesSseResponse("resp_handshake_affinity"),
+      createResponsesSseResponse("resp_malformed_affinity"),
+    )
+    const metadataOnly = createTestWebSocket()
+    metadataOnly.data.affinity = undefined
+    await responsesWebSocket.message(
+      metadataOnly,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "hello",
+        client_metadata: { session_id: "frame-session" },
+      }),
+    )
+    expect(capturedAffinity).toEqual({
+      key: "frame-session",
+      source: "codex_metadata",
+    })
+
+    const handshake = createTestWebSocket()
+    handshake.data.affinity = {
+      key: "handshake-session",
+      source: "copilot_session",
+    }
+    await responsesWebSocket.message(
+      handshake,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "hello",
+        client_metadata: { session_id: "conflicting-frame-session" },
+      }),
+    )
+    expect(capturedAffinity).toEqual(handshake.data.affinity)
+
+    const malformed = createTestWebSocket()
+    malformed.data.affinity = undefined
+    await responsesWebSocket.message(
+      malformed,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "hello",
+        client_metadata: "not json",
+      }),
+    )
+    expect(capturedAffinity).toBeUndefined()
+  })
+
+  test("inherits affinity from a completed continuation snapshot", async () => {
+    state.accountType = "individual"
+    state.copilotToken = "copilot-token"
+    state.models = responsesCapableModels
+    queuedResponses.push(
+      createResponsesSseResponse("resp_affinity_parent"),
+      createResponsesSseResponse("resp_affinity_child"),
+    )
+    const ws = createTestWebSocket()
+    ws.data.affinity = undefined
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "first",
+        client_metadata: { session_id: "snapshot-session" },
+      }),
+    )
+    expect(ws.data.responseSnapshots.has("resp_affinity_parent")).toBe(true)
+
+    capturedAffinity = undefined as RoutingAffinity | undefined
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "follow-up",
+        previous_response_id: "resp_affinity_parent",
+      }),
+    )
+
+    expect(capturedAffinity).toEqual({
+      key: "snapshot-session",
+      source: "codex_metadata",
+    })
+    expect(lastRequestBody?.previous_response_id).toBeUndefined()
+  })
+
+  test("isolates concurrent WebSocket turn affinity contexts", async () => {
+    const firstWs = createTestWebSocket()
+    const secondWs = createTestWebSocket()
+    const firstTurn = createResponsesWebSocketTurn(firstWs.data, "first")
+    const secondTurn = createResponsesWebSocketTurn(secondWs.data, "second")
+    let releaseFirst: (() => void) | undefined
+    let releaseSecond: (() => void) | undefined
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+    const secondGate = new Promise<void>((resolve) => {
+      releaseSecond = resolve
+    })
+    const observed: Array<string | undefined> = []
+
+    const first = runWithWebSocketRequestContext(
+      { key: "first-turn", source: "codex_metadata" },
+      firstTurn,
+      async () => {
+        observed.push(getRoutingAffinity()?.key)
+        await firstGate
+        observed.push(getRoutingAffinity()?.key)
+      },
+    )
+    const second = runWithWebSocketRequestContext(
+      { key: "second-turn", source: "codex_metadata" },
+      secondTurn,
+      async () => {
+        observed.push(getRoutingAffinity()?.key)
+        await secondGate
+        observed.push(getRoutingAffinity()?.key)
+      },
+    )
+
+    releaseSecond?.()
+    await second
+    releaseFirst?.()
+    await first
+    expect(observed).toEqual([
+      "first-turn",
+      "second-turn",
+      "second-turn",
+      "first-turn",
+    ])
+    expect(getRoutingAffinity()).toBeUndefined()
   })
 
   test("streams the Chat Completions fallback with a per-turn abort signal", async () => {
@@ -1045,7 +1281,7 @@ function createTestWebSocket(): {
       nextTurnSequence: 0,
       type: "responses",
       requestId: "req-test",
-      sessionId: "session-test",
+      affinity: { key: "session-test", source: "claude_session" },
       responseSnapshots: new Map(),
     },
     sent,

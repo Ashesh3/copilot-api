@@ -15,6 +15,10 @@ import {
   recordNonDefaultBehavior,
   setRequestContext,
 } from "~/lib/request-logger"
+import {
+  installRoutingAffinityFallback,
+  resolveClaudeRoutingAffinity,
+} from "~/lib/routing-affinity"
 import { state } from "~/lib/state"
 import { getTokenCount } from "~/lib/tokenizer"
 
@@ -29,6 +33,9 @@ export async function handleCountTokens(c: Context) {
     const anthropicBeta = c.req.header("anthropic-beta")
 
     const anthropicPayload = await c.req.json<AnthropicMessagesPayload>()
+    installRoutingAffinityFallback(
+      resolveClaudeRoutingAffinity(anthropicPayload.metadata),
+    )
     const requestedModel = anthropicPayload.model
 
     const { baseModel, reasoningEffort: suffixEffort } =

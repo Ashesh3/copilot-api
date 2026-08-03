@@ -1,7 +1,22 @@
-import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  expect,
+  mock,
+  spyOn,
+  test,
+} from "bun:test"
 
-import { startLogicalRequestLog } from "../src/lib/request-logger"
+import {
+  sanitizeRequestBodyForLog,
+  startLogicalRequestLog,
+} from "../src/lib/request-logger"
 import { createRoutingTelemetryRequestState } from "../src/lib/request-session"
+import {
+  getRoutingAffinity,
+  type RoutingAffinity,
+} from "../src/lib/routing-affinity"
 import {
   getRoutingTelemetrySnapshot,
   resetRoutingTelemetryForTest,
@@ -11,6 +26,7 @@ import { server } from "../src/server"
 
 const originalFetch = globalThis.fetch
 let lastHeaders: Record<string, string> | undefined
+let lastRoutingAffinity: RoutingAffinity | undefined
 let upstreamResponseHeaders: Record<string, string>
 let queuedResponses: Array<Response>
 
@@ -47,6 +63,7 @@ function createChatCompletionResponse(
 
 const fetchMock = mock((_url: string, init?: RequestInit) => {
   lastHeaders = init?.headers as Record<string, string> | undefined
+  lastRoutingAffinity = getRoutingAffinity()
 
   return queuedResponses.shift() ?? createChatCompletionResponse()
 })
@@ -63,6 +80,7 @@ afterAll(() => {
 beforeEach(() => {
   fetchMock.mockClear()
   lastHeaders = undefined
+  lastRoutingAffinity = undefined
   upstreamResponseHeaders = { "content-type": "application/json" }
   queuedResponses = []
   state.accountType = "individual"
@@ -114,6 +132,227 @@ test("generates a request ID when the client does not supply one", async () => {
     throw new TypeError("Expected x-request-id header to be present")
   }
   expect(lastHeaders?.["X-Request-Id"]).toBe(generatedRequestId)
+})
+
+test("exposes Copilot client session affinity in the provider path", async () => {
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-client-session-id": "copilot-conversation",
+    },
+    body: JSON.stringify({
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "Hello" }],
+      max_tokens: 32,
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastRoutingAffinity).toEqual({
+    key: "copilot-conversation",
+    source: "copilot_session",
+  })
+})
+
+test("redacts routing affinity headers from debug request logs", async () => {
+  const rawAffinityIds = [
+    "claude-affinity-private",
+    "copilot-affinity-private",
+    "codex-affinity-private",
+    "thread-affinity-private",
+  ]
+  const consoleLog = spyOn(console, "log").mockImplementation(() => undefined)
+  state.debug = true
+  try {
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-claude-code-session-id": rawAffinityIds[0] ?? "",
+        "x-client-session-id": rawAffinityIds[1] ?? "",
+        "session-id": rawAffinityIds[2] ?? "",
+        "thread-id": rawAffinityIds[3] ?? "",
+        "x-harmless-debug-header": "harmless-visible-value",
+      },
+      body: JSON.stringify({
+        model: "gpt-4o",
+        messages: [{ role: "user", content: "Hello" }],
+        max_tokens: 32,
+      }),
+    })
+
+    expect(response.status).toBe(200)
+    const output = consoleLog.mock.calls.flat().join("\n")
+    for (const rawAffinityId of rawAffinityIds) {
+      expect(output).not.toContain(rawAffinityId)
+    }
+    expect(output).toContain("[REDACTED]")
+    expect(output).toContain("x-harmless-debug-header")
+    expect(output).toContain("harmless-visible-value")
+  } finally {
+    state.debug = false
+    consoleLog.mockRestore()
+  }
+})
+
+test("redacts routing affinity metadata from debug request bodies", async () => {
+  const rawIds = [
+    "client-session-private",
+    "client-thread-private",
+    "string-session-private",
+    "claude-session-private",
+    "root-session-private",
+    "root-thread-private",
+    "malformed-private",
+  ]
+  const consoleLog = spyOn(console, "log").mockImplementation(() => undefined)
+  state.debug = true
+  try {
+    await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-4o",
+        messages: [{ role: "user", content: "Hello" }],
+        max_tokens: 32,
+        harmless_root: "keep-root",
+        session_id: rawIds[4],
+        thread_id: rawIds[5],
+        client_metadata: {
+          session_id: rawIds[0],
+          thread_id: rawIds[1],
+          device_id: "keep-device",
+        },
+        metadata: {
+          user_id: JSON.stringify({
+            session_id: rawIds[3],
+            account_uuid: "keep-account",
+          }),
+        },
+        unrelated_tool_arguments: {
+          session_id: "keep-unrelated-session",
+          thread_id: "keep-unrelated-thread",
+        },
+      }),
+    })
+    await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-4o",
+        messages: [{ role: "user", content: "Hello" }],
+        max_tokens: 32,
+        client_metadata: JSON.stringify({
+          session_id: rawIds[2],
+          device_id: "keep-string-device",
+        }),
+      }),
+    })
+    await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-4o",
+        messages: [{ role: "user", content: "Hello" }],
+        max_tokens: 32,
+        client_metadata: `{"session_id":"${rawIds[6]}`,
+      }),
+    })
+    await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-4o",
+        messages: [{ role: "user", content: "Hello" }],
+        max_tokens: 32,
+        metadata: JSON.stringify({
+          harmless_metadata: "keep-outer-metadata",
+          user_id: JSON.stringify({
+            session_id: "outer-metadata-session-private",
+            account_uuid: "keep-outer-account",
+          }),
+        }),
+      }),
+    })
+    await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-4o",
+        messages: [{ role: "user", content: "Hello" }],
+        max_tokens: 32,
+        metadata: `{"user_id":"outer-malformed-private`,
+      }),
+    })
+
+    const output = consoleLog.mock.calls.flat().join("\n")
+    for (const rawId of rawIds) expect(output).not.toContain(rawId)
+    expect(output).not.toContain("outer-metadata-session-private")
+    expect(output).not.toContain("outer-malformed-private")
+    for (const harmless of [
+      "keep-root",
+      "keep-device",
+      "keep-account",
+      "keep-string-device",
+      "keep-unrelated-session",
+      "keep-unrelated-thread",
+      "keep-outer-metadata",
+      "keep-outer-account",
+    ]) {
+      expect(output).toContain(harmless)
+    }
+    expect(output).toContain("[REDACTED]")
+  } finally {
+    state.debug = false
+    consoleLog.mockRestore()
+  }
+})
+
+test("sanitizes handler payload objects before verbose file logging", () => {
+  const rawIds = [
+    "handler-claude-session",
+    "handler-response-session",
+    "handler-response-thread",
+    "handler-string-session",
+    "handler-malformed-session",
+  ]
+  const sanitized = [
+    sanitizeRequestBodyForLog({
+      harmless: "keep-handler-field",
+      metadata: {
+        user_id: JSON.stringify({
+          account_uuid: "keep-handler-account",
+          session_id: rawIds[0],
+        }),
+      },
+      client_metadata: {
+        session_id: rawIds[1],
+        thread_id: rawIds[2],
+        device_id: "keep-handler-device",
+      },
+    }),
+    sanitizeRequestBodyForLog({
+      client_metadata: JSON.stringify({
+        session_id: rawIds[3],
+        device_id: "keep-string-handler-device",
+      }),
+    }),
+    sanitizeRequestBodyForLog({
+      client_metadata: `{"session_id":"${rawIds[4]}`,
+    }),
+  ]
+  const output = JSON.stringify(sanitized)
+
+  for (const rawId of rawIds) expect(output).not.toContain(rawId)
+  for (const harmless of [
+    "keep-handler-field",
+    "keep-handler-account",
+    "keep-handler-device",
+    "keep-string-handler-device",
+  ]) {
+    expect(output).toContain(harmless)
+  }
 })
 
 test("forwards upstream quota snapshot headers to the client response", async () => {

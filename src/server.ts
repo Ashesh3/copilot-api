@@ -1,6 +1,11 @@
 import { Hono } from "hono"
 import { randomUUID } from "node:crypto"
 
+import {
+  resolveRoutingAffinityFromHeaders,
+  runWithRoutingAffinity,
+} from "~/lib/routing-affinity"
+
 import { authenticateAdminRequest } from "./lib/admin-auth"
 import { apiKeyGuard } from "./lib/api-key-guard"
 import { forwardError } from "./lib/error"
@@ -8,7 +13,6 @@ import { inferenceCors } from "./lib/inference-cors"
 import { createAuthMiddleware } from "./lib/request-auth"
 import { requestLogger } from "./lib/request-logger"
 import {
-  clientSessionStorage,
   createRoutingTelemetryRequestState,
   getQuotaHeaders,
   quotaHeadersStorage,
@@ -95,13 +99,13 @@ server.use("*", async (c, next) => {
   applySecurityHeaders(c)
 })
 
-// Capture X-Claude-Code-Session-Id for session-affinity routing in multi-token mode
+// Capture the highest-priority safe conversation identity for account affinity.
 server.use("*", async (c, next) => {
-  const sessionId = c.req.header("x-claude-code-session-id")
+  const affinity = resolveRoutingAffinityFromHeaders(c.req.raw.headers)
   const requestId = c.req.header("x-request-id") ?? randomUUID()
 
   await requestIdStorage.run(requestId, async () => {
-    await clientSessionStorage.run(sessionId, async () => {
+    await runWithRoutingAffinity(affinity, async () => {
       await quotaHeadersStorage.run({}, async () => {
         await routedAccountStorage.run({}, async () => {
           await next()

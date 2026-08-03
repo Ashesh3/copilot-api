@@ -1,4 +1,6 @@
-import { beforeEach, expect, test } from "bun:test"
+import * as Sentry from "@sentry/bun"
+import { beforeEach, expect, spyOn, test } from "bun:test"
+import { Hono } from "hono"
 
 import {
   getAllModelSettings,
@@ -14,7 +16,9 @@ import {
   getSentryConversationIdFromHeaders,
   getSentryConversationIdFromPayload,
   getSentryModelName,
+  pseudonymizeSentryConversationId,
   scrubStatsigClientKeyData,
+  setSentryConversationIdFromRequest,
 } from "../src/lib/sentry"
 
 const originalSentryAiRecordInputs = process.env.SENTRY_AI_RECORD_INPUTS
@@ -246,6 +250,41 @@ test("extracts Sentry conversation ID from supported headers", () => {
   expect(getSentryConversationIdFromHeaders(headers)).toBe("session_header")
 })
 
+test("pseudonymizes Sentry conversation IDs stably without retaining raw input", () => {
+  const raw = "routing-session-private-value"
+  const first = pseudonymizeSentryConversationId(raw)
+  const second = pseudonymizeSentryConversationId(raw)
+  const different = pseudonymizeSentryConversationId("different-session")
+
+  expect(first).toBe(second)
+  expect(first).not.toBe(different)
+  expect(first).toMatch(/^sha256:[a-f0-9]{64}$/)
+  expect(first).not.toContain(raw)
+})
+
+test("sets and returns only a pseudonymous Sentry conversation ID", async () => {
+  const raw = "payload-session-private-value"
+  const setConversationId = spyOn(
+    Sentry,
+    "setConversationId",
+  ).mockImplementation(() => undefined)
+  const app = new Hono()
+  let returned: string | undefined
+  app.post("/", (c) => {
+    returned = setSentryConversationIdFromRequest(c, {
+      metadata: { session_id: raw },
+    })
+    return c.text("ok")
+  })
+
+  await app.request("/", { method: "POST" })
+
+  expect(returned).toBe(pseudonymizeSentryConversationId(raw))
+  expect(returned).not.toContain(raw)
+  expect(setConversationId).toHaveBeenCalledWith(returned)
+  setConversationId.mockRestore()
+})
+
 test("scrubs Statsig client keys from full URLs and breadcrumb data", () => {
   const event = {
     request: {
@@ -446,4 +485,58 @@ test("registers Statsig redaction hooks for all Sentry send callbacks", () => {
   expect(beforeSendLogPayload.attributes.request.url).toBe(
     "https://ab.chatgpt.com/v1/initialize?k=[Filtered]",
   )
+})
+
+test("scrubs affinity headers from every Sentry send callback", () => {
+  const options = createSentryInitOptions(
+    "https://public@example.ingest.sentry.io/1",
+  )
+  const rawIds = [
+    "sentry-conversation-private",
+    "conversation-private",
+    "x-thread-private",
+    "x-session-private",
+    "claude-sentry-private",
+    "copilot-sentry-private",
+    "session-sentry-private",
+    "thread-sentry-private",
+  ]
+  const headers = {
+    "X-SENTRY-CONVERSATION-ID": rawIds[0],
+    "x-Conversation-Id": rawIds[1],
+    "X-Thread-Id": rawIds[2],
+    "x-SESSION-id": rawIds[3],
+    "X-Claude-Code-Session-Id": rawIds[4],
+    "x-CLIENT-session-ID": rawIds[5],
+    "Session-Id": rawIds[6],
+    "THREAD-ID": rawIds[7],
+    "x-harmless": "visible",
+  }
+  const event = { request: { headers: { ...headers } } }
+  const transaction = { request: { headers: { ...headers } } }
+  const span = { data: { nested: { request: { headers: { ...headers } } } } }
+  const log = { attributes: { request: { headers: { ...headers } } } }
+
+  const beforeSend = options.beforeSend as
+    | ((value: typeof event) => typeof event | null)
+    | undefined
+  const beforeSendTransaction = options.beforeSendTransaction as
+    | ((value: typeof transaction) => typeof transaction | null)
+    | undefined
+  const beforeSendSpan = options.beforeSendSpan as
+    | ((value: typeof span) => typeof span | null)
+    | undefined
+  const beforeSendLog = options.beforeSendLog as
+    | ((value: typeof log) => typeof log | null)
+    | undefined
+
+  beforeSend?.(event)
+  beforeSendTransaction?.(transaction)
+  beforeSendSpan?.(span)
+  beforeSendLog?.(log)
+
+  const serialized = JSON.stringify({ event, transaction, span, log })
+  for (const rawId of rawIds) expect(serialized).not.toContain(rawId)
+  expect(serialized).toContain("[Filtered]")
+  expect(serialized).toContain("visible")
 })

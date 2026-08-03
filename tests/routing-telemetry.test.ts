@@ -241,6 +241,173 @@ test("calculates eligibility-weighted account balance separately from calls", ()
   })
 })
 
+test("aggregates fixed routing affinity sources without retaining raw keys", () => {
+  const sources = [
+    "claude_session",
+    "copilot_session",
+    "codex_session",
+    "claude_metadata",
+    "codex_metadata",
+    "codex_thread",
+  ] as const
+  for (const [index, affinitySource] of sources.entries()) {
+    recordRoutingSelection({
+      accountId: index,
+      affinitySource,
+      eligibleAccountIds: [index],
+      mode: "sticky",
+      model: `raw-session-id-${index}`,
+      timestamp: NOW,
+    })
+  }
+  recordRoutingSelection({
+    accountId: 0,
+    eligibleAccountIds: [0],
+    mode: "default",
+    model: "default-model",
+    timestamp: NOW,
+  })
+  recordRoutingSelection({
+    eligibleAccountIds: [],
+    mode: "single",
+    model: "single-model",
+    timestamp: NOW,
+  })
+
+  const snapshot = getRoutingTelemetrySnapshot({
+    accounts: [],
+    multiToken: true,
+    now: NOW,
+    window: "1h",
+  })
+
+  expect(snapshot.affinitySources).toEqual({
+    claude_session: 1,
+    copilot_session: 1,
+    codex_session: 1,
+    claude_metadata: 1,
+    codex_metadata: 1,
+    codex_thread: 1,
+    unidentified: 1,
+  })
+  expect(Object.keys(snapshot.affinitySources).sort()).toEqual(
+    [...sources, "unidentified"].sort(),
+  )
+  const serialized = JSON.stringify(snapshot)
+  expect(serialized).not.toContain("raw-session-id")
+})
+
+test("windows, prunes, resets, and bounds affinity source counters", () => {
+  recordRoutingSelection({
+    accountId: 1,
+    affinitySource: "claude_session",
+    eligibleAccountIds: [1],
+    mode: "sticky",
+    model: "old",
+    timestamp: NOW - 25 * HOUR_MS,
+  })
+  recordRoutingSelection({
+    accountId: 1,
+    affinitySource: "copilot_session",
+    eligibleAccountIds: [1],
+    mode: "sticky",
+    model: "current",
+    timestamp: NOW,
+  })
+  recordRoutingSelection({
+    accountId: 1,
+    affinitySource: "invalid_source" as "copilot_session",
+    eligibleAccountIds: [1],
+    mode: "sticky",
+    model: "invalid",
+    timestamp: NOW,
+  })
+
+  const current = getRoutingTelemetrySnapshot({
+    accounts: [],
+    multiToken: true,
+    now: NOW,
+    window: "1h",
+  })
+  expect(current.affinitySources).toEqual({
+    claude_session: 0,
+    copilot_session: 1,
+    codex_session: 0,
+    claude_metadata: 0,
+    codex_metadata: 0,
+    codex_thread: 0,
+    unidentified: 1,
+  })
+
+  resetRoutingTelemetryForTest(NOW)
+  expect(
+    getRoutingTelemetrySnapshot({
+      accounts: [],
+      multiToken: true,
+      now: NOW,
+      window: "1h",
+    }).affinitySources,
+  ).toEqual({
+    claude_session: 0,
+    copilot_session: 0,
+    codex_session: 0,
+    claude_metadata: 0,
+    codex_metadata: 0,
+    codex_thread: 0,
+    unidentified: 0,
+  })
+})
+
+test("aligns affinity source counters with selection modes", () => {
+  recordRoutingSelection({
+    accountId: 1,
+    affinitySource: "copilot_session",
+    eligibleAccountIds: [1],
+    mode: "default",
+    model: "default-with-source",
+    timestamp: NOW,
+  })
+  recordRoutingSelection({
+    accountId: 1,
+    eligibleAccountIds: [1],
+    mode: "sticky",
+    model: "sticky-missing-source",
+    timestamp: NOW,
+  })
+  recordRoutingSelection({
+    accountId: 1,
+    affinitySource: "invalid" as "claude_session",
+    eligibleAccountIds: [1],
+    mode: "sticky",
+    model: "sticky-invalid-source",
+    timestamp: NOW,
+  })
+  recordRoutingSelection({
+    affinitySource: "claude_session",
+    eligibleAccountIds: [],
+    mode: "single",
+    model: "single-with-source",
+    timestamp: NOW,
+  })
+
+  expect(
+    getRoutingTelemetrySnapshot({
+      accounts: [],
+      multiToken: true,
+      now: NOW,
+      window: "1h",
+    }).affinitySources,
+  ).toEqual({
+    claude_session: 0,
+    copilot_session: 0,
+    codex_session: 0,
+    claude_metadata: 0,
+    codex_metadata: 0,
+    codex_thread: 0,
+    unidentified: 3,
+  })
+})
+
 test("counts single-token selections without inventing an account", () => {
   recordRoutingSelection({
     eligibleAccountIds: [],

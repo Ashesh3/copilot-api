@@ -71,6 +71,15 @@ test("routing usage defaults to one hour and exposes safe account metadata", asy
 
   expect(response.status).toBe(200)
   expect(body).toMatchObject({
+    affinitySources: {
+      claude_session: 0,
+      copilot_session: 0,
+      codex_session: 0,
+      claude_metadata: 0,
+      codex_metadata: 0,
+      codex_thread: 0,
+      unidentified: 0,
+    },
     multiToken: true,
     retentionMinutes: 1440,
     totals: { requests: 0, upstreamCalls: 0 },
@@ -171,6 +180,29 @@ test("Usage screen keeps existing cards and adds live routing observability", ()
   expect(usageSource).toContain("Routing pulse")
   expect(usageSource).toContain("Model usage &amp; routing")
   expect(usageSource).toContain("Account balance")
+  expect(usageSource).toContain(
+    "normalizeAffinitySources(data.affinitySources)",
+  )
+  expect(usageSource).toContain("EMPTY_AFFINITY_SOURCES")
+  expect(usageSource).toContain('source === "unidentified"')
+  for (const source of [
+    "claude_session",
+    "copilot_session",
+    "codex_session",
+    "claude_metadata",
+    "codex_metadata",
+    "codex_thread",
+    "unidentified",
+    "Claude session",
+    "Copilot session",
+    "Codex session",
+    "Claude metadata",
+    "Codex metadata",
+    "Codex thread",
+    "Unidentified",
+  ]) {
+    expect(usageSource).toContain(source)
+  }
   expect(usageSource).toContain("Route breakdown")
   expect(usageSource).toContain("Upstream calls")
   expect(usageSource).toContain("Retries")

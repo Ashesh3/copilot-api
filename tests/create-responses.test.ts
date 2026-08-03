@@ -3,20 +3,55 @@ import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
 import { HTTPError } from "../src/lib/error"
 import { setModelSettingsForTest } from "../src/lib/model-settings"
 import {
+  getRoutingAffinity,
+  type RoutingAffinity,
+} from "../src/lib/routing-affinity"
+import {
   getRoutingTelemetrySnapshot,
   resetRoutingTelemetryForTest,
 } from "../src/lib/routing-telemetry"
 import { state } from "../src/lib/state"
+import { tokenPool } from "../src/lib/token-pool"
 import { normalizeResponsesReasoning } from "../src/routes/responses/handler"
+import { server } from "../src/server"
 import {
   createResponses,
   type ResponsesPayload,
 } from "../src/services/copilot/create-responses"
 
 const originalFetch = globalThis.fetch
+const originalModels = state.models
+const originalIsMultiToken = state.isMultiToken
+const addedAccountIds = [2201, 2202]
 let lastRequestBody: Record<string, unknown> | undefined
 let requestBodies: Array<Record<string, unknown>>
 let queuedResponses: Array<Response>
+let capturedAffinity: RoutingAffinity | undefined
+const capturedAuthorization: Array<string | undefined> = []
+
+const responsesCapableModels = {
+  object: "list" as const,
+  data: [
+    {
+      id: "gpt-4o",
+      name: "gpt-4o",
+      object: "model" as const,
+      version: "test",
+      vendor: "openai",
+      preview: false,
+      model_picker_enabled: true,
+      supported_endpoints: ["/responses"],
+      capabilities: {
+        family: "gpt-4o",
+        limits: {},
+        object: "model_capabilities" as const,
+        supports: {},
+        tokenizer: "cl100k_base",
+        type: "chat",
+      },
+    },
+  ],
+}
 
 function createSuccessResponse(): Response {
   return new Response(
@@ -55,6 +90,10 @@ function parseRequestBody(init?: RequestInit): Record<string, unknown> {
 }
 
 const fetchMock = mock((_url: string, init?: RequestInit) => {
+  capturedAffinity = getRoutingAffinity()
+  capturedAuthorization.push(
+    new Headers(init?.headers).get("authorization") ?? undefined,
+  )
   lastRequestBody = parseRequestBody(init)
   requestBodies.push(lastRequestBody)
 
@@ -67,6 +106,10 @@ beforeAll(() => {
 })
 
 afterAll(() => {
+  for (const accountId of addedAccountIds)
+    tokenPool.removeAccountForTest(accountId)
+  state.models = originalModels
+  state.isMultiToken = originalIsMultiToken
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
 })
 
@@ -75,12 +118,148 @@ beforeEach(() => {
   lastRequestBody = undefined
   requestBodies = []
   queuedResponses = []
+  capturedAffinity = undefined
+  capturedAuthorization.length = 0
+  state.models = originalModels
+  state.isMultiToken = originalIsMultiToken
   state.accountType = "individual"
   state.copilotToken = "copilot-token"
   state.githubToken = "github-token"
   state.isMultiToken = false
   resetRoutingTelemetryForTest()
   setModelSettingsForTest([])
+})
+
+test("routes repeated Responses metadata sessions to stable accounts", async () => {
+  const modelId = "responses-metadata-routing-model"
+  const model = {
+    ...responsesCapableModels.data[0],
+    id: modelId,
+    name: modelId,
+  }
+  state.models = { object: "list", data: [model] }
+  for (const [id, token] of [
+    [2201, "responses-token-one"],
+    [2202, "responses-token-two"],
+  ] as const) {
+    const account = tokenPool.addAccount(`github-${id}`, "individual", id)
+    account.copilotToken = token
+    account.healthy = true
+    account.models = new Set([modelId])
+  }
+  tokenPool.rebuildModelIndex()
+  state.isMultiToken = true
+  const keys: Array<string> = []
+  for (let index = 0; index < 100 && keys.length < 2; index++) {
+    const key = `responses-session-${index}`
+    const accountId = tokenPool.getAccountForModelBySession(modelId, key)?.id
+    if (
+      accountId !== undefined
+      && !keys.some(
+        (existing) =>
+          tokenPool.getAccountForModelBySession(modelId, existing)?.id
+          === accountId,
+      )
+    ) {
+      keys.push(key)
+    }
+  }
+  expect(keys).toHaveLength(2)
+  const request = (key: string) =>
+    server.request("/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: modelId,
+        input: "hello",
+        client_metadata: { session_id: key },
+      }),
+    })
+
+  await request(keys[0] ?? "")
+  await request(keys[0] ?? "")
+  await request(keys[1] ?? "")
+  await request(keys[1] ?? "")
+
+  const expected = keys.map(
+    (key) =>
+      `Bearer ${tokenPool.getAccountForModelBySession(modelId, key)?.copilotToken}`,
+  )
+  expect(capturedAuthorization).toEqual([
+    expected[0],
+    expected[0],
+    expected[1],
+    expected[1],
+  ])
+  expect(expected[0]).not.toBe(expected[1])
+  const usage = getRoutingTelemetrySnapshot({
+    accounts: tokenPool.getAllAccounts().map((account) => ({
+      accountType: account.accountType,
+      healthy: account.healthy,
+      id: account.id,
+    })),
+    multiToken: true,
+    window: "1h",
+  })
+  expect(usage.selectionModes.sticky).toBe(4)
+})
+
+test("installs Responses client metadata affinity before provider dispatch", async () => {
+  state.models = responsesCapableModels
+  for (const clientMetadata of [
+    { session_id: "responses-object-session" },
+    JSON.stringify({ session_id: "responses-string-session" }),
+  ]) {
+    const expectedKey =
+      typeof clientMetadata === "string" ?
+        "responses-string-session"
+      : "responses-object-session"
+    const response = await server.request("/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-4o",
+        input: "hello",
+        client_metadata: clientMetadata,
+      }),
+    })
+    expect(response.status).toBe(200)
+    expect(capturedAffinity).toEqual({
+      key: expectedKey,
+      source: "codex_metadata",
+    })
+  }
+})
+
+test("keeps Responses header affinity over metadata and ignores malformed metadata", async () => {
+  state.models = responsesCapableModels
+  await server.request("/v1/responses", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-client-session-id": "header-session",
+    },
+    body: JSON.stringify({
+      model: "gpt-4o",
+      input: "hello",
+      client_metadata: { session_id: "body-session" },
+    }),
+  })
+  expect(capturedAffinity).toEqual({
+    key: "header-session",
+    source: "copilot_session",
+  })
+
+  await server.request("/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-4o",
+      input: "hello",
+      client_metadata: "not json",
+    }),
+  })
+  expect(capturedAffinity).toBeUndefined()
 })
 
 test("preserves previous_response_id when sending Responses API requests", async () => {

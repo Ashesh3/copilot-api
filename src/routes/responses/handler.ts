@@ -26,8 +26,13 @@ import {
 } from "~/lib/model-suffix"
 import {
   recordNonDefaultBehavior,
+  sanitizeRequestBodyForLog,
   setRequestContext,
 } from "~/lib/request-logger"
+import {
+  installRoutingAffinityFallback,
+  resolveResponsesRoutingAffinity,
+} from "~/lib/routing-affinity"
 import {
   createSentryChatSpanOptions,
   createSentryInvokeAgentSpanOptions,
@@ -404,6 +409,11 @@ function rewriteResponseModelInEvent(
 
 export const handleResponses = async (c: Context) => {
   const payload = await c.req.json<ResponsesPayload>()
+  installRoutingAffinityFallback(
+    resolveResponsesRoutingAffinity(
+      (payload as Record<string, unknown>).client_metadata,
+    ),
+  )
   const conversationId = setSentryConversationIdFromRequest(c, payload)
 
   const model = parseModelSuffix(payload.model).baseModel
@@ -462,7 +472,10 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
     model: payload.model,
     reasoningEffort: finalEffort,
   })
-  logger.debug("Responses request payload:", JSON.stringify(payload))
+  logger.debug(
+    "Responses request payload:",
+    sanitizeRequestBodyForLog(payload as Record<string, unknown>),
+  )
 
   // Expand compaction items back into regular messages
   expandCompactionItems(payload)

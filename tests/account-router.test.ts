@@ -13,6 +13,14 @@ import type { Model } from "../src/services/copilot/get-models"
 
 import { getLastUsedAccountId, routedFetch } from "../src/lib/account-router"
 import { setModelRoutingOverridesForTest } from "../src/lib/model-routing"
+import { clientSessionStorage } from "../src/lib/request-session"
+/* eslint-disable max-lines -- account-router integration variants share singleton fixtures */
+import { runWithRoutingAffinity } from "../src/lib/routing-affinity"
+import {
+  getRoutingAffinityLease,
+  resetRoutingAffinityLeasesForTest,
+  setRoutingAffinityLease,
+} from "../src/lib/routing-affinity-leases"
 import { state } from "../src/lib/state"
 import { tokenPool } from "../src/lib/token-pool"
 
@@ -162,9 +170,212 @@ beforeEach(() => {
   fetchMock.mockClear()
   queuedResults.length = 0
   capturedRequests.length = 0
+  resetRoutingAffinityLeasesForTest()
   setModelRoutingOverridesForTest({})
   state.isMultiToken = true
   state.sessionId = "router-test-session"
+})
+
+async function routedFetchWithAffinity(modelId: string, key: string) {
+  return await runWithRoutingAffinity(
+    { key, source: "copilot_session" },
+    async () =>
+      await routedFetch("/chat/completions", { method: "POST" }, { modelId }),
+  )
+}
+
+test("reuses a successful failover account for the next identified request", async () => {
+  const modelId = "router-successful-failover-lease"
+  registerAccount(1201, modelId, "lease-primary")
+  registerAccount(1202, modelId, "lease-secondary")
+  tokenPool.rebuildModelIndex()
+  const key = "lease-session"
+  const initial = tokenPool.getAccountForModelBySession(modelId, key)
+  if (!initial) throw new TypeError("Expected initial account")
+  const replacement = tokenPool.getNextAccountForModel(modelId, initial)
+  if (!replacement) throw new TypeError("Expected replacement account")
+  queuedResults.push(
+    new Response("forbidden", { status: 403 }),
+    new Response("{}", { status: 200 }),
+    new Response("{}", { status: 200 }),
+  )
+
+  const first = await routedFetchWithAffinity(modelId, key)
+  initial.healthy = true
+  tokenPool.rebuildModelIndex()
+  const second = await routedFetchWithAffinity(modelId, key)
+
+  expect(first.account?.id).toBe(replacement.id)
+  expect(second.account?.id).toBe(replacement.id)
+  expect(getRoutingAffinityLease(key)).toBe(replacement.id)
+})
+
+test("does not lease an unsuccessful failover response", async () => {
+  const modelId = "router-unsuccessful-failover-lease"
+  registerAccount(1211, modelId, "failed-primary")
+  registerAccount(1212, modelId, "failed-secondary")
+  tokenPool.rebuildModelIndex()
+  const key = "failed-lease-session"
+  queuedResults.push(
+    new Response("forbidden", { status: 403 }),
+    new Response("failed replacement", { status: 400 }),
+  )
+
+  const result = await routedFetchWithAffinity(modelId, key)
+
+  expect(result.response.status).toBe(400)
+  expect(getRoutingAffinityLease(key)).toBeUndefined()
+})
+
+test("does not lease when the replacement failover throws", async () => {
+  const modelId = "router-throwing-failover-lease"
+  registerAccount(1213, modelId, "throw-primary")
+  registerAccount(1214, modelId, "throw-secondary")
+  tokenPool.rebuildModelIndex()
+  const key = "throwing-lease-session"
+  const transportError = Object.assign(new Error("replacement socket failed"), {
+    code: "ECONNRESET",
+  })
+  queuedResults.push(
+    new Response("forbidden", { status: 403 }),
+    transportError,
+    transportError,
+  )
+
+  let thrown: unknown
+  try {
+    await routedFetchWithAffinity(modelId, key)
+  } catch (error) {
+    thrown = error
+  }
+
+  expect(thrown).toBe(transportError)
+  expect(getRoutingAffinityLease(key)).toBeUndefined()
+  expect(capturedRequests).toHaveLength(3)
+})
+
+test("ignores an ineligible lease without deleting it and later reuses it", async () => {
+  const modelA = "router-lease-model-a"
+  const modelB = "router-lease-model-b"
+  registerAccount(1221, modelA, "model-a-primary")
+  registerAccount(1222, modelA, "shared-account")
+  const shared = tokenPool
+    .getAllAccounts()
+    .find((account) => account.id === 1222)
+  if (!shared) throw new TypeError("Expected shared account")
+  shared.models.add(modelB)
+  shared.modelsData.push(createModel(modelB))
+  registerAccount(1223, modelB, "model-b-only")
+  tokenPool.rebuildModelIndex()
+  const key = "cross-model-lease-session"
+  const initialA = tokenPool.getAccountForModelBySession(modelA, key)
+  if (!initialA) throw new TypeError("Expected model A initial account")
+  const replacementA = tokenPool.getNextAccountForModel(modelA, initialA)
+  if (!replacementA) throw new TypeError("Expected model A replacement")
+  queuedResults.push(
+    new Response("forbidden", { status: 403 }),
+    new Response("{}", { status: 200 }),
+  )
+  await routedFetchWithAffinity(modelA, key)
+
+  const leasedId = replacementA.id
+  const ineligibleModel = leasedId === 1222 ? "model-never-supported" : modelB
+  if (ineligibleModel === "model-never-supported") {
+    registerAccount(1224, ineligibleModel, "other-only")
+    tokenPool.rebuildModelIndex()
+  }
+  queuedResults.push(new Response("{}", { status: 200 }))
+  const ignored = await routedFetchWithAffinity(ineligibleModel, key)
+  expect(ignored.account?.id).not.toBe(leasedId)
+  expect(getRoutingAffinityLease(key)).toBe(leasedId)
+
+  const laterModel = leasedId === 1222 ? modelB : modelA
+  queuedResults.push(new Response("{}", { status: 200 }))
+  const reused = await routedFetchWithAffinity(laterModel, key)
+  expect(reused.account?.id).toBe(leasedId)
+})
+
+test("does not create a lease for an unidentified request", async () => {
+  const modelId = "router-unidentified-no-lease"
+  registerAccount(1231, modelId, "unknown-primary")
+  registerAccount(1232, modelId, "unknown-secondary")
+  tokenPool.rebuildModelIndex()
+  setRoutingAffinityLease("sentinel-session", 4321)
+  queuedResults.push(
+    new Response("forbidden", { status: 403 }),
+    new Response("{}", { status: 200 }),
+  )
+
+  await routedFetch("/chat/completions", { method: "POST" }, { modelId })
+
+  expect(getRoutingAffinityLease("sentinel-session")).toBe(4321)
+})
+
+test("does not create or change leases in single-token mode", async () => {
+  const key = "single-token-affinity"
+  setRoutingAffinityLease(key, 777)
+  state.isMultiToken = false
+  state.copilotToken = "single-token"
+  queuedResults.push(new Response("{}", { status: 200 }))
+
+  const result = await routedFetchWithAffinity("single-token-model", key)
+
+  expect(result.response.status).toBe(200)
+  expect(result.account).toBeUndefined()
+  expect(getRoutingAffinityLease(key)).toBe(777)
+  expect(getRoutingAffinityLease("single-token-model")).toBeUndefined()
+})
+
+test("preserves legacy WebSocket affinity and typed affinity precedence", async () => {
+  const modelId = "router-legacy-websocket-affinity"
+  registerAccount(1241, modelId, "legacy-first")
+  registerAccount(1242, modelId, "legacy-second")
+  tokenPool.rebuildModelIndex()
+  const legacyKey = Array.from(
+    { length: 100 },
+    (_, index) => `legacy-websocket-session-${index}`,
+  ).find(
+    (key) => tokenPool.getAccountForModelBySession(modelId, key)?.id === 1241,
+  )
+  if (!legacyKey) throw new TypeError("Expected legacy key for first account")
+  const typedKey = "typed-session"
+  const legacyPreferred = tokenPool.getAccountForModelBySession(
+    modelId,
+    legacyKey,
+  )
+  if (!legacyPreferred) throw new TypeError("Expected legacy preferred account")
+  const leased = tokenPool.getNextAccountForModel(modelId, legacyPreferred)
+  if (!leased) throw new TypeError("Expected legacy leased account")
+  setRoutingAffinityLease(legacyKey, leased.id)
+  queuedResults.push(new Response("{}", { status: 200 }))
+
+  const legacyResult = await clientSessionStorage.run(
+    legacyKey,
+    async () =>
+      await routedFetch("/chat/completions", { method: "POST" }, { modelId }),
+  )
+  expect(legacyResult.account?.id).toBe(leased.id)
+
+  const typedPreferred = tokenPool.getAccountForModelBySession(
+    modelId,
+    typedKey,
+  )
+  if (!typedPreferred) throw new TypeError("Expected typed preferred account")
+  queuedResults.push(new Response("{}", { status: 200 }))
+  const typedResult = await clientSessionStorage.run(
+    legacyKey,
+    async () =>
+      await runWithRoutingAffinity(
+        { key: typedKey, source: "copilot_session" },
+        async () =>
+          await routedFetch(
+            "/chat/completions",
+            { method: "POST" },
+            { modelId },
+          ),
+      ),
+  )
+  expect(typedResult.account?.id).toBe(typedPreferred.id)
 })
 
 test("fails over to the next account immediately after a multi-token 401", async () => {

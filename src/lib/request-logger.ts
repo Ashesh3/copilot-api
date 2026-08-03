@@ -91,6 +91,23 @@ export const colors = {
   gray: "\x1b[90m",
 }
 
+const REDACTED_DEBUG_HEADERS = new Set([
+  "session-id",
+  "thread-id",
+  "x-claude-code-session-id",
+  "x-client-session-id",
+])
+
+function shouldRedactDebugHeader(name: string): boolean {
+  const normalized = name.toLowerCase()
+  return (
+    REDACTED_DEBUG_HEADERS.has(normalized)
+    || /authorization|api-key|x-goog-api-key|cookie|token|secret/i.test(
+      normalized,
+    )
+  )
+}
+
 /**
  * Get the current time formatted as HH:MM:SS
  */
@@ -290,31 +307,137 @@ function recordCompletedRoutingRequest(
 /**
  * Sanitize request body by omitting large message/prompt arrays
  */
-function sanitizeRequestBody(
+export function sanitizeRequestBodyForLog(
   parsed: Record<string, unknown>,
+  context: "client_metadata" | "metadata" | "root" | "other" = "root",
 ): Record<string, unknown> {
   const sanitized: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(parsed)) {
-    const sensitive =
-      /password|secret|api[_-]?key|authorization|cookie|access[_-]?token|refresh[_-]?token|code[_-]?verifier|client[_-]?secret/i.test(
-        key,
-      )
-    if (sensitive) {
-      sanitized[key] = "[REDACTED]"
-    } else if (key === "messages" || key === "prompt") {
-      const itemCount = Array.isArray(value) ? value.length : 1
-      sanitized[key] = `[${itemCount} items omitted]`
-    } else if (
-      typeof value === "object"
-      && value !== null
-      && !Array.isArray(value)
-    ) {
-      sanitized[key] = sanitizeRequestBody(value as Record<string, unknown>)
-    } else {
-      sanitized[key] = value
-    }
+    sanitized[key] = sanitizeRequestBodyValue(key, value, context)
   }
   return sanitized
+}
+
+function sanitizeRequestBodyValue(
+  key: string,
+  value: unknown,
+  context: "client_metadata" | "metadata" | "root" | "other",
+): unknown {
+  if (isSensitiveBodyKey(key) || isRoutingMetadataKey(key, context)) {
+    return "[REDACTED]"
+  }
+  if (context === "root" && key === "client_metadata") {
+    return sanitizeClientMetadata(value)
+  }
+  if (context === "root" && key === "metadata") {
+    return sanitizeMetadata(value)
+  }
+  if (context === "metadata" && key === "user_id") {
+    return sanitizeClaudeUserMetadata(value)
+  }
+  if (key === "messages" || key === "prompt") {
+    const itemCount = Array.isArray(value) ? value.length : 1
+    return `[${itemCount} items omitted]`
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return value
+  }
+  return sanitizeRequestBodyForLog(value as Record<string, unknown>, "other")
+}
+
+function isSensitiveBodyKey(key: string): boolean {
+  return /password|secret|api[_-]?key|authorization|cookie|access[_-]?token|refresh[_-]?token|code[_-]?verifier|client[_-]?secret/i.test(
+    key,
+  )
+}
+
+function isRoutingMetadataKey(
+  key: string,
+  context: "client_metadata" | "metadata" | "root" | "other",
+): boolean {
+  return (
+    (context === "root" || context === "client_metadata")
+    && (key === "session_id" || key === "thread_id")
+  )
+}
+
+function sanitizeClientMetadata(value: unknown): unknown {
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value) as unknown
+      if (
+        typeof parsed !== "object"
+        || parsed === null
+        || Array.isArray(parsed)
+      ) {
+        return "[REDACTED]"
+      }
+      return JSON.stringify(
+        sanitizeRequestBodyForLog(
+          parsed as Record<string, unknown>,
+          "client_metadata",
+        ),
+      )
+    } catch {
+      return "[REDACTED]"
+    }
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return value
+  }
+  return sanitizeRequestBodyForLog(
+    value as Record<string, unknown>,
+    "client_metadata",
+  )
+}
+
+function sanitizeClaudeUserMetadata(value: unknown): unknown {
+  if (typeof value !== "string") return "[REDACTED]"
+  try {
+    const parsed = JSON.parse(value) as unknown
+    if (
+      typeof parsed !== "object"
+      || parsed === null
+      || Array.isArray(parsed)
+    ) {
+      return "[REDACTED]"
+    }
+    return JSON.stringify(
+      sanitizeRequestBodyForLog(
+        parsed as Record<string, unknown>,
+        "client_metadata",
+      ),
+    )
+  } catch {
+    return "[REDACTED]"
+  }
+}
+
+function sanitizeMetadata(value: unknown): unknown {
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value) as unknown
+      if (
+        typeof parsed !== "object"
+        || parsed === null
+        || Array.isArray(parsed)
+      ) {
+        return "[REDACTED]"
+      }
+      return JSON.stringify(
+        sanitizeRequestBodyForLog(
+          parsed as Record<string, unknown>,
+          "metadata",
+        ),
+      )
+    } catch {
+      return "[REDACTED]"
+    }
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return value
+  }
+  return sanitizeRequestBodyForLog(value as Record<string, unknown>, "metadata")
 }
 
 /**
@@ -334,10 +457,7 @@ async function logRawRequest(c: Context): Promise<void> {
 
   for (const [key, value] of Object.entries(headers)) {
     // Never print secret-bearing header values, even partially.
-    const displayValue =
-      /authorization|api-key|x-goog-api-key|cookie|token|secret/i.test(key) ?
-        "[REDACTED]"
-      : value
+    const displayValue = shouldRedactDebugHeader(key) ? "[REDACTED]" : value
     lines.push(`  ${colors.gray}${key}:${colors.reset} ${displayValue}`)
   }
 
@@ -350,7 +470,7 @@ async function logRawRequest(c: Context): Promise<void> {
         // Parse JSON to extract model, omit messages/prompt
         try {
           const parsed = JSON.parse(body) as Record<string, unknown>
-          const sanitized = sanitizeRequestBody(parsed)
+          const sanitized = sanitizeRequestBodyForLog(parsed)
 
           lines.push(
             `${colors.dim}Body (sanitized):${colors.reset}`,

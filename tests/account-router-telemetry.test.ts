@@ -4,6 +4,8 @@ import type { Model } from "../src/services/copilot/get-models"
 
 import { routedFetch } from "../src/lib/account-router"
 import { setModelRoutingOverridesForTest } from "../src/lib/model-routing"
+import { runWithRoutingAffinity } from "../src/lib/routing-affinity"
+import { resetRoutingAffinityLeasesForTest } from "../src/lib/routing-affinity-leases"
 import {
   getRoutingTelemetrySnapshot,
   resetRoutingTelemetryForTest,
@@ -83,6 +85,7 @@ beforeEach(() => {
   queuedResults.length = 0
   fetchMock.mockClear()
   resetRoutingTelemetryForTest()
+  resetRoutingAffinityLeasesForTest()
   setModelRoutingOverridesForTest({})
   state.isMultiToken = true
   state.sessionId = "router-telemetry-test"
@@ -159,4 +162,76 @@ test("keeps transport retries on the initially selected account", async () => {
   expect(usage.models[0]?.accounts).toEqual([
     { accountId: 1101, share: 1, upstreamCalls: 2 },
   ])
+})
+
+test("records one sticky selection when a successful failover creates a lease", async () => {
+  const modelId = "router-telemetry-sticky-failover"
+  registerAccount(1301, modelId, "sticky-primary")
+  registerAccount(1302, modelId, "sticky-secondary")
+  tokenPool.rebuildModelIndex()
+  queuedResults.push(
+    new Response("forbidden", { status: 403 }),
+    new Response("{}", { status: 200 }),
+  )
+
+  await runWithRoutingAffinity(
+    { key: "sticky-failover-session", source: "copilot_session" },
+    async () =>
+      await routedFetch("/chat/completions", { method: "POST" }, { modelId }),
+  )
+
+  const usage = snapshot()
+  expect(usage.selectionModes).toEqual({ default: 0, single: 0, sticky: 1 })
+  expect(
+    usage.accounts.reduce((sum, account) => sum + account.selected, 0),
+  ).toBe(1)
+})
+
+test("records typed routing affinity sources and unidentified defaults", async () => {
+  resetRoutingTelemetryForTest()
+  const cases = [
+    [1401, "telemetry-source-copilot", "copilot_session"],
+    [1402, "telemetry-source-codex", "codex_session"],
+    [1403, "telemetry-source-claude", "claude_metadata"],
+  ] as const
+  const defaultModel = "telemetry-source-default"
+  try {
+    for (const [accountId, modelId, source] of cases) {
+      registerAccount(accountId, modelId, `token-${accountId}`)
+      tokenPool.rebuildModelIndex()
+      queuedResults.push(new Response("{}", { status: 200 }))
+      await runWithRoutingAffinity(
+        { key: `private-session-${accountId}`, source },
+        async () =>
+          await routedFetch(
+            "/chat/completions",
+            { method: "POST" },
+            { modelId },
+          ),
+      )
+    }
+    registerAccount(1404, defaultModel, "token-1404")
+    tokenPool.rebuildModelIndex()
+    queuedResults.push(new Response("{}", { status: 200 }))
+    await routedFetch(
+      "/chat/completions",
+      { method: "POST" },
+      { modelId: defaultModel },
+    )
+
+    const usage = snapshot()
+    expect(usage.affinitySources).toEqual({
+      claude_session: 0,
+      copilot_session: 1,
+      codex_session: 1,
+      claude_metadata: 1,
+      codex_metadata: 0,
+      codex_thread: 0,
+      unidentified: 1,
+    })
+    expect(JSON.stringify(usage)).not.toContain("private-session")
+  } finally {
+    for (const [accountId] of cases) tokenPool.removeAccountForTest(accountId)
+    tokenPool.removeAccountForTest(1404)
+  }
 })
