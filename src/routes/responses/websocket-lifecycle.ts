@@ -1,10 +1,11 @@
+import type { RoutingAffinity } from "~/lib/routing-affinity"
+
 import { HTTPError } from "~/lib/error"
 import {
   type LogicalRequestLifecycle,
   startLogicalRequestLog,
 } from "~/lib/request-logger"
 import {
-  clientSessionStorage,
   createRoutingTelemetryRequestState,
   quotaHeadersStorage,
   requestIdStorage,
@@ -12,6 +13,7 @@ import {
   type RoutingTelemetryRequestState,
   routingTelemetryStorage,
 } from "~/lib/request-session"
+import { runWithRoutingAffinity } from "~/lib/routing-affinity"
 
 export interface ResponsesWebSocketTurn {
   abortController: AbortController
@@ -138,12 +140,12 @@ export function classifyWebSocketTerminal(
 }
 
 export async function runWithWebSocketRequestContext(
-  sessionId: string | undefined,
+  affinity: RoutingAffinity | undefined,
   turn: ResponsesWebSocketTurn,
   callback: () => Promise<void>,
 ): Promise<void> {
   await requestIdStorage.run(turn.turnId, async () => {
-    await clientSessionStorage.run(sessionId, async () => {
+    await runWithRoutingAffinity(affinity, async () => {
       await quotaHeadersStorage.run({}, async () => {
         await routedAccountStorage.run(turn.routingState, async () => {
           await routingTelemetryStorage.run(turn.telemetryState, callback)

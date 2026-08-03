@@ -4,15 +4,24 @@ import type { ChatCompletionsPayload } from "../src/services/copilot/create-chat
 
 import { setModelSettingsForTest } from "../src/lib/model-settings"
 import {
+  getRoutingAffinity,
+  type RoutingAffinity,
+} from "../src/lib/routing-affinity"
+import {
   getRoutingTelemetrySnapshot,
   resetRoutingTelemetryForTest,
 } from "../src/lib/routing-telemetry"
 import { state } from "../src/lib/state"
+import { tokenPool } from "../src/lib/token-pool"
+import { server } from "../src/server"
 import { createChatCompletions } from "../src/services/copilot/create-chat-completions"
 
 // Save and restore original fetch so integration tests aren't affected
 const originalFetch = globalThis.fetch
+const originalIsMultiToken = state.isMultiToken
 const queuedResponses: Array<Response> = []
+let capturedAffinity: RoutingAffinity | undefined
+const capturedAuthorization: Array<string | undefined> = []
 
 const createDefaultResponse = () =>
   new Response(
@@ -40,6 +49,8 @@ state.accountType = "individual"
 // Helper to mock fetch
 const fetchMock = mock(
   (_url: string, opts: { headers: Record<string, string> }) => {
+    capturedAffinity = getRoutingAffinity()
+    capturedAuthorization.push(opts.headers.Authorization)
     void opts
     return queuedResponses.shift() ?? createDefaultResponse()
   },
@@ -51,14 +62,64 @@ beforeAll(() => {
 })
 
 afterAll(() => {
+  state.isMultiToken = originalIsMultiToken
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
 })
 
 beforeEach(() => {
   fetchMock.mockClear()
   queuedResponses.length = 0
+  capturedAffinity = undefined
+  capturedAuthorization.length = 0
+  state.isMultiToken = originalIsMultiToken
   setModelSettingsForTest([])
   resetRoutingTelemetryForTest()
+})
+
+test("installs Claude metadata affinity before provider dispatch", async () => {
+  const model = "claude-metadata-routing-model"
+  for (const [id, token] of [
+    [2101, "metadata-token-one"],
+    [2102, "metadata-token-two"],
+  ] as const) {
+    const account = tokenPool.addAccount(`github-${id}`, "individual", id)
+    account.copilotToken = token
+    account.healthy = true
+    account.models = new Set([model])
+  }
+  tokenPool.rebuildModelIndex()
+  state.isMultiToken = true
+  const request = () =>
+    server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: "user", content: "hello" }],
+        max_tokens: 32,
+        metadata: {
+          user_id: JSON.stringify({ session_id: "claude-body-session" }),
+        },
+      }),
+    })
+
+  const first = await request()
+  const second = await request()
+
+  expect(first.status).toBe(200)
+  expect(second.status).toBe(200)
+  expect(capturedAffinity).toEqual({
+    key: "claude-body-session",
+    source: "claude_metadata",
+  })
+  const expected = tokenPool.getAccountForModelBySession(
+    model,
+    "claude-body-session",
+  )
+  expect(capturedAuthorization).toEqual([
+    `Bearer ${expected?.copilotToken}`,
+    `Bearer ${expected?.copilotToken}`,
+  ])
 })
 
 test("sets X-Initiator to agent if tool/assistant present", async () => {

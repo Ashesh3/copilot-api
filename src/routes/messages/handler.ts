@@ -33,6 +33,10 @@ import {
   setRequestContext,
 } from "~/lib/request-logger"
 import {
+  installRoutingAffinityFallback,
+  resolveClaudeRoutingAffinity,
+} from "~/lib/routing-affinity"
+import {
   createSentryChatSpanOptions,
   createSentryInvokeAgentSpanOptions,
   setSentryOutputMessages,
@@ -156,6 +160,9 @@ const hasWebSearchToolInPayload = (
 
 export async function handleCompletion(c: Context) {
   const anthropicPayload = await c.req.json<AnthropicMessagesPayload>()
+  installRoutingAffinityFallback(
+    resolveClaudeRoutingAffinity(anthropicPayload.metadata),
+  )
   const conversationId = setSentryConversationIdFromRequest(c, anthropicPayload)
   logger.debug("Anthropic request payload:", JSON.stringify(anthropicPayload))
 

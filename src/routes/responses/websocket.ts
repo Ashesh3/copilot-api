@@ -2,6 +2,8 @@
 import consola from "consola"
 import { randomUUID } from "node:crypto"
 
+import type { RoutingAffinity } from "~/lib/routing-affinity"
+
 import { resolveRequestCredential } from "~/lib/credential-resolver"
 import {
   applyModelRedirect,
@@ -17,6 +19,10 @@ import {
 } from "~/lib/model-suffix"
 import { resolveProtectedCredential } from "~/lib/protected-credential"
 import { reportNonDefaultBehavior } from "~/lib/request-logger"
+import {
+  resolveResponsesRoutingAffinity,
+  resolveRoutingAffinityFromHeaders,
+} from "~/lib/routing-affinity"
 import { state } from "~/lib/state"
 import { resolveWebSearchCalls } from "~/routes/messages/web-search-helpers"
 import {
@@ -62,7 +68,7 @@ export interface ResponsesWebSocketData {
   nextTurnSequence: number
   type: "responses"
   requestId: string
-  sessionId?: string
+  affinity?: RoutingAffinity
   responseSnapshots: Map<string, ResponsesPayload>
 }
 
@@ -119,10 +125,7 @@ export async function tryUpgradeResponsesWebSocket(
     req.headers.get("x-request-id")
     ?? req.headers.get("x-client-request-id")
     ?? randomUUID()
-  const sessionId =
-    req.headers.get("x-claude-code-session-id")
-    ?? req.headers.get("session-id")
-    ?? undefined
+  const affinity = resolveRoutingAffinityFromHeaders(req.headers)
 
   const data: ResponsesWebSocketData = {
     type: "responses",
@@ -130,7 +133,7 @@ export async function tryUpgradeResponsesWebSocket(
     closed: false,
     nextTurnSequence: 0,
     requestId,
-    sessionId,
+    affinity,
     responseSnapshots: new Map<string, ResponsesPayload>(),
   }
   if (!server.upgrade(req, { data })) return "no_match"
@@ -189,6 +192,10 @@ export const responsesWebSocket = {
     }
 
     const turn = createResponsesWebSocketTurn(ws.data, message)
+    const frameAffinity = resolveResponsesRoutingAffinity(
+      extractResponsesPayload(parsed).client_metadata,
+    )
+    const affinity = ws.data.affinity ?? frameAffinity
     const requestedModel = getRequestedModel(parsed)
     turn.requestedModel = requestedModel
     turn.model = requestedModel
@@ -198,13 +205,9 @@ export const responsesWebSocket = {
     })
 
     try {
-      await runWithWebSocketRequestContext(
-        ws.data.sessionId,
-        turn,
-        async () => {
-          await handleResponseCreate(ws, parsed, turn)
-        },
-      )
+      await runWithWebSocketRequestContext(affinity, turn, async () => {
+        await handleResponseCreate(ws, parsed, turn)
+      })
       if (!turn.finalized) {
         throw new WebSocketRequestError(
           "Responses stream ended without a terminal frame",

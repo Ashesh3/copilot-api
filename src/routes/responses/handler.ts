@@ -29,6 +29,10 @@ import {
   setRequestContext,
 } from "~/lib/request-logger"
 import {
+  installRoutingAffinityFallback,
+  resolveResponsesRoutingAffinity,
+} from "~/lib/routing-affinity"
+import {
   createSentryChatSpanOptions,
   createSentryInvokeAgentSpanOptions,
   setSentryOutputMessages,
@@ -404,6 +408,11 @@ function rewriteResponseModelInEvent(
 
 export const handleResponses = async (c: Context) => {
   const payload = await c.req.json<ResponsesPayload>()
+  installRoutingAffinityFallback(
+    resolveResponsesRoutingAffinity(
+      (payload as Record<string, unknown>).client_metadata,
+    ),
+  )
   const conversationId = setSentryConversationIdFromRequest(c, payload)
 
   const model = parseModelSuffix(payload.model).baseModel
