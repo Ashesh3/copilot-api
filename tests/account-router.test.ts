@@ -292,7 +292,7 @@ test("keeps an account healthy when GitHub username lookup fails", async () => {
       status: 200,
       headers: { "content-type": "application/json" },
     }),
-    new Error("request failed for github-username-failure-token"),
+    new Response("Service unavailable", { status: 503 }),
   )
 
   const warnSpy = spyOn(consola, "warn")
@@ -310,7 +310,49 @@ test("keeps an account healthy when GitHub username lookup fails", async () => {
   expect(account.githubUsername).toBeUndefined()
   expect(capturedRequests[2]?.url).toBe("https://api.github.com/user")
   expect(warningOutput).toContain("account #1112")
+  expect(warningOutput).toContain("HTTP 503")
   expect(warningOutput).not.toContain("github-username-failure-token")
+})
+
+test("redacts arbitrary GitHub username lookup error messages", async () => {
+  const account = tokenPool.addAccount(
+    "github-username-redaction-token",
+    "individual",
+    1113,
+  )
+  queuedResults.push(
+    new Response(
+      JSON.stringify({
+        token: "copilot-username-redaction-token",
+        expires_at: 1_900_000_000,
+        refresh_in: 1800,
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    ),
+    new Response(JSON.stringify({ object: "list", data: [] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }),
+    new Error("request failed for github-username-redaction-token"),
+  )
+
+  const warnSpy = spyOn(consola, "warn")
+  let warningOutput: string
+  try {
+    await tokenPool.initializeAccount(account)
+    warningOutput = warnSpy.mock.calls
+      .map((args) => args.map(String).join(" "))
+      .join("\n")
+  } finally {
+    warnSpy.mockRestore()
+  }
+
+  expect(account.healthy).toBe(true)
+  expect(account.githubUsername).toBeUndefined()
+  expect(warningOutput).toContain("account #1113")
+  expect(warningOutput).toContain("Error")
+  expect(warningOutput).not.toContain("request failed")
+  expect(warningOutput).not.toContain("github-username-redaction-token")
 })
 
 test("does not fail over aborted multi-token requests", async () => {
