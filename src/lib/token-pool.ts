@@ -405,12 +405,21 @@ export class TokenPool {
 
   private async resolveGitHubUsername(account: Account): Promise<void> {
     try {
-      const user = await getGitHubUser(account.githubToken)
+      const user = await getGitHubUser(
+        account.githubToken,
+        AbortSignal.timeout(5_000),
+      )
       // eslint-disable-next-line require-atomic-updates
       account.githubUsername = user.login
     } catch (error) {
+      let detail = "Unknown error"
+      if (error instanceof HTTPError) {
+        detail = `HTTP ${error.response.status}`
+      } else if (error instanceof Error) {
+        detail = error.name
+      }
       consola.warn(
-        `Failed to resolve GitHub username for account #${account.id}: ${error instanceof Error ? error.message : String(error)}`,
+        `Failed to resolve GitHub username for account #${account.id}: ${detail}`,
       )
     }
   }

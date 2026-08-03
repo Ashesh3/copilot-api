@@ -1,4 +1,13 @@
-import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  expect,
+  mock,
+  spyOn,
+  test,
+} from "bun:test"
+import consola from "consola"
 
 import type { Model } from "../src/services/copilot/get-models"
 
@@ -239,11 +248,29 @@ test("resolves the GitHub username during account initialization", async () => {
 
   await tokenPool.initializeAccount(account)
 
+  queuedResults.push(
+    new Response(
+      JSON.stringify({
+        token: "refreshed-copilot-username-token",
+        expires_at: 1_900_003_600,
+        refresh_in: 1800,
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    ),
+  )
+  await tokenPool.refreshAccountToken(account)
+
   expect(account.githubUsername).toBe("octocat")
   expect(capturedRequests[2]?.url).toBe("https://api.github.com/user")
   expect(capturedRequests[2]?.init?.headers).toMatchObject({
     authorization: "token github-username-token",
   })
+  expect(capturedRequests[2]?.init?.signal).toBeInstanceOf(AbortSignal)
+  expect(
+    capturedRequests.filter(
+      (request) => request.url === "https://api.github.com/user",
+    ),
+  ).toHaveLength(1)
 })
 
 test("keeps an account healthy when GitHub username lookup fails", async () => {
@@ -265,14 +292,25 @@ test("keeps an account healthy when GitHub username lookup fails", async () => {
       status: 200,
       headers: { "content-type": "application/json" },
     }),
-    new Response("Service unavailable", { status: 503 }),
+    new Error("request failed for github-username-failure-token"),
   )
 
-  await tokenPool.initializeAccount(account)
+  const warnSpy = spyOn(consola, "warn")
+  let warningOutput: string
+  try {
+    await tokenPool.initializeAccount(account)
+    warningOutput = warnSpy.mock.calls
+      .map((args) => args.map(String).join(" "))
+      .join("\n")
+  } finally {
+    warnSpy.mockRestore()
+  }
 
   expect(account.healthy).toBe(true)
   expect(account.githubUsername).toBeUndefined()
   expect(capturedRequests[2]?.url).toBe("https://api.github.com/user")
+  expect(warningOutput).toContain("account #1112")
+  expect(warningOutput).not.toContain("github-username-failure-token")
 })
 
 test("does not fail over aborted multi-token requests", async () => {
