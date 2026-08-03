@@ -1,5 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks"
 
+import { getRoutingAffinity } from "~/lib/routing-affinity"
+
 /**
  * Request-scoped storage for the client session ID.
  *
@@ -54,7 +56,7 @@ export function updateRoutingTelemetryRequestState(options: {
 }
 
 export function getClientSessionId(): string | undefined {
-  return clientSessionStorage.getStore()
+  return getRoutingAffinity()?.key ?? clientSessionStorage.getStore()
 }
 
 export function getRequestId(): string | undefined {
