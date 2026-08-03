@@ -21,6 +21,7 @@ import { useMemo, useState } from "react"
 
 import type {
   RoutingAccountUsage,
+  RoutingAffinitySources,
   RoutingBalanceStatus,
   RoutingModelUsage,
   RoutingTelemetrySnapshot,
@@ -547,7 +548,24 @@ function AccountBalanceRow({ account }: { account: RoutingAccountUsage }) {
   )
 }
 
+const EMPTY_AFFINITY_SOURCES: RoutingAffinitySources = {
+  claude_session: 0,
+  copilot_session: 0,
+  codex_session: 0,
+  claude_metadata: 0,
+  codex_metadata: 0,
+  codex_thread: 0,
+  unidentified: 0,
+}
+
+export function normalizeAffinitySources(
+  sources: RoutingAffinitySources | undefined,
+): RoutingAffinitySources {
+  return { ...EMPTY_AFFINITY_SOURCES, ...sources }
+}
+
 function AccountBalance({ data }: { data: RoutingTelemetrySnapshot }) {
+  const sourceCounts = normalizeAffinitySources(data.affinitySources)
   const affinitySources = [
     ["claude_session", "Claude session"],
     ["copilot_session", "Copilot session"],
@@ -578,13 +596,13 @@ function AccountBalance({ data }: { data: RoutingTelemetrySnapshot }) {
           {affinitySources
             .filter(
               ([source]) =>
-                source === "unidentified" || data.affinitySources[source] > 0,
+                source === "unidentified" || sourceCounts[source] > 0,
             )
             .map(([source, label]) => (
               <Badge
                 key={source}
                 variant="neutral"
-                label={`${label}: ${data.affinitySources[source].toLocaleString()}`}
+                label={`${label}: ${sourceCounts[source].toLocaleString()}`}
               />
             ))}
         </HStack>

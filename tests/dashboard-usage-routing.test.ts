@@ -180,6 +180,11 @@ test("Usage screen keeps existing cards and adds live routing observability", ()
   expect(usageSource).toContain("Routing pulse")
   expect(usageSource).toContain("Model usage &amp; routing")
   expect(usageSource).toContain("Account balance")
+  expect(usageSource).toContain(
+    "normalizeAffinitySources(data.affinitySources)",
+  )
+  expect(usageSource).toContain("EMPTY_AFFINITY_SOURCES")
+  expect(usageSource).toContain('source === "unidentified"')
   for (const source of [
     "claude_session",
     "copilot_session",
