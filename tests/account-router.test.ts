@@ -13,6 +13,12 @@ import type { Model } from "../src/services/copilot/get-models"
 
 import { getLastUsedAccountId, routedFetch } from "../src/lib/account-router"
 import { setModelRoutingOverridesForTest } from "../src/lib/model-routing"
+import { runWithRoutingAffinity } from "../src/lib/routing-affinity"
+/* eslint-disable max-lines -- account-router integration variants share singleton fixtures */
+import {
+  getRoutingAffinityLease,
+  resetRoutingAffinityLeasesForTest,
+} from "../src/lib/routing-affinity-leases"
 import { state } from "../src/lib/state"
 import { tokenPool } from "../src/lib/token-pool"
 
@@ -162,9 +168,117 @@ beforeEach(() => {
   fetchMock.mockClear()
   queuedResults.length = 0
   capturedRequests.length = 0
+  resetRoutingAffinityLeasesForTest()
   setModelRoutingOverridesForTest({})
   state.isMultiToken = true
   state.sessionId = "router-test-session"
+})
+
+async function routedFetchWithAffinity(modelId: string, key: string) {
+  return await runWithRoutingAffinity(
+    { key, source: "copilot_session" },
+    async () =>
+      await routedFetch("/chat/completions", { method: "POST" }, { modelId }),
+  )
+}
+
+test("reuses a successful failover account for the next identified request", async () => {
+  const modelId = "router-successful-failover-lease"
+  registerAccount(1201, modelId, "lease-primary")
+  registerAccount(1202, modelId, "lease-secondary")
+  tokenPool.rebuildModelIndex()
+  const key = "lease-session"
+  const initial = tokenPool.getAccountForModelBySession(modelId, key)
+  if (!initial) throw new TypeError("Expected initial account")
+  const replacement = tokenPool.getNextAccountForModel(modelId, initial)
+  if (!replacement) throw new TypeError("Expected replacement account")
+  queuedResults.push(
+    new Response("forbidden", { status: 403 }),
+    new Response("{}", { status: 200 }),
+    new Response("{}", { status: 200 }),
+  )
+
+  const first = await routedFetchWithAffinity(modelId, key)
+  initial.healthy = true
+  tokenPool.rebuildModelIndex()
+  const second = await routedFetchWithAffinity(modelId, key)
+
+  expect(first.account?.id).toBe(replacement.id)
+  expect(second.account?.id).toBe(replacement.id)
+  expect(getRoutingAffinityLease(key)).toBe(replacement.id)
+})
+
+test("does not lease an unsuccessful failover response", async () => {
+  const modelId = "router-unsuccessful-failover-lease"
+  registerAccount(1211, modelId, "failed-primary")
+  registerAccount(1212, modelId, "failed-secondary")
+  tokenPool.rebuildModelIndex()
+  const key = "failed-lease-session"
+  queuedResults.push(
+    new Response("forbidden", { status: 403 }),
+    new Response("failed replacement", { status: 400 }),
+  )
+
+  const result = await routedFetchWithAffinity(modelId, key)
+
+  expect(result.response.status).toBe(400)
+  expect(getRoutingAffinityLease(key)).toBeUndefined()
+})
+
+test("ignores an ineligible lease without deleting it and later reuses it", async () => {
+  const modelA = "router-lease-model-a"
+  const modelB = "router-lease-model-b"
+  registerAccount(1221, modelA, "model-a-primary")
+  registerAccount(1222, modelA, "shared-account")
+  const shared = tokenPool
+    .getAllAccounts()
+    .find((account) => account.id === 1222)
+  if (!shared) throw new TypeError("Expected shared account")
+  shared.models.add(modelB)
+  shared.modelsData.push(createModel(modelB))
+  registerAccount(1223, modelB, "model-b-only")
+  tokenPool.rebuildModelIndex()
+  const key = "cross-model-lease-session"
+  const initialA = tokenPool.getAccountForModelBySession(modelA, key)
+  if (!initialA) throw new TypeError("Expected model A initial account")
+  const replacementA = tokenPool.getNextAccountForModel(modelA, initialA)
+  if (!replacementA) throw new TypeError("Expected model A replacement")
+  queuedResults.push(
+    new Response("forbidden", { status: 403 }),
+    new Response("{}", { status: 200 }),
+  )
+  await routedFetchWithAffinity(modelA, key)
+
+  const leasedId = replacementA.id
+  const ineligibleModel = leasedId === 1222 ? "model-never-supported" : modelB
+  if (ineligibleModel === "model-never-supported") {
+    registerAccount(1224, ineligibleModel, "other-only")
+    tokenPool.rebuildModelIndex()
+  }
+  queuedResults.push(new Response("{}", { status: 200 }))
+  const ignored = await routedFetchWithAffinity(ineligibleModel, key)
+  expect(ignored.account?.id).not.toBe(leasedId)
+  expect(getRoutingAffinityLease(key)).toBe(leasedId)
+
+  const laterModel = leasedId === 1222 ? modelB : modelA
+  queuedResults.push(new Response("{}", { status: 200 }))
+  const reused = await routedFetchWithAffinity(laterModel, key)
+  expect(reused.account?.id).toBe(leasedId)
+})
+
+test("does not create a lease for an unidentified request", async () => {
+  const modelId = "router-unidentified-no-lease"
+  registerAccount(1231, modelId, "unknown-primary")
+  registerAccount(1232, modelId, "unknown-secondary")
+  tokenPool.rebuildModelIndex()
+  queuedResults.push(
+    new Response("forbidden", { status: 403 }),
+    new Response("{}", { status: 200 }),
+  )
+
+  await routedFetch("/chat/completions", { method: "POST" }, { modelId })
+
+  expect(getRoutingAffinityLease("unidentified")).toBeUndefined()
 })
 
 test("fails over to the next account immediately after a multi-token 401", async () => {

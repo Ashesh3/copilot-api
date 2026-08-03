@@ -330,6 +330,15 @@ export class TokenPool {
       .sort((left, right) => left - right)
   }
 
+  getEligibleAccountForModel(
+    modelId: string,
+    accountId: number,
+  ): Account | undefined {
+    return (this.modelIndex.get(modelId) ?? []).find(
+      (account) => account.id === accountId,
+    )
+  }
+
   getHealthyAccountIds(): Array<number> {
     return this.getAllAccounts()
       .filter((account) => account.healthy)

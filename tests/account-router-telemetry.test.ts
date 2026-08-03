@@ -4,6 +4,8 @@ import type { Model } from "../src/services/copilot/get-models"
 
 import { routedFetch } from "../src/lib/account-router"
 import { setModelRoutingOverridesForTest } from "../src/lib/model-routing"
+import { runWithRoutingAffinity } from "../src/lib/routing-affinity"
+import { resetRoutingAffinityLeasesForTest } from "../src/lib/routing-affinity-leases"
 import {
   getRoutingTelemetrySnapshot,
   resetRoutingTelemetryForTest,
@@ -83,6 +85,7 @@ beforeEach(() => {
   queuedResults.length = 0
   fetchMock.mockClear()
   resetRoutingTelemetryForTest()
+  resetRoutingAffinityLeasesForTest()
   setModelRoutingOverridesForTest({})
   state.isMultiToken = true
   state.sessionId = "router-telemetry-test"
@@ -159,4 +162,27 @@ test("keeps transport retries on the initially selected account", async () => {
   expect(usage.models[0]?.accounts).toEqual([
     { accountId: 1101, share: 1, upstreamCalls: 2 },
   ])
+})
+
+test("records one sticky selection when a successful failover creates a lease", async () => {
+  const modelId = "router-telemetry-sticky-failover"
+  registerAccount(1301, modelId, "sticky-primary")
+  registerAccount(1302, modelId, "sticky-secondary")
+  tokenPool.rebuildModelIndex()
+  queuedResults.push(
+    new Response("forbidden", { status: 403 }),
+    new Response("{}", { status: 200 }),
+  )
+
+  await runWithRoutingAffinity(
+    { key: "sticky-failover-session", source: "copilot_session" },
+    async () =>
+      await routedFetch("/chat/completions", { method: "POST" }, { modelId }),
+  )
+
+  const usage = snapshot()
+  expect(usage.selectionModes).toEqual({ default: 0, single: 0, sticky: 1 })
+  expect(
+    usage.accounts.reduce((sum, account) => sum + account.selected, 0),
+  ).toBe(1)
 })
