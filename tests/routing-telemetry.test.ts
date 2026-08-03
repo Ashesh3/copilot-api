@@ -8,6 +8,7 @@ import {
   recordUpstreamCall,
   resetRoutingTelemetryForTest,
 } from "~/lib/routing-telemetry"
+import { getRoutingSourceProtocol } from "~/server"
 
 const MINUTE_MS = 60_000
 const HOUR_MS = 60 * MINUTE_MS
@@ -380,4 +381,28 @@ test("recognizes only supported routing windows", () => {
   expect(isRoutingWindow("24h")).toBe(true)
   expect(isRoutingWindow("7d")).toBe(false)
   expect(isRoutingWindow("")).toBe(false)
+})
+
+test("labels supported client protocol paths before provider routing", () => {
+  expect(getRoutingSourceProtocol("/v1/messages/count_tokens")).toBe(
+    "Token Count",
+  )
+  expect(getRoutingSourceProtocol("/v1/messages")).toBe("Messages")
+  expect(getRoutingSourceProtocol("/v1/responses")).toBe("Responses")
+  expect(getRoutingSourceProtocol("/v1/chat/completions")).toBe(
+    "Chat Completions",
+  )
+  expect(getRoutingSourceProtocol("/v1/embeddings")).toBe("Embeddings")
+  expect(
+    getRoutingSourceProtocol("/models/gemini-2.0-flash:generateContent"),
+  ).toBe("Google AI")
+  expect(
+    getRoutingSourceProtocol("/v1/models/gemini-2.0-flash:generateContent"),
+  ).toBe("Google AI")
+  expect(
+    getRoutingSourceProtocol(
+      "/v1beta/models/gemini-2.0-flash:streamGenerateContent",
+    ),
+  ).toBe("Google AI")
+  expect(getRoutingSourceProtocol("/v1/complete")).toBe("Legacy Complete")
 })

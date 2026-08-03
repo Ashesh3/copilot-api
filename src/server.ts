@@ -47,13 +47,20 @@ import { whamRoutes } from "./routes/wham/route"
 
 export const server = new Hono()
 
-function getRoutingSourceProtocol(path: string): string {
+export function getRoutingSourceProtocol(path: string): string {
+  if (path.includes("/count_tokens")) return "Token Count"
+  if (
+    /^\/(?:v1\/|v1beta\/)?models\/[^/]+:(?:generateContent|streamGenerateContent|countTokens)$/.test(
+      path,
+    )
+  ) {
+    return "Google AI"
+  }
   if (path.includes("/messages")) return "Messages"
   if (path.includes("/responses")) return "Responses"
   if (path.includes("/chat/completions")) return "Chat Completions"
   if (path.includes("/embeddings")) return "Embeddings"
-  if (path.includes("/count_tokens")) return "Token Count"
-  if (path.startsWith("/v1beta/")) return "Google AI"
+  if (path.endsWith("/complete")) return "Legacy Complete"
   if (path.includes("/search")) return "Search"
   return "HTTP"
 }
