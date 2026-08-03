@@ -5,6 +5,10 @@ import {
   getLlmDebugLog,
   listLlmDebugLogs,
 } from "../src/lib/llm-debug-log"
+import {
+  getRoutingTelemetrySnapshot,
+  resetRoutingTelemetryForTest,
+} from "../src/lib/routing-telemetry"
 import { state } from "../src/lib/state"
 import {
   copilotFetch,
@@ -87,6 +91,7 @@ beforeEach(() => {
     return Promise.resolve()
   })
   clearLlmDebugLogs()
+  resetRoutingTelemetryForTest()
   state.accountType = "individual"
   state.githubToken = "github-token"
   state.copilotToken = "expired-copilot-token"
@@ -343,6 +348,47 @@ test("retries Bun's socket-closed ECONNRESET and returns the retried response", 
 
   expect(response.status).toBe(200)
   expect(capturedRequests).toHaveLength(2)
+})
+
+test("records every Copilot transport attempt with its retry reason", async () => {
+  queuedResults.push(
+    bunSocketClosedError(),
+    new Response("{}", { status: 200 }),
+  )
+
+  const response = await copilotFetch(
+    "/responses",
+    { method: "POST", headers: AUTH_HEADERS },
+    {
+      telemetry: {
+        accountId: 7,
+        destination: "Responses",
+        model: "gpt-telemetry-test",
+        provider: "GitHub Copilot",
+        reason: "initial",
+      },
+    },
+  )
+
+  expect(response.status).toBe(200)
+  const snapshot = getRoutingTelemetrySnapshot({
+    accounts: [{ id: 7, accountType: "individual", healthy: true }],
+    multiToken: true,
+    window: "1h",
+  })
+  expect(snapshot.totals).toMatchObject({
+    failovers: 0,
+    retries: 1,
+    upstreamCalls: 2,
+  })
+  expect(snapshot.models[0]).toMatchObject({
+    model: "gpt-telemetry-test",
+    outcomes: { success: 1, transportError: 1 },
+    provider: "GitHub Copilot",
+  })
+  expect(snapshot.models[0]?.accounts).toEqual([
+    { accountId: 7, share: 1, upstreamCalls: 2 },
+  ])
 })
 
 test("disables Bun pooling and replaces its idle deadline with caller cancellation", async () => {

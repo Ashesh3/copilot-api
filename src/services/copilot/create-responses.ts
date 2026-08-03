@@ -870,6 +870,8 @@ export const createResponses = async (
       {
         modelId: payload.model,
         headerOptions: headerOpts,
+        reason: "http_retry",
+        recordSelection: false,
         maxHttpRetryDelaySeconds:
           payload.stream ? PRE_HEADER_MAX_DELAY_SECONDS : undefined,
       },

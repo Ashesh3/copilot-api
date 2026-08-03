@@ -9,10 +9,12 @@ import { createAuthMiddleware } from "./lib/request-auth"
 import { requestLogger } from "./lib/request-logger"
 import {
   clientSessionStorage,
+  createRoutingTelemetryRequestState,
   getQuotaHeaders,
   quotaHeadersStorage,
   requestIdStorage,
   routedAccountStorage,
+  routingTelemetryStorage,
 } from "./lib/request-session"
 import { transparentProxy } from "./lib/transparent-proxy"
 import { completionRoutes } from "./routes/chat-completions/route"
@@ -45,6 +47,24 @@ import { whamRoutes } from "./routes/wham/route"
 
 export const server = new Hono()
 
+export function getRoutingSourceProtocol(path: string): string {
+  if (path.includes("/count_tokens")) return "Token Count"
+  if (
+    /^\/(?:v1\/|v1beta\/)?models\/[^/]+:(?:generateContent|streamGenerateContent|countTokens)$/.test(
+      path,
+    )
+  ) {
+    return "Google AI"
+  }
+  if (path.includes("/messages")) return "Messages"
+  if (path.includes("/responses")) return "Responses"
+  if (path.includes("/chat/completions")) return "Chat Completions"
+  if (path.includes("/embeddings")) return "Embeddings"
+  if (path.endsWith("/complete")) return "Legacy Complete"
+  if (path.includes("/search")) return "Search"
+  return "HTTP"
+}
+
 function applySecurityHeaders(c: {
   header(name: string, value: string): void
 }): void {
@@ -62,6 +82,12 @@ function applySecurityHeaders(c: {
 
 // Global middleware — applied to ALL routes including pre-auth ones
 server.use("*", statsigProxyMiddleware)
+server.use("*", async (c, next) => {
+  const telemetryState = createRoutingTelemetryRequestState(
+    getRoutingSourceProtocol(c.req.path),
+  )
+  await routingTelemetryStorage.run(telemetryState, next)
+})
 server.use(requestLogger)
 server.use("*", inferenceCors)
 server.use("*", async (c, next) => {

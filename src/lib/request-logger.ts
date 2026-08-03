@@ -2,6 +2,10 @@ import type { Context, Next } from "hono"
 
 import * as Sentry from "@sentry/bun"
 
+import type { RoutingTelemetryRequestState } from "./request-session"
+
+import { getRoutingTelemetryRequestState } from "./request-session"
+import { recordRoutingRequest } from "./routing-telemetry"
 import { getSentryModelName } from "./sentry"
 import { state } from "./state"
 import { recordUsage } from "./usage-tracker"
@@ -56,6 +60,18 @@ export interface LogicalRequestLifecycle {
       Pick<RequestContext, "model" | "reasoningEffort" | "requestedModel">
     >,
   ): void
+}
+
+interface LogicalRequestStartOptions {
+  inputLength: number
+  method: string
+  model: string
+  path: string
+  reasoningEffort?: string
+  requestedModel?: string
+  telemetryState?: RoutingTelemetryRequestState
+  transport: string
+  turnId: string
 }
 
 const REQUEST_CONTEXT_KEY = "requestContext"
@@ -135,30 +151,10 @@ function getErrorMessage(error: unknown): string | undefined {
   }
 }
 
-/**
- * Log a request lifecycle that does not pass through Hono middleware, such as
- * a logical request carried by a long-lived WebSocket connection.
- */
-export function startLogicalRequestLog(options: {
-  inputLength: number
-  method: string
-  model: string
-  path: string
-  reasoningEffort?: string
-  requestedModel?: string
-  transport: string
-  turnId: string
-}): LogicalRequestLifecycle {
-  const startedAt = Date.now()
-  const requestContext: RequestContext = {
-    inputLength: options.inputLength,
-    model: options.model,
-    reasoningEffort: options.reasoningEffort,
-    requestedModel: options.requestedModel,
-    startTime: startedAt,
-  }
-  let finalized = false
-
+function logLogicalRequestStarted(
+  options: LogicalRequestStartOptions,
+  requestContext: RequestContext,
+): void {
   const startedLines = [
     `${colors.dim}${"─".repeat(60)}${colors.reset}`,
     `${colors.blue}${colors.bold}STARTED${colors.reset} ${colors.bold}${options.method}${colors.reset} ${options.path} ${colors.dim}[${options.transport} · ${options.turnId}]${colors.reset}`,
@@ -184,6 +180,26 @@ export function startLogicalRequestLog(options: {
       turnId: options.turnId,
     },
   )
+}
+
+/**
+ * Log a request lifecycle that does not pass through Hono middleware, such as
+ * a logical request carried by a long-lived WebSocket connection.
+ */
+export function startLogicalRequestLog(
+  options: LogicalRequestStartOptions,
+): LogicalRequestLifecycle {
+  const startedAt = Date.now()
+  const requestContext: RequestContext = {
+    inputLength: options.inputLength,
+    model: options.model,
+    reasoningEffort: options.reasoningEffort,
+    requestedModel: options.requestedModel,
+    startTime: startedAt,
+  }
+  let finalized = false
+
+  logLogicalRequestStarted(options, requestContext)
 
   return {
     finalize(terminalOptions): boolean {
@@ -230,6 +246,11 @@ export function startLogicalRequestLog(options: {
           turnId: options.turnId,
         },
       )
+      recordCompletedRoutingRequest(
+        ctx,
+        options.telemetryState,
+        terminalOptions.status,
+      )
       return true
     },
     isFinalized(): boolean {
@@ -240,6 +261,30 @@ export function startLogicalRequestLog(options: {
       Object.assign(requestContext, next)
     },
   }
+}
+
+function recordCompletedRoutingRequest(
+  ctx: RequestContext | undefined,
+  telemetryState: RoutingTelemetryRequestState | undefined,
+  status: number,
+): void {
+  if (
+    !ctx?.model
+    || !telemetryState?.dispatched
+    || telemetryState.requestRecorded
+  ) {
+    return
+  }
+  const provider = telemetryState.lastProvider ?? ctx.provider ?? "Unknown"
+  const destination =
+    telemetryState.lastDestination ?? ctx.provider ?? "Unknown"
+  recordRoutingRequest({
+    model: telemetryState.lastModel ?? ctx.model,
+    provider,
+    route: `${telemetryState.sourceProtocol} -> ${destination}`,
+    status,
+  })
+  telemetryState.requestRecorded = true
 }
 
 /**
@@ -631,6 +676,8 @@ export async function requestLogger(c: Context, next: Next): Promise<void> {
   const duration = ((Date.now() - startTime) / 1000).toFixed(1)
   const status = c.res.status
   const statusColor = getStatusColor(status)
+
+  recordCompletedRoutingRequest(ctx, getRoutingTelemetryRequestState(), status)
 
   // Build the log block
   const lines: Array<string> = []

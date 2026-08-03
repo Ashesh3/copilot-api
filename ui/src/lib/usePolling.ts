@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 
-export function usePolling(
+function usePollingEffect(
   fn: () => void | Promise<void>,
   intervalMs: number,
-  deps: ReadonlyArray<unknown>,
+  options: { deps: ReadonlyArray<unknown>; immediate: boolean },
 ): void {
   const fnRef = useRef(fn)
   fnRef.current = fn
@@ -16,7 +16,7 @@ export function usePolling(
       void fnRef.current()
     }
 
-    tick()
+    if (options.immediate) tick()
     const id = globalThis.setInterval(tick, intervalMs)
 
     const onVisibilityChange = () => {
@@ -30,7 +30,23 @@ export function usePolling(
       document.removeEventListener("visibilitychange", onVisibilityChange)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [intervalMs, ...deps])
+  }, [intervalMs, options.immediate, ...options.deps])
+}
+
+export function usePolling(
+  fn: () => void | Promise<void>,
+  intervalMs: number,
+  deps: ReadonlyArray<unknown>,
+): void {
+  usePollingEffect(fn, intervalMs, { deps, immediate: true })
+}
+
+export function useDelayedPolling(
+  fn: () => void | Promise<void>,
+  intervalMs: number,
+  deps: ReadonlyArray<unknown>,
+): void {
+  usePollingEffect(fn, intervalMs, { deps, immediate: false })
 }
 
 export interface UseAsyncDataResult<T> {
@@ -62,6 +78,8 @@ export function useAsyncData<T>(
     if (silentRef.current) {
       silentRef.current = false
     } else {
+      // A dependency/reload change intentionally begins a foreground load.
+      // eslint-disable-next-line @eslint-react/hooks-extra/no-direct-set-state-in-use-effect
       setLoading(true)
     }
 

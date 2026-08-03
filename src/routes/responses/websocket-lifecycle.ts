@@ -5,9 +5,12 @@ import {
 } from "~/lib/request-logger"
 import {
   clientSessionStorage,
+  createRoutingTelemetryRequestState,
   quotaHeadersStorage,
   requestIdStorage,
   routedAccountStorage,
+  type RoutingTelemetryRequestState,
+  routingTelemetryStorage,
 } from "~/lib/request-session"
 
 export interface ResponsesWebSocketTurn {
@@ -19,6 +22,7 @@ export interface ResponsesWebSocketTurn {
   reasoningEffort?: string
   requestedModel?: string
   routingState: { lastUsedAccountId?: number }
+  telemetryState: RoutingTelemetryRequestState
   sequence: number
   turnId: string
 }
@@ -48,6 +52,7 @@ export function createResponsesWebSocketTurn(
     finalized: false,
     inputLength: new TextEncoder().encode(message).byteLength,
     routingState: {},
+    telemetryState: createRoutingTelemetryRequestState("Responses WebSocket"),
     sequence,
     turnId: `${data.requestId}:${sequence}`,
   }
@@ -72,6 +77,7 @@ export function ensureResponsesWebSocketLifecycle(
       reasoningEffort: options?.reasoningEffort,
       requestedModel: options?.requestedModel ?? turn.requestedModel,
       transport: "Responses WebSocket",
+      telemetryState: turn.telemetryState,
       turnId: turn.turnId,
     })
   } else if (options) {
@@ -139,7 +145,9 @@ export async function runWithWebSocketRequestContext(
   await requestIdStorage.run(turn.turnId, async () => {
     await clientSessionStorage.run(sessionId, async () => {
       await quotaHeadersStorage.run({}, async () => {
-        await routedAccountStorage.run(turn.routingState, callback)
+        await routedAccountStorage.run(turn.routingState, async () => {
+          await routingTelemetryStorage.run(turn.telemetryState, callback)
+        })
       })
     })
   })

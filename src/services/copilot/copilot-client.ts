@@ -11,9 +11,16 @@ import {
 } from "~/lib/llm-debug-log"
 import {
   clearQuotaHeaders,
+  getRoutingTelemetryRequestState,
   getRequestId,
   setQuotaHeader,
+  updateRoutingTelemetryRequestState,
 } from "~/lib/request-session"
+import {
+  recordUpstreamCall,
+  type UpstreamOutcome,
+  type UpstreamSendReason,
+} from "~/lib/routing-telemetry"
 import { state } from "~/lib/state"
 import { getCopilotToken } from "~/services/github/get-copilot-token"
 
@@ -42,6 +49,14 @@ export const MODELS_API_VERSION = "2026-06-01"
 export const INTEGRATION_ID = "vscode-chat"
 export const INITIAL_RETRY_BACKOFF_EXTRA_SECONDS = 1
 export const RETRYABLE_STATUSES = new Set([408, 429, 500, 502, 503, 504])
+
+export interface CopilotTelemetryOptions {
+  accountId?: number
+  destination: string
+  model: string
+  provider: "GitHub Copilot"
+  reason: UpstreamSendReason
+}
 
 type HttpRetrySleep = (
   ms: number,
@@ -342,6 +357,86 @@ function isRetryableStatus(response: Response): boolean {
   return RETRYABLE_STATUSES.has(response.status)
 }
 
+function outcomeForResponse(response: Response): UpstreamOutcome {
+  if (response.status >= 500) return "server_error"
+  if (response.status >= 400) return "client_error"
+  return "success"
+}
+
+function outcomeForError(error: unknown): UpstreamOutcome {
+  return isAbortLikeError(error) ? "aborted" : "transport_error"
+}
+
+function recordCopilotAttempt(options: {
+  outcome: UpstreamOutcome
+  reason: UpstreamSendReason
+  telemetry: CopilotTelemetryOptions | undefined
+}): void {
+  const { outcome, reason, telemetry } = options
+  if (!telemetry) return
+  updateRoutingTelemetryRequestState({
+    destination: telemetry.destination,
+    model: telemetry.model,
+    provider: telemetry.provider,
+  })
+  const requestState = getRoutingTelemetryRequestState()
+  recordUpstreamCall({
+    ...(telemetry.accountId === undefined ?
+      {}
+    : { accountId: telemetry.accountId }),
+    model: telemetry.model,
+    outcome,
+    provider: telemetry.provider,
+    reason,
+    route:
+      requestState ?
+        `${requestState.sourceProtocol} -> ${telemetry.destination}`
+      : telemetry.destination,
+  })
+}
+
+interface CopilotAttemptTelemetryState {
+  reason: UpstreamSendReason
+  telemetry?: CopilotTelemetryOptions
+}
+
+function createCopilotAttemptTelemetryState(
+  options:
+    | {
+        telemetry?: CopilotTelemetryOptions
+      }
+    | undefined,
+): CopilotAttemptTelemetryState {
+  return {
+    reason: options?.telemetry?.reason ?? "initial",
+    ...(options?.telemetry ? { telemetry: options.telemetry } : {}),
+  }
+}
+
+async function fetchCopilotAttempt(options: {
+  init: RequestInit
+  telemetryState: CopilotAttemptTelemetryState
+  url: string
+}): Promise<Response> {
+  const { init, telemetryState, url } = options
+  try {
+    const response = await fetch(url, init)
+    recordCopilotAttempt({
+      outcome: outcomeForResponse(response),
+      reason: telemetryState.reason,
+      telemetry: telemetryState.telemetry,
+    })
+    return response
+  } catch (error) {
+    recordCopilotAttempt({
+      outcome: outcomeForError(error),
+      reason: telemetryState.reason,
+      telemetry: telemetryState.telemetry,
+    })
+    throw error
+  }
+}
+
 function setCurrentCopilotToken(token: string): void {
   state.copilotToken = token
 }
@@ -503,6 +598,7 @@ export async function copilotFetch(
     baseUrl?: string
     maxHttpRetryDelaySeconds?: number
     retryBudget?: RetryBudget
+    telemetry?: CopilotTelemetryOptions
   },
 ): Promise<Response> {
   const url = `${fetchOptions?.baseUrl ?? copilotBaseUrl()}${path}`
@@ -516,6 +612,7 @@ export async function copilotFetch(
   const maxAttempts = MAX_RETRIES + 1
   let retryBackoffExtraSeconds = INITIAL_RETRY_BACKOFF_EXTRA_SECONDS
   let requestInit = init
+  const telemetryState = createCopilotAttemptTelemetryState(fetchOptions)
 
   let lastError: Error | undefined
   let lastResponse: Response | undefined
@@ -535,7 +632,11 @@ export async function copilotFetch(
         ...requestInit,
         headers,
       })
-      const response = await fetch(url, transportInit)
+      const response = await fetchCopilotAttempt({
+        init: transportInit,
+        telemetryState,
+        url,
+      })
 
       captureLlmDebugAttemptResponse(debugLogId, response)
       recordQuotaSnapshot(response)
@@ -551,6 +652,7 @@ export async function copilotFetch(
 
       if (action.kind === "refresh-token") {
         requestInit = await refreshTokenForRetry(headers, requestInit, path)
+        telemetryState.reason = "token_refresh"
         continue
       }
 
@@ -558,6 +660,7 @@ export async function copilotFetch(
         lastResponse = response
         retryBackoffExtraSeconds *= BACKOFF_FACTOR
         await httpRetrySleep(action.delaySeconds * 1000, requestInit?.signal)
+        telemetryState.reason = "http_retry"
         continue
       }
 
@@ -575,6 +678,7 @@ export async function copilotFetch(
         error,
         signal: requestInit?.signal,
       })
+      telemetryState.reason = "transport_retry"
     }
   }
 

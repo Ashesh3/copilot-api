@@ -16,6 +16,43 @@ export const routedAccountStorage = new AsyncLocalStorage<{
   lastUsedAccountId?: number
 }>()
 
+export interface RoutingTelemetryRequestState {
+  sourceProtocol: string
+  dispatched?: boolean
+  lastDestination?: string
+  lastModel?: string
+  lastProvider?: string
+  requestRecorded?: boolean
+}
+
+export const routingTelemetryStorage =
+  new AsyncLocalStorage<RoutingTelemetryRequestState>()
+
+export function createRoutingTelemetryRequestState(
+  sourceProtocol: string,
+): RoutingTelemetryRequestState {
+  return { sourceProtocol }
+}
+
+export function getRoutingTelemetryRequestState():
+  | RoutingTelemetryRequestState
+  | undefined {
+  return routingTelemetryStorage.getStore()
+}
+
+export function updateRoutingTelemetryRequestState(options: {
+  destination: string
+  model: string
+  provider: string
+}): void {
+  const telemetryState = getRoutingTelemetryRequestState()
+  if (!telemetryState) return
+  telemetryState.dispatched = true
+  telemetryState.lastDestination = options.destination
+  telemetryState.lastModel = options.model
+  telemetryState.lastProvider = options.provider
+}
+
 export function getClientSessionId(): string | undefined {
   return clientSessionStorage.getStore()
 }

@@ -173,6 +173,95 @@ export interface UsageSection {
 
 export type UsageData = Record<string, UsageSection>
 
+export type RoutingWindow = "15m" | "1h" | "6h" | "24h"
+export type RoutingBalanceStatus =
+  | "not_applicable"
+  | "insufficient_data"
+  | "within_range"
+  | "skewed"
+
+export interface RoutingTotals {
+  requests: number
+  upstreamCalls: number
+  retries: number
+  failovers: number
+}
+
+export interface RoutingTimeSeriesPoint extends RoutingTotals {
+  timestamp: number
+  extraCalls: number
+}
+
+export interface RoutingOutcomeCounts {
+  success: number
+  clientError: number
+  serverError: number
+  transportError: number
+  aborted: number
+}
+
+export interface RoutingModelAccountUsage {
+  accountId: number
+  share: number
+  upstreamCalls: number
+}
+
+export interface RoutingModelUsage extends RoutingTotals {
+  id: string
+  model: string
+  provider: string
+  share: number
+  amplification: number
+  successRate: number
+  outcomes: RoutingOutcomeCounts
+  accounts: Array<RoutingModelAccountUsage>
+}
+
+export interface RoutingAccountUsage {
+  accountId: number | null
+  label: string
+  accountType?: string
+  githubUsername?: string
+  healthy: boolean
+  selected: number
+  selectionShare: number
+  expectedSelections: number
+  expectedShare: number
+  selectionDelta: number
+  upstreamCalls: number
+  callShare: number
+  balanceStatus: RoutingBalanceStatus
+}
+
+export interface RoutingRouteUsage {
+  route: string
+  requests: number
+  upstreamCalls: number
+  share: number
+}
+
+export interface RoutingSelectionModes {
+  sticky: number
+  default: number
+  single: number
+}
+
+export interface RoutingTelemetrySnapshot {
+  window: RoutingWindow
+  windowMinutes: number
+  retentionMinutes: number
+  generatedAt: number
+  telemetryStartedAt: number
+  multiToken: boolean
+  totals: RoutingTotals
+  lifetime: RoutingTotals
+  timeSeries: Array<RoutingTimeSeriesPoint>
+  models: Array<RoutingModelUsage>
+  accounts: Array<RoutingAccountUsage>
+  routes: Array<RoutingRouteUsage>
+  selectionModes: RoutingSelectionModes
+}
+
 export interface IpAllowlistEntry {
   ip: string
   enabled: boolean

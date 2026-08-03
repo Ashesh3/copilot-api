@@ -17,6 +17,7 @@ import type { ModelsResponse } from "../src/services/copilot/get-models"
 
 import { setConfigForTest } from "../src/lib/config"
 import { isIpBlocked, resetIpSecurityForTest } from "../src/lib/ip-blocker"
+import { createRoutingTelemetryRequestState } from "../src/lib/request-session"
 import { state } from "../src/lib/state"
 import {
   extractResponsesPayload,
@@ -365,6 +366,9 @@ describe("responses websocket message handling", () => {
         finalized: false,
         inputLength: 0,
         routingState: {},
+        telemetryState: createRoutingTelemetryRequestState(
+          "Responses WebSocket",
+        ),
         sequence: index,
         turnId: `test:${index}`,
       })
