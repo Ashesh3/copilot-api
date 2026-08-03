@@ -329,6 +329,9 @@ function sanitizeRequestBodyValue(
   if (context === "root" && key === "client_metadata") {
     return sanitizeClientMetadata(value)
   }
+  if (context === "root" && key === "metadata") {
+    return sanitizeMetadata(value)
+  }
   if (context === "metadata" && key === "user_id") {
     return sanitizeClaudeUserMetadata(value)
   }
@@ -339,10 +342,7 @@ function sanitizeRequestBodyValue(
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return value
   }
-  return sanitizeRequestBody(
-    value as Record<string, unknown>,
-    context === "root" && key === "metadata" ? "metadata" : "other",
-  )
+  return sanitizeRequestBody(value as Record<string, unknown>, "other")
 }
 
 function isSensitiveBodyKey(key: string): boolean {
@@ -408,6 +408,30 @@ function sanitizeClaudeUserMetadata(value: unknown): unknown {
   } catch {
     return "[REDACTED]"
   }
+}
+
+function sanitizeMetadata(value: unknown): unknown {
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value) as unknown
+      if (
+        typeof parsed !== "object"
+        || parsed === null
+        || Array.isArray(parsed)
+      ) {
+        return "[REDACTED]"
+      }
+      return JSON.stringify(
+        sanitizeRequestBody(parsed as Record<string, unknown>, "metadata"),
+      )
+    } catch {
+      return "[REDACTED]"
+    }
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return value
+  }
+  return sanitizeRequestBody(value as Record<string, unknown>, "metadata")
 }
 
 /**

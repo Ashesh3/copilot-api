@@ -256,9 +256,37 @@ test("redacts routing affinity metadata from debug request bodies", async () => 
         client_metadata: `{"session_id":"${rawIds[6]}`,
       }),
     })
+    await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-4o",
+        messages: [{ role: "user", content: "Hello" }],
+        max_tokens: 32,
+        metadata: JSON.stringify({
+          harmless_metadata: "keep-outer-metadata",
+          user_id: JSON.stringify({
+            session_id: "outer-metadata-session-private",
+            account_uuid: "keep-outer-account",
+          }),
+        }),
+      }),
+    })
+    await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-4o",
+        messages: [{ role: "user", content: "Hello" }],
+        max_tokens: 32,
+        metadata: `{"user_id":"outer-malformed-private`,
+      }),
+    })
 
     const output = consoleLog.mock.calls.flat().join("\n")
     for (const rawId of rawIds) expect(output).not.toContain(rawId)
+    expect(output).not.toContain("outer-metadata-session-private")
+    expect(output).not.toContain("outer-malformed-private")
     for (const harmless of [
       "keep-root",
       "keep-device",
@@ -266,6 +294,8 @@ test("redacts routing affinity metadata from debug request bodies", async () => 
       "keep-string-device",
       "keep-unrelated-session",
       "keep-unrelated-thread",
+      "keep-outer-metadata",
+      "keep-outer-account",
     ]) {
       expect(output).toContain(harmless)
     }

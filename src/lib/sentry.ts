@@ -31,10 +31,17 @@ const SENSITIVE_HEADER_PATTERNS = [
   "cookie",
   "x-api-key",
 ]
+export const SENTRY_CONVERSATION_ID_HEADERS = [
+  "x-sentry-conversation-id",
+  "x-conversation-id",
+  "x-thread-id",
+  "x-session-id",
+  "x-claude-code-session-id",
+] as const
 const ROUTING_AFFINITY_HEADER_NAMES = new Set([
+  ...SENTRY_CONVERSATION_ID_HEADERS,
   "session-id",
   "thread-id",
-  "x-claude-code-session-id",
   "x-client-session-id",
 ])
 const FILTERED_VALUE = "[Filtered]"
@@ -424,14 +431,6 @@ const CONVERSATION_ID_METADATA_KEYS = [
   "sessionId",
 ]
 
-const CONVERSATION_ID_HEADERS = [
-  "x-sentry-conversation-id",
-  "x-conversation-id",
-  "x-thread-id",
-  "x-session-id",
-  "x-claude-code-session-id",
-]
-
 function normalizeConversationId(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined
 
@@ -491,7 +490,7 @@ export function getSentryConversationIdFromPayload(
 export function getSentryConversationIdFromHeaders(
   headers: Headers,
 ): string | undefined {
-  for (const header of CONVERSATION_ID_HEADERS) {
+  for (const header of SENTRY_CONVERSATION_ID_HEADERS) {
     const value = normalizeConversationId(headers.get(header))
     if (value) return value
   }

@@ -492,16 +492,24 @@ test("scrubs affinity headers from every Sentry send callback", () => {
     "https://public@example.ingest.sentry.io/1",
   )
   const rawIds = [
+    "sentry-conversation-private",
+    "conversation-private",
+    "x-thread-private",
+    "x-session-private",
     "claude-sentry-private",
     "copilot-sentry-private",
     "session-sentry-private",
     "thread-sentry-private",
   ]
   const headers = {
-    "X-Claude-Code-Session-Id": rawIds[0],
-    "x-CLIENT-session-ID": rawIds[1],
-    "Session-Id": rawIds[2],
-    "THREAD-ID": rawIds[3],
+    "X-SENTRY-CONVERSATION-ID": rawIds[0],
+    "x-Conversation-Id": rawIds[1],
+    "X-Thread-Id": rawIds[2],
+    "x-SESSION-id": rawIds[3],
+    "X-Claude-Code-Session-Id": rawIds[4],
+    "x-CLIENT-session-ID": rawIds[5],
+    "Session-Id": rawIds[6],
+    "THREAD-ID": rawIds[7],
     "x-harmless": "visible",
   }
   const event = { request: { headers: { ...headers } } }
