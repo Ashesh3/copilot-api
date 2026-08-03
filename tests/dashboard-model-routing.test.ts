@@ -128,6 +128,14 @@ test("model routing account formatters fall back without a username", () => {
 })
 
 test("generated dashboard includes GitHub username account labels", () => {
-  expect(DASHBOARD_HTML).toContain("githubUsername")
-  expect(DASHBOARD_HTML).toContain(" · ")
+  const formatterStart = DASHBOARD_HTML.indexOf("modelsCount")
+  expect(formatterStart).toBeGreaterThanOrEqual(0)
+
+  const formatterRegion = DASHBOARD_HTML.slice(
+    Math.max(0, formatterStart - 40),
+    formatterStart + 160,
+  )
+  expect(formatterRegion).toMatch(
+    /const ([\w$]+)=`\$\{([\w$]+)\.modelsCount\} models`;return \2\.githubUsername\?`@\$\{\2\.githubUsername\} · \$\{\1\}`:\1\}/,
+  )
 })
