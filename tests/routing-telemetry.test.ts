@@ -155,6 +155,42 @@ test("includes records exactly on the selected window cutoff", () => {
   expect(snapshot.timeSeries[0]?.requests).toBe(1)
 })
 
+test("chart extra calls use classified resends instead of call-request timing", () => {
+  recordUpstreamCall({
+    model: "slow-model",
+    outcome: "success",
+    provider: "GitHub Copilot",
+    reason: "initial",
+    route: "Responses -> Responses",
+    timestamp: NOW - MINUTE_MS,
+  })
+  recordRoutingRequest({
+    model: "slow-model",
+    provider: "GitHub Copilot",
+    route: "Responses -> Responses",
+    status: 200,
+    timestamp: NOW,
+  })
+
+  const snapshot = getRoutingTelemetrySnapshot({
+    accounts: [],
+    multiToken: false,
+    now: NOW,
+    window: "15m",
+  })
+
+  expect(snapshot.timeSeries.at(-2)).toMatchObject({
+    extraCalls: 0,
+    requests: 0,
+    upstreamCalls: 1,
+  })
+  expect(snapshot.timeSeries.at(-1)).toMatchObject({
+    extraCalls: 0,
+    requests: 1,
+    upstreamCalls: 0,
+  })
+})
+
 test("calculates eligibility-weighted account balance separately from calls", () => {
   for (let index = 0; index < 30; index++) {
     recordRoutingSelection({

@@ -203,6 +203,28 @@ test("does not record non-model dashboard traffic", async () => {
   expect(snapshot.totals.requests).toBe(0)
 })
 
+test("does not record model requests rejected before upstream dispatch", () => {
+  const telemetryState = createRoutingTelemetryRequestState("Chat Completions")
+  const lifecycle = startLogicalRequestLog({
+    inputLength: 10,
+    method: "POST",
+    model: "locally-rejected-model",
+    path: "/v1/chat/completions",
+    telemetryState,
+    transport: "HTTP",
+    turnId: "http-rejected",
+  })
+  lifecycle.finalize({ status: 403, terminalStatus: "REJECTED" })
+
+  const snapshot = getRoutingTelemetrySnapshot({
+    accounts: [],
+    multiToken: false,
+    window: "1h",
+  })
+  expect(snapshot.totals.requests).toBe(0)
+  expect(snapshot.models).toEqual([])
+})
+
 test("records a logical WebSocket turn exactly once", () => {
   const telemetryState = createRoutingTelemetryRequestState(
     "Responses WebSocket",
@@ -215,6 +237,12 @@ test("records a logical WebSocket turn exactly once", () => {
     telemetryState,
     transport: "Responses WebSocket",
     turnId: "turn-1",
+  })
+  Object.assign(telemetryState, {
+    dispatched: true,
+    lastDestination: "Responses",
+    lastModel: "gpt-test",
+    lastProvider: "GitHub Copilot",
   })
 
   expect(lifecycle.finalize({ status: 200, terminalStatus: "COMPLETE" })).toBe(
@@ -234,4 +262,28 @@ test("records a logical WebSocket turn exactly once", () => {
     model: "gpt-test",
     requests: 1,
   })
+})
+
+test("does not record a logical turn that never reached a provider", () => {
+  const telemetryState = createRoutingTelemetryRequestState(
+    "Responses WebSocket",
+  )
+  const lifecycle = startLogicalRequestLog({
+    inputLength: 10,
+    method: "POST",
+    model: "locally-rejected-model",
+    path: "/responses",
+    telemetryState,
+    transport: "Responses WebSocket",
+    turnId: "turn-rejected",
+  })
+
+  lifecycle.finalize({ status: 400, terminalStatus: "REJECTED" })
+
+  const snapshot = getRoutingTelemetrySnapshot({
+    accounts: [],
+    multiToken: false,
+    window: "1h",
+  })
+  expect(snapshot.totals.requests).toBe(0)
 })

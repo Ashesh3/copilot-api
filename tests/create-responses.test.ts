@@ -2,6 +2,10 @@ import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
 
 import { HTTPError } from "../src/lib/error"
 import { setModelSettingsForTest } from "../src/lib/model-settings"
+import {
+  getRoutingTelemetrySnapshot,
+  resetRoutingTelemetryForTest,
+} from "../src/lib/routing-telemetry"
 import { state } from "../src/lib/state"
 import { normalizeResponsesReasoning } from "../src/routes/responses/handler"
 import {
@@ -75,6 +79,7 @@ beforeEach(() => {
   state.copilotToken = "copilot-token"
   state.githubToken = "github-token"
   state.isMultiToken = false
+  resetRoutingTelemetryForTest()
   setModelSettingsForTest([])
 })
 
@@ -509,6 +514,20 @@ test("retries 413 Responses requests without input images", async () => {
       content: [{ type: "input_text", text: "Describe this image" }],
     },
   ])
+  const usage = getRoutingTelemetrySnapshot({
+    accounts: [],
+    multiToken: false,
+    window: "1h",
+  })
+  expect(usage.totals).toMatchObject({
+    retries: 1,
+    upstreamCalls: 2,
+  })
+  expect(
+    usage.selectionModes.sticky
+      + usage.selectionModes.default
+      + usage.selectionModes.single,
+  ).toBe(1)
 })
 
 test("does not retry 413 Responses requests when removing images leaves an empty input", async () => {

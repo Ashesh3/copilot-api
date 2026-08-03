@@ -40,7 +40,7 @@ import { Page } from "../components/Page"
 import { ResponsivePair } from "../components/ResponsivePair"
 import { ChartBarIcon, SearchIcon } from "../icons"
 import { get } from "../lib/api"
-import { useAsyncData, usePolling } from "../lib/usePolling"
+import { useAsyncData, useDelayedPolling } from "../lib/usePolling"
 
 const ROUTING_POLL_INTERVAL_MS = 10_000
 
@@ -246,7 +246,11 @@ function RoutingChart({ points }: { points: Array<RoutingTimeSeriesPoint> }) {
     <div
       className="usage-chart"
       aria-label="Requests and extra upstream calls over time"
+      role="img"
     >
+      <span className="usage-visually-hidden">
+        {points.map((point) => chartLabel(point)).join("; ")}
+      </span>
       {points.map((point) => (
         <div
           className="usage-chart-group"
@@ -642,7 +646,7 @@ export default function UsageScreen() {
   const [filter, setFilter] = useState("")
   const usage = useAsyncData(loadUsage, [])
   const routing = useAsyncData(() => loadRoutingUsage(window), [window])
-  usePolling(routing.reloadSilently, ROUTING_POLL_INTERVAL_MS, [window])
+  useDelayedPolling(routing.reloadSilently, ROUTING_POLL_INTERVAL_MS, [window])
 
   const actions = useMemo(
     () => (

@@ -3,6 +3,10 @@ import { test, expect, mock, beforeAll, afterAll, beforeEach } from "bun:test"
 import type { ChatCompletionsPayload } from "../src/services/copilot/create-chat-completions"
 
 import { setModelSettingsForTest } from "../src/lib/model-settings"
+import {
+  getRoutingTelemetrySnapshot,
+  resetRoutingTelemetryForTest,
+} from "../src/lib/routing-telemetry"
 import { state } from "../src/lib/state"
 import { createChatCompletions } from "../src/services/copilot/create-chat-completions"
 
@@ -54,6 +58,7 @@ beforeEach(() => {
   fetchMock.mockClear()
   queuedResponses.length = 0
   setModelSettingsForTest([])
+  resetRoutingTelemetryForTest()
 })
 
 test("sets X-Initiator to agent if tool/assistant present", async () => {
@@ -157,6 +162,20 @@ test("retries streamed chat completions when the first SSE event is an overload 
 
   expect(fetchMock.mock.calls.length - startCallCount).toBe(2)
   expect(receivedEvents).toEqual([successChunk, "[DONE]"])
+  const usage = getRoutingTelemetrySnapshot({
+    accounts: [],
+    multiToken: false,
+    window: "1h",
+  })
+  expect(usage.totals).toMatchObject({
+    retries: 1,
+    upstreamCalls: 2,
+  })
+  expect(
+    usage.selectionModes.sticky
+      + usage.selectionModes.default
+      + usage.selectionModes.single,
+  ).toBe(1)
 })
 
 test("defaults stream_options.include_usage for direct streaming chat completions", async () => {

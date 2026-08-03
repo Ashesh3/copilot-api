@@ -731,10 +731,7 @@ function snapshotTimeSeries(
     points.push({
       timestamp,
       ...aggregate.totals,
-      extraCalls: Math.max(
-        0,
-        aggregate.totals.upstreamCalls - aggregate.totals.requests,
-      ),
+      extraCalls: aggregate.totals.retries + aggregate.totals.failovers,
     })
   }
   return points

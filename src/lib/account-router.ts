@@ -46,6 +46,8 @@ interface RoutedFetchContext {
   modelId: string
   maxHttpRetryDelaySeconds: number | undefined
   path: string
+  reason: UpstreamSendReason
+  recordSelection: boolean
   retryBudget: RetryBudget
 }
 
@@ -205,13 +207,15 @@ async function fetchWithFallbackAccount(
       `Using Account #${account.id} as fallback for model "${context.modelId}"`,
     )
     setLastUsedRoutedAccountId(account.id)
-    recordSelection({
-      accountId: account.id,
-      eligibleAccountIds: tokenPool.getHealthyAccountIds(),
-      mode: getClientSessionId() ? "sticky" : "default",
-      model: context.modelId,
-    })
-    return await fetchWithRoutedAccount(context, account)
+    if (context.recordSelection) {
+      recordSelection({
+        accountId: account.id,
+        eligibleAccountIds: tokenPool.getHealthyAccountIds(),
+        mode: getClientSessionId() ? "sticky" : "default",
+        model: context.modelId,
+      })
+    }
+    return await fetchWithRoutedAccount(context, account, context.reason)
   }
 
   const fallbackHeaders =
@@ -231,7 +235,7 @@ async function fetchWithFallbackAccount(
       telemetry: copilotTelemetry({
         model: context.modelId,
         path,
-        reason: "initial",
+        reason: context.reason,
       }),
     },
   )
@@ -289,6 +293,7 @@ async function failoverToAccount(
 async function fetchWithRoutedAccount(
   context: RoutedFetchContext,
   account: Account,
+  reason: UpstreamSendReason = "initial",
 ): Promise<RoutedFetchResult> {
   const { headerOptions, init, maxHttpRetryDelaySeconds, path, retryBudget } =
     context
@@ -300,7 +305,7 @@ async function fetchWithRoutedAccount(
     maxHttpRetryDelaySeconds,
     modelId: context.modelId,
     path,
-    reason: "initial",
+    reason,
     retryBudget,
   })
 
@@ -346,6 +351,8 @@ export interface RoutedFetchOptions {
   modelId: string
   headerOptions?: CopilotHeaderOptions
   maxHttpRetryDelaySeconds?: number
+  reason?: UpstreamSendReason
+  recordSelection?: boolean
 }
 
 /**
@@ -369,7 +376,13 @@ export async function routedFetch(
   init: RequestInit | undefined,
   options: RoutedFetchOptions,
 ): Promise<{ response: Response; account: Account | undefined }> {
-  const { modelId, headerOptions, maxHttpRetryDelaySeconds } = options
+  const {
+    modelId,
+    headerOptions,
+    maxHttpRetryDelaySeconds,
+    reason = "initial",
+    recordSelection: shouldRecordSelection = true,
+  } = options
   // Two extra sends for the whole routed call (a three-send ceiling) so sends
   // cannot multiply across the initial account, a 401 refresh-and-retry, and a
   // 401/403/429 failover.
@@ -380,17 +393,21 @@ export async function routedFetch(
     modelId,
     maxHttpRetryDelaySeconds,
     path,
+    reason,
+    recordSelection: shouldRecordSelection,
     retryBudget,
   }
   setLastUsedRoutedAccountId(undefined)
 
   if (!state.isMultiToken) {
     const headers = copilotHeaders(headerOptions)
-    recordRoutingSelection({
-      eligibleAccountIds: [],
-      mode: "single",
-      model: modelId,
-    })
+    if (shouldRecordSelection) {
+      recordRoutingSelection({
+        eligibleAccountIds: [],
+        mode: "single",
+        model: modelId,
+      })
+    }
     const response = await copilotFetch(
       path,
       { ...init, headers },
@@ -400,7 +417,7 @@ export async function routedFetch(
         telemetry: copilotTelemetry({
           model: modelId,
           path,
-          reason: "initial",
+          reason,
         }),
       },
     )
@@ -429,12 +446,14 @@ export async function routedFetch(
     `[Account #${account.id}] ${path} (model: ${modelId}, session: ${clientSessionId ? "sticky" : "default"})`,
   )
   setLastUsedRoutedAccountId(account.id)
-  recordSelection({
-    accountId: account.id,
-    eligibleAccountIds: tokenPool.getEligibleAccountIdsForModel(modelId),
-    mode: clientSessionId ? "sticky" : "default",
-    model: modelId,
-  })
+  if (shouldRecordSelection) {
+    recordSelection({
+      accountId: account.id,
+      eligibleAccountIds: tokenPool.getEligibleAccountIdsForModel(modelId),
+      mode: clientSessionId ? "sticky" : "default",
+      model: modelId,
+    })
+  }
 
-  return await fetchWithRoutedAccount(context, account)
+  return await fetchWithRoutedAccount(context, account, reason)
 }

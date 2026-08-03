@@ -268,7 +268,13 @@ function recordCompletedRoutingRequest(
   telemetryState: RoutingTelemetryRequestState | undefined,
   status: number,
 ): void {
-  if (!ctx?.model || !telemetryState || telemetryState.requestRecorded) return
+  if (
+    !ctx?.model
+    || !telemetryState?.dispatched
+    || telemetryState.requestRecorded
+  ) {
+    return
+  }
   const provider = telemetryState.lastProvider ?? ctx.provider ?? "Unknown"
   const destination =
     telemetryState.lastDestination ?? ctx.provider ?? "Unknown"

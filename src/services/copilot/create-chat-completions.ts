@@ -427,6 +427,8 @@ export const createChatCompletions = async (
       {
         modelId: payload.model,
         headerOptions: nonVisionHeaderOpts,
+        reason: "http_retry",
+        recordSelection: false,
         maxHttpRetryDelaySeconds:
           payload.stream ? PRE_HEADER_MAX_DELAY_SECONDS : undefined,
       },
@@ -451,6 +453,8 @@ export const createChatCompletions = async (
           {
             modelId: payload.model,
             headerOptions: streamHeaderOpts,
+            reason: "http_retry",
+            recordSelection: false,
             maxHttpRetryDelaySeconds: PRE_HEADER_MAX_DELAY_SECONDS,
           },
         )

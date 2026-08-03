@@ -18,6 +18,7 @@ export const routedAccountStorage = new AsyncLocalStorage<{
 
 export interface RoutingTelemetryRequestState {
   sourceProtocol: string
+  dispatched?: boolean
   lastDestination?: string
   lastModel?: string
   lastProvider?: string
@@ -46,6 +47,7 @@ export function updateRoutingTelemetryRequestState(options: {
 }): void {
   const telemetryState = getRoutingTelemetryRequestState()
   if (!telemetryState) return
+  telemetryState.dispatched = true
   telemetryState.lastDestination = options.destination
   telemetryState.lastModel = options.model
   telemetryState.lastProvider = options.provider
