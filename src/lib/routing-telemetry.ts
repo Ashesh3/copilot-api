@@ -45,7 +45,7 @@ export interface UpstreamCallEvent {
 }
 
 export interface RoutingSelectionEvent {
-  accountId: number
+  accountId?: number
   eligibleAccountIds: ReadonlyArray<number>
   mode: RoutingSelectionMode
   model: string
@@ -470,13 +470,14 @@ export function recordUpstreamCall(event: UpstreamCallEvent): void {
 export function recordRoutingSelection(event: RoutingSelectionEvent): void {
   try {
     const timestamp = eventTimestamp(event.timestamp)
-    if (
-      timestamp === undefined
-      || !validAccountId(event.accountId)
-      || !VALID_SELECTION_MODES.has(event.mode)
-    ) {
+    if (timestamp === undefined || !VALID_SELECTION_MODES.has(event.mode)) {
       return
     }
+    if (event.mode === "single") {
+      getBucket(timestamp).selectionModes.single++
+      return
+    }
+    if (!validAccountId(event.accountId)) return
     const eligible = [
       ...new Set(
         event.eligibleAccountIds.filter((accountId) =>

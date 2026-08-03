@@ -1,7 +1,10 @@
 import consola from "consola"
 
 import type { Account } from "~/lib/token-pool"
-import type { CopilotHeaderOptions } from "~/services/copilot/copilot-client"
+import type {
+  CopilotHeaderOptions,
+  CopilotTelemetryOptions,
+} from "~/services/copilot/copilot-client"
 import type { RetryBudget } from "~/services/copilot/transport-retry"
 
 import {
@@ -9,6 +12,11 @@ import {
   getLastUsedRoutedAccountId,
   setLastUsedRoutedAccountId,
 } from "~/lib/request-session"
+import {
+  recordRoutingSelection,
+  type RoutingSelectionMode,
+  type UpstreamSendReason,
+} from "~/lib/routing-telemetry"
 import { state } from "~/lib/state"
 import { tokenPool } from "~/lib/token-pool"
 import { copilotFetch, copilotHeaders } from "~/services/copilot/copilot-client"
@@ -27,7 +35,9 @@ interface AccountFetchOptions {
   init: RequestInit | undefined
   path: string
   maxHttpRetryDelaySeconds: number | undefined
+  modelId: string
   retryBudget: RetryBudget
+  reason: UpstreamSendReason
 }
 
 interface RoutedFetchContext {
@@ -42,6 +52,52 @@ interface RoutedFetchContext {
 type RoutedFetchResult = {
   account: Account | undefined
   response: Response
+}
+
+function destinationForPath(path: string): string {
+  switch (path) {
+    case "/responses": {
+      return "Responses"
+    }
+    case "/chat/completions": {
+      return "Chat Completions"
+    }
+    case "/embeddings": {
+      return "Embeddings"
+    }
+    case "/v1/messages": {
+      return "Anthropic Messages"
+    }
+    default: {
+      return path
+    }
+  }
+}
+
+function copilotTelemetry(options: {
+  accountId?: number
+  model: string
+  path: string
+  reason: UpstreamSendReason
+}): CopilotTelemetryOptions {
+  return {
+    ...(options.accountId === undefined ?
+      {}
+    : { accountId: options.accountId }),
+    destination: destinationForPath(options.path),
+    model: options.model,
+    provider: "GitHub Copilot",
+    reason: options.reason,
+  }
+}
+
+function recordSelection(options: {
+  accountId: number
+  eligibleAccountIds: ReadonlyArray<number>
+  mode: RoutingSelectionMode
+  model: string
+}): void {
+  recordRoutingSelection(options)
 }
 
 function mergeHeaders(
@@ -85,6 +141,7 @@ async function fetchWithAccount(
     init,
     maxHttpRetryDelaySeconds,
     path,
+    reason,
     retryBudget,
   } = options
   const headers = copilotHeaders({
@@ -96,7 +153,17 @@ async function fetchWithAccount(
   return await copilotFetch(
     path,
     { ...init, headers },
-    { baseUrl, maxHttpRetryDelaySeconds, retryBudget },
+    {
+      baseUrl,
+      maxHttpRetryDelaySeconds,
+      retryBudget,
+      telemetry: copilotTelemetry({
+        accountId: account.id,
+        model: options.modelId,
+        path,
+        reason,
+      }),
+    },
   )
 }
 
@@ -124,7 +191,7 @@ async function refreshAndRetryAccount(
     return undefined
   }
 
-  return await fetchWithAccount(options)
+  return await fetchWithAccount({ ...options, reason: "token_refresh" })
 }
 
 async function fetchWithFallbackAccount(
@@ -138,6 +205,12 @@ async function fetchWithFallbackAccount(
       `Using Account #${account.id} as fallback for model "${context.modelId}"`,
     )
     setLastUsedRoutedAccountId(account.id)
+    recordSelection({
+      accountId: account.id,
+      eligibleAccountIds: tokenPool.getHealthyAccountIds(),
+      mode: getClientSessionId() ? "sticky" : "default",
+      model: context.modelId,
+    })
     return await fetchWithRoutedAccount(context, account)
   }
 
@@ -152,7 +225,15 @@ async function fetchWithFallbackAccount(
       ...init,
       ...(fallbackHeaders ? { headers: fallbackHeaders } : {}),
     },
-    { maxHttpRetryDelaySeconds, retryBudget },
+    {
+      maxHttpRetryDelaySeconds,
+      retryBudget,
+      telemetry: copilotTelemetry({
+        model: context.modelId,
+        path,
+        reason: "initial",
+      }),
+    },
   )
   return { response, account: undefined }
 }
@@ -197,7 +278,9 @@ async function failoverToAccount(
     headerOptions,
     init,
     maxHttpRetryDelaySeconds,
+    modelId,
     path,
+    reason: "failover",
     retryBudget,
   })
   return { response, account: next }
@@ -215,7 +298,9 @@ async function fetchWithRoutedAccount(
     headerOptions,
     init,
     maxHttpRetryDelaySeconds,
+    modelId: context.modelId,
     path,
+    reason: "initial",
     retryBudget,
   })
 
@@ -226,7 +311,9 @@ async function fetchWithRoutedAccount(
         headerOptions,
         init,
         maxHttpRetryDelaySeconds,
+        modelId: context.modelId,
         path,
+        reason: "token_refresh",
         retryBudget,
       })) ?? response
   }
@@ -299,10 +386,23 @@ export async function routedFetch(
 
   if (!state.isMultiToken) {
     const headers = copilotHeaders(headerOptions)
+    recordRoutingSelection({
+      eligibleAccountIds: [],
+      mode: "single",
+      model: modelId,
+    })
     const response = await copilotFetch(
       path,
       { ...init, headers },
-      { maxHttpRetryDelaySeconds, retryBudget },
+      {
+        maxHttpRetryDelaySeconds,
+        retryBudget,
+        telemetry: copilotTelemetry({
+          model: modelId,
+          path,
+          reason: "initial",
+        }),
+      },
     )
     return { response, account: undefined }
   }
@@ -329,6 +429,12 @@ export async function routedFetch(
     `[Account #${account.id}] ${path} (model: ${modelId}, session: ${clientSessionId ? "sticky" : "default"})`,
   )
   setLastUsedRoutedAccountId(account.id)
+  recordSelection({
+    accountId: account.id,
+    eligibleAccountIds: tokenPool.getEligibleAccountIdsForModel(modelId),
+    mode: clientSessionId ? "sticky" : "default",
+    model: modelId,
+  })
 
   return await fetchWithRoutedAccount(context, account)
 }

@@ -204,6 +204,32 @@ test("calculates eligibility-weighted account balance separately from calls", ()
   })
 })
 
+test("counts single-token selections without inventing an account", () => {
+  recordRoutingSelection({
+    eligibleAccountIds: [],
+    mode: "single",
+    model: "gpt-5-mini",
+    timestamp: NOW,
+  })
+
+  const snapshot = getRoutingTelemetrySnapshot({
+    accounts: [],
+    multiToken: false,
+    now: NOW,
+    window: "1h",
+  })
+
+  expect(snapshot.selectionModes).toEqual({
+    default: 0,
+    single: 1,
+    sticky: 0,
+  })
+  expect(snapshot.accounts[0]).toMatchObject({
+    accountId: null,
+    label: "Default credential",
+  })
+})
+
 test("shows custom providers without an account distribution", () => {
   recordRoutingRequest({
     model: "qwen3-embedding",
