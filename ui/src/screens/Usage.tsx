@@ -548,6 +548,15 @@ function AccountBalanceRow({ account }: { account: RoutingAccountUsage }) {
 }
 
 function AccountBalance({ data }: { data: RoutingTelemetrySnapshot }) {
+  const affinitySources = [
+    ["claude_session", "Claude session"],
+    ["copilot_session", "Copilot session"],
+    ["codex_session", "Codex session"],
+    ["claude_metadata", "Claude metadata"],
+    ["codex_metadata", "Codex metadata"],
+    ["codex_thread", "Codex thread"],
+    ["unidentified", "Unidentified"],
+  ] as const
   return (
     <Card height="100%">
       <VStack gap={3}>
@@ -565,9 +574,26 @@ function AccountBalance({ data }: { data: RoutingTelemetrySnapshot }) {
             />
           ))}
         </VStack>
+        <HStack gap={1} wrap="wrap" aria-label="Routing affinity sources">
+          {affinitySources
+            .filter(
+              ([source]) =>
+                source === "unidentified" || data.affinitySources[source] > 0,
+            )
+            .map(([source, label]) => (
+              <Badge
+                key={source}
+                variant="neutral"
+                label={`${label}: ${data.affinitySources[source].toLocaleString()}`}
+              />
+            ))}
+        </HStack>
         <Text type="supporting" color="secondary">
           Session affinity deliberately keeps a client session on one account.
           {` ${data.selectionModes.sticky.toLocaleString()} sticky · ${data.selectionModes.default.toLocaleString()} without session · ${data.selectionModes.single.toLocaleString()} single-token selections.`}
+          {
+            " Source counts describe independent account selections, not client requests."
+          }
         </Text>
       </VStack>
     </Card>

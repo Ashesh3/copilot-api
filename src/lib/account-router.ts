@@ -1,5 +1,6 @@
 import consola from "consola"
 
+import type { RoutingAffinitySource } from "~/lib/routing-affinity"
 import type { Account } from "~/lib/token-pool"
 import type {
   CopilotHeaderOptions,
@@ -105,6 +106,7 @@ function copilotTelemetry(options: {
 
 function recordSelection(options: {
   accountId: number
+  affinitySource?: RoutingAffinitySource
   eligibleAccountIds: ReadonlyArray<number>
   mode: RoutingSelectionMode
   model: string
@@ -222,6 +224,7 @@ async function fetchWithFallbackAccount(
         accountId: account.id,
         eligibleAccountIds: tokenPool.getHealthyAccountIds(),
         mode: getEffectiveAffinityKey() ? "sticky" : "default",
+        affinitySource: getRoutingAffinity()?.source,
         model: context.modelId,
       })
     }
@@ -467,6 +470,7 @@ export async function routedFetch(
   if (shouldRecordSelection) {
     recordSelection({
       accountId: account.id,
+      affinitySource: getRoutingAffinity()?.source,
       eligibleAccountIds: tokenPool.getEligibleAccountIdsForModel(modelId),
       mode: affinityKey ? "sticky" : "default",
       model: modelId,

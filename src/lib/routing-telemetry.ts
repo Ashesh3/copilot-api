@@ -1,3 +1,5 @@
+import type { RoutingAffinitySource } from "~/lib/routing-affinity"
+
 const MINUTE_MS = 60_000
 const RETENTION_MINUTES = 24 * 60
 const MAX_MODEL_DIMENSIONS = 200
@@ -46,6 +48,7 @@ export interface UpstreamCallEvent {
 
 export interface RoutingSelectionEvent {
   accountId?: number
+  affinitySource?: RoutingAffinitySource
   eligibleAccountIds: ReadonlyArray<number>
   mode: RoutingSelectionMode
   model: string
@@ -125,6 +128,16 @@ export interface RoutingSelectionModes {
   single: number
 }
 
+export interface RoutingAffinitySources {
+  claude_session: number
+  copilot_session: number
+  codex_session: number
+  claude_metadata: number
+  codex_metadata: number
+  codex_thread: number
+  unidentified: number
+}
+
 export interface RoutingTelemetrySnapshot {
   window: RoutingWindow
   windowMinutes: number
@@ -139,6 +152,7 @@ export interface RoutingTelemetrySnapshot {
   accounts: Array<RoutingAccountUsage>
   routes: Array<RoutingRouteUsage>
   selectionModes: RoutingSelectionModes
+  affinitySources: RoutingAffinitySources
 }
 
 export interface RoutingSnapshotOptions {
@@ -174,6 +188,7 @@ interface MinuteBucket {
   accounts: Map<number, AccountCounters>
   defaultUpstreamCalls: number
   selectionModes: RoutingSelectionModes
+  affinitySources: RoutingAffinitySources
 }
 
 const WINDOW_CONFIG: Record<
@@ -225,6 +240,27 @@ function emptyTotals(): RoutingTotals {
 function emptySelectionModes(): RoutingSelectionModes {
   return { sticky: 0, default: 0, single: 0 }
 }
+
+function emptyAffinitySources(): RoutingAffinitySources {
+  return {
+    claude_session: 0,
+    copilot_session: 0,
+    codex_session: 0,
+    claude_metadata: 0,
+    codex_metadata: 0,
+    codex_thread: 0,
+    unidentified: 0,
+  }
+}
+
+const VALID_AFFINITY_SOURCES = new Set<RoutingAffinitySource>([
+  "claude_session",
+  "copilot_session",
+  "codex_session",
+  "claude_metadata",
+  "codex_metadata",
+  "codex_thread",
+])
 
 function emptyOutcomes(): RoutingOutcomeCounts {
   return {
@@ -303,6 +339,7 @@ function createBucket(timestamp: number): MinuteBucket {
     accounts: new Map(),
     defaultUpstreamCalls: 0,
     selectionModes: emptySelectionModes(),
+    affinitySources: emptyAffinitySources(),
   }
 }
 
@@ -495,6 +532,11 @@ export function recordRoutingSelection(event: RoutingSelectionEvent): void {
       getAccountCounters(bucket, accountId).expectedSelections += credit
     }
     bucket.selectionModes[event.mode]++
+    const affinitySource =
+      event.affinitySource && VALID_AFFINITY_SOURCES.has(event.affinitySource) ?
+        event.affinitySource
+      : "unidentified"
+    bucket.affinitySources[affinitySource]++
   } catch {
     // Telemetry must never affect account selection.
   }
@@ -566,6 +608,17 @@ function aggregateBuckets(source: ReadonlyArray<MinuteBucket>): MinuteBucket {
     aggregate.selectionModes.sticky += bucket.selectionModes.sticky
     aggregate.selectionModes.default += bucket.selectionModes.default
     aggregate.selectionModes.single += bucket.selectionModes.single
+    for (const source of [
+      "claude_session",
+      "copilot_session",
+      "codex_session",
+      "claude_metadata",
+      "codex_metadata",
+      "codex_thread",
+      "unidentified",
+    ] as const) {
+      aggregate.affinitySources[source] += bucket.affinitySources[source]
+    }
   }
   return aggregate
 }
@@ -759,6 +812,7 @@ export function getRoutingTelemetrySnapshot(
     retentionMinutes: RETENTION_MINUTES,
     routes: snapshotRoutes(aggregate),
     selectionModes: { ...aggregate.selectionModes },
+    affinitySources: { ...aggregate.affinitySources },
     telemetryStartedAt,
     timeSeries: snapshotTimeSeries(selected, now, options.window),
     totals: { ...aggregate.totals },

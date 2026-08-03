@@ -186,3 +186,47 @@ test("records one sticky selection when a successful failover creates a lease", 
     usage.accounts.reduce((sum, account) => sum + account.selected, 0),
   ).toBe(1)
 })
+
+test("records typed routing affinity sources and unidentified defaults", async () => {
+  resetRoutingTelemetryForTest()
+  const cases = [
+    [1401, "telemetry-source-copilot", "copilot_session"],
+    [1402, "telemetry-source-codex", "codex_session"],
+    [1403, "telemetry-source-claude", "claude_metadata"],
+  ] as const
+  for (const [accountId, modelId, source] of cases) {
+    registerAccount(accountId, modelId, `token-${accountId}`)
+    tokenPool.rebuildModelIndex()
+    queuedResults.push(new Response("{}", { status: 200 }))
+    await runWithRoutingAffinity(
+      { key: `private-session-${accountId}`, source },
+      async () =>
+        await routedFetch("/chat/completions", { method: "POST" }, { modelId }),
+    )
+  }
+  const defaultModel = "telemetry-source-default"
+  registerAccount(1404, defaultModel, "token-1404")
+  tokenPool.rebuildModelIndex()
+  queuedResults.push(new Response("{}", { status: 200 }))
+  await routedFetch(
+    "/chat/completions",
+    { method: "POST" },
+    {
+      modelId: defaultModel,
+    },
+  )
+
+  const usage = snapshot()
+  expect(usage.affinitySources).toEqual({
+    claude_session: 0,
+    copilot_session: 1,
+    codex_session: 1,
+    claude_metadata: 1,
+    codex_metadata: 0,
+    codex_thread: 0,
+    unidentified: 1,
+  })
+  expect(JSON.stringify(usage)).not.toContain("private-session")
+  for (const [accountId] of cases) tokenPool.removeAccountForTest(accountId)
+  tokenPool.removeAccountForTest(1404)
+})

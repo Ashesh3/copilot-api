@@ -246,6 +246,16 @@ export interface RoutingSelectionModes {
   single: number
 }
 
+export interface RoutingAffinitySources {
+  claude_session: number
+  copilot_session: number
+  codex_session: number
+  claude_metadata: number
+  codex_metadata: number
+  codex_thread: number
+  unidentified: number
+}
+
 export interface RoutingTelemetrySnapshot {
   window: RoutingWindow
   windowMinutes: number
@@ -260,6 +270,7 @@ export interface RoutingTelemetrySnapshot {
   accounts: Array<RoutingAccountUsage>
   routes: Array<RoutingRouteUsage>
   selectionModes: RoutingSelectionModes
+  affinitySources: RoutingAffinitySources
 }
 
 export interface IpAllowlistEntry {
