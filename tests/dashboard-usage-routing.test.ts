@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, beforeEach, expect, spyOn, test } from "bun:test"
+import fs from "node:fs"
+import path from "node:path"
 
 import type { Account } from "../src/lib/token-pool"
 
@@ -151,4 +153,37 @@ test("routing usage returns current in-memory model and call totals", async () =
     requests: 1,
     upstreamCalls: 1,
   })
+})
+
+test("Usage screen keeps existing cards and adds live routing observability", () => {
+  const usageSource = fs.readFileSync(
+    path.join(import.meta.dir, "..", "ui", "src", "screens", "Usage.tsx"),
+    "utf8",
+  )
+  const cssSource = fs.readFileSync(
+    path.join(import.meta.dir, "..", "ui", "src", "global.css"),
+    "utf8",
+  )
+
+  expect(usageSource).toContain("UsageSectionCard")
+  expect(usageSource).toContain('get<UsageData>("/dashboard/api/usage")')
+  expect(usageSource).toContain("/dashboard/api/usage-routing?window=")
+  expect(usageSource).toContain("Routing pulse")
+  expect(usageSource).toContain("Model usage &amp; routing")
+  expect(usageSource).toContain("Account balance")
+  expect(usageSource).toContain("Route breakdown")
+  expect(usageSource).toContain("Upstream calls")
+  expect(usageSource).toContain("Retries")
+  expect(usageSource).toContain("Failovers")
+  expect(usageSource).toContain("N/A")
+  expect(usageSource).toContain("process memory only")
+  expect(usageSource).toContain("reloadSilently")
+  expect(usageSource).toContain("usePolling")
+  expect(usageSource).toContain("10_000")
+  for (const window of ["15m", "1h", "6h", "24h"]) {
+    expect(usageSource).toContain(`value="${window}"`)
+  }
+  expect(cssSource).toContain(".usage-pulse")
+  expect(cssSource).toContain(".usage-chart")
+  expect(cssSource).toContain(".usage-account-distribution")
 })
