@@ -4,7 +4,12 @@ import type { Account } from "../src/lib/token-pool"
 import type { ModelRouting } from "../ui/src/lib/types"
 
 import { tokenPool } from "../src/lib/token-pool"
+import { DASHBOARD_HTML } from "../src/routes/dashboard/page-generated"
 import { server } from "../src/server"
+import {
+  formatModelRoutingAccountDetails,
+  formatModelRoutingAccountSummary,
+} from "../ui/src/lib/model-routing"
 import {
   adminHeaders,
   createTestAdminSession,
@@ -91,4 +96,38 @@ test("model routing returns account usernames without GitHub tokens", async () =
   const serializedBody = JSON.stringify(body)
   expect(serializedBody).not.toContain(GITHUB_TOKEN)
   expect(serializedBody).not.toContain(GITHUB_TOKEN_WITHOUT_USERNAME)
+})
+
+test("model routing account formatters include the GitHub username", () => {
+  const account = {
+    id: 3,
+    accountType: "individual",
+    githubUsername: "octocat",
+    healthy: true,
+    modelsCount: 46,
+  }
+
+  expect(formatModelRoutingAccountDetails(account)).toBe("@octocat · 46 models")
+  expect(formatModelRoutingAccountSummary(account)).toBe(
+    "Account #3, @octocat, individual, Healthy",
+  )
+})
+
+test("model routing account formatters fall back without a username", () => {
+  const account = {
+    id: 3,
+    accountType: "individual",
+    healthy: false,
+    modelsCount: 46,
+  }
+
+  expect(formatModelRoutingAccountDetails(account)).toBe("46 models")
+  expect(formatModelRoutingAccountSummary(account)).toBe(
+    "Account #3, individual, Unhealthy",
+  )
+})
+
+test("generated dashboard includes GitHub username account labels", () => {
+  expect(DASHBOARD_HTML).toContain("githubUsername")
+  expect(DASHBOARD_HTML).toContain(" · ")
 })

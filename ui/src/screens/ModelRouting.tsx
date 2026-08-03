@@ -18,6 +18,10 @@ import { DataTable, EmptyState, MonoText } from "../components/common"
 import { Page } from "../components/Page"
 import { RouteIcon, SearchIcon } from "../icons"
 import { ApiError, get, post } from "../lib/api"
+import {
+  formatModelRoutingAccountDetails,
+  formatModelRoutingAccountSummary,
+} from "../lib/model-routing"
 import { useToast } from "../lib/toast"
 import { useAsyncData } from "../lib/usePolling"
 
@@ -88,8 +92,8 @@ export default function ModelRoutingScreen() {
           ),
         },
         ...data.accounts.map((account): TableColumn<ModelRow> => {
-          const health = account.healthy ? "Healthy" : "Unhealthy"
-          const accountSummary = `Account #${account.id}, ${account.accountType}, ${health}`
+          const accountSummary = formatModelRoutingAccountSummary(account)
+          const accountDetails = formatModelRoutingAccountDetails(account)
 
           return {
             key: `account-${account.id}`,
@@ -103,12 +107,12 @@ export default function ModelRoutingScreen() {
                   />
                   <VStack gap={0} hAlign="start">
                     <Text weight="medium">Account #{account.id}</Text>
-                    <Text type="supporting">{account.modelsCount} models</Text>
+                    <Text type="supporting">{accountDetails}</Text>
                   </VStack>
                 </HStack>
               </div>
             ),
-            width: pixel(140),
+            width: pixel(180),
             align: "center",
             renderCell: (item) => {
               const entry = item.accounts.find(
