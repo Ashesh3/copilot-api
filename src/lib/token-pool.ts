@@ -1,5 +1,5 @@
 import consola from "consola"
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 
 import type { Model, ModelsResponse } from "~/services/copilot/get-models"
 
@@ -206,8 +206,8 @@ export class TokenPool {
   /**
    * Session-affinity selection of an account for a given model.
    *
-   * When a clientSessionId is provided, hashes it to deterministically pick
-   * the same account for every request in that session.  This prevents
+   * When a clientSessionId is provided, rendezvous-hashes it against eligible
+   * account IDs to deterministically pick one account. This prevents
    * mid-conversation account switches that break cryptographic signatures
    * on thinking/memory blocks.
    *
@@ -225,9 +225,11 @@ export class TokenPool {
       return eligible[0]
     }
 
-    const hash = this.hashString(clientSessionId)
-    const index = hash % eligible.length
-    return eligible[index]
+    return eligible.reduce((winner, candidate) => {
+      const winnerScore = this.rendezvousScore(clientSessionId, winner.id)
+      const candidateScore = this.rendezvousScore(clientSessionId, candidate.id)
+      return candidateScore > winnerScore ? candidate : winner
+    })
   }
 
   /**
@@ -397,15 +399,10 @@ export class TokenPool {
 
   // --- Private helpers ---
 
-  /**
-   * djb2 hash — fast, deterministic, and sufficient for load distribution.
-   */
-  private hashString(str: string): number {
-    let hash = 5381
-    for (let i = 0; i < str.length; i++) {
-      hash = ((hash << 5) + hash + (str.codePointAt(i) ?? 0)) >>> 0
-    }
-    return hash
+  private rendezvousScore(affinityKey: string, accountId: number): string {
+    return createHash("sha256")
+      .update(`${affinityKey}\0${accountId}`)
+      .digest("hex")
   }
 
   private getHealthyCount(): number {
