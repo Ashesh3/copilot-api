@@ -1,4 +1,13 @@
-import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  expect,
+  mock,
+  spyOn,
+  test,
+} from "bun:test"
+import consola from "consola"
 
 import type { Model } from "../src/services/copilot/get-models"
 
@@ -8,8 +17,76 @@ import { state } from "../src/lib/state"
 import { tokenPool } from "../src/lib/token-pool"
 
 const originalFetch = globalThis.fetch
-const queuedResults: Array<Error | Response> = []
+const queuedResults: Array<DeferredFetchResponse | Error | Response> = []
 const capturedRequests: Array<{ url: string; init?: RequestInit }> = []
+
+interface DeferredFetchResponse {
+  requestStarted: Promise<void>
+  rejectResponse(error: Error): void
+  resolveResponse(response: Response): void
+  startRequest(): Promise<Response>
+}
+
+function createDeferredFetchResponse(): DeferredFetchResponse {
+  let rejectResponse!: (error: Error) => void
+  let resolveRequestStarted!: () => void
+  let resolveResponse!: (response: Response) => void
+  const requestStarted = new Promise<void>((resolve) => {
+    resolveRequestStarted = resolve
+  })
+  const responsePromise = new Promise<Response>((resolve, reject) => {
+    resolveResponse = resolve
+    rejectResponse = reject
+  })
+
+  return {
+    requestStarted,
+    rejectResponse,
+    resolveResponse,
+    startRequest() {
+      resolveRequestStarted()
+      return responsePromise
+    },
+  }
+}
+
+function createObservedGitHubUserResponse(login: string): {
+  loginRead: Promise<void>
+  response: Response
+} {
+  let resolveLoginRead!: () => void
+  const loginRead = new Promise<void>((resolve) => {
+    resolveLoginRead = resolve
+  })
+  const response = new Response(JSON.stringify({ login }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  })
+  Object.defineProperty(response, "json", {
+    value: () =>
+      Promise.resolve({
+        get login() {
+          resolveLoginRead()
+          return login
+        },
+      }),
+  })
+  return { loginRead, response }
+}
+
+function createWarningObserver(): {
+  implementation: typeof consola.warn
+  observed: Promise<void>
+} {
+  let resolveObserved!: () => void
+  const observed = new Promise<void>((resolve) => {
+    resolveObserved = resolve
+  })
+  const implementation = Object.assign(resolveObserved, {
+    raw: resolveObserved,
+  })
+  return { implementation, observed }
+}
 
 function getRequestUrl(url: string | URL | Request): string {
   if (typeof url === "string") {
@@ -34,7 +111,7 @@ const fetchMock = mock((url: string | URL | Request, init?: RequestInit) => {
     throw next
   }
 
-  return next
+  return next instanceof Response ? next : next.startRequest()
 })
 
 function createModel(id: string): Model {
@@ -187,6 +264,8 @@ test("refreshes a multi-token account and retries after a 401", async () => {
 
 test("disables pooling for multi-token model discovery", async () => {
   const account = tokenPool.addAccount("github-model-token", "individual", 1110)
+  const githubUserResponse = createDeferredFetchResponse()
+  const observedGitHubUser = createObservedGitHubUserResponse("model-user")
   queuedResults.push(
     new Response(
       JSON.stringify({
@@ -200,12 +279,228 @@ test("disables pooling for multi-token model discovery", async () => {
       status: 200,
       headers: { "content-type": "application/json" },
     }),
+    githubUserResponse,
   )
 
-  await tokenPool.initializeAccount(account)
+  const initialization = tokenPool.initializeAccount(account)
+  await githubUserResponse.requestStarted
+  githubUserResponse.resolveResponse(observedGitHubUser.response)
+  await observedGitHubUser.loginRead
+  await initialization
 
   expect(capturedRequests[1]?.url).toContain("/models")
   expect(capturedRequests[1]?.init?.keepalive).toBe(false)
+})
+
+test("resolves the GitHub username during account initialization", async () => {
+  const account = tokenPool.addAccount(
+    "github-username-token",
+    "individual",
+    1111,
+  )
+  const githubUserResponse = createDeferredFetchResponse()
+  const observedGitHubUser = createObservedGitHubUserResponse("octocat")
+  queuedResults.push(
+    new Response(
+      JSON.stringify({
+        token: "copilot-username-token",
+        expires_at: 1_900_000_000,
+        refresh_in: 1800,
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    ),
+    new Response(JSON.stringify({ object: "list", data: [] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }),
+    githubUserResponse,
+  )
+
+  const initialization = tokenPool.initializeAccount(account)
+  await githubUserResponse.requestStarted
+  githubUserResponse.resolveResponse(observedGitHubUser.response)
+  await observedGitHubUser.loginRead
+  await initialization
+
+  queuedResults.push(
+    new Response(
+      JSON.stringify({
+        token: "refreshed-copilot-username-token",
+        expires_at: 1_900_003_600,
+        refresh_in: 1800,
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    ),
+  )
+  await tokenPool.refreshAccountToken(account)
+
+  expect(account.githubUsername).toBe("octocat")
+  expect(capturedRequests[2]?.url).toBe("https://api.github.com/user")
+  expect(capturedRequests[2]?.init?.headers).toMatchObject({
+    authorization: "token github-username-token",
+  })
+  expect(
+    capturedRequests.filter(
+      (request) => request.url === "https://api.github.com/user",
+    ),
+  ).toHaveLength(1)
+})
+
+test("does not block account initialization while GitHub username lookup is pending", async () => {
+  const account = tokenPool.addAccount(
+    "github-username-deferred-token",
+    "individual",
+    1114,
+  )
+  const githubUserResponse = createDeferredFetchResponse()
+  const observedGitHubUser = createObservedGitHubUserResponse("deferred-user")
+  queuedResults.push(
+    new Response(
+      JSON.stringify({
+        token: "copilot-username-deferred-token",
+        expires_at: 1_900_000_000,
+        refresh_in: 1800,
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    ),
+    new Response(JSON.stringify({ object: "list", data: [] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }),
+    githubUserResponse,
+  )
+
+  let initializationSettled = false
+  const initialization = tokenPool.initializeAccount(account).then(() => {
+    initializationSettled = true
+  })
+  try {
+    await githubUserResponse.requestStarted
+    // requestStarted resolves before initializeAccount returns. Its completion
+    // reaction is therefore already queued; one microtask lets it run without
+    // releasing the still-pending GitHub response.
+    await Promise.resolve()
+
+    expect(initializationSettled).toBe(true)
+    expect(account.healthy).toBe(true)
+    expect(account.githubUsername).toBeUndefined()
+    expect(
+      capturedRequests.filter(
+        (request) => request.url === "https://api.github.com/user",
+      ),
+    ).toHaveLength(1)
+  } finally {
+    githubUserResponse.resolveResponse(observedGitHubUser.response)
+    await initialization
+    await observedGitHubUser.loginRead
+  }
+
+  expect(account.githubUsername).toBe("deferred-user")
+  expect(
+    capturedRequests.filter(
+      (request) => request.url === "https://api.github.com/user",
+    ),
+  ).toHaveLength(1)
+})
+
+test("keeps an account healthy when GitHub username lookup fails", async () => {
+  const account = tokenPool.addAccount(
+    "github-username-failure-token",
+    "individual",
+    1112,
+  )
+  const githubUserResponse = createDeferredFetchResponse()
+  queuedResults.push(
+    new Response(
+      JSON.stringify({
+        token: "copilot-username-failure-token",
+        expires_at: 1_900_000_000,
+        refresh_in: 1800,
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    ),
+    new Response(JSON.stringify({ object: "list", data: [] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }),
+    githubUserResponse,
+  )
+
+  const warnSpy = spyOn(consola, "warn")
+  const warningObserver = createWarningObserver()
+  warnSpy.mockImplementation(warningObserver.implementation)
+  let warningOutput: string
+  try {
+    const initialization = tokenPool.initializeAccount(account)
+    await githubUserResponse.requestStarted
+    githubUserResponse.resolveResponse(
+      new Response("Service unavailable", { status: 503 }),
+    )
+    await warningObserver.observed
+    await initialization
+    warningOutput = warnSpy.mock.calls
+      .map((args) => args.map(String).join(" "))
+      .join("\n")
+  } finally {
+    warnSpy.mockRestore()
+  }
+
+  expect(account.healthy).toBe(true)
+  expect(account.githubUsername).toBeUndefined()
+  expect(capturedRequests[2]?.url).toBe("https://api.github.com/user")
+  expect(warningOutput).toContain("account #1112")
+  expect(warningOutput).toContain("HTTP 503")
+  expect(warningOutput).not.toContain("github-username-failure-token")
+})
+
+test("redacts arbitrary GitHub username lookup error messages", async () => {
+  const account = tokenPool.addAccount(
+    "github-username-redaction-token",
+    "individual",
+    1113,
+  )
+  const githubUserResponse = createDeferredFetchResponse()
+  queuedResults.push(
+    new Response(
+      JSON.stringify({
+        token: "copilot-username-redaction-token",
+        expires_at: 1_900_000_000,
+        refresh_in: 1800,
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    ),
+    new Response(JSON.stringify({ object: "list", data: [] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }),
+    githubUserResponse,
+  )
+
+  const warnSpy = spyOn(consola, "warn")
+  const warningObserver = createWarningObserver()
+  warnSpy.mockImplementation(warningObserver.implementation)
+  let warningOutput: string
+  try {
+    const initialization = tokenPool.initializeAccount(account)
+    await githubUserResponse.requestStarted
+    githubUserResponse.rejectResponse(
+      new Error("request failed for github-username-redaction-token"),
+    )
+    await warningObserver.observed
+    await initialization
+    warningOutput = warnSpy.mock.calls
+      .map((args) => args.map(String).join(" "))
+      .join("\n")
+  } finally {
+    warnSpy.mockRestore()
+  }
+
+  expect(account.healthy).toBe(true)
+  expect(account.githubUsername).toBeUndefined()
+  expect(warningOutput).toContain("account #1113")
+  expect(warningOutput).toContain("Error")
+  expect(warningOutput).not.toContain("request failed")
+  expect(warningOutput).not.toContain("github-username-redaction-token")
 })
 
 test("does not fail over aborted multi-token requests", async () => {
