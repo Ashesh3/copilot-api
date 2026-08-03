@@ -533,7 +533,11 @@ export function recordRoutingSelection(event: RoutingSelectionEvent): void {
     }
     bucket.selectionModes[event.mode]++
     const affinitySource =
-      event.affinitySource && VALID_AFFINITY_SOURCES.has(event.affinitySource) ?
+      (
+        event.mode === "sticky"
+        && event.affinitySource
+        && VALID_AFFINITY_SOURCES.has(event.affinitySource)
+      ) ?
         event.affinitySource
       : "unidentified"
     bucket.affinitySources[affinitySource]++

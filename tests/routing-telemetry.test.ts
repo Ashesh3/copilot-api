@@ -358,6 +358,56 @@ test("windows, prunes, resets, and bounds affinity source counters", () => {
   })
 })
 
+test("aligns affinity source counters with selection modes", () => {
+  recordRoutingSelection({
+    accountId: 1,
+    affinitySource: "copilot_session",
+    eligibleAccountIds: [1],
+    mode: "default",
+    model: "default-with-source",
+    timestamp: NOW,
+  })
+  recordRoutingSelection({
+    accountId: 1,
+    eligibleAccountIds: [1],
+    mode: "sticky",
+    model: "sticky-missing-source",
+    timestamp: NOW,
+  })
+  recordRoutingSelection({
+    accountId: 1,
+    affinitySource: "invalid" as "claude_session",
+    eligibleAccountIds: [1],
+    mode: "sticky",
+    model: "sticky-invalid-source",
+    timestamp: NOW,
+  })
+  recordRoutingSelection({
+    affinitySource: "claude_session",
+    eligibleAccountIds: [],
+    mode: "single",
+    model: "single-with-source",
+    timestamp: NOW,
+  })
+
+  expect(
+    getRoutingTelemetrySnapshot({
+      accounts: [],
+      multiToken: true,
+      now: NOW,
+      window: "1h",
+    }).affinitySources,
+  ).toEqual({
+    claude_session: 0,
+    copilot_session: 0,
+    codex_session: 0,
+    claude_metadata: 0,
+    codex_metadata: 0,
+    codex_thread: 0,
+    unidentified: 3,
+  })
+})
+
 test("counts single-token selections without inventing an account", () => {
   recordRoutingSelection({
     eligibleAccountIds: [],
