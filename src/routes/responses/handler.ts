@@ -26,6 +26,7 @@ import {
 } from "~/lib/model-suffix"
 import {
   recordNonDefaultBehavior,
+  sanitizeRequestBodyForLog,
   setRequestContext,
 } from "~/lib/request-logger"
 import {
@@ -471,7 +472,10 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
     model: payload.model,
     reasoningEffort: finalEffort,
   })
-  logger.debug("Responses request payload:", JSON.stringify(payload))
+  logger.debug(
+    "Responses request payload:",
+    sanitizeRequestBodyForLog(payload as Record<string, unknown>),
+  )
 
   // Expand compaction items back into regular messages
   expandCompactionItems(payload)

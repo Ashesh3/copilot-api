@@ -623,6 +623,45 @@ describe("responses websocket message handling", () => {
     expect(capturedAffinity).toBeUndefined()
   })
 
+  test("inherits affinity from a completed continuation snapshot", async () => {
+    state.accountType = "individual"
+    state.copilotToken = "copilot-token"
+    state.models = responsesCapableModels
+    queuedResponses.push(
+      createResponsesSseResponse("resp_affinity_parent"),
+      createResponsesSseResponse("resp_affinity_child"),
+    )
+    const ws = createTestWebSocket()
+    ws.data.affinity = undefined
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "first",
+        client_metadata: { session_id: "snapshot-session" },
+      }),
+    )
+    expect(ws.data.responseSnapshots.has("resp_affinity_parent")).toBe(true)
+
+    capturedAffinity = undefined as RoutingAffinity | undefined
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "follow-up",
+        previous_response_id: "resp_affinity_parent",
+      }),
+    )
+
+    expect(capturedAffinity).toEqual({
+      key: "snapshot-session",
+      source: "codex_metadata",
+    })
+    expect(lastRequestBody?.previous_response_id).toBeUndefined()
+  })
+
   test("isolates concurrent WebSocket turn affinity contexts", async () => {
     const firstWs = createTestWebSocket()
     const secondWs = createTestWebSocket()

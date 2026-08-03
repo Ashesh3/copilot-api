@@ -19,6 +19,7 @@ import { createChatCompletions } from "../src/services/copilot/create-chat-compl
 // Save and restore original fetch so integration tests aren't affected
 const originalFetch = globalThis.fetch
 const originalIsMultiToken = state.isMultiToken
+const addedAccountIds = [2101, 2102]
 const queuedResponses: Array<Response> = []
 let capturedAffinity: RoutingAffinity | undefined
 const capturedAuthorization: Array<string | undefined> = []
@@ -62,6 +63,8 @@ beforeAll(() => {
 })
 
 afterAll(() => {
+  for (const accountId of addedAccountIds)
+    tokenPool.removeAccountForTest(accountId)
   state.isMultiToken = originalIsMultiToken
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
 })

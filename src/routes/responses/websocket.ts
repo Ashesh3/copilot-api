@@ -192,10 +192,6 @@ export const responsesWebSocket = {
     }
 
     const turn = createResponsesWebSocketTurn(ws.data, message)
-    const frameAffinity = resolveResponsesRoutingAffinity(
-      extractResponsesPayload(parsed).client_metadata,
-    )
-    const affinity = ws.data.affinity ?? frameAffinity
     const requestedModel = getRequestedModel(parsed)
     turn.requestedModel = requestedModel
     turn.model = requestedModel
@@ -205,8 +201,13 @@ export const responsesWebSocket = {
     })
 
     try {
+      const { affinity, payload } = prepareResponseCreate(ws.data, parsed)
       await runWithWebSocketRequestContext(affinity, turn, async () => {
-        await handleResponseCreate(ws, parsed, turn)
+        await handleResponseCreate(ws, {
+          payload,
+          requestedModel,
+          turn,
+        })
       })
       if (!turn.finalized) {
         throw new WebSocketRequestError(
@@ -259,6 +260,28 @@ export const responsesWebSocket = {
   },
 }
 
+function prepareResponseCreate(
+  data: ResponsesWebSocketData,
+  message: Record<string, unknown>,
+): { affinity: RoutingAffinity | undefined; payload: ResponsesPayload } {
+  const rawPayload = extractResponsesPayload(message)
+  const resolution = resolveWebSocketContinuationPayload(
+    data.responseSnapshots,
+    rawPayload,
+  )
+  if (resolution.shouldStop) {
+    throw new WebSocketRequestError(
+      resolution.message ?? "Invalid continuation request",
+      resolution.status ?? 400,
+      "invalid_request_error",
+    )
+  }
+  const payload = resolution.payload ?? rawPayload
+  payload.previous_response_id = undefined
+  const frameAffinity = resolveResponsesRoutingAffinity(payload.client_metadata)
+  return { affinity: data.affinity ?? frameAffinity, payload }
+}
+
 function storeResponseSnapshot(
   snapshots: Map<string, ResponsesPayload>,
   responseId: string,
@@ -269,13 +292,15 @@ function storeResponseSnapshot(
 
 async function handleResponseCreate(
   ws: ResponsesWebSocketState,
-  message: Record<string, unknown>,
-  turn: ResponsesWebSocketTurn,
+  options: {
+    payload: ResponsesPayload
+    requestedModel: string | undefined
+    turn: ResponsesWebSocketTurn
+  },
 ): Promise<void> {
-  const requestedModel = getRequestedModel(message)
+  const { payload, requestedModel, turn } = options
   turn.requestedModel = requestedModel
   turn.model = requestedModel
-  let payload = extractResponsesPayload(message)
 
   // Force streaming for WebSocket mode
   payload.stream = true
@@ -291,20 +316,6 @@ async function handleResponseCreate(
     reasoningEffort,
     requestedModel,
   })
-
-  const continuationResolution = resolveWebSocketContinuationPayload(
-    ws.data.responseSnapshots,
-    payload,
-  )
-  if (continuationResolution.shouldStop) {
-    throw new WebSocketRequestError(
-      continuationResolution.message ?? "Invalid continuation request",
-      continuationResolution.status ?? 400,
-      "invalid_request_error",
-    )
-  }
-  payload = continuationResolution.payload ?? payload
-  payload.previous_response_id = undefined
 
   expandCompactionItems(payload)
   disableParallelWebSearch(payload)

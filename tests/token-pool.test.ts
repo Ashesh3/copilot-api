@@ -179,3 +179,11 @@ test("keeps unidentified clients on the first eligible account", () => {
   const pool = createPool([9, 4, 7])
   expect(pool.getAccountForModelBySession(MODEL_A, undefined)?.id).toBe(9)
 })
+
+test("removes test accounts from model eligibility", () => {
+  const pool = createPool([91, 92])
+  pool.removeAccountForTest(91)
+
+  expect(pool.getAllAccounts().map((account) => account.id)).toEqual([92])
+  expect(pool.getEligibleAccountIdsForModel(MODEL_A)).toEqual([92])
+})

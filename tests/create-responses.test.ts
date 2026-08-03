@@ -21,6 +21,8 @@ import {
 
 const originalFetch = globalThis.fetch
 const originalModels = state.models
+const originalIsMultiToken = state.isMultiToken
+const addedAccountIds = [2201, 2202]
 let lastRequestBody: Record<string, unknown> | undefined
 let requestBodies: Array<Record<string, unknown>>
 let queuedResponses: Array<Response>
@@ -104,7 +106,10 @@ beforeAll(() => {
 })
 
 afterAll(() => {
+  for (const accountId of addedAccountIds)
+    tokenPool.removeAccountForTest(accountId)
   state.models = originalModels
+  state.isMultiToken = originalIsMultiToken
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
 })
 
@@ -116,6 +121,7 @@ beforeEach(() => {
   capturedAffinity = undefined
   capturedAuthorization.length = 0
   state.models = originalModels
+  state.isMultiToken = originalIsMultiToken
   state.accountType = "individual"
   state.copilotToken = "copilot-token"
   state.githubToken = "github-token"

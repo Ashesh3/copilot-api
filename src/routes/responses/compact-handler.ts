@@ -6,6 +6,10 @@ import { randomUUID } from "node:crypto"
 import { createHandlerLogger } from "~/lib/logger"
 import { parseModelSuffix } from "~/lib/model-suffix"
 import { setRequestContext } from "~/lib/request-logger"
+import {
+  installRoutingAffinityFallback,
+  resolveResponsesRoutingAffinity,
+} from "~/lib/routing-affinity"
 import { state } from "~/lib/state"
 import {
   type ChatCompletionResponse,
@@ -31,6 +35,7 @@ interface CompactRequestBody {
   model: string
   input: Array<ResponseInputItem>
   instructions?: string
+  client_metadata?: Record<string, unknown> | string
   previous_response_id?: string
   prompt_cache_key?: string
 }
@@ -190,6 +195,9 @@ const convertSpecialItem = (
 
 export const handleCompact = async (c: Context) => {
   const body = await c.req.json<CompactRequestBody>()
+  installRoutingAffinityFallback(
+    resolveResponsesRoutingAffinity(body.client_metadata),
+  )
 
   const { baseModel } = parseModelSuffix(body.model)
   const model = baseModel

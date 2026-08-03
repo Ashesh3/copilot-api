@@ -307,7 +307,7 @@ function recordCompletedRoutingRequest(
 /**
  * Sanitize request body by omitting large message/prompt arrays
  */
-function sanitizeRequestBody(
+export function sanitizeRequestBodyForLog(
   parsed: Record<string, unknown>,
   context: "client_metadata" | "metadata" | "root" | "other" = "root",
 ): Record<string, unknown> {
@@ -342,7 +342,7 @@ function sanitizeRequestBodyValue(
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return value
   }
-  return sanitizeRequestBody(value as Record<string, unknown>, "other")
+  return sanitizeRequestBodyForLog(value as Record<string, unknown>, "other")
 }
 
 function isSensitiveBodyKey(key: string): boolean {
@@ -373,7 +373,7 @@ function sanitizeClientMetadata(value: unknown): unknown {
         return "[REDACTED]"
       }
       return JSON.stringify(
-        sanitizeRequestBody(
+        sanitizeRequestBodyForLog(
           parsed as Record<string, unknown>,
           "client_metadata",
         ),
@@ -385,7 +385,7 @@ function sanitizeClientMetadata(value: unknown): unknown {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return value
   }
-  return sanitizeRequestBody(
+  return sanitizeRequestBodyForLog(
     value as Record<string, unknown>,
     "client_metadata",
   )
@@ -403,7 +403,10 @@ function sanitizeClaudeUserMetadata(value: unknown): unknown {
       return "[REDACTED]"
     }
     return JSON.stringify(
-      sanitizeRequestBody(parsed as Record<string, unknown>, "client_metadata"),
+      sanitizeRequestBodyForLog(
+        parsed as Record<string, unknown>,
+        "client_metadata",
+      ),
     )
   } catch {
     return "[REDACTED]"
@@ -422,7 +425,10 @@ function sanitizeMetadata(value: unknown): unknown {
         return "[REDACTED]"
       }
       return JSON.stringify(
-        sanitizeRequestBody(parsed as Record<string, unknown>, "metadata"),
+        sanitizeRequestBodyForLog(
+          parsed as Record<string, unknown>,
+          "metadata",
+        ),
       )
     } catch {
       return "[REDACTED]"
@@ -431,7 +437,7 @@ function sanitizeMetadata(value: unknown): unknown {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return value
   }
-  return sanitizeRequestBody(value as Record<string, unknown>, "metadata")
+  return sanitizeRequestBodyForLog(value as Record<string, unknown>, "metadata")
 }
 
 /**
@@ -464,7 +470,7 @@ async function logRawRequest(c: Context): Promise<void> {
         // Parse JSON to extract model, omit messages/prompt
         try {
           const parsed = JSON.parse(body) as Record<string, unknown>
-          const sanitized = sanitizeRequestBody(parsed)
+          const sanitized = sanitizeRequestBodyForLog(parsed)
 
           lines.push(
             `${colors.dim}Body (sanitized):${colors.reset}`,

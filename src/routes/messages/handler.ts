@@ -30,6 +30,7 @@ import {
 } from "~/lib/model-suffix"
 import {
   recordNonDefaultBehavior,
+  sanitizeRequestBodyForLog,
   setRequestContext,
 } from "~/lib/request-logger"
 import {
@@ -164,7 +165,12 @@ export async function handleCompletion(c: Context) {
     resolveClaudeRoutingAffinity(anthropicPayload.metadata),
   )
   const conversationId = setSentryConversationIdFromRequest(c, anthropicPayload)
-  logger.debug("Anthropic request payload:", JSON.stringify(anthropicPayload))
+  logger.debug(
+    "Anthropic request payload:",
+    sanitizeRequestBodyForLog(
+      anthropicPayload as unknown as Record<string, unknown>,
+    ),
+  )
 
   const model = normalizeModelName(
     parseModelSuffix(anthropicPayload.model).baseModel,

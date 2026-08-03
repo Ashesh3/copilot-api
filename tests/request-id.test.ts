@@ -8,7 +8,10 @@ import {
   test,
 } from "bun:test"
 
-import { startLogicalRequestLog } from "../src/lib/request-logger"
+import {
+  sanitizeRequestBodyForLog,
+  startLogicalRequestLog,
+} from "../src/lib/request-logger"
 import { createRoutingTelemetryRequestState } from "../src/lib/request-session"
 import {
   getRoutingAffinity,
@@ -303,6 +306,52 @@ test("redacts routing affinity metadata from debug request bodies", async () => 
   } finally {
     state.debug = false
     consoleLog.mockRestore()
+  }
+})
+
+test("sanitizes handler payload objects before verbose file logging", () => {
+  const rawIds = [
+    "handler-claude-session",
+    "handler-response-session",
+    "handler-response-thread",
+    "handler-string-session",
+    "handler-malformed-session",
+  ]
+  const sanitized = [
+    sanitizeRequestBodyForLog({
+      harmless: "keep-handler-field",
+      metadata: {
+        user_id: JSON.stringify({
+          account_uuid: "keep-handler-account",
+          session_id: rawIds[0],
+        }),
+      },
+      client_metadata: {
+        session_id: rawIds[1],
+        thread_id: rawIds[2],
+        device_id: "keep-handler-device",
+      },
+    }),
+    sanitizeRequestBodyForLog({
+      client_metadata: JSON.stringify({
+        session_id: rawIds[3],
+        device_id: "keep-string-handler-device",
+      }),
+    }),
+    sanitizeRequestBodyForLog({
+      client_metadata: `{"session_id":"${rawIds[4]}`,
+    }),
+  ]
+  const output = JSON.stringify(sanitized)
+
+  for (const rawId of rawIds) expect(output).not.toContain(rawId)
+  for (const harmless of [
+    "keep-handler-field",
+    "keep-handler-account",
+    "keep-handler-device",
+    "keep-string-handler-device",
+  ]) {
+    expect(output).toContain(harmless)
   }
 })
 

@@ -324,6 +324,14 @@ export class TokenPool {
     return [...this.accounts.values()]
   }
 
+  removeAccountForTest(accountId: number): void {
+    const timer = this.refreshTimers.get(accountId)
+    if (timer) clearInterval(timer)
+    this.refreshTimers.delete(accountId)
+    this.accounts.delete(accountId)
+    this.rebuildModelIndex()
+  }
+
   getEligibleAccountIdsForModel(modelId: string): Array<number> {
     return (this.modelIndex.get(modelId) ?? [])
       .map((account) => account.id)
