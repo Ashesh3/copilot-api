@@ -38,7 +38,7 @@ export function getRoutingAffinityLease(
     if (!validKey(key) || !validTimestamp(now)) return undefined
     const lease = leases.get(key)
     if (!lease) return undefined
-    if (now - lease.assignedAt >= LEASE_TTL_MS) {
+    if (now < lease.assignedAt || now - lease.assignedAt >= LEASE_TTL_MS) {
       leases.delete(key)
       return undefined
     }

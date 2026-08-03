@@ -13,8 +13,9 @@ import type { Model } from "../src/services/copilot/get-models"
 
 import { getLastUsedAccountId, routedFetch } from "../src/lib/account-router"
 import { setModelRoutingOverridesForTest } from "../src/lib/model-routing"
-import { runWithRoutingAffinity } from "../src/lib/routing-affinity"
+import { clientSessionStorage } from "../src/lib/request-session"
 /* eslint-disable max-lines -- account-router integration variants share singleton fixtures */
+import { runWithRoutingAffinity } from "../src/lib/routing-affinity"
 import {
   getRoutingAffinityLease,
   resetRoutingAffinityLeasesForTest,
@@ -299,6 +300,7 @@ test("does not create a lease for an unidentified request", async () => {
   registerAccount(1231, modelId, "unknown-primary")
   registerAccount(1232, modelId, "unknown-secondary")
   tokenPool.rebuildModelIndex()
+  setRoutingAffinityLease("sentinel-session", 4321)
   queuedResults.push(
     new Response("forbidden", { status: 403 }),
     new Response("{}", { status: 200 }),
@@ -306,7 +308,7 @@ test("does not create a lease for an unidentified request", async () => {
 
   await routedFetch("/chat/completions", { method: "POST" }, { modelId })
 
-  expect(getRoutingAffinityLease("unidentified")).toBeUndefined()
+  expect(getRoutingAffinityLease("sentinel-session")).toBe(4321)
 })
 
 test("does not create or change leases in single-token mode", async () => {
@@ -322,6 +324,58 @@ test("does not create or change leases in single-token mode", async () => {
   expect(result.account).toBeUndefined()
   expect(getRoutingAffinityLease(key)).toBe(777)
   expect(getRoutingAffinityLease("single-token-model")).toBeUndefined()
+})
+
+test("preserves legacy WebSocket affinity and typed affinity precedence", async () => {
+  const modelId = "router-legacy-websocket-affinity"
+  registerAccount(1241, modelId, "legacy-first")
+  registerAccount(1242, modelId, "legacy-second")
+  tokenPool.rebuildModelIndex()
+  const legacyKey = Array.from(
+    { length: 100 },
+    (_, index) => `legacy-websocket-session-${index}`,
+  ).find(
+    (key) => tokenPool.getAccountForModelBySession(modelId, key)?.id === 1241,
+  )
+  if (!legacyKey) throw new TypeError("Expected legacy key for first account")
+  const typedKey = "typed-session"
+  const legacyPreferred = tokenPool.getAccountForModelBySession(
+    modelId,
+    legacyKey,
+  )
+  if (!legacyPreferred) throw new TypeError("Expected legacy preferred account")
+  const leased = tokenPool.getNextAccountForModel(modelId, legacyPreferred)
+  if (!leased) throw new TypeError("Expected legacy leased account")
+  setRoutingAffinityLease(legacyKey, leased.id)
+  queuedResults.push(new Response("{}", { status: 200 }))
+
+  const legacyResult = await clientSessionStorage.run(
+    legacyKey,
+    async () =>
+      await routedFetch("/chat/completions", { method: "POST" }, { modelId }),
+  )
+  expect(legacyResult.account?.id).toBe(leased.id)
+
+  const typedPreferred = tokenPool.getAccountForModelBySession(
+    modelId,
+    typedKey,
+  )
+  if (!typedPreferred) throw new TypeError("Expected typed preferred account")
+  queuedResults.push(new Response("{}", { status: 200 }))
+  const typedResult = await clientSessionStorage.run(
+    legacyKey,
+    async () =>
+      await runWithRoutingAffinity(
+        { key: typedKey, source: "copilot_session" },
+        async () =>
+          await routedFetch(
+            "/chat/completions",
+            { method: "POST" },
+            { modelId },
+          ),
+      ),
+  )
+  expect(typedResult.account?.id).toBe(typedPreferred.id)
 })
 
 test("fails over to the next account immediately after a multi-token 401", async () => {

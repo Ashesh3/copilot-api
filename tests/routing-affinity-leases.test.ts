@@ -21,6 +21,13 @@ test("expires leases exactly 24 hours after their latest assignment", () => {
   expect(getRoutingAffinityLease("session", NOW + DAY_MS)).toBeUndefined()
 })
 
+test("deletes a lease when the clock moves before its assignment", () => {
+  setRoutingAffinityLease("future-session", 13, NOW)
+
+  expect(getRoutingAffinityLease("future-session", NOW - 1)).toBeUndefined()
+  expect(getRoutingAffinityLease("future-session", NOW)).toBeUndefined()
+})
+
 test("updating a lease refreshes its timestamp and insertion age", () => {
   setRoutingAffinityLease("refreshed", 1, NOW)
   setRoutingAffinityLease("older", 2, NOW + 1)

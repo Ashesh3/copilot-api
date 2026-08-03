@@ -8,6 +8,7 @@ import type {
 import type { RetryBudget } from "~/services/copilot/transport-retry"
 
 import {
+  getClientSessionId,
   getLastUsedRoutedAccountId,
   setLastUsedRoutedAccountId,
 } from "~/lib/request-session"
@@ -54,6 +55,10 @@ interface RoutedFetchContext {
   reason: UpstreamSendReason
   recordSelection: boolean
   retryBudget: RetryBudget
+}
+
+function getEffectiveAffinityKey(): string | undefined {
+  return getRoutingAffinity()?.key ?? getClientSessionId()
 }
 
 type RoutedFetchResult = {
@@ -216,7 +221,7 @@ async function fetchWithFallbackAccount(
       recordSelection({
         accountId: account.id,
         eligibleAccountIds: tokenPool.getHealthyAccountIds(),
-        mode: getRoutingAffinity() ? "sticky" : "default",
+        mode: getEffectiveAffinityKey() ? "sticky" : "default",
         model: context.modelId,
       })
     }
@@ -396,7 +401,7 @@ export async function routedFetch(
   // 401/403/429 failover.
   const retryBudget = createRetryBudget()
   const context: RoutedFetchContext = {
-    affinityKey: getRoutingAffinity()?.key,
+    affinityKey: getEffectiveAffinityKey(),
     headerOptions,
     init,
     modelId,
@@ -433,16 +438,15 @@ export async function routedFetch(
     return { response, account: undefined }
   }
 
-  const affinity = getRoutingAffinity()
+  const affinityKey = getEffectiveAffinityKey()
   const leasedAccountId =
-    affinity ? getRoutingAffinityLease(affinity.key) : undefined
+    affinityKey ? getRoutingAffinityLease(affinityKey) : undefined
   const leasedAccount =
     leasedAccountId === undefined ? undefined : (
       tokenPool.getEligibleAccountForModel(modelId, leasedAccountId)
     )
   const account =
-    leasedAccount
-    ?? tokenPool.getAccountForModelBySession(modelId, affinity?.key)
+    leasedAccount ?? tokenPool.getAccountForModelBySession(modelId, affinityKey)
   if (!account) {
     if (tokenPool.hasKnownModel(modelId)) {
       const response = createNoEnabledAccountResponse(modelId)
@@ -457,14 +461,14 @@ export async function routedFetch(
   }
 
   consola.debug(
-    `[Account #${account.id}] ${path} (model: ${modelId}, session: ${affinity ? "sticky" : "default"})`,
+    `[Account #${account.id}] ${path} (model: ${modelId}, session: ${affinityKey ? "sticky" : "default"})`,
   )
   setLastUsedRoutedAccountId(account.id)
   if (shouldRecordSelection) {
     recordSelection({
       accountId: account.id,
       eligibleAccountIds: tokenPool.getEligibleAccountIdsForModel(modelId),
-      mode: affinity ? "sticky" : "default",
+      mode: affinityKey ? "sticky" : "default",
       model: modelId,
     })
   }
