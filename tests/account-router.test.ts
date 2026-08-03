@@ -17,8 +17,76 @@ import { state } from "../src/lib/state"
 import { tokenPool } from "../src/lib/token-pool"
 
 const originalFetch = globalThis.fetch
-const queuedResults: Array<Error | Promise<Response> | Response> = []
+const queuedResults: Array<DeferredFetchResponse | Error | Response> = []
 const capturedRequests: Array<{ url: string; init?: RequestInit }> = []
+
+interface DeferredFetchResponse {
+  requestStarted: Promise<void>
+  rejectResponse(error: Error): void
+  resolveResponse(response: Response): void
+  startRequest(): Promise<Response>
+}
+
+function createDeferredFetchResponse(): DeferredFetchResponse {
+  let rejectResponse!: (error: Error) => void
+  let resolveRequestStarted!: () => void
+  let resolveResponse!: (response: Response) => void
+  const requestStarted = new Promise<void>((resolve) => {
+    resolveRequestStarted = resolve
+  })
+  const responsePromise = new Promise<Response>((resolve, reject) => {
+    resolveResponse = resolve
+    rejectResponse = reject
+  })
+
+  return {
+    requestStarted,
+    rejectResponse,
+    resolveResponse,
+    startRequest() {
+      resolveRequestStarted()
+      return responsePromise
+    },
+  }
+}
+
+function createObservedGitHubUserResponse(login: string): {
+  loginRead: Promise<void>
+  response: Response
+} {
+  let resolveLoginRead!: () => void
+  const loginRead = new Promise<void>((resolve) => {
+    resolveLoginRead = resolve
+  })
+  const response = new Response(JSON.stringify({ login }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  })
+  Object.defineProperty(response, "json", {
+    value: () =>
+      Promise.resolve({
+        get login() {
+          resolveLoginRead()
+          return login
+        },
+      }),
+  })
+  return { loginRead, response }
+}
+
+function createWarningObserver(): {
+  implementation: typeof consola.warn
+  observed: Promise<void>
+} {
+  let resolveObserved!: () => void
+  const observed = new Promise<void>((resolve) => {
+    resolveObserved = resolve
+  })
+  const implementation = Object.assign(resolveObserved, {
+    raw: resolveObserved,
+  })
+  return { implementation, observed }
+}
 
 function getRequestUrl(url: string | URL | Request): string {
   if (typeof url === "string") {
@@ -43,12 +111,8 @@ const fetchMock = mock((url: string | URL | Request, init?: RequestInit) => {
     throw next
   }
 
-  return next
+  return next instanceof Response ? next : next.startRequest()
 })
-
-function flushPendingGitHubLookup(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 0))
-}
 
 function createModel(id: string): Model {
   return {
@@ -200,6 +264,8 @@ test("refreshes a multi-token account and retries after a 401", async () => {
 
 test("disables pooling for multi-token model discovery", async () => {
   const account = tokenPool.addAccount("github-model-token", "individual", 1110)
+  const githubUserResponse = createDeferredFetchResponse()
+  const observedGitHubUser = createObservedGitHubUserResponse("model-user")
   queuedResults.push(
     new Response(
       JSON.stringify({
@@ -213,14 +279,14 @@ test("disables pooling for multi-token model discovery", async () => {
       status: 200,
       headers: { "content-type": "application/json" },
     }),
-    new Response(JSON.stringify({ login: "model-user" }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    }),
+    githubUserResponse,
   )
 
-  await tokenPool.initializeAccount(account)
-  await flushPendingGitHubLookup()
+  const initialization = tokenPool.initializeAccount(account)
+  await githubUserResponse.requestStarted
+  githubUserResponse.resolveResponse(observedGitHubUser.response)
+  await observedGitHubUser.loginRead
+  await initialization
 
   expect(capturedRequests[1]?.url).toContain("/models")
   expect(capturedRequests[1]?.init?.keepalive).toBe(false)
@@ -232,6 +298,8 @@ test("resolves the GitHub username during account initialization", async () => {
     "individual",
     1111,
   )
+  const githubUserResponse = createDeferredFetchResponse()
+  const observedGitHubUser = createObservedGitHubUserResponse("octocat")
   queuedResults.push(
     new Response(
       JSON.stringify({
@@ -245,14 +313,14 @@ test("resolves the GitHub username during account initialization", async () => {
       status: 200,
       headers: { "content-type": "application/json" },
     }),
-    new Response(JSON.stringify({ login: "octocat" }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    }),
+    githubUserResponse,
   )
 
-  await tokenPool.initializeAccount(account)
-  await flushPendingGitHubLookup()
+  const initialization = tokenPool.initializeAccount(account)
+  await githubUserResponse.requestStarted
+  githubUserResponse.resolveResponse(observedGitHubUser.response)
+  await observedGitHubUser.loginRead
+  await initialization
 
   queuedResults.push(
     new Response(
@@ -284,10 +352,8 @@ test("does not block account initialization while GitHub username lookup is pend
     "individual",
     1114,
   )
-  let resolveGitHubUser!: (response: Response) => void
-  const deferredGitHubUser = new Promise<Response>((resolve) => {
-    resolveGitHubUser = resolve
-  })
+  const githubUserResponse = createDeferredFetchResponse()
+  const observedGitHubUser = createObservedGitHubUserResponse("deferred-user")
   queuedResults.push(
     new Response(
       JSON.stringify({
@@ -301,20 +367,21 @@ test("does not block account initialization while GitHub username lookup is pend
       status: 200,
       headers: { "content-type": "application/json" },
     }),
-    deferredGitHubUser,
+    githubUserResponse,
   )
 
-  const initialization = tokenPool.initializeAccount(account)
-  let raceTimer: ReturnType<typeof setTimeout> | undefined
+  let initializationSettled = false
+  const initialization = tokenPool.initializeAccount(account).then(() => {
+    initializationSettled = true
+  })
   try {
-    const outcome = await Promise.race([
-      initialization.then(() => "initialized" as const),
-      new Promise<"lookup-pending">((resolve) => {
-        raceTimer = setTimeout(() => resolve("lookup-pending"), 50)
-      }),
-    ])
+    await githubUserResponse.requestStarted
+    // requestStarted resolves before initializeAccount returns. Its completion
+    // reaction is therefore already queued; one microtask lets it run without
+    // releasing the still-pending GitHub response.
+    await Promise.resolve()
 
-    expect(outcome).toBe("initialized")
+    expect(initializationSettled).toBe(true)
     expect(account.healthy).toBe(true)
     expect(account.githubUsername).toBeUndefined()
     expect(
@@ -323,19 +390,10 @@ test("does not block account initialization while GitHub username lookup is pend
       ),
     ).toHaveLength(1)
   } finally {
-    if (raceTimer) {
-      clearTimeout(raceTimer)
-    }
-    resolveGitHubUser(
-      new Response(JSON.stringify({ login: "deferred-user" }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
-    )
+    githubUserResponse.resolveResponse(observedGitHubUser.response)
     await initialization
+    await observedGitHubUser.loginRead
   }
-
-  await flushPendingGitHubLookup()
 
   expect(account.githubUsername).toBe("deferred-user")
   expect(
@@ -351,6 +409,7 @@ test("keeps an account healthy when GitHub username lookup fails", async () => {
     "individual",
     1112,
   )
+  const githubUserResponse = createDeferredFetchResponse()
   queuedResults.push(
     new Response(
       JSON.stringify({
@@ -364,14 +423,21 @@ test("keeps an account healthy when GitHub username lookup fails", async () => {
       status: 200,
       headers: { "content-type": "application/json" },
     }),
-    new Response("Service unavailable", { status: 503 }),
+    githubUserResponse,
   )
 
   const warnSpy = spyOn(consola, "warn")
+  const warningObserver = createWarningObserver()
+  warnSpy.mockImplementation(warningObserver.implementation)
   let warningOutput: string
   try {
-    await tokenPool.initializeAccount(account)
-    await flushPendingGitHubLookup()
+    const initialization = tokenPool.initializeAccount(account)
+    await githubUserResponse.requestStarted
+    githubUserResponse.resolveResponse(
+      new Response("Service unavailable", { status: 503 }),
+    )
+    await warningObserver.observed
+    await initialization
     warningOutput = warnSpy.mock.calls
       .map((args) => args.map(String).join(" "))
       .join("\n")
@@ -393,6 +459,7 @@ test("redacts arbitrary GitHub username lookup error messages", async () => {
     "individual",
     1113,
   )
+  const githubUserResponse = createDeferredFetchResponse()
   queuedResults.push(
     new Response(
       JSON.stringify({
@@ -406,14 +473,21 @@ test("redacts arbitrary GitHub username lookup error messages", async () => {
       status: 200,
       headers: { "content-type": "application/json" },
     }),
-    new Error("request failed for github-username-redaction-token"),
+    githubUserResponse,
   )
 
   const warnSpy = spyOn(consola, "warn")
+  const warningObserver = createWarningObserver()
+  warnSpy.mockImplementation(warningObserver.implementation)
   let warningOutput: string
   try {
-    await tokenPool.initializeAccount(account)
-    await flushPendingGitHubLookup()
+    const initialization = tokenPool.initializeAccount(account)
+    await githubUserResponse.requestStarted
+    githubUserResponse.rejectResponse(
+      new Error("request failed for github-username-redaction-token"),
+    )
+    await warningObserver.observed
+    await initialization
     warningOutput = warnSpy.mock.calls
       .map((args) => args.map(String).join(" "))
       .join("\n")
