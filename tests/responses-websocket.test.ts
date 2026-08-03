@@ -239,6 +239,65 @@ describe("responses websocket upgrade handling", () => {
     }
   })
 
+  test("uses upgrade affinity precedence and ignores request identifiers", async () => {
+    state.apiKeyAuth = "route-secret"
+    let upgraded: ResponsesWebSocketData | undefined
+    const upgrade = async (headers: Record<string, string>) => {
+      await tryUpgradeResponsesWebSocket(
+        new Request("http://localhost/responses", {
+          headers: { authorization: "Bearer route-secret", ...headers },
+        }),
+        {
+          upgrade(_request, options): boolean {
+            upgraded = (options as { data: ResponsesWebSocketData }).data
+            return true
+          },
+        },
+      )
+      return upgraded
+    }
+
+    expect(
+      (
+        await upgrade({
+          "x-claude-code-session-id": "claude-wins",
+          "x-client-session-id": "copilot-loses",
+          "session-id": "session-loses",
+          "thread-id": "thread-loses",
+        })
+      )?.affinity,
+    ).toEqual({ key: "claude-wins", source: "claude_session" })
+    expect(
+      (
+        await upgrade({
+          "x-client-session-id": "copilot-wins",
+          "session-id": "session-loses",
+          "thread-id": "thread-loses",
+        })
+      )?.affinity,
+    ).toEqual({ key: "copilot-wins", source: "copilot_session" })
+    expect(
+      (
+        await upgrade({
+          "session-id": "session-wins",
+          "thread-id": "thread-loses",
+        })
+      )?.affinity,
+    ).toEqual({ key: "session-wins", source: "codex_session" })
+    expect((await upgrade({ "thread-id": "thread-wins" }))?.affinity).toEqual({
+      key: "thread-wins",
+      source: "codex_thread",
+    })
+    expect(
+      (
+        await upgrade({
+          "x-request-id": "request-not-affinity",
+          "x-client-request-id": "client-request-not-affinity",
+        })
+      )?.affinity,
+    ).toBeUndefined()
+  })
+
   test("enforces cli and config api keys before upgrade", async () => {
     const server = {
       upgrade(): boolean {

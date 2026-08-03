@@ -1,12 +1,33 @@
-import { afterAll, beforeEach, expect, test } from "bun:test"
+import { afterAll, beforeEach, expect, spyOn, test } from "bun:test"
 
 import type { ModelsResponse } from "../src/services/copilot/get-models"
 
 import { setModelRedirectsForTest } from "../src/lib/model-redirect"
+import {
+  getRoutingAffinity,
+  runWithRoutingAffinity,
+  type RoutingAffinity,
+} from "../src/lib/routing-affinity"
 import { state } from "../src/lib/state"
+import * as tokenizer from "../src/lib/tokenizer"
 import { server } from "../src/server"
 
 const originalModels = state.models
+
+function requestCountTokensWithMetadata(headers: Record<string, string>) {
+  return server.request("/v1/messages/count_tokens", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...headers },
+    body: JSON.stringify({
+      model: "claude-opus-4.7-1m-internal",
+      messages: [{ role: "user", content: "Hello" }],
+      max_tokens: 32,
+      metadata: {
+        user_id: JSON.stringify({ session_id: "count-body-session" }),
+      },
+    }),
+  })
+}
 
 const models: ModelsResponse = {
   object: "list",
@@ -106,4 +127,35 @@ test("count_tokens uses redirected target model for model lookup", async () => {
   expect(response.status).toBe(200)
   const body = (await response.json()) as { input_tokens: number }
   expect(body.input_tokens).toBeGreaterThan(1)
+})
+
+test("count_tokens installs Claude metadata affinity and preserves headers", async () => {
+  const observed: Array<RoutingAffinity | undefined> = []
+  const originalGetTokenCount = tokenizer.getTokenCount
+  const getTokenCount = spyOn(tokenizer, "getTokenCount").mockImplementation(
+    async (...args) => {
+      observed.push(getRoutingAffinity())
+      return await originalGetTokenCount(...args)
+    },
+  )
+  try {
+    await runWithRoutingAffinity(
+      undefined,
+      async () => await requestCountTokensWithMetadata({}),
+    )
+    await runWithRoutingAffinity(
+      undefined,
+      async () =>
+        await requestCountTokensWithMetadata({
+          "x-client-session-id": "count-header-session",
+        }),
+    )
+  } finally {
+    getTokenCount.mockRestore()
+  }
+
+  expect(observed).toEqual([
+    { key: "count-body-session", source: "claude_metadata" },
+    { key: "count-header-session", source: "copilot_session" },
+  ])
 })

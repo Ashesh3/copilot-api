@@ -11,6 +11,7 @@ import {
   resetRoutingTelemetryForTest,
 } from "../src/lib/routing-telemetry"
 import { state } from "../src/lib/state"
+import { tokenPool } from "../src/lib/token-pool"
 import { normalizeResponsesReasoning } from "../src/routes/responses/handler"
 import { server } from "../src/server"
 import {
@@ -24,6 +25,7 @@ let lastRequestBody: Record<string, unknown> | undefined
 let requestBodies: Array<Record<string, unknown>>
 let queuedResponses: Array<Response>
 let capturedAffinity: RoutingAffinity | undefined
+const capturedAuthorization: Array<string | undefined> = []
 
 const responsesCapableModels = {
   object: "list" as const,
@@ -87,6 +89,9 @@ function parseRequestBody(init?: RequestInit): Record<string, unknown> {
 
 const fetchMock = mock((_url: string, init?: RequestInit) => {
   capturedAffinity = getRoutingAffinity()
+  capturedAuthorization.push(
+    new Headers(init?.headers).get("authorization") ?? undefined,
+  )
   lastRequestBody = parseRequestBody(init)
   requestBodies.push(lastRequestBody)
 
@@ -109,6 +114,7 @@ beforeEach(() => {
   requestBodies = []
   queuedResponses = []
   capturedAffinity = undefined
+  capturedAuthorization.length = 0
   state.models = originalModels
   state.accountType = "individual"
   state.copilotToken = "copilot-token"
@@ -116,6 +122,80 @@ beforeEach(() => {
   state.isMultiToken = false
   resetRoutingTelemetryForTest()
   setModelSettingsForTest([])
+})
+
+test("routes repeated Responses metadata sessions to stable accounts", async () => {
+  const modelId = "responses-metadata-routing-model"
+  const model = {
+    ...responsesCapableModels.data[0],
+    id: modelId,
+    name: modelId,
+  }
+  state.models = { object: "list", data: [model] }
+  for (const [id, token] of [
+    [2201, "responses-token-one"],
+    [2202, "responses-token-two"],
+  ] as const) {
+    const account = tokenPool.addAccount(`github-${id}`, "individual", id)
+    account.copilotToken = token
+    account.healthy = true
+    account.models = new Set([modelId])
+  }
+  tokenPool.rebuildModelIndex()
+  state.isMultiToken = true
+  const keys: Array<string> = []
+  for (let index = 0; index < 100 && keys.length < 2; index++) {
+    const key = `responses-session-${index}`
+    const accountId = tokenPool.getAccountForModelBySession(modelId, key)?.id
+    if (
+      accountId !== undefined
+      && !keys.some(
+        (existing) =>
+          tokenPool.getAccountForModelBySession(modelId, existing)?.id
+          === accountId,
+      )
+    ) {
+      keys.push(key)
+    }
+  }
+  expect(keys).toHaveLength(2)
+  const request = (key: string) =>
+    server.request("/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: modelId,
+        input: "hello",
+        client_metadata: { session_id: key },
+      }),
+    })
+
+  await request(keys[0] ?? "")
+  await request(keys[0] ?? "")
+  await request(keys[1] ?? "")
+  await request(keys[1] ?? "")
+
+  const expected = keys.map(
+    (key) =>
+      `Bearer ${tokenPool.getAccountForModelBySession(modelId, key)?.copilotToken}`,
+  )
+  expect(capturedAuthorization).toEqual([
+    expected[0],
+    expected[0],
+    expected[1],
+    expected[1],
+  ])
+  expect(expected[0]).not.toBe(expected[1])
+  const usage = getRoutingTelemetrySnapshot({
+    accounts: tokenPool.getAllAccounts().map((account) => ({
+      accountType: account.accountType,
+      healthy: account.healthy,
+      id: account.id,
+    })),
+    multiToken: true,
+    window: "1h",
+  })
+  expect(usage.selectionModes.sticky).toBe(4)
 })
 
 test("installs Responses client metadata affinity before provider dispatch", async () => {
