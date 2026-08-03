@@ -31,6 +31,12 @@ const SENSITIVE_HEADER_PATTERNS = [
   "cookie",
   "x-api-key",
 ]
+const ROUTING_AFFINITY_HEADER_NAMES = new Set([
+  "session-id",
+  "thread-id",
+  "x-claude-code-session-id",
+  "x-client-session-id",
+])
 const FILTERED_VALUE = "[Filtered]"
 const STATSIG_PROXY_HOST = "ab.chatgpt.com"
 const STATSIG_CLIENT_KEY_RE = /(^|[?&])k=[^&#\s"'<>]*/g
@@ -43,7 +49,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isSensitiveHeader(key: string): boolean {
   const lower = key.toLowerCase()
-  return SENSITIVE_HEADER_PATTERNS.some((pattern) => lower.includes(pattern))
+  return (
+    ROUTING_AFFINITY_HEADER_NAMES.has(lower)
+    || SENSITIVE_HEADER_PATTERNS.some((pattern) => lower.includes(pattern))
+  )
+}
+
+function isRoutingAffinityHeader(key: string): boolean {
+  return ROUTING_AFFINITY_HEADER_NAMES.has(key.toLowerCase())
 }
 
 function escapeRegExp(value: string): string {
@@ -121,6 +134,10 @@ export function scrubStatsigClientKeyData(
     inheritedStatsigContext || objectCreatesLocalStatsigContext(value)
 
   for (const [key, nestedValue] of Object.entries(value)) {
+    if (isRoutingAffinityHeader(key)) {
+      value[key] = FILTERED_VALUE
+      continue
+    }
     if (typeof nestedValue === "string") {
       value[key] = scrubStatsigClientKeyString(nestedValue, localStatsigContext)
       continue

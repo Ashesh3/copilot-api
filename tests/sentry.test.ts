@@ -486,3 +486,49 @@ test("registers Statsig redaction hooks for all Sentry send callbacks", () => {
     "https://ab.chatgpt.com/v1/initialize?k=[Filtered]",
   )
 })
+
+test("scrubs affinity headers from every Sentry send callback", () => {
+  const options = createSentryInitOptions(
+    "https://public@example.ingest.sentry.io/1",
+  )
+  const rawIds = [
+    "claude-sentry-private",
+    "copilot-sentry-private",
+    "session-sentry-private",
+    "thread-sentry-private",
+  ]
+  const headers = {
+    "X-Claude-Code-Session-Id": rawIds[0],
+    "x-CLIENT-session-ID": rawIds[1],
+    "Session-Id": rawIds[2],
+    "THREAD-ID": rawIds[3],
+    "x-harmless": "visible",
+  }
+  const event = { request: { headers: { ...headers } } }
+  const transaction = { request: { headers: { ...headers } } }
+  const span = { data: { nested: { request: { headers: { ...headers } } } } }
+  const log = { attributes: { request: { headers: { ...headers } } } }
+
+  const beforeSend = options.beforeSend as
+    | ((value: typeof event) => typeof event | null)
+    | undefined
+  const beforeSendTransaction = options.beforeSendTransaction as
+    | ((value: typeof transaction) => typeof transaction | null)
+    | undefined
+  const beforeSendSpan = options.beforeSendSpan as
+    | ((value: typeof span) => typeof span | null)
+    | undefined
+  const beforeSendLog = options.beforeSendLog as
+    | ((value: typeof log) => typeof log | null)
+    | undefined
+
+  beforeSend?.(event)
+  beforeSendTransaction?.(transaction)
+  beforeSendSpan?.(span)
+  beforeSendLog?.(log)
+
+  const serialized = JSON.stringify({ event, transaction, span, log })
+  for (const rawId of rawIds) expect(serialized).not.toContain(rawId)
+  expect(serialized).toContain("[Filtered]")
+  expect(serialized).toContain("visible")
+})

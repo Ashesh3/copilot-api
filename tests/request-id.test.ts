@@ -193,6 +193,89 @@ test("redacts routing affinity headers from debug request logs", async () => {
   }
 })
 
+test("redacts routing affinity metadata from debug request bodies", async () => {
+  const rawIds = [
+    "client-session-private",
+    "client-thread-private",
+    "string-session-private",
+    "claude-session-private",
+    "root-session-private",
+    "root-thread-private",
+    "malformed-private",
+  ]
+  const consoleLog = spyOn(console, "log").mockImplementation(() => undefined)
+  state.debug = true
+  try {
+    await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-4o",
+        messages: [{ role: "user", content: "Hello" }],
+        max_tokens: 32,
+        harmless_root: "keep-root",
+        session_id: rawIds[4],
+        thread_id: rawIds[5],
+        client_metadata: {
+          session_id: rawIds[0],
+          thread_id: rawIds[1],
+          device_id: "keep-device",
+        },
+        metadata: {
+          user_id: JSON.stringify({
+            session_id: rawIds[3],
+            account_uuid: "keep-account",
+          }),
+        },
+        unrelated_tool_arguments: {
+          session_id: "keep-unrelated-session",
+          thread_id: "keep-unrelated-thread",
+        },
+      }),
+    })
+    await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-4o",
+        messages: [{ role: "user", content: "Hello" }],
+        max_tokens: 32,
+        client_metadata: JSON.stringify({
+          session_id: rawIds[2],
+          device_id: "keep-string-device",
+        }),
+      }),
+    })
+    await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-4o",
+        messages: [{ role: "user", content: "Hello" }],
+        max_tokens: 32,
+        client_metadata: `{"session_id":"${rawIds[6]}`,
+      }),
+    })
+
+    const output = consoleLog.mock.calls.flat().join("\n")
+    for (const rawId of rawIds) expect(output).not.toContain(rawId)
+    for (const harmless of [
+      "keep-root",
+      "keep-device",
+      "keep-account",
+      "keep-string-device",
+      "keep-unrelated-session",
+      "keep-unrelated-thread",
+    ]) {
+      expect(output).toContain(harmless)
+    }
+    expect(output).toContain("[REDACTED]")
+  } finally {
+    state.debug = false
+    consoleLog.mockRestore()
+  }
+})
+
 test("forwards upstream quota snapshot headers to the client response", async () => {
   upstreamResponseHeaders = {
     "content-type": "application/json",

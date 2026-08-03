@@ -140,3 +140,47 @@ test("keeps mutable affinity state and never overwrites an existing value", () =
   })
   expect(getRoutingAffinity()).toBeUndefined()
 })
+
+test("isolates overlapping asynchronous routing affinity scopes", async () => {
+  let releaseFirst: (() => void) | undefined
+  let releaseSecond: (() => void) | undefined
+  const firstGate = new Promise<void>((resolve) => {
+    releaseFirst = resolve
+  })
+  const secondGate = new Promise<void>((resolve) => {
+    releaseSecond = resolve
+  })
+  const observed: Array<string | undefined> = []
+
+  const first = runWithRoutingAffinity(
+    { key: "first-session", source: "claude_session" },
+    async () => {
+      observed.push(getRoutingAffinity()?.key)
+      await firstGate
+      observed.push(getRoutingAffinity()?.key)
+    },
+  )
+  const second = runWithRoutingAffinity(
+    { key: "second-session", source: "copilot_session" },
+    async () => {
+      observed.push(getRoutingAffinity()?.key)
+      await secondGate
+      observed.push(getRoutingAffinity()?.key)
+    },
+  )
+
+  expect(getRoutingAffinity()).toBeUndefined()
+  releaseSecond?.()
+  await second
+  expect(getRoutingAffinity()).toBeUndefined()
+  releaseFirst?.()
+  await first
+
+  expect(observed).toEqual([
+    "first-session",
+    "second-session",
+    "second-session",
+    "first-session",
+  ])
+  expect(getRoutingAffinity()).toBeUndefined()
+})

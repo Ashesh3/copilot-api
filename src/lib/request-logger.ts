@@ -309,29 +309,105 @@ function recordCompletedRoutingRequest(
  */
 function sanitizeRequestBody(
   parsed: Record<string, unknown>,
+  context: "client_metadata" | "metadata" | "root" | "other" = "root",
 ): Record<string, unknown> {
   const sanitized: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(parsed)) {
-    const sensitive =
-      /password|secret|api[_-]?key|authorization|cookie|access[_-]?token|refresh[_-]?token|code[_-]?verifier|client[_-]?secret/i.test(
-        key,
-      )
-    if (sensitive) {
-      sanitized[key] = "[REDACTED]"
-    } else if (key === "messages" || key === "prompt") {
-      const itemCount = Array.isArray(value) ? value.length : 1
-      sanitized[key] = `[${itemCount} items omitted]`
-    } else if (
-      typeof value === "object"
-      && value !== null
-      && !Array.isArray(value)
-    ) {
-      sanitized[key] = sanitizeRequestBody(value as Record<string, unknown>)
-    } else {
-      sanitized[key] = value
-    }
+    sanitized[key] = sanitizeRequestBodyValue(key, value, context)
   }
   return sanitized
+}
+
+function sanitizeRequestBodyValue(
+  key: string,
+  value: unknown,
+  context: "client_metadata" | "metadata" | "root" | "other",
+): unknown {
+  if (isSensitiveBodyKey(key) || isRoutingMetadataKey(key, context)) {
+    return "[REDACTED]"
+  }
+  if (context === "root" && key === "client_metadata") {
+    return sanitizeClientMetadata(value)
+  }
+  if (context === "metadata" && key === "user_id") {
+    return sanitizeClaudeUserMetadata(value)
+  }
+  if (key === "messages" || key === "prompt") {
+    const itemCount = Array.isArray(value) ? value.length : 1
+    return `[${itemCount} items omitted]`
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return value
+  }
+  return sanitizeRequestBody(
+    value as Record<string, unknown>,
+    context === "root" && key === "metadata" ? "metadata" : "other",
+  )
+}
+
+function isSensitiveBodyKey(key: string): boolean {
+  return /password|secret|api[_-]?key|authorization|cookie|access[_-]?token|refresh[_-]?token|code[_-]?verifier|client[_-]?secret/i.test(
+    key,
+  )
+}
+
+function isRoutingMetadataKey(
+  key: string,
+  context: "client_metadata" | "metadata" | "root" | "other",
+): boolean {
+  return (
+    (context === "root" || context === "client_metadata")
+    && (key === "session_id" || key === "thread_id")
+  )
+}
+
+function sanitizeClientMetadata(value: unknown): unknown {
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value) as unknown
+      if (
+        typeof parsed !== "object"
+        || parsed === null
+        || Array.isArray(parsed)
+      ) {
+        return "[REDACTED]"
+      }
+      return JSON.stringify(
+        sanitizeRequestBody(
+          parsed as Record<string, unknown>,
+          "client_metadata",
+        ),
+      )
+    } catch {
+      return "[REDACTED]"
+    }
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return value
+  }
+  return sanitizeRequestBody(
+    value as Record<string, unknown>,
+    "client_metadata",
+  )
+}
+
+function sanitizeClaudeUserMetadata(value: unknown): unknown {
+  if (typeof value !== "string") return "[REDACTED]"
+  try {
+    const parsed = JSON.parse(value) as unknown
+    if (
+      typeof parsed !== "object"
+      || parsed === null
+      || Array.isArray(parsed)
+    ) {
+      return "[REDACTED]"
+    }
+    return JSON.stringify(
+      sanitizeRequestBody(parsed as Record<string, unknown>, "client_metadata"),
+    )
+  } catch {
+    return "[REDACTED]"
+  }
 }
 
 /**
