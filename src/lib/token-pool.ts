@@ -225,11 +225,16 @@ export class TokenPool {
       return eligible[0]
     }
 
-    return eligible.reduce((winner, candidate) => {
-      const winnerScore = this.rendezvousScore(clientSessionId, winner.id)
+    let winner = eligible[0]
+    let winnerScore = this.rendezvousScore(clientSessionId, winner.id)
+    for (const candidate of eligible.slice(1)) {
       const candidateScore = this.rendezvousScore(clientSessionId, candidate.id)
-      return candidateScore > winnerScore ? candidate : winner
-    })
+      if (candidateScore > winnerScore) {
+        winner = candidate
+        winnerScore = candidateScore
+      }
+    }
+    return winner
   }
 
   /**

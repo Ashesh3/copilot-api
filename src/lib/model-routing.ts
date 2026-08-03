@@ -111,6 +111,11 @@ export function setModelRoutingOverridesForTest(
   isLoaded = true
 }
 
+export function resetModelRoutingOverridesForTest(): void {
+  routingConfig = {}
+  isLoaded = false
+}
+
 export async function getAllModelRoutingOverrides(): Promise<
   Array<ModelRoutingOverride>
 > {

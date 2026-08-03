@@ -1,7 +1,11 @@
-import { beforeEach, expect, test } from "bun:test"
+import { afterEach, beforeEach, expect, test } from "bun:test"
 import { createHash } from "node:crypto"
 
-import { setModelRoutingOverridesForTest } from "../src/lib/model-routing"
+import {
+  isModelEnabledForAccount,
+  resetModelRoutingOverridesForTest,
+  setModelRoutingOverridesForTest,
+} from "../src/lib/model-routing"
 import * as tokenPoolModule from "../src/lib/token-pool"
 
 const MODEL_A = "model-a"
@@ -50,6 +54,19 @@ function expectedRendezvousAccount(
 
 beforeEach(() => {
   setModelRoutingOverridesForTest({})
+})
+
+afterEach(() => {
+  resetModelRoutingOverridesForTest()
+})
+
+test("resets model-routing test overrides after isolated use", () => {
+  setModelRoutingOverridesForTest({ [MODEL_A]: { "1": false } })
+  expect(isModelEnabledForAccount(MODEL_A, 1)).toBe(false)
+
+  resetModelRoutingOverridesForTest()
+
+  expect(isModelEnabledForAccount(MODEL_A, 1)).toBe(true)
 })
 
 test("uses a 120-second buffer when scheduling token refresh", () => {
