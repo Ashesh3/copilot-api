@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, expect, test } from "bun:test"
+import { afterAll, beforeAll, expect, spyOn, test } from "bun:test"
 
 import type { Account } from "../src/lib/token-pool"
 import type { ModelRouting } from "../ui/src/lib/types"
@@ -13,24 +13,40 @@ import {
 } from "./helpers/admin-session"
 
 const ACCOUNT_ID = 8301
+const ACCOUNT_WITHOUT_USERNAME_ID = 8302
 const GITHUB_TOKEN = "dashboard-model-routing-secret-token"
+const GITHUB_TOKEN_WITHOUT_USERNAME =
+  "dashboard-model-routing-second-secret-token"
 
-let account: Account
 let adminSession: TestAdminSession
+const accounts: Array<Account> = [
+  {
+    id: ACCOUNT_ID,
+    accountType: "individual",
+    githubToken: GITHUB_TOKEN,
+    githubUsername: "octocat",
+    healthy: true,
+    models: new Set(["dashboard-routing-model"]),
+    modelsData: [],
+  },
+  {
+    id: ACCOUNT_WITHOUT_USERNAME_ID,
+    accountType: "business",
+    githubToken: GITHUB_TOKEN_WITHOUT_USERNAME,
+    healthy: false,
+    models: new Set(),
+    modelsData: [],
+  },
+]
+const getAllAccountsSpy = spyOn(tokenPool, "getAllAccounts")
 
 beforeAll(async () => {
   adminSession = await createTestAdminSession()
-  account = tokenPool.addAccount(GITHUB_TOKEN, "individual", ACCOUNT_ID)
-  account.githubUsername = "octocat"
-  account.healthy = true
-  account.models = new Set(["dashboard-routing-model"])
+  getAllAccountsSpy.mockReturnValue(accounts)
 })
 
 afterAll(() => {
-  account.githubUsername = undefined
-  account.healthy = false
-  account.models.clear()
-  account.modelsData.length = 0
+  getAllAccountsSpy.mockRestore()
   resetTestAdminSession()
 })
 
@@ -48,6 +64,9 @@ test("model routing returns account usernames without GitHub tokens", async () =
   const listedAccount = body.accounts.find(
     (candidate) => candidate.id === ACCOUNT_ID,
   )
+  const accountWithoutUsername = body.accounts.find(
+    (candidate) => candidate.id === ACCOUNT_WITHOUT_USERNAME_ID,
+  )
 
   expect(response.status).toBe(200)
   expect(listedAccount).toEqual({
@@ -57,6 +76,19 @@ test("model routing returns account usernames without GitHub tokens", async () =
     healthy: true,
     modelsCount: 1,
   })
-  expect(JSON.stringify(body)).not.toContain(GITHUB_TOKEN)
-  expect(Object.hasOwn(listedAccount ?? {}, "githubToken")).toBe(false)
+  expect(accountWithoutUsername).toEqual({
+    id: ACCOUNT_WITHOUT_USERNAME_ID,
+    accountType: "business",
+    healthy: false,
+    modelsCount: 0,
+  })
+  expect(Object.hasOwn(accountWithoutUsername ?? {}, "githubUsername")).toBe(
+    false,
+  )
+  expect(
+    body.accounts.every((account) => !Object.hasOwn(account, "githubToken")),
+  ).toBe(true)
+  const serializedBody = JSON.stringify(body)
+  expect(serializedBody).not.toContain(GITHUB_TOKEN)
+  expect(serializedBody).not.toContain(GITHUB_TOKEN_WITHOUT_USERNAME)
 })
