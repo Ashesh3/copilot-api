@@ -17,7 +17,7 @@ import { state } from "../src/lib/state"
 import { tokenPool } from "../src/lib/token-pool"
 
 const originalFetch = globalThis.fetch
-const queuedResults: Array<Error | Response> = []
+const queuedResults: Array<Error | Promise<Response> | Response> = []
 const capturedRequests: Array<{ url: string; init?: RequestInit }> = []
 
 function getRequestUrl(url: string | URL | Request): string {
@@ -45,6 +45,10 @@ const fetchMock = mock((url: string | URL | Request, init?: RequestInit) => {
 
   return next
 })
+
+function flushPendingGitHubLookup(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0))
+}
 
 function createModel(id: string): Model {
   return {
@@ -216,6 +220,7 @@ test("disables pooling for multi-token model discovery", async () => {
   )
 
   await tokenPool.initializeAccount(account)
+  await flushPendingGitHubLookup()
 
   expect(capturedRequests[1]?.url).toContain("/models")
   expect(capturedRequests[1]?.init?.keepalive).toBe(false)
@@ -247,6 +252,7 @@ test("resolves the GitHub username during account initialization", async () => {
   )
 
   await tokenPool.initializeAccount(account)
+  await flushPendingGitHubLookup()
 
   queuedResults.push(
     new Response(
@@ -265,7 +271,73 @@ test("resolves the GitHub username during account initialization", async () => {
   expect(capturedRequests[2]?.init?.headers).toMatchObject({
     authorization: "token github-username-token",
   })
-  expect(capturedRequests[2]?.init?.signal).toBeInstanceOf(AbortSignal)
+  expect(
+    capturedRequests.filter(
+      (request) => request.url === "https://api.github.com/user",
+    ),
+  ).toHaveLength(1)
+})
+
+test("does not block account initialization while GitHub username lookup is pending", async () => {
+  const account = tokenPool.addAccount(
+    "github-username-deferred-token",
+    "individual",
+    1114,
+  )
+  let resolveGitHubUser!: (response: Response) => void
+  const deferredGitHubUser = new Promise<Response>((resolve) => {
+    resolveGitHubUser = resolve
+  })
+  queuedResults.push(
+    new Response(
+      JSON.stringify({
+        token: "copilot-username-deferred-token",
+        expires_at: 1_900_000_000,
+        refresh_in: 1800,
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    ),
+    new Response(JSON.stringify({ object: "list", data: [] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }),
+    deferredGitHubUser,
+  )
+
+  const initialization = tokenPool.initializeAccount(account)
+  let raceTimer: ReturnType<typeof setTimeout> | undefined
+  try {
+    const outcome = await Promise.race([
+      initialization.then(() => "initialized" as const),
+      new Promise<"lookup-pending">((resolve) => {
+        raceTimer = setTimeout(() => resolve("lookup-pending"), 50)
+      }),
+    ])
+
+    expect(outcome).toBe("initialized")
+    expect(account.healthy).toBe(true)
+    expect(account.githubUsername).toBeUndefined()
+    expect(
+      capturedRequests.filter(
+        (request) => request.url === "https://api.github.com/user",
+      ),
+    ).toHaveLength(1)
+  } finally {
+    if (raceTimer) {
+      clearTimeout(raceTimer)
+    }
+    resolveGitHubUser(
+      new Response(JSON.stringify({ login: "deferred-user" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    await initialization
+  }
+
+  await flushPendingGitHubLookup()
+
+  expect(account.githubUsername).toBe("deferred-user")
   expect(
     capturedRequests.filter(
       (request) => request.url === "https://api.github.com/user",
@@ -299,6 +371,7 @@ test("keeps an account healthy when GitHub username lookup fails", async () => {
   let warningOutput: string
   try {
     await tokenPool.initializeAccount(account)
+    await flushPendingGitHubLookup()
     warningOutput = warnSpy.mock.calls
       .map((args) => args.map(String).join(" "))
       .join("\n")
@@ -340,6 +413,7 @@ test("redacts arbitrary GitHub username lookup error messages", async () => {
   let warningOutput: string
   try {
     await tokenPool.initializeAccount(account)
+    await flushPendingGitHubLookup()
     warningOutput = warnSpy.mock.calls
       .map((args) => args.map(String).join(" "))
       .join("\n")

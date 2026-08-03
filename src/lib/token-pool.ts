@@ -121,7 +121,7 @@ export class TokenPool {
     // eslint-disable-next-line require-atomic-updates
     account.models = new Set(modelsResponse.data.map((m) => m.id))
 
-    await this.resolveGitHubUsername(account)
+    void this.resolveGitHubUsername(account)
 
     consola.info(
       `Account #${account.id} (${account.accountType}): ${account.models.size} models available`,
@@ -405,10 +405,7 @@ export class TokenPool {
 
   private async resolveGitHubUsername(account: Account): Promise<void> {
     try {
-      const user = await getGitHubUser(
-        account.githubToken,
-        AbortSignal.timeout(5_000),
-      )
+      const user = await getGitHubUser(account.githubToken)
       // eslint-disable-next-line require-atomic-updates
       account.githubUsername = user.login
     } catch (error) {
