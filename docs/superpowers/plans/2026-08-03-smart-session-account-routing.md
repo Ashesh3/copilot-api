@@ -46,7 +46,7 @@ fallbacks, including malformed metadata.
 
 - [ ] **Step 2: Run the unit test and verify RED**
 
-Run: `bun test tests/routing-affinity.test.ts`  
+Run: `bun test tests/routing-affinity.test.ts`
 Expected: FAIL because `~/lib/routing-affinity` does not exist.
 
 - [ ] **Step 3: Implement the affinity module**
@@ -59,7 +59,7 @@ must never overwrite an existing higher-priority value. Preserve
 
 - [ ] **Step 4: Run the unit test and verify GREEN**
 
-Run: `bun test tests/routing-affinity.test.ts`  
+Run: `bun test tests/routing-affinity.test.ts`
 Expected: PASS.
 
 - [ ] **Step 5: Write and verify an HTTP ingress regression test RED**
@@ -100,7 +100,7 @@ account.
 
 - [ ] **Step 2: Run and verify RED**
 
-Run: `bun test tests/token-pool.test.ts`  
+Run: `bun test tests/token-pool.test.ts`
 Expected: the distribution/minimal-remapping expectations fail under modulo
 hashing and first-account fallback remains green.
 
@@ -113,7 +113,7 @@ first-account behavior when affinity is absent.
 
 - [ ] **Step 4: Run and verify GREEN**
 
-Run: `bun test tests/token-pool.test.ts`  
+Run: `bun test tests/token-pool.test.ts`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -140,7 +140,7 @@ snapshots (the module should expose no snapshot API).
 
 - [ ] **Step 2: Run and verify RED**
 
-Run: `bun test tests/routing-affinity-leases.test.ts`  
+Run: `bun test tests/routing-affinity-leases.test.ts`
 Expected: FAIL because the module is absent.
 
 - [ ] **Step 3: Implement the bounded store and verify GREEN**
@@ -159,7 +159,7 @@ second selection for failover.
 
 - [ ] **Step 5: Run and verify RED**
 
-Run: `bun test tests/account-router.test.ts tests/account-router-telemetry.test.ts`  
+Run: `bun test tests/account-router.test.ts tests/account-router-telemetry.test.ts`
 Expected: follow-up calls return to the hash winner because the router does not
 consult leases.
 
@@ -199,7 +199,7 @@ stability through captured authorization headers.
 
 - [ ] **Step 2: Run and verify RED**
 
-Run: `bun test tests/create-chat-completions.test.ts tests/create-responses.test.ts`  
+Run: `bun test tests/create-chat-completions.test.ts tests/create-responses.test.ts`
 Expected: metadata-only follow-ups use default selection instead of sticky
 selection.
 
@@ -219,7 +219,7 @@ and a handshake header beats conflicting frame metadata.
 
 - [ ] **Step 5: Run and verify RED**
 
-Run: `bun test tests/responses-websocket.test.ts`  
+Run: `bun test tests/responses-websocket.test.ts`
 Expected: Copilot/header and per-frame affinity expectations fail.
 
 - [ ] **Step 6: Implement WebSocket affinity and verify GREEN**
@@ -255,7 +255,7 @@ session IDs never appear in serialized snapshots.
 
 - [ ] **Step 2: Run and verify RED**
 
-Run: `bun test tests/routing-telemetry.test.ts tests/account-router-telemetry.test.ts tests/dashboard-usage-routing.test.ts`  
+Run: `bun test tests/routing-telemetry.test.ts tests/account-router-telemetry.test.ts tests/dashboard-usage-routing.test.ts`
 Expected: types/expectations fail because snapshots have no affinity summary.
 
 - [ ] **Step 3: Implement telemetry aggregation and verify GREEN**
@@ -274,13 +274,13 @@ supporting text. Do not display IDs.
 
 - [ ] **Step 5: Build UI and regenerate embedded page**
 
-Run: `npm run typecheck --prefix ui && npm run build --prefix ui`  
+Run: `npm run typecheck --prefix ui && npm run build --prefix ui`
 Expected: PASS and update `src/routes/dashboard/page-generated.ts` through the
 existing build pipeline.
 
 - [ ] **Step 6: Run dashboard tests and commit**
 
-Run: `bun test tests/dashboard-usage-routing.test.ts tests/routing-telemetry.test.ts tests/account-router-telemetry.test.ts`  
+Run: `bun test tests/dashboard-usage-routing.test.ts tests/routing-telemetry.test.ts tests/account-router-telemetry.test.ts`
 Expected: PASS.
 
 ```powershell
@@ -333,4 +333,3 @@ Repeat Step 2. Completion claims require this post-review output.
 Push `codex/smart-session-routing` and open a PR against `master` summarizing the
 root cause, protocol-aware affinity, rendezvous selection, failover leases,
 redacted observability, and verification evidence.
-

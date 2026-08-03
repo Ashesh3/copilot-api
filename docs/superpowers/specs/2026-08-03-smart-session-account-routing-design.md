@@ -1,6 +1,6 @@
 # Smart Session Account Routing Design
 
-**Date:** 2026-08-03  
+**Date:** 2026-08-03
 **Status:** Approved
 
 ## Problem
@@ -202,4 +202,3 @@ Tests must prove:
 - telemetry exposes source counts without raw IDs;
 - existing retry budgets, model eligibility, and single-token behavior remain
   unchanged.
-
