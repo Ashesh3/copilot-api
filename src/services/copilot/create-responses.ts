@@ -17,6 +17,11 @@ import { getUnsupportedRequestParameters } from "~/lib/model-settings"
 import { usesImplicitReasoningDefault } from "~/lib/model-suffix"
 import { PRE_HEADER_MAX_DELAY_SECONDS } from "~/services/copilot/transport-retry"
 
+import {
+  fitResponsesCompactionPayload,
+  isResponsesCompactionRequest,
+} from "./compaction-payload"
+
 export interface ResponsesPayload {
   model: string
   instructions?: string | null
@@ -581,6 +586,7 @@ interface ResponsesRequestOptions {
   vision: boolean
   initiator: "agent" | "user"
   signal?: AbortSignal
+  compaction?: boolean
 }
 
 /**
@@ -630,6 +636,32 @@ function sanitizeResponsesPayload(
     }
   }
   return result
+}
+
+function prepareResponsesPayload(
+  payload: ResponsesPayload,
+  fitCompactionPayload: boolean,
+): Record<string, unknown> {
+  const sanitized = sanitizeResponsesPayload(payload)
+  if (!fitCompactionPayload) return sanitized
+
+  const fitted = fitResponsesCompactionPayload(sanitized)
+  if (fitted.reduced) {
+    consola.warn("Reduced oversized Responses compaction payload", {
+      originalBytes: fitted.originalBytes,
+      finalBytes: fitted.finalBytes,
+      omittedBinaryBlocks: fitted.omittedBinaryBlocks,
+      truncatedToolOutputBytes: fitted.truncatedToolOutputBytes,
+    })
+  }
+  return fitted.payload
+}
+
+function shouldFitResponsesCompactionPayload(
+  payload: ResponsesPayload,
+  explicitlyRequested: boolean | undefined,
+): boolean {
+  return explicitlyRequested === true || isResponsesCompactionRequest(payload)
 }
 
 function clampMaxOutputTokens(payload: ResponsesPayload): void {
@@ -813,8 +845,9 @@ function removeUnsupportedRequestParameters(payload: ResponsesPayload): void {
 
 export const createResponses = async (
   payload: ResponsesPayload,
-  { vision, initiator, signal }: ResponsesRequestOptions,
+  options: ResponsesRequestOptions,
 ): Promise<CreateResponsesReturn> => {
+  const { vision, initiator, signal } = options
   signal?.throwIfAborted()
   let headerOpts = { vision, initiator }
 
@@ -847,7 +880,14 @@ export const createResponses = async (
   // Strip unknown fields — only forward fields the Copilot API recognizes.
   // The [key: string]: unknown index signature on ResponsesPayload allows
   // arbitrary client fields to leak through; sanitize before forwarding.
-  let sanitizedPayload = sanitizeResponsesPayload(payload)
+  const shouldFitCompactionPayload = shouldFitResponsesCompactionPayload(
+    payload,
+    options.compaction,
+  )
+  let sanitizedPayload = prepareResponsesPayload(
+    payload,
+    shouldFitCompactionPayload,
+  )
 
   let { response } = await routedFetch(
     "/responses",
@@ -862,7 +902,10 @@ export const createResponses = async (
 
   if (response.status === 413 && vision && removeInputImages(payload)) {
     consola.warn("413 Payload Too Large with images, retrying without images")
-    sanitizedPayload = sanitizeResponsesPayload(payload)
+    sanitizedPayload = prepareResponsesPayload(
+      payload,
+      shouldFitCompactionPayload,
+    )
     headerOpts = { vision: false, initiator }
     const { response: retryResponse } = await routedFetch(
       "/responses",
