@@ -22,7 +22,7 @@ Copilot Runtime also caps individually persisted model-facing binary results at 
 
 ## Goals
 
-- Keep every outbound native CAPI Responses request at or below a 30 MiB serialized JSON target, leaving 2 MiB of headroom below CAPI's 32 MiB hard cap.
+- Keep every outbound native CAPI Responses request below CAPI's 32 MiB serialized JSON hard cap, targeting at most 32 MiB minus a 64 KiB recovery margin after transformation. This preserves the observed 31.862 MiB non-image history while leaving structural slack.
 - Apply recovery to ordinary HTTP and Responses WebSocket turns after all local continuation rehydration, attachment normalization, compaction-boundary expansion, and request sanitization.
 - Preserve inline image meaning by downscaling images before removing any binary attachment.
 - Prefer removing historical binaries before current-turn binaries.
@@ -47,7 +47,7 @@ Copilot Runtime also caps individually persisted model-facing binary results at 
 `createResponses` remains the authoritative final native Responses boundary. It already runs after attachment normalization and request sanitization and is shared by HTTP and WebSocket callers. It will prepare the exact outbound object asynchronously:
 
 - compaction requests continue through `fitResponsesCompactionPayload` exactly as in PR #51;
-- ordinary requests at or below 30 MiB return the original sanitized object reference;
+- ordinary requests at or below the 32 MiB hard cap return the original sanitized object reference;
 - oversized ordinary requests enter binary-only recovery before the first upstream dispatch.
 
 No upstream 413 is required to trigger recovery. The legacy post-413 image-removal retry is replaced by the pre-dispatch recovery for CAPI Responses so nested tool-result images are handled and the first upstream request is already safe.
@@ -76,7 +76,7 @@ Recovery never silently classifies a dropped/undecodable image as a successful d
 
 ### Stage 2: binary removal
 
-If the exact body remains above 30 MiB, the utility removes inline binary blocks in two passes:
+If the exact body remains above the 32 MiB hard cap after downscaling, the utility removes inline binary blocks in two passes:
 
 1. historical binary blocks outside the latest active turn;
 2. binary blocks in the latest active turn, only if historical removal is insufficient.
@@ -90,11 +90,11 @@ Removed blocks become shape-valid text breadcrumbs rather than disappearing:
 
 The recursive traversal covers `input_image`, `input_file`, and `computer_screenshot`, including binary blocks nested in tool-result arrays. External textual URLs and file IDs remain untouched because they do not contain inline binary bytes.
 
-After each pass the complete JSON body is remeasured. The utility stops immediately when it fits, so current-turn media is retained whenever historical recovery is sufficient.
+After each pass the complete JSON body is remeasured. A transformed body must fit within 32 MiB minus the 64 KiB margin. The utility stops immediately when it reaches that target, so current-turn media is retained whenever historical recovery is sufficient.
 
 ### Unrecoverable requests
 
-If the body remains above 30 MiB after all inline binaries are recovered or removed, the gateway returns a local 413 with safe code `responses_payload_too_large`. The envelope reports `max_bytes` and `payload_bytes` but contains no request content. This is distinct from `compaction_payload_too_large`, because ordinary-turn recovery is binary-only and does not truncate textual tool results.
+If the body remains above the transformed target after all inline binaries are recovered or removed, the gateway returns a local 413 with safe code `responses_payload_too_large`. The envelope reports the 32 MiB hard `max_bytes`, the 64 KiB `recovery_margin_bytes`, and `payload_bytes` but contains no request content. This is distinct from `compaction_payload_too_large`, because ordinary-turn recovery is binary-only and does not truncate textual tool results.
 
 ## Data Flow
 
@@ -102,11 +102,11 @@ If the body remains above 30 MiB after all inline binaries are recovered or remo
 2. Endpoint routing selects native Responses.
 3. `createResponses` normalizes attachment representations and sanitizes known fields.
 4. Compaction request: existing PR #51 fitting runs.
-5. Ordinary request: exact serialized bytes are measured.
+5. Ordinary request: exact serialized bytes are measured against the 32 MiB hard cap.
 6. If oversized, inline images are downscaled and the full body is remeasured.
 7. If still oversized, historical binaries are replaced with breadcrumbs and remeasured.
 8. If still oversized, current-turn binaries are replaced and remeasured.
-9. A body at or below 30 MiB is dispatched once. Otherwise a safe local 413 is returned without contacting GitHub.
+9. An unchanged body at or below 32 MiB is dispatched once. A transformed body at or below 32 MiB minus 64 KiB is dispatched once. Otherwise a safe local 413 is returned without contacting GitHub.
 
 ## Observability
 
@@ -132,7 +132,7 @@ Logs never include base64 data, filenames, prompt text, tool output, credentials
 Testing follows red-green TDD and covers:
 
 - an ordinary small Responses payload returning the original reference unchanged;
-- the observed shape: a roughly 32 MiB history plus a nested tool-result PNG producing a roughly 38 MiB request, fitted below 30 MiB while the image remains present and decodable;
+- the observed shape: a roughly 31.862 MiB non-image history plus a nested tool-result PNG producing a roughly 38 MiB request, fitted below the 32 MiB-minus-64 KiB transformed target while the image remains present and decodable;
 - exact-body accounting including JSON structure and base64 expansion;
 - multiple images sharing the available budget;
 - historical binaries being removed before current-turn binaries;
@@ -141,8 +141,8 @@ Testing follows red-green TDD and covers:
 - external URLs/file IDs remaining unchanged;
 - malformed/unsupported image data taking the explicit removal path;
 - ordinary text/tool-result bodies never being truncated;
-- a deterministic safe local 413 when non-binary content alone exceeds 30 MiB;
-- native HTTP and WebSocket continuation paths dispatching no body above 30 MiB;
+- a deterministic safe local 413 when non-binary content alone cannot fit below 32 MiB minus the recovery margin;
+- native HTTP and WebSocket continuation paths dispatching no body at or above 32 MiB;
 - no double upstream dispatch for a body known to be oversized; and
 - all existing compaction, attachment, retry, marker/bootstrap, and ordinary-small-request regressions.
 
@@ -150,4 +150,4 @@ Focused tests, the full Bun suite, lint, type checking, build, production depend
 
 ## Rollout
 
-The pull request changes request preparation and tests only. After merge, deploy through the normal `update.sh` workflow. Live validation should send an ordinary-turn synthetic payload shaped like the incident (large history plus a tool-result screenshot), verify a single successful upstream request below 30 MiB, and confirm the screenshot is downscaled rather than removed when resizing is sufficient. A text-only oversized control should return the safe local error without an upstream call.
+The pull request changes request preparation and tests only. After merge, deploy through the normal `update.sh` workflow. Live validation should send an ordinary-turn synthetic payload shaped like the incident (roughly 31.862 MiB of non-image history plus a tool-result screenshot), verify a single successful upstream request below 32 MiB with the 64 KiB margin, and confirm the screenshot is downscaled rather than removed when resizing is sufficient. A text-only oversized control should return the safe local error without an upstream call.
