@@ -4,7 +4,7 @@
 
 **Goal:** Prevent GitHub Copilot's upstream 413 from blocking first/manual compaction turns by fitting only oversized compaction payloads below 30 MiB while preserving conversational state and tool semantics.
 
-**Architecture:** Add an immutable Responses compaction reducer beside the Copilot transport. It detects Codex compaction metadata, elides inline attachment bytes, truncates the largest tool-result text first, and raises a local typed 413 if preserved content alone cannot fit. `createResponses` enforces the exact sanitized post-normalization payload; `/responses/compact` also pre-fits its shared input for the ChatCompletions fallback.
+**Architecture:** Add immutable, dialect-aware compaction reducers beside the Copilot transport. They detect Codex compaction metadata, elide inline attachment bytes, truncate the largest tool-result text first, and raise a safe local typed 413 if preserved content alone cannot fit. The Responses, ChatCompletions, and native Messages transports each enforce their exact sanitized post-normalization payload; HTTP, WebSocket, and `/responses/compact` also pre-fit shared input before endpoint fallback.
 
 **Tech Stack:** TypeScript, Bun test runner, Hono, existing `HTTPError`, Responses WebSocket continuation snapshots.
 
@@ -15,7 +15,11 @@
 - Create `src/services/copilot/compaction-payload.ts`: compaction detection, UTF-8 byte measurement, immutable attachment elision, largest-first tool-output truncation, and local 413 construction.
 - Create `tests/responses-compaction-payload.test.ts`: focused reducer and metadata tests using small injected budgets.
 - Modify `src/services/copilot/create-responses.ts`: identify compaction turns and enforce the final sanitized payload budget after attachment normalization.
+- Modify `src/services/copilot/create-chat-completions.ts`: enforce the final fallback payload and reuse the fitted body across image and overload retries.
+- Modify `src/services/copilot/create-anthropic-messages.ts`: enforce the final native Messages payload.
+- Modify `src/routes/responses/handler.ts` and `src/routes/responses/websocket.ts`: pre-fit before endpoint fallback and preserve otherwise-unrepresentable custom tool context on compaction turns.
 - Modify `src/routes/responses/compact-handler.ts`: pre-fit the summary request and explicitly mark the native transport call as compaction.
+- Modify `src/lib/error.ts`: expose only the deterministic safe local 413 envelope while retaining upstream error redaction.
 - Modify `tests/responses-websocket.test.ts`: reproduce a greater-than-32-MiB rehydrated WebSocket compaction request.
 - Modify `tests/responses-compact-affinity.test.ts`: prove `/responses/compact` fits an oversized tool result before the mocked upstream call.
 - Modify `docs/superpowers/specs/2026-08-06-pre-compaction-payload-budget-design.md`: record final transport-boundary enforcement.

@@ -47,6 +47,10 @@ import { state } from "~/lib/state"
 import { tokenPool } from "~/lib/token-pool"
 import { emitResponsesToolSpans } from "~/lib/tool-spans"
 import {
+  fitResponsesCompactionPayload,
+  isResponsesCompactionRequest,
+} from "~/services/copilot/compaction-payload"
+import {
   createAnthropicMessages,
   modelSupportsNativeMessages,
 } from "~/services/copilot/create-anthropic-messages"
@@ -60,6 +64,7 @@ import {
 import {
   createResponses,
   type FunctionTool,
+  type ResponseInputItem,
   type ResponseOutputFunctionCall,
   type ResponseOutputItem,
   type ResponseOutputMessage,
@@ -844,6 +849,7 @@ const createCCStreamState = (model: string): CCStreamState => ({
 
 const convertInputToMessages = (
   input: ResponsesPayload["input"],
+  preserveCustomToolContext: boolean,
 ): ChatCompletionsPayload["messages"] => {
   const messages: ChatCompletionsPayload["messages"] = []
 
@@ -871,6 +877,49 @@ const convertInputToMessages = (
     }
   }
 
+  const convertCustomItem = (
+    itemType: unknown,
+    item: ResponseInputItem,
+  ): boolean => {
+    if (!preserveCustomToolContext) return false
+    if (itemType === "custom_tool_call") {
+      const call = item as {
+        call_id: string
+        input?: string
+        name: string
+      }
+      flushToolCalls()
+      messages.push({
+        role: "assistant",
+        content:
+          `[Custom tool call ${call.call_id}: `
+          + `${call.name}(${call.input ?? ""})]`,
+      })
+      return true
+    }
+    if (itemType === "custom_tool_call_output") {
+      const output = item as { call_id: string; output: unknown }
+      messages.push({
+        role: "user",
+        content:
+          `[Custom tool result ${output.call_id}: `
+          + `${stringifyResponsesToolOutput(output.output)}]`,
+      })
+      return true
+    }
+    if (itemType === "computer_call_output") {
+      const output = item as { call_id?: string; output: unknown }
+      messages.push({
+        role: "user",
+        content:
+          `[Computer tool result ${output.call_id ?? "unknown"}: `
+          + `${stringifyResponsesToolOutput(output.output)}]`,
+      })
+      return true
+    }
+    return false
+  }
+
   for (const item of input) {
     const itemType = (item as { type?: string }).type
     if (itemType === "reasoning") continue
@@ -883,6 +932,7 @@ const convertInputToMessages = (
       })
       continue
     }
+    if (convertCustomItem(itemType, item)) continue
     flushToolCalls()
     if (itemType === "function_call_output") {
       const fco = item as { call_id: string; output: unknown }
@@ -955,6 +1005,9 @@ const convertFunctionCallOutputToCC = (
   return JSON.stringify(output)
 }
 
+const stringifyResponsesToolOutput = (output: unknown): string =>
+  typeof output === "string" ? output : JSON.stringify(output)
+
 const convertMessageItem = (
   item: unknown,
   messages: ChatCompletionsPayload["messages"],
@@ -1017,8 +1070,12 @@ const convertToolChoiceForCC = (
 
 export const responsesToChatCompletions = (
   payload: ResponsesPayload,
+  options: { preserveCustomToolContext?: boolean } = {},
 ): ChatCompletionsPayload => {
-  const messages = convertInputToMessages(payload.input)
+  const messages = convertInputToMessages(
+    payload.input,
+    options.preserveCustomToolContext ?? false,
+  )
 
   if (payload.instructions) {
     messages.unshift({ role: "system", content: payload.instructions })
@@ -1479,6 +1536,7 @@ const handleFallbackViaNativeMessages = async (
   c: Context,
   options: {
     ccPayload: ChatCompletionsPayload & { model: string }
+    compaction: boolean
     isStream: boolean
     responseModel: string
     selectedModel?: Model
@@ -1503,6 +1561,7 @@ const handleFallbackViaNativeMessages = async (
   anthropicPayload.stream = false
 
   const response = (await createAnthropicMessages(anthropicPayload, {
+    compaction: options.compaction,
     signal: c.req.raw.signal,
   })) as AnthropicResponse
 
@@ -1543,7 +1602,20 @@ const handleWithChatCompletions = async (
   payload: ResponsesPayload,
   requestedModel?: string,
 ) => {
-  const ccPayload = responsesToChatCompletions(payload)
+  const compaction = isResponsesCompactionRequest(payload)
+  const fitted = compaction ? fitResponsesCompactionPayload(payload) : null
+  const fallbackPayload = fitted?.payload ?? payload
+  if (fitted?.reduced) {
+    logger.warn("Reduced oversized Responses fallback compaction payload", {
+      originalBytes: fitted.originalBytes,
+      finalBytes: fitted.finalBytes,
+      omittedBinaryBlocks: fitted.omittedBinaryBlocks,
+      truncatedToolOutputBytes: fitted.truncatedToolOutputBytes,
+    })
+  }
+  const ccPayload = responsesToChatCompletions(fallbackPayload, {
+    preserveCustomToolContext: compaction,
+  })
   const responseModel = requestedModel ?? payload.model
   const needsWebSearch =
     ccPayload.tools?.some((tool) => tool.function.name === "web_search")
@@ -1559,7 +1631,8 @@ const handleWithChatCompletions = async (
     if (modelSupportsNativeMessages(selectedModel)) {
       return await handleFallbackViaNativeMessages(c, {
         ccPayload: { ...ccPayload, model: payload.model },
-        isStream: Boolean(payload.stream),
+        compaction,
+        isStream: Boolean(fallbackPayload.stream),
         responseModel,
         selectedModel,
       })
@@ -1567,7 +1640,7 @@ const handleWithChatCompletions = async (
   }
 
   // Non-streaming: span wraps the entire call + response processing
-  if (!payload.stream) {
+  if (!fallbackPayload.stream) {
     return await Sentry.startSpan(
       createSentryChatSpanOptions({
         inputMessages: ccPayload.messages,
@@ -1575,6 +1648,7 @@ const handleWithChatCompletions = async (
       }),
       async (span) => {
         const response = await createChatCompletions(ccPayload, {
+          compaction,
           signal: c.req.raw.signal,
         })
 
@@ -1589,6 +1663,11 @@ const handleWithChatCompletions = async (
           needsWebSearch ?
             await resolveWebSearchCalls(initialResponse, ccPayload, {
               abortSignal: c.req.raw.signal,
+              createCompletion: async (nextPayload) =>
+                (await createChatCompletions(nextPayload, {
+                  compaction,
+                  signal: c.req.raw.signal,
+                })) as ChatCompletionResponse,
             })
           : initialResponse
         logger.debug(
@@ -1629,6 +1708,7 @@ const handleWithChatCompletions = async (
   if (needsWebSearch) {
     return await handleStreamingChatFallbackWebSearch(c, {
       ccPayload,
+      compaction,
       responseModel,
     })
   }
@@ -1649,6 +1729,7 @@ const handleWithChatCompletions = async (
 
       try {
         const response = await createChatCompletions(ccPayload, {
+          compaction,
           signal: c.req.raw.signal,
         })
 
@@ -1736,15 +1817,22 @@ async function handleStreamingChatFallbackWebSearch(
   c: Context,
   options: {
     ccPayload: ChatCompletionsPayload
+    compaction: boolean
     responseModel: string
   },
 ): Promise<Response> {
   const payload = { ...options.ccPayload, stream: false, stream_options: null }
   const initial = (await createChatCompletions(payload, {
+    compaction: options.compaction,
     signal: c.req.raw.signal,
   })) as ChatCompletionResponse
   const response = await resolveWebSearchCalls(initial, payload, {
     abortSignal: c.req.raw.signal,
+    createCompletion: async (nextPayload) =>
+      (await createChatCompletions(nextPayload, {
+        compaction: options.compaction,
+        signal: c.req.raw.signal,
+      })) as ChatCompletionResponse,
   })
   const result = chatCompletionToResponsesResult(
     response,

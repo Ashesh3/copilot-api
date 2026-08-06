@@ -32,21 +32,21 @@ The gateway will treat a request as a compaction-generation turn when either con
 
 Codex turn metadata may be an object or a JSON string stored under `x-codex-turn-metadata`. Malformed or unrelated metadata is not a compaction signal and must not change request handling.
 
-The same detection helper will cover HTTP and WebSocket requests at their shared Responses transport boundary. WebSocket reduction therefore happens after continuation rehydration and existing compaction-marker expansion. Final enforcement happens after attachment normalization and request sanitization, because that is the exact representation serialized upstream.
+The same detection helper covers HTTP and WebSocket requests before endpoint selection. WebSocket reduction therefore happens after continuation rehydration and existing compaction-marker expansion. Native Responses, ChatCompletions fallback, and native Messages fallback each enforce the budget again after their own attachment normalization and request sanitization, because those are the exact representations serialized upstream.
 
 ## Payload Budgeting
 
-The production budget is 30 MiB measured with `Buffer.byteLength(JSON.stringify(payload), "utf8")`. The reducer receives the complete outbound Responses payload so non-input fields are included in the measurement. It returns reduction statistics alongside the fitted payload: original bytes, final bytes, omitted binary blocks, and truncated tool-output bytes.
+The production budget is 30 MiB measured with `Buffer.byteLength(JSON.stringify(payload), "utf8")`. Dialect-specific reducers receive the complete outbound Responses, ChatCompletions, or Anthropic Messages payload so non-input fields are included in the measurement. They return reduction statistics alongside the fitted payload: original bytes, final bytes, omitted binary blocks, and truncated tool-output bytes.
 
 The reducer does nothing when the serialized payload is already within budget. When reduction is required, it works in two stages.
 
 ### Stage 1: Inline binary and image elision
 
-Inline `input_image`, `input_file`, and equivalent image/file blocks nested in tool outputs are replaced with a short text note that records the original block type and that its bytes were omitted for compaction. External textual URLs may remain when they do not embed data. Item order and surrounding text remain unchanged.
+Inline `input_image`, `input_file`, computer screenshots, and equivalent ChatCompletions or Anthropic image/file blocks are replaced with a short text note that records the original block type and that its bytes were omitted for compaction. External textual URLs may remain when they do not embed data. Item order and surrounding text remain unchanged.
 
 ### Stage 2: Largest-first tool-output truncation
 
-Only tool-result bodies are candidates: `function_call_output`, `custom_tool_call_output`, and their string or content-array output fields. Tool calls and command input are never truncated.
+Only tool-result bodies are candidates: Responses `function_call_output` and `custom_tool_call_output`, ChatCompletions tool-result messages and preserved custom-result text, and Anthropic `tool_result` content. Tool calls and command input are never truncated.
 
 Candidates are measured in UTF-8 bytes and processed largest first. Each truncated result retains:
 
@@ -60,16 +60,17 @@ If binary elision and safe tool-output truncation cannot bring the payload below
 
 ## Integration Points
 
-- A focused Responses utility module owns compaction detection, byte measurement, binary elision, and tool-output fitting.
-- `src/services/copilot/create-responses.ts` detects HTTP and WebSocket compaction turns and enforces the final budget after attachment normalization and request sanitization.
-- `src/routes/responses/compact-handler.ts` pre-fits the model payload used to generate the compacted summary so both native Responses and ChatCompletions fallback paths are bounded, then explicitly requests final transport enforcement for the native path.
+- A focused compaction utility module owns detection, byte measurement, dialect-aware binary elision, tool-output fitting, and the safe local 413.
+- `src/services/copilot/create-responses.ts`, `create-chat-completions.ts`, and `create-anthropic-messages.ts` enforce the exact final serialized dialect after normalization and sanitization. Retry paths reuse the fitted body rather than an earlier oversized body.
+- The HTTP and WebSocket Responses handlers pre-fit rehydrated compaction context before endpoint fallback and preserve custom tool calls/results as textual compaction context when ChatCompletions cannot represent them natively.
+- `src/routes/responses/compact-handler.ts` applies the same behavior to both native Responses and ChatCompletions fallback summary generation.
 - Existing `expandCompactionItems` behavior remains unchanged.
 
 Reduction logs contain counts and byte sizes only. They never include request content, tool output, credentials, or encoded binary data.
 
 ## Error Handling
 
-Invalid Codex metadata is ignored rather than failing an otherwise valid request. A payload that remains over budget after all allowed reductions raises an explicit typed HTTP error with status 413. WebSocket handling converts that error through the existing terminal error-frame path, so the client receives one deterministic failure instead of retries against the upstream ceiling.
+Invalid Codex metadata is ignored rather than failing an otherwise valid request. A payload that remains over budget after all allowed reductions raises an explicit local HTTP error with status 413 and the safe code `compaction_payload_too_large`; the normal upstream-error redaction behavior remains unchanged. WebSocket handling converts that error through the existing terminal error-frame path, so the client receives one deterministic failure instead of retries against the upstream ceiling.
 
 ## Testing
 
@@ -81,6 +82,7 @@ Testing follows red-green TDD and covers:
 - largest-first tool-result truncation with preserved IDs, call IDs, commands, prefix, suffix, and UTF-8 validity;
 - deterministic local 413 when preserved text alone exceeds the budget;
 - an actual greater-than-32-MiB WebSocket continuation that rehydrates to an oversized compaction request and reaches the mocked upstream below 30 MiB;
+- HTTP and WebSocket endpoint fallbacks, final ChatCompletions and native Messages serialization, and retry reuse of the fitted body;
 - `/responses/compact` using the same fitted payload behavior; and
 - existing post-marker bootstrap and tool-retention regressions.
 

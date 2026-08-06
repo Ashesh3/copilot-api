@@ -13,10 +13,8 @@ import {
 import { state } from "~/lib/state"
 import {
   type CompactionPayloadFitResult,
-  COMPACTION_PAYLOAD_MAX_BYTES,
   fitResponsesCompactionPayload,
 } from "~/services/copilot/compaction-payload"
-import { addPromptCaching } from "~/services/copilot/copilot-client"
 import {
   type ChatCompletionResponse,
   type ChatCompletionsPayload,
@@ -189,17 +187,26 @@ const convertSpecialItem = (
       break
     }
     case "function_call": {
-      const fc = item as { name?: string; arguments?: string }
+      const fc = item as {
+        call_id?: string
+        name?: string
+        arguments?: string
+      }
       messages.push({
         role: "assistant",
-        content: `[Tool call: ${fc.name ?? "unknown"}(${fc.arguments ?? ""})]`,
+        content:
+          `[Tool call ${fc.call_id ?? "unknown"}: `
+          + `${fc.name ?? "unknown"}(${fc.arguments ?? ""})]`,
       })
       break
     }
     case "function_call_output": {
-      const fco = item as { output?: string }
+      const fco = item as { call_id?: string; output?: string }
       const output = stringifyToolOutput(fco.output)
-      messages.push({ role: "user", content: `[Tool result: ${output}]` })
+      messages.push({
+        role: "user",
+        content: `[Tool result ${fco.call_id ?? "unknown"}: ${output}]`,
+      })
       break
     }
     case "reasoning": {
@@ -236,41 +243,6 @@ const reportCompactionReduction = (
     omittedBinaryBlocks: fitted.omittedBinaryBlocks,
     truncatedToolOutputBytes: fitted.truncatedToolOutputBytes,
   })
-}
-
-const createChatCompactionPayload = (
-  payload: ResponsesPayload,
-): {
-  fitted: CompactionPayloadFitResult<ResponsesPayload>
-  payload: ChatCompletionsPayload
-} => {
-  let sourceBudget = COMPACTION_PAYLOAD_MAX_BYTES
-
-  while (true) {
-    const fitted = fitResponsesCompactionPayload(payload, sourceBudget)
-    const input = fitted.payload.input as Array<ResponseInputItem>
-    const chatPayload: ChatCompletionsPayload = {
-      model: fitted.payload.model,
-      messages: [
-        {
-          role: "system",
-          content: fitted.payload.instructions ?? "",
-        },
-        ...convertInputToMessages(input),
-      ],
-      stream: false,
-      temperature: 0,
-    }
-    addPromptCaching(chatPayload.messages)
-
-    const chatBytes = Buffer.byteLength(JSON.stringify(chatPayload), "utf8")
-    if (chatBytes <= COMPACTION_PAYLOAD_MAX_BYTES) {
-      return { fitted, payload: chatPayload }
-    }
-
-    const overflowBytes = chatBytes - COMPACTION_PAYLOAD_MAX_BYTES
-    sourceBudget = Math.max(0, fitted.finalBytes - overflowBytes - 1)
-  }
 }
 
 export const handleCompact = async (c: Context) => {
@@ -350,13 +322,18 @@ export const handleCompact = async (c: Context) => {
       `[compact] Model ${model} does not support /responses, falling back to ChatCompletions`,
     )
     setRequestContext(c, { provider: "Compact→ChatCompletions" })
-    const prepared = createChatCompactionPayload(responsesPayload)
-    reportCompactionReduction(
-      "Reduced oversized compact fallback payload",
-      prepared.fitted,
-    )
+    const ccPayload: ChatCompletionsPayload = {
+      model,
+      messages: [
+        { role: "system", content: compactionPrompt },
+        ...convertInputToMessages(expandedInput),
+      ],
+      stream: false,
+      temperature: 0,
+    }
 
-    const response = await createChatCompletions(prepared.payload, {
+    const response = await createChatCompletions(ccPayload, {
+      compaction: true,
       signal: c.req.raw.signal,
     })
     const result = response as ChatCompletionResponse

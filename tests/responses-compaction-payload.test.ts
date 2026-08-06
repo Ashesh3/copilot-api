@@ -192,3 +192,107 @@ test("raises a local 413 when preserved content alone exceeds the budget", () =>
     "preserved conversation content",
   )
 })
+
+test("elides computer screenshots nested in tool output", () => {
+  const payload = {
+    model: "gpt-5.6-sol",
+    input: [
+      {
+        type: "computer_call_output",
+        call_id: "call_screenshot",
+        output: {
+          type: "computer_screenshot",
+          image_url: `data:image/png;base64,${"a".repeat(4096)}`,
+        },
+      },
+    ],
+  }
+
+  const result = fitResponsesCompactionPayload(payload, 512)
+  const serialized = JSON.stringify(result.payload)
+
+  expect(serialized).toContain("inline image bytes omitted during compaction")
+  expect(serialized).not.toContain("data:image/png;base64")
+  expect(result.omittedBinaryBlocks).toBe(1)
+})
+
+test("preserves textual input_file descriptors while eliding raw base64", () => {
+  const textual = {
+    model: "gpt-5.6-sol",
+    input: [
+      {
+        type: "input_file",
+        filename: "reference.pdf",
+        file_data: "https://example.com/reference.pdf",
+      },
+      {
+        type: "function_call_output",
+        call_id: "call_textual_file",
+        output: "reducible output ".repeat(400),
+      },
+    ],
+  }
+  const rawBase64 = {
+    model: "gpt-5.6-sol",
+    input: [
+      {
+        type: "input_file",
+        filename: "reference.pdf",
+        file_data: "a".repeat(4096),
+      },
+    ],
+  }
+
+  const textualResult = fitResponsesCompactionPayload(textual, 1700)
+  expect(textualResult.reduced).toBe(true)
+  expect(JSON.stringify(textualResult.payload)).toContain(
+    "https://example.com/reference.pdf",
+  )
+  expect(
+    JSON.stringify(fitResponsesCompactionPayload(rawBase64, 512).payload),
+  ).toContain("inline file bytes omitted during compaction")
+})
+
+test("does not introduce replacement characters for lone surrogates", () => {
+  const payload = {
+    model: "gpt-5.6-sol",
+    input: [
+      {
+        type: "function_call_output",
+        call_id: "call_surrogate",
+        output: `BEGIN\ud800${"x".repeat(7000)}\udc00END`,
+      },
+    ],
+  }
+
+  const result = fitResponsesCompactionPayload(payload, 1800)
+  const output = (result.payload.input[0] as { output: string }).output
+
+  expect(output).toStartWith("BEGIN\ud800")
+  expect(output).toEndWith("\udc00END")
+  expect(output.includes("�")).toBe(false)
+})
+
+test("keeps valid emoji intact when malformed surrogates force source slicing", () => {
+  const payload = {
+    model: "gpt-5.6-sol",
+    input: [
+      {
+        type: "function_call_output",
+        call_id: "call_mixed_surrogate",
+        output:
+          `${"a".repeat(510)}🙂PREFIX\ud800`
+          + "x".repeat(7000)
+          + `\udc00SUFFIX🙂${"z".repeat(510)}`,
+      },
+    ],
+  }
+
+  const result = fitResponsesCompactionPayload(payload, 2300)
+  const output = (result.payload.input[0] as { output: string }).output
+
+  expect(
+    Array.from(output).filter((character) => character === "🙂"),
+  ).toHaveLength(2)
+  expect(output.includes("�")).toBe(false)
+})

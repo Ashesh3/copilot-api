@@ -201,6 +201,17 @@ test("compact fits and preserves custom tool context on ChatCompletions fallback
         call_id: "call_fallback",
         output: oversizedOutput,
       },
+      {
+        type: "function_call",
+        call_id: "call_standard_fallback",
+        name: "shell",
+        arguments: JSON.stringify({ command: "Get-Date" }),
+      },
+      {
+        type: "function_call_output",
+        call_id: "call_standard_fallback",
+        output: "standard fallback result",
+      },
     ],
   )
 
@@ -212,7 +223,93 @@ test("compact fits and preserves custom tool context on ChatCompletions fallback
   )
   expect(serialized).toContain("run fallback diagnostic")
   expect(serialized).toContain("call_fallback")
+  expect(serialized).toContain("call_standard_fallback")
+  expect(serialized).toContain("standard fallback result")
   expect(serialized).toContain("BEGIN-FALLBACK")
   expect(serialized).toContain("END-FALLBACK")
   expect(serialized).toContain("UTF-8 bytes omitted during compaction")
+})
+
+test("direct Responses HTTP fallback fits oversized compaction turns", async () => {
+  const model = state.models?.data[0]
+  if (model) model.supported_endpoints = ["/chat/completions"]
+  const oversizedOutput =
+    "BEGIN-HTTP-FALLBACK\n"
+    + "x".repeat(COMPACTION_PAYLOAD_MAX_BYTES + 2 * 1024 * 1024)
+    + "\nEND-HTTP-FALLBACK"
+
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-compact",
+      input: [
+        {
+          type: "custom_tool_call",
+          call_id: "call_http_fallback",
+          name: "exec",
+          input: "run http fallback diagnostic",
+        },
+        {
+          type: "custom_tool_call_output",
+          call_id: "call_http_fallback",
+          output: oversizedOutput,
+        },
+      ],
+      client_metadata: {
+        "x-codex-turn-metadata": JSON.stringify({
+          request_kind: "compaction",
+        }),
+      },
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastRequestUrl).toEndWith("/chat/completions")
+  const serialized = JSON.stringify(lastRequestBody)
+  expect(Buffer.byteLength(serialized)).toBeLessThanOrEqual(
+    COMPACTION_PAYLOAD_MAX_BYTES,
+  )
+  expect(serialized).toContain("run http fallback diagnostic")
+  expect(serialized).toContain("call_http_fallback")
+  expect(serialized).toContain("BEGIN-HTTP-FALLBACK")
+  expect(serialized).toContain("END-HTTP-FALLBACK")
+  expect(serialized).toContain("UTF-8 bytes omitted during compaction")
+})
+
+test("direct Responses returns the safe local compaction error code", async () => {
+  const model = state.models?.data[0]
+  if (model) model.supported_endpoints = ["/responses"]
+  const callsBefore = fetchMock.mock.calls.length
+
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-compact",
+      input: [
+        {
+          type: "message",
+          role: "developer",
+          content: "preserved context ".repeat(
+            Math.ceil((COMPACTION_PAYLOAD_MAX_BYTES + 1024) / 18),
+          ),
+        },
+      ],
+      client_metadata: {
+        "x-codex-turn-metadata": JSON.stringify({
+          request_kind: "compaction",
+        }),
+      },
+    }),
+  })
+  const body = (await response.json()) as {
+    error?: { code?: string; message?: string; type?: string }
+  }
+
+  expect(response.status).toBe(413)
+  expect(fetchMock.mock.calls.length).toBe(callsBefore)
+  expect(body.error?.code).toBe("compaction_payload_too_large")
+  expect(body.error?.type).toBe("error")
+  expect(body.error?.message).toContain("safe compaction payload budget")
 })

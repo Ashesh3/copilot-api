@@ -84,3 +84,58 @@ test("converts non-apply_patch custom tools for chat completions fallback only",
     },
   ])
 })
+
+test("preserves custom tool calls and results in chat completions fallback", () => {
+  const payload = {
+    model: "gpt-4o",
+    input: [
+      {
+        type: "custom_tool_call",
+        call_id: "call_custom",
+        name: "exec",
+        input: "run canonical command",
+      },
+      {
+        type: "custom_tool_call_output",
+        call_id: "call_custom",
+        output: "canonical result",
+      },
+    ],
+  } as ResponsesPayload
+
+  const result = responsesToChatCompletions(payload, {
+    preserveCustomToolContext: true,
+  })
+
+  expect(result.messages).toEqual([
+    {
+      role: "assistant",
+      content: "[Custom tool call call_custom: exec(run canonical command)]",
+    },
+    {
+      role: "user",
+      content: "[Custom tool result call_custom: canonical result]",
+    },
+  ])
+})
+
+test("keeps ordinary custom tool history out of chat completions fallback", () => {
+  const payload = {
+    model: "gpt-4o",
+    input: [
+      {
+        type: "custom_tool_call",
+        call_id: "call_ordinary_custom",
+        name: "exec",
+        input: "ordinary command",
+      },
+      {
+        type: "custom_tool_call_output",
+        call_id: "call_ordinary_custom",
+        output: "ordinary result",
+      },
+    ],
+  } as ResponsesPayload
+
+  expect(responsesToChatCompletions(payload).messages).toEqual([])
+})

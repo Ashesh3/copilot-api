@@ -748,6 +748,75 @@ describe("responses websocket message handling", () => {
     expect(ws.data.activeTurns.size).toBe(0)
   })
 
+  test("fits rehydrated compaction turns on ChatCompletions fallback", async () => {
+    state.accountType = "individual"
+    state.copilotToken = "copilot-token"
+    state.models = {
+      ...responsesCapableModels,
+      data: responsesCapableModels.data.map((model) => ({
+        ...model,
+        supported_endpoints: ["/chat/completions"],
+      })),
+    }
+    queuedResponses.push(createChatCompletionsSseResponse())
+    const ws = createTestWebSocket()
+    const oversizedOutput =
+      "BEGIN-WS-FALLBACK\n"
+      + "x".repeat(COMPACTION_PAYLOAD_MAX_BYTES + 2 * 1024 * 1024)
+      + "\nEND-WS-FALLBACK"
+
+    recordResponseSnapshotFromFrame(
+      ws.data.responseSnapshots,
+      {
+        model: "gpt-5.4",
+        input: [
+          {
+            type: "custom_tool_call",
+            call_id: "call_ws_fallback",
+            name: "exec",
+            input: "run ws fallback diagnostic",
+          },
+          {
+            type: "custom_tool_call_output",
+            call_id: "call_ws_fallback",
+            output: oversizedOutput,
+          },
+        ],
+        stream: true,
+      },
+      JSON.stringify({
+        type: "response.completed",
+        response: { id: "resp_ws_fallback", output: [] },
+      }),
+    )
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        previous_response_id: "resp_ws_fallback",
+        input: [],
+        client_metadata: {
+          "x-codex-turn-metadata": JSON.stringify({
+            request_kind: "compaction",
+          }),
+        },
+      }),
+    )
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const serialized = JSON.stringify(lastRequestBody)
+    expect(Buffer.byteLength(serialized)).toBeLessThanOrEqual(
+      COMPACTION_PAYLOAD_MAX_BYTES,
+    )
+    expect(serialized).toContain("run ws fallback diagnostic")
+    expect(serialized).toContain("call_ws_fallback")
+    expect(serialized).toContain("BEGIN-WS-FALLBACK")
+    expect(serialized).toContain("END-WS-FALLBACK")
+    expect(serialized).toContain("UTF-8 bytes omitted during compaction")
+  })
+
   test("tracks concurrent turns independently", async () => {
     state.models = responsesCapableModels
     const resolvers: Array<(response: Response) => void> = []

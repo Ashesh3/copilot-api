@@ -1,6 +1,7 @@
 import type { ResponsesPayload } from "~/services/copilot/create-responses"
 
-import { HTTPError } from "~/lib/error"
+import { isDataUri, isLikelyBase64 } from "~/lib/attachments"
+import { LocalHTTPError } from "~/lib/error"
 
 export const COMPACTION_PAYLOAD_MAX_BYTES = 30 * 1024 * 1024
 
@@ -25,6 +26,7 @@ interface ReductionCounts {
 }
 
 interface TextSlot {
+  hasLoneSurrogate: boolean
   originalText: string
   originalBytes: number
   setText: (text: string) => void
@@ -33,6 +35,17 @@ interface TextSlot {
 interface TruncatedText {
   text: string
   omittedBytes: number
+}
+
+interface CompactionPayloadStrategy {
+  collectToolOutputSlots: (
+    payload: Record<string, unknown>,
+    slots: Array<TextSlot>,
+  ) => void
+  elideInlineAttachments: (
+    payload: Record<string, unknown>,
+    counts: ReductionCounts,
+  ) => void
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -83,11 +96,18 @@ const elideInlineAttachments = (
   }
   if (!isRecord(value)) return value
 
-  if (value.type === "input_image" && isInlineData(value.image_url)) {
+  if (
+    (value.type === "input_image" || value.type === "computer_screenshot")
+    && isInlineData(value.image_url)
+  ) {
     counts.omittedBinaryBlocks += 1
     return omissionNote("image")
   }
-  if (value.type === "input_file" && typeof value.file_data === "string") {
+  if (
+    value.type === "input_file"
+    && typeof value.file_data === "string"
+    && (isDataUri(value.file_data) || isLikelyBase64(value.file_data))
+  ) {
     counts.omittedBinaryBlocks += 1
     return omissionNote("file")
   }
@@ -106,6 +126,7 @@ const addTextSlot = (
   slots: Array<TextSlot>,
 ): void => {
   slots.push({
+    hasLoneSurrogate: containsLoneSurrogate(originalText),
     originalText,
     originalBytes: Buffer.byteLength(originalText, "utf8"),
     setText,
@@ -173,10 +194,118 @@ const collectToolOutputSlots = (
   }
 }
 
+const elideChatContentPart = (
+  value: unknown,
+  counts: ReductionCounts,
+): unknown => {
+  if (!isRecord(value)) return value
+
+  if (
+    value.type === "image_url"
+    && isRecord(value.image_url)
+    && isInlineData(value.image_url.url)
+  ) {
+    counts.omittedBinaryBlocks += 1
+    return { type: "text", text: omissionNote("image").text }
+  }
+  if (
+    value.type === "file"
+    && isRecord(value.file)
+    && typeof value.file.file_data === "string"
+  ) {
+    counts.omittedBinaryBlocks += 1
+    return { type: "text", text: omissionNote("file").text }
+  }
+
+  return value
+}
+
+const elideChatAttachments = (
+  payload: Record<string, unknown>,
+  counts: ReductionCounts,
+): void => {
+  if (!Array.isArray(payload.messages)) return
+
+  for (const message of payload.messages) {
+    if (!isRecord(message) || !Array.isArray(message.content)) continue
+    message.content = message.content.map((part) =>
+      elideChatContentPart(part, counts),
+    )
+  }
+}
+
+const collectChatToolOutputSlots = (
+  payload: Record<string, unknown>,
+  slots: Array<TextSlot>,
+): void => {
+  if (!Array.isArray(payload.messages)) return
+
+  for (const message of payload.messages) {
+    if (!isRecord(message)) continue
+    const isToolMessage = message.role === "tool"
+    const isCompactionToolResult =
+      message.role === "user"
+      && typeof message.content === "string"
+      && (message.content.startsWith("[Custom tool result ")
+        || message.content.startsWith("[Tool result "))
+    if (!isToolMessage && !isCompactionToolResult) continue
+    collectOutputTextSlots(
+      message.content,
+      (content) => {
+        message.content = content
+      },
+      slots,
+    )
+  }
+}
+
+const containsLoneSurrogate = (text: string): boolean => {
+  for (let index = 0; index < text.length; index += 1) {
+    const current = text.codePointAt(index) ?? 0
+    if (current < 0xd800 || current > 0xdfff) {
+      if (current > 0xffff) index += 1
+      continue
+    }
+    return true
+  }
+  return false
+}
+
+const sourcePrefixAtLeast = (text: string, minimumBytes: number): string => {
+  let low = 0
+  let high = text.length
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2)
+    if (Buffer.byteLength(text.slice(0, middle), "utf8") < minimumBytes) {
+      low = middle + 1
+    } else {
+      high = middle
+    }
+  }
+  let end = low
+  if ((text.codePointAt(Math.max(0, end - 1)) ?? 0) > 0xffff) end += 1
+  return text.slice(0, end)
+}
+
+const sourceSuffixAtLeast = (text: string, minimumBytes: number): string => {
+  let low = 0
+  let high = text.length
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2)
+    if (Buffer.byteLength(text.slice(middle), "utf8") >= minimumBytes) {
+      low = middle
+    } else {
+      high = middle - 1
+    }
+  }
+  let start = low
+  if ((text.codePointAt(Math.max(0, start - 1)) ?? 0) > 0xffff) start -= 1
+  return text.slice(start)
+}
+
 const decodePrefixAtLeast = (buffer: Buffer, minimumBytes: number): string => {
   const decoder = new TextDecoder(undefined, { fatal: true })
   let end = Math.min(buffer.length, minimumBytes)
-
   while (end <= buffer.length) {
     try {
       return decoder.decode(buffer.subarray(0, end))
@@ -190,7 +319,6 @@ const decodePrefixAtLeast = (buffer: Buffer, minimumBytes: number): string => {
 const decodeSuffixAtLeast = (buffer: Buffer, minimumBytes: number): string => {
   const decoder = new TextDecoder(undefined, { fatal: true })
   let start = Math.max(0, buffer.length - minimumBytes)
-
   while (start >= 0) {
     try {
       return decoder.decode(buffer.subarray(start))
@@ -201,7 +329,11 @@ const decodeSuffixAtLeast = (buffer: Buffer, minimumBytes: number): string => {
   return buffer.toString("utf8")
 }
 
-const truncateText = (text: string, retainedBytes: number): TruncatedText => {
+const truncateText = (
+  text: string,
+  retainedBytes: number,
+  hasLoneSurrogate: boolean,
+): TruncatedText => {
   const buffer = Buffer.from(text, "utf8")
   if (retainedBytes >= buffer.length) {
     return { text, omittedBytes: 0 }
@@ -209,8 +341,14 @@ const truncateText = (text: string, retainedBytes: number): TruncatedText => {
 
   const prefixTarget = Math.ceil(retainedBytes / 2)
   const suffixTarget = Math.floor(retainedBytes / 2)
-  const prefix = decodePrefixAtLeast(buffer, prefixTarget)
-  const suffix = decodeSuffixAtLeast(buffer, suffixTarget)
+  const prefix =
+    hasLoneSurrogate ?
+      sourcePrefixAtLeast(text, prefixTarget)
+    : decodePrefixAtLeast(buffer, prefixTarget)
+  const suffix =
+    hasLoneSurrogate ?
+      sourceSuffixAtLeast(text, suffixTarget)
+    : decodeSuffixAtLeast(buffer, suffixTarget)
   const actualRetainedBytes =
     Buffer.byteLength(prefix, "utf8") + Buffer.byteLength(suffix, "utf8")
 
@@ -228,29 +366,29 @@ const truncateText = (text: string, retainedBytes: number): TruncatedText => {
   }
 }
 
-const createPayloadTooLargeError = (bytes: number, maxBytes: number) =>
-  new HTTPError(
+const createPayloadTooLargeError = (bytes: number, maxBytes: number) => {
+  const clientBody = {
+    error: {
+      code: "compaction_payload_too_large",
+      message:
+        "Preserved conversation content exceeds the safe compaction payload budget",
+      type: "error",
+      max_bytes: maxBytes,
+      payload_bytes: bytes,
+    },
+  }
+  return new LocalHTTPError(
     "Compaction payload exceeds the safe upstream budget because preserved conversation content is too large",
-    Response.json(
-      {
-        error: {
-          code: "compaction_payload_too_large",
-          message:
-            "Preserved conversation content exceeds the safe compaction payload budget",
-          max_bytes: maxBytes,
-          payload_bytes: bytes,
-        },
-      },
-      { status: 413 },
-    ),
+    Response.json(clientBody, { status: 413 }),
+    clientBody,
   )
+}
 
-export function fitResponsesCompactionPayload<
-  T extends Record<string, unknown>,
->(
+const fitCompactionPayload = <T extends object>(
   payload: T,
-  maxBytes = COMPACTION_PAYLOAD_MAX_BYTES,
-): CompactionPayloadFitResult<T> {
+  maxBytes: number,
+  strategy: CompactionPayloadStrategy,
+): CompactionPayloadFitResult<T> => {
   const originalBytes = serializedBytes(payload)
   if (originalBytes <= maxBytes) {
     return {
@@ -264,17 +402,15 @@ export function fitResponsesCompactionPayload<
   }
 
   const reducedPayload = structuredClone(payload)
-  const reducedRecord: Record<string, unknown> = reducedPayload
+  const reducedRecord = reducedPayload as Record<string, unknown>
   const counts: ReductionCounts = { omittedBinaryBlocks: 0 }
-  if ("input" in reducedRecord) {
-    reducedRecord.input = elideInlineAttachments(reducedRecord.input, counts)
-  }
+  strategy.elideInlineAttachments(reducedRecord, counts)
 
   let currentBytes = serializedBytes(reducedPayload)
   let truncatedToolOutputBytes = 0
   if (currentBytes > maxBytes) {
     const slots: Array<TextSlot> = []
-    collectToolOutputSlots(reducedRecord.input, slots)
+    strategy.collectToolOutputSlots(reducedRecord, slots)
     slots.sort((left, right) => right.originalBytes - left.originalBytes)
 
     for (const slot of slots) {
@@ -286,6 +422,7 @@ export function fitResponsesCompactionPayload<
       const minimumCandidate = truncateText(
         slot.originalText,
         minimumRetainedBytes,
+        slot.hasLoneSurrogate,
       )
       const minimumSerializedBytes = serializedBytes(minimumCandidate.text)
       if (minimumSerializedBytes >= originalSerializedBytes) continue
@@ -305,7 +442,11 @@ export function fitResponsesCompactionPayload<
       let best = minimumCandidate
       while (low <= high) {
         const retainedBytes = Math.floor((low + high) / 2)
-        const candidate = truncateText(slot.originalText, retainedBytes)
+        const candidate = truncateText(
+          slot.originalText,
+          retainedBytes,
+          slot.hasLoneSurrogate,
+        )
         const candidatePayloadBytes =
           currentBytes
           - originalSerializedBytes
@@ -339,4 +480,107 @@ export function fitResponsesCompactionPayload<
     truncatedToolOutputBytes,
     reduced: true,
   }
+}
+
+export function fitResponsesCompactionPayload<T extends object>(
+  payload: T,
+  maxBytes = COMPACTION_PAYLOAD_MAX_BYTES,
+): CompactionPayloadFitResult<T> {
+  return fitCompactionPayload(payload, maxBytes, {
+    elideInlineAttachments(record, counts) {
+      if ("input" in record) {
+        record.input = elideInlineAttachments(record.input, counts)
+      }
+    },
+    collectToolOutputSlots(record, slots) {
+      collectToolOutputSlots(record.input, slots)
+    },
+  })
+}
+
+export function fitChatCompletionsCompactionPayload<T extends object>(
+  payload: T,
+  maxBytes = COMPACTION_PAYLOAD_MAX_BYTES,
+): CompactionPayloadFitResult<T> {
+  return fitCompactionPayload(payload, maxBytes, {
+    elideInlineAttachments: elideChatAttachments,
+    collectToolOutputSlots: collectChatToolOutputSlots,
+  })
+}
+
+const elideAnthropicAttachments = (
+  payload: Record<string, unknown>,
+  counts: ReductionCounts,
+): void => {
+  if ("messages" in payload) {
+    payload.messages = elideAnthropicValue(payload.messages, counts)
+  }
+}
+
+const elideAnthropicValue = (
+  value: unknown,
+  counts: ReductionCounts,
+): unknown => {
+  if (Array.isArray(value)) {
+    return value.map((entry) => elideAnthropicValue(entry, counts))
+  }
+  if (!isRecord(value)) return value
+
+  if (
+    (value.type === "image" || value.type === "document")
+    && isRecord(value.source)
+    && value.source.type === "base64"
+    && typeof value.source.data === "string"
+  ) {
+    counts.omittedBinaryBlocks += 1
+    return {
+      type: "text",
+      text: omissionNote(value.type === "image" ? "image" : "file").text,
+    }
+  }
+
+  return Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => [
+      key,
+      elideAnthropicValue(entry, counts),
+    ]),
+  )
+}
+
+const collectAnthropicToolOutputSlots = (
+  value: unknown,
+  slots: Array<TextSlot>,
+): void => {
+  if (Array.isArray(value)) {
+    for (const entry of value) collectAnthropicToolOutputSlots(entry, slots)
+    return
+  }
+  if (!isRecord(value)) return
+
+  if (value.type === "tool_result") {
+    collectOutputTextSlots(
+      value.content,
+      (content) => {
+        value.content = content
+      },
+      slots,
+    )
+    return
+  }
+
+  for (const entry of Object.values(value)) {
+    collectAnthropicToolOutputSlots(entry, slots)
+  }
+}
+
+export function fitAnthropicCompactionPayload<T extends object>(
+  payload: T,
+  maxBytes = COMPACTION_PAYLOAD_MAX_BYTES,
+): CompactionPayloadFitResult<T> {
+  return fitCompactionPayload(payload, maxBytes, {
+    elideInlineAttachments: elideAnthropicAttachments,
+    collectToolOutputSlots(record, slots) {
+      collectAnthropicToolOutputSlots(record.messages, slots)
+    },
+  })
 }
