@@ -3,6 +3,7 @@ import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
 import type { AnthropicMessagesPayload } from "../src/routes/messages/anthropic-types"
 
 import { state } from "../src/lib/state"
+import { COMPACTION_PAYLOAD_MAX_BYTES } from "../src/services/copilot/compaction-payload"
 import { createAnthropicMessages } from "../src/services/copilot/create-anthropic-messages"
 
 const originalFetch = globalThis.fetch
@@ -164,4 +165,51 @@ test("serializes native cache controls using Copilot's supported wire shape", as
       },
     ],
   })
+})
+
+test("fits explicitly marked native Messages compaction payloads", async () => {
+  const oversizedOutput =
+    "BEGIN-MESSAGES\n"
+    + "x".repeat(COMPACTION_PAYLOAD_MAX_BYTES + 2 * 1024 * 1024)
+    + "\nEND-MESSAGES"
+
+  await createAnthropicMessages(
+    {
+      model: "claude-opus-4.8",
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "call_messages",
+              name: "exec",
+              input: { input: "run messages diagnostic" },
+            },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "call_messages",
+              content: oversizedOutput,
+            },
+          ],
+        },
+      ],
+    },
+    { compaction: true },
+  )
+
+  const serialized = JSON.stringify(capturedBody)
+  expect(Buffer.byteLength(serialized)).toBeLessThanOrEqual(
+    COMPACTION_PAYLOAD_MAX_BYTES,
+  )
+  expect(serialized).toContain("run messages diagnostic")
+  expect(serialized).toContain("call_messages")
+  expect(serialized).toContain("BEGIN-MESSAGES")
+  expect(serialized).toContain("END-MESSAGES")
+  expect(serialized).toContain("UTF-8 bytes omitted during compaction")
 })

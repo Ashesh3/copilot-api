@@ -25,6 +25,19 @@ export class HTTPError extends Error {
   }
 }
 
+export class LocalHTTPError extends HTTPError {
+  readonly clientBody: Record<string, unknown>
+
+  constructor(
+    message: string,
+    response: Response,
+    clientBody: Record<string, unknown>,
+  ) {
+    super(message, response)
+    this.clientBody = clientBody
+  }
+}
+
 interface ContentFilterError {
   error: {
     code: string
@@ -156,6 +169,13 @@ export async function forwardError(c: Context, error: unknown) {
       clientMessage = "Copilot quota exhausted"
     } else if (error.response.status === 466) {
       clientMessage = "Copilot client version mismatch"
+    }
+
+    if (error instanceof LocalHTTPError) {
+      return c.json(
+        error.clientBody,
+        error.response.status as ContentfulStatusCode,
+      )
     }
 
     return c.json(

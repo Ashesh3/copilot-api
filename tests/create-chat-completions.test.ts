@@ -14,7 +14,11 @@ import {
 import { state } from "../src/lib/state"
 import { tokenPool } from "../src/lib/token-pool"
 import { server } from "../src/server"
-import { createChatCompletions } from "../src/services/copilot/create-chat-completions"
+import { COMPACTION_PAYLOAD_MAX_BYTES } from "../src/services/copilot/compaction-payload"
+import {
+  createChatCompletions,
+  type Message,
+} from "../src/services/copilot/create-chat-completions"
 
 // Save and restore original fetch so integration tests aren't affected
 const originalFetch = globalThis.fetch
@@ -23,6 +27,7 @@ const addedAccountIds = [2101, 2102]
 const queuedResponses: Array<Response> = []
 let capturedAffinity: RoutingAffinity | undefined
 const capturedAuthorization: Array<string | undefined> = []
+let lastRequestBody: Record<string, unknown> | undefined
 
 const createDefaultResponse = () =>
   new Response(
@@ -49,9 +54,11 @@ state.accountType = "individual"
 
 // Helper to mock fetch
 const fetchMock = mock(
-  (_url: string, opts: { headers: Record<string, string> }) => {
+  (_url: string, opts: { body?: string; headers: Record<string, string> }) => {
     capturedAffinity = getRoutingAffinity()
     capturedAuthorization.push(opts.headers.Authorization)
+    lastRequestBody =
+      opts.body ? (JSON.parse(opts.body) as Record<string, unknown>) : undefined
     void opts
     return queuedResponses.shift() ?? createDefaultResponse()
   },
@@ -73,10 +80,56 @@ beforeEach(() => {
   fetchMock.mockClear()
   queuedResponses.length = 0
   capturedAffinity = undefined
+  lastRequestBody = undefined
   capturedAuthorization.length = 0
   state.isMultiToken = originalIsMultiToken
   setModelSettingsForTest([])
   resetRoutingTelemetryForTest()
+})
+
+test("fits explicitly marked ChatCompletions compaction payloads", async () => {
+  const oversizedOutput =
+    "BEGIN-CHAT-TRANSPORT\n"
+    + "x".repeat(COMPACTION_PAYLOAD_MAX_BYTES + 2 * 1024 * 1024)
+    + "\nEND-CHAT-TRANSPORT"
+
+  await createChatCompletions(
+    {
+      model: "gpt-test",
+      messages: [
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call_chat_transport",
+              type: "function",
+              function: {
+                name: "exec",
+                arguments: JSON.stringify({ input: "run chat diagnostic" }),
+              },
+            },
+          ],
+        },
+        {
+          role: "tool",
+          tool_call_id: "call_chat_transport",
+          content: oversizedOutput,
+        },
+      ] as Array<Message>,
+    },
+    { compaction: true },
+  )
+
+  const serialized = JSON.stringify(lastRequestBody)
+  expect(Buffer.byteLength(serialized)).toBeLessThanOrEqual(
+    COMPACTION_PAYLOAD_MAX_BYTES,
+  )
+  expect(serialized).toContain("run chat diagnostic")
+  expect(serialized).toContain("call_chat_transport")
+  expect(serialized).toContain("BEGIN-CHAT-TRANSPORT")
+  expect(serialized).toContain("END-CHAT-TRANSPORT")
+  expect(serialized).toContain("UTF-8 bytes omitted during compaction")
 })
 
 test("installs Claude metadata affinity before provider dispatch", async () => {
@@ -240,6 +293,70 @@ test("retries streamed chat completions when the first SSE event is an overload 
       + usage.selectionModes.default
       + usage.selectionModes.single,
   ).toBe(1)
+})
+
+test("stream overload retry keeps the image-stripped compaction body", async () => {
+  const overloadEvent = 'data: {"error":{"message":"Overloaded"}}'
+  const successChunk = JSON.stringify({
+    id: "chunk-image-retry",
+    object: "chat.completion.chunk",
+    created: 1,
+    model: "gpt-test",
+    choices: [
+      {
+        index: 0,
+        delta: { content: "ok" },
+        finish_reason: "stop",
+        logprobs: null,
+      },
+    ],
+  })
+  const requestBodies: Array<string> = []
+  const originalMock = globalThis.fetch
+  let call = 0
+  const chainedFetch = mock((_url: string, init?: RequestInit) => {
+    requestBodies.push(typeof init?.body === "string" ? init.body : "")
+    call += 1
+    if (call === 1) return new Response("too large", { status: 413 })
+    if (call === 2) return createSSEStreamResponse([overloadEvent])
+    return createSSEStreamResponse([`data: ${successChunk}`, "data: [DONE]"])
+  })
+  ;(globalThis as unknown as { fetch: typeof fetch }).fetch =
+    chainedFetch as unknown as typeof fetch
+
+  try {
+    const response = await createChatCompletions(
+      {
+        model: "gpt-test",
+        stream: true,
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "describe" },
+              {
+                type: "image_url",
+                image_url: {
+                  url: `data:image/png;base64,${"a".repeat(4096)}`,
+                },
+              },
+            ],
+          },
+        ],
+      },
+      { compaction: true },
+    )
+    for await (const _event of response as AsyncIterable<unknown>) {
+      // Drain the stream so the overload retry executes.
+    }
+  } finally {
+    ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalMock
+  }
+
+  expect(requestBodies).toHaveLength(3)
+  expect(requestBodies[0]).toContain("data:image/png;base64")
+  expect(requestBodies[1]).not.toContain("data:image/png;base64")
+  expect(requestBodies[2]).toBe(requestBodies[1] ?? "")
 })
 
 test("defaults stream_options.include_usage for direct streaming chat completions", async () => {

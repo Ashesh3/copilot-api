@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import { Hono } from "hono"
 
-import { forwardError, HTTPError } from "../src/lib/error"
+import { forwardError, HTTPError, LocalHTTPError } from "../src/lib/error"
 
 test("returns a clear quota exhausted message for upstream 402 responses", async () => {
   const app = new Hono()
@@ -116,4 +116,29 @@ test("returns an empty 499 response for upstream client disconnects", async () =
 
   expect(response.status).toBe(499)
   expect(body).toBe("")
+})
+
+test("returns an explicitly safe local error body without exposing upstream bodies", async () => {
+  const app = new Hono()
+  const clientBody = {
+    error: {
+      code: "compaction_payload_too_large",
+      message: "Preserved content is too large",
+      type: "error",
+    },
+  }
+
+  app.get("/local-error", () => {
+    throw new LocalHTTPError(
+      "Compaction payload is too large",
+      Response.json({ internal: "not exposed" }, { status: 413 }),
+      clientBody,
+    )
+  })
+  app.onError(async (error, c) => await forwardError(c, error))
+
+  const response = await app.request("/local-error")
+
+  expect(response.status).toBe(413)
+  expect(await response.json()).toEqual(clientBody)
 })

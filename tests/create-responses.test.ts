@@ -14,6 +14,7 @@ import { state } from "../src/lib/state"
 import { tokenPool } from "../src/lib/token-pool"
 import { normalizeResponsesReasoning } from "../src/routes/responses/handler"
 import { server } from "../src/server"
+import { COMPACTION_PAYLOAD_MAX_BYTES } from "../src/services/copilot/compaction-payload"
 import {
   createResponses,
   type ResponsesPayload,
@@ -309,6 +310,78 @@ test("preserves prompt and conversation_id when sending Responses API requests",
 
   expect(lastRequestBody?.prompt).toEqual(prompt)
   expect(lastRequestBody?.conversation_id).toBe("conv_abc")
+})
+
+test("fits explicitly marked compaction payloads at the transport boundary", async () => {
+  const oversizedOutput =
+    "BEGIN-TRANSPORT\n"
+    + "x".repeat(COMPACTION_PAYLOAD_MAX_BYTES + 2 * 1024 * 1024)
+    + "\nEND-TRANSPORT"
+
+  await createResponses(
+    {
+      model: "gpt-4o",
+      input: [
+        {
+          type: "custom_tool_call",
+          call_id: "call_transport",
+          name: "exec",
+          input: "run transport diagnostic",
+        },
+        {
+          type: "custom_tool_call_output",
+          call_id: "call_transport",
+          output: oversizedOutput,
+        },
+      ],
+    },
+    {
+      compaction: true,
+      vision: false,
+      initiator: "user",
+    },
+  )
+
+  const serialized = JSON.stringify(lastRequestBody)
+  expect(Buffer.byteLength(serialized)).toBeLessThanOrEqual(
+    COMPACTION_PAYLOAD_MAX_BYTES,
+  )
+  expect(serialized).toContain("run transport diagnostic")
+  expect(serialized).toContain("BEGIN-TRANSPORT")
+  expect(serialized).toContain("END-TRANSPORT")
+  expect(serialized).toContain("UTF-8 bytes omitted during compaction")
+  expect(oversizedOutput).toEndWith("END-TRANSPORT")
+})
+
+test("leaves ordinary oversized Responses payloads unchanged", async () => {
+  const oversizedOutput =
+    "BEGIN-ORDINARY\n"
+    + "x".repeat(COMPACTION_PAYLOAD_MAX_BYTES + 1024)
+    + "\nEND-ORDINARY"
+
+  await createResponses(
+    {
+      model: "gpt-4o",
+      input: [
+        {
+          type: "custom_tool_call_output",
+          call_id: "call_ordinary",
+          output: oversizedOutput,
+        },
+      ],
+    },
+    { vision: false, initiator: "user" },
+  )
+
+  const serialized = JSON.stringify(lastRequestBody)
+  expect(Buffer.byteLength(serialized)).toBeGreaterThan(
+    COMPACTION_PAYLOAD_MAX_BYTES,
+  )
+  const forwardedOutput = (
+    lastRequestBody?.input as Array<{ output?: unknown }> | undefined
+  )?.[0]?.output
+  expect(forwardedOutput === oversizedOutput).toBe(true)
+  expect(serialized).not.toContain("UTF-8 bytes omitted during compaction")
 })
 
 test("injects runtime-style default reasoning settings for direct Responses requests", async () => {

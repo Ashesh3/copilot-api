@@ -38,6 +38,7 @@ import {
   createResponsesWebSocketTurn,
   runWithWebSocketRequestContext,
 } from "../src/routes/responses/websocket-lifecycle"
+import { COMPACTION_PAYLOAD_MAX_BYTES } from "../src/services/copilot/compaction-payload"
 
 const originalApiKeyAuth = state.apiKeyAuth
 const originalFetch = globalThis.fetch
@@ -747,6 +748,75 @@ describe("responses websocket message handling", () => {
     expect(ws.data.activeTurns.size).toBe(0)
   })
 
+  test("fits rehydrated compaction turns on ChatCompletions fallback", async () => {
+    state.accountType = "individual"
+    state.copilotToken = "copilot-token"
+    state.models = {
+      ...responsesCapableModels,
+      data: responsesCapableModels.data.map((model) => ({
+        ...model,
+        supported_endpoints: ["/chat/completions"],
+      })),
+    }
+    queuedResponses.push(createChatCompletionsSseResponse())
+    const ws = createTestWebSocket()
+    const oversizedOutput =
+      "BEGIN-WS-FALLBACK\n"
+      + "x".repeat(COMPACTION_PAYLOAD_MAX_BYTES + 2 * 1024 * 1024)
+      + "\nEND-WS-FALLBACK"
+
+    recordResponseSnapshotFromFrame(
+      ws.data.responseSnapshots,
+      {
+        model: "gpt-5.4",
+        input: [
+          {
+            type: "custom_tool_call",
+            call_id: "call_ws_fallback",
+            name: "exec",
+            input: "run ws fallback diagnostic",
+          },
+          {
+            type: "custom_tool_call_output",
+            call_id: "call_ws_fallback",
+            output: oversizedOutput,
+          },
+        ],
+        stream: true,
+      },
+      JSON.stringify({
+        type: "response.completed",
+        response: { id: "resp_ws_fallback", output: [] },
+      }),
+    )
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        previous_response_id: "resp_ws_fallback",
+        input: [],
+        client_metadata: {
+          "x-codex-turn-metadata": JSON.stringify({
+            request_kind: "compaction",
+          }),
+        },
+      }),
+    )
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const serialized = JSON.stringify(lastRequestBody)
+    expect(Buffer.byteLength(serialized)).toBeLessThanOrEqual(
+      COMPACTION_PAYLOAD_MAX_BYTES,
+    )
+    expect(serialized).toContain("run ws fallback diagnostic")
+    expect(serialized).toContain("call_ws_fallback")
+    expect(serialized).toContain("BEGIN-WS-FALLBACK")
+    expect(serialized).toContain("END-WS-FALLBACK")
+    expect(serialized).toContain("UTF-8 bytes omitted during compaction")
+  })
+
   test("tracks concurrent turns independently", async () => {
     state.models = responsesCapableModels
     const resolvers: Array<(response: Response) => void> = []
@@ -978,6 +1048,130 @@ describe("responses websocket message handling", () => {
 })
 
 describe("responses websocket upstream handling", () => {
+  test("fits a rehydrated pre-compaction continuation before forwarding", async () => {
+    state.accountType = "individual"
+    state.copilotToken = "copilot-token"
+    state.models = responsesCapableModels
+    queuedResponses.push(createResponsesSseResponse("resp_compaction_fit"))
+    const ws = createTestWebSocket()
+    const oversizedLength = COMPACTION_PAYLOAD_MAX_BYTES + 2 * 1024 * 1024
+    const originalLargeOutput =
+      "BEGIN-WEBSOCKET\n" + "x".repeat(oversizedLength) + "\nEND-WEBSOCKET"
+
+    recordResponseSnapshotFromFrame(
+      ws.data.responseSnapshots,
+      {
+        model: "gpt-5.4",
+        input: [
+          {
+            type: "custom_tool_call",
+            call_id: "call_websocket",
+            name: "exec",
+            input: "run diagnostic",
+          },
+          {
+            type: "custom_tool_call_output",
+            call_id: "call_websocket",
+            output: originalLargeOutput,
+          },
+        ],
+        stream: true,
+      },
+      JSON.stringify({
+        type: "response.completed",
+        response: {
+          id: "resp_before_compaction",
+          output: [],
+        },
+      }),
+    )
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        previous_response_id: "resp_before_compaction",
+        input: [],
+        tools: [],
+        client_metadata: {
+          "x-codex-turn-metadata": JSON.stringify({
+            request_kind: "compaction",
+          }),
+        },
+      }),
+    )
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const serialized = JSON.stringify(lastRequestBody)
+    expect(Buffer.byteLength(serialized)).toBeLessThanOrEqual(
+      COMPACTION_PAYLOAD_MAX_BYTES,
+    )
+    expect(serialized).toContain("run diagnostic")
+    expect(serialized).toContain("call_websocket")
+    expect(serialized).toContain("BEGIN-WEBSOCKET")
+    expect(serialized).toContain("END-WEBSOCKET")
+    expect(serialized).toContain("UTF-8 bytes omitted during compaction")
+    expect(originalLargeOutput).toHaveLength(
+      oversizedLength + "BEGIN-WEBSOCKET\n".length + "\nEND-WEBSOCKET".length,
+    )
+  })
+
+  test("rejects preserved-text-only compaction payloads locally", async () => {
+    state.accountType = "individual"
+    state.copilotToken = "copilot-token"
+    state.models = responsesCapableModels
+    const ws = createTestWebSocket()
+    const preservedContent = "preserved-context-".repeat(
+      Math.ceil((COMPACTION_PAYLOAD_MAX_BYTES + 1024) / 18),
+    )
+
+    recordResponseSnapshotFromFrame(
+      ws.data.responseSnapshots,
+      {
+        model: "gpt-5.4",
+        input: [
+          {
+            type: "message",
+            role: "developer",
+            content: preservedContent,
+          },
+        ],
+        stream: true,
+      },
+      JSON.stringify({
+        type: "response.completed",
+        response: { id: "resp_preserved_only", output: [] },
+      }),
+    )
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        previous_response_id: "resp_preserved_only",
+        input: [],
+        client_metadata: {
+          "x-codex-turn-metadata": JSON.stringify({
+            request_kind: "compaction",
+          }),
+        },
+      }),
+    )
+
+    expect(fetchMock).not.toHaveBeenCalled()
+    const errorFrame = JSON.parse(ws.sent[0] ?? "{}") as {
+      error?: { code?: string; message?: string }
+      status?: number
+      type?: string
+    }
+    expect(errorFrame.type).toBe("error")
+    expect(errorFrame.status).toBe(413)
+    expect(errorFrame.error?.code).toBe("request_too_large")
+    expect(errorFrame.error?.message).toContain("safe upstream budget")
+  })
+
   test("strips encrypted reasoning from rehydrated continuation input before forwarding", async () => {
     state.accountType = "individual"
     state.copilotToken = "copilot-token"

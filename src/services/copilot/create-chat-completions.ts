@@ -18,6 +18,8 @@ import {
 } from "~/services/copilot/copilot-client"
 import { PRE_HEADER_MAX_DELAY_SECONDS } from "~/services/copilot/transport-retry"
 
+import { fitChatCompletionsCompactionPayload } from "./compaction-payload"
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null
 
@@ -350,6 +352,107 @@ interface StreamingRetryOptions {
   retriesRemaining?: number
 }
 
+interface ChatCompletionsRequestOptions {
+  compaction?: boolean
+  initiator?: "agent" | "user"
+  signal?: AbortSignal
+}
+
+interface ChatHeaderOptions {
+  vision: boolean
+  initiator: "agent" | "user"
+}
+
+interface ChatUpstreamAttempt {
+  headerOptions: ChatHeaderOptions
+  payload: ChatCompletionsPayload
+  response: Response
+}
+
+const prepareChatCompletionsPayload = (
+  payload: ChatCompletionsPayload,
+  compaction: boolean | undefined,
+): ChatCompletionsPayload => {
+  if (!compaction) return payload
+
+  const fitted = fitChatCompletionsCompactionPayload(payload)
+  if (fitted.reduced) {
+    consola.warn("Reduced oversized ChatCompletions compaction payload", {
+      originalBytes: fitted.originalBytes,
+      finalBytes: fitted.finalBytes,
+      omittedBinaryBlocks: fitted.omittedBinaryBlocks,
+      truncatedToolOutputBytes: fitted.truncatedToolOutputBytes,
+    })
+  }
+  return fitted.payload
+}
+
+const dispatchChatCompletions = async (
+  payload: ChatCompletionsPayload,
+  options: {
+    headerOptions: ChatHeaderOptions
+    reason?: "http_retry"
+    recordSelection?: boolean
+    signal?: AbortSignal
+  },
+): Promise<Response> => {
+  const { response } = await routedFetch(
+    "/chat/completions",
+    { method: "POST", body: JSON.stringify(payload), signal: options.signal },
+    {
+      modelId: payload.model,
+      headerOptions: options.headerOptions,
+      reason: options.reason,
+      recordSelection: options.recordSelection,
+      maxHttpRetryDelaySeconds:
+        payload.stream ? PRE_HEADER_MAX_DELAY_SECONDS : undefined,
+    },
+  )
+  return response
+}
+
+const dispatchWithImageFallback = async (options: {
+  compaction: boolean | undefined
+  headerOptions: ChatHeaderOptions
+  outboundPayload: ChatCompletionsPayload
+  signal?: AbortSignal
+  sourcePayload: ChatCompletionsPayload
+}): Promise<ChatUpstreamAttempt> => {
+  const response = await dispatchChatCompletions(options.outboundPayload, {
+    headerOptions: options.headerOptions,
+    signal: options.signal,
+  })
+  if (response.status !== 413 || !options.headerOptions.vision) {
+    return {
+      response,
+      payload: options.outboundPayload,
+      headerOptions: options.headerOptions,
+    }
+  }
+
+  consola.warn("413 Payload Too Large with images, retrying without images")
+  removeImages(options.sourcePayload)
+  const retryPayload = prepareChatCompletionsPayload(
+    options.sourcePayload,
+    options.compaction,
+  )
+  const retryHeaderOptions = {
+    vision: false,
+    initiator: options.headerOptions.initiator,
+  }
+  const retryResponse = await dispatchChatCompletions(retryPayload, {
+    headerOptions: retryHeaderOptions,
+    reason: "http_retry",
+    recordSelection: false,
+    signal: options.signal,
+  })
+  return {
+    response: retryResponse,
+    payload: retryPayload,
+    headerOptions: retryHeaderOptions,
+  }
+}
+
 const handleStreamingResponse = async (
   response: Response,
   options: StreamingRetryOptions,
@@ -383,10 +486,7 @@ const handleStreamingResponse = async (
 
 export const createChatCompletions = async (
   payload: ChatCompletionsPayload,
-  options?: {
-    initiator?: "agent" | "user"
-    signal?: AbortSignal
-  },
+  options?: ChatCompletionsRequestOptions,
 ) => {
   options?.signal?.throwIfAborted()
   rewriteUnsupportedAssistantPrefill(payload)
@@ -395,75 +495,39 @@ export const createChatCompletions = async (
   const vision = hasVisionContent(payload.messages)
   const initiator = detectInitiator(payload.messages, options?.initiator)
   const headerOpts = { vision, initiator }
-  const nonVisionHeaderOpts = { vision: false, initiator }
 
   normalizePayload(payload)
   injectJsonInstruction(payload)
   addPromptCaching(payload.messages, payload.tools ?? undefined)
 
-  let { response } = await routedFetch(
-    "/chat/completions",
-    { method: "POST", body: JSON.stringify(payload), signal: options?.signal },
-    {
-      modelId: payload.model,
-      headerOptions: headerOpts,
-      maxHttpRetryDelaySeconds:
-        payload.stream ? PRE_HEADER_MAX_DELAY_SECONDS : undefined,
-    },
+  const outboundPayload = prepareChatCompletionsPayload(
+    payload,
+    options?.compaction,
   )
-  const shouldRetryWithoutImages = response.status === 413 && vision
 
-  // 413 image fallback: if request has images and response is 413, remove images and retry
-  if (shouldRetryWithoutImages) {
-    consola.warn("413 Payload Too Large with images, retrying without images")
-    removeImages(payload)
-    const { response: retryResponse } = await routedFetch(
-      "/chat/completions",
-      {
-        method: "POST",
-        body: JSON.stringify(payload),
-        signal: options?.signal,
-      },
-      {
-        modelId: payload.model,
-        headerOptions: nonVisionHeaderOpts,
-        reason: "http_retry",
-        recordSelection: false,
-        maxHttpRetryDelaySeconds:
-          payload.stream ? PRE_HEADER_MAX_DELAY_SECONDS : undefined,
-      },
-    )
-    response = retryResponse
-  }
-
-  const streamHeaderOpts =
-    shouldRetryWithoutImages ? nonVisionHeaderOpts : headerOpts
+  const active = await dispatchWithImageFallback({
+    compaction: options?.compaction,
+    headerOptions: headerOpts,
+    outboundPayload,
+    signal: options?.signal,
+    sourcePayload: payload,
+  })
 
   if (payload.stream) {
-    return handleStreamingResponse(response, {
-      payload,
+    return handleStreamingResponse(active.response, {
+      payload: active.payload,
       retry: async () => {
-        const { response: retryResponse } = await routedFetch(
-          "/chat/completions",
-          {
-            method: "POST",
-            body: JSON.stringify(payload),
-            signal: options?.signal,
-          },
-          {
-            modelId: payload.model,
-            headerOptions: streamHeaderOpts,
-            reason: "http_retry",
-            recordSelection: false,
-            maxHttpRetryDelaySeconds: PRE_HEADER_MAX_DELAY_SECONDS,
-          },
-        )
-        return retryResponse
+        return await dispatchChatCompletions(active.payload, {
+          headerOptions: active.headerOptions,
+          reason: "http_retry",
+          recordSelection: false,
+          signal: options?.signal,
+        })
       },
     })
   }
 
-  return handleResponse(response, payload)
+  return handleResponse(active.response, active.payload)
 }
 
 // Streaming types

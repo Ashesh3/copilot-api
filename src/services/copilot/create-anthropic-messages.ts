@@ -12,6 +12,7 @@ import { HTTPError } from "~/lib/error"
 import { state } from "~/lib/state"
 import { PRE_HEADER_MAX_DELAY_SECONDS } from "~/services/copilot/transport-retry"
 
+import { fitAnthropicCompactionPayload } from "./compaction-payload"
 import { hasVisionContent } from "./copilot-client"
 
 /**
@@ -177,6 +178,7 @@ function extractUpstreamErrorMessage(errorBody: string): string {
 export const createAnthropicMessages = async (
   payload: AnthropicMessagesPayload,
   options?: {
+    compaction?: boolean
     initiator?: "agent" | "user"
     signal?: AbortSignal
   },
@@ -185,7 +187,18 @@ export const createAnthropicMessages = async (
   const initiator =
     options?.initiator ?? detectAnthropicInitiator(payload.messages)
 
-  const body = sanitizeMessagesPayload(payload)
+  const sanitizedBody = sanitizeMessagesPayload(payload)
+  const fitted =
+    options?.compaction ? fitAnthropicCompactionPayload(sanitizedBody) : null
+  const body = fitted?.payload ?? sanitizedBody
+  if (fitted?.reduced) {
+    consola.warn("Reduced oversized native Messages compaction payload", {
+      originalBytes: fitted.originalBytes,
+      finalBytes: fitted.finalBytes,
+      omittedBinaryBlocks: fitted.omittedBinaryBlocks,
+      truncatedToolOutputBytes: fitted.truncatedToolOutputBytes,
+    })
+  }
 
   const { response } = await routedFetch(
     ANTHROPIC_MESSAGES_ENDPOINT,

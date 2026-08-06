@@ -26,6 +26,10 @@ import {
 import { state } from "~/lib/state"
 import { resolveWebSearchCalls } from "~/routes/messages/web-search-helpers"
 import {
+  fitResponsesCompactionPayload,
+  isResponsesCompactionRequest,
+} from "~/services/copilot/compaction-payload"
+import {
   createChatCompletions,
   type ChatCompletionResponse,
 } from "~/services/copilot/create-chat-completions"
@@ -808,12 +812,31 @@ async function streamChatCompletionsOverWs(
   payload: ResponsesPayload,
   turn: ResponsesWebSocketTurn,
 ): Promise<void> {
-  const ccPayload = responsesToChatCompletions(payload)
+  const compaction = isResponsesCompactionRequest(payload)
+  const fitted = compaction ? fitResponsesCompactionPayload(payload) : null
+  const fallbackPayload = fitted?.payload ?? payload
+  if (fitted?.reduced) {
+    consola.warn("Reduced oversized WebSocket fallback compaction payload", {
+      originalBytes: fitted.originalBytes,
+      finalBytes: fitted.finalBytes,
+      omittedBinaryBlocks: fitted.omittedBinaryBlocks,
+      truncatedToolOutputBytes: fitted.truncatedToolOutputBytes,
+    })
+  }
+  const ccPayload = responsesToChatCompletions(fallbackPayload, {
+    preserveCustomToolContext: compaction,
+  })
   const needsWebSearch =
     ccPayload.tools?.some((tool) => tool.function.name === "web_search")
     ?? false
   if (needsWebSearch) {
-    await streamChatWebSearchOverWs({ ws, payload, ccPayload, turn })
+    await streamChatWebSearchOverWs({
+      ws,
+      payload,
+      ccPayload,
+      compaction,
+      turn,
+    })
     return
   }
   ccPayload.stream = true
@@ -821,6 +844,7 @@ async function streamChatCompletionsOverWs(
 
   const response = await waitForWebSocketTurn(
     createChatCompletions(ccPayload, {
+      compaction,
       signal: turn.abortController.signal,
     }),
     turn,
@@ -849,19 +873,26 @@ async function streamChatWebSearchOverWs(options: {
   ws: ResponsesWebSocketState
   payload: ResponsesPayload
   ccPayload: ReturnType<typeof responsesToChatCompletions>
+  compaction: boolean
   turn: ResponsesWebSocketTurn
 }): Promise<void> {
-  const { ws, payload, ccPayload, turn } = options
+  const { ws, payload, ccPayload, compaction, turn } = options
   ccPayload.stream = false
   ccPayload.stream_options = null
   const initial = (await waitForWebSocketTurn(
     createChatCompletions(ccPayload, {
+      compaction,
       signal: turn.abortController.signal,
     }),
     turn,
   )) as ChatCompletionResponse
   const response = await resolveWebSearchCalls(initial, ccPayload, {
     abortSignal: turn.abortController.signal,
+    createCompletion: async (nextPayload) =>
+      (await createChatCompletions(nextPayload, {
+        compaction,
+        signal: turn.abortController.signal,
+      })) as ChatCompletionResponse,
   })
   const wsStream = {
     // eslint-disable-next-line @typescript-eslint/require-await
