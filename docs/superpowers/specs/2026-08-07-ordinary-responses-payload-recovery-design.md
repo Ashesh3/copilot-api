@@ -81,7 +81,7 @@ If the exact body remains above the 32 MiB hard cap after downscaling, the utili
 1. historical binary blocks outside the latest active turn;
 2. binary blocks in the latest active turn, only if historical removal is insufficient.
 
-The latest active turn is identified from `client_metadata["x-codex-turn-metadata"].turn_id`, falling back to the latest non-empty `internal_chat_message_metadata_passthrough.turn_id` found in input. Items tagged with that turn ID form the protected current turn. If no turn ID is available, the latest user-message group is protected during the first pass.
+The latest active turn is identified from `client_metadata["x-codex-turn-metadata"].turn_id`, falling back to the latest non-empty `internal_chat_message_metadata_passthrough.turn_id` found in input. The protected current-turn tail begins at the first item tagged with that active turn ID and includes every later item, because function/custom tool calls and results created within the same turn may be untagged. If no turn ID is available, the latest user-message group and every later item are protected during the first pass.
 
 Removed blocks become shape-valid text breadcrumbs rather than disappearing:
 
@@ -106,7 +106,8 @@ If the body remains above the transformed target after all inline binaries are r
 6. If oversized, inline images are downscaled and the full body is remeasured.
 7. If still oversized, historical binaries are replaced with breadcrumbs and remeasured.
 8. If still oversized, current-turn binaries are replaced and remeasured.
-9. An unchanged body at or below 32 MiB is dispatched once. A transformed body at or below 32 MiB minus 64 KiB is dispatched once. Otherwise a safe local 413 is returned without contacting GitHub.
+9. The Copilot vision header is derived from the recovered final body, including recursively nested tool-result screenshots/files; it is removed if recovery removed every attachment.
+10. An unchanged body at or below 32 MiB is dispatched once. A transformed body at or below 32 MiB minus 64 KiB is dispatched once. Otherwise a safe local 413 is returned without contacting GitHub.
 
 ## Observability
 

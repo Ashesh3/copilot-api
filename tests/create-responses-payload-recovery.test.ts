@@ -143,3 +143,74 @@ test("removes the vision header when recovery removes every attachment", async (
   expect(JSON.stringify(requestBodies[0])).not.toContain(inlineFile)
   expect(requestHeaders[0]?.has("Copilot-Vision-Request")).toBe(false)
 })
+
+test("sets the vision header from nested recovered screenshots", async () => {
+  await createResponses(
+    {
+      model: "gpt-4o",
+      input: [
+        {
+          type: "function_call_output",
+          call_id: "call_nested_header",
+          output: [
+            {
+              type: "computer_screenshot",
+              image_url: "data:image/png;base64,abc",
+            },
+          ],
+        },
+      ],
+    },
+    { vision: false, initiator: "user" },
+  )
+
+  expect(requestBodies).toHaveLength(1)
+  expect(requestHeaders[0]?.get("Copilot-Vision-Request")).toBe("true")
+})
+
+test.skipIf(typeof Bun.Image !== "function")(
+  "downscales an incident-shaped ordinary turn and keeps the image on wire",
+  async () => {
+    const png = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+      "base64",
+    )
+    const paddedPng = Buffer.concat([png, Buffer.alloc(4 * 1024 * 1024)])
+    const originalImage = `data:image/png;base64,${paddedPng.toString("base64")}`
+    const history = "x".repeat(32_625 * 1024)
+
+    await createResponses(
+      {
+        model: "gpt-4o",
+        input: [
+          {
+            type: "function_call_output",
+            call_id: "call_incident_history",
+            output: history,
+          },
+          {
+            type: "function_call_output",
+            call_id: "call_incident_image",
+            output: [{ type: "input_image", image_url: originalImage }],
+          },
+        ],
+      },
+      { vision: true, initiator: "user" },
+    )
+
+    expect(requestBodies).toHaveLength(1)
+    const serialized = JSON.stringify(requestBodies[0])
+    expect(Buffer.byteLength(serialized)).toBeLessThanOrEqual(
+      CAPI_RESPONSES_MAX_REQUEST_BYTES - RESPONSES_RECOVERY_MARGIN_BYTES,
+    )
+    expect(serialized).toContain("call_incident_history")
+    expect(serialized).toContain("call_incident_image")
+    expect(serialized).toContain("data:image/png;base64,")
+    expect(serialized).not.toContain(originalImage)
+    expect(serialized).not.toContain(
+      "omitted to fit the CAPI Responses request-size limit",
+    )
+    expect(requestHeaders[0]?.get("Copilot-Vision-Request")).toBe("true")
+  },
+  { timeout: 15_000 },
+)

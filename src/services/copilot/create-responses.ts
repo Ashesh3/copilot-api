@@ -830,7 +830,7 @@ export const createResponses = async (
   payload: ResponsesPayload,
   options: ResponsesRequestOptions,
 ): Promise<CreateResponsesReturn> => {
-  const { vision, initiator, signal } = options
+  const { initiator, signal } = options
   signal?.throwIfAborted()
   // service_tier is not supported by github copilot
   delete payload.service_tier
@@ -870,7 +870,7 @@ export const createResponses = async (
     signal,
   })
   const headerOpts = {
-    vision: vision && hasResponsesAttachment(sanitizedPayload),
+    vision: hasResponsesAttachment(sanitizedPayload),
     initiator,
   }
 

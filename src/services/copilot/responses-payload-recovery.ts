@@ -108,8 +108,8 @@ const currentTurnStart = (
   activeTurnId: string | null,
 ): number => {
   if (activeTurnId !== null) {
-    for (let index = input.length - 1; index >= 0; index -= 1) {
-      if (itemTurnId(input[index]) === activeTurnId) return index
+    for (const [index, element] of input.entries()) {
+      if (itemTurnId(element) === activeTurnId) return index
     }
   }
   return fallbackCurrentStart(input)
@@ -159,8 +159,9 @@ const containsResponsesAttachment = (value: unknown): boolean => {
   )
 }
 
-export const hasResponsesAttachment = (payload: Record<string, unknown>) =>
-  containsResponsesAttachment(payload.input)
+export const hasResponsesAttachment = (
+  payload: Record<string, unknown>,
+): boolean => containsResponsesAttachment(payload.input)
 
 const SUPPORTED_RESIZE_MEDIA_TYPES = new Set([
   "image/jpeg",
