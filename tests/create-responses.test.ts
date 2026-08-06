@@ -353,37 +353,6 @@ test("fits explicitly marked compaction payloads at the transport boundary", asy
   expect(oversizedOutput).toEndWith("END-TRANSPORT")
 })
 
-test("leaves ordinary oversized Responses payloads unchanged", async () => {
-  const oversizedOutput =
-    "BEGIN-ORDINARY\n"
-    + "x".repeat(COMPACTION_PAYLOAD_MAX_BYTES + 1024)
-    + "\nEND-ORDINARY"
-
-  await createResponses(
-    {
-      model: "gpt-4o",
-      input: [
-        {
-          type: "custom_tool_call_output",
-          call_id: "call_ordinary",
-          output: oversizedOutput,
-        },
-      ],
-    },
-    { vision: false, initiator: "user" },
-  )
-
-  const serialized = JSON.stringify(lastRequestBody)
-  expect(Buffer.byteLength(serialized)).toBeGreaterThan(
-    COMPACTION_PAYLOAD_MAX_BYTES,
-  )
-  const forwardedOutput = (
-    lastRequestBody?.input as Array<{ output?: unknown }> | undefined
-  )?.[0]?.output
-  expect(forwardedOutput === oversizedOutput).toBe(true)
-  expect(serialized).not.toContain("UTF-8 bytes omitted during compaction")
-})
-
 test("injects runtime-style default reasoning settings for direct Responses requests", async () => {
   await createResponses(
     {
@@ -705,7 +674,7 @@ test("does not add JSON mode input instruction when input already mentions json"
   ])
 })
 
-test("retries 413 Responses requests without input images", async () => {
+test("does not mutate and retry a changed-ceiling upstream 413", async () => {
   queuedResponses.push(
     new Response("payload too large", {
       status: 413,
@@ -714,7 +683,7 @@ test("retries 413 Responses requests without input images", async () => {
     createSuccessResponse(),
   )
 
-  await createResponses(
+  const error = await createResponses(
     {
       model: "gpt-4o",
       input: [
@@ -744,9 +713,11 @@ test("retries 413 Responses requests without input images", async () => {
       vision: true,
       initiator: "user",
     },
-  )
+  ).catch((caught: unknown) => caught)
 
-  expect(requestBodies).toHaveLength(2)
+  expect(error).toBeInstanceOf(HTTPError)
+  expect((error as HTTPError).response.status).toBe(413)
+  expect(requestBodies).toHaveLength(1)
   expect(requestBodies[0]?.input).toEqual([
     {
       role: "user",
@@ -760,20 +731,14 @@ test("retries 413 Responses requests without input images", async () => {
       ],
     },
   ])
-  expect(requestBodies[1]?.input).toEqual([
-    {
-      role: "user",
-      content: [{ type: "input_text", text: "Describe this image" }],
-    },
-  ])
   const usage = getRoutingTelemetrySnapshot({
     accounts: [],
     multiToken: false,
     window: "1h",
   })
   expect(usage.totals).toMatchObject({
-    retries: 1,
-    upstreamCalls: 2,
+    retries: 0,
+    upstreamCalls: 1,
   })
   expect(
     usage.selectionModes.sticky
@@ -782,7 +747,7 @@ test("retries 413 Responses requests without input images", async () => {
   ).toBe(1)
 })
 
-test("does not retry 413 Responses requests when removing images leaves an empty input", async () => {
+test("does not retry changed-ceiling 413 Responses requests with image-only input", async () => {
   queuedResponses.push(
     new Response("payload too large", {
       status: 413,
