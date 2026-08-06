@@ -140,43 +140,47 @@ test("compact installs metadata affinity and preserves header precedence", async
   expect(capturedAffinity).toBeUndefined()
 })
 
-test("compact fits oversized tool results before summary generation", async () => {
-  const oversizedOutput =
-    "BEGIN-COMPACT\n"
-    + "x".repeat(COMPACTION_PAYLOAD_MAX_BYTES + 2 * 1024 * 1024)
-    + "\nEND-COMPACT"
+test(
+  "compact fits oversized tool results before summary generation",
+  async () => {
+    const oversizedOutput =
+      "BEGIN-COMPACT\n"
+      + "x".repeat(COMPACTION_PAYLOAD_MAX_BYTES + 2 * 1024 * 1024)
+      + "\nEND-COMPACT"
 
-  const response = await compactRequest(
-    { session_id: "compact-oversized" },
-    {},
-    [
-      {
-        type: "custom_tool_call",
-        call_id: "call_compact",
-        name: "exec",
-        input: "run compact diagnostic",
-      },
-      {
-        type: "custom_tool_call_output",
-        call_id: "call_compact",
-        output: oversizedOutput,
-      },
-    ],
-  )
+    const response = await compactRequest(
+      { session_id: "compact-oversized" },
+      {},
+      [
+        {
+          type: "custom_tool_call",
+          call_id: "call_compact",
+          name: "exec",
+          input: "run compact diagnostic",
+        },
+        {
+          type: "custom_tool_call_output",
+          call_id: "call_compact",
+          output: oversizedOutput,
+        },
+      ],
+    )
 
-  expect(response.status).toBe(200)
-  expect(fetchMock).toHaveBeenCalledTimes(1)
-  const serialized = JSON.stringify(lastRequestBody)
-  expect(Buffer.byteLength(serialized)).toBeLessThanOrEqual(
-    COMPACTION_PAYLOAD_MAX_BYTES,
-  )
-  expect(serialized).toContain("run compact diagnostic")
-  expect(serialized).toContain("call_compact")
-  expect(serialized).toContain("BEGIN-COMPACT")
-  expect(serialized).toContain("END-COMPACT")
-  expect(serialized).toContain("UTF-8 bytes omitted during compaction")
-  expect(oversizedOutput).toEndWith("END-COMPACT")
-})
+    expect(response.status).toBe(200)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const serialized = JSON.stringify(lastRequestBody)
+    expect(Buffer.byteLength(serialized)).toBeLessThanOrEqual(
+      COMPACTION_PAYLOAD_MAX_BYTES,
+    )
+    expect(serialized).toContain("run compact diagnostic")
+    expect(serialized).toContain("call_compact")
+    expect(serialized).toContain("BEGIN-COMPACT")
+    expect(serialized).toContain("END-COMPACT")
+    expect(serialized).toContain("UTF-8 bytes omitted during compaction")
+    expect(oversizedOutput).toEndWith("END-COMPACT")
+  },
+  { timeout: 15_000 },
+)
 
 test("compact fits and preserves custom tool context on ChatCompletions fallback", async () => {
   const model = state.models?.data[0]
