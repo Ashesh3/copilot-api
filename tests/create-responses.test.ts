@@ -353,6 +353,37 @@ test("fits explicitly marked compaction payloads at the transport boundary", asy
   expect(oversizedOutput).toEndWith("END-TRANSPORT")
 })
 
+test("leaves ordinary oversized Responses payloads unchanged", async () => {
+  const oversizedOutput =
+    "BEGIN-ORDINARY\n"
+    + "x".repeat(COMPACTION_PAYLOAD_MAX_BYTES + 1024)
+    + "\nEND-ORDINARY"
+
+  await createResponses(
+    {
+      model: "gpt-4o",
+      input: [
+        {
+          type: "custom_tool_call_output",
+          call_id: "call_ordinary",
+          output: oversizedOutput,
+        },
+      ],
+    },
+    { vision: false, initiator: "user" },
+  )
+
+  const serialized = JSON.stringify(lastRequestBody)
+  expect(Buffer.byteLength(serialized)).toBeGreaterThan(
+    COMPACTION_PAYLOAD_MAX_BYTES,
+  )
+  const forwardedOutput = (
+    lastRequestBody?.input as Array<{ output?: unknown }> | undefined
+  )?.[0]?.output
+  expect(forwardedOutput === oversizedOutput).toBe(true)
+  expect(serialized).not.toContain("UTF-8 bytes omitted during compaction")
+})
+
 test("injects runtime-style default reasoning settings for direct Responses requests", async () => {
   await createResponses(
     {

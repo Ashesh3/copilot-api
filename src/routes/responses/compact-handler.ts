@@ -12,6 +12,12 @@ import {
 } from "~/lib/routing-affinity"
 import { state } from "~/lib/state"
 import {
+  type CompactionPayloadFitResult,
+  COMPACTION_PAYLOAD_MAX_BYTES,
+  fitResponsesCompactionPayload,
+} from "~/services/copilot/compaction-payload"
+import { addPromptCaching } from "~/services/copilot/copilot-client"
+import {
   type ChatCompletionResponse,
   type ChatCompletionsPayload,
   createChatCompletions,
@@ -158,6 +164,30 @@ const convertSpecialItem = (
   item: ResponseInputItem,
 ): void => {
   switch (itemType) {
+    case "custom_tool_call": {
+      const call = item as {
+        call_id?: string
+        input?: string
+        name?: string
+      }
+      messages.push({
+        role: "assistant",
+        content:
+          `[Custom tool call ${call.call_id ?? "unknown"}: `
+          + `${call.name ?? "unknown"}(${call.input ?? ""})]`,
+      })
+      break
+    }
+    case "custom_tool_call_output": {
+      const output = item as { call_id?: string; output?: unknown }
+      messages.push({
+        role: "user",
+        content:
+          `[Custom tool result ${output.call_id ?? "unknown"}: `
+          + `${stringifyToolOutput(output.output)}]`,
+      })
+      break
+    }
     case "function_call": {
       const fc = item as { name?: string; arguments?: string }
       messages.push({
@@ -168,8 +198,7 @@ const convertSpecialItem = (
     }
     case "function_call_output": {
       const fco = item as { output?: string }
-      const output =
-        typeof fco.output === "string" ? fco.output : JSON.stringify(fco.output)
+      const output = stringifyToolOutput(fco.output)
       messages.push({ role: "user", content: `[Tool result: ${output}]` })
       break
     }
@@ -190,6 +219,57 @@ const convertSpecialItem = (
       break
     }
     // No default
+  }
+}
+
+const stringifyToolOutput = (output: unknown): string =>
+  typeof output === "string" ? output : JSON.stringify(output)
+
+const reportCompactionReduction = (
+  message: string,
+  fitted: CompactionPayloadFitResult<ResponsesPayload>,
+): void => {
+  if (!fitted.reduced) return
+  consola.warn(message, {
+    originalBytes: fitted.originalBytes,
+    finalBytes: fitted.finalBytes,
+    omittedBinaryBlocks: fitted.omittedBinaryBlocks,
+    truncatedToolOutputBytes: fitted.truncatedToolOutputBytes,
+  })
+}
+
+const createChatCompactionPayload = (
+  payload: ResponsesPayload,
+): {
+  fitted: CompactionPayloadFitResult<ResponsesPayload>
+  payload: ChatCompletionsPayload
+} => {
+  let sourceBudget = COMPACTION_PAYLOAD_MAX_BYTES
+
+  while (true) {
+    const fitted = fitResponsesCompactionPayload(payload, sourceBudget)
+    const input = fitted.payload.input as Array<ResponseInputItem>
+    const chatPayload: ChatCompletionsPayload = {
+      model: fitted.payload.model,
+      messages: [
+        {
+          role: "system",
+          content: fitted.payload.instructions ?? "",
+        },
+        ...convertInputToMessages(input),
+      ],
+      stream: false,
+      temperature: 0,
+    }
+    addPromptCaching(chatPayload.messages)
+
+    const chatBytes = Buffer.byteLength(JSON.stringify(chatPayload), "utf8")
+    if (chatBytes <= COMPACTION_PAYLOAD_MAX_BYTES) {
+      return { fitted, payload: chatPayload }
+    }
+
+    const overflowBytes = chatBytes - COMPACTION_PAYLOAD_MAX_BYTES
+    sourceBudget = Math.max(0, fitted.finalBytes - overflowBytes - 1)
   }
 }
 
@@ -227,7 +307,14 @@ export const handleCompact = async (c: Context) => {
   const tempPayload = { input, model } as ResponsesPayload
   expandCompactionItems(tempPayload)
   const expandedInput = tempPayload.input as Array<ResponseInputItem>
-
+  const responsesPayload: ResponsesPayload = {
+    model,
+    instructions: compactionPrompt,
+    input: expandedInput,
+    stream: false,
+    tool_choice: "none",
+    store: false,
+  }
   // Check if the model supports native /responses
   const selectedModel = state.models?.data.find((m) => m.id === model)
   const supportsResponses =
@@ -238,20 +325,18 @@ export const handleCompact = async (c: Context) => {
 
   if (supportsResponses) {
     // Use native Responses API
-    const responsesPayload: ResponsesPayload = {
-      model,
-      instructions: compactionPrompt,
-      input: expandedInput,
-      stream: false,
-      tool_choice: "none",
-      store: false,
-    }
-
-    const { vision, initiator } = getResponsesRequestOptions(responsesPayload)
-    const response = await createResponses(responsesPayload, {
+    const fitted = fitResponsesCompactionPayload(responsesPayload)
+    const fittedPayload = fitted.payload
+    reportCompactionReduction(
+      "Reduced oversized compact summary payload",
+      fitted,
+    )
+    const { vision, initiator } = getResponsesRequestOptions(fittedPayload)
+    const response = await createResponses(fittedPayload, {
       vision,
       initiator,
       signal: c.req.raw.signal,
+      compaction: true,
     })
 
     const result = response as ResponsesResult
@@ -265,20 +350,13 @@ export const handleCompact = async (c: Context) => {
       `[compact] Model ${model} does not support /responses, falling back to ChatCompletions`,
     )
     setRequestContext(c, { provider: "Compact→ChatCompletions" })
+    const prepared = createChatCompactionPayload(responsesPayload)
+    reportCompactionReduction(
+      "Reduced oversized compact fallback payload",
+      prepared.fitted,
+    )
 
-    const messages: ChatCompletionsPayload["messages"] = [
-      { role: "system", content: compactionPrompt },
-      ...convertInputToMessages(expandedInput),
-    ]
-
-    const ccPayload: ChatCompletionsPayload = {
-      model,
-      messages,
-      stream: false,
-      temperature: 0,
-    }
-
-    const response = await createChatCompletions(ccPayload, {
+    const response = await createChatCompletions(prepared.payload, {
       signal: c.req.raw.signal,
     })
     const result = response as ChatCompletionResponse

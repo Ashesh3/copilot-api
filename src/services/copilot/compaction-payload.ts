@@ -174,7 +174,7 @@ const collectToolOutputSlots = (
 }
 
 const decodePrefixAtLeast = (buffer: Buffer, minimumBytes: number): string => {
-  const decoder = new TextDecoder("utf8", { fatal: true })
+  const decoder = new TextDecoder(undefined, { fatal: true })
   let end = Math.min(buffer.length, minimumBytes)
 
   while (end <= buffer.length) {
@@ -188,7 +188,7 @@ const decodePrefixAtLeast = (buffer: Buffer, minimumBytes: number): string => {
 }
 
 const decodeSuffixAtLeast = (buffer: Buffer, minimumBytes: number): string => {
-  const decoder = new TextDecoder("utf8", { fatal: true })
+  const decoder = new TextDecoder(undefined, { fatal: true })
   let start = Math.max(0, buffer.length - minimumBytes)
 
   while (start >= 0) {
@@ -264,16 +264,17 @@ export function fitResponsesCompactionPayload<
   }
 
   const reducedPayload = structuredClone(payload)
+  const reducedRecord: Record<string, unknown> = reducedPayload
   const counts: ReductionCounts = { omittedBinaryBlocks: 0 }
-  if ("input" in reducedPayload) {
-    reducedPayload.input = elideInlineAttachments(reducedPayload.input, counts)
+  if ("input" in reducedRecord) {
+    reducedRecord.input = elideInlineAttachments(reducedRecord.input, counts)
   }
 
   let currentBytes = serializedBytes(reducedPayload)
   let truncatedToolOutputBytes = 0
   if (currentBytes > maxBytes) {
     const slots: Array<TextSlot> = []
-    collectToolOutputSlots(reducedPayload.input, slots)
+    collectToolOutputSlots(reducedRecord.input, slots)
     slots.sort((left, right) => right.originalBytes - left.originalBytes)
 
     for (const slot of slots) {
