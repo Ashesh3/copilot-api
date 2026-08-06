@@ -32,7 +32,7 @@ The gateway will treat a request as a compaction-generation turn when either con
 
 Codex turn metadata may be an object or a JSON string stored under `x-codex-turn-metadata`. Malformed or unrelated metadata is not a compaction signal and must not change request handling.
 
-The same detection helper will be used by the HTTP Responses handler and the WebSocket handler. WebSocket reduction happens after continuation rehydration and existing compaction-marker expansion, because that is the exact representation serialized upstream.
+The same detection helper will cover HTTP and WebSocket requests at their shared Responses transport boundary. WebSocket reduction therefore happens after continuation rehydration and existing compaction-marker expansion. Final enforcement happens after attachment normalization and request sanitization, because that is the exact representation serialized upstream.
 
 ## Payload Budgeting
 
@@ -61,9 +61,8 @@ If binary elision and safe tool-output truncation cannot bring the payload below
 ## Integration Points
 
 - A focused Responses utility module owns compaction detection, byte measurement, binary elision, and tool-output fitting.
-- `src/routes/responses/handler.ts` applies the reducer only to direct HTTP compaction turns.
-- `src/routes/responses/websocket.ts` applies it only after continuation rehydration and compaction expansion for WebSocket compaction turns.
-- `src/routes/responses/compact-handler.ts` applies it to the actual model payload used to generate the compacted summary, including the compaction instructions and final summarization request.
+- `src/services/copilot/create-responses.ts` detects HTTP and WebSocket compaction turns and enforces the final budget after attachment normalization and request sanitization.
+- `src/routes/responses/compact-handler.ts` pre-fits the model payload used to generate the compacted summary so both native Responses and ChatCompletions fallback paths are bounded, then explicitly requests final transport enforcement for the native path.
 - Existing `expandCompactionItems` behavior remains unchanged.
 
 Reduction logs contain counts and byte sizes only. They never include request content, tool output, credentials, or encoded binary data.
