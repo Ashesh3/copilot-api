@@ -47,7 +47,7 @@ Copilot Runtime also caps individually persisted model-facing binary results at 
 `createResponses` remains the authoritative final native Responses boundary. It already runs after attachment normalization and request sanitization and is shared by HTTP and WebSocket callers. It will prepare the exact outbound object asynchronously:
 
 - compaction requests continue through `fitResponsesCompactionPayload` exactly as in PR #51;
-- ordinary requests at or below the 32 MiB hard cap return the original sanitized object reference;
+- ordinary requests strictly below the 32 MiB hard cap return the original sanitized object reference; an exact-cap request enters recovery so no body at or above the ambiguous upstream boundary is dispatched;
 - oversized ordinary requests enter binary-only recovery before the first upstream dispatch.
 
 No upstream 413 is required to trigger recovery. The legacy post-413 image-removal retry is replaced by the pre-dispatch recovery for CAPI Responses so nested tool-result images are handled and the first upstream request is already safe.
@@ -72,7 +72,7 @@ It calculates the non-image serialized weight from the exact payload size minus 
 
 Each supported image is decoded and re-encoded with production Bun 1.3.14's built-in `Bun.Image`, which is available in the deployed Alpine container and requires no new native dependency. Images retain aspect ratio and are progressively reduced until the exact full JSON body fits or no further safe reduction is possible. Encoding is deterministic: JPEG remains JPEG at quality 80, PNG remains PNG at compression level 9, and WebP remains WebP at quality 80. Other formats, animated images, and decode/encode failures use the explicit-removal fallback rather than silently changing or partially preserving their semantics. The data URI continues to declare the actual encoded format.
 
-Recovery never silently classifies a dropped/undecodable image as a successful downscale. Any decode/encode failure proceeds to explicit binary removal.
+Recovery never silently classifies a dropped/undecodable image as a successful downscale. Image processing returns an explicit outcome: resized, invalid, or valid-but-unshrinkable. Invalid/malformed/unsupported media always becomes an explicit breadcrumb. Valid-but-unshrinkable media participates in the historical-first/current-last removal order, so current visual content survives when historical removal alone is sufficient.
 
 ### Stage 2: binary removal
 
@@ -107,7 +107,7 @@ If the body remains above the transformed target after all inline binaries are r
 7. If still oversized, historical binaries are replaced with breadcrumbs and remeasured.
 8. If still oversized, current-turn binaries are replaced and remeasured.
 9. The Copilot vision header is derived from the recovered final body, including recursively nested tool-result screenshots/files; it is removed if recovery removed every attachment.
-10. An unchanged body at or below 32 MiB is dispatched once. A transformed body at or below 32 MiB minus 64 KiB is dispatched once. Otherwise a safe local 413 is returned without contacting GitHub.
+10. An unchanged body strictly below 32 MiB is dispatched once. A transformed body at or below 32 MiB minus 64 KiB is dispatched once. Otherwise a safe local 413 is returned without contacting GitHub.
 
 ## Observability
 

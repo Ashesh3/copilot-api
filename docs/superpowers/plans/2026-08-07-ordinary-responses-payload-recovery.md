@@ -100,9 +100,13 @@ export interface ResponsesImageResizeInput {
   targetDataUriBytes: number
 }
 
+export type ResponsesImageResizeResult =
+  | { dataUri: string; outcome: "resized" }
+  | { outcome: "invalid" | "unshrinkable" }
+
 export type ResponsesImageResizer = (
   input: ResponsesImageResizeInput,
-) => Promise<string | null>
+) => Promise<ResponsesImageResizeResult>
 
 export interface ResponsesPayloadRecoveryResult<T> {
   payload: T
@@ -163,7 +167,7 @@ test("removes historical binaries before current-turn binaries", async () => {
   const result = await recoverResponsesPayload(payload, {
     maxBytes: 3900,
     recoveryMarginBytes: 100,
-    resizeImage: async () => null,
+    resizeImage: async () => ({ outcome: "unshrinkable" }),
   })
   const serialized = JSON.stringify(result.payload)
   expect(result.removedHistoricalBinaries).toBe(1)
@@ -176,7 +180,7 @@ test("removes current-turn binary only as the final recoverable fallback", async
   const result = await recoverResponsesPayload(currentOnlyBinaryPayload(), {
     maxBytes: 1500,
     recoveryMarginBytes: 100,
-    resizeImage: async () => null,
+    resizeImage: async () => ({ outcome: "unshrinkable" }),
   })
   expect(result.removedCurrentBinaries).toBe(1)
   expect(result.finalBytes).toBeLessThanOrEqual(1400)
@@ -260,13 +264,13 @@ Expected: FAIL because `resizeResponsesImage` is not implemented.
 Export `resizeResponsesImage` as the default `ResponsesImageResizer`:
 
 - parse the data URI and decode base64;
-- accept only JPEG, PNG, and WebP; return `null` for GIF/other formats;
+- accept only JPEG, PNG, and WebP; return `invalid` for GIF/other formats;
 - reject APNG (`acTL`) and animated WebP (`ANIM`) before decoding;
 - read metadata with `new Bun.Image(buffer).metadata()`;
 - re-encode same-format at JPEG/WebP quality 80 or PNG compression level 9;
 - if still above target, reduce width/height proportionally using the square root of the target/current byte ratio with a safety factor and retry up to eight decreasing dimensions;
 - preserve aspect ratio with `fit: "inside"` and `withoutEnlargement: true`;
-- return `null` on Bun image error codes or if no encoding reaches the target; and
+- return `invalid` on Bun image/decode errors, `unshrinkable` when valid media cannot reach the target, and `resized` with the fitted data URI on success; and
 - check `signal?.throwIfAborted()` before every awaited terminal.
 
 - [ ] **Step 4: Verify GREEN on Bun 1.3.14 and the local focused suite**

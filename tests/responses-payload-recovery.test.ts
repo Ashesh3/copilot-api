@@ -5,6 +5,8 @@ import { LocalHTTPError } from "~/lib/error"
 import {
   recoverResponsesPayload,
   resizeResponsesImage,
+  resizeResponsesImageWithFactory,
+  type ResponsesImageFactory,
   type ResponsesImageResizer,
 } from "~/services/copilot/responses-payload-recovery"
 
@@ -16,7 +18,15 @@ const PNG_B64 =
 const shrinkToTarget: ResponsesImageResizer = ({
   dataUri,
   targetDataUriBytes,
-}) => Promise.resolve(dataUri.slice(0, targetDataUriBytes))
+}) =>
+  Promise.resolve({
+    dataUri: dataUri.slice(0, targetDataUriBytes),
+    outcome: "resized",
+  })
+
+const invalidImage = () => Promise.resolve({ outcome: "invalid" as const })
+const unshrinkableImage = () =>
+  Promise.resolve({ outcome: "unshrinkable" as const })
 
 test("returns the original ordinary payload when it is within the hard cap", async () => {
   const payload = { model: "gpt-5.6-sol", input: "hello" }
@@ -28,6 +38,45 @@ test("returns the original ordinary payload when it is within the hard cap", asy
 
   expect(result.payload).toBe(payload)
   expect(result.reduced).toBe(false)
+})
+
+test("treats one byte below the hard cap as unchanged", async () => {
+  const maxBytes = 256
+  const payload = { model: "m", input: "" }
+  const overheadBytes = Buffer.byteLength(JSON.stringify(payload))
+  payload.input = "x".repeat(maxBytes - 1 - overheadBytes)
+
+  const result = await recoverResponsesPayload(payload, {
+    maxBytes,
+    recoveryMarginBytes: 16,
+  })
+
+  expect(Buffer.byteLength(JSON.stringify(payload))).toBe(maxBytes - 1)
+  expect(result.payload).toBe(payload)
+  expect(result.reduced).toBe(false)
+})
+
+test("rejects preserved content exactly at the hard cap", async () => {
+  const maxBytes = 256
+  const payload = { model: "m", input: "" }
+  const overheadBytes = Buffer.byteLength(JSON.stringify(payload))
+  payload.input = "x".repeat(maxBytes - overheadBytes)
+
+  let thrown: unknown
+  try {
+    await recoverResponsesPayload(payload, {
+      maxBytes,
+      recoveryMarginBytes: 16,
+    })
+  } catch (error) {
+    thrown = error
+  }
+
+  expect(Buffer.byteLength(JSON.stringify(payload))).toBe(maxBytes)
+  expect(thrown).toBeInstanceOf(LocalHTTPError)
+  expect((thrown as LocalHTTPError).clientBody).toMatchObject({
+    error: { code: "responses_payload_too_large", payload_bytes: maxBytes },
+  })
 })
 
 test("downscales nested tool-result images before removing them", async () => {
@@ -53,6 +102,81 @@ test("downscales nested tool-result images before removing them", async () => {
   expect(result.removedHistoricalBinaries).toBe(0)
   expect(JSON.stringify(result.payload)).toContain("data:image/png;base64")
   expect(payload).toEqual(original)
+})
+
+test("removes an invalid image even when another image shrinks enough to fit", async () => {
+  const failedImage = `data:image/png;base64,${"F".repeat(1000)}`
+  const shrinkableImage = `data:image/png;base64,${"S".repeat(4000)}`
+  const payload = {
+    model: "gpt-5.6-sol",
+    input: [
+      {
+        type: "function_call_output",
+        call_id: "call_mixed_images",
+        output: [
+          { type: "input_image", image_url: failedImage },
+          { type: "input_image", image_url: shrinkableImage },
+        ],
+      },
+    ],
+  }
+
+  const result = await recoverResponsesPayload(payload, {
+    maxBytes: 3000,
+    recoveryMarginBytes: 100,
+    resizeImage: ({ dataUri, targetDataUriBytes }) =>
+      dataUri === failedImage ? invalidImage() : (
+        Promise.resolve({
+          dataUri: dataUri.slice(0, targetDataUriBytes),
+          outcome: "resized",
+        })
+      ),
+  })
+  const serialized = JSON.stringify(result.payload)
+
+  expect(result.downscaledImages).toBe(1)
+  expect(result.removedHistoricalBinaries).toBe(1)
+  expect(serialized).not.toContain(failedImage)
+  expect(serialized).toContain("data:image/png;base64")
+  expect(serialized).toContain(
+    "omitted to fit the CAPI Responses request-size limit",
+  )
+})
+
+test("removes a malformed data image when another image shrinks enough to fit", async () => {
+  const malformedImage = "data:image/png,not-base64"
+  const shrinkableImage = `data:image/png;base64,${"S".repeat(4000)}`
+  const payload = {
+    model: "gpt-5.6-sol",
+    input: [
+      {
+        type: "function_call_output",
+        call_id: "call_malformed_image",
+        output: [
+          { type: "computer_screenshot", image_url: malformedImage },
+          { type: "input_image", image_url: shrinkableImage },
+        ],
+      },
+    ],
+  }
+
+  const result = await recoverResponsesPayload(payload, {
+    maxBytes: 3000,
+    recoveryMarginBytes: 100,
+    resizeImage: ({ dataUri, targetDataUriBytes }) =>
+      dataUri === malformedImage ? invalidImage() : (
+        Promise.resolve({
+          dataUri: dataUri.slice(0, targetDataUriBytes),
+          outcome: "resized",
+        })
+      ),
+  })
+  const serialized = JSON.stringify(result.payload)
+
+  expect(result.downscaledImages).toBe(1)
+  expect(result.removedHistoricalBinaries).toBe(1)
+  expect(serialized).not.toContain(malformedImage)
+  expect(serialized).toContain("data:image/png;base64")
 })
 
 test("removes historical binaries before current-turn binaries", async () => {
@@ -87,7 +211,7 @@ test("removes historical binaries before current-turn binaries", async () => {
   const result = await recoverResponsesPayload(payload, {
     maxBytes: 3900,
     recoveryMarginBytes: 100,
-    resizeImage: () => Promise.resolve(null),
+    resizeImage: unshrinkableImage,
   })
   const serialized = JSON.stringify(result.payload)
 
@@ -95,9 +219,43 @@ test("removes historical binaries before current-turn binaries", async () => {
   expect(result.removedCurrentBinaries).toBe(0)
   expect(serialized).not.toContain(historyImage)
   expect(serialized).toContain(currentImage)
-  expect(serialized).toContain(
-    "omitted to fit the CAPI Responses request-size limit",
-  )
+})
+
+test("keeps an unshrinkable current image when historical removal is sufficient", async () => {
+  const historyFile = `data:application/pdf;base64,${"H".repeat(3000)}`
+  const currentImage = `data:image/png;base64,${"C".repeat(1500)}`
+  const payload = {
+    model: "gpt-5.6-sol",
+    client_metadata: {
+      "x-codex-turn-metadata": JSON.stringify({ turn_id: "turn_current" }),
+    },
+    input: [
+      {
+        type: "input_file",
+        filename: "history.pdf",
+        file_data: historyFile,
+      },
+      {
+        type: "message",
+        role: "user",
+        content: "use the current screenshot",
+        internal_chat_message_metadata_passthrough: { turn_id: "turn_current" },
+      },
+      { type: "input_image", image_url: currentImage },
+    ],
+  }
+
+  const result = await recoverResponsesPayload(payload, {
+    maxBytes: 2050,
+    recoveryMarginBytes: 100,
+    resizeImage: unshrinkableImage,
+  })
+  const serialized = JSON.stringify(result.payload)
+
+  expect(result.removedHistoricalBinaries).toBe(1)
+  expect(result.removedCurrentBinaries).toBe(0)
+  expect(serialized).not.toContain(historyFile)
+  expect(serialized).toContain(currentImage)
 })
 
 test("removes current-turn binary only as the final recoverable fallback", async () => {
@@ -115,7 +273,7 @@ test("removes current-turn binary only as the final recoverable fallback", async
   const result = await recoverResponsesPayload(payload, {
     maxBytes: 1500,
     recoveryMarginBytes: 100,
-    resizeImage: () => Promise.resolve(null),
+    resizeImage: unshrinkableImage,
   })
 
   expect(result.removedCurrentBinaries).toBe(1)
@@ -132,10 +290,7 @@ test("handles nested screenshots and files without changing external descriptors
         output: [
           {
             type: "computer_call_output",
-            output: {
-              type: "computer_screenshot",
-              image_url: tinyImage(2000),
-            },
+            output: { type: "computer_screenshot", image_url: tinyImage(2000) },
           },
           {
             type: "input_file",
@@ -156,7 +311,7 @@ test("handles nested screenshots and files without changing external descriptors
   const result = await recoverResponsesPayload(payload, {
     maxBytes: 1800,
     recoveryMarginBytes: 100,
-    resizeImage: () => Promise.resolve(null),
+    resizeImage: unshrinkableImage,
   })
   const serialized = JSON.stringify(result.payload)
 
@@ -193,7 +348,7 @@ test("preserves ordinary tool text commands IDs and ordering", async () => {
   const result = await recoverResponsesPayload(payload, {
     maxBytes: 3900,
     recoveryMarginBytes: 100,
-    resizeImage: () => Promise.resolve(null),
+    resizeImage: unshrinkableImage,
   })
   const recoveredInput = result.payload.input
 
@@ -220,7 +375,7 @@ test("raises a safe local 413 when preserved ordinary content cannot fit", async
     await recoverResponsesPayload(payload, {
       maxBytes: 1000,
       recoveryMarginBytes: 100,
-      resizeImage: () => Promise.resolve(null),
+      resizeImage: unshrinkableImage,
     })
   } catch (error) {
     thrown = error
@@ -253,9 +408,60 @@ test.skipIf(typeof Bun.Image !== "function")(
       targetDataUriBytes: 32 * 1024,
     })
 
-    expect(resized).not.toBeNull()
-    if (resized === null) throw new Error("Expected a resized PNG data URI")
-    expect(Buffer.byteLength(resized)).toBeLessThanOrEqual(32 * 1024)
-    expect(parseDataUri(resized)?.mediaType).toBe("image/png")
+    expect(resized.outcome).toBe("resized")
+    if (resized.outcome !== "resized") {
+      throw new Error("Expected a resized PNG data URI")
+    }
+    expect(Buffer.byteLength(resized.dataUri)).toBeLessThanOrEqual(32 * 1024)
+    expect(parseDataUri(resized.dataUri)?.mediaType).toBe("image/png")
   },
 )
+
+test("checks the eighth resized image candidate before giving up", async () => {
+  let encodeCount = 0
+
+  class FakeImage {
+    jpeg(): this {
+      return this
+    }
+
+    metadata(): Promise<{ format: "png"; height: number; width: number }> {
+      return Promise.resolve({ format: "png", height: 100, width: 100 })
+    }
+
+    png(): this {
+      return this
+    }
+
+    resize(): this {
+      return this
+    }
+
+    buffer(): Promise<Buffer> {
+      const bytes = encodeCount === 8 ? 10 : 300
+      encodeCount += 1
+      return Promise.resolve(Buffer.alloc(bytes))
+    }
+
+    webp(): this {
+      return this
+    }
+  }
+
+  const imageFactory: ResponsesImageFactory = () => new FakeImage()
+  const resized = await resizeResponsesImageWithFactory(
+    {
+      dataUri: `data:image/png;base64,${Buffer.alloc(300).toString("base64")}`,
+      mediaType: "image/png",
+      targetDataUriBytes: 100,
+    },
+    imageFactory,
+  )
+
+  expect(encodeCount).toBe(9)
+  expect(resized.outcome).toBe("resized")
+  if (resized.outcome !== "resized") {
+    throw new Error("Expected the eighth resized image")
+  }
+  expect(Buffer.byteLength(resized.dataUri)).toBeLessThanOrEqual(100)
+})
