@@ -12,6 +12,7 @@ const originalFetch = globalThis.fetch
 const originalAccountType = state.accountType
 const originalCopilotToken = state.copilotToken
 const requestBodies: Array<Record<string, unknown>> = []
+const requestHeaders: Array<Headers> = []
 
 const successResponse = () =>
   Response.json({
@@ -23,6 +24,7 @@ const successResponse = () =>
   })
 
 const fetchMock = mock((_url: string, init?: RequestInit) => {
+  requestHeaders.push(new Headers(init?.headers))
   if (typeof init?.body === "string") {
     requestBodies.push(JSON.parse(init.body) as Record<string, unknown>)
   }
@@ -42,6 +44,7 @@ afterAll(() => {
 
 beforeEach(() => {
   requestBodies.length = 0
+  requestHeaders.length = 0
   fetchMock.mockClear()
   state.accountType = "individual"
   state.copilotToken = "copilot-token"
@@ -109,4 +112,34 @@ test("rejects oversized ordinary preserved text without calling upstream", async
     error: { code: "responses_payload_too_large" },
   })
   expect(fetchMock).not.toHaveBeenCalled()
+})
+
+test("removes the vision header when recovery removes every attachment", async () => {
+  const preservedOutput = "x".repeat(31 * 1024 * 1024)
+  const inlineFile = `data:application/pdf;base64,${"A".repeat(2 * 1024 * 1024)}`
+
+  await createResponses(
+    {
+      model: "gpt-4o",
+      input: [
+        {
+          type: "custom_tool_call_output",
+          call_id: "call_header",
+          output: [
+            { type: "input_text", text: preservedOutput },
+            {
+              type: "input_file",
+              filename: "header.pdf",
+              file_data: inlineFile,
+            },
+          ],
+        },
+      ],
+    },
+    { vision: true, initiator: "user" },
+  )
+
+  expect(requestBodies).toHaveLength(1)
+  expect(JSON.stringify(requestBodies[0])).not.toContain(inlineFile)
+  expect(requestHeaders[0]?.has("Copilot-Vision-Request")).toBe(false)
 })

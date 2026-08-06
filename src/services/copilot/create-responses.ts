@@ -22,6 +22,7 @@ import {
   isResponsesCompactionRequest,
 } from "./compaction-payload"
 import {
+  hasResponsesAttachment,
   recoverResponsesPayload,
   type ResponsesPayloadRecoveryResult,
 } from "./responses-payload-recovery"
@@ -831,8 +832,6 @@ export const createResponses = async (
 ): Promise<CreateResponsesReturn> => {
   const { vision, initiator, signal } = options
   signal?.throwIfAborted()
-  const headerOpts = { vision, initiator }
-
   // service_tier is not supported by github copilot
   delete payload.service_tier
 
@@ -870,6 +869,10 @@ export const createResponses = async (
     fitCompactionPayload: shouldFitCompactionPayload,
     signal,
   })
+  const headerOpts = {
+    vision: vision && hasResponsesAttachment(sanitizedPayload),
+    initiator,
+  }
 
   const { response } = await routedFetch(
     "/responses",

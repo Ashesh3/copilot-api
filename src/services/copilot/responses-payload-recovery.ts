@@ -103,6 +103,18 @@ const fallbackCurrentStart = (input: Array<unknown>): number => {
   return input.length
 }
 
+const currentTurnStart = (
+  input: Array<unknown>,
+  activeTurnId: string | null,
+): number => {
+  if (activeTurnId !== null) {
+    for (let index = input.length - 1; index >= 0; index -= 1) {
+      if (itemTurnId(input[index]) === activeTurnId) return index
+    }
+  }
+  return fallbackCurrentStart(input)
+}
+
 const collectImageSlots = (value: unknown, slots: Array<ImageSlot>): void => {
   if (Array.isArray(value)) {
     for (const entry of value) collectImageSlots(entry, slots)
@@ -129,6 +141,26 @@ const collectImageSlots = (value: unknown, slots: Array<ImageSlot>): void => {
 
   for (const entry of Object.values(value)) collectImageSlots(entry, slots)
 }
+
+const containsResponsesAttachment = (value: unknown): boolean => {
+  if (Array.isArray(value)) {
+    return value.some((entry) => containsResponsesAttachment(entry))
+  }
+  if (!isRecord(value)) return false
+  if (
+    value.type === "input_image"
+    || value.type === "input_file"
+    || value.type === "computer_screenshot"
+  ) {
+    return true
+  }
+  return Object.values(value).some((entry) =>
+    containsResponsesAttachment(entry),
+  )
+}
+
+export const hasResponsesAttachment = (payload: Record<string, unknown>) =>
+  containsResponsesAttachment(payload.input)
 
 const SUPPORTED_RESIZE_MEDIA_TYPES = new Set([
   "image/jpeg",
@@ -262,15 +294,12 @@ const collectInputBinarySlots = (
   const input: Array<unknown> = Array.isArray(record.input) ? record.input : []
   if (input.length === 0) return []
   const activeTurnId = requestTurnId(record)
-  const fallbackStart = fallbackCurrentStart(input)
+  const currentStart = currentTurnStart(input, activeTurnId)
   const slots: Array<BinarySlot> = []
 
   for (let index = 0; index < input.length; index += 1) {
     const item: unknown = input[index]
-    const current =
-      activeTurnId === null ?
-        index >= fallbackStart
-      : itemTurnId(item) === activeTurnId
+    const current = index >= currentStart
     collectBinarySlots(item, {
       current,
       replace(replacement) {

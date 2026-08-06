@@ -56,7 +56,7 @@ test("downscales nested tool-result images before removing them", async () => {
 })
 
 test("removes historical binaries before current-turn binaries", async () => {
-  const historyImage = tinyImage(3000)
+  const historyImage = tinyImage(2500)
   const currentImage = `data:image/png;base64,${"C".repeat(3000)}`
   const payload = {
     model: "gpt-5.6-sol",
@@ -71,10 +71,15 @@ test("removes historical binaries before current-turn binaries", async () => {
         internal_chat_message_metadata_passthrough: { turn_id: "turn_old" },
       },
       {
+        type: "message",
+        role: "user",
+        content: "inspect the latest screenshot",
+        internal_chat_message_metadata_passthrough: { turn_id: "turn_current" },
+      },
+      {
         type: "function_call_output",
         call_id: "call_current",
         output: [{ type: "input_image", image_url: currentImage }],
-        internal_chat_message_metadata_passthrough: { turn_id: "turn_current" },
       },
     ],
   }
