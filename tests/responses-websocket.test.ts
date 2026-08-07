@@ -39,6 +39,10 @@ import {
   runWithWebSocketRequestContext,
 } from "../src/routes/responses/websocket-lifecycle"
 import { COMPACTION_PAYLOAD_MAX_BYTES } from "../src/services/copilot/compaction-payload"
+import {
+  CAPI_RESPONSES_MAX_REQUEST_BYTES,
+  RESPONSES_RECOVERY_MARGIN_BYTES,
+} from "../src/services/copilot/responses-payload-recovery"
 
 const originalApiKeyAuth = state.apiKeyAuth
 const originalFetch = globalThis.fetch
@@ -1048,6 +1052,89 @@ describe("responses websocket message handling", () => {
 })
 
 describe("responses websocket upstream handling", () => {
+  test(
+    "recovers an oversized ordinary rehydrated continuation before forwarding",
+    async () => {
+      state.accountType = "individual"
+      state.copilotToken = "copilot-token"
+      state.models = responsesCapableModels
+      queuedResponses.push(createResponsesSseResponse("resp_ordinary_fit"))
+      const ws = createTestWebSocket()
+      const preservedHistory =
+        "BEGIN-ORDINARY-WS\n"
+        + "x".repeat(26 * 1024 * 1024)
+        + "\nEND-ORDINARY-WS"
+      const inlineScreenshot = `data:image/png;base64,${"A".repeat(7 * 1024 * 1024)}`
+
+      recordResponseSnapshotFromFrame(
+        ws.data.responseSnapshots,
+        {
+          model: "gpt-5.4",
+          input: [
+            {
+              type: "function_call_output",
+              call_id: "call_ws_history",
+              output: preservedHistory,
+              internal_chat_message_metadata_passthrough: {
+                turn_id: "turn_history",
+              },
+            },
+          ],
+          stream: true,
+        },
+        JSON.stringify({
+          type: "response.completed",
+          response: { id: "resp_before_ordinary", output: [] },
+        }),
+      )
+
+      await responsesWebSocket.message(
+        ws,
+        JSON.stringify({
+          type: "response.create",
+          model: "gpt-5.4",
+          previous_response_id: "resp_before_ordinary",
+          input: [
+            {
+              type: "function_call_output",
+              call_id: "call_ws_current",
+              output: [
+                {
+                  type: "computer_screenshot",
+                  image_url: inlineScreenshot,
+                },
+              ],
+              internal_chat_message_metadata_passthrough: {
+                turn_id: "turn_current",
+              },
+            },
+          ],
+          client_metadata: {
+            "x-codex-turn-metadata": JSON.stringify({
+              request_kind: "turn",
+              turn_id: "turn_current",
+            }),
+          },
+        }),
+      )
+
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      const serialized = JSON.stringify(lastRequestBody)
+      expect(Buffer.byteLength(serialized)).toBeLessThanOrEqual(
+        CAPI_RESPONSES_MAX_REQUEST_BYTES - RESPONSES_RECOVERY_MARGIN_BYTES,
+      )
+      expect(serialized).toContain("BEGIN-ORDINARY-WS")
+      expect(serialized).toContain("END-ORDINARY-WS")
+      expect(serialized).toContain("call_ws_current")
+      expect(serialized).not.toContain(inlineScreenshot)
+      expect(serialized).toContain(
+        "omitted to fit the CAPI Responses request-size limit",
+      )
+      expect(lastRequestBody?.previous_response_id).toBeUndefined()
+    },
+    { timeout: 15_000 },
+  )
+
   test("fits a rehydrated pre-compaction continuation before forwarding", async () => {
     state.accountType = "individual"
     state.copilotToken = "copilot-token"

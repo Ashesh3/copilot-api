@@ -21,6 +21,11 @@ import {
   fitResponsesCompactionPayload,
   isResponsesCompactionRequest,
 } from "./compaction-payload"
+import {
+  hasResponsesAttachment,
+  recoverResponsesPayload,
+  type ResponsesPayloadRecoveryResult,
+} from "./responses-payload-recovery"
 
 export interface ResponsesPayload {
   model: string
@@ -311,48 +316,6 @@ function stripFileUrl(part: ResponseInputFile): ResponseInputFile {
   return rest
 }
 
-function hasArrayContent(
-  item: ResponseInputItem,
-): item is ResponseInputMessage & { content: Array<ResponseInputContent> } {
-  return isRecord(item) && Array.isArray(item.content)
-}
-
-function removeInputImages(payload: ResponsesPayload): boolean {
-  if (!Array.isArray(payload.input)) {
-    return false
-  }
-
-  let removedImages = false
-  const filteredInput: Array<ResponseInputItem> = []
-  for (const item of payload.input) {
-    if (isAttachmentPart(item)) {
-      removedImages = true
-      continue
-    }
-
-    if (hasArrayContent(item)) {
-      const filteredContent: Array<ResponseInputContent> = []
-      for (const part of item.content) {
-        if (isAttachmentPart(part)) {
-          removedImages = true
-          continue
-        }
-        filteredContent.push(part)
-      }
-      if (filteredContent.length === 0) {
-        continue
-      }
-      filteredInput.push({ ...item, content: filteredContent })
-      continue
-    }
-
-    filteredInput.push(item)
-  }
-  payload.input = filteredInput
-
-  return removedImages && payload.input.length > 0
-}
-
 export interface ResponsesResult {
   id: string
   object: "response"
@@ -638,12 +601,32 @@ function sanitizeResponsesPayload(
   return result
 }
 
-function prepareResponsesPayload(
+const logOrdinaryRecovery = (
+  recovered: ResponsesPayloadRecoveryResult<Record<string, unknown>>,
+): void => {
+  if (!recovered.reduced) return
+
+  consola.warn("Recovered oversized ordinary Responses payload", {
+    originalBytes: recovered.originalBytes,
+    finalBytes: recovered.finalBytes,
+    downscaledImages: recovered.downscaledImages,
+    removedHistoricalBinaries: recovered.removedHistoricalBinaries,
+    removedCurrentBinaries: recovered.removedCurrentBinaries,
+  })
+}
+
+async function prepareResponsesPayload(
   payload: ResponsesPayload,
-  fitCompactionPayload: boolean,
-): Record<string, unknown> {
+  options: { fitCompactionPayload: boolean; signal?: AbortSignal },
+): Promise<Record<string, unknown>> {
   const sanitized = sanitizeResponsesPayload(payload)
-  if (!fitCompactionPayload) return sanitized
+  if (!options.fitCompactionPayload) {
+    const recovered = await recoverResponsesPayload(sanitized, {
+      signal: options.signal,
+    })
+    logOrdinaryRecovery(recovered)
+    return recovered.payload
+  }
 
   const fitted = fitResponsesCompactionPayload(sanitized)
   if (fitted.reduced) {
@@ -847,10 +830,8 @@ export const createResponses = async (
   payload: ResponsesPayload,
   options: ResponsesRequestOptions,
 ): Promise<CreateResponsesReturn> => {
-  const { vision, initiator, signal } = options
+  const { initiator, signal } = options
   signal?.throwIfAborted()
-  let headerOpts = { vision, initiator }
-
   // service_tier is not supported by github copilot
   delete payload.service_tier
 
@@ -884,12 +865,16 @@ export const createResponses = async (
     payload,
     options.compaction,
   )
-  let sanitizedPayload = prepareResponsesPayload(
-    payload,
-    shouldFitCompactionPayload,
-  )
+  const sanitizedPayload = await prepareResponsesPayload(payload, {
+    fitCompactionPayload: shouldFitCompactionPayload,
+    signal,
+  })
+  const headerOpts = {
+    vision: hasResponsesAttachment(sanitizedPayload),
+    initiator,
+  }
 
-  let { response } = await routedFetch(
+  const { response } = await routedFetch(
     "/responses",
     { method: "POST", body: JSON.stringify(sanitizedPayload), signal },
     {
@@ -899,28 +884,6 @@ export const createResponses = async (
         payload.stream ? PRE_HEADER_MAX_DELAY_SECONDS : undefined,
     },
   )
-
-  if (response.status === 413 && vision && removeInputImages(payload)) {
-    consola.warn("413 Payload Too Large with images, retrying without images")
-    sanitizedPayload = prepareResponsesPayload(
-      payload,
-      shouldFitCompactionPayload,
-    )
-    headerOpts = { vision: false, initiator }
-    const { response: retryResponse } = await routedFetch(
-      "/responses",
-      { method: "POST", body: JSON.stringify(sanitizedPayload), signal },
-      {
-        modelId: payload.model,
-        headerOptions: headerOpts,
-        reason: "http_retry",
-        recordSelection: false,
-        maxHttpRetryDelaySeconds:
-          payload.stream ? PRE_HEADER_MAX_DELAY_SECONDS : undefined,
-      },
-    )
-    response = retryResponse
-  }
 
   if (!response.ok) {
     consola.error("Failed to create responses", response)

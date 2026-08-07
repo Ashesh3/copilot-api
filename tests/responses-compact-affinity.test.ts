@@ -9,6 +9,10 @@ import {
 import { state } from "~/lib/state"
 import { server } from "~/server"
 import { COMPACTION_PAYLOAD_MAX_BYTES } from "~/services/copilot/compaction-payload"
+import {
+  CAPI_RESPONSES_MAX_REQUEST_BYTES,
+  RESPONSES_RECOVERY_MARGIN_BYTES,
+} from "~/services/copilot/responses-payload-recovery"
 
 const originalFetch = globalThis.fetch
 const originalModels = state.models
@@ -316,4 +320,82 @@ test("direct Responses returns the safe local compaction error code", async () =
   expect(body.error?.code).toBe("compaction_payload_too_large")
   expect(body.error?.type).toBe("error")
   expect(body.error?.message).toContain("safe compaction payload budget")
+})
+
+test(
+  "direct Responses HTTP recovers oversized ordinary turns before upstream",
+  async () => {
+    const preservedOutput =
+      "BEGIN-HTTP-ORDINARY\n"
+      + "x".repeat(26 * 1024 * 1024)
+      + "\nEND-HTTP-ORDINARY"
+    const inlineFile = `data:application/pdf;base64,${"A".repeat(7 * 1024 * 1024)}`
+
+    const response = await server.request("/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-compact",
+        input: [
+          {
+            type: "custom_tool_call_output",
+            call_id: "call_http_ordinary",
+            output: [
+              { type: "input_text", text: preservedOutput },
+              {
+                type: "input_file",
+                filename: "ordinary.pdf",
+                file_data: inlineFile,
+              },
+            ],
+          },
+        ],
+        client_metadata: {
+          "x-codex-turn-metadata": JSON.stringify({ request_kind: "turn" }),
+        },
+      }),
+    })
+
+    expect(response.status).toBe(200)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(lastRequestUrl).toEndWith("/responses")
+    const serialized = JSON.stringify(lastRequestBody)
+    expect(Buffer.byteLength(serialized)).toBeLessThanOrEqual(
+      CAPI_RESPONSES_MAX_REQUEST_BYTES - RESPONSES_RECOVERY_MARGIN_BYTES,
+    )
+    expect(serialized).toContain("BEGIN-HTTP-ORDINARY")
+    expect(serialized).toContain("END-HTTP-ORDINARY")
+    expect(serialized).toContain("call_http_ordinary")
+    expect(serialized).not.toContain(inlineFile)
+  },
+  { timeout: 15_000 },
+)
+
+test("direct Responses HTTP rejects unrecoverable ordinary turns locally", async () => {
+  const callsBefore = fetchMock.mock.calls.length
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-compact",
+      input: [
+        {
+          type: "message",
+          role: "developer",
+          content: "preserved".repeat(4 * 1024 * 1024),
+        },
+      ],
+      client_metadata: {
+        "x-codex-turn-metadata": JSON.stringify({ request_kind: "turn" }),
+      },
+    }),
+  })
+  const body = (await response.json()) as {
+    error?: { code?: string; type?: string }
+  }
+
+  expect(response.status).toBe(413)
+  expect(fetchMock.mock.calls.length).toBe(callsBefore)
+  expect(body.error?.code).toBe("responses_payload_too_large")
+  expect(body.error?.type).toBe("error")
 })
