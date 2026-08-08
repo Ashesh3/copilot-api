@@ -30,9 +30,346 @@ function chatChunk(
   })}\n\u200B\n`
 }
 
+function anthropicSse(type: string, data: Record<string, unknown>): string {
+  return `event: ${type}\ndata: ${JSON.stringify({ ...data, type })}\n\n`
+}
+
 // Compact fixtures intentionally keep the parser's capture variants together.
 // eslint-disable-next-line max-lines-per-function
 describe("Responses debug body parser", () => {
+  test("assembles Anthropic Messages text deltas and exposes every event", () => {
+    const raw = [
+      anthropicSse("message_start", {
+        message: {
+          content: [],
+          id: "msg_011CdpQ27rZpAoXmmLG7xR5S",
+          model: "claude-opus-5",
+          role: "assistant",
+          stop_reason: null,
+          type: "message",
+          usage: {
+            cache_creation_input_tokens: 305_438,
+            cache_read_input_tokens: 0,
+            input_tokens: 2,
+            output_tokens: 6,
+          },
+        },
+      }),
+      anthropicSse("content_block_start", {
+        content_block: { text: "", type: "text" },
+        index: 0,
+      }),
+      anthropicSse("content_block_delta", {
+        delta: { text: "Let me verify ", type: "text_delta" },
+        index: 0,
+      }),
+      anthropicSse("content_block_delta", {
+        delta: { text: "rather than assume.", type: "text_delta" },
+        index: 0,
+      }),
+      anthropicSse("content_block_stop", { index: 0 }),
+      anthropicSse("message_delta", {
+        copilot_usage: { total_nano_aiu: 191_627_250_000 },
+        delta: { stop_reason: "end_turn", stop_sequence: null },
+        usage: {
+          cache_creation_input_tokens: 305_438,
+          cache_read_input_tokens: 0,
+          input_tokens: 2,
+          output_tokens: 14,
+        },
+      }),
+      anthropicSse("message_stop", {}),
+      "data: [DONE]\n\n",
+    ].join("")
+
+    const parsed = parseResponsesBody(raw)
+
+    expect(parsed?.assistantText).toBe("Let me verify rather than assume.")
+    expect(parsed?.reasoningText).toBe("")
+    expect(parsed?.status).toBe("completed")
+    expect(parsed?.response).toMatchObject({
+      id: "msg_011CdpQ27rZpAoXmmLG7xR5S",
+      model: "claude-opus-5",
+      object: "message",
+      status: "completed",
+      stop_reason: "end_turn",
+    })
+    expect(parsed?.usage).toEqual({
+      cache_creation_input_tokens: 305_438,
+      cache_read_input_tokens: 0,
+      input_tokens: 2,
+      input_tokens_details: {
+        cache_write_tokens: 305_438,
+        cached_tokens: 0,
+      },
+      output_tokens: 14,
+    })
+    expect(parsed?.copilotUsage?.total_nano_aiu).toBe(191_627_250_000)
+    expect(parsed?.events.map((event) => event.type)).toEqual([
+      "message_start",
+      "content_block_start",
+      "content_block_delta",
+      "content_block_delta",
+      "content_block_stop",
+      "message_delta",
+      "message_stop",
+      "done",
+    ])
+    expect(parsed?.isPartial).toBe(false)
+  })
+
+  test("separates Anthropic thinking deltas from assistant output", () => {
+    const raw = [
+      anthropicSse("message_start", {
+        message: {
+          content: [],
+          id: "msg_thinking",
+          model: "claude-opus-5",
+          role: "assistant",
+          type: "message",
+          usage: { input_tokens: 8, output_tokens: 1 },
+        },
+      }),
+      anthropicSse("content_block_start", {
+        content_block: { signature: "", thinking: "", type: "thinking" },
+        index: 0,
+      }),
+      anthropicSse("content_block_delta", {
+        delta: { thinking: "Checked the ", type: "thinking_delta" },
+        index: 0,
+      }),
+      anthropicSse("content_block_delta", {
+        delta: { thinking: "current state.", type: "thinking_delta" },
+        index: 0,
+      }),
+      anthropicSse("content_block_delta", {
+        delta: { signature: "opaque", type: "signature_delta" },
+        index: 0,
+      }),
+      anthropicSse("content_block_stop", { index: 0 }),
+      anthropicSse("content_block_start", {
+        content_block: { text: "", type: "text" },
+        index: 1,
+      }),
+      anthropicSse("content_block_delta", {
+        delta: { text: "Final answer", type: "text_delta" },
+        index: 1,
+      }),
+      anthropicSse("content_block_stop", { index: 1 }),
+      anthropicSse("message_stop", {}),
+    ].join("")
+
+    const parsed = parseResponsesBody(raw)
+
+    expect(parsed?.reasoningText).toBe("Checked the current state.")
+    expect(parsed?.assistantText).toBe("Final answer")
+  })
+
+  test("assembles Anthropic tool-use input JSON without mixing it into text", () => {
+    const raw = [
+      anthropicSse("message_start", {
+        message: {
+          content: [],
+          id: "msg_tool",
+          model: "claude-opus-5",
+          role: "assistant",
+          type: "message",
+          usage: { input_tokens: 2, output_tokens: 1 },
+        },
+      }),
+      anthropicSse("content_block_start", {
+        content_block: {
+          caller: { type: "direct" },
+          id: "toolu_01QwzGAu4ouYQdhoHNJJJVv5",
+          input: {},
+          name: "Bash",
+          type: "tool_use",
+        },
+        index: 1,
+      }),
+      anthropicSse("content_block_delta", {
+        delta: { partial_json: '{"command":"git ', type: "input_json_delta" },
+        index: 1,
+      }),
+      anthropicSse("content_block_delta", {
+        delta: { partial_json: 'status"}', type: "input_json_delta" },
+        index: 1,
+      }),
+      anthropicSse("content_block_stop", { index: 1 }),
+      anthropicSse("message_delta", {
+        delta: { stop_reason: "tool_use", stop_sequence: null },
+        usage: { output_tokens: 12 },
+      }),
+      anthropicSse("message_stop", {}),
+      "data: [DONE]\n\n",
+    ].join("")
+
+    const parsed = parseResponsesBody(raw)
+
+    expect(parsed?.assistantText).toBe("")
+    expect(parsed?.toolCalls).toEqual([
+      {
+        arguments: '{"command":"git status"}',
+        argumentsJson: { command: "git status" },
+        callId: "toolu_01QwzGAu4ouYQdhoHNJJJVv5",
+        id: null,
+        name: "Bash",
+        outputIndex: 1,
+      },
+    ])
+    expect(parsed?.response?.tool_call_count).toBe(1)
+    expect(parsed?.response?.finish_reason).toBe("tool_use")
+  })
+
+  test("parses a direct Anthropic Messages response", () => {
+    const parsed = parseResponsesBody(
+      JSON.stringify({
+        content: [
+          { thinking: "Checked the state.", type: "thinking" },
+          { text: "First paragraph.", type: "text" },
+          {
+            id: "toolu_direct",
+            input: { path: "README.md" },
+            name: "Read",
+            type: "tool_use",
+          },
+          { text: "Second paragraph.", type: "text" },
+        ],
+        id: "msg_direct",
+        model: "claude-opus-5",
+        role: "assistant",
+        stop_reason: "end_turn",
+        stop_sequence: null,
+        type: "message",
+        usage: {
+          cache_read_input_tokens: 100,
+          input_tokens: 20,
+          output_tokens: 15,
+        },
+      }),
+    )
+
+    expect(parsed?.assistantText).toBe("First paragraph.\n\nSecond paragraph.")
+    expect(parsed?.reasoningText).toBe("Checked the state.")
+    expect(parsed?.status).toBe("completed")
+    expect(parsed?.toolCalls).toEqual([
+      {
+        arguments: '{"path":"README.md"}',
+        argumentsJson: { path: "README.md" },
+        callId: "toolu_direct",
+        id: null,
+        name: "Read",
+        outputIndex: 2,
+      },
+    ])
+  })
+
+  test("retains Anthropic text before a terminal stream error", () => {
+    const raw = [
+      anthropicSse("message_start", {
+        message: {
+          content: [],
+          id: "msg_error",
+          model: "claude-opus-5",
+          role: "assistant",
+          type: "message",
+          usage: { input_tokens: 4, output_tokens: 1 },
+        },
+      }),
+      anthropicSse("content_block_start", {
+        content_block: { text: "", type: "text" },
+        index: 0,
+      }),
+      anthropicSse("content_block_delta", {
+        delta: { text: "Partial answer", type: "text_delta" },
+        index: 0,
+      }),
+      anthropicSse("error", {
+        error: { message: "Generation failed", type: "api_error" },
+      }),
+    ].join("")
+
+    const parsed = parseResponsesBody(raw)
+
+    expect(parsed?.assistantText).toBe("Partial answer")
+    expect(parsed?.errorMessage).toBe("Generation failed")
+    expect(parsed?.status).toBe("error")
+    expect(parsed?.response?.status).toBe("error")
+    expect(parsed?.isPartial).toBe(false)
+  })
+
+  test("does not claim Chat Completions with an Anthropic-like event label", () => {
+    const raw = [
+      anthropicSse("message_start", {
+        message: {
+          content: [],
+          id: "msg_mislabeled",
+          model: "gpt-test",
+          role: "assistant",
+          type: "message",
+          usage: { input_tokens: 1, output_tokens: 1 },
+        },
+      }),
+      `data: ${JSON.stringify({
+        id: "chat_mislabeled",
+        object: "chat.completion.chunk",
+        model: "gpt-test",
+        choices: [
+          {
+            index: 0,
+            delta: { content: "Chat answer", role: "assistant" },
+            finish_reason: null,
+          },
+        ],
+      })}\n\n`,
+      "data: [DONE]",
+      "",
+      "",
+    ].join("\n")
+
+    const parsed = parseResponsesBody(raw)
+
+    expect(parsed?.assistantText).toBe("Chat answer")
+    expect(parsed?.response?.object).toBe("chat.completion.chunk")
+  })
+
+  test("preserves Anthropic stop sequence and direct Copilot usage", () => {
+    const stream = [
+      anthropicSse("message_start", {
+        message: {
+          content: [],
+          id: "msg_stop_sequence",
+          model: "claude-opus-5",
+          role: "assistant",
+          stop_reason: null,
+          stop_sequence: null,
+          type: "message",
+          usage: { input_tokens: 3, output_tokens: 1 },
+        },
+      }),
+      anthropicSse("message_delta", {
+        delta: { stop_reason: "stop_sequence", stop_sequence: "END" },
+        usage: { output_tokens: 2 },
+      }),
+      anthropicSse("message_stop", {}),
+    ].join("")
+    const direct = parseResponsesBody(
+      JSON.stringify({
+        content: [{ text: "Answer", type: "text" }],
+        copilot_usage: { total_nano_aiu: 42 },
+        id: "msg_direct_usage",
+        model: "claude-opus-5",
+        role: "assistant",
+        stop_reason: "end_turn",
+        type: "message",
+        usage: { input_tokens: 3, output_tokens: 2 },
+      }),
+    )
+
+    expect(parseResponsesBody(stream)?.response?.stop_sequence).toBe("END")
+    expect(direct?.copilotUsage?.total_nano_aiu).toBe(42)
+  })
+
   test("assembles a completed stream from its authoritative response", () => {
     const response = {
       id: "resp_1",

@@ -1,6 +1,7 @@
 import type { JsonValue } from "./json-tree"
 import type { ParsedToolCall } from "./response-tool-calls"
 
+import { looksLikeAnthropicMessage, parseAnthropicBody } from "./anthropic-body"
 import {
   collectChatToolCalls,
   collectResponsesToolCalls,
@@ -168,6 +169,9 @@ function directJsonFrame(raw: string): ParsedFrame | null {
       event: stringValue(data.object) ?? "chat.completion",
       rawData: raw.trim(),
     }
+  }
+  if (looksLikeAnthropicMessage(data)) {
+    return { data, event: "message", rawData: raw.trim() }
   }
   return null
 }
@@ -591,6 +595,8 @@ function responseErrorMessage(
 export function parseResponsesBody(raw: string): ParsedResponsesBody | null {
   const direct = directJsonFrame(raw)
   const parsedFrames = direct ? [direct] : parseSseFrames(raw)
+  const anthropicMessage = parseAnthropicBody(parsedFrames)
+  if (anthropicMessage) return anthropicMessage
   const chatCompletion = parseChatCompletionFrames(parsedFrames)
   if (chatCompletion) return chatCompletion
   const frames = parsedFrames.filter((frame) => {
