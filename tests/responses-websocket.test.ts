@@ -23,6 +23,7 @@ import {
   type RoutingAffinity,
 } from "../src/lib/routing-affinity"
 import { state } from "../src/lib/state"
+import { tokenPool } from "../src/lib/token-pool"
 import {
   extractResponsesPayload,
   isSyntheticWarmupRequest,
@@ -47,12 +48,14 @@ import {
 const originalApiKeyAuth = state.apiKeyAuth
 const originalFetch = globalThis.fetch
 const originalModels = state.models
+const webSocketAccountIds = [23_001, 23_002]
 const queuedResponses: Array<Response> = []
 const queuedFetchHandlers: Array<
   (init?: RequestInit) => Promise<Response> | Response
 > = []
 let lastRequestBody: Record<string, unknown> | undefined
 let capturedAffinity: RoutingAffinity | undefined
+const capturedAuthorization: Array<string | null> = []
 
 function authenticatedResponsesRequest(): Request {
   return new Request("http://localhost/responses", {
@@ -86,6 +89,7 @@ const responsesCapableModels: ModelsResponse = {
 
 const fetchMock = mock((_url: string, init?: RequestInit) => {
   capturedAffinity = getRoutingAffinity()
+  capturedAuthorization.push(new Headers(init?.headers).get("authorization"))
   lastRequestBody =
     typeof init?.body === "string" ?
       (JSON.parse(init.body) as Record<string, unknown>)
@@ -104,6 +108,8 @@ beforeAll(() => {
 })
 
 afterAll(() => {
+  for (const accountId of webSocketAccountIds)
+    tokenPool.removeAccountForTest(accountId)
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
 })
 
@@ -111,6 +117,7 @@ afterEach(() => {
   fetchMock.mockClear()
   lastRequestBody = undefined
   capturedAffinity = undefined
+  capturedAuthorization.length = 0
   queuedResponses.length = 0
   queuedFetchHandlers.length = 0
   state.apiKeyAuth = originalApiKeyAuth
@@ -541,6 +548,75 @@ describe("responses websocket message handling", () => {
         request_id: "req-test",
       },
     })
+  })
+
+  test("preserves a structured session affinity error in the terminal frame", async () => {
+    const modelId = "responses-websocket-session-affinity-error"
+    const model = {
+      ...responsesCapableModels.data[0],
+      id: modelId,
+      name: modelId,
+    }
+    state.models = { data: [model], object: "list" }
+    for (const [id, token] of [
+      [23_001, "websocket-bound-token"],
+      [23_002, "websocket-alternate-token"],
+    ] as const) {
+      const account = tokenPool.addAccount(`github-${id}`, "individual", id)
+      account.copilotToken = token
+      account.healthy = true
+      account.models = new Set([modelId])
+      account.modelsData = [model]
+    }
+    tokenPool.rebuildModelIndex()
+    state.isMultiToken = true
+    const selected = tokenPool.getAccountForModelBySession(
+      modelId,
+      "session-test",
+    )
+    if (!selected) throw new TypeError("Expected selected WebSocket account")
+    queuedResponses.push(
+      new Response("Unauthorized", { status: 401 }),
+      Response.json({
+        expires_at: 1_900_000_000,
+        refresh_in: 1800,
+        token: "websocket-refreshed-token",
+      }),
+      Response.json({ data: [model], object: "list" }),
+      new Response("Unauthorized", { status: 401 }),
+    )
+    const ws = createTestWebSocket()
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        input: "continue",
+        model: modelId,
+        type: "response.create",
+      }),
+    )
+
+    const errorFrame = JSON.parse(ws.sent[0] ?? "{}") as {
+      error?: { code?: string; message?: string; type?: string }
+      status?: number
+      type?: string
+    }
+    expect(errorFrame).toMatchObject({
+      type: "error",
+      status: 409,
+      error: {
+        code: "bad_request",
+        message:
+          "The bound account rejected this conversation after successful account reinitialization; affinity was preserved and no cross-account retry was attempted.",
+        type: "session_affinity_error",
+      },
+    })
+    expect(ws.data.activeTurns.size).toBe(0)
+    expect(capturedAuthorization).not.toContain(
+      selected.id === 23_001 ?
+        "Bearer websocket-alternate-token"
+      : "Bearer websocket-bound-token",
+    )
   })
 
   test("streams native Responses SSE events as WebSocket JSON frames", async () => {

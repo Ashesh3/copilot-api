@@ -23,7 +23,7 @@ import {
 const originalFetch = globalThis.fetch
 const originalModels = state.models
 const originalIsMultiToken = state.isMultiToken
-const addedAccountIds = [2201, 2202]
+const addedAccountIds = [2201, 2202, 2211, 2212]
 let lastRequestBody: Record<string, unknown> | undefined
 let requestBodies: Array<Record<string, unknown>>
 let queuedResponses: Array<Response>
@@ -203,6 +203,70 @@ test("routes repeated Responses metadata sessions to stable accounts", async () 
     window: "1h",
   })
   expect(usage.selectionModes.sticky).toBe(4)
+})
+
+test("returns a structured conflict when a bound Responses account still rejects the session", async () => {
+  const modelId = "responses-session-account-rejected"
+  const model = {
+    ...responsesCapableModels.data[0],
+    id: modelId,
+    name: modelId,
+  }
+  state.models = { data: [model], object: "list" }
+  for (const [id, token] of [
+    [2211, "responses-bound-token"],
+    [2212, "responses-alternate-token"],
+  ] as const) {
+    const account = tokenPool.addAccount(`github-${id}`, "individual", id)
+    account.copilotToken = token
+    account.healthy = true
+    account.models = new Set([modelId])
+    account.modelsData = [model]
+  }
+  tokenPool.rebuildModelIndex()
+  state.isMultiToken = true
+  const sessionId = Array.from(
+    { length: 1000 },
+    (_, index) => `responses-rejected-session-${index}`,
+  ).find(
+    (candidate) =>
+      tokenPool.getAccountForModelBySession(modelId, candidate)?.id === 2211,
+  )
+  if (!sessionId) throw new TypeError("Expected affinity key for account 2211")
+  queuedResponses.push(
+    new Response("Unauthorized", { status: 401 }),
+    Response.json({
+      expires_at: 1_900_000_000,
+      refresh_in: 1800,
+      token: "responses-refreshed-bound-token",
+    }),
+    Response.json({ data: [model], object: "list" }),
+    new Response("Unauthorized", { status: 401 }),
+  )
+
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      client_metadata: { session_id: sessionId },
+      input: "continue the conversation",
+      model: modelId,
+    }),
+  })
+  const body = (await response.json()) as Record<string, unknown>
+
+  expect(response.status).toBe(409)
+  expect(body).toMatchObject({
+    error: {
+      account_id: 2211,
+      code: "session_account_rejected",
+      type: "session_affinity_error",
+    },
+  })
+  expect(JSON.stringify(body)).not.toContain(sessionId)
+  expect(capturedAuthorization).not.toContain(
+    "Bearer responses-alternate-token",
+  )
 })
 
 test("installs Responses client metadata affinity before provider dispatch", async () => {
