@@ -463,12 +463,15 @@ docker compose run --rm --no-deps --entrypoint bun copilot-api run dist/main.js 
 docker compose up -d copilot-api
 ```
 
-LLM Debug records outbound Copilot attempts with authorization, cookies, API
-keys, tokens, and secret-like JSON properties redacted before storage. Entries
-expire after ten minutes and are pruned during debug-store operations. It
-observes Chat Completions, Responses, Embeddings, and Messages attempts. Replay
-is narrower and supports logged Chat Completions and Responses attempts only.
-Debug detail, replay, provider-secret changes, configuration export, and other
+LLM Debug records outbound Copilot attempts exactly as captured, including raw
+URLs, request and response headers, bodies, authorization, cookies, API keys,
+tokens, session identifiers, and other secret-bearing fields. Entries exist
+only in process memory, expire after ten minutes, and are pruned during
+debug-store operations. It observes Chat Completions, Responses, Embeddings,
+and Messages attempts. Replay is narrower and supports logged Chat Completions
+and Responses attempts only; replay execution obtains fresh server-side
+authorization instead of sending the captured authorization header. Debug
+detail, replay, provider-secret changes, configuration export, and other
 sensitive operations require the authenticated administrator session.
 
 `GET /usage` returns current GitHub Copilot quota data. The dashboard's local
@@ -836,9 +839,11 @@ WebSocket probes.
   secret-like configuration and require an authenticated administrator session.
   Preserve full recovery backups through a separately protected filesystem
   process.
-- **Treat LLM Debug as sensitive.** Credentials and secret-like JSON fields are
-  redacted before storage, but prompts, responses, and operational metadata can
-  still be sensitive. Records expire after ten minutes.
+- **Treat LLM Debug as raw credential-bearing data.** It intentionally preserves
+  exact captured request and response URLs, headers, and bodies without
+  redaction, including credentials and session identifiers. Access requires an
+  administrator session, and records expire from process memory after ten
+  minutes, but anyone viewing or exporting them receives the raw values.
 - **Use Sentry deliberately.** When `SENTRY_DSN` is set, AI prompt and completion
   content is recorded by default. Set `SENTRY_AI_RECORD_INPUTS=false` before
   handling sensitive data.
@@ -882,10 +887,11 @@ configuration inherited those maximum-duration directives and reload Nginx.
 ### The dashboard asks for the administrator password again
 
 Current builds require the gateway key and administrator password only when
-creating or signing into the dashboard session. LLM Debug, sanitized export,
-provider management, and IP policy then use that session without a second
-password prompt. Hard-refresh the dashboard if an older bundled script is still
-cached. A current bundle contains no `/dashboard/auth/reauth` request.
+creating or signing into the dashboard session. LLM Debug, sanitized
+configuration export, provider management, and IP policy then use that session
+without a second password prompt. Hard-refresh the dashboard if an older
+bundled script is still cached. A current bundle contains no
+`/dashboard/auth/reauth` request.
 
 ### A model is missing or rejected
 

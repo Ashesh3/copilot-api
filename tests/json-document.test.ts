@@ -50,6 +50,12 @@ describe("JSON document helpers", () => {
     expect(prepareReplayDocument('{"model":')).toBe('{"model":')
   })
 
+  test("preserves valid replay source exactly until formatting is explicit", () => {
+    const source = ` {\r\n\t"model" : "gpt-test", "api_key" : "body-secret"\r\n}\r\n`
+
+    expect(prepareReplayDocument(source)).toBe(source)
+  })
+
   test("reports the first JSON syntax error with its location", () => {
     const diagnostic = findJsonDocumentDiagnostic(
       '{\n  "model": "gpt-test",\n}',

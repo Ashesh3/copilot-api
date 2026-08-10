@@ -1,6 +1,10 @@
 import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
 
-import { clearLlmDebugLogs, startLlmDebugLog } from "../src/lib/llm-debug-log"
+import {
+  clearLlmDebugLogs,
+  finishLlmDebugLog,
+  startLlmDebugLog,
+} from "../src/lib/llm-debug-log"
 import { state } from "../src/lib/state"
 import { DASHBOARD_HTML } from "../src/routes/dashboard/page-generated"
 import { server } from "../src/server"
@@ -50,13 +54,30 @@ afterAll(() => {
 })
 
 test("serves LLM debug logs through dashboard API", async () => {
+  const requestBody = `{ "input": "dashboard lookup", "api_key": "body-secret", "model": "gpt-ui" }`
+  const responseBody = `{ "access_token": "response-secret", "ok": true }`
+  const requestHeaders = {
+    authorization: "Bearer raw-token",
+    cookie: "dashboard-session=secret",
+  }
+  const responseHeaders = {
+    "content-type": "application/json",
+    "set-cookie": "upstream=secret",
+  }
+  const url = "https://example.test/responses?api_key=query-secret"
   const id = startLlmDebugLog({
     method: "POST",
     path: "/responses",
-    requestBody: JSON.stringify({ input: "dashboard lookup", model: "gpt-ui" }),
-    requestHeaders: { authorization: "Bearer raw-token" },
+    requestBody,
+    requestHeaders,
     requestId: "req-dashboard",
-    url: "https://example.test/responses",
+    url,
+  })
+  finishLlmDebugLog(id, {
+    body: responseBody,
+    headers: responseHeaders,
+    status: 200,
+    statusText: "OK",
   })
 
   const listResponse = await server.request("/dashboard/api/llm-debug", {
@@ -77,9 +98,25 @@ test("serves LLM debug logs through dashboard API", async () => {
   )
   expect(detailResponse.status).toBe(200)
   const detailBody = (await detailResponse.json()) as {
-    request: { headers: Record<string, string> }
+    request: {
+      body: string | null
+      headers: Record<string, string>
+      url: string
+    }
+    response?: {
+      body: string | null
+      headers: Record<string, string>
+    }
   }
-  expect(detailBody.request.headers.authorization).toBe("[REDACTED]")
+  expect(detailBody.request).toMatchObject({
+    body: requestBody,
+    headers: requestHeaders,
+    url,
+  })
+  expect(detailBody.response).toMatchObject({
+    body: responseBody,
+    headers: responseHeaders,
+  })
 
   const clearResponse = await server.request("/dashboard/api/llm-debug", {
     headers: adminHeaders(adminSession),

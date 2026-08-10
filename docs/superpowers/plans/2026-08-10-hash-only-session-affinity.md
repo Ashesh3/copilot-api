@@ -15,14 +15,16 @@
 - Create `src/lib/upstream-session-affinity.ts`: pure hash-to-UUID derivation.
 - Create `tests/upstream-session-affinity.test.ts`: deterministic UUID tests.
 - Modify `src/services/copilot/copilot-client.ts`: request-scoped upstream IDs.
-- Modify `src/lib/llm-debug-log.ts`: redact upstream session headers.
+- Modify `src/lib/llm-debug-log.ts`: preserve raw upstream session headers in
+  the administrator-only LLM Debug record, as required by the later Raw LLM
+  Debug Capture design.
 - Modify `src/lib/token-pool.ts`: atomic single-flight reinitialization.
 - Modify `src/lib/account-router.ts`: strict identified-session behavior.
 - Delete `src/lib/routing-affinity-leases.ts`: remove session mapping.
 - Delete `tests/routing-affinity-leases.test.ts`: remove obsolete lease tests.
 - Modify focused router, token, HTTP, WebSocket, and privacy tests.
 
-### Task 1: Deterministic Upstream Identity and Debug Privacy
+### Task 1: Deterministic Upstream Identity and Raw Debug Capture
 
 **Files:**
 - Create: `src/lib/upstream-session-affinity.ts`
@@ -147,26 +149,27 @@ const headers: Record<string, string> = {
 Keep `TokenPool.buildCopilotHeaders()` on the process identity because it is a
 control-plane model-discovery call.
 
-- [ ] **Step 8: Write the debug-redaction RED test**
+- [ ] **Step 8: Preserve the exact upstream session headers in LLM Debug**
 
 ```ts
 expect(entry?.request.headers).toMatchObject({
-  "X-Agent-Task-Id": "[REDACTED]",
-  "X-Client-Session-Id": "[REDACTED]",
-  "X-Interaction-Id": "[REDACTED]",
+  "X-Agent-Task-Id": derivedUpstreamSessionId,
+  "X-Client-Session-Id": derivedUpstreamSessionId,
+  "X-Interaction-Id": derivedUpstreamSessionId,
 })
 ```
 
 Run: `bun test tests/llm-debug-log.test.ts -t "session headers"`
 
-Expected: FAIL because those values are retained.
+Expected: PASS because the ten-minute administrator-only LLM Debug record is
+the intentional raw-data exception. Ordinary logs and telemetry must still not
+emit these values.
 
-- [ ] **Step 9: Redact the exact headers and verify GREEN**
+- [ ] **Step 9: Verify raw capture without adding a redaction pattern**
 
-```ts
-const SENSITIVE_HEADER_PATTERN =
-  /^(?:authorization|proxy-authorization|cookie|set-cookie|x-api-key|x-goog-api-key|x-auth-token|x-agent-task-id|x-client-session-id|x-interaction-id)$/i
-```
+Do not add these session headers to any LLM Debug redaction pattern. The Raw LLM
+Debug Capture design dated 2026-08-10 supersedes the earlier privacy assumption
+in this plan.
 
 Run:
 

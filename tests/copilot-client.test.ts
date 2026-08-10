@@ -337,6 +337,12 @@ test("captures raw LLM request and response attempts for dashboard debugging", a
   expect(logs.entries[0]?.requestPreview).toContain("debug capture")
   expect(logs.entries[0]?.responseStatus).toBe(200)
   expect(logs.entries[0]?.responsePreview).toContain("choices")
+  const detail = getLlmDebugLog(logs.entries[0]?.id ?? "")
+  expect(detail?.request.body).toBe(requestBody)
+  expect(detail?.request.headers.Authorization).toBe(
+    "Bearer expired-copilot-token",
+  )
+  expect(detail?.response?.body).toBe('{"choices":[]}')
 })
 
 // --- Transport-level connection errors ---
@@ -609,7 +615,7 @@ test("keeps the same X-Request-Id across a transport retry", async () => {
   })
 })
 
-test("records the connection error code and a sanitized path in LLM debug", async () => {
+test("records the connection error code and full path in LLM debug", async () => {
   queuedResults.push(bunSocketClosedError(), bunSocketClosedError())
 
   try {
@@ -624,7 +630,9 @@ test("records the connection error code and a sanitized path in LLM debug", asyn
   const entry = getLlmDebugLog(summary.id)
   expect(entry?.error?.code).toBe("ECONNRESET")
   expect(entry?.error?.errno).toBe(0)
-  expect(entry?.error?.path).toBe("https://api.githubcopilot.com/responses")
+  expect(entry?.error?.path).toBe(
+    "https://api.githubcopilot.com/responses?session=secret-token",
+  )
 })
 
 test("does not retry an ECONNABORTED when the caller already disconnected", async () => {
@@ -688,7 +696,7 @@ function causeWrappedSocketError(): Error {
   })
 }
 
-test("records cause-level errno and path in LLM debug", async () => {
+test("records cause-level errno and full path in LLM debug", async () => {
   queuedResults.push(causeWrappedSocketError(), causeWrappedSocketError())
 
   try {
@@ -702,7 +710,9 @@ test("records cause-level errno and path in LLM debug", async () => {
   const entry = getLlmDebugLog(summary.id)
   expect(entry?.error?.code).toBe("ECONNRESET")
   expect(entry?.error?.errno).toBe(0)
-  expect(entry?.error?.path).toBe("https://api.githubcopilot.com/responses")
+  expect(entry?.error?.path).toBe(
+    "https://api.githubcopilot.com/responses?session=secret",
+  )
 })
 
 test("retries ECONNABORTED instead of reading it as a client cancellation", async () => {
