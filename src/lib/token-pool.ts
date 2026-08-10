@@ -502,7 +502,9 @@ export class TokenPool {
     account: Account,
     showToken: boolean,
   ): Promise<void> {
-    const tokenData = await this.fetchCopilotToken(account)
+    const tokenData = this.validateCopilotTokenResponse(
+      await this.fetchCopilotToken(account),
+    )
     const modelsResponse = await this.fetchModels(
       account,
       this.getBaseUrl(account),
@@ -536,6 +538,27 @@ export class TokenPool {
       getTokenRefreshIntervalMs(tokenData.refresh_in),
       showToken,
     )
+  }
+
+  private validateCopilotTokenResponse(
+    response: unknown,
+  ): CopilotTokenResponse {
+    if (
+      typeof response !== "object"
+      || response === null
+      || !("token" in response)
+      || typeof response.token !== "string"
+      || response.token.length === 0
+      || !("expires_at" in response)
+      || typeof response.expires_at !== "number"
+      || !Number.isFinite(response.expires_at)
+      || !("refresh_in" in response)
+      || typeof response.refresh_in !== "number"
+      || !Number.isFinite(response.refresh_in)
+    ) {
+      throw new TypeError("Invalid Copilot token response")
+    }
+    return response as CopilotTokenResponse
   }
 
   private validateModelsResponse(response: unknown): Array<Model> {

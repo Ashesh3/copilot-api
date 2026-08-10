@@ -269,6 +269,32 @@ test("rejects malformed model discovery before mutating account state", async ()
   expect(snapshotAccount(account)).toEqual(before)
 })
 
+test("rejects malformed token exchange before model discovery or mutation", async () => {
+  const malformedPayloads = [
+    { expires_at: 1_900_000_000, refresh_in: 1800 },
+    { expires_at: "invalid", refresh_in: 1800, token: "fresh-token" },
+    { expires_at: 1_900_000_000, refresh_in: null, token: "fresh-token" },
+  ]
+
+  for (const [index, payload] of malformedPayloads.entries()) {
+    const modelRequestCountBefore = modelRequests().length
+    const pool = new tokenPoolModule.TokenPool()
+    pools.add(pool)
+    const account = createInitializedAccount(pool)
+    const before = snapshotAccount(account)
+    queuedResults.push(Response.json(payload))
+
+    const error = await pool
+      .reinitializeAccount(account)
+      .catch((caught: unknown) => caught)
+
+    expect(error).toBeInstanceOf(Error)
+    expect(snapshotAccount(account)).toEqual(before)
+    expect(modelRequests()).toHaveLength(modelRequestCountBefore)
+    expect(tokenRequests()).toHaveLength(index + 1)
+  }
+})
+
 test("publishes the merged model snapshot only after reinitialization commits", async () => {
   const published: Array<ModelsResponse> = []
   const pool = new tokenPoolModule.TokenPool((models) => published.push(models))
