@@ -115,6 +115,16 @@ function redactHeaders(headers: HeaderRecord): HeaderRecord {
 
 function redactJsonValue(value: unknown, key = ""): unknown {
   if (SENSITIVE_FIELD_PATTERN.test(key)) return "[REDACTED]"
+  if (
+    typeof value === "string"
+    && (key === "client_metadata" || key === "metadata")
+  ) {
+    try {
+      return JSON.stringify(redactJsonValue(JSON.parse(value) as unknown))
+    } catch {
+      return "[REDACTED]"
+    }
+  }
   if (Array.isArray(value)) {
     return value.map((item) => redactJsonValue(item))
   }

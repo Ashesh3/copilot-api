@@ -126,10 +126,10 @@ test("redacts affinity identifiers from structured request bodies", () => {
       conversation_id: rawIds[2],
       prompt_cache_key: rawIds[3],
       safety_identifier: rawIds[4],
-      client_metadata: {
+      client_metadata: JSON.stringify({
         session_id: rawIds[5],
         thread_id: rawIds[6],
-      },
+      }),
       metadata: {
         user_id: JSON.stringify({ session_id: rawIds[7] }),
       },

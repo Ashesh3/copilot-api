@@ -8,6 +8,7 @@ import { createHash } from "node:crypto"
 
 import { getModelSettings } from "~/lib/model-settings"
 import { getRequestId } from "~/lib/request-session"
+import { getRoutingAffinity } from "~/lib/routing-affinity"
 
 import packageJson from "../../package.json" with { type: "json" }
 
@@ -506,12 +507,13 @@ export function setSentryConversationIdFromRequest(
   c: Context,
   payload?: unknown,
 ): string | undefined {
+  const routingAffinityKey = getRoutingAffinity()?.key
   const conversationId =
     getSentryConversationIdFromPayload(payload)
     ?? getSentryConversationIdFromHeaders(c.req.raw.headers)
     ?? getRequestId()
 
-  if (!conversationId) return undefined
+  if (!conversationId || conversationId === routingAffinityKey) return undefined
 
   const pseudonymousConversationId =
     pseudonymizeSentryConversationId(conversationId)

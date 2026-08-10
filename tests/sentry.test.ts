@@ -297,7 +297,10 @@ test("does not emit active routing affinity to Sentry", async () => {
   app.post("/", (c) => {
     returned = runWithRoutingAffinity(
       { key: affinityKey, source: "copilot_session" },
-      () => setSentryConversationIdFromRequest(c),
+      () =>
+        setSentryConversationIdFromRequest(c, {
+          metadata: { session_id: affinityKey },
+        }),
     )
     return c.text("ok")
   })
