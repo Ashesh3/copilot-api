@@ -68,12 +68,15 @@ export class TokenPool {
   private accountReinitializations: Map<number, Promise<void>> = new Map()
   private accounts: Map<number, Account> = new Map()
   private modelIndex: Map<string, Array<Account>> = new Map()
+  private readonly onModelsChanged: ModelsSnapshotListener | undefined
   private roundRobinIndex = 0
   private refreshTimers: Map<number, ReturnType<typeof setInterval>> = new Map()
   private sessionId: string = randomUUID()
   private vsCodeVersion = "1.104.3"
 
-  constructor(private readonly onModelsChanged?: ModelsSnapshotListener) {}
+  constructor(onModelsChanged?: ModelsSnapshotListener) {
+    this.onModelsChanged = onModelsChanged
+  }
 
   /**
    * Set the VS Code version used in Copilot request headers.
