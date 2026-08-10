@@ -5,7 +5,6 @@ import type { Model } from "../src/services/copilot/get-models"
 import { routedFetch } from "../src/lib/account-router"
 import { setModelRoutingOverridesForTest } from "../src/lib/model-routing"
 import { runWithRoutingAffinity } from "../src/lib/routing-affinity"
-import { resetRoutingAffinityLeasesForTest } from "../src/lib/routing-affinity-leases"
 import {
   getRoutingTelemetrySnapshot,
   resetRoutingTelemetryForTest,
@@ -85,7 +84,6 @@ beforeEach(() => {
   queuedResults.length = 0
   fetchMock.mockClear()
   resetRoutingTelemetryForTest()
-  resetRoutingAffinityLeasesForTest()
   setModelRoutingOverridesForTest({})
   state.isMultiToken = true
   state.sessionId = "router-telemetry-test"
@@ -103,6 +101,7 @@ test("separates token refresh retries from account failover", async () => {
       expires_at: 1_900_000_000,
       refresh_in: 1800,
     }),
+    Response.json({ data: [createModel(modelId)], object: "list" }),
     new Response("Unauthorized", { status: 401 }),
     new Response("{}", { status: 200 }),
   )
@@ -164,24 +163,24 @@ test("keeps transport retries on the initially selected account", async () => {
   ])
 })
 
-test("records one sticky selection when a successful failover creates a lease", async () => {
+test("records one sticky selection when identified failover is suppressed", async () => {
   const modelId = "router-telemetry-sticky-failover"
   registerAccount(1301, modelId, "sticky-primary")
   registerAccount(1302, modelId, "sticky-secondary")
   tokenPool.rebuildModelIndex()
-  queuedResults.push(
-    new Response("forbidden", { status: 403 }),
-    new Response("{}", { status: 200 }),
-  )
+  queuedResults.push(new Response("forbidden", { status: 403 }))
 
-  await runWithRoutingAffinity(
+  const error = await runWithRoutingAffinity(
     { key: "sticky-failover-session", source: "copilot_session" },
     async () =>
       await routedFetch("/chat/completions", { method: "POST" }, { modelId }),
-  )
+  ).catch((caught: unknown) => caught)
 
+  expect(error).toBeInstanceOf(Error)
   const usage = snapshot()
   expect(usage.selectionModes).toEqual({ default: 0, single: 0, sticky: 1 })
+  expect(usage.totals.failovers).toBe(0)
+  expect(usage.totals.upstreamCalls).toBe(1)
   expect(
     usage.accounts.reduce((sum, account) => sum + account.selected, 0),
   ).toBe(1)

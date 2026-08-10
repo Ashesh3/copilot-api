@@ -12,15 +12,11 @@ import consola from "consola"
 import type { Model } from "../src/services/copilot/get-models"
 
 import { getLastUsedAccountId, routedFetch } from "../src/lib/account-router"
+import { LocalHTTPError } from "../src/lib/error"
 import { setModelRoutingOverridesForTest } from "../src/lib/model-routing"
 import { clientSessionStorage } from "../src/lib/request-session"
 /* eslint-disable max-lines -- account-router integration variants share singleton fixtures */
 import { runWithRoutingAffinity } from "../src/lib/routing-affinity"
-import {
-  getRoutingAffinityLease,
-  resetRoutingAffinityLeasesForTest,
-  setRoutingAffinityLease,
-} from "../src/lib/routing-affinity-leases"
 import { state } from "../src/lib/state"
 import { tokenPool } from "../src/lib/token-pool"
 
@@ -154,6 +150,71 @@ function registerAccount(
   account.healthy = true
 }
 
+function findKeyForAccount(modelId: string, accountId: number): string {
+  const key = Array.from(
+    { length: 1000 },
+    (_, index) => `session-${index}`,
+  ).find(
+    (candidate) =>
+      tokenPool.getAccountForModelBySession(modelId, candidate)?.id
+      === accountId,
+  )
+  if (!key)
+    throw new TypeError(`No affinity key found for account ${accountId}`)
+  return key
+}
+
+function findAnotherKeyForAccount(
+  modelId: string,
+  accountId: number,
+  excluded: string,
+): string {
+  const key = Array.from({ length: 1000 }, (_, index) => `other-${index}`).find(
+    (candidate) =>
+      candidate !== excluded
+      && tokenPool.getAccountForModelBySession(modelId, candidate)?.id
+        === accountId,
+  )
+  if (!key) throw new TypeError(`No second key found for account ${accountId}`)
+  return key
+}
+
+function copilotTokenResponse(token: string): Response {
+  return Response.json({
+    expires_at: 1_900_000_000,
+    refresh_in: 1800,
+    token,
+  })
+}
+
+function modelsResponse(modelIds: Array<string>): Response {
+  return Response.json({
+    data: modelIds.map((modelId) => createModel(modelId)),
+    object: "list",
+  })
+}
+
+function queuePersistent401Reinitialization(
+  freshToken: string,
+  modelIds: Array<string>,
+): void {
+  queuedResults.push(
+    new Response("Unauthorized", { status: 401 }),
+    copilotTokenResponse(freshToken),
+    modelsResponse(modelIds),
+    new Response("Unauthorized", { status: 401 }),
+  )
+}
+
+function llmAuthorizationHeaders(): Array<string | null> {
+  return capturedRequests
+    .filter(
+      ({ url }) =>
+        !url.includes("/copilot_internal/") && !url.endsWith("/models"),
+    )
+    .map(({ init }) => new Headers(init?.headers).get("authorization"))
+}
+
 beforeAll(() => {
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch =
     fetchMock as unknown as typeof fetch
@@ -170,7 +231,6 @@ beforeEach(() => {
   fetchMock.mockClear()
   queuedResults.length = 0
   capturedRequests.length = 0
-  resetRoutingAffinityLeasesForTest()
   setModelRoutingOverridesForTest({})
   state.isMultiToken = true
   state.sessionId = "router-test-session"
@@ -184,146 +244,135 @@ async function routedFetchWithAffinity(modelId: string, key: string) {
   )
 }
 
-test("reuses a successful failover account for the next identified request", async () => {
-  const modelId = "router-successful-failover-lease"
-  registerAccount(1201, modelId, "lease-primary")
-  registerAccount(1202, modelId, "lease-secondary")
+test("keeps an identified session on its hashed account after persistent 401", async () => {
+  const modelId = "identified-401-affinity"
+  registerAccount(12_001, modelId, "bound-token")
+  registerAccount(12_002, modelId, "alternate-token")
   tokenPool.rebuildModelIndex()
-  const key = "lease-session"
-  const initial = tokenPool.getAccountForModelBySession(modelId, key)
-  if (!initial) throw new TypeError("Expected initial account")
-  const replacement = tokenPool.getNextAccountForModel(modelId, initial)
-  if (!replacement) throw new TypeError("Expected replacement account")
-  queuedResults.push(
-    new Response("forbidden", { status: 403 }),
-    new Response("{}", { status: 200 }),
-    new Response("{}", { status: 200 }),
+  const key = findKeyForAccount(modelId, 12_001)
+  queuePersistent401Reinitialization("fresh-bound-token", [modelId])
+
+  const error = await routedFetchWithAffinity(modelId, key).catch(
+    (caught: unknown) => caught,
   )
 
-  const first = await routedFetchWithAffinity(modelId, key)
-  initial.healthy = true
-  tokenPool.rebuildModelIndex()
-  const second = await routedFetchWithAffinity(modelId, key)
-
-  expect(first.account?.id).toBe(replacement.id)
-  expect(second.account?.id).toBe(replacement.id)
-  expect(getRoutingAffinityLease(key)).toBe(replacement.id)
-})
-
-test("does not lease an unsuccessful failover response", async () => {
-  const modelId = "router-unsuccessful-failover-lease"
-  registerAccount(1211, modelId, "failed-primary")
-  registerAccount(1212, modelId, "failed-secondary")
-  tokenPool.rebuildModelIndex()
-  const key = "failed-lease-session"
-  queuedResults.push(
-    new Response("forbidden", { status: 403 }),
-    new Response("failed replacement", { status: 400 }),
-  )
-
-  const result = await routedFetchWithAffinity(modelId, key)
-
-  expect(result.response.status).toBe(400)
-  expect(getRoutingAffinityLease(key)).toBeUndefined()
-})
-
-test("does not lease when the replacement failover throws", async () => {
-  const modelId = "router-throwing-failover-lease"
-  registerAccount(1213, modelId, "throw-primary")
-  registerAccount(1214, modelId, "throw-secondary")
-  tokenPool.rebuildModelIndex()
-  const key = "throwing-lease-session"
-  const transportError = Object.assign(new Error("replacement socket failed"), {
-    code: "ECONNRESET",
+  expect(error).toBeInstanceOf(LocalHTTPError)
+  expect((error as LocalHTTPError).response.status).toBe(409)
+  expect((error as LocalHTTPError).clientBody).toMatchObject({
+    error: {
+      account_id: 12_001,
+      code: "session_account_rejected",
+      type: "session_affinity_error",
+    },
   })
-  queuedResults.push(
-    new Response("forbidden", { status: 403 }),
-    transportError,
-    transportError,
-  )
-
-  let thrown: unknown
-  try {
-    await routedFetchWithAffinity(modelId, key)
-  } catch (error) {
-    thrown = error
-  }
-
-  expect(thrown).toBe(transportError)
-  expect(getRoutingAffinityLease(key)).toBeUndefined()
-  expect(capturedRequests).toHaveLength(3)
+  expect(tokenPool.getEligibleAccountForModel(modelId, 12_001)).toBeDefined()
+  expect(llmAuthorizationHeaders()).not.toContain("Bearer alternate-token")
 })
 
-test("ignores an ineligible lease without deleting it and later reuses it", async () => {
-  const modelA = "router-lease-model-a"
-  const modelB = "router-lease-model-b"
-  registerAccount(1221, modelA, "model-a-primary")
-  registerAccount(1222, modelA, "shared-account")
-  const shared = tokenPool
-    .getAllAccounts()
-    .find((account) => account.id === 1222)
-  if (!shared) throw new TypeError("Expected shared account")
-  shared.models.add(modelB)
-  shared.modelsData.push(createModel(modelB))
-  registerAccount(1223, modelB, "model-b-only")
+test("one request rejection cannot remap another session", async () => {
+  const modelId = "cross-session-health-regression"
+  registerAccount(12_011, modelId, "shared-home")
+  registerAccount(12_012, modelId, "other-home")
   tokenPool.rebuildModelIndex()
-  const key = "cross-model-lease-session"
-  const initialA = tokenPool.getAccountForModelBySession(modelA, key)
-  if (!initialA) throw new TypeError("Expected model A initial account")
-  const replacementA = tokenPool.getNextAccountForModel(modelA, initialA)
-  if (!replacementA) throw new TypeError("Expected model A replacement")
-  queuedResults.push(
-    new Response("forbidden", { status: 403 }),
-    new Response("{}", { status: 200 }),
-  )
-  await routedFetchWithAffinity(modelA, key)
+  const rejectedKey = findKeyForAccount(modelId, 12_011)
+  const unaffectedKey = findAnotherKeyForAccount(modelId, 12_011, rejectedKey)
+  queuePersistent401Reinitialization("refreshed-home", [modelId])
 
-  const leasedId = replacementA.id
-  const ineligibleModel = leasedId === 1222 ? "model-never-supported" : modelB
-  if (ineligibleModel === "model-never-supported") {
-    registerAccount(1224, ineligibleModel, "other-only")
-    tokenPool.rebuildModelIndex()
-  }
+  await routedFetchWithAffinity(modelId, rejectedKey).catch(() => undefined)
+  queuedResults.length = 0
   queuedResults.push(new Response("{}", { status: 200 }))
-  const ignored = await routedFetchWithAffinity(ineligibleModel, key)
-  expect(ignored.account?.id).not.toBe(leasedId)
-  expect(getRoutingAffinityLease(key)).toBe(leasedId)
+  const result = await routedFetchWithAffinity(modelId, unaffectedKey)
 
-  const laterModel = leasedId === 1222 ? modelB : modelA
-  queuedResults.push(new Response("{}", { status: 200 }))
-  const reused = await routedFetchWithAffinity(laterModel, key)
-  expect(reused.account?.id).toBe(leasedId)
+  expect(result.account?.id).toBe(12_011)
+  expect(tokenPool.getHealthyAccountIds()).toContain(12_011)
 })
 
-test("does not create a lease for an unidentified request", async () => {
-  const modelId = "router-unidentified-no-lease"
-  registerAccount(1231, modelId, "unknown-primary")
-  registerAccount(1232, modelId, "unknown-secondary")
+test("returns a local conflict for identified 403 without failover", async () => {
+  const modelId = "identified-403-affinity"
+  registerAccount(12_021, modelId, "forbidden-home")
+  registerAccount(12_022, modelId, "forbidden-alternate")
   tokenPool.rebuildModelIndex()
-  setRoutingAffinityLease("sentinel-session", 4321)
-  queuedResults.push(
-    new Response("forbidden", { status: 403 }),
-    new Response("{}", { status: 200 }),
+  const key = findKeyForAccount(modelId, 12_021)
+  queuedResults.push(new Response("Forbidden", { status: 403 }))
+
+  const error = await routedFetchWithAffinity(modelId, key).catch(
+    (caught: unknown) => caught,
   )
 
-  await routedFetch("/chat/completions", { method: "POST" }, { modelId })
-
-  expect(getRoutingAffinityLease("sentinel-session")).toBe(4321)
+  expect(error).toBeInstanceOf(LocalHTTPError)
+  expect((error as LocalHTTPError).response.status).toBe(409)
+  expect(llmAuthorizationHeaders()).toEqual(["Bearer forbidden-home"])
+  expect(tokenPool.getHealthyAccountIds()).toContain(12_021)
 })
 
-test("does not create or change leases in single-token mode", async () => {
-  const key = "single-token-affinity"
-  setRoutingAffinityLease(key, 777)
-  state.isMultiToken = false
-  state.copilotToken = "single-token"
-  queuedResults.push(new Response("{}", { status: 200 }))
+test("keeps identified 429 retries on the hashed account", async () => {
+  const modelId = "identified-429-affinity"
+  registerAccount(12_031, modelId, "limited-home")
+  registerAccount(12_032, modelId, "limited-alternate")
+  tokenPool.rebuildModelIndex()
+  const key = findKeyForAccount(modelId, 12_031)
+  queuedResults.push(
+    new Response("limited", {
+      status: 429,
+      headers: { "retry-after": "0" },
+    }),
+    new Response("still limited", {
+      status: 429,
+      headers: { "retry-after": "0" },
+    }),
+  )
 
-  const result = await routedFetchWithAffinity("single-token-model", key)
+  const result = await runWithRoutingAffinity(
+    { key, source: "copilot_session" },
+    async () =>
+      await routedFetch(
+        "/chat/completions",
+        { method: "POST" },
+        { maxHttpRetryDelaySeconds: 0, modelId },
+      ),
+  )
 
-  expect(result.response.status).toBe(200)
-  expect(result.account).toBeUndefined()
-  expect(getRoutingAffinityLease(key)).toBe(777)
-  expect(getRoutingAffinityLease("single-token-model")).toBeUndefined()
+  expect(result.response.status).toBe(429)
+  expect(result.account?.id).toBe(12_031)
+  expect(llmAuthorizationHeaders()).toEqual([
+    "Bearer limited-home",
+    "Bearer limited-home",
+  ])
+})
+
+test("returns local 503 without failover when reinitialization fails", async () => {
+  const modelId = "identified-reinitialization-failure"
+  registerAccount(12_041, modelId, "preserved-home")
+  registerAccount(12_042, modelId, "unused-alternate")
+  tokenPool.rebuildModelIndex()
+  const key = findKeyForAccount(modelId, 12_041)
+  const account = tokenPool.getEligibleAccountForModel(modelId, 12_041)
+  if (!account) throw new TypeError("Expected bound account")
+  const originalModelsData = account.modelsData
+  queuedResults.push(
+    new Response("Unauthorized", { status: 401 }),
+    copilotTokenResponse("unused-fresh-token"),
+    new Response("model outage", { status: 503 }),
+  )
+
+  const error = await routedFetchWithAffinity(modelId, key).catch(
+    (caught: unknown) => caught,
+  )
+
+  expect(error).toBeInstanceOf(LocalHTTPError)
+  expect((error as LocalHTTPError).response.status).toBe(503)
+  expect((error as LocalHTTPError).clientBody).toMatchObject({
+    error: {
+      account_id: 12_041,
+      code: "account_reinitialization_failed",
+      type: "account_unavailable",
+    },
+  })
+  expect(account.copilotToken).toBe("preserved-home")
+  expect(account.modelsData).toBe(originalModelsData)
+  expect(account.models).toEqual(new Set([modelId]))
+  expect(account.healthy).toBe(true)
+  expect(llmAuthorizationHeaders()).toEqual(["Bearer preserved-home"])
 })
 
 test("preserves legacy WebSocket affinity and typed affinity precedence", async () => {
@@ -344,9 +393,6 @@ test("preserves legacy WebSocket affinity and typed affinity precedence", async 
     legacyKey,
   )
   if (!legacyPreferred) throw new TypeError("Expected legacy preferred account")
-  const leased = tokenPool.getNextAccountForModel(modelId, legacyPreferred)
-  if (!leased) throw new TypeError("Expected legacy leased account")
-  setRoutingAffinityLease(legacyKey, leased.id)
   queuedResults.push(new Response("{}", { status: 200 }))
 
   const legacyResult = await clientSessionStorage.run(
@@ -354,7 +400,7 @@ test("preserves legacy WebSocket affinity and typed affinity precedence", async 
     async () =>
       await routedFetch("/chat/completions", { method: "POST" }, { modelId }),
   )
-  expect(legacyResult.account?.id).toBe(leased.id)
+  expect(legacyResult.account?.id).toBe(legacyPreferred.id)
 
   const typedPreferred = tokenPool.getAccountForModelBySession(
     modelId,
@@ -389,17 +435,8 @@ test("fails over to the next account immediately after a multi-token 401", async
       status: 401,
       headers: { "retry-after": "0" },
     }),
-    new Response(
-      JSON.stringify({
-        token: "fresh-primary-copilot-token",
-        expires_at: 1_900_000_000,
-        refresh_in: 1800,
-      }),
-      {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      },
-    ),
+    copilotTokenResponse("fresh-primary-copilot-token"),
+    modelsResponse([modelId]),
     new Response("Unauthorized", {
       status: 401,
       headers: { "retry-after": "0" },
@@ -415,15 +452,16 @@ test("fails over to the next account immediately after a multi-token 401", async
 
   expect(response.status).toBe(200)
   expect(account?.id).toBe(1002)
-  expect(capturedRequests).toHaveLength(4)
+  expect(capturedRequests).toHaveLength(5)
   expect(capturedRequests[0]?.init?.headers).toMatchObject({
     Authorization: "Bearer primary-copilot-token",
   })
   expect(capturedRequests[1]?.url).toContain("/copilot_internal/v2/token")
-  expect(capturedRequests[2]?.init?.headers).toMatchObject({
+  expect(capturedRequests[2]?.url).toContain("/models")
+  expect(capturedRequests[3]?.init?.headers).toMatchObject({
     Authorization: "Bearer fresh-primary-copilot-token",
   })
-  expect(capturedRequests[3]?.init?.headers).toMatchObject({
+  expect(capturedRequests[4]?.init?.headers).toMatchObject({
     Authorization: "Bearer secondary-copilot-token",
   })
 })
@@ -437,17 +475,8 @@ test("refreshes a multi-token account and retries after a 401", async () => {
     new Response("IDE token expired: unauthorized: token expired\n", {
       status: 401,
     }),
-    new Response(
-      JSON.stringify({
-        token: "fresh-copilot-token",
-        expires_at: 1_900_000_000,
-        refresh_in: 1800,
-      }),
-      {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      },
-    ),
+    copilotTokenResponse("fresh-copilot-token"),
+    modelsResponse([modelId]),
     new Response("{}", { status: 200 }),
   )
 
@@ -460,7 +489,7 @@ test("refreshes a multi-token account and retries after a 401", async () => {
   expect(response.status).toBe(200)
   expect(account?.id).toBe(1011)
   expect(account?.copilotToken).toBe("fresh-copilot-token")
-  expect(capturedRequests).toHaveLength(3)
+  expect(capturedRequests).toHaveLength(4)
   expect(capturedRequests[0]?.init?.headers).toMatchObject({
     Authorization: "Bearer expired-copilot-token",
   })
@@ -468,7 +497,8 @@ test("refreshes a multi-token account and retries after a 401", async () => {
   expect(capturedRequests[1]?.init?.headers).toMatchObject({
     authorization: "token github-token-1011",
   })
-  expect(capturedRequests[2]?.init?.headers).toMatchObject({
+  expect(capturedRequests[2]?.url).toContain("/models")
+  expect(capturedRequests[3]?.init?.headers).toMatchObject({
     Authorization: "Bearer fresh-copilot-token",
   })
 })
@@ -792,17 +822,8 @@ test("refreshes the fallback account for unknown models after a 401", async () =
     new Response("IDE token expired: unauthorized: token expired\n", {
       status: 401,
     }),
-    new Response(
-      JSON.stringify({
-        token: "fresh-fallback-token",
-        expires_at: 1_900_000_000,
-        refresh_in: 1800,
-      }),
-      {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      },
-    ),
+    copilotTokenResponse("fresh-fallback-token"),
+    modelsResponse(["different-known-model"]),
     new Response("{}", { status: 200 }),
   )
 
@@ -815,12 +836,13 @@ test("refreshes the fallback account for unknown models after a 401", async () =
   expect(response.status).toBe(200)
   expect(account?.id).toBe(expectedAccount.id)
   expect(account?.copilotToken).toBe("fresh-fallback-token")
-  expect(capturedRequests).toHaveLength(3)
+  expect(capturedRequests).toHaveLength(4)
   expect(capturedRequests[0]?.init?.headers).toMatchObject({
     Authorization: "Bearer expired-fallback-token",
   })
   expect(capturedRequests[1]?.url).toContain("/copilot_internal/v2/token")
-  expect(capturedRequests[2]?.init?.headers).toMatchObject({
+  expect(capturedRequests[2]?.url).toContain("/models")
+  expect(capturedRequests[3]?.init?.headers).toMatchObject({
     Authorization: "Bearer fresh-fallback-token",
   })
 })
@@ -898,17 +920,8 @@ test("does not fail over to an account where the model is disabled", async () =>
 
   queuedResults.push(
     new Response("Unauthorized", { status: 401 }),
-    new Response(
-      JSON.stringify({
-        token: "fresh-enabled-failover-primary",
-        expires_at: 1_900_000_000,
-        refresh_in: 1800,
-      }),
-      {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      },
-    ),
+    copilotTokenResponse("fresh-enabled-failover-primary"),
+    modelsResponse([modelId]),
     new Response("Unauthorized", { status: 401 }),
   )
 
@@ -920,12 +933,13 @@ test("does not fail over to an account where the model is disabled", async () =>
 
   expect(response.status).toBe(401)
   expect(account?.id).toBe(1008)
-  expect(capturedRequests).toHaveLength(3)
+  expect(capturedRequests).toHaveLength(4)
   expect(capturedRequests[0]?.init?.headers).toMatchObject({
     Authorization: "Bearer enabled-failover-primary",
   })
   expect(capturedRequests[1]?.url).toContain("/copilot_internal/v2/token")
-  expect(capturedRequests[2]?.init?.headers).toMatchObject({
+  expect(capturedRequests[2]?.url).toContain("/models")
+  expect(capturedRequests[3]?.init?.headers).toMatchObject({
     Authorization: "Bearer fresh-enabled-failover-primary",
   })
 })
@@ -1005,6 +1019,7 @@ test("caps sends across a 401 refresh-resend and a failover transport retry", as
   queuedResults.push(
     new Response("unauthorized: token expired\n", { status: 401 }),
     tokenResponse(),
+    modelsResponse([modelId]),
     new Response("unauthorized: token expired\n", { status: 401 }),
     Object.assign(
       new Error(
@@ -1028,7 +1043,9 @@ test("caps sends across a 401 refresh-resend and a failover transport retry", as
   )
 
   const llmSends = capturedRequests.filter(
-    (request) => !request.url.includes("/copilot_internal/"),
+    (request) =>
+      !request.url.includes("/copilot_internal/")
+      && !request.url.endsWith("/models"),
   )
   expect(llmSends).toHaveLength(3)
   expect(llmSends[0]?.init?.headers).toMatchObject({
