@@ -7,6 +7,7 @@ import {
   modelSupportsAssistantPrefill,
   setModelSettingsForTest,
 } from "../src/lib/model-settings"
+import { runWithRoutingAffinity } from "../src/lib/routing-affinity"
 import {
   createSentryInitOptions,
   createSentryChatSpanOptions,
@@ -282,6 +283,35 @@ test("sets and returns only a pseudonymous Sentry conversation ID", async () => 
   expect(returned).toBe(pseudonymizeSentryConversationId(raw))
   expect(returned).not.toContain(raw)
   expect(setConversationId).toHaveBeenCalledWith(returned)
+  setConversationId.mockRestore()
+})
+
+test("does not emit active routing affinity to Sentry", async () => {
+  const affinityKey = "winning-header-affinity-private-value"
+  const losingMetadataKey = "losing-metadata-affinity-private-value"
+  const setConversationId = spyOn(
+    Sentry,
+    "setConversationId",
+  ).mockImplementation(() => undefined)
+  const app = new Hono()
+  let returned: string | undefined
+  app.post("/", (c) => {
+    returned = runWithRoutingAffinity(
+      { key: affinityKey, source: "copilot_session" },
+      () =>
+        setSentryConversationIdFromRequest(c, {
+          metadata: {
+            user_id: JSON.stringify({ session_id: losingMetadataKey }),
+          },
+        }),
+    )
+    return c.text("ok")
+  })
+
+  await app.request("/", { method: "POST" })
+
+  expect(returned).toBeUndefined()
+  expect(setConversationId).not.toHaveBeenCalled()
   setConversationId.mockRestore()
 })
 

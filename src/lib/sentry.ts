@@ -7,7 +7,8 @@ import consola from "consola"
 import { createHash } from "node:crypto"
 
 import { getModelSettings } from "~/lib/model-settings"
-import { getClientSessionId, getRequestId } from "~/lib/request-session"
+import { getRequestId } from "~/lib/request-session"
+import { getRoutingAffinity } from "~/lib/routing-affinity"
 
 import packageJson from "../../package.json" with { type: "json" }
 
@@ -506,11 +507,15 @@ export function setSentryConversationIdFromRequest(
   c: Context,
   payload?: unknown,
 ): string | undefined {
+  const routingAffinityKey = getRoutingAffinity()?.key
+  const payloadConversationId = getSentryConversationIdFromPayload(payload)
+  const headerConversationId = getSentryConversationIdFromHeaders(
+    c.req.raw.headers,
+  )
   const conversationId =
-    getSentryConversationIdFromPayload(payload)
-    ?? getSentryConversationIdFromHeaders(c.req.raw.headers)
-    ?? getClientSessionId()
-    ?? getRequestId()
+    routingAffinityKey && (payloadConversationId || headerConversationId) ?
+      undefined
+    : (payloadConversationId ?? headerConversationId ?? getRequestId())
 
   if (!conversationId) return undefined
 

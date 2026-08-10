@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto"
 import type { RoutingAffinity } from "~/lib/routing-affinity"
 
 import { resolveRequestCredential } from "~/lib/credential-resolver"
+import { LocalHTTPError } from "~/lib/error"
 import {
   applyModelRedirect,
   formatModelRedirectResult,
@@ -1018,6 +1019,17 @@ function normalizeWebSocketError(
   error: unknown,
   fallbackMessage: string,
 ): WebSocketErrorFrameOptions {
+  if (error instanceof LocalHTTPError) {
+    const local = localWebSocketError(error)
+    if (local) {
+      return {
+        code: mapHttpStatusToWebSocketErrorCode(error.response.status),
+        message: local.message,
+        status: error.response.status,
+        type: local.type,
+      }
+    }
+  }
   if (isHTTPErrorLike(error)) {
     return {
       code: mapHttpStatusToWebSocketErrorCode(error.response.status),
@@ -1033,6 +1045,21 @@ function normalizeWebSocketError(
     status: 500,
     type: "websocket_error",
   }
+}
+
+function localWebSocketError(
+  error: LocalHTTPError,
+): { message: string; type: string } | undefined {
+  const bodyError = error.clientBody.error
+  if (!isRecord(bodyError)) return undefined
+  if (
+    bodyError.type !== "session_affinity_error"
+    && bodyError.type !== "account_unavailable"
+  ) {
+    return undefined
+  }
+  if (typeof bodyError.message !== "string") return undefined
+  return { message: bodyError.message, type: bodyError.type }
 }
 
 function isHTTPErrorLike(error: unknown): error is { response: Response } {

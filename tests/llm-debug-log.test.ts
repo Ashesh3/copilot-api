@@ -85,6 +85,64 @@ test("redacts credentials from stored debug URLs and structured bodies", () => {
   expect(detail?.request.headers["x-api-key"]).toBe("[REDACTED]")
 })
 
+test("redacts upstream session headers from stored debug entries", () => {
+  const id = startLlmDebugLog({
+    method: "POST",
+    path: "/responses",
+    requestBody: JSON.stringify({ model: "gpt-test", input: "hello" }),
+    requestHeaders: {
+      "X-Agent-Task-Id": "derived-agent-task-id",
+      "X-Client-Session-Id": "derived-client-session-id",
+      "X-Interaction-Id": "derived-interaction-id",
+    },
+    url: "https://example.test/responses",
+  })
+
+  const detail = getLlmDebugLog(id)
+  expect(detail?.request.headers).toMatchObject({
+    "X-Agent-Task-Id": "[REDACTED]",
+    "X-Client-Session-Id": "[REDACTED]",
+    "X-Interaction-Id": "[REDACTED]",
+  })
+})
+
+test("redacts affinity identifiers from structured request bodies", () => {
+  const rawIds = [
+    "root-session-private",
+    "root-thread-private",
+    "conversation-private",
+    "prompt-cache-private",
+    "safety-private",
+    "client-session-private",
+    "client-thread-private",
+    "claude-session-private",
+  ]
+  const id = startLlmDebugLog({
+    method: "POST",
+    path: "/responses",
+    requestBody: JSON.stringify({
+      session_id: rawIds[0],
+      thread_id: rawIds[1],
+      conversation_id: rawIds[2],
+      prompt_cache_key: rawIds[3],
+      safety_identifier: rawIds[4],
+      client_metadata: JSON.stringify({
+        session_id: rawIds[5],
+        thread_id: rawIds[6],
+      }),
+      metadata: {
+        user_id: JSON.stringify({ session_id: rawIds[7] }),
+      },
+      model: "gpt-test",
+    }),
+    requestHeaders: {},
+    url: "https://example.test/responses",
+  })
+
+  const body = getLlmDebugLog(id)?.request.body
+  for (const rawId of rawIds) expect(body).not.toContain(rawId)
+})
+
 test("prunes entries older than the retention window", () => {
   const now = Date.now()
   startLlmDebugLog({

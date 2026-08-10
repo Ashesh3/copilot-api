@@ -21,7 +21,7 @@ export class HTTPError extends Error {
   constructor(message: string, response: Response, requestPayload?: unknown) {
     super(message)
     this.response = response
-    this.requestPayload = requestPayload
+    this.requestPayload = redactSensitiveValue(requestPayload)
   }
 }
 
@@ -66,10 +66,20 @@ const SENSITIVE_HEADER_PATTERNS = [
   "set-cookie",
 ]
 const SENSITIVE_FIELD_PATTERN =
-  /password|secret|api[_-]?key|authorization|cookie|access[_-]?token|refresh[_-]?token|client[_-]?secret|code[_-]?verifier/i
+  /password|secret|api[_-]?key|authorization|cookie|access[_-]?token|refresh[_-]?token|client[_-]?secret|code[_-]?verifier|(?:conversation|session|thread)[_-]?id|prompt[_-]?cache[_-]?key|safety[_-]?identifier|user[_-]?id/i
 
 function redactSensitiveValue(value: unknown, key = ""): unknown {
   if (SENSITIVE_FIELD_PATTERN.test(key)) return "[REDACTED]"
+  if (
+    typeof value === "string"
+    && (key === "client_metadata" || key === "metadata")
+  ) {
+    try {
+      return JSON.stringify(redactSensitiveValue(JSON.parse(value) as unknown))
+    } catch {
+      return "[REDACTED]"
+    }
+  }
   if (Array.isArray(value)) {
     return value.map((item) => redactSensitiveValue(item))
   }

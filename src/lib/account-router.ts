@@ -8,16 +8,13 @@ import type {
 } from "~/services/copilot/copilot-client"
 import type { RetryBudget } from "~/services/copilot/transport-retry"
 
+import { HTTPError, LocalHTTPError } from "~/lib/error"
 import {
   getClientSessionId,
   getLastUsedRoutedAccountId,
   setLastUsedRoutedAccountId,
 } from "~/lib/request-session"
 import { getRoutingAffinity } from "~/lib/routing-affinity"
-import {
-  getRoutingAffinityLease,
-  setRoutingAffinityLease,
-} from "~/lib/routing-affinity-leases"
 import {
   recordRoutingSelection,
   type RoutingSelectionMode,
@@ -181,20 +178,67 @@ async function fetchWithAccount(
   )
 }
 
-async function refreshAndRetryAccount(
+function createSessionAccountRejectedError(
+  account: Account,
+  afterReinitialization: boolean,
+): LocalHTTPError {
+  const message =
+    afterReinitialization ?
+      "The bound account rejected this conversation after successful account reinitialization; affinity was preserved and no cross-account retry was attempted."
+    : "The bound account rejected this conversation; affinity was preserved and no cross-account retry was attempted."
+  const clientBody = {
+    error: {
+      account_id: account.id,
+      code: "session_account_rejected",
+      message,
+      type: "session_affinity_error",
+    },
+  }
+  return new LocalHTTPError(
+    clientBody.error.message,
+    Response.json(clientBody, { status: 409 }),
+    clientBody,
+  )
+}
+
+function createAccountReinitializationFailedError(
+  account: Account,
+): LocalHTTPError {
+  const clientBody = {
+    error: {
+      account_id: account.id,
+      code: "account_reinitialization_failed",
+      message:
+        "The bound account could not be reinitialized; affinity was preserved and no cross-account retry was attempted.",
+      type: "account_unavailable",
+    },
+  }
+  return new LocalHTTPError(
+    clientBody.error.message,
+    Response.json(clientBody, { status: 503 }),
+    clientBody,
+  )
+}
+
+async function reinitializeAndRetryAccount(
   options: AccountFetchOptions,
-): Promise<Response | undefined> {
+): Promise<Response> {
   const { account, path, retryBudget } = options
   try {
     consola.warn(
-      `[Account #${account.id}] HTTP 401 on ${path}, refreshing Copilot token`,
+      `[Account #${account.id}] HTTP 401 on ${path}, reinitializing account credentials and models`,
     )
-    await tokenPool.refreshAccountToken(account, state.showToken)
+    await tokenPool.reinitializeAccount(account, state.showToken)
   } catch (error) {
     consola.warn(
-      `[Account #${account.id}] Failed to refresh Copilot token after 401 on ${path}: ${error instanceof Error ? error.message : String(error)}`,
+      `[Account #${account.id}] Account reinitialization failed after HTTP 401 on ${path}`,
+      error instanceof HTTPError ?
+        { status: error.response.status }
+      : {
+          errorClass: error instanceof Error ? error.name : "Unknown",
+        },
     )
-    return undefined
+    throw createAccountReinitializationFailedError(account)
   }
 
   // The resend is an extra upstream send and is charged like any other.
@@ -202,7 +246,7 @@ async function refreshAndRetryAccount(
     consola.warn(
       `[Account #${account.id}] Send budget exhausted after 401 on ${path}, not resending`,
     )
-    return undefined
+    return new Response(null, { status: 401 })
   }
 
   return await fetchWithAccount({ ...options, reason: "token_refresh" })
@@ -276,10 +320,6 @@ async function failoverToAccount(
   consola.warn(
     `[Account #${currentAccount.id}] HTTP ${failedResponse.status} on ${path}, failing over to Account #${next.id}`,
   )
-  if (failedResponse.status === 401 || failedResponse.status === 403) {
-    tokenPool.markUnhealthy(currentAccount)
-  }
-
   // Failing over issues another upstream send, so it draws on the same budget.
   if (!consumeExtraSend(retryBudget)) {
     consola.warn(
@@ -300,9 +340,6 @@ async function failoverToAccount(
     reason: "failover",
     retryBudget,
   })
-  if (response.ok && context.affinityKey) {
-    setRoutingAffinityLease(context.affinityKey, next.id)
-  }
   return { response, account: next }
 }
 
@@ -324,19 +361,30 @@ async function fetchWithRoutedAccount(
     reason,
     retryBudget,
   })
+  let reinitialized = false
 
   if (response.status === 401) {
-    response =
-      (await refreshAndRetryAccount({
-        account,
-        headerOptions,
-        init,
-        maxHttpRetryDelaySeconds,
-        modelId: context.modelId,
-        path,
-        reason: "token_refresh",
-        retryBudget,
-      })) ?? response
+    response = await reinitializeAndRetryAccount({
+      account,
+      headerOptions,
+      init,
+      maxHttpRetryDelaySeconds,
+      modelId: context.modelId,
+      path,
+      reason: "token_refresh",
+      retryBudget,
+    })
+    reinitialized = true
+  }
+
+  if (
+    context.affinityKey
+    && (response.status === 401 || response.status === 403)
+  ) {
+    throw createSessionAccountRejectedError(account, reinitialized)
+  }
+  if (context.affinityKey) {
+    return { response, account }
   }
 
   if (!FAILOVER_STATUSES.has(response.status)) {
@@ -378,7 +426,8 @@ export interface RoutedFetchOptions {
  * to `copilotFetch`.
  * In multi-token mode, selects an account for the requested model,
  * builds headers with that account's token, issues the request, and on
- * 401/403/429 attempts one failover to an alternative account.
+ * unidentified 401/403/429 attempts one failover to an alternative account.
+ * Identified conversations never move away from their hash-selected account.
  *
  * Transport failures are NOT failed over. `copilotFetch` retries them in
  * place; every account resolves to the same Copilot host, so switching
@@ -442,14 +491,7 @@ export async function routedFetch(
   }
 
   const affinityKey = getEffectiveAffinityKey()
-  const leasedAccountId =
-    affinityKey ? getRoutingAffinityLease(affinityKey) : undefined
-  const leasedAccount =
-    leasedAccountId === undefined ? undefined : (
-      tokenPool.getEligibleAccountForModel(modelId, leasedAccountId)
-    )
-  const account =
-    leasedAccount ?? tokenPool.getAccountForModelBySession(modelId, affinityKey)
+  const account = tokenPool.getAccountForModelBySession(modelId, affinityKey)
   if (!account) {
     if (tokenPool.hasKnownModel(modelId)) {
       const response = createNoEnabledAccountResponse(modelId)
