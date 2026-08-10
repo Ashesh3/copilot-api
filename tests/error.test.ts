@@ -1,4 +1,6 @@
-import { expect, test } from "bun:test"
+import * as Sentry from "@sentry/bun"
+import { expect, spyOn, test } from "bun:test"
+import consola from "consola"
 import { Hono } from "hono"
 
 import { forwardError, HTTPError, LocalHTTPError } from "../src/lib/error"
@@ -141,4 +143,60 @@ test("returns an explicitly safe local error body without exposing upstream bodi
 
   expect(response.status).toBe(413)
   expect(await response.json()).toEqual(clientBody)
+})
+
+test("redacts affinity identifiers from HTTP error diagnostics", async () => {
+  const rawIds = [
+    "error-root-session-private",
+    "error-root-thread-private",
+    "error-conversation-private",
+    "error-prompt-cache-private",
+    "error-safety-private",
+    "error-client-session-private",
+    "error-client-thread-private",
+    "error-claude-session-private",
+  ]
+  const payload = {
+    session_id: rawIds[0],
+    thread_id: rawIds[1],
+    conversation_id: rawIds[2],
+    prompt_cache_key: rawIds[3],
+    safety_identifier: rawIds[4],
+    client_metadata: JSON.stringify({
+      session_id: rawIds[5],
+      thread_id: rawIds[6],
+    }),
+    metadata: {
+      user_id: JSON.stringify({ session_id: rawIds[7] }),
+    },
+  }
+  const errorOutput: Array<unknown> = []
+  const errorSpy = spyOn(consola, "error")
+  const captureException = spyOn(Sentry, "captureException").mockImplementation(
+    () => "event-id",
+  )
+  const app = new Hono()
+  app.get("/affinity-error", () => {
+    throw new HTTPError(
+      "Failed upstream request",
+      Response.json({ error: "failed" }, { status: 500 }),
+      payload,
+    )
+  })
+  app.onError(async (error, c) => await forwardError(c, error))
+
+  try {
+    await app.request("/affinity-error")
+    for (const call of errorSpy.mock.calls) errorOutput.push(...call)
+    const diagnosticOutput = JSON.stringify([
+      errorOutput,
+      captureException.mock.calls,
+    ])
+    for (const rawId of rawIds) {
+      expect(diagnosticOutput).not.toContain(rawId)
+    }
+  } finally {
+    errorSpy.mockRestore()
+    captureException.mockRestore()
+  }
 })
