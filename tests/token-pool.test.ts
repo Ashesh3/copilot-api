@@ -9,7 +9,7 @@ import {
 } from "bun:test"
 import { createHash } from "node:crypto"
 
-import type { Model } from "../src/services/copilot/get-models"
+import type { Model, ModelsResponse } from "../src/services/copilot/get-models"
 
 import {
   isModelEnabledForAccount,
@@ -249,6 +249,54 @@ test("preserves account state when reinitialization fails", async () => {
 
   expect(error).toBeInstanceOf(Error)
   expect(snapshotAccount(account)).toEqual(before)
+})
+
+test("rejects malformed model discovery before mutating account state", async () => {
+  const pool = new tokenPoolModule.TokenPool()
+  pools.add(pool)
+  const account = createInitializedAccount(pool)
+  const before = snapshotAccount(account)
+  queuedResults.push(
+    tokenResponse("unused-malformed-token"),
+    Response.json({ data: null, object: "list" }),
+  )
+
+  const error = await pool
+    .reinitializeAccount(account)
+    .catch((caught: unknown) => caught)
+
+  expect(error).toBeInstanceOf(Error)
+  expect(snapshotAccount(account)).toEqual(before)
+})
+
+test("publishes the merged model snapshot only after reinitialization commits", async () => {
+  const published: Array<ModelsResponse> = []
+  const pool = new tokenPoolModule.TokenPool((models) => published.push(models))
+  pools.add(pool)
+  const firstAccount = createInitializedAccount(pool)
+  const secondAccount = pool.addAccount(
+    "github-token-static-model",
+    "individual",
+    802,
+  )
+  secondAccount.copilotToken = "static-copilot-token"
+  secondAccount.copilotTokenExpiry = 1_800_000_000
+  secondAccount.healthy = true
+  secondAccount.models = new Set(["model-c"])
+  secondAccount.modelsData = [createModel("model-c")]
+  pool.rebuildModelIndex()
+  queuedResults.push(
+    tokenResponse("published-fresh-token"),
+    modelsResponse([createModel(MODEL_B)]),
+  )
+
+  await pool.reinitializeAccount(firstAccount)
+
+  expect(published).toHaveLength(1)
+  expect(published[0]?.data.map((model) => model.id)).toEqual([
+    MODEL_B,
+    "model-c",
+  ])
 })
 
 test("coalesces concurrent account reinitialization", async () => {

@@ -9,6 +9,7 @@ import {
   hasModelRoutingOverride,
   isModelEnabledForAccount,
 } from "~/lib/model-routing"
+import { state } from "~/lib/state"
 import { createCopilotTransportInit } from "~/services/copilot/transport-options"
 import { getGitHubUser } from "~/services/github/get-user"
 
@@ -28,6 +29,18 @@ export interface Account {
   modelsData: Array<Model>
   accountType: string
   healthy: boolean
+}
+
+type ModelsSnapshotListener = (models: ModelsResponse) => void
+
+function hasModelId(value: unknown): value is Model {
+  return (
+    typeof value === "object"
+    && value !== null
+    && "id" in value
+    && typeof value.id === "string"
+    && value.id.length > 0
+  )
 }
 
 // --- Copilot Token Response ---
@@ -59,6 +72,8 @@ export class TokenPool {
   private refreshTimers: Map<number, ReturnType<typeof setInterval>> = new Map()
   private sessionId: string = randomUUID()
   private vsCodeVersion = "1.104.3"
+
+  constructor(private readonly onModelsChanged?: ModelsSnapshotListener) {}
 
   /**
    * Set the VS Code version used in Copilot request headers.
@@ -490,6 +505,8 @@ export class TokenPool {
       this.getBaseUrl(account),
       tokenData.token,
     )
+    const modelsData = this.validateModelsResponse(modelsResponse)
+    const models = new Set(modelsData.map((model) => model.id))
 
     // Commit only after both control-plane requests succeed.
     // eslint-disable-next-line require-atomic-updates
@@ -497,9 +514,9 @@ export class TokenPool {
     // eslint-disable-next-line require-atomic-updates
     account.copilotTokenExpiry = tokenData.expires_at
     // eslint-disable-next-line require-atomic-updates
-    account.modelsData = modelsResponse.data
+    account.modelsData = modelsData
     // eslint-disable-next-line require-atomic-updates
-    account.models = new Set(modelsResponse.data.map((model) => model.id))
+    account.models = models
     // eslint-disable-next-line require-atomic-updates
     account.healthy = true
 
@@ -510,11 +527,27 @@ export class TokenPool {
     }
 
     this.rebuildModelIndex()
+    this.onModelsChanged?.(this.getAllModels())
     this.setupRefreshTimer(
       account,
       getTokenRefreshIntervalMs(tokenData.refresh_in),
       showToken,
     )
+  }
+
+  private validateModelsResponse(response: unknown): Array<Model> {
+    if (
+      typeof response !== "object"
+      || response === null
+      || !("object" in response)
+      || response.object !== "list"
+      || !("data" in response)
+      || !Array.isArray(response.data)
+      || !response.data.every((model: unknown) => hasModelId(model))
+    ) {
+      throw new TypeError("Invalid Copilot models response")
+    }
+    return response.data
   }
 
   private async fetchCopilotToken(
@@ -619,4 +652,6 @@ export class TokenPool {
 
 // --- Module-level singleton ---
 
-export const tokenPool = new TokenPool()
+export const tokenPool = new TokenPool((models) => {
+  state.models = models
+})
