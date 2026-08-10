@@ -10,7 +10,7 @@ export interface LlmDebugLogError {
   errno?: number
   message: string
   name: string
-  /** Upstream URL stripped of query string and credentials. */
+  /** Runtime diagnostic path, when the thrown error exposes one. */
   path?: string
   stack?: string
 }
@@ -98,74 +98,6 @@ let logIndex = new Map<string, LlmDebugLogEntry>()
 let firstLogIndex = 0
 let pruneTimer: ReturnType<typeof setTimeout> | undefined
 let pruneTimerDeadlineMs: number | undefined
-
-const SENSITIVE_HEADER_PATTERN =
-  /^(?:authorization|proxy-authorization|cookie|set-cookie|x-api-key|x-goog-api-key|x-auth-token|x-agent-task-id|x-client-session-id|x-interaction-id)$/i
-const SENSITIVE_FIELD_PATTERN =
-  /api[_-]?key|authorization|cookie|password|secret|access[_-]?token|refresh[_-]?token|client[_-]?secret|code[_-]?verifier|(?:conversation|session|thread)[_-]?id|prompt[_-]?cache[_-]?key|safety[_-]?identifier|user[_-]?id/i
-
-function redactHeaders(headers: HeaderRecord): HeaderRecord {
-  return Object.fromEntries(
-    Object.entries(headers).map(([key, value]) => [
-      key,
-      SENSITIVE_HEADER_PATTERN.test(key) ? "[REDACTED]" : value,
-    ]),
-  )
-}
-
-function redactJsonValue(value: unknown, key = ""): unknown {
-  if (SENSITIVE_FIELD_PATTERN.test(key)) return "[REDACTED]"
-  if (
-    typeof value === "string"
-    && (key === "client_metadata" || key === "metadata")
-  ) {
-    try {
-      return JSON.stringify(redactJsonValue(JSON.parse(value) as unknown))
-    } catch {
-      return "[REDACTED]"
-    }
-  }
-  if (Array.isArray(value)) {
-    return value.map((item) => redactJsonValue(item))
-  }
-  if (isRecord(value)) {
-    return Object.fromEntries(
-      Object.entries(value).map(([nestedKey, nestedValue]) => [
-        nestedKey,
-        redactJsonValue(nestedValue, nestedKey),
-      ]),
-    )
-  }
-  return value
-}
-
-function redactBody(body: string | null): string | null {
-  if (!body) return body
-  try {
-    return JSON.stringify(redactJsonValue(JSON.parse(body) as unknown))
-  } catch {
-    return body
-  }
-}
-
-function redactUrl(value: string): string {
-  try {
-    const url = new URL(value)
-    for (const key of url.searchParams.keys()) {
-      if (SENSITIVE_FIELD_PATTERN.test(key)) {
-        url.searchParams.set(key, "[REDACTED]")
-      }
-    }
-    url.username = ""
-    url.password = ""
-    return url.toString()
-  } catch {
-    return value.replaceAll(
-      /([?&][^=&]*(?:key|token|secret|password|credential)[^=&]*=)[^&]*/gi,
-      "$1[REDACTED]",
-    )
-  }
-}
 
 function byteLength(value: string | null): number {
   if (value === null) return 0
@@ -385,16 +317,8 @@ function readErrorField(error: Error, key: string): unknown {
   return undefined
 }
 
-/** Strip query string and credentials before storing an upstream URL. */
-function sanitizeErrorPath(value: unknown): string | undefined {
-  if (typeof value !== "string" || value.length === 0) return undefined
-
-  try {
-    const parsed = new URL(value)
-    return `${parsed.origin}${parsed.pathname}`
-  } catch {
-    return undefined
-  }
+function readErrorPath(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined
 }
 
 function normalizeError(error: unknown): LlmDebugLogError {
@@ -402,7 +326,7 @@ function normalizeError(error: unknown): LlmDebugLogError {
     const codeValue = readErrorField(error, "code")
     const code = typeof codeValue === "string" ? codeValue : undefined
     const errnoValue = readErrorField(error, "errno")
-    const path = sanitizeErrorPath(readErrorField(error, "path"))
+    const path = readErrorPath(readErrorField(error, "path"))
 
     return {
       message: error.message,
@@ -473,7 +397,7 @@ export function startLlmDebugLog(input: StartLlmDebugLogInput): string {
   const startedAtMs = input.startedAtMs ?? Date.now()
   prune(startedAtMs)
 
-  const requestBody = redactBody(input.requestBody)
+  const requestBody = input.requestBody
 
   const id = randomUUID()
   insertLog({
@@ -482,10 +406,10 @@ export function startLlmDebugLog(input: StartLlmDebugLogInput): string {
     request: {
       body: requestBody,
       bodyBytes: byteLength(requestBody),
-      headers: redactHeaders(input.requestHeaders),
+      headers: { ...input.requestHeaders },
       method: input.method,
       path: input.path,
-      url: redactUrl(input.url),
+      url: input.url,
     },
     requestId: input.requestId,
     startedAt: new Date(startedAtMs).toISOString(),
@@ -511,9 +435,9 @@ export function finishLlmDebugLog(
   entry.durationMs = endedAtMs - entry.startedAtMs
   entry.response = {
     ...response,
-    body: redactBody(response.body),
-    headers: redactHeaders(response.headers),
-    bodyBytes: byteLength(redactBody(response.body)),
+    body: response.body,
+    headers: { ...response.headers },
+    bodyBytes: byteLength(response.body),
   }
   entry.status = response.bodyReadError ? "error" : "complete"
 }
@@ -548,9 +472,9 @@ export function abortLlmDebugLog(
   if (options.response) {
     entry.response = {
       ...options.response,
-      body: redactBody(options.response.body),
-      headers: redactHeaders(options.response.headers),
-      bodyBytes: byteLength(redactBody(options.response.body)),
+      body: options.response.body,
+      headers: { ...options.response.headers },
+      bodyBytes: byteLength(options.response.body),
     }
   }
   entry.status = "aborted"

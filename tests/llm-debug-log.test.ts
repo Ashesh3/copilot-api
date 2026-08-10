@@ -20,28 +20,36 @@ afterEach(() => {
   jest.useRealTimers()
 })
 
-test("stores request details with sensitive headers redacted", () => {
+test("stores exact request and completed response details", () => {
   const startedAtMs = Date.now()
-  const requestBody = JSON.stringify({
-    messages: [{ role: "user", content: "Find this request" }],
-    model: "gpt-test",
-    stream: false,
-  })
+  const requestBody = `{"messages": [ {"role": "user", "content": "Find this request"} ], "api_key": "body-secret", "model": "gpt-test", "stream": false}`
+  const responseBody = `{ "access_token": "response-secret", "ok": true }`
+  const requestHeaders = {
+    authorization: "Bearer raw-token",
+    cookie: "session=secret",
+    "x-api-key": "header-secret",
+  }
+  const responseHeaders = {
+    "content-type": "application/json",
+    "set-cookie": "upstream=secret",
+  }
+  const url =
+    "https://url-user:url-password@example.test/chat/completions?api_key=query-secret"
   const id = startLlmDebugLog({
     method: "POST",
     path: "/chat/completions",
     requestBody,
-    requestHeaders: { authorization: "Bearer raw-token" },
+    requestHeaders,
     requestId: "req-debug-1",
     startedAtMs,
-    url: "https://example.test/chat/completions",
+    url,
   })
 
   finishLlmDebugLog(
     id,
     {
-      body: '{"ok":true}',
-      headers: { "content-type": "application/json" },
+      body: responseBody,
+      headers: responseHeaders,
       status: 200,
       statusText: "OK",
     },
@@ -56,57 +64,20 @@ test("stores request details with sensitive headers redacted", () => {
   expect(list.entries[0]?.durationMs).toBe(123)
 
   const detail = getLlmDebugLog(id)
-  expect(detail?.request.body).toBe(requestBody)
-  expect(detail?.request.headers.authorization).toBe("[REDACTED]")
-  expect(detail?.response?.body).toBe('{"ok":true}')
-})
-
-test("redacts credentials from stored debug URLs and structured bodies", () => {
-  const id = startLlmDebugLog({
-    method: "POST",
-    path: "/responses",
-    requestBody: JSON.stringify({
-      api_key: "body-secret",
-      nested: { refresh_token: "refresh-secret" },
-    }),
-    requestHeaders: {
-      cookie: "session=secret",
-      "x-api-key": "header-secret",
-    },
-    url: "https://example.test/responses?api_key=query-secret&safe=value",
+  expect(detail?.request).toMatchObject({
+    body: requestBody,
+    bodyBytes: new TextEncoder().encode(requestBody).byteLength,
+    headers: requestHeaders,
+    url,
   })
-
-  const detail = getLlmDebugLog(id)
-  expect(detail?.request.url).not.toContain("query-secret")
-  expect(detail?.request.url).toContain("safe=value")
-  expect(detail?.request.body).not.toContain("body-secret")
-  expect(detail?.request.body).not.toContain("refresh-secret")
-  expect(detail?.request.headers.cookie).toBe("[REDACTED]")
-  expect(detail?.request.headers["x-api-key"]).toBe("[REDACTED]")
-})
-
-test("redacts upstream session headers from stored debug entries", () => {
-  const id = startLlmDebugLog({
-    method: "POST",
-    path: "/responses",
-    requestBody: JSON.stringify({ model: "gpt-test", input: "hello" }),
-    requestHeaders: {
-      "X-Agent-Task-Id": "derived-agent-task-id",
-      "X-Client-Session-Id": "derived-client-session-id",
-      "X-Interaction-Id": "derived-interaction-id",
-    },
-    url: "https://example.test/responses",
-  })
-
-  const detail = getLlmDebugLog(id)
-  expect(detail?.request.headers).toMatchObject({
-    "X-Agent-Task-Id": "[REDACTED]",
-    "X-Client-Session-Id": "[REDACTED]",
-    "X-Interaction-Id": "[REDACTED]",
+  expect(detail?.response).toMatchObject({
+    body: responseBody,
+    bodyBytes: new TextEncoder().encode(responseBody).byteLength,
+    headers: responseHeaders,
   })
 })
 
-test("redacts affinity identifiers from structured request bodies", () => {
+test("stores exact session headers and nested structured request body", () => {
   const rawIds = [
     "root-session-private",
     "root-thread-private",
@@ -117,30 +88,123 @@ test("redacts affinity identifiers from structured request bodies", () => {
     "client-thread-private",
     "claude-session-private",
   ]
+  const requestBody = JSON.stringify({
+    session_id: rawIds[0],
+    thread_id: rawIds[1],
+    conversation_id: rawIds[2],
+    prompt_cache_key: rawIds[3],
+    safety_identifier: rawIds[4],
+    client_metadata: JSON.stringify({
+      session_id: rawIds[5],
+      thread_id: rawIds[6],
+    }),
+    metadata: {
+      user_id: JSON.stringify({ session_id: rawIds[7] }),
+    },
+    model: "gpt-test",
+  })
+  const requestHeaders = {
+    "X-Agent-Task-Id": "derived-agent-task-id",
+    "X-Client-Session-Id": "derived-client-session-id",
+    "X-Interaction-Id": "derived-interaction-id",
+  }
   const id = startLlmDebugLog({
     method: "POST",
     path: "/responses",
-    requestBody: JSON.stringify({
-      session_id: rawIds[0],
-      thread_id: rawIds[1],
-      conversation_id: rawIds[2],
-      prompt_cache_key: rawIds[3],
-      safety_identifier: rawIds[4],
-      client_metadata: JSON.stringify({
-        session_id: rawIds[5],
-        thread_id: rawIds[6],
-      }),
-      metadata: {
-        user_id: JSON.stringify({ session_id: rawIds[7] }),
-      },
-      model: "gpt-test",
-    }),
-    requestHeaders: {},
+    requestBody,
+    requestHeaders,
     url: "https://example.test/responses",
   })
 
-  const body = getLlmDebugLog(id)?.request.body
-  for (const rawId of rawIds) expect(body).not.toContain(rawId)
+  const detail = getLlmDebugLog(id)
+  expect(detail?.request.body).toBe(requestBody)
+  expect(detail?.request.headers).toEqual(requestHeaders)
+})
+
+test("stores non-JSON request bodies unchanged", () => {
+  const requestBody = "api_key=body-secret & keep = exact spacing"
+  const id = startLlmDebugLog({
+    method: "POST",
+    path: "/embeddings",
+    requestBody,
+    requestHeaders: {},
+    url: "https://example.test/embeddings",
+  })
+
+  expect(getLlmDebugLog(id)?.request.body).toBe(requestBody)
+})
+
+test("stores exact aborted response details and runtime error path", () => {
+  const startedAtMs = Date.now()
+  const id = startLlmDebugLog({
+    method: "POST",
+    path: "/responses",
+    requestBody: "{}",
+    requestHeaders: {},
+    startedAtMs,
+    url: "https://example.test/responses",
+  })
+  const errorPath =
+    "https://error-user:error-password@example.test/responses?token=error-secret"
+  const error = Object.assign(new Error("client disconnected"), {
+    code: "ECONNABORTED",
+    path: errorPath,
+  })
+  const responseBody = `{ "refresh_token": "response-secret" }`
+  const responseHeaders = {
+    "content-type": "application/json",
+    "set-cookie": "upstream=secret",
+  }
+
+  abortLlmDebugLog(id, {
+    endedAtMs: startedAtMs + 25,
+    error,
+    response: {
+      body: responseBody,
+      headers: responseHeaders,
+      status: 499,
+      statusText: "Client Closed Request",
+    },
+  })
+
+  const detail = getLlmDebugLog(id)
+  expect(detail?.error?.path).toBe(errorPath)
+  expect(detail?.response).toMatchObject({
+    body: responseBody,
+    bodyBytes: new TextEncoder().encode(responseBody).byteLength,
+    headers: responseHeaders,
+  })
+})
+
+test("returns defensive clones of raw entries", () => {
+  const requestBody = `{ "api_key": "request-secret" }`
+  const responseBody = `{ "access_token": "response-secret" }`
+  const id = startLlmDebugLog({
+    method: "POST",
+    path: "/responses",
+    requestBody,
+    requestHeaders: { authorization: "Bearer raw-token" },
+    url: "https://example.test/responses?token=query-secret",
+  })
+  finishLlmDebugLog(id, {
+    body: responseBody,
+    headers: { "set-cookie": "upstream=secret" },
+    status: 200,
+    statusText: "OK",
+  })
+
+  const firstRead = getLlmDebugLog(id)
+  if (!firstRead?.response) throw new Error("Expected a completed debug entry")
+  firstRead.request.body = "mutated"
+  firstRead.request.headers.authorization = "mutated"
+  firstRead.response.body = "mutated"
+  firstRead.response.headers["set-cookie"] = "mutated"
+
+  const secondRead = getLlmDebugLog(id)
+  expect(secondRead?.request.body).toBe(requestBody)
+  expect(secondRead?.request.headers.authorization).toBe("Bearer raw-token")
+  expect(secondRead?.response?.body).toBe(responseBody)
+  expect(secondRead?.response?.headers["set-cookie"]).toBe("upstream=secret")
 })
 
 test("prunes entries older than the retention window", () => {
