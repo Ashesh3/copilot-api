@@ -1,5 +1,9 @@
 # LLM Replay and Debug UX Implementation Plan
 
+> **2026-08-10 amendment:** The later Raw LLM Debug Capture design supersedes
+> this plan's automatic initial JSON formatting. Replay now loads and resets to
+> the exact captured request body; `Format JSON` remains an explicit action.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the raw LLM Replay transport dump with an editable split workspace, reconstruct useful streamed output (including tool-only responses), add request/response exports, and keep multi-megabyte Debug payloads responsive.
@@ -234,7 +238,7 @@ export function formatJsonDocument(raw: string): string | null {
 }
 
 export function prepareReplayDocument(raw: string): string {
-  return formatJsonDocument(raw) ?? raw
+  return raw
 }
 
 export function validateReplayDocument(
@@ -3194,9 +3198,9 @@ Initialize captured data exactly once per source body:
 ```tsx
 useEffect(() => {
   if (!data) return
-  const prepared = prepareReplayDocument(data.request.body ?? "")
-  setBody(prepared)
-  setOriginalBody(prepared)
+  const capturedBody = prepareReplayDocument(data.request.body ?? "")
+  setBody(capturedBody)
+  setOriginalBody(capturedBody)
   setResult(undefined)
   setReplayError(undefined)
 }, [data])

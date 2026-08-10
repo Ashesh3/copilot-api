@@ -4,7 +4,7 @@
 
 **Goal:** Make the ten-minute administrator-only LLM Debug store preserve and expose every captured request and response value without redaction or rewriting.
 
-**Architecture:** Keep the existing Copilot per-attempt capture, in-memory queue, authenticated dashboard API, UI, exports, and replay flow. Remove transformations only inside `src/lib/llm-debug-log.ts`, so all existing consumers receive exact captured strings and header values while unrelated logging, Sentry, and configuration exports retain their own sanitization.
+**Architecture:** Keep the existing Copilot per-attempt capture, in-memory queue, authenticated dashboard API, exports, and fresh-auth replay execution. Remove storage transformations inside `src/lib/llm-debug-log.ts` and remove Replay's automatic initial JSON formatting, so every consumer can access exact captured strings while unrelated logging, Sentry, and configuration exports retain their own sanitization.
 
 **Tech Stack:** TypeScript, Bun test runner, Hono dashboard API, React dashboard consumers, Markdown documentation.
 
@@ -16,6 +16,12 @@
 - Modify `tests/llm-debug-dashboard.test.ts`: prove the authenticated detail API returns raw URL, headers, request body, and response body.
 - Modify `tests/copilot-client.test.ts`: prove the real Copilot attempt capture keeps authorization and full runtime error paths.
 - Modify `src/lib/llm-debug-log.ts`: remove request/response redaction and retain exact captured error paths.
+- Modify `ui/src/lib/json-document.ts`: preserve the exact captured body during
+  Replay initialization and reset; keep formatting explicit.
+- Modify `tests/json-document.test.ts`: prove valid captured JSON retains its
+  whitespace and line endings before explicit formatting.
+- Regenerate `src/routes/dashboard/page-generated.ts` through
+  `bun run build:ui` after the Replay source change.
 - Modify `README.md`: document raw LLM Debug contents while keeping configuration-export and request-log sanitization distinct.
 - Modify `SECURITY.md`: describe LLM Debug as an intentional administrator-only raw-data boundary without weakening other controls.
 
@@ -320,10 +326,12 @@ Expected: zero failures.
 - [ ] **Step 4: Build production output**
 
 ```powershell
+bun run build:ui
 bun run build
 ```
 
-Expected: exit zero. Do not run `build:ui` because no UI source changes.
+Expected: exit zero after `bun run build:ui` regenerates the dashboard bundle
+from the Replay source change.
 
 - [ ] **Step 5: Audit scope and stale redaction claims**
 

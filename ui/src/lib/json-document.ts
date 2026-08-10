@@ -234,7 +234,7 @@ export function formatJsonDocument(raw: string): string | null {
 }
 
 export function prepareReplayDocument(raw: string): string {
-  return formatJsonDocument(raw) ?? raw
+  return raw
 }
 
 function isJsonRecord(value: JsonValue): value is Record<string, JsonValue> {

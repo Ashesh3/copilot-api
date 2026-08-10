@@ -105,7 +105,8 @@ for every token in a multi-megabyte document.
 
 Editor behavior:
 
-- Valid source JSON is formatted with two-space indentation once on load.
+- Valid source JSON loads exactly as captured. The later Raw LLM Debug Capture
+  design dated 2026-08-10 supersedes automatic initial formatting.
 - The editor is the canonical request state; there is no second structured form
   that can drift from it.
 - `Format` parses and re-formats the current document without changing key
@@ -359,8 +360,8 @@ not fully traverse a large tree merely to classify it.
 - Pretty/raw tab changes reuse the normalized parse result.
 - Only the selected response tab mounts.
 - Only the selected event payload is formatted and mounted.
-- Large source formatting happens on initial load or explicit `Format`, not on
-  every keystroke.
+- Large source formatting happens only through explicit `Format`, not on
+  initial load or every keystroke.
 - Live diagnostics debounce expensive whole-document validation while keeping
   CodeMirror editing responsive.
 - No CI test relies on a fragile millisecond threshold; deterministic tests
@@ -403,7 +404,7 @@ must be regenerated through `bun run build:ui`, never hand-edited.
 
 ### Replay
 
-1. Load the source detail and format valid request JSON into the editor.
+1. Load the exact captured request body into the editor without formatting it.
 2. Validate the current editor document client-side.
 3. Submit exact editor text to `/dashboard/api/llm-debug/:id/replay`.
 4. Keep server-side validation and safe reauthentication as the authority.
@@ -511,8 +512,8 @@ render bounds rather than machine-dependent timing assertions.
 
 ## 10. Acceptance criteria
 
-- Replay opens with readable, two-space-formatted request JSON when the source
-  is valid.
+- Replay opens with the exact captured request text; operators can explicitly
+  format valid JSON when desired.
 - Operators can edit, format, validate, reset, copy, and replay from one screen.
 - Request and result remain simultaneously visible on desktop and stack on
   narrow screens.

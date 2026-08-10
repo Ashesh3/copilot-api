@@ -116,16 +116,20 @@ remain unchanged.
 - Compute model, stream status, previews, and body byte counts from the exact
   stored strings.
 - Replace error-path sanitization with type validation only.
+- Preserve the exact captured request body when Replay initializes or resets
+  its editor. Formatting remains available only through the explicit
+  `Format JSON` action.
 - Update LLM Debug tests that currently require redaction so they instead prove
   exact preservation across the in-memory layer and authenticated dashboard
   API.
 - Update README and security-boundary statements that currently describe LLM
   Debug as redacted.
 
-No dashboard source or generated bundle change is needed: the current detail,
-preview, structured viewer, raw viewer, bulk export, and request-export paths
-consume the data returned by the LLM Debug API without applying another
-redaction layer.
+The detail, preview, structured viewer, raw viewer, bulk export, and
+request-export paths consume the data returned by the LLM Debug API without
+applying another redaction layer. Replay previously formatted valid JSON during
+editor initialization, so its source must change to preserve the exact body and
+the generated dashboard bundle must be rebuilt through `bun run build:ui`.
 
 ## Testing
 
@@ -142,8 +146,10 @@ and then pass after the change. They will prove:
 6. Body-byte counts match the exact preserved strings.
 7. Runtime error paths retain their complete string.
 8. The authenticated dashboard detail endpoint returns the same raw values.
-9. Ten-minute pruning, list previews, cloning, terminal-state handling, replay
-   reauthentication, and per-attempt capture continue to work.
+9. Replay initialization and reset retain exact valid-JSON whitespace and line
+   endings until the operator explicitly formats the document.
+10. Ten-minute pruning, list previews, cloning, terminal-state handling, replay
+    reauthentication, and per-attempt capture continue to work.
 
 Focused verification covers the LLM Debug store, dashboard API, exports, replay,
 and Copilot capture. Final verification includes typecheck, lint, the complete
