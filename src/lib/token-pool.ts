@@ -52,6 +52,7 @@ export function maskTokenForLog(token: string): string {
 // --- TokenPool ---
 
 export class TokenPool {
+  private accountReinitializations: Map<number, Promise<void>> = new Map()
   private accounts: Map<number, Account> = new Map()
   private modelIndex: Map<string, Array<Account>> = new Map()
   private roundRobinIndex = 0
@@ -162,6 +163,31 @@ export class TokenPool {
 
     const refreshMs = getTokenRefreshIntervalMs(tokenData.refresh_in)
     this.setupRefreshTimer(account, refreshMs, showToken)
+  }
+
+  /**
+   * Re-exchange credentials and refresh model eligibility as one atomic update.
+   * Concurrent callers for the same account share the same control-plane work.
+   */
+  async reinitializeAccount(
+    account: Account,
+    showToken = false,
+  ): Promise<void> {
+    const existing = this.accountReinitializations.get(account.id)
+    if (existing) {
+      await existing
+      return
+    }
+
+    const current = this.performAccountReinitialization(account, showToken)
+    this.accountReinitializations.set(account.id, current)
+    try {
+      await current
+    } finally {
+      if (this.accountReinitializations.get(account.id) === current) {
+        this.accountReinitializations.delete(account.id)
+      }
+    }
   }
 
   /**
@@ -307,6 +333,7 @@ export class TokenPool {
       clearInterval(timer)
     }
     this.refreshTimers.clear()
+    this.accountReinitializations.clear()
     consola.debug("TokenPool disposed, all refresh timers cleared")
   }
 
@@ -453,6 +480,43 @@ export class TokenPool {
     }
   }
 
+  private async performAccountReinitialization(
+    account: Account,
+    showToken: boolean,
+  ): Promise<void> {
+    const tokenData = await this.fetchCopilotToken(account)
+    const modelsResponse = await this.fetchModels(
+      account,
+      this.getBaseUrl(account),
+      tokenData.token,
+    )
+
+    // Commit only after both control-plane requests succeed.
+    // eslint-disable-next-line require-atomic-updates
+    account.copilotToken = tokenData.token
+    // eslint-disable-next-line require-atomic-updates
+    account.copilotTokenExpiry = tokenData.expires_at
+    // eslint-disable-next-line require-atomic-updates
+    account.modelsData = modelsResponse.data
+    // eslint-disable-next-line require-atomic-updates
+    account.models = new Set(modelsResponse.data.map((model) => model.id))
+    // eslint-disable-next-line require-atomic-updates
+    account.healthy = true
+
+    if (showToken) {
+      consola.info(
+        `Account #${account.id} reinitialized Copilot token: ${maskTokenForLog(tokenData.token)}`,
+      )
+    }
+
+    this.rebuildModelIndex()
+    this.setupRefreshTimer(
+      account,
+      getTokenRefreshIntervalMs(tokenData.refresh_in),
+      showToken,
+    )
+  }
+
   private async fetchCopilotToken(
     account: Account,
   ): Promise<CopilotTokenResponse> {
@@ -480,18 +544,18 @@ export class TokenPool {
   private async fetchModels(
     account: Account,
     baseUrl: string,
+    copilotToken = account.copilotToken,
   ): Promise<ModelsResponse> {
     const response = await fetch(
       `${baseUrl}/models`,
       createCopilotTransportInit({
-        headers: this.buildCopilotHeaders(account),
+        headers: this.buildCopilotHeaders(account, copilotToken),
       }),
     )
 
     if (!response.ok) {
-      const errorBody = await response.text()
       consola.error(
-        `Failed to fetch models for account #${account.id}: ${response.status} ${response.statusText}\n${errorBody}`,
+        `Failed to fetch models for account #${account.id}: ${response.status} ${response.statusText}`,
       )
       throw new HTTPError(
         `Failed to fetch models for account #${account.id}: ${response.status}`,
@@ -502,8 +566,11 @@ export class TokenPool {
     return (await response.json()) as ModelsResponse
   }
 
-  private buildCopilotHeaders(account: Account): Record<string, string> {
-    if (!account.copilotToken) {
+  private buildCopilotHeaders(
+    account: Account,
+    copilotToken = account.copilotToken,
+  ): Record<string, string> {
+    if (!copilotToken) {
       throw new Error(
         `Copilot token not set for account #${account.id}. Cannot build request headers.`,
       )
@@ -512,7 +579,7 @@ export class TokenPool {
     return {
       "content-type": "application/json",
       accept: "application/json",
-      Authorization: `Bearer ${account.copilotToken}`,
+      Authorization: `Bearer ${copilotToken}`,
       "Copilot-Integration-Id": INTEGRATION_ID,
       "editor-version": `vscode/${this.vsCodeVersion}`,
       "Openai-Intent": "conversation-agent",
@@ -535,35 +602,15 @@ export class TokenPool {
       clearInterval(existing)
     }
 
-    const timer = setInterval(async () => {
-      consola.debug(`Refreshing Copilot token for account #${account.id}`)
-      try {
-        const tokenData = await this.fetchCopilotToken(account)
-        // eslint-disable-next-line require-atomic-updates
-        account.copilotToken = tokenData.token
-        // eslint-disable-next-line require-atomic-updates
-        account.copilotTokenExpiry = tokenData.expires_at
-
-        if (showToken) {
-          consola.info(
-            `Account #${account.id} refreshed Copilot token: ${maskTokenForLog(tokenData.token)}`,
-          )
-        }
-
-        consola.debug(`Account #${account.id} Copilot token refreshed`)
-
-        // If the account was unhealthy, mark it healthy and rebuild index
-        if (!account.healthy) {
-          account.healthy = true
-          consola.info(`Account #${account.id} recovered, marking healthy`)
-          this.rebuildModelIndex()
-        }
-      } catch (error) {
-        consola.error(
-          `Failed to refresh Copilot token for account #${account.id}:`,
-          error,
-        )
-      }
+    const timer = setInterval(() => {
+      consola.debug(`Reinitializing account #${account.id}`)
+      void this.reinitializeAccount(account, showToken).catch(
+        (error: unknown) => {
+          consola.error(`Failed to reinitialize account #${account.id}`, {
+            errorClass: error instanceof Error ? error.name : "Unknown",
+          })
+        },
+      )
     }, intervalMs)
 
     this.refreshTimers.set(account.id, timer)

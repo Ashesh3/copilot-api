@@ -1,5 +1,15 @@
-import { afterEach, beforeEach, expect, test } from "bun:test"
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  expect,
+  mock,
+  test,
+} from "bun:test"
 import { createHash } from "node:crypto"
+
+import type { Model } from "../src/services/copilot/get-models"
 
 import {
   isModelEnabledForAccount,
@@ -10,12 +20,126 @@ import * as tokenPoolModule from "../src/lib/token-pool"
 
 const MODEL_A = "model-a"
 const MODEL_B = "model-b"
+const originalFetch = globalThis.fetch
+const capturedRequests: Array<{ init?: RequestInit; url: string }> = []
+const queuedResults: Array<DeferredFetchResponse | Response> = []
+const pools = new Set<tokenPoolModule.TokenPool>()
+
+interface DeferredFetchResponse {
+  requestStarted: Promise<void>
+  resolveResponse(response: Response): void
+  startRequest(): Promise<Response>
+}
+
+function createDeferredFetchResponse(): DeferredFetchResponse {
+  let resolveRequestStarted!: () => void
+  let resolveResponse!: (response: Response) => void
+  const requestStarted = new Promise<void>((resolve) => {
+    resolveRequestStarted = resolve
+  })
+  const responsePromise = new Promise<Response>((resolve) => {
+    resolveResponse = resolve
+  })
+  return {
+    requestStarted,
+    resolveResponse,
+    startRequest() {
+      resolveRequestStarted()
+      return responsePromise
+    },
+  }
+}
+
+function requestUrl(value: string | URL | Request): string {
+  if (typeof value === "string") return value
+  return value instanceof URL ? value.toString() : value.url
+}
+
+const fetchMock = mock(
+  (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const normalizedUrl = requestUrl(url)
+    capturedRequests.push({ init, url: normalizedUrl })
+    const next = queuedResults.shift()
+    if (!next) throw new Error(`Unexpected fetch: ${normalizedUrl}`)
+    return Promise.resolve(
+      next instanceof Response ? next : next.startRequest(),
+    )
+  },
+)
+
+function createModel(id: string): Model {
+  return {
+    capabilities: {
+      family: "gpt-4o",
+      limits: {},
+      object: "model_capabilities",
+      supports: {},
+      tokenizer: "cl100k_base",
+      type: "chat",
+    },
+    id,
+    model_picker_enabled: true,
+    name: id,
+    object: "model",
+    preview: false,
+    vendor: "openai",
+    version: "test",
+  }
+}
+
+function tokenResponse(token: string): Response {
+  return Response.json({
+    expires_at: 1_900_000_000,
+    refresh_in: 1800,
+    token,
+  })
+}
+
+function modelsResponse(models: Array<Model>): Response {
+  return Response.json({ data: models, object: "list" })
+}
+
+function createInitializedAccount(pool: tokenPoolModule.TokenPool) {
+  const account = pool.addAccount(
+    "github-token-reinitialize",
+    "individual",
+    801,
+  )
+  account.copilotToken = "old-copilot-token"
+  account.copilotTokenExpiry = 1_800_000_000
+  account.healthy = true
+  account.models = new Set([MODEL_A])
+  account.modelsData = [createModel(MODEL_A)]
+  pool.rebuildModelIndex()
+  return account
+}
+
+function snapshotAccount(account: tokenPoolModule.Account) {
+  return {
+    copilotToken: account.copilotToken,
+    copilotTokenExpiry: account.copilotTokenExpiry,
+    healthy: account.healthy,
+    models: [...account.models],
+    modelsData: account.modelsData,
+  }
+}
+
+function tokenRequests() {
+  return capturedRequests.filter(({ url }) =>
+    url.includes("/copilot_internal/v2/token"),
+  )
+}
+
+function modelRequests() {
+  return capturedRequests.filter(({ url }) => url.endsWith("/models"))
+}
 
 function createPool(
   accountIds: Array<number>,
   models: Array<string> = [MODEL_A],
 ): tokenPoolModule.TokenPool {
   const pool = new tokenPoolModule.TokenPool()
+  pools.add(pool)
   for (const accountId of accountIds) {
     const account = pool.addAccount(
       `github-token-${accountId}`,
@@ -52,11 +176,25 @@ function expectedRendezvousAccount(
   })
 }
 
+beforeAll(() => {
+  ;(globalThis as unknown as { fetch: typeof fetch }).fetch =
+    fetchMock as unknown as typeof fetch
+})
+
+afterAll(() => {
+  ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
+})
+
 beforeEach(() => {
+  capturedRequests.length = 0
+  queuedResults.length = 0
+  fetchMock.mockClear()
   setModelRoutingOverridesForTest({})
 })
 
 afterEach(() => {
+  for (const pool of pools) pool.dispose()
+  pools.clear()
   resetModelRoutingOverridesForTest()
 })
 
@@ -75,6 +213,61 @@ test("uses a 120-second buffer when scheduling token refresh", () => {
 
 test("keeps a 60-second minimum refresh interval", () => {
   expect(tokenPoolModule.getTokenRefreshIntervalMs(100)).toBe(60_000)
+})
+
+test("reinitializes token and models as one account update", async () => {
+  const pool = new tokenPoolModule.TokenPool()
+  pools.add(pool)
+  const account = createInitializedAccount(pool)
+  queuedResults.push(
+    tokenResponse("fresh-copilot-token"),
+    modelsResponse([createModel(MODEL_B)]),
+  )
+
+  await pool.reinitializeAccount(account)
+
+  expect(account.copilotToken).toBe("fresh-copilot-token")
+  expect(account.copilotTokenExpiry).toBe(1_900_000_000)
+  expect(account.models).toEqual(new Set([MODEL_B]))
+  expect(account.modelsData.map((model) => model.id)).toEqual([MODEL_B])
+  expect(account.healthy).toBe(true)
+})
+
+test("preserves account state when reinitialization fails", async () => {
+  const pool = new tokenPoolModule.TokenPool()
+  pools.add(pool)
+  const account = createInitializedAccount(pool)
+  const before = snapshotAccount(account)
+  queuedResults.push(
+    tokenResponse("unused-fresh-token"),
+    new Response("model outage", { status: 503 }),
+  )
+
+  const error = await pool
+    .reinitializeAccount(account)
+    .catch((caught: unknown) => caught)
+
+  expect(error).toBeInstanceOf(Error)
+  expect(snapshotAccount(account)).toEqual(before)
+})
+
+test("coalesces concurrent account reinitialization", async () => {
+  const pool = new tokenPoolModule.TokenPool()
+  pools.add(pool)
+  const account = createInitializedAccount(pool)
+  const deferredModels = createDeferredFetchResponse()
+  queuedResults.push(tokenResponse("coalesced-token"), deferredModels)
+
+  const first = pool.reinitializeAccount(account)
+  const second = pool.reinitializeAccount(account)
+  await deferredModels.requestStarted
+  deferredModels.resolveResponse(modelsResponse([createModel(MODEL_B)]))
+  await Promise.all([first, second])
+
+  expect(tokenRequests()).toHaveLength(1)
+  expect(modelRequests()).toHaveLength(1)
+  expect(account.copilotToken).toBe("coalesced-token")
+  expect(account.models).toEqual(new Set([MODEL_B]))
 })
 
 test("masks tokens before logging them", () => {
