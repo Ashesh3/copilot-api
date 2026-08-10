@@ -7,7 +7,7 @@ import consola from "consola"
 import { createHash } from "node:crypto"
 
 import { getModelSettings } from "~/lib/model-settings"
-import { getClientSessionId, getRequestId } from "~/lib/request-session"
+import { getRequestId } from "~/lib/request-session"
 
 import packageJson from "../../package.json" with { type: "json" }
 
@@ -509,7 +509,6 @@ export function setSentryConversationIdFromRequest(
   const conversationId =
     getSentryConversationIdFromPayload(payload)
     ?? getSentryConversationIdFromHeaders(c.req.raw.headers)
-    ?? getClientSessionId()
     ?? getRequestId()
 
   if (!conversationId) return undefined
