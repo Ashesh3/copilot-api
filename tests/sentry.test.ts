@@ -287,7 +287,8 @@ test("sets and returns only a pseudonymous Sentry conversation ID", async () => 
 })
 
 test("does not emit active routing affinity to Sentry", async () => {
-  const affinityKey = "routing-affinity-private-value"
+  const affinityKey = "winning-header-affinity-private-value"
+  const losingMetadataKey = "losing-metadata-affinity-private-value"
   const setConversationId = spyOn(
     Sentry,
     "setConversationId",
@@ -299,7 +300,9 @@ test("does not emit active routing affinity to Sentry", async () => {
       { key: affinityKey, source: "copilot_session" },
       () =>
         setSentryConversationIdFromRequest(c, {
-          metadata: { session_id: affinityKey },
+          metadata: {
+            user_id: JSON.stringify({ session_id: losingMetadataKey }),
+          },
         }),
     )
     return c.text("ok")

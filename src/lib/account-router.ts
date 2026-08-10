@@ -361,6 +361,7 @@ async function fetchWithRoutedAccount(
     reason,
     retryBudget,
   })
+  let reinitialized = false
 
   if (response.status === 401) {
     response = await reinitializeAndRetryAccount({
@@ -373,13 +374,14 @@ async function fetchWithRoutedAccount(
       reason: "token_refresh",
       retryBudget,
     })
+    reinitialized = true
   }
 
   if (
     context.affinityKey
     && (response.status === 401 || response.status === 403)
   ) {
-    throw createSessionAccountRejectedError(account, response.status === 401)
+    throw createSessionAccountRejectedError(account, reinitialized)
   }
   if (context.affinityKey) {
     return { response, account }

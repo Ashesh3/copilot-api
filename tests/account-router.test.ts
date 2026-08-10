@@ -335,6 +335,36 @@ test("returns a local conflict for identified 403 without failover", async () =>
   expect(tokenPool.getHealthyAccountIds()).toContain(12_021)
 })
 
+test("reports reinitialization when the same-account retry returns 403", async () => {
+  const modelId = "identified-reinitialized-403-affinity"
+  registerAccount(12_025, modelId, "reinitialized-forbidden-home")
+  registerAccount(12_026, modelId, "reinitialized-forbidden-alternate")
+  tokenPool.rebuildModelIndex()
+  const key = findKeyForAccount(modelId, 12_025)
+  queuedResults.push(
+    new Response("Unauthorized", { status: 401 }),
+    copilotTokenResponse("fresh-reinitialized-forbidden-home"),
+    modelsResponse([modelId]),
+    new Response("Forbidden", { status: 403 }),
+  )
+
+  const error = await routedFetchWithAffinity(modelId, key).catch(
+    (caught: unknown) => caught,
+  )
+
+  expect(error).toBeInstanceOf(LocalHTTPError)
+  expect((error as LocalHTTPError).clientBody).toMatchObject({
+    error: {
+      code: "session_account_rejected",
+      message:
+        "The bound account rejected this conversation after successful account reinitialization; affinity was preserved and no cross-account retry was attempted.",
+    },
+  })
+  expect(llmAuthorizationHeaders()).not.toContain(
+    "Bearer reinitialized-forbidden-alternate",
+  )
+})
+
 test("keeps identified 429 retries on the hashed account", async () => {
   const modelId = "identified-429-affinity"
   registerAccount(12_031, modelId, "limited-home")

@@ -508,12 +508,16 @@ export function setSentryConversationIdFromRequest(
   payload?: unknown,
 ): string | undefined {
   const routingAffinityKey = getRoutingAffinity()?.key
+  const payloadConversationId = getSentryConversationIdFromPayload(payload)
+  const headerConversationId = getSentryConversationIdFromHeaders(
+    c.req.raw.headers,
+  )
   const conversationId =
-    getSentryConversationIdFromPayload(payload)
-    ?? getSentryConversationIdFromHeaders(c.req.raw.headers)
-    ?? getRequestId()
+    routingAffinityKey && (payloadConversationId || headerConversationId) ?
+      undefined
+    : (payloadConversationId ?? headerConversationId ?? getRequestId())
 
-  if (!conversationId || conversationId === routingAffinityKey) return undefined
+  if (!conversationId) return undefined
 
   const pseudonymousConversationId =
     pseudonymizeSentryConversationId(conversationId)
