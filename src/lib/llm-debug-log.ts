@@ -102,7 +102,7 @@ let pruneTimerDeadlineMs: number | undefined
 const SENSITIVE_HEADER_PATTERN =
   /^(?:authorization|proxy-authorization|cookie|set-cookie|x-api-key|x-goog-api-key|x-auth-token|x-agent-task-id|x-client-session-id|x-interaction-id)$/i
 const SENSITIVE_FIELD_PATTERN =
-  /api[_-]?key|authorization|cookie|password|secret|access[_-]?token|refresh[_-]?token|client[_-]?secret|code[_-]?verifier/i
+  /api[_-]?key|authorization|cookie|password|secret|access[_-]?token|refresh[_-]?token|client[_-]?secret|code[_-]?verifier|(?:conversation|session|thread)[_-]?id|prompt[_-]?cache[_-]?key|safety[_-]?identifier|user[_-]?id/i
 
 function redactHeaders(headers: HeaderRecord): HeaderRecord {
   return Object.fromEntries(
