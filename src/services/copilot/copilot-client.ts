@@ -11,6 +11,7 @@ import {
 } from "~/lib/llm-debug-log"
 import {
   clearQuotaHeaders,
+  getClientSessionId,
   getRoutingTelemetryRequestState,
   getRequestId,
   setQuotaHeader,
@@ -22,6 +23,7 @@ import {
   type UpstreamSendReason,
 } from "~/lib/routing-telemetry"
 import { state } from "~/lib/state"
+import { deriveUpstreamSessionId } from "~/lib/upstream-session-affinity"
 import { getCopilotToken } from "~/services/github/get-copilot-token"
 
 import type { RetryBudget, RetryClaim } from "./transport-retry"
@@ -96,6 +98,9 @@ export function copilotHeaders(
   }
 
   const initiator = options?.initiator ?? "user"
+  const affinityKey = getClientSessionId()
+  const upstreamSessionId =
+    affinityKey ? deriveUpstreamSessionId(affinityKey) : state.sessionId
 
   const headers: Record<string, string> = {
     "content-type": "application/json",
@@ -108,9 +113,9 @@ export function copilotHeaders(
     "X-GitHub-Api-Version": API_VERSION,
     "X-Initiator": initiator,
     "X-Request-Id": getRequestId() ?? randomUUID(),
-    "X-Interaction-Id": state.sessionId,
-    "X-Client-Session-Id": state.sessionId,
-    "X-Agent-Task-Id": state.sessionId,
+    "X-Interaction-Id": upstreamSessionId,
+    "X-Client-Session-Id": upstreamSessionId,
+    "X-Agent-Task-Id": upstreamSessionId,
     "X-Interaction-Type":
       initiator === "user" ? "conversation-user" : "conversation-agent",
   }

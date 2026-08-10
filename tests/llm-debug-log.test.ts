@@ -85,6 +85,27 @@ test("redacts credentials from stored debug URLs and structured bodies", () => {
   expect(detail?.request.headers["x-api-key"]).toBe("[REDACTED]")
 })
 
+test("redacts upstream session headers from stored debug entries", () => {
+  const id = startLlmDebugLog({
+    method: "POST",
+    path: "/responses",
+    requestBody: JSON.stringify({ model: "gpt-test", input: "hello" }),
+    requestHeaders: {
+      "X-Agent-Task-Id": "derived-agent-task-id",
+      "X-Client-Session-Id": "derived-client-session-id",
+      "X-Interaction-Id": "derived-interaction-id",
+    },
+    url: "https://example.test/responses",
+  })
+
+  const detail = getLlmDebugLog(id)
+  expect(detail?.request.headers).toMatchObject({
+    "X-Agent-Task-Id": "[REDACTED]",
+    "X-Client-Session-Id": "[REDACTED]",
+    "X-Interaction-Id": "[REDACTED]",
+  })
+})
+
 test("prunes entries older than the retention window", () => {
   const now = Date.now()
   startLlmDebugLog({

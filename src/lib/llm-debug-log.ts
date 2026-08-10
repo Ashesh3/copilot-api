@@ -100,7 +100,7 @@ let pruneTimer: ReturnType<typeof setTimeout> | undefined
 let pruneTimerDeadlineMs: number | undefined
 
 const SENSITIVE_HEADER_PATTERN =
-  /^(?:authorization|proxy-authorization|cookie|set-cookie|x-api-key|x-goog-api-key|x-auth-token)$/i
+  /^(?:authorization|proxy-authorization|cookie|set-cookie|x-api-key|x-goog-api-key|x-auth-token|x-agent-task-id|x-client-session-id|x-interaction-id)$/i
 const SENSITIVE_FIELD_PATTERN =
   /api[_-]?key|authorization|cookie|password|secret|access[_-]?token|refresh[_-]?token|client[_-]?secret|code[_-]?verifier/i
 

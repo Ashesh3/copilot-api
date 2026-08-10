@@ -5,6 +5,7 @@ import {
   getLlmDebugLog,
   listLlmDebugLogs,
 } from "../src/lib/llm-debug-log"
+import { runWithRoutingAffinity } from "../src/lib/routing-affinity"
 import {
   getRoutingTelemetrySnapshot,
   resetRoutingTelemetryForTest,
@@ -190,6 +191,34 @@ test("includes a per-session X-Agent-Task-Id header", () => {
   const headers = copilotHeaders()
 
   expect(headers["X-Agent-Task-Id"]).toBe("session-guid")
+})
+
+test("derives restart-stable upstream headers from request affinity", () => {
+  state.sessionId = "before-restart"
+  const first = runWithRoutingAffinity(
+    { key: "conversation", source: "codex_session" },
+    () => copilotHeaders(),
+  )
+  state.sessionId = "after-restart"
+  const second = runWithRoutingAffinity(
+    { key: "conversation", source: "codex_session" },
+    () => copilotHeaders(),
+  )
+
+  expect(second["X-Client-Session-Id"]).toBe(first["X-Client-Session-Id"])
+  expect(first["X-Interaction-Id"]).toBe(first["X-Client-Session-Id"])
+  expect(first["X-Agent-Task-Id"]).toBe(first["X-Client-Session-Id"])
+  expect(first["X-Client-Session-Id"]).not.toBe(state.sessionId)
+})
+
+test("uses process identity for unidentified requests", () => {
+  state.sessionId = "process-session"
+
+  const headers = copilotHeaders()
+
+  expect(headers["X-Interaction-Id"]).toBe("process-session")
+  expect(headers["X-Client-Session-Id"]).toBe("process-session")
+  expect(headers["X-Agent-Task-Id"]).toBe("process-session")
 })
 
 test("sets a descriptive User-Agent header", () => {
