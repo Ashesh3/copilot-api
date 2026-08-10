@@ -178,13 +178,19 @@ async function fetchWithAccount(
   )
 }
 
-function createSessionAccountRejectedError(account: Account): LocalHTTPError {
+function createSessionAccountRejectedError(
+  account: Account,
+  afterReinitialization: boolean,
+): LocalHTTPError {
+  const message =
+    afterReinitialization ?
+      "The bound account rejected this conversation after successful account reinitialization; affinity was preserved and no cross-account retry was attempted."
+    : "The bound account rejected this conversation; affinity was preserved and no cross-account retry was attempted."
   const clientBody = {
     error: {
       account_id: account.id,
       code: "session_account_rejected",
-      message:
-        "The bound account rejected this conversation after successful account reinitialization; affinity was preserved and no cross-account retry was attempted.",
+      message,
       type: "session_affinity_error",
     },
   }
@@ -373,7 +379,7 @@ async function fetchWithRoutedAccount(
     context.affinityKey
     && (response.status === 401 || response.status === 403)
   ) {
-    throw createSessionAccountRejectedError(account)
+    throw createSessionAccountRejectedError(account, response.status === 401)
   }
   if (context.affinityKey) {
     return { response, account }

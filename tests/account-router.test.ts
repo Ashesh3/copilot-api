@@ -324,6 +324,13 @@ test("returns a local conflict for identified 403 without failover", async () =>
 
   expect(error).toBeInstanceOf(LocalHTTPError)
   expect((error as LocalHTTPError).response.status).toBe(409)
+  expect((error as LocalHTTPError).clientBody).toMatchObject({
+    error: {
+      code: "session_account_rejected",
+      message:
+        "The bound account rejected this conversation; affinity was preserved and no cross-account retry was attempted.",
+    },
+  })
   expect(llmAuthorizationHeaders()).toEqual(["Bearer forbidden-home"])
   expect(tokenPool.getHealthyAccountIds()).toContain(12_021)
 })
