@@ -21,7 +21,13 @@ import { state } from "../src/lib/state"
 import { tokenPool } from "../src/lib/token-pool"
 
 const originalFetch = globalThis.fetch
-const queuedResults: Array<DeferredFetchResponse | Error | Response> = []
+type FetchResultFactory = (
+  url: string,
+  init?: RequestInit,
+) => Promise<Response> | Response
+const queuedResults: Array<
+  DeferredFetchResponse | Error | FetchResultFactory | Response
+> = []
 const capturedRequests: Array<{ url: string; init?: RequestInit }> = []
 
 interface DeferredFetchResponse {
@@ -113,6 +119,9 @@ const fetchMock = mock((url: string | URL | Request, init?: RequestInit) => {
 
   if (next instanceof Error) {
     throw next
+  }
+  if (typeof next === "function") {
+    return next(requestUrl, init)
   }
 
   return next instanceof Response ? next : next.startRequest()
@@ -206,6 +215,20 @@ function queuePersistent401Reinitialization(
   )
 }
 
+function queueUrlAwarePersistent401(
+  freshToken: string,
+  modelIds: Array<string>,
+): void {
+  const responder: FetchResultFactory = (url) => {
+    if (url.includes("/copilot_internal/v2/token")) {
+      return copilotTokenResponse(freshToken)
+    }
+    if (url.endsWith("/models")) return modelsResponse(modelIds)
+    return new Response("Unauthorized", { status: 401 })
+  }
+  queuedResults.push(responder, responder, responder, responder, responder)
+}
+
 function llmAuthorizationHeaders(): Array<string | null> {
   return capturedRequests
     .filter(
@@ -276,7 +299,7 @@ test("one request rejection cannot remap another session", async () => {
   tokenPool.rebuildModelIndex()
   const rejectedKey = findKeyForAccount(modelId, 12_011)
   const unaffectedKey = findAnotherKeyForAccount(modelId, 12_011, rejectedKey)
-  queuePersistent401Reinitialization("refreshed-home", [modelId])
+  queueUrlAwarePersistent401("refreshed-home", [modelId])
 
   await routedFetchWithAffinity(modelId, rejectedKey).catch(() => undefined)
   queuedResults.length = 0
