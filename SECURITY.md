@@ -31,8 +31,10 @@ affected, include its exact version or digest.
   Mutations still require the SameSite CSRF cookie, matching header, and
   approved Origin.
 - Provider keys and sensitive custom headers are write-only through dashboard
-  APIs. Configuration export, debug storage, and request logging redact
-  recognized secret fields and headers.
+  APIs. Configuration export and ordinary request logging redact recognized
+  secret fields and headers. LLM Debug is the intentional exception: its
+  administrator-only in-memory records preserve raw request and response data
+  for ten minutes.
 - Remote Control uses short-lived, one-use, administrator/session-bound
   WebSocket tickets. Voice and Responses WebSockets authenticate before upgrade
   and retain protocol validation without local traffic or resource limits.
@@ -55,7 +57,7 @@ affected, include its exact version or digest.
 | ID | Status | Current resolution |
 | --- | --- | --- |
 | F-01 | Resolved | OAuth refresh no longer returns the gateway key. Opaque scoped access/refresh tokens, PKCE-bound one-use codes, rotation, replay-family revocation, and digested persistence replaced the simulated bearer exchange. |
-| F-02 | Resolved | Dashboard authority moved to gateway-plus-password cookie sessions. Gateway credentials alone cannot access dashboard APIs; provider secrets are write-only and debug/export paths redact recognized secrets. |
+| F-02 | Resolved with an intentional raw-diagnostics exception | Dashboard authority moved to gateway-plus-password cookie sessions. Gateway credentials alone cannot access dashboard APIs; provider secrets are write-only and configuration exports redact recognized secrets. Administrator-only LLM Debug intentionally retains raw request and response data in process memory for ten minutes. |
 | F-03 | Resolved | Remote Control requires short-lived, one-use, administrator/session-bound WebSocket tickets with Origin validation. |
 | F-04 | Resolved | Only exact metadata-free `GET /health/health` remains public. Direct Connect is disabled by default and authenticated when explicitly enabled. |
 | F-05 | Resolved | Voice WebSockets authenticate before upgrade, enforce Origin when supplied, validate protocol messages, and cancel transcription when callers disconnect. |
@@ -87,8 +89,9 @@ affected, include its exact version or digest.
   terminating quiet model streams. Streaming locations retain the buffering
   and WebSocket directives needed by their protocols.
 - Administrator step-up reauthentication was removed. One valid dashboard
-  session covers LLM Debug, sanitized export, provider changes, and IP policy;
-  CSRF, Origin, expiry, logout, and password-change revocation remain enforced.
+  session covers LLM Debug, sanitized configuration export, provider changes,
+  and IP policy; CSRF, Origin, expiry, logout, and password-change revocation
+  remain enforced.
 - The inherited unauthenticated GitHub Pages usage viewer and its workflow were
   removed from this fork. Startup output and the Windows launcher now open the
   authenticated same-origin operator dashboard.

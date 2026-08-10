@@ -247,9 +247,11 @@ Add bounded counters/log attributes for:
 - post-reinitialization session/account rejection;
 - identified-session failover suppression.
 
-Do not emit affinity keys, their hashes, derived upstream UUIDs, GitHub tokens,
-Copilot tokens, or arbitrary upstream error bodies. Existing account/model
-usage telemetry remains compatible.
+Outside the administrator-only ten-minute LLM Debug store, do not emit affinity
+keys, their hashes, derived upstream UUIDs, GitHub tokens, Copilot tokens, or
+arbitrary upstream error bodies. LLM Debug is the intentional raw-data
+exception and preserves the derived upstream headers exactly. Existing
+account/model usage telemetry remains compatible.
 
 ## File Boundaries
 
@@ -293,8 +295,8 @@ Tests must prove:
 11. HTTP and Responses WebSocket requests derive the same upstream UUID from
     every supported affinity source.
 12. Derived upstream identity is stable across restarts, differs across
-    sessions, has valid UUID version/variant bits, and never appears in logs or
-    telemetry.
+    sessions, has valid UUID version/variant bits, and never appears in ordinary
+    logs or telemetry; the administrator-only LLM Debug record captures it raw.
 13. Unidentified and control-plane requests retain the process-level header
     fallback.
 14. Existing retry-budget, model-routing override, single-token, custom

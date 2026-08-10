@@ -272,10 +272,12 @@ Keep the existing formats:
 - `Request JSON` (`llm-request-<id>.json`)
 - `Raw HTTP request` (`llm-request-<id>.http`)
 
-In Debug these use the captured, already-redacted request. In Replay they use
-the current edited body plus the captured method, URL/path, and redacted
-headers. JSON export is disabled for invalid JSON; cURL and raw HTTP can still
-preserve the exact edited text.
+In Debug these use the captured request. As of the approved Raw LLM Debug
+Capture design dated 2026-08-10, that request contains exact raw values rather
+than the redacted values assumed by this earlier design. In Replay they use the
+current edited body plus the captured method, URL/path, and raw headers. JSON
+export is disabled for invalid JSON; cURL and raw HTTP can still preserve the
+exact edited text.
 
 ### Response formats
 
