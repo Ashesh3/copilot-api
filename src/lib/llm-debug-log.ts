@@ -439,7 +439,10 @@ export function finishLlmDebugLog(
     headers: { ...response.headers },
     bodyBytes: byteLength(response.body),
   }
-  entry.status = response.bodyReadError ? "error" : "complete"
+  entry.status =
+    response.bodyReadError || response.status < 200 || response.status >= 300 ?
+      "error"
+    : "complete"
 }
 
 export function failLlmDebugLog(

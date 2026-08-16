@@ -2,15 +2,6 @@ import consola from "consola"
 import { events } from "fetch-event-stream"
 
 import { routedFetch } from "~/lib/account-router"
-import {
-  attachmentOmittedNote,
-  fetchUrlAsDataUri,
-  isDataUri,
-  isHttpUrl,
-  isLikelyBase64,
-  mediaTypeFromFilename,
-  toDataUri,
-} from "~/lib/attachments"
 import { getReasoningEffortForModel } from "~/lib/config"
 import { HTTPError } from "~/lib/error"
 import { getUnsupportedRequestParameters } from "~/lib/model-settings"
@@ -21,11 +12,14 @@ import {
   fitResponsesCompactionPayload,
   isResponsesCompactionRequest,
 } from "./compaction-payload"
+import { normalizeResponsesAttachments } from "./responses-attachments"
 import {
   hasResponsesAttachment,
   recoverResponsesPayload,
   type ResponsesPayloadRecoveryResult,
 } from "./responses-payload-recovery"
+
+export { normalizeResponsesAttachments } from "./responses-attachments"
 
 export interface ResponsesPayload {
   model: string
@@ -174,147 +168,6 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 const JSON_OBJECT_INPUT_INSTRUCTION = "Respond with JSON."
 const COPILOT_RESPONSES_MIN_OUTPUT_TOKENS = 16
-
-function isInputImage(value: unknown): value is ResponseInputImage {
-  return isRecord(value) && value.type === "input_image"
-}
-
-function isInputFile(value: unknown): value is ResponseInputFile {
-  return isRecord(value) && value.type === "input_file"
-}
-
-function isAttachmentPart(value: unknown): boolean {
-  return isInputImage(value) || isInputFile(value)
-}
-
-/**
- * Normalize attachment parts to the shapes Copilot's /responses endpoint
- * accepts (verified 2026-07-03):
- *   - input_image.image_url must be a data URI (external URLs rejected)
- *   - input_file.file_data must be a data URI (raw base64 and file_url
- *     values rejected)
- * External URLs are fetched and inlined by the proxy; failures downgrade to
- * an explanatory input_text part.
- */
-export async function normalizeResponsesAttachments(
-  payload: ResponsesPayload,
-  signal?: AbortSignal,
-): Promise<void> {
-  if (!Array.isArray(payload.input)) return
-
-  const normalizedInput: Array<ResponseInputItem> = []
-  for (const item of payload.input) {
-    if (isAttachmentPart(item)) {
-      normalizedInput.push(
-        (await normalizeResponsesContentPart(
-          item as ResponseInputContent,
-          signal,
-        )) as ResponseInputItem,
-      )
-      continue
-    }
-
-    if (isRecord(item) && Array.isArray(item.content)) {
-      const content: Array<ResponseInputContent> = []
-      for (const part of item.content as Array<ResponseInputContent>) {
-        content.push(await normalizeResponsesContentPart(part, signal))
-      }
-      normalizedInput.push({ ...item, content })
-      continue
-    }
-
-    // function_call_output items carry content in `output`
-    if (isRecord(item) && Array.isArray(item.output)) {
-      const output: Array<ResponseInputContent> = []
-      for (const part of item.output as Array<ResponseInputContent>) {
-        output.push(await normalizeResponsesContentPart(part, signal))
-      }
-      normalizedInput.push({ ...item, output })
-      continue
-    }
-
-    normalizedInput.push(item)
-  }
-  payload.input = normalizedInput
-}
-
-async function normalizeResponsesContentPart(
-  part: ResponseInputContent,
-  signal?: AbortSignal,
-): Promise<ResponseInputContent> {
-  if (isInputImage(part) && part.image_url && isHttpUrl(part.image_url)) {
-    const inlined = await fetchUrlAsDataUri(part.image_url, { signal })
-    if (inlined) {
-      return { ...part, image_url: toDataUri(inlined.mediaType, inlined.data) }
-    }
-    return {
-      type: "input_text",
-      text: attachmentOmittedNote({
-        kind: "image",
-        name: part.image_url,
-        reason: "the URL could not be fetched by the proxy",
-      }),
-    }
-  }
-
-  if (isInputFile(part)) {
-    return await normalizeInputFile(part, signal)
-  }
-
-  return part
-}
-
-async function normalizeInputFile(
-  part: ResponseInputFile,
-  signal?: AbortSignal,
-): Promise<ResponseInputContent> {
-  const { file_url: fileUrl, file_data: fileData } = part
-
-  if (fileData) {
-    if (isDataUri(fileData)) return stripFileUrl(part)
-    if (isLikelyBase64(fileData)) {
-      const mediaType =
-        mediaTypeFromFilename(part.filename) ?? "application/pdf"
-      return stripFileUrl({
-        ...part,
-        file_data: toDataUri(mediaType, fileData),
-      })
-    }
-    return stripFileUrl(part)
-  }
-
-  if (fileUrl && isHttpUrl(fileUrl)) {
-    const inlined = await fetchUrlAsDataUri(fileUrl, {
-      expectPdf: true,
-      signal,
-    })
-    if (inlined) {
-      const { file_url: _fileUrl, ...rest } = part
-      return {
-        ...rest,
-        filename:
-          part.filename ?? new URL(fileUrl).pathname.split("/").pop() ?? null,
-        file_data: toDataUri(inlined.mediaType, inlined.data),
-      }
-    }
-    return {
-      type: "input_text",
-      text: attachmentOmittedNote({
-        kind: "file",
-        name: part.filename ?? fileUrl,
-        reason: "the URL could not be fetched by the proxy",
-      }),
-    }
-  }
-
-  return part
-}
-
-function stripFileUrl(part: ResponseInputFile): ResponseInputFile {
-  if (part.file_url === undefined || part.file_url === null) return part
-  const { file_url: _fileUrl, ...rest } = part
-  return rest
-}
 
 export interface ResponsesResult {
   id: string
@@ -588,6 +441,7 @@ function sanitizeResponsesPayload(
 ): Record<string, unknown> {
   ensureJsonObjectInputMentionsJson(payload)
   normalizeFunctionToolParameters(payload)
+  normalizeEmptyToolControls(payload)
   normalizeJsonSchemaResponseFormat(payload)
   clampMaxOutputTokens(payload)
   removeUnsupportedRequestParameters(payload)
@@ -599,6 +453,14 @@ function sanitizeResponsesPayload(
     }
   }
   return result
+}
+
+function normalizeEmptyToolControls(payload: ResponsesPayload): void {
+  if (Array.isArray(payload.tools) && payload.tools.length > 0) return
+
+  delete payload.tools
+  delete payload.tool_choice
+  delete payload.parallel_tool_calls
 }
 
 const logOrdinaryRecovery = (
@@ -809,7 +671,16 @@ function normalizeSchemaValue(value: unknown, seen: Set<object>): void {
 }
 
 function removeUnsupportedRequestParameters(payload: ResponsesPayload): void {
-  for (const parameter of getUnsupportedRequestParameters(payload.model)) {
+  const unsupported = new Set(getUnsupportedRequestParameters(payload.model))
+  if (
+    payload.model.startsWith("gpt-5.6-")
+    && payload.reasoning?.effort !== "none"
+  ) {
+    unsupported.add("temperature")
+    unsupported.add("top_p")
+  }
+
+  for (const parameter of unsupported) {
     switch (parameter) {
       case "temperature": {
         delete payload.temperature
@@ -886,7 +757,7 @@ export const createResponses = async (
   )
 
   if (!response.ok) {
-    consola.error("Failed to create responses", response)
+    consola.error("Failed to create responses")
     throw new HTTPError("Failed to create responses", response, payload)
   }
 

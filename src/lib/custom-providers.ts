@@ -14,7 +14,7 @@ import type {
 import type { EmbeddingResponse } from "~/services/copilot/create-embeddings"
 
 import { getConfig, updateConfig } from "~/lib/config"
-import { HTTPError } from "~/lib/error"
+import { HTTPError, LocalHTTPError } from "~/lib/error"
 import {
   getRoutingTelemetryRequestState,
   updateRoutingTelemetryRequestState,
@@ -352,21 +352,17 @@ function getProviderApiKey(provider: CustomProviderConfig): string {
   const apiKey = provider.apiKey?.trim() ?? getProviderApiKeyFromEnv(provider)
   if (!apiKey) {
     const fallback = provider.apiKeyEnv ? ` or set ${provider.apiKeyEnv}` : ""
-    throw new HTTPError(
-      `Missing API key for custom provider ${provider.name}. Configure apiKey${fallback}.`,
-      new Response(
-        JSON.stringify({
-          error: {
-            message: `Missing API key for custom provider ${provider.name}. Configure apiKey${fallback}.`,
-            type: "configuration_error",
-            provider: provider.id,
-          },
-        }),
-        {
-          status: 500,
-          headers: { "content-type": "application/json" },
-        },
-      ),
+    const clientBody = {
+      error: {
+        message: `Missing API key for custom provider ${provider.name}. Configure apiKey${fallback}.`,
+        type: "configuration_error",
+        provider: provider.id,
+      },
+    }
+    throw new LocalHTTPError(
+      "Custom provider API key is not configured",
+      Response.json(clientBody, { status: 500 }),
+      clientBody,
     )
   }
   return apiKey
@@ -462,10 +458,8 @@ async function fetchCustomProvider(
 function createUpstreamErrorMessage(
   reference: CustomProviderModelReference,
   path: string,
-  response?: Response,
 ): string {
-  const status = response ? `: ${response.status} ${response.statusText}` : ""
-  return `Custom provider ${reference.provider.name} failed ${path} for model ${reference.upstreamModel}${status}`
+  return `Custom provider ${reference.provider.name} failed ${path} for model ${reference.upstreamModel}`
 }
 
 async function throwCustomProviderError(
@@ -474,15 +468,13 @@ async function throwCustomProviderError(
   const { response, reference, path, payload } = context
   const body = await response.clone().text()
   consola.error(
-    createUpstreamErrorMessage(reference, path, response),
-    `Status: ${response.status} ${response.statusText}`,
-    body,
+    createUpstreamErrorMessage(reference, path),
+    `Status: ${response.status}`,
   )
   throw new HTTPError(
-    createUpstreamErrorMessage(reference, path, response),
+    createUpstreamErrorMessage(reference, path),
     new Response(body, {
       status: response.status,
-      statusText: response.statusText,
       headers: response.headers,
     }),
     payload,
@@ -549,22 +541,18 @@ function validateEmbeddingResponse(
 
   for (const item of response.data) {
     if (item.embedding.length !== reference.model.dimensions) {
-      throw new HTTPError(
-        `Custom provider ${reference.provider.name} returned embedding dimension ${item.embedding.length}; expected ${reference.model.dimensions}`,
-        new Response(
-          JSON.stringify({
-            error: {
-              message: `Embedding dimension mismatch for ${reference.upstreamModel}: expected ${reference.model.dimensions}, got ${item.embedding.length}`,
-              type: "upstream_response_error",
-              provider: reference.provider.id,
-              model: reference.upstreamModel,
-            },
-          }),
-          {
-            status: 502,
-            headers: { "content-type": "application/json" },
-          },
-        ),
+      const clientBody = {
+        error: {
+          message: `Embedding dimension mismatch for ${reference.upstreamModel}: expected ${reference.model.dimensions}, got ${item.embedding.length}`,
+          type: "upstream_response_error",
+          provider: reference.provider.id,
+          model: reference.upstreamModel,
+        },
+      }
+      throw new LocalHTTPError(
+        "Custom provider returned an invalid embedding dimension",
+        Response.json(clientBody, { status: 502 }),
+        clientBody,
       )
     }
   }

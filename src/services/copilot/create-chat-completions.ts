@@ -268,7 +268,7 @@ async function handleResponse(
     }
     return result
   } catch {
-    consola.error("Invalid JSON from Copilot:", text)
+    consola.error("Invalid JSON from Copilot")
     throw new HTTPError(
       "Invalid JSON response from upstream",
       new Response(text, { status: 502 }),
@@ -291,8 +291,7 @@ const throwFailedResponse = async (
     : response
   consola.error(
     "Failed to create chat completions",
-    `Status: ${response.status} ${response.statusText}`,
-    errorBody,
+    `Status: ${response.status}`,
   )
   throw new HTTPError(
     "Failed to create chat completions",

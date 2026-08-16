@@ -240,6 +240,7 @@ const SUPPORTED_RESIZE_MEDIA_TYPES = new Set([
   "image/png",
   "image/webp",
 ])
+const COPILOT_RESPONSES_IMAGE_MEDIA_TYPES = new Set(["image/jpeg", "image/png"])
 
 const isAnimatedImage = (bytes: Buffer, mediaType: string): boolean => {
   if (mediaType === "image/png") return bytes.includes(Buffer.from("acTL"))
@@ -270,6 +271,9 @@ const encodeImage = async (options: {
   return await image.png({ compressionLevel: 9 }).buffer()
 }
 
+const outputMediaType = (mediaType: string): string =>
+  COPILOT_RESPONSES_IMAGE_MEDIA_TYPES.has(mediaType) ? mediaType : "image/jpeg"
+
 export const resizeResponsesImageWithFactory = async (
   input: ResponsesImageResizeInput,
   imageFactory: ResponsesImageFactory,
@@ -288,14 +292,15 @@ export const resizeResponsesImageWithFactory = async (
     const metadata = await source.metadata()
     input.signal?.throwIfAborted()
 
+    const encodedMediaType = outputMediaType(input.mediaType)
     let encoded = await encodeImage({
       bytes,
       imageFactory,
-      mediaType: input.mediaType,
+      mediaType: encodedMediaType,
     })
     for (let attempt = 0; attempt < 8; attempt += 1) {
       input.signal?.throwIfAborted()
-      const candidate = toDataUri(input.mediaType, encoded.toString("base64"))
+      const candidate = toDataUri(encodedMediaType, encoded.toString("base64"))
       const candidateBytes = Buffer.byteLength(candidate, "utf8")
       if (candidateBytes <= input.targetDataUriBytes) {
         return { dataUri: candidate, outcome: "resized" }
@@ -309,12 +314,12 @@ export const resizeResponsesImageWithFactory = async (
         bytes,
         dimensions: { height, width },
         imageFactory,
-        mediaType: input.mediaType,
+        mediaType: encodedMediaType,
       })
     }
     input.signal?.throwIfAborted()
     const finalCandidate = toDataUri(
-      input.mediaType,
+      encodedMediaType,
       encoded.toString("base64"),
     )
     if (Buffer.byteLength(finalCandidate, "utf8") <= input.targetDataUriBytes) {

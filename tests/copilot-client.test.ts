@@ -1,4 +1,13 @@
-import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  expect,
+  mock,
+  spyOn,
+  test,
+} from "bun:test"
+import consola from "consola"
 
 import {
   clearLlmDebugLogs,
@@ -33,6 +42,34 @@ const transportEvents: Array<{
   outcome: string
 }> = []
 const httpRetrySleeps: Array<number> = []
+
+test("does not log deterministic HTTP 400 response bodies", async () => {
+  const privateMarker = "deterministic-private-marker"
+  queuedResults.push(
+    Response.json(
+      {
+        error: {
+          code: "invalid_request_body",
+          message: privateMarker,
+        },
+      },
+      { status: 400 },
+    ),
+  )
+  const warnSpy = spyOn(consola, "warn")
+
+  try {
+    const response = await copilotFetch("/responses", {
+      method: "POST",
+      body: "{}",
+    })
+
+    expect(response.status).toBe(400)
+    expect(JSON.stringify(warnSpy.mock.calls)).not.toContain(privateMarker)
+  } finally {
+    warnSpy.mockRestore()
+  }
+})
 
 type BunTimeoutRequestInit = RequestInit & {
   timeout?: boolean | number

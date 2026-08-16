@@ -417,6 +417,76 @@ test.skipIf(typeof Bun.Image !== "function")(
   },
 )
 
+test("transcodes WebP images to JPEG for Copilot Responses", async () => {
+  let jpegQuality: number | undefined
+
+  class FakeImage {
+    jpeg(options?: { quality?: number }): this {
+      jpegQuality = options?.quality
+      return this
+    }
+
+    metadata(): Promise<{ format: "webp"; height: number; width: number }> {
+      return Promise.resolve({ format: "webp", height: 64, width: 64 })
+    }
+
+    png(): this {
+      throw new Error("WebP normalization must encode JPEG")
+    }
+
+    resize(): this {
+      throw new Error("WebP normalization must preserve dimensions")
+    }
+
+    buffer(): Promise<Buffer> {
+      return Promise.resolve(Buffer.from("jpeg-output"))
+    }
+
+    webp(): this {
+      throw new Error("WebP normalization must not re-encode WebP")
+    }
+  }
+
+  const imageFactory: ResponsesImageFactory = () => new FakeImage()
+  const normalized = await resizeResponsesImageWithFactory(
+    {
+      dataUri: `data:image/webp;base64,${Buffer.from("webp-input").toString("base64")}`,
+      mediaType: "image/webp",
+      targetDataUriBytes: Number.MAX_SAFE_INTEGER,
+    },
+    imageFactory,
+  )
+
+  expect(normalized).toEqual({
+    dataUri: `data:image/jpeg;base64,${Buffer.from("jpeg-output").toString("base64")}`,
+    outcome: "resized",
+  })
+  expect(jpegQuality).toBe(80)
+})
+
+test.skipIf(typeof Bun.Image !== "function")(
+  "transcodes a real WebP fixture to a JPEG data URI",
+  async () => {
+    const webpBase64 =
+      "UklGRjwAAABXRUJQVlA4IDAAAADQAQCdASoBAAEAAUAmJaACdLoB+AADsAD+8ut//NgVzXPv9//S4P0uD9Lg/9KQAAA="
+    const normalized = await resizeResponsesImage({
+      dataUri: `data:image/webp;base64,${webpBase64}`,
+      mediaType: "image/webp",
+      targetDataUriBytes: Number.MAX_SAFE_INTEGER,
+    })
+
+    expect(normalized.outcome).toBe("resized")
+    if (normalized.outcome !== "resized") {
+      throw new Error("Expected a transcoded WebP image")
+    }
+    const parsed = parseDataUri(normalized.dataUri)
+    expect(parsed?.mediaType).toBe("image/jpeg")
+    expect(Buffer.from(parsed?.data ?? "", "base64").subarray(0, 2)).toEqual(
+      Buffer.from([0xff, 0xd8]),
+    )
+  },
+)
+
 test("checks the eighth resized image candidate before giving up", async () => {
   let encodeCount = 0
 

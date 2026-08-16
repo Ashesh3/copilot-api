@@ -94,9 +94,7 @@ export async function fetchUrlAsDataUri(
       signal: options?.signal,
     })
     if (!response.ok) {
-      consola.warn(
-        `Attachment fetch failed: ${response.status} ${response.statusText} for ${url}`,
-      )
+      consola.warn(`Attachment fetch failed with HTTP ${response.status}`)
       return null
     }
 
@@ -119,7 +117,7 @@ export async function fetchUrlAsDataUri(
     }
   } catch (error) {
     if (options?.signal?.aborted) throw error
-    consola.warn(`Attachment fetch error for ${url}:`, error)
+    consola.warn("Attachment fetch failed with a transport error")
     return null
   }
 }

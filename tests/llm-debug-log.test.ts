@@ -77,6 +77,28 @@ test("stores exact request and completed response details", () => {
   })
 })
 
+test("classifies non-success upstream responses as errors", () => {
+  const id = startLlmDebugLog({
+    method: "POST",
+    path: "/responses",
+    requestBody: JSON.stringify({ model: "gpt-test" }),
+    requestHeaders: {},
+    url: "https://example.test/responses",
+  })
+
+  finishLlmDebugLog(id, {
+    body: JSON.stringify({
+      error: { code: "invalid_request_body", message: "Invalid request" },
+    }),
+    headers: { "content-type": "application/json" },
+    status: 400,
+    statusText: "Bad Request",
+  })
+
+  expect(getLlmDebugLog(id)?.status).toBe("error")
+  expect(listLlmDebugLogs().entries[0]?.status).toBe("error")
+})
+
 test("stores exact session headers and nested structured request body", () => {
   const rawIds = [
     "root-session-private",
