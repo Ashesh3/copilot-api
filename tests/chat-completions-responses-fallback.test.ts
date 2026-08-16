@@ -327,6 +327,66 @@ test("routes legacy chat completions requests for responses-only models through 
   })
 })
 
+test("omits tool controls when a chat fallback request has no tools", async () => {
+  const response = await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "Reply without tools." }],
+      tools: null,
+      tool_choice: "auto",
+      parallel_tool_calls: true,
+      stream: false,
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/responses")
+  expect(lastUpstreamPayload).not.toHaveProperty("tools")
+  expect(lastUpstreamPayload).not.toHaveProperty("tool_choice")
+  expect(lastUpstreamPayload).not.toHaveProperty("parallel_tool_calls")
+})
+
+test("preserves tool controls when a chat fallback request has tools", async () => {
+  const response = await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "Call the weather tool." }],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "get_weather",
+            description: "Read the weather",
+            parameters: { type: "object", properties: {} },
+          },
+        },
+      ],
+      tool_choice: "auto",
+      parallel_tool_calls: false,
+      stream: false,
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  const tools = lastUpstreamPayload?.tools as
+    | Array<Record<string, unknown>>
+    | undefined
+  expect(tools).toHaveLength(1)
+  expect(tools?.[0]).toMatchObject({
+    type: "function",
+    name: "get_weather",
+    description: "Read the weather",
+    parameters: { type: "object", properties: {} },
+    strict: false,
+  })
+  expect(lastUpstreamPayload?.tool_choice).toBe("auto")
+  expect(lastUpstreamPayload?.parallel_tool_calls).toBe(false)
+})
+
 test("omits unsupported sampling parameters for responses-only fallback models", async () => {
   const response = await server.request("/v1/chat/completions", {
     method: "POST",

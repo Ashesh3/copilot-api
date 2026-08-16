@@ -1,4 +1,13 @@
-import { test, expect, mock, beforeAll, afterAll, beforeEach } from "bun:test"
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  expect,
+  mock,
+  spyOn,
+  test,
+} from "bun:test"
+import consola from "consola"
 
 import type { ChatCompletionsPayload } from "../src/services/copilot/create-chat-completions"
 
@@ -494,5 +503,59 @@ test("rewrites upstream chat completions 404 responses to 502", async () => {
     throw new Error("Expected createChatCompletions to reject")
   } catch (error) {
     expect(error).toHaveProperty("response.status", 502)
+  }
+})
+
+test("does not log malformed upstream ChatCompletions bodies", async () => {
+  const privateMarker = "chat-invalid-json-private-marker"
+  queuedResponses.push(
+    new Response(privateMarker, {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }),
+  )
+  const errorSpy = spyOn(consola, "error")
+
+  try {
+    let thrown: unknown
+    try {
+      await createChatCompletions({
+        model: "gpt-test",
+        messages: [{ role: "user", content: "hello" }],
+      })
+    } catch (error) {
+      thrown = error
+    }
+    expect(thrown).toHaveProperty("response.status", 502)
+    expect(JSON.stringify(errorSpy.mock.calls)).not.toContain(privateMarker)
+  } finally {
+    errorSpy.mockRestore()
+  }
+})
+
+test("does not log upstream ChatCompletions status text", async () => {
+  const privateMarker = "chat-private-status-marker"
+  queuedResponses.push(
+    Response.json(
+      { error: { code: "invalid_request_body", message: "invalid" } },
+      { status: 400, statusText: privateMarker },
+    ),
+  )
+  const errorSpy = spyOn(consola, "error")
+
+  try {
+    let thrown: unknown
+    try {
+      await createChatCompletions({
+        model: "gpt-test",
+        messages: [{ role: "user", content: "hello" }],
+      })
+    } catch (error) {
+      thrown = error
+    }
+    expect(thrown).toHaveProperty("response.status", 400)
+    expect(JSON.stringify(errorSpy.mock.calls)).not.toContain(privateMarker)
+  } finally {
+    errorSpy.mockRestore()
   }
 })

@@ -1,4 +1,13 @@
-import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  expect,
+  mock,
+  spyOn,
+  test,
+} from "bun:test"
+import consola from "consola"
 
 import type { ModelsResponse } from "../src/services/copilot/get-models"
 
@@ -352,6 +361,35 @@ test("records custom-provider transport failures without swallowing them", async
     provider: "Custom Chat",
     upstreamCalls: 1,
   })
+})
+
+test("does not log custom-provider upstream status text or body", async () => {
+  const statusMarker = "custom-private-status"
+  const bodyMarker = "custom-private-body"
+  fetchMock.mockImplementationOnce(() =>
+    Response.json(
+      { error: { code: "invalid_request_body", message: bodyMarker } },
+      { status: 400, statusText: statusMarker },
+    ),
+  )
+  const errorSpy = spyOn(consola, "error")
+
+  try {
+    const response = await server.request("/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "custom-chat-model",
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    })
+    expect(response.status).toBe(400)
+    const output = JSON.stringify(errorSpy.mock.calls)
+    expect(output).not.toContain(statusMarker)
+    expect(output).not.toContain(bodyMarker)
+  } finally {
+    errorSpy.mockRestore()
+  }
 })
 
 test("missing custom provider API key returns a clear error", async () => {

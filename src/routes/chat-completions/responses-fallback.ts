@@ -85,6 +85,7 @@ export function chatCompletionsToResponses(
   const input = convertMessagesToResponsesInput(payload.messages)
   const instructions = createResponsesInstructions(payload)
   const tools = convertToolsToResponses(payload.tools)
+  const hasTools = Array.isArray(tools) && tools.length > 0
 
   return {
     model: payload.model,
@@ -93,11 +94,15 @@ export function chatCompletionsToResponses(
     temperature: payload.temperature,
     top_p: payload.top_p,
     max_output_tokens: payload.max_tokens,
-    tools,
-    tool_choice: convertToolChoiceToResponses(payload.tool_choice, tools),
+    ...(hasTools ?
+      {
+        tools,
+        tool_choice: convertToolChoiceToResponses(payload.tool_choice, tools),
+        parallel_tool_calls: payload.parallel_tool_calls ?? true,
+      }
+    : {}),
     stream: payload.stream,
     store: false,
-    parallel_tool_calls: payload.parallel_tool_calls ?? true,
     reasoning: {
       ...(reasoningEffort ? { effort: reasoningEffort } : {}),
       summary: "auto",

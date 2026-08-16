@@ -209,7 +209,7 @@ async function isDeterministic400Response(
 ): Promise<boolean> {
   const body = await response.clone().text()
   if (!isDeterministic400(body)) return false
-  consola.warn(`Deterministic HTTP 400, skipping retry: ${body}`)
+  consola.warn("Deterministic HTTP 400, skipping retry")
   return true
 }
 

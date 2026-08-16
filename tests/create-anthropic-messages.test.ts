@@ -1,4 +1,13 @@
-import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  expect,
+  mock,
+  spyOn,
+  test,
+} from "bun:test"
+import consola from "consola"
 
 import type { AnthropicMessagesPayload } from "../src/routes/messages/anthropic-types"
 
@@ -165,6 +174,37 @@ test("serializes native cache controls using Copilot's supported wire shape", as
       },
     ],
   })
+})
+
+test("does not log native Messages upstream status text or body", async () => {
+  const statusMarker = "anthropic-private-status"
+  const bodyMarker = "anthropic-private-body"
+  fetchMock.mockImplementationOnce(() =>
+    Response.json(
+      { error: { code: "invalid_request_body", message: bodyMarker } },
+      { status: 400, statusText: statusMarker },
+    ),
+  )
+  const errorSpy = spyOn(consola, "error")
+
+  try {
+    let thrown: unknown
+    try {
+      await createAnthropicMessages({
+        model: "claude-opus-4.8",
+        max_tokens: 16,
+        messages: [{ role: "user", content: "hello" }],
+      })
+    } catch (error) {
+      thrown = error
+    }
+    expect(thrown).toHaveProperty("response.status", 400)
+    const output = JSON.stringify(errorSpy.mock.calls)
+    expect(output).not.toContain(statusMarker)
+    expect(output).not.toContain(bodyMarker)
+  } finally {
+    errorSpy.mockRestore()
+  }
 })
 
 test("fits explicitly marked native Messages compaction payloads", async () => {

@@ -38,35 +38,42 @@ export class LocalHTTPError extends HTTPError {
   }
 }
 
-interface ContentFilterError {
+interface UpstreamErrorBody {
   error: {
-    code: string
-    innererror?: {
-      code: string
-      content_filter_result?: unknown
-    }
+    code?: unknown
+    message?: unknown
   }
 }
 
-function isContentFilterError(obj: unknown): obj is ContentFilterError {
-  return (
-    typeof obj === "object"
-    && obj !== null
-    && "error" in obj
-    && typeof (obj as ContentFilterError).error === "object"
-    && (obj as ContentFilterError).error.code === "content_filter"
-  )
+interface SafeUpstreamClientError {
+  code: string
+  fingerprint: string
+  message: string
 }
 
-const SENSITIVE_HEADER_PATTERNS = [
-  "authorization",
-  "api-key",
-  "cookie",
-  "x-api-key",
-  "set-cookie",
-]
 const SENSITIVE_FIELD_PATTERN =
   /password|secret|api[_-]?key|authorization|cookie|access[_-]?token|refresh[_-]?token|client[_-]?secret|code[_-]?verifier|(?:conversation|session|thread)[_-]?id|prompt[_-]?cache[_-]?key|safety[_-]?identifier|user[_-]?id/i
+const SENSITIVE_ERROR_MESSAGE_PATTERN =
+  /authorization|bearer\s|api[_ -]?key|password|secret|token|cookie/i
+const SAFE_HTTP_ERROR_MESSAGES = new Set([
+  "Empty response body from upstream",
+  "Failed to create chat completions",
+  "Failed to create embeddings",
+  "Failed to create responses",
+  "Failed to get Copilot usage",
+  "Failed to get Copilot token",
+  "Failed to get device code",
+  "Failed to get GitHub user",
+  "Failed to get models",
+  "Invalid JSON response from upstream",
+  "Request rejected",
+])
+
+function safeHttpErrorMessage(error: HTTPError): string {
+  return SAFE_HTTP_ERROR_MESSAGES.has(error.message) ?
+      error.message
+    : "Upstream request failed"
+}
 
 function redactSensitiveValue(value: unknown, key = ""): unknown {
   if (SENSITIVE_FIELD_PATTERN.test(key)) return "[REDACTED]"
@@ -94,15 +101,183 @@ function redactSensitiveValue(value: unknown, key = ""): unknown {
   return value
 }
 
-function extractResponseHeaders(response: Response): Record<string, string> {
-  const headers: Record<string, string> = {}
-  for (const [key, value] of response.headers.entries()) {
-    const lower = key.toLowerCase()
-    if (!SENSITIVE_HEADER_PATTERNS.some((p) => lower.includes(p))) {
-      headers[key] = value
+function isUpstreamErrorBody(value: unknown): value is UpstreamErrorBody {
+  return (
+    typeof value === "object"
+    && value !== null
+    && "error" in value
+    && typeof value.error === "object"
+    && value.error !== null
+  )
+}
+
+function unwrapUpstreamErrorMessage(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined
+  try {
+    const parsed = JSON.parse(value) as unknown
+    if (typeof parsed !== "object" || parsed === null) return value
+    const record = parsed as Record<string, unknown>
+    if (typeof record.error === "string") return record.error
+    if (typeof record.message === "string") return record.message
+  } catch {
+    return value
+  }
+  return value
+}
+
+function classifyValidationMessage(
+  message: string,
+): Pick<SafeUpstreamClientError, "fingerprint" | "message"> | undefined {
+  const toolChoiceMessage =
+    "Invalid request content: A tool_choice was set on the request but no tools were specified."
+  if (message === toolChoiceMessage) {
+    return { fingerprint: "tool_choice_without_tools", message }
+  }
+  const sampling =
+    /^Unsupported parameter: '(temperature|top_p)' is not supported with this model\.$/.exec(
+      message,
+    )
+  if (sampling) {
+    return {
+      fingerprint: `unsupported_${sampling[1]}`,
+      message: `Unsupported parameter: '${sampling[1]}' is not supported with this model.`,
     }
   }
-  return headers
+  const imageMessage =
+    "validating vision content in responses input: validating responses image content: image media type not supported"
+  if (message === imageMessage) {
+    return { fingerprint: "unsupported_image_media_type", message }
+  }
+  return undefined
+}
+
+function safeUpstreamClientError(
+  status: number,
+  body: unknown,
+): SafeUpstreamClientError | undefined {
+  if (status !== 400 || !isUpstreamErrorBody(body)) {
+    return undefined
+  }
+  const code = body.error.code
+  const message = unwrapUpstreamErrorMessage(body.error.message)
+  const validation = message ? classifyValidationMessage(message) : undefined
+  if (
+    code !== "invalid_request_body"
+    || !message
+    || !validation
+    || SENSITIVE_ERROR_MESSAGE_PATTERN.test(message)
+  ) {
+    return undefined
+  }
+  return {
+    code,
+    ...validation,
+  }
+}
+
+async function readResponseBody(response: Response): Promise<unknown> {
+  let body: string
+  try {
+    body = await response.text()
+  } catch {
+    return "(unable to read response body)"
+  }
+
+  try {
+    return JSON.parse(body) as unknown
+  } catch {
+    return body
+  }
+}
+
+function logHttpError(options: {
+  error: HTTPError
+  clientError?: SafeUpstreamClientError
+}): void {
+  const { clientError, error } = options
+  const message = safeHttpErrorMessage(error)
+  consola.error(`[${error.response.status}] ${message}`)
+  if (clientError) consola.error("Validation class:", clientError.fingerprint)
+}
+
+function captureHttpError(options: {
+  c: Context
+  clientError?: SafeUpstreamClientError
+  error: HTTPError
+}): void {
+  const { c, clientError, error } = options
+  Sentry.captureException(new Error(safeHttpErrorMessage(error)), {
+    ...(clientError ?
+      {
+        fingerprint: [
+          "http-error",
+          c.req.path,
+          String(error.response.status),
+          clientError.code,
+          clientError.fingerprint,
+        ],
+      }
+    : {}),
+    tags: {
+      path: c.req.path,
+      method: c.req.method,
+      status: String(error.response.status),
+    },
+    extra: {
+      status: error.response.status,
+      validationClass: clientError?.fingerprint,
+    },
+  })
+}
+
+function httpErrorResponse(
+  c: Context,
+  error: HTTPError,
+  clientError?: SafeUpstreamClientError,
+) {
+  if (error instanceof LocalHTTPError) {
+    return c.json(
+      error.clientBody,
+      error.response.status as ContentfulStatusCode,
+    )
+  }
+  if (clientError) {
+    return c.json(
+      {
+        error: {
+          code: clientError.code,
+          message: clientError.message,
+          type: "invalid_request_error",
+        },
+      },
+      error.response.status as ContentfulStatusCode,
+    )
+  }
+
+  let message = safeHttpErrorMessage(error)
+  if (error.response.status === 402) message = "Copilot quota exhausted"
+  if (error.response.status === 466) {
+    message = "Copilot client version mismatch"
+  }
+  return c.json(
+    { error: { message, type: "error" } },
+    error.response.status as ContentfulStatusCode,
+  )
+}
+
+async function forwardHttpError(c: Context, error: HTTPError) {
+  if (error.response.status === 499) {
+    consola.debug("Client disconnected (upstream 499)")
+    return c.body(null, 499 as ContentfulStatusCode)
+  }
+
+  const parsedBody = redactSensitiveValue(
+    await readResponseBody(error.response),
+  )
+  const clientError = safeUpstreamClientError(error.response.status, parsedBody)
+  logHttpError({ error, clientError })
+  captureHttpError({ c, clientError, error })
+  return httpErrorResponse(c, error, clientError)
 }
 
 export async function forwardError(c: Context, error: unknown) {
@@ -113,91 +288,7 @@ export async function forwardError(c: Context, error: unknown) {
     return c.body(null, 499 as ContentfulStatusCode)
   }
 
-  if (error instanceof HTTPError) {
-    if (error.response.status === 499) {
-      consola.debug("Client disconnected (upstream 499)")
-      return c.body(null, 499 as ContentfulStatusCode)
-    }
-
-    let responseBody: string
-    try {
-      responseBody = await error.response.text()
-    } catch {
-      responseBody = "(unable to read response body)"
-    }
-
-    let parsedBody: unknown
-    try {
-      parsedBody = JSON.parse(responseBody)
-    } catch {
-      parsedBody = responseBody
-    }
-
-    const responseHeaders = extractResponseHeaders(error.response)
-
-    consola.error(
-      `[${error.response.status} ${error.response.statusText}] ${error.message}`,
-    )
-    parsedBody = redactSensitiveValue(parsedBody)
-    const requestPayload = redactSensitiveValue(error.requestPayload)
-    consola.error("Response body:", parsedBody)
-    consola.error("Response headers:", responseHeaders)
-    if (requestPayload) {
-      consola.error("Request payload:", requestPayload)
-    }
-
-    // Check for content filter error and log full details
-    if (isContentFilterError(parsedBody)) {
-      consola.box("CONTENT FILTER TRIGGERED")
-      consola.error("Full error response:")
-      console.log(JSON.stringify(parsedBody, null, 2))
-
-      if (requestPayload) {
-        consola.error("Request payload that triggered the filter:")
-        console.log(JSON.stringify(requestPayload, null, 2))
-      }
-    }
-
-    Sentry.captureException(error, {
-      tags: {
-        path: c.req.path,
-        method: c.req.method,
-        status: String(error.response.status),
-      },
-      extra: {
-        status: error.response.status,
-        statusText: error.response.statusText,
-        responseUrl: error.response.url || undefined,
-        responseBody: parsedBody,
-        responseHeaders,
-        requestPayload,
-      },
-    })
-
-    let clientMessage = error.message
-    if (error.response.status === 402) {
-      clientMessage = "Copilot quota exhausted"
-    } else if (error.response.status === 466) {
-      clientMessage = "Copilot client version mismatch"
-    }
-
-    if (error instanceof LocalHTTPError) {
-      return c.json(
-        error.clientBody,
-        error.response.status as ContentfulStatusCode,
-      )
-    }
-
-    return c.json(
-      {
-        error: {
-          message: clientMessage,
-          type: "error",
-        },
-      },
-      error.response.status as ContentfulStatusCode,
-    )
-  }
+  if (error instanceof HTTPError) return await forwardHttpError(c, error)
 
   consola.error("Error occurred:", error)
 
