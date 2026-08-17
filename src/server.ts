@@ -2,6 +2,12 @@ import { Hono } from "hono"
 import { randomUUID } from "node:crypto"
 
 import {
+  type CopilotRequestAttribution,
+  resolveCopilotRequestAttribution,
+  runWithCopilotRequestAttribution,
+} from "~/lib/copilot-request-context"
+import {
+  type RoutingAffinity,
   resolveRoutingAffinityFromHeaders,
   runWithRoutingAffinity,
 } from "~/lib/routing-affinity"
@@ -84,6 +90,18 @@ function applySecurityHeaders(c: {
   c.header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 }
 
+function runWithRequestRoutingScopes<T>(
+  attribution: CopilotRequestAttribution,
+  affinity: RoutingAffinity | undefined,
+  callback: () => T,
+): T {
+  return runWithCopilotRequestAttribution(attribution, () =>
+    runWithRoutingAffinity(affinity, () =>
+      quotaHeadersStorage.run({}, () => routedAccountStorage.run({}, callback)),
+    ),
+  )
+}
+
 // Global middleware — applied to ALL routes including pre-auth ones
 server.use("*", statsigProxyMiddleware)
 server.use("*", async (c, next) => {
@@ -102,19 +120,16 @@ server.use("*", async (c, next) => {
 // Capture the highest-priority safe conversation identity for account affinity.
 server.use("*", async (c, next) => {
   const affinity = resolveRoutingAffinityFromHeaders(c.req.raw.headers)
+  const attribution = resolveCopilotRequestAttribution(c.req.raw.headers)
   const requestId = c.req.header("x-request-id") ?? randomUUID()
 
   await requestIdStorage.run(requestId, async () => {
-    await runWithRoutingAffinity(affinity, async () => {
-      await quotaHeadersStorage.run({}, async () => {
-        await routedAccountStorage.run({}, async () => {
-          await next()
+    await runWithRequestRoutingScopes(attribution, affinity, async () => {
+      await next()
 
-          for (const [key, value] of Object.entries(getQuotaHeaders())) {
-            c.header(key, value)
-          }
-        })
-      })
+      for (const [key, value] of Object.entries(getQuotaHeaders())) {
+        c.header(key, value)
+      }
     })
   })
 

@@ -9,6 +9,8 @@ import {
 } from "bun:test"
 import consola from "consola"
 
+/* eslint-disable max-lines -- Copilot client integration cases share singleton fetch fixtures */
+import { runWithCopilotRequestAttribution } from "../src/lib/copilot-request-context"
 import {
   clearLlmDebugLogs,
   getLlmDebugLog,
@@ -247,6 +249,69 @@ test("includes a per-session X-Agent-Task-Id header", () => {
   const headers = copilotHeaders()
 
   expect(headers["X-Agent-Task-Id"]).toBe("session-guid")
+})
+
+test("keeps conversation identity stable while preserving task attribution", () => {
+  state.copilotToken = "token"
+  const headers = runWithRoutingAffinity(
+    { key: "conversation", source: "codex_session" },
+    () =>
+      runWithCopilotRequestAttribution(
+        { agentTaskId: "task-123", parentAgentId: "parent-456" },
+        () => copilotHeaders(),
+      ),
+  )
+  expect(headers["X-Agent-Task-Id"]).toBe("task-123")
+  expect(headers["X-Parent-Agent-Id"]).toBe("parent-456")
+  expect(headers["X-Interaction-Id"]).toBe(headers["X-Client-Session-Id"])
+})
+
+test("maps only typed attribution and header options", () => {
+  const headers = copilotHeaders({
+    anthropicBeta: " beta-feature ",
+    anthropicVersion: " 2023-06-01 ",
+    attribution: {
+      clientExperimentAssignment: "client_flight:1;",
+      clientMachineId: "machine-abc",
+      harnessId: "copilot",
+      interactionType: "conversation-agent",
+      openaiIntent: "conversation-agent",
+      repositoryHost: "github.example",
+      repositoryNwo: "owner/repo",
+      subsystemId: "cli",
+    },
+    copilotSessionToken: " session-token ",
+    modelProviderPreference: " azure ",
+  })
+
+  expect(headers).toMatchObject({
+    "Anthropic-Beta": "beta-feature",
+    "anthropic-version": "2023-06-01",
+    "Copilot-Harness-Id": "copilot",
+    "Copilot-Session-Token": "session-token",
+    "Copilot-Subsystem-Id": "cli",
+    "Openai-Intent": "conversation-agent",
+    "X-Client-Machine-Id": "machine-abc",
+    "X-Copilot-Client-Exp-Assignment-Context": "client_flight:1;",
+    "X-GitHub-Repository-Host": "github.example",
+    "X-GitHub-Repository-Nwo": "owner/repo",
+    "X-Interaction-Type": "conversation-agent",
+    "X-Model-Provider-Preference": "azure",
+  })
+})
+
+test("drops invalid typed Copilot header options", () => {
+  const headers = copilotHeaders({
+    anthropicBeta: "bad\nbeta",
+    anthropicVersion: "x".repeat(1025),
+    copilotSessionToken: " ",
+    modelProviderPreference: "bad\rprovider",
+  })
+
+  expect(headers["Anthropic-Beta"]).toBeUndefined()
+  expect(headers["anthropic-version"]).toBeUndefined()
+  expect(headers["Copilot-Session-Token"]).toBeUndefined()
+  expect(headers["X-Model-Provider-Preference"]).toBeUndefined()
 })
 
 test("derives restart-stable upstream headers from request affinity", () => {

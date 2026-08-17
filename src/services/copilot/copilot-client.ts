@@ -3,6 +3,11 @@ import consola from "consola"
 import { randomUUID } from "node:crypto"
 
 import {
+  type CopilotRequestAttribution,
+  getCopilotRequestAttribution,
+  mergeCopilotRequestAttribution,
+} from "~/lib/copilot-request-context"
+import {
   abortLlmDebugLog,
   failLlmDebugLog,
   finishLlmDebugLog,
@@ -24,7 +29,10 @@ import {
 } from "~/lib/routing-telemetry"
 import { state } from "~/lib/state"
 import { deriveUpstreamSessionId } from "~/lib/upstream-session-affinity"
-import { COPILOT_API_VERSION } from "~/services/copilot/copilot-contract"
+import {
+  COPILOT_API_VERSION,
+  sanitizeCopilotHeaderValue,
+} from "~/services/copilot/copilot-contract"
 import { getCopilotToken } from "~/services/github/get-copilot-token"
 
 import type { RetryBudget, RetryClaim } from "./transport-retry"
@@ -79,11 +87,66 @@ export function copilotBaseUrl(): string {
 // --- Headers ---
 
 export interface CopilotHeaderOptions {
-  vision?: boolean
-  initiator?: "agent" | "user"
-  copilotToken?: string
+  anthropicBeta?: string
   /** Set the anthropic-version header (native /v1/messages requests). */
   anthropicVersion?: string
+  attribution?: CopilotRequestAttribution
+  copilotSessionToken?: string
+  copilotToken?: string
+  initiator?: "agent" | "user"
+  modelProviderPreference?: string
+  vision?: boolean
+}
+
+const attributionHeaderNames: Partial<
+  Record<keyof CopilotRequestAttribution, string>
+> = {
+  clientExperimentAssignment: "X-Copilot-Client-Exp-Assignment-Context",
+  clientMachineId: "X-Client-Machine-Id",
+  harnessId: "Copilot-Harness-Id",
+  parentAgentId: "X-Parent-Agent-Id",
+  repositoryHost: "X-GitHub-Repository-Host",
+  repositoryNwo: "X-GitHub-Repository-Nwo",
+  subsystemId: "Copilot-Subsystem-Id",
+}
+
+function assignSanitizedHeader(
+  headers: Record<string, string>,
+  name: string,
+  value: string | undefined,
+): void {
+  const sanitized = sanitizeCopilotHeaderValue(value)
+  if (sanitized) headers[name] = sanitized
+}
+
+function assignAttributionHeaders(
+  headers: Record<string, string>,
+  attribution: CopilotRequestAttribution,
+): void {
+  for (const [key, name] of Object.entries(attributionHeaderNames) as Array<
+    [keyof CopilotRequestAttribution, string]
+  >) {
+    const value = attribution[key]
+    if (value) headers[name] = value
+  }
+}
+
+function assignTypedOptionHeaders(
+  headers: Record<string, string>,
+  options: CopilotHeaderOptions | undefined,
+): void {
+  assignSanitizedHeader(headers, "Anthropic-Beta", options?.anthropicBeta)
+  assignSanitizedHeader(headers, "anthropic-version", options?.anthropicVersion)
+  assignSanitizedHeader(
+    headers,
+    "Copilot-Session-Token",
+    options?.copilotSessionToken,
+  )
+  assignSanitizedHeader(
+    headers,
+    "X-Model-Provider-Preference",
+    options?.modelProviderPreference,
+  )
 }
 
 export function copilotHeaders(
@@ -98,6 +161,11 @@ export function copilotHeaders(
   const affinityKey = getClientSessionId()
   const upstreamSessionId =
     affinityKey ? deriveUpstreamSessionId(affinityKey) : state.sessionId
+  const attribution = mergeCopilotRequestAttribution(
+    getCopilotRequestAttribution(),
+    options?.attribution,
+  )
+  const agentTaskId = attribution.agentTaskId ?? upstreamSessionId
 
   const headers: Record<string, string> = {
     "content-type": "application/json",
@@ -106,24 +174,25 @@ export function copilotHeaders(
     "User-Agent": "copilot-api",
     "Copilot-Integration-Id": state.copilotIntegrationId,
     "editor-version": `vscode/${state.vsCodeVersion ?? "1.104.3"}`,
-    "Openai-Intent": "conversation-agent",
+    "Openai-Intent": attribution.openaiIntent ?? "conversation-agent",
     "X-GitHub-Api-Version": COPILOT_API_VERSION,
     "X-Initiator": initiator,
     "X-Request-Id": getRequestId() ?? randomUUID(),
     "X-Interaction-Id": upstreamSessionId,
     "X-Client-Session-Id": upstreamSessionId,
-    "X-Agent-Task-Id": upstreamSessionId,
+    "X-Agent-Task-Id": agentTaskId,
     "X-Interaction-Type":
-      initiator === "user" ? "conversation-user" : "conversation-agent",
+      attribution.interactionType
+      ?? (initiator === "user" ? "conversation-user" : "conversation-agent"),
   }
+
+  assignAttributionHeaders(headers, attribution)
 
   if (options?.vision) {
     headers["Copilot-Vision-Request"] = "true"
   }
 
-  if (options?.anthropicVersion) {
-    headers["anthropic-version"] = options.anthropicVersion
-  }
+  assignTypedOptionHeaders(headers, options)
 
   return headers
 }
