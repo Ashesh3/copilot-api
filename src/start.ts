@@ -38,6 +38,7 @@ import {
 } from "./routes/responses/websocket"
 import { tryUpgradeVoiceWebSocket, voiceWebSocket } from "./routes/voice/route"
 import { server } from "./server"
+import { resolveCopilotIntegrationId } from "./services/copilot/copilot-contract"
 import { getVSCodeVersion } from "./services/get-vscode-version"
 
 async function cacheVSCodeVersion(): Promise<void> {
@@ -482,6 +483,9 @@ export async function runServer(options: RunServerOptions): Promise<void> {
   state.debug = options.debug
   state.verbose = options.verbose
   state.apiKeyAuth = options.apiKeyAuth
+  state.copilotIntegrationId = resolveCopilotIntegrationId(
+    process.env.COPILOT_INTEGRATION_ID,
+  )
 
   if (options.apiKeyAuth)
     consola.info(

@@ -616,6 +616,7 @@ files.
 | Variable | Scope | Purpose |
 | --- | --- | --- |
 | `GITHUB_TOKENS` | Direct and Docker | Comma-separated GitHub tokens; two or more enable multi-account mode |
+| `COPILOT_INTEGRATION_ID` | Direct and Docker | Copilot integration identifier; defaults to `vscode-chat` for backwards-compatible entitlement behavior. Use an assigned integration ID when available; do not copy a first-party client ID merely to imitate that client. |
 | `DATA_DIR` | Direct and Docker | Override the persistent data directory |
 | `COPILOT_API_KEY_AUTH` | Direct and Docker | Gateway key and sole environment-based gateway credential; direct usage also requires the `--api-key-auth` flag without a value |
 | `COPILOT_ADMIN_PASSWORD_HASH` | Direct and Docker | Optional authoritative Argon2id PHC verifier for the administrator password; suitable for 1Password/Varlock |

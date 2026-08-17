@@ -21,10 +21,12 @@ import {
 } from "../src/lib/routing-telemetry"
 import { state } from "../src/lib/state"
 import {
+  copilotBaseUrl,
   copilotFetch,
   copilotHeaders,
   setHttpRetrySleepForTest,
 } from "../src/services/copilot/copilot-client"
+import { DEFAULT_COPILOT_INTEGRATION_ID } from "../src/services/copilot/copilot-contract"
 import {
   createRetryBudget,
   MAX_DELAY_SECONDS,
@@ -133,7 +135,24 @@ beforeEach(() => {
   state.accountType = "individual"
   state.githubToken = "github-token"
   state.copilotToken = "expired-copilot-token"
+  state.copilotIntegrationId = DEFAULT_COPILOT_INTEGRATION_ID
   state.isMultiToken = false
+})
+
+test.each([
+  ["individual", "https://api.githubcopilot.com"],
+  ["business", "https://api.business.githubcopilot.com"],
+  ["enterprise", "https://api.enterprise.githubcopilot.com"],
+] as const)("uses the reviewed %s Copilot host", (accountType, expected) => {
+  state.accountType = accountType
+  expect(copilotBaseUrl()).toBe(expected)
+})
+
+test("uses one current API version and the configured integration id", () => {
+  state.copilotIntegrationId = "assigned-integration"
+  const headers = copilotHeaders()
+  expect(headers["X-GitHub-Api-Version"]).toBe("2026-08-01")
+  expect(headers["Copilot-Integration-Id"]).toBe("assigned-integration")
 })
 
 test("refreshes the single-token copilot token and retries the request after a 401", async () => {

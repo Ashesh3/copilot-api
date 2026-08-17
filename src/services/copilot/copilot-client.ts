@@ -24,6 +24,7 @@ import {
 } from "~/lib/routing-telemetry"
 import { state } from "~/lib/state"
 import { deriveUpstreamSessionId } from "~/lib/upstream-session-affinity"
+import { COPILOT_API_VERSION } from "~/services/copilot/copilot-contract"
 import { getCopilotToken } from "~/services/github/get-copilot-token"
 
 import type { RetryBudget, RetryClaim } from "./transport-retry"
@@ -45,10 +46,6 @@ import {
 
 // --- Constants ---
 
-export const API_VERSION = "2026-01-09"
-export const MODELS_API_VERSION = "2026-06-01"
-// Intentionally reuse the VS Code chat integration identifier.
-export const INTEGRATION_ID = "vscode-chat"
 export const INITIAL_RETRY_BACKOFF_EXTRA_SECONDS = 1
 export const RETRYABLE_STATUSES = new Set([408, 429, 500, 502, 503, 504])
 
@@ -107,10 +104,10 @@ export function copilotHeaders(
     accept: "application/json",
     Authorization: `Bearer ${token}`,
     "User-Agent": "copilot-api",
-    "Copilot-Integration-Id": INTEGRATION_ID,
+    "Copilot-Integration-Id": state.copilotIntegrationId,
     "editor-version": `vscode/${state.vsCodeVersion ?? "1.104.3"}`,
     "Openai-Intent": "conversation-agent",
-    "X-GitHub-Api-Version": API_VERSION,
+    "X-GitHub-Api-Version": COPILOT_API_VERSION,
     "X-Initiator": initiator,
     "X-Request-Id": getRequestId() ?? randomUUID(),
     "X-Interaction-Id": upstreamSessionId,

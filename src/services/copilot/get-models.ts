@@ -1,18 +1,11 @@
 import consola from "consola"
 
 import { HTTPError } from "~/lib/error"
-import {
-  MODELS_API_VERSION,
-  copilotFetch,
-  copilotHeaders,
-} from "~/services/copilot/copilot-client"
+import { copilotFetch, copilotHeaders } from "~/services/copilot/copilot-client"
 
 export const getModels = async () => {
   const response = await copilotFetch("/models", {
-    headers: {
-      ...copilotHeaders(),
-      "X-GitHub-Api-Version": MODELS_API_VERSION,
-    },
+    headers: copilotHeaders(),
   })
 
   if (!response.ok) {
