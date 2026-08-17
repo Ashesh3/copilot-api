@@ -828,6 +828,50 @@ describe("responses websocket message handling", () => {
     expect(ws.data.activeTurns.size).toBe(0)
   })
 
+  test("forwards safe translation errors before upstream and keeps the socket open", async () => {
+    state.accountType = "individual"
+    state.copilotToken = "copilot-token"
+    state.models = {
+      ...responsesCapableModels,
+      data: responsesCapableModels.data.map((model) => ({
+        ...model,
+        supported_endpoints: ["/chat/completions"],
+      })),
+    }
+    const ws = createTestWebSocket()
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: [
+          {
+            type: "reasoning",
+            encrypted_content: "private-encrypted-state",
+            summary: [],
+          },
+        ],
+      }),
+    )
+
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(ws.data.closed).toBe(false)
+    expect(ws.data.activeTurns.size).toBe(0)
+    expect(JSON.parse(ws.sent.at(-1) ?? "{}")).toEqual({
+      type: "error",
+      status: 400,
+      error: {
+        code: "endpoint_translation_unsupported",
+        message:
+          "The selected Copilot model cannot accept this request without losing required protocol data.",
+        param: "opaque_reasoning",
+        type: "invalid_request_error",
+        request_id: "req-test",
+      },
+    })
+  })
+
   test("fits rehydrated compaction turns on ChatCompletions fallback", async () => {
     state.accountType = "individual"
     state.copilotToken = "copilot-token"

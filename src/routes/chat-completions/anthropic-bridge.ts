@@ -52,10 +52,13 @@ import {
 } from "~/services/copilot/create-chat-completions"
 
 import {
+  applyParallelToolChoice,
+  convertChatReasoningOptions,
   createAssistantBlocks,
   getAnthropicReasoning,
 } from "./anthropic-reasoning"
-import { checkChatToMessagesTranslation } from "./translation-fidelity"
+import { normalizeChatCompletionsRequest } from "./chat-contract"
+import { checkNormalizedChatToMessagesTranslation } from "./translation-fidelity"
 
 const logger = createHandlerLogger("anthropic-bridge")
 
@@ -275,34 +278,43 @@ export async function chatPayloadToAnthropic(
   selectedModel?: Model,
   signal?: AbortSignal,
 ): Promise<AnthropicMessagesPayload> {
+  const normalized = normalizeChatCompletionsRequest(payload)
   assertEndpointTranslationSupported(
     {
       blockers: [],
       code: "endpoint_translation_unsupported",
       source: "chat",
     },
-    checkChatToMessagesTranslation(payload),
+    checkNormalizedChatToMessagesTranslation(normalized),
   )
 
   const { systemTexts, messages } = await convertChatMessages(
-    payload.messages,
+    normalized.messages,
     signal,
   )
 
   const maxTokens =
-    payload.max_tokens ?? selectedModel?.capabilities.limits?.max_output_tokens
+    normalized.max_tokens
+    ?? normalized.max_completion_tokens
+    ?? selectedModel?.capabilities.limits?.max_output_tokens
+  const toolChoice = convertToolChoice(normalized.tool_choice)
+  const parallelChoice = applyParallelToolChoice(
+    toolChoice,
+    normalized.parallel_tool_calls,
+    normalized.tools,
+  )
 
   return {
-    model: payload.model,
+    model: normalized.model,
     messages,
     ...(maxTokens === undefined ? {} : { max_tokens: maxTokens }),
     ...(systemTexts.length > 0 ? { system: systemTexts.join("\n\n") } : {}),
-    ...convertSamplingOptions(payload),
-    ...(payload.stream ? { stream: true } : {}),
-    ...(payload.user ? { metadata: { user_id: payload.user } } : {}),
-    ...convertTools(payload.tools),
-    ...convertToolChoice(payload.tool_choice),
-    ...convertReasoningEffort(payload),
+    ...convertSamplingOptions(normalized),
+    ...(normalized.stream ? { stream: true } : {}),
+    ...(normalized.user ? { metadata: { user_id: normalized.user } } : {}),
+    ...convertTools(normalized.tools),
+    ...parallelChoice,
+    ...convertChatReasoningOptions(normalized),
   }
 }
 
@@ -389,22 +401,6 @@ function convertSamplingOptions(
           Array.isArray(payload.stop) ? payload.stop : [payload.stop],
       }
     : {}),
-  }
-}
-
-function convertReasoningEffort(
-  payload: ChatCompletionsPayload,
-): Pick<AnthropicMessagesPayload, "output_config"> {
-  const reasoningEffort = (payload as unknown as Record<string, unknown>)
-    .reasoning_effort
-  if (typeof reasoningEffort !== "string") return {}
-  // createAnthropicMessages strips effort for models that do not support it
-  return {
-    output_config: {
-      effort: reasoningEffort as NonNullable<
-        AnthropicMessagesPayload["output_config"]
-      >["effort"],
-    },
   }
 }
 

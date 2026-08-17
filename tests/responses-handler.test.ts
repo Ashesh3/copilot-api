@@ -104,6 +104,53 @@ test("preserves custom tool calls and results for compaction fallback", () => {
   ])
 })
 
+test("rejects ordinary computer output but preserves it for compaction", () => {
+  const payload = {
+    model: "gpt-4o",
+    input: [
+      {
+        type: "computer_call_output",
+        call_id: "call_computer",
+        output: "canonical computer result",
+      },
+    ],
+  } as ResponsesPayload
+
+  expect(() => responsesToChatCompletions(payload)).toThrow(LocalHTTPError)
+  expect(
+    responsesToChatCompletions(payload, { preserveCustomToolContext: true })
+      .messages,
+  ).toEqual([
+    {
+      role: "user",
+      content:
+        "[Computer tool result call_computer: canonical computer result]",
+    },
+  ])
+})
+
+test("maps Responses parallel tools reasoning and user controls to Chat", () => {
+  const result = responsesToChatCompletions({
+    model: "gpt-4o",
+    input: "hello",
+    tools: [
+      {
+        type: "function",
+        name: "lookup",
+        parameters: { type: "object", properties: {} },
+        strict: false,
+      },
+    ],
+    parallel_tool_calls: false,
+    reasoning: { effort: "high" },
+    user: "user-safe",
+  })
+
+  expect(result.parallel_tool_calls).toBe(false)
+  expect(result.reasoning_effort).toBe("high")
+  expect(result.user).toBe("user-safe")
+})
+
 test("compaction fallback still rejects unrelated lossy Responses state", () => {
   expect(() =>
     assertResponsesChatFallbackTranslation(

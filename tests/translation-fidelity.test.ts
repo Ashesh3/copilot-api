@@ -5,6 +5,7 @@ import {
   anthropicResponseToChat,
   chatPayloadToAnthropic,
 } from "~/routes/chat-completions/anthropic-bridge"
+import { chatCompletionsToResponses } from "~/routes/chat-completions/responses-fallback"
 import {
   checkChatToMessagesTranslation,
   checkChatToResponsesTranslation,
@@ -82,6 +83,57 @@ test("normalizes deprecated Chat controls before Messages checks", () => {
   expect(payload).toHaveProperty("function_call")
 })
 
+test("uses normalized deprecated controls in the direct Chat to Responses converter", () => {
+  const payload = {
+    model: "gpt-current",
+    messages: [{ role: "user" as const, content: "hello" }],
+    functions: [{ name: "legacy_lookup", parameters: {} }],
+    function_call: { name: "legacy_lookup" },
+  }
+
+  const translated = chatCompletionsToResponses(payload)
+
+  expect(translated.tools).toEqual([
+    {
+      type: "function",
+      name: "legacy_lookup",
+      description: null,
+      parameters: { type: "object", properties: {} },
+      strict: false,
+    },
+  ])
+  expect(translated.tool_choice).toEqual({
+    type: "function",
+    name: "legacy_lookup",
+  })
+  expect(payload).toHaveProperty("functions")
+  expect(payload).toHaveProperty("function_call")
+})
+
+test("uses normalized deprecated controls in the direct Chat to Messages converter", async () => {
+  const payload = {
+    model: "claude-current",
+    messages: [{ role: "user" as const, content: "hello" }],
+    functions: [{ name: "legacy_lookup", parameters: {} }],
+    function_call: { name: "legacy_lookup" },
+  }
+
+  const translated = await chatPayloadToAnthropic(payload)
+
+  expect(translated.tools).toEqual([
+    {
+      name: "legacy_lookup",
+      input_schema: { type: "object", properties: {} },
+    },
+  ])
+  expect(translated.tool_choice).toEqual({
+    type: "tool",
+    name: "legacy_lookup",
+  })
+  expect(payload).toHaveProperty("functions")
+  expect(payload).toHaveProperty("function_call")
+})
+
 test("rejects Chat to Responses unsupported content and malformed tool results in order", () => {
   expect(
     checkChatToResponsesTranslation({
@@ -121,6 +173,71 @@ test("rejects Chat content parts that Responses cannot preserve for the message 
       ],
     }),
   ).toEqual({ supported: false, blockers: ["message_content_part"] })
+})
+
+test("rejects every unmapped Chat to Responses request concept in first-seen order", () => {
+  expect(
+    checkChatToResponsesTranslation({
+      model: "gpt-current",
+      messages: [
+        {
+          role: "assistant",
+          content: "answer",
+          name: "private-name",
+          reasoning_text: "unsealed reasoning",
+          reasoning_opaque: "unsealed-state",
+        },
+      ],
+      stop: ["stop-private"],
+      n: 2,
+      stream_options: { include_usage: false },
+      frequency_penalty: 0.5,
+      presence_penalty: 0.5,
+      logit_bias: { 1: 1 },
+      logprobs: true,
+      top_logprobs: 3,
+      prediction: { type: "content", content: "private-prediction" },
+      thinking_budget: 2048,
+      seed: 7,
+      response_format: { type: "future_format" },
+      tool_choice: { type: "future_choice" },
+    }),
+  ).toEqual({
+    supported: false,
+    blockers: [
+      "message_name",
+      "reasoning_state",
+      "stop",
+      "n",
+      "stream_options",
+      "frequency_penalty",
+      "presence_penalty",
+      "logit_bias",
+      "logprobs",
+      "top_logprobs",
+      "prediction",
+      "seed",
+      "thinking_budget",
+      "response_format",
+      "tool_choice",
+    ],
+  })
+})
+
+test("maps exact Chat controls into the direct Responses payload", () => {
+  const translated = chatCompletionsToResponses({
+    model: "gpt-current",
+    messages: [{ role: "user", content: "hello" }],
+    max_completion_tokens: 321,
+    reasoning_effort: "high",
+    user: "user-safe",
+    snippy: { enabled: false },
+  })
+
+  expect(translated.max_output_tokens).toBe(321)
+  expect(translated.reasoning).toMatchObject({ effort: "high" })
+  expect(translated.user).toBe("user-safe")
+  expect(translated.snippy).toEqual({ enabled: false })
 })
 
 test("rejects Chat to Messages when an OpenAI-only custom tool cannot map", () => {
@@ -174,6 +291,111 @@ test("allows Chat reasoning already encoded as an Anthropic signature", () => {
   ).toEqual({ supported: true, blockers: [] })
 })
 
+test("rejects role-incompatible Chat content on the Messages bridge", () => {
+  expect(
+    checkChatToMessagesTranslation({
+      model: "claude-current",
+      messages: [
+        {
+          role: "system",
+          content: [
+            {
+              type: "image_url",
+              image_url: { url: "data:image/png;base64,AA==" },
+            },
+          ],
+        },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "file",
+              file: {
+                filename: "private.pdf",
+                file_data: "data:application/pdf;base64,AA==",
+              },
+            },
+          ],
+        },
+      ],
+    }),
+  ).toEqual({ supported: false, blockers: ["message_content_part"] })
+})
+
+test("rejects exact hosted tool variants and unmapped Chat to Messages controls", () => {
+  expect(
+    checkChatToMessagesTranslation({
+      model: "claude-current",
+      messages: [{ role: "user", content: "hello", name: "private-name" }],
+      tools: [{ type: "web_search_20250305", name: "private-search" } as never],
+      n: 2,
+      stream_options: { include_usage: false },
+      frequency_penalty: 0.5,
+      presence_penalty: 0.5,
+      logit_bias: { 1: 1 },
+      logprobs: true,
+      top_logprobs: 3,
+      prediction: { type: "content", content: "private-prediction" },
+      seed: 7,
+      snippy: { enabled: true },
+    }),
+  ).toEqual({
+    supported: false,
+    blockers: [
+      "message_name",
+      "hosted_tool:web_search",
+      "n",
+      "stream_options",
+      "frequency_penalty",
+      "presence_penalty",
+      "logit_bias",
+      "logprobs",
+      "top_logprobs",
+      "prediction",
+      "seed",
+      "snippy",
+    ],
+  })
+})
+
+test("maps exact Chat controls into the direct Messages payload", async () => {
+  const translated = await chatPayloadToAnthropic({
+    model: "claude-current",
+    messages: [{ role: "user", content: "hello" }],
+    max_completion_tokens: 321,
+    parallel_tool_calls: false,
+    response_format: {
+      type: "json_schema",
+      json_schema: {
+        name: "result",
+        schema: { type: "object" },
+      },
+    },
+    thinking_budget: 2048,
+    tools: [
+      {
+        type: "function",
+        function: {
+          name: "lookup",
+          parameters: { type: "object", properties: {} },
+        },
+      },
+    ],
+  })
+
+  expect(translated.max_tokens).toBe(321)
+  expect(translated.thinking).toEqual({ type: "enabled", budget_tokens: 2048 })
+  expect(translated.output_config?.format).toEqual({
+    type: "json_schema",
+    name: "result",
+    schema: { type: "object" },
+  })
+  expect(translated.tool_choice).toEqual({
+    type: "auto",
+    disable_parallel_tool_use: true,
+  })
+})
+
 test("rejects Responses to Chat when opaque reasoning would be lost", () => {
   expect(
     checkResponsesToChatTranslation({
@@ -222,6 +444,126 @@ test("rejects Responses to Chat unsupported item tool phase and context semantic
   })
 })
 
+test("rejects ordinary computer output and every unmapped Responses to Chat control", () => {
+  expect(
+    checkResponsesToChatTranslation({
+      model: "chat-only",
+      input: [
+        {
+          type: "computer_call_output",
+          call_id: "private-call",
+          output: "private-output",
+        },
+      ],
+      prompt: { id: "private-prompt" },
+      conversation_id: "private-conversation",
+      metadata: { private: "value" },
+      user: "user-safe",
+      safety_identifier: "private-safety",
+      prompt_cache_key: "private-cache-key",
+      prompt_cache_options: { mode: "explicit" },
+      prompt_cache_retention: "in_memory",
+      reasoning: { effort: "high", summary: "detailed" },
+      include: ["reasoning.encrypted_content"],
+      context_management: [{ type: "truncate" }],
+      truncation: "auto",
+      multi_agent: { agents: [] },
+      snippy: { enabled: false },
+      generate: false,
+      task_budget: { type: "tokens", total: 100 },
+      copilot_cache_control: { type: "ephemeral" },
+    }),
+  ).toEqual({
+    supported: false,
+    blockers: [
+      "tool_semantics:computer_call_output",
+      "prompt",
+      "conversation_id",
+      "metadata",
+      "safety_identifier",
+      "prompt_cache_key",
+      "prompt_cache_options",
+      "prompt_cache_retention",
+      "context_management",
+      "truncation",
+      "multi_agent",
+      "snippy",
+      "generate",
+      "task_budget",
+      "copilot_cache_control",
+      "reasoning_summary",
+      "include",
+    ],
+  })
+})
+
+test("allows exact Responses to Chat controls that have direct mappings", () => {
+  expect(
+    checkResponsesToChatTranslation({
+      model: "chat-only",
+      input: "hello",
+      tools: [
+        {
+          type: "function",
+          name: "lookup",
+          parameters: { type: "object", properties: {} },
+          strict: false,
+        },
+      ],
+      parallel_tool_calls: false,
+      reasoning: { effort: "high" },
+      user: "user-safe",
+    }),
+  ).toEqual({ supported: true, blockers: [] })
+})
+
+test("rejects nested Responses details that Chat cannot preserve", () => {
+  expect(
+    checkResponsesToChatTranslation({
+      model: "chat-only",
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: "hello",
+              prompt_cache_breakpoint: { mode: "explicit" },
+            },
+            {
+              type: "input_image",
+              image_url: "data:image/png;base64,AA==",
+              detail: "high",
+            },
+            {
+              type: "input_file",
+              filename: "private.pdf",
+              file_url: "https://private.invalid/file.pdf",
+            },
+          ],
+        },
+      ],
+      tools: [
+        {
+          type: "function",
+          name: "lookup",
+          parameters: { type: "object", properties: {} },
+          strict: true,
+        },
+      ],
+    }),
+  ).toEqual({
+    supported: false,
+    blockers: [
+      "prompt_cache_breakpoint",
+      "image_detail",
+      "file_url",
+      "strict_function_tool",
+    ],
+  })
+})
+
 test("rejects Responses to Messages for item references and unsupported hosted tools", () => {
   expect(
     checkResponsesToMessagesTranslation({
@@ -232,6 +574,19 @@ test("rejects Responses to Messages for item references and unsupported hosted t
   ).toEqual({
     supported: false,
     blockers: ["item_reference", "hosted_tool:file_search"],
+  })
+})
+
+test("canonicalizes versioned hosted tools in Responses to Messages blockers", () => {
+  expect(
+    checkResponsesToMessagesTranslation({
+      model: "claude-current",
+      input: "hello",
+      tools: [{ type: "web_search_20250305", name: "private-search" }],
+    }),
+  ).toEqual({
+    supported: false,
+    blockers: ["hosted_tool:web_search"],
   })
 })
 
@@ -258,6 +613,120 @@ test("rejects Responses to Messages opaque reasoning custom grammar and multi-ag
   ).toEqual({
     supported: false,
     blockers: ["opaque_reasoning", "custom_tool_grammar", "multi_agent"],
+  })
+})
+
+test("rejects every unmapped Responses to Messages top-level control", () => {
+  expect(
+    checkResponsesToMessagesTranslation({
+      model: "claude-current",
+      input: "hello",
+      prompt: { id: "private-prompt" },
+      conversation_id: "private-conversation",
+      metadata: { private: "value" },
+      user: "user-safe",
+      safety_identifier: "private-safety",
+      prompt_cache_key: "private-cache-key",
+      prompt_cache_options: { mode: "explicit" },
+      prompt_cache_retention: "in_memory",
+      include: ["code_interpreter_call.outputs"],
+      context_management: [{ type: "truncate" }],
+      truncation: "auto",
+      multi_agent: { agents: [] },
+      snippy: { enabled: false },
+      generate: false,
+      copilot_cache_control: { type: "ephemeral" },
+      tool_choice: "validated",
+    }),
+  ).toEqual({
+    supported: false,
+    blockers: [
+      "prompt",
+      "conversation_id",
+      "metadata",
+      "safety_identifier",
+      "prompt_cache_key",
+      "prompt_cache_options",
+      "prompt_cache_retention",
+      "context_management",
+      "truncation",
+      "multi_agent",
+      "snippy",
+      "generate",
+      "copilot_cache_control",
+      "include",
+      "tool_choice",
+    ],
+  })
+})
+
+test("allows exact Responses to Messages controls in the forthcoming bridge subset", () => {
+  expect(
+    checkResponsesToMessagesTranslation({
+      model: "claude-current",
+      input: "hello",
+      tools: [
+        {
+          type: "function",
+          name: "lookup",
+          parameters: { type: "object", properties: {} },
+          strict: false,
+        },
+      ],
+      parallel_tool_calls: false,
+      reasoning: { effort: "high", summary: "detailed" },
+      text: { format: { type: "json_object" } },
+      task_budget: { type: "tokens", total: 100 },
+      user: "user-safe",
+      include: ["reasoning.encrypted_content"],
+    }),
+  ).toEqual({ supported: true, blockers: [] })
+})
+
+test("rejects nested Responses details that Messages cannot preserve", () => {
+  expect(
+    checkResponsesToMessagesTranslation({
+      model: "claude-current",
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: "hello",
+              prompt_cache_breakpoint: { mode: "explicit" },
+            },
+            {
+              type: "input_image",
+              image_url: "data:image/png;base64,AA==",
+              detail: "high",
+            },
+            {
+              type: "input_file",
+              filename: "private.pdf",
+              file_url: "https://private.invalid/file.pdf",
+            },
+          ],
+        },
+      ],
+      tools: [
+        {
+          type: "function",
+          name: "lookup",
+          parameters: { type: "object", properties: {} },
+          strict: true,
+        },
+      ],
+    }),
+  ).toEqual({
+    supported: false,
+    blockers: [
+      "prompt_cache_breakpoint",
+      "image_detail",
+      "file_url",
+      "strict_function_tool",
+    ],
   })
 })
 

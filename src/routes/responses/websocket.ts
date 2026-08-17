@@ -86,6 +86,7 @@ export interface WebSocketErrorFrameOptions {
   code: string
   message: string
   status: number
+  param?: string
   requestId?: string
   type?: string
 }
@@ -1006,6 +1007,7 @@ export function sendWebSocketError(
       error: {
         code: options.code,
         message: options.message,
+        ...(options.param ? { param: options.param } : {}),
         type: options.type ?? "websocket_error",
         request_id: options.requestId ?? ws.data.requestId,
       },
@@ -1020,9 +1022,14 @@ function normalizeWebSocketError(
   if (error instanceof LocalHTTPError) {
     const local = localWebSocketError(error)
     if (local) {
+      const code =
+        local.type === "invalid_request_error" ?
+          local.code
+        : mapHttpStatusToWebSocketErrorCode(error.response.status)
       return {
-        code: mapHttpStatusToWebSocketErrorCode(error.response.status),
+        code,
         message: local.message,
+        ...(local.param ? { param: local.param } : {}),
         status: error.response.status,
         type: local.type,
       }
@@ -1047,17 +1054,28 @@ function normalizeWebSocketError(
 
 function localWebSocketError(
   error: LocalHTTPError,
-): { message: string; type: string } | undefined {
+): { code: string; message: string; param?: string; type: string } | undefined {
   const bodyError = error.clientBody.error
   if (!isRecord(bodyError)) return undefined
   if (
     bodyError.type !== "session_affinity_error"
     && bodyError.type !== "account_unavailable"
+    && bodyError.type !== "invalid_request_error"
   ) {
     return undefined
   }
-  if (typeof bodyError.message !== "string") return undefined
-  return { message: bodyError.message, type: bodyError.type }
+  if (
+    typeof bodyError.code !== "string"
+    || typeof bodyError.message !== "string"
+  ) {
+    return undefined
+  }
+  return {
+    code: bodyError.code,
+    message: bodyError.message,
+    ...(typeof bodyError.param === "string" ? { param: bodyError.param } : {}),
+    type: bodyError.type,
+  }
 }
 
 function isHTTPErrorLike(error: unknown): error is { response: Response } {

@@ -785,7 +785,8 @@ export const assertResponsesChatFallbackTranslation = (
       check.blockers.filter(
         (blocker) =>
           blocker !== "tool_semantics:custom_tool_call"
-          && blocker !== "tool_semantics:custom_tool_call_output",
+          && blocker !== "tool_semantics:custom_tool_call_output"
+          && blocker !== "tool_semantics:computer_call_output",
       )
     : check.blockers
   assertEndpointTranslationSupported(
@@ -1110,6 +1111,7 @@ export const responsesToChatCompletions = (
 
   const tools = convertToolsForCC(payload.tools)
   const toolChoice = convertToolChoiceForCC(payload.tool_choice)
+  const mappedControls = mapResponsesControlsToChat(payload)
 
   // Map structured output (text.format) to response_format
   // Preserve json_schema details so normalizePayload can stash the schema
@@ -1136,14 +1138,36 @@ export const responsesToChatCompletions = (
   return {
     model: payload.model,
     messages,
-    temperature: payload.temperature,
-    top_p: payload.top_p,
-    max_tokens: payload.max_output_tokens,
+    ...mappedControls,
     stream: payload.stream ?? false,
     ...(tools ? { tools } : {}),
     ...(toolChoice !== undefined ? { tool_choice: toolChoice } : {}),
     ...(payload.stream ? { stream_options: { include_usage: true } } : {}),
     ...(responseFormat ? { response_format: responseFormat } : {}),
+  }
+}
+
+function mapResponsesControlsToChat(
+  payload: ResponsesPayload,
+): Pick<
+  ChatCompletionsPayload,
+  | "max_tokens"
+  | "parallel_tool_calls"
+  | "reasoning_effort"
+  | "temperature"
+  | "top_p"
+  | "user"
+> {
+  return {
+    temperature: payload.temperature,
+    top_p: payload.top_p,
+    max_tokens: payload.max_output_tokens,
+    parallel_tool_calls: payload.parallel_tool_calls,
+    reasoning_effort:
+      typeof payload.reasoning?.effort === "string" ?
+        payload.reasoning.effort
+      : undefined,
+    user: payload.user,
   }
 }
 
