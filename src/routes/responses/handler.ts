@@ -187,9 +187,7 @@ const getCompletedBufferedResponse = (chunkData: {
   }
 }
 
-type ResponsesReasoningEffort = NonNullable<
-  NonNullable<ResponsesPayload["reasoning"]>["effort"]
->
+type ResponsesReasoningEffort = ReasoningEffort
 
 function isResponsesReasoningEffort(
   value: unknown,
@@ -238,7 +236,8 @@ export function normalizeResponsesReasoning(
       : { effort: suffixEffort }
   }
 
-  return payload.reasoning?.effort ?? undefined
+  const effort = payload.reasoning?.effort
+  return isResponsesReasoningEffort(effort) ? effort : undefined
 }
 
 function getRedirectReasoningEffort(

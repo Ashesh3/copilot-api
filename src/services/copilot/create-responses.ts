@@ -4,7 +4,6 @@ import { events } from "fetch-event-stream"
 import { routedFetch } from "~/lib/account-router"
 import { getReasoningEffortForModel } from "~/lib/config"
 import { HTTPError } from "~/lib/error"
-import { getUnsupportedRequestParameters } from "~/lib/model-settings"
 import { usesImplicitReasoningDefault } from "~/lib/model-suffix"
 import { PRE_HEADER_MAX_DELAY_SECONDS } from "~/services/copilot/transport-retry"
 
@@ -13,6 +12,10 @@ import {
   isResponsesCompactionRequest,
 } from "./compaction-payload"
 import { normalizeResponsesAttachments } from "./responses-attachments"
+import {
+  prepareResponsesRequest,
+  type ResponsesWireBody,
+} from "./responses-contract"
 import {
   hasResponsesAttachment,
   recoverResponsesPayload,
@@ -28,16 +31,24 @@ export interface ResponsesPayload {
   prompt?: string | Record<string, unknown> | null
   conversation_id?: string | null
   tools?: Array<Tool> | null
-  tool_choice?: ToolChoiceOptions | ToolChoiceFunction
+  tool_choice?: ToolChoiceOptions | Record<string, unknown>
   temperature?: number | null
   top_p?: number | null
   max_output_tokens?: number | null
   metadata?: Metadata | null
+  user?: string | null
   stream?: boolean | null
   safety_identifier?: string | null
   prompt_cache_key?: string | null
+  prompt_cache_options?: Record<string, unknown> | null
+  prompt_cache_retention?: string | null
   parallel_tool_calls?: boolean | null
   store?: boolean | null
+  background?: boolean | null
+  context_management?: Array<Record<string, unknown>> | null
+  multi_agent?: Record<string, unknown> | null
+  snippy?: Record<string, unknown> | null
+  truncation?: string | Record<string, unknown> | null
   text?: {
     format?: { type: string; [key: string]: unknown } | null
   } | null
@@ -54,9 +65,9 @@ export interface ResponsesPayload {
   [key: string]: unknown
 }
 
-export type ToolChoiceOptions = "none" | "auto" | "required"
+export type ToolChoiceOptions = "none" | "auto" | "required" | "validated"
 
-export interface ToolChoiceFunction {
+export interface ToolChoiceFunction extends Record<string, unknown> {
   name: string
   type: "function"
 }
@@ -79,15 +90,7 @@ export type ResponseIncludable =
   | "code_interpreter_call.outputs"
 
 export interface Reasoning {
-  effort?:
-    | "none"
-    | "minimal"
-    | "low"
-    | "medium"
-    | "high"
-    | "xhigh"
-    | "max"
-    | null
+  effort?: string | number | null
   summary?: "auto" | "concise" | "detailed" | null
 }
 
@@ -162,12 +165,6 @@ export interface ResponseInputFile {
   file_id?: string | null
   file_url?: string | null
 }
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null
-
-const JSON_OBJECT_INPUT_INSTRUCTION = "Respond with JSON."
-const COPILOT_RESPONSES_MIN_OUTPUT_TOKENS = 16
 
 export interface ResponsesResult {
   id: string
@@ -405,64 +402,6 @@ interface ResponsesRequestOptions {
   compaction?: boolean
 }
 
-/**
- * Known fields accepted by the Copilot Responses API.
- * Any field not in this set is stripped before forwarding to prevent 400 errors.
- */
-const KNOWN_RESPONSES_FIELDS = new Set([
-  "model",
-  "instructions",
-  "input",
-  "prompt",
-  "conversation_id",
-  "generate",
-  "client_metadata",
-  "tools",
-  "tool_choice",
-  "temperature",
-  "top_p",
-  "max_output_tokens",
-  "metadata",
-  "stream",
-  "safety_identifier",
-  "prompt_cache_key",
-  "parallel_tool_calls",
-  "store",
-  "text",
-  "task_budget",
-  "previous_response_id",
-  "reasoning",
-  "include",
-  "copilot_cache_control",
-])
-
-function sanitizeResponsesPayload(
-  payload: ResponsesPayload,
-): Record<string, unknown> {
-  ensureJsonObjectInputMentionsJson(payload)
-  normalizeFunctionToolParameters(payload)
-  normalizeEmptyToolControls(payload)
-  normalizeJsonSchemaResponseFormat(payload)
-  clampMaxOutputTokens(payload)
-  removeUnsupportedRequestParameters(payload)
-
-  const result: Record<string, unknown> = {}
-  for (const key of KNOWN_RESPONSES_FIELDS) {
-    if (key in payload && payload[key] !== undefined) {
-      result[key] = payload[key]
-    }
-  }
-  return result
-}
-
-function normalizeEmptyToolControls(payload: ResponsesPayload): void {
-  if (Array.isArray(payload.tools) && payload.tools.length > 0) return
-
-  delete payload.tools
-  delete payload.tool_choice
-  delete payload.parallel_tool_calls
-}
-
 const logOrdinaryRecovery = (
   recovered: ResponsesPayloadRecoveryResult<Record<string, unknown>>,
 ): void => {
@@ -478,19 +417,18 @@ const logOrdinaryRecovery = (
 }
 
 async function prepareResponsesPayload(
-  payload: ResponsesPayload,
+  payload: ResponsesWireBody,
   options: { fitCompactionPayload: boolean; signal?: AbortSignal },
 ): Promise<Record<string, unknown>> {
-  const sanitized = sanitizeResponsesPayload(payload)
   if (!options.fitCompactionPayload) {
-    const recovered = await recoverResponsesPayload(sanitized, {
+    const recovered = await recoverResponsesPayload(payload, {
       signal: options.signal,
     })
     logOrdinaryRecovery(recovered)
     return recovered.payload
   }
 
-  const fitted = fitResponsesCompactionPayload(sanitized)
+  const fitted = fitResponsesCompactionPayload(payload)
   if (fitted.reduced) {
     consola.warn("Reduced oversized Responses compaction payload", {
       originalBytes: fitted.originalBytes,
@@ -509,259 +447,68 @@ function shouldFitResponsesCompactionPayload(
   return explicitlyRequested === true || isResponsesCompactionRequest(payload)
 }
 
-function clampMaxOutputTokens(payload: ResponsesPayload): void {
-  if (
-    typeof payload.max_output_tokens === "number"
-    && payload.max_output_tokens < COPILOT_RESPONSES_MIN_OUTPUT_TOKENS
-  ) {
-    payload.max_output_tokens = COPILOT_RESPONSES_MIN_OUTPUT_TOKENS
-  }
-}
-
-function ensureJsonObjectInputMentionsJson(payload: ResponsesPayload): void {
-  if (payload.text?.format?.type !== "json_object") return
-  if (inputMentionsJson(payload.input)) return
-
-  const instruction: ResponseInputMessage = {
-    type: "message",
-    role: "developer",
-    content: JSON_OBJECT_INPUT_INSTRUCTION,
-  }
-
-  if (Array.isArray(payload.input)) {
-    payload.input = [instruction, ...payload.input]
-    return
-  }
-
-  if (typeof payload.input === "string") {
-    payload.input = [
-      instruction,
-      { type: "message", role: "user", content: payload.input },
-    ]
-    return
-  }
-
-  payload.input = [instruction]
-}
-
-function inputMentionsJson(input: ResponsesPayload["input"]): boolean {
-  if (typeof input === "string") return containsJson(input)
-  if (!Array.isArray(input)) return false
-
-  return input.some((item) => {
-    if (!isRecord(item)) return false
-    if (!("content" in item)) return false
-    return contentMentionsJson(item.content)
-  })
-}
-
-function contentMentionsJson(content: unknown): boolean {
-  if (typeof content === "string") return containsJson(content)
-  if (!Array.isArray(content)) return false
-
-  return content.some((part) => {
-    if (typeof part === "string") return containsJson(part)
-    return isRecord(part) && containsJson(part.text)
-  })
-}
-
-function containsJson(value: unknown): boolean {
-  return typeof value === "string" && value.toLowerCase().includes("json")
-}
-
-function normalizeFunctionToolParameters(payload: ResponsesPayload): void {
-  if (!Array.isArray(payload.tools)) return
-
-  for (const tool of payload.tools) {
-    if (!isRecord(tool) || tool.type !== "function") continue
-
-    if (!isRecord(tool.parameters) || Array.isArray(tool.parameters)) {
-      tool.parameters = { type: "object", properties: {} }
-      continue
-    }
-
-    tool.parameters.type ??= "object"
-    if (!isRecord(tool.parameters.properties)) {
-      tool.parameters.properties = {}
-    }
-  }
-}
-
-function normalizeJsonSchemaResponseFormat(payload: ResponsesPayload): void {
-  const format = payload.text?.format
-  if (!isRecord(format) || format.type !== "json_schema") return
-
-  normalizeJsonSchemaObject(format.schema)
-}
-
-function normalizeJsonSchemaObject(
-  schema: unknown,
-  seen = new Set<object>(),
-): void {
-  if (!isRecord(schema)) return
-  if (seen.has(schema)) return
-  seen.add(schema)
-
-  if (schema.type === "object" || isRecord(schema.properties)) {
-    if (schema.additionalProperties === undefined) {
-      schema.additionalProperties = false
-    }
-    normalizeJsonSchemaRequired(schema)
-  }
-
-  normalizeSchemaMap(schema.properties, seen)
-  normalizeSchemaMap(schema.patternProperties, seen)
-  normalizeSchemaMap(schema.$defs, seen)
-  normalizeSchemaMap(schema.definitions, seen)
-  normalizeSchemaValue(schema.items, seen)
-  normalizeSchemaValue(schema.additionalItems, seen)
-  normalizeSchemaValue(schema.contains, seen)
-  normalizeSchemaValue(schema.propertyNames, seen)
-  normalizeSchemaValue(schema.not, seen)
-  normalizeSchemaValue(schema.if, seen)
-  normalizeSchemaValue(schema.then, seen)
-  normalizeSchemaValue(schema.else, seen)
-  normalizeSchemaArray(schema.anyOf, seen)
-  normalizeSchemaArray(schema.oneOf, seen)
-  normalizeSchemaArray(schema.allOf, seen)
-}
-
-function normalizeJsonSchemaRequired(schema: Record<string, unknown>): void {
-  if (!isRecord(schema.properties)) return
-
-  const propertyKeys = Object.keys(schema.properties)
-  if (propertyKeys.length === 0) return
-
-  const existingRequired =
-    Array.isArray(schema.required) ?
-      schema.required.filter((key): key is string => typeof key === "string")
-    : []
-  const required = new Set(existingRequired)
-
-  for (const key of propertyKeys) {
-    required.add(key)
-  }
-
-  schema.required = [...required]
-}
-
-function normalizeSchemaMap(value: unknown, seen: Set<object>): void {
-  if (!isRecord(value)) return
-
-  for (const schema of Object.values(value)) {
-    normalizeJsonSchemaObject(schema, seen)
-  }
-}
-
-function normalizeSchemaArray(value: unknown, seen: Set<object>): void {
-  if (!Array.isArray(value)) return
-
-  for (const schema of value) {
-    normalizeJsonSchemaObject(schema, seen)
-  }
-}
-
-function normalizeSchemaValue(value: unknown, seen: Set<object>): void {
-  if (Array.isArray(value)) {
-    normalizeSchemaArray(value, seen)
-    return
-  }
-
-  normalizeJsonSchemaObject(value, seen)
-}
-
-function removeUnsupportedRequestParameters(payload: ResponsesPayload): void {
-  const unsupported = new Set(getUnsupportedRequestParameters(payload.model))
-  if (
-    payload.model.startsWith("gpt-5.6-")
-    && payload.reasoning?.effort !== "none"
-  ) {
-    unsupported.add("temperature")
-    unsupported.add("top_p")
-  }
-
-  for (const parameter of unsupported) {
-    switch (parameter) {
-      case "temperature": {
-        delete payload.temperature
-        break
-      }
-      case "top_p": {
-        delete payload.top_p
-        break
-      }
-      default: {
-        break
-      }
-    }
-  }
-}
-
 export const createResponses = async (
   payload: ResponsesPayload,
   options: ResponsesRequestOptions,
 ): Promise<CreateResponsesReturn> => {
   const { initiator, signal } = options
   signal?.throwIfAborted()
-  // service_tier is not supported by github copilot
-  delete payload.service_tier
+  const prepared = prepareResponsesRequest(payload)
+  const body = prepared.body
 
   // Zero-data retention enforcement
-  payload.store = false
+  body.store = false
 
   // Inline external attachment URLs / normalize file_data to data URIs
-  await normalizeResponsesAttachments(payload, signal)
+  await normalizeResponsesAttachments(body, signal)
   signal?.throwIfAborted()
 
   // Match runtime defaults for direct Responses requests.
-  payload.reasoning ??= {}
-  if (usesImplicitReasoningDefault(payload.model)) {
-    delete payload.reasoning.effort
+  body.reasoning ??= {}
+  if (usesImplicitReasoningDefault(body.model)) {
+    delete body.reasoning.effort
   } else {
-    payload.reasoning.effort ??= getReasoningEffortForModel(payload.model)
+    body.reasoning.effort ??= getReasoningEffortForModel(body.model)
   }
-  payload.reasoning.summary ??= "auto"
+  body.reasoning.summary ??= "auto"
 
-  if (!payload.include) {
-    payload.include = []
+  if (!body.include) {
+    body.include = []
   }
-  if (!payload.include.includes("reasoning.encrypted_content")) {
-    payload.include.push("reasoning.encrypted_content")
+  if (!body.include.includes("reasoning.encrypted_content")) {
+    body.include.push("reasoning.encrypted_content")
   }
 
-  // Strip unknown fields — only forward fields the Copilot API recognizes.
-  // The [key: string]: unknown index signature on ResponsesPayload allows
-  // arbitrary client fields to leak through; sanitize before forwarding.
   const shouldFitCompactionPayload = shouldFitResponsesCompactionPayload(
-    payload,
+    body,
     options.compaction,
   )
-  const sanitizedPayload = await prepareResponsesPayload(payload, {
+  const preparedPayload = await prepareResponsesPayload(body, {
     fitCompactionPayload: shouldFitCompactionPayload,
     signal,
   })
   const headerOpts = {
-    vision: hasResponsesAttachment(sanitizedPayload),
+    vision: hasResponsesAttachment(preparedPayload),
     initiator,
   }
 
   const { response } = await routedFetch(
     "/responses",
-    { method: "POST", body: JSON.stringify(sanitizedPayload), signal },
+    { method: "POST", body: JSON.stringify(preparedPayload), signal },
     {
-      modelId: payload.model,
+      modelId: body.model,
       headerOptions: headerOpts,
       maxHttpRetryDelaySeconds:
-        payload.stream ? PRE_HEADER_MAX_DELAY_SECONDS : undefined,
+        body.stream ? PRE_HEADER_MAX_DELAY_SECONDS : undefined,
     },
   )
 
   if (!response.ok) {
     consola.error("Failed to create responses")
-    throw new HTTPError("Failed to create responses", response, payload)
+    throw new HTTPError("Failed to create responses", response, preparedPayload)
   }
 
-  if (payload.stream) {
+  if (body.stream) {
     return events(response)
   }
 

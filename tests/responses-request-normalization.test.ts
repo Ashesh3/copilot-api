@@ -100,6 +100,29 @@ test("omits Responses tool controls when no tools are available", async () => {
   expect(lastRequestBody).not.toHaveProperty("parallel_tool_calls")
 })
 
+test("forwards reviewed Responses fields from the prepared request", async () => {
+  await createResponses(
+    {
+      model: "gpt-4o",
+      input: "Hello",
+      context_management: [{ type: "truncate" }],
+      prompt_cache_options: { mode: "explicit", ttl: "30m" },
+      prompt_cache_retention: "in_memory",
+      truncation: "auto",
+      user: "user-1",
+    },
+    { vision: false, initiator: "user" },
+  )
+
+  expect(lastRequestBody).toMatchObject({
+    context_management: [{ type: "truncate" }],
+    prompt_cache_options: { mode: "explicit", ttl: "30m" },
+    prompt_cache_retention: "in_memory",
+    truncation: "auto",
+    user: "user-1",
+  })
+})
+
 test("does not pass upstream Responses objects to ordinary logs", async () => {
   fetchMock.mockImplementationOnce(() =>
     Response.json(

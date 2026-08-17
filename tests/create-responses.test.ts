@@ -327,24 +327,22 @@ test("keeps Responses header affinity over metadata and ignores malformed metada
   expect(capturedAffinity).toBeUndefined()
 })
 
-test("preserves previous_response_id when sending Responses API requests", async () => {
-  await createResponses(
-    {
-      model: "gpt-4o",
-      input: "Hello",
-      previous_response_id: "resp_previous",
-    } as {
-      model: string
-      input: string
-      previous_response_id: string
+test("rejects previous_response_id for HTTP Responses API requests", async () => {
+  const error = await createResponses(
+    { model: "gpt-4o", input: "Hello", previous_response_id: "resp_previous" },
+    { vision: false, initiator: "user" },
+  ).catch((caught: unknown) => caught)
+  expect(error).toMatchObject({
+    response: { status: 400 },
+    clientBody: {
+      error: {
+        code: "unsupported_value",
+        param: "previous_response_id",
+        type: "invalid_request_error",
+      },
     },
-    {
-      vision: false,
-      initiator: "user",
-    },
-  )
-
-  expect(lastRequestBody?.previous_response_id).toBe("resp_previous")
+  })
+  expect(fetchMock).not.toHaveBeenCalled()
 })
 
 test("preserves prompt and conversation_id when sending Responses API requests", async () => {

@@ -135,7 +135,7 @@ async function normalizeContentArray(
 }
 
 export async function normalizeResponsesAttachments(
-  payload: ResponsesPayload,
+  payload: Pick<ResponsesPayload, "input"> & Record<string, unknown>,
   signal?: AbortSignal,
   resizeImage: ResponsesImageResizer = resizeResponsesImage,
 ): Promise<void> {
