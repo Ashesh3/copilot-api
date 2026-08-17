@@ -387,6 +387,45 @@ test("preserves tool controls when a chat fallback request has tools", async () 
   expect(lastUpstreamPayload?.parallel_tool_calls).toBe(false)
 })
 
+test("normalizes deprecated Chat controls before Responses fallback translation", async () => {
+  const response = await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "Call the legacy lookup." }],
+      functions: [
+        {
+          name: "legacy_lookup",
+          description: "Legacy lookup",
+          parameters: {},
+        },
+      ],
+      function_call: { name: "legacy_lookup" },
+      stream: false,
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/responses")
+  expect(lastUpstreamPayload?.tools).toEqual([
+    {
+      type: "function",
+      name: "legacy_lookup",
+      description: "Legacy lookup",
+      parameters: { type: "object", properties: {} },
+      strict: false,
+      copilot_cache_control: { type: "ephemeral" },
+    },
+  ])
+  expect(lastUpstreamPayload?.tool_choice).toEqual({
+    type: "function",
+    name: "legacy_lookup",
+  })
+  expect(lastUpstreamPayload).not.toHaveProperty("functions")
+  expect(lastUpstreamPayload).not.toHaveProperty("function_call")
+})
+
 test("omits unsupported sampling parameters for responses-only fallback models", async () => {
   const response = await server.request("/v1/chat/completions", {
     method: "POST",

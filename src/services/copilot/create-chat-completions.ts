@@ -11,6 +11,7 @@ import {
 } from "~/lib/attachments"
 import { HTTPError } from "~/lib/error"
 import { modelSupportsAssistantPrefill } from "~/lib/model-settings"
+import { normalizeChatCompletionsRequest } from "~/routes/chat-completions/chat-contract"
 import {
   hasVisionContent,
   detectInitiator,
@@ -48,45 +49,14 @@ const rewriteUnsupportedAssistantPrefill = (
   }
 }
 
-const normalizeFunctionTool = (tool: unknown): void => {
-  if (!isRecord(tool) || tool.type !== "function") {
-    return
-  }
-
-  const functionDefinition = tool.function
-  if (!isRecord(functionDefinition)) {
-    return
-  }
-
-  const parameters = functionDefinition.parameters
-  if (!isRecord(parameters) || Array.isArray(parameters)) {
-    functionDefinition.parameters = { type: "object", properties: {} }
-    return
-  }
-
-  if (!parameters.type) {
-    parameters.type = "object"
-  }
-  if (!isRecord(parameters.properties)) {
-    parameters.properties = {}
-  }
-}
-
 /**
  * Normalize payload before sending to Copilot.
- * - Fix empty tool parameters (Copilot rejects {} without type/properties)
  * - Downgrade json_schema to json_object (Copilot returns empty content for json_schema)
  *   and stash the schema so injectJsonInstruction can reference it
  */
 const normalizePayload = (payload: ChatCompletionsPayload): void => {
   if (payload.stream && !payload.stream_options) {
     payload.stream_options = { include_usage: true }
-  }
-
-  if (payload.tools) {
-    for (const tool of payload.tools) {
-      normalizeFunctionTool(tool)
-    }
   }
 
   if (
@@ -487,20 +457,27 @@ export const createChatCompletions = async (
   payload: ChatCompletionsPayload,
   options?: ChatCompletionsRequestOptions,
 ) => {
+  const normalizedPayload = normalizeChatCompletionsRequest(payload)
   options?.signal?.throwIfAborted()
-  rewriteUnsupportedAssistantPrefill(payload)
-  await normalizeChatAttachments(payload, options?.signal)
+  rewriteUnsupportedAssistantPrefill(normalizedPayload)
+  await normalizeChatAttachments(normalizedPayload, options?.signal)
   options?.signal?.throwIfAborted()
-  const vision = hasVisionContent(payload.messages)
-  const initiator = detectInitiator(payload.messages, options?.initiator)
+  const vision = hasVisionContent(normalizedPayload.messages)
+  const initiator = detectInitiator(
+    normalizedPayload.messages,
+    options?.initiator,
+  )
   const headerOpts = { vision, initiator }
 
-  normalizePayload(payload)
-  injectJsonInstruction(payload)
-  addPromptCaching(payload.messages, payload.tools ?? undefined)
+  normalizePayload(normalizedPayload)
+  injectJsonInstruction(normalizedPayload)
+  addPromptCaching(
+    normalizedPayload.messages,
+    normalizedPayload.tools ?? undefined,
+  )
 
   const outboundPayload = prepareChatCompletionsPayload(
-    payload,
+    normalizedPayload,
     options?.compaction,
   )
 
@@ -509,10 +486,10 @@ export const createChatCompletions = async (
     headerOptions: headerOpts,
     outboundPayload,
     signal: options?.signal,
-    sourcePayload: payload,
+    sourcePayload: normalizedPayload,
   })
 
-  if (payload.stream) {
+  if (normalizedPayload.stream) {
     return handleStreamingResponse(active.response, {
       payload: active.payload,
       retry: async () => {
@@ -617,6 +594,7 @@ export interface ChatCompletionsPayload {
   temperature?: number | null
   top_p?: number | null
   max_tokens?: number | null
+  max_completion_tokens?: number | null
   stop?: string | Array<string> | null
   n?: number | null
   stream?: boolean | null
@@ -627,9 +605,15 @@ export interface ChatCompletionsPayload {
   presence_penalty?: number | null
   logit_bias?: Record<string, number> | null
   logprobs?: boolean | null
+  top_logprobs?: number | null
+  prediction?: Record<string, unknown> | null
+  reasoning_effort?: string | null
+  thinking_budget?: number | null
   response_format?: { type: string; [key: string]: unknown } | null
   seed?: number | null
   tools?: Array<Tool> | null
+  functions?: Array<Record<string, unknown>> | null
+  function_call?: string | { name: string } | null
   tool_choice?:
     | "none"
     | "auto"

@@ -248,6 +248,40 @@ test("skips non-function tools during payload normalization", async () => {
   ).toEqual({ type: "object", properties: {} })
 })
 
+test("dispatches normalized deprecated Chat controls without mutating the caller", async () => {
+  const payload: ChatCompletionsPayload = {
+    model: "gpt-test",
+    messages: [{ role: "user", content: "hello" }],
+    functions: [{ name: "legacy_lookup", parameters: {} }],
+    function_call: { name: "legacy_lookup" },
+    stream: true,
+  }
+  const original = structuredClone(payload)
+  queuedResponses.push(createSSEStreamResponse(["data: [DONE]"]))
+
+  await createChatCompletions(payload)
+
+  expect(payload).toEqual(original)
+  expect(lastRequestBody).toMatchObject({
+    tools: [
+      {
+        type: "function",
+        function: {
+          name: "legacy_lookup",
+          parameters: { type: "object", properties: {} },
+        },
+      },
+    ],
+    tool_choice: {
+      type: "function",
+      function: { name: "legacy_lookup" },
+    },
+    stream_options: { include_usage: true },
+  })
+  expect(lastRequestBody).not.toHaveProperty("functions")
+  expect(lastRequestBody).not.toHaveProperty("function_call")
+})
+
 test("retries streamed chat completions when the first SSE event is an overload error", async () => {
   const overloadEvent = 'data: {"error":{"message":"Overloaded"}}'
   const successChunk = JSON.stringify({

@@ -60,6 +60,7 @@ import {
   resolveWebSearchCalls,
 } from "../messages/web-search-helpers"
 import { executeAnthropicBridge } from "./anthropic-bridge"
+import { normalizeChatCompletionsRequest } from "./chat-contract"
 import {
   executeResponsesFallback,
   shouldUseResponsesFallback,
@@ -67,14 +68,20 @@ import {
 
 export async function handleCompletion(c: Context) {
   const rawPayload = await c.req.json<ChatCompletionsPayload>()
-  const conversationId = setSentryConversationIdFromRequest(c, rawPayload)
+  const normalizedPayload = normalizeChatCompletionsRequest(rawPayload)
+  const conversationId = setSentryConversationIdFromRequest(
+    c,
+    normalizedPayload,
+  )
 
-  const model = normalizeModelName(parseModelSuffix(rawPayload.model).baseModel)
+  const model = normalizeModelName(
+    parseModelSuffix(normalizedPayload.model).baseModel,
+  )
 
   return await Sentry.startSpan(
     createSentryInvokeAgentSpanOptions(model, conversationId),
     async () => {
-      return await handleCompletionInner(c, rawPayload)
+      return await handleCompletionInner(c, normalizedPayload)
     },
   )
 }
