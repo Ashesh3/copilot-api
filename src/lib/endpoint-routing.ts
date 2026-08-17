@@ -33,6 +33,8 @@ export interface EndpointRouteFailure {
   source: ClientDialect
 }
 
+type TranslatedRouteReason = Exclude<EndpointRouteDecision["reason"], "native">
+
 const SOURCE_ENDPOINTS: Record<ClientDialect, CopilotInferenceEndpoint> = {
   chat: "/chat/completions",
   messages: "/v1/messages",
@@ -96,7 +98,7 @@ export function selectCopilotEndpoint(options: {
   candidates: Array<{
     check: TranslationCheck
     endpoint: CopilotInferenceEndpoint
-    reason: EndpointRouteDecision["reason"]
+    reason: TranslatedRouteReason
   }>
   source: ClientDialect
   support: ModelEndpointSupport
@@ -107,8 +109,15 @@ export function selectCopilotEndpoint(options: {
       && candidate.check.supported
     ) {
       const translated = candidate.endpoint !== SOURCE_ENDPOINTS[options.source]
+      let reason: EndpointRouteDecision["reason"] = "native"
+      if (translated) {
+        reason = "endpoint_unavailable"
+        if (candidate.reason === "payload_requirement") {
+          reason = "payload_requirement"
+        }
+      }
       return {
-        reason: translated ? candidate.reason : "native",
+        reason,
         source: options.source,
         target: candidate.endpoint,
         translated,

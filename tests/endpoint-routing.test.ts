@@ -77,7 +77,7 @@ test("selects native first and the first lossless supported fallback", () => {
       candidates: [
         {
           endpoint: "/v1/messages",
-          reason: "native",
+          reason: "endpoint_unavailable",
           check: { supported: true, blockers: [] },
         },
         {
@@ -111,7 +111,7 @@ test("selects candidates in caller order when earlier endpoints are unusable", (
         },
         {
           endpoint: "/chat/completions",
-          reason: "native",
+          reason: "endpoint_unavailable",
           check: { supported: true, blockers: [] },
         },
       ],
@@ -169,6 +169,30 @@ test("derives a native route from its source and selected endpoint", () => {
     source: "responses",
     target: "/responses",
     translated: false,
+  })
+})
+
+test("does not preserve a native reason for a translated route", () => {
+  const support = getModelEndpointSupport({
+    supported_endpoints: ["/responses"],
+  })
+  expect(
+    selectCopilotEndpoint({
+      source: "chat",
+      support,
+      candidates: [
+        {
+          endpoint: "/responses",
+          reason: "native" as never,
+          check: { supported: true, blockers: [] },
+        },
+      ],
+    }),
+  ).toEqual({
+    reason: "endpoint_unavailable",
+    source: "chat",
+    target: "/responses",
+    translated: true,
   })
 })
 
