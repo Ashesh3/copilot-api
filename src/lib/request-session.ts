@@ -11,9 +11,10 @@ import { getRoutingAffinity } from "~/lib/routing-affinity"
  */
 export const clientSessionStorage = new AsyncLocalStorage<string | undefined>()
 export const requestIdStorage = new AsyncLocalStorage<string | undefined>()
-export const quotaHeadersStorage = new AsyncLocalStorage<
+export const copilotResponseHeadersStorage = new AsyncLocalStorage<
   Record<string, string>
 >()
+export const quotaHeadersStorage = copilotResponseHeadersStorage
 export const routedAccountStorage = new AsyncLocalStorage<{
   lastUsedAccountId?: number
 }>()
@@ -63,20 +64,20 @@ export function getRequestId(): string | undefined {
   return requestIdStorage.getStore()
 }
 
-export function getQuotaHeaders(): Record<string, string> {
-  return quotaHeadersStorage.getStore() ?? {}
+export function getCopilotResponseHeaders(): Record<string, string> {
+  return copilotResponseHeadersStorage.getStore() ?? {}
 }
 
-export function setQuotaHeader(name: string, value: string): void {
-  const headers = quotaHeadersStorage.getStore()
+export function setCopilotResponseHeader(name: string, value: string): void {
+  const headers = copilotResponseHeadersStorage.getStore()
   if (!headers) {
     return
   }
   headers[name] = value
 }
 
-export function clearQuotaHeaders(): void {
-  const headers = quotaHeadersStorage.getStore()
+export function clearCopilotResponseHeaders(): void {
+  const headers = copilotResponseHeadersStorage.getStore()
   if (!headers) {
     return
   }
@@ -85,6 +86,10 @@ export function clearQuotaHeaders(): void {
     Reflect.deleteProperty(headers, key)
   }
 }
+
+export const getQuotaHeaders = getCopilotResponseHeaders
+export const setQuotaHeader = setCopilotResponseHeader
+export const clearQuotaHeaders = clearCopilotResponseHeaders
 
 export function getLastUsedRoutedAccountId(): number | undefined {
   return routedAccountStorage.getStore()?.lastUsedAccountId

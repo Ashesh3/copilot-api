@@ -20,8 +20,8 @@ import { createAuthMiddleware } from "./lib/request-auth"
 import { requestLogger } from "./lib/request-logger"
 import {
   createRoutingTelemetryRequestState,
-  getQuotaHeaders,
-  quotaHeadersStorage,
+  copilotResponseHeadersStorage,
+  getCopilotResponseHeaders,
   requestIdStorage,
   routedAccountStorage,
   routingTelemetryStorage,
@@ -97,7 +97,9 @@ function runWithRequestRoutingScopes<T>(
 ): T {
   return runWithCopilotRequestAttribution(attribution, () =>
     runWithRoutingAffinity(affinity, () =>
-      quotaHeadersStorage.run({}, () => routedAccountStorage.run({}, callback)),
+      copilotResponseHeadersStorage.run({}, () =>
+        routedAccountStorage.run({}, callback),
+      ),
     ),
   )
 }
@@ -127,7 +129,8 @@ server.use("*", async (c, next) => {
     await runWithRequestRoutingScopes(attribution, affinity, async () => {
       await next()
 
-      for (const [key, value] of Object.entries(getQuotaHeaders())) {
+      for (const [key, value] of Object.entries(getCopilotResponseHeaders())) {
+        if (key === "x-request-id") continue
         c.header(key, value)
       }
     })

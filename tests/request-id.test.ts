@@ -407,6 +407,75 @@ test("does not forward stale quota headers from a failed upstream retry attempt"
   expect(response.headers.get("x-quota-snapshot-chat")).toBeNull()
 })
 
+test("publishes safe metadata from only the final returned attempt", async () => {
+  queuedResponses.push(
+    new Response("retry", {
+      status: 503,
+      headers: {
+        "retry-after": "0",
+        "x-copilot-service-request-id": "failed-attempt",
+      },
+    }),
+    createChatCompletionResponse(200, {
+      "x-copilot-service-request-id": "successful-attempt",
+      "x-copilot-api-exp-assignment-context": "flight:1;",
+      "x-request-id": "upstream-request-id",
+    }),
+  )
+
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-request-id": "gateway-request-id",
+    },
+    body: JSON.stringify({
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "Hello" }],
+      max_tokens: 32,
+    }),
+  })
+
+  expect(response.headers.get("x-copilot-service-request-id")).toBe(
+    "successful-attempt",
+  )
+  expect(response.headers.get("x-copilot-api-exp-assignment-context")).toBe(
+    "flight:1;",
+  )
+  expect(response.headers.get("x-request-id")).toBe("gateway-request-id")
+})
+
+test("publishes safe metadata from a terminal upstream error", async () => {
+  queuedResponses.push(
+    Response.json(
+      { error: { message: "invalid request" } },
+      {
+        status: 400,
+        headers: {
+          "retry-after": "15",
+          "x-copilot-service-request-id": "terminal-error",
+        },
+      },
+    ),
+  )
+
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "Hello" }],
+      max_tokens: 32,
+    }),
+  })
+
+  expect(response.status).toBe(400)
+  expect(response.headers.get("retry-after")).toBe("15")
+  expect(response.headers.get("x-copilot-service-request-id")).toBe(
+    "terminal-error",
+  )
+})
+
 test("records one routed client request after HTTP model handling", async () => {
   const response = await server.request("/v1/messages", {
     method: "POST",

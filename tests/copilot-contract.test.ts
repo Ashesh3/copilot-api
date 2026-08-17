@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test"
 
 import {
+  collectSafeCopilotResponseHeaders,
   COPILOT_API_VERSION,
   DEFAULT_COPILOT_INTEGRATION_ID,
   resolveCopilotIntegrationId,
@@ -29,4 +30,45 @@ test("rejects integration identifiers that can inject a header", () => {
   expect(() => resolveCopilotIntegrationId("good\r\nX-Evil: 1")).toThrow(
     "COPILOT_INTEGRATION_ID",
   )
+})
+
+test("collects only safe Copilot response metadata", () => {
+  const headers = new Headers({
+    "x-quota-snapshot-premium_interactions": "ent=100&rem=50",
+    "retry-after": "Sun, 17 Aug 2026 12:00:00 GMT",
+    "x-copilot-api-exp-assignment-context": "capi_flight:1;",
+    "x-copilot-service-request-id": "service-123",
+    "x-github-request-id": "github-456",
+    "x-github-copilot-request-te": "false",
+    "x-usage-ratelimit-remaining": "42",
+    "x-request-id": "upstream-owned",
+    "set-cookie": "secret=1",
+    authorization: "Bearer secret",
+    "x-provider-deployment": "private-name",
+  })
+
+  expect(collectSafeCopilotResponseHeaders(headers)).toEqual({
+    "retry-after": "Sun, 17 Aug 2026 12:00:00 GMT",
+    "x-copilot-api-exp-assignment-context": "capi_flight:1;",
+    "x-copilot-service-request-id": "service-123",
+    "x-github-copilot-request-te": "false",
+    "x-github-request-id": "github-456",
+    "x-quota-snapshot-premium_interactions": "ent=100&rem=50",
+    "x-usage-ratelimit-remaining": "42",
+  })
+})
+
+test("rejects unsafe Copilot response metadata values", () => {
+  const headers = {
+    *entries(): IterableIterator<[string, string]> {
+      yield ["x-copilot-service-request-id", "service-123\0private"]
+      yield ["x-github-request-id", "github-456\r\nprivate"]
+      yield ["retry-after", "x".repeat(8 * 1024 + 1)]
+      yield ["X-Usage-Ratelimit-Remaining", "42"]
+    },
+  } as unknown as Headers
+
+  expect(collectSafeCopilotResponseHeaders(headers)).toEqual({
+    "x-usage-ratelimit-remaining": "42",
+  })
 })

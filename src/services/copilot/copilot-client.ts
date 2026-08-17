@@ -15,11 +15,11 @@ import {
   toLlmDebugLogError,
 } from "~/lib/llm-debug-log"
 import {
-  clearQuotaHeaders,
+  clearCopilotResponseHeaders,
   getClientSessionId,
   getRoutingTelemetryRequestState,
   getRequestId,
-  setQuotaHeader,
+  setCopilotResponseHeader,
   updateRoutingTelemetryRequestState,
 } from "~/lib/request-session"
 import {
@@ -30,6 +30,7 @@ import {
 import { state } from "~/lib/state"
 import { deriveUpstreamSessionId } from "~/lib/upstream-session-affinity"
 import {
+  collectSafeCopilotResponseHeaders,
   COPILOT_API_VERSION,
   sanitizeCopilotHeaderValue,
 } from "~/services/copilot/copilot-contract"
@@ -230,14 +231,6 @@ export function parseQuotaHeaders(
   }
 
   return found ? result : undefined
-}
-
-function captureQuotaHeaders(response: Response): void {
-  for (const [key, value] of response.headers.entries()) {
-    if (key.toLowerCase().startsWith("x-quota-snapshot-")) {
-      setQuotaHeader(key, value)
-    }
-  }
 }
 
 // --- Deterministic 400 Detection ---
@@ -606,12 +599,20 @@ function planHttpRetryDelaySeconds(options: {
   return delaySeconds
 }
 
-function recordQuotaSnapshot(response: Response): void {
+function logQuotaSnapshot(response: Response): void {
   const quota = parseQuotaHeaders(response)
   if (quota) {
     consola.debug("Copilot quota snapshot:", quota)
   }
-  captureQuotaHeaders(response)
+}
+
+function recordFinalResponseHeaders(response: Response): void {
+  clearCopilotResponseHeaders()
+  for (const [name, value] of Object.entries(
+    collectSafeCopilotResponseHeaders(response.headers),
+  )) {
+    setCopilotResponseHeader(name, value)
+  }
 }
 
 type ResponseAction =
@@ -687,6 +688,7 @@ export async function copilotFetch(
 
   let lastError: Error | undefined
   let lastResponse: Response | undefined
+  clearCopilotResponseHeaders()
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     let debugLogId: string | undefined
@@ -695,7 +697,6 @@ export async function copilotFetch(
 
     try {
       const headers = toHeaderRecord(requestInit?.headers)
-      clearQuotaHeaders()
 
       debugLogId = startLlmDebugAttempt({ headers, path, requestInit, url })
 
@@ -710,7 +711,7 @@ export async function copilotFetch(
       })
 
       captureLlmDebugAttemptResponse(debugLogId, response)
-      recordQuotaSnapshot(response)
+      logQuotaSnapshot(response)
 
       const action = await classifyResponse({
         attempt,
@@ -722,6 +723,7 @@ export async function copilotFetch(
       })
 
       if (action.kind === "refresh-token") {
+        clearCopilotResponseHeaders()
         requestInit = await refreshTokenForRetry(headers, requestInit, path)
         telemetryState.reason = "token_refresh"
         continue
@@ -729,6 +731,7 @@ export async function copilotFetch(
 
       if (action.kind === "retry-status") {
         lastResponse = response
+        clearCopilotResponseHeaders()
         retryBackoffExtraSeconds *= BACKOFF_FACTOR
         await httpRetrySleep(action.delaySeconds * 1000, requestInit?.signal)
         telemetryState.reason = "http_retry"
@@ -736,10 +739,12 @@ export async function copilotFetch(
       }
 
       logChainResponse(chain, Date.now() - attemptStartedAtMs, response.status)
+      recordFinalResponseHeaders(response)
       return response
     } catch (error) {
       lastError = error as Error
       failLlmDebugAttempt(debugLogId, error)
+      clearCopilotResponseHeaders()
 
       // Resolves once the backoff has elapsed; throws to end the chain.
       await handleTransportFailure({
@@ -754,6 +759,7 @@ export async function copilotFetch(
   }
 
   if (lastResponse) {
+    recordFinalResponseHeaders(lastResponse)
     return lastResponse
   }
 
