@@ -1,3 +1,5 @@
+import { Buffer } from "node:buffer"
+
 export const COPILOT_API_VERSION = "2026-08-01"
 export const DEFAULT_COPILOT_INTEGRATION_ID = "vscode-chat"
 
@@ -50,7 +52,8 @@ export function collectSafeCopilotResponseHeaders(
       )
     if (
       !isSafeName
-      || value.length > MAX_SAFE_RESPONSE_HEADER_VALUE_LENGTH
+      || Buffer.byteLength(value, "utf8")
+        > MAX_SAFE_RESPONSE_HEADER_VALUE_LENGTH
       || /[\0\r\n]/.test(value)
     ) {
       continue

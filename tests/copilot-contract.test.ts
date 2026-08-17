@@ -72,3 +72,18 @@ test("rejects unsafe Copilot response metadata values", () => {
     "x-usage-ratelimit-remaining": "42",
   })
 })
+
+test("enforces the Copilot response metadata limit in UTF-8 bytes", () => {
+  const exactlyEightKiB = "é".repeat(4 * 1024)
+  const overEightKiB = `${exactlyEightKiB}a`
+  const headers = {
+    *entries(): IterableIterator<[string, string]> {
+      yield ["x-github-request-id", exactlyEightKiB]
+      yield ["x-copilot-service-request-id", overEightKiB]
+    },
+  } as unknown as Headers
+
+  expect(collectSafeCopilotResponseHeaders(headers)).toEqual({
+    "x-github-request-id": exactlyEightKiB,
+  })
+})
