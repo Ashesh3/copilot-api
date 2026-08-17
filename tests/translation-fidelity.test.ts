@@ -1131,6 +1131,92 @@ test("scans Responses input before tools and top-level controls", () => {
   })
 })
 
+test("preserves true first-seen order across Responses input items", () => {
+  expect(
+    checkResponsesToChatTranslation({
+      model: "chat-only",
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "future_content", value: "private" }],
+        },
+        {
+          type: "reasoning",
+          encrypted_content: "private-state",
+          summary: [],
+        },
+      ],
+    }),
+  ).toEqual({
+    supported: false,
+    blockers: ["content_type", "opaque_reasoning"],
+  })
+
+  expect(
+    checkResponsesToMessagesTranslation({
+      model: "claude-current",
+      input: [
+        { type: "future_item", value: "private" },
+        {
+          type: "custom_tool_call",
+          call_id: "call_1",
+          name: "private-tool",
+        },
+      ],
+    }),
+  ).toEqual({
+    supported: false,
+    blockers: ["input_item", "tool_semantics:custom_tool_call"],
+  })
+})
+
+test.each([
+  {
+    name: "numeric message content",
+    item: { type: "message", role: "user", content: 7 },
+    blocker: "content_type",
+  },
+  {
+    name: "secret object message content",
+    item: {
+      type: "message",
+      role: "user",
+      content: { type: "SECRET_message_content", value: "private" },
+    },
+    blocker: "content_type",
+  },
+  {
+    name: "numeric function output",
+    item: { type: "function_call_output", call_id: "call_1", output: 7 },
+    blocker: "content_type",
+  },
+  {
+    name: "secret object function output",
+    item: {
+      type: "function_call_output",
+      call_id: "call_1",
+      output: { type: "SECRET_output", value: "private" },
+    },
+    blocker: "content_type",
+  },
+])("rejects explicit malformed Responses $name", ({ item, blocker }) => {
+  const payload = { model: "chat-only", input: [item] } as ResponsesPayload
+
+  expect(checkResponsesToChatTranslation(payload)).toEqual({
+    supported: false,
+    blockers: [blocker],
+  })
+  expect(checkResponsesToMessagesTranslation(payload)).toEqual({
+    supported: false,
+    blockers: [blocker],
+  })
+  expect(() => responsesToChatCompletions(payload)).toThrow(LocalHTTPError)
+  expect(
+    JSON.stringify(checkResponsesToChatTranslation(payload)),
+  ).not.toContain("SECRET_")
+})
+
 test("blocks accepted Responses client_metadata on both translation targets", () => {
   const payload = {
     model: "gpt-current",

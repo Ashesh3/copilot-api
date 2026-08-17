@@ -56,17 +56,6 @@ function getType(value: unknown): string | undefined {
   return value.type
 }
 
-function scanInput(
-  input: ResponsesPayload["input"],
-  onItem: (item: Record<string, unknown>, type: string | undefined) => void,
-): void {
-  if (!Array.isArray(input)) return
-  for (const item of input) {
-    if (!isRecord(item)) continue
-    onItem(item, getType(item))
-  }
-}
-
 function scanTools(
   tools: ResponsesPayload["tools"],
   onTool: (tool: Record<string, unknown>, type: string | undefined) => void,
@@ -135,19 +124,6 @@ function hasOnlyMessagesReasoningInclude(payload: ResponsesPayload): boolean {
     || (payload.include.length === 1
       && payload.include[0] === "reasoning.encrypted_content")
   )
-}
-
-function scanInputContentBlockers(
-  payload: ResponsesPayload,
-  blockers: Array<string>,
-): void {
-  scanInput(payload.input, (item, type) => {
-    let content: unknown
-    if (type === undefined || type === "message") content = item.content
-    else if (type === "function_call_output") content = item.output
-    if (!Array.isArray(content)) return
-    for (const part of content) scanInputContent(part, blockers)
-  })
 }
 
 function scanInputContent(content: unknown, blockers: Array<string>): void {
@@ -225,25 +201,73 @@ const SUPPORTED_INPUT_ITEMS = new Set([
   "reasoning",
 ])
 
-function scanUnknownInputItems(
-  payload: ResponsesPayload,
+function scanResponsesInput(
+  input: ResponsesPayload["input"],
   blockers: Array<string>,
+  options: { toolBlockers: Record<string, string> },
 ): void {
-  if (!Array.isArray(payload.input)) return
-  for (const item of payload.input) {
+  if (!Array.isArray(input)) return
+  for (const item of input) {
     if (!isRecord(item)) {
       addBlocker(blockers, "input_item")
       continue
     }
     const type = getType(item)
-    const isImplicitMessage =
-      type === undefined
-      && typeof item.role === "string"
-      && (typeof item.content === "string" || Array.isArray(item.content))
-    if (!isImplicitMessage && (!type || !SUPPORTED_INPUT_ITEMS.has(type))) {
-      addBlocker(blockers, "input_item")
-    }
+    addInputItemBlockers({ item, type, blockers, ...options })
+    scanItemContent(item, type, blockers)
   }
+}
+
+function addInputItemBlockers(options: {
+  blockers: Array<string>
+  item: Record<string, unknown>
+  type: string | undefined
+  toolBlockers: Record<string, string>
+}): void {
+  const { blockers, item, toolBlockers, type } = options
+  if (type === "reasoning") addBlocker(blockers, "opaque_reasoning")
+  if (type === "item_reference") addBlocker(blockers, "item_reference")
+  addKnownInputToolBlocker(blockers, type, toolBlockers)
+
+  if (
+    (type === undefined || type === "message")
+    && item.phase !== undefined
+    && item.phase !== null
+  ) {
+    addBlocker(blockers, "content_phase")
+  }
+
+  if (!isKnownInputItem(item, type)) addBlocker(blockers, "input_item")
+}
+
+function isKnownInputItem(
+  item: Record<string, unknown>,
+  type: string | undefined,
+): boolean {
+  const isImplicitMessage =
+    type === undefined
+    && typeof item.role === "string"
+    && item.content !== undefined
+  return isImplicitMessage || Boolean(type && SUPPORTED_INPUT_ITEMS.has(type))
+}
+
+function scanItemContent(
+  item: Record<string, unknown>,
+  type: string | undefined,
+  blockers: Array<string>,
+): void {
+  let field: "content" | "output" | undefined
+  if (type === undefined || type === "message") field = "content"
+  else if (type === "function_call_output") field = "output"
+  if (!field || !Object.hasOwn(item, field)) return
+
+  const content = item[field]
+  if (typeof content === "string") return
+  if (!Array.isArray(content)) {
+    addBlocker(blockers, "content_type")
+    return
+  }
+  for (const part of content) scanInputContent(part, blockers)
 }
 
 function addKnownInputToolBlocker(
@@ -295,20 +319,9 @@ export function checkResponsesToChatTranslation(
   payload: ResponsesPayload,
 ): TranslationCheck {
   const blockers: Array<string> = []
-  scanInput(payload.input, (item, type) => {
-    if (type === "reasoning") addBlocker(blockers, "opaque_reasoning")
-    if (type === "item_reference") addBlocker(blockers, "item_reference")
-    addKnownInputToolBlocker(blockers, type, CHAT_INPUT_TOOL_BLOCKERS)
-    if (
-      (type === undefined || type === "message")
-      && item.phase !== undefined
-      && item.phase !== null
-    ) {
-      addBlocker(blockers, "content_phase")
-    }
+  scanResponsesInput(payload.input, blockers, {
+    toolBlockers: CHAT_INPUT_TOOL_BLOCKERS,
   })
-  scanUnknownInputItems(payload, blockers)
-  scanInputContentBlockers(payload, blockers)
   scanTools(payload.tools, (_tool, type) => {
     if (type && CHAT_UNSUPPORTED_TOOL_SEMANTICS.has(type)) {
       addBlocker(blockers, `tool_semantics:${type}`)
@@ -336,13 +349,9 @@ export function checkResponsesToMessagesTranslation(
   payload: ResponsesPayload,
 ): TranslationCheck {
   const blockers: Array<string> = []
-  scanInput(payload.input, (_item, type) => {
-    if (type === "reasoning") addBlocker(blockers, "opaque_reasoning")
-    if (type === "item_reference") addBlocker(blockers, "item_reference")
-    addKnownInputToolBlocker(blockers, type, MESSAGES_INPUT_TOOL_BLOCKERS)
+  scanResponsesInput(payload.input, blockers, {
+    toolBlockers: MESSAGES_INPUT_TOOL_BLOCKERS,
   })
-  scanUnknownInputItems(payload, blockers)
-  scanInputContentBlockers(payload, blockers)
   scanTools(payload.tools, (tool, type) => {
     if (isCustomGrammar(tool)) {
       addBlocker(blockers, "custom_tool_grammar")
