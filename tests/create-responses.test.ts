@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- integration coverage shares one server fixture */
 import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
 
 import { HTTPError } from "../src/lib/error"
@@ -344,6 +345,49 @@ test("rejects previous_response_id for HTTP Responses API requests", async () =>
   })
   expect(fetchMock).not.toHaveBeenCalled()
 })
+
+test.each([
+  ["store", { store: true }],
+  ["background", { background: true }],
+  ["previous_response_id", { previous_response_id: "resp_previous" }],
+  ["service_tier", { service_tier: "priority" }],
+] as const)(
+  "rejects stateful control %s before a chat-only Responses fallback",
+  async (param, extra) => {
+    state.models = {
+      object: "list",
+      data: [
+        {
+          ...responsesCapableModels.data[0],
+          id: "chat-only-responses-model",
+          name: "chat-only-responses-model",
+          supported_endpoints: ["/chat/completions"],
+        },
+      ],
+    }
+
+    const response = await server.request("/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "chat-only-responses-model",
+        input: "Hello",
+        ...extra,
+      }),
+    })
+    const body = (await response.json()) as Record<string, unknown>
+
+    expect(response.status).toBe(400)
+    expect(body).toMatchObject({
+      error: {
+        code: "unsupported_value",
+        param,
+        type: "invalid_request_error",
+      },
+    })
+    expect(fetchMock).not.toHaveBeenCalled()
+  },
+)
 
 test("preserves prompt and conversation_id when sending Responses API requests", async () => {
   const prompt = {

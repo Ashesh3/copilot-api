@@ -78,6 +78,7 @@ import {
   createWebSearchResponsesTool,
   isResponsesWebSearchFunctionTool,
 } from "~/services/copilot/mcp-web-search"
+import { prepareResponsesRequest } from "~/services/copilot/responses-contract"
 
 import {
   anthropicResponseToChat,
@@ -483,6 +484,10 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
   // Expand compaction items back into regular messages
   expandCompactionItems(payload)
   disableParallelWebSearch(payload)
+
+  // Validate the shared HTTP Responses contract before endpoint selection so
+  // chat-only model fallback cannot bypass stateful-control rejection.
+  prepareResponsesRequest(payload)
 
   const selectedModel = state.models?.data.find(
     (model) => model.id === payload.model,
