@@ -5,6 +5,7 @@ import type { Model, ModelsResponse } from "../src/services/copilot/get-models"
 import { setModelRedirectsForTest } from "../src/lib/model-redirect"
 import { setModelSettingsForTest } from "../src/lib/model-settings"
 import { state } from "../src/lib/state"
+import { buildModelDiscoveryListings } from "../src/routes/models/route"
 import { server } from "../src/server"
 
 const originalModels = state.models
@@ -410,6 +411,51 @@ test("advertises ws:/responses only for native Responses models", async () => {
     "ws:/responses",
   ])
   expect(chatOnly?.supported_endpoints).toEqual(["/chat/completions"])
+})
+
+test("isolates chat-only endpoint arrays from upstream model state", async () => {
+  const listings = await buildModelDiscoveryListings()
+  const listing = listings.find(
+    (model) => model.id === "claude-implicit-medium",
+  )
+  const upstream = state.models?.data.find(
+    (model) => model.id === "claude-implicit-medium",
+  )
+
+  expect(listing?.supported_endpoints).toEqual(["/chat/completions"])
+  listing?.supported_endpoints?.push("/mutated")
+
+  expect(upstream?.supported_endpoints).toEqual(["/chat/completions"])
+})
+
+test("isolates virtual model nested metadata from upstream model state", async () => {
+  const listings = await buildModelDiscoveryListings()
+  const virtual = listings.find(
+    (model) => model.id === "claude-sonnet-4.6:high",
+  )
+  const upstream = state.models?.data.find(
+    (model) => model.id === "claude-sonnet-4.6",
+  )
+
+  virtual?.capabilities?.supports.reasoning_effort?.push("mutated")
+  const virtualBilling = virtual?.billing as {
+    token_prices: { default: { input_price: number } }
+  }
+  virtualBilling.token_prices.default.input_price = 999
+
+  expect(upstream?.capabilities.supports.reasoning_effort).toEqual([
+    "low",
+    "medium",
+    "high",
+    "max",
+  ])
+  expect(
+    (
+      upstream?.billing as {
+        token_prices: { default: { input_price: number } }
+      }
+    ).token_prices.default.input_price,
+  ).toBe(3)
 })
 
 test("preserves cumulative upstream model metadata", async () => {

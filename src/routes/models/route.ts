@@ -74,7 +74,7 @@ function supportedEndpointsForClient(model: {
 }): Array<string> | undefined {
   const endpoints = model.supported_endpoints
   if (!endpoints) return undefined
-  if (!endpoints.includes("/responses")) return endpoints
+  if (!endpoints.includes("/responses")) return [...endpoints]
   return [...new Set([...endpoints, "ws:/responses"])]
 }
 
@@ -164,13 +164,13 @@ function toVirtualModelListings(
     const separator = virtualModel.id.lastIndexOf(":")
     const sourceModel = modelsById.get(virtualModel.id.slice(0, separator))
     const supportedEndpoints = supportedEndpointsForClient(virtualModel)
-    return {
-      ...(sourceModel ? structuredClone(sourceModel) : {}),
+    return structuredClone({
+      ...sourceModel,
       ...virtualModel,
       ...(supportedEndpoints ?
         { supported_endpoints: supportedEndpoints }
       : {}),
-    }
+    })
   })
 }
 
