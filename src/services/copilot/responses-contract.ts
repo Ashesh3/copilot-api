@@ -124,10 +124,14 @@ export function prepareResponsesRequest(
 ): PreparedResponsesRequest {
   validateStatefulControls(payload)
   validateResponsesContextManagement(payload.context_management)
-  validateResponsesTools(payload.tools)
+  const preparedTools = prepareResponsesTools(payload.tools)
 
   const body = {} as ResponsesWireBody
   for (const field of RESPONSES_TOP_LEVEL_FIELDS) {
+    if (field === "tools") {
+      if (preparedTools !== undefined) body.tools = preparedTools
+      continue
+    }
     const value = normalizeStatefulField(field, payload[field])
     if (value === OMIT_FIELD || value === undefined) continue
     ;(body as Record<string, unknown>)[field] = structuredClone(value)
@@ -143,7 +147,13 @@ export function prepareResponsesRequest(
 }
 
 export function validateResponsesTools(tools: unknown): void {
-  if (tools === undefined || tools === null) return
+  prepareResponsesTools(tools)
+}
+
+function prepareResponsesTools(
+  tools: unknown,
+): Array<Record<string, unknown>> | undefined {
+  if (tools === undefined || tools === null) return undefined
   if (!Array.isArray(tools)) {
     throw createResponsesValidationError({
       code: "invalid_type",
@@ -152,19 +162,10 @@ export function validateResponsesTools(tools: unknown): void {
     })
   }
 
-  for (const tool of tools) {
-    if (
-      !isRecord(tool)
-      || Array.isArray(tool)
-      || typeof tool.type !== "string"
-    ) {
-      throw createResponsesValidationError({
-        code: "invalid_type",
-        message: "Each tool must be an object with a string type.",
-        param: "tools",
-      })
-    }
-    if (ALWAYS_BLOCKED_RESPONSES_TOOLS.has(tool.type)) {
+  return tools.map((tool) => {
+    const snapshot = getSafeResponsesToolSnapshot(tool)
+    const type = snapshot.type
+    if (ALWAYS_BLOCKED_RESPONSES_TOOLS.has(type)) {
       throw createResponsesValidationError({
         code: "unsupported_value",
         message:
@@ -172,7 +173,102 @@ export function validateResponsesTools(tools: unknown): void {
         param: "tools",
       })
     }
+    return snapshot
+  })
+}
+
+function getSafeResponsesToolSnapshot(
+  tool: unknown,
+): Record<string, unknown> & { type: string } {
+  try {
+    return createSafeResponsesToolSnapshot(tool)
+  } catch (error) {
+    if (error instanceof LocalHTTPError) throw error
+    throw createInvalidResponsesToolError()
   }
+}
+
+function createSafeResponsesToolSnapshot(
+  tool: unknown,
+): Record<string, unknown> & { type: string } {
+  if (
+    !isRecord(tool)
+    || Array.isArray(tool)
+    || Object.getPrototypeOf(tool) !== Object.prototype
+  ) {
+    throw createInvalidResponsesToolError()
+  }
+
+  const snapshot = cloneResponsesToolData(tool, new Map<object, unknown>())
+  if (!isRecord(snapshot) || Array.isArray(snapshot)) {
+    throw createInvalidResponsesToolError()
+  }
+
+  const descriptor = asDataDescriptor(
+    Object.getOwnPropertyDescriptor(snapshot, "type"),
+  )
+  if (!descriptor) {
+    throw createInvalidResponsesToolError()
+  }
+
+  const type = descriptor.value
+  if (typeof type !== "string" || type.trim() === "") {
+    throw createInvalidResponsesToolError()
+  }
+  snapshot.type = type.trim()
+  return snapshot as Record<string, unknown> & { type: string }
+}
+
+function cloneResponsesToolData(
+  value: unknown,
+  seen: Map<object, unknown>,
+): unknown {
+  if (typeof value !== "object" || value === null) return value
+  const existing = seen.get(value)
+  if (existing !== undefined) return existing
+
+  const isArray = Array.isArray(value)
+  const prototype: unknown = Object.getPrototypeOf(value)
+  if (
+    (!isArray && prototype !== Object.prototype && prototype !== null)
+    || (isArray && prototype !== Array.prototype)
+  ) {
+    throw createInvalidResponsesToolError()
+  }
+
+  const snapshot: Record<PropertyKey, unknown> | Array<unknown> =
+    isArray ? [] : {}
+  seen.set(value, snapshot)
+  for (const key of Reflect.ownKeys(value)) {
+    if (key === "length" || typeof key === "symbol") continue
+    const descriptor = asDataDescriptor(
+      Object.getOwnPropertyDescriptor(value, key),
+    )
+    if (!descriptor) throw createInvalidResponsesToolError()
+    if (!descriptor.enumerable) continue
+    Object.defineProperty(snapshot, key, {
+      configurable: true,
+      enumerable: true,
+      value: cloneResponsesToolData(descriptor.value, seen),
+      writable: true,
+    })
+  }
+  return snapshot
+}
+
+function asDataDescriptor(
+  descriptor: PropertyDescriptor | undefined,
+): { enumerable?: boolean; value: unknown } | undefined {
+  if (descriptor === undefined || !("value" in descriptor)) return undefined
+  return descriptor as { enumerable?: boolean; value: unknown }
+}
+
+function createInvalidResponsesToolError(): LocalHTTPError {
+  return createResponsesValidationError({
+    code: "invalid_type",
+    message: "Each tool must be a plain object with a non-empty string type.",
+    param: "tools",
+  })
 }
 
 export function validateResponsesContextManagement(value: unknown): void {

@@ -9,6 +9,7 @@ import {
 } from "bun:test"
 import consola from "consola"
 
+import { LocalHTTPError } from "~/lib/error"
 import { setModelSettingsForTest } from "~/lib/model-settings"
 import { state } from "~/lib/state"
 import { createResponses } from "~/services/copilot/create-responses"
@@ -208,6 +209,43 @@ test("forwards Responses tool controls when a real tool is available", async () 
   expect(lastRequestBody?.tool_choice).toBe("required")
   expect(lastRequestBody?.parallel_tool_calls).toBe(true)
 })
+
+test.each(["changing", "throwing"])(
+  "rejects a %s Responses tool type getter before the wire",
+  async (behavior) => {
+    let reads = 0
+    const tool = Object.defineProperty({}, "type", {
+      enumerable: true,
+      get() {
+        reads += 1
+        if (behavior === "throwing") throw new Error("unsafe getter detail")
+        return reads === 1 ? "function" : "code_interpreter"
+      },
+    })
+
+    let caught: unknown
+    try {
+      await createResponses(
+        {
+          model: "gpt-4o",
+          input: "Hello",
+          tools: [tool as Record<string, unknown>],
+        },
+        { vision: false, initiator: "user" },
+      )
+    } catch (error) {
+      caught = error
+    }
+
+    expect(caught).toBeInstanceOf(LocalHTTPError)
+    expect((caught as LocalHTTPError).clientBody).toMatchObject({
+      error: { code: "invalid_type", param: "tools" },
+    })
+
+    expect(reads).toBe(0)
+    expect(lastRequestBody).toBeUndefined()
+  },
+)
 
 test("forwards reviewed Responses fields from the prepared request", async () => {
   await createResponses(

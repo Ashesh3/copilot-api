@@ -392,6 +392,8 @@ test.each([
   { name: "primitive tool item", tools: ["function"] },
   { name: "missing tool type", tools: [{ name: "run" }] },
   { name: "non-string tool type", tools: [{ type: 1 }] },
+  { name: "empty tool type", tools: [{ type: "" }] },
+  { name: "blank tool type", tools: [{ type: "  \t" }] },
 ])("rejects malformed Responses $name", ({ tools }) => {
   const error = captureValidationError({
     model: "gpt-current",
@@ -401,6 +403,188 @@ test.each([
 
   expect(error.clientBody).toMatchObject({
     error: { code: "invalid_type", param: "tools" },
+  })
+})
+
+test("rejects inherited Responses tool types", () => {
+  const tool = Object.create({ type: "function" }) as Record<string, unknown>
+  tool.name = "run"
+
+  const error = captureValidationError({
+    model: "gpt-current",
+    input: "hello",
+    tools: [tool],
+  })
+
+  expect(error.clientBody).toMatchObject({
+    error: { code: "invalid_type", param: "tools" },
+  })
+})
+
+test("rejects non-plain Responses tool records", () => {
+  class ToolRecord {
+    type = "function"
+  }
+
+  const error = captureValidationError({
+    model: "gpt-current",
+    input: "hello",
+    tools: [new ToolRecord() as unknown as Record<string, unknown>],
+  })
+
+  expect(error.clientBody).toMatchObject({
+    error: { code: "invalid_type", param: "tools" },
+  })
+})
+
+test("trims Responses tool types without mutating the caller", () => {
+  const tool = { type: "  client_future_tool  ", name: "run" }
+  const body = prepareResponsesRequest({
+    model: "gpt-current",
+    input: "hello",
+    tools: [tool],
+  }).body
+
+  expect((body.tools as Array<Record<string, unknown>>)[0]?.type).toBe(
+    "client_future_tool",
+  )
+  expect(tool.type).toBe("  client_future_tool  ")
+})
+
+test("blocks Responses tool types after trimming", () => {
+  const error = captureValidationError({
+    model: "gpt-current",
+    input: "hello",
+    tools: [{ type: "  code_interpreter  " }],
+  })
+
+  expect(error.clientBody).toMatchObject({
+    error: { code: "unsupported_value", param: "tools" },
+  })
+})
+
+test("rejects a changing Responses tool type getter without invoking it", () => {
+  let reads = 0
+  const tool = Object.defineProperty({}, "type", {
+    enumerable: true,
+    get() {
+      reads += 1
+      return reads === 1 ? "function" : "code_interpreter"
+    },
+  })
+
+  const error = captureValidationError({
+    model: "gpt-current",
+    input: "hello",
+    tools: [tool as Record<string, unknown>],
+  })
+
+  expect(error.clientBody).toMatchObject({
+    error: { code: "invalid_type", param: "tools" },
+  })
+  expect(reads).toBe(0)
+})
+
+test("rejects a throwing Responses tool type getter with a safe error", () => {
+  let reads = 0
+  const tool = Object.defineProperty({}, "type", {
+    enumerable: true,
+    get() {
+      reads += 1
+      throw new Error("unsafe getter detail")
+    },
+  })
+
+  const error = captureValidationError({
+    model: "gpt-current",
+    input: "hello",
+    tools: [tool as Record<string, unknown>],
+  })
+
+  expect(error.clientBody).toEqual({
+    error: {
+      code: "invalid_type",
+      message: "Each tool must be a plain object with a non-empty string type.",
+      param: "tools",
+      type: "invalid_request_error",
+    },
+  })
+  expect(reads).toBe(0)
+})
+
+test("rejects other Responses tool getters without invoking them", () => {
+  let reads = 0
+  const tool = Object.defineProperties(
+    {},
+    {
+      type: { enumerable: true, value: "function" },
+      name: {
+        enumerable: true,
+        get() {
+          reads += 1
+          throw new Error("unsafe getter detail")
+        },
+      },
+    },
+  )
+
+  const error = captureValidationError({
+    model: "gpt-current",
+    input: "hello",
+    tools: [tool as Record<string, unknown>],
+  })
+
+  expect(error.clientBody).toMatchObject({
+    error: { code: "invalid_type", param: "tools" },
+  })
+  expect(reads).toBe(0)
+})
+
+test("rejects nested Responses tool getters without invoking them", () => {
+  let reads = 0
+  const nested = Object.defineProperty({}, "enabled", {
+    enumerable: true,
+    get() {
+      reads += 1
+      throw new Error("unsafe nested getter detail")
+    },
+  })
+
+  const error = captureValidationError({
+    model: "gpt-current",
+    input: "hello",
+    tools: [{ type: "client_future_tool", options: nested }],
+  })
+
+  expect(error.clientBody).toMatchObject({
+    error: { code: "invalid_type", param: "tools" },
+  })
+  expect(reads).toBe(0)
+})
+
+test("rejects throwing Responses tool reflection traps with a safe error", () => {
+  const tool = new Proxy(
+    { type: "function" },
+    {
+      getPrototypeOf() {
+        throw new Error("unsafe proxy detail")
+      },
+    },
+  )
+
+  const error = captureValidationError({
+    model: "gpt-current",
+    input: "hello",
+    tools: [tool],
+  })
+
+  expect(error.clientBody).toEqual({
+    error: {
+      code: "invalid_type",
+      message: "Each tool must be a plain object with a non-empty string type.",
+      param: "tools",
+      type: "invalid_request_error",
+    },
   })
 })
 
