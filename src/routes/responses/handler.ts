@@ -10,6 +10,7 @@ import type { Model } from "~/services/copilot/get-models"
 import { getLastUsedAccountId } from "~/lib/account-router"
 import { awaitApproval } from "~/lib/approval"
 import { getConfig } from "~/lib/config"
+import { getModelEndpointSupport } from "~/lib/endpoint-routing"
 import { isAbortError } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
 import {
@@ -91,8 +92,6 @@ import { createStreamIdTracker, fixStreamIds } from "./stream-id-sync"
 import { expandCompactionItems, getResponsesRequestOptions } from "./utils"
 
 const logger = createHandlerLogger("responses-handler")
-
-const RESPONSES_ENDPOINT = "/responses"
 
 /**
  * Extracts detailed token counts from a Responses API usage object,
@@ -489,8 +488,7 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
   const selectedModel = state.models?.data.find(
     (model) => model.id === payload.model,
   )
-  const supportsResponses =
-    selectedModel?.supported_endpoints?.includes(RESPONSES_ENDPOINT) ?? false
+  const supportsResponses = getModelEndpointSupport(selectedModel).responses
 
   if (!supportsResponses) {
     // ChatCompletions has no hosted web-search tool. Downgrade it to the

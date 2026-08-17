@@ -8,6 +8,7 @@ import type {
 } from "~/routes/messages/anthropic-types"
 
 import { routedFetch } from "~/lib/account-router"
+import { getModelEndpointSupport } from "~/lib/endpoint-routing"
 import { HTTPError } from "~/lib/error"
 import { state } from "~/lib/state"
 import { PRE_HEADER_MAX_DELAY_SECONDS } from "~/services/copilot/transport-retry"
@@ -33,9 +34,7 @@ export const ANTHROPIC_MESSAGES_ENDPOINT = "/v1/messages"
 export function modelSupportsNativeMessages(
   model: { supported_endpoints?: Array<string> } | undefined,
 ): boolean {
-  return (
-    model?.supported_endpoints?.includes(ANTHROPIC_MESSAGES_ENDPOINT) ?? false
-  )
+  return getModelEndpointSupport(model).messages
 }
 
 /**

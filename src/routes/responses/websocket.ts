@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto"
 import type { RoutingAffinity } from "~/lib/routing-affinity"
 
 import { resolveRequestCredential } from "~/lib/credential-resolver"
+import { getModelEndpointSupport } from "~/lib/endpoint-routing"
 import { LocalHTTPError } from "~/lib/error"
 import {
   applyModelRedirect,
@@ -59,8 +60,6 @@ import {
   throwIfWebSocketTurnAborted,
   WebSocketRequestError,
 } from "./websocket-lifecycle"
-
-const RESPONSES_ENDPOINT = "/responses"
 
 const WS_PATHS = new Set(["/v1/responses", "/responses"])
 
@@ -334,8 +333,7 @@ async function handleResponseCreate(
   const selectedModel = state.models?.data.find(
     (model) => model.id === payload.model,
   )
-  const supportsResponses =
-    selectedModel?.supported_endpoints?.includes(RESPONSES_ENDPOINT) ?? false
+  const supportsResponses = getModelEndpointSupport(selectedModel).responses
 
   const { vision, initiator } = getResponsesRequestOptions(payload)
 

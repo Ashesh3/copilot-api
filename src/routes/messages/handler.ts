@@ -14,6 +14,7 @@ import {
   resolveCustomProviderModel,
   type CustomProviderModelReference,
 } from "~/lib/custom-providers"
+import { getModelEndpointSupport } from "~/lib/endpoint-routing"
 import { HTTPError, isAbortError } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
 import {
@@ -364,8 +365,6 @@ async function handleCompletionInner(
     requestedModel,
   })
 }
-
-const RESPONSES_ENDPOINT = "/responses"
 
 interface BufferedChatCompletionsResult {
   hadWebSearch: boolean
@@ -1554,9 +1553,7 @@ const executeResponsesApi = async (
 }
 
 const shouldUseResponsesApi = (selectedModel: Model | undefined): boolean => {
-  return (
-    selectedModel?.supported_endpoints?.includes(RESPONSES_ENDPOINT) ?? false
-  )
+  return getModelEndpointSupport(selectedModel).responses
 }
 
 const modelExists = (id: string) =>

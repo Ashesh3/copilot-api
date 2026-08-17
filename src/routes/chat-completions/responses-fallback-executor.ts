@@ -9,6 +9,7 @@ import type { ReasoningEffort } from "~/lib/model-suffix"
 import type { ChatCompletionsPayload } from "~/services/copilot/create-chat-completions"
 
 import { getLastUsedAccountId } from "~/lib/account-router"
+import { getModelEndpointSupport } from "~/lib/endpoint-routing"
 import { isAbortError } from "~/lib/error"
 import {
   recordNonDefaultBehavior,
@@ -75,9 +76,8 @@ interface UnexpectedNonStreamOptions {
 export function shouldUseResponsesFallback(
   selectedModel: { supported_endpoints?: Array<string> } | undefined,
 ): boolean {
-  const endpoints = selectedModel?.supported_endpoints
-  if (!endpoints?.includes("/responses")) return false
-  return !endpoints.includes("/chat/completions")
+  const support = getModelEndpointSupport(selectedModel)
+  return support.responses && !support.chat
 }
 
 export async function executeResponsesFallback(
