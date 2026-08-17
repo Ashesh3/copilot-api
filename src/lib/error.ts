@@ -4,6 +4,11 @@ import type { ContentfulStatusCode } from "hono/utils/http-status"
 import * as Sentry from "@sentry/bun"
 import consola from "consola"
 
+import type {
+  EndpointRouteFailure,
+  TranslationCheck,
+} from "~/lib/endpoint-routing"
+
 /**
  * Check if an error is an AbortError (client disconnected during streaming).
  * These are expected and should not be logged or reported to Sentry.
@@ -36,6 +41,38 @@ export class LocalHTTPError extends HTTPError {
     super(message, response)
     this.clientBody = clientBody
   }
+}
+
+export function createEndpointTranslationError(
+  failure: EndpointRouteFailure,
+): LocalHTTPError {
+  const concept = failure.blockers[0] ?? "request_shape"
+  const clientBody = {
+    error: {
+      code: failure.code,
+      message:
+        "The selected Copilot model cannot accept this request without losing required protocol data.",
+      param: concept,
+      type: "invalid_request_error",
+    },
+  }
+  return new LocalHTTPError(
+    clientBody.error.message,
+    Response.json(clientBody, { status: 400 }),
+    clientBody,
+  )
+}
+
+export function assertEndpointTranslationSupported(
+  failure: EndpointRouteFailure,
+  check: TranslationCheck,
+): void {
+  if (check.supported) return
+  throw createEndpointTranslationError({
+    blockers: check.blockers,
+    code: failure.code,
+    source: failure.source,
+  })
 }
 
 interface UpstreamErrorBody {

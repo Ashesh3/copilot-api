@@ -4,7 +4,6 @@ import * as Sentry from "@sentry/bun"
 import { streamSSE } from "hono/streaming"
 
 import type {
-  AnthropicAssistantContentBlock,
   AnthropicDocumentBlock,
   AnthropicImageBlock,
   AnthropicMessage,
@@ -12,7 +11,6 @@ import type {
   AnthropicResponse,
   AnthropicStreamEventData,
   AnthropicTextBlock,
-  AnthropicThinkingBlock,
   AnthropicTool,
   AnthropicToolResultBlock,
   AnthropicUserContentBlock,
@@ -28,7 +26,7 @@ import {
   isPdfMediaType,
   parseDataUri,
 } from "~/lib/attachments"
-import { isAbortError } from "~/lib/error"
+import { assertEndpointTranslationSupported, isAbortError } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
 import {
   recordNonDefaultBehavior,
@@ -52,6 +50,12 @@ import {
   type Message,
   type ToolCall,
 } from "~/services/copilot/create-chat-completions"
+
+import {
+  createAssistantBlocks,
+  getAnthropicReasoning,
+} from "./anthropic-reasoning"
+import { checkChatToMessagesTranslation } from "./translation-fidelity"
 
 const logger = createHandlerLogger("anthropic-bridge")
 
@@ -271,6 +275,15 @@ export async function chatPayloadToAnthropic(
   selectedModel?: Model,
   signal?: AbortSignal,
 ): Promise<AnthropicMessagesPayload> {
+  assertEndpointTranslationSupported(
+    {
+      blockers: [],
+      code: "endpoint_translation_unsupported",
+      source: "chat",
+    },
+    checkChatToMessagesTranslation(payload),
+  )
+
   const { systemTexts, messages } = await convertChatMessages(
     payload.messages,
     signal,
@@ -346,7 +359,7 @@ async function convertChatMessages(
 }
 
 function convertAssistantMessage(message: Message): AnthropicMessage | null {
-  const blocks: Array<AnthropicAssistantContentBlock> = []
+  const blocks = createAssistantBlocks(message)
   const text = contentToPlainText(message.content)
   if (text) blocks.push({ type: "text", text })
   for (const toolCall of message.tool_calls ?? []) {
@@ -585,12 +598,7 @@ export function anthropicResponseToChat(
     .map((block) => block.text)
     .join("")
 
-  const reasoningText = response.content
-    .filter(
-      (block): block is AnthropicThinkingBlock => block.type === "thinking",
-    )
-    .map((block) => block.thinking)
-    .join("\n\n")
+  const reasoning = getAnthropicReasoning(response.content)
 
   const toolCalls: Array<ToolCall> = response.content
     .filter((block) => block.type === "tool_use")
@@ -623,7 +631,7 @@ export function anthropicResponseToChat(
         message: {
           role: "assistant",
           content: textContent || null,
-          ...(reasoningText ? { reasoning_text: reasoningText } : {}),
+          ...reasoning,
           ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
         },
         logprobs: null,

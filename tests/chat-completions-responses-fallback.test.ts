@@ -327,6 +327,33 @@ test("routes legacy chat completions requests for responses-only models through 
   })
 })
 
+test("rejects a lossy Chat to Responses fallback before upstream dispatch", async () => {
+  const response = await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-5.5",
+      messages: [
+        { role: "user", content: "Run the tool." },
+        { role: "tool", content: "private" },
+      ],
+      stream: false,
+    }),
+  })
+
+  expect(response.status).toBe(400)
+  expect(fetchMock).not.toHaveBeenCalled()
+  expect(await response.json()).toEqual({
+    error: {
+      code: "endpoint_translation_unsupported",
+      message:
+        "The selected Copilot model cannot accept this request without losing required protocol data.",
+      param: "tool_result_pairing",
+      type: "invalid_request_error",
+    },
+  })
+})
+
 test("omits tool controls when a chat fallback request has no tools", async () => {
   const response = await server.request("/v1/chat/completions", {
     method: "POST",

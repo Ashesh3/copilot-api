@@ -2,7 +2,9 @@ import { expect, test } from "bun:test"
 
 import type { ResponsesPayload } from "../src/services/copilot/create-responses"
 
+import { LocalHTTPError } from "../src/lib/error"
 import {
+  assertResponsesChatFallbackTranslation,
   responsesToChatCompletions,
   useFunctionApplyPatch,
 } from "../src/routes/responses/handler"
@@ -45,7 +47,7 @@ test("keeps non-apply_patch custom tools unchanged on the native responses path"
   ])
 })
 
-test("converts non-apply_patch custom tools for chat completions fallback only", () => {
+test("rejects custom tool semantics in chat completions fallback", () => {
   const payload = {
     model: "gpt-4o",
     input: "Hello",
@@ -65,27 +67,10 @@ test("converts non-apply_patch custom tools for chat completions fallback only",
     ],
   } as ResponsesPayload
 
-  const chatCompletionsPayload = responsesToChatCompletions(payload)
-
-  expect(chatCompletionsPayload.tools).toEqual([
-    {
-      type: "function",
-      function: {
-        name: "run_sql",
-        description: "Execute a SQL query",
-        parameters: {
-          type: "object",
-          properties: {
-            query: { type: "string" },
-          },
-          required: ["query"],
-        },
-      },
-    },
-  ])
+  expect(() => responsesToChatCompletions(payload)).toThrow(LocalHTTPError)
 })
 
-test("preserves custom tool calls and results in chat completions fallback", () => {
+test("preserves custom tool calls and results for compaction fallback", () => {
   const payload = {
     model: "gpt-4o",
     input: [
@@ -119,7 +104,27 @@ test("preserves custom tool calls and results in chat completions fallback", () 
   ])
 })
 
-test("keeps ordinary custom tool history out of chat completions fallback", () => {
+test("compaction fallback still rejects unrelated lossy Responses state", () => {
+  expect(() =>
+    assertResponsesChatFallbackTranslation(
+      {
+        model: "gpt-4o",
+        input: [
+          {
+            type: "custom_tool_call",
+            call_id: "call_custom",
+            name: "exec",
+            input: "run",
+          },
+        ],
+        tools: [{ type: "namespace", name: "private_namespace" }],
+      },
+      true,
+    ),
+  ).toThrow(LocalHTTPError)
+})
+
+test("rejects ordinary custom tool history in chat completions fallback", () => {
   const payload = {
     model: "gpt-4o",
     input: [
@@ -137,5 +142,44 @@ test("keeps ordinary custom tool history out of chat completions fallback", () =
     ],
   } as ResponsesPayload
 
-  expect(responsesToChatCompletions(payload).messages).toEqual([])
+  expect(() => responsesToChatCompletions(payload)).toThrow(LocalHTTPError)
+})
+
+test("rejects a lossy Responses to Chat fallback before conversion", () => {
+  expect(() =>
+    responsesToChatCompletions({
+      model: "chat-only",
+      input: [
+        {
+          type: "reasoning",
+          encrypted_content: "private-encrypted-state",
+          summary: [],
+        },
+      ],
+    }),
+  ).toThrow(LocalHTTPError)
+
+  try {
+    responsesToChatCompletions({
+      model: "chat-only",
+      input: [
+        {
+          type: "reasoning",
+          encrypted_content: "private-encrypted-state",
+          summary: [],
+        },
+      ],
+    })
+  } catch (error) {
+    expect(error).toBeInstanceOf(LocalHTTPError)
+    expect((error as LocalHTTPError).clientBody).toEqual({
+      error: {
+        code: "endpoint_translation_unsupported",
+        message:
+          "The selected Copilot model cannot accept this request without losing required protocol data.",
+        param: "opaque_reasoning",
+        type: "invalid_request_error",
+      },
+    })
+  }
 })

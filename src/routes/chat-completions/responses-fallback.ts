@@ -31,11 +31,14 @@ import type {
   ResponseUsage,
 } from "~/services/copilot/create-responses"
 
+import { assertEndpointTranslationSupported } from "~/lib/error"
 import {
   createHostedWebSearchTool,
   isChatWebSearchFunctionTool,
   isWebSearchToolType,
 } from "~/services/copilot/mcp-web-search"
+
+import { checkChatToResponsesTranslation } from "./translation-fidelity"
 
 type WriteSseStream = {
   writeSSE: (data: { data: string }) => Promise<void>
@@ -82,6 +85,15 @@ export function chatCompletionsToResponses(
   payload: ChatCompletionsPayload & { model: string },
   reasoningEffort?: ReasoningEffort,
 ): ResponsesPayload {
+  assertEndpointTranslationSupported(
+    {
+      blockers: [],
+      code: "endpoint_translation_unsupported",
+      source: "chat",
+    },
+    checkChatToResponsesTranslation(payload),
+  )
+
   const input = convertMessagesToResponsesInput(payload.messages)
   const instructions = createResponsesInstructions(payload)
   const tools = convertToolsToResponses(payload.tools)

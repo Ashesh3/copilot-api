@@ -11,7 +11,7 @@ import { getLastUsedAccountId } from "~/lib/account-router"
 import { awaitApproval } from "~/lib/approval"
 import { getConfig } from "~/lib/config"
 import { getModelEndpointSupport } from "~/lib/endpoint-routing"
-import { isAbortError } from "~/lib/error"
+import { assertEndpointTranslationSupported, isAbortError } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
 import {
   applyModelRedirect,
@@ -90,6 +90,7 @@ import {
   resolveWebSearchCalls,
 } from "../messages/web-search-helpers"
 import { createStreamIdTracker, fixStreamIds } from "./stream-id-sync"
+import { checkResponsesToChatTranslation } from "./translation-fidelity"
 import { expandCompactionItems, getResponsesRequestOptions } from "./utils"
 
 const logger = createHandlerLogger("responses-handler")
@@ -774,6 +775,29 @@ export const useFunctionApplyPatch = (payload: ResponsesPayload): void => {
   }
 }
 
+export const assertResponsesChatFallbackTranslation = (
+  payload: ResponsesPayload,
+  preserveCustomToolContext: boolean | undefined,
+): void => {
+  const check = checkResponsesToChatTranslation(payload)
+  const blockers =
+    preserveCustomToolContext ?
+      check.blockers.filter(
+        (blocker) =>
+          blocker !== "tool_semantics:custom_tool_call"
+          && blocker !== "tool_semantics:custom_tool_call_output",
+      )
+    : check.blockers
+  assertEndpointTranslationSupported(
+    {
+      blockers: [],
+      code: "endpoint_translation_unsupported",
+      source: "responses",
+    },
+    { supported: blockers.length === 0, blockers },
+  )
+}
+
 export const convertWebSearchTool = (payload: ResponsesPayload): void => {
   if (!Array.isArray(payload.tools) || payload.tools.length === 0) return
 
@@ -1070,6 +1094,11 @@ export const responsesToChatCompletions = (
   payload: ResponsesPayload,
   options: { preserveCustomToolContext?: boolean } = {},
 ): ChatCompletionsPayload => {
+  assertResponsesChatFallbackTranslation(
+    payload,
+    options.preserveCustomToolContext,
+  )
+
   const messages = convertInputToMessages(
     payload.input,
     options.preserveCustomToolContext ?? false,
