@@ -1,7 +1,10 @@
 import { expect, test } from "bun:test"
 
 import type { AnthropicMessagesPayload } from "../src/routes/messages/anthropic-types"
-import type { ResponsesResult } from "../src/services/copilot/create-responses"
+import type {
+  ResponsesPayload,
+  ResponsesResult,
+} from "../src/services/copilot/create-responses"
 
 import {
   translateAnthropicMessagesToResponsesPayload,
@@ -83,6 +86,20 @@ test("preserves integer Responses reasoning effort across named suffixes", () =>
 
   expect(effort).toBe(2048)
   expect(payload.reasoning).toEqual({ effort: 2048 })
+})
+
+test("preserves zero from the top-level Responses reasoning alias", () => {
+  const payload: ResponsesPayload = {
+    model: "gpt-current",
+    input: "hello",
+    reasoning_effort: 0,
+  }
+
+  const effort = normalizeResponsesReasoning(payload)
+
+  expect(effort).toBe(0)
+  expect(payload.reasoning).toEqual({ effort: 0 })
+  expect(payload).not.toHaveProperty("reasoning_effort")
 })
 
 test("maps raw Responses reasoning content into Anthropic thinking", () => {

@@ -1,7 +1,16 @@
 /* eslint-disable max-lines -- integration coverage shares one server fixture */
-import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  expect,
+  mock,
+  spyOn,
+  test,
+} from "bun:test"
 
 import { HTTPError } from "../src/lib/error"
+import { setModelRedirectsForTest } from "../src/lib/model-redirect"
 import { setModelSettingsForTest } from "../src/lib/model-settings"
 import {
   getRoutingAffinity,
@@ -129,6 +138,7 @@ beforeEach(() => {
   state.githubToken = "github-token"
   state.isMultiToken = false
   resetRoutingTelemetryForTest()
+  setModelRedirectsForTest([])
   setModelSettingsForTest([])
 })
 
@@ -512,7 +522,7 @@ test("normalizes direct Responses max reasoning aliases", () => {
   expect((payload as Record<string, unknown>).reasoning_effort).toBeUndefined()
 })
 
-test("does not send configurable effort for implicit-default Responses models", async () => {
+test("preserves explicit string effort for implicit-default Responses models", async () => {
   setModelSettingsForTest([
     {
       model: "claude-implicit-medium",
@@ -539,8 +549,146 @@ test("does not send configurable effort for implicit-default Responses models", 
   )
 
   expect(lastRequestBody?.reasoning).toEqual({
+    effort: "high",
     summary: "auto",
   })
+})
+
+test("preserves explicit none for implicit-default Responses models", async () => {
+  const model = {
+    ...responsesCapableModels.data[0],
+    id: "gpt-5.6-implicit-medium",
+    name: "gpt-5.6-implicit-medium",
+  }
+  state.models = { object: "list", data: [model] }
+  setModelSettingsForTest([
+    {
+      model: model.id,
+      supportedReasoningEfforts: ["none", "medium"],
+      defaultReasoningEffort: "medium",
+      implicitReasoningDefault: true,
+    },
+  ])
+
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: model.id,
+      input: "Hello",
+      reasoning: { effort: "none" },
+      temperature: 0.3,
+      top_p: 0.8,
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastRequestBody?.reasoning).toEqual({ effort: "none" })
+  expect(lastRequestBody?.include ?? []).not.toContain(
+    "reasoning.encrypted_content",
+  )
+  expect(lastRequestBody?.temperature).toBe(0.3)
+  expect(lastRequestBody?.top_p).toBe(0.8)
+})
+
+test("keeps numeric Responses redirects model-only across the HTTP route", async () => {
+  const sourceModel = {
+    ...responsesCapableModels.data[0],
+    id: "numeric-route-source",
+    name: "numeric-route-source",
+  }
+  const middleModel = {
+    ...responsesCapableModels.data[0],
+    id: "numeric-route-middle",
+    name: "numeric-route-middle",
+  }
+  const finalModel = {
+    ...responsesCapableModels.data[0],
+    id: "numeric-route-final",
+    name: "numeric-route-final",
+  }
+  state.models = {
+    object: "list",
+    data: [sourceModel, middleModel, finalModel],
+  }
+  setModelRedirectsForTest([
+    {
+      id: "numeric-route-source-to-middle",
+      sourceModel: sourceModel.id,
+      sourceEffort: "default",
+      targetModel: middleModel.id,
+      targetEffort: "high",
+      enabled: true,
+    },
+    {
+      id: "numeric-route-middle-high-to-wrong",
+      sourceModel: middleModel.id,
+      sourceEffort: "high",
+      targetModel: "wrong-named-route-target",
+      targetEffort: "max",
+      enabled: true,
+    },
+    {
+      id: "numeric-route-middle-default-to-final",
+      sourceModel: middleModel.id,
+      sourceEffort: "default",
+      targetModel: finalModel.id,
+      targetEffort: "xhigh",
+      enabled: true,
+    },
+  ])
+  const infoSpy = spyOn(console, "info")
+
+  try {
+    const response = await server.request("/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: sourceModel.id,
+        input: "Hello",
+        reasoning: { effort: 2048 },
+      }),
+    })
+
+    expect(response.status).toBe(200)
+    expect(lastRequestBody?.model).toBe(finalModel.id)
+    expect(lastRequestBody?.reasoning).toEqual({
+      effort: 2048,
+      summary: "auto",
+    })
+    const redirectTelemetry = infoSpy.mock.calls
+      .flat()
+      .filter(
+        (value): value is string =>
+          typeof value === "string" && value.includes("model_redirect"),
+      )
+      .join("\n")
+    expect(redirectTelemetry).toContain(
+      `${sourceModel.id} -> ${middleModel.id} -> ${finalModel.id}`,
+    )
+    expect(redirectTelemetry).not.toContain(":high")
+    expect(redirectTelemetry).not.toContain(":max")
+    expect(redirectTelemetry).not.toContain(":xhigh")
+  } finally {
+    infoSpy.mockRestore()
+  }
+})
+
+test("dispatches zero from the top-level Responses reasoning alias", async () => {
+  state.models = responsesCapableModels
+
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-4o",
+      input: "Hello",
+      reasoning_effort: 0,
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastRequestBody?.reasoning).toEqual({ effort: 0, summary: "auto" })
 })
 
 for (const model of ["gpt-5.4-mini", "gpt-5.5"]) {

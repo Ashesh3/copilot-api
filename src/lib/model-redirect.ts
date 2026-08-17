@@ -319,6 +319,7 @@ export interface ModelRedirectResult {
 export interface ModelRedirectRequest {
   model: string
   effort?: ReasoningEffort
+  modelOnly?: boolean
 }
 
 export interface ModelRedirectStep {
@@ -379,18 +380,20 @@ function getRedirectStateKey(
   return formatModelWithEffort(model, effort ?? undefined)
 }
 
-function createRedirectStep(
-  rule: ModelRedirectRule,
-  sourceModel: string,
-  sourceEffort: ReasoningEffort | undefined,
-): ModelRedirectStep {
+function createRedirectStep(options: {
+  modelOnly: boolean
+  rule: ModelRedirectRule
+  sourceEffort: ReasoningEffort | undefined
+  sourceModel: string
+}): ModelRedirectStep {
+  const { modelOnly, rule, sourceEffort, sourceModel } = options
   return {
     ruleId: rule.id,
     ruleName: rule.name,
     sourceModel,
-    sourceEffort,
+    sourceEffort: modelOnly ? undefined : sourceEffort,
     targetModel: rule.targetModel,
-    targetEffort: rule.targetEffort ?? sourceEffort,
+    targetEffort: modelOnly ? undefined : (rule.targetEffort ?? sourceEffort),
   }
 }
 
@@ -423,6 +426,7 @@ export async function applyModelRedirect(
   await ensureLoaded()
   const originalModel = typeof input === "string" ? input : input.model
   const originalEffort = typeof input === "string" ? undefined : input.effort
+  const modelOnly = typeof input === "string" ? false : input.modelOnly === true
   let model = originalModel
   let effort = originalEffort
   const redirectChain: Array<ModelRedirectStep> = []
@@ -436,7 +440,12 @@ export async function applyModelRedirect(
     if (!match) break
 
     const currentKey = getRedirectStateKey(model, effort)
-    const step = createRedirectStep(match.rule, model, effort)
+    const step = createRedirectStep({
+      modelOnly,
+      rule: match.rule,
+      sourceEffort: effort,
+      sourceModel: model,
+    })
     const nextKey = getRedirectStateKey(step.targetModel, step.targetEffort)
     if (nextKey === currentKey) {
       break

@@ -83,7 +83,7 @@ test("keeps sampling parameters for GPT-5.6 with reasoning disabled", async () =
   expect(lastRequestBody?.top_p).toBe(0.8)
 })
 
-test("omits GPT-5.6 sampling after implicit defaults remove explicit none", async () => {
+test("keeps GPT-5.6 sampling for explicit none on implicit-default models", async () => {
   setModelSettingsForTest([
     {
       model: "gpt-5.6-implicit-medium",
@@ -104,9 +104,9 @@ test("omits GPT-5.6 sampling after implicit defaults remove explicit none", asyn
     { vision: false, initiator: "user" },
   )
 
-  expect(lastRequestBody?.reasoning).toEqual({ summary: "auto" })
-  expect(lastRequestBody).not.toHaveProperty("temperature")
-  expect(lastRequestBody).not.toHaveProperty("top_p")
+  expect(lastRequestBody?.reasoning).toEqual({ effort: "none" })
+  expect(lastRequestBody?.temperature).toBe(0.3)
+  expect(lastRequestBody?.top_p).toBe(0.8)
 })
 
 test("keeps GPT-5.6 sampling when the configured final default is none", async () => {

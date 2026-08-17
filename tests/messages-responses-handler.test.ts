@@ -370,7 +370,7 @@ test("clamps redirected Anthropic Responses probes to Copilot's minimum output t
   expect(lastResponsesPayload?.max_output_tokens).toBe(16)
 })
 
-test("does not send configurable effort for implicit-default models on the responses path", async () => {
+test("preserves explicit effort for implicit-default models on the responses path", async () => {
   setModelSettingsForTest([
     {
       model: "claude-implicit-medium",
@@ -397,6 +397,6 @@ test("does not send configurable effort for implicit-default models on the respo
 
   expect(response.status).toBe(200)
   expect(lastResponsesPayload?.model).toBe("claude-implicit-medium")
-  expect(lastResponsesPayload?.reasoning?.effort).toBeUndefined()
+  expect(lastResponsesPayload?.reasoning?.effort).toBe("medium")
   expect(lastResponsesPayload?.reasoning?.summary).toBe("auto")
 })

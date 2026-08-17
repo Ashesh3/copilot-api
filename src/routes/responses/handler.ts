@@ -216,7 +216,7 @@ export function normalizeResponsesReasoning(
       undefined
     )
 
-  if (topLevelEffort) {
+  if (topLevelEffort !== undefined) {
     payload.reasoning =
       payload.reasoning ?
         {
@@ -272,18 +272,6 @@ function applyRedirectedResponsesEffort(options: {
     }
     return
   }
-  if (usesImplicitReasoningDefault(options.model)) {
-    recordNonDefaultBehavior(options.c, {
-      kind: "reasoning_effort_implicit_default",
-      message: `${options.model} is configured for implicit reasoning defaults; removing explicit reasoning.effort=${options.effort}`,
-      data: {
-        model: options.model,
-        requestedEffort: options.effort,
-      },
-    })
-    delete options.payload.reasoning
-    return
-  }
   options.payload.reasoning =
     options.payload.reasoning ?
       { ...options.payload.reasoning, effort: options.effort }
@@ -308,16 +296,18 @@ async function resolveResponsesRedirect(
   const redirect = await applyModelRedirect({
     model: request.model,
     effort: requestedEffort,
+    modelOnly: typeof request.effectiveEffort === "number",
   })
   if (redirect.redirected) {
+    const numericEffort = typeof request.effectiveEffort === "number"
     recordNonDefaultBehavior(c, {
       kind: "model_redirect",
       message: `Model redirect chain: ${formatModelRedirectResult(redirect)}`,
       data: {
         sourceModel: request.model,
-        sourceEffort: requestedEffort,
+        sourceEffort: numericEffort ? undefined : requestedEffort,
         targetModel: redirect.model,
-        targetEffort: redirect.effort,
+        targetEffort: numericEffort ? undefined : redirect.effort,
         ruleId: redirect.ruleId,
         ruleIds: redirect.ruleIds?.join(","),
       },

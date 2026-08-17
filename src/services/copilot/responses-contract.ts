@@ -19,7 +19,10 @@ export function applyResponsesReasoningDefaults(options: {
   const reasoning = body.reasoning ?? {}
   body.reasoning = reasoning
 
-  if (implicitDefault && typeof reasoning.effort !== "number") {
+  if (
+    implicitDefault
+    && (reasoning.effort === undefined || reasoning.effort === null)
+  ) {
     delete reasoning.effort
   } else {
     reasoning.effort ??= defaultEffort
