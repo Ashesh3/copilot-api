@@ -787,7 +787,6 @@ export const assertResponsesChatFallbackTranslation = (
           blocker !== "tool_semantics:custom_tool_call"
           && blocker !== "tool_semantics:custom_tool_call_output"
           && blocker !== "tool_semantics:computer_call_output"
-          && blocker !== "input_item"
           && blocker !== "client_metadata",
       )
     : check.blockers

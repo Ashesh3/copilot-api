@@ -301,6 +301,8 @@ test("rejects every unsigned or incomplete Chat reasoning combination for Messag
     { reasoning_opaque: "native-signature" },
     { reasoning_text: "thinking", reasoning_opaque: "" },
     { reasoning_text: "", reasoning_opaque: "native-signature" },
+    { reasoning_text: "   ", reasoning_opaque: "native-signature" },
+    { reasoning_text: "thinking", reasoning_opaque: "   " },
     {
       reasoning_text: "thinking",
       reasoning_opaque: "responses-state@item-id",
@@ -609,12 +611,12 @@ test.each([
   {
     name: "refusal",
     content: { type: "refusal", refusal: "private-refusal" },
-    blocker: "content_type:refusal",
+    blocker: "content_type",
   },
   {
     name: "future content",
     content: { type: "future_content", value: "private-future" },
-    blocker: "content_type:future_content",
+    blocker: "content_type",
   },
 ])(
   "rejects Responses to Chat $name content instead of dropping it",
@@ -622,6 +624,58 @@ test.each([
     const payload = {
       model: "chat-only",
       input: [{ type: "message", role: "user", content: [content] }],
+    } as ResponsesPayload
+
+    expect(checkResponsesToChatTranslation(payload)).toEqual({
+      supported: false,
+      blockers: [blocker],
+    })
+    expect(() => responsesToChatCompletions(payload)).toThrow(LocalHTTPError)
+  },
+)
+
+test.each([
+  {
+    name: "file_id image",
+    output: [
+      { type: "input_text", text: "kept" },
+      { type: "input_image", file_id: "private-file", detail: "auto" },
+    ],
+    blocker: "input_image:file_id",
+  },
+  {
+    name: "refusal",
+    output: [
+      { type: "input_text", text: "kept" },
+      { type: "refusal", refusal: "private" },
+    ],
+    blocker: "content_type",
+  },
+  {
+    name: "future content",
+    output: [
+      { type: "input_text", text: "kept" },
+      { type: "future_SECRET_output", value: "private" },
+    ],
+    blocker: "content_type",
+  },
+  {
+    name: "primitive content",
+    output: [{ type: "input_text", text: "kept" }, 7],
+    blocker: "content_type",
+  },
+])(
+  "rejects Responses to Chat function output $name without partial loss",
+  ({ output, blocker }) => {
+    const payload = {
+      model: "chat-only",
+      input: [
+        {
+          type: "function_call_output",
+          call_id: "call_1",
+          output,
+        },
+      ],
     } as ResponsesPayload
 
     expect(checkResponsesToChatTranslation(payload)).toEqual({
@@ -648,6 +702,64 @@ test.each([
   expect(() => responsesToChatCompletions(payload)).toThrow(LocalHTTPError)
 })
 
+test.each([null, 7, "private-primitive"])(
+  "rejects primitive Responses to Chat input item %#",
+  (item) => {
+    const payload = {
+      model: "chat-only",
+      input: [item],
+    } as unknown as ResponsesPayload
+
+    expect(checkResponsesToChatTranslation(payload)).toEqual({
+      supported: false,
+      blockers: ["input_item"],
+    })
+    expect(() => responsesToChatCompletions(payload)).toThrow(LocalHTTPError)
+  },
+)
+
+test.each([null, 7, "private-content"])(
+  "rejects primitive Responses to Chat content part %#",
+  (content) => {
+    const payload = {
+      model: "chat-only",
+      input: [{ type: "message", role: "user", content: [content] }],
+    } as unknown as ResponsesPayload
+
+    expect(checkResponsesToChatTranslation(payload)).toEqual({
+      supported: false,
+      blockers: ["content_type"],
+    })
+    expect(() => responsesToChatCompletions(payload)).toThrow(LocalHTTPError)
+  },
+)
+
+test("does not expose a caller-provided unknown content type in blockers or errors", () => {
+  const secretType = "future_SECRET_token_123"
+  const payload = {
+    model: "chat-only",
+    input: [
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: secretType, value: "private" }],
+      },
+    ],
+  } as ResponsesPayload
+
+  expect(checkResponsesToChatTranslation(payload)).toEqual({
+    supported: false,
+    blockers: ["content_type"],
+  })
+  try {
+    responsesToChatCompletions(payload)
+  } catch (error) {
+    expect(JSON.stringify((error as LocalHTTPError).clientBody)).not.toContain(
+      secretType,
+    )
+  }
+})
+
 test("rejects numeric Responses reasoning effort instead of dropping it in Chat", () => {
   for (const effort of [0, 2048]) {
     const payload = {
@@ -662,6 +774,27 @@ test("rejects numeric Responses reasoning effort instead of dropping it in Chat"
     })
     expect(() => responsesToChatCompletions(payload)).toThrow(LocalHTTPError)
   }
+})
+
+test.each([
+  { tool_choice: "validated", blocker: "tool_choice" },
+  { tool_choice: { type: "future_choice" }, blocker: "tool_choice" },
+  { tool_choice: { type: "function" }, blocker: "tool_choice" },
+  { text: { format: { type: "future_format" } }, blocker: "text_format" },
+  { text: { format: { type: "json_schema" } }, blocker: "text_format" },
+])("rejects unsupported Responses to Chat control %#", (extra) => {
+  const { blocker, ...payloadExtra } = extra
+  const payload = {
+    model: "chat-only",
+    input: "hello",
+    ...payloadExtra,
+  } as ResponsesPayload
+
+  expect(checkResponsesToChatTranslation(payload)).toEqual({
+    supported: false,
+    blockers: [blocker],
+  })
+  expect(() => responsesToChatCompletions(payload)).toThrow(LocalHTTPError)
 })
 
 test("rejects Responses to Messages for item references and unsupported hosted tools", () => {
@@ -844,12 +977,12 @@ test.each([
   {
     name: "refusal",
     content: { type: "refusal", refusal: "private-refusal" },
-    blocker: "content_type:refusal",
+    blocker: "content_type",
   },
   {
     name: "future content",
     content: { type: "future_content", value: "private-future" },
-    blocker: "content_type:future_content",
+    blocker: "content_type",
   },
 ])("rejects Responses to Messages $name content", ({ content, blocker }) => {
   expect(
@@ -861,6 +994,54 @@ test.each([
 })
 
 test.each([
+  {
+    name: "file_id image",
+    output: [
+      { type: "input_text", text: "kept" },
+      { type: "input_image", file_id: "private-file", detail: "auto" },
+    ],
+    blocker: "input_image:file_id",
+  },
+  {
+    name: "refusal",
+    output: [
+      { type: "input_text", text: "kept" },
+      { type: "refusal", refusal: "private" },
+    ],
+    blocker: "content_type",
+  },
+  {
+    name: "future content",
+    output: [
+      { type: "input_text", text: "kept" },
+      { type: "future_SECRET_output", value: "private" },
+    ],
+    blocker: "content_type",
+  },
+  {
+    name: "primitive content",
+    output: [{ type: "input_text", text: "kept" }, 7],
+    blocker: "content_type",
+  },
+])(
+  "rejects Responses to Messages function output $name",
+  ({ output, blocker }) => {
+    expect(
+      checkResponsesToMessagesTranslation({
+        model: "claude-current",
+        input: [
+          {
+            type: "function_call_output",
+            call_id: "call_1",
+            output,
+          },
+        ],
+      } as ResponsesPayload),
+    ).toEqual({ supported: false, blockers: [blocker] })
+  },
+)
+
+test.each([
   { type: "future_item", value: "private" },
   { value: "missing-type-private" },
 ])("rejects Responses to Messages unknown input item %#", (item) => {
@@ -870,6 +1051,84 @@ test.each([
       input: [item],
     } as ResponsesPayload),
   ).toEqual({ supported: false, blockers: ["input_item"] })
+})
+
+test.each([null, 7, "private-primitive"])(
+  "rejects primitive Responses to Messages input item %#",
+  (item) => {
+    expect(
+      checkResponsesToMessagesTranslation({
+        model: "claude-current",
+        input: [item],
+      } as unknown as ResponsesPayload),
+    ).toEqual({ supported: false, blockers: ["input_item"] })
+  },
+)
+
+test.each([null, 7, "private-content"])(
+  "rejects primitive Responses to Messages content part %#",
+  (content) => {
+    expect(
+      checkResponsesToMessagesTranslation({
+        model: "claude-current",
+        input: [{ type: "message", role: "user", content: [content] }],
+      } as unknown as ResponsesPayload),
+    ).toEqual({ supported: false, blockers: ["content_type"] })
+  },
+)
+
+test.each([
+  "custom_tool_call",
+  "custom_tool_call_output",
+  "programmatic_tool_call",
+  "programmatic_tool_call_output",
+  "computer_call_output",
+])("rejects Responses to Messages unsupported item family %s", (type) => {
+  expect(
+    checkResponsesToMessagesTranslation({
+      model: "claude-current",
+      input: [{ type, call_id: "private-call" }],
+    }),
+  ).toEqual({
+    supported: false,
+    blockers: [`tool_semantics:${type}`],
+  })
+})
+
+test.each([
+  { tool_choice: "validated", blocker: "tool_choice" },
+  { tool_choice: { type: "future_choice" }, blocker: "tool_choice" },
+  { tool_choice: { type: "function" }, blocker: "tool_choice" },
+  { text: { format: { type: "future_format" } }, blocker: "text_format" },
+])("rejects unsupported Responses to Messages control %#", (extra) => {
+  const { blocker, ...payloadExtra } = extra
+  expect(
+    checkResponsesToMessagesTranslation({
+      model: "claude-current",
+      input: "hello",
+      ...payloadExtra,
+    } as ResponsesPayload),
+  ).toEqual({ supported: false, blockers: [blocker] })
+})
+
+test("scans Responses input before tools and top-level controls", () => {
+  expect(
+    checkResponsesToChatTranslation({
+      model: "chat-only",
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "refusal", refusal: "private" }],
+        },
+      ],
+      tools: [{ type: "custom", name: "private-tool" }],
+      prompt: { id: "private-prompt" },
+    }),
+  ).toEqual({
+    supported: false,
+    blockers: ["content_type", "tool_semantics:custom", "prompt"],
+  })
 })
 
 test("blocks accepted Responses client_metadata on both translation targets", () => {

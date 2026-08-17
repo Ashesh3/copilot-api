@@ -171,6 +171,23 @@ test("compaction fallback still rejects unrelated lossy Responses state", () => 
   ).toThrow(LocalHTTPError)
 })
 
+test("compaction fallback rejects unknown future input items", () => {
+  expect(() =>
+    assertResponsesChatFallbackTranslation(
+      {
+        model: "gpt-4o",
+        input: [{ type: "future_SECRET_item", value: "private" }],
+        client_metadata: {
+          "x-codex-turn-metadata": JSON.stringify({
+            request_kind: "compaction",
+          }),
+        },
+      },
+      true,
+    ),
+  ).toThrow(LocalHTTPError)
+})
+
 test("rejects ordinary custom tool history in chat completions fallback", () => {
   const payload = {
     model: "gpt-4o",

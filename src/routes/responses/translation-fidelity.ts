@@ -23,6 +23,14 @@ const MESSAGES_HOSTED_TOOL_TYPES = new Set([
   "mcp_list_tools",
   "web_search",
 ])
+const CHAT_INPUT_TOOL_BLOCKERS: Record<string, string> = {
+  computer_call_output: "tool_semantics:computer_call_output",
+  custom_tool_call: "tool_semantics:custom_tool_call",
+  custom_tool_call_output: "tool_semantics:custom_tool_call_output",
+  programmatic_tool_call: "tool_semantics:programmatic_tool_call",
+  programmatic_tool_call_output: "tool_semantics:programmatic_tool_call_output",
+}
+const MESSAGES_INPUT_TOOL_BLOCKERS = { ...CHAT_INPUT_TOOL_BLOCKERS }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
@@ -134,14 +142,19 @@ function scanInputContentBlockers(
   blockers: Array<string>,
 ): void {
   scanInput(payload.input, (item, type) => {
-    if (type !== undefined && type !== "message") return
-    if (!Array.isArray(item.content)) return
-    for (const content of item.content) scanInputContent(content, blockers)
+    let content: unknown
+    if (type === undefined || type === "message") content = item.content
+    else if (type === "function_call_output") content = item.output
+    if (!Array.isArray(content)) return
+    for (const part of content) scanInputContent(part, blockers)
   })
 }
 
 function scanInputContent(content: unknown, blockers: Array<string>): void {
-  if (!isRecord(content)) return
+  if (!isRecord(content)) {
+    addBlocker(blockers, "content_type")
+    return
+  }
   const contentType = getType(content)
   if (!contentType) {
     addBlocker(blockers, "content_type")
@@ -164,7 +177,7 @@ function scanInputContent(content: unknown, blockers: Array<string>): void {
       return
     }
     default: {
-      addBlocker(blockers, `content_type:${contentType}`)
+      addBlocker(blockers, "content_type")
     }
   }
 }
@@ -216,7 +229,13 @@ function scanUnknownInputItems(
   payload: ResponsesPayload,
   blockers: Array<string>,
 ): void {
-  scanInput(payload.input, (item, type) => {
+  if (!Array.isArray(payload.input)) return
+  for (const item of payload.input) {
+    if (!isRecord(item)) {
+      addBlocker(blockers, "input_item")
+      continue
+    }
+    const type = getType(item)
     const isImplicitMessage =
       type === undefined
       && typeof item.role === "string"
@@ -224,7 +243,43 @@ function scanUnknownInputItems(
     if (!isImplicitMessage && (!type || !SUPPORTED_INPUT_ITEMS.has(type))) {
       addBlocker(blockers, "input_item")
     }
-  })
+  }
+}
+
+function addKnownInputToolBlocker(
+  blockers: Array<string>,
+  type: string | undefined,
+  mapping: Record<string, string>,
+): void {
+  if (!type) return
+  const blocker = mapping[type]
+  if (blocker) addBlocker(blockers, blocker)
+}
+
+function isSupportedToolChoice(
+  value: ResponsesPayload["tool_choice"],
+): boolean {
+  if (
+    value === undefined
+    || value === "auto"
+    || value === "none"
+    || value === "required"
+  ) {
+    return true
+  }
+  return (
+    isRecord(value)
+    && value.type === "function"
+    && typeof value.name === "string"
+    && value.name.length > 0
+  )
+}
+
+function isSupportedTextFormat(payload: ResponsesPayload): boolean {
+  const format = payload.text?.format
+  if (format === undefined || format === null) return true
+  if (format.type === "json_object") return true
+  return format.type === "json_schema" && format.schema !== undefined
 }
 
 function hasStrictFunctionTool(payload: ResponsesPayload): boolean {
@@ -243,9 +298,7 @@ export function checkResponsesToChatTranslation(
   scanInput(payload.input, (item, type) => {
     if (type === "reasoning") addBlocker(blockers, "opaque_reasoning")
     if (type === "item_reference") addBlocker(blockers, "item_reference")
-    if (type && CHAT_UNSUPPORTED_TOOL_SEMANTICS.has(type)) {
-      addBlocker(blockers, `tool_semantics:${type}`)
-    }
+    addKnownInputToolBlocker(blockers, type, CHAT_INPUT_TOOL_BLOCKERS)
     if (
       (type === undefined || type === "message")
       && item.phase !== undefined
@@ -254,13 +307,13 @@ export function checkResponsesToChatTranslation(
       addBlocker(blockers, "content_phase")
     }
   })
+  scanUnknownInputItems(payload, blockers)
+  scanInputContentBlockers(payload, blockers)
   scanTools(payload.tools, (_tool, type) => {
     if (type && CHAT_UNSUPPORTED_TOOL_SEMANTICS.has(type)) {
       addBlocker(blockers, `tool_semantics:${type}`)
     }
   })
-  scanUnknownInputItems(payload, blockers)
-  scanInputContentBlockers(payload, blockers)
   if (hasStrictFunctionTool(payload)) {
     addBlocker(blockers, "strict_function_tool")
   }
@@ -272,6 +325,10 @@ export function checkResponsesToChatTranslation(
     addBlocker(blockers, "numeric_reasoning_effort")
   }
   if (payload.include !== undefined) addBlocker(blockers, "include")
+  if (!isSupportedToolChoice(payload.tool_choice)) {
+    addBlocker(blockers, "tool_choice")
+  }
+  if (!isSupportedTextFormat(payload)) addBlocker(blockers, "text_format")
   return createCheck(blockers)
 }
 
@@ -282,7 +339,10 @@ export function checkResponsesToMessagesTranslation(
   scanInput(payload.input, (_item, type) => {
     if (type === "reasoning") addBlocker(blockers, "opaque_reasoning")
     if (type === "item_reference") addBlocker(blockers, "item_reference")
+    addKnownInputToolBlocker(blockers, type, MESSAGES_INPUT_TOOL_BLOCKERS)
   })
+  scanUnknownInputItems(payload, blockers)
+  scanInputContentBlockers(payload, blockers)
   scanTools(payload.tools, (tool, type) => {
     if (isCustomGrammar(tool)) {
       addBlocker(blockers, "custom_tool_grammar")
@@ -299,8 +359,6 @@ export function checkResponsesToMessagesTranslation(
       )
     }
   })
-  scanUnknownInputItems(payload, blockers)
-  scanInputContentBlockers(payload, blockers)
   if (hasStrictFunctionTool(payload)) {
     addBlocker(blockers, "strict_function_tool")
   }
@@ -308,8 +366,9 @@ export function checkResponsesToMessagesTranslation(
   if (!hasOnlyMessagesReasoningInclude(payload)) {
     addBlocker(blockers, "include")
   }
-  if (payload.tool_choice === "validated") {
+  if (!isSupportedToolChoice(payload.tool_choice)) {
     addBlocker(blockers, "tool_choice")
   }
+  if (!isSupportedTextFormat(payload)) addBlocker(blockers, "text_format")
   return createCheck(blockers)
 }

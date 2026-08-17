@@ -49,9 +49,9 @@ function getType(value: unknown): string | undefined {
 function hasAnthropicReasoningSignature(message: Message): boolean {
   return (
     typeof message.reasoning_text === "string"
-    && message.reasoning_text.length > 0
+    && message.reasoning_text.trim().length > 0
     && typeof message.reasoning_opaque === "string"
-    && message.reasoning_opaque.length > 0
+    && message.reasoning_opaque.trim().length > 0
     && !message.reasoning_opaque.includes("@")
     && !message.encrypted_content
   )
