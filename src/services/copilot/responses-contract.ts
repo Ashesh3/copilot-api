@@ -83,6 +83,9 @@ const RESPONSES_TOP_LEVEL_FIELDS = [
 ] as const
 
 const OMIT_FIELD = Symbol("omit Responses field")
+const INVALID_RESPONSES_TOOL_SNAPSHOT = Symbol(
+  "invalid Responses tool snapshot",
+)
 const JSON_OBJECT_INPUT_INSTRUCTION = "Respond with JSON."
 const COPILOT_RESPONSES_MIN_OUTPUT_TOKENS = 16
 const ALWAYS_BLOCKED_RESPONSES_TOOLS = new Set([
@@ -180,40 +183,49 @@ function prepareResponsesTools(
 function getSafeResponsesToolSnapshot(
   tool: unknown,
 ): Record<string, unknown> & { type: string } {
+  let snapshot:
+    | (Record<string, unknown> & { type: string })
+    | typeof INVALID_RESPONSES_TOOL_SNAPSHOT
   try {
-    return createSafeResponsesToolSnapshot(tool)
-  } catch (error) {
-    if (error instanceof LocalHTTPError) throw error
+    snapshot = createSafeResponsesToolSnapshot(tool)
+  } catch {
     throw createInvalidResponsesToolError()
   }
+
+  if (snapshot === INVALID_RESPONSES_TOOL_SNAPSHOT) {
+    throw createInvalidResponsesToolError()
+  }
+  return snapshot
 }
 
 function createSafeResponsesToolSnapshot(
   tool: unknown,
-): Record<string, unknown> & { type: string } {
+):
+  | (Record<string, unknown> & { type: string })
+  | typeof INVALID_RESPONSES_TOOL_SNAPSHOT {
   if (
     !isRecord(tool)
     || Array.isArray(tool)
     || Object.getPrototypeOf(tool) !== Object.prototype
   ) {
-    throw createInvalidResponsesToolError()
+    return INVALID_RESPONSES_TOOL_SNAPSHOT
   }
 
   const snapshot = cloneResponsesToolData(tool, new Map<object, unknown>())
   if (!isRecord(snapshot) || Array.isArray(snapshot)) {
-    throw createInvalidResponsesToolError()
+    return INVALID_RESPONSES_TOOL_SNAPSHOT
   }
 
   const descriptor = asDataDescriptor(
     Object.getOwnPropertyDescriptor(snapshot, "type"),
   )
   if (!descriptor) {
-    throw createInvalidResponsesToolError()
+    return INVALID_RESPONSES_TOOL_SNAPSHOT
   }
 
   const type = descriptor.value
   if (typeof type !== "string" || type.trim() === "") {
-    throw createInvalidResponsesToolError()
+    return INVALID_RESPONSES_TOOL_SNAPSHOT
   }
   snapshot.type = type.trim()
   return snapshot as Record<string, unknown> & { type: string }
@@ -233,7 +245,7 @@ function cloneResponsesToolData(
     (!isArray && prototype !== Object.prototype && prototype !== null)
     || (isArray && prototype !== Array.prototype)
   ) {
-    throw createInvalidResponsesToolError()
+    return INVALID_RESPONSES_TOOL_SNAPSHOT
   }
 
   const snapshot: Record<PropertyKey, unknown> | Array<unknown> =
@@ -244,12 +256,16 @@ function cloneResponsesToolData(
     const descriptor = asDataDescriptor(
       Object.getOwnPropertyDescriptor(value, key),
     )
-    if (!descriptor) throw createInvalidResponsesToolError()
+    if (!descriptor) return INVALID_RESPONSES_TOOL_SNAPSHOT
     if (!descriptor.enumerable) continue
+    const nestedSnapshot = cloneResponsesToolData(descriptor.value, seen)
+    if (nestedSnapshot === INVALID_RESPONSES_TOOL_SNAPSHOT) {
+      return INVALID_RESPONSES_TOOL_SNAPSHOT
+    }
     Object.defineProperty(snapshot, key, {
       configurable: true,
       enumerable: true,
-      value: cloneResponsesToolData(descriptor.value, seen),
+      value: nestedSnapshot,
       writable: true,
     })
   }

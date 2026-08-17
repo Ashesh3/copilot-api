@@ -588,6 +588,81 @@ test("rejects throwing Responses tool reflection traps with a safe error", () =>
   })
 })
 
+test("canonicalizes an injected LocalHTTPError from a tool reflection trap", () => {
+  const injected = new LocalHTTPError(
+    "injected tool error",
+    Response.json({ injected: true }, { status: 418 }),
+    { injected: true },
+  )
+  const tool = new Proxy(
+    { type: "function" },
+    {
+      getPrototypeOf() {
+        throw injected
+      },
+    },
+  )
+
+  const error = captureValidationError({
+    model: "gpt-current",
+    input: "hello",
+    tools: [tool],
+  })
+
+  expect(error.message).toBe(
+    "Each tool must be a plain object with a non-empty string type.",
+  )
+  expect(error.response.status).toBe(400)
+  expect(error.clientBody).toEqual({
+    error: {
+      code: "invalid_type",
+      message: "Each tool must be a plain object with a non-empty string type.",
+      param: "tools",
+      type: "invalid_request_error",
+    },
+  })
+})
+
+test("canonicalizes a hostile thrown proxy without inspecting it", () => {
+  let prototypeReads = 0
+  const hostileThrown = new Proxy(new Error("hostile thrown value"), {
+    getPrototypeOf() {
+      prototypeReads += 1
+      throw new Error("unsafe thrown-value inspection")
+    },
+  })
+  const tool = new Proxy(
+    { type: "function" },
+    {
+      getPrototypeOf() {
+        throw hostileThrown
+      },
+    },
+  )
+
+  let caught: unknown
+  try {
+    prepareResponsesRequest({
+      model: "gpt-current",
+      input: "hello",
+      tools: [tool],
+    })
+  } catch (error) {
+    caught = error
+  }
+
+  expect(caught).toBeInstanceOf(LocalHTTPError)
+  expect((caught as LocalHTTPError).clientBody).toEqual({
+    error: {
+      code: "invalid_type",
+      message: "Each tool must be a plain object with a non-empty string type.",
+      param: "tools",
+      type: "invalid_request_error",
+    },
+  })
+  expect(prototypeReads).toBe(0)
+})
+
 test.each([
   { name: "omitted", tools: undefined },
   { name: "null", tools: null },
