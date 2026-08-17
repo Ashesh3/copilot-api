@@ -49,6 +49,7 @@ function getType(value: unknown): string | undefined {
 function hasAnthropicReasoningSignature(message: Message): boolean {
   return (
     typeof message.reasoning_text === "string"
+    && message.reasoning_text.length > 0
     && typeof message.reasoning_opaque === "string"
     && message.reasoning_opaque.length > 0
     && !message.reasoning_opaque.includes("@")
@@ -215,12 +216,15 @@ export function checkNormalizedChatToMessagesTranslation(
   scanMessageNames(payload.messages, blockers)
   scanChatToMessagesContent(payload.messages, blockers)
   for (const message of payload.messages) {
-    if (
-      message.role === "assistant"
-      && (message.encrypted_content || message.reasoning_opaque)
-      && !hasAnthropicReasoningSignature(message)
-    ) {
-      addBlocker(blockers, "opaque_reasoning")
+    if (message.role !== "assistant") continue
+    const hasReasoning =
+      (message.reasoning_text !== undefined && message.reasoning_text !== null)
+      || (message.reasoning_opaque !== undefined
+        && message.reasoning_opaque !== null)
+      || (message.encrypted_content !== undefined
+        && message.encrypted_content !== null)
+    if (hasReasoning && !hasAnthropicReasoningSignature(message)) {
+      addBlocker(blockers, "unsigned_reasoning")
     }
   }
   scanChatToolsForMessages(payload.tools, blockers)

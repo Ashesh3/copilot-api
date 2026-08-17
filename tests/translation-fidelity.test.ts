@@ -1,6 +1,9 @@
+/* eslint-disable max-lines */
 import { expect, test } from "bun:test"
 
-import { createEndpointTranslationError } from "~/lib/error"
+import type { ResponsesPayload } from "~/services/copilot/create-responses"
+
+import { createEndpointTranslationError, LocalHTTPError } from "~/lib/error"
 import {
   anthropicResponseToChat,
   chatPayloadToAnthropic,
@@ -10,6 +13,7 @@ import {
   checkChatToMessagesTranslation,
   checkChatToResponsesTranslation,
 } from "~/routes/chat-completions/translation-fidelity"
+import { responsesToChatCompletions } from "~/routes/responses/handler"
 import {
   checkResponsesToChatTranslation,
   checkResponsesToMessagesTranslation,
@@ -271,7 +275,7 @@ test("rejects Chat to Messages unsupported reasoning tools and prediction in ord
     }),
   ).toEqual({
     supported: false,
-    blockers: ["opaque_reasoning", "hosted_tool:file_search", "prediction"],
+    blockers: ["unsigned_reasoning", "hosted_tool:file_search", "prediction"],
   })
 })
 
@@ -289,6 +293,33 @@ test("allows Chat reasoning already encoded as an Anthropic signature", () => {
       ],
     }),
   ).toEqual({ supported: true, blockers: [] })
+})
+
+test("rejects every unsigned or incomplete Chat reasoning combination for Messages", () => {
+  const cases = [
+    { reasoning_text: "thinking" },
+    { reasoning_opaque: "native-signature" },
+    { reasoning_text: "thinking", reasoning_opaque: "" },
+    { reasoning_text: "", reasoning_opaque: "native-signature" },
+    {
+      reasoning_text: "thinking",
+      reasoning_opaque: "responses-state@item-id",
+    },
+    {
+      reasoning_text: "thinking",
+      reasoning_opaque: "native-signature",
+      encrypted_content: "openai-encrypted-state",
+    },
+  ]
+
+  for (const reasoning of cases) {
+    expect(
+      checkChatToMessagesTranslation({
+        model: "claude-current",
+        messages: [{ role: "assistant", content: null, ...reasoning }],
+      }),
+    ).toEqual({ supported: false, blockers: ["unsigned_reasoning"] })
+  }
 })
 
 test("rejects role-incompatible Chat content on the Messages bridge", () => {
@@ -564,6 +595,75 @@ test("rejects nested Responses details that Chat cannot preserve", () => {
   })
 })
 
+test.each([
+  {
+    name: "image file_id",
+    content: { type: "input_image", file_id: "private-file", detail: "auto" },
+    blocker: "input_image:file_id",
+  },
+  {
+    name: "empty image",
+    content: { type: "input_image", detail: "auto" },
+    blocker: "input_image",
+  },
+  {
+    name: "refusal",
+    content: { type: "refusal", refusal: "private-refusal" },
+    blocker: "content_type:refusal",
+  },
+  {
+    name: "future content",
+    content: { type: "future_content", value: "private-future" },
+    blocker: "content_type:future_content",
+  },
+])(
+  "rejects Responses to Chat $name content instead of dropping it",
+  ({ content, blocker }) => {
+    const payload = {
+      model: "chat-only",
+      input: [{ type: "message", role: "user", content: [content] }],
+    } as ResponsesPayload
+
+    expect(checkResponsesToChatTranslation(payload)).toEqual({
+      supported: false,
+      blockers: [blocker],
+    })
+    expect(() => responsesToChatCompletions(payload)).toThrow(LocalHTTPError)
+  },
+)
+
+test.each([
+  { type: "future_item", value: "private" },
+  { value: "missing-type-private" },
+])("rejects Responses to Chat unknown input item %#", (item) => {
+  const payload = {
+    model: "chat-only",
+    input: [item],
+  } as ResponsesPayload
+
+  expect(checkResponsesToChatTranslation(payload)).toEqual({
+    supported: false,
+    blockers: ["input_item"],
+  })
+  expect(() => responsesToChatCompletions(payload)).toThrow(LocalHTTPError)
+})
+
+test("rejects numeric Responses reasoning effort instead of dropping it in Chat", () => {
+  for (const effort of [0, 2048]) {
+    const payload = {
+      model: "chat-only",
+      input: "hello",
+      reasoning: { effort },
+    } as ResponsesPayload
+
+    expect(checkResponsesToChatTranslation(payload)).toEqual({
+      supported: false,
+      blockers: ["numeric_reasoning_effort"],
+    })
+    expect(() => responsesToChatCompletions(payload)).toThrow(LocalHTTPError)
+  }
+})
+
 test("rejects Responses to Messages for item references and unsupported hosted tools", () => {
   expect(
     checkResponsesToMessagesTranslation({
@@ -727,6 +827,65 @@ test("rejects nested Responses details that Messages cannot preserve", () => {
       "file_url",
       "strict_function_tool",
     ],
+  })
+})
+
+test.each([
+  {
+    name: "image file_id",
+    content: { type: "input_image", file_id: "private-file", detail: "auto" },
+    blocker: "input_image:file_id",
+  },
+  {
+    name: "empty image",
+    content: { type: "input_image", detail: "auto" },
+    blocker: "input_image",
+  },
+  {
+    name: "refusal",
+    content: { type: "refusal", refusal: "private-refusal" },
+    blocker: "content_type:refusal",
+  },
+  {
+    name: "future content",
+    content: { type: "future_content", value: "private-future" },
+    blocker: "content_type:future_content",
+  },
+])("rejects Responses to Messages $name content", ({ content, blocker }) => {
+  expect(
+    checkResponsesToMessagesTranslation({
+      model: "claude-current",
+      input: [{ type: "message", role: "user", content: [content] }],
+    } as ResponsesPayload),
+  ).toEqual({ supported: false, blockers: [blocker] })
+})
+
+test.each([
+  { type: "future_item", value: "private" },
+  { value: "missing-type-private" },
+])("rejects Responses to Messages unknown input item %#", (item) => {
+  expect(
+    checkResponsesToMessagesTranslation({
+      model: "claude-current",
+      input: [item],
+    } as ResponsesPayload),
+  ).toEqual({ supported: false, blockers: ["input_item"] })
+})
+
+test("blocks accepted Responses client_metadata on both translation targets", () => {
+  const payload = {
+    model: "gpt-current",
+    input: "hello",
+    client_metadata: { session_id: "private-session" },
+  } as ResponsesPayload
+
+  expect(checkResponsesToChatTranslation(payload)).toEqual({
+    supported: false,
+    blockers: ["client_metadata"],
+  })
+  expect(checkResponsesToMessagesTranslation(payload)).toEqual({
+    supported: false,
+    blockers: ["client_metadata"],
   })
 })
 

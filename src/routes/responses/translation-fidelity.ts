@@ -109,6 +109,7 @@ function scanSharedTopLevelBlockers(
     "copilot_cache_control",
     payload.copilot_cache_control,
   )
+  addPresentBlocker(blockers, "client_metadata", payload.client_metadata)
 }
 
 function hasUnmappedReasoningSummary(payload: ResponsesPayload): boolean {
@@ -135,21 +136,93 @@ function scanInputContentBlockers(
   scanInput(payload.input, (item, type) => {
     if (type !== undefined && type !== "message") return
     if (!Array.isArray(item.content)) return
-    for (const content of item.content) {
-      if (!isRecord(content)) continue
-      if (content.prompt_cache_breakpoint !== undefined) {
-        addBlocker(blockers, "prompt_cache_breakpoint")
-      }
-      if (
-        content.type === "input_image"
-        && content.detail !== undefined
-        && content.detail !== "auto"
-      ) {
-        addBlocker(blockers, "image_detail")
-      }
-      if (content.type === "input_file" && content.file_url !== undefined) {
-        addBlocker(blockers, "file_url")
-      }
+    for (const content of item.content) scanInputContent(content, blockers)
+  })
+}
+
+function scanInputContent(content: unknown, blockers: Array<string>): void {
+  if (!isRecord(content)) return
+  const contentType = getType(content)
+  if (!contentType) {
+    addBlocker(blockers, "content_type")
+    return
+  }
+  if (content.prompt_cache_breakpoint !== undefined) {
+    addBlocker(blockers, "prompt_cache_breakpoint")
+  }
+  switch (contentType) {
+    case "input_image": {
+      scanInputImage(content, blockers)
+      return
+    }
+    case "input_file": {
+      scanInputFile(content, blockers)
+      return
+    }
+    case "input_text":
+    case "output_text": {
+      return
+    }
+    default: {
+      addBlocker(blockers, `content_type:${contentType}`)
+    }
+  }
+}
+
+function scanInputImage(
+  content: Record<string, unknown>,
+  blockers: Array<string>,
+): void {
+  const hasImageUrl =
+    typeof content.image_url === "string" && content.image_url.length > 0
+  if (!hasImageUrl) {
+    const hasFileId =
+      typeof content.file_id === "string" && content.file_id.length > 0
+    addBlocker(blockers, hasFileId ? "input_image:file_id" : "input_image")
+  }
+  if (content.detail !== undefined && content.detail !== "auto") {
+    addBlocker(blockers, "image_detail")
+  }
+}
+
+function scanInputFile(
+  content: Record<string, unknown>,
+  blockers: Array<string>,
+): void {
+  const hasFileData =
+    typeof content.file_data === "string" && content.file_data.length > 0
+  const hasFileId =
+    typeof content.file_id === "string" && content.file_id.length > 0
+  if (!hasFileData && !hasFileId && content.file_url === undefined) {
+    addBlocker(blockers, "input_file")
+  }
+  if (content.file_url !== undefined) addBlocker(blockers, "file_url")
+}
+
+const SUPPORTED_INPUT_ITEMS = new Set([
+  "computer_call_output",
+  "custom_tool_call",
+  "custom_tool_call_output",
+  "function_call",
+  "function_call_output",
+  "item_reference",
+  "message",
+  "programmatic_tool_call",
+  "programmatic_tool_call_output",
+  "reasoning",
+])
+
+function scanUnknownInputItems(
+  payload: ResponsesPayload,
+  blockers: Array<string>,
+): void {
+  scanInput(payload.input, (item, type) => {
+    const isImplicitMessage =
+      type === undefined
+      && typeof item.role === "string"
+      && (typeof item.content === "string" || Array.isArray(item.content))
+    if (!isImplicitMessage && (!type || !SUPPORTED_INPUT_ITEMS.has(type))) {
+      addBlocker(blockers, "input_item")
     }
   })
 }
@@ -186,6 +259,7 @@ export function checkResponsesToChatTranslation(
       addBlocker(blockers, `tool_semantics:${type}`)
     }
   })
+  scanUnknownInputItems(payload, blockers)
   scanInputContentBlockers(payload, blockers)
   if (hasStrictFunctionTool(payload)) {
     addBlocker(blockers, "strict_function_tool")
@@ -193,6 +267,9 @@ export function checkResponsesToChatTranslation(
   scanSharedTopLevelBlockers(payload, blockers, { allowTaskBudget: false })
   if (hasUnmappedReasoningSummary(payload)) {
     addBlocker(blockers, "reasoning_summary")
+  }
+  if (typeof payload.reasoning?.effort === "number") {
+    addBlocker(blockers, "numeric_reasoning_effort")
   }
   if (payload.include !== undefined) addBlocker(blockers, "include")
   return createCheck(blockers)
@@ -222,6 +299,7 @@ export function checkResponsesToMessagesTranslation(
       )
     }
   })
+  scanUnknownInputItems(payload, blockers)
   scanInputContentBlockers(payload, blockers)
   if (hasStrictFunctionTool(payload)) {
     addBlocker(blockers, "strict_function_tool")
