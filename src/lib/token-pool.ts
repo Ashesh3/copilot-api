@@ -10,12 +10,9 @@ import {
   isModelEnabledForAccount,
 } from "~/lib/model-routing"
 import { state } from "~/lib/state"
+import { COPILOT_API_VERSION } from "~/services/copilot/copilot-contract"
 import { createCopilotTransportInit } from "~/services/copilot/transport-options"
 import { getGitHubUser } from "~/services/github/get-user"
-
-// Inline constants from copilot-client to avoid circular dependencies
-const MODELS_API_VERSION = "2026-06-01"
-const INTEGRATION_ID = "vscode-chat"
 
 // --- Account ---
 
@@ -639,10 +636,10 @@ export class TokenPool {
       "content-type": "application/json",
       accept: "application/json",
       Authorization: `Bearer ${copilotToken}`,
-      "Copilot-Integration-Id": INTEGRATION_ID,
+      "Copilot-Integration-Id": state.copilotIntegrationId,
       "editor-version": `vscode/${this.vsCodeVersion}`,
       "Openai-Intent": "conversation-agent",
-      "X-GitHub-Api-Version": MODELS_API_VERSION,
+      "X-GitHub-Api-Version": COPILOT_API_VERSION,
       "X-Request-Id": randomUUID(),
       "X-Interaction-Id": this.sessionId,
       "X-Client-Session-Id": this.sessionId,
