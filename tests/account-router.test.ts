@@ -526,6 +526,60 @@ test("fails over to the next account immediately after a multi-token 401", async
   })
 })
 
+test("retries encrypted Responses compaction failures on the selected account", async () => {
+  const modelId = "router-encrypted-compaction-retry"
+  registerAccount(1021, modelId, "selected-copilot-token")
+  registerAccount(1022, modelId, "alternate-copilot-token")
+  tokenPool.rebuildModelIndex()
+  const requestBody = JSON.stringify({
+    input: [
+      {
+        encrypted_content: "opaque-compaction",
+        type: "compaction",
+      },
+    ],
+    model: modelId,
+  })
+  const encryptedFailure = () =>
+    Response.json(
+      {
+        error: {
+          code: "invalid_request_body",
+          message: "The encrypted content could not be verified.",
+        },
+      },
+      { status: 400 },
+    )
+  queuedResults.push(
+    encryptedFailure(),
+    encryptedFailure(),
+    new Response("{}", { status: 200 }),
+  )
+
+  const { response, account } = await routedFetch(
+    "/responses",
+    { body: requestBody, method: "POST" },
+    { modelId },
+  )
+
+  expect(response.status).toBe(200)
+  expect(account).toBeDefined()
+  expect(capturedRequests).toHaveLength(3)
+  expect(capturedRequests.map(({ init }) => init?.body)).toEqual([
+    requestBody,
+    requestBody,
+    requestBody,
+  ])
+  expect(llmAuthorizationHeaders()).toEqual([
+    `Bearer ${account?.copilotToken}`,
+    `Bearer ${account?.copilotToken}`,
+    `Bearer ${account?.copilotToken}`,
+  ])
+  expect(llmAuthorizationHeaders()).not.toContain(
+    "Bearer alternate-copilot-token",
+  )
+})
+
 test("refreshes a multi-token account and retries after a 401", async () => {
   const modelId = "router-401-refresh-test"
   registerAccount(1011, modelId, "expired-copilot-token")

@@ -28,6 +28,10 @@ import { getCopilotToken } from "~/services/github/get-copilot-token"
 
 import type { RetryBudget, RetryClaim } from "./transport-retry"
 
+import {
+  isEncryptedCompactionVerificationError,
+  refreshRequestIdForRetry,
+} from "./encrypted-compaction-retry"
 import { createCopilotTransportInit } from "./transport-options"
 import {
   abortableSleep,
@@ -36,11 +40,12 @@ import {
   createRetryBudget,
   createRetryClaim,
   createTransportChain,
+  consumeExtraSend,
   handleTransportFailure,
   isAbortLikeError,
   logChainResponse,
   MAX_DELAY_SECONDS,
-  MAX_RETRIES,
+  MAX_ROUTED_SENDS,
 } from "./transport-retry"
 
 // --- Constants ---
@@ -549,24 +554,35 @@ function recordQuotaSnapshot(response: Response): void {
 }
 
 type ResponseAction =
+  | { kind: "retry-encrypted-compaction" }
   | { delaySeconds: number; kind: "retry-status" }
   | { kind: "refresh-token" }
   | { kind: "return" }
 
+interface RetryResponseState {
+  requestInit: RequestInit | undefined
+  retryBackoffExtraSeconds: number
+  telemetryReason: UpstreamSendReason
+}
+
 /** Decide what an upstream response means, claiming budget for any resend. */
 async function classifyResponse(options: {
   attempt: number
+  claimEncryptedCompactionRetry: RetryClaim
   claimRetry: RetryClaim
   maxHttpRetryDelaySeconds: number
   path: string
+  requestInit: RequestInit | undefined
   response: Response
   retryBackoffExtraSeconds: number
 }): Promise<ResponseAction> {
   const {
     attempt,
+    claimEncryptedCompactionRetry,
     claimRetry,
     maxHttpRetryDelaySeconds,
     path,
+    requestInit,
     response,
     retryBackoffExtraSeconds,
   } = options
@@ -576,6 +592,19 @@ async function classifyResponse(options: {
   }
 
   if (response.status === 400) {
+    if (
+      (await isEncryptedCompactionVerificationError(
+        path,
+        response,
+        requestInit,
+      ))
+      && claimEncryptedCompactionRetry()
+    ) {
+      consola.warn(
+        `HTTP 400 encrypted compaction verification failed on ${path}, retrying with preserved payload`,
+      )
+      return { kind: "retry-encrypted-compaction" }
+    }
     await isDeterministic400Response(response)
     return { kind: "return" }
   }
@@ -596,6 +625,39 @@ async function classifyResponse(options: {
   return { kind: "return" }
 }
 
+async function applyRetryResponseAction(options: {
+  action: Exclude<ResponseAction, { kind: "return" }>
+  path: string
+  requestInit: RequestInit | undefined
+  retryBackoffExtraSeconds: number
+}): Promise<RetryResponseState> {
+  const { action, path, requestInit, retryBackoffExtraSeconds } = options
+
+  if (action.kind === "refresh-token") {
+    const headers = toHeaderRecord(requestInit?.headers)
+    return {
+      requestInit: await refreshTokenForRetry(headers, requestInit, path),
+      retryBackoffExtraSeconds,
+      telemetryReason: "token_refresh",
+    }
+  }
+
+  if (action.kind === "retry-status") {
+    await httpRetrySleep(action.delaySeconds * 1000, requestInit?.signal)
+    return {
+      requestInit,
+      retryBackoffExtraSeconds: retryBackoffExtraSeconds * BACKOFF_FACTOR,
+      telemetryReason: "http_retry",
+    }
+  }
+
+  return {
+    requestInit: refreshRequestIdForRetry(requestInit),
+    retryBackoffExtraSeconds,
+    telemetryReason: "http_retry",
+  }
+}
+
 export async function copilotFetch(
   path: string,
   init?: RequestInit,
@@ -613,8 +675,10 @@ export async function copilotFetch(
   // Both caps apply: the shared routed-call allowance and this invocation's
   // own limit, so one copilotFetch can never drain the whole budget.
   const claimRetry: RetryClaim = createRetryClaim(budget)
+  const claimEncryptedCompactionRetry: RetryClaim = () =>
+    consumeExtraSend(budget)
   const chain = createTransportChain(path, randomUUID())
-  const maxAttempts = MAX_RETRIES + 1
+  const maxAttempts = MAX_ROUTED_SENDS
   let retryBackoffExtraSeconds = INITIAL_RETRY_BACKOFF_EXTRA_SECONDS
   let requestInit = init
   const telemetryState = createCopilotAttemptTelemetryState(fetchOptions)
@@ -648,24 +712,26 @@ export async function copilotFetch(
 
       const action = await classifyResponse({
         attempt,
+        claimEncryptedCompactionRetry,
         claimRetry,
         maxHttpRetryDelaySeconds,
         path,
+        requestInit,
         response,
         retryBackoffExtraSeconds,
       })
 
-      if (action.kind === "refresh-token") {
-        requestInit = await refreshTokenForRetry(headers, requestInit, path)
-        telemetryState.reason = "token_refresh"
-        continue
-      }
-
-      if (action.kind === "retry-status") {
+      if (action.kind !== "return") {
         lastResponse = response
-        retryBackoffExtraSeconds *= BACKOFF_FACTOR
-        await httpRetrySleep(action.delaySeconds * 1000, requestInit?.signal)
-        telemetryState.reason = "http_retry"
+        const next = await applyRetryResponseAction({
+          action,
+          path,
+          requestInit,
+          retryBackoffExtraSeconds,
+        })
+        requestInit = next.requestInit
+        retryBackoffExtraSeconds = next.retryBackoffExtraSeconds
+        telemetryState.reason = next.telemetryReason
         continue
       }
 
