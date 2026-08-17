@@ -45,6 +45,7 @@ import { emitChatCompletionsToolSpans } from "~/lib/tool-spans"
 import { modelSupportsNativeMessages } from "~/services/copilot/create-anthropic-messages"
 import {
   createChatCompletions,
+  createChatCompletionsWithProcessedPayload,
   type ChatCompletionChunk,
   type ChatCompletionResponse,
   type ChatCompletionsPayload,
@@ -413,13 +414,11 @@ const executeRequest = async (
         model: payload.model,
       }),
       async (span) => {
-        let processedPayload = payload
-        const response = (await createChatCompletions(payload, {
-          onProcessedPayload: (currentPayload) => {
-            processedPayload = currentPayload
-          },
-          signal: c.req.raw.signal,
-        })) as ChatCompletionResponse
+        const { processedPayload, response } =
+          await createChatCompletionsWithProcessedPayload(
+            payload as ChatCompletionsPayload & { stream?: false | null },
+            { signal: c.req.raw.signal },
+          )
 
         // Track which account handled this request (multi-token mode)
         const accountId = getLastUsedAccountId()
@@ -511,7 +510,7 @@ async function executeStreamingWebSearchRequest(
   payload: ChatCompletionsPayload & { model: string },
   requestedModel?: string,
 ) {
-  const bufferedPayload = { ...payload, stream: false }
+  const bufferedPayload = { ...payload, stream: false as const }
   return await Sentry.startSpan(
     createSentryChatSpanOptions({
       inputMessages: payload.messages,
@@ -519,13 +518,10 @@ async function executeStreamingWebSearchRequest(
       streaming: true,
     }),
     async (span) => {
-      let processedPayload: ChatCompletionsPayload = bufferedPayload
-      const initial = (await createChatCompletions(bufferedPayload, {
-        onProcessedPayload: (currentPayload) => {
-          processedPayload = currentPayload
-        },
-        signal: c.req.raw.signal,
-      })) as ChatCompletionResponse
+      const { processedPayload, response: initial } =
+        await createChatCompletionsWithProcessedPayload(bufferedPayload, {
+          signal: c.req.raw.signal,
+        })
       const finalResponse = await resolveWebSearchCalls(
         initial,
         processedPayload,

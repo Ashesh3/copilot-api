@@ -161,6 +161,7 @@ export function normalizeChatCompletionsRequest(
   let normalized: ChatCompletionsPayload
   try {
     normalized = structuredClone(payload)
+    JSON.stringify(normalized)
   } catch {
     throw createInvalidChatBodyError()
   }

@@ -80,6 +80,9 @@ const isJsonResponseFormat = (payload: ChatCompletionsPayload): boolean => {
   return type === "json_object" || type === "json_schema"
 }
 
+const JSON_RESPONSE_INSTRUCTION =
+  "IMPORTANT: You MUST respond with valid JSON only. No markdown, no code fences, no explanation — just raw JSON."
+
 /**
  * Strip markdown code fences from content when json response_format is requested.
  * Claude wraps JSON output in ```json ... ``` fences, violating the OpenAI contract
@@ -111,12 +114,22 @@ const injectJsonInstruction = (payload: ChatCompletionsPayload): void => {
 
   const stashedSchema = (payload as unknown as Record<string, unknown>)
     ._json_schema
-  let instruction =
-    "IMPORTANT: You MUST respond with valid JSON only. No markdown, no code fences, no explanation — just raw JSON."
+  let instruction = JSON_RESPONSE_INSTRUCTION
 
   if (stashedSchema) {
     instruction += `\nYou MUST conform to this JSON schema:\n${JSON.stringify(stashedSchema)}`
     delete (payload as unknown as Record<string, unknown>)._json_schema
+  }
+
+  if (
+    payload.messages.some(
+      (message) =>
+        message.role === "system"
+        && typeof message.content === "string"
+        && message.content.includes(instruction),
+    )
+  ) {
+    return
   }
 
   const systemMsg = payload.messages.find((m) => m.role === "system")
@@ -324,8 +337,22 @@ interface StreamingRetryOptions {
 interface ChatCompletionsRequestOptions {
   compaction?: boolean
   initiator?: "agent" | "user"
-  onProcessedPayload?: (payload: ChatCompletionsPayload) => void
   signal?: AbortSignal
+}
+
+interface ChatCompletionsWithProcessedPayload {
+  processedPayload: ChatCompletionsPayload
+  response: ChatCompletionsResult
+}
+
+interface NonStreamingChatCompletionsWithProcessedPayload {
+  processedPayload: ChatCompletionsPayload
+  response: ChatCompletionResponse
+}
+
+interface ChatCompletionsCoreResult {
+  processedPayload: ChatCompletionsPayload
+  response: ChatCompletionsResult
 }
 
 interface ChatHeaderOptions {
@@ -454,10 +481,31 @@ const handleStreamingResponse = async (
   })
 }
 
-export const createChatCompletions = async (
+type ChatCompletionsResult = ChatCompletionResponse | AsyncIterable<StreamEvent>
+
+export function createChatCompletionsWithProcessedPayload(
+  payload: ChatCompletionsPayload & { stream?: false | null },
+  options?: ChatCompletionsRequestOptions,
+): Promise<NonStreamingChatCompletionsWithProcessedPayload>
+export function createChatCompletionsWithProcessedPayload(
   payload: ChatCompletionsPayload,
   options?: ChatCompletionsRequestOptions,
-) => {
+): Promise<ChatCompletionsWithProcessedPayload>
+export async function createChatCompletionsWithProcessedPayload(
+  payload: ChatCompletionsPayload,
+  options?: ChatCompletionsRequestOptions,
+): Promise<ChatCompletionsWithProcessedPayload> {
+  const result = await createChatCompletionsCore(payload, options)
+  return {
+    processedPayload: structuredClone(result.processedPayload),
+    response: result.response,
+  }
+}
+
+async function createChatCompletionsCore(
+  payload: ChatCompletionsPayload,
+  options?: ChatCompletionsRequestOptions,
+): Promise<ChatCompletionsCoreResult> {
   const normalizedPayload = normalizeChatCompletionsRequest(payload)
   options?.signal?.throwIfAborted()
   rewriteUnsupportedAssistantPrefill(normalizedPayload)
@@ -489,23 +537,35 @@ export const createChatCompletions = async (
     signal: options?.signal,
     sourcePayload: normalizedPayload,
   })
-  options?.onProcessedPayload?.(active.payload)
-
   if (normalizedPayload.stream) {
-    return handleStreamingResponse(active.response, {
-      payload: active.payload,
-      retry: async () => {
-        return await dispatchChatCompletions(active.payload, {
-          headerOptions: active.headerOptions,
-          reason: "http_retry",
-          recordSelection: false,
-          signal: options?.signal,
-        })
-      },
-    })
+    return {
+      processedPayload: active.payload,
+      response: await handleStreamingResponse(active.response, {
+        payload: active.payload,
+        retry: async () => {
+          return await dispatchChatCompletions(active.payload, {
+            headerOptions: active.headerOptions,
+            reason: "http_retry",
+            recordSelection: false,
+            signal: options?.signal,
+          })
+        },
+      }),
+    }
   }
 
-  return handleResponse(active.response, active.payload)
+  return {
+    processedPayload: active.payload,
+    response: await handleResponse(active.response, active.payload),
+  }
+}
+
+export const createChatCompletions = async (
+  payload: ChatCompletionsPayload,
+  options?: ChatCompletionsRequestOptions,
+): Promise<ChatCompletionsResult> => {
+  const result = await createChatCompletionsCore(payload, options)
+  return result.response
 }
 
 // Streaming types

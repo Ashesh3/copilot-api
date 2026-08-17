@@ -77,6 +77,18 @@ test("preserves string and null stop values", () => {
   expect(nullStop.stop).toBeNull()
 })
 
+test("keeps undefined object fields while validating JSON serializability", () => {
+  const payload: ChatCompletionsPayload = {
+    model: "gpt-current",
+    messages: [{ role: "user", content: "hello" }],
+    stop: undefined,
+  }
+
+  const normalized = normalizeChatCompletionsRequest(payload)
+
+  expect(normalized).toHaveProperty("stop", undefined)
+})
+
 test("converts deprecated functions and function_call to modern controls", () => {
   const normalized = normalizeChatCompletionsRequest({
     model: "gpt-current",
@@ -208,6 +220,36 @@ describe("Chat request validation", () => {
         param: "body",
       },
     )
+  })
+
+  test("rejects BigInt values with the same safe local error", () => {
+    expectValidationError(
+      () =>
+        normalizeChatCompletionsRequest({
+          model: "gpt-current",
+          messages: [{ role: "user", content: "hello" }],
+          metadata: { count: 1n },
+        } as unknown as ChatCompletionsPayload),
+      {
+        code: "invalid_type",
+        message: "The request body must be a JSON object.",
+        param: "body",
+      },
+    )
+  })
+
+  test("rejects cyclic values with the same safe local error", () => {
+    const payload = {
+      model: "gpt-current",
+      messages: [{ role: "user", content: "hello" }],
+    } as unknown as ChatCompletionsPayload & { self?: unknown }
+    payload.self = payload
+
+    expectValidationError(() => normalizeChatCompletionsRequest(payload), {
+      code: "invalid_type",
+      message: "The request body must be a JSON object.",
+      param: "body",
+    })
   })
 
   test("rejects max_tokens with max_completion_tokens", () => {

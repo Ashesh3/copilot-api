@@ -294,3 +294,40 @@ test("Chat web-search follow-up carries one fetched attachment forward", async (
     )
   }
 })
+
+test("Chat web-search follow-up injects the generated JSON instruction once", async () => {
+  const response = await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-sonnet-4.6",
+      messages: [{ role: "user", content: "Search and return JSON." }],
+      response_format: { type: "json_object" },
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "web_search",
+            parameters: { type: "object", properties: {} },
+          },
+        },
+      ],
+      tool_choice: "auto",
+      stream: false,
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(chatRequests).toHaveLength(2)
+  const followUpMessages = chatRequests[1]?.messages as
+    | Array<{ content?: unknown; role?: string; tool_call_id?: string }>
+    | undefined
+  const serialized = JSON.stringify(followUpMessages)
+  expect(
+    serialized.match(/IMPORTANT: You MUST respond with valid JSON only/g),
+  ).toHaveLength(1)
+  expect(followUpMessages?.at(-1)).toMatchObject({
+    role: "tool",
+    tool_call_id: "search-call",
+  })
+})

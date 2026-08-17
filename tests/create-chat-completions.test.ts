@@ -8,9 +8,11 @@ import {
   test,
 } from "bun:test"
 import consola from "consola"
+import { Hono, type Context } from "hono"
 
 import type { ChatCompletionsPayload } from "../src/services/copilot/create-chat-completions"
 
+import { forwardError, LocalHTTPError } from "../src/lib/error"
 import { setModelSettingsForTest } from "../src/lib/model-settings"
 import {
   getRoutingAffinity,
@@ -22,10 +24,12 @@ import {
 } from "../src/lib/routing-telemetry"
 import { state } from "../src/lib/state"
 import { tokenPool } from "../src/lib/token-pool"
+import { handleCompletion } from "../src/routes/chat-completions/handler"
 import { server } from "../src/server"
 import { COMPACTION_PAYLOAD_MAX_BYTES } from "../src/services/copilot/compaction-payload"
 import {
   createChatCompletions,
+  createChatCompletionsWithProcessedPayload,
   type Message,
 } from "../src/services/copilot/create-chat-completions"
 
@@ -114,6 +118,100 @@ test("returns a safe local Chat error for a null JSON body", async () => {
     },
   })
   expect(JSON.stringify(body)).not.toContain("Cannot read properties")
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
+test("rejects direct BigInt payloads before upstream serialization", async () => {
+  let thrown: unknown
+  try {
+    await createChatCompletions({
+      model: "gpt-test",
+      messages: [{ role: "user", content: "hello" }],
+      metadata: { count: 1n },
+    } as unknown as ChatCompletionsPayload)
+  } catch (error) {
+    thrown = error
+  }
+
+  expect(thrown).toBeInstanceOf(LocalHTTPError)
+  expect(thrown).toHaveProperty("response.status", 400)
+  expect(thrown).toHaveProperty("clientBody.error", {
+    code: "invalid_type",
+    message: "The request body must be a JSON object.",
+    param: "body",
+    type: "invalid_request_error",
+  })
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
+test("rejects direct cyclic payloads before upstream serialization", async () => {
+  const payload = {
+    model: "gpt-test",
+    messages: [{ role: "user", content: "hello" }],
+  } as unknown as ChatCompletionsPayload & { self?: unknown }
+  payload.self = payload
+  let thrown: unknown
+
+  try {
+    await createChatCompletions(payload)
+  } catch (error) {
+    thrown = error
+  }
+
+  expect(thrown).toBeInstanceOf(LocalHTTPError)
+  expect(thrown).toHaveProperty("response.status", 400)
+  expect(thrown).toHaveProperty("clientBody.error", {
+    code: "invalid_type",
+    message: "The request body must be a JSON object.",
+    param: "body",
+    type: "invalid_request_error",
+  })
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
+test("returns the fixed route error for programmatic BigInt and cyclic bodies", async () => {
+  const payloads: Array<unknown> = [
+    {
+      model: "gpt-test",
+      messages: [{ role: "user", content: "hello" }],
+      metadata: { count: 1n },
+    },
+  ]
+  const cyclic = {
+    model: "gpt-test",
+    messages: [{ role: "user", content: "hello" }],
+  } as Record<string, unknown>
+  cyclic.self = cyclic
+  payloads.push(cyclic)
+
+  for (const payload of payloads) {
+    const app = new Hono()
+    app.post("/", async (c) => {
+      const context = Object.create(c) as Context
+      Object.defineProperty(context, "req", {
+        value: { json: () => Promise.resolve(payload) },
+      })
+      try {
+        return await handleCompletion(context)
+      } catch (error) {
+        return await forwardError(c, error)
+      }
+    })
+    const response = await app.request("/", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    })
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({
+      error: {
+        code: "invalid_type",
+        message: "The request body must be a JSON object.",
+        param: "body",
+        type: "invalid_request_error",
+      },
+    })
+  }
   expect(fetchMock).not.toHaveBeenCalled()
 })
 
@@ -315,20 +413,91 @@ test("exposes the processed clone without changing the direct response API", asy
     ],
   }
   const original = structuredClone(payload)
-  let processedPayload: ChatCompletionsPayload | undefined
-
-  const response = await createChatCompletions(payload, {
-    onProcessedPayload: (currentPayload) => {
-      processedPayload = currentPayload
-    },
-  })
+  const { processedPayload, response } =
+    await createChatCompletionsWithProcessedPayload(payload)
 
   expect(response).toHaveProperty("object", "chat.completion")
   expect(payload).toEqual(original)
-  expect(processedPayload?.messages[1]).toEqual({
+  expect(processedPayload.messages[1]).toEqual({
     role: "user",
     content: "prefill",
   })
+})
+
+test("isolates the processed snapshot from stream retry state", async () => {
+  const overloadEvent = 'data: {"error":{"message":"Overloaded"}}'
+  queuedResponses.push(
+    createSSEStreamResponse([overloadEvent]),
+    createSSEStreamResponse(["data: [DONE]"]),
+  )
+  const payload: ChatCompletionsPayload = {
+    model: "gpt-test",
+    stream: true,
+    messages: [{ role: "user", content: "hello" }],
+  }
+
+  const { processedPayload, response } =
+    await createChatCompletionsWithProcessedPayload(payload)
+  processedPayload.model = "attacker-model"
+  processedPayload.messages[0].content = "attacker-content"
+  for await (const _event of response as AsyncIterable<unknown>) {
+    // Drain so streamed retry handling completes.
+  }
+
+  expect(fetchMock).toHaveBeenCalledTimes(2)
+  expect(lastRequestBody?.model).toBe("gpt-test")
+  expect(lastRequestBody?.messages).toEqual([
+    { role: "user", content: "hello" },
+  ])
+})
+
+test("ignores removed processed-payload hooks without changing responses", async () => {
+  const response = await createChatCompletions(
+    {
+      model: "gpt-test",
+      messages: [{ role: "user", content: "hello" }],
+    },
+    {
+      onProcessedPayload: () => {
+        throw new Error("hook failure")
+      },
+    } as unknown as Parameters<typeof createChatCompletions>[1],
+  )
+
+  expect(response).toHaveProperty("object", "chat.completion")
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+})
+
+test("isolates processed snapshots from non-streaming response state", async () => {
+  queuedResponses.push(
+    new Response(
+      JSON.stringify({
+        id: "json-response",
+        object: "chat.completion",
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: "assistant",
+              content: '```json\n{"ok":true}\n```',
+            },
+            finish_reason: "stop",
+            logprobs: null,
+          },
+        ],
+      }),
+      { headers: { "content-type": "application/json" } },
+    ),
+  )
+  const { processedPayload, response } =
+    await createChatCompletionsWithProcessedPayload({
+      model: "gpt-test",
+      messages: [{ role: "user", content: "return JSON" }],
+      response_format: { type: "json_object" },
+    })
+  processedPayload.response_format = null
+
+  expect(response).toHaveProperty("choices.0.message.content", '{"ok":true}')
 })
 
 test("retries streamed chat completions when the first SSE event is an overload error", async () => {
