@@ -178,6 +178,37 @@ test("omits Responses tool controls when no tools are available", async () => {
   expect(lastRequestBody).not.toHaveProperty("parallel_tool_calls")
 })
 
+test("forwards Responses tool controls when a real tool is available", async () => {
+  await createResponses(
+    {
+      model: "gpt-4o",
+      input: "Hello",
+      tools: [
+        {
+          type: "function",
+          name: "lookup",
+          parameters: {},
+          strict: false,
+        },
+      ],
+      tool_choice: "required",
+      parallel_tool_calls: true,
+    },
+    { vision: false, initiator: "user" },
+  )
+
+  expect(lastRequestBody?.tools).toEqual([
+    {
+      type: "function",
+      name: "lookup",
+      parameters: { type: "object", properties: {} },
+      strict: false,
+    },
+  ])
+  expect(lastRequestBody?.tool_choice).toBe("required")
+  expect(lastRequestBody?.parallel_tool_calls).toBe(true)
+})
+
 test("forwards reviewed Responses fields from the prepared request", async () => {
   await createResponses(
     {

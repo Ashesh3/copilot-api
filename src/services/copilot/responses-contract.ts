@@ -85,6 +85,15 @@ const RESPONSES_TOP_LEVEL_FIELDS = [
 const OMIT_FIELD = Symbol("omit Responses field")
 const JSON_OBJECT_INPUT_INSTRUCTION = "Respond with JSON."
 const COPILOT_RESPONSES_MIN_OUTPUT_TOKENS = 16
+const ALWAYS_BLOCKED_RESPONSES_TOOLS = new Set([
+  "code_interpreter",
+  "computer_use",
+  "computer_use_preview",
+  "file_search",
+  "local_shell",
+  "mcp",
+  "mcp_list_tools",
+])
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null
@@ -115,6 +124,7 @@ export function prepareResponsesRequest(
 ): PreparedResponsesRequest {
   validateStatefulControls(payload)
   validateResponsesContextManagement(payload.context_management)
+  validateResponsesTools(payload.tools)
 
   const body = {} as ResponsesWireBody
   for (const field of RESPONSES_TOP_LEVEL_FIELDS) {
@@ -130,6 +140,39 @@ export function prepareResponsesRequest(
   clampMaxOutputTokens(body)
 
   return { body, normalizationClasses: [] }
+}
+
+export function validateResponsesTools(tools: unknown): void {
+  if (tools === undefined || tools === null) return
+  if (!Array.isArray(tools)) {
+    throw createResponsesValidationError({
+      code: "invalid_type",
+      message: "The tools field must be an array.",
+      param: "tools",
+    })
+  }
+
+  for (const tool of tools) {
+    if (
+      !isRecord(tool)
+      || Array.isArray(tool)
+      || typeof tool.type !== "string"
+    ) {
+      throw createResponsesValidationError({
+        code: "invalid_type",
+        message: "Each tool must be an object with a string type.",
+        param: "tools",
+      })
+    }
+    if (ALWAYS_BLOCKED_RESPONSES_TOOLS.has(tool.type)) {
+      throw createResponsesValidationError({
+        code: "unsupported_value",
+        message:
+          "The Copilot Responses endpoint does not support one or more requested tools.",
+        param: "tools",
+      })
+    }
+  }
 }
 
 export function validateResponsesContextManagement(value: unknown): void {

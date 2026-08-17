@@ -18,6 +18,29 @@ function captureValidationError(payload: ResponsesPayload): LocalHTTPError {
   throw new Error("Expected Responses validation error")
 }
 
+const ALWAYS_BLOCKED_RESPONSES_TOOLS = [
+  "code_interpreter",
+  "computer_use",
+  "computer_use_preview",
+  "file_search",
+  "local_shell",
+  "mcp",
+  "mcp_list_tools",
+]
+
+const FORWARDED_RESPONSES_TOOLS = [
+  "function",
+  "custom",
+  "namespace",
+  "shell",
+  "apply_patch",
+  "programmatic_tool_calling",
+  "web_search",
+  "computer",
+  "image_generation",
+  "client_future_tool",
+]
+
 test("preserves the reviewed current Responses field inventory", () => {
   const result = prepareResponsesRequest({
     model: "gpt-5.6-sol",
@@ -316,6 +339,107 @@ test("accepts null stateful controls without forwarding them", () => {
   expect(body).not.toHaveProperty("background")
   expect(body).not.toHaveProperty("previous_response_id")
   expect(body).not.toHaveProperty("service_tier")
+})
+
+test.each(ALWAYS_BLOCKED_RESPONSES_TOOLS)(
+  "rejects blocked native Responses tool %s",
+  (type) => {
+    const error = captureValidationError({
+      model: "gpt-current",
+      input: "hello",
+      tools: [{ type }],
+    })
+
+    expect(error.clientBody).toEqual({
+      error: {
+        code: "unsupported_value",
+        message:
+          "The Copilot Responses endpoint does not support one or more requested tools.",
+        param: "tools",
+        type: "invalid_request_error",
+      },
+    })
+  },
+)
+
+test.each(FORWARDED_RESPONSES_TOOLS)(
+  "preserves upstream-authorized Responses tool class %s",
+  (type) => {
+    const tool =
+      type === "function" ?
+        {
+          type,
+          name: "run",
+          description: "Run a command",
+          parameters: { type: "object", properties: {} },
+          strict: false,
+        }
+      : { type, name: "run", future_option: { enabled: true } }
+    const body = prepareResponsesRequest({
+      model: "gpt-current",
+      input: "hello",
+      tools: [tool],
+    }).body
+
+    expect((body.tools as Array<Record<string, unknown>>)[0]).toEqual(tool)
+  },
+)
+
+test.each([
+  { name: "non-array tools", tools: "function" },
+  { name: "null tool item", tools: [null] },
+  { name: "array tool item", tools: [[]] },
+  { name: "primitive tool item", tools: ["function"] },
+  { name: "missing tool type", tools: [{ name: "run" }] },
+  { name: "non-string tool type", tools: [{ type: 1 }] },
+])("rejects malformed Responses $name", ({ tools }) => {
+  const error = captureValidationError({
+    model: "gpt-current",
+    input: "hello",
+    tools: tools as unknown as ResponsesPayload["tools"],
+  })
+
+  expect(error.clientBody).toMatchObject({
+    error: { code: "invalid_type", param: "tools" },
+  })
+})
+
+test.each([
+  { name: "omitted", tools: undefined },
+  { name: "null", tools: null },
+  { name: "empty", tools: [] },
+])("removes Responses tool controls when tools are $name", ({ tools }) => {
+  const body = prepareResponsesRequest({
+    model: "gpt-current",
+    input: "hello",
+    tools: tools as ResponsesPayload["tools"],
+    tool_choice: "required",
+    parallel_tool_calls: true,
+  }).body
+
+  expect(body).not.toHaveProperty("tools")
+  expect(body).not.toHaveProperty("tool_choice")
+  expect(body).not.toHaveProperty("parallel_tool_calls")
+})
+
+test("preserves Responses tool controls when a real tool is available", () => {
+  const body = prepareResponsesRequest({
+    model: "gpt-current",
+    input: "hello",
+    tools: [
+      {
+        type: "function",
+        name: "lookup",
+        parameters: { type: "object" },
+        strict: false,
+      },
+    ],
+    tool_choice: "required",
+    parallel_tool_calls: true,
+  }).body
+
+  expect(body.tool_choice).toBe("required")
+  expect(body.parallel_tool_calls).toBe(true)
 })
 
 test("prepares a new top-level body without mutating caller values", () => {

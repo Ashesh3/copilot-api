@@ -627,6 +627,7 @@ describe("Tool calling: Responses - tools", () => {
         ],
         tools: [RESPONSES_WEATHER_TOOL, RESPONSES_TIME_TOOL],
         tool_choice: "required",
+        parallel_tool_calls: true,
         stream: false,
       })
       expect(res.status).toBe(200)
