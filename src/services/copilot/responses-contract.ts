@@ -91,9 +91,37 @@ export function prepareResponsesRequest(
   normalizeEmptyToolControls(body)
   normalizeJsonSchemaResponseFormat(body)
   clampMaxOutputTokens(body)
-  removeUnsupportedRequestParameters(body)
 
   return { body, normalizationClasses: [] }
+}
+
+export function removeUnsupportedResponsesRequestParameters(
+  payload: ResponsesWireBody,
+): void {
+  const unsupported = new Set(getUnsupportedRequestParameters(payload.model))
+  if (
+    payload.model.startsWith("gpt-5.6-")
+    && payload.reasoning?.effort !== "none"
+  ) {
+    unsupported.add("temperature")
+    unsupported.add("top_p")
+  }
+
+  for (const parameter of unsupported) {
+    switch (parameter) {
+      case "temperature": {
+        delete payload.temperature
+        break
+      }
+      case "top_p": {
+        delete payload.top_p
+        break
+      }
+      default: {
+        break
+      }
+    }
+  }
 }
 
 function validateStatefulControls(payload: ResponsesPayload): void {
@@ -357,31 +385,4 @@ function normalizeSchemaValue(value: unknown, seen: Set<object>): void {
   }
 
   normalizeJsonSchemaObject(value, seen)
-}
-
-function removeUnsupportedRequestParameters(payload: ResponsesWireBody): void {
-  const unsupported = new Set(getUnsupportedRequestParameters(payload.model))
-  if (
-    payload.model.startsWith("gpt-5.6-")
-    && payload.reasoning?.effort !== "none"
-  ) {
-    unsupported.add("temperature")
-    unsupported.add("top_p")
-  }
-
-  for (const parameter of unsupported) {
-    switch (parameter) {
-      case "temperature": {
-        delete payload.temperature
-        break
-      }
-      case "top_p": {
-        delete payload.top_p
-        break
-      }
-      default: {
-        break
-      }
-    }
-  }
 }

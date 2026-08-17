@@ -83,6 +83,59 @@ test("keeps sampling parameters for GPT-5.6 with reasoning disabled", async () =
   expect(lastRequestBody?.top_p).toBe(0.8)
 })
 
+test("omits GPT-5.6 sampling after implicit defaults remove explicit none", async () => {
+  setModelSettingsForTest([
+    {
+      model: "gpt-5.6-implicit-medium",
+      supportedReasoningEfforts: ["none", "medium"],
+      defaultReasoningEffort: "medium",
+      implicitReasoningDefault: true,
+    },
+  ])
+
+  await createResponses(
+    {
+      model: "gpt-5.6-implicit-medium",
+      input: "Hello",
+      reasoning: { effort: "none" },
+      temperature: 0.3,
+      top_p: 0.8,
+    },
+    { vision: false, initiator: "user" },
+  )
+
+  expect(lastRequestBody?.reasoning).toEqual({ summary: "auto" })
+  expect(lastRequestBody).not.toHaveProperty("temperature")
+  expect(lastRequestBody).not.toHaveProperty("top_p")
+})
+
+test("keeps GPT-5.6 sampling when the configured final default is none", async () => {
+  setModelSettingsForTest([
+    {
+      model: "gpt-5.6-default-none",
+      supportedReasoningEfforts: ["none", "medium"],
+      defaultReasoningEffort: "none",
+    },
+  ])
+
+  await createResponses(
+    {
+      model: "gpt-5.6-default-none",
+      input: "Hello",
+      temperature: 0.3,
+      top_p: 0.8,
+    },
+    { vision: false, initiator: "user" },
+  )
+
+  expect(lastRequestBody?.reasoning).toEqual({
+    effort: "none",
+    summary: "auto",
+  })
+  expect(lastRequestBody?.temperature).toBe(0.3)
+  expect(lastRequestBody?.top_p).toBe(0.8)
+})
+
 test("omits Responses tool controls when no tools are available", async () => {
   await createResponses(
     {

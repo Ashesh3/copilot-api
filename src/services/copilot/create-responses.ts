@@ -4,7 +4,10 @@ import { events } from "fetch-event-stream"
 import { routedFetch } from "~/lib/account-router"
 import { getReasoningEffortForModel } from "~/lib/config"
 import { HTTPError } from "~/lib/error"
-import { usesImplicitReasoningDefault } from "~/lib/model-suffix"
+import {
+  getModelReasoningConfig,
+  usesImplicitReasoningDefault,
+} from "~/lib/model-suffix"
 import { PRE_HEADER_MAX_DELAY_SECONDS } from "~/services/copilot/transport-retry"
 
 import {
@@ -14,6 +17,7 @@ import {
 import { normalizeResponsesAttachments } from "./responses-attachments"
 import {
   prepareResponsesRequest,
+  removeUnsupportedResponsesRequestParameters,
   type ResponsesWireBody,
 } from "./responses-contract"
 import {
@@ -468,9 +472,12 @@ export const createResponses = async (
   if (usesImplicitReasoningDefault(body.model)) {
     delete body.reasoning.effort
   } else {
-    body.reasoning.effort ??= getReasoningEffortForModel(body.model)
+    body.reasoning.effort ??=
+      getModelReasoningConfig(body.model)?.defaultEffort
+      ?? getReasoningEffortForModel(body.model)
   }
   body.reasoning.summary ??= "auto"
+  removeUnsupportedResponsesRequestParameters(body)
 
   if (!body.include) {
     body.include = []
