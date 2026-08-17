@@ -5,6 +5,7 @@ import {
   COPILOT_API_VERSION,
   DEFAULT_COPILOT_INTEGRATION_ID,
   resolveCopilotIntegrationId,
+  sanitizeCopilotHeaderValue,
 } from "~/services/copilot/copilot-contract"
 
 test("pins the reviewed cumulative Copilot API contract", () => {
@@ -30,6 +31,14 @@ test("rejects integration identifiers that can inject a header", () => {
   expect(() => resolveCopilotIntegrationId("good\r\nX-Evil: 1")).toThrow(
     "COPILOT_INTEGRATION_ID",
   )
+})
+
+test("enforces request header limits in UTF-8 bytes", () => {
+  const exactlyOneKiB = "é".repeat(512)
+  const overOneKiB = `${exactlyOneKiB}a`
+
+  expect(sanitizeCopilotHeaderValue(`  ${exactlyOneKiB}  `)).toBe(exactlyOneKiB)
+  expect(sanitizeCopilotHeaderValue(overOneKiB)).toBeUndefined()
 })
 
 test("collects only safe Copilot response metadata", () => {

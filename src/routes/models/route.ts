@@ -360,14 +360,18 @@ modelRoutes.get("/", async (c) => {
 })
 
 modelRoutes.get("/:model", async (c) => {
-  const model = (await buildModelDiscoveryListings()).find(
-    (entry) => entry.id === c.req.param("model"),
-  )
-  if (!model) {
-    return c.json(
-      { error: { message: "Model not found", type: "not_found_error" } },
-      404,
+  try {
+    const model = (await buildModelDiscoveryListings()).find(
+      (entry) => entry.id === c.req.param("model"),
     )
+    if (!model) {
+      return c.json(
+        { error: { message: "Model not found", type: "not_found_error" } },
+        404,
+      )
+    }
+    return c.json(model)
+  } catch (error) {
+    return await forwardError(c, error)
   }
-  return c.json(model)
 })

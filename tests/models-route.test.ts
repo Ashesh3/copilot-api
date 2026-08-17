@@ -1,14 +1,22 @@
-import { afterAll, beforeEach, expect, test } from "bun:test"
+import { afterAll, beforeEach, expect, mock, test } from "bun:test"
 
 import type { Model, ModelsResponse } from "../src/services/copilot/get-models"
 
 import { setModelRedirectsForTest } from "../src/lib/model-redirect"
 import { setModelSettingsForTest } from "../src/lib/model-settings"
 import { state } from "../src/lib/state"
-import { buildModelDiscoveryListings } from "../src/routes/models/route"
+import {
+  buildModelDiscoveryListings,
+  modelRoutes,
+} from "../src/routes/models/route"
 import { server } from "../src/server"
 
 const originalModels = state.models
+const originalFetch = globalThis.fetch
+
+function restoreCopilotToken(token: string | undefined): void {
+  state.copilotToken = token
+}
 
 const currentCapabilities = {
   family: "gpt",
@@ -502,6 +510,39 @@ test("returns a safe not-found error for an unknown single model", async () => {
   expect(await response.json()).toEqual({
     error: { message: "Model not found", type: "not_found_error" },
   })
+})
+
+test("adapts single-model discovery failures through the safe gateway error boundary", async () => {
+  const privateMarker = "single-model-upstream-private-marker"
+  const originalCopilotToken = state.copilotToken
+  state.models = undefined
+  state.copilotToken = "test-copilot-token"
+  const fetchMock = mock(() =>
+    Promise.resolve(
+      Response.json(
+        { error: { message: privateMarker } },
+        { status: 400, statusText: "Bad Request" },
+      ),
+    ),
+  )
+  globalThis.fetch = Object.assign(fetchMock, {
+    preconnect: originalFetch.preconnect,
+  })
+
+  try {
+    const response = await modelRoutes.request("/gpt-current")
+    const body = await response.text()
+
+    expect(response.status).toBe(400)
+    expect(body).not.toContain(privateMarker)
+    expect(JSON.parse(body)).toEqual({
+      error: { message: "Upstream request failed", type: "error" },
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  } finally {
+    globalThis.fetch = originalFetch
+    restoreCopilotToken(originalCopilotToken)
+  }
 })
 
 test("preserves Copilot model limits and long-context billing metadata", async () => {

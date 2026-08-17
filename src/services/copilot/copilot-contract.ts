@@ -20,7 +20,11 @@ export function sanitizeCopilotHeaderValue(
   maxLength = 1024,
 ): string | undefined {
   const trimmed = value?.trim()
-  if (!trimmed || trimmed.length > maxLength || /[\0\r\n]/.test(trimmed)) {
+  if (
+    !trimmed
+    || Buffer.byteLength(trimmed, "utf8") > maxLength
+    || /[\0\r\n]/.test(trimmed)
+  ) {
     return undefined
   }
   return trimmed
