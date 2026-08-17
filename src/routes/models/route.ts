@@ -18,14 +18,16 @@ import { cacheModels } from "~/lib/utils"
 export const modelRoutes = new Hono()
 
 function isModelVisible(model: Model): boolean {
-  return model.model_picker_enabled || model.policy?.state === "enabled"
+  return (
+    model.model_picker_enabled === true || model.policy?.state === "enabled"
+  )
 }
 
 function getCopilotModelIds(models: Array<{ id: string }>): Set<string> {
   return new Set(models.map((model) => model.id))
 }
 
-interface ModelDiscoveryListing {
+export interface ModelDiscoveryListing extends Record<string, unknown> {
   id: string
   alias?: boolean
   aliases?: Array<string>
@@ -103,33 +105,14 @@ function toCopilotModelListing(model: Model): ModelDiscoveryListing {
   const supportedEndpoints = supportedEndpointsForClient(model)
   const thinking = toDiscoveryThinking(model)
   return {
+    ...structuredClone(model),
     id: model.id,
     object: "model",
     type: "model",
     created: 0, // No date available from source
     created_at: new Date(0).toISOString(), // No date available from source
-    owned_by: model.vendor,
+    owned_by: model.vendor ?? "unknown",
     display_name: model.name,
-    name: model.name,
-    vendor: model.vendor,
-    version: model.version,
-    preview: model.preview,
-    capabilities: model.capabilities,
-    ...(model.policy ? { policy: model.policy } : {}),
-    ...(model.billing ? { billing: model.billing } : {}),
-    ...(model.model_picker_category ?
-      { model_picker_category: model.model_picker_category }
-    : {}),
-    ...(model.model_picker_price_category ?
-      { model_picker_price_category: model.model_picker_price_category }
-    : {}),
-    ...(model.custom_model !== undefined ?
-      { custom_model: model.custom_model }
-    : {}),
-    ...(model.issues ? { issues: model.issues } : {}),
-    ...(model.warning_messages ?
-      { warning_messages: model.warning_messages }
-    : {}),
     ...(supportedEndpoints ? { supported_endpoints: supportedEndpoints } : {}),
     ...(modelHasOneMillionContext(model) ? { supports_1m_context: true } : {}),
     ...(thinking ? { thinking } : {}),
@@ -176,10 +159,14 @@ function toListingById(
 function toVirtualModelListings(
   models: Array<Model>,
 ): Array<ModelDiscoveryListing> {
-  return generateVirtualModels(models).map((model) => {
-    const supportedEndpoints = supportedEndpointsForClient(model)
+  const modelsById = new Map(models.map((model) => [model.id, model]))
+  return generateVirtualModels(models).map((virtualModel) => {
+    const separator = virtualModel.id.lastIndexOf(":")
+    const sourceModel = modelsById.get(virtualModel.id.slice(0, separator))
+    const supportedEndpoints = supportedEndpointsForClient(virtualModel)
     return {
-      ...model,
+      ...(sourceModel ? structuredClone(sourceModel) : {}),
+      ...virtualModel,
       ...(supportedEndpoints ?
         { supported_endpoints: supportedEndpoints }
       : {}),
@@ -299,68 +286,88 @@ function getOneMillionContextAliasModels(
   })
 }
 
+export async function buildModelDiscoveryListings(): Promise<
+  Array<ModelDiscoveryListing>
+> {
+  if (!state.models) {
+    // This should be handled by startup logic, but as a fallback.
+    await cacheModels()
+  }
+
+  const visibleModels =
+    state.models?.data.filter((model) => isModelVisible(model)) ?? []
+
+  const allModels = state.models?.data ?? []
+  const allCopilotModels = allModels.map((model) =>
+    toCopilotModelListing(model),
+  )
+  const allVirtualModels = toVirtualModelListings(allModels)
+
+  // Copilot models
+  const copilotModels = visibleModels.map((model) =>
+    toCopilotModelListing(model),
+  )
+
+  // Virtual models for reasoning effort variants (e.g. "claude-sonnet-4.6:high")
+  const virtualModels = toVirtualModelListings(visibleModels)
+
+  const discoveryModels: Array<ModelDiscoveryListing> = [
+    ...copilotModels,
+    ...virtualModels,
+  ]
+  const copilotModelIds = getCopilotModelIds(discoveryModels)
+  const customProviderModelCandidates: Array<ModelDiscoveryListing> =
+    getCustomProviderModels().map((model) => ({ ...model }))
+  const listingsById = toListingById([
+    ...allCopilotModels,
+    ...allVirtualModels,
+    ...customProviderModelCandidates,
+  ])
+
+  addUniqueListings(
+    discoveryModels,
+    copilotModelIds,
+    await getRedirectSourceModels(listingsById),
+  )
+  addUniqueListings(
+    discoveryModels,
+    copilotModelIds,
+    getClaudeDashAliasModels(discoveryModels),
+  )
+  addUniqueListings(
+    discoveryModels,
+    copilotModelIds,
+    getOneMillionContextAliasModels(discoveryModels, listingsById),
+  )
+
+  const customModels = customProviderModelCandidates.filter(
+    (model) => model.alias || !copilotModelIds.has(model.id),
+  )
+
+  return [...discoveryModels, ...customModels]
+}
+
 modelRoutes.get("/", async (c) => {
   try {
-    if (!state.models) {
-      // This should be handled by startup logic, but as a fallback.
-      await cacheModels()
-    }
-
-    const visibleModels =
-      state.models?.data.filter((model) => isModelVisible(model)) ?? []
-
-    const allModels = state.models?.data ?? []
-    const allCopilotModels = allModels.map((model) =>
-      toCopilotModelListing(model),
-    )
-    const allVirtualModels = toVirtualModelListings(allModels)
-
-    // Copilot models
-    const copilotModels = visibleModels.map((model) =>
-      toCopilotModelListing(model),
-    )
-
-    // Virtual models for reasoning effort variants (e.g. "claude-sonnet-4.6:high")
-    const virtualModels = toVirtualModelListings(visibleModels)
-
-    const discoveryModels: Array<ModelDiscoveryListing> = [
-      ...copilotModels,
-      ...virtualModels,
-    ]
-    const copilotModelIds = getCopilotModelIds(discoveryModels)
-    const customProviderModelCandidates = getCustomProviderModels()
-    const listingsById = toListingById([
-      ...allCopilotModels,
-      ...allVirtualModels,
-      ...customProviderModelCandidates,
-    ])
-
-    addUniqueListings(
-      discoveryModels,
-      copilotModelIds,
-      await getRedirectSourceModels(listingsById),
-    )
-    addUniqueListings(
-      discoveryModels,
-      copilotModelIds,
-      getClaudeDashAliasModels(discoveryModels),
-    )
-    addUniqueListings(
-      discoveryModels,
-      copilotModelIds,
-      getOneMillionContextAliasModels(discoveryModels, listingsById),
-    )
-
-    const customModels = getCustomProviderModels().filter(
-      (model) => model.alias || !copilotModelIds.has(model.id),
-    )
-
     return c.json({
       object: "list",
-      data: [...discoveryModels, ...customModels],
+      data: await buildModelDiscoveryListings(),
       has_more: false,
     })
   } catch (error) {
     return await forwardError(c, error)
   }
+})
+
+modelRoutes.get("/:model", async (c) => {
+  const model = (await buildModelDiscoveryListings()).find(
+    (entry) => entry.id === c.req.param("model"),
+  )
+  if (!model) {
+    return c.json(
+      { error: { message: "Model not found", type: "not_found_error" } },
+      404,
+    )
+  }
+  return c.json(model)
 })

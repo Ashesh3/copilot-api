@@ -1,6 +1,6 @@
 import { afterAll, beforeEach, expect, test } from "bun:test"
 
-import type { ModelsResponse } from "../src/services/copilot/get-models"
+import type { Model, ModelsResponse } from "../src/services/copilot/get-models"
 
 import { setModelRedirectsForTest } from "../src/lib/model-redirect"
 import { setModelSettingsForTest } from "../src/lib/model-settings"
@@ -8,6 +8,44 @@ import { state } from "../src/lib/state"
 import { server } from "../src/server"
 
 const originalModels = state.models
+
+const currentCapabilities = {
+  family: "gpt",
+  limits: {},
+  object: "model_capabilities",
+  supports: {},
+  tokenizer: "cl100k_base",
+  type: "chat",
+} satisfies Model["capabilities"]
+
+const currentModel = {
+  id: "gpt-current",
+  name: "GPT Current",
+  object: "model",
+  version: "2026-08-01",
+  vendor: "OpenAI",
+  model_picker_enabled: true,
+  auto: true,
+  is_chat_default: true,
+  is_chat_fallback: false,
+  info_messages: [{ type: "info", message: "current" }],
+  billing: {
+    auto_discount: 0.5,
+    token_prices: {
+      batch_size: 1_000_000,
+      default: {
+        input_price: 17.5,
+        output_price: 90.25,
+        cache_read_price: 1.75,
+        cache_write_price: 21.875,
+        cache_write_1h_price: 35.5,
+        max_prompt_tokens: 128_000,
+      },
+    },
+  },
+  capabilities: currentCapabilities,
+  supported_endpoints: ["/responses"],
+} satisfies Model
 
 interface ModelsRouteEntry {
   id: string
@@ -263,6 +301,7 @@ beforeEach(() => {
           type: "chat",
         },
       },
+      structuredClone(currentModel),
     ],
   } satisfies ModelsResponse
   setModelSettingsForTest([])
@@ -371,6 +410,52 @@ test("advertises ws:/responses only for native Responses models", async () => {
     "ws:/responses",
   ])
   expect(chatOnly?.supported_endpoints).toEqual(["/chat/completions"])
+})
+
+test("preserves cumulative upstream model metadata", async () => {
+  const response = await server.request("/v1/models")
+  const body = (await response.json()) as {
+    data: Array<Record<string, unknown>>
+  }
+  const model = body.data.find((entry) => entry.id === "gpt-current")
+
+  expect(model).toMatchObject({
+    auto: true,
+    is_chat_default: true,
+    is_chat_fallback: false,
+    info_messages: [{ type: "info", message: "current" }],
+    billing: {
+      auto_discount: 0.5,
+      token_prices: {
+        default: {
+          input_price: 17.5,
+          cache_write_1h_price: 35.5,
+        },
+      },
+    },
+  })
+})
+
+test("serves the same normalized row from single-model discovery", async () => {
+  const list = await server.request("/v1/models")
+  const listBody = (await list.json()) as {
+    data: Array<Record<string, unknown>>
+  }
+  const single = await server.request("/v1/models/gpt-current")
+
+  expect(single.status).toBe(200)
+  expect(await single.json()).toEqual(
+    listBody.data.find((entry) => entry.id === "gpt-current"),
+  )
+})
+
+test("returns a safe not-found error for an unknown single model", async () => {
+  const response = await server.request("/models/not-real")
+
+  expect(response.status).toBe(404)
+  expect(await response.json()).toEqual({
+    error: { message: "Model not found", type: "not_found_error" },
+  })
 })
 
 test("preserves Copilot model limits and long-context billing metadata", async () => {

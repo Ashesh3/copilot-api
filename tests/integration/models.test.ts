@@ -70,4 +70,23 @@ describe("GET /v1/models", () => {
     },
     TEST_TIMEOUT,
   )
+
+  for (const prefix of ["/v1/models", "/models"]) {
+    test(
+      `${prefix} serves the normalized list row from single-model discovery`,
+      async () => {
+        const list = await request(prefix)
+        const listBody = (await list.json()) as ModelsResponse
+        const expected = listBody.data.at(0)
+
+        expect(expected).toBeDefined()
+        if (!expected) throw new Error("Expected at least one discovered model")
+
+        const single = await request(`${prefix}/${expected.id}`)
+        expect(single.status).toBe(200)
+        expect(await single.json()).toEqual(expected)
+      },
+      TEST_TIMEOUT,
+    )
+  }
 })

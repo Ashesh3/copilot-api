@@ -270,9 +270,9 @@ interface VirtualModel {
   owned_by: string
   display_name: string
   name: string
-  vendor: string
+  vendor?: Model["vendor"]
   version: string
-  preview: boolean
+  preview?: Model["preview"]
   policy?: Model["policy"]
   billing?: Model["billing"]
   custom_model?: Model["custom_model"]
@@ -310,7 +310,7 @@ export function generateVirtualModels(
         type: "model",
         created: 0,
         created_at: new Date(0).toISOString(),
-        owned_by: model.vendor,
+        owned_by: model.vendor ?? "unknown",
         display_name: displayName,
         name: displayName,
         vendor: model.vendor,
