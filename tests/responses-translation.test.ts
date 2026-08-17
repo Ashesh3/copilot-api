@@ -7,6 +7,7 @@ import {
   translateAnthropicMessagesToResponsesPayload,
   translateResponsesResultToAnthropic,
 } from "../src/routes/messages/responses-translation"
+import { normalizeResponsesReasoning } from "../src/routes/responses/handler"
 
 test("keeps Anthropics max_tokens when translating to Responses payload", () => {
   const payload: AnthropicMessagesPayload = {
@@ -69,6 +70,19 @@ test("derives safety and cache fields from Claude JSON metadata.user_id", () => 
 
   expect(translated.safety_identifier).toBe("account-456")
   expect(translated.prompt_cache_key).toBe("session-789")
+})
+
+test("preserves integer Responses reasoning effort across named suffixes", () => {
+  const payload = {
+    model: "gpt-current",
+    input: "hello",
+    reasoning: { effort: 2048 },
+  }
+
+  const effort = normalizeResponsesReasoning(payload, "high")
+
+  expect(effort).toBe(2048)
+  expect(payload.reasoning).toEqual({ effort: 2048 })
 })
 
 test("maps raw Responses reasoning content into Anthropic thinking", () => {

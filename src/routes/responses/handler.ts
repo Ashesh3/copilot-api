@@ -188,13 +188,14 @@ const getCompletedBufferedResponse = (chunkData: {
   }
 }
 
-type ResponsesReasoningEffort = ReasoningEffort
+type ResponsesReasoningEffort = ReasoningEffort | number
 
 function isResponsesReasoningEffort(
   value: unknown,
 ): value is ResponsesReasoningEffort {
   return (
-    value === "none"
+    Number.isInteger(value)
+    || value === "none"
     || value === "minimal"
     || value === "low"
     || value === "medium"
@@ -227,7 +228,7 @@ export function normalizeResponsesReasoning(
   delete payload.reasoningEffort
   delete payload.reasoning_effort
 
-  if (suffixEffort) {
+  if (suffixEffort && typeof payload.reasoning?.effort !== "number") {
     payload.reasoning =
       payload.reasoning ?
         {
@@ -244,7 +245,7 @@ export function normalizeResponsesReasoning(
 function getRedirectReasoningEffort(
   effort: ResponsesReasoningEffort | undefined,
 ): ReasoningEffort | undefined {
-  return parseReasoningEffort(effort)
+  return typeof effort === "string" ? parseReasoningEffort(effort) : undefined
 }
 
 function applyRedirectedResponsesEffort(options: {
@@ -252,8 +253,10 @@ function applyRedirectedResponsesEffort(options: {
   payload: ResponsesPayload
   model: string
   effort: ReasoningEffort | undefined
+  preserveNumericEffort: boolean
 }): void {
   if (!options.effort) {
+    if (options.preserveNumericEffort) return
     if (
       usesImplicitReasoningDefault(options.model)
       && options.payload.reasoning
@@ -450,21 +453,24 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
   })
   // eslint-disable-next-line require-atomic-updates
   payload.model = normalizeModelName(redirect.model)
-  const redirectedEffort = normalizeReasoningEffortForModel(
-    payload.model,
-    redirect.effort,
-  )
-  reportClampedResponsesEffort(c, {
-    model: payload.model,
-    requestedEffort: redirect.effort,
-    effectiveEffort: redirectedEffort,
-    redirected: true,
-  })
+  const redirectedEffort =
+    typeof effectiveEffort === "number" ? undefined : (
+      normalizeReasoningEffortForModel(payload.model, redirect.effort)
+    )
+  if (typeof effectiveEffort !== "number") {
+    reportClampedResponsesEffort(c, {
+      model: payload.model,
+      requestedEffort: redirect.effort,
+      effectiveEffort: redirectedEffort,
+      redirected: true,
+    })
+  }
   applyRedirectedResponsesEffort({
     c,
     payload,
     model: payload.model,
     effort: redirectedEffort,
+    preserveNumericEffort: typeof effectiveEffort === "number",
   })
   const finalEffort = redirectedEffort ?? effectiveEffort
 
@@ -474,7 +480,7 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
     requestedModel,
     provider: "Responses",
     model: payload.model,
-    reasoningEffort: finalEffort,
+    reasoningEffort: typeof finalEffort === "string" ? finalEffort : undefined,
   })
   logger.debug(
     "Responses request payload:",

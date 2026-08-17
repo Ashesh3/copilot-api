@@ -130,10 +130,35 @@ test("keeps GPT-5.6 sampling when the configured final default is none", async (
 
   expect(lastRequestBody?.reasoning).toEqual({
     effort: "none",
-    summary: "auto",
   })
   expect(lastRequestBody?.temperature).toBe(0.3)
   expect(lastRequestBody?.top_p).toBe(0.8)
+})
+
+test("preserves integer effort for implicit-default Responses models", async () => {
+  setModelSettingsForTest([
+    {
+      model: "gpt-5.6-implicit-medium",
+      supportedReasoningEfforts: ["none", "medium"],
+      defaultReasoningEffort: "medium",
+      implicitReasoningDefault: true,
+    },
+  ])
+
+  await createResponses(
+    {
+      model: "gpt-5.6-implicit-medium",
+      input: "Hello",
+      reasoning: { effort: 2048 },
+      temperature: 0.3,
+      top_p: 0.8,
+    },
+    { vision: false, initiator: "user" },
+  )
+
+  expect(lastRequestBody?.reasoning).toEqual({ effort: 2048, summary: "auto" })
+  expect(lastRequestBody).not.toHaveProperty("temperature")
+  expect(lastRequestBody).not.toHaveProperty("top_p")
 })
 
 test("omits Responses tool controls when no tools are available", async () => {
@@ -174,6 +199,51 @@ test("forwards reviewed Responses fields from the prepared request", async () =>
     truncation: "auto",
     user: "user-1",
   })
+})
+
+test("preserves explicit Responses prompt caching controls exactly", async () => {
+  const promptCacheOptions = {
+    mode: "explicit",
+    ttl: "30m",
+    namespace: { tenant: "alpha", revision: 7 },
+  }
+  const promptCacheBreakpoint = {
+    mode: "explicit",
+    ttl: "5m",
+    metadata: { prefix: "stable", version: 2 },
+  }
+
+  await createResponses(
+    {
+      model: "gpt-4o",
+      input: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: "stable prefix",
+              prompt_cache_breakpoint: promptCacheBreakpoint,
+            },
+          ],
+        },
+      ],
+      prompt_cache_options: promptCacheOptions,
+      prompt_cache_retention: "in_memory",
+    },
+    { vision: false, initiator: "user" },
+  )
+
+  expect(JSON.stringify(lastRequestBody?.prompt_cache_options)).toBe(
+    JSON.stringify(promptCacheOptions),
+  )
+  expect(lastRequestBody?.prompt_cache_retention).toBe("in_memory")
+  const input = lastRequestBody?.input as Array<{
+    content: Array<{ prompt_cache_breakpoint?: Record<string, unknown> }>
+  }>
+  expect(JSON.stringify(input[0]?.content[0]?.prompt_cache_breakpoint)).toBe(
+    JSON.stringify(promptCacheBreakpoint),
+  )
 })
 
 test("does not pass upstream Responses objects to ordinary logs", async () => {

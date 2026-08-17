@@ -16,6 +16,7 @@ import {
 } from "./compaction-payload"
 import { normalizeResponsesAttachments } from "./responses-attachments"
 import {
+  applyResponsesReasoningDefaults,
   prepareResponsesRequest,
   removeUnsupportedResponsesRequestParameters,
   type ResponsesWireBody,
@@ -468,23 +469,14 @@ export const createResponses = async (
   signal?.throwIfAborted()
 
   // Match runtime defaults for direct Responses requests.
-  body.reasoning ??= {}
-  if (usesImplicitReasoningDefault(body.model)) {
-    delete body.reasoning.effort
-  } else {
-    body.reasoning.effort ??=
+  applyResponsesReasoningDefaults({
+    body,
+    defaultEffort:
       getModelReasoningConfig(body.model)?.defaultEffort
-      ?? getReasoningEffortForModel(body.model)
-  }
-  body.reasoning.summary ??= "auto"
+      ?? getReasoningEffortForModel(body.model),
+    implicitDefault: usesImplicitReasoningDefault(body.model),
+  })
   removeUnsupportedResponsesRequestParameters(body)
-
-  if (!body.include) {
-    body.include = []
-  }
-  if (!body.include.includes("reasoning.encrypted_content")) {
-    body.include.push("reasoning.encrypted_content")
-  }
 
   const shouldFitCompactionPayload = shouldFitResponsesCompactionPayload(
     body,

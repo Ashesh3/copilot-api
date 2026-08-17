@@ -10,6 +10,39 @@ export interface PreparedResponsesRequest {
   normalizationClasses: Array<string>
 }
 
+export function applyResponsesReasoningDefaults(options: {
+  body: ResponsesWireBody
+  defaultEffort: string | undefined
+  implicitDefault: boolean
+}): void {
+  const { body, defaultEffort, implicitDefault } = options
+  const reasoning = body.reasoning ?? {}
+  body.reasoning = reasoning
+
+  if (implicitDefault && typeof reasoning.effort !== "number") {
+    delete reasoning.effort
+  } else {
+    reasoning.effort ??= defaultEffort
+  }
+
+  if (reasoning.effort === "none") {
+    delete reasoning.summary
+    if (body.include) {
+      body.include = body.include.filter(
+        (item) => item !== "reasoning.encrypted_content",
+      )
+    }
+    return
+  }
+
+  reasoning.summary ??= "auto"
+  const include = body.include ? [...body.include] : []
+  if (!include.includes("reasoning.encrypted_content")) {
+    include.push("reasoning.encrypted_content")
+  }
+  body.include = include
+}
+
 const RESPONSES_TOP_LEVEL_FIELDS = [
   "model",
   "input",
@@ -78,6 +111,7 @@ export function prepareResponsesRequest(
   payload: ResponsesPayload,
 ): PreparedResponsesRequest {
   validateStatefulControls(payload)
+  validateResponsesContextManagement(payload.context_management)
 
   const body = {} as ResponsesWireBody
   for (const field of RESPONSES_TOP_LEVEL_FIELDS) {
@@ -93,6 +127,34 @@ export function prepareResponsesRequest(
   clampMaxOutputTokens(body)
 
   return { body, normalizationClasses: [] }
+}
+
+export function validateResponsesContextManagement(value: unknown): void {
+  if (value === undefined || value === null) return
+  if (!Array.isArray(value)) {
+    throw createResponsesValidationError({
+      code: "invalid_type",
+      message: "The context_management field must be an array.",
+      param: "context_management",
+    })
+  }
+
+  for (const item of value) {
+    if (!isRecord(item) || Array.isArray(item)) {
+      throw createResponsesValidationError({
+        code: "invalid_type",
+        message: "Each context_management item must be an object.",
+        param: "context_management",
+      })
+    }
+    if (item.type !== "compaction" && item.type !== "truncate") {
+      throw createResponsesValidationError({
+        code: "unsupported_value",
+        message: "The context_management type must be compaction or truncate.",
+        param: "context_management",
+      })
+    }
+  }
 }
 
 export function removeUnsupportedResponsesRequestParameters(
@@ -208,6 +270,7 @@ function normalizeStatefulField(
   value: unknown,
 ): unknown {
   if (field === "store") return value === false ? false : OMIT_FIELD
+  if (field === "context_management" && value === null) return OMIT_FIELD
   if (
     field === "background"
     || field === "previous_response_id"

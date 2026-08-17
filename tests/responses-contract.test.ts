@@ -3,7 +3,10 @@ import { expect, test } from "bun:test"
 import type { ResponsesPayload } from "~/services/copilot/create-responses"
 
 import { LocalHTTPError } from "~/lib/error"
-import { prepareResponsesRequest } from "~/services/copilot/responses-contract"
+import {
+  applyResponsesReasoningDefaults,
+  prepareResponsesRequest,
+} from "~/services/copilot/responses-contract"
 
 function captureValidationError(payload: ResponsesPayload): LocalHTTPError {
   try {
@@ -49,6 +52,163 @@ test("preserves the reviewed current Responses field inventory", () => {
   })
   expect(JSON.stringify(result.body)).toContain("prompt_cache_breakpoint")
 })
+
+test("keeps reasoning disabled without requesting summaries or encrypted state", () => {
+  const body = prepareResponsesRequest({
+    model: "gpt-5.6-sol",
+    input: "hello",
+    reasoning: { effort: "none" },
+    include: ["code_interpreter_call.outputs"],
+  }).body
+
+  applyResponsesReasoningDefaults({
+    body,
+    defaultEffort: "medium",
+    implicitDefault: false,
+  })
+
+  expect(body.reasoning).toEqual({ effort: "none" })
+  expect(body.include).toEqual(["code_interpreter_call.outputs"])
+})
+
+test("removes encrypted reasoning inclusion when reasoning is disabled", () => {
+  const body = prepareResponsesRequest({
+    model: "gpt-current",
+    input: "hello",
+    reasoning: { effort: "none", summary: "detailed" },
+    include: ["reasoning.encrypted_content", "code_interpreter_call.outputs"],
+  }).body
+
+  applyResponsesReasoningDefaults({
+    body,
+    defaultEffort: "medium",
+    implicitDefault: false,
+  })
+
+  expect(body.reasoning).toEqual({ effort: "none" })
+  expect(body.include).toEqual(["code_interpreter_call.outputs"])
+})
+
+test("preserves integer reasoning effort", () => {
+  const body = prepareResponsesRequest({
+    model: "gpt-current",
+    input: "hello",
+    reasoning: { effort: 2048 },
+  }).body
+
+  applyResponsesReasoningDefaults({
+    body,
+    defaultEffort: "medium",
+    implicitDefault: false,
+  })
+
+  expect(body.reasoning).toEqual({ effort: 2048, summary: "auto" })
+  expect(body.include).toContain("reasoning.encrypted_content")
+})
+
+test("adds encrypted reasoning inclusion once", () => {
+  const body = prepareResponsesRequest({
+    model: "gpt-current",
+    input: "hello",
+    include: ["reasoning.encrypted_content"],
+  }).body
+  const preparedInclude = body.include
+
+  applyResponsesReasoningDefaults({
+    body,
+    defaultEffort: "medium",
+    implicitDefault: false,
+  })
+
+  expect(body.include).toEqual(["reasoning.encrypted_content"])
+  expect(body.include).not.toBe(preparedInclude)
+})
+
+test("treats null reasoning as absent", () => {
+  const body = prepareResponsesRequest({
+    model: "gpt-current",
+    input: "hello",
+    reasoning: null,
+  }).body
+
+  applyResponsesReasoningDefaults({
+    body,
+    defaultEffort: "medium",
+    implicitDefault: false,
+  })
+
+  expect(body.reasoning).toEqual({ effort: "medium", summary: "auto" })
+})
+
+test.each(["compaction", "truncate"])(
+  "accepts %s context management",
+  (type) => {
+    const body = prepareResponsesRequest({
+      model: "gpt-current",
+      input: "hello",
+      context_management: [
+        { type, threshold: 4096, future_nested: { enabled: true } },
+      ],
+    }).body
+
+    expect(body.context_management).toEqual([
+      { type, threshold: 4096, future_nested: { enabled: true } },
+    ])
+  },
+)
+
+test("accepts null context management without forwarding it", () => {
+  const body = prepareResponsesRequest({
+    model: "gpt-current",
+    input: "hello",
+    context_management: null,
+  }).body
+
+  expect(body).not.toHaveProperty("context_management")
+})
+
+test("rejects unsupported context management types locally", () => {
+  const error = captureValidationError({
+    model: "gpt-current",
+    input: "hello",
+    context_management: [{ type: "future_unknown" }],
+  })
+
+  expect(error.clientBody).toMatchObject({
+    error: { code: "unsupported_value", param: "context_management" },
+  })
+})
+
+test.each([1, null, undefined])(
+  "rejects unsupported context management type %p locally",
+  (type) => {
+    const error = captureValidationError({
+      model: "gpt-current",
+      input: "hello",
+      context_management: [{ type } as unknown as Record<string, unknown>],
+    })
+
+    expect(error.clientBody).toMatchObject({
+      error: { code: "unsupported_value", param: "context_management" },
+    })
+  },
+)
+
+test.each([{ value: "truncate" }, { value: [null] }] as const)(
+  "rejects invalid context management shape",
+  ({ value }) => {
+    const error = captureValidationError({
+      model: "gpt-current",
+      input: "hello",
+      context_management:
+        value as unknown as ResponsesPayload["context_management"],
+    })
+
+    expect(error.clientBody).toMatchObject({
+      error: { code: "invalid_type", param: "context_management" },
+    })
+  },
+)
 
 test.each([
   ["store", { store: true }],
