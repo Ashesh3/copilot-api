@@ -11,6 +11,7 @@ import { resetWebSearchSessionsForTest } from "../src/services/copilot/mcp-web-s
 const originalFetch = globalThis.fetch
 const chatRequests: Array<Record<string, unknown>> = []
 const mcpHeaders: Array<Headers> = []
+let attachmentFetchCount = 0
 
 const models: ModelsResponse = {
   object: "list",
@@ -43,7 +44,8 @@ function jsonResponse(body: unknown): Response {
 }
 
 const fetchMock = mock((url: string, init?: RequestInit) => {
-  const path = new URL(url).pathname
+  const parsedUrl = new URL(url)
+  const path = parsedUrl.pathname
   const body =
     typeof init?.body === "string" ?
       (JSON.parse(init.body) as Record<string, unknown>)
@@ -66,6 +68,13 @@ const fetchMock = mock((url: string, init?: RequestInit) => {
       'data: {"jsonrpc":"2.0","id":"search","result":{"content":[{"type":"text","text":"{\\"type\\":\\"output_text\\",\\"text\\":{\\"value\\":\\"July 14, 2026 [Source](https://example.com)\\",\\"annotations\\":[]}}"}]}}\n\n',
       { headers: { "content-type": "text/event-stream" } },
     )
+  }
+
+  if (parsedUrl.hostname === "assets.example") {
+    attachmentFetchCount += 1
+    return new Response(Uint8Array.from([1, 2, 3]), {
+      headers: { "content-type": "image/png" },
+    })
   }
 
   if (path === "/chat/completions") {
@@ -134,6 +143,7 @@ beforeEach(() => {
   fetchMock.mockClear()
   chatRequests.length = 0
   mcpHeaders.length = 0
+  attachmentFetchCount = 0
   resetWebSearchSessionsForTest()
   state.accountType = "individual"
   state.copilotToken = "copilot-token"
@@ -194,4 +204,93 @@ test("Claude web search completes through Copilot MCP without leaking a tool cal
   )
   expect(mcpHeaders[0]?.get("x-mcp-tools")).toBe("web_search")
   expect(mcpHeaders[0]?.get("x-mcp-host")).toBe("copilot-cli")
+})
+
+test("Chat web-search follow-up retains the rewritten no-prefill history", async () => {
+  setModelSettingsForTest([
+    { model: "claude-sonnet-4.6", supportsAssistantPrefill: false },
+  ])
+
+  const response = await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-sonnet-4.6",
+      messages: [
+        { role: "user", content: "Use current facts." },
+        { role: "assistant", content: "I will search now." },
+      ],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "web_search",
+            parameters: { type: "object", properties: {} },
+          },
+        },
+      ],
+      tool_choice: "auto",
+      stream: false,
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(chatRequests).toHaveLength(2)
+  const firstMessages = chatRequests[0]?.messages as
+    | Array<Record<string, unknown>>
+    | undefined
+  const followUpMessages = chatRequests[1]?.messages as
+    | Array<Record<string, unknown>>
+    | undefined
+  expect(firstMessages?.[1]?.role).toBe("user")
+  expect(followUpMessages?.[1]?.role).toBe("user")
+  expect(followUpMessages?.at(-1)).toMatchObject({
+    role: "tool",
+    tool_call_id: "search-call",
+  })
+})
+
+test("Chat web-search follow-up carries one fetched attachment forward", async () => {
+  const response = await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-sonnet-4.6",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Use the image and current facts." },
+            {
+              type: "image_url",
+              image_url: { url: "https://assets.example/image.png" },
+            },
+          ],
+        },
+      ],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "web_search",
+            parameters: { type: "object", properties: {} },
+          },
+        },
+      ],
+      tool_choice: "auto",
+      stream: false,
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(attachmentFetchCount).toBe(1)
+  expect(chatRequests).toHaveLength(2)
+  for (const request of chatRequests) {
+    const messages = request.messages as Array<{
+      content: Array<{ image_url?: { url?: string } }>
+    }>
+    expect(messages[0]?.content[1]?.image_url?.url).toBe(
+      "data:image/png;base64,AQID",
+    )
+  }
 })

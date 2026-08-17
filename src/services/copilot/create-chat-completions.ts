@@ -324,6 +324,7 @@ interface StreamingRetryOptions {
 interface ChatCompletionsRequestOptions {
   compaction?: boolean
   initiator?: "agent" | "user"
+  onProcessedPayload?: (payload: ChatCompletionsPayload) => void
   signal?: AbortSignal
 }
 
@@ -488,6 +489,7 @@ export const createChatCompletions = async (
     signal: options?.signal,
     sourcePayload: normalizedPayload,
   })
+  options?.onProcessedPayload?.(active.payload)
 
   if (normalizedPayload.stream) {
     return handleStreamingResponse(active.response, {

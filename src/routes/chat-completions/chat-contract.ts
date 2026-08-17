@@ -8,6 +8,25 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const hasOwn = (value: object, key: PropertyKey): boolean =>
   Object.prototype.hasOwnProperty.call(value, key)
 
+function createInvalidChatBodyError(): LocalHTTPError {
+  return createChatValidationError({
+    code: "invalid_type",
+    message: "The request body must be a JSON object.",
+    param: "body",
+  })
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null) return false
+  try {
+    return (
+      !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype
+    )
+  } catch {
+    return false
+  }
+}
+
 function createChatValidationError(options: {
   code: string
   message: string
@@ -137,7 +156,14 @@ function normalizeDeprecatedFunctionCall(
 export function normalizeChatCompletionsRequest(
   payload: ChatCompletionsPayload,
 ): ChatCompletionsPayload {
-  const normalized = structuredClone(payload)
+  if (!isPlainRecord(payload)) throw createInvalidChatBodyError()
+
+  let normalized: ChatCompletionsPayload
+  try {
+    normalized = structuredClone(payload)
+  } catch {
+    throw createInvalidChatBodyError()
+  }
 
   if (typeof normalized.model !== "string" || normalized.model.trim() === "") {
     throw createChatValidationError({

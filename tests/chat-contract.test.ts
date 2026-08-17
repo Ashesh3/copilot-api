@@ -7,7 +7,7 @@ import { normalizeChatCompletionsRequest } from "~/routes/chat-completions/chat-
 
 function expectValidationError(
   action: () => unknown,
-  options: { code: string; param: string },
+  options: { code: string; message?: string; param: string },
 ): void {
   try {
     action()
@@ -16,6 +16,9 @@ function expectValidationError(
     expect(error).toBeInstanceOf(LocalHTTPError)
     expect(error).toHaveProperty("response.status", 400)
     expect(error).toHaveProperty("clientBody.error.code", options.code)
+    if (options.message) {
+      expect(error).toHaveProperty("clientBody.error.message", options.message)
+    }
     expect(error).toHaveProperty("clientBody.error.param", options.param)
     expect(error).toHaveProperty(
       "clientBody.error.type",
@@ -176,6 +179,37 @@ test("maps deprecated string function_call values", () => {
 })
 
 describe("Chat request validation", () => {
+  test("rejects a null request body with a safe local error", () => {
+    expectValidationError(
+      () =>
+        normalizeChatCompletionsRequest(
+          null as unknown as ChatCompletionsPayload,
+        ),
+      {
+        code: "invalid_type",
+        message: "The request body must be a JSON object.",
+        param: "body",
+      },
+    )
+  })
+
+  test("rejects an unusable request body with the same safe local error", () => {
+    const { proxy, revoke } = Proxy.revocable({}, {})
+    revoke()
+
+    expectValidationError(
+      () =>
+        normalizeChatCompletionsRequest(
+          proxy as unknown as ChatCompletionsPayload,
+        ),
+      {
+        code: "invalid_type",
+        message: "The request body must be a JSON object.",
+        param: "body",
+      },
+    )
+  })
+
   test("rejects max_tokens with max_completion_tokens", () => {
     expectValidationError(
       () =>

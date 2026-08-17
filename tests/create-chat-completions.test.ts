@@ -96,6 +96,27 @@ beforeEach(() => {
   resetRoutingTelemetryForTest()
 })
 
+test("returns a safe local Chat error for a null JSON body", async () => {
+  const response = await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "null",
+  })
+  const body = (await response.json()) as Record<string, unknown>
+
+  expect(response.status).toBe(400)
+  expect(body).toEqual({
+    error: {
+      code: "invalid_type",
+      message: "The request body must be a JSON object.",
+      param: "body",
+      type: "invalid_request_error",
+    },
+  })
+  expect(JSON.stringify(body)).not.toContain("Cannot read properties")
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
 test("fits explicitly marked ChatCompletions compaction payloads", async () => {
   const oversizedOutput =
     "BEGIN-CHAT-TRANSPORT\n"
@@ -280,6 +301,34 @@ test("dispatches normalized deprecated Chat controls without mutating the caller
   })
   expect(lastRequestBody).not.toHaveProperty("functions")
   expect(lastRequestBody).not.toHaveProperty("function_call")
+})
+
+test("exposes the processed clone without changing the direct response API", async () => {
+  setModelSettingsForTest([
+    { model: "claude-no-prefill", supportsAssistantPrefill: false },
+  ])
+  const payload: ChatCompletionsPayload = {
+    model: "claude-no-prefill",
+    messages: [
+      { role: "user", content: "hello" },
+      { role: "assistant", content: "prefill" },
+    ],
+  }
+  const original = structuredClone(payload)
+  let processedPayload: ChatCompletionsPayload | undefined
+
+  const response = await createChatCompletions(payload, {
+    onProcessedPayload: (currentPayload) => {
+      processedPayload = currentPayload
+    },
+  })
+
+  expect(response).toHaveProperty("object", "chat.completion")
+  expect(payload).toEqual(original)
+  expect(processedPayload?.messages[1]).toEqual({
+    role: "user",
+    content: "prefill",
+  })
 })
 
 test("retries streamed chat completions when the first SSE event is an overload error", async () => {

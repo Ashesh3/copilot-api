@@ -413,7 +413,11 @@ const executeRequest = async (
         model: payload.model,
       }),
       async (span) => {
+        let processedPayload = payload
         const response = (await createChatCompletions(payload, {
+          onProcessedPayload: (currentPayload) => {
+            processedPayload = currentPayload
+          },
           signal: c.req.raw.signal,
         })) as ChatCompletionResponse
 
@@ -425,7 +429,7 @@ const executeRequest = async (
 
         const finalResponse =
           needsWebSearch ?
-            await resolveWebSearchCalls(response, payload, {
+            await resolveWebSearchCalls(response, processedPayload, {
               abortSignal: c.req.raw.signal,
             })
           : response
@@ -515,12 +519,16 @@ async function executeStreamingWebSearchRequest(
       streaming: true,
     }),
     async (span) => {
+      let processedPayload: ChatCompletionsPayload = bufferedPayload
       const initial = (await createChatCompletions(bufferedPayload, {
+        onProcessedPayload: (currentPayload) => {
+          processedPayload = currentPayload
+        },
         signal: c.req.raw.signal,
       })) as ChatCompletionResponse
       const finalResponse = await resolveWebSearchCalls(
         initial,
-        bufferedPayload,
+        processedPayload,
         { abortSignal: c.req.raw.signal },
       )
       const response =
