@@ -23,6 +23,10 @@ import {
 import { state } from "../src/lib/state"
 import { tokenPool } from "../src/lib/token-pool"
 import { normalizeResponsesReasoning } from "../src/routes/responses/handler"
+import {
+  createStreamIdTracker,
+  fixStreamIds,
+} from "../src/routes/responses/stream-id-sync"
 import { server } from "../src/server"
 import { COMPACTION_PAYLOAD_MAX_BYTES } from "../src/services/copilot/compaction-payload"
 import {
@@ -56,7 +60,6 @@ test("sanitizes an unknown terminal shape through the direct event helper", () =
     response: {
       id: "resp_direct",
       object: "response",
-      status: "failed",
       output: [],
       output_text: "",
       usage: null,
@@ -90,6 +93,263 @@ test("leaves a well-formed completed terminal event unchanged", () => {
   const event = { event: "response.completed", data }
 
   expect(sanitizeResponsesStreamEvent(event)).toEqual(event)
+})
+
+test.each([
+  {
+    name: "missing id",
+    response: {
+      object: "response",
+      status: "completed",
+      output: [],
+      output_text: "",
+      usage: null,
+      error: null,
+      incomplete_details: null,
+    },
+  },
+  {
+    name: "wrong object",
+    response: {
+      id: "resp_invalid",
+      object: "private_object",
+      status: "completed",
+      output: [],
+      output_text: "",
+      usage: null,
+      error: null,
+      incomplete_details: null,
+    },
+  },
+  {
+    name: "non-array output",
+    response: {
+      id: "resp_invalid",
+      object: "response",
+      status: "completed",
+      output: "private-output",
+      output_text: "",
+      usage: null,
+      error: null,
+      incomplete_details: null,
+    },
+  },
+  {
+    name: "non-null error",
+    response: {
+      id: "resp_invalid",
+      object: "response",
+      status: "completed",
+      output: [],
+      output_text: "",
+      usage: null,
+      error: { message: "private-error" },
+      incomplete_details: null,
+    },
+  },
+])("fails closed for malformed completed shape with $name", ({ response }) => {
+  const sanitized = sanitizeResponsesStreamEvent({
+    event: "response.completed",
+    data: JSON.stringify({
+      type: "response.completed",
+      sequence_number: 3,
+      response,
+    }),
+  })
+
+  expect(JSON.parse(sanitized.data ?? "{}") as { type?: string }).toMatchObject(
+    {
+      type: "response.failed",
+    },
+  )
+  expect(sanitized.data).not.toContain("private")
+})
+
+test.each([
+  { data: "null", name: "null" },
+  { data: '"private-terminal-string"', name: "string" },
+  { data: "17", name: "number" },
+  { data: "true", name: "boolean" },
+  { data: '["private-terminal-array"]', name: "array" },
+])("reconstructs terminal $name JSON through the direct helper", ({ data }) => {
+  const sanitized = sanitizeResponsesStreamEvent({
+    event: "response.failed",
+    data,
+  })
+
+  expect(JSON.parse(sanitized.data ?? "{}") as unknown).toEqual({
+    type: "response.failed",
+    sequence_number: 0,
+    response: {
+      output: [],
+      output_text: "",
+      usage: null,
+      error: {
+        code: "server_error",
+        message: "Upstream Responses stream failed.",
+        param: null,
+        status: 502,
+      },
+      incomplete_details: null,
+    },
+  })
+  expect(sanitized.data).not.toContain("private-terminal")
+})
+
+test("reconstructs malformed terminal JSON through the direct helper", () => {
+  const sanitized = sanitizeResponsesStreamEvent({
+    event: "response.failed",
+    data: '{"private":"malformed-terminal-private-marker"',
+  })
+
+  expect(JSON.parse(sanitized.data ?? "{}") as unknown).toEqual({
+    type: "response.failed",
+    sequence_number: 0,
+    response: {
+      output: [],
+      output_text: "",
+      usage: null,
+      error: {
+        code: "server_error",
+        message: "Upstream Responses stream failed.",
+        param: null,
+        status: 502,
+      },
+      incomplete_details: null,
+    },
+  })
+  expect(sanitized.data).not.toContain("malformed-terminal-private-marker")
+})
+
+test.each([
+  { response: {}, name: "missing status" },
+  { response: { status: "future_status" }, name: "unknown status" },
+  { response: { status: "failed" }, name: "failed status" },
+  { response: { status: "incomplete" }, name: "incomplete status" },
+  { response: "private-response-string", name: "primitive response" },
+])("fails closed for response.completed with $name", ({ response }) => {
+  const sanitized = sanitizeResponsesStreamEvent({
+    event: "response.completed",
+    data: JSON.stringify({
+      type: "response.completed",
+      sequence_number: 4,
+      response,
+      private: "completed-private-marker",
+    }),
+  })
+
+  expect(JSON.parse(sanitized.data ?? "{}") as unknown).toEqual({
+    type: "response.failed",
+    sequence_number: 4,
+    response: {
+      output: [],
+      output_text: "",
+      usage: null,
+      error: {
+        code: "server_error",
+        message: "Upstream Responses stream failed.",
+        param: null,
+        status: 502,
+      },
+      incomplete_details: null,
+    },
+  })
+  expect(sanitized.data).not.toContain("completed-private-marker")
+  expect(sanitized.data).not.toContain("private-response-string")
+})
+
+test("fails closed when the terminal event name and JSON type disagree", () => {
+  const sanitized = sanitizeResponsesStreamEvent({
+    event: "response.completed",
+    data: JSON.stringify({
+      type: "response.failed",
+      sequence_number: 8,
+      response: {
+        id: "resp_mismatch",
+        object: "response",
+        status: "completed",
+        output: [],
+        output_text: "",
+        usage: null,
+        error: null,
+        incomplete_details: null,
+      },
+      private: "mismatched-completed-private-marker",
+    }),
+  })
+
+  expect(JSON.parse(sanitized.data ?? "{}") as unknown).toEqual({
+    type: "response.failed",
+    sequence_number: 8,
+    response: {
+      id: "resp_mismatch",
+      object: "response",
+      output: [],
+      output_text: "",
+      usage: null,
+      error: {
+        code: "server_error",
+        message: "Upstream Responses stream failed.",
+        param: null,
+        status: 502,
+      },
+      incomplete_details: null,
+    },
+  })
+  expect(sanitized.data).not.toContain("mismatched-completed-private-marker")
+})
+
+test("stream ID synchronization delegates terminal primitives to sanitization", () => {
+  expect(
+    JSON.parse(
+      fixStreamIds(
+        '["stream-sync-private-marker"]',
+        "response.completed",
+        createStreamIdTracker(),
+      ),
+    ) as unknown,
+  ).toEqual({
+    type: "response.failed",
+    sequence_number: 0,
+    response: {
+      output: [],
+      output_text: "",
+      usage: null,
+      error: {
+        code: "server_error",
+        message: "Upstream Responses stream failed.",
+        param: null,
+        status: 502,
+      },
+      incomplete_details: null,
+    },
+  })
+})
+
+test("stream ID synchronization does not mutate a readonly terminal record", () => {
+  const terminal = Object.freeze({
+    type: "response.completed",
+    sequence_number: 1,
+    response: Object.freeze({
+      id: "resp_readonly",
+      object: "response",
+      status: "completed",
+      output: Object.freeze([]),
+      output_text: "",
+      usage: null,
+      error: null,
+      incomplete_details: null,
+    }),
+  })
+
+  expect(() =>
+    fixStreamIds(
+      JSON.stringify(terminal),
+      "response.completed",
+      createStreamIdTracker(),
+    ),
+  ).not.toThrow()
+  expect(terminal.type).toBe("response.completed")
 })
 
 const originalFetch = globalThis.fetch

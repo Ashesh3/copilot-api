@@ -1,6 +1,11 @@
 import * as Sentry from "@sentry/bun"
 import consola from "consola"
 
+import {
+  readDescriptorSnapshotValue,
+  readNativeDomExceptionField,
+  snapshotDescriptorChain,
+} from "~/lib/descriptor-chain"
 import { sleep } from "~/lib/utils"
 
 // --- Constants ---
@@ -128,14 +133,13 @@ interface TransportErrorSnapshot {
   name?: string
 }
 
-function readTransportDescriptorValue(
-  descriptors: Record<string, PropertyDescriptor>,
-  key: string,
-): unknown {
-  if (!Object.hasOwn(descriptors, key)) return undefined
-  const descriptor = descriptors[key]
-  return "value" in descriptor ? descriptor.value : undefined
-}
+const TRANSPORT_ERROR_DESCRIPTOR_KEYS = new Set([
+  "cause",
+  "code",
+  "message",
+  "name",
+])
+const TRANSPORT_ERROR_DESCRIPTOR_DEPTH = 5
 
 function snapshotTransportError(
   value: unknown,
@@ -145,17 +149,23 @@ function snapshotTransportError(
     return undefined
   }
 
-  let descriptors: Record<string, PropertyDescriptor>
-  try {
-    descriptors = Object.getOwnPropertyDescriptors(value)
-  } catch {
-    return undefined
-  }
+  const snapshot = snapshotDescriptorChain(value, {
+    keys: TRANSPORT_ERROR_DESCRIPTOR_KEYS,
+    maxDepth: TRANSPORT_ERROR_DESCRIPTOR_DEPTH,
+  })
+  if (!snapshot) return undefined
 
-  const codeValue = readTransportDescriptorValue(descriptors, "code")
-  const messageValue = readTransportDescriptorValue(descriptors, "message")
-  const nameValue = readTransportDescriptorValue(descriptors, "name")
-  const causeValue = readTransportDescriptorValue(descriptors, "cause")
+  const codeValue =
+    readNativeDomExceptionField(snapshot, "code")
+    ?? readDescriptorSnapshotValue(snapshot, "code")
+  const messageValue =
+    readNativeDomExceptionField(snapshot, "message")
+    ?? readDescriptorSnapshotValue(snapshot, "message")
+  const nameValue =
+    readNativeDomExceptionField(snapshot, "name")
+    ?? readDescriptorSnapshotValue(snapshot, "name")
+    ?? snapshot.errorKind
+  const causeValue = readDescriptorSnapshotValue(snapshot, "cause")
 
   return {
     ...(typeof codeValue === "string" ? { code: codeValue } : {}),
@@ -247,10 +257,10 @@ function calculateNetworkRetryDelay(attempt: number): number {
 
 function toAbortReason(signal: AbortSignal): Error {
   const reason: unknown = signal.reason
-  if (reason instanceof Error) return reason
+  if (Error.isError(reason)) return reason
 
   const error = new Error("The operation was aborted")
-  error.name = "AbortError"
+  error.name = isAbortLikeError(reason) ? "AbortError" : "Error"
   // Preserve non-Error reasons (e.g. a DOMException) for diagnostics.
   if (reason !== undefined && reason !== null) {
     error.cause = reason

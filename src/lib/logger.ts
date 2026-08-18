@@ -3,6 +3,10 @@ import fs from "node:fs"
 import path from "node:path"
 import util from "node:util"
 
+import {
+  readDescriptorSnapshotValue,
+  snapshotDescriptorChain,
+} from "./descriptor-chain"
 import { PATHS } from "./paths"
 import { state } from "./state"
 
@@ -96,6 +100,8 @@ const SAFE_HANDLER_LOG_MESSAGES = new Set([
   "Translated Responses payload:",
   "Using function tool apply_patch for responses",
 ])
+const HANDLER_LOG_DESCRIPTOR_KEYS = new Set(["name"])
+const HANDLER_LOG_DESCRIPTOR_DEPTH = 5
 
 const ensureLogDirectory = () => {
   if (!fs.existsSync(LOG_DIR)) {
@@ -127,7 +133,14 @@ function sanitizeHandlerLogValue(value: unknown): unknown {
   const descriptors = getSafeOwnPropertyDescriptors(value)
   if (!descriptors) return OMITTED_HANDLER_LOG_OBJECT
   if (Array.isArray(value)) return sanitizeHandlerLogArray(descriptors)
-  if (value instanceof Error) return sanitizeHandlerLogError(descriptors)
+  const descriptorSnapshot = snapshotDescriptorChain(value, {
+    keys: HANDLER_LOG_DESCRIPTOR_KEYS,
+    maxDepth: HANDLER_LOG_DESCRIPTOR_DEPTH,
+  })
+  if (!descriptorSnapshot) return OMITTED_HANDLER_LOG_OBJECT
+  if (descriptorSnapshot.errorKind) {
+    return sanitizeHandlerLogError(descriptorSnapshot)
+  }
   if (!isPlainHandlerLogRecord(value)) return OMITTED_HANDLER_LOG_OBJECT
 
   const sanitized: Record<string, unknown> = {}
@@ -189,14 +202,15 @@ function sanitizeHandlerLogField(key: string, value: unknown): unknown {
 }
 
 function sanitizeHandlerLogError(
-  descriptors: Record<string, PropertyDescriptor>,
+  snapshot: ReturnType<typeof snapshotDescriptorChain>,
 ): { name: string } {
-  const ownName = readHandlerLogDescriptorValue(descriptors, "name")
+  const ownName = readDescriptorSnapshotValue(snapshot, "name")
+  const errorName = ownName ?? snapshot?.errorKind
   if (
-    typeof ownName === "string"
-    && SAFE_HANDLER_LOG_ERROR_NAMES.has(ownName)
+    typeof errorName === "string"
+    && SAFE_HANDLER_LOG_ERROR_NAMES.has(errorName)
   ) {
-    return { name: ownName }
+    return { name: errorName }
   }
   return { name: "Error" }
 }

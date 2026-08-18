@@ -16,6 +16,7 @@ import {
   clearLlmDebugLogs,
   getLlmDebugLog,
   listLlmDebugLogs,
+  toLlmDebugLogError,
 } from "../src/lib/llm-debug-log"
 import { runWithRoutingAffinity } from "../src/lib/routing-affinity"
 import {
@@ -31,9 +32,11 @@ import {
 } from "../src/services/copilot/copilot-client"
 import { DEFAULT_COPILOT_INTEGRATION_ID } from "../src/services/copilot/copilot-contract"
 import {
+  abortableSleep,
   createRetryBudget,
   createTransportChain,
   handleTransportFailure,
+  isAbortLikeError,
   MAX_DELAY_SECONDS,
   MAX_RETRIES,
   MAX_ROUTED_SENDS,
@@ -718,6 +721,204 @@ test("retries when the connection code is only on error.cause", async () => {
 
   expect(response.status).toBe(200)
   expect(capturedRequests).toHaveLength(2)
+})
+
+test("retries platform errors whose connection code is inherited", async () => {
+  const prototype = Object.create(Error.prototype, {
+    code: {
+      configurable: true,
+      value: "ECONNRESET",
+    },
+  }) as object
+  const inheritedCodeError = Object.create(prototype) as object
+  Object.defineProperty(inheritedCodeError, "message", {
+    configurable: true,
+    value: "provider request failed",
+  })
+  queuedResults.push(
+    { kind: "throw", value: inheritedCodeError } satisfies QueuedThrow,
+    new Response("{}", { status: 200 }),
+  )
+
+  const response = await copilotFetch("/responses", {
+    method: "POST",
+    headers: AUTH_HEADERS,
+  })
+
+  expect(response.status).toBe(200)
+  expect(capturedRequests).toHaveLength(2)
+})
+
+test("classifies Bun DOMException cancellation from inherited semantics", () => {
+  const cancellation = new DOMException(
+    "The operation was aborted.",
+    "AbortError",
+  )
+
+  expect(isAbortLikeError(cancellation)).toBe(true)
+})
+
+test("does not spend retry budget on Bun DOMException cancellation", async () => {
+  const cancellation = new DOMException(
+    "The operation was aborted.",
+    "AbortError",
+  )
+  let claims = 0
+
+  expect(
+    await captureRejection(
+      handleTransportFailure({
+        attemptMs: 1,
+        chain: createTransportChain("/responses", "dom-cancelled"),
+        claimRetry: () => {
+          claims += 1
+          return true
+        },
+        error: cancellation,
+        signal: undefined,
+      }),
+    ),
+  ).toBe(true)
+  expect(claims).toBe(0)
+})
+
+test("converts Bun DOMException abort reasons without losing semantics", async () => {
+  const controller = new AbortController()
+  const cancellation = new DOMException(
+    "The operation was aborted.",
+    "AbortError",
+  )
+  controller.abort(cancellation)
+  const thrown = await captureThrown(abortableSleep(1, controller.signal))
+
+  expect(isAbortLikeError(thrown)).toBe(true)
+})
+
+test("does not invoke inherited transport accessors", async () => {
+  let getterCalls = 0
+  const prototype = Object.defineProperties(
+    {},
+    {
+      code: {
+        get() {
+          getterCalls += 1
+          return "ECONNRESET"
+        },
+      },
+      message: {
+        get() {
+          getterCalls += 1
+          return "socket connection was closed"
+        },
+      },
+      name: {
+        get() {
+          getterCalls += 1
+          return "AbortError"
+        },
+      },
+    },
+  )
+  const hostile = Object.create(prototype) as object
+  queuedResults.push({ kind: "throw", value: hostile } satisfies QueuedThrow)
+
+  expect(
+    await captureRejection(
+      copilotFetch("/responses", { method: "POST", headers: AUTH_HEADERS }),
+    ),
+  ).toBe(true)
+  expect(getterCalls).toBe(0)
+  expect(capturedRequests).toHaveLength(1)
+})
+
+test("classifies a hostile inherited prototype chain conservatively", async () => {
+  let prototypeTrapCalls = 0
+  const prototype = new Proxy(
+    {},
+    {
+      getPrototypeOf() {
+        prototypeTrapCalls += 1
+        throw new Error("prototype-private-marker")
+      },
+    },
+  )
+  const hostile = Object.create(prototype) as object
+  queuedResults.push({ kind: "throw", value: hostile } satisfies QueuedThrow)
+
+  expect(
+    await captureRejection(
+      copilotFetch("/responses", { method: "POST", headers: AUTH_HEADERS }),
+    ),
+  ).toBe(true)
+  expect(prototypeTrapCalls).toBe(0)
+  expect(capturedRequests).toHaveLength(1)
+})
+
+test("keeps inherited runtime error details exact in LLM Debug", () => {
+  const ordinary = new TypeError("typed-private-message")
+  const domException = new DOMException("dom-private-message", "AbortError")
+
+  expect(toLlmDebugLogError(ordinary)).toMatchObject({
+    message: "typed-private-message",
+    name: "TypeError",
+    stack: ordinary.stack,
+  })
+  expect(toLlmDebugLogError(domException)).toMatchObject({
+    code: 20,
+    message: "dom-private-message",
+    name: "AbortError",
+  })
+})
+
+test("keeps nested DOMException codes exact in LLM Debug", () => {
+  const wrapped = new Error("wrapped transport failure", {
+    cause: new DOMException("nested abort", "AbortError"),
+  })
+
+  expect(toLlmDebugLogError(wrapped)).toMatchObject({
+    code: 20,
+    message: "wrapped transport failure",
+    name: "Error",
+  })
+})
+
+test("keeps LLM Debug bounded on hostile inherited descriptors", () => {
+  let getterCalls = 0
+  const prototype = Object.defineProperties(
+    {},
+    {
+      code: {
+        get() {
+          getterCalls += 1
+          return "PRIVATE_CODE"
+        },
+      },
+      message: {
+        get() {
+          getterCalls += 1
+          return "private message"
+        },
+      },
+      name: {
+        get() {
+          getterCalls += 1
+          return "PrivateError"
+        },
+      },
+      stack: {
+        get() {
+          getterCalls += 1
+          return "private stack"
+        },
+      },
+    },
+  )
+
+  expect(toLlmDebugLogError(Object.create(prototype))).toEqual({
+    message: "Unknown thrown value",
+    name: "Error",
+  })
+  expect(getterCalls).toBe(0)
 })
 
 test("classifies hostile transport values without invoking getters", async () => {

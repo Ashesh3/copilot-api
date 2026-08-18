@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- request logging security cases share one server fixture */
 import {
   afterAll,
   beforeAll,
@@ -564,6 +565,51 @@ test("allowlists fixed Error classes and redacts custom names", () => {
     { name: "AbortError" },
     { name: "Error" },
     { enabled: true, attempt: 3, status: "completed" },
+  ])
+})
+
+test("uses inherited Error names without instanceof checks", () => {
+  expect(
+    sanitizeHandlerLogArguments([
+      "Prepared request",
+      new TypeError("typed-error-private-marker"),
+    ]),
+  ).toEqual(["Prepared request", { name: "TypeError" }])
+})
+
+test("omits objects whose prototype chain crosses a proxy", () => {
+  const privateMarker = "prototype-proxy-private-marker"
+  let prototypeTrapCalls = 0
+  const hostilePrototype = new Proxy(
+    {},
+    {
+      getPrototypeOf() {
+        prototypeTrapCalls += 1
+        throw new Error(privateMarker)
+      },
+    },
+  )
+  const value = Object.create(hostilePrototype) as Record<string, unknown>
+  Object.defineProperty(value, "status", {
+    enumerable: true,
+    value: "completed",
+  })
+
+  expect(sanitizeHandlerLogArguments(["Prepared request", value])).toEqual([
+    "Prepared request",
+    "[OBJECT OMITTED]",
+  ])
+  expect(prototypeTrapCalls).toBe(0)
+})
+
+test("omits nested revoked prototype chains without throwing", () => {
+  const { proxy, revoke } = Proxy.revocable({}, {})
+  const value = { nested: Object.create(proxy) as object }
+  revoke()
+
+  expect(sanitizeHandlerLogArguments(["Prepared request", value])).toEqual([
+    "Prepared request",
+    { nested: "[OBJECT OMITTED]" },
   ])
 })
 

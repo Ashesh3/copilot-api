@@ -1,12 +1,19 @@
 import { randomUUID } from "node:crypto"
 
+import {
+  readDescriptorSnapshotValue,
+  readNativeDomExceptionField,
+  snapshotDescriptorChain,
+  type DescriptorChainSnapshot,
+} from "./descriptor-chain"
+
 export const LLM_DEBUG_HISTORY_WINDOW_MS = 10 * 60 * 1000
 
 type HeaderRecord = Record<string, string>
 
 export interface LlmDebugLogError {
   /** Transport error code (e.g. Bun's `ECONNRESET`), when the runtime sets one. */
-  code?: string
+  code?: number | string
   errno?: number
   message: string
   name: string
@@ -301,75 +308,78 @@ function cloneEntry(entry: LlmDebugLogEntry): LlmDebugLogEntry {
   return structuredClone(entry)
 }
 
-function getSafeErrorDescriptors(
-  error: unknown,
-): Record<string, PropertyDescriptor> | undefined {
-  if (typeof error !== "object" || error === null) return undefined
-  try {
-    return Object.getOwnPropertyDescriptors(error)
-  } catch {
-    return undefined
-  }
-}
-
-function readDescriptorValue(
-  descriptors: Record<string, PropertyDescriptor> | undefined,
-  key: string,
-): unknown {
-  if (!descriptors || !Object.hasOwn(descriptors, key)) return undefined
-  const descriptor = descriptors[key]
-  return "value" in descriptor ? descriptor.value : undefined
-}
+const DEBUG_ERROR_DESCRIPTOR_KEYS = new Set([
+  "cause",
+  "code",
+  "errno",
+  "message",
+  "name",
+  "path",
+  "stack",
+])
+const DEBUG_ERROR_DESCRIPTOR_DEPTH = 5
 
 /**
  * Read a runtime-attached diagnostic field, falling back to the cause. Wrapped
  * errors (`new Error(msg, { cause: bunError })`) carry these on the cause only.
  */
 function readErrorField(
-  descriptors: Record<string, PropertyDescriptor>,
+  snapshot: DescriptorChainSnapshot,
   key: string,
 ): unknown {
-  const own = readDescriptorValue(descriptors, key)
+  const own = readDescriptorSnapshotValue(snapshot, key)
   if (own !== undefined) return own
 
-  const causeDescriptors = getSafeErrorDescriptors(
-    readDescriptorValue(descriptors, "cause"),
-  )
-  return readDescriptorValue(causeDescriptors, key)
+  const cause = readDescriptorSnapshotValue(snapshot, "cause")
+  const causeSnapshot = snapshotDescriptorChain(cause, {
+    keys: DEBUG_ERROR_DESCRIPTOR_KEYS,
+    maxDepth: DEBUG_ERROR_DESCRIPTOR_DEPTH,
+  })
+  if (key === "code") {
+    return (
+      readNativeDomExceptionField(causeSnapshot, "code")
+      ?? readDescriptorSnapshotValue(causeSnapshot, key)
+    )
+  }
+  return readDescriptorSnapshotValue(causeSnapshot, key)
 }
 
 function readDebugErrorString(
-  descriptors: Record<string, PropertyDescriptor>,
+  snapshot: DescriptorChainSnapshot,
   key: string,
 ): string | undefined {
-  const value = readDescriptorValue(descriptors, key)
+  const nativeValue =
+    key === "message" || key === "name" ?
+      readNativeDomExceptionField(snapshot, key)
+    : undefined
+  const value = nativeValue ?? readDescriptorSnapshotValue(snapshot, key)
   return typeof value === "string" ? value : undefined
 }
 
-function readDebugErrorName(
-  descriptors: Record<string, PropertyDescriptor>,
-): string {
-  return readDebugErrorString(descriptors, "name") || "Error"
+function readDebugErrorName(snapshot: DescriptorChainSnapshot): string {
+  return readDebugErrorString(snapshot, "name") ?? snapshot.errorKind ?? "Error"
 }
 
-function readDebugErrorMessage(
-  descriptors: Record<string, PropertyDescriptor>,
-): string {
-  return readDebugErrorString(descriptors, "message") ?? "Unknown thrown value"
+function readDebugErrorMessage(snapshot: DescriptorChainSnapshot): string {
+  return readDebugErrorString(snapshot, "message") ?? "Unknown thrown value"
 }
 
 function normalizeDescriptorError(
-  descriptors: Record<string, PropertyDescriptor>,
+  snapshot: DescriptorChainSnapshot,
 ): LlmDebugLogError {
-  const codeValue = readErrorField(descriptors, "code")
-  const code = typeof codeValue === "string" ? codeValue : undefined
-  const errnoValue = readErrorField(descriptors, "errno")
-  const path = readErrorPath(readErrorField(descriptors, "path"))
-  const stack = readDebugErrorString(descriptors, "stack")
+  const nativeCode = readNativeDomExceptionField(snapshot, "code")
+  const codeValue = nativeCode ?? readErrorField(snapshot, "code")
+  const code =
+    typeof codeValue === "string" || typeof codeValue === "number" ?
+      codeValue
+    : undefined
+  const errnoValue = readErrorField(snapshot, "errno")
+  const path = readErrorPath(readErrorField(snapshot, "path"))
+  const stack = readDebugErrorString(snapshot, "stack")
 
   return {
-    message: readDebugErrorMessage(descriptors),
-    name: readDebugErrorName(descriptors),
+    message: readDebugErrorMessage(snapshot),
+    name: readDebugErrorName(snapshot),
     ...(stack ? { stack } : {}),
     ...(code === undefined ? {} : { code }),
     ...(typeof errnoValue === "number" ? { errno: errnoValue } : {}),
@@ -382,8 +392,13 @@ function readErrorPath(value: unknown): string | undefined {
 }
 
 function normalizeError(error: unknown): LlmDebugLogError {
-  const descriptors = getSafeErrorDescriptors(error)
-  if (descriptors) return normalizeDescriptorError(descriptors)
+  const snapshot = snapshotDescriptorChain(error, {
+    keys: DEBUG_ERROR_DESCRIPTOR_KEYS,
+    maxDepth: DEBUG_ERROR_DESCRIPTOR_DEPTH,
+  })
+  if (snapshot && typeof error === "object" && error !== null) {
+    return normalizeDescriptorError(snapshot)
+  }
 
   return {
     message:

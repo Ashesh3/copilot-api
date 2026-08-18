@@ -453,6 +453,16 @@ const SAFE_RESPONSES_INCOMPLETE_REASONS = new Set([
   "content_filter",
   "max_output_tokens",
 ])
+const REQUIRED_COMPLETED_RESPONSE_FIELDS = [
+  "error",
+  "id",
+  "incomplete_details",
+  "object",
+  "output",
+  "output_text",
+  "status",
+  "usage",
+] as const
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   if (typeof value !== "object" || value === null) return false
@@ -565,6 +575,7 @@ function sanitizeResponsesIncompleteDetails(
 
 function sanitizeTerminalResponsesResponse(
   value: unknown,
+  includeStatus = true,
 ): Record<string, unknown> {
   const id = sanitizeResponsesString(readRecordValue(value, "id"))
   const object = readRecordValue(value, "object")
@@ -573,7 +584,11 @@ function sanitizeTerminalResponsesResponse(
   return {
     ...(id ? { id } : {}),
     ...(object === SAFE_RESPONSES_OBJECT ? { object } : {}),
-    ...(typeof status === "string" && SAFE_RESPONSES_STATUSES.has(status) ?
+    ...((
+      includeStatus
+      && typeof status === "string"
+      && SAFE_RESPONSES_STATUSES.has(status)
+    ) ?
       { status }
     : {}),
     output: [],
@@ -586,8 +601,37 @@ function sanitizeTerminalResponsesResponse(
   }
 }
 
+function isAcceptedCompletedResponsesEvent(
+  parsed: unknown,
+  response: unknown,
+): boolean {
+  if (!isRecord(parsed) || !isRecord(response)) return false
+  if (readRecordValue(parsed, "type") !== "response.completed") return false
+  if (readRecordValue(response, "status") !== "completed") return false
+  if (sanitizeResponsesString(readRecordValue(response, "id")) === undefined) {
+    return false
+  }
+  if (readRecordValue(response, "object") !== SAFE_RESPONSES_OBJECT)
+    return false
+  if (!Array.isArray(readRecordValue(response, "output"))) return false
+  if (typeof readRecordValue(response, "output_text") !== "string") return false
+  if (readRecordValue(response, "error") !== null) return false
+  if (readRecordValue(response, "incomplete_details") !== null) return false
+  const usage = readRecordValue(response, "usage")
+  if (usage !== null && sanitizeResponsesUsage(usage) === null) return false
+
+  return REQUIRED_COMPLETED_RESPONSE_FIELDS.every((key) => {
+    try {
+      const descriptor = Object.getOwnPropertyDescriptor(response, key)
+      return descriptor !== undefined && "value" in descriptor
+    } catch {
+      return false
+    }
+  })
+}
+
 function sanitizeTerminalResponsesEvent(
-  parsed: Record<string, unknown>,
+  parsed: unknown,
   eventType: string,
 ): Record<string, unknown> {
   const sequenceNumber = sanitizeResponsesSequenceNumber(
@@ -603,10 +647,14 @@ function sanitizeTerminalResponsesEvent(
   }
 
   const response = readRecordValue(parsed, "response")
+  const safeResponse =
+    eventType === "response.failed" ?
+      sanitizeTerminalResponsesResponse(response, false)
+    : sanitizeTerminalResponsesResponse(response)
   return {
     type: eventType,
     sequence_number: sequenceNumber,
-    response: sanitizeTerminalResponsesResponse(response),
+    response: safeResponse,
   }
 }
 
@@ -620,11 +668,9 @@ export function sanitizeResponsesStreamEvent(
 ): ServerSentEventMessage {
   if (!event.data) return event
 
-  let parsed: Record<string, unknown>
+  let parsed: unknown
   try {
-    const value = JSON.parse(event.data) as unknown
-    if (!isRecord(value)) return event
-    parsed = value
+    parsed = JSON.parse(event.data) as unknown
   } catch {
     if (!event.event || !RESPONSES_TERMINAL_EVENT_TYPES.has(event.event)) {
       return event
@@ -643,12 +689,16 @@ export function sanitizeResponsesStreamEvent(
   if (!eventType || !RESPONSES_TERMINAL_EVENT_TYPES.has(eventType)) return event
 
   if (eventType === "response.completed") {
-    const status = readRecordValue(
-      readRecordValue(parsed, "response"),
-      "status",
-    )
-    if (status !== "failed" && status !== "incomplete") {
+    const response = readRecordValue(parsed, "response")
+    if (isAcceptedCompletedResponsesEvent(parsed, response)) {
       return event
+    }
+    return {
+      ...event,
+      event: "response.failed",
+      data: JSON.stringify(
+        sanitizeTerminalResponsesEvent(parsed, "response.failed"),
+      ),
     }
   }
 

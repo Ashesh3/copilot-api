@@ -637,7 +637,6 @@ test("uses the terminal SSE event name over a mismatched JSON type", async () =>
     response: {
       id: "resp_private_terminal",
       object: "response",
-      status: "failed",
       output: [],
       output_text: "",
       usage: { input_tokens: 3, output_tokens: 2, total_tokens: 5 },
@@ -685,6 +684,86 @@ test("reconstructs terminal Responses frames from an explicit allowlist", async 
     incomplete_details: { reason: "max_output_tokens" },
   })
   expect(body).not.toContain(privateMarker)
+})
+
+test.each([
+  { data: "null", name: "null" },
+  { data: '"http-terminal-private-string"', name: "string" },
+  { data: "17", name: "number" },
+  { data: '["http-terminal-private-array"]', name: "array" },
+])("fails closed for HTTP terminal $name JSON", async ({ data }) => {
+  installModel({ supported_endpoints: ["/responses"] })
+  fetchMock.mockImplementationOnce(() => createRawTerminalResponsesStream(data))
+
+  const body = await (
+    await postResponses({ input: "hello", stream: true })
+  ).text()
+  const eventOrder = body
+    .split("\n")
+    .filter((line) => line.startsWith("event: "))
+    .map((line) => line.slice(7))
+  const terminal = body
+    .split("\n")
+    .filter((line) => line.startsWith("data: "))
+    .map((line) => JSON.parse(line.slice(6)) as unknown)
+    .at(-1)
+
+  expect(eventOrder).toEqual([
+    "response.created",
+    "response.output_text.delta",
+    "response.failed",
+  ])
+  expect(terminal).toEqual({
+    type: "response.failed",
+    sequence_number: 0,
+    response: {
+      output: [],
+      output_text: "",
+      usage: null,
+      error: {
+        code: "server_error",
+        message: "Upstream Responses stream failed.",
+        param: null,
+        status: 502,
+      },
+      incomplete_details: null,
+    },
+  })
+  expect(body).toContain("partial-output")
+  expect(body).not.toContain("http-terminal-private")
+  expect(body).not.toContain("[DONE]")
+})
+
+test("fails closed for HTTP response.completed without completed status", async () => {
+  installModel({ supported_endpoints: ["/responses"] })
+  fetchMock.mockImplementationOnce(() =>
+    createRawTerminalResponsesStream(
+      JSON.stringify({
+        type: "response.completed",
+        sequence_number: 2,
+        response: {
+          id: "resp_missing_status",
+          object: "response",
+          output: [],
+          private: "http-missing-status-private-marker",
+        },
+      }),
+    ),
+  )
+
+  const body = await (
+    await postResponses({ input: "hello", stream: true })
+  ).text()
+  const terminal = body
+    .split("\n")
+    .filter((line) => line.startsWith("data: "))
+    .map((line) => JSON.parse(line.slice(6)) as { type?: string })
+    .at(-1)
+
+  expect(terminal?.type).toBe("response.failed")
+  expect(body).toContain("Upstream Responses stream failed.")
+  expect(body).not.toContain("http-missing-status-private-marker")
+  expect(body).not.toContain("[DONE]")
 })
 
 test("sanitizes native terminal events after the HTTP stream is committed", async () => {
@@ -750,6 +829,42 @@ test("sanitizes native terminal events after the HTTP stream is committed", asyn
     .map((line) => JSON.parse(line.slice(6)) as { response?: unknown })
     .at(-1)
   expect(terminalData?.response).toMatchObject({ output: [], output_text: "" })
+})
+
+test("fails closed for primitive terminal JSON after HTTP preflush", async () => {
+  installModel({ supported_endpoints: ["/responses"] })
+  delayNativeResponsesStream = true
+
+  const responsePromise = postResponses({ input: "hello", stream: true })
+  const response = await responsePromise
+  const body = response.body
+  if (!body) throw new Error("Expected an SSE response body")
+  const reader = body.getReader()
+  const encoder = new TextEncoder()
+  delayedNativeResponsesController?.enqueue(
+    encoder.encode(
+      `event: response.output_text.delta\ndata: ${JSON.stringify({
+        type: "response.output_text.delta",
+        sequence_number: 1,
+        item_id: "msg_preflush",
+        output_index: 0,
+        content_index: 0,
+        delta: "partial-output",
+      })}\n\n`,
+    ),
+  )
+  delayedNativeResponsesController?.enqueue(
+    encoder.encode(
+      'event: response.completed\ndata: ["preflush-private-marker"]\n\n',
+    ),
+  )
+  delayedNativeResponsesController?.close()
+  const rest = await readRemaining(reader)
+
+  expect(rest).toContain("partial-output")
+  expect(rest).toContain("Upstream Responses stream failed.")
+  expect(rest).not.toContain("preflush-private-marker")
+  expect(rest).not.toContain("[DONE]")
 })
 
 test("keeps route retries private while preserving ECONNRESET recovery", async () => {
@@ -1309,6 +1424,40 @@ function createPrivateTerminalResponsesStream(
       `event: response.output_text.delta\ndata: ${JSON.stringify(delta)}\n\n`,
       `event: ${terminalType}\ndata: ${JSON.stringify(terminal)}\n\n`,
     ].join(""),
+    {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    },
+  )
+}
+
+function createRawTerminalResponsesStream(data: string): Response {
+  const created = JSON.stringify({
+    type: "response.created",
+    sequence_number: 0,
+    response: {
+      id: "resp_raw_terminal",
+      object: "response",
+      status: "in_progress",
+      output: [],
+      output_text: "",
+      usage: null,
+      error: null,
+      incomplete_details: null,
+    },
+  })
+  const delta = JSON.stringify({
+    type: "response.output_text.delta",
+    sequence_number: 1,
+    item_id: "msg_raw_terminal",
+    output_index: 0,
+    content_index: 0,
+    delta: "partial-output",
+  })
+  return new Response(
+    `event: response.created\ndata: ${created}\n\n`
+      + `event: response.output_text.delta\ndata: ${delta}\n\n`
+      + `event: response.completed\ndata: ${data}\n\n`,
     {
       status: 200,
       headers: { "content-type": "text/event-stream" },

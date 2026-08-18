@@ -1278,7 +1278,6 @@ describe("responses websocket message handling", () => {
     expect(terminal.response).toEqual({
       id: "resp_terminal",
       object: "response",
-      status: "failed",
       output: [],
       output_text: "",
       usage: null,
@@ -1291,6 +1290,91 @@ describe("responses websocket message handling", () => {
       incomplete_details: null,
     })
     expect(ws.sent.join("\n")).not.toContain(privateMarker)
+  })
+
+  test.each([
+    { data: "null", name: "null" },
+    { data: '"ws-terminal-private-string"', name: "string" },
+    { data: "17", name: "number" },
+    { data: '["ws-terminal-private-array"]', name: "array" },
+  ])("fails closed for native terminal $name JSON", async ({ data }) => {
+    state.copilotToken = "copilot-token"
+    state.models = responsesCapableModels
+    queuedResponses.push(createRawResponsesTerminalSseResponse(data))
+    const ws = createTestWebSocket()
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "fail",
+        tools: [],
+      }),
+    )
+
+    const output = ws.sent.join("\n")
+    expect(output).toContain("partial-output")
+    expect(output).not.toContain("ws-terminal-private")
+    expect(output).not.toContain("[DONE]")
+    expect(JSON.parse(ws.sent.at(-1) ?? "{}") as unknown).toEqual({
+      type: "response.failed",
+      sequence_number: 0,
+      response: {
+        output: [],
+        output_text: "",
+        usage: null,
+        error: {
+          code: "server_error",
+          message: "Upstream Responses stream failed.",
+          param: null,
+          status: 502,
+        },
+        incomplete_details: null,
+      },
+    })
+    expect(ws.data.activeTurns.size).toBe(0)
+  })
+
+  test("treats missing completed status as an error terminal", async () => {
+    state.copilotToken = "copilot-token"
+    state.models = responsesCapableModels
+    queuedResponses.push(
+      createRawResponsesTerminalSseResponse(
+        JSON.stringify({
+          type: "response.completed",
+          sequence_number: 2,
+          response: {
+            id: "resp_missing_status",
+            object: "response",
+            output: [],
+            private: "ws-missing-status-private-marker",
+          },
+        }),
+      ),
+    )
+    const ws = createTestWebSocket()
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "fail",
+        tools: [],
+      }),
+    )
+
+    const terminal = JSON.parse(ws.sent.at(-1) ?? "{}") as {
+      response?: { error?: { message?: string } }
+      type?: string
+    }
+    expect(terminal.type).toBe("response.failed")
+    expect(terminal.response?.error?.message).toBe(
+      "Upstream Responses stream failed.",
+    )
+    expect(ws.sent.join("\n")).not.toContain("ws-missing-status-private-marker")
+    expect(ws.data.activeTurns.size).toBe(0)
   })
 
   test("keeps a delivered completed frame COMPLETE when the socket closes", async () => {
@@ -2157,6 +2241,25 @@ function createResponsesTerminalSseResponse(
     {
       headers: { "content-type": "text/event-stream" },
       status: 200,
+    },
+  )
+}
+
+function createRawResponsesTerminalSseResponse(data: string): Response {
+  const delta = JSON.stringify({
+    type: "response.output_text.delta",
+    sequence_number: 1,
+    item_id: "msg_terminal",
+    output_index: 0,
+    content_index: 0,
+    delta: "partial-output",
+  })
+  return new Response(
+    `event: response.output_text.delta\ndata: ${delta}\n\n`
+      + `event: response.completed\ndata: ${data}\n\n`,
+    {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
     },
   )
 }

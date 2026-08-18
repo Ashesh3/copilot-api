@@ -471,15 +471,42 @@ function rewriteResponseModelInEvent(
   requestedModel: string,
 ): string {
   try {
-    const parsed = JSON.parse(data) as { response?: { model?: string } }
-    if (parsed.response?.model) {
-      parsed.response.model = requestedModel
-      return JSON.stringify(parsed)
-    }
+    const parsed = JSON.parse(data) as unknown
+    if (!isPlainResponseEventRecord(parsed)) return data
+    const response = readResponseEventDataProperty(parsed, "response")
+    if (!isPlainResponseEventRecord(response)) return data
+    const model = readResponseEventDataProperty(response, "model")
+    if (typeof model !== "string" || model.length === 0) return data
+    return JSON.stringify({
+      ...parsed,
+      response: { ...response, model: requestedModel },
+    })
   } catch {
     return data
   }
   return data
+}
+
+function isPlainResponseEventRecord(
+  value: unknown,
+): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false
+  }
+  try {
+    const prototype = Object.getPrototypeOf(value) as unknown
+    return prototype === Object.prototype || prototype === null
+  } catch {
+    return false
+  }
+}
+
+function readResponseEventDataProperty(
+  value: Record<string, unknown>,
+  key: string,
+): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(value, key)
+  return descriptor && "value" in descriptor ? descriptor.value : undefined
 }
 
 export const handleResponses = async (c: Context) => {

@@ -9,14 +9,30 @@ import type {
   TranslationCheck,
 } from "~/lib/endpoint-routing"
 
+import {
+  readDescriptorSnapshotValue,
+  readNativeDomExceptionField,
+  snapshotDescriptorChain,
+} from "~/lib/descriptor-chain"
+
+const ABORT_ERROR_DESCRIPTOR_KEYS = new Set(["name"])
+
 /**
  * Check if an error is an AbortError (client disconnected during streaming).
  * These are expected and should not be logged or reported to Sentry.
  */
 export function isAbortError(error: unknown): boolean {
-  if (error instanceof DOMException && error.name === "AbortError") return true
-  if (error instanceof Error && error.name === "AbortError") return true
-  return false
+  if (typeof error !== "object" || error === null) return false
+  const snapshot = snapshotDescriptorChain(error, {
+    keys: ABORT_ERROR_DESCRIPTOR_KEYS,
+    maxDepth: 5,
+  })
+  if (!snapshot) return false
+  const name =
+    readNativeDomExceptionField(snapshot, "name")
+    ?? readDescriptorSnapshotValue(snapshot, "name")
+    ?? snapshot.errorKind
+  return name === "AbortError"
 }
 
 export class HTTPError extends Error {
