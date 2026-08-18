@@ -14,6 +14,7 @@ import {
   type ResponseInputItem,
   type ResponseInputMessage,
   type ResponseInputReasoning,
+  type ResponseInputReasoningSummary,
   type ResponseInputText,
   type ResponsesResult,
   type ResponseOutputContentBlock,
@@ -184,11 +185,7 @@ const translateAssistantMessage = (
       continue
     }
 
-    if (
-      block.type === "thinking"
-      && block.signature
-      && block.signature.includes("@")
-    ) {
+    if (block.type === "thinking") {
       flushPendingContent(pendingContent, items, {
         role: "assistant",
         phase: assistantPhase,
@@ -342,7 +339,7 @@ const createFileContent = (
 
 const createReasoningContent = (
   block: AnthropicThinkingBlock,
-): ResponseInputReasoning => {
+): ResponseInputReasoning | ResponseInputReasoningSummary => {
   // align with vscode-copilot-chat extractThinkingData, should add id, otherwise it will cause miss cache occasionally —— the usage input cached tokens to be 0
   // https://github.com/microsoft/vscode-copilot-chat/blob/main/src/platform/endpoint/node/responsesApi.ts#L162
   // when use in codex cli, reasoning id is empty, so it will cause miss cache occasionally
@@ -350,10 +347,15 @@ const createReasoningContent = (
   const signature = array[0]
   const id = array[1]
   const thinking = block.thinking === THINKING_TEXT ? "" : block.thinking
+  const summary =
+    thinking ? [{ type: "summary_text" as const, text: thinking }] : []
+  if (!signature || !id) {
+    return { type: "reasoning_summary", summary }
+  }
   return {
     id,
     type: "reasoning",
-    summary: thinking ? [{ type: "summary_text", text: thinking }] : [],
+    summary,
     encrypted_content: signature,
   }
 }

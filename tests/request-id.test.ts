@@ -457,6 +457,71 @@ test("truncates dynamic text from ordinary handler log messages", () => {
   ])
 })
 
+test("defensively sanitizes hostile and free-form handler log data", () => {
+  const privateMarkers = [
+    "throwing-getter-private-marker",
+    "proxy-private-marker",
+    "plain-secret-sentence-private-marker",
+    "array-private-marker",
+    "error-private-marker",
+    "unsafe-field-private-marker",
+  ]
+  let getterCalls = 0
+  const throwingGetter = Object.defineProperty({}, "secret", {
+    enumerable: true,
+    get() {
+      getterCalls += 1
+      throw new Error(privateMarkers[0])
+    },
+  })
+  let proxyTrapCalls = 0
+  const hostileProxy = new Proxy(
+    {},
+    {
+      ownKeys() {
+        proxyTrapCalls += 1
+        throw new Error(privateMarkers[1])
+      },
+    },
+  )
+
+  const sanitized = sanitizeHandlerLogArguments([
+    `This is an ordinary long secret sentence containing ${privateMarkers[2]} and should never survive`,
+    {
+      attempt: 2,
+      stream: true,
+      status: "completed",
+      outcome: "retrying",
+      target: "/responses",
+      unsafe: privateMarkers[5],
+      nested: [privateMarkers[3]],
+      error: new Error(privateMarkers[4]),
+      throwingGetter,
+      hostileProxy,
+    },
+  ])
+
+  expect(getterCalls).toBe(0)
+  expect(proxyTrapCalls).toBe(0)
+  const output = JSON.stringify(sanitized)
+  for (const marker of privateMarkers) expect(output).not.toContain(marker)
+  expect(sanitized).toEqual([
+    "Log",
+    {
+      attempt: 2,
+      stream: true,
+      status: "completed",
+      outcome: "retrying",
+      target: "/responses",
+      unsafe: "[REDACTED]",
+      nested: "[1 items omitted]",
+      error: { name: "Error" },
+      throwingGetter: { secret: "[OBJECT OMITTED]" },
+      hostileProxy: "[OBJECT OMITTED]",
+    },
+  ])
+})
+
 test("formats ordinary handler file lines without private payload values", () => {
   const privateMarkers = [
     "handler-prompt-private",

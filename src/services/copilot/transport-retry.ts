@@ -321,17 +321,26 @@ function warnTransportRetry(options: {
   retryChainId: string
 }): void {
   const { attempt, delayMs, error, path, retryChainId } = options
-  const message = (error as Error).message
+  const errorCode = error instanceof Error ? getErrorCode(error) : undefined
+  const errorClass = isConnectionError(error) ? "connection" : "network"
 
   consola.warn(
-    `Fetch failed on ${path} (attempt ${attempt + 1}), retrying in ${(delayMs / 1000).toFixed(2)}s:`,
-    message,
+    `Fetch ${errorClass} error on ${path} (attempt ${attempt + 1}), retrying in ${(delayMs / 1000).toFixed(2)}s`,
+    {
+      ...(errorCode === undefined ? {} : { errorCode }),
+      retryChainId,
+    },
   )
   Sentry.addBreadcrumb({
     category: "copilot",
-    message: `Fetch error on ${path} (attempt ${attempt + 1})`,
+    message: `Fetch ${errorClass} error on ${path} (attempt ${attempt + 1})`,
     level: "warning",
-    data: { error: message, delayMs, retryChainId },
+    data: {
+      delayMs,
+      errorClass,
+      ...(errorCode === undefined ? {} : { errorCode }),
+      retryChainId,
+    },
   })
 }
 

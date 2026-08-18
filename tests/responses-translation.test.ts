@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test"
 
-import type { AnthropicMessagesPayload } from "../src/routes/messages/anthropic-types"
+import type {
+  AnthropicAssistantContentBlock,
+  AnthropicMessagesPayload,
+} from "../src/routes/messages/anthropic-types"
 import type {
   ResponsesPayload,
   ResponsesResult,
@@ -74,6 +77,125 @@ test("derives safety and cache fields from Claude JSON metadata.user_id", () => 
   expect(translated.safety_identifier).toBe("account-456")
   expect(translated.prompt_cache_key).toBe("session-789")
 })
+
+test.each([
+  {
+    name: "single signed@id",
+    content: [
+      { type: "thinking", thinking: "signed", signature: "sig-one@rs-one" },
+    ],
+    expected: [
+      {
+        id: "rs-one",
+        type: "reasoning",
+        summary: [{ type: "summary_text", text: "signed" }],
+        encrypted_content: "sig-one",
+      },
+    ],
+  },
+  {
+    name: "single unsigned",
+    content: [{ type: "thinking", thinking: "unsigned" }],
+    expected: [
+      {
+        type: "reasoning_summary",
+        summary: [{ type: "summary_text", text: "unsigned" }],
+      },
+    ],
+  },
+  {
+    name: "multiple unsigned",
+    content: [
+      { type: "thinking", thinking: "first" },
+      { type: "thinking", thinking: "second" },
+    ],
+    expected: [
+      {
+        type: "reasoning_summary",
+        summary: [{ type: "summary_text", text: "first" }],
+      },
+      {
+        type: "reasoning_summary",
+        summary: [{ type: "summary_text", text: "second" }],
+      },
+    ],
+  },
+  {
+    name: "signed then unsigned",
+    content: [
+      { type: "thinking", thinking: "signed", signature: "sig-one@rs-one" },
+      { type: "thinking", thinking: "unsigned" },
+    ],
+    expected: [
+      {
+        id: "rs-one",
+        type: "reasoning",
+        summary: [{ type: "summary_text", text: "signed" }],
+        encrypted_content: "sig-one",
+      },
+      {
+        type: "reasoning_summary",
+        summary: [{ type: "summary_text", text: "unsigned" }],
+      },
+    ],
+  },
+  {
+    name: "unsigned then signed",
+    content: [
+      { type: "thinking", thinking: "unsigned" },
+      { type: "thinking", thinking: "signed", signature: "sig-two@rs-two" },
+    ],
+    expected: [
+      {
+        type: "reasoning_summary",
+        summary: [{ type: "summary_text", text: "unsigned" }],
+      },
+      {
+        id: "rs-two",
+        type: "reasoning",
+        summary: [{ type: "summary_text", text: "signed" }],
+        encrypted_content: "sig-two",
+      },
+    ],
+  },
+  {
+    name: "multiple signed",
+    content: [
+      { type: "thinking", thinking: "first", signature: "sig-one@rs-one" },
+      { type: "thinking", thinking: "second", signature: "sig-two@rs-two" },
+    ],
+    expected: [
+      {
+        id: "rs-one",
+        type: "reasoning",
+        summary: [{ type: "summary_text", text: "first" }],
+        encrypted_content: "sig-one",
+      },
+      {
+        id: "rs-two",
+        type: "reasoning",
+        summary: [{ type: "summary_text", text: "second" }],
+        encrypted_content: "sig-two",
+      },
+    ],
+  },
+])(
+  "preserves $name thinking blocks on Messages to Responses",
+  ({ content, expected }) => {
+    const translated = translateAnthropicMessagesToResponsesPayload({
+      model: "gpt-5.4",
+      max_tokens: 64,
+      messages: [
+        {
+          role: "assistant",
+          content: [...content] as Array<AnthropicAssistantContentBlock>,
+        },
+      ],
+    })
+
+    expect(translated.input as unknown).toEqual(expected)
+  },
+)
 
 test("preserves integer Responses reasoning effort across named suffixes", () => {
   const payload = {

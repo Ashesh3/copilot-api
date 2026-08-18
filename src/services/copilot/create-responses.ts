@@ -1,5 +1,5 @@
 import consola from "consola"
-import { events } from "fetch-event-stream"
+import { events, type ServerSentEventMessage } from "fetch-event-stream"
 
 import { routedFetch } from "~/lib/account-router"
 import { getReasoningEffortForModel } from "~/lib/config"
@@ -127,7 +127,15 @@ export interface ResponseInputReasoning {
     type: "summary_text"
     text: string
   }>
-  encrypted_content: string
+  encrypted_content?: string
+}
+
+export interface ResponseInputReasoningSummary {
+  type: "reasoning_summary"
+  summary: Array<{
+    type: "summary_text"
+    text: string
+  }>
 }
 
 export type ResponseInputItem =
@@ -135,6 +143,7 @@ export type ResponseInputItem =
   | ResponseFunctionToolCallItem
   | ResponseFunctionCallOutputItem
   | ResponseInputReasoning
+  | ResponseInputReasoningSummary
   | Record<string, unknown>
 
 export type ResponseInputContent =
@@ -199,7 +208,10 @@ export interface IncompleteDetails {
 }
 
 export interface ResponseError {
+  code?: string
   message: string
+  param?: string | null
+  status?: number
 }
 
 export type ResponseOutputItem =
@@ -401,6 +413,156 @@ export interface ResponseTextDoneEvent {
 export type ResponsesStream = ReturnType<typeof events>
 export type CreateResponsesReturn = ResponsesResult | ResponsesStream
 
+export const SAFE_RESPONSES_STREAM_ERROR_MESSAGE =
+  "Upstream Responses stream failed."
+
+const SAFE_RESPONSES_ERROR_CODES = new Set([
+  "content_filter",
+  "internal_error",
+  "invalid_request_body",
+  "invalid_request_error",
+  "model_error",
+  "overloaded_error",
+  "rate_limit_exceeded",
+  "rate_limited",
+  "server_error",
+  "service_unavailable",
+  "timeout",
+  "upstream_error",
+])
+const SAFE_RESPONSES_ERROR_PARAMS = new Set([
+  "background",
+  "body",
+  "input",
+  "max_output_tokens",
+  "model",
+  "previous_response_id",
+  "reasoning",
+  "service_tier",
+  "store",
+  "temperature",
+  "tool_choice",
+  "tools",
+  "top_p",
+])
+const RESPONSES_TERMINAL_EVENT_TYPES = new Set([
+  "error",
+  "response.completed",
+  "response.failed",
+  "response.incomplete",
+])
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function sanitizeResponsesErrorCode(value: unknown): string {
+  return typeof value === "string" && SAFE_RESPONSES_ERROR_CODES.has(value) ?
+      value
+    : "server_error"
+}
+
+function sanitizeResponsesErrorParam(value: unknown): string | null {
+  if (value === null) return null
+  return typeof value === "string" && SAFE_RESPONSES_ERROR_PARAMS.has(value) ?
+      value
+    : null
+}
+
+function sanitizeResponsesErrorStatus(value: unknown): number {
+  return (
+      typeof value === "number"
+        && Number.isInteger(value)
+        && value >= 400
+        && value <= 599
+    ) ?
+      value
+    : 502
+}
+
+function sanitizeResponsesError(value: unknown): Record<string, unknown> {
+  const error = isRecord(value) ? value : {}
+  return {
+    code: sanitizeResponsesErrorCode(error.code),
+    message: SAFE_RESPONSES_STREAM_ERROR_MESSAGE,
+    param: sanitizeResponsesErrorParam(error.param),
+    status: sanitizeResponsesErrorStatus(error.status),
+  }
+}
+
+function sanitizeTerminalResponsesEvent(
+  parsed: Record<string, unknown>,
+  eventType: string,
+): Record<string, unknown> {
+  const sequenceNumber =
+    typeof parsed.sequence_number === "number" ? parsed.sequence_number : 0
+
+  if (eventType === "error") {
+    return {
+      type: "error",
+      sequence_number: sequenceNumber,
+      ...sanitizeResponsesError(parsed),
+    }
+  }
+
+  const response = isRecord(parsed.response) ? parsed.response : {}
+  return {
+    type: eventType,
+    sequence_number: sequenceNumber,
+    response: {
+      ...response,
+      error: sanitizeResponsesError(response.error),
+    },
+  }
+}
+
+/**
+ * Native Responses streams are ordinarily client-visible. Keep the raw wire in
+ * administrator-only LLM Debug, but canonicalize terminal text before any
+ * route, WebSocket lifecycle, consola reporter, or Sentry integration sees it.
+ */
+export function sanitizeResponsesStreamEvent(
+  event: ServerSentEventMessage,
+): ServerSentEventMessage {
+  if (!event.data) return event
+
+  let parsed: Record<string, unknown>
+  try {
+    const value = JSON.parse(event.data) as unknown
+    if (!isRecord(value)) return event
+    parsed = value
+  } catch {
+    if (!event.event || !RESPONSES_TERMINAL_EVENT_TYPES.has(event.event)) {
+      return event
+    }
+    return {
+      ...event,
+      data: JSON.stringify(sanitizeTerminalResponsesEvent({}, event.event)),
+    }
+  }
+
+  const eventType = typeof parsed.type === "string" ? parsed.type : event.event
+  if (!eventType || !RESPONSES_TERMINAL_EVENT_TYPES.has(eventType)) return event
+
+  if (eventType === "response.completed") {
+    const response = isRecord(parsed.response) ? parsed.response : undefined
+    if (response?.status !== "failed" && response?.status !== "incomplete") {
+      return event
+    }
+  }
+
+  return {
+    ...event,
+    data: JSON.stringify(sanitizeTerminalResponsesEvent(parsed, eventType)),
+  }
+}
+
+async function* sanitizeResponsesStream(response: Response): ResponsesStream {
+  for await (const event of events(response)) {
+    yield sanitizeResponsesStreamEvent(event)
+  }
+}
+
 interface ResponsesRequestOptions {
   vision: boolean
   initiator: "agent" | "user"
@@ -508,7 +670,7 @@ export const createResponses = async (
   }
 
   if (body.stream) {
-    return events(response)
+    return sanitizeResponsesStream(response)
   }
 
   return (await response.json()) as ResponsesResult

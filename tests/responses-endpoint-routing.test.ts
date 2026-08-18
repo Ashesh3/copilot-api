@@ -1,3 +1,4 @@
+import * as Sentry from "@sentry/bun"
 import {
   afterAll,
   beforeAll,
@@ -24,6 +25,10 @@ const originalModels = state.models
 let lastUpstreamPath: string | undefined
 let lastUpstreamPayload: Record<string, unknown> | undefined
 let attachmentFetchCount = 0
+let delayedNativeResponsesController:
+  | ReadableStreamDefaultController<Uint8Array>
+  | undefined
+let delayNativeResponsesStream = false
 
 const fetchMock = mock((url: string | URL | Request, init?: RequestInit) => {
   const rawUrl = typeof url === "string" || url instanceof URL ? url : url.url
@@ -33,6 +38,17 @@ const fetchMock = mock((url: string | URL | Request, init?: RequestInit) => {
     typeof init?.body === "string" ?
       (JSON.parse(init.body) as Record<string, unknown>)
     : undefined
+
+  if (delayNativeResponsesStream && lastUpstreamPath === "/responses") {
+    return new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          delayedNativeResponsesController = controller
+        },
+      }),
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    )
+  }
 
   if (lastUpstreamPath === "/v1/messages") {
     return Response.json({
@@ -113,6 +129,8 @@ beforeEach(() => {
   lastUpstreamPath = undefined
   lastUpstreamPayload = undefined
   attachmentFetchCount = 0
+  delayedNativeResponsesController = undefined
+  delayNativeResponsesStream = false
   state.accountType = "individual"
   state.copilotToken = "copilot-token"
   state.githubToken = "github-token"
@@ -527,6 +545,191 @@ test("returns a synthetic Responses stream for a Messages fallback", async () =>
   expect(body).toContain("event: response.completed")
 })
 
+test.each(["response.failed", "error"])(
+  "sanitizes native %s events without losing partial output or event order",
+  async (terminalType) => {
+    installModel({ supported_endpoints: ["/responses"] })
+    const privateMarker = `native-${terminalType}-private-marker`
+    fetchMock.mockImplementationOnce((url, init) => {
+      const rawUrl =
+        typeof url === "string" || url instanceof URL ? url : url.url
+      lastUpstreamPath = new URL(rawUrl).pathname
+      lastUpstreamPayload =
+        typeof init?.body === "string" ?
+          (JSON.parse(init.body) as Record<string, unknown>)
+        : undefined
+      return createPrivateTerminalResponsesStream(terminalType, privateMarker)
+    })
+
+    const response = await postResponses({ input: "hello", stream: true })
+    const body = await response.text()
+
+    expect(response.status).toBe(200)
+    expect(lastUpstreamPath).toBe("/responses")
+    expect(body).toContain("partial-output")
+    expect(body).toContain("Upstream Responses stream failed.")
+    expect(body).not.toContain(privateMarker)
+    expect(body).not.toContain("[DONE]")
+    const eventOrder = body
+      .split("\n")
+      .filter((line) => line.startsWith("event: "))
+      .map((line) => line.slice(7))
+    expect(eventOrder).toEqual([
+      "response.created",
+      "response.output_text.delta",
+      terminalType,
+    ])
+
+    const dataFrames = body
+      .split("\n")
+      .filter((line) => line.startsWith("data: "))
+      .map((line) => JSON.parse(line.slice(6)) as Record<string, unknown>)
+    const terminal = dataFrames.at(-1) as {
+      code?: string
+      message?: string
+      param?: string | null
+      response?: {
+        error?: {
+          code?: string
+          message?: string
+          param?: string | null
+          status?: number
+        }
+      }
+      status?: number
+    }
+    const terminalError = terminal.response?.error ?? terminal
+    expect(terminalError).toMatchObject({
+      code: "server_error",
+      message: "Upstream Responses stream failed.",
+      param: "input",
+      status: 502,
+    })
+  },
+)
+
+test("sanitizes native terminal events after the HTTP stream is committed", async () => {
+  installModel({ supported_endpoints: ["/responses"] })
+  delayNativeResponsesStream = true
+  const privateMarker = "native-preflush-private-marker"
+
+  const responsePromise = postResponses({ input: "hello", stream: true })
+  const responseOutcome = await Promise.race([
+    responsePromise.then(() => "response" as const),
+    new Promise<"timed-out">((resolve) =>
+      setTimeout(() => resolve("timed-out"), 250),
+    ),
+  ])
+  expect(responseOutcome).toBe("response")
+  const response = await responsePromise
+  const body = response.body
+  if (!body) throw new Error("Expected an SSE response body")
+  const reader = body.getReader()
+
+  const encoder = new TextEncoder()
+  delayedNativeResponsesController?.enqueue(
+    encoder.encode(
+      `event: response.output_text.delta\ndata: ${JSON.stringify({
+        type: "response.output_text.delta",
+        sequence_number: 1,
+        item_id: "msg_preflush",
+        output_index: 0,
+        content_index: 0,
+        delta: "partial-output",
+      })}\n\n`,
+    ),
+  )
+  delayedNativeResponsesController?.enqueue(
+    encoder.encode(
+      `event: response.failed\ndata: ${JSON.stringify({
+        type: "response.failed",
+        sequence_number: 2,
+        response: {
+          id: "resp_preflush",
+          object: "response",
+          status: "failed",
+          error: {
+            code: "server_error",
+            message: privateMarker,
+            param: "input",
+            status: 502,
+          },
+        },
+      })}\n\n`,
+    ),
+  )
+  delayedNativeResponsesController?.close()
+  const rest = await readRemaining(reader)
+
+  expect(rest).toContain("partial-output")
+  expect(rest).toContain("Upstream Responses stream failed.")
+  expect(rest).not.toContain(privateMarker)
+  expect(rest).not.toContain("[DONE]")
+})
+
+test("keeps route retries private while preserving ECONNRESET recovery", async () => {
+  installModel({ supported_endpoints: ["/responses"] })
+  const privateMarker = "route-transport-private-marker"
+  fetchMock.mockImplementationOnce(() => {
+    throw Object.assign(new Error(`socket reset ${privateMarker}`), {
+      code: "ECONNRESET",
+      path: `https://api.githubcopilot.com/responses?private=${privateMarker}`,
+    })
+  })
+  fetchMock.mockImplementationOnce((url, init) => {
+    const rawUrl = typeof url === "string" || url instanceof URL ? url : url.url
+    lastUpstreamPath = new URL(rawUrl).pathname
+    lastUpstreamPayload =
+      typeof init?.body === "string" ?
+        (JSON.parse(init.body) as Record<string, unknown>)
+      : undefined
+    return Response.json({
+      id: "resp_retry",
+      object: "response",
+      created_at: 1,
+      model: "route-model",
+      output: [],
+      output_text: "",
+      status: "completed",
+      usage: null,
+      error: null,
+      incomplete_details: null,
+      instructions: null,
+      metadata: null,
+      parallel_tool_calls: true,
+      temperature: null,
+      tool_choice: "auto",
+      tools: [],
+      top_p: null,
+    })
+  })
+  const warnSpy = spyOn(consola, "warn")
+  const breadcrumbSpy = spyOn(Sentry, "addBreadcrumb").mockImplementation(
+    () => undefined,
+  )
+  const sentryLogSpy = spyOn(Sentry.logger, "info")
+
+  try {
+    const response = await postResponses({ input: "hello" })
+
+    expect(response.status).toBe(200)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(lastUpstreamPath).toBe("/responses")
+    const diagnostics = JSON.stringify({
+      breadcrumbs: breadcrumbSpy.mock.calls,
+      logger: sentryLogSpy.mock.calls,
+      warn: warnSpy.mock.calls,
+    })
+    expect(diagnostics).not.toContain(privateMarker)
+    expect(diagnostics).not.toContain("api.githubcopilot.com")
+    expect(diagnostics).toContain("ECONNRESET")
+  } finally {
+    sentryLogSpy.mockRestore()
+    breadcrumbSpy.mockRestore()
+    warnSpy.mockRestore()
+  }
+})
+
 test("fails locally when the model advertises no supported inference endpoint", async () => {
   installModel({ supported_endpoints: [] })
 
@@ -918,5 +1121,108 @@ function createModel(options: {
     ...(options.supported_endpoints ?
       { supported_endpoints: [...options.supported_endpoints] }
     : {}),
+  }
+}
+
+function createPrivateTerminalResponsesStream(
+  terminalType: string,
+  privateMarker: string,
+): Response {
+  const created = {
+    type: "response.created",
+    sequence_number: 0,
+    response: {
+      id: "resp_private_terminal",
+      object: "response",
+      created_at: 1,
+      model: "route-model",
+      output: [],
+      output_text: "",
+      status: "in_progress",
+      usage: null,
+      error: null,
+      incomplete_details: null,
+      instructions: null,
+      metadata: null,
+      parallel_tool_calls: true,
+      temperature: null,
+      tool_choice: "auto",
+      tools: [],
+      top_p: null,
+    },
+  }
+  const delta = {
+    type: "response.output_text.delta",
+    sequence_number: 1,
+    item_id: "msg_private_terminal",
+    output_index: 0,
+    content_index: 0,
+    delta: "partial-output",
+  }
+  const terminal =
+    terminalType === "error" ?
+      {
+        type: "error",
+        sequence_number: 2,
+        code: "server_error",
+        message: privateMarker,
+        param: "input",
+        status: 502,
+      }
+    : {
+        type: "response.failed",
+        sequence_number: 2,
+        response: {
+          ...created.response,
+          status: "failed",
+          output: [
+            {
+              id: "msg_private_terminal",
+              type: "message",
+              role: "assistant",
+              status: "incomplete",
+              content: [
+                {
+                  type: "output_text",
+                  text: "partial-output",
+                  annotations: [],
+                },
+              ],
+            },
+          ],
+          output_text: "partial-output",
+          error: {
+            code: "server_error",
+            message: privateMarker,
+            param: "input",
+            status: 502,
+          },
+        },
+      }
+
+  return new Response(
+    [
+      `event: response.created\ndata: ${JSON.stringify(created)}\n\n`,
+      `event: response.output_text.delta\ndata: ${JSON.stringify(delta)}\n\n`,
+      `event: ${terminalType}\ndata: ${JSON.stringify(terminal)}\n\n`,
+    ].join(""),
+    {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    },
+  )
+}
+
+async function readRemaining(reader: {
+  read: () => Promise<
+    { done: false; value: Uint8Array } | { done: true; value?: Uint8Array }
+  >
+}): Promise<string> {
+  const decoder = new TextDecoder()
+  let output = ""
+  while (true) {
+    const next = await reader.read()
+    if (next.done) return output
+    output += decoder.decode(next.value, { stream: true })
   }
 }

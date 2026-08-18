@@ -1,4 +1,5 @@
 /* eslint-disable max-lines, max-lines-per-function */
+import * as Sentry from "@sentry/bun"
 import {
   afterAll,
   afterEach,
@@ -6,8 +7,10 @@ import {
   describe,
   expect,
   mock,
+  spyOn,
   test,
 } from "bun:test"
+import consola from "consola"
 
 import type {
   ResponseInputItem,
@@ -1160,36 +1163,88 @@ describe("responses websocket message handling", () => {
   })
 
   test.each([
-    ["response.failed", "failed upstream"],
-    ["response.incomplete", "incomplete upstream"],
-    ["error", "stream error"],
-  ])("logs native %s terminal frames as errors", async (type, message) => {
-    state.models = responsesCapableModels
-    queuedResponses.push(createResponsesTerminalSseResponse(type, message))
-    const ws = createTestWebSocket()
-    const infoLines: Array<string> = []
-    const originalConsoleInfo = console.info
-    console.info = (...args: Array<unknown>) => {
-      infoLines.push(args.map(String).join(" "))
-    }
-
-    try {
-      await responsesWebSocket.message(
-        ws,
-        JSON.stringify({
-          type: "response.create",
-          model: "gpt-5.4",
-          input: "fail",
-          tools: [],
-        }),
+    { eventType: "response.failed", name: "response.failed" },
+    { eventType: "response.incomplete", name: "response.incomplete" },
+    { eventType: "response.completed", name: "failed response.completed" },
+    { eventType: "error", name: "error" },
+  ])(
+    "sanitizes native $name terminal frames across clients and diagnostics",
+    async ({ eventType }) => {
+      state.models = responsesCapableModels
+      const privateMarker = `ws-${eventType}-private-marker`
+      queuedResponses.push(
+        createResponsesTerminalSseResponse(eventType, privateMarker),
       )
-      expect(infoLines.filter((line) => line.includes("ERROR"))).toHaveLength(1)
-      expect(infoLines.some((line) => line.includes("COMPLETE"))).toBe(false)
-    } finally {
-      // eslint-disable-next-line require-atomic-updates
-      console.info = originalConsoleInfo
-    }
-  })
+      const ws = createTestWebSocket()
+      const infoSpy = spyOn(console, "info").mockImplementation(() => undefined)
+      const errorSpy = spyOn(consola, "error")
+      const breadcrumbSpy = spyOn(Sentry, "addBreadcrumb").mockImplementation(
+        () => undefined,
+      )
+      const captureSpy = spyOn(Sentry, "captureException").mockImplementation(
+        () => "event-id",
+      )
+      const sentryLogSpy = spyOn(Sentry.logger, "info")
+
+      try {
+        await responsesWebSocket.message(
+          ws,
+          JSON.stringify({
+            type: "response.create",
+            model: "gpt-5.4",
+            input: "fail",
+            tools: [],
+          }),
+        )
+
+        const clientOutput = ws.sent.join("\n")
+        expect(clientOutput).toContain("partial-output")
+        expect(clientOutput).toContain("Upstream Responses stream failed.")
+        expect(clientOutput).not.toContain(privateMarker)
+        expect(clientOutput).not.toContain("[DONE]")
+
+        const terminal = JSON.parse(ws.sent.at(-1) ?? "{}") as {
+          code?: string
+          message?: string
+          param?: string | null
+          response?: {
+            error?: {
+              code?: string
+              message?: string
+              param?: string | null
+              status?: number
+            }
+            status?: string
+          }
+          status?: number
+          type?: string
+        }
+        const terminalError = terminal.response?.error ?? terminal
+        expect(terminalError.code).toBe("server_error")
+        expect(terminalError.message).toBe("Upstream Responses stream failed.")
+        expect(terminalError.param).toBe("input")
+        expect(terminalError.status ?? terminal.status).toBe(502)
+
+        const infoOutput = JSON.stringify(infoSpy.mock.calls)
+        expect(infoOutput.match(/ERROR/g)).toHaveLength(1)
+        expect(infoOutput).not.toContain("COMPLETE")
+        const diagnostics = JSON.stringify({
+          breadcrumbs: breadcrumbSpy.mock.calls,
+          captured: captureSpy.mock.calls,
+          consola: errorSpy.mock.calls,
+          lifecycle: infoSpy.mock.calls,
+          sentry: sentryLogSpy.mock.calls,
+        })
+        expect(diagnostics).not.toContain(privateMarker)
+      } finally {
+        sentryLogSpy.mockRestore()
+        captureSpy.mockRestore()
+        breadcrumbSpy.mockRestore()
+        errorSpy.mockRestore()
+        infoSpy.mockRestore()
+      }
+    },
+  )
 
   test("keeps a delivered completed frame COMPLETE when the socket closes", async () => {
     state.models = responsesCapableModels
@@ -1990,23 +2045,66 @@ function createResponsesTerminalSseResponse(
   type: string,
   message: string,
 ): Response {
+  const delta = {
+    type: "response.output_text.delta",
+    sequence_number: 1,
+    item_id: "msg_terminal",
+    output_index: 0,
+    content_index: 0,
+    delta: "partial-output",
+  }
+  const responseStatus =
+    type === "response.failed" || type === "response.completed" ?
+      "failed"
+    : "incomplete"
   const frame =
     type === "error" ?
-      { type, message, code: "upstream_error", param: null, sequence_number: 1 }
+      {
+        type,
+        message,
+        code: "server_error",
+        param: "input",
+        status: 502,
+        sequence_number: 2,
+      }
     : {
         type,
-        sequence_number: 1,
+        sequence_number: 2,
         response: {
           id: "resp_terminal",
           object: "response",
-          status: type === "response.failed" ? "failed" : "incomplete",
-          error: { message },
+          status: responseStatus,
+          output: [
+            {
+              id: "msg_terminal",
+              type: "message",
+              role: "assistant",
+              status: "incomplete",
+              content: [
+                {
+                  type: "output_text",
+                  text: "partial-output",
+                  annotations: [],
+                },
+              ],
+            },
+          ],
+          error: {
+            code: "server_error",
+            message,
+            param: "input",
+            status: 502,
+          },
         },
       }
-  return new Response(`event: ${type}\ndata: ${JSON.stringify(frame)}\n\n`, {
-    headers: { "content-type": "text/event-stream" },
-    status: 200,
-  })
+  return new Response(
+    `event: response.output_text.delta\ndata: ${JSON.stringify(delta)}\n\n`
+      + `event: ${type}\ndata: ${JSON.stringify(frame)}\n\n`,
+    {
+      headers: { "content-type": "text/event-stream" },
+      status: 200,
+    },
+  )
 }
 
 async function waitFor(predicate: () => boolean): Promise<void> {

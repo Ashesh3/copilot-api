@@ -38,6 +38,7 @@ import {
 } from "~/services/copilot/create-chat-completions"
 import {
   createResponses,
+  SAFE_RESPONSES_STREAM_ERROR_MESSAGE,
   type ResponsesPayload,
 } from "~/services/copilot/create-responses"
 
@@ -445,7 +446,7 @@ async function waitForWebSocketTurn<T>(
 
 // Terminal frame classification has intentionally explicit branches so close
 // races cannot overwrite a client-visible completion.
-// eslint-disable-next-line complexity
+
 function finalizeFromResponsesFrame(
   data: ResponsesWebSocketData,
   turn: ResponsesWebSocketTurn,
@@ -465,12 +466,8 @@ function finalizeFromResponsesFrame(
   if (parsed.type === "response.completed") {
     const responseStatus = parsed.response?.status
     if (responseStatus === "failed" || responseStatus === "incomplete") {
-      const message =
-        parsed.response?.error?.message
-        ?? `Responses stream ended with status ${responseStatus}`
       finalizeResponsesWebSocketTurn(data, turn, {
-        error:
-          typeof message === "string" ? message : "Responses stream failed",
+        error: SAFE_RESPONSES_STREAM_ERROR_MESSAGE,
         status: 502,
         terminalStatus: "ERROR",
       })
@@ -493,12 +490,8 @@ function finalizeFromResponsesFrame(
   }
 
   if (parsed.type === "response.failed" || parsed.type === "error") {
-    const message =
-      parsed.response?.error?.message
-      ?? (typeof parsed.message === "string" ? parsed.message : undefined)
-      ?? `Responses stream emitted ${parsed.type}`
     finalizeResponsesWebSocketTurn(data, turn, {
-      error: message,
+      error: SAFE_RESPONSES_STREAM_ERROR_MESSAGE,
       status: 502,
       terminalStatus: "ERROR",
     })

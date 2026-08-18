@@ -12,6 +12,85 @@ const BUFFER_FLUSH_BATCH_SIZE = 100
 
 const logStreams = new Map<string, fs.WriteStream>()
 const logBuffers = new Map<string, Array<string>>()
+const OMITTED_HANDLER_LOG_OBJECT = "[OBJECT OMITTED]"
+const SAFE_HANDLER_LOG_ENUMS = new Set([
+  "aborted",
+  "cancelled",
+  "chat",
+  "completed",
+  "complete",
+  "connection",
+  "error",
+  "exhausted",
+  "failed",
+  "incomplete",
+  "messages",
+  "network",
+  "pending",
+  "rejected",
+  "response_received",
+  "responses",
+  "retrying",
+  "streaming",
+  "/chat/completions",
+  "/responses",
+  "/v1/messages",
+])
+const SAFE_HANDLER_LOG_STRING_FIELDS = new Set([
+  "destination",
+  "errorClass",
+  "event",
+  "inputKind",
+  "outcome",
+  "path",
+  "provider",
+  "reason",
+  "source",
+  "status",
+  "target",
+  "terminalStatus",
+  "transport",
+  "type",
+])
+const SAFE_HANDLER_LOG_MESSAGES = new Set([
+  "Anthropic Beta header present:",
+  "ChatCompletions fallback streaming",
+  "Compact ChatCompletions result received",
+  "Compact request for model:",
+  "Compact Responses result received",
+  "Copilot raw stream event:",
+  "Detected Subagent marker",
+  "Forwarding native Responses result",
+  "Forwarding native Responses stream",
+  "Google AI request payload:",
+  "Is compact request:",
+  "Native messages stream failed",
+  "Non-streaming response from Copilot:",
+  "Non-streaming Responses result:",
+  "Prepared Anthropic bridge request",
+  "Prepared request",
+  "Prepared Chat fallback request",
+  "Prepared translated Chat request",
+  "Prepared translated Responses request",
+  "Received Anthropic request",
+  "Received Chat fallback response",
+  "Received native Messages response",
+  "Received non-streaming Chat response",
+  "Received non-streaming Responses result",
+  "Received Responses request",
+  "Reduced oversized Responses fallback compaction payload",
+  "Responses raw stream event:",
+  "Routing custom model",
+  "Responses stream ended without completion; sending error event",
+  "Streaming native /v1/messages response",
+  "Streaming response from Copilot",
+  "Streaming response from Copilot (Responses API)",
+  "Translated Anthropic response",
+  "Translated custom provider Anthropic response",
+  "Translated OpenAI payload:",
+  "Translated Responses payload:",
+  "Using function tool apply_patch for responses",
+])
 
 const ensureLogDirectory = () => {
   if (!fs.existsSync(LOG_DIR)) {
@@ -38,25 +117,81 @@ const formatArgs = (args: Array<unknown>) =>
 function sanitizeHandlerLogValue(value: unknown): unknown {
   if (typeof value === "string") return "[REDACTED]"
   if (Array.isArray(value)) return `[${value.length} items omitted]`
-  if (value instanceof Error) return { name: value.name }
-  if (typeof value !== "object" || value === null) return value
+  if (typeof value !== "object" || value === null) {
+    return (
+        typeof value === "number"
+          || typeof value === "boolean"
+          || value === null
+      ) ?
+        value
+      : "[REDACTED]"
+  }
+  if (util.types.isProxy(value)) return OMITTED_HANDLER_LOG_OBJECT
+  if (value instanceof Error) return sanitizeHandlerLogError(value)
 
   const sanitized: Record<string, unknown> = {}
-  for (const [key, nestedValue] of Object.entries(value)) {
-    sanitized[key] = sanitizeHandlerLogValue(nestedValue)
+  const descriptors = getSafeOwnPropertyDescriptors(value)
+  if (!descriptors) return OMITTED_HANDLER_LOG_OBJECT
+  if (!isPlainHandlerLogRecord(value)) return OMITTED_HANDLER_LOG_OBJECT
+
+  for (const [key, descriptor] of Object.entries(descriptors)) {
+    if (!("value" in descriptor)) {
+      sanitized[key] = OMITTED_HANDLER_LOG_OBJECT
+      continue
+    }
+    sanitized[key] = sanitizeHandlerLogField(key, descriptor.value)
   }
   return sanitized
 }
 
 function sanitizeHandlerLogMessage(value: string): string {
-  if (value.includes(":") || value.includes(",")) {
-    const prefix = value.split(/[:,]/, 1)[0]?.trim()
-    if (prefix) return prefix
+  if (SAFE_HANDLER_LOG_MESSAGES.has(value)) return value
+
+  for (const message of SAFE_HANDLER_LOG_MESSAGES) {
+    if (value.startsWith(message)) return message.replace(/:$/, "")
   }
-  if (/[0-9_/@.[\]-]/.test(value)) {
-    return value.split(" ").slice(0, 3).join(" ") || "Log"
+
+  return "Log"
+}
+
+function sanitizeHandlerLogField(key: string, value: unknown): unknown {
+  if (typeof value !== "string") return sanitizeHandlerLogValue(value)
+  if (
+    SAFE_HANDLER_LOG_STRING_FIELDS.has(key)
+    && SAFE_HANDLER_LOG_ENUMS.has(value)
+  ) {
+    return value
   }
-  return value
+  return "[REDACTED]"
+}
+
+function sanitizeHandlerLogError(error: Error): { name: string } {
+  try {
+    const descriptors = Object.getOwnPropertyDescriptors(error)
+    const name = descriptors.name.value as unknown
+    return { name: typeof name === "string" ? name : "Error" }
+  } catch {
+    return { name: "Error" }
+  }
+}
+
+function getSafeOwnPropertyDescriptors(
+  value: object,
+): Record<string, PropertyDescriptor> | undefined {
+  try {
+    return Object.getOwnPropertyDescriptors(value)
+  } catch {
+    return undefined
+  }
+}
+
+function isPlainHandlerLogRecord(value: object): boolean {
+  try {
+    const prototype: unknown = Object.getPrototypeOf(value)
+    return prototype === Object.prototype || prototype === null
+  } catch {
+    return false
+  }
 }
 
 const sanitizeName = (name: string) => {

@@ -1,3 +1,4 @@
+import * as Sentry from "@sentry/bun"
 import {
   afterAll,
   beforeAll,
@@ -466,6 +467,39 @@ test("captures raw LLM request and response attempts for dashboard debugging", a
   expect(detail?.response?.body).toBe('{"choices":[]}')
 })
 
+test("keeps raw native Responses terminal bodies exact in LLM Debug", async () => {
+  const privateMarker = "llm-debug-native-terminal-private-marker"
+  const rawBody = `event: response.failed\ndata: ${JSON.stringify({
+    type: "response.failed",
+    response: {
+      status: "failed",
+      error: { code: "server_error", message: privateMarker },
+    },
+  })}\n\n`
+  queuedResults.push(
+    new Response(rawBody, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    }),
+  )
+
+  const response = await copilotFetch("/responses", {
+    method: "POST",
+    body: '{"model":"gpt-debug","stream":true}',
+    headers: {
+      Authorization: "Bearer raw-debug-token",
+      "content-type": "application/json",
+    },
+  })
+  await response.text()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+
+  const summary = listLlmDebugLogs().entries[0]
+  const detail = getLlmDebugLog(summary.id)
+  expect(detail?.response?.body).toBe(rawBody)
+  expect(detail?.response?.body).toContain(privateMarker)
+})
+
 // --- Transport-level connection errors ---
 
 const AUTH_HEADERS = {
@@ -482,6 +516,15 @@ function bunSocketClosedError(): Error {
     code: "ECONNRESET",
     errno: 0,
     path: "https://api.githubcopilot.com/responses?session=secret-token",
+  })
+}
+
+function privateBunSocketClosedError(privateMarker: string): Error {
+  const error = new Error(`socket reset ${privateMarker}`)
+  return Object.assign(error, {
+    code: "ECONNRESET",
+    errno: 0,
+    path: `https://api.githubcopilot.com/responses?private=${privateMarker}`,
   })
 }
 
@@ -504,6 +547,42 @@ test("retries Bun's socket-closed ECONNRESET and returns the retried response", 
 
   expect(response.status).toBe(200)
   expect(capturedRequests).toHaveLength(2)
+})
+
+test("omits private transport values from retry logs and breadcrumbs", async () => {
+  const privateMarker = "transport-retry-private-marker"
+  queuedResults.push(
+    privateBunSocketClosedError(privateMarker),
+    new Response("{}", { status: 200 }),
+  )
+  const warnSpy = spyOn(consola, "warn")
+  const breadcrumbSpy = spyOn(Sentry, "addBreadcrumb").mockImplementation(
+    () => undefined,
+  )
+  const sentryLogSpy = spyOn(Sentry.logger, "info")
+
+  try {
+    const response = await copilotFetch("/responses", {
+      method: "POST",
+      headers: AUTH_HEADERS,
+    })
+
+    expect(response.status).toBe(200)
+    expect(capturedRequests).toHaveLength(2)
+    const diagnostics = JSON.stringify({
+      breadcrumbs: breadcrumbSpy.mock.calls,
+      logger: sentryLogSpy.mock.calls,
+      warn: warnSpy.mock.calls,
+    })
+    expect(diagnostics).not.toContain(privateMarker)
+    expect(diagnostics).not.toContain("api.githubcopilot.com")
+    expect(diagnostics).toContain("ECONNRESET")
+    expect(diagnostics).toContain("retrying")
+  } finally {
+    sentryLogSpy.mockRestore()
+    breadcrumbSpy.mockRestore()
+    warnSpy.mockRestore()
+  }
 })
 
 test("records every Copilot transport attempt with its retry reason", async () => {
