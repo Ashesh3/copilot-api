@@ -216,10 +216,30 @@ export interface AnthropicContentBlockDeltaEvent
   type: "content_block_delta"
   index: number
   delta:
-    | { type: "text_delta"; text: string }
-    | { type: "input_json_delta"; partial_json: string }
-    | { type: "thinking_delta"; thinking: string }
-    | { type: "signature_delta"; signature: string }
+    | AnthropicTextDelta
+    | AnthropicInputJsonDelta
+    | AnthropicThinkingDelta
+    | AnthropicSignatureDelta
+}
+
+export interface AnthropicTextDelta extends Record<string, unknown> {
+  type: "text_delta"
+  text: string
+}
+
+export interface AnthropicInputJsonDelta extends Record<string, unknown> {
+  type: "input_json_delta"
+  partial_json: string
+}
+
+export interface AnthropicThinkingDelta extends Record<string, unknown> {
+  type: "thinking_delta"
+  thinking: string
+}
+
+export interface AnthropicSignatureDelta extends Record<string, unknown> {
+  type: "signature_delta"
+  signature: string
 }
 
 export interface AnthropicContentBlockStopEvent

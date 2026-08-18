@@ -7,6 +7,7 @@ import type {
 } from "~/services/copilot/create-chat-completions"
 
 import {
+  type AnthropicContentBlockDeltaEvent,
   type AnthropicMessageDeltaEvent,
   type AnthropicMessageStartEvent,
   type AnthropicResponse,
@@ -73,6 +74,51 @@ function isValidAnthropicStreamEvent(payload: unknown): boolean {
   return anthropicStreamEventSchema.safeParse(payload).success
 }
 
+test("types and preserves unknown fields in native Messages deltas", () => {
+  const contentBlockDeltas: Array<AnthropicContentBlockDeltaEvent> = [
+    {
+      type: "content_block_delta",
+      index: 0,
+      delta: {
+        type: "text_delta",
+        text: "hello",
+        future_native_field: true,
+      },
+    },
+    {
+      type: "content_block_delta",
+      index: 1,
+      delta: {
+        type: "input_json_delta",
+        partial_json: '{"answer":',
+        future_native_field: true,
+      },
+    },
+    {
+      type: "content_block_delta",
+      index: 2,
+      delta: {
+        type: "thinking_delta",
+        thinking: "considering the answer",
+        future_native_field: true,
+      },
+    },
+    {
+      type: "content_block_delta",
+      index: 3,
+      delta: {
+        type: "signature_delta",
+        signature: "signature",
+        future_native_field: true,
+      },
+    },
+  ]
+
+  for (const contentBlockDelta of contentBlockDeltas) {
+    expect(contentBlockDelta.delta.future_native_field).toBe(true)
+  }
+})
+
 describe("OpenAI to Anthropic Non-Streaming Response Translation", () => {
   test("types and preserves current native Messages response extensions", () => {
     const response: AnthropicResponse = {
@@ -115,7 +161,6 @@ describe("OpenAI to Anthropic Non-Streaming Response Translation", () => {
       copilot_usage: { completion_tokens: 8 },
       future_native_field: { enabled: true },
     }
-
     expect(response).toMatchObject({
       id: "msg-current",
       type: "message",
@@ -150,6 +195,7 @@ describe("OpenAI to Anthropic Non-Streaming Response Translation", () => {
         content: [],
         stop_reason: null,
         stop_sequence: null,
+        recommended_auto_tier: "balanced",
       },
     })
     expect(messageDelta).toMatchObject({
