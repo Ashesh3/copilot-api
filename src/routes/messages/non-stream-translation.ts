@@ -1,3 +1,4 @@
+import { createEndpointTranslationError } from "~/lib/error"
 import {
   type ChatCompletionResponse,
   type ChatCompletionsPayload,
@@ -325,6 +326,19 @@ function handleAssistantMessage(
   const thinkingBlocks = message.content.filter(
     (block): block is AnthropicThinkingBlock => block.type === "thinking",
   )
+  const signedThinkingBlocks = thinkingBlocks.filter(
+    (block) => block.signature && isValidReasoningSignature(block.signature),
+  )
+  if (
+    signedThinkingBlocks.length > 1
+    || (signedThinkingBlocks.length === 1 && thinkingBlocks.length > 1)
+  ) {
+    throw createEndpointTranslationError({
+      blockers: ["mixed_thinking_blocks"],
+      code: "endpoint_translation_unsupported",
+      source: "messages",
+    })
+  }
 
   const textContent = textBlocks.map((block) => block.text).join("\n\n")
   const reasoningText = thinkingBlocks
@@ -333,9 +347,7 @@ function handleAssistantMessage(
       (thinking) => thinking.trim().length > 0 && thinking !== "Thinking...",
     )
     .join("\n\n")
-  const reasoningOpaque = thinkingBlocks
-    .map((block) => block.signature)
-    .find((signature) => isValidReasoningSignature(signature))
+  const reasoningOpaque = signedThinkingBlocks[0]?.signature
 
   return [
     {

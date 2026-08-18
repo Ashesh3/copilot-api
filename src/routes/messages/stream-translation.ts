@@ -172,7 +172,7 @@ export function translateChunkToAnthropicEvents(
   const copilotMetadata = extractCopilotChunkMetadata(chunk)
 
   if (copilotMetadata) {
-    consola.debug("Copilot chunk metadata:", copilotMetadata)
+    consola.debug("Copilot chunk metadata received")
   }
 
   // Capture usage from any chunk that has it (may come before, with, or after finish_reason)

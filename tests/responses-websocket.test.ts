@@ -445,6 +445,7 @@ describe("responses websocket message handling", () => {
   })
 
   test("accepts frames larger than the former local frame boundary", async () => {
+    state.models = responsesCapableModels
     const ws = createTestWebSocket()
     await responsesWebSocket.message(
       ws,
@@ -467,6 +468,7 @@ describe("responses websocket message handling", () => {
   })
 
   test("accepts a new turn while other turns are active", async () => {
+    state.models = responsesCapableModels
     const ws = createTestWebSocket()
     ws.data.nextTurnSequence = 5
     for (let index = 1; index <= 5; index += 1) {
@@ -1614,6 +1616,97 @@ describe("responses websocket warmup handling", () => {
         stream: true,
       }),
     ).toBe(false)
+  })
+
+  test.each([
+    {
+      name: "stateful control",
+      configure: () => {
+        state.models = responsesCapableModels
+      },
+      payload: { store: true },
+      code: "unsupported_value",
+    },
+    {
+      name: "blocked tool",
+      configure: () => {
+        state.models = responsesCapableModels
+      },
+      payload: { tools: [{ type: "code_interpreter" }] },
+      code: "unsupported_value",
+    },
+    {
+      name: "missing endpoint",
+      configure: () => {
+        state.models = {
+          ...responsesCapableModels,
+          data: responsesCapableModels.data.map((model) => ({
+            ...model,
+            supported_endpoints: [],
+          })),
+        }
+      },
+      payload: {},
+      code: "endpoint_translation_unsupported",
+    },
+  ])(
+    "rejects warmup $name before success",
+    async ({ configure, payload, code }) => {
+      configure()
+      const ws = createTestWebSocket()
+
+      await responsesWebSocket.message(
+        ws,
+        JSON.stringify({
+          type: "response.create",
+          model: "gpt-5.4",
+          input: "warmup",
+          generate: false,
+          ...payload,
+        }),
+      )
+
+      expect(fetchMock).not.toHaveBeenCalled()
+      expect(ws.data.closed).toBe(false)
+      expect(ws.sent).toHaveLength(1)
+      expect(JSON.parse(ws.sent[0] ?? "{}")).toMatchObject({
+        type: "error",
+        status: 400,
+        error: { code },
+      })
+    },
+  )
+
+  test("selects a Messages-only warmup without dispatching upstream", async () => {
+    state.models = {
+      ...responsesCapableModels,
+      data: responsesCapableModels.data.map((model) => ({
+        ...model,
+        vendor: "anthropic",
+        supported_endpoints: ["/v1/messages"],
+      })),
+    }
+    const ws = createTestWebSocket()
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "warmup",
+        generate: false,
+        tools: [],
+        tool_choice: "none",
+        reasoning: { effort: "none" },
+      }),
+    )
+
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(ws.sent.some((frame) => frame.includes("response.completed"))).toBe(
+      true,
+    )
+    const snapshot = ws.data.responseSnapshots.values().next().value
+    expect(snapshot).toMatchObject({ model: "gpt-5.4", stream: true })
   })
 
   test("rehydrates follow-up requests that reference a synthetic warmup", () => {

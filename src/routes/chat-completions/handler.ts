@@ -15,7 +15,11 @@ import {
   resolveCustomProviderModel,
   type CustomProviderModelReference,
 } from "~/lib/custom-providers"
-import { createEndpointTranslationError, isAbortError } from "~/lib/error"
+import {
+  createEndpointTranslationError,
+  createInvalidJsonBodyError,
+  isAbortError,
+} from "~/lib/error"
 import {
   applyModelRedirect,
   formatModelRedirectResult,
@@ -71,7 +75,7 @@ import {
 export { selectChatUpstreamEndpoint } from "./responses-fallback-executor"
 
 export async function handleCompletion(c: Context) {
-  const rawPayload = await c.req.json<ChatCompletionsPayload>()
+  const rawPayload = await parseChatRequestBody(c)
   const normalizedPayload = normalizeChatCompletionsRequest(rawPayload)
   const conversationId = setSentryConversationIdFromRequest(
     c,
@@ -88,6 +92,16 @@ export async function handleCompletion(c: Context) {
       return await handleCompletionInner(c, normalizedPayload)
     },
   )
+}
+
+async function parseChatRequestBody(
+  c: Context,
+): Promise<ChatCompletionsPayload> {
+  try {
+    return await c.req.json<ChatCompletionsPayload>()
+  } catch {
+    throw createInvalidJsonBodyError()
+  }
 }
 
 async function handleCompletionInner(
@@ -775,7 +789,6 @@ const handleStreamingResponse = (
             let streamCachedTokens = 0
 
             for await (const chunk of withSseHeartbeat(response, stream)) {
-              consola.debug("Streaming chunk:", JSON.stringify(chunk))
               let outChunk = chunk
               // Capture usage from final chunk if available
               if (chunk.data && chunk.data !== "[DONE]") {

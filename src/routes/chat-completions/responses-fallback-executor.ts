@@ -382,7 +382,7 @@ function executeStreamingResponsesFallback(
             setStreamUsage(c, span, usage)
           } catch (error) {
             if (isAbortError(error)) return
-            throw error
+            await emitOpenAiStreamError(stream, error)
           } finally {
             finishSpan()
           }
@@ -453,13 +453,10 @@ async function executeStreamingMcpWebSearchFallback(
 
 async function emitOpenAiStreamError(
   stream: { writeSSE: (message: { data: string }) => Promise<void> },
-  error: unknown,
+  _error: unknown,
 ): Promise<void> {
   Sentry.captureException(new Error("Chat fallback stream failed"))
-  consola.error(
-    "Chat Completions stream failed after headers were sent:",
-    error,
-  )
+  consola.error("Chat Completions stream failed after headers were sent")
   try {
     await stream.writeSSE({
       data: JSON.stringify({

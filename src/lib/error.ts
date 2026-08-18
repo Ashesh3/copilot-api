@@ -43,6 +43,22 @@ export class LocalHTTPError extends HTTPError {
   }
 }
 
+export function createInvalidJsonBodyError(): LocalHTTPError {
+  const clientBody = {
+    error: {
+      code: "invalid_json",
+      message: "The request body must contain valid JSON.",
+      param: "body",
+      type: "invalid_request_error",
+    },
+  }
+  return new LocalHTTPError(
+    clientBody.error.message,
+    Response.json(clientBody, { status: 400 }),
+    clientBody,
+  )
+}
+
 export function createEndpointTranslationError(
   failure: EndpointRouteFailure,
 ): LocalHTTPError {

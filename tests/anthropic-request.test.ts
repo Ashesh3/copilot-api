@@ -1,7 +1,10 @@
 import { describe, test, expect } from "bun:test"
 import { z } from "zod"
 
-import type { AnthropicMessagesPayload } from "~/routes/messages/anthropic-types"
+import type {
+  AnthropicAssistantContentBlock,
+  AnthropicMessagesPayload,
+} from "~/routes/messages/anthropic-types"
 
 import { stripThinkingBlocks } from "../src/routes/messages/handler"
 import { translateToOpenAI } from "../src/routes/messages/non-stream-translation"
@@ -63,6 +66,7 @@ function isValidChatCompletionRequest(payload: unknown): boolean {
   return result.success
 }
 
+// eslint-disable-next-line max-lines-per-function
 describe("Anthropic to OpenAI translation logic", () => {
   test("should translate minimal Anthropic payload to valid OpenAI payload", () => {
     const anthropicPayload: AnthropicMessagesPayload = {
@@ -237,6 +241,38 @@ describe("Anthropic to OpenAI translation logic", () => {
     expect(assistantMessage?.reasoning_opaque).toBe("sig-123")
     expect(assistantMessage?.content).toBe("2+2 equals 4.")
   })
+
+  test.each([
+    {
+      name: "signed then unsigned",
+      content: [
+        { type: "thinking", thinking: "signed", signature: "sig-first" },
+        { type: "thinking", thinking: "unsigned" },
+      ],
+    },
+    {
+      name: "unsigned then signed",
+      content: [
+        { type: "thinking", thinking: "unsigned" },
+        { type: "thinking", thinking: "signed", signature: "sig-last" },
+      ],
+    },
+  ])(
+    "rejects assistant history with mixed $name thinking blocks",
+    ({ content }) => {
+      expect(() =>
+        translateToOpenAI({
+          model: "claude-current",
+          messages: [
+            {
+              role: "assistant",
+              content: [...content] as Array<AnthropicAssistantContentBlock>,
+            },
+          ],
+        }),
+      ).toThrow()
+    },
+  )
 
   test("should handle thinking blocks with tool calls", () => {
     const anthropicPayload: AnthropicMessagesPayload = {

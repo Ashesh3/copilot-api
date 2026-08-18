@@ -31,7 +31,6 @@ import {
 } from "~/lib/model-suffix"
 import {
   recordNonDefaultBehavior,
-  sanitizeRequestBodyForLog,
   setRequestContext,
 } from "~/lib/request-logger"
 import {
@@ -58,6 +57,7 @@ import { emitAnthropicToolSpans } from "~/lib/tool-spans"
 import {
   buildErrorEvent,
   createResponsesStreamState,
+  SAFE_RESPONSES_STREAM_ERROR_MESSAGE,
   translateResponsesStreamEvent,
 } from "~/routes/messages/responses-stream-translation"
 import {
@@ -167,12 +167,11 @@ export async function handleCompletion(c: Context) {
     resolveClaudeRoutingAffinity(anthropicPayload.metadata),
   )
   const conversationId = setSentryConversationIdFromRequest(c, anthropicPayload)
-  logger.debug(
-    "Anthropic request payload:",
-    sanitizeRequestBodyForLog(
-      anthropicPayload as unknown as Record<string, unknown>,
-    ),
-  )
+  logger.debug("Received Anthropic request", {
+    messageCount: anthropicPayload.messages.length,
+    stream: Boolean(anthropicPayload.stream),
+    toolCount: anthropicPayload.tools?.length ?? 0,
+  })
 
   const model = normalizeModelName(
     parseModelSuffix(anthropicPayload.model).baseModel,
@@ -260,15 +259,13 @@ async function handleCompletionInner(
 
   const subagentMarker = parseSubagentMarkerFromFirstUser(anthropicPayload)
   const initiatorOverride = subagentMarker ? "agent" : undefined
-  if (subagentMarker) {
-    logger.debug("Detected Subagent marker:", JSON.stringify(subagentMarker))
-  }
+  if (subagentMarker) logger.debug("Detected Subagent marker")
 
   // claude code and opencode compact request detection
   const isCompact = isCompactRequest(anthropicPayload)
 
   const anthropicBeta = c.req.header("anthropic-beta")
-  logger.debug("Anthropic Beta header:", anthropicBeta)
+  logger.debug("Anthropic Beta header present:", Boolean(anthropicBeta))
 
   // Route to model variants based on client signals
   applyModelVariantRouting(c, anthropicPayload, anthropicBeta)
@@ -1110,9 +1107,7 @@ const parseResponsesStreamError = (
   parsed: ResponseStreamEvent,
 ): string | null => {
   if (parsed.type !== "error") return null
-  return "message" in parsed ?
-      (parsed as { message: string }).message
-    : "Upstream error"
+  return SAFE_RESPONSES_STREAM_ERROR_MESSAGE
 }
 
 const writeResponsesEvents = async (

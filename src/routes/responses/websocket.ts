@@ -334,11 +334,6 @@ async function handleResponseCreate(
   disableParallelWebSearch(payload)
   throwIfWebSocketTurnAborted(turn)
 
-  if (isSyntheticWarmupRequest(payload)) {
-    handleSyntheticWarmupRequest(ws, payload, turn)
-    return
-  }
-
   const selectedModel = state.models?.data.find(
     (model) => model.id === payload.model,
   )
@@ -351,6 +346,11 @@ async function handleResponseCreate(
     turn,
   )
   const preparedPayload = route.preparedPayload
+
+  if (isSyntheticWarmupRequest(preparedPayload)) {
+    handleSyntheticWarmupRequest(ws, preparedPayload, turn)
+    return
+  }
 
   const { vision, initiator } = getResponsesRequestOptions(preparedPayload)
 
@@ -847,6 +847,7 @@ async function streamAnthropicMessagesOverWs(
   const anthropicPayload = await responsesPayloadToAnthropic(
     payload,
     turn.abortController.signal,
+    { attachmentsNormalized: true },
   )
   anthropicPayload.stream = false
   const response = (await waitForWebSocketTurn(

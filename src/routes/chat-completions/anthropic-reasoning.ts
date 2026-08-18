@@ -31,7 +31,10 @@ export function getAnthropicReasoning(
     (block): block is AnthropicThinkingBlock => block.type === "thinking",
   )
   const signedThinkingBlocks = thinkingBlocks.filter((block) => block.signature)
-  if (signedThinkingBlocks.length > 1) {
+  if (
+    signedThinkingBlocks.length > 1
+    || (signedThinkingBlocks.length === 1 && thinkingBlocks.length > 1)
+  ) {
     throw createEndpointTranslationError({
       blockers: ["multiple_signed_thinking_blocks"],
       code: "endpoint_translation_unsupported",

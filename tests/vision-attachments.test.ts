@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test"
 
-import type { AnthropicMessagesPayload } from "~/routes/messages/anthropic-types"
+import type {
+  AnthropicMessagesPayload,
+  AnthropicResponse,
+} from "~/routes/messages/anthropic-types"
 import type {
   ChatCompletionsPayload,
   ContentPart,
@@ -557,6 +560,86 @@ describe("anthropicResponseToChat bridge", () => {
         "claude-sonnet-4.6",
       ),
     ).toThrow()
+  })
+
+  test.each([
+    {
+      name: "signed then unsigned",
+      content: [
+        { type: "thinking", thinking: "signed", signature: "sig-first" },
+        { type: "thinking", thinking: "unsigned" },
+      ],
+    },
+    {
+      name: "unsigned then signed",
+      content: [
+        { type: "thinking", thinking: "unsigned" },
+        { type: "thinking", thinking: "signed", signature: "sig-last" },
+      ],
+    },
+  ])("rejects mixed $name thinking blocks", ({ content }) => {
+    expect(() =>
+      anthropicResponseToChat(
+        {
+          id: "msg_mixed_reasoning",
+          type: "message",
+          role: "assistant",
+          model: "claude-sonnet-4.6",
+          content: [...content] as AnthropicResponse["content"],
+          stop_reason: "end_turn",
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 2 },
+        },
+        "claude-sonnet-4.6",
+      ),
+    ).toThrow()
+  })
+
+  test("preserves multiple unsigned thinking blocks without a signature", () => {
+    const chat = anthropicResponseToChat(
+      {
+        id: "msg_unsigned_reasoning",
+        type: "message",
+        role: "assistant",
+        model: "claude-sonnet-4.6",
+        content: [
+          { type: "thinking", thinking: "first" },
+          { type: "thinking", thinking: "second" },
+        ],
+        stop_reason: "end_turn",
+        stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 2 },
+      },
+      "claude-sonnet-4.6",
+    )
+
+    expect(chat.choices[0]?.message).toMatchObject({
+      reasoning_text: "first\n\nsecond",
+    })
+    expect(chat.choices[0]?.message).not.toHaveProperty("reasoning_opaque")
+  })
+
+  test("preserves one signed thinking block", () => {
+    const chat = anthropicResponseToChat(
+      {
+        id: "msg_single_signed",
+        type: "message",
+        role: "assistant",
+        model: "claude-sonnet-4.6",
+        content: [
+          { type: "thinking", thinking: "signed", signature: "sig-only" },
+        ],
+        stop_reason: "end_turn",
+        stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+      "claude-sonnet-4.6",
+    )
+
+    expect(chat.choices[0]?.message).toMatchObject({
+      reasoning_text: "signed",
+      reasoning_opaque: "sig-only",
+    })
   })
 })
 

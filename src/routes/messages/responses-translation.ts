@@ -625,11 +625,8 @@ const parseFunctionCallArguments = (
     if (parsed && typeof parsed === "object") {
       return parsed as Record<string, unknown>
     }
-  } catch (error) {
-    consola.warn("Failed to parse function call arguments", {
-      error,
-      rawArguments,
-    })
+  } catch {
+    consola.warn("Failed to parse function call arguments")
   }
 
   return { raw_arguments: rawArguments }

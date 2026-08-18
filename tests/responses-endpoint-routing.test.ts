@@ -17,14 +17,18 @@ import { state } from "~/lib/state"
 import { selectResponsesUpstreamEndpoint } from "~/routes/responses/handler"
 import { server } from "~/server"
 
+/* eslint-disable max-lines */
+
 const originalFetch = globalThis.fetch
 const originalModels = state.models
 let lastUpstreamPath: string | undefined
 let lastUpstreamPayload: Record<string, unknown> | undefined
+let attachmentFetchCount = 0
 
 const fetchMock = mock((url: string | URL | Request, init?: RequestInit) => {
   const rawUrl = typeof url === "string" || url instanceof URL ? url : url.url
   lastUpstreamPath = new URL(rawUrl).pathname
+  if (new URL(rawUrl).hostname === "example.invalid") attachmentFetchCount += 1
   lastUpstreamPayload =
     typeof init?.body === "string" ?
       (JSON.parse(init.body) as Record<string, unknown>)
@@ -108,6 +112,7 @@ beforeEach(() => {
   fetchMock.mockClear()
   lastUpstreamPath = undefined
   lastUpstreamPayload = undefined
+  attachmentFetchCount = 0
   state.accountType = "individual"
   state.copilotToken = "copilot-token"
   state.githubToken = "github-token"
@@ -219,6 +224,47 @@ test.each([
   expect(fetchMock).not.toHaveBeenCalled()
   expect(JSON.stringify(await response.json())).not.toContain("private")
 })
+
+test.each([
+  { name: "empty body", body: "" },
+  {
+    name: "malformed JSON",
+    body: '{"model":"route-model","input":"json-private-marker"',
+  },
+])(
+  "returns a fixed 400 for $name before Responses routing",
+  async ({ body }) => {
+    state.models = undefined
+    const errorSpy = spyOn(consola, "error")
+
+    try {
+      const response = await server.request("/v1/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body,
+      })
+      const output = JSON.stringify([
+        await response.clone().json(),
+        errorSpy.mock.calls,
+      ])
+
+      expect(response.status).toBe(400)
+      expect(fetchMock).not.toHaveBeenCalled()
+      expect(output).not.toContain("json-private-marker")
+      expect(output).not.toContain("Unexpected end of JSON")
+      expect(await response.json()).toEqual({
+        error: {
+          code: "invalid_json",
+          message: "The request body must contain valid JSON.",
+          param: "body",
+          type: "invalid_request_error",
+        },
+      })
+    } finally {
+      errorSpy.mockRestore()
+    }
+  },
+)
 
 test("prefers Messages over Chat for a PDF-capable fallback", async () => {
   installModel({ supported_endpoints: ["/v1/messages", "/chat/completions"] })
@@ -656,9 +702,15 @@ test.each([
   })
 })
 
-test("rejects a Messages image URL fetch failure instead of inserting omission text", async () => {
+test("fetches a Messages image URL once before rejecting its failed normalization", async () => {
   installModel({ supported_endpoints: ["/v1/messages"] })
-  fetchMock.mockImplementationOnce(() => Response.json({}, { status: 404 }))
+  fetchMock.mockImplementationOnce((url) => {
+    const rawUrl = typeof url === "string" || url instanceof URL ? url : url.url
+    if (new URL(rawUrl).hostname === "example.invalid") {
+      attachmentFetchCount += 1
+    }
+    return Response.json({}, { status: 404 })
+  })
 
   const response = await postResponses({
     input: [
@@ -677,7 +729,7 @@ test("rejects a Messages image URL fetch failure instead of inserting omission t
   })
 
   expect(response.status).toBe(400)
-  expect(fetchMock).toHaveBeenCalledTimes(2)
+  expect(attachmentFetchCount).toBe(1)
   expect(lastUpstreamPath).not.toBe("/v1/messages")
   expect(await response.json()).toMatchObject({
     error: {
@@ -686,6 +738,63 @@ test("rejects a Messages image URL fetch failure instead of inserting omission t
     },
   })
 })
+
+test.each([
+  {
+    name: "image",
+    content: {
+      type: "input_image",
+      image_url: "https://example.invalid/image.png",
+      detail: "auto",
+    },
+    contentType: "image/png",
+    expectedType: "image",
+  },
+  {
+    name: "document",
+    content: {
+      type: "input_file",
+      filename: "report.pdf",
+      file_url: "https://example.invalid/report.pdf",
+    },
+    contentType: "application/pdf",
+    expectedType: "document",
+  },
+])(
+  "fetches a translated Responses URL $name once",
+  async ({ content, contentType, expectedType }) => {
+    installModel({ supported_endpoints: ["/v1/messages"] })
+    fetchMock.mockImplementationOnce((url) => {
+      const rawUrl =
+        typeof url === "string" || url instanceof URL ? url : url.url
+      if (new URL(rawUrl).hostname === "example.invalid") {
+        attachmentFetchCount += 1
+      }
+      return new Response("attachment-bytes", {
+        status: 200,
+        headers: { "content-type": contentType },
+      })
+    })
+
+    const response = await postResponses({
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [content],
+        },
+      ],
+    })
+
+    expect(response.status).toBe(200)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(attachmentFetchCount).toBe(1)
+    expect(lastUpstreamPath).toBe("/v1/messages")
+    expect(JSON.stringify(lastUpstreamPayload)).toContain(
+      `"type":"${expectedType}"`,
+    )
+  },
+)
 
 test("routes Responses compaction through the existing Chat preservation path", async () => {
   installModel({ supported_endpoints: ["/v1/messages", "/chat/completions"] })

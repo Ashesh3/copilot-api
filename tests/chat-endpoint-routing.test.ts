@@ -1,3 +1,4 @@
+import * as Sentry from "@sentry/bun"
 import {
   afterAll,
   beforeAll,
@@ -16,6 +17,49 @@ import { setModelSettingsForTest } from "~/lib/model-settings"
 import { state } from "~/lib/state"
 import { selectChatUpstreamEndpoint } from "~/routes/chat-completions/handler"
 import { server } from "~/server"
+
+test.each([
+  { name: "empty body", body: "" },
+  {
+    name: "malformed JSON",
+    body: '{"model":"route-model","messages":[{"role":"user","content":"chat-json-private-marker"}]',
+  },
+])("returns a fixed 400 for Chat $name before routing", async ({ body }) => {
+  const errorSpy = spyOn(consola, "error")
+  const captureException = spyOn(Sentry, "captureException").mockImplementation(
+    () => "event-id",
+  )
+
+  try {
+    const response = await server.request("/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+    })
+    const responseBody = await response.json()
+    const diagnostics = JSON.stringify([
+      responseBody,
+      errorSpy.mock.calls,
+      captureException.mock.calls,
+    ])
+
+    expect(response.status).toBe(400)
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(diagnostics).not.toContain("chat-json-private-marker")
+    expect(diagnostics).not.toContain("Unexpected end of JSON")
+    expect(responseBody).toEqual({
+      error: {
+        code: "invalid_json",
+        message: "The request body must contain valid JSON.",
+        param: "body",
+        type: "invalid_request_error",
+      },
+    })
+  } finally {
+    errorSpy.mockRestore()
+    captureException.mockRestore()
+  }
+})
 
 /* eslint-disable max-lines -- route matrix intentionally stays in one fixture-backed file */
 

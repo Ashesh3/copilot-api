@@ -18,6 +18,7 @@ import {
 import {
   assertEndpointTranslationSupported,
   createEndpointTranslationError,
+  createInvalidJsonBodyError,
   isAbortError,
 } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
@@ -36,7 +37,6 @@ import {
 } from "~/lib/model-suffix"
 import {
   recordNonDefaultBehavior,
-  sanitizeRequestBodyForLog,
   setRequestContext,
 } from "~/lib/request-logger"
 import {
@@ -483,7 +483,7 @@ function rewriteResponseModelInEvent(
 }
 
 export const handleResponses = async (c: Context) => {
-  const payload = await c.req.json<ResponsesPayload>()
+  const payload = await parseResponsesRequestBody(c)
   prepareResponsesRequest(payload)
   installRoutingAffinityFallback(
     resolveResponsesRoutingAffinity(
@@ -500,6 +500,16 @@ export const handleResponses = async (c: Context) => {
       return await handleResponsesInner(c, payload)
     },
   )
+}
+
+async function parseResponsesRequestBody(
+  c: Context,
+): Promise<ResponsesPayload> {
+  try {
+    return await c.req.json<ResponsesPayload>()
+  } catch {
+    throw createInvalidJsonBodyError()
+  }
 }
 
 const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
@@ -551,10 +561,11 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
     model: payload.model,
     reasoningEffort: typeof finalEffort === "string" ? finalEffort : undefined,
   })
-  logger.debug(
-    "Responses request payload:",
-    sanitizeRequestBodyForLog(payload as Record<string, unknown>),
-  )
+  logger.debug("Received Responses request", {
+    inputKind: Array.isArray(payload.input) ? "items" : typeof payload.input,
+    stream: Boolean(payload.stream),
+    toolCount: payload.tools?.length ?? 0,
+  })
 
   // Expand compaction items back into regular messages
   expandCompactionItems(payload)
@@ -850,21 +861,22 @@ export async function prepareResponsesRouteForTransport(options: {
     implicitDefault: usesImplicitReasoningDefault(options.payload.model),
   }).body
   const support = getModelEndpointSupport(options.selectedModel)
-  if (!support.responses) {
+  if (!support.responses && !isResponsesWarmupPayload(preparedPayload)) {
     await (support.messages ?
       normalizeResponsesAttachmentsFailClosed(preparedPayload, options.signal)
     : normalizeResponsesAttachments(preparedPayload, options.signal))
   }
+  const routePayload = stripResponsesWarmupControl(preparedPayload)
   let decision = selectResponsesUpstreamEndpoint({
-    payload: preparedPayload,
+    payload: routePayload,
     selectedModel: options.selectedModel,
   })
   if (
     "code" in decision
     && support.chat
-    && payloadHasChatFallbackToolRewrite(preparedPayload)
+    && payloadHasChatFallbackToolRewrite(routePayload)
   ) {
-    const chatPayload = structuredClone(preparedPayload)
+    const chatPayload = structuredClone(routePayload)
     convertWebSearchTool(chatPayload)
     useFunctionApplyPatch(chatPayload)
     if (getResponsesChatRouteCheck(chatPayload).supported) {
@@ -879,6 +891,19 @@ export async function prepareResponsesRouteForTransport(options: {
   }
   if ("code" in decision) throw createEndpointTranslationError(decision)
   return { decision, preparedPayload }
+}
+
+function isResponsesWarmupPayload(payload: ResponsesPayload): boolean {
+  return (payload as Record<string, unknown>).generate === false
+}
+
+function stripResponsesWarmupControl(
+  payload: ResponsesPayload,
+): ResponsesPayload {
+  if (!isResponsesWarmupPayload(payload)) return payload
+  const routePayload = structuredClone(payload)
+  delete (routePayload as Record<string, unknown>).generate
+  return routePayload
 }
 
 function payloadHasChatFallbackToolRewrite(payload: ResponsesPayload): boolean {
@@ -1780,6 +1805,7 @@ const handleWithAnthropicMessages = async (
   const anthropicPayload = await responsesPayloadToAnthropic(
     payload,
     c.req.raw.signal,
+    { attachmentsNormalized: true },
   )
   anthropicPayload.stream = false
   const compaction = isResponsesCompactionRequest(payload)

@@ -9,6 +9,10 @@ import {
 } from "bun:test"
 
 import {
+  formatHandlerLogLine,
+  sanitizeHandlerLogArguments,
+} from "../src/lib/logger"
+import {
   sanitizeRequestBodyForLog,
   startLogicalRequestLog,
 } from "../src/lib/request-logger"
@@ -401,6 +405,83 @@ test("omits private nested payload data from ordinary diagnostics", () => {
     input: "[2 items omitted]",
     tools: "[1 items omitted]",
   })
+})
+
+test("sanitizes non-leading ordinary handler log arguments", () => {
+  const privateMarkers = [
+    "handler-model-private",
+    "handler-status-private",
+    "handler-array-private",
+    "handler-error-private",
+  ]
+  const sanitized = sanitizeHandlerLogArguments([
+    "Prepared request",
+    {
+      model: privateMarkers[0],
+      status: privateMarkers[1],
+      nested: [privateMarkers[2]],
+      error: new Error(privateMarkers[3]),
+      stream: true,
+    },
+  ])
+  const output = JSON.stringify(sanitized)
+
+  for (const marker of privateMarkers) expect(output).not.toContain(marker)
+  expect(sanitized).toEqual([
+    "Prepared request",
+    {
+      model: "[REDACTED]",
+      status: "[REDACTED]",
+      nested: "[1 items omitted]",
+      error: { name: "Error" },
+      stream: true,
+    },
+  ])
+})
+
+test("truncates dynamic text from ordinary handler log messages", () => {
+  const privateMarker = "handler-inline-private-marker"
+
+  expect(
+    sanitizeHandlerLogArguments([
+      `Compact request for model: ${privateMarker}`,
+    ]),
+  ).toEqual(["Compact request for model"])
+  expect(
+    sanitizeHandlerLogArguments([
+      `Routing custom model ${privateMarker} to private/provider`,
+    ]),
+  ).toEqual(["Routing custom model"])
+  expect(sanitizeHandlerLogArguments(["Detected Subagent marker"])).toEqual([
+    "Detected Subagent marker",
+  ])
+})
+
+test("formats ordinary handler file lines without private payload values", () => {
+  const privateMarkers = [
+    "handler-prompt-private",
+    "handler-model-private",
+    "handler-marker-private",
+  ]
+  const output = formatHandlerLogLine({
+    date: new Date(0),
+    name: "messages-handler",
+    tag: "messages-handler",
+    type: "debug",
+    args: [
+      "Received Anthropic request",
+      {
+        model: privateMarkers[1],
+        messages: [{ content: privateMarkers[0] }],
+        marker: privateMarkers[2],
+        stream: true,
+      },
+    ],
+  })
+
+  for (const marker of privateMarkers) expect(output).not.toContain(marker)
+  expect(output).toContain("Received Anthropic request")
+  expect(output).toContain("stream: true")
 })
 
 test("forwards upstream quota snapshot headers to the client response", async () => {

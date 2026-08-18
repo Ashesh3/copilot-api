@@ -754,12 +754,10 @@ async function emitTranslatedEvent(
       }
     }
     case "response.failed": {
-      throw new Error(
-        event.response.error?.message ?? "Responses API stream failed",
-      )
+      throw new Error("Responses API stream failed")
     }
     case "error": {
-      throw new Error(event.message)
+      throw new Error("Responses API stream failed")
     }
     default: {
       return null

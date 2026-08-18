@@ -117,7 +117,7 @@ async function normalizeImageBlock(
     }
   }
 
-  consola.warn(`Could not inline image URL: ${block.source.url}`)
+  consola.warn("Could not inline remote image attachment")
   return {
     type: "text",
     text: attachmentOmittedNote({
@@ -233,7 +233,7 @@ async function normalizeUrlDocument(
     return [wrapDocumentText(block, decodedText)]
   }
 
-  consola.warn(`Could not inline document URL: ${url}`)
+  consola.warn("Could not inline remote document attachment")
   return [
     omittedDocumentNote(
       block,

@@ -19,14 +19,45 @@ const ensureLogDirectory = () => {
   }
 }
 
+export const sanitizeHandlerLogArguments = (args: Array<unknown>) =>
+  args.map((arg, index) =>
+    index === 0 && typeof arg === "string" ?
+      sanitizeHandlerLogMessage(arg)
+    : sanitizeHandlerLogValue(arg),
+  )
+
 const formatArgs = (args: Array<unknown>) =>
-  args
+  sanitizeHandlerLogArguments(args)
     .map((arg) =>
       typeof arg === "string" ? arg : (
-        util.inspect(arg, { depth: null, colors: false })
+        util.inspect(arg, { depth: 4, colors: false })
       ),
     )
     .join(" ")
+
+function sanitizeHandlerLogValue(value: unknown): unknown {
+  if (typeof value === "string") return "[REDACTED]"
+  if (Array.isArray(value)) return `[${value.length} items omitted]`
+  if (value instanceof Error) return { name: value.name }
+  if (typeof value !== "object" || value === null) return value
+
+  const sanitized: Record<string, unknown> = {}
+  for (const [key, nestedValue] of Object.entries(value)) {
+    sanitized[key] = sanitizeHandlerLogValue(nestedValue)
+  }
+  return sanitized
+}
+
+function sanitizeHandlerLogMessage(value: string): string {
+  if (value.includes(":") || value.includes(",")) {
+    const prefix = value.split(/[:,]/, 1)[0]?.trim()
+    if (prefix) return prefix
+  }
+  if (/[0-9_/@.[\]-]/.test(value)) {
+    return value.split(" ").slice(0, 3).join(" ") || "Log"
+  }
+  return value
+}
 
 const sanitizeName = (name: string) => {
   const normalized = name
@@ -115,27 +146,49 @@ export const createHandlerLogger = (name: string): ConsolaInstance => {
   const sanitizedName = sanitizeName(name)
   const instance = consola.withTag(name)
 
-  if (state.verbose) {
-    instance.level = 5
-  }
+  if (state.verbose) instance.level = 5
   instance.setReporters([])
 
-  instance.addReporter({
-    log(logObj) {
-      ensureLogDirectory()
-
-      const date = logObj.date
-      const dateKey = date.toLocaleDateString("sv-SE")
-      const timestamp = date.toLocaleString("sv-SE", { hour12: false })
-      const filePath = path.join(LOG_DIR, `${sanitizedName}-${dateKey}.log`)
-      const message = formatArgs(logObj.args as Array<unknown>)
-      const line = `[${timestamp}] [${logObj.type}] [${logObj.tag || name}]${
-        message ? ` ${message}` : ""
-      }`
-
-      appendLine(filePath, line)
-    },
-  })
+  instance.addReporter(createHandlerLogReporter({ name, sanitizedName }))
 
   return instance
+}
+
+export function formatHandlerLogLine(options: {
+  args: Array<unknown>
+  date: Date
+  name: string
+  tag?: string
+  type: string
+}): string {
+  const timestamp = options.date.toLocaleString("sv-SE", { hour12: false })
+  const message = formatArgs(options.args)
+  return `[${timestamp}] [${options.type}] [${options.tag || options.name}]${
+    message ? ` ${message}` : ""
+  }`
+}
+
+function createHandlerLogReporter(options: {
+  name: string
+  sanitizedName: string
+}) {
+  return {
+    log(logObj: {
+      args: Array<unknown>
+      date: Date
+      tag?: string
+      type: string
+    }) {
+      ensureLogDirectory()
+      const dateKey = logObj.date.toLocaleDateString("sv-SE")
+      const filePath = path.join(
+        LOG_DIR,
+        `${options.sanitizedName}-${dateKey}.log`,
+      )
+      appendLine(
+        filePath,
+        formatHandlerLogLine({ ...logObj, name: options.name }),
+      )
+    },
+  }
 }

@@ -22,6 +22,10 @@ const originalFetch = globalThis.fetch
 let lastUpstreamPath: string | undefined
 let lastUpstreamPayload: Record<string, unknown> | undefined
 let delayBufferedWebSearchResponse = false
+let nextResponsesStreamError:
+  | { kind: "error"; marker: string }
+  | { kind: "failed"; marker: string }
+  | undefined
 let delayedResponsesController:
   | ReadableStreamDefaultController<Uint8Array>
   | undefined
@@ -181,6 +185,31 @@ const responsesCompletedEvent = {
 }
 
 function createResponsesSse(): Response {
+  if (nextResponsesStreamError) {
+    const current = nextResponsesStreamError
+    const event =
+      current.kind === "error" ?
+        {
+          type: "error",
+          code: "upstream_error",
+          message: current.marker,
+          param: null,
+          sequence_number: 1,
+        }
+      : {
+          type: "response.failed",
+          sequence_number: 1,
+          response: {
+            ...responsesResult,
+            status: "failed",
+            error: { message: current.marker },
+          },
+        }
+    return new Response(
+      `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
+      { headers: { "content-type": "text/event-stream" }, status: 200 },
+    )
+  }
   return new Response(
     [
       `event: response.created\ndata: ${JSON.stringify(responsesCreatedEvent)}`,
@@ -254,6 +283,7 @@ beforeEach(() => {
   lastUpstreamPath = undefined
   lastUpstreamPayload = undefined
   delayBufferedWebSearchResponse = false
+  nextResponsesStreamError = undefined
   delayedResponsesController = undefined
   state.accountType = "individual"
   state.copilotToken = "copilot-token"
@@ -661,6 +691,28 @@ test("streams responses-only models back as chat completion chunks", async () =>
     },
   })
 })
+
+test.each(["error", "failed"] as const)(
+  "uses fixed safe Chat output for Responses %s events",
+  async (kind) => {
+    const marker = `chat-responses-${kind}-private-marker`
+    nextResponsesStreamError = { kind, marker }
+
+    const response = await server.request("/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-5.5",
+        messages: [{ role: "user", content: "Fail safely." }],
+        stream: true,
+      }),
+    })
+    const body = await response.text()
+
+    expect(body).toContain("An unexpected error occurred during streaming.")
+    expect(body).not.toContain(marker)
+  },
+)
 
 test("commits a keepalive while the buffered web-search fallback is pending", async () => {
   setSsePreflushDeadlineForTest(20)

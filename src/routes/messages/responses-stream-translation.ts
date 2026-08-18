@@ -428,33 +428,24 @@ const handleResponseCompleted = (
 }
 
 const handleResponseFailed = (
-  rawEvent: ResponseFailedEvent,
+  _rawEvent: ResponseFailedEvent,
   state: ResponsesStreamState,
 ): Array<AnthropicStreamEventData> => {
-  const response = rawEvent.response
   const events = new Array<AnthropicStreamEventData>()
   closeAllOpenBlocks(state, events)
 
-  const message =
-    response.error?.message ?? "The response failed due to an unknown error."
-
-  events.push(buildErrorEvent(message))
+  events.push(buildErrorEvent(SAFE_RESPONSES_STREAM_ERROR_MESSAGE))
   state.messageCompleted = true
 
   return events
 }
 
 const handleErrorEvent = (
-  rawEvent: ResponseErrorEvent,
+  _rawEvent: ResponseErrorEvent,
   state: ResponsesStreamState,
 ): Array<AnthropicStreamEventData> => {
-  const message =
-    typeof rawEvent.message === "string" ?
-      rawEvent.message
-    : "An unexpected error occurred during streaming."
-
   state.messageCompleted = true
-  return [buildErrorEvent(message)]
+  return [buildErrorEvent(SAFE_RESPONSES_STREAM_ERROR_MESSAGE)]
 }
 
 const handleFunctionCallArgumentsValidationError = (
@@ -607,6 +598,9 @@ export const buildErrorEvent = (message: string): AnthropicStreamEventData => ({
     message,
   },
 })
+
+export const SAFE_RESPONSES_STREAM_ERROR_MESSAGE =
+  "Upstream Responses stream failed."
 
 const getBlockKey = (outputIndex: number, contentIndex: number): string =>
   `${outputIndex}:${contentIndex}`

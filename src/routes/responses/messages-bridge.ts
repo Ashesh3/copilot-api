@@ -30,6 +30,7 @@ import { checkResponsesToMessagesTranslation } from "./translation-fidelity"
 export async function responsesPayloadToAnthropic(
   payload: ResponsesPayload,
   signal?: AbortSignal,
+  options?: { attachmentsNormalized?: boolean },
 ): Promise<AnthropicMessagesPayload> {
   assertEndpointTranslationSupported(
     {
@@ -43,6 +44,7 @@ export async function responsesPayloadToAnthropic(
   const { messages, systemTexts } = await convertResponsesInput(
     payload.input,
     signal,
+    options,
   )
   if (payload.instructions) systemTexts.unshift(payload.instructions)
 
@@ -79,6 +81,7 @@ export async function responsesPayloadToAnthropic(
 async function convertResponsesInput(
   input: ResponsesPayload["input"],
   signal?: AbortSignal,
+  options?: { attachmentsNormalized?: boolean },
 ): Promise<{
   messages: Array<AnthropicMessage>
   systemTexts: Array<string>
@@ -92,7 +95,7 @@ async function convertResponsesInput(
   if (!Array.isArray(input)) return { messages, systemTexts }
 
   for (const item of input) {
-    await appendResponsesItem({ item, messages, signal, systemTexts })
+    await appendResponsesItem({ item, messages, options, signal, systemTexts })
   }
   return { messages, systemTexts }
 }
@@ -100,6 +103,7 @@ async function convertResponsesInput(
 async function appendResponsesItem(options: {
   item: ResponseInputItem
   messages: Array<AnthropicMessage>
+  options?: { attachmentsNormalized?: boolean }
   signal?: AbortSignal
   systemTexts: Array<string>
 }): Promise<void> {
@@ -123,7 +127,11 @@ async function appendResponsesItem(options: {
     appendUserBlock(options.messages, {
       type: "tool_result",
       tool_use_id: callId,
-      content: await convertResponsesToolResult(item.output, options.signal),
+      content: await convertResponsesToolResult(
+        item.output,
+        options.signal,
+        options.options,
+      ),
     })
     return
   }
@@ -140,11 +148,16 @@ async function appendResponsesItem(options: {
     const blocks = await convertResponsesAssistantContent(
       content,
       options.signal,
+      options.options,
     )
     options.messages.push({ role: "assistant", content: blocks })
     return
   }
-  const blocks = await convertResponsesUserContent(content, options.signal)
+  const blocks = await convertResponsesUserContent(
+    content,
+    options.signal,
+    options.options,
+  )
   let messageContent: string | Array<AnthropicUserContentBlock> = ""
   if (typeof content === "string") messageContent = content
   else if (blocks.length > 0) messageContent = blocks
@@ -181,6 +194,7 @@ function appendUserBlock(
 async function convertResponsesUserContent(
   content: unknown,
   signal?: AbortSignal,
+  options?: { attachmentsNormalized?: boolean },
 ): Promise<Array<AnthropicUserContentBlock>> {
   if (typeof content === "string") {
     return content ? [{ type: "text", text: content }] : []
@@ -188,6 +202,7 @@ async function convertResponsesUserContent(
   if (!Array.isArray(content)) return []
   const blocks: Array<AnthropicUserContentBlock> = []
   for (const part of content) {
+    assertPreparedAttachment(part, options)
     blocks.push(
       ...(await convertOpenAIContentPartToAnthropic(
         responsesContentPartToOpenAI(part as Record<string, unknown>),
@@ -201,8 +216,9 @@ async function convertResponsesUserContent(
 async function convertResponsesAssistantContent(
   content: unknown,
   signal?: AbortSignal,
+  options?: { attachmentsNormalized?: boolean },
 ): Promise<Array<AnthropicAssistantContentBlock>> {
-  const blocks = await convertResponsesUserContent(content, signal)
+  const blocks = await convertResponsesUserContent(content, signal, options)
   return blocks.flatMap(
     (block): Array<AnthropicAssistantContentBlock> =>
       block.type === "text" ? [block] : [],
@@ -212,16 +228,42 @@ async function convertResponsesAssistantContent(
 async function convertResponsesToolResult(
   output: unknown,
   signal?: AbortSignal,
+  options?: { attachmentsNormalized?: boolean },
 ): Promise<AnthropicToolResultBlock["content"]> {
   if (typeof output === "string") return output
   if (!Array.isArray(output)) return ""
-  const blocks = await convertResponsesUserContent(output, signal)
+  const blocks = await convertResponsesUserContent(output, signal, options)
   return blocks.filter(
     (block) =>
       block.type === "text"
       || block.type === "image"
       || block.type === "document",
   )
+}
+
+function assertPreparedAttachment(
+  part: unknown,
+  options: { attachmentsNormalized?: boolean } | undefined,
+): void {
+  if (!options?.attachmentsNormalized || !part || typeof part !== "object") {
+    return
+  }
+  const record = part as Record<string, unknown>
+  const hasRemoteImage =
+    record.type === "input_image"
+    && typeof record.image_url === "string"
+    && /^https?:\/\//i.test(record.image_url)
+  const hasRemoteFile =
+    record.type === "input_file"
+    && typeof record.file_url === "string"
+    && /^https?:\/\//i.test(record.file_url)
+  if (!hasRemoteImage && !hasRemoteFile) return
+
+  throw createEndpointTranslationError({
+    blockers: ["message_content_part"],
+    code: "endpoint_translation_unsupported",
+    source: "responses",
+  })
 }
 
 function responsesContentPartToOpenAI(
