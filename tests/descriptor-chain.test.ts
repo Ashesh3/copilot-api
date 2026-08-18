@@ -15,7 +15,7 @@ import {
   isConnectionError,
 } from "../src/services/copilot/transport-retry"
 
-const ERROR_KEYS = new Set(["code", "message", "name"])
+const ERROR_KEYS = new Set(["code", "message", "name", "stack"])
 
 function objectWithDescriptors(
   prototype: object | null,
@@ -52,6 +52,285 @@ function defineUnreadable(
     },
   })
 }
+
+type LowerPrototypeKind = "accessor" | "data"
+
+interface NativeErrorShadowCase {
+  readonly create: () => Error
+  readonly expectedName: "Error" | "TypeError"
+  readonly label: string
+  readonly lowerKind: LowerPrototypeKind
+  readonly nativePrototype: object
+}
+
+function lowerDescriptors(
+  kind: LowerPrototypeKind,
+  getterCalls: { count: number },
+): PropertyDescriptorMap {
+  if (kind === "data") {
+    return {
+      code: { configurable: true, value: "LOWER_PRIVATE_CODE" },
+      message: { configurable: true, value: "lower private message" },
+      name: { configurable: true, value: "AbortError" },
+      stack: { configurable: true, value: "lower private stack" },
+    }
+  }
+
+  return Object.fromEntries(
+    ["code", "message", "name", "stack"].map((key) => [
+      key,
+      {
+        configurable: true,
+        get() {
+          getterCalls.count += 1
+          throw new Error(`unreadable lower ${key}`)
+        },
+      },
+    ]),
+  )
+}
+
+function withLowerPrototype<T>(
+  nativePrototype: object,
+  descriptors: PropertyDescriptorMap,
+  callback: () => T,
+): T {
+  const originalPrototype = Object.getPrototypeOf(nativePrototype) as
+    | object
+    | null
+  const lowerPrototype = objectWithDescriptors(originalPrototype, descriptors)
+  Object.setPrototypeOf(nativePrototype, lowerPrototype)
+  try {
+    return callback()
+  } finally {
+    Object.setPrototypeOf(nativePrototype, originalPrototype)
+  }
+}
+
+function withRevokedLowerPrototype<T>(
+  nativePrototype: object,
+  callback: () => T,
+): T {
+  const originalPrototype = Object.getPrototypeOf(nativePrototype) as
+    | object
+    | null
+  const { proxy, revoke } = Proxy.revocable(
+    Object.create(originalPrototype) as object,
+    {},
+  )
+  revoke()
+  Object.setPrototypeOf(nativePrototype, proxy)
+  try {
+    return callback()
+  } finally {
+    Object.setPrototypeOf(nativePrototype, originalPrototype)
+  }
+}
+
+const NATIVE_ERROR_SHADOW_CASES: Array<NativeErrorShadowCase> = [
+  ...(["data", "accessor"] as const).map((lowerKind) => ({
+    create: () => new Error(),
+    expectedName: "Error" as const,
+    label: `Error over lower ${lowerKind}`,
+    lowerKind,
+    nativePrototype: Error.prototype,
+  })),
+  ...(["data", "accessor"] as const).map((lowerKind) => ({
+    create: () => new TypeError(),
+    expectedName: "TypeError" as const,
+    label: `TypeError over lower ${lowerKind}`,
+    lowerKind,
+    nativePrototype: TypeError.prototype,
+  })),
+]
+
+test.each(NATIVE_ERROR_SHADOW_CASES.map((testCase) => [testCase] as const))(
+  "preserves native $label fields",
+  ({ create, expectedName, lowerKind, nativePrototype }) => {
+    const getterCalls = { count: 0 }
+    withLowerPrototype(
+      nativePrototype,
+      lowerDescriptors(lowerKind, getterCalls),
+      () => {
+        const error = create()
+        Object.defineProperty(error, "code", {
+          configurable: true,
+          value: "ECONNRESET",
+        })
+        const expectedStack = error.stack
+        const result = snapshot(error)
+
+        expect(result).toBeDefined()
+        expect(readDescriptorSnapshotValue(result, "message")).toBeUndefined()
+        expect(readNativeErrorMessage(result)).toBe("")
+        expect(getErrorCode(error)).toBe("ECONNRESET")
+        expect(isConnectionError(error)).toBe(true)
+        expect(
+          sanitizeHandlerLogArguments(["Prepared request", error]),
+        ).toEqual(["Prepared request", { name: expectedName }])
+        expect(toLlmDebugLogError(error)).toMatchObject({
+          code: "ECONNRESET",
+          message: "",
+          name: expectedName,
+          stack: expectedStack,
+        })
+      },
+    )
+    expect(getterCalls.count).toBe(0)
+  },
+)
+
+test.each(["data", "accessor"] as const)(
+  "preserves native DOMException fields over a lower %s descriptor",
+  (lowerKind) => {
+    const getterCalls = { count: 0 }
+    withLowerPrototype(
+      DOMException.prototype,
+      lowerDescriptors(lowerKind, getterCalls),
+      () => {
+        const error = new DOMException("", "AbortError")
+        const result = snapshot(error)
+
+        expect(result).toBeDefined()
+        expect(readDescriptorSnapshotValue(result, "code")).toBeUndefined()
+        expect(readDescriptorSnapshotValue(result, "message")).toBeUndefined()
+        expect(readDescriptorSnapshotValue(result, "name")).toBeUndefined()
+        expect(readDescriptorSnapshotValue(result, "stack")).toBeUndefined()
+        expect(result?.blockedDescriptors.has("stack")).toBe(true)
+        expect(readNativeDomExceptionField(result, "code")).toBe(20)
+        expect(readNativeDomExceptionField(result, "message")).toBe("")
+        expect(readNativeDomExceptionField(result, "name")).toBe("AbortError")
+        expect(isAbortLikeError(error)).toBe(true)
+        expect(isAbortError(error)).toBe(true)
+        expect(isConnectionError(error)).toBe(false)
+        expect(toLlmDebugLogError(error)).toEqual({
+          code: 20,
+          message: "",
+          name: "AbortError",
+        })
+      },
+    )
+    expect(getterCalls.count).toBe(0)
+  },
+)
+
+test("uses blocked fallback when native DOMException reconstruction is unreadable", () => {
+  const privateMarker = "lower-dom-private-marker"
+  withLowerPrototype(
+    DOMException.prototype,
+    {
+      code: { configurable: true, value: privateMarker },
+      message: { configurable: true, value: privateMarker },
+      name: { configurable: true, value: "AbortError" },
+    },
+    () => {
+      const error = new DOMException("native message", "AbortError")
+      Object.defineProperty(error, "details", {
+        enumerable: true,
+        value: { privateMarker },
+      })
+      const result = snapshot(error)
+
+      expect(result).toBeDefined()
+      expect(readNativeDomExceptionField(result, "code")).toBeUndefined()
+      expect(readNativeDomExceptionField(result, "message")).toBeUndefined()
+      expect(readNativeDomExceptionField(result, "name")).toBeUndefined()
+      expect(result?.blockedDescriptors.has("code")).toBe(true)
+      expect(result?.blockedDescriptors.has("message")).toBe(true)
+      expect(result?.blockedDescriptors.has("name")).toBe(true)
+      expect(isAbortLikeError(error)).toBe(false)
+      expect(isAbortError(error)).toBe(false)
+      expect(toLlmDebugLogError(error)).toEqual({
+        message: "Unknown thrown value",
+        name: "Error",
+      })
+      expect(JSON.stringify(toLlmDebugLogError(error))).not.toContain(
+        privateMarker,
+      )
+    },
+  )
+})
+
+test("keeps native Error fields when a lower prototype is revoked", () => {
+  withRevokedLowerPrototype(Error.prototype, () => {
+    const error = new Error()
+    Object.defineProperty(error, "code", { value: "ECONNRESET" })
+    const expectedStack = error.stack
+    const result = snapshot(error)
+
+    expect(result).toBeDefined()
+    expect(readNativeErrorMessage(result)).toBe("")
+    expect(getErrorCode(error)).toBe("ECONNRESET")
+    expect(isConnectionError(error)).toBe(true)
+    expect(sanitizeHandlerLogArguments(["Prepared request", error])).toEqual([
+      "Prepared request",
+      { name: "Error" },
+    ])
+    expect(toLlmDebugLogError(error)).toMatchObject({
+      code: "ECONNRESET",
+      message: "",
+      name: "Error",
+      stack: expectedStack,
+    })
+  })
+})
+
+test("keeps native TypeError fields when a lower prototype is revoked", () => {
+  withRevokedLowerPrototype(TypeError.prototype, () => {
+    const error = new TypeError()
+    Object.defineProperty(error, "code", { value: "ECONNRESET" })
+    const expectedStack = error.stack
+    const result = snapshot(error)
+
+    expect(result).toBeDefined()
+    expect(readNativeErrorMessage(result)).toBe("")
+    expect(getErrorCode(error)).toBe("ECONNRESET")
+    expect(isConnectionError(error)).toBe(true)
+    expect(sanitizeHandlerLogArguments(["Prepared request", error])).toEqual([
+      "Prepared request",
+      { name: "TypeError" },
+    ])
+    expect(toLlmDebugLogError(error)).toMatchObject({
+      code: "ECONNRESET",
+      message: "",
+      name: "TypeError",
+      stack: expectedStack,
+    })
+  })
+})
+
+test("keeps native DOMException fields when a lower prototype is revoked", () => {
+  withRevokedLowerPrototype(DOMException.prototype, () => {
+    const error = new DOMException("", "AbortError")
+    const result = snapshot(error)
+
+    expect(result).toBeDefined()
+    expect(readNativeDomExceptionField(result, "code")).toBe(20)
+    expect(readNativeDomExceptionField(result, "message")).toBe("")
+    expect(readNativeDomExceptionField(result, "name")).toBe("AbortError")
+    expect(isAbortLikeError(error)).toBe(true)
+    expect(isAbortError(error)).toBe(true)
+    expect(isConnectionError(error)).toBe(false)
+    expect(toLlmDebugLogError(error)).toMatchObject({
+      code: 20,
+      message: "",
+      name: "AbortError",
+    })
+  })
+})
+
+test("keeps a native-absent DOMException stack over a revoked prototype", () => {
+  withRevokedLowerPrototype(DOMException.prototype, () => {
+    const result = snapshotDescriptorChain(new DOMException("", "AbortError"), {
+      keys: new Set(["stack"]),
+      maxDepth: 6,
+    })
+
+    expect(result).toBeDefined()
+    expect(readDescriptorSnapshotValue(result, "stack")).toBeUndefined()
+    expect(result?.blockedDescriptors.has("stack")).toBe(true)
+  })
+})
 
 test("the nearest Error accessor blocks lower data and native fallback", () => {
   const getterCalls = { count: 0 }

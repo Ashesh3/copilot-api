@@ -130,28 +130,53 @@ function shouldSkipNativePrototypeDescriptor(
   )
 }
 
+function isNativePrototypeDescriptor(
+  current: object,
+  key: string,
+  descriptor: PropertyDescriptor,
+): boolean {
+  const isErrorPrototype =
+    current === Error.prototype || current === TypeError.prototype
+  return (
+    shouldSkipNativePrototypeDescriptor(current, key)
+    && (isErrorPrototype ?
+      "value" in descriptor
+    : !Object.hasOwn(descriptor, "value"))
+  )
+}
+
+interface DescriptorResolutionState {
+  readonly blockedDescriptors: Set<string>
+  readonly descriptors: Map<string, PropertyDescriptor>
+  readonly nativeDescriptors: Map<string, PropertyDescriptor | undefined>
+}
+
 function collectAllowlistedDescriptors(
   options: {
     readonly current: object
     readonly keys: ReadonlySet<string>
     readonly ownDescriptors: Record<string, PropertyDescriptor>
   },
-  collected: Map<string, PropertyDescriptor>,
-  blocked: Set<string>,
+  state: DescriptorResolutionState,
 ): void {
   const { current, keys, ownDescriptors } = options
+  const { blockedDescriptors, descriptors, nativeDescriptors } = state
   for (const key of keys) {
     if (
-      collected.has(key)
-      || blocked.has(key)
+      descriptors.has(key)
+      || blockedDescriptors.has(key)
+      || nativeDescriptors.has(key)
       || !Object.hasOwn(ownDescriptors, key)
     ) {
       continue
     }
-    if (shouldSkipNativePrototypeDescriptor(current, key)) continue
     const descriptor = ownDescriptors[key]
-    if ("value" in descriptor) collected.set(key, descriptor)
-    else blocked.add(key)
+    if (isNativePrototypeDescriptor(current, key, descriptor)) {
+      nativeDescriptors.set(key, descriptor)
+      continue
+    }
+    if ("value" in descriptor) descriptors.set(key, descriptor)
+    else blockedDescriptors.add(key)
   }
 }
 
@@ -159,50 +184,148 @@ interface DescriptorChainWalk {
   readonly blockedDescriptors: Set<string>
   readonly descriptors: Map<string, PropertyDescriptor>
   readonly domExceptionPrototypeSeen: boolean
-  readonly errorPrototypeSeen: boolean
+  readonly nativeDescriptors: Map<string, PropertyDescriptor | undefined>
   readonly rootDescriptors: Record<string, PropertyDescriptor>
+}
+
+function areAllKeysResolved(
+  keys: ReadonlySet<string>,
+  state: DescriptorResolutionState,
+): boolean {
+  for (const key of keys) {
+    if (!isKeyResolved(key, state)) return false
+  }
+  return true
+}
+
+function isKeyResolved(key: string, state: DescriptorResolutionState): boolean {
+  return (
+    state.descriptors.has(key)
+    || state.blockedDescriptors.has(key)
+    || state.nativeDescriptors.has(key)
+  )
+}
+
+function resolveAbsentNativeDomExceptionStack(
+  current: object,
+  keys: ReadonlySet<string>,
+  state: DescriptorResolutionState,
+): void {
+  if (
+    current === DOMException.prototype
+    && keys.has("stack")
+    && !isKeyResolved("stack", state)
+  ) {
+    state.nativeDescriptors.set("stack", undefined)
+    state.blockedDescriptors.add("stack")
+  }
+}
+
+function canKeepPartialNativeSnapshot(
+  nativeDescriptors: ReadonlyMap<string, PropertyDescriptor | undefined>,
+): boolean {
+  return nativeDescriptors.size > 0
+}
+
+function readOwnDescriptors(
+  current: object,
+): Record<string, PropertyDescriptor> | undefined {
+  try {
+    return Object.getOwnPropertyDescriptors(current)
+  } catch {
+    return undefined
+  }
+}
+
+function shouldStopBeforeCurrent(
+  current: object,
+  depth: number,
+  nativeDescriptors: ReadonlyMap<string, PropertyDescriptor | undefined>,
+): boolean | undefined {
+  if (depth === 0 || !safeIsProxy(current)) return false
+  if (canKeepPartialNativeSnapshot(nativeDescriptors)) return true
+  return undefined
+}
+
+function nextPrototype(
+  current: object,
+  nativeDescriptors: ReadonlyMap<string, PropertyDescriptor | undefined>,
+): { current: object | null; partial: boolean } | undefined {
+  try {
+    return {
+      current: Object.getPrototypeOf(current) as object | null,
+      partial: false,
+    }
+  } catch {
+    if (canKeepPartialNativeSnapshot(nativeDescriptors)) {
+      return { current: null, partial: true }
+    }
+    return undefined
+  }
 }
 
 function walkDescriptorChain(
   value: object,
   options: SnapshotDescriptorChainOptions,
 ): DescriptorChainWalk | undefined {
-  const blockedDescriptors = new Set<string>()
-  const descriptors = new Map<string, PropertyDescriptor>()
+  const state: DescriptorResolutionState = {
+    blockedDescriptors: new Set<string>(),
+    descriptors: new Map<string, PropertyDescriptor>(),
+    nativeDescriptors: new Map<string, PropertyDescriptor>(),
+  }
+  const { blockedDescriptors, descriptors, nativeDescriptors } = state
   let domExceptionPrototypeSeen = false
-  let errorPrototypeSeen = false
+  let partialNativeSnapshotAllowed = false
   let rootDescriptors: Record<string, PropertyDescriptor> | undefined
   let current: object | null = value
 
   for (let depth = 0; depth < options.maxDepth && current !== null; depth++) {
-    if (depth > 0 && safeIsProxy(current)) return undefined
-    let ownDescriptors: Record<string, PropertyDescriptor>
-    try {
-      ownDescriptors = Object.getOwnPropertyDescriptors(current)
-    } catch {
+    const stopBeforeCurrent = shouldStopBeforeCurrent(
+      current,
+      depth,
+      nativeDescriptors,
+    )
+    if (stopBeforeCurrent === undefined) return undefined
+    if (stopBeforeCurrent) {
+      partialNativeSnapshotAllowed = true
+      break
+    }
+    const ownDescriptors = readOwnDescriptors(current)
+    if (!ownDescriptors) {
+      if (canKeepPartialNativeSnapshot(nativeDescriptors)) {
+        partialNativeSnapshotAllowed = true
+        break
+      }
       return undefined
     }
     rootDescriptors ??= ownDescriptors
     if (current === DOMException.prototype) domExceptionPrototypeSeen = true
-    if (current === Error.prototype) errorPrototypeSeen = true
     collectAllowlistedDescriptors(
       { current, keys: options.keys, ownDescriptors },
-      descriptors,
-      blockedDescriptors,
+      state,
     )
-    try {
-      current = Object.getPrototypeOf(current) as object | null
-    } catch {
-      return undefined
+    resolveAbsentNativeDomExceptionStack(current, options.keys, state)
+    if (
+      canKeepPartialNativeSnapshot(nativeDescriptors)
+      && areAllKeysResolved(options.keys, state)
+    ) {
+      current = null
+      break
     }
+    const next = nextPrototype(current, nativeDescriptors)
+    if (next === undefined) return undefined
+    current = next.current
+    partialNativeSnapshotAllowed ||= next.partial
   }
 
-  if (current !== null || !rootDescriptors) return undefined
+  if ((current !== null && !partialNativeSnapshotAllowed) || !rootDescriptors) {
+    return undefined
+  }
   return {
     blockedDescriptors,
     descriptors,
     domExceptionPrototypeSeen,
-    errorPrototypeSeen,
+    nativeDescriptors,
     rootDescriptors,
   }
 }
@@ -222,9 +345,22 @@ export function snapshotDescriptorChain(
     chain.domExceptionPrototypeSeen ?
       snapshotDomException(value, chain.rootDescriptors)
     : undefined
+  if (chain.domExceptionPrototypeSeen && !domException) {
+    for (const key of ["code", "message", "name"] as const) {
+      if (chain.nativeDescriptors.has(key)) {
+        chain.blockedDescriptors.add(key)
+      }
+    }
+  }
+  const errorMessageDescriptor = chain.nativeDescriptors.get("message")
   const error =
-    errorKind && chain.errorPrototypeSeen ?
-      { message: Error.prototype.message }
+    (
+      errorKind
+      && errorMessageDescriptor
+      && "value" in errorMessageDescriptor
+      && typeof errorMessageDescriptor.value === "string"
+    ) ?
+      { message: errorMessageDescriptor.value }
     : undefined
   return {
     blockedDescriptors: chain.blockedDescriptors,
