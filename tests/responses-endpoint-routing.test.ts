@@ -154,6 +154,72 @@ test.each([
   expect(lastUpstreamPath).toBe(expected)
 })
 
+test.each([
+  { endpoints: ["/responses"], target: "/responses" },
+  { endpoints: ["/v1/messages"], target: "/v1/messages" },
+  { endpoints: ["/chat/completions"], target: "/chat/completions" },
+])(
+  "routes one identical finalized Responses clone to $target",
+  async ({ endpoints, target }) => {
+    installModel({ supported_endpoints: [...endpoints] })
+
+    const response = await postResponses({
+      input: "Return JSON",
+      max_output_tokens: 1,
+      reasoning: { effort: "medium" },
+      temperature: 0.4,
+      text: {
+        format: {
+          type: "json_schema",
+          name: "answer",
+          schema: {
+            type: "object",
+            properties: { answer: { type: "string" } },
+          },
+        },
+      },
+      tools: [],
+      tool_choice: "auto",
+    })
+
+    expect(response.status).toBe(200)
+    expect(lastUpstreamPath).toBe(target)
+    if (target === "/responses") {
+      expect(lastUpstreamPayload).not.toHaveProperty("tools")
+      expect(lastUpstreamPayload).not.toHaveProperty("tool_choice")
+      expect(lastUpstreamPayload?.max_output_tokens).toBe(16)
+      expect(lastUpstreamPayload).toHaveProperty(
+        "text.format.schema.additionalProperties",
+        false,
+      )
+      expect(lastUpstreamPayload).toHaveProperty(
+        "text.format.schema.required",
+        ["answer"],
+      )
+    }
+  },
+)
+
+test.each([
+  { name: "null body", body: "null" },
+  { name: "array body", body: "[]" },
+  { name: "empty object", body: "{}" },
+  { name: "numeric model", body: '{"model":7}' },
+  { name: "blank model", body: '{"model":"   "}' },
+])("rejects $name before Responses routing", async ({ body }) => {
+  state.models = undefined
+
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body,
+  })
+
+  expect(response.status).toBe(400)
+  expect(fetchMock).not.toHaveBeenCalled()
+  expect(JSON.stringify(await response.json())).not.toContain("private")
+})
+
 test("prefers Messages over Chat for a PDF-capable fallback", async () => {
   installModel({ supported_endpoints: ["/v1/messages", "/chat/completions"] })
 

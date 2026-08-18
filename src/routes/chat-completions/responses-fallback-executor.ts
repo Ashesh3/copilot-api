@@ -272,7 +272,12 @@ export async function executeResponsesFallback(
   setRequestContext(c, { provider: "ChatCompletions→Responses" })
 
   const prepared = prepareResponsesFallback(options)
-  consola.debug("Responses fallback payload:", JSON.stringify(prepared.payload))
+  consola.debug("Prepared Responses fallback request", {
+    inputKind: Array.isArray(prepared.payload.input) ? "items" : "text",
+    model: prepared.payload.model,
+    stream: Boolean(prepared.payload.stream),
+    toolCount: prepared.payload.tools?.length ?? 0,
+  })
 
   if (!prepared.payload.stream) {
     return await executeNonStreamingResponsesFallback(c, prepared)
@@ -450,7 +455,7 @@ async function emitOpenAiStreamError(
   stream: { writeSSE: (message: { data: string }) => Promise<void> },
   error: unknown,
 ): Promise<void> {
-  Sentry.captureException(error)
+  Sentry.captureException(new Error("Chat fallback stream failed"))
   consola.error(
     "Chat Completions stream failed after headers were sent:",
     error,

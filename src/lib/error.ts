@@ -327,24 +327,21 @@ export async function forwardError(c: Context, error: unknown) {
 
   if (error instanceof HTTPError) return await forwardHttpError(c, error)
 
-  consola.error("Error occurred:", error)
+  consola.error("Unexpected internal error")
 
-  Sentry.captureException(error, {
+  Sentry.captureException(new Error("Unexpected internal error"), {
     tags: {
       path: c.req.path,
       method: c.req.method,
-    },
-    extra: {
-      errorMessage: (error as Error).message,
-      errorStack: (error as Error).stack,
     },
   })
 
   return c.json(
     {
       error: {
-        message: (error as Error).message,
-        type: "error",
+        code: "internal_error",
+        message: "Internal server error",
+        type: "server_error",
       },
     },
     500,

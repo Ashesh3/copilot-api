@@ -13,17 +13,11 @@ import { getRoutingAffinity } from "~/lib/routing-affinity"
 import packageJson from "../../package.json" with { type: "json" }
 
 /**
- * Check whether AI request/response content (prompts and completions)
- * should be recorded in Sentry spans.
- *
- * Controlled by `SENTRY_AI_RECORD_INPUTS` env var (default: "true").
- * Set to "false" to prevent `gen_ai.input.messages` and
- * `gen_ai.output.messages` from being sent to Sentry.
+ * Ordinary Sentry telemetry never records AI request/response bodies. Raw
+ * capture is restricted to the administrator-only LLM Debug facility.
  */
 export function shouldRecordAiContent(): boolean {
-  const value = process.env.SENTRY_AI_RECORD_INPUTS
-  if (value === undefined || value === "") return true
-  return value.toLowerCase() !== "false"
+  return false
 }
 
 const SENSITIVE_HEADER_PATTERNS = [
@@ -284,12 +278,6 @@ export function createSentryChatSpanOptions(options: {
       ...(options.streaming && {
         "gen_ai.response.streaming": true,
       }),
-      ...(shouldRecordAiContent()
-        && options.inputMessages !== undefined && {
-          "gen_ai.input.messages": getSentryInputMessages(
-            options.inputMessages,
-          ),
-        }),
     },
   }
 }
@@ -308,55 +296,16 @@ export function createSentryToolSpanOptions(options: {
       "gen_ai.operation.name": "execute_tool",
       "gen_ai.tool.name": options.toolName,
       "gen_ai.tool.type": options.toolType ?? "function",
-      ...(shouldRecordAiContent() && {
-        ...(options.toolArguments !== undefined && {
-          "gen_ai.tool.call.arguments": stringifySentryContent(
-            options.toolArguments,
-          ),
-        }),
-        ...(options.toolResult !== undefined && {
-          "gen_ai.tool.call.result": stringifySentryContent(
-            options.toolResult,
-          ).slice(0, 10000),
-        }),
-      }),
       ...(options.isError && { "gen_ai.tool.error": "true" }),
     },
   }
 }
 
-function getSentryInputMessages(messages: unknown): string {
-  return typeof messages === "string" ? messages : JSON.stringify(messages)
-}
-
-function stringifySentryContent(content: unknown): string {
-  if (typeof content === "string") return content
-  return JSON.stringify(content ?? "")
-}
-
-export function createSentryOutputMessages(content: unknown): string {
-  return JSON.stringify([
-    {
-      role: "assistant",
-      parts: [
-        {
-          type: "text",
-          content: stringifySentryContent(content),
-        },
-      ],
-    },
-  ])
-}
-
 export function setSentryOutputMessages(
-  span: Sentry.Span,
-  content: unknown,
+  _span: Sentry.Span,
+  _content: unknown,
 ): void {
-  if (!shouldRecordAiContent()) return
-  span.setAttribute(
-    "gen_ai.output.messages",
-    createSentryOutputMessages(content),
-  )
+  // Intentionally empty: ordinary Sentry spans retain only structural data.
 }
 
 export function initSentry(): void {
@@ -380,7 +329,6 @@ export type CopilotApiSentryInitOptions = BunOptions
 export function createSentryInitOptions(
   dsn: string,
 ): CopilotApiSentryInitOptions {
-  const recordAiContent = shouldRecordAiContent()
   const tracesSampleRate = Number.parseFloat(
     process.env.SENTRY_TRACES_SAMPLE_RATE ?? "1.0",
   )
@@ -389,7 +337,7 @@ export function createSentryInitOptions(
     dsn,
     release: `copilot-api@${packageJson.version}`,
     environment: process.env.NODE_ENV ?? "development",
-    sendDefaultPii: recordAiContent,
+    sendDefaultPii: false,
     streamGenAiSpans: true,
     tracesSampleRate:
       Number.isFinite(tracesSampleRate) ? tracesSampleRate : 1.0,

@@ -373,10 +373,9 @@ test("rejects a lossy Chat to Responses fallback before upstream dispatch", asyn
   expect(fetchMock).not.toHaveBeenCalled()
   expect(await response.json()).toEqual({
     error: {
-      code: "endpoint_translation_unsupported",
-      message:
-        "The selected Copilot model cannot accept this request without losing required protocol data.",
-      param: "tool_result_pairing",
+      code: "invalid_value",
+      message: "Tool calls and tool results must be complete and ordered.",
+      param: "messages",
       type: "invalid_request_error",
     },
   })

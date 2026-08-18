@@ -828,6 +828,119 @@ describe("responses websocket message handling", () => {
     expect(ws.data.activeTurns.size).toBe(0)
   })
 
+  test("routes a Messages-only WebSocket model through native Messages", async () => {
+    state.accountType = "individual"
+    state.copilotToken = "copilot-token"
+    state.models = {
+      ...responsesCapableModels,
+      data: responsesCapableModels.data.map((model) => ({
+        ...model,
+        vendor: "anthropic",
+        supported_endpoints: ["/v1/messages"],
+        capabilities: {
+          ...model.capabilities,
+          supports: { reasoning_effort: ["medium"] },
+        },
+      })),
+    }
+    queuedResponses.push(
+      Response.json({
+        id: "msg_ws_messages",
+        type: "message",
+        role: "assistant",
+        model: "gpt-5.4",
+        content: [{ type: "text", text: "Hello from Messages" }],
+        stop_reason: "end_turn",
+        stop_sequence: null,
+        usage: { input_tokens: 2, output_tokens: 3 },
+      }),
+    )
+    const ws = createTestWebSocket()
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "Hello",
+      }),
+    )
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(ws.sent.some((frame) => frame.includes("Hello from Messages"))).toBe(
+      true,
+    )
+    expect(lastRequestBody).toMatchObject({
+      model: "gpt-5.4",
+      messages: [{ role: "user", content: "Hello" }],
+      stream: false,
+    })
+  })
+
+  test("returns a recoverable error when a WebSocket model has no endpoint", async () => {
+    state.accountType = "individual"
+    state.copilotToken = "copilot-token"
+    state.models = {
+      ...responsesCapableModels,
+      data: responsesCapableModels.data.map((model) => ({
+        ...model,
+        supported_endpoints: [],
+      })),
+    }
+    const ws = createTestWebSocket()
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "Hello",
+      }),
+    )
+
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(ws.data.closed).toBe(false)
+    expect(JSON.parse(ws.sent.at(-1) ?? "{}")).toMatchObject({
+      type: "error",
+      status: 400,
+      error: { code: "endpoint_translation_unsupported" },
+    })
+  })
+
+  test("rejects stateful and blocked-tool WebSocket turns before dispatch", async () => {
+    state.models = responsesCapableModels
+    const ws = createTestWebSocket()
+
+    for (const payload of [
+      { model: "gpt-5.4", input: "Hello", store: true },
+      {
+        model: "gpt-5.4",
+        input: "Hello",
+        tools: [{ type: "code_interpreter" }],
+      },
+    ]) {
+      await responsesWebSocket.message(
+        ws,
+        JSON.stringify({ type: "response.create", ...payload }),
+      )
+    }
+
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(ws.data.closed).toBe(false)
+    const errorFrames = ws.sent.map(
+      (frame) =>
+        JSON.parse(frame) as {
+          error?: { param?: string }
+          type?: string
+        },
+    )
+    expect(errorFrames).toHaveLength(2)
+    expect(errorFrames[0]?.type).toBe("error")
+    expect(errorFrames[0]?.error?.param).toBe("store")
+    expect(errorFrames[1]?.type).toBe("error")
+    expect(errorFrames[1]?.error?.param).toBe("tools")
+  })
+
   test("forwards safe translation errors before upstream and keeps the socket open", async () => {
     state.accountType = "individual"
     state.copilotToken = "copilot-token"
@@ -1376,7 +1489,9 @@ describe("responses websocket upstream handling", () => {
     expect(errorFrame.type).toBe("error")
     expect(errorFrame.status).toBe(413)
     expect(errorFrame.error?.code).toBe("request_too_large")
-    expect(errorFrame.error?.message).toContain("safe upstream budget")
+    expect(errorFrame.error?.message).toContain(
+      "safe compaction payload budget",
+    )
   })
 
   test("strips encrypted reasoning from rehydrated continuation input before forwarding", async () => {

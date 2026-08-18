@@ -9,6 +9,8 @@ import type {
   ResponseMessage,
 } from "~/services/copilot/create-chat-completions"
 
+import { createEndpointTranslationError } from "~/lib/error"
+
 export function createAssistantBlocks(
   message: Message,
 ): Array<AnthropicAssistantContentBlock> {
@@ -28,6 +30,14 @@ export function getAnthropicReasoning(
   const thinkingBlocks = content.filter(
     (block): block is AnthropicThinkingBlock => block.type === "thinking",
   )
+  const signedThinkingBlocks = thinkingBlocks.filter((block) => block.signature)
+  if (signedThinkingBlocks.length > 1) {
+    throw createEndpointTranslationError({
+      blockers: ["multiple_signed_thinking_blocks"],
+      code: "endpoint_translation_unsupported",
+      source: "chat",
+    })
+  }
   const reasoningText = thinkingBlocks
     .map((block) => block.thinking)
     .join("\n\n")

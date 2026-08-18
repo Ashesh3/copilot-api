@@ -562,12 +562,21 @@ export function checkResponsesToChatTranslation(
   if (typeof payload.reasoning?.effort === "number") {
     addBlocker(blockers, "numeric_reasoning_effort")
   }
-  if (payload.include !== undefined) addBlocker(blockers, "include")
+  if (!hasOnlyEncryptedReasoningInclude(payload)) {
+    addBlocker(blockers, "include")
+  }
   if (!isSupportedToolChoice(payload.tool_choice)) {
     addBlocker(blockers, "tool_choice")
   }
   if (!isSupportedTextFormat(payload)) addBlocker(blockers, "text_format")
   return createCheck(blockers)
+}
+
+function hasOnlyEncryptedReasoningInclude(payload: ResponsesPayload): boolean {
+  return (
+    payload.include === undefined
+    || payload.include.every((item) => item === "reasoning.encrypted_content")
+  )
 }
 
 export function checkResponsesToMessagesTranslation(

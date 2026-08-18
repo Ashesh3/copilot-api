@@ -16,9 +16,7 @@ import {
 } from "./compaction-payload"
 import { normalizeResponsesAttachments } from "./responses-attachments"
 import {
-  applyResponsesReasoningDefaults,
-  prepareResponsesRequest,
-  removeUnsupportedResponsesRequestParameters,
+  finalizeResponsesRequest,
   type ResponsesWireBody,
 } from "./responses-contract"
 import {
@@ -408,6 +406,7 @@ interface ResponsesRequestOptions {
   initiator: "agent" | "user"
   signal?: AbortSignal
   compaction?: boolean
+  prepared?: boolean
 }
 
 const logOrdinaryRecovery = (
@@ -461,7 +460,15 @@ export const createResponses = async (
 ): Promise<CreateResponsesReturn> => {
   const { initiator, signal } = options
   signal?.throwIfAborted()
-  const prepared = prepareResponsesRequest(payload)
+  const prepared =
+    options.prepared ?
+      { body: structuredClone(payload) }
+    : finalizeResponsesRequest(payload, {
+        defaultEffort:
+          getModelReasoningConfig(payload.model)?.defaultEffort
+          ?? getReasoningEffortForModel(payload.model),
+        implicitDefault: usesImplicitReasoningDefault(payload.model),
+      })
   const body = prepared.body
 
   // Zero-data retention enforcement
@@ -470,16 +477,6 @@ export const createResponses = async (
   // Inline external attachment URLs / normalize file_data to data URIs
   await normalizeResponsesAttachments(body, signal)
   signal?.throwIfAborted()
-
-  // Match runtime defaults for direct Responses requests.
-  applyResponsesReasoningDefaults({
-    body,
-    defaultEffort:
-      getModelReasoningConfig(body.model)?.defaultEffort
-      ?? getReasoningEffortForModel(body.model),
-    implicitDefault: usesImplicitReasoningDefault(body.model),
-  })
-  removeUnsupportedResponsesRequestParameters(body)
 
   const shouldFitCompactionPayload = shouldFitResponsesCompactionPayload(
     body,

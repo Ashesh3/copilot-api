@@ -305,7 +305,8 @@ function recordCompletedRoutingRequest(
 }
 
 /**
- * Sanitize request body by omitting large message/prompt arrays
+ * Reduce an ordinary request diagnostic to bounded structural metadata.
+ * Raw payload capture belongs only to the administrator LLM Debug facility.
  */
 export function sanitizeRequestBodyForLog(
   parsed: Record<string, unknown>,
@@ -335,14 +336,23 @@ function sanitizeRequestBodyValue(
   if (context === "metadata" && key === "user_id") {
     return sanitizeClaudeUserMetadata(value)
   }
-  if (key === "messages" || key === "prompt") {
+  if (isPrivatePayloadField(key)) {
     const itemCount = Array.isArray(value) ? value.length : 1
     return `[${itemCount} items omitted]`
   }
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+  if (Array.isArray(value)) {
+    return `[${value.length} items omitted]`
+  }
+  if (typeof value !== "object" || value === null) {
     return value
   }
   return sanitizeRequestBodyForLog(value as Record<string, unknown>, "other")
+}
+
+function isPrivatePayloadField(key: string): boolean {
+  return /^(?:input|instructions|messages|prompt|tools?|attachments?|content|output|reasoning|thinking|encrypted_content|signature|reasoning_opaque|prompt_cache_key|prompt_cache_options|prompt_cache_retention|safety_identifier|user|metadata|client_metadata|url|uri|image_url|file_data|data)$/i.test(
+    key,
+  )
 }
 
 function isSensitiveBodyKey(key: string): boolean {

@@ -730,10 +730,12 @@ const executeChatCompletions = async (
 
   await tryCountTokens(c, finalPayload)
 
-  logger.debug(
-    "Translated OpenAI request payload:",
-    JSON.stringify(finalPayload),
-  )
+  logger.debug("Prepared translated Chat request", {
+    messageCount: finalPayload.messages.length,
+    model: finalPayload.model,
+    stream: Boolean(finalPayload.stream),
+    toolCount: finalPayload.tools?.length ?? 0,
+  })
 
   if (!finalPayload.stream) {
     const { initialResponse, hadWebSearch } = await Sentry.startSpan(
@@ -768,19 +770,19 @@ const executeChatCompletions = async (
         })
       : initialResponse
 
-    logger.debug(
-      "Non-streaming response from Copilot:",
-      JSON.stringify(finalResponse),
-    )
+    logger.debug("Received non-streaming Chat response", {
+      choiceCount: finalResponse.choices.length,
+      model: finalResponse.model,
+    })
 
     const anthropicResponse = translateToAnthropic(
       finalResponse,
       requestedModel,
     )
-    logger.debug(
-      "Translated Anthropic response:",
-      JSON.stringify(anthropicResponse),
-    )
+    logger.debug("Translated Anthropic response", {
+      blockCount: anthropicResponse.content.length,
+      model: anthropicResponse.model,
+    })
     return c.json(anthropicResponse)
   }
 
@@ -967,10 +969,10 @@ async function executeCustomProviderChatCompletions(
         setChatCompletionSpanResult(span, response)
 
         const anthropicResponse = translateToAnthropic(response, responseModel)
-        logger.debug(
-          "Translated custom provider Anthropic response:",
-          JSON.stringify(anthropicResponse),
-        )
+        logger.debug("Translated custom provider Anthropic response", {
+          blockCount: anthropicResponse.content.length,
+          model: anthropicResponse.model,
+        })
         return c.json(anthropicResponse)
       },
     )
@@ -1363,10 +1365,12 @@ const executeResponsesApi = async (
     anthropicPayload,
     effortOverride,
   )
-  logger.debug(
-    "Translated Responses payload:",
-    JSON.stringify(responsesPayload),
-  )
+  logger.debug("Prepared translated Responses request", {
+    inputKind: Array.isArray(responsesPayload.input) ? "items" : "text",
+    model: responsesPayload.model,
+    stream: Boolean(responsesPayload.stream),
+    toolCount: responsesPayload.tools?.length ?? 0,
+  })
 
   const { vision, initiator } = getResponsesRequestOptions(responsesPayload)
 
@@ -1544,14 +1548,18 @@ const executeResponsesApi = async (
       })
     : initialResult
 
-  logger.debug("Non-streaming Responses result:", JSON.stringify(resolved))
+  logger.debug("Received non-streaming Responses result", {
+    model: resolved.model,
+    outputCount: resolved.output.length,
+    status: resolved.status,
+  })
 
   const anthropicResponse = translateResponsesResultToAnthropic(resolved)
   if (requestedModel) anthropicResponse.model = requestedModel
-  logger.debug(
-    "Translated Anthropic response:",
-    JSON.stringify(anthropicResponse),
-  )
+  logger.debug("Translated Anthropic response", {
+    blockCount: anthropicResponse.content.length,
+    model: anthropicResponse.model,
+  })
   return c.json(anthropicResponse)
 }
 

@@ -15,7 +15,11 @@ import type {
 import type { Model } from "~/services/copilot/get-models"
 
 import { getLastUsedAccountId } from "~/lib/account-router"
-import { assertEndpointTranslationSupported, isAbortError } from "~/lib/error"
+import {
+  assertEndpointTranslationSupported,
+  isAbortError,
+  LocalHTTPError,
+} from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
 import { setRequestContext } from "~/lib/request-logger"
 import {
@@ -75,7 +79,12 @@ export async function executeAnthropicBridge(
     selectedModel,
     c.req.raw.signal,
   )
-  logger.debug("Bridged Anthropic payload:", JSON.stringify(anthropicPayload))
+  logger.debug("Prepared Anthropic bridge request", {
+    messageCount: anthropicPayload.messages.length,
+    model: anthropicPayload.model,
+    stream: Boolean(anthropicPayload.stream),
+    toolCount: anthropicPayload.tools?.length ?? 0,
+  })
 
   if (anthropicPayload.tools?.some((tool) => tool.name === "web_search")) {
     return await executeBridgeWebSearch(c, {
@@ -439,9 +448,26 @@ function safeParseArguments(rawArguments: string): Record<string, unknown> {
       return parsed as Record<string, unknown>
     }
   } catch {
-    /* fall through */
+    throw createInvalidAnthropicToolArgumentsError()
   }
-  return rawArguments.trim().length > 0 ? { raw_arguments: rawArguments } : {}
+  throw createInvalidAnthropicToolArgumentsError()
+}
+
+function createInvalidAnthropicToolArgumentsError(): LocalHTTPError {
+  const clientBody = {
+    error: {
+      code: "endpoint_translation_unsupported",
+      message:
+        "The selected Copilot model cannot accept this request without losing required protocol data.",
+      param: "tool_arguments",
+      type: "invalid_request_error",
+    },
+  }
+  return new LocalHTTPError(
+    "Tool call arguments must be a JSON object for Anthropic Messages.",
+    Response.json(clientBody, { status: 400 }),
+    clientBody,
+  )
 }
 
 function convertToolChoice(
@@ -558,6 +584,7 @@ interface BridgeStreamState {
   cachedTokens: number
   responseText: string
   finishReason: "stop" | "length" | "tool_calls" | "content_filter" | null
+  signatureByBlockIndex: Map<number, string>
 }
 
 type WriteBridgeChunk = (
@@ -595,6 +622,7 @@ export async function streamAnthropicAsChatCompletions(
     cachedTokens: 0,
     responseText: "",
     finishReason: null,
+    signatureByBlockIndex: new Map(),
   }
 
   const writeChunk: WriteBridgeChunk = async (delta, options) => {
@@ -711,9 +739,15 @@ async function handleBridgeStreamEvent(
       break
     }
     case "error": {
-      logger.warn("Native messages stream error:", event.error.message)
+      logger.warn("Native messages stream failed")
       await writeRaw(
-        JSON.stringify({ error: { message: event.error.message } }),
+        JSON.stringify({
+          error: {
+            code: "upstream_error",
+            message: "Upstream stream failed",
+            type: "server_error",
+          },
+        }),
       )
       await writeRaw("[DONE]")
       break
@@ -748,6 +782,14 @@ async function handleBridgeContentDelta(
           ],
         })
       }
+      break
+    }
+    case "signature_delta": {
+      const signature =
+        (state.signatureByBlockIndex.get(event.index) ?? "")
+        + event.delta.signature
+      state.signatureByBlockIndex.set(event.index, signature)
+      await writeChunk({ reasoning_opaque: signature })
       break
     }
     case "thinking_delta": {

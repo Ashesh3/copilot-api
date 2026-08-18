@@ -355,6 +355,54 @@ test("sanitizes handler payload objects before verbose file logging", () => {
   }
 })
 
+test("omits private nested payload data from ordinary diagnostics", () => {
+  const privateMarkers = [
+    "prompt-private-marker",
+    "encrypted-private-marker",
+    "cache-private-marker",
+    "safety-private-marker",
+    "tool-private-marker",
+    "url-private-marker",
+    "media-private-marker",
+  ]
+  const sanitized = sanitizeRequestBodyForLog({
+    model: "gpt-current",
+    input: [
+      {
+        role: "user",
+        content: [
+          { type: "input_text", text: privateMarkers[0] },
+          {
+            type: "input_image",
+            image_url: `data:image/png;base64,${privateMarkers[6]}`,
+          },
+        ],
+      },
+      {
+        type: "reasoning",
+        encrypted_content: privateMarkers[1],
+      },
+    ],
+    prompt_cache_key: privateMarkers[2],
+    safety_identifier: privateMarkers[3],
+    tools: [
+      {
+        type: "function",
+        name: privateMarkers[4],
+        server_url: `https://example.invalid/${privateMarkers[5]}`,
+      },
+    ],
+  })
+
+  const output = JSON.stringify(sanitized)
+  for (const marker of privateMarkers) expect(output).not.toContain(marker)
+  expect(sanitized).toMatchObject({
+    model: "gpt-current",
+    input: "[2 items omitted]",
+    tools: "[1 items omitted]",
+  })
+})
+
 test("forwards upstream quota snapshot headers to the client response", async () => {
   upstreamResponseHeaders = {
     "content-type": "application/json",

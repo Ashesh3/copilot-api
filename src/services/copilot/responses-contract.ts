@@ -10,6 +10,11 @@ export interface PreparedResponsesRequest {
   normalizationClasses: Array<string>
 }
 
+export interface FinalizeResponsesRequestOptions {
+  defaultEffort?: string
+  implicitDefault: boolean
+}
+
 export function applyResponsesReasoningDefaults(options: {
   body: ResponsesWireBody
   defaultEffort: string | undefined
@@ -44,6 +49,33 @@ export function applyResponsesReasoningDefaults(options: {
     include.push("reasoning.encrypted_content")
   }
   body.include = include
+}
+
+export function finalizeResponsesRequest(
+  payload: ResponsesPayload,
+  options: FinalizeResponsesRequestOptions,
+): PreparedResponsesRequest {
+  const prepared = prepareResponsesRequest(payload)
+  if (shouldFinalizeResponsesReasoning(prepared.body, options)) {
+    applyResponsesReasoningDefaults({
+      body: prepared.body,
+      defaultEffort: options.defaultEffort,
+      implicitDefault: options.implicitDefault,
+    })
+  }
+  removeUnsupportedResponsesRequestParameters(prepared.body)
+  return prepared
+}
+
+function shouldFinalizeResponsesReasoning(
+  body: ResponsesWireBody,
+  options: FinalizeResponsesRequestOptions,
+): boolean {
+  return (
+    body.reasoning !== undefined
+    || options.defaultEffort !== undefined
+    || options.implicitDefault
+  )
 }
 
 const RESPONSES_TOP_LEVEL_FIELDS = [
@@ -125,6 +157,7 @@ export function createResponsesValidationError(options: {
 export function prepareResponsesRequest(
   payload: ResponsesPayload,
 ): PreparedResponsesRequest {
+  validateResponsesBody(payload)
   validateStatefulControls(payload)
   validateResponsesContextManagement(payload.context_management)
   const preparedTools = prepareResponsesTools(payload.tools)
@@ -144,9 +177,50 @@ export function prepareResponsesRequest(
   normalizeFunctionToolParameters(body)
   normalizeEmptyToolControls(body)
   normalizeJsonSchemaResponseFormat(body)
+  canonicalizeEncryptedReasoningInclude(body)
   clampMaxOutputTokens(body)
 
   return { body, normalizationClasses: [] }
+}
+
+function validateResponsesBody(payload: ResponsesPayload): void {
+  if (!isPlainResponsesRecord(payload)) {
+    throw createResponsesValidationError({
+      code: "invalid_type",
+      message: "The request body must be a JSON object.",
+      param: "body",
+    })
+  }
+  if (typeof payload.model !== "string" || payload.model.trim() === "") {
+    throw createResponsesValidationError({
+      code: "invalid_value",
+      message: "The model field must be a non-empty string.",
+      param: "model",
+    })
+  }
+}
+
+function isPlainResponsesRecord(value: unknown): value is ResponsesPayload {
+  if (!isRecord(value) || Array.isArray(value)) return false
+  try {
+    return Object.getPrototypeOf(value) === Object.prototype
+  } catch {
+    return false
+  }
+}
+
+function canonicalizeEncryptedReasoningInclude(
+  payload: ResponsesWireBody,
+): void {
+  if (!Array.isArray(payload.include)) return
+
+  let encryptedReasoningIncluded = false
+  payload.include = payload.include.filter((item) => {
+    if (item !== "reasoning.encrypted_content") return true
+    if (encryptedReasoningIncluded) return false
+    encryptedReasoningIncluded = true
+    return true
+  })
 }
 
 export function validateResponsesTools(tools: unknown): void {

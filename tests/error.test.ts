@@ -413,3 +413,37 @@ test("redacts affinity identifiers from HTTP error diagnostics", async () => {
     captureException.mockRestore()
   }
 })
+
+test("returns and reports a fixed envelope for unexpected runtime errors", async () => {
+  const privateMarker = "runtime-private-marker"
+  const errorOutput: Array<unknown> = []
+  const errorSpy = spyOn(consola, "error")
+  const captureException = spyOn(Sentry, "captureException").mockImplementation(
+    () => "event-id",
+  )
+  const app = new Hono()
+  app.get("/unexpected", () => {
+    throw new Error(privateMarker)
+  })
+  app.onError(async (error, c) => await forwardError(c, error))
+
+  try {
+    const response = await app.request("/unexpected")
+    for (const call of errorSpy.mock.calls) errorOutput.push(...call)
+    const body = await response.text()
+    expect(response.status).toBe(500)
+    expect(JSON.parse(body)).toEqual({
+      error: {
+        code: "internal_error",
+        message: "Internal server error",
+        type: "server_error",
+      },
+    })
+    expect(
+      JSON.stringify([body, errorOutput, captureException.mock.calls]),
+    ).not.toContain(privateMarker)
+  } finally {
+    errorSpy.mockRestore()
+    captureException.mockRestore()
+  }
+})

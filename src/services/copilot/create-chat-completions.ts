@@ -638,6 +638,7 @@ export interface ResponseMessage {
   content: string | null
   reasoning_text?: string | null // Claude thinking text from CAPI
   reasoning_opaque?: string | null // Encrypted signature from CAPI
+  encrypted_content?: string | null
   tool_calls?: Array<ToolCall>
 }
 

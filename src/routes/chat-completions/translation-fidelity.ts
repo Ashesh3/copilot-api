@@ -144,6 +144,25 @@ function scanChatToMessagesContent(
   }
 }
 
+function scanChatToolArgumentsForMessages(
+  messages: ChatCompletionsPayload["messages"],
+  blockers: Array<string>,
+): void {
+  for (const message of messages) {
+    if (message.role !== "assistant" || !Array.isArray(message.tool_calls)) {
+      continue
+    }
+    for (const toolCall of message.tool_calls) {
+      try {
+        const parsed = JSON.parse(toolCall.function.arguments) as unknown
+        if (!isRecord(parsed)) addBlocker(blockers, "tool_arguments")
+      } catch {
+        addBlocker(blockers, "tool_arguments")
+      }
+    }
+  }
+}
+
 function isSupportedMessagesContentPart(
   part: Record<string, unknown>,
   role: Message["role"],
@@ -443,6 +462,7 @@ export function checkNormalizedChatToMessagesTranslation(
   const blockers: Array<string> = []
   scanMessageNames(payload.messages, blockers)
   scanChatToMessagesContent(payload.messages, blockers)
+  scanChatToolArgumentsForMessages(payload.messages, blockers)
   for (const message of payload.messages) {
     if (message.role !== "assistant") continue
     const hasReasoning =

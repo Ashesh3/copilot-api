@@ -633,10 +633,10 @@ export async function emitAnthropicStreamError(
   stream: {
     writeSSE: (data: { event: string; data: string }) => Promise<void>
   },
-  error: unknown,
+  _error: unknown,
 ): Promise<void> {
-  Sentry.captureException(error)
-  consola.error("Anthropic stream failed after headers were sent:", error)
+  Sentry.captureException(new Error("Anthropic stream failed after headers"))
+  consola.error("Anthropic stream failed after headers were sent")
 
   const event = translateErrorToAnthropicErrorEvent()
   try {

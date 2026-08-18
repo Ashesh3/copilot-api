@@ -147,6 +147,45 @@ test("adds encrypted reasoning inclusion once", () => {
   expect(body.include).not.toBe(preparedInclude)
 })
 
+test("canonicalizes duplicate encrypted reasoning includes", () => {
+  const body = prepareResponsesRequest({
+    model: "gpt-current",
+    input: "hello",
+    include: [
+      "code_interpreter_call.outputs",
+      "reasoning.encrypted_content",
+      "file_search_call.results",
+      "reasoning.encrypted_content",
+    ],
+  }).body
+
+  expect(body.include).toEqual([
+    "code_interpreter_call.outputs",
+    "reasoning.encrypted_content",
+    "file_search_call.results",
+  ])
+})
+
+test("rejects null and array Responses bodies before preparation", () => {
+  for (const payload of [null, []]) {
+    const error = captureValidationError(payload as never)
+    expect(error.response.status).toBe(400)
+    expect(error.clientBody).toMatchObject({
+      error: { type: "invalid_request_error" },
+    })
+  }
+})
+
+test("requires a non-empty Responses model before preparation", () => {
+  for (const payload of [{}, { model: "   " }]) {
+    const error = captureValidationError(payload as never)
+    expect(error.response.status).toBe(400)
+    expect(error.clientBody).toMatchObject({
+      error: { param: "model", type: "invalid_request_error" },
+    })
+  }
+})
+
 test("treats null reasoning as absent", () => {
   const body = prepareResponsesRequest({
     model: "gpt-current",

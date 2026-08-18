@@ -3,9 +3,9 @@ import consola from "consola"
 import { randomUUID } from "node:crypto"
 
 import type { RoutingAffinity } from "~/lib/routing-affinity"
+import type { AnthropicResponse } from "~/routes/messages/anthropic-types"
 
 import { resolveRequestCredential } from "~/lib/credential-resolver"
-import { getModelEndpointSupport } from "~/lib/endpoint-routing"
 import { LocalHTTPError } from "~/lib/error"
 import {
   applyModelRedirect,
@@ -31,6 +31,7 @@ import {
   fitResponsesCompactionPayload,
   isResponsesCompactionRequest,
 } from "~/services/copilot/compaction-payload"
+import { createAnthropicMessages } from "~/services/copilot/create-anthropic-messages"
 import {
   createChatCompletions,
   type ChatCompletionResponse,
@@ -44,10 +45,15 @@ import {
   convertWebSearchTool,
   disableParallelWebSearch,
   normalizeResponsesReasoning,
+  prepareResponsesRouteForTransport,
   responsesToChatCompletions,
   streamChatCompletionsAsResponses,
   useFunctionApplyPatch,
 } from "./handler"
+import {
+  anthropicResponseToResponsesResult,
+  responsesPayloadToAnthropic,
+} from "./messages-bridge"
 import { createStreamIdTracker, fixStreamIds } from "./stream-id-sync"
 import { expandCompactionItems, getResponsesRequestOptions } from "./utils"
 import {
@@ -222,8 +228,7 @@ export const responsesWebSocket = {
         )
       }
     } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : "Internal server error"
+      const errorMessage = getSafeWebSocketErrorMessage(error)
       const terminal = classifyWebSocketTerminal(error, turn)
       finalizeResponsesWebSocketTurn(ws.data, turn, {
         error,
@@ -233,7 +238,10 @@ export const responsesWebSocket = {
         consola.debug(`[responses-ws] ${turn.turnId} aborted`)
         return
       }
-      consola.error(`[responses-ws] ${turn.turnId} error:`, errorMessage)
+      consola.error(`[responses-ws] ${turn.turnId} error`, {
+        code: normalizeWebSocketError(error, errorMessage).code,
+        status: terminal.status,
+      })
       try {
         sendWebSocketError(ws, {
           ...normalizeWebSocketError(error, errorMessage),
@@ -334,25 +342,46 @@ async function handleResponseCreate(
   const selectedModel = state.models?.data.find(
     (model) => model.id === payload.model,
   )
-  const supportsResponses = getModelEndpointSupport(selectedModel).responses
+  const route = await waitForWebSocketTurn(
+    prepareResponsesRouteForTransport({
+      payload,
+      selectedModel,
+      signal: turn.abortController.signal,
+    }),
+    turn,
+  )
+  const preparedPayload = route.preparedPayload
 
-  const { vision, initiator } = getResponsesRequestOptions(payload)
+  const { vision, initiator } = getResponsesRequestOptions(preparedPayload)
 
-  if (!supportsResponses) {
-    convertWebSearchTool(payload)
+  if (route.decision.target === "/v1/messages") {
+    reportResponsesWebSocketEndpointFallback(
+      preparedPayload.model,
+      "AnthropicMessages",
+    )
+    await streamAnthropicMessagesOverWs(ws, preparedPayload, turn)
+    return
+  }
+
+  if (route.decision.target === "/chat/completions") {
+    convertWebSearchTool(preparedPayload)
     // Rewrite custom apply_patch to a function tool only for the CC
     // fallback. Native /responses must keep the freeform tool intact.
-    useFunctionApplyPatch(payload)
-    reportResponsesWebSocketEndpointFallback(payload.model)
-    await streamChatCompletionsOverWs(ws, payload, turn)
+    useFunctionApplyPatch(preparedPayload)
+    reportResponsesWebSocketEndpointFallback(
+      preparedPayload.model,
+      "ChatCompletions",
+    )
+    await streamChatCompletionsOverWs(ws, preparedPayload, turn)
     return
   }
 
   // Native responses streaming
   const response = await waitForWebSocketTurn(
-    createResponses(payload, {
+    createResponses(preparedPayload, {
       vision,
       initiator,
+      prepared: true,
       signal: turn.abortController.signal,
     }),
     turn,
@@ -378,7 +407,7 @@ async function handleResponseCreate(
     const processed = fixStreamIds(data, event, idTracker)
     recordResponseSnapshotFromFrame(
       ws.data.responseSnapshots,
-      payload,
+      preparedPayload,
       processed,
     )
     ws.send(processed)
@@ -628,14 +657,17 @@ function reportClampedWebSocketEffort(options: {
   })
 }
 
-function reportResponsesWebSocketEndpointFallback(model: string): void {
+function reportResponsesWebSocketEndpointFallback(
+  model: string,
+  targetEndpoint: "AnthropicMessages" | "ChatCompletions",
+): void {
   reportNonDefaultBehavior({
     kind: "endpoint_fallback",
-    message: `Responses WebSocket model ${model} does not support /responses; falling back to ChatCompletions`,
+    message: `Responses WebSocket model ${model} does not support /responses; falling back to ${targetEndpoint}`,
     data: {
       model,
       sourceEndpoint: "Responses WebSocket",
-      targetEndpoint: "ChatCompletions",
+      targetEndpoint,
       transport: "websocket",
     },
   })
@@ -805,6 +837,70 @@ function handleSyntheticWarmupRequest(
   })
   ws.send(completedFrame)
   finalizeFromResponsesFrame(ws.data, turn, completedFrame)
+}
+
+async function streamAnthropicMessagesOverWs(
+  ws: ResponsesWebSocketState,
+  payload: ResponsesPayload,
+  turn: ResponsesWebSocketTurn,
+): Promise<void> {
+  const anthropicPayload = await responsesPayloadToAnthropic(
+    payload,
+    turn.abortController.signal,
+  )
+  anthropicPayload.stream = false
+  const response = (await waitForWebSocketTurn(
+    createAnthropicMessages(anthropicPayload, {
+      compaction: isResponsesCompactionRequest(payload),
+      preserveValidatedControls: true,
+      signal: turn.abortController.signal,
+    }),
+    turn,
+  )) as AnthropicResponse
+  throwIfWebSocketTurnAborted(turn)
+  const result = anthropicResponseToResponsesResult(
+    response,
+    payload.model,
+    payload,
+  )
+  const wsStream = {
+    // eslint-disable-next-line @typescript-eslint/require-await
+    writeSSE: async (data: { event?: string; data: string }) => {
+      recordResponseSnapshotFromFrame(
+        ws.data.responseSnapshots,
+        payload,
+        data.data,
+      )
+      ws.send(data.data)
+      finalizeFromResponsesFrame(ws.data, turn, data.data)
+    },
+  }
+  await emitResponsesResultAsWebSocketFrames(wsStream, result)
+}
+
+async function emitResponsesResultAsWebSocketFrames(
+  stream: {
+    writeSSE: (data: { event?: string; data: string }) => Promise<void>
+  },
+  result: ReturnType<typeof anthropicResponseToResponsesResult>,
+): Promise<void> {
+  const created = { ...result, status: "in_progress" as const }
+  await stream.writeSSE({
+    event: "response.created",
+    data: JSON.stringify({
+      type: "response.created",
+      sequence_number: 0,
+      response: created,
+    }),
+  })
+  await stream.writeSSE({
+    event: "response.completed",
+    data: JSON.stringify({
+      type: "response.completed",
+      sequence_number: 1,
+      response: result,
+    }),
+  })
 }
 
 async function streamChatCompletionsOverWs(
@@ -1050,6 +1146,29 @@ function normalizeWebSocketError(
     status: 500,
     type: "websocket_error",
   }
+}
+
+function getSafeWebSocketErrorMessage(error: unknown): string {
+  if (error instanceof LocalHTTPError) {
+    const local = localWebSocketError(error)
+    if (local) return local.message
+    const bodyError = error.clientBody.error
+    if (
+      isRecord(bodyError)
+      && typeof bodyError.code === "string"
+      && typeof bodyError.message === "string"
+    ) {
+      return bodyError.message
+    }
+    return "Request rejected"
+  }
+  if (error instanceof WebSocketRequestError) {
+    return error.response.status < 500 ?
+        error.message
+      : "Upstream request failed"
+  }
+  if (isHTTPErrorLike(error)) return "Upstream request failed"
+  return "Internal server error"
 }
 
 function localWebSocketError(

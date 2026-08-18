@@ -32,6 +32,13 @@ test("allows Chat to Responses with encrypted reasoning and structured tool outp
           reasoning_text: "thinking",
           reasoning_opaque: "rs_1",
           encrypted_content: "encrypted",
+          tool_calls: [
+            {
+              id: "call_1",
+              type: "function",
+              function: { name: "lookup", arguments: "{}" },
+            },
+          ],
         },
         {
           role: "tool",
@@ -141,6 +148,43 @@ test("uses normalized deprecated controls in the direct Chat to Messages convert
 })
 
 test.each([
+  { name: "array", arguments: "[]" },
+  { name: "scalar", arguments: "7" },
+  { name: "malformed", arguments: "{private" },
+])(
+  "rejects $name Chat tool arguments before Messages conversion",
+  ({ arguments: rawArguments }) => {
+    const payload = {
+      model: "claude-current",
+      messages: [
+        {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            {
+              id: "call_lookup",
+              type: "function" as const,
+              function: { name: "lookup", arguments: rawArguments },
+            },
+          ],
+        },
+        {
+          role: "tool" as const,
+          tool_call_id: "call_lookup",
+          content: "done",
+        },
+      ],
+    }
+
+    expect(checkChatToMessagesTranslation(payload)).toEqual({
+      supported: false,
+      blockers: ["tool_arguments"],
+    })
+    expect(() => chatPayloadToAnthropic(payload)).toThrow(LocalHTTPError)
+  },
+)
+
+test.each([
   {
     name: "scalar content",
     payload: {
@@ -192,7 +236,7 @@ test.each([
 })
 
 test("rejects Chat to Responses unsupported content and malformed tool results in order", () => {
-  expect(
+  expect(() =>
     checkChatToResponsesTranslation({
       model: "gpt-current",
       messages: [
@@ -204,13 +248,9 @@ test("rejects Chat to Responses unsupported content and malformed tool results i
           ],
         },
         { role: "tool", content: "orphan" },
-        { role: "tool", tool_call_id: "missing_call", content: "orphan" },
       ],
     }),
-  ).toEqual({
-    supported: false,
-    blockers: ["message_content_part", "tool_result_pairing"],
-  })
+  ).toThrow(LocalHTTPError)
 })
 
 test("rejects Chat content parts that Responses cannot preserve for the message role", () => {
@@ -808,7 +848,6 @@ test("rejects ordinary computer output and every unmapped Responses to Chat cont
       "task_budget",
       "copilot_cache_control",
       "reasoning_summary",
-      "include",
     ],
   })
 })

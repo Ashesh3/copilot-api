@@ -8,6 +8,14 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const hasOwn = (value: object, key: PropertyKey): boolean =>
   Object.prototype.hasOwnProperty.call(value, key)
 
+const SUPPORTED_CHAT_ROLES = new Set([
+  "assistant",
+  "developer",
+  "system",
+  "tool",
+  "user",
+])
+
 function createInvalidChatBodyError(): LocalHTTPError {
   return createChatValidationError({
     code: "invalid_type",
@@ -55,21 +63,122 @@ function normalizeFunctionParameters(value: unknown): Record<string, unknown> {
 }
 
 function validateMessages(messages: ChatCompletionsPayload["messages"]): void {
+  const seenToolCallIds = new Set<string>()
+  let pendingToolCallIds: Array<string> = []
   for (const message of messages as Array<unknown>) {
     if (!isRecord(message)) throw createInvalidMessagesError()
-    if (!hasOwn(message, "content")) continue
-    const content = message.content
-    if (typeof content === "string" || content === null) continue
-    if (!Array.isArray(content)) throw createInvalidMessagesError()
-    for (const part of content) {
-      if (part === null) continue
-      if (!isRecord(part)) throw createInvalidMessagesError()
-      if (!hasOwn(part, "type") || typeof part.type !== "string") {
-        throw createInvalidMessagesError()
-      }
-      validateKnownContentPart(part)
-    }
+    validateMessageRole(message)
+    pendingToolCallIds = validateToolHistoryMessage({
+      message,
+      pendingToolCallIds,
+      seenToolCallIds,
+    })
+    validateMessageContent(message)
   }
+  if (pendingToolCallIds.length > 0) throw createInvalidToolHistoryError()
+}
+
+function validateMessageRole(message: Record<string, unknown>): void {
+  if (
+    typeof message.role !== "string"
+    || !SUPPORTED_CHAT_ROLES.has(message.role)
+  ) {
+    throw createInvalidMessageRoleError()
+  }
+}
+
+function validateToolHistoryMessage(options: {
+  message: Record<string, unknown>
+  pendingToolCallIds: Array<string>
+  seenToolCallIds: Set<string>
+}): Array<string> {
+  const { message, pendingToolCallIds, seenToolCallIds } = options
+  if (pendingToolCallIds.length > 0 && message.role !== "tool") {
+    throw createInvalidToolHistoryError()
+  }
+  if (message.role === "assistant") {
+    return validateAssistantToolCalls(message.tool_calls, seenToolCallIds)
+  }
+  if (message.role === "tool") {
+    return consumeToolResult(message, pendingToolCallIds)
+  }
+  return pendingToolCallIds
+}
+
+function validateMessageContent(message: Record<string, unknown>): void {
+  if (!hasOwn(message, "content")) return
+  const content = message.content
+  if (typeof content === "string" || content === null) return
+  if (!Array.isArray(content)) throw createInvalidMessagesError()
+  for (const part of content) {
+    if (part === null) throw createInvalidMessagesError()
+    if (!isRecord(part)) throw createInvalidMessagesError()
+    if (!hasOwn(part, "type") || typeof part.type !== "string") {
+      throw createInvalidMessagesError()
+    }
+    validateKnownContentPart(part)
+  }
+}
+
+function createInvalidMessageRoleError(): LocalHTTPError {
+  return createChatValidationError({
+    code: "invalid_value",
+    message: "Each message must use a supported role.",
+    param: "messages",
+  })
+}
+
+function createInvalidToolHistoryError(): LocalHTTPError {
+  return createChatValidationError({
+    code: "invalid_value",
+    message: "Tool calls and tool results must be complete and ordered.",
+    param: "messages",
+  })
+}
+
+function validateAssistantToolCalls(
+  toolCalls: unknown,
+  seenToolCallIds: Set<string>,
+): Array<string> {
+  if (toolCalls === undefined || toolCalls === null) return []
+  if (!Array.isArray(toolCalls) || toolCalls.length === 0) {
+    throw createInvalidToolHistoryError()
+  }
+
+  const pending: Array<string> = []
+  for (const toolCall of toolCalls) {
+    if (!isRecord(toolCall) || toolCall.type !== "function") {
+      throw createInvalidToolHistoryError()
+    }
+    if (
+      typeof toolCall.id !== "string"
+      || toolCall.id.trim() === ""
+      || seenToolCallIds.has(toolCall.id)
+      || !isRecord(toolCall.function)
+      || typeof toolCall.function.name !== "string"
+      || toolCall.function.name.trim() === ""
+      || typeof toolCall.function.arguments !== "string"
+    ) {
+      throw createInvalidToolHistoryError()
+    }
+    seenToolCallIds.add(toolCall.id)
+    pending.push(toolCall.id)
+  }
+  return pending
+}
+
+function consumeToolResult(
+  message: Record<string, unknown>,
+  pendingToolCallIds: Array<string>,
+): Array<string> {
+  const expected = pendingToolCallIds[0]
+  if (
+    typeof message.tool_call_id !== "string"
+    || message.tool_call_id !== expected
+  ) {
+    throw createInvalidToolHistoryError()
+  }
+  return pendingToolCallIds.slice(1)
 }
 
 function validateKnownContentPart(part: Record<string, unknown>): void {

@@ -310,7 +310,18 @@ test("sets X-Initiator to agent if tool/assistant present", async () => {
   const payload: ChatCompletionsPayload = {
     messages: [
       { role: "user", content: "hi" },
-      { role: "tool", content: "tool call" },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "call_agent",
+            type: "function",
+            function: { name: "lookup", arguments: "{}" },
+          },
+        ],
+      },
+      { role: "tool", tool_call_id: "call_agent", content: "tool call" },
     ],
     model: "gpt-test",
   }
@@ -667,6 +678,8 @@ test("rewrites final assistant messages for models without assistant prefill", a
           },
         ],
       },
+      { role: "tool", tool_call_id: "call_1", content: "done" },
+      { role: "assistant", content: "I have enough context to continue." },
     ],
   }
 
@@ -679,10 +692,24 @@ test("rewrites final assistant messages for models without assistant prefill", a
   }
   const sentBody = JSON.parse(lastCall.body) as ChatCompletionsPayload
 
-  expect(sentBody.messages).toEqual([
-    { role: "user", content: "Help me investigate an error." },
-    { role: "user", content: "I have enough context to continue." },
-  ])
+  expect(sentBody.messages).toHaveLength(4)
+  expect(sentBody.messages[0]).toEqual({
+    role: "user",
+    content: "Help me investigate an error.",
+  })
+  expect(sentBody.messages[1]).toMatchObject({
+    role: "assistant",
+    tool_calls: [{ id: "call_1" }],
+  })
+  expect(sentBody.messages[2]).toMatchObject({
+    role: "tool",
+    tool_call_id: "call_1",
+    content: "done",
+  })
+  expect(sentBody.messages[3]).toEqual({
+    role: "user",
+    content: "I have enough context to continue.",
+  })
 })
 
 test("rewrites final assistant messages for built-in no-prefill models", async () => {

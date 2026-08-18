@@ -139,7 +139,10 @@ export async function handleWithNativeMessages(
           ...response,
           model: requestedModel ?? response.model,
         }
-        logger.debug("Native /v1/messages response:", JSON.stringify(result))
+        logger.debug("Received native Messages response", {
+          blockCount: result.content.length,
+          model: result.model,
+        })
         return c.json(result)
       },
     )

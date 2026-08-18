@@ -176,7 +176,12 @@ async function handleCompletionInner(
 
   payload = applyRoutableModelFallback(c, payload)
 
-  consola.debug("Request payload:", JSON.stringify(payload))
+  consola.debug("Prepared Chat request", {
+    messageCount: payload.messages.length,
+    model: payload.model,
+    stream: Boolean(payload.stream),
+    toolCount: payload.tools?.length ?? 0,
+  })
 
   setRequestContext(c, {
     requestedModel,
@@ -262,8 +267,8 @@ async function setInputTokenContext(
   try {
     const tokenCount = await getTokenCount(payload, selectedModel)
     setRequestContext(c, { inputTokens: tokenCount.input })
-  } catch (error) {
-    consola.warn("Failed to calculate token count:", error)
+  } catch {
+    consola.warn("Failed to calculate token count")
   }
 }
 
@@ -692,7 +697,10 @@ const handleNonStreamingResponse = (
   context: { span: Sentry.Span; requestedModel?: string },
 ) => {
   const { span, requestedModel } = context
-  consola.debug("Non-streaming response:", JSON.stringify(response))
+  consola.debug("Received non-streaming Chat response", {
+    choiceCount: response.choices.length,
+    model: response.model,
+  })
   if (response.usage) {
     setRequestContext(c, {
       inputTokens: response.usage.prompt_tokens,

@@ -14,6 +14,7 @@ import type {
   ResponsesPayload,
 } from "~/services/copilot/create-responses"
 
+/* eslint-disable max-lines */
 import {
   isLikelyBase64,
   mediaTypeFromFilename,
@@ -536,6 +537,27 @@ describe("anthropicResponseToChat bridge", () => {
     expect(chat.usage?.prompt_tokens).toBe(100)
     expect(chat.usage?.prompt_tokens_details?.cached_tokens).toBe(90)
   })
+
+  test("rejects multiple signed thinking blocks", () => {
+    expect(() =>
+      anthropicResponseToChat(
+        {
+          id: "msg_multi_reasoning",
+          type: "message",
+          role: "assistant",
+          model: "claude-sonnet-4.6",
+          content: [
+            { type: "thinking", thinking: "first", signature: "sig-first" },
+            { type: "thinking", thinking: "second", signature: "sig-second" },
+          ],
+          stop_reason: "end_turn",
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 2 },
+        },
+        "claude-sonnet-4.6",
+      ),
+    ).toThrow()
+  })
 })
 
 describe("streamAnthropicAsChatCompletions bridge", () => {
@@ -623,6 +645,118 @@ describe("streamAnthropicAsChatCompletions bridge", () => {
     expect(parsed.at(-1)?.choices[0].finish_reason).toBe("stop")
     expect(parsed.every((c) => c.model === "claude-sonnet-4.6")).toBe(true)
   })
+
+  test("emits a fixed safe Chat error envelope for native stream errors", async () => {
+    const privateMarker = "native-stream-private-marker"
+    const written: Array<string> = []
+    const stream = {
+      writeSSE: (chunk: { data: string }) => {
+        written.push(chunk.data)
+        return Promise.resolve()
+      },
+    }
+
+    async function* iterate() {
+      yield await Promise.resolve({
+        event: "error",
+        data: JSON.stringify({
+          type: "error",
+          error: { type: "api_error", message: privateMarker },
+        }),
+      })
+    }
+
+    await streamAnthropicAsChatCompletions(
+      stream,
+      iterate(),
+      "claude-sonnet-4.6",
+    )
+
+    const output = written.join("\n")
+    expect(output).not.toContain(privateMarker)
+    expect(JSON.parse(written[0] ?? "{}")).toEqual({
+      error: {
+        code: "upstream_error",
+        message: "Upstream stream failed",
+        type: "server_error",
+      },
+    })
+    expect(written.at(-1)).toBe("[DONE]")
+  })
+
+  test("preserves fragmented thinking signatures before later tools", async () => {
+    const events = [
+      {
+        data: JSON.stringify({
+          type: "message_start",
+          message: {
+            id: "msg_signed",
+            usage: { input_tokens: 1, output_tokens: 0 },
+          },
+        }),
+      },
+      {
+        data: JSON.stringify({
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "thinking_delta", thinking: "thought" },
+        }),
+      },
+      {
+        data: JSON.stringify({
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "signature_delta", signature: "sig-" },
+        }),
+      },
+      {
+        data: JSON.stringify({
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "signature_delta", signature: "final" },
+        }),
+      },
+      {
+        data: JSON.stringify({
+          type: "content_block_start",
+          index: 1,
+          content_block: {
+            type: "tool_use",
+            id: "tool_1",
+            name: "lookup",
+            input: {},
+          },
+        }),
+      },
+    ]
+    const written: Array<string> = []
+    const stream = {
+      writeSSE: (chunk: { data: string }) => {
+        written.push(chunk.data)
+        return Promise.resolve()
+      },
+    }
+    async function* iterate() {
+      for (const event of events) yield await Promise.resolve(event)
+    }
+
+    await streamAnthropicAsChatCompletions(stream, iterate(), "claude")
+
+    const deltas = written.map(
+      (data) =>
+        (
+          JSON.parse(data) as {
+            choices: Array<{ delta: Record<string, unknown> }>
+          }
+        ).choices[0].delta,
+    )
+    const signatureIndex = deltas.findIndex(
+      (delta) => delta.reasoning_opaque === "sig-final",
+    )
+    const toolIndex = deltas.findIndex((delta) => delta.tool_calls)
+    expect(signatureIndex).toBeGreaterThan(-1)
+    expect(toolIndex).toBeGreaterThan(signatureIndex)
+  })
 })
 
 // ─── CC → Responses fallback ───
@@ -663,6 +797,17 @@ describe("chatCompletionsToResponses attachments", () => {
       max_tokens: 100,
       messages: [
         {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call_2",
+              type: "function",
+              function: { name: "screenshot", arguments: "{}" },
+            },
+          ],
+        },
+        {
           role: "tool",
           tool_call_id: "call_2",
           content: [
@@ -673,7 +818,7 @@ describe("chatCompletionsToResponses attachments", () => {
       ],
     }
     const responses = chatCompletionsToResponses(payload)
-    const output = (responses.input as Array<ResponseFunctionCallOutputItem>)[0]
+    const output = (responses.input as Array<ResponseFunctionCallOutputItem>)[1]
 
     expect(output.type).toBe("function_call_output")
     const parts = output.output as Array<{ type: string }>

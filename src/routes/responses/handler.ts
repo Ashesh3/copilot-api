@@ -27,6 +27,7 @@ import {
 } from "~/lib/model-redirect"
 import { normalizeModelName } from "~/lib/model-resolver"
 import {
+  getModelReasoningConfig,
   type ReasoningEffort,
   normalizeReasoningEffortForModel,
   parseReasoningEffort,
@@ -78,6 +79,7 @@ import {
   type ResponseOutputFunctionCall,
   type ResponseOutputItem,
   type ResponseOutputMessage,
+  type ResponseOutputReasoning,
   type ResponseOutputText,
   type ResponsesPayload,
   type ResponsesResult,
@@ -88,7 +90,10 @@ import {
   isResponsesWebSearchFunctionTool,
 } from "~/services/copilot/mcp-web-search"
 import { normalizeResponsesAttachmentsFailClosed } from "~/services/copilot/responses-attachments"
-import { prepareResponsesRequest } from "~/services/copilot/responses-contract"
+import {
+  finalizeResponsesRequest,
+  prepareResponsesRequest,
+} from "~/services/copilot/responses-contract"
 
 import {
   emitResponsesFailureAsStream,
@@ -479,6 +484,7 @@ function rewriteResponseModelInEvent(
 
 export const handleResponses = async (c: Context) => {
   const payload = await c.req.json<ResponsesPayload>()
+  prepareResponsesRequest(payload)
   installRoutingAffinityFallback(
     resolveResponsesRoutingAffinity(
       (payload as Record<string, unknown>).client_metadata,
@@ -581,20 +587,20 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
     return await handleWithChatCompletions(c, preparedPayload, requestedModel)
   }
 
-  const { vision, initiator } = getResponsesRequestOptions(payload)
+  const { vision, initiator } = getResponsesRequestOptions(preparedPayload)
 
   // Extract messages for Sentry span attribute
   const inputMessages =
-    typeof payload.input === "string" ?
-      payload.input
-    : JSON.stringify(payload.input)
+    typeof preparedPayload.input === "string" ?
+      preparedPayload.input
+    : JSON.stringify(preparedPayload.input)
 
-  if (isStreamingRequested(payload)) {
+  if (isStreamingRequested(preparedPayload)) {
     logger.debug("Forwarding native Responses stream")
     return await Sentry.startSpanManual(
       createSentryChatSpanOptions({
         inputMessages,
-        model: payload.model,
+        model: preparedPayload.model,
         streaming: true,
       }),
       async (streamSpan, finish) => {
@@ -606,9 +612,10 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
         }
 
         try {
-          const response = await createResponses(payload, {
+          const response = await createResponses(preparedPayload, {
             vision,
             initiator,
+            prepared: true,
             signal: c.req.raw.signal,
           })
 
@@ -637,17 +644,22 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
 
             const resolved =
               hadWebSearch ?
-                await resolveResponsesWebSearchCalls(response, payload, {
-                  vision,
-                  initiator,
-                  signal: c.req.raw.signal,
-                })
+                await resolveResponsesWebSearchCalls(
+                  response,
+                  preparedPayload,
+                  {
+                    vision,
+                    initiator,
+                    signal: c.req.raw.signal,
+                  },
+                )
               : response
 
-            logger.debug(
-              "Forwarding native Responses result:",
-              JSON.stringify(resolved),
-            )
+            logger.debug("Forwarding native Responses result", {
+              model: resolved.model,
+              outputCount: resolved.output.length,
+              status: resolved.status,
+            })
             return c.json(withRequestedResponseModel(resolved, requestedModel))
           }
 
@@ -703,11 +715,15 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
                 // generations plus live web fetches, so it needs keep-alives.
                 const resolved = await withHeartbeatWhilePending(
                   Sentry.withActiveSpan(null, () =>
-                    resolveResponsesWebSearchCalls(completedResult, payload, {
-                      vision,
-                      initiator,
-                      signal: c.req.raw.signal,
-                    }),
+                    resolveResponsesWebSearchCalls(
+                      completedResult,
+                      preparedPayload,
+                      {
+                        vision,
+                        initiator,
+                        signal: c.req.raw.signal,
+                      },
+                    ),
                   ),
                   stream,
                 )
@@ -753,12 +769,13 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
   const { initialResult, hadWebSearch } = await Sentry.startSpan(
     createSentryChatSpanOptions({
       inputMessages,
-      model: payload.model,
+      model: preparedPayload.model,
     }),
     async (span) => {
-      const result = (await createResponses(payload, {
+      const result = (await createResponses(preparedPayload, {
         vision,
         initiator,
+        prepared: true,
         signal: c.req.raw.signal,
       })) as ResponsesResult
 
@@ -788,14 +805,18 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
 
   const resolved =
     hadWebSearch ?
-      await resolveResponsesWebSearchCalls(initialResult, payload, {
+      await resolveResponsesWebSearchCalls(initialResult, preparedPayload, {
         vision,
         initiator,
         signal: c.req.raw.signal,
       })
     : initialResult
 
-  logger.debug("Forwarding native Responses result:", JSON.stringify(resolved))
+  logger.debug("Forwarding native Responses result", {
+    model: resolved.model,
+    outputCount: resolved.output.length,
+    status: resolved.status,
+  })
 
   return c.json(withRequestedResponseModel(resolved, requestedModel))
 }
@@ -808,16 +829,35 @@ async function prepareResponsesRoute(
   decision: EndpointRouteDecision
   preparedPayload: ResponsesPayload
 }> {
-  const preparedPayload = prepareResponsesRequest(payload).body
-  const support = getModelEndpointSupport(selectedModel)
+  return await prepareResponsesRouteForTransport({
+    payload,
+    selectedModel,
+    signal: c.req.raw.signal,
+  })
+}
+
+export async function prepareResponsesRouteForTransport(options: {
+  payload: ResponsesPayload
+  selectedModel: Model | undefined
+  signal?: AbortSignal
+}): Promise<{
+  decision: EndpointRouteDecision
+  preparedPayload: ResponsesPayload
+}> {
+  const preparedPayload = finalizeResponsesRequest(options.payload, {
+    defaultEffort: getModelReasoningConfig(options.payload.model)
+      ?.defaultEffort,
+    implicitDefault: usesImplicitReasoningDefault(options.payload.model),
+  }).body
+  const support = getModelEndpointSupport(options.selectedModel)
   if (!support.responses) {
     await (support.messages ?
-      normalizeResponsesAttachmentsFailClosed(preparedPayload, c.req.raw.signal)
-    : normalizeResponsesAttachments(preparedPayload, c.req.raw.signal))
+      normalizeResponsesAttachmentsFailClosed(preparedPayload, options.signal)
+    : normalizeResponsesAttachments(preparedPayload, options.signal))
   }
   let decision = selectResponsesUpstreamEndpoint({
     payload: preparedPayload,
-    selectedModel,
+    selectedModel: options.selectedModel,
   })
   if (
     "code" in decision
@@ -863,7 +903,8 @@ function getResponsesMessagesRouteCheck(
   const effort = payload.reasoning?.effort
   if (typeof effort !== "string") return check
   const supportedEfforts = selectedModel?.capabilities.supports.reasoning_effort
-  if (supportedEfforts?.includes(effort)) return check
+  if (!supportedEfforts) return check
+  if (supportedEfforts.includes(effort)) return check
   return {
     supported: false,
     blockers:
@@ -1324,6 +1365,20 @@ const chatCompletionToResponsesResult = (
   const choice = response.choices[0]
   const output: Array<ResponseOutputItem> = []
   let outputText = ""
+
+  if (choice.message.reasoning_opaque || choice.message.encrypted_content) {
+    output.push({
+      id: choice.message.reasoning_opaque ?? `rs_${response.id}`,
+      type: "reasoning",
+      summary:
+        choice.message.reasoning_text ?
+          [{ type: "summary_text", text: choice.message.reasoning_text }]
+        : [],
+      ...(choice.message.encrypted_content ?
+        { encrypted_content: choice.message.encrypted_content }
+      : {}),
+    } satisfies ResponseOutputReasoning)
+  }
 
   // Map text content
   if (choice.message.content) {
@@ -1829,7 +1884,12 @@ const handleWithChatCompletions = async (
   const needsWebSearch =
     ccPayload.tools?.some((tool) => tool.function.name === "web_search")
     ?? false
-  logger.debug("ChatCompletions fallback payload:", JSON.stringify(ccPayload))
+  logger.debug("Prepared Chat fallback request", {
+    messageCount: ccPayload.messages.length,
+    model: ccPayload.model,
+    stream: Boolean(ccPayload.stream),
+    toolCount: ccPayload.tools?.length ?? 0,
+  })
 
   // Non-streaming: span wraps the entire call + response processing
   if (!fallbackPayload.stream) {
@@ -1862,10 +1922,10 @@ const handleWithChatCompletions = async (
                 })) as ChatCompletionResponse,
             })
           : initialResponse
-        logger.debug(
-          "ChatCompletions fallback response:",
-          JSON.stringify(ccResponse),
-        )
+        logger.debug("Received Chat fallback response", {
+          choiceCount: ccResponse.choices.length,
+          model: ccResponse.model,
+        })
 
         if (ccResponse.usage) {
           setRequestContext(c, {

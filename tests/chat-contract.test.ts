@@ -369,7 +369,172 @@ describe("Chat request validation", () => {
   })
 })
 
+// Contract permutations intentionally live together for route-invariant review.
+// eslint-disable-next-line max-lines-per-function
 describe("Chat route-invariant shape validation", () => {
+  test("accepts every supported Chat role", () => {
+    for (const role of [
+      "system",
+      "developer",
+      "user",
+      "assistant",
+      "tool",
+    ] as const) {
+      const message =
+        role === "tool" ?
+          { role, content: "done", tool_call_id: "call_1" }
+        : { role, content: role === "assistant" ? null : "hello" }
+      const messages =
+        role === "tool" ?
+          [
+            {
+              role: "assistant" as const,
+              content: null,
+              tool_calls: [
+                {
+                  id: "call_1",
+                  type: "function" as const,
+                  function: { name: "lookup", arguments: "{}" },
+                },
+              ],
+            },
+            message,
+          ]
+        : [message]
+      expect(
+        normalizeChatCompletionsRequest({
+          model: "gpt-current",
+          messages,
+        } as ChatCompletionsPayload).messages.at(-1)?.role,
+      ).toBe(role)
+    }
+  })
+
+  test.each([undefined, 7, "future_role"])(
+    "rejects malformed Chat role %p",
+    (role) => {
+      expectValidationError(
+        () =>
+          normalizeChatCompletionsRequest({
+            model: "gpt-current",
+            messages: [{ role, content: "hello" }],
+          } as unknown as ChatCompletionsPayload),
+        { code: "invalid_value", param: "messages" },
+      )
+    },
+  )
+
+  test("rejects literal null content parts", () => {
+    expectValidationError(
+      () =>
+        normalizeChatCompletionsRequest({
+          model: "gpt-current",
+          messages: [{ role: "user", content: [null] }],
+        } as unknown as ChatCompletionsPayload),
+      { code: "invalid_type", param: "messages" },
+    )
+  })
+
+  test("preserves valid ordered multi-call tool history", () => {
+    const messages = [
+      { role: "user" as const, content: "look up both" },
+      {
+        role: "assistant" as const,
+        content: null,
+        tool_calls: [
+          {
+            id: "call_a",
+            type: "function" as const,
+            function: { name: "lookup", arguments: '{"id":1}' },
+          },
+          {
+            id: "call_b",
+            type: "function" as const,
+            function: { name: "lookup", arguments: '{"id":2}' },
+          },
+        ],
+      },
+      { role: "tool" as const, tool_call_id: "call_a", content: "one" },
+      { role: "tool" as const, tool_call_id: "call_b", content: "two" },
+    ]
+    expect(
+      normalizeChatCompletionsRequest({
+        model: "gpt-current",
+        messages,
+      }).messages,
+    ).toEqual(messages)
+  })
+
+  test.each([
+    {
+      name: "orphan result",
+      messages: [{ role: "tool", tool_call_id: "call_a", content: "one" }],
+    },
+    {
+      name: "duplicate call id",
+      messages: [
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call_a",
+              type: "function",
+              function: { name: "a", arguments: "{}" },
+            },
+            {
+              id: "call_a",
+              type: "function",
+              function: { name: "b", arguments: "{}" },
+            },
+          ],
+        },
+      ],
+    },
+    {
+      name: "mismatched result",
+      messages: [
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call_a",
+              type: "function",
+              function: { name: "a", arguments: "{}" },
+            },
+          ],
+        },
+        { role: "tool", tool_call_id: "call_b", content: "one" },
+      ],
+    },
+    {
+      name: "interrupted results",
+      messages: [
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call_a",
+              type: "function",
+              function: { name: "a", arguments: "{}" },
+            },
+          ],
+        },
+        { role: "user", content: "continue" },
+      ],
+    },
+  ])("rejects $name in Chat tool history", ({ messages }) => {
+    expectValidationError(
+      () =>
+        normalizeChatCompletionsRequest({
+          model: "gpt-current",
+          messages,
+        } as unknown as ChatCompletionsPayload),
+      { code: "invalid_value", param: "messages" },
+    )
+  })
   test.each([
     { name: "numeric scalar", content: 7 },
     { name: "object scalar", content: { text: "hello" } },

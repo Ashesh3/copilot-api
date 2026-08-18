@@ -122,8 +122,8 @@ export async function handleCountTokens(c: Context) {
     return c.json({
       input_tokens: finalTokenCount,
     })
-  } catch (error) {
-    consola.error("Error counting tokens:", error)
+  } catch {
+    consola.error("Error counting tokens")
     return c.json({
       input_tokens: 1,
     })
