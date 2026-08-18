@@ -288,6 +288,91 @@ test("rejects Chat file_id sources before the Messages converter can replace the
   expect(thrown).toBeInstanceOf(LocalHTTPError)
 })
 
+test("preserves base64 PDF documents from user and tool content on Messages", async () => {
+  const document = {
+    type: "document" as const,
+    source: {
+      type: "base64" as const,
+      media_type: "application/pdf",
+      data: "AA==",
+    },
+    title: "review.pdf",
+  }
+  const payload = {
+    model: "claude-current",
+    messages: [
+      { role: "user" as const, content: [document] },
+      {
+        role: "assistant" as const,
+        content: null,
+        tool_calls: [
+          {
+            id: "call_review",
+            type: "function" as const,
+            function: { name: "review", arguments: "{}" },
+          },
+        ],
+      },
+      {
+        role: "tool" as const,
+        tool_call_id: "call_review",
+        content: [document],
+      },
+    ],
+  } as unknown as Parameters<typeof checkChatToMessagesTranslation>[0]
+
+  expect(checkChatToMessagesTranslation(payload)).toEqual({
+    supported: true,
+    blockers: [],
+  })
+  const translated = await chatPayloadToAnthropic(payload)
+  expect(translated.messages[0]).toEqual({ role: "user", content: [document] })
+  expect(translated.messages[2]).toEqual({
+    role: "user",
+    content: [
+      {
+        type: "tool_result",
+        tool_use_id: "call_review",
+        content: [document],
+      },
+    ],
+  })
+})
+
+test.each([
+  { name: "null", file_id: null, supported: true },
+  { name: "blank", file_id: "   ", supported: true },
+  { name: "nonempty", file_id: "file_review_1", supported: false },
+])(
+  "treats $name file_id alongside PDF data correctly",
+  ({ file_id, supported }) => {
+    const check = checkChatToMessagesTranslation({
+      model: "claude-current",
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "file",
+              file: {
+                filename: "review.pdf",
+                file_data: "data:application/pdf;base64,AA==",
+                file_id,
+              },
+            },
+          ],
+        },
+      ],
+    } as never)
+
+    expect(check).toEqual(
+      supported ?
+        { supported: true, blockers: [] }
+      : { supported: false, blockers: ["file_source:file_id"] },
+    )
+  },
+)
+
 test.each([
   { name: "missing file data", file: { filename: "missing.pdf" } },
   {

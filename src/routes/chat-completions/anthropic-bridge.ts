@@ -440,7 +440,7 @@ async function convertToolResultContent(
 }
 
 async function convertContentPart(
-  part: ContentPart,
+  part: ContentPart | AnthropicDocumentBlock,
   signal?: AbortSignal,
 ): Promise<Array<AnthropicUserContentBlock>> {
   switch (part.type) {
@@ -452,6 +452,9 @@ async function convertContentPart(
     }
     case "file": {
       return [convertFilePart(part)]
+    }
+    case "document": {
+      return [part]
     }
     default: {
       return []

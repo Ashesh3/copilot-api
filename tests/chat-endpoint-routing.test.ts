@@ -300,6 +300,117 @@ test("rejects document content on a Chat-only model before upstream dispatch", a
   expect(fetchMock).not.toHaveBeenCalled()
 })
 
+test.each([
+  { name: "Messages+Responses", endpoints: ["/v1/messages", "/responses"] },
+  { name: "Messages-only", endpoints: ["/v1/messages"] },
+])(
+  "preserves document content through Messages for a $name model",
+  async ({ endpoints }) => {
+    installModel({ id: "route-model", supported_endpoints: [...endpoints] })
+
+    const response = await postChatRoute({ document: true })
+
+    expect(response.status).toBe(200)
+    expect(lastUpstreamPath).toBe("/v1/messages")
+    expect(lastUpstreamPayload).toHaveProperty(
+      "messages.0.content.1.source.data",
+      "AA==",
+    )
+  },
+)
+
+test("rejects unsupported document sources on a Messages-only model", async () => {
+  installModel({
+    id: "route-model",
+    supported_endpoints: ["/v1/messages"],
+  })
+
+  const response = await postChatRoute({
+    content: [
+      {
+        type: "document",
+        source: { type: "url", url: "https://example.com/private.pdf" },
+      },
+    ],
+  })
+
+  expect(response.status).toBe(400)
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
+test.each([
+  { name: "primitive content", content: [7] },
+  { name: "typeless content", content: [{ text: "hello" }] },
+])("rejects $name on a Chat-only model", async ({ content }) => {
+  installModel({
+    id: "route-model",
+    supported_endpoints: ["/chat/completions"],
+  })
+
+  const response = await postChatRoute({ content })
+
+  expect(response.status).toBe(400)
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
+test.each([
+  {
+    name: "null function",
+    tools: [{ type: "function", function: null }],
+  },
+  {
+    name: "blank function name",
+    tools: [{ type: "function", function: { name: "", parameters: {} } }],
+  },
+])("rejects a $name tool on a Chat-only model", async ({ tools }) => {
+  installModel({
+    id: "route-model",
+    supported_endpoints: ["/chat/completions"],
+  })
+
+  const response = await postChatRoute({ tools: [...tools] })
+
+  expect(response.status).toBe(400)
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
+test("rejects a malformed native tool choice on a Chat-only model", async () => {
+  installModel({
+    id: "route-model",
+    supported_endpoints: ["/chat/completions"],
+  })
+
+  const response = await postChatRoute({
+    toolChoice: { type: "web_search", function: null },
+  })
+
+  expect(response.status).toBe(400)
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
+test("keeps valid text function tools and choices on Chat", async () => {
+  installModel({
+    id: "route-model",
+    supported_endpoints: ["/chat/completions"],
+  })
+
+  const response = await postChatRoute({
+    tools: [
+      {
+        type: "function",
+        function: {
+          name: "lookup",
+          parameters: { type: "object", properties: {} },
+        },
+      },
+    ],
+    toolChoice: { type: "function", function: { name: "lookup" } },
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/chat/completions")
+})
+
 test("prefers Responses for non-Anthropic models when Chat is unavailable", async () => {
   installModel({
     id: "claude-looking-openai-model",
@@ -477,6 +588,7 @@ function createModel(options: {
 }
 
 async function postChatRoute(options: {
+  content?: unknown
   customGrammar?: boolean
   document?: boolean
   encryptedReasoning?: boolean
@@ -485,49 +597,12 @@ async function postChatRoute(options: {
   pdf?: boolean
   signedReasoning?: boolean
   thinkingBudget?: boolean
+  toolChoice?: unknown
+  tools?: Array<unknown>
   webSearch?: boolean
 }): Promise<Response> {
-  let content: unknown = "hello"
-  if (options.pdf || options.fileId) {
-    content = [
-      { type: "text", text: "Read the PDF." },
-      {
-        type: "file",
-        file: {
-          filename: "brief.pdf",
-          ...(options.fileId ?
-            { file_id: "file_review_1" }
-          : { file_data: "data:application/pdf;base64,AA==" }),
-        },
-      },
-    ]
-  } else if (options.document) {
-    content = [
-      { type: "text", text: "Read the document." },
-      {
-        type: "document",
-        source: {
-          type: "base64",
-          media_type: "application/pdf",
-          data: "AA==",
-        },
-      },
-    ]
-  }
-  let tools: Array<Record<string, unknown>> | undefined
-  if (options.customGrammar) {
-    tools = [{ type: "custom", format: { type: "grammar", syntax: "lark" } }]
-  } else if (options.webSearch) {
-    tools = [
-      {
-        type: "web_search",
-        function: {
-          name: "web_search",
-          parameters: { type: "object", properties: {} },
-        },
-      },
-    ]
-  }
+  const content = createRouteContent(options)
+  const tools = createRouteTools(options)
   const messages = [
     ...(options.signedReasoning || options.encryptedReasoning ?
       [
@@ -553,8 +628,71 @@ async function postChatRoute(options: {
       model: options.model ?? "route-model",
       messages,
       ...(tools ? { tools } : {}),
+      ...(options.toolChoice !== undefined ?
+        { tool_choice: options.toolChoice }
+      : {}),
       ...(options.thinkingBudget ? { thinking_budget: 1024 } : {}),
       stream: false,
     }),
   })
+}
+
+function createRouteContent(options: {
+  content?: unknown
+  document?: boolean
+  fileId?: boolean
+  pdf?: boolean
+}): unknown {
+  if (options.content !== undefined) return options.content
+  if (options.pdf || options.fileId) {
+    return [
+      { type: "text", text: "Read the PDF." },
+      {
+        type: "file",
+        file: {
+          filename: "brief.pdf",
+          ...(options.fileId ?
+            { file_id: "file_review_1" }
+          : { file_data: "data:application/pdf;base64,AA==" }),
+        },
+      },
+    ]
+  }
+  if (options.document) {
+    return [
+      { type: "text", text: "Read the document." },
+      {
+        type: "document",
+        source: {
+          type: "base64",
+          media_type: "application/pdf",
+          data: "AA==",
+        },
+      },
+    ]
+  }
+  return "hello"
+}
+
+function createRouteTools(options: {
+  customGrammar?: boolean
+  tools?: Array<unknown>
+  webSearch?: boolean
+}): Array<unknown> | undefined {
+  if (options.tools) return options.tools
+  if (options.customGrammar) {
+    return [{ type: "custom", format: { type: "grammar", syntax: "lark" } }]
+  }
+  if (options.webSearch) {
+    return [
+      {
+        type: "web_search",
+        function: {
+          name: "web_search",
+          parameters: { type: "object", properties: {} },
+        },
+      },
+    ]
+  }
+  return undefined
 }

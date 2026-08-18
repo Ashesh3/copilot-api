@@ -95,15 +95,17 @@ export function selectChatUpstreamEndpoint(options: {
   const messagesCheck = checkChatToMessagesTranslation(payload)
   const responsesCheck = checkChatToResponsesTranslation(payload)
   const hasFileParts = payloadHasFileParts(payload)
+  const hasDocumentParts = payloadHasDocumentParts(payload)
   const messagesPreserveFiles = !messagesCheck.blockers.some((blocker) =>
     blocker.startsWith("file_source:"),
   )
   const anthropicModel = modelIsAnthropic(selectedModel)
-  const prefersMessages =
-    (hasFileParts && messagesPreserveFiles)
-    || payloadHasAnthropicSignedReasoning(payload)
-    || (payload.thinking_budget !== undefined
-      && payload.thinking_budget !== null)
+  const prefersMessages = payloadPrefersMessages({
+    hasDocumentParts,
+    hasFileParts,
+    messagesPreserveFiles,
+    payload,
+  })
   const prefersResponses =
     payloadHasResponsesNativeTool(payload)
     || payloadHasOpenAiReasoningState(payload)
@@ -142,6 +144,21 @@ export function selectChatUpstreamEndpoint(options: {
   }
 
   return selectCopilotEndpoint({ source: "chat", support, candidates })
+}
+
+function payloadPrefersMessages(options: {
+  hasDocumentParts: boolean
+  hasFileParts: boolean
+  messagesPreserveFiles: boolean
+  payload: ChatCompletionsPayload
+}): boolean {
+  return (
+    (options.hasFileParts && options.messagesPreserveFiles)
+    || options.hasDocumentParts
+    || payloadHasAnthropicSignedReasoning(options.payload)
+    || (options.payload.thinking_budget !== undefined
+      && options.payload.thinking_budget !== null)
+  )
 }
 
 function modelIsAnthropic(selectedModel: Model | undefined): boolean {
@@ -193,6 +210,16 @@ function payloadHasFileParts(payload: ChatCompletionsPayload): boolean {
     (message) =>
       Array.isArray(message.content)
       && message.content.some((part) => part.type === "file"),
+  )
+}
+
+function payloadHasDocumentParts(payload: ChatCompletionsPayload): boolean {
+  return payload.messages.some(
+    (message) =>
+      Array.isArray(message.content)
+      && (message.content as Array<{ type?: string }>).some(
+        (part) => part.type === "document",
+      ),
   )
 }
 

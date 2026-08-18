@@ -119,7 +119,11 @@ function scanChatToMessagesContent(
 ): void {
   for (const message of messages) {
     if (!Array.isArray(message.content)) continue
-    for (const part of message.content) {
+    for (const part of message.content as Array<unknown>) {
+      if (!isRecord(part)) {
+        addBlocker(blockers, "message_content_part")
+        continue
+      }
       if (
         (message.role === "assistant"
           || message.role === "system"
@@ -129,8 +133,20 @@ function scanChatToMessagesContent(
         addBlocker(blockers, "message_content_part")
       }
       if (part.type === "file") scanMessagesFileSource(part.file, blockers)
+      if (part.type === "document" && !isLosslessMessagesDocument(part)) {
+        addBlocker(blockers, "document_source")
+      }
     }
   }
+}
+
+function isLosslessMessagesDocument(part: Record<string, unknown>): boolean {
+  if (part.type !== "document" || !isRecord(part.source)) return false
+  return (
+    part.source.type === "base64"
+    && part.source.media_type === "application/pdf"
+    && typeof part.source.data === "string"
+  )
 }
 
 function scanMessagesFileSource(file: unknown, blockers: Array<string>): void {
@@ -138,7 +154,7 @@ function scanMessagesFileSource(file: unknown, blockers: Array<string>): void {
     addBlocker(blockers, "file_source:file_data")
     return
   }
-  if (file.file_id !== undefined) {
+  if (typeof file.file_id === "string" && file.file_id.trim().length > 0) {
     addBlocker(blockers, "file_source:file_id")
     return
   }
@@ -156,10 +172,7 @@ function scanChatNativeContent(
   for (const message of messages) {
     if (Array.isArray(message.content)) {
       for (const part of message.content as Array<unknown>) {
-        const type = getType(part)
-        if (type && type !== "text" && type !== "image_url") {
-          addBlocker(blockers, `message_content_part:${type}`)
-        }
+        scanChatNativeContentPart(part, blockers)
       }
     }
     if (
@@ -176,14 +189,75 @@ function scanChatNativeContent(
   }
 }
 
+function scanChatNativeContentPart(
+  part: unknown,
+  blockers: Array<string>,
+): void {
+  if (!isRecord(part)) {
+    addBlocker(blockers, "message_content_part")
+    return
+  }
+  switch (part.type) {
+    case "text": {
+      if (typeof part.text !== "string") {
+        addBlocker(blockers, "message_content_part")
+      }
+      break
+    }
+    case "image_url": {
+      const image = part.image_url
+      if (
+        !isRecord(image)
+        || typeof image.url !== "string"
+        || image.url.trim().length === 0
+        || (image.detail !== undefined
+          && image.detail !== "low"
+          && image.detail !== "high"
+          && image.detail !== "auto")
+      ) {
+        addBlocker(blockers, "message_content_part")
+      }
+      break
+    }
+    case "file": {
+      addBlocker(blockers, "message_content_part:file")
+      break
+    }
+    case "document": {
+      addBlocker(blockers, "message_content_part:document")
+      break
+    }
+    default: {
+      addBlocker(blockers, "message_content_part")
+    }
+  }
+}
+
 function scanChatNativeTools(
   tools: ChatCompletionsPayload["tools"],
   blockers: Array<string>,
 ): void {
   if (!Array.isArray(tools)) return
   for (const tool of tools as Array<unknown>) {
+    if (!isRecord(tool)) {
+      addBlocker(blockers, "native_tool")
+      continue
+    }
     const type = getType(tool)
-    if (type === "function") continue
+    if (type === "function") {
+      const func = tool.function
+      if (
+        !isRecord(func)
+        || typeof func.name !== "string"
+        || func.name.trim().length === 0
+        || (func.description !== undefined
+          && typeof func.description !== "string")
+        || !isRecord(func.parameters)
+      ) {
+        addBlocker(blockers, "native_tool:function")
+      }
+      continue
+    }
     if (type === "custom") {
       addBlocker(blockers, "native_tool:custom")
     } else if (type && type.startsWith("web_search")) {
@@ -201,14 +275,29 @@ export function checkNormalizedChatNativeRequirements(
   scanChatNativeContent(payload.messages, blockers)
   scanChatNativeTools(payload.tools, blockers)
   addPresentBlocker(blockers, "thinking_budget", payload.thinking_budget)
-  if (
-    payload.tool_choice
-    && typeof payload.tool_choice === "object"
-    && !("function" in payload.tool_choice)
-  ) {
+  if (!isLosslessChatToolChoice(payload.tool_choice)) {
     addBlocker(blockers, "tool_choice")
   }
   return createCheck(blockers)
+}
+
+function isLosslessChatToolChoice(
+  toolChoice: ChatCompletionsPayload["tool_choice"],
+): boolean {
+  if (toolChoice === undefined || toolChoice === null) return true
+  if (
+    toolChoice === "none"
+    || toolChoice === "auto"
+    || toolChoice === "required"
+  ) {
+    return true
+  }
+  if (!isRecord(toolChoice) || toolChoice.type !== "function") return false
+  return (
+    isRecord(toolChoice.function)
+    && typeof toolChoice.function.name === "string"
+    && toolChoice.function.name.trim().length > 0
+  )
 }
 
 export function checkChatNativeRequirements(
