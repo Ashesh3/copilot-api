@@ -170,10 +170,13 @@ function scanChatNativeContent(
   blockers: Array<string>,
 ): void {
   for (const message of messages) {
-    if (Array.isArray(message.content)) {
-      for (const part of message.content as Array<unknown>) {
+    const content = message.content as unknown
+    if (Array.isArray(content)) {
+      for (const part of content) {
         scanChatNativeContentPart(part, blockers)
       }
+    } else if (content !== null && typeof content !== "string") {
+      addBlocker(blockers, "message_content")
     }
     if (
       message.role === "assistant"
@@ -237,7 +240,11 @@ function scanChatNativeTools(
   tools: ChatCompletionsPayload["tools"],
   blockers: Array<string>,
 ): void {
-  if (!Array.isArray(tools)) return
+  if (tools === undefined || tools === null) return
+  if (!Array.isArray(tools)) {
+    addBlocker(blockers, "native_tool")
+    return
+  }
   for (const tool of tools as Array<unknown>) {
     if (!isRecord(tool)) {
       addBlocker(blockers, "native_tool")
@@ -275,7 +282,7 @@ export function checkNormalizedChatNativeRequirements(
   scanChatNativeContent(payload.messages, blockers)
   scanChatNativeTools(payload.tools, blockers)
   addPresentBlocker(blockers, "thinking_budget", payload.thinking_budget)
-  if (!isLosslessChatToolChoice(payload.tool_choice)) {
+  if (!isLosslessChatToolChoice(payload.tool_choice, payload.tools)) {
     addBlocker(blockers, "tool_choice")
   }
   return createCheck(blockers)
@@ -283,21 +290,38 @@ export function checkNormalizedChatNativeRequirements(
 
 function isLosslessChatToolChoice(
   toolChoice: ChatCompletionsPayload["tool_choice"],
+  tools: ChatCompletionsPayload["tools"],
 ): boolean {
   if (toolChoice === undefined || toolChoice === null) return true
-  if (
-    toolChoice === "none"
-    || toolChoice === "auto"
-    || toolChoice === "required"
-  ) {
-    return true
-  }
+  if (toolChoice === "none") return true
+  const functionNames = getUsableFunctionToolNames(tools)
+  if (functionNames.length === 0) return false
+  if (toolChoice === "auto" || toolChoice === "required") return true
   if (!isRecord(toolChoice) || toolChoice.type !== "function") return false
   return (
     isRecord(toolChoice.function)
     && typeof toolChoice.function.name === "string"
     && toolChoice.function.name.trim().length > 0
+    && functionNames.includes(toolChoice.function.name)
   )
+}
+
+function getUsableFunctionToolNames(
+  tools: ChatCompletionsPayload["tools"],
+): Array<string> {
+  if (!Array.isArray(tools)) return []
+  return (tools as Array<unknown>).flatMap((tool) => {
+    if (!isRecord(tool) || tool.type !== "function") return []
+    const func = tool.function
+    if (
+      !isRecord(func)
+      || typeof func.name !== "string"
+      || func.name.trim().length === 0
+    ) {
+      return []
+    }
+    return [func.name]
+  })
 }
 
 export function checkChatNativeRequirements(

@@ -231,9 +231,10 @@ function payloadHasResponsesNativeTool(
   payload: ChatCompletionsPayload,
 ): boolean {
   return (
-    payload.tools?.some(
+    Array.isArray(payload.tools)
+    && payload.tools.some(
       (tool) => (tool as { type?: string }).type !== "function",
-    ) ?? false
+    )
   )
 }
 

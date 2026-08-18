@@ -484,7 +484,10 @@ function convertHostedWebSearchTools(payload: ChatCompletionsPayload): void {
 }
 
 function disableParallelWebSearch(payload: ChatCompletionsPayload): void {
-  if (payload.tools?.some((tool) => isChatWebSearchFunctionTool(tool))) {
+  if (
+    Array.isArray(payload.tools)
+    && payload.tools.some((tool) => isChatWebSearchFunctionTool(tool))
+  ) {
     payload.parallel_tool_calls = false
   }
 }

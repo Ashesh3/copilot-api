@@ -354,6 +354,108 @@ test.each([
 })
 
 test.each([
+  { name: "numeric scalar", content: 7 },
+  { name: "object scalar", content: { text: "hello" } },
+])(
+  "rejects $name message content on a Chat-only model",
+  async ({ content }) => {
+    installModel({
+      id: "route-model",
+      supported_endpoints: ["/chat/completions"],
+    })
+
+    const response = await postChatRoute({ content })
+
+    expect(response.status).toBe(400)
+    expect(fetchMock).not.toHaveBeenCalled()
+  },
+)
+
+test.each([
+  { name: "string", content: "hello" },
+  { name: "null", content: null },
+  { name: "validated array", content: [{ type: "text", text: "hello" }] },
+])("accepts $name message content on Chat", async ({ content }) => {
+  installModel({
+    id: "route-model",
+    supported_endpoints: ["/chat/completions"],
+  })
+
+  const response = await postChatRoute({ content, hasContent: true })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/chat/completions")
+})
+
+test.each([
+  { name: "object", tools: { type: "function" } },
+  { name: "string", tools: "private-tools" },
+])("rejects non-array $name tools on a Chat-only model", async ({ tools }) => {
+  installModel({
+    id: "route-model",
+    supported_endpoints: ["/chat/completions"],
+  })
+
+  const response = await postChatRoute({ tools })
+
+  expect(response.status).toBe(400)
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
+test.each([
+  { name: "null", tools: null },
+  { name: "empty array", tools: [] },
+])("accepts $name tools with no forced choice", async ({ tools }) => {
+  installModel({
+    id: "route-model",
+    supported_endpoints: ["/chat/completions"],
+  })
+
+  const response = await postChatRoute({ tools })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/chat/completions")
+})
+
+test.each([
+  { name: "required", toolChoice: "required" },
+  { name: "auto", toolChoice: "auto" },
+  {
+    name: "named function",
+    toolChoice: { type: "function", function: { name: "lookup" } },
+  },
+])("rejects $name choice when no tools exist", async ({ toolChoice }) => {
+  installModel({
+    id: "route-model",
+    supported_endpoints: ["/chat/completions"],
+  })
+
+  const response = await postChatRoute({ tools: [], toolChoice })
+
+  expect(response.status).toBe(400)
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
+test.each([
+  { name: "absent", toolChoice: undefined },
+  { name: "null", toolChoice: null },
+  { name: "none", toolChoice: "none" },
+])("accepts $name choice when no tools exist", async ({ toolChoice }) => {
+  installModel({
+    id: "route-model",
+    supported_endpoints: ["/chat/completions"],
+  })
+
+  const response = await postChatRoute({
+    tools: [],
+    ...(toolChoice !== undefined ? { toolChoice } : {}),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/chat/completions")
+})
+
+test.each([
   {
     name: "null function",
     tools: [{ type: "function", function: null }],
@@ -593,12 +695,13 @@ async function postChatRoute(options: {
   document?: boolean
   encryptedReasoning?: boolean
   fileId?: boolean
+  hasContent?: boolean
   model?: string
   pdf?: boolean
   signedReasoning?: boolean
   thinkingBudget?: boolean
   toolChoice?: unknown
-  tools?: Array<unknown>
+  tools?: unknown
   webSearch?: boolean
 }): Promise<Response> {
   const content = createRouteContent(options)
@@ -641,9 +744,11 @@ function createRouteContent(options: {
   content?: unknown
   document?: boolean
   fileId?: boolean
+  hasContent?: boolean
   pdf?: boolean
 }): unknown {
-  if (options.content !== undefined) return options.content
+  if (options.hasContent || options.content !== undefined)
+    return options.content
   if (options.pdf || options.fileId) {
     return [
       { type: "text", text: "Read the PDF." },
@@ -676,10 +781,10 @@ function createRouteContent(options: {
 
 function createRouteTools(options: {
   customGrammar?: boolean
-  tools?: Array<unknown>
+  tools?: unknown
   webSearch?: boolean
-}): Array<unknown> | undefined {
-  if (options.tools) return options.tools
+}): unknown {
+  if (options.tools !== undefined) return options.tools
   if (options.customGrammar) {
     return [{ type: "custom", format: { type: "grammar", syntax: "lark" } }]
   }
