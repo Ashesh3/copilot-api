@@ -21,6 +21,7 @@ import type { ModelsResponse } from "../src/services/copilot/get-models"
 
 import { setConfigForTest } from "../src/lib/config"
 import { isIpBlocked, resetIpSecurityForTest } from "../src/lib/ip-blocker"
+import { setModelRedirectsForTest } from "../src/lib/model-redirect"
 import { createRoutingTelemetryRequestState } from "../src/lib/request-session"
 import {
   getRoutingAffinity,
@@ -135,6 +136,7 @@ afterEach(() => {
   state.isMultiToken = false
   state.manualApprove = false
   state.models = originalModels
+  setModelRedirectsForTest([])
   setConfigForTest(null)
   resetIpSecurityForTest()
 })
@@ -946,6 +948,65 @@ describe("responses websocket message handling", () => {
       source: "copilot_session",
     })
     expect(ws.data.responseSnapshots.has("msg_ws_headers")).toBe(true)
+  })
+
+  test("reports the requested model after a Messages WebSocket redirect", async () => {
+    const requestedModel = "claude-ws-alias"
+    const targetModel = "claude-ws-target"
+    state.accountType = "individual"
+    state.copilotToken = "copilot-token"
+    state.isMultiToken = false
+    installWebSocketMessagesModel(targetModel)
+    setModelRedirectsForTest([
+      {
+        id: "ws-alias-to-target",
+        sourceModel: requestedModel,
+        sourceEffort: "default",
+        targetModel,
+        enabled: true,
+      },
+    ])
+    queuedResponses.push(
+      createAnthropicMessageResponse("msg_ws_redirect", targetModel),
+    )
+    const ws = await createUpgradedTestWebSocket({
+      "anthropic-beta": "beta-one, beta-two",
+      "anthropic-version": "2024-01-01",
+      "x-client-session-id": "ws-redirect-session",
+      "x-model-provider-preference": "anthropic",
+      "x-request-id": "req-ws-redirect",
+    })
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: requestedModel,
+        input: "Hello",
+      }),
+    )
+
+    expect(lastRequestBody?.model).toBe(targetModel)
+    const completed = ws.sent
+      .map(
+        (frame) =>
+          JSON.parse(frame) as {
+            response?: { model?: string }
+            type?: string
+          },
+      )
+      .find((frame) => frame.type === "response.completed")
+    expect(completed?.response?.model).toBe(requestedModel)
+    const headers = capturedUpstreamHeaders[0]
+    expect(headers.get("anthropic-beta")).toBe("beta-one,beta-two")
+    expect(headers.get("anthropic-version")).toBe("2024-01-01")
+    expect(headers.get("x-model-provider-preference")).toBe("anthropic")
+    expect(headers.get("x-request-id")).toBe("req-ws-redirect:1")
+    expect(headers.get("x-initiator")).toBe("user")
+    expect(capturedAffinity).toEqual({
+      key: "ws-redirect-session",
+      source: "copilot_session",
+    })
   })
 
   test("preserves handshake native headers across transport retry", async () => {
@@ -2401,12 +2462,36 @@ function installWebSocketEndpoint(endpoint: string): void {
   }
 }
 
-function createAnthropicMessageResponse(id: string): Response {
+function installWebSocketMessagesModel(modelId: string): void {
+  const base = responsesCapableModels.data[0]
+  state.models = {
+    object: "list",
+    data: [
+      {
+        ...base,
+        id: modelId,
+        name: modelId,
+        vendor: "anthropic",
+        supported_endpoints: ["/v1/messages"],
+        capabilities: {
+          ...base.capabilities,
+          limits: { max_output_tokens: 4096 },
+          supports: { reasoning_effort: ["medium"] },
+        },
+      },
+    ],
+  }
+}
+
+function createAnthropicMessageResponse(
+  id: string,
+  model = "gpt-5.4",
+): Response {
   return Response.json({
     id,
     type: "message",
     role: "assistant",
-    model: "gpt-5.4",
+    model,
     content: [{ type: "text", text: "Hello from Messages" }],
     stop_reason: "end_turn",
     stop_sequence: null,

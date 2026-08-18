@@ -364,6 +364,7 @@ async function handleResponseCreate(
     await dispatchTranslatedWebSocketEndpoint({
       initiator,
       preparedPayload,
+      requestedModel,
       routeTarget: route.decision.target,
       turn,
       ws,
@@ -415,11 +416,13 @@ async function handleResponseCreate(
 async function dispatchTranslatedWebSocketEndpoint(options: {
   initiator: "agent" | "user"
   preparedPayload: ResponsesPayload
+  requestedModel: string | undefined
   routeTarget: string
   turn: ResponsesWebSocketTurn
   ws: ResponsesWebSocketState
 }): Promise<boolean> {
-  const { initiator, preparedPayload, routeTarget, turn, ws } = options
+  const { initiator, preparedPayload, requestedModel, routeTarget, turn, ws } =
+    options
   if (routeTarget === "/v1/messages") {
     reportResponsesWebSocketEndpointFallback(
       preparedPayload.model,
@@ -429,6 +432,7 @@ async function dispatchTranslatedWebSocketEndpoint(options: {
       nativeOptions: {
         ...ws.data.nativeMessagesOptions,
         initiatorOverride: initiator,
+        requestedModel,
       },
       payload: preparedPayload,
       turn,
