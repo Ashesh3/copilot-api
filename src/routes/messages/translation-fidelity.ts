@@ -7,12 +7,75 @@ import type {
 } from "./anthropic-types"
 
 type TranslationTarget = "chat" | "responses"
-const MAPPED_TOOL_FIELDS = new Set([
+
+const ROOT_FIELDS = new Set([
+  "cache_control",
+  "context_management",
+  "fallback_credit_token",
+  "max_tokens",
+  "messages",
+  "metadata",
+  "model",
+  "output_config",
+  "service_tier",
+  "speed",
+  "stop_details",
+  "stop_sequences",
+  "stream",
+  "system",
+  "temperature",
+  "thinking",
+  "tool_choice",
+  "tools",
+  "top_k",
+  "top_p",
+])
+const MESSAGE_FIELDS = new Set(["content", "role"])
+const CACHE_CONTROL_FIELDS = new Set(["ttl", "type"])
+const CONTENT_FIELDS: Partial<Record<string, ReadonlySet<string>>> = {
+  document: new Set([
+    "cache_control",
+    "citations",
+    "context",
+    "source",
+    "title",
+    "type",
+  ]),
+  image: new Set(["cache_control", "source", "type"]),
+  text: new Set(["cache_control", "text", "type"]),
+  thinking: new Set(["cache_control", "signature", "thinking", "type"]),
+  tool_reference: new Set(["cache_control", "tool_name", "type"]),
+  tool_result: new Set([
+    "cache_control",
+    "content",
+    "is_error",
+    "tool_use_id",
+    "type",
+  ]),
+  tool_use: new Set(["cache_control", "id", "input", "name", "type"]),
+}
+const FUNCTION_TOOL_FIELDS = new Set([
   "description",
   "input_schema",
   "name",
   "type",
 ])
+const WEB_SEARCH_TOOL_FIELDS = new Set([
+  "allowed_domains",
+  "blocked_domains",
+  "description",
+  "input_schema",
+  "name",
+  "type",
+])
+const TOOL_CHOICE_FIELDS = new Set([
+  "disable_parallel_tool_use",
+  "name",
+  "type",
+])
+const THINKING_FIELDS = new Set(["budget_tokens", "type"])
+const OUTPUT_CONFIG_FIELDS = new Set(["effort", "format", "task_budget"])
+const METADATA_FIELDS = new Set(["user_id"])
 
 function createCheck(blockers: Array<string>): TranslationCheck {
   return { supported: blockers.length === 0, blockers }
@@ -31,15 +94,92 @@ function addPresentBlocker(
   if (value !== undefined && value !== null) addBlocker(blockers, field)
 }
 
-function scanNativeTopLevelControls(
+function scanUnknownKeys(
+  value: Record<string, unknown>,
+  allowed: ReadonlySet<string>,
+  options: { blockers: Array<string>; prefix: string },
+): void {
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) {
+      addBlocker(options.blockers, `${options.prefix}${key}`)
+    }
+  }
+}
+
+function scanRoot(
   payload: AnthropicMessagesPayload,
   blockers: Array<string>,
+  target: TranslationTarget,
 ): void {
+  scanUnknownKeys(payload, ROOT_FIELDS, {
+    blockers,
+    prefix: "request_extension:",
+  })
   addPresentBlocker(payload, blockers, "fallback_credit_token")
   addPresentBlocker(payload, blockers, "stop_details")
   addPresentBlocker(payload, blockers, "context_management")
-  addPresentBlocker(payload, blockers, "compaction")
   addPresentBlocker(payload, blockers, "cache_control")
+  if (payload.top_k !== undefined) {
+    addBlocker(blockers, "top_k")
+  }
+  if (payload.service_tier !== undefined) {
+    addBlocker(blockers, "service_tier")
+  }
+  if (target === "responses") {
+    if (payload.stop_sequences !== undefined) {
+      addBlocker(blockers, "stop_sequences")
+    }
+    if (payload.temperature !== undefined) {
+      addBlocker(blockers, "temperature")
+    }
+  }
+}
+
+function scanTypedObject(
+  value: unknown,
+  allowed: ReadonlySet<string>,
+  options: { blockers: Array<string>; prefix: string },
+): void {
+  if (!isRecord(value)) return
+  scanUnknownKeys(value, allowed, options)
+}
+
+function scanStructuredControls(
+  payload: AnthropicMessagesPayload,
+  blockers: Array<string>,
+  target: TranslationTarget,
+): void {
+  scanTypedObject(payload.metadata, METADATA_FIELDS, {
+    blockers,
+    prefix: "metadata.",
+  })
+  scanTypedObject(payload.thinking, THINKING_FIELDS, {
+    blockers,
+    prefix: "thinking.",
+  })
+  scanTypedObject(payload.tool_choice, TOOL_CHOICE_FIELDS, {
+    blockers,
+    prefix: "tool_choice.",
+  })
+  if (payload.tool_choice?.disable_parallel_tool_use !== undefined) {
+    addBlocker(blockers, "tool_choice.disable_parallel_tool_use")
+  }
+  scanTypedObject(payload.output_config, OUTPUT_CONFIG_FIELDS, {
+    blockers,
+    prefix: "output_config.",
+  })
+  if (target === "chat" && payload.output_config?.task_budget !== undefined) {
+    addBlocker(blockers, "output_config.task_budget")
+  }
+}
+
+function scanCacheControl(value: unknown, blockers: Array<string>): void {
+  if (!isRecord(value)) return
+  addBlocker(blockers, "content_cache_control")
+  scanUnknownKeys(value, CACHE_CONTROL_FIELDS, {
+    blockers,
+    prefix: "cache_control_extension:",
+  })
 }
 
 function scanMessagesContent(
@@ -47,23 +187,52 @@ function scanMessagesContent(
   blockers: Array<string>,
   target: TranslationTarget,
 ): void {
-  for (const message of payload.messages) {
-    if (!Array.isArray(message.content)) continue
-    for (const block of message.content) {
-      if (
-        block.type === "tool_result"
-        && Array.isArray(block.content)
-        && block.content.some((item) => item.type === "tool_reference")
-      ) {
-        addBlocker(blockers, "tool_reference")
-      }
-      if (block.type !== "thinking") continue
-      if (typeof block.signature !== "string" || block.signature.length === 0) {
-        continue
-      }
-      scanThinkingBlock(block, blockers, target)
+  if (Array.isArray(payload.system)) {
+    for (const block of payload.system) {
+      scanContentBlock(block, blockers, target)
     }
   }
+  for (const message of payload.messages) {
+    scanUnknownKeys(message, MESSAGE_FIELDS, {
+      blockers,
+      prefix: "message_extension:",
+    })
+    if (!Array.isArray(message.content)) continue
+    for (const block of message.content) {
+      scanContentBlock(block, blockers, target)
+      if (block.type !== "tool_result" || !Array.isArray(block.content)) {
+        continue
+      }
+      for (const nested of block.content) {
+        scanContentBlock(nested, blockers, target)
+      }
+    }
+  }
+}
+
+function scanContentBlock(
+  block: Record<string, unknown>,
+  blockers: Array<string>,
+  target: TranslationTarget,
+): void {
+  const type = typeof block.type === "string" ? block.type : "unknown"
+  const allowed = CONTENT_FIELDS[type]
+  if (allowed === undefined) {
+    addBlocker(blockers, `content_type:${type}`)
+    return
+  }
+  scanUnknownKeys(block, allowed, {
+    blockers,
+    prefix: "content_extension:",
+  })
+  scanCacheControl(block.cache_control, blockers)
+  if (type === "tool_reference") addBlocker(blockers, "tool_reference")
+  if (type !== "thinking") return
+  scanThinkingBlock(
+    block as unknown as AnthropicThinkingBlock,
+    blockers,
+    target,
+  )
 }
 
 function scanThinkingBlock(
@@ -72,7 +241,10 @@ function scanThinkingBlock(
   target: TranslationTarget,
 ): void {
   const signature = block.signature
-  if (typeof signature !== "string" || signature.length === 0) return
+  if (!signature) {
+    if (target === "responses") addBlocker(blockers, "thinking_signature")
+    return
+  }
   const hasResponsesItemId = isResponsesThinkingSignature(signature)
   if (
     (target === "responses" && !hasResponsesItemId)
@@ -97,39 +269,29 @@ function scanTools(
 
 function scanTool(tool: AnthropicTool, blockers: Array<string>): void {
   const type = typeof tool.type === "string" ? tool.type : undefined
-  if (type?.startsWith("web_search") || type?.startsWith("web_fetch")) {
-    if (!isSupportedWebCompatibilityTool(tool)) {
-      addBlocker(
-        blockers,
-        `native_tool:${type.startsWith("web_search") ? "web_search" : "web_fetch"}`,
-      )
-    }
+  if (type?.startsWith("web_search")) {
+    scanUnknownKeys(tool, WEB_SEARCH_TOOL_FIELDS, {
+      blockers,
+      prefix: "tool_extension:",
+    })
+    return
+  }
+  if (type?.startsWith("web_fetch")) {
+    addBlocker(blockers, "native_tool:web_fetch")
     return
   }
   if (tool.input_schema === undefined && type !== undefined) {
     addBlocker(blockers, `native_tool:${type}`)
     return
   }
-  if (hasAdvancedToolMetadata(tool)) {
-    addBlocker(blockers, "advanced_tool_metadata")
-  }
+  scanUnknownKeys(tool, FUNCTION_TOOL_FIELDS, {
+    blockers,
+    prefix: "tool_extension:",
+  })
 }
 
-function hasAdvancedToolMetadata(tool: AnthropicTool): boolean {
-  return Object.keys(tool).some((key) => !MAPPED_TOOL_FIELDS.has(key))
-}
-
-function isSupportedWebCompatibilityTool(tool: AnthropicTool): boolean {
-  return (
-    typeof tool.type === "string"
-    && tool.type.startsWith("web_search")
-    && !Object.keys(tool).some(
-      (key) =>
-        !MAPPED_TOOL_FIELDS.has(key)
-        && key !== "allowed_domains"
-        && key !== "blocked_domains",
-    )
-  )
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
 function checkMessagesTranslation(
@@ -137,7 +299,8 @@ function checkMessagesTranslation(
   target: TranslationTarget,
 ): TranslationCheck {
   const blockers: Array<string> = []
-  scanNativeTopLevelControls(payload, blockers)
+  scanRoot(payload, blockers, target)
+  scanStructuredControls(payload, blockers, target)
   scanMessagesContent(payload, blockers, target)
   scanTools(payload.tools, blockers)
   return createCheck(blockers)

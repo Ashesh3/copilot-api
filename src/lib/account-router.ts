@@ -34,6 +34,10 @@ import {
 const FAILOVER_STATUSES = new Set([401, 403, 429])
 const pinnedRoutedAccountStorage = new AsyncLocalStorage<number | undefined>()
 
+export interface RoutedAccountPin {
+  accountId?: number
+}
+
 export function runWithPinnedRoutedAccount<T>(
   accountId: number | undefined,
   callback: () => T,
@@ -66,6 +70,25 @@ interface RoutedFetchContext {
 
 function getEffectiveAffinityKey(): string | undefined {
   return getRoutingAffinity()?.key ?? getClientSessionId()
+}
+
+function selectRoutedAccount(options: {
+  affinityKey: string | undefined
+  modelId: string
+  routedAccountPin: RoutedAccountPin | undefined
+}): Account | undefined {
+  const { affinityKey, modelId, routedAccountPin } = options
+  if (routedAccountPin?.accountId !== undefined) {
+    return tokenPool.getEligibleAccountForModel(
+      modelId,
+      routedAccountPin.accountId,
+    )
+  }
+  const pinnedAccountId = pinnedRoutedAccountStorage.getStore()
+  if (pinnedAccountId !== undefined) {
+    return tokenPool.getEligibleAccountForModel(modelId, pinnedAccountId)
+  }
+  return tokenPool.getAccountForModelBySession(modelId, affinityKey)
 }
 
 type RoutedFetchResult = {
@@ -426,6 +449,7 @@ export interface RoutedFetchOptions {
   maxHttpRetryDelaySeconds?: number
   reason?: UpstreamSendReason
   recordSelection?: boolean
+  routedAccountPin?: RoutedAccountPin
   retryBudget?: RetryBudget
 }
 
@@ -446,6 +470,8 @@ export interface RoutedFetchOptions {
  * Callers should NOT pre-build headers — this function handles header
  * construction in all modes to avoid double-advancing the round-robin.
  */
+// Keep selection, failover, and the shared logical-call budget together.
+// eslint-disable-next-line complexity
 export async function routedFetch(
   path: string,
   init: RequestInit | undefined,
@@ -457,10 +483,18 @@ export async function routedFetch(
     maxHttpRetryDelaySeconds,
     reason = "initial",
     recordSelection: shouldRecordSelection = true,
+    routedAccountPin,
     retryBudget = createRetryBudget(),
   } = options
+  const asyncPinnedAccountId = pinnedRoutedAccountStorage.getStore()
   const context: RoutedFetchContext = {
-    affinityKey: getEffectiveAffinityKey(),
+    affinityKey:
+      (
+        routedAccountPin?.accountId !== undefined
+        || asyncPinnedAccountId !== undefined
+      ) ?
+        `pinned-account:${routedAccountPin?.accountId ?? asyncPinnedAccountId}`
+      : getEffectiveAffinityKey(),
     headerOptions,
     init,
     modelId,
@@ -498,13 +532,11 @@ export async function routedFetch(
   }
 
   const affinityKey = getEffectiveAffinityKey()
-  const hasPinnedAccountContext =
-    pinnedRoutedAccountStorage.getStore() !== undefined
-  const pinnedAccountId = pinnedRoutedAccountStorage.getStore()
-  const account =
-    !hasPinnedAccountContext || pinnedAccountId === undefined ?
-      tokenPool.getAccountForModelBySession(modelId, affinityKey)
-    : tokenPool.getEligibleAccountForModel(modelId, pinnedAccountId)
+  const account = selectRoutedAccount({
+    affinityKey,
+    modelId,
+    routedAccountPin,
+  })
   if (!account) {
     if (tokenPool.hasKnownModel(modelId)) {
       const response = createNoEnabledAccountResponse(modelId)
@@ -532,5 +564,9 @@ export async function routedFetch(
     })
   }
 
-  return await fetchWithRoutedAccount(context, account, reason)
+  const result = await fetchWithRoutedAccount(context, account, reason)
+  if (routedAccountPin && result.account) {
+    routedAccountPin.accountId = result.account.id
+  }
+  return result
 }

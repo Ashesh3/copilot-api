@@ -1,6 +1,7 @@
 import consola from "consola"
 import { events } from "fetch-event-stream"
 
+import type { RoutedAccountPin } from "~/lib/account-router"
 import type {
   AnthropicMessage,
   AnthropicMessagesPayload,
@@ -82,6 +83,7 @@ export const createAnthropicMessages = async (
     initiator?: "agent" | "user"
     modelProviderPreference?: string
     preserveValidatedControls?: boolean
+    routedAccountPin?: RoutedAccountPin
     retryBudget?: RetryBudget
     signal?: AbortSignal
   },
@@ -128,6 +130,7 @@ async function dispatchAnthropicMessages(options: {
   options:
     | {
         compaction?: boolean
+        routedAccountPin?: RoutedAccountPin
         retryBudget?: RetryBudget
         signal?: AbortSignal
       }
@@ -171,6 +174,7 @@ async function dispatchAnthropicMessages(options: {
       headerOptions: { vision, initiator, ...preparedHeaders },
       maxHttpRetryDelaySeconds:
         stream ? PRE_HEADER_MAX_DELAY_SECONDS : undefined,
+      routedAccountPin: options.options?.routedAccountPin,
       retryBudget: options.options?.retryBudget,
     },
   )

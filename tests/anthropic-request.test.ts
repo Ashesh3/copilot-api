@@ -699,11 +699,11 @@ describe("Messages translation fidelity", () => {
     } as AnthropicMessagesPayload
 
     expect(checkMessagesToResponsesTranslation(payload).blockers).toEqual([
-      "advanced_tool_metadata",
+      "tool_extension:defer_loading",
       "native_tool:web_fetch",
     ])
     expect(checkMessagesToChatTranslation(payload).blockers).toEqual([
-      "advanced_tool_metadata",
+      "tool_extension:defer_loading",
       "native_tool:web_fetch",
     ])
   })

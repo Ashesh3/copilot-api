@@ -122,6 +122,10 @@ import {
 } from "./stream-translation"
 import { parseSubagentMarkerFromFirstUser } from "./subagent-marker"
 import {
+  isInvalidThinkingSignatureResponse,
+  stripThinkingBlocks,
+} from "./thinking-recovery"
+import {
   checkMessagesToChatTranslation,
   checkMessagesToResponsesTranslation,
 } from "./translation-fidelity"
@@ -177,27 +181,7 @@ export function selectMessagesUpstreamEndpoint(options: {
  * Used to recover from "Invalid signature in thinking block" errors
  * when models are switched mid-conversation.
  */
-export function stripThinkingBlocks(
-  payload: AnthropicMessagesPayload,
-): boolean {
-  let stripped = false
-  for (const msg of payload.messages) {
-    if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue
-    const before = msg.content.length
-    msg.content = msg.content.filter((block) => block.type !== "thinking")
-    if (msg.content.length < before) stripped = true
-  }
-  return stripped
-}
-
-async function isInvalidThinkingSignatureResponse(
-  response: Response,
-): Promise<boolean> {
-  const body = await response.clone().text()
-  return (
-    body.includes("Invalid signature") || body.includes("Invalid `signature`")
-  )
-}
+export { stripThinkingBlocks } from "./thinking-recovery"
 
 /**
  * Strip thinking blocks from assistant messages in multi-token mode.
@@ -432,6 +416,7 @@ async function handleCompletionInner(
     const requestOptions: NativeMessagesRequestOptions = {
       ...nativeOptions,
       requestedModel,
+      originalStream: Boolean(anthropicPayload.stream),
       retryBudget,
       ...(initiatorOverride ? { initiatorOverride } : {}),
     }
@@ -439,7 +424,7 @@ async function handleCompletionInner(
       return await handleWithNativeMessages(c, anthropicPayload, requestOptions)
     } catch (error) {
       if (
-        anthropicPayload.stream
+        requestOptions.originalStream
         || !(error instanceof HTTPError)
         || error.response.status !== 400
         || !(await isInvalidThinkingSignatureResponse(error.response))
@@ -461,14 +446,13 @@ async function handleCompletionInner(
           endpoint: "AnthropicMessages",
         },
       })
-      const recoveryBudget = createRetryBudget({ extraSends: 0 })
       const accountId = getLastUsedAccountId()
       return await runWithPinnedRoutedAccount(
         accountId,
         async () =>
           await handleWithNativeMessages(c, recoveredPayload, {
             ...requestOptions,
-            retryBudget: recoveryBudget,
+            retryBudget,
           }),
       )
     }

@@ -200,7 +200,7 @@ test("rejects unsigned thinking before sending a Responses payload", async () =>
   expect(await response.json()).toMatchObject({
     error: {
       code: "endpoint_translation_unsupported",
-      param: "thinking",
+      param: "thinking_signature",
     },
   })
   expect(fetchMock).not.toHaveBeenCalled()

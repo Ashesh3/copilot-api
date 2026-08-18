@@ -25,3 +25,34 @@
   `baseline-browser-mapping` notice only).
 - `bun run build`: passed.
 - `git diff --check`: passed.
+
+## Review Remediation Round 1
+
+- Replaced permissive translation checks with exhaustive map-or-block scans for
+  accepted root fields, structured controls, messages, content blocks, cache
+  controls, thinking signatures, tool declarations, and unknown extensions.
+- Kept native Messages forward-compatible while making every translated route
+  fail closed for unmapped native data.
+- Preserved schema-less native/server tools unchanged on `/v1/messages` and
+  moved compatibility web-search rewriting onto an immutable request clone.
+- Preserved original streaming semantics for native web-search requests;
+  invalid-signature recovery stays inside the internal web-search loop and the
+  final result is emitted as Anthropic SSE.
+- Added an explicit routed-account pin shared across native web-search
+  iterations, including after unidentified failover.
+- Kept one RetryBudget instance for the whole logical call: signature recovery
+  consumes one extra send while the recovery attempt retains remaining
+  transport/reinitialization allowance.
+- Replaced substring matching with exact parsing of the two known safe native
+  invalid-signature error shapes.
+
+### Remediation Verification
+
+- Focused Task 4, translation, native web-search, account-router, and transport
+  suites: 236 passed, 0 failed.
+- Full suite: 1,857 passed, 3 expected media skips, 0 failed across 117 files.
+- `bun run typecheck`: passed.
+- Changed-file lint: passed with only the existing stale
+  `baseline-browser-mapping` notice.
+- `bun run build`: passed.
+- `git diff --check`: passed.

@@ -3,11 +3,16 @@ import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
 import type { AnthropicMessagesPayload } from "~/routes/messages/anthropic-types"
 
 import { state } from "~/lib/state"
-import { resolveNativeWebSearch } from "~/routes/messages/native-handler"
+import {
+  handleWithNativeMessages,
+  resolveNativeWebSearch,
+} from "~/routes/messages/native-handler"
+import { server } from "~/server"
 import { resetWebSearchSessionsForTest } from "~/services/copilot/mcp-web-search"
 
 const originalFetch = globalThis.fetch
 const nativeHeaders: Array<Headers> = []
+const nativeBodies: Array<Record<string, unknown>> = []
 let nativeAttempt = 0
 
 function jsonResponse(body: unknown): Response {
@@ -46,6 +51,7 @@ const fetchMock = mock(
     }
 
     nativeHeaders.push(new Headers(init?.headers))
+    nativeBodies.push(body)
     nativeAttempt += 1
     if (nativeAttempt === 1) {
       return jsonResponse({
@@ -92,6 +98,7 @@ afterAll(() => {
 beforeEach(() => {
   fetchMock.mockClear()
   nativeHeaders.length = 0
+  nativeBodies.length = 0
   nativeAttempt = 0
   resetWebSearchSessionsForTest()
   state.accountType = "individual"
@@ -99,6 +106,96 @@ beforeEach(() => {
   state.githubToken = "github-token"
   state.isMultiToken = false
 })
+
+test("forwards native server tools without schemas and preserves the caller", async () => {
+  const tools = [
+    {
+      type: "web_fetch_20250910",
+      name: "web_fetch",
+      max_uses: 2,
+      allowed_domains: ["example.com"],
+    },
+    {
+      type: "computer_20251124",
+      name: "computer",
+      display_width_px: 1280,
+      display_height_px: 720,
+    },
+    {
+      type: "future_native_20270101",
+      name: "future_native",
+      future_option: { enabled: true },
+    },
+  ]
+  const payload = {
+    model: "claude-current",
+    max_tokens: 64,
+    messages: [{ role: "user", content: "Use native tools." }],
+    tools,
+  } as AnthropicMessagesPayload
+  const snapshot = structuredClone(payload)
+  state.models = {
+    object: "list",
+    data: [
+      {
+        id: "claude-current",
+        name: "claude-current",
+        object: "model",
+        version: "1",
+        supported_endpoints: ["/v1/messages"],
+        capabilities: {
+          family: "claude",
+          limits: { max_output_tokens: 1024 },
+          object: "model_capabilities",
+          supports: {},
+          tokenizer: "cl100k_base",
+          type: "chat",
+        },
+      },
+    ],
+  }
+
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+
+  expect(response.status).toBe(200)
+  expect(nativeBodies[0]?.tools).toEqual(tools)
+  expect(payload).toEqual(snapshot)
+})
+
+test("native handler does not mutate a direct caller while preparing tools", async () => {
+  const payload = {
+    model: "claude-current",
+    max_tokens: 64,
+    messages: [{ role: "user", content: "Use native tools." }],
+    tools: [
+      {
+        type: "future_native_20270101",
+        name: "future_native",
+        future_option: { enabled: true },
+      },
+    ],
+  } as AnthropicMessagesPayload
+  const snapshot = structuredClone(payload)
+  await handleWithNativeMessages(createNativeContext(), payload)
+
+  expect(nativeBodies[0]?.tools).toEqual(snapshot.tools)
+  expect(payload).toEqual(snapshot)
+})
+
+function createNativeContext() {
+  const request = new Request("http://localhost/v1/messages")
+  const values = new Map<string, unknown>()
+  return {
+    req: { raw: request },
+    json: (body: unknown) => Response.json(body),
+    get: (key: string) => values.get(key),
+    set: (key: string, value: unknown) => values.set(key, value),
+  } as never
+}
 
 test("preserves explicit native header options across every web-search iteration", async () => {
   const payload: AnthropicMessagesPayload = {

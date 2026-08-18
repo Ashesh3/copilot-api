@@ -3,11 +3,12 @@ import type { Context } from "hono"
 import * as Sentry from "@sentry/bun"
 import { streamSSE } from "hono/streaming"
 
+import type { RoutedAccountPin } from "~/lib/account-router"
 import type { AnthropicRequestHeaderOptions } from "~/services/copilot/messages-contract"
 import type { RetryBudget } from "~/services/copilot/transport-retry"
 
 import { getLastUsedAccountId } from "~/lib/account-router"
-import { isAbortError } from "~/lib/error"
+import { HTTPError, isAbortError } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
 import { setRequestContext } from "~/lib/request-logger"
 import {
@@ -33,6 +34,10 @@ import {
   executeWebSearch,
   isWebSearchToolType,
 } from "~/services/copilot/mcp-web-search"
+import {
+  consumeExtraSend,
+  createRetryBudget,
+} from "~/services/copilot/transport-retry"
 
 import {
   type AnthropicMessagesPayload,
@@ -40,6 +45,10 @@ import {
   type AnthropicToolUseBlock,
 } from "./anthropic-types"
 import { emitAnthropicStreamError } from "./stream-translation"
+import {
+  isInvalidThinkingSignatureResponse,
+  stripThinkingBlocks,
+} from "./thinking-recovery"
 import { emitAnthropicResponseAsStream } from "./web-search-helpers"
 
 const logger = createHandlerLogger("messages-native-handler")
@@ -47,13 +56,16 @@ const logger = createHandlerLogger("messages-native-handler")
 export interface NativeMessagesRequestOptions
   extends AnthropicRequestHeaderOptions {
   initiatorOverride?: "agent" | "user"
+  originalStream?: boolean
   requestedModel?: string
+  routedAccountPin?: RoutedAccountPin
   retryBudget?: RetryBudget
 }
 
 type NativeMessagesDispatchOptions = {
   compaction?: boolean
   preserveValidatedControls?: boolean
+  routedAccountPin?: RoutedAccountPin
   retryBudget?: RetryBudget
   signal?: AbortSignal
 }
@@ -70,6 +82,8 @@ export async function createNativeMessages(
     initiator: nativeOptions.initiatorOverride,
     modelProviderPreference: nativeOptions.modelProviderPreference,
     preserveValidatedControls: dispatchOptions?.preserveValidatedControls,
+    routedAccountPin:
+      dispatchOptions?.routedAccountPin ?? nativeOptions.routedAccountPin,
     retryBudget: dispatchOptions?.retryBudget ?? nativeOptions.retryBudget,
     signal: dispatchOptions?.signal,
   })
@@ -138,28 +152,26 @@ export async function handleWithNativeMessages(
 ) {
   const { requestedModel } = options
 
-  const usesWebSearch = prepareNativeTools(anthropicPayload)
+  const requestedStream = Boolean(anthropicPayload.stream)
+  const { payload, usesWebSearch } = prepareNativeTools(anthropicPayload)
 
   if (usesWebSearch) {
-    return await handleWithMcpWebSearch(c, anthropicPayload, {
-      ...options,
+    return await handleWithMcpWebSearch(c, payload, {
+      options,
+      requestedStream,
     })
   }
 
-  if (!anthropicPayload.stream) {
+  if (!requestedStream) {
     return await Sentry.startSpan(
       createSentryChatSpanOptions({
-        inputMessages: anthropicPayload.messages,
-        model: anthropicPayload.model,
+        inputMessages: payload.messages,
+        model: payload.model,
       }),
       async (span) => {
-        const response = (await createNativeMessages(
-          anthropicPayload,
-          options,
-          {
-            signal: c.req.raw.signal,
-          },
-        )) as AnthropicResponse
+        const response = (await createNativeMessages(payload, options, {
+          signal: c.req.raw.signal,
+        })) as AnthropicResponse
 
         const accountId = getLastUsedAccountId()
         if (accountId !== undefined) {
@@ -183,7 +195,7 @@ export async function handleWithNativeMessages(
   }
 
   logger.debug("Streaming native /v1/messages response")
-  return await streamNativeMessages(c, anthropicPayload, {
+  return await streamNativeMessages(c, payload, {
     ...options,
   })
 }
@@ -278,36 +290,34 @@ async function streamNativeMessages(
   )
 }
 
-function prepareNativeTools(payload: AnthropicMessagesPayload): boolean {
-  if (!payload.tools) return false
-  const usesWebSearch = payload.tools.some((tool) => isWebSearchToolType(tool))
-  const kept = payload.tools.flatMap((tool) => {
-    if (isWebSearchToolType(tool)) {
-      return [createWebSearchAnthropicTool(tool)]
-    }
-    return tool.input_schema !== undefined || !tool.type ? [tool] : []
-  })
-  if (kept.length < payload.tools.length) {
-    logger.debug(
-      `Dropped ${payload.tools.length - kept.length} server-side tool(s) without input_schema on native /v1/messages path`,
-    )
-  }
-  payload.tools = kept.length > 0 ? kept : undefined
+function prepareNativeTools(payload: AnthropicMessagesPayload): {
+  payload: AnthropicMessagesPayload
+  usesWebSearch: boolean
+} {
+  const prepared = structuredClone(payload)
+  if (!prepared.tools) return { payload: prepared, usesWebSearch: false }
+  const usesWebSearch = prepared.tools.some((tool) => isWebSearchToolType(tool))
+  prepared.tools = prepared.tools.map((tool) =>
+    isWebSearchToolType(tool) ? createWebSearchAnthropicTool(tool) : tool,
+  )
   if (usesWebSearch) {
-    payload.tool_choice = {
-      ...(payload.tool_choice ?? { type: "auto" }),
+    prepared.tool_choice = {
+      ...(prepared.tool_choice ?? { type: "auto" }),
       disable_parallel_tool_use: true,
     }
   }
-  return usesWebSearch
+  return { payload: prepared, usesWebSearch }
 }
 
 async function handleWithMcpWebSearch(
   c: Context,
   payload: AnthropicMessagesPayload,
-  options: NativeMessagesRequestOptions,
+  request: {
+    options: NativeMessagesRequestOptions
+    requestedStream: boolean
+  },
 ) {
-  const requestedStream = Boolean(payload.stream)
+  const { options, requestedStream } = request
   payload.stream = false
 
   return await Sentry.startSpan(
@@ -349,12 +359,36 @@ export async function resolveNativeWebSearch(
 ): Promise<AnthropicResponse> {
   let payload = initialPayload
   let iteration = 0
+  const routedAccountPin = options.routedAccountPin ?? {}
+  const retryBudget = options.retryBudget ?? createRetryBudget()
+  const loopOptions = { ...options, retryBudget }
 
   while (true) {
     iteration += 1
-    const response = (await createNativeMessages(payload, options, {
-      signal: options.signal,
-    })) as AnthropicResponse
+    let response: AnthropicResponse
+    try {
+      response = (await createNativeMessages(payload, loopOptions, {
+        routedAccountPin,
+        signal: options.signal,
+      })) as AnthropicResponse
+    } catch (error) {
+      if (
+        options.originalStream !== true
+        || !(error instanceof HTTPError)
+        || error.response.status !== 400
+        || !(await isInvalidThinkingSignatureResponse(error.response))
+      ) {
+        throw error
+      }
+      if (!consumeExtraSend(retryBudget)) throw error
+      const recovered = structuredClone(payload)
+      if (!stripThinkingBlocks(recovered)) throw error
+      response = (await createNativeMessages(recovered, loopOptions, {
+        routedAccountPin,
+        signal: options.signal,
+      })) as AnthropicResponse
+      payload = recovered
+    }
     const calls = response.content.filter(
       (block): block is AnthropicToolUseBlock =>
         block.type === "tool_use" && block.name === "web_search",

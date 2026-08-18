@@ -1,3 +1,5 @@
+/* eslint-disable max-lines -- route, fidelity, and recovery matrix share one transport harness */
+
 import {
   afterAll,
   afterEach,
@@ -8,6 +10,7 @@ import {
   test,
 } from "bun:test"
 
+import type { AnthropicMessagesPayload } from "~/routes/messages/anthropic-types"
 import type { Model, ModelsResponse } from "~/services/copilot/get-models"
 
 import { state } from "~/lib/state"
@@ -24,7 +27,7 @@ const upstreamBodies: Array<Record<string, unknown>> = []
 const upstreamHeaders: Array<Headers> = []
 const upstreamPaths: Array<string> = []
 const queuedMessagesResults: Array<Error | Response> = []
-const TEST_ACCOUNT_IDS = [91_001, 91_002, 92_001, 92_002]
+const TEST_ACCOUNT_IDS = [91_001, 91_002, 92_001, 92_002, 93_001, 93_002]
 
 const fetchMock = mock(
   (url: string | URL | Request, init?: RequestInit): Response => {
@@ -52,6 +55,24 @@ const fetchMock = mock(
         stop_sequence: null,
         usage: { input_tokens: 1, output_tokens: 1 },
       })
+    }
+    if (path === "/mcp/readonly") {
+      const requestBody = upstreamBodies.at(-1)
+      if (requestBody?.method === "initialize") {
+        return new Response(
+          'data: {"jsonrpc":"2.0","id":"init","result":{}}\n\n',
+          {
+            headers: {
+              "content-type": "text/event-stream",
+              "Mcp-Session-Id": "route-session",
+            },
+          },
+        )
+      }
+      return new Response(
+        'data: {"jsonrpc":"2.0","id":"search","result":{"content":[{"type":"text","text":"current result"}]}}\n\n',
+        { headers: { "content-type": "text/event-stream" } },
+      )
     }
     if (path === "/responses") {
       return Response.json({
@@ -295,6 +316,76 @@ test.each([
   expect(upstreamPaths).toEqual(["/v1/messages"])
 })
 
+test("does not recover an unrelated 400 that merely contains invalid-signature words", async () => {
+  installModel({ supported_endpoints: ["/v1/messages"] })
+  queuedMessagesResults.push(
+    Response.json(
+      {
+        error: {
+          code: "different_error",
+          message: "An unrelated validation mentions Invalid signature text",
+        },
+      },
+      { status: 400 },
+    ),
+    nativeSuccess("must-not-send"),
+  )
+
+  const response = await postMessages({ messages: signedThinkingHistory() })
+
+  expect(response.status).toBe(400)
+  expect(upstreamPaths).toEqual(["/v1/messages"])
+})
+
+test.each([
+  Response.json(
+    {
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message: "Invalid signature in thinking block",
+      },
+    },
+    { status: 400 },
+  ),
+  Response.json(
+    {
+      error: {
+        code: "invalid_request_body",
+        message: "Invalid `signature` in thinking block",
+      },
+    },
+    { status: 400 },
+  ),
+])("recovers exact known native signature response %#", async (failure) => {
+  installModel({ supported_endpoints: ["/v1/messages"] })
+  queuedMessagesResults.push(failure, nativeSuccess("recovered-exact"))
+
+  const response = await postMessages({ messages: signedThinkingHistory() })
+
+  expect(response.status).toBe(200)
+  expect(upstreamPaths).toEqual(["/v1/messages", "/v1/messages"])
+})
+
+test.each([
+  new Response("{not-json", { status: 400 }),
+  Response.json(
+    { error: { code: "invalid_request_body", message: { private: true } } },
+    { status: 400 },
+  ),
+])(
+  "does not recover malformed or private signature body %#",
+  async (failure) => {
+    installModel({ supported_endpoints: ["/v1/messages"] })
+    queuedMessagesResults.push(failure, nativeSuccess("must-not-send"))
+
+    const response = await postMessages({ messages: signedThinkingHistory() })
+
+    expect(response.status).toBe(400)
+    expect(upstreamPaths).toEqual(["/v1/messages"])
+  },
+)
+
 test("does not recover a streaming native signature rejection", async () => {
   installModel({ supported_endpoints: ["/v1/messages"] })
   queuedMessagesResults.push(
@@ -318,6 +409,123 @@ test("does not recover a streaming native signature rejection", async () => {
 
   expect(response.status).toBe(400)
   expect(upstreamPaths).toEqual(["/v1/messages"])
+})
+
+test("streaming native web search keeps recovery inside the loop and emits Anthropic SSE", async () => {
+  installModel({ supported_endpoints: ["/v1/messages"] })
+  queuedMessagesResults.push(
+    Response.json(
+      {
+        type: "error",
+        error: {
+          type: "invalid_request_error",
+          message: "Invalid signature in thinking block",
+        },
+      },
+      { status: 400 },
+    ),
+    Response.json({
+      id: "msg_search",
+      type: "message",
+      role: "assistant",
+      model: "route-model",
+      content: [
+        {
+          type: "tool_use",
+          id: "toolu_search",
+          name: "web_search",
+          input: { query: "current facts" },
+        },
+      ],
+      stop_reason: "tool_use",
+      stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    }),
+    nativeSuccess("streamed-final"),
+  )
+
+  const response = await postMessages({
+    messages: signedThinkingHistory(),
+    stream: true,
+    tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 1 }],
+  })
+  const body = await response.text()
+
+  expect(response.status).toBe(200)
+  expect(response.headers.get("content-type")).toContain("text/event-stream")
+  expect(body).toContain("event: message_start")
+  expect(body).toContain("streamed-final")
+  expect(body).toContain("event: message_stop")
+  expect(body).not.toContain('"type":"tool_use"')
+  expect(upstreamPaths.filter((path) => path === "/v1/messages")).toHaveLength(
+    3,
+  )
+})
+
+test("pins native web-search follow-up to the account selected by failover", async () => {
+  installModel({ supported_endpoints: ["/v1/messages"] })
+  state.isMultiToken = true
+  registerAccount(93_001, "web-primary-token")
+  registerAccount(93_002, "web-secondary-token")
+  tokenPool.rebuildModelIndex()
+  queuedMessagesResults.push(
+    Response.json(
+      { type: "error", error: { type: "overloaded_error" } },
+      { status: 429, headers: { "retry-after": "0" } },
+    ),
+    Response.json(
+      { type: "error", error: { type: "overloaded_error" } },
+      { status: 429 },
+    ),
+    Response.json(
+      {
+        id: "msg_search",
+        type: "message",
+        role: "assistant",
+        model: "route-model",
+        content: [
+          {
+            type: "thinking",
+            thinking: "searching",
+            signature: "signed-on-secondary",
+          },
+          {
+            type: "tool_use",
+            id: "toolu_search",
+            name: "web_search",
+            input: { query: "current facts" },
+          },
+        ],
+        stop_reason: "tool_use",
+        stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+      { status: 200 },
+    ),
+    nativeSuccess("done"),
+  )
+
+  const response = await postMessages({
+    tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 1 }],
+  })
+
+  expect(response.status).toBe(200)
+  const messageAttempts = upstreamPaths.flatMap((path, index) =>
+    path === "/v1/messages" ? [index] : [],
+  )
+  expect(
+    messageAttempts.map((index) =>
+      upstreamHeaders[index]?.get("authorization"),
+    ),
+  ).toEqual([
+    "Bearer web-primary-token",
+    "Bearer web-primary-token",
+    "Bearer web-secondary-token",
+    "Bearer web-secondary-token",
+  ])
+  expect(JSON.stringify(upstreamBodies[messageAttempts[3]])).toContain(
+    "signed-on-secondary",
+  )
 })
 
 test("suppresses signature recovery after transport retry exhausts the shared send budget", async () => {
@@ -363,6 +571,35 @@ test("suppresses signature recovery after transport retry exhausts the shared se
     "/v1/messages",
   ])
   expect(JSON.stringify(upstreamBodies[2])).toContain("native-signature")
+})
+
+test("allows a recovery transport retry as the third shared send", async () => {
+  installModel({ supported_endpoints: ["/v1/messages"] })
+  queuedMessagesResults.push(
+    Response.json(
+      {
+        type: "error",
+        error: {
+          type: "invalid_request_error",
+          message: "Invalid signature in thinking block",
+        },
+      },
+      { status: 400 },
+    ),
+    Object.assign(new Error("socket reset"), { code: "ECONNRESET" }),
+    nativeSuccess("recovered-after-transport"),
+    nativeSuccess("fourth-send-must-not-happen"),
+  )
+
+  const response = await postMessages({ messages: signedThinkingHistory() })
+
+  expect(response.status).toBe(200)
+  expect(upstreamPaths).toEqual([
+    "/v1/messages",
+    "/v1/messages",
+    "/v1/messages",
+  ])
+  expect(JSON.stringify(upstreamBodies[2])).not.toContain('"type":"thinking"')
 })
 
 test.each([
@@ -515,14 +752,273 @@ test("allows the mapped Messages translation subset", () => {
   }
 
   expect(checkMessagesToResponsesTranslation(payload)).toEqual({
-    supported: true,
-    blockers: [],
+    supported: false,
+    blockers: ["stop_sequences", "temperature"],
   })
   expect(checkMessagesToChatTranslation(payload)).toEqual({
     supported: true,
     blockers: [],
   })
 })
+
+test.each([
+  {
+    name: "stop sequences",
+    extra: { stop_sequences: ["END"] },
+    responses: ["stop_sequences"],
+    chat: [],
+  },
+  {
+    name: "temperature",
+    extra: { temperature: 0.4 },
+    responses: ["temperature"],
+    chat: [],
+  },
+  {
+    name: "top p",
+    extra: { top_p: 0.8 },
+    responses: [],
+    chat: [],
+  },
+  {
+    name: "top k",
+    extra: { top_k: 20 },
+    responses: ["top_k"],
+    chat: ["top_k"],
+  },
+  {
+    name: "service tier",
+    extra: { service_tier: "standard_only" },
+    responses: ["service_tier"],
+    chat: ["service_tier"],
+  },
+  {
+    name: "output format",
+    extra: { output_config: { format: { type: "json_object" } } },
+    responses: [],
+    chat: [],
+  },
+  {
+    name: "output effort",
+    extra: { output_config: { effort: "high" } },
+    responses: [],
+    chat: [],
+  },
+  {
+    name: "output task budget",
+    extra: {
+      output_config: {
+        task_budget: { type: "tokens", total: 100, remaining: 80 },
+      },
+    },
+    responses: [],
+    chat: ["output_config.task_budget"],
+  },
+  {
+    name: "unknown output config extension",
+    extra: { output_config: { future_output_control: true } },
+    responses: ["output_config.future_output_control"],
+    chat: ["output_config.future_output_control"],
+  },
+  {
+    name: "parallel tool control",
+    extra: {
+      tool_choice: { type: "auto", disable_parallel_tool_use: true },
+    },
+    responses: ["tool_choice.disable_parallel_tool_use"],
+    chat: ["tool_choice.disable_parallel_tool_use"],
+  },
+  {
+    name: "unknown root extension",
+    extra: { future_native_field: { enabled: true } },
+    responses: ["request_extension:future_native_field"],
+    chat: ["request_extension:future_native_field"],
+  },
+])(
+  "maps or blocks top-level Messages $name exactly",
+  ({ extra, responses, chat }) => {
+    const payload = {
+      model: "route-model",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "hello" }],
+      ...extra,
+    } as AnthropicMessagesPayload
+
+    expect(checkMessagesToResponsesTranslation(payload).blockers).toEqual([
+      ...responses,
+    ])
+    expect(checkMessagesToChatTranslation(payload).blockers).toEqual([...chat])
+  },
+)
+
+test.each([
+  {
+    name: "text cache control",
+    block: {
+      type: "text",
+      text: "hello",
+      cache_control: { type: "ephemeral" },
+    },
+    blocker: "content_cache_control",
+  },
+  {
+    name: "text extension",
+    block: { type: "text", text: "hello", future_text_field: true },
+    blocker: "content_extension:future_text_field",
+  },
+  {
+    name: "message extension",
+    messageExtra: { future_message_field: true },
+    block: { type: "text", text: "hello" },
+    blocker: "message_extension:future_message_field",
+  },
+  {
+    name: "tool use extension",
+    role: "assistant",
+    block: {
+      type: "tool_use",
+      id: "toolu_1",
+      name: "lookup",
+      input: {},
+      future_tool_use_field: true,
+    },
+    blocker: "content_extension:future_tool_use_field",
+  },
+  {
+    name: "tool result extension",
+    block: {
+      type: "tool_result",
+      tool_use_id: "toolu_1",
+      content: "done",
+      future_tool_result_field: true,
+    },
+    blocker: "content_extension:future_tool_result_field",
+  },
+])(
+  "fails closed for nested Messages $name",
+  ({ blocker, block, messageExtra, role = "user" }) => {
+    const payload = {
+      model: "route-model",
+      max_tokens: 64,
+      messages: [{ role, content: [block], ...messageExtra }],
+    } as unknown as AnthropicMessagesPayload
+
+    expect(checkMessagesToResponsesTranslation(payload).blockers).toContain(
+      blocker,
+    )
+    expect(checkMessagesToChatTranslation(payload).blockers).toContain(blocker)
+  },
+)
+
+test("blocks thinking that the target converter cannot round-trip", () => {
+  const unsigned = {
+    model: "route-model",
+    max_tokens: 64,
+    messages: [
+      {
+        role: "assistant",
+        content: [{ type: "thinking", thinking: "unsigned" }],
+      },
+    ],
+  } as AnthropicMessagesPayload
+  const responsesSigned = {
+    ...unsigned,
+    messages: [
+      {
+        role: "assistant" as const,
+        content: [
+          {
+            type: "thinking" as const,
+            thinking: "responses",
+            signature: "encrypted@rs_1",
+          },
+        ],
+      },
+    ],
+  }
+  const chatSigned = {
+    ...unsigned,
+    messages: [
+      {
+        role: "assistant" as const,
+        content: [
+          {
+            type: "thinking" as const,
+            thinking: "chat",
+            signature: "native-signature",
+          },
+        ],
+      },
+    ],
+  }
+
+  expect(checkMessagesToResponsesTranslation(unsigned).blockers).toEqual([
+    "thinking_signature",
+  ])
+  expect(checkMessagesToChatTranslation(unsigned).blockers).toEqual([])
+  expect(checkMessagesToResponsesTranslation(responsesSigned).blockers).toEqual(
+    [],
+  )
+  expect(checkMessagesToChatTranslation(responsesSigned).blockers).toEqual([
+    "thinking_signature",
+  ])
+  expect(checkMessagesToResponsesTranslation(chatSigned).blockers).toEqual([
+    "thinking_signature",
+  ])
+  expect(checkMessagesToChatTranslation(chatSigned).blockers).toEqual([])
+})
+
+test("routes to the remaining endpoint only when its full conversion is lossless", () => {
+  const payload = {
+    model: "route-model",
+    max_tokens: 64,
+    messages: [{ role: "user", content: "hello" }],
+    stop_sequences: ["END"],
+  } as AnthropicMessagesPayload
+  const selectedModel = createModel({
+    supported_endpoints: ["/responses", "/chat/completions"],
+  })
+
+  expect(selectMessagesUpstreamEndpoint({ payload, selectedModel })).toEqual({
+    reason: "endpoint_unavailable",
+    source: "messages",
+    target: "/chat/completions",
+    translated: true,
+  })
+})
+
+test.each([
+  {
+    name: "Responses",
+    endpoints: ["/responses"],
+    extra: { future_native_field: { enabled: true } },
+    param: "request_extension:future_native_field",
+  },
+  {
+    name: "Chat",
+    endpoints: ["/chat/completions"],
+    extra: {
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "text", text: "hello", future_text_field: true }],
+        },
+      ],
+    },
+    param: "content_extension:future_text_field",
+  },
+])(
+  "rejects unknown native extensions before translated $name dispatch",
+  async ({ endpoints, extra, param }) => {
+    installModel({ supported_endpoints: [...endpoints] })
+
+    const response = await postMessages(extra)
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toHaveProperty("error.param", param)
+    expect(fetchMock).not.toHaveBeenCalled()
+  },
+)
 
 test.each([
   {
