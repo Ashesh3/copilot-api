@@ -18,6 +18,8 @@ import { server } from "~/server"
 
 const originalFetch = globalThis.fetch
 let upstreamAborted = false
+let rejectUpstream: ((error: unknown) => void) | undefined
+let resolveUpstream: ((response: Response) => void) | undefined
 
 const messagesOnlyModels: ModelsResponse = {
   object: "list",
@@ -45,7 +47,9 @@ const messagesOnlyModels: ModelsResponse = {
 
 const fetchMock = mock(
   (_url: string | URL | Request, init?: RequestInit) =>
-    new Promise<Response>((_resolve, reject) => {
+    new Promise<Response>((resolve, reject) => {
+      resolveUpstream = resolve
+      rejectUpstream = reject
       const rejectAsAborted = (): void => {
         upstreamAborted = true
         reject(new DOMException("The request was aborted", "AbortError"))
@@ -70,6 +74,8 @@ afterAll(() => {
 beforeEach(() => {
   fetchMock.mockClear()
   upstreamAborted = false
+  rejectUpstream = undefined
+  resolveUpstream = undefined
   state.accountType = "individual"
   state.copilotToken = "copilot-token"
   state.githubToken = "github-token"
@@ -116,6 +122,78 @@ test("cancels buffered Messages and emits no Responses events after detach", asy
   expect(await waitForUpstreamAbort()).toBe(true)
 })
 
+test("emits an in-band Responses failure for a late upstream rejection", async () => {
+  const unhandled: Array<unknown> = []
+  const onUnhandled = (event: Event): void => {
+    unhandled.push((event as unknown as { reason?: unknown }).reason)
+  }
+  globalThis.addEventListener("unhandledrejection", onUnhandled)
+  try {
+    const response = await server.request("/v1/responses", createRequest())
+    const reader = requireBody(response).getReader()
+    const first = await reader.read()
+    expect(new TextDecoder().decode(first.value)).toBe(": keepalive\n\n")
+
+    rejectUpstream?.(new Error("late private upstream failure"))
+    const rest = await readRemaining(reader)
+
+    expect(rest).toContain("event: error")
+    expect(rest).toContain("event: response.failed")
+    expect(rest).not.toContain("late private upstream failure")
+    expect((await reader.read()).done).toBe(true)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(unhandled).toEqual([])
+  } finally {
+    globalThis.removeEventListener("unhandledrejection", onUnhandled)
+  }
+})
+
+test("does not emit failure or leak rejection when abort races late failure", async () => {
+  const unhandled: Array<unknown> = []
+  const onUnhandled = (event: Event): void => {
+    unhandled.push((event as unknown as { reason?: unknown }).reason)
+  }
+  globalThis.addEventListener("unhandledrejection", onUnhandled)
+  try {
+    const response = await server.request("/v1/responses", createRequest())
+    const reader = requireBody(response).getReader()
+    await reader.read()
+    await reader.cancel()
+    rejectUpstream?.(new Error("late private abort race"))
+
+    expect(await waitForUpstreamAbort()).toBe(true)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(unhandled).toEqual([])
+  } finally {
+    globalThis.removeEventListener("unhandledrejection", onUnhandled)
+  }
+})
+
+test("emits an in-band Responses failure for a late conversion rejection", async () => {
+  const response = await server.request("/v1/responses", createRequest())
+  const reader = requireBody(response).getReader()
+  const first = await reader.read()
+  expect(new TextDecoder().decode(first.value)).toBe(": keepalive\n\n")
+
+  resolveUpstream?.(
+    Response.json({
+      id: "msg_invalid",
+      type: "message",
+      role: "assistant",
+      model: "route-model",
+      content: [{ type: "future_private_block", secret: "private" }],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    }),
+  )
+  const rest = await readRemaining(reader)
+
+  expect(rest).toContain("event: error")
+  expect(rest).toContain("event: response.failed")
+  expect(rest).not.toContain("private")
+})
+
 function createRequest(): RequestInit {
   return {
     method: "POST",
@@ -139,4 +217,18 @@ async function waitForUpstreamAbort(): Promise<boolean> {
     await new Promise((resolve) => setTimeout(resolve, 1))
   }
   return false
+}
+
+async function readRemaining(reader: {
+  read: () => Promise<
+    { done: false; value: Uint8Array } | { done: true; value?: Uint8Array }
+  >
+}): Promise<string> {
+  const decoder = new TextDecoder()
+  let output = ""
+  while (true) {
+    const next = await reader.read()
+    if (next.done) return output
+    output += decoder.decode(next.value, { stream: true })
+  }
 }

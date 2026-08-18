@@ -1231,7 +1231,7 @@ test("allows exact Responses to Messages controls in the forthcoming bridge subs
         },
       ],
       parallel_tool_calls: false,
-      reasoning: { effort: "high", summary: "detailed" },
+      reasoning: { effort: "high", summary: "auto" },
       text: { format: { type: "json_object" } },
       task_budget: { type: "tokens", total: 100 },
       user: "user-safe",
@@ -1239,6 +1239,19 @@ test("allows exact Responses to Messages controls in the forthcoming bridge subs
     }),
   ).toEqual({ supported: true, blockers: [] })
 })
+
+test.each(["concise", "detailed", "future_private_summary"])(
+  "rejects unmapped Responses to Messages reasoning summary %s",
+  (summary) => {
+    expect(
+      checkResponsesToMessagesTranslation({
+        model: "claude-current",
+        input: "hello",
+        reasoning: { effort: "high", summary: summary as never },
+      }),
+    ).toEqual({ supported: false, blockers: ["reasoning_summary"] })
+  },
+)
 
 test("allows integer Responses reasoning effort on the Messages bridge", () => {
   expect(
@@ -1450,6 +1463,46 @@ test.each([
     } as ResponsesPayload),
   ).toEqual({ supported: false, blockers: ["content_direction"] })
 })
+
+test.each([undefined, null, 7, { private: true }])(
+  "rejects Responses to Messages input_text scalar %#",
+  (text) => {
+    expect(
+      checkResponsesToMessagesTranslation({
+        model: "claude-current",
+        input: [
+          {
+            type: "message",
+            role: "user",
+            content: [
+              { type: "input_text", ...(text === undefined ? {} : { text }) },
+            ],
+          },
+        ],
+      } as ResponsesPayload),
+    ).toEqual({ supported: false, blockers: ["content_text"] })
+  },
+)
+
+test.each([undefined, null, 7, { private: true }])(
+  "rejects Responses to Messages output_text scalar %#",
+  (text) => {
+    expect(
+      checkResponsesToMessagesTranslation({
+        model: "claude-current",
+        input: [
+          {
+            type: "message",
+            role: "assistant",
+            content: [
+              { type: "output_text", ...(text === undefined ? {} : { text }) },
+            ],
+          },
+        ],
+      } as ResponsesPayload),
+    ).toEqual({ supported: false, blockers: ["content_text"] })
+  },
+)
 
 test.each([
   "data:text/plain;base64,AA==",

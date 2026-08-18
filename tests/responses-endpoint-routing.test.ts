@@ -380,6 +380,27 @@ test("rejects unsupported Messages reasoning effort without upstream dispatch", 
   })
 })
 
+test.each(["concise", "detailed", "future_private_summary"])(
+  "rejects Messages-only unmapped reasoning summary %s without upstream",
+  async (summary) => {
+    installModel({ supported_endpoints: ["/v1/messages"] })
+
+    const response = await postResponses({
+      input: "hello",
+      reasoning: { effort: "high", summary },
+    })
+
+    expect(response.status).toBe(400)
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(await response.json()).toMatchObject({
+      error: {
+        code: "endpoint_translation_unsupported",
+        param: "reasoning_summary",
+      },
+    })
+  },
+)
+
 test("returns a synthetic Responses stream for a Messages fallback", async () => {
   installModel({ supported_endpoints: ["/v1/messages"] })
 

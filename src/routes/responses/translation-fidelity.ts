@@ -162,6 +162,9 @@ function scanInputContentForTarget(
     }
     case "input_text":
     case "output_text": {
+      if (typeof content.text !== "string") {
+        addBlocker(blockers, "content_text")
+      }
       return
     }
     default: {
@@ -240,8 +243,7 @@ function scanResponsesInput(
   },
 ): void {
   if (!Array.isArray(input)) return
-  const functionCallIds = new Set<string>()
-  const functionResultIds = new Set<string>()
+  const functionGrouping = createFunctionGroupingState()
   for (const item of input) {
     if (!isRecord(item)) {
       addBlocker(blockers, "input_item")
@@ -251,8 +253,7 @@ function scanResponsesInput(
     if (options.target === "messages") {
       scanFunctionPairing({
         blockers,
-        functionCallIds,
-        functionResultIds,
+        state: functionGrouping,
         item,
         type,
       })
@@ -262,33 +263,59 @@ function scanResponsesInput(
   }
 }
 
+interface FunctionGroupingState {
+  callIds: Array<string>
+  phase: "calls" | "idle" | "results"
+  resultIndex: number
+  seenIds: Set<string>
+}
+
+function createFunctionGroupingState(): FunctionGroupingState {
+  return {
+    callIds: [],
+    phase: "idle",
+    resultIndex: 0,
+    seenIds: new Set(),
+  }
+}
+
 function scanFunctionPairing(options: {
   blockers: Array<string>
-  functionCallIds: Set<string>
-  functionResultIds: Set<string>
   item: Record<string, unknown>
+  state: FunctionGroupingState
   type: string | undefined
 }): void {
-  const { blockers, functionCallIds, functionResultIds, item, type } = options
+  const { blockers, item, state, type } = options
+  if (type !== "function_call" && type !== "function_call_output") {
+    if (state.phase !== "idle") addBlocker(blockers, "tool_result_pairing")
+    return
+  }
   if (type === "function_call") {
     if (typeof item.call_id !== "string" || item.call_id.length === 0) return
-    if (functionCallIds.has(item.call_id)) {
+    if (state.phase === "results" || state.seenIds.has(item.call_id)) {
       addBlocker(blockers, "tool_result_pairing")
       return
     }
-    functionCallIds.add(item.call_id)
+    state.phase = "calls"
+    state.callIds.push(item.call_id)
+    state.seenIds.add(item.call_id)
     return
   }
-  if (type !== "function_call_output") return
   if (typeof item.call_id !== "string" || item.call_id.length === 0) return
   if (
-    !functionCallIds.has(item.call_id)
-    || functionResultIds.has(item.call_id)
+    state.phase === "idle"
+    || state.callIds[state.resultIndex] !== item.call_id
   ) {
     addBlocker(blockers, "tool_result_pairing")
     return
   }
-  functionResultIds.add(item.call_id)
+  state.phase = "results"
+  state.resultIndex += 1
+  if (state.resultIndex === state.callIds.length) {
+    state.phase = "idle"
+    state.callIds = []
+    state.resultIndex = 0
+  }
 }
 
 function addInputItemBlockers(options: {
@@ -558,6 +585,9 @@ export function checkResponsesToMessagesTranslation(
   }
   if (hasIncompatibleMessagesSampling(payload)) {
     addBlocker(blockers, "sampling")
+  }
+  if (hasUnmappedReasoningSummary(payload)) {
+    addBlocker(blockers, "reasoning_summary")
   }
   scanSharedTopLevelBlockers(payload, blockers, { allowTaskBudget: true })
   if (!hasOnlyMessagesReasoningInclude(payload)) {

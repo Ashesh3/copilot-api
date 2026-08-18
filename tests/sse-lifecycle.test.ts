@@ -3,7 +3,9 @@ import { events } from "fetch-event-stream"
 
 import {
   getSseHeartbeatCount,
+  raceSsePreflush,
   resetSseHeartbeatCountForTest,
+  setSsePreflushDeadlineForTest,
   SSE_HEARTBEAT_COMMENT,
   withHeartbeatWhilePending,
   withSseHeartbeat,
@@ -343,5 +345,30 @@ describe("withHeartbeatWhilePending", () => {
     ])
 
     expect(outcome).toBe("aborted")
+  })
+})
+
+describe("raceSsePreflush", () => {
+  test("returns an observed late-rejection promise after the preflush timer wins", async () => {
+    setSsePreflushDeadlineForTest(1)
+    let rejectPending: ((error: unknown) => void) | undefined
+    const original = new Promise<string>((_resolve, reject) => {
+      rejectPending = reject
+    })
+    const result = await raceSsePreflush(original)
+    expect(result.kind).toBe("pending")
+    if (result.kind !== "pending") throw new Error("Expected pending result")
+    expect(result.pending).not.toBe(original)
+
+    const boom = new Error("late failure")
+    rejectPending?.(boom)
+    let caught: unknown
+    try {
+      await result.pending
+    } catch (error) {
+      caught = error
+    }
+    expect(caught).toBe(boom)
+    setSsePreflushDeadlineForTest()
   })
 })

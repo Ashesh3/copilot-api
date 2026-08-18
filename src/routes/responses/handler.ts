@@ -90,6 +90,7 @@ import { normalizeResponsesAttachmentsFailClosed } from "~/services/copilot/resp
 import { prepareResponsesRequest } from "~/services/copilot/responses-contract"
 
 import {
+  emitResponsesFailureAsStream,
   emitResponsesResultAsStream,
   resolveResponsesWebSearchCalls,
   resolveWebSearchCalls,
@@ -1762,7 +1763,11 @@ const handleWithAnthropicMessages = async (
       await emitResponsesResultAsStream(stream, result)
     } catch (error) {
       if (isAbortError(error)) return
-      throw error
+      if (stream.aborted || stream.closed) return
+      await emitResponsesFailureAsStream(stream, {
+        responseId: "resp_messages_failed",
+        model: requestedModel,
+      })
     }
   })
 }

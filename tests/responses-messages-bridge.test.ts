@@ -14,6 +14,8 @@ import {
   responsesPayloadToAnthropic,
 } from "~/routes/responses/messages-bridge"
 
+/* eslint-disable max-lines */
+
 test("maps text image document function tools and results to Messages", async () => {
   const payload = await responsesPayloadToAnthropic({
     model: "claude-current",
@@ -274,6 +276,28 @@ test("maps integer Responses reasoning effort to a Messages thinking budget", as
   expect(payload.thinking).toEqual({ type: "enabled", budget_tokens: 2048 })
 })
 
+test.each(["concise", "detailed", "future_private_summary"])(
+  "refuses unmapped reasoning summary %s before Messages wire/result echo",
+  async (summary) => {
+    const request = {
+      model: "claude-current",
+      input: "Think carefully.",
+      reasoning: { effort: "high", summary },
+    }
+    const error = await responsesPayloadToAnthropic(request as never).catch(
+      (caught: unknown) => caught,
+    )
+
+    expect(error).toBeInstanceOf(LocalHTTPError)
+    expect((error as LocalHTTPError).clientBody).toMatchObject({
+      error: {
+        code: "endpoint_translation_unsupported",
+        param: "reasoning_summary",
+      },
+    })
+  },
+)
+
 test("accepts implicit Responses messages with omitted content", async () => {
   const payload = await responsesPayloadToAnthropic({
     model: "claude-current",
@@ -323,11 +347,10 @@ test("preserves separate assistant text and function calls in input order", asyn
   expect(payload.messages).toEqual([
     {
       role: "assistant",
-      content: [{ type: "text", text: "I will look it up." }],
-    },
-    {
-      role: "assistant",
-      content: [{ type: "tool_use", id: "call_1", name: "lookup", input: {} }],
+      content: [
+        { type: "text", text: "I will look it up." },
+        { type: "tool_use", id: "call_1", name: "lookup", input: {} },
+      ],
     },
     {
       role: "user",
@@ -336,6 +359,100 @@ test("preserves separate assistant text and function calls in input order", asyn
       ],
     },
   ])
+})
+
+test("groups multiple function calls and results into legal Anthropic turns", async () => {
+  const request = {
+    model: "claude-current",
+    input: [
+      {
+        type: "function_call" as const,
+        call_id: "call_1",
+        name: "lookup",
+        arguments: '{"query":"one"}',
+      },
+      {
+        type: "function_call" as const,
+        call_id: "call_2",
+        name: "lookup",
+        arguments: '{"query":"two"}',
+      },
+      {
+        type: "function_call_output" as const,
+        call_id: "call_1",
+        output: "first",
+      },
+      {
+        type: "function_call_output" as const,
+        call_id: "call_2",
+        output: "second",
+      },
+    ],
+  }
+
+  const payload = await responsesPayloadToAnthropic(request)
+
+  expect(payload.messages).toEqual([
+    {
+      role: "assistant",
+      content: [
+        {
+          type: "tool_use",
+          id: "call_1",
+          name: "lookup",
+          input: { query: "one" },
+        },
+        {
+          type: "tool_use",
+          id: "call_2",
+          name: "lookup",
+          input: { query: "two" },
+        },
+      ],
+    },
+    {
+      role: "user",
+      content: [
+        { type: "tool_result", tool_use_id: "call_1", content: "first" },
+        { type: "tool_result", tool_use_id: "call_2", content: "second" },
+      ],
+    },
+  ])
+})
+
+test.each([
+  {
+    name: "result order differs from call order",
+    input: [
+      {
+        type: "function_call",
+        call_id: "call_1",
+        name: "lookup",
+        arguments: "{}",
+      },
+      {
+        type: "function_call",
+        call_id: "call_2",
+        name: "lookup",
+        arguments: "{}",
+      },
+      { type: "function_call_output", call_id: "call_2", output: "second" },
+      { type: "function_call_output", call_id: "call_1", output: "first" },
+    ],
+  },
+])("refuses unrepresentable function grouping: $name", async ({ input }) => {
+  const error = await responsesPayloadToAnthropic({
+    model: "claude-current",
+    input,
+  } as never).catch((caught: unknown) => caught)
+
+  expect(error).toBeInstanceOf(LocalHTTPError)
+  expect((error as LocalHTTPError).clientBody).toMatchObject({
+    error: {
+      code: "endpoint_translation_unsupported",
+      param: "tool_result_pairing",
+    },
+  })
 })
 
 test.each([

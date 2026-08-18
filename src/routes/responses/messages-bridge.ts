@@ -16,7 +16,10 @@ import type {
   ResponseUsage,
 } from "~/services/copilot/create-responses"
 
-import { assertEndpointTranslationSupported } from "~/lib/error"
+import {
+  assertEndpointTranslationSupported,
+  createEndpointTranslationError,
+} from "~/lib/error"
 
 import {
   convertOpenAIContentPartToAnthropic,
@@ -107,33 +110,20 @@ async function appendResponsesItem(options: {
     const name = typeof item.name === "string" ? item.name : ""
     const argumentsText =
       typeof item.arguments === "string" ? item.arguments : ""
-    options.messages.push({
-      role: "assistant",
-      content: [
-        {
-          type: "tool_use",
-          id: callId,
-          name,
-          input: safeParseArguments(argumentsText),
-        },
-      ],
+    appendAssistantBlock(options.messages, {
+      type: "tool_use",
+      id: callId,
+      name,
+      input: safeParseArguments(argumentsText),
     })
     return
   }
   if (type === "function_call_output") {
     const callId = typeof item.call_id === "string" ? item.call_id : ""
-    options.messages.push({
-      role: "user",
-      content: [
-        {
-          type: "tool_result",
-          tool_use_id: callId,
-          content: await convertResponsesToolResult(
-            item.output,
-            options.signal,
-          ),
-        },
-      ],
+    appendUserBlock(options.messages, {
+      type: "tool_result",
+      tool_use_id: callId,
+      content: await convertResponsesToolResult(item.output, options.signal),
     })
     return
   }
@@ -162,6 +152,30 @@ async function appendResponsesItem(options: {
     role: "user",
     content: messageContent,
   })
+}
+
+function appendAssistantBlock(
+  messages: Array<AnthropicMessage>,
+  block: AnthropicAssistantContentBlock,
+): void {
+  const previous = messages.at(-1)
+  if (previous?.role === "assistant" && Array.isArray(previous.content)) {
+    previous.content.push(block)
+    return
+  }
+  messages.push({ role: "assistant", content: [block] })
+}
+
+function appendUserBlock(
+  messages: Array<AnthropicMessage>,
+  block: AnthropicUserContentBlock,
+): void {
+  const previous = messages.at(-1)
+  if (previous?.role === "user" && Array.isArray(previous.content)) {
+    previous.content.push(block)
+    return
+  }
+  messages.push({ role: "user", content: [block] })
 }
 
 async function convertResponsesUserContent(
@@ -415,21 +429,60 @@ function convertAnthropicOutput(response: AnthropicResponse): {
   let text = ""
   let messageIndex = 0
   let reasoningIndex = 0
-  for (const block of response.content) {
+  for (const rawBlock of response.content) {
+    const block = rawBlock as unknown as Record<string, unknown>
     if (block.type === "thinking") {
-      output.push(createReasoningOutput(response.id, block, reasoningIndex))
+      if (typeof block.thinking !== "string") throwResponseContentError()
+      output.push(
+        createReasoningOutput(
+          response.id,
+          block as unknown as Extract<
+            AnthropicResponse["content"][number],
+            { type: "thinking" }
+          >,
+          reasoningIndex,
+        ),
+      )
       reasoningIndex += 1
       continue
     }
     if (block.type === "text") {
+      if (typeof block.text !== "string") throwResponseContentError()
       text += block.text
       output.push(createTextOutput(response.id, block.text, messageIndex))
       messageIndex += 1
       continue
     }
-    output.push(createFunctionCallOutput(block))
+    if (
+      block.type !== "tool_use"
+      || typeof block.id !== "string"
+      || typeof block.name !== "string"
+      || !isRecordValue(block.input)
+    ) {
+      throwResponseContentError()
+    }
+    output.push(
+      createFunctionCallOutput(
+        block as unknown as Extract<
+          AnthropicResponse["content"][number],
+          { type: "tool_use" }
+        >,
+      ),
+    )
   }
   return { output, text }
+}
+
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function throwResponseContentError(): never {
+  throw createEndpointTranslationError({
+    blockers: ["response_content"],
+    code: "endpoint_translation_unsupported",
+    source: "messages",
+  })
 }
 
 function createReasoningOutput(

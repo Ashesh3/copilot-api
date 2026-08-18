@@ -115,3 +115,29 @@ Witnessed RED failures covered all six review groups: Chat web-search routing re
 ### Concerns
 
 No blocking concern. The repository retains the same five lint warnings and three optional real-media skips.
+
+## Fix Round 2
+
+### Findings addressed
+
+- Typed `input_text` and `output_text` blocks now require a real string `text` value before the Messages converter runs; missing, null, numeric, and object values fail with the canonical `content_text` blocker.
+- Responses function calls/results now use exact Anthropic-compatible grouping: adjacent assistant calls become one ordered `tool_use` turn and matching ordered results become one `tool_result` turn. Duplicate/orphan/mismatched/result-reordered shapes fail locally as `tool_result_pairing`; legal sequential groups remain representable.
+- Every non-auto reasoning summary (`concise`, `detailed`, and unknown values) is blocked as `reasoning_summary` at scan, direct bridge, and route boundaries. Absent/auto summaries and string/integer effort mappings remain supported.
+- Synthetic Messages fallback streams now consume the observed preflush promise, emit sanitized `error` plus `response.failed` lifecycle events for late upstream or response-conversion failures, close cleanly, and emit nothing after downstream detach.
+
+### RED/GREEN evidence
+
+Witnessed RED failures covered missing/non-string text coercion, fragmented multi-call/result turns, result reordering, summary values reaching Messages without a wire mapping, late upstream rejection escaping the stream, and late invalid response content being converted into a bogus tool call. Focused GREEN verification passed 382/382 across 15 bridge, fidelity, handler, stream/lifecycle, cancellation, compaction, affinity, media, WebSocket, and live integration files.
+
+### Verification
+
+- Non-integration suite: 1398 passed, 3 existing media skips, 0 failed across 102 files; 5017 assertions.
+- Full `bun test`: 1551 passed, 3 existing media skips, 0 failed across 113 files; 6344 assertions.
+- `bun run typecheck`: exit 0.
+- `bun run lint:all`: 0 errors, 5 existing warnings.
+- `bun run build`: exit 0.
+- `git diff --check`: exit 0.
+
+### Concerns
+
+No blocking concern. The repository retains the same five lint warnings and three optional real-media skips.
