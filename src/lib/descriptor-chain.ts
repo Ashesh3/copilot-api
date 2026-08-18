@@ -118,10 +118,15 @@ function snapshotDomException(
   }
 }
 
-function shouldSkipBaseErrorDescriptor(current: object, key: string): boolean {
+function shouldSkipNativePrototypeDescriptor(
+  current: object,
+  key: string,
+): boolean {
   return (
-    (current === Error.prototype || current === TypeError.prototype)
-    && (key === "message" || key === "name")
+    ((current === Error.prototype || current === TypeError.prototype)
+      && (key === "message" || key === "name"))
+    || (current === DOMException.prototype
+      && (key === "code" || key === "message" || key === "name"))
   )
 }
 
@@ -136,8 +141,14 @@ function collectAllowlistedDescriptors(
 ): void {
   const { current, keys, ownDescriptors } = options
   for (const key of keys) {
-    if (collected.has(key) || !Object.hasOwn(ownDescriptors, key)) continue
-    if (shouldSkipBaseErrorDescriptor(current, key)) continue
+    if (
+      collected.has(key)
+      || blocked.has(key)
+      || !Object.hasOwn(ownDescriptors, key)
+    ) {
+      continue
+    }
+    if (shouldSkipNativePrototypeDescriptor(current, key)) continue
     const descriptor = ownDescriptors[key]
     if ("value" in descriptor) collected.set(key, descriptor)
     else blocked.add(key)
@@ -233,12 +244,20 @@ export function readDescriptorSnapshotValue(
   return descriptor && "value" in descriptor ? descriptor.value : undefined
 }
 
+function hasDescriptorSnapshotValue(
+  snapshot: DescriptorChainSnapshot | undefined,
+  key: string,
+): boolean {
+  return snapshot?.descriptors.has(key) === true
+}
+
 export function readNativeDomExceptionField(
   snapshot: DescriptorChainSnapshot | undefined,
   key: "code" | "message" | "name",
 ): unknown {
   const descriptorValue = readDescriptorSnapshotValue(snapshot, key)
-  if (descriptorValue !== undefined) return descriptorValue
+  if (hasDescriptorSnapshotValue(snapshot, key)) return descriptorValue
+  if (snapshot?.blockedDescriptors.has(key)) return undefined
   if (snapshot?.prototypeKind !== "DOMException") return undefined
   return snapshot.domException?.[key]
 }
@@ -247,7 +266,7 @@ export function readNativeErrorMessage(
   snapshot: DescriptorChainSnapshot | undefined,
 ): unknown {
   const descriptorValue = readDescriptorSnapshotValue(snapshot, "message")
-  if (descriptorValue !== undefined) return descriptorValue
+  if (hasDescriptorSnapshotValue(snapshot, "message")) return descriptorValue
   if (snapshot?.blockedDescriptors.has("message")) return undefined
   return snapshot?.error?.message
 }
