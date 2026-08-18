@@ -13,6 +13,7 @@ import {
 } from "~/lib/sentry"
 import {
   raceSsePreflush,
+  unwrapSsePreflushSettlement,
   type SseHeartbeatSink,
   withHeartbeatWhilePending,
   withSseHeartbeat,
@@ -200,7 +201,9 @@ async function streamNativeMessages(
             const response =
               preflush.kind === "settled" ?
                 preflush.value
-              : await withHeartbeatWhilePending(preflush.pending, stream)
+              : unwrapSsePreflushSettlement(
+                  await withHeartbeatWhilePending(preflush.pending, stream),
+                )
             const accountId = getLastUsedAccountId()
             if (accountId !== undefined) {
               setRequestContext(c, { accountId })

@@ -27,6 +27,7 @@ import {
 } from "~/lib/sentry"
 import {
   raceSsePreflush,
+  unwrapSsePreflushSettlement,
   withHeartbeatWhilePending,
   withSseHeartbeat,
   writeSseHeartbeat,
@@ -428,7 +429,9 @@ async function executeStreamingMcpWebSearchFallback(
       const response =
         preflush.kind === "settled" ?
           preflush.value
-        : await withHeartbeatWhilePending(preflush.pending, stream)
+        : unwrapSsePreflushSettlement(
+            await withHeartbeatWhilePending(preflush.pending, stream),
+          )
       recordAccountContext(c)
       setResponsesUsageContext(c, response.usage)
       const result = responsesResultToChatCompletion(

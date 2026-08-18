@@ -7,6 +7,7 @@ import {
   resetSseHeartbeatCountForTest,
   setSsePreflushDeadlineForTest,
   SSE_HEARTBEAT_COMMENT,
+  unwrapSsePreflushSettlement,
   withHeartbeatWhilePending,
   withSseHeartbeat,
   type SseHeartbeatSink,
@@ -382,7 +383,23 @@ describe("raceSsePreflush", () => {
     expect(result.kind).toBe("pending")
     if (result.kind !== "pending") throw new Error("Expected pending result")
     resolvePending?.("late")
-    expect(await result.pending).toBe("late")
+    expect(unwrapSsePreflushSettlement(await result.pending)).toBe("late")
+  })
+
+  test("does not leak a late rejection when the timed-out handle is abandoned", async () => {
+    setSsePreflushDeadlineForTest(1)
+    let rejectPending: ((error: unknown) => void) | undefined
+    const original = new Promise<string>((_resolve, reject) => {
+      rejectPending = reject
+    })
+    const result = await raceSsePreflush(original)
+    expect(result.kind).toBe("pending")
+
+    const unhandled = await captureUnhandled(() => {
+      rejectPending?.(new Error("abandoned late failure"))
+      return Promise.resolve()
+    })
+    expect(unhandled).toEqual([])
   })
 
   test("returns an observed late-rejection promise without an unhandled rejection", async () => {
@@ -401,7 +418,7 @@ describe("raceSsePreflush", () => {
       rejectPending?.(boom)
       let caught: unknown
       try {
-        await result.pending
+        unwrapSsePreflushSettlement(await result.pending)
       } catch (error) {
         caught = error
       }

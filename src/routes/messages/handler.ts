@@ -46,6 +46,7 @@ import {
 } from "~/lib/sentry"
 import {
   raceSsePreflush,
+  unwrapSsePreflushSettlement,
   withHeartbeatWhilePending,
   withSseHeartbeat,
   writeSseHeartbeat,
@@ -828,7 +829,9 @@ const executeChatCompletions = async (
             const response =
               preflush.kind === "settled" ?
                 preflush.value
-              : await withHeartbeatWhilePending(preflush.pending, stream)
+              : unwrapSsePreflushSettlement(
+                  await withHeartbeatWhilePending(preflush.pending, stream),
+                )
 
             // Track which account handled this request (multi-token mode)
             const accountId = getLastUsedAccountId()

@@ -50,6 +50,7 @@ import {
 } from "~/lib/sentry"
 import {
   raceSsePreflush,
+  unwrapSsePreflushSettlement,
   withHeartbeatWhilePending,
   withSseHeartbeat,
   writeSseHeartbeat,
@@ -1757,7 +1758,9 @@ const handleWithAnthropicMessages = async (
       const result =
         preflush.kind === "settled" ?
           preflush.value
-        : await withHeartbeatWhilePending(preflush.pending, stream)
+        : unwrapSsePreflushSettlement(
+            await withHeartbeatWhilePending(preflush.pending, stream),
+          )
       if (stream.aborted || stream.closed) return
       setResponsesResultContext(c, result)
       await emitResponsesResultAsStream(stream, result)

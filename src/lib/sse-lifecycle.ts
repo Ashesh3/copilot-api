@@ -222,14 +222,22 @@ export const withHeartbeatWhilePending = async <T>(
   throw createAbortError()
 }
 
-type ObservedSettlement<T> =
-  | { kind: "fulfilled"; value: T }
-  | { error: unknown; kind: "rejected" }
-  | { kind: "timer" }
+export type SsePreflushSettlement<T> =
+  | { status: "fulfilled"; value: T }
+  | { reason: unknown; status: "rejected" }
+
+const SSE_PREFLUSH_TIMER = Symbol("sse-preflush-timer")
 
 export type SsePreflushResult<T> =
-  | { kind: "pending"; pending: Promise<T> }
+  | { kind: "pending"; pending: Promise<SsePreflushSettlement<T>> }
   | { kind: "settled"; value: T }
+
+export function unwrapSsePreflushSettlement<T>(
+  settlement: SsePreflushSettlement<T>,
+): T {
+  if (settlement.status === "fulfilled") return settlement.value
+  throw settlement.reason
+}
 
 /**
  * Preserve ordinary HTTP errors for a short window, then let the caller open
@@ -239,29 +247,27 @@ export async function raceSsePreflush<T>(
   pending: Promise<T>,
 ): Promise<SsePreflushResult<T>> {
   let timeout: ReturnType<typeof setTimeout> | undefined
-  const observed = pending.then<ObservedSettlement<T>, ObservedSettlement<T>>(
-    (value) => ({ kind: "fulfilled", value }),
-    (error: unknown) => ({ error, kind: "rejected" }),
+  const observed = pending.then<
+    SsePreflushSettlement<T>,
+    SsePreflushSettlement<T>
+  >(
+    (value) => ({ status: "fulfilled", value }),
+    (reason: unknown) => ({ reason, status: "rejected" }),
   )
-  const timer = new Promise<ObservedSettlement<T>>((resolve) => {
+  const timer = new Promise<typeof SSE_PREFLUSH_TIMER>((resolve) => {
     timeout = setTimeout(
-      () => resolve({ kind: "timer" }),
+      () => resolve(SSE_PREFLUSH_TIMER),
       ssePreflushDeadlineMs,
     )
   })
   const settlement = await Promise.race([observed, timer])
   if (timeout !== undefined) clearTimeout(timeout)
 
-  if (settlement.kind === "fulfilled") {
-    return { kind: "settled", value: settlement.value }
+  if (settlement === SSE_PREFLUSH_TIMER) {
+    return { kind: "pending", pending: observed }
   }
-  if (settlement.kind === "rejected") throw settlement.error
   return {
-    kind: "pending",
-    pending: observed.then((result) => {
-      if (result.kind === "fulfilled") return result.value
-      if (result.kind === "rejected") throw result.error
-      return Promise.reject(new Error("Unexpected preflush timer settlement"))
-    }),
+    kind: "settled",
+    value: unwrapSsePreflushSettlement(settlement),
   }
 }

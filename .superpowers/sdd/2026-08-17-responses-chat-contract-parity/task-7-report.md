@@ -165,3 +165,27 @@ Witnessed RED failures showed partial tool groups accepted by the pure scan, dir
 ### Concerns
 
 No blocking concern. The repository retains the same five lint warnings and three optional real-media skips.
+
+## Fix Round 4
+
+### Finding addressed
+
+- Timed-out preflush work now exposes an immediately observed, non-rejecting settlement handle rather than a newly derived rejecting promise. Abandoned handles cannot leak late rejections; active stream callers explicitly unwrap fulfilled/rejected settlements and retain exactly-once success/error behavior. All Responses, Chat-to-Responses, native Messages, and Messages fallback callers use the same settlement API.
+
+### RED/GREEN evidence
+
+The RED regression timed out a preflush operation, abandoned the returned handle, then rejected upstream; Bun reported the late rejection as unhandled. Additional cases covered early value/rejection, timeout plus late resolve/reject, and downstream detach. The settlement-handle implementation made all paths green with zero captured unhandled rejections and preserved active late error delivery.
+
+### Verification
+
+- Focused covering matrix: 313 passed, 0 failed across 10 files; 680 assertions.
+- Non-integration suite: 1411 passed, 3 existing media skips, 0 failed across 102 files; 5042 assertions.
+- Full `bun test`: 1564 passed, 3 existing media skips, 0 failed across 113 files; 6369 assertions.
+- `bun run typecheck`: exit 0.
+- `bun run lint:all`: 0 errors, 5 existing warnings.
+- `bun run build`: exit 0.
+- `git diff --check`: exit 0.
+
+### Concerns
+
+No blocking concern. The repository retains the same five lint warnings and three optional real-media skips.
