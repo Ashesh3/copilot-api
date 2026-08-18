@@ -8,6 +8,7 @@ import {
   convertOpenAIContentPartToAnthropic,
   convertOpenAIToolsToAnthropic,
 } from "~/routes/chat-completions/anthropic-conversion"
+import { emitResponsesResultAsStream } from "~/routes/messages/web-search-helpers"
 import {
   anthropicResponseToResponsesResult,
   responsesPayloadToAnthropic,
@@ -109,48 +110,158 @@ test("maps text image document function tools and results to Messages", async ()
   ])
 })
 
-test("maps Responses sampling reasoning output format and user metadata", async () => {
-  const payload = await responsesPayloadToAnthropic({
-    model: "claude-current",
-    input: "Return JSON.",
-    temperature: 0.4,
-    top_p: 0.8,
-    user: "user-safe",
-    reasoning: { effort: "high", summary: "auto" },
-    text: {
-      format: {
-        type: "json_schema",
-        name: "answer",
-        schema: { type: "object", properties: { answer: { type: "string" } } },
-      },
-    },
-    task_budget: { type: "tokens", total: 4000, remaining: 2500 },
-    parallel_tool_calls: false,
-    tools: [
-      {
-        type: "function",
-        name: "lookup",
-        parameters: { type: "object", properties: {} },
-        strict: false,
-      },
-    ],
-  })
-
-  expect(payload).toMatchObject({
-    temperature: 0.4,
-    top_p: 0.8,
-    metadata: { user_id: "user-safe" },
-    output_config: {
-      effort: "high",
-      format: {
-        type: "json_schema",
-        name: "answer",
-        schema: { type: "object", properties: { answer: { type: "string" } } },
+test.each([
+  { temperature: 0.4, topP: undefined },
+  { temperature: undefined, topP: 0.8 },
+])(
+  "maps Responses sampling reasoning output format and user metadata",
+  async ({ temperature, topP }) => {
+    const payload = await responsesPayloadToAnthropic({
+      model: "claude-current",
+      input: "Return JSON.",
+      ...(temperature === undefined ? {} : { temperature }),
+      ...(topP === undefined ? {} : { top_p: topP }),
+      user: "user-safe",
+      reasoning: { effort: "high", summary: "auto" },
+      text: {
+        format: {
+          type: "json_schema",
+          name: "answer",
+          schema: {
+            type: "object",
+            properties: { answer: { type: "string" } },
+          },
+        },
       },
       task_budget: { type: "tokens", total: 4000, remaining: 2500 },
-    },
-    tool_choice: { type: "auto", disable_parallel_tool_use: true },
+      parallel_tool_calls: false,
+      tools: [
+        {
+          type: "function",
+          name: "lookup",
+          parameters: { type: "object", properties: {} },
+          strict: false,
+        },
+      ],
+    })
+
+    expect(payload).toMatchObject({
+      ...(temperature === undefined ? {} : { temperature }),
+      ...(topP === undefined ? {} : { top_p: topP }),
+      metadata: { user_id: "user-safe" },
+      output_config: {
+        effort: "high",
+        format: {
+          type: "json_schema",
+          name: "answer",
+          schema: {
+            type: "object",
+            properties: { answer: { type: "string" } },
+          },
+        },
+        task_budget: { type: "tokens", total: 4000, remaining: 2500 },
+      },
+      tool_choice: { type: "auto", disable_parallel_tool_use: true },
+    })
+  },
+)
+
+test.each([
+  { name: "temperature", temperature: 0.4, topP: undefined },
+  { name: "top_p", temperature: undefined, topP: 0.8 },
+])(
+  "round-trips accepted Responses $name request controls",
+  async ({ temperature, topP }) => {
+    const request = {
+      model: "claude-current",
+      input: "Return JSON.",
+      max_output_tokens: 512,
+      ...(temperature === undefined ? {} : { temperature }),
+      ...(topP === undefined ? {} : { top_p: topP }),
+      reasoning: { effort: "high", summary: "auto" as const },
+      text: {
+        format: {
+          type: "json_schema",
+          name: "answer",
+          schema: { type: "object", properties: {} },
+        },
+      },
+      tools: [
+        {
+          type: "function" as const,
+          name: "lookup",
+          parameters: { type: "object", properties: {} },
+          strict: false,
+        },
+      ],
+      tool_choice: { type: "function", name: "lookup" },
+      parallel_tool_calls: false,
+    }
+    const anthropic = await responsesPayloadToAnthropic(request)
+    const response: AnthropicResponse = {
+      id: "msg_round_trip",
+      type: "message",
+      role: "assistant",
+      model: "resolved",
+      content: [{ type: "text", text: "ok" }],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    }
+
+    expect(anthropic).toMatchObject({
+      max_tokens: 512,
+      ...(temperature === undefined ? {} : { temperature }),
+      ...(topP === undefined ? {} : { top_p: topP }),
+      output_config: {
+        effort: "high",
+        format: request.text.format,
+      },
+      tool_choice: {
+        type: "tool",
+        name: "lookup",
+        disable_parallel_tool_use: true,
+      },
+    })
+    expect(
+      anthropicResponseToResponsesResult(response, "requested", request),
+    ).toMatchObject({
+      model: "requested",
+      parallel_tool_calls: false,
+      temperature: temperature ?? null,
+      top_p: topP ?? null,
+      tool_choice: request.tool_choice,
+      tools: request.tools,
+      max_output_tokens: 512,
+      reasoning: request.reasoning,
+      text: request.text,
+    })
+  },
+)
+
+test("round-trips integer reasoning request context", async () => {
+  const request = {
+    model: "claude-current",
+    input: "Think.",
+    reasoning: { effort: 2048, summary: "auto" as const },
+  }
+  const response: AnthropicResponse = {
+    id: "msg_integer",
+    type: "message",
+    role: "assistant",
+    model: "resolved",
+    content: [{ type: "text", text: "ok" }],
+    stop_reason: "end_turn",
+    stop_sequence: null,
+    usage: { input_tokens: 1, output_tokens: 1 },
+  }
+
+  expect(await responsesPayloadToAnthropic(request)).toMatchObject({
+    thinking: { type: "enabled", budget_tokens: 2048 },
   })
+  expect(
+    anthropicResponseToResponsesResult(response, "requested", request),
+  ).toMatchObject({ reasoning: request.reasoning })
 })
 
 test("maps integer Responses reasoning effort to a Messages thinking budget", async () => {
@@ -170,6 +281,28 @@ test("accepts implicit Responses messages with omitted content", async () => {
   })
 
   expect(payload.messages).toEqual([{ role: "user", content: "" }])
+})
+
+test.each([
+  { name: "missing role", item: { type: "message", content: "hello" } },
+  {
+    name: "unknown role",
+    item: { type: "message", role: "future_private_role", content: "hello" },
+  },
+  {
+    name: "numeric role",
+    item: { type: "message", role: 7, content: "hello" },
+  },
+])("refuses explicit Responses message with $name", async ({ item }) => {
+  const error = await responsesPayloadToAnthropic({
+    model: "claude-current",
+    input: [item],
+  } as never).catch((caught: unknown) => caught)
+
+  expect(error).toBeInstanceOf(LocalHTTPError)
+  expect((error as LocalHTTPError).clientBody).toMatchObject({
+    error: { code: "endpoint_translation_unsupported", param: "message_role" },
+  })
 })
 
 test("preserves separate assistant text and function calls in input order", async () => {
@@ -251,6 +384,108 @@ test.each([
   expect(JSON.stringify((error as LocalHTTPError).clientBody)).not.toContain(
     "private",
   )
+})
+
+test.each([
+  {
+    name: "meaningful status",
+    payload: {
+      model: "claude-current",
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: "hello",
+          status: "incomplete",
+        },
+      ],
+    },
+    param: "item_status",
+  },
+  {
+    name: "wrong text direction",
+    payload: {
+      model: "claude-current",
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "output_text", text: "answer" }],
+        },
+      ],
+    },
+    param: "content_direction",
+  },
+  {
+    name: "unsupported image source",
+    payload: {
+      model: "claude-current",
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [
+            {
+              type: "input_image",
+              image_url: "data:text/plain;base64,AA==",
+              detail: "auto",
+            },
+          ],
+        },
+      ],
+    },
+    param: "input_image",
+  },
+  {
+    name: "orphan tool result",
+    payload: {
+      model: "claude-current",
+      input: [
+        { type: "function_call_output", call_id: "call_1", output: "done" },
+      ],
+    },
+    param: "tool_result_pairing",
+  },
+  {
+    name: "non-object function arguments",
+    payload: {
+      model: "claude-current",
+      input: [
+        {
+          type: "function_call",
+          call_id: "call_1",
+          name: "lookup",
+          arguments: "[]",
+        },
+      ],
+    },
+    param: "function_arguments",
+  },
+  {
+    name: "undeclared named tool choice",
+    payload: {
+      model: "claude-current",
+      input: "hello",
+      tools: [
+        {
+          type: "function",
+          name: "lookup",
+          parameters: { type: "object", properties: {} },
+          strict: false,
+        },
+      ],
+      tool_choice: { type: "function", name: "missing" },
+    },
+    param: "tool_choice",
+  },
+])("direct bridge refuses $name", async ({ payload, param }) => {
+  const error = await responsesPayloadToAnthropic(payload as never).catch(
+    (caught: unknown) => caught,
+  )
+  expect(error).toBeInstanceOf(LocalHTTPError)
+  expect((error as LocalHTTPError).clientBody).toMatchObject({
+    error: { code: "endpoint_translation_unsupported", param },
+  })
 })
 
 test("refuses opaque Responses reasoning before Messages conversion", async () => {
@@ -352,6 +587,61 @@ test("converts Anthropic text thinking tools usage stop and model alias", () => 
   })
 })
 
+test("preserves interleaved Anthropic blocks and every thinking signature", () => {
+  const response: AnthropicResponse = {
+    id: "msg_interleaved",
+    type: "message",
+    role: "assistant",
+    model: "resolved",
+    content: [
+      { type: "thinking", thinking: "first", signature: "sig-first" },
+      { type: "text", text: "alpha" },
+      {
+        type: "tool_use",
+        id: "call_1",
+        name: "lookup",
+        input: { query: "one" },
+      },
+      { type: "thinking", thinking: "second", signature: "sig-second" },
+      { type: "text", text: "omega" },
+    ],
+    stop_reason: "end_turn",
+    stop_sequence: null,
+    usage: { input_tokens: 1, output_tokens: 2 },
+  }
+
+  const result = anthropicResponseToResponsesResult(response, "requested")
+  expect(result.output.map((item) => item.type)).toEqual([
+    "reasoning",
+    "message",
+    "function_call",
+    "reasoning",
+    "message",
+  ])
+  expect(result.output_text).toBe("alphaomega")
+  expect(result.output).toMatchObject([
+    {
+      id: "rs_msg_interleaved",
+      encrypted_content: "sig-first",
+      summary: [{ type: "summary_text", text: "first" }],
+    },
+    {
+      id: "msg_msg_interleaved",
+      content: [{ type: "output_text", text: "alpha", annotations: [] }],
+    },
+    { id: "fc_call_1", call_id: "call_1" },
+    {
+      id: "rs_msg_interleaved_1",
+      encrypted_content: "sig-second",
+      summary: [{ type: "summary_text", text: "second" }],
+    },
+    {
+      id: "msg_msg_interleaved_1",
+      content: [{ type: "output_text", text: "omega", annotations: [] }],
+    },
+  ])
+})
+
 test("maps Anthropic max-token and refusal stops to Responses status", () => {
   const base: AnthropicResponse = {
     id: "msg_stop",
@@ -377,6 +667,59 @@ test("maps Anthropic max-token and refusal stops to Responses status", () => {
     status: "incomplete",
     incomplete_details: { reason: "content_filter" },
   })
+})
+
+test("emits reasoning lifecycle and the result's terminal status", async () => {
+  const writes: Array<{ event?: string; data: string }> = []
+  const result = anthropicResponseToResponsesResult(
+    {
+      id: "msg_stream_reasoning",
+      type: "message",
+      role: "assistant",
+      model: "resolved",
+      content: [
+        {
+          type: "thinking",
+          thinking: "considering",
+          signature: "sig-stream",
+        },
+      ],
+      stop_reason: "max_tokens",
+      stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    },
+    "requested",
+  )
+
+  await emitResponsesResultAsStream(
+    {
+      writeSSE: (data) => {
+        writes.push(data)
+        return Promise.resolve()
+      },
+    },
+    result,
+  )
+
+  expect(writes.map((entry) => entry.event)).toEqual([
+    "response.created",
+    "response.output_item.added",
+    "response.reasoning_summary_text.delta",
+    "response.reasoning_summary_text.done",
+    "response.output_item.done",
+    "response.incomplete",
+  ])
+  const parsedWrites = writes.map(
+    (entry) => JSON.parse(entry.data) as Record<string, unknown>,
+  )
+  expect(parsedWrites).toMatchObject([
+    {},
+    {},
+    { delta: "considering", summary_index: 0 },
+    { text: "considering", summary_index: 0 },
+    {},
+    { type: "response.incomplete", response: { status: "incomplete" } },
+  ])
 })
 
 test.each([
@@ -435,3 +778,38 @@ test("shared Anthropic conversion helpers reject unknown content and tools", asy
     ] as never),
   ).toThrow(LocalHTTPError)
 })
+
+test.each([
+  {
+    name: "non-image data URI",
+    part: {
+      type: "image_url",
+      image_url: { url: "data:text/plain;base64,AA==", detail: "auto" },
+    },
+  },
+  {
+    name: "malformed PDF file",
+    part: {
+      type: "file",
+      file: {
+        filename: "document.pdf",
+        file_data: "data:text/plain;base64,AA==",
+      },
+    },
+  },
+])(
+  "shared Anthropic converter refuses $name instead of omitting it",
+  async ({ part }) => {
+    const error = await convertOpenAIContentPartToAnthropic(
+      part as never,
+    ).catch((caught: unknown) => caught)
+
+    expect(error).toBeInstanceOf(LocalHTTPError)
+    expect((error as LocalHTTPError).clientBody).toMatchObject({
+      error: {
+        code: "endpoint_translation_unsupported",
+        param: "message_content_part",
+      },
+    })
+  },
+)

@@ -232,6 +232,47 @@ test("applies the sanctioned apply_patch rewrite before Chat route selection", a
   )
 })
 
+test.each(["web_search", "web_search_20250305", "web_search_preview"])(
+  "applies the %s rewrite before Chat-only route selection",
+  async (type) => {
+    installModel({ supported_endpoints: ["/chat/completions"] })
+
+    const response = await postResponses({
+      input: "Search current information.",
+      tools: [
+        {
+          type,
+          external_web_access: true,
+          filters: { allowed_domains: ["example.com"] },
+        },
+      ],
+      tool_choice: "auto",
+    })
+
+    expect(response.status).toBe(200)
+    expect(lastUpstreamPath).toBe("/chat/completions")
+    expect(lastUpstreamPayload).toHaveProperty(
+      "tools.0.function.name",
+      "web_search",
+    )
+  },
+)
+
+test("keeps native Responses priority for hosted web search", async () => {
+  installModel({
+    supported_endpoints: ["/responses", "/chat/completions"],
+  })
+
+  const response = await postResponses({
+    input: "Search current information.",
+    tools: [{ type: "web_search", external_web_access: true }],
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/responses")
+  expect(lastUpstreamPayload).toHaveProperty("tools.0.type", "web_search")
+})
+
 test("normalizes Responses controls before Messages fallback conversion", async () => {
   installModel({ supported_endpoints: ["/v1/messages"] })
 
@@ -266,6 +307,77 @@ test("normalizes Responses controls before Messages fallback conversion", async 
     "output_config.format.schema.additionalProperties",
     false,
   )
+})
+
+test.each([
+  {
+    name: "temperature and effort",
+    request: {
+      temperature: 0.4,
+      reasoning: { effort: "high", summary: "auto" },
+    },
+    wire: { temperature: 0.4, output_config: { effort: "high" } },
+  },
+  {
+    name: "top_p and effort",
+    request: {
+      top_p: 0.8,
+      reasoning: { effort: "high", summary: "auto" },
+    },
+    wire: { top_p: 0.8, output_config: { effort: "high" } },
+  },
+  {
+    name: "integer reasoning",
+    request: { reasoning: { effort: 2048, summary: "auto" } },
+    wire: { thinking: { type: "enabled", budget_tokens: 2048 } },
+  },
+])(
+  "preserves accepted $name on native Messages wire",
+  async ({ request, wire }) => {
+    installModel({ supported_endpoints: ["/v1/messages"] })
+
+    const response = await postResponses({ input: "hello", ...request })
+
+    expect(response.status).toBe(200)
+    expect(lastUpstreamPayload).toMatchObject(wire)
+  },
+)
+
+test("rejects incompatible Messages sampling without upstream dispatch", async () => {
+  installModel({ supported_endpoints: ["/v1/messages"] })
+
+  const response = await postResponses({
+    input: "hello",
+    temperature: 0.4,
+    top_p: 0.8,
+  })
+
+  expect(response.status).toBe(400)
+  expect(fetchMock).not.toHaveBeenCalled()
+  expect(await response.json()).toMatchObject({
+    error: { code: "endpoint_translation_unsupported", param: "sampling" },
+  })
+})
+
+test("rejects unsupported Messages reasoning effort without upstream dispatch", async () => {
+  installModel({
+    supported_endpoints: ["/v1/messages"],
+    reasoning_effort: [],
+  })
+
+  const response = await postResponses({
+    input: "hello",
+    reasoning: { effort: "high", summary: "auto" },
+  })
+
+  expect(response.status).toBe(400)
+  expect(fetchMock).not.toHaveBeenCalled()
+  expect(await response.json()).toMatchObject({
+    error: {
+      code: "endpoint_translation_unsupported",
+      param: "reasoning_effort",
+    },
+  })
 })
 
 test("returns a synthetic Responses stream for a Messages fallback", async () => {
@@ -316,6 +428,104 @@ test("rejects Messages-only opaque reasoning without upstream dispatch", async (
     error: {
       code: "endpoint_translation_unsupported",
       param: "opaque_reasoning",
+    },
+  })
+})
+
+test.each([
+  { name: "missing role", item: { type: "message", content: "hello" } },
+  {
+    name: "unknown role",
+    item: { type: "message", role: "future_private_role", content: "hello" },
+  },
+  {
+    name: "numeric role",
+    item: { type: "message", role: 7, content: "hello" },
+  },
+])("rejects Messages-only explicit message with $name", async ({ item }) => {
+  installModel({ supported_endpoints: ["/v1/messages"] })
+
+  const response = await postResponses({ input: [item] })
+
+  expect(response.status).toBe(400)
+  expect(fetchMock).not.toHaveBeenCalled()
+  expect(await response.json()).toMatchObject({
+    error: { code: "endpoint_translation_unsupported", param: "message_role" },
+  })
+})
+
+test.each([
+  {
+    name: "orphan tool result",
+    input: [{ type: "function_call_output", call_id: "call_1", output: "x" }],
+    param: "tool_result_pairing",
+  },
+  {
+    name: "non-object function arguments",
+    input: [
+      {
+        type: "function_call",
+        call_id: "call_1",
+        name: "lookup",
+        arguments: "[]",
+      },
+    ],
+    param: "function_arguments",
+  },
+  {
+    name: "unsupported image source",
+    input: [
+      {
+        type: "message",
+        role: "user",
+        content: [
+          {
+            type: "input_image",
+            image_url: "data:text/plain;base64,AA==",
+            detail: "auto",
+          },
+        ],
+      },
+    ],
+    param: "input_image",
+  },
+])("rejects Messages-only $name without upstream", async ({ input, param }) => {
+  installModel({ supported_endpoints: ["/v1/messages"] })
+  const response = await postResponses({ input })
+  expect(response.status).toBe(400)
+  expect(fetchMock).not.toHaveBeenCalled()
+  expect(await response.json()).toMatchObject({
+    error: { code: "endpoint_translation_unsupported", param },
+  })
+})
+
+test("rejects a Messages image URL fetch failure instead of inserting omission text", async () => {
+  installModel({ supported_endpoints: ["/v1/messages"] })
+  fetchMock.mockImplementationOnce(() => Response.json({}, { status: 404 }))
+
+  const response = await postResponses({
+    input: [
+      {
+        type: "message",
+        role: "user",
+        content: [
+          {
+            type: "input_image",
+            image_url: "https://example.invalid/private.png",
+            detail: "auto",
+          },
+        ],
+      },
+    ],
+  })
+
+  expect(response.status).toBe(400)
+  expect(fetchMock).toHaveBeenCalledTimes(2)
+  expect(lastUpstreamPath).not.toBe("/v1/messages")
+  expect(await response.json()).toMatchObject({
+    error: {
+      code: "endpoint_translation_unsupported",
+      param: "message_content_part",
     },
   })
 })
@@ -402,14 +612,20 @@ function postResponses(extra: Record<string, unknown>): Promise<Response> {
   )
 }
 
-function installModel(options: { supported_endpoints?: Array<string> }): void {
+function installModel(options: {
+  reasoning_effort?: Array<string>
+  supported_endpoints?: Array<string>
+}): void {
   state.models = {
     object: "list",
     data: [createModel(options)],
   } satisfies ModelsResponse
 }
 
-function createModel(options: { supported_endpoints?: Array<string> }): Model {
+function createModel(options: {
+  reasoning_effort?: Array<string>
+  supported_endpoints?: Array<string>
+}): Model {
   return {
     id: "route-model",
     name: "Route Model",
@@ -423,7 +639,12 @@ function createModel(options: { supported_endpoints?: Array<string> }): Model {
       limits: { max_output_tokens: 1024 },
       object: "model_capabilities",
       supports: {
-        reasoning_effort: ["low", "medium", "high", "max"],
+        reasoning_effort: options.reasoning_effort ?? [
+          "low",
+          "medium",
+          "high",
+          "max",
+        ],
       },
       tokenizer: "cl100k_base",
       type: "chat",

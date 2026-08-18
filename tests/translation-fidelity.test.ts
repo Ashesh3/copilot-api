@@ -1409,8 +1409,166 @@ test.each([
     checkResponsesToMessagesTranslation({
       model: "claude-current",
       input: [item],
-    } as ResponsesPayload),
+    } as unknown as ResponsesPayload),
   ).toEqual({ supported: false, blockers: [blocker] })
+})
+
+test.each(["in_progress", "completed", "incomplete"])(
+  "rejects Responses to Messages meaningful item status %s",
+  (status) => {
+    expect(
+      checkResponsesToMessagesTranslation({
+        model: "claude-current",
+        input: [{ type: "message", role: "user", content: "hello", status }],
+      } as ResponsesPayload),
+    ).toEqual({ supported: false, blockers: ["item_status"] })
+  },
+)
+
+test.each([
+  {
+    name: "output_text in a user message",
+    item: {
+      type: "message",
+      role: "user",
+      content: [{ type: "output_text", text: "answer" }],
+    },
+  },
+  {
+    name: "input_text in an assistant message",
+    item: {
+      type: "message",
+      role: "assistant",
+      content: [{ type: "input_text", text: "prompt" }],
+    },
+  },
+])("rejects Responses to Messages $name", ({ item }) => {
+  expect(
+    checkResponsesToMessagesTranslation({
+      model: "claude-current",
+      input: [item],
+    } as ResponsesPayload),
+  ).toEqual({ supported: false, blockers: ["content_direction"] })
+})
+
+test.each([
+  "data:text/plain;base64,AA==",
+  "data:image/svg+xml;base64,AA==",
+  "not-an-image-source",
+])("rejects Responses to Messages image source %s", (imageUrl) => {
+  expect(
+    checkResponsesToMessagesTranslation({
+      model: "claude-current",
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [
+            { type: "input_image", image_url: imageUrl, detail: "auto" },
+          ],
+        },
+      ],
+    }),
+  ).toEqual({ supported: false, blockers: ["input_image"] })
+})
+
+test.each([
+  {
+    name: "orphan result",
+    input: [{ type: "function_call_output", call_id: "call_1", output: "x" }],
+  },
+  {
+    name: "mismatched result",
+    input: [
+      {
+        type: "function_call",
+        call_id: "call_1",
+        name: "lookup",
+        arguments: "{}",
+      },
+      { type: "function_call_output", call_id: "call_2", output: "x" },
+    ],
+  },
+  {
+    name: "duplicate result",
+    input: [
+      {
+        type: "function_call",
+        call_id: "call_1",
+        name: "lookup",
+        arguments: "{}",
+      },
+      { type: "function_call_output", call_id: "call_1", output: "x" },
+      { type: "function_call_output", call_id: "call_1", output: "y" },
+    ],
+  },
+])("rejects Responses to Messages $name", ({ input }) => {
+  expect(
+    checkResponsesToMessagesTranslation({
+      model: "claude-current",
+      input,
+    } as unknown as ResponsesPayload),
+  ).toEqual({ supported: false, blockers: ["tool_result_pairing"] })
+})
+
+test.each(["[]", "1", '"text"', "not-json"])(
+  "rejects Responses to Messages function arguments %s",
+  (argumentsText) => {
+    expect(
+      checkResponsesToMessagesTranslation({
+        model: "claude-current",
+        input: [
+          {
+            type: "function_call",
+            call_id: "call_1",
+            name: "lookup",
+            arguments: argumentsText,
+          },
+        ],
+      }),
+    ).toEqual({ supported: false, blockers: ["function_arguments"] })
+  },
+)
+
+test("rejects named Messages tool choice for an undeclared tool", () => {
+  expect(
+    checkResponsesToMessagesTranslation({
+      model: "claude-current",
+      input: "hello",
+      tools: [
+        {
+          type: "function",
+          name: "lookup",
+          parameters: { type: "object", properties: {} },
+          strict: false,
+        },
+      ],
+      tool_choice: { type: "function", name: "missing" },
+    }),
+  ).toEqual({ supported: false, blockers: ["tool_choice"] })
+})
+
+test.each([
+  {
+    name: "temperature with top_p",
+    payload: { temperature: 0.4, top_p: 0.8 },
+  },
+  {
+    name: "temperature with integer reasoning",
+    payload: { temperature: 0.4, reasoning: { effort: 2048, summary: "auto" } },
+  },
+  {
+    name: "top_p with integer reasoning",
+    payload: { top_p: 0.8, reasoning: { effort: 2048, summary: "auto" } },
+  },
+])("rejects Responses to Messages incompatible $name", ({ payload }) => {
+  expect(
+    checkResponsesToMessagesTranslation({
+      model: "claude-current",
+      input: "hello",
+      ...payload,
+    }),
+  ).toEqual({ supported: false, blockers: ["sampling"] })
 })
 
 test.each([
@@ -1487,7 +1645,10 @@ test.each([
           },
         ],
       } as ResponsesPayload),
-    ).toEqual({ supported: false, blockers: [blocker] })
+    ).toEqual({
+      supported: false,
+      blockers: ["tool_result_pairing", blocker],
+    })
   },
 )
 
@@ -1652,6 +1813,10 @@ test.each([
   },
 ])("rejects explicit malformed Responses $name", ({ item, blocker }) => {
   const payload = { model: "chat-only", input: [item] } as ResponsesPayload
+  const messagesBlockers =
+    item.type === "function_call_output" ?
+      ["tool_result_pairing", blocker]
+    : [blocker]
 
   expect(checkResponsesToChatTranslation(payload)).toEqual({
     supported: false,
@@ -1659,7 +1824,7 @@ test.each([
   })
   expect(checkResponsesToMessagesTranslation(payload)).toEqual({
     supported: false,
-    blockers: [blocker],
+    blockers: messagesBlockers,
   })
   expect(() => responsesToChatCompletions(payload)).toThrow(LocalHTTPError)
   expect(
@@ -1679,7 +1844,7 @@ test("rejects omitted function output on both Responses translation targets", ()
   })
   expect(checkResponsesToMessagesTranslation(payload)).toEqual({
     supported: false,
-    blockers: ["content_type"],
+    blockers: ["tool_result_pairing", "content_type"],
   })
 
   try {
@@ -1736,6 +1901,29 @@ test.each(["user", "assistant", "system", "developer"] as const)(
     })
   },
 )
+
+test.each([
+  { name: "missing role", item: { type: "message", content: "hello" } },
+  {
+    name: "unknown role",
+    item: { type: "message", role: "future_private_role", content: "hello" },
+  },
+  {
+    name: "numeric role",
+    item: { type: "message", role: 7, content: "hello" },
+  },
+])("rejects explicit Responses message with $name", ({ item }) => {
+  const payload = { model: "chat-only", input: [item] } as ResponsesPayload
+
+  expect(checkResponsesToChatTranslation(payload)).toEqual({
+    supported: false,
+    blockers: ["message_role"],
+  })
+  expect(checkResponsesToMessagesTranslation(payload)).toEqual({
+    supported: false,
+    blockers: ["message_role"],
+  })
+})
 
 test.each([
   { name: "missing role", item: {} },

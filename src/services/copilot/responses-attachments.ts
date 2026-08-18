@@ -38,6 +38,7 @@ function stripFileUrl(part: ResponseInputFile): ResponseInputFile {
 async function normalizeInputFile(
   part: ResponseInputFile,
   signal?: AbortSignal,
+  options?: { failClosed?: boolean },
 ): Promise<ResponseInputContent> {
   const { file_url: fileUrl, file_data: fileData } = part
   if (fileData) {
@@ -67,38 +68,45 @@ async function normalizeInputFile(
       file_data: toDataUri(inlined.mediaType, inlined.data),
     })
   }
-  return {
-    type: "input_text",
-    text: attachmentOmittedNote({
-      kind: "file",
-      name: part.filename ?? fileUrl,
-      reason: "the URL could not be fetched by the proxy",
-    }),
-  }
+  return options?.failClosed ? part : (
+      {
+        type: "input_text",
+        text: attachmentOmittedNote({
+          kind: "file",
+          name: part.filename ?? fileUrl,
+          reason: "the URL could not be fetched by the proxy",
+        }),
+      }
+    )
 }
 
 async function normalizeContentPart(
   part: ResponseInputContent,
-  signal: AbortSignal | undefined,
-  resizeImage: ResponsesImageResizer,
+  options: {
+    failClosed?: boolean
+    resizeImage: ResponsesImageResizer
+    signal?: AbortSignal
+  },
 ): Promise<ResponseInputContent> {
+  const { failClosed, resizeImage, signal } = options
   if (isInputImage(part) && part.image_url && isHttpUrl(part.image_url)) {
     const inlined = await fetchUrlAsDataUri(part.image_url, { signal })
     if (inlined) {
       return await normalizeContentPart(
         { ...part, image_url: toDataUri(inlined.mediaType, inlined.data) },
-        signal,
-        resizeImage,
+        options,
       )
     }
-    return {
-      type: "input_text",
-      text: attachmentOmittedNote({
-        kind: "image",
-        name: part.image_url,
-        reason: "the URL could not be fetched by the proxy",
-      }),
-    }
+    return failClosed ? part : (
+        {
+          type: "input_text",
+          text: attachmentOmittedNote({
+            kind: "image",
+            name: part.image_url,
+            reason: "the URL could not be fetched by the proxy",
+          }),
+        }
+      )
   }
   if (isInputImage(part) && part.image_url?.startsWith("data:image/webp;")) {
     const normalized = await resizeImage({
@@ -110,6 +118,7 @@ async function normalizeContentPart(
     if (normalized.outcome === "resized") {
       return { ...part, image_url: normalized.dataUri }
     }
+    if (failClosed) return part
     return {
       type: "input_text",
       text: attachmentOmittedNote({
@@ -118,18 +127,23 @@ async function normalizeContentPart(
       }),
     }
   }
-  if (isInputFile(part)) return await normalizeInputFile(part, signal)
+  if (isInputFile(part)) {
+    return await normalizeInputFile(part, signal, { failClosed })
+  }
   return part
 }
 
 async function normalizeContentArray(
   content: Array<ResponseInputContent>,
-  signal: AbortSignal | undefined,
-  resizeImage: ResponsesImageResizer,
+  options: {
+    failClosed?: boolean
+    resizeImage: ResponsesImageResizer
+    signal?: AbortSignal
+  },
 ): Promise<Array<ResponseInputContent>> {
   const normalized: Array<ResponseInputContent> = []
   for (const part of content) {
-    normalized.push(await normalizeContentPart(part, signal, resizeImage))
+    normalized.push(await normalizeContentPart(part, options))
   }
   return normalized
 }
@@ -139,17 +153,43 @@ export async function normalizeResponsesAttachments(
   signal?: AbortSignal,
   resizeImage: ResponsesImageResizer = resizeResponsesImage,
 ): Promise<void> {
+  await normalizeResponsesAttachmentsWithOptions(payload, {
+    resizeImage,
+    signal,
+  })
+}
+
+export async function normalizeResponsesAttachmentsFailClosed(
+  payload: Pick<ResponsesPayload, "input"> & Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<void> {
+  await normalizeResponsesAttachmentsWithOptions(payload, {
+    failClosed: true,
+    resizeImage: resizeResponsesImage,
+    signal,
+  })
+}
+
+async function normalizeResponsesAttachmentsWithOptions(
+  payload: Pick<ResponsesPayload, "input"> & Record<string, unknown>,
+  options: {
+    failClosed?: boolean
+    resizeImage: ResponsesImageResizer
+    signal?: AbortSignal
+  },
+): Promise<void> {
+  const { failClosed = false, resizeImage, signal } = options
   if (!Array.isArray(payload.input)) return
 
   const normalizedInput: Array<ResponseInputItem> = []
   for (const item of payload.input) {
     if (isInputImage(item) || isInputFile(item)) {
       normalizedInput.push(
-        (await normalizeContentPart(
-          item,
-          signal,
+        (await normalizeContentPart(item, {
+          failClosed,
           resizeImage,
-        )) as ResponseInputItem,
+          signal,
+        })) as ResponseInputItem,
       )
       continue
     }
@@ -158,8 +198,7 @@ export async function normalizeResponsesAttachments(
         ...item,
         content: await normalizeContentArray(
           item.content as Array<ResponseInputContent>,
-          signal,
-          resizeImage,
+          { failClosed, resizeImage, signal },
         ),
       })
       continue
@@ -169,8 +208,7 @@ export async function normalizeResponsesAttachments(
         ...item,
         output: await normalizeContentArray(
           item.output as Array<ResponseInputContent>,
-          signal,
-          resizeImage,
+          { failClosed, resizeImage, signal },
         ),
       })
       continue
@@ -178,7 +216,11 @@ export async function normalizeResponsesAttachments(
     if (isRecord(item) && isInputImage(item.output)) {
       normalizedInput.push({
         ...item,
-        output: await normalizeContentPart(item.output, signal, resizeImage),
+        output: await normalizeContentPart(item.output, {
+          failClosed,
+          resizeImage,
+          signal,
+        }),
       })
       continue
     }

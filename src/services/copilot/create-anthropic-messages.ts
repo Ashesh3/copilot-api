@@ -97,6 +97,7 @@ function serializeMessagesPayload(payload: Record<string, unknown>): string {
 
 function sanitizeMessagesPayload(
   payload: AnthropicMessagesPayload,
+  options?: { preserveValidatedControls?: boolean },
 ): Record<string, unknown> {
   const source = payload as unknown as Record<string, unknown>
   const result: Record<string, unknown> = {}
@@ -119,7 +120,11 @@ function sanitizeMessagesPayload(
   const outputConfig = result.output_config as
     | { effort?: string; [key: string]: unknown }
     | undefined
-  if (outputConfig?.effort && !modelSupportsEffort(payload.model)) {
+  if (
+    !options?.preserveValidatedControls
+    && outputConfig?.effort
+    && !modelSupportsEffort(payload.model)
+  ) {
     consola.debug(
       `Removing output_config.effort for ${payload.model}: model does not support reasoning effort`,
     )
@@ -162,6 +167,7 @@ export const createAnthropicMessages = async (
   options?: {
     compaction?: boolean
     initiator?: "agent" | "user"
+    preserveValidatedControls?: boolean
     signal?: AbortSignal
   },
 ): Promise<CreateAnthropicMessagesReturn> => {
@@ -169,7 +175,7 @@ export const createAnthropicMessages = async (
   const initiator =
     options?.initiator ?? detectAnthropicInitiator(payload.messages)
 
-  const sanitizedBody = sanitizeMessagesPayload(payload)
+  const sanitizedBody = sanitizeMessagesPayload(payload, options)
   const fitted =
     options?.compaction ? fitAnthropicCompactionPayload(sanitizedBody) : null
   const body = fitted?.payload ?? sanitizedBody

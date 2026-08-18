@@ -2,7 +2,6 @@ import type {
   AnthropicDocumentBlock,
   AnthropicImageBlock,
   AnthropicMessagesPayload,
-  AnthropicTextBlock,
   AnthropicTool,
   AnthropicUserContentBlock,
 } from "~/routes/messages/anthropic-types"
@@ -12,14 +11,19 @@ import type {
 } from "~/services/copilot/create-chat-completions"
 
 import {
-  attachmentOmittedNote,
   fetchUrlAsDataUri,
   isHttpUrl,
-  isImageMediaType,
   isPdfMediaType,
   parseDataUri,
 } from "~/lib/attachments"
 import { createEndpointTranslationError } from "~/lib/error"
+
+const ANTHROPIC_IMAGE_MEDIA_TYPES = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+])
 
 export async function convertOpenAIContentPartToAnthropic(
   part: ContentPart | AnthropicDocumentBlock,
@@ -51,13 +55,13 @@ export async function convertOpenAIContentPartToAnthropic(
 async function convertImagePart(
   url: string,
   signal?: AbortSignal,
-): Promise<AnthropicImageBlock | AnthropicTextBlock> {
+): Promise<AnthropicImageBlock> {
   let parsed = parseDataUri(url)
   if (!parsed && isHttpUrl(url)) {
     parsed = await fetchUrlAsDataUri(url, { signal })
   }
 
-  if (parsed && isImageMediaType(parsed.mediaType)) {
+  if (parsed && ANTHROPIC_IMAGE_MEDIA_TYPES.has(parsed.mediaType)) {
     return {
       type: "image",
       source: {
@@ -72,19 +76,12 @@ async function convertImagePart(
     }
   }
 
-  return {
-    type: "text",
-    text: attachmentOmittedNote({
-      kind: "image",
-      name: url,
-      reason: "the image could not be decoded or fetched by the proxy",
-    }),
-  }
+  throwUnsupportedContentPart()
 }
 
 function convertFilePart(
   part: ContentPart & { type: "file" },
-): AnthropicDocumentBlock | AnthropicTextBlock {
+): AnthropicDocumentBlock {
   const parsed = part.file.file_data ? parseDataUri(part.file.file_data) : null
 
   if (parsed && isPdfMediaType(parsed.mediaType)) {
@@ -99,17 +96,15 @@ function convertFilePart(
     }
   }
 
-  return {
-    type: "text",
-    text: attachmentOmittedNote({
-      kind: "file",
-      name: part.file.filename,
-      reason:
-        part.file.file_id ?
-          "file_id references are not supported by this proxy; send file_data as a base64 data URI"
-        : "file_data must be a base64 data URI (e.g. data:application/pdf;base64,...)",
-    }),
-  }
+  throwUnsupportedContentPart()
+}
+
+function throwUnsupportedContentPart(): never {
+  throw createEndpointTranslationError({
+    blockers: ["message_content_part"],
+    code: "endpoint_translation_unsupported",
+    source: "chat",
+  })
 }
 
 export function convertOpenAIToolsToAnthropic(

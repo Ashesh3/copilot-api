@@ -89,3 +89,29 @@ Responses lifecycle for streaming clients.
 - No blocking concern.
 - The repository retains the five pre-existing lint warnings and three
   optional-real-media skips.
+
+## Fix Round 1
+
+### Findings addressed
+
+- Chat-only hosted `web_search`, dated variants, and preview variants are now rewritten on a clone before endpoint selection; native Responses remains unchanged and preferred.
+- Explicit Responses message items now require a supported role. The Messages subset rejects meaningful statuses, wrong text direction, malformed/non-image media, invalid or non-object function arguments, undeclared named choices, and orphan/mismatched/duplicate results. Shared media converters fail closed instead of inserting omission notes.
+- Messages routing now blocks incompatible sampling/thinking combinations and model-unsupported string effort. Accepted temperature, `top_p`, string/integer reasoning, tools/choice, parallelism, output limits, structured output, and request context survive native wire and converted result round trips.
+- Anthropic output conversion preserves original thinking/text/tool order and each thinking signature one-to-one. Synthetic streams emit reasoning summary lifecycle events and use completed/incomplete/failed terminal events.
+- Buffered Messages streaming now preflushes SSE, propagates downstream cancellation through a composed abort signal, and emits no protocol events after detach.
+
+### RED/GREEN evidence
+
+Witnessed RED failures covered all six review groups: Chat web-search routing returned 400; explicit roles and Messages subset cases were accepted/coerced; request context and wire controls were stripped; thinking blocks were aggregated; reasoning/terminal events were missing; and the buffered stream waited for upstream headers. Focused GREEN verification passed 269/269 across route, bridge, fidelity, lifecycle, media, compaction, and Messages regression files.
+
+### Verification
+
+- `bun test`: 1527 passed, 3 existing media skips, 0 failed across 113 files; 6298 assertions.
+- `bun run typecheck`: exit 0.
+- `bun run lint:all`: 0 errors, 5 existing warnings.
+- `bun run build`: exit 0.
+- `git diff --check`: exit 0.
+
+### Concerns
+
+No blocking concern. The repository retains the same five lint warnings and three optional real-media skips.

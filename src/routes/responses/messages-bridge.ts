@@ -350,50 +350,9 @@ function convertResponsesOutputConfig(
 export function anthropicResponseToResponsesResult(
   response: AnthropicResponse,
   requestedModel: string,
+  request?: ResponsesPayload,
 ): ResponsesResult {
-  const output: Array<ResponseOutputItem> = []
-  const text = response.content
-    .filter((block) => block.type === "text")
-    .map((block) => block.text)
-    .join("")
-  const thinking = response.content.filter((block) => block.type === "thinking")
-  if (thinking.length > 0) {
-    output.push({
-      id: `rs_${response.id}`,
-      type: "reasoning",
-      summary: thinking.flatMap((block) =>
-        block.thinking ? [{ type: "summary_text", text: block.thinking }] : [],
-      ),
-      ...(thinking.find((block) => block.signature)?.signature ?
-        {
-          encrypted_content: thinking.find((block) => block.signature)
-            ?.signature,
-        }
-      : {}),
-      status: "completed",
-    })
-  }
-  if (text) {
-    output.push({
-      id: `msg_${response.id}`,
-      type: "message",
-      role: "assistant",
-      status: "completed",
-      content: [{ type: "output_text", text, annotations: [] }],
-    })
-  }
-  for (const block of response.content) {
-    if (block.type !== "tool_use") continue
-    output.push({
-      id: `fc_${block.id}`,
-      type: "function_call",
-      call_id: block.id,
-      name: block.name,
-      arguments: JSON.stringify(block.input),
-      status: "completed",
-    })
-  }
-
+  const { output, text } = convertAnthropicOutput(response)
   const incompleteDetails = mapStopReason(response.stop_reason)
   return {
     id: response.id,
@@ -406,13 +365,112 @@ export function anthropicResponseToResponsesResult(
     usage: mapAnthropicUsage(response),
     error: null,
     incomplete_details: incompleteDetails,
-    instructions: null,
-    metadata: null,
-    parallel_tool_calls: true,
-    temperature: null,
-    tool_choice: "auto",
-    tools: [],
-    top_p: null,
+    ...getResponsesRequestContext(request),
+  }
+}
+
+function getResponsesRequestContext(
+  request: ResponsesPayload | undefined,
+): Pick<
+  ResponsesResult,
+  | "instructions"
+  | "metadata"
+  | "parallel_tool_calls"
+  | "temperature"
+  | "tool_choice"
+  | "tools"
+  | "top_p"
+>
+  & Partial<Pick<ResponsesResult, "max_output_tokens" | "reasoning" | "text">> {
+  if (!request) {
+    return {
+      instructions: null,
+      metadata: null,
+      parallel_tool_calls: true,
+      temperature: null,
+      tool_choice: "auto",
+      tools: [],
+      top_p: null,
+    }
+  }
+  return {
+    instructions: request.instructions ?? null,
+    metadata: request.metadata ?? null,
+    parallel_tool_calls: request.parallel_tool_calls ?? true,
+    temperature: request.temperature ?? null,
+    tool_choice: request.tool_choice ?? "auto",
+    tools: request.tools ?? [],
+    top_p: request.top_p ?? null,
+    max_output_tokens: request.max_output_tokens ?? null,
+    reasoning: request.reasoning ?? null,
+    text: request.text ?? null,
+  }
+}
+
+function convertAnthropicOutput(response: AnthropicResponse): {
+  output: Array<ResponseOutputItem>
+  text: string
+} {
+  const output: Array<ResponseOutputItem> = []
+  let text = ""
+  let messageIndex = 0
+  let reasoningIndex = 0
+  for (const block of response.content) {
+    if (block.type === "thinking") {
+      output.push(createReasoningOutput(response.id, block, reasoningIndex))
+      reasoningIndex += 1
+      continue
+    }
+    if (block.type === "text") {
+      text += block.text
+      output.push(createTextOutput(response.id, block.text, messageIndex))
+      messageIndex += 1
+      continue
+    }
+    output.push(createFunctionCallOutput(block))
+  }
+  return { output, text }
+}
+
+function createReasoningOutput(
+  responseId: string,
+  block: Extract<AnthropicResponse["content"][number], { type: "thinking" }>,
+  index: number,
+): ResponseOutputItem {
+  return {
+    id: index === 0 ? `rs_${responseId}` : `rs_${responseId}_${index}`,
+    type: "reasoning",
+    summary:
+      block.thinking ? [{ type: "summary_text", text: block.thinking }] : [],
+    ...(block.signature ? { encrypted_content: block.signature } : {}),
+    status: "completed",
+  }
+}
+
+function createTextOutput(
+  responseId: string,
+  text: string,
+  index: number,
+): ResponseOutputItem {
+  return {
+    id: index === 0 ? `msg_${responseId}` : `msg_${responseId}_${index}`,
+    type: "message",
+    role: "assistant",
+    status: "completed",
+    content: [{ type: "output_text", text, annotations: [] }],
+  }
+}
+
+function createFunctionCallOutput(
+  block: Extract<AnthropicResponse["content"][number], { type: "tool_use" }>,
+): ResponseOutputItem {
+  return {
+    id: `fc_${block.id}`,
+    type: "function_call",
+    call_id: block.id,
+    name: block.name,
+    arguments: JSON.stringify(block.input),
+    status: "completed",
   }
 }
 

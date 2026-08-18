@@ -183,9 +183,12 @@ export interface ResponsesResult {
   error: ResponseError | null
   incomplete_details: IncompleteDetails | null
   instructions: string | null
+  max_output_tokens?: number | null
   metadata: Metadata | null
   parallel_tool_calls: boolean
+  reasoning?: Reasoning | null
   temperature: number | null
+  text?: ResponsesPayload["text"]
   tool_choice: unknown
   tools: Array<Tool>
   top_p: number | null

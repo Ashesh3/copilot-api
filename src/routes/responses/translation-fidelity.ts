@@ -1,7 +1,7 @@
 import type { TranslationCheck } from "~/lib/endpoint-routing"
 import type { ResponsesPayload } from "~/services/copilot/create-responses"
 
-import { isPdfMediaType, parseDataUri } from "~/lib/attachments"
+import { isHttpUrl, isPdfMediaType, parseDataUri } from "~/lib/attachments"
 
 const CHAT_UNSUPPORTED_TOOL_SEMANTICS = new Set([
   "custom",
@@ -33,6 +33,12 @@ const CHAT_INPUT_TOOL_BLOCKERS: Record<string, string> = {
   programmatic_tool_call_output: "tool_semantics:programmatic_tool_call_output",
 }
 const MESSAGES_INPUT_TOOL_BLOCKERS = { ...CHAT_INPUT_TOOL_BLOCKERS }
+const MESSAGES_IMAGE_MEDIA_TYPES = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+])
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
@@ -128,7 +134,11 @@ function hasOnlyMessagesReasoningInclude(payload: ResponsesPayload): boolean {
   )
 }
 
-function scanInputContent(content: unknown, blockers: Array<string>): void {
+function scanInputContentForTarget(
+  content: unknown,
+  blockers: Array<string>,
+  target: "chat" | "messages",
+): void {
   if (!isRecord(content)) {
     addBlocker(blockers, "content_type")
     return
@@ -143,7 +153,7 @@ function scanInputContent(content: unknown, blockers: Array<string>): void {
   }
   switch (contentType) {
     case "input_image": {
-      scanInputImage(content, blockers)
+      scanInputImage(content, blockers, target)
       return
     }
     case "input_file": {
@@ -163,6 +173,7 @@ function scanInputContent(content: unknown, blockers: Array<string>): void {
 function scanInputImage(
   content: Record<string, unknown>,
   blockers: Array<string>,
+  target: "chat" | "messages",
 ): void {
   const hasImageUrl =
     typeof content.image_url === "string" && content.image_url.length > 0
@@ -170,6 +181,15 @@ function scanInputImage(
     const hasFileId =
       typeof content.file_id === "string" && content.file_id.length > 0
     addBlocker(blockers, hasFileId ? "input_image:file_id" : "input_image")
+  } else if (target === "messages") {
+    const imageUrl = content.image_url as string
+    const parsed = parseDataUri(imageUrl)
+    if (
+      !isHttpUrl(imageUrl)
+      && (!parsed || !MESSAGES_IMAGE_MEDIA_TYPES.has(parsed.mediaType))
+    ) {
+      addBlocker(blockers, "input_image")
+    }
   }
   if (content.detail !== undefined && content.detail !== "auto") {
     addBlocker(blockers, "image_detail")
@@ -214,32 +234,77 @@ const MESSAGE_ROLES = new Set(["user", "assistant", "system", "developer"])
 function scanResponsesInput(
   input: ResponsesPayload["input"],
   blockers: Array<string>,
-  options: { toolBlockers: Record<string, string> },
+  options: {
+    target: "chat" | "messages"
+    toolBlockers: Record<string, string>
+  },
 ): void {
   if (!Array.isArray(input)) return
+  const functionCallIds = new Set<string>()
+  const functionResultIds = new Set<string>()
   for (const item of input) {
     if (!isRecord(item)) {
       addBlocker(blockers, "input_item")
       continue
     }
     const type = getType(item)
+    if (options.target === "messages") {
+      scanFunctionPairing({
+        blockers,
+        functionCallIds,
+        functionResultIds,
+        item,
+        type,
+      })
+    }
     addInputItemBlockers({ item, type, blockers, ...options })
-    scanItemContent(item, type, blockers)
+    scanItemContent({ item, type, blockers, target: options.target })
   }
+}
+
+function scanFunctionPairing(options: {
+  blockers: Array<string>
+  functionCallIds: Set<string>
+  functionResultIds: Set<string>
+  item: Record<string, unknown>
+  type: string | undefined
+}): void {
+  const { blockers, functionCallIds, functionResultIds, item, type } = options
+  if (type === "function_call") {
+    if (typeof item.call_id !== "string" || item.call_id.length === 0) return
+    if (functionCallIds.has(item.call_id)) {
+      addBlocker(blockers, "tool_result_pairing")
+      return
+    }
+    functionCallIds.add(item.call_id)
+    return
+  }
+  if (type !== "function_call_output") return
+  if (typeof item.call_id !== "string" || item.call_id.length === 0) return
+  if (
+    !functionCallIds.has(item.call_id)
+    || functionResultIds.has(item.call_id)
+  ) {
+    addBlocker(blockers, "tool_result_pairing")
+    return
+  }
+  functionResultIds.add(item.call_id)
 }
 
 function addInputItemBlockers(options: {
   blockers: Array<string>
   item: Record<string, unknown>
+  target: "chat" | "messages"
   type: string | undefined
   toolBlockers: Record<string, string>
 }): void {
-  const { blockers, item, toolBlockers, type } = options
+  const { blockers, item, target, toolBlockers, type } = options
   if (type === "reasoning") addBlocker(blockers, "opaque_reasoning")
   if (type === "item_reference") addBlocker(blockers, "item_reference")
-  if (type === "function_call" && !isLosslessFunctionCall(item)) {
-    addBlocker(blockers, "function_call")
+  if (type === "message" && !isMessageRole(item.role)) {
+    addBlocker(blockers, "message_role")
   }
+  addFunctionCallBlockers({ blockers, item, target, type })
   if (
     type === "function_call_output"
     && (typeof item.call_id !== "string" || item.call_id.length === 0)
@@ -260,6 +325,27 @@ function addInputItemBlockers(options: {
   if (!isKnownInputItem(item, type)) addBlocker(blockers, "input_item")
 }
 
+function addFunctionCallBlockers(options: {
+  blockers: Array<string>
+  item: Record<string, unknown>
+  target: "chat" | "messages"
+  type: string | undefined
+}): void {
+  const { blockers, item, target, type } = options
+  if (type !== "function_call") return
+  if (!isLosslessFunctionCall(item)) {
+    addBlocker(blockers, "function_call")
+    return
+  }
+  if (target === "messages" && !hasObjectFunctionArguments(item.arguments)) {
+    addBlocker(blockers, "function_arguments")
+  }
+}
+
+function isMessageRole(role: unknown): boolean {
+  return typeof role === "string" && MESSAGE_ROLES.has(role)
+}
+
 function isSupportedItemStatus(status: unknown): boolean {
   return (
     status === undefined
@@ -267,6 +353,15 @@ function isSupportedItemStatus(status: unknown): boolean {
     || status === "completed"
     || status === "incomplete"
   )
+}
+
+function hasObjectFunctionArguments(argumentsValue: unknown): boolean {
+  if (typeof argumentsValue !== "string") return false
+  try {
+    return isRecord(JSON.parse(argumentsValue) as unknown)
+  } catch {
+    return false
+  }
 }
 
 function isLosslessFunctionCall(item: Record<string, unknown>): boolean {
@@ -283,18 +378,17 @@ function isKnownInputItem(
   item: Record<string, unknown>,
   type: string | undefined,
 ): boolean {
-  const isImplicitMessage =
-    type === undefined
-    && typeof item.role === "string"
-    && MESSAGE_ROLES.has(item.role)
+  const isImplicitMessage = type === undefined && isMessageRole(item.role)
   return isImplicitMessage || Boolean(type && SUPPORTED_INPUT_ITEMS.has(type))
 }
 
-function scanItemContent(
-  item: Record<string, unknown>,
-  type: string | undefined,
-  blockers: Array<string>,
-): void {
+function scanItemContent(options: {
+  blockers: Array<string>
+  item: Record<string, unknown>
+  target: "chat" | "messages"
+  type: string | undefined
+}): void {
+  const { blockers, item, target, type } = options
   let field: "content" | "output" | undefined
   if (type === undefined || type === "message") field = "content"
   else if (type === "function_call_output") field = "output"
@@ -311,16 +405,33 @@ function scanItemContent(
     return
   }
   for (const part of content) {
-    if (
-      field === "content"
-      && isRecord(part)
-      && (part.type === "input_image" || part.type === "input_file")
-      && item.role !== "user"
-    ) {
-      addBlocker(blockers, "message_content_role")
-    }
-    scanInputContent(part, blockers)
+    addContentPartRoleBlockers({ blockers, field, item, part, target })
+    scanInputContentForTarget(part, blockers, target)
   }
+}
+
+function addContentPartRoleBlockers(options: {
+  blockers: Array<string>
+  field: "content" | "output"
+  item: Record<string, unknown>
+  part: unknown
+  target: "chat" | "messages"
+}): void {
+  const { blockers, field, item, part, target } = options
+  if (!isRecord(part)) return
+  const isMedia = part.type === "input_image" || part.type === "input_file"
+  if (field === "content" && isMedia && item.role !== "user") {
+    addBlocker(blockers, "message_content_role")
+  }
+  if (target === "messages" && isWrongTextDirection(item.role, part.type)) {
+    addBlocker(blockers, "content_direction")
+  }
+}
+
+function isWrongTextDirection(role: unknown, contentType: unknown): boolean {
+  if (role === "assistant") return contentType === "input_text"
+  if (MESSAGE_ROLES.has(String(role))) return contentType === "output_text"
+  return false
 }
 
 function addKnownInputToolBlocker(
@@ -373,6 +484,7 @@ export function checkResponsesToChatTranslation(
 ): TranslationCheck {
   const blockers: Array<string> = []
   scanResponsesInput(payload.input, blockers, {
+    target: "chat",
     toolBlockers: CHAT_INPUT_TOOL_BLOCKERS,
   })
   scanTools(payload.tools, (_tool, type) => {
@@ -411,8 +523,12 @@ export function checkResponsesToMessagesTranslation(
 ): TranslationCheck {
   const blockers: Array<string> = []
   scanResponsesInput(payload.input, blockers, {
+    target: "messages",
     toolBlockers: MESSAGES_INPUT_TOOL_BLOCKERS,
   })
+  if (hasMeaningfulItemStatus(payload.input)) {
+    addBlocker(blockers, "item_status")
+  }
   scanTools(payload.tools, (tool, type) => {
     if (isCustomGrammar(tool)) {
       addBlocker(blockers, "custom_tool_grammar")
@@ -440,15 +556,52 @@ export function checkResponsesToMessagesTranslation(
   if (hasStrictFunctionTool(payload)) {
     addBlocker(blockers, "strict_function_tool")
   }
+  if (hasIncompatibleMessagesSampling(payload)) {
+    addBlocker(blockers, "sampling")
+  }
   scanSharedTopLevelBlockers(payload, blockers, { allowTaskBudget: true })
   if (!hasOnlyMessagesReasoningInclude(payload)) {
     addBlocker(blockers, "include")
   }
   if (!isSupportedToolChoice(payload.tool_choice)) {
     addBlocker(blockers, "tool_choice")
+  } else if (!doesNamedToolChoiceExist(payload)) {
+    addBlocker(blockers, "tool_choice")
   }
   if (!isSupportedTextFormat(payload)) addBlocker(blockers, "text_format")
   return createCheck(blockers)
+}
+
+function hasIncompatibleMessagesSampling(payload: ResponsesPayload): boolean {
+  const hasTemperature =
+    payload.temperature !== undefined && payload.temperature !== null
+  const hasTopP = payload.top_p !== undefined && payload.top_p !== null
+  return (
+    (hasTemperature && hasTopP)
+    || (typeof payload.reasoning?.effort === "number"
+      && (hasTemperature || hasTopP))
+  )
+}
+
+function hasMeaningfulItemStatus(input: ResponsesPayload["input"]): boolean {
+  if (!Array.isArray(input)) return false
+  return input.some(
+    (item) =>
+      isRecord(item) && item.status !== undefined && item.status !== null,
+  )
+}
+
+function doesNamedToolChoiceExist(payload: ResponsesPayload): boolean {
+  const choice = payload.tool_choice
+  if (!isRecord(choice) || choice.type !== "function") return true
+  if (typeof choice.name !== "string") return false
+  return (
+    Array.isArray(payload.tools)
+    && payload.tools.some(
+      (tool) =>
+        isRecord(tool) && tool.type === "function" && tool.name === choice.name,
+    )
+  )
 }
 
 function isLosslessFunctionTool(tool: Record<string, unknown>): boolean {

@@ -207,6 +207,48 @@ test("does not log native Messages upstream status text or body", async () => {
   }
 })
 
+test("preserves controls already validated by the Responses bridge", async () => {
+  const previousModels = state.models
+  state.models = {
+    object: "list",
+    data: [
+      {
+        id: "claude-no-effort",
+        name: "Claude No Effort",
+        object: "model",
+        version: "1",
+        capabilities: {
+          family: "claude",
+          object: "model_capabilities",
+          supports: {},
+          tokenizer: "cl100k_base",
+          type: "chat",
+        },
+      },
+    ],
+  }
+
+  try {
+    await createAnthropicMessages(
+      {
+        model: "claude-no-effort",
+        messages: [{ role: "user", content: "hello" }],
+        output_config: { effort: "high" },
+        temperature: 0.4,
+      },
+      { preserveValidatedControls: true },
+    )
+
+    expect(capturedBody).toMatchObject({
+      output_config: { effort: "high" },
+      temperature: 0.4,
+    })
+  } finally {
+    // eslint-disable-next-line require-atomic-updates
+    state.models = previousModels
+  }
+})
+
 test("fits explicitly marked native Messages compaction payloads", async () => {
   const oversizedOutput =
     "BEGIN-MESSAGES\n"

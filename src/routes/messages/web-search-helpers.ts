@@ -623,14 +623,23 @@ export const emitResponsesResultAsStream = async (
     })
   }
 
+  const terminalEvent = getResponsesTerminalEvent(result.status)
   await stream.writeSSE({
-    event: "response.completed",
+    event: terminalEvent,
     data: JSON.stringify({
-      type: "response.completed",
+      type: terminalEvent,
       response: result,
       sequence_number: seqNum,
     }),
   })
+}
+
+function getResponsesTerminalEvent(
+  status: ResponsesResult["status"],
+): "response.completed" | "response.failed" | "response.incomplete" {
+  if (status === "failed") return "response.failed"
+  if (status === "incomplete") return "response.incomplete"
+  return "response.completed"
 }
 
 type ResponsesSSEWriter = {
@@ -674,6 +683,15 @@ const emitResponsesOutputItem = async (
     })
   }
 
+  if (item.type === "reasoning" && item.summary) {
+    seq = await emitResponsesReasoningSummary(item.summary, {
+      stream: ctx.stream,
+      itemId,
+      outputIndex: ctx.outputIndex,
+      seqNum: seq,
+    })
+  }
+
   if (item.type === "function_call") {
     await ctx.stream.writeSSE({
       event: "response.function_call_arguments.done",
@@ -698,6 +716,41 @@ const emitResponsesOutputItem = async (
     }),
   })
 
+  return seq
+}
+
+const emitResponsesReasoningSummary = async (
+  summary: NonNullable<
+    Extract<ResponseOutputItem, { type: "reasoning" }>["summary"]
+  >,
+  ctx: MessageContentEmitContext,
+): Promise<number> => {
+  let seq = ctx.seqNum
+  for (const [summaryIndex, block] of summary.entries()) {
+    if (typeof block.text !== "string") continue
+    await ctx.stream.writeSSE({
+      event: "response.reasoning_summary_text.delta",
+      data: JSON.stringify({
+        type: "response.reasoning_summary_text.delta",
+        item_id: ctx.itemId,
+        output_index: ctx.outputIndex,
+        summary_index: summaryIndex,
+        delta: block.text,
+        sequence_number: seq++,
+      }),
+    })
+    await ctx.stream.writeSSE({
+      event: "response.reasoning_summary_text.done",
+      data: JSON.stringify({
+        type: "response.reasoning_summary_text.done",
+        item_id: ctx.itemId,
+        output_index: ctx.outputIndex,
+        summary_index: summaryIndex,
+        text: block.text,
+        sequence_number: seq++,
+      }),
+    })
+  }
   return seq
 }
 

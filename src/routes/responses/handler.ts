@@ -49,8 +49,10 @@ import {
   setSentryConversationIdFromRequest,
 } from "~/lib/sentry"
 import {
+  raceSsePreflush,
   withHeartbeatWhilePending,
   withSseHeartbeat,
+  writeSseHeartbeat,
 } from "~/lib/sse-lifecycle"
 import { state } from "~/lib/state"
 import { tokenPool } from "~/lib/token-pool"
@@ -84,6 +86,7 @@ import {
   createWebSearchResponsesTool,
   isResponsesWebSearchFunctionTool,
 } from "~/services/copilot/mcp-web-search"
+import { normalizeResponsesAttachmentsFailClosed } from "~/services/copilot/responses-attachments"
 import { prepareResponsesRequest } from "~/services/copilot/responses-contract"
 
 import {
@@ -419,7 +422,10 @@ export function selectResponsesUpstreamEndpoint(options: {
       {
         endpoint: "/v1/messages",
         reason: "endpoint_unavailable",
-        check: checkResponsesToMessagesTranslation(options.payload),
+        check: getResponsesMessagesRouteCheck(
+          options.payload,
+          options.selectedModel,
+        ),
       },
       {
         endpoint: "/chat/completions",
@@ -803,7 +809,9 @@ async function prepareResponsesRoute(
   const preparedPayload = prepareResponsesRequest(payload).body
   const support = getModelEndpointSupport(selectedModel)
   if (!support.responses) {
-    await normalizeResponsesAttachments(preparedPayload, c.req.raw.signal)
+    await (support.messages ?
+      normalizeResponsesAttachmentsFailClosed(preparedPayload, c.req.raw.signal)
+    : normalizeResponsesAttachments(preparedPayload, c.req.raw.signal))
   }
   let decision = selectResponsesUpstreamEndpoint({
     payload: preparedPayload,
@@ -812,9 +820,10 @@ async function prepareResponsesRoute(
   if (
     "code" in decision
     && support.chat
-    && payloadHasApplyPatchTool(preparedPayload)
+    && payloadHasChatFallbackToolRewrite(preparedPayload)
   ) {
     const chatPayload = structuredClone(preparedPayload)
+    convertWebSearchTool(chatPayload)
     useFunctionApplyPatch(chatPayload)
     if (getResponsesChatRouteCheck(chatPayload).supported) {
       preparedPayload.tools = chatPayload.tools
@@ -830,13 +839,36 @@ async function prepareResponsesRoute(
   return { decision, preparedPayload }
 }
 
-function payloadHasApplyPatchTool(payload: ResponsesPayload): boolean {
+function payloadHasChatFallbackToolRewrite(payload: ResponsesPayload): boolean {
   return (
     Array.isArray(payload.tools)
-    && payload.tools.some(
-      (tool) => tool.type === "custom" && tool.name === "apply_patch",
-    )
+    && payload.tools.some((tool) => {
+      const type = (tool as { type?: unknown }).type
+      return (
+        (type === "custom" && tool.name === "apply_patch")
+        || (typeof type === "string"
+          && (type === "web_search" || type.startsWith("web_search_")))
+      )
+    })
   )
+}
+
+function getResponsesMessagesRouteCheck(
+  payload: ResponsesPayload,
+  selectedModel: Model | undefined,
+): { blockers: Array<string>; supported: boolean } {
+  const check = checkResponsesToMessagesTranslation(payload)
+  const effort = payload.reasoning?.effort
+  if (typeof effort !== "string") return check
+  const supportedEfforts = selectedModel?.capabilities.supports.reasoning_effort
+  if (supportedEfforts?.includes(effort)) return check
+  return {
+    supported: false,
+    blockers:
+      check.blockers.includes("reasoning_effort") ?
+        check.blockers
+      : [...check.blockers, "reasoning_effort"],
+  }
 }
 
 const isAsyncIterable = <T>(value: unknown): value is AsyncIterable<T> =>
@@ -1693,35 +1725,76 @@ const handleWithAnthropicMessages = async (
     c.req.raw.signal,
   )
   anthropicPayload.stream = false
-
-  const response = (await createAnthropicMessages(anthropicPayload, {
-    compaction: isResponsesCompactionRequest(payload),
-    signal: c.req.raw.signal,
-  })) as Parameters<typeof anthropicResponseToResponsesResult>[0]
-
-  const nativeAccountId = getLastUsedAccountId()
-  if (nativeAccountId !== undefined) {
-    setRequestContext(c, { accountId: nativeAccountId })
-  }
-
-  const result = anthropicResponseToResponsesResult(response, requestedModel)
-  if (result.usage) {
-    setRequestContext(c, {
-      inputTokens: result.usage.input_tokens,
-      outputTokens: result.usage.output_tokens,
-    })
-  }
+  const compaction = isResponsesCompactionRequest(payload)
   if (!payload.stream) {
+    const result = await createAnthropicResponsesResult({
+      anthropicPayload,
+      compaction,
+      payload,
+      requestedModel,
+      signal: c.req.raw.signal,
+    })
+    setResponsesResultContext(c, result)
     return c.json(result)
   }
 
+  const upstreamController = new AbortController()
+  const signal = AbortSignal.any([c.req.raw.signal, upstreamController.signal])
+  const pendingResult = createAnthropicResponsesResult({
+    anthropicPayload,
+    compaction,
+    payload,
+    requestedModel,
+    signal,
+  })
+  const preflush = await raceSsePreflush(pendingResult)
+
   return streamSSE(c, async (stream) => {
+    stream.onAbort(() => upstreamController.abort())
     try {
+      if (preflush.kind === "pending") await writeSseHeartbeat(stream)
+      const result =
+        preflush.kind === "settled" ?
+          preflush.value
+        : await withHeartbeatWhilePending(preflush.pending, stream)
+      if (stream.aborted || stream.closed) return
+      setResponsesResultContext(c, result)
       await emitResponsesResultAsStream(stream, result)
     } catch (error) {
       if (isAbortError(error)) return
       throw error
     }
+  })
+}
+
+async function createAnthropicResponsesResult(options: {
+  anthropicPayload: Awaited<ReturnType<typeof responsesPayloadToAnthropic>>
+  compaction: boolean
+  payload: ResponsesPayload
+  requestedModel: string
+  signal: AbortSignal
+}): Promise<ResponsesResult> {
+  const response = (await createAnthropicMessages(options.anthropicPayload, {
+    compaction: options.compaction,
+    preserveValidatedControls: true,
+    signal: options.signal,
+  })) as Parameters<typeof anthropicResponseToResponsesResult>[0]
+  return anthropicResponseToResponsesResult(
+    response,
+    options.requestedModel,
+    options.payload,
+  )
+}
+
+function setResponsesResultContext(c: Context, result: ResponsesResult): void {
+  const nativeAccountId = getLastUsedAccountId()
+  if (nativeAccountId !== undefined) {
+    setRequestContext(c, { accountId: nativeAccountId })
+  }
+  if (!result.usage) return
+  setRequestContext(c, {
+    inputTokens: result.usage.input_tokens,
+    outputTokens: result.usage.output_tokens,
   })
 }
 
