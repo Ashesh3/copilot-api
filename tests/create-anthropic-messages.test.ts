@@ -397,6 +397,27 @@ test("preserves native fields and forwards canonical prepared headers", async ()
   expect(capturedHeaders?.get("x-model-provider-preference")).toBe("anthropic")
 })
 
+test.each(["unicode-βeta", "latin-é", "safe-beta,bad\u0001beta"])(
+  "drops invalid beta %s before physical header dispatch",
+  async (anthropicBeta) => {
+    const payload = {
+      model: "claude-opus-4.8",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "hello" }],
+      future_native_field: { preserved: true },
+    } as AnthropicMessagesPayload
+
+    const result = await createAnthropicMessages(payload, { anthropicBeta })
+
+    expect(result).toHaveProperty("id", "msg_cache_control")
+    expect(capturedHeaders?.get("anthropic-beta")).toBeNull()
+    expect(capturedBody).toMatchObject({
+      model: "claude-opus-4.8",
+      future_native_field: { preserved: true },
+    })
+  },
+)
+
 test("uses one prepared snapshot when the caller mutates after invocation", async () => {
   let resolveResponse!: (response: Response) => void
   pendingResponse = new Promise<Response>((resolve) => {

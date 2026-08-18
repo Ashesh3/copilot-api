@@ -252,36 +252,23 @@ function validateAnthropicMessagesPayload(
   }
 }
 
-function hasUnsafeHeaderControl(value: string): boolean {
-  for (const character of value) {
-    const codePoint = character.codePointAt(0)
-    if (
-      codePoint !== undefined
-      && (codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f))
-    ) {
-      return true
-    }
-  }
-  return false
+export function isAnthropicBetaIdentifier(value: string): boolean {
+  return /^[!#$%&'*+.^\w`|~-]+$/u.test(value)
 }
 
 export function canonicalizeAnthropicBeta(
   value: string | undefined,
 ): string | undefined {
   const trimmed = value?.trim()
-  if (!trimmed || hasUnsafeHeaderControl(trimmed)) {
+  if (!trimmed) return undefined
+
+  const identifiers = trimmed.split(",").map((beta) => beta.trim())
+  if (
+    identifiers.some((identifier) => !isAnthropicBetaIdentifier(identifier))
+  ) {
     return undefined
   }
-
-  const canonical = [
-    ...new Set(
-      trimmed
-        .split(",")
-        .map((beta) => beta.trim())
-        .filter(Boolean),
-    ),
-  ].join(",")
-  if (!canonical) return undefined
+  const canonical = [...new Set(identifiers)].join(",")
   return sanitizeCopilotHeaderValue(canonical)
 }
 

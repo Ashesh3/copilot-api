@@ -5,6 +5,7 @@ import type { AnthropicMessagesPayload } from "~/routes/messages/anthropic-types
 import { LocalHTTPError } from "~/lib/error"
 import {
   canonicalizeAnthropicBeta,
+  isAnthropicBetaIdentifier,
   prepareAnthropicMessagesRequest,
   serializeAnthropicMessagesRequest,
 } from "~/services/copilot/messages-contract"
@@ -40,16 +41,39 @@ test("canonicalizes beta whitespace and duplicates without renaming ids", () => 
   ).toBe("interleaved-thinking-2025-05-14,claude-code-20250219")
 })
 
-test("deduplicates beta identifiers before enforcing the UTF-8 byte limit", () => {
-  const beta = "unicode-βeta-2026-08-19"
+test("accepts only visible ASCII HTTP-token beta identifiers", () => {
+  expect(isAnthropicBetaIdentifier("interleaved-thinking-2025-05-14")).toBe(
+    true,
+  )
+  expect(isAnthropicBetaIdentifier("beta_feature.v2")).toBe(true)
+  expect(isAnthropicBetaIdentifier("beta feature")).toBe(false)
+  expect(isAnthropicBetaIdentifier("beta/version")).toBe(false)
+  expect(isAnthropicBetaIdentifier("unicode-βeta")).toBe(false)
+  expect(isAnthropicBetaIdentifier("latin-é")).toBe(false)
+  expect(isAnthropicBetaIdentifier("beta\u007fvalue")).toBe(false)
+  expect(isAnthropicBetaIdentifier("bad\u0001beta")).toBe(false)
+})
+
+test("deduplicates beta identifiers before enforcing the final byte limit", () => {
+  const beta = "advanced-tool-use-2025-11-20"
   expect(canonicalizeAnthropicBeta(Array(80).fill(beta).join(","))).toBe(beta)
 })
 
-test("rejects control injection and oversized canonical beta output", () => {
+test("trims only comma-separator whitespace and rejects invalid segments", () => {
+  expect(canonicalizeAnthropicBeta(" beta-one , beta-two ")).toBe(
+    "beta-one,beta-two",
+  )
+  expect(canonicalizeAnthropicBeta("beta-one,,beta-two")).toBeUndefined()
+  expect(canonicalizeAnthropicBeta("beta-one beta-two")).toBeUndefined()
   expect(canonicalizeAnthropicBeta("safe-beta,bad\u0001beta")).toBeUndefined()
+  expect(canonicalizeAnthropicBeta("safe-beta,unicode-βeta")).toBeUndefined()
+  expect(canonicalizeAnthropicBeta("safe-beta,latin-é")).toBeUndefined()
+})
+
+test("rejects oversized canonical beta output", () => {
   expect(
     canonicalizeAnthropicBeta(
-      Array.from({ length: 180 }, (_, index) => `unicode-βeta-${index}`).join(
+      Array.from({ length: 180 }, (_, index) => `beta-feature-${index}`).join(
         ",",
       ),
     ),
