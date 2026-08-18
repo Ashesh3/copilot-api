@@ -60,6 +60,8 @@ import {
   isWebSearchToolType,
 } from "~/services/copilot/mcp-web-search"
 
+import type { NativeMessagesRequestOptions } from "../messages/native-handler"
+
 import {
   emitChatCompletionResponseAsStream,
   resolveWebSearchCalls,
@@ -77,6 +79,11 @@ export { selectChatUpstreamEndpoint } from "./responses-fallback-executor"
 export async function handleCompletion(c: Context) {
   const rawPayload = await parseChatRequestBody(c)
   const normalizedPayload = normalizeChatCompletionsRequest(rawPayload)
+  const nativeOptions: NativeMessagesRequestOptions = {
+    anthropicBeta: c.req.header("anthropic-beta"),
+    anthropicVersion: c.req.header("anthropic-version"),
+    modelProviderPreference: c.req.header("x-model-provider-preference"),
+  }
   const conversationId = setSentryConversationIdFromRequest(
     c,
     normalizedPayload,
@@ -89,7 +96,7 @@ export async function handleCompletion(c: Context) {
   return await Sentry.startSpan(
     createSentryInvokeAgentSpanOptions(model, conversationId),
     async () => {
-      return await handleCompletionInner(c, normalizedPayload)
+      return await handleCompletionInner(c, normalizedPayload, nativeOptions)
     },
   )
 }
@@ -107,6 +114,7 @@ async function parseChatRequestBody(
 async function handleCompletionInner(
   c: Context,
   rawPayload: ChatCompletionsPayload,
+  nativeOptions: NativeMessagesRequestOptions,
 ) {
   // Emit synthetic tool execution spans from tool results in message history
   emitChatCompletionsToolSpans(rawPayload.messages)
@@ -223,6 +231,7 @@ async function handleCompletionInner(
     reasoningEffort,
     selectedModel,
     decision,
+    nativeOptions: { ...nativeOptions, requestedModel },
   })
 }
 
@@ -234,10 +243,17 @@ async function dispatchCopilotCompletion(
     requestedModel: string
     reasoningEffort?: ReasoningEffort
     selectedModel: Model | undefined
+    nativeOptions: NativeMessagesRequestOptions
   },
 ) {
-  const { decision, payload, requestedModel, reasoningEffort, selectedModel } =
-    options
+  const {
+    decision,
+    payload,
+    requestedModel,
+    reasoningEffort,
+    selectedModel,
+    nativeOptions,
+  } = options
   if (decision.translated) recordChatEndpointFallback(c, payload, decision)
 
   switch (decision.target) {
@@ -250,8 +266,8 @@ async function dispatchCopilotCompletion(
     }
     case "/v1/messages": {
       return await executeAnthropicBridge(c, {
+        nativeOptions,
         payload,
-        requestedModel,
         selectedModel,
       })
     }

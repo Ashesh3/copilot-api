@@ -11,6 +11,7 @@ import { server } from "../src/server"
 
 const originalFetch = globalThis.fetch
 let lastUpstreamPayload: ChatCompletionsPayload | undefined
+let lastUpstreamHeaders: Headers | undefined
 let lastUpstreamUrl: string | undefined
 
 const upstreamMaxReasoningModels: ModelsResponse = {
@@ -97,6 +98,30 @@ const nativeMessagesModels: ModelsResponse = {
   ],
 }
 
+const responsesOnlyMessagesModels: ModelsResponse = {
+  object: "list",
+  data: [
+    {
+      id: "gpt-responses-only",
+      name: "GPT Responses Only",
+      object: "model",
+      preview: false,
+      vendor: "openai",
+      version: "1",
+      model_picker_enabled: true,
+      capabilities: {
+        family: "gpt",
+        limits: { max_output_tokens: 1024 },
+        object: "model_capabilities",
+        supports: {},
+        tokenizer: "cl100k_base",
+        type: "chat",
+      },
+      supported_endpoints: ["/responses"],
+    },
+  ],
+}
+
 const toolReferenceTurn = {
   role: "user",
   content: [
@@ -120,6 +145,7 @@ function parseRequestBody(init?: RequestInit): ChatCompletionsPayload {
 const fetchMock = mock((url: string, init?: RequestInit) => {
   lastUpstreamUrl = url
   lastUpstreamPayload = parseRequestBody(init)
+  lastUpstreamHeaders = new Headers(init?.headers)
 
   // The native Anthropic endpoint returns Messages-shaped bodies; every other
   // path returns chat.completion. Match on URL so both routes parse cleanly.
@@ -140,6 +166,36 @@ const fetchMock = mock((url: string, init?: RequestInit) => {
         headers: { "content-type": "application/json" },
       },
     )
+  }
+
+  if (typeof url === "string" && url.includes("/responses")) {
+    return Response.json({
+      id: "resp_messages_header",
+      object: "response",
+      created_at: 1,
+      model: "gpt-responses-only",
+      output: [
+        {
+          id: "msg_responses_header",
+          type: "message",
+          role: "assistant",
+          status: "completed",
+          content: [{ type: "output_text", text: "hello" }],
+        },
+      ],
+      output_text: "hello",
+      status: "completed",
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      error: null,
+      incomplete_details: null,
+      instructions: null,
+      metadata: null,
+      parallel_tool_calls: true,
+      temperature: null,
+      tool_choice: "auto",
+      tools: [],
+      top_p: null,
+    })
   }
 
   return new Response(
@@ -184,6 +240,7 @@ afterAll(() => {
 beforeEach(() => {
   fetchMock.mockClear()
   lastUpstreamPayload = undefined
+  lastUpstreamHeaders = undefined
   lastUpstreamUrl = undefined
   state.accountType = "individual"
   state.copilotToken = "copilot-token"
@@ -365,6 +422,104 @@ test("routes PDF documents to native /v1/messages and strips foreign thinking bl
   expect(blocks.some((b) => b.type === "thinking")).toBe(false)
   // …but the PDF document block is preserved.
   expect(blocks.some((b) => b.type === "document")).toBe(true)
+})
+
+test("forwards canonical beta, anthropic version, and provider preference on native Messages", async () => {
+  state.models = nativeMessagesModels
+  const pdfB64 = Buffer.from("%PDF-1.4 native header regression").toString(
+    "base64",
+  )
+
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "anthropic-beta":
+        " advanced-tool-use-2025-11-20, fallback-credit-2026-07-01, advanced-tool-use-2025-11-20 ",
+      "anthropic-version": "2023-06-01",
+      "x-model-provider-preference": "anthropic",
+    },
+    body: JSON.stringify({
+      model: "claude-opus-4.8",
+      max_tokens: 64,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Read this document." },
+            {
+              type: "document",
+              source: {
+                type: "base64",
+                media_type: "application/pdf",
+                data: pdfB64,
+              },
+            },
+          ],
+        },
+      ],
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamUrl).toContain("/v1/messages")
+  expect(lastUpstreamHeaders?.get("anthropic-beta")).toBe(
+    "advanced-tool-use-2025-11-20,fallback-credit-2026-07-01",
+  )
+  expect(lastUpstreamHeaders?.get("anthropic-version")).toBe("2023-06-01")
+  expect(lastUpstreamHeaders?.get("x-model-provider-preference")).toBe(
+    "anthropic",
+  )
+})
+
+test("does not forward native Messages headers to a Chat branch", async () => {
+  state.models = nativeMessagesModels
+
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "anthropic-beta": "advanced-tool-use-2025-11-20",
+      "anthropic-version": "2024-01-01",
+      "x-model-provider-preference": "anthropic",
+    },
+    body: JSON.stringify({
+      model: "claude-opus-4.8",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "Use the Chat branch." }],
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamUrl).toContain("/chat/completions")
+  expect(lastUpstreamHeaders?.get("anthropic-beta")).toBeNull()
+  expect(lastUpstreamHeaders?.get("anthropic-version")).toBeNull()
+  expect(lastUpstreamHeaders?.get("x-model-provider-preference")).toBeNull()
+})
+
+test("does not forward native Messages headers to a Responses branch", async () => {
+  state.models = responsesOnlyMessagesModels
+
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "anthropic-beta": "advanced-tool-use-2025-11-20",
+      "anthropic-version": "2024-01-01",
+      "x-model-provider-preference": "anthropic",
+    },
+    body: JSON.stringify({
+      model: "gpt-responses-only",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "Use the Responses branch." }],
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamUrl).toContain("/responses")
+  expect(lastUpstreamHeaders?.get("anthropic-beta")).toBeNull()
+  expect(lastUpstreamHeaders?.get("anthropic-version")).toBeNull()
+  expect(lastUpstreamHeaders?.get("x-model-provider-preference")).toBeNull()
 })
 
 test("preserves ToolSearch tool references on the native messages route", async () => {

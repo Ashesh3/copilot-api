@@ -21,6 +21,7 @@ const originalFetch = globalThis.fetch
 
 let lastUpstreamPath: string | undefined
 let lastUpstreamPayload: Record<string, unknown> | undefined
+let lastUpstreamHeaders: Headers | undefined
 let delayBufferedWebSearchResponse = false
 let nextResponsesStreamError:
   | { kind: "error"; marker: string }
@@ -62,6 +63,30 @@ const responsesOnlyModels: ModelsResponse = {
       supported_endpoints: ["/responses"],
       capabilities: {
         family: "gpt",
+        limits: { max_output_tokens: 1024 },
+        object: "model_capabilities",
+        supports: {},
+        tokenizer: "cl100k_base",
+        type: "chat",
+      },
+    },
+  ],
+}
+
+const messagesOnlyModels: ModelsResponse = {
+  object: "list",
+  data: [
+    {
+      id: "claude-messages-only",
+      name: "Claude Messages Only",
+      object: "model",
+      preview: false,
+      vendor: "anthropic",
+      version: "1",
+      model_picker_enabled: true,
+      supported_endpoints: ["/v1/messages"],
+      capabilities: {
+        family: "claude",
         limits: { max_output_tokens: 1024 },
         object: "model_capabilities",
         supports: {},
@@ -225,6 +250,7 @@ function createResponsesSse(): Response {
 
 const fetchMock = mock((url: string, init?: RequestInit) => {
   lastUpstreamPath = new URL(url).pathname
+  lastUpstreamHeaders = new Headers(init?.headers)
   lastUpstreamPayload =
     typeof init?.body === "string" ?
       (JSON.parse(init.body) as Record<string, unknown>)
@@ -251,6 +277,19 @@ const fetchMock = mock((url: string, init?: RequestInit) => {
     return new Response(JSON.stringify(responsesResult), {
       status: 200,
       headers: { "content-type": "application/json" },
+    })
+  }
+
+  if (lastUpstreamPath.endsWith("/v1/messages")) {
+    return Response.json({
+      id: "msg_chat_bridge",
+      type: "message",
+      role: "assistant",
+      model: "claude-messages-only",
+      content: [{ type: "text", text: "hello from messages" }],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
     })
   }
 
@@ -282,6 +321,7 @@ beforeEach(() => {
   fetchMock.mockClear()
   lastUpstreamPath = undefined
   lastUpstreamPayload = undefined
+  lastUpstreamHeaders = undefined
   delayBufferedWebSearchResponse = false
   nextResponsesStreamError = undefined
   delayedResponsesController = undefined
@@ -356,6 +396,57 @@ test("routes legacy chat completions requests for responses-only models through 
     prompt_tokens_details: { cached_tokens: 1 },
     completion_tokens_details: { reasoning_tokens: 2 },
   })
+})
+
+test("passes explicit native beta, version, and provider preference through Chat to Messages", async () => {
+  state.models = messagesOnlyModels
+
+  const response = await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "anthropic-beta": "beta-one, beta-two, beta-one",
+      "anthropic-version": "2023-06-01",
+      "x-model-provider-preference": "anthropic",
+    },
+    body: JSON.stringify({
+      model: "claude-messages-only",
+      messages: [{ role: "user", content: "Say hello." }],
+      max_tokens: 32,
+      stream: false,
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/v1/messages")
+  expect(lastUpstreamHeaders?.get("anthropic-beta")).toBe("beta-one,beta-two")
+  expect(lastUpstreamHeaders?.get("anthropic-version")).toBe("2023-06-01")
+  expect(lastUpstreamHeaders?.get("x-model-provider-preference")).toBe(
+    "anthropic",
+  )
+})
+
+test("does not pass native Messages headers through Chat to Responses", async () => {
+  const response = await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "anthropic-beta": "beta-one",
+      "anthropic-version": "2024-01-01",
+      "x-model-provider-preference": "anthropic",
+    },
+    body: JSON.stringify({
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "Say hello." }],
+      stream: false,
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/responses")
+  expect(lastUpstreamHeaders?.get("anthropic-beta")).toBeNull()
+  expect(lastUpstreamHeaders?.get("anthropic-version")).toBeNull()
+  expect(lastUpstreamHeaders?.get("x-model-provider-preference")).toBeNull()
 })
 
 test("records one endpoint fallback event for a translated Chat request", async () => {

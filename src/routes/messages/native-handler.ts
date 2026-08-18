@@ -22,6 +22,7 @@ import {
 import {
   type AnthropicStreamChunk,
   createAnthropicMessages,
+  type CreateAnthropicMessagesReturn,
 } from "~/services/copilot/create-anthropic-messages"
 import {
   buildWebSearchQuery,
@@ -39,6 +40,36 @@ import { emitAnthropicStreamError } from "./stream-translation"
 import { emitAnthropicResponseAsStream } from "./web-search-helpers"
 
 const logger = createHandlerLogger("messages-native-handler")
+
+export interface NativeMessagesRequestOptions {
+  anthropicBeta?: string
+  anthropicVersion?: string
+  initiatorOverride?: "agent" | "user"
+  modelProviderPreference?: string
+  requestedModel?: string
+}
+
+type NativeMessagesDispatchOptions = {
+  compaction?: boolean
+  preserveValidatedControls?: boolean
+  signal?: AbortSignal
+}
+
+export async function createNativeMessages(
+  payload: AnthropicMessagesPayload,
+  nativeOptions: NativeMessagesRequestOptions,
+  dispatchOptions?: NativeMessagesDispatchOptions,
+): Promise<CreateAnthropicMessagesReturn> {
+  return await createAnthropicMessages(payload, {
+    anthropicBeta: nativeOptions.anthropicBeta,
+    anthropicVersion: nativeOptions.anthropicVersion,
+    compaction: dispatchOptions?.compaction,
+    initiator: nativeOptions.initiatorOverride,
+    modelProviderPreference: nativeOptions.modelProviderPreference,
+    preserveValidatedControls: dispatchOptions?.preserveValidatedControls,
+    signal: dispatchOptions?.signal,
+  })
+}
 
 function asAnthropicStream(
   response: Awaited<ReturnType<typeof createAnthropicMessages>>,
@@ -99,19 +130,15 @@ async function consumeNativeMessageStream(
 export async function handleWithNativeMessages(
   c: Context,
   anthropicPayload: AnthropicMessagesPayload,
-  options?: {
-    initiatorOverride?: "agent" | "user"
-    requestedModel?: string
-  },
+  options: NativeMessagesRequestOptions = {},
 ) {
-  const { initiatorOverride, requestedModel } = options ?? {}
+  const { requestedModel } = options
 
   const usesWebSearch = prepareNativeTools(anthropicPayload)
 
   if (usesWebSearch) {
     return await handleWithMcpWebSearch(c, anthropicPayload, {
-      initiatorOverride,
-      requestedModel,
+      ...options,
     })
   }
 
@@ -122,10 +149,13 @@ export async function handleWithNativeMessages(
         model: anthropicPayload.model,
       }),
       async (span) => {
-        const response = (await createAnthropicMessages(anthropicPayload, {
-          initiator: initiatorOverride,
-          signal: c.req.raw.signal,
-        })) as AnthropicResponse
+        const response = (await createNativeMessages(
+          anthropicPayload,
+          options,
+          {
+            signal: c.req.raw.signal,
+          },
+        )) as AnthropicResponse
 
         const accountId = getLastUsedAccountId()
         if (accountId !== undefined) {
@@ -150,20 +180,16 @@ export async function handleWithNativeMessages(
 
   logger.debug("Streaming native /v1/messages response")
   return await streamNativeMessages(c, anthropicPayload, {
-    initiatorOverride,
-    requestedModel,
+    ...options,
   })
 }
 
 async function streamNativeMessages(
   c: Context,
   anthropicPayload: AnthropicMessagesPayload,
-  options: {
-    initiatorOverride?: "agent" | "user"
-    requestedModel?: string
-  },
+  options: NativeMessagesRequestOptions,
 ) {
-  const { initiatorOverride, requestedModel } = options
+  const { requestedModel } = options
 
   return await Sentry.startSpanManual(
     createSentryChatSpanOptions({
@@ -186,8 +212,7 @@ async function streamNativeMessages(
           downstreamAbort.signal,
         ])
         const preflush = await raceSsePreflush(
-          createAnthropicMessages(anthropicPayload, {
-            initiator: initiatorOverride,
+          createNativeMessages(anthropicPayload, options, {
             signal: upstreamSignal,
           }),
         )
@@ -276,10 +301,7 @@ function prepareNativeTools(payload: AnthropicMessagesPayload): boolean {
 async function handleWithMcpWebSearch(
   c: Context,
   payload: AnthropicMessagesPayload,
-  options: {
-    initiatorOverride?: "agent" | "user"
-    requestedModel?: string
-  },
+  options: NativeMessagesRequestOptions,
 ) {
   const requestedStream = Boolean(payload.stream)
   payload.stream = false
@@ -292,7 +314,7 @@ async function handleWithMcpWebSearch(
     }),
     async (span) => {
       const response = await resolveNativeWebSearch(payload, {
-        initiatorOverride: options.initiatorOverride,
+        ...options,
         signal: c.req.raw.signal,
       })
 
@@ -319,15 +341,14 @@ async function handleWithMcpWebSearch(
 
 export async function resolveNativeWebSearch(
   initialPayload: AnthropicMessagesPayload,
-  options: { initiatorOverride?: "agent" | "user"; signal: AbortSignal },
+  options: NativeMessagesRequestOptions & { signal: AbortSignal },
 ): Promise<AnthropicResponse> {
   let payload = initialPayload
   let iteration = 0
 
   while (true) {
     iteration += 1
-    const response = (await createAnthropicMessages(payload, {
-      initiator: options.initiatorOverride,
+    const response = (await createNativeMessages(payload, options, {
       signal: options.signal,
     })) as AnthropicResponse
     const calls = response.content.filter(

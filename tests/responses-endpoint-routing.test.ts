@@ -24,6 +24,7 @@ const originalFetch = globalThis.fetch
 const originalModels = state.models
 let lastUpstreamPath: string | undefined
 let lastUpstreamPayload: Record<string, unknown> | undefined
+let lastUpstreamHeaders: Headers | undefined
 let attachmentFetchCount = 0
 let delayedNativeResponsesController:
   | ReadableStreamDefaultController<Uint8Array>
@@ -33,6 +34,7 @@ let delayNativeResponsesStream = false
 const fetchMock = mock((url: string | URL | Request, init?: RequestInit) => {
   const rawUrl = typeof url === "string" || url instanceof URL ? url : url.url
   lastUpstreamPath = new URL(rawUrl).pathname
+  lastUpstreamHeaders = new Headers(init?.headers)
   if (new URL(rawUrl).hostname === "example.invalid") attachmentFetchCount += 1
   lastUpstreamPayload =
     typeof init?.body === "string" ?
@@ -128,6 +130,7 @@ beforeEach(() => {
   fetchMock.mockClear()
   lastUpstreamPath = undefined
   lastUpstreamPayload = undefined
+  lastUpstreamHeaders = undefined
   attachmentFetchCount = 0
   delayedNativeResponsesController = undefined
   delayNativeResponsesStream = false
@@ -175,6 +178,46 @@ test.each([
 
   expect(response.status).toBe(200)
   expect(lastUpstreamPath).toBe(expected)
+})
+
+test("passes explicit native beta, version, and provider preference through Responses to Messages", async () => {
+  installModel({ supported_endpoints: ["/v1/messages"] })
+
+  const response = await postResponses(
+    { input: "hello" },
+    {
+      "anthropic-beta": "beta-one, beta-two, beta-one",
+      "anthropic-version": "2023-06-01",
+      "x-model-provider-preference": "anthropic",
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/v1/messages")
+  expect(lastUpstreamHeaders?.get("anthropic-beta")).toBe("beta-one,beta-two")
+  expect(lastUpstreamHeaders?.get("anthropic-version")).toBe("2023-06-01")
+  expect(lastUpstreamHeaders?.get("x-model-provider-preference")).toBe(
+    "anthropic",
+  )
+})
+
+test("does not pass native Messages headers through Responses to native Responses", async () => {
+  installModel({ supported_endpoints: ["/responses"] })
+
+  const response = await postResponses(
+    { input: "hello" },
+    {
+      "anthropic-beta": "beta-one",
+      "anthropic-version": "2024-01-01",
+      "x-model-provider-preference": "anthropic",
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/responses")
+  expect(lastUpstreamHeaders?.get("anthropic-beta")).toBeNull()
+  expect(lastUpstreamHeaders?.get("anthropic-version")).toBeNull()
+  expect(lastUpstreamHeaders?.get("x-model-provider-preference")).toBeNull()
 })
 
 test.each([
@@ -1342,11 +1385,14 @@ test("selects Responses then Messages then Chat without mutating inputs", () => 
   expect(model).toEqual(modelSnapshot)
 })
 
-function postResponses(extra: Record<string, unknown>): Promise<Response> {
+function postResponses(
+  extra: Record<string, unknown>,
+  headers?: Record<string, string>,
+): Promise<Response> {
   return Promise.resolve(
     server.request("/v1/responses", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...headers },
       body: JSON.stringify({ model: "route-model", ...extra }),
     }),
   )

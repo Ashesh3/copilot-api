@@ -18,6 +18,7 @@ import { createAnthropicMessages } from "../src/services/copilot/create-anthropi
 const originalFetch = globalThis.fetch
 let capturedBody: unknown
 let capturedHeaders: Headers | undefined
+const capturedHeaderAttempts: Array<Headers> = []
 let pendingResponse: Promise<Response> | undefined
 
 const fetchMock = mock((_url: string | URL | Request, init?: RequestInit) => {
@@ -26,6 +27,7 @@ const fetchMock = mock((_url: string | URL | Request, init?: RequestInit) => {
   }
   capturedBody = JSON.parse(init.body) as unknown
   capturedHeaders = new Headers(init.headers)
+  capturedHeaderAttempts.push(capturedHeaders)
   return (
     pendingResponse
     ?? new Response(
@@ -57,6 +59,7 @@ beforeEach(() => {
   fetchMock.mockClear()
   capturedBody = undefined
   capturedHeaders = undefined
+  capturedHeaderAttempts.length = 0
   pendingResponse = undefined
   state.accountType = "individual"
   state.copilotToken = "copilot-token"
@@ -395,6 +398,50 @@ test("preserves native fields and forwards canonical prepared headers", async ()
   expect(capturedHeaders?.get("anthropic-beta")).toBe("beta-one,beta-two")
   expect(capturedHeaders?.get("anthropic-version")).toBe("2023-06-01")
   expect(capturedHeaders?.get("x-model-provider-preference")).toBe("anthropic")
+})
+
+test("preserves beta, anthropic version, and provider preference on transport retry", async () => {
+  fetchMock
+    .mockImplementationOnce((_url, init) => {
+      capturedHeaderAttempts.push(new Headers(init?.headers))
+      return new Response("retry", {
+        status: 503,
+        headers: { "retry-after": "0" },
+      })
+    })
+    .mockImplementationOnce((_url, init) => {
+      capturedHeaderAttempts.push(new Headers(init?.headers))
+      return Response.json({
+        id: "msg_retry_headers",
+        type: "message",
+        role: "assistant",
+        model: "claude-opus-4.8",
+        content: [{ type: "text", text: "ok" }],
+        stop_reason: "end_turn",
+        stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      })
+    })
+
+  await createAnthropicMessages(
+    {
+      model: "claude-opus-4.8",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "hello" }],
+    },
+    {
+      anthropicBeta: "beta-one, beta-two, beta-one",
+      anthropicVersion: "2023-06-01",
+      modelProviderPreference: "anthropic",
+    },
+  )
+
+  expect(capturedHeaderAttempts).toHaveLength(2)
+  for (const headers of capturedHeaderAttempts) {
+    expect(headers.get("anthropic-beta")).toBe("beta-one,beta-two")
+    expect(headers.get("anthropic-version")).toBe("2023-06-01")
+    expect(headers.get("x-model-provider-preference")).toBe("anthropic")
+  }
 })
 
 test.each(["unicode-βeta", "latin-é", "safe-beta,bad\u0001beta"])(

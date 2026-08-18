@@ -12,6 +12,7 @@ import type {
   AnthropicToolResultBlock,
   AnthropicUserContentBlock,
 } from "~/routes/messages/anthropic-types"
+import type { AnthropicStreamChunk } from "~/services/copilot/create-anthropic-messages"
 import type { Model } from "~/services/copilot/get-models"
 
 import { getLastUsedAccountId } from "~/lib/account-router"
@@ -27,11 +28,11 @@ import {
   setSentryOutputMessages,
 } from "~/lib/sentry"
 import { withSseHeartbeat } from "~/lib/sse-lifecycle"
-import { resolveNativeWebSearch } from "~/routes/messages/native-handler"
 import {
-  createAnthropicMessages,
-  type AnthropicStreamChunk,
-} from "~/services/copilot/create-anthropic-messages"
+  createNativeMessages,
+  type NativeMessagesRequestOptions,
+  resolveNativeWebSearch,
+} from "~/routes/messages/native-handler"
 import {
   type ChatCompletionChunk,
   type ChatCompletionResponse,
@@ -65,12 +66,13 @@ const logger = createHandlerLogger("anthropic-bridge")
 export async function executeAnthropicBridge(
   c: Context,
   options: {
+    nativeOptions: NativeMessagesRequestOptions
     payload: ChatCompletionsPayload & { model: string }
-    requestedModel: string
     selectedModel?: Model
   },
 ): Promise<Response> {
-  const { payload, requestedModel, selectedModel } = options
+  const { nativeOptions, payload, selectedModel } = options
+  const requestedModel = nativeOptions.requestedModel ?? payload.model
 
   setRequestContext(c, { provider: "ChatCompletions→AnthropicMessages" })
 
@@ -90,7 +92,7 @@ export async function executeAnthropicBridge(
     return await executeBridgeWebSearch(c, {
       payload,
       anthropicPayload,
-      requestedModel,
+      nativeOptions,
     })
   }
 
@@ -101,9 +103,13 @@ export async function executeAnthropicBridge(
         model: payload.model,
       }),
       async (span) => {
-        const response = (await createAnthropicMessages(anthropicPayload, {
-          signal: c.req.raw.signal,
-        })) as AnthropicResponse
+        const response = (await createNativeMessages(
+          anthropicPayload,
+          nativeOptions,
+          {
+            signal: c.req.raw.signal,
+          },
+        )) as AnthropicResponse
 
         recordAccountContext(c)
 
@@ -134,7 +140,7 @@ export async function executeAnthropicBridge(
   return await executeBridgeStreaming(c, {
     payload,
     anthropicPayload,
-    requestedModel,
+    nativeOptions,
   })
 }
 
@@ -143,16 +149,20 @@ async function executeBridgeWebSearch(
   options: {
     payload: ChatCompletionsPayload & { model: string }
     anthropicPayload: AnthropicMessagesPayload
-    requestedModel: string
+    nativeOptions: NativeMessagesRequestOptions
   },
 ): Promise<Response> {
   const requestedStream = Boolean(options.anthropicPayload.stream)
   options.anthropicPayload.stream = false
   const response = await resolveNativeWebSearch(options.anthropicPayload, {
+    ...options.nativeOptions,
     signal: c.req.raw.signal,
   })
   recordAccountContext(c)
-  const result = anthropicResponseToChat(response, options.requestedModel)
+  const result = anthropicResponseToChat(
+    response,
+    options.nativeOptions.requestedModel ?? options.payload.model,
+  )
 
   if (!requestedStream) return c.json(result)
   return streamSSE(c, async (stream) => {
@@ -187,10 +197,11 @@ async function executeBridgeStreaming(
   options: {
     payload: ChatCompletionsPayload & { model: string }
     anthropicPayload: AnthropicMessagesPayload
-    requestedModel: string
+    nativeOptions: NativeMessagesRequestOptions
   },
 ): Promise<Response> {
-  const { payload, anthropicPayload, requestedModel } = options
+  const { payload, anthropicPayload, nativeOptions } = options
+  const requestedModel = nativeOptions.requestedModel ?? payload.model
 
   return await Sentry.startSpanManual(
     createSentryChatSpanOptions({
@@ -207,9 +218,13 @@ async function executeBridgeStreaming(
       }
 
       try {
-        const response = (await createAnthropicMessages(anthropicPayload, {
-          signal: c.req.raw.signal,
-        })) as AsyncIterable<AnthropicStreamChunk>
+        const response = (await createNativeMessages(
+          anthropicPayload,
+          nativeOptions,
+          {
+            signal: c.req.raw.signal,
+          },
+        )) as AsyncIterable<AnthropicStreamChunk>
 
         recordAccountContext(c)
 

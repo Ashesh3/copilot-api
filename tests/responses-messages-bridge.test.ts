@@ -1,8 +1,9 @@
-import { expect, test } from "bun:test"
+import { expect, mock, test } from "bun:test"
 
 import type { AnthropicResponse } from "~/routes/messages/anthropic-types"
 
 import { LocalHTTPError } from "~/lib/error"
+import { state } from "~/lib/state"
 import { chatPayloadToAnthropic } from "~/routes/chat-completions/anthropic-bridge"
 import {
   convertOpenAIContentPartToAnthropic,
@@ -11,6 +12,7 @@ import {
 import { emitResponsesResultAsStream } from "~/routes/messages/web-search-helpers"
 import {
   anthropicResponseToResponsesResult,
+  executeResponsesMessagesBridge,
   responsesPayloadToAnthropic,
 } from "~/routes/responses/messages-bridge"
 
@@ -110,6 +112,64 @@ test("maps text image document function tools and results to Messages", async ()
       ],
     },
   ])
+})
+
+test("passes explicit native options through the Responses Messages bridge", async () => {
+  const originalFetch = globalThis.fetch
+  const originalAccountType = state.accountType
+  const originalCopilotToken = state.copilotToken
+  const originalIsMultiToken = state.isMultiToken
+  let headers: Headers | undefined
+  const fetchMock = mock(
+    (_url: string | URL | Request, init?: RequestInit): Response => {
+      headers = new Headers(init?.headers)
+      return Response.json({
+        id: "msg_explicit_options",
+        type: "message",
+        role: "assistant",
+        model: "claude-current",
+        content: [{ type: "text", text: "ok" }],
+        stop_reason: "end_turn",
+        stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      })
+    },
+  )
+
+  state.accountType = "individual"
+  state.copilotToken = "copilot-token"
+  state.isMultiToken = false
+  ;(globalThis as unknown as { fetch: typeof fetch }).fetch =
+    fetchMock as unknown as typeof fetch
+
+  try {
+    const result = await executeResponsesMessagesBridge({
+      nativeOptions: {
+        anthropicBeta: "beta-one, beta-two, beta-one",
+        anthropicVersion: "2023-06-01",
+        modelProviderPreference: "anthropic",
+        requestedModel: "requested-alias",
+      },
+      payload: {
+        model: "claude-current",
+        input: "hello",
+        max_output_tokens: 64,
+      },
+    })
+
+    expect(result.model).toBe("requested-alias")
+    expect(headers?.get("anthropic-beta")).toBe("beta-one,beta-two")
+    expect(headers?.get("anthropic-version")).toBe("2023-06-01")
+    expect(headers?.get("x-model-provider-preference")).toBe("anthropic")
+  } finally {
+    ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
+    // eslint-disable-next-line require-atomic-updates
+    state.accountType = originalAccountType
+    // eslint-disable-next-line require-atomic-updates
+    state.copilotToken = originalCopilotToken
+    // eslint-disable-next-line require-atomic-updates
+    state.isMultiToken = originalIsMultiToken
+  }
 })
 
 test.each([

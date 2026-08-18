@@ -63,7 +63,6 @@ import {
   fitResponsesCompactionPayload,
   isResponsesCompactionRequest,
 } from "~/services/copilot/compaction-payload"
-import { createAnthropicMessages } from "~/services/copilot/create-anthropic-messages"
 import {
   createChatCompletions,
   type ChatCompletionChunk,
@@ -95,16 +94,14 @@ import {
   prepareResponsesRequest,
 } from "~/services/copilot/responses-contract"
 
+import { type NativeMessagesRequestOptions } from "../messages/native-handler"
 import {
   emitResponsesFailureAsStream,
   emitResponsesResultAsStream,
   resolveResponsesWebSearchCalls,
   resolveWebSearchCalls,
 } from "../messages/web-search-helpers"
-import {
-  anthropicResponseToResponsesResult,
-  responsesPayloadToAnthropic,
-} from "./messages-bridge"
+import { executeResponsesMessagesBridge } from "./messages-bridge"
 import { createStreamIdTracker, fixStreamIds } from "./stream-id-sync"
 import {
   checkResponsesToChatTranslation,
@@ -512,6 +509,11 @@ function readResponseEventDataProperty(
 export const handleResponses = async (c: Context) => {
   const payload = await parseResponsesRequestBody(c)
   prepareResponsesRequest(payload)
+  const nativeOptions: NativeMessagesRequestOptions = {
+    anthropicBeta: c.req.header("anthropic-beta"),
+    anthropicVersion: c.req.header("anthropic-version"),
+    modelProviderPreference: c.req.header("x-model-provider-preference"),
+  }
   installRoutingAffinityFallback(
     resolveResponsesRoutingAffinity(
       (payload as Record<string, unknown>).client_metadata,
@@ -524,7 +526,7 @@ export const handleResponses = async (c: Context) => {
   return await Sentry.startSpan(
     createSentryInvokeAgentSpanOptions(model, conversationId),
     async () => {
-      return await handleResponsesInner(c, payload)
+      return await handleResponsesInner(c, payload, nativeOptions)
     },
   )
 }
@@ -539,7 +541,11 @@ async function parseResponsesRequestBody(
   }
 }
 
-const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
+const handleResponsesInner = async (
+  c: Context,
+  payload: ResponsesPayload,
+  nativeOptions: NativeMessagesRequestOptions,
+) => {
   // Emit synthetic tool execution spans from tool results in input history
   emitResponsesToolSpans(payload.input)
 
@@ -608,7 +614,10 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
 
   if (decision.target === "/v1/messages") {
     reportResponsesEndpointFallback(c, payload.model, decision)
-    return await handleWithAnthropicMessages(c, preparedPayload, requestedModel)
+    return await handleWithAnthropicMessages(c, preparedPayload, {
+      ...nativeOptions,
+      requestedModel,
+    })
   }
 
   if (decision.target === "/chat/completions") {
@@ -1826,22 +1835,17 @@ export const streamChatCompletionsAsResponses = async (
 const handleWithAnthropicMessages = async (
   c: Context,
   payload: ResponsesPayload,
-  requestedModel: string,
+  nativeOptions: NativeMessagesRequestOptions,
 ) => {
+  const requestedModel = nativeOptions.requestedModel ?? payload.model
   setRequestContext(c, { provider: "Responses→AnthropicMessages" })
-  const anthropicPayload = await responsesPayloadToAnthropic(
-    payload,
-    c.req.raw.signal,
-    { attachmentsNormalized: true },
-  )
-  anthropicPayload.stream = false
   const compaction = isResponsesCompactionRequest(payload)
   if (!payload.stream) {
     const result = await createAnthropicResponsesResult({
-      anthropicPayload,
+      attachmentsNormalized: true,
       compaction,
+      nativeOptions,
       payload,
-      requestedModel,
       signal: c.req.raw.signal,
     })
     setResponsesResultContext(c, result)
@@ -1851,10 +1855,10 @@ const handleWithAnthropicMessages = async (
   const upstreamController = new AbortController()
   const signal = AbortSignal.any([c.req.raw.signal, upstreamController.signal])
   const pendingResult = createAnthropicResponsesResult({
-    anthropicPayload,
+    attachmentsNormalized: true,
     compaction,
+    nativeOptions,
     payload,
-    requestedModel,
     signal,
   })
   const preflush = await raceSsePreflush(pendingResult)
@@ -1884,22 +1888,20 @@ const handleWithAnthropicMessages = async (
 }
 
 async function createAnthropicResponsesResult(options: {
-  anthropicPayload: Awaited<ReturnType<typeof responsesPayloadToAnthropic>>
+  attachmentsNormalized?: boolean
   compaction: boolean
+  nativeOptions: NativeMessagesRequestOptions
   payload: ResponsesPayload
-  requestedModel: string
   signal: AbortSignal
 }): Promise<ResponsesResult> {
-  const response = (await createAnthropicMessages(options.anthropicPayload, {
+  return await executeResponsesMessagesBridge({
+    attachmentsNormalized: options.attachmentsNormalized,
     compaction: options.compaction,
+    nativeOptions: options.nativeOptions,
+    payload: options.payload,
     preserveValidatedControls: true,
     signal: options.signal,
-  })) as Parameters<typeof anthropicResponseToResponsesResult>[0]
-  return anthropicResponseToResponsesResult(
-    response,
-    options.requestedModel,
-    options.payload,
-  )
+  })
 }
 
 function setResponsesResultContext(c: Context, result: ResponsesResult): void {

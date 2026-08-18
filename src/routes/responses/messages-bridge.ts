@@ -6,6 +6,7 @@ import type {
   AnthropicToolResultBlock,
   AnthropicUserContentBlock,
 } from "~/routes/messages/anthropic-types"
+import type { NativeMessagesRequestOptions } from "~/routes/messages/native-handler"
 import type { ContentPart } from "~/services/copilot/create-chat-completions"
 import type {
   FunctionTool,
@@ -20,6 +21,7 @@ import {
   assertEndpointTranslationSupported,
   createEndpointTranslationError,
 } from "~/lib/error"
+import { createNativeMessages } from "~/routes/messages/native-handler"
 
 import {
   convertOpenAIContentPartToAnthropic,
@@ -27,10 +29,44 @@ import {
 } from "../chat-completions/anthropic-conversion"
 import { checkResponsesToMessagesTranslation } from "./translation-fidelity"
 
+export interface ResponsesMessagesBridgeOptions {
+  attachmentsNormalized?: boolean
+}
+
+export async function executeResponsesMessagesBridge(options: {
+  attachmentsNormalized?: boolean
+  compaction?: boolean
+  nativeOptions: NativeMessagesRequestOptions
+  payload: ResponsesPayload
+  preserveValidatedControls?: boolean
+  signal?: AbortSignal
+}): Promise<ResponsesResult> {
+  const anthropicPayload = await responsesPayloadToAnthropic(
+    options.payload,
+    options.signal,
+    { attachmentsNormalized: options.attachmentsNormalized },
+  )
+  anthropicPayload.stream = false
+  const response = (await createNativeMessages(
+    anthropicPayload,
+    options.nativeOptions,
+    {
+      compaction: options.compaction,
+      preserveValidatedControls: options.preserveValidatedControls,
+      signal: options.signal,
+    },
+  )) as AnthropicResponse
+  return anthropicResponseToResponsesResult(
+    response,
+    options.nativeOptions.requestedModel ?? options.payload.model,
+    options.payload,
+  )
+}
+
 export async function responsesPayloadToAnthropic(
   payload: ResponsesPayload,
   signal?: AbortSignal,
-  options?: { attachmentsNormalized?: boolean },
+  options?: ResponsesMessagesBridgeOptions,
 ): Promise<AnthropicMessagesPayload> {
   assertEndpointTranslationSupported(
     {

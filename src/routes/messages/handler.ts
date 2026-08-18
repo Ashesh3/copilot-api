@@ -93,7 +93,10 @@ import {
   normalizeAnthropicAttachments,
   payloadHasPdfDocuments,
 } from "./attachment-normalization"
-import { handleWithNativeMessages } from "./native-handler"
+import {
+  handleWithNativeMessages,
+  type NativeMessagesRequestOptions,
+} from "./native-handler"
 import {
   translateToAnthropic,
   translateToOpenAI,
@@ -176,6 +179,11 @@ export async function handleCompletion(c: Context) {
     payload: rawPayload,
     requireMaxTokens: true,
   }).body as unknown as AnthropicMessagesPayload
+  const nativeOptions: NativeMessagesRequestOptions = {
+    anthropicBeta: c.req.header("anthropic-beta"),
+    anthropicVersion: c.req.header("anthropic-version"),
+    modelProviderPreference: c.req.header("x-model-provider-preference"),
+  }
   installRoutingAffinityFallback(
     resolveClaudeRoutingAffinity(anthropicPayload.metadata),
   )
@@ -193,7 +201,7 @@ export async function handleCompletion(c: Context) {
   return await Sentry.startSpan(
     createSentryInvokeAgentSpanOptions(model, conversationId),
     async () => {
-      return await handleCompletionInner(c, anthropicPayload)
+      return await handleCompletionInner(c, anthropicPayload, nativeOptions)
     },
   )
 }
@@ -201,6 +209,7 @@ export async function handleCompletion(c: Context) {
 async function handleCompletionInner(
   c: Context,
   anthropicPayload: AnthropicMessagesPayload,
+  nativeOptions: NativeMessagesRequestOptions,
 ) {
   // Emit synthetic tool execution spans from tool results in message history
   emitAnthropicToolSpans(anthropicPayload.messages)
@@ -277,7 +286,7 @@ async function handleCompletionInner(
   // claude code and opencode compact request detection
   const isCompact = isCompactRequest(anthropicPayload)
 
-  const anthropicBeta = c.req.header("anthropic-beta")
+  const { anthropicBeta } = nativeOptions
   logger.debug("Anthropic Beta header present:", Boolean(anthropicBeta))
 
   // Route to model variants based on client signals
@@ -356,10 +365,12 @@ async function handleCompletionInner(
         },
       })
     }
-    return await handleWithNativeMessages(c, anthropicPayload, {
-      initiatorOverride,
+    const requestOptions: NativeMessagesRequestOptions = {
+      ...nativeOptions,
       requestedModel,
-    })
+      ...(initiatorOverride ? { initiatorOverride } : {}),
+    }
+    return await handleWithNativeMessages(c, anthropicPayload, requestOptions)
   }
 
   if (shouldUseResponsesApi(selectedModel)) {
