@@ -844,6 +844,7 @@ describe("responses websocket message handling", () => {
         supported_endpoints: ["/v1/messages"],
         capabilities: {
           ...model.capabilities,
+          limits: { max_output_tokens: 4096 },
           supports: { reasoning_effort: ["medium"] },
         },
       })),
@@ -877,6 +878,7 @@ describe("responses websocket message handling", () => {
     )
     expect(lastRequestBody).toMatchObject({
       model: "gpt-5.4",
+      max_tokens: 4096,
       messages: [{ role: "user", content: "Hello" }],
       stream: false,
     })

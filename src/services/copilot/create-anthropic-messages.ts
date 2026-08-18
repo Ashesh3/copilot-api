@@ -16,6 +16,7 @@ import { PRE_HEADER_MAX_DELAY_SECONDS } from "~/services/copilot/transport-retry
 import { fitAnthropicCompactionPayload } from "./compaction-payload"
 import { hasVisionContent } from "./copilot-client"
 import {
+  normalizeAnthropicMessagesRequest,
   prepareAnthropicMessagesRequest,
   serializeAnthropicMessagesRequest,
 } from "./messages-contract"
@@ -34,7 +35,6 @@ import {
  */
 
 export const ANTHROPIC_MESSAGES_ENDPOINT = "/v1/messages"
-const DEFAULT_BRIDGE_MAX_TOKENS = 64_000
 
 export function modelSupportsNativeMessages(
   model: { supported_endpoints?: Array<string> } | undefined,
@@ -66,20 +66,10 @@ export function detectAnthropicInitiator(
   return "user"
 }
 
-function applyValidatedBridgeMaxTokens(
-  payload: AnthropicMessagesPayload,
-  preserveValidatedControls: boolean | undefined,
-): AnthropicMessagesPayload {
-  if (!preserveValidatedControls || payload.max_tokens !== undefined) {
-    return payload
-  }
-
-  return {
-    ...payload,
-    max_tokens:
-      state.models?.data.find((model) => model.id === payload.model)
-        ?.capabilities.limits?.max_output_tokens ?? DEFAULT_BRIDGE_MAX_TOKENS,
-  }
+function getPositiveModelOutputLimit(modelId: string): number | undefined {
+  const limit = state.models?.data.find((model) => model.id === modelId)
+    ?.capabilities.limits?.max_output_tokens
+  return Number.isInteger(limit) && Number(limit) > 0 ? limit : undefined
 }
 
 export const createAnthropicMessages = async (
@@ -94,27 +84,39 @@ export const createAnthropicMessages = async (
     signal?: AbortSignal
   },
 ): Promise<CreateAnthropicMessagesReturn> => {
-  const preparedPayload = applyValidatedBridgeMaxTokens(
-    payload,
-    options?.preserveValidatedControls,
-  )
-  const prepared = prepareAnthropicMessagesRequest({
+  const initialPrepared = prepareAnthropicMessagesRequest({
     anthropicBeta: options?.anthropicBeta,
     anthropicVersion: options?.anthropicVersion,
     modelProviderPreference: options?.modelProviderPreference,
-    payload: preparedPayload,
+    payload,
+    requireMaxTokens: !options?.preserveValidatedControls,
+  })
+  const initialBody =
+    initialPrepared.body as unknown as AnthropicMessagesPayload
+  if (
+    options?.preserveValidatedControls
+    && initialBody.max_tokens === undefined
+  ) {
+    const maxTokens = getPositiveModelOutputLimit(initialBody.model)
+    if (maxTokens !== undefined) initialBody.max_tokens = maxTokens
+  }
+  const prepared = prepareAnthropicMessagesRequest({
+    ...initialPrepared.headers,
+    payload: initialBody,
     requireMaxTokens: true,
   })
-  const vision = hasVisionContent(payload.messages)
+  const snapshot = prepared.body as unknown as AnthropicMessagesPayload
+  const vision = hasVisionContent(snapshot.messages)
   const initiator =
-    options?.initiator ?? detectAnthropicInitiator(payload.messages)
+    options?.initiator ?? detectAnthropicInitiator(snapshot.messages)
 
   return await dispatchAnthropicMessages({
     initiator,
     options,
-    payload,
-    preparedBody: prepared.body,
+    modelId: snapshot.model,
+    preparedBody: normalizeAnthropicMessagesRequest(prepared.body),
     preparedHeaders: prepared.headers,
+    stream: Boolean(snapshot.stream),
     vision,
   })
 }
@@ -127,16 +129,18 @@ async function dispatchAnthropicMessages(options: {
         signal?: AbortSignal
       }
     | undefined
-  payload: AnthropicMessagesPayload
+  modelId: string
   preparedBody: Record<string, unknown>
   preparedHeaders: {
     anthropicBeta?: string
     anthropicVersion: string
     modelProviderPreference?: string
   }
+  stream: boolean
   vision: boolean
 }): Promise<CreateAnthropicMessagesReturn> {
-  const { initiator, payload, preparedBody, preparedHeaders, vision } = options
+  const { initiator, modelId, preparedBody, preparedHeaders, stream, vision } =
+    options
 
   const fitted =
     options.options?.compaction ?
@@ -160,10 +164,10 @@ async function dispatchAnthropicMessages(options: {
       signal: options.options?.signal,
     },
     {
-      modelId: payload.model,
+      modelId,
       headerOptions: { vision, initiator, ...preparedHeaders },
       maxHttpRetryDelaySeconds:
-        payload.stream ? PRE_HEADER_MAX_DELAY_SECONDS : undefined,
+        stream ? PRE_HEADER_MAX_DELAY_SECONDS : undefined,
     },
   )
 
@@ -179,7 +183,7 @@ async function dispatchAnthropicMessages(options: {
     )
   }
 
-  if (payload.stream) {
+  if (stream) {
     return events(response) as AsyncIterable<AnthropicStreamChunk>
   }
 

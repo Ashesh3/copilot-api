@@ -78,6 +78,10 @@ import {
   type ResponseStreamEvent,
 } from "~/services/copilot/create-responses"
 import { isWebSearchToolType } from "~/services/copilot/mcp-web-search"
+import {
+  createInvalidAnthropicMessagesJsonError,
+  prepareAnthropicMessagesRequest,
+} from "~/services/copilot/messages-contract"
 
 import {
   type AnthropicMessagesPayload,
@@ -162,7 +166,16 @@ const hasWebSearchToolInPayload = (
 }
 
 export async function handleCompletion(c: Context) {
-  const anthropicPayload = await c.req.json<AnthropicMessagesPayload>()
+  let rawPayload: AnthropicMessagesPayload
+  try {
+    rawPayload = await c.req.json<AnthropicMessagesPayload>()
+  } catch {
+    throw createInvalidAnthropicMessagesJsonError()
+  }
+  const anthropicPayload = prepareAnthropicMessagesRequest({
+    payload: rawPayload,
+    requireMaxTokens: true,
+  }).body as unknown as AnthropicMessagesPayload
   installRoutingAffinityFallback(
     resolveClaudeRoutingAffinity(anthropicPayload.metadata),
   )

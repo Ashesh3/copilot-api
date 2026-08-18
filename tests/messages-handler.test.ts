@@ -195,6 +195,98 @@ beforeEach(() => {
   setModelSettingsForTest([])
 })
 
+test.each([
+  ["null body", "null", "The Messages request body must be a JSON object."],
+  ["array body", "[]", "The Messages request body must be a JSON object."],
+  [
+    "blank model",
+    JSON.stringify({
+      model: " ",
+      messages: [{ role: "user", content: "x" }],
+      max_tokens: 1,
+    }),
+    "model is required for Messages requests.",
+  ],
+  [
+    "missing model",
+    JSON.stringify({
+      messages: [{ role: "user", content: "x" }],
+      max_tokens: 1,
+    }),
+    "model is required for Messages requests.",
+  ],
+  [
+    "empty messages",
+    JSON.stringify({ model: "claude", messages: [], max_tokens: 1 }),
+    "messages is required for Messages requests.",
+  ],
+  [
+    "missing messages",
+    JSON.stringify({ model: "claude", max_tokens: 1 }),
+    "messages is required for Messages requests.",
+  ],
+  [
+    "missing max_tokens",
+    JSON.stringify({
+      model: "claude",
+      messages: [{ role: "user", content: "x" }],
+    }),
+    "max_tokens is required for Messages requests.",
+  ],
+  [
+    "zero max_tokens",
+    JSON.stringify({
+      model: "claude",
+      messages: [{ role: "user", content: "x" }],
+      max_tokens: 0,
+    }),
+    "max_tokens is required for Messages requests.",
+  ],
+  [
+    "fractional max_tokens",
+    JSON.stringify({
+      model: "claude",
+      messages: [{ role: "user", content: "x" }],
+      max_tokens: 1.5,
+    }),
+    "max_tokens is required for Messages requests.",
+  ],
+] as const)(
+  "rejects public Messages %s before upstream dispatch",
+  async (_name, body, message) => {
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+    })
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({
+      type: "error",
+      error: { type: "invalid_request_error", message },
+    })
+    expect(fetchMock).not.toHaveBeenCalled()
+  },
+)
+
+test("rejects malformed public Messages JSON before upstream dispatch", async () => {
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: '{"model":',
+  })
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toEqual({
+    type: "error",
+    error: {
+      type: "invalid_request_error",
+      message: "The Messages request body must contain valid JSON.",
+    },
+  })
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
 test("removes top_p when thinking is enabled on the chat completions path", async () => {
   const response = await server.request("/v1/messages", {
     method: "POST",

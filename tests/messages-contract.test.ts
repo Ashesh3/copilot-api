@@ -9,12 +9,51 @@ import {
   serializeAnthropicMessagesRequest,
 } from "~/services/copilot/messages-contract"
 
+function expectFixedBodyError(action: () => unknown, marker: string): void {
+  try {
+    action()
+    throw new Error("Expected Messages body validation to fail")
+  } catch (error) {
+    expect(error).toBeInstanceOf(LocalHTTPError)
+    expect(error).toHaveProperty("response.status", 400)
+    expect(error).toHaveProperty("clientBody.type", "error")
+    expect(error).toHaveProperty(
+      "clientBody.error.type",
+      "invalid_request_error",
+    )
+    expect(error).toHaveProperty(
+      "clientBody.error.message",
+      "The Messages request body must contain only plain JSON values.",
+    )
+    expect(JSON.stringify((error as LocalHTTPError).clientBody)).not.toContain(
+      marker,
+    )
+    expect((error as Error).message).not.toContain(marker)
+  }
+}
+
 test("canonicalizes beta whitespace and duplicates without renaming ids", () => {
   expect(
     canonicalizeAnthropicBeta(
       " interleaved-thinking-2025-05-14,claude-code-20250219, interleaved-thinking-2025-05-14 ",
     ),
   ).toBe("interleaved-thinking-2025-05-14,claude-code-20250219")
+})
+
+test("deduplicates beta identifiers before enforcing the UTF-8 byte limit", () => {
+  const beta = "unicode-βeta-2026-08-19"
+  expect(canonicalizeAnthropicBeta(Array(80).fill(beta).join(","))).toBe(beta)
+})
+
+test("rejects control injection and oversized canonical beta output", () => {
+  expect(canonicalizeAnthropicBeta("safe-beta,bad\u0001beta")).toBeUndefined()
+  expect(
+    canonicalizeAnthropicBeta(
+      Array.from({ length: 180 }, (_, index) => `unicode-βeta-${index}`).join(
+        ",",
+      ),
+    ),
+  ).toBeUndefined()
 })
 
 test("preserves native top-level fields and removes only gateway-local keys", () => {
@@ -150,4 +189,108 @@ test("does not require max_tokens for shared non-inference preparation", () => {
       requireMaxTokens: false,
     }).body,
   ).not.toHaveProperty("max_tokens")
+})
+
+test("rejects a throwing accessor without invoking or exposing it", () => {
+  const marker = "PRIVATE_THROWING_GETTER"
+  let reads = 0
+  const payload = {
+    max_tokens: 1,
+    messages: [{ role: "user", content: "hello" }],
+  } as Record<string, unknown>
+  Object.defineProperty(payload, "model", {
+    enumerable: true,
+    get() {
+      reads += 1
+      throw new Error(marker)
+    },
+  })
+
+  expectFixedBodyError(
+    () =>
+      prepareAnthropicMessagesRequest({
+        payload: payload as AnthropicMessagesPayload,
+        requireMaxTokens: true,
+      }),
+    marker,
+  )
+  expect(reads).toBe(0)
+})
+
+test("rejects a revoked proxy with a fixed body error", () => {
+  const marker = "revoked proxy"
+  const revocable = Proxy.revocable(
+    {
+      model: "claude",
+      max_tokens: 1,
+      messages: [{ role: "user", content: "hello" }],
+    },
+    {},
+  )
+  revocable.revoke()
+
+  expectFixedBodyError(
+    () =>
+      prepareAnthropicMessagesRequest({
+        payload: revocable.proxy as AnthropicMessagesPayload,
+        requireMaxTokens: true,
+      }),
+    marker,
+  )
+})
+
+test.each([
+  ["PRIVATE_BIGINT", 1n],
+  ["PRIVATE_HOST_OBJECT", new Date(0)],
+] as const)(
+  "rejects non-JSON value %s with a fixed body error",
+  (marker, value) => {
+    const payload = {
+      model: "claude",
+      max_tokens: 1,
+      messages: [{ role: "user", content: "hello" }],
+      future_native_field: value,
+    } as AnthropicMessagesPayload
+
+    expectFixedBodyError(
+      () =>
+        prepareAnthropicMessagesRequest({ payload, requireMaxTokens: true }),
+      marker,
+    )
+    expect(payload.future_native_field).toBe(value)
+  },
+)
+
+test("rejects cyclic data with a fixed body error and preserves the source", () => {
+  const marker = "PRIVATE_CYCLE"
+  const futureNativeField: Record<string, unknown> = { marker }
+  futureNativeField.self = futureNativeField
+  const payload = {
+    model: "claude",
+    max_tokens: 1,
+    messages: [{ role: "user", content: "hello" }],
+    future_native_field: futureNativeField,
+  } as AnthropicMessagesPayload
+
+  expectFixedBodyError(
+    () => prepareAnthropicMessagesRequest({ payload, requireMaxTokens: true }),
+    marker,
+  )
+  expect(futureNativeField.self).toBe(futureNativeField)
+})
+
+test("serializer rejects accessors without invoking or exposing them", () => {
+  const marker = "PRIVATE_SERIALIZER_GETTER"
+  let reads = 0
+  const body: Record<string, unknown> = {}
+  Object.defineProperty(body, "future_native_field", {
+    enumerable: true,
+    get() {
+      reads += 1
+      throw new Error(marker)
+    },
+  })
+
+  expectFixedBodyError(() => serializeAnthropicMessagesRequest(body), marker)
+  expect(reads).toBe(0)
 })
