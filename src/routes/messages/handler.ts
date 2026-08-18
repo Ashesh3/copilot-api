@@ -4,9 +4,16 @@ import type { Context } from "hono"
 import * as Sentry from "@sentry/bun"
 import { streamSSE } from "hono/streaming"
 
+import type {
+  EndpointRouteDecision,
+  EndpointRouteFailure,
+} from "~/lib/endpoint-routing"
 import type { Model } from "~/services/copilot/get-models"
 
-import { getLastUsedAccountId } from "~/lib/account-router"
+import {
+  getLastUsedAccountId,
+  runWithPinnedRoutedAccount,
+} from "~/lib/account-router"
 import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
 import {
@@ -14,8 +21,15 @@ import {
   resolveCustomProviderModel,
   type CustomProviderModelReference,
 } from "~/lib/custom-providers"
-import { getModelEndpointSupport } from "~/lib/endpoint-routing"
-import { HTTPError, isAbortError } from "~/lib/error"
+import {
+  getModelEndpointSupport,
+  selectCopilotEndpoint,
+} from "~/lib/endpoint-routing"
+import {
+  createEndpointTranslationError,
+  HTTPError,
+  isAbortError,
+} from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
 import {
   applyModelRedirect,
@@ -65,7 +79,6 @@ import {
   translateResponsesResultToAnthropic,
 } from "~/routes/messages/responses-translation"
 import { getResponsesRequestOptions } from "~/routes/responses/utils"
-import { modelSupportsNativeMessages } from "~/services/copilot/create-anthropic-messages"
 import {
   createChatCompletions,
   type ChatCompletionChunk,
@@ -82,6 +95,10 @@ import {
   createInvalidAnthropicMessagesJsonError,
   prepareAnthropicMessagesRequest,
 } from "~/services/copilot/messages-contract"
+import {
+  consumeExtraSend,
+  createRetryBudget,
+} from "~/services/copilot/transport-retry"
 
 import {
   type AnthropicMessagesPayload,
@@ -89,10 +106,7 @@ import {
   type AnthropicTextBlock,
   type AnthropicToolResultBlock,
 } from "./anthropic-types"
-import {
-  normalizeAnthropicAttachments,
-  payloadHasPdfDocuments,
-} from "./attachment-normalization"
+import { normalizeAnthropicAttachments } from "./attachment-normalization"
 import {
   handleWithNativeMessages,
   type NativeMessagesRequestOptions,
@@ -108,6 +122,10 @@ import {
 } from "./stream-translation"
 import { parseSubagentMarkerFromFirstUser } from "./subagent-marker"
 import {
+  checkMessagesToChatTranslation,
+  checkMessagesToResponsesTranslation,
+} from "./translation-fidelity"
+import {
   emitAnthropicResponseAsStream,
   extractWebSearchCalls,
   hasWebSearchInChunks,
@@ -115,6 +133,43 @@ import {
   resolveResponsesWebSearchCalls,
   resolveWebSearchCalls,
 } from "./web-search-helpers"
+
+export function selectMessagesUpstreamEndpoint(options: {
+  payload: AnthropicMessagesPayload
+  selectedModel: Model | undefined
+}): EndpointRouteDecision | EndpointRouteFailure {
+  const support =
+    options.selectedModel ?
+      getModelEndpointSupport(options.selectedModel)
+    : {
+        chat: true,
+        embeddings: false,
+        messages: false,
+        responses: false,
+        responsesWebSocket: false,
+      }
+  return selectCopilotEndpoint({
+    source: "messages",
+    support,
+    candidates: [
+      {
+        endpoint: "/v1/messages",
+        reason: "endpoint_unavailable",
+        check: { supported: true, blockers: [] },
+      },
+      {
+        endpoint: "/responses",
+        reason: "endpoint_unavailable",
+        check: checkMessagesToResponsesTranslation(options.payload),
+      },
+      {
+        endpoint: "/chat/completions",
+        reason: "endpoint_unavailable",
+        check: checkMessagesToChatTranslation(options.payload),
+      },
+    ],
+  })
+}
 
 /**
  * Strip thinking blocks from all assistant messages in the payload.
@@ -133,6 +188,15 @@ export function stripThinkingBlocks(
     if (msg.content.length < before) stripped = true
   }
   return stripped
+}
+
+async function isInvalidThinkingSignatureResponse(
+  response: Response,
+): Promise<boolean> {
+  const body = await response.clone().text()
+  return (
+    body.includes("Invalid signature") || body.includes("Invalid `signature`")
+  )
 }
 
 /**
@@ -306,32 +370,49 @@ async function handleCompletionInner(
     await awaitApproval()
   }
 
+  const customReference = resolveCustomChatModel(anthropicPayload.model)
+  if (customReference) {
+    setRequestContext(c, {
+      requestedModel,
+      model: anthropicPayload.model,
+      provider: "ChatCompletions",
+      reasoningEffort:
+        redirectEffort ?? getBodyReasoningEffort(anthropicPayload),
+    })
+    return await handleWithChatCompletions(c, anthropicPayload, {
+      initiatorOverride,
+      effortOverride: redirectEffort,
+      requestedModel,
+    })
+  }
+
   const selectedModel = state.models?.data.find(
     (m) => m.id === anthropicPayload.model,
   )
 
-  // Base64 PDFs and ToolSearch references can only remain structural on the
-  // native /v1/messages endpoint. Translated endpoints use a textual fallback.
-  const hasPdfDocuments = payloadHasPdfDocuments(anthropicPayload)
-  const hasToolReferences = payloadHasToolReference(anthropicPayload)
-  const usesNativeMessages =
-    (hasPdfDocuments || hasToolReferences)
-    && modelSupportsNativeMessages(selectedModel)
+  const routeDecision = selectMessagesUpstreamEndpoint({
+    payload: anthropicPayload,
+    selectedModel,
+  })
+  if ("code" in routeDecision)
+    throw createEndpointTranslationError(routeDecision)
 
   let apiType = "ChatCompletions"
-  if (usesNativeMessages) {
+  if (routeDecision.target === "/v1/messages") {
     apiType = "AnthropicMessages"
+  } else if (routeDecision.target === "/responses") {
+    apiType = "Responses"
+  }
+  if (routeDecision.translated) {
     recordNonDefaultBehavior(c, {
       kind: "endpoint_fallback",
-      message: `${hasPdfDocuments ? "PDF document attachment" : "ToolSearch reference"} routed ${anthropicPayload.model} to native /v1/messages`,
+      message: `Model ${anthropicPayload.model} does not support native /v1/messages; falling back to ${apiType}`,
       data: {
         model: anthropicPayload.model,
-        sourceEndpoint: "ChatCompletions",
-        targetEndpoint: "AnthropicMessages",
+        sourceEndpoint: "AnthropicMessages",
+        targetEndpoint: apiType,
       },
     })
-  } else if (shouldUseResponsesApi(selectedModel)) {
-    apiType = "Responses"
   }
 
   // Determine effective reasoning effort for logging
@@ -346,34 +427,54 @@ async function handleCompletionInner(
     reasoningEffort: effectiveEffort,
   })
 
-  if (usesNativeMessages) {
-    // The native /v1/messages endpoint validates assistant thinking-block
-    // signatures as genuine Anthropic signatures. In a mixed session, prior
-    // turns were served by the OpenAI-format /chat/completions and /responses
-    // endpoints, whose opaque reasoning signatures are NOT valid here — CAPI
-    // rejects them with 400 "Invalid signature in thinking block". Drop the
-    // history thinking blocks before dispatching; they aren't needed to read
-    // the attachment, and the current turn still reasons via `thinking`.
-    if (stripThinkingBlocks(anthropicPayload)) {
-      recordNonDefaultBehavior(c, {
-        kind: "reasoning_retry_without_thinking",
-        message: `Stripped foreign-endpoint thinking blocks before native /v1/messages for ${anthropicPayload.model}`,
-        data: {
-          model: anthropicPayload.model,
-          reason: "thinking signatures not valid on /v1/messages",
-          endpoint: "AnthropicMessages",
-        },
-      })
-    }
+  if (routeDecision.target === "/v1/messages") {
+    const retryBudget = createRetryBudget()
     const requestOptions: NativeMessagesRequestOptions = {
       ...nativeOptions,
       requestedModel,
+      retryBudget,
       ...(initiatorOverride ? { initiatorOverride } : {}),
     }
-    return await handleWithNativeMessages(c, anthropicPayload, requestOptions)
+    try {
+      return await handleWithNativeMessages(c, anthropicPayload, requestOptions)
+    } catch (error) {
+      if (
+        anthropicPayload.stream
+        || !(error instanceof HTTPError)
+        || error.response.status !== 400
+        || !(await isInvalidThinkingSignatureResponse(error.response))
+      ) {
+        throw error
+      }
+
+      if (!consumeExtraSend(retryBudget)) {
+        throw error
+      }
+      const recoveredPayload = structuredClone(anthropicPayload)
+      if (!stripThinkingBlocks(recoveredPayload)) throw error
+      recordNonDefaultBehavior(c, {
+        kind: "reasoning_retry_without_thinking",
+        message: `Stripped thinking blocks after native /v1/messages rejected their signature for ${anthropicPayload.model}`,
+        data: {
+          model: anthropicPayload.model,
+          reason: "invalid signature",
+          endpoint: "AnthropicMessages",
+        },
+      })
+      const recoveryBudget = createRetryBudget({ extraSends: 0 })
+      const accountId = getLastUsedAccountId()
+      return await runWithPinnedRoutedAccount(
+        accountId,
+        async () =>
+          await handleWithNativeMessages(c, recoveredPayload, {
+            ...requestOptions,
+            retryBudget: recoveryBudget,
+          }),
+      )
+    }
   }
 
-  if (shouldUseResponsesApi(selectedModel)) {
+  if (routeDecision.target === "/responses") {
     return await handleWithResponsesApi(c, anthropicPayload, {
       initiatorOverride,
       effortOverride,
@@ -1582,10 +1683,6 @@ const executeResponsesApi = async (
   return c.json(anthropicResponse)
 }
 
-const shouldUseResponsesApi = (selectedModel: Model | undefined): boolean => {
-  return getModelEndpointSupport(selectedModel).responses
-}
-
 const modelExists = (id: string) =>
   state.models?.data.some((m) => m.id === id) ?? false
 
@@ -1758,15 +1855,6 @@ const mergeContentWithTexts = (
 const hasToolReference = (toolResult: AnthropicToolResultBlock): boolean =>
   Array.isArray(toolResult.content)
   && toolResult.content.some((block) => block.type === "tool_reference")
-
-const payloadHasToolReference = (payload: AnthropicMessagesPayload): boolean =>
-  payload.messages.some(
-    (message) =>
-      Array.isArray(message.content)
-      && message.content.some(
-        (block) => block.type === "tool_result" && hasToolReference(block),
-      ),
-  )
 
 const mergeToolResultForClaude = (
   anthropicPayload: AnthropicMessagesPayload,

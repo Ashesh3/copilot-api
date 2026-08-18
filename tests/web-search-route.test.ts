@@ -9,7 +9,7 @@ import { server } from "../src/server"
 import { resetWebSearchSessionsForTest } from "../src/services/copilot/mcp-web-search"
 
 const originalFetch = globalThis.fetch
-const chatRequests: Array<Record<string, unknown>> = []
+const upstreamRequests: Array<Record<string, unknown>> = []
 const mcpHeaders: Array<Headers> = []
 let attachmentFetchCount = 0
 
@@ -77,9 +77,47 @@ const fetchMock = mock((url: string, init?: RequestInit) => {
     })
   }
 
+  if (path === "/v1/messages") {
+    upstreamRequests.push(body)
+    if (upstreamRequests.length === 1) {
+      return jsonResponse({
+        id: "msg-search",
+        type: "message",
+        role: "assistant",
+        model: "claude-sonnet-4.6",
+        content: [
+          {
+            type: "tool_use",
+            id: "search-call",
+            name: "web_search",
+            input: { query: "today UTC date" },
+          },
+        ],
+        stop_reason: "tool_use",
+        stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      })
+    }
+    return jsonResponse({
+      id: "msg-final",
+      type: "message",
+      role: "assistant",
+      model: "claude-sonnet-4.6",
+      content: [
+        {
+          type: "text",
+          text: "Today is July 14, 2026 ([Source](https://example.com)).",
+        },
+      ],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 2, output_tokens: 1 },
+    })
+  }
+
   if (path === "/chat/completions") {
-    chatRequests.push(body)
-    if (chatRequests.length === 1) {
+    upstreamRequests.push(body)
+    if (upstreamRequests.length === 1) {
       return jsonResponse({
         id: "chat-search",
         object: "chat.completion",
@@ -141,7 +179,7 @@ afterAll(() => {
 
 beforeEach(() => {
   fetchMock.mockClear()
-  chatRequests.length = 0
+  upstreamRequests.length = 0
   mcpHeaders.length = 0
   attachmentFetchCount = 0
   resetWebSearchSessionsForTest()
@@ -186,22 +224,40 @@ test("Claude web search completes through Copilot MCP without leaking a tool cal
       text: "Today is July 14, 2026 ([Source](https://example.com)).",
     },
   ])
-  expect(chatRequests).toHaveLength(2)
-  const tools = chatRequests[0]?.tools as
-    | Array<{ type?: string; function?: { name?: string } }>
+  expect(upstreamRequests).toHaveLength(2)
+  const tools = upstreamRequests[0]?.tools as
+    | Array<{ type?: string; name?: string }>
     | undefined
-  expect(tools?.[0]?.type).toBe("function")
-  expect(tools?.[0]?.function?.name).toBe("web_search")
-  expect(chatRequests[0]?.parallel_tool_calls).toBe(false)
-  expect(chatRequests[1]?.tool_choice).toBe("auto")
-  expect(chatRequests[1]?.messages).toEqual(
-    expect.arrayContaining([
-      expect.objectContaining({
-        role: "tool",
-        tool_call_id: "search-call",
-      }),
-    ]),
-  )
+  expect(tools?.[0]?.type).toBeUndefined()
+  expect(tools?.[0]?.name).toBe("web_search")
+  expect(upstreamRequests[0]?.tool_choice).toEqual({
+    type: "tool",
+    name: "web_search",
+    disable_parallel_tool_use: true,
+  })
+  expect(upstreamRequests[1]?.tool_choice).toEqual({
+    type: "auto",
+    disable_parallel_tool_use: true,
+  })
+  const followUpMessages = upstreamRequests[1]?.messages as
+    | Array<{ content?: unknown; role?: string }>
+    | undefined
+  expect(
+    followUpMessages?.some(
+      (message) =>
+        message.role === "user"
+        && Array.isArray(message.content)
+        && message.content.some(
+          (block: unknown) =>
+            typeof block === "object"
+            && block !== null
+            && "type" in block
+            && block.type === "tool_result"
+            && "tool_use_id" in block
+            && block.tool_use_id === "search-call",
+        ),
+    ),
+  ).toBe(true)
   expect(mcpHeaders[0]?.get("x-mcp-tools")).toBe("web_search")
   expect(mcpHeaders[0]?.get("x-mcp-host")).toBe("copilot-cli")
 })
@@ -235,11 +291,11 @@ test("Chat web-search follow-up retains the rewritten no-prefill history", async
   })
 
   expect(response.status).toBe(200)
-  expect(chatRequests).toHaveLength(2)
-  const firstMessages = chatRequests[0]?.messages as
+  expect(upstreamRequests).toHaveLength(2)
+  const firstMessages = upstreamRequests[0]?.messages as
     | Array<Record<string, unknown>>
     | undefined
-  const followUpMessages = chatRequests[1]?.messages as
+  const followUpMessages = upstreamRequests[1]?.messages as
     | Array<Record<string, unknown>>
     | undefined
   expect(firstMessages?.[1]?.role).toBe("user")
@@ -284,8 +340,8 @@ test("Chat web-search follow-up carries one fetched attachment forward", async (
 
   expect(response.status).toBe(200)
   expect(attachmentFetchCount).toBe(1)
-  expect(chatRequests).toHaveLength(2)
-  for (const request of chatRequests) {
+  expect(upstreamRequests).toHaveLength(2)
+  for (const request of upstreamRequests) {
     const messages = request.messages as Array<{
       content: Array<{ image_url?: { url?: string } }>
     }>
@@ -318,8 +374,8 @@ test("Chat web-search follow-up injects the generated JSON instruction once", as
   })
 
   expect(response.status).toBe(200)
-  expect(chatRequests).toHaveLength(2)
-  const followUpMessages = chatRequests[1]?.messages as
+  expect(upstreamRequests).toHaveLength(2)
+  const followUpMessages = upstreamRequests[1]?.messages as
     | Array<{ content?: unknown; role?: string; tool_call_id?: string }>
     | undefined
   const serialized = JSON.stringify(followUpMessages)

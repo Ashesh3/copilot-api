@@ -4,6 +4,7 @@ import * as Sentry from "@sentry/bun"
 import { streamSSE } from "hono/streaming"
 
 import type { AnthropicRequestHeaderOptions } from "~/services/copilot/messages-contract"
+import type { RetryBudget } from "~/services/copilot/transport-retry"
 
 import { getLastUsedAccountId } from "~/lib/account-router"
 import { isAbortError } from "~/lib/error"
@@ -47,11 +48,13 @@ export interface NativeMessagesRequestOptions
   extends AnthropicRequestHeaderOptions {
   initiatorOverride?: "agent" | "user"
   requestedModel?: string
+  retryBudget?: RetryBudget
 }
 
 type NativeMessagesDispatchOptions = {
   compaction?: boolean
   preserveValidatedControls?: boolean
+  retryBudget?: RetryBudget
   signal?: AbortSignal
 }
 
@@ -67,6 +70,7 @@ export async function createNativeMessages(
     initiator: nativeOptions.initiatorOverride,
     modelProviderPreference: nativeOptions.modelProviderPreference,
     preserveValidatedControls: dispatchOptions?.preserveValidatedControls,
+    retryBudget: dispatchOptions?.retryBudget ?? nativeOptions.retryBudget,
     signal: dispatchOptions?.signal,
   })
 }

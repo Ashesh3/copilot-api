@@ -8,6 +8,11 @@ import type {
 
 import { stripThinkingBlocks } from "../src/routes/messages/handler"
 import { translateToOpenAI } from "../src/routes/messages/non-stream-translation"
+import { translateAnthropicMessagesToResponsesPayload } from "../src/routes/messages/responses-translation"
+import {
+  checkMessagesToChatTranslation,
+  checkMessagesToResponsesTranslation,
+} from "../src/routes/messages/translation-fidelity"
 
 // Zod schema for a single message in the chat completion request.
 const messageSchema = z.object({
@@ -610,6 +615,121 @@ describe("OpenAI Chat Completion v1 Request Payload Validation with Zod", () => 
     expect(isValidChatCompletionRequest(undefined)).toBe(false)
     expect(isValidChatCompletionRequest("a string")).toBe(false)
     expect(isValidChatCompletionRequest(123)).toBe(false)
+  })
+})
+
+describe("Messages translation fidelity", () => {
+  test("round-trips a Responses-native thinking signature", () => {
+    const payload: AnthropicMessagesPayload = {
+      model: "gpt-current",
+      max_tokens: 64,
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "thinking",
+              thinking: "prior thought",
+              signature: "encrypted-state@rs_1",
+            },
+          ],
+        },
+      ],
+    }
+
+    expect(checkMessagesToResponsesTranslation(payload)).toEqual({
+      supported: true,
+      blockers: [],
+    })
+    const translated = translateAnthropicMessagesToResponsesPayload(payload)
+    expect(translated.input).toEqual([
+      {
+        id: "rs_1",
+        type: "reasoning",
+        summary: [{ type: "summary_text", text: "prior thought" }],
+        encrypted_content: "encrypted-state",
+      },
+    ])
+  })
+
+  test("round-trips a Chat-native thinking signature", () => {
+    const payload: AnthropicMessagesPayload = {
+      model: "claude-current",
+      max_tokens: 64,
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "thinking",
+              thinking: "prior thought",
+              signature: "native-signature",
+            },
+          ],
+        },
+      ],
+    }
+
+    expect(checkMessagesToChatTranslation(payload)).toEqual({
+      supported: true,
+      blockers: [],
+    })
+    const translated = translateToOpenAI(payload)
+    expect(translated.messages[0]).toMatchObject({
+      role: "assistant",
+      reasoning_text: "prior thought",
+      reasoning_opaque: "native-signature",
+    })
+  })
+
+  test("blocks advanced and native-only tool declarations", () => {
+    const payload = {
+      model: "claude-current",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "hello" }],
+      tools: [
+        {
+          type: "custom",
+          name: "advanced",
+          input_schema: { type: "object", properties: {} },
+          defer_loading: true,
+        },
+        { type: "web_fetch_20250910", name: "web_fetch" },
+      ],
+    } as AnthropicMessagesPayload
+
+    expect(checkMessagesToResponsesTranslation(payload).blockers).toEqual([
+      "advanced_tool_metadata",
+      "native_tool:web_fetch",
+    ])
+    expect(checkMessagesToChatTranslation(payload).blockers).toEqual([
+      "advanced_tool_metadata",
+      "native_tool:web_fetch",
+    ])
+  })
+
+  test("allows the existing web-search compatibility loop", () => {
+    const payload = {
+      model: "claude-current",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "search" }],
+      tools: [
+        {
+          type: "web_search_20250305",
+          name: "web_search",
+          allowed_domains: ["example.com"],
+        },
+      ],
+    } as AnthropicMessagesPayload
+
+    expect(checkMessagesToResponsesTranslation(payload)).toEqual({
+      supported: true,
+      blockers: [],
+    })
+    expect(checkMessagesToChatTranslation(payload)).toEqual({
+      supported: true,
+      blockers: [],
+    })
   })
 })
 

@@ -6,6 +6,7 @@ import type {
   AnthropicMessagesPayload,
   AnthropicResponse,
 } from "~/routes/messages/anthropic-types"
+import type { RetryBudget } from "~/services/copilot/transport-retry"
 
 import { routedFetch } from "~/lib/account-router"
 import { getModelEndpointSupport } from "~/lib/endpoint-routing"
@@ -81,6 +82,7 @@ export const createAnthropicMessages = async (
     initiator?: "agent" | "user"
     modelProviderPreference?: string
     preserveValidatedControls?: boolean
+    retryBudget?: RetryBudget
     signal?: AbortSignal
   },
 ): Promise<CreateAnthropicMessagesReturn> => {
@@ -126,6 +128,7 @@ async function dispatchAnthropicMessages(options: {
   options:
     | {
         compaction?: boolean
+        retryBudget?: RetryBudget
         signal?: AbortSignal
       }
     | undefined
@@ -168,6 +171,7 @@ async function dispatchAnthropicMessages(options: {
       headerOptions: { vision, initiator, ...preparedHeaders },
       maxHttpRetryDelaySeconds:
         stream ? PRE_HEADER_MAX_DELAY_SECONDS : undefined,
+      retryBudget: options.options?.retryBudget,
     },
   )
 

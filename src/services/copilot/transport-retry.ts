@@ -56,8 +56,10 @@ export interface RetryBudget {
   remaining: number
 }
 
-export function createRetryBudget(): RetryBudget {
-  return { remaining: MAX_ROUTED_SENDS - 1 }
+export function createRetryBudget(options?: {
+  extraSends?: number
+}): RetryBudget {
+  return { remaining: options?.extraSends ?? MAX_ROUTED_SENDS - 1 }
 }
 
 /** Claim one shared extra-send allowance. Returns false when exhausted. */

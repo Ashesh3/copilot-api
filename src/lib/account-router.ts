@@ -1,4 +1,5 @@
 import consola from "consola"
+import { AsyncLocalStorage } from "node:async_hooks"
 
 import type { RoutingAffinitySource } from "~/lib/routing-affinity"
 import type { Account } from "~/lib/token-pool"
@@ -31,6 +32,14 @@ import {
 // --- Constants ---
 
 const FAILOVER_STATUSES = new Set([401, 403, 429])
+const pinnedRoutedAccountStorage = new AsyncLocalStorage<number | undefined>()
+
+export function runWithPinnedRoutedAccount<T>(
+  accountId: number | undefined,
+  callback: () => T,
+): T {
+  return pinnedRoutedAccountStorage.run(accountId, callback)
+}
 
 interface AccountFetchOptions {
   account: Account
@@ -417,6 +426,7 @@ export interface RoutedFetchOptions {
   maxHttpRetryDelaySeconds?: number
   reason?: UpstreamSendReason
   recordSelection?: boolean
+  retryBudget?: RetryBudget
 }
 
 /**
@@ -447,11 +457,8 @@ export async function routedFetch(
     maxHttpRetryDelaySeconds,
     reason = "initial",
     recordSelection: shouldRecordSelection = true,
+    retryBudget = createRetryBudget(),
   } = options
-  // Two extra sends for the whole routed call (a three-send ceiling) so sends
-  // cannot multiply across the initial account, a 401 refresh-and-retry, and a
-  // 401/403/429 failover.
-  const retryBudget = createRetryBudget()
   const context: RoutedFetchContext = {
     affinityKey: getEffectiveAffinityKey(),
     headerOptions,
@@ -491,7 +498,13 @@ export async function routedFetch(
   }
 
   const affinityKey = getEffectiveAffinityKey()
-  const account = tokenPool.getAccountForModelBySession(modelId, affinityKey)
+  const hasPinnedAccountContext =
+    pinnedRoutedAccountStorage.getStore() !== undefined
+  const pinnedAccountId = pinnedRoutedAccountStorage.getStore()
+  const account =
+    !hasPinnedAccountContext || pinnedAccountId === undefined ?
+      tokenPool.getAccountForModelBySession(modelId, affinityKey)
+    : tokenPool.getEligibleAccountForModel(modelId, pinnedAccountId)
   if (!account) {
     if (tokenPool.hasKnownModel(modelId)) {
       const response = createNoEnabledAccountResponse(modelId)

@@ -364,7 +364,7 @@ test("removes top_p when thinking is enabled on the chat completions path", asyn
   expect(lastUpstreamPayload?.top_p).toBeUndefined()
 })
 
-test("routes PDF documents to native /v1/messages and strips foreign thinking blocks", async () => {
+test("routes PDF documents to native /v1/messages and preserves thinking blocks", async () => {
   state.models = nativeMessagesModels
   const pdfB64 = Buffer.from("%PDF-1.4 regression test").toString("base64")
 
@@ -418,9 +418,7 @@ test("routes PDF documents to native /v1/messages and strips foreign thinking bl
   const blocks = messages.flatMap((m) =>
     Array.isArray(m.content) ? (m.content as Array<{ type?: string }>) : [],
   )
-  // Foreign thinking blocks removed from history…
-  expect(blocks.some((b) => b.type === "thinking")).toBe(false)
-  // …but the PDF document block is preserved.
+  expect(blocks.some((b) => b.type === "thinking")).toBe(true)
   expect(blocks.some((b) => b.type === "document")).toBe(true)
 })
 
@@ -472,7 +470,7 @@ test("forwards canonical beta, anthropic version, and provider preference on nat
   )
 })
 
-test("does not forward native Messages headers to a Chat branch", async () => {
+test("forwards native Messages headers when a dual-endpoint model selects native", async () => {
   state.models = nativeMessagesModels
 
   const response = await server.request("/v1/messages", {
@@ -486,15 +484,19 @@ test("does not forward native Messages headers to a Chat branch", async () => {
     body: JSON.stringify({
       model: "claude-opus-4.8",
       max_tokens: 64,
-      messages: [{ role: "user", content: "Use the Chat branch." }],
+      messages: [{ role: "user", content: "Use the native branch." }],
     }),
   })
 
   expect(response.status).toBe(200)
-  expect(lastUpstreamUrl).toContain("/chat/completions")
-  expect(lastUpstreamHeaders?.get("anthropic-beta")).toBeNull()
-  expect(lastUpstreamHeaders?.get("anthropic-version")).toBeNull()
-  expect(lastUpstreamHeaders?.get("x-model-provider-preference")).toBeNull()
+  expect(lastUpstreamUrl).toContain("/v1/messages")
+  expect(lastUpstreamHeaders?.get("anthropic-beta")).toBe(
+    "advanced-tool-use-2025-11-20",
+  )
+  expect(lastUpstreamHeaders?.get("anthropic-version")).toBe("2024-01-01")
+  expect(lastUpstreamHeaders?.get("x-model-provider-preference")).toBe(
+    "anthropic",
+  )
 })
 
 test("does not forward native Messages headers to a Responses branch", async () => {
