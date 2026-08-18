@@ -3,6 +3,8 @@ import type { Context } from "hono"
 import * as Sentry from "@sentry/bun"
 import { streamSSE } from "hono/streaming"
 
+import type { AnthropicRequestHeaderOptions } from "~/services/copilot/messages-contract"
+
 import { getLastUsedAccountId } from "~/lib/account-router"
 import { isAbortError } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
@@ -41,11 +43,9 @@ import { emitAnthropicResponseAsStream } from "./web-search-helpers"
 
 const logger = createHandlerLogger("messages-native-handler")
 
-export interface NativeMessagesRequestOptions {
-  anthropicBeta?: string
-  anthropicVersion?: string
+export interface NativeMessagesRequestOptions
+  extends AnthropicRequestHeaderOptions {
   initiatorOverride?: "agent" | "user"
-  modelProviderPreference?: string
   requestedModel?: string
 }
 

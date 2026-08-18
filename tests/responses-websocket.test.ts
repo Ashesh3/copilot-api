@@ -12,6 +12,7 @@ import {
 } from "bun:test"
 import consola from "consola"
 
+import type { NativeMessagesRequestOptions } from "../src/routes/messages/native-handler"
 import type {
   ResponseInputItem,
   ResponsesPayload,
@@ -59,6 +60,7 @@ const queuedFetchHandlers: Array<
 let lastRequestBody: Record<string, unknown> | undefined
 let capturedAffinity: RoutingAffinity | undefined
 const capturedAuthorization: Array<string | null> = []
+const capturedUpstreamHeaders: Array<Headers> = []
 
 function authenticatedResponsesRequest(): Request {
   return new Request("http://localhost/responses", {
@@ -92,7 +94,9 @@ const responsesCapableModels: ModelsResponse = {
 
 const fetchMock = mock((_url: string, init?: RequestInit) => {
   capturedAffinity = getRoutingAffinity()
-  capturedAuthorization.push(new Headers(init?.headers).get("authorization"))
+  const headers = new Headers(init?.headers)
+  capturedAuthorization.push(headers.get("authorization"))
+  capturedUpstreamHeaders.push(headers)
   lastRequestBody =
     typeof init?.body === "string" ?
       (JSON.parse(init.body) as Record<string, unknown>)
@@ -121,6 +125,7 @@ afterEach(() => {
   lastRequestBody = undefined
   capturedAffinity = undefined
   capturedAuthorization.length = 0
+  capturedUpstreamHeaders.length = 0
   queuedResponses.length = 0
   queuedFetchHandlers.length = 0
   state.apiKeyAuth = originalApiKeyAuth
@@ -252,6 +257,32 @@ describe("responses websocket upgrade handling", () => {
       )
       expect(upgraded?.affinity).toEqual({ key, source })
     }
+  })
+
+  test("captures canonical native Messages headers in upgrade state", async () => {
+    const ws = await createUpgradedTestWebSocket({
+      "anthropic-beta": " beta-one, beta-two, beta-one ",
+      "anthropic-version": "2024-01-01",
+      "x-model-provider-preference": "anthropic",
+      "x-request-id": "req-ws-headers",
+    })
+
+    expect(readNativeMessagesOptions(ws.data)).toEqual({
+      anthropicBeta: "beta-one,beta-two",
+      anthropicVersion: "2024-01-01",
+      modelProviderPreference: "anthropic",
+    })
+    expect(ws.data.requestId).toBe("req-ws-headers")
+  })
+
+  test("omits invalid native Messages headers from upgrade state", async () => {
+    const ws = await createUpgradedTestWebSocket({
+      "anthropic-beta": "beta one",
+      "anthropic-version": "v".repeat(1025),
+      "x-model-provider-preference": "p".repeat(1025),
+    })
+
+    expect(readNativeMessagesOptions(ws.data)).toEqual({})
   })
 
   test("uses upgrade affinity precedence and ignores request identifiers", async () => {
@@ -882,6 +913,153 @@ describe("responses websocket message handling", () => {
       messages: [{ role: "user", content: "Hello" }],
       stream: false,
     })
+  })
+
+  test("forwards handshake native headers on a Messages-only WebSocket turn", async () => {
+    installWebSocketEndpoint("/v1/messages")
+    queuedResponses.push(createAnthropicMessageResponse("msg_ws_headers"))
+    const ws = await createUpgradedTestWebSocket({
+      "anthropic-beta": "beta-one, beta-two, beta-one",
+      "anthropic-version": "2024-01-01",
+      "x-client-session-id": "ws-native-session",
+      "x-model-provider-preference": "anthropic",
+      "x-request-id": "req-ws-native",
+    })
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "Hello",
+      }),
+    )
+
+    const headers = capturedUpstreamHeaders[0]
+    expect(headers.get("anthropic-beta")).toBe("beta-one,beta-two")
+    expect(headers.get("anthropic-version")).toBe("2024-01-01")
+    expect(headers.get("x-model-provider-preference")).toBe("anthropic")
+    expect(headers.get("x-request-id")).toBe("req-ws-native:1")
+    expect(headers.get("x-initiator")).toBe("user")
+    expect(capturedAffinity).toEqual({
+      key: "ws-native-session",
+      source: "copilot_session",
+    })
+    expect(ws.data.responseSnapshots.has("msg_ws_headers")).toBe(true)
+  })
+
+  test("preserves handshake native headers across transport retry", async () => {
+    installWebSocketEndpoint("/v1/messages")
+    queuedResponses.push(
+      new Response("retry", {
+        status: 503,
+        headers: { "retry-after": "0" },
+      }),
+      createAnthropicMessageResponse("msg_ws_retry"),
+    )
+    const ws = await createUpgradedTestWebSocket({
+      "anthropic-beta": "beta-one, beta-two",
+      "anthropic-version": "2024-01-01",
+      "x-model-provider-preference": "anthropic",
+      "x-request-id": "req-ws-retry",
+    })
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "Hello",
+      }),
+    )
+
+    expect(capturedUpstreamHeaders).toHaveLength(2)
+    for (const headers of capturedUpstreamHeaders) {
+      expect(headers.get("anthropic-beta")).toBe("beta-one,beta-two")
+      expect(headers.get("anthropic-version")).toBe("2024-01-01")
+      expect(headers.get("x-model-provider-preference")).toBe("anthropic")
+      expect(headers.get("x-request-id")).toBe("req-ws-retry:1")
+    }
+  })
+
+  test("omits invalid handshake native headers without failing a Messages turn", async () => {
+    installWebSocketEndpoint("/v1/messages")
+    queuedResponses.push(createAnthropicMessageResponse("msg_ws_invalid"))
+    const ws = await createUpgradedTestWebSocket({
+      "anthropic-beta": "beta one",
+      "anthropic-version": "v".repeat(1025),
+      "x-model-provider-preference": "p".repeat(1025),
+    })
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "Hello",
+      }),
+    )
+
+    const headers = capturedUpstreamHeaders[0]
+    expect(headers.get("anthropic-beta")).toBeNull()
+    expect(headers.get("anthropic-version")).toBe("2023-06-01")
+    expect(headers.get("x-model-provider-preference")).toBeNull()
+    expect(
+      ws.sent.some(
+        (frame) => (JSON.parse(frame) as { type?: string }).type === "error",
+      ),
+    ).toBe(false)
+    expect(ws.sent.some((frame) => frame.includes("response.completed"))).toBe(
+      true,
+    )
+  })
+
+  test("does not leak handshake native headers to native Responses", async () => {
+    state.models = responsesCapableModels
+    queuedResponses.push(createResponsesSseResponse("resp_ws_no_headers"))
+    const ws = await createUpgradedTestWebSocket({
+      "anthropic-beta": "beta-one",
+      "anthropic-version": "2024-01-01",
+      "x-model-provider-preference": "anthropic",
+    })
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "Hello",
+      }),
+    )
+
+    const headers = capturedUpstreamHeaders[0]
+    expect(headers.get("anthropic-beta")).toBeNull()
+    expect(headers.get("anthropic-version")).toBeNull()
+    expect(headers.get("x-model-provider-preference")).toBeNull()
+  })
+
+  test("does not leak handshake native headers to Chat fallback", async () => {
+    installWebSocketEndpoint("/chat/completions")
+    queuedResponses.push(createChatCompletionsSseResponse())
+    const ws = await createUpgradedTestWebSocket({
+      "anthropic-beta": "beta-one",
+      "anthropic-version": "2024-01-01",
+      "x-model-provider-preference": "anthropic",
+    })
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "Hello",
+      }),
+    )
+
+    const headers = capturedUpstreamHeaders[0]
+    expect(headers.get("anthropic-beta")).toBeNull()
+    expect(headers.get("anthropic-version")).toBeNull()
+    expect(headers.get("x-model-provider-preference")).toBeNull()
   })
 
   test("returns a recoverable error when a WebSocket model has no endpoint", async () => {
@@ -1932,6 +2110,56 @@ describe("responses websocket warmup handling", () => {
     expect(snapshot).toMatchObject({ model: "gpt-5.4", stream: true })
   })
 
+  test("preserves native header options across warmup continuation", async () => {
+    installWebSocketEndpoint("/v1/messages")
+    const ws = await createUpgradedTestWebSocket({
+      "anthropic-beta": "beta-one, beta-two",
+      "anthropic-version": "2024-01-01",
+      "x-client-session-id": "ws-warmup-session",
+      "x-model-provider-preference": "anthropic",
+      "x-request-id": "req-ws-warmup",
+    })
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "warmup",
+        generate: false,
+        tools: [],
+      }),
+    )
+    expect(fetchMock).not.toHaveBeenCalled()
+    const warmupId = ws.sent
+      .map((frame) => JSON.parse(frame) as { response?: { id?: string } })
+      .find((frame) => frame.response?.id?.startsWith("warmup_"))?.response?.id
+    if (!warmupId) throw new Error("Expected synthetic warmup response id")
+
+    queuedResponses.push(createAnthropicMessageResponse("msg_ws_warmup"))
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        previous_response_id: warmupId,
+        input: "Continue",
+        tools: [],
+      }),
+    )
+
+    const headers = capturedUpstreamHeaders[0]
+    expect(headers.get("anthropic-beta")).toBe("beta-one,beta-two")
+    expect(headers.get("anthropic-version")).toBe("2024-01-01")
+    expect(headers.get("x-model-provider-preference")).toBe("anthropic")
+    expect(headers.get("x-request-id")).toBe("req-ws-warmup:2")
+    expect(capturedAffinity).toEqual({
+      key: "ws-warmup-session",
+      source: "copilot_session",
+    })
+    expect(lastRequestBody?.previous_response_id).toBeUndefined()
+  })
+
   test("rehydrates follow-up requests that reference a synthetic warmup", () => {
     const warmupPayload: ResponsesPayload = {
       model: "gpt-5.4",
@@ -2099,7 +2327,7 @@ describe("responses websocket continuation handling", () => {
   })
 })
 
-function createTestWebSocket(): {
+function createTestWebSocket(data?: ResponsesWebSocketData): {
   close: () => void
   data: ResponsesWebSocketData
   sent: Array<string>
@@ -2107,13 +2335,14 @@ function createTestWebSocket(): {
 } {
   const sent: Array<string> = []
   return {
-    data: {
+    data: data ?? {
       activeTurns: new Map(),
       closed: false,
       nextTurnSequence: 0,
       type: "responses",
       requestId: "req-test",
       affinity: { key: "session-test", source: "claude_session" },
+      nativeMessagesOptions: {},
       responseSnapshots: new Map(),
     },
     sent,
@@ -2122,6 +2351,67 @@ function createTestWebSocket(): {
     },
     close(): void {},
   }
+}
+
+async function createUpgradedTestWebSocket(
+  headers: Record<string, string>,
+): Promise<ReturnType<typeof createTestWebSocket>> {
+  state.apiKeyAuth = "cli-secret"
+  let data: ResponsesWebSocketData | undefined
+  const result = await tryUpgradeResponsesWebSocket(
+    new Request("http://localhost/responses", {
+      headers: {
+        authorization: "Bearer cli-secret",
+        upgrade: "websocket",
+        ...headers,
+      },
+    }),
+    {
+      upgrade(_request, options): boolean {
+        data = (options as { data: ResponsesWebSocketData }).data
+        return true
+      },
+    },
+  )
+  if (result !== "upgraded" || !data) {
+    throw new Error("Expected Responses WebSocket upgrade")
+  }
+  return createTestWebSocket(data)
+}
+
+function readNativeMessagesOptions(
+  data: ResponsesWebSocketData,
+): NativeMessagesRequestOptions {
+  return data.nativeMessagesOptions
+}
+
+function installWebSocketEndpoint(endpoint: string): void {
+  state.models = {
+    ...responsesCapableModels,
+    data: responsesCapableModels.data.map((model) => ({
+      ...model,
+      vendor: endpoint === "/v1/messages" ? "anthropic" : model.vendor,
+      supported_endpoints: [endpoint],
+      capabilities: {
+        ...model.capabilities,
+        limits: { max_output_tokens: 4096 },
+        supports: { reasoning_effort: ["medium"] },
+      },
+    })),
+  }
+}
+
+function createAnthropicMessageResponse(id: string): Response {
+  return Response.json({
+    id,
+    type: "message",
+    role: "assistant",
+    model: "gpt-5.4",
+    content: [{ type: "text", text: "Hello from Messages" }],
+    stop_reason: "end_turn",
+    stop_sequence: null,
+    usage: { input_tokens: 2, output_tokens: 3 },
+  })
 }
 
 function createResponsesSseResponse(responseId: string): Response {

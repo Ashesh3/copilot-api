@@ -3,7 +3,7 @@ import consola from "consola"
 import { randomUUID } from "node:crypto"
 
 import type { RoutingAffinity } from "~/lib/routing-affinity"
-import type { AnthropicResponse } from "~/routes/messages/anthropic-types"
+import type { NativeMessagesRequestOptions } from "~/routes/messages/native-handler"
 
 import { resolveRequestCredential } from "~/lib/credential-resolver"
 import { LocalHTTPError } from "~/lib/error"
@@ -31,16 +31,17 @@ import {
   fitResponsesCompactionPayload,
   isResponsesCompactionRequest,
 } from "~/services/copilot/compaction-payload"
-import { createAnthropicMessages } from "~/services/copilot/create-anthropic-messages"
 import {
   createChatCompletions,
   type ChatCompletionResponse,
 } from "~/services/copilot/create-chat-completions"
 import {
+  type ResponsesResult,
   createResponses,
   SAFE_RESPONSES_STREAM_ERROR_MESSAGE,
   type ResponsesPayload,
 } from "~/services/copilot/create-responses"
+import { sanitizeAnthropicRequestHeaderOptions } from "~/services/copilot/messages-contract"
 
 import {
   convertWebSearchTool,
@@ -51,10 +52,7 @@ import {
   streamChatCompletionsAsResponses,
   useFunctionApplyPatch,
 } from "./handler"
-import {
-  anthropicResponseToResponsesResult,
-  responsesPayloadToAnthropic,
-} from "./messages-bridge"
+import { executeResponsesMessagesBridge } from "./messages-bridge"
 import { createStreamIdTracker, fixStreamIds } from "./stream-id-sync"
 import { expandCompactionItems, getResponsesRequestOptions } from "./utils"
 import {
@@ -80,6 +78,7 @@ export interface ResponsesWebSocketData {
   type: "responses"
   requestId: string
   affinity?: RoutingAffinity
+  nativeMessagesOptions: NativeMessagesRequestOptions
   responseSnapshots: Map<string, ResponsesPayload>
 }
 
@@ -138,6 +137,11 @@ export async function tryUpgradeResponsesWebSocket(
     ?? req.headers.get("x-client-request-id")
     ?? randomUUID()
   const affinity = resolveRoutingAffinityFromHeaders(req.headers)
+  const nativeMessagesOptions = sanitizeAnthropicRequestHeaderOptions({
+    anthropicBeta: req.headers.get("anthropic-beta"),
+    anthropicVersion: req.headers.get("anthropic-version"),
+    modelProviderPreference: req.headers.get("x-model-provider-preference"),
+  })
 
   const data: ResponsesWebSocketData = {
     type: "responses",
@@ -146,6 +150,7 @@ export async function tryUpgradeResponsesWebSocket(
     nextTurnSequence: 0,
     requestId,
     affinity,
+    nativeMessagesOptions,
     responseSnapshots: new Map<string, ResponsesPayload>(),
   }
   if (!server.upgrade(req, { data })) return "no_match"
@@ -355,25 +360,15 @@ async function handleResponseCreate(
 
   const { vision, initiator } = getResponsesRequestOptions(preparedPayload)
 
-  if (route.decision.target === "/v1/messages") {
-    reportResponsesWebSocketEndpointFallback(
-      preparedPayload.model,
-      "AnthropicMessages",
-    )
-    await streamAnthropicMessagesOverWs(ws, preparedPayload, turn)
-    return
-  }
-
-  if (route.decision.target === "/chat/completions") {
-    convertWebSearchTool(preparedPayload)
-    // Rewrite custom apply_patch to a function tool only for the CC
-    // fallback. Native /responses must keep the freeform tool intact.
-    useFunctionApplyPatch(preparedPayload)
-    reportResponsesWebSocketEndpointFallback(
-      preparedPayload.model,
-      "ChatCompletions",
-    )
-    await streamChatCompletionsOverWs(ws, preparedPayload, turn)
+  if (
+    await dispatchTranslatedWebSocketEndpoint({
+      initiator,
+      preparedPayload,
+      routeTarget: route.decision.target,
+      turn,
+      ws,
+    })
+  ) {
     return
   }
 
@@ -415,6 +410,44 @@ async function handleResponseCreate(
     finalizeFromResponsesFrame(ws.data, turn, processed)
     if (turn.lifecycle?.isFinalized()) break
   }
+}
+
+async function dispatchTranslatedWebSocketEndpoint(options: {
+  initiator: "agent" | "user"
+  preparedPayload: ResponsesPayload
+  routeTarget: string
+  turn: ResponsesWebSocketTurn
+  ws: ResponsesWebSocketState
+}): Promise<boolean> {
+  const { initiator, preparedPayload, routeTarget, turn, ws } = options
+  if (routeTarget === "/v1/messages") {
+    reportResponsesWebSocketEndpointFallback(
+      preparedPayload.model,
+      "AnthropicMessages",
+    )
+    await streamAnthropicMessagesOverWs({
+      nativeOptions: {
+        ...ws.data.nativeMessagesOptions,
+        initiatorOverride: initiator,
+      },
+      payload: preparedPayload,
+      turn,
+      ws,
+    })
+    return true
+  }
+
+  if (routeTarget !== "/chat/completions") return false
+  convertWebSearchTool(preparedPayload)
+  // Rewrite custom apply_patch to a function tool only for the CC fallback.
+  // Native /responses must keep the freeform tool intact.
+  useFunctionApplyPatch(preparedPayload)
+  reportResponsesWebSocketEndpointFallback(
+    preparedPayload.model,
+    "ChatCompletions",
+  )
+  await streamChatCompletionsOverWs(ws, preparedPayload, turn)
+  return true
 }
 
 async function waitForWebSocketTurn<T>(
@@ -832,31 +865,25 @@ function handleSyntheticWarmupRequest(
   finalizeFromResponsesFrame(ws.data, turn, completedFrame)
 }
 
-async function streamAnthropicMessagesOverWs(
-  ws: ResponsesWebSocketState,
-  payload: ResponsesPayload,
-  turn: ResponsesWebSocketTurn,
-): Promise<void> {
-  const anthropicPayload = await responsesPayloadToAnthropic(
-    payload,
-    turn.abortController.signal,
-    { attachmentsNormalized: true },
-  )
-  anthropicPayload.stream = false
-  const response = (await waitForWebSocketTurn(
-    createAnthropicMessages(anthropicPayload, {
+async function streamAnthropicMessagesOverWs(options: {
+  nativeOptions: NativeMessagesRequestOptions
+  payload: ResponsesPayload
+  turn: ResponsesWebSocketTurn
+  ws: ResponsesWebSocketState
+}): Promise<void> {
+  const { nativeOptions, payload, turn, ws } = options
+  const result = await waitForWebSocketTurn(
+    executeResponsesMessagesBridge({
+      attachmentsNormalized: true,
       compaction: isResponsesCompactionRequest(payload),
+      nativeOptions,
+      payload,
       preserveValidatedControls: true,
       signal: turn.abortController.signal,
     }),
     turn,
-  )) as AnthropicResponse
-  throwIfWebSocketTurnAborted(turn)
-  const result = anthropicResponseToResponsesResult(
-    response,
-    payload.model,
-    payload,
   )
+  throwIfWebSocketTurnAborted(turn)
   const wsStream = {
     // eslint-disable-next-line @typescript-eslint/require-await
     writeSSE: async (data: { event?: string; data: string }) => {
@@ -876,7 +903,7 @@ async function emitResponsesResultAsWebSocketFrames(
   stream: {
     writeSSE: (data: { event?: string; data: string }) => Promise<void>
   },
-  result: ReturnType<typeof anthropicResponseToResponsesResult>,
+  result: ResponsesResult,
 ): Promise<void> {
   const created = { ...result, status: "in_progress" as const }
   await stream.writeSSE({

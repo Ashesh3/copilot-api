@@ -20,10 +20,14 @@ const GATEWAY_ONLY_MESSAGES_FIELDS = new Set([
   "_json_schema",
 ])
 
-export interface AnthropicRequestHeaders {
+export interface AnthropicRequestHeaderOptions {
   anthropicBeta?: string
-  anthropicVersion: string
+  anthropicVersion?: string
   modelProviderPreference?: string
+}
+
+export interface AnthropicRequestHeaders extends AnthropicRequestHeaderOptions {
+  anthropicVersion: string
 }
 
 export interface PreparedAnthropicMessagesRequest {
@@ -272,6 +276,25 @@ export function canonicalizeAnthropicBeta(
   return sanitizeCopilotHeaderValue(canonical)
 }
 
+export function sanitizeAnthropicRequestHeaderOptions(options: {
+  anthropicBeta?: string | null
+  anthropicVersion?: string | null
+  modelProviderPreference?: string | null
+}): AnthropicRequestHeaderOptions {
+  const anthropicBeta = canonicalizeAnthropicBeta(
+    options.anthropicBeta ?? undefined,
+  )
+  const anthropicVersion = sanitizeCopilotHeaderValue(options.anthropicVersion)
+  const modelProviderPreference = sanitizeCopilotHeaderValue(
+    options.modelProviderPreference,
+  )
+  return {
+    ...(anthropicBeta ? { anthropicBeta } : {}),
+    ...(anthropicVersion ? { anthropicVersion } : {}),
+    ...(modelProviderPreference ? { modelProviderPreference } : {}),
+  }
+}
+
 export function prepareAnthropicMessagesRequest(options: {
   anthropicBeta?: string
   anthropicVersion?: string
@@ -285,20 +308,14 @@ export function prepareAnthropicMessagesRequest(options: {
     Reflect.deleteProperty(body, field)
   }
 
-  const anthropicBeta = canonicalizeAnthropicBeta(options.anthropicBeta)
-  const anthropicVersion =
-    sanitizeCopilotHeaderValue(options.anthropicVersion)
-    ?? DEFAULT_ANTHROPIC_VERSION
-  const modelProviderPreference = sanitizeCopilotHeaderValue(
-    options.modelProviderPreference,
-  )
+  const sanitizedHeaders = sanitizeAnthropicRequestHeaderOptions(options)
 
   return {
     body,
     headers: {
-      ...(anthropicBeta ? { anthropicBeta } : {}),
-      anthropicVersion,
-      ...(modelProviderPreference ? { modelProviderPreference } : {}),
+      ...sanitizedHeaders,
+      anthropicVersion:
+        sanitizedHeaders.anthropicVersion ?? DEFAULT_ANTHROPIC_VERSION,
     },
   }
 }
