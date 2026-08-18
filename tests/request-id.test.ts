@@ -522,6 +522,51 @@ test("defensively sanitizes hostile and free-form handler log data", () => {
   ])
 })
 
+test("reduces hostile array and revoked proxies before reflection", () => {
+  const privateMarker = "hostile-array-proxy-private-marker"
+  let descriptorCalls = 0
+  const hostileArrayProxy = new Proxy([privateMarker], {
+    getOwnPropertyDescriptor() {
+      descriptorCalls += 1
+      throw new Error(privateMarker)
+    },
+  })
+  const { proxy: revokedProxy, revoke } = Proxy.revocable({}, {})
+  revoke()
+
+  expect(
+    sanitizeHandlerLogArguments([
+      "Prepared request",
+      hostileArrayProxy,
+      revokedProxy,
+    ]),
+  ).toEqual(["Prepared request", "[OBJECT OMITTED]", "[OBJECT OMITTED]"])
+  expect(descriptorCalls).toBe(0)
+})
+
+test("allowlists fixed Error classes and redacts custom names", () => {
+  const custom = new Error("custom-error-private-marker")
+  custom.name = "CustomPrivateError"
+  const abortError = new Error("abort-error-private-marker")
+  abortError.name = "AbortError"
+
+  expect(
+    sanitizeHandlerLogArguments([
+      "Prepared request",
+      new Error("plain-error-private-marker"),
+      abortError,
+      custom,
+      { enabled: true, attempt: 3, status: "completed" },
+    ]),
+  ).toEqual([
+    "Prepared request",
+    { name: "Error" },
+    { name: "AbortError" },
+    { name: "Error" },
+    { enabled: true, attempt: 3, status: "completed" },
+  ])
+})
+
 test("formats ordinary handler file lines without private payload values", () => {
   const privateMarkers = [
     "handler-prompt-private",

@@ -96,12 +96,7 @@ test.each([
   {
     name: "single unsigned",
     content: [{ type: "thinking", thinking: "unsigned" }],
-    expected: [
-      {
-        type: "reasoning_summary",
-        summary: [{ type: "summary_text", text: "unsigned" }],
-      },
-    ],
+    errorParam: "thinking",
   },
   {
     name: "multiple unsigned",
@@ -109,16 +104,7 @@ test.each([
       { type: "thinking", thinking: "first" },
       { type: "thinking", thinking: "second" },
     ],
-    expected: [
-      {
-        type: "reasoning_summary",
-        summary: [{ type: "summary_text", text: "first" }],
-      },
-      {
-        type: "reasoning_summary",
-        summary: [{ type: "summary_text", text: "second" }],
-      },
-    ],
+    errorParam: "thinking",
   },
   {
     name: "signed then unsigned",
@@ -126,18 +112,7 @@ test.each([
       { type: "thinking", thinking: "signed", signature: "sig-one@rs-one" },
       { type: "thinking", thinking: "unsigned" },
     ],
-    expected: [
-      {
-        id: "rs-one",
-        type: "reasoning",
-        summary: [{ type: "summary_text", text: "signed" }],
-        encrypted_content: "sig-one",
-      },
-      {
-        type: "reasoning_summary",
-        summary: [{ type: "summary_text", text: "unsigned" }],
-      },
-    ],
+    errorParam: "thinking",
   },
   {
     name: "unsigned then signed",
@@ -145,18 +120,26 @@ test.each([
       { type: "thinking", thinking: "unsigned" },
       { type: "thinking", thinking: "signed", signature: "sig-two@rs-two" },
     ],
-    expected: [
-      {
-        type: "reasoning_summary",
-        summary: [{ type: "summary_text", text: "unsigned" }],
-      },
-      {
-        id: "rs-two",
-        type: "reasoning",
-        summary: [{ type: "summary_text", text: "signed" }],
-        encrypted_content: "sig-two",
-      },
+    errorParam: "thinking",
+  },
+  {
+    name: "malformed signed",
+    content: [
+      { type: "thinking", thinking: "signed", signature: "missing-id" },
     ],
+    errorParam: "thinking",
+  },
+  {
+    name: "signed with empty id",
+    content: [{ type: "thinking", thinking: "signed", signature: "sig-one@" }],
+    errorParam: "thinking",
+  },
+  {
+    name: "signed with extra separator",
+    content: [
+      { type: "thinking", thinking: "signed", signature: "sig@rs@extra" },
+    ],
+    errorParam: "thinking",
   },
   {
     name: "multiple signed",
@@ -181,19 +164,32 @@ test.each([
   },
 ])(
   "preserves $name thinking blocks on Messages to Responses",
-  ({ content, expected }) => {
-    const translated = translateAnthropicMessagesToResponsesPayload({
-      model: "gpt-5.4",
-      max_tokens: 64,
-      messages: [
-        {
-          role: "assistant",
-          content: [...content] as Array<AnthropicAssistantContentBlock>,
-        },
-      ],
-    })
+  ({ content, errorParam, expected }) => {
+    const translate = () =>
+      translateAnthropicMessagesToResponsesPayload({
+        model: "gpt-5.4",
+        max_tokens: 64,
+        messages: [
+          {
+            role: "assistant",
+            content: [...content] as Array<AnthropicAssistantContentBlock>,
+          },
+        ],
+      })
 
-    expect(translated.input as unknown).toEqual(expected)
+    if (errorParam) {
+      expect(translate).toThrow()
+      try {
+        translate()
+      } catch (error) {
+        expect(error).toMatchObject({
+          clientBody: { error: { param: errorParam } },
+        })
+      }
+      return
+    }
+
+    expect(translate().input as unknown).toEqual(expected)
   },
 )
 

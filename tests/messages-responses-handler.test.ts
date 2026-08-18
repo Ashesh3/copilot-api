@@ -178,6 +178,34 @@ beforeEach(() => {
   setModelSettingsForTest([])
 })
 
+test("rejects unsigned thinking before sending a Responses payload", async () => {
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-4o",
+      messages: [
+        {
+          role: "assistant",
+          content: [{ type: "thinking", thinking: "unsigned history" }],
+        },
+        { role: "user", content: "continue" },
+      ],
+      max_tokens: 32,
+      thinking: { type: "enabled", budget_tokens: 1024 },
+    }),
+  })
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toMatchObject({
+    error: {
+      code: "endpoint_translation_unsupported",
+      param: "thinking",
+    },
+  })
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
 test("preserves output_config.format on the Anthropic responses path", async () => {
   const response = await server.request("/v1/messages", {
     method: "POST",

@@ -301,20 +301,80 @@ function cloneEntry(entry: LlmDebugLogEntry): LlmDebugLogEntry {
   return structuredClone(entry)
 }
 
+function getSafeErrorDescriptors(
+  error: unknown,
+): Record<string, PropertyDescriptor> | undefined {
+  if (typeof error !== "object" || error === null) return undefined
+  try {
+    return Object.getOwnPropertyDescriptors(error)
+  } catch {
+    return undefined
+  }
+}
+
+function readDescriptorValue(
+  descriptors: Record<string, PropertyDescriptor> | undefined,
+  key: string,
+): unknown {
+  if (!descriptors || !Object.hasOwn(descriptors, key)) return undefined
+  const descriptor = descriptors[key]
+  return "value" in descriptor ? descriptor.value : undefined
+}
+
 /**
  * Read a runtime-attached diagnostic field, falling back to the cause. Wrapped
  * errors (`new Error(msg, { cause: bunError })`) carry these on the cause only.
  */
-function readErrorField(error: Error, key: string): unknown {
-  const own = (error as unknown as Record<string, unknown>)[key]
+function readErrorField(
+  descriptors: Record<string, PropertyDescriptor>,
+  key: string,
+): unknown {
+  const own = readDescriptorValue(descriptors, key)
   if (own !== undefined) return own
 
-  const cause = error.cause
-  if (cause instanceof Error) {
-    return (cause as unknown as Record<string, unknown>)[key]
-  }
+  const causeDescriptors = getSafeErrorDescriptors(
+    readDescriptorValue(descriptors, "cause"),
+  )
+  return readDescriptorValue(causeDescriptors, key)
+}
 
-  return undefined
+function readDebugErrorString(
+  descriptors: Record<string, PropertyDescriptor>,
+  key: string,
+): string | undefined {
+  const value = readDescriptorValue(descriptors, key)
+  return typeof value === "string" ? value : undefined
+}
+
+function readDebugErrorName(
+  descriptors: Record<string, PropertyDescriptor>,
+): string {
+  return readDebugErrorString(descriptors, "name") || "Error"
+}
+
+function readDebugErrorMessage(
+  descriptors: Record<string, PropertyDescriptor>,
+): string {
+  return readDebugErrorString(descriptors, "message") ?? "Unknown thrown value"
+}
+
+function normalizeDescriptorError(
+  descriptors: Record<string, PropertyDescriptor>,
+): LlmDebugLogError {
+  const codeValue = readErrorField(descriptors, "code")
+  const code = typeof codeValue === "string" ? codeValue : undefined
+  const errnoValue = readErrorField(descriptors, "errno")
+  const path = readErrorPath(readErrorField(descriptors, "path"))
+  const stack = readDebugErrorString(descriptors, "stack")
+
+  return {
+    message: readDebugErrorMessage(descriptors),
+    name: readDebugErrorName(descriptors),
+    ...(stack ? { stack } : {}),
+    ...(code === undefined ? {} : { code }),
+    ...(typeof errnoValue === "number" ? { errno: errnoValue } : {}),
+    ...(path === undefined ? {} : { path }),
+  }
 }
 
 function readErrorPath(value: unknown): string | undefined {
@@ -322,24 +382,19 @@ function readErrorPath(value: unknown): string | undefined {
 }
 
 function normalizeError(error: unknown): LlmDebugLogError {
-  if (error instanceof Error) {
-    const codeValue = readErrorField(error, "code")
-    const code = typeof codeValue === "string" ? codeValue : undefined
-    const errnoValue = readErrorField(error, "errno")
-    const path = readErrorPath(readErrorField(error, "path"))
-
-    return {
-      message: error.message,
-      name: error.name || "Error",
-      ...(error.stack ? { stack: error.stack } : {}),
-      ...(code === undefined ? {} : { code }),
-      ...(typeof errnoValue === "number" ? { errno: errnoValue } : {}),
-      ...(path === undefined ? {} : { path }),
-    }
-  }
+  const descriptors = getSafeErrorDescriptors(error)
+  if (descriptors) return normalizeDescriptorError(descriptors)
 
   return {
-    message: String(error),
+    message:
+      (
+        typeof error === "string"
+        || typeof error === "number"
+        || typeof error === "boolean"
+        || typeof error === "bigint"
+      ) ?
+        String(error)
+      : "Unknown thrown value",
     name: "Error",
   }
 }

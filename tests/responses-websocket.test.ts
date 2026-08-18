@@ -1170,6 +1170,7 @@ describe("responses websocket message handling", () => {
   ])(
     "sanitizes native $name terminal frames across clients and diagnostics",
     async ({ eventType }) => {
+      state.copilotToken = "copilot-token"
       state.models = responsesCapableModels
       const privateMarker = `ws-${eventType}-private-marker`
       queuedResponses.push(
@@ -1245,6 +1246,52 @@ describe("responses websocket message handling", () => {
       }
     },
   )
+
+  test("uses the native terminal SSE event name when JSON type disagrees", async () => {
+    state.copilotToken = "copilot-token"
+    state.models = responsesCapableModels
+    const privateMarker = "ws-mismatched-terminal-private-marker"
+    queuedResponses.push(
+      createResponsesTerminalSseResponse(
+        "response.failed",
+        privateMarker,
+        "response.output_text.delta",
+      ),
+    )
+    const ws = createTestWebSocket()
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "fail",
+        tools: [],
+      }),
+    )
+
+    const terminal = JSON.parse(ws.sent.at(-1) ?? "{}") as {
+      response?: Record<string, unknown>
+      type?: string
+    }
+    expect(terminal.type).toBe("response.failed")
+    expect(terminal.response).toEqual({
+      id: "resp_terminal",
+      object: "response",
+      status: "failed",
+      output: [],
+      output_text: "",
+      usage: null,
+      error: {
+        code: "server_error",
+        message: "Upstream Responses stream failed.",
+        param: "input",
+        status: 502,
+      },
+      incomplete_details: null,
+    })
+    expect(ws.sent.join("\n")).not.toContain(privateMarker)
+  })
 
   test("keeps a delivered completed frame COMPLETE when the socket closes", async () => {
     state.models = responsesCapableModels
@@ -2044,6 +2091,7 @@ function createChatCompletionsSseResponse(): Response {
 function createResponsesTerminalSseResponse(
   type: string,
   message: string,
+  jsonType = type,
 ): Response {
   const delta = {
     type: "response.output_text.delta",
@@ -2060,7 +2108,7 @@ function createResponsesTerminalSseResponse(
   const frame =
     type === "error" ?
       {
-        type,
+        type: jsonType,
         message,
         code: "server_error",
         param: "input",
@@ -2068,7 +2116,7 @@ function createResponsesTerminalSseResponse(
         sequence_number: 2,
       }
     : {
-        type,
+        type: jsonType,
         sequence_number: 2,
         response: {
           id: "resp_terminal",
@@ -2094,8 +2142,14 @@ function createResponsesTerminalSseResponse(
             message,
             param: "input",
             status: 502,
+            private: message,
           },
+          message,
+          metadata: { private: message },
+          incomplete_details: { private: message },
+          prompt_cache_key: message,
         },
+        private: message,
       }
   return new Response(
     `event: response.output_text.delta\ndata: ${JSON.stringify(delta)}\n\n`

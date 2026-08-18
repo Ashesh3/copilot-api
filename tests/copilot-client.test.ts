@@ -32,6 +32,8 @@ import {
 import { DEFAULT_COPILOT_INTEGRATION_ID } from "../src/services/copilot/copilot-contract"
 import {
   createRetryBudget,
+  createTransportChain,
+  handleTransportFailure,
   MAX_DELAY_SECONDS,
   MAX_RETRIES,
   MAX_ROUTED_SENDS,
@@ -40,7 +42,7 @@ import {
 } from "../src/services/copilot/transport-retry"
 
 const originalFetch = globalThis.fetch
-const queuedResults: Array<Error | Response> = []
+const queuedResults: Array<Error | QueuedThrow | Response> = []
 const capturedRequests: Array<{ url: string; init?: RequestInit }> = []
 const transportEvents: Array<{
   attributes: Record<string, unknown>
@@ -80,6 +82,11 @@ type BunTimeoutRequestInit = RequestInit & {
   timeout?: boolean | number
 }
 
+interface QueuedThrow {
+  readonly kind: "throw"
+  readonly value: unknown
+}
+
 function getRequestUrl(url: string | URL | Request): string {
   if (typeof url === "string") {
     return url
@@ -97,6 +104,10 @@ const fetchMock = mock((url: string | URL | Request, init?: RequestInit) => {
   const next = queuedResults.shift()
   if (!next) {
     throw new Error(`Unexpected fetch: ${requestUrl}`)
+  }
+
+  if ("kind" in next) {
+    throw next.value
   }
 
   if (next instanceof Error) {
@@ -534,6 +545,24 @@ function llmSends(): Array<{ url: string; init?: RequestInit }> {
   )
 }
 
+async function captureThrown(promise: Promise<unknown>): Promise<unknown> {
+  try {
+    await promise
+  } catch (error) {
+    return error
+  }
+  throw new Error("Expected promise to reject")
+}
+
+async function captureRejection(promise: Promise<unknown>): Promise<boolean> {
+  try {
+    await promise
+  } catch {
+    return true
+  }
+  return false
+}
+
 test("retries Bun's socket-closed ECONNRESET and returns the retried response", async () => {
   queuedResults.push(
     bunSocketClosedError(),
@@ -689,6 +718,130 @@ test("retries when the connection code is only on error.cause", async () => {
 
   expect(response.status).toBe(200)
   expect(capturedRequests).toHaveLength(2)
+})
+
+test("classifies hostile transport values without invoking getters", async () => {
+  const privateMarker = "transport-hostile-getter-private-marker"
+  let getterCalls = 0
+  const hostile = Object.defineProperties(
+    {},
+    {
+      code: {
+        get() {
+          getterCalls += 1
+          throw new Error(privateMarker)
+        },
+      },
+      message: {
+        get() {
+          getterCalls += 1
+          throw new Error(privateMarker)
+        },
+      },
+      name: {
+        get() {
+          getterCalls += 1
+          throw new Error(privateMarker)
+        },
+      },
+    },
+  )
+  queuedResults.push({ kind: "throw", value: hostile } satisfies QueuedThrow)
+
+  const thrown = await captureThrown(
+    copilotFetch("/responses", { method: "POST", headers: AUTH_HEADERS }),
+  )
+  expect(thrown).toBe(hostile)
+
+  expect(getterCalls).toBe(0)
+  expect(capturedRequests).toHaveLength(1)
+})
+
+test("classifies revoked transport proxies conservatively", async () => {
+  const { proxy, revoke } = Proxy.revocable({}, {})
+  revoke()
+  queuedResults.push({ kind: "throw", value: proxy } satisfies QueuedThrow)
+
+  expect(
+    await captureRejection(
+      copilotFetch("/models", { method: "GET", headers: AUTH_HEADERS }),
+    ),
+  ).toBe(true)
+
+  expect(capturedRequests).toHaveLength(1)
+})
+
+test("keeps revoked transport values bounded on the Responses debug path", async () => {
+  const { proxy, revoke } = Proxy.revocable({}, {})
+  revoke()
+  queuedResults.push({ kind: "throw", value: proxy } satisfies QueuedThrow)
+
+  expect(
+    await captureRejection(
+      copilotFetch("/responses", { method: "POST", headers: AUTH_HEADERS }),
+    ),
+  ).toBe(true)
+
+  expect(capturedRequests).toHaveLength(1)
+  const entry = listLlmDebugLogs().entries[0]
+  expect(entry.status).toBe("error")
+  expect(entry.errorMessage).toBe("Unknown thrown value")
+})
+
+test("does not expose or retry arbitrary transport classes and codes", async () => {
+  const privateMarker = "transport-custom-private-marker"
+  const custom = Object.assign(new Error(privateMarker), {
+    code: "CUSTOM_PRIVATE_CODE",
+    name: "CustomPrivateError",
+  })
+  queuedResults.push(custom)
+  const warnSpy = spyOn(consola, "warn")
+  const breadcrumbSpy = spyOn(Sentry, "addBreadcrumb").mockImplementation(
+    () => undefined,
+  )
+  const sentryLogSpy = spyOn(Sentry.logger, "info")
+
+  try {
+    const thrown = await captureThrown(
+      copilotFetch("/responses", { method: "POST", headers: AUTH_HEADERS }),
+    )
+    expect(thrown).toBe(custom)
+
+    expect(capturedRequests).toHaveLength(1)
+    const diagnostics = JSON.stringify({
+      breadcrumbs: breadcrumbSpy.mock.calls,
+      logger: sentryLogSpy.mock.calls,
+      warn: warnSpy.mock.calls,
+    })
+    expect(diagnostics).not.toContain(privateMarker)
+    expect(diagnostics).not.toContain("CUSTOM_PRIVATE_CODE")
+    expect(diagnostics).not.toContain("CustomPrivateError")
+  } finally {
+    sentryLogSpy.mockRestore()
+    breadcrumbSpy.mockRestore()
+    warnSpy.mockRestore()
+  }
+})
+
+test("keeps hostile direct transport classification inside its retry budget", async () => {
+  const { proxy, revoke } = Proxy.revocable({}, {})
+  revoke()
+  let claims = 0
+  expect(
+    await captureRejection(
+      handleTransportFailure({
+        attemptMs: 1,
+        chain: createTransportChain("/responses", "direct-hostile"),
+        claimRetry: () => {
+          claims += 1
+          return true
+        },
+        error: proxy,
+        signal: undefined,
+      }),
+    ),
+  ).toBe(true)
+  expect(claims).toBe(0)
 })
 
 test("caps repeated connection errors at two transport sends", async () => {

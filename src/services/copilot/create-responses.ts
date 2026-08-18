@@ -130,20 +130,11 @@ export interface ResponseInputReasoning {
   encrypted_content?: string
 }
 
-export interface ResponseInputReasoningSummary {
-  type: "reasoning_summary"
-  summary: Array<{
-    type: "summary_text"
-    text: string
-  }>
-}
-
 export type ResponseInputItem =
   | ResponseInputMessage
   | ResponseFunctionToolCallItem
   | ResponseFunctionCallOutputItem
   | ResponseInputReasoning
-  | ResponseInputReasoningSummary
   | Record<string, unknown>
 
 export type ResponseInputContent =
@@ -451,9 +442,47 @@ const RESPONSES_TERMINAL_EVENT_TYPES = new Set([
   "response.failed",
   "response.incomplete",
 ])
+const SAFE_RESPONSES_OBJECT = "response"
+const SAFE_RESPONSES_STATUSES = new Set([
+  "completed",
+  "failed",
+  "in_progress",
+  "incomplete",
+])
+const SAFE_RESPONSES_INCOMPLETE_REASONS = new Set([
+  "content_filter",
+  "max_output_tokens",
+])
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
+  if (typeof value !== "object" || value === null) return false
+  try {
+    return !Array.isArray(value)
+  } catch {
+    return false
+  }
+}
+
+function readRecordValue(value: unknown, key: string): unknown {
+  if (!isRecord(value)) return undefined
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key)
+    return descriptor && "value" in descriptor ? descriptor.value : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function sanitizeResponsesString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined
+}
+
+function sanitizeResponsesSequenceNumber(value: unknown): number {
+  return (
+      typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ) ?
+      value
+    : 0
 }
 
 function sanitizeResponsesErrorCode(value: unknown): string {
@@ -481,12 +510,79 @@ function sanitizeResponsesErrorStatus(value: unknown): number {
 }
 
 function sanitizeResponsesError(value: unknown): Record<string, unknown> {
-  const error = isRecord(value) ? value : {}
   return {
-    code: sanitizeResponsesErrorCode(error.code),
+    code: sanitizeResponsesErrorCode(readRecordValue(value, "code")),
     message: SAFE_RESPONSES_STREAM_ERROR_MESSAGE,
-    param: sanitizeResponsesErrorParam(error.param),
-    status: sanitizeResponsesErrorStatus(error.status),
+    param: sanitizeResponsesErrorParam(readRecordValue(value, "param")),
+    status: sanitizeResponsesErrorStatus(readRecordValue(value, "status")),
+  }
+}
+
+function sanitizeResponsesUsage(
+  value: unknown,
+): Record<string, unknown> | null {
+  if (value === null) return null
+
+  const inputTokens = readRecordValue(value, "input_tokens")
+  const outputTokens = readRecordValue(value, "output_tokens")
+  const totalTokens = readRecordValue(value, "total_tokens")
+  if (
+    typeof inputTokens !== "number"
+    || !Number.isSafeInteger(inputTokens)
+    || inputTokens < 0
+    || typeof totalTokens !== "number"
+    || !Number.isSafeInteger(totalTokens)
+    || totalTokens < 0
+  ) {
+    return null
+  }
+
+  return {
+    input_tokens: inputTokens,
+    ...((
+      typeof outputTokens === "number"
+      && Number.isSafeInteger(outputTokens)
+      && outputTokens >= 0
+    ) ?
+      { output_tokens: outputTokens }
+    : {}),
+    total_tokens: totalTokens,
+  }
+}
+
+function sanitizeResponsesIncompleteDetails(
+  value: unknown,
+): Record<string, unknown> | null {
+  if (value === null) return null
+  const reason = readRecordValue(value, "reason")
+  return (
+      typeof reason === "string"
+        && SAFE_RESPONSES_INCOMPLETE_REASONS.has(reason)
+    ) ?
+      { reason }
+    : null
+}
+
+function sanitizeTerminalResponsesResponse(
+  value: unknown,
+): Record<string, unknown> {
+  const id = sanitizeResponsesString(readRecordValue(value, "id"))
+  const object = readRecordValue(value, "object")
+  const status = readRecordValue(value, "status")
+
+  return {
+    ...(id ? { id } : {}),
+    ...(object === SAFE_RESPONSES_OBJECT ? { object } : {}),
+    ...(typeof status === "string" && SAFE_RESPONSES_STATUSES.has(status) ?
+      { status }
+    : {}),
+    output: [],
+    output_text: "",
+    usage: sanitizeResponsesUsage(readRecordValue(value, "usage")),
+    error: sanitizeResponsesError(readRecordValue(value, "error")),
+    incomplete_details: sanitizeResponsesIncompleteDetails(
+      readRecordValue(value, "incomplete_details"),
+    ),
   }
 }
 
@@ -494,8 +590,9 @@ function sanitizeTerminalResponsesEvent(
   parsed: Record<string, unknown>,
   eventType: string,
 ): Record<string, unknown> {
-  const sequenceNumber =
-    typeof parsed.sequence_number === "number" ? parsed.sequence_number : 0
+  const sequenceNumber = sanitizeResponsesSequenceNumber(
+    readRecordValue(parsed, "sequence_number"),
+  )
 
   if (eventType === "error") {
     return {
@@ -505,14 +602,11 @@ function sanitizeTerminalResponsesEvent(
     }
   }
 
-  const response = isRecord(parsed.response) ? parsed.response : {}
+  const response = readRecordValue(parsed, "response")
   return {
     type: eventType,
     sequence_number: sequenceNumber,
-    response: {
-      ...response,
-      error: sanitizeResponsesError(response.error),
-    },
+    response: sanitizeTerminalResponsesResponse(response),
   }
 }
 
@@ -541,12 +635,19 @@ export function sanitizeResponsesStreamEvent(
     }
   }
 
-  const eventType = typeof parsed.type === "string" ? parsed.type : event.event
+  const eventType =
+    event.event
+    ?? (typeof readRecordValue(parsed, "type") === "string" ?
+      (readRecordValue(parsed, "type") as string)
+    : undefined)
   if (!eventType || !RESPONSES_TERMINAL_EVENT_TYPES.has(eventType)) return event
 
   if (eventType === "response.completed") {
-    const response = isRecord(parsed.response) ? parsed.response : undefined
-    if (response?.status !== "failed" && response?.status !== "incomplete") {
+    const status = readRecordValue(
+      readRecordValue(parsed, "response"),
+      "status",
+    )
+    if (status !== "failed" && status !== "incomplete") {
       return event
     }
   }

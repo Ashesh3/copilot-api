@@ -34,6 +34,10 @@ export const fixStreamIds = (
 ): string => {
   if (!data) return data
   const parsed = JSON.parse(data) as ResponseStreamEvent
+  if (event !== undefined && isTerminalEventName(event)) {
+    ;(parsed as unknown as Record<string, unknown>).type = event
+    return JSON.stringify(parsed)
+  }
   switch (event) {
     case "response.output_item.added": {
       return handleOutputItemAdded(
@@ -51,6 +55,17 @@ export const fixStreamIds = (
       return handleItemId(parsed, tracker)
     }
   }
+}
+
+const TERMINAL_EVENT_NAMES = new Set([
+  "error",
+  "response.completed",
+  "response.failed",
+  "response.incomplete",
+])
+
+function isTerminalEventName(value: string): boolean {
+  return TERMINAL_EVENT_NAMES.has(value)
 }
 
 const handleOutputItemAdded = (

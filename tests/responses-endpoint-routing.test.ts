@@ -599,6 +599,9 @@ test.each(["response.failed", "error"])(
       status?: number
     }
     const terminalError = terminal.response?.error ?? terminal
+    if (terminal.response) {
+      expect(terminal.response).toMatchObject({ output: [], output_text: "" })
+    }
     expect(terminalError).toMatchObject({
       code: "server_error",
       message: "Upstream Responses stream failed.",
@@ -607,6 +610,82 @@ test.each(["response.failed", "error"])(
     })
   },
 )
+
+test("uses the terminal SSE event name over a mismatched JSON type", async () => {
+  installModel({ supported_endpoints: ["/responses"] })
+  const privateMarker = "mismatched-terminal-private-marker"
+  fetchMock.mockImplementationOnce(() =>
+    createPrivateTerminalResponsesStream(
+      "response.failed",
+      privateMarker,
+      "response.output_text.delta",
+    ),
+  )
+
+  const body = await (
+    await postResponses({ input: "hello", stream: true })
+  ).text()
+  const terminal = body
+    .split("\n")
+    .filter((line) => line.startsWith("data: "))
+    .map((line) => JSON.parse(line.slice(6)) as Record<string, unknown>)
+    .at(-1)
+
+  expect(terminal).toEqual({
+    type: "response.failed",
+    sequence_number: 2,
+    response: {
+      id: "resp_private_terminal",
+      object: "response",
+      status: "failed",
+      output: [],
+      output_text: "",
+      usage: { input_tokens: 3, output_tokens: 2, total_tokens: 5 },
+      error: {
+        code: "server_error",
+        message: "Upstream Responses stream failed.",
+        param: "input",
+        status: 502,
+      },
+      incomplete_details: null,
+    },
+  })
+  expect(body).not.toContain(privateMarker)
+})
+
+test("reconstructs terminal Responses frames from an explicit allowlist", async () => {
+  installModel({ supported_endpoints: ["/responses"] })
+  const privateMarker = "terminal-allowlist-private-marker"
+  fetchMock.mockImplementationOnce(() =>
+    createPrivateTerminalResponsesStream("response.incomplete", privateMarker),
+  )
+
+  const body = await (
+    await postResponses({ input: "hello", stream: true })
+  ).text()
+  const terminal = body
+    .split("\n")
+    .filter((line) => line.startsWith("data: "))
+    .map((line) => JSON.parse(line.slice(6)) as Record<string, unknown>)
+    .at(-1) as { response?: Record<string, unknown> }
+
+  expect(terminal.response).toEqual({
+    id: "resp_private_terminal",
+    object: "response",
+    status: "incomplete",
+    output: [],
+    output_text: "",
+    usage: { input_tokens: 3, output_tokens: 2, total_tokens: 5 },
+    error: {
+      code: "server_error",
+      message: "Upstream Responses stream failed.",
+      param: "input",
+      status: 502,
+    },
+    incomplete_details: { reason: "max_output_tokens" },
+  })
+  expect(body).not.toContain(privateMarker)
+})
 
 test("sanitizes native terminal events after the HTTP stream is committed", async () => {
   installModel({ supported_endpoints: ["/responses"] })
@@ -665,6 +744,12 @@ test("sanitizes native terminal events after the HTTP stream is committed", asyn
   expect(rest).toContain("Upstream Responses stream failed.")
   expect(rest).not.toContain(privateMarker)
   expect(rest).not.toContain("[DONE]")
+  const terminalData = rest
+    .split("\n")
+    .filter((line) => line.startsWith("data: "))
+    .map((line) => JSON.parse(line.slice(6)) as { response?: unknown })
+    .at(-1)
+  expect(terminalData?.response).toMatchObject({ output: [], output_text: "" })
 })
 
 test("keeps route retries private while preserving ECONNRESET recovery", async () => {
@@ -1127,6 +1212,7 @@ function createModel(options: {
 function createPrivateTerminalResponsesStream(
   terminalType: string,
   privateMarker: string,
+  jsonType = terminalType,
 ): Response {
   const created = {
     type: "response.created",
@@ -1162,7 +1248,7 @@ function createPrivateTerminalResponsesStream(
   const terminal =
     terminalType === "error" ?
       {
-        type: "error",
+        type: jsonType,
         sequence_number: 2,
         code: "server_error",
         message: privateMarker,
@@ -1170,11 +1256,12 @@ function createPrivateTerminalResponsesStream(
         status: 502,
       }
     : {
-        type: "response.failed",
+        type: jsonType,
         sequence_number: 2,
         response: {
           ...created.response,
-          status: "failed",
+          status:
+            terminalType === "response.incomplete" ? "incomplete" : "failed",
           output: [
             {
               id: "msg_private_terminal",
@@ -1191,13 +1278,29 @@ function createPrivateTerminalResponsesStream(
             },
           ],
           output_text: "partial-output",
+          message: privateMarker,
+          metadata: { private: privateMarker },
+          prompt_cache_key: privateMarker,
+          safety_identifier: privateMarker,
+          incomplete_details:
+            terminalType === "response.incomplete" ?
+              { reason: "max_output_tokens", private: privateMarker }
+            : { private: privateMarker },
+          usage: {
+            input_tokens: 3,
+            output_tokens: 2,
+            total_tokens: 5,
+            private: privateMarker,
+          },
           error: {
             code: "server_error",
             message: privateMarker,
             param: "input",
             status: 502,
+            private: privateMarker,
           },
         },
+        private: privateMarker,
       }
 
   return new Response(

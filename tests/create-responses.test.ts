@@ -27,8 +27,70 @@ import { server } from "../src/server"
 import { COMPACTION_PAYLOAD_MAX_BYTES } from "../src/services/copilot/compaction-payload"
 import {
   createResponses,
+  sanitizeResponsesStreamEvent,
   type ResponsesPayload,
 } from "../src/services/copilot/create-responses"
+
+test("sanitizes an unknown terminal shape through the direct event helper", () => {
+  const privateMarker = "direct-terminal-private-marker"
+  const sanitized = sanitizeResponsesStreamEvent({
+    event: "response.failed",
+    data: JSON.stringify({
+      type: "response.output_text.delta",
+      sequence_number: 9,
+      response: {
+        id: "resp_direct",
+        object: "response",
+        status: "failed",
+        message: privateMarker,
+        metadata: { private: privateMarker },
+        error: { message: privateMarker, code: "custom_private_code" },
+      },
+      private: privateMarker,
+    }),
+  })
+
+  expect(JSON.parse(sanitized.data ?? "{}") as unknown).toEqual({
+    type: "response.failed",
+    sequence_number: 9,
+    response: {
+      id: "resp_direct",
+      object: "response",
+      status: "failed",
+      output: [],
+      output_text: "",
+      usage: null,
+      error: {
+        code: "server_error",
+        message: "Upstream Responses stream failed.",
+        param: null,
+        status: 502,
+      },
+      incomplete_details: null,
+    },
+  })
+  expect(sanitized.data).not.toContain(privateMarker)
+})
+
+test("leaves a well-formed completed terminal event unchanged", () => {
+  const data = JSON.stringify({
+    type: "response.completed",
+    sequence_number: 3,
+    response: {
+      id: "resp_completed",
+      object: "response",
+      status: "completed",
+      output: [],
+      output_text: "done",
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      error: null,
+      incomplete_details: null,
+    },
+  })
+  const event = { event: "response.completed", data }
+
+  expect(sanitizeResponsesStreamEvent(event)).toEqual(event)
+})
 
 const originalFetch = globalThis.fetch
 const originalModels = state.models

@@ -13,6 +13,11 @@ const BUFFER_FLUSH_BATCH_SIZE = 100
 const logStreams = new Map<string, fs.WriteStream>()
 const logBuffers = new Map<string, Array<string>>()
 const OMITTED_HANDLER_LOG_OBJECT = "[OBJECT OMITTED]"
+const SAFE_HANDLER_LOG_ERROR_NAMES = new Set([
+  "AbortError",
+  "Error",
+  "TypeError",
+])
 const SAFE_HANDLER_LOG_ENUMS = new Set([
   "aborted",
   "cancelled",
@@ -116,24 +121,16 @@ const formatArgs = (args: Array<unknown>) =>
 
 function sanitizeHandlerLogValue(value: unknown): unknown {
   if (typeof value === "string") return "[REDACTED]"
-  if (Array.isArray(value)) return `[${value.length} items omitted]`
-  if (typeof value !== "object" || value === null) {
-    return (
-        typeof value === "number"
-          || typeof value === "boolean"
-          || value === null
-      ) ?
-        value
-      : "[REDACTED]"
-  }
-  if (util.types.isProxy(value)) return OMITTED_HANDLER_LOG_OBJECT
-  if (value instanceof Error) return sanitizeHandlerLogError(value)
-
-  const sanitized: Record<string, unknown> = {}
+  if (typeof value !== "object" || value === null)
+    return sanitizeHandlerLogPrimitive(value)
+  if (isHandlerLogProxy(value)) return OMITTED_HANDLER_LOG_OBJECT
   const descriptors = getSafeOwnPropertyDescriptors(value)
   if (!descriptors) return OMITTED_HANDLER_LOG_OBJECT
+  if (Array.isArray(value)) return sanitizeHandlerLogArray(descriptors)
+  if (value instanceof Error) return sanitizeHandlerLogError(descriptors)
   if (!isPlainHandlerLogRecord(value)) return OMITTED_HANDLER_LOG_OBJECT
 
+  const sanitized: Record<string, unknown> = {}
   for (const [key, descriptor] of Object.entries(descriptors)) {
     if (!("value" in descriptor)) {
       sanitized[key] = OMITTED_HANDLER_LOG_OBJECT
@@ -142,6 +139,32 @@ function sanitizeHandlerLogValue(value: unknown): unknown {
     sanitized[key] = sanitizeHandlerLogField(key, descriptor.value)
   }
   return sanitized
+}
+
+function sanitizeHandlerLogPrimitive(value: unknown): unknown {
+  return (
+      typeof value === "number" || typeof value === "boolean" || value === null
+    ) ?
+      value
+    : "[REDACTED]"
+}
+
+function readHandlerLogDescriptorValue(
+  descriptors: Record<string, PropertyDescriptor>,
+  key: string,
+): unknown {
+  if (!Object.hasOwn(descriptors, key)) return undefined
+  const descriptor = descriptors[key]
+  return "value" in descriptor ? descriptor.value : undefined
+}
+
+function sanitizeHandlerLogArray(
+  descriptors: Record<string, PropertyDescriptor>,
+): string {
+  const length = readHandlerLogDescriptorValue(descriptors, "length")
+  return typeof length === "number" && Number.isSafeInteger(length) ?
+      `[${length} items omitted]`
+    : OMITTED_HANDLER_LOG_OBJECT
 }
 
 function sanitizeHandlerLogMessage(value: string): string {
@@ -165,13 +188,24 @@ function sanitizeHandlerLogField(key: string, value: unknown): unknown {
   return "[REDACTED]"
 }
 
-function sanitizeHandlerLogError(error: Error): { name: string } {
+function sanitizeHandlerLogError(
+  descriptors: Record<string, PropertyDescriptor>,
+): { name: string } {
+  const ownName = readHandlerLogDescriptorValue(descriptors, "name")
+  if (
+    typeof ownName === "string"
+    && SAFE_HANDLER_LOG_ERROR_NAMES.has(ownName)
+  ) {
+    return { name: ownName }
+  }
+  return { name: "Error" }
+}
+
+function isHandlerLogProxy(value: object): boolean {
   try {
-    const descriptors = Object.getOwnPropertyDescriptors(error)
-    const name = descriptors.name.value as unknown
-    return { name: typeof name === "string" ? name : "Error" }
+    return util.types.isProxy(value)
   } catch {
-    return { name: "Error" }
+    return true
   }
 }
 

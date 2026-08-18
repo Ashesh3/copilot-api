@@ -6,6 +6,7 @@ import {
   getExtraPromptForModel,
   getReasoningEffortForModel,
 } from "~/lib/config"
+import { createEndpointTranslationError } from "~/lib/error"
 import {
   type ResponsesPayload,
   type ResponseInputContent,
@@ -14,7 +15,6 @@ import {
   type ResponseInputItem,
   type ResponseInputMessage,
   type ResponseInputReasoning,
-  type ResponseInputReasoningSummary,
   type ResponseInputText,
   type ResponsesResult,
   type ResponseOutputContentBlock,
@@ -339,18 +339,22 @@ const createFileContent = (
 
 const createReasoningContent = (
   block: AnthropicThinkingBlock,
-): ResponseInputReasoning | ResponseInputReasoningSummary => {
+): ResponseInputReasoning => {
   // align with vscode-copilot-chat extractThinkingData, should add id, otherwise it will cause miss cache occasionally —— the usage input cached tokens to be 0
   // https://github.com/microsoft/vscode-copilot-chat/blob/main/src/platform/endpoint/node/responsesApi.ts#L162
   // when use in codex cli, reasoning id is empty, so it will cause miss cache occasionally
-  const array = (block.signature ?? "").split("@")
-  const signature = array[0]
-  const id = array[1]
+  const signatureParts = block.signature?.split("@") ?? []
+  const signature = signatureParts[0]
+  const id = signatureParts[1]
   const thinking = block.thinking === THINKING_TEXT ? "" : block.thinking
   const summary =
     thinking ? [{ type: "summary_text" as const, text: thinking }] : []
-  if (!signature || !id) {
-    return { type: "reasoning_summary", summary }
+  if (!signature || !id || signatureParts.length !== 2) {
+    throw createEndpointTranslationError({
+      blockers: ["thinking"],
+      code: "endpoint_translation_unsupported",
+      source: "messages",
+    })
   }
   return {
     id,
