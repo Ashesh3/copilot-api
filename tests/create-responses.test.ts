@@ -222,6 +222,64 @@ test("reconstructs malformed terminal JSON through the direct helper", () => {
 })
 
 test.each([
+  { data: "", name: "empty" },
+  {
+    data: '{"private":"completed-malformed-private-marker"',
+    name: "malformed",
+  },
+])("fails closed for response.completed with $name data", ({ data }) => {
+  const sanitized = sanitizeResponsesStreamEvent({
+    event: "response.completed",
+    data,
+  })
+
+  expect(sanitized.event).toBe("response.failed")
+  expect(JSON.parse(sanitized.data ?? "{}") as unknown).toEqual({
+    type: "response.failed",
+    sequence_number: 0,
+    response: {
+      output: [],
+      output_text: "",
+      usage: null,
+      error: {
+        code: "server_error",
+        message: "Upstream Responses stream failed.",
+        param: null,
+        status: 502,
+      },
+      incomplete_details: null,
+    },
+  })
+  expect(sanitized.data).not.toContain("completed-malformed-private-marker")
+})
+
+test("fails closed for response.completed without a sequence number", () => {
+  const sanitized = sanitizeResponsesStreamEvent({
+    event: "response.completed",
+    data: JSON.stringify({
+      type: "response.completed",
+      response: {
+        id: "resp_missing_sequence",
+        object: "response",
+        status: "completed",
+        output: [],
+        output_text: "",
+        usage: null,
+        error: null,
+        incomplete_details: null,
+      },
+    }),
+  })
+
+  expect(sanitized.event).toBe("response.failed")
+  expect(JSON.parse(sanitized.data ?? "{}") as { type?: string }).toMatchObject(
+    {
+      type: "response.failed",
+    },
+  )
+})
+
+test.each([
   { response: {}, name: "missing status" },
   { response: { status: "future_status" }, name: "unknown status" },
   { response: { status: "failed" }, name: "failed status" },

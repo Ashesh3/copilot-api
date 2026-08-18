@@ -80,10 +80,10 @@ bytes, and native Responses no-`[DONE]` behavior.
 ## Verification
 
 - Focused terminal/HTTP/WS/retry/logger/LLM Debug/cancellation/lifecycle:
-  **329 pass, 0 fail, 1,114 assertions across 12 files**.
-- Non-integration suite: **1,539 pass, 3 skip, 0 fail, 5,494 assertions across
+  **332 pass, 0 fail, 1,122 assertions across 12 files**.
+- Non-integration suite: **1,542 pass, 3 skip, 0 fail, 5,502 assertions across
   102 files**.
-- Full `bun test`: **1,692 pass, 3 skip, 0 fail, 6,821 assertions across 113
+- Full `bun test`: **1,695 pass, 3 skip, 0 fail, 6,829 assertions across 113
   files**. The three skips are the established local Bun 1.3.10 media gates.
 - `bun run lint:all` exits 0 with the five established warnings only: one
   `useFunctionApplyPatch` naming warning and four UI hook warnings.

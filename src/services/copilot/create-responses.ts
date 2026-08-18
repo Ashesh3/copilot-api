@@ -606,6 +606,14 @@ function isAcceptedCompletedResponsesEvent(
   response: unknown,
 ): boolean {
   if (!isRecord(parsed) || !isRecord(response)) return false
+  const sequenceNumber = readRecordValue(parsed, "sequence_number")
+  if (
+    typeof sequenceNumber !== "number"
+    || !Number.isSafeInteger(sequenceNumber)
+    || sequenceNumber < 0
+  ) {
+    return false
+  }
   if (readRecordValue(parsed, "type") !== "response.completed") return false
   if (readRecordValue(response, "status") !== "completed") return false
   if (sanitizeResponsesString(readRecordValue(response, "id")) === undefined) {
@@ -666,7 +674,18 @@ function sanitizeTerminalResponsesEvent(
 export function sanitizeResponsesStreamEvent(
   event: ServerSentEventMessage,
 ): ServerSentEventMessage {
-  if (!event.data) return event
+  if (!event.data) {
+    if (event.event === "response.completed") {
+      return {
+        ...event,
+        event: "response.failed",
+        data: JSON.stringify(
+          sanitizeTerminalResponsesEvent({}, "response.failed"),
+        ),
+      }
+    }
+    return event
+  }
 
   let parsed: unknown
   try {
@@ -675,9 +694,12 @@ export function sanitizeResponsesStreamEvent(
     if (!event.event || !RESPONSES_TERMINAL_EVENT_TYPES.has(event.event)) {
       return event
     }
+    const eventType =
+      event.event === "response.completed" ? "response.failed" : event.event
     return {
       ...event,
-      data: JSON.stringify(sanitizeTerminalResponsesEvent({}, event.event)),
+      event: eventType,
+      data: JSON.stringify(sanitizeTerminalResponsesEvent({}, eventType)),
     }
   }
 
