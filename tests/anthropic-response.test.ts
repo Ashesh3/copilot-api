@@ -8,6 +8,8 @@ import type {
 
 import {
   type AnthropicMessageDeltaEvent,
+  type AnthropicMessageStartEvent,
+  type AnthropicResponse,
   type AnthropicStreamState,
 } from "~/routes/messages/anthropic-types"
 import { translateToAnthropic } from "~/routes/messages/non-stream-translation"
@@ -72,6 +74,93 @@ function isValidAnthropicStreamEvent(payload: unknown): boolean {
 }
 
 describe("OpenAI to Anthropic Non-Streaming Response Translation", () => {
+  test("types and preserves current native Messages response extensions", () => {
+    const response: AnthropicResponse = {
+      id: "msg-current",
+      type: "message",
+      role: "assistant",
+      content: [
+        { type: "text", text: "hello", cache_control: { type: "ephemeral" } },
+      ],
+      model: "claude-current",
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: {
+        input_tokens: 12,
+        output_tokens: 8,
+        cache_creation: {
+          ephemeral_5m_input_tokens: 4,
+          ephemeral_1h_input_tokens: 2,
+        },
+        future_usage_field: true,
+      },
+      copilot_usage: { completion_tokens: 8 },
+      recommended_auto_tier: "balanced",
+      stop_details: { reason: "native" },
+      future_native_field: { enabled: true },
+    }
+    const messageStart: AnthropicMessageStartEvent = {
+      type: "message_start",
+      message: {
+        ...response,
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+      },
+    }
+    const messageDelta: AnthropicMessageDeltaEvent = {
+      type: "message_delta",
+      delta: { stop_reason: "end_turn" },
+      usage: { output_tokens: 8 },
+      copilot_usage: { completion_tokens: 8 },
+      future_native_field: { enabled: true },
+    }
+
+    expect(response).toMatchObject({
+      id: "msg-current",
+      type: "message",
+      role: "assistant",
+      content: [
+        {
+          type: "text",
+          text: "hello",
+          cache_control: { type: "ephemeral" },
+        },
+      ],
+      model: "claude-current",
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: {
+        input_tokens: 12,
+        output_tokens: 8,
+        cache_creation: {
+          ephemeral_5m_input_tokens: 4,
+          ephemeral_1h_input_tokens: 2,
+        },
+        future_usage_field: true,
+      },
+      copilot_usage: { completion_tokens: 8 },
+      recommended_auto_tier: "balanced",
+      stop_details: { reason: "native" },
+      future_native_field: { enabled: true },
+    })
+    expect(messageStart).toMatchObject({
+      type: "message_start",
+      message: {
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+      },
+    })
+    expect(messageDelta).toMatchObject({
+      type: "message_delta",
+      delta: { stop_reason: "end_turn" },
+      usage: { output_tokens: 8 },
+      copilot_usage: { completion_tokens: 8 },
+      future_native_field: { enabled: true },
+    })
+  })
+
   test("should translate a simple text response correctly", () => {
     const openAIResponse: ChatCompletionResponse = {
       id: "chatcmpl-123",

@@ -68,6 +68,26 @@ function isValidChatCompletionRequest(payload: unknown): boolean {
 
 // eslint-disable-next-line max-lines-per-function
 describe("Anthropic to OpenAI translation logic", () => {
+  test("types and preserves current native Messages extensions", () => {
+    const payload: AnthropicMessagesPayload = {
+      model: "claude-current",
+      max_tokens: 512,
+      cache_control: { type: "ephemeral", ttl: "5m" },
+      fallback_credit_token: "opaque-token",
+      messages: [{ role: "user", content: "hello" }],
+      future_native_field: { enabled: true },
+    }
+
+    expect(payload).toEqual({
+      model: "claude-current",
+      max_tokens: 512,
+      cache_control: { type: "ephemeral", ttl: "5m" },
+      fallback_credit_token: "opaque-token",
+      messages: [{ role: "user", content: "hello" }],
+      future_native_field: { enabled: true },
+    })
+  })
+
   test("should translate minimal Anthropic payload to valid OpenAI payload", () => {
     const anthropicPayload: AnthropicMessagesPayload = {
       model: "gpt-4o",

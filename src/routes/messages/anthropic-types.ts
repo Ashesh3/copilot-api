@@ -1,6 +1,6 @@
 // Anthropic API Types
 
-export interface AnthropicMessagesPayload {
+export interface AnthropicMessagesPayload extends Record<string, unknown> {
   model: string
   messages: Array<AnthropicMessage>
   max_tokens?: number
@@ -37,14 +37,22 @@ export interface AnthropicMessagesPayload {
     }
   }
   speed?: "fast"
+  cache_control?: AnthropicCacheControl
+  fallback_credit_token?: string
 }
 
-export interface AnthropicTextBlock {
+export interface AnthropicCacheControl extends Record<string, unknown> {
+  type: "ephemeral"
+  ttl?: "5m" | "1h"
+}
+
+export interface AnthropicTextBlock extends Record<string, unknown> {
   type: "text"
   text: string
+  cache_control?: AnthropicCacheControl
 }
 
-export interface AnthropicImageBlock {
+export interface AnthropicImageBlock extends Record<string, unknown> {
   type: "image"
   source:
     | {
@@ -56,13 +64,14 @@ export interface AnthropicImageBlock {
         type: "url"
         url: string
       }
+  cache_control?: AnthropicCacheControl
 }
 
 /**
  * Anthropic document block — how Claude Code attaches PDFs (base64 source),
  * plain text files (text source) and remote documents (url source).
  */
-export interface AnthropicDocumentBlock {
+export interface AnthropicDocumentBlock extends Record<string, unknown> {
   type: "document"
   source:
     | { type: "base64"; media_type: string; data: string }
@@ -75,14 +84,16 @@ export interface AnthropicDocumentBlock {
   title?: string | null
   context?: string | null
   citations?: { enabled?: boolean } | null
+  cache_control?: AnthropicCacheControl
 }
 
-export interface AnthropicToolReferenceBlock {
+export interface AnthropicToolReferenceBlock extends Record<string, unknown> {
   type: "tool_reference"
   tool_name: string
+  cache_control?: AnthropicCacheControl
 }
 
-export interface AnthropicToolResultBlock {
+export interface AnthropicToolResultBlock extends Record<string, unknown> {
   type: "tool_result"
   tool_use_id: string
   content:
@@ -94,19 +105,22 @@ export interface AnthropicToolResultBlock {
         | AnthropicToolReferenceBlock
       >
   is_error?: boolean
+  cache_control?: AnthropicCacheControl
 }
 
-export interface AnthropicToolUseBlock {
+export interface AnthropicToolUseBlock extends Record<string, unknown> {
   type: "tool_use"
   id: string
   name: string
   input: Record<string, unknown>
+  cache_control?: AnthropicCacheControl
 }
 
-export interface AnthropicThinkingBlock {
+export interface AnthropicThinkingBlock extends Record<string, unknown> {
   type: "thinking"
   thinking: string
   signature?: string
+  cache_control?: AnthropicCacheControl
 }
 
 export type AnthropicUserContentBlock =
@@ -120,19 +134,19 @@ export type AnthropicAssistantContentBlock =
   | AnthropicToolUseBlock
   | AnthropicThinkingBlock
 
-export interface AnthropicUserMessage {
+export interface AnthropicUserMessage extends Record<string, unknown> {
   role: "user"
   content: string | Array<AnthropicUserContentBlock>
 }
 
-export interface AnthropicAssistantMessage {
+export interface AnthropicAssistantMessage extends Record<string, unknown> {
   role: "assistant"
   content: string | Array<AnthropicAssistantContentBlock>
 }
 
 export type AnthropicMessage = AnthropicUserMessage | AnthropicAssistantMessage
 
-export interface AnthropicTool {
+export interface AnthropicTool extends Record<string, unknown> {
   type?: string
   name: string
   description?: string
@@ -140,9 +154,10 @@ export interface AnthropicTool {
   allowed_domains?: Array<string>
   blocked_domains?: Array<string>
   max_uses?: number
+  cache_control?: AnthropicCacheControl
 }
 
-export interface AnthropicResponse {
+export interface AnthropicResponse extends Record<string, unknown> {
   id: string
   type: "message"
   role: "assistant"
@@ -163,36 +178,41 @@ export interface AnthropicResponse {
     cache_creation_input_tokens?: number
     cache_read_input_tokens?: number
     service_tier?: "standard" | "priority" | "batch"
+    cache_creation?: {
+      ephemeral_5m_input_tokens?: number
+      ephemeral_1h_input_tokens?: number
+    }
+    [key: string]: unknown
   }
+  copilot_usage?: unknown
+  recommended_auto_tier?: "eco" | "balanced"
+  stop_details?: Record<string, unknown>
 }
 
 export type AnthropicResponseContentBlock = AnthropicAssistantContentBlock
 
 // Anthropic Stream Event Types
-export interface AnthropicMessageStartEvent {
+export interface AnthropicMessageStartEvent extends Record<string, unknown> {
   type: "message_start"
-  message: Omit<
-    AnthropicResponse,
-    "content" | "stop_reason" | "stop_sequence"
-  > & {
+  message: AnthropicResponse & {
     content: []
     stop_reason: null
     stop_sequence: null
   }
 }
 
-export interface AnthropicContentBlockStartEvent {
+export interface AnthropicContentBlockStartEvent
+  extends Record<string, unknown> {
   type: "content_block_start"
   index: number
   content_block:
-    | { type: "text"; text: string }
-    | (Omit<AnthropicToolUseBlock, "input"> & {
-        input: Record<string, unknown>
-      })
-    | { type: "thinking"; thinking: string }
+    | AnthropicTextBlock
+    | AnthropicToolUseBlock
+    | AnthropicThinkingBlock
 }
 
-export interface AnthropicContentBlockDeltaEvent {
+export interface AnthropicContentBlockDeltaEvent
+  extends Record<string, unknown> {
   type: "content_block_delta"
   index: number
   delta:
@@ -202,12 +222,13 @@ export interface AnthropicContentBlockDeltaEvent {
     | { type: "signature_delta"; signature: string }
 }
 
-export interface AnthropicContentBlockStopEvent {
+export interface AnthropicContentBlockStopEvent
+  extends Record<string, unknown> {
   type: "content_block_stop"
   index: number
 }
 
-export interface AnthropicMessageDeltaEvent {
+export interface AnthropicMessageDeltaEvent extends Record<string, unknown> {
   type: "message_delta"
   delta: {
     stop_reason?: AnthropicResponse["stop_reason"]
@@ -218,18 +239,24 @@ export interface AnthropicMessageDeltaEvent {
     output_tokens: number
     cache_creation_input_tokens?: number
     cache_read_input_tokens?: number
+    cache_creation?: {
+      ephemeral_5m_input_tokens?: number
+      ephemeral_1h_input_tokens?: number
+    }
+    [key: string]: unknown
   }
+  copilot_usage?: unknown
 }
 
-export interface AnthropicMessageStopEvent {
+export interface AnthropicMessageStopEvent extends Record<string, unknown> {
   type: "message_stop"
 }
 
-export interface AnthropicPingEvent {
+export interface AnthropicPingEvent extends Record<string, unknown> {
   type: "ping"
 }
 
-export interface AnthropicErrorEvent {
+export interface AnthropicErrorEvent extends Record<string, unknown> {
   type: "error"
   error: {
     type: string
