@@ -4,14 +4,22 @@ import type { Context } from "hono"
 import * as Sentry from "@sentry/bun"
 import { streamSSE } from "hono/streaming"
 
-import type { AnthropicResponse } from "~/routes/messages/anthropic-types"
 import type { Model } from "~/services/copilot/get-models"
 
 import { getLastUsedAccountId } from "~/lib/account-router"
 import { awaitApproval } from "~/lib/approval"
 import { getConfig } from "~/lib/config"
-import { getModelEndpointSupport } from "~/lib/endpoint-routing"
-import { assertEndpointTranslationSupported, isAbortError } from "~/lib/error"
+import {
+  type EndpointRouteDecision,
+  type EndpointRouteFailure,
+  getModelEndpointSupport,
+  selectCopilotEndpoint,
+} from "~/lib/endpoint-routing"
+import {
+  assertEndpointTranslationSupported,
+  createEndpointTranslationError,
+  isAbortError,
+} from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
 import {
   applyModelRedirect,
@@ -51,10 +59,7 @@ import {
   fitResponsesCompactionPayload,
   isResponsesCompactionRequest,
 } from "~/services/copilot/compaction-payload"
-import {
-  createAnthropicMessages,
-  modelSupportsNativeMessages,
-} from "~/services/copilot/create-anthropic-messages"
+import { createAnthropicMessages } from "~/services/copilot/create-anthropic-messages"
 import {
   createChatCompletions,
   type ChatCompletionChunk,
@@ -64,6 +69,7 @@ import {
 } from "~/services/copilot/create-chat-completions"
 import {
   createResponses,
+  normalizeResponsesAttachments,
   type FunctionTool,
   type ResponseInputItem,
   type ResponseOutputFunctionCall,
@@ -81,16 +87,19 @@ import {
 import { prepareResponsesRequest } from "~/services/copilot/responses-contract"
 
 import {
-  anthropicResponseToChat,
-  chatPayloadToAnthropic,
-} from "../chat-completions/anthropic-bridge"
-import {
   emitResponsesResultAsStream,
   resolveResponsesWebSearchCalls,
   resolveWebSearchCalls,
 } from "../messages/web-search-helpers"
+import {
+  anthropicResponseToResponsesResult,
+  responsesPayloadToAnthropic,
+} from "./messages-bridge"
 import { createStreamIdTracker, fixStreamIds } from "./stream-id-sync"
-import { checkResponsesToChatTranslation } from "./translation-fidelity"
+import {
+  checkResponsesToChatTranslation,
+  checkResponsesToMessagesTranslation,
+} from "./translation-fidelity"
 import { expandCompactionItems, getResponsesRequestOptions } from "./utils"
 
 const logger = createHandlerLogger("responses-handler")
@@ -370,16 +379,71 @@ function applyResponsesModelFallback(
   payload.model = candidate
 }
 
-function reportResponsesEndpointFallback(c: Context, model: string): void {
+function reportResponsesEndpointFallback(
+  c: Context,
+  model: string,
+  decision: EndpointRouteDecision,
+): void {
+  const targetName =
+    decision.target === "/v1/messages" ?
+      "native /v1/messages"
+    : "ChatCompletions"
+  const targetEndpoint =
+    decision.target === "/v1/messages" ? "AnthropicMessages" : "ChatCompletions"
   recordNonDefaultBehavior(c, {
     kind: "endpoint_fallback",
-    message: `Model ${model} does not support /responses; falling back to ChatCompletions`,
+    message: `Model ${model} does not support /responses; falling back to ${targetName}`,
     data: {
       model,
       sourceEndpoint: "Responses",
-      targetEndpoint: "ChatCompletions",
+      targetEndpoint,
     },
   })
+}
+
+export function selectResponsesUpstreamEndpoint(options: {
+  payload: ResponsesPayload
+  selectedModel: Model | undefined
+}): EndpointRouteDecision | EndpointRouteFailure {
+  const support = getModelEndpointSupport(options.selectedModel)
+  const chatCheck = getResponsesChatRouteCheck(options.payload)
+  return selectCopilotEndpoint({
+    source: "responses",
+    support,
+    candidates: [
+      {
+        endpoint: "/responses",
+        reason: "endpoint_unavailable",
+        check: { supported: true, blockers: [] },
+      },
+      {
+        endpoint: "/v1/messages",
+        reason: "endpoint_unavailable",
+        check: checkResponsesToMessagesTranslation(options.payload),
+      },
+      {
+        endpoint: "/chat/completions",
+        reason: "endpoint_unavailable",
+        check: chatCheck,
+      },
+    ],
+  })
+}
+
+function getResponsesChatRouteCheck(payload: ResponsesPayload): {
+  blockers: Array<string>
+  supported: boolean
+} {
+  const check = checkResponsesToChatTranslation(payload)
+  if (!isResponsesCompactionRequest(payload)) return check
+  const blockers = check.blockers.filter(
+    (blocker) =>
+      blocker !== "tool_semantics:custom_tool_call"
+      && blocker !== "tool_semantics:custom_tool_call_output"
+      && blocker !== "tool_semantics:computer_call_output"
+      && blocker !== "client_metadata",
+  )
+  return { supported: blockers.length === 0, blockers }
 }
 
 function withRequestedResponseModel(
@@ -482,34 +546,34 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
   expandCompactionItems(payload)
   disableParallelWebSearch(payload)
 
-  // Validate the shared HTTP Responses contract before endpoint selection so
-  // chat-only model fallback cannot bypass stateful-control rejection.
-  prepareResponsesRequest(payload)
-
   const selectedModel = state.models?.data.find(
     (model) => model.id === payload.model,
   )
-  const supportsResponses = getModelEndpointSupport(selectedModel).responses
+  const route = await prepareResponsesRoute(c, payload, selectedModel)
+  const { decision, preparedPayload } = route
 
-  if (!supportsResponses) {
+  if (state.manualApprove) await awaitApproval()
+
+  if (decision.target === "/v1/messages") {
+    reportResponsesEndpointFallback(c, payload.model, decision)
+    return await handleWithAnthropicMessages(c, preparedPayload, requestedModel)
+  }
+
+  if (decision.target === "/chat/completions") {
     // ChatCompletions has no hosted web-search tool. Downgrade it to the
     // shared MCP-backed function loop only on this fallback path.
-    convertWebSearchTool(payload)
+    convertWebSearchTool(preparedPayload)
     // ChatCompletions can't accept custom (freeform) tools, so rewrite
     // apply_patch into a function tool only on this fallback path. The
     // native /responses path supports custom tools and must pass them
     // through unchanged (Codex Desktop aborts otherwise).
-    useFunctionApplyPatch(payload)
-    reportResponsesEndpointFallback(c, payload.model)
+    useFunctionApplyPatch(preparedPayload)
+    reportResponsesEndpointFallback(c, preparedPayload.model, decision)
     setRequestContext(c, { provider: "Responses→ChatCompletions" })
-    return await handleWithChatCompletions(c, payload, requestedModel)
+    return await handleWithChatCompletions(c, preparedPayload, requestedModel)
   }
 
   const { vision, initiator } = getResponsesRequestOptions(payload)
-
-  if (state.manualApprove) {
-    await awaitApproval()
-  }
 
   // Extract messages for Sentry span attribute
   const inputMessages =
@@ -726,6 +790,53 @@ const handleResponsesInner = async (c: Context, payload: ResponsesPayload) => {
   logger.debug("Forwarding native Responses result:", JSON.stringify(resolved))
 
   return c.json(withRequestedResponseModel(resolved, requestedModel))
+}
+
+async function prepareResponsesRoute(
+  c: Context,
+  payload: ResponsesPayload,
+  selectedModel: Model | undefined,
+): Promise<{
+  decision: EndpointRouteDecision
+  preparedPayload: ResponsesPayload
+}> {
+  const preparedPayload = prepareResponsesRequest(payload).body
+  const support = getModelEndpointSupport(selectedModel)
+  if (!support.responses) {
+    await normalizeResponsesAttachments(preparedPayload, c.req.raw.signal)
+  }
+  let decision = selectResponsesUpstreamEndpoint({
+    payload: preparedPayload,
+    selectedModel,
+  })
+  if (
+    "code" in decision
+    && support.chat
+    && payloadHasApplyPatchTool(preparedPayload)
+  ) {
+    const chatPayload = structuredClone(preparedPayload)
+    useFunctionApplyPatch(chatPayload)
+    if (getResponsesChatRouteCheck(chatPayload).supported) {
+      preparedPayload.tools = chatPayload.tools
+      decision = {
+        reason: "endpoint_unavailable",
+        source: "responses",
+        target: "/chat/completions",
+        translated: true,
+      }
+    }
+  }
+  if ("code" in decision) throw createEndpointTranslationError(decision)
+  return { decision, preparedPayload }
+}
+
+function payloadHasApplyPatchTool(payload: ResponsesPayload): boolean {
+  return (
+    Array.isArray(payload.tools)
+    && payload.tools.some(
+      (tool) => tool.type === "custom" && tool.name === "apply_patch",
+    )
+  )
 }
 
 const isAsyncIterable = <T>(value: unknown): value is AsyncIterable<T> =>
@@ -1571,71 +1682,36 @@ export const streamChatCompletionsAsResponses = async (
   return { ...s.usage, responseText: s.accumulatedText }
 }
 
-const ccPayloadHasFileParts = (payload: ChatCompletionsPayload): boolean =>
-  payload.messages.some(
-    (message) =>
-      Array.isArray(message.content)
-      && message.content.some((part) => part.type === "file"),
-  )
-
-/**
- * Bridge the ChatCompletions fallback to native /v1/messages for claude
- * models when the payload carries PDF attachments. The response is buffered
- * and re-emitted as a Responses stream when streaming was requested (same
- * pattern as web-search resolution).
- */
-const handleFallbackViaNativeMessages = async (
+const handleWithAnthropicMessages = async (
   c: Context,
-  options: {
-    ccPayload: ChatCompletionsPayload & { model: string }
-    compaction: boolean
-    isStream: boolean
-    responseModel: string
-    selectedModel?: Model
-  },
+  payload: ResponsesPayload,
+  requestedModel: string,
 ) => {
-  recordNonDefaultBehavior(c, {
-    kind: "endpoint_fallback",
-    message: `PDF file attachment routed ${options.ccPayload.model} to native /v1/messages`,
-    data: {
-      model: options.ccPayload.model,
-      sourceEndpoint: "Responses",
-      targetEndpoint: "AnthropicMessages",
-    },
-  })
   setRequestContext(c, { provider: "Responses→AnthropicMessages" })
-
-  const anthropicPayload = await chatPayloadToAnthropic(
-    options.ccPayload,
-    options.selectedModel,
+  const anthropicPayload = await responsesPayloadToAnthropic(
+    payload,
     c.req.raw.signal,
   )
   anthropicPayload.stream = false
 
   const response = (await createAnthropicMessages(anthropicPayload, {
-    compaction: options.compaction,
+    compaction: isResponsesCompactionRequest(payload),
     signal: c.req.raw.signal,
-  })) as AnthropicResponse
+  })) as Parameters<typeof anthropicResponseToResponsesResult>[0]
 
   const nativeAccountId = getLastUsedAccountId()
   if (nativeAccountId !== undefined) {
     setRequestContext(c, { accountId: nativeAccountId })
   }
 
-  const ccResponse = anthropicResponseToChat(response, options.responseModel)
-  if (ccResponse.usage) {
+  const result = anthropicResponseToResponsesResult(response, requestedModel)
+  if (result.usage) {
     setRequestContext(c, {
-      inputTokens: ccResponse.usage.prompt_tokens,
-      outputTokens: ccResponse.usage.completion_tokens,
+      inputTokens: result.usage.input_tokens,
+      outputTokens: result.usage.output_tokens,
     })
   }
-
-  const result = chatCompletionToResponsesResult(
-    ccResponse,
-    options.responseModel,
-  )
-
-  if (!options.isStream) {
+  if (!payload.stream) {
     return c.json(result)
   }
 
@@ -1673,23 +1749,6 @@ const handleWithChatCompletions = async (
     ccPayload.tools?.some((tool) => tool.function.name === "web_search")
     ?? false
   logger.debug("ChatCompletions fallback payload:", JSON.stringify(ccPayload))
-
-  // PDF file parts cannot ride /chat/completions upstream; claude models
-  // accept them natively via /v1/messages
-  if (ccPayloadHasFileParts(ccPayload)) {
-    const selectedModel = state.models?.data.find(
-      (model) => model.id === payload.model,
-    )
-    if (modelSupportsNativeMessages(selectedModel)) {
-      return await handleFallbackViaNativeMessages(c, {
-        ccPayload: { ...ccPayload, model: payload.model },
-        compaction,
-        isStream: Boolean(fallbackPayload.stream),
-        responseModel,
-        selectedModel,
-      })
-    }
-  }
 
   // Non-streaming: span wraps the entire call + response processing
   if (!fallbackPayload.stream) {

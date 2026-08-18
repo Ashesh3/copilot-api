@@ -833,6 +833,47 @@ test("allows exact Responses to Chat controls that have direct mappings", () => 
   ).toEqual({ supported: true, blockers: [] })
 })
 
+test.each([
+  {
+    name: "missing call arguments",
+    payload: {
+      model: "chat-only",
+      input: [{ type: "function_call", call_id: "call_1", name: "lookup" }],
+    },
+    blocker: "function_call",
+  },
+  {
+    name: "unknown tool declaration",
+    payload: {
+      model: "chat-only",
+      input: "hello",
+      tools: [{ type: "future_private_tool", secret: "private" }],
+    },
+    blocker: "tool_semantics",
+  },
+  {
+    name: "malformed function declaration",
+    payload: {
+      model: "chat-only",
+      input: "hello",
+      tools: [
+        {
+          type: "function",
+          name: "lookup",
+          parameters: "private-schema",
+          strict: false,
+        },
+      ],
+    },
+    blocker: "function_tool",
+  },
+])("rejects Responses to Chat $name", ({ payload, blocker }) => {
+  expect(checkResponsesToChatTranslation(payload as never)).toEqual({
+    supported: false,
+    blockers: [blocker],
+  })
+})
+
 test("rejects nested Responses details that Chat cannot preserve", () => {
   expect(
     checkResponsesToChatTranslation({
@@ -1199,6 +1240,57 @@ test("allows exact Responses to Messages controls in the forthcoming bridge subs
   ).toEqual({ supported: true, blockers: [] })
 })
 
+test("allows integer Responses reasoning effort on the Messages bridge", () => {
+  expect(
+    checkResponsesToMessagesTranslation({
+      model: "claude-current",
+      input: "hello",
+      reasoning: { effort: 2048, summary: "auto" },
+    }),
+  ).toEqual({ supported: true, blockers: [] })
+})
+
+test.each([
+  {
+    name: "missing call arguments",
+    payload: {
+      model: "claude-current",
+      input: [{ type: "function_call", call_id: "call_1", name: "lookup" }],
+    },
+    blocker: "function_call",
+  },
+  {
+    name: "unknown tool declaration",
+    payload: {
+      model: "claude-current",
+      input: "hello",
+      tools: [{ type: "future_private_tool", secret: "private" }],
+    },
+    blocker: "tool_semantics",
+  },
+  {
+    name: "malformed function declaration",
+    payload: {
+      model: "claude-current",
+      input: "hello",
+      tools: [
+        {
+          type: "function",
+          name: "lookup",
+          parameters: "private-schema",
+          strict: false,
+        },
+      ],
+    },
+    blocker: "function_tool",
+  },
+])("rejects Responses to Messages $name", ({ payload, blocker }) => {
+  expect(checkResponsesToMessagesTranslation(payload as never)).toEqual({
+    supported: false,
+    blockers: [blocker],
+  })
+})
+
 test("rejects nested Responses details that Messages cannot preserve", () => {
   expect(
     checkResponsesToMessagesTranslation({
@@ -1244,6 +1336,81 @@ test("rejects nested Responses details that Messages cannot preserve", () => {
       "strict_function_tool",
     ],
   })
+})
+
+test.each([
+  {
+    name: "assistant image content",
+    item: {
+      type: "message",
+      role: "assistant",
+      content: [
+        {
+          type: "input_image",
+          image_url: "data:image/png;base64,AA==",
+          detail: "auto",
+        },
+      ],
+    },
+    blocker: "message_content_role",
+  },
+  {
+    name: "system file content",
+    item: {
+      type: "message",
+      role: "system",
+      content: [
+        {
+          type: "input_file",
+          filename: "doc.pdf",
+          file_data: "data:application/pdf;base64,AA==",
+        },
+      ],
+    },
+    blocker: "message_content_role",
+  },
+  {
+    name: "file_id source",
+    item: {
+      type: "message",
+      role: "user",
+      content: [{ type: "input_file", filename: "doc.pdf", file_id: "file_1" }],
+    },
+    blocker: "input_file:file_id",
+  },
+  {
+    name: "malformed file data",
+    item: {
+      type: "message",
+      role: "user",
+      content: [
+        { type: "input_file", filename: "doc.pdf", file_data: "private" },
+      ],
+    },
+    blocker: "input_file",
+  },
+  {
+    name: "invalid message status",
+    item: {
+      type: "message",
+      role: "user",
+      content: "hello",
+      status: "future_private_status",
+    },
+    blocker: "item_status",
+  },
+  {
+    name: "missing function output call id",
+    item: { type: "function_call_output", call_id: "", output: "done" },
+    blocker: "tool_result_pairing",
+  },
+])("rejects Responses to Messages $name", ({ item, blocker }) => {
+  expect(
+    checkResponsesToMessagesTranslation({
+      model: "claude-current",
+      input: [item],
+    } as ResponsesPayload),
+  ).toEqual({ supported: false, blockers: [blocker] })
 })
 
 test.each([
@@ -1549,6 +1716,68 @@ test("keeps omitted message content under its permitted Responses semantics", ()
   expect(responsesToChatCompletions(payload).messages).toEqual([
     { role: "user", content: "" },
   ])
+})
+
+test.each(["user", "assistant", "system", "developer"] as const)(
+  "treats a valid role-only %s record as an implicit Responses message",
+  (role) => {
+    const payload = {
+      model: "chat-only",
+      input: [{ role }],
+    } as ResponsesPayload
+
+    expect(checkResponsesToChatTranslation(payload)).toEqual({
+      supported: true,
+      blockers: [],
+    })
+    expect(checkResponsesToMessagesTranslation(payload)).toEqual({
+      supported: true,
+      blockers: [],
+    })
+  },
+)
+
+test.each([
+  { name: "missing role", item: {} },
+  { name: "unknown role", item: { role: "future_private_role" } },
+  { name: "numeric role", item: { role: 7 } },
+])("rejects malformed implicit Responses message with $name", ({ item }) => {
+  const payload = { model: "chat-only", input: [item] } as ResponsesPayload
+
+  expect(checkResponsesToChatTranslation(payload)).toEqual({
+    supported: false,
+    blockers: ["input_item"],
+  })
+  expect(checkResponsesToMessagesTranslation(payload)).toEqual({
+    supported: false,
+    blockers: ["input_item"],
+  })
+})
+
+test("rejects unknown typed Chat content and tools before Messages conversion", () => {
+  const contentPayload = {
+    model: "claude-current",
+    messages: [
+      {
+        role: "user" as const,
+        content: [{ type: "future_private_content", secret: "do-not-log" }],
+      },
+    ],
+  }
+  expect(checkChatToMessagesTranslation(contentPayload as never)).toEqual({
+    supported: false,
+    blockers: ["message_content_part"],
+  })
+
+  const toolPayload = {
+    model: "claude-current",
+    messages: [{ role: "user" as const, content: "hello" }],
+    tools: [{ type: "future_private_tool", secret: "do-not-log" }],
+  }
+  expect(checkChatToMessagesTranslation(toolPayload as never)).toEqual({
+    supported: false,
+    blockers: ["tool_semantics"],
+  })
 })
 
 test("blocks accepted Responses client_metadata on both translation targets", () => {

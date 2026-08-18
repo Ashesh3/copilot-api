@@ -124,6 +124,10 @@ function scanChatToMessagesContent(
         addBlocker(blockers, "message_content_part")
         continue
       }
+      if (!isSupportedMessagesContentPart(part, message.role)) {
+        addBlocker(blockers, "message_content_part")
+        continue
+      }
       if (
         (message.role === "assistant"
           || message.role === "system"
@@ -138,6 +142,22 @@ function scanChatToMessagesContent(
       }
     }
   }
+}
+
+function isSupportedMessagesContentPart(
+  part: Record<string, unknown>,
+  role: Message["role"],
+): boolean {
+  if (part.type === "text") return typeof part.text === "string"
+  if (role !== "user" && role !== "tool") return false
+  if (part.type === "image_url") {
+    return (
+      isRecord(part.image_url)
+      && typeof part.image_url.url === "string"
+      && part.image_url.url.trim().length > 0
+    )
+  }
+  return part.type === "file" || part.type === "document"
 }
 
 function isLosslessMessagesDocument(part: Record<string, unknown>): boolean {
@@ -365,14 +385,19 @@ function scanChatToolsForMessages(
       continue
     }
     const type = getType(tool)
-    if (
-      type
-      && (HOSTED_RESPONSES_TOOLS.has(type) || type.startsWith("web_search_"))
-    ) {
-      addBlocker(
-        blockers,
-        `hosted_tool:${type.startsWith("web_search") ? "web_search" : type}`,
-      )
+    if (type !== "function") {
+      if (
+        type
+        && (HOSTED_RESPONSES_TOOLS.has(type) || type.startsWith("web_search_"))
+      ) {
+        addBlocker(
+          blockers,
+          `hosted_tool:${type.startsWith("web_search") ? "web_search" : type}`,
+        )
+      } else {
+        addBlocker(blockers, "tool_semantics")
+      }
+      continue
     }
   }
 }

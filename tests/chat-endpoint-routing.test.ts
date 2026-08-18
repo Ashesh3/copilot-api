@@ -250,6 +250,49 @@ test("rejects a Messages-only custom grammar without upstream dispatch", async (
   })
 })
 
+test.each([
+  {
+    name: "unknown typed content",
+    body: {
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "future_private_content", secret: "do-not-log" }],
+        },
+      ],
+    },
+    param: "message_content_part",
+  },
+  {
+    name: "unknown typed tool",
+    body: {
+      messages: [{ role: "user", content: "hello" }],
+      tools: [{ type: "future_private_tool", secret: "do-not-log" }],
+    },
+    param: "tool_semantics",
+  },
+])(
+  "rejects Messages-only $name without upstream dispatch",
+  async ({ body, param }) => {
+    installModel({
+      id: "route-model",
+      supported_endpoints: ["/v1/messages"],
+    })
+
+    const response = await server.request("/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "route-model", stream: false, ...body }),
+    })
+
+    expect(response.status).toBe(400)
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(await response.json()).toMatchObject({
+      error: { code: "endpoint_translation_unsupported", param },
+    })
+  },
+)
+
 test("routes file_id through Responses instead of losing it on Messages", async () => {
   installModel({
     id: "route-model",

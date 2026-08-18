@@ -1,6 +1,8 @@
 import type { TranslationCheck } from "~/lib/endpoint-routing"
 import type { ResponsesPayload } from "~/services/copilot/create-responses"
 
+import { isPdfMediaType, parseDataUri } from "~/lib/attachments"
+
 const CHAT_UNSUPPORTED_TOOL_SEMANTICS = new Set([
   "custom",
   "custom_tool_call",
@@ -182,8 +184,15 @@ function scanInputFile(
     typeof content.file_data === "string" && content.file_data.length > 0
   const hasFileId =
     typeof content.file_id === "string" && content.file_id.length > 0
+  if (hasFileId) addBlocker(blockers, "input_file:file_id")
   if (!hasFileData && !hasFileId && content.file_url === undefined) {
     addBlocker(blockers, "input_file")
+  }
+  if (hasFileData) {
+    const parsed = parseDataUri(content.file_data as string)
+    if (!parsed || !isPdfMediaType(parsed.mediaType)) {
+      addBlocker(blockers, "input_file")
+    }
   }
   if (content.file_url !== undefined) addBlocker(blockers, "file_url")
 }
@@ -200,6 +209,7 @@ const SUPPORTED_INPUT_ITEMS = new Set([
   "programmatic_tool_call_output",
   "reasoning",
 ])
+const MESSAGE_ROLES = new Set(["user", "assistant", "system", "developer"])
 
 function scanResponsesInput(
   input: ResponsesPayload["input"],
@@ -227,6 +237,16 @@ function addInputItemBlockers(options: {
   const { blockers, item, toolBlockers, type } = options
   if (type === "reasoning") addBlocker(blockers, "opaque_reasoning")
   if (type === "item_reference") addBlocker(blockers, "item_reference")
+  if (type === "function_call" && !isLosslessFunctionCall(item)) {
+    addBlocker(blockers, "function_call")
+  }
+  if (
+    type === "function_call_output"
+    && (typeof item.call_id !== "string" || item.call_id.length === 0)
+  ) {
+    addBlocker(blockers, "tool_result_pairing")
+  }
+  if (!isSupportedItemStatus(item.status)) addBlocker(blockers, "item_status")
   addKnownInputToolBlocker(blockers, type, toolBlockers)
 
   if (
@@ -240,6 +260,25 @@ function addInputItemBlockers(options: {
   if (!isKnownInputItem(item, type)) addBlocker(blockers, "input_item")
 }
 
+function isSupportedItemStatus(status: unknown): boolean {
+  return (
+    status === undefined
+    || status === "in_progress"
+    || status === "completed"
+    || status === "incomplete"
+  )
+}
+
+function isLosslessFunctionCall(item: Record<string, unknown>): boolean {
+  return (
+    typeof item.call_id === "string"
+    && item.call_id.length > 0
+    && typeof item.name === "string"
+    && item.name.length > 0
+    && typeof item.arguments === "string"
+  )
+}
+
 function isKnownInputItem(
   item: Record<string, unknown>,
   type: string | undefined,
@@ -247,7 +286,7 @@ function isKnownInputItem(
   const isImplicitMessage =
     type === undefined
     && typeof item.role === "string"
-    && item.content !== undefined
+    && MESSAGE_ROLES.has(item.role)
   return isImplicitMessage || Boolean(type && SUPPORTED_INPUT_ITEMS.has(type))
 }
 
@@ -271,7 +310,17 @@ function scanItemContent(
     addBlocker(blockers, "content_type")
     return
   }
-  for (const part of content) scanInputContent(part, blockers)
+  for (const part of content) {
+    if (
+      field === "content"
+      && isRecord(part)
+      && (part.type === "input_image" || part.type === "input_file")
+      && item.role !== "user"
+    ) {
+      addBlocker(blockers, "message_content_role")
+    }
+    scanInputContent(part, blockers)
+  }
 }
 
 function addKnownInputToolBlocker(
@@ -329,6 +378,14 @@ export function checkResponsesToChatTranslation(
   scanTools(payload.tools, (_tool, type) => {
     if (type && CHAT_UNSUPPORTED_TOOL_SEMANTICS.has(type)) {
       addBlocker(blockers, `tool_semantics:${type}`)
+      return
+    }
+    if (type !== "function") {
+      addBlocker(blockers, "tool_semantics")
+      return
+    }
+    if (!isLosslessFunctionTool(_tool)) {
+      addBlocker(blockers, "function_tool")
     }
   })
   if (hasStrictFunctionTool(payload)) {
@@ -370,6 +427,14 @@ export function checkResponsesToMessagesTranslation(
         blockers,
         `hosted_tool:${type.startsWith("web_search") ? "web_search" : type}`,
       )
+      return
+    }
+    if (type !== "function") {
+      addBlocker(blockers, "tool_semantics")
+      return
+    }
+    if (!isLosslessFunctionTool(tool)) {
+      addBlocker(blockers, "function_tool")
     }
   })
   if (hasStrictFunctionTool(payload)) {
@@ -384,4 +449,15 @@ export function checkResponsesToMessagesTranslation(
   }
   if (!isSupportedTextFormat(payload)) addBlocker(blockers, "text_format")
   return createCheck(blockers)
+}
+
+function isLosslessFunctionTool(tool: Record<string, unknown>): boolean {
+  return (
+    typeof tool.name === "string"
+    && tool.name.length > 0
+    && (tool.description === undefined
+      || tool.description === null
+      || typeof tool.description === "string")
+    && isRecord(tool.parameters)
+  )
 }

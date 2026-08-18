@@ -4,28 +4,17 @@ import * as Sentry from "@sentry/bun"
 import { streamSSE } from "hono/streaming"
 
 import type {
-  AnthropicDocumentBlock,
-  AnthropicImageBlock,
   AnthropicMessage,
   AnthropicMessagesPayload,
   AnthropicResponse,
   AnthropicStreamEventData,
   AnthropicTextBlock,
-  AnthropicTool,
   AnthropicToolResultBlock,
   AnthropicUserContentBlock,
 } from "~/routes/messages/anthropic-types"
 import type { Model } from "~/services/copilot/get-models"
 
 import { getLastUsedAccountId } from "~/lib/account-router"
-import {
-  attachmentOmittedNote,
-  fetchUrlAsDataUri,
-  isHttpUrl,
-  isImageMediaType,
-  isPdfMediaType,
-  parseDataUri,
-} from "~/lib/attachments"
 import { assertEndpointTranslationSupported, isAbortError } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
 import { setRequestContext } from "~/lib/request-logger"
@@ -48,6 +37,10 @@ import {
   type ToolCall,
 } from "~/services/copilot/create-chat-completions"
 
+import {
+  convertOpenAIContentPartToAnthropic,
+  convertOpenAIToolsToAnthropic,
+} from "./anthropic-conversion"
 import {
   applyParallelToolChoice,
   convertChatReasoningOptions,
@@ -300,7 +293,7 @@ export async function chatPayloadToAnthropic(
     ...convertSamplingOptions(normalized),
     ...(normalized.stream ? { stream: true } : {}),
     ...(normalized.user ? { metadata: { user_id: normalized.user } } : {}),
-    ...convertTools(normalized.tools),
+    ...convertOpenAIToolsToAnthropic(normalized.tools),
     ...parallelChoice,
     ...convertChatReasoningOptions(normalized),
   }
@@ -414,7 +407,7 @@ async function convertUserContent(
 
   const blocks: Array<AnthropicUserContentBlock> = []
   for (const part of content) {
-    blocks.push(...(await convertContentPart(part, signal)))
+    blocks.push(...(await convertOpenAIContentPartToAnthropic(part, signal)))
   }
   return blocks
 }
@@ -427,103 +420,16 @@ async function convertToolResultContent(
   if (!Array.isArray(content)) return ""
 
   const blocks: Array<
-    AnthropicTextBlock | AnthropicImageBlock | AnthropicDocumentBlock
+    Exclude<AnthropicUserContentBlock, AnthropicToolResultBlock>
   > = []
   for (const part of content) {
     blocks.push(
-      ...((await convertContentPart(part, signal)) as Array<
-        AnthropicTextBlock | AnthropicImageBlock | AnthropicDocumentBlock
+      ...((await convertOpenAIContentPartToAnthropic(part, signal)) as Array<
+        Exclude<AnthropicUserContentBlock, AnthropicToolResultBlock>
       >),
     )
   }
   return blocks
-}
-
-async function convertContentPart(
-  part: ContentPart | AnthropicDocumentBlock,
-  signal?: AbortSignal,
-): Promise<Array<AnthropicUserContentBlock>> {
-  switch (part.type) {
-    case "text": {
-      return [{ type: "text", text: part.text }]
-    }
-    case "image_url": {
-      return [await convertImagePart(part.image_url.url, signal)]
-    }
-    case "file": {
-      return [convertFilePart(part)]
-    }
-    case "document": {
-      return [part]
-    }
-    default: {
-      return []
-    }
-  }
-}
-
-async function convertImagePart(
-  url: string,
-  signal?: AbortSignal,
-): Promise<AnthropicImageBlock | AnthropicTextBlock> {
-  let parsed = parseDataUri(url)
-  if (!parsed && isHttpUrl(url)) {
-    parsed = await fetchUrlAsDataUri(url, { signal })
-  }
-
-  if (parsed && isImageMediaType(parsed.mediaType)) {
-    return {
-      type: "image",
-      source: {
-        type: "base64",
-        media_type: parsed.mediaType as
-          | "image/jpeg"
-          | "image/png"
-          | "image/gif"
-          | "image/webp",
-        data: parsed.data,
-      },
-    }
-  }
-
-  return {
-    type: "text",
-    text: attachmentOmittedNote({
-      kind: "image",
-      name: url,
-      reason: "the image could not be decoded or fetched by the proxy",
-    }),
-  }
-}
-
-function convertFilePart(
-  part: ContentPart & { type: "file" },
-): AnthropicDocumentBlock | AnthropicTextBlock {
-  const parsed = part.file.file_data ? parseDataUri(part.file.file_data) : null
-
-  if (parsed && isPdfMediaType(parsed.mediaType)) {
-    return {
-      type: "document",
-      source: {
-        type: "base64",
-        media_type: "application/pdf",
-        data: parsed.data,
-      },
-      ...(part.file.filename ? { title: part.file.filename } : {}),
-    }
-  }
-
-  return {
-    type: "text",
-    text: attachmentOmittedNote({
-      kind: "file",
-      name: part.file.filename,
-      reason:
-        part.file.file_id ?
-          "file_id references are not supported by this proxy; send file_data as a base64 data URI"
-        : "file_data must be a base64 data URI (e.g. data:application/pdf;base64,...)",
-    }),
-  }
 }
 
 function safeParseArguments(rawArguments: string): Record<string, unknown> {
@@ -536,20 +442,6 @@ function safeParseArguments(rawArguments: string): Record<string, unknown> {
     /* fall through */
   }
   return rawArguments.trim().length > 0 ? { raw_arguments: rawArguments } : {}
-}
-
-function convertTools(
-  tools: ChatCompletionsPayload["tools"],
-): Pick<AnthropicMessagesPayload, "tools"> {
-  if (!tools || tools.length === 0) return {}
-  const converted: Array<AnthropicTool> = tools.map((tool) => ({
-    name: tool.function.name,
-    ...(tool.function.description ?
-      { description: tool.function.description }
-    : {}),
-    input_schema: tool.function.parameters,
-  }))
-  return { tools: converted }
 }
 
 function convertToolChoice(

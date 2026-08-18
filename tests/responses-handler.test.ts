@@ -151,6 +151,35 @@ test("maps Responses parallel tools reasoning and user controls to Chat", () => 
   expect(result.user).toBe("user-safe")
 })
 
+test("rejects malformed function calls before Chat fallback conversion", () => {
+  expect(() =>
+    responsesToChatCompletions({
+      model: "chat-only",
+      input: [{ type: "function_call", call_id: "call_1", name: "lookup" }],
+    } as ResponsesPayload),
+  ).toThrow(LocalHTTPError)
+})
+
+test("rejects unknown and malformed tools before Chat fallback conversion", () => {
+  for (const tool of [
+    { type: "future_private_tool", secret: "private" },
+    {
+      type: "function",
+      name: "lookup",
+      parameters: "private-schema",
+      strict: false,
+    },
+  ]) {
+    expect(() =>
+      responsesToChatCompletions({
+        model: "chat-only",
+        input: "hello",
+        tools: [tool],
+      } as ResponsesPayload),
+    ).toThrow(LocalHTTPError)
+  }
+})
+
 test("compaction fallback still rejects unrelated lossy Responses state", () => {
   expect(() =>
     assertResponsesChatFallbackTranslation(
