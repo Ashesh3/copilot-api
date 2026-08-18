@@ -251,3 +251,44 @@ test("deduplicates failure blockers in first-seen order", () => {
     source: "responses",
   })
 })
+
+test("ignores blockers from endpoint candidates the model does not advertise", () => {
+  const result = selectCopilotEndpoint({
+    source: "chat",
+    support: getModelEndpointSupport({
+      supported_endpoints: ["/responses"],
+    }),
+    candidates: [
+      {
+        endpoint: "/v1/messages",
+        reason: "endpoint_unavailable",
+        check: {
+          supported: false,
+          blockers: ["custom_tool_grammar"],
+        },
+      },
+      {
+        endpoint: "/responses",
+        reason: "endpoint_unavailable",
+        check: {
+          supported: false,
+          blockers: ["thinking_budget", "thinking_budget"],
+        },
+      },
+      {
+        endpoint: "/chat/completions",
+        reason: "endpoint_unavailable",
+        check: {
+          supported: false,
+          blockers: ["message_content_part"],
+        },
+      },
+    ],
+  })
+
+  expect(result).toEqual({
+    blockers: ["thinking_budget"],
+    code: "endpoint_translation_unsupported",
+    source: "chat",
+  })
+})

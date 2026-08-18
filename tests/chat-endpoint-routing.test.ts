@@ -19,10 +19,15 @@ import { server } from "~/server"
 
 const originalFetch = globalThis.fetch
 let lastUpstreamPath: string | undefined
+let lastUpstreamPayload: Record<string, unknown> | undefined
 
 const fetchMock = mock((url: string | URL | Request, init?: RequestInit) => {
   const rawUrl = typeof url === "string" || url instanceof URL ? url : url.url
   lastUpstreamPath = new URL(rawUrl).pathname
+  lastUpstreamPayload =
+    typeof init?.body === "string" ?
+      (JSON.parse(init.body) as Record<string, unknown>)
+    : undefined
 
   if (lastUpstreamPath === "/responses") {
     return Response.json({
@@ -105,6 +110,7 @@ afterAll(() => {
 beforeEach(() => {
   fetchMock.mockClear()
   lastUpstreamPath = undefined
+  lastUpstreamPayload = undefined
   state.accountType = "individual"
   state.copilotToken = "copilot-token"
   state.githubToken = "github-token"
@@ -116,9 +122,11 @@ beforeEach(() => {
 
 interface RouteCase {
   customGrammar?: boolean
+  document?: boolean
   encryptedReasoning?: boolean
   endpoints: Array<string>
   expected: string
+  fileId?: boolean
   name: string
   pdf?: boolean
   signedReasoning?: boolean
@@ -188,9 +196,11 @@ test.each(routeCases)(
   "$name",
   async ({
     customGrammar,
+    document,
     encryptedReasoning,
     endpoints,
     expected,
+    fileId,
     pdf,
     signedReasoning,
     thinkingBudget,
@@ -203,7 +213,9 @@ test.each(routeCases)(
 
     const response = await postChatRoute({
       customGrammar,
+      document,
       encryptedReasoning,
+      fileId,
       pdf,
       signedReasoning,
       thinkingBudget,
@@ -233,6 +245,95 @@ test("rejects a Messages-only custom grammar without upstream dispatch", async (
       param: "custom_tool_grammar",
       type: "invalid_request_error",
     },
+  })
+})
+
+test("routes file_id through Responses instead of losing it on Messages", async () => {
+  installModel({
+    id: "route-model",
+    supported_endpoints: ["/v1/messages", "/responses"],
+  })
+
+  const response = await postChatRoute({ fileId: true })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/responses")
+  expect(lastUpstreamPayload).toHaveProperty(
+    "input.0.content.1.file_id",
+    "file_review_1",
+  )
+})
+
+test("rejects custom tools on a Chat-only model before upstream dispatch", async () => {
+  installModel({
+    id: "route-model",
+    supported_endpoints: ["/chat/completions"],
+  })
+
+  const response = await postChatRoute({ customGrammar: true })
+
+  expect(response.status).toBe(400)
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
+test("rejects file sources on a Chat-only model before upstream dispatch", async () => {
+  installModel({
+    id: "route-model",
+    supported_endpoints: ["/chat/completions"],
+  })
+
+  const response = await postChatRoute({ fileId: true })
+
+  expect(response.status).toBe(400)
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
+test("rejects document content on a Chat-only model before upstream dispatch", async () => {
+  installModel({
+    id: "route-model",
+    supported_endpoints: ["/chat/completions"],
+  })
+
+  const response = await postChatRoute({ document: true })
+
+  expect(response.status).toBe(400)
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
+test("prefers Responses for non-Anthropic models when Chat is unavailable", async () => {
+  installModel({
+    id: "claude-looking-openai-model",
+    vendor: "openai",
+    family: "gpt",
+    supported_endpoints: ["/v1/messages", "/responses"],
+  })
+
+  const response = await postChatRoute({ model: "claude-looking-openai-model" })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/responses")
+})
+
+test("reports only the advertised Responses blocker", () => {
+  const decision = selectChatUpstreamEndpoint({
+    payload: {
+      model: "route-model",
+      messages: [{ role: "user", content: "hello" }],
+      thinking_budget: 1024,
+      tools: [
+        { type: "custom", format: { type: "grammar", syntax: "lark" } },
+      ] as never,
+    },
+    selectedModel: createModel({
+      id: "route-model",
+      supported_endpoints: ["/responses"],
+    }),
+  })
+
+  expect(decision).toEqual({
+    blockers: ["thinking_budget"],
+    code: "endpoint_translation_unsupported",
+    source: "chat",
   })
 })
 
@@ -336,8 +437,10 @@ test("selects the remaining lossless advertised translation", () => {
 })
 
 function installModel(options: {
+  family?: string
   id: string
   supported_endpoints?: Array<string>
+  vendor?: string
 }): void {
   state.models = {
     object: "list",
@@ -346,22 +449,24 @@ function installModel(options: {
 }
 
 function createModel(options: {
+  family?: string
   id: string
   supported_endpoints?: Array<string>
+  vendor?: string
 }): Model {
   return {
     id: options.id,
     name: options.id,
     object: "model",
     preview: false,
-    vendor: "anthropic",
+    vendor: options.vendor ?? "anthropic",
     version: "1",
     model_picker_enabled: true,
     ...(options.supported_endpoints ?
       { supported_endpoints: options.supported_endpoints }
     : {}),
     capabilities: {
-      family: "claude",
+      family: options.family ?? "claude",
       limits: { max_output_tokens: 1024 },
       object: "model_capabilities",
       supports: {},
@@ -373,25 +478,42 @@ function createModel(options: {
 
 async function postChatRoute(options: {
   customGrammar?: boolean
+  document?: boolean
   encryptedReasoning?: boolean
+  fileId?: boolean
+  model?: string
   pdf?: boolean
   signedReasoning?: boolean
   thinkingBudget?: boolean
   webSearch?: boolean
 }): Promise<Response> {
-  const content =
-    options.pdf ?
-      [
-        { type: "text", text: "Read the PDF." },
-        {
-          type: "file",
-          file: {
-            filename: "brief.pdf",
-            file_data: "data:application/pdf;base64,AA==",
-          },
+  let content: unknown = "hello"
+  if (options.pdf || options.fileId) {
+    content = [
+      { type: "text", text: "Read the PDF." },
+      {
+        type: "file",
+        file: {
+          filename: "brief.pdf",
+          ...(options.fileId ?
+            { file_id: "file_review_1" }
+          : { file_data: "data:application/pdf;base64,AA==" }),
         },
-      ]
-    : "hello"
+      },
+    ]
+  } else if (options.document) {
+    content = [
+      { type: "text", text: "Read the document." },
+      {
+        type: "document",
+        source: {
+          type: "base64",
+          media_type: "application/pdf",
+          data: "AA==",
+        },
+      },
+    ]
+  }
   let tools: Array<Record<string, unknown>> | undefined
   if (options.customGrammar) {
     tools = [{ type: "custom", format: { type: "grammar", syntax: "lark" } }]
@@ -428,7 +550,7 @@ async function postChatRoute(options: {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      model: "route-model",
+      model: options.model ?? "route-model",
       messages,
       ...(tools ? { tools } : {}),
       ...(options.thinkingBudget ? { thinking_budget: 1024 } : {}),

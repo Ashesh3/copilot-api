@@ -4,6 +4,8 @@ import type {
   Message,
 } from "~/services/copilot/create-chat-completions"
 
+import { isPdfMediaType, parseDataUri } from "~/lib/attachments"
+
 import { normalizeChatCompletionsRequest } from "./chat-contract"
 
 const RESPONSES_CONTENT_PARTS = new Set(["file", "image_url", "text"])
@@ -117,15 +119,103 @@ function scanChatToMessagesContent(
 ): void {
   for (const message of messages) {
     if (!Array.isArray(message.content)) continue
-    if (
-      (message.role === "assistant"
-        || message.role === "system"
-        || message.role === "developer")
-      && message.content.some((part) => part.type !== "text")
-    ) {
-      addBlocker(blockers, "message_content_part")
+    for (const part of message.content) {
+      if (
+        (message.role === "assistant"
+          || message.role === "system"
+          || message.role === "developer")
+        && part.type !== "text"
+      ) {
+        addBlocker(blockers, "message_content_part")
+      }
+      if (part.type === "file") scanMessagesFileSource(part.file, blockers)
     }
   }
+}
+
+function scanMessagesFileSource(file: unknown, blockers: Array<string>): void {
+  if (!isRecord(file)) {
+    addBlocker(blockers, "file_source:file_data")
+    return
+  }
+  if (file.file_id !== undefined) {
+    addBlocker(blockers, "file_source:file_id")
+    return
+  }
+  const parsed =
+    typeof file.file_data === "string" ? parseDataUri(file.file_data) : null
+  if (!parsed || !isPdfMediaType(parsed.mediaType)) {
+    addBlocker(blockers, "file_source:file_data")
+  }
+}
+
+function scanChatNativeContent(
+  messages: ChatCompletionsPayload["messages"],
+  blockers: Array<string>,
+): void {
+  for (const message of messages) {
+    if (Array.isArray(message.content)) {
+      for (const part of message.content as Array<unknown>) {
+        const type = getType(part)
+        if (type && type !== "text" && type !== "image_url") {
+          addBlocker(blockers, `message_content_part:${type}`)
+        }
+      }
+    }
+    if (
+      message.role === "assistant"
+      && ((message.reasoning_text !== undefined
+        && message.reasoning_text !== null)
+        || (message.reasoning_opaque !== undefined
+          && message.reasoning_opaque !== null)
+        || (message.encrypted_content !== undefined
+          && message.encrypted_content !== null))
+    ) {
+      addBlocker(blockers, "reasoning_state")
+    }
+  }
+}
+
+function scanChatNativeTools(
+  tools: ChatCompletionsPayload["tools"],
+  blockers: Array<string>,
+): void {
+  if (!Array.isArray(tools)) return
+  for (const tool of tools as Array<unknown>) {
+    const type = getType(tool)
+    if (type === "function") continue
+    if (type === "custom") {
+      addBlocker(blockers, "native_tool:custom")
+    } else if (type && type.startsWith("web_search")) {
+      addBlocker(blockers, "native_tool:web_search")
+    } else {
+      addBlocker(blockers, "native_tool")
+    }
+  }
+}
+
+export function checkNormalizedChatNativeRequirements(
+  payload: ChatCompletionsPayload,
+): TranslationCheck {
+  const blockers: Array<string> = []
+  scanChatNativeContent(payload.messages, blockers)
+  scanChatNativeTools(payload.tools, blockers)
+  addPresentBlocker(blockers, "thinking_budget", payload.thinking_budget)
+  if (
+    payload.tool_choice
+    && typeof payload.tool_choice === "object"
+    && !("function" in payload.tool_choice)
+  ) {
+    addBlocker(blockers, "tool_choice")
+  }
+  return createCheck(blockers)
+}
+
+export function checkChatNativeRequirements(
+  payload: ChatCompletionsPayload,
+): TranslationCheck {
+  const normalized = normalizeChatCompletionsRequest(payload)
+  return checkNormalizedChatNativeRequirements(normalized)
 }
 
 function scanCommonUnmappedControls(

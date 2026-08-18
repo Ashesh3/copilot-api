@@ -10,6 +10,7 @@ import {
 } from "~/routes/chat-completions/anthropic-bridge"
 import { chatCompletionsToResponses } from "~/routes/chat-completions/responses-fallback"
 import {
+  checkChatNativeRequirements,
   checkChatToMessagesTranslation,
   checkChatToResponsesTranslation,
 } from "~/routes/chat-completions/translation-fidelity"
@@ -254,6 +255,142 @@ test("rejects Chat to Messages when an OpenAI-only custom tool cannot map", () =
   ).toEqual({
     supported: false,
     blockers: ["custom_tool_grammar"],
+  })
+})
+
+test("rejects Chat file_id sources before the Messages converter can replace them", async () => {
+  const payload = {
+    model: "claude-current",
+    messages: [
+      {
+        role: "user" as const,
+        content: [
+          { type: "text" as const, text: "Read this file." },
+          {
+            type: "file" as const,
+            file: { filename: "review.pdf", file_id: "file_review_1" },
+          },
+        ],
+      },
+    ],
+  }
+
+  expect(checkChatToMessagesTranslation(payload)).toEqual({
+    supported: false,
+    blockers: ["file_source:file_id"],
+  })
+  let thrown: unknown
+  try {
+    await chatPayloadToAnthropic(payload)
+  } catch (error) {
+    thrown = error
+  }
+  expect(thrown).toBeInstanceOf(LocalHTTPError)
+})
+
+test.each([
+  { name: "missing file data", file: { filename: "missing.pdf" } },
+  {
+    name: "malformed file data",
+    file: { filename: "malformed.pdf", file_data: "not-a-data-uri" },
+  },
+  {
+    name: "non-PDF file data",
+    file: {
+      filename: "image.png",
+      file_data: "data:image/png;base64,AA==",
+    },
+  },
+])("rejects $name on the Messages bridge", ({ file }) => {
+  expect(
+    checkChatToMessagesTranslation({
+      model: "claude-current",
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "file", file }],
+        },
+      ],
+    }),
+  ).toEqual({
+    supported: false,
+    blockers: ["file_source:file_data"],
+  })
+})
+
+test.each([
+  { name: "missing file object", part: { type: "file" } },
+  { name: "primitive file object", part: { type: "file", file: "private" } },
+])("rejects $name on the Messages bridge", ({ part }) => {
+  expect(
+    checkChatToMessagesTranslation({
+      model: "claude-current",
+      messages: [{ role: "user", content: [part] }],
+    } as never),
+  ).toEqual({
+    supported: false,
+    blockers: ["file_source:file_data"],
+  })
+})
+
+test("allows only payload concepts the native Chat endpoint preserves", () => {
+  expect(
+    checkChatNativeRequirements({
+      model: "chat-current",
+      messages: [{ role: "user", content: "hello" }],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "lookup",
+            parameters: { type: "object", properties: {} },
+          },
+        },
+      ],
+    }),
+  ).toEqual({ supported: true, blockers: [] })
+
+  expect(
+    checkChatNativeRequirements({
+      model: "chat-current",
+      messages: [
+        {
+          role: "assistant",
+          content: "answer",
+          reasoning_text: null,
+          reasoning_opaque: null,
+          encrypted_content: null,
+        },
+      ],
+    }),
+  ).toEqual({ supported: true, blockers: [] })
+
+  expect(
+    checkChatNativeRequirements({
+      model: "chat-current",
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "file",
+              file: { filename: "review.pdf", file_id: "file_review_1" },
+            },
+          ],
+        },
+      ],
+      tools: [
+        { type: "custom", format: { type: "grammar", syntax: "lark" } },
+        { type: "web_search" },
+      ] as never,
+    }),
+  ).toEqual({
+    supported: false,
+    blockers: [
+      "message_content_part:file",
+      "native_tool:custom",
+      "native_tool:web_search",
+    ],
   })
 })
 

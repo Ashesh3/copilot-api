@@ -58,6 +58,7 @@ import {
   streamResponsesAsChatCompletions,
 } from "./responses-fallback"
 import {
+  checkChatNativeRequirements,
   checkChatToMessagesTranslation,
   checkChatToResponsesTranslation,
 } from "./translation-fidelity"
@@ -90,21 +91,27 @@ export function selectChatUpstreamEndpoint(options: {
 }): EndpointRouteDecision | EndpointRouteFailure {
   const { payload, selectedModel } = options
   const support = getModelEndpointSupport(selectedModel)
+  const chatCheck = checkChatNativeRequirements(payload)
   const messagesCheck = checkChatToMessagesTranslation(payload)
   const responsesCheck = checkChatToResponsesTranslation(payload)
   const hasFileParts = payloadHasFileParts(payload)
+  const messagesPreserveFiles = !messagesCheck.blockers.some((blocker) =>
+    blocker.startsWith("file_source:"),
+  )
+  const anthropicModel = modelIsAnthropic(selectedModel)
   const prefersMessages =
-    hasFileParts
+    (hasFileParts && messagesPreserveFiles)
     || payloadHasAnthropicSignedReasoning(payload)
     || (payload.thinking_budget !== undefined
       && payload.thinking_budget !== null)
   const prefersResponses =
     payloadHasResponsesNativeTool(payload)
     || payloadHasOpenAiReasoningState(payload)
+    || (hasFileParts && !messagesPreserveFiles)
   const chatCandidate = {
     endpoint: "/chat/completions" as const,
     reason: "endpoint_unavailable" as const,
-    check: { supported: true, blockers: [] },
+    check: chatCheck,
   }
   const payloadRequirementReason = "payload_requirement" as const
   const messagesCandidate = {
@@ -124,18 +131,29 @@ export function selectChatUpstreamEndpoint(options: {
     check: responsesCheck,
   }
 
-  let candidates = [chatCandidate, messagesCandidate, responsesCandidate]
-  if (prefersMessages) {
-    candidates = [
-      messagesCandidate,
-      responsesCandidate,
-      ...(hasFileParts ? [] : [chatCandidate]),
-    ]
-  } else if (prefersResponses) {
+  let candidates =
+    anthropicModel ?
+      [chatCandidate, messagesCandidate, responsesCandidate]
+    : [chatCandidate, responsesCandidate, messagesCandidate]
+  if (prefersMessages && anthropicModel) {
+    candidates = [messagesCandidate, responsesCandidate, chatCandidate]
+  } else if (prefersResponses || prefersMessages) {
     candidates = [responsesCandidate, messagesCandidate, chatCandidate]
   }
 
   return selectCopilotEndpoint({ source: "chat", support, candidates })
+}
+
+function modelIsAnthropic(selectedModel: Model | undefined): boolean {
+  const vendor =
+    typeof selectedModel?.vendor === "string" ?
+      selectedModel.vendor.trim().toLowerCase()
+    : ""
+  if (vendor) return vendor === "anthropic"
+
+  const family = selectedModel?.capabilities.family.trim().toLowerCase()
+  if (family) return family.startsWith("claude")
+  return selectedModel?.id.toLowerCase().startsWith("claude-") ?? false
 }
 
 export function recordChatEndpointFallback(

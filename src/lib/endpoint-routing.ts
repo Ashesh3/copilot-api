@@ -127,7 +127,11 @@ export function selectCopilotEndpoint(options: {
 
   const blockers = Array.from(
     new Set(
-      options.candidates.flatMap((candidate) => candidate.check.blockers),
+      options.candidates.flatMap((candidate) =>
+        endpointEnabled(options.support, candidate.endpoint) ?
+          candidate.check.blockers
+        : [],
+      ),
     ),
   )
   return {
