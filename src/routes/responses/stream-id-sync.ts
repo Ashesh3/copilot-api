@@ -34,10 +34,10 @@ export const fixStreamIds = (
   event: string | undefined,
   tracker: StreamIdTracker,
 ): string => {
-  if (!data) return data
   if (event !== undefined && isTerminalEventName(event)) {
     return sanitizeResponsesStreamEvent({ data, event }).data ?? data
   }
+  if (!data) return data
   const parsed = JSON.parse(data) as ResponseStreamEvent
   switch (event) {
     case "response.output_item.added": {

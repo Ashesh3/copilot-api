@@ -734,6 +734,44 @@ test.each([
   expect(body).not.toContain("[DONE]")
 })
 
+test.each([
+  { dataLine: "data:", eventType: "error" },
+  { dataLine: undefined, eventType: "response.failed" },
+  { dataLine: "data:", eventType: "response.incomplete" },
+  { dataLine: undefined, eventType: "response.completed" },
+])(
+  "canonicalizes HTTP $eventType with empty or missing data",
+  async ({ dataLine, eventType }) => {
+    installModel({ supported_endpoints: ["/responses"] })
+    fetchMock.mockImplementationOnce(() =>
+      createEmptyTerminalResponsesStream(eventType, dataLine),
+    )
+
+    const body = await (
+      await postResponses({ input: "hello", stream: true })
+    ).text()
+    const eventOrder = body
+      .split("\n")
+      .filter((line) => line.startsWith("event: "))
+      .map((line) => line.slice(7))
+    const terminal = body
+      .split("\n")
+      .filter((line) => line.startsWith("data: "))
+      .map((line) => JSON.parse(line.slice(6)) as { type?: string })
+      .at(-1)
+
+    expect(body).toContain("partial-output")
+    expect(eventOrder.at(-1)).toBe(
+      eventType === "response.completed" ? "response.failed" : eventType,
+    )
+    expect(terminal?.type).toBe(
+      eventType === "response.completed" ? "response.failed" : eventType,
+    )
+    expect(body).toContain("Upstream Responses stream failed.")
+    expect(body).not.toContain("[DONE]")
+  },
+)
+
 test("fails closed for HTTP response.completed without completed status", async () => {
   installModel({ supported_endpoints: ["/responses"] })
   fetchMock.mockImplementationOnce(() =>
@@ -864,6 +902,39 @@ test("fails closed for primitive terminal JSON after HTTP preflush", async () =>
   expect(rest).toContain("partial-output")
   expect(rest).toContain("Upstream Responses stream failed.")
   expect(rest).not.toContain("preflush-private-marker")
+  expect(rest).not.toContain("[DONE]")
+})
+
+test("canonicalizes an empty terminal after HTTP preflush", async () => {
+  installModel({ supported_endpoints: ["/responses"] })
+  delayNativeResponsesStream = true
+
+  const response = await postResponses({ input: "hello", stream: true })
+  const body = response.body
+  if (!body) throw new Error("Expected an SSE response body")
+  const reader = body.getReader()
+  const encoder = new TextEncoder()
+  delayedNativeResponsesController?.enqueue(
+    encoder.encode(
+      `event: response.output_text.delta\ndata: ${JSON.stringify({
+        type: "response.output_text.delta",
+        sequence_number: 1,
+        item_id: "msg_preflush",
+        output_index: 0,
+        content_index: 0,
+        delta: "partial-output",
+      })}\n\n`,
+    ),
+  )
+  delayedNativeResponsesController?.enqueue(
+    encoder.encode("event: response.failed\ndata:\n\n"),
+  )
+  delayedNativeResponsesController?.close()
+  const rest = await readRemaining(reader)
+
+  expect(rest).toContain("partial-output")
+  expect(rest).toContain("event: response.failed")
+  expect(rest).toContain("Upstream Responses stream failed.")
   expect(rest).not.toContain("[DONE]")
 })
 
@@ -1458,6 +1529,33 @@ function createRawTerminalResponsesStream(data: string): Response {
     `event: response.created\ndata: ${created}\n\n`
       + `event: response.output_text.delta\ndata: ${delta}\n\n`
       + `event: response.completed\ndata: ${data}\n\n`,
+    {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    },
+  )
+}
+
+function createEmptyTerminalResponsesStream(
+  eventType: string,
+  dataLine: string | undefined,
+): Response {
+  const delta = JSON.stringify({
+    type: "response.output_text.delta",
+    sequence_number: 1,
+    item_id: "msg_empty_terminal",
+    output_index: 0,
+    content_index: 0,
+    delta: "partial-output",
+  })
+  const terminal = [
+    `event: ${eventType}`,
+    ...(dataLine === undefined ? [] : [dataLine]),
+    "",
+    "",
+  ].join("\n")
+  return new Response(
+    `event: response.output_text.delta\ndata: ${delta}\n\n${terminal}`,
     {
       status: 200,
       headers: { "content-type": "text/event-stream" },

@@ -870,6 +870,34 @@ test("keeps inherited runtime error details exact in LLM Debug", () => {
   })
 })
 
+test.each([
+  { error: new Error(), name: "Error" },
+  { error: new TypeError(), name: "TypeError" },
+  { error: new DOMException("", "AbortError"), name: "AbortError" },
+])(
+  "keeps an exact empty inherited $name message in LLM Debug",
+  ({ error, name }) => {
+    expect(toLlmDebugLogError(error)).toMatchObject({ message: "", name })
+  },
+)
+
+test("uses fallback text for an unreadable Error message descriptor", () => {
+  let getterCalls = 0
+  const error = new Error()
+  Object.defineProperty(error, "message", {
+    get() {
+      getterCalls += 1
+      return "private-message"
+    },
+  })
+
+  expect(toLlmDebugLogError(error)).toMatchObject({
+    message: "Unknown thrown value",
+    name: "Error",
+  })
+  expect(getterCalls).toBe(0)
+})
+
 test("keeps nested DOMException codes exact in LLM Debug", () => {
   const wrapped = new Error("wrapped transport failure", {
     cause: new DOMException("nested abort", "AbortError"),

@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto"
 import {
   readDescriptorSnapshotValue,
   readNativeDomExceptionField,
+  readNativeErrorMessage,
   snapshotDescriptorChain,
   type DescriptorChainSnapshot,
 } from "./descriptor-chain"
@@ -348,10 +349,14 @@ function readDebugErrorString(
   snapshot: DescriptorChainSnapshot,
   key: string,
 ): string | undefined {
-  const nativeValue =
-    key === "message" || key === "name" ?
+  let nativeValue: unknown
+  if (key === "message") {
+    nativeValue =
       readNativeDomExceptionField(snapshot, key)
-    : undefined
+      ?? readNativeErrorMessage(snapshot)
+  } else if (key === "name") {
+    nativeValue = readNativeDomExceptionField(snapshot, key)
+  }
   const value = nativeValue ?? readDescriptorSnapshotValue(snapshot, key)
   return typeof value === "string" ? value : undefined
 }

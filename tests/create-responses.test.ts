@@ -75,24 +75,315 @@ test("sanitizes an unknown terminal shape through the direct event helper", () =
   expect(sanitized.data).not.toContain(privateMarker)
 })
 
-test("leaves a well-formed completed terminal event unchanged", () => {
+test("reconstructs a completed terminal event from an explicit allowlist", () => {
+  const privateMarker = "completed-allowlist-private-marker"
   const data = JSON.stringify({
+    type: "response.completed",
+    sequence_number: 3,
+    provider: privateMarker,
+    response: {
+      id: "resp_completed",
+      object: "response",
+      created_at: 1_700_000_000,
+      model: "gpt-public",
+      status: "completed",
+      output: [
+        {
+          id: "msg_completed",
+          type: "message",
+          role: "assistant",
+          status: "completed",
+          content: [
+            {
+              type: "output_text",
+              text: "done",
+              annotations: [
+                {
+                  type: "url_citation",
+                  start_index: 0,
+                  end_index: 4,
+                  title: "Public source",
+                  url: "https://example.com/source",
+                  private: privateMarker,
+                },
+              ],
+              provider: privateMarker,
+            },
+          ],
+          metadata: { private: privateMarker },
+        },
+        {
+          id: "rs_completed",
+          type: "reasoning",
+          status: "completed",
+          summary: [
+            {
+              type: "summary_text",
+              text: "Checked the public state.",
+              private: privateMarker,
+            },
+          ],
+          encrypted_content: "encrypted-client-state",
+          provider: privateMarker,
+        },
+        {
+          id: "fc_completed",
+          type: "function_call",
+          call_id: "call_completed",
+          name: "lookup",
+          arguments: '{"id":7}',
+          status: "completed",
+          private: privateMarker,
+        },
+        {
+          type: "private_future_item",
+          value: privateMarker,
+        },
+      ],
+      output_text: "done",
+      usage: {
+        input_tokens: 1,
+        output_tokens: 1,
+        total_tokens: 2,
+        input_tokens_details: {
+          cached_tokens: 1,
+          provider_cache_key: privateMarker,
+        },
+        output_tokens_details: {
+          reasoning_tokens: 1,
+          provider_reasoning: privateMarker,
+        },
+        provider_usage: privateMarker,
+      },
+      error: null,
+      incomplete_details: null,
+      metadata: { private: privateMarker },
+      prompt_cache_key: privateMarker,
+      safety_identifier: privateMarker,
+      provider: privateMarker,
+    },
+  })
+  const event = { event: "response.completed", data }
+
+  const sanitized = sanitizeResponsesStreamEvent(event)
+
+  expect(sanitized).not.toBe(event)
+  expect(sanitized.event).toBe("response.completed")
+  expect(JSON.parse(sanitized.data ?? "{}") as unknown).toEqual({
     type: "response.completed",
     sequence_number: 3,
     response: {
       id: "resp_completed",
       object: "response",
+      created_at: 1_700_000_000,
+      model: "gpt-public",
       status: "completed",
-      output: [],
+      output: [
+        {
+          id: "msg_completed",
+          type: "message",
+          role: "assistant",
+          status: "completed",
+          content: [
+            {
+              type: "output_text",
+              text: "done",
+              annotations: [
+                {
+                  type: "url_citation",
+                  start_index: 0,
+                  end_index: 4,
+                  title: "Public source",
+                  url: "https://example.com/source",
+                },
+              ],
+            },
+          ],
+        },
+        {
+          id: "rs_completed",
+          type: "reasoning",
+          status: "completed",
+          summary: [
+            {
+              type: "summary_text",
+              text: "Checked the public state.",
+            },
+          ],
+          encrypted_content: "encrypted-client-state",
+        },
+        {
+          id: "fc_completed",
+          type: "function_call",
+          call_id: "call_completed",
+          name: "lookup",
+          arguments: '{"id":7}',
+          status: "completed",
+        },
+      ],
       output_text: "done",
-      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      usage: {
+        input_tokens: 1,
+        output_tokens: 1,
+        total_tokens: 2,
+        input_tokens_details: { cached_tokens: 1 },
+        output_tokens_details: { reasoning_tokens: 1 },
+      },
       error: null,
       incomplete_details: null,
     },
   })
-  const event = { event: "response.completed", data }
+  expect(sanitized.data).not.toBe(data)
+  expect(sanitized.data).not.toContain(privateMarker)
+})
 
-  expect(sanitizeResponsesStreamEvent(event)).toEqual(event)
+test("preserves reviewed completed tool output families without private fields", () => {
+  const privateMarker = "completed-tool-private-marker"
+  const sanitized = sanitizeResponsesStreamEvent({
+    event: "response.completed",
+    data: JSON.stringify({
+      type: "response.completed",
+      sequence_number: 4,
+      response: {
+        id: "resp_tools",
+        object: "response",
+        status: "completed",
+        output: [
+          {
+            id: "computer_1",
+            call_id: "call_computer",
+            type: "computer_call",
+            status: "completed",
+            action: {
+              type: "click",
+              button: "left",
+              x: 12,
+              y: 34,
+              private: privateMarker,
+            },
+            pending_safety_checks: [{ message: privateMarker }],
+            private: privateMarker,
+          },
+          {
+            id: "custom_1",
+            call_id: "call_custom",
+            type: "custom_tool_call",
+            name: "shell",
+            input: "pwd",
+            status: "completed",
+            private: privateMarker,
+          },
+          {
+            id: "file_1",
+            type: "file_search_call",
+            status: "completed",
+            queries: ["incident", 7, "timeline"],
+            results: [
+              {
+                file_id: "file_a",
+                filename: "incident.txt",
+                score: 0.9,
+                text: "reviewed excerpt",
+                attributes: { private: privateMarker },
+                private: privateMarker,
+              },
+            ],
+            private: privateMarker,
+          },
+          {
+            id: "mcp_1",
+            call_id: "call_mcp",
+            type: "mcp_call",
+            name: "lookup",
+            arguments: '{"id":1}',
+            server_label: "inventory",
+            output: "found",
+            error: null,
+            status: "completed",
+            private: privateMarker,
+          },
+          {
+            id: "web_1",
+            type: "web_search_call",
+            status: "completed",
+            action: {
+              type: "search",
+              query: "current status",
+              private: privateMarker,
+            },
+            private: privateMarker,
+          },
+        ],
+        output_text: "",
+        usage: null,
+        error: null,
+        incomplete_details: null,
+      },
+    }),
+  })
+
+  expect(JSON.parse(sanitized.data ?? "{}") as unknown).toEqual({
+    type: "response.completed",
+    sequence_number: 4,
+    response: {
+      id: "resp_tools",
+      object: "response",
+      status: "completed",
+      output: [
+        {
+          id: "computer_1",
+          call_id: "call_computer",
+          type: "computer_call",
+          status: "completed",
+          action: { type: "click", button: "left", x: 12, y: 34 },
+        },
+        {
+          id: "custom_1",
+          call_id: "call_custom",
+          type: "custom_tool_call",
+          name: "shell",
+          input: "pwd",
+          status: "completed",
+        },
+        {
+          id: "file_1",
+          type: "file_search_call",
+          status: "completed",
+          queries: ["incident", "timeline"],
+          results: [
+            {
+              file_id: "file_a",
+              filename: "incident.txt",
+              score: 0.9,
+              text: "reviewed excerpt",
+            },
+          ],
+        },
+        {
+          id: "mcp_1",
+          call_id: "call_mcp",
+          type: "mcp_call",
+          name: "lookup",
+          arguments: '{"id":1}',
+          server_label: "inventory",
+          output: "found",
+          error: null,
+          status: "completed",
+        },
+        {
+          id: "web_1",
+          type: "web_search_call",
+          status: "completed",
+          action: { type: "search", query: "current status" },
+        },
+      ],
+      output_text: "",
+      usage: null,
+      error: null,
+      incomplete_details: null,
+    },
+  })
+  expect(sanitized.data).not.toContain(privateMarker)
 })
 
 test.each([
@@ -253,6 +544,177 @@ test.each([
   expect(sanitized.data).not.toContain("completed-malformed-private-marker")
 })
 
+test.each([
+  {
+    data: "",
+    event: "error",
+    name: "empty error",
+    expectedEvent: "error",
+    expected: {
+      type: "error",
+      sequence_number: 0,
+      code: "server_error",
+      message: "Upstream Responses stream failed.",
+      param: null,
+      status: 502,
+    },
+  },
+  {
+    data: undefined,
+    event: "error",
+    name: "missing error",
+    expectedEvent: "error",
+    expected: {
+      type: "error",
+      sequence_number: 0,
+      code: "server_error",
+      message: "Upstream Responses stream failed.",
+      param: null,
+      status: 502,
+    },
+  },
+  {
+    data: "",
+    event: "response.failed",
+    name: "empty response.failed",
+    expectedEvent: "response.failed",
+    expected: {
+      type: "response.failed",
+      sequence_number: 0,
+      response: {
+        output: [],
+        output_text: "",
+        usage: null,
+        error: {
+          code: "server_error",
+          message: "Upstream Responses stream failed.",
+          param: null,
+          status: 502,
+        },
+        incomplete_details: null,
+      },
+    },
+  },
+  {
+    data: undefined,
+    event: "response.failed",
+    name: "missing response.failed",
+    expectedEvent: "response.failed",
+    expected: {
+      type: "response.failed",
+      sequence_number: 0,
+      response: {
+        output: [],
+        output_text: "",
+        usage: null,
+        error: {
+          code: "server_error",
+          message: "Upstream Responses stream failed.",
+          param: null,
+          status: 502,
+        },
+        incomplete_details: null,
+      },
+    },
+  },
+  {
+    data: "",
+    event: "response.incomplete",
+    name: "empty response.incomplete",
+    expectedEvent: "response.incomplete",
+    expected: {
+      type: "response.incomplete",
+      sequence_number: 0,
+      response: {
+        output: [],
+        output_text: "",
+        usage: null,
+        error: {
+          code: "server_error",
+          message: "Upstream Responses stream failed.",
+          param: null,
+          status: 502,
+        },
+        incomplete_details: null,
+      },
+    },
+  },
+  {
+    data: undefined,
+    event: "response.incomplete",
+    name: "missing response.incomplete",
+    expectedEvent: "response.incomplete",
+    expected: {
+      type: "response.incomplete",
+      sequence_number: 0,
+      response: {
+        output: [],
+        output_text: "",
+        usage: null,
+        error: {
+          code: "server_error",
+          message: "Upstream Responses stream failed.",
+          param: null,
+          status: 502,
+        },
+        incomplete_details: null,
+      },
+    },
+  },
+  {
+    data: "",
+    event: "response.completed",
+    name: "empty response.completed",
+    expectedEvent: "response.failed",
+    expected: {
+      type: "response.failed",
+      sequence_number: 0,
+      response: {
+        output: [],
+        output_text: "",
+        usage: null,
+        error: {
+          code: "server_error",
+          message: "Upstream Responses stream failed.",
+          param: null,
+          status: 502,
+        },
+        incomplete_details: null,
+      },
+    },
+  },
+  {
+    data: undefined,
+    event: "response.completed",
+    name: "missing response.completed",
+    expectedEvent: "response.failed",
+    expected: {
+      type: "response.failed",
+      sequence_number: 0,
+      response: {
+        output: [],
+        output_text: "",
+        usage: null,
+        error: {
+          code: "server_error",
+          message: "Upstream Responses stream failed.",
+          param: null,
+          status: 502,
+        },
+        incomplete_details: null,
+      },
+    },
+  },
+])(
+  "canonicalizes $name terminal data",
+  ({ data, event, expected, expectedEvent }) => {
+    const sanitized = sanitizeResponsesStreamEvent({ data, event })
+
+    expect(sanitized.event).toBe(expectedEvent)
+    expect(JSON.parse(sanitized.data ?? "{}") as unknown).toEqual(expected)
+  },
+)
+
 test("fails closed for response.completed without a sequence number", () => {
   const sanitized = sanitizeResponsesStreamEvent({
     event: "response.completed",
@@ -382,6 +844,90 @@ test("stream ID synchronization delegates terminal primitives to sanitization", 
       incomplete_details: null,
     },
   })
+})
+
+test.each([
+  {
+    event: "error",
+    expected: {
+      type: "error",
+      sequence_number: 0,
+      code: "server_error",
+      message: "Upstream Responses stream failed.",
+      param: null,
+      status: 502,
+    },
+  },
+  {
+    event: "response.failed",
+    expected: {
+      type: "response.failed",
+      sequence_number: 0,
+      response: {
+        output: [],
+        output_text: "",
+        usage: null,
+        error: {
+          code: "server_error",
+          message: "Upstream Responses stream failed.",
+          param: null,
+          status: 502,
+        },
+        incomplete_details: null,
+      },
+    },
+  },
+  {
+    event: "response.incomplete",
+    expected: {
+      type: "response.incomplete",
+      sequence_number: 0,
+      response: {
+        output: [],
+        output_text: "",
+        usage: null,
+        error: {
+          code: "server_error",
+          message: "Upstream Responses stream failed.",
+          param: null,
+          status: 502,
+        },
+        incomplete_details: null,
+      },
+    },
+  },
+  {
+    event: "response.completed",
+    expected: {
+      type: "response.failed",
+      sequence_number: 0,
+      response: {
+        output: [],
+        output_text: "",
+        usage: null,
+        error: {
+          code: "server_error",
+          message: "Upstream Responses stream failed.",
+          param: null,
+          status: 502,
+        },
+        incomplete_details: null,
+      },
+    },
+  },
+])(
+  "sanitizes empty $event data before stream ID synchronization",
+  ({ event, expected }) => {
+    expect(
+      JSON.parse(fixStreamIds("", event, createStreamIdTracker())) as unknown,
+    ).toEqual(expected)
+  },
+)
+
+test("leaves an empty nonterminal heartbeat unchanged during ID sync", () => {
+  expect(
+    fixStreamIds("", "response.output_text.delta", createStreamIdTracker()),
+  ).toBe("")
 })
 
 test("stream ID synchronization does not mutate a readonly terminal record", () => {

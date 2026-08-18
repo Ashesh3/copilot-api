@@ -1336,6 +1336,41 @@ describe("responses websocket message handling", () => {
     expect(ws.data.activeTurns.size).toBe(0)
   })
 
+  test.each([
+    { dataLine: "data:", eventType: "error" },
+    { dataLine: undefined, eventType: "response.failed" },
+    { dataLine: "data:", eventType: "response.incomplete" },
+    { dataLine: undefined, eventType: "response.completed" },
+  ])(
+    "canonicalizes native $eventType with empty or missing data",
+    async ({ dataLine, eventType }) => {
+      state.copilotToken = "copilot-token"
+      state.models = responsesCapableModels
+      queuedResponses.push(
+        createEmptyResponsesTerminalSseResponse(eventType, dataLine),
+      )
+      const ws = createTestWebSocket()
+
+      await responsesWebSocket.message(
+        ws,
+        JSON.stringify({
+          type: "response.create",
+          model: "gpt-5.4",
+          input: "fail",
+          tools: [],
+        }),
+      )
+
+      const terminal = JSON.parse(ws.sent.at(-1) ?? "{}") as { type?: string }
+      expect(ws.sent.join("\n")).toContain("partial-output")
+      expect(terminal.type).toBe(
+        eventType === "response.completed" ? "response.failed" : eventType,
+      )
+      expect(ws.sent.join("\n")).toContain("Upstream Responses stream failed.")
+      expect(ws.data.activeTurns.size).toBe(0)
+    },
+  )
+
   test("treats missing completed status as an error terminal", async () => {
     state.copilotToken = "copilot-token"
     state.models = responsesCapableModels
@@ -2257,6 +2292,33 @@ function createRawResponsesTerminalSseResponse(data: string): Response {
   return new Response(
     `event: response.output_text.delta\ndata: ${delta}\n\n`
       + `event: response.completed\ndata: ${data}\n\n`,
+    {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    },
+  )
+}
+
+function createEmptyResponsesTerminalSseResponse(
+  eventType: string,
+  dataLine: string | undefined,
+): Response {
+  const delta = JSON.stringify({
+    type: "response.output_text.delta",
+    sequence_number: 1,
+    item_id: "msg_terminal",
+    output_index: 0,
+    content_index: 0,
+    delta: "partial-output",
+  })
+  const terminal = [
+    `event: ${eventType}`,
+    ...(dataLine === undefined ? [] : [dataLine]),
+    "",
+    "",
+  ].join("\n")
+  return new Response(
+    `event: response.output_text.delta\ndata: ${delta}\n\n${terminal}`,
     {
       status: 200,
       headers: { "content-type": "text/event-stream" },

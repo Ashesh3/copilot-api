@@ -7,6 +7,10 @@ export interface DescriptorChainSnapshot {
     readonly message: string
     readonly name: string
   }
+  readonly error?: {
+    readonly message: string
+  }
+  readonly blockedDescriptors: ReadonlySet<string>
   readonly errorKind?: "Error" | "TypeError"
   readonly prototypeKind?: "DOMException"
 }
@@ -128,6 +132,7 @@ function collectAllowlistedDescriptors(
     readonly ownDescriptors: Record<string, PropertyDescriptor>
   },
   collected: Map<string, PropertyDescriptor>,
+  blocked: Set<string>,
 ): void {
   const { current, keys, ownDescriptors } = options
   for (const key of keys) {
@@ -135,12 +140,15 @@ function collectAllowlistedDescriptors(
     if (shouldSkipBaseErrorDescriptor(current, key)) continue
     const descriptor = ownDescriptors[key]
     if ("value" in descriptor) collected.set(key, descriptor)
+    else blocked.add(key)
   }
 }
 
 interface DescriptorChainWalk {
+  readonly blockedDescriptors: Set<string>
   readonly descriptors: Map<string, PropertyDescriptor>
   readonly domExceptionPrototypeSeen: boolean
+  readonly errorPrototypeSeen: boolean
   readonly rootDescriptors: Record<string, PropertyDescriptor>
 }
 
@@ -148,8 +156,10 @@ function walkDescriptorChain(
   value: object,
   options: SnapshotDescriptorChainOptions,
 ): DescriptorChainWalk | undefined {
+  const blockedDescriptors = new Set<string>()
   const descriptors = new Map<string, PropertyDescriptor>()
   let domExceptionPrototypeSeen = false
+  let errorPrototypeSeen = false
   let rootDescriptors: Record<string, PropertyDescriptor> | undefined
   let current: object | null = value
 
@@ -163,9 +173,11 @@ function walkDescriptorChain(
     }
     rootDescriptors ??= ownDescriptors
     if (current === DOMException.prototype) domExceptionPrototypeSeen = true
+    if (current === Error.prototype) errorPrototypeSeen = true
     collectAllowlistedDescriptors(
       { current, keys: options.keys, ownDescriptors },
       descriptors,
+      blockedDescriptors,
     )
     try {
       current = Object.getPrototypeOf(current) as object | null
@@ -175,7 +187,13 @@ function walkDescriptorChain(
   }
 
   if (current !== null || !rootDescriptors) return undefined
-  return { descriptors, domExceptionPrototypeSeen, rootDescriptors }
+  return {
+    blockedDescriptors,
+    descriptors,
+    domExceptionPrototypeSeen,
+    errorPrototypeSeen,
+    rootDescriptors,
+  }
 }
 
 export function snapshotDescriptorChain(
@@ -193,9 +211,15 @@ export function snapshotDescriptorChain(
     chain.domExceptionPrototypeSeen ?
       snapshotDomException(value, chain.rootDescriptors)
     : undefined
+  const error =
+    errorKind && chain.errorPrototypeSeen ?
+      { message: Error.prototype.message }
+    : undefined
   return {
+    blockedDescriptors: chain.blockedDescriptors,
     descriptors: chain.descriptors,
     domException,
+    error,
     errorKind,
     ...(domException ? { prototypeKind: "DOMException" as const } : {}),
   }
@@ -217,4 +241,13 @@ export function readNativeDomExceptionField(
   if (descriptorValue !== undefined) return descriptorValue
   if (snapshot?.prototypeKind !== "DOMException") return undefined
   return snapshot.domException?.[key]
+}
+
+export function readNativeErrorMessage(
+  snapshot: DescriptorChainSnapshot | undefined,
+): unknown {
+  const descriptorValue = readDescriptorSnapshotValue(snapshot, "message")
+  if (descriptorValue !== undefined) return descriptorValue
+  if (snapshot?.blockedDescriptors.has("message")) return undefined
+  return snapshot?.error?.message
 }
