@@ -422,6 +422,76 @@ test("groups multiple function calls and results into legal Anthropic turns", as
 
 test.each([
   {
+    name: "partial results at EOF",
+    input: [
+      {
+        type: "function_call",
+        call_id: "call_1",
+        name: "lookup",
+        arguments: "{}",
+      },
+      {
+        type: "function_call",
+        call_id: "call_2",
+        name: "lookup",
+        arguments: "{}",
+      },
+      { type: "function_call_output", call_id: "call_1", output: "first" },
+    ],
+  },
+  {
+    name: "calls without results at EOF",
+    input: [
+      {
+        type: "function_call",
+        call_id: "call_1",
+        name: "lookup",
+        arguments: "{}",
+      },
+      {
+        type: "function_call",
+        call_id: "call_2",
+        name: "lookup",
+        arguments: "{}",
+      },
+    ],
+  },
+  {
+    name: "partial results interrupted by a message",
+    input: [
+      {
+        type: "function_call",
+        call_id: "call_1",
+        name: "lookup",
+        arguments: "{}",
+      },
+      {
+        type: "function_call",
+        call_id: "call_2",
+        name: "lookup",
+        arguments: "{}",
+      },
+      { type: "function_call_output", call_id: "call_1", output: "first" },
+      { type: "message", role: "user", content: "continue" },
+    ],
+  },
+])("refuses incomplete tool group: $name", async ({ input }) => {
+  const error = await responsesPayloadToAnthropic({
+    model: "claude-current",
+    input,
+  } as never).catch((caught: unknown) => caught)
+
+  expect(error).toBeInstanceOf(LocalHTTPError)
+  expect((error as LocalHTTPError).clientBody).toMatchObject({
+    error: {
+      code: "endpoint_translation_unsupported",
+      param: "tool_result_pairing",
+    },
+  })
+})
+
+test.each([
+  {
     name: "result order differs from call order",
     input: [
       {

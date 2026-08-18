@@ -520,6 +520,76 @@ test.each([
   })
 })
 
+test.each([
+  {
+    name: "partial tool results at EOF",
+    input: [
+      {
+        type: "function_call",
+        call_id: "call_1",
+        name: "lookup",
+        arguments: "{}",
+      },
+      {
+        type: "function_call",
+        call_id: "call_2",
+        name: "lookup",
+        arguments: "{}",
+      },
+      { type: "function_call_output", call_id: "call_1", output: "first" },
+    ],
+  },
+  {
+    name: "tool calls without results at EOF",
+    input: [
+      {
+        type: "function_call",
+        call_id: "call_1",
+        name: "lookup",
+        arguments: "{}",
+      },
+      {
+        type: "function_call",
+        call_id: "call_2",
+        name: "lookup",
+        arguments: "{}",
+      },
+    ],
+  },
+  {
+    name: "partial tool results interrupted by a message",
+    input: [
+      {
+        type: "function_call",
+        call_id: "call_1",
+        name: "lookup",
+        arguments: "{}",
+      },
+      {
+        type: "function_call",
+        call_id: "call_2",
+        name: "lookup",
+        arguments: "{}",
+      },
+      { type: "function_call_output", call_id: "call_1", output: "first" },
+      { type: "message", role: "user", content: "continue" },
+    ],
+  },
+])("rejects Messages-only $name", async ({ input }) => {
+  installModel({ supported_endpoints: ["/v1/messages"] })
+
+  const response = await postResponses({ input })
+
+  expect(response.status).toBe(400)
+  expect(fetchMock).not.toHaveBeenCalled()
+  expect(await response.json()).toMatchObject({
+    error: {
+      code: "endpoint_translation_unsupported",
+      param: "tool_result_pairing",
+    },
+  })
+})
+
 test("rejects a Messages image URL fetch failure instead of inserting omission text", async () => {
   installModel({ supported_endpoints: ["/v1/messages"] })
   fetchMock.mockImplementationOnce(() => Response.json({}, { status: 404 }))

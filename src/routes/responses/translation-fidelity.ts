@@ -251,16 +251,41 @@ function scanResponsesInput(
     }
     const type = getType(item)
     if (options.target === "messages") {
-      scanFunctionPairing({
-        blockers,
-        state: functionGrouping,
-        item,
-        type,
-      })
+      if (isValidGroupingItem(item, type)) {
+        scanFunctionPairing({ blockers, state: functionGrouping, item, type })
+      } else if (type !== "function_call") {
+        interruptFunctionGrouping(blockers, functionGrouping)
+      }
     }
     addInputItemBlockers({ item, type, blockers, ...options })
     scanItemContent({ item, type, blockers, target: options.target })
   }
+  if (options.target === "messages" && functionGrouping.phase !== "idle") {
+    addBlocker(blockers, "tool_result_pairing")
+  }
+}
+
+function isValidGroupingItem(
+  item: Record<string, unknown>,
+  type: string | undefined,
+): boolean {
+  if (type === "function_call") {
+    return (
+      isLosslessFunctionCall(item) && hasObjectFunctionArguments(item.arguments)
+    )
+  }
+  return (
+    type === "function_call_output"
+    && typeof item.call_id === "string"
+    && item.call_id.length > 0
+  )
+}
+
+function interruptFunctionGrouping(
+  blockers: Array<string>,
+  state: FunctionGroupingState,
+): void {
+  if (state.phase !== "idle") addBlocker(blockers, "tool_result_pairing")
 }
 
 interface FunctionGroupingState {
@@ -287,7 +312,7 @@ function scanFunctionPairing(options: {
 }): void {
   const { blockers, item, state, type } = options
   if (type !== "function_call" && type !== "function_call_output") {
-    if (state.phase !== "idle") addBlocker(blockers, "tool_result_pairing")
+    interruptFunctionGrouping(blockers, state)
     return
   }
   if (type === "function_call") {

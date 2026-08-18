@@ -141,3 +141,27 @@ Witnessed RED failures covered missing/non-string text coercion, fragmented mult
 ### Concerns
 
 No blocking concern. The repository retains the same five lint warnings and three optional real-media skips.
+
+## Fix Round 3
+
+### Findings addressed
+
+- Messages tool grouping now fails closed when a call group is incomplete at EOF or interrupted before every adjacent call receives exactly one ordered result. Partial two-call groups, calls without results, and interrupted result groups block as `tool_result_pairing`; complete two-call/two-result groups remain supported.
+- `raceSsePreflush()` now creates one settlement-observation chain before winner selection and only derives the returned value promise after the timer wins. Early value/rejection and timeout-late value/rejection paths are consumed exactly once without unhandled rejections.
+
+### RED/GREEN evidence
+
+Witnessed RED failures showed partial tool groups accepted by the pure scan, direct bridge, and HTTP route, and an early preflush rejection surfacing as an unhandled rejection from the unused derived promise. The focused GREEN matrix passed 345/345 across bridge, fidelity, handler, synthetic/native lifecycle, cancellation, WebSocket, and live Responses/tool-calling suites.
+
+### Verification
+
+- Non-integration suite: 1410 passed, 3 existing media skips, 0 failed across 102 files; 5040 assertions.
+- Full `bun test`: 1563 passed, 3 existing media skips, 0 failed across 113 files; 6367 assertions.
+- `bun run typecheck`: exit 0.
+- `bun run lint:all`: 0 errors, 5 existing warnings.
+- `bun run build`: exit 0.
+- `git diff --check`: exit 0.
+
+### Concerns
+
+No blocking concern. The repository retains the same five lint warnings and three optional real-media skips.

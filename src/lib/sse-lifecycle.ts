@@ -239,30 +239,29 @@ export async function raceSsePreflush<T>(
   pending: Promise<T>,
 ): Promise<SsePreflushResult<T>> {
   let timeout: ReturnType<typeof setTimeout> | undefined
-  const observedSettlement = pending.then<
-    ObservedSettlement<T>,
-    ObservedSettlement<T>
-  >(
+  const observed = pending.then<ObservedSettlement<T>, ObservedSettlement<T>>(
     (value) => ({ kind: "fulfilled", value }),
     (error: unknown) => ({ error, kind: "rejected" }),
   )
-  const observedValue = observedSettlement.then((settlement) => {
-    if (settlement.kind === "fulfilled") return settlement.value
-    if (settlement.kind === "rejected") throw settlement.error
-    return Promise.reject(new Error("Unexpected preflush timer settlement"))
-  })
   const timer = new Promise<ObservedSettlement<T>>((resolve) => {
     timeout = setTimeout(
       () => resolve({ kind: "timer" }),
       ssePreflushDeadlineMs,
     )
   })
-  const settlement = await Promise.race([observedSettlement, timer])
+  const settlement = await Promise.race([observed, timer])
   if (timeout !== undefined) clearTimeout(timeout)
 
   if (settlement.kind === "fulfilled") {
     return { kind: "settled", value: settlement.value }
   }
   if (settlement.kind === "rejected") throw settlement.error
-  return { kind: "pending", pending: observedValue }
+  return {
+    kind: "pending",
+    pending: observed.then((result) => {
+      if (result.kind === "fulfilled") return result.value
+      if (result.kind === "rejected") throw result.error
+      return Promise.reject(new Error("Unexpected preflush timer settlement"))
+    }),
+  }
 }

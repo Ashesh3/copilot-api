@@ -1564,6 +1564,97 @@ test.each([
   ).toEqual({ supported: false, blockers: ["tool_result_pairing"] })
 })
 
+test.each([
+  {
+    name: "partial results at EOF",
+    input: [
+      {
+        type: "function_call",
+        call_id: "call_1",
+        name: "lookup",
+        arguments: "{}",
+      },
+      {
+        type: "function_call",
+        call_id: "call_2",
+        name: "lookup",
+        arguments: "{}",
+      },
+      { type: "function_call_output", call_id: "call_1", output: "first" },
+    ],
+  },
+  {
+    name: "calls without results at EOF",
+    input: [
+      {
+        type: "function_call",
+        call_id: "call_1",
+        name: "lookup",
+        arguments: "{}",
+      },
+      {
+        type: "function_call",
+        call_id: "call_2",
+        name: "lookup",
+        arguments: "{}",
+      },
+    ],
+  },
+  {
+    name: "partial results interrupted by a message",
+    input: [
+      {
+        type: "function_call",
+        call_id: "call_1",
+        name: "lookup",
+        arguments: "{}",
+      },
+      {
+        type: "function_call",
+        call_id: "call_2",
+        name: "lookup",
+        arguments: "{}",
+      },
+      { type: "function_call_output", call_id: "call_1", output: "first" },
+      { type: "message", role: "user", content: "continue" },
+    ],
+  },
+])(
+  "rejects Responses to Messages incomplete tool group: $name",
+  ({ input }) => {
+    expect(
+      checkResponsesToMessagesTranslation({
+        model: "claude-current",
+        input,
+      } as unknown as ResponsesPayload),
+    ).toEqual({ supported: false, blockers: ["tool_result_pairing"] })
+  },
+)
+
+test("accepts a complete two-call two-result group", () => {
+  expect(
+    checkResponsesToMessagesTranslation({
+      model: "claude-current",
+      input: [
+        {
+          type: "function_call",
+          call_id: "call_1",
+          name: "lookup",
+          arguments: "{}",
+        },
+        {
+          type: "function_call",
+          call_id: "call_2",
+          name: "lookup",
+          arguments: "{}",
+        },
+        { type: "function_call_output", call_id: "call_1", output: "first" },
+        { type: "function_call_output", call_id: "call_2", output: "second" },
+      ],
+    }),
+  ).toEqual({ supported: true, blockers: [] })
+})
+
 test.each(["[]", "1", '"text"', "not-json"])(
   "rejects Responses to Messages function arguments %s",
   (argumentsText) => {
