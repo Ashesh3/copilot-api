@@ -390,7 +390,6 @@ test("omits tool controls when a chat fallback request has no tools", async () =
       model: "gpt-5.5",
       messages: [{ role: "user", content: "Reply without tools." }],
       tools: null,
-      tool_choice: "auto",
       parallel_tool_calls: true,
       stream: false,
     }),

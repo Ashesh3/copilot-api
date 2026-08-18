@@ -179,7 +179,7 @@ test("repairs only function tool parameter schemas", () => {
 })
 
 test("maps deprecated string function_call values", () => {
-  for (const functionCall of ["none", "auto"] as const) {
+  for (const functionCall of ["none"] as const) {
     const normalized = normalizeChatCompletionsRequest({
       model: "gpt-current",
       messages: [{ role: "user", content: "hello" }],
@@ -188,6 +188,15 @@ test("maps deprecated string function_call values", () => {
     expect(normalized.tool_choice).toBe(functionCall)
     expect(normalized).not.toHaveProperty("function_call")
   }
+
+  const normalizedAuto = normalizeChatCompletionsRequest({
+    model: "gpt-current",
+    messages: [{ role: "user", content: "hello" }],
+    functions: [{ name: "lookup", parameters: {} }],
+    function_call: "auto",
+  })
+  expect(normalizedAuto.tool_choice).toBe("auto")
+  expect(normalizedAuto).not.toHaveProperty("function_call")
 })
 
 describe("Chat request validation", () => {
@@ -356,6 +365,170 @@ describe("Chat request validation", () => {
           function_call: "required",
         }),
       { code: "invalid_value", param: "function_call" },
+    )
+  })
+})
+
+describe("Chat route-invariant shape validation", () => {
+  test.each([
+    { name: "numeric scalar", content: 7 },
+    { name: "object scalar", content: { text: "hello" } },
+  ])("rejects $name message content", ({ content }) => {
+    expectValidationError(
+      () =>
+        normalizeChatCompletionsRequest({
+          model: "gpt-current",
+          messages: [{ role: "user", content }],
+        } as unknown as ChatCompletionsPayload),
+      { code: "invalid_type", param: "messages" },
+    )
+  })
+
+  test("accepts string null and valid content arrays", () => {
+    for (const content of [
+      "hello",
+      null,
+      [{ type: "text", text: "hello" }],
+      [
+        {
+          type: "image_url",
+          image_url: {
+            url: "data:image/png;base64,AA==",
+            detail: "auto",
+          },
+        },
+      ],
+      [
+        {
+          type: "file",
+          file: {
+            filename: "review.pdf",
+            file_data: "data:application/pdf;base64,AA==",
+          },
+        },
+      ],
+      [
+        {
+          type: "document",
+          source: {
+            type: "base64",
+            media_type: "application/pdf",
+            data: "AA==",
+          },
+        },
+      ],
+    ]) {
+      expect(
+        normalizeChatCompletionsRequest({
+          model: "gpt-current",
+          messages: [{ role: "user", content }],
+        } as ChatCompletionsPayload).messages[0].content as unknown,
+      ).toEqual(content as unknown)
+    }
+  })
+
+  test.each([
+    { name: "primitive part", content: [7] },
+    { name: "typeless part", content: [{ text: "hello" }] },
+    { name: "invalid text", content: [{ type: "text", text: 7 }] },
+    {
+      name: "invalid image",
+      content: [{ type: "image_url", image_url: { url: "" } }],
+    },
+    {
+      name: "invalid document",
+      content: [{ type: "document", source: "private" }],
+    },
+  ])("rejects a $name content record", ({ content }) => {
+    expectValidationError(
+      () =>
+        normalizeChatCompletionsRequest({
+          model: "gpt-current",
+          messages: [{ role: "user", content }],
+        } as unknown as ChatCompletionsPayload),
+      { code: "invalid_type", param: "messages" },
+    )
+  })
+
+  test.each([
+    { name: "object", tools: { type: "function" } },
+    { name: "string", tools: "private-tools" },
+  ])("rejects non-array $name tools", ({ tools }) => {
+    expectValidationError(
+      () =>
+        normalizeChatCompletionsRequest({
+          model: "gpt-current",
+          messages: [{ role: "user", content: "hello" }],
+          tools,
+        } as unknown as ChatCompletionsPayload),
+      { code: "invalid_type", param: "tools" },
+    )
+  })
+
+  test.each([
+    { name: "absent", toolChoice: undefined },
+    { name: "null", toolChoice: null },
+    { name: "none", toolChoice: "none" },
+  ])("accepts $name tool choice without usable tools", ({ toolChoice }) => {
+    const normalized = normalizeChatCompletionsRequest({
+      model: "gpt-current",
+      messages: [{ role: "user", content: "hello" }],
+      tools: [],
+      ...(toolChoice === undefined ? {} : { tool_choice: toolChoice }),
+    } as ChatCompletionsPayload)
+
+    expect(normalized.tool_choice).toBe(toolChoice)
+  })
+
+  test.each([
+    { name: "auto", toolChoice: "auto" },
+    { name: "required", toolChoice: "required" },
+    {
+      name: "named function",
+      toolChoice: { type: "function", function: { name: "lookup" } },
+    },
+  ])("rejects $name tool choice without usable tools", ({ toolChoice }) => {
+    expectValidationError(
+      () =>
+        normalizeChatCompletionsRequest({
+          model: "gpt-current",
+          messages: [{ role: "user", content: "hello" }],
+          tools: [],
+          tool_choice: toolChoice,
+        } as ChatCompletionsPayload),
+      { code: "invalid_value", param: "tool_choice" },
+    )
+  })
+
+  test("requires named function choices to match a usable tool", () => {
+    const payload = {
+      model: "gpt-current",
+      messages: [{ role: "user", content: "hello" }],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "lookup",
+            parameters: { type: "object", properties: {} },
+          },
+        },
+      ],
+    } satisfies ChatCompletionsPayload
+
+    expect(
+      normalizeChatCompletionsRequest({
+        ...payload,
+        tool_choice: { type: "function", function: { name: "lookup" } },
+      }).tool_choice,
+    ).toEqual({ type: "function", function: { name: "lookup" } })
+
+    expectValidationError(
+      () =>
+        normalizeChatCompletionsRequest({
+          ...payload,
+          tool_choice: { type: "function", function: { name: "missing" } },
+        }),
+      { code: "invalid_value", param: "tool_choice" },
     )
   })
 })

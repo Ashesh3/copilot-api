@@ -17,6 +17,8 @@ import { state } from "~/lib/state"
 import { selectChatUpstreamEndpoint } from "~/routes/chat-completions/handler"
 import { server } from "~/server"
 
+/* eslint-disable max-lines -- route matrix intentionally stays in one fixture-backed file */
+
 const originalFetch = globalThis.fetch
 let lastUpstreamPath: string | undefined
 let lastUpstreamPayload: Record<string, unknown> | undefined
@@ -372,6 +374,21 @@ test.each([
 )
 
 test.each([
+  { name: "Responses", endpoints: ["/chat/completions", "/responses"] },
+  { name: "Messages", endpoints: ["/chat/completions", "/v1/messages"] },
+])(
+  "rejects scalar message content before Chat can fall back to $name",
+  async ({ endpoints }) => {
+    installModel({ id: "route-model", supported_endpoints: [...endpoints] })
+
+    const response = await postChatRoute({ content: { text: "hello" } })
+
+    await expectSafeChatContractError(response, "messages")
+    expect(fetchMock).not.toHaveBeenCalled()
+  },
+)
+
+test.each([
   { name: "string", content: "hello" },
   { name: "null", content: null },
   { name: "validated array", content: [{ type: "text", text: "hello" }] },
@@ -403,6 +420,21 @@ test.each([
 })
 
 test.each([
+  { name: "Responses", endpoints: ["/chat/completions", "/responses"] },
+  { name: "Messages", endpoints: ["/chat/completions", "/v1/messages"] },
+])(
+  "rejects non-array tools before Chat can fall back to $name",
+  async ({ endpoints }) => {
+    installModel({ id: "route-model", supported_endpoints: [...endpoints] })
+
+    const response = await postChatRoute({ tools: { type: "function" } })
+
+    await expectSafeChatContractError(response, "tools")
+    expect(fetchMock).not.toHaveBeenCalled()
+  },
+)
+
+test.each([
   { name: "null", tools: null },
   { name: "empty array", tools: [] },
 ])("accepts $name tools with no forced choice", async ({ tools }) => {
@@ -416,6 +448,22 @@ test.each([
   expect(response.status).toBe(200)
   expect(lastUpstreamPath).toBe("/chat/completions")
 })
+
+test.each([
+  { name: "Responses", endpoints: ["/responses"] },
+  { name: "Messages", endpoints: ["/v1/messages"] },
+])(
+  "serializes explicit null tools through the $name route",
+  async ({ endpoints }) => {
+    installModel({ id: "route-model", supported_endpoints: [...endpoints] })
+
+    const response = await postChatRoute({ tools: null, hasTools: true })
+
+    expect(response.status).toBe(200)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(lastUpstreamPayload).not.toHaveProperty("tools")
+  },
+)
 
 test.each([
   { name: "required", toolChoice: "required" },
@@ -435,6 +483,52 @@ test.each([
   expect(response.status).toBe(400)
   expect(fetchMock).not.toHaveBeenCalled()
 })
+
+test.each([
+  {
+    name: "Responses auto",
+    endpoints: ["/chat/completions", "/responses"],
+    toolChoice: "auto",
+  },
+  {
+    name: "Responses required",
+    endpoints: ["/chat/completions", "/responses"],
+    toolChoice: "required",
+  },
+  {
+    name: "Responses named function",
+    endpoints: ["/chat/completions", "/responses"],
+    toolChoice: { type: "function", function: { name: "lookup" } },
+  },
+  {
+    name: "Messages auto",
+    endpoints: ["/chat/completions", "/v1/messages"],
+    toolChoice: "auto",
+  },
+  {
+    name: "Messages required",
+    endpoints: ["/chat/completions", "/v1/messages"],
+    toolChoice: "required",
+  },
+  {
+    name: "Messages named function",
+    endpoints: ["/chat/completions", "/v1/messages"],
+    toolChoice: { type: "function", function: { name: "lookup" } },
+  },
+])(
+  "rejects $name without usable tools before endpoint selection",
+  async ({ endpoints, toolChoice }) => {
+    installModel({ id: "route-model", supported_endpoints: [...endpoints] })
+
+    const response = await postChatRoute({
+      tools: [],
+      toolChoice,
+    })
+
+    await expectSafeChatContractError(response, "tool_choice")
+    expect(fetchMock).not.toHaveBeenCalled()
+  },
+)
 
 test.each([
   { name: "absent", toolChoice: undefined },
@@ -512,6 +606,48 @@ test("keeps valid text function tools and choices on Chat", async () => {
   expect(response.status).toBe(200)
   expect(lastUpstreamPath).toBe("/chat/completions")
 })
+
+test.each([
+  { name: "Responses", endpoints: ["/responses"] },
+  { name: "Messages", endpoints: ["/v1/messages"] },
+])(
+  "preserves a matching named function choice through the $name route",
+  async ({ endpoints }) => {
+    installModel({ id: "route-model", supported_endpoints: [...endpoints] })
+
+    const response = await postChatRoute({
+      tools: [createFunctionTool("lookup")],
+      toolChoice: { type: "function", function: { name: "lookup" } },
+    })
+
+    expect(response.status).toBe(200)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(lastUpstreamPayload).toHaveProperty(
+      "tool_choice",
+      endpoints[0] === "/responses" ?
+        { type: "function", name: "lookup" }
+      : { type: "tool", name: "lookup" },
+    )
+  },
+)
+
+test.each([
+  { name: "Responses", endpoints: ["/chat/completions", "/responses"] },
+  { name: "Messages", endpoints: ["/chat/completions", "/v1/messages"] },
+])(
+  "rejects a missing named function before Chat can fall back to $name",
+  async ({ endpoints }) => {
+    installModel({ id: "route-model", supported_endpoints: [...endpoints] })
+
+    const response = await postChatRoute({
+      tools: [createFunctionTool("lookup")],
+      toolChoice: { type: "function", function: { name: "missing" } },
+    })
+
+    await expectSafeChatContractError(response, "tool_choice")
+    expect(fetchMock).not.toHaveBeenCalled()
+  },
+)
 
 test("prefers Responses for non-Anthropic models when Chat is unavailable", async () => {
   installModel({
@@ -696,6 +832,7 @@ async function postChatRoute(options: {
   encryptedReasoning?: boolean
   fileId?: boolean
   hasContent?: boolean
+  hasTools?: boolean
   model?: string
   pdf?: boolean
   signedReasoning?: boolean
@@ -730,7 +867,7 @@ async function postChatRoute(options: {
     body: JSON.stringify({
       model: options.model ?? "route-model",
       messages,
-      ...(tools ? { tools } : {}),
+      ...(options.hasTools || tools !== undefined ? { tools } : {}),
       ...(options.toolChoice !== undefined ?
         { tool_choice: options.toolChoice }
       : {}),
@@ -800,4 +937,28 @@ function createRouteTools(options: {
     ]
   }
   return undefined
+}
+
+function createFunctionTool(name: string): Record<string, unknown> {
+  return {
+    type: "function",
+    function: {
+      name,
+      parameters: { type: "object", properties: {} },
+    },
+  }
+}
+
+async function expectSafeChatContractError(
+  response: Response,
+  param: string,
+): Promise<void> {
+  expect(response.status).toBe(400)
+  const body: unknown = await response.json()
+  expect(body).toMatchObject({
+    error: {
+      param,
+      type: "invalid_request_error",
+    },
+  })
 }

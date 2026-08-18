@@ -54,6 +54,197 @@ function normalizeFunctionParameters(value: unknown): Record<string, unknown> {
   return parameters
 }
 
+function validateMessages(messages: ChatCompletionsPayload["messages"]): void {
+  for (const message of messages as Array<unknown>) {
+    if (!isRecord(message)) throw createInvalidMessagesError()
+    if (!hasOwn(message, "content")) continue
+    const content = message.content
+    if (typeof content === "string" || content === null) continue
+    if (!Array.isArray(content)) throw createInvalidMessagesError()
+    for (const part of content) {
+      if (part === null) continue
+      if (!isRecord(part)) throw createInvalidMessagesError()
+      if (!hasOwn(part, "type") || typeof part.type !== "string") {
+        throw createInvalidMessagesError()
+      }
+      validateKnownContentPart(part)
+    }
+  }
+}
+
+function validateKnownContentPart(part: Record<string, unknown>): void {
+  switch (part.type) {
+    case "text": {
+      validateTextContentPart(part)
+      return
+    }
+    case "image_url": {
+      validateImageContentPart(part)
+      return
+    }
+    case "file": {
+      validateFileContentPart(part)
+      return
+    }
+    case "document": {
+      validateDocumentContentPart(part)
+      return
+    }
+    default: {
+      return
+    }
+  }
+}
+
+function validateTextContentPart(part: Record<string, unknown>): void {
+  if (typeof part.text !== "string") throw createInvalidMessagesError()
+}
+
+function validateImageContentPart(part: Record<string, unknown>): void {
+  const image = part.image_url
+  if (!isRecord(image) || typeof image.url !== "string") {
+    throw createInvalidMessagesError()
+  }
+  if (image.url.trim().length === 0) throw createInvalidMessagesError()
+  if (
+    image.detail !== undefined
+    && image.detail !== "low"
+    && image.detail !== "high"
+    && image.detail !== "auto"
+  ) {
+    throw createInvalidMessagesError()
+  }
+}
+
+function validateFileContentPart(part: Record<string, unknown>): void {
+  const file = part.file
+  if (!isRecord(file)) return
+  if (
+    !isOptionalString(file.filename)
+    || !isOptionalString(file.file_data)
+    || !isOptionalString(file.file_id)
+  ) {
+    throw createInvalidMessagesError()
+  }
+}
+
+function validateDocumentContentPart(part: Record<string, unknown>): void {
+  if (hasOwn(part, "source") && !isRecord(part.source)) {
+    throw createInvalidMessagesError()
+  }
+}
+
+function isOptionalString(value: unknown): boolean {
+  return value === undefined || value === null || typeof value === "string"
+}
+
+function createInvalidMessagesError(): LocalHTTPError {
+  return createChatValidationError({
+    code: "invalid_type",
+    message:
+      "Each message content must be a string, null, or a valid content-part array.",
+    param: "messages",
+  })
+}
+
+function validateToolsContainer(tools: unknown): void {
+  if (tools === undefined || tools === null || Array.isArray(tools)) return
+  throw createChatValidationError({
+    code: "invalid_type",
+    message: "The tools field must be an array or null.",
+    param: "tools",
+  })
+}
+
+function validateTools(tools: ChatCompletionsPayload["tools"]): Set<string> {
+  const functionNames = new Set<string>()
+  if (!Array.isArray(tools)) return functionNames
+
+  for (const tool of tools as Array<unknown>) {
+    if (
+      !isRecord(tool)
+      || typeof tool.type !== "string"
+      || tool.type.trim().length === 0
+    ) {
+      throw createInvalidToolsError()
+    }
+    if (tool.type !== "function") continue
+
+    const func = tool.function
+    if (
+      !isRecord(func)
+      || typeof func.name !== "string"
+      || func.name.trim().length === 0
+      || (func.description !== undefined
+        && typeof func.description !== "string")
+      || !isRecord(func.parameters)
+    ) {
+      throw createInvalidToolsError()
+    }
+    functionNames.add(func.name)
+  }
+
+  return functionNames
+}
+
+function createInvalidToolsError(): LocalHTTPError {
+  return createChatValidationError({
+    code: "invalid_type",
+    message: "Each tools entry must be a valid tool definition.",
+    param: "tools",
+  })
+}
+
+function validateToolChoice(
+  toolChoice: ChatCompletionsPayload["tool_choice"],
+  functionNames: Set<string>,
+): void {
+  if (
+    toolChoice === undefined
+    || toolChoice === null
+    || toolChoice === "none"
+  ) {
+    return
+  }
+
+  if (functionNames.size === 0) throw createInvalidToolChoiceError()
+  if (typeof toolChoice === "string") {
+    return
+  }
+  if (!isRecord(toolChoice)) throw createInvalidToolChoiceError()
+  if (toolChoice.type !== "function") {
+    if (typeof toolChoice.type !== "string" || toolChoice.type.trim() === "") {
+      throw createInvalidToolChoiceError()
+    }
+    return
+  }
+  if (!isMatchingFunctionToolChoice(toolChoice, functionNames)) {
+    throw createInvalidToolChoiceError()
+  }
+}
+
+function isMatchingFunctionToolChoice(
+  toolChoice: Record<string, unknown>,
+  functionNames: Set<string>,
+): boolean {
+  if (!isRecord(toolChoice.function)) return false
+  const name = toolChoice.function.name
+  return (
+    typeof name === "string"
+    && name.trim().length > 0
+    && functionNames.has(name)
+  )
+}
+
+function createInvalidToolChoiceError(): LocalHTTPError {
+  return createChatValidationError({
+    code: "invalid_value",
+    message:
+      "The tool_choice field must select a declared function when tools are used.",
+    param: "tool_choice",
+  })
+}
+
 function normalizeModernFunctionTools(payload: ChatCompletionsPayload): void {
   if (!Array.isArray(payload.tools)) return
 
@@ -180,6 +371,8 @@ export function normalizeChatCompletionsRequest(
       param: "messages",
     })
   }
+  validateMessages(normalized.messages)
+  validateToolsContainer(normalized.tools)
   if (
     normalized.max_tokens !== undefined
     && normalized.max_tokens !== null
@@ -196,5 +389,7 @@ export function normalizeChatCompletionsRequest(
   normalizeModernFunctionTools(normalized)
   normalizeDeprecatedFunctions(normalized)
   normalizeDeprecatedFunctionCall(normalized)
+  const functionNames = validateTools(normalized.tools)
+  validateToolChoice(normalized.tool_choice, functionNames)
   return normalized
 }

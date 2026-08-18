@@ -1,6 +1,7 @@
 /* eslint-disable max-lines */
 import { expect, test } from "bun:test"
 
+import type { ChatCompletionsPayload } from "~/services/copilot/create-chat-completions"
 import type { ResponsesPayload } from "~/services/copilot/create-responses"
 
 import { createEndpointTranslationError, LocalHTTPError } from "~/lib/error"
@@ -139,6 +140,57 @@ test("uses normalized deprecated controls in the direct Chat to Messages convert
   expect(payload).toHaveProperty("function_call")
 })
 
+test.each([
+  {
+    name: "scalar content",
+    payload: {
+      model: "gpt-current",
+      messages: [{ role: "user", content: { text: "hello" } }],
+    },
+  },
+  {
+    name: "non-array tools",
+    payload: {
+      model: "gpt-current",
+      messages: [{ role: "user", content: "hello" }],
+      tools: { type: "function" },
+    },
+  },
+  {
+    name: "forced choice without tools",
+    payload: {
+      model: "gpt-current",
+      messages: [{ role: "user", content: "hello" }],
+      tools: [],
+      tool_choice: "required",
+    },
+  },
+  {
+    name: "missing named function",
+    payload: {
+      model: "gpt-current",
+      messages: [{ role: "user", content: "hello" }],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "lookup",
+            parameters: { type: "object", properties: {} },
+          },
+        },
+      ],
+      tool_choice: { type: "function", function: { name: "missing" } },
+    },
+  },
+])("rejects $name before either Chat translator", ({ payload }) => {
+  const malformed = payload as unknown as ChatCompletionsPayload & {
+    model: string
+  }
+
+  expect(() => chatCompletionsToResponses(malformed)).toThrow(LocalHTTPError)
+  expect(() => chatPayloadToAnthropic(malformed)).toThrow(LocalHTTPError)
+})
+
 test("rejects Chat to Responses unsupported content and malformed tool results in order", () => {
   expect(
     checkChatToResponsesTranslation({
@@ -205,6 +257,15 @@ test("rejects every unmapped Chat to Responses request concept in first-seen ord
       thinking_budget: 2048,
       seed: 7,
       response_format: { type: "future_format" },
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "lookup",
+            parameters: { type: "object", properties: {} },
+          },
+        },
+      ],
       tool_choice: { type: "future_choice" },
     }),
   ).toEqual({
