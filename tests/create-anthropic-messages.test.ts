@@ -17,12 +17,14 @@ import { createAnthropicMessages } from "../src/services/copilot/create-anthropi
 
 const originalFetch = globalThis.fetch
 let capturedBody: unknown
+let capturedHeaders: Headers | undefined
 
 const fetchMock = mock((_url: string | URL | Request, init?: RequestInit) => {
   if (typeof init?.body !== "string") {
     throw new TypeError("Expected native Messages JSON body")
   }
   capturedBody = JSON.parse(init.body) as unknown
+  capturedHeaders = new Headers(init.headers)
   return new Response(
     JSON.stringify({
       id: "msg_cache_control",
@@ -50,6 +52,7 @@ afterAll(() => {
 beforeEach(() => {
   fetchMock.mockClear()
   capturedBody = undefined
+  capturedHeaders = undefined
   state.accountType = "individual"
   state.copilotToken = "copilot-token"
   state.isMultiToken = false
@@ -232,6 +235,7 @@ test("preserves controls already validated by the Responses bridge", async () =>
     await createAnthropicMessages(
       {
         model: "claude-no-effort",
+        max_tokens: 64,
         messages: [{ role: "user", content: "hello" }],
         output_config: { effort: "high" },
         temperature: 0.4,
@@ -249,6 +253,90 @@ test("preserves controls already validated by the Responses bridge", async () =>
   }
 })
 
+test.each([
+  [4096, 4096],
+  [undefined, 64_000],
+] as const)(
+  "defaults bridge max_tokens from model limit %# without mutating input",
+  async (modelLimit, expectedMaxTokens) => {
+    const previousModels = state.models
+    state.models = {
+      object: "list",
+      data: [
+        {
+          id: "claude-bridge-default",
+          name: "Claude Bridge Default",
+          object: "model",
+          version: "1",
+          capabilities: {
+            family: "claude",
+            limits:
+              modelLimit === undefined ? {} : { max_output_tokens: modelLimit },
+            object: "model_capabilities",
+            supports: {},
+            tokenizer: "cl100k_base",
+            type: "chat",
+          },
+        },
+      ],
+    }
+    const payload: AnthropicMessagesPayload = {
+      model: "claude-bridge-default",
+      messages: [{ role: "user", content: "hello" }],
+    }
+
+    try {
+      await createAnthropicMessages(payload, {
+        preserveValidatedControls: true,
+      })
+
+      expect(capturedBody).toHaveProperty("max_tokens", expectedMaxTokens)
+      expect(payload).not.toHaveProperty("max_tokens")
+    } finally {
+      // eslint-disable-next-line require-atomic-updates
+      state.models = previousModels
+    }
+  },
+)
+
+test("preserves native fields and forwards canonical prepared headers", async () => {
+  const payload = {
+    model: "claude-opus-4.8",
+    max_tokens: 64,
+    messages: [{ role: "user", content: "hello" }],
+    temperature: 0.4,
+    top_p: 0.8,
+    output_config: { effort: "high", future_effort_option: true },
+    cache_control: { type: "ephemeral", ttl: "5m", scope: "global" },
+    fallback_credit_token: "opaque",
+    future_native_field: { enabled: true },
+    _gateway_compaction: true,
+    _json_schema: { type: "object" },
+  } as AnthropicMessagesPayload
+  const originalPayload = structuredClone(payload)
+
+  await createAnthropicMessages(payload, {
+    anthropicBeta: " beta-one,beta-two, beta-one ",
+    anthropicVersion: " 2023-06-01 ",
+    modelProviderPreference: " anthropic ",
+  })
+
+  expect(payload).toEqual(originalPayload)
+  expect(capturedBody).toMatchObject({
+    temperature: 0.4,
+    top_p: 0.8,
+    output_config: { effort: "high", future_effort_option: true },
+    cache_control: { type: "ephemeral", ttl: "5m" },
+    fallback_credit_token: "opaque",
+    future_native_field: { enabled: true },
+  })
+  expect(capturedBody).not.toHaveProperty("_gateway_compaction")
+  expect(capturedBody).not.toHaveProperty("_json_schema")
+  expect(capturedHeaders?.get("anthropic-beta")).toBe("beta-one,beta-two")
+  expect(capturedHeaders?.get("anthropic-version")).toBe("2023-06-01")
+  expect(capturedHeaders?.get("x-model-provider-preference")).toBe("anthropic")
+})
+
 test("fits explicitly marked native Messages compaction payloads", async () => {
   const oversizedOutput =
     "BEGIN-MESSAGES\n"
@@ -258,6 +346,7 @@ test("fits explicitly marked native Messages compaction payloads", async () => {
   await createAnthropicMessages(
     {
       model: "claude-opus-4.8",
+      max_tokens: 64,
       messages: [
         {
           role: "assistant",

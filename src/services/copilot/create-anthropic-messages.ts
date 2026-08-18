@@ -15,6 +15,10 @@ import { PRE_HEADER_MAX_DELAY_SECONDS } from "~/services/copilot/transport-retry
 
 import { fitAnthropicCompactionPayload } from "./compaction-payload"
 import { hasVisionContent } from "./copilot-client"
+import {
+  prepareAnthropicMessagesRequest,
+  serializeAnthropicMessagesRequest,
+} from "./messages-contract"
 
 /**
  * Native Anthropic Messages endpoint on the Copilot API.
@@ -30,34 +34,13 @@ import { hasVisionContent } from "./copilot-client"
  */
 
 export const ANTHROPIC_MESSAGES_ENDPOINT = "/v1/messages"
+const DEFAULT_BRIDGE_MAX_TOKENS = 64_000
 
 export function modelSupportsNativeMessages(
   model: { supported_endpoints?: Array<string> } | undefined,
 ): boolean {
   return getModelEndpointSupport(model).messages
 }
-
-/**
- * Fields the Copilot /v1/messages endpoint is known to accept. Anything else
- * (client extensions like `betas`, `container`, proxy-internal fields) is
- * stripped to avoid 400s.
- */
-const KNOWN_MESSAGES_FIELDS = new Set([
-  "model",
-  "messages",
-  "max_tokens",
-  "system",
-  "metadata",
-  "stop_sequences",
-  "stream",
-  "temperature",
-  "top_p",
-  "top_k",
-  "tools",
-  "tool_choice",
-  "thinking",
-  "output_config",
-])
 
 export interface AnthropicStreamChunk {
   event?: string
@@ -67,85 +50,6 @@ export interface AnthropicStreamChunk {
 export type CreateAnthropicMessagesReturn =
   | AnthropicResponse
   | AsyncIterable<AnthropicStreamChunk>
-
-type NativeCacheControl = {
-  type: "ephemeral"
-  ttl?: "5m" | "1h"
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-}
-
-function serializeMessagesPayload(payload: Record<string, unknown>): string {
-  return JSON.stringify(payload, (key, value: unknown) => {
-    if (
-      key !== "cache_control"
-      || !isRecord(value)
-      || value.type !== "ephemeral"
-    ) {
-      return value
-    }
-
-    const cacheControl: NativeCacheControl = { type: "ephemeral" }
-    if (value.ttl === "5m" || value.ttl === "1h") {
-      cacheControl.ttl = value.ttl
-    }
-    return cacheControl
-  })
-}
-
-function sanitizeMessagesPayload(
-  payload: AnthropicMessagesPayload,
-  options?: { preserveValidatedControls?: boolean },
-): Record<string, unknown> {
-  const source = payload as unknown as Record<string, unknown>
-  const result: Record<string, unknown> = {}
-  for (const key of KNOWN_MESSAGES_FIELDS) {
-    if (key in source && source[key] !== undefined) {
-      result[key] = source[key]
-    }
-  }
-
-  // Copilot's /v1/messages rejects temperature and top_p together, and the
-  // Anthropic API requires temperature=1 (or unset) when thinking is enabled.
-  if (payload.thinking) {
-    delete result.temperature
-    delete result.top_p
-  } else if (result.temperature !== undefined && result.top_p !== undefined) {
-    delete result.top_p
-  }
-
-  // Effort is model-gated upstream ("does not support reasoning effort").
-  const outputConfig = result.output_config as
-    | { effort?: string; [key: string]: unknown }
-    | undefined
-  if (
-    !options?.preserveValidatedControls
-    && outputConfig?.effort
-    && !modelSupportsEffort(payload.model)
-  ) {
-    consola.debug(
-      `Removing output_config.effort for ${payload.model}: model does not support reasoning effort`,
-    )
-    const { effort: _effort, ...rest } = outputConfig
-    if (Object.keys(rest).length > 0) {
-      result.output_config = rest
-    } else {
-      delete result.output_config
-    }
-  }
-
-  return result
-}
-
-function modelSupportsEffort(modelId: string): boolean {
-  const supports = state.models?.data.find((entry) => entry.id === modelId)
-    ?.capabilities.supports
-  const efforts = (supports as { reasoning_effort?: Array<string> } | undefined)
-    ?.reasoning_effort
-  return Array.isArray(efforts) && efforts.length > 0
-}
 
 export function detectAnthropicInitiator(
   messages: Array<AnthropicMessage>,
@@ -162,23 +66,83 @@ export function detectAnthropicInitiator(
   return "user"
 }
 
+function applyValidatedBridgeMaxTokens(
+  payload: AnthropicMessagesPayload,
+  preserveValidatedControls: boolean | undefined,
+): AnthropicMessagesPayload {
+  if (!preserveValidatedControls || payload.max_tokens !== undefined) {
+    return payload
+  }
+
+  return {
+    ...payload,
+    max_tokens:
+      state.models?.data.find((model) => model.id === payload.model)
+        ?.capabilities.limits?.max_output_tokens ?? DEFAULT_BRIDGE_MAX_TOKENS,
+  }
+}
+
 export const createAnthropicMessages = async (
   payload: AnthropicMessagesPayload,
   options?: {
+    anthropicBeta?: string
+    anthropicVersion?: string
     compaction?: boolean
     initiator?: "agent" | "user"
+    modelProviderPreference?: string
     preserveValidatedControls?: boolean
     signal?: AbortSignal
   },
 ): Promise<CreateAnthropicMessagesReturn> => {
+  const preparedPayload = applyValidatedBridgeMaxTokens(
+    payload,
+    options?.preserveValidatedControls,
+  )
+  const prepared = prepareAnthropicMessagesRequest({
+    anthropicBeta: options?.anthropicBeta,
+    anthropicVersion: options?.anthropicVersion,
+    modelProviderPreference: options?.modelProviderPreference,
+    payload: preparedPayload,
+    requireMaxTokens: true,
+  })
   const vision = hasVisionContent(payload.messages)
   const initiator =
     options?.initiator ?? detectAnthropicInitiator(payload.messages)
 
-  const sanitizedBody = sanitizeMessagesPayload(payload, options)
+  return await dispatchAnthropicMessages({
+    initiator,
+    options,
+    payload,
+    preparedBody: prepared.body,
+    preparedHeaders: prepared.headers,
+    vision,
+  })
+}
+
+async function dispatchAnthropicMessages(options: {
+  initiator: "agent" | "user"
+  options:
+    | {
+        compaction?: boolean
+        signal?: AbortSignal
+      }
+    | undefined
+  payload: AnthropicMessagesPayload
+  preparedBody: Record<string, unknown>
+  preparedHeaders: {
+    anthropicBeta?: string
+    anthropicVersion: string
+    modelProviderPreference?: string
+  }
+  vision: boolean
+}): Promise<CreateAnthropicMessagesReturn> {
+  const { initiator, payload, preparedBody, preparedHeaders, vision } = options
+
   const fitted =
-    options?.compaction ? fitAnthropicCompactionPayload(sanitizedBody) : null
-  const body = fitted?.payload ?? sanitizedBody
+    options.options?.compaction ?
+      fitAnthropicCompactionPayload(preparedBody)
+    : null
+  const body = fitted?.payload ?? preparedBody
   if (fitted?.reduced) {
     consola.warn("Reduced oversized native Messages compaction payload", {
       originalBytes: fitted.originalBytes,
@@ -192,12 +156,12 @@ export const createAnthropicMessages = async (
     ANTHROPIC_MESSAGES_ENDPOINT,
     {
       method: "POST",
-      body: serializeMessagesPayload(body),
-      signal: options?.signal,
+      body: serializeAnthropicMessagesRequest(body),
+      signal: options.options?.signal,
     },
     {
       modelId: payload.model,
-      headerOptions: { vision, initiator, anthropicVersion: "2023-06-01" },
+      headerOptions: { vision, initiator, ...preparedHeaders },
       maxHttpRetryDelaySeconds:
         payload.stream ? PRE_HEADER_MAX_DELAY_SECONDS : undefined,
     },
