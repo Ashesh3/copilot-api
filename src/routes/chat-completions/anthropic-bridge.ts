@@ -28,10 +28,7 @@ import {
 } from "~/lib/attachments"
 import { assertEndpointTranslationSupported, isAbortError } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
-import {
-  recordNonDefaultBehavior,
-  setRequestContext,
-} from "~/lib/request-logger"
+import { setRequestContext } from "~/lib/request-logger"
 import {
   createSentryChatSpanOptions,
   setSentryOutputMessages,
@@ -78,15 +75,6 @@ export async function executeAnthropicBridge(
 ): Promise<Response> {
   const { payload, requestedModel, selectedModel } = options
 
-  recordNonDefaultBehavior(c, {
-    kind: "endpoint_fallback",
-    message: `PDF file attachment routed ${payload.model} to native /v1/messages`,
-    data: {
-      model: payload.model,
-      sourceEndpoint: "ChatCompletions",
-      targetEndpoint: "AnthropicMessages",
-    },
-  })
   setRequestContext(c, { provider: "ChatCompletions→AnthropicMessages" })
 
   const anthropicPayload = await chatPayloadToAnthropic(

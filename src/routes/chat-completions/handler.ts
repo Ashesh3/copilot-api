@@ -4,6 +4,7 @@ import * as Sentry from "@sentry/bun"
 import consola from "consola"
 import { streamSSE, type SSEMessage } from "hono/streaming"
 
+import type { EndpointRouteDecision } from "~/lib/endpoint-routing"
 import type { Model } from "~/services/copilot/get-models"
 
 import { getLastUsedAccountId } from "~/lib/account-router"
@@ -14,7 +15,7 @@ import {
   resolveCustomProviderModel,
   type CustomProviderModelReference,
 } from "~/lib/custom-providers"
-import { isAbortError } from "~/lib/error"
+import { createEndpointTranslationError, isAbortError } from "~/lib/error"
 import {
   applyModelRedirect,
   formatModelRedirectResult,
@@ -42,7 +43,6 @@ import { state } from "~/lib/state"
 import { tokenPool } from "~/lib/token-pool"
 import { getTokenCount } from "~/lib/tokenizer"
 import { emitChatCompletionsToolSpans } from "~/lib/tool-spans"
-import { modelSupportsNativeMessages } from "~/services/copilot/create-anthropic-messages"
 import {
   createChatCompletions,
   createChatCompletionsWithProcessedPayload,
@@ -64,8 +64,11 @@ import { executeAnthropicBridge } from "./anthropic-bridge"
 import { normalizeChatCompletionsRequest } from "./chat-contract"
 import {
   executeResponsesFallback,
-  shouldUseResponsesFallback,
+  recordChatEndpointFallback,
+  selectChatUpstreamEndpoint,
 } from "./responses-fallback-executor"
+
+export { selectChatUpstreamEndpoint } from "./responses-fallback-executor"
 
 export async function handleCompletion(c: Context) {
   const rawPayload = await c.req.json<ChatCompletionsPayload>()
@@ -188,6 +191,9 @@ async function handleCompletionInner(
     (model) => model.id === payload.model,
   )
 
+  const decision = selectChatUpstreamEndpoint({ payload, selectedModel })
+  if ("code" in decision) throw createEndpointTranslationError(decision)
+
   await setInputTokenContext(c, payload, selectedModel)
 
   if (state.manualApprove) await awaitApproval()
@@ -197,71 +203,49 @@ async function handleCompletionInner(
     requestedModel,
     reasoningEffort,
     selectedModel,
+    decision,
   })
 }
 
-/**
- * Pick the upstream endpoint. PDF file parts cannot ride /chat/completions
- * upstream, so file-bearing payloads route to /responses or native
- * /v1/messages when the model supports one of them.
- */
 async function dispatchCopilotCompletion(
   c: Context,
   options: {
+    decision: EndpointRouteDecision
     payload: ChatCompletionsPayload & { model: string }
     requestedModel: string
     reasoningEffort?: ReasoningEffort
     selectedModel: Model | undefined
   },
 ) {
-  const { payload, requestedModel, reasoningEffort, selectedModel } = options
-  const hasFileParts = payloadHasFileParts(payload)
-  const hasNativeWebSearch =
-    payload.tools?.some((tool) => isWebSearchToolType(tool)) ?? false
+  const { decision, payload, requestedModel, reasoningEffort, selectedModel } =
+    options
+  if (decision.translated) recordChatEndpointFallback(c, payload, decision)
 
-  if (
-    shouldUseResponsesFallback(selectedModel)
-    || (hasNativeWebSearch && supportsResponsesEndpoint(selectedModel))
-    || (hasFileParts && supportsResponsesEndpoint(selectedModel))
-  ) {
-    return await executeResponsesFallback(c, {
-      payload,
-      requestedModel,
-      reasoningEffort,
-      ...(hasFileParts ? { reason: "PDF file attachment" } : {}),
-      ...(!hasFileParts && hasNativeWebSearch ?
-        { reason: "Hosted web search" }
-      : {}),
-    })
+  switch (decision.target) {
+    case "/responses": {
+      return await executeResponsesFallback(c, {
+        payload,
+        requestedModel,
+        reasoningEffort,
+      })
+    }
+    case "/v1/messages": {
+      return await executeAnthropicBridge(c, {
+        payload,
+        requestedModel,
+        selectedModel,
+      })
+    }
+    case "/chat/completions": {
+      if (payload.tools?.some((tool) => isWebSearchToolType(tool))) {
+        convertHostedWebSearchTools(payload)
+      }
+      return await executeRequest(c, payload, requestedModel)
+    }
+    default: {
+      throw new Error("Unsupported Chat endpoint route")
+    }
   }
-
-  if (hasNativeWebSearch) {
-    convertHostedWebSearchTools(payload)
-  }
-
-  if (hasFileParts && modelSupportsNativeMessages(selectedModel)) {
-    return await executeAnthropicBridge(c, {
-      payload,
-      requestedModel,
-      selectedModel,
-    })
-  }
-
-  return await executeRequest(c, payload, requestedModel)
-}
-
-function payloadHasFileParts(payload: ChatCompletionsPayload): boolean {
-  return payload.messages.some(
-    (message) =>
-      Array.isArray(message.content)
-      && message.content.some((part) => part.type === "file"),
-  )
-}
-
-function supportsResponsesEndpoint(
-  selectedModel: { supported_endpoints?: Array<string> } | undefined,
-): boolean {
-  return selectedModel?.supported_endpoints?.includes("/responses") ?? false
 }
 
 function getCopilotModelIds(): Set<string> {

@@ -5,6 +5,7 @@ import {
   beforeEach,
   expect,
   mock,
+  spyOn,
   test,
 } from "bun:test"
 
@@ -325,6 +326,33 @@ test("routes legacy chat completions requests for responses-only models through 
     prompt_tokens_details: { cached_tokens: 1 },
     completion_tokens_details: { reasoning_tokens: 2 },
   })
+})
+
+test("records one endpoint fallback event for a translated Chat request", async () => {
+  const infoSpy = spyOn(console, "info").mockImplementation(() => undefined)
+
+  try {
+    const response = await server.request("/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-5.5",
+        messages: [{ role: "user", content: "Say hello." }],
+        stream: false,
+      }),
+    })
+
+    expect(response.status).toBe(200)
+    const fallbackEvents = infoSpy.mock.calls.filter(
+      ([message]) =>
+        typeof message === "string"
+        && message.includes("[NON-DEFAULT]")
+        && message.includes("endpoint_fallback"),
+    )
+    expect(fallbackEvents).toHaveLength(1)
+  } finally {
+    infoSpy.mockRestore()
+  }
 })
 
 test("rejects a lossy Chat to Responses fallback before upstream dispatch", async () => {

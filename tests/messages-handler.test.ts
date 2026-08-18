@@ -1,3 +1,4 @@
+/* eslint-disable max-lines */
 import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
 
 import type { ChatCompletionsPayload } from "../src/services/copilot/create-chat-completions"
@@ -772,6 +773,17 @@ test("rewrites final assistant message after model redirects when prefill is uns
 })
 
 test("applies final self-redirect effort on direct chat completions requests", async () => {
+  state.models = structuredClone(upstreamMaxReasoningModels)
+  Object.assign(state.models.data[0], {
+    id: "claude-opus-4.7-1m-internal",
+    supported_endpoints: undefined,
+  })
+  setModelSettingsForTest([
+    {
+      model: "claude-opus-4.7-1m-internal",
+      supportedReasoningEfforts: ["low", "medium", "high", "max", "xhigh"],
+    },
+  ])
   setModelRedirectsForTest([
     {
       id: "opus-47-to-internal",
@@ -843,6 +855,11 @@ test("does not send custom reasoning effort for implicit-default models", async 
 })
 
 test("strips custom reasoning effort for direct implicit-default chat completions", async () => {
+  state.models = structuredClone(upstreamMaxReasoningModels)
+  Object.assign(state.models.data[0], {
+    id: "claude-implicit-medium",
+    supported_endpoints: undefined,
+  })
   setModelSettingsForTest([
     {
       model: "claude-implicit-medium",

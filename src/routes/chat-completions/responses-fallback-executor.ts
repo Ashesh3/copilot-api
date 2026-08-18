@@ -7,9 +7,15 @@ import { streamSSE } from "hono/streaming"
 
 import type { ReasoningEffort } from "~/lib/model-suffix"
 import type { ChatCompletionsPayload } from "~/services/copilot/create-chat-completions"
+import type { Model } from "~/services/copilot/get-models"
 
 import { getLastUsedAccountId } from "~/lib/account-router"
-import { getModelEndpointSupport } from "~/lib/endpoint-routing"
+import {
+  type EndpointRouteDecision,
+  type EndpointRouteFailure,
+  getModelEndpointSupport,
+  selectCopilotEndpoint,
+} from "~/lib/endpoint-routing"
 import { isAbortError } from "~/lib/error"
 import {
   recordNonDefaultBehavior,
@@ -40,7 +46,10 @@ import {
   type ResponsesPayload,
   type ResponsesResult,
 } from "~/services/copilot/create-responses"
-import { isResponsesWebSearchFunctionTool } from "~/services/copilot/mcp-web-search"
+import {
+  isResponsesWebSearchFunctionTool,
+  isWebSearchToolType,
+} from "~/services/copilot/mcp-web-search"
 
 import {
   chatCompletionsToResponses,
@@ -48,13 +57,15 @@ import {
   responsesResultToChatCompletion,
   streamResponsesAsChatCompletions,
 } from "./responses-fallback"
+import {
+  checkChatToMessagesTranslation,
+  checkChatToResponsesTranslation,
+} from "./translation-fidelity"
 
 interface ResponsesFallbackOptions {
   payload: ChatCompletionsPayload & { model: string }
   requestedModel: string
   reasoningEffort?: ReasoningEffort
-  /** Override for the fallback log message (default: endpoint capability). */
-  reason?: string
 }
 
 interface PreparedResponsesFallback {
@@ -73,18 +84,144 @@ interface UnexpectedNonStreamOptions {
   span: Sentry.Span
 }
 
-export function shouldUseResponsesFallback(
-  selectedModel: { supported_endpoints?: Array<string> } | undefined,
-): boolean {
+export function selectChatUpstreamEndpoint(options: {
+  payload: ChatCompletionsPayload
+  selectedModel: Model | undefined
+}): EndpointRouteDecision | EndpointRouteFailure {
+  const { payload, selectedModel } = options
   const support = getModelEndpointSupport(selectedModel)
-  return support.responses && !support.chat
+  const messagesCheck = checkChatToMessagesTranslation(payload)
+  const responsesCheck = checkChatToResponsesTranslation(payload)
+  const hasFileParts = payloadHasFileParts(payload)
+  const prefersMessages =
+    hasFileParts
+    || payloadHasAnthropicSignedReasoning(payload)
+    || (payload.thinking_budget !== undefined
+      && payload.thinking_budget !== null)
+  const prefersResponses =
+    payloadHasResponsesNativeTool(payload)
+    || payloadHasOpenAiReasoningState(payload)
+  const chatCandidate = {
+    endpoint: "/chat/completions" as const,
+    reason: "endpoint_unavailable" as const,
+    check: { supported: true, blockers: [] },
+  }
+  const payloadRequirementReason = "payload_requirement" as const
+  const messagesCandidate = {
+    endpoint: "/v1/messages" as const,
+    reason:
+      prefersMessages ?
+        payloadRequirementReason
+      : ("endpoint_unavailable" as const),
+    check: messagesCheck,
+  }
+  const responsesCandidate = {
+    endpoint: "/responses" as const,
+    reason:
+      prefersResponses || prefersMessages ?
+        payloadRequirementReason
+      : ("endpoint_unavailable" as const),
+    check: responsesCheck,
+  }
+
+  let candidates = [chatCandidate, messagesCandidate, responsesCandidate]
+  if (prefersMessages) {
+    candidates = [
+      messagesCandidate,
+      responsesCandidate,
+      ...(hasFileParts ? [] : [chatCandidate]),
+    ]
+  } else if (prefersResponses) {
+    candidates = [responsesCandidate, messagesCandidate, chatCandidate]
+  }
+
+  return selectCopilotEndpoint({ source: "chat", support, candidates })
+}
+
+export function recordChatEndpointFallback(
+  c: Context,
+  payload: ChatCompletionsPayload,
+  decision: EndpointRouteDecision,
+): void {
+  const targetName =
+    decision.target === "/responses" ? "Responses" : "native /v1/messages"
+  let reason: string | undefined
+  if (payloadHasFileParts(payload)) {
+    reason = "PDF file attachment"
+  } else if (payloadHasHostedWebSearch(payload)) {
+    reason = "Hosted web search"
+  } else if (decision.reason === "payload_requirement") {
+    reason = "Payload requirements"
+  }
+  const targetEndpoint =
+    decision.target === "/responses" ? "Responses" : "AnthropicMessages"
+  recordNonDefaultBehavior(c, {
+    kind: "endpoint_fallback",
+    message:
+      reason ?
+        `${reason} routed ${payload.model} to ${targetName}`
+      : `Model ${payload.model} does not support /chat/completions; falling back to ${targetName}`,
+    data: {
+      model: payload.model,
+      sourceEndpoint: "ChatCompletions",
+      targetEndpoint,
+      ...(reason ? { reason } : {}),
+    },
+  })
+}
+
+function payloadHasFileParts(payload: ChatCompletionsPayload): boolean {
+  return payload.messages.some(
+    (message) =>
+      Array.isArray(message.content)
+      && message.content.some((part) => part.type === "file"),
+  )
+}
+
+function payloadHasHostedWebSearch(payload: ChatCompletionsPayload): boolean {
+  return payload.tools?.some((tool) => isWebSearchToolType(tool)) ?? false
+}
+
+function payloadHasResponsesNativeTool(
+  payload: ChatCompletionsPayload,
+): boolean {
+  return (
+    payload.tools?.some(
+      (tool) => (tool as { type?: string }).type !== "function",
+    ) ?? false
+  )
+}
+
+function payloadHasAnthropicSignedReasoning(
+  payload: ChatCompletionsPayload,
+): boolean {
+  return payload.messages.some(
+    (message) =>
+      message.role === "assistant"
+      && typeof message.reasoning_text === "string"
+      && message.reasoning_text.trim().length > 0
+      && typeof message.reasoning_opaque === "string"
+      && message.reasoning_opaque.trim().length > 0
+      && !message.reasoning_opaque.includes("@")
+      && !message.encrypted_content,
+  )
+}
+
+function payloadHasOpenAiReasoningState(
+  payload: ChatCompletionsPayload,
+): boolean {
+  return payload.messages.some(
+    (message) =>
+      Boolean(message.encrypted_content)
+      || (typeof message.reasoning_opaque === "string"
+        && message.reasoning_opaque.includes("@")),
+  )
 }
 
 export async function executeResponsesFallback(
   c: Context,
   options: ResponsesFallbackOptions,
 ): Promise<Response> {
-  reportEndpointFallback(c, options.payload.model, options.reason)
   setRequestContext(c, { provider: "ChatCompletions→Responses" })
 
   const prepared = prepareResponsesFallback(options)
@@ -112,26 +249,6 @@ function prepareResponsesFallback(
     vision: hasVisionContent(options.payload.messages),
     initiator: detectInitiator(options.payload.messages),
   }
-}
-
-function reportEndpointFallback(
-  c: Context,
-  model: string,
-  reason?: string,
-): void {
-  recordNonDefaultBehavior(c, {
-    kind: "endpoint_fallback",
-    message:
-      reason ?
-        `${reason} routed ${model} to Responses`
-      : `Model ${model} does not support /chat/completions; falling back to Responses`,
-    data: {
-      model,
-      sourceEndpoint: "ChatCompletions",
-      targetEndpoint: "Responses",
-      ...(reason ? { reason } : {}),
-    },
-  })
 }
 
 async function executeNonStreamingResponsesFallback(
