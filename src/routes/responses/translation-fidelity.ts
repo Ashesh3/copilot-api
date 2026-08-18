@@ -259,7 +259,11 @@ function scanItemContent(
   let field: "content" | "output" | undefined
   if (type === undefined || type === "message") field = "content"
   else if (type === "function_call_output") field = "output"
-  if (!field || !Object.hasOwn(item, field)) return
+  if (!field) return
+  if (!Object.hasOwn(item, field)) {
+    if (field === "output") addBlocker(blockers, "content_type")
+    return
+  }
 
   const content = item[field]
   if (typeof content === "string") return

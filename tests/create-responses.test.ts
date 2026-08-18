@@ -399,6 +399,42 @@ test.each([
   },
 )
 
+test("rejects omitted function output before chat fallback reaches upstream", async () => {
+  const modelId = "chat-only-missing-function-output"
+  state.models = {
+    object: "list",
+    data: [
+      {
+        ...responsesCapableModels.data[0],
+        id: modelId,
+        name: modelId,
+        supported_endpoints: ["/chat/completions"],
+      },
+    ],
+  }
+
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: modelId,
+      input: [{ type: "function_call_output", call_id: "call_1" }],
+    }),
+  })
+
+  expect(response.status).toBe(400)
+  expect(fetchMock).not.toHaveBeenCalled()
+  expect(await response.json()).toEqual({
+    error: {
+      code: "endpoint_translation_unsupported",
+      message:
+        "The selected Copilot model cannot accept this request without losing required protocol data.",
+      param: "content_type",
+      type: "invalid_request_error",
+    },
+  })
+})
+
 test("preserves prompt and conversation_id when sending Responses API requests", async () => {
   const prompt = {
     id: "pmpt_123",

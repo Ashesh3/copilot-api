@@ -1217,6 +1217,57 @@ test.each([
   ).not.toContain("SECRET_")
 })
 
+test("rejects omitted function output on both Responses translation targets", () => {
+  const payload = {
+    model: "chat-only",
+    input: [{ type: "function_call_output", call_id: "call_1" }],
+  } as ResponsesPayload
+
+  expect(checkResponsesToChatTranslation(payload)).toEqual({
+    supported: false,
+    blockers: ["content_type"],
+  })
+  expect(checkResponsesToMessagesTranslation(payload)).toEqual({
+    supported: false,
+    blockers: ["content_type"],
+  })
+
+  try {
+    responsesToChatCompletions(payload)
+    throw new TypeError("Expected translation to reject before conversion")
+  } catch (error) {
+    expect(error).toBeInstanceOf(LocalHTTPError)
+    expect((error as LocalHTTPError).clientBody).toEqual({
+      error: {
+        code: "endpoint_translation_unsupported",
+        message:
+          "The selected Copilot model cannot accept this request without losing required protocol data.",
+        param: "content_type",
+        type: "invalid_request_error",
+      },
+    })
+  }
+})
+
+test("keeps omitted message content under its permitted Responses semantics", () => {
+  const payload = {
+    model: "chat-only",
+    input: [{ type: "message", role: "user" }],
+  } as ResponsesPayload
+
+  expect(checkResponsesToChatTranslation(payload)).toEqual({
+    supported: true,
+    blockers: [],
+  })
+  expect(checkResponsesToMessagesTranslation(payload)).toEqual({
+    supported: true,
+    blockers: [],
+  })
+  expect(responsesToChatCompletions(payload).messages).toEqual([
+    { role: "user", content: "" },
+  ])
+})
+
 test("blocks accepted Responses client_metadata on both translation targets", () => {
   const payload = {
     model: "gpt-current",
