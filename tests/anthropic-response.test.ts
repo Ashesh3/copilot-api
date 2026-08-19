@@ -514,6 +514,152 @@ describe("OpenAI to Anthropic Streaming Response Translation", () => {
     ).toMatchObject({ copilot_usage: { total_nano_aiu: 456 } })
   })
 
+  test("attaches Copilot usage when it arrives after the finish reason", () => {
+    const state: AnthropicStreamState = {
+      messageStartSent: true,
+      contentBlockIndex: 0,
+      contentBlockOpen: false,
+      toolCalls: {},
+    }
+    const finishChunk: ChatCompletionChunk = {
+      id: "cmpl-late-meta",
+      object: "chat.completion.chunk",
+      created: 1,
+      model: "gpt-current",
+      choices: [
+        {
+          index: 0,
+          delta: {},
+          finish_reason: "stop",
+          logprobs: null,
+        },
+      ],
+    }
+    const usageChunk = {
+      id: "cmpl-late-meta",
+      object: "chat.completion.chunk",
+      created: 1,
+      model: "gpt-current",
+      choices: [],
+      usage: {
+        prompt_tokens: 5,
+        completion_tokens: 3,
+        total_tokens: 8,
+      },
+      copilot_usage: { total_nano_aiu: 123 },
+    } as ChatCompletionChunk & {
+      copilot_usage: { total_nano_aiu: number }
+    }
+
+    const finishEvents = translateChunkToAnthropicEvents(finishChunk, state)
+    const usageEvents = translateChunkToAnthropicEvents(usageChunk, state)
+
+    expect(finishEvents).toEqual([])
+    expect(usageEvents).toEqual([
+      {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn", stop_sequence: null },
+        usage: {
+          input_tokens: 5,
+          output_tokens: 3,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+        },
+        copilot_usage: { total_nano_aiu: 123 },
+      },
+      { type: "message_stop" },
+    ])
+    expect(streamTranslation.createFallbackMessageDeltaEvents(state)).toEqual(
+      [],
+    )
+  })
+
+  test("retains usage and Copilot metadata that arrive before the finish reason", () => {
+    const state: AnthropicStreamState = {
+      messageStartSent: true,
+      contentBlockIndex: 0,
+      contentBlockOpen: false,
+      toolCalls: {},
+    }
+    const usageChunk = {
+      id: "cmpl-early-meta",
+      object: "chat.completion.chunk",
+      created: 1,
+      model: "gpt-current",
+      choices: [],
+      usage: {
+        prompt_tokens: 7,
+        completion_tokens: 4,
+        total_tokens: 11,
+      },
+      copilot_usage: { total_nano_aiu: 456 },
+    } as ChatCompletionChunk & {
+      copilot_usage: { total_nano_aiu: number }
+    }
+    const finishChunk: ChatCompletionChunk = {
+      id: "cmpl-early-meta",
+      object: "chat.completion.chunk",
+      created: 1,
+      model: "gpt-current",
+      choices: [
+        {
+          index: 0,
+          delta: {},
+          finish_reason: "stop",
+          logprobs: null,
+        },
+      ],
+    }
+
+    expect(translateChunkToAnthropicEvents(usageChunk, state)).toEqual([])
+    expect(translateChunkToAnthropicEvents(finishChunk, state)).toMatchObject([
+      {
+        type: "message_delta",
+        usage: { input_tokens: 7, output_tokens: 4 },
+        copilot_usage: { total_nano_aiu: 456 },
+      },
+      { type: "message_stop" },
+    ])
+  })
+
+  test("closes a finish-only stream without inventing Copilot metadata", () => {
+    const state: AnthropicStreamState = {
+      messageStartSent: true,
+      contentBlockIndex: 0,
+      contentBlockOpen: false,
+      toolCalls: {},
+    }
+    const finishChunk: ChatCompletionChunk = {
+      id: "cmpl-no-usage",
+      object: "chat.completion.chunk",
+      created: 1,
+      model: "gpt-current",
+      choices: [
+        {
+          index: 0,
+          delta: {},
+          finish_reason: "stop",
+          logprobs: null,
+        },
+      ],
+    }
+
+    expect(translateChunkToAnthropicEvents(finishChunk, state)).toEqual([])
+    expect(streamTranslation.createFallbackMessageDeltaEvents(state)).toEqual([
+      {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn", stop_sequence: null },
+        usage: {
+          input_tokens: 0,
+          output_tokens: 0,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+        },
+      },
+      { type: "message_stop" },
+    ])
+  })
+
   test("should translate a simple text stream correctly", () => {
     const openAIStream: Array<ChatCompletionChunk> = [
       {

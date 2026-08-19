@@ -213,6 +213,7 @@ export function translateChunkToAnthropicEvents(
         ...createMessageDeltaEvents(
           state.pendingFinishReason,
           state.pendingUsage,
+          state.pendingCopilotUsage,
         ),
       )
       state.messageDeltaSent = true
