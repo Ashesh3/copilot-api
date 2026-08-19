@@ -6,7 +6,6 @@ import type { SafeHttpErrorInspection } from "~/lib/error"
 import type { RoutingAffinity } from "~/lib/routing-affinity"
 import type { NativeMessagesRequestOptions } from "~/routes/messages/native-handler"
 
-import { runWithCopilotRequestAttribution } from "~/lib/copilot-request-context"
 import { resolveRequestCredential } from "~/lib/credential-resolver"
 import { isHTTPError } from "~/lib/error"
 import {
@@ -23,6 +22,7 @@ import {
 } from "~/lib/model-suffix"
 import { resolveProtectedCredential } from "~/lib/protected-credential"
 import { reportNonDefaultBehavior } from "~/lib/request-logger"
+import { getCopilotResponseHeaders } from "~/lib/request-session"
 import {
   resolveResponsesRoutingAffinity,
   resolveRoutingAffinityFromHeaders,
@@ -68,6 +68,7 @@ import {
   WebSocketRequestError,
 } from "./websocket-lifecycle"
 import {
+  addResponsesWebSocketMetadata,
   mergeContinuationInput,
   parseResponsesWebSocketFrame,
   rehydrateContinuationPayloadFromSnapshot,
@@ -196,16 +197,19 @@ export const responsesWebSocket = {
         ws.data,
         parsedPayload,
       )
-      await runWithCopilotRequestAttribution(attribution, async () => {
-        await runWithWebSocketRequestContext(affinity, turn, async () => {
+      await runWithWebSocketRequestContext(
+        affinity,
+        attribution,
+        turn,
+        async () => {
           await handleResponseCreate(ws, {
             initiator,
             payload,
             requestedModel,
             turn,
           })
-        })
-      })
+        },
+      )
       if (!turn.finalized) {
         throw new WebSocketRequestError(
           "Responses stream ended without a terminal frame",
@@ -369,11 +373,7 @@ async function handleResponseCreate(
 
   if (!isAsyncIterable(response)) {
     // Shouldn't happen since we forced stream: true, but handle gracefully
-    ws.send(JSON.stringify({ type: "response.completed", response }))
-    finalizeResponsesWebSocketTurn(ws.data, turn, {
-      status: 200,
-      terminalStatus: "COMPLETE",
-    })
+    handleNonStreamingResponsesResult(ws, response, turn)
     return
   }
 
@@ -383,7 +383,10 @@ async function handleResponseCreate(
     if (!data) continue
 
     const event = (chunk as { event?: string }).event
-    const processed = fixStreamIds(data, event, idTracker)
+    const processed = addResponsesWebSocketMetadata(
+      fixStreamIds(data, event, idTracker),
+      getCopilotResponseHeaders(),
+    )
     recordResponseSnapshotFromFrame(
       ws.data.responseSnapshots,
       preparedPayload,
@@ -393,6 +396,21 @@ async function handleResponseCreate(
     finalizeFromResponsesFrame(ws.data, turn, processed)
     if (turn.lifecycle?.isFinalized()) break
   }
+}
+
+function handleNonStreamingResponsesResult(
+  ws: ResponsesWebSocketState,
+  response: ResponsesResult,
+  turn: ResponsesWebSocketTurn,
+): void {
+  sendResponsesWebSocketFrame(
+    ws,
+    JSON.stringify({ type: "response.completed", response }),
+  )
+  finalizeResponsesWebSocketTurn(ws.data, turn, {
+    status: 200,
+    terminalStatus: "COMPLETE",
+  })
 }
 
 async function dispatchTranslatedWebSocketEndpoint(options: {
@@ -711,7 +729,8 @@ function handleSyntheticWarmupRequest(
     top_p: payload.top_p ?? null,
   }
 
-  ws.send(
+  sendResponsesWebSocketFrame(
+    ws,
     JSON.stringify({
       type: "response.created",
       sequence_number: 0,
@@ -730,7 +749,7 @@ function handleSyntheticWarmupRequest(
       status: "completed",
     },
   })
-  ws.send(completedFrame)
+  sendResponsesWebSocketFrame(ws, completedFrame)
   finalizeFromResponsesFrame(ws.data, turn, completedFrame)
 }
 
@@ -756,13 +775,14 @@ async function streamAnthropicMessagesOverWs(options: {
   const wsStream = {
     // eslint-disable-next-line @typescript-eslint/require-await
     writeSSE: async (data: { event?: string; data: string }) => {
-      recordResponseSnapshotFromFrame(
-        ws.data.responseSnapshots,
-        payload,
+      if (data.data === "[DONE]") return
+      const frame = addResponsesWebSocketMetadata(
         data.data,
+        getCopilotResponseHeaders(),
       )
-      ws.send(data.data)
-      finalizeFromResponsesFrame(ws.data, turn, data.data)
+      recordResponseSnapshotFromFrame(ws.data.responseSnapshots, payload, frame)
+      ws.send(frame)
+      finalizeFromResponsesFrame(ws.data, turn, frame)
     },
   }
   await emitResponsesResultAsWebSocketFrames(wsStream, result)
@@ -846,13 +866,14 @@ async function streamChatCompletionsOverWs(options: {
   const wsStream = {
     // eslint-disable-next-line @typescript-eslint/require-await
     writeSSE: async (data: { event?: string; data: string }) => {
-      recordResponseSnapshotFromFrame(
-        ws.data.responseSnapshots,
-        payload,
+      if (data.data === "[DONE]") return
+      const frame = addResponsesWebSocketMetadata(
         data.data,
+        getCopilotResponseHeaders(),
       )
-      ws.send(data.data)
-      finalizeFromResponsesFrame(ws.data, turn, data.data)
+      recordResponseSnapshotFromFrame(ws.data.responseSnapshots, payload, frame)
+      ws.send(frame)
+      finalizeFromResponsesFrame(ws.data, turn, frame)
     },
   }
 
@@ -890,13 +911,14 @@ async function streamChatWebSearchOverWs(options: {
   const wsStream = {
     // eslint-disable-next-line @typescript-eslint/require-await
     writeSSE: async (data: { event?: string; data: string }) => {
-      recordResponseSnapshotFromFrame(
-        ws.data.responseSnapshots,
-        payload,
+      if (data.data === "[DONE]") return
+      const frame = addResponsesWebSocketMetadata(
         data.data,
+        getCopilotResponseHeaders(),
       )
-      ws.send(data.data)
-      finalizeFromResponsesFrame(ws.data, turn, data.data)
+      recordResponseSnapshotFromFrame(ws.data.responseSnapshots, payload, frame)
+      ws.send(frame)
+      finalizeFromResponsesFrame(ws.data, turn, frame)
     },
   }
   await streamChatCompletionsAsResponses(
@@ -946,6 +968,13 @@ function chatResponseAsStream(
       yield { data: "[DONE]" }
     },
   }
+}
+
+function sendResponsesWebSocketFrame(
+  ws: ResponsesWebSocketState,
+  frame: string,
+): void {
+  ws.send(addResponsesWebSocketMetadata(frame, getCopilotResponseHeaders()))
 }
 
 export function recordResponseSnapshotFromFrame(

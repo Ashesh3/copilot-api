@@ -20,10 +20,17 @@ import type {
 import type { ModelsResponse } from "../src/services/copilot/get-models"
 
 import { setConfigForTest } from "../src/lib/config"
+import { getCopilotRequestAttribution } from "../src/lib/copilot-request-context"
 import { HTTPError, LocalHTTPError } from "../src/lib/error"
 import { isIpBlocked, resetIpSecurityForTest } from "../src/lib/ip-blocker"
 import { setModelRedirectsForTest } from "../src/lib/model-redirect"
-import { createRoutingTelemetryRequestState } from "../src/lib/request-session"
+import {
+  createRoutingTelemetryRequestState,
+  getCopilotResponseHeaders,
+  getLastUsedRoutedAccountId,
+  setCopilotResponseHeader,
+  setLastUsedRoutedAccountId,
+} from "../src/lib/request-session"
 import {
   getRoutingAffinity,
   type RoutingAffinity,
@@ -49,6 +56,7 @@ import {
   createResponsesWebSocketTurn,
   runWithWebSocketRequestContext,
 } from "../src/routes/responses/websocket-lifecycle"
+import { addResponsesWebSocketMetadata } from "../src/routes/responses/websocket-protocol"
 import { COMPACTION_PAYLOAD_MAX_BYTES } from "../src/services/copilot/compaction-payload"
 import {
   CAPI_RESPONSES_MAX_REQUEST_BYTES,
@@ -723,6 +731,91 @@ describe("responses websocket message handling", () => {
     expect(lastRequestBody).not.toHaveProperty("parent_agent_id")
   })
 
+  test("applies independent per-turn attribution while preserving connection identity", async () => {
+    state.copilotToken = "copilot-token"
+    state.models = responsesCapableModels
+    queuedResponses.push(
+      createResponsesSseResponse("resp_turn_one"),
+      createResponsesSseResponse("resp_turn_two"),
+    )
+    const ws = createTestWebSocket()
+
+    for (const turn of [
+      {
+        agentTaskId: "task-one",
+        clientExperiment: "experiment:one;",
+        clientMachineId: "machine-one",
+        input: "first",
+        interactionType: "conversation-subagent",
+        parentAgentId: "parent-one",
+      },
+      {
+        agentTaskId: "task-two",
+        clientExperiment: "experiment:two;",
+        clientMachineId: "machine-two",
+        input: "second",
+        interactionType: "conversation-background",
+        parentAgentId: "parent-two",
+      },
+    ]) {
+      await responsesWebSocket.message(
+        ws,
+        JSON.stringify({
+          agent_task_id: turn.agentTaskId,
+          headers: {
+            Authorization: `Bearer spoof-${turn.input}`,
+            "Copilot-Session-Token": `session-spoof-${turn.input}`,
+            "X-Copilot-Client-Exp-Assignment-Context": turn.clientExperiment,
+            "X-Client-Machine-Id": turn.clientMachineId,
+            "X-GitHub-User": `user-spoof-${turn.input}`,
+            "X-Interaction-Type": turn.interactionType,
+          },
+          input: turn.input,
+          model: "gpt-5.4",
+          parent_agent_id: turn.parentAgentId,
+          type: "response.create",
+        }),
+      )
+    }
+
+    expect(capturedUpstreamHeaders).toHaveLength(2)
+    for (const [index, expected] of [
+      {
+        agentTaskId: "task-one",
+        clientExperiment: "experiment:one;",
+        clientMachineId: "machine-one",
+        interactionType: "conversation-subagent",
+        parentAgentId: "parent-one",
+      },
+      {
+        agentTaskId: "task-two",
+        clientExperiment: "experiment:two;",
+        clientMachineId: "machine-two",
+        interactionType: "conversation-background",
+        parentAgentId: "parent-two",
+      },
+    ].entries()) {
+      const headers = capturedUpstreamHeaders[index]
+      expect(headers.get("x-agent-task-id")).toBe(expected.agentTaskId)
+      expect(headers.get("x-parent-agent-id")).toBe(expected.parentAgentId)
+      expect(headers.get("x-interaction-type")).toBe(expected.interactionType)
+      expect(headers.get("x-client-machine-id")).toBe(expected.clientMachineId)
+      expect(headers.get("x-copilot-client-exp-assignment-context")).toBe(
+        expected.clientExperiment,
+      )
+      expect(headers.get("authorization")).toBe("Bearer copilot-token")
+      expect(headers.get("copilot-session-token")).toBeNull()
+      expect(headers.get("x-github-user")).toBeNull()
+    }
+    expect(capturedUpstreamHeaders[0]?.get("x-interaction-id")).toBe(
+      capturedUpstreamHeaders[1]?.get("x-interaction-id"),
+    )
+    expect(capturedUpstreamHeaders[0]?.get("x-client-session-id")).toBe(
+      capturedUpstreamHeaders[1]?.get("x-client-session-id"),
+    )
+    expect(capturedAuthorization[0]).toBe(capturedAuthorization[1])
+  })
+
   test.each([
     {
       expectedParent: "parent-header",
@@ -1190,7 +1283,7 @@ describe("responses websocket message handling", () => {
     expect(lastRequestBody?.previous_response_id).toBeUndefined()
   })
 
-  test("isolates concurrent WebSocket turn affinity contexts", async () => {
+  test("isolates concurrent WebSocket turn lifecycle contexts", async () => {
     const firstWs = createTestWebSocket()
     const secondWs = createTestWebSocket()
     const firstTurn = createResponsesWebSocketTurn(firstWs.data, "first")
@@ -1203,24 +1296,35 @@ describe("responses websocket message handling", () => {
     const secondGate = new Promise<void>((resolve) => {
       releaseSecond = resolve
     })
-    const observed: Array<string | undefined> = []
+    const observed: Array<{
+      accountId?: number
+      affinity?: string
+      metadata?: string
+      taskId?: string
+    }> = []
 
     const first = runWithWebSocketRequestContext(
       { key: "first-turn", source: "codex_metadata" },
+      { agentTaskId: "first-task" },
       firstTurn,
       async () => {
-        observed.push(getRoutingAffinity()?.key)
+        setCopilotResponseHeader("x-copilot-service-request-id", "first")
+        setLastUsedRoutedAccountId(101)
+        observed.push(readCurrentWebSocketLifecycleContext())
         await firstGate
-        observed.push(getRoutingAffinity()?.key)
+        observed.push(readCurrentWebSocketLifecycleContext())
       },
     )
     const second = runWithWebSocketRequestContext(
       { key: "second-turn", source: "codex_metadata" },
+      { agentTaskId: "second-task" },
       secondTurn,
       async () => {
-        observed.push(getRoutingAffinity()?.key)
+        setCopilotResponseHeader("x-copilot-service-request-id", "second")
+        setLastUsedRoutedAccountId(202)
+        observed.push(readCurrentWebSocketLifecycleContext())
         await secondGate
-        observed.push(getRoutingAffinity()?.key)
+        observed.push(readCurrentWebSocketLifecycleContext())
       },
     )
 
@@ -1229,12 +1333,179 @@ describe("responses websocket message handling", () => {
     releaseFirst?.()
     await first
     expect(observed).toEqual([
-      "first-turn",
-      "second-turn",
-      "second-turn",
-      "first-turn",
+      {
+        accountId: 101,
+        affinity: "first-turn",
+        metadata: "first",
+        taskId: "first-task",
+      },
+      {
+        accountId: 202,
+        affinity: "second-turn",
+        metadata: "second",
+        taskId: "second-task",
+      },
+      {
+        accountId: 202,
+        affinity: "second-turn",
+        metadata: "second",
+        taskId: "second-task",
+      },
+      {
+        accountId: 101,
+        affinity: "first-turn",
+        metadata: "first",
+        taskId: "first-task",
+      },
     ])
     expect(getRoutingAffinity()).toBeUndefined()
+    expect(getCopilotRequestAttribution()).toBeUndefined()
+    expect(getCopilotResponseHeaders()).toEqual({})
+    expect(firstTurn.routingState.lastUsedAccountId).toBe(101)
+    expect(secondTurn.routingState.lastUsedAccountId).toBe(202)
+  })
+
+  test("adds only safe successful metadata to created and terminal frames", async () => {
+    state.models = responsesCapableModels
+    queuedResponses.push(
+      createResponsesSseResponse("resp_metadata", [], {
+        "retry-after": "15",
+        "x-copilot-api-exp-assignment-context": "flight:1;",
+        "x-copilot-service-request-id": "service-1",
+        "x-quota-snapshot-premium_interactions": "ent=100&rem=50",
+        "x-usage-ratelimit-remaining": "private-rate-state",
+      }),
+    )
+    const ws = createTestWebSocket()
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        input: "metadata",
+        model: "gpt-5.4",
+        type: "response.create",
+      }),
+    )
+
+    const frames = ws.sent.map(
+      (frame) =>
+        JSON.parse(frame) as {
+          copilot_quota_snapshots?: Record<string, string>
+          headers?: Record<string, string>
+          type?: string
+        },
+    )
+    expect(frames.map((frame) => frame.type)).toEqual([
+      "response.created",
+      "response.completed",
+    ])
+    for (const frame of frames) {
+      expect(frame.headers).toEqual({
+        "x-copilot-api-exp-assignment-context": "flight:1;",
+        "x-copilot-service-request-id": "service-1",
+      })
+      expect(frame.copilot_quota_snapshots).toEqual({
+        premium_interactions: "ent=100&rem=50",
+      })
+      expect(JSON.stringify(frame)).not.toContain("retry-after")
+      expect(JSON.stringify(frame)).not.toContain("usage-ratelimit")
+      expect(JSON.stringify(frame)).not.toContain("private-rate-state")
+    }
+  })
+
+  test("keeps metadata isolated across concurrent WebSocket turns", async () => {
+    state.models = responsesCapableModels
+    const resolvers: Array<(response: Response) => void> = []
+    for (let index = 0; index < 2; index += 1) {
+      queuedFetchHandlers.push(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolvers.push(resolve)
+          }),
+      )
+    }
+    const ws = createTestWebSocket()
+
+    const first = responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        input: "first",
+        model: "gpt-5.4",
+        type: "response.create",
+      }),
+    )
+    const second = responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        input: "second",
+        model: "gpt-5.4",
+        type: "response.create",
+      }),
+    )
+    await waitFor(() => resolvers.length === 2)
+
+    resolvers[1]?.(
+      createResponsesSseResponse("resp_metadata_second", [], {
+        "x-copilot-service-request-id": "service-second",
+      }),
+    )
+    resolvers[0]?.(
+      createResponsesSseResponse("resp_metadata_first", [], {
+        "x-copilot-service-request-id": "service-first",
+      }),
+    )
+    await Promise.all([first, second])
+
+    const terminalById = new Map(
+      ws.sent
+        .map(
+          (frame) =>
+            JSON.parse(frame) as {
+              headers?: Record<string, string>
+              response?: { id?: string }
+              type?: string
+            },
+        )
+        .filter((frame) => frame.type === "response.completed")
+        .map((frame) => [frame.response?.id, frame.headers] as const),
+    )
+    expect(terminalById.get("resp_metadata_first")).toEqual({
+      "x-copilot-service-request-id": "service-first",
+    })
+    expect(terminalById.get("resp_metadata_second")).toEqual({
+      "x-copilot-service-request-id": "service-second",
+    })
+  })
+
+  test("leaves invalid and noneligible frames unchanged while preserving usage", () => {
+    const invalid = "not-json"
+    const delta = JSON.stringify({
+      delta: "hello",
+      type: "response.output_text.delta",
+    })
+    const completed = JSON.stringify({
+      copilot_usage: { total_nano_aiu: 123 },
+      response: { id: "resp_usage" },
+      type: "response.completed",
+    })
+    const metadata = {
+      "retry-after": "15",
+      "x-copilot-service-request-id": "service-usage",
+      "x-quota-snapshot-chat": "ent=10&rem=9",
+      "x-usage-ratelimit-remaining": "private",
+    }
+
+    expect(addResponsesWebSocketMetadata(invalid, metadata)).toBe(invalid)
+    expect(addResponsesWebSocketMetadata(delta, metadata)).toBe(delta)
+    expect(
+      JSON.parse(addResponsesWebSocketMetadata(completed, metadata)),
+    ).toEqual({
+      copilot_usage: { total_nano_aiu: 123 },
+      response: { id: "resp_usage" },
+      type: "response.completed",
+      headers: { "x-copilot-service-request-id": "service-usage" },
+      copilot_quota_snapshots: { chat: "ent=10&rem=9" },
+    })
   })
 
   test("streams the Chat Completions fallback with a per-turn abort signal", async () => {
@@ -1273,6 +1544,11 @@ describe("responses websocket message handling", () => {
       ),
     ).toBe(true)
     expect(ws.data.activeTurns.size).toBe(0)
+    const frames = ws.sent.map(
+      (frame) => JSON.parse(frame) as { type?: string },
+    )
+    expect(frames.at(-1)?.type).toBe("response.completed")
+    expect(ws.sent).not.toContain("[DONE]")
   })
 
   test("routes a Messages-only WebSocket model through native Messages", async () => {
@@ -3042,6 +3318,20 @@ function createTestWebSocket(data?: ResponsesWebSocketData): {
   }
 }
 
+function readCurrentWebSocketLifecycleContext(): {
+  accountId?: number
+  affinity?: string
+  metadata?: string
+  taskId?: string
+} {
+  return {
+    accountId: getLastUsedRoutedAccountId(),
+    affinity: getRoutingAffinity()?.key,
+    metadata: getCopilotResponseHeaders()["x-copilot-service-request-id"],
+    taskId: getCopilotRequestAttribution()?.agentTaskId,
+  }
+}
+
 async function createUpgradedTestWebSocket(
   headers: Record<string, string>,
 ): Promise<ReturnType<typeof createTestWebSocket>> {
@@ -3130,6 +3420,7 @@ function createAnthropicMessageResponse(
 function createResponsesSseResponse(
   responseId: string,
   output: ReadonlyArray<ResponseInputItem> = [],
+  headers: Record<string, string> = {},
 ): Response {
   const created = JSON.stringify({
     type: "response.created",
@@ -3183,7 +3474,7 @@ function createResponsesSseResponse(
       + `event: response.completed\ndata: ${completed}\n\n`,
     {
       status: 200,
-      headers: { "content-type": "text/event-stream" },
+      headers: { "content-type": "text/event-stream", ...headers },
     },
   )
 }

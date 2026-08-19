@@ -15,6 +15,19 @@ const FRAME_ENVELOPE_KEYS = new Set([
   "response",
   "type",
 ])
+const METADATA_ELIGIBLE_EVENT_TYPES = new Set([
+  "response.completed",
+  "response.created",
+  "response.failed",
+  "response.incomplete",
+])
+const SAFE_EVENT_HEADER_NAMES = new Set([
+  "x-copilot-api-exp-assignment-context",
+  "x-copilot-service-request-id",
+  "x-github-copilot-request-te",
+  "x-github-request-id",
+])
+const QUOTA_SNAPSHOT_PREFIX = "x-quota-snapshot-"
 
 export interface ParsedResponseCreateFrame {
   attribution: CopilotRequestAttribution
@@ -92,6 +105,51 @@ export function parseResponsesWebSocketFrame(
       requestedModel: getRequestedModel(parsed),
     },
   }
+}
+
+export function addResponsesWebSocketMetadata(
+  frame: string,
+  headers: Record<string, string>,
+): string {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(frame) as unknown
+  } catch {
+    return frame
+  }
+  if (
+    !isRecord(parsed)
+    || typeof parsed.type !== "string"
+    || !METADATA_ELIGIBLE_EVENT_TYPES.has(parsed.type)
+  ) {
+    return frame
+  }
+
+  const eventHeaders: Record<string, string> = {}
+  const quotaSnapshots: Record<string, string> = {}
+  for (const [rawName, value] of Object.entries(headers)) {
+    const name = rawName.toLowerCase()
+    if (name.startsWith(QUOTA_SNAPSHOT_PREFIX)) {
+      const quotaName = name.slice(QUOTA_SNAPSHOT_PREFIX.length)
+      if (quotaName) quotaSnapshots[quotaName] = value
+      continue
+    }
+    if (SAFE_EVENT_HEADER_NAMES.has(name)) eventHeaders[name] = value
+  }
+
+  if (
+    Object.keys(eventHeaders).length === 0
+    && Object.keys(quotaSnapshots).length === 0
+  ) {
+    return frame
+  }
+  return JSON.stringify({
+    ...parsed,
+    ...(Object.keys(eventHeaders).length > 0 ? { headers: eventHeaders } : {}),
+    ...(Object.keys(quotaSnapshots).length > 0 ?
+      { copilot_quota_snapshots: quotaSnapshots }
+    : {}),
+  })
 }
 
 export function extractResponsesPayload(

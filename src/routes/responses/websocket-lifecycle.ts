@@ -2,6 +2,10 @@ import type { SafeHttpErrorInspection } from "~/lib/error"
 import type { RoutingAffinity } from "~/lib/routing-affinity"
 
 import {
+  type CopilotRequestAttribution,
+  runWithCopilotRequestAttribution,
+} from "~/lib/copilot-request-context"
+import {
   isAbortError,
   isHTTPError,
   LocalHTTPError,
@@ -13,7 +17,7 @@ import {
 } from "~/lib/request-logger"
 import {
   createRoutingTelemetryRequestState,
-  quotaHeadersStorage,
+  copilotResponseHeadersStorage,
   requestIdStorage,
   routedAccountStorage,
   type RoutingTelemetryRequestState,
@@ -166,18 +170,36 @@ export function classifyWebSocketTerminal(
   return { status: 500, terminalStatus: "ERROR" }
 }
 
-export async function runWithWebSocketRequestContext(
+// The public lifecycle interface keeps affinity, attribution, turn, and work explicit.
+// eslint-disable-next-line max-params
+export async function runWithWebSocketRequestContext<T>(
   affinity: RoutingAffinity | undefined,
+  attribution: CopilotRequestAttribution,
   turn: ResponsesWebSocketTurn,
-  callback: () => Promise<void>,
-): Promise<void> {
-  await requestIdStorage.run(turn.turnId, async () => {
-    await runWithRoutingAffinity(affinity, async () => {
-      await quotaHeadersStorage.run({}, async () => {
-        await routedAccountStorage.run(turn.routingState, async () => {
-          await routingTelemetryStorage.run(turn.telemetryState, callback)
-        })
-      })
-    })
-  })
+  callback: () => Promise<T>,
+): Promise<T> {
+  return await requestIdStorage.run(
+    turn.turnId,
+    async () =>
+      await runWithRoutingAffinity(
+        affinity,
+        async () =>
+          await runWithCopilotRequestAttribution(
+            attribution,
+            async () =>
+              await copilotResponseHeadersStorage.run(
+                {},
+                async () =>
+                  await routedAccountStorage.run(
+                    turn.routingState,
+                    async () =>
+                      await routingTelemetryStorage.run(
+                        turn.telemetryState,
+                        callback,
+                      ),
+                  ),
+              ),
+          ),
+      ),
+  )
 }
