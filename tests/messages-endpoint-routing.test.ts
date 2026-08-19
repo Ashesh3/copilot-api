@@ -29,9 +29,65 @@ const upstreamPaths: Array<string> = []
 const queuedMessagesResults: Array<Error | Response> = []
 let attachmentFetchCount = 0
 const TEST_ACCOUNT_IDS = [91_001, 91_002, 92_001, 92_002, 93_001, 93_002]
+const INVALID_TRANSLATED_DOCUMENT_URLS = [
+  "ftp://example.test/report.pdf",
+  "file:///tmp/report.pdf",
+  "data:application/pdf;base64,JVBERi0=",
+  "/relative/report.pdf",
+  "not a URL",
+  " ",
+  "http:///attachment.test/report.pdf",
+  "http:////attachment.test/report.pdf",
+  " https://attachment.test/report.pdf",
+  "https://attachment.test/report.pdf ",
+  "\nhttps://attachment.test/report.pdf",
+  "https://attachment.test/report.pdf\n",
+  "https://attachment.test/\u0000report.pdf",
+  "https://attachment.test/report.pdf\u007f",
+  "https://user:pass@attachment.test/report.pdf",
+  "https://user@attachment.test/report.pdf",
+  "https://@attachment.test/report.pdf",
+  "https://:@attachment.test/report.pdf",
+  "http://[::1/report.pdf",
+  "https://:443/report.pdf",
+  "https://attachment.test:65536/report.pdf",
+  "https://attachment..test/report.pdf",
+  "https://-attachment.test/report.pdf",
+  "https://attachment-.test/report.pdf",
+  "https://attach_ment.test/report.pdf",
+  "https://127.1/report.pdf",
+  "https://2130706433/report.pdf",
+  "https://0x7f000001/report.pdf",
+  "https://0x7f.0.0.1/report.pdf",
+  "https://0177.0.0.1/report.pdf",
+  "https://./report.pdf",
+  "https://../report.pdf",
+  String.raw`http://attachment.test\report.pdf`,
+  "https://attachment.test/a/../report.pdf",
+  "https://attachment.test/report%zz.pdf",
+]
+const VALID_TRANSLATED_DOCUMENT_URLS = [
+  "https://attachment.test",
+  "https://attachment.test?download=1#section",
+  "https://attachment.test/?download=1#section",
+  "http://attachment.test:80/report.pdf?download=1#section",
+  "https://attachment.test:443/report.pdf?download=1#section",
+  "http://attachment.test:8080/report.pdf?download=1#section",
+  "https://LOCALHOST:8443/report.pdf?download=1#section",
+  "https://127.0.0.1:8443/report.pdf?download=1#section",
+  "https://[2001:db8::1]:8443/report.pdf?download=1#section",
+  "https://attachment.test/report%20name.pdf?download=%E2%9C%93#section-1",
+]
 
 function createAttachmentResponse(url: URL): Response | undefined {
-  if (url.hostname !== "attachment.test") return undefined
+  if (
+    url.hostname !== "attachment.test"
+    && url.hostname !== "localhost"
+    && url.hostname !== "127.0.0.1"
+    && url.hostname !== "[2001:db8::1]"
+  ) {
+    return undefined
+  }
   attachmentFetchCount += 1
   const isImage = url.pathname.endsWith(".png")
   return new Response(
@@ -1083,14 +1139,7 @@ test.each([
     responses: ["document.source"],
     chat: ["document"],
   },
-  ...[
-    "ftp://example.test/report.pdf",
-    "file:///tmp/report.pdf",
-    "data:application/pdf;base64,JVBERi0=",
-    "/relative/report.pdf",
-    "not a URL",
-    " ",
-  ].map((url) => ({
+  ...INVALID_TRANSLATED_DOCUMENT_URLS.map((url) => ({
     name: `invalid URL document source ${url}`,
     document: {
       type: "document",
@@ -1098,6 +1147,16 @@ test.each([
       title: "report.pdf",
     },
     responses: ["document.source"],
+    chat: ["document"],
+  })),
+  ...VALID_TRANSLATED_DOCUMENT_URLS.map((url) => ({
+    name: `valid canonical URL document source ${url}`,
+    document: {
+      type: "document",
+      source: { type: "url", url },
+      title: "report.pdf",
+    },
+    responses: [],
     chat: ["document"],
   })),
   {
@@ -1340,10 +1399,7 @@ test.each([
   },
 )
 
-test.each([
-  "http://attachment.test/report.pdf",
-  "https://attachment.test/report.pdf",
-])(
+test.each(VALID_TRANSLATED_DOCUMENT_URLS)(
   "normalizes one remote PDF %s only after selecting Responses",
   async (url) => {
     installModel({ supported_endpoints: ["/responses", "/chat/completions"] })
@@ -1542,14 +1598,7 @@ test("blocks remote document metadata before fetching or wrong-endpoint dispatch
   expect(fetchMock).not.toHaveBeenCalled()
 })
 
-test.each([
-  "ftp://example.test/report.pdf",
-  "file:///tmp/report.pdf",
-  "data:application/pdf;base64,JVBERi0=",
-  "/relative/report.pdf",
-  "not a URL",
-  " ",
-])(
+test.each(INVALID_TRANSLATED_DOCUMENT_URLS)(
   "blocks translated document URL %s before fetch or dispatch",
   async (url) => {
     installModel({ supported_endpoints: ["/responses", "/chat/completions"] })
@@ -1609,30 +1658,26 @@ test("blocks translated URL source extensions before fetch or dispatch", async (
   expect(fetchMock).not.toHaveBeenCalled()
 })
 
-test.each([
-  "ftp://example.test/report.pdf",
-  "file:///tmp/report.pdf",
-  "data:application/pdf;base64,JVBERi0=",
-  "/relative/report.pdf",
-  "not a URL",
-  " ",
-])("native Messages preserves document URL %s unchanged", async (url) => {
-  installModel({ supported_endpoints: ["/v1/messages", "/responses"] })
-  const document = {
-    type: "document",
-    source: { type: "url", url, future_source_field: "native" },
-    title: "report.pdf",
-  }
+test.each(INVALID_TRANSLATED_DOCUMENT_URLS)(
+  "native Messages preserves document URL %s unchanged",
+  async (url) => {
+    installModel({ supported_endpoints: ["/v1/messages", "/responses"] })
+    const document = {
+      type: "document",
+      source: { type: "url", url, future_source_field: "native" },
+      title: "report.pdf",
+    }
 
-  const response = await postMessages({
-    messages: [{ role: "user", content: [document] }],
-  })
+    const response = await postMessages({
+      messages: [{ role: "user", content: [document] }],
+    })
 
-  expect(response.status).toBe(200)
-  expect(attachmentFetchCount).toBe(0)
-  expect(upstreamPaths).toEqual(["/v1/messages"])
-  expect(upstreamBodies[0]).toHaveProperty("messages.0.content.0", document)
-})
+    expect(response.status).toBe(200)
+    expect(attachmentFetchCount).toBe(0)
+    expect(upstreamPaths).toEqual(["/v1/messages"])
+    expect(upstreamBodies[0]).toHaveProperty("messages.0.content.0", document)
+  },
+)
 
 test.each([
   {

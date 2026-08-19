@@ -330,6 +330,10 @@ describe("normalizeAnthropicAttachments", () => {
   test.each([
     "http://attachment.test/report.pdf",
     "https://attachment.test/report.pdf",
+    "http://attachment.test:80/report.pdf?download=1#section",
+    "https://attachment.test:443/report.pdf?download=1#section",
+    "http://attachment.test:8080/report.pdf?download=1#section",
+    "https://[2001:db8::1]:8443/report.pdf?download=1#section",
   ])("fetches absolute HTTP document URL %s once", async (url) => {
     const fetchMock = mock(() =>
       Promise.resolve(

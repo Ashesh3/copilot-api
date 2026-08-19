@@ -131,3 +131,33 @@
   `baseline-browser-mapping` notice.
 - `bun run build`: passed.
 - `git diff --check`: passed.
+
+## Review Remediation Round 5
+
+- Replaced parse-success URL acceptance with raw HTTP(S) validation before
+  translation. WHATWG-repaired slashes, whitespace/control characters,
+  credentials, backslashes, dot segments, invalid percent escapes, malformed
+  hosts, and legacy numeric host spellings now block locally as
+  `document.source`.
+- Retained valid root URLs, query/fragment forms, default and non-default ports,
+  canonical IPv4, DNS hosts, and IPv6 document URLs; translated routes fetch
+  each valid URL once.
+- Kept native Messages forward-compatible: every malformed/future document URL
+  fixture remains byte-for-byte pass-through when `/v1/messages` is selected.
+- Witnessed RED against the round-4 validator before implementation: the direct
+  fidelity and public route matrix accepted repaired URL cases, producing 16
+  expected failures; additional raw-host probes caught hexadecimal numeric host
+  repair before the final host guard.
+
+### Round 5 Verification
+
+- Requested route/fidelity/normalizer group: 327 passed, 0 failed across 5
+  files.
+- Focused Task 4 attachment, bridge, routing, recovery, contract, and custom
+  provider suite: 557 passed, 0 failed across 17 files.
+- Full suite: 2,027 passed, 3 expected media skips, 0 failed across 117 files.
+- `bun run typecheck`: passed.
+- Changed-file lint: passed (with the existing stale
+  `baseline-browser-mapping` data notice).
+- `bun run build`: passed.
+- `git diff --check`: passed.
