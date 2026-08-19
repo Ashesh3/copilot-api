@@ -1072,7 +1072,41 @@ beforeEach(() => {
 })
 
 const sessionToken = (payload: Record<string, unknown>): string =>
-  `header.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.signature`
+  `e30.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.c2ln`
+
+function invalidSessionTokens(model: string): Array<string> {
+  const payload = Buffer.from(
+    JSON.stringify({ selected_model: model }),
+  ).toString("base64url")
+  const noncanonicalPayload = Buffer.from(
+    JSON.stringify({ selected_model: model, padding: "x" }),
+  ).toString("base64url")
+  if (noncanonicalPayload.length % 4 === 0) {
+    throw new Error("Expected unused terminal base64url bits")
+  }
+  const decoded = Buffer.from(noncanonicalPayload, "base64url")
+  const noncanonical = Array.from(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_",
+  )
+    .map((character) => `${noncanonicalPayload.slice(0, -1)}${character}`)
+    .find(
+      (candidate) =>
+        candidate !== noncanonicalPayload
+        && Buffer.from(candidate, "base64url").equals(decoded),
+    )
+  if (!noncanonical) throw new Error("Expected a noncanonical token payload")
+  return [
+    `e%0.${payload}.c2ln`,
+    `e30=.${payload}.c2ln`,
+    `A.${payload}.c2ln`,
+    `e30.${noncanonical}.c2ln`,
+    `e30.${"A".repeat(16 * 1024)}.c2ln`,
+    sessionToken({
+      selected_model: { model },
+      available_models: { 0: model },
+    }),
+  ]
+}
 
 test("forwards only matching model-scoped session tokens on Responses inference", async () => {
   state.models = responsesCapableModels
@@ -1090,8 +1124,9 @@ test("forwards only matching model-scoped session tokens on Responses inference"
   for (const token of [
     sessionToken({ selected_model: "different-model" }),
     "malformed-token",
+    ...invalidSessionTokens("gpt-4o"),
   ]) {
-    await server.request("/v1/responses", {
+    const response = await server.request("/v1/responses", {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -1099,6 +1134,7 @@ test("forwards only matching model-scoped session tokens on Responses inference"
       },
       body: JSON.stringify({ model: "gpt-4o", input: "hello" }),
     })
+    expect(response.status).toBe(200)
     expect(lastUpstreamHeaders?.get("copilot-session-token")).toBeNull()
     expect(lastUpstreamHeaders?.get("authorization")).toBe(
       "Bearer copilot-token",
@@ -1132,6 +1168,53 @@ test("forwards only matching model-scoped session tokens on Responses inference"
     body: JSON.stringify({ model: "gpt-4o", input: "hello" }),
   })
   expect(lastRequestBody?.model).toBe("gpt-redirected")
+  expect(lastUpstreamHeaders?.get("copilot-session-token")).toBeNull()
+
+  setModelRedirectsForTest([])
+  const aliasModel = {
+    ...responsesCapableModels.data[0],
+    id: "gpt-4.1",
+    name: "GPT 4.1",
+  }
+  state.models = { object: "list", data: [aliasModel] }
+  const aliasToken = sessionToken({ selected_model: "gpt-4.1" })
+  await server.request("/v1/responses", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "copilot-session-token": aliasToken,
+    },
+    body: JSON.stringify({ model: "gpt-4-1", input: "ordinary alias" }),
+  })
+  expect(lastRequestBody?.model).toBe("gpt-4.1")
+  expect(lastUpstreamHeaders?.get("copilot-session-token")).toBe(aliasToken)
+
+  setModelRedirectsForTest([
+    {
+      id: "responses-alias-chain-1",
+      sourceModel: "gpt-4.1",
+      targetModel: "gpt-alias-middle",
+      enabled: true,
+    },
+    {
+      id: "responses-alias-chain-2",
+      sourceModel: "gpt-alias-middle",
+      targetModel: "gpt-4-1",
+      enabled: true,
+    },
+  ])
+  await server.request("/v1/responses", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "copilot-session-token": aliasToken,
+    },
+    body: JSON.stringify({
+      model: "gpt-4-1",
+      input: "configured alias redirect",
+    }),
+  })
+  expect(lastRequestBody?.model).toBe("gpt-4.1")
   expect(lastUpstreamHeaders?.get("copilot-session-token")).toBeNull()
 })
 

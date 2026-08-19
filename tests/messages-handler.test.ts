@@ -16,7 +16,41 @@ let lastUpstreamUrl: string | undefined
 let upstreamResponseOverride: Response | undefined
 
 const sessionToken = (payload: Record<string, unknown>): string =>
-  `header.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.signature`
+  `e30.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.c2ln`
+
+function invalidSessionTokens(model: string): Array<string> {
+  const payload = Buffer.from(
+    JSON.stringify({ selected_model: model }),
+  ).toString("base64url")
+  const noncanonicalPayload = Buffer.from(
+    JSON.stringify({ selected_model: model, padding: "x" }),
+  ).toString("base64url")
+  if (noncanonicalPayload.length % 4 === 0) {
+    throw new Error("Expected unused terminal base64url bits")
+  }
+  const decoded = Buffer.from(noncanonicalPayload, "base64url")
+  const noncanonical = Array.from(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_",
+  )
+    .map((character) => `${noncanonicalPayload.slice(0, -1)}${character}`)
+    .find(
+      (candidate) =>
+        candidate !== noncanonicalPayload
+        && Buffer.from(candidate, "base64url").equals(decoded),
+    )
+  if (!noncanonical) throw new Error("Expected a noncanonical token payload")
+  return [
+    `e%0.${payload}.c2ln`,
+    `e30=.${payload}.c2ln`,
+    `A.${payload}.c2ln`,
+    `e30.${noncanonical}.c2ln`,
+    `e30.${"A".repeat(16 * 1024)}.c2ln`,
+    sessionToken({
+      selected_model: { model },
+      available_models: { 0: model },
+    }),
+  ]
+}
 
 const upstreamMaxReasoningModels: ModelsResponse = {
   object: "list",
@@ -724,8 +758,9 @@ test("forwards only matching model-scoped session tokens on Messages inference",
   for (const token of [
     sessionToken({ selected_model: "different-model" }),
     "malformed-token",
+    ...invalidSessionTokens("claude-opus-4.8"),
   ]) {
-    await server.request("/v1/messages", {
+    const response = await server.request("/v1/messages", {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -737,6 +772,7 @@ test("forwards only matching model-scoped session tokens on Messages inference",
         messages: [{ role: "user", content: "hello" }],
       }),
     })
+    expect(response.status).toBe(200)
     expect(lastUpstreamHeaders?.get("copilot-session-token")).toBeNull()
     expect(lastUpstreamHeaders?.get("authorization")).toBe(
       "Bearer copilot-token",
@@ -772,6 +808,56 @@ test("forwards only matching model-scoped session tokens on Messages inference",
     }),
   })
   expect(lastUpstreamPayload?.model).toBe("claude-opus-4.7")
+  expect(lastUpstreamHeaders?.get("copilot-session-token")).toBeNull()
+
+  setModelRedirectsForTest([])
+  state.models = nativeMessagesModels
+  const aliasToken = sessionToken({ selected_model: "claude-opus-4.8" })
+  await server.request("/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "copilot-session-token": aliasToken,
+    },
+    body: JSON.stringify({
+      model: "claude-opus-4-8",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "ordinary alias" }],
+    }),
+  })
+  expect(lastUpstreamPayload?.model).toBe("claude-opus-4.8")
+  expect(lastUpstreamHeaders?.get("copilot-session-token")).toBe(aliasToken)
+
+  setModelRedirectsForTest([
+    {
+      id: "messages-alias-chain-1",
+      sourceModel: "claude-opus-4.8",
+      targetModel: "claude-alias-middle",
+      enabled: true,
+    },
+    {
+      id: "messages-alias-chain-2",
+      sourceModel: "claude-alias-middle",
+      targetModel: "claude-opus-4-8",
+      enabled: true,
+    },
+  ])
+  const rawAliasModel = structuredClone(nativeMessagesModels.data[0])
+  rawAliasModel.id = "claude-opus-4-8"
+  state.models = { object: "list", data: [rawAliasModel] }
+  await server.request("/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "copilot-session-token": aliasToken,
+    },
+    body: JSON.stringify({
+      model: "claude-opus-4-8",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "configured alias redirect" }],
+    }),
+  })
+  expect(lastUpstreamPayload?.model).toBe("claude-opus-4-8")
   expect(lastUpstreamHeaders?.get("copilot-session-token")).toBeNull()
 })
 

@@ -7,6 +7,7 @@ export interface CopilotSessionTokenClaims {
 
 const MAX_SESSION_TOKEN_LENGTH = 16 * 1024
 const BASE64URL_PATTERN = /^[\w-]+$/
+const UTF8_DECODER = new TextDecoder(undefined, { fatal: true })
 
 function normalizedClaim(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined
@@ -14,15 +15,33 @@ function normalizedClaim(value: unknown): string | undefined {
   return trimmed || undefined
 }
 
+function hasValidSegmentSyntax(segment: string): boolean {
+  return Boolean(
+    segment && BASE64URL_PATTERN.test(segment) && segment.length % 4 !== 1,
+  )
+}
+
+function decodeCanonicalPayload(segment: string): Buffer | undefined {
+  if (!hasValidSegmentSyntax(segment)) {
+    return undefined
+  }
+
+  try {
+    const decoded = Buffer.from(segment, "base64url")
+    return decoded.toString("base64url") === segment ? decoded : undefined
+  } catch {
+    return undefined
+  }
+}
+
 function parsePayloadSegment(
   segment: string,
 ): Record<string, unknown> | undefined {
-  if (!segment || !BASE64URL_PATTERN.test(segment)) return undefined
+  const decoded = decodeCanonicalPayload(segment)
+  if (!decoded) return undefined
 
   try {
-    const parsed = JSON.parse(
-      Buffer.from(segment, "base64url").toString(),
-    ) as unknown
+    const parsed = JSON.parse(UTF8_DECODER.decode(decoded)) as unknown
     if (
       typeof parsed !== "object"
       || parsed === null
@@ -43,6 +62,12 @@ export function inspectCopilotSessionToken(
 
   const segments = token.split(".")
   if (segments.length !== 3 || segments.some((segment) => !segment)) {
+    return undefined
+  }
+  if (
+    !hasValidSegmentSyntax(segments[0])
+    || !hasValidSegmentSyntax(segments[2])
+  ) {
     return undefined
   }
 
@@ -71,11 +96,12 @@ export function inspectCopilotSessionToken(
 
 export function sessionTokenMatchesModel(options: {
   finalModel: string
+  modelWasRedirected: boolean
   requestedModel: string
   token: string | undefined
 }): boolean {
-  const { finalModel, requestedModel, token } = options
-  if (!token) return false
+  const { finalModel, modelWasRedirected, requestedModel, token } = options
+  if (!token || modelWasRedirected) return false
 
   const normalizedRequestedModel = normalizeModelName(requestedModel)
   const normalizedFinalModel = normalizeModelName(finalModel)

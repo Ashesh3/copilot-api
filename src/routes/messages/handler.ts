@@ -347,7 +347,9 @@ async function handleCompletionInner(
   logger.debug("Anthropic Beta header present:", Boolean(anthropicBeta))
 
   // Route to model variants based on client signals
-  applyModelVariantRouting(c, anthropicPayload, anthropicBeta)
+  const modelWasRedirected =
+    redirect.redirected
+    || applyModelVariantRouting(c, anthropicPayload, anthropicBeta)
 
   const customReference = resolveCustomChatModel(anthropicPayload.model)
   if (customReference) {
@@ -386,6 +388,7 @@ async function handleCompletionInner(
         token: inboundSessionToken,
         requestedModel: baseModel,
         finalModel: anthropicPayload.model,
+        modelWasRedirected,
       })
     ) ?
       inboundSessionToken
@@ -1790,7 +1793,8 @@ function applyModelVariantRouting(
   c: Context,
   payload: AnthropicMessagesPayload,
   anthropicBeta: string | undefined,
-): void {
+): boolean {
+  const initialModel = payload.model
   // 1M context via beta header → route to -1m model variant
   if (
     getCanonicalAnthropicBetaIdentifiers(anthropicBeta).has(
@@ -1863,6 +1867,7 @@ function applyModelVariantRouting(
     })
     delete payload.speed
   }
+  return payload.model !== initialModel
 }
 
 /**

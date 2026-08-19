@@ -162,10 +162,11 @@ async function handleCompletionInner(
     })
   }
 
-  const { targetModel, reasoningEffort } = await resolveRedirectedModel(c, {
-    model: normalizedModel,
-    effort: requestedEffort,
-  })
+  const { targetModel, reasoningEffort, redirected } =
+    await resolveRedirectedModel(c, {
+      model: normalizedModel,
+      effort: requestedEffort,
+    })
   applyRedirectedReasoningEffort({
     c,
     payload: replacedPayload,
@@ -195,6 +196,7 @@ async function handleCompletionInner(
     })
   }
 
+  const modelBeforeFallback = payload.model
   payload = applyRoutableModelFallback(c, payload)
   const inboundSessionToken = c.req.header("copilot-session-token")
   const copilotSessionToken =
@@ -203,6 +205,10 @@ async function handleCompletionInner(
         token: inboundSessionToken,
         requestedModel: baseModel,
         finalModel: payload.model,
+        modelWasRedirected:
+          replacedPayload.model !== baseModel
+          || redirected
+          || payload.model !== modelBeforeFallback,
       })
     ) ?
       inboundSessionToken
@@ -639,7 +645,11 @@ function getNormalizedRequestedEffort(
 async function resolveRedirectedModel(
   c: Context,
   request: { model: string; effort?: ReasoningEffort },
-): Promise<{ targetModel: string; reasoningEffort?: ReasoningEffort }> {
+): Promise<{
+  reasoningEffort?: ReasoningEffort
+  redirected: boolean
+  targetModel: string
+}> {
   const redirect = await applyModelRedirect(request)
   if (redirect.redirected) {
     recordNonDefaultBehavior(c, {
@@ -666,7 +676,7 @@ async function resolveRedirectedModel(
     requestedEffort: redirect.effort,
     effectiveEffort: reasoningEffort,
   })
-  return { targetModel, reasoningEffort }
+  return { targetModel, reasoningEffort, redirected: redirect.redirected }
 }
 
 function reportClampedRedirectEffort(

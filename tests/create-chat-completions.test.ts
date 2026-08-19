@@ -54,7 +54,41 @@ let lastRequestBody: Record<string, unknown> | undefined
 let lastRequestHeaders: Headers | undefined
 
 const sessionToken = (payload: Record<string, unknown>): string =>
-  `header.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.signature`
+  `e30.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.c2ln`
+
+function invalidSessionTokens(model: string): Array<string> {
+  const payload = Buffer.from(
+    JSON.stringify({ selected_model: model }),
+  ).toString("base64url")
+  const noncanonicalPayload = Buffer.from(
+    JSON.stringify({ selected_model: model, padding: "x" }),
+  ).toString("base64url")
+  if (noncanonicalPayload.length % 4 === 0) {
+    throw new Error("Expected unused terminal base64url bits")
+  }
+  const decoded = Buffer.from(noncanonicalPayload, "base64url")
+  const noncanonical = Array.from(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_",
+  )
+    .map((character) => `${noncanonicalPayload.slice(0, -1)}${character}`)
+    .find(
+      (candidate) =>
+        candidate !== noncanonicalPayload
+        && Buffer.from(candidate, "base64url").equals(decoded),
+    )
+  if (!noncanonical) throw new Error("Expected a noncanonical token payload")
+  return [
+    `e%0.${payload}.c2ln`,
+    `e30=.${payload}.c2ln`,
+    `A.${payload}.c2ln`,
+    `e30.${noncanonical}.c2ln`,
+    `e30.${"A".repeat(16 * 1024)}.c2ln`,
+    sessionToken({
+      selected_model: { model },
+      available_models: { 0: model },
+    }),
+  ]
+}
 
 function createLegacyMessagesModel(
   model: string,
@@ -190,8 +224,9 @@ test("forwards only matching model-scoped session tokens on Chat inference", asy
   for (const token of [
     sessionToken({ selected_model: "different-model" }),
     "malformed-token",
+    ...invalidSessionTokens("gpt-test"),
   ]) {
-    await server.request("/v1/chat/completions", {
+    const response = await server.request("/v1/chat/completions", {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -202,6 +237,7 @@ test("forwards only matching model-scoped session tokens on Chat inference", asy
         messages: [{ role: "user", content: "hello" }],
       }),
     })
+    expect(response.status).toBe(200)
     expect(lastRequestHeaders?.get("copilot-session-token")).toBeNull()
     expect(lastRequestHeaders?.get("authorization")).toBe("Bearer test-token")
   }
@@ -234,6 +270,54 @@ test("forwards only matching model-scoped session tokens on Chat inference", asy
     }),
   })
   expect(lastRequestBody?.model).toBe("gpt-redirected")
+  expect(lastRequestHeaders?.get("copilot-session-token")).toBeNull()
+
+  setModelRedirectsForTest([])
+  state.models = {
+    object: "list",
+    data: [createLegacyMessagesModel("gpt-4.1")],
+  }
+  const aliasToken = sessionToken({ selected_model: "gpt-4.1" })
+  await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "copilot-session-token": aliasToken,
+    },
+    body: JSON.stringify({
+      model: "gpt-4-1",
+      messages: [{ role: "user", content: "ordinary alias" }],
+    }),
+  })
+  expect(lastRequestBody?.model).toBe("gpt-4.1")
+  expect(lastRequestHeaders?.get("copilot-session-token")).toBe(aliasToken)
+
+  setModelRedirectsForTest([
+    {
+      id: "chat-alias-chain-1",
+      sourceModel: "gpt-4.1",
+      targetModel: "gpt-alias-middle",
+      enabled: true,
+    },
+    {
+      id: "chat-alias-chain-2",
+      sourceModel: "gpt-alias-middle",
+      targetModel: "gpt-4-1",
+      enabled: true,
+    },
+  ])
+  await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "copilot-session-token": aliasToken,
+    },
+    body: JSON.stringify({
+      model: "gpt-4-1",
+      messages: [{ role: "user", content: "configured alias redirect" }],
+    }),
+  })
+  expect(lastRequestBody?.model).toBe("gpt-4.1")
   expect(lastRequestHeaders?.get("copilot-session-token")).toBeNull()
 })
 

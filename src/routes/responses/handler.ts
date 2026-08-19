@@ -364,16 +364,16 @@ function reportClampedResponsesEffort(
 function applyResponsesModelFallback(
   c: Context,
   payload: ResponsesPayload,
-): void {
+): boolean {
   if (
     payload.model.endsWith("-1m")
     || tokenPool.hasEnabledAccountForKnownModel(payload.model) !== undefined
   ) {
-    return
+    return false
   }
 
   const candidate = `${payload.model}-1m`
-  if (!state.models?.data.some((m) => m.id === candidate)) return
+  if (!state.models?.data.some((m) => m.id === candidate)) return false
 
   recordNonDefaultBehavior(c, {
     kind: "model_fallback",
@@ -385,6 +385,7 @@ function applyResponsesModelFallback(
     },
   })
   payload.model = candidate
+  return true
 }
 
 function reportResponsesEndpointFallback(
@@ -587,18 +588,11 @@ const handleResponsesInner = async (
   })
   const finalEffort = redirectedEffort ?? effectiveEffort
 
-  applyResponsesModelFallback(c, payload)
-  const inboundSessionToken = c.req.header("copilot-session-token")
-  const copilotSessionToken =
-    (
-      sessionTokenMatchesModel({
-        token: inboundSessionToken,
-        requestedModel: baseModel,
-        finalModel: payload.model,
-      })
-    ) ?
-      inboundSessionToken
-    : undefined
+  const copilotSessionToken = resolveResponsesSessionToken(c, {
+    payload,
+    redirectOccurred: redirect.redirected,
+    requestedModel: baseModel,
+  })
 
   setRequestContext(c, {
     requestedModel,
@@ -887,6 +881,29 @@ const handleResponsesInner = async (
   })
 
   return c.json(withRequestedResponseModel(resolved, requestedModel))
+}
+
+function resolveResponsesSessionToken(
+  c: Context,
+  options: {
+    payload: ResponsesPayload
+    redirectOccurred: boolean
+    requestedModel: string
+  },
+): string | undefined {
+  const modelWasRedirected =
+    options.redirectOccurred || applyResponsesModelFallback(c, options.payload)
+  const token = c.req.header("copilot-session-token")
+  return (
+      sessionTokenMatchesModel({
+        token,
+        requestedModel: options.requestedModel,
+        finalModel: options.payload.model,
+        modelWasRedirected,
+      })
+    ) ?
+      token
+    : undefined
 }
 
 async function prepareResponsesRoute(
