@@ -449,6 +449,41 @@ test("custom Messages rejects an unknown typed tool with a schema", async () => 
   expect(requests).toHaveLength(0)
 })
 
+test.each([
+  "web_searchfuture",
+  "Web_search_20250305",
+  "prefix_web_search_20250305",
+  "web-search_20250305",
+  "web_search_",
+  "web_search__20250305",
+])("custom Messages rejects web-search lookalike type %s", async (type) => {
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "custom-chat-model",
+      max_tokens: 16,
+      messages: [{ role: "user", content: "hello" }],
+      tools: [
+        {
+          type,
+          name: "future_native",
+          input_schema: { type: "object", properties: {} },
+        },
+      ],
+    }),
+  })
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toMatchObject({
+    error: {
+      code: "endpoint_translation_unsupported",
+      param: "tool_type",
+    },
+  })
+  expect(requests).toHaveLength(0)
+})
+
 test("custom Messages rejects document flattening before attachment normalization", async () => {
   const document = {
     type: "document",

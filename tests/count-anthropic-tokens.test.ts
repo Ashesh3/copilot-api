@@ -189,12 +189,14 @@ test("does not require max_tokens", async () => {
 })
 
 test.each([
+  ["undefined", undefined],
   ["string", "32"],
   ["null", null],
   ["zero", 0],
   ["negative", -1],
   ["fractional", 1.5],
   ["NaN", Number.NaN],
+  ["infinity", Number.POSITIVE_INFINITY],
 ] as const)(
   "rejects invalid present internal max_tokens: %s",
   async (_name, maxTokens) => {

@@ -307,10 +307,7 @@ function cloneAnthropicMessagesBody(payload: unknown): Record<string, unknown> {
   return clone
 }
 
-function validateRawMaxTokens(
-  payload: unknown,
-  requireMaxTokens: boolean,
-): void {
+function validateRawMaxTokens(payload: unknown): void {
   if (typeof payload !== "object" || payload === null || isProxy(payload))
     return
   const descriptors = getPlainJsonDescriptors(payload)
@@ -318,7 +315,7 @@ function validateRawMaxTokens(
   if (!("max_tokens" in descriptors)) return
   const data = readDataDescriptor(descriptors.max_tokens)
   if (data === INVALID_MESSAGES_JSON) return
-  validateMaxTokens(data.value, requireMaxTokens)
+  validateMaxTokens(data.value, true)
 }
 
 function validateMaxTokens(value: unknown, required: boolean): void {
@@ -824,7 +821,7 @@ export function prepareAnthropicMessagesRequest(options: {
   payload: AnthropicMessagesPayload
   requireMaxTokens: boolean
 }): PreparedAnthropicMessagesRequest {
-  validateRawMaxTokens(options.payload, options.requireMaxTokens)
+  validateRawMaxTokens(options.payload)
   const body = cloneAnthropicMessagesBody(options.payload)
   validateAnthropicMessagesPayload(body, options.requireMaxTokens)
   for (const field of GATEWAY_ONLY_MESSAGES_FIELDS) {

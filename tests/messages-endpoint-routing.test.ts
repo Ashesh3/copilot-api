@@ -433,6 +433,82 @@ test("preserves an unknown typed tool with a schema on native Messages", async (
   expect(upstreamBodies[0]).toHaveProperty("tools.0", tool)
 })
 
+const WEB_SEARCH_TYPE_LOOKALIKES = [
+  "web_searchfuture",
+  "Web_search_20250305",
+  "prefix_web_search_20250305",
+  "web-search_20250305",
+  "web_search_",
+  "web_search__20250305",
+]
+
+test.each(WEB_SEARCH_TYPE_LOOKALIKES)(
+  "preserves unknown web-search lookalike type %s on native Messages",
+  async (type) => {
+    installModel({ supported_endpoints: ["/v1/messages", "/responses"] })
+    const tool = {
+      type,
+      name: "future_native",
+      input_schema: { type: "object", properties: {} },
+      future_option: { enabled: true },
+    }
+
+    const response = await postMessages({ tools: [tool] })
+
+    expect(response.status).toBe(200)
+    expect(upstreamPaths).toEqual(["/v1/messages"])
+    expect(upstreamBodies[0]).toHaveProperty("tools.0", tool)
+  },
+)
+
+test.each(WEB_SEARCH_TYPE_LOOKALIKES)(
+  "blocks unknown web-search lookalike type %s on translated Messages",
+  async (type) => {
+    installModel({ supported_endpoints: ["/responses", "/chat/completions"] })
+    const tool = {
+      type,
+      name: "future_native",
+      input_schema: { type: "object", properties: {} },
+    }
+
+    const response = await postMessages({ tools: [tool] })
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toMatchObject({
+      error: {
+        code: "endpoint_translation_unsupported",
+        param: "tool_type",
+      },
+    })
+    expect(attachmentFetchCount).toBe(0)
+    expect(upstreamPaths).toEqual([])
+  },
+)
+
+test.each([
+  "web_search",
+  "web_search_20250305",
+  "web_search_preview",
+  "web_search_preview_2025_03_11",
+])("retains schema-extension rules for valid web-search type %s", (type) => {
+  const tool = {
+    type,
+    name: "web_search",
+    input_schema: { type: "object", properties: { query: {} } },
+  }
+  const payload = {
+    model: "route-model",
+    max_tokens: 64,
+    messages: [{ role: "user", content: "hello" }],
+    tools: [tool],
+  } as AnthropicMessagesPayload
+
+  expect(checkMessagesToResponsesTranslation(payload)).toEqual({
+    supported: false,
+    blockers: ["tool_extension"],
+  })
+})
+
 test("recursively blocks lossy nested tool-result content", () => {
   const payload = {
     model: "route-model",

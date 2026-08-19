@@ -246,6 +246,7 @@ test("does not require max_tokens for shared non-inference preparation", () => {
 })
 
 test.each([
+  ["undefined", undefined],
   ["string", "32"],
   ["null", null],
   ["zero", 0],

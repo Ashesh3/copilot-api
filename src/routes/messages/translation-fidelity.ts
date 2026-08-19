@@ -1,5 +1,7 @@
 import type { TranslationCheck } from "~/lib/endpoint-routing"
 
+import { isWebSearchToolType } from "~/services/copilot/mcp-web-search"
+
 import type { AnthropicMessagesPayload, AnthropicTool } from "./anthropic-types"
 
 import { scanMessagesContent } from "./content-fidelity"
@@ -289,7 +291,7 @@ function scanTools(
 
 function scanTool(tool: AnthropicTool, blockers: Array<string>): void {
   const type = typeof tool.type === "string" ? tool.type : undefined
-  if (type?.startsWith("web_search")) {
+  if (isWebSearchToolType(tool)) {
     scanUnknownKeys(tool, WEB_SEARCH_TOOL_FIELDS, {
       blockers,
       concept: "tool_extension",
@@ -414,8 +416,7 @@ export function checkMessagesNativeCompatibility(
 ): TranslationCheck {
   const blockers: Array<string> = []
   for (const tool of payload.tools ?? []) {
-    const type = typeof tool.type === "string" ? tool.type : undefined
-    if (!type?.startsWith("web_search")) continue
+    if (!isWebSearchToolType(tool)) continue
     scanUnknownKeys(tool, WEB_SEARCH_TOOL_FIELDS, {
       blockers,
       concept: "tool_extension",

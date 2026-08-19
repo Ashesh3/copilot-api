@@ -629,7 +629,7 @@ export const buildWebSearchQuery = (
 export const isWebSearchToolType = (tool: { type?: string }): boolean => {
   return (
     typeof tool.type === "string"
-    && (tool.type === "web_search" || tool.type.startsWith("web_search_"))
+    && /^web_search(?:_[a-z\d]+)*$/.test(tool.type)
   )
 }
 

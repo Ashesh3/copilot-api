@@ -300,6 +300,48 @@ test("defaults bridge max_tokens from an advertised positive model limit", async
   }
 })
 
+test("rejects present undefined bridge max_tokens instead of defaulting it", async () => {
+  const previousModels = state.models
+  state.models = {
+    object: "list",
+    data: [
+      {
+        id: "claude-bridge-default",
+        name: "Claude Bridge Default",
+        object: "model",
+        version: "1",
+        capabilities: {
+          family: "claude",
+          limits: { max_output_tokens: 4096 },
+          object: "model_capabilities",
+          supports: {},
+          tokenizer: "cl100k_base",
+          type: "chat",
+        },
+      },
+    ],
+  }
+  const payload = {
+    model: "claude-bridge-default",
+    max_tokens: undefined,
+    messages: [{ role: "user", content: "hello" }],
+  } as unknown as AnthropicMessagesPayload
+
+  try {
+    const error = await createAnthropicMessages(payload, {
+      preserveValidatedControls: true,
+    }).catch((caught: unknown) => caught)
+
+    expect(error).toHaveProperty("clientBody.error.code", "invalid_value")
+    expect(error).toHaveProperty("clientBody.error.param", "max_tokens")
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(payload).toHaveProperty("max_tokens", undefined)
+  } finally {
+    // eslint-disable-next-line require-atomic-updates
+    state.models = previousModels
+  }
+})
+
 test("rejects a bridge request without an explicit or advertised max_tokens", async () => {
   const previousModels = state.models
   state.models = {
