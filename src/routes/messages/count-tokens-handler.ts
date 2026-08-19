@@ -6,7 +6,7 @@ import {
   resolveCustomProviderModel,
   type CustomProviderModelReference,
 } from "~/lib/custom-providers"
-import { LocalHTTPError } from "~/lib/error"
+import { createEndpointTranslationError, LocalHTTPError } from "~/lib/error"
 import {
   applyModelRedirect,
   formatModelRedirectResult,
@@ -30,10 +30,12 @@ import { countAnthropicTokens } from "~/services/copilot/count-anthropic-tokens"
 import {
   createInvalidAnthropicMessagesJsonError,
   prepareAnthropicMessagesRequest,
+  validateAnthropicRequestHeaderOptions,
 } from "~/services/copilot/messages-contract"
 
 import { type AnthropicMessagesPayload } from "./anthropic-types"
 import { translateToOpenAI } from "./non-stream-translation"
+import { checkMessagesToChatTranslation } from "./translation-fidelity"
 
 /**
  * Handles token counting for Anthropic messages.
@@ -49,6 +51,11 @@ export async function handleCountTokens(c: Context) {
     payload: rawPayload,
     requireMaxTokens: false,
   }).body as unknown as AnthropicMessagesPayload
+  const nativeHeaders = validateAnthropicRequestHeaderOptions({
+    anthropicBeta: c.req.header("anthropic-beta"),
+    anthropicVersion: c.req.header("anthropic-version"),
+    modelProviderPreference: c.req.header("x-model-provider-preference"),
+  })
   installRoutingAffinityFallback(
     resolveClaudeRoutingAffinity(anthropicPayload.metadata),
   )
@@ -96,12 +103,10 @@ export async function handleCountTokens(c: Context) {
   const selectedModel = state.models?.data.find(
     (model) => model.id === targetModel,
   )
-  if (!selectedModel) throw createCountTokensModelNotFoundError(targetModel)
+  if (!selectedModel) throw createCountTokensModelNotFoundError()
 
   const result = await countAnthropicTokens(anthropicPayload, {
-    anthropicBeta: c.req.header("anthropic-beta"),
-    anthropicVersion: c.req.header("anthropic-version"),
-    modelProviderPreference: c.req.header("x-model-provider-preference"),
+    ...nativeHeaders,
     signal: c.req.raw.signal,
   })
 
@@ -131,6 +136,14 @@ async function countCustomProviderTokens(
 ) {
   const { anthropicPayload, customReference, requestedModel, targetEffort } =
     options
+  const translation = checkMessagesToChatTranslation(anthropicPayload)
+  if (!translation.supported) {
+    throw createEndpointTranslationError({
+      blockers: translation.blockers,
+      code: "endpoint_translation_unsupported",
+      source: "messages",
+    })
+  }
   setRequestContext(c, {
     requestedModel,
     model: customReference.upstreamModel,
@@ -145,12 +158,14 @@ async function countCustomProviderTokens(
   return c.json({ input_tokens: inputTokens })
 }
 
-function createCountTokensModelNotFoundError(model: string): LocalHTTPError {
+function createCountTokensModelNotFoundError(): LocalHTTPError {
   const clientBody = {
     type: "error",
     error: {
       type: "not_found_error",
-      message: `Model "${model}" not found.`,
+      code: "model_not_found",
+      message: "The requested Copilot Messages model was not found.",
+      param: "model",
     },
   }
   return new LocalHTTPError(

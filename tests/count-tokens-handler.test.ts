@@ -240,7 +240,9 @@ test("count_tokens returns an Anthropic model-not-found error", async () => {
     type: "error",
     error: {
       type: "not_found_error",
-      message: 'Model "missing-model" not found.',
+      code: "model_not_found",
+      message: "The requested Copilot Messages model was not found.",
+      param: "model",
     },
   })
   expect(capturedRequests).toHaveLength(0)
@@ -290,3 +292,138 @@ test("count_tokens estimates configured custom-provider models locally", async (
   expect(await response.json()).toEqual({ input_tokens: 8 })
   expect(capturedRequests).toHaveLength(0)
 })
+
+test("count_tokens rejects custom-provider nested extensions before local translation", async () => {
+  const marker = "PRIVATE_CUSTOM_COUNT_SCHEMA"
+  const response = await requestCountTokens({
+    model: "custom-count-alias",
+    body: {
+      tools: [
+        {
+          name: "lookup",
+          input_schema: {
+            type: "object",
+            properties: {},
+            [marker]: true,
+          },
+        },
+      ],
+    },
+  })
+  const body = await response.text()
+
+  expect(response.status).toBe(400)
+  expect(JSON.parse(body)).toMatchObject({
+    type: "error",
+    error: {
+      code: "endpoint_translation_unsupported",
+      param: "tool_extension",
+    },
+  })
+  expect(body).not.toContain(marker)
+  expect(capturedRequests).toHaveLength(0)
+})
+
+test.each([
+  {
+    name: "root",
+    body: null,
+    code: "invalid_type",
+    param: "body",
+  },
+  {
+    name: "model",
+    body: { model: "" },
+    code: "invalid_value",
+    param: "model",
+  },
+  {
+    name: "messages",
+    body: { model: "claude-opus-4.7-1m-internal", messages: [] },
+    code: "invalid_value",
+    param: "messages",
+  },
+  {
+    name: "content block",
+    body: {
+      model: "claude-opus-4.7-1m-internal",
+      messages: [{ role: "user", content: [null] }],
+    },
+    code: "invalid_type",
+    param: "content",
+  },
+  {
+    name: "tools",
+    body: {
+      model: "claude-opus-4.7-1m-internal",
+      messages: [{ role: "user", content: "hello" }],
+      tools: [{ name: "missing_schema" }],
+    },
+    code: "invalid_type",
+    param: "tools",
+  },
+] as const)(
+  "count_tokens returns machine metadata for malformed $name input",
+  async ({ body, code, param }) => {
+    const response = await server.request("/v1/messages/count_tokens", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    })
+    const responseBody = await response.text()
+
+    expect(response.status).toBe(400)
+    expect(JSON.parse(responseBody)).toMatchObject({
+      type: "error",
+      error: { code, param, type: "invalid_request_error" },
+    })
+    expect(responseBody).not.toContain("missing_schema")
+    expect(capturedRequests).toHaveLength(0)
+  },
+)
+
+test("count_tokens returns invalid_json metadata without raw input", async () => {
+  const marker = "PRIVATE_COUNT_INVALID_JSON"
+  const response = await server.request("/v1/messages/count_tokens", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: `{"model":"${marker}",`,
+  })
+  const body = await response.text()
+
+  expect(response.status).toBe(400)
+  expect(JSON.parse(body)).toMatchObject({
+    type: "error",
+    error: {
+      code: "invalid_json",
+      param: "body",
+      type: "invalid_request_error",
+    },
+  })
+  expect(body).not.toContain(marker)
+  expect(capturedRequests).toHaveLength(0)
+})
+
+test.each([
+  ["anthropic-beta", "PRIVATE_COUNT_BETA value", "anthropic_beta"],
+  ["anthropic-version", "PRIVATE_COUNT_VERSION", "anthropic_version"],
+  [
+    "x-model-provider-preference",
+    "PRIVATE_COUNT_PROVIDER",
+    "model_provider_preference",
+  ],
+] as const)(
+  "count_tokens rejects an invalid %s header locally",
+  async (name, value, param) => {
+    const response = await requestCountTokens({ headers: { [name]: value } })
+    const body = await response.text()
+
+    expect(response.status).toBe(400)
+    expect(JSON.parse(body)).toMatchObject({
+      type: "error",
+      error: { code: "invalid_value", param },
+    })
+    expect(body).not.toContain("PRIVATE_COUNT")
+    expect(capturedRequests).toHaveLength(0)
+  },
+)

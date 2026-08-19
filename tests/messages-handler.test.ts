@@ -256,64 +256,90 @@ beforeEach(() => {
 })
 
 test.each([
-  ["null body", "null", "The Messages request body must be a JSON object."],
-  ["array body", "[]", "The Messages request body must be a JSON object."],
-  [
-    "blank model",
-    JSON.stringify({
+  {
+    name: "null body",
+    body: "null",
+    message: "The Messages request body must be a JSON object.",
+    code: "invalid_type",
+    param: "body",
+  },
+  {
+    name: "array body",
+    body: "[]",
+    message: "The Messages request body must be a JSON object.",
+    code: "invalid_type",
+    param: "body",
+  },
+  {
+    name: "blank model",
+    body: JSON.stringify({
       model: " ",
       messages: [{ role: "user", content: "x" }],
       max_tokens: 1,
     }),
-    "model is required for Messages requests.",
-  ],
-  [
-    "missing model",
-    JSON.stringify({
+    message: "model is required for Messages requests.",
+    code: "invalid_value",
+    param: "model",
+  },
+  {
+    name: "missing model",
+    body: JSON.stringify({
       messages: [{ role: "user", content: "x" }],
       max_tokens: 1,
     }),
-    "model is required for Messages requests.",
-  ],
-  [
-    "empty messages",
-    JSON.stringify({ model: "claude", messages: [], max_tokens: 1 }),
-    "messages is required for Messages requests.",
-  ],
-  [
-    "missing messages",
-    JSON.stringify({ model: "claude", max_tokens: 1 }),
-    "messages is required for Messages requests.",
-  ],
-  [
-    "missing max_tokens",
-    JSON.stringify({
+    message: "model is required for Messages requests.",
+    code: "invalid_value",
+    param: "model",
+  },
+  {
+    name: "empty messages",
+    body: JSON.stringify({ model: "claude", messages: [], max_tokens: 1 }),
+    message: "messages is required for Messages requests.",
+    code: "invalid_value",
+    param: "messages",
+  },
+  {
+    name: "missing messages",
+    body: JSON.stringify({ model: "claude", max_tokens: 1 }),
+    message: "messages is required for Messages requests.",
+    code: "invalid_value",
+    param: "messages",
+  },
+  {
+    name: "missing max_tokens",
+    body: JSON.stringify({
       model: "claude",
       messages: [{ role: "user", content: "x" }],
     }),
-    "max_tokens is required for Messages requests.",
-  ],
-  [
-    "zero max_tokens",
-    JSON.stringify({
+    message: "max_tokens is required for Messages requests.",
+    code: "invalid_value",
+    param: "max_tokens",
+  },
+  {
+    name: "zero max_tokens",
+    body: JSON.stringify({
       model: "claude",
       messages: [{ role: "user", content: "x" }],
       max_tokens: 0,
     }),
-    "max_tokens is required for Messages requests.",
-  ],
-  [
-    "fractional max_tokens",
-    JSON.stringify({
+    message: "max_tokens is required for Messages requests.",
+    code: "invalid_value",
+    param: "max_tokens",
+  },
+  {
+    name: "fractional max_tokens",
+    body: JSON.stringify({
       model: "claude",
       messages: [{ role: "user", content: "x" }],
       max_tokens: 1.5,
     }),
-    "max_tokens is required for Messages requests.",
-  ],
+    message: "max_tokens is required for Messages requests.",
+    code: "invalid_value",
+    param: "max_tokens",
+  },
 ] as const)(
-  "rejects public Messages %s before upstream dispatch",
-  async (_name, body, message) => {
+  "rejects public Messages $name before upstream dispatch",
+  async ({ body, code, message, param }) => {
     const response = await server.request("/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -323,34 +349,41 @@ test.each([
     expect(response.status).toBe(400)
     expect(await response.json()).toEqual({
       type: "error",
-      error: { type: "invalid_request_error", message },
+      error: { type: "invalid_request_error", code, message, param },
     })
     expect(fetchMock).not.toHaveBeenCalled()
   },
 )
 
 test.each([
-  ["primitive metadata", { metadata: "private" }],
-  ["null tool choice", { tool_choice: null }],
-  ["primitive cache control", { cache_control: "ephemeral" }],
-  ["primitive thinking", { thinking: true }],
-  ["primitive output config", { output_config: "high" }],
-  ["primitive system entry", { system: ["not-a-block"] }],
-  ["primitive message entry", { messages: [null] }],
-  ["invalid message role", { messages: [{ role: "system", content: "x" }] }],
+  ["primitive metadata", { metadata: "private" }, "metadata"],
+  ["null tool choice", { tool_choice: null }, "tool_choice"],
+  ["primitive cache control", { cache_control: "ephemeral" }, "cache_control"],
+  ["primitive thinking", { thinking: true }, "thinking"],
+  ["primitive output config", { output_config: "high" }, "output_config"],
+  ["primitive system entry", { system: ["not-a-block"] }, "system"],
+  ["primitive message entry", { messages: [null] }, "messages"],
+  [
+    "invalid message role",
+    { messages: [{ role: "system", content: "x" }] },
+    "messages",
+  ],
   [
     "primitive content entry",
     { messages: [{ role: "user", content: [null] }] },
+    "content",
   ],
   [
     "non-string text",
     { messages: [{ role: "user", content: [{ type: "text", text: 3 }] }] },
+    "content",
   ],
   [
     "invalid image source",
     {
       messages: [{ role: "user", content: [{ type: "image", source: null }] }],
     },
+    "source",
   ],
   [
     "non-string tool id",
@@ -362,12 +395,17 @@ test.each([
         },
       ],
     },
+    "content",
   ],
-  ["non-string tool name", { tools: [{ name: 3, input_schema: {} }] }],
-  ["function tool without schema", { tools: [{ name: "missing_schema" }] }],
+  ["non-string tool name", { tools: [{ name: 3, input_schema: {} }] }, "tools"],
+  [
+    "function tool without schema",
+    { tools: [{ name: "missing_schema" }] },
+    "tools",
+  ],
 ] as const)(
   "rejects malformed valid-JSON Messages %s before upstream dispatch",
-  async (_name, extra) => {
+  async (_name, extra, param) => {
     state.models = structuredClone(nativeMessagesModels)
     Object.assign(state.models.data[0], {
       id: "claude-opus-4.6",
@@ -387,7 +425,11 @@ test.each([
     expect(response.status).toBe(400)
     expect(await response.json()).toMatchObject({
       type: "error",
-      error: { type: "invalid_request_error" },
+      error: {
+        code: "invalid_type",
+        param,
+        type: "invalid_request_error",
+      },
     })
     expect(fetchMock).not.toHaveBeenCalled()
   },
@@ -429,11 +471,48 @@ test("rejects malformed public Messages JSON before upstream dispatch", async ()
     type: "error",
     error: {
       type: "invalid_request_error",
+      code: "invalid_json",
       message: "The Messages request body must contain valid JSON.",
+      param: "body",
     },
   })
   expect(fetchMock).not.toHaveBeenCalled()
 })
+
+test.each([
+  ["anthropic-beta", "PRIVATE_BAD_BETA value", "anthropic_beta"],
+  ["anthropic-version", "PRIVATE_BAD_VERSION", "anthropic_version"],
+  [
+    "x-model-provider-preference",
+    "PRIVATE_BAD_PROVIDER",
+    "model_provider_preference",
+  ],
+] as const)(
+  "rejects an invalid public Messages %s header without exposing it",
+  async (name, value, param) => {
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        [name]: value,
+      },
+      body: JSON.stringify({
+        model: "claude-opus-4.8",
+        messages: [{ role: "user", content: "hello" }],
+        max_tokens: 1,
+      }),
+    })
+    const body = await response.text()
+
+    expect(response.status).toBe(400)
+    expect(JSON.parse(body)).toMatchObject({
+      type: "error",
+      error: { code: "invalid_value", param },
+    })
+    expect(body).not.toContain("PRIVATE_")
+    expect(fetchMock).not.toHaveBeenCalled()
+  },
+)
 
 test("returns a safe Anthropic error for an upstream Messages failure", async () => {
   upstreamResponseOverride = Response.json(

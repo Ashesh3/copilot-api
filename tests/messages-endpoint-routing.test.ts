@@ -290,6 +290,168 @@ test.each([
   },
 )
 
+test.each([
+  {
+    name: "metadata",
+    extra: { metadata: { user_id: "safe", private_metadata_key: true } },
+    blocker: "request_extension",
+  },
+  {
+    name: "thinking control",
+    extra: { thinking: { type: "enabled", private_thinking_key: true } },
+    blocker: "request_extension",
+  },
+  {
+    name: "output format",
+    extra: {
+      output_config: {
+        format: { type: "json_object", private_format_key: true },
+      },
+    },
+    blocker: "format_extension",
+  },
+  {
+    name: "image source",
+    extra: {
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "image",
+              source: {
+                type: "url",
+                url: "https://attachment.test/private.png",
+                private_source_key: true,
+              },
+            },
+          ],
+        },
+      ],
+    },
+    blocker: "source_extension",
+  },
+  {
+    name: "document citations",
+    extra: {
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "document",
+              source: {
+                type: "base64",
+                media_type: "application/pdf",
+                data: "JVBERi0=",
+              },
+              citations: { enabled: true, private_citation_key: true },
+            },
+          ],
+        },
+      ],
+    },
+    blocker: "content_extension",
+  },
+  {
+    name: "cache control",
+    extra: {
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: "hello",
+              cache_control: {
+                type: "ephemeral",
+                private_cache_key: true,
+              },
+            },
+          ],
+        },
+      ],
+    },
+    blocker: "content_extension",
+  },
+  {
+    name: "tool schema",
+    extra: {
+      tools: [
+        {
+          name: "lookup",
+          input_schema: {
+            type: "object",
+            properties: {},
+            private_schema_key: true,
+          },
+        },
+      ],
+    },
+    blocker: "tool_extension",
+  },
+  {
+    name: "nested tool schema",
+    extra: {
+      tools: [
+        {
+          name: "lookup",
+          input_schema: {
+            type: "object",
+            properties: {
+              query: {
+                type: "string",
+                private_nested_schema_key: true,
+              },
+            },
+          },
+        },
+      ],
+    },
+    blocker: "tool_extension",
+  },
+  {
+    name: "nested output schema",
+    extra: {
+      output_config: {
+        format: {
+          type: "json_schema",
+          schema: {
+            type: "object",
+            properties: {
+              answer: {
+                type: "string",
+                private_nested_format_key: true,
+              },
+            },
+          },
+        },
+      },
+    },
+    blocker: "format_extension",
+  },
+] as const)(
+  "rejects nested $name extensions before translated fetch or dispatch",
+  async ({ blocker, extra }) => {
+    installModel({ supported_endpoints: ["/responses", "/chat/completions"] })
+
+    const response = await postMessages(extra)
+    const body = await response.text()
+
+    expect(response.status).toBe(400)
+    expect(JSON.parse(body)).toMatchObject({
+      type: "error",
+      error: {
+        code: "endpoint_translation_unsupported",
+        param: blocker,
+      },
+    })
+    expect(body).not.toContain("private_")
+    expect(attachmentFetchCount).toBe(0)
+    expect(upstreamPaths).toEqual([])
+  },
+)
+
 test("prefers native Messages and preserves signed thinking", async () => {
   installModel({ supported_endpoints: ["/responses", "/v1/messages"] })
 
@@ -334,12 +496,6 @@ test.each([
     expectedModel: "route-model",
     expectedHeader: "not-context-1m-2025-08-07-extra",
   },
-  {
-    name: "invalid mixed header",
-    beta: "context-1m-2025-08-07,bad beta",
-    expectedModel: "route-model",
-    expectedHeader: null,
-  },
 ] as const)(
   "uses canonical beta membership for $name model routing",
   async ({ beta, expectedHeader, expectedModel }) => {
@@ -365,6 +521,34 @@ test.each([
     expect(upstreamHeaders[0]?.get("anthropic-beta")).toBe(expectedHeader)
   },
 )
+
+test("rejects invalid mixed beta before model-variant routing", async () => {
+  state.isMultiToken = true
+  registerAccount(92_001, "beta-account-token")
+  tokenPool.rebuildModelIndex()
+  state.models = {
+    object: "list",
+    data: [
+      createModel({ supported_endpoints: ["/v1/messages"] }),
+      {
+        ...createModel({ supported_endpoints: ["/v1/messages"] }),
+        id: "route-model-1m",
+        name: "route-model-1m",
+      },
+    ],
+  } satisfies ModelsResponse
+
+  const response = await postMessages(
+    {},
+    { "anthropic-beta": "context-1m-2025-08-07,bad beta" },
+  )
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toMatchObject({
+    error: { code: "invalid_value", param: "anthropic_beta" },
+  })
+  expect(upstreamPaths).toEqual([])
+})
 
 test("rejects an unknown Messages model without fabricating Chat support", async () => {
   state.models = {
@@ -612,7 +796,7 @@ test("streaming native web search keeps recovery inside the loop and emits Anthr
   const response = await postMessages({
     messages: signedThinkingHistory(),
     stream: true,
-    tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 1 }],
+    tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 2 }],
   })
   const body = await response.text()
 
@@ -671,7 +855,7 @@ test("pins native web-search follow-up to the account selected by failover", asy
   )
 
   const response = await postMessages({
-    tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 1 }],
+    tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 2 }],
   })
 
   expect(response.status).toBe(200)
@@ -791,7 +975,7 @@ test.each([
     extra: {
       tools: [{ type: "future_native_tool", name: "future_tool" }],
     },
-    param: "native_tool:future_native_tool",
+    param: "tool_extension",
   },
 ])(
   "rejects a Responses-only $name before upstream dispatch",
@@ -969,8 +1153,8 @@ test.each([
   {
     name: "unknown output config extension",
     extra: { output_config: { future_output_control: true } },
-    responses: ["output_config.future_output_control"],
-    chat: ["output_config.future_output_control"],
+    responses: ["request_extension"],
+    chat: ["request_extension"],
   },
   {
     name: "parallel tool control",
@@ -983,8 +1167,8 @@ test.each([
   {
     name: "unknown root extension",
     extra: { future_native_field: { enabled: true } },
-    responses: ["request_extension:future_native_field"],
-    chat: ["request_extension:future_native_field"],
+    responses: ["request_extension"],
+    chat: ["request_extension"],
   },
 ])(
   "maps or blocks top-level Messages $name exactly",
@@ -1016,13 +1200,13 @@ test.each([
   {
     name: "text extension",
     block: { type: "text", text: "hello", future_text_field: true },
-    blocker: "content_extension:future_text_field",
+    blocker: "content_extension",
   },
   {
     name: "message extension",
     messageExtra: { future_message_field: true },
     block: { type: "text", text: "hello" },
-    blocker: "message_extension:future_message_field",
+    blocker: "content_extension",
   },
   {
     name: "tool use extension",
@@ -1034,7 +1218,7 @@ test.each([
       input: {},
       future_tool_use_field: true,
     },
-    blocker: "content_extension:future_tool_use_field",
+    blocker: "content_extension",
   },
   {
     name: "tool result extension",
@@ -1044,7 +1228,7 @@ test.each([
       content: "done",
       future_tool_result_field: true,
     },
-    blocker: "content_extension:future_tool_result_field",
+    blocker: "content_extension",
   },
 ])(
   "fails closed for nested Messages $name",
@@ -1247,8 +1431,8 @@ test.each([
       },
       title: "report.pdf",
     },
-    responses: ["document.source"],
-    chat: ["document"],
+    responses: ["source_extension", "document.source"],
+    chat: ["source_extension", "document"],
   },
 ])("maps or blocks $name without loss", ({ document, responses, chat }) => {
   const payload = {
@@ -1750,7 +1934,7 @@ test.each([
     name: "Responses",
     endpoints: ["/responses"],
     extra: { future_native_field: { enabled: true } },
-    param: "request_extension:future_native_field",
+    param: "request_extension",
   },
   {
     name: "Chat",
@@ -1763,7 +1947,7 @@ test.each([
         },
       ],
     },
-    param: "content_extension:future_text_field",
+    param: "content_extension",
   },
 ])(
   "rejects unknown native extensions before translated $name dispatch",

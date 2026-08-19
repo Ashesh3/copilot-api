@@ -10,6 +10,12 @@ import type {
 } from "./anthropic-types"
 
 type TranslationTarget = "chat" | "responses"
+type ExtensionConcept =
+  | "content_extension"
+  | "format_extension"
+  | "request_extension"
+  | "source_extension"
+  | "tool_extension"
 
 const ROOT_FIELDS = new Set([
   "cache_control",
@@ -79,6 +85,88 @@ const TOOL_CHOICE_FIELDS = new Set([
 const THINKING_FIELDS = new Set(["budget_tokens", "type"])
 const OUTPUT_CONFIG_FIELDS = new Set(["effort", "format", "task_budget"])
 const METADATA_FIELDS = new Set(["user_id"])
+const CITATION_FIELDS = new Set(["enabled"])
+const IMAGE_SOURCE_FIELDS: Partial<Record<string, ReadonlySet<string>>> = {
+  base64: new Set(["data", "media_type", "type"]),
+  url: new Set(["type", "url"]),
+}
+const DOCUMENT_SOURCE_FIELDS: Partial<Record<string, ReadonlySet<string>>> = {
+  base64: new Set(["data", "media_type", "type"]),
+  content: new Set(["content", "type"]),
+  text: new Set(["data", "media_type", "type"]),
+  url: new Set(["type", "url"]),
+}
+const FORMAT_FIELDS: Partial<Record<string, ReadonlySet<string>>> = {
+  json_object: new Set(["type"]),
+  json_schema: new Set(["description", "name", "schema", "strict", "type"]),
+  text: new Set(["type"]),
+}
+const TASK_BUDGET_FIELDS = new Set(["remaining", "total", "type"])
+const JSON_SCHEMA_FIELDS = new Set([
+  "$anchor",
+  "$comment",
+  "$defs",
+  "$dynamicAnchor",
+  "$dynamicRef",
+  "$id",
+  "$ref",
+  "$schema",
+  "additionalItems",
+  "additionalProperties",
+  "allOf",
+  "anyOf",
+  "const",
+  "contains",
+  "contentEncoding",
+  "contentMediaType",
+  "contentSchema",
+  "default",
+  "definitions",
+  "dependentRequired",
+  "dependentSchemas",
+  "deprecated",
+  "description",
+  "discriminator",
+  "else",
+  "enum",
+  "example",
+  "examples",
+  "exclusiveMaximum",
+  "exclusiveMinimum",
+  "externalDocs",
+  "format",
+  "if",
+  "items",
+  "maxContains",
+  "maxItems",
+  "maxLength",
+  "maxProperties",
+  "maximum",
+  "minContains",
+  "minItems",
+  "minLength",
+  "minProperties",
+  "minimum",
+  "multipleOf",
+  "not",
+  "nullable",
+  "oneOf",
+  "pattern",
+  "patternProperties",
+  "prefixItems",
+  "properties",
+  "propertyNames",
+  "readOnly",
+  "required",
+  "then",
+  "title",
+  "type",
+  "unevaluatedItems",
+  "unevaluatedProperties",
+  "uniqueItems",
+  "writeOnly",
+  "xml",
+])
 
 function createCheck(blockers: Array<string>): TranslationCheck {
   return { supported: blockers.length === 0, blockers }
@@ -100,11 +188,11 @@ function addPresentBlocker(
 function scanUnknownKeys(
   value: Record<string, unknown>,
   allowed: ReadonlySet<string>,
-  options: { blockers: Array<string>; prefix: string },
+  options: { blockers: Array<string>; concept: ExtensionConcept },
 ): void {
   for (const key of Object.keys(value)) {
     if (!allowed.has(key)) {
-      addBlocker(options.blockers, `${options.prefix}${key}`)
+      addBlocker(options.blockers, options.concept)
     }
   }
 }
@@ -116,12 +204,15 @@ function scanRoot(
 ): void {
   scanUnknownKeys(payload, ROOT_FIELDS, {
     blockers,
-    prefix: "request_extension:",
+    concept: "request_extension",
   })
   addPresentBlocker(payload, blockers, "fallback_credit_token")
   addPresentBlocker(payload, blockers, "stop_details")
   addPresentBlocker(payload, blockers, "context_management")
-  addPresentBlocker(payload, blockers, "cache_control")
+  scanCacheControl(payload.cache_control, blockers, {
+    extensionFirst: false,
+    presenceBlocker: "cache_control",
+  })
   if (payload.top_k !== undefined) {
     addBlocker(blockers, "top_k")
   }
@@ -141,7 +232,7 @@ function scanRoot(
 function scanTypedObject(
   value: unknown,
   allowed: ReadonlySet<string>,
-  options: { blockers: Array<string>; prefix: string },
+  options: { blockers: Array<string>; concept: ExtensionConcept },
 ): void {
   if (!isRecord(value)) return
   scanUnknownKeys(value, allowed, options)
@@ -154,35 +245,76 @@ function scanStructuredControls(
 ): void {
   scanTypedObject(payload.metadata, METADATA_FIELDS, {
     blockers,
-    prefix: "metadata.",
+    concept: "request_extension",
   })
   scanTypedObject(payload.thinking, THINKING_FIELDS, {
     blockers,
-    prefix: "thinking.",
+    concept: "request_extension",
   })
   scanTypedObject(payload.tool_choice, TOOL_CHOICE_FIELDS, {
     blockers,
-    prefix: "tool_choice.",
+    concept: "request_extension",
   })
   if (payload.tool_choice?.disable_parallel_tool_use !== undefined) {
     addBlocker(blockers, "tool_choice.disable_parallel_tool_use")
   }
   scanTypedObject(payload.output_config, OUTPUT_CONFIG_FIELDS, {
     blockers,
-    prefix: "output_config.",
+    concept: "request_extension",
   })
+  scanOutputConfig(payload.output_config, blockers)
   if (target === "chat" && payload.output_config?.task_budget !== undefined) {
     addBlocker(blockers, "output_config.task_budget")
   }
 }
 
-function scanCacheControl(value: unknown, blockers: Array<string>): void {
+function scanCacheControl(
+  value: unknown,
+  blockers: Array<string>,
+  options: {
+    extensionFirst: boolean
+    presenceBlocker: string
+  } = { extensionFirst: true, presenceBlocker: "content_cache_control" },
+): void {
   if (!isRecord(value)) return
-  addBlocker(blockers, "content_cache_control")
+  if (!options.extensionFirst) addBlocker(blockers, options.presenceBlocker)
   scanUnknownKeys(value, CACHE_CONTROL_FIELDS, {
     blockers,
-    prefix: "cache_control_extension:",
+    concept:
+      options.presenceBlocker === "cache_control" ?
+        "request_extension"
+      : "content_extension",
   })
+  if (options.extensionFirst) addBlocker(blockers, options.presenceBlocker)
+}
+
+function scanOutputConfig(value: unknown, blockers: Array<string>): void {
+  if (!isRecord(value)) return
+  scanOutputFormat(value.format, blockers)
+  scanTypedObject(value.task_budget, TASK_BUDGET_FIELDS, {
+    blockers,
+    concept: "request_extension",
+  })
+}
+
+function scanOutputFormat(value: unknown, blockers: Array<string>): void {
+  if (!isRecord(value)) return
+  const type = typeof value.type === "string" ? value.type : "unknown"
+  const allowed = FORMAT_FIELDS[type]
+  if (!allowed) {
+    addBlocker(blockers, "format_extension")
+    return
+  }
+  scanUnknownKeys(value, allowed, {
+    blockers,
+    concept: "format_extension",
+  })
+  if (type === "json_schema") {
+    scanJsonSchema(value.schema, {
+      blockers,
+      concept: "format_extension",
+    })
+  }
 }
 
 function scanMessagesContent(
@@ -198,7 +330,7 @@ function scanMessagesContent(
   for (const message of payload.messages) {
     scanUnknownKeys(message, MESSAGE_FIELDS, {
       blockers,
-      prefix: "message_extension:",
+      concept: "content_extension",
     })
     if (!Array.isArray(message.content)) continue
     for (const block of message.content) {
@@ -221,14 +353,15 @@ function scanContentBlock(
   const type = typeof block.type === "string" ? block.type : "unknown"
   const allowed = CONTENT_FIELDS[type]
   if (allowed === undefined) {
-    addBlocker(blockers, `content_type:${type}`)
+    addBlocker(blockers, "content_extension")
     return
   }
   scanUnknownKeys(block, allowed, {
     blockers,
-    prefix: "content_extension:",
+    concept: "content_extension",
   })
   scanCacheControl(block.cache_control, blockers)
+  if (type === "image") scanSource(block.source, blockers, "image")
   if (type === "document") {
     scanDocument(block, blockers, target)
   }
@@ -253,6 +386,11 @@ function scanDocument(
   blockers: Array<string>,
   target: TranslationTarget,
 ): void {
+  scanSource(block.source, blockers, "document")
+  scanTypedObject(block.citations, CITATION_FIELDS, {
+    blockers,
+    concept: "content_extension",
+  })
   if (target === "chat") {
     addBlocker(blockers, "document")
     return
@@ -265,6 +403,30 @@ function scanDocument(
   }
   if (block.citations !== undefined && block.citations !== null) {
     addBlocker(blockers, "document.citations")
+  }
+}
+
+function scanSource(
+  value: unknown,
+  blockers: Array<string>,
+  kind: "document" | "image",
+): void {
+  if (!isRecord(value)) return
+  const type = typeof value.type === "string" ? value.type : "unknown"
+  const allowed =
+    kind === "image" ? IMAGE_SOURCE_FIELDS[type] : DOCUMENT_SOURCE_FIELDS[type]
+  if (!allowed) {
+    addBlocker(blockers, "source_extension")
+    return
+  }
+  scanUnknownKeys(value, allowed, {
+    blockers,
+    concept: "source_extension",
+  })
+  if (kind !== "document" || type !== "content") return
+  if (!Array.isArray(value.content)) return
+  for (const nested of value.content) {
+    if (isRecord(nested)) scanContentBlock(nested, blockers, "responses")
   }
 }
 
@@ -469,22 +631,77 @@ function scanTool(tool: AnthropicTool, blockers: Array<string>): void {
   if (type?.startsWith("web_search")) {
     scanUnknownKeys(tool, WEB_SEARCH_TOOL_FIELDS, {
       blockers,
-      prefix: "tool_extension:",
+      concept: "tool_extension",
     })
     return
   }
   if (type?.startsWith("web_fetch")) {
-    addBlocker(blockers, "native_tool:web_fetch")
+    addBlocker(blockers, "tool_extension")
     return
   }
   if (tool.input_schema === undefined && type !== undefined) {
-    addBlocker(blockers, `native_tool:${type}`)
+    addBlocker(blockers, "tool_extension")
     return
   }
   scanUnknownKeys(tool, FUNCTION_TOOL_FIELDS, {
     blockers,
-    prefix: "tool_extension:",
+    concept: "tool_extension",
   })
+  scanJsonSchema(tool.input_schema, {
+    blockers,
+    concept: "tool_extension",
+  })
+}
+
+function scanJsonSchema(
+  value: unknown,
+  options: {
+    blockers: Array<string>
+    concept: "format_extension" | "tool_extension"
+    seen?: Set<object>
+  },
+): void {
+  const seen = options.seen ?? new Set<object>()
+  if (!isRecord(value) || seen.has(value)) return
+  seen.add(value)
+  scanUnknownKeys(value, JSON_SCHEMA_FIELDS, options)
+
+  for (const field of [
+    "$defs",
+    "definitions",
+    "dependentSchemas",
+    "patternProperties",
+    "properties",
+  ]) {
+    const schemas = value[field]
+    if (!isRecord(schemas)) continue
+    for (const schema of Object.values(schemas)) {
+      scanJsonSchema(schema, { ...options, seen })
+    }
+  }
+
+  for (const field of ["allOf", "anyOf", "oneOf", "prefixItems"]) {
+    const schemas = value[field]
+    if (!Array.isArray(schemas)) continue
+    for (const schema of schemas) scanJsonSchema(schema, { ...options, seen })
+  }
+
+  for (const field of [
+    "additionalItems",
+    "additionalProperties",
+    "contains",
+    "contentSchema",
+    "else",
+    "if",
+    "items",
+    "not",
+    "propertyNames",
+    "then",
+    "unevaluatedItems",
+    "unevaluatedProperties",
+  ]) {
+    scanJsonSchema(value[field], { ...options, seen })
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

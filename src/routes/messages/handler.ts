@@ -96,7 +96,7 @@ import {
   createInvalidAnthropicMessagesJsonError,
   getCanonicalAnthropicBetaIdentifiers,
   prepareAnthropicMessagesRequest,
-  sanitizeAnthropicRequestHeaderOptions,
+  validateAnthropicRequestHeaderOptions,
 } from "~/services/copilot/messages-contract"
 import {
   consumeExtraSend,
@@ -234,7 +234,7 @@ export async function handleCompletion(c: Context) {
     requireMaxTokens: true,
   }).body as unknown as AnthropicMessagesPayload
   const nativeOptions: NativeMessagesRequestOptions =
-    sanitizeAnthropicRequestHeaderOptions({
+    validateAnthropicRequestHeaderOptions({
       anthropicBeta: c.req.header("anthropic-beta"),
       anthropicVersion: c.req.header("anthropic-version"),
       modelProviderPreference: c.req.header("x-model-provider-preference"),

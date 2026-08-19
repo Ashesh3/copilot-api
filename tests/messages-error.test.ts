@@ -48,7 +48,9 @@ app.get("/error", async (c) => {
       type: "error",
       error: {
         type: "invalid_request_error",
+        code: "invalid_value",
         message: "max_tokens is required for Messages requests.",
+        param: "max_tokens",
       },
     }
     return await forwardMessagesError(
@@ -104,7 +106,9 @@ test("preserves a local Anthropic error body", async () => {
     type: "error",
     error: {
       type: "invalid_request_error",
+      code: "invalid_value",
       message: "max_tokens is required for Messages requests.",
+      param: "max_tokens",
     },
   })
 })
@@ -158,6 +162,47 @@ test("preserves the same safe local metadata in an in-band error", () => {
       param: "thinking_signature",
     },
   })
+})
+
+test("keeps concept-only translation metadata out of HTTP, SSE, logs, and Sentry", async () => {
+  const marker = "PRIVATE_TRANSLATION_EXTENSION_KEY"
+  const error = localError({
+    type: "error",
+    error: {
+      type: "invalid_request_error",
+      code: "endpoint_translation_unsupported",
+      message:
+        "The selected Copilot model cannot accept this request without losing required protocol data.",
+      param: "content_extension",
+    },
+  })
+  const errorSpy = spyOn(consola, "error")
+  const captureException = spyOn(Sentry, "captureException").mockImplementation(
+    () => "event-id",
+  )
+
+  try {
+    const response = await forwardAnthropicError(error)
+    const httpBody = await response.text()
+    const streamBody = JSON.stringify(createAnthropicStreamError(error))
+    const output = JSON.stringify([
+      httpBody,
+      streamBody,
+      errorSpy.mock.calls,
+      captureException.mock.calls,
+    ])
+
+    expect(JSON.parse(httpBody)).toMatchObject({
+      error: { param: "content_extension" },
+    })
+    expect(JSON.parse(streamBody)).toMatchObject({
+      error: { param: "content_extension" },
+    })
+    expect(output).not.toContain(marker)
+  } finally {
+    errorSpy.mockRestore()
+    captureException.mockRestore()
+  }
 })
 
 test.each([

@@ -8,6 +8,7 @@ import {
   isAnthropicBetaIdentifier,
   prepareAnthropicMessagesRequest,
   serializeAnthropicMessagesRequest,
+  validateAnthropicRequestHeaderOptions,
 } from "~/services/copilot/messages-contract"
 
 function expectFixedBodyError(action: () => unknown, marker: string): void {
@@ -26,6 +27,8 @@ function expectFixedBodyError(action: () => unknown, marker: string): void {
       "clientBody.error.message",
       "The Messages request body must contain only plain JSON values.",
     )
+    expect(error).toHaveProperty("clientBody.error.code", "invalid_type")
+    expect(error).toHaveProperty("clientBody.error.param", "body")
     expect(JSON.stringify((error as LocalHTTPError).clientBody)).not.toContain(
       marker,
     )
@@ -116,7 +119,7 @@ test("preserves native top-level fields and removes only gateway-local keys", ()
   })
 })
 
-test("sanitizes native header options and defaults the Anthropic version", () => {
+test("defaults omitted native header options", () => {
   const prepared = prepareAnthropicMessagesRequest({
     payload: {
       model: "claude-current",
@@ -124,14 +127,39 @@ test("sanitizes native header options and defaults the Anthropic version", () =>
       messages: [{ role: "user", content: "hello" }],
     },
     requireMaxTokens: true,
-    anthropicBeta: "bad\nbeta",
-    anthropicVersion: "bad\rversion",
-    modelProviderPreference: "bad\nprovider",
   })
 
-  expect(prepared.headers).toEqual({
-    anthropicVersion: "2023-06-01",
-  })
+  expect(prepared.headers).toEqual({ anthropicVersion: "2023-06-01" })
+})
+
+test.each([
+  {
+    name: "beta",
+    options: { anthropicBeta: "PRIVATE_BAD_BETA value" },
+    param: "anthropic_beta",
+  },
+  {
+    name: "version",
+    options: { anthropicVersion: "PRIVATE_BAD_VERSION\nvalue" },
+    param: "anthropic_version",
+  },
+  {
+    name: "provider preference",
+    options: { modelProviderPreference: "PRIVATE_BAD_PROVIDER\nvalue" },
+    param: "model_provider_preference",
+  },
+] as const)("rejects an invalid public $name header", ({ options, param }) => {
+  try {
+    validateAnthropicRequestHeaderOptions(options)
+    throw new Error("Expected header validation to fail")
+  } catch (error) {
+    expect(error).toBeInstanceOf(LocalHTTPError)
+    expect(error).toHaveProperty("clientBody.error.code", "invalid_value")
+    expect(error).toHaveProperty("clientBody.error.param", param)
+    expect(JSON.stringify((error as LocalHTTPError).clientBody)).not.toContain(
+      "PRIVATE_BAD",
+    )
+  }
 })
 
 test("normalizes every ephemeral cache marker without mutating the source", () => {
@@ -183,6 +211,8 @@ test.each([
       "clientBody.error.type",
       "invalid_request_error",
     )
+    expect(error).toHaveProperty("clientBody.error.code", "invalid_value")
+    expect(error).toHaveProperty("clientBody.error.param", param)
     expect(error).toHaveProperty("clientBody.type", "error")
   }
 })

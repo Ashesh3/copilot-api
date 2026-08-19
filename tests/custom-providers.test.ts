@@ -389,6 +389,84 @@ test("custom Messages rejects document flattening before attachment normalizatio
   expect(requests).toHaveLength(0)
 })
 
+test.each([
+  {
+    name: "image source extension",
+    extra: {
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "image",
+              source: {
+                type: "url",
+                url: "https://private.example/image.png",
+                private_custom_source: true,
+              },
+            },
+          ],
+        },
+      ],
+    },
+    param: "source_extension",
+  },
+  {
+    name: "tool schema extension",
+    extra: {
+      tools: [
+        {
+          name: "lookup",
+          input_schema: {
+            type: "object",
+            properties: {},
+            private_custom_schema: true,
+          },
+        },
+      ],
+    },
+    param: "tool_extension",
+  },
+  {
+    name: "format extension",
+    extra: {
+      output_config: {
+        format: {
+          type: "json_object",
+          private_custom_format: true,
+        },
+      },
+    },
+    param: "format_extension",
+  },
+] as const)(
+  "rejects custom-provider nested $name without fetching or dispatching",
+  async ({ extra, param }) => {
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "custom-chat-model",
+        messages: [{ role: "user", content: "hello" }],
+        max_tokens: 16,
+        ...extra,
+      }),
+    })
+    const body = await response.text()
+
+    expect(response.status).toBe(400)
+    expect(JSON.parse(body)).toMatchObject({
+      type: "error",
+      error: {
+        code: "endpoint_translation_unsupported",
+        param,
+      },
+    })
+    expect(body).not.toContain("private_custom")
+    expect(requests).toHaveLength(0)
+  },
+)
+
 test("embeddings request routes to Nebius config by alias", async () => {
   const response = await server.request("/v1/embeddings", {
     method: "POST",

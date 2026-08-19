@@ -61,6 +61,7 @@ export interface NativeMessagesRequestOptions
   requestedModel?: string
   routedAccountPin?: RoutedAccountPin
   retryBudget?: RetryBudget
+  webSearchMaxUses?: number
 }
 
 type NativeMessagesDispatchOptions = {
@@ -161,12 +162,14 @@ export async function handleWithNativeMessages(
   const { requestedModel } = options
 
   const requestedStream = Boolean(anthropicPayload.stream)
-  const { payload, usesWebSearch } = prepareNativeTools(anthropicPayload)
+  const { payload, usesWebSearch, webSearchMaxUses } =
+    prepareNativeTools(anthropicPayload)
 
   if (usesWebSearch) {
     return await handleWithMcpWebSearch(c, payload, {
       options,
       requestedStream,
+      webSearchMaxUses,
     })
   }
 
@@ -301,10 +304,14 @@ async function streamNativeMessages(
 function prepareNativeTools(payload: AnthropicMessagesPayload): {
   payload: AnthropicMessagesPayload
   usesWebSearch: boolean
+  webSearchMaxUses?: number
 } {
   const prepared = structuredClone(payload)
   if (!prepared.tools) return { payload: prepared, usesWebSearch: false }
-  const usesWebSearch = prepared.tools.some((tool) => isWebSearchToolType(tool))
+  const webSearchTool = prepared.tools.find((tool) => isWebSearchToolType(tool))
+  const usesWebSearch = webSearchTool !== undefined
+  const webSearchMaxUses =
+    usesWebSearch ? getNativeWebSearchLimit(prepared.tools) : undefined
   prepared.tools = prepared.tools.map((tool) =>
     isWebSearchToolType(tool) ? createWebSearchAnthropicTool(tool) : tool,
   )
@@ -314,7 +321,7 @@ function prepareNativeTools(payload: AnthropicMessagesPayload): {
       disable_parallel_tool_use: true,
     }
   }
-  return { payload: prepared, usesWebSearch }
+  return { payload: prepared, usesWebSearch, webSearchMaxUses }
 }
 
 async function handleWithMcpWebSearch(
@@ -323,9 +330,10 @@ async function handleWithMcpWebSearch(
   request: {
     options: NativeMessagesRequestOptions
     requestedStream: boolean
+    webSearchMaxUses: number | undefined
   },
 ) {
-  const { options, requestedStream } = request
+  const { options, requestedStream, webSearchMaxUses } = request
   payload.stream = false
 
   return await Sentry.startSpan(
@@ -338,6 +346,7 @@ async function handleWithMcpWebSearch(
       const response = await resolveNativeWebSearch(payload, {
         ...options,
         signal: c.req.raw.signal,
+        webSearchMaxUses,
       })
 
       const accountId = getLastUsedAccountId()
@@ -370,7 +379,8 @@ export async function resolveNativeWebSearch(
   const routedAccountPin = options.routedAccountPin ?? {}
   const retryBudget = options.retryBudget ?? createRetryBudget()
   const loopOptions = { ...options, retryBudget }
-  const maxSearchUses = getNativeWebSearchLimit(initialPayload.tools)
+  const maxSearchUses =
+    options.webSearchMaxUses ?? getNativeWebSearchLimit(initialPayload.tools)
   let searchUses = 0
 
   while (true) {
@@ -426,6 +436,10 @@ export async function resolveNativeWebSearch(
       })),
     )
 
+    if (searchUses >= maxSearchUses) {
+      throw createNativeWebSearchLimitError(maxSearchUses)
+    }
+
     payload = {
       ...payload,
       stream: false,
@@ -460,7 +474,7 @@ function createNativeWebSearchLimitError(limit: number): LocalHTTPError {
       type: "invalid_request_error",
       code: "web_search_limit_exceeded",
       message: "The Copilot Messages request was rejected.",
-      param: "tools.web_search.max_uses",
+      param: "web_search_limit",
     },
   }
   return new LocalHTTPError(

@@ -753,12 +753,10 @@ describe("Messages translation fidelity", () => {
     } as AnthropicMessagesPayload
 
     expect(checkMessagesToResponsesTranslation(payload).blockers).toEqual([
-      "tool_extension:defer_loading",
-      "native_tool:web_fetch",
+      "tool_extension",
     ])
     expect(checkMessagesToChatTranslation(payload).blockers).toEqual([
-      "tool_extension:defer_loading",
-      "native_tool:web_fetch",
+      "tool_extension",
     ])
   })
 

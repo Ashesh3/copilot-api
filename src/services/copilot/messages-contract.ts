@@ -1,10 +1,24 @@
+/* eslint-disable max-lines -- exhaustive hostile-safe Messages boundary validation */
 import util from "node:util"
 
 import type { AnthropicMessagesPayload } from "~/routes/messages/anthropic-types"
 
 import { LocalHTTPError } from "~/lib/error"
 
-import { sanitizeCopilotHeaderValue } from "./copilot-contract"
+import {
+  type AnthropicRequestHeaders,
+  sanitizeAnthropicRequestHeaderOptions,
+} from "./anthropic-request-headers"
+
+export {
+  type AnthropicRequestHeaderOptions,
+  type AnthropicRequestHeaders,
+  canonicalizeAnthropicBeta,
+  getCanonicalAnthropicBetaIdentifiers,
+  isAnthropicBetaIdentifier,
+  sanitizeAnthropicRequestHeaderOptions,
+  validateAnthropicRequestHeaderOptions,
+} from "./anthropic-request-headers"
 
 const DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
 const INVALID_MESSAGES_JSON = Symbol("invalid-messages-json")
@@ -20,16 +34,6 @@ const GATEWAY_ONLY_MESSAGES_FIELDS = new Set([
   "_json_schema",
 ])
 
-export interface AnthropicRequestHeaderOptions {
-  anthropicBeta?: string
-  anthropicVersion?: string
-  modelProviderPreference?: string
-}
-
-export interface AnthropicRequestHeaders extends AnthropicRequestHeaderOptions {
-  anthropicVersion: string
-}
-
 export interface PreparedAnthropicMessagesRequest {
   body: Record<string, unknown>
   headers: AnthropicRequestHeaders
@@ -44,45 +48,105 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
-function createMessagesError(message: string): LocalHTTPError {
+type MessagesValidationParam =
+  | "body"
+  | "cache_control"
+  | "content"
+  | "format"
+  | "headers"
+  | "max_tokens"
+  | "messages"
+  | "metadata"
+  | "model"
+  | "output_config"
+  | "source"
+  | "system"
+  | "thinking"
+  | "tool_choice"
+  | "tools"
+
+function createMessagesError(options: {
+  code: "invalid_json" | "invalid_type" | "invalid_value"
+  message: string
+  param: MessagesValidationParam
+}): LocalHTTPError {
   const clientBody = {
     type: "error",
     error: {
       type: "invalid_request_error",
-      message,
+      code: options.code,
+      message: options.message,
+      param: options.param,
     },
   }
   return new LocalHTTPError(
-    message,
+    options.message,
     Response.json(clientBody, { status: 400 }),
     clientBody,
   )
 }
 
-function createMessagesValidationError(param: string): LocalHTTPError {
-  return createMessagesError(`${param} is required for Messages requests.`)
+function createMessagesValidationError(
+  param: "max_tokens" | "messages" | "model",
+): LocalHTTPError {
+  return createMessagesError({
+    code: "invalid_value",
+    message: `${param} is required for Messages requests.`,
+    param,
+  })
 }
 
 function createInvalidMessagesFieldError(param: string): LocalHTTPError {
-  return createMessagesError(
-    `The Messages request contains an invalid ${param} field.`,
-  )
+  return createMessagesError({
+    code: "invalid_type",
+    message: `The Messages request contains an invalid ${param} field.`,
+    param: canonicalMessagesValidationParam(param),
+  })
 }
 
 function createInvalidMessagesBodyError(): LocalHTTPError {
-  return createMessagesError("The Messages request body must be a JSON object.")
+  return createMessagesError({
+    code: "invalid_type",
+    message: "The Messages request body must be a JSON object.",
+    param: "body",
+  })
 }
 
 function createInvalidMessagesJsonValueError(): LocalHTTPError {
-  return createMessagesError(
-    "The Messages request body must contain only plain JSON values.",
-  )
+  return createMessagesError({
+    code: "invalid_type",
+    message: "The Messages request body must contain only plain JSON values.",
+    param: "body",
+  })
 }
 
 export function createInvalidAnthropicMessagesJsonError(): LocalHTTPError {
-  return createMessagesError(
-    "The Messages request body must contain valid JSON.",
-  )
+  return createMessagesError({
+    code: "invalid_json",
+    message: "The Messages request body must contain valid JSON.",
+    param: "body",
+  })
+}
+
+function canonicalMessagesValidationParam(
+  param: string,
+): MessagesValidationParam {
+  if (param.startsWith("tools")) return "tools"
+  if (param.startsWith("tool_choice")) return "tool_choice"
+  if (param.startsWith("metadata")) return "metadata"
+  if (param.startsWith("thinking")) return "thinking"
+  if (param.startsWith("output_config.format")) return "format"
+  if (param.startsWith("output_config")) return "output_config"
+  if (param.startsWith("cache_control")) return "cache_control"
+  if (param.startsWith("system")) return "system"
+  if (param.includes(".source")) return "source"
+  if (param.includes(".content") || param.startsWith("content")) {
+    return "content"
+  }
+  if (param.startsWith("messages")) return "messages"
+  if (param === "model") return "model"
+  if (param === "max_tokens") return "max_tokens"
+  return "body"
 }
 
 function isProxy(value: object): boolean {
@@ -735,52 +799,6 @@ function validateTools(value: unknown): void {
       throw createInvalidMessagesFieldError(`${param}.max_uses`)
     }
     validateNestedCacheControl(tool, param)
-  }
-}
-
-export function isAnthropicBetaIdentifier(value: string): boolean {
-  return /^[!#$%&'*+.^\w`|~-]+$/u.test(value)
-}
-
-export function canonicalizeAnthropicBeta(
-  value: string | undefined,
-): string | undefined {
-  const trimmed = value?.trim()
-  if (!trimmed) return undefined
-
-  const identifiers = trimmed.split(",").map((beta) => beta.trim())
-  if (
-    identifiers.some((identifier) => !isAnthropicBetaIdentifier(identifier))
-  ) {
-    return undefined
-  }
-  const canonical = [...new Set(identifiers)].join(",")
-  return sanitizeCopilotHeaderValue(canonical)
-}
-
-export function getCanonicalAnthropicBetaIdentifiers(
-  value: string | undefined,
-): ReadonlySet<string> {
-  const canonical = canonicalizeAnthropicBeta(value)
-  return new Set(canonical?.split(",") ?? [])
-}
-
-export function sanitizeAnthropicRequestHeaderOptions(options: {
-  anthropicBeta?: string | null
-  anthropicVersion?: string | null
-  modelProviderPreference?: string | null
-}): AnthropicRequestHeaderOptions {
-  const anthropicBeta = canonicalizeAnthropicBeta(
-    options.anthropicBeta ?? undefined,
-  )
-  const anthropicVersion = sanitizeCopilotHeaderValue(options.anthropicVersion)
-  const modelProviderPreference = sanitizeCopilotHeaderValue(
-    options.modelProviderPreference,
-  )
-  return {
-    ...(anthropicBeta ? { anthropicBeta } : {}),
-    ...(anthropicVersion ? { anthropicVersion } : {}),
-    ...(modelProviderPreference ? { modelProviderPreference } : {}),
   }
 }
 
