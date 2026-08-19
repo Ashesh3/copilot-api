@@ -2104,7 +2104,7 @@ describe("responses websocket message handling", () => {
     }
   })
 
-  test("does not forward unknown previous_response_id upstream", async () => {
+  test("returns a recoverable previous_response_not_found without echoing the id", async () => {
     state.models = responsesCapableModels
     const ws = createTestWebSocket()
 
@@ -2120,41 +2120,77 @@ describe("responses websocket message handling", () => {
     )
 
     const errorFrame = JSON.parse(ws.sent[0] ?? "{}") as {
-      error?: { code?: string; message?: string }
+      error?: {
+        code?: string
+        message?: string
+        request_id?: string
+        type?: string
+      }
       status?: number
       type?: string
     }
     expect(errorFrame.type).toBe("error")
     expect(errorFrame.status).toBe(400)
-    expect(errorFrame.error?.code).toBe("bad_request")
-    expect(errorFrame.error?.message).toContain("Unknown previous_response_id")
+    expect(errorFrame.error).toEqual({
+      code: "previous_response_not_found",
+      message:
+        "The previous response is not available on this WebSocket connection.",
+      type: "invalid_request_error",
+      request_id: "req-test",
+    })
+    expect(JSON.stringify(errorFrame)).not.toContain("missing")
     expect(fetchMock).not.toHaveBeenCalled()
-  })
+    expect(ws.data.closed).toBe(false)
 
-  test("strips null previous_response_id before forwarding upstream", async () => {
-    state.models = responsesCapableModels
-    queuedResponses.push(createResponsesSseResponse("resp_null_prev"))
-    const ws = createTestWebSocket()
-
+    queuedResponses.push(createResponsesSseResponse("resp_after_stale"))
     await responsesWebSocket.message(
       ws,
       JSON.stringify({
         type: "response.create",
         model: "gpt-5.4",
-        previous_response_id: null,
-        input: [],
-        tools: [],
+        input: "new local thread",
       }),
     )
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
-    expect(lastRequestBody?.previous_response_id).toBeUndefined()
-    expect(
-      ws.sent.some(
-        (frame) => (JSON.parse(frame) as { type: string }).type === "error",
-      ),
-    ).toBe(false)
+    expect(ws.data.responseSnapshots.has("resp_after_stale")).toBe(true)
   })
+
+  test.each([
+    [null, "previous_response_id must be a string"],
+    ["", "previous_response_id must not be empty"],
+    [17, "previous_response_id must be a string"],
+  ] as const)(
+    "rejects malformed previous_response_id %p without dispatch",
+    async (previousResponseId, message) => {
+      state.models = responsesCapableModels
+      const ws = createTestWebSocket()
+
+      await responsesWebSocket.message(
+        ws,
+        JSON.stringify({
+          type: "response.create",
+          model: "gpt-5.4",
+          previous_response_id: previousResponseId,
+          input: [],
+          tools: [],
+        }),
+      )
+
+      expect(fetchMock).not.toHaveBeenCalled()
+      expect(ws.data.closed).toBe(false)
+      expect(JSON.parse(ws.sent.at(-1) ?? "{}")).toEqual({
+        type: "error",
+        status: 400,
+        error: {
+          code: "invalid_request_error",
+          message,
+          type: "invalid_request_error",
+          request_id: "req-test",
+        },
+      })
+    },
+  )
 })
 
 describe("responses websocket upstream handling", () => {

@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test"
 
-import { parseResponsesWebSocketFrame } from "~/routes/responses/websocket-protocol"
+import type { ResponsesPayload } from "~/services/copilot/create-responses"
+
+import {
+  parseResponsesWebSocketFrame,
+  resolveResponsesContinuation,
+} from "~/routes/responses/websocket-protocol"
 
 describe("parseResponsesWebSocketFrame", () => {
   test("merges payload fields while keeping the protocol envelope out", () => {
@@ -207,6 +212,101 @@ describe("parseResponsesWebSocketFrame", () => {
       })
     },
   )
+})
+
+describe("resolveResponsesContinuation", () => {
+  test("starts a new thread when previous_response_id is omitted", () => {
+    const payload: ResponsesPayload = {
+      model: "gpt-current",
+      input: "hello",
+    }
+
+    expect(resolveResponsesContinuation(new Map(), payload)).toEqual({
+      ok: true,
+      payload: { model: "gpt-current", input: "hello" },
+    })
+    expect(payload).toEqual({ model: "gpt-current", input: "hello" })
+  })
+
+  test("immutably rehydrates a known connection-local response id", () => {
+    const snapshot: ResponsesPayload = {
+      model: "gpt-current",
+      instructions: "stable",
+      input: [{ role: "user", content: "first" }],
+      tools: [{ type: "function", name: "run" }],
+    }
+    const payload: ResponsesPayload = {
+      model: "gpt-current",
+      previous_response_id: "resp_1",
+      input: [{ role: "user", content: "second" }],
+    }
+
+    const result = resolveResponsesContinuation(
+      new Map([["resp_1", snapshot]]),
+      payload,
+    )
+
+    expect(result).toEqual({
+      ok: true,
+      payload: {
+        model: "gpt-current",
+        instructions: "stable",
+        input: [
+          { role: "user", content: "first" },
+          { role: "user", content: "second" },
+        ],
+        previous_response_id: undefined,
+        tools: [{ type: "function", name: "run" }],
+        generate: undefined,
+      },
+    })
+    expect(snapshot).toEqual({
+      model: "gpt-current",
+      instructions: "stable",
+      input: [{ role: "user", content: "first" }],
+      tools: [{ type: "function", name: "run" }],
+    })
+    expect(payload).toEqual({
+      model: "gpt-current",
+      previous_response_id: "resp_1",
+      input: [{ role: "user", content: "second" }],
+    })
+  })
+
+  test("returns previous_response_not_found for a stale local id", () => {
+    expect(
+      resolveResponsesContinuation(new Map(), {
+        model: "gpt-current",
+        input: "delta",
+        previous_response_id: "resp_stale",
+      }),
+    ).toEqual({
+      ok: false,
+      code: "previous_response_not_found",
+      message:
+        "The previous response is not available on this WebSocket connection.",
+      status: 400,
+    })
+  })
+
+  test.each([
+    [null, "previous_response_id must be a string"],
+    ["", "previous_response_id must not be empty"],
+    [17, "previous_response_id must be a string"],
+  ] as const)("rejects malformed previous_response_id %p", (value, message) => {
+    expect(
+      resolveResponsesContinuation(new Map(), {
+        model: "gpt-current",
+        input: "delta",
+        previous_response_id: value,
+      } as ResponsesPayload),
+    ).toEqual({
+      ok: false,
+      code: "invalid_request_error",
+      message,
+      status: 400,
+    })
+  })
 })
 
 describe("parseResponsesWebSocketFrame hostile input", () => {

@@ -8,6 +8,7 @@ import type { NativeMessagesRequestOptions } from "~/routes/messages/native-hand
 
 import { runWithCopilotRequestAttribution } from "~/lib/copilot-request-context"
 import { resolveRequestCredential } from "~/lib/credential-resolver"
+import { isHTTPError } from "~/lib/error"
 import {
   applyModelRedirect,
   formatModelRedirectResult,
@@ -66,7 +67,12 @@ import {
   throwIfWebSocketTurnAborted,
   WebSocketRequestError,
 } from "./websocket-lifecycle"
-import { parseResponsesWebSocketFrame } from "./websocket-protocol"
+import {
+  mergeContinuationInput,
+  parseResponsesWebSocketFrame,
+  rehydrateContinuationPayloadFromSnapshot,
+  resolveResponsesContinuation,
+} from "./websocket-protocol"
 
 const WS_PATHS = new Set(["/v1/responses", "/responses"])
 
@@ -102,13 +108,6 @@ interface ResponseCompletedFrame {
     output?: unknown
   }
   type?: string
-}
-
-interface ContinuationResolutionResult {
-  message?: string
-  payload?: ResponsesPayload
-  shouldStop: boolean
-  status?: number
 }
 
 /**
@@ -212,12 +211,13 @@ export const responsesWebSocket = {
           "Responses stream ended without a terminal frame",
           502,
           "server_error",
+          "server_error",
         )
       }
     } catch (error) {
       const terminal = classifyWebSocketTerminal(error, turn)
       const errorInspection = terminal.errorInspection
-      const normalized = normalizeWebSocketError(errorInspection)
+      const normalized = normalizeWebSocketError(error, errorInspection)
       finalizeResponsesWebSocketTurn(ws.data, turn, {
         error,
         ...terminal,
@@ -260,19 +260,19 @@ function prepareResponseCreate(
   data: ResponsesWebSocketData,
   rawPayload: ResponsesPayload,
 ): { affinity: RoutingAffinity | undefined; payload: ResponsesPayload } {
-  const resolution = resolveWebSocketContinuationPayload(
+  const resolution = resolveResponsesContinuation(
     data.responseSnapshots,
     rawPayload,
   )
-  if (resolution.shouldStop) {
+  if (!resolution.ok) {
     throw new WebSocketRequestError(
-      resolution.message ?? "Invalid continuation request",
-      resolution.status ?? 400,
+      resolution.message,
+      resolution.status,
       "invalid_request_error",
+      resolution.code,
     )
   }
-  const payload = resolution.payload ?? rawPayload
-  payload.previous_response_id = undefined
+  const payload = resolution.payload
   const frameAffinity = resolveResponsesRoutingAffinity(payload.client_metadata)
   return { affinity: data.affinity ?? frameAffinity, payload }
 }
@@ -522,52 +522,6 @@ function finalizeFromResponsesFrame(
   }
 }
 
-function resolveWebSocketContinuationPayload(
-  responseSnapshots: Map<string, ResponsesPayload>,
-  payload: ResponsesPayload,
-): ContinuationResolutionResult {
-  const previousResponseId = (payload as Record<string, unknown>)
-    .previous_response_id
-
-  if (
-    previousResponseId !== undefined
-    && previousResponseId !== null
-    && typeof previousResponseId !== "string"
-  ) {
-    return {
-      message: "previous_response_id must be a string",
-      shouldStop: true,
-      status: 400,
-    }
-  }
-
-  if (previousResponseId === "") {
-    return {
-      message: "previous_response_id must not be empty",
-      shouldStop: true,
-      status: 400,
-    }
-  }
-
-  if (typeof previousResponseId !== "string") {
-    return { shouldStop: false }
-  }
-
-  const rehydratedPayload = rehydrateContinuationPayload(
-    responseSnapshots,
-    payload,
-  )
-  if (rehydratedPayload) {
-    return { payload: rehydratedPayload, shouldStop: false }
-  }
-
-  return {
-    message: `Unknown previous_response_id: ${previousResponseId}`,
-    shouldStop: true,
-    status: 400,
-  }
-}
-
 function getRedirectReasoningEffort(
   effort: NonNullable<ResponsesPayload["reasoning"]>["effort"] | undefined,
 ): ReasoningEffort | undefined {
@@ -713,7 +667,10 @@ function applyRedirectedResponsesEffort(
     payload.reasoning ? { ...payload.reasoning, effort } : { effort }
 }
 
-export { extractResponsesPayload } from "./websocket-protocol"
+export {
+  extractResponsesPayload,
+  rehydrateContinuationPayload,
+} from "./websocket-protocol"
 
 export function isSyntheticWarmupRequest(payload: ResponsesPayload): boolean {
   return (payload as Record<string, unknown>).generate === false
@@ -724,59 +681,6 @@ export function rehydrateWarmupPayload(
   payload: ResponsesPayload,
 ): ResponsesPayload {
   return rehydrateContinuationPayloadFromSnapshot(warmupPayload, payload)
-}
-
-export function rehydrateContinuationPayloadFromSnapshot(
-  snapshotPayload: ResponsesPayload,
-  payload: ResponsesPayload,
-): ResponsesPayload {
-  const mergedInput = mergeContinuationInput(
-    snapshotPayload.input,
-    payload.input,
-  )
-
-  return {
-    ...snapshotPayload,
-    ...payload,
-    ...(mergedInput !== undefined ? { input: mergedInput } : {}),
-    previous_response_id: undefined,
-    generate: undefined,
-  }
-}
-
-export function rehydrateContinuationPayload(
-  responseSnapshots: Map<string, ResponsesPayload>,
-  payload: ResponsesPayload,
-): ResponsesPayload | undefined {
-  if (!payload.previous_response_id) {
-    return undefined
-  }
-
-  const snapshotPayload = responseSnapshots.get(payload.previous_response_id)
-  if (!snapshotPayload) {
-    return undefined
-  }
-
-  return rehydrateContinuationPayloadFromSnapshot(snapshotPayload, payload)
-}
-
-function mergeContinuationInput(
-  warmupInput: ResponsesPayload["input"],
-  input: ResponsesPayload["input"],
-): ResponsesPayload["input"] {
-  if (Array.isArray(warmupInput) && Array.isArray(input)) {
-    return [...warmupInput, ...input]
-  }
-  if (Array.isArray(warmupInput) && input === undefined) {
-    return [...warmupInput]
-  }
-  if (Array.isArray(input)) {
-    return [...input]
-  }
-  if (typeof input === "string") {
-    return input.length > 0 ? input : warmupInput
-  }
-  return warmupInput
 }
 
 function handleSyntheticWarmupRequest(
@@ -1105,8 +1009,17 @@ export function sendWebSocketError(
 }
 
 function normalizeWebSocketError(
+  error: unknown,
   inspection?: SafeHttpErrorInspection,
 ): WebSocketErrorFrameOptions {
+  if (isHTTPError(error) && error instanceof WebSocketRequestError) {
+    return {
+      code: error.errorCode,
+      message: error.message,
+      status: error.response.status,
+      type: error.errorType,
+    }
+  }
   if (inspection?.localError) {
     const local = inspection.localError
     const code = mapLocalWebSocketErrorCode(local, inspection.status)

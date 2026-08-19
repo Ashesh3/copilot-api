@@ -42,22 +42,28 @@ interface ResponsesWebSocketLifecycleData {
 }
 
 export class WebSocketRequestError extends LocalHTTPError {
-  constructor(message: string, status: number, errorType: string) {
+  readonly errorCode: string
+  readonly errorType: string
+
+  // The protocol-native error tuple is intentionally explicit at throw sites.
+  // eslint-disable-next-line max-params
+  constructor(
+    message: string,
+    status: number,
+    errorType: string,
+    errorCode = "bad_request",
+  ) {
     const clientBody = {
       error: {
-        code: mapWebSocketRequestErrorCode(status),
+        code: errorCode,
         message,
         type: errorType,
       },
     }
     super(message, Response.json(clientBody, { status }), clientBody)
+    this.errorCode = errorCode
+    this.errorType = errorType
   }
-}
-
-function mapWebSocketRequestErrorCode(status: number): string {
-  if (status === 413) return "request_too_large"
-  if (status >= 500) return "server_error"
-  return "bad_request"
 }
 
 export function createResponsesWebSocketTurn(

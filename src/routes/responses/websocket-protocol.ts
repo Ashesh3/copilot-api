@@ -32,6 +32,15 @@ export type WebSocketFrameParseResult =
       }
     }
 
+export type ContinuationResolution =
+  | { ok: true; payload: ResponsesPayload }
+  | {
+      ok: false
+      code: "invalid_request_error" | "previous_response_not_found"
+      message: string
+      status: 400
+    }
+
 export function parseResponsesWebSocketFrame(
   message: string | Buffer | Uint8Array,
 ): WebSocketFrameParseResult {
@@ -89,6 +98,95 @@ export function extractResponsesPayload(
   const nested =
     isRecord(frame.response) ? omitFrameEnvelope(frame.response) : {}
   return { ...topLevel, ...nested } as ResponsesPayload
+}
+
+export function resolveResponsesContinuation(
+  snapshots: ReadonlyMap<string, ResponsesPayload>,
+  payload: ResponsesPayload,
+): ContinuationResolution {
+  const previousResponseId = (payload as Record<string, unknown>)
+    .previous_response_id
+
+  if (previousResponseId === undefined) {
+    return { ok: true, payload }
+  }
+  if (typeof previousResponseId !== "string") {
+    return continuationError(
+      "invalid_request_error",
+      "previous_response_id must be a string",
+    )
+  }
+  if (previousResponseId === "") {
+    return continuationError(
+      "invalid_request_error",
+      "previous_response_id must not be empty",
+    )
+  }
+
+  const snapshotPayload = snapshots.get(previousResponseId)
+  if (!snapshotPayload) {
+    // External IDs require direct upstream response state or gateway storage;
+    // this no-storage transport can resolve only this connection's snapshots.
+    return continuationError(
+      "previous_response_not_found",
+      "The previous response is not available on this WebSocket connection.",
+    )
+  }
+
+  return {
+    ok: true,
+    payload: rehydrateContinuationPayloadFromSnapshot(snapshotPayload, payload),
+  }
+}
+
+export function rehydrateContinuationPayloadFromSnapshot(
+  snapshotPayload: ResponsesPayload,
+  payload: ResponsesPayload,
+): ResponsesPayload {
+  const mergedInput = mergeContinuationInput(
+    snapshotPayload.input,
+    payload.input,
+  )
+
+  return {
+    ...snapshotPayload,
+    ...payload,
+    ...(mergedInput !== undefined ? { input: mergedInput } : {}),
+    previous_response_id: undefined,
+    generate: undefined,
+  }
+}
+
+export function rehydrateContinuationPayload(
+  responseSnapshots: ReadonlyMap<string, ResponsesPayload>,
+  payload: ResponsesPayload,
+): ResponsesPayload | undefined {
+  const previousResponseId = payload.previous_response_id
+  if (!previousResponseId) return undefined
+
+  const snapshotPayload = responseSnapshots.get(previousResponseId)
+  if (!snapshotPayload) return undefined
+
+  return rehydrateContinuationPayloadFromSnapshot(snapshotPayload, payload)
+}
+
+export function mergeContinuationInput(
+  snapshotInput: ResponsesPayload["input"],
+  input: ResponsesPayload["input"],
+): ResponsesPayload["input"] {
+  if (Array.isArray(snapshotInput) && Array.isArray(input)) {
+    return [...snapshotInput, ...input]
+  }
+  if (Array.isArray(snapshotInput) && input === undefined) {
+    return [...snapshotInput]
+  }
+  if (Array.isArray(input)) {
+    return [...input]
+  }
+  if (typeof input === "string") {
+    return input.length > 0 ? input : snapshotInput
+  }
+  return snapshotInput
 }
 
 function omitFrameEnvelope(
@@ -168,6 +266,13 @@ function parseError(
     ok: false,
     error: { code, message, status: 400, type: "invalid_request_error" },
   }
+}
+
+function continuationError(
+  code: "invalid_request_error" | "previous_response_not_found",
+  message: string,
+): Extract<ContinuationResolution, { ok: false }> {
+  return { ok: false, code, message, status: 400 }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
