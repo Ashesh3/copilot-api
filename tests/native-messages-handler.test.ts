@@ -186,6 +186,41 @@ test("native handler does not mutate a direct caller while preparing tools", asy
   expect(payload).toEqual(snapshot)
 })
 
+test("native Messages preserves document metadata and tool-result error status", async () => {
+  const payload = {
+    model: "claude-current",
+    max_tokens: 64,
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "document",
+            source: {
+              type: "base64",
+              media_type: "application/pdf",
+              data: "JVBERi0=",
+            },
+            title: "report.pdf",
+            context: "Read section two first.",
+            citations: { enabled: true },
+          },
+          {
+            type: "tool_result",
+            tool_use_id: "toolu_1",
+            content: "failed",
+            is_error: true,
+          },
+        ],
+      },
+    ],
+  } as AnthropicMessagesPayload
+
+  await handleWithNativeMessages(createNativeContext(), payload)
+
+  expect(nativeBodies[0]?.messages).toEqual(payload.messages)
+})
+
 function createNativeContext() {
   const request = new Request("http://localhost/v1/messages")
   const values = new Map<string, unknown>()

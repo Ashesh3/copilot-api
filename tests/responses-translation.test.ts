@@ -58,6 +58,79 @@ test("preserves tool references as explicit text on Responses", () => {
   })
 })
 
+test("Responses document conversion proves context and citations have no mapping", () => {
+  const translated = translateAnthropicMessagesToResponsesPayload({
+    model: "gpt-current",
+    max_tokens: 64,
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "document",
+            source: {
+              type: "base64",
+              media_type: "application/pdf",
+              data: "JVBERi0=",
+            },
+            title: "report.pdf",
+            context: "Read section two first.",
+            citations: { enabled: true },
+          },
+        ],
+      },
+    ],
+  })
+
+  expect(translated.input).toEqual([
+    {
+      type: "message",
+      role: "user",
+      content: [
+        {
+          type: "input_file",
+          filename: "report.pdf",
+          file_data: "data:application/pdf;base64,JVBERi0=",
+        },
+      ],
+    },
+  ])
+  expect(JSON.stringify(translated.input)).not.toContain("section two")
+  expect(JSON.stringify(translated.input)).not.toContain("citations")
+})
+
+test.each([true, false])(
+  "Responses maps tool_result.is_error=%s to item status",
+  (isError) => {
+    const translated = translateAnthropicMessagesToResponsesPayload({
+      model: "gpt-current",
+      max_tokens: 64,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "toolu_1",
+              content: "result",
+              is_error: isError,
+            },
+          ],
+        },
+      ],
+    })
+
+    expect(translated.input).toEqual([
+      {
+        type: "function_call_output",
+        call_id: "toolu_1",
+        output: "result",
+        status: isError ? "incomplete" : "completed",
+      },
+    ])
+  },
+)
+
 test("derives safety and cache fields from Claude JSON metadata.user_id", () => {
   const payload: AnthropicMessagesPayload = {
     model: "gpt-4o-mini",

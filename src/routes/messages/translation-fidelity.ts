@@ -226,6 +226,16 @@ function scanContentBlock(
     prefix: "content_extension:",
   })
   scanCacheControl(block.cache_control, blockers)
+  if (type === "document") {
+    scanDocument(block, blockers, target)
+  }
+  if (
+    type === "tool_result"
+    && target === "chat"
+    && block.is_error !== undefined
+  ) {
+    addBlocker(blockers, "tool_result.is_error")
+  }
   if (type === "tool_reference") addBlocker(blockers, "tool_reference")
   if (type !== "thinking") return
   scanThinkingBlock(
@@ -233,6 +243,23 @@ function scanContentBlock(
     blockers,
     target,
   )
+}
+
+function scanDocument(
+  block: Record<string, unknown>,
+  blockers: Array<string>,
+  target: TranslationTarget,
+): void {
+  if (target === "chat") {
+    addBlocker(blockers, "document")
+    return
+  }
+  if (block.context !== undefined && block.context !== null) {
+    addBlocker(blockers, "document.context")
+  }
+  if (block.citations !== undefined && block.citations !== null) {
+    addBlocker(blockers, "document.citations")
+  }
 }
 
 function scanThinkingBlock(

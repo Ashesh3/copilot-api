@@ -756,8 +756,8 @@ test("allows the mapped Messages translation subset", () => {
     blockers: ["stop_sequences", "temperature"],
   })
   expect(checkMessagesToChatTranslation(payload)).toEqual({
-    supported: true,
-    blockers: [],
+    supported: false,
+    blockers: ["document"],
   })
 })
 
@@ -984,6 +984,122 @@ test("routes to the remaining endpoint only when its full conversion is lossless
     source: "messages",
     target: "/chat/completions",
     translated: true,
+  })
+})
+
+test.each([
+  {
+    name: "plain document",
+    document: {
+      type: "document",
+      source: {
+        type: "base64",
+        media_type: "application/pdf",
+        data: "JVBERi0=",
+      },
+      title: "report.pdf",
+    },
+    responses: [],
+    chat: ["document"],
+  },
+  {
+    name: "document context",
+    document: {
+      type: "document",
+      source: {
+        type: "base64",
+        media_type: "application/pdf",
+        data: "JVBERi0=",
+      },
+      context: "Read section two first.",
+    },
+    responses: ["document.context"],
+    chat: ["document"],
+  },
+  {
+    name: "document citations",
+    document: {
+      type: "document",
+      source: {
+        type: "base64",
+        media_type: "application/pdf",
+        data: "JVBERi0=",
+      },
+      citations: { enabled: true },
+    },
+    responses: ["document.citations"],
+    chat: ["document"],
+  },
+])("maps or blocks $name without loss", ({ document, responses, chat }) => {
+  const payload = {
+    model: "route-model",
+    max_tokens: 64,
+    messages: [{ role: "user", content: [document] }],
+  } as unknown as AnthropicMessagesPayload
+
+  expect(checkMessagesToResponsesTranslation(payload).blockers).toEqual([
+    ...responses,
+  ])
+  expect(checkMessagesToChatTranslation(payload).blockers).toEqual([...chat])
+})
+
+test.each([true, false])(
+  "preserves or blocks meaningful tool_result.is_error=%s",
+  (isError) => {
+    const payload = {
+      model: "route-model",
+      max_tokens: 64,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "toolu_1",
+              content: "result",
+              is_error: isError,
+            },
+          ],
+        },
+      ],
+    } as AnthropicMessagesPayload
+
+    expect(checkMessagesToResponsesTranslation(payload).blockers).toEqual([])
+    expect(checkMessagesToChatTranslation(payload).blockers).toEqual([
+      "tool_result.is_error",
+    ])
+  },
+)
+
+test("routes document context away from lossy translated endpoints", () => {
+  const payload = {
+    model: "route-model",
+    max_tokens: 64,
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "document",
+            source: {
+              type: "base64",
+              media_type: "application/pdf",
+              data: "JVBERi0=",
+            },
+            context: "Preserve this context.",
+          },
+        ],
+      },
+    ],
+  } as AnthropicMessagesPayload
+  const selectedModel = createModel({
+    supported_endpoints: ["/responses", "/chat/completions"],
+  })
+
+  expect(selectMessagesUpstreamEndpoint({ payload, selectedModel })).toEqual({
+    blockers: ["document.context", "document"],
+    code: "endpoint_translation_unsupported",
+    source: "messages",
   })
 })
 

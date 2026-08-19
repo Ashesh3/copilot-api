@@ -1,5 +1,7 @@
 import { describe, test, expect, beforeAll } from "bun:test"
 
+import { state } from "~/lib/state"
+
 import {
   initializeTestState,
   postJSON,
@@ -512,7 +514,7 @@ describe("Tool calling: Messages - tool_choice & errors", () => {
     "tool result with is_error: true",
     async () => {
       const res1 = await postJSON("/v1/messages", {
-        model: "gpt-4o-mini",
+        model: getResponsesCapableModel(),
         messages: [{ role: "user", content: "What's the weather in Sydney?" }],
         tools: [ANTHROPIC_WEATHER_TOOL],
         tool_choice: { type: "any" },
@@ -525,7 +527,7 @@ describe("Tool calling: Messages - tool_choice & errors", () => {
       expect(toolUse).toBeDefined()
 
       const res2 = await postJSON("/v1/messages", {
-        model: "gpt-4o-mini",
+        model: getResponsesCapableModel(),
         messages: [
           { role: "user", content: "What's the weather in Sydney?" },
           { role: "assistant", content: body1.content },
@@ -552,6 +554,14 @@ describe("Tool calling: Messages - tool_choice & errors", () => {
     TEST_TIMEOUT,
   )
 })
+
+function getResponsesCapableModel(): string {
+  return (
+    state.models?.data.find((model) =>
+      model.supported_endpoints?.includes("/responses"),
+    )?.id ?? "gpt-4o-mini"
+  )
+}
 
 // ─── Responses: Multi-turn ───
 

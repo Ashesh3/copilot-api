@@ -731,6 +731,68 @@ describe("Messages translation fidelity", () => {
       blockers: [],
     })
   })
+
+  test("Chat document conversion proves the Copilot fallback is not lossless", () => {
+    const translated = translateToOpenAI({
+      model: "chat-only",
+      max_tokens: 64,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "document",
+              source: {
+                type: "base64",
+                media_type: "application/pdf",
+                data: "JVBERi0=",
+              },
+              title: "report.pdf",
+            },
+          ],
+        },
+      ],
+    })
+
+    expect(translated.messages[0]?.content).toEqual([
+      {
+        type: "file",
+        file: {
+          filename: "report.pdf",
+          file_data: "data:application/pdf;base64,JVBERi0=",
+        },
+      },
+    ])
+  })
+
+  test.each([true, false])(
+    "Chat tool-result conversion drops is_error=%s",
+    (isError) => {
+      const translated = translateToOpenAI({
+        model: "chat-only",
+        max_tokens: 64,
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "toolu_1",
+                content: "result",
+                is_error: isError,
+              },
+            ],
+          },
+        ],
+      })
+
+      expect(translated.messages[0]).toEqual({
+        role: "tool",
+        tool_call_id: "toolu_1",
+        content: "result",
+      })
+    },
+  )
 })
 
 describe("stripThinkingBlocks", () => {

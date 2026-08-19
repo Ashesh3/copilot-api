@@ -26,6 +26,30 @@
 - `bun run build`: passed.
 - `git diff --check`: passed.
 
+## Review Remediation Round 2
+
+- Blocked Messages-to-Responses document variants whose `context` or
+  `citations` metadata has no Responses mapping, while keeping plain PDF title
+  and data eligible for the existing exact mapping.
+- Blocked every Messages document block from Chat fallback because the Copilot
+  Chat transport downgrades file parts to omission text.
+- Kept Responses `tool_result.is_error` eligible through its exact
+  completed/incomplete item-status mapping and blocked meaningful/present
+  `is_error` on Chat, whose tool-message shape cannot preserve it.
+- Added direct scan, converter, route, and native-wire coverage proving both
+  the translated loss and native preservation behavior.
+
+### Round 2 Verification
+
+- Focused Messages routing and translation suite: 249 passed, 0 failed.
+- Targeted live `tool_result.is_error` Responses mapping: 1 passed, 0 failed.
+- Full suite: 1870 passed, 3 expected media skips, 0 failed across 117 files.
+- `bun run typecheck`: passed.
+- Changed-file lint: passed (with the existing stale
+  `baseline-browser-mapping` data notice).
+- `bun run build`: passed.
+- `git diff --check`: passed.
+
 ## Review Remediation Round 1
 
 - Replaced permissive translation checks with exhaustive map-or-block scans for
