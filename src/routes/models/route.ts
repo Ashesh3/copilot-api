@@ -2,6 +2,7 @@ import { Hono } from "hono"
 
 import type { Model } from "~/services/copilot/get-models"
 
+import { getLastUsedAccountId } from "~/lib/account-router"
 import { getCustomProviderModels } from "~/lib/custom-providers"
 import { forwardError } from "~/lib/error"
 import { modelHasOneMillionContext } from "~/lib/model-capabilities"
@@ -12,8 +13,10 @@ import {
   generateVirtualModels,
   getModelReasoningConfig,
 } from "~/lib/model-suffix"
+import { setRequestContext } from "~/lib/request-logger"
 import { state } from "~/lib/state"
 import { cacheModels } from "~/lib/utils"
+import { enableCopilotModelPolicy } from "~/services/copilot/control-plane"
 
 export const modelRoutes = new Hono()
 
@@ -354,6 +357,23 @@ modelRoutes.get("/", async (c) => {
       data: await buildModelDiscoveryListings(),
       has_more: false,
     })
+  } catch (error) {
+    return await forwardError(c, error)
+  }
+})
+
+modelRoutes.post("/:model/policy", async (c) => {
+  try {
+    const modelId = c.req.param("model")
+    const result = await enableCopilotModelPolicy(modelId, c.req.raw.signal)
+    setRequestContext(c, {
+      accountId: getLastUsedAccountId(),
+      inputLength: 0,
+      model: modelId,
+      provider: "GitHub Copilot",
+      requestedModel: modelId,
+    })
+    return c.json(result)
   } catch (error) {
     return await forwardError(c, error)
   }

@@ -1,0 +1,534 @@
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  expect,
+  mock,
+  spyOn,
+  test,
+} from "bun:test"
+import consola from "consola"
+
+import { HTTPError, LocalHTTPError } from "~/lib/error"
+import { state } from "~/lib/state"
+import { tokenPool } from "~/lib/token-pool"
+import { server } from "~/server"
+import {
+  createCopilotAutoSession,
+  createCopilotModelSession,
+  enableCopilotModelPolicy,
+  predictCopilotIntent,
+} from "~/services/copilot/control-plane"
+
+const originalFetch = globalThis.fetch
+const originalApiKeyAuth = state.apiKeyAuth
+const originalCopilotToken = state.copilotToken
+const originalGitHubToken = state.githubToken
+const originalIsMultiToken = state.isMultiToken
+const capturedRequests: Array<{ init?: RequestInit; url: string }> = []
+const queuedResponses: Array<Response> = []
+
+function requestHeaders(index = capturedRequests.length - 1): Headers {
+  return new Headers(capturedRequests[index]?.init?.headers)
+}
+
+function requestPayload(index = capturedRequests.length - 1): unknown {
+  const body = capturedRequests[index]?.init?.body
+  return typeof body === "string" ? JSON.parse(body) : undefined
+}
+
+function requestUrl(url: string | URL | Request): string {
+  if (typeof url === "string") return url
+  if (url instanceof URL) return url.toString()
+  return url.url
+}
+
+const fetchMock = mock((url: string | URL | Request, init?: RequestInit) => {
+  const urlString = requestUrl(url)
+  capturedRequests.push({ url: urlString, init })
+  const response = queuedResponses.shift()
+  if (!response) throw new Error(`Unexpected fetch: ${urlString}`)
+  return response
+})
+
+beforeAll(() => {
+  ;(globalThis as unknown as { fetch: typeof fetch }).fetch =
+    fetchMock as unknown as typeof fetch
+})
+
+afterAll(() => {
+  tokenPool.dispose()
+  for (const account of tokenPool.getAllAccounts()) {
+    tokenPool.removeAccountForTest(account.id)
+  }
+  state.apiKeyAuth = originalApiKeyAuth
+  state.copilotToken = originalCopilotToken
+  state.githubToken = originalGitHubToken
+  state.isMultiToken = originalIsMultiToken
+  ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
+})
+
+beforeEach(() => {
+  tokenPool.dispose()
+  for (const account of tokenPool.getAllAccounts()) {
+    tokenPool.removeAccountForTest(account.id)
+  }
+  capturedRequests.length = 0
+  queuedResponses.length = 0
+  fetchMock.mockClear()
+  state.isMultiToken = false
+  state.apiKeyAuth = undefined
+  state.copilotToken = "control-plane-copilot-token"
+  state.githubToken = undefined
+  state.sessionId = "control-plane-test-session"
+})
+
+function registerAccount(
+  id: number,
+  token: string,
+  models: Array<string>,
+): void {
+  const account = tokenPool.addAccount(`github-token-${id}`, "individual", id)
+  account.copilotToken = token
+  account.healthy = true
+  account.models = new Set(models)
+  tokenPool.rebuildModelIndex()
+}
+
+function findHealthyAffinity(accountId: number): string {
+  const key = Array.from(
+    { length: 2000 },
+    (_, index) => `route-affinity-${index}`,
+  ).find(
+    (candidate) =>
+      tokenPool.getHealthyAccountBySession(candidate)?.id === accountId,
+  )
+  if (!key) throw new TypeError(`No affinity found for account ${accountId}`)
+  return key
+}
+
+test("enables a percent-encoded model policy", async () => {
+  queuedResponses.push(Response.json({ ignored: true }))
+
+  const result = await enableCopilotModelPolicy("claude/model 1")
+
+  expect(result).toEqual({ success: true })
+  expect(capturedRequests[0]?.url).toBe(
+    "https://api.githubcopilot.com/models/claude%2Fmodel%201/policy",
+  )
+  expect(capturedRequests[0]?.init?.method).toBe("POST")
+  expect(capturedRequests[0]?.init?.body).toBeUndefined()
+})
+
+test("maps policy 403 to the fixed compatibility result", async () => {
+  const upstream = Response.json(
+    { error: { message: "private policy reason" } },
+    { status: 403 },
+  )
+  queuedResponses.push(upstream)
+
+  const result = await enableCopilotModelPolicy("gpt-current")
+
+  expect(result).toEqual({
+    success: false,
+    can_be_enabled: false,
+    error:
+      "This model cannot be enabled. Your organization or subscription may not permit self-service model enablement.",
+  })
+  expect(upstream.bodyUsed).toBe(false)
+})
+
+test("creates and refreshes model sessions", async () => {
+  queuedResponses.push(
+    Response.json({ token: "created" }),
+    Response.json({ token: "refreshed" }),
+  )
+
+  expect(await createCopilotModelSession({})).toEqual({ token: "created" })
+  expect(capturedRequests[0]?.url).toBe(
+    "https://api.githubcopilot.com/models/session",
+  )
+  expect(requestPayload(0)).toEqual({
+    auto_mode: { model_hints: ["auto"] },
+  })
+  expect(requestHeaders(0).get("copilot-session-token")).toBeNull()
+
+  expect(
+    await createCopilotModelSession({ existingToken: "session-secret" }),
+  ).toEqual({ token: "refreshed" })
+  expect(capturedRequests[1]?.url).toBe(
+    "https://api.githubcopilot.com/models/session",
+  )
+  expect(capturedRequests[1]?.init?.body).toBeUndefined()
+  expect(requestHeaders(1).get("copilot-session-token")).toBe("session-secret")
+})
+
+test("creates Auto sessions with forward-compatible optional fields", async () => {
+  queuedResponses.push(Response.json({ selected_model: "gpt-current" }))
+
+  await createCopilotAutoSession({
+    prompt: "inspect image",
+    hasImage: true,
+    tier: "balanced",
+    multiTurn: { sigma: 1.2 },
+    previousUserMessages: ["oldest", "latest"],
+  })
+
+  expect(capturedRequests[0]?.url).toBe("https://api.githubcopilot.com/auto")
+  expect(requestPayload()).toEqual({
+    prompt: "inspect image",
+    has_image: true,
+    tier: "balanced",
+    multi_turn: { sigma: 1.2 },
+    previous_user_messages: ["oldest", "latest"],
+  })
+})
+
+test("requires and forwards the model session token for intent", async () => {
+  const missingTokenError = await predictCopilotIntent({
+    sessionToken: "",
+    availableModels: ["gpt-current"],
+    hasImage: false,
+    payload: { prompt: "refactor" },
+  }).catch((error: unknown) => error)
+  expect(missingTokenError).toBeInstanceOf(LocalHTTPError)
+  expect(capturedRequests).toHaveLength(0)
+
+  queuedResponses.push(Response.json({ intent: "code" }))
+  await predictCopilotIntent({
+    sessionToken: "session-secret",
+    availableModels: ["gpt-current", "claude-current"],
+    hasImage: false,
+    payload: {
+      prompt: "refactor",
+      previous_user_messages: ["oldest", "latest"],
+      routing_intent: "code",
+      available_models: ["must-not-override"],
+      has_image: true,
+    },
+  })
+
+  expect(capturedRequests[0]?.url).toBe(
+    "https://api.githubcopilot.com/models/session/intent",
+  )
+  expect(requestHeaders().get("copilot-session-token")).toBe("session-secret")
+  expect(requestPayload()).toEqual({
+    prompt: "refactor",
+    previous_user_messages: ["oldest", "latest"],
+    routing_intent: "code",
+    available_models: ["gpt-current", "claude-current"],
+    has_image: false,
+  })
+})
+
+test("normalizes invalid session tokens before control-plane sends", async () => {
+  queuedResponses.push(Response.json({ token: "created" }))
+
+  await createCopilotModelSession({ existingToken: " \r\n" })
+
+  expect(requestPayload()).toEqual({
+    auto_mode: { model_hints: ["auto"] },
+  })
+  expect(requestHeaders().get("copilot-session-token")).toBeNull()
+
+  const error = await predictCopilotIntent({
+    sessionToken: " \r\n",
+    availableModels: ["gpt-current"],
+    hasImage: false,
+    payload: { prompt: "refactor" },
+  }).catch((caught: unknown) => caught)
+  expect(error).toBeInstanceOf(LocalHTTPError)
+  expect(capturedRequests).toHaveLength(1)
+})
+
+test("rejects malformed successful control-plane JSON", async () => {
+  queuedResponses.push(Response.json(["not", "a", "record"]))
+
+  const error = await createCopilotModelSession({}).catch(
+    (caught: unknown) => caught,
+  )
+
+  expect(error).toBeInstanceOf(HTTPError)
+  expect((error as HTTPError).message).toBe(
+    "Invalid Copilot control-plane response",
+  )
+  expect((error as HTTPError).response.status).toBe(502)
+})
+
+test("never logs or exposes a session token on service errors", async () => {
+  const upstream = Response.json(
+    { error: { message: "session-secret private body" } },
+    { status: 400 },
+  )
+  queuedResponses.push(upstream)
+  const errorSpy = spyOn(consola, "error")
+  let error: unknown
+  try {
+    error = await createCopilotModelSession({
+      existingToken: "session-secret",
+    }).catch((caught: unknown) => caught)
+  } finally {
+    errorSpy.mockRestore()
+  }
+
+  expect(error).toBeInstanceOf(HTTPError)
+  expect((error as HTTPError).message).toBe(
+    "Copilot control-plane request failed",
+  )
+  expect((error as HTTPError).response).toBe(upstream)
+  expect(upstream.bodyUsed).toBe(false)
+  expect(JSON.stringify(errorSpy.mock.calls)).not.toContain("session-secret")
+})
+
+test("serves exact model-session, Auto, and intent routes", async () => {
+  queuedResponses.push(
+    Response.json({ session_token: "created-token" }),
+    Response.json({ selected_model: "gpt-current" }),
+    Response.json({ intent: "code" }),
+  )
+
+  const session = await server.request("/models/session", {
+    method: "POST",
+    headers: {
+      "Copilot-Session-Token": "existing-session-token",
+      "X-Client-Session-Id": "route-session",
+    },
+  })
+  expect(session.status).toBe(200)
+  expect(await session.json()).toEqual({ session_token: "created-token" })
+  expect(capturedRequests[0]?.url).toBe(
+    "https://api.githubcopilot.com/models/session",
+  )
+  expect(capturedRequests[0]?.init?.body).toBeUndefined()
+  expect(requestHeaders(0).get("copilot-session-token")).toBe(
+    "existing-session-token",
+  )
+
+  const auto = await server.request("/auto", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "X-Client-Session-Id": "route-session",
+    },
+    body: JSON.stringify({
+      prompt: "inspect image",
+      has_image: true,
+      tier: "balanced",
+      multi_turn: { sigma: 1.2 },
+      previous_user_messages: ["oldest", "latest"],
+    }),
+  })
+  expect(auto.status).toBe(200)
+  expect(await auto.json()).toEqual({ selected_model: "gpt-current" })
+  expect(capturedRequests[1]?.url).toBe("https://api.githubcopilot.com/auto")
+  expect(requestPayload(1)).toEqual({
+    prompt: "inspect image",
+    has_image: true,
+    tier: "balanced",
+    multi_turn: { sigma: 1.2 },
+    previous_user_messages: ["oldest", "latest"],
+  })
+
+  const intent = await server.request("/models/session/intent", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "Copilot-Session-Token": "existing-session-token",
+      "X-Client-Session-Id": "route-session",
+    },
+    body: JSON.stringify({
+      prompt: "refactor",
+      available_models: ["gpt-current", "claude-current"],
+      previous_user_messages: ["oldest", "latest"],
+      routing_intent: "code",
+    }),
+  })
+  expect(intent.status).toBe(200)
+  expect(await intent.json()).toEqual({ intent: "code" })
+  expect(capturedRequests[2]?.url).toBe(
+    "https://api.githubcopilot.com/models/session/intent",
+  )
+  expect(requestPayload(2)).toEqual({
+    prompt: "refactor",
+    available_models: ["gpt-current", "claude-current"],
+    has_image: false,
+    previous_user_messages: ["oldest", "latest"],
+    routing_intent: "code",
+  })
+})
+
+test("serves model policy on both public aliases", async () => {
+  queuedResponses.push(
+    Response.json({ enabled: true }),
+    Response.json({ enabled: true }),
+  )
+  const encodedModel = "claude%2Fmodel%201"
+
+  for (const prefix of ["/models", "/v1/models"]) {
+    const response = await server.request(`${prefix}/${encodedModel}/policy`, {
+      method: "POST",
+      headers: { "X-Client-Session-Id": "policy-session" },
+    })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ success: true })
+  }
+
+  expect(capturedRequests.map(({ url }) => url)).toEqual([
+    "https://api.githubcopilot.com/models/claude%2Fmodel%201/policy",
+    "https://api.githubcopilot.com/models/claude%2Fmodel%201/policy",
+  ])
+})
+
+test("keeps every control-plane route behind inference authentication", async () => {
+  state.apiKeyAuth = "control-plane-api-key"
+
+  for (const path of [
+    "/models/session",
+    "/models/session/intent",
+    "/auto",
+    "/models/gpt-current/policy",
+    "/v1/models/gpt-current/policy",
+  ]) {
+    const response = await server.request(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    })
+    expect(response.status, path).toBe(401)
+  }
+  expect(capturedRequests).toHaveLength(0)
+
+  queuedResponses.push(Response.json({ created: true }))
+  const authorized = await server.request("/models/session", {
+    method: "POST",
+    headers: { "x-api-key": "control-plane-api-key" },
+  })
+  expect(authorized.status).toBe(200)
+})
+
+test("rejects invalid Auto and intent payloads without upstream sends", async () => {
+  const invalidRequests: Array<{
+    body: string
+    headers: Record<string, string>
+    param: string
+    path: string
+  }> = [
+    {
+      path: "/auto",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ prompt: " " }),
+      param: "prompt",
+    },
+    {
+      path: "/auto",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "valid", has_image: "yes" }),
+      param: "has_image",
+    },
+    {
+      path: "/models/session/intent",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        prompt: "refactor",
+        available_models: ["gpt-current"],
+      }),
+      param: "Copilot-Session-Token",
+    },
+    {
+      path: "/models/session/intent",
+      headers: {
+        "content-type": "application/json",
+        "Copilot-Session-Token": "session-token",
+      },
+      body: JSON.stringify({ prompt: "refactor", available_models: [] }),
+      param: "available_models",
+    },
+  ]
+
+  for (const request of invalidRequests) {
+    const response = await server.request(request.path, {
+      method: "POST",
+      headers: request.headers,
+      body: request.body,
+    })
+    expect(response.status, request.param).toBe(400)
+    expect(await response.json()).toMatchObject({
+      error: {
+        param: request.param,
+        type: "invalid_request_error",
+      },
+    })
+  }
+  expect(capturedRequests).toHaveLength(0)
+})
+
+test("routes by affinity rather than the opaque session token", async () => {
+  state.isMultiToken = true
+  registerAccount(14_001, "account-one-token", ["gpt-current"])
+  registerAccount(14_002, "account-two-token", ["gpt-current"])
+  const firstAffinity = findHealthyAffinity(14_001)
+  const secondAffinity = findHealthyAffinity(14_002)
+  queuedResponses.push(
+    Response.json({ call: 1 }),
+    Response.json({ call: 2 }),
+    Response.json({ call: 3 }),
+  )
+
+  for (const [affinity, sessionToken] of [
+    [firstAffinity, "opaque-one"],
+    [firstAffinity, "opaque-two"],
+    [secondAffinity, "opaque-one"],
+  ] as const) {
+    const response = await server.request("/models/session", {
+      method: "POST",
+      headers: {
+        "Copilot-Session-Token": sessionToken,
+        "X-Client-Session-Id": affinity,
+      },
+    })
+    expect(response.status).toBe(200)
+  }
+
+  expect(
+    capturedRequests.map((request) =>
+      new Headers(request.init?.headers).get("authorization"),
+    ),
+  ).toEqual([
+    "Bearer account-one-token",
+    "Bearer account-one-token",
+    "Bearer account-two-token",
+  ])
+})
+
+test("returns safe metadata and redacts control-plane error secrets", async () => {
+  const errorSpy = spyOn(consola, "error")
+  queuedResponses.push(
+    Response.json(
+      { error: { message: "session-secret private upstream body" } },
+      {
+        status: 400,
+        headers: {
+          "x-github-request-id": "safe-request-id",
+          "x-private-upstream": "private-metadata",
+        },
+      },
+    ),
+  )
+  let response: Response
+  try {
+    response = await server.request("/models/session", {
+      method: "POST",
+      headers: { "Copilot-Session-Token": "session-secret" },
+    })
+  } finally {
+    errorSpy.mockRestore()
+  }
+
+  const body = await response.text()
+  expect(response.status).toBe(400)
+  expect(body).not.toContain("session-secret")
+  expect(body).not.toContain("private upstream body")
+  expect(response.headers.get("x-github-request-id")).toBe("safe-request-id")
+  expect(response.headers.get("x-private-upstream")).toBeNull()
+  expect(JSON.stringify(errorSpy.mock.calls)).not.toContain("session-secret")
+})

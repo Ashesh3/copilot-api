@@ -262,20 +262,34 @@ export class TokenPool {
     const eligible = this.modelIndex.get(modelId)
     if (!eligible || eligible.length === 0) return undefined
 
-    if (!clientSessionId) {
-      return eligible[0]
-    }
+    return this.selectAccountBySession(eligible, clientSessionId)
+  }
 
-    let winner = eligible[0]
-    let winnerScore = this.rendezvousScore(clientSessionId, winner.id)
-    for (const candidate of eligible.slice(1)) {
-      const candidateScore = this.rendezvousScore(clientSessionId, candidate.id)
-      if (candidateScore > winnerScore) {
-        winner = candidate
-        winnerScore = candidateScore
-      }
-    }
-    return winner
+  /**
+   * Select a healthy account for a control-plane request.
+   *
+   * This is deterministic for identified sessions and does not retain a
+   * session-to-account mapping.
+   */
+  getHealthyAccountBySession(clientSessionId?: string): Account | undefined {
+    const healthy = this.getAllAccounts().filter((account) => account.healthy)
+    return this.selectAccountBySession(healthy, clientSessionId)
+  }
+
+  /**
+   * Select a healthy account whose raw catalog advertises the model.
+   *
+   * Policy calls deliberately ignore inference routing overrides and the
+   * derived model index because they are used to enable catalog models.
+   */
+  getAccountAdvertisingModelBySession(
+    modelId: string,
+    clientSessionId?: string,
+  ): Account | undefined {
+    const advertising = this.getAllAccounts().filter(
+      (account) => account.healthy && account.models.has(modelId),
+    )
+    return this.selectAccountBySession(advertising, clientSessionId)
   }
 
   /**
@@ -467,6 +481,25 @@ export class TokenPool {
     return createHash("sha256")
       .update(`${affinityKey}\0${accountId}`)
       .digest("hex")
+  }
+
+  private selectAccountBySession(
+    accounts: Array<Account>,
+    clientSessionId?: string,
+  ): Account | undefined {
+    const first = accounts.at(0)
+    if (!first || !clientSessionId) return first
+
+    let winner = first
+    let winnerScore = this.rendezvousScore(clientSessionId, winner.id)
+    for (const candidate of accounts.slice(1)) {
+      const candidateScore = this.rendezvousScore(clientSessionId, candidate.id)
+      if (candidateScore > winnerScore) {
+        winner = candidate
+        winnerScore = candidateScore
+      }
+    }
+    return winner
   }
 
   private getHealthyCount(): number {

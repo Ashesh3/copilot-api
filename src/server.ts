@@ -33,6 +33,7 @@ import { codeSessionsRoutes } from "./routes/code-sessions/route"
 import { codexResponsesRoutes } from "./routes/codex-responses/route"
 import { codexSearchRoutes } from "./routes/codex-search/route"
 import { computerUsePolicyRoutes } from "./routes/computer-use-policy/route"
+import { copilotControlPlaneRoutes } from "./routes/copilot-control-plane/route"
 import { dashboardRoutes } from "./routes/dashboard/route"
 import { directConnectRoutes } from "./routes/direct-connect/route"
 import { embeddingRoutes } from "./routes/embeddings/route"
@@ -206,6 +207,7 @@ server.onError(async (err, c) => {
 
 server.get("/", (c) => c.text("Server running"))
 
+server.route("", copilotControlPlaneRoutes)
 server.route("/chat/completions", completionRoutes)
 server.route("/models", modelRoutes)
 server.route("/embeddings", embeddingRoutes)

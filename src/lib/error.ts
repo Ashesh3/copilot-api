@@ -121,6 +121,25 @@ export function createInvalidJsonBodyError(): LocalHTTPError {
   )
 }
 
+export function createInvalidRequestError(
+  message: string,
+  param: string,
+): LocalHTTPError {
+  const clientBody = {
+    error: {
+      code: "invalid_request",
+      message,
+      param,
+      type: "invalid_request_error",
+    },
+  }
+  return new LocalHTTPError(
+    clientBody.error.message,
+    Response.json(clientBody, { status: 400 }),
+    clientBody,
+  )
+}
+
 export function createEndpointTranslationError(
   failure: EndpointRouteFailure,
 ): LocalHTTPError {

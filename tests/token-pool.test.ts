@@ -468,6 +468,59 @@ test("keeps unidentified clients on the first eligible account", () => {
   expect(pool.getAccountForModelBySession(MODEL_A, undefined)?.id).toBe(9)
 })
 
+test("selects an advertising model account outside the inference index", () => {
+  const pool = createPool([1, 2])
+  setModelRoutingOverridesForTest({ [MODEL_A]: { "1": false } })
+  pool.rebuildModelIndex()
+
+  expect(pool.getEligibleAccountIdsForModel(MODEL_A)).toEqual([2])
+  expect(pool.getAccountAdvertisingModelBySession(MODEL_A)?.id).toBe(1)
+})
+
+test("keeps a control-plane affinity on one healthy account", () => {
+  const pool = createPool([1, 2, 3])
+  const selections = Array.from(
+    { length: 20 },
+    () => pool.getHealthyAccountBySession("control-plane-stable")?.id,
+  )
+
+  expect(new Set(selections).size).toBe(1)
+})
+
+test("distributes distinct control-plane affinities across healthy accounts", () => {
+  const pool = createPool([1, 2, 3])
+  const selected = new Set(
+    Array.from({ length: 300 }, (_, index) => {
+      const accountId = pool.getHealthyAccountBySession(
+        `control-plane-${index}`,
+      )?.id
+      if (accountId === undefined) {
+        throw new TypeError("Expected a healthy control-plane account")
+      }
+      return accountId
+    }),
+  )
+
+  expect([...selected].sort((left, right) => left - right)).toEqual([1, 2, 3])
+})
+
+test("uses the first healthy account without control-plane affinity", () => {
+  const pool = createPool([9, 4, 7])
+  const first = pool.getAllAccounts().at(0)
+  if (!first) throw new TypeError("Expected first account")
+  pool.markUnhealthy(first)
+
+  expect(pool.getHealthyAccountBySession()?.id).toBe(4)
+})
+
+test("does not route an unadvertised model to an unrelated account", () => {
+  const pool = createPool([1, 2, 3])
+
+  expect(
+    pool.getAccountAdvertisingModelBySession("unadvertised-model", "session"),
+  ).toBeUndefined()
+})
+
 test("removes test accounts from model eligibility", () => {
   const pool = createPool([91, 92])
   pool.removeAccountForTest(91)

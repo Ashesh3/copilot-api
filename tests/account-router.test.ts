@@ -11,10 +11,19 @@ import consola from "consola"
 
 import type { Model } from "../src/services/copilot/get-models"
 
-import { getLastUsedAccountId, routedFetch } from "../src/lib/account-router"
+import {
+  getLastUsedAccountId,
+  routedControlPlaneFetch,
+  routedFetch,
+} from "../src/lib/account-router"
+import { runWithCopilotRequestAttribution } from "../src/lib/copilot-request-context"
 import { LocalHTTPError } from "../src/lib/error"
 import { setModelRoutingOverridesForTest } from "../src/lib/model-routing"
-import { clientSessionStorage } from "../src/lib/request-session"
+import {
+  clientSessionStorage,
+  requestIdStorage,
+  routedAccountStorage,
+} from "../src/lib/request-session"
 /* eslint-disable max-lines -- account-router integration variants share singleton fixtures */
 import { runWithRoutingAffinity } from "../src/lib/routing-affinity"
 import { state } from "../src/lib/state"
@@ -251,12 +260,177 @@ afterAll(() => {
 
 beforeEach(() => {
   tokenPool.dispose()
+  for (const account of tokenPool.getAllAccounts()) {
+    tokenPool.removeAccountForTest(account.id)
+  }
   fetchMock.mockClear()
   queuedResults.length = 0
   capturedRequests.length = 0
   setModelRoutingOverridesForTest({})
   state.isMultiToken = true
   state.sessionId = "router-test-session"
+})
+
+test("routes control-plane policy through raw advertised model membership", async () => {
+  const modelId = "control-plane-disabled-inference-model"
+  registerAccount(13_001, modelId, "raw-advertising-token")
+  registerAccount(13_002, modelId, "inference-enabled-token")
+  setModelRoutingOverridesForTest({ [modelId]: { "13001": false } })
+  tokenPool.rebuildModelIndex()
+  const affinityKey = Array.from(
+    { length: 1000 },
+    (_, index) => `control-plane-policy-${index}`,
+  ).find(
+    (candidate) =>
+      tokenPool.getAccountAdvertisingModelBySession(modelId, candidate)?.id
+      === 13_001,
+  )
+  if (!affinityKey) throw new TypeError("Expected policy affinity key")
+  queuedResults.push(Response.json({ success: true }))
+
+  const result = await requestIdStorage.run("control-plane-request-id", () =>
+    runWithCopilotRequestAttribution(
+      {
+        clientMachineId: "control-plane-machine",
+        openaiIntent: "control-plane-intent",
+        subsystemId: "control-plane-subsystem",
+      },
+      () =>
+        routedAccountStorage.run({}, () =>
+          runWithRoutingAffinity(
+            { key: affinityKey, source: "copilot_session" },
+            async () => {
+              const routed = await routedControlPlaneFetch({
+                modelId,
+                path: `/models/${encodeURIComponent(modelId)}/policy`,
+              })
+              return { lastAccountId: getLastUsedAccountId(), routed }
+            },
+          ),
+        ),
+    ),
+  )
+
+  expect(tokenPool.getEligibleAccountIdsForModel(modelId)).toEqual([13_002])
+  expect(result.routed.account?.id).toBe(13_001)
+  expect(result.lastAccountId).toBe(13_001)
+  expect(capturedRequests).toHaveLength(1)
+  expect(capturedRequests[0]?.url).toBe(
+    `https://api.githubcopilot.com/models/${encodeURIComponent(modelId)}/policy`,
+  )
+  const headers = new Headers(capturedRequests[0]?.init?.headers)
+  expect(headers.get("authorization")).toBe("Bearer raw-advertising-token")
+  expect(headers.get("copilot-integration-id")).toBe(state.copilotIntegrationId)
+  expect(headers.get("copilot-subsystem-id")).toBe("control-plane-subsystem")
+  expect(headers.get("openai-intent")).toBe("control-plane-intent")
+  expect(headers.get("x-client-machine-id")).toBe("control-plane-machine")
+  expect(headers.get("x-github-api-version")).toBe("2026-08-01")
+  expect(headers.get("x-request-id")).toBe("control-plane-request-id")
+})
+
+test("forwards typed control-plane body, session token, and abort signal", async () => {
+  registerAccount(13_011, "model-a", "control-plane-token")
+  tokenPool.rebuildModelIndex()
+  const controller = new AbortController()
+  queuedResults.push(Response.json({ session: "created" }))
+
+  const result = await runWithRoutingAffinity(
+    { key: "control-plane-session", source: "copilot_session" },
+    async () =>
+      await routedControlPlaneFetch({
+        body: { auto_mode: { model_hints: ["auto"] } },
+        copilotSessionToken: "opaque-session-secret",
+        path: "/models/session",
+        signal: controller.signal,
+      }),
+  )
+
+  expect(result.account?.id).toBe(13_011)
+  expect(capturedRequests).toHaveLength(1)
+  expect(capturedRequests[0]?.init?.method).toBe("POST")
+  expect(capturedRequests[0]?.init?.body).toBe(
+    JSON.stringify({ auto_mode: { model_hints: ["auto"] } }),
+  )
+  expect(capturedRequests[0]?.init?.signal).toBe(controller.signal)
+  expect(
+    new Headers(capturedRequests[0]?.init?.headers).get(
+      "copilot-session-token",
+    ),
+  ).toBe("opaque-session-secret")
+})
+
+test("returns local 503 without sending when no account advertises a policy model", async () => {
+  registerAccount(13_021, "different-model", "unrelated-token")
+  tokenPool.rebuildModelIndex()
+
+  const { account, response } = await routedControlPlaneFetch({
+    modelId: "missing-policy-model",
+    path: "/models/missing-policy-model/policy",
+  })
+
+  expect(account).toBeUndefined()
+  expect(response.status).toBe(503)
+  expect(await response.json()).toEqual({
+    error: {
+      code: "account_unavailable",
+      message: "No healthy Copilot account is available for this request.",
+      type: "account_unavailable",
+    },
+  })
+  expect(capturedRequests).toHaveLength(0)
+})
+
+test("reinitializes a selected control-plane account without cross-account failover", async () => {
+  registerAccount(13_031, "model-a", "expired-control-plane-token")
+  registerAccount(13_032, "model-a", "alternate-control-plane-token")
+  tokenPool.rebuildModelIndex()
+  const affinityKey = Array.from(
+    { length: 1000 },
+    (_, index) => `control-plane-reinit-${index}`,
+  ).find(
+    (candidate) =>
+      tokenPool.getHealthyAccountBySession(candidate)?.id === 13_031,
+  )
+  if (!affinityKey)
+    throw new TypeError("Expected reinitialization affinity key")
+  queuedResults.push(
+    new Response("Unauthorized", { status: 401 }),
+    copilotTokenResponse("fresh-control-plane-token"),
+    modelsResponse(["model-a"]),
+    Response.json({ refreshed: true }),
+  )
+
+  const { account, response } = await runWithRoutingAffinity(
+    { key: affinityKey, source: "copilot_session" },
+    async () =>
+      await routedControlPlaneFetch({
+        copilotSessionToken: "opaque-session-secret",
+        path: "/models/session",
+      }),
+  )
+
+  expect(response.status).toBe(200)
+  expect(account?.id).toBe(13_031)
+  expect(llmAuthorizationHeaders()).toEqual([
+    "Bearer expired-control-plane-token",
+    "Bearer fresh-control-plane-token",
+  ])
+  expect(llmAuthorizationHeaders()).not.toContain(
+    "Bearer alternate-control-plane-token",
+  )
+})
+
+test("uses the configured token for single-token control-plane calls", async () => {
+  state.isMultiToken = false
+  state.copilotToken = "single-control-plane-token"
+  queuedResults.push(Response.json({ session: "created" }))
+
+  const result = await routedControlPlaneFetch({ path: "/models/session" })
+
+  expect(result.account).toBeUndefined()
+  expect(
+    new Headers(capturedRequests[0]?.init?.headers).get("authorization"),
+  ).toBe("Bearer single-control-plane-token")
 })
 
 async function routedFetchWithAffinity(modelId: string, key: string) {

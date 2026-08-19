@@ -453,6 +453,113 @@ export interface RoutedFetchOptions {
   retryBudget?: RetryBudget
 }
 
+export interface RoutedControlPlaneFetchOptions {
+  body?: Record<string, unknown>
+  copilotSessionToken?: string
+  modelId?: string
+  path: string
+  signal?: AbortSignal
+}
+
+function createNoControlPlaneAccountResponse(): Response {
+  return Response.json(
+    {
+      error: {
+        code: "account_unavailable",
+        message: "No healthy Copilot account is available for this request.",
+        type: "account_unavailable",
+      },
+    },
+    { status: 503 },
+  )
+}
+
+function controlPlaneRequestInit(
+  options: RoutedControlPlaneFetchOptions,
+  headers: Record<string, string>,
+): RequestInit {
+  return {
+    method: "POST",
+    headers,
+    ...(options.body === undefined ?
+      {}
+    : { body: JSON.stringify(options.body) }),
+    ...(options.signal ? { signal: options.signal } : {}),
+  }
+}
+
+/**
+ * Perform one account-aware Copilot control-plane call.
+ *
+ * Selection is deterministic for identified sessions and remains read-only:
+ * no session token or affinity mapping is retained. Policy calls select from
+ * raw model catalog membership, while session/Auto/intent calls select from
+ * all healthy accounts. A selected account is never replaced by failover.
+ */
+export async function routedControlPlaneFetch(
+  options: RoutedControlPlaneFetchOptions,
+): Promise<{ account: Account | undefined; response: Response }> {
+  const affinityKey = getEffectiveAffinityKey()
+  const retryBudget = createRetryBudget()
+  const telemetryModel = options.modelId ?? "control-plane"
+  setLastUsedRoutedAccountId(undefined)
+
+  if (!state.isMultiToken) {
+    const response = await copilotFetch(
+      options.path,
+      controlPlaneRequestInit(
+        options,
+        copilotHeaders({
+          copilotSessionToken: options.copilotSessionToken,
+        }),
+      ),
+      {
+        retryBudget,
+        telemetry: copilotTelemetry({
+          model: telemetryModel,
+          path: options.path,
+          reason: "initial",
+        }),
+      },
+    )
+    return { response, account: undefined }
+  }
+
+  const account =
+    options.modelId ?
+      tokenPool.getAccountAdvertisingModelBySession(
+        options.modelId,
+        affinityKey,
+      )
+    : tokenPool.getHealthyAccountBySession(affinityKey)
+  if (!account) {
+    return {
+      response: createNoControlPlaneAccountResponse(),
+      account: undefined,
+    }
+  }
+
+  setLastUsedRoutedAccountId(account.id)
+  const accountOptions: AccountFetchOptions = {
+    account,
+    headerOptions: {
+      copilotSessionToken: options.copilotSessionToken,
+    },
+    init: controlPlaneRequestInit(options, {}),
+    maxHttpRetryDelaySeconds: undefined,
+    modelId: telemetryModel,
+    path: options.path,
+    reason: "initial",
+    retryBudget,
+  }
+  let response = await fetchWithAccount(accountOptions)
+  if (response.status === 401) {
+    response = await reinitializeAndRetryAccount(accountOptions)
+  }
+
+  return { response, account }
+}
+
 /**
  * Perform a fetch with account-aware routing and single-attempt failover.
  *
