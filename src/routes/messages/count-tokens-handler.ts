@@ -3,6 +3,11 @@ import type { Context } from "hono"
 import consola from "consola"
 
 import {
+  resolveCustomProviderModel,
+  type CustomProviderModelReference,
+} from "~/lib/custom-providers"
+import { LocalHTTPError } from "~/lib/error"
+import {
   applyModelRedirect,
   formatModelRedirectResult,
 } from "~/lib/model-redirect"
@@ -20,114 +25,139 @@ import {
   resolveClaudeRoutingAffinity,
 } from "~/lib/routing-affinity"
 import { state } from "~/lib/state"
-import { getTokenCount } from "~/lib/tokenizer"
+import { estimateTokenCount } from "~/lib/tokenizer"
+import { countAnthropicTokens } from "~/services/copilot/count-anthropic-tokens"
+import {
+  createInvalidAnthropicMessagesJsonError,
+  prepareAnthropicMessagesRequest,
+} from "~/services/copilot/messages-contract"
 
 import { type AnthropicMessagesPayload } from "./anthropic-types"
 import { translateToOpenAI } from "./non-stream-translation"
 
 /**
- * Handles token counting for Anthropic messages
+ * Handles token counting for Anthropic messages.
  */
 export async function handleCountTokens(c: Context) {
+  let rawPayload: AnthropicMessagesPayload
   try {
-    const anthropicBeta = c.req.header("anthropic-beta")
-
-    const anthropicPayload = await c.req.json<AnthropicMessagesPayload>()
-    installRoutingAffinityFallback(
-      resolveClaudeRoutingAffinity(anthropicPayload.metadata),
-    )
-    const requestedModel = anthropicPayload.model
-
-    const { baseModel, reasoningEffort: suffixEffort } =
-      parseModelSuffix(requestedModel)
-    const normalizedModel = normalizeModelName(baseModel)
-    const requestedEffort = normalizeReasoningEffortForModel(
-      normalizedModel,
-      suffixEffort,
-    )
-    const redirect = await applyModelRedirect({
-      model: normalizedModel,
-      effort: requestedEffort,
-    })
-    reportCountTokensRedirect(c, {
-      sourceModel: normalizedModel,
-      sourceEffort: requestedEffort,
-      redirect,
-    })
-    const targetModel = normalizeModelName(redirect.model)
-    const targetEffort = normalizeReasoningEffortForModel(
-      targetModel,
-      redirect.effort,
-    )
-    anthropicPayload.model = targetModel
-
-    setRequestContext(c, {
-      requestedModel,
-      model: targetModel,
-      provider: "TokenCount",
-      reasoningEffort: targetEffort,
-    })
-
-    const openAIPayload = translateToOpenAI(anthropicPayload)
-
-    const selectedModel = state.models?.data.find(
-      (model) => model.id === targetModel,
-    )
-
-    if (!selectedModel) {
-      consola.warn("Model not found for count_tokens, returning default", {
-        requestedModel,
-        baseModel,
-        normalizedModel,
-        targetModel,
-        reasoningEffort: targetEffort,
-        modelsLoaded: Boolean(state.models),
-        knownModelCount: state.models?.data.length ?? 0,
-      })
-      setRequestContext(c, { inputTokens: 1 })
-      return c.json({
-        input_tokens: 1,
-      })
-    }
-
-    const tokenCount = await getTokenCount(openAIPayload, selectedModel)
-
-    if (anthropicPayload.tools && anthropicPayload.tools.length > 0) {
-      let mcpToolExist = false
-      if (anthropicBeta?.startsWith("claude-code")) {
-        mcpToolExist = anthropicPayload.tools.some((tool) =>
-          tool.name.startsWith("mcp__"),
-        )
-      }
-      if (!mcpToolExist) {
-        if (targetModel.startsWith("claude")) {
-          // https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/overview#pricing
-          tokenCount.input = tokenCount.input + 346
-        } else if (targetModel.startsWith("grok")) {
-          tokenCount.input = tokenCount.input + 480
-        }
-      }
-    }
-
-    let finalTokenCount = tokenCount.input + tokenCount.output
-    if (targetModel.startsWith("claude")) {
-      finalTokenCount = Math.round(finalTokenCount * 1.15)
-    } else if (targetModel.startsWith("grok")) {
-      finalTokenCount = Math.round(finalTokenCount * 1.03)
-    }
-
-    setRequestContext(c, { inputTokens: finalTokenCount })
-    consola.info(`Token count: ${finalTokenCount} (${requestedModel})`)
-
-    return c.json({
-      input_tokens: finalTokenCount,
-    })
+    rawPayload = await c.req.json<AnthropicMessagesPayload>()
   } catch {
-    consola.error("Error counting tokens")
-    return c.json({
-      input_tokens: 1,
+    throw createInvalidAnthropicMessagesJsonError()
+  }
+  const anthropicPayload = prepareAnthropicMessagesRequest({
+    payload: rawPayload,
+    requireMaxTokens: false,
+  }).body as unknown as AnthropicMessagesPayload
+  installRoutingAffinityFallback(
+    resolveClaudeRoutingAffinity(anthropicPayload.metadata),
+  )
+  const requestedModel = anthropicPayload.model
+
+  const { baseModel, reasoningEffort: suffixEffort } =
+    parseModelSuffix(requestedModel)
+  const normalizedModel = normalizeModelName(baseModel)
+  const requestedEffort = normalizeReasoningEffortForModel(
+    normalizedModel,
+    suffixEffort,
+  )
+  const redirect = await applyModelRedirect({
+    model: normalizedModel,
+    effort: requestedEffort,
+  })
+  reportCountTokensRedirect(c, {
+    sourceModel: normalizedModel,
+    sourceEffort: requestedEffort,
+    redirect,
+  })
+  const targetModel = normalizeModelName(redirect.model)
+  const targetEffort = normalizeReasoningEffortForModel(
+    targetModel,
+    redirect.effort,
+  )
+  anthropicPayload.model = targetModel
+
+  setRequestContext(c, {
+    requestedModel,
+    model: targetModel,
+    provider: "TokenCount",
+    reasoningEffort: targetEffort,
+  })
+  const customReference = resolveCustomCountModel(targetModel)
+  if (customReference) {
+    return await countCustomProviderTokens(c, {
+      anthropicPayload,
+      customReference,
+      requestedModel,
+      targetEffort,
     })
   }
+
+  const selectedModel = state.models?.data.find(
+    (model) => model.id === targetModel,
+  )
+  if (!selectedModel) throw createCountTokensModelNotFoundError(targetModel)
+
+  const result = await countAnthropicTokens(anthropicPayload, {
+    anthropicBeta: c.req.header("anthropic-beta"),
+    anthropicVersion: c.req.header("anthropic-version"),
+    modelProviderPreference: c.req.header("x-model-provider-preference"),
+    signal: c.req.raw.signal,
+  })
+
+  setRequestContext(c, { inputTokens: result.input_tokens })
+  consola.info(`Token count: ${result.input_tokens} (${requestedModel})`)
+  return c.json(result)
+}
+
+function resolveCustomCountModel(
+  model: string,
+): CustomProviderModelReference | undefined {
+  return resolveCustomProviderModel({
+    model,
+    kind: "chat",
+    copilotModelIds: new Set(state.models?.data.map((entry) => entry.id) ?? []),
+  })
+}
+
+async function countCustomProviderTokens(
+  c: Context,
+  options: {
+    anthropicPayload: AnthropicMessagesPayload
+    customReference: CustomProviderModelReference
+    requestedModel: string
+    targetEffort: ReturnType<typeof normalizeReasoningEffortForModel>
+  },
+) {
+  const { anthropicPayload, customReference, requestedModel, targetEffort } =
+    options
+  setRequestContext(c, {
+    requestedModel,
+    model: customReference.upstreamModel,
+    provider: customReference.provider.name,
+    reasoningEffort: targetEffort,
+  })
+  const inputTokens = await estimateTokenCount(
+    translateToOpenAI(anthropicPayload),
+  )
+  setRequestContext(c, { inputTokens })
+  consola.info(`Token count: ${inputTokens} (${requestedModel})`)
+  return c.json({ input_tokens: inputTokens })
+}
+
+function createCountTokensModelNotFoundError(model: string): LocalHTTPError {
+  const clientBody = {
+    type: "error",
+    error: {
+      type: "not_found_error",
+      message: `Model "${model}" not found.`,
+    },
+  }
+  return new LocalHTTPError(
+    clientBody.error.message,
+    Response.json(clientBody, { status: 404 }),
+    clientBody,
+  )
 }
 
 function reportCountTokensRedirect(

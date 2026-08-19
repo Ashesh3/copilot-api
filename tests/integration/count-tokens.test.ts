@@ -8,16 +8,15 @@ beforeAll(async () => {
 
 describe("POST /v1/messages/count_tokens", () => {
   test(
-    "simple message token count",
+    "live upstream token count does not require max_tokens",
     async () => {
       const res = await postJSON("/v1/messages/count_tokens", {
         model: "gpt-4o-mini",
         messages: [{ role: "user", content: "Hello, world!" }],
-        max_tokens: 100,
       })
       expect(res.status).toBe(200)
       const body = (await res.json()) as { input_tokens: number }
-      expect(body.input_tokens).toBeDefined()
+      expect(Number.isInteger(body.input_tokens)).toBe(true)
       expect(body.input_tokens).toBeGreaterThan(0)
     },
     TEST_TIMEOUT,
