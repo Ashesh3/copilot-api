@@ -1,6 +1,7 @@
 import type { TranslationCheck } from "~/lib/endpoint-routing"
 
 import type {
+  AnthropicDocumentBlock,
   AnthropicMessagesPayload,
   AnthropicThinkingBlock,
   AnthropicTool,
@@ -254,12 +255,30 @@ function scanDocument(
     addBlocker(blockers, "document")
     return
   }
+  if (!isResponsesDocumentSource(block)) {
+    addBlocker(blockers, "document.source")
+  }
   if (block.context !== undefined && block.context !== null) {
     addBlocker(blockers, "document.context")
   }
   if (block.citations !== undefined && block.citations !== null) {
     addBlocker(blockers, "document.citations")
   }
+}
+
+function isResponsesDocumentSource(block: Record<string, unknown>): boolean {
+  const source = (block as unknown as AnthropicDocumentBlock).source
+  if (!isRecord(source)) return false
+  if (source.type === "url") {
+    return typeof source.url === "string" && source.url.length > 0
+  }
+  return (
+    source.type === "base64"
+    && typeof source.media_type === "string"
+    && source.media_type.toLowerCase().split(";")[0].trim()
+      === "application/pdf"
+    && typeof source.data === "string"
+  )
 }
 
 function scanThinkingBlock(

@@ -27,12 +27,30 @@ const upstreamBodies: Array<Record<string, unknown>> = []
 const upstreamHeaders: Array<Headers> = []
 const upstreamPaths: Array<string> = []
 const queuedMessagesResults: Array<Error | Response> = []
+let attachmentFetchCount = 0
 const TEST_ACCOUNT_IDS = [91_001, 91_002, 92_001, 92_002, 93_001, 93_002]
+
+function createAttachmentResponse(url: URL): Response | undefined {
+  if (url.hostname !== "attachment.test") return undefined
+  attachmentFetchCount += 1
+  const isImage = url.pathname.endsWith(".png")
+  return new Response(
+    isImage ? "normalized image" : "%PDF-1.4 normalized attachment",
+    {
+      headers: {
+        "content-type": isImage ? "image/png" : "application/pdf",
+      },
+    },
+  )
+}
 
 const fetchMock = mock(
   (url: string | URL | Request, init?: RequestInit): Response => {
     const rawUrl = typeof url === "string" || url instanceof URL ? url : url.url
-    const path = new URL(rawUrl).pathname
+    const parsedUrl = new URL(rawUrl)
+    const attachment = createAttachmentResponse(parsedUrl)
+    if (attachment) return attachment
+    const path = parsedUrl.pathname
     upstreamPaths.push(path)
     upstreamHeaders.push(new Headers(init?.headers))
     upstreamBodies.push(
@@ -146,6 +164,7 @@ beforeEach(() => {
   upstreamHeaders.length = 0
   upstreamPaths.length = 0
   queuedMessagesResults.length = 0
+  attachmentFetchCount = 0
   state.accountType = "individual"
   state.copilotToken = "copilot-token"
   state.githubToken = "github-token"
@@ -1030,6 +1049,40 @@ test.each([
     responses: ["document.citations"],
     chat: ["document"],
   },
+  {
+    name: "text document source",
+    document: {
+      type: "document",
+      source: { type: "text", media_type: "text/plain", data: "notes" },
+      title: "notes.txt",
+    },
+    responses: ["document.source"],
+    chat: ["document"],
+  },
+  {
+    name: "content document source",
+    document: {
+      type: "document",
+      source: { type: "content", content: "notes" },
+      title: "notes.txt",
+    },
+    responses: ["document.source"],
+    chat: ["document"],
+  },
+  {
+    name: "non-PDF document source",
+    document: {
+      type: "document",
+      source: {
+        type: "base64",
+        media_type: "text/plain",
+        data: "bm90ZXM=",
+      },
+      title: "notes.txt",
+    },
+    responses: ["document.source"],
+    chat: ["document"],
+  },
 ])("maps or blocks $name without loss", ({ document, responses, chat }) => {
   const payload = {
     model: "route-model",
@@ -1101,6 +1154,355 @@ test("routes document context away from lossy translated endpoints", () => {
     code: "endpoint_translation_unsupported",
     source: "messages",
   })
+})
+
+test.each([
+  {
+    name: "text source with context",
+    document: {
+      type: "document",
+      source: { type: "text", media_type: "text/plain", data: "notes" },
+      title: "notes.txt",
+      context: "preserve text context",
+    },
+    param: "document.source",
+  },
+  {
+    name: "content source with citations",
+    document: {
+      type: "document",
+      source: { type: "content", content: "content source" },
+      title: "content.txt",
+      citations: { enabled: true },
+    },
+    param: "document.source",
+  },
+  {
+    name: "non-PDF base64 source with citations",
+    document: {
+      type: "document",
+      source: {
+        type: "base64",
+        media_type: "text/plain",
+        data: Buffer.from("encoded notes").toString("base64"),
+      },
+      title: "encoded.txt",
+      citations: { enabled: false },
+    },
+    param: "document.source",
+  },
+])(
+  "rejects $name from Responses and Chat before normalization",
+  async ({ document, param }) => {
+    installModel({ supported_endpoints: ["/responses", "/chat/completions"] })
+
+    const response = await postMessages({
+      messages: [{ role: "user", content: [document] }],
+    })
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toHaveProperty("error.param", param)
+    expect(upstreamPaths).toEqual([])
+    expect(fetchMock).not.toHaveBeenCalled()
+  },
+)
+
+test.each([
+  {
+    name: "text source",
+    document: {
+      type: "document",
+      source: { type: "text", media_type: "text/plain", data: "notes" },
+      title: "notes.txt",
+      context: "preserve text context",
+    },
+  },
+  {
+    name: "content source",
+    document: {
+      type: "document",
+      source: { type: "content", content: "content source" },
+      title: "content.txt",
+      citations: { enabled: true },
+    },
+  },
+  {
+    name: "non-PDF base64 source",
+    document: {
+      type: "document",
+      source: {
+        type: "base64",
+        media_type: "text/plain",
+        data: Buffer.from("encoded notes").toString("base64"),
+      },
+      title: "encoded.txt",
+      citations: { enabled: false },
+    },
+  },
+])(
+  "rejects $name from Chat alone before normalization",
+  async ({ document }) => {
+    installModel({ supported_endpoints: ["/chat/completions"] })
+
+    const response = await postMessages({
+      messages: [{ role: "user", content: [document] }],
+    })
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toHaveProperty("error.param", "document")
+    expect(upstreamPaths).toEqual([])
+    expect(fetchMock).not.toHaveBeenCalled()
+  },
+)
+
+test.each([
+  {
+    name: "text source",
+    document: {
+      type: "document",
+      source: { type: "text", media_type: "text/plain", data: "notes" },
+      title: "notes.txt",
+      context: "preserve text context",
+      citations: { enabled: true },
+    },
+  },
+  {
+    name: "content source",
+    document: {
+      type: "document",
+      source: {
+        type: "content",
+        content: [{ type: "text", text: "content source" }],
+      },
+      title: "content.txt",
+      context: "preserve content context",
+      citations: { enabled: false },
+    },
+  },
+  {
+    name: "non-PDF base64 source",
+    document: {
+      type: "document",
+      source: {
+        type: "base64",
+        media_type: "text/plain",
+        data: Buffer.from("encoded notes").toString("base64"),
+      },
+      title: "encoded.txt",
+      context: "preserve encoded context",
+      citations: { enabled: true },
+    },
+  },
+])(
+  "passes $name metadata through native Messages without normalization",
+  async ({ document }) => {
+    installModel({ supported_endpoints: ["/v1/messages", "/responses"] })
+
+    const response = await postMessages({
+      messages: [{ role: "user", content: [document] }],
+    })
+
+    expect(response.status).toBe(200)
+    expect(upstreamPaths).toEqual(["/v1/messages"])
+    expect(upstreamBodies[0]).toHaveProperty("messages.0.content.0", document)
+    expect(attachmentFetchCount).toBe(0)
+  },
+)
+
+test("normalizes one remote PDF only after selecting Responses", async () => {
+  installModel({ supported_endpoints: ["/responses", "/chat/completions"] })
+
+  const response = await postMessages({
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "document",
+            source: { type: "url", url: "https://attachment.test/report.pdf" },
+            title: "report.pdf",
+          },
+        ],
+      },
+    ],
+  })
+
+  expect(response.status).toBe(200)
+  expect(attachmentFetchCount).toBe(1)
+  expect(upstreamPaths).toEqual(["/responses"])
+  expect(upstreamBodies[0]).toHaveProperty(
+    "input.0.content.0.filename",
+    "report.pdf",
+  )
+  expect(upstreamBodies[0]).toHaveProperty(
+    "input.0.content.0.type",
+    "input_file",
+  )
+})
+
+test("sends a base64 PDF with title to Responses without attachment fetch", async () => {
+  installModel({ supported_endpoints: ["/responses", "/chat/completions"] })
+
+  const response = await postMessages({
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "document",
+            source: {
+              type: "base64",
+              media_type: "application/pdf",
+              data: "JVBERi0=",
+            },
+            title: "report.pdf",
+          },
+        ],
+      },
+    ],
+  })
+
+  expect(response.status).toBe(200)
+  expect(attachmentFetchCount).toBe(0)
+  expect(upstreamPaths).toEqual(["/responses"])
+  expect(upstreamBodies[0]).toHaveProperty(
+    "input.0.content.0.filename",
+    "report.pdf",
+  )
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+})
+
+test("normalizes one remote image only after selecting Chat", async () => {
+  installModel({ supported_endpoints: ["/chat/completions"] })
+
+  const response = await postMessages({
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "image",
+            source: { type: "url", url: "https://attachment.test/image.png" },
+          },
+        ],
+      },
+    ],
+  })
+
+  expect(response.status).toBe(200)
+  expect(attachmentFetchCount).toBe(1)
+  expect(upstreamPaths).toEqual(["/chat/completions"])
+  const body = upstreamBodies[0] as {
+    messages?: Array<{
+      content?: Array<{ image_url?: { url?: string } }>
+    }>
+  }
+  expect(body.messages?.[0]?.content?.[0]?.image_url?.url).toStartWith(
+    "data:image/png;base64,",
+  )
+})
+
+test("normalizes one remote image after selecting native Messages", async () => {
+  installModel({ supported_endpoints: ["/v1/messages", "/responses"] })
+
+  const response = await postMessages({
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "image",
+            source: { type: "url", url: "https://attachment.test/image.png" },
+          },
+        ],
+      },
+    ],
+  })
+
+  expect(response.status).toBe(200)
+  expect(attachmentFetchCount).toBe(1)
+  expect(upstreamPaths).toEqual(["/v1/messages"])
+  expect(upstreamBodies[0]).toHaveProperty(
+    "messages.0.content.0.source.type",
+    "base64",
+  )
+})
+
+test("preserves nested native document metadata while normalizing its sibling image once", async () => {
+  installModel({ supported_endpoints: ["/v1/messages", "/responses"] })
+  const document = {
+    type: "document",
+    source: { type: "content", content: "nested content" },
+    title: "nested.txt",
+    context: "nested context",
+    citations: { enabled: true },
+  }
+
+  const response = await postMessages({
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "toolu_nested",
+            content: [
+              document,
+              {
+                type: "image",
+                source: {
+                  type: "url",
+                  url: "https://attachment.test/image.png",
+                },
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  })
+
+  expect(response.status).toBe(200)
+  expect(attachmentFetchCount).toBe(1)
+  expect(upstreamPaths).toEqual(["/v1/messages"])
+  expect(upstreamBodies[0]).toHaveProperty(
+    "messages.0.content.0.content.0",
+    document,
+  )
+  expect(upstreamBodies[0]).toHaveProperty(
+    "messages.0.content.0.content.1.source.type",
+    "base64",
+  )
+})
+
+test("blocks remote document metadata before fetching or wrong-endpoint dispatch", async () => {
+  installModel({ supported_endpoints: ["/responses", "/chat/completions"] })
+
+  const response = await postMessages({
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "document",
+            source: { type: "url", url: "https://attachment.test/report.pdf" },
+            title: "report.pdf",
+            context: "must remain structural",
+            citations: { enabled: true },
+          },
+        ],
+      },
+    ],
+  })
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toHaveProperty(
+    "error.param",
+    "document.context",
+  )
+  expect(attachmentFetchCount).toBe(0)
+  expect(upstreamPaths).toEqual([])
+  expect(fetchMock).not.toHaveBeenCalled()
 })
 
 test.each([

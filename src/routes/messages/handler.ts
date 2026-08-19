@@ -106,7 +106,10 @@ import {
   type AnthropicTextBlock,
   type AnthropicToolResultBlock,
 } from "./anthropic-types"
-import { normalizeAnthropicAttachments } from "./attachment-normalization"
+import {
+  normalizeAnthropicAttachments,
+  normalizeAnthropicImages,
+} from "./attachment-normalization"
 import {
   handleWithNativeMessages,
   type NativeMessagesRequestOptions,
@@ -340,22 +343,14 @@ async function handleCompletionInner(
   // Route to model variants based on client signals
   applyModelVariantRouting(c, anthropicPayload, anthropicBeta)
 
-  // Inline URL/text attachment sources so only base64 images and base64 PDF
-  // documents remain (upstream rejects external URLs and text documents)
-  await normalizeAnthropicAttachments(anthropicPayload, c.req.raw.signal)
-
-  if (isCompact) {
-    logger.debug("Is compact request:", isCompact)
-  } else {
-    mergeToolResultForClaude(anthropicPayload)
-  }
-
-  if (state.manualApprove) {
-    await awaitApproval()
-  }
-
   const customReference = resolveCustomChatModel(anthropicPayload.model)
   if (customReference) {
+    await normalizeAnthropicAttachments(anthropicPayload, c.req.raw.signal)
+    await prepareMessagesPayloadForDispatch(c, {
+      payload: anthropicPayload,
+      isCompact,
+      attachmentsPrepared: true,
+    })
     setRequestContext(c, {
       requestedModel,
       model: anthropicPayload.model,
@@ -380,6 +375,18 @@ async function handleCompletionInner(
   })
   if ("code" in routeDecision)
     throw createEndpointTranslationError(routeDecision)
+
+  const attachmentsPrepared = routeDecision.target !== "/v1/messages"
+  // Fidelity selection above must see the original semantic block shape.
+  // Only the chosen dispatch path may now rewrite its attachment transport.
+  if (attachmentsPrepared) {
+    await normalizeAnthropicAttachments(anthropicPayload, c.req.raw.signal)
+  }
+  await prepareMessagesPayloadForDispatch(c, {
+    payload: anthropicPayload,
+    isCompact,
+    attachmentsPrepared,
+  })
 
   let apiType = "ChatCompletions"
   if (routeDecision.target === "/v1/messages") {
@@ -471,6 +478,30 @@ async function handleCompletionInner(
     effortOverride,
     requestedModel,
   })
+}
+
+async function prepareMessagesPayloadForDispatch(
+  c: Context,
+  options: {
+    attachmentsPrepared?: boolean
+    isCompact: boolean
+    payload: AnthropicMessagesPayload
+  },
+): Promise<void> {
+  const { attachmentsPrepared, isCompact, payload } = options
+  if (!attachmentsPrepared) {
+    // Native Messages can preserve accepted document sources and their
+    // metadata. It still needs external image URLs inlined for Copilot.
+    await normalizeAnthropicImages(payload, c.req.raw.signal)
+  }
+
+  if (isCompact) {
+    logger.debug("Is compact request:", isCompact)
+  } else {
+    mergeToolResultForClaude(payload)
+  }
+
+  if (state.manualApprove) await awaitApproval()
 }
 
 interface BufferedChatCompletionsResult {

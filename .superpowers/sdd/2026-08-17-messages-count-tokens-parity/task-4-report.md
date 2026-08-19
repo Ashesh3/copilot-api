@@ -50,6 +50,32 @@
 - `bun run build`: passed.
 - `git diff --check`: passed.
 
+## Review Remediation Round 3
+
+- Moved Copilot endpoint selection ahead of destructive attachment
+  normalization so fidelity checks see original Messages document blocks,
+  source variants, titles, contexts, and citations.
+- Kept native Messages document blocks intact while still inlining external
+  images, including images nested inside tool results.
+- Normalized document/image attachments only after selecting a translated or
+  custom Chat path, with one-fetch controls for remote PDF and image inputs.
+- Added Responses blockers for text, content, and non-PDF base64 document
+  sources because the existing translator cannot map those sources exactly.
+- Added endpoint-level coverage for local translated rejection, zero wrong
+  endpoint dispatch, native metadata pass-through, normalized media success,
+  nested media, custom-provider compatibility, and attachment fetch counts.
+
+### Round 3 Verification
+
+- Focused Task 4 attachment, bridge, routing, recovery, contract, and custom
+  provider suite: 411 passed, 3 expected media skips, 0 failed across 17 files.
+- Full suite: 1889 passed, 3 expected media skips, 0 failed across 117 files.
+- `bun run typecheck`: passed.
+- Changed-file lint: passed (with the existing stale
+  `baseline-browser-mapping` data notice).
+- `bun run build`: passed.
+- `git diff --check`: passed.
+
 ## Review Remediation Round 1
 
 - Replaced permissive translation checks with exhaustive map-or-block scans for

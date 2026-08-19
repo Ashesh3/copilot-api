@@ -303,6 +303,36 @@ test("Anthropic messages request routes to custom chat provider by model id", as
   expect(requests[0]?.headers.get("authorization")).toBe("Bearer custom-key")
 })
 
+test("custom Messages keeps attachment normalization on its selected Chat path", async () => {
+  const document = {
+    type: "document",
+    source: { type: "text", media_type: "text/plain", data: "custom notes" },
+    title: "notes.txt",
+    context: "custom context",
+  }
+
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "custom-chat-model",
+      messages: [{ role: "user", content: [document] }],
+      max_tokens: 16,
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(requests).toHaveLength(1)
+  expect(requests[0]?.url).toBe("https://custom.example/v1/chat/completions")
+  expect(requests[0]?.body.messages).toEqual([
+    {
+      role: "user",
+      content:
+        '<document title="notes.txt">\ncustom context\ncustom notes\n</document>',
+    },
+  ])
+})
+
 test("embeddings request routes to Nebius config by alias", async () => {
   const response = await server.request("/v1/embeddings", {
     method: "POST",
