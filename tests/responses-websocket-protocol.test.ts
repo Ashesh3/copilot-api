@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test"
 
-import type { ResponsesPayload } from "~/services/copilot/create-responses"
+import type {
+  ResponseInputItem,
+  ResponsesPayload,
+} from "~/services/copilot/create-responses"
 
 import {
   parseResponsesWebSocketFrame,
@@ -214,7 +217,15 @@ describe("parseResponsesWebSocketFrame", () => {
   )
 })
 
-describe("resolveResponsesContinuation", () => {
+function userInput(text: string): ResponseInputItem {
+  return {
+    type: "message",
+    role: "user",
+    content: [{ type: "input_text", text }],
+  }
+}
+
+describe("resolveResponsesContinuation core", () => {
   test("starts a new thread when previous_response_id is omitted", () => {
     const payload: ResponsesPayload = {
       model: "gpt-current",
@@ -272,7 +283,272 @@ describe("resolveResponsesContinuation", () => {
       input: [{ role: "user", content: "second" }],
     })
   })
+})
 
+describe("resolveResponsesContinuation input merging", () => {
+  test.each([
+    {
+      currentInput: "second",
+      expected: [userInput("first"), userInput("second")],
+      name: "string then string",
+      snapshotInput: "first",
+    },
+    {
+      currentInput: [userInput("second")],
+      expected: [userInput("first"), userInput("second")],
+      name: "string then array",
+      snapshotInput: "first",
+    },
+    {
+      currentInput: "second",
+      expected: [userInput("first"), userInput("second")],
+      name: "array then string",
+      snapshotInput: [userInput("first")],
+    },
+    {
+      currentInput: [userInput("second")],
+      expected: [userInput("first"), userInput("second")],
+      name: "array then array",
+      snapshotInput: [userInput("first")],
+    },
+    {
+      currentInput: "",
+      expected: [userInput(""), userInput("")],
+      name: "empty string then empty string",
+      snapshotInput: "",
+    },
+    {
+      currentInput: [],
+      expected: [userInput("first")],
+      name: "string then empty array",
+      snapshotInput: "first",
+    },
+    {
+      currentInput: "second",
+      expected: [userInput("second")],
+      name: "empty array then string",
+      snapshotInput: [],
+    },
+    {
+      currentInput: [],
+      expected: [],
+      name: "empty array then empty array",
+      snapshotInput: [],
+    },
+  ] as Array<{
+    currentInput: ResponsesPayload["input"]
+    expected: Array<ResponseInputItem>
+    name: string
+    snapshotInput: ResponsesPayload["input"]
+  }>)(
+    "preserves ordered $name continuation input",
+    ({ currentInput, expected, snapshotInput }) => {
+      const result = resolveResponsesContinuation(
+        new Map([
+          ["resp_mixed", { input: snapshotInput, model: "gpt-current" }],
+        ]),
+        {
+          input: currentInput,
+          model: "gpt-current",
+          previous_response_id: "resp_mixed",
+        },
+      )
+
+      expect(result).toMatchObject({ ok: true, payload: { input: expected } })
+    },
+  )
+
+  test.each([
+    {
+      currentInput: "current",
+      name: "null snapshot input",
+      snapshotInput: null,
+    },
+    {
+      currentInput: null,
+      name: "null current input",
+      snapshotInput: "snapshot",
+    },
+    {
+      currentInput: "current",
+      name: "malformed snapshot input",
+      snapshotInput: { role: "user" },
+    },
+    {
+      currentInput: { role: "user" },
+      name: "malformed current input",
+      snapshotInput: "snapshot",
+    },
+  ])("rejects $name", ({ currentInput, snapshotInput }) => {
+    expect(
+      resolveResponsesContinuation(
+        new Map([
+          [
+            "resp_invalid_input",
+            { input: snapshotInput, model: "gpt-current" } as ResponsesPayload,
+          ],
+        ]),
+        {
+          input: currentInput,
+          model: "gpt-current",
+          previous_response_id: "resp_invalid_input",
+        } as ResponsesPayload,
+      ),
+    ).toEqual({
+      ok: false,
+      code: "invalid_request_error",
+      message: "input must be a string or array",
+      status: 400,
+    })
+  })
+})
+
+describe("resolveResponsesContinuation cloning", () => {
+  test("deep-clones snapshot and current continuation values", () => {
+    const snapshot: ResponsesPayload = {
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "first" }],
+        },
+      ],
+      metadata: {
+        owner: { name: "snapshot-owner" },
+      } as unknown as ResponsesPayload["metadata"],
+      model: "gpt-current",
+      tools: [
+        {
+          type: "function",
+          name: "run",
+          parameters: {
+            type: "object",
+            properties: { command: { type: "string" } },
+          },
+        },
+      ],
+    }
+    const current: ResponsesPayload = {
+      client_metadata: { turn: { id: "turn-current" } },
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "second" }],
+        },
+      ],
+      model: "gpt-current",
+      previous_response_id: "resp_clone",
+    }
+    const result = resolveResponsesContinuation(
+      new Map([["resp_clone", snapshot]]),
+      current,
+    )
+    if (!result.ok) throw new Error("Expected continuation resolution")
+
+    const output = result.payload as unknown as {
+      client_metadata: { turn: { id: string } }
+      input: Array<{ content: Array<{ text: string }> }>
+      metadata: { owner: { name: string } }
+      tools: Array<{
+        parameters: { properties: { command: { type: string } } }
+      }>
+    }
+    output.input[0].content[0].text = "mutated-snapshot-input"
+    output.input[1].content[0].text = "mutated-current-input"
+    output.tools[0].parameters.properties.command.type = "number"
+    output.metadata.owner.name = "mutated-snapshot-metadata"
+    output.client_metadata.turn.id = "mutated-current-metadata"
+
+    expect(snapshot).toMatchObject({
+      input: [{ content: [{ text: "first" }] }],
+      metadata: { owner: { name: "snapshot-owner" } },
+      tools: [{ parameters: { properties: { command: { type: "string" } } } }],
+    })
+    expect(current).toMatchObject({
+      client_metadata: { turn: { id: "turn-current" } },
+      input: [{ content: [{ text: "second" }] }],
+    })
+  })
+
+  test("deep-clones a new-thread payload when previous_response_id is omitted", () => {
+    const payload: ResponsesPayload = {
+      input: [{ role: "user", content: [{ type: "input_text", text: "hi" }] }],
+      metadata: {
+        owner: { name: "caller" },
+      } as unknown as ResponsesPayload["metadata"],
+      model: "gpt-current",
+      tools: [{ type: "function", name: "run", parameters: {} }],
+    }
+    const result = resolveResponsesContinuation(new Map(), payload)
+    if (!result.ok) throw new Error("Expected new-thread resolution")
+
+    const output = result.payload as unknown as {
+      input: Array<{ content: Array<{ text: string }> }>
+      metadata: { owner: { name: string } }
+      tools: Array<{ parameters: Record<string, unknown> }>
+    }
+    output.input[0].content[0].text = "mutated"
+    output.metadata.owner.name = "mutated"
+    output.tools[0].parameters.changed = true
+
+    expect(payload).toMatchObject({
+      input: [{ content: [{ text: "hi" }] }],
+      metadata: { owner: { name: "caller" } },
+      tools: [{ parameters: {} }],
+    })
+  })
+
+  test("deep-clones current tools and metadata overrides", () => {
+    const snapshot: ResponsesPayload = {
+      metadata: { source: "snapshot" },
+      model: "gpt-current",
+      tools: [{ type: "function", name: "snapshot_tool", parameters: {} }],
+    }
+    const current: ResponsesPayload = {
+      metadata: {
+        owner: { name: "current-owner" },
+      } as unknown as ResponsesPayload["metadata"],
+      model: "gpt-current",
+      previous_response_id: "resp_current_clone",
+      tools: [
+        {
+          type: "function",
+          name: "current_tool",
+          parameters: {
+            type: "object",
+            properties: { query: { type: "string" } },
+          },
+        },
+      ],
+    }
+    const result = resolveResponsesContinuation(
+      new Map([["resp_current_clone", snapshot]]),
+      current,
+    )
+    if (!result.ok) throw new Error("Expected continuation resolution")
+
+    const output = result.payload as unknown as {
+      metadata: { owner: { name: string } }
+      tools: Array<{
+        parameters: { properties: { query: { type: string } } }
+      }>
+    }
+    output.metadata.owner.name = "mutated-current-owner"
+    output.tools[0].parameters.properties.query.type = "number"
+
+    expect(current).toMatchObject({
+      metadata: { owner: { name: "current-owner" } },
+      tools: [{ parameters: { properties: { query: { type: "string" } } } }],
+    })
+    expect(snapshot).toMatchObject({
+      metadata: { source: "snapshot" },
+      tools: [{ name: "snapshot_tool" }],
+    })
+  })
+})
+
+describe("resolveResponsesContinuation errors", () => {
   test("returns previous_response_not_found for a stale local id", () => {
     expect(
       resolveResponsesContinuation(new Map(), {

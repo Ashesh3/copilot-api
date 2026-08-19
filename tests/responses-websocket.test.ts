@@ -2826,6 +2826,105 @@ describe("responses websocket warmup handling", () => {
 })
 
 describe("responses websocket continuation handling", () => {
+  test.each([
+    {
+      expectedInput: [
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "first prompt" }],
+        },
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "current delta" }],
+        },
+      ],
+      name: "empty completed output",
+      output: [],
+    },
+    {
+      expectedInput: [
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "first prompt" }],
+        },
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "assistant answer" }],
+        },
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "current delta" }],
+        },
+      ],
+      name: "substantive completed output",
+      output: [
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "assistant answer" }],
+        },
+      ],
+    },
+  ])(
+    "sends full history after a string first turn with $name",
+    async ({ expectedInput, output }) => {
+      state.models = responsesCapableModels
+      queuedResponses.push(
+        createResponsesSseResponse("resp_string_parent", output),
+        createResponsesSseResponse("resp_string_child"),
+      )
+      const ws = createTestWebSocket()
+
+      await responsesWebSocket.message(
+        ws,
+        JSON.stringify({
+          type: "response.create",
+          model: "gpt-5.4",
+          instructions: "Keep the stable instructions.",
+          input: "first prompt",
+          metadata: { nested: { source: "first-turn" } },
+          tools: [
+            {
+              type: "function",
+              name: "run",
+              parameters: { type: "object", properties: {} },
+            },
+          ],
+        }),
+      )
+      await responsesWebSocket.message(
+        ws,
+        JSON.stringify({
+          type: "response.create",
+          model: "gpt-5.4",
+          previous_response_id: "resp_string_parent",
+          input: "current delta",
+        }),
+      )
+
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(lastRequestBody).toMatchObject({
+        input: expectedInput,
+        instructions: "Keep the stable instructions.",
+        metadata: { nested: { source: "first-turn" } },
+        tools: [
+          {
+            type: "function",
+            name: "run",
+            parameters: { type: "object", properties: {} },
+          },
+        ],
+      })
+      expect(lastRequestBody?.previous_response_id).toBeUndefined()
+      expect(ws.data.closed).toBe(false)
+    },
+  )
+
   test("rehydrates arbitrary completed response continuations", () => {
     const snapshots = new Map<string, ResponsesPayload>()
     const priorPayload: ResponsesPayload = {
@@ -3028,7 +3127,10 @@ function createAnthropicMessageResponse(
   })
 }
 
-function createResponsesSseResponse(responseId: string): Response {
+function createResponsesSseResponse(
+  responseId: string,
+  output: ReadonlyArray<ResponseInputItem> = [],
+): Response {
   const created = JSON.stringify({
     type: "response.created",
     sequence_number: 0,
@@ -3037,7 +3139,7 @@ function createResponsesSseResponse(responseId: string): Response {
       object: "response",
       created_at: 1,
       model: "gpt-5.4",
-      output: [],
+      output,
       output_text: "",
       status: "in_progress",
       usage: null,
@@ -3060,7 +3162,7 @@ function createResponsesSseResponse(responseId: string): Response {
       object: "response",
       created_at: 1,
       model: "gpt-5.4",
-      output: [],
+      output,
       output_text: "",
       status: "completed",
       usage: null,

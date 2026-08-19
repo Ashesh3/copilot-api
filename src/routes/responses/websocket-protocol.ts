@@ -1,5 +1,8 @@
 import type { CopilotRequestAttribution } from "~/lib/copilot-request-context"
-import type { ResponsesPayload } from "~/services/copilot/create-responses"
+import type {
+  ResponseInputItem,
+  ResponsesPayload,
+} from "~/services/copilot/create-responses"
 
 import { resolveCopilotRequestAttribution } from "~/lib/copilot-request-context"
 import { sanitizeCopilotHeaderValue } from "~/services/copilot/copilot-contract"
@@ -108,7 +111,7 @@ export function resolveResponsesContinuation(
     .previous_response_id
 
   if (previousResponseId === undefined) {
-    return { ok: true, payload }
+    return { ok: true, payload: structuredClone(payload) }
   }
   if (typeof previousResponseId !== "string") {
     return continuationError(
@@ -132,7 +135,15 @@ export function resolveResponsesContinuation(
       "The previous response is not available on this WebSocket connection.",
     )
   }
-
+  if (
+    !isContinuationInput(snapshotPayload.input)
+    || !isContinuationInput(payload.input)
+  ) {
+    return continuationError(
+      "invalid_request_error",
+      "input must be a string or array",
+    )
+  }
   return {
     ok: true,
     payload: rehydrateContinuationPayloadFromSnapshot(snapshotPayload, payload),
@@ -143,14 +154,16 @@ export function rehydrateContinuationPayloadFromSnapshot(
   snapshotPayload: ResponsesPayload,
   payload: ResponsesPayload,
 ): ResponsesPayload {
+  const snapshotClone = structuredClone(snapshotPayload)
+  const payloadClone = structuredClone(payload)
   const mergedInput = mergeContinuationInput(
-    snapshotPayload.input,
-    payload.input,
+    snapshotClone.input,
+    payloadClone.input,
   )
 
   return {
-    ...snapshotPayload,
-    ...payload,
+    ...snapshotClone,
+    ...payloadClone,
     ...(mergedInput !== undefined ? { input: mergedInput } : {}),
     previous_response_id: undefined,
     generate: undefined,
@@ -174,19 +187,33 @@ export function mergeContinuationInput(
   snapshotInput: ResponsesPayload["input"],
   input: ResponsesPayload["input"],
 ): ResponsesPayload["input"] {
-  if (Array.isArray(snapshotInput) && Array.isArray(input)) {
-    return [...snapshotInput, ...input]
-  }
-  if (Array.isArray(snapshotInput) && input === undefined) {
-    return [...snapshotInput]
-  }
-  if (Array.isArray(input)) {
-    return [...input]
-  }
-  if (typeof input === "string") {
-    return input.length > 0 ? input : snapshotInput
-  }
-  return snapshotInput
+  if (snapshotInput === undefined) return input
+  if (input === undefined) return snapshotInput
+  return [
+    ...continuationInputItems(snapshotInput),
+    ...continuationInputItems(input),
+  ]
+}
+
+function continuationInputItems(
+  input: Exclude<ResponsesPayload["input"], undefined>,
+): Array<ResponseInputItem> {
+  if (Array.isArray(input)) return input
+  return [
+    {
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: input }],
+    },
+  ]
+}
+
+function isContinuationInput(
+  input: unknown,
+): input is ResponsesPayload["input"] {
+  return (
+    input === undefined || typeof input === "string" || Array.isArray(input)
+  )
 }
 
 function omitFrameEnvelope(

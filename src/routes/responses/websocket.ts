@@ -976,13 +976,14 @@ function createCompletedResponseSnapshot(
   frame: ResponseCompletedFrame,
 ): ResponsesPayload {
   const output = frame.response?.output
+  const snapshotPayload = structuredClone(payload)
   const completedInput =
     Array.isArray(output) ?
-      mergeContinuationInput(payload.input, output)
-    : payload.input
+      mergeContinuationInput(snapshotPayload.input, structuredClone(output))
+    : snapshotPayload.input
 
   return {
-    ...payload,
+    ...snapshotPayload,
     input: completedInput,
     previous_response_id: undefined,
     generate: undefined,
