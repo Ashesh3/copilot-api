@@ -1,6 +1,12 @@
+import type { SafeHttpErrorInspection } from "~/lib/error"
 import type { RoutingAffinity } from "~/lib/routing-affinity"
 
-import { HTTPError } from "~/lib/error"
+import {
+  isAbortError,
+  isHTTPError,
+  LocalHTTPError,
+  snapshotSafeHttpError,
+} from "~/lib/error"
 import {
   type LogicalRequestLifecycle,
   startLogicalRequestLog,
@@ -35,13 +41,26 @@ interface ResponsesWebSocketLifecycleData {
   requestId: string
 }
 
-export class WebSocketRequestError extends HTTPError {
+export class WebSocketRequestError extends LocalHTTPError {
   readonly errorType: string
 
   constructor(message: string, status: number, errorType: string) {
-    super(message, Response.json({ message }, { status }))
+    const clientBody = {
+      error: {
+        code: mapWebSocketRequestErrorCode(status),
+        message,
+        type: errorType,
+      },
+    }
+    super(message, Response.json(clientBody, { status }), clientBody)
     this.errorType = errorType
   }
+}
+
+function mapWebSocketRequestErrorCode(status: number): string {
+  if (status === 413) return "request_too_large"
+  if (status >= 500) return "server_error"
+  return "bad_request"
 }
 
 export function createResponsesWebSocketTurn(
@@ -93,6 +112,7 @@ export function finalizeResponsesWebSocketTurn(
   turn: ResponsesWebSocketTurn,
   options: {
     error?: unknown
+    errorInspection?: SafeHttpErrorInspection
     status: number
     terminalStatus: "COMPLETE" | "ERROR" | "REJECTED" | "ABORTED"
   },
@@ -101,6 +121,7 @@ export function finalizeResponsesWebSocketTurn(
   const finalized = lifecycle.finalize({
     accountId: turn.routingState.lastUsedAccountId,
     error: options.error,
+    errorInspection: options.errorInspection,
     status: options.status,
     terminalStatus: options.terminalStatus,
   })
@@ -123,15 +144,18 @@ export function classifyWebSocketTerminal(
   error: unknown,
   turn: ResponsesWebSocketTurn,
 ): {
+  errorInspection?: SafeHttpErrorInspection
   status: number
   terminalStatus: "ERROR" | "REJECTED" | "ABORTED"
 } {
-  if (turn.abortController.signal.aborted || isAbortLikeError(error)) {
+  if (turn.abortController.signal.aborted || isAbortError(error)) {
     return { status: 499, terminalStatus: "ABORTED" }
   }
-  if (error instanceof HTTPError) {
-    const status = error.response.status
+  if (isHTTPError(error)) {
+    const errorInspection = snapshotSafeHttpError(error)
+    const { status } = errorInspection
     return {
+      errorInspection,
       status,
       terminalStatus: status < 500 ? "REJECTED" : "ERROR",
     }
@@ -153,17 +177,4 @@ export async function runWithWebSocketRequestContext(
       })
     })
   })
-}
-
-function isAbortLikeError(error: unknown): boolean {
-  if (error instanceof DOMException && error.name === "AbortError") return true
-  if (!(error instanceof Error)) return false
-  const message = error.message.toLowerCase()
-  const causeMessage =
-    error.cause instanceof Error ? error.cause.message.toLowerCase() : ""
-  return (
-    error.name === "AbortError"
-    || message.includes("aborted")
-    || causeMessage.includes("aborted")
-  )
 }

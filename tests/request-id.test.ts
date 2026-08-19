@@ -966,3 +966,55 @@ test("reports a revoked logical request error without throwing", () => {
     infoSpy.mockRestore()
   }
 })
+
+test("uses a provided HTTP inspection for logical status and message", () => {
+  const upstream = Response.json({}, { status: 429 })
+  const error = new HTTPError("Failed to create responses", upstream)
+  Object.defineProperty(upstream, "status", {
+    configurable: true,
+    get() {
+      throw new Error("provided-inspection-status-private-marker")
+    },
+  })
+  Object.defineProperty(error, "message", {
+    configurable: true,
+    get() {
+      throw new Error("provided-inspection-message-private-marker")
+    },
+  })
+  const infoSpy = spyOn(console, "info")
+  const lifecycle = startLogicalRequestLog({
+    inputLength: 10,
+    method: "POST",
+    model: "gpt-test",
+    path: "/responses",
+    transport: "Responses WebSocket",
+    turnId: "turn-provided-inspection",
+  })
+
+  try {
+    lifecycle.finalize({
+      error,
+      errorInspection: {
+        responseHeaders: {},
+        safeMessage: "Upstream request failed",
+        status: 429,
+      },
+      status: 500,
+      terminalStatus: "ERROR",
+    })
+    const diagnostics = JSON.stringify(infoSpy.mock.calls)
+
+    expect(diagnostics).toContain("REJECTED")
+    expect(diagnostics).toContain("429")
+    expect(diagnostics).toContain("Upstream request failed")
+    expect(diagnostics).not.toContain(
+      "provided-inspection-status-private-marker",
+    )
+    expect(diagnostics).not.toContain(
+      "provided-inspection-message-private-marker",
+    )
+  } finally {
+    infoSpy.mockRestore()
+  }
+})

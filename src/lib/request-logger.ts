@@ -2,6 +2,7 @@ import type { Context, Next } from "hono"
 
 import * as Sentry from "@sentry/bun"
 
+import type { SafeHttpErrorInspection } from "./error"
 import type { RoutingTelemetryRequestState } from "./request-session"
 
 import { isHTTPError, snapshotSafeHttpError } from "./error"
@@ -50,6 +51,7 @@ export type LogicalRequestTerminalStatus =
 export interface LogicalRequestTerminalOptions {
   accountId?: number
   error?: unknown
+  errorInspection?: SafeHttpErrorInspection
   status: number
   terminalStatus: LogicalRequestTerminalStatus
 }
@@ -152,6 +154,12 @@ function getLogicalStatusColor(status: LogicalRequestTerminalStatus): string {
   }
 }
 
+function inspectionTerminalStatus(
+  status: number,
+): Extract<LogicalRequestTerminalStatus, "ERROR" | "REJECTED"> {
+  return status < 500 ? "REJECTED" : "ERROR"
+}
+
 function getErrorMessage(error: unknown): string | undefined {
   if (isHTTPError(error)) return snapshotSafeHttpError(error).safeMessage
   if (isProxyObject(error)) return undefined
@@ -244,17 +252,23 @@ export function startLogicalRequestLog(
 
       const duration = ((Date.now() - startedAt) / 1000).toFixed(1)
       const ctx = { ...requestContext, accountId: terminalOptions.accountId }
-      const terminalColor = getLogicalStatusColor(
-        terminalOptions.terminalStatus,
-      )
+      const status =
+        terminalOptions.errorInspection?.status ?? terminalOptions.status
+      const terminalStatus =
+        terminalOptions.errorInspection ?
+          inspectionTerminalStatus(status)
+        : terminalOptions.terminalStatus
+      const terminalColor = getLogicalStatusColor(terminalStatus)
       const lines = [
         `${colors.dim}${"─".repeat(60)}${colors.reset}`,
-        `${terminalColor}${colors.bold}${terminalOptions.terminalStatus}${colors.reset} ${colors.bold}${options.method}${colors.reset} ${options.path} ${getStatusColor(terminalOptions.status)}${terminalOptions.status}${colors.reset} ${colors.cyan}${duration}s${colors.reset} ${colors.dim}[${options.transport} · ${options.turnId}]${colors.reset}`,
+        `${terminalColor}${colors.bold}${terminalStatus}${colors.reset} ${colors.bold}${options.method}${colors.reset} ${options.path} ${getStatusColor(status)}${status}${colors.reset} ${colors.cyan}${duration}s${colors.reset} ${colors.dim}[${options.transport} · ${options.turnId}]${colors.reset}`,
         buildModelLine(ctx),
       ]
       const terminalModificationsLine = buildModificationsLine(ctx)
       if (terminalModificationsLine) lines.push(terminalModificationsLine)
-      const errorMessage = getErrorMessage(terminalOptions.error)
+      const errorMessage =
+        terminalOptions.errorInspection?.safeMessage
+        ?? getErrorMessage(terminalOptions.error)
       if (errorMessage) {
         lines.push(`  ${colors.red}${errorMessage}${colors.reset}`)
       }
@@ -262,7 +276,7 @@ export function startLogicalRequestLog(
       console.info(lines.join("\n"))
 
       Sentry.logger.info(
-        `${terminalOptions.terminalStatus} ${options.method} ${options.path} ${terminalOptions.status} ${duration}s | ${buildPlainModelLine(ctx)} | ${options.transport} | ${options.turnId}`,
+        `${terminalStatus} ${options.method} ${options.path} ${status} ${duration}s | ${buildPlainModelLine(ctx)} | ${options.transport} | ${options.turnId}`,
         {
           accountId: terminalOptions.accountId,
           duration: Number(duration),
@@ -276,17 +290,13 @@ export function startLogicalRequestLog(
             ctx.requestedModel ?
               getSentryModelName(ctx.requestedModel)
             : undefined,
-          status: terminalOptions.status,
-          terminalStatus: terminalOptions.terminalStatus,
+          status,
+          terminalStatus,
           transport: options.transport,
           turnId: options.turnId,
         },
       )
-      recordCompletedRoutingRequest(
-        ctx,
-        options.telemetryState,
-        terminalOptions.status,
-      )
+      recordCompletedRoutingRequest(ctx, options.telemetryState, status)
       return true
     },
     isFinalized(): boolean {

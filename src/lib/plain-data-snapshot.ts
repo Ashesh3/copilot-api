@@ -2,6 +2,7 @@ import util from "node:util"
 
 const SNAPSHOT_MAX_DEPTH = 16
 const SNAPSHOT_MAX_NODES = 2048
+const SNAPSHOT_MAX_ARRAY_LENGTH = SNAPSHOT_MAX_NODES
 
 type DescriptorMap = Readonly<
   Record<PropertyKey, PropertyDescriptor | undefined>
@@ -92,6 +93,7 @@ function snapshotArray(
     return SNAPSHOT_FAILURE
   }
   const length = lengthDescriptor.value
+  if (length > SNAPSHOT_MAX_ARRAY_LENGTH) return SNAPSHOT_FAILURE
   const keys = Reflect.ownKeys(descriptors)
   if (
     keys.some(
@@ -126,7 +128,7 @@ function snapshotRecord(
   if (prototype !== Object.prototype && prototype !== null) {
     return SNAPSHOT_FAILURE
   }
-  const clone: Record<string, unknown> = {}
+  const clone = Object.create(null) as Record<string, unknown>
   for (const key of Reflect.ownKeys(descriptors)) {
     if (typeof key !== "string") return SNAPSHOT_FAILURE
     const descriptor = descriptors[key]
@@ -135,7 +137,12 @@ function snapshotRecord(
     }
     const nested = snapshotValue(descriptor.value, state, depth + 1)
     if (!nested.ok) return SNAPSHOT_FAILURE
-    clone[key] = nested.value
+    Object.defineProperty(clone, key, {
+      configurable: false,
+      enumerable: true,
+      value: nested.value,
+      writable: false,
+    })
   }
   return snapshotSuccess(Object.freeze(clone))
 }

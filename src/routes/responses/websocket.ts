@@ -2,11 +2,12 @@
 import consola from "consola"
 import { randomUUID } from "node:crypto"
 
+import type { SafeHttpErrorInspection } from "~/lib/error"
 import type { RoutingAffinity } from "~/lib/routing-affinity"
 import type { NativeMessagesRequestOptions } from "~/routes/messages/native-handler"
 
 import { resolveRequestCredential } from "~/lib/credential-resolver"
-import { LocalHTTPError } from "~/lib/error"
+import { isHTTPError } from "~/lib/error"
 import {
   applyModelRedirect,
   formatModelRedirectResult,
@@ -234,8 +235,10 @@ export const responsesWebSocket = {
         )
       }
     } catch (error) {
-      const errorMessage = getSafeWebSocketErrorMessage(error)
       const terminal = classifyWebSocketTerminal(error, turn)
+      const errorInspection = terminal.errorInspection
+      const errorMessage = getSafeWebSocketErrorMessage(error, errorInspection)
+      const normalized = normalizeWebSocketError(errorMessage, errorInspection)
       finalizeResponsesWebSocketTurn(ws.data, turn, {
         error,
         ...terminal,
@@ -245,12 +248,12 @@ export const responsesWebSocket = {
         return
       }
       consola.error(`[responses-ws] ${turn.turnId} error`, {
-        code: normalizeWebSocketError(error, errorMessage).code,
+        code: normalized.code,
         status: terminal.status,
       })
       try {
         sendWebSocketError(ws, {
-          ...normalizeWebSocketError(error, errorMessage),
+          ...normalized,
           ...(error instanceof WebSocketRequestError ?
             { type: error.errorType }
           : {}),
@@ -1137,30 +1140,30 @@ export function sendWebSocketError(
 }
 
 function normalizeWebSocketError(
-  error: unknown,
   fallbackMessage: string,
+  inspection?: SafeHttpErrorInspection,
 ): WebSocketErrorFrameOptions {
-  if (error instanceof LocalHTTPError) {
-    const local = localWebSocketError(error)
+  if (inspection?.localClientBody) {
+    const local = localWebSocketError(inspection)
     if (local) {
       const code =
         local.type === "invalid_request_error" ?
           local.code
-        : mapHttpStatusToWebSocketErrorCode(error.response.status)
+        : mapHttpStatusToWebSocketErrorCode(inspection.status)
       return {
         code,
         message: local.message,
         ...(local.param ? { param: local.param } : {}),
-        status: error.response.status,
+        status: inspection.status,
         type: local.type,
       }
     }
   }
-  if (isHTTPErrorLike(error)) {
+  if (inspection) {
     return {
-      code: mapHttpStatusToWebSocketErrorCode(error.response.status),
+      code: mapHttpStatusToWebSocketErrorCode(inspection.status),
       message: fallbackMessage,
-      status: error.response.status,
+      status: inspection.status,
       type: "websocket_error",
     }
   }
@@ -1173,38 +1176,32 @@ function normalizeWebSocketError(
   }
 }
 
-function getSafeWebSocketErrorMessage(error: unknown): string {
-  if (error instanceof LocalHTTPError) {
-    const local = localWebSocketError(error)
+function getSafeWebSocketErrorMessage(
+  error: unknown,
+  inspection?: SafeHttpErrorInspection,
+): string {
+  if (inspection?.localClientBody) {
+    const local = localWebSocketError(inspection)
     if (local) return local.message
-    const bodyError = error.clientBody.error
-    if (
-      isRecord(bodyError)
-      && typeof bodyError.code === "string"
-      && typeof bodyError.message === "string"
-    ) {
-      return bodyError.message
-    }
     return "Request rejected"
   }
-  if (error instanceof WebSocketRequestError) {
-    return error.response.status < 500 ?
-        error.message
+  if (error instanceof WebSocketRequestError && inspection) {
+    return inspection.status < 500 ?
+        inspection.safeMessage
       : "Upstream request failed"
   }
-  if (isHTTPErrorLike(error)) return "Upstream request failed"
+  if (inspection || isHTTPError(error)) return "Upstream request failed"
   return "Internal server error"
 }
 
 function localWebSocketError(
-  error: LocalHTTPError,
+  inspection: SafeHttpErrorInspection,
 ): { code: string; message: string; param?: string; type: string } | undefined {
-  const bodyError = error.clientBody.error
+  const bodyError = inspection.localClientBody?.error
   if (!isRecord(bodyError)) return undefined
   if (
-    bodyError.type !== "session_affinity_error"
-    && bodyError.type !== "account_unavailable"
-    && bodyError.type !== "invalid_request_error"
+    typeof bodyError.type !== "string"
+    || !SAFE_LOCAL_WEBSOCKET_ERROR_TYPES.has(bodyError.type)
   ) {
     return undefined
   }
@@ -1222,9 +1219,13 @@ function localWebSocketError(
   }
 }
 
-function isHTTPErrorLike(error: unknown): error is { response: Response } {
-  return isRecord(error) && error.response instanceof Response
-}
+const SAFE_LOCAL_WEBSOCKET_ERROR_TYPES = new Set([
+  "account_unavailable",
+  "error",
+  "invalid_request_error",
+  "session_affinity_error",
+  "server_error",
+])
 
 function mapHttpStatusToWebSocketErrorCode(status: number): string {
   switch (status) {

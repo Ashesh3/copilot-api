@@ -20,6 +20,7 @@ import type {
 import type { ModelsResponse } from "../src/services/copilot/get-models"
 
 import { setConfigForTest } from "../src/lib/config"
+import { HTTPError } from "../src/lib/error"
 import { isIpBlocked, resetIpSecurityForTest } from "../src/lib/ip-blocker"
 import { setModelRedirectsForTest } from "../src/lib/model-redirect"
 import { createRoutingTelemetryRequestState } from "../src/lib/request-session"
@@ -2053,6 +2054,90 @@ describe("responses websocket upstream handling", () => {
     expect(errorFrame.type).toBe("error")
     expect(errorFrame.status).toBe(400)
     expect(errorFrame.error?.code).toBe("bad_request")
+  })
+
+  test("uses one immutable HTTP inspection for WebSocket reporting", async () => {
+    state.accountType = "individual"
+    state.copilotToken = "copilot-token"
+    state.models = responsesCapableModels
+    const privateMarkers = [
+      "ws-status-getter-private-marker",
+      "ws-message-getter-private-marker",
+    ]
+    let getterCalls = 0
+    queuedFetchHandlers.push(() => {
+      const response = Response.json({}, { status: 429 })
+      Object.defineProperty(response, "status", {
+        configurable: true,
+        get() {
+          getterCalls += 1
+          throw new Error(privateMarkers[0])
+        },
+      })
+      const error = new HTTPError("Failed to create responses", response)
+      Object.defineProperty(error, "message", {
+        configurable: true,
+        get() {
+          getterCalls += 1
+          throw new Error(privateMarkers[1])
+        },
+      })
+      throw error
+    })
+    const ws = createTestWebSocket()
+    const errorSpy = spyOn(consola, "error")
+    const infoSpy = spyOn(console, "info").mockImplementation(() => undefined)
+    const captureSpy = spyOn(Sentry, "captureException").mockImplementation(
+      () => "event-id",
+    )
+
+    try {
+      await responsesWebSocket.message(
+        ws,
+        JSON.stringify({
+          type: "response.create",
+          model: "gpt-5.4",
+          input: [],
+          tools: [],
+        }),
+      )
+      const errorFrame = JSON.parse(ws.sent.at(-1) ?? "{}") as {
+        error?: { code?: string; message?: string }
+        status?: number
+      }
+      const diagnostics = JSON.stringify([
+        ws.sent,
+        errorSpy.mock.calls,
+        infoSpy.mock.calls,
+        captureSpy.mock.calls,
+      ])
+      const infoValues: Array<unknown> = infoSpy.mock.calls.flat()
+      const lifecycleLine = infoValues.find(
+        (value) => typeof value === "string" && value.includes("REJECTED"),
+      )
+      const errorValues: Array<unknown> = errorSpy.mock.calls.flat()
+      const wsLog = errorValues.find(
+        (value) => typeof value === "object" && value !== null,
+      )
+
+      expect(errorFrame.status).toBe(429)
+      expect(errorFrame.error).toMatchObject({
+        code: "rate_limited",
+        message: "Upstream request failed",
+      })
+      expect(lifecycleLine).toContain("REJECTED")
+      expect(lifecycleLine).toContain("429")
+      expect(lifecycleLine).toContain("Upstream request failed")
+      expect(wsLog).toMatchObject({ status: 429 })
+      expect(getterCalls).toBe(0)
+      for (const marker of privateMarkers) {
+        expect(diagnostics).not.toContain(marker)
+      }
+    } finally {
+      errorSpy.mockRestore()
+      infoSpy.mockRestore()
+      captureSpy.mockRestore()
+    }
   })
 })
 

@@ -534,3 +534,99 @@ test("creates a fixed in-band event for a revoked HTTP error proxy", () => {
     },
   })
 })
+
+test.each(["__proto__", "constructor", "prototype"] as const)(
+  "rejects a local Anthropic JSON %s extra without prototype pollution",
+  async (key) => {
+    const body = JSON.parse(
+      `{"type":"error","error":{"type":"invalid_request_error","message":"safe"},"${key}":{"polluted":"dangerous-key-marker"}}`,
+    ) as Record<string, unknown>
+    const response = await forwardAnthropicError(localError(body))
+    const responseBody = await response.text()
+
+    expect(response.status).toBe(400)
+    expect(JSON.parse(responseBody)).toEqual(fixedInvalidRequestBody())
+    expect(responseBody).not.toContain("dangerous-key-marker")
+    expect(({} as { polluted?: unknown }).polluted).toBeUndefined()
+  },
+)
+
+test.each(["__proto__", "constructor", "prototype"] as const)(
+  "rejects an in-band local Anthropic JSON %s extra without pollution",
+  (key) => {
+    const body = JSON.parse(
+      `{"type":"error","error":{"type":"invalid_request_error","message":"safe"},"${key}":{"polluted":"dangerous-stream-marker"}}`,
+    ) as Record<string, unknown>
+    const event = createAnthropicStreamError(localError(body))
+
+    expect(event).toEqual({
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message: "The Copilot Messages request was rejected.",
+      },
+    })
+    expect(JSON.stringify(event)).not.toContain("dangerous-stream-marker")
+    expect(({} as { polluted?: unknown }).polluted).toBeUndefined()
+  },
+)
+
+test.each([
+  ["max plus one", 2049],
+  ["uint32 max", 0xffff_ffff],
+] as const)(
+  "rejects a local Anthropic %s array before allocation",
+  async (_name, length) => {
+    const array: Array<unknown> = []
+    Object.defineProperty(array, "length", { value: length })
+
+    const response = await forwardAnthropicError(localError(array))
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual(fixedInvalidRequestBody())
+  },
+)
+
+test("rejects sparse and accessor local Anthropic arrays", async () => {
+  let getterCalls = 0
+  const sparse: Array<unknown> = []
+  Object.defineProperty(sparse, "length", { value: 8 })
+  const accessor: Array<unknown> = []
+  Object.defineProperty(accessor, "0", {
+    enumerable: true,
+    get() {
+      getterCalls += 1
+      throw new Error("array-accessor-private-marker")
+    },
+  })
+
+  for (const body of [sparse, accessor]) {
+    const response = await forwardAnthropicError(localError(body))
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual(fixedInvalidRequestBody())
+  }
+  expect(getterCalls).toBe(0)
+})
+
+test("rejects oversized and proxied local arrays in-band", () => {
+  const oversized: Array<unknown> = []
+  Object.defineProperty(oversized, "length", { value: 0xffff_ffff })
+  let trapCalls = 0
+  const proxied = new Proxy([], {
+    getOwnPropertyDescriptor() {
+      trapCalls += 1
+      throw new Error("array-proxy-private-marker")
+    },
+  })
+
+  for (const body of [oversized, proxied]) {
+    expect(createAnthropicStreamError(localError(body))).toEqual({
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message: "The Copilot Messages request was rejected.",
+      },
+    })
+  }
+  expect(trapCalls).toBe(0)
+})
