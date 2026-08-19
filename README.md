@@ -48,6 +48,10 @@ workflows.
 These are compatibility endpoints and translation layers, not claims of complete
 parity with every feature of the upstream APIs.
 
+See the [detailed Copilot API compatibility contract](docs/copilot-api-compatibility.md)
+for field handling, endpoint precedence, streaming, affinity, and current
+feature-flag limitations.
+
 | API family | Method and path | Support |
 | --- | --- | --- |
 | OpenAI Models | `GET /v1/models` | Live model discovery plus configured aliases, reasoning variants, redirect sources, and custom-provider models |
