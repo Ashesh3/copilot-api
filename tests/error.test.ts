@@ -8,6 +8,7 @@ import {
   HTTPError,
   inspectSafeHttpError,
   LocalHTTPError,
+  snapshotSafeHttpError,
 } from "../src/lib/error"
 
 function captureContextValue(
@@ -652,6 +653,97 @@ test("returns an explicitly safe local error body without exposing upstream bodi
 
   expect(response.status).toBe(413)
   expect(await response.json()).toEqual(clientBody)
+})
+
+test.each(["replace", "delete"] as const)(
+  "owns local HTTP status before a later response %s",
+  async (mutation) => {
+    const clientBody = {
+      error: {
+        code: "invalid_value",
+        message: "The model field must be a non-empty string.",
+        param: "model",
+        type: "invalid_request_error",
+      },
+    }
+    const error = new LocalHTTPError(
+      clientBody.error.message,
+      Response.json(clientBody, { status: 400 }),
+      clientBody,
+    )
+    if (mutation === "replace") {
+      error.response = Response.json(
+        { error: { message: "replacement-response-private-marker" } },
+        { status: 503 },
+      )
+    } else {
+      Reflect.deleteProperty(error, "response")
+    }
+
+    const inspection = await inspectSafeHttpError(error)
+
+    expect(inspection.status).toBe(400)
+    expect(inspection.safeMessage).toBe(clientBody.error.message)
+    expect(inspection.localError).toEqual(clientBody.error)
+  },
+)
+
+test("never reads a redefined local HTTP response", () => {
+  const clientBody = {
+    error: {
+      code: "invalid_value",
+      message: "The model field must be a non-empty string.",
+      param: "model",
+      type: "invalid_request_error",
+    },
+  }
+  const error = new LocalHTTPError(
+    clientBody.error.message,
+    Response.json(clientBody, { status: 400 }),
+    clientBody,
+  )
+  let getterCalls = 0
+  Object.defineProperty(error, "response", {
+    configurable: true,
+    get() {
+      getterCalls += 1
+      throw new Error("local-response-getter-private-marker")
+    },
+  })
+
+  const inspection = snapshotSafeHttpError(error)
+
+  expect(inspection.status).toBe(400)
+  expect(inspection.safeMessage).toBe(clientBody.error.message)
+  expect(getterCalls).toBe(0)
+})
+
+test("owns safe local HTTP headers before response replacement", async () => {
+  const clientBody = {
+    error: {
+      code: "invalid_value",
+      message: "The model field must be a non-empty string.",
+      param: "model",
+      type: "invalid_request_error",
+    },
+  }
+  const error = new LocalHTTPError(
+    clientBody.error.message,
+    Response.json(clientBody, {
+      headers: { "retry-after": "17" },
+      status: 400,
+    }),
+    clientBody,
+  )
+  error.response = Response.json(
+    { error: { message: "replacement-response-private-marker" } },
+    { headers: { "retry-after": "99" }, status: 503 },
+  )
+
+  const inspection = await inspectSafeHttpError(error)
+
+  expect(inspection.status).toBe(400)
+  expect(inspection.responseHeaders).toEqual({ "retry-after": "17" })
 })
 
 test("redacts affinity identifiers from HTTP error diagnostics", async () => {

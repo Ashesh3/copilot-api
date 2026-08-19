@@ -72,6 +72,9 @@ export class HTTPError extends Error {
 interface LocalHttpErrorSnapshot {
   readonly clientBody?: Readonly<Record<string, unknown>>
   readonly localError?: SafeLocalClientError
+  readonly responseHeaders: Readonly<Record<string, string>>
+  readonly safeMessage: string
+  readonly status: number
 }
 
 const LOCAL_HTTP_ERROR_SNAPSHOTS = new WeakMap<
@@ -90,9 +93,12 @@ export class LocalHTTPError extends HTTPError {
     super(message, response)
     this.clientBody = clientBody
     const clientBodySnapshot = snapshotPlainDataRecord(clientBody)
+    const responseSnapshot = snapshotLocalResponse(response)
     LOCAL_HTTP_ERROR_SNAPSHOTS.set(this, {
       clientBody: clientBodySnapshot,
       localError: safeLocalClientError(clientBodySnapshot),
+      safeMessage: safeHttpErrorMessage(message),
+      ...responseSnapshot,
     })
   }
 }
@@ -211,8 +217,37 @@ function safeHttpErrorMessage(message: unknown): string {
     : "Upstream request failed"
 }
 
-function snapshotLocalClientBody(error: HTTPError): LocalHttpErrorSnapshot {
-  return LOCAL_HTTP_ERROR_SNAPSHOTS.get(error) ?? {}
+function snapshotLocalHttpError(
+  error: HTTPError,
+): LocalHttpErrorSnapshot | undefined {
+  return LOCAL_HTTP_ERROR_SNAPSHOTS.get(error)
+}
+
+function snapshotLocalResponse(
+  response: Response,
+): Pick<LocalHttpErrorSnapshot, "responseHeaders" | "status"> {
+  let status = 500
+  let responseHeaders: Readonly<Record<string, string>> = Object.freeze({})
+  try {
+    const nativeStatus = Reflect.apply(RESPONSE_STATUS, response, []) as unknown
+    if (
+      typeof nativeStatus === "number"
+      && Number.isInteger(nativeStatus)
+      && nativeStatus >= 200
+      && nativeStatus <= 599
+    ) {
+      status = nativeStatus
+    }
+    const headers = Reflect.apply(RESPONSE_HEADERS, response, []) as unknown
+    if (headers instanceof Headers && !isProxyObject(headers)) {
+      responseHeaders = Object.freeze(
+        collectSafeCopilotResponseHeaders(headers),
+      )
+    }
+  } catch {
+    // Local responses are native at construction; fail closed if not.
+  }
+  return { responseHeaders, status }
 }
 
 function safeLocalClientError(
@@ -391,15 +426,22 @@ async function readResponseBody(response: Response): Promise<unknown> {
 }
 
 function readHttpErrorSnapshot(error: HTTPError): SafeHttpErrorSnapshot {
+  const localSnapshot = snapshotLocalHttpError(error)
+  if (localSnapshot) {
+    return {
+      localClientBody: localSnapshot.clientBody,
+      localError: localSnapshot.localError,
+      responseHeaders: localSnapshot.responseHeaders,
+      safeMessage: localSnapshot.safeMessage,
+      status: localSnapshot.status,
+    }
+  }
   const snapshot = snapshotDescriptorChain(error, {
     keys: HTTP_ERROR_DESCRIPTOR_KEYS,
     maxDepth: 6,
   })
   const message = readNativeErrorMessage(snapshot)
   const response = readDescriptorSnapshotValue(snapshot, "response")
-  const localSnapshot = snapshotLocalClientBody(error)
-  const localClientBody = localSnapshot.clientBody
-  const localError = localSnapshot.localError
 
   if (
     typeof response !== "object"
@@ -407,8 +449,6 @@ function readHttpErrorSnapshot(error: HTTPError): SafeHttpErrorSnapshot {
     || isProxyObject(response)
   ) {
     return {
-      localClientBody,
-      localError,
       responseHeaders: Object.freeze({}),
       safeMessage: safeHttpErrorMessage(message),
       status: 500,
@@ -437,8 +477,6 @@ function readHttpErrorSnapshot(error: HTTPError): SafeHttpErrorSnapshot {
     responseBody = Reflect.apply(RESPONSE_CLONE, response, []) as Response
   } catch {
     return {
-      localClientBody,
-      localError,
       responseHeaders,
       safeMessage: safeHttpErrorMessage(message),
       status,
@@ -446,8 +484,6 @@ function readHttpErrorSnapshot(error: HTTPError): SafeHttpErrorSnapshot {
   }
 
   return {
-    localClientBody,
-    localError,
     responseBody,
     responseHeaders,
     safeMessage: safeHttpErrorMessage(message),

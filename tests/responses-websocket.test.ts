@@ -673,6 +673,7 @@ describe("responses websocket message handling", () => {
       "local-error-type-private-marker",
       "local-error-message-private-marker",
       "local-client-body-private-marker",
+      "local-response-private-marker",
     ]
     let getterCalls = 0
     queuedFetchHandlers.push(() => {
@@ -715,6 +716,16 @@ describe("responses websocket message handling", () => {
               type: "server_error",
             },
           }
+        },
+      })
+      Object.defineProperty(error, "response", {
+        configurable: true,
+        get() {
+          getterCalls += 1
+          return Response.json(
+            { error: { message: privateMarkers[3] } },
+            { status: 503 },
+          )
         },
       })
       throw error
