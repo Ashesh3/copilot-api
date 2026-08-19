@@ -462,7 +462,7 @@ describe("responses websocket message handling", () => {
     expect(JSON.parse(ws.sent[0] ?? "{}")).toMatchObject({
       type: "error",
       status: 400,
-      error: { message: "Unsupported message type: response.processed" },
+      error: { message: "Unsupported message type" },
     })
   })
 
@@ -598,6 +598,48 @@ describe("responses websocket message handling", () => {
     expect(ws.data.activeTurns.size).toBe(0)
   })
 
+  test.each([
+    { type: null as unknown },
+    { type: 7 as unknown },
+    { type: [] as unknown },
+    { type: {} as unknown },
+    { type: { toString: null } as unknown },
+    { type: { toString: {}, valueOf: {} } as unknown },
+  ])(
+    "keeps the socket usable after hostile message type $type",
+    async ({ type }) => {
+      state.models = responsesCapableModels
+      const ws = createTestWebSocket()
+
+      await responsesWebSocket.message(ws, JSON.stringify({ type }))
+
+      expect(ws.data.nextTurnSequence).toBe(0)
+      expect(JSON.parse(ws.sent[0] ?? "{}")).toMatchObject({
+        type: "error",
+        status: 400,
+        error: { message: "Unsupported message type" },
+      })
+
+      await responsesWebSocket.message(
+        ws,
+        JSON.stringify({
+          type: "response.create",
+          model: "gpt-5.4",
+          generate: false,
+        }),
+      )
+
+      expect(
+        ws.sent.some(
+          (frame) =>
+            (JSON.parse(frame) as { type?: string }).type
+            === "response.completed",
+        ),
+      ).toBe(true)
+      expect(ws.data.closed).toBe(false)
+    },
+  )
+
   test("rejects stream false before starting a turn and remains usable", async () => {
     state.models = responsesCapableModels
     const ws = createTestWebSocket()
@@ -680,6 +722,97 @@ describe("responses websocket message handling", () => {
     expect(lastRequestBody).not.toHaveProperty("agent_task_id")
     expect(lastRequestBody).not.toHaveProperty("parent_agent_id")
   })
+
+  test.each([
+    {
+      expectedParent: "parent-header",
+      expectedTask: null,
+      frameFields: { agent_task_id: "" },
+      name: "blank task id",
+    },
+    {
+      expectedParent: "parent-header",
+      expectedTask: null,
+      frameFields: { agent_task_id: 7 },
+      name: "non-string task id",
+    },
+    {
+      expectedParent: "parent-header",
+      expectedTask: null,
+      frameFields: { agent_task_id: "x".repeat(1025) },
+      name: "oversized task id",
+    },
+    {
+      expectedParent: "parent-header",
+      expectedTask: null,
+      frameFields: { agent_task_id: "bad\nvalue" },
+      name: "control-character task id",
+    },
+    {
+      expectedParent: "parent-header",
+      expectedTask: "task-header",
+      frameFields: {},
+      name: "absent task id",
+    },
+    {
+      expectedParent: null,
+      expectedTask: "task-header",
+      frameFields: { parent_agent_id: " " },
+      name: "blank parent id",
+    },
+    {
+      expectedParent: null,
+      expectedTask: "task-header",
+      frameFields: { parent_agent_id: false },
+      name: "non-string parent id",
+    },
+    {
+      expectedParent: null,
+      expectedTask: "task-header",
+      frameFields: { parent_agent_id: "x".repeat(1025) },
+      name: "oversized parent id",
+    },
+    {
+      expectedParent: null,
+      expectedTask: "task-header",
+      frameFields: { parent_agent_id: "bad\rvalue" },
+      name: "control-character parent id",
+    },
+    {
+      expectedParent: "parent-header",
+      expectedTask: "task-header",
+      frameFields: {},
+      name: "absent parent id",
+    },
+  ])(
+    "applies top-level precedence upstream for $name",
+    async ({ expectedParent, expectedTask, frameFields }) => {
+      state.models = responsesCapableModels
+      const ws = createTestWebSocket()
+      queuedResponses.push(createResponsesSseResponse("resp_precedence"))
+
+      await responsesWebSocket.message(
+        ws,
+        JSON.stringify({
+          type: "response.create",
+          model: "gpt-5.4",
+          input: "hello",
+          headers: {
+            "X-Agent-Task-Id": "task-header",
+            "X-Parent-Agent-Id": "parent-header",
+          },
+          ...frameFields,
+        }),
+      )
+
+      expect(capturedUpstreamHeaders[0]?.get("x-agent-task-id")).toBe(
+        expectedTask ?? capturedUpstreamHeaders[0]?.get("x-interaction-id"),
+      )
+      expect(capturedUpstreamHeaders[0]?.get("x-parent-agent-id")).toBe(
+        expectedParent,
+      )
+    },
+  )
 
   test("preserves the top-level initiator on Chat fallback", async () => {
     installWebSocketEndpoint("/chat/completions")

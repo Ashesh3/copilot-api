@@ -208,3 +208,142 @@ describe("parseResponsesWebSocketFrame", () => {
     },
   )
 })
+
+describe("parseResponsesWebSocketFrame hostile input", () => {
+  test.each([
+    { name: "null", type: null as unknown },
+    { name: "number", type: 7 as unknown },
+    { name: "array", type: [] as unknown },
+    { name: "object", type: {} as unknown },
+    { name: "shadowed toString", type: { toString: null } as unknown },
+    {
+      name: "shadowed valueOf and toString",
+      type: { toString: {}, valueOf: {} } as unknown,
+    },
+  ])("rejects hostile $name message types without coercion", ({ type }) => {
+    const result = parseResponsesWebSocketFrame(
+      JSON.stringify({ type, model: "gpt-current" }),
+    )
+
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        code: "bad_request",
+        message: "Unsupported message type",
+        status: 400,
+        type: "invalid_request_error",
+      },
+    })
+  })
+})
+
+describe("parseResponsesWebSocketFrame attribution precedence", () => {
+  test.each(["agent", "user"] as const)(
+    "uses top-level initiator %s over the header envelope",
+    (initiator) => {
+      const result = parseResponsesWebSocketFrame(
+        JSON.stringify({
+          type: "response.create",
+          model: "gpt-current",
+          headers: { "X-Initiator": initiator === "agent" ? "user" : "agent" },
+          initiator,
+        }),
+      )
+
+      expect(result).toMatchObject({ ok: true, value: { initiator } })
+    },
+  )
+
+  test.each([null, false, "assistant", 1])(
+    "rejects invalid present top-level initiator %p instead of retaining header",
+    (initiator) => {
+      const result = parseResponsesWebSocketFrame(
+        JSON.stringify({
+          type: "response.create",
+          model: "gpt-current",
+          headers: { "X-Initiator": "agent" },
+          initiator,
+        }),
+      )
+
+      expect(result).toEqual({
+        ok: false,
+        error: {
+          code: "invalid_request_error",
+          message: "Responses WebSocket initiator must be user or agent.",
+          status: 400,
+          type: "invalid_request_error",
+        },
+      })
+    },
+  )
+
+  test.each([
+    {
+      agent_task_id: "",
+      expected: { parentAgentId: "parent-header" },
+      name: "blank task id",
+    },
+    {
+      agent_task_id: 7,
+      expected: { parentAgentId: "parent-header" },
+      name: "non-string task id",
+    },
+    {
+      agent_task_id: "x".repeat(1025),
+      expected: { parentAgentId: "parent-header" },
+      name: "oversized task id",
+    },
+    {
+      agent_task_id: "bad\nvalue",
+      expected: { parentAgentId: "parent-header" },
+      name: "control-character task id",
+    },
+    {
+      expected: {
+        agentTaskId: "task-header",
+        parentAgentId: "parent-header",
+      },
+      name: "absent task id",
+    },
+    {
+      expected: { agentTaskId: "task-header" },
+      name: "blank parent id",
+      parent_agent_id: " ",
+    },
+    {
+      expected: { agentTaskId: "task-header" },
+      name: "non-string parent id",
+      parent_agent_id: false,
+    },
+    {
+      expected: { agentTaskId: "task-header" },
+      name: "oversized parent id",
+      parent_agent_id: "x".repeat(1025),
+    },
+    {
+      expected: { agentTaskId: "task-header" },
+      name: "control-character parent id",
+      parent_agent_id: "bad\rvalue",
+    },
+  ])(
+    "applies explicit top-level precedence for $name",
+    ({ expected, ...topLevel }) => {
+      const { name: _name, ...frameFields } = topLevel
+      const result = parseResponsesWebSocketFrame(
+        JSON.stringify({
+          type: "response.create",
+          model: "gpt-current",
+          headers: {
+            "X-Agent-Task-Id": "task-header",
+            "X-Parent-Agent-Id": "parent-header",
+          },
+          ...frameFields,
+        }),
+      )
+
+      expect(result.ok).toBe(true)
+      if (result.ok) expect(result.value.attribution).toEqual(expected)
+    },
+  )
+})

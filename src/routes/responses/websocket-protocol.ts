@@ -51,10 +51,7 @@ export function parseResponsesWebSocketFrame(
   }
 
   if (parsed.type !== "response.create") {
-    return parseError(
-      "bad_request",
-      `Unsupported message type: ${String(parsed.type)}`,
-    )
+    return parseError("bad_request", "Unsupported message type")
   }
 
   const nestedResponse = isRecord(parsed.response) ? parsed.response : undefined
@@ -107,6 +104,8 @@ function resolveFrameAttribution(
 ): CopilotRequestAttribution {
   const headers = resolveFrameHeaders(frame.headers)
   const attribution = resolveCopilotRequestAttribution(headers)
+  if ("agent_task_id" in frame) delete attribution.agentTaskId
+  if ("parent_agent_id" in frame) delete attribution.parentAgentId
   const agentTaskId = sanitizeCopilotHeaderValue(
     typeof frame.agent_task_id === "string" ? frame.agent_task_id : undefined,
   )
