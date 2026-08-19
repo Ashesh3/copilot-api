@@ -56,6 +56,11 @@ let lastRequestHeaders: Headers | undefined
 const sessionToken = (payload: Record<string, unknown>): string =>
   `e30.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.c2ln`
 
+const binarySessionToken = (payload: Record<string, unknown>): string => {
+  const opaque = Buffer.from([0xff, 0, 0x80]).toString("base64url")
+  return `${opaque}.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.${opaque}`
+}
+
 function invalidSessionTokens(model: string): Array<string> {
   const payload = Buffer.from(
     JSON.stringify({ selected_model: model }),
@@ -81,6 +86,8 @@ function invalidSessionTokens(model: string): Array<string> {
     `e%0.${payload}.c2ln`,
     `e30=.${payload}.c2ln`,
     `A.${payload}.c2ln`,
+    `Zh.${payload}.c2ln`,
+    `e30.${payload}.Zh`,
     `e30.${noncanonical}.c2ln`,
     `e30.${"A".repeat(16 * 1024)}.c2ln`,
     sessionToken({
@@ -220,6 +227,20 @@ test("forwards only matching model-scoped session tokens on Chat inference", asy
   expect(lastRequestHeaders?.get("copilot-session-token")).toBe(
     longMatchingToken,
   )
+
+  const binaryToken = binarySessionToken({ selected_model: "gpt-test" })
+  await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "copilot-session-token": binaryToken,
+    },
+    body: JSON.stringify({
+      model: "gpt-test",
+      messages: [{ role: "user", content: "binary opaque segments" }],
+    }),
+  })
+  expect(lastRequestHeaders?.get("copilot-session-token")).toBe(binaryToken)
 
   for (const token of [
     sessionToken({ selected_model: "different-model" }),

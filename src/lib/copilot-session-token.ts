@@ -15,14 +15,12 @@ function normalizedClaim(value: unknown): string | undefined {
   return trimmed || undefined
 }
 
-function hasValidSegmentSyntax(segment: string): boolean {
-  return Boolean(
-    segment && BASE64URL_PATTERN.test(segment) && segment.length % 4 !== 1,
-  )
-}
-
-function decodeCanonicalPayload(segment: string): Buffer | undefined {
-  if (!hasValidSegmentSyntax(segment)) {
+function decodeCanonicalSegment(segment: string): Buffer | undefined {
+  if (
+    !segment
+    || !BASE64URL_PATTERN.test(segment)
+    || segment.length % 4 === 1
+  ) {
     return undefined
   }
 
@@ -37,7 +35,7 @@ function decodeCanonicalPayload(segment: string): Buffer | undefined {
 function parsePayloadSegment(
   segment: string,
 ): Record<string, unknown> | undefined {
-  const decoded = decodeCanonicalPayload(segment)
+  const decoded = decodeCanonicalSegment(segment)
   if (!decoded) return undefined
 
   try {
@@ -65,8 +63,8 @@ export function inspectCopilotSessionToken(
     return undefined
   }
   if (
-    !hasValidSegmentSyntax(segments[0])
-    || !hasValidSegmentSyntax(segments[2])
+    !decodeCanonicalSegment(segments[0])
+    || !decodeCanonicalSegment(segments[2])
   ) {
     return undefined
   }

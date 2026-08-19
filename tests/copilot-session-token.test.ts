@@ -103,15 +103,27 @@ test("does not inspect header or signature segments as JSON", () => {
   ).toEqual({ availableModels: ["gpt-current"] })
 })
 
-test("keeps syntactically valid header and signature segments opaque", () => {
+test("keeps canonical binary header and signature segments opaque", () => {
+  const payload = Buffer.from(
+    JSON.stringify({ selected_model: "gpt-current" }),
+  ).toString("base64url")
+  const binarySegment = Buffer.from([0xff, 0, 0x80]).toString("base64url")
+
+  expect(
+    inspectCopilotSessionToken(`${binarySegment}.${payload}.${binarySegment}`),
+  ).toEqual({
+    selectedModel: "gpt-current",
+    availableModels: [],
+  })
+})
+
+test("rejects noncanonical header and signature trailing-bit aliases", () => {
   const payload = Buffer.from(
     JSON.stringify({ selected_model: "gpt-current" }),
   ).toString("base64url")
 
-  expect(inspectCopilotSessionToken(`Zh.${payload}.Zh`)).toEqual({
-    selectedModel: "gpt-current",
-    availableModels: [],
-  })
+  expect(inspectCopilotSessionToken(`Zh.${payload}.c2ln`)).toBeUndefined()
+  expect(inspectCopilotSessionToken(`e30.${payload}.Zh`)).toBeUndefined()
 })
 
 test("forwards only when the requested and final models remain allowed", () => {
