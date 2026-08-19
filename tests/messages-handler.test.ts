@@ -13,6 +13,7 @@ const originalFetch = globalThis.fetch
 let lastUpstreamPayload: ChatCompletionsPayload | undefined
 let lastUpstreamHeaders: Headers | undefined
 let lastUpstreamUrl: string | undefined
+let upstreamResponseOverride: Response | undefined
 
 const upstreamMaxReasoningModels: ModelsResponse = {
   object: "list",
@@ -146,6 +147,7 @@ const fetchMock = mock((url: string, init?: RequestInit) => {
   lastUpstreamUrl = url
   lastUpstreamPayload = parseRequestBody(init)
   lastUpstreamHeaders = new Headers(init?.headers)
+  if (upstreamResponseOverride) return upstreamResponseOverride
 
   // The native Anthropic endpoint returns Messages-shaped bodies; every other
   // path returns chat.completion. Match on URL so both routes parse cleanly.
@@ -242,6 +244,7 @@ beforeEach(() => {
   lastUpstreamPayload = undefined
   lastUpstreamHeaders = undefined
   lastUpstreamUrl = undefined
+  upstreamResponseOverride = undefined
   state.accountType = "individual"
   state.copilotToken = "copilot-token"
   state.githubToken = "github-token"
@@ -342,6 +345,38 @@ test("rejects malformed public Messages JSON before upstream dispatch", async ()
     },
   })
   expect(fetchMock).not.toHaveBeenCalled()
+})
+
+test("returns a safe Anthropic error for an upstream Messages failure", async () => {
+  upstreamResponseOverride = Response.json(
+    { error: { message: "messages-upstream-private-marker" } },
+    { status: 400, statusText: "messages-status-private-marker" },
+  )
+
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-request-id": "req-messages-safe",
+    },
+    body: JSON.stringify({
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "Hello" }],
+      max_tokens: 32,
+    }),
+  })
+  const body = await response.text()
+
+  expect(response.status).toBe(400)
+  expect(JSON.parse(body)).toEqual({
+    type: "error",
+    request_id: "req-messages-safe",
+    error: {
+      type: "invalid_request_error",
+      message: "The Copilot Messages request was rejected.",
+    },
+  })
+  expect(body).not.toContain("private-marker")
 })
 
 test("removes top_p when thinking is enabled on the chat completions path", async () => {

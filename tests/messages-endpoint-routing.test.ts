@@ -79,6 +79,17 @@ const VALID_TRANSLATED_DOCUMENT_URLS = [
   "https://attachment.test/report%20name.pdf?download=%E2%9C%93#section-1",
 ]
 
+async function expectSafeMessagesRejection(response: Response): Promise<void> {
+  expect(response.status).toBe(400)
+  expect(await response.json()).toMatchObject({
+    type: "error",
+    error: {
+      type: "invalid_request_error",
+      message: "The Copilot Messages request was rejected.",
+    },
+  })
+}
+
 function createAttachmentResponse(url: URL): Response | undefined {
   if (
     url.hostname !== "attachment.test"
@@ -705,21 +716,12 @@ test.each([
   },
 ])(
   "rejects a Responses-only $name before upstream dispatch",
-  async ({ extra, param }) => {
+  async ({ extra }) => {
     installModel({ supported_endpoints: ["/responses"] })
 
     const response = await postMessages(extra)
 
-    expect(response.status).toBe(400)
-    expect(await response.json()).toEqual({
-      error: {
-        code: "endpoint_translation_unsupported",
-        message:
-          "The selected Copilot model cannot accept this request without losing required protocol data.",
-        param,
-        type: "invalid_request_error",
-      },
-    })
+    await expectSafeMessagesRejection(response)
     expect(fetchMock).not.toHaveBeenCalled()
   },
 )
@@ -729,11 +731,7 @@ test("rejects an explicit empty endpoint list before upstream dispatch", async (
 
   const response = await postMessages({})
 
-  expect(response.status).toBe(400)
-  expect(await response.json()).toHaveProperty(
-    "error.code",
-    "endpoint_translation_unsupported",
-  )
+  await expectSafeMessagesRejection(response)
   expect(fetchMock).not.toHaveBeenCalled()
 })
 
@@ -1283,15 +1281,14 @@ test.each([
   },
 ])(
   "rejects $name from Responses and Chat before normalization",
-  async ({ document, param }) => {
+  async ({ document }) => {
     installModel({ supported_endpoints: ["/responses", "/chat/completions"] })
 
     const response = await postMessages({
       messages: [{ role: "user", content: [document] }],
     })
 
-    expect(response.status).toBe(400)
-    expect(await response.json()).toHaveProperty("error.param", param)
+    await expectSafeMessagesRejection(response)
     expect(upstreamPaths).toEqual([])
     expect(fetchMock).not.toHaveBeenCalled()
   },
@@ -1338,8 +1335,7 @@ test.each([
       messages: [{ role: "user", content: [document] }],
     })
 
-    expect(response.status).toBe(400)
-    expect(await response.json()).toHaveProperty("error.param", "document")
+    await expectSafeMessagesRejection(response)
     expect(upstreamPaths).toEqual([])
     expect(fetchMock).not.toHaveBeenCalled()
   },
@@ -1588,11 +1584,7 @@ test("blocks remote document metadata before fetching or wrong-endpoint dispatch
     ],
   })
 
-  expect(response.status).toBe(400)
-  expect(await response.json()).toHaveProperty(
-    "error.param",
-    "document.context",
-  )
+  await expectSafeMessagesRejection(response)
   expect(attachmentFetchCount).toBe(0)
   expect(upstreamPaths).toEqual([])
   expect(fetchMock).not.toHaveBeenCalled()
@@ -1618,11 +1610,7 @@ test.each(INVALID_TRANSLATED_DOCUMENT_URLS)(
       ],
     })
 
-    expect(response.status).toBe(400)
-    expect(await response.json()).toHaveProperty(
-      "error.param",
-      "document.source",
-    )
+    await expectSafeMessagesRejection(response)
     expect(attachmentFetchCount).toBe(0)
     expect(upstreamPaths).toEqual([])
     expect(fetchMock).not.toHaveBeenCalled()
@@ -1651,8 +1639,7 @@ test("blocks translated URL source extensions before fetch or dispatch", async (
     ],
   })
 
-  expect(response.status).toBe(400)
-  expect(await response.json()).toHaveProperty("error.param", "document.source")
+  await expectSafeMessagesRejection(response)
   expect(attachmentFetchCount).toBe(0)
   expect(upstreamPaths).toEqual([])
   expect(fetchMock).not.toHaveBeenCalled()
@@ -1701,13 +1688,12 @@ test.each([
   },
 ])(
   "rejects unknown native extensions before translated $name dispatch",
-  async ({ endpoints, extra, param }) => {
+  async ({ endpoints, extra }) => {
     installModel({ supported_endpoints: [...endpoints] })
 
     const response = await postMessages(extra)
 
-    expect(response.status).toBe(400)
-    expect(await response.json()).toHaveProperty("error.param", param)
+    await expectSafeMessagesRejection(response)
     expect(fetchMock).not.toHaveBeenCalled()
   },
 )

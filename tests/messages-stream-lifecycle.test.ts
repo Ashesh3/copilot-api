@@ -7,15 +7,19 @@ import {
   mock,
   test,
 } from "bun:test"
+import { Hono } from "hono"
+import { streamSSE } from "hono/streaming"
 
 import type { ChatCompletionsPayload } from "../src/services/copilot/create-chat-completions"
 import type { ModelsResponse } from "../src/services/copilot/get-models"
 
+import { HTTPError, LocalHTTPError } from "../src/lib/error"
 import { setModelRedirectsForTest } from "../src/lib/model-redirect"
 import { setModelSettingsForTest } from "../src/lib/model-settings"
 import { setSsePreflushDeadlineForTest } from "../src/lib/sse-lifecycle"
 import { state } from "../src/lib/state"
 import { trackMessageDelta } from "../src/routes/messages/native-handler"
+import { emitAnthropicStreamError } from "../src/routes/messages/stream-translation"
 import { server } from "../src/server"
 
 const originalFetch = globalThis.fetch
@@ -365,6 +369,69 @@ test("does not emit a successful terminal pair when the upstream stream errors",
   expect(eventTypes).not.toContain("message_delta")
   expect(eventTypes).not.toContain("message_stop")
 })
+
+test.each([
+  [
+    "local",
+    new LocalHTTPError(
+      "safe local validation",
+      Response.json({}, { status: 400 }),
+      {
+        type: "error",
+        error: {
+          type: "invalid_request_error",
+          message: "safe local validation",
+        },
+      },
+    ),
+    {
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message: "safe local validation",
+      },
+    },
+  ],
+  [
+    "upstream",
+    new HTTPError(
+      "stream-runtime-private-marker",
+      Response.json(
+        { error: { message: "stream-body-private-marker" } },
+        { status: 429, statusText: "stream-status-private-marker" },
+      ),
+    ),
+    {
+      type: "error",
+      error: {
+        type: "rate_limit_error",
+        message: "Copilot rate limit exceeded.",
+      },
+    },
+  ],
+] as const)(
+  "emits a safe Anthropic %s error after headers are committed",
+  async (_kind, error, expected) => {
+    const app = new Hono()
+    app.get("/stream", (c) =>
+      streamSSE(c, async (stream) => {
+        await stream.write(": keepalive\n\n")
+        await emitAnthropicStreamError(stream, error)
+      }),
+    )
+
+    const response = await app.request("/stream")
+    const body = await response.text()
+    const data = body.match(/^data: (\{.*\})$/m)?.[1]
+
+    expect(response.status).toBe(200)
+    expect(response.headers.get("content-type")).toContain("text/event-stream")
+    expect(body).toContain("event: error")
+    expect(data).toBeDefined()
+    expect(JSON.parse(data ?? "null")).toEqual(expected)
+    expect(body).not.toContain("private-marker")
+  },
+)
 
 test("commits a keepalive while native Anthropic waits for upstream headers", async () => {
   setSsePreflushDeadlineForTest(20)

@@ -16,6 +16,7 @@ import {
 } from "~/lib/descriptor-chain"
 
 const ABORT_ERROR_DESCRIPTOR_KEYS = new Set(["name"])
+export const HTTP_TOO_MANY_REQUESTS_STATUS = 429
 
 /**
  * Check if an error is an AbortError (client disconnected during streaming).
@@ -114,10 +115,15 @@ interface UpstreamErrorBody {
   }
 }
 
-interface SafeUpstreamClientError {
+export interface SafeUpstreamClientError {
   code: string
   fingerprint: string
   message: string
+}
+
+export interface SafeHttpErrorInspection {
+  clientError?: SafeUpstreamClientError
+  safeMessage: string
 }
 
 const SENSITIVE_FIELD_PATTERN =
@@ -299,10 +305,34 @@ function captureHttpError(options: {
   })
 }
 
+export function reportSafeHttpError(
+  c: Context,
+  error: HTTPError,
+  inspection: SafeHttpErrorInspection,
+): void {
+  logHttpError({ error, clientError: inspection.clientError })
+  captureHttpError({ c, error, clientError: inspection.clientError })
+}
+
+export async function inspectSafeHttpError(
+  error: HTTPError,
+): Promise<SafeHttpErrorInspection> {
+  const parsedBody = redactSensitiveValue(
+    await readResponseBody(error.response),
+  )
+  const clientError = safeUpstreamClientError(error.response.status, parsedBody)
+  let safeMessage = safeHttpErrorMessage(error)
+  if (error.response.status === 402) safeMessage = "Copilot quota exhausted"
+  if (error.response.status === 466) {
+    safeMessage = "Copilot client version mismatch"
+  }
+  return { clientError, safeMessage }
+}
+
 function httpErrorResponse(
   c: Context,
   error: HTTPError,
-  clientError?: SafeUpstreamClientError,
+  inspection: SafeHttpErrorInspection,
 ) {
   if (error instanceof LocalHTTPError) {
     return c.json(
@@ -310,12 +340,12 @@ function httpErrorResponse(
       error.response.status as ContentfulStatusCode,
     )
   }
-  if (clientError) {
+  if (inspection.clientError) {
     return c.json(
       {
         error: {
-          code: clientError.code,
-          message: clientError.message,
+          code: inspection.clientError.code,
+          message: inspection.clientError.message,
           type: "invalid_request_error",
         },
       },
@@ -323,13 +353,8 @@ function httpErrorResponse(
     )
   }
 
-  let message = safeHttpErrorMessage(error)
-  if (error.response.status === 402) message = "Copilot quota exhausted"
-  if (error.response.status === 466) {
-    message = "Copilot client version mismatch"
-  }
   return c.json(
-    { error: { message, type: "error" } },
+    { error: { message: inspection.safeMessage, type: "error" } },
     error.response.status as ContentfulStatusCode,
   )
 }
@@ -340,13 +365,9 @@ async function forwardHttpError(c: Context, error: HTTPError) {
     return c.body(null, 499 as ContentfulStatusCode)
   }
 
-  const parsedBody = redactSensitiveValue(
-    await readResponseBody(error.response),
-  )
-  const clientError = safeUpstreamClientError(error.response.status, parsedBody)
-  logHttpError({ error, clientError })
-  captureHttpError({ c, clientError, error })
-  return httpErrorResponse(c, error, clientError)
+  const inspection = await inspectSafeHttpError(error)
+  reportSafeHttpError(c, error, inspection)
+  return httpErrorResponse(c, error, inspection)
 }
 
 export async function forwardError(c: Context, error: unknown) {

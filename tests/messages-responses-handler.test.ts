@@ -198,9 +198,10 @@ test("rejects unsigned thinking before sending a Responses payload", async () =>
 
   expect(response.status).toBe(400)
   expect(await response.json()).toMatchObject({
+    type: "error",
     error: {
-      code: "endpoint_translation_unsupported",
-      param: "thinking_signature",
+      type: "invalid_request_error",
+      message: "The Copilot Messages request was rejected.",
     },
   })
   expect(fetchMock).not.toHaveBeenCalled()

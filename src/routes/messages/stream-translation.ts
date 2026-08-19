@@ -7,9 +7,11 @@ import {
 } from "~/services/copilot/create-chat-completions"
 
 import {
+  type AnthropicErrorEvent,
   type AnthropicStreamEventData,
   type AnthropicStreamState,
 } from "./anthropic-types"
+import { createAnthropicStreamError } from "./error"
 import { mapOpenAIStopReasonToAnthropic } from "./utils"
 
 function isToolBlockOpen(state: AnthropicStreamState): boolean {
@@ -616,16 +618,6 @@ function getChatCopilotUsage(response: ChatCompletionResponse): unknown {
     .copilot_usage
 }
 
-export function translateErrorToAnthropicErrorEvent(): AnthropicStreamEventData {
-  return {
-    type: "error",
-    error: {
-      type: "api_error",
-      message: "An unexpected error occurred during streaming.",
-    },
-  }
-}
-
 /**
  * Report a mid-stream failure to the client as an Anthropic `error` event.
  *
@@ -646,12 +638,12 @@ export async function emitAnthropicStreamError(
   stream: {
     writeSSE: (data: { event: string; data: string }) => Promise<void>
   },
-  _error: unknown,
+  error: unknown,
 ): Promise<void> {
   Sentry.captureException(new Error("Anthropic stream failed after headers"))
   consola.error("Anthropic stream failed after headers were sent")
 
-  const event = translateErrorToAnthropicErrorEvent()
+  const event: AnthropicErrorEvent = createAnthropicStreamError(error)
   try {
     await stream.writeSSE({ event: event.type, data: JSON.stringify(event) })
   } catch {

@@ -253,14 +253,33 @@ test("count_tokens propagates an upstream HTTP status", async () => {
         type: "error",
         error: { type: "invalid_request_error", message: "private upstream" },
       },
-      { status: 400 },
+      {
+        status: 400,
+        headers: {
+          "retry-after": "17",
+          "x-quota-snapshot-premium_interactions": "remaining=0;limit=100",
+        },
+      },
     )
 
-  const response = await requestCountTokens()
+  const response = await requestCountTokens({
+    headers: { "x-request-id": "req-count-safe" },
+  })
   const body = (await response.json()) as Record<string, unknown>
 
   expect(response.status).toBe(400)
-  expect(body).not.toHaveProperty("input_tokens")
+  expect(body).toEqual({
+    type: "error",
+    request_id: "req-count-safe",
+    error: {
+      type: "invalid_request_error",
+      message: "The Copilot Messages request was rejected.",
+    },
+  })
+  expect(response.headers.get("retry-after")).toBe("17")
+  expect(response.headers.get("x-quota-snapshot-premium_interactions")).toBe(
+    "remaining=0;limit=100",
+  )
   expect(JSON.stringify(body)).not.toContain("private upstream")
 })
 
