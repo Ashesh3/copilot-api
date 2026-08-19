@@ -6,6 +6,7 @@ import type { SafeHttpErrorInspection } from "~/lib/error"
 import type { RoutingAffinity } from "~/lib/routing-affinity"
 import type { NativeMessagesRequestOptions } from "~/routes/messages/native-handler"
 
+import { runWithCopilotRequestAttribution } from "~/lib/copilot-request-context"
 import { resolveRequestCredential } from "~/lib/credential-resolver"
 import {
   applyModelRedirect,
@@ -65,11 +66,9 @@ import {
   throwIfWebSocketTurnAborted,
   WebSocketRequestError,
 } from "./websocket-lifecycle"
+import { parseResponsesWebSocketFrame } from "./websocket-protocol"
 
 const WS_PATHS = new Set(["/v1/responses", "/responses"])
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null
 
 export interface ResponsesWebSocketData {
   activeTurns: Map<number, ResponsesWebSocketTurn>
@@ -171,45 +170,21 @@ export const responsesWebSocket = {
   ) {
     if (ws.data.closed) return
 
-    if (typeof message !== "string") {
-      sendWebSocketError(ws, {
-        code: "bad_request",
-        message: "Binary frames not supported",
-        status: 400,
-        type: "invalid_request_error",
-      })
+    const parsed = parseResponsesWebSocketFrame(message)
+    if (!parsed.ok) {
+      sendWebSocketError(ws, parsed.error)
       return
     }
+    if (typeof message !== "string") return
 
-    let parsed: { type?: string; [key: string]: unknown }
-    try {
-      parsed = JSON.parse(message) as { type?: string; [key: string]: unknown }
-    } catch {
-      sendWebSocketError(ws, {
-        code: "bad_request",
-        message: "Invalid JSON",
-        status: 400,
-        type: "invalid_request_error",
-      })
-      return
-    }
-
-    if (parsed.type === "response.processed") {
-      return
-    }
-
-    if (parsed.type !== "response.create") {
-      sendWebSocketError(ws, {
-        code: "bad_request",
-        message: `Unsupported message type: ${String(parsed.type)}`,
-        status: 400,
-        type: "invalid_request_error",
-      })
-      return
-    }
-
+    const {
+      attribution,
+      initiator,
+      payload: parsedPayload,
+      requestedModel,
+    } = parsed.value
+    parsedPayload.stream = true
     const turn = createResponsesWebSocketTurn(ws.data, message)
-    const requestedModel = getRequestedModel(parsed)
     turn.requestedModel = requestedModel
     turn.model = requestedModel
     ensureResponsesWebSocketLifecycle(turn, {
@@ -218,12 +193,18 @@ export const responsesWebSocket = {
     })
 
     try {
-      const { affinity, payload } = prepareResponseCreate(ws.data, parsed)
-      await runWithWebSocketRequestContext(affinity, turn, async () => {
-        await handleResponseCreate(ws, {
-          payload,
-          requestedModel,
-          turn,
+      const { affinity, payload } = prepareResponseCreate(
+        ws.data,
+        parsedPayload,
+      )
+      await runWithCopilotRequestAttribution(attribution, async () => {
+        await runWithWebSocketRequestContext(affinity, turn, async () => {
+          await handleResponseCreate(ws, {
+            initiator,
+            payload,
+            requestedModel,
+            turn,
+          })
         })
       })
       if (!turn.finalized) {
@@ -277,9 +258,8 @@ export const responsesWebSocket = {
 
 function prepareResponseCreate(
   data: ResponsesWebSocketData,
-  message: Record<string, unknown>,
+  rawPayload: ResponsesPayload,
 ): { affinity: RoutingAffinity | undefined; payload: ResponsesPayload } {
-  const rawPayload = extractResponsesPayload(message)
   const resolution = resolveWebSocketContinuationPayload(
     data.responseSnapshots,
     rawPayload,
@@ -308,17 +288,21 @@ function storeResponseSnapshot(
 async function handleResponseCreate(
   ws: ResponsesWebSocketState,
   options: {
+    initiator?: "agent" | "user"
     payload: ResponsesPayload
     requestedModel: string | undefined
     turn: ResponsesWebSocketTurn
   },
 ): Promise<void> {
-  const { payload, requestedModel, turn } = options
+  const {
+    initiator: initiatorOverride,
+    payload,
+    requestedModel,
+    turn,
+  } = options
   turn.requestedModel = requestedModel
   turn.model = requestedModel
 
-  // Force streaming for WebSocket mode
-  payload.stream = true
   const reasoningEffort = await waitForWebSocketTurn(
     applyResponsesWebSocketRouting(payload),
     turn,
@@ -354,7 +338,9 @@ async function handleResponseCreate(
     return
   }
 
-  const { vision, initiator } = getResponsesRequestOptions(preparedPayload)
+  const { vision, initiator: inferredInitiator } =
+    getResponsesRequestOptions(preparedPayload)
+  const initiator = initiatorOverride ?? inferredInitiator
 
   if (
     await dispatchTranslatedWebSocketEndpoint({
@@ -446,7 +432,12 @@ async function dispatchTranslatedWebSocketEndpoint(options: {
     preparedPayload.model,
     "ChatCompletions",
   )
-  await streamChatCompletionsOverWs(ws, preparedPayload, turn)
+  await streamChatCompletionsOverWs({
+    initiator,
+    payload: preparedPayload,
+    turn,
+    ws,
+  })
   return true
 }
 
@@ -575,16 +566,6 @@ function resolveWebSocketContinuationPayload(
     shouldStop: true,
     status: 400,
   }
-}
-
-function getRequestedModel(
-  message: Record<string, unknown>,
-): string | undefined {
-  const response = message.response
-  if (isRecord(response) && typeof response.model === "string") {
-    return response.model
-  }
-  return typeof message.model === "string" ? message.model : undefined
 }
 
 function getRedirectReasoningEffort(
@@ -732,23 +713,7 @@ function applyRedirectedResponsesEffort(
     payload.reasoning ? { ...payload.reasoning, effort } : { effort }
 }
 
-export function extractResponsesPayload(
-  message: Record<string, unknown>,
-): ResponsesPayload {
-  const { type: _type, response, ...topLevel } = message
-
-  if (!isRecord(response)) {
-    return topLevel as ResponsesPayload
-  }
-
-  // Some clients split fields between top-level and nested response payload.
-  // Merge both so required continuation fields (e.g. previous_response_id)
-  // are preserved regardless of where they're sent.
-  return {
-    ...topLevel,
-    ...response,
-  } as ResponsesPayload
-}
+export { extractResponsesPayload } from "./websocket-protocol"
 
 export function isSyntheticWarmupRequest(payload: ResponsesPayload): boolean {
   return (payload as Record<string, unknown>).generate === false
@@ -924,11 +889,13 @@ async function emitResponsesResultAsWebSocketFrames(
   })
 }
 
-async function streamChatCompletionsOverWs(
-  ws: ResponsesWebSocketState,
-  payload: ResponsesPayload,
-  turn: ResponsesWebSocketTurn,
-): Promise<void> {
+async function streamChatCompletionsOverWs(options: {
+  initiator: "agent" | "user"
+  payload: ResponsesPayload
+  turn: ResponsesWebSocketTurn
+  ws: ResponsesWebSocketState
+}): Promise<void> {
+  const { initiator, payload, turn, ws } = options
   const compaction = isResponsesCompactionRequest(payload)
   const fitted = compaction ? fitResponsesCompactionPayload(payload) : null
   const fallbackPayload = fitted?.payload ?? payload
@@ -952,6 +919,7 @@ async function streamChatCompletionsOverWs(
       payload,
       ccPayload,
       compaction,
+      initiator,
       turn,
     })
     return
@@ -962,6 +930,7 @@ async function streamChatCompletionsOverWs(
   const response = await waitForWebSocketTurn(
     createChatCompletions(ccPayload, {
       compaction,
+      initiator,
       signal: turn.abortController.signal,
     }),
     turn,
@@ -991,14 +960,16 @@ async function streamChatWebSearchOverWs(options: {
   payload: ResponsesPayload
   ccPayload: ReturnType<typeof responsesToChatCompletions>
   compaction: boolean
+  initiator: "agent" | "user"
   turn: ResponsesWebSocketTurn
 }): Promise<void> {
-  const { ws, payload, ccPayload, compaction, turn } = options
+  const { ws, payload, ccPayload, compaction, initiator, turn } = options
   ccPayload.stream = false
   ccPayload.stream_options = null
   const initial = (await waitForWebSocketTurn(
     createChatCompletions(ccPayload, {
       compaction,
+      initiator,
       signal: turn.abortController.signal,
     }),
     turn,
@@ -1008,6 +979,7 @@ async function streamChatWebSearchOverWs(options: {
     createCompletion: async (nextPayload) =>
       (await createChatCompletions(nextPayload, {
         compaction,
+        initiator,
         signal: turn.abortController.signal,
       })) as ChatCompletionResponse,
   })

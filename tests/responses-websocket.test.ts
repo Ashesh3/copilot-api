@@ -449,7 +449,7 @@ describe("responses websocket upgrade handling", () => {
 })
 
 describe("responses websocket message handling", () => {
-  test("accepts response.processed as a no-op", async () => {
+  test("rejects response.processed without starting a turn", async () => {
     const ws = createTestWebSocket()
 
     await responsesWebSocket.message(
@@ -457,7 +457,13 @@ describe("responses websocket message handling", () => {
       JSON.stringify({ type: "response.processed", response_id: "resp_1" }),
     )
 
-    expect(ws.sent).toEqual([])
+    expect(ws.data.nextTurnSequence).toBe(0)
+    expect(ws.data.activeTurns.size).toBe(0)
+    expect(JSON.parse(ws.sent[0] ?? "{}")).toMatchObject({
+      type: "error",
+      status: 400,
+      error: { message: "Unsupported message type: response.processed" },
+    })
   })
 
   test("closing a socket does not affect later upgrades", async () => {
@@ -545,14 +551,24 @@ describe("responses websocket message handling", () => {
     expect(ws.data.activeTurns.size).toBe(5)
   })
 
-  test("sends terminal error frames for invalid client messages", async () => {
+  test("keeps the socket usable after invalid client messages", async () => {
+    state.models = responsesCapableModels
     const ws = createTestWebSocket()
 
     await responsesWebSocket.message(ws, new Uint8Array([1, 2, 3]))
     await responsesWebSocket.message(ws, "{")
     await responsesWebSocket.message(ws, JSON.stringify({ type: "unknown" }))
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "still usable",
+        generate: false,
+      }),
+    )
 
-    const frames = ws.sent.map(
+    const frames = ws.sent.slice(0, 3).map(
       (frame) =>
         JSON.parse(frame) as {
           error: { code: string; message: string; request_id: string }
@@ -571,6 +587,117 @@ describe("responses websocket message handling", () => {
       true,
     )
     expect(frames[2]?.error.message).toContain("Unsupported message type")
+    expect(
+      ws.sent.some(
+        (frame) =>
+          (JSON.parse(frame) as { type?: string }).type
+          === "response.completed",
+      ),
+    ).toBe(true)
+    expect(ws.data.closed).toBe(false)
+    expect(ws.data.activeTurns.size).toBe(0)
+  })
+
+  test("rejects stream false before starting a turn and remains usable", async () => {
+    state.models = responsesCapableModels
+    const ws = createTestWebSocket()
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "do not start",
+        stream: false,
+      }),
+    )
+
+    expect(ws.data.nextTurnSequence).toBe(0)
+    expect(ws.data.activeTurns.size).toBe(0)
+    expect(JSON.parse(ws.sent[0] ?? "{}")).toMatchObject({
+      type: "error",
+      status: 400,
+      error: {
+        code: "invalid_request_error",
+        message: "Responses WebSocket requests must stream.",
+      },
+    })
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "continue",
+        generate: false,
+      }),
+    )
+
+    expect(
+      ws.sent.some(
+        (frame) =>
+          (JSON.parse(frame) as { type?: string }).type
+          === "response.completed",
+      ),
+    ).toBe(true)
+    expect(ws.data.closed).toBe(false)
+  })
+
+  test("applies the top-level initiator without forwarding envelope fields", async () => {
+    state.models = responsesCapableModels
+    const ws = createTestWebSocket()
+    queuedResponses.push(createResponsesSseResponse("resp_attribution"))
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "hello",
+        headers: {
+          Authorization: "Bearer frame-secret",
+          "Copilot-Session-Token": "frame-session-secret",
+        },
+        initiator: "agent",
+        agent_task_id: "task-frame",
+        parent_agent_id: "parent-frame",
+      }),
+    )
+
+    expect(capturedUpstreamHeaders[0]?.get("x-initiator")).toBe("agent")
+    expect(capturedUpstreamHeaders[0]?.get("x-agent-task-id")).toBe(
+      "task-frame",
+    )
+    expect(capturedUpstreamHeaders[0]?.get("x-parent-agent-id")).toBe(
+      "parent-frame",
+    )
+    expect(capturedUpstreamHeaders[0]?.get("authorization")).toBe(
+      "Bearer copilot-token",
+    )
+    expect(capturedUpstreamHeaders[0]?.has("copilot-session-token")).toBe(false)
+    expect(lastRequestBody).not.toHaveProperty("headers")
+    expect(lastRequestBody).not.toHaveProperty("initiator")
+    expect(lastRequestBody).not.toHaveProperty("agent_task_id")
+    expect(lastRequestBody).not.toHaveProperty("parent_agent_id")
+  })
+
+  test("preserves the top-level initiator on Chat fallback", async () => {
+    installWebSocketEndpoint("/chat/completions")
+    state.copilotToken = "copilot-token"
+    const ws = createTestWebSocket()
+    queuedResponses.push(createChatCompletionsSseResponse())
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "hello",
+        initiator: "agent",
+      }),
+    )
+
+    expect(capturedUpstreamHeaders[0]?.get("x-initiator")).toBe("agent")
   })
 
   test("sendWebSocketError emits CAPI-style error envelopes", () => {
