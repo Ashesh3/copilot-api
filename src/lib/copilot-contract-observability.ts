@@ -312,7 +312,7 @@ function getSafeDataProperties(
     const descriptors = Object.getOwnPropertyDescriptors(value)
     const result = Object.create(null) as Record<string, unknown>
     for (const [name, descriptor] of Object.entries(descriptors)) {
-      if (!("value" in descriptor)) continue
+      if (!Object.hasOwn(descriptor, "value")) continue
       Object.defineProperty(result, name, {
         configurable: true,
         enumerable: true,

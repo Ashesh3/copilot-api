@@ -422,3 +422,41 @@ test.each(validRuntimeEvents)(
     }
   },
 )
+
+test.each(validRuntimeEvents)(
+  "does not read inherited descriptor value for $kind",
+  (validEvent) => {
+    const diagnostics = installDiagnosticSpies()
+    const privateMarker = `hostile-${validEvent.kind}-descriptor-private`
+    let inheritedValueReads = 0
+    const event = { ...validEvent } as Record<string, unknown>
+    Object.defineProperty(event, "hostileAccessor", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        throw new Error(privateMarker)
+      },
+    })
+    Object.defineProperty(Object.prototype, "value", {
+      configurable: true,
+      get() {
+        inheritedValueReads += 1
+        throw new Error(privateMarker)
+      },
+    })
+
+    try {
+      expect(() => recordCopilotContractEvent(event as never)).not.toThrow()
+      expect(inheritedValueReads).toBe(0)
+      expect(diagnostics.debug.mock.calls).toHaveLength(1)
+      const output = JSON.stringify({
+        breadcrumbs: diagnostics.breadcrumb.mock.calls,
+        logs: diagnostics.debug.mock.calls,
+      })
+      expect(output).not.toContain(privateMarker)
+    } finally {
+      Reflect.deleteProperty(Object.prototype, "value")
+      diagnostics.restore()
+    }
+  },
+)
