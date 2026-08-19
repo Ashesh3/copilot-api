@@ -170,6 +170,32 @@ test("count_tokens strips a reasoning suffix and returns the upstream count", as
   })
 })
 
+test.each([
+  ["string", "32"],
+  ["null", null],
+  ["zero", 0],
+  ["negative", -1],
+  ["fractional", 1.5],
+] as const)(
+  "count_tokens rejects present invalid max_tokens: %s",
+  async (_name, maxTokens) => {
+    const response = await requestCountTokens({
+      body: { max_tokens: maxTokens },
+    })
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toMatchObject({
+      type: "error",
+      error: {
+        code: "invalid_value",
+        param: "max_tokens",
+        type: "invalid_request_error",
+      },
+    })
+    expect(capturedRequests).toHaveLength(0)
+  },
+)
+
 test("count_tokens forwards prepared native headers", async () => {
   const response = await requestCountTokens({
     headers: {

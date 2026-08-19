@@ -292,6 +292,331 @@ test.each([
 
 test.each([
   {
+    name: "on translated routing without a URL image",
+    endpoints: ["/responses", "/chat/completions"],
+    messages: [{ role: "user", content: "search" }],
+  },
+  {
+    name: "on translated routing with a URL image",
+    endpoints: ["/responses", "/chat/completions"],
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "image",
+            source: {
+              type: "url",
+              url: "https://attachment.test/private.png",
+            },
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: "on the native compatibility loop without a URL image",
+    endpoints: ["/v1/messages", "/responses"],
+    messages: [{ role: "user", content: "search" }],
+  },
+  {
+    name: "on the native compatibility loop with a URL image",
+    endpoints: ["/v1/messages", "/responses"],
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "image",
+            source: {
+              type: "url",
+              url: "https://attachment.test/private.png",
+            },
+          },
+        ],
+      },
+    ],
+  },
+] as const)(
+  "rejects a meaningful versioned web-search schema $name before fetch or dispatch",
+  async ({ endpoints, messages }) => {
+    installModel({ supported_endpoints: [...endpoints] })
+    const marker = "PRIVATE_WEB_SEARCH_SCHEMA"
+
+    const response = await postMessages({
+      messages: structuredClone(messages),
+      tools: [
+        {
+          type: "web_search_20250305",
+          name: "web_search",
+          input_schema: {
+            type: "object",
+            properties: {
+              query: {
+                type: "string",
+                description: marker,
+              },
+            },
+          },
+        },
+      ],
+    })
+    const body = await response.text()
+
+    expect(response.status).toBe(400)
+    expect(JSON.parse(body)).toMatchObject({
+      type: "error",
+      error: {
+        code: "endpoint_translation_unsupported",
+        param: "tool_extension",
+      },
+    })
+    expect(body).not.toContain(marker)
+    expect(attachmentFetchCount).toBe(0)
+    expect(upstreamPaths).toEqual([])
+  },
+)
+
+test("blocks an unknown typed tool with a schema using a fixed concept", async () => {
+  installModel({ supported_endpoints: ["/responses", "/chat/completions"] })
+  const privateType = "PRIVATE_FUTURE_NATIVE_20270101"
+  const privateName = "PRIVATE_FUTURE_TOOL"
+  const tool = {
+    type: privateType,
+    name: privateName,
+    input_schema: { type: "object", properties: {} },
+  }
+
+  const response = await postMessages({ tools: [tool] })
+  const body = await response.text()
+
+  expect(
+    checkMessagesToResponsesTranslation({
+      model: "route-model",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "hello" }],
+      tools: [tool],
+    } as AnthropicMessagesPayload),
+  ).toEqual({
+    supported: false,
+    blockers: ["tool_type"],
+  })
+  expect(response.status).toBe(400)
+  expect(JSON.parse(body)).toMatchObject({
+    error: {
+      code: "endpoint_translation_unsupported",
+      param: "tool_type",
+    },
+  })
+  expect(body).not.toContain(privateType)
+  expect(body).not.toContain(privateName)
+  expect(attachmentFetchCount).toBe(0)
+  expect(upstreamPaths).toEqual([])
+})
+
+test("preserves an unknown typed tool with a schema on native Messages", async () => {
+  installModel({ supported_endpoints: ["/v1/messages", "/responses"] })
+  const tool = {
+    type: "future_native_20270101",
+    name: "future_native",
+    input_schema: {
+      type: "object",
+      properties: { value: { type: "string" } },
+    },
+    future_option: { enabled: true },
+  }
+
+  const response = await postMessages({ tools: [tool] })
+
+  expect(response.status).toBe(200)
+  expect(upstreamPaths).toEqual(["/v1/messages"])
+  expect(upstreamBodies[0]).toHaveProperty("tools.0", tool)
+})
+
+test("recursively blocks lossy nested tool-result content", () => {
+  const payload = {
+    model: "route-model",
+    max_tokens: 64,
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "toolu_outer",
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "PRIVATE_NESTED_ID",
+                is_error: true,
+                content: [
+                  {
+                    type: "image",
+                    source: {
+                      type: "url",
+                      url: "https://attachment.test/private.png",
+                      private_source_key: true,
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  } as unknown as AnthropicMessagesPayload
+
+  expect(checkMessagesToResponsesTranslation(payload).blockers).toEqual([
+    "content_extension",
+    "source_extension",
+  ])
+  expect(checkMessagesToChatTranslation(payload).blockers).toEqual([
+    "content_extension",
+    "tool_result.is_error",
+    "source_extension",
+  ])
+  expect(
+    JSON.stringify(checkMessagesToResponsesTranslation(payload)),
+  ).not.toContain("PRIVATE_NESTED_ID")
+})
+
+test.each([
+  {
+    name: "primitive content",
+    content: [null],
+  },
+  {
+    name: "empty content",
+    content: [],
+  },
+  {
+    name: "nested native tool block",
+    content: [
+      {
+        type: "tool_use",
+        id: "PRIVATE_NESTED_TOOL_ID",
+        name: "PRIVATE_NESTED_TOOL",
+        input: {},
+      },
+    ],
+  },
+] as const)("blocks tool-result $name without throwing", ({ content }) => {
+  const payload = {
+    model: "route-model",
+    max_tokens: 64,
+    messages: [
+      {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "toolu_outer", content }],
+      },
+    ],
+  } as unknown as AnthropicMessagesPayload
+
+  expect(checkMessagesToResponsesTranslation(payload).blockers).toEqual([
+    "content_extension",
+  ])
+  expect(checkMessagesToChatTranslation(payload).blockers).toEqual([
+    "content_extension",
+  ])
+})
+
+test("bounds cyclic, deep, and oversized tool-result traversal", () => {
+  const cyclic = {
+    type: "tool_result",
+    tool_use_id: "toolu_cycle",
+    content: [] as Array<unknown>,
+  }
+  cyclic.content.push(cyclic)
+
+  let deep: Record<string, unknown> = {
+    type: "text",
+    text: "deep",
+  }
+  for (let index = 0; index < 40; index += 1) {
+    deep = {
+      type: "tool_result",
+      tool_use_id: `toolu_${index}`,
+      content: [deep],
+    }
+  }
+
+  for (const content of [
+    [cyclic],
+    [deep],
+    Array.from({ length: 2_049 }, () => ({ type: "text", text: "x" })),
+  ]) {
+    const payload = {
+      model: "route-model",
+      max_tokens: 64,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "toolu_outer", content },
+          ],
+        },
+      ],
+    } as unknown as AnthropicMessagesPayload
+
+    expect(checkMessagesToResponsesTranslation(payload).blockers).toContain(
+      "content_extension",
+    )
+    expect(checkMessagesToChatTranslation(payload).blockers).toContain(
+      "content_extension",
+    )
+  }
+})
+
+test("rejects empty tool-result content before Chat can reduce it to an empty string", async () => {
+  installModel({ supported_endpoints: ["/chat/completions"] })
+
+  const response = await postMessages({
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "toolu_empty", content: [] },
+        ],
+      },
+    ],
+  })
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toMatchObject({
+    error: { param: "content_extension" },
+  })
+  expect(attachmentFetchCount).toBe(0)
+  expect(upstreamPaths).toEqual([])
+})
+
+test("preserves recursively nested tool results on native Messages", async () => {
+  installModel({ supported_endpoints: ["/v1/messages", "/responses"] })
+  const nested = {
+    type: "tool_result",
+    tool_use_id: "toolu_outer",
+    content: [
+      {
+        type: "tool_result",
+        tool_use_id: "toolu_inner",
+        content: [{ type: "text", text: "inner" }],
+        is_error: true,
+        cache_control: { type: "ephemeral", ttl: "5m" },
+      },
+    ],
+  }
+
+  const response = await postMessages({
+    messages: [{ role: "user", content: [nested] }],
+  })
+
+  expect(response.status).toBe(200)
+  expect(upstreamPaths).toEqual(["/v1/messages"])
+  expect(upstreamBodies[0]).toHaveProperty("messages.0.content.0", nested)
+})
+
+test.each([
+  {
     name: "metadata",
     extra: { metadata: { user_id: "safe", private_metadata_key: true } },
     blocker: "request_extension",

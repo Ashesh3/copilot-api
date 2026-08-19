@@ -133,6 +133,7 @@ import {
 } from "./thinking-recovery"
 import {
   checkMessagesToChatTranslation,
+  checkMessagesNativeCompatibility,
   checkMessagesToResponsesTranslation,
 } from "./translation-fidelity"
 import {
@@ -388,6 +389,18 @@ async function handleCompletionInner(
   })
   if ("code" in routeDecision)
     throw createEndpointTranslationError(routeDecision)
+
+  if (routeDecision.target === "/v1/messages") {
+    const nativeCompatibility =
+      checkMessagesNativeCompatibility(anthropicPayload)
+    if (!nativeCompatibility.supported) {
+      throw createEndpointTranslationError({
+        blockers: nativeCompatibility.blockers,
+        code: "endpoint_translation_unsupported",
+        source: "messages",
+      })
+    }
+  }
 
   const attachmentsPrepared = routeDecision.target !== "/v1/messages"
   // Fidelity selection above must see the original semantic block shape.

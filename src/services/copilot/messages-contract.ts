@@ -307,6 +307,27 @@ function cloneAnthropicMessagesBody(payload: unknown): Record<string, unknown> {
   return clone
 }
 
+function validateRawMaxTokens(
+  payload: unknown,
+  requireMaxTokens: boolean,
+): void {
+  if (typeof payload !== "object" || payload === null || isProxy(payload))
+    return
+  const descriptors = getPlainJsonDescriptors(payload)
+  if (descriptors === INVALID_MESSAGES_JSON) return
+  if (!("max_tokens" in descriptors)) return
+  const data = readDataDescriptor(descriptors.max_tokens)
+  if (data === INVALID_MESSAGES_JSON) return
+  validateMaxTokens(data.value, requireMaxTokens)
+}
+
+function validateMaxTokens(value: unknown, required: boolean): void {
+  if (value === undefined && !required) return
+  if (!Number.isInteger(value) || Number(value) <= 0) {
+    throw createMessagesValidationError("max_tokens")
+  }
+}
+
 function validateAnthropicMessagesPayload(
   payload: Record<string, unknown>,
   requireMaxTokens: boolean,
@@ -317,13 +338,7 @@ function validateAnthropicMessagesPayload(
   if (!Array.isArray(payload.messages) || payload.messages.length === 0) {
     throw createMessagesValidationError("messages")
   }
-  if (
-    requireMaxTokens
-    && (!Number.isInteger(payload.max_tokens)
-      || Number(payload.max_tokens) <= 0)
-  ) {
-    throw createMessagesValidationError("max_tokens")
-  }
+  validateMaxTokens(payload.max_tokens, requireMaxTokens)
   validateOptionalRecord(payload, "metadata", validateMetadata)
   validateOptionalRecord(payload, "tool_choice", validateToolChoice)
   validateOptionalRecord(payload, "cache_control", validateCacheControl)
@@ -809,6 +824,7 @@ export function prepareAnthropicMessagesRequest(options: {
   payload: AnthropicMessagesPayload
   requireMaxTokens: boolean
 }): PreparedAnthropicMessagesRequest {
+  validateRawMaxTokens(options.payload, options.requireMaxTokens)
   const body = cloneAnthropicMessagesBody(options.payload)
   validateAnthropicMessagesPayload(body, options.requireMaxTokens)
   for (const field of GATEWAY_ONLY_MESSAGES_FIELDS) {

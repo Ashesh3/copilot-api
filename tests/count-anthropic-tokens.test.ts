@@ -3,6 +3,7 @@ import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
 import type { RoutingAffinity } from "../src/lib/routing-affinity"
 import type { AnthropicMessagesPayload } from "../src/routes/messages/anthropic-types"
 
+import { LocalHTTPError } from "../src/lib/error"
 import {
   getRoutingAffinity,
   runWithRoutingAffinity,
@@ -186,6 +187,32 @@ test("does not require max_tokens", async () => {
     messages: [{ role: "user", content: "hello" }],
   })
 })
+
+test.each([
+  ["string", "32"],
+  ["null", null],
+  ["zero", 0],
+  ["negative", -1],
+  ["fractional", 1.5],
+  ["NaN", Number.NaN],
+] as const)(
+  "rejects invalid present internal max_tokens: %s",
+  async (_name, maxTokens) => {
+    try {
+      await countAnthropicTokens({
+        model: "claude-current",
+        messages: [{ role: "user", content: "hello" }],
+        max_tokens: maxTokens,
+      } as unknown as AnthropicMessagesPayload)
+      throw new Error("Expected count-token preparation to fail")
+    } catch (error) {
+      expect(error).toBeInstanceOf(LocalHTTPError)
+      expect(error).toHaveProperty("clientBody.error.code", "invalid_value")
+      expect(error).toHaveProperty("clientBody.error.param", "max_tokens")
+    }
+    expect(fetchMock).not.toHaveBeenCalled()
+  },
+)
 
 test("returns only the validated token count field", async () => {
   queuedResponse = Response.json({

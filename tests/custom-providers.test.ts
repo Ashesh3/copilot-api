@@ -367,6 +367,88 @@ test.each([
   },
 )
 
+test("custom Messages rejects a versioned web-search schema before URL-image fetch", async () => {
+  const marker = "PRIVATE_CUSTOM_WEB_SEARCH_SCHEMA"
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "custom-chat-model",
+      max_tokens: 16,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "image",
+              source: {
+                type: "url",
+                url: "https://private.example/image.png",
+              },
+            },
+          ],
+        },
+      ],
+      tools: [
+        {
+          type: "web_search_20250305",
+          name: "web_search",
+          input_schema: {
+            type: "object",
+            properties: {
+              query: { type: "string", description: marker },
+            },
+          },
+        },
+      ],
+    }),
+  })
+  const body = await response.text()
+
+  expect(response.status).toBe(400)
+  expect(JSON.parse(body)).toMatchObject({
+    error: {
+      code: "endpoint_translation_unsupported",
+      param: "tool_extension",
+    },
+  })
+  expect(body).not.toContain(marker)
+  expect(requests).toHaveLength(0)
+})
+
+test("custom Messages rejects an unknown typed tool with a schema", async () => {
+  const privateType = "PRIVATE_CUSTOM_NATIVE_TYPE"
+  const privateName = "PRIVATE_CUSTOM_NATIVE_NAME"
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "custom-chat-model",
+      max_tokens: 16,
+      messages: [{ role: "user", content: "hello" }],
+      tools: [
+        {
+          type: privateType,
+          name: privateName,
+          input_schema: { type: "object", properties: {} },
+        },
+      ],
+    }),
+  })
+  const body = await response.text()
+
+  expect(response.status).toBe(400)
+  expect(JSON.parse(body)).toMatchObject({
+    error: {
+      code: "endpoint_translation_unsupported",
+      param: "tool_type",
+    },
+  })
+  expect(body).not.toContain(privateType)
+  expect(body).not.toContain(privateName)
+  expect(requests).toHaveLength(0)
+})
+
 test("custom Messages rejects document flattening before attachment normalization", async () => {
   const document = {
     type: "document",

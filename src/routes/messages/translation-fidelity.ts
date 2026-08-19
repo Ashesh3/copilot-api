@@ -1,13 +1,8 @@
 import type { TranslationCheck } from "~/lib/endpoint-routing"
 
-import { isHttpUrl } from "~/lib/attachments"
+import type { AnthropicMessagesPayload, AnthropicTool } from "./anthropic-types"
 
-import type {
-  AnthropicDocumentBlock,
-  AnthropicMessagesPayload,
-  AnthropicThinkingBlock,
-  AnthropicTool,
-} from "./anthropic-types"
+import { scanMessagesContent } from "./content-fidelity"
 
 type TranslationTarget = "chat" | "responses"
 type ExtensionConcept =
@@ -15,8 +10,8 @@ type ExtensionConcept =
   | "format_extension"
   | "request_extension"
   | "source_extension"
+  | "tool_type"
   | "tool_extension"
-
 const ROOT_FIELDS = new Set([
   "cache_control",
   "context_management",
@@ -39,30 +34,7 @@ const ROOT_FIELDS = new Set([
   "top_k",
   "top_p",
 ])
-const MESSAGE_FIELDS = new Set(["content", "role"])
 const CACHE_CONTROL_FIELDS = new Set(["ttl", "type"])
-const CONTENT_FIELDS: Partial<Record<string, ReadonlySet<string>>> = {
-  document: new Set([
-    "cache_control",
-    "citations",
-    "context",
-    "source",
-    "title",
-    "type",
-  ]),
-  image: new Set(["cache_control", "source", "type"]),
-  text: new Set(["cache_control", "text", "type"]),
-  thinking: new Set(["cache_control", "signature", "thinking", "type"]),
-  tool_reference: new Set(["cache_control", "tool_name", "type"]),
-  tool_result: new Set([
-    "cache_control",
-    "content",
-    "is_error",
-    "tool_use_id",
-    "type",
-  ]),
-  tool_use: new Set(["cache_control", "id", "input", "name", "type"]),
-}
 const FUNCTION_TOOL_FIELDS = new Set([
   "description",
   "input_schema",
@@ -74,6 +46,7 @@ const WEB_SEARCH_TOOL_FIELDS = new Set([
   "blocked_domains",
   "description",
   "input_schema",
+  "max_uses",
   "name",
   "type",
 ])
@@ -85,17 +58,6 @@ const TOOL_CHOICE_FIELDS = new Set([
 const THINKING_FIELDS = new Set(["budget_tokens", "type"])
 const OUTPUT_CONFIG_FIELDS = new Set(["effort", "format", "task_budget"])
 const METADATA_FIELDS = new Set(["user_id"])
-const CITATION_FIELDS = new Set(["enabled"])
-const IMAGE_SOURCE_FIELDS: Partial<Record<string, ReadonlySet<string>>> = {
-  base64: new Set(["data", "media_type", "type"]),
-  url: new Set(["type", "url"]),
-}
-const DOCUMENT_SOURCE_FIELDS: Partial<Record<string, ReadonlySet<string>>> = {
-  base64: new Set(["data", "media_type", "type"]),
-  content: new Set(["content", "type"]),
-  text: new Set(["data", "media_type", "type"]),
-  url: new Set(["type", "url"]),
-}
 const FORMAT_FIELDS: Partial<Record<string, ReadonlySet<string>>> = {
   json_object: new Set(["type"]),
   json_schema: new Set(["description", "name", "schema", "strict", "type"]),
@@ -317,307 +279,6 @@ function scanOutputFormat(value: unknown, blockers: Array<string>): void {
   }
 }
 
-function scanMessagesContent(
-  payload: AnthropicMessagesPayload,
-  blockers: Array<string>,
-  target: TranslationTarget,
-): void {
-  if (Array.isArray(payload.system)) {
-    for (const block of payload.system) {
-      scanContentBlock(block, blockers, target)
-    }
-  }
-  for (const message of payload.messages) {
-    scanUnknownKeys(message, MESSAGE_FIELDS, {
-      blockers,
-      concept: "content_extension",
-    })
-    if (!Array.isArray(message.content)) continue
-    for (const block of message.content) {
-      scanContentBlock(block, blockers, target)
-      if (block.type !== "tool_result" || !Array.isArray(block.content)) {
-        continue
-      }
-      for (const nested of block.content) {
-        scanContentBlock(nested, blockers, target)
-      }
-    }
-  }
-}
-
-function scanContentBlock(
-  block: Record<string, unknown>,
-  blockers: Array<string>,
-  target: TranslationTarget,
-): void {
-  const type = typeof block.type === "string" ? block.type : "unknown"
-  const allowed = CONTENT_FIELDS[type]
-  if (allowed === undefined) {
-    addBlocker(blockers, "content_extension")
-    return
-  }
-  scanUnknownKeys(block, allowed, {
-    blockers,
-    concept: "content_extension",
-  })
-  scanCacheControl(block.cache_control, blockers)
-  if (type === "image") scanSource(block.source, blockers, "image")
-  if (type === "document") {
-    scanDocument(block, blockers, target)
-  }
-  if (
-    type === "tool_result"
-    && target === "chat"
-    && block.is_error !== undefined
-  ) {
-    addBlocker(blockers, "tool_result.is_error")
-  }
-  if (type === "tool_reference") addBlocker(blockers, "tool_reference")
-  if (type !== "thinking") return
-  scanThinkingBlock(
-    block as unknown as AnthropicThinkingBlock,
-    blockers,
-    target,
-  )
-}
-
-function scanDocument(
-  block: Record<string, unknown>,
-  blockers: Array<string>,
-  target: TranslationTarget,
-): void {
-  scanSource(block.source, blockers, "document")
-  scanTypedObject(block.citations, CITATION_FIELDS, {
-    blockers,
-    concept: "content_extension",
-  })
-  if (target === "chat") {
-    addBlocker(blockers, "document")
-    return
-  }
-  if (!isResponsesDocumentSource(block)) {
-    addBlocker(blockers, "document.source")
-  }
-  if (block.context !== undefined && block.context !== null) {
-    addBlocker(blockers, "document.context")
-  }
-  if (block.citations !== undefined && block.citations !== null) {
-    addBlocker(blockers, "document.citations")
-  }
-}
-
-function scanSource(
-  value: unknown,
-  blockers: Array<string>,
-  kind: "document" | "image",
-): void {
-  if (!isRecord(value)) return
-  const type = typeof value.type === "string" ? value.type : "unknown"
-  const allowed =
-    kind === "image" ? IMAGE_SOURCE_FIELDS[type] : DOCUMENT_SOURCE_FIELDS[type]
-  if (!allowed) {
-    addBlocker(blockers, "source_extension")
-    return
-  }
-  scanUnknownKeys(value, allowed, {
-    blockers,
-    concept: "source_extension",
-  })
-  if (kind !== "document" || type !== "content") return
-  if (!Array.isArray(value.content)) return
-  for (const nested of value.content) {
-    if (isRecord(nested)) scanContentBlock(nested, blockers, "responses")
-  }
-}
-
-function isResponsesDocumentSource(block: Record<string, unknown>): boolean {
-  const source = (block as unknown as AnthropicDocumentBlock).source
-  if (!isRecord(source)) return false
-  if (source.type === "url") {
-    return (
-      hasExactlyKeys(source, ["type", "url"])
-      && typeof source.url === "string"
-      && isAbsoluteHttpUrl(source.url)
-    )
-  }
-  return (
-    source.type === "base64"
-    && hasExactlyKeys(source, ["data", "media_type", "type"])
-    && typeof source.media_type === "string"
-    && source.media_type.toLowerCase().split(";")[0].trim()
-      === "application/pdf"
-    && typeof source.data === "string"
-  )
-}
-
-function hasExactlyKeys(
-  value: Record<string, unknown>,
-  expected: ReadonlyArray<string>,
-): boolean {
-  const keys = Object.keys(value)
-  return (
-    keys.length === expected.length && expected.every((key) => key in value)
-  )
-}
-
-function isAbsoluteHttpUrl(value: string): boolean {
-  if (
-    !isHttpUrl(value)
-    || hasUnsafeRawUrlCharacter(value)
-    || hasInvalidPercentEncoding(value)
-  ) {
-    return false
-  }
-  try {
-    const url = new URL(value)
-    const authority = rawUrlAuthority(value)
-    return (
-      (url.protocol === "http:" || url.protocol === "https:")
-      && url.hostname.length > 0
-      && url.username.length === 0
-      && url.password.length === 0
-      && isValidRawHttpAuthority(authority, url.hostname, url.protocol)
-      && matchesCanonicalHttpUrl(value, url)
-    )
-  } catch {
-    return false
-  }
-}
-
-function hasUnsafeRawUrlCharacter(value: string): boolean {
-  for (const character of value) {
-    const code = character.codePointAt(0)
-    if (
-      character === "\\"
-      || code === undefined
-      || code <= 0x1f
-      || (code >= 0x7f && code <= 0x9f)
-      || character.trim().length === 0
-    ) {
-      return true
-    }
-  }
-  return false
-}
-
-function hasInvalidPercentEncoding(value: string): boolean {
-  for (
-    let index = value.indexOf("%");
-    index >= 0;
-    index = value.indexOf("%", index + 1)
-  ) {
-    if (!/^[\da-f]{2}$/i.test(value.slice(index + 1, index + 3))) return true
-  }
-  return false
-}
-
-function rawUrlAuthority(value: string): string {
-  const authorityStart = value.startsWith("https://") ? 8 : 7
-  const authorityEnd = findFirstDelimiter(value, authorityStart)
-  return value.slice(authorityStart, authorityEnd)
-}
-
-function isValidRawHttpAuthority(
-  authority: string,
-  parsedHostname: string,
-  protocol: string,
-): boolean {
-  if (authority.length === 0 || authority.includes("@")) return false
-  if (authority.startsWith("[")) {
-    const closingBracket = authority.indexOf("]")
-    if (closingBracket <= 1) return false
-    return authority === new URL(`${protocol}//${authority}`).host
-  }
-
-  const firstColon = authority.indexOf(":")
-  const lastColon = authority.lastIndexOf(":")
-  if (firstColon !== lastColon) return false
-  const hostname = firstColon < 0 ? authority : authority.slice(0, firstColon)
-  const portSuffix = firstColon < 0 ? "" : authority.slice(firstColon)
-  return (
-    isValidRawHostname(hostname)
-    && isValidRawPortSuffix(portSuffix)
-    && (!isCanonicalIpv4Address(parsedHostname) || hostname === parsedHostname)
-  )
-}
-
-function isValidRawHostname(hostname: string): boolean {
-  const withoutTrailingDot =
-    hostname.endsWith(".") ? hostname.slice(0, -1) : hostname
-  if (/^[\d.]+$/.test(withoutTrailingDot)) {
-    const octets = withoutTrailingDot.split(".")
-    return (
-      octets.length === 4
-      && octets.every(
-        (octet) => /^(?:0|[1-9]\d{0,2})$/.test(octet) && Number(octet) <= 255,
-      )
-    )
-  }
-  return (
-    withoutTrailingDot.length > 0
-    && withoutTrailingDot.length <= 253
-    && withoutTrailingDot
-      .split(".")
-      .every((label) => /^[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?$/i.test(label))
-  )
-}
-
-function isValidRawPortSuffix(value: string): boolean {
-  if (value.length === 0) return true
-  const port = value.slice(1)
-  return /^\d{1,5}$/.test(port) && Number(port) <= 65_535
-}
-
-function isCanonicalIpv4Address(value: string): boolean {
-  return value.split(".").length === 4 && isValidRawHostname(value)
-}
-
-function matchesCanonicalHttpUrl(value: string, url: URL): boolean {
-  const authorityEnd = findFirstDelimiter(value, url.protocol.length + 2)
-  const rawPathAndSuffix = value.slice(authorityEnd)
-  const canonicalAuthorityEnd = findFirstDelimiter(
-    url.href,
-    url.protocol.length + 2,
-  )
-  const canonicalPathAndSuffix = url.href.slice(canonicalAuthorityEnd)
-  if (rawPathAndSuffix.length === 0) return canonicalPathAndSuffix === "/"
-  if (rawPathAndSuffix.startsWith("?") || rawPathAndSuffix.startsWith("#")) {
-    return canonicalPathAndSuffix === `/${rawPathAndSuffix}`
-  }
-  return rawPathAndSuffix === canonicalPathAndSuffix
-}
-
-function findFirstDelimiter(value: string, start: number): number {
-  const indexes = ["/", "?", "#"]
-    .map((delimiter) => value.indexOf(delimiter, start))
-    .filter((index) => index >= 0)
-  return indexes.length === 0 ? value.length : Math.min(...indexes)
-}
-
-function scanThinkingBlock(
-  block: AnthropicThinkingBlock,
-  blockers: Array<string>,
-  target: TranslationTarget,
-): void {
-  const signature = block.signature
-  if (!signature) {
-    if (target === "responses") addBlocker(blockers, "thinking_signature")
-    return
-  }
-  const hasResponsesItemId = isResponsesThinkingSignature(signature)
-  if (
-    (target === "responses" && !hasResponsesItemId)
-    || (target === "chat" && hasResponsesItemId)
-  ) {
-    addBlocker(blockers, "thinking_signature")
-  }
-}
-
-function isResponsesThinkingSignature(signature: string): boolean {
-  const parts = signature.split("@")
-  return parts.length === 2 && parts[0].length > 0 && parts[1].length > 0
-}
-
 function scanTools(
   tools: AnthropicMessagesPayload["tools"],
   blockers: Array<string>,
@@ -633,24 +294,40 @@ function scanTool(tool: AnthropicTool, blockers: Array<string>): void {
       blockers,
       concept: "tool_extension",
     })
+    scanProvidedToolSchema(tool.input_schema, blockers, true)
     return
   }
   if (type?.startsWith("web_fetch")) {
     addBlocker(blockers, "tool_extension")
-    return
-  }
-  if (tool.input_schema === undefined && type !== undefined) {
+  } else if (type === "custom") {
     addBlocker(blockers, "tool_extension")
-    return
+  } else if (type !== undefined && type !== "function") {
+    addBlocker(blockers, "tool_type")
   }
   scanUnknownKeys(tool, FUNCTION_TOOL_FIELDS, {
     blockers,
     concept: "tool_extension",
   })
-  scanJsonSchema(tool.input_schema, {
+  scanProvidedToolSchema(tool.input_schema, blockers, false)
+}
+
+function scanProvidedToolSchema(
+  value: unknown,
+  blockers: Array<string>,
+  regenerated: boolean,
+): void {
+  if (value === undefined) return
+  if (!isRecord(value)) {
+    addBlocker(blockers, "tool_extension")
+    return
+  }
+  scanJsonSchema(value, {
     blockers,
     concept: "tool_extension",
   })
+  if (regenerated && Object.keys(value).length > 0) {
+    addBlocker(blockers, "tool_extension")
+  }
 }
 
 function scanJsonSchema(
@@ -730,4 +407,20 @@ export function checkMessagesToChatTranslation(
   payload: AnthropicMessagesPayload,
 ): TranslationCheck {
   return checkMessagesTranslation(payload, "chat")
+}
+
+export function checkMessagesNativeCompatibility(
+  payload: AnthropicMessagesPayload,
+): TranslationCheck {
+  const blockers: Array<string> = []
+  for (const tool of payload.tools ?? []) {
+    const type = typeof tool.type === "string" ? tool.type : undefined
+    if (!type?.startsWith("web_search")) continue
+    scanUnknownKeys(tool, WEB_SEARCH_TOOL_FIELDS, {
+      blockers,
+      concept: "tool_extension",
+    })
+    scanProvidedToolSchema(tool.input_schema, blockers, true)
+  }
+  return createCheck(blockers)
 }

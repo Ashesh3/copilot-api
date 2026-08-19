@@ -245,6 +245,35 @@ test("does not require max_tokens for shared non-inference preparation", () => {
   ).not.toHaveProperty("max_tokens")
 })
 
+test.each([
+  ["string", "32"],
+  ["null", null],
+  ["zero", 0],
+  ["negative", -1],
+  ["fractional", 1.5],
+  ["NaN", Number.NaN],
+  ["infinity", Number.POSITIVE_INFINITY],
+] as const)(
+  "rejects present invalid optional max_tokens: %s",
+  (_name, maxTokens) => {
+    try {
+      prepareAnthropicMessagesRequest({
+        payload: {
+          model: "claude",
+          messages: [{ role: "user", content: "x" }],
+          max_tokens: maxTokens,
+        } as unknown as AnthropicMessagesPayload,
+        requireMaxTokens: false,
+      })
+      throw new Error("Expected optional max_tokens validation to fail")
+    } catch (error) {
+      expect(error).toBeInstanceOf(LocalHTTPError)
+      expect(error).toHaveProperty("clientBody.error.code", "invalid_value")
+      expect(error).toHaveProperty("clientBody.error.param", "max_tokens")
+    }
+  },
+)
+
 test("rejects a throwing accessor without invoking or exposing it", () => {
   const marker = "PRIVATE_THROWING_GETTER"
   let reads = 0
