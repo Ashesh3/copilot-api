@@ -656,9 +656,11 @@ function safeCompletedEvent(
   if (!parts) return undefined
   const createdAt = nonNegativeInteger(readRecordValue(response, "created_at"))
   const model = nonEmptyString(readRecordValue(response, "model"))
+  const copilotUsage = readRecordValue(parsed, "copilot_usage")
   return {
     type: "response.completed",
     sequence_number: parts.sequenceNumber,
+    ...(isRecord(copilotUsage) ? { copilot_usage: copilotUsage } : {}),
     response: {
       id: parts.id,
       object: SAFE_OBJECT,
@@ -716,9 +718,11 @@ function safeTerminalEvent(
     return { type: "error", sequence_number: sequence, ...safeError(parsed) }
   }
   const response = readRecordValue(parsed, "response")
+  const copilotUsage = readRecordValue(parsed, "copilot_usage")
   return {
     type: eventType,
     sequence_number: sequence,
+    ...(isRecord(copilotUsage) ? { copilot_usage: copilotUsage } : {}),
     response: safeTerminalResponse(response, eventType !== "response.failed"),
   }
 }

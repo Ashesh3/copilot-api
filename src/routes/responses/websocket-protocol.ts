@@ -137,14 +137,20 @@ export function addResponsesWebSocketMetadata(
     if (SAFE_EVENT_HEADER_NAMES.has(name)) eventHeaders[name] = value
   }
 
+  const hadReservedFields =
+    "headers" in parsed || "copilot_quota_snapshots" in parsed
   if (
-    Object.keys(eventHeaders).length === 0
+    !hadReservedFields
+    && Object.keys(eventHeaders).length === 0
     && Object.keys(quotaSnapshots).length === 0
   ) {
     return frame
   }
+  const safeFrame = { ...parsed }
+  delete safeFrame.headers
+  delete safeFrame.copilot_quota_snapshots
   return JSON.stringify({
-    ...parsed,
+    ...safeFrame,
     ...(Object.keys(eventHeaders).length > 0 ? { headers: eventHeaders } : {}),
     ...(Object.keys(quotaSnapshots).length > 0 ?
       { copilot_quota_snapshots: quotaSnapshots }

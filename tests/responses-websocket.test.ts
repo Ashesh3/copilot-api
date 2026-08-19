@@ -76,6 +76,22 @@ let capturedAffinity: RoutingAffinity | undefined
 const capturedAuthorization: Array<string | null> = []
 const capturedUpstreamHeaders: Array<Headers> = []
 
+interface WebSocketMetadataCase {
+  expectedHeaders: Record<string, string> | undefined
+  expectedQuota: Record<string, string> | undefined
+  headers: Record<string, string>
+  name: string
+}
+
+interface WebSocketResponseMetadataCase
+  extends Omit<WebSocketMetadataCase, "headers"> {
+  responseHeaders: Record<string, string>
+}
+
+function typedCases<T>(cases: Array<T>): Array<T> {
+  return cases
+}
+
 function authenticatedResponsesRequest(): Request {
   return new Request("http://localhost/responses", {
     headers: { authorization: "Bearer cli-secret" },
@@ -1365,53 +1381,105 @@ describe("responses websocket message handling", () => {
     expect(secondTurn.routingState.lastUsedAccountId).toBe(202)
   })
 
-  test("adds only safe successful metadata to created and terminal frames", async () => {
-    state.models = responsesCapableModels
-    queuedResponses.push(
-      createResponsesSseResponse("resp_metadata", [], {
-        "retry-after": "15",
-        "x-copilot-api-exp-assignment-context": "flight:1;",
-        "x-copilot-service-request-id": "service-1",
-        "x-quota-snapshot-premium_interactions": "ent=100&rem=50",
-        "x-usage-ratelimit-remaining": "private-rate-state",
-      }),
-    )
-    const ws = createTestWebSocket()
-
-    await responsesWebSocket.message(
-      ws,
-      JSON.stringify({
-        input: "metadata",
-        model: "gpt-5.4",
-        type: "response.create",
-      }),
-    )
-
-    const frames = ws.sent.map(
-      (frame) =>
-        JSON.parse(frame) as {
-          copilot_quota_snapshots?: Record<string, string>
-          headers?: Record<string, string>
-          type?: string
+  test.each(
+    typedCases<WebSocketResponseMetadataCase>([
+      {
+        expectedHeaders: undefined,
+        expectedQuota: undefined,
+        name: "neither metadata category",
+        responseHeaders: {},
+      },
+      {
+        expectedHeaders: {
+          "x-copilot-service-request-id": "service-nonquota",
         },
-    )
-    expect(frames.map((frame) => frame.type)).toEqual([
-      "response.created",
-      "response.completed",
-    ])
-    for (const frame of frames) {
-      expect(frame.headers).toEqual({
-        "x-copilot-api-exp-assignment-context": "flight:1;",
-        "x-copilot-service-request-id": "service-1",
-      })
-      expect(frame.copilot_quota_snapshots).toEqual({
-        premium_interactions: "ent=100&rem=50",
-      })
-      expect(JSON.stringify(frame)).not.toContain("retry-after")
-      expect(JSON.stringify(frame)).not.toContain("usage-ratelimit")
-      expect(JSON.stringify(frame)).not.toContain("private-rate-state")
-    }
-  })
+        expectedQuota: undefined,
+        name: "non-quota metadata only",
+        responseHeaders: {
+          "x-copilot-service-request-id": "service-nonquota",
+        },
+      },
+      {
+        expectedHeaders: undefined,
+        expectedQuota: { premium_interactions: "ent=100&rem=50" },
+        name: "quota metadata only",
+        responseHeaders: {
+          "x-quota-snapshot-premium_interactions": "ent=100&rem=50",
+        },
+      },
+      {
+        expectedHeaders: {
+          "x-copilot-api-exp-assignment-context": "flight:1;",
+          "x-copilot-service-request-id": "service-both",
+        },
+        expectedQuota: { premium_interactions: "ent=100&rem=50" },
+        name: "both metadata categories",
+        responseHeaders: {
+          "retry-after": "15",
+          "x-copilot-api-exp-assignment-context": "flight:1;",
+          "x-copilot-service-request-id": "service-both",
+          "x-quota-snapshot-premium_interactions": "ent=100&rem=50",
+          "x-usage-ratelimit-remaining": "private-rate-state",
+        },
+      },
+    ]),
+  )(
+    "reconstructs $name from only the safe response store",
+    async ({ expectedHeaders, expectedQuota, responseHeaders }) => {
+      state.copilotToken = "copilot-token"
+      state.models = responsesCapableModels
+      queuedResponses.push(
+        createResponsesSseResponse("resp_metadata", [], {
+          frameFields: {
+            copilot_quota_snapshots: {
+              private_quota: "frame-private-quota",
+            },
+            headers: {
+              authorization: "Bearer frame-private-auth",
+              cookie: "frame-private-cookie",
+              private: "frame-private-header",
+            },
+          },
+          headers: responseHeaders,
+        }),
+      )
+      const ws = createTestWebSocket()
+
+      await responsesWebSocket.message(
+        ws,
+        JSON.stringify({
+          input: "metadata",
+          model: "gpt-5.4",
+          type: "response.create",
+        }),
+      )
+
+      const frames = ws.sent.map(
+        (frame) =>
+          JSON.parse(frame) as {
+            copilot_quota_snapshots?: Record<string, string>
+            headers?: Record<string, string>
+            type?: string
+          },
+      )
+      expect(frames.map((frame) => frame.type)).toEqual([
+        "response.created",
+        "response.completed",
+      ])
+      for (const frame of frames) {
+        expect(frame.headers).toEqual(expectedHeaders)
+        expect(frame.copilot_quota_snapshots).toEqual(expectedQuota)
+        const serialized = JSON.stringify(frame)
+        expect(serialized).not.toContain("frame-private-auth")
+        expect(serialized).not.toContain("frame-private-cookie")
+        expect(serialized).not.toContain("frame-private-header")
+        expect(serialized).not.toContain("frame-private-quota")
+        expect(serialized).not.toContain("retry-after")
+        expect(serialized).not.toContain("usage-ratelimit")
+        expect(serialized).not.toContain("private-rate-state")
+      }
+    },
+  )
 
   test("keeps metadata isolated across concurrent WebSocket turns", async () => {
     state.models = responsesCapableModels
@@ -1446,12 +1514,12 @@ describe("responses websocket message handling", () => {
 
     resolvers[1]?.(
       createResponsesSseResponse("resp_metadata_second", [], {
-        "x-copilot-service-request-id": "service-second",
+        headers: { "x-copilot-service-request-id": "service-second" },
       }),
     )
     resolvers[0]?.(
       createResponsesSseResponse("resp_metadata_first", [], {
-        "x-copilot-service-request-id": "service-first",
+        headers: { "x-copilot-service-request-id": "service-first" },
       }),
     )
     await Promise.all([first, second])
@@ -1477,36 +1545,77 @@ describe("responses websocket message handling", () => {
     })
   })
 
-  test("leaves invalid and noneligible frames unchanged while preserving usage", () => {
-    const invalid = "not-json"
-    const delta = JSON.stringify({
-      delta: "hello",
-      type: "response.output_text.delta",
-    })
-    const completed = JSON.stringify({
-      copilot_usage: { total_nano_aiu: 123 },
-      response: { id: "resp_usage" },
-      type: "response.completed",
-    })
-    const metadata = {
-      "retry-after": "15",
-      "x-copilot-service-request-id": "service-usage",
-      "x-quota-snapshot-chat": "ent=10&rem=9",
-      "x-usage-ratelimit-remaining": "private",
-    }
+  test.each(
+    typedCases<WebSocketMetadataCase>([
+      {
+        expectedHeaders: undefined,
+        expectedQuota: undefined,
+        headers: {},
+        name: "neither metadata category",
+      },
+      {
+        expectedHeaders: {
+          "x-copilot-service-request-id": "service-nonquota",
+        },
+        expectedQuota: undefined,
+        headers: { "x-copilot-service-request-id": "service-nonquota" },
+        name: "non-quota metadata only",
+      },
+      {
+        expectedHeaders: undefined,
+        expectedQuota: { chat: "ent=10&rem=9" },
+        headers: { "x-quota-snapshot-chat": "ent=10&rem=9" },
+        name: "quota metadata only",
+      },
+      {
+        expectedHeaders: {
+          "x-copilot-service-request-id": "service-both",
+        },
+        expectedQuota: { chat: "ent=10&rem=9" },
+        headers: {
+          "retry-after": "15",
+          "x-copilot-service-request-id": "service-both",
+          "x-quota-snapshot-chat": "ent=10&rem=9",
+          "x-usage-ratelimit-remaining": "private-rate-state",
+        },
+        name: "both metadata categories",
+      },
+    ]),
+  )(
+    "replaces reserved frame fields for $name while preserving usage",
+    ({ expectedHeaders, expectedQuota, headers, name: _name }) => {
+      const invalid = "not-json"
+      const delta = JSON.stringify({
+        delta: "hello",
+        type: "response.output_text.delta",
+      })
+      const completed = JSON.stringify({
+        copilot_usage: { total_nano_aiu: 123 },
+        copilot_quota_snapshots: { private: "frame-private-quota" },
+        headers: {
+          authorization: "Bearer frame-private-auth",
+          cookie: "frame-private-cookie",
+          private: "frame-private-header",
+        },
+        response: { id: "resp_usage" },
+        type: "response.completed",
+      })
 
-    expect(addResponsesWebSocketMetadata(invalid, metadata)).toBe(invalid)
-    expect(addResponsesWebSocketMetadata(delta, metadata)).toBe(delta)
-    expect(
-      JSON.parse(addResponsesWebSocketMetadata(completed, metadata)),
-    ).toEqual({
-      copilot_usage: { total_nano_aiu: 123 },
-      response: { id: "resp_usage" },
-      type: "response.completed",
-      headers: { "x-copilot-service-request-id": "service-usage" },
-      copilot_quota_snapshots: { chat: "ent=10&rem=9" },
-    })
-  })
+      expect(addResponsesWebSocketMetadata(invalid, headers)).toBe(invalid)
+      expect(addResponsesWebSocketMetadata(delta, headers)).toBe(delta)
+      expect(
+        JSON.parse(addResponsesWebSocketMetadata(completed, headers)),
+      ).toEqual({
+        copilot_usage: { total_nano_aiu: 123 },
+        response: { id: "resp_usage" },
+        type: "response.completed",
+        ...(expectedHeaders === undefined ? {} : { headers: expectedHeaders }),
+        ...(expectedQuota === undefined ?
+          {}
+        : { copilot_quota_snapshots: expectedQuota }),
+      })
+    },
+  )
 
   test("streams the Chat Completions fallback with a per-turn abort signal", async () => {
     state.accountType = "individual"
@@ -2170,6 +2279,48 @@ describe("responses websocket message handling", () => {
         errorSpy.mockRestore()
         infoSpy.mockRestore()
       }
+    },
+  )
+
+  test.each(["response.completed", "response.incomplete", "response.failed"])(
+    "preserves native %s copilot_usage through sanitization, ID sync, and metadata",
+    async (eventType) => {
+      state.copilotToken = "copilot-token"
+      state.models = responsesCapableModels
+      const copilotUsage = {
+        completion_tokens: 9,
+        total_nano_aiu: 123_456,
+      }
+      queuedResponses.push(
+        createResponsesUsageTerminalSseResponse(eventType, copilotUsage, {
+          "x-copilot-service-request-id": `service-${eventType}`,
+        }),
+      )
+      const ws = createTestWebSocket()
+
+      await responsesWebSocket.message(
+        ws,
+        JSON.stringify({
+          input: "terminal usage",
+          model: "gpt-5.4",
+          tools: [],
+          type: "response.create",
+        }),
+      )
+
+      const terminal = JSON.parse(ws.sent.at(-1) ?? "{}") as {
+        copilot_usage?: unknown
+        headers?: Record<string, string>
+        private?: unknown
+        type?: string
+      }
+      expect(terminal.type).toBe(eventType)
+      expect(terminal.copilot_usage).toEqual(copilotUsage)
+      expect(terminal.headers).toEqual({
+        "x-copilot-service-request-id": `service-${eventType}`,
+      })
+      expect(terminal).not.toHaveProperty("private")
+      expect(JSON.stringify(terminal)).not.toContain("terminal-private-field")
     },
   )
 
@@ -3420,9 +3571,14 @@ function createAnthropicMessageResponse(
 function createResponsesSseResponse(
   responseId: string,
   output: ReadonlyArray<ResponseInputItem> = [],
-  headers: Record<string, string> = {},
+  options: {
+    frameFields?: Record<string, unknown>
+    headers?: Record<string, string>
+  } = {},
 ): Response {
+  const { frameFields = {}, headers = {} } = options
   const created = JSON.stringify({
+    ...frameFields,
     type: "response.created",
     sequence_number: 0,
     response: {
@@ -3446,6 +3602,7 @@ function createResponsesSseResponse(
     },
   })
   const completed = JSON.stringify({
+    ...frameFields,
     type: "response.completed",
     sequence_number: 1,
     response: {
@@ -3477,6 +3634,54 @@ function createResponsesSseResponse(
       headers: { "content-type": "text/event-stream", ...headers },
     },
   )
+}
+
+function createResponsesUsageTerminalSseResponse(
+  eventType: string,
+  copilotUsage: Record<string, unknown>,
+  headers: Record<string, string>,
+): Response {
+  const response =
+    eventType === "response.completed" ?
+      {
+        error: null,
+        id: "resp_usage_terminal",
+        incomplete_details: null,
+        object: "response",
+        output: [],
+        output_text: "",
+        status: "completed",
+        usage: null,
+      }
+    : {
+        error: {
+          code: "server_error",
+          message: "terminal-private-field",
+          param: "input",
+          status: 502,
+        },
+        id: "resp_usage_terminal",
+        incomplete_details:
+          eventType === "response.incomplete" ?
+            { reason: "max_output_tokens" }
+          : null,
+        object: "response",
+        output: [],
+        output_text: "",
+        status: eventType === "response.incomplete" ? "incomplete" : "failed",
+        usage: null,
+      }
+  const terminal = JSON.stringify({
+    copilot_usage: copilotUsage,
+    private: "terminal-private-field",
+    response,
+    sequence_number: 2,
+    type: eventType,
+  })
+  return new Response(`event: ${eventType}\ndata: ${terminal}\n\n`, {
+    headers: { "content-type": "text/event-stream", ...headers },
+    status: 200,
+  })
 }
 
 function createChatCompletionsSseResponse(): Response {
