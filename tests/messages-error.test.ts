@@ -109,6 +109,57 @@ test("preserves a local Anthropic error body", async () => {
   })
 })
 
+test("preserves safe local code and param with a fixed HTTP message", async () => {
+  const response = await forwardAnthropicError(
+    localError({
+      error: {
+        type: "invalid_request_error",
+        code: "endpoint_translation_unsupported",
+        message:
+          "The selected Copilot model cannot accept this request without losing required protocol data.",
+        param: "document.citations",
+      },
+    }),
+  )
+  const body = await response.text()
+
+  expect(JSON.parse(body)).toEqual({
+    type: "error",
+    request_id: "req-hostile",
+    error: {
+      type: "invalid_request_error",
+      code: "endpoint_translation_unsupported",
+      message: "The Copilot Messages request was rejected.",
+      param: "document.citations",
+    },
+  })
+  expect(body).not.toContain("document contents")
+})
+
+test("preserves the same safe local metadata in an in-band error", () => {
+  expect(
+    createAnthropicStreamError(
+      localError({
+        error: {
+          type: "invalid_request_error",
+          code: "endpoint_translation_unsupported",
+          message:
+            "The selected Copilot model cannot accept this request without losing required protocol data.",
+          param: "thinking_signature",
+        },
+      }),
+    ),
+  ).toEqual({
+    type: "error",
+    error: {
+      type: "invalid_request_error",
+      code: "endpoint_translation_unsupported",
+      message: "The Copilot Messages request was rejected.",
+      param: "thinking_signature",
+    },
+  })
+})
+
 test.each([
   [400, "invalid_request_error", "The Copilot Messages request was rejected."],
   [401, "authentication_error", "Copilot authentication failed."],

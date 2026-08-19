@@ -11,6 +11,7 @@ import consola from "consola"
 import { Hono, type Context } from "hono"
 
 import type { ChatCompletionsPayload } from "../src/services/copilot/create-chat-completions"
+import type { ModelsResponse } from "../src/services/copilot/get-models"
 
 import { forwardError, LocalHTTPError } from "../src/lib/error"
 import { setModelSettingsForTest } from "../src/lib/model-settings"
@@ -38,9 +39,32 @@ const originalFetch = globalThis.fetch
 const originalIsMultiToken = state.isMultiToken
 const addedAccountIds = [2101, 2102]
 const queuedResponses: Array<Response> = []
-let capturedAffinity: RoutingAffinity | undefined
+const capturedAffinities: Array<RoutingAffinity | undefined> = []
 const capturedAuthorization: Array<string | undefined> = []
+let metadataAffinityFetchCount = 0
 let lastRequestBody: Record<string, unknown> | undefined
+
+function createLegacyMessagesModel(
+  model: string,
+): ModelsResponse["data"][number] {
+  return {
+    id: model,
+    name: model,
+    object: "model",
+    preview: false,
+    vendor: "anthropic",
+    version: "1",
+    model_picker_enabled: true,
+    capabilities: {
+      family: "claude",
+      limits: { max_output_tokens: 1024 },
+      object: "model_capabilities",
+      supports: {},
+      tokenizer: "cl100k_base",
+      type: "chat",
+    },
+  }
+}
 
 const createDefaultResponse = () =>
   new Response(
@@ -68,10 +92,14 @@ state.accountType = "individual"
 // Helper to mock fetch
 const fetchMock = mock(
   (_url: string, opts: { body?: string; headers: Record<string, string> }) => {
-    capturedAffinity = getRoutingAffinity()
-    capturedAuthorization.push(opts.headers.Authorization)
-    lastRequestBody =
+    const body =
       opts.body ? (JSON.parse(opts.body) as Record<string, unknown>) : undefined
+    if (body?.model === "claude-metadata-routing-model") {
+      capturedAffinities.push(getRoutingAffinity())
+      capturedAuthorization.push(opts.headers.Authorization)
+      metadataAffinityFetchCount += 1
+    }
+    lastRequestBody = body
     void opts
     return queuedResponses.shift() ?? createDefaultResponse()
   },
@@ -92,9 +120,10 @@ afterAll(() => {
 beforeEach(() => {
   fetchMock.mockClear()
   queuedResponses.length = 0
-  capturedAffinity = undefined
+  capturedAffinities.length = 0
   lastRequestBody = undefined
   capturedAuthorization.length = 0
+  metadataAffinityFetchCount = 0
   state.isMultiToken = originalIsMultiToken
   setModelSettingsForTest([])
   resetRoutingTelemetryForTest()
@@ -273,6 +302,10 @@ test("installs Claude metadata affinity before provider dispatch", async () => {
   }
   tokenPool.rebuildModelIndex()
   state.isMultiToken = true
+  state.models = {
+    object: "list",
+    data: [createLegacyMessagesModel(model)],
+  }
   const request = () =>
     server.request("/v1/messages", {
       method: "POST",
@@ -289,18 +322,21 @@ test("installs Claude metadata affinity before provider dispatch", async () => {
 
   const first = await request()
   const second = await request()
+  const authorization = capturedAuthorization.slice(-2)
+  const affinities = capturedAffinities.slice(-2)
 
   expect(first.status).toBe(200)
   expect(second.status).toBe(200)
-  expect(capturedAffinity).toEqual({
-    key: "claude-body-session",
-    source: "claude_metadata",
-  })
+  expect(metadataAffinityFetchCount).toBe(2)
+  expect(affinities).toEqual([
+    { key: "claude-body-session", source: "claude_metadata" },
+    { key: "claude-body-session", source: "claude_metadata" },
+  ])
   const expected = tokenPool.getAccountForModelBySession(
     model,
     "claude-body-session",
   )
-  expect(capturedAuthorization).toEqual([
+  expect(authorization).toEqual([
     `Bearer ${expected?.copilotToken}`,
     `Bearer ${expected?.copilotToken}`,
   ])

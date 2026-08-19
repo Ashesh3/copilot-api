@@ -314,7 +314,7 @@ function isAbsoluteHttpUrl(value: string): boolean {
       && url.hostname.length > 0
       && url.username.length === 0
       && url.password.length === 0
-      && isValidRawHttpAuthority(authority, url.hostname)
+      && isValidRawHttpAuthority(authority, url.hostname, url.protocol)
       && matchesCanonicalHttpUrl(value, url)
     )
   } catch {
@@ -358,12 +358,13 @@ function rawUrlAuthority(value: string): string {
 function isValidRawHttpAuthority(
   authority: string,
   parsedHostname: string,
+  protocol: string,
 ): boolean {
   if (authority.length === 0 || authority.includes("@")) return false
   if (authority.startsWith("[")) {
     const closingBracket = authority.indexOf("]")
     if (closingBracket <= 1) return false
-    return isValidRawPortSuffix(authority.slice(closingBracket + 1))
+    return authority === new URL(`${protocol}//${authority}`).host
   }
 
   const firstColon = authority.indexOf(":")

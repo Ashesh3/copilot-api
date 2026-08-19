@@ -5,7 +5,7 @@ export interface AnthropicMessagesPayload extends Record<string, unknown> {
   messages: Array<AnthropicMessage>
   max_tokens?: number
   system?: string | Array<AnthropicTextBlock>
-  metadata?: {
+  metadata?: Record<string, unknown> & {
     user_id?: string
   }
   stop_sequences?: Array<string>
@@ -14,23 +14,22 @@ export interface AnthropicMessagesPayload extends Record<string, unknown> {
   top_p?: number
   top_k?: number
   tools?: Array<AnthropicTool>
-  tool_choice?: {
+  tool_choice?: Record<string, unknown> & {
     type: "auto" | "any" | "tool" | "none"
     name?: string
     disable_parallel_tool_use?: boolean
   }
-  thinking?: {
+  thinking?: Record<string, unknown> & {
     type: "enabled" | "adaptive"
     budget_tokens?: number
   }
   service_tier?: "auto" | "standard_only"
-  output_config?: {
+  output_config?: Record<string, unknown> & {
     effort?: "none" | "minimal" | "low" | "medium" | "high" | "max" | "xhigh"
-    format?: {
+    format?: Record<string, unknown> & {
       type: string
-      [key: string]: unknown
     }
-    task_budget?: {
+    task_budget?: Record<string, unknown> & {
       type: "tokens"
       total: number
       remaining?: number
@@ -55,15 +54,15 @@ export interface AnthropicTextBlock extends Record<string, unknown> {
 export interface AnthropicImageBlock extends Record<string, unknown> {
   type: "image"
   source:
-    | {
+    | (Record<string, unknown> & {
         type: "base64"
         media_type: "image/jpeg" | "image/png" | "image/gif" | "image/webp"
         data: string
-      }
-    | {
+      })
+    | (Record<string, unknown> & {
         type: "url"
         url: string
-      }
+      })
   cache_control?: AnthropicCacheControl
 }
 
@@ -74,16 +73,24 @@ export interface AnthropicImageBlock extends Record<string, unknown> {
 export interface AnthropicDocumentBlock extends Record<string, unknown> {
   type: "document"
   source:
-    | { type: "base64"; media_type: string; data: string }
-    | { type: "text"; media_type?: string; data: string }
-    | { type: "url"; url: string }
-    | {
+    | (Record<string, unknown> & {
+        type: "base64"
+        media_type: string
+        data: string
+      })
+    | (Record<string, unknown> & {
+        type: "text"
+        media_type?: string
+        data: string
+      })
+    | (Record<string, unknown> & { type: "url"; url: string })
+    | (Record<string, unknown> & {
         type: "content"
         content: string | Array<AnthropicTextBlock | AnthropicImageBlock>
-      }
+      })
   title?: string | null
   context?: string | null
-  citations?: { enabled?: boolean } | null
+  citations?: (Record<string, unknown> & { enabled?: boolean }) | null
   cache_control?: AnthropicCacheControl
 }
 
@@ -172,13 +179,13 @@ export interface AnthropicResponse extends Record<string, unknown> {
     | "refusal"
     | null
   stop_sequence: string | null
-  usage: {
+  usage: Record<string, unknown> & {
     input_tokens: number
     output_tokens: number
     cache_creation_input_tokens?: number
     cache_read_input_tokens?: number
     service_tier?: "standard" | "priority" | "batch"
-    cache_creation?: {
+    cache_creation?: Record<string, unknown> & {
       ephemeral_5m_input_tokens?: number
       ephemeral_1h_input_tokens?: number
     }
@@ -253,13 +260,14 @@ export interface AnthropicMessageDeltaEvent extends Record<string, unknown> {
   delta: {
     stop_reason?: AnthropicResponse["stop_reason"]
     stop_sequence?: string | null
+    [key: string]: unknown
   }
-  usage?: {
+  usage?: Record<string, unknown> & {
     input_tokens?: number
     output_tokens: number
     cache_creation_input_tokens?: number
     cache_read_input_tokens?: number
-    cache_creation?: {
+    cache_creation?: Record<string, unknown> & {
       ephemeral_5m_input_tokens?: number
       ephemeral_1h_input_tokens?: number
     }
@@ -281,6 +289,9 @@ export interface AnthropicErrorEvent extends Record<string, unknown> {
   error: {
     type: string
     message: string
+    code?: string
+    param?: string
+    [key: string]: unknown
   }
 }
 

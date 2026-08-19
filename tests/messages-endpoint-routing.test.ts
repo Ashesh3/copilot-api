@@ -65,6 +65,12 @@ const INVALID_TRANSLATED_DOCUMENT_URLS = [
   String.raw`http://attachment.test\report.pdf`,
   "https://attachment.test/a/../report.pdf",
   "https://attachment.test/report%zz.pdf",
+  "https://[2001:0DB8:0000:0000:0000:0000:0000:0001]:8443/report.pdf",
+  "https://[2001:DB8::1]:8443/report.pdf",
+  "https://[::ffff:192.0.2.128]:8443/report.pdf",
+  "http://[2001:db8::1]:080/report.pdf",
+  "http://[2001:db8::1]:80/report.pdf",
+  "https://[2001:db8::1]:443/report.pdf",
 ]
 const VALID_TRANSLATED_DOCUMENT_URLS = [
   "https://attachment.test",
@@ -307,6 +313,79 @@ test("prefers native Messages and preserves signed thinking", async () => {
   expect(response.status).toBe(200)
   expect(upstreamPaths).toEqual(["/v1/messages"])
   expect(JSON.stringify(upstreamBodies[0])).toContain("valid-native-signature")
+})
+
+test.each([
+  {
+    name: "exact identifier",
+    beta: "context-1m-2025-08-07",
+    expectedModel: "route-model-1m",
+    expectedHeader: "context-1m-2025-08-07",
+  },
+  {
+    name: "duplicate canonical identifiers",
+    beta: " beta-one,context-1m-2025-08-07,beta-one ",
+    expectedModel: "route-model-1m",
+    expectedHeader: "beta-one,context-1m-2025-08-07",
+  },
+  {
+    name: "substring only",
+    beta: "not-context-1m-2025-08-07-extra",
+    expectedModel: "route-model",
+    expectedHeader: "not-context-1m-2025-08-07-extra",
+  },
+  {
+    name: "invalid mixed header",
+    beta: "context-1m-2025-08-07,bad beta",
+    expectedModel: "route-model",
+    expectedHeader: null,
+  },
+] as const)(
+  "uses canonical beta membership for $name model routing",
+  async ({ beta, expectedHeader, expectedModel }) => {
+    state.isMultiToken = true
+    registerAccount(92_001, "beta-account-token")
+    tokenPool.rebuildModelIndex()
+    state.models = {
+      object: "list",
+      data: [
+        createModel({ supported_endpoints: ["/v1/messages"] }),
+        {
+          ...createModel({ supported_endpoints: ["/v1/messages"] }),
+          id: "route-model-1m",
+          name: "route-model-1m",
+        },
+      ],
+    } satisfies ModelsResponse
+
+    const response = await postMessages({}, { "anthropic-beta": beta })
+
+    expect(response.status).toBe(200)
+    expect(upstreamBodies[0]?.model).toBe(expectedModel)
+    expect(upstreamHeaders[0]?.get("anthropic-beta")).toBe(expectedHeader)
+  },
+)
+
+test("rejects an unknown Messages model without fabricating Chat support", async () => {
+  state.models = {
+    object: "list",
+    data: [
+      {
+        ...createModel({ supported_endpoints: ["/chat/completions"] }),
+        id: "different-model",
+        name: "different-model",
+      },
+    ],
+  } satisfies ModelsResponse
+
+  const response = await postMessages({ model: "unknown-model" })
+
+  expect(response.status).toBe(404)
+  expect(await response.json()).toMatchObject({
+    type: "error",
+    error: { type: "not_found_error", code: "model_not_found" },
+  })
+  expect(fetchMock).not.toHaveBeenCalled()
 })
 
 test("recovers once from a deterministic native signature rejection", async () => {

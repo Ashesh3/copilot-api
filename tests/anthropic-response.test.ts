@@ -122,6 +122,35 @@ test("types and preserves unknown fields in native Messages deltas", () => {
   }
 })
 
+test("types forward-compatible message delta and error records", () => {
+  const delta: AnthropicMessageDeltaEvent = {
+    type: "message_delta",
+    delta: { stop_reason: "end_turn", future_delta: true },
+  }
+  const error = {
+    type: "error" as const,
+    error: {
+      type: "invalid_request_error",
+      message: "safe",
+      code: "invalid_value",
+      future_error: true,
+    },
+  } satisfies import("~/routes/messages/anthropic-types").AnthropicErrorEvent
+
+  expect(delta).toMatchObject({
+    type: "message_delta",
+    delta: { stop_reason: "end_turn", future_delta: true },
+  })
+  expect(error).toMatchObject({
+    type: "error",
+    error: {
+      type: "invalid_request_error",
+      code: "invalid_value",
+      future_error: true,
+    },
+  })
+})
+
 // eslint-disable-next-line max-lines-per-function
 describe("OpenAI to Anthropic Non-Streaming Response Translation", () => {
   test("preserves optional Chat response metadata in the Anthropic result", () => {

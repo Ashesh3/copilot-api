@@ -1,3 +1,4 @@
+/* eslint-disable max-lines */
 import { describe, test, expect } from "bun:test"
 import { z } from "zod"
 
@@ -90,6 +91,59 @@ describe("Anthropic to OpenAI translation logic", () => {
       fallback_credit_token: "opaque-token",
       messages: [{ role: "user", content: "hello" }],
       future_native_field: { enabled: true },
+    })
+  })
+
+  test("types forward-compatible nested Messages wire records", () => {
+    const payload: AnthropicMessagesPayload = {
+      model: "claude-current",
+      max_tokens: 64,
+      metadata: { user_id: "user", future_metadata: true },
+      tool_choice: { type: "auto", future_choice: true },
+      thinking: { type: "adaptive", future_thinking: true },
+      output_config: {
+        effort: "high",
+        future_output: true,
+        task_budget: {
+          type: "tokens",
+          total: 64,
+          future_budget: true,
+        },
+      },
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "document",
+              source: {
+                type: "url",
+                url: "https://example.test",
+                future_source: true,
+              },
+              citations: { enabled: true, future_citation: true },
+            },
+          ],
+        },
+      ],
+    }
+
+    expect(payload).toMatchObject({
+      model: "claude-current",
+      max_tokens: 64,
+      metadata: { user_id: "user", future_metadata: true },
+      tool_choice: { type: "auto", future_choice: true },
+      thinking: { type: "adaptive", future_thinking: true },
+      output_config: {
+        effort: "high",
+        future_output: true,
+        task_budget: {
+          type: "tokens",
+          total: 64,
+          future_budget: true,
+        },
+      },
+      messages: [{ role: "user" }],
     })
   })
 

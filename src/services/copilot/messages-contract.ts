@@ -63,6 +63,12 @@ function createMessagesValidationError(param: string): LocalHTTPError {
   return createMessagesError(`${param} is required for Messages requests.`)
 }
 
+function createInvalidMessagesFieldError(param: string): LocalHTTPError {
+  return createMessagesError(
+    `The Messages request contains an invalid ${param} field.`,
+  )
+}
+
 function createInvalidMessagesBodyError(): LocalHTTPError {
   return createMessagesError("The Messages request body must be a JSON object.")
 }
@@ -254,6 +260,482 @@ function validateAnthropicMessagesPayload(
   ) {
     throw createMessagesValidationError("max_tokens")
   }
+  validateOptionalRecord(payload, "metadata", validateMetadata)
+  validateOptionalRecord(payload, "tool_choice", validateToolChoice)
+  validateOptionalRecord(payload, "cache_control", validateCacheControl)
+  validateOptionalRecord(payload, "thinking", validateThinking)
+  validateOptionalRecord(payload, "output_config", validateOutputConfig)
+  validateOptionalRecord(payload, "context_management")
+  validateOptionalRecord(payload, "stop_details")
+  validateSystem(payload.system)
+  validateMessages(payload.messages)
+  validateTools(payload.tools)
+  validateOptionalStringArray(payload, "stop_sequences")
+  validateOptionalFiniteNumber(payload, "temperature")
+  validateOptionalFiniteNumber(payload, "top_p")
+  validateOptionalFiniteNumber(payload, "top_k")
+  validateOptionalBoolean(payload, "stream")
+  validateOptionalString(payload, "fallback_credit_token")
+  if (
+    payload.service_tier !== undefined
+    && payload.service_tier !== "auto"
+    && payload.service_tier !== "standard_only"
+  ) {
+    throw createInvalidMessagesFieldError("service_tier")
+  }
+  if (payload.speed !== undefined && payload.speed !== "fast") {
+    throw createInvalidMessagesFieldError("speed")
+  }
+}
+
+function validateOptionalRecord(
+  parent: Record<string, unknown>,
+  field: string,
+  validate?: (value: Record<string, unknown>) => void,
+): void {
+  const value = parent[field]
+  if (value === undefined) return
+  if (!isRecord(value)) throw createInvalidMessagesFieldError(field)
+  validate?.(value)
+}
+
+function validateOptionalString(
+  parent: Record<string, unknown>,
+  field: string,
+): void {
+  const value = parent[field]
+  if (value !== undefined && typeof value !== "string") {
+    throw createInvalidMessagesFieldError(field)
+  }
+}
+
+function validateNonEmptyString(value: unknown, param: string): void {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw createInvalidMessagesFieldError(param)
+  }
+}
+
+function validateOptionalBoolean(
+  parent: Record<string, unknown>,
+  field: string,
+): void {
+  const value = parent[field]
+  if (value !== undefined && typeof value !== "boolean") {
+    throw createInvalidMessagesFieldError(field)
+  }
+}
+
+function validateOptionalFiniteNumber(
+  parent: Record<string, unknown>,
+  field: string,
+): void {
+  const value = parent[field]
+  if (
+    value !== undefined
+    && (typeof value !== "number" || !Number.isFinite(value))
+  ) {
+    throw createInvalidMessagesFieldError(field)
+  }
+}
+
+function validateOptionalStringArray(
+  parent: Record<string, unknown>,
+  field: string,
+): void {
+  const value = parent[field]
+  if (
+    value !== undefined
+    && (!Array.isArray(value) || value.some((item) => typeof item !== "string"))
+  ) {
+    throw createInvalidMessagesFieldError(field)
+  }
+}
+
+function validateMetadata(value: Record<string, unknown>): void {
+  validateOptionalString(value, "user_id")
+}
+
+function validateCacheControl(value: Record<string, unknown>): void {
+  if (value.type !== "ephemeral") {
+    throw createInvalidMessagesFieldError("cache_control.type")
+  }
+  if (value.ttl !== undefined && typeof value.ttl !== "string") {
+    throw createInvalidMessagesFieldError("cache_control.ttl")
+  }
+  validatePlainNestedValues(value, "cache_control")
+}
+
+function validateToolChoice(value: Record<string, unknown>): void {
+  if (
+    value.type !== "auto"
+    && value.type !== "any"
+    && value.type !== "tool"
+    && value.type !== "none"
+  ) {
+    throw createInvalidMessagesFieldError("tool_choice.type")
+  }
+  if (value.name !== undefined) {
+    validateNonEmptyString(value.name, "tool_choice.name")
+  }
+  if (value.type === "tool" && value.name === undefined) {
+    throw createInvalidMessagesFieldError("tool_choice.name")
+  }
+  validateOptionalBoolean(value, "disable_parallel_tool_use")
+  validatePlainNestedValues(value, "tool_choice")
+}
+
+function validateThinking(value: Record<string, unknown>): void {
+  if (value.type !== "enabled" && value.type !== "adaptive") {
+    throw createInvalidMessagesFieldError("thinking.type")
+  }
+  if (
+    value.budget_tokens !== undefined
+    && (!Number.isInteger(value.budget_tokens)
+      || Number(value.budget_tokens) <= 0)
+  ) {
+    throw createInvalidMessagesFieldError("thinking.budget_tokens")
+  }
+  validatePlainNestedValues(value, "thinking")
+}
+
+const REASONING_EFFORTS = new Set([
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+])
+
+function validateOutputConfig(value: Record<string, unknown>): void {
+  if (
+    value.effort !== undefined
+    && (typeof value.effort !== "string"
+      || !REASONING_EFFORTS.has(value.effort))
+  ) {
+    throw createInvalidMessagesFieldError("output_config.effort")
+  }
+  if (value.format !== undefined) {
+    if (!isRecord(value.format)) {
+      throw createInvalidMessagesFieldError("output_config.format")
+    }
+    validateNonEmptyString(value.format.type, "output_config.format.type")
+  }
+  if (value.task_budget !== undefined) {
+    if (!isRecord(value.task_budget) || value.task_budget.type !== "tokens") {
+      throw createInvalidMessagesFieldError("output_config.task_budget")
+    }
+    if (
+      !Number.isInteger(value.task_budget.total)
+      || Number(value.task_budget.total) <= 0
+      || (value.task_budget.remaining !== undefined
+        && (!Number.isInteger(value.task_budget.remaining)
+          || Number(value.task_budget.remaining) < 0))
+    ) {
+      throw createInvalidMessagesFieldError("output_config.task_budget")
+    }
+    validatePlainNestedValues(value.task_budget, "output_config.task_budget")
+  }
+  validatePlainNestedValues(value, "output_config")
+}
+
+function validateSystem(value: unknown): void {
+  if (value === undefined || typeof value === "string") return
+  if (!Array.isArray(value)) throw createInvalidMessagesFieldError("system")
+  for (const [index, block] of value.entries()) {
+    const param = `system.${index}`
+    if (!isRecord(block)) throw createInvalidMessagesFieldError(param)
+    validateNonEmptyString(block.type, `${param}.type`)
+    if (block.type === "text") validateTextBlock(block, param)
+  }
+}
+
+function validateMessages(value: unknown): void {
+  if (!Array.isArray(value)) throw createInvalidMessagesFieldError("messages")
+  for (const [index, message] of value.entries()) {
+    const param = `messages.${index}`
+    if (!isRecord(message)) throw createInvalidMessagesFieldError(param)
+    if (message.role !== "user" && message.role !== "assistant") {
+      throw createInvalidMessagesFieldError(`${param}.role`)
+    }
+    if (typeof message.content === "string") continue
+    if (!Array.isArray(message.content)) {
+      throw createInvalidMessagesFieldError(`${param}.content`)
+    }
+    for (const [contentIndex, block] of message.content.entries()) {
+      validateContentBlock(
+        block,
+        `${param}.content.${contentIndex}`,
+        message.role,
+      )
+    }
+  }
+}
+
+// Wire-union validation is kept centralized so every caller fails identically.
+// eslint-disable-next-line complexity
+function validateContentBlock(
+  value: unknown,
+  param: string,
+  role: "assistant" | "user",
+): void {
+  if (!isRecord(value)) throw createInvalidMessagesFieldError(param)
+  validateNonEmptyString(value.type, `${param}.type`)
+  switch (value.type) {
+    case "text": {
+      if (typeof value.text !== "string") {
+        throw createInvalidMessagesFieldError(`${param}.text`)
+      }
+      validateNestedCacheControl(value, param)
+      return
+    }
+    case "image": {
+      if (role !== "user") throw createInvalidMessagesFieldError(param)
+      validateImageSource(value.source, `${param}.source`)
+      validateNestedCacheControl(value, param)
+      return
+    }
+    case "document": {
+      if (role !== "user") throw createInvalidMessagesFieldError(param)
+      validateDocumentBlock(value, param)
+      return
+    }
+    case "tool_result": {
+      if (role !== "user") throw createInvalidMessagesFieldError(param)
+      validateNonEmptyString(value.tool_use_id, `${param}.tool_use_id`)
+      if (typeof value.content !== "string") {
+        if (!Array.isArray(value.content)) {
+          throw createInvalidMessagesFieldError(`${param}.content`)
+        }
+        for (const [index, nested] of value.content.entries()) {
+          validateToolResultContent(nested, `${param}.content.${index}`)
+        }
+      }
+      validateOptionalBoolean(value, "is_error")
+      validateNestedCacheControl(value, param)
+      return
+    }
+    case "tool_use": {
+      if (role !== "assistant") throw createInvalidMessagesFieldError(param)
+      validateNonEmptyString(value.id, `${param}.id`)
+      validateNonEmptyString(value.name, `${param}.name`)
+      if (!isRecord(value.input)) {
+        throw createInvalidMessagesFieldError(`${param}.input`)
+      }
+      validateNestedCacheControl(value, param)
+      return
+    }
+    case "thinking": {
+      if (role !== "assistant" || typeof value.thinking !== "string") {
+        throw createInvalidMessagesFieldError(param)
+      }
+      if (
+        value.signature !== undefined
+        && typeof value.signature !== "string"
+      ) {
+        throw createInvalidMessagesFieldError(`${param}.signature`)
+      }
+      validateNestedCacheControl(value, param)
+      return
+    }
+    default: {
+      return
+    }
+  }
+}
+
+function validateToolResultContent(value: unknown, param: string): void {
+  if (!isRecord(value)) throw createInvalidMessagesFieldError(param)
+  if (value.type === "tool_reference") {
+    validateNonEmptyString(value.tool_name, `${param}.tool_name`)
+    validateNestedCacheControl(value, param)
+    return
+  }
+  validateContentBlock(value, param, "user")
+}
+
+function validateTextBlock(value: unknown, param: string): void {
+  if (
+    !isRecord(value)
+    || value.type !== "text"
+    || typeof value.text !== "string"
+  ) {
+    throw createInvalidMessagesFieldError(param)
+  }
+  validateNestedCacheControl(value, param)
+}
+
+function validateNestedCacheControl(
+  value: Record<string, unknown>,
+  param: string,
+): void {
+  if (value.cache_control === undefined) return
+  if (!isRecord(value.cache_control)) {
+    throw createInvalidMessagesFieldError(`${param}.cache_control`)
+  }
+  validateCacheControl(value.cache_control)
+}
+
+function validatePlainNestedValues(
+  value: Record<string, unknown>,
+  param: string,
+): void {
+  for (const [key, nested] of Object.entries(value)) {
+    if (
+      nested !== null
+      && typeof nested === "object"
+      && !Array.isArray(nested)
+      && !isRecord(nested)
+    ) {
+      throw createInvalidMessagesFieldError(`${param}.${key}`)
+    }
+  }
+}
+
+function validateImageSource(value: unknown, param: string): void {
+  if (!isRecord(value)) throw createInvalidMessagesFieldError(param)
+  if (value.type === "url") {
+    if (typeof value.url !== "string") {
+      throw createInvalidMessagesFieldError(`${param}.url`)
+    }
+    return
+  }
+  if (value.type !== "base64")
+    throw createInvalidMessagesFieldError(`${param}.type`)
+  if (
+    value.media_type !== "image/jpeg"
+    && value.media_type !== "image/png"
+    && value.media_type !== "image/gif"
+    && value.media_type !== "image/webp"
+  ) {
+    throw createInvalidMessagesFieldError(`${param}.media_type`)
+  }
+  if (typeof value.data !== "string") {
+    throw createInvalidMessagesFieldError(`${param}.data`)
+  }
+}
+
+// Document source variants share one exact public-boundary validator.
+// eslint-disable-next-line complexity
+function validateDocumentBlock(
+  value: Record<string, unknown>,
+  param: string,
+): void {
+  const source = value.source
+  if (!isRecord(source)) {
+    throw createInvalidMessagesFieldError(`${param}.source`)
+  }
+  switch (source.type) {
+    case "base64": {
+      validateNonEmptyString(source.media_type, `${param}.source.media_type`)
+      if (typeof source.data !== "string") {
+        throw createInvalidMessagesFieldError(`${param}.source.data`)
+      }
+      break
+    }
+    case "text": {
+      if (
+        source.media_type !== undefined
+        && typeof source.media_type !== "string"
+      ) {
+        throw createInvalidMessagesFieldError(`${param}.source.media_type`)
+      }
+      if (typeof source.data !== "string") {
+        throw createInvalidMessagesFieldError(`${param}.source.data`)
+      }
+      break
+    }
+    case "url": {
+      if (typeof source.url !== "string") {
+        throw createInvalidMessagesFieldError(`${param}.source.url`)
+      }
+      break
+    }
+    case "content": {
+      if (typeof source.content === "string") break
+      if (!Array.isArray(source.content)) {
+        throw createInvalidMessagesFieldError(`${param}.source.content`)
+      }
+      for (const [index, nested] of source.content.entries()) {
+        if (!isRecord(nested)) {
+          throw createInvalidMessagesFieldError(
+            `${param}.source.content.${index}`,
+          )
+        }
+        if (nested.type === "text") {
+          validateTextBlock(nested, `${param}.source.content.${index}`)
+        } else if (nested.type === "image") {
+          validateImageSource(
+            nested.source,
+            `${param}.source.content.${index}.source`,
+          )
+        } else {
+          throw createInvalidMessagesFieldError(
+            `${param}.source.content.${index}.type`,
+          )
+        }
+      }
+      break
+    }
+    default: {
+      throw createInvalidMessagesFieldError(`${param}.source.type`)
+    }
+  }
+  if (
+    value.title !== undefined
+    && value.title !== null
+    && typeof value.title !== "string"
+  ) {
+    throw createInvalidMessagesFieldError(`${param}.title`)
+  }
+  if (
+    value.context !== undefined
+    && value.context !== null
+    && typeof value.context !== "string"
+  ) {
+    throw createInvalidMessagesFieldError(`${param}.context`)
+  }
+  if (value.citations !== undefined && value.citations !== null) {
+    if (!isRecord(value.citations)) {
+      throw createInvalidMessagesFieldError(`${param}.citations`)
+    }
+    validateOptionalBoolean(value.citations, "enabled")
+  }
+  validateNestedCacheControl(value, param)
+}
+
+function validateTools(value: unknown): void {
+  if (value === undefined) return
+  if (!Array.isArray(value)) throw createInvalidMessagesFieldError("tools")
+  for (const [index, tool] of value.entries()) {
+    const param = `tools.${index}`
+    if (!isRecord(tool)) throw createInvalidMessagesFieldError(param)
+    validateNonEmptyString(tool.name, `${param}.name`)
+    if (tool.type !== undefined)
+      validateNonEmptyString(tool.type, `${param}.type`)
+    if (
+      tool.description !== undefined
+      && typeof tool.description !== "string"
+    ) {
+      throw createInvalidMessagesFieldError(`${param}.description`)
+    }
+    if (tool.input_schema !== undefined && !isRecord(tool.input_schema)) {
+      throw createInvalidMessagesFieldError(`${param}.input_schema`)
+    }
+    if (tool.type === undefined && tool.input_schema === undefined) {
+      throw createInvalidMessagesFieldError(`${param}.input_schema`)
+    }
+    validateOptionalStringArray(tool, "allowed_domains")
+    validateOptionalStringArray(tool, "blocked_domains")
+    if (
+      tool.max_uses !== undefined
+      && (!Number.isInteger(tool.max_uses) || Number(tool.max_uses) <= 0)
+    ) {
+      throw createInvalidMessagesFieldError(`${param}.max_uses`)
+    }
+    validateNestedCacheControl(tool, param)
+  }
 }
 
 export function isAnthropicBetaIdentifier(value: string): boolean {
@@ -274,6 +756,13 @@ export function canonicalizeAnthropicBeta(
   }
   const canonical = [...new Set(identifiers)].join(",")
   return sanitizeCopilotHeaderValue(canonical)
+}
+
+export function getCanonicalAnthropicBetaIdentifiers(
+  value: string | undefined,
+): ReadonlySet<string> {
+  const canonical = canonicalizeAnthropicBeta(value)
+  return new Set(canonical?.split(",") ?? [])
 }
 
 export function sanitizeAnthropicRequestHeaderOptions(options: {

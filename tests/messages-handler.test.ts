@@ -329,6 +329,94 @@ test.each([
   },
 )
 
+test.each([
+  ["primitive metadata", { metadata: "private" }],
+  ["null tool choice", { tool_choice: null }],
+  ["primitive cache control", { cache_control: "ephemeral" }],
+  ["primitive thinking", { thinking: true }],
+  ["primitive output config", { output_config: "high" }],
+  ["primitive system entry", { system: ["not-a-block"] }],
+  ["primitive message entry", { messages: [null] }],
+  ["invalid message role", { messages: [{ role: "system", content: "x" }] }],
+  [
+    "primitive content entry",
+    { messages: [{ role: "user", content: [null] }] },
+  ],
+  [
+    "non-string text",
+    { messages: [{ role: "user", content: [{ type: "text", text: 3 }] }] },
+  ],
+  [
+    "invalid image source",
+    {
+      messages: [{ role: "user", content: [{ type: "image", source: null }] }],
+    },
+  ],
+  [
+    "non-string tool id",
+    {
+      messages: [
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: 2, name: "x", input: {} }],
+        },
+      ],
+    },
+  ],
+  ["non-string tool name", { tools: [{ name: 3, input_schema: {} }] }],
+  ["function tool without schema", { tools: [{ name: "missing_schema" }] }],
+] as const)(
+  "rejects malformed valid-JSON Messages %s before upstream dispatch",
+  async (_name, extra) => {
+    state.models = structuredClone(nativeMessagesModels)
+    Object.assign(state.models.data[0], {
+      id: "claude-opus-4.6",
+      name: "Claude Opus 4.6",
+    })
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-opus-4.6",
+        messages: [{ role: "user", content: "x" }],
+        max_tokens: 1,
+        ...extra,
+      }),
+    })
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toMatchObject({
+      type: "error",
+      error: { type: "invalid_request_error" },
+    })
+    expect(fetchMock).not.toHaveBeenCalled()
+  },
+)
+
+test("preserves a forward-compatible native content record", async () => {
+  state.models = structuredClone(nativeMessagesModels)
+  const futureBlock = {
+    type: "future_native_block_20270101",
+    future_payload: { enabled: true },
+  }
+
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-opus-4.8",
+      messages: [{ role: "user", content: [futureBlock] }],
+      max_tokens: 1,
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPayload).toHaveProperty(
+    "messages.0.content.0",
+    futureBlock,
+  )
+})
+
 test("rejects malformed public Messages JSON before upstream dispatch", async () => {
   const response = await server.request("/v1/messages", {
     method: "POST",

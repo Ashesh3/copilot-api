@@ -31,6 +31,8 @@ function exactKeys(
   )
 }
 
+// Exact hostile-safe structural validation is intentionally branch-heavy.
+// eslint-disable-next-line complexity
 function snapshotAnthropicErrorBody(
   value: Readonly<Record<string, unknown>> | undefined,
 ): AnthropicErrorBody | undefined {
@@ -51,10 +53,15 @@ function snapshotAnthropicErrorBody(
     return undefined
   }
   const nested = value.error as Readonly<Record<string, unknown>>
+  const expectedErrorKeys = ["message", "type"]
+  if (nested.code !== undefined) expectedErrorKeys.push("code")
+  if (nested.param !== undefined) expectedErrorKeys.push("param")
   if (
-    !exactKeys(nested, ["message", "type"])
+    !exactKeys(nested, expectedErrorKeys)
     || typeof nested.type !== "string"
     || typeof nested.message !== "string"
+    || (nested.code !== undefined && typeof nested.code !== "string")
+    || (nested.param !== undefined && typeof nested.param !== "string")
   ) {
     return undefined
   }
@@ -63,7 +70,12 @@ function snapshotAnthropicErrorBody(
     ...(typeof value.request_id === "string" ?
       { request_id: value.request_id }
     : {}),
-    error: { type: nested.type, message: nested.message },
+    error: {
+      type: nested.type,
+      message: nested.message,
+      ...(typeof nested.code === "string" ? { code: nested.code } : {}),
+      ...(typeof nested.param === "string" ? { param: nested.param } : {}),
+    },
   }
 }
 
@@ -145,6 +157,22 @@ function createAnthropicStreamErrorFromInspection(
 ): AnthropicErrorEvent {
   const localBody = snapshotAnthropicErrorBody(inspection.localClientBody)
   if (localBody) return localBody
+
+  if (inspection.localError) {
+    return {
+      type: "error",
+      error: {
+        type: inspection.localError.type,
+        message: anthropicErrorMessage(inspection.status),
+        ...(inspection.localError.code ?
+          { code: inspection.localError.code }
+        : {}),
+        ...(inspection.localError.param ?
+          { param: inspection.localError.param }
+        : {}),
+      },
+    }
+  }
 
   return {
     type: "error",

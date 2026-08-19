@@ -14,6 +14,8 @@ const originalFetch = globalThis.fetch
 const nativeHeaders: Array<Headers> = []
 const nativeBodies: Array<Record<string, unknown>> = []
 let nativeAttempt = 0
+let repeatNativeSearch = false
+let searchInvocationCount = 0
 
 function jsonResponse(body: unknown): Response {
   return Response.json(body)
@@ -40,6 +42,7 @@ const fetchMock = mock(
           },
         )
       }
+      searchInvocationCount += 1
       return new Response(
         'data: {"jsonrpc":"2.0","id":"search","result":{"content":[{"type":"text","text":"{\\"type\\":\\"output_text\\",\\"text\\":{\\"value\\":\\"current result\\",\\"annotations\\":[]}}"}]}}\n\n',
         { headers: { "content-type": "text/event-stream" } },
@@ -53,7 +56,7 @@ const fetchMock = mock(
     nativeHeaders.push(new Headers(init?.headers))
     nativeBodies.push(body)
     nativeAttempt += 1
-    if (nativeAttempt === 1) {
+    if (nativeAttempt === 1 || repeatNativeSearch) {
       return jsonResponse({
         id: "msg_search",
         type: "message",
@@ -100,6 +103,8 @@ beforeEach(() => {
   nativeHeaders.length = 0
   nativeBodies.length = 0
   nativeAttempt = 0
+  repeatNativeSearch = false
+  searchInvocationCount = 0
   resetWebSearchSessionsForTest()
   state.accountType = "individual"
   state.copilotToken = "copilot-token"
@@ -262,3 +267,36 @@ test("preserves explicit native header options across every web-search iteration
     expect(headers.get("x-model-provider-preference")).toBe("anthropic")
   }
 })
+
+test.each([
+  ["caller maximum", 2, 2],
+  ["defensive maximum", undefined, 8],
+] as const)(
+  "stops native web search at the $name",
+  async (_name, maxUses, expectedSearches) => {
+    repeatNativeSearch = true
+    const payload: AnthropicMessagesPayload = {
+      model: "claude-current",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "Keep searching." }],
+      tools: [
+        {
+          type: "web_search_20250305",
+          name: "web_search",
+          ...(maxUses === undefined ? {} : { max_uses: maxUses }),
+        },
+      ],
+    }
+
+    try {
+      await resolveNativeWebSearch(payload, {
+        signal: new AbortController().signal,
+      })
+      throw new Error("Expected native web search to stop at its limit")
+    } catch (error) {
+      expect(error).toHaveProperty("response.status", 400)
+    }
+    expect(searchInvocationCount).toBe(expectedSearches)
+    expect(nativeAttempt).toBe(expectedSearches + 1)
+  },
+)

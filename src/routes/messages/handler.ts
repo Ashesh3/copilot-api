@@ -29,6 +29,7 @@ import {
   createEndpointTranslationError,
   HTTPError,
   isAbortError,
+  LocalHTTPError,
 } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
 import {
@@ -93,7 +94,9 @@ import {
 import { isWebSearchToolType } from "~/services/copilot/mcp-web-search"
 import {
   createInvalidAnthropicMessagesJsonError,
+  getCanonicalAnthropicBetaIdentifiers,
   prepareAnthropicMessagesRequest,
+  sanitizeAnthropicRequestHeaderOptions,
 } from "~/services/copilot/messages-contract"
 import {
   consumeExtraSend,
@@ -230,11 +233,12 @@ export async function handleCompletion(c: Context) {
     payload: rawPayload,
     requireMaxTokens: true,
   }).body as unknown as AnthropicMessagesPayload
-  const nativeOptions: NativeMessagesRequestOptions = {
-    anthropicBeta: c.req.header("anthropic-beta"),
-    anthropicVersion: c.req.header("anthropic-version"),
-    modelProviderPreference: c.req.header("x-model-provider-preference"),
-  }
+  const nativeOptions: NativeMessagesRequestOptions =
+    sanitizeAnthropicRequestHeaderOptions({
+      anthropicBeta: c.req.header("anthropic-beta"),
+      anthropicVersion: c.req.header("anthropic-version"),
+      modelProviderPreference: c.req.header("x-model-provider-preference"),
+    })
   installRoutingAffinityFallback(
     resolveClaudeRoutingAffinity(anthropicPayload.metadata),
   )
@@ -345,6 +349,14 @@ async function handleCompletionInner(
 
   const customReference = resolveCustomChatModel(anthropicPayload.model)
   if (customReference) {
+    const customTranslation = checkMessagesToChatTranslation(anthropicPayload)
+    if (!customTranslation.supported) {
+      throw createEndpointTranslationError({
+        blockers: customTranslation.blockers,
+        code: "endpoint_translation_unsupported",
+        source: "messages",
+      })
+    }
     await normalizeAnthropicAttachments(anthropicPayload, c.req.raw.signal)
     await prepareMessagesPayloadForDispatch(c, {
       payload: anthropicPayload,
@@ -368,6 +380,7 @@ async function handleCompletionInner(
   const selectedModel = state.models?.data.find(
     (m) => m.id === anthropicPayload.model,
   )
+  if (state.models && !selectedModel) throw createMessagesModelNotFoundError()
 
   const routeDecision = selectMessagesUpstreamEndpoint({
     payload: anthropicPayload,
@@ -1701,6 +1714,23 @@ const executeResponsesApi = async (
 const modelExists = (id: string) =>
   state.models?.data.some((m) => m.id === id) ?? false
 
+function createMessagesModelNotFoundError(): LocalHTTPError {
+  const clientBody = {
+    type: "error",
+    error: {
+      type: "not_found_error",
+      code: "model_not_found",
+      message: "The requested Copilot Messages model was not found.",
+      param: "model",
+    },
+  }
+  return new LocalHTTPError(
+    clientBody.error.message,
+    Response.json(clientBody, { status: 404 }),
+    clientBody,
+  )
+}
+
 /**
  * Route to model variants based on client signals (1m context, fast mode).
  * Mutates the payload in place.
@@ -1711,7 +1741,11 @@ function applyModelVariantRouting(
   anthropicBeta: string | undefined,
 ): void {
   // 1M context via beta header → route to -1m model variant
-  if (anthropicBeta?.includes("context-1m")) {
+  if (
+    getCanonicalAnthropicBetaIdentifiers(anthropicBeta).has(
+      "context-1m-2025-08-07",
+    )
+  ) {
     const candidate = `${payload.model}-1m`
     if (modelExists(candidate)) {
       recordNonDefaultBehavior(c, {

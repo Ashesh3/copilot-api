@@ -3,6 +3,7 @@ import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
 import type { ResponsesPayload } from "../src/services/copilot/create-responses"
 import type { ModelsResponse } from "../src/services/copilot/get-models"
 
+import { setModelRedirectsForTest } from "../src/lib/model-redirect"
 import { state } from "../src/lib/state"
 import { server } from "../src/server"
 
@@ -10,6 +11,8 @@ const originalFetch = globalThis.fetch
 
 let lastResponsesPayload: ResponsesPayload | undefined
 let lastHeaders: Record<string, string> | undefined
+let lastPath: string | undefined
+let lastBody: Record<string, unknown> | undefined
 
 function parseRequestBody(init?: RequestInit): ResponsesPayload {
   if (typeof init?.body !== "string") {
@@ -83,8 +86,10 @@ const responsesCapableModels: ModelsResponse = {
   ],
 }
 
-const fetchMock = mock((_url: string, init?: RequestInit) => {
+const fetchMock = mock((url: string, init?: RequestInit) => {
+  lastPath = new URL(url).pathname
   lastResponsesPayload = parseRequestBody(init)
+  lastBody = lastResponsesPayload as unknown as Record<string, unknown>
   lastHeaders = init?.headers as Record<string, string> | undefined
 
   return new Response(JSON.stringify(responsesResult), {
@@ -106,12 +111,15 @@ beforeEach(() => {
   fetchMock.mockClear()
   lastResponsesPayload = undefined
   lastHeaders = undefined
+  lastPath = undefined
+  lastBody = undefined
   state.accountType = "individual"
   state.copilotToken = "copilot-token"
   state.githubToken = "github-token"
   state.isMultiToken = false
   state.manualApprove = false
   state.models = responsesCapableModels
+  setModelRedirectsForTest([])
 })
 
 test("adds reasoning defaults on the Google AI responses path", async () => {
@@ -277,6 +285,149 @@ test("detects vision and initiator headers on the Google AI responses path", asy
   expect(response.status).toBe(200)
   expect(lastHeaders?.["Copilot-Vision-Request"]).toBe("true")
   expect(lastHeaders?.["X-Initiator"]).toBe("agent")
+})
+
+test("threads typed native options through the Google PDF Messages path", async () => {
+  state.models = {
+    object: "list",
+    data: [
+      {
+        ...structuredClone(responsesCapableModels.data[0]),
+        id: "claude-native",
+        name: "claude-native",
+        vendor: "anthropic",
+        supported_endpoints: ["/v1/messages"],
+      },
+    ],
+  }
+  fetchMock.mockImplementationOnce((url: string, init?: RequestInit) => {
+    lastPath = new URL(url).pathname
+    lastHeaders = init?.headers as Record<string, string> | undefined
+    lastBody =
+      typeof init?.body === "string" ?
+        (JSON.parse(init.body) as Record<string, unknown>)
+      : undefined
+    return Response.json({
+      id: "msg_google_native",
+      type: "message",
+      role: "assistant",
+      model: "claude-native",
+      content: [{ type: "text", text: "done" }],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    })
+  })
+
+  const response = await server.request(
+    "/v1/models/claude-native:generateContent",
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "anthropic-beta": " beta-one,beta-two,beta-one ",
+        "anthropic-version": "2024-01-01",
+        "x-model-provider-preference": "anthropic",
+      },
+      body: JSON.stringify({
+        contents: [
+          {
+            role: "user",
+            parts: [
+              { text: "Review the PDF." },
+              {
+                inlineData: {
+                  mimeType: "application/pdf",
+                  data: "JVBERi0=",
+                },
+              },
+            ],
+          },
+          { role: "model", parts: [{ text: "I will inspect it." }] },
+        ],
+        generationConfig: { maxOutputTokens: 32 },
+      }),
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(lastPath).toBe("/v1/messages")
+  expect(new Headers(lastHeaders).get("anthropic-beta")).toBe(
+    "beta-one,beta-two",
+  )
+  expect(new Headers(lastHeaders).get("anthropic-version")).toBe("2024-01-01")
+  expect(new Headers(lastHeaders).get("x-model-provider-preference")).toBe(
+    "anthropic",
+  )
+  expect(new Headers(lastHeaders).get("x-initiator")).toBe("agent")
+  expect(lastBody).not.toHaveProperty("anthropic-beta")
+  expect(lastBody).not.toHaveProperty("anthropic-version")
+  expect(lastBody).not.toHaveProperty("x-model-provider-preference")
+})
+
+test("keeps the requested Google model in a redirected native response", async () => {
+  state.models = {
+    object: "list",
+    data: [
+      {
+        ...structuredClone(responsesCapableModels.data[0]),
+        id: "claude-target",
+        name: "claude-target",
+        vendor: "anthropic",
+        supported_endpoints: ["/v1/messages"],
+      },
+    ],
+  }
+  setModelRedirectsForTest([
+    {
+      id: "google-native-redirect",
+      sourceModel: "claude-source",
+      sourceEffort: "all",
+      targetModel: "claude-target",
+      enabled: true,
+    },
+  ])
+  fetchMock.mockImplementationOnce(() =>
+    Response.json({
+      id: "msg_google_redirected",
+      type: "message",
+      role: "assistant",
+      model: "claude-target",
+      content: [{ type: "text", text: "done" }],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    }),
+  )
+
+  const response = await server.request(
+    "/v1/models/claude-source:generateContent",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [
+          {
+            role: "user",
+            parts: [
+              { text: "Review." },
+              {
+                inlineData: {
+                  mimeType: "application/pdf",
+                  data: "JVBERi0=",
+                },
+              },
+            ],
+          },
+        ],
+        generationConfig: { maxOutputTokens: 32 },
+      }),
+    },
+  )
+  const body = (await response.json()) as { modelVersion?: string }
+
+  expect(response.status).toBe(200)
+  expect(body.modelVersion).toBe("claude-source")
 })
 
 test("rejects unsupported Google root request fields instead of silently dropping them", async () => {

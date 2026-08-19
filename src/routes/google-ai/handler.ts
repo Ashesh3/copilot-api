@@ -43,6 +43,7 @@ import {
 } from "~/services/copilot/copilot-client"
 import {
   createAnthropicMessages,
+  detectAnthropicInitiator,
   modelSupportsNativeMessages,
   type AnthropicStreamChunk,
 } from "~/services/copilot/create-anthropic-messages"
@@ -62,6 +63,7 @@ import {
   isChatWebSearchFunctionTool,
   isResponsesWebSearchFunctionTool,
 } from "~/services/copilot/mcp-web-search"
+import { sanitizeAnthropicRequestHeaderOptions } from "~/services/copilot/messages-contract"
 
 import type { AnthropicResponse } from "../messages/anthropic-types"
 import type { GoogleAIRequest } from "./google-ai-types"
@@ -319,6 +321,7 @@ export async function handleGoogleAI(c: Context) {
 
   return await dispatchGoogleRequest(c, {
     finalPayload,
+    requestedModel: rawModel,
     selectedModel,
     useResponsesApi,
     isStream,
@@ -331,6 +334,7 @@ async function dispatchGoogleRequest(
   c: Context,
   options: {
     finalPayload: ChatCompletionsPayload & { model: string }
+    requestedModel: string
     selectedModel: Model | undefined
     useResponsesApi: boolean
     isStream: boolean
@@ -357,6 +361,7 @@ async function dispatchGoogleRequest(
       `[google-ai] Using native /v1/messages for ${finalPayload.model} (PDF attachment)`,
     )
     return await handleWithAnthropicMessages(c, finalPayload, {
+      requestedModel: options.requestedModel,
       selectedModel,
       isStream,
     })
@@ -544,7 +549,11 @@ async function handleChatCompletionsWithWebSearch(
 async function handleWithAnthropicMessages(
   c: Context,
   payload: ChatCompletionsPayload & { model: string },
-  options: { selectedModel?: Model; isStream: boolean },
+  options: {
+    selectedModel?: Model
+    isStream: boolean
+    requestedModel: string
+  },
 ) {
   recordNonDefaultBehavior(c, {
     kind: "endpoint_fallback",
@@ -562,7 +571,14 @@ async function handleWithAnthropicMessages(
     options.selectedModel,
     c.req.raw.signal,
   )
+  const nativeOptions = sanitizeAnthropicRequestHeaderOptions({
+    anthropicBeta: c.req.header("anthropic-beta"),
+    anthropicVersion: c.req.header("anthropic-version"),
+    modelProviderPreference: c.req.header("x-model-provider-preference"),
+  })
   const response = await createAnthropicMessages(anthropicPayload, {
+    ...nativeOptions,
+    initiator: detectAnthropicInitiator(anthropicPayload.messages),
     signal: c.req.raw.signal,
   })
 
@@ -574,7 +590,7 @@ async function handleWithAnthropicMessages(
   if (!options.isStream || !isAsyncIterable(response)) {
     const chatResponse = anthropicResponseToChat(
       response as AnthropicResponse,
-      payload.model,
+      options.requestedModel,
     )
     if (chatResponse.usage) {
       setRequestContext(c, {
@@ -612,7 +628,7 @@ async function handleWithAnthropicMessages(
           response as AsyncIterable<AnthropicStreamChunk>,
           stream,
         ),
-        payload.model,
+        options.requestedModel,
       )
     } catch (error) {
       if (isAbortError(error)) return

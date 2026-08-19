@@ -97,7 +97,9 @@ export class LocalHTTPError extends HTTPError {
     LOCAL_HTTP_ERROR_SNAPSHOTS.set(this, {
       clientBody: clientBodySnapshot,
       localError: safeLocalClientError(clientBodySnapshot),
-      safeMessage: safeHttpErrorMessage(message),
+      safeMessage:
+        safeLocalClientError(clientBodySnapshot)?.message
+        ?? safeHttpErrorMessage(message),
       ...responseSnapshot,
     })
   }
@@ -294,11 +296,13 @@ const SAFE_LOCAL_ERROR_CODES = new Set([
   "invalid_request",
   "invalid_type",
   "invalid_value",
+  "model_not_found",
   "request_too_large",
   "responses_payload_too_large",
   "server_error",
   "session_account_rejected",
   "unsupported_value",
+  "web_search_limit_exceeded",
 ])
 
 function isSafeLocalErrorMetadata(

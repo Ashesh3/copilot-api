@@ -85,7 +85,10 @@ export const translateAnthropicMessagesToResponsesPayload = (
     max_output_tokens: payload.max_tokens,
     tools: translatedTools,
     tool_choice: toolChoice,
-    metadata: payload.metadata ? { ...payload.metadata } : undefined,
+    metadata:
+      payload.metadata?.user_id === undefined ?
+        undefined
+      : { user_id: payload.metadata.user_id },
     safety_identifier: safetyIdentifier ?? undefined,
     prompt_cache_key: promptCacheKey ?? undefined,
     stream: payload.stream,

@@ -303,7 +303,71 @@ test("Anthropic messages request routes to custom chat provider by model id", as
   expect(requests[0]?.headers.get("authorization")).toBe("Bearer custom-key")
 })
 
-test("custom Messages keeps attachment normalization on its selected Chat path", async () => {
+test.each([
+  ["root cache control", { cache_control: { type: "ephemeral" } }],
+  ["future root field", { future_native_field: true }],
+  [
+    "deferred native tool",
+    { tools: [{ type: "future_native_20270101", name: "future_native" }] },
+  ],
+  [
+    "document context",
+    {
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "document",
+              source: { type: "text", data: "notes" },
+              context: "must stay structural",
+            },
+          ],
+        },
+      ],
+    },
+  ],
+  [
+    "Responses thinking signature",
+    {
+      messages: [
+        { role: "user", content: "hello" },
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "private", signature: "item@opaque" },
+          ],
+        },
+      ],
+    },
+  ],
+] as const)(
+  "rejects custom-provider Messages %s before lossy Chat conversion",
+  async (_name, extra) => {
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "custom-chat-model",
+        messages: [{ role: "user", content: "hello" }],
+        max_tokens: 16,
+        ...extra,
+      }),
+    })
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toMatchObject({
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        code: "endpoint_translation_unsupported",
+      },
+    })
+    expect(requests).toHaveLength(0)
+  },
+)
+
+test("custom Messages rejects document flattening before attachment normalization", async () => {
   const document = {
     type: "document",
     source: { type: "text", media_type: "text/plain", data: "custom notes" },
@@ -321,16 +385,8 @@ test("custom Messages keeps attachment normalization on its selected Chat path",
     }),
   })
 
-  expect(response.status).toBe(200)
-  expect(requests).toHaveLength(1)
-  expect(requests[0]?.url).toBe("https://custom.example/v1/chat/completions")
-  expect(requests[0]?.body.messages).toEqual([
-    {
-      role: "user",
-      content:
-        '<document title="notes.txt">\ncustom context\ncustom notes\n</document>',
-    },
-  ])
+  expect(response.status).toBe(400)
+  expect(requests).toHaveLength(0)
 })
 
 test("embeddings request routes to Nebius config by alias", async () => {

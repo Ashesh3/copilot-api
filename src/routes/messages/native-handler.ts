@@ -8,7 +8,7 @@ import type { AnthropicRequestHeaderOptions } from "~/services/copilot/messages-
 import type { RetryBudget } from "~/services/copilot/transport-retry"
 
 import { getLastUsedAccountId } from "~/lib/account-router"
-import { HTTPError, isAbortError } from "~/lib/error"
+import { HTTPError, isAbortError, LocalHTTPError } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
 import { setRequestContext } from "~/lib/request-logger"
 import {
@@ -52,6 +52,7 @@ import {
 import { emitAnthropicResponseAsStream } from "./web-search-helpers"
 
 const logger = createHandlerLogger("messages-native-handler")
+const MAX_NATIVE_WEB_SEARCH_USES = 8
 
 export interface NativeMessagesRequestOptions
   extends AnthropicRequestHeaderOptions {
@@ -369,6 +370,8 @@ export async function resolveNativeWebSearch(
   const routedAccountPin = options.routedAccountPin ?? {}
   const retryBudget = options.retryBudget ?? createRetryBudget()
   const loopOptions = { ...options, retryBudget }
+  const maxSearchUses = getNativeWebSearchLimit(initialPayload.tools)
+  let searchUses = 0
 
   while (true) {
     iteration += 1
@@ -401,6 +404,10 @@ export async function resolveNativeWebSearch(
         block.type === "tool_use" && block.name === "web_search",
     )
     if (calls.length === 0) return response
+    if (searchUses + calls.length > maxSearchUses) {
+      throw createNativeWebSearchLimitError(maxSearchUses)
+    }
+    searchUses += calls.length
 
     logger.info(
       `Executing ${calls.length} web search(es) from native Messages, iteration ${iteration}`,
@@ -435,6 +442,32 @@ export async function resolveNativeWebSearch(
       ],
     }
   }
+}
+
+function getNativeWebSearchLimit(
+  tools: AnthropicMessagesPayload["tools"],
+): number {
+  const callerLimit = tools?.find((tool) => isWebSearchToolType(tool))?.max_uses
+  return Number.isInteger(callerLimit) && Number(callerLimit) > 0 ?
+      Math.min(Number(callerLimit), MAX_NATIVE_WEB_SEARCH_USES)
+    : MAX_NATIVE_WEB_SEARCH_USES
+}
+
+function createNativeWebSearchLimitError(limit: number): LocalHTTPError {
+  const clientBody = {
+    type: "error",
+    error: {
+      type: "invalid_request_error",
+      code: "web_search_limit_exceeded",
+      message: "The Copilot Messages request was rejected.",
+      param: "tools.web_search.max_uses",
+    },
+  }
+  return new LocalHTTPError(
+    `Native web search exceeded ${limit} uses.`,
+    Response.json(clientBody, { status: 400 }),
+    clientBody,
+  )
 }
 
 function recordUsage(
