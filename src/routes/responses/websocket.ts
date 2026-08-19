@@ -7,7 +7,6 @@ import type { RoutingAffinity } from "~/lib/routing-affinity"
 import type { NativeMessagesRequestOptions } from "~/routes/messages/native-handler"
 
 import { resolveRequestCredential } from "~/lib/credential-resolver"
-import { isHTTPError } from "~/lib/error"
 import {
   applyModelRedirect,
   formatModelRedirectResult,
@@ -237,8 +236,7 @@ export const responsesWebSocket = {
     } catch (error) {
       const terminal = classifyWebSocketTerminal(error, turn)
       const errorInspection = terminal.errorInspection
-      const errorMessage = getSafeWebSocketErrorMessage(error, errorInspection)
-      const normalized = normalizeWebSocketError(errorMessage, errorInspection)
+      const normalized = normalizeWebSocketError(errorInspection)
       finalizeResponsesWebSocketTurn(ws.data, turn, {
         error,
         ...terminal,
@@ -252,12 +250,7 @@ export const responsesWebSocket = {
         status: terminal.status,
       })
       try {
-        sendWebSocketError(ws, {
-          ...normalized,
-          ...(error instanceof WebSocketRequestError ?
-            { type: error.errorType }
-          : {}),
-        })
+        sendWebSocketError(ws, normalized)
       } catch {
         // Client already disconnected, nothing to do
       }
@@ -1140,29 +1133,23 @@ export function sendWebSocketError(
 }
 
 function normalizeWebSocketError(
-  fallbackMessage: string,
   inspection?: SafeHttpErrorInspection,
 ): WebSocketErrorFrameOptions {
-  if (inspection?.localClientBody) {
-    const local = localWebSocketError(inspection)
-    if (local) {
-      const code =
-        local.type === "invalid_request_error" ?
-          local.code
-        : mapHttpStatusToWebSocketErrorCode(inspection.status)
-      return {
-        code,
-        message: local.message,
-        ...(local.param ? { param: local.param } : {}),
-        status: inspection.status,
-        type: local.type,
-      }
+  if (inspection?.localError) {
+    const local = inspection.localError
+    const code = mapLocalWebSocketErrorCode(local, inspection.status)
+    return {
+      code,
+      message: local.message,
+      ...(local.param ? { param: local.param } : {}),
+      status: inspection.status,
+      type: local.type,
     }
   }
   if (inspection) {
     return {
       code: mapHttpStatusToWebSocketErrorCode(inspection.status),
-      message: fallbackMessage,
+      message: "Upstream request failed",
       status: inspection.status,
       type: "websocket_error",
     }
@@ -1170,62 +1157,30 @@ function normalizeWebSocketError(
 
   return {
     code: "internal_error",
-    message: fallbackMessage,
+    message: "Internal server error",
     status: 500,
     type: "websocket_error",
   }
 }
 
-function getSafeWebSocketErrorMessage(
-  error: unknown,
-  inspection?: SafeHttpErrorInspection,
+function mapLocalWebSocketErrorCode(
+  local: NonNullable<SafeHttpErrorInspection["localError"]>,
+  status: number,
 ): string {
-  if (inspection?.localClientBody) {
-    const local = localWebSocketError(inspection)
-    if (local) return local.message
-    return "Request rejected"
-  }
-  if (error instanceof WebSocketRequestError && inspection) {
-    return inspection.status < 500 ?
-        inspection.safeMessage
-      : "Upstream request failed"
-  }
-  if (inspection || isHTTPError(error)) return "Upstream request failed"
-  return "Internal server error"
-}
-
-function localWebSocketError(
-  inspection: SafeHttpErrorInspection,
-): { code: string; message: string; param?: string; type: string } | undefined {
-  const bodyError = inspection.localClientBody?.error
-  if (!isRecord(bodyError)) return undefined
   if (
-    typeof bodyError.type !== "string"
-    || !SAFE_LOCAL_WEBSOCKET_ERROR_TYPES.has(bodyError.type)
+    local.type === "session_affinity_error"
+    || local.type === "account_unavailable"
   ) {
-    return undefined
+    return mapHttpStatusToWebSocketErrorCode(status)
   }
   if (
-    typeof bodyError.code !== "string"
-    || typeof bodyError.message !== "string"
+    local.code === "compaction_payload_too_large"
+    || local.code === "responses_payload_too_large"
   ) {
-    return undefined
+    return "request_too_large"
   }
-  return {
-    code: bodyError.code,
-    message: bodyError.message,
-    ...(typeof bodyError.param === "string" ? { param: bodyError.param } : {}),
-    type: bodyError.type,
-  }
+  return local.code ?? mapHttpStatusToWebSocketErrorCode(status)
 }
-
-const SAFE_LOCAL_WEBSOCKET_ERROR_TYPES = new Set([
-  "account_unavailable",
-  "error",
-  "invalid_request_error",
-  "session_affinity_error",
-  "server_error",
-])
 
 function mapHttpStatusToWebSocketErrorCode(status: number): string {
   switch (status) {

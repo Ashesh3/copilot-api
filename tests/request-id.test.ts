@@ -996,8 +996,14 @@ test("uses a provided HTTP inspection for logical status and message", () => {
     lifecycle.finalize({
       error,
       errorInspection: {
+        localError: {
+          code: "invalid_value",
+          message: "The model field must be a non-empty string.",
+          param: "model",
+          type: "invalid_request_error",
+        },
         responseHeaders: {},
-        safeMessage: "Upstream request failed",
+        safeMessage: "The model field must be a non-empty string.",
         status: 429,
       },
       status: 500,
@@ -1007,7 +1013,8 @@ test("uses a provided HTTP inspection for logical status and message", () => {
 
     expect(diagnostics).toContain("REJECTED")
     expect(diagnostics).toContain("429")
-    expect(diagnostics).toContain("Upstream request failed")
+    expect(diagnostics).toContain("The model field must be a non-empty string.")
+    expect(diagnostics).not.toContain("Upstream request failed")
     expect(diagnostics).not.toContain(
       "provided-inspection-status-private-marker",
     )

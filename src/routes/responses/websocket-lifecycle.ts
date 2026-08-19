@@ -42,8 +42,6 @@ interface ResponsesWebSocketLifecycleData {
 }
 
 export class WebSocketRequestError extends LocalHTTPError {
-  readonly errorType: string
-
   constructor(message: string, status: number, errorType: string) {
     const clientBody = {
       error: {
@@ -53,7 +51,6 @@ export class WebSocketRequestError extends LocalHTTPError {
       },
     }
     super(message, Response.json(clientBody, { status }), clientBody)
-    this.errorType = errorType
   }
 }
 

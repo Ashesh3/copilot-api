@@ -20,7 +20,7 @@ import type {
 import type { ModelsResponse } from "../src/services/copilot/get-models"
 
 import { setConfigForTest } from "../src/lib/config"
-import { HTTPError } from "../src/lib/error"
+import { HTTPError, LocalHTTPError } from "../src/lib/error"
 import { isIpBlocked, resetIpSecurityForTest } from "../src/lib/ip-blocker"
 import { setModelRedirectsForTest } from "../src/lib/model-redirect"
 import { createRoutingTelemetryRequestState } from "../src/lib/request-session"
@@ -28,6 +28,10 @@ import {
   getRoutingAffinity,
   type RoutingAffinity,
 } from "../src/lib/routing-affinity"
+import {
+  getRoutingTelemetrySnapshot,
+  resetRoutingTelemetryForTest,
+} from "../src/lib/routing-telemetry"
 import { state } from "../src/lib/state"
 import { tokenPool } from "../src/lib/token-pool"
 import {
@@ -140,6 +144,7 @@ afterEach(() => {
   setModelRedirectsForTest([])
   setConfigForTest(null)
   resetIpSecurityForTest()
+  resetRoutingTelemetryForTest()
 })
 
 describe("extractResponsesPayload", () => {
@@ -656,6 +661,138 @@ describe("responses websocket message handling", () => {
         "Bearer websocket-alternate-token"
       : "Bearer websocket-bound-token",
     )
+  })
+
+  test("uses immutable safe local metadata across every WebSocket boundary", async () => {
+    state.accountType = "individual"
+    state.copilotToken = "copilot-token"
+    state.models = responsesCapableModels
+    const safeMessage =
+      "The selected Copilot model cannot accept this request without losing required protocol data."
+    const privateMarkers = [
+      "local-error-type-private-marker",
+      "local-error-message-private-marker",
+      "local-client-body-private-marker",
+    ]
+    let getterCalls = 0
+    queuedFetchHandlers.push(() => {
+      const clientBody = {
+        error: {
+          code: "endpoint_translation_unsupported",
+          message: safeMessage,
+          param: "opaque_reasoning",
+          type: "invalid_request_error",
+        },
+      }
+      const error = new LocalHTTPError(
+        safeMessage,
+        Response.json(clientBody, { status: 400 }),
+        clientBody,
+      ) as LocalHTTPError & { errorType?: string }
+      error.errorType = "invalid_request_error"
+      Object.defineProperty(error, "errorType", {
+        configurable: true,
+        get() {
+          getterCalls += 1
+          return privateMarkers[0]
+        },
+      })
+      Object.defineProperty(error, "message", {
+        configurable: true,
+        get() {
+          getterCalls += 1
+          return privateMarkers[1]
+        },
+      })
+      Object.defineProperty(error, "clientBody", {
+        configurable: true,
+        get() {
+          getterCalls += 1
+          return {
+            error: {
+              code: "private_code",
+              message: privateMarkers[2],
+              type: "server_error",
+            },
+          }
+        },
+      })
+      throw error
+    })
+    const ws = createTestWebSocket()
+    const errorSpy = spyOn(consola, "error")
+    const infoSpy = spyOn(console, "info").mockImplementation(() => undefined)
+    const sentryLogSpy = spyOn(Sentry.logger, "info")
+
+    try {
+      await responsesWebSocket.message(
+        ws,
+        JSON.stringify({
+          type: "response.create",
+          model: "gpt-5.4",
+          input: [],
+          tools: [],
+        }),
+      )
+      const frame = JSON.parse(ws.sent.at(-1) ?? "{}") as {
+        error?: { code?: string; message?: string; type?: string }
+        status?: number
+      }
+      const diagnostics = JSON.stringify([
+        ws.sent,
+        errorSpy.mock.calls,
+        infoSpy.mock.calls,
+        sentryLogSpy.mock.calls,
+      ])
+      const infoValues: Array<unknown> = infoSpy.mock.calls.flat()
+      const lifecycleLine = infoValues.find(
+        (value) => typeof value === "string" && value.includes("REJECTED"),
+      )
+      const sentryTerminalCall = sentryLogSpy.mock.calls.find(
+        ([message]) =>
+          typeof message === "string" && message.startsWith("REJECTED "),
+      )
+      const errorValues: Array<unknown> = errorSpy.mock.calls.flat()
+      const structuredLog = errorValues.find(
+        (value) => typeof value === "object" && value !== null,
+      )
+      const telemetry = getRoutingTelemetrySnapshot({
+        accounts: [],
+        multiToken: false,
+        window: "1h",
+      })
+
+      expect(frame).toMatchObject({
+        status: 400,
+        error: {
+          code: "endpoint_translation_unsupported",
+          message: safeMessage,
+          type: "invalid_request_error",
+        },
+      })
+      expect(lifecycleLine).toContain(safeMessage)
+      expect(sentryTerminalCall?.[1]).toMatchObject({
+        error: safeMessage,
+        status: 400,
+        terminalStatus: "REJECTED",
+      })
+      expect(structuredLog).toMatchObject({
+        code: "endpoint_translation_unsupported",
+        status: 400,
+      })
+      expect(telemetry.models[0]).toMatchObject({
+        model: "gpt-5.4",
+        requests: 1,
+      })
+      expect(getterCalls).toBe(0)
+      for (const marker of privateMarkers) {
+        expect(diagnostics).not.toContain(marker)
+      }
+    } finally {
+      sentryLogSpy.mockRestore()
+      infoSpy.mockRestore()
+      errorSpy.mockRestore()
+    }
   })
 
   test("streams native Responses SSE events as WebSocket JSON frames", async () => {
