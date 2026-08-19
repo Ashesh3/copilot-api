@@ -113,11 +113,10 @@ const attributionHeaderNames: Partial<
 
 function assignSanitizedHeader(
   headers: Record<string, string>,
-  name: string,
-  value: string | undefined,
+  options: { maxLength?: number; name: string; value: string | undefined },
 ): void {
-  const sanitized = sanitizeCopilotHeaderValue(value)
-  if (sanitized) headers[name] = sanitized
+  const sanitized = sanitizeCopilotHeaderValue(options.value, options.maxLength)
+  if (sanitized) headers[options.name] = sanitized
 }
 
 function assignAttributionHeaders(
@@ -136,18 +135,23 @@ function assignTypedOptionHeaders(
   headers: Record<string, string>,
   options: CopilotHeaderOptions | undefined,
 ): void {
-  assignSanitizedHeader(headers, "Anthropic-Beta", options?.anthropicBeta)
-  assignSanitizedHeader(headers, "anthropic-version", options?.anthropicVersion)
-  assignSanitizedHeader(
-    headers,
-    "Copilot-Session-Token",
-    options?.copilotSessionToken,
-  )
-  assignSanitizedHeader(
-    headers,
-    "X-Model-Provider-Preference",
-    options?.modelProviderPreference,
-  )
+  assignSanitizedHeader(headers, {
+    name: "Anthropic-Beta",
+    value: options?.anthropicBeta,
+  })
+  assignSanitizedHeader(headers, {
+    name: "anthropic-version",
+    value: options?.anthropicVersion,
+  })
+  assignSanitizedHeader(headers, {
+    maxLength: 16 * 1024,
+    name: "Copilot-Session-Token",
+    value: options?.copilotSessionToken,
+  })
+  assignSanitizedHeader(headers, {
+    name: "X-Model-Provider-Preference",
+    value: options?.modelProviderPreference,
+  })
 }
 
 export function copilotHeaders(

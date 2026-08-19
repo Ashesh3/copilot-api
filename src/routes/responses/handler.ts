@@ -9,6 +9,7 @@ import type { Model } from "~/services/copilot/get-models"
 import { getLastUsedAccountId } from "~/lib/account-router"
 import { awaitApproval } from "~/lib/approval"
 import { getConfig } from "~/lib/config"
+import { sessionTokenMatchesModel } from "~/lib/copilot-session-token"
 import {
   type EndpointRouteDecision,
   type EndpointRouteFailure,
@@ -587,6 +588,17 @@ const handleResponsesInner = async (
   const finalEffort = redirectedEffort ?? effectiveEffort
 
   applyResponsesModelFallback(c, payload)
+  const inboundSessionToken = c.req.header("copilot-session-token")
+  const copilotSessionToken =
+    (
+      sessionTokenMatchesModel({
+        token: inboundSessionToken,
+        requestedModel: baseModel,
+        finalModel: payload.model,
+      })
+    ) ?
+      inboundSessionToken
+    : undefined
 
   setRequestContext(c, {
     requestedModel,
@@ -617,6 +629,7 @@ const handleResponsesInner = async (
     return await handleWithAnthropicMessages(c, preparedPayload, {
       ...nativeOptions,
       requestedModel,
+      copilotSessionToken,
     })
   }
 
@@ -631,7 +644,10 @@ const handleResponsesInner = async (
     useFunctionApplyPatch(preparedPayload)
     reportResponsesEndpointFallback(c, preparedPayload.model, decision)
     setRequestContext(c, { provider: "Responses→ChatCompletions" })
-    return await handleWithChatCompletions(c, preparedPayload, requestedModel)
+    return await handleWithChatCompletions(c, preparedPayload, {
+      requestedModel,
+      copilotSessionToken,
+    })
   }
 
   const { vision, initiator } = getResponsesRequestOptions(preparedPayload)
@@ -660,6 +676,7 @@ const handleResponsesInner = async (
 
         try {
           const response = await createResponses(preparedPayload, {
+            copilotSessionToken,
             vision,
             initiator,
             prepared: true,
@@ -695,6 +712,7 @@ const handleResponsesInner = async (
                   response,
                   preparedPayload,
                   {
+                    copilotSessionToken,
                     vision,
                     initiator,
                     signal: c.req.raw.signal,
@@ -766,6 +784,7 @@ const handleResponsesInner = async (
                       completedResult,
                       preparedPayload,
                       {
+                        copilotSessionToken,
                         vision,
                         initiator,
                         signal: c.req.raw.signal,
@@ -820,6 +839,7 @@ const handleResponsesInner = async (
     }),
     async (span) => {
       const result = (await createResponses(preparedPayload, {
+        copilotSessionToken,
         vision,
         initiator,
         prepared: true,
@@ -853,6 +873,7 @@ const handleResponsesInner = async (
   const resolved =
     hadWebSearch ?
       await resolveResponsesWebSearchCalls(initialResult, preparedPayload, {
+        copilotSessionToken,
         vision,
         initiator,
         signal: c.req.raw.signal,
@@ -1919,7 +1940,7 @@ function setResponsesResultContext(c: Context, result: ResponsesResult): void {
 const handleWithChatCompletions = async (
   c: Context,
   payload: ResponsesPayload,
-  requestedModel?: string,
+  options: { requestedModel?: string; copilotSessionToken?: string } = {},
 ) => {
   const compaction = isResponsesCompactionRequest(payload)
   const fitted = compaction ? fitResponsesCompactionPayload(payload) : null
@@ -1935,7 +1956,7 @@ const handleWithChatCompletions = async (
   const ccPayload = responsesToChatCompletions(fallbackPayload, {
     preserveCustomToolContext: compaction,
   })
-  const responseModel = requestedModel ?? payload.model
+  const responseModel = options.requestedModel ?? payload.model
   const needsWebSearch =
     ccPayload.tools?.some((tool) => tool.function.name === "web_search")
     ?? false
@@ -1956,6 +1977,7 @@ const handleWithChatCompletions = async (
       async (span) => {
         const response = await createChatCompletions(ccPayload, {
           compaction,
+          copilotSessionToken: options.copilotSessionToken,
           signal: c.req.raw.signal,
         })
 
@@ -1970,9 +1992,11 @@ const handleWithChatCompletions = async (
           needsWebSearch ?
             await resolveWebSearchCalls(initialResponse, ccPayload, {
               abortSignal: c.req.raw.signal,
+              copilotSessionToken: options.copilotSessionToken,
               createCompletion: async (nextPayload) =>
                 (await createChatCompletions(nextPayload, {
                   compaction,
+                  copilotSessionToken: options.copilotSessionToken,
                   signal: c.req.raw.signal,
                 })) as ChatCompletionResponse,
             })
@@ -2016,6 +2040,7 @@ const handleWithChatCompletions = async (
     return await handleStreamingChatFallbackWebSearch(c, {
       ccPayload,
       compaction,
+      copilotSessionToken: options.copilotSessionToken,
       responseModel,
     })
   }
@@ -2037,6 +2062,7 @@ const handleWithChatCompletions = async (
       try {
         const response = await createChatCompletions(ccPayload, {
           compaction,
+          copilotSessionToken: options.copilotSessionToken,
           signal: c.req.raw.signal,
         })
 
@@ -2125,19 +2151,23 @@ async function handleStreamingChatFallbackWebSearch(
   options: {
     ccPayload: ChatCompletionsPayload
     compaction: boolean
+    copilotSessionToken?: string
     responseModel: string
   },
 ): Promise<Response> {
   const payload = { ...options.ccPayload, stream: false, stream_options: null }
   const initial = (await createChatCompletions(payload, {
     compaction: options.compaction,
+    copilotSessionToken: options.copilotSessionToken,
     signal: c.req.raw.signal,
   })) as ChatCompletionResponse
   const response = await resolveWebSearchCalls(initial, payload, {
     abortSignal: c.req.raw.signal,
+    copilotSessionToken: options.copilotSessionToken,
     createCompletion: async (nextPayload) =>
       (await createChatCompletions(nextPayload, {
         compaction: options.compaction,
+        copilotSessionToken: options.copilotSessionToken,
         signal: c.req.raw.signal,
       })) as ChatCompletionResponse,
   })

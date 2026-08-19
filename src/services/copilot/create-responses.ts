@@ -418,6 +418,7 @@ async function* sanitizeResponsesStream(response: Response): ResponsesStream {
 interface ResponsesRequestOptions {
   vision: boolean
   initiator: "agent" | "user"
+  copilotSessionToken?: string
   signal?: AbortSignal
   compaction?: boolean
   prepared?: boolean
@@ -501,6 +502,7 @@ export const createResponses = async (
     signal,
   })
   const headerOpts = {
+    copilotSessionToken: options.copilotSessionToken,
     vision: hasResponsesAttachment(preparedPayload),
     initiator,
   }

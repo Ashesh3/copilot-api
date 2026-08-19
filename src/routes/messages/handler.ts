@@ -16,6 +16,7 @@ import {
 } from "~/lib/account-router"
 import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
+import { sessionTokenMatchesModel } from "~/lib/copilot-session-token"
 import {
   createCustomProviderChatCompletions,
   resolveCustomProviderModel,
@@ -378,6 +379,18 @@ async function handleCompletionInner(
     })
   }
 
+  const inboundSessionToken = c.req.header("copilot-session-token")
+  const copilotSessionToken =
+    (
+      sessionTokenMatchesModel({
+        token: inboundSessionToken,
+        requestedModel: baseModel,
+        finalModel: anthropicPayload.model,
+      })
+    ) ?
+      inboundSessionToken
+    : undefined
+
   const selectedModel = state.models?.data.find(
     (m) => m.id === anthropicPayload.model,
   )
@@ -451,6 +464,7 @@ async function handleCompletionInner(
       requestedModel,
       originalStream: Boolean(anthropicPayload.stream),
       retryBudget,
+      copilotSessionToken,
       ...(initiatorOverride ? { initiatorOverride } : {}),
     }
     try {
@@ -493,6 +507,7 @@ async function handleCompletionInner(
 
   if (routeDecision.target === "/responses") {
     return await handleWithResponsesApi(c, anthropicPayload, {
+      copilotSessionToken,
       initiatorOverride,
       effortOverride,
       requestedModel,
@@ -500,6 +515,7 @@ async function handleCompletionInner(
   }
 
   return await handleWithChatCompletions(c, anthropicPayload, {
+    copilotSessionToken,
     initiatorOverride,
     effortOverride,
     requestedModel,
@@ -738,6 +754,7 @@ const handleWithChatCompletions = async (
   c: Context,
   anthropicPayload: AnthropicMessagesPayload,
   options?: {
+    copilotSessionToken?: string
     initiatorOverride?: "agent" | "user"
     effortOverride?: ReasoningEffort
     requestedModel?: string
@@ -790,12 +807,18 @@ const executeChatCompletions = async (
   c: Context,
   anthropicPayload: AnthropicMessagesPayload,
   options?: {
+    copilotSessionToken?: string
     initiatorOverride?: "agent" | "user"
     effortOverride?: ReasoningEffort
     requestedModel?: string
   },
 ) => {
-  const { initiatorOverride, effortOverride, requestedModel } = options ?? {}
+  const {
+    copilotSessionToken,
+    initiatorOverride,
+    effortOverride,
+    requestedModel,
+  } = options ?? {}
   const reasoningEnabled = Boolean(effortOverride || anthropicPayload.thinking)
 
   // In multi-token mode, reasoning_opaque is cryptographically tied to a
@@ -908,6 +931,7 @@ const executeChatCompletions = async (
       }),
       async (span) => {
         const response = (await createChatCompletions(finalPayload, {
+          copilotSessionToken,
           initiator: initiatorOverride,
           signal: c.req.raw.signal,
         })) as ChatCompletionResponse
@@ -928,6 +952,7 @@ const executeChatCompletions = async (
     const finalResponse =
       hadWebSearch ?
         await resolveWebSearchCalls(initialResponse, finalPayload, {
+          copilotSessionToken,
           initiatorOverride,
           abortSignal: c.req.raw.signal,
         })
@@ -976,6 +1001,7 @@ const executeChatCompletions = async (
         ])
         const preflush = await raceSsePreflush(
           createChatCompletions(finalPayload, {
+            copilotSessionToken,
             initiator: initiatorOverride,
             signal: upstreamSignal,
           }),
@@ -1025,6 +1051,7 @@ const executeChatCompletions = async (
                 const resolved = await withHeartbeatWhilePending(
                   Sentry.withActiveSpan(null, () =>
                     resolveWebSearchCalls(initialResp, finalPayload, {
+                      copilotSessionToken,
                       initiatorOverride,
                       abortSignal: upstreamSignal,
                     }),
@@ -1465,6 +1492,7 @@ const handleWithResponsesApi = async (
   c: Context,
   anthropicPayload: AnthropicMessagesPayload,
   options?: {
+    copilotSessionToken?: string
     initiatorOverride?: "agent" | "user"
     effortOverride?: ReasoningEffort
     requestedModel?: string
@@ -1512,12 +1540,18 @@ const executeResponsesApi = async (
   c: Context,
   anthropicPayload: AnthropicMessagesPayload,
   options?: {
+    copilotSessionToken?: string
     initiatorOverride?: "agent" | "user"
     effortOverride?: ReasoningEffort
     requestedModel?: string
   },
 ) => {
-  const { initiatorOverride, effortOverride, requestedModel } = options ?? {}
+  const {
+    copilotSessionToken,
+    initiatorOverride,
+    effortOverride,
+    requestedModel,
+  } = options ?? {}
   const reasoningEnabled = Boolean(effortOverride || anthropicPayload.thinking)
   if (!reasoningEnabled) {
     stripThinkingBlocksForMultiToken(anthropicPayload)
@@ -1557,6 +1591,7 @@ const executeResponsesApi = async (
 
         try {
           const response = await createResponses(responsesPayload, {
+            copilotSessionToken,
             vision,
             initiator: initiatorOverride ?? initiator,
             signal: c.req.raw.signal,
@@ -1614,6 +1649,7 @@ const executeResponsesApi = async (
                         initialRes,
                         responsesPayload,
                         {
+                          copilotSessionToken,
                           vision,
                           initiator: initiatorOverride ?? initiator,
                           signal: c.req.raw.signal,
@@ -1672,6 +1708,7 @@ const executeResponsesApi = async (
     }),
     async (span) => {
       const result = (await createResponses(responsesPayload, {
+        copilotSessionToken,
         vision,
         initiator: initiatorOverride ?? initiator,
         signal: c.req.raw.signal,
@@ -1703,6 +1740,7 @@ const executeResponsesApi = async (
   const resolved =
     hadWebSearch ?
       await resolveResponsesWebSearchCalls(initialResult, responsesPayload, {
+        copilotSessionToken,
         vision,
         initiator: initiatorOverride ?? initiator,
         signal: c.req.raw.signal,

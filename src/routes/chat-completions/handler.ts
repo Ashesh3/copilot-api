@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- protocol routing, streaming, and fallback paths share request context */
 import type { Context } from "hono"
 
 import * as Sentry from "@sentry/bun"
@@ -10,6 +11,7 @@ import type { Model } from "~/services/copilot/get-models"
 import { getLastUsedAccountId } from "~/lib/account-router"
 import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
+import { sessionTokenMatchesModel } from "~/lib/copilot-session-token"
 import {
   createCustomProviderChatCompletions,
   resolveCustomProviderModel,
@@ -111,24 +113,23 @@ async function parseChatRequestBody(
   }
 }
 
+// Route preparation intentionally stays together so model-scoped headers are
+// matched only after every payload/model transformation is complete.
+// eslint-disable-next-line max-lines-per-function
 async function handleCompletionInner(
   c: Context,
   rawPayload: ChatCompletionsPayload,
   nativeOptions: NativeMessagesRequestOptions,
 ) {
-  // Emit synthetic tool execution spans from tool results in message history
   emitChatCompletionsToolSpans(rawPayload.messages)
 
-  // Capture the originally requested model before any manipulation
   const requestedModel = rawPayload.model
 
-  // Parse model suffix to strip reasoning effort suffix (e.g. "gpt-5.3-codex:high" -> "gpt-5.3-codex")
   const { baseModel, reasoningEffort: suffixEffort } = parseModelSuffix(
     rawPayload.model,
   )
   rawPayload.model = baseModel
 
-  // Apply auto-replacements to the payload
   const { payload: replacedPayload, appliedRules } =
     await applyReplacementsToPayload(rawPayload)
 
@@ -161,7 +162,6 @@ async function handleCompletionInner(
     })
   }
 
-  // Apply user-configured silent model redirect (e.g. opus-4-7 -> opus-4-6)
   const { targetModel, reasoningEffort } = await resolveRedirectedModel(c, {
     model: normalizedModel,
     effort: requestedEffort,
@@ -173,7 +173,6 @@ async function handleCompletionInner(
     effort: reasoningEffort,
   })
 
-  // Normalize model name (e.g., claude-opus-4-5 -> claude-opus-4.5)
   let payload = {
     ...replacedPayload,
     model: targetModel,
@@ -197,6 +196,17 @@ async function handleCompletionInner(
   }
 
   payload = applyRoutableModelFallback(c, payload)
+  const inboundSessionToken = c.req.header("copilot-session-token")
+  const copilotSessionToken =
+    (
+      sessionTokenMatchesModel({
+        token: inboundSessionToken,
+        requestedModel: baseModel,
+        finalModel: payload.model,
+      })
+    ) ?
+      inboundSessionToken
+    : undefined
 
   consola.debug("Prepared Chat request", {
     messageCount: payload.messages.length,
@@ -231,7 +241,8 @@ async function handleCompletionInner(
     reasoningEffort,
     selectedModel,
     decision,
-    nativeOptions: { ...nativeOptions, requestedModel },
+    nativeOptions: { ...nativeOptions, requestedModel, copilotSessionToken },
+    copilotSessionToken,
   })
 }
 
@@ -244,6 +255,7 @@ async function dispatchCopilotCompletion(
     reasoningEffort?: ReasoningEffort
     selectedModel: Model | undefined
     nativeOptions: NativeMessagesRequestOptions
+    copilotSessionToken?: string
   },
 ) {
   const {
@@ -253,6 +265,7 @@ async function dispatchCopilotCompletion(
     reasoningEffort,
     selectedModel,
     nativeOptions,
+    copilotSessionToken,
   } = options
   if (decision.translated) recordChatEndpointFallback(c, payload, decision)
 
@@ -262,6 +275,7 @@ async function dispatchCopilotCompletion(
         payload,
         requestedModel,
         reasoningEffort,
+        copilotSessionToken,
       })
     }
     case "/v1/messages": {
@@ -275,7 +289,10 @@ async function dispatchCopilotCompletion(
       if (payload.tools?.some((tool) => isWebSearchToolType(tool))) {
         convertHostedWebSearchTools(payload)
       }
-      return await executeRequest(c, payload, requestedModel)
+      return await executeRequest(c, payload, {
+        requestedModel,
+        copilotSessionToken,
+      })
     }
     default: {
       throw new Error("Unsupported Chat endpoint route")
@@ -422,7 +439,7 @@ async function handleCustomProviderStreamingResponse(
 const executeRequest = async (
   c: Context,
   payload: ChatCompletionsPayload & { model: string },
-  requestedModel?: string,
+  options: { requestedModel?: string; copilotSessionToken?: string } = {},
 ) => {
   const needsWebSearch =
     payload.tools?.some((tool) => isChatWebSearchFunctionTool(tool)) ?? false
@@ -436,7 +453,10 @@ const executeRequest = async (
         const { processedPayload, response } =
           await createChatCompletionsWithProcessedPayload(
             payload as ChatCompletionsPayload & { stream?: false | null },
-            { signal: c.req.raw.signal },
+            {
+              copilotSessionToken: options.copilotSessionToken,
+              signal: c.req.raw.signal,
+            },
           )
 
         // Track which account handled this request (multi-token mode)
@@ -449,22 +469,23 @@ const executeRequest = async (
           needsWebSearch ?
             await resolveWebSearchCalls(response, processedPayload, {
               abortSignal: c.req.raw.signal,
+              copilotSessionToken: options.copilotSessionToken,
             })
           : response
 
         return handleNonStreamingResponse(c, finalResponse, {
           span,
-          requestedModel,
+          requestedModel: options.requestedModel,
         })
       },
     )
   }
 
   if (needsWebSearch) {
-    return await executeStreamingWebSearchRequest(c, payload, requestedModel)
+    return await executeStreamingWebSearchRequest(c, payload, options)
   }
 
-  return await handleStreamingResponse(c, payload, requestedModel)
+  return await handleStreamingResponse(c, payload, options)
 }
 
 async function executeCustomProviderWebSearchRequest(
@@ -530,7 +551,7 @@ function disableParallelWebSearch(payload: ChatCompletionsPayload): void {
 async function executeStreamingWebSearchRequest(
   c: Context,
   payload: ChatCompletionsPayload & { model: string },
-  requestedModel?: string,
+  options: { requestedModel?: string; copilotSessionToken?: string },
 ) {
   const bufferedPayload = { ...payload, stream: false as const }
   return await Sentry.startSpan(
@@ -542,16 +563,20 @@ async function executeStreamingWebSearchRequest(
     async (span) => {
       const { processedPayload, response: initial } =
         await createChatCompletionsWithProcessedPayload(bufferedPayload, {
+          copilotSessionToken: options.copilotSessionToken,
           signal: c.req.raw.signal,
         })
       const finalResponse = await resolveWebSearchCalls(
         initial,
         processedPayload,
-        { abortSignal: c.req.raw.signal },
+        {
+          abortSignal: c.req.raw.signal,
+          copilotSessionToken: options.copilotSessionToken,
+        },
       )
       const response =
-        requestedModel ?
-          { ...finalResponse, model: requestedModel }
+        options.requestedModel ?
+          { ...finalResponse, model: options.requestedModel }
         : finalResponse
       setChatCompletionSpanResult(span, response)
       return streamSSE(c, async (stream) => {
@@ -761,7 +786,7 @@ const handleNonStreamingResponse = (
 const handleStreamingResponse = (
   c: Context,
   payload: ChatCompletionsPayload & { model: string },
-  requestedModel?: string,
+  options: { requestedModel?: string; copilotSessionToken?: string },
 ) => {
   consola.debug("Streaming response")
   return Sentry.startSpanManual(
@@ -780,6 +805,7 @@ const handleStreamingResponse = (
 
       try {
         const response = await createChatCompletions(payload, {
+          copilotSessionToken: options.copilotSessionToken,
           signal: c.req.raw.signal,
         })
 
@@ -792,7 +818,7 @@ const handleStreamingResponse = (
         if (isNonStreaming(response)) {
           const result = handleNonStreamingResponse(c, response, {
             span,
-            requestedModel,
+            requestedModel: options.requestedModel,
           })
           finishSpan()
           return result
@@ -819,8 +845,11 @@ const handleStreamingResponse = (
                     outputTokens: parsed.usage.completion_tokens,
                   })
                 }
-                if (requestedModel && parsed.model !== requestedModel) {
-                  parsed.model = requestedModel
+                if (
+                  options.requestedModel
+                  && parsed.model !== options.requestedModel
+                ) {
+                  parsed.model = options.requestedModel
                   outChunk = { ...chunk, data: JSON.stringify(parsed) }
                 }
               }

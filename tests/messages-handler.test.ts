@@ -15,6 +15,9 @@ let lastUpstreamHeaders: Headers | undefined
 let lastUpstreamUrl: string | undefined
 let upstreamResponseOverride: Response | undefined
 
+const sessionToken = (payload: Record<string, unknown>): string =>
+  `header.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.signature`
+
 const upstreamMaxReasoningModels: ModelsResponse = {
   object: "list",
   data: [
@@ -699,6 +702,77 @@ test("forwards native Messages headers when a dual-endpoint model selects native
   expect(lastUpstreamHeaders?.get("x-model-provider-preference")).toBe(
     "anthropic",
   )
+})
+
+test("forwards only matching model-scoped session tokens on Messages inference", async () => {
+  state.models = nativeMessagesModels
+  const matchingToken = sessionToken({ selected_model: "claude-opus-4.8" })
+  await server.request("/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "copilot-session-token": matchingToken,
+    },
+    body: JSON.stringify({
+      model: "claude-opus-4.8",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "hello" }],
+    }),
+  })
+  expect(lastUpstreamHeaders?.get("copilot-session-token")).toBe(matchingToken)
+
+  for (const token of [
+    sessionToken({ selected_model: "different-model" }),
+    "malformed-token",
+  ]) {
+    await server.request("/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "copilot-session-token": token,
+      },
+      body: JSON.stringify({
+        model: "claude-opus-4.8",
+        max_tokens: 64,
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    })
+    expect(lastUpstreamHeaders?.get("copilot-session-token")).toBeNull()
+    expect(lastUpstreamHeaders?.get("authorization")).toBe(
+      "Bearer copilot-token",
+    )
+  }
+
+  const redirectedModel = structuredClone(nativeMessagesModels.data[0])
+  redirectedModel.id = "claude-opus-4.7"
+  redirectedModel.name = "Claude Opus 4.7"
+  state.models = { object: "list", data: [redirectedModel] }
+  setModelRedirectsForTest([
+    {
+      id: "messages-session-token-redirect",
+      sourceModel: "claude-opus-4.8",
+      targetModel: "claude-opus-4.7",
+      enabled: true,
+    },
+  ])
+  const redirectedToken = sessionToken({
+    selected_model: "claude-opus-4.7",
+    available_models: ["claude-opus-4.8", "claude-opus-4.7"],
+  })
+  await server.request("/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "copilot-session-token": redirectedToken,
+    },
+    body: JSON.stringify({
+      model: "claude-opus-4.8",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "hello" }],
+    }),
+  })
+  expect(lastUpstreamPayload?.model).toBe("claude-opus-4.7")
+  expect(lastUpstreamHeaders?.get("copilot-session-token")).toBeNull()
 })
 
 test("does not forward native Messages headers to a Responses branch", async () => {

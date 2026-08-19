@@ -80,6 +80,7 @@ export const createAnthropicMessages = async (
     anthropicBeta?: string
     anthropicVersion?: string
     compaction?: boolean
+    copilotSessionToken?: string
     initiator?: "agent" | "user"
     modelProviderPreference?: string
     preserveValidatedControls?: boolean
@@ -130,6 +131,7 @@ async function dispatchAnthropicMessages(options: {
   options:
     | {
         compaction?: boolean
+        copilotSessionToken?: string
         routedAccountPin?: RoutedAccountPin
         retryBudget?: RetryBudget
         signal?: AbortSignal
@@ -171,7 +173,12 @@ async function dispatchAnthropicMessages(options: {
     },
     {
       modelId,
-      headerOptions: { vision, initiator, ...preparedHeaders },
+      headerOptions: {
+        copilotSessionToken: options.options?.copilotSessionToken,
+        vision,
+        initiator,
+        ...preparedHeaders,
+      },
       maxHttpRetryDelaySeconds:
         stream ? PRE_HEADER_MAX_DELAY_SECONDS : undefined,
       routedAccountPin: options.options?.routedAccountPin,

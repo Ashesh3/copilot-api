@@ -65,12 +65,14 @@ import {
 } from "./translation-fidelity"
 
 interface ResponsesFallbackOptions {
+  copilotSessionToken?: string
   payload: ChatCompletionsPayload & { model: string }
   requestedModel: string
   reasoningEffort?: ReasoningEffort
 }
 
 interface PreparedResponsesFallback {
+  copilotSessionToken?: string
   initiator: "agent" | "user"
   originalPayload: ChatCompletionsPayload & { model: string }
   payload: ResponsesPayload
@@ -292,6 +294,7 @@ function prepareResponsesFallback(
   addPromptCaching(options.payload.messages, options.payload.tools ?? undefined)
 
   return {
+    copilotSessionToken: options.copilotSessionToken,
     payload: chatCompletionsToResponses(
       options.payload,
       options.reasoningEffort,
@@ -311,6 +314,7 @@ async function executeNonStreamingResponsesFallback(
     createSentrySpanOptions(options),
     async (span) => {
       const requestOptions = {
+        copilotSessionToken: options.copilotSessionToken,
         vision: options.vision,
         initiator: options.initiator,
         signal: c.req.raw.signal,
@@ -355,6 +359,7 @@ function executeStreamingResponsesFallback(
 
       try {
         const response = await createResponses(options.payload, {
+          copilotSessionToken: options.copilotSessionToken,
           vision: options.vision,
           initiator: options.initiator,
           signal: c.req.raw.signal,
@@ -413,6 +418,7 @@ async function executeStreamingMcpWebSearchFallback(
     downstreamAbort.signal,
   ])
   const requestOptions = {
+    copilotSessionToken: options.copilotSessionToken,
     vision: options.vision,
     initiator: options.initiator,
     signal: upstreamSignal,

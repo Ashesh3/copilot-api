@@ -1,3 +1,5 @@
+/* eslint-disable max-lines -- route and transport coverage share singleton fetch fixtures */
+import * as Sentry from "@sentry/bun"
 import {
   afterAll,
   beforeAll,
@@ -14,6 +16,12 @@ import type { ChatCompletionsPayload } from "../src/services/copilot/create-chat
 import type { ModelsResponse } from "../src/services/copilot/get-models"
 
 import { forwardError, LocalHTTPError } from "../src/lib/error"
+import {
+  clearLlmDebugLogs,
+  getLlmDebugLog,
+  listLlmDebugLogs,
+} from "../src/lib/llm-debug-log"
+import { setModelRedirectsForTest } from "../src/lib/model-redirect"
 import { setModelSettingsForTest } from "../src/lib/model-settings"
 import {
   getRoutingAffinity,
@@ -43,6 +51,10 @@ const capturedAffinities: Array<RoutingAffinity | undefined> = []
 const capturedAuthorization: Array<string | undefined> = []
 let metadataAffinityFetchCount = 0
 let lastRequestBody: Record<string, unknown> | undefined
+let lastRequestHeaders: Headers | undefined
+
+const sessionToken = (payload: Record<string, unknown>): string =>
+  `header.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.signature`
 
 function createLegacyMessagesModel(
   model: string,
@@ -100,6 +112,7 @@ const fetchMock = mock(
       metadataAffinityFetchCount += 1
     }
     lastRequestBody = body
+    lastRequestHeaders = new Headers(opts.headers)
     void opts
     return queuedResponses.shift() ?? createDefaultResponse()
   },
@@ -122,11 +135,153 @@ beforeEach(() => {
   queuedResponses.length = 0
   capturedAffinities.length = 0
   lastRequestBody = undefined
+  lastRequestHeaders = undefined
   capturedAuthorization.length = 0
   metadataAffinityFetchCount = 0
   state.isMultiToken = originalIsMultiToken
   setModelSettingsForTest([])
+  setModelRedirectsForTest([])
+  clearLlmDebugLogs()
   resetRoutingTelemetryForTest()
+})
+
+test("forwards only matching model-scoped session tokens on Chat inference", async () => {
+  state.models = {
+    object: "list",
+    data: [createLegacyMessagesModel("gpt-test")],
+  }
+  const matchingToken = sessionToken({ selected_model: "gpt-test" })
+  await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "copilot-session-token": matchingToken,
+    },
+    body: JSON.stringify({
+      model: "gpt-test",
+      messages: [{ role: "user", content: "hello" }],
+    }),
+  })
+  expect(lastRequestHeaders?.get("copilot-session-token")).toBe(matchingToken)
+  const matchingDebug = getLlmDebugLog(listLlmDebugLogs().entries[0]?.id ?? "")
+  expect(matchingDebug?.request.headers["Copilot-Session-Token"]).toBe(
+    matchingToken,
+  )
+
+  const longMatchingToken = sessionToken({
+    selected_model: "gpt-test",
+    padding: "x".repeat(2 * 1024),
+  })
+  await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "copilot-session-token": longMatchingToken,
+    },
+    body: JSON.stringify({
+      model: "gpt-test",
+      messages: [{ role: "user", content: "hello" }],
+    }),
+  })
+  expect(lastRequestHeaders?.get("copilot-session-token")).toBe(
+    longMatchingToken,
+  )
+
+  for (const token of [
+    sessionToken({ selected_model: "different-model" }),
+    "malformed-token",
+  ]) {
+    await server.request("/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "copilot-session-token": token,
+      },
+      body: JSON.stringify({
+        model: "gpt-test",
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    })
+    expect(lastRequestHeaders?.get("copilot-session-token")).toBeNull()
+    expect(lastRequestHeaders?.get("authorization")).toBe("Bearer test-token")
+  }
+
+  setModelRedirectsForTest([
+    {
+      id: "chat-session-token-redirect",
+      sourceModel: "gpt-test",
+      targetModel: "gpt-redirected",
+      enabled: true,
+    },
+  ])
+  state.models = {
+    object: "list",
+    data: [createLegacyMessagesModel("gpt-redirected")],
+  }
+  const redirectedToken = sessionToken({
+    selected_model: "gpt-redirected",
+    available_models: ["gpt-test", "gpt-redirected"],
+  })
+  await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "copilot-session-token": redirectedToken,
+    },
+    body: JSON.stringify({
+      model: "gpt-test",
+      messages: [{ role: "user", content: "hello" }],
+    }),
+  })
+  expect(lastRequestBody?.model).toBe("gpt-redirected")
+  expect(lastRequestHeaders?.get("copilot-session-token")).toBeNull()
+})
+
+test("keeps inference session tokens out of ordinary error diagnostics", async () => {
+  state.models = {
+    object: "list",
+    data: [createLegacyMessagesModel("gpt-test")],
+  }
+  const privateToken = sessionToken({ selected_model: "gpt-test" })
+  queuedResponses.push(
+    Response.json(
+      { error: { code: "invalid_request_body", message: privateToken } },
+      { status: 400 },
+    ),
+  )
+  const errorSpy = spyOn(consola, "error")
+  const captureException = spyOn(Sentry, "captureException").mockImplementation(
+    () => "event-id",
+  )
+
+  try {
+    const response = await server.request("/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "copilot-session-token": privateToken,
+      },
+      body: JSON.stringify({
+        model: "gpt-test",
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    })
+    const body = await response.text()
+
+    expect(response.status).toBe(400)
+    expect(
+      JSON.stringify([body, errorSpy.mock.calls, captureException.mock.calls]),
+    ).not.toContain(privateToken)
+
+    const rawDebug = getLlmDebugLog(listLlmDebugLogs().entries[0]?.id ?? "")
+    expect(rawDebug?.request.headers["Copilot-Session-Token"]).toBe(
+      privateToken,
+    )
+    expect(rawDebug?.response?.body).toContain(privateToken)
+  } finally {
+    errorSpy.mockRestore()
+    captureException.mockRestore()
+  }
 })
 
 test("returns a safe local Chat error for a null JSON body", async () => {

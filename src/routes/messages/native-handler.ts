@@ -56,6 +56,7 @@ const MAX_NATIVE_WEB_SEARCH_USES = 8
 
 export interface NativeMessagesRequestOptions
   extends AnthropicRequestHeaderOptions {
+  copilotSessionToken?: string
   initiatorOverride?: "agent" | "user"
   originalStream?: boolean
   requestedModel?: string
@@ -88,6 +89,7 @@ export async function createNativeMessages(
     anthropicBeta: nativeOptions.anthropicBeta,
     anthropicVersion: nativeOptions.anthropicVersion,
     compaction: dispatchOptions?.compaction,
+    copilotSessionToken: nativeOptions.copilotSessionToken,
     initiator: nativeOptions.initiatorOverride,
     modelProviderPreference: nativeOptions.modelProviderPreference,
     preserveValidatedControls: dispatchOptions?.preserveValidatedControls,

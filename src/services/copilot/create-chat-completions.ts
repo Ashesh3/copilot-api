@@ -336,6 +336,7 @@ interface StreamingRetryOptions {
 
 interface ChatCompletionsRequestOptions {
   compaction?: boolean
+  copilotSessionToken?: string
   initiator?: "agent" | "user"
   signal?: AbortSignal
 }
@@ -356,6 +357,7 @@ interface ChatCompletionsCoreResult {
 }
 
 interface ChatHeaderOptions {
+  copilotSessionToken?: string
   vision: boolean
   initiator: "agent" | "user"
 }
@@ -434,6 +436,7 @@ const dispatchWithImageFallback = async (options: {
     options.compaction,
   )
   const retryHeaderOptions = {
+    copilotSessionToken: options.headerOptions.copilotSessionToken,
     vision: false,
     initiator: options.headerOptions.initiator,
   }
@@ -516,7 +519,11 @@ async function createChatCompletionsCore(
     normalizedPayload.messages,
     options?.initiator,
   )
-  const headerOpts = { vision, initiator }
+  const headerOpts = {
+    copilotSessionToken: options?.copilotSessionToken,
+    vision,
+    initiator,
+  }
 
   normalizePayload(normalizedPayload)
   injectJsonInstruction(normalizedPayload)

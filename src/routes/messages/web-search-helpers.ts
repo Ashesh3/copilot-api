@@ -61,12 +61,18 @@ export const resolveWebSearchCalls = async (
   options: {
     initiatorOverride?: "agent" | "user"
     abortSignal?: AbortSignal
+    copilotSessionToken?: string
     createCompletion?: (
       payload: ChatCompletionsPayload,
     ) => Promise<ChatCompletionResponse>
   } = {},
 ): Promise<ChatCompletionResponse> => {
-  const { initiatorOverride, abortSignal, createCompletion } = options
+  const {
+    initiatorOverride,
+    abortSignal,
+    copilotSessionToken,
+    createCompletion,
+  } = options
   let current = response
   let currentPayload = payload
   let iteration = 0
@@ -123,6 +129,7 @@ export const resolveWebSearchCalls = async (
           createCompletion ?
             await createCompletion(currentPayload)
           : ((await createChatCompletions(currentPayload, {
+              copilotSessionToken,
               initiator: initiatorOverride,
               signal: abortSignal,
             })) as ChatCompletionResponse)
@@ -147,6 +154,7 @@ export const resolveResponsesWebSearchCalls = async (
   requestOptions: {
     vision: boolean
     initiator: "agent" | "user"
+    copilotSessionToken?: string
     signal?: AbortSignal
     createResponse?: (payload: ResponsesPayload) => Promise<ResponsesResult>
   },

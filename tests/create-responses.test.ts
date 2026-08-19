@@ -964,6 +964,7 @@ let lastRequestBody: Record<string, unknown> | undefined
 let requestBodies: Array<Record<string, unknown>>
 let queuedResponses: Array<Response>
 let capturedAffinity: RoutingAffinity | undefined
+let lastUpstreamHeaders: Headers | undefined
 const capturedAuthorization: Array<string | undefined> = []
 
 const responsesCapableModels = {
@@ -1028,6 +1029,7 @@ function parseRequestBody(init?: RequestInit): Record<string, unknown> {
 
 const fetchMock = mock((_url: string, init?: RequestInit) => {
   capturedAffinity = getRoutingAffinity()
+  lastUpstreamHeaders = new Headers(init?.headers)
   capturedAuthorization.push(
     new Headers(init?.headers).get("authorization") ?? undefined,
   )
@@ -1056,6 +1058,7 @@ beforeEach(() => {
   requestBodies = []
   queuedResponses = []
   capturedAffinity = undefined
+  lastUpstreamHeaders = undefined
   capturedAuthorization.length = 0
   state.models = originalModels
   state.isMultiToken = originalIsMultiToken
@@ -1066,6 +1069,70 @@ beforeEach(() => {
   resetRoutingTelemetryForTest()
   setModelRedirectsForTest([])
   setModelSettingsForTest([])
+})
+
+const sessionToken = (payload: Record<string, unknown>): string =>
+  `header.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.signature`
+
+test("forwards only matching model-scoped session tokens on Responses inference", async () => {
+  state.models = responsesCapableModels
+  const matchingToken = sessionToken({ selected_model: "gpt-4o" })
+  await server.request("/v1/responses", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "copilot-session-token": matchingToken,
+    },
+    body: JSON.stringify({ model: "gpt-4o", input: "hello" }),
+  })
+  expect(lastUpstreamHeaders?.get("copilot-session-token")).toBe(matchingToken)
+
+  for (const token of [
+    sessionToken({ selected_model: "different-model" }),
+    "malformed-token",
+  ]) {
+    await server.request("/v1/responses", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "copilot-session-token": token,
+      },
+      body: JSON.stringify({ model: "gpt-4o", input: "hello" }),
+    })
+    expect(lastUpstreamHeaders?.get("copilot-session-token")).toBeNull()
+    expect(lastUpstreamHeaders?.get("authorization")).toBe(
+      "Bearer copilot-token",
+    )
+  }
+
+  const redirectedModel = {
+    ...responsesCapableModels.data[0],
+    id: "gpt-redirected",
+    name: "GPT Redirected",
+  }
+  state.models = { object: "list", data: [redirectedModel] }
+  setModelRedirectsForTest([
+    {
+      id: "responses-session-token-redirect",
+      sourceModel: "gpt-4o",
+      targetModel: "gpt-redirected",
+      enabled: true,
+    },
+  ])
+  const redirectedToken = sessionToken({
+    selected_model: "gpt-redirected",
+    available_models: ["gpt-4o", "gpt-redirected"],
+  })
+  await server.request("/v1/responses", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "copilot-session-token": redirectedToken,
+    },
+    body: JSON.stringify({ model: "gpt-4o", input: "hello" }),
+  })
+  expect(lastRequestBody?.model).toBe("gpt-redirected")
+  expect(lastUpstreamHeaders?.get("copilot-session-token")).toBeNull()
 })
 
 test("routes repeated Responses metadata sessions to stable accounts", async () => {
