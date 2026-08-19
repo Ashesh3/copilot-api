@@ -303,3 +303,122 @@ test.each([
     diagnostics.restore()
   }
 })
+
+const validRuntimeEvents: Array<Record<string, unknown> & { kind: string }> = [
+  {
+    kind: "endpoint_route",
+    source: "responses",
+    target: "/responses",
+    translated: false,
+    reason: "native",
+  },
+  {
+    kind: "request_normalization",
+    protocol: "responses",
+    classes: ["json_schema"],
+  },
+  { kind: "messages_beta", count: 1 },
+  { kind: "websocket_continuation", outcome: "new_thread" },
+  { kind: "response_metadata", headerCount: 1, quotaSnapshotCount: 0 },
+]
+
+function hostileInheritedField(kind: string): string {
+  switch (kind) {
+    case "endpoint_route": {
+      return "source"
+    }
+    case "request_normalization": {
+      return "protocol"
+    }
+    case "messages_beta": {
+      return "count"
+    }
+    case "websocket_continuation": {
+      return "outcome"
+    }
+    case "response_metadata": {
+      return "headerCount"
+    }
+    default: {
+      return "kind"
+    }
+  }
+}
+
+test.each(validRuntimeEvents)(
+  "does not inherit hostile __proto__ fields for $kind",
+  (validEvent) => {
+    const diagnostics = installDiagnosticSpies()
+    const privateMarker = `hostile-${validEvent.kind}-proto-private`
+    const inheritedField = hostileInheritedField(validEvent.kind)
+    const event = { ...validEvent } as Record<string, unknown>
+    Reflect.deleteProperty(event, inheritedField)
+    Object.defineProperty(event, "__proto__", {
+      enumerable: true,
+      value: Object.defineProperty({}, inheritedField, {
+        get() {
+          throw new Error(privateMarker)
+        },
+      }),
+    })
+
+    try {
+      expect(() => recordCopilotContractEvent(event as never)).not.toThrow()
+      const output = JSON.stringify({
+        breadcrumbs: diagnostics.breadcrumb.mock.calls,
+        logs: diagnostics.debug.mock.calls,
+      })
+      expect(output).not.toContain(privateMarker)
+    } finally {
+      diagnostics.restore()
+    }
+  },
+)
+
+test.each(validRuntimeEvents)(
+  "ignores dangerous and nested hostile values for $kind",
+  (validEvent) => {
+    const diagnostics = installDiagnosticSpies()
+    const privateMarker = `hostile-${validEvent.kind}-nested-private`
+    const revoked = Proxy.revocable({}, {})
+    revoked.revoke()
+    const nestedProxy = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error(privateMarker)
+        },
+      },
+    )
+    const event = { ...validEvent } as Record<string, unknown>
+    Object.defineProperties(event, {
+      constructor: { enumerable: true, value: nestedProxy },
+      prototype: { enumerable: true, value: revoked.proxy },
+      nested: {
+        enumerable: true,
+        value: Object.defineProperty({}, "private", {
+          get() {
+            throw new Error(privateMarker)
+          },
+        }),
+      },
+      accessor: {
+        enumerable: true,
+        get() {
+          throw new Error(privateMarker)
+        },
+      },
+    })
+
+    try {
+      expect(() => recordCopilotContractEvent(event as never)).not.toThrow()
+      const output = JSON.stringify({
+        breadcrumbs: diagnostics.breadcrumb.mock.calls,
+        logs: diagnostics.debug.mock.calls,
+      })
+      expect(output).not.toContain(privateMarker)
+    } finally {
+      diagnostics.restore()
+    }
+  },
+)

@@ -310,9 +310,15 @@ function getSafeDataProperties(
     const prototype: unknown = Object.getPrototypeOf(value)
     if (prototype !== Object.prototype && prototype !== null) return undefined
     const descriptors = Object.getOwnPropertyDescriptors(value)
-    const result: Record<string, unknown> = {}
+    const result = Object.create(null) as Record<string, unknown>
     for (const [name, descriptor] of Object.entries(descriptors)) {
-      if ("value" in descriptor) result[name] = descriptor.value
+      if (!("value" in descriptor)) continue
+      Object.defineProperty(result, name, {
+        configurable: true,
+        enumerable: true,
+        value: descriptor.value,
+        writable: true,
+      })
     }
     return result
   } catch {
