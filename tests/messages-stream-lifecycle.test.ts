@@ -24,8 +24,12 @@ let delayedStreamController:
   | undefined
 let delayedUpstreamAborted = false
 let lastUpstreamPath: string | undefined
-let streamMode: "immediate" | "native-metadata" | "stall-body" | "stall-fetch" =
-  "stall-body"
+let streamMode:
+  | "finish-then-invalid"
+  | "immediate"
+  | "native-metadata"
+  | "stall-body"
+  | "stall-fetch" = "stall-body"
 
 const nativeMessagesModels: ModelsResponse = {
   object: "list",
@@ -137,6 +141,27 @@ function createNativeMetadataStream(): Response {
   )
 }
 
+function createFinishThenInvalidStream(): Response {
+  const finishChunk = {
+    id: "chatcmpl-finish-error",
+    object: "chat.completion.chunk",
+    created: 1,
+    model: "gpt-4o",
+    choices: [
+      {
+        index: 0,
+        delta: { role: "assistant" },
+        finish_reason: "stop",
+        logprobs: null,
+      },
+    ],
+  }
+  return new Response(
+    `data: ${JSON.stringify(finishChunk)}\n\ndata: {invalid-json\n\n`,
+    { headers: { "content-type": "text/event-stream" } },
+  )
+}
+
 function createStalledStream(signal?: AbortSignal | null): Response {
   signal?.addEventListener(
     "abort",
@@ -177,6 +202,9 @@ const fetchMock = mock((_url: string | URL | Request, init?: RequestInit) => {
     })
   }
   if (streamMode === "immediate") return createImmediateStream()
+  if (streamMode === "finish-then-invalid") {
+    return createFinishThenInvalidStream()
+  }
   if (streamMode === "native-metadata") return createNativeMetadataStream()
   return createStalledStream(init?.signal)
 })
@@ -322,6 +350,20 @@ test("keeps the Anthropic event order unchanged when the first event is immediat
     "message_delta",
     "message_stop",
   ])
+})
+
+test("does not emit a successful terminal pair when the upstream stream errors", async () => {
+  streamMode = "finish-then-invalid"
+  const response = await server.request("/v1/messages", createMessagesRequest())
+  const body = await response.text()
+  const eventTypes = Array.from(
+    body.matchAll(/^event: (.+)$/gm),
+    (match) => match[1],
+  )
+
+  expect(eventTypes).toContain("error")
+  expect(eventTypes).not.toContain("message_delta")
+  expect(eventTypes).not.toContain("message_stop")
 })
 
 test("commits a keepalive while native Anthropic waits for upstream headers", async () => {

@@ -159,6 +159,7 @@ export function createFallbackMessageDeltaEvents(
         state.pendingCopilotUsage,
       ),
     )
+    state.messageDeltaSent = true
     return events
   }
 
@@ -170,6 +171,7 @@ export function createFallbackMessageDeltaEvents(
         state.pendingCopilotUsage,
       ),
     )
+    state.messageDeltaSent = true
     return events
   }
 
@@ -205,18 +207,6 @@ export function translateChunkToAnthropicEvents(
       prompt_tokens: chunk.usage.prompt_tokens,
       completion_tokens: chunk.usage.completion_tokens,
       cached_tokens: chunk.usage.prompt_tokens_details?.cached_tokens ?? 0,
-    }
-
-    // If we already saw finish_reason but deferred message_delta, send it now
-    if (state.pendingFinishReason && !state.messageDeltaSent) {
-      events.push(
-        ...createMessageDeltaEvents(
-          state.pendingFinishReason,
-          state.pendingUsage,
-          state.pendingCopilotUsage,
-        ),
-      )
-      state.messageDeltaSent = true
     }
   }
 
@@ -401,36 +391,7 @@ export function translateChunkToAnthropicEvents(
       state.contentBlockOpen = false
     }
 
-    // Check if we have usage data (from this chunk or previously captured)
-    const hasUsage = chunk.usage || state.pendingUsage
-
-    if (hasUsage) {
-      // We have usage - send message_delta immediately
-      const usage = {
-        prompt_tokens:
-          chunk.usage?.prompt_tokens ?? state.pendingUsage?.prompt_tokens ?? 0,
-        completion_tokens:
-          chunk.usage?.completion_tokens
-          ?? state.pendingUsage?.completion_tokens
-          ?? 0,
-        cached_tokens:
-          chunk.usage?.prompt_tokens_details?.cached_tokens
-          ?? state.pendingUsage?.cached_tokens
-          ?? 0,
-      }
-
-      events.push(
-        ...createMessageDeltaEvents(
-          choice.finish_reason,
-          usage,
-          state.pendingCopilotUsage,
-        ),
-      )
-      state.messageDeltaSent = true
-    } else {
-      // No usage yet - defer message_delta until we receive usage in a later chunk
-      state.pendingFinishReason = choice.finish_reason
-    }
+    state.pendingFinishReason = choice.finish_reason
   }
 
   return events

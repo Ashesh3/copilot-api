@@ -468,13 +468,18 @@ describe("OpenAI to Anthropic Streaming Response Translation", () => {
     const events = [startChunk, finalChunk].flatMap((chunk) =>
       translateChunkToAnthropicEvents(chunk, state),
     )
+    const terminalEvents =
+      streamTranslation.createFallbackMessageDeltaEvents(state)
 
     expect(
       events.find((event) => event.type === "message_start"),
     ).toMatchObject({ message: { recommended_auto_tier: "eco" } })
     expect(
       events.find((event) => event.type === "message_delta"),
-    ).toMatchObject({ copilot_usage: { total_nano_aiu: 123 } })
+    ).toBeUndefined()
+    expect(terminalEvents[0]).toMatchObject({
+      copilot_usage: { total_nano_aiu: 123 },
+    })
   })
 
   test("carries Chat metadata through simulated Anthropic streams", () => {
@@ -555,7 +560,8 @@ describe("OpenAI to Anthropic Streaming Response Translation", () => {
     const usageEvents = translateChunkToAnthropicEvents(usageChunk, state)
 
     expect(finishEvents).toEqual([])
-    expect(usageEvents).toEqual([
+    expect(usageEvents).toEqual([])
+    expect(streamTranslation.createFallbackMessageDeltaEvents(state)).toEqual([
       {
         type: "message_delta",
         delta: { stop_reason: "end_turn", stop_sequence: null },
@@ -612,7 +618,10 @@ describe("OpenAI to Anthropic Streaming Response Translation", () => {
     }
 
     expect(translateChunkToAnthropicEvents(usageChunk, state)).toEqual([])
-    expect(translateChunkToAnthropicEvents(finishChunk, state)).toMatchObject([
+    expect(translateChunkToAnthropicEvents(finishChunk, state)).toEqual([])
+    expect(
+      streamTranslation.createFallbackMessageDeltaEvents(state),
+    ).toMatchObject([
       {
         type: "message_delta",
         usage: { input_tokens: 7, output_tokens: 4 },
@@ -658,6 +667,141 @@ describe("OpenAI to Anthropic Streaming Response Translation", () => {
       },
       { type: "message_stop" },
     ])
+  })
+
+  test.each([
+    {
+      name: "finish then usage",
+      chunks: [{ finish: true }, { usage: { prompt: 5, completion: 3 } }],
+      expectedUsage: { input_tokens: 5, output_tokens: 3 },
+    },
+    {
+      name: "usage then finish",
+      chunks: [{ usage: { prompt: 7, completion: 4 } }, { finish: true }],
+      expectedUsage: { input_tokens: 7, output_tokens: 4 },
+    },
+    {
+      name: "usage with finish then late Copilot metadata",
+      chunks: [
+        { finish: true, usage: { prompt: 9, completion: 6 } },
+        { copilotUsage: { total_nano_aiu: 901 } },
+      ],
+      expectedUsage: { input_tokens: 9, output_tokens: 6 },
+      expectedCopilotUsage: { total_nano_aiu: 901 },
+    },
+    {
+      name: "Copilot metadata then finish",
+      chunks: [{ copilotUsage: { total_nano_aiu: 345 } }, { finish: true }],
+      expectedUsage: { input_tokens: 0, output_tokens: 0 },
+      expectedCopilotUsage: { total_nano_aiu: 345 },
+    },
+    {
+      name: "finish only",
+      chunks: [{ finish: true }],
+      expectedUsage: { input_tokens: 0, output_tokens: 0 },
+    },
+  ])(
+    "finalizes exactly once after stream exhaustion for $name",
+    ({ chunks, expectedCopilotUsage, expectedUsage }) => {
+      const orderingChunks = chunks as ReadonlyArray<{
+        copilotUsage?: { total_nano_aiu: number }
+        finish?: boolean
+        usage?: { completion: number; prompt: number }
+      }>
+      const state: AnthropicStreamState = {
+        messageStartSent: true,
+        contentBlockIndex: 0,
+        contentBlockOpen: false,
+        toolCalls: {},
+      }
+      const streamedEvents = orderingChunks.flatMap((item, index) => {
+        const chunk = {
+          id: "cmpl-ordering",
+          object: "chat.completion.chunk",
+          created: index,
+          model: "gpt-current",
+          choices:
+            item.finish ?
+              [
+                {
+                  index: 0,
+                  delta: {},
+                  finish_reason: "stop",
+                  logprobs: null,
+                },
+              ]
+            : [],
+          ...(item.usage ?
+            {
+              usage: {
+                prompt_tokens: item.usage.prompt,
+                completion_tokens: item.usage.completion,
+                total_tokens: item.usage.prompt + item.usage.completion,
+              },
+            }
+          : {}),
+          ...(item.copilotUsage ? { copilot_usage: item.copilotUsage } : {}),
+        } as ChatCompletionChunk & { copilot_usage?: unknown }
+        return translateChunkToAnthropicEvents(chunk, state)
+      })
+
+      expect(
+        streamedEvents.filter(
+          (event) =>
+            event.type === "message_delta" || event.type === "message_stop",
+        ),
+      ).toEqual([])
+
+      const terminalEvents =
+        streamTranslation.createFallbackMessageDeltaEvents(state)
+      expect(terminalEvents).toHaveLength(2)
+      expect(terminalEvents[0]).toMatchObject({
+        type: "message_delta",
+        usage: expectedUsage,
+        ...(expectedCopilotUsage ?
+          { copilot_usage: expectedCopilotUsage }
+        : {}),
+      })
+      if (!expectedCopilotUsage) {
+        expect(terminalEvents[0]).not.toHaveProperty("copilot_usage")
+      }
+      expect(terminalEvents[1]).toEqual({ type: "message_stop" })
+      expect(streamTranslation.createFallbackMessageDeltaEvents(state)).toEqual(
+        [],
+      )
+    },
+  )
+
+  test("emits content deltas before terminal finalization", () => {
+    const state: AnthropicStreamState = {
+      messageStartSent: false,
+      contentBlockIndex: 0,
+      contentBlockOpen: false,
+      toolCalls: {},
+    }
+    const contentChunk: ChatCompletionChunk = {
+      id: "cmpl-content-immediate",
+      object: "chat.completion.chunk",
+      created: 1,
+      model: "gpt-current",
+      choices: [
+        {
+          index: 0,
+          delta: { role: "assistant", content: "hello" },
+          finish_reason: null,
+          logprobs: null,
+        },
+      ],
+    }
+
+    expect(translateChunkToAnthropicEvents(contentChunk, state)).toMatchObject([
+      { type: "message_start" },
+      { type: "content_block_start" },
+      { type: "content_block_delta", delta: { text: "hello" } },
+    ])
+    expect(streamTranslation.createFallbackMessageDeltaEvents(state)).toEqual(
+      [],
+    )
   })
 
   test("should translate a simple text stream correctly", () => {
