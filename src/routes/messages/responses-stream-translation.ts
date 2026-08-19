@@ -420,6 +420,9 @@ const handleResponseCompleted = (
         stop_sequence: anthropic.stop_sequence,
       },
       usage: anthropic.usage,
+      ...(anthropic.copilot_usage !== undefined ?
+        { copilot_usage: anthropic.copilot_usage }
+      : {}),
     },
     { type: "message_stop" },
   )
@@ -467,6 +470,9 @@ const messageStart = (
   state: ResponsesStreamState,
   response: ResponsesResult,
 ): Array<AnthropicStreamEventData> => {
+  const metadata = response as ResponsesResult & {
+    recommended_auto_tier?: "eco" | "balanced"
+  }
   state.messageStartSent = true
   const inputCachedTokens = response.usage?.input_tokens_details?.cached_tokens
   const inputTokens =
@@ -488,6 +494,9 @@ const messageStart = (
           cache_read_input_tokens: inputCachedTokens ?? 0,
           cache_creation_input_tokens: 0,
         },
+        ...(metadata.recommended_auto_tier !== undefined ?
+          { recommended_auto_tier: metadata.recommended_auto_tier }
+        : {}),
       },
     },
   ]

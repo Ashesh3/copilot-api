@@ -313,6 +313,8 @@ export interface AnthropicStreamState {
     completion_tokens: number
     cached_tokens: number
   }
+  pendingCopilotUsage?: unknown
+  pendingRecommendedAutoTier?: "eco" | "balanced"
   // Track finish_reason to defer message_delta until we have usage
   pendingFinishReason?: "stop" | "length" | "tool_calls" | "content_filter"
   // Track if message_delta was already sent

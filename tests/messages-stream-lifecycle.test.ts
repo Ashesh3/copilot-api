@@ -15,6 +15,7 @@ import { setModelRedirectsForTest } from "../src/lib/model-redirect"
 import { setModelSettingsForTest } from "../src/lib/model-settings"
 import { setSsePreflushDeadlineForTest } from "../src/lib/sse-lifecycle"
 import { state } from "../src/lib/state"
+import { trackMessageDelta } from "../src/routes/messages/native-handler"
 import { server } from "../src/server"
 
 const originalFetch = globalThis.fetch
@@ -23,7 +24,8 @@ let delayedStreamController:
   | undefined
 let delayedUpstreamAborted = false
 let lastUpstreamPath: string | undefined
-let streamMode: "immediate" | "stall-body" | "stall-fetch" = "stall-body"
+let streamMode: "immediate" | "native-metadata" | "stall-body" | "stall-fetch" =
+  "stall-body"
 
 const nativeMessagesModels: ModelsResponse = {
   object: "list",
@@ -93,6 +95,48 @@ function createImmediateStream(): Response {
   )
 }
 
+function createNativeMetadataStream(): Response {
+  const messageStart = {
+    type: "message_start",
+    message: {
+      id: "msg_1",
+      type: "message",
+      role: "assistant",
+      model: "claude-current",
+      content: [],
+      stop_reason: null,
+      stop_sequence: null,
+      usage: { input_tokens: 5, output_tokens: 0 },
+      recommended_auto_tier: "eco",
+      future_message_field: { preserved: true },
+    },
+    future_event_field: "start-metadata",
+  }
+  const messageDelta = {
+    type: "message_delta",
+    delta: { stop_reason: "end_turn" },
+    usage: {
+      output_tokens: 3,
+      cache_read_input_tokens: 2,
+      cache_creation_input_tokens: 1,
+      cache_creation: { ephemeral_5m_input_tokens: 1 },
+      future_usage_field: true,
+    },
+    copilot_usage: { total_nano_aiu: 123 },
+    future_event_field: "delta-metadata",
+  }
+  return new Response(
+    [
+      `event: message_start\ndata: ${JSON.stringify(messageStart)}`,
+      `event: message_delta\ndata: ${JSON.stringify(messageDelta)}`,
+      'event: message_stop\ndata: {"type":"message_stop"}',
+      "data: [DONE]",
+      "",
+    ].join("\n\n"),
+    { headers: { "content-type": "text/event-stream" } },
+  )
+}
+
 function createStalledStream(signal?: AbortSignal | null): Response {
   signal?.addEventListener(
     "abort",
@@ -132,9 +176,9 @@ const fetchMock = mock((_url: string | URL | Request, init?: RequestInit) => {
       init?.signal?.addEventListener("abort", rejectAsAborted, { once: true })
     })
   }
-  return streamMode === "immediate" ?
-      createImmediateStream()
-    : createStalledStream(init?.signal)
+  if (streamMode === "immediate") return createImmediateStream()
+  if (streamMode === "native-metadata") return createNativeMetadataStream()
+  return createStalledStream(init?.signal)
 })
 
 function requireBody(response: Response): ReadableStream<Uint8Array> {
@@ -296,4 +340,79 @@ test("commits a keepalive while native Anthropic waits for upstream headers", as
   expect(new TextDecoder().decode(first.value)).toBe(": keepalive\n\n")
   await reader.cancel()
   expect(await waitForUpstreamAbort()).toBe(true)
+})
+
+test("forwards native Messages metadata verbatim except for the requested model", async () => {
+  streamMode = "native-metadata"
+  state.models = nativeMessagesModels
+
+  const response = await server.request(
+    "/v1/messages",
+    createNativeMessagesRequest(),
+  )
+  const body = await response.text()
+  const payloads = Array.from(
+    body.matchAll(/^data: (\{.*\})$/gm),
+    (match) => JSON.parse(match[1]) as Record<string, unknown>,
+  )
+
+  expect(lastUpstreamPath).toBe("/v1/messages")
+  expect(payloads).toEqual([
+    {
+      type: "message_start",
+      message: {
+        id: "msg_1",
+        type: "message",
+        role: "assistant",
+        model: "claude-opus-4.8",
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: 5, output_tokens: 0 },
+        recommended_auto_tier: "eco",
+        future_message_field: { preserved: true },
+      },
+      future_event_field: "start-metadata",
+    },
+    {
+      type: "message_delta",
+      delta: { stop_reason: "end_turn" },
+      usage: {
+        output_tokens: 3,
+        cache_read_input_tokens: 2,
+        cache_creation_input_tokens: 1,
+        cache_creation: { ephemeral_5m_input_tokens: 1 },
+        future_usage_field: true,
+      },
+      copilot_usage: { total_nano_aiu: 123 },
+      future_event_field: "delta-metadata",
+    },
+    { type: "message_stop" },
+  ])
+  expect(body).not.toContain("[DONE]")
+})
+
+test("tracks cumulative native cache usage without rebuilding the frame", () => {
+  const usage = { input: 5, output: 0, cached: 0, created: 0 }
+  const frame = JSON.stringify({
+    type: "message_delta",
+    delta: { stop_reason: "end_turn" },
+    usage: {
+      output_tokens: 3,
+      cache_read_input_tokens: 2,
+      cache_creation_input_tokens: 1,
+      cache_creation: { ephemeral_5m_input_tokens: 1 },
+    },
+    copilot_usage: { total_nano_aiu: 123 },
+  })
+
+  trackMessageDelta(frame, usage)
+
+  expect(usage).toEqual({ input: 5, output: 3, cached: 2, created: 1 })
+  expect(JSON.parse(frame)).toMatchObject({
+    usage: {
+      cache_creation: { ephemeral_5m_input_tokens: 1 },
+    },
+    copilot_usage: { total_nano_aiu: 123 },
+  })
 })

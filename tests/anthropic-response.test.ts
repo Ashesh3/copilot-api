@@ -1,3 +1,4 @@
+/* eslint-disable max-lines */
 import { describe, test, expect } from "bun:test"
 import { z } from "zod"
 
@@ -5,6 +6,7 @@ import type {
   ChatCompletionChunk,
   ChatCompletionResponse,
 } from "~/services/copilot/create-chat-completions"
+import type { ResponsesResult } from "~/services/copilot/create-responses"
 
 import {
   type AnthropicContentBlockDeltaEvent,
@@ -14,6 +16,7 @@ import {
   type AnthropicStreamState,
 } from "~/routes/messages/anthropic-types"
 import { translateToAnthropic } from "~/routes/messages/non-stream-translation"
+import { translateResponsesResultToAnthropic } from "~/routes/messages/responses-translation"
 import * as streamTranslation from "~/routes/messages/stream-translation"
 import { translateChunkToAnthropicEvents } from "~/routes/messages/stream-translation"
 
@@ -119,7 +122,72 @@ test("types and preserves unknown fields in native Messages deltas", () => {
   }
 })
 
+// eslint-disable-next-line max-lines-per-function
 describe("OpenAI to Anthropic Non-Streaming Response Translation", () => {
+  test("preserves optional Chat response metadata in the Anthropic result", () => {
+    const response = {
+      id: "chatcmpl-meta",
+      object: "chat.completion",
+      created: 1,
+      model: "gpt-current",
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: "hello" },
+          finish_reason: "stop",
+          logprobs: null,
+        },
+      ],
+      usage: {
+        prompt_tokens: 5,
+        completion_tokens: 3,
+        total_tokens: 8,
+      },
+      recommended_auto_tier: "eco",
+      copilot_usage: { total_nano_aiu: 123 },
+    } as ChatCompletionResponse & {
+      recommended_auto_tier: "eco"
+      copilot_usage: { total_nano_aiu: number }
+    }
+
+    expect(translateToAnthropic(response)).toMatchObject({
+      recommended_auto_tier: "eco",
+      copilot_usage: { total_nano_aiu: 123 },
+    })
+  })
+
+  test("preserves optional Responses metadata in the Anthropic result", () => {
+    const response = {
+      id: "resp-meta",
+      object: "response",
+      created_at: 1,
+      model: "gpt-current",
+      output: [],
+      output_text: "hello",
+      status: "completed",
+      usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8 },
+      error: null,
+      incomplete_details: null,
+      instructions: null,
+      metadata: null,
+      parallel_tool_calls: true,
+      temperature: null,
+      tool_choice: "auto",
+      tools: [],
+      top_p: null,
+      recommended_auto_tier: "balanced",
+      copilot_usage: { total_nano_aiu: 456 },
+    } as ResponsesResult & {
+      recommended_auto_tier: "balanced"
+      copilot_usage: { total_nano_aiu: number }
+    }
+
+    expect(translateResponsesResultToAnthropic(response)).toMatchObject({
+      recommended_auto_tier: "balanced",
+      copilot_usage: { total_nano_aiu: 456 },
+    })
+  })
+
   test("types and preserves current native Messages response extensions", () => {
     const response: AnthropicResponse = {
       id: "msg-current",
@@ -350,6 +418,100 @@ describe("OpenAI to Anthropic Streaming Response Translation", () => {
       annotations: [{ type: "citation", title: "doc" }],
       usage: { completion_tokens: 12 },
     })
+  })
+
+  test("carries Chat recommendation and Copilot usage into Anthropic events", () => {
+    const state: AnthropicStreamState = {
+      messageStartSent: false,
+      contentBlockIndex: 0,
+      contentBlockOpen: false,
+      toolCalls: {},
+    }
+    const startChunk = {
+      id: "cmpl-meta-stream",
+      object: "chat.completion.chunk",
+      created: 1,
+      model: "gpt-current",
+      choices: [
+        {
+          index: 0,
+          delta: { role: "assistant" },
+          finish_reason: null,
+          logprobs: null,
+        },
+      ],
+      recommended_auto_tier: "eco",
+    } as ChatCompletionChunk & { recommended_auto_tier: "eco" }
+    const finalChunk = {
+      id: "cmpl-meta-stream",
+      object: "chat.completion.chunk",
+      created: 1,
+      model: "gpt-current",
+      choices: [
+        {
+          index: 0,
+          delta: {},
+          finish_reason: "stop",
+          logprobs: null,
+        },
+      ],
+      usage: {
+        prompt_tokens: 5,
+        completion_tokens: 3,
+        total_tokens: 8,
+      },
+      copilot_usage: { total_nano_aiu: 123 },
+    } as ChatCompletionChunk & {
+      copilot_usage: { total_nano_aiu: number }
+    }
+
+    const events = [startChunk, finalChunk].flatMap((chunk) =>
+      translateChunkToAnthropicEvents(chunk, state),
+    )
+
+    expect(
+      events.find((event) => event.type === "message_start"),
+    ).toMatchObject({ message: { recommended_auto_tier: "eco" } })
+    expect(
+      events.find((event) => event.type === "message_delta"),
+    ).toMatchObject({ copilot_usage: { total_nano_aiu: 123 } })
+  })
+
+  test("carries Chat metadata through simulated Anthropic streams", () => {
+    const response = {
+      id: "chatcmpl-simulated-meta",
+      object: "chat.completion",
+      created: 1,
+      model: "gpt-current",
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: "hello" },
+          finish_reason: "stop",
+          logprobs: null,
+        },
+      ],
+      usage: {
+        prompt_tokens: 5,
+        completion_tokens: 3,
+        total_tokens: 8,
+      },
+      recommended_auto_tier: "balanced",
+      copilot_usage: { total_nano_aiu: 456 },
+    } as ChatCompletionResponse & {
+      recommended_auto_tier: "balanced"
+      copilot_usage: { total_nano_aiu: number }
+    }
+
+    const events =
+      streamTranslation.translateResponseToAnthropicEvents(response)
+
+    expect(
+      events.find((event) => event.type === "message_start"),
+    ).toMatchObject({ message: { recommended_auto_tier: "balanced" } })
+    expect(
+      events.find((event) => event.type === "message_delta"),
+    ).toMatchObject({ copilot_usage: { total_nano_aiu: 456 } })
   })
 
   test("should translate a simple text stream correctly", () => {

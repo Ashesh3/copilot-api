@@ -70,6 +70,13 @@ type NativeMessagesDispatchOptions = {
   signal?: AbortSignal
 }
 
+export interface NativeMessageUsage {
+  cached: number
+  created: number
+  input: number
+  output: number
+}
+
 export async function createNativeMessages(
   payload: AnthropicMessagesPayload,
   nativeOptions: NativeMessagesRequestOptions,
@@ -103,7 +110,7 @@ async function consumeNativeMessageStream(
   response: AsyncIterable<AnthropicStreamChunk>,
   state: {
     requestedModel: string | undefined
-    usage: { cached: number; input: number; output: number }
+    usage: NativeMessageUsage
   },
 ): Promise<string> {
   const { requestedModel, usage } = state
@@ -235,7 +242,7 @@ async function streamNativeMessages(
 
         return streamSSE(c, async (stream) => {
           stream.onAbort(() => downstreamAbort.abort())
-          const usage = { input: 0, output: 0, cached: 0 }
+          const usage = { input: 0, output: 0, cached: 0, created: 0 }
           let responseText = ""
 
           try {
@@ -264,12 +271,12 @@ async function streamNativeMessages(
             await emitAnthropicStreamError(stream, error)
           } finally {
             setRequestContext(c, {
-              inputTokens: usage.input + usage.cached,
+              inputTokens: usage.input + usage.cached + usage.created,
               outputTokens: usage.output,
             })
             streamSpan.setAttribute(
               "gen_ai.usage.input_tokens",
-              usage.input + usage.cached,
+              usage.input + usage.cached + usage.created,
             )
             streamSpan.setAttribute("gen_ai.usage.output_tokens", usage.output)
             if (usage.cached > 0) {
@@ -437,11 +444,15 @@ function recordUsage(
 ): void {
   if (!usage) return
   const cached = usage.cache_read_input_tokens ?? 0
+  const created = usage.cache_creation_input_tokens ?? 0
   setRequestContext(c, {
-    inputTokens: usage.input_tokens + cached,
+    inputTokens: usage.input_tokens + cached + created,
     outputTokens: usage.output_tokens,
   })
-  span.setAttribute("gen_ai.usage.input_tokens", usage.input_tokens + cached)
+  span.setAttribute(
+    "gen_ai.usage.input_tokens",
+    usage.input_tokens + cached + created,
+  )
   span.setAttribute("gen_ai.usage.output_tokens", usage.output_tokens)
   if (cached > 0) {
     span.setAttribute("gen_ai.usage.input_tokens.cached", cached)
@@ -457,7 +468,7 @@ function collectResponseText(response: AnthropicResponse): string {
 function rewriteMessageStart(
   data: string,
   requestedModel: string | undefined,
-  usage: { input: number; output: number; cached: number },
+  usage: NativeMessageUsage,
 ): string {
   try {
     const parsed = JSON.parse(data) as {
@@ -467,6 +478,7 @@ function rewriteMessageStart(
           input_tokens?: number
           output_tokens?: number
           cache_read_input_tokens?: number
+          cache_creation_input_tokens?: number
         }
       }
     }
@@ -474,10 +486,16 @@ function rewriteMessageStart(
       usage.input = parsed.message.usage.input_tokens ?? 0
       usage.output = parsed.message.usage.output_tokens ?? 0
       usage.cached = parsed.message.usage.cache_read_input_tokens ?? 0
+      usage.created = parsed.message.usage.cache_creation_input_tokens ?? 0
     }
     if (requestedModel && parsed.message?.model) {
-      parsed.message.model = requestedModel
-      return JSON.stringify(parsed)
+      return JSON.stringify({
+        ...parsed,
+        message: {
+          ...parsed.message,
+          model: requestedModel,
+        },
+      })
     }
   } catch {
     return data
@@ -485,19 +503,30 @@ function rewriteMessageStart(
   return data
 }
 
-function trackMessageDelta(
+export function trackMessageDelta(
   data: string,
-  usage: { input: number; output: number; cached: number },
+  usage: NativeMessageUsage,
 ): void {
   try {
     const parsed = JSON.parse(data) as {
-      usage?: { output_tokens?: number; input_tokens?: number }
+      usage?: {
+        output_tokens?: number
+        input_tokens?: number
+        cache_read_input_tokens?: number
+        cache_creation_input_tokens?: number
+      }
     }
     if (parsed.usage?.output_tokens !== undefined) {
       usage.output = parsed.usage.output_tokens
     }
     if (parsed.usage?.input_tokens !== undefined) {
       usage.input = parsed.usage.input_tokens
+    }
+    if (parsed.usage?.cache_read_input_tokens !== undefined) {
+      usage.cached = parsed.usage.cache_read_input_tokens
+    }
+    if (parsed.usage?.cache_creation_input_tokens !== undefined) {
+      usage.created = parsed.usage.cache_creation_input_tokens
     }
   } catch {
     /* ignore */

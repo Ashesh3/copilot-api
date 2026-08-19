@@ -470,6 +470,10 @@ const convertAnthropicToolChoice = (
 export const translateResponsesResultToAnthropic = (
   response: ResponsesResult,
 ): AnthropicResponse => {
+  const metadata = response as ResponsesResult & {
+    copilot_usage?: unknown
+    recommended_auto_tier?: "eco" | "balanced"
+  }
   const contentBlocks = mapOutputToAnthropicContent(response.output)
   const usage = mapResponsesUsage(response)
   let anthropicContent = fallbackContentBlocks(response.output_text)
@@ -488,6 +492,12 @@ export const translateResponsesResultToAnthropic = (
     stop_reason: stopReason,
     stop_sequence: null,
     usage,
+    ...(metadata.copilot_usage !== undefined ?
+      { copilot_usage: metadata.copilot_usage }
+    : {}),
+    ...(metadata.recommended_auto_tier !== undefined ?
+      { recommended_auto_tier: metadata.recommended_auto_tier }
+    : {}),
   }
 }
 

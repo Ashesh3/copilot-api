@@ -2,6 +2,8 @@ import { expect, test } from "bun:test"
 
 import type { AnthropicContentBlockDeltaEvent } from "../src/routes/messages/anthropic-types"
 import type {
+  ResponseCompletedEvent,
+  ResponseCreatedEvent,
   ResponseErrorEvent,
   ResponseFailedEvent,
   ResponseReasoningTextDeltaEvent,
@@ -32,6 +34,52 @@ test("translates Responses reasoning_text deltas to Anthropic thinking deltas", 
     type: "thinking_delta",
     thinking: "raw reasoning",
   })
+})
+
+test("preserves Responses recommendation and Copilot usage in Anthropic events", () => {
+  const state = createResponsesStreamState()
+  const response = {
+    id: "resp-meta",
+    object: "response",
+    created_at: 1,
+    model: "gpt-current",
+    output: [],
+    output_text: "",
+    status: "completed",
+    usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8 },
+    error: null,
+    incomplete_details: null,
+    instructions: null,
+    metadata: null,
+    parallel_tool_calls: true,
+    temperature: null,
+    tool_choice: "auto",
+    tools: [],
+    top_p: null,
+    recommended_auto_tier: "balanced",
+    copilot_usage: { total_nano_aiu: 456 },
+  } as ResponseCreatedEvent["response"] & {
+    recommended_auto_tier: "balanced"
+    copilot_usage: { total_nano_aiu: number }
+  }
+  const created: ResponseCreatedEvent = {
+    type: "response.created",
+    sequence_number: 1,
+    response,
+  }
+  const completed: ResponseCompletedEvent = {
+    type: "response.completed",
+    sequence_number: 2,
+    response,
+  }
+
+  expect(translateResponsesStreamEvent(created, state)).toMatchObject([
+    { message: { recommended_auto_tier: "balanced" } },
+  ])
+  expect(translateResponsesStreamEvent(completed, state)).toMatchObject([
+    { copilot_usage: { total_nano_aiu: 456 } },
+    { type: "message_stop" },
+  ])
 })
 
 test.each([

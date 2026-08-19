@@ -98,6 +98,7 @@ function createMessageDeltaEvents(
     completion_tokens: number
     cached_tokens: number
   },
+  copilotUsage?: unknown,
 ): Array<AnthropicStreamEventData> {
   const stopReason = mapOpenAIStopReasonToAnthropic(finishReason)
   // Anthropic input_tokens = uncached tokens only
@@ -116,6 +117,7 @@ function createMessageDeltaEvents(
         cache_creation_input_tokens: 0,
         cache_read_input_tokens: usage.cached_tokens,
       },
+      ...(copilotUsage !== undefined ? { copilot_usage: copilotUsage } : {}),
     },
     {
       type: "message_stop",
@@ -150,12 +152,24 @@ export function createFallbackMessageDeltaEvents(
 
   // If we have a pending finish_reason, send message_delta with whatever usage we have
   if (state.pendingFinishReason) {
-    events.push(...createMessageDeltaEvents(state.pendingFinishReason, usage))
+    events.push(
+      ...createMessageDeltaEvents(
+        state.pendingFinishReason,
+        usage,
+        state.pendingCopilotUsage,
+      ),
+    )
     return events
   }
 
   if (Object.keys(state.toolCalls).length > 0) {
-    events.push(...createMessageDeltaEvents("tool_calls", usage))
+    events.push(
+      ...createMessageDeltaEvents(
+        "tool_calls",
+        usage,
+        state.pendingCopilotUsage,
+      ),
+    )
     return events
   }
 
@@ -173,6 +187,16 @@ export function translateChunkToAnthropicEvents(
 
   if (copilotMetadata) {
     consola.debug("Copilot chunk metadata received")
+  }
+  const metadataChunk = chunk as ChatCompletionChunk & {
+    copilot_usage?: unknown
+    recommended_auto_tier?: "eco" | "balanced"
+  }
+  if (metadataChunk.copilot_usage !== undefined) {
+    state.pendingCopilotUsage = metadataChunk.copilot_usage
+  }
+  if (metadataChunk.recommended_auto_tier !== undefined) {
+    state.pendingRecommendedAutoTier = metadataChunk.recommended_auto_tier
   }
 
   // Capture usage from any chunk that has it (may come before, with, or after finish_reason)
@@ -232,6 +256,9 @@ export function translateChunkToAnthropicEvents(
           cache_creation_input_tokens: 0,
           cache_read_input_tokens: usage.cached_tokens,
         },
+        ...(state.pendingRecommendedAutoTier !== undefined ?
+          { recommended_auto_tier: state.pendingRecommendedAutoTier }
+        : {}),
       },
     })
     state.messageStartSent = true
@@ -391,7 +418,13 @@ export function translateChunkToAnthropicEvents(
           ?? 0,
       }
 
-      events.push(...createMessageDeltaEvents(choice.finish_reason, usage))
+      events.push(
+        ...createMessageDeltaEvents(
+          choice.finish_reason,
+          usage,
+          state.pendingCopilotUsage,
+        ),
+      )
       state.messageDeltaSent = true
     } else {
       // No usage yet - defer message_delta until we receive usage in a later chunk
@@ -439,10 +472,10 @@ export function translateResponseToAnthropicEvents(
   )
   contentBlockIndex = addTextContentEvents(events, choice, contentBlockIndex)
   addToolCallEvents(events, choice, contentBlockIndex)
-  addMessageDeltaAndStopEvents(events, choice, {
-    inputTokens,
-    outputTokens,
-    cachedTokens,
+  addMessageDeltaAndStopEvents(events, {
+    choice,
+    copilotUsage: getChatCopilotUsage(response),
+    usage: { inputTokens, outputTokens, cachedTokens },
   })
 
   return events
@@ -459,6 +492,9 @@ function createMessageStartEvent(
   options: MessageStartEventOptions,
 ): AnthropicStreamEventData {
   const { originalModel, inputTokens, cachedTokens } = options
+  const metadata = response as ChatCompletionResponse & {
+    recommended_auto_tier?: "eco" | "balanced"
+  }
   return {
     type: "message_start",
     message: {
@@ -475,6 +511,9 @@ function createMessageStartEvent(
         cache_creation_input_tokens: 0,
         cache_read_input_tokens: cachedTokens,
       },
+      ...(metadata.recommended_auto_tier !== undefined ?
+        { recommended_auto_tier: metadata.recommended_auto_tier }
+      : {}),
     },
   }
 }
@@ -580,11 +619,17 @@ interface UsageTokens {
   cachedTokens: number
 }
 
+interface MessageDeltaOptions {
+  choice: ChatCompletionResponse["choices"][0]
+  copilotUsage?: unknown
+  usage: UsageTokens
+}
+
 function addMessageDeltaAndStopEvents(
   events: Array<AnthropicStreamEventData>,
-  choice: ChatCompletionResponse["choices"][0],
-  usage: UsageTokens,
+  options: MessageDeltaOptions,
 ): void {
+  const { choice, copilotUsage, usage } = options
   events.push(
     {
       type: "message_delta",
@@ -598,9 +643,15 @@ function addMessageDeltaAndStopEvents(
         cache_creation_input_tokens: 0,
         cache_read_input_tokens: usage.cachedTokens,
       },
+      ...(copilotUsage !== undefined ? { copilot_usage: copilotUsage } : {}),
     },
     { type: "message_stop" },
   )
+}
+
+function getChatCopilotUsage(response: ChatCompletionResponse): unknown {
+  return (response as ChatCompletionResponse & { copilot_usage?: unknown })
+    .copilot_usage
 }
 
 export function translateErrorToAnthropicErrorEvent(): AnthropicStreamEventData {

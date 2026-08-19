@@ -605,6 +605,10 @@ function buildAnthropicResponse(
 ): AnthropicResponse {
   const { contentBlocks, stopReason, originalModel } = options
   const cachedTokens = response.usage?.prompt_tokens_details?.cached_tokens ?? 0
+  const metadata = response as ChatCompletionResponse & {
+    copilot_usage?: unknown
+    recommended_auto_tier?: "eco" | "balanced"
+  }
   return {
     id: response.id,
     type: "message",
@@ -619,6 +623,12 @@ function buildAnthropicResponse(
       cache_read_input_tokens: cachedTokens,
       cache_creation_input_tokens: 0,
     },
+    ...(metadata.copilot_usage !== undefined ?
+      { copilot_usage: metadata.copilot_usage }
+    : {}),
+    ...(metadata.recommended_auto_tier !== undefined ?
+      { recommended_auto_tier: metadata.recommended_auto_tier }
+    : {}),
   }
 }
 
