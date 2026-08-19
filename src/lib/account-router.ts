@@ -461,17 +461,30 @@ export interface RoutedControlPlaneFetchOptions {
   signal?: AbortSignal
 }
 
-function createNoControlPlaneAccountResponse(): Response {
-  return Response.json(
-    {
-      error: {
-        code: "account_unavailable",
-        message: "No healthy Copilot account is available for this request.",
-        type: "account_unavailable",
-      },
+export interface RoutedControlPlaneFetchResult {
+  account: Account | undefined
+  localError?: LocalHTTPError
+  response: Response
+}
+
+function createNoControlPlaneAccountResult(): RoutedControlPlaneFetchResult {
+  const clientBody = {
+    error: {
+      code: "account_unavailable",
+      message: "No healthy Copilot account is available for this request.",
+      type: "account_unavailable",
     },
-    { status: 503 },
-  )
+  }
+  const response = Response.json(clientBody, { status: 503 })
+  return {
+    account: undefined,
+    localError: new LocalHTTPError(
+      clientBody.error.message,
+      response,
+      clientBody,
+    ),
+    response,
+  }
 }
 
 function controlPlaneRequestInit(
@@ -498,7 +511,7 @@ function controlPlaneRequestInit(
  */
 export async function routedControlPlaneFetch(
   options: RoutedControlPlaneFetchOptions,
-): Promise<{ account: Account | undefined; response: Response }> {
+): Promise<RoutedControlPlaneFetchResult> {
   const affinityKey = getEffectiveAffinityKey()
   const retryBudget = createRetryBudget()
   const telemetryModel = options.modelId ?? "control-plane"
@@ -533,10 +546,7 @@ export async function routedControlPlaneFetch(
       )
     : tokenPool.getHealthyAccountBySession(affinityKey)
   if (!account) {
-    return {
-      response: createNoControlPlaneAccountResponse(),
-      account: undefined,
-    }
+    return createNoControlPlaneAccountResult()
   }
 
   setLastUsedRoutedAccountId(account.id)

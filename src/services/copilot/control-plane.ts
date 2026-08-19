@@ -59,7 +59,8 @@ async function routedControlPlaneJson(options: {
   path: string
   signal?: AbortSignal
 }): Promise<Record<string, unknown>> {
-  const { response } = await routedControlPlaneFetch(options)
+  const { localError, response } = await routedControlPlaneFetch(options)
+  if (localError) throw localError
   if (!response.ok) {
     throw new HTTPError("Copilot control-plane request failed", response)
   }
@@ -79,11 +80,12 @@ export async function enableCopilotModelPolicy(
   signal?: AbortSignal,
 ): Promise<EnableModelPolicyResult> {
   const path = `/models/${encodeURIComponent(modelId)}/policy`
-  const { response } = await routedControlPlaneFetch({
+  const { localError, response } = await routedControlPlaneFetch({
     modelId,
     path,
     signal,
   })
+  if (localError) throw localError
   if (response.ok) return { success: true }
   if (response.status === 403) {
     return {

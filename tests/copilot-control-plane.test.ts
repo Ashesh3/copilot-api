@@ -107,6 +107,94 @@ function findHealthyAffinity(accountId: number): string {
   return key
 }
 
+const accountUnavailableBody = {
+  error: {
+    code: "account_unavailable",
+    message: "No healthy Copilot account is available for this request.",
+    type: "account_unavailable",
+  },
+}
+
+function noAccountServiceCalls(): Array<{
+  name: string
+  run(): Promise<unknown>
+}> {
+  return [
+    {
+      name: "policy",
+      run: async () => await enableCopilotModelPolicy("missing-model"),
+    },
+    {
+      name: "model session",
+      run: async () => await createCopilotModelSession({}),
+    },
+    {
+      name: "Auto",
+      run: async () =>
+        await createCopilotAutoSession({
+          hasImage: false,
+          prompt: "choose a model",
+        }),
+    },
+    {
+      name: "intent",
+      run: async () =>
+        await predictCopilotIntent({
+          availableModels: ["missing-model"],
+          hasImage: false,
+          payload: { prompt: "choose a model" },
+          sessionToken: "service-session-secret",
+        }),
+    },
+  ]
+}
+
+function noAccountRouteRequests(): Array<{
+  init: RequestInit
+  name: string
+  path: string
+}> {
+  return [
+    {
+      name: "policy",
+      path: "/models/missing-model/policy",
+      init: { method: "POST" },
+    },
+    {
+      name: "model session",
+      path: "/models/session",
+      init: {
+        method: "POST",
+        headers: { "Copilot-Session-Token": "route-session-secret" },
+      },
+    },
+    {
+      name: "Auto",
+      path: "/auto",
+      init: {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ prompt: "choose a model" }),
+      },
+    },
+    {
+      name: "intent",
+      path: "/models/session/intent",
+      init: {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "Copilot-Session-Token": "route-session-secret",
+        },
+        body: JSON.stringify({
+          available_models: ["missing-model"],
+          prompt: "choose a model",
+        }),
+      },
+    },
+  ]
+}
+
 test("enables a percent-encoded model policy", async () => {
   queuedResponses.push(Response.json({ ignored: true }))
 
@@ -280,6 +368,50 @@ test("never logs or exposes a session token on service errors", async () => {
   expect(JSON.stringify(errorSpy.mock.calls)).not.toContain("session-secret")
 })
 
+test("preserves the fixed local account-unavailable error for every service", async () => {
+  state.isMultiToken = true
+  const errorSpy = spyOn(consola, "error")
+  try {
+    for (const service of noAccountServiceCalls()) {
+      const error = await service.run().catch((caught: unknown) => caught)
+
+      expect(error, service.name).toBeInstanceOf(LocalHTTPError)
+      expect((error as LocalHTTPError).response.status, service.name).toBe(503)
+      expect((error as LocalHTTPError).clientBody, service.name).toEqual(
+        accountUnavailableBody,
+      )
+    }
+  } finally {
+    errorSpy.mockRestore()
+  }
+
+  expect(capturedRequests).toHaveLength(0)
+  expect(JSON.stringify(errorSpy.mock.calls)).not.toContain(
+    "service-session-secret",
+  )
+})
+
+test("keeps an identical upstream 503 body on the sanitized HTTPError path", async () => {
+  queuedResponses.push(
+    Response.json(accountUnavailableBody, {
+      status: 503,
+      headers: { "retry-after": "0" },
+    }),
+    Response.json(accountUnavailableBody, { status: 503 }),
+  )
+
+  const error = await createCopilotModelSession({}).catch(
+    (caught: unknown) => caught,
+  )
+
+  expect(error).toBeInstanceOf(HTTPError)
+  expect(error).not.toBeInstanceOf(LocalHTTPError)
+  expect((error as HTTPError).message).toBe(
+    "Copilot control-plane request failed",
+  )
+  expect(capturedRequests).toHaveLength(2)
+})
+
 test("serves exact model-session, Auto, and intent routes", async () => {
   queuedResponses.push(
     Response.json({ session_token: "created-token" }),
@@ -355,6 +487,26 @@ test("serves exact model-session, Auto, and intent routes", async () => {
     previous_user_messages: ["oldest", "latest"],
     routing_intent: "code",
   })
+})
+
+test("preserves the fixed local account-unavailable error on every public route", async () => {
+  state.isMultiToken = true
+  const errorSpy = spyOn(consola, "error")
+  try {
+    for (const route of noAccountRouteRequests()) {
+      const response = await server.request(route.path, route.init)
+
+      expect(response.status, route.name).toBe(503)
+      expect(await response.json(), route.name).toEqual(accountUnavailableBody)
+    }
+  } finally {
+    errorSpy.mockRestore()
+  }
+
+  expect(capturedRequests).toHaveLength(0)
+  const logs = JSON.stringify(errorSpy.mock.calls)
+  expect(logs).not.toContain("route-session-secret")
+  expect(logs).not.toContain("service-session-secret")
 })
 
 test("serves model policy on both public aliases", async () => {
