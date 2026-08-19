@@ -6,6 +6,10 @@ import type { SafeHttpErrorInspection } from "~/lib/error"
 import type { RoutingAffinity } from "~/lib/routing-affinity"
 import type { NativeMessagesRequestOptions } from "~/routes/messages/native-handler"
 
+import {
+  recordCopilotContractEvent,
+  recordCopilotMessagesBeta,
+} from "~/lib/copilot-contract-observability"
 import { resolveRequestCredential } from "~/lib/credential-resolver"
 import { isHTTPError } from "~/lib/error"
 import {
@@ -269,6 +273,12 @@ function prepareResponseCreate(
     rawPayload,
   )
   if (!resolution.ok) {
+    if (resolution.code === "previous_response_not_found") {
+      recordCopilotContractEvent({
+        kind: "websocket_continuation",
+        outcome: "not_found",
+      })
+    }
     throw new WebSocketRequestError(
       resolution.message,
       resolution.status,
@@ -276,6 +286,13 @@ function prepareResponseCreate(
       resolution.code,
     )
   }
+  recordCopilotContractEvent({
+    kind: "websocket_continuation",
+    outcome:
+      rawPayload.previous_response_id === undefined ?
+        "new_thread"
+      : "rehydrated",
+  })
   const payload = resolution.payload
   const frameAffinity = resolveResponsesRoutingAffinity(payload.client_metadata)
   return { affinity: data.affinity ?? frameAffinity, payload }
@@ -336,6 +353,9 @@ async function handleResponseCreate(
     turn,
   )
   const preparedPayload = route.preparedPayload
+  if (route.decision.target === "/v1/messages") {
+    recordCopilotMessagesBeta(ws.data.nativeMessagesOptions.anthropicBeta)
+  }
 
   if (isSyntheticWarmupRequest(preparedPayload)) {
     handleSyntheticWarmupRequest(ws, preparedPayload, turn)

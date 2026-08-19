@@ -266,6 +266,35 @@ test.each([
   },
 )
 
+test("emits one bounded Responses route event before dispatch", async () => {
+  installModel({ supported_endpoints: ["/responses"] })
+  const debugSpy = spyOn(consola, "debug")
+
+  try {
+    const response = await postResponses({ input: "hello" })
+
+    expect(response.status).toBe(200)
+    const routeEvents = debugSpy.mock.calls.filter(
+      (call) =>
+        call[0] === "[copilot-contract]"
+        && (call[1] as { kind?: string; source?: string }).kind
+          === "endpoint_route"
+        && (call[1] as { kind?: string; source?: string }).source
+          === "responses",
+    )
+    expect(routeEvents).toHaveLength(1)
+    expect(routeEvents[0]?.[1]).toEqual({
+      kind: "endpoint_route",
+      source: "responses",
+      target: "/responses",
+      translated: false,
+      reason: "native",
+    })
+  } finally {
+    debugSpy.mockRestore()
+  }
+})
+
 test.each([
   { name: "null body", body: "null" },
   { name: "array body", body: "[]" },

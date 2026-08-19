@@ -2532,55 +2532,69 @@ describe("responses websocket message handling", () => {
   })
 
   test("returns a recoverable previous_response_not_found without echoing the id", async () => {
+    state.copilotToken = "copilot-token"
     state.models = responsesCapableModels
     const ws = createTestWebSocket()
+    const debugSpy = spyOn(consola, "debug")
 
-    await responsesWebSocket.message(
-      ws,
-      JSON.stringify({
-        type: "response.create",
-        model: "gpt-5.4",
-        previous_response_id: "missing",
-        input: [],
-        tools: [],
-      }),
-    )
+    try {
+      await responsesWebSocket.message(
+        ws,
+        JSON.stringify({
+          type: "response.create",
+          model: "gpt-5.4",
+          previous_response_id: "missing",
+          input: [],
+          tools: [],
+        }),
+      )
 
-    const errorFrame = JSON.parse(ws.sent[0] ?? "{}") as {
-      error?: {
-        code?: string
-        message?: string
-        request_id?: string
+      const errorFrame = JSON.parse(ws.sent[0] ?? "{}") as {
+        error?: {
+          code?: string
+          message?: string
+          request_id?: string
+          type?: string
+        }
+        status?: number
         type?: string
       }
-      status?: number
-      type?: string
+      expect(errorFrame.type).toBe("error")
+      expect(errorFrame.status).toBe(400)
+      expect(errorFrame.error).toEqual({
+        code: "previous_response_not_found",
+        message:
+          "The previous response is not available on this WebSocket connection.",
+        type: "invalid_request_error",
+        request_id: "req-test",
+      })
+      expect(JSON.stringify(errorFrame)).not.toContain("missing")
+      expect(fetchMock).not.toHaveBeenCalled()
+      expect(ws.data.closed).toBe(false)
+
+      queuedResponses.push(createResponsesSseResponse("resp_after_stale"))
+      await responsesWebSocket.message(
+        ws,
+        JSON.stringify({
+          type: "response.create",
+          model: "gpt-5.4",
+          input: "new local thread",
+        }),
+      )
+
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(ws.data.responseSnapshots.has("resp_after_stale")).toBe(true)
+      const continuationOutcomes = debugSpy.mock.calls
+        .filter(
+          (call) =>
+            call[0] === "[copilot-contract]"
+            && (call[1] as { kind?: string }).kind === "websocket_continuation",
+        )
+        .map((call) => (call[1] as { outcome: string }).outcome)
+      expect(continuationOutcomes).toEqual(["not_found", "new_thread"])
+    } finally {
+      debugSpy.mockRestore()
     }
-    expect(errorFrame.type).toBe("error")
-    expect(errorFrame.status).toBe(400)
-    expect(errorFrame.error).toEqual({
-      code: "previous_response_not_found",
-      message:
-        "The previous response is not available on this WebSocket connection.",
-      type: "invalid_request_error",
-      request_id: "req-test",
-    })
-    expect(JSON.stringify(errorFrame)).not.toContain("missing")
-    expect(fetchMock).not.toHaveBeenCalled()
-    expect(ws.data.closed).toBe(false)
-
-    queuedResponses.push(createResponsesSseResponse("resp_after_stale"))
-    await responsesWebSocket.message(
-      ws,
-      JSON.stringify({
-        type: "response.create",
-        model: "gpt-5.4",
-        input: "new local thread",
-      }),
-    )
-
-    expect(fetchMock).toHaveBeenCalledTimes(1)
-    expect(ws.data.responseSnapshots.has("resp_after_stale")).toBe(true)
   })
 
   test.each([

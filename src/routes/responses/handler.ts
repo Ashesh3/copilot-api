@@ -9,6 +9,11 @@ import type { Model } from "~/services/copilot/get-models"
 import { getLastUsedAccountId } from "~/lib/account-router"
 import { awaitApproval } from "~/lib/approval"
 import { getConfig } from "~/lib/config"
+import {
+  recordCopilotEndpointRoute,
+  recordCopilotMessagesBeta,
+  recordCopilotRequestNormalization,
+} from "~/lib/copilot-contract-observability"
 import { sessionTokenMatchesModel } from "~/lib/copilot-session-token"
 import {
   type EndpointRouteDecision,
@@ -89,6 +94,7 @@ import {
   createWebSearchResponsesTool,
   isResponsesWebSearchFunctionTool,
 } from "~/services/copilot/mcp-web-search"
+import { canonicalizeAnthropicBeta } from "~/services/copilot/messages-contract"
 import { normalizeResponsesAttachmentsFailClosed } from "~/services/copilot/responses-attachments"
 import {
   finalizeResponsesRequest,
@@ -615,6 +621,11 @@ const handleResponsesInner = async (
   )
   const route = await prepareResponsesRoute(c, payload, selectedModel)
   const { decision, preparedPayload } = route
+  if (decision.target === "/v1/messages") {
+    recordCopilotMessagesBeta(
+      canonicalizeAnthropicBeta(nativeOptions.anthropicBeta),
+    )
+  }
 
   if (state.manualApprove) await awaitApproval()
 
@@ -929,11 +940,12 @@ export async function prepareResponsesRouteForTransport(options: {
   decision: EndpointRouteDecision
   preparedPayload: ResponsesPayload
 }> {
-  const preparedPayload = finalizeResponsesRequest(options.payload, {
+  const prepared = finalizeResponsesRequest(options.payload, {
     defaultEffort: getModelReasoningConfig(options.payload.model)
       ?.defaultEffort,
     implicitDefault: usesImplicitReasoningDefault(options.payload.model),
-  }).body
+  })
+  const preparedPayload = prepared.body
   const support = getModelEndpointSupport(options.selectedModel)
   if (!support.responses && !isResponsesWarmupPayload(preparedPayload)) {
     await (support.messages ?
@@ -964,6 +976,8 @@ export async function prepareResponsesRouteForTransport(options: {
     }
   }
   if ("code" in decision) throw createEndpointTranslationError(decision)
+  recordCopilotRequestNormalization("responses", prepared.normalizationClasses)
+  recordCopilotEndpointRoute(decision)
   return { decision, preparedPayload }
 }
 

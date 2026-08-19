@@ -3,7 +3,10 @@ import { describe, expect, test } from "bun:test"
 import type { ChatCompletionsPayload } from "~/services/copilot/create-chat-completions"
 
 import { LocalHTTPError } from "~/lib/error"
-import { normalizeChatCompletionsRequest } from "~/routes/chat-completions/chat-contract"
+import {
+  normalizeChatCompletionsRequest,
+  prepareChatCompletionsRequest,
+} from "~/routes/chat-completions/chat-contract"
 
 function expectValidationError(
   action: () => unknown,
@@ -119,6 +122,27 @@ test("converts deprecated functions and function_call to modern controls", () =>
   })
   expect(normalized).not.toHaveProperty("functions")
   expect(normalized).not.toHaveProperty("function_call")
+})
+
+test("reports only fixed classes for wire-changing Chat normalization", () => {
+  const prepared = prepareChatCompletionsRequest({
+    model: "gpt-current",
+    messages: [{ role: "user", content: "hello" }],
+    tools: [
+      {
+        type: "function",
+        function: { name: "modern", parameters: {} },
+      },
+    ],
+    functions: [{ name: "legacy", parameters: {} }],
+    function_call: { name: "legacy" },
+  })
+
+  expect(prepared.normalizationClasses).toEqual([
+    "function_parameters",
+    "deprecated_functions",
+    "deprecated_function_call",
+  ])
 })
 
 test("appends legacy functions after modern tools and keeps modern tool_choice", () => {

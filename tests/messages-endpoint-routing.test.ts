@@ -7,8 +7,10 @@ import {
   beforeEach,
   expect,
   mock,
+  spyOn,
   test,
 } from "bun:test"
+import consola from "consola"
 
 import type { AnthropicMessagesPayload } from "~/routes/messages/anthropic-types"
 import type { Model, ModelsResponse } from "~/services/copilot/get-models"
@@ -2443,6 +2445,35 @@ function postMessages(
     }),
   )
 }
+
+test("emits one bounded Messages route event before dispatch", async () => {
+  installModel({ supported_endpoints: ["/v1/messages"] })
+  const debugSpy = spyOn(consola, "debug")
+
+  try {
+    const response = await postMessages({})
+
+    expect(response.status).toBe(200)
+    const routeEvents = debugSpy.mock.calls.filter(
+      (call) =>
+        call[0] === "[copilot-contract]"
+        && (call[1] as { kind?: string; source?: string }).kind
+          === "endpoint_route"
+        && (call[1] as { kind?: string; source?: string }).source
+          === "messages",
+    )
+    expect(routeEvents).toHaveLength(1)
+    expect(routeEvents[0]?.[1]).toEqual({
+      kind: "endpoint_route",
+      source: "messages",
+      target: "/v1/messages",
+      translated: false,
+      reason: "native",
+    })
+  } finally {
+    debugSpy.mockRestore()
+  }
+})
 
 function signedThinkingHistory(): Array<Record<string, unknown>> {
   return [

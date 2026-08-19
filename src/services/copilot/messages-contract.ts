@@ -1,6 +1,7 @@
 /* eslint-disable max-lines -- exhaustive hostile-safe Messages boundary validation */
 import util from "node:util"
 
+import type { CopilotContractNormalizationClass } from "~/lib/copilot-contract-observability"
 import type { AnthropicMessagesPayload } from "~/routes/messages/anthropic-types"
 
 import { LocalHTTPError } from "~/lib/error"
@@ -37,6 +38,7 @@ const GATEWAY_ONLY_MESSAGES_FIELDS = new Set([
 export interface PreparedAnthropicMessagesRequest {
   body: Record<string, unknown>
   headers: AnthropicRequestHeaders
+  normalizationClasses: Array<CopilotContractNormalizationClass>
 }
 
 type NativeCacheControl = {
@@ -824,20 +826,51 @@ export function prepareAnthropicMessagesRequest(options: {
   validateRawMaxTokens(options.payload)
   const body = cloneAnthropicMessagesBody(options.payload)
   validateAnthropicMessagesPayload(body, options.requireMaxTokens)
+  const normalizationClasses: Array<CopilotContractNormalizationClass> = []
+  let removedGatewayField = false
   for (const field of GATEWAY_ONLY_MESSAGES_FIELDS) {
+    if (!Object.hasOwn(body, field)) continue
     Reflect.deleteProperty(body, field)
+    removedGatewayField = true
+  }
+  if (removedGatewayField) normalizationClasses.push("gateway_only_fields")
+  if (hasCacheControlNormalization(body)) {
+    normalizationClasses.push("cache_control")
   }
 
   const sanitizedHeaders = sanitizeAnthropicRequestHeaderOptions(options)
 
   return {
     body,
+    normalizationClasses,
     headers: {
       ...sanitizedHeaders,
       anthropicVersion:
         sanitizedHeaders.anthropicVersion ?? DEFAULT_ANTHROPIC_VERSION,
     },
   }
+}
+
+function hasCacheControlNormalization(value: unknown): boolean {
+  if (Array.isArray(value)) {
+    return value.some((item) => hasCacheControlNormalization(item))
+  }
+  if (!isRecord(value)) return false
+
+  for (const [key, nested] of Object.entries(value)) {
+    if (
+      key === "cache_control"
+      && isRecord(nested)
+      && nested.type === "ephemeral"
+      && Object.keys(nested).some(
+        (nestedKey) => nestedKey !== "type" && nestedKey !== "ttl",
+      )
+    ) {
+      return true
+    }
+    if (hasCacheControlNormalization(nested)) return true
+  }
+  return false
 }
 
 function normalizeCacheControls(value: unknown): void {

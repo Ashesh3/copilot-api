@@ -11,6 +11,11 @@ import type { Model } from "~/services/copilot/get-models"
 import { getLastUsedAccountId } from "~/lib/account-router"
 import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
+import {
+  recordCopilotEndpointRoute,
+  recordCopilotMessagesBeta,
+  recordCopilotRequestNormalization,
+} from "~/lib/copilot-contract-observability"
 import { sessionTokenMatchesModel } from "~/lib/copilot-session-token"
 import {
   createCustomProviderChatCompletions,
@@ -61,6 +66,7 @@ import {
   isChatWebSearchFunctionTool,
   isWebSearchToolType,
 } from "~/services/copilot/mcp-web-search"
+import { canonicalizeAnthropicBeta } from "~/services/copilot/messages-contract"
 
 import type { NativeMessagesRequestOptions } from "../messages/native-handler"
 
@@ -69,7 +75,7 @@ import {
   resolveWebSearchCalls,
 } from "../messages/web-search-helpers"
 import { executeAnthropicBridge } from "./anthropic-bridge"
-import { normalizeChatCompletionsRequest } from "./chat-contract"
+import { prepareChatCompletionsRequest } from "./chat-contract"
 import {
   executeResponsesFallback,
   recordChatEndpointFallback,
@@ -80,7 +86,8 @@ export { selectChatUpstreamEndpoint } from "./responses-fallback-executor"
 
 export async function handleCompletion(c: Context) {
   const rawPayload = await parseChatRequestBody(c)
-  const normalizedPayload = normalizeChatCompletionsRequest(rawPayload)
+  const prepared = prepareChatCompletionsRequest(rawPayload)
+  const normalizedPayload = prepared.payload
   const nativeOptions: NativeMessagesRequestOptions = {
     anthropicBeta: c.req.header("anthropic-beta"),
     anthropicVersion: c.req.header("anthropic-version"),
@@ -98,6 +105,7 @@ export async function handleCompletion(c: Context) {
   return await Sentry.startSpan(
     createSentryInvokeAgentSpanOptions(model, conversationId),
     async () => {
+      recordCopilotRequestNormalization("chat", prepared.normalizationClasses)
       return await handleCompletionInner(c, normalizedPayload, nativeOptions)
     },
   )
@@ -236,6 +244,7 @@ async function handleCompletionInner(
 
   const decision = selectChatUpstreamEndpoint({ payload, selectedModel })
   if ("code" in decision) throw createEndpointTranslationError(decision)
+  recordCopilotEndpointRoute(decision)
 
   await setInputTokenContext(c, payload, selectedModel)
 
@@ -273,6 +282,11 @@ async function dispatchCopilotCompletion(
     nativeOptions,
     copilotSessionToken,
   } = options
+  if (decision.target === "/v1/messages") {
+    recordCopilotMessagesBeta(
+      canonicalizeAnthropicBeta(nativeOptions.anthropicBeta),
+    )
+  }
   if (decision.translated) recordChatEndpointFallback(c, payload, decision)
 
   switch (decision.target) {

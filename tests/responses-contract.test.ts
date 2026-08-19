@@ -5,6 +5,7 @@ import type { ResponsesPayload } from "~/services/copilot/create-responses"
 import { LocalHTTPError } from "~/lib/error"
 import {
   applyResponsesReasoningDefaults,
+  finalizeResponsesRequest,
   prepareResponsesRequest,
 } from "~/services/copilot/responses-contract"
 
@@ -74,6 +75,43 @@ test("preserves the reviewed current Responses field inventory", () => {
     snippy: { enabled: false },
   })
   expect(JSON.stringify(result.body)).toContain("prompt_cache_breakpoint")
+})
+
+test("reports only fixed classes for wire-changing Responses normalization", () => {
+  const result = prepareResponsesRequest({
+    model: "gpt-5.6-sol",
+    input: "hello",
+    max_output_tokens: 1,
+    temperature: 0.3,
+    top_p: 0.8,
+    tools: [],
+    tool_choice: "auto",
+    parallel_tool_calls: true,
+    include: ["reasoning.encrypted_content", "reasoning.encrypted_content"],
+  })
+
+  expect(result.normalizationClasses).toEqual([
+    "empty_tool_controls",
+    "encrypted_reasoning_include",
+    "max_output_tokens",
+  ])
+})
+
+test("reports final reasoning and sampling normalization classes", () => {
+  const result = finalizeResponsesRequest(
+    {
+      model: "gpt-5.6-sol",
+      input: "hello",
+      temperature: 0.3,
+      top_p: 0.8,
+    },
+    { defaultEffort: "medium", implicitDefault: false },
+  )
+
+  expect(result.normalizationClasses).toEqual([
+    "reasoning_defaults",
+    "gpt56_sampling",
+  ])
 })
 
 test("keeps reasoning disabled without requesting summaries or encrypted state", () => {

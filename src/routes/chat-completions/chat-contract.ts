@@ -1,3 +1,4 @@
+import type { CopilotContractNormalizationClass } from "~/lib/copilot-contract-observability"
 import type { ChatCompletionsPayload } from "~/services/copilot/create-chat-completions"
 
 import { LocalHTTPError } from "~/lib/error"
@@ -354,23 +355,41 @@ function createInvalidToolChoiceError(): LocalHTTPError {
   })
 }
 
-function normalizeModernFunctionTools(payload: ChatCompletionsPayload): void {
-  if (!Array.isArray(payload.tools)) return
+function normalizeModernFunctionTools(
+  payload: ChatCompletionsPayload,
+): boolean {
+  if (!Array.isArray(payload.tools)) return false
 
+  let changed = false
   for (const tool of payload.tools as Array<unknown>) {
     if (!isRecord(tool) || tool.type !== "function") continue
     if (!isRecord(tool.function)) continue
-    tool.function.parameters = normalizeFunctionParameters(
-      tool.function.parameters,
-    )
+    const parameters = tool.function.parameters
+    if (!isRecord(parameters)) {
+      tool.function.parameters = normalizeFunctionParameters(parameters)
+      changed = true
+      continue
+    }
+    if (!parameters.type) {
+      parameters.type = "object"
+      changed = true
+    }
+    if (!isRecord(parameters.properties)) {
+      parameters.properties = {}
+      changed = true
+    }
   }
+  return changed
 }
 
-function normalizeDeprecatedFunctions(payload: ChatCompletionsPayload): void {
+function normalizeDeprecatedFunctions(
+  payload: ChatCompletionsPayload,
+): boolean {
   const legacyFunctions = payload.functions
   if (legacyFunctions === undefined || legacyFunctions === null) {
+    const changed = hasOwn(payload, "functions")
     delete payload.functions
-    return
+    return changed
   }
   if (!Array.isArray(legacyFunctions)) {
     throw createChatValidationError({
@@ -409,6 +428,7 @@ function normalizeDeprecatedFunctions(payload: ChatCompletionsPayload): void {
     ]
   }
   delete payload.functions
+  return true
 }
 
 function createInvalidLegacyFunctionError(): LocalHTTPError {
@@ -421,8 +441,8 @@ function createInvalidLegacyFunctionError(): LocalHTTPError {
 
 function normalizeDeprecatedFunctionCall(
   payload: ChatCompletionsPayload,
-): void {
-  if (!hasOwn(payload, "function_call")) return
+): boolean {
+  if (!hasOwn(payload, "function_call")) return false
 
   const functionCall = payload.function_call
   let converted: ChatCompletionsPayload["tool_choice"]
@@ -451,11 +471,17 @@ function normalizeDeprecatedFunctionCall(
     payload.tool_choice = converted
   }
   delete payload.function_call
+  return true
 }
 
-export function normalizeChatCompletionsRequest(
+export interface PreparedChatCompletionsRequest {
+  payload: ChatCompletionsPayload
+  normalizationClasses: Array<CopilotContractNormalizationClass>
+}
+
+export function prepareChatCompletionsRequest(
   payload: ChatCompletionsPayload,
-): ChatCompletionsPayload {
+): PreparedChatCompletionsRequest {
   if (!isPlainRecord(payload)) throw createInvalidChatBodyError()
 
   let normalized: ChatCompletionsPayload
@@ -495,10 +521,23 @@ export function normalizeChatCompletionsRequest(
     })
   }
 
-  normalizeModernFunctionTools(normalized)
-  normalizeDeprecatedFunctions(normalized)
-  normalizeDeprecatedFunctionCall(normalized)
+  const normalizationClasses: Array<CopilotContractNormalizationClass> = []
+  if (normalizeModernFunctionTools(normalized)) {
+    normalizationClasses.push("function_parameters")
+  }
+  if (normalizeDeprecatedFunctions(normalized)) {
+    normalizationClasses.push("deprecated_functions")
+  }
+  if (normalizeDeprecatedFunctionCall(normalized)) {
+    normalizationClasses.push("deprecated_function_call")
+  }
   const functionNames = validateTools(normalized.tools)
   validateToolChoice(normalized.tool_choice, functionNames)
-  return normalized
+  return { payload: normalized, normalizationClasses }
+}
+
+export function normalizeChatCompletionsRequest(
+  payload: ChatCompletionsPayload,
+): ChatCompletionsPayload {
+  return prepareChatCompletionsRequest(payload).payload
 }

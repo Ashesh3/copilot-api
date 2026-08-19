@@ -581,6 +581,59 @@ test("retries Bun's socket-closed ECONNRESET and returns the retried response", 
   expect(capturedRequests).toHaveLength(2)
 })
 
+test("records safe metadata counts only from the final selected attempt", async () => {
+  queuedResults.push(
+    new Response("retry", {
+      status: 500,
+      headers: {
+        "x-quota-snapshot-private": "retry-value",
+        "x-github-request-id": "retry-id",
+      },
+    }),
+    new Response("{}", {
+      status: 200,
+      headers: {
+        "x-quota-snapshot-premium": "final-value",
+        "x-github-request-id": "final-id",
+        authorization: "Bearer private-token",
+      },
+    }),
+  )
+  const debugSpy = spyOn(consola, "debug")
+  const breadcrumbSpy = spyOn(Sentry, "addBreadcrumb").mockImplementation(
+    () => undefined,
+  )
+
+  try {
+    const response = await copilotFetch("/responses", { method: "POST" })
+
+    expect(response.status).toBe(200)
+    const contractLogs = debugSpy.mock.calls.filter(
+      (call) => call[0] === "[copilot-contract]",
+    )
+    expect(contractLogs).toEqual([
+      [
+        "[copilot-contract]",
+        {
+          kind: "response_metadata",
+          headerCount: 2,
+          quotaSnapshotCount: 1,
+        },
+      ],
+    ])
+    const diagnostics = JSON.stringify({
+      breadcrumbs: breadcrumbSpy.mock.calls,
+      logs: contractLogs,
+    })
+    expect(diagnostics).not.toContain("retry-value")
+    expect(diagnostics).not.toContain("final-value")
+    expect(diagnostics).not.toContain("private-token")
+  } finally {
+    breadcrumbSpy.mockRestore()
+    debugSpy.mockRestore()
+  }
+})
+
 test("omits private transport values from retry logs and breadcrumbs", async () => {
   const privateMarker = "transport-retry-private-marker"
   queuedResults.push(

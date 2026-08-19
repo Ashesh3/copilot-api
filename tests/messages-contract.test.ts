@@ -110,6 +110,7 @@ test("preserves native top-level fields and removes only gateway-local keys", ()
   })
   expect(prepared.body).not.toHaveProperty("_gateway_compaction")
   expect(prepared.body).not.toHaveProperty("_json_schema")
+  expect(prepared.normalizationClasses).toEqual(["gateway_only_fields"])
   expect(payload).toHaveProperty("_gateway_compaction", true)
   expect(payload).toHaveProperty("_json_schema", { type: "object" })
   expect(prepared.headers).toEqual({
@@ -185,6 +186,34 @@ test("normalizes every ephemeral cache marker without mutating the source", () =
     ],
   })
   expect(body.cache_control).toHaveProperty("scope", "global")
+})
+
+test("reports cache-control normalization before native serialization", () => {
+  const prepared = prepareAnthropicMessagesRequest({
+    payload: {
+      model: "claude-current",
+      max_tokens: 64,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: "hello",
+              cache_control: {
+                type: "ephemeral",
+                ttl: "5m",
+                scope: "private-marker",
+              },
+            },
+          ],
+        },
+      ],
+    },
+    requireMaxTokens: true,
+  })
+
+  expect(prepared.normalizationClasses).toEqual(["cache_control"])
 })
 
 test.each([

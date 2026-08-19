@@ -273,6 +273,41 @@ test.each(routeCases)(
   },
 )
 
+test("emits one bounded Chat route event before dispatch", async () => {
+  installModel({
+    id: "route-model",
+    supported_endpoints: ["/chat/completions"],
+  })
+  const debugSpy = spyOn(consola, "debug")
+
+  try {
+    const response = await postChatRoute({})
+
+    expect(response.status).toBe(200)
+    const routeEvents = debugSpy.mock.calls.filter(
+      (call) =>
+        call[0] === "[copilot-contract]"
+        && (call[1] as { kind?: string; source?: string }).kind
+          === "endpoint_route"
+        && (call[1] as { kind?: string; source?: string }).source === "chat",
+    )
+    expect(routeEvents).toEqual([
+      [
+        "[copilot-contract]",
+        {
+          kind: "endpoint_route",
+          source: "chat",
+          target: "/chat/completions",
+          translated: false,
+          reason: "native",
+        },
+      ],
+    ])
+  } finally {
+    debugSpy.mockRestore()
+  }
+})
+
 test("rejects a Messages-only custom grammar without upstream dispatch", async () => {
   installModel({
     id: "route-model",

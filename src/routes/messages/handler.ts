@@ -16,6 +16,11 @@ import {
 } from "~/lib/account-router"
 import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
+import {
+  recordCopilotEndpointRoute,
+  recordCopilotMessagesBeta,
+  recordCopilotRequestNormalization,
+} from "~/lib/copilot-contract-observability"
 import { sessionTokenMatchesModel } from "~/lib/copilot-session-token"
 import {
   createCustomProviderChatCompletions,
@@ -231,10 +236,12 @@ export async function handleCompletion(c: Context) {
   } catch {
     throw createInvalidAnthropicMessagesJsonError()
   }
-  const anthropicPayload = prepareAnthropicMessagesRequest({
+  const preparedMessages = prepareAnthropicMessagesRequest({
     payload: rawPayload,
     requireMaxTokens: true,
-  }).body as unknown as AnthropicMessagesPayload
+  })
+  const anthropicPayload =
+    preparedMessages.body as unknown as AnthropicMessagesPayload
   const nativeOptions: NativeMessagesRequestOptions =
     validateAnthropicRequestHeaderOptions({
       anthropicBeta: c.req.header("anthropic-beta"),
@@ -258,6 +265,11 @@ export async function handleCompletion(c: Context) {
   return await Sentry.startSpan(
     createSentryInvokeAgentSpanOptions(model, conversationId),
     async () => {
+      recordCopilotRequestNormalization(
+        "messages",
+        preparedMessages.normalizationClasses,
+      )
+      recordCopilotMessagesBeta(nativeOptions.anthropicBeta)
       return await handleCompletionInner(c, anthropicPayload, nativeOptions)
     },
   )
@@ -405,6 +417,7 @@ async function handleCompletionInner(
   })
   if ("code" in routeDecision)
     throw createEndpointTranslationError(routeDecision)
+  recordCopilotEndpointRoute(routeDecision)
 
   if (routeDecision.target === "/v1/messages") {
     const nativeCompatibility =

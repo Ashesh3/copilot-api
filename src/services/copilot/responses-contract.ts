@@ -1,3 +1,5 @@
+import type { CopilotContractNormalizationClass } from "~/lib/copilot-contract-observability"
+
 import { LocalHTTPError } from "~/lib/error"
 import { getUnsupportedRequestParameters } from "~/lib/model-settings"
 
@@ -7,7 +9,7 @@ export type ResponsesWireBody = ResponsesPayload & Record<string, unknown>
 
 export interface PreparedResponsesRequest {
   body: ResponsesWireBody
-  normalizationClasses: Array<string>
+  normalizationClasses: Array<CopilotContractNormalizationClass>
 }
 
 export interface FinalizeResponsesRequestOptions {
@@ -19,36 +21,56 @@ export function applyResponsesReasoningDefaults(options: {
   body: ResponsesWireBody
   defaultEffort: string | undefined
   implicitDefault: boolean
-}): void {
+}): boolean {
   const { body, defaultEffort, implicitDefault } = options
+  const createdReasoning =
+    body.reasoning === undefined || body.reasoning === null
   const reasoning = body.reasoning ?? {}
   body.reasoning = reasoning
-
-  if (
-    implicitDefault
-    && (reasoning.effort === undefined || reasoning.effort === null)
-  ) {
-    delete reasoning.effort
-  } else {
-    reasoning.effort ??= defaultEffort
-  }
+  let changed =
+    applyReasoningEffortDefault(reasoning, defaultEffort, implicitDefault)
+    || createdReasoning
 
   if (reasoning.effort === "none") {
+    changed ||= Object.hasOwn(reasoning, "summary")
     delete reasoning.summary
     if (body.include) {
-      body.include = body.include.filter(
+      const filtered = body.include.filter(
         (item) => item !== "reasoning.encrypted_content",
       )
+      changed ||= filtered.length !== body.include.length
+      body.include = filtered
     }
-    return
+    return changed
   }
 
-  reasoning.summary ??= "auto"
+  if (reasoning.summary === undefined || reasoning.summary === null) {
+    reasoning.summary = "auto"
+    changed = true
+  }
   const include = body.include ? [...body.include] : []
   if (!include.includes("reasoning.encrypted_content")) {
     include.push("reasoning.encrypted_content")
+    changed = true
   }
   body.include = include
+  return changed
+}
+
+function applyReasoningEffortDefault(
+  reasoning: NonNullable<ResponsesWireBody["reasoning"]>,
+  defaultEffort: string | undefined,
+  implicitDefault: boolean,
+): boolean {
+  if (reasoning.effort !== undefined && reasoning.effort !== null) return false
+  if (implicitDefault) {
+    const changed = Object.hasOwn(reasoning, "effort")
+    delete reasoning.effort
+    return changed
+  }
+  if (defaultEffort === undefined) return false
+  reasoning.effort = defaultEffort
+  return true
 }
 
 export function finalizeResponsesRequest(
@@ -56,14 +78,20 @@ export function finalizeResponsesRequest(
   options: FinalizeResponsesRequestOptions,
 ): PreparedResponsesRequest {
   const prepared = prepareResponsesRequest(payload)
-  if (shouldFinalizeResponsesReasoning(prepared.body, options)) {
-    applyResponsesReasoningDefaults({
+  if (
+    shouldFinalizeResponsesReasoning(prepared.body, options)
+    && applyResponsesReasoningDefaults({
       body: prepared.body,
       defaultEffort: options.defaultEffort,
       implicitDefault: options.implicitDefault,
     })
+  ) {
+    prepared.normalizationClasses.push("reasoning_defaults")
   }
-  removeUnsupportedResponsesRequestParameters(prepared.body)
+  const samplingClass = removeUnsupportedResponsesRequestParameters(
+    prepared.body,
+  )
+  if (samplingClass) prepared.normalizationClasses.push(samplingClass)
   return prepared
 }
 
@@ -161,6 +189,7 @@ export function prepareResponsesRequest(
   validateStatefulControls(payload)
   validateResponsesContextManagement(payload.context_management)
   const preparedTools = prepareResponsesTools(payload.tools)
+  const normalizationClasses: Array<CopilotContractNormalizationClass> = []
 
   const body = {} as ResponsesWireBody
   for (const field of RESPONSES_TOP_LEVEL_FIELDS) {
@@ -173,14 +202,26 @@ export function prepareResponsesRequest(
     ;(body as Record<string, unknown>)[field] = structuredClone(value)
   }
 
-  ensureJsonObjectInputMentionsJson(body)
-  normalizeFunctionToolParameters(body)
-  normalizeEmptyToolControls(body)
-  normalizeJsonSchemaResponseFormat(body)
-  canonicalizeEncryptedReasoningInclude(body)
-  clampMaxOutputTokens(body)
+  if (ensureJsonObjectInputMentionsJson(body)) {
+    normalizationClasses.push("json_object_instruction")
+  }
+  if (normalizeFunctionToolParameters(body)) {
+    normalizationClasses.push("function_parameters")
+  }
+  if (normalizeEmptyToolControls(body)) {
+    normalizationClasses.push("empty_tool_controls")
+  }
+  if (normalizeJsonSchemaResponseFormat(body)) {
+    normalizationClasses.push("json_schema")
+  }
+  if (canonicalizeEncryptedReasoningInclude(body)) {
+    normalizationClasses.push("encrypted_reasoning_include")
+  }
+  if (clampMaxOutputTokens(body)) {
+    normalizationClasses.push("max_output_tokens")
+  }
 
-  return { body, normalizationClasses: [] }
+  return { body, normalizationClasses }
 }
 
 function validateResponsesBody(payload: ResponsesPayload): void {
@@ -211,16 +252,21 @@ function isPlainResponsesRecord(value: unknown): value is ResponsesPayload {
 
 function canonicalizeEncryptedReasoningInclude(
   payload: ResponsesWireBody,
-): void {
-  if (!Array.isArray(payload.include)) return
+): boolean {
+  if (!Array.isArray(payload.include)) return false
 
   let encryptedReasoningIncluded = false
+  let changed = false
   payload.include = payload.include.filter((item) => {
     if (item !== "reasoning.encrypted_content") return true
-    if (encryptedReasoningIncluded) return false
+    if (encryptedReasoningIncluded) {
+      changed = true
+      return false
+    }
     encryptedReasoningIncluded = true
     return true
   })
+  return changed
 }
 
 export function validateResponsesTools(tools: unknown): void {
@@ -391,23 +437,25 @@ export function validateResponsesContextManagement(value: unknown): void {
 
 export function removeUnsupportedResponsesRequestParameters(
   payload: ResponsesWireBody,
-): void {
+): "gpt56_sampling" | "unsupported_sampling" | undefined {
   const unsupported = new Set(getUnsupportedRequestParameters(payload.model))
-  if (
-    payload.model.startsWith("gpt-5.6-")
-    && payload.reasoning?.effort !== "none"
-  ) {
+  const gpt56Sampling =
+    payload.model.startsWith("gpt-5.6-") && payload.reasoning?.effort !== "none"
+  if (gpt56Sampling) {
     unsupported.add("temperature")
     unsupported.add("top_p")
   }
 
+  let removed = false
   for (const parameter of unsupported) {
     switch (parameter) {
       case "temperature": {
+        removed ||= payload.temperature !== undefined
         delete payload.temperature
         break
       }
       case "top_p": {
+        removed ||= payload.top_p !== undefined
         delete payload.top_p
         break
       }
@@ -416,6 +464,8 @@ export function removeUnsupportedResponsesRequestParameters(
       }
     }
   }
+  if (!removed) return undefined
+  return gpt56Sampling ? "gpt56_sampling" : "unsupported_sampling"
 }
 
 function validateStatefulControls(payload: ResponsesPayload): void {
@@ -513,26 +563,35 @@ function normalizeStatefulField(
   return value
 }
 
-function normalizeEmptyToolControls(payload: ResponsesWireBody): void {
-  if (Array.isArray(payload.tools) && payload.tools.length > 0) return
+function normalizeEmptyToolControls(payload: ResponsesWireBody): boolean {
+  if (Array.isArray(payload.tools) && payload.tools.length > 0) return false
 
+  const changed =
+    payload.tools !== undefined
+    || payload.tool_choice !== undefined
+    || payload.parallel_tool_calls !== undefined
   delete payload.tools
   delete payload.tool_choice
   delete payload.parallel_tool_calls
+  return changed
 }
 
-function clampMaxOutputTokens(payload: ResponsesWireBody): void {
+function clampMaxOutputTokens(payload: ResponsesWireBody): boolean {
   if (
     typeof payload.max_output_tokens === "number"
     && payload.max_output_tokens < COPILOT_RESPONSES_MIN_OUTPUT_TOKENS
   ) {
     payload.max_output_tokens = COPILOT_RESPONSES_MIN_OUTPUT_TOKENS
+    return true
   }
+  return false
 }
 
-function ensureJsonObjectInputMentionsJson(payload: ResponsesWireBody): void {
-  if (payload.text?.format?.type !== "json_object") return
-  if (inputMentionsJson(payload.input)) return
+function ensureJsonObjectInputMentionsJson(
+  payload: ResponsesWireBody,
+): boolean {
+  if (payload.text?.format?.type !== "json_object") return false
+  if (inputMentionsJson(payload.input)) return false
 
   const instruction: ResponseInputMessage = {
     type: "message",
@@ -542,7 +601,7 @@ function ensureJsonObjectInputMentionsJson(payload: ResponsesWireBody): void {
 
   if (Array.isArray(payload.input)) {
     payload.input = [instruction, ...payload.input]
-    return
+    return true
   }
 
   if (typeof payload.input === "string") {
@@ -550,10 +609,11 @@ function ensureJsonObjectInputMentionsJson(payload: ResponsesWireBody): void {
       instruction,
       { type: "message", role: "user", content: payload.input },
     ]
-    return
+    return true
   }
 
   payload.input = [instruction]
+  return true
 }
 
 function inputMentionsJson(input: ResponsesPayload["input"]): boolean {
@@ -581,29 +641,134 @@ function containsJson(value: unknown): boolean {
   return typeof value === "string" && value.toLowerCase().includes("json")
 }
 
-function normalizeFunctionToolParameters(payload: ResponsesWireBody): void {
-  if (!Array.isArray(payload.tools)) return
+function normalizeFunctionToolParameters(payload: ResponsesWireBody): boolean {
+  if (!Array.isArray(payload.tools)) return false
 
+  let changed = false
   for (const tool of payload.tools) {
     if (!isRecord(tool) || tool.type !== "function") continue
 
     if (!isRecord(tool.parameters) || Array.isArray(tool.parameters)) {
       tool.parameters = { type: "object", properties: {} }
+      changed = true
       continue
     }
 
-    tool.parameters.type ??= "object"
+    if (tool.parameters.type === undefined || tool.parameters.type === null) {
+      tool.parameters.type = "object"
+      changed = true
+    }
     if (!isRecord(tool.parameters.properties)) {
       tool.parameters.properties = {}
+      changed = true
     }
   }
+  return changed
 }
 
-function normalizeJsonSchemaResponseFormat(payload: ResponsesWireBody): void {
+function normalizeJsonSchemaResponseFormat(
+  payload: ResponsesWireBody,
+): boolean {
   const format = payload.text?.format
-  if (!isRecord(format) || format.type !== "json_schema") return
+  if (!isRecord(format) || format.type !== "json_schema") return false
 
+  const before = countMissingJsonSchemaDefaults(format.schema)
   normalizeJsonSchemaObject(format.schema)
+  return before > 0
+}
+
+function countMissingJsonSchemaDefaults(
+  schema: unknown,
+  seen = new Set<object>(),
+): number {
+  if (!isRecord(schema) || seen.has(schema)) return 0
+  seen.add(schema)
+  let missing = countMissingObjectSchemaDefaults(schema)
+  missing += countMissingSchemaMapDefaults(schema, seen)
+  missing += countMissingSchemaValueDefaults(schema, seen)
+  missing += countMissingSchemaArrayDefaults(schema, seen)
+  return missing
+}
+
+function countMissingObjectSchemaDefaults(
+  schema: Record<string, unknown>,
+): number {
+  let missing = 0
+  if (schema.type === "object" || isRecord(schema.properties)) {
+    if (schema.additionalProperties === undefined) missing += 1
+    if (isRecord(schema.properties)) {
+      const required = new Set(
+        Array.isArray(schema.required) ?
+          schema.required.filter(
+            (key): key is string => typeof key === "string",
+          )
+        : [],
+      )
+      for (const key of Object.keys(schema.properties)) {
+        if (!required.has(key)) missing += 1
+      }
+    }
+  }
+  return missing
+}
+
+function countMissingSchemaMapDefaults(
+  schema: Record<string, unknown>,
+  seen: Set<object>,
+): number {
+  let missing = 0
+  for (const value of [
+    schema.properties,
+    schema.patternProperties,
+    schema.$defs,
+    schema.definitions,
+  ]) {
+    if (!isRecord(value)) continue
+    for (const nested of Object.values(value)) {
+      missing += countMissingJsonSchemaDefaults(nested, seen)
+    }
+  }
+  return missing
+}
+
+function countMissingSchemaValueDefaults(
+  schema: Record<string, unknown>,
+  seen: Set<object>,
+): number {
+  let missing = 0
+  for (const value of [
+    schema.items,
+    schema.additionalItems,
+    schema.contains,
+    schema.propertyNames,
+    schema.not,
+    schema.if,
+    schema.then,
+    schema.else,
+  ]) {
+    if (Array.isArray(value)) {
+      for (const nested of value) {
+        missing += countMissingJsonSchemaDefaults(nested, seen)
+      }
+    } else {
+      missing += countMissingJsonSchemaDefaults(value, seen)
+    }
+  }
+  return missing
+}
+
+function countMissingSchemaArrayDefaults(
+  schema: Record<string, unknown>,
+  seen: Set<object>,
+): number {
+  let missing = 0
+  for (const value of [schema.anyOf, schema.oneOf, schema.allOf]) {
+    if (!Array.isArray(value)) continue
+    for (const nested of value) {
+      missing += countMissingJsonSchemaDefaults(nested, seen)
+    }
+  }
+  return missing
 }
 
 function normalizeJsonSchemaObject(
