@@ -1,5 +1,6 @@
 import * as Sentry from "@sentry/bun"
 import consola from "consola"
+import util from "node:util"
 
 import type {
   ClientDialect,
@@ -22,43 +23,6 @@ export type CopilotContractNormalizationClass =
   | "reasoning_defaults"
   | "stateless_controls"
   | "unsupported_sampling"
-
-export function recordCopilotEndpointRoute(
-  decision: EndpointRouteDecision,
-): void {
-  recordCopilotContractEvent({ kind: "endpoint_route", ...decision })
-}
-
-export function recordCopilotRequestNormalization(
-  protocol: ClientDialect,
-  classes: Array<CopilotContractNormalizationClass>,
-): void {
-  if (classes.length === 0) return
-  recordCopilotContractEvent({
-    kind: "request_normalization",
-    protocol,
-    classes,
-  })
-}
-
-export function recordCopilotMessagesBeta(beta: string | undefined): void {
-  const count = beta ? beta.split(",").length : 0
-  recordCopilotContractEvent({ kind: "messages_beta", count })
-}
-
-export function recordCopilotResponseMetadata(
-  metadata: Record<string, string>,
-): void {
-  let quotaSnapshotCount = 0
-  for (const name of Object.keys(metadata)) {
-    if (name.startsWith("x-quota-snapshot-")) quotaSnapshotCount += 1
-  }
-  recordCopilotContractEvent({
-    kind: "response_metadata",
-    headerCount: Object.keys(metadata).length,
-    quotaSnapshotCount,
-  })
-}
 
 export type CopilotContractEvent =
   | {
@@ -88,10 +52,31 @@ export type CopilotContractEvent =
     }
 
 type SafeContractData = Record<string, boolean | number | string>
+type SafeDiagnostic = {
+  attributes: SafeContractData
+  data: SafeContractData
+  message: string
+}
 
 const MAX_COUNT = 65_535
 const MAX_NORMALIZATION_INPUTS = 64
 const MAX_NORMALIZATION_TEXT_LENGTH = 256
+const CLIENT_DIALECTS = new Set<ClientDialect>([
+  "chat",
+  "messages",
+  "responses",
+])
+const COPILOT_ENDPOINTS = new Set<CopilotInferenceEndpoint>([
+  "/chat/completions",
+  "/responses",
+  "/v1/messages",
+])
+const ROUTE_REASONS = new Set<EndpointRouteDecision["reason"]>([
+  "endpoint_unavailable",
+  "native",
+  "payload_requirement",
+])
+const CONTINUATION_OUTCOMES = new Set(["new_thread", "not_found", "rehydrated"])
 const NORMALIZATION_CLASSES = new Set<CopilotContractNormalizationClass>([
   "cache_control",
   "deprecated_function_call",
@@ -109,125 +94,255 @@ const NORMALIZATION_CLASSES = new Set<CopilotContractNormalizationClass>([
   "unsupported_sampling",
 ])
 
+export function recordCopilotEndpointRoute(
+  decision: EndpointRouteDecision,
+): void {
+  recordCopilotContractEvent({ kind: "endpoint_route", ...decision })
+}
+
+export function recordCopilotRequestNormalization(
+  protocol: ClientDialect,
+  classes: Array<CopilotContractNormalizationClass>,
+): void {
+  if (classes.length === 0) return
+  recordCopilotContractEvent({
+    kind: "request_normalization",
+    protocol,
+    classes,
+  })
+}
+
+export function recordCopilotMessagesBeta(beta: string | undefined): void {
+  const count =
+    typeof beta === "string" && beta !== "" ?
+      beta.split(",", MAX_COUNT + 1).length
+    : 0
+  recordCopilotContractEvent({ kind: "messages_beta", count })
+}
+
+export function recordCopilotResponseMetadata(
+  metadata: Record<string, string>,
+): void {
+  let names: Array<string>
+  try {
+    if (util.types.isProxy(metadata)) return
+    names = Object.keys(metadata)
+  } catch {
+    return
+  }
+  recordCopilotContractEvent({
+    kind: "response_metadata",
+    headerCount: names.length,
+    quotaSnapshotCount: names.filter((name) =>
+      name.startsWith("x-quota-snapshot-"),
+    ).length,
+  })
+}
+
 export function recordCopilotContractEvent(event: CopilotContractEvent): void {
   const diagnostic = createSafeDiagnostic(event)
-  consola.debug("[copilot-contract]", diagnostic.data)
-  Sentry.addBreadcrumb({
-    category: "copilot-api.contract",
-    level: "info",
-    message: diagnostic.message,
-    data: diagnostic.data,
-  })
+  if (!diagnostic) return
 
-  const span = Sentry.getActiveSpan()
+  try {
+    consola.debug("[copilot-contract]", diagnostic.data)
+  } catch {
+    // Diagnostics must never affect request processing.
+  }
+  try {
+    Sentry.addBreadcrumb({
+      category: "copilot-api.contract",
+      level: "info",
+      message: diagnostic.message,
+      data: diagnostic.data,
+    })
+  } catch {
+    // Diagnostics must never affect request processing.
+  }
+
+  let span: ReturnType<typeof Sentry.getActiveSpan>
+  try {
+    span = Sentry.getActiveSpan()
+  } catch {
+    return
+  }
   if (!span) return
   for (const [name, value] of Object.entries(diagnostic.attributes)) {
-    span.setAttribute(name, value)
+    try {
+      span.setAttribute(name, value)
+    } catch {
+      // One failed attribute must not affect the request or later attributes.
+    }
   }
 }
 
-function createSafeDiagnostic(event: CopilotContractEvent): {
-  attributes: SafeContractData
-  data: SafeContractData
-  message: string
-} {
-  switch (event.kind) {
+function createSafeDiagnostic(event: unknown): SafeDiagnostic | undefined {
+  const values = getSafeDataProperties(event)
+  if (!values) return undefined
+  const kind = values.kind
+
+  switch (kind) {
     case "endpoint_route": {
+      const source = allowlisted(values.source, CLIENT_DIALECTS)
+      const target = allowlisted(values.target, COPILOT_ENDPOINTS)
+      const reason = allowlisted(values.reason, ROUTE_REASONS)
+      if (
+        !source
+        || !target
+        || !reason
+        || typeof values.translated !== "boolean"
+      ) {
+        return undefined
+      }
       const data = {
-        kind: event.kind,
-        source: event.source,
-        target: event.target,
-        translated: event.translated,
-        reason: event.reason,
+        kind,
+        source,
+        target,
+        translated: values.translated,
+        reason,
       }
       return {
         data,
         message: "Copilot endpoint route selected",
-        attributes: prefixAttributes(event.kind, {
-          source: event.source,
-          target: event.target,
-          translated: event.translated,
-          reason: event.reason,
+        attributes: prefixAttributes(kind, {
+          source,
+          target,
+          translated: values.translated,
+          reason,
         }),
       }
     }
     case "request_normalization": {
-      const classes = normalizeClasses(event.classes)
+      const protocol = allowlisted(values.protocol, CLIENT_DIALECTS)
+      const classes = normalizeClasses(values.classes)
+      if (!protocol || !classes) return undefined
       const data = {
-        kind: event.kind,
-        protocol: event.protocol,
-        classes,
-        classCount: classes === "" ? 0 : classes.split(",").length,
+        kind,
+        protocol,
+        classes: classes.text,
+        classCount: classes.count,
       }
       return {
         data,
         message: "Copilot request normalized",
-        attributes: prefixAttributes(event.kind, {
-          protocol: event.protocol,
-          classes,
-          class_count: data.classCount,
+        attributes: prefixAttributes(kind, {
+          protocol,
+          classes: classes.text,
+          class_count: classes.count,
         }),
       }
     }
     case "messages_beta": {
-      const count = boundCount(event.count)
-      const data = { kind: event.kind, count }
+      const count = boundCount(values.count)
+      const data = { kind, count }
       return {
         data,
         message: "Copilot Messages beta identifiers counted",
-        attributes: prefixAttributes(event.kind, { count }),
+        attributes: prefixAttributes(kind, { count }),
       }
     }
     case "websocket_continuation": {
-      const data = { kind: event.kind, outcome: event.outcome }
+      const outcome = allowlisted(values.outcome, CONTINUATION_OUTCOMES)
+      if (!outcome) return undefined
+      const data = { kind, outcome }
       return {
         data,
         message: "Copilot WebSocket continuation resolved",
-        attributes: prefixAttributes(event.kind, {
-          outcome: event.outcome,
-        }),
+        attributes: prefixAttributes(kind, { outcome }),
       }
     }
     case "response_metadata": {
-      const headerCount = boundCount(event.headerCount)
-      const quotaSnapshotCount = boundCount(event.quotaSnapshotCount)
-      const data = {
-        kind: event.kind,
-        headerCount,
-        quotaSnapshotCount,
-      }
+      const headerCount = boundCount(values.headerCount)
+      const quotaSnapshotCount = boundCount(values.quotaSnapshotCount)
+      const data = { kind, headerCount, quotaSnapshotCount }
       return {
         data,
         message: "Copilot response metadata collected",
-        attributes: prefixAttributes(event.kind, {
+        attributes: prefixAttributes(kind, {
           header_count: headerCount,
           quota_snapshot_count: quotaSnapshotCount,
         }),
       }
     }
     default: {
-      return assertNever(event)
+      return undefined
     }
   }
 }
 
-function normalizeClasses(
-  classes: Array<CopilotContractNormalizationClass>,
-): string {
-  const safeClasses = new Set<CopilotContractNormalizationClass>()
-  const limit = Math.min(classes.length, MAX_NORMALIZATION_INPUTS)
-  for (let index = 0; index < limit; index += 1) {
-    const value = classes[index]
-    if (NORMALIZATION_CLASSES.has(value)) safeClasses.add(value)
+function getSafeDataProperties(
+  value: unknown,
+): Record<string, unknown> | undefined {
+  if (typeof value !== "object" || value === null) return undefined
+  try {
+    if (util.types.isProxy(value)) return undefined
+    const prototype: unknown = Object.getPrototypeOf(value)
+    if (prototype !== Object.prototype && prototype !== null) return undefined
+    const descriptors = Object.getOwnPropertyDescriptors(value)
+    const result: Record<string, unknown> = {}
+    for (const [name, descriptor] of Object.entries(descriptors)) {
+      if ("value" in descriptor) result[name] = descriptor.value
+    }
+    return result
+  } catch {
+    return undefined
   }
-  return [...safeClasses]
-    .sort()
-    .join(",")
-    .slice(0, MAX_NORMALIZATION_TEXT_LENGTH)
 }
 
-function boundCount(value: number): number {
-  if (!Number.isFinite(value)) return 0
+function normalizeClasses(
+  value: unknown,
+): { count: number; text: string } | undefined {
+  const classes = getSafeArrayValues(value)
+  if (!classes) return undefined
+  const safeClasses = new Set<CopilotContractNormalizationClass>()
+  for (const entry of classes) {
+    const normalizationClass = allowlisted(entry, NORMALIZATION_CLASSES)
+    if (normalizationClass) safeClasses.add(normalizationClass)
+  }
+
+  const included: Array<CopilotContractNormalizationClass> = []
+  let length = 0
+  for (const normalizationClass of [...safeClasses].sort()) {
+    const nextLength =
+      length + (included.length === 0 ? 0 : 1) + normalizationClass.length
+    if (nextLength > MAX_NORMALIZATION_TEXT_LENGTH) break
+    included.push(normalizationClass)
+    length = nextLength
+  }
+  if (included.length === 0) return undefined
+  return { count: included.length, text: included.join(",") }
+}
+
+function getSafeArrayValues(value: unknown): Array<unknown> | undefined {
+  if (!Array.isArray(value)) return undefined
+  try {
+    if (util.types.isProxy(value)) return undefined
+    if (Object.getPrototypeOf(value) !== Array.prototype) return undefined
+    const descriptors = Object.getOwnPropertyDescriptors(value)
+    const length = Math.min(value.length, MAX_NORMALIZATION_INPUTS)
+    const result: Array<unknown> = []
+    for (let index = 0; index < length; index += 1) {
+      const descriptor = descriptors[String(index)]
+      if (Object.hasOwn(descriptor, "value")) {
+        result.push(descriptor.value)
+      }
+    }
+    return result
+  } catch {
+    return undefined
+  }
+}
+
+function allowlisted<T extends string>(
+  value: unknown,
+  allowed: ReadonlySet<T>,
+): T | undefined {
+  return typeof value === "string" && allowed.has(value as T) ?
+      (value as T)
+    : undefined
+}
+
+function boundCount(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return 0
   return Math.min(MAX_COUNT, Math.max(0, Math.trunc(value)))
 }
 
@@ -241,9 +356,4 @@ function prefixAttributes(
       value,
     ]),
   )
-}
-
-function assertNever(value: never): never {
-  void value
-  throw new Error("Unhandled Copilot contract event")
 }

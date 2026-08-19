@@ -862,9 +862,12 @@ function hasCacheControlNormalization(value: unknown): boolean {
       key === "cache_control"
       && isRecord(nested)
       && nested.type === "ephemeral"
-      && Object.keys(nested).some(
-        (nestedKey) => nestedKey !== "type" && nestedKey !== "ttl",
-      )
+      && ((nested.ttl !== undefined
+        && nested.ttl !== "5m"
+        && nested.ttl !== "1h")
+        || Object.keys(nested).some(
+          (nestedKey) => nestedKey !== "type" && nestedKey !== "ttl",
+        ))
     ) {
       return true
     }

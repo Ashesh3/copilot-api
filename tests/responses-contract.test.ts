@@ -3,6 +3,7 @@ import { expect, test } from "bun:test"
 import type { ResponsesPayload } from "~/services/copilot/create-responses"
 
 import { LocalHTTPError } from "~/lib/error"
+import { setModelSettingsForTest } from "~/lib/model-settings"
 import {
   applyResponsesReasoningDefaults,
   finalizeResponsesRequest,
@@ -112,6 +113,98 @@ test("reports final reasoning and sampling normalization classes", () => {
     "reasoning_defaults",
     "gpt56_sampling",
   ])
+})
+
+test("reports every stateless control removed from the Responses wire", () => {
+  const prepared = prepareResponsesRequest({
+    model: "gpt-current",
+    input: "hello",
+    store: false,
+    background: false,
+    previous_response_id: null,
+    service_tier: null,
+    context_management: null,
+  })
+
+  expect(prepared.body).toEqual({
+    model: "gpt-current",
+    input: "hello",
+    store: false,
+  })
+  expect(prepared.normalizationClasses).toEqual(["stateless_controls"])
+})
+
+test("reports JSON-schema required filtering and deduplication", () => {
+  const prepared = prepareResponsesRequest({
+    model: "gpt-current",
+    input: "hello",
+    text: {
+      format: {
+        type: "json_schema",
+        name: "result",
+        schema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            answer: { type: "string" },
+            confidence: { type: "number" },
+          },
+          required: ["answer", "answer", "unknown", 7],
+        },
+      },
+    },
+  })
+
+  expect(prepared.body.text?.format).toMatchObject({
+    schema: {
+      required: ["answer", "confidence"],
+    },
+  })
+  expect(prepared.normalizationClasses).toEqual(["json_schema"])
+})
+
+test("reports JSON-object instruction injection", () => {
+  const prepared = prepareResponsesRequest({
+    model: "gpt-current",
+    input: "plain response",
+    text: { format: { type: "json_object" } },
+  })
+
+  expect(prepared.body.input).toEqual([
+    {
+      type: "message",
+      role: "developer",
+      content: "Respond with JSON.",
+    },
+    { type: "message", role: "user", content: "plain response" },
+  ])
+  expect(prepared.normalizationClasses).toEqual(["json_object_instruction"])
+})
+
+test("reports configured unsupported sampling removal", () => {
+  setModelSettingsForTest([
+    {
+      model: "sampling-limited",
+      unsupportedRequestParameters: ["temperature", "top_p"],
+    },
+  ])
+  try {
+    const prepared = finalizeResponsesRequest(
+      {
+        model: "sampling-limited",
+        input: "hello",
+        temperature: 0.2,
+        top_p: 0.7,
+      },
+      { implicitDefault: false },
+    )
+
+    expect(prepared.body).not.toHaveProperty("temperature")
+    expect(prepared.body).not.toHaveProperty("top_p")
+    expect(prepared.normalizationClasses).toEqual(["unsupported_sampling"])
+  } finally {
+    setModelSettingsForTest([])
+  }
 })
 
 test("keeps reasoning disabled without requesting summaries or encrypted state", () => {

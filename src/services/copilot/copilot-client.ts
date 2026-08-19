@@ -2,7 +2,6 @@ import * as Sentry from "@sentry/bun"
 import consola from "consola"
 import { randomUUID } from "node:crypto"
 
-import { recordCopilotResponseMetadata } from "~/lib/copilot-contract-observability"
 import {
   type CopilotRequestAttribution,
   getCopilotRequestAttribution,
@@ -617,7 +616,6 @@ function recordFinalResponseHeaders(response: Response): void {
   for (const [name, value] of Object.entries(metadata)) {
     setCopilotResponseHeader(name, value)
   }
-  recordCopilotResponseMetadata(metadata)
 }
 
 type ResponseAction =

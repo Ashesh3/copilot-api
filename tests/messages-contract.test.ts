@@ -216,6 +216,42 @@ test("reports cache-control normalization before native serialization", () => {
   expect(prepared.normalizationClasses).toEqual(["cache_control"])
 })
 
+test.each(["30m", "forever"])(
+  "reports removal of unsupported cache-control ttl %s",
+  (ttl) => {
+    const prepared = prepareAnthropicMessagesRequest({
+      payload: {
+        model: "claude-current",
+        max_tokens: 64,
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: "hello",
+                cache_control: { type: "ephemeral", ttl } as never,
+              },
+            ],
+          },
+        ],
+      },
+      requireMaxTokens: true,
+    })
+
+    expect(prepared.normalizationClasses).toEqual(["cache_control"])
+    expect(
+      JSON.parse(serializeAnthropicMessagesRequest(prepared.body)),
+    ).toMatchObject({
+      messages: [
+        {
+          content: [{ cache_control: { type: "ephemeral" } }],
+        },
+      ],
+    })
+  },
+)
+
 test.each([
   ["model", { model: "", messages: [], max_tokens: 1 }],
   ["messages", { model: "claude", messages: [], max_tokens: 1 }],

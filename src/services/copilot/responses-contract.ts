@@ -192,14 +192,22 @@ export function prepareResponsesRequest(
   const normalizationClasses: Array<CopilotContractNormalizationClass> = []
 
   const body = {} as ResponsesWireBody
+  let statelessControlsNormalized = false
   for (const field of RESPONSES_TOP_LEVEL_FIELDS) {
     if (field === "tools") {
       if (preparedTools !== undefined) body.tools = preparedTools
       continue
     }
     const value = normalizeStatefulField(field, payload[field])
-    if (value === OMIT_FIELD || value === undefined) continue
+    if (value === OMIT_FIELD) {
+      statelessControlsNormalized ||= payload[field] !== undefined
+      continue
+    }
+    if (value === undefined) continue
     ;(body as Record<string, unknown>)[field] = structuredClone(value)
+  }
+  if (statelessControlsNormalized) {
+    normalizationClasses.push("stateless_controls")
   }
 
   if (ensureJsonObjectInputMentionsJson(body)) {
@@ -707,6 +715,15 @@ function countMissingObjectSchemaDefaults(
       for (const key of Object.keys(schema.properties)) {
         if (!required.has(key)) missing += 1
       }
+      const propertyKeys = new Set(Object.keys(schema.properties))
+      const rawRequiredLength =
+        Array.isArray(schema.required) ? schema.required.length : 0
+      if (
+        required.size !== rawRequiredLength
+        || [...required].some((key) => !propertyKeys.has(key))
+      ) {
+        missing += 1
+      }
     }
   }
   return missing
@@ -813,7 +830,10 @@ function normalizeJsonSchemaRequired(schema: Record<string, unknown>): void {
     Array.isArray(schema.required) ?
       schema.required.filter((key): key is string => typeof key === "string")
     : []
-  const required = new Set(existingRequired)
+  const propertyKeySet = new Set(propertyKeys)
+  const required = new Set(
+    existingRequired.filter((key) => propertyKeySet.has(key)),
+  )
 
   for (const key of propertyKeys) {
     required.add(key)

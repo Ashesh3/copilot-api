@@ -581,7 +581,7 @@ test("retries Bun's socket-closed ECONNRESET and returns the retried response", 
   expect(capturedRequests).toHaveLength(2)
 })
 
-test("records safe metadata counts only from the final selected attempt", async () => {
+test("leaves logical response metadata emission to routedFetch", async () => {
   queuedResults.push(
     new Response("retry", {
       status: 500,
@@ -611,16 +611,7 @@ test("records safe metadata counts only from the final selected attempt", async 
     const contractLogs = debugSpy.mock.calls.filter(
       (call) => call[0] === "[copilot-contract]",
     )
-    expect(contractLogs).toEqual([
-      [
-        "[copilot-contract]",
-        {
-          kind: "response_metadata",
-          headerCount: 2,
-          quotaSnapshotCount: 1,
-        },
-      ],
-    ])
+    expect(contractLogs).toEqual([])
     const diagnostics = JSON.stringify({
       breadcrumbs: breadcrumbSpy.mock.calls,
       logs: contractLogs,

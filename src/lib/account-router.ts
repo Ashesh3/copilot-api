@@ -9,9 +9,12 @@ import type {
 } from "~/services/copilot/copilot-client"
 import type { RetryBudget } from "~/services/copilot/transport-retry"
 
+import { recordCopilotResponseMetadata } from "~/lib/copilot-contract-observability"
 import { HTTPError, LocalHTTPError } from "~/lib/error"
 import {
+  clearCopilotResponseHeaders,
   getClientSessionId,
+  getCopilotResponseHeaders,
   getLastUsedRoutedAccountId,
   setLastUsedRoutedAccountId,
 } from "~/lib/request-session"
@@ -94,6 +97,11 @@ function selectRoutedAccount(options: {
 type RoutedFetchResult = {
   account: Account | undefined
   response: Response
+}
+
+function finalizeRoutedFetch(result: RoutedFetchResult): RoutedFetchResult {
+  recordCopilotResponseMetadata(getCopilotResponseHeaders())
+  return result
 }
 
 function destinationForPath(path: string): string {
@@ -622,6 +630,7 @@ export async function routedFetch(
     retryBudget,
   }
   setLastUsedRoutedAccountId(undefined)
+  clearCopilotResponseHeaders()
 
   if (!state.isMultiToken) {
     const headers = copilotHeaders(headerOptions)
@@ -645,7 +654,7 @@ export async function routedFetch(
         }),
       },
     )
-    return { response, account: undefined }
+    return finalizeRoutedFetch({ response, account: undefined })
   }
 
   const affinityKey = getEffectiveAffinityKey()
@@ -657,14 +666,14 @@ export async function routedFetch(
   if (!account) {
     if (tokenPool.hasKnownModel(modelId)) {
       const response = createNoEnabledAccountResponse(modelId)
-      return { response, account: undefined }
+      return finalizeRoutedFetch({ response, account: undefined })
     }
 
     consola.warn(
       `No account found for model "${modelId}", falling back to default`,
     )
 
-    return await fetchWithFallbackAccount(context)
+    return finalizeRoutedFetch(await fetchWithFallbackAccount(context))
   }
 
   consola.debug(
@@ -685,5 +694,5 @@ export async function routedFetch(
   if (routedAccountPin && result.account) {
     routedAccountPin.accountId = result.account.id
   }
-  return result
+  return finalizeRoutedFetch(result)
 }

@@ -21,6 +21,8 @@ import { LocalHTTPError } from "../src/lib/error"
 import { setModelRoutingOverridesForTest } from "../src/lib/model-routing"
 import {
   clientSessionStorage,
+  copilotResponseHeadersStorage,
+  getCopilotResponseHeaders,
   requestIdStorage,
   routedAccountStorage,
 } from "../src/lib/request-session"
@@ -245,6 +247,39 @@ function llmAuthorizationHeaders(): Array<string | null> {
         !url.includes("/copilot_internal/") && !url.endsWith("/models"),
     )
     .map(({ init }) => new Headers(init?.headers).get("authorization"))
+}
+
+function responseMetadataEvents(
+  calls: ReadonlyArray<ReadonlyArray<unknown>>,
+): Array<unknown> {
+  return calls
+    .filter(
+      (call) =>
+        call[0] === "[copilot-contract]"
+        && (call[1] as { kind?: unknown } | undefined)?.kind
+          === "response_metadata",
+    )
+    .map((call) => call[1])
+}
+
+async function routedFetchWithMetadataStore(modelId: string): Promise<{
+  headers: Record<string, string>
+  result: { account: unknown; response: Response }
+}> {
+  return await copilotResponseHeadersStorage.run({}, async () => {
+    const result = await routedFetch(
+      "/chat/completions",
+      { method: "POST" },
+      { maxHttpRetryDelaySeconds: 0, modelId },
+    )
+    return { result, headers: { ...getCopilotResponseHeaders() } }
+  })
+}
+
+function retryableSocketError(): Error {
+  return Object.assign(new Error("socket connection was closed unexpectedly"), {
+    code: "ECONNRESET",
+  })
 }
 
 beforeAll(() => {
@@ -698,6 +733,136 @@ test("fails over to the next account immediately after a multi-token 401", async
   expect(capturedRequests[4]?.init?.headers).toMatchObject({
     Authorization: "Bearer secondary-copilot-token",
   })
+})
+
+test("records final response metadata once after a 403 account failover", async () => {
+  const modelId = "router-metadata-failover"
+  registerAccount(10_031, modelId, "metadata-primary")
+  registerAccount(10_032, modelId, "metadata-secondary")
+  tokenPool.rebuildModelIndex()
+  queuedResults.push(
+    new Response("Forbidden", {
+      status: 403,
+      headers: { "x-github-request-id": "failed-attempt" },
+    }),
+    new Response("{}", {
+      status: 200,
+      headers: {
+        "x-github-request-id": "final-attempt",
+        "x-quota-snapshot-premium": "final-quota",
+      },
+    }),
+  )
+  const debugSpy = spyOn(consola, "debug")
+
+  try {
+    const { result, headers } = await routedFetchWithMetadataStore(modelId)
+
+    expect(result.response.status).toBe(200)
+    expect(headers).toEqual({
+      "x-github-request-id": "final-attempt",
+      "x-quota-snapshot-premium": "final-quota",
+    })
+    expect(responseMetadataEvents(debugSpy.mock.calls)).toEqual([
+      {
+        kind: "response_metadata",
+        headerCount: 2,
+        quotaSnapshotCount: 1,
+      },
+    ])
+  } finally {
+    debugSpy.mockRestore()
+  }
+})
+
+test("records final response metadata once after a transport retry", async () => {
+  const modelId = "router-metadata-transport"
+  registerAccount(10_041, modelId, "metadata-transport")
+  tokenPool.rebuildModelIndex()
+  queuedResults.push(
+    retryableSocketError(),
+    new Response("{}", {
+      status: 200,
+      headers: { "x-github-request-id": "transport-final" },
+    }),
+  )
+  const debugSpy = spyOn(consola, "debug")
+
+  try {
+    await routedFetchWithMetadataStore(modelId)
+
+    expect(responseMetadataEvents(debugSpy.mock.calls)).toEqual([
+      {
+        kind: "response_metadata",
+        headerCount: 1,
+        quotaSnapshotCount: 0,
+      },
+    ])
+  } finally {
+    debugSpy.mockRestore()
+  }
+})
+
+test("records final response metadata once after same-account reinitialization", async () => {
+  const modelId = "router-metadata-reinitialize"
+  registerAccount(10_051, modelId, "metadata-expired")
+  tokenPool.rebuildModelIndex()
+  queuedResults.push(
+    new Response("Unauthorized", {
+      status: 401,
+      headers: { "x-github-request-id": "expired-attempt" },
+    }),
+    copilotTokenResponse("metadata-fresh"),
+    modelsResponse([modelId]),
+    new Response("{}", {
+      status: 200,
+      headers: { "x-github-request-id": "reinitialized-final" },
+    }),
+  )
+  const debugSpy = spyOn(consola, "debug")
+
+  try {
+    const { result } = await routedFetchWithMetadataStore(modelId)
+
+    expect(result.response.status).toBe(200)
+    expect(responseMetadataEvents(debugSpy.mock.calls)).toEqual([
+      {
+        kind: "response_metadata",
+        headerCount: 1,
+        quotaSnapshotCount: 0,
+      },
+    ])
+  } finally {
+    debugSpy.mockRestore()
+  }
+})
+
+test("records final response metadata once for a returned terminal error", async () => {
+  const modelId = "router-metadata-terminal"
+  registerAccount(10_061, modelId, "metadata-terminal")
+  tokenPool.rebuildModelIndex()
+  queuedResults.push(
+    new Response("unprocessable", {
+      status: 422,
+      headers: { "x-github-request-id": "terminal-final" },
+    }),
+  )
+  const debugSpy = spyOn(consola, "debug")
+
+  try {
+    const { result } = await routedFetchWithMetadataStore(modelId)
+
+    expect(result.response.status).toBe(422)
+    expect(responseMetadataEvents(debugSpy.mock.calls)).toEqual([
+      {
+        kind: "response_metadata",
+        headerCount: 1,
+        quotaSnapshotCount: 0,
+      },
+    ])
+  } finally {
+    debugSpy.mockRestore()
+  }
 })
 
 test("refreshes a multi-token account and retries after a 401", async () => {

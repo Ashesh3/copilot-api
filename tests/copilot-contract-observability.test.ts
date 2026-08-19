@@ -154,3 +154,110 @@ test("bounds metadata counts before logging or tracing", () => {
     diagnostics.restore()
   }
 })
+
+test("drops whole normalization tokens instead of slicing partial values", () => {
+  const diagnostics = installDiagnosticSpies()
+  try {
+    recordCopilotContractEvent({
+      kind: "request_normalization",
+      protocol: "responses",
+      classes: [
+        "unsupported_sampling",
+        "stateless_controls",
+        "reasoning_defaults",
+        "max_output_tokens",
+        "json_schema",
+        "json_object_instruction",
+        "gpt56_sampling",
+        "gateway_only_fields",
+        "function_parameters",
+        "encrypted_reasoning_include",
+        "empty_tool_controls",
+        "deprecated_functions",
+        "deprecated_function_call",
+        "cache_control",
+      ],
+    })
+
+    expect(diagnostics.debug.mock.calls[0]?.[1]).toEqual({
+      kind: "request_normalization",
+      protocol: "responses",
+      classes:
+        "cache_control,deprecated_function_call,deprecated_functions,empty_tool_controls,encrypted_reasoning_include,function_parameters,gateway_only_fields,gpt56_sampling,json_object_instruction,json_schema,max_output_tokens,reasoning_defaults,stateless_controls",
+      classCount: 13,
+    })
+  } finally {
+    diagnostics.restore()
+  }
+})
+
+test("ignores hostile runtime events without throwing or leaking", () => {
+  const diagnostics = installDiagnosticSpies()
+  const privateMarker = "hostile-contract-private-marker"
+  let getterCalls = 0
+  const hostile = new Proxy(
+    {
+      get kind() {
+        getterCalls += 1
+        throw new Error(privateMarker)
+      },
+    },
+    {
+      ownKeys() {
+        throw new Error(privateMarker)
+      },
+    },
+  )
+
+  try {
+    expect(() => recordCopilotContractEvent(hostile as never)).not.toThrow()
+    expect(() =>
+      recordCopilotContractEvent({
+        kind: "endpoint_route",
+        source: privateMarker,
+        target: privateMarker,
+        translated: privateMarker,
+        reason: privateMarker,
+      } as never),
+    ).not.toThrow()
+    expect(() =>
+      recordCopilotContractEvent({
+        kind: "request_normalization",
+        protocol: privateMarker,
+        classes: new Proxy([], {
+          get() {
+            throw new Error(privateMarker)
+          },
+        }),
+      } as never),
+    ).not.toThrow()
+    expect(() =>
+      recordCopilotContractEvent({
+        kind: "websocket_continuation",
+        outcome: privateMarker,
+      } as never),
+    ).not.toThrow()
+    expect(() =>
+      recordCopilotContractEvent({
+        kind: "messages_beta",
+        count: privateMarker,
+      } as never),
+    ).not.toThrow()
+    expect(() =>
+      recordCopilotContractEvent({
+        kind: "response_metadata",
+        headerCount: privateMarker,
+        quotaSnapshotCount: privateMarker,
+      } as never),
+    ).not.toThrow()
+
+    const output = JSON.stringify({
+      breadcrumbs: diagnostics.breadcrumb.mock.calls,
+      logs: diagnostics.debug.mock.calls,
+    })
+    expect(output).not.toContain(privateMarker)
+    expect(getterCalls).toBeLessThanOrEqual(1)
+  } finally {
+    diagnostics.restore()
+  }
+})
