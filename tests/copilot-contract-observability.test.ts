@@ -261,3 +261,45 @@ test("ignores hostile runtime events without throwing or leaking", () => {
     diagnostics.restore()
   }
 })
+
+test.each([
+  {
+    kind: "request_normalization",
+    protocol: "responses",
+    classes: ["json_schema"],
+  },
+  {
+    kind: "endpoint_route",
+    source: "responses",
+    target: "/responses",
+    translated: false,
+    reason: "native",
+  },
+  { kind: "messages_beta", count: 1 },
+  { kind: "websocket_continuation", outcome: "new_thread" },
+  { kind: "response_metadata", headerCount: 1, quotaSnapshotCount: 0 },
+])("ignores hostile array-like property for $kind", (event) => {
+  const diagnostics = installDiagnosticSpies()
+  const privateMarker = `hostile-${event.kind}-array-private`
+  const revoked = Proxy.revocable([], {})
+  revoked.revoke()
+  const hostile = {
+    ...event,
+    classes: revoked.proxy,
+    count: revoked.proxy,
+    headerCount: revoked.proxy,
+    quotaSnapshotCount: revoked.proxy,
+    translated: revoked.proxy,
+  }
+
+  try {
+    expect(() => recordCopilotContractEvent(hostile as never)).not.toThrow()
+    const output = JSON.stringify({
+      breadcrumbs: diagnostics.breadcrumb.mock.calls,
+      logs: diagnostics.debug.mock.calls,
+    })
+    expect(output).not.toContain(privateMarker)
+  } finally {
+    diagnostics.restore()
+  }
+})

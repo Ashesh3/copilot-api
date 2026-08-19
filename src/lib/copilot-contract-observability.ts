@@ -1,5 +1,6 @@
 import * as Sentry from "@sentry/bun"
 import consola from "consola"
+import { AsyncLocalStorage } from "node:async_hooks"
 import util from "node:util"
 
 import type {
@@ -7,6 +8,11 @@ import type {
   CopilotInferenceEndpoint,
   EndpointRouteDecision,
 } from "~/lib/endpoint-routing"
+
+import {
+  clearCopilotResponseHeaders,
+  getCopilotResponseHeaders,
+} from "~/lib/request-session"
 
 export type CopilotContractNormalizationClass =
   | "cache_control"
@@ -93,6 +99,32 @@ const NORMALIZATION_CLASSES = new Set<CopilotContractNormalizationClass>([
   "stateless_controls",
   "unsupported_sampling",
 ])
+const contractObservabilityStorage = new AsyncLocalStorage<{
+  responseMetadataAvailable: boolean
+}>()
+
+export async function runWithCopilotContractObservabilityScope<T>(
+  callback: () => Promise<T>,
+): Promise<T> {
+  if (contractObservabilityStorage.getStore()) return await callback()
+
+  clearCopilotResponseHeaders()
+  const scope = { responseMetadataAvailable: false }
+  return await contractObservabilityStorage.run(scope, async () => {
+    try {
+      return await callback()
+    } finally {
+      if (scope.responseMetadataAvailable) {
+        recordCopilotResponseMetadata(getCopilotResponseHeaders())
+      }
+    }
+  })
+}
+
+export function markCopilotContractResponseMetadataAvailable(): void {
+  const scope = contractObservabilityStorage.getStore()
+  if (scope) scope.responseMetadataAvailable = true
+}
 
 export function recordCopilotEndpointRoute(
   decision: EndpointRouteDecision,
@@ -313,9 +345,9 @@ function normalizeClasses(
 }
 
 function getSafeArrayValues(value: unknown): Array<unknown> | undefined {
-  if (!Array.isArray(value)) return undefined
   try {
     if (util.types.isProxy(value)) return undefined
+    if (!Array.isArray(value)) return undefined
     if (Object.getPrototypeOf(value) !== Array.prototype) return undefined
     const descriptors = Object.getOwnPropertyDescriptors(value)
     const length = Math.min(value.length, MAX_NORMALIZATION_INPUTS)

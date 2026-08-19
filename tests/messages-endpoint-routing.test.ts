@@ -977,6 +977,7 @@ test("rejects an unknown Messages model without fabricating Chat support", async
 
 test("recovers once from a deterministic native signature rejection", async () => {
   installModel({ supported_endpoints: ["/v1/messages"] })
+  const debugSpy = spyOn(consola, "debug")
   queuedMessagesResults.push(
     new Response(
       JSON.stringify({
@@ -986,9 +987,22 @@ test("recovers once from a deterministic native signature rejection", async () =
           message: "Invalid signature in thinking block",
         },
       }),
-      { status: 400, headers: { "content-type": "application/json" } },
+      {
+        status: 400,
+        headers: {
+          "content-type": "application/json",
+          "x-github-request-id": "signature-rejected",
+        },
+      },
     ),
-    nativeSuccess("recovered"),
+    new Response(await nativeSuccess("recovered").text(), {
+      status: 200,
+      headers: {
+        "content-type": "application/json",
+        "x-github-request-id": "signature-recovered",
+        "x-quota-snapshot-premium": "final-quota",
+      },
+    }),
   )
 
   const response = await postMessages(
@@ -1013,6 +1027,14 @@ test("recovers once from a deterministic native signature rejection", async () =
     expect(headers.get("anthropic-version")).toBe("2024-01-01")
     expect(headers.get("x-model-provider-preference")).toBe("anthropic")
   }
+  const metadataEvents = contractEventData(
+    debugSpy.mock.calls,
+    "response_metadata",
+  )
+  expect(metadataEvents).toEqual([
+    { kind: "response_metadata", headerCount: 2, quotaSnapshotCount: 1 },
+  ])
+  debugSpy.mockRestore()
 })
 
 test("keeps native signature recovery on the account used by the first send", async () => {
@@ -1212,6 +1234,57 @@ test("streaming native web search keeps recovery inside the loop and emits Anthr
   expect(upstreamPaths.filter((path) => path === "/v1/messages")).toHaveLength(
     3,
   )
+})
+
+test("native web-search iterations emit one final metadata event", async () => {
+  installModel({ supported_endpoints: ["/v1/messages"] })
+  const debugSpy = spyOn(consola, "debug")
+  queuedMessagesResults.push(
+    Response.json(
+      {
+        id: "msg_search_metadata",
+        type: "message",
+        role: "assistant",
+        model: "route-model",
+        content: [
+          {
+            type: "tool_use",
+            id: "toolu_search_metadata",
+            name: "web_search",
+            input: { query: "current facts" },
+          },
+        ],
+        stop_reason: "tool_use",
+        stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+      { headers: { "x-github-request-id": "search-intermediate" } },
+    ),
+    new Response(await nativeSuccess("search-final").text(), {
+      status: 200,
+      headers: {
+        "content-type": "application/json",
+        "x-github-request-id": "search-final",
+      },
+    }),
+  )
+
+  try {
+    const response = await postMessages({
+      tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 2 }],
+    })
+
+    expect(response.status).toBe(200)
+    const metadataEvents = contractEventData(
+      debugSpy.mock.calls,
+      "response_metadata",
+    )
+    expect(metadataEvents).toEqual([
+      { kind: "response_metadata", headerCount: 1, quotaSnapshotCount: 0 },
+    ])
+  } finally {
+    debugSpy.mockRestore()
+  }
 })
 
 test("pins native web-search follow-up to the account selected by failover", async () => {
@@ -2444,6 +2517,23 @@ function postMessages(
       }),
     }),
   )
+}
+
+function contractEventData(
+  calls: ReadonlyArray<ReadonlyArray<unknown>>,
+  kind: string,
+): Array<Record<string, unknown>> {
+  return calls.flatMap((call) => {
+    const value = call[1]
+    return (
+        call[0] === "[copilot-contract]"
+          && typeof value === "object"
+          && value !== null
+          && (value as { kind?: unknown }).kind === kind
+      ) ?
+        [value as Record<string, unknown>]
+      : []
+  })
 }
 
 test("emits one bounded Messages route event before dispatch", async () => {

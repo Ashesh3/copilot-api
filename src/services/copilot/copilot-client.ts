@@ -2,6 +2,7 @@ import * as Sentry from "@sentry/bun"
 import consola from "consola"
 import { randomUUID } from "node:crypto"
 
+import { markCopilotContractResponseMetadataAvailable } from "~/lib/copilot-contract-observability"
 import {
   type CopilotRequestAttribution,
   getCopilotRequestAttribution,
@@ -743,6 +744,7 @@ export async function copilotFetch(
 
       logChainResponse(chain, Date.now() - attemptStartedAtMs, response.status)
       recordFinalResponseHeaders(response)
+      markCopilotContractResponseMetadataAvailable()
       return response
     } catch (error) {
       lastError = error as Error
@@ -763,6 +765,7 @@ export async function copilotFetch(
 
   if (lastResponse) {
     recordFinalResponseHeaders(lastResponse)
+    markCopilotContractResponseMetadataAvailable()
     return lastResponse
   }
 

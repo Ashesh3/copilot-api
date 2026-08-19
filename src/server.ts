@@ -1,6 +1,7 @@
 import { Hono } from "hono"
 import { randomUUID } from "node:crypto"
 
+import { runWithCopilotContractObservabilityScope } from "~/lib/copilot-contract-observability"
 import {
   type CopilotRequestAttribution,
   resolveCopilotRequestAttribution,
@@ -91,17 +92,29 @@ function applySecurityHeaders(c: {
   c.header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 }
 
-function runWithRequestRoutingScopes<T>(
+async function runWithRequestRoutingScopes<T>(
   attribution: CopilotRequestAttribution,
   affinity: RoutingAffinity | undefined,
-  callback: () => T,
-): T {
-  return runWithCopilotRequestAttribution(attribution, () =>
-    runWithRoutingAffinity(affinity, () =>
-      copilotResponseHeadersStorage.run({}, () =>
-        routedAccountStorage.run({}, callback),
+  callback: () => Promise<T>,
+): Promise<T> {
+  return await runWithCopilotRequestAttribution(
+    attribution,
+    async () =>
+      await runWithRoutingAffinity(
+        affinity,
+        async () =>
+          await copilotResponseHeadersStorage.run(
+            {},
+            async () =>
+              await routedAccountStorage.run(
+                {},
+                async () =>
+                  await runWithCopilotContractObservabilityScope(
+                    async () => await callback(),
+                  ),
+              ),
+          ),
       ),
-    ),
   )
 }
 

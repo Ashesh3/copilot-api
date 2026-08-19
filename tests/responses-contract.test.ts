@@ -1,5 +1,7 @@
+/* eslint-disable max-lines -- current Responses contract matrix stays together */
 import { expect, test } from "bun:test"
 
+import type { CopilotContractNormalizationClass } from "~/lib/copilot-contract-observability"
 import type { ResponsesPayload } from "~/services/copilot/create-responses"
 
 import { LocalHTTPError } from "~/lib/error"
@@ -161,6 +163,101 @@ test("reports JSON-schema required filtering and deduplication", () => {
     },
   })
   expect(prepared.normalizationClasses).toEqual(["json_schema"])
+})
+
+test.each([
+  {
+    name: "fully canonical schema",
+    schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: { answer: { type: "string" } },
+      required: ["answer"],
+    },
+    expectedClasses: [],
+  },
+  {
+    name: "duplicate required entry",
+    schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: { answer: { type: "string" } },
+      required: ["answer", "answer"],
+    },
+    expectedClasses: ["json_schema"],
+  },
+])("classifies JSON-schema mutation exactly for $name", (entry) => {
+  const prepared = prepareResponsesRequest({
+    model: "gpt-current",
+    input: "hello",
+    text: {
+      format: { type: "json_schema", name: "result", schema: entry.schema },
+    },
+  })
+
+  expect([...prepared.normalizationClasses]).toEqual([...entry.expectedClasses])
+})
+
+test.each([
+  {
+    name: "absent tools and controls",
+    extra: {},
+    expectedClasses: [],
+  },
+  {
+    name: "null tools without controls",
+    extra: { tools: null },
+    expectedClasses: [],
+  },
+  {
+    name: "empty tools without controls",
+    extra: { tools: [] },
+    expectedClasses: ["empty_tool_controls"],
+  },
+  {
+    name: "null tools with controls",
+    extra: { tools: null, tool_choice: "auto", parallel_tool_calls: true },
+    expectedClasses: ["empty_tool_controls"],
+  },
+] as Array<{
+  name: string
+  extra: Record<string, unknown>
+  expectedClasses: Array<CopilotContractNormalizationClass>
+}>)("classifies empty tool mutation exactly for $name", (entry) => {
+  const prepared = prepareResponsesRequest({
+    model: "gpt-current",
+    input: "hello",
+    ...entry.extra,
+  })
+
+  expect([...prepared.normalizationClasses]).toEqual([...entry.expectedClasses])
+})
+
+test.each([
+  { name: "no stateless values", extra: {}, expectedClasses: [] },
+  {
+    name: "preserved store false only",
+    extra: { store: false },
+    expectedClasses: [],
+  },
+  {
+    name: "omitted background false",
+    extra: { background: false },
+    expectedClasses: ["stateless_controls"],
+  },
+  {
+    name: "omitted null continuation controls",
+    extra: { previous_response_id: null, service_tier: null },
+    expectedClasses: ["stateless_controls"],
+  },
+])("classifies stateless mutation exactly for $name", (entry) => {
+  const prepared = prepareResponsesRequest({
+    model: "gpt-current",
+    input: "hello",
+    ...entry.extra,
+  })
+
+  expect([...prepared.normalizationClasses]).toEqual([...entry.expectedClasses])
 })
 
 test("reports JSON-object instruction injection", () => {

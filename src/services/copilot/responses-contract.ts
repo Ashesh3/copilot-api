@@ -680,79 +680,56 @@ function normalizeJsonSchemaResponseFormat(
   const format = payload.text?.format
   if (!isRecord(format) || format.type !== "json_schema") return false
 
-  const before = countMissingJsonSchemaDefaults(format.schema)
-  normalizeJsonSchemaObject(format.schema)
-  return before > 0
+  return normalizeJsonSchemaObject(format.schema)
 }
 
-function countMissingJsonSchemaDefaults(
+function normalizeJsonSchemaObject(
   schema: unknown,
   seen = new Set<object>(),
-): number {
-  if (!isRecord(schema) || seen.has(schema)) return 0
+): boolean {
+  if (!isRecord(schema)) return false
+  if (seen.has(schema)) return false
   seen.add(schema)
-  let missing = countMissingObjectSchemaDefaults(schema)
-  missing += countMissingSchemaMapDefaults(schema, seen)
-  missing += countMissingSchemaValueDefaults(schema, seen)
-  missing += countMissingSchemaArrayDefaults(schema, seen)
-  return missing
+  const objectChanged = normalizeObjectSchemaDefaults(schema)
+  const mapsChanged = normalizeSchemaMaps(schema, seen)
+  const valuesChanged = normalizeSchemaValues(schema, seen)
+  const arraysChanged = normalizeSchemaArrays(schema, seen)
+  return objectChanged || mapsChanged || valuesChanged || arraysChanged
 }
 
-function countMissingObjectSchemaDefaults(
+function normalizeObjectSchemaDefaults(
   schema: Record<string, unknown>,
-): number {
-  let missing = 0
-  if (schema.type === "object" || isRecord(schema.properties)) {
-    if (schema.additionalProperties === undefined) missing += 1
-    if (isRecord(schema.properties)) {
-      const required = new Set(
-        Array.isArray(schema.required) ?
-          schema.required.filter(
-            (key): key is string => typeof key === "string",
-          )
-        : [],
-      )
-      for (const key of Object.keys(schema.properties)) {
-        if (!required.has(key)) missing += 1
-      }
-      const propertyKeys = new Set(Object.keys(schema.properties))
-      const rawRequiredLength =
-        Array.isArray(schema.required) ? schema.required.length : 0
-      if (
-        required.size !== rawRequiredLength
-        || [...required].some((key) => !propertyKeys.has(key))
-      ) {
-        missing += 1
-      }
-    }
+): boolean {
+  if (schema.type !== "object" && !isRecord(schema.properties)) return false
+  let changed = false
+  if (schema.additionalProperties === undefined) {
+    schema.additionalProperties = false
+    changed = true
   }
-  return missing
+  return normalizeJsonSchemaRequired(schema) || changed
 }
 
-function countMissingSchemaMapDefaults(
+function normalizeSchemaMaps(
   schema: Record<string, unknown>,
   seen: Set<object>,
-): number {
-  let missing = 0
+): boolean {
+  let changed = false
   for (const value of [
     schema.properties,
     schema.patternProperties,
     schema.$defs,
     schema.definitions,
   ]) {
-    if (!isRecord(value)) continue
-    for (const nested of Object.values(value)) {
-      missing += countMissingJsonSchemaDefaults(nested, seen)
-    }
+    if (normalizeSchemaMap(value, seen)) changed = true
   }
-  return missing
+  return changed
 }
 
-function countMissingSchemaValueDefaults(
+function normalizeSchemaValues(
   schema: Record<string, unknown>,
   seen: Set<object>,
-): number {
-  let missing = 0
+): boolean {
+  let changed = false
   for (const value of [
     schema.items,
     schema.additionalItems,
@@ -763,68 +740,27 @@ function countMissingSchemaValueDefaults(
     schema.then,
     schema.else,
   ]) {
-    if (Array.isArray(value)) {
-      for (const nested of value) {
-        missing += countMissingJsonSchemaDefaults(nested, seen)
-      }
-    } else {
-      missing += countMissingJsonSchemaDefaults(value, seen)
-    }
+    if (normalizeSchemaValue(value, seen)) changed = true
   }
-  return missing
+  return changed
 }
 
-function countMissingSchemaArrayDefaults(
+function normalizeSchemaArrays(
   schema: Record<string, unknown>,
   seen: Set<object>,
-): number {
-  let missing = 0
+): boolean {
+  let changed = false
   for (const value of [schema.anyOf, schema.oneOf, schema.allOf]) {
-    if (!Array.isArray(value)) continue
-    for (const nested of value) {
-      missing += countMissingJsonSchemaDefaults(nested, seen)
-    }
+    if (normalizeSchemaArray(value, seen)) changed = true
   }
-  return missing
+  return changed
 }
 
-function normalizeJsonSchemaObject(
-  schema: unknown,
-  seen = new Set<object>(),
-): void {
-  if (!isRecord(schema)) return
-  if (seen.has(schema)) return
-  seen.add(schema)
-
-  if (schema.type === "object" || isRecord(schema.properties)) {
-    if (schema.additionalProperties === undefined) {
-      schema.additionalProperties = false
-    }
-    normalizeJsonSchemaRequired(schema)
-  }
-
-  normalizeSchemaMap(schema.properties, seen)
-  normalizeSchemaMap(schema.patternProperties, seen)
-  normalizeSchemaMap(schema.$defs, seen)
-  normalizeSchemaMap(schema.definitions, seen)
-  normalizeSchemaValue(schema.items, seen)
-  normalizeSchemaValue(schema.additionalItems, seen)
-  normalizeSchemaValue(schema.contains, seen)
-  normalizeSchemaValue(schema.propertyNames, seen)
-  normalizeSchemaValue(schema.not, seen)
-  normalizeSchemaValue(schema.if, seen)
-  normalizeSchemaValue(schema.then, seen)
-  normalizeSchemaValue(schema.else, seen)
-  normalizeSchemaArray(schema.anyOf, seen)
-  normalizeSchemaArray(schema.oneOf, seen)
-  normalizeSchemaArray(schema.allOf, seen)
-}
-
-function normalizeJsonSchemaRequired(schema: Record<string, unknown>): void {
-  if (!isRecord(schema.properties)) return
+function normalizeJsonSchemaRequired(schema: Record<string, unknown>): boolean {
+  if (!isRecord(schema.properties)) return false
 
   const propertyKeys = Object.keys(schema.properties)
-  if (propertyKeys.length === 0) return
+  if (propertyKeys.length === 0) return false
 
   const existingRequired =
     Array.isArray(schema.required) ?
@@ -839,30 +775,43 @@ function normalizeJsonSchemaRequired(schema: Record<string, unknown>): void {
     required.add(key)
   }
 
-  schema.required = [...required]
+  const normalizedRequired = [...required]
+  const existingValue = schema.required
+  if (
+    Array.isArray(existingValue)
+    && existingValue.length === normalizedRequired.length
+    && existingValue.every((key, index) => key === normalizedRequired[index])
+  ) {
+    return false
+  }
+  schema.required = normalizedRequired
+  return true
 }
 
-function normalizeSchemaMap(value: unknown, seen: Set<object>): void {
-  if (!isRecord(value)) return
+function normalizeSchemaMap(value: unknown, seen: Set<object>): boolean {
+  if (!isRecord(value)) return false
 
+  let changed = false
   for (const schema of Object.values(value)) {
-    normalizeJsonSchemaObject(schema, seen)
+    if (normalizeJsonSchemaObject(schema, seen)) changed = true
   }
+  return changed
 }
 
-function normalizeSchemaArray(value: unknown, seen: Set<object>): void {
-  if (!Array.isArray(value)) return
+function normalizeSchemaArray(value: unknown, seen: Set<object>): boolean {
+  if (!Array.isArray(value)) return false
 
+  let changed = false
   for (const schema of value) {
-    normalizeJsonSchemaObject(schema, seen)
+    if (normalizeJsonSchemaObject(schema, seen)) changed = true
   }
+  return changed
 }
 
-function normalizeSchemaValue(value: unknown, seen: Set<object>): void {
+function normalizeSchemaValue(value: unknown, seen: Set<object>): boolean {
   if (Array.isArray(value)) {
-    normalizeSchemaArray(value, seen)
-    return
+    return normalizeSchemaArray(value, seen)
   }
 
-  normalizeJsonSchemaObject(value, seen)
+  return normalizeJsonSchemaObject(value, seen)
 }

@@ -16,6 +16,7 @@ import {
   routedControlPlaneFetch,
   routedFetch,
 } from "../src/lib/account-router"
+import { runWithCopilotContractObservabilityScope } from "../src/lib/copilot-contract-observability"
 import { runWithCopilotRequestAttribution } from "../src/lib/copilot-request-context"
 import { LocalHTTPError } from "../src/lib/error"
 import { setModelRoutingOverridesForTest } from "../src/lib/model-routing"
@@ -266,14 +267,18 @@ async function routedFetchWithMetadataStore(modelId: string): Promise<{
   headers: Record<string, string>
   result: { account: unknown; response: Response }
 }> {
-  return await copilotResponseHeadersStorage.run({}, async () => {
-    const result = await routedFetch(
-      "/chat/completions",
-      { method: "POST" },
-      { maxHttpRetryDelaySeconds: 0, modelId },
-    )
-    return { result, headers: { ...getCopilotResponseHeaders() } }
-  })
+  return await copilotResponseHeadersStorage.run(
+    {},
+    async () =>
+      await runWithCopilotContractObservabilityScope(async () => {
+        const result = await routedFetch(
+          "/chat/completions",
+          { method: "POST" },
+          { maxHttpRetryDelaySeconds: 0, modelId },
+        )
+        return { result, headers: { ...getCopilotResponseHeaders() } }
+      }),
+  )
 }
 
 function retryableSocketError(): Error {
@@ -853,6 +858,58 @@ test("records final response metadata once for a returned terminal error", async
     const { result } = await routedFetchWithMetadataStore(modelId)
 
     expect(result.response.status).toBe(422)
+    expect(responseMetadataEvents(debugSpy.mock.calls)).toEqual([
+      {
+        kind: "response_metadata",
+        headerCount: 1,
+        quotaSnapshotCount: 0,
+      },
+    ])
+  } finally {
+    debugSpy.mockRestore()
+  }
+})
+
+test("records final response metadata once when affinity rejection throws", async () => {
+  const modelId = "router-metadata-affinity-rejection"
+  registerAccount(10_071, modelId, "metadata-affinity")
+  tokenPool.rebuildModelIndex()
+  const key = findKeyForAccount(modelId, 10_071)
+  queuedResults.push(
+    new Response("Unauthorized", {
+      status: 401,
+      headers: { "x-github-request-id": "affinity-first" },
+    }),
+    copilotTokenResponse("metadata-affinity-fresh"),
+    modelsResponse([modelId]),
+    new Response("Unauthorized", {
+      status: 401,
+      headers: { "x-github-request-id": "affinity-final" },
+    }),
+  )
+  const debugSpy = spyOn(consola, "debug")
+
+  try {
+    const error = await copilotResponseHeadersStorage
+      .run(
+        {},
+        async () =>
+          await runWithCopilotContractObservabilityScope(
+            async () =>
+              await runWithRoutingAffinity(
+                { key, source: "copilot_session" },
+                async () =>
+                  await routedFetch(
+                    "/chat/completions",
+                    { method: "POST" },
+                    { modelId },
+                  ),
+              ),
+          ),
+      )
+      .catch((caught: unknown) => caught)
+
+    expect(error).toBeInstanceOf(LocalHTTPError)
     expect(responseMetadataEvents(debugSpy.mock.calls)).toEqual([
       {
         kind: "response_metadata",

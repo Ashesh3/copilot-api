@@ -1,6 +1,7 @@
 import type { SafeHttpErrorInspection } from "~/lib/error"
 import type { RoutingAffinity } from "~/lib/routing-affinity"
 
+import { runWithCopilotContractObservabilityScope } from "~/lib/copilot-contract-observability"
 import {
   type CopilotRequestAttribution,
   runWithCopilotRequestAttribution,
@@ -178,6 +179,11 @@ export async function runWithWebSocketRequestContext<T>(
   turn: ResponsesWebSocketTurn,
   callback: () => Promise<T>,
 ): Promise<T> {
+  const runTelemetryScope = async (): Promise<T> =>
+    await routingTelemetryStorage.run(
+      turn.telemetryState,
+      async () => await runWithCopilotContractObservabilityScope(callback),
+    )
   return await requestIdStorage.run(
     turn.turnId,
     async () =>
@@ -192,11 +198,7 @@ export async function runWithWebSocketRequestContext<T>(
                 async () =>
                   await routedAccountStorage.run(
                     turn.routingState,
-                    async () =>
-                      await routingTelemetryStorage.run(
-                        turn.telemetryState,
-                        callback,
-                      ),
+                    runTelemetryScope,
                   ),
               ),
           ),
