@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer"
+import util from "node:util"
 
 export const COPILOT_API_VERSION = "2026-08-01"
 export const DEFAULT_COPILOT_INTEGRATION_ID = "vscode-chat"
@@ -14,6 +15,10 @@ const SAFE_RESPONSE_HEADERS = new Set([
   "x-github-request-id",
 ])
 const SAFE_RESPONSE_PREFIXES = ["x-quota-snapshot-", "x-usage-ratelimit-"]
+const HEADERS_ENTRIES = Object.getOwnPropertyDescriptor(
+  Headers.prototype,
+  "entries",
+)?.value as (() => IterableIterator<[string, string]>) | undefined
 
 export function sanitizeCopilotHeaderValue(
   value: string | null | undefined,
@@ -47,7 +52,24 @@ export function collectSafeCopilotResponseHeaders(
 ): Record<string, string> {
   const result: Record<string, string> = {}
 
-  for (const [name, value] of headers.entries()) {
+  try {
+    if (util.types.isProxy(headers)) return result
+  } catch {
+    return result
+  }
+
+  let entries: IterableIterator<[string, string]>
+  if (HEADERS_ENTRIES) {
+    try {
+      entries = Reflect.apply(HEADERS_ENTRIES, headers, [])
+    } catch {
+      entries = headers.entries()
+    }
+  } else {
+    entries = headers.entries()
+  }
+
+  for (const [name, value] of entries) {
     const canonicalName = name.toLowerCase()
     const isSafeName =
       SAFE_RESPONSE_HEADERS.has(canonicalName)

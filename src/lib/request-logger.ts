@@ -4,6 +4,8 @@ import * as Sentry from "@sentry/bun"
 
 import type { RoutingTelemetryRequestState } from "./request-session"
 
+import { isHTTPError, snapshotSafeHttpError } from "./error"
+import { isProxyObject } from "./plain-data-snapshot"
 import { getRoutingTelemetryRequestState } from "./request-session"
 import { recordRoutingRequest } from "./routing-telemetry"
 import { getSentryModelName } from "./sentry"
@@ -151,7 +153,24 @@ function getLogicalStatusColor(status: LogicalRequestTerminalStatus): string {
 }
 
 function getErrorMessage(error: unknown): string | undefined {
-  if (error instanceof Error) return error.message
+  if (isHTTPError(error)) return snapshotSafeHttpError(error).safeMessage
+  if (isProxyObject(error)) return undefined
+  try {
+    if (!(error instanceof Error)) return primitiveErrorMessage(error)
+  } catch {
+    return undefined
+  }
+  const descriptor = Object.getOwnPropertyDescriptor(error, "message")
+  return (
+      descriptor
+        && "value" in descriptor
+        && typeof descriptor.value === "string"
+    ) ?
+      descriptor.value
+    : undefined
+}
+
+function primitiveErrorMessage(error: unknown): string | undefined {
   if (error === undefined) return undefined
   if (typeof error === "string") return error
   if (

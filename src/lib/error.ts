@@ -12,10 +12,36 @@ import type {
 import {
   readDescriptorSnapshotValue,
   readNativeDomExceptionField,
+  readNativeErrorMessage,
   snapshotDescriptorChain,
 } from "~/lib/descriptor-chain"
+import {
+  isProxyObject,
+  snapshotPlainDataRecord,
+} from "~/lib/plain-data-snapshot"
+import { collectSafeCopilotResponseHeaders } from "~/services/copilot/copilot-contract"
 
 const ABORT_ERROR_DESCRIPTOR_KEYS = new Set(["name"])
+const HTTP_ERROR_DESCRIPTOR_KEYS = new Set([
+  "clientBody",
+  "message",
+  "response",
+])
+const RESPONSE_PROTOTYPE_DESCRIPTORS = Object.getOwnPropertyDescriptors(
+  Response.prototype,
+)
+const RESPONSE_CLONE = RESPONSE_PROTOTYPE_DESCRIPTORS.clone.value as (
+  this: Response,
+) => Response
+const RESPONSE_HEADERS = RESPONSE_PROTOTYPE_DESCRIPTORS.headers.get as (
+  this: Response,
+) => Headers
+const RESPONSE_STATUS = RESPONSE_PROTOTYPE_DESCRIPTORS.status.get as (
+  this: Response,
+) => number
+const RESPONSE_TEXT = RESPONSE_PROTOTYPE_DESCRIPTORS.text.value as (
+  this: Response,
+) => Promise<string>
 export const HTTP_TOO_MANY_REQUESTS_STATUS = 429
 
 /**
@@ -122,8 +148,24 @@ export interface SafeUpstreamClientError {
 }
 
 export interface SafeHttpErrorInspection {
-  clientError?: SafeUpstreamClientError
-  safeMessage: string
+  readonly clientError?: SafeUpstreamClientError
+  readonly localClientBody?: Readonly<Record<string, unknown>>
+  readonly responseHeaders: Readonly<Record<string, string>>
+  readonly safeMessage: string
+  readonly status: number
+}
+
+export function isHTTPError(error: unknown): error is HTTPError {
+  if (isProxyObject(error)) return false
+  try {
+    return error instanceof HTTPError
+  } catch {
+    return false
+  }
+}
+
+interface SafeHttpErrorSnapshot extends SafeHttpErrorInspection {
+  readonly responseBody?: Response
 }
 
 const SENSITIVE_FIELD_PATTERN =
@@ -144,9 +186,9 @@ const SAFE_HTTP_ERROR_MESSAGES = new Set([
   "Request rejected",
 ])
 
-function safeHttpErrorMessage(error: HTTPError): string {
-  return SAFE_HTTP_ERROR_MESSAGES.has(error.message) ?
-      error.message
+function safeHttpErrorMessage(message: unknown): string {
+  return typeof message === "string" && SAFE_HTTP_ERROR_MESSAGES.has(message) ?
+      message
     : "Upstream request failed"
 }
 
@@ -177,13 +219,11 @@ function redactSensitiveValue(value: unknown, key = ""): unknown {
 }
 
 function isUpstreamErrorBody(value: unknown): value is UpstreamErrorBody {
-  return (
-    typeof value === "object"
-    && value !== null
-    && "error" in value
-    && typeof value.error === "object"
-    && value.error !== null
-  )
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false
+  }
+  const body = value as Record<string, unknown>
+  return typeof body.error === "object" && body.error !== null
 }
 
 function unwrapUpstreamErrorMessage(value: unknown): string | undefined {
@@ -230,11 +270,12 @@ function safeUpstreamClientError(
   status: number,
   body: unknown,
 ): SafeUpstreamClientError | undefined {
-  if (status !== 400 || !isUpstreamErrorBody(body)) {
+  const snapshot = snapshotPlainDataRecord(body)
+  if (status !== 400 || !snapshot || !isUpstreamErrorBody(snapshot)) {
     return undefined
   }
-  const code = body.error.code
-  const message = unwrapUpstreamErrorMessage(body.error.message)
+  const code = snapshot.error.code
+  const message = unwrapUpstreamErrorMessage(snapshot.error.message)
   const validation = message ? classifyValidationMessage(message) : undefined
   if (
     code !== "invalid_request_body"
@@ -253,7 +294,7 @@ function safeUpstreamClientError(
 async function readResponseBody(response: Response): Promise<unknown> {
   let body: string
   try {
-    body = await response.text()
+    body = await Reflect.apply(RESPONSE_TEXT, response, [])
   } catch {
     return "(unable to read response body)"
   }
@@ -265,79 +306,171 @@ async function readResponseBody(response: Response): Promise<unknown> {
   }
 }
 
-function logHttpError(options: {
-  error: HTTPError
-  clientError?: SafeUpstreamClientError
-}): void {
-  const { clientError, error } = options
-  const message = safeHttpErrorMessage(error)
-  consola.error(`[${error.response.status}] ${message}`)
-  if (clientError) consola.error("Validation class:", clientError.fingerprint)
+function readHttpErrorSnapshot(error: HTTPError): SafeHttpErrorSnapshot {
+  const snapshot = snapshotDescriptorChain(error, {
+    keys: HTTP_ERROR_DESCRIPTOR_KEYS,
+    maxDepth: 6,
+  })
+  const message = readNativeErrorMessage(snapshot)
+  const response = readDescriptorSnapshotValue(snapshot, "response")
+  const localClientBody =
+    (
+      (() => {
+        try {
+          return error instanceof LocalHTTPError
+        } catch {
+          return false
+        }
+      })()
+    ) ?
+      snapshotPlainDataRecord(
+        readDescriptorSnapshotValue(snapshot, "clientBody"),
+      )
+    : undefined
+
+  if (
+    typeof response !== "object"
+    || response === null
+    || isProxyObject(response)
+  ) {
+    return {
+      localClientBody,
+      responseHeaders: Object.freeze({}),
+      safeMessage: safeHttpErrorMessage(message),
+      status: 500,
+    }
+  }
+
+  let status = 500
+  let responseHeaders: Readonly<Record<string, string>> = Object.freeze({})
+  let responseBody: Response | undefined
+  try {
+    const nativeStatus = Reflect.apply(RESPONSE_STATUS, response, []) as unknown
+    if (
+      typeof nativeStatus === "number"
+      && Number.isInteger(nativeStatus)
+      && nativeStatus >= 200
+      && nativeStatus <= 599
+    ) {
+      status = nativeStatus
+    }
+    const headers = Reflect.apply(RESPONSE_HEADERS, response, []) as unknown
+    if (headers instanceof Headers && !isProxyObject(headers)) {
+      responseHeaders = Object.freeze(
+        collectSafeCopilotResponseHeaders(headers),
+      )
+    }
+    responseBody = Reflect.apply(RESPONSE_CLONE, response, []) as Response
+  } catch {
+    return {
+      localClientBody,
+      responseHeaders,
+      safeMessage: safeHttpErrorMessage(message),
+      status,
+    }
+  }
+
+  return {
+    localClientBody,
+    responseBody,
+    responseHeaders,
+    safeMessage: safeHttpErrorMessage(message),
+    status,
+  }
+}
+
+export function snapshotSafeHttpError(
+  error: HTTPError,
+): SafeHttpErrorInspection {
+  const snapshot = readHttpErrorSnapshot(error)
+  let safeMessage = snapshot.safeMessage
+  if (snapshot.status === 402) safeMessage = "Copilot quota exhausted"
+  if (snapshot.status === 466) {
+    safeMessage = "Copilot client version mismatch"
+  }
+  return Object.freeze({
+    localClientBody: snapshot.localClientBody,
+    responseHeaders: snapshot.responseHeaders,
+    safeMessage,
+    status: snapshot.status,
+  })
+}
+
+function logHttpError(inspection: SafeHttpErrorInspection): void {
+  consola.error(`[${inspection.status}] ${inspection.safeMessage}`)
+  if (inspection.clientError) {
+    consola.error("Validation class:", inspection.clientError.fingerprint)
+  }
 }
 
 function captureHttpError(options: {
   c: Context
-  clientError?: SafeUpstreamClientError
-  error: HTTPError
+  inspection: SafeHttpErrorInspection
 }): void {
-  const { c, clientError, error } = options
-  Sentry.captureException(new Error(safeHttpErrorMessage(error)), {
-    ...(clientError ?
+  const { c, inspection } = options
+  Sentry.captureException(new Error(inspection.safeMessage), {
+    ...(inspection.clientError ?
       {
         fingerprint: [
           "http-error",
           c.req.path,
-          String(error.response.status),
-          clientError.code,
-          clientError.fingerprint,
+          String(inspection.status),
+          inspection.clientError.code,
+          inspection.clientError.fingerprint,
         ],
       }
     : {}),
     tags: {
       path: c.req.path,
       method: c.req.method,
-      status: String(error.response.status),
+      status: String(inspection.status),
     },
     extra: {
-      status: error.response.status,
-      validationClass: clientError?.fingerprint,
+      status: inspection.status,
+      validationClass: inspection.clientError?.fingerprint,
     },
   })
 }
 
 export function reportSafeHttpError(
   c: Context,
-  error: HTTPError,
   inspection: SafeHttpErrorInspection,
 ): void {
-  logHttpError({ error, clientError: inspection.clientError })
-  captureHttpError({ c, error, clientError: inspection.clientError })
+  logHttpError(inspection)
+  captureHttpError({ c, inspection })
 }
 
 export async function inspectSafeHttpError(
   error: HTTPError,
 ): Promise<SafeHttpErrorInspection> {
-  const parsedBody = redactSensitiveValue(
-    await readResponseBody(error.response),
-  )
-  const clientError = safeUpstreamClientError(error.response.status, parsedBody)
-  let safeMessage = safeHttpErrorMessage(error)
-  if (error.response.status === 402) safeMessage = "Copilot quota exhausted"
-  if (error.response.status === 466) {
+  const snapshot = readHttpErrorSnapshot(error)
+  const parsedBody =
+    snapshot.responseBody ?
+      redactSensitiveValue(await readResponseBody(snapshot.responseBody))
+    : undefined
+  const clientError = safeUpstreamClientError(snapshot.status, parsedBody)
+  let safeMessage = snapshot.safeMessage
+  if (snapshot.status === 402) safeMessage = "Copilot quota exhausted"
+  if (snapshot.status === 466) {
     safeMessage = "Copilot client version mismatch"
   }
-  return { clientError, safeMessage }
+  return Object.freeze({
+    clientError,
+    localClientBody: snapshot.localClientBody,
+    responseHeaders: snapshot.responseHeaders,
+    safeMessage,
+    status: snapshot.status,
+  })
 }
 
-function httpErrorResponse(
-  c: Context,
-  error: HTTPError,
-  inspection: SafeHttpErrorInspection,
-) {
-  if (error instanceof LocalHTTPError) {
+function httpErrorResponse(c: Context, inspection: SafeHttpErrorInspection) {
+  for (const [name, value] of Object.entries(inspection.responseHeaders)) {
+    c.header(name, value)
+  }
+  if (inspection.localClientBody) {
     return c.json(
-      error.clientBody,
-      error.response.status as ContentfulStatusCode,
+      inspection.localClientBody,
+      inspection.status as ContentfulStatusCode,
     )
   }
   if (inspection.clientError) {
@@ -349,25 +482,25 @@ function httpErrorResponse(
           type: "invalid_request_error",
         },
       },
-      error.response.status as ContentfulStatusCode,
+      inspection.status as ContentfulStatusCode,
     )
   }
 
   return c.json(
     { error: { message: inspection.safeMessage, type: "error" } },
-    error.response.status as ContentfulStatusCode,
+    inspection.status as ContentfulStatusCode,
   )
 }
 
 async function forwardHttpError(c: Context, error: HTTPError) {
-  if (error.response.status === 499) {
+  const inspection = await inspectSafeHttpError(error)
+  if (inspection.status === 499) {
     consola.debug("Client disconnected (upstream 499)")
     return c.body(null, 499 as ContentfulStatusCode)
   }
 
-  const inspection = await inspectSafeHttpError(error)
-  reportSafeHttpError(c, error, inspection)
-  return httpErrorResponse(c, error, inspection)
+  reportSafeHttpError(c, inspection)
+  return httpErrorResponse(c, inspection)
 }
 
 export async function forwardError(c: Context, error: unknown) {
@@ -378,7 +511,7 @@ export async function forwardError(c: Context, error: unknown) {
     return c.body(null, 499 as ContentfulStatusCode)
   }
 
-  if (error instanceof HTTPError) return await forwardHttpError(c, error)
+  if (isHTTPError(error)) return await forwardHttpError(c, error)
 
   consola.error("Unexpected internal error")
 

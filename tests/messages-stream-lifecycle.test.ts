@@ -433,6 +433,38 @@ test.each([
   },
 )
 
+test("does not invoke hostile local body getters in an emitted stream error", async () => {
+  let getterCalls = 0
+  const hostileBody = Object.defineProperty({}, "type", {
+    enumerable: true,
+    get() {
+      getterCalls += 1
+      throw new Error("stream-hostile-local-private-marker")
+    },
+  })
+  const error = new LocalHTTPError(
+    "local stream validation",
+    Response.json({}, { status: 400 }),
+    hostileBody,
+  )
+  const app = new Hono()
+  app.get("/stream", (c) =>
+    streamSSE(c, async (stream) => {
+      await stream.write(": keepalive\n\n")
+      await emitAnthropicStreamError(stream, error)
+    }),
+  )
+
+  const response = await app.request("/stream")
+  const body = await response.text()
+
+  expect(response.status).toBe(200)
+  expect(body).toContain('"type":"invalid_request_error"')
+  expect(body).toContain("The Copilot Messages request was rejected.")
+  expect(getterCalls).toBe(0)
+  expect(body).not.toContain("stream-hostile-local-private-marker")
+})
+
 test("commits a keepalive while native Anthropic waits for upstream headers", async () => {
   setSsePreflushDeadlineForTest(20)
   streamMode = "stall-fetch"

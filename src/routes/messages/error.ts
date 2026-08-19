@@ -5,12 +5,13 @@ import * as Sentry from "@sentry/bun"
 import consola from "consola"
 
 import {
-  HTTPError,
   HTTP_TOO_MANY_REQUESTS_STATUS,
-  LocalHTTPError,
+  type SafeHttpErrorInspection,
   inspectSafeHttpError,
   isAbortError,
+  isHTTPError,
   reportSafeHttpError,
+  snapshotSafeHttpError,
 } from "~/lib/error"
 import { getRequestId } from "~/lib/request-session"
 
@@ -18,28 +19,52 @@ import type { AnthropicErrorEvent } from "./anthropic-types"
 
 type AnthropicErrorBody = AnthropicErrorEvent & { request_id?: string }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null
+function exactKeys(
+  value: Readonly<Record<string, unknown>>,
+  expected: ReadonlyArray<string>,
+): boolean {
+  const keys = Object.keys(value).sort()
+  const sortedExpected = [...expected].sort()
+  return (
+    keys.length === sortedExpected.length
+    && keys.every((key, index) => key === sortedExpected[index])
+  )
 }
 
-function isAnthropicErrorBody(value: unknown): value is AnthropicErrorBody {
-  if (!isRecord(value) || value.type !== "error" || !isRecord(value.error)) {
-    return false
+function snapshotAnthropicErrorBody(
+  value: Readonly<Record<string, unknown>> | undefined,
+): AnthropicErrorBody | undefined {
+  if (!value || value.type !== "error") return undefined
+  const expectedRootKeys =
+    value.request_id === undefined ?
+      ["error", "type"]
+    : ["error", "request_id", "type"]
+  if (!exactKeys(value, expectedRootKeys)) return undefined
+  if (value.request_id !== undefined && typeof value.request_id !== "string") {
+    return undefined
   }
   if (
-    typeof value.error.type !== "string"
-    || typeof value.error.message !== "string"
+    typeof value.error !== "object"
+    || value.error === null
+    || Array.isArray(value.error)
   ) {
-    return false
+    return undefined
   }
+  const nested = value.error as Readonly<Record<string, unknown>>
   if (
-    "request_id" in value
-    && value.request_id !== undefined
-    && typeof value.request_id !== "string"
+    !exactKeys(nested, ["message", "type"])
+    || typeof nested.type !== "string"
+    || typeof nested.message !== "string"
   ) {
-    return false
+    return undefined
   }
-  return true
+  return {
+    type: "error",
+    ...(typeof value.request_id === "string" ?
+      { request_id: value.request_id }
+    : {}),
+    error: { type: nested.type, message: nested.message },
+  }
 }
 
 function anthropicErrorType(status: number): string {
@@ -100,32 +125,32 @@ function anthropicErrorMessage(status: number): string {
   }
 }
 
-function statusForError(error: unknown): number {
-  return error instanceof HTTPError ? error.response.status : 500
-}
-
-function localAnthropicError(error: unknown): AnthropicErrorBody | undefined {
-  if (
-    error instanceof LocalHTTPError
-    && isAnthropicErrorBody(error.clientBody)
-  ) {
-    return error.clientBody
-  }
-  return undefined
-}
-
 export function createAnthropicStreamError(
   error: unknown,
 ): AnthropicErrorEvent {
-  const localBody = localAnthropicError(error)
+  if (!isHTTPError(error)) {
+    return {
+      type: "error",
+      error: {
+        type: "api_error",
+        message: "The Copilot Messages request failed.",
+      },
+    }
+  }
+  return createAnthropicStreamErrorFromInspection(snapshotSafeHttpError(error))
+}
+
+function createAnthropicStreamErrorFromInspection(
+  inspection: SafeHttpErrorInspection,
+): AnthropicErrorEvent {
+  const localBody = snapshotAnthropicErrorBody(inspection.localClientBody)
   if (localBody) return localBody
 
-  const status = statusForError(error)
   return {
     type: "error",
     error: {
-      type: anthropicErrorType(status),
-      message: anthropicErrorMessage(status),
+      type: anthropicErrorType(inspection.status),
+      message: anthropicErrorMessage(inspection.status),
     },
   }
 }
@@ -150,19 +175,25 @@ export async function forwardMessagesError(
     return c.body(null, 499 as ContentfulStatusCode)
   }
 
-  if (error instanceof HTTPError) {
-    if (error.response.status === 499) {
+  if (isHTTPError(error)) {
+    const inspection = await inspectSafeHttpError(error)
+    if (inspection.status === 499) {
       consola.debug("Client disconnected (upstream 499)")
       return c.body(null, 499 as ContentfulStatusCode)
     }
 
-    const inspection = await inspectSafeHttpError(error)
-    reportSafeHttpError(c, error, inspection)
-    const localBody = localAnthropicError(error)
+    reportSafeHttpError(c, inspection)
+    for (const [name, value] of Object.entries(inspection.responseHeaders)) {
+      c.header(name, value)
+    }
+    const localBody = snapshotAnthropicErrorBody(inspection.localClientBody)
     const body =
       localBody
-      ?? withRequestId(createAnthropicStreamError(error), requestId(c))
-    return c.json(body, error.response.status as ContentfulStatusCode)
+      ?? withRequestId(
+        createAnthropicStreamErrorFromInspection(inspection),
+        requestId(c),
+      )
+    return c.json(body, inspection.status as ContentfulStatusCode)
   }
 
   consola.error("Unexpected internal error")

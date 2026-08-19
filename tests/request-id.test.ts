@@ -9,6 +9,7 @@ import {
   test,
 } from "bun:test"
 
+import { HTTPError } from "../src/lib/error"
 import {
   formatHandlerLogLine,
   sanitizeHandlerLogArguments,
@@ -879,4 +880,89 @@ test("does not record a logical turn that never reached a provider", () => {
     window: "1h",
   })
   expect(snapshot.totals.requests).toBe(0)
+})
+
+test("uses the guarded HTTP snapshot for logical request reporting", () => {
+  const privateMarkers = [
+    "logical-http-message-private-marker",
+    "logical-http-status-private-marker",
+  ]
+  let getterCalls = 0
+  const upstream = Response.json({}, { status: 429 })
+  Object.defineProperty(upstream, "status", {
+    configurable: true,
+    get() {
+      getterCalls += 1
+      throw new Error(privateMarkers[1])
+    },
+  })
+  const error = new HTTPError("Failed to create responses", upstream)
+  Object.defineProperty(error, "message", {
+    configurable: true,
+    get() {
+      getterCalls += 1
+      throw new Error(privateMarkers[0])
+    },
+  })
+  const infoSpy = spyOn(console, "info")
+  const lifecycle = startLogicalRequestLog({
+    inputLength: 10,
+    method: "POST",
+    model: "gpt-test",
+    path: "/responses",
+    transport: "Responses WebSocket",
+    turnId: "turn-http-error",
+  })
+
+  try {
+    lifecycle.finalize({
+      error,
+      status: 429,
+      terminalStatus: "REJECTED",
+    })
+    const diagnostics = JSON.stringify(infoSpy.mock.calls)
+
+    expect(getterCalls).toBe(0)
+    expect(diagnostics).toContain("Upstream request failed")
+    for (const marker of privateMarkers) {
+      expect(diagnostics).not.toContain(marker)
+    }
+  } finally {
+    infoSpy.mockRestore()
+  }
+})
+
+test("reports a revoked logical request error without throwing", () => {
+  const { proxy, revoke } = Proxy.revocable(
+    new HTTPError(
+      "Failed to create responses",
+      Response.json({}, { status: 429 }),
+    ),
+    {},
+  )
+  revoke()
+  const infoSpy = spyOn(console, "info")
+  const lifecycle = startLogicalRequestLog({
+    inputLength: 10,
+    method: "POST",
+    model: "gpt-test",
+    path: "/responses",
+    transport: "Responses WebSocket",
+    turnId: "turn-revoked-error",
+  })
+
+  try {
+    expect(
+      lifecycle.finalize({
+        error: proxy,
+        status: 500,
+        terminalStatus: "ERROR",
+      }),
+    ).toBe(true)
+    expect(JSON.stringify(infoSpy.mock.calls)).not.toContain(
+      "Failed to create responses",
+    )
+  } finally {
+    infoSpy.mockRestore()
+  }
 })
