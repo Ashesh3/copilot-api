@@ -1083,6 +1083,37 @@ test.each([
     responses: ["document.source"],
     chat: ["document"],
   },
+  ...[
+    "ftp://example.test/report.pdf",
+    "file:///tmp/report.pdf",
+    "data:application/pdf;base64,JVBERi0=",
+    "/relative/report.pdf",
+    "not a URL",
+    " ",
+  ].map((url) => ({
+    name: `invalid URL document source ${url}`,
+    document: {
+      type: "document",
+      source: { type: "url", url },
+      title: "report.pdf",
+    },
+    responses: ["document.source"],
+    chat: ["document"],
+  })),
+  {
+    name: "URL document source extension",
+    document: {
+      type: "document",
+      source: {
+        type: "url",
+        url: "https://attachment.test/report.pdf",
+        authorization: "private",
+      },
+      title: "report.pdf",
+    },
+    responses: ["document.source"],
+    chat: ["document"],
+  },
 ])("maps or blocks $name without loss", ({ document, responses, chat }) => {
   const payload = {
     model: "route-model",
@@ -1309,36 +1340,42 @@ test.each([
   },
 )
 
-test("normalizes one remote PDF only after selecting Responses", async () => {
-  installModel({ supported_endpoints: ["/responses", "/chat/completions"] })
+test.each([
+  "http://attachment.test/report.pdf",
+  "https://attachment.test/report.pdf",
+])(
+  "normalizes one remote PDF %s only after selecting Responses",
+  async (url) => {
+    installModel({ supported_endpoints: ["/responses", "/chat/completions"] })
 
-  const response = await postMessages({
-    messages: [
-      {
-        role: "user",
-        content: [
-          {
-            type: "document",
-            source: { type: "url", url: "https://attachment.test/report.pdf" },
-            title: "report.pdf",
-          },
-        ],
-      },
-    ],
-  })
+    const response = await postMessages({
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "document",
+              source: { type: "url", url },
+              title: "report.pdf",
+            },
+          ],
+        },
+      ],
+    })
 
-  expect(response.status).toBe(200)
-  expect(attachmentFetchCount).toBe(1)
-  expect(upstreamPaths).toEqual(["/responses"])
-  expect(upstreamBodies[0]).toHaveProperty(
-    "input.0.content.0.filename",
-    "report.pdf",
-  )
-  expect(upstreamBodies[0]).toHaveProperty(
-    "input.0.content.0.type",
-    "input_file",
-  )
-})
+    expect(response.status).toBe(200)
+    expect(attachmentFetchCount).toBe(1)
+    expect(upstreamPaths).toEqual(["/responses"])
+    expect(upstreamBodies[0]).toHaveProperty(
+      "input.0.content.0.filename",
+      "report.pdf",
+    )
+    expect(upstreamBodies[0]).toHaveProperty(
+      "input.0.content.0.type",
+      "input_file",
+    )
+  },
+)
 
 test("sends a base64 PDF with title to Responses without attachment fetch", async () => {
   installModel({ supported_endpoints: ["/responses", "/chat/completions"] })
@@ -1503,6 +1540,98 @@ test("blocks remote document metadata before fetching or wrong-endpoint dispatch
   expect(attachmentFetchCount).toBe(0)
   expect(upstreamPaths).toEqual([])
   expect(fetchMock).not.toHaveBeenCalled()
+})
+
+test.each([
+  "ftp://example.test/report.pdf",
+  "file:///tmp/report.pdf",
+  "data:application/pdf;base64,JVBERi0=",
+  "/relative/report.pdf",
+  "not a URL",
+  " ",
+])(
+  "blocks translated document URL %s before fetch or dispatch",
+  async (url) => {
+    installModel({ supported_endpoints: ["/responses", "/chat/completions"] })
+
+    const response = await postMessages({
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "document",
+              source: { type: "url", url },
+              title: "report.pdf",
+            },
+          ],
+        },
+      ],
+    })
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toHaveProperty(
+      "error.param",
+      "document.source",
+    )
+    expect(attachmentFetchCount).toBe(0)
+    expect(upstreamPaths).toEqual([])
+    expect(fetchMock).not.toHaveBeenCalled()
+  },
+)
+
+test("blocks translated URL source extensions before fetch or dispatch", async () => {
+  installModel({ supported_endpoints: ["/responses", "/chat/completions"] })
+
+  const response = await postMessages({
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "document",
+            source: {
+              type: "url",
+              url: "https://attachment.test/report.pdf",
+              future_source_field: "private",
+            },
+            title: "report.pdf",
+          },
+        ],
+      },
+    ],
+  })
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toHaveProperty("error.param", "document.source")
+  expect(attachmentFetchCount).toBe(0)
+  expect(upstreamPaths).toEqual([])
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
+test.each([
+  "ftp://example.test/report.pdf",
+  "file:///tmp/report.pdf",
+  "data:application/pdf;base64,JVBERi0=",
+  "/relative/report.pdf",
+  "not a URL",
+  " ",
+])("native Messages preserves document URL %s unchanged", async (url) => {
+  installModel({ supported_endpoints: ["/v1/messages", "/responses"] })
+  const document = {
+    type: "document",
+    source: { type: "url", url, future_source_field: "native" },
+    title: "report.pdf",
+  }
+
+  const response = await postMessages({
+    messages: [{ role: "user", content: [document] }],
+  })
+
+  expect(response.status).toBe(200)
+  expect(attachmentFetchCount).toBe(0)
+  expect(upstreamPaths).toEqual(["/v1/messages"])
+  expect(upstreamBodies[0]).toHaveProperty("messages.0.content.0", document)
 })
 
 test.each([

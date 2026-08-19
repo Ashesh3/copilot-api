@@ -1,5 +1,7 @@
 import type { TranslationCheck } from "~/lib/endpoint-routing"
 
+import { isHttpUrl } from "~/lib/attachments"
+
 import type {
   AnthropicDocumentBlock,
   AnthropicMessagesPayload,
@@ -270,15 +272,43 @@ function isResponsesDocumentSource(block: Record<string, unknown>): boolean {
   const source = (block as unknown as AnthropicDocumentBlock).source
   if (!isRecord(source)) return false
   if (source.type === "url") {
-    return typeof source.url === "string" && source.url.length > 0
+    return (
+      hasExactlyKeys(source, ["type", "url"])
+      && typeof source.url === "string"
+      && isAbsoluteHttpUrl(source.url)
+    )
   }
   return (
     source.type === "base64"
+    && hasExactlyKeys(source, ["data", "media_type", "type"])
     && typeof source.media_type === "string"
     && source.media_type.toLowerCase().split(";")[0].trim()
       === "application/pdf"
     && typeof source.data === "string"
   )
+}
+
+function hasExactlyKeys(
+  value: Record<string, unknown>,
+  expected: ReadonlyArray<string>,
+): boolean {
+  const keys = Object.keys(value)
+  return (
+    keys.length === expected.length && expected.every((key) => key in value)
+  )
+}
+
+function isAbsoluteHttpUrl(value: string): boolean {
+  if (!isHttpUrl(value)) return false
+  try {
+    const url = new URL(value)
+    return (
+      (url.protocol === "http:" || url.protocol === "https:")
+      && url.hostname.length > 0
+    )
+  } catch {
+    return false
+  }
 }
 
 function scanThinkingBlock(

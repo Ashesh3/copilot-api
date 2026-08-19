@@ -76,6 +76,31 @@
 - `bun run build`: passed.
 - `git diff --check`: passed.
 
+## Review Remediation Round 4
+
+- Required translated document URL sources to be valid absolute HTTP or HTTPS
+  URLs; FTP, file, data, relative, malformed, and blank values now block
+  locally with the canonical `document.source` concept.
+- Required translated URL and base64 document source objects to contain only
+  the exact fields consumed by normalization/conversion, so unknown source
+  extensions cannot be silently dropped.
+- Kept native Messages forward-compatible by preserving every tested document
+  URL/source object unchanged, including non-HTTP values and future fields.
+- Added direct fidelity, attachment normalizer, and public routing tests for
+  invalid schemes/shapes, zero-fetch local rejection, native pass-through, and
+  one-fetch HTTP/HTTPS success controls.
+
+### Round 4 Verification
+
+- Focused Task 4 attachment, bridge, routing, recovery, contract, and custom
+  provider suite: 440 passed, 3 expected media skips, 0 failed across 17 files.
+- Full suite: 1918 passed, 3 expected media skips, 0 failed across 117 files.
+- `bun run typecheck`: passed.
+- Changed-file lint: passed (with the existing stale
+  `baseline-browser-mapping` data notice).
+- `bun run build`: passed.
+- `git diff --check`: passed.
+
 ## Review Remediation Round 1
 
 - Replaced permissive translation checks with exhaustive map-or-block scans for

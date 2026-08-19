@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, mock, test } from "bun:test"
 
 import type {
   AnthropicMessagesPayload,
@@ -46,6 +46,11 @@ const PNG_B64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
 const PDF_DATA_URI = `data:application/pdf;base64,${PDF_B64}`
 const PNG_DATA_URI = `data:image/png;base64,${PNG_B64}`
+const originalFetch = globalThis.fetch
+
+afterEach(() => {
+  ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
+})
 
 // ─── attachments lib ───
 
@@ -281,6 +286,93 @@ describe("Anthropic document blocks → Responses translation", () => {
 // ─── attachment normalization (messages route) ───
 
 describe("normalizeAnthropicAttachments", () => {
+  test.each([
+    "ftp://example.test/report.pdf",
+    "file:///tmp/report.pdf",
+    "data:application/pdf;base64,JVBERi0=",
+    "/relative/report.pdf",
+    "not a URL",
+    " ",
+  ])("does not fetch non-HTTP document URL %s", async (url) => {
+    const fetchMock = mock(() => {
+      throw new Error("unexpected fetch")
+    })
+    ;(globalThis as unknown as { fetch: typeof fetch }).fetch =
+      fetchMock as unknown as typeof fetch
+    const payload: AnthropicMessagesPayload = {
+      model: "gpt-current",
+      max_tokens: 100,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "document",
+              source: { type: "url", url },
+              title: "report.pdf",
+            },
+          ],
+        },
+      ],
+    }
+
+    await normalizeAnthropicAttachments(payload)
+
+    expect(fetchMock).not.toHaveBeenCalled()
+    const content = payload.messages[0].content as Array<{
+      text?: string
+      type: string
+    }>
+    expect(content[0]?.type).toBe("text")
+    expect(content[0]?.text).toContain("omitted")
+  })
+
+  test.each([
+    "http://attachment.test/report.pdf",
+    "https://attachment.test/report.pdf",
+  ])("fetches absolute HTTP document URL %s once", async (url) => {
+    const fetchMock = mock(() =>
+      Promise.resolve(
+        new Response("%PDF-1.4", {
+          headers: { "content-type": "application/pdf" },
+        }),
+      ),
+    )
+    ;(globalThis as unknown as { fetch: typeof fetch }).fetch =
+      fetchMock as unknown as typeof fetch
+    const payload: AnthropicMessagesPayload = {
+      model: "gpt-current",
+      max_tokens: 100,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "document",
+              source: { type: "url", url },
+              title: "report.pdf",
+            },
+          ],
+        },
+      ],
+    }
+
+    await normalizeAnthropicAttachments(payload)
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(payload.messages[0].content).toEqual([
+      {
+        type: "document",
+        source: {
+          type: "base64",
+          media_type: "application/pdf",
+          data: Buffer.from("%PDF-1.4").toString("base64"),
+        },
+        title: "report.pdf",
+      },
+    ])
+  })
+
   test("inlines text-source documents as text blocks", async () => {
     const payload: AnthropicMessagesPayload = {
       model: "claude-sonnet-4.6",
