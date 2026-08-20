@@ -220,7 +220,8 @@ failed terminal events. Native Responses preserves sanitized
 `response.incomplete`, `response.failed`, or `error` families supplied by
 upstream. Valid completed events remain `response.completed`; when upstream
 omits the optional `response.output_text` convenience field, the proxy derives
-it from sanitized assistant output. Malformed completed events fail closed as
+missing `response.output_text` by concatenating sanitized assistant
+`output_text` blocks in output order. Malformed completed events fail closed as
 `response.failed`.
 A thrown transport or runtime failure after commitment on native Chat or native
 Responses may instead be recorded while the stream closes without a newly
