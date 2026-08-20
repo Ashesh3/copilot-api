@@ -10,6 +10,7 @@ import { getModelSettings } from "~/lib/model-settings"
 import {
   isGoogleModelActionRequest,
   sanitizeRequestDiagnosticReference,
+  sanitizeSensitiveDiagnosticQuery,
 } from "~/lib/request-diagnostics"
 import { getRequestId } from "~/lib/request-session"
 import { getRoutingAffinity } from "~/lib/routing-affinity"
@@ -46,6 +47,8 @@ const ROUTING_AFFINITY_HEADER_NAMES = new Set([
 const FILTERED_VALUE = "[Filtered]"
 const STATSIG_PROXY_HOST = "ab.chatgpt.com"
 const STATSIG_CLIENT_KEY_RE = /(^|[?&])k=[^&#\s"'<>]*/g
+const GOOGLE_PRIVATE_MODEL_ACTION_REFERENCE =
+  /\/(?:v1beta\/models|v1\/models|models)\/([^/?#\s"'<>]+)/gi
 
 type HeaderTuple = [string, unknown]
 
@@ -185,22 +188,39 @@ function scrubRequestHeaders(event: Sentry.Event): void {
   request.headers = scrubbed
 }
 
+interface GoogleRouteScrubContext {
+  method: string
+  privateRouteValues: ReadonlySet<string>
+  seen: WeakSet<object>
+}
+
+function sanitizeGoogleRouteString(
+  key: string,
+  value: string,
+  context: GoogleRouteScrubContext,
+): string {
+  if (context.privateRouteValues.has(value)) return FILTERED_VALUE
+  const sanitized = sanitizeRequestDiagnosticReference(context.method, value)
+  return key === "url.query" || key === "query" ?
+      sanitizeSensitiveDiagnosticQuery(sanitized)
+    : sanitized
+}
+
 function scrubGoogleRouteData(
   value: unknown,
-  method: string,
-  seen: WeakSet<object> = new WeakSet<object>(),
+  context: GoogleRouteScrubContext,
 ): void {
-  if (!isRecord(value) || seen.has(value)) return
-  seen.add(value)
+  if (!isRecord(value) || context.seen.has(value)) return
+  context.seen.add(value)
 
   if (Array.isArray(value)) {
     const arrayValue = value as Array<unknown>
     for (let index = 0; index < arrayValue.length; index += 1) {
       const entry: unknown = arrayValue[index]
       if (typeof entry === "string") {
-        arrayValue[index] = sanitizeRequestDiagnosticReference(method, entry)
+        arrayValue[index] = sanitizeGoogleRouteString("", entry, context)
       } else {
-        scrubGoogleRouteData(entry, method, seen)
+        scrubGoogleRouteData(entry, context)
       }
     }
     return
@@ -208,11 +228,48 @@ function scrubGoogleRouteData(
 
   for (const [key, nestedValue] of Object.entries(value)) {
     if (typeof nestedValue === "string") {
-      value[key] = sanitizeRequestDiagnosticReference(method, nestedValue)
+      value[key] = sanitizeGoogleRouteString(key, nestedValue, context)
     } else {
-      scrubGoogleRouteData(nestedValue, method, seen)
+      scrubGoogleRouteData(nestedValue, context)
     }
   }
+}
+
+function addGoogleRouteValueParts(
+  values: Set<string>,
+  match: RegExpMatchArray,
+): void {
+  values.add(match[1])
+  const separator = match[1].lastIndexOf(":")
+  if (separator === -1) return
+  values.add(match[1].slice(0, separator))
+  values.add(match[1].slice(separator + 1))
+}
+
+function findGoogleRouteValues(
+  value: unknown,
+  method: string,
+  seen: WeakSet<object> = new WeakSet<object>(),
+): Set<string> {
+  const values = new Set<string>()
+  if (!isRecord(value) || seen.has(value)) return values
+  seen.add(value)
+
+  for (const entry of Object.values(value)) {
+    if (typeof entry === "string") {
+      const matches = entry.matchAll(GOOGLE_PRIVATE_MODEL_ACTION_REFERENCE)
+      for (const match of matches) {
+        if (sanitizeRequestDiagnosticReference(method, match[0]) === match[0])
+          continue
+        addGoogleRouteValueParts(values, match)
+      }
+      continue
+    }
+    for (const nested of findGoogleRouteValues(entry, method, seen)) {
+      values.add(nested)
+    }
+  }
+  return values
 }
 
 function findGoogleRequestMethod(
@@ -277,7 +334,11 @@ function scrubSensitiveData<T>(event: T): T {
     scrubStatsigClientKeyData(event)
     const googleRequestMethod = findGoogleRequestMethod(event)
     if (googleRequestMethod) {
-      scrubGoogleRouteData(event, googleRequestMethod)
+      scrubGoogleRouteData(event, {
+        method: googleRequestMethod,
+        privateRouteValues: findGoogleRouteValues(event, googleRequestMethod),
+        seen: new WeakSet<object>(),
+      })
     }
   }
 

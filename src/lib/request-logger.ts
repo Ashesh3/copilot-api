@@ -32,6 +32,7 @@ export interface RequestContext {
   reasoningEffort?: string
   accountId?: number
   nonDefaultBehaviors?: Array<RequestBehavior>
+  suppressModelDiagnostics?: boolean
 }
 
 type RequestBehaviorData = Record<
@@ -81,6 +82,9 @@ interface LogicalRequestStartOptions {
   transport: string
   turnId: string
 }
+
+const GOOGLE_MODEL_DIAGNOSTICS_OMITTED =
+  "Applied to Google compatibility request"
 
 const REQUEST_CONTEXT_KEY = "requestContext"
 
@@ -534,22 +538,8 @@ async function logRawRequest(c: Context): Promise<void> {
   console.log(lines.join("\n"))
 }
 
-function redactRequestUrl(value: string): string {
-  try {
-    const url = new URL(value)
-    for (const key of url.searchParams.keys()) {
-      if (/key|token|secret|password|credential/i.test(key)) {
-        url.searchParams.set(key, "[REDACTED]")
-      }
-    }
-    return url.toString()
-  } catch {
-    return value
-  }
-}
-
 function requestDiagnosticPath(c: Context): string {
-  const url = new URL(redactRequestUrl(c.req.url))
+  const url = new URL(c.req.url)
   return sanitizeRequestDiagnosticReference(
     c.req.method,
     `${url.pathname}${url.search}`,
@@ -557,9 +547,32 @@ function requestDiagnosticPath(c: Context): string {
 }
 
 function requestDiagnosticUrl(c: Context): string {
-  const url = new URL(redactRequestUrl(c.req.url))
-  url.pathname = sanitizeRequestDiagnosticReference(c.req.method, url.pathname)
-  return url.toString()
+  return sanitizeRequestDiagnosticReference(c.req.method, c.req.url)
+}
+
+function isGoogleDiagnosticPath(method: string, path: string): boolean {
+  if (method.toUpperCase() !== "POST") return false
+  return /\/(?:v1beta\/models|v1\/models|models)\/:modelAction(?:$|[?#])/i.test(
+    path,
+  )
+}
+
+function diagnosticRequestContext(
+  method: string,
+  path: string,
+  ctx: RequestContext | undefined,
+): RequestContext | undefined {
+  if (!ctx || !isGoogleDiagnosticPath(method, path)) return ctx
+  return {
+    ...ctx,
+    model: undefined,
+    nonDefaultBehaviors: ctx.nonDefaultBehaviors?.map((behavior) => ({
+      kind: behavior.kind,
+      message: GOOGLE_MODEL_DIAGNOSTICS_OMITTED,
+      sentryLevel: behavior.sentryLevel,
+    })),
+    requestedModel: undefined,
+  }
 }
 
 /**
@@ -590,7 +603,15 @@ export function recordNonDefaultBehavior(
     nonDefaultBehaviors,
   } as RequestContext)
 
-  reportNonDefaultBehavior(behavior)
+  reportNonDefaultBehavior(
+    existing?.suppressModelDiagnostics ?
+      {
+        kind: behavior.kind,
+        message: GOOGLE_MODEL_DIAGNOSTICS_OMITTED,
+        sentryLevel: behavior.sentryLevel,
+      }
+    : behavior,
+  )
 }
 
 export function reportNonDefaultBehavior(behavior: RequestBehavior): void {
@@ -858,6 +879,7 @@ export async function requestLogger(c: Context, next: Next): Promise<void> {
   const duration = ((Date.now() - startTime) / 1000).toFixed(1)
   const status = c.res.status
   const statusColor = getStatusColor(status)
+  const diagnosticContext = diagnosticRequestContext(method, path, ctx)
 
   recordCompletedRoutingRequest(ctx, getRoutingTelemetryRequestState(), status)
 
@@ -875,15 +897,15 @@ export async function requestLogger(c: Context, next: Next): Promise<void> {
   )
 
   // Model routing line
-  if (ctx?.model) {
-    lines.push(buildModelLine(ctx))
+  if (diagnosticContext?.model) {
+    lines.push(buildModelLine(diagnosticContext))
   }
 
   // Applied modifications line
-  if (ctx) {
-    const modsLine = buildModificationsLine(ctx)
+  if (diagnosticContext) {
+    const modsLine = buildModificationsLine(diagnosticContext)
     if (modsLine) lines.push(modsLine)
-    lines.push(...buildNonDefaultBehaviorLines(ctx))
+    lines.push(...buildNonDefaultBehaviorLines(diagnosticContext))
   }
 
   // Timestamp
@@ -898,7 +920,13 @@ export async function requestLogger(c: Context, next: Next): Promise<void> {
   console.log(lines.join("\n"))
 
   // Send enriched log to Sentry
-  sendRequestLogToSentry({ method, path, status, duration, ctx })
+  sendRequestLogToSentry({
+    method,
+    path,
+    status,
+    duration,
+    ctx: diagnosticContext,
+  })
 }
 
 /**

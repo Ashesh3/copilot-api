@@ -107,7 +107,10 @@ gemini-2.5-pro gemini-pro dall-e-3 omni-moderation-latest
 grok-3 grok-3-mini deepseek-r1 deepseek-v3.1 deepseek-chat llama-3.3-70b-instruct
 meta-llama/Llama-3.1-405B-Instruct Qwen/Qwen3-235B-A22B qwen2.5-coder-32b
 mistral-large-2411 mistral-large-latest qwen-max codestral-2501
-microsoft/Phi-4-mini-instruct phi-3.5-mini-instruct`.split(/\s+/)
+microsoft/Phi-4-mini-instruct phi-3.5-mini-instruct
+deepseek/deepseek-chat mistralai/mistral-large-latest qwen/qwen-max x-ai/grok-3`.split(
+  /\s+/,
+)
 
 const allowedModelLanguage = `GPT-compatible clients|Codex-compatible transport
 Claude-compatible API|Gemini-compatible clients|GPT family|Claude models
@@ -165,6 +168,24 @@ function hasGenericModelSuffix(token: string): boolean {
   )
 }
 
+function isProviderQualifiedStaticModelIdentifier(token: string): boolean {
+  return (
+    /^(?:meta-llama\/llama|microsoft\/phi)(?:-|(?=\d))(?=[\w.:[\]-]*\d)[\w.:[\]-]+$/i.test(
+      token,
+    )
+    || /^deepseek\/deepseek-(?:chat|coder|reasoner|r\d|v\d|(?=[\w.:[\]-]*\d)[\w.:[\]-]+)$/i.test(
+      token,
+    )
+    || /^mistralai\/mistral-(?:large|medium|small|nemo|saba)(?:-[\w.:[\]-]+)?$/i.test(
+      token,
+    )
+    || /^qwen\/qwen(?:-|(?=\d))(?:(?=[\w.:[\]-]*\d)[\w.:[\]-]+|max(?:-[\w.:[\]-]+)?)$/i.test(
+      token,
+    )
+    || /^x-ai\/grok-(?=[\w.:[\]-]*\d)[\w.:[\]-]+$/i.test(token)
+  )
+}
+
 function isStaticModelIdentifier(token: string): boolean {
   const normalized = stripModelTokenSuffix(token).toLowerCase()
   if (hasGenericModelSuffix(normalized)) return false
@@ -196,9 +217,7 @@ function isStaticModelIdentifier(token: string): boolean {
     || /^qwen(?:-|(?=\d))(?:(?=[\w.:[\]-]*\d)[\w.:[\]-]+|max(?:-[\w.:[\]-]+)?)$/i.test(
       normalized,
     )
-    || /^(?:meta-llama\/llama|qwen\/qwen|microsoft\/phi)(?:-|(?=\d))(?=[\w.:[\]-]*\d)[\w.:[\]-]+$/i.test(
-      normalized,
-    )
+    || isProviderQualifiedStaticModelIdentifier(normalized)
   )
 }
 
@@ -681,6 +700,26 @@ test("detects concrete model IDs without flagging generic compatibility language
   }
   for (const snippet of allowedModelLanguage) {
     expect(staticModelIdentifiers(snippet)).toEqual([])
+  }
+})
+
+test("keeps the mounted Messages status oracle independent of production contract values", async () => {
+  const source = await readFile(
+    new URL("./messages-stream-lifecycle.test.ts", import.meta.url),
+    "utf8",
+  )
+
+  expect(source).not.toContain("ANTHROPIC_HTTP_ERROR_STATUS_TYPES")
+  for (const [status, type] of [
+    [400, "invalid_request_error"],
+    [401, "authentication_error"],
+    [403, "permission_error"],
+    [404, "not_found_error"],
+    [413, "request_too_large"],
+    [429, "rate_limit_error"],
+    [500, "api_error"],
+  ] as const) {
+    expect(source).toContain(`[${status}, "${type}"]`)
   }
 })
 

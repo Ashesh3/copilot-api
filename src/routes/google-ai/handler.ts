@@ -237,6 +237,7 @@ async function resolveGoogleModelRedirect(
 }
 
 export async function handleGoogleAI(c: Context) {
+  setRequestContext(c, { suppressModelDiagnostics: true })
   // Extract model and action from URL path
   // URL path: /v1/models/{model}:{action} or /models/{model}:{action}
   const modelAction = c.req.param("modelAction")
@@ -258,7 +259,7 @@ export async function handleGoogleAI(c: Context) {
     rawModel,
   )
 
-  logger.debug(`Google AI request: model=${model}, action=${action}`)
+  logger.debug("Google AI request")
 
   // Parse Google AI request body
   const googlePayload = await c.req.json<GoogleAIRequest>()
@@ -343,7 +344,7 @@ export async function handleGoogleAI(c: Context) {
   }
 
   consola.debug(
-    `[google-ai] Translated payload: model=${finalPayload.model}, max_tokens=${finalPayload.max_tokens}, stream=${finalPayload.stream}, tools=${finalPayload.tools?.length ?? 0}, messages=${finalPayload.messages.length}`,
+    `[google-ai] Translated payload: max_tokens=${finalPayload.max_tokens}, stream=${finalPayload.stream}, tools=${finalPayload.tools?.length ?? 0}, messages=${finalPayload.messages.length}`,
   )
   logger.debug("Translated OpenAI payload:", JSON.stringify(finalPayload))
 
@@ -372,7 +373,7 @@ async function dispatchGoogleRequest(
   const { finalPayload, routeDecision, selectedModel, isStream } = options
 
   if (routeDecision.target === "/responses") {
-    consola.debug(`[google-ai] Using Responses API for ${finalPayload.model}`)
+    consola.debug("[google-ai] Using Responses API")
     return await handleWithResponsesApi(c, finalPayload, {
       isStream,
       effortOverride: options.reasoningEffort,
@@ -380,9 +381,7 @@ async function dispatchGoogleRequest(
   }
 
   if (routeDecision.target === "/v1/messages") {
-    consola.debug(
-      `[google-ai] Using native /v1/messages for ${finalPayload.model}`,
-    )
+    consola.debug("[google-ai] Using native /v1/messages")
     return await handleWithAnthropicMessages(c, finalPayload, {
       requestedModel: options.requestedModel,
       selectedModel,
@@ -390,9 +389,7 @@ async function dispatchGoogleRequest(
     })
   }
 
-  consola.debug(
-    `[google-ai] Using ChatCompletions API for ${finalPayload.model}`,
-  )
+  consola.debug("[google-ai] Using ChatCompletions API")
   return await handleWithChatCompletions(c, finalPayload)
 }
 

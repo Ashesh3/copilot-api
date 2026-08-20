@@ -592,8 +592,16 @@ test.each(["/v1beta/models", "/v1/models", "/models"])(
   (prefix) => {
     const model = "sentry-private-model"
     const action = "sentry-private-action"
-    const path = `${prefix}/${model}:${action}/`
-    const url = `https://gateway.example${path}?alt=sse&visible=1`
+    const secrets = [
+      "query-key-secret",
+      "query-api-key-secret",
+      "query-access-token-secret",
+      "query-token-secret",
+      "query-password-secret",
+      "query-credential-secret",
+    ]
+    const path = `${prefix}/${model}:${action}/?key=${secrets[0]}&api_key=${secrets[1]}&alt=sse`
+    const url = `https://gateway.example${prefix}/${model}:${action}/?access_token=${secrets[2]}&visible=1`
     const options = createSentryInitOptions(
       "https://public@example.ingest.sentry.io/1",
     )
@@ -601,6 +609,11 @@ test.each(["/v1beta/models", "/v1/models", "/models"])(
       type: "transaction" as const,
       transaction: `POST ${path}`,
       request: { method: "POST", url },
+      extra: {
+        model,
+        requestedModel: model,
+        metadata: { action, model, safe: "visible" },
+      },
       contexts: {
         response: { status_code: 404 },
         trace: {
@@ -611,6 +624,7 @@ test.each(["/v1beta/models", "/v1/models", "/models"])(
             "http.route": path,
             "url.full": url,
             "url.path": path,
+            "url.query": `token=${secrets[3]}&alt=sse`,
           },
         },
       },
@@ -619,13 +633,18 @@ test.each(["/v1beta/models", "/v1/models", "/models"])(
           trace_id: "a".repeat(32),
           span_id: "c".repeat(16),
           start_timestamp: 1,
-          description: `POST ${url}`,
+          description: `POST ${prefix}/${model}:${action}/?password=${secrets[4]}&alt=sse`,
           data: {
             "http.request.method": "POST",
             "http.response.status_code": 404,
             "http.route": path,
             "url.full": url,
             "url.path": path,
+            nested: {
+              request: {
+                url: `${prefix}/${model}:${action}/?credential=${secrets[5]}&alt=sse`,
+              },
+            },
           },
         },
       ],
@@ -644,10 +663,12 @@ test.each(["/v1beta/models", "/v1/models", "/models"])(
 
       expect(serialized).not.toContain(model)
       expect(serialized).not.toContain(action)
+      for (const secret of secrets) expect(serialized).not.toContain(secret)
       expect(serialized).toContain(`${prefix}/:modelAction`)
       expect(serialized).toContain("POST")
       expect(serialized).toContain("404")
       expect(serialized).toContain("alt=sse")
+      expect(serialized).toContain("visible")
     }
   },
 )
@@ -711,8 +732,8 @@ test.each(["/v1beta/models", "/v1/models", "/models"])(
     const scope = new Sentry.Scope()
     const model = "scope-private-model"
     const action = "scope-private-action"
-    const path = `${prefix}/${model}:${action}/?alt=sse`
-    const url = `https://gateway.example${path}`
+    const path = `${prefix}/${model}:${action}/?key=scope-query-secret&alt=sse`
+    const url = `https://gateway.example${prefix}/${model}:${action}/?access_token=scope-access-secret&alt=sse`
 
     applySentryRequestDiagnosticsToScope(scope, {
       method: "POST",
@@ -725,9 +746,12 @@ test.each(["/v1beta/models", "/v1/models", "/models"])(
     expect(scopeData.transactionName).toBe(`POST ${prefix}/:modelAction`)
     expect(scopeData.sdkProcessingMetadata.normalizedRequest).toMatchObject({
       method: "POST",
-      url: `https://gateway.example${prefix}/:modelAction?alt=sse`,
+      url: `https://gateway.example${prefix}/:modelAction?access_token=[REDACTED]&alt=sse`,
     })
     expect(serialized).not.toContain(model)
     expect(serialized).not.toContain(action)
+    expect(serialized).not.toContain("scope-query-secret")
+    expect(serialized).not.toContain("scope-access-secret")
+    expect(serialized).toContain("alt=sse")
   },
 )

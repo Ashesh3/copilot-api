@@ -13,7 +13,6 @@ import { streamSSE } from "hono/streaming"
 import type { ChatCompletionsPayload } from "../src/services/copilot/create-chat-completions"
 import type { ModelsResponse } from "../src/services/copilot/get-models"
 
-import { ANTHROPIC_HTTP_ERROR_STATUS_TYPES } from "../src/lib/compatibility-contract-values"
 import { HTTPError, LocalHTTPError } from "../src/lib/error"
 import { setModelRedirectsForTest } from "../src/lib/model-redirect"
 import { setModelSettingsForTest } from "../src/lib/model-settings"
@@ -411,11 +410,15 @@ test("does not emit a successful terminal pair when the upstream stream errors",
   expect(eventTypes).not.toContain("message_stop")
 })
 
-test.each(
-  ANTHROPIC_HTTP_ERROR_STATUS_TYPES.map(
-    ({ status, type }) => [status, type] as const,
-  ),
-)(
+test.each([
+  [400, "invalid_request_error"],
+  [401, "authentication_error"],
+  [403, "permission_error"],
+  [404, "not_found_error"],
+  [413, "request_too_large"],
+  [429, "rate_limit_error"],
+  [500, "api_error"],
+] as const)(
   "mounted native Messages stream maps late HTTP %s to %s",
   async (status, type) => {
     streamMode = "native-late-http-error"

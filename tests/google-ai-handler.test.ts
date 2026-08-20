@@ -204,8 +204,154 @@ beforeEach(() => {
   state.githubToken = "github-token"
   state.isMultiToken = false
   state.manualApprove = false
+  state.debug = false
+  state.verbose = false
   state.models = responsesCapableModels
   setModelRedirectsForTest([])
+})
+
+test.each(["/v1beta/models", "/v1/models", "/models"] as const)(
+  "keeps successful Google route model and action out of ordinary diagnostics for %s",
+  async (prefix) => {
+    const privateModel = "private-supported-model-marker"
+    const privateAction = "generateContent"
+    const model = structuredClone(responsesCapableModels.data[0])
+    model.id = privateModel
+    model.name = "Private supported model marker"
+    state.models = { object: "list", data: [model] }
+    state.debug = true
+    state.verbose = true
+    const consoleLog = spyOn(console, "log").mockImplementation(() => undefined)
+    const consoleInfo = spyOn(console, "info").mockImplementation(
+      () => undefined,
+    )
+    const debugLog = spyOn(consola, "debug")
+    const sentryLog = spyOn(Sentry.logger, "info").mockImplementation(
+      () => undefined,
+    )
+
+    try {
+      const response = await server.request(
+        `${prefix}/${privateModel}:${privateAction}?key=mounted-query-secret&alt=json`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ role: "user", parts: [{ text: "Hello" }] }],
+          }),
+        },
+      )
+      const diagnostics = JSON.stringify([
+        consoleLog.mock.calls,
+        consoleInfo.mock.calls,
+        debugLog.mock.calls,
+        sentryLog.mock.calls,
+      ])
+
+      expect(response.status).toBe(200)
+      expect(lastPath).toBe("/responses")
+      expect(diagnostics).toContain(`${prefix}/:modelAction`)
+      expect(diagnostics).toContain("alt=json")
+      expect(diagnostics).not.toContain(privateModel)
+      expect(diagnostics).not.toContain(privateAction)
+      expect(diagnostics).not.toContain("mounted-query-secret")
+    } finally {
+      state.debug = false
+      state.verbose = false
+      consoleLog.mockRestore()
+      consoleInfo.mockRestore()
+      debugLog.mockRestore()
+      sentryLog.mockRestore()
+    }
+  },
+)
+
+test("keeps Google non-default diagnostics free of route-derived models", async () => {
+  const sourceModel = "private-google-source-marker"
+  const targetModel = "private-google-target-marker"
+  const model = structuredClone(responsesCapableModels.data[0])
+  model.id = targetModel
+  model.name = "Private Google target marker"
+  model.vendor = "anthropic"
+  model.supported_endpoints = ["/v1/messages"]
+  state.models = { object: "list", data: [model] }
+  setModelRedirectsForTest([
+    {
+      id: "private-google-redirect-rule-marker",
+      sourceModel,
+      sourceEffort: "all",
+      targetModel,
+      enabled: true,
+    },
+  ])
+  const consoleLog = spyOn(console, "log").mockImplementation(() => undefined)
+  const consoleInfo = spyOn(console, "info").mockImplementation(() => undefined)
+  const breadcrumb = spyOn(Sentry, "addBreadcrumb").mockImplementation(
+    () => undefined,
+  )
+  const sentryInfo = spyOn(Sentry.logger, "info").mockImplementation(
+    () => undefined,
+  )
+
+  try {
+    const response = await server.request(
+      `/v1/models/${sourceModel}:generateContent`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: "Hello" }] }],
+        }),
+      },
+    )
+    const diagnostics = JSON.stringify([
+      consoleLog.mock.calls,
+      consoleInfo.mock.calls,
+      breadcrumb.mock.calls,
+      sentryInfo.mock.calls,
+    ])
+
+    expect(response.status).toBe(200)
+    expect(lastPath).toBe("/v1/messages")
+    expect(diagnostics).toContain("model_redirect")
+    expect(diagnostics).toContain("endpoint_fallback")
+    expect(diagnostics).not.toContain(sourceModel)
+    expect(diagnostics).not.toContain(targetModel)
+    expect(diagnostics).not.toContain("private-google-redirect-rule-marker")
+  } finally {
+    consoleLog.mockRestore()
+    consoleInfo.mockRestore()
+    breadcrumb.mockRestore()
+    sentryInfo.mockRestore()
+  }
+})
+
+test("preserves non-Google diagnostic paths while redacting query credentials", async () => {
+  state.debug = true
+  const consoleLog = spyOn(console, "log").mockImplementation(() => undefined)
+  const sentryInfo = spyOn(Sentry.logger, "info").mockImplementation(
+    () => undefined,
+  )
+
+  try {
+    const response = await server.request(
+      "/health?api_key=non-google-query-secret&alt=json",
+    )
+    const diagnostics = JSON.stringify([
+      consoleLog.mock.calls,
+      sentryInfo.mock.calls,
+    ])
+
+    expect(response.status).toBe(404)
+    expect(diagnostics).toContain("/health")
+    expect(diagnostics).toContain("alt=json")
+    expect(diagnostics).not.toContain("non-google-query-secret")
+    expect(diagnostics).not.toContain(":modelAction")
+  } finally {
+    state.debug = false
+    consoleLog.mockRestore()
+    sentryInfo.mockRestore()
+  }
 })
 
 test("adds reasoning defaults on the Google AI responses path", async () => {
