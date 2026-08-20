@@ -1207,6 +1207,87 @@ describe("responses websocket message handling", () => {
     expect(ws.data.activeTurns.size).toBe(0)
   })
 
+  test("completes a native turn when upstream omits terminal output_text", async () => {
+    state.accountType = "individual"
+    state.copilotToken = "copilot-token"
+    state.models = responsesCapableModels
+    queuedResponses.push(
+      createResponsesSseResponse(
+        "resp_ws_missing_output_text",
+        [
+          {
+            id: "msg_ws_missing_output_text",
+            type: "message",
+            role: "assistant",
+            status: "completed",
+            content: [
+              {
+                type: "output_text",
+                text: "Hello world",
+                annotations: [],
+              },
+            ],
+          },
+        ],
+        { omitCompletedOutputText: true },
+      ),
+    )
+    const ws = createTestWebSocket()
+    const infoSpy = spyOn(console, "info").mockImplementation(() => undefined)
+
+    try {
+      await responsesWebSocket.message(
+        ws,
+        JSON.stringify({
+          type: "response.create",
+          model: "gpt-5.4",
+          input: [
+            {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: "Hello" }],
+            },
+          ],
+          tools: [],
+        }),
+      )
+
+      const frames = ws.sent.map(
+        (frame) =>
+          JSON.parse(frame) as {
+            response?: { output_text?: string }
+            type?: string
+          },
+      )
+      const terminal = frames.find(
+        (frame) =>
+          frame.type === "error"
+          || frame.type === "response.completed"
+          || frame.type === "response.failed",
+      )
+      const lifecycleLines = infoSpy.mock.calls
+        .flat()
+        .filter((value): value is string => typeof value === "string")
+      const completeLines = lifecycleLines.filter((line) =>
+        line.includes("COMPLETE"),
+      )
+
+      expect(terminal?.type).toBe("response.completed")
+      expect(terminal?.response?.output_text).toBe("Hello world")
+      expect(
+        frames.some(
+          (frame) => frame.type === "error" || frame.type === "response.failed",
+        ),
+      ).toBe(false)
+      expect(ws.data.activeTurns.size).toBe(0)
+      expect(completeLines).toHaveLength(1)
+      expect(completeLines[0]).toContain("200")
+      expect(lifecycleLines.some((line) => line.includes("ERROR"))).toBe(false)
+    } finally {
+      infoSpy.mockRestore()
+    }
+  })
+
   test("uses per-frame metadata affinity and preserves handshake precedence", async () => {
     state.models = responsesCapableModels
     queuedResponses.push(
@@ -3845,9 +3926,14 @@ function createResponsesSseResponse(
   options: {
     frameFields?: Record<string, unknown>
     headers?: Record<string, string>
+    omitCompletedOutputText?: boolean
   } = {},
 ): Response {
-  const { frameFields = {}, headers = {} } = options
+  const {
+    frameFields = {},
+    headers = {},
+    omitCompletedOutputText = false,
+  } = options
   const created = JSON.stringify({
     ...frameFields,
     type: "response.created",
@@ -3882,7 +3968,7 @@ function createResponsesSseResponse(
       created_at: 1,
       model: "gpt-5.4",
       output,
-      output_text: "",
+      ...(omitCompletedOutputText ? {} : { output_text: "" }),
       status: "completed",
       usage: null,
       error: null,
