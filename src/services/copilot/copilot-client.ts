@@ -39,6 +39,15 @@ import { getCopilotToken } from "~/services/github/get-copilot-token"
 
 import type { RetryBudget, RetryClaim } from "./transport-retry"
 
+import {
+  isEncryptedCompactionVerificationError,
+  refreshRequestIdForRetry,
+} from "./encrypted-compaction-retry"
+export {
+  addPromptCaching,
+  detectInitiator,
+  hasVisionContent,
+} from "./copilot-payload-helpers"
 import { createCopilotTransportInit } from "./transport-options"
 import {
   abortableSleep,
@@ -47,11 +56,12 @@ import {
   createRetryBudget,
   createRetryClaim,
   createTransportChain,
+  consumeExtraSend,
   handleTransportFailure,
   isAbortLikeError,
   logChainResponse,
   MAX_DELAY_SECONDS,
-  MAX_RETRIES,
+  MAX_ROUTED_SENDS,
 } from "./transport-retry"
 
 // --- Constants ---
@@ -620,24 +630,35 @@ function recordFinalResponseHeaders(response: Response): void {
 }
 
 type ResponseAction =
+  | { kind: "retry-encrypted-compaction" }
   | { delaySeconds: number; kind: "retry-status" }
   | { kind: "refresh-token" }
   | { kind: "return" }
 
+interface RetryResponseState {
+  requestInit: RequestInit | undefined
+  retryBackoffExtraSeconds: number
+  telemetryReason: UpstreamSendReason
+}
+
 /** Decide what an upstream response means, claiming budget for any resend. */
 async function classifyResponse(options: {
   attempt: number
+  claimEncryptedCompactionRetry: RetryClaim
   claimRetry: RetryClaim
   maxHttpRetryDelaySeconds: number
   path: string
+  requestInit: RequestInit | undefined
   response: Response
   retryBackoffExtraSeconds: number
 }): Promise<ResponseAction> {
   const {
     attempt,
+    claimEncryptedCompactionRetry,
     claimRetry,
     maxHttpRetryDelaySeconds,
     path,
+    requestInit,
     response,
     retryBackoffExtraSeconds,
   } = options
@@ -647,6 +668,19 @@ async function classifyResponse(options: {
   }
 
   if (response.status === 400) {
+    if (
+      (await isEncryptedCompactionVerificationError(
+        path,
+        response,
+        requestInit,
+      ))
+      && claimEncryptedCompactionRetry()
+    ) {
+      consola.warn(
+        `HTTP 400 encrypted compaction verification failed on ${path}, retrying with preserved payload`,
+      )
+      return { kind: "retry-encrypted-compaction" }
+    }
     await isDeterministic400Response(response)
     return { kind: "return" }
   }
@@ -667,6 +701,39 @@ async function classifyResponse(options: {
   return { kind: "return" }
 }
 
+async function applyRetryResponseAction(options: {
+  action: Exclude<ResponseAction, { kind: "return" }>
+  path: string
+  requestInit: RequestInit | undefined
+  retryBackoffExtraSeconds: number
+}): Promise<RetryResponseState> {
+  const { action, path, requestInit, retryBackoffExtraSeconds } = options
+
+  if (action.kind === "refresh-token") {
+    const headers = toHeaderRecord(requestInit?.headers)
+    return {
+      requestInit: await refreshTokenForRetry(headers, requestInit, path),
+      retryBackoffExtraSeconds,
+      telemetryReason: "token_refresh",
+    }
+  }
+
+  if (action.kind === "retry-status") {
+    await httpRetrySleep(action.delaySeconds * 1000, requestInit?.signal)
+    return {
+      requestInit,
+      retryBackoffExtraSeconds: retryBackoffExtraSeconds * BACKOFF_FACTOR,
+      telemetryReason: "http_retry",
+    }
+  }
+
+  return {
+    requestInit: refreshRequestIdForRetry(requestInit),
+    retryBackoffExtraSeconds,
+    telemetryReason: "http_retry",
+  }
+}
+
 export async function copilotFetch(
   path: string,
   init?: RequestInit,
@@ -684,8 +751,10 @@ export async function copilotFetch(
   // Both caps apply: the shared routed-call allowance and this invocation's
   // own limit, so one copilotFetch can never drain the whole budget.
   const claimRetry: RetryClaim = createRetryClaim(budget)
+  const claimEncryptedCompactionRetry: RetryClaim = () =>
+    consumeExtraSend(budget)
   const chain = createTransportChain(path, randomUUID())
-  const maxAttempts = MAX_RETRIES + 1
+  const maxAttempts = MAX_ROUTED_SENDS
   let retryBackoffExtraSeconds = INITIAL_RETRY_BACKOFF_EXTRA_SECONDS
   let requestInit = init
   const telemetryState = createCopilotAttemptTelemetryState(fetchOptions)
@@ -719,26 +788,27 @@ export async function copilotFetch(
 
       const action = await classifyResponse({
         attempt,
+        claimEncryptedCompactionRetry,
         claimRetry,
         maxHttpRetryDelaySeconds,
         path,
+        requestInit,
         response,
         retryBackoffExtraSeconds,
       })
 
-      if (action.kind === "refresh-token") {
-        clearCopilotResponseHeaders()
-        requestInit = await refreshTokenForRetry(headers, requestInit, path)
-        telemetryState.reason = "token_refresh"
-        continue
-      }
-
-      if (action.kind === "retry-status") {
+      if (action.kind !== "return") {
         lastResponse = response
         clearCopilotResponseHeaders()
-        retryBackoffExtraSeconds *= BACKOFF_FACTOR
-        await httpRetrySleep(action.delaySeconds * 1000, requestInit?.signal)
-        telemetryState.reason = "http_retry"
+        const next = await applyRetryResponseAction({
+          action,
+          path,
+          requestInit,
+          retryBackoffExtraSeconds,
+        })
+        requestInit = next.requestInit
+        retryBackoffExtraSeconds = next.retryBackoffExtraSeconds
+        telemetryState.reason = next.telemetryReason
         continue
       }
 
@@ -770,134 +840,4 @@ export async function copilotFetch(
   }
 
   throw lastError ?? new Error("Request failed without a captured error")
-}
-
-// --- Message Types ---
-
-interface ContentPart {
-  type: string
-}
-
-// --- Helper Functions ---
-
-export function hasVisionContent(
-  messages: ReadonlyArray<{
-    content?: string | ReadonlyArray<ContentPart> | null
-  }>,
-): boolean {
-  // Image parts across dialects, plus file/document attachment parts (PDFs)
-  // which also ride the vision pipeline upstream.
-  const attachmentTypes = new Set([
-    "image_url",
-    "image",
-    "input_image",
-    "file",
-    "input_file",
-    "document",
-  ])
-
-  for (const message of messages) {
-    if (Array.isArray(message.content)) {
-      const parts = message.content as ReadonlyArray<ContentPart>
-      for (const part of parts) {
-        if (attachmentTypes.has(part.type)) {
-          return true
-        }
-      }
-    }
-  }
-
-  return false
-}
-
-export function detectInitiator(
-  messages: ReadonlyArray<{ role: string }>,
-  override?: "agent" | "user",
-): "agent" | "user" {
-  if (override) return override
-
-  if (messages.length === 0) return "user"
-
-  const lastMessage = messages.at(-1)
-  if (
-    lastMessage
-    && (lastMessage.role === "assistant" || lastMessage.role === "tool")
-  ) {
-    return "agent"
-  }
-
-  return "user"
-}
-
-export function addPromptCaching(
-  messages: Array<{
-    role: string
-    content?: string | Array<unknown> | null
-    tool_calls?: Array<unknown>
-    reasoning_text?: string | null
-    reasoning_opaque?: string | null
-    encrypted_content?: string | null
-  }>,
-  tools?: Array<object>,
-): void {
-  // Add cache control to last system message
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role === "system") {
-      ;(messages[i] as Record<string, unknown>).copilot_cache_control = {
-        type: "ephemeral",
-      }
-      break
-    }
-  }
-
-  // CAPI caching is most effective when the checkpoint is on the last non-user turn.
-  // Avoid pure reasoning-only assistant turns to prevent Anthropic validation issues.
-  const lastNonUserIndex = messages.findLastIndex(
-    (message) => message.role !== "user" && !isReasoningOnlyMessage(message),
-  )
-  if (lastNonUserIndex !== -1) {
-    ;(
-      messages[lastNonUserIndex] as Record<string, unknown>
-    ).copilot_cache_control = {
-      type: "ephemeral",
-    }
-  }
-
-  // Add cache control to last tool definition
-  if (tools && tools.length > 0) {
-    const lastTool = tools.at(-1)
-    if (lastTool) {
-      ;(lastTool as Record<string, unknown>).copilot_cache_control = {
-        type: "ephemeral",
-      }
-    }
-  }
-}
-
-function isReasoningOnlyMessage(message: {
-  role: string
-  content?: string | Array<unknown> | null
-  tool_calls?: Array<unknown>
-  reasoning_text?: string | null
-  reasoning_opaque?: string | null
-  encrypted_content?: string | null
-}): boolean {
-  if (message.role !== "assistant") return false
-
-  const hasReasoning = Boolean(
-    message.reasoning_text
-      || message.reasoning_opaque
-      || message.encrypted_content,
-  )
-  if (!hasReasoning) return false
-
-  const hasContent =
-    typeof message.content === "string" ?
-      message.content.trim().length > 0
-    : Array.isArray(message.content) && message.content.length > 0
-
-  const hasToolCalls =
-    Array.isArray(message.tool_calls) && message.tool_calls.length > 0
-
-  return !hasContent && !hasToolCalls
 }

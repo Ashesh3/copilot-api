@@ -978,6 +978,105 @@ test("records final response metadata once when affinity rejection throws", asyn
   }
 })
 
+test("retries encrypted Responses compaction failures on the selected account", async () => {
+  const modelId = "router-encrypted-compaction-retry"
+  registerAccount(1021, modelId, "selected-copilot-token")
+  registerAccount(1022, modelId, "alternate-copilot-token")
+  for (const accountId of [1021, 1022]) {
+    const account = tokenPool
+      .getAllAccounts()
+      .find((entry) => entry.id === accountId)
+    if (!account) throw new TypeError("Expected compaction retry account")
+    const model = account.modelsData.find((entry) => entry.id === modelId)
+    if (!model) throw new TypeError("Expected compaction retry model")
+    model.supported_endpoints = ["/responses"]
+  }
+  tokenPool.rebuildModelIndex()
+  const requestBody = JSON.stringify({
+    input: [
+      {
+        encrypted_content: "opaque-compaction",
+        type: "compaction",
+      },
+    ],
+    model: modelId,
+  })
+  const encryptedFailure = () =>
+    Response.json(
+      {
+        error: {
+          code: "invalid_request_body",
+          message: "The encrypted content could not be verified.",
+        },
+      },
+      {
+        status: 400,
+        headers: {
+          "x-github-request-id": "stale-compaction-attempt",
+          "x-quota-snapshot-premium": "stale-quota",
+        },
+      },
+    )
+  queuedResults.push(
+    encryptedFailure(),
+    encryptedFailure(),
+    new Response("{}", {
+      status: 200,
+      headers: {
+        "x-github-request-id": "final-compaction-attempt",
+        "x-quota-snapshot-premium": "final-quota",
+      },
+    }),
+  )
+  const debugSpy = spyOn(consola, "debug")
+
+  try {
+    const { result, headers } = await copilotResponseHeadersStorage.run(
+      {},
+      async () =>
+        await runWithCopilotContractObservabilityScope(async () => {
+          const result = await routedFetch(
+            "/responses",
+            { body: requestBody, method: "POST" },
+            { modelId },
+          )
+          return { result, headers: { ...getCopilotResponseHeaders() } }
+        }),
+    )
+    const { response, account } = result
+
+    expect(response.status).toBe(200)
+    expect(account).toBeDefined()
+    expect(capturedRequests).toHaveLength(3)
+    expect(capturedRequests.map(({ init }) => init?.body)).toEqual([
+      requestBody,
+      requestBody,
+      requestBody,
+    ])
+    expect(llmAuthorizationHeaders()).toEqual([
+      `Bearer ${account?.copilotToken}`,
+      `Bearer ${account?.copilotToken}`,
+      `Bearer ${account?.copilotToken}`,
+    ])
+    expect(llmAuthorizationHeaders()).not.toContain(
+      "Bearer alternate-copilot-token",
+    )
+    expect(headers).toEqual({
+      "x-github-request-id": "final-compaction-attempt",
+      "x-quota-snapshot-premium": "final-quota",
+    })
+    expect(responseMetadataEvents(debugSpy.mock.calls)).toEqual([
+      {
+        kind: "response_metadata",
+        headerCount: 2,
+        quotaSnapshotCount: 1,
+      },
+    ])
+  } finally {
+    debugSpy.mockRestore()
+  }
+})
+
 test("refreshes a multi-token account and retries after a 401", async () => {
   const modelId = "router-401-refresh-test"
   registerAccount(1011, modelId, "expired-copilot-token")
