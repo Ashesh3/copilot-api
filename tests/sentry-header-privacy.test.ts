@@ -25,6 +25,17 @@ type SendHook = (
   value: Record<string, unknown>,
 ) => Record<string, unknown> | null
 
+const SPAN_STRUCTURAL_FIELDS = {
+  data: {},
+  op: "http.client",
+  parent_span_id: "3333333333333333",
+  span_id: "2222222222222222",
+  start_timestamp: 1,
+  status: "ok",
+  timestamp: 2,
+  trace_id: "11111111111111111111111111111111",
+} as const
+
 function sendHooks(): Array<[string, SendHook]> {
   const options = createSentryInitOptions(
     "https://public@example.ingest.sentry.io/1",
@@ -38,6 +49,49 @@ function sendHooks(): Array<[string, SendHook]> {
     ["beforeSendSpan", options.beforeSendSpan as unknown as SendHook],
     ["beforeSendLog", options.beforeSendLog as unknown as SendHook],
   ]
+}
+
+function payloadForHook(
+  hookName: string,
+  payload: Record<string, unknown>,
+): Record<string, unknown> {
+  return hookName === "beforeSendSpan" ?
+      { ...SPAN_STRUCTURAL_FIELDS, ...payload }
+    : payload
+}
+
+function expectFailClosed(
+  hookName: string,
+  hook: SendHook,
+  payload: Record<string, unknown>,
+): void {
+  const returned = hook(payloadForHook(hookName, payload))
+  if (hookName !== "beforeSendSpan") {
+    expect(returned).toBeNull()
+    return
+  }
+
+  expect(returned).not.toBeNull()
+  const safeSpan = returned as Record<string, unknown>
+  expect(safeSpan.data).toEqual({})
+  const structuralFields: Record<string, unknown> = SPAN_STRUCTURAL_FIELDS
+  for (const key of [
+    "op",
+    "parent_span_id",
+    "span_id",
+    "start_timestamp",
+    "status",
+    "timestamp",
+    "trace_id",
+  ]) {
+    expect([structuralFields[key], undefined]).toContain(safeSpan[key])
+  }
+  expect(Object.keys(safeSpan).sort()).toEqual(
+    Object.keys(SPAN_STRUCTURAL_FIELDS)
+      .filter((key) => safeSpan[key] !== undefined)
+      .sort(),
+  )
+  expect(JSON.stringify(returned)).not.toContain("private")
 }
 
 function realHeadersRecord(prefix: string): Record<string, string> {
@@ -228,6 +282,211 @@ test("Sentry header scrubbing is bounded on pathologically deep telemetry", () =
     }
 
     expect(() => hook(payload)).not.toThrow()
+  }
+})
+
+test("every Sentry send hook drops frozen sensitive header records", () => {
+  for (const [name, hook] of sendHooks()) {
+    const payload = {
+      headers: Object.freeze({
+        "Copilot-Session-Token": "frozen-private-token",
+        "X-Safe-Header": SAFE_HEADER_VALUE,
+      }),
+      status: 429,
+    }
+
+    expectFailClosed(name, hook, payload)
+  }
+})
+
+test("every Sentry send hook drops non-configurable sensitive headers", () => {
+  for (const [name, hook] of sendHooks()) {
+    const headers: Record<string, unknown> = {
+      "X-Safe-Header": SAFE_HEADER_VALUE,
+    }
+    Object.defineProperty(headers, "Authorization", {
+      configurable: false,
+      enumerable: true,
+      value: "non-configurable-private-token",
+      writable: false,
+    })
+    const payload = { headers, status: 401 }
+
+    expectFailClosed(name, hook, payload)
+  }
+})
+
+test("every Sentry send hook drops telemetry with over-depth sensitive headers", () => {
+  for (const [name, hook] of sendHooks()) {
+    const payload: Record<string, unknown> = {}
+    let cursor = payload
+    for (let depth = 0; depth < 80; depth += 1) {
+      const next: Record<string, unknown> = {}
+      cursor.next = next
+      cursor = next
+    }
+    cursor.headers = {
+      "Copilot-Session-Token": "over-depth-private-token",
+    }
+
+    expectFailClosed(name, hook, payload)
+  }
+})
+
+test("every Sentry send hook drops telemetry when descriptor inspection traps", () => {
+  for (const [name, hook] of sendHooks()) {
+    let ownKeysCalls = 0
+    const ownKeysTrap = new Proxy(Object.create(null) as object, {
+      ownKeys() {
+        ownKeysCalls += 1
+        throw new Error("hostile ownKeys trap")
+      },
+    })
+
+    expectFailClosed(name, hook, { branch: ownKeysTrap })
+    expect(ownKeysCalls).toBeGreaterThan(0)
+
+    let descriptorCalls = 0
+    const descriptorTrap = new Proxy(
+      { headers: { Authorization: "descriptor-private-token" } },
+      {
+        getOwnPropertyDescriptor() {
+          descriptorCalls += 1
+          throw new Error("hostile descriptor trap")
+        },
+      },
+    )
+
+    expectFailClosed(name, hook, { branch: descriptorTrap })
+    expect(descriptorCalls).toBeGreaterThan(0)
+  }
+})
+
+test("every Sentry send hook scrubs inspectable siblings before failing closed", () => {
+  for (const [name, hook] of sendHooks()) {
+    const hostile = new Proxy(Object.create(null) as object, {
+      ownKeys() {
+        throw new Error("hostile sibling")
+      },
+    })
+    const payload = payloadForHook(name, {
+      first: hostile,
+      headers: { Authorization: "sibling-private-token" },
+    })
+
+    const returned = hook(payload)
+    expect((payload.headers as Record<string, string>).Authorization).toBe(
+      FILTERED_VALUE,
+    )
+    if (name === "beforeSendSpan") {
+      expect(returned).not.toBeNull()
+      expect(JSON.stringify(returned)).not.toContain("sibling-private-token")
+    } else {
+      expect(returned).toBeNull()
+    }
+  }
+})
+
+test("every Sentry send hook scrubs later array siblings before failing closed", () => {
+  for (const [name, hook] of sendHooks()) {
+    const hostile = new Proxy(Object.create(null) as object, {
+      ownKeys() {
+        throw new Error("hostile array sibling")
+      },
+    })
+    const headers = { Authorization: "array-sibling-private-token" }
+    const payload = payloadForHook(name, {
+      list: [hostile, { headers }],
+    })
+
+    const returned = hook(payload)
+    expect(headers.Authorization).toBe(FILTERED_VALUE)
+    if (name === "beforeSendSpan") {
+      expect(returned).not.toBeNull()
+      expect(JSON.stringify(returned)).not.toContain(
+        "array-sibling-private-token",
+      )
+    } else {
+      expect(returned).toBeNull()
+    }
+  }
+})
+
+test("Statsig context is revisited when a shared branch becomes sensitive", () => {
+  for (const [, hook] of sendHooks()) {
+    const shared = { query: "k=shared-private&visible=1" }
+    const payload = {
+      nonStatsig: shared,
+      statsig: {
+        host: "ab.chatgpt.com",
+        shared,
+      },
+    }
+
+    expect(hook(payload)).toBe(payload)
+    expect(shared.query).toBe("k=[Filtered]&visible=1")
+  }
+})
+
+test("every Sentry send hook ignores hostile accessors without invoking them", () => {
+  for (const [, hook] of sendHooks()) {
+    let getterCalls = 0
+    const branch = Object.create(null) as Record<string, unknown>
+    Object.defineProperty(branch, "headers", {
+      enumerable: true,
+      get() {
+        getterCalls += 1
+        throw new Error("hostile headers getter")
+      },
+    })
+    const payload = { branch, status: 202 }
+
+    expect(() => hook(payload)).not.toThrow()
+    expect(getterCalls).toBe(0)
+  }
+})
+
+test("every Sentry send hook retains proven-safe immutable telemetry", () => {
+  for (const [, hook] of sendHooks()) {
+    const safePayload = Object.freeze({
+      headers: Object.freeze({ "X-Safe-Header": SAFE_HEADER_VALUE }),
+      method: "GET",
+      status: 204,
+    })
+
+    expect(hook(safePayload)).toBe(safePayload)
+
+    const mutablePayload = {
+      headers: { Authorization: "mutable-private-token" },
+      status: 200,
+    }
+    expect(hook(mutablePayload)).toBe(mutablePayload)
+    expect(mutablePayload.headers.Authorization).toBe(FILTERED_VALUE)
+  }
+})
+
+test("every Sentry send hook drops immutable sensitive Statsig telemetry", () => {
+  for (const [name, hook] of sendHooks()) {
+    const payload = Object.freeze({
+      request: Object.freeze({
+        url: "https://ab.chatgpt.com/v1/initialize?k=frozen-statsig-private",
+      }),
+    })
+
+    expectFailClosed(name, hook, payload)
+  }
+})
+
+test("every Sentry send hook drops immutable sensitive Google telemetry", () => {
+  for (const [name, hook] of sendHooks()) {
+    const payload = Object.freeze({
+      request: Object.freeze({
+        method: "POST",
+        url: "https://gateway.example/v1beta/models/private-model:private-action?api_key=private-google-key&alt=sse",
+      }),
+    })
+
+    expectFailClosed(name, hook, payload)
   }
 })
 

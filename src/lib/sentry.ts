@@ -1,5 +1,5 @@
 import type { BunOptions } from "@sentry/bun"
-import type { Client, SpanAttributes } from "@sentry/core"
+import type { Client, SpanAttributes, SpanJSON } from "@sentry/core"
 import type { Context } from "hono"
 
 import * as Sentry from "@sentry/bun"
@@ -64,6 +64,32 @@ const SENTRY_SCRUB_MAX_DEPTH = 64
 
 type HeaderTuple = [string, unknown]
 
+interface OwnDataEntry {
+  key: string
+  value: unknown
+}
+
+interface InspectionResult<T> {
+  complete: boolean
+  value: T
+}
+
+interface SentrySpanShape {
+  data: Record<string, never>
+  op?: string
+  parent_span_id?: string
+  span_id: string
+  start_timestamp: number
+  status?: string
+  timestamp?: number
+  trace_id: string
+}
+
+type ScrubResult = "safe" | "uncertain"
+
+const SAFE_SCRUB_RESULT: ScrubResult = "safe"
+const UNCERTAIN_SCRUB_RESULT: ScrubResult = "uncertain"
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null
 }
@@ -94,22 +120,25 @@ function containsStatsigHost(value: string): boolean {
   return STATSIG_HOST_REFERENCE_RE.test(value)
 }
 
-function hasDirectStatsigHostString(value: unknown): boolean {
-  if (!isRecord(value)) return false
-
-  return ownDataEntries(value).some(
-    ([, entry]) => typeof entry === "string" && containsStatsigHost(entry),
+function inspectLocalStatsigContext(
+  entries: ReadonlyArray<OwnDataEntry>,
+): InspectionResult<boolean> {
+  if (
+    entries.some(
+      ({ value }) => typeof value === "string" && containsStatsigHost(value),
+    )
   )
-}
+    return { complete: true, value: true }
 
-function objectCreatesLocalStatsigContext(
-  value: Record<string, unknown>,
-): boolean {
-  return (
-    ownDataEntries(value).some(
-      ([, entry]) => typeof entry === "string" && containsStatsigHost(entry),
-    ) || hasDirectStatsigHostString(value.server)
-  )
+  const server = entries.find(({ key }) => key === "server")?.value
+  if (!isRecord(server)) return { complete: true, value: false }
+  const serverInspection = inspectOwnDataEntries(server)
+  return {
+    complete: serverInspection.complete,
+    value: serverInspection.value.some(
+      ({ value }) => typeof value === "string" && containsStatsigHost(value),
+    ),
+  }
 }
 
 function scrubStatsigClientKeyString(
@@ -125,60 +154,68 @@ function scrubStatsigClientKeyString(
   )
 }
 
-// eslint-disable-next-line max-params -- recursive depth bounds hostile telemetry
-export function scrubStatsigClientKeyData(
+interface StatsigScrubContext {
+  inheritedStatsigContext: boolean
+  seen: WeakMap<object, boolean>
+}
+
+// eslint-disable-next-line complexity -- fail-closed descriptor traversal tracks partial progress
+function scrubStatsigClientKeyDataSafely(
   value: unknown,
-  seen: WeakSet<object> = new WeakSet<object>(),
-  inheritedStatsigContext = false,
+  context: StatsigScrubContext,
   depth = 0,
-): void {
-  if (!isRecord(value) || depth > SENTRY_SCRUB_MAX_DEPTH) return
-  if (seen.has(value)) return
+): ScrubResult {
+  if (!isRecord(value)) return SAFE_SCRUB_RESULT
+  if (depth > SENTRY_SCRUB_MAX_DEPTH) return UNCERTAIN_SCRUB_RESULT
 
-  seen.add(value)
+  const seenInStatsigContext = context.seen.get(value)
+  if (
+    seenInStatsigContext === true
+    || (seenInStatsigContext === false && !context.inheritedStatsigContext)
+  )
+    return SAFE_SCRUB_RESULT
+  context.seen.set(value, context.inheritedStatsigContext)
 
-  if (Array.isArray(value)) {
-    const arrayValue = value as Array<unknown>
-    for (let index = 0; index < arrayValue.length; index += 1) {
-      const descriptor = Object.getOwnPropertyDescriptor(
-        arrayValue,
-        String(index),
-      )
-      if (!descriptor || !Object.hasOwn(descriptor, "value")) continue
-      const entry: unknown = descriptor.value
-      if (typeof entry === "string") {
-        setOwnDataValue(
-          arrayValue as unknown as Record<string, unknown>,
-          String(index),
-          scrubStatsigClientKeyString(entry, inheritedStatsigContext),
-        )
-        continue
-      }
+  const inspected = inspectOwnDataEntries(value)
+  let result = inspected.complete ? SAFE_SCRUB_RESULT : UNCERTAIN_SCRUB_RESULT
 
-      scrubStatsigClientKeyData(entry, seen, inheritedStatsigContext, depth + 1)
-    }
-    return
-  }
-
+  const statsigInspection = inspectLocalStatsigContext(inspected.value)
+  if (!statsigInspection.complete) result = UNCERTAIN_SCRUB_RESULT
   const localStatsigContext =
-    inheritedStatsigContext || objectCreatesLocalStatsigContext(value)
-
-  for (const [key, nestedValue] of ownDataEntries(value)) {
+    context.inheritedStatsigContext || statsigInspection.value
+  if (localStatsigContext) context.seen.set(value, true)
+  for (const { key, value: nestedValue } of inspected.value) {
     if (isRoutingAffinityHeader(key)) {
-      setOwnDataValue(value, key, FILTERED_VALUE)
+      if (!setOwnDataValue(value, key, FILTERED_VALUE))
+        result = UNCERTAIN_SCRUB_RESULT
       continue
     }
     if (typeof nestedValue === "string") {
-      setOwnDataValue(
-        value,
-        key,
-        scrubStatsigClientKeyString(nestedValue, localStatsigContext),
+      const scrubbed = scrubStatsigClientKeyString(
+        nestedValue,
+        localStatsigContext,
       )
+      if (scrubbed !== nestedValue && !setOwnDataValue(value, key, scrubbed))
+        result = UNCERTAIN_SCRUB_RESULT
       continue
     }
-
-    scrubStatsigClientKeyData(nestedValue, seen, localStatsigContext, depth + 1)
+    if (
+      scrubStatsigClientKeyDataSafely(
+        nestedValue,
+        { inheritedStatsigContext: localStatsigContext, seen: context.seen },
+        depth + 1,
+      ) === UNCERTAIN_SCRUB_RESULT
+    )
+      result = UNCERTAIN_SCRUB_RESULT
   }
+  return result
+}
+
+export function scrubStatsigClientKeyData(value: unknown): void {
+  scrubStatsigClientKeyDataSafely(value, {
+    inheritedStatsigContext: false,
+    seen: new WeakMap<object, boolean>(),
+  })
 }
 
 interface GoogleRouteScrubContext {
@@ -203,49 +240,26 @@ function scrubGoogleRouteData(
   value: unknown,
   context: GoogleRouteScrubContext,
   depth = 0,
-): void {
-  if (
-    !isRecord(value)
-    || context.seen.has(value)
-    || depth > SENTRY_SCRUB_MAX_DEPTH
-  ) {
-    return
-  }
+): ScrubResult {
+  if (!isRecord(value) || context.seen.has(value)) return SAFE_SCRUB_RESULT
+  if (depth > SENTRY_SCRUB_MAX_DEPTH) return UNCERTAIN_SCRUB_RESULT
   context.seen.add(value)
 
-  if (Array.isArray(value)) {
-    const arrayValue = value as Array<unknown>
-    for (let index = 0; index < arrayValue.length; index += 1) {
-      const descriptor = Object.getOwnPropertyDescriptor(
-        arrayValue,
-        String(index),
-      )
-      if (!descriptor || !Object.hasOwn(descriptor, "value")) continue
-      const entry: unknown = descriptor.value
-      if (typeof entry === "string") {
-        setOwnDataValue(
-          arrayValue as unknown as Record<string, unknown>,
-          String(index),
-          sanitizeGoogleRouteString("", entry, context),
-        )
-      } else {
-        scrubGoogleRouteData(entry, context, depth + 1)
-      }
-    }
-    return
-  }
-
-  for (const [key, nestedValue] of ownDataEntries(value)) {
+  const inspected = inspectOwnDataEntries(value)
+  let result = inspected.complete ? SAFE_SCRUB_RESULT : UNCERTAIN_SCRUB_RESULT
+  for (const { key, value: nestedValue } of inspected.value) {
     if (typeof nestedValue === "string") {
-      setOwnDataValue(
-        value,
-        key,
-        sanitizeGoogleRouteString(key, nestedValue, context),
-      )
-    } else {
+      const scrubbed = sanitizeGoogleRouteString(key, nestedValue, context)
+      if (scrubbed !== nestedValue && !setOwnDataValue(value, key, scrubbed))
+        result = UNCERTAIN_SCRUB_RESULT
+    } else if (
       scrubGoogleRouteData(nestedValue, context, depth + 1)
+      === UNCERTAIN_SCRUB_RESULT
+    ) {
+      result = UNCERTAIN_SCRUB_RESULT
     }
   }
+  return result
 }
 
 function addGoogleRouteValueParts(
@@ -398,26 +412,35 @@ function sensitiveSemanticHeaderName(key: string): string | undefined {
   return undefined
 }
 
-function ownDataEntries(
+function inspectOwnDataEntries(
   value: Record<string, unknown>,
-): Array<[string, unknown]> {
-  const entries: Array<[string, unknown]> = []
+): InspectionResult<Array<OwnDataEntry>> {
+  const entries: Array<OwnDataEntry> = []
   let keys: Array<string>
   try {
     keys = Object.keys(value)
   } catch {
-    return entries
+    return { complete: false, value: entries }
   }
   for (const key of keys) {
     try {
       const descriptor = Object.getOwnPropertyDescriptor(value, key)
-      if (!descriptor || !Object.hasOwn(descriptor, "value")) continue
-      entries.push([key, descriptor.value])
+      if (!descriptor) return { complete: false, value: entries }
+      if (!Object.hasOwn(descriptor, "value")) continue
+      entries.push({ key, value: descriptor.value })
     } catch {
-      continue
+      return { complete: false, value: entries }
     }
   }
-  return entries
+  return { complete: true, value: entries }
+}
+
+function ownDataEntries(
+  value: Record<string, unknown>,
+): Array<[string, unknown]> {
+  return inspectOwnDataEntries(value).value.map(
+    ({ key, value: entryValue }) => [key, entryValue],
+  )
 }
 
 function ownDataValue(value: Record<string, unknown>, key: string): unknown {
@@ -435,18 +458,20 @@ function setOwnDataValue(
   owner: Record<string, unknown>,
   key: string,
   value: unknown,
-): void {
+): boolean {
   try {
     const descriptor = Object.getOwnPropertyDescriptor(owner, key)
-    if (!descriptor || !Object.hasOwn(descriptor, "value")) return
+    if (!descriptor || !Object.hasOwn(descriptor, "value")) return false
     if (descriptor.writable) {
       Object.defineProperty(owner, key, { ...descriptor, value })
-      return
+      return true
     }
-    if (!descriptor.configurable) return
+    if (!descriptor.configurable) return Object.is(descriptor.value, value)
     Object.defineProperty(owner, key, { ...descriptor, value })
+    return true
   } catch {
     // Hostile telemetry values are ignored rather than invoked.
+    return false
   }
 }
 
@@ -455,17 +480,17 @@ function scrubHeaderContainer(
   value: unknown,
   seen: WeakSet<object>,
   depth = 0,
-): void {
-  if (!isRecord(value) || seen.has(value) || depth > SENTRY_SCRUB_MAX_DEPTH) {
-    return
-  }
+): ScrubResult {
+  if (!isRecord(value) || seen.has(value)) return SAFE_SCRUB_RESULT
+  if (depth > SENTRY_SCRUB_MAX_DEPTH) return UNCERTAIN_SCRUB_RESULT
   seen.add(value)
 
   if (Array.isArray(value)) {
-    for (let index = 0; index < value.length; index += 1) {
-      const descriptor = Object.getOwnPropertyDescriptor(value, String(index))
-      if (!descriptor || !Object.hasOwn(descriptor, "value")) continue
-      const entry: unknown = descriptor.value
+    const inspected = inspectOwnDataEntries(
+      value as unknown as Record<string, unknown>,
+    )
+    let result = inspected.complete ? SAFE_SCRUB_RESULT : UNCERTAIN_SCRUB_RESULT
+    for (const { value: entry } of inspected.value) {
       if (isHeaderTuple(entry)) {
         const headerName = ownDataValue(
           entry as unknown as Record<string, unknown>,
@@ -477,83 +502,173 @@ function scrubHeaderContainer(
           && isSensitiveHeader(headerName)
           && tupleDescriptor
           && Object.hasOwn(tupleDescriptor, "value")
-        ) {
-          setOwnDataValue(
+          && !setOwnDataValue(
             entry as unknown as Record<string, unknown>,
             "1",
             FILTERED_VALUE,
           )
-        }
+        )
+          result = UNCERTAIN_SCRUB_RESULT
         continue
       }
-      scrubHeaderContainer(entry, seen, depth + 1)
+      if (
+        scrubHeaderContainer(entry, seen, depth + 1) === UNCERTAIN_SCRUB_RESULT
+      )
+        result = UNCERTAIN_SCRUB_RESULT
     }
-    return
+    return result
   }
 
   const iteratorEntries = ownDataValue(value, "entries")
-  if (typeof iteratorEntries === "function") return
+  if (typeof iteratorEntries === "function") return SAFE_SCRUB_RESULT
 
-  for (const [key, nestedValue] of ownDataEntries(value)) {
+  const inspected = inspectOwnDataEntries(value)
+  let result = inspected.complete ? SAFE_SCRUB_RESULT : UNCERTAIN_SCRUB_RESULT
+  for (const { key, value: nestedValue } of inspected.value) {
     if (isSensitiveHeader(key)) {
-      setOwnDataValue(value, key, FILTERED_VALUE)
+      if (!setOwnDataValue(value, key, FILTERED_VALUE))
+        result = UNCERTAIN_SCRUB_RESULT
       continue
     }
-    if (isRecord(nestedValue))
-      scrubHeaderContainer(nestedValue, seen, depth + 1)
+    if (
+      isRecord(nestedValue)
+      && scrubHeaderContainer(nestedValue, seen, depth + 1)
+        === UNCERTAIN_SCRUB_RESULT
+    )
+      result = UNCERTAIN_SCRUB_RESULT
   }
+  return result
 }
 
-// eslint-disable-next-line max-params -- recursive depth bounds hostile telemetry
+// eslint-disable-next-line max-params, complexity -- recursive descriptor traversal is the privacy boundary
 function scrubNestedHeaders(
   value: unknown,
   seen: WeakSet<object> = new WeakSet<object>(),
   headerSeen: WeakSet<object> = new WeakSet<object>(),
   depth = 0,
-): void {
-  if (!isRecord(value) || seen.has(value) || depth > SENTRY_SCRUB_MAX_DEPTH) {
-    return
-  }
+): ScrubResult {
+  if (!isRecord(value) || seen.has(value)) return SAFE_SCRUB_RESULT
+  if (depth > SENTRY_SCRUB_MAX_DEPTH) return UNCERTAIN_SCRUB_RESULT
   seen.add(value)
 
   if (Array.isArray(value)) {
-    for (let index = 0; index < value.length; index += 1) {
-      const descriptor = Object.getOwnPropertyDescriptor(value, String(index))
-      if (!descriptor || !Object.hasOwn(descriptor, "value")) continue
-      scrubNestedHeaders(descriptor.value, seen, headerSeen, depth + 1)
+    const inspected = inspectOwnDataEntries(
+      value as unknown as Record<string, unknown>,
+    )
+    let result = inspected.complete ? SAFE_SCRUB_RESULT : UNCERTAIN_SCRUB_RESULT
+    for (const { value: nestedValue } of inspected.value) {
+      if (
+        scrubNestedHeaders(nestedValue, seen, headerSeen, depth + 1)
+        === UNCERTAIN_SCRUB_RESULT
+      )
+        result = UNCERTAIN_SCRUB_RESULT
     }
-    return
+    return result
   }
 
-  for (const [key, nestedValue] of ownDataEntries(value)) {
+  const inspected = inspectOwnDataEntries(value)
+  let result = inspected.complete ? SAFE_SCRUB_RESULT : UNCERTAIN_SCRUB_RESULT
+  for (const { key, value: nestedValue } of inspected.value) {
     const semanticHeaderName = sensitiveSemanticHeaderName(key)
     if (semanticHeaderName && isSensitiveHeader(semanticHeaderName)) {
-      setOwnDataValue(value, key, FILTERED_VALUE)
+      if (!setOwnDataValue(value, key, FILTERED_VALUE))
+        result = UNCERTAIN_SCRUB_RESULT
       continue
     }
     if (isHeaderContainerKey(key)) {
-      scrubHeaderContainer(nestedValue, headerSeen, depth + 1)
+      if (
+        scrubHeaderContainer(nestedValue, headerSeen, depth + 1)
+        === UNCERTAIN_SCRUB_RESULT
+      )
+        result = UNCERTAIN_SCRUB_RESULT
       continue
     }
-    scrubNestedHeaders(nestedValue, seen, headerSeen, depth + 1)
+    if (
+      scrubNestedHeaders(nestedValue, seen, headerSeen, depth + 1)
+      === UNCERTAIN_SCRUB_RESULT
+    )
+      result = UNCERTAIN_SCRUB_RESULT
   }
+  return result
 }
 
-function scrubSensitiveData<T>(event: T): T {
+function scrubSensitiveData<T>(event: T): T | null {
   if (isRecord(event)) {
-    scrubNestedHeaders(event)
-    scrubStatsigClientKeyData(event)
+    if (scrubNestedHeaders(event) === UNCERTAIN_SCRUB_RESULT) return null
+    if (
+      scrubStatsigClientKeyDataSafely(event, {
+        inheritedStatsigContext: false,
+        seen: new WeakMap<object, boolean>(),
+      }) === UNCERTAIN_SCRUB_RESULT
+    )
+      return null
     const googleRequestMethod = findGoogleRequestMethod(event)
-    if (googleRequestMethod) {
-      scrubGoogleRouteData(event, {
+    if (
+      googleRequestMethod
+      && scrubGoogleRouteData(event, {
         method: googleRequestMethod,
         privateRouteValues: findGoogleRouteValues(event, googleRequestMethod),
         seen: new WeakSet<object>(),
-      })
-    }
+      }) === UNCERTAIN_SCRUB_RESULT
+    )
+      return null
   }
 
   return event
+}
+
+function readOwnStructuralString(
+  span: Record<string, unknown>,
+  key: string,
+): string | undefined {
+  const value = ownDataValue(span, key)
+  return typeof value === "string" ? value : undefined
+}
+
+function readOwnStructuralNumber(
+  span: Record<string, unknown>,
+  key: string,
+): number | undefined {
+  const value = ownDataValue(span, key)
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined
+}
+
+/**
+ * The installed Sentry SDK does not support dropping spans from beforeSendSpan:
+ * a null result is ignored and the original span is emitted. On privacy
+ * uncertainty, return a minimal fresh span containing only primitive tracing
+ * structure. All descriptive data, attributes, measurements and links are
+ * omitted so no uninspected user value can survive.
+ */
+function createFailClosedSentrySpan(
+  span: Record<string, unknown>,
+): SentrySpanShape {
+  return {
+    data: {},
+    span_id: readOwnStructuralString(span, "span_id") ?? "0000000000000000",
+    start_timestamp: readOwnStructuralNumber(span, "start_timestamp") ?? 0,
+    trace_id:
+      readOwnStructuralString(span, "trace_id")
+      ?? "00000000000000000000000000000000",
+    ...(readOwnStructuralString(span, "op") && {
+      op: readOwnStructuralString(span, "op"),
+    }),
+    ...(readOwnStructuralString(span, "parent_span_id") && {
+      parent_span_id: readOwnStructuralString(span, "parent_span_id"),
+    }),
+    ...(readOwnStructuralString(span, "status") && {
+      status: readOwnStructuralString(span, "status"),
+    }),
+    ...(readOwnStructuralNumber(span, "timestamp") !== undefined && {
+      timestamp: readOwnStructuralNumber(span, "timestamp"),
+    }),
+  }
+}
+
+function scrubSensitiveSpanData(span: SpanJSON): SpanJSON {
+  const record = span as unknown as Record<string, unknown>
+  return (scrubSensitiveData(record)
+    ?? createFailClosedSentrySpan(record)) as unknown as SpanJSON
 }
 
 interface SentryRequestDiagnostics {
@@ -757,7 +872,7 @@ export function createSentryInitOptions(
       return scrubSensitiveData(event)
     },
     beforeSendSpan(span) {
-      return scrubSensitiveData(span)
+      return scrubSensitiveSpanData(span)
     },
     beforeSendLog(log) {
       return scrubSensitiveData(log)

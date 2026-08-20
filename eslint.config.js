@@ -62,7 +62,7 @@ export default config(
     // all send hooks and hostile nested header encodings.
     files: ["src/lib/sentry.ts"],
     rules: {
-      "max-lines": ["error", 1000],
+      "max-lines": ["error", 1100],
     },
   },
   {
