@@ -15,8 +15,16 @@ import type { ResponsesPayload } from "../src/services/copilot/create-responses"
 import type { ModelsResponse } from "../src/services/copilot/get-models"
 
 import { getGoogleRoutingContractRows } from "../src/lib/compatibility-contract"
+import {
+  clearLlmDebugLogs,
+  getLlmDebugLog,
+  listLlmDebugLogs,
+} from "../src/lib/llm-debug-log"
 import { setModelRedirectsForTest } from "../src/lib/model-redirect"
+import { getRoutingTelemetrySnapshot } from "../src/lib/routing-telemetry"
 import { state } from "../src/lib/state"
+import { tokenPool } from "../src/lib/token-pool"
+import { getUsageResponse, resetUsageForTest } from "../src/lib/usage-tracker"
 import { selectGoogleUpstreamEndpoint } from "../src/routes/google-ai/handler"
 import { server } from "../src/server"
 
@@ -265,6 +273,120 @@ test.each(["/v1beta/models", "/v1/models", "/models"] as const)(
     }
   },
 )
+
+test("keeps a multi-account Google model internal while ordinary routing diagnostics stay structural", async () => {
+  const privateModel = "multi-private-google-model"
+  const privateAction = "generateContent"
+  const accountId = 99_192
+  const model = structuredClone(responsesCapableModels.data[0])
+  model.id = privateModel
+  model.name = "Multi private Google model"
+  state.models = { object: "list", data: [model] }
+  state.isMultiToken = true
+  const account = tokenPool.addAccount(
+    "multi-private-google-github-token",
+    "individual",
+    accountId,
+  )
+  account.copilotToken = "multi-private-google-copilot-token"
+  account.models = new Set([privateModel])
+  account.modelsData = [model]
+  account.healthy = true
+  tokenPool.rebuildModelIndex()
+  clearLlmDebugLogs()
+  resetUsageForTest()
+  const usageBefore = getUsageResponse().lifetime as {
+    total_input_tokens: number
+    total_output_tokens: number
+    total_requests: number
+  }
+
+  const originalConsolaLevel = consola.level
+  const capturedConsola: Array<unknown> = []
+  const ordinaryReporter = {
+    log(logObject: unknown) {
+      capturedConsola.push(logObject)
+    },
+  }
+  const sentryReporterInput: Array<unknown> = []
+  const sentryReporter = Sentry.createConsolaReporter()
+  const sentryReporterLog = spyOn(sentryReporter, "log").mockImplementation(
+    (logObject) => {
+      sentryReporterInput.push(logObject)
+    },
+  )
+  consola.level = 5
+  consola.addReporter(ordinaryReporter)
+  consola.addReporter(sentryReporter)
+
+  try {
+    const response = await server.request(
+      `/v1/models/${privateModel}:${privateAction}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: "Hello" }] }],
+        }),
+      },
+    )
+    const diagnostics = JSON.stringify([capturedConsola, sentryReporterInput])
+    const telemetry = getRoutingTelemetrySnapshot({
+      accounts: tokenPool.getAllAccounts(),
+      multiToken: true,
+      window: "15m",
+    })
+
+    expect(response.status).toBe(200)
+    expect(lastPath).toBe("/responses")
+    expect(lastResponsesPayload?.model).toBe(privateModel)
+    expect(lastHeaders?.Authorization).toBe(
+      "Bearer multi-private-google-copilot-token",
+    )
+    const debugEntries = listLlmDebugLogs().entries
+    const debugDetails = debugEntries.map((entry) => getLlmDebugLog(entry.id))
+    expect(
+      debugDetails.some(
+        (entry) =>
+          entry?.request.path === "/responses"
+          && entry.request.body?.includes(privateModel),
+      ),
+    ).toBe(true)
+    expect(telemetry.models.some((entry) => entry.model === privateModel)).toBe(
+      true,
+    )
+    expect(
+      telemetry.accounts.find((entry) => entry.accountId === accountId)
+        ?.selected,
+    ).toBeGreaterThan(0)
+    const usageAfter = getUsageResponse().lifetime as {
+      total_input_tokens: number
+      total_output_tokens: number
+      total_requests: number
+    }
+    expect(usageAfter.total_input_tokens - usageBefore.total_input_tokens).toBe(
+      1,
+    )
+    expect(
+      usageAfter.total_output_tokens - usageBefore.total_output_tokens,
+    ).toBe(1)
+    expect(usageAfter.total_requests - usageBefore.total_requests).toBe(1)
+    expect(diagnostics).toContain(`[Account #${accountId}]`)
+    expect(diagnostics).toContain("/responses")
+    expect(diagnostics).toContain("session: default")
+    expect(diagnostics).not.toContain(privateModel)
+    expect(diagnostics).not.toContain(privateAction)
+  } finally {
+    consola.removeReporter(ordinaryReporter)
+    consola.removeReporter(sentryReporter)
+    sentryReporterLog.mockRestore()
+    consola.level = originalConsolaLevel
+    tokenPool.removeAccountForTest(accountId)
+    state.isMultiToken = false
+    clearLlmDebugLogs()
+    resetUsageForTest()
+  }
+})
 
 test("keeps Google non-default diagnostics free of route-derived models", async () => {
   const sourceModel = "private-google-source-marker"

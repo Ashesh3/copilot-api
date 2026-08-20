@@ -14,6 +14,7 @@ import {
   getClientSessionId,
   getLastUsedRoutedAccountId,
   setLastUsedRoutedAccountId,
+  shouldSuppressRequestModelDiagnostics,
 } from "~/lib/request-session"
 import { getRoutingAffinity } from "~/lib/routing-affinity"
 import {
@@ -33,6 +34,16 @@ import {
 
 const FAILOVER_STATUSES = new Set([401, 403, 429])
 const pinnedRoutedAccountStorage = new AsyncLocalStorage<number | undefined>()
+
+function routedModelDiagnostic(modelId: string): string {
+  return shouldSuppressRequestModelDiagnostics() ? "omitted" : modelId
+}
+
+function routedModelDiagnosticSuffix(modelId: string): string {
+  return shouldSuppressRequestModelDiagnostics() ? "" : (
+      ` for model "${modelId}"`
+    )
+}
 
 export interface RoutedAccountPin {
   accountId?: number
@@ -292,7 +303,7 @@ async function fetchWithFallbackAccount(
   const account = tokenPool.getFirstHealthyAccount()
   if (account) {
     consola.warn(
-      `Using Account #${account.id} as fallback for model "${context.modelId}"`,
+      `Using Account #${account.id} as fallback${routedModelDiagnosticSuffix(context.modelId)}`,
     )
     setLastUsedRoutedAccountId(account.id)
     if (context.recordSelection) {
@@ -661,14 +672,14 @@ export async function routedFetch(
     }
 
     consola.warn(
-      `No account found for model "${modelId}", falling back to default`,
+      `No account found${routedModelDiagnosticSuffix(modelId)}, falling back to default`,
     )
 
     return await fetchWithFallbackAccount(context)
   }
 
   consola.debug(
-    `[Account #${account.id}] ${path} (model: ${modelId}, session: ${affinityKey ? "sticky" : "default"})`,
+    `[Account #${account.id}] ${path} (model: ${routedModelDiagnostic(modelId)}, session: ${affinityKey ? "sticky" : "default"})`,
   )
   setLastUsedRoutedAccountId(account.id)
   if (shouldRecordSelection) {

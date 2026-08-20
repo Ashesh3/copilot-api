@@ -26,6 +26,7 @@ import {
   requestIdStorage,
   routedAccountStorage,
   routingTelemetryStorage,
+  runWithRequestDiagnostics,
 } from "./lib/request-session"
 import { transparentProxy } from "./lib/transparent-proxy"
 import { completionRoutes } from "./routes/chat-completions/route"
@@ -97,6 +98,10 @@ async function runWithRequestRoutingScopes<T>(
   affinity: RoutingAffinity | undefined,
   callback: () => Promise<T>,
 ): Promise<T> {
+  const runWithDiagnostics = async () =>
+    await runWithRequestDiagnostics(
+      async () => await runWithCopilotContractObservabilityScope(callback),
+    )
   return await runWithCopilotRequestAttribution(
     attribution,
     async () =>
@@ -105,14 +110,7 @@ async function runWithRequestRoutingScopes<T>(
         async () =>
           await copilotResponseHeadersStorage.run(
             {},
-            async () =>
-              await routedAccountStorage.run(
-                {},
-                async () =>
-                  await runWithCopilotContractObservabilityScope(
-                    async () => await callback(),
-                  ),
-              ),
+            async () => await routedAccountStorage.run({}, runWithDiagnostics),
           ),
       ),
   )

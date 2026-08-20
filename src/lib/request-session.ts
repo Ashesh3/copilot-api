@@ -18,6 +18,9 @@ export const quotaHeadersStorage = copilotResponseHeadersStorage
 export const routedAccountStorage = new AsyncLocalStorage<{
   lastUsedAccountId?: number
 }>()
+const requestDiagnosticStorage = new AsyncLocalStorage<{
+  suppressModel?: boolean
+}>()
 
 export interface RoutingTelemetryRequestState {
   sourceProtocol: string
@@ -62,6 +65,21 @@ export function getClientSessionId(): string | undefined {
 
 export function getRequestId(): string | undefined {
   return requestIdStorage.getStore()
+}
+
+export function shouldSuppressRequestModelDiagnostics(): boolean {
+  return requestDiagnosticStorage.getStore()?.suppressModel === true
+}
+
+/** Mark the current request so ordinary diagnostics omit route-derived models. */
+export function suppressRequestModelDiagnostics(): void {
+  const diagnostics = requestDiagnosticStorage.getStore()
+  if (diagnostics) diagnostics.suppressModel = true
+}
+
+/** Isolate diagnostic policy so it cannot bleed between concurrent requests. */
+export function runWithRequestDiagnostics<T>(callback: () => T): T {
+  return requestDiagnosticStorage.run({}, callback)
 }
 
 export function getCopilotResponseHeaders(): Record<string, string> {

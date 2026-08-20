@@ -26,6 +26,8 @@ import {
   getCopilotResponseHeaders,
   requestIdStorage,
   routedAccountStorage,
+  runWithRequestDiagnostics,
+  suppressRequestModelDiagnostics,
 } from "../src/lib/request-session"
 /* eslint-disable max-lines -- account-router integration variants share singleton fixtures */
 import { runWithRoutingAffinity } from "../src/lib/routing-affinity"
@@ -1262,6 +1264,32 @@ test("applies headerOptions when multi-token falls back with no matching account
     "X-Initiator": "agent",
     "Copilot-Vision-Request": "true",
   })
+})
+
+test("omits fallback model diagnostics only inside a suppressed request scope", async () => {
+  const modelId = "router-private-fallback-model"
+  registerAccount(10_212, "different-known-model", "healthy-fallback-token")
+  tokenPool.rebuildModelIndex()
+  queuedResults.push(new Response("{}", { status: 200 }))
+  const warnSpy = spyOn(consola, "warn")
+
+  try {
+    await runWithRequestDiagnostics(async () => {
+      suppressRequestModelDiagnostics()
+      await routedFetch("/responses", { method: "POST" }, { modelId })
+    })
+    const suppressedOutput = JSON.stringify(warnSpy.mock.calls)
+    expect(suppressedOutput).toContain("Using Account #10212 as fallback")
+    expect(suppressedOutput).not.toContain("for model")
+    expect(suppressedOutput).not.toContain(modelId)
+
+    warnSpy.mockClear()
+    queuedResults.push(new Response("{}", { status: 200 }))
+    await routedFetch("/responses", { method: "POST" }, { modelId })
+    expect(JSON.stringify(warnSpy.mock.calls)).toContain(modelId)
+  } finally {
+    warnSpy.mockRestore()
+  }
 })
 
 test("refreshes the fallback account for unknown models after a 401", async () => {

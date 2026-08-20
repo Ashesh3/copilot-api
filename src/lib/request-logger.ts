@@ -11,7 +11,10 @@ import {
   sanitizeRequestDiagnosticReference,
   shouldOmitRequestBodyFromDiagnostics,
 } from "./request-diagnostics"
-import { getRoutingTelemetryRequestState } from "./request-session"
+import {
+  getRoutingTelemetryRequestState,
+  suppressRequestModelDiagnostics,
+} from "./request-session"
 import { recordRoutingRequest } from "./routing-telemetry"
 import { applySentryRequestDiagnostics, getSentryModelName } from "./sentry"
 import { state } from "./state"
@@ -585,6 +588,9 @@ export function setRequestContext(
   const existing = c.get(REQUEST_CONTEXT_KEY) as RequestContext | undefined
   if (existing) {
     c.set(REQUEST_CONTEXT_KEY, { ...existing, ...ctx })
+    if (ctx.suppressModelDiagnostics === true) {
+      suppressRequestModelDiagnostics()
+    }
   }
 }
 
