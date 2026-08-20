@@ -147,6 +147,26 @@ test("adds reasoning defaults on the Google AI responses path", async () => {
   expect(lastResponsesPayload?.include).toContain("reasoning.encrypted_content")
 })
 
+test.each(["generateContent", "countTokens", "futureAction"])(
+  "treats Google %s as the current non-stream generation path",
+  async (action) => {
+    const response = await server.request(`/v1/models/gpt-4o-mini:${action}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: "Hello" }] }],
+        generationConfig: { maxOutputTokens: 32 },
+      }),
+    })
+
+    expect(response.status).toBe(200)
+    expect(response.headers.get("content-type")).toContain("application/json")
+    expect(lastPath).toBe("/responses")
+    expect(lastResponsesPayload?.stream).toBe(false)
+    expect(await response.json()).toHaveProperty("candidates")
+  },
+)
+
 test("routes Google googleSearch through Copilot native Responses web search", async () => {
   const response = await server.request(
     "/v1/models/gpt-4o-mini:generateContent",

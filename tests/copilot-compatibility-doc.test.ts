@@ -1,13 +1,39 @@
-import { expect, test } from "bun:test"
-import { readFile } from "node:fs/promises"
+import * as Sentry from "@sentry/bun"
+import { expect, spyOn, test } from "bun:test"
+import consola from "consola"
+import { unzipSync } from "fflate"
+import { Hono } from "hono"
+import fs, { readFile } from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
 
+import { createConfigExportZip } from "~/lib/config-export"
+import {
+  type CopilotContractEvent,
+  recordCopilotContractEvent,
+} from "~/lib/copilot-contract-observability"
+import { sessionTokenMatchesModel } from "~/lib/copilot-session-token"
 import {
   getModelEndpointSupport,
   selectCopilotEndpoint,
 } from "~/lib/endpoint-routing"
+import { HTTPError, forwardError } from "~/lib/error"
+import {
+  clearLlmDebugLogs,
+  getLlmDebugLog,
+  startLlmDebugLog,
+} from "~/lib/llm-debug-log"
+import { sanitizeHandlerLogArguments } from "~/lib/logger"
+import { state } from "~/lib/state"
 import { copilotControlPlaneRoutes } from "~/routes/copilot-control-plane/route"
+import {
+  createAnthropicStreamError,
+  forwardMessagesError,
+} from "~/routes/messages/error"
+import { emitResponsesFailureAsStream } from "~/routes/messages/web-search-helpers"
 import { server } from "~/server"
 import { COPILOT_API_VERSION } from "~/services/copilot/copilot-contract"
+import { sanitizeResponsesStreamEvent } from "~/services/copilot/create-responses"
 
 const documentPath = new URL(
   "../docs/copilot-api-compatibility.md",
@@ -63,16 +89,32 @@ const routeMatrix = [
   },
 ] as const
 
-const googleRouteMatrix = [
+const googleDocumentedRoutes = [
   "/v1beta/models/:model:generateContent",
   "/v1/models/:model:generateContent",
   "/models/:model:generateContent",
   "/v1beta/models/:model:streamGenerateContent",
   "/v1/models/:model:streamGenerateContent",
   "/models/:model:streamGenerateContent",
-  "/v1beta/models/:model:countTokens",
-  "/v1/models/:model:countTokens",
-  "/models/:model:countTokens",
+] as const
+
+const representativeForbiddenModelIds = [
+  "o1",
+  "o3-mini",
+  "codex-mini-latest",
+  "claude-3-7-sonnet-latest",
+  "claude-4-sonnet",
+  "gpt-4.1",
+  "gpt-*",
+] as const
+
+const genericModelPlaceholders = [
+  "model",
+  "models",
+  "model-id",
+  "MODEL_ID",
+  "requestedModel",
+  ":model",
 ] as const
 
 const normalizeWhitespace = (value: string): string =>
@@ -80,6 +122,407 @@ const normalizeWhitespace = (value: string): string =>
 
 function registeredRoutes(): Set<string> {
   return new Set(server.routes.map((route) => `${route.method} ${route.path}`))
+}
+
+function jwt(payload: unknown): string {
+  return `e30.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.c2ln`
+}
+
+function textTokens(value: string): Array<string> {
+  return value.match(/[A-Z0-9][\w.:*[\]-]*/gi) ?? []
+}
+
+function isStaticModelIdentifier(token: string): boolean {
+  return (
+    /^gpt-(?:\*|[a-z0-9][\w.:*[\]-]*)$/i.test(token)
+    || /^o\d(?:-[a-z0-9][\w.:*[\]-]*)?$/i.test(token)
+    || /^codex-[a-z0-9][\w.:*[\]-]*$/i.test(token)
+    || /^claude-(?:\d|sonnet|opus|haiku)[\w.:*[\]-]*$/i.test(token)
+    || /^gemini-\d[\w.:*[\]-]*$/i.test(token)
+  )
+}
+
+function staticModelIdentifiers(value: string): Array<string> {
+  return [
+    ...new Set(
+      textTokens(value).filter((token) => isStaticModelIdentifier(token)),
+    ),
+  ]
+}
+
+function sentences(value: string): Array<string> {
+  return normalizeWhitespace(value)
+    .split(/(?<=[.!?])\s+/)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean)
+}
+
+function blanketStreamClaims(value: string): Array<string> {
+  return sentences(value).filter((sentence) => {
+    const lower = sentence.toLowerCase()
+    const committed =
+      /after (?:http )?headers|post-commit|late stream|once (?:the )?(?:response|stream) (?:starts|begins)|following commitment/.test(
+        lower,
+      )
+    const failure = /failures?|errors?/.test(lower)
+    const universal =
+      /\b(?:all|always|every|invariably|necessarily|the source protocol)\b|without exception/.test(
+        lower,
+      )
+    const inBand =
+      /in-band|error event|event stream|sent (?:to|on) the (?:client|stream)|protocol event/.test(
+        lower,
+      )
+    return committed && failure && universal && inBand
+  })
+}
+
+function blanketTokenPrivacyClaims(value: string): Array<string> {
+  return sentences(value).filter((sentence) => {
+    const lower = sentence.toLowerCase()
+    const token = /session token|copilot-session-token/.test(lower)
+    const blanket =
+      /never (?:logged|captured|exposed|stored)|cannot appear|no .*diagnostic.*(?:captures?|contains?)/.test(
+        lower,
+      )
+    const scoped = /ordinary|outside llm debug|except|administrator-only/.test(
+      lower,
+    )
+    return token && blanket && !scoped
+  })
+}
+
+async function withTempDirectory<T>(
+  callback: (directory: string) => Promise<T>,
+): Promise<T> {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "compat-doc-"))
+  try {
+    return await callback(directory)
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true })
+  }
+}
+
+function failingNativeStream(path: string, privateMarker: string): Response {
+  const encoder = new TextEncoder()
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      cancel() {
+        if (timeout !== undefined) clearTimeout(timeout)
+      },
+      start(controller) {
+        const firstEvent =
+          path.endsWith("/chat/completions") ?
+            `data: ${JSON.stringify({
+              id: "chat-placeholder",
+              object: "chat.completion.chunk",
+              created: 1,
+              model: "model-placeholder",
+              choices: [
+                {
+                  index: 0,
+                  delta: { content: "partial-chat" },
+                  finish_reason: null,
+                },
+              ],
+            })}\n\n`
+          : `event: response.output_text.delta\ndata: ${JSON.stringify({
+              type: "response.output_text.delta",
+              sequence_number: 1,
+              item_id: "message-placeholder",
+              output_index: 0,
+              content_index: 0,
+              delta: "buffered-responses-delta",
+            })}\n\n`
+        controller.enqueue(encoder.encode(firstEvent))
+        timeout = setTimeout(
+          () => controller.error(new Error(privateMarker)),
+          25,
+        )
+      },
+    }),
+    { status: 200, headers: { "content-type": "text/event-stream" } },
+  )
+}
+
+async function probeThrownNativeStreamFailures(privateMarker: string): Promise<{
+  chatBody: string
+  responsesBody: string
+}> {
+  const originalFetch = globalThis.fetch
+  const originalState = {
+    accountType: state.accountType,
+    copilotToken: state.copilotToken,
+    githubToken: state.githubToken,
+    isMultiToken: state.isMultiToken,
+    manualApprove: state.manualApprove,
+    models: state.models,
+  }
+  const consoleError = spyOn(console, "error").mockImplementation(() => {})
+
+  state.accountType = "individual"
+  state.copilotToken = "token-placeholder"
+  state.githubToken = "token-placeholder"
+  state.isMultiToken = false
+  state.manualApprove = false
+  state.models = {
+    object: "list",
+    data: [
+      {
+        id: "model-placeholder",
+        name: "Model Placeholder",
+        object: "model",
+        preview: false,
+        vendor: "placeholder",
+        version: "1",
+        model_picker_enabled: true,
+        supported_endpoints: ["/chat/completions", "/responses"],
+        capabilities: {
+          family: "placeholder",
+          limits: { max_output_tokens: 1024 },
+          object: "model_capabilities",
+          supports: {},
+          tokenizer: "cl100k_base",
+          type: "chat",
+        },
+      },
+    ],
+  }
+  globalThis.fetch = ((url: string | URL | Request) => {
+    const rawUrl = typeof url === "string" || url instanceof URL ? url : url.url
+    return Promise.resolve(
+      failingNativeStream(new URL(rawUrl).pathname, privateMarker),
+    )
+  }) as typeof fetch
+
+  try {
+    const chat = await server.request("/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "model-placeholder",
+        messages: [{ role: "user", content: "hello" }],
+        stream: true,
+      }),
+    })
+    const responses = await server.request("/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "model-placeholder",
+        input: "hello",
+        stream: true,
+      }),
+    })
+    expect(chat.status).toBe(200)
+    expect(responses.status).toBe(200)
+    return {
+      chatBody: await chat.text(),
+      responsesBody: await responses.text(),
+    }
+  } finally {
+    ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
+    Object.assign(state, originalState)
+    consoleError.mockRestore()
+  }
+}
+
+async function deriveCompatibilityMatrix(): Promise<{
+  errors: Record<string, string>
+  privacy: Record<string, string>
+  streams: Record<string, string>
+}> {
+  const privateMarker = "compatibility-private-marker"
+  const anthropicStreamError = createAnthropicStreamError(
+    new Error(privateMarker),
+  )
+  expect(JSON.stringify(anthropicStreamError)).not.toContain(privateMarker)
+
+  const syntheticEvents: Array<{ data: string; event?: string }> = []
+  await emitResponsesFailureAsStream(
+    {
+      writeSSE: (event) => {
+        syntheticEvents.push(event)
+        return Promise.resolve()
+      },
+    },
+    { model: "model-placeholder", responseId: "response-placeholder" },
+  )
+
+  const terminal = sanitizeResponsesStreamEvent({
+    event: "response.failed",
+    data: JSON.stringify({
+      type: "response.failed",
+      response: {
+        status: "failed",
+        error: { message: privateMarker },
+      },
+    }),
+  })
+  expect(terminal.data).not.toContain(privateMarker)
+
+  const nativeFailures = await probeThrownNativeStreamFailures(privateMarker)
+  expect(nativeFailures.chatBody).toContain("partial-chat")
+  expect(nativeFailures.chatBody).not.toContain("event: error")
+  expect(nativeFailures.chatBody).not.toContain(privateMarker)
+  expect(nativeFailures.responsesBody).not.toContain("buffered-responses-delta")
+  expect(nativeFailures.responsesBody).not.toContain("event: error")
+  expect(nativeFailures.responsesBody).not.toContain(privateMarker)
+
+  clearLlmDebugLogs()
+  const token = jwt({ selected_model: "model-placeholder" })
+  try {
+    const debugId = startLlmDebugLog({
+      method: "POST",
+      path: "/responses",
+      requestBody: "{}",
+      requestHeaders: { "Copilot-Session-Token": token },
+      url: "https://example.test/responses",
+    })
+    expect(
+      getLlmDebugLog(debugId)?.request.headers["Copilot-Session-Token"],
+    ).toBe(token)
+  } finally {
+    clearLlmDebugLogs()
+  }
+
+  expect(
+    sanitizeHandlerLogArguments([{ "Copilot-Session-Token": token }]),
+  ).toEqual([{ "Copilot-Session-Token": "[REDACTED]" }])
+
+  const debugLog = spyOn(consola, "debug")
+  const breadcrumb = spyOn(Sentry, "addBreadcrumb").mockImplementation(
+    () => undefined,
+  )
+  try {
+    recordCopilotContractEvent({
+      kind: "endpoint_route",
+      source: "responses",
+      target: "/responses",
+      translated: false,
+      reason: "native",
+      "Copilot-Session-Token": token,
+    } as unknown as CopilotContractEvent)
+    expect(
+      JSON.stringify([debugLog.mock.calls, breadcrumb.mock.calls]),
+    ).not.toContain(token)
+  } finally {
+    debugLog.mockRestore()
+    breadcrumb.mockRestore()
+  }
+
+  await withTempDirectory(async (directory) => {
+    await fs.writeFile(
+      path.join(directory, "config.json"),
+      JSON.stringify({ "Copilot-Session-Token": token }),
+    )
+    const archive = await createConfigExportZip({ appDir: directory })
+    const config = new TextDecoder().decode(
+      unzipSync(archive.zip)["config.json"],
+    )
+    expect(config).toContain("[REDACTED]")
+    expect(config).not.toContain(token)
+  })
+
+  expect(
+    sessionTokenMatchesModel({
+      token,
+      requestedModel: "model-placeholder",
+      finalModel: "model-placeholder",
+      modelWasRedirected: false,
+    }),
+  ).toBe(true)
+  expect(
+    sessionTokenMatchesModel({
+      token,
+      requestedModel: "model-placeholder",
+      finalModel: "different-placeholder",
+      modelWasRedirected: false,
+    }),
+  ).toBe(false)
+
+  const error = new HTTPError(
+    `private upstream error ${token}`,
+    Response.json(
+      { error: { message: `${privateMarker} ${token}` } },
+      { status: 500 },
+    ),
+  )
+  const errorLog = spyOn(consola, "error")
+  const captureException = spyOn(Sentry, "captureException").mockImplementation(
+    () => "event-id",
+  )
+  const openAIApp = new Hono()
+  openAIApp.get("/error", async (c) => await forwardError(c, error))
+  const messagesApp = new Hono()
+  messagesApp.get("/error", async (c) => await forwardMessagesError(c, error))
+  try {
+    const openAIBody = (await (
+      await openAIApp.request("/error")
+    ).json()) as Record<string, unknown>
+    const messagesBody = (await (
+      await messagesApp.request("/error")
+    ).json()) as Record<string, unknown>
+    expect(openAIBody).toEqual({
+      error: { message: "Upstream request failed", type: "error" },
+    })
+    expect(messagesBody).toEqual({
+      type: "error",
+      error: {
+        type: "api_error",
+        message: "The Copilot Messages request failed.",
+      },
+    })
+    expect(
+      JSON.stringify([
+        openAIBody,
+        messagesBody,
+        errorLog.mock.calls,
+        captureException.mock.calls,
+      ]),
+    ).not.toContain(token)
+    expect(JSON.stringify([openAIBody, messagesBody])).not.toContain(
+      privateMarker,
+    )
+  } finally {
+    errorLog.mockRestore()
+    captureException.mockRestore()
+  }
+
+  return {
+    errors: {
+      "Chat and Responses HTTP":
+        "OpenAI/Copilot envelope with fixed safe message",
+      "Messages and count-tokens HTTP":
+        "Anthropic envelope with fixed safe message",
+    },
+    privacy: {
+      "Administrator-only LLM Debug": "exact forwarded token may be captured",
+      "Ordinary handler logs": "session token value is redacted",
+      "Configuration export": "token-keyed values are redacted",
+      "Inference forwarding": "only a matching unredirected model receives it",
+    },
+    streams: {
+      "Messages handled failure": "safe Anthropic error event",
+      "Synthetic Responses-from-Messages failure": "error then response.failed",
+      "Native Responses terminal event": "sanitized protocol terminal event",
+      "Thrown native Chat transport failure":
+        "written chunks then close without synthesized error event",
+      "Thrown native Responses transport failure":
+        "buffered unwritten chunks may be absent when the stream closes",
+    },
+  }
+}
+
+function expectMatrixRows(
+  document: string,
+  matrix: Record<string, string>,
+): void {
+  const normalized = normalizeWhitespace(document)
+  for (const [surface, behavior] of Object.entries(matrix)) {
+    expect(normalized).toContain(`| ${surface} | ${behavior} |`)
+  }
 }
 
 test("documents the registered route matrix and reviewed endpoint authority", async () => {
@@ -104,9 +547,10 @@ test("documents the registered route matrix and reviewed endpoint authority", as
     expect(text).toContain(`\`${route.method} ${route.path}\``)
   }
 
-  for (const route of googleRouteMatrix) {
+  for (const route of googleDocumentedRoutes) {
     expect(text).toContain(`\`POST ${route}\``)
   }
+  expect(text).not.toContain(":countTokens")
 
   const legacySupport = getModelEndpointSupport({})
   expect(legacySupport).toMatchObject({
@@ -150,34 +594,42 @@ test("documents the registered route matrix and reviewed endpoint authority", as
   expect(text).toContain("endpoint_translation_unsupported")
 })
 
-test("documents precise field, error, streaming, and session-token boundaries", async () => {
-  const text = normalizeWhitespace(await readFile(documentPath, "utf8"))
+test("documents behavior-derived stream, privacy, and error matrices", async () => {
+  const document = await readFile(documentPath, "utf8")
+  const matrix = await deriveCompatibilityMatrix()
 
-  for (const required of [
-    "Unknown top-level fields are omitted at the final upstream boundary; nested data inside accepted fields is preserved unless a documented normalization applies.",
-    "The native body uses a clone-and-denylist boundary",
-    "An explicit modern `tool_choice` takes precedence over deprecated `function_call`.",
-    "Chat streams end with `[DONE]`.",
-    "Responses streams do not add `[DONE]`.",
-    "Messages streams remove the trailing bare `[DONE]`",
-    "Messages streams emit a safe Anthropic `error` event for handled failures after headers are committed.",
-    "The synthetic Responses-from-Messages stream emits a protocol-native failed event for handled post-commit failures.",
-    "Native Chat and native Responses stream paths may instead record the failure and close after headers are committed without synthesizing an in-band error event.",
-    "Events written before a late stream failure remain visible to the client.",
-    "Ordinary logs, telemetry, Sentry, and configuration exports never expose `Copilot-Session-Token`.",
-    "Authorized administrator-only LLM Debug may contain the token when it captured a forwarded request.",
-    "Last audited: 2026-08-17",
-  ]) {
-    expect(text).toContain(required)
-  }
+  expectMatrixRows(document, matrix.streams)
+  expectMatrixRows(document, matrix.privacy)
+  expectMatrixRows(document, matrix.errors)
+})
 
-  for (const contradictory of [
-    "After HTTP headers are committed, failures are emitted in-band using the source protocol's error event.",
-    "It is never persisted or logged.",
-    "Ordinary client errors, logs, telemetry, and Sentry events do not expose request bodies, prompts, credentials, session tokens",
+test("rejects adversarial blanket stream and session-token claims", async () => {
+  const document = await readFile(documentPath, "utf8")
+
+  expect(blanketStreamClaims(document)).toEqual([])
+  expect(blanketTokenPrivacyClaims(document)).toEqual([])
+
+  for (const claim of [
+    "After headers are committed, all failures use an in-band error event.",
+    "Every late stream error is sent through the source protocol error event.",
+    "Post-commit failures always become in-band protocol errors.",
+    "Following commitment, stream failures invariably appear in the event stream.",
+    "Once the response starts, errors are sent to the client as protocol events without exception.",
   ]) {
-    expect(text).not.toContain(contradictory)
+    expect(blanketStreamClaims(claim)).toEqual([claim])
   }
+  for (const claim of [
+    "The session token is never logged or captured.",
+    "Copilot-Session-Token cannot appear in diagnostics.",
+    "No diagnostic surface ever captures the session token.",
+  ]) {
+    expect(blanketTokenPrivacyClaims(claim)).toEqual([claim])
+  }
+  expect(
+    blanketTokenPrivacyClaims(
+      "Ordinary logs never expose the session token; administrator-only LLM Debug may capture it.",
+    ),
+  ).toEqual([])
 })
 
 test("links the compatibility report from README", async () => {
@@ -187,7 +639,27 @@ test("links the compatibility report from README", async () => {
   )
 })
 
-test("contains no private paths, credentials, hosts, raw data, or static model IDs", async () => {
+test("detects static model IDs across prose and code while allowing placeholders", async () => {
+  const document = await readFile(documentPath, "utf8")
+
+  expect(staticModelIdentifiers(document)).toEqual([])
+  for (const model of representativeForbiddenModelIds) {
+    for (const snippet of [
+      `Use ${model} for this request.`,
+      `Use \`${model}\` for this request.`,
+      `\`\`\`text\n${model}\n\`\`\``,
+    ]) {
+      expect(staticModelIdentifiers(snippet)).toContain(model)
+    }
+  }
+  for (const placeholder of genericModelPlaceholders) {
+    expect(
+      staticModelIdentifiers(`Use ${placeholder} from discovery.`),
+    ).toEqual([])
+  }
+})
+
+test("contains no private paths, credentials, hosts, or raw data", async () => {
   const text = await readFile(documentPath, "utf8")
 
   for (const forbidden of [
@@ -210,8 +682,5 @@ test("contains no private paths, credentials, hosts, raw data, or static model I
   expect(text).not.toMatch(/\/(?:home|root|Users)\/[\w.-]+\//)
   expect(text).not.toMatch(
     /https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?/,
-  )
-  expect(text).not.toMatch(
-    /`?\b(?:gpt-(?:\d[\w.:-]*|o\d[\w.:-]*)|claude-(?:sonnet|opus|haiku)-[\w.:-]+|gemini-\d[\w.:-]*)`?/i,
   )
 })

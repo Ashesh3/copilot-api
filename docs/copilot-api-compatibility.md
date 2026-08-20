@@ -46,7 +46,6 @@ authentication model is documented in the main README.
 | Search compatibility | `POST /v1/alpha/search` | `POST /alpha/search` |
 | Google-style generation | `POST /v1beta/models/:model:generateContent` | `POST /v1/models/:model:generateContent`; `POST /models/:model:generateContent` |
 | Google-style streaming | `POST /v1beta/models/:model:streamGenerateContent` | `POST /v1/models/:model:streamGenerateContent`; `POST /models/:model:streamGenerateContent` |
-| Google-style token count | `POST /v1beta/models/:model:countTokens` | `POST /v1/models/:model:countTokens`; `POST /models/:model:countTokens` |
 | Model session | `POST /models/session` | Opaque model-session passthrough |
 | Model-session intent | `POST /models/session/intent` | Requires a valid `Copilot-Session-Token` header |
 | Auto selection | `POST /auto` | Account and feature availability remain upstream-authoritative |
@@ -181,12 +180,23 @@ Responses streams do not add `[DONE]`. Messages streams preserve Anthropic
 event names and ordering. Messages streams remove the trailing bare `[DONE]`
 that the upstream compatibility layer may append after `message_stop`.
 
-Messages streams emit a safe Anthropic `error` event for handled failures after
-headers are committed. The synthetic Responses-from-Messages stream emits a
-protocol-native failed event for handled post-commit failures. Native Chat and
-native Responses stream paths may instead record the failure and close after
-headers are committed without synthesizing an in-band error event. Events
-written before a late stream failure remain visible to the client.
+Post-commit behavior is path- and failure-class-specific:
+
+| Surface | Behavior |
+| --- | --- |
+| Messages handled failure | safe Anthropic error event |
+| Synthetic Responses-from-Messages failure | error then response.failed |
+| Native Responses terminal event | sanitized protocol terminal event |
+| Thrown native Chat transport failure | written chunks then close without synthesized error event |
+| Thrown native Responses transport failure | buffered unwritten chunks may be absent when the stream closes |
+
+Messages uses its safe error adapter for handled failures. The synthetic
+Responses-from-Messages path emits both its safe error and failed terminal
+events. Native Responses sanitizes terminal error events supplied by upstream.
+A thrown transport or runtime failure after commitment on native Chat or native
+Responses may instead be recorded while the stream closes without a newly
+synthesized error event. Only events already written downstream remain visible;
+buffered but unwritten events are not promised as partial output.
 
 A logical routed call shares a maximum of three upstream sends across transport
 recovery, account reinitialization, eligible failover, and narrow protocol
@@ -239,6 +249,13 @@ Debug may contain the token when it captured a forwarded request. Inference
 forwards it only when its bounded model claims match the final, unredirected
 requested model; mismatched, malformed, or redirected tokens are not forwarded.
 
+| Surface | Session-token behavior |
+| --- | --- |
+| Administrator-only LLM Debug | exact forwarded token may be captured |
+| Ordinary handler logs | session token value is redacted |
+| Configuration export | token-keyed values are redacted |
+| Inference forwarding | only a matching unredirected model receives it |
+
 ## Intentional gateway extensions
 
 The gateway intentionally provides behavior beyond a transparent upstream
@@ -267,6 +284,11 @@ and count-tokens errors use an Anthropic-shaped envelope. HTTP status,
 error classes are preserved when available. Quota exhaustion maps to `402`,
 deprecated client versions to `466`, and unknown upstream bodies or messages to
 fixed local text.
+
+| HTTP surface | Error behavior |
+| --- | --- |
+| Chat and Responses HTTP | OpenAI/Copilot envelope with fixed safe message |
+| Messages and count-tokens HTTP | Anthropic envelope with fixed safe message |
 
 Outside LLM Debug, ordinary client errors, logs, telemetry, Sentry events, and
 configuration exports do not expose request bodies, prompts, credentials,
