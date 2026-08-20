@@ -90,15 +90,7 @@ export function validateAnthropicRequestHeaderOptions(options: {
 function sanitizeAnthropicHeaderValue(
   value: string | null | undefined,
 ): string | undefined {
-  const sanitized = sanitizeCopilotHeaderValue(value)
-  if (!sanitized) return undefined
-  for (const character of sanitized) {
-    const code = character.codePointAt(0)
-    if (code === undefined || code <= 0x1f || (code >= 0x7f && code <= 0x9f)) {
-      return undefined
-    }
-  }
-  return sanitized
+  return sanitizeCopilotHeaderValue(value)
 }
 
 function validateHeader(options: {

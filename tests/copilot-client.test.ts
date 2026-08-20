@@ -329,6 +329,40 @@ test("drops invalid typed Copilot header options", () => {
   expect(headers["X-Model-Provider-Preference"]).toBeUndefined()
 })
 
+test("drops every C0 and C1 control from every typed Copilot header", () => {
+  const controlCodePoints = [
+    ...Array.from({ length: 0x20 }, (_, codePoint) => codePoint),
+    ...Array.from({ length: 0x21 }, (_, offset) => 0x7f + offset),
+  ]
+
+  for (const codePoint of controlCodePoints) {
+    const control = String.fromCodePoint(codePoint)
+    for (const invalid of [
+      (value: string) => `safe${control}${value}`,
+      (value: string) => `${control}${value}`,
+      (value: string) => `${value}${control}`,
+    ]) {
+      const headers = copilotHeaders({
+        anthropicBeta: invalid("beta-feature"),
+        anthropicVersion: invalid("2026-08"),
+        attribution: {
+          agentTaskId: invalid("task-id"),
+          parentAgentId: invalid("parent-id"),
+        },
+        copilotSessionToken: invalid("session-token"),
+        modelProviderPreference: invalid("provider-preference"),
+      })
+
+      expect(headers["Anthropic-Beta"]).toBeUndefined()
+      expect(headers["anthropic-version"]).toBeUndefined()
+      expect(headers["Copilot-Session-Token"]).toBeUndefined()
+      expect(headers["X-Model-Provider-Preference"]).toBeUndefined()
+      expect(headers["X-Agent-Task-Id"]).not.toContain(control)
+      expect(headers["X-Parent-Agent-Id"]).toBeUndefined()
+    }
+  }
+})
+
 test("derives restart-stable upstream headers from request affinity", () => {
   state.sessionId = "before-restart"
   const first = runWithRoutingAffinity(
