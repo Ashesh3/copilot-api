@@ -258,10 +258,16 @@ conversation-to-account map. Endpoint fallback does not authorize moving
 encrypted or signed history to another account. Eligibility always comes from
 the account's raw current model catalog plus operator routing policy.
 
-In multi-account mode, a supported affinity identity is required to guarantee
-that separate control-plane and inference calls choose the same account. Calls
-without affinity retain conservative first-eligible selection and do not
-promise session-token continuity. No session-token-to-account map is stored.
+In multi-account mode, affinity is necessary but not sufficient for session
+continuity. Separate control-plane and inference calls first use the normal
+deterministic affinity selector. A session token is then forwarded only when
+its bounded issuer subject matches the selected account's bounded current
+issuer assignment. Health, eligibility, account membership, token format, or
+configuration-order changes can therefore lose exact session continuity, but
+they cannot cause cross-account replay: inference omits the token and continues
+ordinarily, while token-required control-plane calls reject locally. Calls
+without affinity retain conservative first-eligible selection and make the
+same issuer-proof check. No session-token-to-account map is stored.
 
 `POST /models/session` creates or refreshes a model-scoped session and may
 receive an existing `Copilot-Session-Token`. `POST /models/session/intent`
@@ -272,9 +278,14 @@ operations are routed account-aware; they are not broadcast to every account.
 The session token is an opaque secret, not gateway authentication, and the
 gateway never persists it. Ordinary logs, telemetry, Sentry, and configuration
 exports never expose `Copilot-Session-Token`. Authorized administrator-only LLM
-Debug may contain the token when it captured a forwarded request. Inference
-forwards it only when its bounded model claims match the final, unredirected
-requested model; mismatched, malformed, or redirected tokens are not forwarded.
+Debug may contain the token only when it captured a request that was actually
+forwarded. Inference requires both bounded model matching and, in multi-account
+mode, bounded issuer proof for the selected account. A mismatch, unknown proof,
+malformed token, or model redirect prevents forwarding. Refresh and intent
+calls with a token require the same issuer proof and otherwise return a fixed
+secret-free local continuity error without an upstream send. Single-token mode
+retains the existing model-scoped forwarding rules because no cross-account
+replay is possible.
 
 <!-- compatibility-contract:session-token-privacy:start -->
 | Surface | Behavior |
@@ -282,7 +293,8 @@ requested model; mismatched, malformed, or redirected tokens are not forwarded.
 | Administrator-only LLM Debug | exact forwarded token may be captured |
 | Ordinary handler logs | session token value is redacted |
 | Configuration export | token-keyed values are redacted |
-| Inference forwarding | only a matching unredirected model receives it |
+| Inference forwarding | multi-account mode also requires issuer proof for the selected account |
+| Token-required control plane | issuer mismatch or unknown proof is rejected locally without upstream send |
 <!-- compatibility-contract:session-token-privacy:end -->
 
 ## Intentional gateway extensions

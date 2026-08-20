@@ -28,6 +28,12 @@ const originalIsMultiToken = state.isMultiToken
 const capturedRequests: Array<{ init?: RequestInit; url: string }> = []
 const queuedResponses: Array<Response> = []
 
+function sessionToken(subject: string): string {
+  return `e30.${Buffer.from(JSON.stringify({ sub: subject })).toString(
+    "base64url",
+  )}.c2ln`
+}
+
 function requestHeaders(index = capturedRequests.length - 1): Headers {
   return new Headers(capturedRequests[index]?.init?.headers)
 }
@@ -93,6 +99,14 @@ function registerAccount(
   account.healthy = true
   account.models = new Set(models)
   tokenPool.rebuildModelIndex()
+}
+
+const continuityErrorBody = {
+  error: {
+    code: "session_account_continuity_error",
+    message: "The Copilot session token does not match the selected account.",
+    type: "session_affinity_error",
+  },
 }
 
 function findHealthyAffinity(accountId: number): string {
@@ -614,27 +628,22 @@ test("rejects invalid Auto and intent payloads without upstream sends", async ()
   expect(capturedRequests).toHaveLength(0)
 })
 
-test("routes by affinity rather than the opaque session token", async () => {
+test("routes by affinity and forwards token-required calls only on issuer continuity", async () => {
   state.isMultiToken = true
-  registerAccount(14_001, "account-one-token", ["gpt-current"])
-  registerAccount(14_002, "account-two-token", ["gpt-current"])
+  registerAccount(14_001, "tid=issuer-one;exp=1900000000", ["gpt-current"])
+  registerAccount(14_002, "tid=issuer-two;exp=1900000000", ["gpt-current"])
   const firstAffinity = findHealthyAffinity(14_001)
   const secondAffinity = findHealthyAffinity(14_002)
-  queuedResponses.push(
-    Response.json({ call: 1 }),
-    Response.json({ call: 2 }),
-    Response.json({ call: 3 }),
-  )
+  queuedResponses.push(Response.json({ call: 1 }), Response.json({ call: 2 }))
 
-  for (const [affinity, sessionToken] of [
-    [firstAffinity, "opaque-one"],
-    [firstAffinity, "opaque-two"],
-    [secondAffinity, "opaque-one"],
+  for (const [affinity, token] of [
+    [firstAffinity, sessionToken("issuer-one")],
+    [secondAffinity, sessionToken("issuer-two")],
   ] as const) {
     const response = await server.request("/models/session", {
       method: "POST",
       headers: {
-        "Copilot-Session-Token": sessionToken,
+        "Copilot-Session-Token": token,
         "X-Client-Session-Id": affinity,
       },
     })
@@ -646,9 +655,94 @@ test("routes by affinity rather than the opaque session token", async () => {
       new Headers(request.init?.headers).get("authorization"),
     ),
   ).toEqual([
-    "Bearer account-one-token",
-    "Bearer account-one-token",
-    "Bearer account-two-token",
+    "Bearer tid=issuer-one;exp=1900000000",
+    "Bearer tid=issuer-two;exp=1900000000",
+  ])
+})
+
+test.each([
+  {
+    name: "model-session refresh",
+    path: "/models/session",
+    body: undefined,
+  },
+  {
+    name: "model-session intent",
+    path: "/models/session/intent",
+    body: JSON.stringify({
+      prompt: "refactor",
+      available_models: ["gpt-current"],
+    }),
+  },
+] as const)(
+  "$name rejects mismatched or unknown issuer proof locally without an upstream send",
+  async ({ body, path }) => {
+    state.isMultiToken = true
+    registerAccount(14_001, "tid=issuer-one;exp=1900000000", ["gpt-current"])
+    registerAccount(14_002, "tid=issuer-two;exp=1900000000", ["gpt-current"])
+    const affinity = findHealthyAffinity(14_001)
+
+    for (const token of [
+      sessionToken("issuer-two"),
+      `e30.${Buffer.from(JSON.stringify({ selected_model: "gpt-current" })).toString("base64url")}.c2ln`,
+      "malformed-session-token",
+    ]) {
+      const response = await server.request(path, {
+        method: "POST",
+        headers: {
+          ...(body ? { "content-type": "application/json" } : {}),
+          "Copilot-Session-Token": token,
+          "X-Client-Session-Id": affinity,
+        },
+        ...(body ? { body } : {}),
+      })
+      expect(response.status).toBe(409)
+      const responseText = await response.text()
+      expect(JSON.parse(responseText) as unknown).toEqual(continuityErrorBody)
+      expect(responseText).not.toContain(token)
+      expect(responseText).not.toContain("issuer-one")
+      expect(responseText).not.toContain("issuer-two")
+    }
+
+    expect(capturedRequests).toHaveLength(0)
+  },
+)
+
+test("tokenless model-session creation and Auto remain ordinary affinity-selected calls", async () => {
+  state.isMultiToken = true
+  registerAccount(14_001, "tid=issuer-one;exp=1900000000", ["gpt-current"])
+  registerAccount(14_002, "tid=issuer-two;exp=1900000000", ["gpt-current"])
+  const affinity = findHealthyAffinity(14_001)
+  queuedResponses.push(
+    Response.json({ session_token: sessionToken("issuer-one") }),
+    Response.json({ selected_model: "gpt-current" }),
+  )
+
+  const session = await server.request("/models/session", {
+    method: "POST",
+    headers: { "X-Client-Session-Id": affinity },
+  })
+  expect(session.status).toBe(200)
+  const auto = await server.request("/auto", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "X-Client-Session-Id": affinity,
+    },
+    body: JSON.stringify({ prompt: "choose" }),
+  })
+  expect(auto.status).toBe(200)
+  expect(capturedRequests.map(({ url }) => new URL(url).pathname)).toEqual([
+    "/models/session",
+    "/auto",
+  ])
+  expect(
+    capturedRequests.map((request) =>
+      new Headers(request.init?.headers).get("authorization"),
+    ),
+  ).toEqual([
+    "Bearer tid=issuer-one;exp=1900000000",
+    "Bearer tid=issuer-one;exp=1900000000",
   ])
 })
 

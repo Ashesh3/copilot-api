@@ -52,7 +52,13 @@ export const SESSION_TOKEN_PRIVACY_CONTRACT = [
   },
   {
     surface: "Inference forwarding",
-    behavior: "only a matching unredirected model receives it",
+    behavior:
+      "multi-account mode also requires issuer proof for the selected account",
+  },
+  {
+    surface: "Token-required control plane",
+    behavior:
+      "issuer mismatch or unknown proof is rejected locally without upstream send",
   },
 ] as const satisfies ReadonlyArray<CompatibilityContractRow>
 

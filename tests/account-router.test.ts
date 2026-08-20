@@ -371,7 +371,10 @@ test("routes control-plane policy through raw advertised model membership", asyn
 })
 
 test("forwards typed control-plane body, session token, and abort signal", async () => {
-  registerAccount(13_011, "model-a", "control-plane-token")
+  const matchingSessionToken = `e30.${Buffer.from(
+    JSON.stringify({ sub: "control-plane-issuer" }),
+  ).toString("base64url")}.c2ln`
+  registerAccount(13_011, "model-a", "tid=control-plane-issuer;exp=1900000000")
   tokenPool.rebuildModelIndex()
   const controller = new AbortController()
   queuedResults.push(Response.json({ session: "created" }))
@@ -381,7 +384,7 @@ test("forwards typed control-plane body, session token, and abort signal", async
     async () =>
       await routedControlPlaneFetch({
         body: { auto_mode: { model_hints: ["auto"] } },
-        copilotSessionToken: "opaque-session-secret",
+        copilotSessionToken: matchingSessionToken,
         path: "/models/session",
         signal: controller.signal,
       }),
@@ -398,7 +401,7 @@ test("forwards typed control-plane body, session token, and abort signal", async
     new Headers(capturedRequests[0]?.init?.headers).get(
       "copilot-session-token",
     ),
-  ).toBe("opaque-session-secret")
+  ).toBe(matchingSessionToken)
 })
 
 test("returns local 503 without sending when no account advertises a policy model", async () => {
@@ -423,8 +426,8 @@ test("returns local 503 without sending when no account advertises a policy mode
 })
 
 test("reinitializes a selected control-plane account without cross-account failover", async () => {
-  registerAccount(13_031, "model-a", "expired-control-plane-token")
-  registerAccount(13_032, "model-a", "alternate-control-plane-token")
+  registerAccount(13_031, "model-a", "tid=control-plane-issuer;exp=expired")
+  registerAccount(13_032, "model-a", "tid=alternate-issuer;exp=current")
   tokenPool.rebuildModelIndex()
   const affinityKey = Array.from(
     { length: 1000 },
@@ -437,7 +440,7 @@ test("reinitializes a selected control-plane account without cross-account failo
     throw new TypeError("Expected reinitialization affinity key")
   queuedResults.push(
     new Response("Unauthorized", { status: 401 }),
-    copilotTokenResponse("fresh-control-plane-token"),
+    copilotTokenResponse("tid=control-plane-issuer;exp=fresh"),
     modelsResponse(["model-a"]),
     Response.json({ refreshed: true }),
   )
@@ -446,7 +449,9 @@ test("reinitializes a selected control-plane account without cross-account failo
     { key: affinityKey, source: "copilot_session" },
     async () =>
       await routedControlPlaneFetch({
-        copilotSessionToken: "opaque-session-secret",
+        copilotSessionToken: `e30.${Buffer.from(
+          JSON.stringify({ sub: "control-plane-issuer" }),
+        ).toString("base64url")}.c2ln`,
         path: "/models/session",
       }),
   )
@@ -454,11 +459,60 @@ test("reinitializes a selected control-plane account without cross-account failo
   expect(response.status).toBe(200)
   expect(account?.id).toBe(13_031)
   expect(llmAuthorizationHeaders()).toEqual([
-    "Bearer expired-control-plane-token",
-    "Bearer fresh-control-plane-token",
+    "Bearer tid=control-plane-issuer;exp=expired",
+    "Bearer tid=control-plane-issuer;exp=fresh",
   ])
   expect(llmAuthorizationHeaders()).not.toContain(
-    "Bearer alternate-control-plane-token",
+    "Bearer tid=alternate-issuer;exp=current",
+  )
+})
+
+test("rejects a control-plane resend when refresh changes the selected account issuer", async () => {
+  const matchingSessionToken = `e30.${Buffer.from(
+    JSON.stringify({ sub: "original-issuer" }),
+  ).toString("base64url")}.c2ln`
+  registerAccount(13_041, "model-a", "tid=original-issuer;exp=expired")
+  registerAccount(13_042, "model-a", "tid=alternate-issuer;exp=current")
+  tokenPool.rebuildModelIndex()
+  const affinityKey = Array.from(
+    { length: 1000 },
+    (_, index) => `control-plane-changed-issuer-${index}`,
+  ).find(
+    (candidate) =>
+      tokenPool.getHealthyAccountBySession(candidate)?.id === 13_041,
+  )
+  if (!affinityKey) throw new TypeError("Expected changed-issuer affinity")
+  queuedResults.push(
+    new Response("Unauthorized", { status: 401 }),
+    copilotTokenResponse("tid=new-issuer;exp=fresh"),
+    modelsResponse(["model-a"]),
+  )
+
+  const result = await runWithRoutingAffinity(
+    { key: affinityKey, source: "copilot_session" },
+    async () =>
+      await routedControlPlaneFetch({
+        copilotSessionToken: matchingSessionToken,
+        path: "/models/session",
+      }),
+  )
+
+  expect(result.response.status).toBe(409)
+  expect(result.localError?.clientBody).toEqual({
+    error: {
+      code: "session_account_continuity_error",
+      message: "The Copilot session token does not match the selected account.",
+      type: "session_affinity_error",
+    },
+  })
+  expect(llmAuthorizationHeaders()).toEqual([
+    "Bearer tid=original-issuer;exp=expired",
+  ])
+  expect(llmAuthorizationHeaders()).not.toContain(
+    "Bearer tid=new-issuer;exp=fresh",
+  )
+  expect(llmAuthorizationHeaders()).not.toContain(
+    "Bearer tid=alternate-issuer;exp=current",
   )
 })
 

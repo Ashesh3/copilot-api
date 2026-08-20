@@ -1,7 +1,9 @@
 import { expect, test } from "bun:test"
 
 import {
+  inspectCopilotBearerTokenIssuer,
   inspectCopilotSessionToken,
+  sessionTokenMatchesAccount,
   sessionTokenMatchesModel,
 } from "~/lib/copilot-session-token"
 
@@ -40,7 +42,129 @@ test("reads only bounded model-binding hints from an opaque session token", () =
   expect(inspectCopilotSessionToken(token)).toEqual({
     selectedModel: "gpt-current",
     availableModels: ["gpt-current", "claude-current"],
+    issuerSubject: "must-not-expose",
   })
+})
+
+test("retains one bounded issuer subject without treating it as authorization", () => {
+  expect(
+    inspectCopilotSessionToken(
+      jwt({ selected_model: "gpt-current", sub: "issuer-subject" }),
+    ),
+  ).toEqual({
+    selectedModel: "gpt-current",
+    availableModels: [],
+    issuerSubject: "issuer-subject",
+  })
+  expect(inspectCopilotSessionToken(jwt({ sub: "issuer-only" }))).toEqual({
+    availableModels: [],
+    issuerSubject: "issuer-only",
+  })
+})
+
+test("ignores unusable issuer subjects without changing model-only behavior", () => {
+  const duplicatePayload = Buffer.from(
+    '{"selected_model":"gpt-current","sub":"first","sub":"second"}',
+  ).toString("base64url")
+  const duplicateToken = `e30.${duplicatePayload}.c2ln`
+  expect(inspectCopilotSessionToken(duplicateToken)).toEqual({
+    selectedModel: "gpt-current",
+    availableModels: [],
+  })
+  expect(
+    sessionTokenMatchesModel({
+      token: duplicateToken,
+      requestedModel: "gpt-current",
+      finalModel: "gpt-current",
+      modelWasRedirected: false,
+    }),
+  ).toBe(true)
+  expect(
+    sessionTokenMatchesAccount({
+      accountToken: "tid=second;exp=1900000000",
+      sessionToken: duplicateToken,
+    }),
+  ).toBe(false)
+
+  for (const sub of [
+    "",
+    "issuer\u0000subject",
+    "issuer subject",
+    "issuer;subject",
+    "x".repeat(513),
+    42,
+  ]) {
+    expect(
+      inspectCopilotSessionToken(jwt({ selected_model: "gpt-current", sub })),
+    ).toEqual({
+      selectedModel: "gpt-current",
+      availableModels: [],
+    })
+  }
+})
+
+test("parses exactly one bounded tid assignment from a Copilot bearer token", () => {
+  expect(
+    inspectCopilotBearerTokenIssuer(
+      "exp=1900000000;tid=issuer-subject;sku=eligible;chat=1",
+    ),
+  ).toBe("issuer-subject")
+  expect(inspectCopilotBearerTokenIssuer("tid=issuer-subject")).toBe(
+    "issuer-subject",
+  )
+})
+
+test("rejects absent, duplicate, empty, hostile, oversized, and ambiguous tid assignments", () => {
+  const invalidTokens = [
+    "exp=1900000000;sku=eligible",
+    "tid=first;tid=second",
+    "tid=",
+    "tid=issuer\u0000subject;exp=1",
+    "tid=issuer subject;exp=1",
+    "tid=issuer%2Fsubject;exp=1",
+    `tid=${"x".repeat(513)};exp=1`,
+    `tid=issuer;blob=${"x".repeat(16 * 1024)}`,
+    "tid=issuer;;exp=1",
+    "tid=issuer;malformed",
+    "tid=issuer=ambiguous;exp=1",
+    "tid=issuer;note=contains whitespace",
+    "tid=issuer;note=contains\u007fcontrol",
+    "TID=issuer;exp=1",
+    "tid=issuer;exp=1;exp=2",
+    "tid=issuer;Upper=1",
+  ]
+
+  for (const token of invalidTokens) {
+    expect(inspectCopilotBearerTokenIssuer(token)).toBeUndefined()
+  }
+})
+
+test("matches session and account issuer proof only by exact bounded equality", () => {
+  const token = jwt({ selected_model: "gpt-current", sub: "issuer-a" })
+  expect(
+    sessionTokenMatchesAccount({
+      accountToken: "tid=issuer-a;exp=1900000000",
+      sessionToken: token,
+    }),
+  ).toBe(true)
+  expect(
+    sessionTokenMatchesAccount({
+      accountToken: "tid=issuer-b;exp=1900000000",
+      sessionToken: token,
+    }),
+  ).toBe(false)
+  expect(
+    sessionTokenMatchesAccount({
+      accountToken: "exp=1900000000",
+      sessionToken: token,
+    }),
+  ).toBe(false)
+  expect(
+    sessionTokenMatchesAccount({
+      accountToken: "tid=issuer-a;exp=1900000000",
+      sessionToken: jwt({ selected_model: "gpt-current" }),
+    }),
+  ).toBe(false)
 })
 
 test("accepts either selected_model or available_models as a model binding", () => {

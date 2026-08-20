@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- endpoint authority and token continuity share singleton route fixtures */
 import {
   afterAll,
   afterEach,
@@ -17,6 +18,11 @@ import {
   selectRoutedModel,
 } from "~/lib/account-router"
 import { LocalHTTPError } from "~/lib/error"
+import {
+  clearLlmDebugLogs,
+  getLlmDebugLog,
+  listLlmDebugLogs,
+} from "~/lib/llm-debug-log"
 import { setModelRedirectsForTest } from "~/lib/model-redirect"
 import { setModelSettingsForTest } from "~/lib/model-settings"
 import { state } from "~/lib/state"
@@ -32,6 +38,19 @@ const upstreamRequests: Array<{
   authorization: string | null
   path: string
 }> = []
+const upstreamSessionTokens: Array<{
+  path: string
+  token: string | null
+}> = []
+
+function sessionToken(options: { modelId: string; subject?: string }): string {
+  return `e30.${Buffer.from(
+    JSON.stringify({
+      selected_model: options.modelId,
+      ...(options.subject ? { sub: options.subject } : {}),
+    }),
+  ).toString("base64url")}.c2ln`
+}
 
 function toRequest(url: string | URL | Request, init?: RequestInit): Request {
   if (url instanceof Request) return new Request(url, init)
@@ -185,6 +204,10 @@ const fetchMock = mock((url: string | URL | Request, init?: RequestInit) => {
       headers: { "content-type": "image/png" },
     })
   }
+  upstreamSessionTokens.push({
+    path,
+    token: request.headers.get("copilot-session-token"),
+  })
 
   const queued = queuedFetchResults.shift()
   if (queued) return queued
@@ -212,9 +235,11 @@ afterAll(() => {
 
 beforeEach(() => {
   upstreamRequests.length = 0
+  upstreamSessionTokens.length = 0
   queuedFetchResults.length = 0
   onAttachmentFetch = undefined
   fetchMock.mockClear()
+  clearLlmDebugLogs()
   state.accountType = "individual"
   state.copilotToken = "single-token-fallback"
   state.githubToken = "github-token"
@@ -223,6 +248,357 @@ beforeEach(() => {
   setModelRedirectsForTest([])
   setModelSettingsForTest([])
 })
+
+test.each([
+  {
+    path: "/v1/chat/completions",
+    upstreamPath: "/chat/completions",
+    body: (modelId: string) => ({
+      model: modelId,
+      messages: [{ role: "user", content: "hello" }],
+    }),
+  },
+  {
+    path: "/v1/responses",
+    upstreamPath: "/responses",
+    body: (modelId: string) => ({ model: modelId, input: "hello" }),
+  },
+  {
+    path: "/v1/messages",
+    upstreamPath: "/v1/messages",
+    body: (modelId: string) => ({
+      model: modelId,
+      max_tokens: 16,
+      messages: [{ role: "user", content: "hello" }],
+    }),
+  },
+] as const)(
+  "$path forwards a model-matched session token only to its issuer-matched selected account",
+  async ({ body, path, upstreamPath }) => {
+    const modelId = `session-continuity-${upstreamPath.replaceAll("/", "-")}`
+    registerAccount({
+      accountId: 52_401,
+      endpoints: [upstreamPath],
+      modelId,
+      token: "tid=issuer-a;exp=1900000000",
+    })
+    registerAccount({
+      accountId: 52_402,
+      endpoints: [upstreamPath],
+      modelId,
+      token: "tid=issuer-b;exp=1900000000",
+    })
+    tokenPool.rebuildModelIndex()
+    state.models = tokenPool.getAllModels()
+    const affinityKey = Array.from(
+      { length: 10_000 },
+      (_, index) => `session-continuity-${index}`,
+    ).find(
+      (candidate) =>
+        tokenPool.getAccountForModelBySession(modelId, candidate)?.id
+        === 52_401,
+    )
+    if (!affinityKey) throw new TypeError("Expected issuer affinity")
+    const token = sessionToken({ modelId, subject: "issuer-a" })
+
+    const response = await server.request(path, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "copilot-session-token": token,
+        "x-client-session-id": affinityKey,
+      },
+      body: JSON.stringify(body(modelId)),
+    })
+
+    expect(response.status).toBe(200)
+    expect(upstreamSessionTokens).toEqual([{ path: upstreamPath, token }])
+    const debugEntry = getLlmDebugLog(
+      listLlmDebugLogs().entries.find((entry) => entry.path === upstreamPath)
+        ?.id ?? "",
+    )
+    expect(debugEntry?.request.headers["Copilot-Session-Token"]).toBe(token)
+  },
+)
+
+test("omits a session issued by account A when eligibility moves inference to account B", async () => {
+  const modelId = "session-continuity-eligibility-change"
+  const accountA = registerAccount({
+    accountId: 52_401,
+    endpoints: ["/responses"],
+    modelId,
+    token: "tid=issuer-a;exp=1900000000",
+  })
+  registerAccount({
+    accountId: 52_402,
+    endpoints: ["/responses"],
+    modelId,
+    token: "tid=issuer-b;exp=1900000000",
+  })
+  tokenPool.rebuildModelIndex()
+  state.models = tokenPool.getAllModels()
+  const affinityKey = Array.from(
+    { length: 10_000 },
+    (_, index) => `session-issuance-${index}`,
+  ).find(
+    (candidate) =>
+      tokenPool.getHealthyAccountBySession(candidate)?.id === 52_401,
+  )
+  if (!affinityKey) throw new TypeError("Expected account A affinity")
+  const issuedToken = sessionToken({ modelId, subject: "issuer-a" })
+  queuedFetchResults.push(Response.json({ session_token: issuedToken }))
+
+  const sessionResponse = await server.request("/models/session", {
+    method: "POST",
+    headers: { "x-client-session-id": affinityKey },
+  })
+  expect(sessionResponse.status).toBe(200)
+  expect(await sessionResponse.json()).toEqual({
+    session_token: issuedToken,
+  })
+  expect(upstreamRequests[0]).toEqual({
+    authorization: "Bearer tid=issuer-a;exp=1900000000",
+    path: "/models/session",
+  })
+
+  accountA.models.clear()
+  tokenPool.rebuildModelIndex()
+  upstreamSessionTokens.length = 0
+
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "copilot-session-token": issuedToken,
+      "x-client-session-id": affinityKey,
+    },
+    body: JSON.stringify({ model: modelId, input: "hello" }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(upstreamRequests.at(-1)).toEqual({
+    authorization: "Bearer tid=issuer-b;exp=1900000000",
+    path: "/responses",
+  })
+  expect(upstreamSessionTokens).toEqual([{ path: "/responses", token: null }])
+  for (const entry of listLlmDebugLogs().entries) {
+    expect(JSON.stringify(getLlmDebugLog(entry.id))).not.toContain(issuedToken)
+  }
+})
+
+test("fails closed when the issuer becomes unhealthy", async () => {
+  const modelId = "session-continuity-issuer-unhealthy"
+  const accountA = registerAccount({
+    accountId: 52_401,
+    endpoints: ["/responses"],
+    modelId,
+    token: "tid=issuer-a;exp=1900000000",
+  })
+  const accountB = registerAccount({
+    accountId: 52_402,
+    endpoints: ["/responses"],
+    modelId,
+    token: "tid=issuer-b;exp=1900000000",
+  })
+  tokenPool.rebuildModelIndex()
+  state.models = tokenPool.getAllModels()
+  const affinityKey = Array.from(
+    { length: 20_000 },
+    (_, index) => `session-change-${index}`,
+  ).find(
+    (candidate) =>
+      tokenPool.getAccountForModelBySession(modelId, candidate)?.id
+      === accountA.id,
+  )
+  if (!affinityKey) throw new TypeError("Expected issuer affinity")
+  const token = sessionToken({ modelId, subject: "issuer-a" })
+  tokenPool.markUnhealthy(accountA)
+  expect(accountB.healthy).toBe(true)
+  state.models = tokenPool.getAllModels()
+
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "copilot-session-token": token,
+      "x-client-session-id": affinityKey,
+    },
+    body: JSON.stringify({ model: modelId, input: "hello" }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(upstreamSessionTokens).toEqual([{ path: "/responses", token: null }])
+})
+
+test("fails closed when adding an account changes the affinity winner", async () => {
+  const modelId = "session-continuity-account-addition"
+  const accountA = registerAccount({
+    accountId: 52_401,
+    endpoints: ["/responses"],
+    modelId,
+    token: "tid=issuer-a;exp=1900000000",
+  })
+  registerAccount({
+    accountId: 52_402,
+    endpoints: ["/responses"],
+    modelId,
+    token: "tid=issuer-b;exp=1900000000",
+  })
+  tokenPool.rebuildModelIndex()
+  const initialCandidates = Array.from(
+    { length: 20_000 },
+    (_, index) => `session-addition-${index}`,
+  ).filter(
+    (candidate) =>
+      tokenPool.getAccountForModelBySession(modelId, candidate)?.id
+      === accountA.id,
+  )
+  registerAccount({
+    accountId: 52_403,
+    endpoints: ["/responses"],
+    modelId,
+    token: "tid=issuer-c;exp=1900000000",
+  })
+  tokenPool.rebuildModelIndex()
+  const affinityKey = initialCandidates.find(
+    (candidate) =>
+      tokenPool.getAccountForModelBySession(modelId, candidate)?.id
+      !== accountA.id,
+  )
+  if (!affinityKey) throw new TypeError("Expected changed affinity winner")
+  state.models = tokenPool.getAllModels()
+  const token = sessionToken({ modelId, subject: "issuer-a" })
+
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "copilot-session-token": token,
+      "x-client-session-id": affinityKey,
+    },
+    body: JSON.stringify({ model: modelId, input: "hello" }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(upstreamSessionTokens).toEqual([{ path: "/responses", token: null }])
+})
+
+test("fails closed after a no-affinity account-order change", async () => {
+  const modelId = "session-continuity-account-order"
+  const accountA = registerAccount({
+    accountId: 52_401,
+    endpoints: ["/responses"],
+    modelId,
+    token: "tid=issuer-a;exp=1900000000",
+  })
+  registerAccount({
+    accountId: 52_402,
+    endpoints: ["/responses"],
+    modelId,
+    token: "tid=issuer-b;exp=1900000000",
+  })
+  tokenPool.rebuildModelIndex()
+  expect(tokenPool.getHealthyAccountBySession()?.id).toBe(accountA.id)
+  const token = sessionToken({ modelId, subject: "issuer-a" })
+
+  tokenPool.removeAccountForTest(accountA.id)
+  registerAccount({
+    accountId: 52_401,
+    endpoints: ["/responses"],
+    modelId,
+    token: "tid=issuer-a;exp=1900000000",
+  })
+  tokenPool.rebuildModelIndex()
+  state.models = tokenPool.getAllModels()
+  expect(tokenPool.getAccountForModelBySession(modelId)?.id).toBe(52_402)
+
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "copilot-session-token": token,
+    },
+    body: JSON.stringify({ model: modelId, input: "hello" }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(upstreamSessionTokens).toEqual([{ path: "/responses", token: null }])
+})
+
+test("pins an unidentified forwarded session token instead of failing over to another issuer", async () => {
+  const modelId = "session-continuity-unidentified-failover"
+  registerAccount({
+    accountId: 52_401,
+    endpoints: ["/chat/completions"],
+    modelId,
+    token: "tid=issuer-a;exp=1900000000",
+  })
+  registerAccount({
+    accountId: 52_402,
+    endpoints: ["/chat/completions"],
+    modelId,
+    token: "tid=issuer-b;exp=1900000000",
+  })
+  tokenPool.rebuildModelIndex()
+  state.models = tokenPool.getAllModels()
+  const token = sessionToken({ modelId, subject: "issuer-a" })
+  queuedFetchResults.push(new Response("forbidden", { status: 403 }))
+
+  const response = await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "copilot-session-token": token,
+    },
+    body: JSON.stringify({
+      model: modelId,
+      messages: [{ role: "user", content: "hello" }],
+    }),
+  })
+
+  expect(response.status).toBe(403)
+  expect(upstreamSessionTokens).toEqual([{ path: "/chat/completions", token }])
+  expect(upstreamRequests).toEqual([
+    {
+      authorization: "Bearer tid=issuer-a;exp=1900000000",
+      path: "/chat/completions",
+    },
+  ])
+})
+
+test.each([
+  "exp=1900000000",
+  "tid=issuer-a;tid=issuer-a",
+  "tid=issuer-a=ambiguous;exp=1900000000",
+] as const)(
+  "omits a model-matched token when the selected account issuer is unprovable: %s",
+  async (accountToken) => {
+    const modelId = "session-continuity-unprovable-account"
+    registerAccount({
+      accountId: 52_401,
+      endpoints: ["/responses"],
+      modelId,
+      token: accountToken,
+    })
+    tokenPool.rebuildModelIndex()
+    state.models = tokenPool.getAllModels()
+
+    const response = await server.request("/v1/responses", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "copilot-session-token": sessionToken({
+          modelId,
+          subject: "issuer-a",
+        }),
+      },
+      body: JSON.stringify({ model: modelId, input: "hello" }),
+    })
+
+    expect(response.status).toBe(200)
+    expect(upstreamSessionTokens).toEqual([{ path: "/responses", token: null }])
+  },
+)
 
 afterEach(() => {
   for (const accountId of testAccountIds) {

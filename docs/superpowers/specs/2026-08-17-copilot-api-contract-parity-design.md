@@ -616,11 +616,15 @@ clients:
 These routes use the same configured integration ID, API version, request ID,
 safe header context, and deterministic account affinity as inference.
 
-In multi-account mode, callers must supply a supported affinity identity to
-guarantee that a returned model-scoped session token is reused against the
-same account. Without affinity, the gateway retains first-eligible routing but
-does not promise cross-request session-token continuity. No token-to-account
-map is stored.
+In multi-account mode, affinity is necessary but not sufficient for reusing a
+returned model-scoped session token. The normal deterministic affinity selector
+runs first. The token is forwarded only when bounded issuer proof in the token
+matches the selected account's bounded current issuer assignment. On mismatch
+or unknown proof, inference omits the token and continues ordinarily, while
+token-required refresh and intent calls reject locally without an upstream
+send. Health, eligibility, account membership, or configuration changes may
+therefore lose exact continuity but cannot cause cross-account replay. No
+token-to-account map is stored.
 
 `Copilot-Session-Token` is forwarded only on these control-plane and matching
 inference requests. It is never logged, returned through dashboard config, or

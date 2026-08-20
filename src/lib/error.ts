@@ -319,6 +319,7 @@ const SAFE_LOCAL_ERROR_CODES = new Set([
   "request_too_large",
   "responses_payload_too_large",
   "server_error",
+  "session_account_continuity_error",
   "session_account_rejected",
   "unsupported_value",
   "web_search_limit_exceeded",

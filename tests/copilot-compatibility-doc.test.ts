@@ -18,7 +18,10 @@ import {
   type CopilotContractEvent,
   recordCopilotContractEvent,
 } from "~/lib/copilot-contract-observability"
-import { sessionTokenMatchesModel } from "~/lib/copilot-session-token"
+import {
+  sessionTokenMatchesAccount,
+  sessionTokenMatchesModel,
+} from "~/lib/copilot-session-token"
 import {
   getModelEndpointSupport,
   selectCopilotEndpoint,
@@ -452,6 +455,22 @@ async function deriveCompatibilityMatrix(): Promise<{
       requestedModel: "model-placeholder",
       finalModel: "different-placeholder",
       modelWasRedirected: false,
+    }),
+  ).toBe(false)
+  const issuerToken = jwt({
+    selected_model: "model-placeholder",
+    sub: "issuer-placeholder",
+  })
+  expect(
+    sessionTokenMatchesAccount({
+      accountToken: "tid=issuer-placeholder;exp=1900000000",
+      sessionToken: issuerToken,
+    }),
+  ).toBe(true)
+  expect(
+    sessionTokenMatchesAccount({
+      accountToken: "tid=other-placeholder;exp=1900000000",
+      sessionToken: issuerToken,
     }),
   ).toBe(false)
 

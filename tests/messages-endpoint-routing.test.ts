@@ -1287,6 +1287,60 @@ test("native web-search iterations emit one final metadata event", async () => {
   }
 })
 
+test("native web-search follow-ups keep an issuer-matched session token on one account", async () => {
+  installModel({ supported_endpoints: ["/v1/messages"] })
+  state.isMultiToken = true
+  registerAccount(93_001, "tid=web-issuer;exp=1900000000")
+  registerAccount(93_002, "tid=other-issuer;exp=1900000000")
+  tokenPool.rebuildModelIndex()
+  const token = `e30.${Buffer.from(
+    JSON.stringify({ selected_model: "route-model", sub: "web-issuer" }),
+  ).toString("base64url")}.c2ln`
+  queuedMessagesResults.push(
+    Response.json({
+      id: "msg_search_token",
+      type: "message",
+      role: "assistant",
+      model: "route-model",
+      content: [
+        {
+          type: "tool_use",
+          id: "toolu_search_token",
+          name: "web_search",
+          input: { query: "current facts" },
+        },
+      ],
+      stop_reason: "tool_use",
+      stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    }),
+    nativeSuccess("done"),
+  )
+
+  const response = await postMessages(
+    {
+      tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 2 }],
+    },
+    { "copilot-session-token": token },
+  )
+
+  expect(response.status).toBe(200)
+  const attempts = upstreamPaths.flatMap((path, index) =>
+    path === "/v1/messages" ? [index] : [],
+  )
+  expect(
+    attempts.map((index) =>
+      upstreamHeaders[index]?.get("copilot-session-token"),
+    ),
+  ).toEqual([token, token])
+  expect(
+    attempts.map((index) => upstreamHeaders[index]?.get("authorization")),
+  ).toEqual([
+    "Bearer tid=web-issuer;exp=1900000000",
+    "Bearer tid=web-issuer;exp=1900000000",
+  ])
+})
+
 test("pins native web-search follow-up to the account selected by failover", async () => {
   installModel({ supported_endpoints: ["/v1/messages"] })
   state.isMultiToken = true
