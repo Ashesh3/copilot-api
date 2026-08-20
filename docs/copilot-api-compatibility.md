@@ -44,9 +44,9 @@ authentication model is documented in the main README.
 | Anthropic token count | `POST /v1/messages/count_tokens` | No prefix-free alias |
 | Embeddings | `POST /v1/embeddings` | `POST /embeddings` |
 | Search compatibility | `POST /v1/alpha/search` | `POST /alpha/search` |
-| Google-style generation | `POST /v1beta/models/:model:generateContent` | Also under `/v1/models` and `/models` |
-| Google-style streaming | `POST /v1beta/models/:model:streamGenerateContent` | Also under `/v1/models` and `/models` |
-| Google-style token count | `POST /v1beta/models/:model:countTokens` | Also under `/v1/models` and `/models` |
+| Google-style generation | `POST /v1beta/models/:model:generateContent` | `POST /v1/models/:model:generateContent`; `POST /models/:model:generateContent` |
+| Google-style streaming | `POST /v1beta/models/:model:streamGenerateContent` | `POST /v1/models/:model:streamGenerateContent`; `POST /models/:model:streamGenerateContent` |
+| Google-style token count | `POST /v1beta/models/:model:countTokens` | `POST /v1/models/:model:countTokens`; `POST /models/:model:countTokens` |
 | Model session | `POST /models/session` | Opaque model-session passthrough |
 | Model-session intent | `POST /models/session/intent` | Requires a valid `Copilot-Session-Token` header |
 | Auto selection | `POST /auto` | Account and feature availability remain upstream-authoritative |
@@ -181,12 +181,17 @@ Responses streams do not add `[DONE]`. Messages streams preserve Anthropic
 event names and ordering. Messages streams remove the trailing bare `[DONE]`
 that the upstream compatibility layer may append after `message_stop`.
 
-After HTTP headers are committed, failures are emitted in-band using the
-source protocol's error event. Any partial output already emitted remains
-visible. A logical routed call shares a maximum of three upstream sends across
-transport recovery, account reinitialization, eligible failover, and narrow
-protocol recovery. Deterministic validation failures are not retried, and a
-stream is not replayed after substantive output.
+Messages streams emit a safe Anthropic `error` event for handled failures after
+headers are committed. The synthetic Responses-from-Messages stream emits a
+protocol-native failed event for handled post-commit failures. Native Chat and
+native Responses stream paths may instead record the failure and close after
+headers are committed without synthesizing an in-band error event. Events
+written before a late stream failure remain visible to the client.
+
+A logical routed call shares a maximum of three upstream sends across transport
+recovery, account reinitialization, eligible failover, and narrow protocol
+recovery. Deterministic validation failures are not retried, and a stream is not
+replayed after substantive output.
 
 The Responses WebSocket accepts JSON text frames with
 `type: "response.create"`. Binary frames, invalid JSON, unsupported message
@@ -227,10 +232,12 @@ requires that header. `POST /auto` accepts its typed selection body but remains
 subject to upstream account and feature availability. Model policy and session
 operations are routed account-aware; they are not broadcast to every account.
 
-The session token is an opaque secret, not gateway authentication. It is never
-persisted or logged. Inference forwards it only when its bounded model claims
-match the final, unredirected requested model; mismatched, malformed, or
-redirected tokens are not forwarded.
+The session token is an opaque secret, not gateway authentication, and the
+gateway never persists it. Ordinary logs, telemetry, Sentry, and configuration
+exports never expose `Copilot-Session-Token`. Authorized administrator-only LLM
+Debug may contain the token when it captured a forwarded request. Inference
+forwards it only when its bounded model claims match the final, unredirected
+requested model; mismatched, malformed, or redirected tokens are not forwarded.
 
 ## Intentional gateway extensions
 
@@ -261,15 +268,17 @@ error classes are preserved when available. Quota exhaustion maps to `402`,
 deprecated client versions to `466`, and unknown upstream bodies or messages to
 fixed local text.
 
-Ordinary client errors, logs, telemetry, and Sentry events do not expose request
-bodies, prompts, credentials, session tokens, beta-header contents, attachment
-URLs, encrypted reasoning, or unreviewed upstream error bodies.
+Outside LLM Debug, ordinary client errors, logs, telemetry, Sentry events, and
+configuration exports do not expose request bodies, prompts, credentials,
+session tokens, beta-header contents, attachment URLs, encrypted reasoning, or
+unreviewed upstream error bodies.
 
 Administrator-only LLM Debug is the deliberate exception. It keeps exact
 short-lived request and response captures for authorized diagnosis and replay.
-It is process-local, expires after ten minutes, and must be treated as
+It may therefore contain forwarded credentials, including a session token. It
+is process-local, expires after ten minutes, and must be treated as
 credential-bearing material. This exception does not relax any ordinary
-logging or client-error boundary.
+logging, telemetry, Sentry, configuration-export, or client-error boundary.
 
 ## Verification matrix and last-audited date
 
