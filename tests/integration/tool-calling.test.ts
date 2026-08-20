@@ -2,6 +2,7 @@ import { describe, test, expect, beforeAll } from "bun:test"
 
 import { state } from "~/lib/state"
 
+import { runMessagesToolErrorFlow } from "./messages-tool-error-flow"
 import {
   initializeTestState,
   postJSON,
@@ -513,55 +514,21 @@ describe("Tool calling: Messages - tool_choice & errors", () => {
   test(
     "tool result with is_error: true",
     async () => {
-      const res1 = await postJSON("/v1/messages", {
-        model: getResponsesCapableModel(),
-        messages: [{ role: "user", content: "What's the weather in Sydney?" }],
-        tools: [ANTHROPIC_WEATHER_TOOL],
-        tool_choice: { type: "any" },
-        max_tokens: 200,
-        stream: false,
+      const result = await runMessagesToolErrorFlow({
+        models: state.models?.data ?? [],
+        tool: ANTHROPIC_WEATHER_TOOL,
       })
-      expect(res1.status).toBe(200)
-      const body1 = (await res1.json()) as AnthropicMessageResponse
-      const toolUse = body1.content.find((b) => b.type === "tool_use")
-      expect(toolUse).toBeDefined()
-
-      const res2 = await postJSON("/v1/messages", {
-        model: getResponsesCapableModel(),
-        messages: [
-          { role: "user", content: "What's the weather in Sydney?" },
-          { role: "assistant", content: body1.content },
-          {
-            role: "user",
-            content: [
-              {
-                type: "tool_result",
-                tool_use_id: toolUse?.id ?? "",
-                content: "Error: Weather service is unavailable",
-                is_error: true,
-              },
-            ],
-          },
-        ],
-        tools: [ANTHROPIC_WEATHER_TOOL],
-        max_tokens: 200,
-        stream: false,
-      })
-      expect(res2.status).toBe(200)
-      const body2 = (await res2.json()) as AnthropicMessageResponse
-      expect(body2.content.length).toBeGreaterThan(0)
+      if (!result) {
+        console.log(
+          "Skipping Messages tool-error flow — no tool-capable Responses model",
+        )
+        return
+      }
+      expect(result.content.length).toBeGreaterThan(0)
     },
     TEST_TIMEOUT,
   )
 })
-
-function getResponsesCapableModel(): string {
-  return (
-    state.models?.data.find((model) =>
-      model.supported_endpoints?.includes("/responses"),
-    )?.id ?? "gpt-4o-mini"
-  )
-}
 
 // ─── Responses: Multi-turn ───
 
