@@ -303,6 +303,155 @@ test("preserves explicit empty completed output_text over derivable text", () =>
   })
 })
 
+test("derives missing completed output_text only from assistant messages", () => {
+  const privateMarker = "assistant-only-derived-output-text-private-marker"
+  const sanitized = sanitizeResponsesStreamEvent({
+    event: "response.completed",
+    data: JSON.stringify({
+      type: "response.completed",
+      sequence_number: 6,
+      response: {
+        id: "resp_assistant_only_output_text",
+        object: "response",
+        status: "completed",
+        output: [
+          {
+            id: "msg_user_output_text",
+            type: "message",
+            role: "user",
+            status: "completed",
+            content: [
+              {
+                type: "output_text",
+                text: "user-text",
+                annotations: [],
+                private: privateMarker,
+              },
+            ],
+            private: privateMarker,
+          },
+          {
+            id: "msg_missing_role_output_text",
+            type: "message",
+            status: "completed",
+            content: [
+              {
+                type: "output_text",
+                text: "missing-role-text",
+                annotations: [],
+                private: privateMarker,
+              },
+            ],
+            private: privateMarker,
+          },
+          {
+            id: "msg_invalid_role_output_text",
+            type: "message",
+            role: "tool",
+            status: "completed",
+            content: [
+              {
+                type: "output_text",
+                text: "invalid-role-text",
+                annotations: [],
+                private: privateMarker,
+              },
+            ],
+            private: privateMarker,
+          },
+          {
+            id: "msg_assistant_output_text",
+            type: "message",
+            role: "assistant",
+            status: "completed",
+            content: [
+              {
+                type: "output_text",
+                text: "assistant-text",
+                annotations: [],
+                private: privateMarker,
+              },
+            ],
+            private: privateMarker,
+          },
+        ],
+        usage: null,
+        error: null,
+        incomplete_details: null,
+        metadata: { private: privateMarker },
+      },
+      private: privateMarker,
+    }),
+  })
+
+  expect(sanitized.event).toBe("response.completed")
+  expect(JSON.parse(sanitized.data ?? "{}") as unknown).toEqual({
+    type: "response.completed",
+    sequence_number: 6,
+    response: {
+      id: "resp_assistant_only_output_text",
+      object: "response",
+      status: "completed",
+      output: [
+        {
+          id: "msg_user_output_text",
+          type: "message",
+          status: "completed",
+          content: [
+            {
+              type: "output_text",
+              text: "user-text",
+              annotations: [],
+            },
+          ],
+        },
+        {
+          id: "msg_missing_role_output_text",
+          type: "message",
+          status: "completed",
+          content: [
+            {
+              type: "output_text",
+              text: "missing-role-text",
+              annotations: [],
+            },
+          ],
+        },
+        {
+          id: "msg_invalid_role_output_text",
+          type: "message",
+          status: "completed",
+          content: [
+            {
+              type: "output_text",
+              text: "invalid-role-text",
+              annotations: [],
+            },
+          ],
+        },
+        {
+          id: "msg_assistant_output_text",
+          type: "message",
+          role: "assistant",
+          status: "completed",
+          content: [
+            {
+              type: "output_text",
+              text: "assistant-text",
+              annotations: [],
+            },
+          ],
+        },
+      ],
+      output_text: "assistant-text",
+      usage: null,
+      error: null,
+      incomplete_details: null,
+    },
+  })
+  expect(sanitized.data).not.toContain(privateMarker)
+})
+
 test.each([
   {
     expectedOutput: [

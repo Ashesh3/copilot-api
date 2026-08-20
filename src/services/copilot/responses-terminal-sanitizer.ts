@@ -598,7 +598,12 @@ function safeCompletedOutput(value: unknown): Array<unknown> {
 function deriveCompletedOutputText(output: ReadonlyArray<unknown>): string {
   let outputText = ""
   for (const item of output) {
-    if (readRecordValue(item, "type") !== "message") continue
+    if (
+      readRecordValue(item, "type") !== "message"
+      || readRecordValue(item, "role") !== "assistant"
+    ) {
+      continue
+    }
     const content = readRecordValue(item, "content")
     if (!Array.isArray(content)) continue
     for (const block of content) {
