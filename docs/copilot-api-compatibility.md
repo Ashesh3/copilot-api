@@ -56,7 +56,9 @@ change the inference contracts described here.
 Only `generateContent` and `streamGenerateContent` are supported public Google
 actions. A missing action suffix or any other suffix, including `countTokens`,
 returns a local Google `400` before body parsing or upstream dispatch. It is not
-a token-count API.
+a token-count API. Ordinary request, authentication, console, and Sentry
+diagnostics use the Google route template instead of the model/action segment,
+and debug logging does not inspect bodies for unsupported actions.
 
 ## Model discovery and endpoint routing
 
@@ -86,7 +88,8 @@ to Chat normalization:
 | Google request condition | Selected result |
 | --- | --- |
 | Ordinary text with Chat advertised | /chat/completions |
-| Chat unavailable; Responses and Messages advertised | /responses |
+| Non-Anthropic, Chat unavailable; Responses and Messages advertised | /responses |
+| Anthropic, Chat unavailable; Responses and Messages advertised | /v1/messages |
 | Messages-only and lossless | /v1/messages |
 | Chat-only | /chat/completions |
 | Legacy omitted endpoint metadata | /chat/completions |
@@ -201,15 +204,18 @@ Post-commit behavior is path- and failure-class-specific:
 
 | Surface | Behavior |
 | --- | --- |
-| Messages handled failure | error event with api_error |
+| Messages handled HTTP failure | error event with invalid_request_error, authentication_error, permission_error, not_found_error, request_too_large, rate_limit_error, api_error |
 | Synthetic Responses-from-Messages failure | error then response.failed |
-| Native Responses terminal event | sanitized response.failed |
+| Native Responses terminal families | sanitized response.completed, response.incomplete, response.failed, error |
 | Thrown native Chat transport failure | written chunks then close without synthesized error event |
 | Thrown native Responses transport failure | buffered unwritten chunks may be absent when the stream closes |
 
-Messages uses its safe error adapter for handled failures. The synthetic
-Responses-from-Messages path emits both its safe error and failed terminal
-events. Native Responses sanitizes terminal error events supplied by upstream.
+Messages maps handled HTTP failures to the status-derived error types listed
+above. The synthetic Responses-from-Messages path emits both its safe error and
+failed terminal events. Native Responses preserves sanitized
+`response.incomplete`, `response.failed`, or `error` families supplied by
+upstream. Valid completed events remain `response.completed`; malformed
+completed events fail closed as `response.failed`.
 A thrown transport or runtime failure after commitment on native Chat or native
 Responses may instead be recorded while the stream closes without a newly
 synthesized error event. Only events already written downstream remain visible;

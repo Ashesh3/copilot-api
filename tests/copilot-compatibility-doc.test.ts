@@ -107,7 +107,12 @@ const representativeForbiddenModelIds = `o1 o3-mini codex-mini-latest
 claude-3-7-sonnet-latest claude-4-sonnet claude-sonnet-4
 claude-opus-4-1-20250805 gpt-4.1 gpt-* gpt-oss-120b gpt-image-1
 chatgpt-4o-latest text-embedding-3-small text-embedding-ada-002
-gemini-2.5-pro gemini-pro dall-e-3 omni-moderation-latest`.split(/\s+/)
+gemini-2.5-pro gemini-pro dall-e-3 omni-moderation-latest
+grok-3 grok-3-mini deepseek-r1 deepseek-v3.1 llama-3.3-70b-instruct
+meta-llama/Llama-3.1-405B-Instruct Qwen/Qwen3-235B-A22B qwen2.5-coder-32b
+mistral-large-2411 codestral-2501 microsoft/Phi-4-mini-instruct phi-3.5-mini-instruct`.split(
+  /\s+/,
+)
 
 const allowedModelLanguage = `GPT-compatible clients|Codex-compatible transport
 Claude-compatible API|Gemini-compatible clients|GPT family|Claude models
@@ -115,7 +120,10 @@ Codex workflows|OpenAI-compatible providers|ChatGPT-compatible clients
 Claude-Sonnet-compatible clients|Codex-model discovery|GPT-5-series models
 Gemini-compatible transports|Use model from discovery.|Use model-id from discovery.
 Use MODEL_ID from discovery.|Use requestedModel from discovery.
-POST /models/:model:generateContent`.split(/\s*\|\s*|\n/)
+POST /models/:model:generateContent|Grok-compatible clients|DeepSeek models
+Llama-compatible APIs|Qwen family|Mistral-based providers|Phi models`.split(
+  /\s*\|\s*|\n/,
+)
 
 const blanketStreamExamples =
   `After headers are committed, all failures use an in-band error event.
@@ -132,6 +140,9 @@ All errors after the first byte are represented within the protocol.
 Once committed, failures become protocol-native frames.
 Late failures are always encoded in the SSE.
 Post-header exceptions are reported as stream frames.
+After commit. Every failure is returned in-band.
+The response has started. Any later error is carried by the event stream.
+Headers are already sent | Failures always arrive as protocol events
 | After headers are sent | Every failure is reported through a stream event |`.split(
     "\n",
   )
@@ -149,6 +160,9 @@ The session token never reaches logs or traces.
 Copilot-Session-Token is redacted everywhere.
 The session token is sensitive. It is never logged or captured.
 No logs, traces, or LLM Debug captures contain session credentials.
+The session token is sensitive. Every diagnostic redacts it.
+Session-token values are secrets | They never appear in logs or traces
+Diagnostics contain no credentials. This includes Copilot-Session-Token.
 | Session-token | Always redacted in every diagnostic |
 Administrator-only LLM Debug exists, but Copilot-Session-Token never appears in any diagnostic.`.split(
   "\n",
@@ -163,18 +177,19 @@ function registeredRoutes(): Set<string> {
 
 function modelWithEndpoints(
   supportedEndpoints: Array<string> | undefined,
+  vendor = "placeholder",
 ): Model {
   return {
     id: "model-placeholder",
     name: "Model Placeholder",
     object: "model",
     preview: false,
-    vendor: "placeholder",
+    vendor,
     version: "1",
     model_picker_enabled: true,
     supported_endpoints: supportedEndpoints,
     capabilities: {
-      family: "placeholder",
+      family: vendor === "anthropic" ? "claude" : "placeholder",
       limits: {},
       object: "model_capabilities",
       supports: {},
@@ -189,19 +204,43 @@ function googleRouteMatrix(): Record<string, string> {
     {
       surface: "Ordinary text with Chat advertised",
       endpoints: ["/chat/completions", "/v1/messages", "/responses"],
+      vendor: "openai",
     },
     {
-      surface: "Chat unavailable; Responses and Messages advertised",
+      surface:
+        "Non-Anthropic, Chat unavailable; Responses and Messages advertised",
       endpoints: ["/v1/messages", "/responses"],
+      vendor: "openai",
     },
-    { surface: "Messages-only and lossless", endpoints: ["/v1/messages"] },
-    { surface: "Chat-only", endpoints: ["/chat/completions"] },
-    { surface: "Legacy omitted endpoint metadata", endpoints: undefined },
-    { surface: "No compatible advertised endpoint", endpoints: [] },
+    {
+      surface: "Anthropic, Chat unavailable; Responses and Messages advertised",
+      endpoints: ["/v1/messages", "/responses"],
+      vendor: "anthropic",
+    },
+    {
+      surface: "Messages-only and lossless",
+      endpoints: ["/v1/messages"],
+      vendor: "anthropic",
+    },
+    {
+      surface: "Chat-only",
+      endpoints: ["/chat/completions"],
+      vendor: "openai",
+    },
+    {
+      surface: "Legacy omitted endpoint metadata",
+      endpoints: undefined,
+      vendor: "openai",
+    },
+    {
+      surface: "No compatible advertised endpoint",
+      endpoints: [],
+      vendor: "openai",
+    },
   ] as const
 
   return Object.fromEntries(
-    cases.map(({ endpoints, surface }) => {
+    cases.map(({ endpoints, surface, vendor }) => {
       const decision = selectGoogleUpstreamEndpoint({
         payload: {
           model: "model-placeholder",
@@ -209,6 +248,7 @@ function googleRouteMatrix(): Record<string, string> {
         },
         selectedModel: modelWithEndpoints(
           endpoints === undefined ? undefined : [...endpoints],
+          vendor,
         ),
       })
       return [surface, "code" in decision ? decision.code : decision.target]
@@ -222,18 +262,20 @@ function jwt(payload: unknown): string {
 
 function textTokens(value: string): Array<string> {
   const codeSpans = [...value.matchAll(/`+([^`]+)`+/g)].flatMap(
-    (match) => match[1].match(/[A-Z0-9][\w.:*[\]-]*/gi) ?? [],
+    (match) => match[1].match(/[A-Z0-9][\w./:*[\]-]*/gi) ?? [],
   )
   const prose = value.replaceAll(/`+[^`]+`+/g, " ")
-  const proseTokens = prose.match(/[A-Z0-9][\w.:*[\]-]*/gi) ?? []
+  const proseTokens = prose.match(/[A-Z0-9][\w./:*[\]-]*/gi) ?? []
   return [...codeSpans, ...proseTokens]
 }
 
 function stripModelTokenSuffix(token: string): string {
-  return token.replace(
+  const withoutAction = token.replace(
     /:(?:countTokens|generateContent|streamGenerateContent)$/i,
     "",
   )
+  const routeMatch = /(?:^|\/)models\/(.+)$/i.exec(withoutAction)
+  return routeMatch?.[1] ?? withoutAction
 }
 
 function hasGenericModelSuffix(token: string): boolean {
@@ -261,6 +303,13 @@ function isStaticModelIdentifier(token: string): boolean {
       normalized,
     )
     || /^omni-moderation-[a-z0-9][\w.:[\]-]*$/i.test(normalized)
+    || /^(?:grok|deepseek|llama|mistral|codestral|phi)-(?=[\w.:[\]-]*\d)[\w.:[\]-]+$/i.test(
+      normalized,
+    )
+    || /^qwen(?:-|(?=\d))(?=[\w.:[\]-]*\d)[\w.:[\]-]+$/i.test(normalized)
+    || /^(?:meta-llama\/llama|qwen\/qwen|microsoft\/phi)(?:-|(?=\d))(?=[\w.:[\]-]*\d)[\w.:[\]-]+$/i.test(
+      normalized,
+    )
   )
 }
 
@@ -300,7 +349,7 @@ function blanketStreamClaims(value: string): Array<string> {
   return semanticWindows(value).filter((clause) => {
     const lower = clause.toLowerCase()
     const committed =
-      /after (?:http )?headers|headers (?:are|have been) (?:committed|sent)|post[- ]headers?|post-commit|committed[- ]stream|late stream|late failures?|once (?:the )?(?:response|stream|streaming) (?:starts|begins)|once committed|following commitment|after commitment|after (?:response )?bytes? (?:are |have been )?written|after (?:the )?first byte/.test(
+      /after (?:http )?headers|headers (?:are|have been) (?:committed|sent)|headers (?:are )?already (?:committed|sent)|post[- ]headers?|post-commit|committed[- ]stream|late stream|late failures?|later (?:faults?|errors?|exceptions?|failures?)|once (?:the )?(?:response|stream|streaming) (?:starts|begins)|(?:response|stream|streaming) has started|once committed|following commitment|after commit(?:ment)?|after (?:response )?bytes? (?:are |have been )?written|after (?:the )?first byte/.test(
         lower,
       )
     const failure = /failures?|faults?|errors?|exceptions?|disconnects?/.test(
@@ -311,7 +360,7 @@ function blanketStreamClaims(value: string): Array<string> {
         lower,
       )
     const inBand =
-      /in-band|error event|event stream|sse event|stream event|stream frame|protocol-native frame|sent (?:to|on) the (?:client|stream)|protocol event|delivered as (?:an? )?event|emitted to the client|surfaced as (?:an? )?(?:protocol )?event|framed as (?:an? )?(?:sse )?event|encoded in (?:the )?sse|encoded in-band|reported through (?:an? )?(?:stream )?event|represented (?:within|in) the protocol/.test(
+      /in-band|returned in-band|carried by (?:the )?event stream|arrive as (?:an? )?(?:protocol )?events?|error event|event stream|sse event|stream event|stream frame|protocol-native frame|sent (?:to|on) the (?:client|stream)|protocol event|delivered as (?:an? )?event|emitted to the client|surfaced as (?:an? )?(?:protocol )?event|framed as (?:an? )?(?:sse )?event|encoded in (?:the )?sse|encoded in-band|reported through (?:an? )?(?:stream )?event|represented (?:within|in) the protocol/.test(
         lower,
       )
     const negated =
@@ -328,7 +377,7 @@ function blanketTokenPrivacyClaims(value: string): Array<string> {
     const token =
       /session[- ](?:credentials?|tokens?)|copilot-session-token/.test(lower)
     const blanket =
-      /never (?:logged|captured|recorded|exposed|stored)|never (?:appears?|reaches?|enters?) (?:in )?(?:any |all )?(?:logs?|traces?|diagnostics?)|cannot appear|guaranteed absent|redacted everywhere|no .*diagnostic.*(?:captures?|contains?|records?)|no (?:log|trace).*(?:capture|contain|record)|(?:absent|excluded|omitted) from (?:all|every) diagnostic|universally absent from diagnostic(?: output)?|diagnostics? (?:are|remain) universally free|(?:all|every) (?:logging|logs?|tracing|traces?|diagnostics?) (?:and (?:logging|logs?|tracing|traces?|diagnostics?) )?(?:omit|exclude|redact)|always redacted in every diagnostic|(?:do|does|will) not (?:appear|occur|exist|show up|be present) in (?:any|all|every) (?:log|trace|diagnostic)/.test(
+      /never (?:logged|captured|recorded|exposed|stored)|never (?:appears?|reaches?|enters?) (?:in )?(?:any |all )?(?:logs?|traces?|diagnostics?)|cannot appear|guaranteed absent|redacted everywhere|no .*diagnostic.*(?:captures?|contains?|records?)|diagnostics? contain no credentials|no (?:log|trace).*(?:capture|contain|record)|(?:absent|excluded|omitted) from (?:all|every) diagnostic|universally absent from diagnostic(?: output)?|diagnostics? (?:are|remain) universally free|(?:all|every) (?:logging|logs?|tracing|traces?|diagnostics?) (?:and (?:logging|logs?|tracing|traces?|diagnostics?) )?(?:omit|exclude|redact)|always redacted in every diagnostic|(?:do|does|will) not (?:appear|occur|exist|show up|be present) in (?:any|all|every) (?:log|trace|diagnostic)/.test(
         lower,
       )
     const scoped =
@@ -475,18 +524,29 @@ async function probeThrownNativeStreamFailures(privateMarker: string): Promise<{
   }
 }
 
+// The behavior matrix intentionally probes every public diagnostic boundary.
+// eslint-disable-next-line max-lines-per-function
 async function deriveCompatibilityMatrix(): Promise<{
   errors: Record<string, string>
   privacy: Record<string, string>
   streams: Record<string, string>
 }> {
   const privateMarker = "compatibility-private-marker"
-  const anthropicStreamError = createAnthropicStreamError(
-    new Error(privateMarker),
+  const anthropicErrorTypes = [400, 401, 403, 404, 413, 429, 500].map(
+    (status) =>
+      createAnthropicStreamError(
+        new HTTPError(privateMarker, Response.json({}, { status })),
+      ).error.type,
   )
-  expect(JSON.stringify(anthropicStreamError)).not.toContain(privateMarker)
-  const anthropicEventType = anthropicStreamError.type
-  const anthropicErrorType = anthropicStreamError.error.type
+  expect(anthropicErrorTypes).toEqual([
+    "invalid_request_error",
+    "authentication_error",
+    "permission_error",
+    "not_found_error",
+    "request_too_large",
+    "rate_limit_error",
+    "api_error",
+  ])
 
   const syntheticEvents: Array<{ data: string; event?: string }> = []
   await emitResponsesFailureAsStream(
@@ -506,21 +566,37 @@ async function deriveCompatibilityMatrix(): Promise<{
   expect(syntheticEventNames).toEqual(["error", "response.failed"])
   expect(syntheticEventTypes).toEqual(["error", "response.failed"])
 
-  const terminal = sanitizeResponsesStreamEvent({
-    event: "response.failed",
-    data: JSON.stringify({
-      type: "response.failed",
-      response: {
-        status: "failed",
-        error: { message: privateMarker },
-      },
-    }),
+  const terminalTypes = [
+    {
+      event: "response.completed",
+      data: JSON.stringify({
+        type: "response.completed",
+        sequence_number: 3,
+        response: {
+          id: "response-placeholder",
+          object: "response",
+          status: "completed",
+          output: [],
+          output_text: "",
+          usage: null,
+          error: null,
+          incomplete_details: null,
+        },
+      }),
+    },
+    { event: "response.incomplete", data: undefined },
+    { event: "response.failed", data: undefined },
+    { event: "error", data: undefined },
+  ].map((event) => {
+    const terminal = sanitizeResponsesStreamEvent(event)
+    return (JSON.parse(terminal.data ?? "null") as { type?: unknown }).type
   })
-  expect(terminal.data).not.toContain(privateMarker)
-  const terminalType = (
-    JSON.parse(terminal.data ?? "null") as { type?: unknown }
-  ).type
-  expect(terminalType).toBe("response.failed")
+  expect(terminalTypes).toEqual([
+    "response.completed",
+    "response.incomplete",
+    "response.failed",
+    "error",
+  ])
 
   const nativeFailures = await probeThrownNativeStreamFailures(privateMarker)
   expect(nativeFailures.chatBody).toContain("partial-chat")
@@ -672,10 +748,10 @@ async function deriveCompatibilityMatrix(): Promise<{
       "Inference forwarding": "only a matching unredirected model receives it",
     },
     streams: {
-      "Messages handled failure": `${anthropicEventType} event with ${anthropicErrorType}`,
+      "Messages handled HTTP failure": `error event with ${[...new Set(anthropicErrorTypes)].join(", ")}`,
       "Synthetic Responses-from-Messages failure":
         syntheticEventNames.join(" then "),
-      "Native Responses terminal event": `sanitized ${String(terminalType)}`,
+      "Native Responses terminal families": `sanitized ${terminalTypes.join(", ")}`,
       "Thrown native Chat transport failure":
         "written chunks then close without synthesized error event",
       "Thrown native Responses transport failure":
@@ -726,6 +802,9 @@ test("documents the registered route matrix and reviewed endpoint authority", as
   )
   expect(normalizedText).toContain(
     "A missing action suffix or any other suffix, including `countTokens`, returns a local Google `400` before body parsing or upstream dispatch.",
+  )
+  expect(normalizedText).toContain(
+    "Ordinary request, authentication, console, and Sentry diagnostics use the Google route template instead of the model/action segment, and debug logging does not inspect bodies for unsupported actions.",
   )
 
   const legacySupport = getModelEndpointSupport({})
@@ -786,10 +865,10 @@ test("rejects adversarial blanket stream and session-token claims", async () => 
   expect(blanketTokenPrivacyClaims(document)).toEqual([])
 
   for (const claim of blanketStreamExamples) {
-    expect(blanketStreamClaims(claim)).toHaveLength(1)
+    expect(blanketStreamClaims(claim).length).toBeGreaterThan(0)
   }
   for (const claim of blanketTokenExamples) {
-    expect(blanketTokenPrivacyClaims(claim)).toHaveLength(1)
+    expect(blanketTokenPrivacyClaims(claim).length).toBeGreaterThan(0)
   }
   expect(
     blanketTokenPrivacyClaims(

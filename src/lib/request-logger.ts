@@ -484,7 +484,8 @@ function sanitizeMetadata(value: unknown): unknown {
  */
 async function logRawRequest(c: Context): Promise<void> {
   const method = c.req.method
-  const url = redactRequestUrl(c.req.url)
+  const url = requestDiagnosticUrl(c)
+  const omitBody = isUnsupportedGoogleModelAction(c.req.path)
   const headers = Object.fromEntries(c.req.raw.headers.entries())
 
   const lines: Array<string> = []
@@ -501,7 +502,7 @@ async function logRawRequest(c: Context): Promise<void> {
   }
 
   // Try to get body info without consuming it
-  if (method !== "GET" && method !== "HEAD") {
+  if (!omitBody && method !== "GET" && method !== "HEAD") {
     try {
       const clonedRequest = c.req.raw.clone()
       const body = await clonedRequest.text()
@@ -541,6 +542,41 @@ function redactRequestUrl(value: string): string {
   } catch {
     return value
   }
+}
+
+function requestDiagnosticPath(c: Context): string {
+  const query =
+    c.req.raw.url.includes("?") ? `?${c.req.raw.url.split("?")[1]}` : ""
+  return sanitizeRequestDiagnosticPath(c.req.path) + query
+}
+
+export function sanitizeRequestDiagnosticPath(path: string): string {
+  if (!isGoogleModelActionPath(path)) return path
+  return `${googleRoutePrefix(path)}/:modelAction`
+}
+
+function requestDiagnosticUrl(c: Context): string {
+  const url = new URL(redactRequestUrl(c.req.url))
+  url.pathname = requestDiagnosticPath(c).split("?", 1)[0]
+  return url.toString()
+}
+
+function isGoogleModelActionPath(path: string): boolean {
+  return /^\/(?:v1beta\/models|v1\/models|models)\/[^/]+$/.test(path)
+}
+
+function isUnsupportedGoogleModelAction(path: string): boolean {
+  if (!isGoogleModelActionPath(path)) return false
+  const segment = path.slice(path.lastIndexOf("/") + 1)
+  const separator = segment.lastIndexOf(":")
+  const action = separator === -1 ? "" : segment.slice(separator + 1)
+  return action !== "generateContent" && action !== "streamGenerateContent"
+}
+
+function googleRoutePrefix(path: string): string {
+  if (path.startsWith("/v1beta/")) return "/v1beta/models"
+  if (path.startsWith("/v1/")) return "/v1/models"
+  return "/models"
 }
 
 /**
@@ -814,9 +850,7 @@ export async function requestLogger(c: Context, next: Next): Promise<void> {
 
   const startTime = Date.now()
   const method = c.req.method
-  const path =
-    c.req.path
-    + (c.req.raw.url.includes("?") ? "?" + c.req.raw.url.split("?")[1] : "")
+  const path = requestDiagnosticPath(c)
 
   // Initialize request context
   const contentLength = c.req.header("content-length")

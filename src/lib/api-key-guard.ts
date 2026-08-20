@@ -11,6 +11,7 @@ import {
   isIpBlocked,
   recordFailedAttempt,
 } from "./ip-blocker"
+import { sanitizeRequestDiagnosticPath } from "./request-logger"
 import { state } from "./state"
 import { isAllowedTransparentProxyRequest } from "./transparent-proxy"
 
@@ -30,6 +31,7 @@ export async function apiKeyGuard(
   }
 
   const clientIp = extractClientIp(c)
+  const diagnosticPath = sanitizeRequestDiagnosticPath(c.req.path)
   const credentialSupplied = [
     "authorization",
     "x-api-key",
@@ -43,11 +45,11 @@ export async function apiKeyGuard(
     if (credential) {
       if (clientIp !== null && isIpBlocked(clientIp)) {
         consola.warn(
-          `[api-key-guard] Blocked request from banned IP ${clientIp} → ${c.req.method} ${c.req.path}`,
+          `[api-key-guard] Blocked request from banned IP ${clientIp} → ${c.req.method} ${diagnosticPath}`,
         )
         Sentry.captureMessage(`Blocked banned IP: ${clientIp}`, {
           level: "warning",
-          extra: { ip: clientIp, method: c.req.method, path: c.req.path },
+          extra: { ip: clientIp, method: c.req.method, path: diagnosticPath },
         })
         return unauthorizedResponse(c)
       }
@@ -59,7 +61,7 @@ export async function apiKeyGuard(
       const alreadyBanned = isIpBanned(clientIp)
       const attempts = recordFailedAttempt(clientIp)
       consola.warn(
-        `[api-key-guard] Failed auth from ${clientIp} → ${c.req.method} ${c.req.path} (attempt ${attempts}/3)`,
+        `[api-key-guard] Failed auth from ${clientIp} → ${c.req.method} ${diagnosticPath} (attempt ${attempts}/3)`,
       )
       if (attempts >= 3 && !alreadyBanned) {
         consola.error(
@@ -67,7 +69,7 @@ export async function apiKeyGuard(
         )
         Sentry.captureMessage(`IP banned: ${clientIp}`, {
           level: "error",
-          extra: { ip: clientIp, attempts, path: c.req.path },
+          extra: { ip: clientIp, attempts, path: diagnosticPath },
         })
       }
     }
@@ -85,11 +87,11 @@ export async function apiKeyGuard(
 
   if (clientIp !== null && isIpBlocked(clientIp)) {
     consola.warn(
-      `[api-key-guard] Blocked request from banned IP ${clientIp} → ${c.req.method} ${c.req.path}`,
+      `[api-key-guard] Blocked request from banned IP ${clientIp} → ${c.req.method} ${diagnosticPath}`,
     )
     Sentry.captureMessage(`Blocked banned IP: ${clientIp}`, {
       level: "warning",
-      extra: { ip: clientIp, method: c.req.method, path: c.req.path },
+      extra: { ip: clientIp, method: c.req.method, path: diagnosticPath },
     })
     return unauthorizedResponse(c)
   }
@@ -97,7 +99,7 @@ export async function apiKeyGuard(
   if (clientIp !== null) {
     const attempts = recordFailedAttempt(clientIp)
     consola.warn(
-      `[api-key-guard] Failed auth from ${clientIp} → ${c.req.method} ${c.req.path} (attempt ${attempts}/3)`,
+      `[api-key-guard] Failed auth from ${clientIp} → ${c.req.method} ${diagnosticPath} (attempt ${attempts}/3)`,
     )
     if (attempts >= 3) {
       consola.error(
@@ -105,7 +107,7 @@ export async function apiKeyGuard(
       )
       Sentry.captureMessage(`IP banned: ${clientIp}`, {
         level: "error",
-        extra: { ip: clientIp, attempts, path: c.req.path },
+        extra: { ip: clientIp, attempts, path: diagnosticPath },
       })
     }
   }

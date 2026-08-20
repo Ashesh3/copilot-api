@@ -281,18 +281,22 @@ test.each([
 
 test("does not expose an unknown Google action suffix to diagnostics", async () => {
   const privateAction = "private-action-marker"
+  const privateBody = "private-body-marker"
+  const consoleLog = spyOn(console, "log").mockImplementation(() => undefined)
   const debugLog = spyOn(consola, "debug")
   const errorLog = spyOn(consola, "error")
+  const sentryLog = spyOn(Sentry.logger, "info")
   const captureException = spyOn(Sentry, "captureException").mockImplementation(
     () => "event-id",
   )
+  state.debug = true
   try {
     const response = await server.request(
       `/v1/models/gpt-4o-mini:${privateAction}`,
       {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: "not-json",
+        body: privateBody,
       },
     )
 
@@ -300,15 +304,55 @@ test("does not expose an unknown Google action suffix to diagnostics", async () 
     expect(await response.text()).not.toContain(privateAction)
     expect(
       JSON.stringify([
+        consoleLog.mock.calls,
         debugLog.mock.calls,
         errorLog.mock.calls,
+        sentryLog.mock.calls,
         captureException.mock.calls,
       ]),
     ).not.toContain(privateAction)
+    const consoleOutput = JSON.stringify(consoleLog.mock.calls)
+    expect(consoleOutput).not.toContain(privateBody)
+    expect(consoleOutput).not.toContain("Body:")
+    expect(consoleOutput).not.toContain("Body (sanitized):")
   } finally {
+    state.debug = false
+    consoleLog.mockRestore()
     debugLog.mockRestore()
     errorLog.mockRestore()
+    sentryLog.mockRestore()
     captureException.mockRestore()
+  }
+})
+
+test("does not expose an unauthenticated Google action suffix", async () => {
+  const privateAction = "private-unauthenticated-action"
+  const consoleWarn = spyOn(consola, "warn")
+  const captureMessage = spyOn(Sentry, "captureMessage").mockImplementation(
+    () => "event-id",
+  )
+  state.apiKeyAuth = "gateway-key"
+  try {
+    const response = await server.request(
+      `/v1/models/gpt-4o-mini:${privateAction}`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-copilot-peer-ip": "198.51.100.240",
+        },
+        body: "private-body-marker",
+      },
+    )
+
+    expect(response.status).toBe(401)
+    expect(
+      JSON.stringify([consoleWarn.mock.calls, captureMessage.mock.calls]),
+    ).not.toContain(privateAction)
+  } finally {
+    state.apiKeyAuth = undefined
+    consoleWarn.mockRestore()
+    captureMessage.mockRestore()
   }
 })
 
