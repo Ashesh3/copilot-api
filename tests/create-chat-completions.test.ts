@@ -559,6 +559,7 @@ test("installs Claude metadata affinity before provider dispatch", async () => {
     account.copilotToken = token
     account.healthy = true
     account.models = new Set([model])
+    account.modelsData = [createLegacyMessagesModel(model)]
   }
   tokenPool.rebuildModelIndex()
   state.isMultiToken = true

@@ -1419,6 +1419,102 @@ describe("responses websocket message handling", () => {
     expect(ws.data.closed).toBe(false)
   })
 
+  test("keeps serialized continuation metadata on the original account", async () => {
+    const model = "ws-string-continuation-model"
+    const firstAccount = tokenPool.addAccount(
+      "github-ws-string-continuation-a",
+      "individual",
+      webSocketAccountIds[0],
+    )
+    firstAccount.copilotToken = "ws-string-continuation-token-a"
+    firstAccount.healthy = true
+    firstAccount.models = new Set([model])
+    firstAccount.modelsData = [createWebSocketModel(model)]
+    const secondAccount = tokenPool.addAccount(
+      "github-ws-string-continuation-b",
+      "individual",
+      webSocketAccountIds[1],
+    )
+    secondAccount.copilotToken = "ws-string-continuation-token-b"
+    secondAccount.healthy = true
+    secondAccount.models = new Set([model])
+    secondAccount.modelsData = [createWebSocketModel(model)]
+    tokenPool.rebuildModelIndex()
+    state.models = tokenPool.getAllModels()
+    state.isMultiToken = true
+
+    const firstAffinity = findWebSocketAffinity(model, firstAccount.id)
+    const replacementAffinity = findWebSocketAffinity(model, secondAccount.id)
+    queuedResponses.push(
+      createResponsesSseResponse("resp_ws_string_parent"),
+      createResponsesSseResponse("resp_ws_string_child"),
+    )
+    const ws = createTestWebSocket()
+    ws.data.affinity = undefined
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model,
+        input: "first history item",
+        client_metadata: JSON.stringify({
+          session_id: firstAffinity,
+          thread_id: "original-thread",
+        }),
+      }),
+    )
+    expect(capturedAuthorization).toEqual([
+      "Bearer ws-string-continuation-token-a",
+    ])
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        input: "valid continuation",
+        client_metadata: JSON.stringify({
+          session_id: replacementAffinity,
+          thread_id: "replacement-thread",
+          request_kind: "compaction",
+        }),
+        previous_response_id: "resp_ws_string_parent",
+      }),
+    )
+
+    expect(capturedAuthorization).toEqual([
+      "Bearer ws-string-continuation-token-a",
+      "Bearer ws-string-continuation-token-a",
+    ])
+    expect(capturedAffinity).toEqual({
+      key: firstAffinity,
+      source: "codex_metadata",
+    })
+    expect(lastRequestBody).toMatchObject({
+      model,
+      client_metadata: {
+        session_id: firstAffinity,
+        thread_id: "original-thread",
+        request_kind: "compaction",
+      },
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "first history item" }],
+        },
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "valid continuation" }],
+        },
+      ],
+    })
+    expect(JSON.stringify(lastRequestBody)).not.toContain(replacementAffinity)
+    expect(ws.data.responseSnapshots.has("resp_ws_string_child")).toBe(true)
+    expect(ws.data.closed).toBe(false)
+  })
+
   test("isolates concurrent WebSocket turn lifecycle contexts", async () => {
     const firstWs = createTestWebSocket()
     const secondWs = createTestWebSocket()

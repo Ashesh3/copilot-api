@@ -8,8 +8,15 @@ import {
   test,
 } from "bun:test"
 
+import type { Account } from "~/lib/token-pool"
 import type { Model } from "~/services/copilot/get-models"
 
+import {
+  routedFetch,
+  runWithRoutedModelSelection,
+  selectRoutedModel,
+} from "~/lib/account-router"
+import { LocalHTTPError } from "~/lib/error"
 import { setModelRedirectsForTest } from "~/lib/model-redirect"
 import { setModelSettingsForTest } from "~/lib/model-settings"
 import { state } from "~/lib/state"
@@ -20,6 +27,7 @@ const originalFetch = globalThis.fetch
 const originalModels = state.models
 const testAccountIds = new Set<number>()
 const queuedFetchResults: Array<Response> = []
+let onAttachmentFetch: (() => void) | undefined
 const upstreamRequests: Array<{
   authorization: string | null
   path: string
@@ -56,7 +64,7 @@ function registerAccount(options: {
   endpoints: Array<string>
   modelId: string
   token: string
-}): void {
+}): Account {
   const account = tokenPool.addAccount(
     `github-${options.accountId}`,
     "individual",
@@ -67,6 +75,7 @@ function registerAccount(options: {
   account.healthy = true
   account.models = new Set([options.modelId])
   account.modelsData = [createModel(options.modelId, options.endpoints)]
+  return account
 }
 
 function installConflictingCatalogs(options: {
@@ -170,6 +179,13 @@ const fetchMock = mock((url: string | URL | Request, init?: RequestInit) => {
     path,
   })
 
+  if (new URL(request.url).hostname === "attachment.test") {
+    onAttachmentFetch?.()
+    return new Response("normalized image", {
+      headers: { "content-type": "image/png" },
+    })
+  }
+
   const queued = queuedFetchResults.shift()
   if (queued) return queued
 
@@ -197,6 +213,7 @@ afterAll(() => {
 beforeEach(() => {
   upstreamRequests.length = 0
   queuedFetchResults.length = 0
+  onAttachmentFetch = undefined
   fetchMock.mockClear()
   state.accountType = "individual"
   state.copilotToken = "single-token-fallback"
@@ -403,4 +420,171 @@ test("does not resend after refresh removes the chosen endpoint", async () => {
   expect(
     upstreamRequests.filter((request) => request.path === "/chat/completions"),
   ).toHaveLength(1)
+})
+
+test.each(["/chat/completions", "/responses", "/v1/messages"] as const)(
+  "rejects stale %s endpoint authority at the shared account transport boundary",
+  async (path) => {
+    const modelId = `account-aware-stale-${path.replaceAll("/", "-")}`
+    const account = registerAccount({
+      accountId: 52_401,
+      endpoints: [path],
+      modelId,
+      token: "selected-account-token",
+    })
+    tokenPool.rebuildModelIndex()
+    state.models = tokenPool.getAllModels()
+    const selection = selectRoutedModel(modelId)
+    expect(selection.accountPin?.accountId).toBe(account.id)
+
+    account.modelsData = [
+      createModel(
+        modelId,
+        path === "/responses" ? ["/chat/completions"] : ["/responses"],
+      ),
+    ]
+
+    let thrown: unknown
+    try {
+      await runWithRoutedModelSelection(selection, async () => {
+        await routedFetch(
+          path,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ model: modelId }),
+          },
+          { modelId },
+        )
+      })
+    } catch (error) {
+      thrown = error
+    }
+
+    expect(thrown).toBeInstanceOf(LocalHTTPError)
+    expect((thrown as LocalHTTPError).clientBody).toEqual({
+      error: {
+        code: "endpoint_translation_unsupported",
+        message:
+          "The selected Copilot account no longer advertises the chosen endpoint.",
+        type: "invalid_request_error",
+      },
+    })
+    expect(upstreamRequests).toEqual([])
+  },
+)
+
+test("rejects dispatch when the selected account model row disappears", async () => {
+  const modelId = "account-aware-missing-row"
+  const account = registerAccount({
+    accountId: 52_401,
+    endpoints: ["/responses"],
+    modelId,
+    token: "selected-account-token",
+  })
+  tokenPool.rebuildModelIndex()
+  state.models = tokenPool.getAllModels()
+  const selection = selectRoutedModel(modelId)
+  expect(selection.accountPin?.accountId).toBe(account.id)
+  account.modelsData = []
+
+  let thrown: unknown
+  try {
+    await runWithRoutedModelSelection(selection, async () => {
+      await routedFetch(
+        "/responses",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ model: modelId }),
+        },
+        { modelId },
+      )
+    })
+  } catch (error) {
+    thrown = error
+  }
+  expect(thrown).toMatchObject({
+    clientBody: {
+      error: { code: "endpoint_translation_unsupported" },
+    },
+  })
+  expect(upstreamRequests).toEqual([])
+})
+
+test("revalidates native Messages authority after asynchronous attachment preparation", async () => {
+  const modelId = "account-aware-messages-pre-send"
+  const account = registerAccount({
+    accountId: 52_401,
+    endpoints: ["/v1/messages"],
+    modelId,
+    token: "selected-account-token",
+  })
+  registerAccount({
+    accountId: 52_402,
+    endpoints: ["/v1/messages"],
+    modelId,
+    token: "alternate-account-token",
+  })
+  tokenPool.rebuildModelIndex()
+  state.models = tokenPool.getAllModels()
+  const affinityKey = Array.from(
+    { length: 10_000 },
+    (_, index) => `pre-send-affinity-${index}`,
+  ).find(
+    (candidate) =>
+      tokenPool.getAccountForModelBySession(modelId, candidate)?.id
+      === account.id,
+  )
+  if (!affinityKey) throw new TypeError("Expected selected-account affinity")
+  let catalogMutated = false
+  onAttachmentFetch = () => {
+    catalogMutated = true
+    account.modelsData = [createModel(modelId, ["/responses"])]
+  }
+
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-client-session-id": affinityKey,
+    },
+    body: JSON.stringify({
+      model: modelId,
+      max_tokens: 16,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "image",
+              source: {
+                type: "url",
+                url: "https://attachment.test/a.png",
+              },
+            },
+          ],
+        },
+      ],
+    }),
+  })
+
+  expect(catalogMutated).toBe(true)
+  expect(response.status).toBe(400)
+  expect(await response.json()).toMatchObject({
+    type: "error",
+    error: {
+      code: "endpoint_translation_unsupported",
+      message: "The Copilot Messages request was rejected.",
+      type: "invalid_request_error",
+    },
+  })
+  expect(upstreamRequests.map((request) => request.path)).toEqual(["/a.png"])
+  expect(
+    upstreamRequests.filter((request) =>
+      ["/chat/completions", "/responses", "/v1/messages"].includes(
+        request.path,
+      ),
+    ),
+  ).toEqual([])
 })

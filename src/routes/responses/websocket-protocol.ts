@@ -5,6 +5,7 @@ import type {
 } from "~/services/copilot/create-responses"
 
 import { resolveCopilotRequestAttribution } from "~/lib/copilot-request-context"
+import { parseRoutingMetadataRecord } from "~/lib/routing-affinity"
 import { sanitizeCopilotHeaderValue } from "~/services/copilot/copilot-contract"
 
 const FRAME_ENVELOPE_KEYS = new Set([
@@ -234,14 +235,22 @@ export function rehydrateContinuationPayloadFromSnapshot(
     snapshotClone.input,
     payloadClone.input,
   )
-  const { model: _ignoredModel, ...safePayloadClone } = payloadClone
+  const {
+    client_metadata: _ignoredClientMetadata,
+    model: _ignoredModel,
+    ...safePayloadClone
+  } = payloadClone
+  const {
+    client_metadata: _ignoredSnapshotClientMetadata,
+    ...safeSnapshotClone
+  } = snapshotClone
   const clientMetadata = mergeContinuationClientMetadata(
     snapshotClone.client_metadata,
     payloadClone.client_metadata,
   )
 
   return {
-    ...snapshotClone,
+    ...safeSnapshotClone,
     ...safePayloadClone,
     ...(clientMetadata === undefined ?
       {}
@@ -256,16 +265,15 @@ function mergeContinuationClientMetadata(
   snapshotMetadata: ResponsesPayload["client_metadata"],
   currentMetadata: ResponsesPayload["client_metadata"],
 ): ResponsesPayload["client_metadata"] {
-  const snapshotRecord =
-    isRecord(snapshotMetadata) ? snapshotMetadata : undefined
-  const currentRecord = isRecord(currentMetadata) ? currentMetadata : undefined
-  if (!snapshotRecord) return currentRecord
-  if (!currentRecord) return snapshotRecord
+  const snapshotRecord = parseRoutingMetadataRecord(snapshotMetadata)
+  const currentRecord = parseRoutingMetadataRecord(currentMetadata)
+  if (!snapshotRecord && !currentRecord) return undefined
 
-  const merged = structuredClone(currentRecord)
+  const merged = structuredClone(currentRecord ?? snapshotRecord ?? {})
   for (const key of AFFINITY_CLIENT_METADATA_KEYS) {
-    if (Object.hasOwn(snapshotRecord, key)) merged[key] = snapshotRecord[key]
-    else Reflect.deleteProperty(merged, key)
+    if (snapshotRecord && Object.hasOwn(snapshotRecord, key)) {
+      merged[key] = structuredClone(snapshotRecord[key])
+    } else Reflect.deleteProperty(merged, key)
   }
   return merged
 }

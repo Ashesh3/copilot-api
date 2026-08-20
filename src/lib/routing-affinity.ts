@@ -51,7 +51,9 @@ export function resolveRoutingAffinityFromHeaders(
   )
 }
 
-function parseRecord(value: unknown): Record<string, unknown> | undefined {
+export function parseRoutingMetadataRecord(
+  value: unknown,
+): Record<string, unknown> | undefined {
   let parsed = value
   if (typeof parsed === "string") {
     try {
@@ -69,16 +71,16 @@ function parseRecord(value: unknown): Record<string, unknown> | undefined {
 export function resolveClaudeRoutingAffinity(
   metadata: unknown,
 ): RoutingAffinity | undefined {
-  const metadataRecord = parseRecord(metadata)
+  const metadataRecord = parseRoutingMetadataRecord(metadata)
   if (!metadataRecord) return undefined
-  const userMetadata = parseRecord(metadataRecord.user_id)
+  const userMetadata = parseRoutingMetadataRecord(metadataRecord.user_id)
   return affinity(userMetadata?.session_id, "claude_metadata")
 }
 
 export function resolveResponsesRoutingAffinity(
   clientMetadata: unknown,
 ): RoutingAffinity | undefined {
-  const metadata = parseRecord(clientMetadata)
+  const metadata = parseRoutingMetadataRecord(clientMetadata)
   if (!metadata) return undefined
   return (
     affinity(metadata.session_id, "codex_metadata")

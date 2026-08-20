@@ -256,6 +256,12 @@ async function fetchWithAccount(
     reason,
     retryBudget,
   } = options
+  if (
+    options.enforceEndpointAuthority
+    && !tokenPool.accountAdvertisesModelEndpoint(account, options.modelId, path)
+  ) {
+    throw createEndpointUnavailableError()
+  }
   const headers = copilotHeaders({
     ...headerOptions,
     copilotToken: account.copilotToken,

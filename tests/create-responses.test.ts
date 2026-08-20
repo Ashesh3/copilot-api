@@ -1252,6 +1252,7 @@ test("routes repeated Responses metadata sessions to stable accounts", async () 
     account.copilotToken = token
     account.healthy = true
     account.models = new Set([modelId])
+    account.modelsData = [model]
   }
   tokenPool.rebuildModelIndex()
   state.isMultiToken = true
