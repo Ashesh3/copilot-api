@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- compatibility matrices share one live behavior harness */
 import * as Sentry from "@sentry/bun"
 import { expect, spyOn, test } from "bun:test"
 import consola from "consola"
@@ -6,6 +7,8 @@ import { Hono } from "hono"
 import fs, { readFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
+
+import type { Model } from "~/services/copilot/get-models"
 
 import { createConfigExportZip } from "~/lib/config-export"
 import {
@@ -26,10 +29,12 @@ import {
 import { sanitizeHandlerLogArguments } from "~/lib/logger"
 import { state } from "~/lib/state"
 import { copilotControlPlaneRoutes } from "~/routes/copilot-control-plane/route"
+import { selectGoogleUpstreamEndpoint } from "~/routes/google-ai/handler"
 import {
   createAnthropicStreamError,
   forwardMessagesError,
 } from "~/routes/messages/error"
+import { messageRoutes } from "~/routes/messages/route"
 import { emitResponsesFailureAsStream } from "~/routes/messages/web-search-helpers"
 import { server } from "~/server"
 import { COPILOT_API_VERSION } from "~/services/copilot/copilot-contract"
@@ -98,24 +103,56 @@ const googleDocumentedRoutes = [
   "/models/:model:streamGenerateContent",
 ] as const
 
-const representativeForbiddenModelIds = [
-  "o1",
-  "o3-mini",
-  "codex-mini-latest",
-  "claude-3-7-sonnet-latest",
-  "claude-4-sonnet",
-  "gpt-4.1",
-  "gpt-*",
-] as const
+const representativeForbiddenModelIds = `o1 o3-mini codex-mini-latest
+claude-3-7-sonnet-latest claude-4-sonnet claude-sonnet-4
+claude-opus-4-1-20250805 gpt-4.1 gpt-* gpt-oss-120b gpt-image-1
+chatgpt-4o-latest text-embedding-3-small text-embedding-ada-002
+gemini-2.5-pro gemini-pro dall-e-3 omni-moderation-latest`.split(/\s+/)
 
-const genericModelPlaceholders = [
-  "model",
-  "models",
-  "model-id",
-  "MODEL_ID",
-  "requestedModel",
-  ":model",
-] as const
+const allowedModelLanguage = `GPT-compatible clients|Codex-compatible transport
+Claude-compatible API|Gemini-compatible clients|GPT family|Claude models
+Codex workflows|OpenAI-compatible providers|ChatGPT-compatible clients
+Claude-Sonnet-compatible clients|Codex-model discovery|GPT-5-series models
+Gemini-compatible transports|Use model from discovery.|Use model-id from discovery.
+Use MODEL_ID from discovery.|Use requestedModel from discovery.
+POST /models/:model:generateContent`.split(/\s*\|\s*|\n/)
+
+const blanketStreamExamples =
+  `After headers are committed, all failures use an in-band error event.
+Every late stream error is sent through the source protocol error event.
+Post-commit failures always become in-band protocol errors.
+Following commitment, stream failures invariably appear in the event stream.
+Once the response starts, errors are sent to the client as protocol events without exception.
+After HTTP headers have been sent, each exception is delivered as an event.
+In every case following commitment, disconnects are emitted to the client through the event stream.
+Committed-stream errors are universally surfaced as protocol events.
+After response bytes are written, any fault is framed as an SSE event.
+Once streaming begins, all exceptions are encoded in-band.
+All errors after the first byte are represented within the protocol.
+Once committed, failures become protocol-native frames.
+Late failures are always encoded in the SSE.
+Post-header exceptions are reported as stream frames.
+| After headers are sent | Every failure is reported through a stream event |`.split(
+    "\n",
+  )
+
+const blanketTokenExamples = `The session token is never logged or captured.
+Copilot-Session-Token cannot appear in diagnostics.
+No diagnostic surface ever captures the session token.
+The session token does not appear in any diagnostic.
+Copilot-Session-Token is absent from every diagnostic log.
+Session-token values are universally absent from diagnostic output.
+\`Copilot-Session-Token\` is guaranteed absent from all diagnostics.
+Diagnostics are universally free of session-token values.
+All logging and tracing omit Copilot-Session-Token.
+The session token never reaches logs or traces.
+Copilot-Session-Token is redacted everywhere.
+The session token is sensitive. It is never logged or captured.
+No logs, traces, or LLM Debug captures contain session credentials.
+| Session-token | Always redacted in every diagnostic |
+Administrator-only LLM Debug exists, but Copilot-Session-Token never appears in any diagnostic.`.split(
+  "\n",
+)
 
 const normalizeWhitespace = (value: string): string =>
   value.replaceAll(/\s+/g, " ").trim()
@@ -124,70 +161,180 @@ function registeredRoutes(): Set<string> {
   return new Set(server.routes.map((route) => `${route.method} ${route.path}`))
 }
 
+function modelWithEndpoints(
+  supportedEndpoints: Array<string> | undefined,
+): Model {
+  return {
+    id: "model-placeholder",
+    name: "Model Placeholder",
+    object: "model",
+    preview: false,
+    vendor: "placeholder",
+    version: "1",
+    model_picker_enabled: true,
+    supported_endpoints: supportedEndpoints,
+    capabilities: {
+      family: "placeholder",
+      limits: {},
+      object: "model_capabilities",
+      supports: {},
+      tokenizer: "cl100k_base",
+      type: "chat",
+    },
+  }
+}
+
+function googleRouteMatrix(): Record<string, string> {
+  const cases = [
+    {
+      surface: "Ordinary text with Chat advertised",
+      endpoints: ["/chat/completions", "/v1/messages", "/responses"],
+    },
+    {
+      surface: "Chat unavailable; Responses and Messages advertised",
+      endpoints: ["/v1/messages", "/responses"],
+    },
+    { surface: "Messages-only and lossless", endpoints: ["/v1/messages"] },
+    { surface: "Chat-only", endpoints: ["/chat/completions"] },
+    { surface: "Legacy omitted endpoint metadata", endpoints: undefined },
+    { surface: "No compatible advertised endpoint", endpoints: [] },
+  ] as const
+
+  return Object.fromEntries(
+    cases.map(({ endpoints, surface }) => {
+      const decision = selectGoogleUpstreamEndpoint({
+        payload: {
+          model: "model-placeholder",
+          messages: [{ role: "user", content: "hello" }],
+        },
+        selectedModel: modelWithEndpoints(
+          endpoints === undefined ? undefined : [...endpoints],
+        ),
+      })
+      return [surface, "code" in decision ? decision.code : decision.target]
+    }),
+  )
+}
+
 function jwt(payload: unknown): string {
   return `e30.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.c2ln`
 }
 
 function textTokens(value: string): Array<string> {
-  return value.match(/[A-Z0-9][\w.:*[\]-]*/gi) ?? []
+  const codeSpans = [...value.matchAll(/`+([^`]+)`+/g)].flatMap(
+    (match) => match[1].match(/[A-Z0-9][\w.:*[\]-]*/gi) ?? [],
+  )
+  const prose = value.replaceAll(/`+[^`]+`+/g, " ")
+  const proseTokens = prose.match(/[A-Z0-9][\w.:*[\]-]*/gi) ?? []
+  return [...codeSpans, ...proseTokens]
+}
+
+function stripModelTokenSuffix(token: string): string {
+  return token.replace(
+    /:(?:countTokens|generateContent|streamGenerateContent)$/i,
+    "",
+  )
+}
+
+function hasGenericModelSuffix(token: string): boolean {
+  return /-(?:api|based|class|compatible|family|models?|series|style|transport|workflows?)$/i.test(
+    token,
+  )
 }
 
 function isStaticModelIdentifier(token: string): boolean {
+  const normalized = stripModelTokenSuffix(token).toLowerCase()
+  if (hasGenericModelSuffix(normalized)) return false
   return (
-    /^gpt-(?:\*|[a-z0-9][\w.:*[\]-]*)$/i.test(token)
-    || /^o\d(?:-[a-z0-9][\w.:*[\]-]*)?$/i.test(token)
-    || /^codex-[a-z0-9][\w.:*[\]-]*$/i.test(token)
-    || /^claude-(?:\d|sonnet|opus|haiku)[\w.:*[\]-]*$/i.test(token)
-    || /^gemini-\d[\w.:*[\]-]*$/i.test(token)
+    /^gpt-(?:\*|(?=[\w.:[\]-]*\d)[\w.:[\]-]+)$/i.test(normalized)
+    || /^chatgpt-(?=[\w.:[\]-]*\d)[\w.:[\]-]+$/i.test(normalized)
+    || /^o\d(?:-[a-z0-9][\w.:[\]-]*)?$/i.test(normalized)
+    || /^codex-(?:(?=[\w.:[\]-]*\d)[\w.:[\]-]+|mini(?:-[\w.:[\]-]+)?|latest|preview)$/i.test(
+      normalized,
+    )
+    || /^claude-(?:\d|sonnet|opus|haiku)[\w.:[\]-]*$/i.test(normalized)
+    || /^gemini-(?:\d[\w.:[\]-]*|pro|flash|nano|ultra)$/i.test(normalized)
+    || /^(?:text-embedding|text-moderation)-[a-z0-9][\w.:[\]-]*$/i.test(
+      normalized,
+    )
+    || /^(?:babbage|davinci|dall-e|tts|whisper)-[a-z0-9][\w.:[\]-]*$/i.test(
+      normalized,
+    )
+    || /^omni-moderation-[a-z0-9][\w.:[\]-]*$/i.test(normalized)
   )
 }
 
 function staticModelIdentifiers(value: string): Array<string> {
   return [
     ...new Set(
-      textTokens(value).filter((token) => isStaticModelIdentifier(token)),
+      textTokens(value)
+        .filter((token) => isStaticModelIdentifier(token))
+        .map((token) => stripModelTokenSuffix(token)),
     ),
   ]
 }
 
-function sentences(value: string): Array<string> {
-  return normalizeWhitespace(value)
-    .split(/(?<=[.!?])\s+/)
+function proseClauses(value: string): Array<string> {
+  return normalizeWhitespace(
+    value
+      .replaceAll(/```[\s\S]*?```/g, " ")
+      .replaceAll(/`([^`]+)`/g, "$1")
+      .replaceAll(/^\s*\|(?:\s*:?-+:?\s*\|)+\s*$/gm, " ")
+      .replaceAll("|", " "),
+  )
+    .split(/(?<=[.!?;])\s+|\s+[—–]\s+|\s*\n\s*/)
     .map((sentence) => sentence.trim())
     .filter(Boolean)
 }
 
+function semanticWindows(value: string): Array<string> {
+  const clauses = proseClauses(value)
+  return clauses.flatMap((clause, index) =>
+    index + 1 < clauses.length ?
+      [clause, `${clause} ${clauses[index + 1]}`]
+    : [clause],
+  )
+}
+
 function blanketStreamClaims(value: string): Array<string> {
-  return sentences(value).filter((sentence) => {
-    const lower = sentence.toLowerCase()
+  return semanticWindows(value).filter((clause) => {
+    const lower = clause.toLowerCase()
     const committed =
-      /after (?:http )?headers|post-commit|late stream|once (?:the )?(?:response|stream) (?:starts|begins)|following commitment/.test(
+      /after (?:http )?headers|headers (?:are|have been) (?:committed|sent)|post[- ]headers?|post-commit|committed[- ]stream|late stream|late failures?|once (?:the )?(?:response|stream|streaming) (?:starts|begins)|once committed|following commitment|after commitment|after (?:response )?bytes? (?:are |have been )?written|after (?:the )?first byte/.test(
         lower,
       )
-    const failure = /failures?|errors?/.test(lower)
+    const failure = /failures?|faults?|errors?|exceptions?|disconnects?/.test(
+      lower,
+    )
     const universal =
-      /\b(?:all|always|every|invariably|necessarily|the source protocol)\b|without exception/.test(
+      /\b(?:all|always|any|each|every|invariably|necessarily|universally|the source protocol)\b|without exception|in every case|\b(?:failures?|faults?|errors?|exceptions?|disconnects?) (?:are|become)\b|\b(?:failures?|faults?|errors?|exceptions?|disconnects?) are reported\b/.test(
         lower,
       )
     const inBand =
-      /in-band|error event|event stream|sent (?:to|on) the (?:client|stream)|protocol event/.test(
+      /in-band|error event|event stream|sse event|stream event|stream frame|protocol-native frame|sent (?:to|on) the (?:client|stream)|protocol event|delivered as (?:an? )?event|emitted to the client|surfaced as (?:an? )?(?:protocol )?event|framed as (?:an? )?(?:sse )?event|encoded in (?:the )?sse|encoded in-band|reported through (?:an? )?(?:stream )?event|represented (?:within|in) the protocol/.test(
         lower,
       )
-    return committed && failure && universal && inBand
+    const negated =
+      /\b(?:not|never) (?:all|any|each|every)|\b(?:do|does) not always|\bmay not always/.test(
+        lower,
+      )
+    return committed && failure && universal && inBand && !negated
   })
 }
 
 function blanketTokenPrivacyClaims(value: string): Array<string> {
-  return sentences(value).filter((sentence) => {
-    const lower = sentence.toLowerCase()
-    const token = /session token|copilot-session-token/.test(lower)
+  return semanticWindows(value).filter((clause) => {
+    const lower = clause.toLowerCase()
+    const token =
+      /session[- ](?:credentials?|tokens?)|copilot-session-token/.test(lower)
     const blanket =
-      /never (?:logged|captured|exposed|stored)|cannot appear|no .*diagnostic.*(?:captures?|contains?)/.test(
+      /never (?:logged|captured|recorded|exposed|stored)|never (?:appears?|reaches?|enters?) (?:in )?(?:any |all )?(?:logs?|traces?|diagnostics?)|cannot appear|guaranteed absent|redacted everywhere|no .*diagnostic.*(?:captures?|contains?|records?)|no (?:log|trace).*(?:capture|contain|record)|(?:absent|excluded|omitted) from (?:all|every) diagnostic|universally absent from diagnostic(?: output)?|diagnostics? (?:are|remain) universally free|(?:all|every) (?:logging|logs?|tracing|traces?|diagnostics?) (?:and (?:logging|logs?|tracing|traces?|diagnostics?) )?(?:omit|exclude|redact)|always redacted in every diagnostic|(?:do|does|will) not (?:appear|occur|exist|show up|be present) in (?:any|all|every) (?:log|trace|diagnostic)/.test(
         lower,
       )
-    const scoped = /ordinary|outside llm debug|except|administrator-only/.test(
-      lower,
-    )
+    const scoped =
+      /\bordinary\b|outside (?:administrator-only )?llm debug|except (?:for )?(?:administrator-only )?llm debug|unless (?:it is )?captured by (?:administrator-only )?llm debug|(?:administrator-only )?llm debug (?:may|might|can|does|is allowed to) (?:capture|contain|include|record|retain|expose)/.test(
+        lower,
+      )
     return token && blanket && !scoped
   })
 }
@@ -338,6 +485,8 @@ async function deriveCompatibilityMatrix(): Promise<{
     new Error(privateMarker),
   )
   expect(JSON.stringify(anthropicStreamError)).not.toContain(privateMarker)
+  const anthropicEventType = anthropicStreamError.type
+  const anthropicErrorType = anthropicStreamError.error.type
 
   const syntheticEvents: Array<{ data: string; event?: string }> = []
   await emitResponsesFailureAsStream(
@@ -349,6 +498,13 @@ async function deriveCompatibilityMatrix(): Promise<{
     },
     { model: "model-placeholder", responseId: "response-placeholder" },
   )
+  const syntheticEventNames = syntheticEvents.map((event) => event.event)
+  const syntheticEventTypes = syntheticEvents.map((event) => {
+    const parsed = JSON.parse(event.data) as { type?: unknown }
+    return typeof parsed.type === "string" ? parsed.type : "unknown"
+  })
+  expect(syntheticEventNames).toEqual(["error", "response.failed"])
+  expect(syntheticEventTypes).toEqual(["error", "response.failed"])
 
   const terminal = sanitizeResponsesStreamEvent({
     event: "response.failed",
@@ -361,6 +517,10 @@ async function deriveCompatibilityMatrix(): Promise<{
     }),
   })
   expect(terminal.data).not.toContain(privateMarker)
+  const terminalType = (
+    JSON.parse(terminal.data ?? "null") as { type?: unknown }
+  ).type
+  expect(terminalType).toBe("response.failed")
 
   const nativeFailures = await probeThrownNativeStreamFailures(privateMarker)
   expect(nativeFailures.chatBody).toContain("partial-chat")
@@ -490,11 +650,19 @@ async function deriveCompatibilityMatrix(): Promise<{
     captureException.mockRestore()
   }
 
+  const messagePaths = messageRoutes.routes
+    .filter((route) => route.method === "POST")
+    .map((route) =>
+      route.path === "/" ? "/v1/messages" : `/v1/messages${route.path}`,
+    )
+    .sort()
+  expect(messagePaths).toEqual(["/v1/messages", "/v1/messages/count_tokens"])
+
   return {
     errors: {
       "Chat and Responses HTTP":
         "OpenAI/Copilot envelope with fixed safe message",
-      "Messages and count-tokens HTTP":
+      [messagePaths.join(" and ")]:
         "Anthropic envelope with fixed safe message",
     },
     privacy: {
@@ -504,9 +672,10 @@ async function deriveCompatibilityMatrix(): Promise<{
       "Inference forwarding": "only a matching unredirected model receives it",
     },
     streams: {
-      "Messages handled failure": "safe Anthropic error event",
-      "Synthetic Responses-from-Messages failure": "error then response.failed",
-      "Native Responses terminal event": "sanitized protocol terminal event",
+      "Messages handled failure": `${anthropicEventType} event with ${anthropicErrorType}`,
+      "Synthetic Responses-from-Messages failure":
+        syntheticEventNames.join(" then "),
+      "Native Responses terminal event": `sanitized ${String(terminalType)}`,
       "Thrown native Chat transport failure":
         "written chunks then close without synthesized error event",
       "Thrown native Responses transport failure":
@@ -551,6 +720,13 @@ test("documents the registered route matrix and reviewed endpoint authority", as
     expect(text).toContain(`\`POST ${route}\``)
   }
   expect(text).not.toContain(":countTokens")
+  expectMatrixRows(text, googleRouteMatrix())
+  expect(normalizedText).toContain(
+    "Only `generateContent` and `streamGenerateContent` are supported public Google actions.",
+  )
+  expect(normalizedText).toContain(
+    "A missing action suffix or any other suffix, including `countTokens`, returns a local Google `400` before body parsing or upstream dispatch.",
+  )
 
   const legacySupport = getModelEndpointSupport({})
   expect(legacySupport).toMatchObject({
@@ -609,25 +785,25 @@ test("rejects adversarial blanket stream and session-token claims", async () => 
   expect(blanketStreamClaims(document)).toEqual([])
   expect(blanketTokenPrivacyClaims(document)).toEqual([])
 
-  for (const claim of [
-    "After headers are committed, all failures use an in-band error event.",
-    "Every late stream error is sent through the source protocol error event.",
-    "Post-commit failures always become in-band protocol errors.",
-    "Following commitment, stream failures invariably appear in the event stream.",
-    "Once the response starts, errors are sent to the client as protocol events without exception.",
-  ]) {
-    expect(blanketStreamClaims(claim)).toEqual([claim])
+  for (const claim of blanketStreamExamples) {
+    expect(blanketStreamClaims(claim)).toHaveLength(1)
   }
-  for (const claim of [
-    "The session token is never logged or captured.",
-    "Copilot-Session-Token cannot appear in diagnostics.",
-    "No diagnostic surface ever captures the session token.",
-  ]) {
-    expect(blanketTokenPrivacyClaims(claim)).toEqual([claim])
+  for (const claim of blanketTokenExamples) {
+    expect(blanketTokenPrivacyClaims(claim)).toHaveLength(1)
   }
   expect(
     blanketTokenPrivacyClaims(
       "Ordinary logs never expose the session token; administrator-only LLM Debug may capture it.",
+    ),
+  ).toEqual([])
+  expect(
+    blanketTokenPrivacyClaims(
+      "All diagnostics except administrator-only LLM Debug redact Copilot-Session-Token.",
+    ),
+  ).toEqual([])
+  expect(
+    blanketStreamClaims(
+      "Not every post-commit failure is emitted through a protocol event.",
     ),
   ).toEqual([])
 })
@@ -639,23 +815,27 @@ test("links the compatibility report from README", async () => {
   )
 })
 
-test("detects static model IDs across prose and code while allowing placeholders", async () => {
+test("detects concrete model IDs without flagging generic compatibility language", async () => {
   const document = await readFile(documentPath, "utf8")
 
   expect(staticModelIdentifiers(document)).toEqual([])
-  for (const model of representativeForbiddenModelIds) {
-    for (const snippet of [
-      `Use ${model} for this request.`,
-      `Use \`${model}\` for this request.`,
-      `\`\`\`text\n${model}\n\`\`\``,
-    ]) {
-      expect(staticModelIdentifiers(snippet)).toContain(model)
-    }
+  const falseNegativeTable = representativeForbiddenModelIds.flatMap(
+    (model) => [
+      { expected: model, snippet: `Use ${model} for this request.` },
+      { expected: model, snippet: `Use \`${model}\` for this request.` },
+      { expected: model, snippet: `\`\`\`text\n${model}\n\`\`\`` },
+      { expected: model, snippet: JSON.stringify({ model }) },
+      {
+        expected: model,
+        snippet: `POST /v1/models/${model}:generateContent`,
+      },
+    ],
+  )
+  for (const { expected, snippet } of falseNegativeTable) {
+    expect(staticModelIdentifiers(snippet)).toContain(expected)
   }
-  for (const placeholder of genericModelPlaceholders) {
-    expect(
-      staticModelIdentifiers(`Use ${placeholder} from discovery.`),
-    ).toEqual([])
+  for (const snippet of allowedModelLanguage) {
+    expect(staticModelIdentifiers(snippet)).toEqual([])
   }
 })
 

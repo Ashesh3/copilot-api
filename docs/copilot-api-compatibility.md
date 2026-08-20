@@ -53,6 +53,11 @@ authentication model is documented in the main README.
 Other client-integration surfaces are documented in the README. They do not
 change the inference contracts described here.
 
+Only `generateContent` and `streamGenerateContent` are supported public Google
+actions. A missing action suffix or any other suffix, including `countTokens`,
+returns a local Google `400` before body parsing or upstream dispatch. It is not
+a token-count API.
+
 ## Model discovery and endpoint routing
 
 Discovery preserves current upstream metadata, then adds configured aliases,
@@ -74,6 +79,18 @@ final upstream protocol. Selection then follows these rules:
 A bridge must fail closed rather than discard reasoning state, tool calls or
 results, call IDs, media, structured-output controls, cache controls,
 continuation identity, or terminal stream state.
+
+Google-style generation uses the same endpoint authority after lossless Google
+to Chat normalization:
+
+| Google request condition | Selected result |
+| --- | --- |
+| Ordinary text with Chat advertised | /chat/completions |
+| Chat unavailable; Responses and Messages advertised | /responses |
+| Messages-only and lossless | /v1/messages |
+| Chat-only | /chat/completions |
+| Legacy omitted endpoint metadata | /chat/completions |
+| No compatible advertised endpoint | endpoint_translation_unsupported |
 
 The `ws:/responses` value in a gateway model listing describes the gateway's
 local compatibility transport and does not promise direct upstream WebSocket use.
@@ -184,9 +201,9 @@ Post-commit behavior is path- and failure-class-specific:
 
 | Surface | Behavior |
 | --- | --- |
-| Messages handled failure | safe Anthropic error event |
+| Messages handled failure | error event with api_error |
 | Synthetic Responses-from-Messages failure | error then response.failed |
-| Native Responses terminal event | sanitized protocol terminal event |
+| Native Responses terminal event | sanitized response.failed |
 | Thrown native Chat transport failure | written chunks then close without synthesized error event |
 | Thrown native Responses transport failure | buffered unwritten chunks may be absent when the stream closes |
 
@@ -288,7 +305,7 @@ fixed local text.
 | HTTP surface | Error behavior |
 | --- | --- |
 | Chat and Responses HTTP | OpenAI/Copilot envelope with fixed safe message |
-| Messages and count-tokens HTTP | Anthropic envelope with fixed safe message |
+| /v1/messages and /v1/messages/count_tokens | Anthropic envelope with fixed safe message |
 
 Outside LLM Debug, ordinary client errors, logs, telemetry, Sentry events, and
 configuration exports do not expose request bodies, prompts, credentials,

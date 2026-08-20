@@ -16,7 +16,11 @@ import type { Model } from "~/services/copilot/get-models"
 import { getLastUsedAccountId } from "~/lib/account-router"
 import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
-import { isAbortError } from "~/lib/error"
+import {
+  type EndpointRouteDecision,
+  type EndpointRouteFailure,
+} from "~/lib/endpoint-routing"
+import { createEndpointTranslationError, isAbortError } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
 import {
   applyModelRedirect,
@@ -44,7 +48,6 @@ import {
 import {
   createAnthropicMessages,
   detectAnthropicInitiator,
-  modelSupportsNativeMessages,
   type AnthropicStreamChunk,
 } from "~/services/copilot/create-anthropic-messages"
 import {
@@ -74,6 +77,7 @@ import {
   anthropicResponseToChat,
 } from "../chat-completions/anthropic-bridge"
 import { chatCompletionsToResponses } from "../chat-completions/responses-fallback"
+import { selectChatUpstreamEndpoint } from "../chat-completions/responses-fallback-executor"
 import {
   resolveResponsesWebSearchCalls,
   resolveWebSearchCalls,
@@ -92,7 +96,33 @@ import {
 
 const logger = createHandlerLogger("google-ai-handler")
 
-const RESPONSES_ENDPOINT = "/responses"
+const GOOGLE_ACTIONS = new Set(["generateContent", "streamGenerateContent"])
+
+function googleActionError(c: Context, message: string): Response {
+  return c.json(
+    {
+      error: {
+        code: 400,
+        message,
+        status: "INVALID_ARGUMENT",
+      },
+    },
+    400,
+  )
+}
+
+function missingGoogleModelAction(c: Context): Response {
+  return c.json(
+    {
+      error: {
+        code: 400,
+        message: "Missing model and action in URL path",
+        status: "INVALID_ARGUMENT",
+      },
+    },
+    400,
+  )
+}
 
 function getUnsupportedGoogleRootFields(
   payload: GoogleAIRequest,
@@ -136,7 +166,7 @@ function parseModelAction(modelAction: string): {
 } {
   const colonIdx = modelAction.lastIndexOf(":")
   if (colonIdx === -1) {
-    return { model: modelAction, action: "generateContent" }
+    return { model: modelAction, action: "" }
   }
   return {
     model: modelAction.slice(0, colonIdx),
@@ -210,20 +240,15 @@ export async function handleGoogleAI(c: Context) {
   // Extract model and action from URL path
   // URL path: /v1/models/{model}:{action} or /models/{model}:{action}
   const modelAction = c.req.param("modelAction")
-  if (!modelAction) {
-    return c.json(
-      {
-        error: {
-          code: 400,
-          message: "Missing model and action in URL path",
-          status: "INVALID_ARGUMENT",
-        },
-      },
-      400,
-    )
-  }
+  if (!modelAction) return missingGoogleModelAction(c)
 
   const { model: rawModel, action } = parseModelAction(modelAction)
+  if (!action) {
+    return googleActionError(c, "Missing Google AI action suffix")
+  }
+  if (!GOOGLE_ACTIONS.has(action)) {
+    return googleActionError(c, "Unsupported Google AI action")
+  }
   const isStream = action === "streamGenerateContent"
 
   // Apply silent model redirect — google-ai response format does not include
@@ -287,15 +312,18 @@ export async function handleGoogleAI(c: Context) {
     (m) => m.id === finalPayload.model,
   )
 
-  // Determine API type based on supported_endpoints
-  const useResponsesApi =
-    selectedModel?.supported_endpoints?.includes(RESPONSES_ENDPOINT) ?? false
+  const routeDecision = selectGoogleUpstreamEndpoint({
+    payload: finalPayload,
+    selectedModel,
+  })
+  if ("code" in routeDecision) {
+    throw createEndpointTranslationError(routeDecision)
+  }
 
   setRequestContext(c, {
     requestedModel: rawModel,
     model: finalPayload.model,
-    provider:
-      useResponsesApi ? "GoogleAI→Responses" : "GoogleAI→ChatCompletions",
+    provider: googleProviderName(routeDecision.target),
     replacements: appliedRules,
     reasoningEffort,
   })
@@ -322,8 +350,8 @@ export async function handleGoogleAI(c: Context) {
   return await dispatchGoogleRequest(c, {
     finalPayload,
     requestedModel: rawModel,
+    routeDecision,
     selectedModel,
-    useResponsesApi,
     isStream,
     reasoningEffort,
   })
@@ -335,15 +363,15 @@ async function dispatchGoogleRequest(
   options: {
     finalPayload: ChatCompletionsPayload & { model: string }
     requestedModel: string
+    routeDecision: EndpointRouteDecision
     selectedModel: Model | undefined
-    useResponsesApi: boolean
     isStream: boolean
     reasoningEffort?: ReasoningEffort
   },
 ) {
-  const { finalPayload, selectedModel, useResponsesApi, isStream } = options
+  const { finalPayload, routeDecision, selectedModel, isStream } = options
 
-  if (useResponsesApi) {
+  if (routeDecision.target === "/responses") {
     consola.debug(`[google-ai] Using Responses API for ${finalPayload.model}`)
     return await handleWithResponsesApi(c, finalPayload, {
       isStream,
@@ -351,14 +379,9 @@ async function dispatchGoogleRequest(
     })
   }
 
-  // PDF file parts cannot ride /chat/completions upstream; claude models
-  // accept them natively via /v1/messages
-  if (
-    payloadHasFileParts(finalPayload)
-    && modelSupportsNativeMessages(selectedModel)
-  ) {
+  if (routeDecision.target === "/v1/messages") {
     consola.debug(
-      `[google-ai] Using native /v1/messages for ${finalPayload.model} (PDF attachment)`,
+      `[google-ai] Using native /v1/messages for ${finalPayload.model}`,
     )
     return await handleWithAnthropicMessages(c, finalPayload, {
       requestedModel: options.requestedModel,
@@ -371,6 +394,30 @@ async function dispatchGoogleRequest(
     `[google-ai] Using ChatCompletions API for ${finalPayload.model}`,
   )
   return await handleWithChatCompletions(c, finalPayload)
+}
+
+export function selectGoogleUpstreamEndpoint(options: {
+  payload: ChatCompletionsPayload
+  selectedModel: Model | undefined
+}): EndpointRouteDecision | EndpointRouteFailure {
+  return selectChatUpstreamEndpoint(options)
+}
+
+function googleProviderName(endpoint: EndpointRouteDecision["target"]): string {
+  switch (endpoint) {
+    case "/responses": {
+      return "GoogleAI→Responses"
+    }
+    case "/v1/messages": {
+      return "GoogleAI→AnthropicMessages"
+    }
+    case "/chat/completions": {
+      return "GoogleAI→ChatCompletions"
+    }
+    default: {
+      return "GoogleAI"
+    }
+  }
 }
 
 function payloadHasFileParts(payload: ChatCompletionsPayload): boolean {
@@ -544,7 +591,7 @@ async function handleChatCompletionsWithWebSearch(
   })
 }
 
-// ─── Native /v1/messages path (claude models with PDF attachments) ───
+// ─── Native /v1/messages path ───
 
 async function handleWithAnthropicMessages(
   c: Context,
@@ -555,13 +602,19 @@ async function handleWithAnthropicMessages(
     requestedModel: string
   },
 ) {
+  const reason =
+    payloadHasFileParts(payload) ? "PDF file attachment" : undefined
   recordNonDefaultBehavior(c, {
     kind: "endpoint_fallback",
-    message: `PDF file attachment routed ${payload.model} to native /v1/messages`,
+    message:
+      reason ?
+        `${reason} routed ${payload.model} to native /v1/messages`
+      : `Model ${payload.model} routed to native /v1/messages`,
     data: {
       model: payload.model,
-      sourceEndpoint: "ChatCompletions",
+      sourceEndpoint: "GoogleAI",
       targetEndpoint: "AnthropicMessages",
+      ...(reason ? { reason } : {}),
     },
   })
   setRequestContext(c, { provider: "GoogleAI→AnthropicMessages" })

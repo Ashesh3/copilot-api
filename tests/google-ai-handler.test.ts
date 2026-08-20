@@ -1,10 +1,22 @@
-import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
+/* eslint-disable max-lines -- Google route variants share one upstream transport harness */
+import * as Sentry from "@sentry/bun"
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  expect,
+  mock,
+  spyOn,
+  test,
+} from "bun:test"
+import consola from "consola"
 
 import type { ResponsesPayload } from "../src/services/copilot/create-responses"
 import type { ModelsResponse } from "../src/services/copilot/get-models"
 
 import { setModelRedirectsForTest } from "../src/lib/model-redirect"
 import { state } from "../src/lib/state"
+import { selectGoogleUpstreamEndpoint } from "../src/routes/google-ai/handler"
 import { server } from "../src/server"
 
 const originalFetch = globalThis.fetch
@@ -92,6 +104,79 @@ const fetchMock = mock((url: string, init?: RequestInit) => {
   lastBody = lastResponsesPayload as unknown as Record<string, unknown>
   lastHeaders = init?.headers as Record<string, string> | undefined
 
+  if (lastPath === "/v1/messages") {
+    if ((lastBody as { stream?: unknown } | undefined)?.stream === true) {
+      return new Response(
+        [
+          `event: message_start\ndata: ${JSON.stringify({
+            type: "message_start",
+            message: {
+              id: "message-placeholder",
+              type: "message",
+              role: "assistant",
+              content: [],
+              model: "route-model",
+              usage: { input_tokens: 1, output_tokens: 0 },
+            },
+          })}`,
+          `event: content_block_start\ndata: ${JSON.stringify({
+            type: "content_block_start",
+            index: 0,
+            content_block: { type: "text", text: "" },
+          })}`,
+          `event: content_block_delta\ndata: ${JSON.stringify({
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "text_delta", text: "hello" },
+          })}`,
+          `event: content_block_stop\ndata: ${JSON.stringify({
+            type: "content_block_stop",
+            index: 0,
+          })}`,
+          `event: message_delta\ndata: ${JSON.stringify({
+            type: "message_delta",
+            delta: { stop_reason: "end_turn", stop_sequence: null },
+            usage: { output_tokens: 1 },
+          })}`,
+          'event: message_stop\ndata: {"type":"message_stop"}',
+          "data: [DONE]",
+          "",
+        ].join("\n\n"),
+        { headers: { "content-type": "text/event-stream" } },
+      )
+    }
+    return Response.json({
+      id: "message-placeholder",
+      type: "message",
+      role: "assistant",
+      model: "route-model",
+      content: [{ type: "text", text: "hello" }],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    })
+  }
+  if (lastPath === "/chat/completions") {
+    return Response.json({
+      id: "chat-placeholder",
+      object: "chat.completion",
+      created: 1,
+      model: "route-model",
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: "hello" },
+          finish_reason: "stop",
+          logprobs: null,
+        },
+      ],
+      usage: {
+        prompt_tokens: 1,
+        completion_tokens: 1,
+        total_tokens: 2,
+      },
+    })
+  }
   return new Response(JSON.stringify(responsesResult), {
     status: 200,
     headers: { "content-type": "application/json" },
@@ -147,25 +232,324 @@ test("adds reasoning defaults on the Google AI responses path", async () => {
   expect(lastResponsesPayload?.include).toContain("reasoning.encrypted_content")
 })
 
-test.each(["generateContent", "countTokens", "futureAction"])(
-  "treats Google %s as the current non-stream generation path",
-  async (action) => {
-    const response = await server.request(`/v1/models/gpt-4o-mini:${action}`, {
+test.each([
+  {
+    label: "countTokens",
+    path: "/v1/models/gpt-4o-mini:countTokens",
+    message: "Unsupported Google AI action",
+  },
+  {
+    label: "futureAction",
+    path: "/v1/models/gpt-4o-mini:futureAction",
+    message: "Unsupported Google AI action",
+  },
+  {
+    label: "private unknown suffix",
+    path: "/v1/models/gpt-4o-mini:private-action-marker",
+    message: "Unsupported Google AI action",
+  },
+  {
+    label: "empty suffix",
+    path: "/v1/models/gpt-4o-mini:",
+    message: "Missing Google AI action suffix",
+  },
+  {
+    label: "missing suffix",
+    path: "/v1/models/gpt-4o-mini",
+    message: "Missing Google AI action suffix",
+  },
+])(
+  "rejects unsupported Google action $label without parsing or forwarding",
+  async ({ message, path }) => {
+    const response = await server.request(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "not-json",
+    })
+
+    expect(response.status).toBe(400)
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(await response.json()).toEqual({
+      error: {
+        code: 400,
+        message,
+        status: "INVALID_ARGUMENT",
+      },
+    })
+  },
+)
+
+test("does not expose an unknown Google action suffix to diagnostics", async () => {
+  const privateAction = "private-action-marker"
+  const debugLog = spyOn(consola, "debug")
+  const errorLog = spyOn(consola, "error")
+  const captureException = spyOn(Sentry, "captureException").mockImplementation(
+    () => "event-id",
+  )
+  try {
+    const response = await server.request(
+      `/v1/models/gpt-4o-mini:${privateAction}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "not-json",
+      },
+    )
+
+    expect(response.status).toBe(400)
+    expect(await response.text()).not.toContain(privateAction)
+    expect(
+      JSON.stringify([
+        debugLog.mock.calls,
+        errorLog.mock.calls,
+        captureException.mock.calls,
+      ]),
+    ).not.toContain(privateAction)
+  } finally {
+    debugLog.mockRestore()
+    errorLog.mockRestore()
+    captureException.mockRestore()
+  }
+})
+
+test.each([
+  {
+    name: "Chat before translated endpoints for ordinary text",
+    endpoints: ["/chat/completions", "/v1/messages", "/responses"],
+    expectedPath: "/chat/completions",
+  },
+  {
+    name: "Responses before Messages when Chat is unavailable",
+    endpoints: ["/v1/messages", "/responses"],
+    expectedPath: "/responses",
+  },
+  {
+    name: "Messages-only text",
+    endpoints: ["/v1/messages"],
+    expectedPath: "/v1/messages",
+  },
+  {
+    name: "Chat-only text",
+    endpoints: ["/chat/completions"],
+    expectedPath: "/chat/completions",
+  },
+  {
+    name: "legacy omitted endpoint metadata",
+    endpoints: undefined,
+    expectedPath: "/chat/completions",
+  },
+] as const)("routes Google $name", async ({ endpoints, expectedPath }) => {
+  const model = structuredClone(responsesCapableModels.data[0])
+  model.id = "route-model"
+  model.name = "Route Model"
+  model.vendor = expectedPath === "/v1/messages" ? "anthropic" : "openai"
+  model.supported_endpoints = endpoints ? [...endpoints] : undefined
+  state.models = { object: "list", data: [model] }
+
+  const response = await server.request(
+    "/v1/models/route-model:generateContent",
+    {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         contents: [{ role: "user", parts: [{ text: "Hello" }] }],
         generationConfig: { maxOutputTokens: 32 },
       }),
-    })
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(lastPath).toBe(expectedPath)
+})
+
+test("routes streaming Google text to an advertised Messages-only endpoint", async () => {
+  const model = structuredClone(responsesCapableModels.data[0])
+  model.id = "route-model"
+  model.name = "Route Model"
+  model.vendor = "anthropic"
+  model.supported_endpoints = ["/v1/messages"]
+  state.models = { object: "list", data: [model] }
+
+  const response = await server.request(
+    "/v1/models/route-model:streamGenerateContent",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: "Hello" }] }],
+      }),
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(lastPath).toBe("/v1/messages")
+  const body = await response.text()
+  expect(response.headers.get("content-type")).toContain("text/event-stream")
+  expect(body).toContain("hello")
+})
+
+test.each([
+  {
+    endpoints: ["/chat/completions", "/v1/messages", "/responses"],
+    expectedPath: "/responses",
+  },
+  {
+    endpoints: ["/chat/completions", "/responses"],
+    expectedPath: "/responses",
+  },
+  {
+    endpoints: ["/chat/completions", "/v1/messages"],
+    expectedPath: "/v1/messages",
+  },
+])(
+  "routes Google PDF content away from Chat for $endpoints",
+  async ({ endpoints, expectedPath }) => {
+    const model = structuredClone(responsesCapableModels.data[0])
+    model.id = "route-model"
+    model.name = "Route Model"
+    model.vendor = "openai"
+    model.supported_endpoints = [...endpoints]
+    state.models = { object: "list", data: [model] }
+
+    const response = await server.request(
+      "/v1/models/route-model:generateContent",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          contents: [
+            {
+              role: "user",
+              parts: [
+                { text: "Review the PDF." },
+                {
+                  inlineData: {
+                    mimeType: "application/pdf",
+                    data: "JVBERi0=",
+                  },
+                },
+              ],
+            },
+          ],
+        }),
+      },
+    )
 
     expect(response.status).toBe(200)
-    expect(response.headers.get("content-type")).toContain("application/json")
-    expect(lastPath).toBe("/responses")
-    expect(lastResponsesPayload?.stream).toBe(false)
-    expect(await response.json()).toHaveProperty("candidates")
+    expect(lastPath).toBe(expectedPath)
   },
 )
+
+test("rejects Google PDF content when the model advertises only Chat", async () => {
+  const model = structuredClone(responsesCapableModels.data[0])
+  model.id = "route-model"
+  model.name = "Route Model"
+  model.supported_endpoints = ["/chat/completions"]
+  state.models = { object: "list", data: [model] }
+
+  const response = await server.request(
+    "/v1/models/route-model:generateContent",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [
+          {
+            role: "user",
+            parts: [
+              {
+                inlineData: {
+                  mimeType: "application/pdf",
+                  data: "JVBERi0=",
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    },
+  )
+
+  expect(response.status).toBe(400)
+  expect(fetchMock).not.toHaveBeenCalled()
+  expect(await response.json()).toMatchObject({
+    error: {
+      code: "endpoint_translation_unsupported",
+      param: "message_content_part:file",
+    },
+  })
+})
+
+test("rejects Google requests when the model advertises no compatible endpoint", async () => {
+  const model = structuredClone(responsesCapableModels.data[0])
+  model.id = "route-model"
+  model.name = "Route Model"
+  model.supported_endpoints = []
+  state.models = { object: "list", data: [model] }
+
+  const response = await server.request(
+    "/v1/models/route-model:generateContent",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: "Hello" }] }],
+      }),
+    },
+  )
+
+  expect(response.status).toBe(400)
+  expect(fetchMock).not.toHaveBeenCalled()
+  expect(await response.json()).toEqual({
+    error: {
+      code: "endpoint_translation_unsupported",
+      message:
+        "The selected Copilot model cannot accept this request without losing required protocol data.",
+      param: "request_shape",
+      type: "invalid_request_error",
+    },
+  })
+})
+
+test("skips an advertised Google Messages endpoint when translation is lossy", () => {
+  const model = structuredClone(responsesCapableModels.data[0])
+  model.id = "route-model"
+  model.supported_endpoints = ["/v1/messages", "/chat/completions"]
+
+  expect(
+    selectGoogleUpstreamEndpoint({
+      selectedModel: model,
+      payload: {
+        model: "route-model",
+        messages: [{ role: "user", content: "hello" }],
+        stream: false,
+        prediction: { type: "content", content: "expected" },
+      },
+    }),
+  ).toMatchObject({ target: "/chat/completions", translated: false })
+})
+
+test("returns the Google translation blocker when every advertised endpoint is lossy", () => {
+  const model = structuredClone(responsesCapableModels.data[0])
+  model.id = "route-model"
+  model.supported_endpoints = ["/v1/messages"]
+
+  expect(
+    selectGoogleUpstreamEndpoint({
+      selectedModel: model,
+      payload: {
+        model: "route-model",
+        messages: [{ role: "user", content: "hello" }],
+        stream: false,
+        prediction: { type: "content", content: "expected" },
+      },
+    }),
+  ).toEqual({
+    blockers: ["prediction"],
+    code: "endpoint_translation_unsupported",
+    source: "chat",
+  })
+})
 
 test("routes Google googleSearch through Copilot native Responses web search", async () => {
   const response = await server.request(
