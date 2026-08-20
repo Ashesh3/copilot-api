@@ -1947,7 +1947,7 @@ describe("responses websocket message handling", () => {
     })
   })
 
-  test("rejects stateful and blocked-tool WebSocket turns before dispatch", async () => {
+  test("rejects stateful, blocked-tool, and invalid-context WebSocket turns before dispatch", async () => {
     state.models = responsesCapableModels
     const ws = createTestWebSocket()
 
@@ -1957,6 +1957,11 @@ describe("responses websocket message handling", () => {
         model: "gpt-5.4",
         input: "Hello",
         tools: [{ type: "code_interpreter" }],
+      },
+      {
+        model: "gpt-5.4",
+        input: "Hello",
+        context_management: [{ type: "future_unknown" }],
       },
     ]) {
       await responsesWebSocket.message(
@@ -1974,11 +1979,13 @@ describe("responses websocket message handling", () => {
           type?: string
         },
     )
-    expect(errorFrames).toHaveLength(2)
+    expect(errorFrames).toHaveLength(3)
     expect(errorFrames[0]?.type).toBe("error")
     expect(errorFrames[0]?.error?.param).toBe("store")
     expect(errorFrames[1]?.type).toBe("error")
     expect(errorFrames[1]?.error?.param).toBe("tools")
+    expect(errorFrames[2]?.type).toBe("error")
+    expect(errorFrames[2]?.error?.param).toBe("context_management")
   })
 
   test("forwards safe translation errors before upstream and keeps the socket open", async () => {
