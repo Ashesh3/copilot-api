@@ -237,6 +237,350 @@ test("reconstructs a completed terminal event from an explicit allowlist", () =>
   expect(sanitized.data).not.toContain(privateMarker)
 })
 
+const missingOutputTextPrivateMarker = "missing-output-text-private-marker"
+
+test("preserves explicit empty completed output_text over derivable text", () => {
+  const sanitized = sanitizeResponsesStreamEvent({
+    event: "response.completed",
+    data: JSON.stringify({
+      type: "response.completed",
+      sequence_number: 5,
+      response: {
+        id: "resp_explicit_empty_output_text",
+        object: "response",
+        status: "completed",
+        output: [
+          {
+            id: "msg_explicit_empty_output_text",
+            type: "message",
+            role: "assistant",
+            status: "completed",
+            content: [
+              {
+                type: "output_text",
+                text: "derived text",
+                annotations: [],
+              },
+            ],
+          },
+        ],
+        output_text: "",
+        usage: null,
+        error: null,
+        incomplete_details: null,
+      },
+    }),
+  })
+
+  expect(sanitized.event).toBe("response.completed")
+  expect(JSON.parse(sanitized.data ?? "{}") as unknown).toEqual({
+    type: "response.completed",
+    sequence_number: 5,
+    response: {
+      id: "resp_explicit_empty_output_text",
+      object: "response",
+      status: "completed",
+      output: [
+        {
+          id: "msg_explicit_empty_output_text",
+          type: "message",
+          role: "assistant",
+          status: "completed",
+          content: [
+            {
+              type: "output_text",
+              text: "derived text",
+              annotations: [],
+            },
+          ],
+        },
+      ],
+      output_text: "",
+      usage: null,
+      error: null,
+      incomplete_details: null,
+    },
+  })
+})
+
+test("derives missing completed output_text only from assistant messages", () => {
+  const privateMarker = "assistant-only-derived-output-text-private-marker"
+  const sanitized = sanitizeResponsesStreamEvent({
+    event: "response.completed",
+    data: JSON.stringify({
+      type: "response.completed",
+      sequence_number: 6,
+      response: {
+        id: "resp_assistant_only_output_text",
+        object: "response",
+        status: "completed",
+        output: [
+          {
+            id: "msg_user_output_text",
+            type: "message",
+            role: "user",
+            status: "completed",
+            content: [
+              {
+                type: "output_text",
+                text: "user-text",
+                annotations: [],
+                private: privateMarker,
+              },
+            ],
+            private: privateMarker,
+          },
+          {
+            id: "msg_missing_role_output_text",
+            type: "message",
+            status: "completed",
+            content: [
+              {
+                type: "output_text",
+                text: "missing-role-text",
+                annotations: [],
+                private: privateMarker,
+              },
+            ],
+            private: privateMarker,
+          },
+          {
+            id: "msg_invalid_role_output_text",
+            type: "message",
+            role: "tool",
+            status: "completed",
+            content: [
+              {
+                type: "output_text",
+                text: "invalid-role-text",
+                annotations: [],
+                private: privateMarker,
+              },
+            ],
+            private: privateMarker,
+          },
+          {
+            id: "msg_assistant_output_text",
+            type: "message",
+            role: "assistant",
+            status: "completed",
+            content: [
+              {
+                type: "output_text",
+                text: "assistant-text",
+                annotations: [],
+                private: privateMarker,
+              },
+            ],
+            private: privateMarker,
+          },
+        ],
+        usage: null,
+        error: null,
+        incomplete_details: null,
+        metadata: { private: privateMarker },
+      },
+      private: privateMarker,
+    }),
+  })
+
+  expect(sanitized.event).toBe("response.completed")
+  expect(JSON.parse(sanitized.data ?? "{}") as unknown).toEqual({
+    type: "response.completed",
+    sequence_number: 6,
+    response: {
+      id: "resp_assistant_only_output_text",
+      object: "response",
+      status: "completed",
+      output: [
+        {
+          id: "msg_user_output_text",
+          type: "message",
+          status: "completed",
+          content: [
+            {
+              type: "output_text",
+              text: "user-text",
+              annotations: [],
+            },
+          ],
+        },
+        {
+          id: "msg_missing_role_output_text",
+          type: "message",
+          status: "completed",
+          content: [
+            {
+              type: "output_text",
+              text: "missing-role-text",
+              annotations: [],
+            },
+          ],
+        },
+        {
+          id: "msg_invalid_role_output_text",
+          type: "message",
+          status: "completed",
+          content: [
+            {
+              type: "output_text",
+              text: "invalid-role-text",
+              annotations: [],
+            },
+          ],
+        },
+        {
+          id: "msg_assistant_output_text",
+          type: "message",
+          role: "assistant",
+          status: "completed",
+          content: [
+            {
+              type: "output_text",
+              text: "assistant-text",
+              annotations: [],
+            },
+          ],
+        },
+      ],
+      output_text: "assistant-text",
+      usage: null,
+      error: null,
+      incomplete_details: null,
+    },
+  })
+  expect(sanitized.data).not.toContain(privateMarker)
+})
+
+test.each([
+  {
+    expectedOutput: [
+      {
+        id: "msg_first",
+        type: "message",
+        role: "assistant",
+        status: "completed",
+        content: [
+          { type: "output_text", text: "first", annotations: [] },
+          { type: "refusal", refusal: "declined" },
+        ],
+      },
+      {
+        id: "msg_second",
+        type: "message",
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text: "second", annotations: [] }],
+      },
+    ],
+    expectedOutputText: "firstsecond",
+    name: "assistant text",
+    output: [
+      {
+        id: "msg_first",
+        type: "message",
+        role: "assistant",
+        status: "completed",
+        content: [
+          {
+            type: "output_text",
+            text: "first",
+            annotations: [],
+            provider: missingOutputTextPrivateMarker,
+          },
+          {
+            type: "refusal",
+            refusal: "declined",
+            provider: missingOutputTextPrivateMarker,
+          },
+        ],
+        metadata: { private: missingOutputTextPrivateMarker },
+      },
+      {
+        id: "msg_second",
+        type: "message",
+        role: "assistant",
+        status: "completed",
+        content: [
+          {
+            type: "output_text",
+            text: "second",
+            annotations: [],
+            provider: missingOutputTextPrivateMarker,
+          },
+        ],
+        metadata: { private: missingOutputTextPrivateMarker },
+      },
+    ],
+  },
+  {
+    expectedOutput: [
+      {
+        id: "fc_tool_only",
+        type: "function_call",
+        call_id: "call_tool_only",
+        name: "lookup",
+        arguments: '{"id":7}',
+        status: "completed",
+      },
+    ],
+    expectedOutputText: "",
+    name: "tool-only output",
+    output: [
+      {
+        id: "fc_tool_only",
+        type: "function_call",
+        call_id: "call_tool_only",
+        name: "lookup",
+        arguments: '{"id":7}',
+        status: "completed",
+        private: missingOutputTextPrivateMarker,
+      },
+    ],
+  },
+])(
+  "reconstructs missing output_text for completed $name",
+  ({ expectedOutput, expectedOutputText, output }) => {
+    const event = {
+      event: "response.completed",
+      data: JSON.stringify({
+        type: "response.completed",
+        sequence_number: 5,
+        provider: missingOutputTextPrivateMarker,
+        response: {
+          id: "resp_missing_output_text",
+          object: "response",
+          status: "completed",
+          output,
+          usage: null,
+          error: null,
+          incomplete_details: null,
+          provider: missingOutputTextPrivateMarker,
+        },
+      }),
+    }
+
+    const sanitized = sanitizeResponsesStreamEvent(event)
+
+    expect(sanitized.event).toBe("response.completed")
+    expect(JSON.parse(sanitized.data ?? "{}") as unknown).toEqual({
+      type: "response.completed",
+      sequence_number: 5,
+      response: {
+        id: "resp_missing_output_text",
+        object: "response",
+        status: "completed",
+        output: expectedOutput,
+        output_text: expectedOutputText,
+        usage: null,
+        error: null,
+        incomplete_details: null,
+      },
+    })
+    expect(sanitized.data).not.toContain(missingOutputTextPrivateMarker)
+  },
+)
+
 test("preserves reviewed completed tool output families without private fields", () => {
   const privateMarker = "completed-tool-private-marker"
   const sanitized = sanitizeResponsesStreamEvent({
@@ -426,6 +770,19 @@ test.each([
     },
   },
   {
+    name: "non-string output_text",
+    response: {
+      id: "resp_invalid",
+      object: "response",
+      status: "completed",
+      output: [],
+      output_text: null,
+      usage: null,
+      error: null,
+      incomplete_details: null,
+    },
+  },
+  {
     name: "non-null error",
     response: {
       id: "resp_invalid",
@@ -448,6 +805,7 @@ test.each([
     }),
   })
 
+  expect(sanitized.event).toBe("response.failed")
   expect(JSON.parse(sanitized.data ?? "{}") as { type?: string }).toMatchObject(
     {
       type: "response.failed",

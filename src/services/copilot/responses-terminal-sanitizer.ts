@@ -67,7 +67,6 @@ const REQUIRED_COMPLETED_FIELDS = [
   "incomplete_details",
   "object",
   "output",
-  "output_text",
   "status",
   "usage",
 ] as const
@@ -88,6 +87,15 @@ function readRecordValue(value: unknown, key: string): unknown {
     return descriptor && "value" in descriptor ? descriptor.value : undefined
   } catch {
     return undefined
+  }
+}
+
+function hasDataProperty(value: Record<string, unknown>, key: string): boolean {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key)
+    return descriptor !== undefined && "value" in descriptor
+  } catch {
+    return false
   }
 }
 
@@ -587,17 +595,43 @@ function safeCompletedOutput(value: unknown): Array<unknown> {
   })
 }
 
+function deriveCompletedOutputText(output: ReadonlyArray<unknown>): string {
+  let outputText = ""
+  for (const item of output) {
+    if (
+      readRecordValue(item, "type") !== "message"
+      || readRecordValue(item, "role") !== "assistant"
+    ) {
+      continue
+    }
+    const content = readRecordValue(item, "content")
+    if (!Array.isArray(content)) continue
+    for (const block of content) {
+      if (readRecordValue(block, "type") !== "output_text") continue
+      outputText += text(readRecordValue(block, "text")) ?? ""
+    }
+  }
+  return outputText
+}
+
+function hasValidCompletedShape(
+  response: Record<string, unknown>,
+  output: unknown,
+): boolean {
+  return (
+    Array.isArray(output)
+    && readRecordValue(response, "error") === null
+    && readRecordValue(response, "incomplete_details") === null
+    && hasRequiredCompletedFields(response)
+  )
+}
+
 function hasRequiredCompletedFields(
   response: Record<string, unknown>,
 ): boolean {
-  return REQUIRED_COMPLETED_FIELDS.every((key) => {
-    try {
-      const descriptor = Object.getOwnPropertyDescriptor(response, key)
-      return descriptor !== undefined && "value" in descriptor
-    } catch {
-      return false
-    }
-  })
+  return REQUIRED_COMPLETED_FIELDS.every((key) =>
+    hasDataProperty(response, key),
+  )
 }
 
 interface CompletedParts {
@@ -621,28 +655,28 @@ function readCompletedParts(
   const object = readRecordValue(response, "object")
   const status = readRecordValue(response, "status")
   const output = readRecordValue(response, "output")
-  const outputText = text(readRecordValue(response, "output_text"))
+  const outputTextPresent = hasDataProperty(response, "output_text")
+  const upstreamOutputText = readRecordValue(response, "output_text")
+  const outputText = text(upstreamOutputText)
   if (
     parsedType !== "response.completed"
     || sequence === undefined
     || id === undefined
     || object !== SAFE_OBJECT
     || status !== "completed"
-    || !Array.isArray(output)
-    || outputText === undefined
-    || readRecordValue(response, "error") !== null
-    || readRecordValue(response, "incomplete_details") !== null
-    || !hasRequiredCompletedFields(response)
+    || (outputTextPresent && outputText === undefined)
+    || !hasValidCompletedShape(response, output)
   ) {
     return undefined
   }
   const usageValue = readRecordValue(response, "usage")
   const usage = safeUsage(usageValue)
   if (usageValue !== null && usage === null) return undefined
+  const sanitizedOutput = safeCompletedOutput(output)
   return {
     id,
-    output: safeCompletedOutput(output),
-    outputText,
+    output: sanitizedOutput,
+    outputText: outputText ?? deriveCompletedOutputText(sanitizedOutput),
     sequenceNumber: sequence,
     usage,
   }

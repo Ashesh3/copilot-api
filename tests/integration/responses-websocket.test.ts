@@ -1,6 +1,11 @@
 import { afterAll, beforeAll, expect, test } from "bun:test"
 import { randomBytes } from "node:crypto"
 
+import { clearLlmDebugLogs, listLlmDebugLogs } from "~/lib/llm-debug-log"
+import {
+  getAllModelRedirects,
+  setModelRedirectsForTest,
+} from "~/lib/model-redirect"
 import { state } from "~/lib/state"
 import {
   type ResponsesWebSocketData,
@@ -11,12 +16,14 @@ import { handleStartFetch } from "~/start"
 import { initializeTestState, TEST_TIMEOUT } from "./setup"
 
 const LIVE_TIMEOUT = TEST_TIMEOUT * 3
+const MAX_LIVE_MODEL_CANDIDATES = 3
 
 interface WebSocketFrame {
   status?: number
   type?: string
   response?: {
     id?: string
+    output_text?: string
     status?: string
     error?: { code?: string; type?: string } | null
     incomplete_details?: { reason?: string } | null
@@ -31,6 +38,7 @@ let localServer:
 let previousGatewayKey: string | undefined
 
 await initializeTestState()
+const previousModelRedirects = await getAllModelRedirects()
 const liveModels = state.models?.data ?? []
 const nativeResponsesModels = liveModels.filter(
   (model) =>
@@ -48,13 +56,17 @@ const orderedChatFallbackModels = [...chatFallbackModels].sort(
     Number(left.capabilities.supports.reasoning_effort !== undefined)
     - Number(right.capabilities.supports.reasoning_effort !== undefined),
 )
+const nativeResponsesCandidates = firstModelByProvider(
+  nativeResponsesModels,
+).slice(0, MAX_LIVE_MODEL_CANDIDATES)
 const responsesModels = [
-  ...firstModelByProvider(nativeResponsesModels).slice(0, 1),
+  ...nativeResponsesCandidates.slice(0, 1),
   ...firstModelByProvider(orderedChatFallbackModels),
-]
+].slice(0, MAX_LIVE_MODEL_CANDIDATES)
 
 beforeAll(() => {
   previousGatewayKey = state.apiKeyAuth
+  setModelRedirectsForTest([])
   if (responsesModels.length === 0) return
 
   gatewayKey = randomBytes(32).toString("base64url")
@@ -68,13 +80,51 @@ beforeAll(() => {
 }, LIVE_TIMEOUT)
 
 afterAll(async () => {
-  await localServer?.stop(true)
-  state.apiKeyAuth = previousGatewayKey
+  try {
+    await localServer?.stop(true)
+  } finally {
+    clearLlmDebugLogs()
+    state.apiKeyAuth = previousGatewayKey
+    setModelRedirectsForTest(previousModelRedirects)
+  }
 }, LIVE_TIMEOUT)
+
+test.skipIf(nativeResponsesCandidates.length === 0)(
+  "completes a native Responses WebSocket turn",
+  async () => {
+    clearLlmDebugLogs()
+    if (!localServer?.port) {
+      throw new Error("Responses WebSocket endpoint unavailable")
+    }
+    const socket = new WebSocket(
+      `ws://127.0.0.1:${localServer.port}/responses`,
+      { headers: { Authorization: `Bearer ${gatewayKey}` } },
+    )
+    const frames = createFrameQueue(socket)
+    try {
+      await frames.opened
+      const turn = await createFirstSuccessfulTurn(
+        socket,
+        frames,
+        nativeResponsesCandidates,
+      )
+
+      expect(turn.frame.type).toBe("response.completed")
+      expect(turn.frame.response?.status).toBe("completed")
+      expect(turn.frame.response?.output_text).toBeString()
+      await expectCompletedUpstreamPath(turn.model.id, "/responses")
+    } finally {
+      socket.close()
+      await frames.closed
+    }
+  },
+  LIVE_TIMEOUT,
+)
 
 test.skipIf(responsesModels.length === 0)(
   "continues only current-connection responses and keeps stale-ID errors recoverable",
   async () => {
+    clearLlmDebugLogs()
     if (!localServer?.port) {
       throw new Error("Responses WebSocket endpoint unavailable")
     }
@@ -231,6 +281,27 @@ function createFrameQueue(socket: WebSocket): {
   }
 }
 
+async function expectCompletedUpstreamPath(
+  modelId: string,
+  expectedPath: string,
+): Promise<void> {
+  const entries = await waitFor(() => {
+    const matching = listLlmDebugLogs().entries.filter(
+      (entry) => entry.model === modelId,
+    )
+    if (
+      matching.some((entry) => entry.status === "complete")
+      && matching.every((entry) => entry.status !== "pending")
+    ) {
+      return matching
+    }
+    return undefined
+  })
+  expect([...new Set(entries.map((entry) => entry.path))]).toEqual([
+    expectedPath,
+  ])
+}
+
 async function createFirstSuccessfulTurn(
   socket: WebSocket,
   frames: ReturnType<typeof createFrameQueue>,
@@ -299,4 +370,17 @@ function firstModelByProvider<T extends { vendor?: string }>(
     firstByProvider.push(model)
   }
   return firstByProvider
+}
+
+async function waitFor<T>(
+  read: () => T | undefined,
+  timeoutMs = 15_000,
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const value = read()
+    if (value !== undefined) return value
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  throw new Error("Timed out waiting for test condition")
 }

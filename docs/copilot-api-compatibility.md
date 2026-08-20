@@ -218,8 +218,11 @@ Messages maps handled HTTP failures to the status-derived error types listed
 above. The synthetic Responses-from-Messages path emits both its safe error and
 failed terminal events. Native Responses preserves sanitized
 `response.incomplete`, `response.failed`, or `error` families supplied by
-upstream. Valid completed events remain `response.completed`; malformed
-completed events fail closed as `response.failed`.
+upstream. Valid completed events remain `response.completed`; when upstream
+omits the optional `response.output_text` convenience field, the proxy derives
+missing `response.output_text` by concatenating sanitized assistant
+`output_text` blocks in output order. Malformed completed events fail closed as
+`response.failed`.
 A thrown transport or runtime failure after commitment on native Chat or native
 Responses may instead be recorded while the stream closes without a newly
 synthesized error event. Only events already written downstream remain visible;
