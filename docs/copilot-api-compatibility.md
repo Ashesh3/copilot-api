@@ -85,6 +85,7 @@ continuation identity, or terminal stream state.
 Google-style generation uses the same endpoint authority after lossless Google
 to Chat normalization:
 
+<!-- compatibility-contract:google-routing:start -->
 | Google request condition | Selected result |
 | --- | --- |
 | Ordinary text with Chat advertised | /chat/completions |
@@ -94,6 +95,7 @@ to Chat normalization:
 | Chat-only | /chat/completions |
 | Legacy omitted endpoint metadata | /chat/completions |
 | No compatible advertised endpoint | endpoint_translation_unsupported |
+<!-- compatibility-contract:google-routing:end -->
 
 The `ws:/responses` value in a gateway model listing describes the gateway's
 local compatibility transport and does not promise direct upstream WebSocket use.
@@ -202,6 +204,7 @@ that the upstream compatibility layer may append after `message_stop`.
 
 Post-commit behavior is path- and failure-class-specific:
 
+<!-- compatibility-contract:stream-behavior:start -->
 | Surface | Behavior |
 | --- | --- |
 | Messages handled HTTP failure | error event with invalid_request_error, authentication_error, permission_error, not_found_error, request_too_large, rate_limit_error, api_error |
@@ -209,6 +212,7 @@ Post-commit behavior is path- and failure-class-specific:
 | Native Responses terminal families | sanitized response.completed, response.incomplete, response.failed, error |
 | Thrown native Chat transport failure | written chunks then close without synthesized error event |
 | Thrown native Responses transport failure | buffered unwritten chunks may be absent when the stream closes |
+<!-- compatibility-contract:stream-behavior:end -->
 
 Messages maps handled HTTP failures to the status-derived error types listed
 above. The synthetic Responses-from-Messages path emits both its safe error and
@@ -272,12 +276,14 @@ Debug may contain the token when it captured a forwarded request. Inference
 forwards it only when its bounded model claims match the final, unredirected
 requested model; mismatched, malformed, or redirected tokens are not forwarded.
 
-| Surface | Session-token behavior |
+<!-- compatibility-contract:session-token-privacy:start -->
+| Surface | Behavior |
 | --- | --- |
 | Administrator-only LLM Debug | exact forwarded token may be captured |
 | Ordinary handler logs | session token value is redacted |
 | Configuration export | token-keyed values are redacted |
 | Inference forwarding | only a matching unredirected model receives it |
+<!-- compatibility-contract:session-token-privacy:end -->
 
 ## Intentional gateway extensions
 
@@ -308,10 +314,12 @@ error classes are preserved when available. Quota exhaustion maps to `402`,
 deprecated client versions to `466`, and unknown upstream bodies or messages to
 fixed local text.
 
-| HTTP surface | Error behavior |
+<!-- compatibility-contract:error-envelope:start -->
+| Surface | Behavior |
 | --- | --- |
 | Chat and Responses HTTP | OpenAI/Copilot envelope with fixed safe message |
 | /v1/messages and /v1/messages/count_tokens | Anthropic envelope with fixed safe message |
+<!-- compatibility-contract:error-envelope:end -->
 
 Outside LLM Debug, ordinary client errors, logs, telemetry, Sentry events, and
 configuration exports do not expose request bodies, prompts, credentials,

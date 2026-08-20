@@ -12,6 +12,7 @@ import consola from "consola"
 
 import type { Model, ModelsResponse } from "~/services/copilot/get-models"
 
+import { STREAM_BEHAVIOR_CONTRACT } from "~/lib/compatibility-contract-values"
 import { setModelRedirectsForTest } from "~/lib/model-redirect"
 import { setModelSettingsForTest } from "~/lib/model-settings"
 import { state } from "~/lib/state"
@@ -682,6 +683,48 @@ test.each(["response.failed", "error"])(
     })
   },
 )
+
+test.each([
+  "response.completed",
+  "response.incomplete",
+  "response.failed",
+  "error",
+] as const)(
+  "mounted native Responses preserves sanitized %s terminal framing",
+  async (terminalType) => {
+    installModel({ supported_endpoints: ["/responses"] })
+    const privateMarker = `native-${terminalType}-matrix-private-marker`
+    fetchMock.mockImplementationOnce(() =>
+      createTerminalResponsesStream(terminalType, privateMarker),
+    )
+
+    const response = await postResponses({ input: "hello", stream: true })
+    const body = await response.text()
+    const eventOrder = Array.from(
+      body.matchAll(/^event: (.+)$/gm),
+      (match) => match[1],
+    )
+    const payloadTypes = Array.from(
+      body.matchAll(/^data: (\{.*\})$/gm),
+      (match) => (JSON.parse(match[1]) as { type?: unknown }).type,
+    )
+
+    expect(response.status).toBe(200)
+    expect(eventOrder.at(-1)).toBe(terminalType)
+    expect(payloadTypes.at(-1)).toBe(terminalType)
+    expect(body).not.toContain(privateMarker)
+  },
+)
+
+test("exported native Responses terminal contract matches mounted coverage", () => {
+  expect(
+    STREAM_BEHAVIOR_CONTRACT.find(
+      (row) => row.surface === "Native Responses terminal families",
+    )?.behavior,
+  ).toBe(
+    "sanitized response.completed, response.incomplete, response.failed, error",
+  )
+})
 
 test("uses the terminal SSE event name over a mismatched JSON type", async () => {
   installModel({ supported_endpoints: ["/responses"] })
@@ -1570,6 +1613,43 @@ function createPrivateTerminalResponsesStream(
       `event: response.output_text.delta\ndata: ${JSON.stringify(delta)}\n\n`,
       `event: ${terminalType}\ndata: ${JSON.stringify(terminal)}\n\n`,
     ].join(""),
+    {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    },
+  )
+}
+
+function createTerminalResponsesStream(
+  terminalType:
+    | "error"
+    | "response.completed"
+    | "response.failed"
+    | "response.incomplete",
+  privateMarker: string,
+): Response {
+  if (terminalType !== "response.completed") {
+    return createPrivateTerminalResponsesStream(terminalType, privateMarker)
+  }
+
+  const completed = {
+    type: "response.completed",
+    sequence_number: 2,
+    response: {
+      id: "resp_completed_matrix",
+      object: "response",
+      status: "completed",
+      output: [],
+      output_text: "",
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      error: null,
+      incomplete_details: null,
+      metadata: { private: privateMarker },
+    },
+    private: privateMarker,
+  }
+  return new Response(
+    `event: response.completed\ndata: ${JSON.stringify(completed)}\n\n`,
     {
       status: 200,
       headers: { "content-type": "text/event-stream" },

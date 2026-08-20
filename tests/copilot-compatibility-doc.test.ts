@@ -1,4 +1,3 @@
-/* eslint-disable max-lines -- compatibility matrices share one live behavior harness */
 import * as Sentry from "@sentry/bun"
 import { expect, spyOn, test } from "bun:test"
 import consola from "consola"
@@ -8,8 +7,12 @@ import fs, { readFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 
-import type { Model } from "~/services/copilot/get-models"
-
+import {
+  ERROR_ENVELOPE_CONTRACT,
+  getGoogleRoutingContractRows,
+  SESSION_TOKEN_PRIVACY_CONTRACT,
+  STREAM_BEHAVIOR_CONTRACT,
+} from "~/lib/compatibility-contract"
 import { createConfigExportZip } from "~/lib/config-export"
 import {
   type CopilotContractEvent,
@@ -29,16 +32,9 @@ import {
 import { sanitizeHandlerLogArguments } from "~/lib/logger"
 import { state } from "~/lib/state"
 import { copilotControlPlaneRoutes } from "~/routes/copilot-control-plane/route"
-import { selectGoogleUpstreamEndpoint } from "~/routes/google-ai/handler"
-import {
-  createAnthropicStreamError,
-  forwardMessagesError,
-} from "~/routes/messages/error"
-import { messageRoutes } from "~/routes/messages/route"
-import { emitResponsesFailureAsStream } from "~/routes/messages/web-search-helpers"
+import { forwardMessagesError } from "~/routes/messages/error"
 import { server } from "~/server"
 import { COPILOT_API_VERSION } from "~/services/copilot/copilot-contract"
-import { sanitizeResponsesStreamEvent } from "~/services/copilot/create-responses"
 
 const documentPath = new URL(
   "../docs/copilot-api-compatibility.md",
@@ -108,11 +104,10 @@ claude-3-7-sonnet-latest claude-4-sonnet claude-sonnet-4
 claude-opus-4-1-20250805 gpt-4.1 gpt-* gpt-oss-120b gpt-image-1
 chatgpt-4o-latest text-embedding-3-small text-embedding-ada-002
 gemini-2.5-pro gemini-pro dall-e-3 omni-moderation-latest
-grok-3 grok-3-mini deepseek-r1 deepseek-v3.1 llama-3.3-70b-instruct
+grok-3 grok-3-mini deepseek-r1 deepseek-v3.1 deepseek-chat llama-3.3-70b-instruct
 meta-llama/Llama-3.1-405B-Instruct Qwen/Qwen3-235B-A22B qwen2.5-coder-32b
-mistral-large-2411 codestral-2501 microsoft/Phi-4-mini-instruct phi-3.5-mini-instruct`.split(
-  /\s+/,
-)
+mistral-large-2411 mistral-large-latest qwen-max codestral-2501
+microsoft/Phi-4-mini-instruct phi-3.5-mini-instruct`.split(/\s+/)
 
 const allowedModelLanguage = `GPT-compatible clients|Codex-compatible transport
 Claude-compatible API|Gemini-compatible clients|GPT family|Claude models
@@ -121,51 +116,9 @@ Claude-Sonnet-compatible clients|Codex-model discovery|GPT-5-series models
 Gemini-compatible transports|Use model from discovery.|Use model-id from discovery.
 Use MODEL_ID from discovery.|Use requestedModel from discovery.
 POST /models/:model:generateContent|Grok-compatible clients|DeepSeek models
-Llama-compatible APIs|Qwen family|Mistral-based providers|Phi models`.split(
+Llama-compatible APIs|Qwen family|Mistral-based providers|Phi models
+latest model generation|large language models|chat capability|maximum output`.split(
   /\s*\|\s*|\n/,
-)
-
-const blanketStreamExamples =
-  `After headers are committed, all failures use an in-band error event.
-Every late stream error is sent through the source protocol error event.
-Post-commit failures always become in-band protocol errors.
-Following commitment, stream failures invariably appear in the event stream.
-Once the response starts, errors are sent to the client as protocol events without exception.
-After HTTP headers have been sent, each exception is delivered as an event.
-In every case following commitment, disconnects are emitted to the client through the event stream.
-Committed-stream errors are universally surfaced as protocol events.
-After response bytes are written, any fault is framed as an SSE event.
-Once streaming begins, all exceptions are encoded in-band.
-All errors after the first byte are represented within the protocol.
-Once committed, failures become protocol-native frames.
-Late failures are always encoded in the SSE.
-Post-header exceptions are reported as stream frames.
-After commit. Every failure is returned in-band.
-The response has started. Any later error is carried by the event stream.
-Headers are already sent | Failures always arrive as protocol events
-| After headers are sent | Every failure is reported through a stream event |`.split(
-    "\n",
-  )
-
-const blanketTokenExamples = `The session token is never logged or captured.
-Copilot-Session-Token cannot appear in diagnostics.
-No diagnostic surface ever captures the session token.
-The session token does not appear in any diagnostic.
-Copilot-Session-Token is absent from every diagnostic log.
-Session-token values are universally absent from diagnostic output.
-\`Copilot-Session-Token\` is guaranteed absent from all diagnostics.
-Diagnostics are universally free of session-token values.
-All logging and tracing omit Copilot-Session-Token.
-The session token never reaches logs or traces.
-Copilot-Session-Token is redacted everywhere.
-The session token is sensitive. It is never logged or captured.
-No logs, traces, or LLM Debug captures contain session credentials.
-The session token is sensitive. Every diagnostic redacts it.
-Session-token values are secrets | They never appear in logs or traces
-Diagnostics contain no credentials. This includes Copilot-Session-Token.
-| Session-token | Always redacted in every diagnostic |
-Administrator-only LLM Debug exists, but Copilot-Session-Token never appears in any diagnostic.`.split(
-  "\n",
 )
 
 const normalizeWhitespace = (value: string): string =>
@@ -175,84 +128,12 @@ function registeredRoutes(): Set<string> {
   return new Set(server.routes.map((route) => `${route.method} ${route.path}`))
 }
 
-function modelWithEndpoints(
-  supportedEndpoints: Array<string> | undefined,
-  vendor = "placeholder",
-): Model {
-  return {
-    id: "model-placeholder",
-    name: "Model Placeholder",
-    object: "model",
-    preview: false,
-    vendor,
-    version: "1",
-    model_picker_enabled: true,
-    supported_endpoints: supportedEndpoints,
-    capabilities: {
-      family: vendor === "anthropic" ? "claude" : "placeholder",
-      limits: {},
-      object: "model_capabilities",
-      supports: {},
-      tokenizer: "cl100k_base",
-      type: "chat",
-    },
-  }
-}
-
 function googleRouteMatrix(): Record<string, string> {
-  const cases = [
-    {
-      surface: "Ordinary text with Chat advertised",
-      endpoints: ["/chat/completions", "/v1/messages", "/responses"],
-      vendor: "openai",
-    },
-    {
-      surface:
-        "Non-Anthropic, Chat unavailable; Responses and Messages advertised",
-      endpoints: ["/v1/messages", "/responses"],
-      vendor: "openai",
-    },
-    {
-      surface: "Anthropic, Chat unavailable; Responses and Messages advertised",
-      endpoints: ["/v1/messages", "/responses"],
-      vendor: "anthropic",
-    },
-    {
-      surface: "Messages-only and lossless",
-      endpoints: ["/v1/messages"],
-      vendor: "anthropic",
-    },
-    {
-      surface: "Chat-only",
-      endpoints: ["/chat/completions"],
-      vendor: "openai",
-    },
-    {
-      surface: "Legacy omitted endpoint metadata",
-      endpoints: undefined,
-      vendor: "openai",
-    },
-    {
-      surface: "No compatible advertised endpoint",
-      endpoints: [],
-      vendor: "openai",
-    },
-  ] as const
-
   return Object.fromEntries(
-    cases.map(({ endpoints, surface, vendor }) => {
-      const decision = selectGoogleUpstreamEndpoint({
-        payload: {
-          model: "model-placeholder",
-          messages: [{ role: "user", content: "hello" }],
-        },
-        selectedModel: modelWithEndpoints(
-          endpoints === undefined ? undefined : [...endpoints],
-          vendor,
-        ),
-      })
-      return [surface, "code" in decision ? decision.code : decision.target]
-    }),
+    getGoogleRoutingContractRows().map(({ behavior, surface }) => [
+      surface,
+      behavior,
+    ]),
   )
 }
 
@@ -303,10 +184,18 @@ function isStaticModelIdentifier(token: string): boolean {
       normalized,
     )
     || /^omni-moderation-[a-z0-9][\w.:[\]-]*$/i.test(normalized)
-    || /^(?:grok|deepseek|llama|mistral|codestral|phi)-(?=[\w.:[\]-]*\d)[\w.:[\]-]+$/i.test(
+    || /^(?:grok|llama|codestral|phi)-(?=[\w.:[\]-]*\d)[\w.:[\]-]+$/i.test(
       normalized,
     )
-    || /^qwen(?:-|(?=\d))(?=[\w.:[\]-]*\d)[\w.:[\]-]+$/i.test(normalized)
+    || /^deepseek-(?:chat|coder|reasoner|r\d|v\d|(?=[\w.:[\]-]*\d)[\w.:[\]-]+)$/i.test(
+      normalized,
+    )
+    || /^mistral-(?:large|medium|small|nemo|saba)(?:-[\w.:[\]-]+)?$/i.test(
+      normalized,
+    )
+    || /^qwen(?:-|(?=\d))(?:(?=[\w.:[\]-]*\d)[\w.:[\]-]+|max(?:-[\w.:[\]-]+)?)$/i.test(
+      normalized,
+    )
     || /^(?:meta-llama\/llama|qwen\/qwen|microsoft\/phi)(?:-|(?=\d))(?=[\w.:[\]-]*\d)[\w.:[\]-]+$/i.test(
       normalized,
     )
@@ -321,71 +210,6 @@ function staticModelIdentifiers(value: string): Array<string> {
         .map((token) => stripModelTokenSuffix(token)),
     ),
   ]
-}
-
-function proseClauses(value: string): Array<string> {
-  return normalizeWhitespace(
-    value
-      .replaceAll(/```[\s\S]*?```/g, " ")
-      .replaceAll(/`([^`]+)`/g, "$1")
-      .replaceAll(/^\s*\|(?:\s*:?-+:?\s*\|)+\s*$/gm, " ")
-      .replaceAll("|", " "),
-  )
-    .split(/(?<=[.!?;])\s+|\s+[—–]\s+|\s*\n\s*/)
-    .map((sentence) => sentence.trim())
-    .filter(Boolean)
-}
-
-function semanticWindows(value: string): Array<string> {
-  const clauses = proseClauses(value)
-  return clauses.flatMap((clause, index) =>
-    index + 1 < clauses.length ?
-      [clause, `${clause} ${clauses[index + 1]}`]
-    : [clause],
-  )
-}
-
-function blanketStreamClaims(value: string): Array<string> {
-  return semanticWindows(value).filter((clause) => {
-    const lower = clause.toLowerCase()
-    const committed =
-      /after (?:http )?headers|headers (?:are|have been) (?:committed|sent)|headers (?:are )?already (?:committed|sent)|post[- ]headers?|post-commit|committed[- ]stream|late stream|late failures?|later (?:faults?|errors?|exceptions?|failures?)|once (?:the )?(?:response|stream|streaming) (?:starts|begins)|(?:response|stream|streaming) has started|once committed|following commitment|after commit(?:ment)?|after (?:response )?bytes? (?:are |have been )?written|after (?:the )?first byte/.test(
-        lower,
-      )
-    const failure = /failures?|faults?|errors?|exceptions?|disconnects?/.test(
-      lower,
-    )
-    const universal =
-      /\b(?:all|always|any|each|every|invariably|necessarily|universally|the source protocol)\b|without exception|in every case|\b(?:failures?|faults?|errors?|exceptions?|disconnects?) (?:are|become)\b|\b(?:failures?|faults?|errors?|exceptions?|disconnects?) are reported\b/.test(
-        lower,
-      )
-    const inBand =
-      /in-band|returned in-band|carried by (?:the )?event stream|arrive as (?:an? )?(?:protocol )?events?|error event|event stream|sse event|stream event|stream frame|protocol-native frame|sent (?:to|on) the (?:client|stream)|protocol event|delivered as (?:an? )?event|emitted to the client|surfaced as (?:an? )?(?:protocol )?event|framed as (?:an? )?(?:sse )?event|encoded in (?:the )?sse|encoded in-band|reported through (?:an? )?(?:stream )?event|represented (?:within|in) the protocol/.test(
-        lower,
-      )
-    const negated =
-      /\b(?:not|never) (?:all|any|each|every)|\b(?:do|does) not always|\bmay not always/.test(
-        lower,
-      )
-    return committed && failure && universal && inBand && !negated
-  })
-}
-
-function blanketTokenPrivacyClaims(value: string): Array<string> {
-  return semanticWindows(value).filter((clause) => {
-    const lower = clause.toLowerCase()
-    const token =
-      /session[- ](?:credentials?|tokens?)|copilot-session-token/.test(lower)
-    const blanket =
-      /never (?:logged|captured|recorded|exposed|stored)|never (?:appears?|reaches?|enters?) (?:in )?(?:any |all )?(?:logs?|traces?|diagnostics?)|cannot appear|guaranteed absent|redacted everywhere|no .*diagnostic.*(?:captures?|contains?|records?)|diagnostics? contain no credentials|no (?:log|trace).*(?:capture|contain|record)|(?:absent|excluded|omitted) from (?:all|every) diagnostic|universally absent from diagnostic(?: output)?|diagnostics? (?:are|remain) universally free|(?:all|every) (?:logging|logs?|tracing|traces?|diagnostics?) (?:and (?:logging|logs?|tracing|traces?|diagnostics?) )?(?:omit|exclude|redact)|always redacted in every diagnostic|(?:do|does|will) not (?:appear|occur|exist|show up|be present) in (?:any|all|every) (?:log|trace|diagnostic)/.test(
-        lower,
-      )
-    const scoped =
-      /\bordinary\b|outside (?:administrator-only )?llm debug|except (?:for )?(?:administrator-only )?llm debug|unless (?:it is )?captured by (?:administrator-only )?llm debug|(?:administrator-only )?llm debug (?:may|might|can|does|is allowed to) (?:capture|contain|include|record|retain|expose)/.test(
-        lower,
-      )
-    return token && blanket && !scoped
-  })
 }
 
 async function withTempDirectory<T>(
@@ -525,79 +349,13 @@ async function probeThrownNativeStreamFailures(privateMarker: string): Promise<{
 }
 
 // The behavior matrix intentionally probes every public diagnostic boundary.
-// eslint-disable-next-line max-lines-per-function
+
 async function deriveCompatibilityMatrix(): Promise<{
   errors: Record<string, string>
   privacy: Record<string, string>
   streams: Record<string, string>
 }> {
   const privateMarker = "compatibility-private-marker"
-  const anthropicErrorTypes = [400, 401, 403, 404, 413, 429, 500].map(
-    (status) =>
-      createAnthropicStreamError(
-        new HTTPError(privateMarker, Response.json({}, { status })),
-      ).error.type,
-  )
-  expect(anthropicErrorTypes).toEqual([
-    "invalid_request_error",
-    "authentication_error",
-    "permission_error",
-    "not_found_error",
-    "request_too_large",
-    "rate_limit_error",
-    "api_error",
-  ])
-
-  const syntheticEvents: Array<{ data: string; event?: string }> = []
-  await emitResponsesFailureAsStream(
-    {
-      writeSSE: (event) => {
-        syntheticEvents.push(event)
-        return Promise.resolve()
-      },
-    },
-    { model: "model-placeholder", responseId: "response-placeholder" },
-  )
-  const syntheticEventNames = syntheticEvents.map((event) => event.event)
-  const syntheticEventTypes = syntheticEvents.map((event) => {
-    const parsed = JSON.parse(event.data) as { type?: unknown }
-    return typeof parsed.type === "string" ? parsed.type : "unknown"
-  })
-  expect(syntheticEventNames).toEqual(["error", "response.failed"])
-  expect(syntheticEventTypes).toEqual(["error", "response.failed"])
-
-  const terminalTypes = [
-    {
-      event: "response.completed",
-      data: JSON.stringify({
-        type: "response.completed",
-        sequence_number: 3,
-        response: {
-          id: "response-placeholder",
-          object: "response",
-          status: "completed",
-          output: [],
-          output_text: "",
-          usage: null,
-          error: null,
-          incomplete_details: null,
-        },
-      }),
-    },
-    { event: "response.incomplete", data: undefined },
-    { event: "response.failed", data: undefined },
-    { event: "error", data: undefined },
-  ].map((event) => {
-    const terminal = sanitizeResponsesStreamEvent(event)
-    return (JSON.parse(terminal.data ?? "null") as { type?: unknown }).type
-  })
-  expect(terminalTypes).toEqual([
-    "response.completed",
-    "response.incomplete",
-    "response.failed",
-    "error",
-  ])
-
   const nativeFailures = await probeThrownNativeStreamFailures(privateMarker)
   expect(nativeFailures.chatBody).toContain("partial-chat")
   expect(nativeFailures.chatBody).not.toContain("event: error")
@@ -726,37 +484,23 @@ async function deriveCompatibilityMatrix(): Promise<{
     captureException.mockRestore()
   }
 
-  const messagePaths = messageRoutes.routes
-    .filter((route) => route.method === "POST")
-    .map((route) =>
-      route.path === "/" ? "/v1/messages" : `/v1/messages${route.path}`,
-    )
+  const messagePaths = [...registeredRoutes()]
+    .filter((route) => route.startsWith("POST /v1/messages"))
+    .map((route) => route.slice("POST ".length))
+    .filter((route) => !route.includes(":"))
     .sort()
   expect(messagePaths).toEqual(["/v1/messages", "/v1/messages/count_tokens"])
 
   return {
-    errors: {
-      "Chat and Responses HTTP":
-        "OpenAI/Copilot envelope with fixed safe message",
-      [messagePaths.join(" and ")]:
-        "Anthropic envelope with fixed safe message",
-    },
-    privacy: {
-      "Administrator-only LLM Debug": "exact forwarded token may be captured",
-      "Ordinary handler logs": "session token value is redacted",
-      "Configuration export": "token-keyed values are redacted",
-      "Inference forwarding": "only a matching unredirected model receives it",
-    },
-    streams: {
-      "Messages handled HTTP failure": `error event with ${[...new Set(anthropicErrorTypes)].join(", ")}`,
-      "Synthetic Responses-from-Messages failure":
-        syntheticEventNames.join(" then "),
-      "Native Responses terminal families": `sanitized ${terminalTypes.join(", ")}`,
-      "Thrown native Chat transport failure":
-        "written chunks then close without synthesized error event",
-      "Thrown native Responses transport failure":
-        "buffered unwritten chunks may be absent when the stream closes",
-    },
+    errors: Object.fromEntries(
+      ERROR_ENVELOPE_CONTRACT.map((row) => [row.surface, row.behavior]),
+    ),
+    privacy: Object.fromEntries(
+      SESSION_TOKEN_PRIVACY_CONTRACT.map((row) => [row.surface, row.behavior]),
+    ),
+    streams: Object.fromEntries(
+      STREAM_BEHAVIOR_CONTRACT.map((row) => [row.surface, row.behavior]),
+    ),
   }
 }
 
@@ -768,6 +512,36 @@ function expectMatrixRows(
   for (const [surface, behavior] of Object.entries(matrix)) {
     expect(normalized).toContain(`| ${surface} | ${behavior} |`)
   }
+}
+
+function documentContractTable(
+  document: string,
+  marker: string,
+): Array<[string, string]> {
+  const match = new RegExp(
+    `<!-- compatibility-contract:${marker}:start -->\\s*([\\s\\S]*?)\\s*<!-- compatibility-contract:${marker}:end -->`,
+  ).exec(document)
+  if (!match)
+    throw new Error(`Missing compatibility contract marker: ${marker}`)
+
+  return match[1]
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(
+      (line) =>
+        line.startsWith("|")
+        && !/^\|\s*(?:Surface|Google request condition|---)/i.test(line),
+    )
+    .map((line) => {
+      const cells = line
+        .slice(1, -1)
+        .split("|")
+        .map((cell) => cell.trim().replaceAll("`", ""))
+      if (cells.length !== 2) {
+        throw new Error(`Expected two contract columns: ${line}`)
+      }
+      return [cells[0], cells[1]]
+    })
 }
 
 test("documents the registered route matrix and reviewed endpoint authority", async () => {
@@ -858,33 +632,25 @@ test("documents behavior-derived stream, privacy, and error matrices", async () 
   expectMatrixRows(document, matrix.errors)
 })
 
-test("rejects adversarial blanket stream and session-token claims", async () => {
+test("documents the exact structured stream and privacy contract", async () => {
   const document = await readFile(documentPath, "utf8")
+  const matrix = await deriveCompatibilityMatrix()
 
-  expect(blanketStreamClaims(document)).toEqual([])
-  expect(blanketTokenPrivacyClaims(document)).toEqual([])
-
-  for (const claim of blanketStreamExamples) {
-    expect(blanketStreamClaims(claim).length).toBeGreaterThan(0)
-  }
-  for (const claim of blanketTokenExamples) {
-    expect(blanketTokenPrivacyClaims(claim).length).toBeGreaterThan(0)
-  }
-  expect(
-    blanketTokenPrivacyClaims(
-      "Ordinary logs never expose the session token; administrator-only LLM Debug may capture it.",
-    ),
-  ).toEqual([])
-  expect(
-    blanketTokenPrivacyClaims(
-      "All diagnostics except administrator-only LLM Debug redact Copilot-Session-Token.",
-    ),
-  ).toEqual([])
-  expect(
-    blanketStreamClaims(
-      "Not every post-commit failure is emitted through a protocol event.",
-    ),
-  ).toEqual([])
+  expect(documentContractTable(document, "google-routing")).toEqual(
+    getGoogleRoutingContractRows().map(({ behavior, surface }) => [
+      surface,
+      behavior,
+    ]),
+  )
+  expect(documentContractTable(document, "stream-behavior")).toEqual(
+    Object.entries(matrix.streams),
+  )
+  expect(documentContractTable(document, "session-token-privacy")).toEqual(
+    Object.entries(matrix.privacy),
+  )
+  expect(documentContractTable(document, "error-envelope")).toEqual(
+    Object.entries(matrix.errors),
+  )
 })
 
 test("links the compatibility report from README", async () => {

@@ -13,6 +13,7 @@ import { streamSSE } from "hono/streaming"
 import type { ChatCompletionsPayload } from "../src/services/copilot/create-chat-completions"
 import type { ModelsResponse } from "../src/services/copilot/get-models"
 
+import { ANTHROPIC_HTTP_ERROR_STATUS_TYPES } from "../src/lib/compatibility-contract-values"
 import { HTTPError, LocalHTTPError } from "../src/lib/error"
 import { setModelRedirectsForTest } from "../src/lib/model-redirect"
 import { setModelSettingsForTest } from "../src/lib/model-settings"
@@ -30,10 +31,12 @@ let delayedUpstreamAborted = false
 let lastUpstreamPath: string | undefined
 let streamMode:
   | "finish-then-invalid"
+  | "native-late-http-error"
   | "immediate"
   | "native-metadata"
   | "stall-body"
   | "stall-fetch" = "stall-body"
+let nativeLateErrorStatus = 429
 
 const nativeMessagesModels: ModelsResponse = {
   object: "list",
@@ -210,6 +213,43 @@ const fetchMock = mock((_url: string | URL | Request, init?: RequestInit) => {
     return createFinishThenInvalidStream()
   }
   if (streamMode === "native-metadata") return createNativeMetadataStream()
+  if (streamMode === "native-late-http-error") {
+    const encoder = new TextEncoder()
+    return new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            encoder.encode(
+              `event: message_start\ndata: ${JSON.stringify({
+                type: "message_start",
+                message: {
+                  id: "msg_late_error",
+                  type: "message",
+                  role: "assistant",
+                  model: "claude-current",
+                  content: [],
+                  stop_reason: null,
+                  stop_sequence: null,
+                  usage: { input_tokens: 1, output_tokens: 0 },
+                },
+              })}\n\n`,
+            ),
+          )
+          setTimeout(
+            () =>
+              controller.error(
+                new HTTPError(
+                  "native stream private marker",
+                  Response.json({}, { status: nativeLateErrorStatus }),
+                ),
+              ),
+            0,
+          )
+        },
+      }),
+      { headers: { "content-type": "text/event-stream" } },
+    )
+  }
   return createStalledStream(init?.signal)
 })
 
@@ -290,6 +330,7 @@ beforeEach(() => {
   delayedUpstreamAborted = false
   lastUpstreamPath = undefined
   streamMode = "stall-body"
+  nativeLateErrorStatus = 429
   state.accountType = "individual"
   state.copilotToken = "copilot-token"
   state.githubToken = "github-token"
@@ -369,6 +410,46 @@ test("does not emit a successful terminal pair when the upstream stream errors",
   expect(eventTypes).not.toContain("message_delta")
   expect(eventTypes).not.toContain("message_stop")
 })
+
+test.each(
+  ANTHROPIC_HTTP_ERROR_STATUS_TYPES.map(
+    ({ status, type }) => [status, type] as const,
+  ),
+)(
+  "mounted native Messages stream maps late HTTP %s to %s",
+  async (status, type) => {
+    streamMode = "native-late-http-error"
+    nativeLateErrorStatus = status
+    state.models = nativeMessagesModels
+
+    const response = await server.request(
+      "/v1/messages",
+      createNativeMessagesRequest(),
+    )
+    const body = await response.text()
+    const events = Array.from(
+      body.matchAll(/^event: (.+)$/gm),
+      (match) => match[1],
+    )
+    const payloads = Array.from(
+      body.matchAll(/^data: (\{.*\})$/gm),
+      (match) =>
+        JSON.parse(match[1]) as {
+          error?: { type?: unknown }
+          type?: unknown
+        },
+    )
+
+    expect(response.status).toBe(200)
+    expect(events).toEqual(["message_start", "error"])
+    expect(payloads.map((payload) => payload.type)).toEqual([
+      "message_start",
+      "error",
+    ])
+    expect(payloads.at(-1)?.error?.type).toBe(type)
+    expect(body).not.toContain("native stream private marker")
+  },
+)
 
 test.each([
   [

@@ -9,6 +9,7 @@ import {
 } from "../src/lib/model-settings"
 import { runWithRoutingAffinity } from "../src/lib/routing-affinity"
 import {
+  applySentryRequestDiagnosticsToScope,
   createSentryInitOptions,
   createSentryChatSpanOptions,
   createSentryInvokeAgentSpanOptions,
@@ -585,3 +586,148 @@ test("scrubs affinity headers from every Sentry send callback", () => {
   expect(serialized).toContain("[Filtered]")
   expect(serialized).toContain("visible")
 })
+
+test.each(["/v1beta/models", "/v1/models", "/models"])(
+  "templates Google model/action data in Sentry events for %s",
+  (prefix) => {
+    const model = "sentry-private-model"
+    const action = "sentry-private-action"
+    const path = `${prefix}/${model}:${action}/`
+    const url = `https://gateway.example${path}?alt=sse&visible=1`
+    const options = createSentryInitOptions(
+      "https://public@example.ingest.sentry.io/1",
+    )
+    const makeEvent = () => ({
+      type: "transaction" as const,
+      transaction: `POST ${path}`,
+      request: { method: "POST", url },
+      contexts: {
+        response: { status_code: 404 },
+        trace: {
+          trace_id: "a".repeat(32),
+          span_id: "b".repeat(16),
+          data: {
+            "http.request.method": "POST",
+            "http.route": path,
+            "url.full": url,
+            "url.path": path,
+          },
+        },
+      },
+      spans: [
+        {
+          trace_id: "a".repeat(32),
+          span_id: "c".repeat(16),
+          start_timestamp: 1,
+          description: `POST ${url}`,
+          data: {
+            "http.request.method": "POST",
+            "http.response.status_code": 404,
+            "http.route": path,
+            "url.full": url,
+            "url.path": path,
+          },
+        },
+      ],
+    })
+    const beforeSend = options.beforeSend as
+      | ((event: ReturnType<typeof makeEvent>) => ReturnType<typeof makeEvent>)
+      | undefined
+    const beforeSendTransaction = options.beforeSendTransaction as
+      | ((event: ReturnType<typeof makeEvent>) => ReturnType<typeof makeEvent>)
+      | undefined
+
+    for (const hook of [beforeSend, beforeSendTransaction]) {
+      const event = makeEvent()
+      expect(hook?.(event)).toBe(event)
+      const serialized = JSON.stringify(event)
+
+      expect(serialized).not.toContain(model)
+      expect(serialized).not.toContain(action)
+      expect(serialized).toContain(`${prefix}/:modelAction`)
+      expect(serialized).toContain("POST")
+      expect(serialized).toContain("404")
+      expect(serialized).toContain("alt=sse")
+    }
+  },
+)
+
+test.each([
+  { method: "GET", path: "/v1/models/model-discovery-id" },
+  { method: "POST", path: "/models/session" },
+  { method: "POST", path: "/models/session/intent" },
+] as const)(
+  "does not relabel non-Google Sentry request diagnostics for $method $path",
+  ({ method, path }) => {
+    const scope = new Sentry.Scope()
+
+    applySentryRequestDiagnosticsToScope(scope, {
+      method,
+      path,
+      url: `https://gateway.example${path}`,
+    })
+
+    expect(scope.getScopeData().transactionName).toBeUndefined()
+    expect(
+      scope.getScopeData().sdkProcessingMetadata.normalizedRequest,
+    ).toBeUndefined()
+  },
+)
+
+test.each([
+  { method: "GET", path: "/v1/models/model-discovery-id" },
+  { method: "POST", path: "/models/session" },
+] as const)(
+  "preserves non-Google Sentry event routes for $method $path",
+  ({ method, path }) => {
+    const options = createSentryInitOptions(
+      "https://public@example.ingest.sentry.io/1",
+    )
+    const event = {
+      type: "transaction" as const,
+      transaction: `${method} ${path}`,
+      request: { method, url: `https://gateway.example${path}` },
+      contexts: {
+        trace: {
+          data: { "http.request.method": method, "http.route": path },
+        },
+      },
+    }
+    const beforeSendTransaction = options.beforeSendTransaction as
+      | ((value: typeof event) => typeof event | null)
+      | undefined
+
+    beforeSendTransaction?.(event)
+
+    expect(event.transaction).toBe(`${method} ${path}`)
+    expect(event.request.url).toBe(`https://gateway.example${path}`)
+    expect(event.contexts.trace.data["http.route"]).toBe(path)
+  },
+)
+
+test.each(["/v1beta/models", "/v1/models", "/models"])(
+  "templates Google request diagnostics stored on a Sentry scope for %s",
+  (prefix) => {
+    const scope = new Sentry.Scope()
+    const model = "scope-private-model"
+    const action = "scope-private-action"
+    const path = `${prefix}/${model}:${action}/?alt=sse`
+    const url = `https://gateway.example${path}`
+
+    applySentryRequestDiagnosticsToScope(scope, {
+      method: "POST",
+      path,
+      url,
+    })
+
+    const scopeData = scope.getScopeData()
+    const serialized = JSON.stringify(scopeData)
+    expect(scopeData.transactionName).toBe(`POST ${prefix}/:modelAction`)
+    expect(scopeData.sdkProcessingMetadata.normalizedRequest).toMatchObject({
+      method: "POST",
+      url: `https://gateway.example${prefix}/:modelAction?alt=sse`,
+    })
+    expect(serialized).not.toContain(model)
+    expect(serialized).not.toContain(action)
+  },
+)

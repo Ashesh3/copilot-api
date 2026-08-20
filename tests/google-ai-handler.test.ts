@@ -14,6 +14,7 @@ import consola from "consola"
 import type { ResponsesPayload } from "../src/services/copilot/create-responses"
 import type { ModelsResponse } from "../src/services/copilot/get-models"
 
+import { getGoogleRoutingContractRows } from "../src/lib/compatibility-contract"
 import { setModelRedirectsForTest } from "../src/lib/model-redirect"
 import { state } from "../src/lib/state"
 import { selectGoogleUpstreamEndpoint } from "../src/routes/google-ai/handler"
@@ -279,131 +280,192 @@ test.each([
   },
 )
 
-test("does not expose an unknown Google action suffix to diagnostics", async () => {
-  const privateAction = "private-action-marker"
-  const privateBody = "private-body-marker"
-  const consoleLog = spyOn(console, "log").mockImplementation(() => undefined)
-  const debugLog = spyOn(consola, "debug")
-  const errorLog = spyOn(consola, "error")
-  const sentryLog = spyOn(Sentry.logger, "info")
-  const captureException = spyOn(Sentry, "captureException").mockImplementation(
-    () => "event-id",
-  )
-  state.debug = true
-  try {
-    const response = await server.request(
-      `/v1/models/gpt-4o-mini:${privateAction}`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: privateBody,
-      },
-    )
+test.each(["/v1beta/models", "/v1/models", "/models"] as const)(
+  "does not expose an unknown Google route or inspect its body for %s",
+  async (prefix) => {
+    const privateModel = "private-model-marker"
+    const privateAction = "private-action-marker"
+    const privateBody = "private-body-marker"
+    const consoleLog = spyOn(console, "log").mockImplementation(() => undefined)
+    const debugLog = spyOn(consola, "debug")
+    const errorLog = spyOn(consola, "error")
+    const sentryLog = spyOn(Sentry.logger, "info")
+    const captureException = spyOn(
+      Sentry,
+      "captureException",
+    ).mockImplementation(() => "event-id")
+    state.debug = true
+    try {
+      const request = new Request(
+        `http://localhost${prefix}/${privateModel}:${privateAction}/?alt=sse`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: privateBody,
+        },
+      )
+      let cloneCalls = 0
+      Object.defineProperty(request, "clone", {
+        configurable: true,
+        value: () => {
+          cloneCalls += 1
+          throw new Error("debug logger read an unsupported Google body")
+        },
+      })
+      const response = await server.fetch(request)
 
-    expect(response.status).toBe(400)
-    expect(await response.text()).not.toContain(privateAction)
-    expect(
-      JSON.stringify([
+      expect([400, 404]).toContain(response.status)
+      expect(await response.text()).not.toContain(privateAction)
+      const output = JSON.stringify([
         consoleLog.mock.calls,
         debugLog.mock.calls,
         errorLog.mock.calls,
         sentryLog.mock.calls,
         captureException.mock.calls,
-      ]),
-    ).not.toContain(privateAction)
-    const consoleOutput = JSON.stringify(consoleLog.mock.calls)
-    expect(consoleOutput).not.toContain(privateBody)
-    expect(consoleOutput).not.toContain("Body:")
-    expect(consoleOutput).not.toContain("Body (sanitized):")
-  } finally {
-    state.debug = false
-    consoleLog.mockRestore()
-    debugLog.mockRestore()
-    errorLog.mockRestore()
-    sentryLog.mockRestore()
-    captureException.mockRestore()
-  }
-})
+      ])
+      expect(output).not.toContain(privateModel)
+      expect(output).not.toContain(privateAction)
+      expect(output).toContain(`${prefix}/:modelAction`)
+      expect(cloneCalls).toBe(0)
+      const consoleOutput = JSON.stringify(consoleLog.mock.calls)
+      expect(consoleOutput).not.toContain(privateBody)
+      expect(consoleOutput).not.toContain("Body:")
+      expect(consoleOutput).not.toContain("Body (sanitized):")
+    } finally {
+      state.debug = false
+      consoleLog.mockRestore()
+      debugLog.mockRestore()
+      errorLog.mockRestore()
+      sentryLog.mockRestore()
+      captureException.mockRestore()
+    }
+  },
+)
 
-test("does not expose an unauthenticated Google action suffix", async () => {
-  const privateAction = "private-unauthenticated-action"
-  const consoleWarn = spyOn(consola, "warn")
-  const captureMessage = spyOn(Sentry, "captureMessage").mockImplementation(
-    () => "event-id",
+test.each(["/v1beta/models", "/v1/models", "/models"] as const)(
+  "does not expose an unauthenticated Google route for %s",
+  async (prefix) => {
+    const privateModel = "private-unauthenticated-model"
+    const privateAction = "private-unauthenticated-action"
+    const consoleWarn = spyOn(consola, "warn")
+    const captureMessage = spyOn(Sentry, "captureMessage").mockImplementation(
+      () => "event-id",
+    )
+    state.apiKeyAuth = "gateway-key"
+    try {
+      const response = await server.request(
+        `${prefix}/${privateModel}:${privateAction}/?alt=sse`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-copilot-peer-ip": "198.51.100.240",
+          },
+          body: "private-body-marker",
+        },
+      )
+
+      expect(response.status).toBe(401)
+      const output = JSON.stringify([
+        consoleWarn.mock.calls,
+        captureMessage.mock.calls,
+      ])
+      expect(output).not.toContain(privateModel)
+      expect(output).not.toContain(privateAction)
+      expect(output).toContain(`${prefix}/:modelAction`)
+    } finally {
+      state.apiKeyAuth = undefined
+      consoleWarn.mockRestore()
+      captureMessage.mockRestore()
+    }
+  },
+)
+
+test("mounted Google routes match the exported routing contract", async () => {
+  const cases = [
+    {
+      surface: "Ordinary text with Chat advertised",
+      endpoints: ["/chat/completions", "/v1/messages", "/responses"],
+      vendor: "openai",
+    },
+    {
+      surface:
+        "Non-Anthropic, Chat unavailable; Responses and Messages advertised",
+      endpoints: ["/v1/messages", "/responses"],
+      vendor: "openai",
+    },
+    {
+      surface: "Anthropic, Chat unavailable; Responses and Messages advertised",
+      endpoints: ["/v1/messages", "/responses"],
+      vendor: "anthropic",
+    },
+    {
+      surface: "Messages-only and lossless",
+      endpoints: ["/v1/messages"],
+      vendor: "anthropic",
+    },
+    {
+      surface: "Chat-only",
+      endpoints: ["/chat/completions"],
+      vendor: "openai",
+    },
+    {
+      surface: "Legacy omitted endpoint metadata",
+      endpoints: undefined,
+      vendor: "openai",
+    },
+    {
+      surface: "No compatible advertised endpoint",
+      endpoints: [],
+      vendor: "openai",
+    },
+  ] as const
+  const expectedRows = new Map(
+    getGoogleRoutingContractRows().map(({ behavior, surface }) => [
+      surface,
+      behavior,
+    ]),
   )
-  state.apiKeyAuth = "gateway-key"
-  try {
+
+  for (const routingCase of cases) {
+    fetchMock.mockClear()
+    lastPath = undefined
+    const model = structuredClone(responsesCapableModels.data[0])
+    model.id = "route-model"
+    model.name = "Route Model"
+    model.vendor = routingCase.vendor
+    model.capabilities.family =
+      routingCase.vendor === "anthropic" ? "claude" : "gpt"
+    model.supported_endpoints =
+      routingCase.endpoints === undefined ?
+        undefined
+      : [...routingCase.endpoints]
+    state.models = { object: "list", data: [model] }
+
     const response = await server.request(
-      `/v1/models/gpt-4o-mini:${privateAction}`,
+      "/v1/models/route-model:generateContent",
       {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-copilot-peer-ip": "198.51.100.240",
-        },
-        body: "private-body-marker",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: "Hello" }] }],
+          generationConfig: { maxOutputTokens: 32 },
+        }),
       },
     )
 
-    expect(response.status).toBe(401)
-    expect(
-      JSON.stringify([consoleWarn.mock.calls, captureMessage.mock.calls]),
-    ).not.toContain(privateAction)
-  } finally {
-    state.apiKeyAuth = undefined
-    consoleWarn.mockRestore()
-    captureMessage.mockRestore()
+    const expected = expectedRows.get(routingCase.surface)
+    if (expected === "endpoint_translation_unsupported") {
+      expect(response.status).toBe(400)
+      expect(fetchMock).not.toHaveBeenCalled()
+    } else {
+      if (expected === undefined) {
+        throw new Error(`Missing routing contract row: ${routingCase.surface}`)
+      }
+      expect(response.status).toBe(200)
+      expect(lastPath as string | undefined).toBe(expected)
+    }
   }
-})
-
-test.each([
-  {
-    name: "Chat before translated endpoints for ordinary text",
-    endpoints: ["/chat/completions", "/v1/messages", "/responses"],
-    expectedPath: "/chat/completions",
-  },
-  {
-    name: "Responses before Messages when Chat is unavailable",
-    endpoints: ["/v1/messages", "/responses"],
-    expectedPath: "/responses",
-  },
-  {
-    name: "Messages-only text",
-    endpoints: ["/v1/messages"],
-    expectedPath: "/v1/messages",
-  },
-  {
-    name: "Chat-only text",
-    endpoints: ["/chat/completions"],
-    expectedPath: "/chat/completions",
-  },
-  {
-    name: "legacy omitted endpoint metadata",
-    endpoints: undefined,
-    expectedPath: "/chat/completions",
-  },
-] as const)("routes Google $name", async ({ endpoints, expectedPath }) => {
-  const model = structuredClone(responsesCapableModels.data[0])
-  model.id = "route-model"
-  model.name = "Route Model"
-  model.vendor = expectedPath === "/v1/messages" ? "anthropic" : "openai"
-  model.supported_endpoints = endpoints ? [...endpoints] : undefined
-  state.models = { object: "list", data: [model] }
-
-  const response = await server.request(
-    "/v1/models/route-model:generateContent",
-    {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ role: "user", parts: [{ text: "Hello" }] }],
-        generationConfig: { maxOutputTokens: 32 },
-      }),
-    },
-  )
-
-  expect(response.status).toBe(200)
-  expect(lastPath).toBe(expectedPath)
 })
 
 test("routes streaming Google text to an advertised Messages-only endpoint", async () => {

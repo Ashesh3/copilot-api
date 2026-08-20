@@ -4,6 +4,7 @@ import type { ContentfulStatusCode } from "hono/utils/http-status"
 import * as Sentry from "@sentry/bun"
 import consola from "consola"
 
+import { ANTHROPIC_HTTP_ERROR_STATUS_TYPES } from "~/lib/compatibility-contract-values"
 import {
   HTTP_TOO_MANY_REQUESTS_STATUS,
   type SafeHttpErrorInspection,
@@ -80,29 +81,10 @@ function snapshotAnthropicErrorBody(
 }
 
 function anthropicErrorType(status: number): string {
-  switch (status) {
-    case 400: {
-      return "invalid_request_error"
-    }
-    case 401: {
-      return "authentication_error"
-    }
-    case 403: {
-      return "permission_error"
-    }
-    case 404: {
-      return "not_found_error"
-    }
-    case 413: {
-      return "request_too_large"
-    }
-    case HTTP_TOO_MANY_REQUESTS_STATUS: {
-      return "rate_limit_error"
-    }
-    default: {
-      return "api_error"
-    }
-  }
+  return (
+    ANTHROPIC_HTTP_ERROR_STATUS_TYPES.find((entry) => entry.status === status)
+      ?.type ?? "api_error"
+  )
 }
 
 function anthropicErrorMessage(status: number): string {

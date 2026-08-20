@@ -7,6 +7,10 @@ import consola from "consola"
 import { createHash } from "node:crypto"
 
 import { getModelSettings } from "~/lib/model-settings"
+import {
+  isGoogleModelActionRequest,
+  sanitizeRequestDiagnosticReference,
+} from "~/lib/request-diagnostics"
 import { getRequestId } from "~/lib/request-session"
 import { getRoutingAffinity } from "~/lib/routing-affinity"
 
@@ -181,6 +185,88 @@ function scrubRequestHeaders(event: Sentry.Event): void {
   request.headers = scrubbed
 }
 
+function scrubGoogleRouteData(
+  value: unknown,
+  method: string,
+  seen: WeakSet<object> = new WeakSet<object>(),
+): void {
+  if (!isRecord(value) || seen.has(value)) return
+  seen.add(value)
+
+  if (Array.isArray(value)) {
+    const arrayValue = value as Array<unknown>
+    for (let index = 0; index < arrayValue.length; index += 1) {
+      const entry: unknown = arrayValue[index]
+      if (typeof entry === "string") {
+        arrayValue[index] = sanitizeRequestDiagnosticReference(method, entry)
+      } else {
+        scrubGoogleRouteData(entry, method, seen)
+      }
+    }
+    return
+  }
+
+  for (const [key, nestedValue] of Object.entries(value)) {
+    if (typeof nestedValue === "string") {
+      value[key] = sanitizeRequestDiagnosticReference(method, nestedValue)
+    } else {
+      scrubGoogleRouteData(nestedValue, method, seen)
+    }
+  }
+}
+
+function findGoogleRequestMethod(
+  value: unknown,
+  seen: WeakSet<object> = new WeakSet<object>(),
+): string | undefined {
+  if (!isRecord(value) || seen.has(value)) return undefined
+  seen.add(value)
+
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const method = findGoogleRequestMethod(entry, seen)
+      if (method) return method
+    }
+    return undefined
+  }
+
+  const directMethod = [
+    value.method,
+    value["http.method"],
+    value["http.request.method"],
+  ].find((entry): entry is string => typeof entry === "string")
+  if (
+    directMethod
+    && Object.values(value).some(
+      (entry) =>
+        typeof entry === "string"
+        && sanitizeRequestDiagnosticReference(directMethod, entry) !== entry,
+    )
+  ) {
+    return directMethod
+  }
+
+  for (const entry of Object.values(value)) {
+    if (typeof entry === "string") {
+      const separator = entry.indexOf(" ")
+      if (separator > 0) {
+        const method = entry.slice(0, separator)
+        const reference = entry.slice(separator + 1)
+        if (
+          /^[A-Z]+$/i.test(method)
+          && sanitizeRequestDiagnosticReference(method, reference) !== reference
+        ) {
+          return method
+        }
+      }
+      continue
+    }
+    const method = findGoogleRequestMethod(entry, seen)
+    if (method) return method
+  }
+  return undefined
+}
+
 function isHeaderTuple(entry: unknown): entry is HeaderTuple {
   return Array.isArray(entry) && typeof entry[0] === "string"
 }
@@ -189,9 +275,55 @@ function scrubSensitiveData<T>(event: T): T {
   if (isRecord(event)) {
     scrubRequestHeaders(event as Sentry.Event)
     scrubStatsigClientKeyData(event)
+    const googleRequestMethod = findGoogleRequestMethod(event)
+    if (googleRequestMethod) {
+      scrubGoogleRouteData(event, googleRequestMethod)
+    }
   }
 
   return event
+}
+
+interface SentryRequestDiagnostics {
+  method: string
+  path: string
+  url: string
+}
+
+export function applySentryRequestDiagnosticsToScope(
+  scope: Sentry.Scope,
+  request: SentryRequestDiagnostics,
+): void {
+  if (!isGoogleModelActionRequest(request.method, request.path)) return
+
+  const path = sanitizeRequestDiagnosticReference(
+    request.method,
+    request.path,
+  ).split(/[?#]/, 1)[0]
+  const url = sanitizeRequestDiagnosticReference(request.method, request.url)
+  const currentRequest =
+    scope.getScopeData().sdkProcessingMetadata.normalizedRequest
+
+  scope.setTransactionName(`${request.method} ${path}`)
+  scope.setSDKProcessingMetadata({
+    normalizedRequest: {
+      ...currentRequest,
+      method: request.method,
+      url,
+    },
+  })
+}
+
+export function applySentryRequestDiagnostics(
+  request: SentryRequestDiagnostics,
+): void {
+  const isolationScope = Sentry.getIsolationScope()
+  applySentryRequestDiagnosticsToScope(isolationScope, request)
+
+  const currentScope = Sentry.getCurrentScope()
+  if (currentScope !== isolationScope) {
+    applySentryRequestDiagnosticsToScope(currentScope, request)
+  }
 }
 
 function sentryAiSpanDefaultsIntegration() {

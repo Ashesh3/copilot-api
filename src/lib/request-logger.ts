@@ -7,9 +7,13 @@ import type { RoutingTelemetryRequestState } from "./request-session"
 
 import { isHTTPError, snapshotSafeHttpError } from "./error"
 import { isProxyObject } from "./plain-data-snapshot"
+import {
+  sanitizeRequestDiagnosticReference,
+  shouldOmitRequestBodyFromDiagnostics,
+} from "./request-diagnostics"
 import { getRoutingTelemetryRequestState } from "./request-session"
 import { recordRoutingRequest } from "./routing-telemetry"
-import { getSentryModelName } from "./sentry"
+import { applySentryRequestDiagnostics, getSentryModelName } from "./sentry"
 import { state } from "./state"
 import { recordUsage } from "./usage-tracker"
 
@@ -485,7 +489,7 @@ function sanitizeMetadata(value: unknown): unknown {
 async function logRawRequest(c: Context): Promise<void> {
   const method = c.req.method
   const url = requestDiagnosticUrl(c)
-  const omitBody = isUnsupportedGoogleModelAction(c.req.path)
+  const omitBody = shouldOmitRequestBodyFromDiagnostics(c.req.path)
   const headers = Object.fromEntries(c.req.raw.headers.entries())
 
   const lines: Array<string> = []
@@ -545,38 +549,17 @@ function redactRequestUrl(value: string): string {
 }
 
 function requestDiagnosticPath(c: Context): string {
-  const query =
-    c.req.raw.url.includes("?") ? `?${c.req.raw.url.split("?")[1]}` : ""
-  return sanitizeRequestDiagnosticPath(c.req.path) + query
-}
-
-export function sanitizeRequestDiagnosticPath(path: string): string {
-  if (!isGoogleModelActionPath(path)) return path
-  return `${googleRoutePrefix(path)}/:modelAction`
+  const url = new URL(redactRequestUrl(c.req.url))
+  return sanitizeRequestDiagnosticReference(
+    c.req.method,
+    `${url.pathname}${url.search}`,
+  )
 }
 
 function requestDiagnosticUrl(c: Context): string {
   const url = new URL(redactRequestUrl(c.req.url))
-  url.pathname = requestDiagnosticPath(c).split("?", 1)[0]
+  url.pathname = sanitizeRequestDiagnosticReference(c.req.method, url.pathname)
   return url.toString()
-}
-
-function isGoogleModelActionPath(path: string): boolean {
-  return /^\/(?:v1beta\/models|v1\/models|models)\/[^/]+$/.test(path)
-}
-
-function isUnsupportedGoogleModelAction(path: string): boolean {
-  if (!isGoogleModelActionPath(path)) return false
-  const segment = path.slice(path.lastIndexOf("/") + 1)
-  const separator = segment.lastIndexOf(":")
-  const action = separator === -1 ? "" : segment.slice(separator + 1)
-  return action !== "generateContent" && action !== "streamGenerateContent"
-}
-
-function googleRoutePrefix(path: string): string {
-  if (path.startsWith("/v1beta/")) return "/v1beta/models"
-  if (path.startsWith("/v1/")) return "/v1/models"
-  return "/models"
 }
 
 /**
@@ -843,6 +826,12 @@ function sendRequestLogToSentry(opts: {
  * Custom request logger middleware
  */
 export async function requestLogger(c: Context, next: Next): Promise<void> {
+  applySentryRequestDiagnostics({
+    method: c.req.method,
+    path: c.req.path,
+    url: c.req.url,
+  })
+
   // Log raw request in debug mode
   if (state.debug) {
     await logRawRequest(c)

@@ -11,7 +11,7 @@ import {
   isIpBlocked,
   recordFailedAttempt,
 } from "./ip-blocker"
-import { sanitizeRequestDiagnosticPath } from "./request-logger"
+import { sanitizeRequestDiagnosticReference } from "./request-diagnostics"
 import { state } from "./state"
 import { isAllowedTransparentProxyRequest } from "./transparent-proxy"
 
@@ -31,7 +31,10 @@ export async function apiKeyGuard(
   }
 
   const clientIp = extractClientIp(c)
-  const diagnosticPath = sanitizeRequestDiagnosticPath(c.req.path)
+  const diagnosticPath = sanitizeRequestDiagnosticReference(
+    c.req.method,
+    c.req.path,
+  )
   const credentialSupplied = [
     "authorization",
     "x-api-key",

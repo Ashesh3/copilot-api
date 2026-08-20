@@ -10,6 +10,7 @@ import {
 
 import type { ModelsResponse } from "~/services/copilot/get-models"
 
+import { STREAM_BEHAVIOR_CONTRACT } from "~/lib/compatibility-contract-values"
 import { setModelRedirectsForTest } from "~/lib/model-redirect"
 import { setModelSettingsForTest } from "~/lib/model-settings"
 import { setSsePreflushDeadlineForTest } from "~/lib/sse-lifecycle"
@@ -137,8 +138,23 @@ test("emits an in-band Responses failure for a late upstream rejection", async (
     rejectUpstream?.(new Error("late private upstream failure"))
     const rest = await readRemaining(reader)
 
-    expect(rest).toContain("event: error")
-    expect(rest).toContain("event: response.failed")
+    const eventOrder = Array.from(
+      rest.matchAll(/^event: (.+)$/gm),
+      (match) => match[1],
+    )
+    const eventTypes = Array.from(
+      rest.matchAll(/^data: (\{.*\})$/gm),
+      (match) => (JSON.parse(match[1]) as { type?: unknown }).type,
+    )
+    expect(eventOrder).toEqual(["error", "response.failed"])
+    expect(eventTypes).toEqual(["error", "response.failed"])
+    const contractBehavior = STREAM_BEHAVIOR_CONTRACT.find(
+      (row) => row.surface === "Synthetic Responses-from-Messages failure",
+    )?.behavior
+    if (contractBehavior === undefined) {
+      throw new Error("Missing synthetic Responses stream contract row")
+    }
+    expect(eventOrder.join(" then ")).toBe(contractBehavior)
     expect(rest).not.toContain("late private upstream failure")
     expect((await reader.read()).done).toBe(true)
     await new Promise((resolve) => setTimeout(resolve, 0))
