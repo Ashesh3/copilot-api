@@ -1,13 +1,60 @@
-import { afterAll, beforeEach, expect, test } from "bun:test"
+import { afterAll, beforeEach, expect, mock, test } from "bun:test"
 
-import type { ModelsResponse } from "../src/services/copilot/get-models"
+import type { Model, ModelsResponse } from "../src/services/copilot/get-models"
 
 import { setModelRedirectsForTest } from "../src/lib/model-redirect"
 import { setModelSettingsForTest } from "../src/lib/model-settings"
 import { state } from "../src/lib/state"
+import {
+  buildModelDiscoveryListings,
+  modelRoutes,
+} from "../src/routes/models/route"
 import { server } from "../src/server"
 
 const originalModels = state.models
+const originalFetch = globalThis.fetch
+
+function restoreCopilotToken(token: string | undefined): void {
+  state.copilotToken = token
+}
+
+const currentCapabilities = {
+  family: "gpt",
+  limits: {},
+  object: "model_capabilities",
+  supports: {},
+  tokenizer: "cl100k_base",
+  type: "chat",
+} satisfies Model["capabilities"]
+
+const currentModel = {
+  id: "gpt-current",
+  name: "GPT Current",
+  object: "model",
+  version: "2026-08-01",
+  vendor: "OpenAI",
+  model_picker_enabled: true,
+  auto: true,
+  is_chat_default: true,
+  is_chat_fallback: false,
+  info_messages: [{ type: "info", message: "current" }],
+  billing: {
+    auto_discount: 0.5,
+    token_prices: {
+      batch_size: 1_000_000,
+      default: {
+        input_price: 17.5,
+        output_price: 90.25,
+        cache_read_price: 1.75,
+        cache_write_price: 21.875,
+        cache_write_1h_price: 35.5,
+        max_prompt_tokens: 128_000,
+      },
+    },
+  },
+  capabilities: currentCapabilities,
+  supported_endpoints: ["/responses"],
+} satisfies Model
 
 interface ModelsRouteEntry {
   id: string
@@ -263,6 +310,7 @@ beforeEach(() => {
           type: "chat",
         },
       },
+      structuredClone(currentModel),
     ],
   } satisfies ModelsResponse
   setModelSettingsForTest([])
@@ -371,6 +419,130 @@ test("advertises ws:/responses only for native Responses models", async () => {
     "ws:/responses",
   ])
   expect(chatOnly?.supported_endpoints).toEqual(["/chat/completions"])
+})
+
+test("isolates chat-only endpoint arrays from upstream model state", async () => {
+  const listings = await buildModelDiscoveryListings()
+  const listing = listings.find(
+    (model) => model.id === "claude-implicit-medium",
+  )
+  const upstream = state.models?.data.find(
+    (model) => model.id === "claude-implicit-medium",
+  )
+
+  expect(listing?.supported_endpoints).toEqual(["/chat/completions"])
+  listing?.supported_endpoints?.push("/mutated")
+
+  expect(upstream?.supported_endpoints).toEqual(["/chat/completions"])
+})
+
+test("isolates virtual model nested metadata from upstream model state", async () => {
+  const listings = await buildModelDiscoveryListings()
+  const virtual = listings.find(
+    (model) => model.id === "claude-sonnet-4.6:high",
+  )
+  const upstream = state.models?.data.find(
+    (model) => model.id === "claude-sonnet-4.6",
+  )
+
+  virtual?.capabilities?.supports.reasoning_effort?.push("mutated")
+  const virtualBilling = virtual?.billing as {
+    token_prices: { default: { input_price: number } }
+  }
+  virtualBilling.token_prices.default.input_price = 999
+
+  expect(upstream?.capabilities.supports.reasoning_effort).toEqual([
+    "low",
+    "medium",
+    "high",
+    "max",
+  ])
+  expect(
+    (
+      upstream?.billing as {
+        token_prices: { default: { input_price: number } }
+      }
+    ).token_prices.default.input_price,
+  ).toBe(3)
+})
+
+test("preserves cumulative upstream model metadata", async () => {
+  const response = await server.request("/v1/models")
+  const body = (await response.json()) as {
+    data: Array<Record<string, unknown>>
+  }
+  const model = body.data.find((entry) => entry.id === "gpt-current")
+
+  expect(model).toMatchObject({
+    auto: true,
+    is_chat_default: true,
+    is_chat_fallback: false,
+    info_messages: [{ type: "info", message: "current" }],
+    billing: {
+      auto_discount: 0.5,
+      token_prices: {
+        default: {
+          input_price: 17.5,
+          cache_write_1h_price: 35.5,
+        },
+      },
+    },
+  })
+})
+
+test("serves the same normalized row from single-model discovery", async () => {
+  const list = await server.request("/v1/models")
+  const listBody = (await list.json()) as {
+    data: Array<Record<string, unknown>>
+  }
+  const single = await server.request("/v1/models/gpt-current")
+
+  expect(single.status).toBe(200)
+  expect(await single.json()).toEqual(
+    listBody.data.find((entry) => entry.id === "gpt-current"),
+  )
+})
+
+test("returns a safe not-found error for an unknown single model", async () => {
+  const response = await server.request("/models/not-real")
+
+  expect(response.status).toBe(404)
+  expect(await response.json()).toEqual({
+    error: { message: "Model not found", type: "not_found_error" },
+  })
+})
+
+test("adapts single-model discovery failures through the safe gateway error boundary", async () => {
+  const privateMarker = "single-model-upstream-private-marker"
+  const originalCopilotToken = state.copilotToken
+  state.models = undefined
+  state.copilotToken = "test-copilot-token"
+  const fetchMock = mock(() =>
+    Promise.resolve(
+      Response.json(
+        { error: { message: privateMarker } },
+        { status: 400, statusText: "Bad Request" },
+      ),
+    ),
+  )
+  globalThis.fetch = Object.assign(fetchMock, {
+    preconnect: originalFetch.preconnect,
+  })
+
+  try {
+    const response = await modelRoutes.request("/gpt-current")
+    const body = await response.text()
+
+    expect(response.status).toBe(400)
+    expect(body).not.toContain(privateMarker)
+    expect(JSON.parse(body)).toEqual({
+      error: { message: "Upstream request failed", type: "error" },
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  } finally {
+    globalThis.fetch = originalFetch
+    restoreCopilotToken(originalCopilotToken)
+  }
 })
 
 test("preserves Copilot model limits and long-context billing metadata", async () => {

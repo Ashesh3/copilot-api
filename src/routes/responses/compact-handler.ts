@@ -315,7 +315,7 @@ export const handleCompact = async (c: Context) => {
     summaryText = extractTextFromResponsesResult(result)
     usage = result.usage ?? null
 
-    logger.debug("Compact result (Responses):", summaryText)
+    logger.debug("Compact Responses result received")
   } else {
     // Fall back to ChatCompletions
     consola.debug(
@@ -340,7 +340,7 @@ export const handleCompact = async (c: Context) => {
     summaryText = extractTextFromCCResult(result)
     usage = mapCCUsage(result.usage)
 
-    logger.debug("Compact result (ChatCompletions):", summaryText)
+    logger.debug("Compact ChatCompletions result received")
   }
 
   if (usage) {

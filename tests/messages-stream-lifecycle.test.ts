@@ -7,14 +7,19 @@ import {
   mock,
   test,
 } from "bun:test"
+import { Hono } from "hono"
+import { streamSSE } from "hono/streaming"
 
 import type { ChatCompletionsPayload } from "../src/services/copilot/create-chat-completions"
 import type { ModelsResponse } from "../src/services/copilot/get-models"
 
+import { HTTPError, LocalHTTPError } from "../src/lib/error"
 import { setModelRedirectsForTest } from "../src/lib/model-redirect"
 import { setModelSettingsForTest } from "../src/lib/model-settings"
 import { setSsePreflushDeadlineForTest } from "../src/lib/sse-lifecycle"
 import { state } from "../src/lib/state"
+import { trackMessageDelta } from "../src/routes/messages/native-handler"
+import { emitAnthropicStreamError } from "../src/routes/messages/stream-translation"
 import { server } from "../src/server"
 
 const originalFetch = globalThis.fetch
@@ -23,7 +28,14 @@ let delayedStreamController:
   | undefined
 let delayedUpstreamAborted = false
 let lastUpstreamPath: string | undefined
-let streamMode: "immediate" | "stall-body" | "stall-fetch" = "stall-body"
+let streamMode:
+  | "finish-then-invalid"
+  | "native-late-http-error"
+  | "immediate"
+  | "native-metadata"
+  | "stall-body"
+  | "stall-fetch" = "stall-body"
+let nativeLateErrorStatus = 429
 
 const nativeMessagesModels: ModelsResponse = {
   object: "list",
@@ -93,6 +105,69 @@ function createImmediateStream(): Response {
   )
 }
 
+function createNativeMetadataStream(): Response {
+  const messageStart = {
+    type: "message_start",
+    message: {
+      id: "msg_1",
+      type: "message",
+      role: "assistant",
+      model: "claude-current",
+      content: [],
+      stop_reason: null,
+      stop_sequence: null,
+      usage: { input_tokens: 5, output_tokens: 0 },
+      recommended_auto_tier: "eco",
+      future_message_field: { preserved: true },
+    },
+    future_event_field: "start-metadata",
+  }
+  const messageDelta = {
+    type: "message_delta",
+    delta: { stop_reason: "end_turn" },
+    usage: {
+      output_tokens: 3,
+      cache_read_input_tokens: 2,
+      cache_creation_input_tokens: 1,
+      cache_creation: { ephemeral_5m_input_tokens: 1 },
+      future_usage_field: true,
+    },
+    copilot_usage: { total_nano_aiu: 123 },
+    future_event_field: "delta-metadata",
+  }
+  return new Response(
+    [
+      `event: message_start\ndata: ${JSON.stringify(messageStart)}`,
+      `event: message_delta\ndata: ${JSON.stringify(messageDelta)}`,
+      'event: message_stop\ndata: {"type":"message_stop"}',
+      "data: [DONE]",
+      "",
+    ].join("\n\n"),
+    { headers: { "content-type": "text/event-stream" } },
+  )
+}
+
+function createFinishThenInvalidStream(): Response {
+  const finishChunk = {
+    id: "chatcmpl-finish-error",
+    object: "chat.completion.chunk",
+    created: 1,
+    model: "gpt-4o",
+    choices: [
+      {
+        index: 0,
+        delta: { role: "assistant" },
+        finish_reason: "stop",
+        logprobs: null,
+      },
+    ],
+  }
+  return new Response(
+    `data: ${JSON.stringify(finishChunk)}\n\ndata: {invalid-json\n\n`,
+    { headers: { "content-type": "text/event-stream" } },
+  )
+}
+
 function createStalledStream(signal?: AbortSignal | null): Response {
   signal?.addEventListener(
     "abort",
@@ -132,9 +207,49 @@ const fetchMock = mock((_url: string | URL | Request, init?: RequestInit) => {
       init?.signal?.addEventListener("abort", rejectAsAborted, { once: true })
     })
   }
-  return streamMode === "immediate" ?
-      createImmediateStream()
-    : createStalledStream(init?.signal)
+  if (streamMode === "immediate") return createImmediateStream()
+  if (streamMode === "finish-then-invalid") {
+    return createFinishThenInvalidStream()
+  }
+  if (streamMode === "native-metadata") return createNativeMetadataStream()
+  if (streamMode === "native-late-http-error") {
+    const encoder = new TextEncoder()
+    return new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            encoder.encode(
+              `event: message_start\ndata: ${JSON.stringify({
+                type: "message_start",
+                message: {
+                  id: "msg_late_error",
+                  type: "message",
+                  role: "assistant",
+                  model: "claude-current",
+                  content: [],
+                  stop_reason: null,
+                  stop_sequence: null,
+                  usage: { input_tokens: 1, output_tokens: 0 },
+                },
+              })}\n\n`,
+            ),
+          )
+          setTimeout(
+            () =>
+              controller.error(
+                new HTTPError(
+                  "native stream private marker",
+                  Response.json({}, { status: nativeLateErrorStatus }),
+                ),
+              ),
+            0,
+          )
+        },
+      }),
+      { headers: { "content-type": "text/event-stream" } },
+    )
+  }
+  return createStalledStream(init?.signal)
 })
 
 function requireBody(response: Response): ReadableStream<Uint8Array> {
@@ -214,6 +329,7 @@ beforeEach(() => {
   delayedUpstreamAborted = false
   lastUpstreamPath = undefined
   streamMode = "stall-body"
+  nativeLateErrorStatus = 429
   state.accountType = "individual"
   state.copilotToken = "copilot-token"
   state.githubToken = "github-token"
@@ -280,6 +396,183 @@ test("keeps the Anthropic event order unchanged when the first event is immediat
   ])
 })
 
+test("does not emit a successful terminal pair when the upstream stream errors", async () => {
+  streamMode = "finish-then-invalid"
+  const response = await server.request("/v1/messages", createMessagesRequest())
+  const body = await response.text()
+  const eventTypes = Array.from(
+    body.matchAll(/^event: (.+)$/gm),
+    (match) => match[1],
+  )
+
+  expect(eventTypes).toContain("error")
+  expect(eventTypes).not.toContain("message_delta")
+  expect(eventTypes).not.toContain("message_stop")
+})
+
+test.each([
+  [400, "invalid_request_error"],
+  [401, "authentication_error"],
+  [403, "permission_error"],
+  [404, "not_found_error"],
+  [413, "request_too_large"],
+  [429, "rate_limit_error"],
+  [500, "api_error"],
+] as const)(
+  "mounted native Messages stream maps late HTTP %s to %s",
+  async (status, type) => {
+    streamMode = "native-late-http-error"
+    nativeLateErrorStatus = status
+    state.models = nativeMessagesModels
+
+    const response = await server.request(
+      "/v1/messages",
+      createNativeMessagesRequest(),
+    )
+    const body = await response.text()
+    const events = Array.from(
+      body.matchAll(/^event: (.+)$/gm),
+      (match) => match[1],
+    )
+    const payloads = Array.from(
+      body.matchAll(/^data: (\{.*\})$/gm),
+      (match) =>
+        JSON.parse(match[1]) as {
+          error?: { type?: unknown }
+          type?: unknown
+        },
+    )
+
+    expect(response.status).toBe(200)
+    expect(events).toEqual(["message_start", "error"])
+    expect(payloads.map((payload) => payload.type)).toEqual([
+      "message_start",
+      "error",
+    ])
+    expect(payloads.at(-1)?.error?.type).toBe(type)
+    expect(body).not.toContain("native stream private marker")
+  },
+)
+
+test.each([
+  [
+    "local",
+    new LocalHTTPError(
+      "safe local validation",
+      Response.json({}, { status: 400 }),
+      {
+        type: "error",
+        error: {
+          type: "invalid_request_error",
+          message: "safe local validation",
+        },
+      },
+    ),
+    {
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message: "safe local validation",
+      },
+    },
+  ],
+  [
+    "upstream",
+    new HTTPError(
+      "stream-runtime-private-marker",
+      Response.json(
+        { error: { message: "stream-body-private-marker" } },
+        { status: 429, statusText: "stream-status-private-marker" },
+      ),
+    ),
+    {
+      type: "error",
+      error: {
+        type: "rate_limit_error",
+        message: "Copilot rate limit exceeded.",
+      },
+    },
+  ],
+] as const)(
+  "emits a safe Anthropic %s error after headers are committed",
+  async (_kind, error, expected) => {
+    const app = new Hono()
+    app.get("/stream", (c) =>
+      streamSSE(c, async (stream) => {
+        await stream.write(": keepalive\n\n")
+        await emitAnthropicStreamError(stream, error)
+      }),
+    )
+
+    const response = await app.request("/stream")
+    const body = await response.text()
+    const data = body.match(/^data: (\{.*\})$/m)?.[1]
+
+    expect(response.status).toBe(200)
+    expect(response.headers.get("content-type")).toContain("text/event-stream")
+    expect(body).toContain("event: error")
+    expect(data).toBeDefined()
+    expect(JSON.parse(data ?? "null")).toEqual(expected)
+    expect(body).not.toContain("private-marker")
+  },
+)
+
+test("does not invoke hostile local body getters in an emitted stream error", async () => {
+  let getterCalls = 0
+  const hostileBody = Object.defineProperty({}, "type", {
+    enumerable: true,
+    get() {
+      getterCalls += 1
+      throw new Error("stream-hostile-local-private-marker")
+    },
+  })
+  const error = new LocalHTTPError(
+    "local stream validation",
+    Response.json({}, { status: 400 }),
+    hostileBody,
+  )
+  const app = new Hono()
+  app.get("/stream", (c) =>
+    streamSSE(c, async (stream) => {
+      await stream.write(": keepalive\n\n")
+      await emitAnthropicStreamError(stream, error)
+    }),
+  )
+
+  const response = await app.request("/stream")
+  const body = await response.text()
+
+  expect(response.status).toBe(200)
+  expect(body).toContain('"type":"invalid_request_error"')
+  expect(body).toContain("The Copilot Messages request was rejected.")
+  expect(getterCalls).toBe(0)
+  expect(body).not.toContain("stream-hostile-local-private-marker")
+})
+
+test("rejects dangerous local JSON keys in an emitted stream error", async () => {
+  const clientBody = JSON.parse(
+    '{"type":"error","error":{"type":"invalid_request_error","message":"safe"},"__proto__":{"polluted":"stream-json-private-marker"}}',
+  ) as Record<string, unknown>
+  const error = new LocalHTTPError(
+    "local stream validation",
+    Response.json({}, { status: 400 }),
+    clientBody,
+  )
+  const app = new Hono()
+  app.get("/stream", (c) =>
+    streamSSE(c, async (stream) => {
+      await emitAnthropicStreamError(stream, error)
+    }),
+  )
+
+  const response = await app.request("/stream")
+  const body = await response.text()
+
+  expect(body).toContain("The Copilot Messages request was rejected.")
+  expect(body).not.toContain("stream-json-private-marker")
+  expect(({} as { polluted?: unknown }).polluted).toBeUndefined()
+})
+
 test("commits a keepalive while native Anthropic waits for upstream headers", async () => {
   setSsePreflushDeadlineForTest(20)
   streamMode = "stall-fetch"
@@ -296,4 +589,79 @@ test("commits a keepalive while native Anthropic waits for upstream headers", as
   expect(new TextDecoder().decode(first.value)).toBe(": keepalive\n\n")
   await reader.cancel()
   expect(await waitForUpstreamAbort()).toBe(true)
+})
+
+test("forwards native Messages metadata verbatim except for the requested model", async () => {
+  streamMode = "native-metadata"
+  state.models = nativeMessagesModels
+
+  const response = await server.request(
+    "/v1/messages",
+    createNativeMessagesRequest(),
+  )
+  const body = await response.text()
+  const payloads = Array.from(
+    body.matchAll(/^data: (\{.*\})$/gm),
+    (match) => JSON.parse(match[1]) as Record<string, unknown>,
+  )
+
+  expect(lastUpstreamPath).toBe("/v1/messages")
+  expect(payloads).toEqual([
+    {
+      type: "message_start",
+      message: {
+        id: "msg_1",
+        type: "message",
+        role: "assistant",
+        model: "claude-opus-4.8",
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: 5, output_tokens: 0 },
+        recommended_auto_tier: "eco",
+        future_message_field: { preserved: true },
+      },
+      future_event_field: "start-metadata",
+    },
+    {
+      type: "message_delta",
+      delta: { stop_reason: "end_turn" },
+      usage: {
+        output_tokens: 3,
+        cache_read_input_tokens: 2,
+        cache_creation_input_tokens: 1,
+        cache_creation: { ephemeral_5m_input_tokens: 1 },
+        future_usage_field: true,
+      },
+      copilot_usage: { total_nano_aiu: 123 },
+      future_event_field: "delta-metadata",
+    },
+    { type: "message_stop" },
+  ])
+  expect(body).not.toContain("[DONE]")
+})
+
+test("tracks cumulative native cache usage without rebuilding the frame", () => {
+  const usage = { input: 5, output: 0, cached: 0, created: 0 }
+  const frame = JSON.stringify({
+    type: "message_delta",
+    delta: { stop_reason: "end_turn" },
+    usage: {
+      output_tokens: 3,
+      cache_read_input_tokens: 2,
+      cache_creation_input_tokens: 1,
+      cache_creation: { ephemeral_5m_input_tokens: 1 },
+    },
+    copilot_usage: { total_nano_aiu: 123 },
+  })
+
+  trackMessageDelta(frame, usage)
+
+  expect(usage).toEqual({ input: 5, output: 3, cached: 2, created: 1 })
+  expect(JSON.parse(frame)).toMatchObject({
+    usage: {
+      cache_creation: { ephemeral_5m_input_tokens: 1 },
+    },
+    copilot_usage: { total_nano_aiu: 123 },
+  })
 })

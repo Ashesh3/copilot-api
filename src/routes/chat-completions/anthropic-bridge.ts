@@ -4,46 +4,35 @@ import * as Sentry from "@sentry/bun"
 import { streamSSE } from "hono/streaming"
 
 import type {
-  AnthropicAssistantContentBlock,
-  AnthropicDocumentBlock,
-  AnthropicImageBlock,
   AnthropicMessage,
   AnthropicMessagesPayload,
   AnthropicResponse,
   AnthropicStreamEventData,
   AnthropicTextBlock,
-  AnthropicThinkingBlock,
-  AnthropicTool,
   AnthropicToolResultBlock,
   AnthropicUserContentBlock,
 } from "~/routes/messages/anthropic-types"
+import type { AnthropicStreamChunk } from "~/services/copilot/create-anthropic-messages"
 import type { Model } from "~/services/copilot/get-models"
 
 import { getLastUsedAccountId } from "~/lib/account-router"
 import {
-  attachmentOmittedNote,
-  fetchUrlAsDataUri,
-  isHttpUrl,
-  isImageMediaType,
-  isPdfMediaType,
-  parseDataUri,
-} from "~/lib/attachments"
-import { isAbortError } from "~/lib/error"
+  assertEndpointTranslationSupported,
+  isAbortError,
+  LocalHTTPError,
+} from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
-import {
-  recordNonDefaultBehavior,
-  setRequestContext,
-} from "~/lib/request-logger"
+import { setRequestContext } from "~/lib/request-logger"
 import {
   createSentryChatSpanOptions,
   setSentryOutputMessages,
 } from "~/lib/sentry"
 import { withSseHeartbeat } from "~/lib/sse-lifecycle"
-import { resolveNativeWebSearch } from "~/routes/messages/native-handler"
 import {
-  createAnthropicMessages,
-  type AnthropicStreamChunk,
-} from "~/services/copilot/create-anthropic-messages"
+  createNativeMessages,
+  type NativeMessagesRequestOptions,
+  resolveNativeWebSearch,
+} from "~/routes/messages/native-handler"
 import {
   type ChatCompletionChunk,
   type ChatCompletionResponse,
@@ -52,6 +41,19 @@ import {
   type Message,
   type ToolCall,
 } from "~/services/copilot/create-chat-completions"
+
+import {
+  convertOpenAIContentPartToAnthropic,
+  convertOpenAIToolsToAnthropic,
+} from "./anthropic-conversion"
+import {
+  applyParallelToolChoice,
+  convertChatReasoningOptions,
+  createAssistantBlocks,
+  getAnthropicReasoning,
+} from "./anthropic-reasoning"
+import { normalizeChatCompletionsRequest } from "./chat-contract"
+import { checkNormalizedChatToMessagesTranslation } from "./translation-fidelity"
 
 const logger = createHandlerLogger("anthropic-bridge")
 
@@ -64,22 +66,14 @@ const logger = createHandlerLogger("anthropic-bridge")
 export async function executeAnthropicBridge(
   c: Context,
   options: {
+    nativeOptions: NativeMessagesRequestOptions
     payload: ChatCompletionsPayload & { model: string }
-    requestedModel: string
     selectedModel?: Model
   },
 ): Promise<Response> {
-  const { payload, requestedModel, selectedModel } = options
+  const { nativeOptions, payload, selectedModel } = options
+  const requestedModel = nativeOptions.requestedModel ?? payload.model
 
-  recordNonDefaultBehavior(c, {
-    kind: "endpoint_fallback",
-    message: `PDF file attachment routed ${payload.model} to native /v1/messages`,
-    data: {
-      model: payload.model,
-      sourceEndpoint: "ChatCompletions",
-      targetEndpoint: "AnthropicMessages",
-    },
-  })
   setRequestContext(c, { provider: "ChatCompletions→AnthropicMessages" })
 
   const anthropicPayload = await chatPayloadToAnthropic(
@@ -87,13 +81,18 @@ export async function executeAnthropicBridge(
     selectedModel,
     c.req.raw.signal,
   )
-  logger.debug("Bridged Anthropic payload:", JSON.stringify(anthropicPayload))
+  logger.debug("Prepared Anthropic bridge request", {
+    messageCount: anthropicPayload.messages.length,
+    model: anthropicPayload.model,
+    stream: Boolean(anthropicPayload.stream),
+    toolCount: anthropicPayload.tools?.length ?? 0,
+  })
 
   if (anthropicPayload.tools?.some((tool) => tool.name === "web_search")) {
     return await executeBridgeWebSearch(c, {
       payload,
       anthropicPayload,
-      requestedModel,
+      nativeOptions,
     })
   }
 
@@ -104,9 +103,13 @@ export async function executeAnthropicBridge(
         model: payload.model,
       }),
       async (span) => {
-        const response = (await createAnthropicMessages(anthropicPayload, {
-          signal: c.req.raw.signal,
-        })) as AnthropicResponse
+        const response = (await createNativeMessages(
+          anthropicPayload,
+          nativeOptions,
+          {
+            signal: c.req.raw.signal,
+          },
+        )) as AnthropicResponse
 
         recordAccountContext(c)
 
@@ -137,7 +140,7 @@ export async function executeAnthropicBridge(
   return await executeBridgeStreaming(c, {
     payload,
     anthropicPayload,
-    requestedModel,
+    nativeOptions,
   })
 }
 
@@ -146,16 +149,20 @@ async function executeBridgeWebSearch(
   options: {
     payload: ChatCompletionsPayload & { model: string }
     anthropicPayload: AnthropicMessagesPayload
-    requestedModel: string
+    nativeOptions: NativeMessagesRequestOptions
   },
 ): Promise<Response> {
   const requestedStream = Boolean(options.anthropicPayload.stream)
   options.anthropicPayload.stream = false
   const response = await resolveNativeWebSearch(options.anthropicPayload, {
+    ...options.nativeOptions,
     signal: c.req.raw.signal,
   })
   recordAccountContext(c)
-  const result = anthropicResponseToChat(response, options.requestedModel)
+  const result = anthropicResponseToChat(
+    response,
+    options.nativeOptions.requestedModel ?? options.payload.model,
+  )
 
   if (!requestedStream) return c.json(result)
   return streamSSE(c, async (stream) => {
@@ -190,10 +197,11 @@ async function executeBridgeStreaming(
   options: {
     payload: ChatCompletionsPayload & { model: string }
     anthropicPayload: AnthropicMessagesPayload
-    requestedModel: string
+    nativeOptions: NativeMessagesRequestOptions
   },
 ): Promise<Response> {
-  const { payload, anthropicPayload, requestedModel } = options
+  const { payload, anthropicPayload, nativeOptions } = options
+  const requestedModel = nativeOptions.requestedModel ?? payload.model
 
   return await Sentry.startSpanManual(
     createSentryChatSpanOptions({
@@ -210,9 +218,13 @@ async function executeBridgeStreaming(
       }
 
       try {
-        const response = (await createAnthropicMessages(anthropicPayload, {
-          signal: c.req.raw.signal,
-        })) as AsyncIterable<AnthropicStreamChunk>
+        const response = (await createNativeMessages(
+          anthropicPayload,
+          nativeOptions,
+          {
+            signal: c.req.raw.signal,
+          },
+        )) as AsyncIterable<AnthropicStreamChunk>
 
         recordAccountContext(c)
 
@@ -271,25 +283,43 @@ export async function chatPayloadToAnthropic(
   selectedModel?: Model,
   signal?: AbortSignal,
 ): Promise<AnthropicMessagesPayload> {
+  const normalized = normalizeChatCompletionsRequest(payload)
+  assertEndpointTranslationSupported(
+    {
+      blockers: [],
+      code: "endpoint_translation_unsupported",
+      source: "chat",
+    },
+    checkNormalizedChatToMessagesTranslation(normalized),
+  )
+
   const { systemTexts, messages } = await convertChatMessages(
-    payload.messages,
+    normalized.messages,
     signal,
   )
 
   const maxTokens =
-    payload.max_tokens ?? selectedModel?.capabilities.limits?.max_output_tokens
+    normalized.max_tokens
+    ?? normalized.max_completion_tokens
+    ?? selectedModel?.capabilities.limits?.max_output_tokens
+  const toolChoice = convertToolChoice(normalized.tool_choice)
+  const parallelChoice = applyParallelToolChoice(
+    toolChoice,
+    normalized.parallel_tool_calls,
+    normalized.tools,
+  )
 
   return {
-    model: payload.model,
+    model: normalized.model,
     messages,
     ...(maxTokens === undefined ? {} : { max_tokens: maxTokens }),
     ...(systemTexts.length > 0 ? { system: systemTexts.join("\n\n") } : {}),
-    ...convertSamplingOptions(payload),
-    ...(payload.stream ? { stream: true } : {}),
-    ...(payload.user ? { metadata: { user_id: payload.user } } : {}),
-    ...convertTools(payload.tools),
-    ...convertToolChoice(payload.tool_choice),
-    ...convertReasoningEffort(payload),
+    ...convertSamplingOptions(normalized),
+    ...(normalized.stream ? { stream: true } : {}),
+    ...(normalized.user ? { metadata: { user_id: normalized.user } } : {}),
+    ...convertOpenAIToolsToAnthropic(normalized.tools),
+    ...parallelChoice,
+    ...convertChatReasoningOptions(normalized),
   }
 }
 
@@ -346,7 +376,7 @@ async function convertChatMessages(
 }
 
 function convertAssistantMessage(message: Message): AnthropicMessage | null {
-  const blocks: Array<AnthropicAssistantContentBlock> = []
+  const blocks = createAssistantBlocks(message)
   const text = contentToPlainText(message.content)
   if (text) blocks.push({ type: "text", text })
   for (const toolCall of message.tool_calls ?? []) {
@@ -379,22 +409,6 @@ function convertSamplingOptions(
   }
 }
 
-function convertReasoningEffort(
-  payload: ChatCompletionsPayload,
-): Pick<AnthropicMessagesPayload, "output_config"> {
-  const reasoningEffort = (payload as unknown as Record<string, unknown>)
-    .reasoning_effort
-  if (typeof reasoningEffort !== "string") return {}
-  // createAnthropicMessages strips effort for models that do not support it
-  return {
-    output_config: {
-      effort: reasoningEffort as NonNullable<
-        AnthropicMessagesPayload["output_config"]
-      >["effort"],
-    },
-  }
-}
-
 function contentToPlainText(content: Message["content"]): string {
   if (typeof content === "string") return content
   if (!Array.isArray(content)) return ""
@@ -417,7 +431,7 @@ async function convertUserContent(
 
   const blocks: Array<AnthropicUserContentBlock> = []
   for (const part of content) {
-    blocks.push(...(await convertContentPart(part, signal)))
+    blocks.push(...(await convertOpenAIContentPartToAnthropic(part, signal)))
   }
   return blocks
 }
@@ -430,100 +444,16 @@ async function convertToolResultContent(
   if (!Array.isArray(content)) return ""
 
   const blocks: Array<
-    AnthropicTextBlock | AnthropicImageBlock | AnthropicDocumentBlock
+    Exclude<AnthropicUserContentBlock, AnthropicToolResultBlock>
   > = []
   for (const part of content) {
     blocks.push(
-      ...((await convertContentPart(part, signal)) as Array<
-        AnthropicTextBlock | AnthropicImageBlock | AnthropicDocumentBlock
+      ...((await convertOpenAIContentPartToAnthropic(part, signal)) as Array<
+        Exclude<AnthropicUserContentBlock, AnthropicToolResultBlock>
       >),
     )
   }
   return blocks
-}
-
-async function convertContentPart(
-  part: ContentPart,
-  signal?: AbortSignal,
-): Promise<Array<AnthropicUserContentBlock>> {
-  switch (part.type) {
-    case "text": {
-      return [{ type: "text", text: part.text }]
-    }
-    case "image_url": {
-      return [await convertImagePart(part.image_url.url, signal)]
-    }
-    case "file": {
-      return [convertFilePart(part)]
-    }
-    default: {
-      return []
-    }
-  }
-}
-
-async function convertImagePart(
-  url: string,
-  signal?: AbortSignal,
-): Promise<AnthropicImageBlock | AnthropicTextBlock> {
-  let parsed = parseDataUri(url)
-  if (!parsed && isHttpUrl(url)) {
-    parsed = await fetchUrlAsDataUri(url, { signal })
-  }
-
-  if (parsed && isImageMediaType(parsed.mediaType)) {
-    return {
-      type: "image",
-      source: {
-        type: "base64",
-        media_type: parsed.mediaType as
-          | "image/jpeg"
-          | "image/png"
-          | "image/gif"
-          | "image/webp",
-        data: parsed.data,
-      },
-    }
-  }
-
-  return {
-    type: "text",
-    text: attachmentOmittedNote({
-      kind: "image",
-      name: url,
-      reason: "the image could not be decoded or fetched by the proxy",
-    }),
-  }
-}
-
-function convertFilePart(
-  part: ContentPart & { type: "file" },
-): AnthropicDocumentBlock | AnthropicTextBlock {
-  const parsed = part.file.file_data ? parseDataUri(part.file.file_data) : null
-
-  if (parsed && isPdfMediaType(parsed.mediaType)) {
-    return {
-      type: "document",
-      source: {
-        type: "base64",
-        media_type: "application/pdf",
-        data: parsed.data,
-      },
-      ...(part.file.filename ? { title: part.file.filename } : {}),
-    }
-  }
-
-  return {
-    type: "text",
-    text: attachmentOmittedNote({
-      kind: "file",
-      name: part.file.filename,
-      reason:
-        part.file.file_id ?
-          "file_id references are not supported by this proxy; send file_data as a base64 data URI"
-        : "file_data must be a base64 data URI (e.g. data:application/pdf;base64,...)",
-    }),
-  }
 }
 
 function safeParseArguments(rawArguments: string): Record<string, unknown> {
@@ -533,23 +463,26 @@ function safeParseArguments(rawArguments: string): Record<string, unknown> {
       return parsed as Record<string, unknown>
     }
   } catch {
-    /* fall through */
+    throw createInvalidAnthropicToolArgumentsError()
   }
-  return rawArguments.trim().length > 0 ? { raw_arguments: rawArguments } : {}
+  throw createInvalidAnthropicToolArgumentsError()
 }
 
-function convertTools(
-  tools: ChatCompletionsPayload["tools"],
-): Pick<AnthropicMessagesPayload, "tools"> {
-  if (!tools || tools.length === 0) return {}
-  const converted: Array<AnthropicTool> = tools.map((tool) => ({
-    name: tool.function.name,
-    ...(tool.function.description ?
-      { description: tool.function.description }
-    : {}),
-    input_schema: tool.function.parameters,
-  }))
-  return { tools: converted }
+function createInvalidAnthropicToolArgumentsError(): LocalHTTPError {
+  const clientBody = {
+    error: {
+      code: "endpoint_translation_unsupported",
+      message:
+        "The selected Copilot model cannot accept this request without losing required protocol data.",
+      param: "tool_arguments",
+      type: "invalid_request_error",
+    },
+  }
+  return new LocalHTTPError(
+    "Tool call arguments must be a JSON object for Anthropic Messages.",
+    Response.json(clientBody, { status: 400 }),
+    clientBody,
+  )
 }
 
 function convertToolChoice(
@@ -585,12 +518,7 @@ export function anthropicResponseToChat(
     .map((block) => block.text)
     .join("")
 
-  const reasoningText = response.content
-    .filter(
-      (block): block is AnthropicThinkingBlock => block.type === "thinking",
-    )
-    .map((block) => block.thinking)
-    .join("\n\n")
+  const reasoning = getAnthropicReasoning(response.content)
 
   const toolCalls: Array<ToolCall> = response.content
     .filter((block) => block.type === "tool_use")
@@ -623,7 +551,7 @@ export function anthropicResponseToChat(
         message: {
           role: "assistant",
           content: textContent || null,
-          ...(reasoningText ? { reasoning_text: reasoningText } : {}),
+          ...reasoning,
           ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
         },
         logprobs: null,
@@ -671,6 +599,7 @@ interface BridgeStreamState {
   cachedTokens: number
   responseText: string
   finishReason: "stop" | "length" | "tool_calls" | "content_filter" | null
+  signatureByBlockIndex: Map<number, string>
 }
 
 type WriteBridgeChunk = (
@@ -708,6 +637,7 @@ export async function streamAnthropicAsChatCompletions(
     cachedTokens: 0,
     responseText: "",
     finishReason: null,
+    signatureByBlockIndex: new Map(),
   }
 
   const writeChunk: WriteBridgeChunk = async (delta, options) => {
@@ -824,9 +754,15 @@ async function handleBridgeStreamEvent(
       break
     }
     case "error": {
-      logger.warn("Native messages stream error:", event.error.message)
+      logger.warn("Native messages stream failed")
       await writeRaw(
-        JSON.stringify({ error: { message: event.error.message } }),
+        JSON.stringify({
+          error: {
+            code: "upstream_error",
+            message: "Upstream stream failed",
+            type: "server_error",
+          },
+        }),
       )
       await writeRaw("[DONE]")
       break
@@ -861,6 +797,14 @@ async function handleBridgeContentDelta(
           ],
         })
       }
+      break
+    }
+    case "signature_delta": {
+      const signature =
+        (state.signatureByBlockIndex.get(event.index) ?? "")
+        + event.delta.signature
+      state.signatureByBlockIndex.set(event.index, signature)
+      await writeChunk({ reasoning_opaque: signature })
       break
     }
     case "thinking_delta": {

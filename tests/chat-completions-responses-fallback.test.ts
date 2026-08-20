@@ -5,6 +5,7 @@ import {
   beforeEach,
   expect,
   mock,
+  spyOn,
   test,
 } from "bun:test"
 
@@ -20,7 +21,12 @@ const originalFetch = globalThis.fetch
 
 let lastUpstreamPath: string | undefined
 let lastUpstreamPayload: Record<string, unknown> | undefined
+let lastUpstreamHeaders: Headers | undefined
 let delayBufferedWebSearchResponse = false
+let nextResponsesStreamError:
+  | { kind: "error"; marker: string }
+  | { kind: "failed"; marker: string }
+  | undefined
 let delayedResponsesController:
   | ReadableStreamDefaultController<Uint8Array>
   | undefined
@@ -57,6 +63,30 @@ const responsesOnlyModels: ModelsResponse = {
       supported_endpoints: ["/responses"],
       capabilities: {
         family: "gpt",
+        limits: { max_output_tokens: 1024 },
+        object: "model_capabilities",
+        supports: {},
+        tokenizer: "cl100k_base",
+        type: "chat",
+      },
+    },
+  ],
+}
+
+const messagesOnlyModels: ModelsResponse = {
+  object: "list",
+  data: [
+    {
+      id: "claude-messages-only",
+      name: "Claude Messages Only",
+      object: "model",
+      preview: false,
+      vendor: "anthropic",
+      version: "1",
+      model_picker_enabled: true,
+      supported_endpoints: ["/v1/messages"],
+      capabilities: {
+        family: "claude",
         limits: { max_output_tokens: 1024 },
         object: "model_capabilities",
         supports: {},
@@ -180,6 +210,31 @@ const responsesCompletedEvent = {
 }
 
 function createResponsesSse(): Response {
+  if (nextResponsesStreamError) {
+    const current = nextResponsesStreamError
+    const event =
+      current.kind === "error" ?
+        {
+          type: "error",
+          code: "upstream_error",
+          message: current.marker,
+          param: null,
+          sequence_number: 1,
+        }
+      : {
+          type: "response.failed",
+          sequence_number: 1,
+          response: {
+            ...responsesResult,
+            status: "failed",
+            error: { message: current.marker },
+          },
+        }
+    return new Response(
+      `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
+      { headers: { "content-type": "text/event-stream" }, status: 200 },
+    )
+  }
   return new Response(
     [
       `event: response.created\ndata: ${JSON.stringify(responsesCreatedEvent)}`,
@@ -195,6 +250,7 @@ function createResponsesSse(): Response {
 
 const fetchMock = mock((url: string, init?: RequestInit) => {
   lastUpstreamPath = new URL(url).pathname
+  lastUpstreamHeaders = new Headers(init?.headers)
   lastUpstreamPayload =
     typeof init?.body === "string" ?
       (JSON.parse(init.body) as Record<string, unknown>)
@@ -221,6 +277,19 @@ const fetchMock = mock((url: string, init?: RequestInit) => {
     return new Response(JSON.stringify(responsesResult), {
       status: 200,
       headers: { "content-type": "application/json" },
+    })
+  }
+
+  if (lastUpstreamPath.endsWith("/v1/messages")) {
+    return Response.json({
+      id: "msg_chat_bridge",
+      type: "message",
+      role: "assistant",
+      model: "claude-messages-only",
+      content: [{ type: "text", text: "hello from messages" }],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
     })
   }
 
@@ -252,7 +321,9 @@ beforeEach(() => {
   fetchMock.mockClear()
   lastUpstreamPath = undefined
   lastUpstreamPayload = undefined
+  lastUpstreamHeaders = undefined
   delayBufferedWebSearchResponse = false
+  nextResponsesStreamError = undefined
   delayedResponsesController = undefined
   state.accountType = "individual"
   state.copilotToken = "copilot-token"
@@ -327,6 +398,110 @@ test("routes legacy chat completions requests for responses-only models through 
   })
 })
 
+test("passes explicit native beta, version, and provider preference through Chat to Messages", async () => {
+  state.models = messagesOnlyModels
+
+  const response = await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "anthropic-beta": "beta-one, beta-two, beta-one",
+      "anthropic-version": "2023-06-01",
+      "x-model-provider-preference": "anthropic",
+    },
+    body: JSON.stringify({
+      model: "claude-messages-only",
+      messages: [{ role: "user", content: "Say hello." }],
+      max_tokens: 32,
+      stream: false,
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/v1/messages")
+  expect(lastUpstreamHeaders?.get("anthropic-beta")).toBe("beta-one,beta-two")
+  expect(lastUpstreamHeaders?.get("anthropic-version")).toBe("2023-06-01")
+  expect(lastUpstreamHeaders?.get("x-model-provider-preference")).toBe(
+    "anthropic",
+  )
+})
+
+test("does not pass native Messages headers through Chat to Responses", async () => {
+  const response = await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "anthropic-beta": "beta-one",
+      "anthropic-version": "2024-01-01",
+      "x-model-provider-preference": "anthropic",
+    },
+    body: JSON.stringify({
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "Say hello." }],
+      stream: false,
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/responses")
+  expect(lastUpstreamHeaders?.get("anthropic-beta")).toBeNull()
+  expect(lastUpstreamHeaders?.get("anthropic-version")).toBeNull()
+  expect(lastUpstreamHeaders?.get("x-model-provider-preference")).toBeNull()
+})
+
+test("records one endpoint fallback event for a translated Chat request", async () => {
+  const infoSpy = spyOn(console, "info").mockImplementation(() => undefined)
+
+  try {
+    const response = await server.request("/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-5.5",
+        messages: [{ role: "user", content: "Say hello." }],
+        stream: false,
+      }),
+    })
+
+    expect(response.status).toBe(200)
+    const fallbackEvents = infoSpy.mock.calls.filter(
+      ([message]) =>
+        typeof message === "string"
+        && message.includes("[NON-DEFAULT]")
+        && message.includes("endpoint_fallback"),
+    )
+    expect(fallbackEvents).toHaveLength(1)
+  } finally {
+    infoSpy.mockRestore()
+  }
+})
+
+test("rejects a lossy Chat to Responses fallback before upstream dispatch", async () => {
+  const response = await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-5.5",
+      messages: [
+        { role: "user", content: "Run the tool." },
+        { role: "tool", content: "private" },
+      ],
+      stream: false,
+    }),
+  })
+
+  expect(response.status).toBe(400)
+  expect(fetchMock).not.toHaveBeenCalled()
+  expect(await response.json()).toEqual({
+    error: {
+      code: "invalid_value",
+      message: "Tool calls and tool results must be complete and ordered.",
+      param: "messages",
+      type: "invalid_request_error",
+    },
+  })
+})
+
 test("omits tool controls when a chat fallback request has no tools", async () => {
   const response = await server.request("/v1/chat/completions", {
     method: "POST",
@@ -335,7 +510,6 @@ test("omits tool controls when a chat fallback request has no tools", async () =
       model: "gpt-5.5",
       messages: [{ role: "user", content: "Reply without tools." }],
       tools: null,
-      tool_choice: "auto",
       parallel_tool_calls: true,
       stream: false,
     }),
@@ -385,6 +559,45 @@ test("preserves tool controls when a chat fallback request has tools", async () 
   })
   expect(lastUpstreamPayload?.tool_choice).toBe("auto")
   expect(lastUpstreamPayload?.parallel_tool_calls).toBe(false)
+})
+
+test("normalizes deprecated Chat controls before Responses fallback translation", async () => {
+  const response = await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "Call the legacy lookup." }],
+      functions: [
+        {
+          name: "legacy_lookup",
+          description: "Legacy lookup",
+          parameters: {},
+        },
+      ],
+      function_call: { name: "legacy_lookup" },
+      stream: false,
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/responses")
+  expect(lastUpstreamPayload?.tools).toEqual([
+    {
+      type: "function",
+      name: "legacy_lookup",
+      description: "Legacy lookup",
+      parameters: { type: "object", properties: {} },
+      strict: false,
+      copilot_cache_control: { type: "ephemeral" },
+    },
+  ])
+  expect(lastUpstreamPayload?.tool_choice).toEqual({
+    type: "function",
+    name: "legacy_lookup",
+  })
+  expect(lastUpstreamPayload).not.toHaveProperty("functions")
+  expect(lastUpstreamPayload).not.toHaveProperty("function_call")
 })
 
 test("omits unsupported sampling parameters for responses-only fallback models", async () => {
@@ -569,6 +782,28 @@ test("streams responses-only models back as chat completion chunks", async () =>
     },
   })
 })
+
+test.each(["error", "failed"] as const)(
+  "uses fixed safe Chat output for Responses %s events",
+  async (kind) => {
+    const marker = `chat-responses-${kind}-private-marker`
+    nextResponsesStreamError = { kind, marker }
+
+    const response = await server.request("/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-5.5",
+        messages: [{ role: "user", content: "Fail safely." }],
+        stream: true,
+      }),
+    })
+    const body = await response.text()
+
+    expect(body).toContain("An unexpected error occurred during streaming.")
+    expect(body).not.toContain(marker)
+  },
+)
 
 test("commits a keepalive while the buffered web-search fallback is pending", async () => {
   setSsePreflushDeadlineForTest(20)

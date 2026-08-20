@@ -1,6 +1,9 @@
-import { describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, mock, test } from "bun:test"
 
-import type { AnthropicMessagesPayload } from "~/routes/messages/anthropic-types"
+import type {
+  AnthropicMessagesPayload,
+  AnthropicResponse,
+} from "~/routes/messages/anthropic-types"
 import type {
   ChatCompletionsPayload,
   ContentPart,
@@ -14,6 +17,7 @@ import type {
   ResponsesPayload,
 } from "~/services/copilot/create-responses"
 
+/* eslint-disable max-lines */
 import {
   isLikelyBase64,
   mediaTypeFromFilename,
@@ -42,6 +46,11 @@ const PNG_B64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
 const PDF_DATA_URI = `data:application/pdf;base64,${PDF_B64}`
 const PNG_DATA_URI = `data:image/png;base64,${PNG_B64}`
+const originalFetch = globalThis.fetch
+
+afterEach(() => {
+  ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
+})
 
 // ─── attachments lib ───
 
@@ -277,6 +286,97 @@ describe("Anthropic document blocks → Responses translation", () => {
 // ─── attachment normalization (messages route) ───
 
 describe("normalizeAnthropicAttachments", () => {
+  test.each([
+    "ftp://example.test/report.pdf",
+    "file:///tmp/report.pdf",
+    "data:application/pdf;base64,JVBERi0=",
+    "/relative/report.pdf",
+    "not a URL",
+    " ",
+  ])("does not fetch non-HTTP document URL %s", async (url) => {
+    const fetchMock = mock(() => {
+      throw new Error("unexpected fetch")
+    })
+    ;(globalThis as unknown as { fetch: typeof fetch }).fetch =
+      fetchMock as unknown as typeof fetch
+    const payload: AnthropicMessagesPayload = {
+      model: "gpt-current",
+      max_tokens: 100,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "document",
+              source: { type: "url", url },
+              title: "report.pdf",
+            },
+          ],
+        },
+      ],
+    }
+
+    await normalizeAnthropicAttachments(payload)
+
+    expect(fetchMock).not.toHaveBeenCalled()
+    const content = payload.messages[0].content as Array<{
+      text?: string
+      type: string
+    }>
+    expect(content[0]?.type).toBe("text")
+    expect(content[0]?.text).toContain("omitted")
+  })
+
+  test.each([
+    "http://attachment.test/report.pdf",
+    "https://attachment.test/report.pdf",
+    "http://attachment.test:80/report.pdf?download=1#section",
+    "https://attachment.test:443/report.pdf?download=1#section",
+    "http://attachment.test:8080/report.pdf?download=1#section",
+    "https://[2001:db8::1]:8443/report.pdf?download=1#section",
+  ])("fetches absolute HTTP document URL %s once", async (url) => {
+    const fetchMock = mock(() =>
+      Promise.resolve(
+        new Response("%PDF-1.4", {
+          headers: { "content-type": "application/pdf" },
+        }),
+      ),
+    )
+    ;(globalThis as unknown as { fetch: typeof fetch }).fetch =
+      fetchMock as unknown as typeof fetch
+    const payload: AnthropicMessagesPayload = {
+      model: "gpt-current",
+      max_tokens: 100,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "document",
+              source: { type: "url", url },
+              title: "report.pdf",
+            },
+          ],
+        },
+      ],
+    }
+
+    await normalizeAnthropicAttachments(payload)
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(payload.messages[0].content).toEqual([
+      {
+        type: "document",
+        source: {
+          type: "base64",
+          media_type: "application/pdf",
+          data: Buffer.from("%PDF-1.4").toString("base64"),
+        },
+        title: "report.pdf",
+      },
+    ])
+  })
+
   test("inlines text-source documents as text blocks", async () => {
     const payload: AnthropicMessagesPayload = {
       model: "claude-sonnet-4.6",
@@ -536,6 +636,107 @@ describe("anthropicResponseToChat bridge", () => {
     expect(chat.usage?.prompt_tokens).toBe(100)
     expect(chat.usage?.prompt_tokens_details?.cached_tokens).toBe(90)
   })
+
+  test("rejects multiple signed thinking blocks", () => {
+    expect(() =>
+      anthropicResponseToChat(
+        {
+          id: "msg_multi_reasoning",
+          type: "message",
+          role: "assistant",
+          model: "claude-sonnet-4.6",
+          content: [
+            { type: "thinking", thinking: "first", signature: "sig-first" },
+            { type: "thinking", thinking: "second", signature: "sig-second" },
+          ],
+          stop_reason: "end_turn",
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 2 },
+        },
+        "claude-sonnet-4.6",
+      ),
+    ).toThrow()
+  })
+
+  test.each([
+    {
+      name: "signed then unsigned",
+      content: [
+        { type: "thinking", thinking: "signed", signature: "sig-first" },
+        { type: "thinking", thinking: "unsigned" },
+      ],
+    },
+    {
+      name: "unsigned then signed",
+      content: [
+        { type: "thinking", thinking: "unsigned" },
+        { type: "thinking", thinking: "signed", signature: "sig-last" },
+      ],
+    },
+  ])("rejects mixed $name thinking blocks", ({ content }) => {
+    expect(() =>
+      anthropicResponseToChat(
+        {
+          id: "msg_mixed_reasoning",
+          type: "message",
+          role: "assistant",
+          model: "claude-sonnet-4.6",
+          content: [...content] as AnthropicResponse["content"],
+          stop_reason: "end_turn",
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 2 },
+        },
+        "claude-sonnet-4.6",
+      ),
+    ).toThrow()
+  })
+
+  test("preserves multiple unsigned thinking blocks without a signature", () => {
+    const chat = anthropicResponseToChat(
+      {
+        id: "msg_unsigned_reasoning",
+        type: "message",
+        role: "assistant",
+        model: "claude-sonnet-4.6",
+        content: [
+          { type: "thinking", thinking: "first" },
+          { type: "thinking", thinking: "second" },
+        ],
+        stop_reason: "end_turn",
+        stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 2 },
+      },
+      "claude-sonnet-4.6",
+    )
+
+    expect(chat.choices[0]?.message).toMatchObject({
+      reasoning_text: "first\n\nsecond",
+    })
+    expect(chat.choices[0]?.message).not.toHaveProperty("reasoning_opaque")
+  })
+
+  test("preserves one signed thinking block", () => {
+    const chat = anthropicResponseToChat(
+      {
+        id: "msg_single_signed",
+        type: "message",
+        role: "assistant",
+        model: "claude-sonnet-4.6",
+        content: [
+          { type: "thinking", thinking: "signed", signature: "sig-only" },
+        ],
+        stop_reason: "end_turn",
+        stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+      "claude-sonnet-4.6",
+    )
+
+    expect(chat.choices[0]?.message).toMatchObject({
+      reasoning_text: "signed",
+      reasoning_opaque: "sig-only",
+    })
+  })
 })
 
 describe("streamAnthropicAsChatCompletions bridge", () => {
@@ -623,6 +824,118 @@ describe("streamAnthropicAsChatCompletions bridge", () => {
     expect(parsed.at(-1)?.choices[0].finish_reason).toBe("stop")
     expect(parsed.every((c) => c.model === "claude-sonnet-4.6")).toBe(true)
   })
+
+  test("emits a fixed safe Chat error envelope for native stream errors", async () => {
+    const privateMarker = "native-stream-private-marker"
+    const written: Array<string> = []
+    const stream = {
+      writeSSE: (chunk: { data: string }) => {
+        written.push(chunk.data)
+        return Promise.resolve()
+      },
+    }
+
+    async function* iterate() {
+      yield await Promise.resolve({
+        event: "error",
+        data: JSON.stringify({
+          type: "error",
+          error: { type: "api_error", message: privateMarker },
+        }),
+      })
+    }
+
+    await streamAnthropicAsChatCompletions(
+      stream,
+      iterate(),
+      "claude-sonnet-4.6",
+    )
+
+    const output = written.join("\n")
+    expect(output).not.toContain(privateMarker)
+    expect(JSON.parse(written[0] ?? "{}")).toEqual({
+      error: {
+        code: "upstream_error",
+        message: "Upstream stream failed",
+        type: "server_error",
+      },
+    })
+    expect(written.at(-1)).toBe("[DONE]")
+  })
+
+  test("preserves fragmented thinking signatures before later tools", async () => {
+    const events = [
+      {
+        data: JSON.stringify({
+          type: "message_start",
+          message: {
+            id: "msg_signed",
+            usage: { input_tokens: 1, output_tokens: 0 },
+          },
+        }),
+      },
+      {
+        data: JSON.stringify({
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "thinking_delta", thinking: "thought" },
+        }),
+      },
+      {
+        data: JSON.stringify({
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "signature_delta", signature: "sig-" },
+        }),
+      },
+      {
+        data: JSON.stringify({
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "signature_delta", signature: "final" },
+        }),
+      },
+      {
+        data: JSON.stringify({
+          type: "content_block_start",
+          index: 1,
+          content_block: {
+            type: "tool_use",
+            id: "tool_1",
+            name: "lookup",
+            input: {},
+          },
+        }),
+      },
+    ]
+    const written: Array<string> = []
+    const stream = {
+      writeSSE: (chunk: { data: string }) => {
+        written.push(chunk.data)
+        return Promise.resolve()
+      },
+    }
+    async function* iterate() {
+      for (const event of events) yield await Promise.resolve(event)
+    }
+
+    await streamAnthropicAsChatCompletions(stream, iterate(), "claude")
+
+    const deltas = written.map(
+      (data) =>
+        (
+          JSON.parse(data) as {
+            choices: Array<{ delta: Record<string, unknown> }>
+          }
+        ).choices[0].delta,
+    )
+    const signatureIndex = deltas.findIndex(
+      (delta) => delta.reasoning_opaque === "sig-final",
+    )
+    const toolIndex = deltas.findIndex((delta) => delta.tool_calls)
+    expect(signatureIndex).toBeGreaterThan(-1)
+    expect(toolIndex).toBeGreaterThan(signatureIndex)
+  })
 })
 
 // ─── CC → Responses fallback ───
@@ -663,6 +976,17 @@ describe("chatCompletionsToResponses attachments", () => {
       max_tokens: 100,
       messages: [
         {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call_2",
+              type: "function",
+              function: { name: "screenshot", arguments: "{}" },
+            },
+          ],
+        },
+        {
           role: "tool",
           tool_call_id: "call_2",
           content: [
@@ -673,7 +997,7 @@ describe("chatCompletionsToResponses attachments", () => {
       ],
     }
     const responses = chatCompletionsToResponses(payload)
-    const output = (responses.input as Array<ResponseFunctionCallOutputItem>)[0]
+    const output = (responses.input as Array<ResponseFunctionCallOutputItem>)[1]
 
     expect(output.type).toBe("function_call_output")
     const parts = output.output as Array<{ type: string }>

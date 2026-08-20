@@ -2,7 +2,9 @@ import { expect, test } from "bun:test"
 
 import type { ResponsesPayload } from "../src/services/copilot/create-responses"
 
+import { LocalHTTPError } from "../src/lib/error"
 import {
+  assertResponsesChatFallbackTranslation,
   responsesToChatCompletions,
   useFunctionApplyPatch,
 } from "../src/routes/responses/handler"
@@ -45,7 +47,7 @@ test("keeps non-apply_patch custom tools unchanged on the native responses path"
   ])
 })
 
-test("converts non-apply_patch custom tools for chat completions fallback only", () => {
+test("rejects custom tool semantics in chat completions fallback", () => {
   const payload = {
     model: "gpt-4o",
     input: "Hello",
@@ -65,27 +67,10 @@ test("converts non-apply_patch custom tools for chat completions fallback only",
     ],
   } as ResponsesPayload
 
-  const chatCompletionsPayload = responsesToChatCompletions(payload)
-
-  expect(chatCompletionsPayload.tools).toEqual([
-    {
-      type: "function",
-      function: {
-        name: "run_sql",
-        description: "Execute a SQL query",
-        parameters: {
-          type: "object",
-          properties: {
-            query: { type: "string" },
-          },
-          required: ["query"],
-        },
-      },
-    },
-  ])
+  expect(() => responsesToChatCompletions(payload)).toThrow(LocalHTTPError)
 })
 
-test("preserves custom tool calls and results in chat completions fallback", () => {
+test("preserves custom tool calls and results for compaction fallback", () => {
   const payload = {
     model: "gpt-4o",
     input: [
@@ -119,7 +104,120 @@ test("preserves custom tool calls and results in chat completions fallback", () 
   ])
 })
 
-test("keeps ordinary custom tool history out of chat completions fallback", () => {
+test("rejects ordinary computer output but preserves it for compaction", () => {
+  const payload = {
+    model: "gpt-4o",
+    input: [
+      {
+        type: "computer_call_output",
+        call_id: "call_computer",
+        output: "canonical computer result",
+      },
+    ],
+  } as ResponsesPayload
+
+  expect(() => responsesToChatCompletions(payload)).toThrow(LocalHTTPError)
+  expect(
+    responsesToChatCompletions(payload, { preserveCustomToolContext: true })
+      .messages,
+  ).toEqual([
+    {
+      role: "user",
+      content:
+        "[Computer tool result call_computer: canonical computer result]",
+    },
+  ])
+})
+
+test("maps Responses parallel tools reasoning and user controls to Chat", () => {
+  const result = responsesToChatCompletions({
+    model: "gpt-4o",
+    input: "hello",
+    tools: [
+      {
+        type: "function",
+        name: "lookup",
+        parameters: { type: "object", properties: {} },
+        strict: false,
+      },
+    ],
+    parallel_tool_calls: false,
+    reasoning: { effort: "high" },
+    user: "user-safe",
+  })
+
+  expect(result.parallel_tool_calls).toBe(false)
+  expect(result.reasoning_effort).toBe("high")
+  expect(result.user).toBe("user-safe")
+})
+
+test("rejects malformed function calls before Chat fallback conversion", () => {
+  expect(() =>
+    responsesToChatCompletions({
+      model: "chat-only",
+      input: [{ type: "function_call", call_id: "call_1", name: "lookup" }],
+    } as ResponsesPayload),
+  ).toThrow(LocalHTTPError)
+})
+
+test("rejects unknown and malformed tools before Chat fallback conversion", () => {
+  for (const tool of [
+    { type: "future_private_tool", secret: "private" },
+    {
+      type: "function",
+      name: "lookup",
+      parameters: "private-schema",
+      strict: false,
+    },
+  ]) {
+    expect(() =>
+      responsesToChatCompletions({
+        model: "chat-only",
+        input: "hello",
+        tools: [tool],
+      } as ResponsesPayload),
+    ).toThrow(LocalHTTPError)
+  }
+})
+
+test("compaction fallback still rejects unrelated lossy Responses state", () => {
+  expect(() =>
+    assertResponsesChatFallbackTranslation(
+      {
+        model: "gpt-4o",
+        input: [
+          {
+            type: "custom_tool_call",
+            call_id: "call_custom",
+            name: "exec",
+            input: "run",
+          },
+        ],
+        tools: [{ type: "namespace", name: "private_namespace" }],
+      },
+      true,
+    ),
+  ).toThrow(LocalHTTPError)
+})
+
+test("compaction fallback rejects unknown future input items", () => {
+  expect(() =>
+    assertResponsesChatFallbackTranslation(
+      {
+        model: "gpt-4o",
+        input: [{ type: "future_SECRET_item", value: "private" }],
+        client_metadata: {
+          "x-codex-turn-metadata": JSON.stringify({
+            request_kind: "compaction",
+          }),
+        },
+      },
+      true,
+    ),
+  ).toThrow(LocalHTTPError)
+})
+
+test("rejects ordinary custom tool history in chat completions fallback", () => {
   const payload = {
     model: "gpt-4o",
     input: [
@@ -137,5 +235,44 @@ test("keeps ordinary custom tool history out of chat completions fallback", () =
     ],
   } as ResponsesPayload
 
-  expect(responsesToChatCompletions(payload).messages).toEqual([])
+  expect(() => responsesToChatCompletions(payload)).toThrow(LocalHTTPError)
+})
+
+test("rejects a lossy Responses to Chat fallback before conversion", () => {
+  expect(() =>
+    responsesToChatCompletions({
+      model: "chat-only",
+      input: [
+        {
+          type: "reasoning",
+          encrypted_content: "private-encrypted-state",
+          summary: [],
+        },
+      ],
+    }),
+  ).toThrow(LocalHTTPError)
+
+  try {
+    responsesToChatCompletions({
+      model: "chat-only",
+      input: [
+        {
+          type: "reasoning",
+          encrypted_content: "private-encrypted-state",
+          summary: [],
+        },
+      ],
+    })
+  } catch (error) {
+    expect(error).toBeInstanceOf(LocalHTTPError)
+    expect((error as LocalHTTPError).clientBody).toEqual({
+      error: {
+        code: "endpoint_translation_unsupported",
+        message:
+          "The selected Copilot model cannot accept this request without losing required protocol data.",
+        param: "opaque_reasoning",
+        type: "invalid_request_error",
+      },
+    })
+  }
 })

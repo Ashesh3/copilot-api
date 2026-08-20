@@ -31,11 +31,15 @@ import type {
   ResponseUsage,
 } from "~/services/copilot/create-responses"
 
+import { assertEndpointTranslationSupported } from "~/lib/error"
 import {
   createHostedWebSearchTool,
   isChatWebSearchFunctionTool,
   isWebSearchToolType,
 } from "~/services/copilot/mcp-web-search"
+
+import { normalizeChatCompletionsRequest } from "./chat-contract"
+import { checkNormalizedChatToResponsesTranslation } from "./translation-fidelity"
 
 type WriteSseStream = {
   writeSSE: (data: { data: string }) => Promise<void>
@@ -82,33 +86,50 @@ export function chatCompletionsToResponses(
   payload: ChatCompletionsPayload & { model: string },
   reasoningEffort?: ReasoningEffort,
 ): ResponsesPayload {
-  const input = convertMessagesToResponsesInput(payload.messages)
-  const instructions = createResponsesInstructions(payload)
-  const tools = convertToolsToResponses(payload.tools)
+  const normalized = normalizeChatCompletionsRequest(payload)
+  assertEndpointTranslationSupported(
+    {
+      blockers: [],
+      code: "endpoint_translation_unsupported",
+      source: "chat",
+    },
+    checkNormalizedChatToResponsesTranslation(normalized),
+  )
+
+  const input = convertMessagesToResponsesInput(normalized.messages)
+  const instructions = createResponsesInstructions(normalized)
+  const tools = convertToolsToResponses(normalized.tools)
   const hasTools = Array.isArray(tools) && tools.length > 0
+  const effort = reasoningEffort ?? normalized.reasoning_effort ?? undefined
 
   return {
-    model: payload.model,
+    model: normalized.model,
     input,
     instructions,
-    temperature: payload.temperature,
-    top_p: payload.top_p,
-    max_output_tokens: payload.max_tokens,
+    temperature: normalized.temperature,
+    top_p: normalized.top_p,
+    max_output_tokens:
+      normalized.max_tokens ?? normalized.max_completion_tokens,
+    user: normalized.user,
+    snippy: normalized.snippy,
     ...(hasTools ?
       {
         tools,
-        tool_choice: convertToolChoiceToResponses(payload.tool_choice, tools),
-        parallel_tool_calls: payload.parallel_tool_calls ?? true,
+        tool_choice: convertToolChoiceToResponses(
+          normalized.tool_choice,
+          tools,
+        ),
+        parallel_tool_calls: normalized.parallel_tool_calls ?? true,
       }
     : {}),
-    stream: payload.stream,
+    stream: normalized.stream,
     store: false,
     reasoning: {
-      ...(reasoningEffort ? { effort: reasoningEffort } : {}),
+      ...(effort ? { effort } : {}),
       summary: "auto",
     },
     include: ["reasoning.encrypted_content"],
-    ...convertResponseFormatToResponsesText(payload.response_format),
+    ...convertResponseFormatToResponsesText(normalized.response_format),
   }
 }
 
@@ -733,12 +754,10 @@ async function emitTranslatedEvent(
       }
     }
     case "response.failed": {
-      throw new Error(
-        event.response.error?.message ?? "Responses API stream failed",
-      )
+      throw new Error("Responses API stream failed")
     }
     case "error": {
-      throw new Error(event.message)
+      throw new Error("Responses API stream failed")
     }
     default: {
       return null

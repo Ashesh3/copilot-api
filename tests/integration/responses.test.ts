@@ -1,5 +1,7 @@
 import { describe, test, expect, beforeAll } from "bun:test"
 
+import { state } from "~/lib/state"
+
 import {
   initializeTestState,
   postJSON,
@@ -157,6 +159,40 @@ describe("POST /v1/responses - advanced", () => {
         stream: false,
       })
       expect(res.status).toBe(200)
+    },
+    TEST_TIMEOUT,
+  )
+
+  test(
+    "uses a live Messages-only model through the Responses bridge when advertised",
+    async () => {
+      const model = state.models?.data.find((entry) => {
+        const endpoints = entry.supported_endpoints
+        return (
+          Array.isArray(endpoints)
+          && endpoints.includes("/v1/messages")
+          && !endpoints.includes("/responses")
+          && !endpoints.includes("/chat/completions")
+        )
+      })
+      if (!model) {
+        console.log(
+          "Skipping live Responses-to-Messages probe — no Messages-only model",
+        )
+        return
+      }
+
+      const res = await postJSON("/v1/responses", {
+        model: model.id,
+        input: "Say hello in one word.",
+        max_output_tokens: 32,
+        stream: false,
+      })
+
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as ResponsesResult
+      expect(body.status).toBe("completed")
+      expect(body.output_text).toBeTruthy()
     },
     TEST_TIMEOUT,
   )

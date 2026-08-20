@@ -11,10 +11,24 @@ import consola from "consola"
 
 import type { Model } from "../src/services/copilot/get-models"
 
-import { getLastUsedAccountId, routedFetch } from "../src/lib/account-router"
+import {
+  getLastUsedAccountId,
+  routedControlPlaneFetch,
+  routedFetch,
+} from "../src/lib/account-router"
+import { runWithCopilotContractObservabilityScope } from "../src/lib/copilot-contract-observability"
+import { runWithCopilotRequestAttribution } from "../src/lib/copilot-request-context"
 import { LocalHTTPError } from "../src/lib/error"
 import { setModelRoutingOverridesForTest } from "../src/lib/model-routing"
-import { clientSessionStorage } from "../src/lib/request-session"
+import {
+  clientSessionStorage,
+  copilotResponseHeadersStorage,
+  getCopilotResponseHeaders,
+  requestIdStorage,
+  routedAccountStorage,
+  runWithRequestDiagnostics,
+  suppressRequestModelDiagnostics,
+} from "../src/lib/request-session"
 /* eslint-disable max-lines -- account-router integration variants share singleton fixtures */
 import { runWithRoutingAffinity } from "../src/lib/routing-affinity"
 import { state } from "../src/lib/state"
@@ -238,6 +252,43 @@ function llmAuthorizationHeaders(): Array<string | null> {
     .map(({ init }) => new Headers(init?.headers).get("authorization"))
 }
 
+function responseMetadataEvents(
+  calls: ReadonlyArray<ReadonlyArray<unknown>>,
+): Array<unknown> {
+  return calls
+    .filter(
+      (call) =>
+        call[0] === "[copilot-contract]"
+        && (call[1] as { kind?: unknown } | undefined)?.kind
+          === "response_metadata",
+    )
+    .map((call) => call[1])
+}
+
+async function routedFetchWithMetadataStore(modelId: string): Promise<{
+  headers: Record<string, string>
+  result: { account: unknown; response: Response }
+}> {
+  return await copilotResponseHeadersStorage.run(
+    {},
+    async () =>
+      await runWithCopilotContractObservabilityScope(async () => {
+        const result = await routedFetch(
+          "/chat/completions",
+          { method: "POST" },
+          { maxHttpRetryDelaySeconds: 0, modelId },
+        )
+        return { result, headers: { ...getCopilotResponseHeaders() } }
+      }),
+  )
+}
+
+function retryableSocketError(): Error {
+  return Object.assign(new Error("socket connection was closed unexpectedly"), {
+    code: "ECONNRESET",
+  })
+}
+
 beforeAll(() => {
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch =
     fetchMock as unknown as typeof fetch
@@ -251,12 +302,231 @@ afterAll(() => {
 
 beforeEach(() => {
   tokenPool.dispose()
+  for (const account of tokenPool.getAllAccounts()) {
+    tokenPool.removeAccountForTest(account.id)
+  }
   fetchMock.mockClear()
   queuedResults.length = 0
   capturedRequests.length = 0
   setModelRoutingOverridesForTest({})
   state.isMultiToken = true
   state.sessionId = "router-test-session"
+})
+
+test("routes control-plane policy through raw advertised model membership", async () => {
+  const modelId = "control-plane-disabled-inference-model"
+  registerAccount(13_001, modelId, "raw-advertising-token")
+  registerAccount(13_002, modelId, "inference-enabled-token")
+  setModelRoutingOverridesForTest({ [modelId]: { "13001": false } })
+  tokenPool.rebuildModelIndex()
+  const affinityKey = Array.from(
+    { length: 1000 },
+    (_, index) => `control-plane-policy-${index}`,
+  ).find(
+    (candidate) =>
+      tokenPool.getAccountAdvertisingModelBySession(modelId, candidate)?.id
+      === 13_001,
+  )
+  if (!affinityKey) throw new TypeError("Expected policy affinity key")
+  queuedResults.push(Response.json({ success: true }))
+
+  const result = await requestIdStorage.run("control-plane-request-id", () =>
+    runWithCopilotRequestAttribution(
+      {
+        clientMachineId: "control-plane-machine",
+        openaiIntent: "control-plane-intent",
+        subsystemId: "control-plane-subsystem",
+      },
+      () =>
+        routedAccountStorage.run({}, () =>
+          runWithRoutingAffinity(
+            { key: affinityKey, source: "copilot_session" },
+            async () => {
+              const routed = await routedControlPlaneFetch({
+                modelId,
+                path: `/models/${encodeURIComponent(modelId)}/policy`,
+              })
+              return { lastAccountId: getLastUsedAccountId(), routed }
+            },
+          ),
+        ),
+    ),
+  )
+
+  expect(tokenPool.getEligibleAccountIdsForModel(modelId)).toEqual([13_002])
+  expect(result.routed.account?.id).toBe(13_001)
+  expect(result.lastAccountId).toBe(13_001)
+  expect(capturedRequests).toHaveLength(1)
+  expect(capturedRequests[0]?.url).toBe(
+    `https://api.githubcopilot.com/models/${encodeURIComponent(modelId)}/policy`,
+  )
+  const headers = new Headers(capturedRequests[0]?.init?.headers)
+  expect(headers.get("authorization")).toBe("Bearer raw-advertising-token")
+  expect(headers.get("copilot-integration-id")).toBe(state.copilotIntegrationId)
+  expect(headers.get("copilot-subsystem-id")).toBe("control-plane-subsystem")
+  expect(headers.get("openai-intent")).toBe("control-plane-intent")
+  expect(headers.get("x-client-machine-id")).toBe("control-plane-machine")
+  expect(headers.get("x-github-api-version")).toBe("2026-08-01")
+  expect(headers.get("x-request-id")).toBe("control-plane-request-id")
+})
+
+test("forwards typed control-plane body, session token, and abort signal", async () => {
+  const matchingSessionToken = `e30.${Buffer.from(
+    JSON.stringify({ sub: "control-plane-issuer" }),
+  ).toString("base64url")}.c2ln`
+  registerAccount(13_011, "model-a", "tid=control-plane-issuer;exp=1900000000")
+  tokenPool.rebuildModelIndex()
+  const controller = new AbortController()
+  queuedResults.push(Response.json({ session: "created" }))
+
+  const result = await runWithRoutingAffinity(
+    { key: "control-plane-session", source: "copilot_session" },
+    async () =>
+      await routedControlPlaneFetch({
+        body: { auto_mode: { model_hints: ["auto"] } },
+        copilotSessionToken: matchingSessionToken,
+        path: "/models/session",
+        signal: controller.signal,
+      }),
+  )
+
+  expect(result.account?.id).toBe(13_011)
+  expect(capturedRequests).toHaveLength(1)
+  expect(capturedRequests[0]?.init?.method).toBe("POST")
+  expect(capturedRequests[0]?.init?.body).toBe(
+    JSON.stringify({ auto_mode: { model_hints: ["auto"] } }),
+  )
+  expect(capturedRequests[0]?.init?.signal).toBe(controller.signal)
+  expect(
+    new Headers(capturedRequests[0]?.init?.headers).get(
+      "copilot-session-token",
+    ),
+  ).toBe(matchingSessionToken)
+})
+
+test("returns local 503 without sending when no account advertises a policy model", async () => {
+  registerAccount(13_021, "different-model", "unrelated-token")
+  tokenPool.rebuildModelIndex()
+
+  const { account, response } = await routedControlPlaneFetch({
+    modelId: "missing-policy-model",
+    path: "/models/missing-policy-model/policy",
+  })
+
+  expect(account).toBeUndefined()
+  expect(response.status).toBe(503)
+  expect(await response.json()).toEqual({
+    error: {
+      code: "account_unavailable",
+      message: "No healthy Copilot account is available for this request.",
+      type: "account_unavailable",
+    },
+  })
+  expect(capturedRequests).toHaveLength(0)
+})
+
+test("reinitializes a selected control-plane account without cross-account failover", async () => {
+  registerAccount(13_031, "model-a", "tid=control-plane-issuer;exp=expired")
+  registerAccount(13_032, "model-a", "tid=alternate-issuer;exp=current")
+  tokenPool.rebuildModelIndex()
+  const affinityKey = Array.from(
+    { length: 1000 },
+    (_, index) => `control-plane-reinit-${index}`,
+  ).find(
+    (candidate) =>
+      tokenPool.getHealthyAccountBySession(candidate)?.id === 13_031,
+  )
+  if (!affinityKey)
+    throw new TypeError("Expected reinitialization affinity key")
+  queuedResults.push(
+    new Response("Unauthorized", { status: 401 }),
+    copilotTokenResponse("tid=control-plane-issuer;exp=fresh"),
+    modelsResponse(["model-a"]),
+    Response.json({ refreshed: true }),
+  )
+
+  const { account, response } = await runWithRoutingAffinity(
+    { key: affinityKey, source: "copilot_session" },
+    async () =>
+      await routedControlPlaneFetch({
+        copilotSessionToken: `e30.${Buffer.from(
+          JSON.stringify({ sub: "control-plane-issuer" }),
+        ).toString("base64url")}.c2ln`,
+        path: "/models/session",
+      }),
+  )
+
+  expect(response.status).toBe(200)
+  expect(account?.id).toBe(13_031)
+  expect(llmAuthorizationHeaders()).toEqual([
+    "Bearer tid=control-plane-issuer;exp=expired",
+    "Bearer tid=control-plane-issuer;exp=fresh",
+  ])
+  expect(llmAuthorizationHeaders()).not.toContain(
+    "Bearer tid=alternate-issuer;exp=current",
+  )
+})
+
+test("rejects a control-plane resend when refresh changes the selected account issuer", async () => {
+  const matchingSessionToken = `e30.${Buffer.from(
+    JSON.stringify({ sub: "original-issuer" }),
+  ).toString("base64url")}.c2ln`
+  registerAccount(13_041, "model-a", "tid=original-issuer;exp=expired")
+  registerAccount(13_042, "model-a", "tid=alternate-issuer;exp=current")
+  tokenPool.rebuildModelIndex()
+  const affinityKey = Array.from(
+    { length: 1000 },
+    (_, index) => `control-plane-changed-issuer-${index}`,
+  ).find(
+    (candidate) =>
+      tokenPool.getHealthyAccountBySession(candidate)?.id === 13_041,
+  )
+  if (!affinityKey) throw new TypeError("Expected changed-issuer affinity")
+  queuedResults.push(
+    new Response("Unauthorized", { status: 401 }),
+    copilotTokenResponse("tid=new-issuer;exp=fresh"),
+    modelsResponse(["model-a"]),
+  )
+
+  const result = await runWithRoutingAffinity(
+    { key: affinityKey, source: "copilot_session" },
+    async () =>
+      await routedControlPlaneFetch({
+        copilotSessionToken: matchingSessionToken,
+        path: "/models/session",
+      }),
+  )
+
+  expect(result.response.status).toBe(409)
+  expect(result.localError?.clientBody).toEqual({
+    error: {
+      code: "session_account_continuity_error",
+      message: "The Copilot session token does not match the selected account.",
+      type: "session_affinity_error",
+    },
+  })
+  expect(llmAuthorizationHeaders()).toEqual([
+    "Bearer tid=original-issuer;exp=expired",
+  ])
+  expect(llmAuthorizationHeaders()).not.toContain(
+    "Bearer tid=new-issuer;exp=fresh",
+  )
+  expect(llmAuthorizationHeaders()).not.toContain(
+    "Bearer tid=alternate-issuer;exp=current",
+  )
+})
+
+test("uses the configured token for single-token control-plane calls", async () => {
+  state.isMultiToken = false
+  state.copilotToken = "single-control-plane-token"
+  queuedResults.push(Response.json({ session: "created" }))
+
+  const result = await routedControlPlaneFetch({ path: "/models/session" })
+
+  expect(result.account).toBeUndefined()
+  expect(
+    new Headers(capturedRequests[0]?.init?.headers).get("authorization"),
+  ).toBe("Bearer single-control-plane-token")
 })
 
 async function routedFetchWithAffinity(modelId: string, key: string) {
@@ -526,10 +796,201 @@ test("fails over to the next account immediately after a multi-token 401", async
   })
 })
 
+test("records final response metadata once after a 403 account failover", async () => {
+  const modelId = "router-metadata-failover"
+  registerAccount(10_031, modelId, "metadata-primary")
+  registerAccount(10_032, modelId, "metadata-secondary")
+  tokenPool.rebuildModelIndex()
+  queuedResults.push(
+    new Response("Forbidden", {
+      status: 403,
+      headers: { "x-github-request-id": "failed-attempt" },
+    }),
+    new Response("{}", {
+      status: 200,
+      headers: {
+        "x-github-request-id": "final-attempt",
+        "x-quota-snapshot-premium": "final-quota",
+      },
+    }),
+  )
+  const debugSpy = spyOn(consola, "debug")
+
+  try {
+    const { result, headers } = await routedFetchWithMetadataStore(modelId)
+
+    expect(result.response.status).toBe(200)
+    expect(headers).toEqual({
+      "x-github-request-id": "final-attempt",
+      "x-quota-snapshot-premium": "final-quota",
+    })
+    expect(responseMetadataEvents(debugSpy.mock.calls)).toEqual([
+      {
+        kind: "response_metadata",
+        headerCount: 2,
+        quotaSnapshotCount: 1,
+      },
+    ])
+  } finally {
+    debugSpy.mockRestore()
+  }
+})
+
+test("records final response metadata once after a transport retry", async () => {
+  const modelId = "router-metadata-transport"
+  registerAccount(10_041, modelId, "metadata-transport")
+  tokenPool.rebuildModelIndex()
+  queuedResults.push(
+    retryableSocketError(),
+    new Response("{}", {
+      status: 200,
+      headers: { "x-github-request-id": "transport-final" },
+    }),
+  )
+  const debugSpy = spyOn(consola, "debug")
+
+  try {
+    await routedFetchWithMetadataStore(modelId)
+
+    expect(responseMetadataEvents(debugSpy.mock.calls)).toEqual([
+      {
+        kind: "response_metadata",
+        headerCount: 1,
+        quotaSnapshotCount: 0,
+      },
+    ])
+  } finally {
+    debugSpy.mockRestore()
+  }
+})
+
+test("records final response metadata once after same-account reinitialization", async () => {
+  const modelId = "router-metadata-reinitialize"
+  registerAccount(10_051, modelId, "metadata-expired")
+  tokenPool.rebuildModelIndex()
+  queuedResults.push(
+    new Response("Unauthorized", {
+      status: 401,
+      headers: { "x-github-request-id": "expired-attempt" },
+    }),
+    copilotTokenResponse("metadata-fresh"),
+    modelsResponse([modelId]),
+    new Response("{}", {
+      status: 200,
+      headers: { "x-github-request-id": "reinitialized-final" },
+    }),
+  )
+  const debugSpy = spyOn(consola, "debug")
+
+  try {
+    const { result } = await routedFetchWithMetadataStore(modelId)
+
+    expect(result.response.status).toBe(200)
+    expect(responseMetadataEvents(debugSpy.mock.calls)).toEqual([
+      {
+        kind: "response_metadata",
+        headerCount: 1,
+        quotaSnapshotCount: 0,
+      },
+    ])
+  } finally {
+    debugSpy.mockRestore()
+  }
+})
+
+test("records final response metadata once for a returned terminal error", async () => {
+  const modelId = "router-metadata-terminal"
+  registerAccount(10_061, modelId, "metadata-terminal")
+  tokenPool.rebuildModelIndex()
+  queuedResults.push(
+    new Response("unprocessable", {
+      status: 422,
+      headers: { "x-github-request-id": "terminal-final" },
+    }),
+  )
+  const debugSpy = spyOn(consola, "debug")
+
+  try {
+    const { result } = await routedFetchWithMetadataStore(modelId)
+
+    expect(result.response.status).toBe(422)
+    expect(responseMetadataEvents(debugSpy.mock.calls)).toEqual([
+      {
+        kind: "response_metadata",
+        headerCount: 1,
+        quotaSnapshotCount: 0,
+      },
+    ])
+  } finally {
+    debugSpy.mockRestore()
+  }
+})
+
+test("records final response metadata once when affinity rejection throws", async () => {
+  const modelId = "router-metadata-affinity-rejection"
+  registerAccount(10_071, modelId, "metadata-affinity")
+  tokenPool.rebuildModelIndex()
+  const key = findKeyForAccount(modelId, 10_071)
+  queuedResults.push(
+    new Response("Unauthorized", {
+      status: 401,
+      headers: { "x-github-request-id": "affinity-first" },
+    }),
+    copilotTokenResponse("metadata-affinity-fresh"),
+    modelsResponse([modelId]),
+    new Response("Unauthorized", {
+      status: 401,
+      headers: { "x-github-request-id": "affinity-final" },
+    }),
+  )
+  const debugSpy = spyOn(consola, "debug")
+
+  try {
+    const error = await copilotResponseHeadersStorage
+      .run(
+        {},
+        async () =>
+          await runWithCopilotContractObservabilityScope(
+            async () =>
+              await runWithRoutingAffinity(
+                { key, source: "copilot_session" },
+                async () =>
+                  await routedFetch(
+                    "/chat/completions",
+                    { method: "POST" },
+                    { modelId },
+                  ),
+              ),
+          ),
+      )
+      .catch((caught: unknown) => caught)
+
+    expect(error).toBeInstanceOf(LocalHTTPError)
+    expect(responseMetadataEvents(debugSpy.mock.calls)).toEqual([
+      {
+        kind: "response_metadata",
+        headerCount: 1,
+        quotaSnapshotCount: 0,
+      },
+    ])
+  } finally {
+    debugSpy.mockRestore()
+  }
+})
+
 test("retries encrypted Responses compaction failures on the selected account", async () => {
   const modelId = "router-encrypted-compaction-retry"
   registerAccount(1021, modelId, "selected-copilot-token")
   registerAccount(1022, modelId, "alternate-copilot-token")
+  for (const accountId of [1021, 1022]) {
+    const account = tokenPool
+      .getAllAccounts()
+      .find((entry) => entry.id === accountId)
+    if (!account) throw new TypeError("Expected compaction retry account")
+    const model = account.modelsData.find((entry) => entry.id === modelId)
+    if (!model) throw new TypeError("Expected compaction retry model")
+    model.supported_endpoints = ["/responses"]
+  }
   tokenPool.rebuildModelIndex()
   const requestBody = JSON.stringify({
     input: [
@@ -548,36 +1009,72 @@ test("retries encrypted Responses compaction failures on the selected account", 
           message: "The encrypted content could not be verified.",
         },
       },
-      { status: 400 },
+      {
+        status: 400,
+        headers: {
+          "x-github-request-id": "stale-compaction-attempt",
+          "x-quota-snapshot-premium": "stale-quota",
+        },
+      },
     )
   queuedResults.push(
     encryptedFailure(),
     encryptedFailure(),
-    new Response("{}", { status: 200 }),
+    new Response("{}", {
+      status: 200,
+      headers: {
+        "x-github-request-id": "final-compaction-attempt",
+        "x-quota-snapshot-premium": "final-quota",
+      },
+    }),
   )
+  const debugSpy = spyOn(consola, "debug")
 
-  const { response, account } = await routedFetch(
-    "/responses",
-    { body: requestBody, method: "POST" },
-    { modelId },
-  )
+  try {
+    const { result, headers } = await copilotResponseHeadersStorage.run(
+      {},
+      async () =>
+        await runWithCopilotContractObservabilityScope(async () => {
+          const result = await routedFetch(
+            "/responses",
+            { body: requestBody, method: "POST" },
+            { modelId },
+          )
+          return { result, headers: { ...getCopilotResponseHeaders() } }
+        }),
+    )
+    const { response, account } = result
 
-  expect(response.status).toBe(200)
-  expect(account).toBeDefined()
-  expect(capturedRequests).toHaveLength(3)
-  expect(capturedRequests.map(({ init }) => init?.body)).toEqual([
-    requestBody,
-    requestBody,
-    requestBody,
-  ])
-  expect(llmAuthorizationHeaders()).toEqual([
-    `Bearer ${account?.copilotToken}`,
-    `Bearer ${account?.copilotToken}`,
-    `Bearer ${account?.copilotToken}`,
-  ])
-  expect(llmAuthorizationHeaders()).not.toContain(
-    "Bearer alternate-copilot-token",
-  )
+    expect(response.status).toBe(200)
+    expect(account).toBeDefined()
+    expect(capturedRequests).toHaveLength(3)
+    expect(capturedRequests.map(({ init }) => init?.body)).toEqual([
+      requestBody,
+      requestBody,
+      requestBody,
+    ])
+    expect(llmAuthorizationHeaders()).toEqual([
+      `Bearer ${account?.copilotToken}`,
+      `Bearer ${account?.copilotToken}`,
+      `Bearer ${account?.copilotToken}`,
+    ])
+    expect(llmAuthorizationHeaders()).not.toContain(
+      "Bearer alternate-copilot-token",
+    )
+    expect(headers).toEqual({
+      "x-github-request-id": "final-compaction-attempt",
+      "x-quota-snapshot-premium": "final-quota",
+    })
+    expect(responseMetadataEvents(debugSpy.mock.calls)).toEqual([
+      {
+        kind: "response_metadata",
+        headerCount: 2,
+        quotaSnapshotCount: 1,
+      },
+    ])
+  } finally {
+    debugSpy.mockRestore()
+  }
 })
 
 test("refreshes a multi-token account and retries after a 401", async () => {
@@ -920,6 +1417,32 @@ test("applies headerOptions when multi-token falls back with no matching account
     "X-Initiator": "agent",
     "Copilot-Vision-Request": "true",
   })
+})
+
+test("omits fallback model diagnostics only inside a suppressed request scope", async () => {
+  const modelId = "router-private-fallback-model"
+  registerAccount(10_212, "different-known-model", "healthy-fallback-token")
+  tokenPool.rebuildModelIndex()
+  queuedResults.push(new Response("{}", { status: 200 }))
+  const warnSpy = spyOn(consola, "warn")
+
+  try {
+    await runWithRequestDiagnostics(async () => {
+      suppressRequestModelDiagnostics()
+      await routedFetch("/responses", { method: "POST" }, { modelId })
+    })
+    const suppressedOutput = JSON.stringify(warnSpy.mock.calls)
+    expect(suppressedOutput).toContain("Using Account #10212 as fallback")
+    expect(suppressedOutput).not.toContain("for model")
+    expect(suppressedOutput).not.toContain(modelId)
+
+    warnSpy.mockClear()
+    queuedResults.push(new Response("{}", { status: 200 }))
+    await routedFetch("/responses", { method: "POST" }, { modelId })
+    expect(JSON.stringify(warnSpy.mock.calls)).toContain(modelId)
+  } finally {
+    warnSpy.mockRestore()
+  }
 })
 
 test("refreshes the fallback account for unknown models after a 401", async () => {

@@ -3,8 +3,12 @@ import type { Context } from "hono"
 import * as Sentry from "@sentry/bun"
 import { streamSSE } from "hono/streaming"
 
+import type { RoutedAccountPin } from "~/lib/account-router"
+import type { AnthropicRequestHeaderOptions } from "~/services/copilot/messages-contract"
+import type { RetryBudget } from "~/services/copilot/transport-retry"
+
 import { getLastUsedAccountId } from "~/lib/account-router"
-import { isAbortError } from "~/lib/error"
+import { HTTPError, isAbortError, LocalHTTPError } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
 import { setRequestContext } from "~/lib/request-logger"
 import {
@@ -13,6 +17,7 @@ import {
 } from "~/lib/sentry"
 import {
   raceSsePreflush,
+  unwrapSsePreflushSettlement,
   type SseHeartbeatSink,
   withHeartbeatWhilePending,
   withSseHeartbeat,
@@ -21,6 +26,7 @@ import {
 import {
   type AnthropicStreamChunk,
   createAnthropicMessages,
+  type CreateAnthropicMessagesReturn,
 } from "~/services/copilot/create-anthropic-messages"
 import {
   buildWebSearchQuery,
@@ -28,6 +34,10 @@ import {
   executeWebSearch,
   isWebSearchToolType,
 } from "~/services/copilot/mcp-web-search"
+import {
+  consumeExtraSend,
+  createRetryBudget,
+} from "~/services/copilot/transport-retry"
 
 import {
   type AnthropicMessagesPayload,
@@ -35,9 +45,60 @@ import {
   type AnthropicToolUseBlock,
 } from "./anthropic-types"
 import { emitAnthropicStreamError } from "./stream-translation"
+import {
+  isInvalidThinkingSignatureResponse,
+  stripThinkingBlocks,
+} from "./thinking-recovery"
 import { emitAnthropicResponseAsStream } from "./web-search-helpers"
 
 const logger = createHandlerLogger("messages-native-handler")
+const MAX_NATIVE_WEB_SEARCH_USES = 8
+
+export interface NativeMessagesRequestOptions
+  extends AnthropicRequestHeaderOptions {
+  copilotSessionToken?: string
+  initiatorOverride?: "agent" | "user"
+  originalStream?: boolean
+  requestedModel?: string
+  routedAccountPin?: RoutedAccountPin
+  retryBudget?: RetryBudget
+  webSearchMaxUses?: number
+}
+
+type NativeMessagesDispatchOptions = {
+  compaction?: boolean
+  preserveValidatedControls?: boolean
+  routedAccountPin?: RoutedAccountPin
+  retryBudget?: RetryBudget
+  signal?: AbortSignal
+}
+
+export interface NativeMessageUsage {
+  cached: number
+  created: number
+  input: number
+  output: number
+}
+
+export async function createNativeMessages(
+  payload: AnthropicMessagesPayload,
+  nativeOptions: NativeMessagesRequestOptions,
+  dispatchOptions?: NativeMessagesDispatchOptions,
+): Promise<CreateAnthropicMessagesReturn> {
+  return await createAnthropicMessages(payload, {
+    anthropicBeta: nativeOptions.anthropicBeta,
+    anthropicVersion: nativeOptions.anthropicVersion,
+    compaction: dispatchOptions?.compaction,
+    copilotSessionToken: nativeOptions.copilotSessionToken,
+    initiator: nativeOptions.initiatorOverride,
+    modelProviderPreference: nativeOptions.modelProviderPreference,
+    preserveValidatedControls: dispatchOptions?.preserveValidatedControls,
+    routedAccountPin:
+      dispatchOptions?.routedAccountPin ?? nativeOptions.routedAccountPin,
+    retryBudget: dispatchOptions?.retryBudget ?? nativeOptions.retryBudget,
+    signal: dispatchOptions?.signal,
+  })
+}
 
 function asAnthropicStream(
   response: Awaited<ReturnType<typeof createAnthropicMessages>>,
@@ -53,7 +114,7 @@ async function consumeNativeMessageStream(
   response: AsyncIterable<AnthropicStreamChunk>,
   state: {
     requestedModel: string | undefined
-    usage: { cached: number; input: number; output: number }
+    usage: NativeMessageUsage
   },
 ): Promise<string> {
   const { requestedModel, usage } = state
@@ -98,31 +159,30 @@ async function consumeNativeMessageStream(
 export async function handleWithNativeMessages(
   c: Context,
   anthropicPayload: AnthropicMessagesPayload,
-  options?: {
-    initiatorOverride?: "agent" | "user"
-    requestedModel?: string
-  },
+  options: NativeMessagesRequestOptions = {},
 ) {
-  const { initiatorOverride, requestedModel } = options ?? {}
+  const { requestedModel } = options
 
-  const usesWebSearch = prepareNativeTools(anthropicPayload)
+  const requestedStream = Boolean(anthropicPayload.stream)
+  const { payload, usesWebSearch, webSearchMaxUses } =
+    prepareNativeTools(anthropicPayload)
 
   if (usesWebSearch) {
-    return await handleWithMcpWebSearch(c, anthropicPayload, {
-      initiatorOverride,
-      requestedModel,
+    return await handleWithMcpWebSearch(c, payload, {
+      options,
+      requestedStream,
+      webSearchMaxUses,
     })
   }
 
-  if (!anthropicPayload.stream) {
+  if (!requestedStream) {
     return await Sentry.startSpan(
       createSentryChatSpanOptions({
-        inputMessages: anthropicPayload.messages,
-        model: anthropicPayload.model,
+        inputMessages: payload.messages,
+        model: payload.model,
       }),
       async (span) => {
-        const response = (await createAnthropicMessages(anthropicPayload, {
-          initiator: initiatorOverride,
+        const response = (await createNativeMessages(payload, options, {
           signal: c.req.raw.signal,
         })) as AnthropicResponse
 
@@ -138,28 +198,27 @@ export async function handleWithNativeMessages(
           ...response,
           model: requestedModel ?? response.model,
         }
-        logger.debug("Native /v1/messages response:", JSON.stringify(result))
+        logger.debug("Received native Messages response", {
+          blockCount: result.content.length,
+          model: result.model,
+        })
         return c.json(result)
       },
     )
   }
 
   logger.debug("Streaming native /v1/messages response")
-  return await streamNativeMessages(c, anthropicPayload, {
-    initiatorOverride,
-    requestedModel,
+  return await streamNativeMessages(c, payload, {
+    ...options,
   })
 }
 
 async function streamNativeMessages(
   c: Context,
   anthropicPayload: AnthropicMessagesPayload,
-  options: {
-    initiatorOverride?: "agent" | "user"
-    requestedModel?: string
-  },
+  options: NativeMessagesRequestOptions,
 ) {
-  const { initiatorOverride, requestedModel } = options
+  const { requestedModel } = options
 
   return await Sentry.startSpanManual(
     createSentryChatSpanOptions({
@@ -182,15 +241,14 @@ async function streamNativeMessages(
           downstreamAbort.signal,
         ])
         const preflush = await raceSsePreflush(
-          createAnthropicMessages(anthropicPayload, {
-            initiator: initiatorOverride,
+          createNativeMessages(anthropicPayload, options, {
             signal: upstreamSignal,
           }),
         )
 
         return streamSSE(c, async (stream) => {
           stream.onAbort(() => downstreamAbort.abort())
-          const usage = { input: 0, output: 0, cached: 0 }
+          const usage = { input: 0, output: 0, cached: 0, created: 0 }
           let responseText = ""
 
           try {
@@ -200,7 +258,9 @@ async function streamNativeMessages(
             const response =
               preflush.kind === "settled" ?
                 preflush.value
-              : await withHeartbeatWhilePending(preflush.pending, stream)
+              : unwrapSsePreflushSettlement(
+                  await withHeartbeatWhilePending(preflush.pending, stream),
+                )
             const accountId = getLastUsedAccountId()
             if (accountId !== undefined) {
               setRequestContext(c, { accountId })
@@ -217,12 +277,12 @@ async function streamNativeMessages(
             await emitAnthropicStreamError(stream, error)
           } finally {
             setRequestContext(c, {
-              inputTokens: usage.input + usage.cached,
+              inputTokens: usage.input + usage.cached + usage.created,
               outputTokens: usage.output,
             })
             streamSpan.setAttribute(
               "gen_ai.usage.input_tokens",
-              usage.input + usage.cached,
+              usage.input + usage.cached + usage.created,
             )
             streamSpan.setAttribute("gen_ai.usage.output_tokens", usage.output)
             if (usage.cached > 0) {
@@ -243,39 +303,39 @@ async function streamNativeMessages(
   )
 }
 
-function prepareNativeTools(payload: AnthropicMessagesPayload): boolean {
-  if (!payload.tools) return false
-  const usesWebSearch = payload.tools.some((tool) => isWebSearchToolType(tool))
-  const kept = payload.tools.flatMap((tool) => {
-    if (isWebSearchToolType(tool)) {
-      return [createWebSearchAnthropicTool(tool)]
-    }
-    return tool.input_schema !== undefined || !tool.type ? [tool] : []
-  })
-  if (kept.length < payload.tools.length) {
-    logger.debug(
-      `Dropped ${payload.tools.length - kept.length} server-side tool(s) without input_schema on native /v1/messages path`,
-    )
-  }
-  payload.tools = kept.length > 0 ? kept : undefined
+function prepareNativeTools(payload: AnthropicMessagesPayload): {
+  payload: AnthropicMessagesPayload
+  usesWebSearch: boolean
+  webSearchMaxUses?: number
+} {
+  const prepared = structuredClone(payload)
+  if (!prepared.tools) return { payload: prepared, usesWebSearch: false }
+  const webSearchTool = prepared.tools.find((tool) => isWebSearchToolType(tool))
+  const usesWebSearch = webSearchTool !== undefined
+  const webSearchMaxUses =
+    usesWebSearch ? getNativeWebSearchLimit(prepared.tools) : undefined
+  prepared.tools = prepared.tools.map((tool) =>
+    isWebSearchToolType(tool) ? createWebSearchAnthropicTool(tool) : tool,
+  )
   if (usesWebSearch) {
-    payload.tool_choice = {
-      ...(payload.tool_choice ?? { type: "auto" }),
+    prepared.tool_choice = {
+      ...(prepared.tool_choice ?? { type: "auto" }),
       disable_parallel_tool_use: true,
     }
   }
-  return usesWebSearch
+  return { payload: prepared, usesWebSearch, webSearchMaxUses }
 }
 
 async function handleWithMcpWebSearch(
   c: Context,
   payload: AnthropicMessagesPayload,
-  options: {
-    initiatorOverride?: "agent" | "user"
-    requestedModel?: string
+  request: {
+    options: NativeMessagesRequestOptions
+    requestedStream: boolean
+    webSearchMaxUses: number | undefined
   },
 ) {
-  const requestedStream = Boolean(payload.stream)
+  const { options, requestedStream, webSearchMaxUses } = request
   payload.stream = false
 
   return await Sentry.startSpan(
@@ -286,8 +346,9 @@ async function handleWithMcpWebSearch(
     }),
     async (span) => {
       const response = await resolveNativeWebSearch(payload, {
-        initiatorOverride: options.initiatorOverride,
+        ...options,
         signal: c.req.raw.signal,
+        webSearchMaxUses,
       })
 
       const accountId = getLastUsedAccountId()
@@ -313,22 +374,52 @@ async function handleWithMcpWebSearch(
 
 export async function resolveNativeWebSearch(
   initialPayload: AnthropicMessagesPayload,
-  options: { initiatorOverride?: "agent" | "user"; signal: AbortSignal },
+  options: NativeMessagesRequestOptions & { signal: AbortSignal },
 ): Promise<AnthropicResponse> {
   let payload = initialPayload
   let iteration = 0
+  const routedAccountPin = options.routedAccountPin ?? {}
+  const retryBudget = options.retryBudget ?? createRetryBudget()
+  const loopOptions = { ...options, retryBudget }
+  const maxSearchUses =
+    options.webSearchMaxUses ?? getNativeWebSearchLimit(initialPayload.tools)
+  let searchUses = 0
 
   while (true) {
     iteration += 1
-    const response = (await createAnthropicMessages(payload, {
-      initiator: options.initiatorOverride,
-      signal: options.signal,
-    })) as AnthropicResponse
+    let response: AnthropicResponse
+    try {
+      response = (await createNativeMessages(payload, loopOptions, {
+        routedAccountPin,
+        signal: options.signal,
+      })) as AnthropicResponse
+    } catch (error) {
+      if (
+        options.originalStream !== true
+        || !(error instanceof HTTPError)
+        || error.response.status !== 400
+        || !(await isInvalidThinkingSignatureResponse(error.response))
+      ) {
+        throw error
+      }
+      if (!consumeExtraSend(retryBudget)) throw error
+      const recovered = structuredClone(payload)
+      if (!stripThinkingBlocks(recovered)) throw error
+      response = (await createNativeMessages(recovered, loopOptions, {
+        routedAccountPin,
+        signal: options.signal,
+      })) as AnthropicResponse
+      payload = recovered
+    }
     const calls = response.content.filter(
       (block): block is AnthropicToolUseBlock =>
         block.type === "tool_use" && block.name === "web_search",
     )
     if (calls.length === 0) return response
+    if (searchUses + calls.length > maxSearchUses) {
+      throw createNativeWebSearchLimitError(maxSearchUses)
+    }
+    searchUses += calls.length
 
     logger.info(
       `Executing ${calls.length} web search(es) from native Messages, iteration ${iteration}`,
@@ -346,6 +437,10 @@ export async function resolveNativeWebSearch(
         ),
       })),
     )
+
+    if (searchUses >= maxSearchUses) {
+      throw createNativeWebSearchLimitError(maxSearchUses)
+    }
 
     payload = {
       ...payload,
@@ -365,6 +460,32 @@ export async function resolveNativeWebSearch(
   }
 }
 
+function getNativeWebSearchLimit(
+  tools: AnthropicMessagesPayload["tools"],
+): number {
+  const callerLimit = tools?.find((tool) => isWebSearchToolType(tool))?.max_uses
+  return Number.isInteger(callerLimit) && Number(callerLimit) > 0 ?
+      Math.min(Number(callerLimit), MAX_NATIVE_WEB_SEARCH_USES)
+    : MAX_NATIVE_WEB_SEARCH_USES
+}
+
+function createNativeWebSearchLimitError(limit: number): LocalHTTPError {
+  const clientBody = {
+    type: "error",
+    error: {
+      type: "invalid_request_error",
+      code: "web_search_limit_exceeded",
+      message: "The Copilot Messages request was rejected.",
+      param: "web_search_limit",
+    },
+  }
+  return new LocalHTTPError(
+    `Native web search exceeded ${limit} uses.`,
+    Response.json(clientBody, { status: 400 }),
+    clientBody,
+  )
+}
+
 function recordUsage(
   c: Context,
   span: Sentry.Span,
@@ -372,11 +493,15 @@ function recordUsage(
 ): void {
   if (!usage) return
   const cached = usage.cache_read_input_tokens ?? 0
+  const created = usage.cache_creation_input_tokens ?? 0
   setRequestContext(c, {
-    inputTokens: usage.input_tokens + cached,
+    inputTokens: usage.input_tokens + cached + created,
     outputTokens: usage.output_tokens,
   })
-  span.setAttribute("gen_ai.usage.input_tokens", usage.input_tokens + cached)
+  span.setAttribute(
+    "gen_ai.usage.input_tokens",
+    usage.input_tokens + cached + created,
+  )
   span.setAttribute("gen_ai.usage.output_tokens", usage.output_tokens)
   if (cached > 0) {
     span.setAttribute("gen_ai.usage.input_tokens.cached", cached)
@@ -392,7 +517,7 @@ function collectResponseText(response: AnthropicResponse): string {
 function rewriteMessageStart(
   data: string,
   requestedModel: string | undefined,
-  usage: { input: number; output: number; cached: number },
+  usage: NativeMessageUsage,
 ): string {
   try {
     const parsed = JSON.parse(data) as {
@@ -402,6 +527,7 @@ function rewriteMessageStart(
           input_tokens?: number
           output_tokens?: number
           cache_read_input_tokens?: number
+          cache_creation_input_tokens?: number
         }
       }
     }
@@ -409,10 +535,16 @@ function rewriteMessageStart(
       usage.input = parsed.message.usage.input_tokens ?? 0
       usage.output = parsed.message.usage.output_tokens ?? 0
       usage.cached = parsed.message.usage.cache_read_input_tokens ?? 0
+      usage.created = parsed.message.usage.cache_creation_input_tokens ?? 0
     }
     if (requestedModel && parsed.message?.model) {
-      parsed.message.model = requestedModel
-      return JSON.stringify(parsed)
+      return JSON.stringify({
+        ...parsed,
+        message: {
+          ...parsed.message,
+          model: requestedModel,
+        },
+      })
     }
   } catch {
     return data
@@ -420,19 +552,30 @@ function rewriteMessageStart(
   return data
 }
 
-function trackMessageDelta(
+export function trackMessageDelta(
   data: string,
-  usage: { input: number; output: number; cached: number },
+  usage: NativeMessageUsage,
 ): void {
   try {
     const parsed = JSON.parse(data) as {
-      usage?: { output_tokens?: number; input_tokens?: number }
+      usage?: {
+        output_tokens?: number
+        input_tokens?: number
+        cache_read_input_tokens?: number
+        cache_creation_input_tokens?: number
+      }
     }
     if (parsed.usage?.output_tokens !== undefined) {
       usage.output = parsed.usage.output_tokens
     }
     if (parsed.usage?.input_tokens !== undefined) {
       usage.input = parsed.usage.input_tokens
+    }
+    if (parsed.usage?.cache_read_input_tokens !== undefined) {
+      usage.cached = parsed.usage.cache_read_input_tokens
+    }
+    if (parsed.usage?.cache_creation_input_tokens !== undefined) {
+      usage.created = parsed.usage.cache_creation_input_tokens
     }
   } catch {
     /* ignore */

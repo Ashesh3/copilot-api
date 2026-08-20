@@ -773,9 +773,9 @@ test("invalid environment admin password hashes fail closed", async () => {
   expect(response.status).toBe(500)
   expect(await response.json()).toEqual({
     error: {
-      message:
-        "COPILOT_ADMIN_PASSWORD_HASH: Administrator password hash must be a valid Argon2id PHC string",
-      type: "error",
+      code: "internal_error",
+      message: "Internal server error",
+      type: "server_error",
     },
   })
 })

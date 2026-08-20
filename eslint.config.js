@@ -58,6 +58,14 @@ export default config(
     },
   },
   {
+    // Sentry owns the complete ordinary-telemetry privacy boundary, including
+    // all send hooks and hostile nested header encodings.
+    files: ["src/lib/sentry.ts"],
+    rules: {
+      "max-lines": ["error", 1100],
+    },
+  },
+  {
     // The administrator security suite intentionally keeps the complete auth
     // boundary, failure accounting, and session lifecycle in one test file.
     files: ["tests/admin-auth.test.ts"],

@@ -70,6 +70,38 @@ const protectedRoutes: Array<ProtectedRoute> = [
     mountedPath: "/models",
   },
   {
+    name: "model session",
+    method: "POST",
+    path: "/models/session",
+    mountedMethod: "POST",
+    mountedPath: "/models/session",
+  },
+  {
+    name: "model session intent",
+    method: "POST",
+    path: "/models/session/intent",
+    mountedMethod: "POST",
+    mountedPath: "/models/session/intent",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({}),
+  },
+  {
+    name: "Auto model selection",
+    method: "POST",
+    path: "/auto",
+    mountedMethod: "POST",
+    mountedPath: "/auto",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({}),
+  },
+  {
+    name: "model policy",
+    method: "POST",
+    path: "/models/gpt-current/policy",
+    mountedMethod: "POST",
+    mountedPath: "/models/:model/policy",
+  },
+  {
     name: "embeddings",
     method: "POST",
     path: "/embeddings",
@@ -124,6 +156,13 @@ const protectedRoutes: Array<ProtectedRoute> = [
     path: "/v1/models",
     mountedMethod: "GET",
     mountedPath: "/v1/models",
+  },
+  {
+    name: "v1 model policy",
+    method: "POST",
+    path: "/v1/models/gpt-current/policy",
+    mountedMethod: "POST",
+    mountedPath: "/v1/models/:model/policy",
   },
   {
     name: "v1 embeddings",
@@ -307,7 +346,7 @@ afterEach(() => {
 describe("Middleware", () => {
   describe("API key guard", () => {
     test("protected route matrix entries map to mounted routes", () => {
-      expect(protectedRoutes).toHaveLength(25)
+      expect(protectedRoutes).toHaveLength(30)
 
       const guardIndex = server.routes.findIndex(
         (route) => route.handler === apiKeyGuard,

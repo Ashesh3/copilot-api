@@ -61,12 +61,18 @@ export const resolveWebSearchCalls = async (
   options: {
     initiatorOverride?: "agent" | "user"
     abortSignal?: AbortSignal
+    copilotSessionToken?: string
     createCompletion?: (
       payload: ChatCompletionsPayload,
     ) => Promise<ChatCompletionResponse>
   } = {},
 ): Promise<ChatCompletionResponse> => {
-  const { initiatorOverride, abortSignal, createCompletion } = options
+  const {
+    initiatorOverride,
+    abortSignal,
+    copilotSessionToken,
+    createCompletion,
+  } = options
   let current = response
   let currentPayload = payload
   let iteration = 0
@@ -123,6 +129,7 @@ export const resolveWebSearchCalls = async (
           createCompletion ?
             await createCompletion(currentPayload)
           : ((await createChatCompletions(currentPayload, {
+              copilotSessionToken,
               initiator: initiatorOverride,
               signal: abortSignal,
             })) as ChatCompletionResponse)
@@ -147,6 +154,7 @@ export const resolveResponsesWebSearchCalls = async (
   requestOptions: {
     vision: boolean
     initiator: "agent" | "user"
+    copilotSessionToken?: string
     signal?: AbortSignal
     createResponse?: (payload: ResponsesPayload) => Promise<ResponsesResult>
   },
@@ -623,14 +631,67 @@ export const emitResponsesResultAsStream = async (
     })
   }
 
+  const terminalEvent = getResponsesTerminalEvent(result.status)
   await stream.writeSSE({
-    event: "response.completed",
+    event: terminalEvent,
     data: JSON.stringify({
-      type: "response.completed",
+      type: terminalEvent,
       response: result,
       sequence_number: seqNum,
     }),
   })
+}
+
+export const emitResponsesFailureAsStream = async (
+  stream: ResponsesSSEWriter,
+  options: { responseId: string; model: string },
+): Promise<void> => {
+  const message = "Upstream request failed"
+  const result: ResponsesResult = {
+    id: options.responseId,
+    object: "response",
+    created_at: Math.floor(Date.now() / 1000),
+    model: options.model,
+    output: [],
+    output_text: "",
+    status: "failed",
+    usage: null,
+    error: { message },
+    incomplete_details: null,
+    instructions: null,
+    metadata: null,
+    parallel_tool_calls: true,
+    temperature: null,
+    tool_choice: "auto",
+    tools: [],
+    top_p: null,
+  }
+  await stream.writeSSE({
+    event: "error",
+    data: JSON.stringify({
+      type: "error",
+      code: "server_error",
+      message,
+      param: null,
+      sequence_number: 0,
+    }),
+  })
+  await stream.writeSSE({
+    event: "response.failed",
+    data: JSON.stringify({
+      type: "response.failed",
+      response: result,
+      sequence_number: 1,
+    }),
+  })
+}
+
+function getResponsesTerminalEvent(
+  status: ResponsesResult["status"],
+): "response.completed" | "response.failed" | "response.incomplete" {
+  if (status === "failed") return "response.failed"
+  if (status === "incomplete") return "response.incomplete"
+  return "response.completed"
 }
 
 type ResponsesSSEWriter = {
@@ -674,6 +735,15 @@ const emitResponsesOutputItem = async (
     })
   }
 
+  if (item.type === "reasoning" && item.summary) {
+    seq = await emitResponsesReasoningSummary(item.summary, {
+      stream: ctx.stream,
+      itemId,
+      outputIndex: ctx.outputIndex,
+      seqNum: seq,
+    })
+  }
+
   if (item.type === "function_call") {
     await ctx.stream.writeSSE({
       event: "response.function_call_arguments.done",
@@ -698,6 +768,41 @@ const emitResponsesOutputItem = async (
     }),
   })
 
+  return seq
+}
+
+const emitResponsesReasoningSummary = async (
+  summary: NonNullable<
+    Extract<ResponseOutputItem, { type: "reasoning" }>["summary"]
+  >,
+  ctx: MessageContentEmitContext,
+): Promise<number> => {
+  let seq = ctx.seqNum
+  for (const [summaryIndex, block] of summary.entries()) {
+    if (typeof block.text !== "string") continue
+    await ctx.stream.writeSSE({
+      event: "response.reasoning_summary_text.delta",
+      data: JSON.stringify({
+        type: "response.reasoning_summary_text.delta",
+        item_id: ctx.itemId,
+        output_index: ctx.outputIndex,
+        summary_index: summaryIndex,
+        delta: block.text,
+        sequence_number: seq++,
+      }),
+    })
+    await ctx.stream.writeSSE({
+      event: "response.reasoning_summary_text.done",
+      data: JSON.stringify({
+        type: "response.reasoning_summary_text.done",
+        item_id: ctx.itemId,
+        output_index: ctx.outputIndex,
+        summary_index: summaryIndex,
+        text: block.text,
+        sequence_number: seq++,
+      }),
+    })
+  }
   return seq
 }
 

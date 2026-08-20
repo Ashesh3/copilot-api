@@ -16,7 +16,9 @@ import {
   resetModelRoutingOverridesForTest,
   setModelRoutingOverridesForTest,
 } from "../src/lib/model-routing"
+import { state } from "../src/lib/state"
 import * as tokenPoolModule from "../src/lib/token-pool"
+import { DEFAULT_COPILOT_INTEGRATION_ID } from "../src/services/copilot/copilot-contract"
 
 const MODEL_A = "model-a"
 const MODEL_B = "model-b"
@@ -190,6 +192,7 @@ beforeEach(() => {
   queuedResults.length = 0
   fetchMock.mockClear()
   setModelRoutingOverridesForTest({})
+  state.copilotIntegrationId = DEFAULT_COPILOT_INTEGRATION_ID
 })
 
 afterEach(() => {
@@ -213,6 +216,24 @@ test("uses a 120-second buffer when scheduling token refresh", () => {
 
 test("keeps a 60-second minimum refresh interval", () => {
   expect(tokenPoolModule.getTokenRefreshIntervalMs(100)).toBe(60_000)
+})
+
+test("uses the current Copilot contract for multi-token model discovery", async () => {
+  const pool = new tokenPoolModule.TokenPool()
+  pools.add(pool)
+  const account = createInitializedAccount(pool)
+  state.copilotIntegrationId = "assigned-integration"
+  queuedResults.push(
+    tokenResponse("copilot-token-contract"),
+    modelsResponse([createModel(MODEL_A)]),
+  )
+
+  await pool.reinitializeAccount(account)
+
+  expect(modelRequests()[0]?.init?.headers).toMatchObject({
+    "Copilot-Integration-Id": "assigned-integration",
+    "X-GitHub-Api-Version": "2026-08-01",
+  })
 })
 
 test("reinitializes token and models as one account update", async () => {
@@ -445,6 +466,59 @@ test("returns the sole eligible account for identified sessions", () => {
 test("keeps unidentified clients on the first eligible account", () => {
   const pool = createPool([9, 4, 7])
   expect(pool.getAccountForModelBySession(MODEL_A, undefined)?.id).toBe(9)
+})
+
+test("selects an advertising model account outside the inference index", () => {
+  const pool = createPool([1, 2])
+  setModelRoutingOverridesForTest({ [MODEL_A]: { "1": false } })
+  pool.rebuildModelIndex()
+
+  expect(pool.getEligibleAccountIdsForModel(MODEL_A)).toEqual([2])
+  expect(pool.getAccountAdvertisingModelBySession(MODEL_A)?.id).toBe(1)
+})
+
+test("keeps a control-plane affinity on one healthy account", () => {
+  const pool = createPool([1, 2, 3])
+  const selections = Array.from(
+    { length: 20 },
+    () => pool.getHealthyAccountBySession("control-plane-stable")?.id,
+  )
+
+  expect(new Set(selections).size).toBe(1)
+})
+
+test("distributes distinct control-plane affinities across healthy accounts", () => {
+  const pool = createPool([1, 2, 3])
+  const selected = new Set(
+    Array.from({ length: 300 }, (_, index) => {
+      const accountId = pool.getHealthyAccountBySession(
+        `control-plane-${index}`,
+      )?.id
+      if (accountId === undefined) {
+        throw new TypeError("Expected a healthy control-plane account")
+      }
+      return accountId
+    }),
+  )
+
+  expect([...selected].sort((left, right) => left - right)).toEqual([1, 2, 3])
+})
+
+test("uses the first healthy account without control-plane affinity", () => {
+  const pool = createPool([9, 4, 7])
+  const first = pool.getAllAccounts().at(0)
+  if (!first) throw new TypeError("Expected first account")
+  pool.markUnhealthy(first)
+
+  expect(pool.getHealthyAccountBySession()?.id).toBe(4)
+})
+
+test("does not route an unadvertised model to an unrelated account", () => {
+  const pool = createPool([1, 2, 3])
+
+  expect(
+    pool.getAccountAdvertisingModelBySession("unadvertised-model", "session"),
+  ).toBeUndefined()
 })
 
 test("removes test accounts from model eligibility", () => {

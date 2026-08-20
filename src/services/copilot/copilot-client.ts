@@ -2,6 +2,12 @@ import * as Sentry from "@sentry/bun"
 import consola from "consola"
 import { randomUUID } from "node:crypto"
 
+import { markCopilotContractResponseMetadataAvailable } from "~/lib/copilot-contract-observability"
+import {
+  type CopilotRequestAttribution,
+  getCopilotRequestAttribution,
+  mergeCopilotRequestAttribution,
+} from "~/lib/copilot-request-context"
 import {
   abortLlmDebugLog,
   failLlmDebugLog,
@@ -10,11 +16,11 @@ import {
   toLlmDebugLogError,
 } from "~/lib/llm-debug-log"
 import {
-  clearQuotaHeaders,
+  clearCopilotResponseHeaders,
   getClientSessionId,
   getRoutingTelemetryRequestState,
   getRequestId,
-  setQuotaHeader,
+  setCopilotResponseHeader,
   updateRoutingTelemetryRequestState,
 } from "~/lib/request-session"
 import {
@@ -24,6 +30,11 @@ import {
 } from "~/lib/routing-telemetry"
 import { state } from "~/lib/state"
 import { deriveUpstreamSessionId } from "~/lib/upstream-session-affinity"
+import {
+  collectSafeCopilotResponseHeaders,
+  COPILOT_API_VERSION,
+  sanitizeCopilotHeaderValue,
+} from "~/services/copilot/copilot-contract"
 import { getCopilotToken } from "~/services/github/get-copilot-token"
 
 import type { RetryBudget, RetryClaim } from "./transport-retry"
@@ -32,6 +43,11 @@ import {
   isEncryptedCompactionVerificationError,
   refreshRequestIdForRetry,
 } from "./encrypted-compaction-retry"
+export {
+  addPromptCaching,
+  detectInitiator,
+  hasVisionContent,
+} from "./copilot-payload-helpers"
 import { createCopilotTransportInit } from "./transport-options"
 import {
   abortableSleep,
@@ -50,10 +66,6 @@ import {
 
 // --- Constants ---
 
-export const API_VERSION = "2026-01-09"
-export const MODELS_API_VERSION = "2026-06-01"
-// Intentionally reuse the VS Code chat integration identifier.
-export const INTEGRATION_ID = "vscode-chat"
 export const INITIAL_RETRY_BACKOFF_EXTRA_SECONDS = 1
 export const RETRYABLE_STATUSES = new Set([408, 429, 500, 502, 503, 504])
 
@@ -87,11 +99,70 @@ export function copilotBaseUrl(): string {
 // --- Headers ---
 
 export interface CopilotHeaderOptions {
-  vision?: boolean
-  initiator?: "agent" | "user"
-  copilotToken?: string
+  anthropicBeta?: string
   /** Set the anthropic-version header (native /v1/messages requests). */
   anthropicVersion?: string
+  attribution?: CopilotRequestAttribution
+  copilotSessionToken?: string
+  copilotToken?: string
+  initiator?: "agent" | "user"
+  modelProviderPreference?: string
+  vision?: boolean
+}
+
+const attributionHeaderNames: Partial<
+  Record<keyof CopilotRequestAttribution, string>
+> = {
+  clientExperimentAssignment: "X-Copilot-Client-Exp-Assignment-Context",
+  clientMachineId: "X-Client-Machine-Id",
+  harnessId: "Copilot-Harness-Id",
+  parentAgentId: "X-Parent-Agent-Id",
+  repositoryHost: "X-GitHub-Repository-Host",
+  repositoryNwo: "X-GitHub-Repository-Nwo",
+  subsystemId: "Copilot-Subsystem-Id",
+}
+
+function assignSanitizedHeader(
+  headers: Record<string, string>,
+  options: { maxLength?: number; name: string; value: string | undefined },
+): void {
+  const sanitized = sanitizeCopilotHeaderValue(options.value, options.maxLength)
+  if (sanitized) headers[options.name] = sanitized
+}
+
+function assignAttributionHeaders(
+  headers: Record<string, string>,
+  attribution: CopilotRequestAttribution,
+): void {
+  for (const [key, name] of Object.entries(attributionHeaderNames) as Array<
+    [keyof CopilotRequestAttribution, string]
+  >) {
+    const value = attribution[key]
+    if (value) headers[name] = value
+  }
+}
+
+function assignTypedOptionHeaders(
+  headers: Record<string, string>,
+  options: CopilotHeaderOptions | undefined,
+): void {
+  assignSanitizedHeader(headers, {
+    name: "Anthropic-Beta",
+    value: options?.anthropicBeta,
+  })
+  assignSanitizedHeader(headers, {
+    name: "anthropic-version",
+    value: options?.anthropicVersion,
+  })
+  assignSanitizedHeader(headers, {
+    maxLength: 16 * 1024,
+    name: "Copilot-Session-Token",
+    value: options?.copilotSessionToken,
+  })
+  assignSanitizedHeader(headers, {
+    name: "X-Model-Provider-Preference",
+    value: options?.modelProviderPreference,
+  })
 }
 
 export function copilotHeaders(
@@ -106,32 +177,38 @@ export function copilotHeaders(
   const affinityKey = getClientSessionId()
   const upstreamSessionId =
     affinityKey ? deriveUpstreamSessionId(affinityKey) : state.sessionId
+  const attribution = mergeCopilotRequestAttribution(
+    getCopilotRequestAttribution(),
+    options?.attribution,
+  )
+  const agentTaskId = attribution.agentTaskId ?? upstreamSessionId
 
   const headers: Record<string, string> = {
     "content-type": "application/json",
     accept: "application/json",
     Authorization: `Bearer ${token}`,
     "User-Agent": "copilot-api",
-    "Copilot-Integration-Id": INTEGRATION_ID,
+    "Copilot-Integration-Id": state.copilotIntegrationId,
     "editor-version": `vscode/${state.vsCodeVersion ?? "1.104.3"}`,
-    "Openai-Intent": "conversation-agent",
-    "X-GitHub-Api-Version": API_VERSION,
+    "Openai-Intent": attribution.openaiIntent ?? "conversation-agent",
+    "X-GitHub-Api-Version": COPILOT_API_VERSION,
     "X-Initiator": initiator,
     "X-Request-Id": getRequestId() ?? randomUUID(),
     "X-Interaction-Id": upstreamSessionId,
     "X-Client-Session-Id": upstreamSessionId,
-    "X-Agent-Task-Id": upstreamSessionId,
+    "X-Agent-Task-Id": agentTaskId,
     "X-Interaction-Type":
-      initiator === "user" ? "conversation-user" : "conversation-agent",
+      attribution.interactionType
+      ?? (initiator === "user" ? "conversation-user" : "conversation-agent"),
   }
+
+  assignAttributionHeaders(headers, attribution)
 
   if (options?.vision) {
     headers["Copilot-Vision-Request"] = "true"
   }
 
-  if (options?.anthropicVersion) {
-    headers["anthropic-version"] = options.anthropicVersion
-  }
+  assignTypedOptionHeaders(headers, options)
 
   return headers
 }
@@ -169,14 +246,6 @@ export function parseQuotaHeaders(
   }
 
   return found ? result : undefined
-}
-
-function captureQuotaHeaders(response: Response): void {
-  for (const [key, value] of response.headers.entries()) {
-    if (key.toLowerCase().startsWith("x-quota-snapshot-")) {
-      setQuotaHeader(key, value)
-    }
-  }
 }
 
 // --- Deterministic 400 Detection ---
@@ -545,12 +614,19 @@ function planHttpRetryDelaySeconds(options: {
   return delaySeconds
 }
 
-function recordQuotaSnapshot(response: Response): void {
+function logQuotaSnapshot(response: Response): void {
   const quota = parseQuotaHeaders(response)
   if (quota) {
     consola.debug("Copilot quota snapshot:", quota)
   }
-  captureQuotaHeaders(response)
+}
+
+function recordFinalResponseHeaders(response: Response): void {
+  clearCopilotResponseHeaders()
+  const metadata = collectSafeCopilotResponseHeaders(response.headers)
+  for (const [name, value] of Object.entries(metadata)) {
+    setCopilotResponseHeader(name, value)
+  }
 }
 
 type ResponseAction =
@@ -685,6 +761,7 @@ export async function copilotFetch(
 
   let lastError: Error | undefined
   let lastResponse: Response | undefined
+  clearCopilotResponseHeaders()
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     let debugLogId: string | undefined
@@ -693,7 +770,6 @@ export async function copilotFetch(
 
     try {
       const headers = toHeaderRecord(requestInit?.headers)
-      clearQuotaHeaders()
 
       debugLogId = startLlmDebugAttempt({ headers, path, requestInit, url })
 
@@ -708,7 +784,7 @@ export async function copilotFetch(
       })
 
       captureLlmDebugAttemptResponse(debugLogId, response)
-      recordQuotaSnapshot(response)
+      logQuotaSnapshot(response)
 
       const action = await classifyResponse({
         attempt,
@@ -723,6 +799,7 @@ export async function copilotFetch(
 
       if (action.kind !== "return") {
         lastResponse = response
+        clearCopilotResponseHeaders()
         const next = await applyRetryResponseAction({
           action,
           path,
@@ -736,10 +813,13 @@ export async function copilotFetch(
       }
 
       logChainResponse(chain, Date.now() - attemptStartedAtMs, response.status)
+      recordFinalResponseHeaders(response)
+      markCopilotContractResponseMetadataAvailable()
       return response
     } catch (error) {
       lastError = error as Error
       failLlmDebugAttempt(debugLogId, error)
+      clearCopilotResponseHeaders()
 
       // Resolves once the backoff has elapsed; throws to end the chain.
       await handleTransportFailure({
@@ -754,138 +834,10 @@ export async function copilotFetch(
   }
 
   if (lastResponse) {
+    recordFinalResponseHeaders(lastResponse)
+    markCopilotContractResponseMetadataAvailable()
     return lastResponse
   }
 
   throw lastError ?? new Error("Request failed without a captured error")
-}
-
-// --- Message Types ---
-
-interface ContentPart {
-  type: string
-}
-
-// --- Helper Functions ---
-
-export function hasVisionContent(
-  messages: ReadonlyArray<{
-    content?: string | ReadonlyArray<ContentPart> | null
-  }>,
-): boolean {
-  // Image parts across dialects, plus file/document attachment parts (PDFs)
-  // which also ride the vision pipeline upstream.
-  const attachmentTypes = new Set([
-    "image_url",
-    "image",
-    "input_image",
-    "file",
-    "input_file",
-    "document",
-  ])
-
-  for (const message of messages) {
-    if (Array.isArray(message.content)) {
-      const parts = message.content as ReadonlyArray<ContentPart>
-      for (const part of parts) {
-        if (attachmentTypes.has(part.type)) {
-          return true
-        }
-      }
-    }
-  }
-
-  return false
-}
-
-export function detectInitiator(
-  messages: ReadonlyArray<{ role: string }>,
-  override?: "agent" | "user",
-): "agent" | "user" {
-  if (override) return override
-
-  if (messages.length === 0) return "user"
-
-  const lastMessage = messages.at(-1)
-  if (
-    lastMessage
-    && (lastMessage.role === "assistant" || lastMessage.role === "tool")
-  ) {
-    return "agent"
-  }
-
-  return "user"
-}
-
-export function addPromptCaching(
-  messages: Array<{
-    role: string
-    content?: string | Array<unknown> | null
-    tool_calls?: Array<unknown>
-    reasoning_text?: string | null
-    reasoning_opaque?: string | null
-    encrypted_content?: string | null
-  }>,
-  tools?: Array<object>,
-): void {
-  // Add cache control to last system message
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role === "system") {
-      ;(messages[i] as Record<string, unknown>).copilot_cache_control = {
-        type: "ephemeral",
-      }
-      break
-    }
-  }
-
-  // CAPI caching is most effective when the checkpoint is on the last non-user turn.
-  // Avoid pure reasoning-only assistant turns to prevent Anthropic validation issues.
-  const lastNonUserIndex = messages.findLastIndex(
-    (message) => message.role !== "user" && !isReasoningOnlyMessage(message),
-  )
-  if (lastNonUserIndex !== -1) {
-    ;(
-      messages[lastNonUserIndex] as Record<string, unknown>
-    ).copilot_cache_control = {
-      type: "ephemeral",
-    }
-  }
-
-  // Add cache control to last tool definition
-  if (tools && tools.length > 0) {
-    const lastTool = tools.at(-1)
-    if (lastTool) {
-      ;(lastTool as Record<string, unknown>).copilot_cache_control = {
-        type: "ephemeral",
-      }
-    }
-  }
-}
-
-function isReasoningOnlyMessage(message: {
-  role: string
-  content?: string | Array<unknown> | null
-  tool_calls?: Array<unknown>
-  reasoning_text?: string | null
-  reasoning_opaque?: string | null
-  encrypted_content?: string | null
-}): boolean {
-  if (message.role !== "assistant") return false
-
-  const hasReasoning = Boolean(
-    message.reasoning_text
-      || message.reasoning_opaque
-      || message.encrypted_content,
-  )
-  if (!hasReasoning) return false
-
-  const hasContent =
-    typeof message.content === "string" ?
-      message.content.trim().length > 0
-    : Array.isArray(message.content) && message.content.length > 0
-
-  const hasToolCalls =
-    Array.isArray(message.tool_calls) && message.tool_calls.length > 0
-
-  return !hasContent && !hasToolCalls
 }

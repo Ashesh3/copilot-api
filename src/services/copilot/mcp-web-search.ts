@@ -562,11 +562,18 @@ export const createHostedWebSearchTool = (
 }
 
 export const createWebSearchAnthropicTool = (tool?: unknown) => {
+  const source = isRecord(tool) ? tool : {}
   const functionTool = createWebSearchFunctionTool(tool).function
+  const maxUses = source.max_uses
   return {
     name: functionTool.name,
     description: functionTool.description,
     input_schema: functionTool.parameters,
+    ...((
+      typeof maxUses === "number" && Number.isInteger(maxUses) && maxUses > 0
+    ) ?
+      { max_uses: maxUses }
+    : {}),
   }
 }
 
@@ -622,7 +629,7 @@ export const buildWebSearchQuery = (
 export const isWebSearchToolType = (tool: { type?: string }): boolean => {
   return (
     typeof tool.type === "string"
-    && (tool.type === "web_search" || tool.type.startsWith("web_search_"))
+    && /^web_search(?:_[a-z\d]+)*$/.test(tool.type)
   )
 }
 

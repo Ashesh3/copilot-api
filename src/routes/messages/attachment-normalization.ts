@@ -50,6 +50,46 @@ export async function normalizeAnthropicAttachments(
   }
 }
 
+/** Inline only image URL blocks, preserving document blocks verbatim. */
+export async function normalizeAnthropicImages(
+  payload: AnthropicMessagesPayload,
+  signal?: AbortSignal,
+): Promise<void> {
+  for (const message of payload.messages) {
+    if (message.role !== "user" || !Array.isArray(message.content)) continue
+
+    const normalized: Array<AnthropicUserContentBlock> = []
+    for (const block of message.content) {
+      if (block.type === "image") {
+        normalized.push(await normalizeImageBlock(block, signal))
+        continue
+      }
+      if (block.type === "tool_result" && Array.isArray(block.content)) {
+        normalized.push({
+          ...block,
+          content: await normalizeToolResultImages(block.content, signal),
+        })
+        continue
+      }
+      normalized.push(block)
+    }
+    message.content = normalized
+  }
+}
+
+async function normalizeToolResultImages(
+  content: Exclude<AnthropicToolResultBlock["content"], string>,
+  signal?: AbortSignal,
+): Promise<Exclude<AnthropicToolResultBlock["content"], string>> {
+  const normalized: Exclude<AnthropicToolResultBlock["content"], string> = []
+  for (const block of content) {
+    normalized.push(
+      block.type === "image" ? await normalizeImageBlock(block, signal) : block,
+    )
+  }
+  return normalized
+}
+
 type NormalizableBlock =
   | AnthropicTextBlock
   | AnthropicImageBlock
@@ -117,7 +157,7 @@ async function normalizeImageBlock(
     }
   }
 
-  consola.warn(`Could not inline image URL: ${block.source.url}`)
+  consola.warn("Could not inline remote image attachment")
   return {
     type: "text",
     text: attachmentOmittedNote({
@@ -233,7 +273,7 @@ async function normalizeUrlDocument(
     return [wrapDocumentText(block, decodedText)]
   }
 
-  consola.warn(`Could not inline document URL: ${url}`)
+  consola.warn("Could not inline remote document attachment")
   return [
     omittedDocumentNote(
       block,

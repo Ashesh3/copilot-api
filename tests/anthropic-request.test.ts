@@ -1,10 +1,19 @@
+/* eslint-disable max-lines */
 import { describe, test, expect } from "bun:test"
 import { z } from "zod"
 
-import type { AnthropicMessagesPayload } from "~/routes/messages/anthropic-types"
+import type {
+  AnthropicAssistantContentBlock,
+  AnthropicMessagesPayload,
+} from "~/routes/messages/anthropic-types"
 
 import { stripThinkingBlocks } from "../src/routes/messages/handler"
 import { translateToOpenAI } from "../src/routes/messages/non-stream-translation"
+import { translateAnthropicMessagesToResponsesPayload } from "../src/routes/messages/responses-translation"
+import {
+  checkMessagesToChatTranslation,
+  checkMessagesToResponsesTranslation,
+} from "../src/routes/messages/translation-fidelity"
 
 // Zod schema for a single message in the chat completion request.
 const messageSchema = z.object({
@@ -63,7 +72,81 @@ function isValidChatCompletionRequest(payload: unknown): boolean {
   return result.success
 }
 
+// eslint-disable-next-line max-lines-per-function
 describe("Anthropic to OpenAI translation logic", () => {
+  test("types and preserves current native Messages extensions", () => {
+    const payload: AnthropicMessagesPayload = {
+      model: "claude-current",
+      max_tokens: 512,
+      cache_control: { type: "ephemeral", ttl: "5m" },
+      fallback_credit_token: "opaque-token",
+      messages: [{ role: "user", content: "hello" }],
+      future_native_field: { enabled: true },
+    }
+
+    expect(payload).toEqual({
+      model: "claude-current",
+      max_tokens: 512,
+      cache_control: { type: "ephemeral", ttl: "5m" },
+      fallback_credit_token: "opaque-token",
+      messages: [{ role: "user", content: "hello" }],
+      future_native_field: { enabled: true },
+    })
+  })
+
+  test("types forward-compatible nested Messages wire records", () => {
+    const payload: AnthropicMessagesPayload = {
+      model: "claude-current",
+      max_tokens: 64,
+      metadata: { user_id: "user", future_metadata: true },
+      tool_choice: { type: "auto", future_choice: true },
+      thinking: { type: "adaptive", future_thinking: true },
+      output_config: {
+        effort: "high",
+        future_output: true,
+        task_budget: {
+          type: "tokens",
+          total: 64,
+          future_budget: true,
+        },
+      },
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "document",
+              source: {
+                type: "url",
+                url: "https://example.test",
+                future_source: true,
+              },
+              citations: { enabled: true, future_citation: true },
+            },
+          ],
+        },
+      ],
+    }
+
+    expect(payload).toMatchObject({
+      model: "claude-current",
+      max_tokens: 64,
+      metadata: { user_id: "user", future_metadata: true },
+      tool_choice: { type: "auto", future_choice: true },
+      thinking: { type: "adaptive", future_thinking: true },
+      output_config: {
+        effort: "high",
+        future_output: true,
+        task_budget: {
+          type: "tokens",
+          total: 64,
+          future_budget: true,
+        },
+      },
+      messages: [{ role: "user" }],
+    })
+  })
+
   test("should translate minimal Anthropic payload to valid OpenAI payload", () => {
     const anthropicPayload: AnthropicMessagesPayload = {
       model: "gpt-4o",
@@ -237,6 +320,38 @@ describe("Anthropic to OpenAI translation logic", () => {
     expect(assistantMessage?.reasoning_opaque).toBe("sig-123")
     expect(assistantMessage?.content).toBe("2+2 equals 4.")
   })
+
+  test.each([
+    {
+      name: "signed then unsigned",
+      content: [
+        { type: "thinking", thinking: "signed", signature: "sig-first" },
+        { type: "thinking", thinking: "unsigned" },
+      ],
+    },
+    {
+      name: "unsigned then signed",
+      content: [
+        { type: "thinking", thinking: "unsigned" },
+        { type: "thinking", thinking: "signed", signature: "sig-last" },
+      ],
+    },
+  ])(
+    "rejects assistant history with mixed $name thinking blocks",
+    ({ content }) => {
+      expect(() =>
+        translateToOpenAI({
+          model: "claude-current",
+          messages: [
+            {
+              role: "assistant",
+              content: [...content] as Array<AnthropicAssistantContentBlock>,
+            },
+          ],
+        }),
+      ).toThrow()
+    },
+  )
 
   test("should handle thinking blocks with tool calls", () => {
     const anthropicPayload: AnthropicMessagesPayload = {
@@ -555,6 +670,181 @@ describe("OpenAI Chat Completion v1 Request Payload Validation with Zod", () => 
     expect(isValidChatCompletionRequest("a string")).toBe(false)
     expect(isValidChatCompletionRequest(123)).toBe(false)
   })
+})
+
+describe("Messages translation fidelity", () => {
+  test("round-trips a Responses-native thinking signature", () => {
+    const payload: AnthropicMessagesPayload = {
+      model: "gpt-current",
+      max_tokens: 64,
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "thinking",
+              thinking: "prior thought",
+              signature: "encrypted-state@rs_1",
+            },
+          ],
+        },
+      ],
+    }
+
+    expect(checkMessagesToResponsesTranslation(payload)).toEqual({
+      supported: true,
+      blockers: [],
+    })
+    const translated = translateAnthropicMessagesToResponsesPayload(payload)
+    expect(translated.input).toEqual([
+      {
+        id: "rs_1",
+        type: "reasoning",
+        summary: [{ type: "summary_text", text: "prior thought" }],
+        encrypted_content: "encrypted-state",
+      },
+    ])
+  })
+
+  test("round-trips a Chat-native thinking signature", () => {
+    const payload: AnthropicMessagesPayload = {
+      model: "claude-current",
+      max_tokens: 64,
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "thinking",
+              thinking: "prior thought",
+              signature: "native-signature",
+            },
+          ],
+        },
+      ],
+    }
+
+    expect(checkMessagesToChatTranslation(payload)).toEqual({
+      supported: true,
+      blockers: [],
+    })
+    const translated = translateToOpenAI(payload)
+    expect(translated.messages[0]).toMatchObject({
+      role: "assistant",
+      reasoning_text: "prior thought",
+      reasoning_opaque: "native-signature",
+    })
+  })
+
+  test("blocks advanced and native-only tool declarations", () => {
+    const payload = {
+      model: "claude-current",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "hello" }],
+      tools: [
+        {
+          type: "custom",
+          name: "advanced",
+          input_schema: { type: "object", properties: {} },
+          defer_loading: true,
+        },
+        { type: "web_fetch_20250910", name: "web_fetch" },
+      ],
+    } as AnthropicMessagesPayload
+
+    expect(checkMessagesToResponsesTranslation(payload).blockers).toEqual([
+      "tool_extension",
+    ])
+    expect(checkMessagesToChatTranslation(payload).blockers).toEqual([
+      "tool_extension",
+    ])
+  })
+
+  test("allows the existing web-search compatibility loop", () => {
+    const payload = {
+      model: "claude-current",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "search" }],
+      tools: [
+        {
+          type: "web_search_20250305",
+          name: "web_search",
+          allowed_domains: ["example.com"],
+        },
+      ],
+    } as AnthropicMessagesPayload
+
+    expect(checkMessagesToResponsesTranslation(payload)).toEqual({
+      supported: true,
+      blockers: [],
+    })
+    expect(checkMessagesToChatTranslation(payload)).toEqual({
+      supported: true,
+      blockers: [],
+    })
+  })
+
+  test("Chat document conversion proves the Copilot fallback is not lossless", () => {
+    const translated = translateToOpenAI({
+      model: "chat-only",
+      max_tokens: 64,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "document",
+              source: {
+                type: "base64",
+                media_type: "application/pdf",
+                data: "JVBERi0=",
+              },
+              title: "report.pdf",
+            },
+          ],
+        },
+      ],
+    })
+
+    expect(translated.messages[0]?.content).toEqual([
+      {
+        type: "file",
+        file: {
+          filename: "report.pdf",
+          file_data: "data:application/pdf;base64,JVBERi0=",
+        },
+      },
+    ])
+  })
+
+  test.each([true, false])(
+    "Chat tool-result conversion drops is_error=%s",
+    (isError) => {
+      const translated = translateToOpenAI({
+        model: "chat-only",
+        max_tokens: 64,
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "toolu_1",
+                content: "result",
+                is_error: isError,
+              },
+            ],
+          },
+        ],
+      })
+
+      expect(translated.messages[0]).toEqual({
+        role: "tool",
+        tool_call_id: "toolu_1",
+        content: "result",
+      })
+    },
+  )
 })
 
 describe("stripThinkingBlocks", () => {

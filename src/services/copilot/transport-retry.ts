@@ -1,6 +1,11 @@
 import * as Sentry from "@sentry/bun"
 import consola from "consola"
 
+import {
+  readDescriptorSnapshotValue,
+  readNativeDomExceptionField,
+  snapshotDescriptorChain,
+} from "~/lib/descriptor-chain"
 import { sleep } from "~/lib/utils"
 
 // --- Constants ---
@@ -51,8 +56,10 @@ export interface RetryBudget {
   remaining: number
 }
 
-export function createRetryBudget(): RetryBudget {
-  return { remaining: MAX_ROUTED_SENDS - 1 }
+export function createRetryBudget(options?: {
+  extraSends?: number
+}): RetryBudget {
+  return { remaining: options?.extraSends ?? MAX_ROUTED_SENDS - 1 }
 }
 
 /** Claim one shared extra-send allowance. Returns false when exhausted. */
@@ -121,26 +128,76 @@ const NETWORK_ERROR_PATTERNS = [
   "goaway",
 ]
 
-export function getErrorCode(error: Error): string | undefined {
-  const ownCode = (error as { code?: unknown }).code
-  if (typeof ownCode === "string") return ownCode
+interface TransportErrorSnapshot {
+  code?: string
+  cause?: TransportErrorSnapshot
+  message?: string
+  name?: string
+}
 
-  const cause = error.cause
-  if (cause instanceof Error) {
-    const causeCode = (cause as { code?: unknown }).code
-    if (typeof causeCode === "string") return causeCode
+const TRANSPORT_ERROR_DESCRIPTOR_KEYS = new Set([
+  "cause",
+  "code",
+  "message",
+  "name",
+])
+const TRANSPORT_ERROR_DESCRIPTOR_DEPTH = 5
+
+function snapshotTransportError(
+  value: unknown,
+  depth = 0,
+): TransportErrorSnapshot | undefined {
+  if (typeof value !== "object" || value === null || depth > 1) {
+    return undefined
   }
 
-  return undefined
+  const snapshot = snapshotDescriptorChain(value, {
+    keys: TRANSPORT_ERROR_DESCRIPTOR_KEYS,
+    maxDepth: TRANSPORT_ERROR_DESCRIPTOR_DEPTH,
+  })
+  if (!snapshot) return undefined
+
+  const codeValue =
+    readNativeDomExceptionField(snapshot, "code")
+    ?? readDescriptorSnapshotValue(snapshot, "code")
+  const messageValue =
+    readNativeDomExceptionField(snapshot, "message")
+    ?? readDescriptorSnapshotValue(snapshot, "message")
+  const nameValue =
+    readNativeDomExceptionField(snapshot, "name")
+    ?? readDescriptorSnapshotValue(snapshot, "name")
+    ?? snapshot.errorKind
+  const causeValue = readDescriptorSnapshotValue(snapshot, "cause")
+
+  return {
+    ...(typeof codeValue === "string" ? { code: codeValue } : {}),
+    ...(typeof messageValue === "string" ? { message: messageValue } : {}),
+    ...(typeof nameValue === "string" ? { name: nameValue } : {}),
+    ...(causeValue === undefined ?
+      {}
+    : {
+        cause: snapshotTransportError(causeValue, depth + 1),
+      }),
+  }
+}
+
+function getTransportErrorCode(
+  snapshot: TransportErrorSnapshot | undefined,
+): string | undefined {
+  return snapshot?.code ?? snapshot?.cause?.code
+}
+
+export function getErrorCode(error: unknown): string | undefined {
+  const code = getTransportErrorCode(snapshotTransportError(error))
+  return code && CONNECTION_ERROR_CODES.has(code) ? code : undefined
 }
 
 function matchesErrorPattern(
-  error: Error,
+  snapshot: TransportErrorSnapshot | undefined,
   patterns: ReadonlyArray<string>,
 ): boolean {
-  const message = error.message.toLowerCase()
-  const causeMessage =
-    error.cause instanceof Error ? error.cause.message.toLowerCase() : ""
+  const message = snapshot?.message?.toLowerCase() ?? ""
+  const causeMessage = snapshot?.cause?.message?.toLowerCase() ?? ""
 
   return patterns.some(
     (pattern) => message.includes(pattern) || causeMessage.includes(pattern),
@@ -148,36 +205,38 @@ function matchesErrorPattern(
 }
 
 export function isAbortLikeError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false
-  if (error.name === "AbortError") return true
+  const snapshot = snapshotTransportError(error)
+  if (!snapshot) return false
+  if (snapshot.name === "AbortError") return true
 
   // A transport code outranks the wording. ECONNABORTED is a dead socket, not
   // a client cancellation, and its message routinely contains "aborted".
-  const code = getErrorCode(error)
+  const code = getTransportErrorCode(snapshot)
   if (code !== undefined && CONNECTION_ERROR_CODES.has(code)) return false
 
-  const message = error.message.toLowerCase()
-  const causeMessage =
-    error.cause instanceof Error ? error.cause.message.toLowerCase() : ""
+  const message = snapshot.message?.toLowerCase() ?? ""
+  const causeMessage = snapshot.cause?.message?.toLowerCase() ?? ""
   return message.includes("aborted") || causeMessage.includes("aborted")
 }
 
 export function isConnectionError(error: unknown): boolean {
-  if (!(error instanceof Error) || isAbortLikeError(error)) return false
+  const snapshot = snapshotTransportError(error)
+  if (!snapshot || isAbortLikeError(error)) return false
 
-  const code = getErrorCode(error)
+  const code = getTransportErrorCode(snapshot)
   if (code !== undefined && CONNECTION_ERROR_CODES.has(code)) return true
-  if (error.name === "ConnectionClosed") return true
+  if (snapshot.name === "ConnectionClosed") return true
 
-  return matchesErrorPattern(error, CONNECTION_ERROR_PATTERNS)
+  return matchesErrorPattern(snapshot, CONNECTION_ERROR_PATTERNS)
 }
 
 export function isRetryableError(error: unknown): boolean {
-  if (!(error instanceof Error) || isAbortLikeError(error)) return false
+  const snapshot = snapshotTransportError(error)
+  if (!snapshot || isAbortLikeError(error)) return false
 
   return (
     isConnectionError(error)
-    || matchesErrorPattern(error, NETWORK_ERROR_PATTERNS)
+    || matchesErrorPattern(snapshot, NETWORK_ERROR_PATTERNS)
   )
 }
 
@@ -200,10 +259,10 @@ function calculateNetworkRetryDelay(attempt: number): number {
 
 function toAbortReason(signal: AbortSignal): Error {
   const reason: unknown = signal.reason
-  if (reason instanceof Error) return reason
+  if (Error.isError(reason)) return reason
 
   const error = new Error("The operation was aborted")
-  error.name = "AbortError"
+  error.name = isAbortLikeError(reason) ? "AbortError" : "Error"
   // Preserve non-Error reasons (e.g. a DOMException) for diagnostics.
   if (reason !== undefined && reason !== null) {
     error.cause = reason
@@ -293,7 +352,7 @@ function logTransportEvent(
     retryChainId,
     status,
   } = fields
-  const errorCode = error instanceof Error ? getErrorCode(error) : undefined
+  const errorCode = getErrorCode(error)
 
   const message = `copilot transport ${outcome}`
   const attributes: Record<string, unknown> = {
@@ -321,17 +380,26 @@ function warnTransportRetry(options: {
   retryChainId: string
 }): void {
   const { attempt, delayMs, error, path, retryChainId } = options
-  const message = (error as Error).message
+  const errorCode = getErrorCode(error)
+  const errorClass = isConnectionError(error) ? "connection" : "network"
 
   consola.warn(
-    `Fetch failed on ${path} (attempt ${attempt + 1}), retrying in ${(delayMs / 1000).toFixed(2)}s:`,
-    message,
+    `Fetch ${errorClass} error on ${path} (attempt ${attempt + 1}), retrying in ${(delayMs / 1000).toFixed(2)}s`,
+    {
+      ...(errorCode === undefined ? {} : { errorCode }),
+      retryChainId,
+    },
   )
   Sentry.addBreadcrumb({
     category: "copilot",
-    message: `Fetch error on ${path} (attempt ${attempt + 1})`,
+    message: `Fetch ${errorClass} error on ${path} (attempt ${attempt + 1})`,
     level: "warning",
-    data: { error: message, delayMs, retryChainId },
+    data: {
+      delayMs,
+      errorClass,
+      ...(errorCode === undefined ? {} : { errorCode }),
+      retryChainId,
+    },
   })
 }
 

@@ -96,6 +96,62 @@ test("follows chained redirects and applies final target effort", async () => {
   )
 })
 
+test("keeps numeric Responses redirects model-only across multiple hops", async () => {
+  setModelRedirectsForTest([
+    {
+      id: "numeric-source-to-middle",
+      sourceModel: "numeric-source",
+      sourceEffort: "default",
+      targetModel: "numeric-middle",
+      targetEffort: "high",
+      enabled: true,
+    },
+    {
+      id: "numeric-middle-high-to-wrong",
+      sourceModel: "numeric-middle",
+      sourceEffort: "high",
+      targetModel: "wrong-named-target",
+      targetEffort: "max",
+      enabled: true,
+    },
+    {
+      id: "numeric-middle-default-to-final",
+      sourceModel: "numeric-middle",
+      sourceEffort: "default",
+      targetModel: "numeric-final",
+      targetEffort: "xhigh",
+      enabled: true,
+    },
+  ])
+
+  const redirect = await applyModelRedirect({
+    model: "numeric-source",
+    effort: undefined,
+    modelOnly: true,
+  })
+
+  expect(redirect).toMatchObject({
+    model: "numeric-final",
+    effort: undefined,
+    ruleIds: ["numeric-source-to-middle", "numeric-middle-default-to-final"],
+  })
+  expect(redirect.redirectChain).toEqual([
+    {
+      ruleId: "numeric-source-to-middle",
+      sourceModel: "numeric-source",
+      targetModel: "numeric-middle",
+    },
+    {
+      ruleId: "numeric-middle-default-to-final",
+      sourceModel: "numeric-middle",
+      targetModel: "numeric-final",
+    },
+  ])
+  expect(formatModelRedirectResult(redirect)).toBe(
+    "numeric-source -> numeric-middle -> numeric-final",
+  )
+})
+
 test("continues chained redirects only through lower priority rules", async () => {
   setModelRedirectsForTest([
     {

@@ -420,6 +420,9 @@ const handleResponseCompleted = (
         stop_sequence: anthropic.stop_sequence,
       },
       usage: anthropic.usage,
+      ...(anthropic.copilot_usage !== undefined ?
+        { copilot_usage: anthropic.copilot_usage }
+      : {}),
     },
     { type: "message_stop" },
   )
@@ -428,33 +431,24 @@ const handleResponseCompleted = (
 }
 
 const handleResponseFailed = (
-  rawEvent: ResponseFailedEvent,
+  _rawEvent: ResponseFailedEvent,
   state: ResponsesStreamState,
 ): Array<AnthropicStreamEventData> => {
-  const response = rawEvent.response
   const events = new Array<AnthropicStreamEventData>()
   closeAllOpenBlocks(state, events)
 
-  const message =
-    response.error?.message ?? "The response failed due to an unknown error."
-
-  events.push(buildErrorEvent(message))
+  events.push(buildErrorEvent(SAFE_RESPONSES_STREAM_ERROR_MESSAGE))
   state.messageCompleted = true
 
   return events
 }
 
 const handleErrorEvent = (
-  rawEvent: ResponseErrorEvent,
+  _rawEvent: ResponseErrorEvent,
   state: ResponsesStreamState,
 ): Array<AnthropicStreamEventData> => {
-  const message =
-    typeof rawEvent.message === "string" ?
-      rawEvent.message
-    : "An unexpected error occurred during streaming."
-
   state.messageCompleted = true
-  return [buildErrorEvent(message)]
+  return [buildErrorEvent(SAFE_RESPONSES_STREAM_ERROR_MESSAGE)]
 }
 
 const handleFunctionCallArgumentsValidationError = (
@@ -476,6 +470,9 @@ const messageStart = (
   state: ResponsesStreamState,
   response: ResponsesResult,
 ): Array<AnthropicStreamEventData> => {
+  const metadata = response as ResponsesResult & {
+    recommended_auto_tier?: "eco" | "balanced"
+  }
   state.messageStartSent = true
   const inputCachedTokens = response.usage?.input_tokens_details?.cached_tokens
   const inputTokens =
@@ -497,6 +494,9 @@ const messageStart = (
           cache_read_input_tokens: inputCachedTokens ?? 0,
           cache_creation_input_tokens: 0,
         },
+        ...(metadata.recommended_auto_tier !== undefined ?
+          { recommended_auto_tier: metadata.recommended_auto_tier }
+        : {}),
       },
     },
   ]
@@ -607,6 +607,9 @@ export const buildErrorEvent = (message: string): AnthropicStreamEventData => ({
     message,
   },
 })
+
+export const SAFE_RESPONSES_STREAM_ERROR_MESSAGE =
+  "Upstream Responses stream failed."
 
 const getBlockKey = (outputIndex: number, contentIndex: number): string =>
   `${outputIndex}:${contentIndex}`

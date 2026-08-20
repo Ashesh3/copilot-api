@@ -11,11 +11,15 @@ import { getRoutingAffinity } from "~/lib/routing-affinity"
  */
 export const clientSessionStorage = new AsyncLocalStorage<string | undefined>()
 export const requestIdStorage = new AsyncLocalStorage<string | undefined>()
-export const quotaHeadersStorage = new AsyncLocalStorage<
+export const copilotResponseHeadersStorage = new AsyncLocalStorage<
   Record<string, string>
 >()
+export const quotaHeadersStorage = copilotResponseHeadersStorage
 export const routedAccountStorage = new AsyncLocalStorage<{
   lastUsedAccountId?: number
+}>()
+const requestDiagnosticStorage = new AsyncLocalStorage<{
+  suppressModel?: boolean
 }>()
 
 export interface RoutingTelemetryRequestState {
@@ -63,20 +67,35 @@ export function getRequestId(): string | undefined {
   return requestIdStorage.getStore()
 }
 
-export function getQuotaHeaders(): Record<string, string> {
-  return quotaHeadersStorage.getStore() ?? {}
+export function shouldSuppressRequestModelDiagnostics(): boolean {
+  return requestDiagnosticStorage.getStore()?.suppressModel === true
 }
 
-export function setQuotaHeader(name: string, value: string): void {
-  const headers = quotaHeadersStorage.getStore()
+/** Mark the current request so ordinary diagnostics omit route-derived models. */
+export function suppressRequestModelDiagnostics(): void {
+  const diagnostics = requestDiagnosticStorage.getStore()
+  if (diagnostics) diagnostics.suppressModel = true
+}
+
+/** Isolate diagnostic policy so it cannot bleed between concurrent requests. */
+export function runWithRequestDiagnostics<T>(callback: () => T): T {
+  return requestDiagnosticStorage.run({}, callback)
+}
+
+export function getCopilotResponseHeaders(): Record<string, string> {
+  return copilotResponseHeadersStorage.getStore() ?? {}
+}
+
+export function setCopilotResponseHeader(name: string, value: string): void {
+  const headers = copilotResponseHeadersStorage.getStore()
   if (!headers) {
     return
   }
   headers[name] = value
 }
 
-export function clearQuotaHeaders(): void {
-  const headers = quotaHeadersStorage.getStore()
+export function clearCopilotResponseHeaders(): void {
+  const headers = copilotResponseHeadersStorage.getStore()
   if (!headers) {
     return
   }
@@ -85,6 +104,10 @@ export function clearQuotaHeaders(): void {
     Reflect.deleteProperty(headers, key)
   }
 }
+
+export const getQuotaHeaders = getCopilotResponseHeaders
+export const setQuotaHeader = setCopilotResponseHeader
+export const clearQuotaHeaders = clearCopilotResponseHeaders
 
 export function getLastUsedRoutedAccountId(): number | undefined {
   return routedAccountStorage.getStore()?.lastUsedAccountId

@@ -4,17 +4,41 @@ import type { Context } from "hono"
 import * as Sentry from "@sentry/bun"
 import { streamSSE } from "hono/streaming"
 
+import type {
+  EndpointRouteDecision,
+  EndpointRouteFailure,
+} from "~/lib/endpoint-routing"
 import type { Model } from "~/services/copilot/get-models"
 
-import { getLastUsedAccountId } from "~/lib/account-router"
+import {
+  getLastUsedAccountId,
+  runWithPinnedRoutedAccount,
+  runWithRoutedModelSelection,
+  selectRoutedModel,
+} from "~/lib/account-router"
 import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
+import {
+  recordCopilotEndpointRoute,
+  recordCopilotMessagesBeta,
+  recordCopilotRequestNormalization,
+} from "~/lib/copilot-contract-observability"
+import { sessionTokenMatchesModel } from "~/lib/copilot-session-token"
 import {
   createCustomProviderChatCompletions,
   resolveCustomProviderModel,
   type CustomProviderModelReference,
 } from "~/lib/custom-providers"
-import { HTTPError, isAbortError } from "~/lib/error"
+import {
+  getModelEndpointSupport,
+  selectCopilotEndpoint,
+} from "~/lib/endpoint-routing"
+import {
+  createEndpointTranslationError,
+  HTTPError,
+  isAbortError,
+  LocalHTTPError,
+} from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
 import {
   applyModelRedirect,
@@ -30,7 +54,6 @@ import {
 } from "~/lib/model-suffix"
 import {
   recordNonDefaultBehavior,
-  sanitizeRequestBodyForLog,
   setRequestContext,
 } from "~/lib/request-logger"
 import {
@@ -45,6 +68,7 @@ import {
 } from "~/lib/sentry"
 import {
   raceSsePreflush,
+  unwrapSsePreflushSettlement,
   withHeartbeatWhilePending,
   withSseHeartbeat,
   writeSseHeartbeat,
@@ -56,6 +80,7 @@ import { emitAnthropicToolSpans } from "~/lib/tool-spans"
 import {
   buildErrorEvent,
   createResponsesStreamState,
+  SAFE_RESPONSES_STREAM_ERROR_MESSAGE,
   translateResponsesStreamEvent,
 } from "~/routes/messages/responses-stream-translation"
 import {
@@ -63,7 +88,6 @@ import {
   translateResponsesResultToAnthropic,
 } from "~/routes/messages/responses-translation"
 import { getResponsesRequestOptions } from "~/routes/responses/utils"
-import { modelSupportsNativeMessages } from "~/services/copilot/create-anthropic-messages"
 import {
   createChatCompletions,
   type ChatCompletionChunk,
@@ -76,6 +100,16 @@ import {
   type ResponseStreamEvent,
 } from "~/services/copilot/create-responses"
 import { isWebSearchToolType } from "~/services/copilot/mcp-web-search"
+import {
+  createInvalidAnthropicMessagesJsonError,
+  getCanonicalAnthropicBetaIdentifiers,
+  prepareAnthropicMessagesRequest,
+  validateAnthropicRequestHeaderOptions,
+} from "~/services/copilot/messages-contract"
+import {
+  consumeExtraSend,
+  createRetryBudget,
+} from "~/services/copilot/transport-retry"
 
 import {
   type AnthropicMessagesPayload,
@@ -85,9 +119,12 @@ import {
 } from "./anthropic-types"
 import {
   normalizeAnthropicAttachments,
-  payloadHasPdfDocuments,
+  normalizeAnthropicImages,
 } from "./attachment-normalization"
-import { handleWithNativeMessages } from "./native-handler"
+import {
+  handleWithNativeMessages,
+  type NativeMessagesRequestOptions,
+} from "./native-handler"
 import {
   translateToAnthropic,
   translateToOpenAI,
@@ -99,6 +136,15 @@ import {
 } from "./stream-translation"
 import { parseSubagentMarkerFromFirstUser } from "./subagent-marker"
 import {
+  isInvalidThinkingSignatureResponse,
+  stripThinkingBlocks,
+} from "./thinking-recovery"
+import {
+  checkMessagesToChatTranslation,
+  checkMessagesNativeCompatibility,
+  checkMessagesToResponsesTranslation,
+} from "./translation-fidelity"
+import {
   emitAnthropicResponseAsStream,
   extractWebSearchCalls,
   hasWebSearchInChunks,
@@ -107,24 +153,50 @@ import {
   resolveWebSearchCalls,
 } from "./web-search-helpers"
 
+export function selectMessagesUpstreamEndpoint(options: {
+  payload: AnthropicMessagesPayload
+  selectedModel: Model | undefined
+}): EndpointRouteDecision | EndpointRouteFailure {
+  const support =
+    options.selectedModel ?
+      getModelEndpointSupport(options.selectedModel)
+    : {
+        chat: true,
+        embeddings: false,
+        messages: false,
+        responses: false,
+        responsesWebSocket: false,
+      }
+  return selectCopilotEndpoint({
+    source: "messages",
+    support,
+    candidates: [
+      {
+        endpoint: "/v1/messages",
+        reason: "endpoint_unavailable",
+        check: { supported: true, blockers: [] },
+      },
+      {
+        endpoint: "/responses",
+        reason: "endpoint_unavailable",
+        check: checkMessagesToResponsesTranslation(options.payload),
+      },
+      {
+        endpoint: "/chat/completions",
+        reason: "endpoint_unavailable",
+        check: checkMessagesToChatTranslation(options.payload),
+      },
+    ],
+  })
+}
+
 /**
  * Strip thinking blocks from all assistant messages in the payload.
  * Returns true if any thinking blocks were removed.
  * Used to recover from "Invalid signature in thinking block" errors
  * when models are switched mid-conversation.
  */
-export function stripThinkingBlocks(
-  payload: AnthropicMessagesPayload,
-): boolean {
-  let stripped = false
-  for (const msg of payload.messages) {
-    if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue
-    const before = msg.content.length
-    msg.content = msg.content.filter((block) => block.type !== "thinking")
-    if (msg.content.length < before) stripped = true
-  }
-  return stripped
-}
+export { stripThinkingBlocks } from "./thinking-recovery"
 
 /**
  * Strip thinking blocks from assistant messages in multi-token mode.
@@ -160,17 +232,33 @@ const hasWebSearchToolInPayload = (
 }
 
 export async function handleCompletion(c: Context) {
-  const anthropicPayload = await c.req.json<AnthropicMessagesPayload>()
+  let rawPayload: AnthropicMessagesPayload
+  try {
+    rawPayload = await c.req.json<AnthropicMessagesPayload>()
+  } catch {
+    throw createInvalidAnthropicMessagesJsonError()
+  }
+  const preparedMessages = prepareAnthropicMessagesRequest({
+    payload: rawPayload,
+    requireMaxTokens: true,
+  })
+  const anthropicPayload =
+    preparedMessages.body as unknown as AnthropicMessagesPayload
+  const nativeOptions: NativeMessagesRequestOptions =
+    validateAnthropicRequestHeaderOptions({
+      anthropicBeta: c.req.header("anthropic-beta"),
+      anthropicVersion: c.req.header("anthropic-version"),
+      modelProviderPreference: c.req.header("x-model-provider-preference"),
+    })
   installRoutingAffinityFallback(
     resolveClaudeRoutingAffinity(anthropicPayload.metadata),
   )
   const conversationId = setSentryConversationIdFromRequest(c, anthropicPayload)
-  logger.debug(
-    "Anthropic request payload:",
-    sanitizeRequestBodyForLog(
-      anthropicPayload as unknown as Record<string, unknown>,
-    ),
-  )
+  logger.debug("Received Anthropic request", {
+    messageCount: anthropicPayload.messages.length,
+    stream: Boolean(anthropicPayload.stream),
+    toolCount: anthropicPayload.tools?.length ?? 0,
+  })
 
   const model = normalizeModelName(
     parseModelSuffix(anthropicPayload.model).baseModel,
@@ -179,7 +267,12 @@ export async function handleCompletion(c: Context) {
   return await Sentry.startSpan(
     createSentryInvokeAgentSpanOptions(model, conversationId),
     async () => {
-      return await handleCompletionInner(c, anthropicPayload)
+      recordCopilotRequestNormalization(
+        "messages",
+        preparedMessages.normalizationClasses,
+      )
+      recordCopilotMessagesBeta(nativeOptions.anthropicBeta)
+      return await handleCompletionInner(c, anthropicPayload, nativeOptions)
     },
   )
 }
@@ -187,6 +280,7 @@ export async function handleCompletion(c: Context) {
 async function handleCompletionInner(
   c: Context,
   anthropicPayload: AnthropicMessagesPayload,
+  nativeOptions: NativeMessagesRequestOptions,
 ) {
   // Emit synthetic tool execution spans from tool results in message history
   emitAnthropicToolSpans(anthropicPayload.messages)
@@ -258,59 +352,114 @@ async function handleCompletionInner(
 
   const subagentMarker = parseSubagentMarkerFromFirstUser(anthropicPayload)
   const initiatorOverride = subagentMarker ? "agent" : undefined
-  if (subagentMarker) {
-    logger.debug("Detected Subagent marker:", JSON.stringify(subagentMarker))
-  }
+  if (subagentMarker) logger.debug("Detected Subagent marker")
 
   // claude code and opencode compact request detection
   const isCompact = isCompactRequest(anthropicPayload)
 
-  const anthropicBeta = c.req.header("anthropic-beta")
-  logger.debug("Anthropic Beta header:", anthropicBeta)
+  const { anthropicBeta } = nativeOptions
+  logger.debug("Anthropic Beta header present:", Boolean(anthropicBeta))
 
   // Route to model variants based on client signals
-  applyModelVariantRouting(c, anthropicPayload, anthropicBeta)
+  const modelWasRedirected =
+    redirect.redirected
+    || applyModelVariantRouting(c, anthropicPayload, anthropicBeta)
 
-  // Inline URL/text attachment sources so only base64 images and base64 PDF
-  // documents remain (upstream rejects external URLs and text documents)
-  await normalizeAnthropicAttachments(anthropicPayload, c.req.raw.signal)
-
-  if (isCompact) {
-    logger.debug("Is compact request:", isCompact)
-  } else {
-    mergeToolResultForClaude(anthropicPayload)
+  const customReference = resolveCustomChatModel(anthropicPayload.model)
+  if (customReference) {
+    const customTranslation = checkMessagesToChatTranslation(anthropicPayload)
+    if (!customTranslation.supported) {
+      throw createEndpointTranslationError({
+        blockers: customTranslation.blockers,
+        code: "endpoint_translation_unsupported",
+        source: "messages",
+      })
+    }
+    await normalizeAnthropicAttachments(anthropicPayload, c.req.raw.signal)
+    await prepareMessagesPayloadForDispatch(c, {
+      payload: anthropicPayload,
+      isCompact,
+      attachmentsPrepared: true,
+    })
+    setRequestContext(c, {
+      requestedModel,
+      model: anthropicPayload.model,
+      provider: "ChatCompletions",
+      reasoningEffort:
+        redirectEffort ?? getBodyReasoningEffort(anthropicPayload),
+    })
+    return await handleWithChatCompletions(c, anthropicPayload, {
+      initiatorOverride,
+      effortOverride: redirectEffort,
+      requestedModel,
+    })
   }
 
-  if (state.manualApprove) {
-    await awaitApproval()
+  const inboundSessionToken = c.req.header("copilot-session-token")
+  const copilotSessionToken =
+    (
+      sessionTokenMatchesModel({
+        token: inboundSessionToken,
+        requestedModel: baseModel,
+        finalModel: anthropicPayload.model,
+        modelWasRedirected,
+      })
+    ) ?
+      inboundSessionToken
+    : undefined
+
+  const routedModel = selectRoutedModel(anthropicPayload.model)
+  const selectedModel = routedModel.model
+  if (state.models && !selectedModel) throw createMessagesModelNotFoundError()
+
+  const routeDecision = selectMessagesUpstreamEndpoint({
+    payload: anthropicPayload,
+    selectedModel,
+  })
+  if ("code" in routeDecision)
+    throw createEndpointTranslationError(routeDecision)
+  recordCopilotEndpointRoute(routeDecision)
+
+  if (routeDecision.target === "/v1/messages") {
+    const nativeCompatibility =
+      checkMessagesNativeCompatibility(anthropicPayload)
+    if (!nativeCompatibility.supported) {
+      throw createEndpointTranslationError({
+        blockers: nativeCompatibility.blockers,
+        code: "endpoint_translation_unsupported",
+        source: "messages",
+      })
+    }
   }
 
-  const selectedModel = state.models?.data.find(
-    (m) => m.id === anthropicPayload.model,
-  )
-
-  // Base64 PDFs and ToolSearch references can only remain structural on the
-  // native /v1/messages endpoint. Translated endpoints use a textual fallback.
-  const hasPdfDocuments = payloadHasPdfDocuments(anthropicPayload)
-  const hasToolReferences = payloadHasToolReference(anthropicPayload)
-  const usesNativeMessages =
-    (hasPdfDocuments || hasToolReferences)
-    && modelSupportsNativeMessages(selectedModel)
+  const attachmentsPrepared = routeDecision.target !== "/v1/messages"
+  // Fidelity selection above must see the original semantic block shape.
+  // Only the chosen dispatch path may now rewrite its attachment transport.
+  if (attachmentsPrepared) {
+    await normalizeAnthropicAttachments(anthropicPayload, c.req.raw.signal)
+  }
+  await prepareMessagesPayloadForDispatch(c, {
+    payload: anthropicPayload,
+    isCompact,
+    attachmentsPrepared,
+  })
 
   let apiType = "ChatCompletions"
-  if (usesNativeMessages) {
+  if (routeDecision.target === "/v1/messages") {
     apiType = "AnthropicMessages"
+  } else if (routeDecision.target === "/responses") {
+    apiType = "Responses"
+  }
+  if (routeDecision.translated) {
     recordNonDefaultBehavior(c, {
       kind: "endpoint_fallback",
-      message: `${hasPdfDocuments ? "PDF document attachment" : "ToolSearch reference"} routed ${anthropicPayload.model} to native /v1/messages`,
+      message: `Model ${anthropicPayload.model} does not support native /v1/messages; falling back to ${apiType}`,
       data: {
         model: anthropicPayload.model,
-        sourceEndpoint: "ChatCompletions",
-        targetEndpoint: "AnthropicMessages",
+        sourceEndpoint: "AnthropicMessages",
+        targetEndpoint: apiType,
       },
     })
-  } else if (shouldUseResponsesApi(selectedModel)) {
-    apiType = "Responses"
   }
 
   // Determine effective reasoning effort for logging
@@ -325,47 +474,100 @@ async function handleCompletionInner(
     reasoningEffort: effectiveEffort,
   })
 
-  if (usesNativeMessages) {
-    // The native /v1/messages endpoint validates assistant thinking-block
-    // signatures as genuine Anthropic signatures. In a mixed session, prior
-    // turns were served by the OpenAI-format /chat/completions and /responses
-    // endpoints, whose opaque reasoning signatures are NOT valid here — CAPI
-    // rejects them with 400 "Invalid signature in thinking block". Drop the
-    // history thinking blocks before dispatching; they aren't needed to read
-    // the attachment, and the current turn still reasons via `thinking`.
-    if (stripThinkingBlocks(anthropicPayload)) {
-      recordNonDefaultBehavior(c, {
-        kind: "reasoning_retry_without_thinking",
-        message: `Stripped foreign-endpoint thinking blocks before native /v1/messages for ${anthropicPayload.model}`,
-        data: {
-          model: anthropicPayload.model,
-          reason: "thinking signatures not valid on /v1/messages",
-          endpoint: "AnthropicMessages",
-        },
+  return await runWithRoutedModelSelection(routedModel, async () => {
+    if (routeDecision.target === "/v1/messages") {
+      const retryBudget = createRetryBudget()
+      const requestOptions: NativeMessagesRequestOptions = {
+        ...nativeOptions,
+        requestedModel,
+        originalStream: Boolean(anthropicPayload.stream),
+        retryBudget,
+        copilotSessionToken,
+        ...(initiatorOverride ? { initiatorOverride } : {}),
+      }
+      try {
+        return await handleWithNativeMessages(
+          c,
+          anthropicPayload,
+          requestOptions,
+        )
+      } catch (error) {
+        if (
+          requestOptions.originalStream
+          || !(error instanceof HTTPError)
+          || error.response.status !== 400
+          || !(await isInvalidThinkingSignatureResponse(error.response))
+        ) {
+          throw error
+        }
+
+        if (!consumeExtraSend(retryBudget)) {
+          throw error
+        }
+        const recoveredPayload = structuredClone(anthropicPayload)
+        if (!stripThinkingBlocks(recoveredPayload)) throw error
+        recordNonDefaultBehavior(c, {
+          kind: "reasoning_retry_without_thinking",
+          message: `Stripped thinking blocks after native /v1/messages rejected their signature for ${anthropicPayload.model}`,
+          data: {
+            model: anthropicPayload.model,
+            reason: "invalid signature",
+            endpoint: "AnthropicMessages",
+          },
+        })
+        const accountId = getLastUsedAccountId()
+        return await runWithPinnedRoutedAccount(
+          accountId,
+          async () =>
+            await handleWithNativeMessages(c, recoveredPayload, {
+              ...requestOptions,
+              retryBudget,
+            }),
+        )
+      }
+    }
+
+    if (routeDecision.target === "/responses") {
+      return await handleWithResponsesApi(c, anthropicPayload, {
+        copilotSessionToken,
+        initiatorOverride,
+        effortOverride,
+        requestedModel,
       })
     }
-    return await handleWithNativeMessages(c, anthropicPayload, {
-      initiatorOverride,
-      requestedModel,
-    })
-  }
 
-  if (shouldUseResponsesApi(selectedModel)) {
-    return await handleWithResponsesApi(c, anthropicPayload, {
+    return await handleWithChatCompletions(c, anthropicPayload, {
+      copilotSessionToken,
       initiatorOverride,
       effortOverride,
       requestedModel,
     })
-  }
-
-  return await handleWithChatCompletions(c, anthropicPayload, {
-    initiatorOverride,
-    effortOverride,
-    requestedModel,
   })
 }
 
-const RESPONSES_ENDPOINT = "/responses"
+async function prepareMessagesPayloadForDispatch(
+  c: Context,
+  options: {
+    attachmentsPrepared?: boolean
+    isCompact: boolean
+    payload: AnthropicMessagesPayload
+  },
+): Promise<void> {
+  const { attachmentsPrepared, isCompact, payload } = options
+  if (!attachmentsPrepared) {
+    // Native Messages can preserve accepted document sources and their
+    // metadata. It still needs external image URLs inlined for Copilot.
+    await normalizeAnthropicImages(payload, c.req.raw.signal)
+  }
+
+  if (isCompact) {
+    logger.debug("Is compact request:", isCompact)
+  } else {
+    mergeToolResultForClaude(payload)
+  }
+
+  if (state.manualApprove) await awaitApproval()
+}
 
 interface BufferedChatCompletionsResult {
   hadWebSearch: boolean
@@ -575,6 +777,7 @@ const handleWithChatCompletions = async (
   c: Context,
   anthropicPayload: AnthropicMessagesPayload,
   options?: {
+    copilotSessionToken?: string
     initiatorOverride?: "agent" | "user"
     effortOverride?: ReasoningEffort
     requestedModel?: string
@@ -627,12 +830,18 @@ const executeChatCompletions = async (
   c: Context,
   anthropicPayload: AnthropicMessagesPayload,
   options?: {
+    copilotSessionToken?: string
     initiatorOverride?: "agent" | "user"
     effortOverride?: ReasoningEffort
     requestedModel?: string
   },
 ) => {
-  const { initiatorOverride, effortOverride, requestedModel } = options ?? {}
+  const {
+    copilotSessionToken,
+    initiatorOverride,
+    effortOverride,
+    requestedModel,
+  } = options ?? {}
   const reasoningEnabled = Boolean(effortOverride || anthropicPayload.thinking)
 
   // In multi-token mode, reasoning_opaque is cryptographically tied to a
@@ -730,10 +939,12 @@ const executeChatCompletions = async (
 
   await tryCountTokens(c, finalPayload)
 
-  logger.debug(
-    "Translated OpenAI request payload:",
-    JSON.stringify(finalPayload),
-  )
+  logger.debug("Prepared translated Chat request", {
+    messageCount: finalPayload.messages.length,
+    model: finalPayload.model,
+    stream: Boolean(finalPayload.stream),
+    toolCount: finalPayload.tools?.length ?? 0,
+  })
 
   if (!finalPayload.stream) {
     const { initialResponse, hadWebSearch } = await Sentry.startSpan(
@@ -743,6 +954,7 @@ const executeChatCompletions = async (
       }),
       async (span) => {
         const response = (await createChatCompletions(finalPayload, {
+          copilotSessionToken,
           initiator: initiatorOverride,
           signal: c.req.raw.signal,
         })) as ChatCompletionResponse
@@ -763,24 +975,25 @@ const executeChatCompletions = async (
     const finalResponse =
       hadWebSearch ?
         await resolveWebSearchCalls(initialResponse, finalPayload, {
+          copilotSessionToken,
           initiatorOverride,
           abortSignal: c.req.raw.signal,
         })
       : initialResponse
 
-    logger.debug(
-      "Non-streaming response from Copilot:",
-      JSON.stringify(finalResponse),
-    )
+    logger.debug("Received non-streaming Chat response", {
+      choiceCount: finalResponse.choices.length,
+      model: finalResponse.model,
+    })
 
     const anthropicResponse = translateToAnthropic(
       finalResponse,
       requestedModel,
     )
-    logger.debug(
-      "Translated Anthropic response:",
-      JSON.stringify(anthropicResponse),
-    )
+    logger.debug("Translated Anthropic response", {
+      blockCount: anthropicResponse.content.length,
+      model: anthropicResponse.model,
+    })
     return c.json(anthropicResponse)
   }
 
@@ -811,6 +1024,7 @@ const executeChatCompletions = async (
         ])
         const preflush = await raceSsePreflush(
           createChatCompletions(finalPayload, {
+            copilotSessionToken,
             initiator: initiatorOverride,
             signal: upstreamSignal,
           }),
@@ -829,7 +1043,9 @@ const executeChatCompletions = async (
             const response =
               preflush.kind === "settled" ?
                 preflush.value
-              : await withHeartbeatWhilePending(preflush.pending, stream)
+              : unwrapSsePreflushSettlement(
+                  await withHeartbeatWhilePending(preflush.pending, stream),
+                )
 
             // Track which account handled this request (multi-token mode)
             const accountId = getLastUsedAccountId()
@@ -858,6 +1074,7 @@ const executeChatCompletions = async (
                 const resolved = await withHeartbeatWhilePending(
                   Sentry.withActiveSpan(null, () =>
                     resolveWebSearchCalls(initialResp, finalPayload, {
+                      copilotSessionToken,
                       initiatorOverride,
                       abortSignal: upstreamSignal,
                     }),
@@ -965,10 +1182,10 @@ async function executeCustomProviderChatCompletions(
         setChatCompletionSpanResult(span, response)
 
         const anthropicResponse = translateToAnthropic(response, responseModel)
-        logger.debug(
-          "Translated custom provider Anthropic response:",
-          JSON.stringify(anthropicResponse),
-        )
+        logger.debug("Translated custom provider Anthropic response", {
+          blockCount: anthropicResponse.content.length,
+          model: anthropicResponse.model,
+        })
         return c.json(anthropicResponse)
       },
     )
@@ -1106,9 +1323,7 @@ const parseResponsesStreamError = (
   parsed: ResponseStreamEvent,
 ): string | null => {
   if (parsed.type !== "error") return null
-  return "message" in parsed ?
-      (parsed as { message: string }).message
-    : "Upstream error"
+  return SAFE_RESPONSES_STREAM_ERROR_MESSAGE
 }
 
 const writeResponsesEvents = async (
@@ -1300,6 +1515,7 @@ const handleWithResponsesApi = async (
   c: Context,
   anthropicPayload: AnthropicMessagesPayload,
   options?: {
+    copilotSessionToken?: string
     initiatorOverride?: "agent" | "user"
     effortOverride?: ReasoningEffort
     requestedModel?: string
@@ -1347,12 +1563,18 @@ const executeResponsesApi = async (
   c: Context,
   anthropicPayload: AnthropicMessagesPayload,
   options?: {
+    copilotSessionToken?: string
     initiatorOverride?: "agent" | "user"
     effortOverride?: ReasoningEffort
     requestedModel?: string
   },
 ) => {
-  const { initiatorOverride, effortOverride, requestedModel } = options ?? {}
+  const {
+    copilotSessionToken,
+    initiatorOverride,
+    effortOverride,
+    requestedModel,
+  } = options ?? {}
   const reasoningEnabled = Boolean(effortOverride || anthropicPayload.thinking)
   if (!reasoningEnabled) {
     stripThinkingBlocksForMultiToken(anthropicPayload)
@@ -1361,10 +1583,12 @@ const executeResponsesApi = async (
     anthropicPayload,
     effortOverride,
   )
-  logger.debug(
-    "Translated Responses payload:",
-    JSON.stringify(responsesPayload),
-  )
+  logger.debug("Prepared translated Responses request", {
+    inputKind: Array.isArray(responsesPayload.input) ? "items" : "text",
+    model: responsesPayload.model,
+    stream: Boolean(responsesPayload.stream),
+    toolCount: responsesPayload.tools?.length ?? 0,
+  })
 
   const { vision, initiator } = getResponsesRequestOptions(responsesPayload)
 
@@ -1390,6 +1614,7 @@ const executeResponsesApi = async (
 
         try {
           const response = await createResponses(responsesPayload, {
+            copilotSessionToken,
             vision,
             initiator: initiatorOverride ?? initiator,
             signal: c.req.raw.signal,
@@ -1447,6 +1672,7 @@ const executeResponsesApi = async (
                         initialRes,
                         responsesPayload,
                         {
+                          copilotSessionToken,
                           vision,
                           initiator: initiatorOverride ?? initiator,
                           signal: c.req.raw.signal,
@@ -1505,6 +1731,7 @@ const executeResponsesApi = async (
     }),
     async (span) => {
       const result = (await createResponses(responsesPayload, {
+        copilotSessionToken,
         vision,
         initiator: initiatorOverride ?? initiator,
         signal: c.req.raw.signal,
@@ -1536,31 +1763,47 @@ const executeResponsesApi = async (
   const resolved =
     hadWebSearch ?
       await resolveResponsesWebSearchCalls(initialResult, responsesPayload, {
+        copilotSessionToken,
         vision,
         initiator: initiatorOverride ?? initiator,
         signal: c.req.raw.signal,
       })
     : initialResult
 
-  logger.debug("Non-streaming Responses result:", JSON.stringify(resolved))
+  logger.debug("Received non-streaming Responses result", {
+    model: resolved.model,
+    outputCount: resolved.output.length,
+    status: resolved.status,
+  })
 
   const anthropicResponse = translateResponsesResultToAnthropic(resolved)
   if (requestedModel) anthropicResponse.model = requestedModel
-  logger.debug(
-    "Translated Anthropic response:",
-    JSON.stringify(anthropicResponse),
-  )
+  logger.debug("Translated Anthropic response", {
+    blockCount: anthropicResponse.content.length,
+    model: anthropicResponse.model,
+  })
   return c.json(anthropicResponse)
-}
-
-const shouldUseResponsesApi = (selectedModel: Model | undefined): boolean => {
-  return (
-    selectedModel?.supported_endpoints?.includes(RESPONSES_ENDPOINT) ?? false
-  )
 }
 
 const modelExists = (id: string) =>
   state.models?.data.some((m) => m.id === id) ?? false
+
+function createMessagesModelNotFoundError(): LocalHTTPError {
+  const clientBody = {
+    type: "error",
+    error: {
+      type: "not_found_error",
+      code: "model_not_found",
+      message: "The requested Copilot Messages model was not found.",
+      param: "model",
+    },
+  }
+  return new LocalHTTPError(
+    clientBody.error.message,
+    Response.json(clientBody, { status: 404 }),
+    clientBody,
+  )
+}
 
 /**
  * Route to model variants based on client signals (1m context, fast mode).
@@ -1570,9 +1813,14 @@ function applyModelVariantRouting(
   c: Context,
   payload: AnthropicMessagesPayload,
   anthropicBeta: string | undefined,
-): void {
+): boolean {
+  const initialModel = payload.model
   // 1M context via beta header → route to -1m model variant
-  if (anthropicBeta?.includes("context-1m")) {
+  if (
+    getCanonicalAnthropicBetaIdentifiers(anthropicBeta).has(
+      "context-1m-2025-08-07",
+    )
+  ) {
     const candidate = `${payload.model}-1m`
     if (modelExists(candidate)) {
       recordNonDefaultBehavior(c, {
@@ -1639,6 +1887,7 @@ function applyModelVariantRouting(
     })
     delete payload.speed
   }
+  return payload.model !== initialModel
 }
 
 /**
@@ -1731,15 +1980,6 @@ const mergeContentWithTexts = (
 const hasToolReference = (toolResult: AnthropicToolResultBlock): boolean =>
   Array.isArray(toolResult.content)
   && toolResult.content.some((block) => block.type === "tool_reference")
-
-const payloadHasToolReference = (payload: AnthropicMessagesPayload): boolean =>
-  payload.messages.some(
-    (message) =>
-      Array.isArray(message.content)
-      && message.content.some(
-        (block) => block.type === "tool_result" && hasToolReference(block),
-      ),
-  )
 
 const mergeToolResultForClaude = (
   anthropicPayload: AnthropicMessagesPayload,

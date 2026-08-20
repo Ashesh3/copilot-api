@@ -303,6 +303,287 @@ test("Anthropic messages request routes to custom chat provider by model id", as
   expect(requests[0]?.headers.get("authorization")).toBe("Bearer custom-key")
 })
 
+test.each([
+  ["root cache control", { cache_control: { type: "ephemeral" } }],
+  ["future root field", { future_native_field: true }],
+  [
+    "deferred native tool",
+    { tools: [{ type: "future_native_20270101", name: "future_native" }] },
+  ],
+  [
+    "document context",
+    {
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "document",
+              source: { type: "text", data: "notes" },
+              context: "must stay structural",
+            },
+          ],
+        },
+      ],
+    },
+  ],
+  [
+    "Responses thinking signature",
+    {
+      messages: [
+        { role: "user", content: "hello" },
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "private", signature: "item@opaque" },
+          ],
+        },
+      ],
+    },
+  ],
+] as const)(
+  "rejects custom-provider Messages %s before lossy Chat conversion",
+  async (_name, extra) => {
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "custom-chat-model",
+        messages: [{ role: "user", content: "hello" }],
+        max_tokens: 16,
+        ...extra,
+      }),
+    })
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toMatchObject({
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        code: "endpoint_translation_unsupported",
+      },
+    })
+    expect(requests).toHaveLength(0)
+  },
+)
+
+test("custom Messages rejects a versioned web-search schema before URL-image fetch", async () => {
+  const marker = "PRIVATE_CUSTOM_WEB_SEARCH_SCHEMA"
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "custom-chat-model",
+      max_tokens: 16,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "image",
+              source: {
+                type: "url",
+                url: "https://private.example/image.png",
+              },
+            },
+          ],
+        },
+      ],
+      tools: [
+        {
+          type: "web_search_20250305",
+          name: "web_search",
+          input_schema: {
+            type: "object",
+            properties: {
+              query: { type: "string", description: marker },
+            },
+          },
+        },
+      ],
+    }),
+  })
+  const body = await response.text()
+
+  expect(response.status).toBe(400)
+  expect(JSON.parse(body)).toMatchObject({
+    error: {
+      code: "endpoint_translation_unsupported",
+      param: "tool_extension",
+    },
+  })
+  expect(body).not.toContain(marker)
+  expect(requests).toHaveLength(0)
+})
+
+test("custom Messages rejects an unknown typed tool with a schema", async () => {
+  const privateType = "PRIVATE_CUSTOM_NATIVE_TYPE"
+  const privateName = "PRIVATE_CUSTOM_NATIVE_NAME"
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "custom-chat-model",
+      max_tokens: 16,
+      messages: [{ role: "user", content: "hello" }],
+      tools: [
+        {
+          type: privateType,
+          name: privateName,
+          input_schema: { type: "object", properties: {} },
+        },
+      ],
+    }),
+  })
+  const body = await response.text()
+
+  expect(response.status).toBe(400)
+  expect(JSON.parse(body)).toMatchObject({
+    error: {
+      code: "endpoint_translation_unsupported",
+      param: "tool_type",
+    },
+  })
+  expect(body).not.toContain(privateType)
+  expect(body).not.toContain(privateName)
+  expect(requests).toHaveLength(0)
+})
+
+test.each([
+  "web_searchfuture",
+  "Web_search_20250305",
+  "prefix_web_search_20250305",
+  "web-search_20250305",
+  "web_search_",
+  "web_search__20250305",
+])("custom Messages rejects web-search lookalike type %s", async (type) => {
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "custom-chat-model",
+      max_tokens: 16,
+      messages: [{ role: "user", content: "hello" }],
+      tools: [
+        {
+          type,
+          name: "future_native",
+          input_schema: { type: "object", properties: {} },
+        },
+      ],
+    }),
+  })
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toMatchObject({
+    error: {
+      code: "endpoint_translation_unsupported",
+      param: "tool_type",
+    },
+  })
+  expect(requests).toHaveLength(0)
+})
+
+test("custom Messages rejects document flattening before attachment normalization", async () => {
+  const document = {
+    type: "document",
+    source: { type: "text", media_type: "text/plain", data: "custom notes" },
+    title: "notes.txt",
+    context: "custom context",
+  }
+
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "custom-chat-model",
+      messages: [{ role: "user", content: [document] }],
+      max_tokens: 16,
+    }),
+  })
+
+  expect(response.status).toBe(400)
+  expect(requests).toHaveLength(0)
+})
+
+test.each([
+  {
+    name: "image source extension",
+    extra: {
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "image",
+              source: {
+                type: "url",
+                url: "https://private.example/image.png",
+                private_custom_source: true,
+              },
+            },
+          ],
+        },
+      ],
+    },
+    param: "source_extension",
+  },
+  {
+    name: "tool schema extension",
+    extra: {
+      tools: [
+        {
+          name: "lookup",
+          input_schema: {
+            type: "object",
+            properties: {},
+            private_custom_schema: true,
+          },
+        },
+      ],
+    },
+    param: "tool_extension",
+  },
+  {
+    name: "format extension",
+    extra: {
+      output_config: {
+        format: {
+          type: "json_object",
+          private_custom_format: true,
+        },
+      },
+    },
+    param: "format_extension",
+  },
+] as const)(
+  "rejects custom-provider nested $name without fetching or dispatching",
+  async ({ extra, param }) => {
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "custom-chat-model",
+        messages: [{ role: "user", content: "hello" }],
+        max_tokens: 16,
+        ...extra,
+      }),
+    })
+    const body = await response.text()
+
+    expect(response.status).toBe(400)
+    expect(JSON.parse(body)).toMatchObject({
+      type: "error",
+      error: {
+        code: "endpoint_translation_unsupported",
+        param,
+      },
+    })
+    expect(body).not.toContain("private_custom")
+    expect(requests).toHaveLength(0)
+  },
+)
+
 test("embeddings request routes to Nebius config by alias", async () => {
   const response = await server.request("/v1/embeddings", {
     method: "POST",

@@ -1,7 +1,14 @@
 import { Hono } from "hono"
 import { randomUUID } from "node:crypto"
 
+import { runWithCopilotContractObservabilityScope } from "~/lib/copilot-contract-observability"
 import {
+  type CopilotRequestAttribution,
+  resolveCopilotRequestAttribution,
+  runWithCopilotRequestAttribution,
+} from "~/lib/copilot-request-context"
+import {
+  type RoutingAffinity,
   resolveRoutingAffinityFromHeaders,
   runWithRoutingAffinity,
 } from "~/lib/routing-affinity"
@@ -14,11 +21,12 @@ import { createAuthMiddleware } from "./lib/request-auth"
 import { requestLogger } from "./lib/request-logger"
 import {
   createRoutingTelemetryRequestState,
-  getQuotaHeaders,
-  quotaHeadersStorage,
+  copilotResponseHeadersStorage,
+  getCopilotResponseHeaders,
   requestIdStorage,
   routedAccountStorage,
   routingTelemetryStorage,
+  runWithRequestDiagnostics,
 } from "./lib/request-session"
 import { transparentProxy } from "./lib/transparent-proxy"
 import { completionRoutes } from "./routes/chat-completions/route"
@@ -27,6 +35,7 @@ import { codeSessionsRoutes } from "./routes/code-sessions/route"
 import { codexResponsesRoutes } from "./routes/codex-responses/route"
 import { codexSearchRoutes } from "./routes/codex-search/route"
 import { computerUsePolicyRoutes } from "./routes/computer-use-policy/route"
+import { copilotControlPlaneRoutes } from "./routes/copilot-control-plane/route"
 import { dashboardRoutes } from "./routes/dashboard/route"
 import { directConnectRoutes } from "./routes/direct-connect/route"
 import { embeddingRoutes } from "./routes/embeddings/route"
@@ -84,6 +93,29 @@ function applySecurityHeaders(c: {
   c.header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 }
 
+async function runWithRequestRoutingScopes<T>(
+  attribution: CopilotRequestAttribution,
+  affinity: RoutingAffinity | undefined,
+  callback: () => Promise<T>,
+): Promise<T> {
+  const runWithDiagnostics = async () =>
+    await runWithRequestDiagnostics(
+      async () => await runWithCopilotContractObservabilityScope(callback),
+    )
+  return await runWithCopilotRequestAttribution(
+    attribution,
+    async () =>
+      await runWithRoutingAffinity(
+        affinity,
+        async () =>
+          await copilotResponseHeadersStorage.run(
+            {},
+            async () => await routedAccountStorage.run({}, runWithDiagnostics),
+          ),
+      ),
+  )
+}
+
 // Global middleware — applied to ALL routes including pre-auth ones
 server.use("*", statsigProxyMiddleware)
 server.use("*", async (c, next) => {
@@ -102,19 +134,17 @@ server.use("*", async (c, next) => {
 // Capture the highest-priority safe conversation identity for account affinity.
 server.use("*", async (c, next) => {
   const affinity = resolveRoutingAffinityFromHeaders(c.req.raw.headers)
+  const attribution = resolveCopilotRequestAttribution(c.req.raw.headers)
   const requestId = c.req.header("x-request-id") ?? randomUUID()
 
   await requestIdStorage.run(requestId, async () => {
-    await runWithRoutingAffinity(affinity, async () => {
-      await quotaHeadersStorage.run({}, async () => {
-        await routedAccountStorage.run({}, async () => {
-          await next()
+    await runWithRequestRoutingScopes(attribution, affinity, async () => {
+      await next()
 
-          for (const [key, value] of Object.entries(getQuotaHeaders())) {
-            c.header(key, value)
-          }
-        })
-      })
+      for (const [key, value] of Object.entries(getCopilotResponseHeaders())) {
+        if (key === "x-request-id") continue
+        c.header(key, value)
+      }
     })
   })
 
@@ -188,6 +218,7 @@ server.onError(async (err, c) => {
 
 server.get("/", (c) => c.text("Server running"))
 
+server.route("", copilotControlPlaneRoutes)
 server.route("/chat/completions", completionRoutes)
 server.route("/models", modelRoutes)
 server.route("/embeddings", embeddingRoutes)

@@ -6,6 +6,7 @@ import {
   getExtraPromptForModel,
   getReasoningEffortForModel,
 } from "~/lib/config"
+import { createEndpointTranslationError } from "~/lib/error"
 import {
   type ResponsesPayload,
   type ResponseInputContent,
@@ -84,7 +85,10 @@ export const translateAnthropicMessagesToResponsesPayload = (
     max_output_tokens: payload.max_tokens,
     tools: translatedTools,
     tool_choice: toolChoice,
-    metadata: payload.metadata ? { ...payload.metadata } : undefined,
+    metadata:
+      payload.metadata?.user_id === undefined ?
+        undefined
+      : { user_id: payload.metadata.user_id },
     safety_identifier: safetyIdentifier ?? undefined,
     prompt_cache_key: promptCacheKey ?? undefined,
     stream: payload.stream,
@@ -184,11 +188,7 @@ const translateAssistantMessage = (
       continue
     }
 
-    if (
-      block.type === "thinking"
-      && block.signature
-      && block.signature.includes("@")
-    ) {
+    if (block.type === "thinking") {
       flushPendingContent(pendingContent, items, {
         role: "assistant",
         phase: assistantPhase,
@@ -346,14 +346,23 @@ const createReasoningContent = (
   // align with vscode-copilot-chat extractThinkingData, should add id, otherwise it will cause miss cache occasionally —— the usage input cached tokens to be 0
   // https://github.com/microsoft/vscode-copilot-chat/blob/main/src/platform/endpoint/node/responsesApi.ts#L162
   // when use in codex cli, reasoning id is empty, so it will cause miss cache occasionally
-  const array = (block.signature ?? "").split("@")
-  const signature = array[0]
-  const id = array[1]
+  const signatureParts = block.signature?.split("@") ?? []
+  const signature = signatureParts[0]
+  const id = signatureParts[1]
   const thinking = block.thinking === THINKING_TEXT ? "" : block.thinking
+  const summary =
+    thinking ? [{ type: "summary_text" as const, text: thinking }] : []
+  if (!signature || !id || signatureParts.length !== 2) {
+    throw createEndpointTranslationError({
+      blockers: ["thinking"],
+      code: "endpoint_translation_unsupported",
+      source: "messages",
+    })
+  }
   return {
     id,
     type: "reasoning",
-    summary: thinking ? [{ type: "summary_text", text: thinking }] : [],
+    summary,
     encrypted_content: signature,
   }
 }
@@ -464,6 +473,10 @@ const convertAnthropicToolChoice = (
 export const translateResponsesResultToAnthropic = (
   response: ResponsesResult,
 ): AnthropicResponse => {
+  const metadata = response as ResponsesResult & {
+    copilot_usage?: unknown
+    recommended_auto_tier?: "eco" | "balanced"
+  }
   const contentBlocks = mapOutputToAnthropicContent(response.output)
   const usage = mapResponsesUsage(response)
   let anthropicContent = fallbackContentBlocks(response.output_text)
@@ -482,6 +495,12 @@ export const translateResponsesResultToAnthropic = (
     stop_reason: stopReason,
     stop_sequence: null,
     usage,
+    ...(metadata.copilot_usage !== undefined ?
+      { copilot_usage: metadata.copilot_usage }
+    : {}),
+    ...(metadata.recommended_auto_tier !== undefined ?
+      { recommended_auto_tier: metadata.recommended_auto_tier }
+    : {}),
   }
 }
 
@@ -625,11 +644,8 @@ const parseFunctionCallArguments = (
     if (parsed && typeof parsed === "object") {
       return parsed as Record<string, unknown>
     }
-  } catch (error) {
-    consola.warn("Failed to parse function call arguments", {
-      error,
-      rawArguments,
-    })
+  } catch {
+    consola.warn("Failed to parse function call arguments")
   }
 
   return { raw_arguments: rawArguments }

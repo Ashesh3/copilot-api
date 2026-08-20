@@ -149,6 +149,26 @@ describe("POST /v1/chat/completions - basic", () => {
     },
     TEST_TIMEOUT,
   )
+
+  test(
+    "conflicting token limits return a local Chat validation error",
+    async () => {
+      const res = await postJSON("/v1/chat/completions", {
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: "hello" }],
+        max_tokens: 10,
+        max_completion_tokens: 10,
+      })
+      expect(res.status).toBe(400)
+      expect(await res.json()).toMatchObject({
+        error: {
+          type: "invalid_request_error",
+          param: "max_tokens",
+        },
+      })
+    },
+    TEST_TIMEOUT,
+  )
 })
 
 describe("POST /v1/chat/completions - tools", () => {

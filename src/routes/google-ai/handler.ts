@@ -16,7 +16,11 @@ import type { Model } from "~/services/copilot/get-models"
 import { getLastUsedAccountId } from "~/lib/account-router"
 import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
-import { isAbortError } from "~/lib/error"
+import {
+  type EndpointRouteDecision,
+  type EndpointRouteFailure,
+} from "~/lib/endpoint-routing"
+import { createEndpointTranslationError, isAbortError } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
 import {
   applyModelRedirect,
@@ -43,7 +47,7 @@ import {
 } from "~/services/copilot/copilot-client"
 import {
   createAnthropicMessages,
-  modelSupportsNativeMessages,
+  detectAnthropicInitiator,
   type AnthropicStreamChunk,
 } from "~/services/copilot/create-anthropic-messages"
 import {
@@ -62,6 +66,7 @@ import {
   isChatWebSearchFunctionTool,
   isResponsesWebSearchFunctionTool,
 } from "~/services/copilot/mcp-web-search"
+import { sanitizeAnthropicRequestHeaderOptions } from "~/services/copilot/messages-contract"
 
 import type { AnthropicResponse } from "../messages/anthropic-types"
 import type { GoogleAIRequest } from "./google-ai-types"
@@ -72,6 +77,7 @@ import {
   anthropicResponseToChat,
 } from "../chat-completions/anthropic-bridge"
 import { chatCompletionsToResponses } from "../chat-completions/responses-fallback"
+import { selectChatUpstreamEndpoint } from "../chat-completions/responses-fallback-executor"
 import {
   resolveResponsesWebSearchCalls,
   resolveWebSearchCalls,
@@ -90,7 +96,33 @@ import {
 
 const logger = createHandlerLogger("google-ai-handler")
 
-const RESPONSES_ENDPOINT = "/responses"
+const GOOGLE_ACTIONS = new Set(["generateContent", "streamGenerateContent"])
+
+function googleActionError(c: Context, message: string): Response {
+  return c.json(
+    {
+      error: {
+        code: 400,
+        message,
+        status: "INVALID_ARGUMENT",
+      },
+    },
+    400,
+  )
+}
+
+function missingGoogleModelAction(c: Context): Response {
+  return c.json(
+    {
+      error: {
+        code: 400,
+        message: "Missing model and action in URL path",
+        status: "INVALID_ARGUMENT",
+      },
+    },
+    400,
+  )
+}
 
 function getUnsupportedGoogleRootFields(
   payload: GoogleAIRequest,
@@ -134,7 +166,7 @@ function parseModelAction(modelAction: string): {
 } {
   const colonIdx = modelAction.lastIndexOf(":")
   if (colonIdx === -1) {
-    return { model: modelAction, action: "generateContent" }
+    return { model: modelAction, action: "" }
   }
   return {
     model: modelAction.slice(0, colonIdx),
@@ -205,23 +237,19 @@ async function resolveGoogleModelRedirect(
 }
 
 export async function handleGoogleAI(c: Context) {
+  setRequestContext(c, { suppressModelDiagnostics: true })
   // Extract model and action from URL path
   // URL path: /v1/models/{model}:{action} or /models/{model}:{action}
   const modelAction = c.req.param("modelAction")
-  if (!modelAction) {
-    return c.json(
-      {
-        error: {
-          code: 400,
-          message: "Missing model and action in URL path",
-          status: "INVALID_ARGUMENT",
-        },
-      },
-      400,
-    )
-  }
+  if (!modelAction) return missingGoogleModelAction(c)
 
   const { model: rawModel, action } = parseModelAction(modelAction)
+  if (!action) {
+    return googleActionError(c, "Missing Google AI action suffix")
+  }
+  if (!GOOGLE_ACTIONS.has(action)) {
+    return googleActionError(c, "Unsupported Google AI action")
+  }
   const isStream = action === "streamGenerateContent"
 
   // Apply silent model redirect — google-ai response format does not include
@@ -231,7 +259,7 @@ export async function handleGoogleAI(c: Context) {
     rawModel,
   )
 
-  logger.debug(`Google AI request: model=${model}, action=${action}`)
+  logger.debug("Google AI request")
 
   // Parse Google AI request body
   const googlePayload = await c.req.json<GoogleAIRequest>()
@@ -285,15 +313,18 @@ export async function handleGoogleAI(c: Context) {
     (m) => m.id === finalPayload.model,
   )
 
-  // Determine API type based on supported_endpoints
-  const useResponsesApi =
-    selectedModel?.supported_endpoints?.includes(RESPONSES_ENDPOINT) ?? false
+  const routeDecision = selectGoogleUpstreamEndpoint({
+    payload: finalPayload,
+    selectedModel,
+  })
+  if ("code" in routeDecision) {
+    throw createEndpointTranslationError(routeDecision)
+  }
 
   setRequestContext(c, {
     requestedModel: rawModel,
     model: finalPayload.model,
-    provider:
-      useResponsesApi ? "GoogleAI→Responses" : "GoogleAI→ChatCompletions",
+    provider: googleProviderName(routeDecision.target),
     replacements: appliedRules,
     reasoningEffort,
   })
@@ -313,14 +344,15 @@ export async function handleGoogleAI(c: Context) {
   }
 
   consola.debug(
-    `[google-ai] Translated payload: model=${finalPayload.model}, max_tokens=${finalPayload.max_tokens}, stream=${finalPayload.stream}, tools=${finalPayload.tools?.length ?? 0}, messages=${finalPayload.messages.length}`,
+    `[google-ai] Translated payload: max_tokens=${finalPayload.max_tokens}, stream=${finalPayload.stream}, tools=${finalPayload.tools?.length ?? 0}, messages=${finalPayload.messages.length}`,
   )
   logger.debug("Translated OpenAI payload:", JSON.stringify(finalPayload))
 
   return await dispatchGoogleRequest(c, {
     finalPayload,
+    requestedModel: rawModel,
+    routeDecision,
     selectedModel,
-    useResponsesApi,
     isStream,
     reasoningEffort,
   })
@@ -331,41 +363,58 @@ async function dispatchGoogleRequest(
   c: Context,
   options: {
     finalPayload: ChatCompletionsPayload & { model: string }
+    requestedModel: string
+    routeDecision: EndpointRouteDecision
     selectedModel: Model | undefined
-    useResponsesApi: boolean
     isStream: boolean
     reasoningEffort?: ReasoningEffort
   },
 ) {
-  const { finalPayload, selectedModel, useResponsesApi, isStream } = options
+  const { finalPayload, routeDecision, selectedModel, isStream } = options
 
-  if (useResponsesApi) {
-    consola.debug(`[google-ai] Using Responses API for ${finalPayload.model}`)
+  if (routeDecision.target === "/responses") {
+    consola.debug("[google-ai] Using Responses API")
     return await handleWithResponsesApi(c, finalPayload, {
       isStream,
       effortOverride: options.reasoningEffort,
     })
   }
 
-  // PDF file parts cannot ride /chat/completions upstream; claude models
-  // accept them natively via /v1/messages
-  if (
-    payloadHasFileParts(finalPayload)
-    && modelSupportsNativeMessages(selectedModel)
-  ) {
-    consola.debug(
-      `[google-ai] Using native /v1/messages for ${finalPayload.model} (PDF attachment)`,
-    )
+  if (routeDecision.target === "/v1/messages") {
+    consola.debug("[google-ai] Using native /v1/messages")
     return await handleWithAnthropicMessages(c, finalPayload, {
+      requestedModel: options.requestedModel,
       selectedModel,
       isStream,
     })
   }
 
-  consola.debug(
-    `[google-ai] Using ChatCompletions API for ${finalPayload.model}`,
-  )
+  consola.debug("[google-ai] Using ChatCompletions API")
   return await handleWithChatCompletions(c, finalPayload)
+}
+
+export function selectGoogleUpstreamEndpoint(options: {
+  payload: ChatCompletionsPayload
+  selectedModel: Model | undefined
+}): EndpointRouteDecision | EndpointRouteFailure {
+  return selectChatUpstreamEndpoint(options)
+}
+
+function googleProviderName(endpoint: EndpointRouteDecision["target"]): string {
+  switch (endpoint) {
+    case "/responses": {
+      return "GoogleAI→Responses"
+    }
+    case "/v1/messages": {
+      return "GoogleAI→AnthropicMessages"
+    }
+    case "/chat/completions": {
+      return "GoogleAI→ChatCompletions"
+    }
+    default: {
+      return "GoogleAI"
+    }
+  }
 }
 
 function payloadHasFileParts(payload: ChatCompletionsPayload): boolean {
@@ -539,20 +588,30 @@ async function handleChatCompletionsWithWebSearch(
   })
 }
 
-// ─── Native /v1/messages path (claude models with PDF attachments) ───
+// ─── Native /v1/messages path ───
 
 async function handleWithAnthropicMessages(
   c: Context,
   payload: ChatCompletionsPayload & { model: string },
-  options: { selectedModel?: Model; isStream: boolean },
+  options: {
+    selectedModel?: Model
+    isStream: boolean
+    requestedModel: string
+  },
 ) {
+  const reason =
+    payloadHasFileParts(payload) ? "PDF file attachment" : undefined
   recordNonDefaultBehavior(c, {
     kind: "endpoint_fallback",
-    message: `PDF file attachment routed ${payload.model} to native /v1/messages`,
+    message:
+      reason ?
+        `${reason} routed ${payload.model} to native /v1/messages`
+      : `Model ${payload.model} routed to native /v1/messages`,
     data: {
       model: payload.model,
-      sourceEndpoint: "ChatCompletions",
+      sourceEndpoint: "GoogleAI",
       targetEndpoint: "AnthropicMessages",
+      ...(reason ? { reason } : {}),
     },
   })
   setRequestContext(c, { provider: "GoogleAI→AnthropicMessages" })
@@ -562,7 +621,14 @@ async function handleWithAnthropicMessages(
     options.selectedModel,
     c.req.raw.signal,
   )
+  const nativeOptions = sanitizeAnthropicRequestHeaderOptions({
+    anthropicBeta: c.req.header("anthropic-beta"),
+    anthropicVersion: c.req.header("anthropic-version"),
+    modelProviderPreference: c.req.header("x-model-provider-preference"),
+  })
   const response = await createAnthropicMessages(anthropicPayload, {
+    ...nativeOptions,
+    initiator: detectAnthropicInitiator(anthropicPayload.messages),
     signal: c.req.raw.signal,
   })
 
@@ -574,7 +640,7 @@ async function handleWithAnthropicMessages(
   if (!options.isStream || !isAsyncIterable(response)) {
     const chatResponse = anthropicResponseToChat(
       response as AnthropicResponse,
-      payload.model,
+      options.requestedModel,
     )
     if (chatResponse.usage) {
       setRequestContext(c, {
@@ -612,7 +678,7 @@ async function handleWithAnthropicMessages(
           response as AsyncIterable<AnthropicStreamChunk>,
           stream,
         ),
-        payload.model,
+        options.requestedModel,
       )
     } catch (error) {
       if (isAbortError(error)) return

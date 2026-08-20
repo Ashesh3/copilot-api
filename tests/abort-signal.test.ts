@@ -87,11 +87,41 @@ const responsesCapableModels: ModelsResponse = {
   ],
 }
 
+const messagesOnlyResponsesModels: ModelsResponse = {
+  object: "list",
+  data: [
+    {
+      ...responsesCapableModels.data[0],
+      id: "claude-messages-only",
+      name: "claude-messages-only",
+      vendor: "anthropic",
+      supported_endpoints: ["/v1/messages"],
+      capabilities: {
+        ...responsesCapableModels.data[0].capabilities,
+        family: "claude",
+      },
+    },
+  ],
+}
+
 const fetchMock = mock((url: string, init?: RequestInit) => {
   lastSignal = init?.signal
 
-  const body =
-    url.includes("/responses") ? responsesResult : chatCompletionsResponse
+  let body: unknown = chatCompletionsResponse
+  if (url.includes("/v1/messages")) {
+    body = {
+      id: "msg_1",
+      type: "message",
+      role: "assistant",
+      model: "claude-messages-only",
+      content: [{ type: "text", text: "hello" }],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    }
+  } else if (url.includes("/responses")) {
+    body = responsesResult
+  }
 
   return new Response(JSON.stringify(body), {
     status: 200,
@@ -146,6 +176,22 @@ test("passes the client abort signal to responses upstream requests", async () =
     },
     body: JSON.stringify({
       model: "gpt-4o-mini",
+      input: "Hello",
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastSignal).toBeInstanceOf(AbortSignal)
+})
+
+test("passes the client abort signal to Responses Messages fallback requests", async () => {
+  state.models = messagesOnlyResponsesModels
+
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-messages-only",
       input: "Hello",
     }),
   })

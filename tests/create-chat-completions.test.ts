@@ -1,3 +1,5 @@
+/* eslint-disable max-lines -- route and transport coverage share singleton fetch fixtures */
+import * as Sentry from "@sentry/bun"
 import {
   afterAll,
   beforeAll,
@@ -8,9 +10,18 @@ import {
   test,
 } from "bun:test"
 import consola from "consola"
+import { Hono, type Context } from "hono"
 
 import type { ChatCompletionsPayload } from "../src/services/copilot/create-chat-completions"
+import type { ModelsResponse } from "../src/services/copilot/get-models"
 
+import { forwardError, LocalHTTPError } from "../src/lib/error"
+import {
+  clearLlmDebugLogs,
+  getLlmDebugLog,
+  listLlmDebugLogs,
+} from "../src/lib/llm-debug-log"
+import { setModelRedirectsForTest } from "../src/lib/model-redirect"
 import { setModelSettingsForTest } from "../src/lib/model-settings"
 import {
   getRoutingAffinity,
@@ -22,10 +33,12 @@ import {
 } from "../src/lib/routing-telemetry"
 import { state } from "../src/lib/state"
 import { tokenPool } from "../src/lib/token-pool"
+import { handleCompletion } from "../src/routes/chat-completions/handler"
 import { server } from "../src/server"
 import { COMPACTION_PAYLOAD_MAX_BYTES } from "../src/services/copilot/compaction-payload"
 import {
   createChatCompletions,
+  createChatCompletionsWithProcessedPayload,
   type Message,
 } from "../src/services/copilot/create-chat-completions"
 
@@ -34,9 +47,77 @@ const originalFetch = globalThis.fetch
 const originalIsMultiToken = state.isMultiToken
 const addedAccountIds = [2101, 2102]
 const queuedResponses: Array<Response> = []
-let capturedAffinity: RoutingAffinity | undefined
+const capturedAffinities: Array<RoutingAffinity | undefined> = []
 const capturedAuthorization: Array<string | undefined> = []
+let metadataAffinityFetchCount = 0
 let lastRequestBody: Record<string, unknown> | undefined
+let lastRequestHeaders: Headers | undefined
+
+const sessionToken = (payload: Record<string, unknown>): string =>
+  `e30.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.c2ln`
+
+const binarySessionToken = (payload: Record<string, unknown>): string => {
+  const opaque = Buffer.from([0xff, 0, 0x80]).toString("base64url")
+  return `${opaque}.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.${opaque}`
+}
+
+function invalidSessionTokens(model: string): Array<string> {
+  const payload = Buffer.from(
+    JSON.stringify({ selected_model: model }),
+  ).toString("base64url")
+  const noncanonicalPayload = Buffer.from(
+    JSON.stringify({ selected_model: model, padding: "x" }),
+  ).toString("base64url")
+  if (noncanonicalPayload.length % 4 === 0) {
+    throw new Error("Expected unused terminal base64url bits")
+  }
+  const decoded = Buffer.from(noncanonicalPayload, "base64url")
+  const noncanonical = Array.from(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_",
+  )
+    .map((character) => `${noncanonicalPayload.slice(0, -1)}${character}`)
+    .find(
+      (candidate) =>
+        candidate !== noncanonicalPayload
+        && Buffer.from(candidate, "base64url").equals(decoded),
+    )
+  if (!noncanonical) throw new Error("Expected a noncanonical token payload")
+  return [
+    `e%0.${payload}.c2ln`,
+    `e30=.${payload}.c2ln`,
+    `A.${payload}.c2ln`,
+    `Zh.${payload}.c2ln`,
+    `e30.${payload}.Zh`,
+    `e30.${noncanonical}.c2ln`,
+    `e30.${"A".repeat(16 * 1024)}.c2ln`,
+    sessionToken({
+      selected_model: { model },
+      available_models: { 0: model },
+    }),
+  ]
+}
+
+function createLegacyMessagesModel(
+  model: string,
+): ModelsResponse["data"][number] {
+  return {
+    id: model,
+    name: model,
+    object: "model",
+    preview: false,
+    vendor: "anthropic",
+    version: "1",
+    model_picker_enabled: true,
+    capabilities: {
+      family: "claude",
+      limits: { max_output_tokens: 1024 },
+      object: "model_capabilities",
+      supports: {},
+      tokenizer: "cl100k_base",
+      type: "chat",
+    },
+  }
+}
 
 const createDefaultResponse = () =>
   new Response(
@@ -64,10 +145,15 @@ state.accountType = "individual"
 // Helper to mock fetch
 const fetchMock = mock(
   (_url: string, opts: { body?: string; headers: Record<string, string> }) => {
-    capturedAffinity = getRoutingAffinity()
-    capturedAuthorization.push(opts.headers.Authorization)
-    lastRequestBody =
+    const body =
       opts.body ? (JSON.parse(opts.body) as Record<string, unknown>) : undefined
+    if (body?.model === "claude-metadata-routing-model") {
+      capturedAffinities.push(getRoutingAffinity())
+      capturedAuthorization.push(opts.headers.Authorization)
+      metadataAffinityFetchCount += 1
+    }
+    lastRequestBody = body
+    lastRequestHeaders = new Headers(opts.headers)
     void opts
     return queuedResponses.shift() ?? createDefaultResponse()
   },
@@ -88,12 +174,334 @@ afterAll(() => {
 beforeEach(() => {
   fetchMock.mockClear()
   queuedResponses.length = 0
-  capturedAffinity = undefined
+  capturedAffinities.length = 0
   lastRequestBody = undefined
+  lastRequestHeaders = undefined
   capturedAuthorization.length = 0
+  metadataAffinityFetchCount = 0
   state.isMultiToken = originalIsMultiToken
   setModelSettingsForTest([])
+  setModelRedirectsForTest([])
+  clearLlmDebugLogs()
   resetRoutingTelemetryForTest()
+})
+
+test("forwards only matching model-scoped session tokens on Chat inference", async () => {
+  state.models = {
+    object: "list",
+    data: [createLegacyMessagesModel("gpt-test")],
+  }
+  const matchingToken = sessionToken({ selected_model: "gpt-test" })
+  await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "copilot-session-token": matchingToken,
+    },
+    body: JSON.stringify({
+      model: "gpt-test",
+      messages: [{ role: "user", content: "hello" }],
+    }),
+  })
+  expect(lastRequestHeaders?.get("copilot-session-token")).toBe(matchingToken)
+  const matchingDebug = getLlmDebugLog(listLlmDebugLogs().entries[0]?.id ?? "")
+  expect(matchingDebug?.request.headers["Copilot-Session-Token"]).toBe(
+    matchingToken,
+  )
+
+  const longMatchingToken = sessionToken({
+    selected_model: "gpt-test",
+    padding: "x".repeat(2 * 1024),
+  })
+  await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "copilot-session-token": longMatchingToken,
+    },
+    body: JSON.stringify({
+      model: "gpt-test",
+      messages: [{ role: "user", content: "hello" }],
+    }),
+  })
+  expect(lastRequestHeaders?.get("copilot-session-token")).toBe(
+    longMatchingToken,
+  )
+
+  const binaryToken = binarySessionToken({ selected_model: "gpt-test" })
+  await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "copilot-session-token": binaryToken,
+    },
+    body: JSON.stringify({
+      model: "gpt-test",
+      messages: [{ role: "user", content: "binary opaque segments" }],
+    }),
+  })
+  expect(lastRequestHeaders?.get("copilot-session-token")).toBe(binaryToken)
+
+  for (const token of [
+    sessionToken({ selected_model: "different-model" }),
+    "malformed-token",
+    ...invalidSessionTokens("gpt-test"),
+  ]) {
+    const response = await server.request("/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "copilot-session-token": token,
+      },
+      body: JSON.stringify({
+        model: "gpt-test",
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    })
+    expect(response.status).toBe(200)
+    expect(lastRequestHeaders?.get("copilot-session-token")).toBeNull()
+    expect(lastRequestHeaders?.get("authorization")).toBe("Bearer test-token")
+  }
+
+  setModelRedirectsForTest([
+    {
+      id: "chat-session-token-redirect",
+      sourceModel: "gpt-test",
+      targetModel: "gpt-redirected",
+      enabled: true,
+    },
+  ])
+  state.models = {
+    object: "list",
+    data: [createLegacyMessagesModel("gpt-redirected")],
+  }
+  const redirectedToken = sessionToken({
+    selected_model: "gpt-redirected",
+    available_models: ["gpt-test", "gpt-redirected"],
+  })
+  await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "copilot-session-token": redirectedToken,
+    },
+    body: JSON.stringify({
+      model: "gpt-test",
+      messages: [{ role: "user", content: "hello" }],
+    }),
+  })
+  expect(lastRequestBody?.model).toBe("gpt-redirected")
+  expect(lastRequestHeaders?.get("copilot-session-token")).toBeNull()
+
+  setModelRedirectsForTest([])
+  state.models = {
+    object: "list",
+    data: [createLegacyMessagesModel("gpt-4.1")],
+  }
+  const aliasToken = sessionToken({ selected_model: "gpt-4.1" })
+  await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "copilot-session-token": aliasToken,
+    },
+    body: JSON.stringify({
+      model: "gpt-4-1",
+      messages: [{ role: "user", content: "ordinary alias" }],
+    }),
+  })
+  expect(lastRequestBody?.model).toBe("gpt-4.1")
+  expect(lastRequestHeaders?.get("copilot-session-token")).toBe(aliasToken)
+
+  setModelRedirectsForTest([
+    {
+      id: "chat-alias-chain-1",
+      sourceModel: "gpt-4.1",
+      targetModel: "gpt-alias-middle",
+      enabled: true,
+    },
+    {
+      id: "chat-alias-chain-2",
+      sourceModel: "gpt-alias-middle",
+      targetModel: "gpt-4-1",
+      enabled: true,
+    },
+  ])
+  await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "copilot-session-token": aliasToken,
+    },
+    body: JSON.stringify({
+      model: "gpt-4-1",
+      messages: [{ role: "user", content: "configured alias redirect" }],
+    }),
+  })
+  expect(lastRequestBody?.model).toBe("gpt-4.1")
+  expect(lastRequestHeaders?.get("copilot-session-token")).toBeNull()
+})
+
+test("keeps inference session tokens out of ordinary error diagnostics", async () => {
+  state.models = {
+    object: "list",
+    data: [createLegacyMessagesModel("gpt-test")],
+  }
+  const privateToken = sessionToken({ selected_model: "gpt-test" })
+  queuedResponses.push(
+    Response.json(
+      { error: { code: "invalid_request_body", message: privateToken } },
+      { status: 400 },
+    ),
+  )
+  const errorSpy = spyOn(consola, "error")
+  const captureException = spyOn(Sentry, "captureException").mockImplementation(
+    () => "event-id",
+  )
+
+  try {
+    const response = await server.request("/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "copilot-session-token": privateToken,
+      },
+      body: JSON.stringify({
+        model: "gpt-test",
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    })
+    const body = await response.text()
+
+    expect(response.status).toBe(400)
+    expect(
+      JSON.stringify([body, errorSpy.mock.calls, captureException.mock.calls]),
+    ).not.toContain(privateToken)
+
+    const rawDebug = getLlmDebugLog(listLlmDebugLogs().entries[0]?.id ?? "")
+    expect(rawDebug?.request.headers["Copilot-Session-Token"]).toBe(
+      privateToken,
+    )
+    expect(rawDebug?.response?.body).toContain(privateToken)
+  } finally {
+    errorSpy.mockRestore()
+    captureException.mockRestore()
+  }
+})
+
+test("returns a safe local Chat error for a null JSON body", async () => {
+  const response = await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "null",
+  })
+  const body = (await response.json()) as Record<string, unknown>
+
+  expect(response.status).toBe(400)
+  expect(body).toEqual({
+    error: {
+      code: "invalid_type",
+      message: "The request body must be a JSON object.",
+      param: "body",
+      type: "invalid_request_error",
+    },
+  })
+  expect(JSON.stringify(body)).not.toContain("Cannot read properties")
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
+test("rejects direct BigInt payloads before upstream serialization", async () => {
+  let thrown: unknown
+  try {
+    await createChatCompletions({
+      model: "gpt-test",
+      messages: [{ role: "user", content: "hello" }],
+      metadata: { count: 1n },
+    } as unknown as ChatCompletionsPayload)
+  } catch (error) {
+    thrown = error
+  }
+
+  expect(thrown).toBeInstanceOf(LocalHTTPError)
+  expect(thrown).toHaveProperty("response.status", 400)
+  expect(thrown).toHaveProperty("clientBody.error", {
+    code: "invalid_type",
+    message: "The request body must be a JSON object.",
+    param: "body",
+    type: "invalid_request_error",
+  })
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
+test("rejects direct cyclic payloads before upstream serialization", async () => {
+  const payload = {
+    model: "gpt-test",
+    messages: [{ role: "user", content: "hello" }],
+  } as unknown as ChatCompletionsPayload & { self?: unknown }
+  payload.self = payload
+  let thrown: unknown
+
+  try {
+    await createChatCompletions(payload)
+  } catch (error) {
+    thrown = error
+  }
+
+  expect(thrown).toBeInstanceOf(LocalHTTPError)
+  expect(thrown).toHaveProperty("response.status", 400)
+  expect(thrown).toHaveProperty("clientBody.error", {
+    code: "invalid_type",
+    message: "The request body must be a JSON object.",
+    param: "body",
+    type: "invalid_request_error",
+  })
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
+test("returns the fixed route error for programmatic BigInt and cyclic bodies", async () => {
+  const payloads: Array<unknown> = [
+    {
+      model: "gpt-test",
+      messages: [{ role: "user", content: "hello" }],
+      metadata: { count: 1n },
+    },
+  ]
+  const cyclic = {
+    model: "gpt-test",
+    messages: [{ role: "user", content: "hello" }],
+  } as Record<string, unknown>
+  cyclic.self = cyclic
+  payloads.push(cyclic)
+
+  for (const payload of payloads) {
+    const app = new Hono()
+    app.post("/", async (c) => {
+      const context = Object.create(c) as Context
+      Object.defineProperty(context, "req", {
+        value: { json: () => Promise.resolve(payload) },
+      })
+      try {
+        return await handleCompletion(context)
+      } catch (error) {
+        return await forwardError(c, error)
+      }
+    })
+    const response = await app.request("/", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    })
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({
+      error: {
+        code: "invalid_type",
+        message: "The request body must be a JSON object.",
+        param: "body",
+        type: "invalid_request_error",
+      },
+    })
+  }
+  expect(fetchMock).not.toHaveBeenCalled()
 })
 
 test("fits explicitly marked ChatCompletions compaction payloads", async () => {
@@ -151,9 +559,14 @@ test("installs Claude metadata affinity before provider dispatch", async () => {
     account.copilotToken = token
     account.healthy = true
     account.models = new Set([model])
+    account.modelsData = [createLegacyMessagesModel(model)]
   }
   tokenPool.rebuildModelIndex()
   state.isMultiToken = true
+  state.models = {
+    object: "list",
+    data: [createLegacyMessagesModel(model)],
+  }
   const request = () =>
     server.request("/v1/messages", {
       method: "POST",
@@ -170,18 +583,21 @@ test("installs Claude metadata affinity before provider dispatch", async () => {
 
   const first = await request()
   const second = await request()
+  const authorization = capturedAuthorization.slice(-2)
+  const affinities = capturedAffinities.slice(-2)
 
   expect(first.status).toBe(200)
   expect(second.status).toBe(200)
-  expect(capturedAffinity).toEqual({
-    key: "claude-body-session",
-    source: "claude_metadata",
-  })
+  expect(metadataAffinityFetchCount).toBe(2)
+  expect(affinities).toEqual([
+    { key: "claude-body-session", source: "claude_metadata" },
+    { key: "claude-body-session", source: "claude_metadata" },
+  ])
   const expected = tokenPool.getAccountForModelBySession(
     model,
     "claude-body-session",
   )
-  expect(capturedAuthorization).toEqual([
+  expect(authorization).toEqual([
     `Bearer ${expected?.copilotToken}`,
     `Bearer ${expected?.copilotToken}`,
   ])
@@ -191,7 +607,18 @@ test("sets X-Initiator to agent if tool/assistant present", async () => {
   const payload: ChatCompletionsPayload = {
     messages: [
       { role: "user", content: "hi" },
-      { role: "tool", content: "tool call" },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "call_agent",
+            type: "function",
+            function: { name: "lookup", arguments: "{}" },
+          },
+        ],
+      },
+      { role: "tool", tool_call_id: "call_agent", content: "tool call" },
     ],
     model: "gpt-test",
   }
@@ -246,6 +673,139 @@ test("skips non-function tools during payload normalization", async () => {
     (sentBody.tools[1]?.function as { parameters?: Record<string, unknown> })
       .parameters,
   ).toEqual({ type: "object", properties: {} })
+})
+
+test("dispatches normalized deprecated Chat controls without mutating the caller", async () => {
+  const payload: ChatCompletionsPayload = {
+    model: "gpt-test",
+    messages: [{ role: "user", content: "hello" }],
+    functions: [{ name: "legacy_lookup", parameters: {} }],
+    function_call: { name: "legacy_lookup" },
+    stream: true,
+  }
+  const original = structuredClone(payload)
+  queuedResponses.push(createSSEStreamResponse(["data: [DONE]"]))
+
+  await createChatCompletions(payload)
+
+  expect(payload).toEqual(original)
+  expect(lastRequestBody).toMatchObject({
+    tools: [
+      {
+        type: "function",
+        function: {
+          name: "legacy_lookup",
+          parameters: { type: "object", properties: {} },
+        },
+      },
+    ],
+    tool_choice: {
+      type: "function",
+      function: { name: "legacy_lookup" },
+    },
+    stream_options: { include_usage: true },
+  })
+  expect(lastRequestBody).not.toHaveProperty("functions")
+  expect(lastRequestBody).not.toHaveProperty("function_call")
+})
+
+test("exposes the processed clone without changing the direct response API", async () => {
+  setModelSettingsForTest([
+    { model: "claude-no-prefill", supportsAssistantPrefill: false },
+  ])
+  const payload: ChatCompletionsPayload = {
+    model: "claude-no-prefill",
+    messages: [
+      { role: "user", content: "hello" },
+      { role: "assistant", content: "prefill" },
+    ],
+  }
+  const original = structuredClone(payload)
+  const { processedPayload, response } =
+    await createChatCompletionsWithProcessedPayload(payload)
+
+  expect(response).toHaveProperty("object", "chat.completion")
+  expect(payload).toEqual(original)
+  expect(processedPayload.messages[1]).toEqual({
+    role: "user",
+    content: "prefill",
+  })
+})
+
+test("isolates the processed snapshot from stream retry state", async () => {
+  const overloadEvent = 'data: {"error":{"message":"Overloaded"}}'
+  queuedResponses.push(
+    createSSEStreamResponse([overloadEvent]),
+    createSSEStreamResponse(["data: [DONE]"]),
+  )
+  const payload: ChatCompletionsPayload = {
+    model: "gpt-test",
+    stream: true,
+    messages: [{ role: "user", content: "hello" }],
+  }
+
+  const { processedPayload, response } =
+    await createChatCompletionsWithProcessedPayload(payload)
+  processedPayload.model = "attacker-model"
+  processedPayload.messages[0].content = "attacker-content"
+  for await (const _event of response as AsyncIterable<unknown>) {
+    // Drain so streamed retry handling completes.
+  }
+
+  expect(fetchMock).toHaveBeenCalledTimes(2)
+  expect(lastRequestBody?.model).toBe("gpt-test")
+  expect(lastRequestBody?.messages).toEqual([
+    { role: "user", content: "hello" },
+  ])
+})
+
+test("ignores removed processed-payload hooks without changing responses", async () => {
+  const response = await createChatCompletions(
+    {
+      model: "gpt-test",
+      messages: [{ role: "user", content: "hello" }],
+    },
+    {
+      onProcessedPayload: () => {
+        throw new Error("hook failure")
+      },
+    } as unknown as Parameters<typeof createChatCompletions>[1],
+  )
+
+  expect(response).toHaveProperty("object", "chat.completion")
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+})
+
+test("isolates processed snapshots from non-streaming response state", async () => {
+  queuedResponses.push(
+    new Response(
+      JSON.stringify({
+        id: "json-response",
+        object: "chat.completion",
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: "assistant",
+              content: '```json\n{"ok":true}\n```',
+            },
+            finish_reason: "stop",
+            logprobs: null,
+          },
+        ],
+      }),
+      { headers: { "content-type": "application/json" } },
+    ),
+  )
+  const { processedPayload, response } =
+    await createChatCompletionsWithProcessedPayload({
+      model: "gpt-test",
+      messages: [{ role: "user", content: "return JSON" }],
+      response_format: { type: "json_object" },
+    })
+  processedPayload.response_format = null
+
+  expect(response).toHaveProperty("choices.0.message.content", '{"ok":true}')
 })
 
 test("retries streamed chat completions when the first SSE event is an overload error", async () => {
@@ -415,6 +975,8 @@ test("rewrites final assistant messages for models without assistant prefill", a
           },
         ],
       },
+      { role: "tool", tool_call_id: "call_1", content: "done" },
+      { role: "assistant", content: "I have enough context to continue." },
     ],
   }
 
@@ -427,10 +989,24 @@ test("rewrites final assistant messages for models without assistant prefill", a
   }
   const sentBody = JSON.parse(lastCall.body) as ChatCompletionsPayload
 
-  expect(sentBody.messages).toEqual([
-    { role: "user", content: "Help me investigate an error." },
-    { role: "user", content: "I have enough context to continue." },
-  ])
+  expect(sentBody.messages).toHaveLength(4)
+  expect(sentBody.messages[0]).toEqual({
+    role: "user",
+    content: "Help me investigate an error.",
+  })
+  expect(sentBody.messages[1]).toMatchObject({
+    role: "assistant",
+    tool_calls: [{ id: "call_1" }],
+  })
+  expect(sentBody.messages[2]).toMatchObject({
+    role: "tool",
+    tool_call_id: "call_1",
+    content: "done",
+  })
+  expect(sentBody.messages[3]).toEqual({
+    role: "user",
+    content: "I have enough context to continue.",
+  })
 })
 
 test("rewrites final assistant messages for built-in no-prefill models", async () => {

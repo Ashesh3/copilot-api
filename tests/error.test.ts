@@ -3,7 +3,25 @@ import { expect, spyOn, test } from "bun:test"
 import consola from "consola"
 import { Hono } from "hono"
 
-import { forwardError, HTTPError, LocalHTTPError } from "../src/lib/error"
+import {
+  forwardError,
+  HTTPError,
+  inspectSafeHttpError,
+  LocalHTTPError,
+  snapshotSafeHttpError,
+} from "../src/lib/error"
+
+function captureContextValue(
+  captureException: ReturnType<typeof spyOn<typeof Sentry, "captureException">>,
+) {
+  return captureException.mock.calls.at(-1)?.[1]
+}
+
+async function forwardOpenAIError(error: unknown): Promise<Response> {
+  const app = new Hono()
+  app.get("/error", async (c) => await forwardError(c, error))
+  return await app.request("/error")
+}
 
 test("returns a clear quota exhausted message for upstream 402 responses", async () => {
   const app = new Hono()
@@ -312,6 +330,285 @@ test("does not expose an upstream-derived HTTP error message", async () => {
   }
 })
 
+test("uses one guarded HTTP snapshot for OpenAI output logs and Sentry", async () => {
+  const privateMarkers = [
+    "http-message-getter-private-marker",
+    "http-status-getter-private-marker",
+    "http-headers-getter-private-marker",
+    "http-body-getter-private-marker",
+  ]
+  let getterCalls = 0
+  const upstream = Response.json(
+    {
+      error: {
+        code: "invalid_request_body",
+        message:
+          "Invalid request content: A tool_choice was set on the request but no tools were specified.",
+      },
+    },
+    { status: 400, headers: { "retry-after": "17" } },
+  )
+  for (const [key, marker] of [
+    ["status", privateMarkers[1]],
+    ["headers", privateMarkers[2]],
+    ["body", privateMarkers[3]],
+  ] as const) {
+    Object.defineProperty(upstream, key, {
+      configurable: true,
+      get() {
+        getterCalls += 1
+        throw new Error(marker)
+      },
+    })
+  }
+  const error = new HTTPError("Failed to create responses", upstream)
+  Object.defineProperty(error, "message", {
+    configurable: true,
+    get() {
+      getterCalls += 1
+      throw new Error(privateMarkers[0])
+    },
+  })
+  const errorSpy = spyOn(consola, "error")
+  const captureException = spyOn(Sentry, "captureException").mockImplementation(
+    () => "event-id",
+  )
+
+  try {
+    const response = await forwardOpenAIError(error)
+    const body = await response.text()
+    const diagnostics = JSON.stringify([
+      body,
+      errorSpy.mock.calls,
+      captureException.mock.calls,
+    ])
+
+    expect(response.status).toBe(400)
+    expect(JSON.parse(body)).toEqual({
+      error: {
+        code: "invalid_request_body",
+        message:
+          "Invalid request content: A tool_choice was set on the request but no tools were specified.",
+        type: "invalid_request_error",
+      },
+    })
+    expect(getterCalls).toBe(0)
+    expect(errorSpy.mock.calls).toContainEqual([
+      "[400] Upstream request failed",
+    ])
+    const context = captureContextValue(captureException)
+    expect(context).toMatchObject({
+      tags: { status: "400" },
+      extra: { status: 400, validationClass: "tool_choice_without_tools" },
+    })
+    expect(captureException.mock.calls.at(-1)?.[0]).toMatchObject({
+      message: "Upstream request failed",
+    })
+    for (const marker of privateMarkers) {
+      expect(diagnostics).not.toContain(marker)
+    }
+  } finally {
+    errorSpy.mockRestore()
+    captureException.mockRestore()
+  }
+})
+
+test("uses the first immutable HTTP values when later reads would alternate", async () => {
+  const upstream = Response.json(
+    { error: { message: "unclassified" } },
+    {
+      status: 429,
+    },
+  )
+  const error = new HTTPError("Failed to create responses", upstream)
+  const originalMessage = Object.getOwnPropertyDescriptor(error, "message")
+  let messageReads = 0
+  let statusReads = 0
+  Object.defineProperty(error, "message", {
+    configurable: true,
+    get() {
+      messageReads += 1
+      return messageReads === 1 ?
+          "Failed to create responses"
+        : "alternating-message-private-marker"
+    },
+  })
+  Object.defineProperty(upstream, "status", {
+    configurable: true,
+    get() {
+      statusReads += 1
+      return statusReads === 1 ? 429 : 500
+    },
+  })
+  const errorSpy = spyOn(consola, "error")
+  const captureException = spyOn(Sentry, "captureException").mockImplementation(
+    () => "event-id",
+  )
+
+  try {
+    const response = await forwardOpenAIError(error)
+
+    expect(response.status).toBe(429)
+    expect(await response.json()).toEqual({
+      error: { message: "Upstream request failed", type: "error" },
+    })
+    expect(messageReads).toBe(0)
+    expect(statusReads).toBe(0)
+    expect(errorSpy.mock.calls).toContainEqual([
+      "[429] Upstream request failed",
+    ])
+    expect(captureContextValue(captureException)).toMatchObject({
+      tags: { status: "429" },
+      extra: { status: 429 },
+    })
+  } finally {
+    errorSpy.mockRestore()
+    captureException.mockRestore()
+    if (originalMessage)
+      Object.defineProperty(error, "message", originalMessage)
+  }
+})
+
+test("falls back consistently when an HTTP response is a hostile proxy", async () => {
+  const privateMarker = "http-response-proxy-private-marker"
+  let trapCalls = 0
+  const hostileResponse = new Proxy(
+    Response.json({ error: { message: privateMarker } }, { status: 429 }),
+    {
+      get() {
+        trapCalls += 1
+        throw new Error(privateMarker)
+      },
+      getOwnPropertyDescriptor() {
+        trapCalls += 1
+        throw new Error(privateMarker)
+      },
+      getPrototypeOf() {
+        trapCalls += 1
+        throw new Error(privateMarker)
+      },
+    },
+  )
+  const error = new HTTPError(
+    "Failed to create chat completions",
+    hostileResponse,
+  )
+  const errorSpy = spyOn(consola, "error")
+  const captureException = spyOn(Sentry, "captureException").mockImplementation(
+    () => "event-id",
+  )
+
+  try {
+    const response = await forwardOpenAIError(error)
+    const body = await response.text()
+    const diagnostics = JSON.stringify([
+      body,
+      errorSpy.mock.calls,
+      captureException.mock.calls,
+    ])
+
+    expect(response.status).toBe(500)
+    expect(JSON.parse(body)).toEqual({
+      error: {
+        message: "Failed to create chat completions",
+        type: "error",
+      },
+    })
+    expect(trapCalls).toBe(0)
+    expect(errorSpy.mock.calls).toContainEqual([
+      "[500] Failed to create chat completions",
+    ])
+    expect(captureContextValue(captureException)).toMatchObject({
+      tags: { status: "500" },
+      extra: { status: 500 },
+    })
+    expect(diagnostics).not.toContain(privateMarker)
+  } finally {
+    errorSpy.mockRestore()
+    captureException.mockRestore()
+  }
+})
+
+test("owns safe HTTP status and headers before awaiting the body", async () => {
+  const upstream = Response.json(
+    { error: { message: "unclassified" } },
+    {
+      status: 429,
+      headers: {
+        "retry-after": "17",
+        "x-quota-snapshot-chat": "remaining=0;limit=100",
+      },
+    },
+  )
+  const inspectionPromise = inspectSafeHttpError(
+    new HTTPError("Failed to create chat completions", upstream),
+  )
+  upstream.headers.set("retry-after", "99")
+  upstream.headers.set("x-quota-snapshot-chat", "remaining=99;limit=100")
+
+  const inspection = await inspectionPromise
+
+  expect(inspection.status).toBe(429)
+  expect(inspection.responseHeaders).toEqual({
+    "retry-after": "17",
+    "x-quota-snapshot-chat": "remaining=0;limit=100",
+  })
+})
+
+test("forwards only the safe headers owned by the OpenAI inspection", async () => {
+  const upstream = Response.json(
+    {},
+    {
+      status: 429,
+      headers: {
+        "retry-after": "17",
+        "x-quota-snapshot-chat": "remaining=0;limit=100",
+        "x-private-upstream": "private-header-marker",
+      },
+    },
+  )
+
+  const response = await forwardOpenAIError(
+    new HTTPError("Failed to create chat completions", upstream),
+  )
+
+  expect(response.status).toBe(429)
+  expect(response.headers.get("retry-after")).toBe("17")
+  expect(response.headers.get("x-quota-snapshot-chat")).toBe(
+    "remaining=0;limit=100",
+  )
+  expect(response.headers.get("x-private-upstream")).toBeNull()
+})
+
+test("treats a revoked HTTP error proxy as an unexpected OpenAI failure", async () => {
+  const { proxy, revoke } = Proxy.revocable(
+    new HTTPError(
+      "Failed to create responses",
+      Response.json(
+        { error: { message: "revoked-error-private-marker" } },
+        {
+          status: 429,
+        },
+      ),
+    ),
+    {},
+  )
+  revoke()
+
+  const response = await forwardOpenAIError(proxy)
+  const body = await response.text()
+
+  expect(response.status).toBe(500)
+  expect(JSON.parse(body)).toEqual({
+    error: {
+      code: "internal_error",
+      message: "Internal server error",
+      type: "server_error",
+    },
+  })
+  expect(body).not.toContain("revoked-error-private-marker")
+})
+
 test("returns an empty 499 response for upstream client disconnects", async () => {
   const app = new Hono()
 
@@ -356,6 +653,97 @@ test("returns an explicitly safe local error body without exposing upstream bodi
 
   expect(response.status).toBe(413)
   expect(await response.json()).toEqual(clientBody)
+})
+
+test.each(["replace", "delete"] as const)(
+  "owns local HTTP status before a later response %s",
+  async (mutation) => {
+    const clientBody = {
+      error: {
+        code: "invalid_value",
+        message: "The model field must be a non-empty string.",
+        param: "model",
+        type: "invalid_request_error",
+      },
+    }
+    const error = new LocalHTTPError(
+      clientBody.error.message,
+      Response.json(clientBody, { status: 400 }),
+      clientBody,
+    )
+    if (mutation === "replace") {
+      error.response = Response.json(
+        { error: { message: "replacement-response-private-marker" } },
+        { status: 503 },
+      )
+    } else {
+      Reflect.deleteProperty(error, "response")
+    }
+
+    const inspection = await inspectSafeHttpError(error)
+
+    expect(inspection.status).toBe(400)
+    expect(inspection.safeMessage).toBe(clientBody.error.message)
+    expect(inspection.localError).toEqual(clientBody.error)
+  },
+)
+
+test("never reads a redefined local HTTP response", () => {
+  const clientBody = {
+    error: {
+      code: "invalid_value",
+      message: "The model field must be a non-empty string.",
+      param: "model",
+      type: "invalid_request_error",
+    },
+  }
+  const error = new LocalHTTPError(
+    clientBody.error.message,
+    Response.json(clientBody, { status: 400 }),
+    clientBody,
+  )
+  let getterCalls = 0
+  Object.defineProperty(error, "response", {
+    configurable: true,
+    get() {
+      getterCalls += 1
+      throw new Error("local-response-getter-private-marker")
+    },
+  })
+
+  const inspection = snapshotSafeHttpError(error)
+
+  expect(inspection.status).toBe(400)
+  expect(inspection.safeMessage).toBe(clientBody.error.message)
+  expect(getterCalls).toBe(0)
+})
+
+test("owns safe local HTTP headers before response replacement", async () => {
+  const clientBody = {
+    error: {
+      code: "invalid_value",
+      message: "The model field must be a non-empty string.",
+      param: "model",
+      type: "invalid_request_error",
+    },
+  }
+  const error = new LocalHTTPError(
+    clientBody.error.message,
+    Response.json(clientBody, {
+      headers: { "retry-after": "17" },
+      status: 400,
+    }),
+    clientBody,
+  )
+  error.response = Response.json(
+    { error: { message: "replacement-response-private-marker" } },
+    { headers: { "retry-after": "99" }, status: 503 },
+  )
+
+  const inspection = await inspectSafeHttpError(error)
+
+  expect(inspection.status).toBe(400)
+  expect(inspection.responseHeaders).toEqual({ "retry-after": "17" })
 })
 
 test("redacts affinity identifiers from HTTP error diagnostics", async () => {
@@ -408,6 +796,40 @@ test("redacts affinity identifiers from HTTP error diagnostics", async () => {
     for (const rawId of rawIds) {
       expect(diagnosticOutput).not.toContain(rawId)
     }
+  } finally {
+    errorSpy.mockRestore()
+    captureException.mockRestore()
+  }
+})
+
+test("returns and reports a fixed envelope for unexpected runtime errors", async () => {
+  const privateMarker = "runtime-private-marker"
+  const errorOutput: Array<unknown> = []
+  const errorSpy = spyOn(consola, "error")
+  const captureException = spyOn(Sentry, "captureException").mockImplementation(
+    () => "event-id",
+  )
+  const app = new Hono()
+  app.get("/unexpected", () => {
+    throw new Error(privateMarker)
+  })
+  app.onError(async (error, c) => await forwardError(c, error))
+
+  try {
+    const response = await app.request("/unexpected")
+    for (const call of errorSpy.mock.calls) errorOutput.push(...call)
+    const body = await response.text()
+    expect(response.status).toBe(500)
+    expect(JSON.parse(body)).toEqual({
+      error: {
+        code: "internal_error",
+        message: "Internal server error",
+        type: "server_error",
+      },
+    })
+    expect(
+      JSON.stringify([body, errorOutput, captureException.mock.calls]),
+    ).not.toContain(privateMarker)
   } finally {
     errorSpy.mockRestore()
     captureException.mockRestore()

@@ -1,3 +1,4 @@
+import * as Sentry from "@sentry/bun"
 import {
   afterAll,
   beforeAll,
@@ -9,10 +10,13 @@ import {
 } from "bun:test"
 import consola from "consola"
 
+/* eslint-disable max-lines -- Copilot client integration cases share singleton fetch fixtures */
+import { runWithCopilotRequestAttribution } from "../src/lib/copilot-request-context"
 import {
   clearLlmDebugLogs,
   getLlmDebugLog,
   listLlmDebugLogs,
+  toLlmDebugLogError,
 } from "../src/lib/llm-debug-log"
 import { runWithRoutingAffinity } from "../src/lib/routing-affinity"
 import {
@@ -21,12 +25,18 @@ import {
 } from "../src/lib/routing-telemetry"
 import { state } from "../src/lib/state"
 import {
+  copilotBaseUrl,
   copilotFetch,
   copilotHeaders,
   setHttpRetrySleepForTest,
 } from "../src/services/copilot/copilot-client"
+import { DEFAULT_COPILOT_INTEGRATION_ID } from "../src/services/copilot/copilot-contract"
 import {
+  abortableSleep,
   createRetryBudget,
+  createTransportChain,
+  handleTransportFailure,
+  isAbortLikeError,
   MAX_DELAY_SECONDS,
   MAX_RETRIES,
   MAX_ROUTED_SENDS,
@@ -35,7 +45,7 @@ import {
 } from "../src/services/copilot/transport-retry"
 
 const originalFetch = globalThis.fetch
-const queuedResults: Array<Error | Response> = []
+const queuedResults: Array<Error | QueuedThrow | Response> = []
 const capturedRequests: Array<{ url: string; init?: RequestInit }> = []
 const transportEvents: Array<{
   attributes: Record<string, unknown>
@@ -75,6 +85,11 @@ type BunTimeoutRequestInit = RequestInit & {
   timeout?: boolean | number
 }
 
+interface QueuedThrow {
+  readonly kind: "throw"
+  readonly value: unknown
+}
+
 function getRequestUrl(url: string | URL | Request): string {
   if (typeof url === "string") {
     return url
@@ -92,6 +107,10 @@ const fetchMock = mock((url: string | URL | Request, init?: RequestInit) => {
   const next = queuedResults.shift()
   if (!next) {
     throw new Error(`Unexpected fetch: ${requestUrl}`)
+  }
+
+  if ("kind" in next) {
+    throw next.value
   }
 
   if (next instanceof Error) {
@@ -133,7 +152,24 @@ beforeEach(() => {
   state.accountType = "individual"
   state.githubToken = "github-token"
   state.copilotToken = "expired-copilot-token"
+  state.copilotIntegrationId = DEFAULT_COPILOT_INTEGRATION_ID
   state.isMultiToken = false
+})
+
+test.each([
+  ["individual", "https://api.githubcopilot.com"],
+  ["business", "https://api.business.githubcopilot.com"],
+  ["enterprise", "https://api.enterprise.githubcopilot.com"],
+] as const)("uses the reviewed %s Copilot host", (accountType, expected) => {
+  state.accountType = accountType
+  expect(copilotBaseUrl()).toBe(expected)
+})
+
+test("uses one current API version and the configured integration id", () => {
+  state.copilotIntegrationId = "assigned-integration"
+  const headers = copilotHeaders()
+  expect(headers["X-GitHub-Api-Version"]).toBe("2026-08-01")
+  expect(headers["Copilot-Integration-Id"]).toBe("assigned-integration")
 })
 
 test("refreshes the single-token copilot token and retries the request after a 401", async () => {
@@ -228,6 +264,103 @@ test("includes a per-session X-Agent-Task-Id header", () => {
   const headers = copilotHeaders()
 
   expect(headers["X-Agent-Task-Id"]).toBe("session-guid")
+})
+
+test("keeps conversation identity stable while preserving task attribution", () => {
+  state.copilotToken = "token"
+  const headers = runWithRoutingAffinity(
+    { key: "conversation", source: "codex_session" },
+    () =>
+      runWithCopilotRequestAttribution(
+        { agentTaskId: "task-123", parentAgentId: "parent-456" },
+        () => copilotHeaders(),
+      ),
+  )
+  expect(headers["X-Agent-Task-Id"]).toBe("task-123")
+  expect(headers["X-Parent-Agent-Id"]).toBe("parent-456")
+  expect(headers["X-Interaction-Id"]).toBe(headers["X-Client-Session-Id"])
+})
+
+test("maps only typed attribution and header options", () => {
+  const headers = copilotHeaders({
+    anthropicBeta: " beta-feature ",
+    anthropicVersion: " 2023-06-01 ",
+    attribution: {
+      clientExperimentAssignment: "client_flight:1;",
+      clientMachineId: "machine-abc",
+      harnessId: "copilot",
+      interactionType: "conversation-agent",
+      openaiIntent: "conversation-agent",
+      repositoryHost: "github.example",
+      repositoryNwo: "owner/repo",
+      subsystemId: "cli",
+    },
+    copilotSessionToken: " session-token ",
+    modelProviderPreference: " azure ",
+  })
+
+  expect(headers).toMatchObject({
+    "Anthropic-Beta": "beta-feature",
+    "anthropic-version": "2023-06-01",
+    "Copilot-Harness-Id": "copilot",
+    "Copilot-Session-Token": "session-token",
+    "Copilot-Subsystem-Id": "cli",
+    "Openai-Intent": "conversation-agent",
+    "X-Client-Machine-Id": "machine-abc",
+    "X-Copilot-Client-Exp-Assignment-Context": "client_flight:1;",
+    "X-GitHub-Repository-Host": "github.example",
+    "X-GitHub-Repository-Nwo": "owner/repo",
+    "X-Interaction-Type": "conversation-agent",
+    "X-Model-Provider-Preference": "azure",
+  })
+})
+
+test("drops invalid typed Copilot header options", () => {
+  const headers = copilotHeaders({
+    anthropicBeta: "bad\nbeta",
+    anthropicVersion: "x".repeat(1025),
+    copilotSessionToken: " ",
+    modelProviderPreference: "bad\rprovider",
+  })
+
+  expect(headers["Anthropic-Beta"]).toBeUndefined()
+  expect(headers["anthropic-version"]).toBeUndefined()
+  expect(headers["Copilot-Session-Token"]).toBeUndefined()
+  expect(headers["X-Model-Provider-Preference"]).toBeUndefined()
+})
+
+test("drops every C0 and C1 control from every typed Copilot header", () => {
+  const controlCodePoints = [
+    ...Array.from({ length: 0x20 }, (_, codePoint) => codePoint),
+    ...Array.from({ length: 0x21 }, (_, offset) => 0x7f + offset),
+  ]
+
+  for (const codePoint of controlCodePoints) {
+    const control = String.fromCodePoint(codePoint)
+    for (const invalid of [
+      (value: string) => `safe${control}${value}`,
+      (value: string) => `${control}${value}`,
+      (value: string) => `${value}${control}`,
+    ]) {
+      const headers = copilotHeaders({
+        anthropicBeta: invalid("beta-feature"),
+        anthropicVersion: invalid("2026-08"),
+        attribution: {
+          agentTaskId: invalid("task-id"),
+          parentAgentId: invalid("parent-id"),
+        },
+        copilotSessionToken: invalid("session-token"),
+        modelProviderPreference: invalid("provider-preference"),
+      })
+
+      expect(headers["Anthropic-Beta"]).toBeUndefined()
+      expect(headers["anthropic-version"]).toBeUndefined()
+      expect(headers["Copilot-Session-Token"]).toBeUndefined()
+      expect(headers["X-Model-Provider-Preference"]).toBeUndefined()
+      expect(headers["X-Agent-Task-Id"]).not.toContain(control)
+      expect(headers["X-Parent-Agent-Id"]).toBeUndefined()
+    }
+  }
 })
 
 test("derives restart-stable upstream headers from request affinity", () => {
@@ -382,6 +515,39 @@ test("captures raw LLM request and response attempts for dashboard debugging", a
   expect(detail?.response?.body).toBe('{"choices":[]}')
 })
 
+test("keeps raw native Responses terminal bodies exact in LLM Debug", async () => {
+  const privateMarker = "llm-debug-native-terminal-private-marker"
+  const rawBody = `event: response.failed\ndata: ${JSON.stringify({
+    type: "response.failed",
+    response: {
+      status: "failed",
+      error: { code: "server_error", message: privateMarker },
+    },
+  })}\n\n`
+  queuedResults.push(
+    new Response(rawBody, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    }),
+  )
+
+  const response = await copilotFetch("/responses", {
+    method: "POST",
+    body: '{"model":"gpt-debug","stream":true}',
+    headers: {
+      Authorization: "Bearer raw-debug-token",
+      "content-type": "application/json",
+    },
+  })
+  await response.text()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+
+  const summary = listLlmDebugLogs().entries[0]
+  const detail = getLlmDebugLog(summary.id)
+  expect(detail?.response?.body).toBe(rawBody)
+  expect(detail?.response?.body).toContain(privateMarker)
+})
+
 // --- Transport-level connection errors ---
 
 const AUTH_HEADERS = {
@@ -401,10 +567,37 @@ function bunSocketClosedError(): Error {
   })
 }
 
+function privateBunSocketClosedError(privateMarker: string): Error {
+  const error = new Error(`socket reset ${privateMarker}`)
+  return Object.assign(error, {
+    code: "ECONNRESET",
+    errno: 0,
+    path: `https://api.githubcopilot.com/responses?private=${privateMarker}`,
+  })
+}
+
 function llmSends(): Array<{ url: string; init?: RequestInit }> {
   return capturedRequests.filter(
     (request) => !request.url.includes("/copilot_internal/"),
   )
+}
+
+async function captureThrown(promise: Promise<unknown>): Promise<unknown> {
+  try {
+    await promise
+  } catch (error) {
+    return error
+  }
+  throw new Error("Expected promise to reject")
+}
+
+async function captureRejection(promise: Promise<unknown>): Promise<boolean> {
+  try {
+    await promise
+  } catch {
+    return true
+  }
+  return false
 }
 
 test("retries Bun's socket-closed ECONNRESET and returns the retried response", async () => {
@@ -420,6 +613,86 @@ test("retries Bun's socket-closed ECONNRESET and returns the retried response", 
 
   expect(response.status).toBe(200)
   expect(capturedRequests).toHaveLength(2)
+})
+
+test("leaves logical response metadata emission to routedFetch", async () => {
+  queuedResults.push(
+    new Response("retry", {
+      status: 500,
+      headers: {
+        "x-quota-snapshot-private": "retry-value",
+        "x-github-request-id": "retry-id",
+      },
+    }),
+    new Response("{}", {
+      status: 200,
+      headers: {
+        "x-quota-snapshot-premium": "final-value",
+        "x-github-request-id": "final-id",
+        authorization: "Bearer private-token",
+      },
+    }),
+  )
+  const debugSpy = spyOn(consola, "debug")
+  const breadcrumbSpy = spyOn(Sentry, "addBreadcrumb").mockImplementation(
+    () => undefined,
+  )
+
+  try {
+    const response = await copilotFetch("/responses", { method: "POST" })
+
+    expect(response.status).toBe(200)
+    const contractLogs = debugSpy.mock.calls.filter(
+      (call) => call[0] === "[copilot-contract]",
+    )
+    expect(contractLogs).toEqual([])
+    const diagnostics = JSON.stringify({
+      breadcrumbs: breadcrumbSpy.mock.calls,
+      logs: contractLogs,
+    })
+    expect(diagnostics).not.toContain("retry-value")
+    expect(diagnostics).not.toContain("final-value")
+    expect(diagnostics).not.toContain("private-token")
+  } finally {
+    breadcrumbSpy.mockRestore()
+    debugSpy.mockRestore()
+  }
+})
+
+test("omits private transport values from retry logs and breadcrumbs", async () => {
+  const privateMarker = "transport-retry-private-marker"
+  queuedResults.push(
+    privateBunSocketClosedError(privateMarker),
+    new Response("{}", { status: 200 }),
+  )
+  const warnSpy = spyOn(consola, "warn")
+  const breadcrumbSpy = spyOn(Sentry, "addBreadcrumb").mockImplementation(
+    () => undefined,
+  )
+  const sentryLogSpy = spyOn(Sentry.logger, "info")
+
+  try {
+    const response = await copilotFetch("/responses", {
+      method: "POST",
+      headers: AUTH_HEADERS,
+    })
+
+    expect(response.status).toBe(200)
+    expect(capturedRequests).toHaveLength(2)
+    const diagnostics = JSON.stringify({
+      breadcrumbs: breadcrumbSpy.mock.calls,
+      logger: sentryLogSpy.mock.calls,
+      warn: warnSpy.mock.calls,
+    })
+    expect(diagnostics).not.toContain(privateMarker)
+    expect(diagnostics).not.toContain("api.githubcopilot.com")
+    expect(diagnostics).toContain("ECONNRESET")
+    expect(diagnostics).toContain("retrying")
+  } finally {
+    sentryLogSpy.mockRestore()
+    breadcrumbSpy.mockRestore()
+    warnSpy.mockRestore()
+  }
 })
 
 test("records every Copilot transport attempt with its retry reason", async () => {
@@ -526,6 +799,356 @@ test("retries when the connection code is only on error.cause", async () => {
 
   expect(response.status).toBe(200)
   expect(capturedRequests).toHaveLength(2)
+})
+
+test("retries platform errors whose connection code is inherited", async () => {
+  const prototype = Object.create(Error.prototype, {
+    code: {
+      configurable: true,
+      value: "ECONNRESET",
+    },
+  }) as object
+  const inheritedCodeError = Object.create(prototype) as object
+  Object.defineProperty(inheritedCodeError, "message", {
+    configurable: true,
+    value: "provider request failed",
+  })
+  queuedResults.push(
+    { kind: "throw", value: inheritedCodeError } satisfies QueuedThrow,
+    new Response("{}", { status: 200 }),
+  )
+
+  const response = await copilotFetch("/responses", {
+    method: "POST",
+    headers: AUTH_HEADERS,
+  })
+
+  expect(response.status).toBe(200)
+  expect(capturedRequests).toHaveLength(2)
+})
+
+test("classifies Bun DOMException cancellation from inherited semantics", () => {
+  const cancellation = new DOMException(
+    "The operation was aborted.",
+    "AbortError",
+  )
+
+  expect(isAbortLikeError(cancellation)).toBe(true)
+})
+
+test("does not spend retry budget on Bun DOMException cancellation", async () => {
+  const cancellation = new DOMException(
+    "The operation was aborted.",
+    "AbortError",
+  )
+  let claims = 0
+
+  expect(
+    await captureRejection(
+      handleTransportFailure({
+        attemptMs: 1,
+        chain: createTransportChain("/responses", "dom-cancelled"),
+        claimRetry: () => {
+          claims += 1
+          return true
+        },
+        error: cancellation,
+        signal: undefined,
+      }),
+    ),
+  ).toBe(true)
+  expect(claims).toBe(0)
+})
+
+test("converts Bun DOMException abort reasons without losing semantics", async () => {
+  const controller = new AbortController()
+  const cancellation = new DOMException(
+    "The operation was aborted.",
+    "AbortError",
+  )
+  controller.abort(cancellation)
+  const thrown = await captureThrown(abortableSleep(1, controller.signal))
+
+  expect(isAbortLikeError(thrown)).toBe(true)
+})
+
+test("does not invoke inherited transport accessors", async () => {
+  let getterCalls = 0
+  const prototype = Object.defineProperties(
+    {},
+    {
+      code: {
+        get() {
+          getterCalls += 1
+          return "ECONNRESET"
+        },
+      },
+      message: {
+        get() {
+          getterCalls += 1
+          return "socket connection was closed"
+        },
+      },
+      name: {
+        get() {
+          getterCalls += 1
+          return "AbortError"
+        },
+      },
+    },
+  )
+  const hostile = Object.create(prototype) as object
+  queuedResults.push({ kind: "throw", value: hostile } satisfies QueuedThrow)
+
+  expect(
+    await captureRejection(
+      copilotFetch("/responses", { method: "POST", headers: AUTH_HEADERS }),
+    ),
+  ).toBe(true)
+  expect(getterCalls).toBe(0)
+  expect(capturedRequests).toHaveLength(1)
+})
+
+test("classifies a hostile inherited prototype chain conservatively", async () => {
+  let prototypeTrapCalls = 0
+  const prototype = new Proxy(
+    {},
+    {
+      getPrototypeOf() {
+        prototypeTrapCalls += 1
+        throw new Error("prototype-private-marker")
+      },
+    },
+  )
+  const hostile = Object.create(prototype) as object
+  queuedResults.push({ kind: "throw", value: hostile } satisfies QueuedThrow)
+
+  expect(
+    await captureRejection(
+      copilotFetch("/responses", { method: "POST", headers: AUTH_HEADERS }),
+    ),
+  ).toBe(true)
+  expect(prototypeTrapCalls).toBe(0)
+  expect(capturedRequests).toHaveLength(1)
+})
+
+test("keeps inherited runtime error details exact in LLM Debug", () => {
+  const ordinary = new TypeError("typed-private-message")
+  const domException = new DOMException("dom-private-message", "AbortError")
+
+  expect(toLlmDebugLogError(ordinary)).toMatchObject({
+    message: "typed-private-message",
+    name: "TypeError",
+    stack: ordinary.stack,
+  })
+  expect(toLlmDebugLogError(domException)).toMatchObject({
+    code: 20,
+    message: "dom-private-message",
+    name: "AbortError",
+  })
+})
+
+test.each([
+  { error: new Error(), name: "Error" },
+  { error: new TypeError(), name: "TypeError" },
+  { error: new DOMException("", "AbortError"), name: "AbortError" },
+])(
+  "keeps an exact empty inherited $name message in LLM Debug",
+  ({ error, name }) => {
+    expect(toLlmDebugLogError(error)).toMatchObject({ message: "", name })
+  },
+)
+
+test("uses fallback text for an unreadable Error message descriptor", () => {
+  let getterCalls = 0
+  const error = new Error()
+  Object.defineProperty(error, "message", {
+    get() {
+      getterCalls += 1
+      return "private-message"
+    },
+  })
+
+  expect(toLlmDebugLogError(error)).toMatchObject({
+    message: "Unknown thrown value",
+    name: "Error",
+  })
+  expect(getterCalls).toBe(0)
+})
+
+test("keeps nested DOMException codes exact in LLM Debug", () => {
+  const wrapped = new Error("wrapped transport failure", {
+    cause: new DOMException("nested abort", "AbortError"),
+  })
+
+  expect(toLlmDebugLogError(wrapped)).toMatchObject({
+    code: 20,
+    message: "wrapped transport failure",
+    name: "Error",
+  })
+})
+
+test("keeps LLM Debug bounded on hostile inherited descriptors", () => {
+  let getterCalls = 0
+  const prototype = Object.defineProperties(
+    {},
+    {
+      code: {
+        get() {
+          getterCalls += 1
+          return "PRIVATE_CODE"
+        },
+      },
+      message: {
+        get() {
+          getterCalls += 1
+          return "private message"
+        },
+      },
+      name: {
+        get() {
+          getterCalls += 1
+          return "PrivateError"
+        },
+      },
+      stack: {
+        get() {
+          getterCalls += 1
+          return "private stack"
+        },
+      },
+    },
+  )
+
+  expect(toLlmDebugLogError(Object.create(prototype))).toEqual({
+    message: "Unknown thrown value",
+    name: "Error",
+  })
+  expect(getterCalls).toBe(0)
+})
+
+test("classifies hostile transport values without invoking getters", async () => {
+  const privateMarker = "transport-hostile-getter-private-marker"
+  let getterCalls = 0
+  const hostile = Object.defineProperties(
+    {},
+    {
+      code: {
+        get() {
+          getterCalls += 1
+          throw new Error(privateMarker)
+        },
+      },
+      message: {
+        get() {
+          getterCalls += 1
+          throw new Error(privateMarker)
+        },
+      },
+      name: {
+        get() {
+          getterCalls += 1
+          throw new Error(privateMarker)
+        },
+      },
+    },
+  )
+  queuedResults.push({ kind: "throw", value: hostile } satisfies QueuedThrow)
+
+  const thrown = await captureThrown(
+    copilotFetch("/responses", { method: "POST", headers: AUTH_HEADERS }),
+  )
+  expect(thrown).toBe(hostile)
+
+  expect(getterCalls).toBe(0)
+  expect(capturedRequests).toHaveLength(1)
+})
+
+test("classifies revoked transport proxies conservatively", async () => {
+  const { proxy, revoke } = Proxy.revocable({}, {})
+  revoke()
+  queuedResults.push({ kind: "throw", value: proxy } satisfies QueuedThrow)
+
+  expect(
+    await captureRejection(
+      copilotFetch("/models", { method: "GET", headers: AUTH_HEADERS }),
+    ),
+  ).toBe(true)
+
+  expect(capturedRequests).toHaveLength(1)
+})
+
+test("keeps revoked transport values bounded on the Responses debug path", async () => {
+  const { proxy, revoke } = Proxy.revocable({}, {})
+  revoke()
+  queuedResults.push({ kind: "throw", value: proxy } satisfies QueuedThrow)
+
+  expect(
+    await captureRejection(
+      copilotFetch("/responses", { method: "POST", headers: AUTH_HEADERS }),
+    ),
+  ).toBe(true)
+
+  expect(capturedRequests).toHaveLength(1)
+  const entry = listLlmDebugLogs().entries[0]
+  expect(entry.status).toBe("error")
+  expect(entry.errorMessage).toBe("Unknown thrown value")
+})
+
+test("does not expose or retry arbitrary transport classes and codes", async () => {
+  const privateMarker = "transport-custom-private-marker"
+  const custom = Object.assign(new Error(privateMarker), {
+    code: "CUSTOM_PRIVATE_CODE",
+    name: "CustomPrivateError",
+  })
+  queuedResults.push(custom)
+  const warnSpy = spyOn(consola, "warn")
+  const breadcrumbSpy = spyOn(Sentry, "addBreadcrumb").mockImplementation(
+    () => undefined,
+  )
+  const sentryLogSpy = spyOn(Sentry.logger, "info")
+
+  try {
+    const thrown = await captureThrown(
+      copilotFetch("/responses", { method: "POST", headers: AUTH_HEADERS }),
+    )
+    expect(thrown).toBe(custom)
+
+    expect(capturedRequests).toHaveLength(1)
+    const diagnostics = JSON.stringify({
+      breadcrumbs: breadcrumbSpy.mock.calls,
+      logger: sentryLogSpy.mock.calls,
+      warn: warnSpy.mock.calls,
+    })
+    expect(diagnostics).not.toContain(privateMarker)
+    expect(diagnostics).not.toContain("CUSTOM_PRIVATE_CODE")
+    expect(diagnostics).not.toContain("CustomPrivateError")
+  } finally {
+    sentryLogSpy.mockRestore()
+    breadcrumbSpy.mockRestore()
+    warnSpy.mockRestore()
+  }
+})
+
+test("keeps hostile direct transport classification inside its retry budget", async () => {
+  const { proxy, revoke } = Proxy.revocable({}, {})
+  revoke()
+  let claims = 0
+  expect(
+    await captureRejection(
+      handleTransportFailure({
+        attemptMs: 1,
+        chain: createTransportChain("/responses", "direct-hostile"),
+        claimRetry: () => {
+          claims += 1
+          return true
+        },
+        error: proxy,
+        signal: undefined,
+      }),
+    ),
+  ).toBe(true)
+  expect(claims).toBe(0)
 })
 
 test("caps repeated connection errors at two transport sends", async () => {
@@ -885,6 +1508,10 @@ test("bounds pre-header retry delay without weakening the send budget", () => {
   expect(MAX_ROUTED_SENDS).toBe(3)
   expect(MAX_RETRIES).toBe(1)
   expect(createRetryBudget()).toEqual({ remaining: MAX_ROUTED_SENDS - 1 })
+})
+
+test("allows a caller to reserve the retry budget for one exact recovery send", () => {
+  expect(createRetryBudget({ extraSends: 0 })).toEqual({ remaining: 0 })
 })
 
 test("caps Retry-After only when the caller opts into the streaming pre-header ceiling", async () => {

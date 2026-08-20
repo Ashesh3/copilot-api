@@ -1,12 +1,19 @@
 import { expect, test } from "bun:test"
 
-import type { AnthropicMessagesPayload } from "../src/routes/messages/anthropic-types"
-import type { ResponsesResult } from "../src/services/copilot/create-responses"
+import type {
+  AnthropicAssistantContentBlock,
+  AnthropicMessagesPayload,
+} from "../src/routes/messages/anthropic-types"
+import type {
+  ResponsesPayload,
+  ResponsesResult,
+} from "../src/services/copilot/create-responses"
 
 import {
   translateAnthropicMessagesToResponsesPayload,
   translateResponsesResultToAnthropic,
 } from "../src/routes/messages/responses-translation"
+import { normalizeResponsesReasoning } from "../src/routes/responses/handler"
 
 test("keeps Anthropics max_tokens when translating to Responses payload", () => {
   const payload: AnthropicMessagesPayload = {
@@ -51,6 +58,79 @@ test("preserves tool references as explicit text on Responses", () => {
   })
 })
 
+test("Responses document conversion proves context and citations have no mapping", () => {
+  const translated = translateAnthropicMessagesToResponsesPayload({
+    model: "gpt-current",
+    max_tokens: 64,
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "document",
+            source: {
+              type: "base64",
+              media_type: "application/pdf",
+              data: "JVBERi0=",
+            },
+            title: "report.pdf",
+            context: "Read section two first.",
+            citations: { enabled: true },
+          },
+        ],
+      },
+    ],
+  })
+
+  expect(translated.input).toEqual([
+    {
+      type: "message",
+      role: "user",
+      content: [
+        {
+          type: "input_file",
+          filename: "report.pdf",
+          file_data: "data:application/pdf;base64,JVBERi0=",
+        },
+      ],
+    },
+  ])
+  expect(JSON.stringify(translated.input)).not.toContain("section two")
+  expect(JSON.stringify(translated.input)).not.toContain("citations")
+})
+
+test.each([true, false])(
+  "Responses maps tool_result.is_error=%s to item status",
+  (isError) => {
+    const translated = translateAnthropicMessagesToResponsesPayload({
+      model: "gpt-current",
+      max_tokens: 64,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "toolu_1",
+              content: "result",
+              is_error: isError,
+            },
+          ],
+        },
+      ],
+    })
+
+    expect(translated.input).toEqual([
+      {
+        type: "function_call_output",
+        call_id: "toolu_1",
+        output: "result",
+        status: isError ? "incomplete" : "completed",
+      },
+    ])
+  },
+)
+
 test("derives safety and cache fields from Claude JSON metadata.user_id", () => {
   const payload: AnthropicMessagesPayload = {
     model: "gpt-4o-mini",
@@ -69,6 +149,148 @@ test("derives safety and cache fields from Claude JSON metadata.user_id", () => 
 
   expect(translated.safety_identifier).toBe("account-456")
   expect(translated.prompt_cache_key).toBe("session-789")
+})
+
+test.each([
+  {
+    name: "single signed@id",
+    content: [
+      { type: "thinking", thinking: "signed", signature: "sig-one@rs-one" },
+    ],
+    expected: [
+      {
+        id: "rs-one",
+        type: "reasoning",
+        summary: [{ type: "summary_text", text: "signed" }],
+        encrypted_content: "sig-one",
+      },
+    ],
+  },
+  {
+    name: "single unsigned",
+    content: [{ type: "thinking", thinking: "unsigned" }],
+    errorParam: "thinking",
+  },
+  {
+    name: "multiple unsigned",
+    content: [
+      { type: "thinking", thinking: "first" },
+      { type: "thinking", thinking: "second" },
+    ],
+    errorParam: "thinking",
+  },
+  {
+    name: "signed then unsigned",
+    content: [
+      { type: "thinking", thinking: "signed", signature: "sig-one@rs-one" },
+      { type: "thinking", thinking: "unsigned" },
+    ],
+    errorParam: "thinking",
+  },
+  {
+    name: "unsigned then signed",
+    content: [
+      { type: "thinking", thinking: "unsigned" },
+      { type: "thinking", thinking: "signed", signature: "sig-two@rs-two" },
+    ],
+    errorParam: "thinking",
+  },
+  {
+    name: "malformed signed",
+    content: [
+      { type: "thinking", thinking: "signed", signature: "missing-id" },
+    ],
+    errorParam: "thinking",
+  },
+  {
+    name: "signed with empty id",
+    content: [{ type: "thinking", thinking: "signed", signature: "sig-one@" }],
+    errorParam: "thinking",
+  },
+  {
+    name: "signed with extra separator",
+    content: [
+      { type: "thinking", thinking: "signed", signature: "sig@rs@extra" },
+    ],
+    errorParam: "thinking",
+  },
+  {
+    name: "multiple signed",
+    content: [
+      { type: "thinking", thinking: "first", signature: "sig-one@rs-one" },
+      { type: "thinking", thinking: "second", signature: "sig-two@rs-two" },
+    ],
+    expected: [
+      {
+        id: "rs-one",
+        type: "reasoning",
+        summary: [{ type: "summary_text", text: "first" }],
+        encrypted_content: "sig-one",
+      },
+      {
+        id: "rs-two",
+        type: "reasoning",
+        summary: [{ type: "summary_text", text: "second" }],
+        encrypted_content: "sig-two",
+      },
+    ],
+  },
+])(
+  "preserves $name thinking blocks on Messages to Responses",
+  ({ content, errorParam, expected }) => {
+    const translate = () =>
+      translateAnthropicMessagesToResponsesPayload({
+        model: "gpt-5.4",
+        max_tokens: 64,
+        messages: [
+          {
+            role: "assistant",
+            content: [...content] as Array<AnthropicAssistantContentBlock>,
+          },
+        ],
+      })
+
+    if (errorParam) {
+      expect(translate).toThrow()
+      try {
+        translate()
+      } catch (error) {
+        expect(error).toMatchObject({
+          clientBody: { error: { param: errorParam } },
+        })
+      }
+      return
+    }
+
+    expect(translate().input as unknown).toEqual(expected)
+  },
+)
+
+test("preserves integer Responses reasoning effort across named suffixes", () => {
+  const payload = {
+    model: "gpt-current",
+    input: "hello",
+    reasoning: { effort: 2048 },
+  }
+
+  const effort = normalizeResponsesReasoning(payload, "high")
+
+  expect(effort).toBe(2048)
+  expect(payload.reasoning).toEqual({ effort: 2048 })
+})
+
+test("preserves zero from the top-level Responses reasoning alias", () => {
+  const payload: ResponsesPayload = {
+    model: "gpt-current",
+    input: "hello",
+    reasoning_effort: 0,
+  }
+
+  const effort = normalizeResponsesReasoning(payload)
+
+  expect(effort).toBe(0)
+  expect(payload.reasoning).toEqual({ effort: 0 })
+  expect(payload).not.toHaveProperty("reasoning_effort")
 })
 
 test("maps raw Responses reasoning content into Anthropic thinking", () => {

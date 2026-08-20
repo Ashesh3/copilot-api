@@ -1,3 +1,4 @@
+import { createEndpointTranslationError } from "~/lib/error"
 import {
   type ChatCompletionResponse,
   type ChatCompletionsPayload,
@@ -325,6 +326,19 @@ function handleAssistantMessage(
   const thinkingBlocks = message.content.filter(
     (block): block is AnthropicThinkingBlock => block.type === "thinking",
   )
+  const signedThinkingBlocks = thinkingBlocks.filter(
+    (block) => block.signature && isValidReasoningSignature(block.signature),
+  )
+  if (
+    signedThinkingBlocks.length > 1
+    || (signedThinkingBlocks.length === 1 && thinkingBlocks.length > 1)
+  ) {
+    throw createEndpointTranslationError({
+      blockers: ["mixed_thinking_blocks"],
+      code: "endpoint_translation_unsupported",
+      source: "messages",
+    })
+  }
 
   const textContent = textBlocks.map((block) => block.text).join("\n\n")
   const reasoningText = thinkingBlocks
@@ -333,9 +347,7 @@ function handleAssistantMessage(
       (thinking) => thinking.trim().length > 0 && thinking !== "Thinking...",
     )
     .join("\n\n")
-  const reasoningOpaque = thinkingBlocks
-    .map((block) => block.signature)
-    .find((signature) => isValidReasoningSignature(signature))
+  const reasoningOpaque = signedThinkingBlocks[0]?.signature
 
   return [
     {
@@ -593,6 +605,10 @@ function buildAnthropicResponse(
 ): AnthropicResponse {
   const { contentBlocks, stopReason, originalModel } = options
   const cachedTokens = response.usage?.prompt_tokens_details?.cached_tokens ?? 0
+  const metadata = response as ChatCompletionResponse & {
+    copilot_usage?: unknown
+    recommended_auto_tier?: "eco" | "balanced"
+  }
   return {
     id: response.id,
     type: "message",
@@ -607,6 +623,12 @@ function buildAnthropicResponse(
       cache_read_input_tokens: cachedTokens,
       cache_creation_input_tokens: 0,
     },
+    ...(metadata.copilot_usage !== undefined ?
+      { copilot_usage: metadata.copilot_usage }
+    : {}),
+    ...(metadata.recommended_auto_tier !== undefined ?
+      { recommended_auto_tier: metadata.recommended_auto_tier }
+    : {}),
   }
 }
 

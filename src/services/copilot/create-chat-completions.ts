@@ -11,6 +11,7 @@ import {
 } from "~/lib/attachments"
 import { HTTPError } from "~/lib/error"
 import { modelSupportsAssistantPrefill } from "~/lib/model-settings"
+import { normalizeChatCompletionsRequest } from "~/routes/chat-completions/chat-contract"
 import {
   hasVisionContent,
   detectInitiator,
@@ -48,45 +49,14 @@ const rewriteUnsupportedAssistantPrefill = (
   }
 }
 
-const normalizeFunctionTool = (tool: unknown): void => {
-  if (!isRecord(tool) || tool.type !== "function") {
-    return
-  }
-
-  const functionDefinition = tool.function
-  if (!isRecord(functionDefinition)) {
-    return
-  }
-
-  const parameters = functionDefinition.parameters
-  if (!isRecord(parameters) || Array.isArray(parameters)) {
-    functionDefinition.parameters = { type: "object", properties: {} }
-    return
-  }
-
-  if (!parameters.type) {
-    parameters.type = "object"
-  }
-  if (!isRecord(parameters.properties)) {
-    parameters.properties = {}
-  }
-}
-
 /**
  * Normalize payload before sending to Copilot.
- * - Fix empty tool parameters (Copilot rejects {} without type/properties)
  * - Downgrade json_schema to json_object (Copilot returns empty content for json_schema)
  *   and stash the schema so injectJsonInstruction can reference it
  */
 const normalizePayload = (payload: ChatCompletionsPayload): void => {
   if (payload.stream && !payload.stream_options) {
     payload.stream_options = { include_usage: true }
-  }
-
-  if (payload.tools) {
-    for (const tool of payload.tools) {
-      normalizeFunctionTool(tool)
-    }
   }
 
   if (
@@ -109,6 +79,9 @@ const isJsonResponseFormat = (payload: ChatCompletionsPayload): boolean => {
     ?.type
   return type === "json_object" || type === "json_schema"
 }
+
+const JSON_RESPONSE_INSTRUCTION =
+  "IMPORTANT: You MUST respond with valid JSON only. No markdown, no code fences, no explanation — just raw JSON."
 
 /**
  * Strip markdown code fences from content when json response_format is requested.
@@ -141,12 +114,22 @@ const injectJsonInstruction = (payload: ChatCompletionsPayload): void => {
 
   const stashedSchema = (payload as unknown as Record<string, unknown>)
     ._json_schema
-  let instruction =
-    "IMPORTANT: You MUST respond with valid JSON only. No markdown, no code fences, no explanation — just raw JSON."
+  let instruction = JSON_RESPONSE_INSTRUCTION
 
   if (stashedSchema) {
     instruction += `\nYou MUST conform to this JSON schema:\n${JSON.stringify(stashedSchema)}`
     delete (payload as unknown as Record<string, unknown>)._json_schema
+  }
+
+  if (
+    payload.messages.some(
+      (message) =>
+        message.role === "system"
+        && typeof message.content === "string"
+        && message.content.includes(instruction),
+    )
+  ) {
+    return
   }
 
   const systemMsg = payload.messages.find((m) => m.role === "system")
@@ -353,11 +336,28 @@ interface StreamingRetryOptions {
 
 interface ChatCompletionsRequestOptions {
   compaction?: boolean
+  copilotSessionToken?: string
   initiator?: "agent" | "user"
   signal?: AbortSignal
 }
 
+interface ChatCompletionsWithProcessedPayload {
+  processedPayload: ChatCompletionsPayload
+  response: ChatCompletionsResult
+}
+
+interface NonStreamingChatCompletionsWithProcessedPayload {
+  processedPayload: ChatCompletionsPayload
+  response: ChatCompletionResponse
+}
+
+interface ChatCompletionsCoreResult {
+  processedPayload: ChatCompletionsPayload
+  response: ChatCompletionsResult
+}
+
 interface ChatHeaderOptions {
+  copilotSessionToken?: string
   vision: boolean
   initiator: "agent" | "user"
 }
@@ -436,6 +436,7 @@ const dispatchWithImageFallback = async (options: {
     options.compaction,
   )
   const retryHeaderOptions = {
+    copilotSessionToken: options.headerOptions.copilotSessionToken,
     vision: false,
     initiator: options.headerOptions.initiator,
   }
@@ -483,24 +484,56 @@ const handleStreamingResponse = async (
   })
 }
 
-export const createChatCompletions = async (
+type ChatCompletionsResult = ChatCompletionResponse | AsyncIterable<StreamEvent>
+
+export function createChatCompletionsWithProcessedPayload(
+  payload: ChatCompletionsPayload & { stream?: false | null },
+  options?: ChatCompletionsRequestOptions,
+): Promise<NonStreamingChatCompletionsWithProcessedPayload>
+export function createChatCompletionsWithProcessedPayload(
   payload: ChatCompletionsPayload,
   options?: ChatCompletionsRequestOptions,
-) => {
-  options?.signal?.throwIfAborted()
-  rewriteUnsupportedAssistantPrefill(payload)
-  await normalizeChatAttachments(payload, options?.signal)
-  options?.signal?.throwIfAborted()
-  const vision = hasVisionContent(payload.messages)
-  const initiator = detectInitiator(payload.messages, options?.initiator)
-  const headerOpts = { vision, initiator }
+): Promise<ChatCompletionsWithProcessedPayload>
+export async function createChatCompletionsWithProcessedPayload(
+  payload: ChatCompletionsPayload,
+  options?: ChatCompletionsRequestOptions,
+): Promise<ChatCompletionsWithProcessedPayload> {
+  const result = await createChatCompletionsCore(payload, options)
+  return {
+    processedPayload: structuredClone(result.processedPayload),
+    response: result.response,
+  }
+}
 
-  normalizePayload(payload)
-  injectJsonInstruction(payload)
-  addPromptCaching(payload.messages, payload.tools ?? undefined)
+async function createChatCompletionsCore(
+  payload: ChatCompletionsPayload,
+  options?: ChatCompletionsRequestOptions,
+): Promise<ChatCompletionsCoreResult> {
+  const normalizedPayload = normalizeChatCompletionsRequest(payload)
+  options?.signal?.throwIfAborted()
+  rewriteUnsupportedAssistantPrefill(normalizedPayload)
+  await normalizeChatAttachments(normalizedPayload, options?.signal)
+  options?.signal?.throwIfAborted()
+  const vision = hasVisionContent(normalizedPayload.messages)
+  const initiator = detectInitiator(
+    normalizedPayload.messages,
+    options?.initiator,
+  )
+  const headerOpts = {
+    copilotSessionToken: options?.copilotSessionToken,
+    vision,
+    initiator,
+  }
+
+  normalizePayload(normalizedPayload)
+  injectJsonInstruction(normalizedPayload)
+  addPromptCaching(
+    normalizedPayload.messages,
+    normalizedPayload.tools ?? undefined,
+  )
 
   const outboundPayload = prepareChatCompletionsPayload(
-    payload,
+    normalizedPayload,
     options?.compaction,
   )
 
@@ -509,24 +542,37 @@ export const createChatCompletions = async (
     headerOptions: headerOpts,
     outboundPayload,
     signal: options?.signal,
-    sourcePayload: payload,
+    sourcePayload: normalizedPayload,
   })
-
-  if (payload.stream) {
-    return handleStreamingResponse(active.response, {
-      payload: active.payload,
-      retry: async () => {
-        return await dispatchChatCompletions(active.payload, {
-          headerOptions: active.headerOptions,
-          reason: "http_retry",
-          recordSelection: false,
-          signal: options?.signal,
-        })
-      },
-    })
+  if (normalizedPayload.stream) {
+    return {
+      processedPayload: active.payload,
+      response: await handleStreamingResponse(active.response, {
+        payload: active.payload,
+        retry: async () => {
+          return await dispatchChatCompletions(active.payload, {
+            headerOptions: active.headerOptions,
+            reason: "http_retry",
+            recordSelection: false,
+            signal: options?.signal,
+          })
+        },
+      }),
+    }
   }
 
-  return handleResponse(active.response, active.payload)
+  return {
+    processedPayload: active.payload,
+    response: await handleResponse(active.response, active.payload),
+  }
+}
+
+export const createChatCompletions = async (
+  payload: ChatCompletionsPayload,
+  options?: ChatCompletionsRequestOptions,
+): Promise<ChatCompletionsResult> => {
+  const result = await createChatCompletionsCore(payload, options)
+  return result.response
 }
 
 // Streaming types
@@ -599,6 +645,7 @@ export interface ResponseMessage {
   content: string | null
   reasoning_text?: string | null // Claude thinking text from CAPI
   reasoning_opaque?: string | null // Encrypted signature from CAPI
+  encrypted_content?: string | null
   tool_calls?: Array<ToolCall>
 }
 
@@ -617,6 +664,7 @@ export interface ChatCompletionsPayload {
   temperature?: number | null
   top_p?: number | null
   max_tokens?: number | null
+  max_completion_tokens?: number | null
   stop?: string | Array<string> | null
   n?: number | null
   stream?: boolean | null
@@ -627,9 +675,15 @@ export interface ChatCompletionsPayload {
   presence_penalty?: number | null
   logit_bias?: Record<string, number> | null
   logprobs?: boolean | null
+  top_logprobs?: number | null
+  prediction?: Record<string, unknown> | null
+  reasoning_effort?: string | null
+  thinking_budget?: number | null
   response_format?: { type: string; [key: string]: unknown } | null
   seed?: number | null
   tools?: Array<Tool> | null
+  functions?: Array<Record<string, unknown>> | null
+  function_call?: string | { name: string } | null
   tool_choice?:
     | "none"
     | "auto"

@@ -1,13 +1,24 @@
+import type { SafeHttpErrorInspection } from "~/lib/error"
 import type { RoutingAffinity } from "~/lib/routing-affinity"
 
-import { HTTPError } from "~/lib/error"
+import { runWithCopilotContractObservabilityScope } from "~/lib/copilot-contract-observability"
+import {
+  type CopilotRequestAttribution,
+  runWithCopilotRequestAttribution,
+} from "~/lib/copilot-request-context"
+import {
+  isAbortError,
+  isHTTPError,
+  LocalHTTPError,
+  snapshotSafeHttpError,
+} from "~/lib/error"
 import {
   type LogicalRequestLifecycle,
   startLogicalRequestLog,
 } from "~/lib/request-logger"
 import {
   createRoutingTelemetryRequestState,
-  quotaHeadersStorage,
+  copilotResponseHeadersStorage,
   requestIdStorage,
   routedAccountStorage,
   type RoutingTelemetryRequestState,
@@ -35,11 +46,27 @@ interface ResponsesWebSocketLifecycleData {
   requestId: string
 }
 
-export class WebSocketRequestError extends HTTPError {
+export class WebSocketRequestError extends LocalHTTPError {
+  readonly errorCode: string
   readonly errorType: string
 
-  constructor(message: string, status: number, errorType: string) {
-    super(message, Response.json({ message }, { status }))
+  // The protocol-native error tuple is intentionally explicit at throw sites.
+  // eslint-disable-next-line max-params
+  constructor(
+    message: string,
+    status: number,
+    errorType: string,
+    errorCode = "bad_request",
+  ) {
+    const clientBody = {
+      error: {
+        code: errorCode,
+        message,
+        type: errorType,
+      },
+    }
+    super(message, Response.json(clientBody, { status }), clientBody)
+    this.errorCode = errorCode
     this.errorType = errorType
   }
 }
@@ -93,6 +120,7 @@ export function finalizeResponsesWebSocketTurn(
   turn: ResponsesWebSocketTurn,
   options: {
     error?: unknown
+    errorInspection?: SafeHttpErrorInspection
     status: number
     terminalStatus: "COMPLETE" | "ERROR" | "REJECTED" | "ABORTED"
   },
@@ -101,6 +129,7 @@ export function finalizeResponsesWebSocketTurn(
   const finalized = lifecycle.finalize({
     accountId: turn.routingState.lastUsedAccountId,
     error: options.error,
+    errorInspection: options.errorInspection,
     status: options.status,
     terminalStatus: options.terminalStatus,
   })
@@ -123,15 +152,18 @@ export function classifyWebSocketTerminal(
   error: unknown,
   turn: ResponsesWebSocketTurn,
 ): {
+  errorInspection?: SafeHttpErrorInspection
   status: number
   terminalStatus: "ERROR" | "REJECTED" | "ABORTED"
 } {
-  if (turn.abortController.signal.aborted || isAbortLikeError(error)) {
+  if (turn.abortController.signal.aborted || isAbortError(error)) {
     return { status: 499, terminalStatus: "ABORTED" }
   }
-  if (error instanceof HTTPError) {
-    const status = error.response.status
+  if (isHTTPError(error)) {
+    const errorInspection = snapshotSafeHttpError(error)
+    const { status } = errorInspection
     return {
+      errorInspection,
       status,
       terminalStatus: status < 500 ? "REJECTED" : "ERROR",
     }
@@ -139,31 +171,37 @@ export function classifyWebSocketTerminal(
   return { status: 500, terminalStatus: "ERROR" }
 }
 
-export async function runWithWebSocketRequestContext(
+// The public lifecycle interface keeps affinity, attribution, turn, and work explicit.
+// eslint-disable-next-line max-params
+export async function runWithWebSocketRequestContext<T>(
   affinity: RoutingAffinity | undefined,
+  attribution: CopilotRequestAttribution,
   turn: ResponsesWebSocketTurn,
-  callback: () => Promise<void>,
-): Promise<void> {
-  await requestIdStorage.run(turn.turnId, async () => {
-    await runWithRoutingAffinity(affinity, async () => {
-      await quotaHeadersStorage.run({}, async () => {
-        await routedAccountStorage.run(turn.routingState, async () => {
-          await routingTelemetryStorage.run(turn.telemetryState, callback)
-        })
-      })
-    })
-  })
-}
-
-function isAbortLikeError(error: unknown): boolean {
-  if (error instanceof DOMException && error.name === "AbortError") return true
-  if (!(error instanceof Error)) return false
-  const message = error.message.toLowerCase()
-  const causeMessage =
-    error.cause instanceof Error ? error.cause.message.toLowerCase() : ""
-  return (
-    error.name === "AbortError"
-    || message.includes("aborted")
-    || causeMessage.includes("aborted")
+  callback: () => Promise<T>,
+): Promise<T> {
+  const runTelemetryScope = async (): Promise<T> =>
+    await routingTelemetryStorage.run(
+      turn.telemetryState,
+      async () => await runWithCopilotContractObservabilityScope(callback),
+    )
+  return await requestIdStorage.run(
+    turn.turnId,
+    async () =>
+      await runWithRoutingAffinity(
+        affinity,
+        async () =>
+          await runWithCopilotRequestAttribution(
+            attribution,
+            async () =>
+              await copilotResponseHeadersStorage.run(
+                {},
+                async () =>
+                  await routedAccountStorage.run(
+                    turn.routingState,
+                    runTelemetryScope,
+                  ),
+              ),
+          ),
+      ),
   )
 }

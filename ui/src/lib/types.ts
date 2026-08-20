@@ -304,7 +304,7 @@ export interface LlmDebugEntry {
 }
 
 export interface LlmDebugLogError {
-  code?: string
+  code?: number | string
   errno?: number
   message: string
   name: string

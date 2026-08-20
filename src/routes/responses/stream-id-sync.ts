@@ -19,6 +19,8 @@ import type {
   ResponseStreamEvent,
 } from "~/services/copilot/create-responses"
 
+import { sanitizeResponsesStreamEvent } from "~/services/copilot/create-responses"
+
 interface StreamIdTracker {
   outputItems: Map<number, string>
 }
@@ -32,6 +34,9 @@ export const fixStreamIds = (
   event: string | undefined,
   tracker: StreamIdTracker,
 ): string => {
+  if (event !== undefined && isTerminalEventName(event)) {
+    return sanitizeResponsesStreamEvent({ data, event }).data ?? data
+  }
   if (!data) return data
   const parsed = JSON.parse(data) as ResponseStreamEvent
   switch (event) {
@@ -51,6 +56,17 @@ export const fixStreamIds = (
       return handleItemId(parsed, tracker)
     }
   }
+}
+
+const TERMINAL_EVENT_NAMES = new Set([
+  "error",
+  "response.completed",
+  "response.failed",
+  "response.incomplete",
+])
+
+function isTerminalEventName(value: string): boolean {
+  return TERMINAL_EVENT_NAMES.has(value)
 }
 
 const handleOutputItemAdded = (

@@ -10,12 +10,9 @@ import {
   isModelEnabledForAccount,
 } from "~/lib/model-routing"
 import { state } from "~/lib/state"
+import { COPILOT_API_VERSION } from "~/services/copilot/copilot-contract"
 import { createCopilotTransportInit } from "~/services/copilot/transport-options"
 import { getGitHubUser } from "~/services/github/get-user"
-
-// Inline constants from copilot-client to avoid circular dependencies
-const MODELS_API_VERSION = "2026-06-01"
-const INTEGRATION_ID = "vscode-chat"
 
 // --- Account ---
 
@@ -265,20 +262,34 @@ export class TokenPool {
     const eligible = this.modelIndex.get(modelId)
     if (!eligible || eligible.length === 0) return undefined
 
-    if (!clientSessionId) {
-      return eligible[0]
-    }
+    return this.selectAccountBySession(eligible, clientSessionId)
+  }
 
-    let winner = eligible[0]
-    let winnerScore = this.rendezvousScore(clientSessionId, winner.id)
-    for (const candidate of eligible.slice(1)) {
-      const candidateScore = this.rendezvousScore(clientSessionId, candidate.id)
-      if (candidateScore > winnerScore) {
-        winner = candidate
-        winnerScore = candidateScore
-      }
-    }
-    return winner
+  /**
+   * Select a healthy account for a control-plane request.
+   *
+   * This is deterministic for identified sessions and does not retain a
+   * session-to-account mapping.
+   */
+  getHealthyAccountBySession(clientSessionId?: string): Account | undefined {
+    const healthy = this.getAllAccounts().filter((account) => account.healthy)
+    return this.selectAccountBySession(healthy, clientSessionId)
+  }
+
+  /**
+   * Select a healthy account whose raw catalog advertises the model.
+   *
+   * Policy calls deliberately ignore inference routing overrides and the
+   * derived model index because they are used to enable catalog models.
+   */
+  getAccountAdvertisingModelBySession(
+    modelId: string,
+    clientSessionId?: string,
+  ): Account | undefined {
+    const advertising = this.getAllAccounts().filter(
+      (account) => account.healthy && account.models.has(modelId),
+    )
+    return this.selectAccountBySession(advertising, clientSessionId)
   }
 
   /**
@@ -293,6 +304,31 @@ export class TokenPool {
     if (!eligible || eligible.length === 0) return undefined
 
     const alternatives = eligible.filter((a) => a.id !== exclude.id)
+    if (alternatives.length === 0) return undefined
+
+    const index = this.roundRobinIndex % alternatives.length
+    this.roundRobinIndex++
+    return alternatives[index]
+  }
+
+  /**
+   * Fail over only to an account whose raw catalog advertises the endpoint
+   * chosen for this request. Missing endpoint metadata retains the documented
+   * legacy Chat Completions assumption.
+   */
+  getNextAccountForModelEndpoint(
+    modelId: string,
+    endpoint: string,
+    exclude: Account,
+  ): Account | undefined {
+    const eligible = this.modelIndex.get(modelId)
+    if (!eligible || eligible.length === 0) return undefined
+
+    const alternatives = eligible.filter(
+      (account) =>
+        account.id !== exclude.id
+        && this.accountAdvertisesModelEndpoint(account, modelId, endpoint),
+    )
     if (alternatives.length === 0) return undefined
 
     const index = this.roundRobinIndex % alternatives.length
@@ -392,6 +428,26 @@ export class TokenPool {
     )
   }
 
+  getModelForAccount(modelId: string, accountId: number): Model | undefined {
+    return this.accounts
+      .get(accountId)
+      ?.modelsData.find((model) => model.id === modelId)
+  }
+
+  accountAdvertisesModelEndpoint(
+    account: Account,
+    modelId: string,
+    endpoint: string,
+  ): boolean {
+    const model = account.modelsData.find(
+      (candidate) => candidate.id === modelId,
+    )
+    if (!model) return false
+    return model.supported_endpoints ?
+        model.supported_endpoints.includes(endpoint)
+      : endpoint === "/chat/completions"
+  }
+
   getHealthyAccountIds(): Array<number> {
     return this.getAllAccounts()
       .filter((account) => account.healthy)
@@ -470,6 +526,25 @@ export class TokenPool {
     return createHash("sha256")
       .update(`${affinityKey}\0${accountId}`)
       .digest("hex")
+  }
+
+  private selectAccountBySession(
+    accounts: Array<Account>,
+    clientSessionId?: string,
+  ): Account | undefined {
+    const first = accounts.at(0)
+    if (!first || !clientSessionId) return first
+
+    let winner = first
+    let winnerScore = this.rendezvousScore(clientSessionId, winner.id)
+    for (const candidate of accounts.slice(1)) {
+      const candidateScore = this.rendezvousScore(clientSessionId, candidate.id)
+      if (candidateScore > winnerScore) {
+        winner = candidate
+        winnerScore = candidateScore
+      }
+    }
+    return winner
   }
 
   private getHealthyCount(): number {
@@ -639,10 +714,10 @@ export class TokenPool {
       "content-type": "application/json",
       accept: "application/json",
       Authorization: `Bearer ${copilotToken}`,
-      "Copilot-Integration-Id": INTEGRATION_ID,
+      "Copilot-Integration-Id": state.copilotIntegrationId,
       "editor-version": `vscode/${this.vsCodeVersion}`,
       "Openai-Intent": "conversation-agent",
-      "X-GitHub-Api-Version": MODELS_API_VERSION,
+      "X-GitHub-Api-Version": COPILOT_API_VERSION,
       "X-Request-Id": randomUUID(),
       "X-Interaction-Id": this.sessionId,
       "X-Client-Session-Id": this.sessionId,

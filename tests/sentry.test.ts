@@ -9,10 +9,10 @@ import {
 } from "../src/lib/model-settings"
 import { runWithRoutingAffinity } from "../src/lib/routing-affinity"
 import {
+  applySentryRequestDiagnosticsToScope,
   createSentryInitOptions,
   createSentryChatSpanOptions,
   createSentryInvokeAgentSpanOptions,
-  createSentryOutputMessages,
   createSentryToolSpanOptions,
   getSentryConversationIdFromHeaders,
   getSentryConversationIdFromPayload,
@@ -112,7 +112,7 @@ test("falls back to built-in Sentry model names", () => {
   expect(getSentryModelName("claude-opus-4.6:high")).toBe("claude-opus-4-6")
 })
 
-test("creates current Sentry AI agent span attributes", () => {
+test("creates current Sentry AI agent span attributes without request content", () => {
   process.env.SENTRY_AI_RECORD_INPUTS = "true"
 
   expect(
@@ -143,9 +143,6 @@ test("creates current Sentry AI agent span attributes", () => {
       "gen_ai.request.model": "claude-opus-4-6",
       "gen_ai.response.model": "claude-opus-4-6",
       "gen_ai.response.streaming": true,
-      "gen_ai.input.messages": JSON.stringify([
-        { role: "user", content: "quota" },
-      ]),
     },
   })
 
@@ -162,21 +159,40 @@ test("creates current Sentry AI agent span attributes", () => {
       "gen_ai.operation.name": "execute_tool",
       "gen_ai.tool.name": "web_search",
       "gen_ai.tool.type": "function",
-      "gen_ai.tool.call.arguments": JSON.stringify({ query: "quota" }),
-      "gen_ai.tool.call.result": "result",
     },
   })
 })
 
-test("creates Sentry output messages in current message format", () => {
-  expect(createSentryOutputMessages("hello")).toBe(
-    JSON.stringify([
+test("omits nested private markers from every ordinary Sentry helper", () => {
+  const privateMarkers = [
+    "sentry-prompt-private",
+    "sentry-encrypted-private",
+    "sentry-cache-private",
+    "sentry-tool-private",
+    "sentry-result-private",
+    "sentry-url-private",
+  ]
+  const chat = createSentryChatSpanOptions({
+    inputMessages: [
       {
-        role: "assistant",
-        parts: [{ type: "text", content: "hello" }],
+        content: privateMarkers[0],
+        encrypted_content: privateMarkers[1],
+        prompt_cache_key: privateMarkers[2],
       },
-    ]),
-  )
+    ],
+    model: "gpt-current",
+  })
+  const tool = createSentryToolSpanOptions({
+    toolArguments: {
+      name: privateMarkers[3],
+      url: `https://example.invalid/${privateMarkers[5]}`,
+    },
+    toolName: "lookup",
+    toolResult: privateMarkers[4],
+  })
+  const output = JSON.stringify({ chat, tool })
+
+  for (const marker of privateMarkers) expect(output).not.toContain(marker)
 })
 
 test("omits Sentry AI content attributes when recording is disabled", () => {
@@ -570,3 +586,172 @@ test("scrubs affinity headers from every Sentry send callback", () => {
   expect(serialized).toContain("[Filtered]")
   expect(serialized).toContain("visible")
 })
+
+test.each(["/v1beta/models", "/v1/models", "/models"])(
+  "templates Google model/action data in Sentry events for %s",
+  (prefix) => {
+    const model = "sentry-private-model"
+    const action = "sentry-private-action"
+    const secrets = [
+      "query-key-secret",
+      "query-api-key-secret",
+      "query-access-token-secret",
+      "query-token-secret",
+      "query-password-secret",
+      "query-credential-secret",
+    ]
+    const path = `${prefix}/${model}:${action}/?key=${secrets[0]}&api_key=${secrets[1]}&alt=sse`
+    const url = `https://gateway.example${prefix}/${model}:${action}/?access_token=${secrets[2]}&visible=1`
+    const options = createSentryInitOptions(
+      "https://public@example.ingest.sentry.io/1",
+    )
+    const makeEvent = () => ({
+      type: "transaction" as const,
+      transaction: `POST ${path}`,
+      request: { method: "POST", url },
+      extra: {
+        model,
+        requestedModel: model,
+        metadata: { action, model, safe: "visible" },
+      },
+      contexts: {
+        response: { status_code: 404 },
+        trace: {
+          trace_id: "a".repeat(32),
+          span_id: "b".repeat(16),
+          data: {
+            "http.request.method": "POST",
+            "http.route": path,
+            "url.full": url,
+            "url.path": path,
+            "url.query": `token=${secrets[3]}&alt=sse`,
+          },
+        },
+      },
+      spans: [
+        {
+          trace_id: "a".repeat(32),
+          span_id: "c".repeat(16),
+          start_timestamp: 1,
+          description: `POST ${prefix}/${model}:${action}/?password=${secrets[4]}&alt=sse`,
+          data: {
+            "http.request.method": "POST",
+            "http.response.status_code": 404,
+            "http.route": path,
+            "url.full": url,
+            "url.path": path,
+            nested: {
+              request: {
+                url: `${prefix}/${model}:${action}/?credential=${secrets[5]}&alt=sse`,
+              },
+            },
+          },
+        },
+      ],
+    })
+    const beforeSend = options.beforeSend as
+      | ((event: ReturnType<typeof makeEvent>) => ReturnType<typeof makeEvent>)
+      | undefined
+    const beforeSendTransaction = options.beforeSendTransaction as
+      | ((event: ReturnType<typeof makeEvent>) => ReturnType<typeof makeEvent>)
+      | undefined
+
+    for (const hook of [beforeSend, beforeSendTransaction]) {
+      const event = makeEvent()
+      expect(hook?.(event)).toBe(event)
+      const serialized = JSON.stringify(event)
+
+      expect(serialized).not.toContain(model)
+      expect(serialized).not.toContain(action)
+      for (const secret of secrets) expect(serialized).not.toContain(secret)
+      expect(serialized).toContain(`${prefix}/:modelAction`)
+      expect(serialized).toContain("POST")
+      expect(serialized).toContain("404")
+      expect(serialized).toContain("alt=sse")
+      expect(serialized).toContain("visible")
+    }
+  },
+)
+
+test.each([
+  { method: "GET", path: "/v1/models/model-discovery-id" },
+  { method: "POST", path: "/models/session" },
+  { method: "POST", path: "/models/session/intent" },
+] as const)(
+  "does not relabel non-Google Sentry request diagnostics for $method $path",
+  ({ method, path }) => {
+    const scope = new Sentry.Scope()
+
+    applySentryRequestDiagnosticsToScope(scope, {
+      method,
+      path,
+      url: `https://gateway.example${path}`,
+    })
+
+    expect(scope.getScopeData().transactionName).toBeUndefined()
+    expect(
+      scope.getScopeData().sdkProcessingMetadata.normalizedRequest,
+    ).toBeUndefined()
+  },
+)
+
+test.each([
+  { method: "GET", path: "/v1/models/model-discovery-id" },
+  { method: "POST", path: "/models/session" },
+] as const)(
+  "preserves non-Google Sentry event routes for $method $path",
+  ({ method, path }) => {
+    const options = createSentryInitOptions(
+      "https://public@example.ingest.sentry.io/1",
+    )
+    const event = {
+      type: "transaction" as const,
+      transaction: `${method} ${path}`,
+      request: { method, url: `https://gateway.example${path}` },
+      contexts: {
+        trace: {
+          data: { "http.request.method": method, "http.route": path },
+        },
+      },
+    }
+    const beforeSendTransaction = options.beforeSendTransaction as
+      | ((value: typeof event) => typeof event | null)
+      | undefined
+
+    beforeSendTransaction?.(event)
+
+    expect(event.transaction).toBe(`${method} ${path}`)
+    expect(event.request.url).toBe(`https://gateway.example${path}`)
+    expect(event.contexts.trace.data["http.route"]).toBe(path)
+  },
+)
+
+test.each(["/v1beta/models", "/v1/models", "/models"])(
+  "templates Google request diagnostics stored on a Sentry scope for %s",
+  (prefix) => {
+    const scope = new Sentry.Scope()
+    const model = "scope-private-model"
+    const action = "scope-private-action"
+    const path = `${prefix}/${model}:${action}/?key=scope-query-secret&alt=sse`
+    const url = `https://gateway.example${prefix}/${model}:${action}/?access_token=scope-access-secret&alt=sse`
+
+    applySentryRequestDiagnosticsToScope(scope, {
+      method: "POST",
+      path,
+      url,
+    })
+
+    const scopeData = scope.getScopeData()
+    const serialized = JSON.stringify(scopeData)
+    expect(scopeData.transactionName).toBe(`POST ${prefix}/:modelAction`)
+    expect(scopeData.sdkProcessingMetadata.normalizedRequest).toMatchObject({
+      method: "POST",
+      url: `https://gateway.example${prefix}/:modelAction?access_token=[REDACTED]&alt=sse`,
+    })
+    expect(serialized).not.toContain(model)
+    expect(serialized).not.toContain(action)
+    expect(serialized).not.toContain("scope-query-secret")
+    expect(serialized).not.toContain("scope-access-secret")
+    expect(serialized).toContain("alt=sse")
+  },
+)

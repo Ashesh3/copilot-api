@@ -2,11 +2,21 @@ import type { Context, Next } from "hono"
 
 import * as Sentry from "@sentry/bun"
 
+import type { SafeHttpErrorInspection } from "./error"
 import type { RoutingTelemetryRequestState } from "./request-session"
 
-import { getRoutingTelemetryRequestState } from "./request-session"
+import { isHTTPError, snapshotSafeHttpError } from "./error"
+import { isProxyObject } from "./plain-data-snapshot"
+import {
+  sanitizeRequestDiagnosticReference,
+  shouldOmitRequestBodyFromDiagnostics,
+} from "./request-diagnostics"
+import {
+  getRoutingTelemetryRequestState,
+  suppressRequestModelDiagnostics,
+} from "./request-session"
 import { recordRoutingRequest } from "./routing-telemetry"
-import { getSentryModelName } from "./sentry"
+import { applySentryRequestDiagnostics, getSentryModelName } from "./sentry"
 import { state } from "./state"
 import { recordUsage } from "./usage-tracker"
 
@@ -25,6 +35,7 @@ export interface RequestContext {
   reasoningEffort?: string
   accountId?: number
   nonDefaultBehaviors?: Array<RequestBehavior>
+  suppressModelDiagnostics?: boolean
 }
 
 type RequestBehaviorData = Record<
@@ -48,6 +59,7 @@ export type LogicalRequestTerminalStatus =
 export interface LogicalRequestTerminalOptions {
   accountId?: number
   error?: unknown
+  errorInspection?: SafeHttpErrorInspection
   status: number
   terminalStatus: LogicalRequestTerminalStatus
 }
@@ -73,6 +85,9 @@ interface LogicalRequestStartOptions {
   transport: string
   turnId: string
 }
+
+const GOOGLE_MODEL_DIAGNOSTICS_OMITTED =
+  "Applied to Google compatibility request"
 
 const REQUEST_CONTEXT_KEY = "requestContext"
 
@@ -150,8 +165,31 @@ function getLogicalStatusColor(status: LogicalRequestTerminalStatus): string {
   }
 }
 
+function inspectionTerminalStatus(
+  status: number,
+): Extract<LogicalRequestTerminalStatus, "ERROR" | "REJECTED"> {
+  return status < 500 ? "REJECTED" : "ERROR"
+}
+
 function getErrorMessage(error: unknown): string | undefined {
-  if (error instanceof Error) return error.message
+  if (isHTTPError(error)) return snapshotSafeHttpError(error).safeMessage
+  if (isProxyObject(error)) return undefined
+  try {
+    if (!(error instanceof Error)) return primitiveErrorMessage(error)
+  } catch {
+    return undefined
+  }
+  const descriptor = Object.getOwnPropertyDescriptor(error, "message")
+  return (
+      descriptor
+        && "value" in descriptor
+        && typeof descriptor.value === "string"
+    ) ?
+      descriptor.value
+    : undefined
+}
+
+function primitiveErrorMessage(error: unknown): string | undefined {
   if (error === undefined) return undefined
   if (typeof error === "string") return error
   if (
@@ -225,17 +263,23 @@ export function startLogicalRequestLog(
 
       const duration = ((Date.now() - startedAt) / 1000).toFixed(1)
       const ctx = { ...requestContext, accountId: terminalOptions.accountId }
-      const terminalColor = getLogicalStatusColor(
-        terminalOptions.terminalStatus,
-      )
+      const status =
+        terminalOptions.errorInspection?.status ?? terminalOptions.status
+      const terminalStatus =
+        terminalOptions.errorInspection ?
+          inspectionTerminalStatus(status)
+        : terminalOptions.terminalStatus
+      const terminalColor = getLogicalStatusColor(terminalStatus)
       const lines = [
         `${colors.dim}${"─".repeat(60)}${colors.reset}`,
-        `${terminalColor}${colors.bold}${terminalOptions.terminalStatus}${colors.reset} ${colors.bold}${options.method}${colors.reset} ${options.path} ${getStatusColor(terminalOptions.status)}${terminalOptions.status}${colors.reset} ${colors.cyan}${duration}s${colors.reset} ${colors.dim}[${options.transport} · ${options.turnId}]${colors.reset}`,
+        `${terminalColor}${colors.bold}${terminalStatus}${colors.reset} ${colors.bold}${options.method}${colors.reset} ${options.path} ${getStatusColor(status)}${status}${colors.reset} ${colors.cyan}${duration}s${colors.reset} ${colors.dim}[${options.transport} · ${options.turnId}]${colors.reset}`,
         buildModelLine(ctx),
       ]
       const terminalModificationsLine = buildModificationsLine(ctx)
       if (terminalModificationsLine) lines.push(terminalModificationsLine)
-      const errorMessage = getErrorMessage(terminalOptions.error)
+      const errorMessage =
+        terminalOptions.errorInspection?.safeMessage
+        ?? getErrorMessage(terminalOptions.error)
       if (errorMessage) {
         lines.push(`  ${colors.red}${errorMessage}${colors.reset}`)
       }
@@ -243,7 +287,7 @@ export function startLogicalRequestLog(
       console.info(lines.join("\n"))
 
       Sentry.logger.info(
-        `${terminalOptions.terminalStatus} ${options.method} ${options.path} ${terminalOptions.status} ${duration}s | ${buildPlainModelLine(ctx)} | ${options.transport} | ${options.turnId}`,
+        `${terminalStatus} ${options.method} ${options.path} ${status} ${duration}s | ${buildPlainModelLine(ctx)} | ${options.transport} | ${options.turnId}`,
         {
           accountId: terminalOptions.accountId,
           duration: Number(duration),
@@ -257,17 +301,13 @@ export function startLogicalRequestLog(
             ctx.requestedModel ?
               getSentryModelName(ctx.requestedModel)
             : undefined,
-          status: terminalOptions.status,
-          terminalStatus: terminalOptions.terminalStatus,
+          status,
+          terminalStatus,
           transport: options.transport,
           turnId: options.turnId,
         },
       )
-      recordCompletedRoutingRequest(
-        ctx,
-        options.telemetryState,
-        terminalOptions.status,
-      )
+      recordCompletedRoutingRequest(ctx, options.telemetryState, status)
       return true
     },
     isFinalized(): boolean {
@@ -305,7 +345,8 @@ function recordCompletedRoutingRequest(
 }
 
 /**
- * Sanitize request body by omitting large message/prompt arrays
+ * Reduce an ordinary request diagnostic to bounded structural metadata.
+ * Raw payload capture belongs only to the administrator LLM Debug facility.
  */
 export function sanitizeRequestBodyForLog(
   parsed: Record<string, unknown>,
@@ -335,14 +376,23 @@ function sanitizeRequestBodyValue(
   if (context === "metadata" && key === "user_id") {
     return sanitizeClaudeUserMetadata(value)
   }
-  if (key === "messages" || key === "prompt") {
+  if (isPrivatePayloadField(key)) {
     const itemCount = Array.isArray(value) ? value.length : 1
     return `[${itemCount} items omitted]`
   }
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+  if (Array.isArray(value)) {
+    return `[${value.length} items omitted]`
+  }
+  if (typeof value !== "object" || value === null) {
     return value
   }
   return sanitizeRequestBodyForLog(value as Record<string, unknown>, "other")
+}
+
+function isPrivatePayloadField(key: string): boolean {
+  return /^(?:input|instructions|messages|prompt|tools?|attachments?|content|output|reasoning|thinking|encrypted_content|signature|reasoning_opaque|prompt_cache_key|prompt_cache_options|prompt_cache_retention|safety_identifier|user|metadata|client_metadata|url|uri|image_url|file_data|data)$/i.test(
+    key,
+  )
 }
 
 function isSensitiveBodyKey(key: string): boolean {
@@ -445,7 +495,8 @@ function sanitizeMetadata(value: unknown): unknown {
  */
 async function logRawRequest(c: Context): Promise<void> {
   const method = c.req.method
-  const url = redactRequestUrl(c.req.url)
+  const url = requestDiagnosticUrl(c)
+  const omitBody = shouldOmitRequestBodyFromDiagnostics(c.req.path)
   const headers = Object.fromEntries(c.req.raw.headers.entries())
 
   const lines: Array<string> = []
@@ -462,7 +513,7 @@ async function logRawRequest(c: Context): Promise<void> {
   }
 
   // Try to get body info without consuming it
-  if (method !== "GET" && method !== "HEAD") {
+  if (!omitBody && method !== "GET" && method !== "HEAD") {
     try {
       const clonedRequest = c.req.raw.clone()
       const body = await clonedRequest.text()
@@ -490,17 +541,40 @@ async function logRawRequest(c: Context): Promise<void> {
   console.log(lines.join("\n"))
 }
 
-function redactRequestUrl(value: string): string {
-  try {
-    const url = new URL(value)
-    for (const key of url.searchParams.keys()) {
-      if (/key|token|secret|password|credential/i.test(key)) {
-        url.searchParams.set(key, "[REDACTED]")
-      }
-    }
-    return url.toString()
-  } catch {
-    return value
+function requestDiagnosticPath(c: Context): string {
+  const url = new URL(c.req.url)
+  return sanitizeRequestDiagnosticReference(
+    c.req.method,
+    `${url.pathname}${url.search}`,
+  )
+}
+
+function requestDiagnosticUrl(c: Context): string {
+  return sanitizeRequestDiagnosticReference(c.req.method, c.req.url)
+}
+
+function isGoogleDiagnosticPath(method: string, path: string): boolean {
+  if (method.toUpperCase() !== "POST") return false
+  return /\/(?:v1beta\/models|v1\/models|models)\/:modelAction(?:$|[?#])/i.test(
+    path,
+  )
+}
+
+function diagnosticRequestContext(
+  method: string,
+  path: string,
+  ctx: RequestContext | undefined,
+): RequestContext | undefined {
+  if (!ctx || !isGoogleDiagnosticPath(method, path)) return ctx
+  return {
+    ...ctx,
+    model: undefined,
+    nonDefaultBehaviors: ctx.nonDefaultBehaviors?.map((behavior) => ({
+      kind: behavior.kind,
+      message: GOOGLE_MODEL_DIAGNOSTICS_OMITTED,
+      sentryLevel: behavior.sentryLevel,
+    })),
+    requestedModel: undefined,
   }
 }
 
@@ -514,6 +588,9 @@ export function setRequestContext(
   const existing = c.get(REQUEST_CONTEXT_KEY) as RequestContext | undefined
   if (existing) {
     c.set(REQUEST_CONTEXT_KEY, { ...existing, ...ctx })
+    if (ctx.suppressModelDiagnostics === true) {
+      suppressRequestModelDiagnostics()
+    }
   }
 }
 
@@ -532,7 +609,15 @@ export function recordNonDefaultBehavior(
     nonDefaultBehaviors,
   } as RequestContext)
 
-  reportNonDefaultBehavior(behavior)
+  reportNonDefaultBehavior(
+    existing?.suppressModelDiagnostics ?
+      {
+        kind: behavior.kind,
+        message: GOOGLE_MODEL_DIAGNOSTICS_OMITTED,
+        sentryLevel: behavior.sentryLevel,
+      }
+    : behavior,
+  )
 }
 
 export function reportNonDefaultBehavior(behavior: RequestBehavior): void {
@@ -768,6 +853,12 @@ function sendRequestLogToSentry(opts: {
  * Custom request logger middleware
  */
 export async function requestLogger(c: Context, next: Next): Promise<void> {
+  applySentryRequestDiagnostics({
+    method: c.req.method,
+    path: c.req.path,
+    url: c.req.url,
+  })
+
   // Log raw request in debug mode
   if (state.debug) {
     await logRawRequest(c)
@@ -775,9 +866,7 @@ export async function requestLogger(c: Context, next: Next): Promise<void> {
 
   const startTime = Date.now()
   const method = c.req.method
-  const path =
-    c.req.path
-    + (c.req.raw.url.includes("?") ? "?" + c.req.raw.url.split("?")[1] : "")
+  const path = requestDiagnosticPath(c)
 
   // Initialize request context
   const contentLength = c.req.header("content-length")
@@ -796,6 +885,7 @@ export async function requestLogger(c: Context, next: Next): Promise<void> {
   const duration = ((Date.now() - startTime) / 1000).toFixed(1)
   const status = c.res.status
   const statusColor = getStatusColor(status)
+  const diagnosticContext = diagnosticRequestContext(method, path, ctx)
 
   recordCompletedRoutingRequest(ctx, getRoutingTelemetryRequestState(), status)
 
@@ -813,15 +903,15 @@ export async function requestLogger(c: Context, next: Next): Promise<void> {
   )
 
   // Model routing line
-  if (ctx?.model) {
-    lines.push(buildModelLine(ctx))
+  if (diagnosticContext?.model) {
+    lines.push(buildModelLine(diagnosticContext))
   }
 
   // Applied modifications line
-  if (ctx) {
-    const modsLine = buildModificationsLine(ctx)
+  if (diagnosticContext) {
+    const modsLine = buildModificationsLine(diagnosticContext)
     if (modsLine) lines.push(modsLine)
-    lines.push(...buildNonDefaultBehaviorLines(ctx))
+    lines.push(...buildNonDefaultBehaviorLines(diagnosticContext))
   }
 
   // Timestamp
@@ -836,7 +926,13 @@ export async function requestLogger(c: Context, next: Next): Promise<void> {
   console.log(lines.join("\n"))
 
   // Send enriched log to Sentry
-  sendRequestLogToSentry({ method, path, status, duration, ctx })
+  sendRequestLogToSentry({
+    method,
+    path,
+    status,
+    duration,
+    ctx: diagnosticContext,
+  })
 }
 
 /**

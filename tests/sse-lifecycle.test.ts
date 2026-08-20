@@ -3,8 +3,11 @@ import { events } from "fetch-event-stream"
 
 import {
   getSseHeartbeatCount,
+  raceSsePreflush,
   resetSseHeartbeatCountForTest,
+  setSsePreflushDeadlineForTest,
   SSE_HEARTBEAT_COMMENT,
+  unwrapSsePreflushSettlement,
   withHeartbeatWhilePending,
   withSseHeartbeat,
   type SseHeartbeatSink,
@@ -345,3 +348,100 @@ describe("withHeartbeatWhilePending", () => {
     expect(outcome).toBe("aborted")
   })
 })
+
+describe("raceSsePreflush", () => {
+  test("returns an early value without an unhandled rejection", async () => {
+    setSsePreflushDeadlineForTest(100)
+    expect(await raceSsePreflush(Promise.resolve("early"))).toEqual({
+      kind: "settled",
+      value: "early",
+    })
+  })
+
+  test("throws an early rejection without an unhandled rejection", async () => {
+    setSsePreflushDeadlineForTest(100)
+    const boom = new Error("early failure")
+    const unhandled = await captureUnhandled(async () => {
+      let caught: unknown
+      try {
+        await raceSsePreflush(Promise.reject(boom))
+      } catch (error) {
+        caught = error
+      }
+      expect(caught).toBe(boom)
+    })
+    expect(unhandled).toEqual([])
+  })
+
+  test("returns a late value after the preflush timer wins", async () => {
+    setSsePreflushDeadlineForTest(1)
+    let resolvePending: ((value: string) => void) | undefined
+    const original = new Promise<string>((resolve) => {
+      resolvePending = resolve
+    })
+    const result = await raceSsePreflush(original)
+    expect(result.kind).toBe("pending")
+    if (result.kind !== "pending") throw new Error("Expected pending result")
+    resolvePending?.("late")
+    expect(unwrapSsePreflushSettlement(await result.pending)).toBe("late")
+  })
+
+  test("does not leak a late rejection when the timed-out handle is abandoned", async () => {
+    setSsePreflushDeadlineForTest(1)
+    let rejectPending: ((error: unknown) => void) | undefined
+    const original = new Promise<string>((_resolve, reject) => {
+      rejectPending = reject
+    })
+    const result = await raceSsePreflush(original)
+    expect(result.kind).toBe("pending")
+
+    const unhandled = await captureUnhandled(() => {
+      rejectPending?.(new Error("abandoned late failure"))
+      return Promise.resolve()
+    })
+    expect(unhandled).toEqual([])
+  })
+
+  test("returns an observed late-rejection promise without an unhandled rejection", async () => {
+    setSsePreflushDeadlineForTest(1)
+    let rejectPending: ((error: unknown) => void) | undefined
+    const original = new Promise<string>((_resolve, reject) => {
+      rejectPending = reject
+    })
+    const result = await raceSsePreflush(original)
+    expect(result.kind).toBe("pending")
+    if (result.kind !== "pending") throw new Error("Expected pending result")
+    expect(result.pending).not.toBe(original)
+
+    const boom = new Error("late failure")
+    const unhandled = await captureUnhandled(async () => {
+      rejectPending?.(boom)
+      let caught: unknown
+      try {
+        unwrapSsePreflushSettlement(await result.pending)
+      } catch (error) {
+        caught = error
+      }
+      expect(caught).toBe(boom)
+    })
+    expect(unhandled).toEqual([])
+  })
+})
+
+async function captureUnhandled(
+  action: () => Promise<void>,
+): Promise<Array<unknown>> {
+  const unhandled: Array<unknown> = []
+  const listener = (error: unknown): void => {
+    unhandled.push(error)
+  }
+  process.on("unhandledRejection", listener)
+  try {
+    await action()
+    await sleep(INTERVAL_MS * 2)
+    return unhandled
+  } finally {
+    process.off("unhandledRejection", listener)
+    setSsePreflushDeadlineForTest()
+  }
+}

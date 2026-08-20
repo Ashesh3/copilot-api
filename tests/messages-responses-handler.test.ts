@@ -178,6 +178,35 @@ beforeEach(() => {
   setModelSettingsForTest([])
 })
 
+test("rejects unsigned thinking before sending a Responses payload", async () => {
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-4o",
+      messages: [
+        {
+          role: "assistant",
+          content: [{ type: "thinking", thinking: "unsigned history" }],
+        },
+        { role: "user", content: "continue" },
+      ],
+      max_tokens: 32,
+      thinking: { type: "enabled", budget_tokens: 1024 },
+    }),
+  })
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toMatchObject({
+    type: "error",
+    error: {
+      type: "invalid_request_error",
+      message: "The Copilot Messages request was rejected.",
+    },
+  })
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
 test("preserves output_config.format on the Anthropic responses path", async () => {
   const response = await server.request("/v1/messages", {
     method: "POST",
@@ -370,7 +399,7 @@ test("clamps redirected Anthropic Responses probes to Copilot's minimum output t
   expect(lastResponsesPayload?.max_output_tokens).toBe(16)
 })
 
-test("does not send configurable effort for implicit-default models on the responses path", async () => {
+test("preserves explicit effort for implicit-default models on the responses path", async () => {
   setModelSettingsForTest([
     {
       model: "claude-implicit-medium",
@@ -397,6 +426,6 @@ test("does not send configurable effort for implicit-default models on the respo
 
   expect(response.status).toBe(200)
   expect(lastResponsesPayload?.model).toBe("claude-implicit-medium")
-  expect(lastResponsesPayload?.reasoning?.effort).toBeUndefined()
+  expect(lastResponsesPayload?.reasoning?.effort).toBe("medium")
   expect(lastResponsesPayload?.reasoning?.summary).toBe("auto")
 })

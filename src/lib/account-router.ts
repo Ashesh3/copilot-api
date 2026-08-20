@@ -1,4 +1,5 @@
 import consola from "consola"
+import { AsyncLocalStorage } from "node:async_hooks"
 
 import type { RoutingAffinitySource } from "~/lib/routing-affinity"
 import type { Account } from "~/lib/token-pool"
@@ -6,13 +7,16 @@ import type {
   CopilotHeaderOptions,
   CopilotTelemetryOptions,
 } from "~/services/copilot/copilot-client"
+import type { Model } from "~/services/copilot/get-models"
 import type { RetryBudget } from "~/services/copilot/transport-retry"
 
+import { sessionTokenMatchesAccount } from "~/lib/copilot-session-token"
 import { HTTPError, LocalHTTPError } from "~/lib/error"
 import {
   getClientSessionId,
   getLastUsedRoutedAccountId,
   setLastUsedRoutedAccountId,
+  shouldSuppressRequestModelDiagnostics,
 } from "~/lib/request-session"
 import { getRoutingAffinity } from "~/lib/routing-affinity"
 import {
@@ -31,20 +35,96 @@ import {
 // --- Constants ---
 
 const FAILOVER_STATUSES = new Set([401, 403, 429])
+const pinnedRoutedAccountStorage = new AsyncLocalStorage<number | undefined>()
+const selectedRoutedAccountStorage = new AsyncLocalStorage<
+  RoutedAccountPin | undefined
+>()
+
+function routedModelDiagnostic(modelId: string): string {
+  return shouldSuppressRequestModelDiagnostics() ? "omitted" : modelId
+}
+
+function routedModelDiagnosticSuffix(modelId: string): string {
+  return shouldSuppressRequestModelDiagnostics() ? "" : (
+      ` for model "${modelId}"`
+    )
+}
+
+export interface RoutedAccountPin {
+  accountId?: number
+}
+
+export function runWithPinnedRoutedAccount<T>(
+  accountId: number | undefined,
+  callback: () => T,
+): T {
+  return pinnedRoutedAccountStorage.run(accountId, callback)
+}
+
+function createEndpointUnavailableError(): LocalHTTPError {
+  const clientBody = {
+    error: {
+      code: "endpoint_translation_unsupported",
+      message:
+        "The selected Copilot account no longer advertises the chosen endpoint.",
+      type: "invalid_request_error",
+    },
+  }
+  const response = Response.json(clientBody, { status: 400 })
+  return new LocalHTTPError(clientBody.error.message, response, clientBody)
+}
+
+export interface RoutedModelSelection {
+  accountPin?: RoutedAccountPin
+  model?: Model
+}
+
+/**
+ * Select the account before endpoint routing, then expose that account's raw
+ * model row as the endpoint authority. The returned mutable pin keeps the
+ * later transport dispatch coherent and follows an eligible unidentified
+ * failover without retaining any session-to-account mapping.
+ */
+export function selectRoutedModel(modelId: string): RoutedModelSelection {
+  const fallbackModel = state.models?.data.find((model) => model.id === modelId)
+  if (!state.isMultiToken) return { model: fallbackModel }
+
+  const account = selectRoutedAccount({
+    affinityKey: getEffectiveAffinityKey(),
+    modelId,
+    routedAccountPin: undefined,
+  })
+  if (!account) return { model: fallbackModel }
+
+  return {
+    accountPin: { accountId: account.id },
+    model: tokenPool.getModelForAccount(modelId, account.id) ?? fallbackModel,
+  }
+}
+
+export function runWithRoutedModelSelection<T>(
+  selection: RoutedModelSelection,
+  callback: () => T,
+): T {
+  return selectedRoutedAccountStorage.run(selection.accountPin, callback)
+}
 
 interface AccountFetchOptions {
   account: Account
+  enforceEndpointAuthority?: boolean
   headerOptions: CopilotHeaderOptions | undefined
   init: RequestInit | undefined
   path: string
   maxHttpRetryDelaySeconds: number | undefined
   modelId: string
+  requireSessionTokenContinuity?: boolean
   retryBudget: RetryBudget
   reason: UpstreamSendReason
 }
 
 interface RoutedFetchContext {
   affinityKey?: string
+  enforceEndpointAuthority: boolean
   headerOptions: CopilotHeaderOptions | undefined
   init: RequestInit | undefined
   modelId: string
@@ -52,11 +132,35 @@ interface RoutedFetchContext {
   path: string
   reason: UpstreamSendReason
   recordSelection: boolean
+  sessionTokenPinsAccount: boolean
   retryBudget: RetryBudget
 }
 
 function getEffectiveAffinityKey(): string | undefined {
   return getRoutingAffinity()?.key ?? getClientSessionId()
+}
+
+function selectRoutedAccount(options: {
+  affinityKey: string | undefined
+  modelId: string
+  routedAccountPin: RoutedAccountPin | undefined
+}): Account | undefined {
+  const { affinityKey, modelId, routedAccountPin } = options
+  if (routedAccountPin?.accountId !== undefined) {
+    return tokenPool.getEligibleAccountForModel(
+      modelId,
+      routedAccountPin.accountId,
+    )
+  }
+  const pinnedAccountId = pinnedRoutedAccountStorage.getStore()
+  if (pinnedAccountId !== undefined) {
+    return tokenPool.getEligibleAccountForModel(modelId, pinnedAccountId)
+  }
+  const selectedAccountId = selectedRoutedAccountStorage.getStore()?.accountId
+  if (selectedAccountId !== undefined) {
+    return tokenPool.getEligibleAccountForModel(modelId, selectedAccountId)
+  }
+  return tokenPool.getAccountForModelBySession(modelId, affinityKey)
 }
 
 type RoutedFetchResult = {
@@ -128,6 +232,60 @@ function mergeHeaders(
   return merged
 }
 
+function withoutCopilotSessionToken(
+  headerOptions: CopilotHeaderOptions | undefined,
+): CopilotHeaderOptions | undefined {
+  if (!headerOptions?.copilotSessionToken) return headerOptions
+  const { copilotSessionToken: _ignored, ...rest } = headerOptions
+  return rest
+}
+
+function createSessionAccountContinuityError(): LocalHTTPError {
+  const clientBody = {
+    error: {
+      code: "session_account_continuity_error",
+      message: "The Copilot session token does not match the selected account.",
+      type: "session_affinity_error",
+    },
+  }
+  return new LocalHTTPError(
+    clientBody.error.message,
+    Response.json(clientBody, { status: 409 }),
+    clientBody,
+  )
+}
+
+function bindSessionTokenToAccount(options: {
+  accountToken: string | undefined
+  headerOptions: CopilotHeaderOptions | undefined
+  requireContinuity?: boolean
+}): {
+  headerOptions: CopilotHeaderOptions | undefined
+  sessionTokenPinsAccount: boolean
+} {
+  const sessionToken = options.headerOptions?.copilotSessionToken
+  if (!sessionToken) {
+    return {
+      headerOptions: options.headerOptions,
+      sessionTokenPinsAccount: false,
+    }
+  }
+  const matches = sessionTokenMatchesAccount({
+    accountToken: options.accountToken,
+    sessionToken,
+  })
+  if (!matches && options.requireContinuity) {
+    throw createSessionAccountContinuityError()
+  }
+  return {
+    headerOptions:
+      matches ?
+        options.headerOptions
+      : withoutCopilotSessionToken(options.headerOptions),
+    sessionTokenPinsAccount: matches,
+  }
+}
+
 function createNoEnabledAccountResponse(modelId: string): Response {
   return new Response(
     JSON.stringify({
@@ -155,8 +313,19 @@ async function fetchWithAccount(
     reason,
     retryBudget,
   } = options
+  if (
+    options.enforceEndpointAuthority
+    && !tokenPool.accountAdvertisesModelEndpoint(account, options.modelId, path)
+  ) {
+    throw createEndpointUnavailableError()
+  }
+  const boundHeaderOptions = bindSessionTokenToAccount({
+    accountToken: account.copilotToken,
+    headerOptions,
+    requireContinuity: options.requireSessionTokenContinuity,
+  }).headerOptions
   const headers = copilotHeaders({
-    ...headerOptions,
+    ...boundHeaderOptions,
     copilotToken: account.copilotToken,
   })
   const baseUrl = tokenPool.getBaseUrl(account)
@@ -241,6 +410,17 @@ async function reinitializeAndRetryAccount(
     throw createAccountReinitializationFailedError(account)
   }
 
+  if (
+    options.enforceEndpointAuthority
+    && !tokenPool.accountAdvertisesModelEndpoint(
+      account,
+      options.modelId,
+      options.path,
+    )
+  ) {
+    throw createEndpointUnavailableError()
+  }
+
   // The resend is an extra upstream send and is charged like any other.
   if (!consumeExtraSend(retryBudget)) {
     consola.warn(
@@ -259,8 +439,12 @@ async function fetchWithFallbackAccount(
     context
   const account = tokenPool.getFirstHealthyAccount()
   if (account) {
+    const binding = bindSessionTokenToAccount({
+      accountToken: account.copilotToken,
+      headerOptions,
+    })
     consola.warn(
-      `Using Account #${account.id} as fallback for model "${context.modelId}"`,
+      `Using Account #${account.id} as fallback${routedModelDiagnosticSuffix(context.modelId)}`,
     )
     setLastUsedRoutedAccountId(account.id)
     if (context.recordSelection) {
@@ -272,12 +456,20 @@ async function fetchWithFallbackAccount(
         model: context.modelId,
       })
     }
-    return await fetchWithRoutedAccount(context, account, context.reason)
+    return await fetchWithRoutedAccount(
+      { ...context, ...binding, enforceEndpointAuthority: false },
+      account,
+      context.reason,
+    )
   }
 
+  const fallbackHeaderOptions = bindSessionTokenToAccount({
+    accountToken: state.copilotToken,
+    headerOptions,
+  }).headerOptions
   const fallbackHeaders =
     state.copilotToken ?
-      mergeHeaders(copilotHeaders(headerOptions), init?.headers)
+      mergeHeaders(copilotHeaders(fallbackHeaderOptions), init?.headers)
     : init?.headers
 
   const response = await copilotFetch(
@@ -312,7 +504,11 @@ async function failoverToAccount(
     path,
     retryBudget,
   } = context
-  const next = tokenPool.getNextAccountForModel(modelId, currentAccount)
+  const next = tokenPool.getNextAccountForModelEndpoint(
+    modelId,
+    path,
+    currentAccount,
+  )
   if (!next) {
     return undefined
   }
@@ -332,6 +528,7 @@ async function failoverToAccount(
 
   const response = await fetchWithAccount({
     account: next,
+    enforceEndpointAuthority: context.enforceEndpointAuthority,
     headerOptions,
     init,
     maxHttpRetryDelaySeconds,
@@ -353,6 +550,7 @@ async function fetchWithRoutedAccount(
 
   let response = await fetchWithAccount({
     account,
+    enforceEndpointAuthority: context.enforceEndpointAuthority,
     headerOptions,
     init,
     maxHttpRetryDelaySeconds,
@@ -366,6 +564,7 @@ async function fetchWithRoutedAccount(
   if (response.status === 401) {
     response = await reinitializeAndRetryAccount({
       account,
+      enforceEndpointAuthority: context.enforceEndpointAuthority,
       headerOptions,
       init,
       maxHttpRetryDelaySeconds,
@@ -384,6 +583,9 @@ async function fetchWithRoutedAccount(
     throw createSessionAccountRejectedError(account, reinitialized)
   }
   if (context.affinityKey) {
+    return { response, account }
+  }
+  if (context.sessionTokenPinsAccount) {
     return { response, account }
   }
 
@@ -417,6 +619,164 @@ export interface RoutedFetchOptions {
   maxHttpRetryDelaySeconds?: number
   reason?: UpstreamSendReason
   recordSelection?: boolean
+  routedAccountPin?: RoutedAccountPin
+  retryBudget?: RetryBudget
+}
+
+export interface RoutedControlPlaneFetchOptions {
+  body?: Record<string, unknown>
+  copilotSessionToken?: string
+  modelId?: string
+  path: string
+  signal?: AbortSignal
+}
+
+export interface RoutedControlPlaneFetchResult {
+  account: Account | undefined
+  localError?: LocalHTTPError
+  response: Response
+}
+
+async function singleTokenRoutedFetch(options: {
+  context: RoutedFetchContext
+  modelId: string
+  shouldRecordSelection: boolean
+}): Promise<RoutedFetchResult> {
+  const { context, modelId, shouldRecordSelection } = options
+  if (shouldRecordSelection) {
+    recordRoutingSelection({
+      eligibleAccountIds: [],
+      mode: "single",
+      model: modelId,
+    })
+  }
+  const response = await copilotFetch(
+    context.path,
+    { ...context.init, headers: copilotHeaders(context.headerOptions) },
+    {
+      maxHttpRetryDelaySeconds: context.maxHttpRetryDelaySeconds,
+      retryBudget: context.retryBudget,
+      telemetry: copilotTelemetry({
+        model: modelId,
+        path: context.path,
+        reason: context.reason,
+      }),
+    },
+  )
+  return { response, account: undefined }
+}
+
+function createNoControlPlaneAccountResult(): RoutedControlPlaneFetchResult {
+  const clientBody = {
+    error: {
+      code: "account_unavailable",
+      message: "No healthy Copilot account is available for this request.",
+      type: "account_unavailable",
+    },
+  }
+  const response = Response.json(clientBody, { status: 503 })
+  return {
+    account: undefined,
+    localError: new LocalHTTPError(
+      clientBody.error.message,
+      response,
+      clientBody,
+    ),
+    response,
+  }
+}
+
+function controlPlaneRequestInit(
+  options: RoutedControlPlaneFetchOptions,
+  headers: Record<string, string>,
+): RequestInit {
+  return {
+    method: "POST",
+    headers,
+    ...(options.body === undefined ?
+      {}
+    : { body: JSON.stringify(options.body) }),
+    ...(options.signal ? { signal: options.signal } : {}),
+  }
+}
+
+/**
+ * Perform one account-aware Copilot control-plane call.
+ *
+ * Selection is deterministic for identified sessions and remains read-only:
+ * no session token or affinity mapping is retained. Policy calls select from
+ * raw model catalog membership, while session/Auto/intent calls select from
+ * all healthy accounts. A selected account is never replaced by failover.
+ */
+export async function routedControlPlaneFetch(
+  options: RoutedControlPlaneFetchOptions,
+): Promise<RoutedControlPlaneFetchResult> {
+  const affinityKey = getEffectiveAffinityKey()
+  const retryBudget = createRetryBudget()
+  const telemetryModel = options.modelId ?? "control-plane"
+  setLastUsedRoutedAccountId(undefined)
+
+  if (!state.isMultiToken) {
+    const response = await copilotFetch(
+      options.path,
+      controlPlaneRequestInit(
+        options,
+        copilotHeaders({
+          copilotSessionToken: options.copilotSessionToken,
+        }),
+      ),
+      {
+        retryBudget,
+        telemetry: copilotTelemetry({
+          model: telemetryModel,
+          path: options.path,
+          reason: "initial",
+        }),
+      },
+    )
+    return { response, account: undefined }
+  }
+
+  const account =
+    options.modelId ?
+      tokenPool.getAccountAdvertisingModelBySession(
+        options.modelId,
+        affinityKey,
+      )
+    : tokenPool.getHealthyAccountBySession(affinityKey)
+  if (!account) {
+    return createNoControlPlaneAccountResult()
+  }
+
+  setLastUsedRoutedAccountId(account.id)
+  const accountOptions: AccountFetchOptions = {
+    account,
+    enforceEndpointAuthority: false,
+    headerOptions: {
+      copilotSessionToken: options.copilotSessionToken,
+    },
+    init: controlPlaneRequestInit(options, {}),
+    maxHttpRetryDelaySeconds: undefined,
+    modelId: telemetryModel,
+    path: options.path,
+    reason: "initial",
+    requireSessionTokenContinuity: Boolean(options.copilotSessionToken),
+    retryBudget,
+  }
+  let response: Response
+  try {
+    response = await fetchWithAccount(accountOptions)
+    if (response.status === 401) {
+      response = await reinitializeAndRetryAccount(accountOptions)
+    }
+  } catch (error) {
+    if (error instanceof LocalHTTPError) {
+      return { account, localError: error, response: error.response }
+    }
+    throw error
+  }
+
+  return { response, account }
 }
 
 /**
@@ -436,6 +796,8 @@ export interface RoutedFetchOptions {
  * Callers should NOT pre-build headers — this function handles header
  * construction in all modes to avoid double-advancing the round-robin.
  */
+// Keep selection, failover, and the shared logical-call budget together.
+// eslint-disable-next-line complexity
 export async function routedFetch(
   path: string,
   init: RequestInit | undefined,
@@ -447,13 +809,20 @@ export async function routedFetch(
     maxHttpRetryDelaySeconds,
     reason = "initial",
     recordSelection: shouldRecordSelection = true,
+    routedAccountPin,
+    retryBudget = createRetryBudget(),
   } = options
-  // Two extra sends for the whole routed call (a three-send ceiling) so sends
-  // cannot multiply across the initial account, a 401 refresh-and-retry, and a
-  // 401/403/429 failover.
-  const retryBudget = createRetryBudget()
+  const asyncPinnedAccountId = pinnedRoutedAccountStorage.getStore()
+  const selectedAccountPin = selectedRoutedAccountStorage.getStore()
   const context: RoutedFetchContext = {
-    affinityKey: getEffectiveAffinityKey(),
+    affinityKey:
+      (
+        routedAccountPin?.accountId !== undefined
+        || asyncPinnedAccountId !== undefined
+      ) ?
+        `pinned-account:${routedAccountPin?.accountId ?? asyncPinnedAccountId}`
+      : getEffectiveAffinityKey(),
+    enforceEndpointAuthority: true,
     headerOptions,
     init,
     modelId,
@@ -461,37 +830,25 @@ export async function routedFetch(
     path,
     reason,
     recordSelection: shouldRecordSelection,
+    sessionTokenPinsAccount: false,
     retryBudget,
   }
   setLastUsedRoutedAccountId(undefined)
 
   if (!state.isMultiToken) {
-    const headers = copilotHeaders(headerOptions)
-    if (shouldRecordSelection) {
-      recordRoutingSelection({
-        eligibleAccountIds: [],
-        mode: "single",
-        model: modelId,
-      })
-    }
-    const response = await copilotFetch(
-      path,
-      { ...init, headers },
-      {
-        maxHttpRetryDelaySeconds,
-        retryBudget,
-        telemetry: copilotTelemetry({
-          model: modelId,
-          path,
-          reason,
-        }),
-      },
-    )
-    return { response, account: undefined }
+    return await singleTokenRoutedFetch({
+      context,
+      modelId,
+      shouldRecordSelection,
+    })
   }
 
   const affinityKey = getEffectiveAffinityKey()
-  const account = tokenPool.getAccountForModelBySession(modelId, affinityKey)
+  const account = selectRoutedAccount({
+    affinityKey,
+    modelId,
+    routedAccountPin,
+  })
   if (!account) {
     if (tokenPool.hasKnownModel(modelId)) {
       const response = createNoEnabledAccountResponse(modelId)
@@ -499,14 +856,20 @@ export async function routedFetch(
     }
 
     consola.warn(
-      `No account found for model "${modelId}", falling back to default`,
+      `No account found${routedModelDiagnosticSuffix(modelId)}, falling back to default`,
     )
 
     return await fetchWithFallbackAccount(context)
   }
 
+  const binding = bindSessionTokenToAccount({
+    accountToken: account.copilotToken,
+    headerOptions: context.headerOptions,
+  })
+  const boundContext = { ...context, ...binding }
+
   consola.debug(
-    `[Account #${account.id}] ${path} (model: ${modelId}, session: ${affinityKey ? "sticky" : "default"})`,
+    `[Account #${account.id}] ${path} (model: ${routedModelDiagnostic(modelId)}, session: ${affinityKey ? "sticky" : "default"})`,
   )
   setLastUsedRoutedAccountId(account.id)
   if (shouldRecordSelection) {
@@ -519,5 +882,10 @@ export async function routedFetch(
     })
   }
 
-  return await fetchWithRoutedAccount(context, account, reason)
+  const result = await fetchWithRoutedAccount(boundContext, account, reason)
+  const mutableAccountPin = routedAccountPin ?? selectedAccountPin
+  if (mutableAccountPin && result.account) {
+    mutableAccountPin.accountId = result.account.id
+  }
+  return result
 }
