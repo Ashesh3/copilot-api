@@ -549,6 +549,100 @@ describe("resolveResponsesContinuation cloning", () => {
 })
 
 describe("resolveResponsesContinuation errors", () => {
+  test("rejects an explicit model that differs from the snapshot model", () => {
+    expect(
+      resolveResponsesContinuation(
+        new Map([
+          [
+            "resp_model",
+            {
+              model: "model-a",
+              client_metadata: { session_id: "session-a" },
+              input: "prior history",
+            },
+          ],
+        ]),
+        {
+          model: "model-b",
+          client_metadata: { session_id: "session-b" },
+          previous_response_id: "resp_model",
+          input: "delta",
+        },
+      ),
+    ).toEqual({
+      ok: false,
+      code: "invalid_request_error",
+      message: "Continuation model must match the previous response model.",
+      status: 400,
+    })
+  })
+
+  test("inherits the snapshot model and affinity metadata when omitted or replaced", () => {
+    const snapshot: ResponsesPayload = {
+      model: "model-a",
+      client_metadata: {
+        session_id: "session-a",
+        thread_id: "thread-a",
+        typed: { source: "snapshot" },
+      },
+      input: "prior history",
+    }
+
+    const result = resolveResponsesContinuation(
+      new Map([["resp_affinity", snapshot]]),
+      {
+        client_metadata: {
+          session_id: "session-b",
+          thread_id: "thread-b",
+          typed: { source: "caller" },
+        },
+        previous_response_id: "resp_affinity",
+        input: "delta",
+      } as unknown as ResponsesPayload,
+    )
+
+    expect(result).toEqual({
+      ok: true,
+      payload: {
+        model: "model-a",
+        client_metadata: {
+          session_id: "session-a",
+          thread_id: "thread-a",
+          typed: { source: "caller" },
+        },
+        input: [userInput("prior history"), userInput("delta")],
+        previous_response_id: undefined,
+        generate: undefined,
+      },
+    })
+    expect(snapshot.client_metadata).toEqual({
+      session_id: "session-a",
+      thread_id: "thread-a",
+      typed: { source: "snapshot" },
+    })
+  })
+
+  test("accepts an already-normalized explicit model equal to the prepared snapshot", () => {
+    const result = resolveResponsesContinuation(
+      new Map([
+        [
+          "resp_normalized",
+          { model: "claude-opus-4.6", input: "prior history" },
+        ],
+      ]),
+      {
+        model: "claude-opus-4.6",
+        previous_response_id: "resp_normalized",
+        input: "delta",
+      },
+    )
+
+    expect(result).toMatchObject({
+      ok: true,
+      payload: { model: "claude-opus-4.6" },
+    })
+  })
+
   test("returns previous_response_not_found for a stale local id", () => {
     expect(
       resolveResponsesContinuation(new Map(), {

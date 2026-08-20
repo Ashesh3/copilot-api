@@ -97,7 +97,20 @@ test.skipIf(responsesModels.length === 0)(
       socket.send(
         JSON.stringify({
           type: "response.create",
-          model: firstTurn.model.id,
+          model: `${firstTurn.model.id}-continuation-mismatch`,
+          previous_response_id: firstResponseId,
+          input: "This model mismatch must not reach upstream.",
+          max_output_tokens: 256,
+        }),
+      )
+      const mismatchError = await frames.nextTerminal()
+      expect(mismatchError.type).toBe("error")
+      expect(mismatchError.error?.code).toBe("invalid_request_error")
+      expect(socket.readyState).toBe(WebSocket.OPEN)
+
+      socket.send(
+        JSON.stringify({
+          type: "response.create",
           previous_response_id: firstResponseId,
           input: "Reply with OK again.",
           max_output_tokens: 256,

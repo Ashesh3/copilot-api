@@ -1299,6 +1299,126 @@ describe("responses websocket message handling", () => {
     expect(lastRequestBody?.previous_response_id).toBeUndefined()
   })
 
+  test("rejects model or affinity replacement locally and keeps the socket on the original account", async () => {
+    const modelA = "ws-continuation-model-a"
+    const modelB = "ws-continuation-model-b"
+    const firstAccount = tokenPool.addAccount(
+      "github-ws-continuation-a",
+      "individual",
+      webSocketAccountIds[0],
+    )
+    firstAccount.copilotToken = "ws-continuation-token-a"
+    firstAccount.healthy = true
+    firstAccount.models = new Set([modelA, modelB])
+    firstAccount.modelsData = [
+      createWebSocketModel(modelA),
+      createWebSocketModel(modelB),
+    ]
+    const secondAccount = tokenPool.addAccount(
+      "github-ws-continuation-b",
+      "individual",
+      webSocketAccountIds[1],
+    )
+    secondAccount.copilotToken = "ws-continuation-token-b"
+    secondAccount.healthy = true
+    secondAccount.models = new Set([modelA, modelB])
+    secondAccount.modelsData = [
+      createWebSocketModel(modelA),
+      createWebSocketModel(modelB),
+    ]
+    tokenPool.rebuildModelIndex()
+    state.models = tokenPool.getAllModels()
+    state.isMultiToken = true
+
+    const firstAffinity = findWebSocketAffinity(modelA, firstAccount.id)
+    const replacementAffinity = findWebSocketAffinity(modelA, secondAccount.id)
+    const modelBReplacementAffinity = findWebSocketAffinity(
+      modelB,
+      secondAccount.id,
+    )
+    queuedResponses.push(
+      createResponsesSseResponse("resp_ws_consistent_parent"),
+      createResponsesSseResponse("resp_ws_consistent_child"),
+    )
+    const ws = createTestWebSocket()
+    ws.data.affinity = undefined
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: modelA,
+        input: "first",
+        client_metadata: { session_id: firstAffinity },
+      }),
+    )
+    expect(capturedAuthorization).toEqual(["Bearer ws-continuation-token-a"])
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: modelB,
+        input: "must reject",
+        client_metadata: { session_id: modelBReplacementAffinity },
+        previous_response_id: "resp_ws_consistent_parent",
+      }),
+    )
+
+    const rejection = JSON.parse(ws.sent.at(-1) ?? "{}") as {
+      error?: {
+        code?: string
+        message?: string
+        request_id?: string
+        type?: string
+      }
+      status?: number
+      type?: string
+    }
+    expect(rejection).toEqual({
+      type: "error",
+      status: 400,
+      error: {
+        code: "invalid_request_error",
+        message: "Continuation model must match the previous response model.",
+        type: "invalid_request_error",
+        request_id: "req-test",
+      },
+    })
+    expect(JSON.stringify(rejection)).not.toContain(modelA)
+    expect(JSON.stringify(rejection)).not.toContain(modelB)
+    expect(JSON.stringify(rejection)).not.toContain(firstAffinity)
+    expect(JSON.stringify(rejection)).not.toContain(modelBReplacementAffinity)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(ws.data.closed).toBe(false)
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        input: "valid continuation",
+        client_metadata: { session_id: replacementAffinity },
+        previous_response_id: "resp_ws_consistent_parent",
+      }),
+    )
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(capturedAuthorization).toEqual([
+      "Bearer ws-continuation-token-a",
+      "Bearer ws-continuation-token-a",
+    ])
+    expect(capturedAffinity).toEqual({
+      key: firstAffinity,
+      source: "codex_metadata",
+    })
+    expect(lastRequestBody).toMatchObject({
+      model: modelA,
+      client_metadata: { session_id: firstAffinity },
+    })
+    expect(ws.data.responseSnapshots.has("resp_ws_consistent_child")).toBe(true)
+    expect(ws.data.closed).toBe(false)
+  })
+
   test("isolates concurrent WebSocket turn lifecycle contexts", async () => {
     const firstWs = createTestWebSocket()
     const secondWs = createTestWebSocket()
@@ -3463,6 +3583,40 @@ describe("responses websocket continuation handling", () => {
     expect(snapshots.has("resp_33")).toBe(true)
   })
 })
+
+function createWebSocketModel(modelId: string) {
+  return {
+    id: modelId,
+    name: modelId,
+    object: "model" as const,
+    preview: false,
+    vendor: "openai",
+    version: "test",
+    model_picker_enabled: true,
+    supported_endpoints: ["/responses"],
+    capabilities: {
+      family: "gpt",
+      limits: {},
+      object: "model_capabilities",
+      supports: { streaming: true },
+      tokenizer: "cl100k_base",
+      type: "chat",
+    },
+  }
+}
+
+function findWebSocketAffinity(modelId: string, accountId: number): string {
+  const affinity = Array.from(
+    { length: 10_000 },
+    (_, index) => `ws-continuation-affinity-${accountId}-${index}`,
+  ).find(
+    (candidate) =>
+      tokenPool.getAccountForModelBySession(modelId, candidate)?.id
+      === accountId,
+  )
+  if (!affinity) throw new TypeError("Expected WebSocket account affinity")
+  return affinity
+}
 
 function createTestWebSocket(data?: ResponsesWebSocketData): {
   close: () => void

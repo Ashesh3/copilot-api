@@ -13,6 +13,8 @@ import type { Model } from "~/services/copilot/get-models"
 import {
   getLastUsedAccountId,
   runWithPinnedRoutedAccount,
+  runWithRoutedModelSelection,
+  selectRoutedModel,
 } from "~/lib/account-router"
 import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
@@ -406,9 +408,8 @@ async function handleCompletionInner(
       inboundSessionToken
     : undefined
 
-  const selectedModel = state.models?.data.find(
-    (m) => m.id === anthropicPayload.model,
-  )
+  const routedModel = selectRoutedModel(anthropicPayload.model)
+  const selectedModel = routedModel.model
   if (state.models && !selectedModel) throw createMessagesModelNotFoundError()
 
   const routeDecision = selectMessagesUpstreamEndpoint({
@@ -473,68 +474,74 @@ async function handleCompletionInner(
     reasoningEffort: effectiveEffort,
   })
 
-  if (routeDecision.target === "/v1/messages") {
-    const retryBudget = createRetryBudget()
-    const requestOptions: NativeMessagesRequestOptions = {
-      ...nativeOptions,
-      requestedModel,
-      originalStream: Boolean(anthropicPayload.stream),
-      retryBudget,
-      copilotSessionToken,
-      ...(initiatorOverride ? { initiatorOverride } : {}),
-    }
-    try {
-      return await handleWithNativeMessages(c, anthropicPayload, requestOptions)
-    } catch (error) {
-      if (
-        requestOptions.originalStream
-        || !(error instanceof HTTPError)
-        || error.response.status !== 400
-        || !(await isInvalidThinkingSignatureResponse(error.response))
-      ) {
-        throw error
+  return await runWithRoutedModelSelection(routedModel, async () => {
+    if (routeDecision.target === "/v1/messages") {
+      const retryBudget = createRetryBudget()
+      const requestOptions: NativeMessagesRequestOptions = {
+        ...nativeOptions,
+        requestedModel,
+        originalStream: Boolean(anthropicPayload.stream),
+        retryBudget,
+        copilotSessionToken,
+        ...(initiatorOverride ? { initiatorOverride } : {}),
       }
+      try {
+        return await handleWithNativeMessages(
+          c,
+          anthropicPayload,
+          requestOptions,
+        )
+      } catch (error) {
+        if (
+          requestOptions.originalStream
+          || !(error instanceof HTTPError)
+          || error.response.status !== 400
+          || !(await isInvalidThinkingSignatureResponse(error.response))
+        ) {
+          throw error
+        }
 
-      if (!consumeExtraSend(retryBudget)) {
-        throw error
+        if (!consumeExtraSend(retryBudget)) {
+          throw error
+        }
+        const recoveredPayload = structuredClone(anthropicPayload)
+        if (!stripThinkingBlocks(recoveredPayload)) throw error
+        recordNonDefaultBehavior(c, {
+          kind: "reasoning_retry_without_thinking",
+          message: `Stripped thinking blocks after native /v1/messages rejected their signature for ${anthropicPayload.model}`,
+          data: {
+            model: anthropicPayload.model,
+            reason: "invalid signature",
+            endpoint: "AnthropicMessages",
+          },
+        })
+        const accountId = getLastUsedAccountId()
+        return await runWithPinnedRoutedAccount(
+          accountId,
+          async () =>
+            await handleWithNativeMessages(c, recoveredPayload, {
+              ...requestOptions,
+              retryBudget,
+            }),
+        )
       }
-      const recoveredPayload = structuredClone(anthropicPayload)
-      if (!stripThinkingBlocks(recoveredPayload)) throw error
-      recordNonDefaultBehavior(c, {
-        kind: "reasoning_retry_without_thinking",
-        message: `Stripped thinking blocks after native /v1/messages rejected their signature for ${anthropicPayload.model}`,
-        data: {
-          model: anthropicPayload.model,
-          reason: "invalid signature",
-          endpoint: "AnthropicMessages",
-        },
+    }
+
+    if (routeDecision.target === "/responses") {
+      return await handleWithResponsesApi(c, anthropicPayload, {
+        copilotSessionToken,
+        initiatorOverride,
+        effortOverride,
+        requestedModel,
       })
-      const accountId = getLastUsedAccountId()
-      return await runWithPinnedRoutedAccount(
-        accountId,
-        async () =>
-          await handleWithNativeMessages(c, recoveredPayload, {
-            ...requestOptions,
-            retryBudget,
-          }),
-      )
     }
-  }
 
-  if (routeDecision.target === "/responses") {
-    return await handleWithResponsesApi(c, anthropicPayload, {
+    return await handleWithChatCompletions(c, anthropicPayload, {
       copilotSessionToken,
       initiatorOverride,
       effortOverride,
       requestedModel,
     })
-  }
-
-  return await handleWithChatCompletions(c, anthropicPayload, {
-    copilotSessionToken,
-    initiatorOverride,
-    effortOverride,
-    requestedModel,
   })
 }
 

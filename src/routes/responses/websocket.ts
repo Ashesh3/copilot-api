@@ -7,6 +7,10 @@ import type { RoutingAffinity } from "~/lib/routing-affinity"
 import type { NativeMessagesRequestOptions } from "~/routes/messages/native-handler"
 
 import {
+  runWithRoutedModelSelection,
+  selectRoutedModel,
+} from "~/lib/account-router"
+import {
   recordCopilotContractEvent,
   recordCopilotMessagesBeta,
 } from "~/lib/copilot-contract-observability"
@@ -31,7 +35,6 @@ import {
   resolveResponsesRoutingAffinity,
   resolveRoutingAffinityFromHeaders,
 } from "~/lib/routing-affinity"
-import { state } from "~/lib/state"
 import { resolveWebSearchCalls } from "~/routes/messages/web-search-helpers"
 import {
   fitResponsesCompactionPayload,
@@ -197,7 +200,7 @@ export const responsesWebSocket = {
     })
 
     try {
-      const { affinity, payload } = prepareResponseCreate(
+      const { affinity, payload } = await prepareResponseCreate(
         ws.data,
         parsedPayload,
       )
@@ -264,13 +267,27 @@ export const responsesWebSocket = {
   },
 }
 
-function prepareResponseCreate(
+async function prepareResponseCreate(
   data: ResponsesWebSocketData,
   rawPayload: ResponsesPayload,
-): { affinity: RoutingAffinity | undefined; payload: ResponsesPayload } {
+): Promise<{
+  affinity: RoutingAffinity | undefined
+  payload: ResponsesPayload
+}> {
+  const previousResponseId = rawPayload.previous_response_id
+  const payloadForResolution =
+    (
+      typeof previousResponseId === "string"
+      && typeof rawPayload.model === "string"
+    ) ?
+      {
+        ...rawPayload,
+        model: await normalizeRequestedWebSocketModel(rawPayload),
+      }
+    : rawPayload
   const resolution = resolveResponsesContinuation(
     data.responseSnapshots,
-    rawPayload,
+    payloadForResolution,
   )
   if (!resolution.ok) {
     if (resolution.code === "previous_response_not_found") {
@@ -341,9 +358,8 @@ async function handleResponseCreate(
   disableParallelWebSearch(payload)
   throwIfWebSocketTurnAborted(turn)
 
-  const selectedModel = state.models?.data.find(
-    (model) => model.id === payload.model,
-  )
+  const routedModel = selectRoutedModel(payload.model)
+  const selectedModel = routedModel.model
   const route = await waitForWebSocketTurn(
     prepareResponsesRouteForTransport({
       payload,
@@ -366,56 +382,58 @@ async function handleResponseCreate(
     getResponsesRequestOptions(preparedPayload)
   const initiator = initiatorOverride ?? inferredInitiator
 
-  if (
-    await dispatchTranslatedWebSocketEndpoint({
-      initiator,
-      preparedPayload,
-      requestedModel,
-      routeTarget: route.decision.target,
+  await runWithRoutedModelSelection(routedModel, async () => {
+    if (
+      await dispatchTranslatedWebSocketEndpoint({
+        initiator,
+        preparedPayload,
+        requestedModel,
+        routeTarget: route.decision.target,
+        turn,
+        ws,
+      })
+    ) {
+      return
+    }
+
+    // Native responses streaming
+    const response = await waitForWebSocketTurn(
+      createResponses(preparedPayload, {
+        vision,
+        initiator,
+        prepared: true,
+        signal: turn.abortController.signal,
+      }),
       turn,
-      ws,
-    })
-  ) {
-    return
-  }
-
-  // Native responses streaming
-  const response = await waitForWebSocketTurn(
-    createResponses(preparedPayload, {
-      vision,
-      initiator,
-      prepared: true,
-      signal: turn.abortController.signal,
-    }),
-    turn,
-  )
-  throwIfWebSocketTurnAborted(turn)
-
-  if (!isAsyncIterable(response)) {
-    // Shouldn't happen since we forced stream: true, but handle gracefully
-    handleNonStreamingResponsesResult(ws, response, turn)
-    return
-  }
-
-  const idTracker = createStreamIdTracker()
-  for await (const chunk of response) {
-    const data = (chunk as { data?: string }).data
-    if (!data) continue
-
-    const event = (chunk as { event?: string }).event
-    const processed = addResponsesWebSocketMetadata(
-      fixStreamIds(data, event, idTracker),
-      getCopilotResponseHeaders(),
     )
-    recordResponseSnapshotFromFrame(
-      ws.data.responseSnapshots,
-      preparedPayload,
-      processed,
-    )
-    ws.send(processed)
-    finalizeFromResponsesFrame(ws.data, turn, processed)
-    if (turn.lifecycle?.isFinalized()) break
-  }
+    throwIfWebSocketTurnAborted(turn)
+
+    if (!isAsyncIterable(response)) {
+      // Shouldn't happen since we forced stream: true, but handle gracefully
+      handleNonStreamingResponsesResult(ws, response, turn)
+      return
+    }
+
+    const idTracker = createStreamIdTracker()
+    for await (const chunk of response) {
+      const data = (chunk as { data?: string }).data
+      if (!data) continue
+
+      const event = (chunk as { event?: string }).event
+      const processed = addResponsesWebSocketMetadata(
+        fixStreamIds(data, event, idTracker),
+        getCopilotResponseHeaders(),
+      )
+      recordResponseSnapshotFromFrame(
+        ws.data.responseSnapshots,
+        preparedPayload,
+        processed,
+      )
+      ws.send(processed)
+      finalizeFromResponsesFrame(ws.data, turn, processed)
+      if (turn.lifecycle?.isFinalized()) break
+    }
+  })
 }
 
 function handleNonStreamingResponsesResult(
@@ -593,6 +611,24 @@ async function applyResponsesWebSocketRouting(
   })
   applyRedirectedResponsesEffort(payload, payload.model, redirectedEffort)
   return redirectedEffort ?? getRedirectReasoningEffort(effectiveEffort)
+}
+
+async function normalizeRequestedWebSocketModel(
+  payload: ResponsesPayload,
+): Promise<string> {
+  const { baseModel, reasoningEffort: suffixEffort } = parseModelSuffix(
+    payload.model,
+  )
+  const normalizedModel = normalizeModelName(baseModel)
+  const effectiveEffort = normalizeResponsesReasoning(
+    structuredClone(payload),
+    suffixEffort,
+  )
+  const redirect = await applyModelRedirect({
+    model: normalizedModel,
+    effort: getRedirectReasoningEffort(effectiveEffort),
+  })
+  return normalizeModelName(redirect.model)
 }
 
 async function resolveResponsesWebSocketRedirect(

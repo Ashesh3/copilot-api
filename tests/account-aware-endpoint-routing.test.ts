@@ -1,0 +1,406 @@
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  expect,
+  mock,
+  test,
+} from "bun:test"
+
+import type { Model } from "~/services/copilot/get-models"
+
+import { setModelRedirectsForTest } from "~/lib/model-redirect"
+import { setModelSettingsForTest } from "~/lib/model-settings"
+import { state } from "~/lib/state"
+import { tokenPool } from "~/lib/token-pool"
+import { server } from "~/server"
+
+const originalFetch = globalThis.fetch
+const originalModels = state.models
+const testAccountIds = new Set<number>()
+const queuedFetchResults: Array<Response> = []
+const upstreamRequests: Array<{
+  authorization: string | null
+  path: string
+}> = []
+
+function toRequest(url: string | URL | Request, init?: RequestInit): Request {
+  if (url instanceof Request) return new Request(url, init)
+  return new Request(url.toString(), init)
+}
+
+function createModel(id: string, supportedEndpoints: Array<string>): Model {
+  return {
+    capabilities: {
+      family: "test",
+      limits: { max_output_tokens: 1024 },
+      object: "model_capabilities",
+      supports: { streaming: true, tool_calls: true },
+      tokenizer: "cl100k_base",
+      type: "chat",
+    },
+    id,
+    model_picker_enabled: true,
+    name: id,
+    object: "model",
+    preview: false,
+    supported_endpoints: [...supportedEndpoints],
+    vendor: "openai",
+    version: "test",
+  }
+}
+
+function registerAccount(options: {
+  accountId: number
+  endpoints: Array<string>
+  modelId: string
+  token: string
+}): void {
+  const account = tokenPool.addAccount(
+    `github-${options.accountId}`,
+    "individual",
+    options.accountId,
+  )
+  testAccountIds.add(options.accountId)
+  account.copilotToken = options.token
+  account.healthy = true
+  account.models = new Set([options.modelId])
+  account.modelsData = [createModel(options.modelId, options.endpoints)]
+}
+
+function installConflictingCatalogs(options: {
+  first: Array<string>
+  modelId: string
+  second: Array<string>
+}): string {
+  registerAccount({
+    accountId: 52_401,
+    endpoints: options.first,
+    modelId: options.modelId,
+    token: "first-account-token",
+  })
+  registerAccount({
+    accountId: 52_402,
+    endpoints: options.second,
+    modelId: options.modelId,
+    token: "second-account-token",
+  })
+  tokenPool.rebuildModelIndex()
+  state.models = tokenPool.getAllModels()
+
+  const affinityKey = Array.from(
+    { length: 10_000 },
+    (_, index) => `account-aware-affinity-${index}`,
+  ).find(
+    (candidate) =>
+      tokenPool.getAccountForModelBySession(options.modelId, candidate)?.id
+      === 52_402,
+  )
+  if (!affinityKey) throw new TypeError("Expected affinity for second account")
+  return affinityKey
+}
+
+function chatResponse(model: string): Response {
+  return Response.json({
+    id: "chat_account_aware",
+    object: "chat.completion",
+    created: 1,
+    model,
+    choices: [
+      {
+        index: 0,
+        message: { role: "assistant", content: "ok" },
+        finish_reason: "stop",
+        logprobs: null,
+      },
+    ],
+    usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+  })
+}
+
+function responsesResponse(model: string): Response {
+  return Response.json({
+    id: "resp_account_aware",
+    object: "response",
+    created_at: 1,
+    model,
+    output: [
+      {
+        id: "msg_account_aware",
+        type: "message",
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text: "ok", annotations: [] }],
+      },
+    ],
+    output_text: "ok",
+    status: "completed",
+    usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+    error: null,
+    incomplete_details: null,
+    instructions: null,
+    metadata: null,
+    parallel_tool_calls: true,
+    temperature: null,
+    tool_choice: "auto",
+    tools: [],
+    top_p: null,
+  })
+}
+
+function messagesResponse(model: string): Response {
+  return Response.json({
+    id: "msg_account_aware",
+    type: "message",
+    role: "assistant",
+    model,
+    content: [{ type: "text", text: "ok" }],
+    stop_reason: "end_turn",
+    stop_sequence: null,
+    usage: { input_tokens: 1, output_tokens: 1 },
+  })
+}
+
+const fetchMock = mock((url: string | URL | Request, init?: RequestInit) => {
+  const request = toRequest(url, init)
+  const path = new URL(request.url).pathname
+  upstreamRequests.push({
+    authorization: request.headers.get("authorization"),
+    path,
+  })
+
+  const queued = queuedFetchResults.shift()
+  if (queued) return queued
+
+  const body =
+    typeof init?.body === "string" ?
+      (JSON.parse(init.body) as { model?: string })
+    : {}
+  const model = body.model ?? "account-aware-model"
+  if (path === "/responses") return responsesResponse(model)
+  if (path === "/v1/messages") return messagesResponse(model)
+  if (path === "/chat/completions") return chatResponse(model)
+  return new Response("unexpected path", { status: 500 })
+})
+
+beforeAll(() => {
+  ;(globalThis as { fetch: typeof fetch }).fetch =
+    fetchMock as unknown as typeof fetch
+})
+
+afterAll(() => {
+  ;(globalThis as { fetch: typeof fetch }).fetch = originalFetch
+  state.models = originalModels
+})
+
+beforeEach(() => {
+  upstreamRequests.length = 0
+  queuedFetchResults.length = 0
+  fetchMock.mockClear()
+  state.accountType = "individual"
+  state.copilotToken = "single-token-fallback"
+  state.githubToken = "github-token"
+  state.isMultiToken = true
+  state.manualApprove = false
+  setModelRedirectsForTest([])
+  setModelSettingsForTest([])
+})
+
+afterEach(() => {
+  for (const accountId of testAccountIds) {
+    tokenPool.removeAccountForTest(accountId)
+  }
+  testAccountIds.clear()
+  state.models = originalModels
+  state.isMultiToken = false
+})
+
+test("Chat routes from the affinity-selected account's raw endpoint catalog", async () => {
+  const modelId = "account-aware-chat"
+  const affinityKey = installConflictingCatalogs({
+    first: ["/chat/completions"],
+    modelId,
+    second: ["/responses"],
+  })
+
+  const response = await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-client-session-id": affinityKey,
+    },
+    body: JSON.stringify({
+      model: modelId,
+      messages: [{ role: "user", content: "hello" }],
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(upstreamRequests).toEqual([
+    {
+      authorization: "Bearer second-account-token",
+      path: "/responses",
+    },
+  ])
+})
+
+test("Responses routes from the affinity-selected account's raw endpoint catalog", async () => {
+  const modelId = "account-aware-responses"
+  const affinityKey = installConflictingCatalogs({
+    first: ["/responses"],
+    modelId,
+    second: ["/chat/completions"],
+  })
+
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-client-session-id": affinityKey,
+    },
+    body: JSON.stringify({ model: modelId, input: "hello" }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(upstreamRequests).toEqual([
+    {
+      authorization: "Bearer second-account-token",
+      path: "/chat/completions",
+    },
+  ])
+})
+
+test("Messages routes from the affinity-selected account's raw endpoint catalog", async () => {
+  const modelId = "account-aware-messages"
+  const affinityKey = installConflictingCatalogs({
+    first: ["/v1/messages"],
+    modelId,
+    second: ["/responses"],
+  })
+
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-client-session-id": affinityKey,
+    },
+    body: JSON.stringify({
+      model: modelId,
+      max_tokens: 16,
+      messages: [{ role: "user", content: "hello" }],
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(upstreamRequests).toEqual([
+    {
+      authorization: "Bearer second-account-token",
+      path: "/responses",
+    },
+  ])
+})
+
+test("unidentified failover skips accounts that do not advertise the chosen endpoint", async () => {
+  const modelId = "account-aware-failover"
+  registerAccount({
+    accountId: 52_401,
+    endpoints: ["/chat/completions"],
+    modelId,
+    token: "first-account-token",
+  })
+  registerAccount({
+    accountId: 52_402,
+    endpoints: ["/responses"],
+    modelId,
+    token: "wrong-endpoint-token",
+  })
+  registerAccount({
+    accountId: 52_403,
+    endpoints: ["/chat/completions"],
+    modelId,
+    token: "eligible-failover-token",
+  })
+  tokenPool.rebuildModelIndex()
+  state.models = tokenPool.getAllModels()
+  fetchMock.mockImplementationOnce((url, init) => {
+    const request = toRequest(url, init)
+    upstreamRequests.push({
+      authorization: request.headers.get("authorization"),
+      path: new URL(request.url).pathname,
+    })
+    return new Response("forbidden", { status: 403 })
+  })
+
+  const response = await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: modelId,
+      messages: [{ role: "user", content: "hello" }],
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(upstreamRequests).toEqual([
+    {
+      authorization: "Bearer first-account-token",
+      path: "/chat/completions",
+    },
+    {
+      authorization: "Bearer eligible-failover-token",
+      path: "/chat/completions",
+    },
+  ])
+})
+
+test("does not resend after refresh removes the chosen endpoint", async () => {
+  const modelId = "account-aware-refresh"
+  registerAccount({
+    accountId: 52_401,
+    endpoints: ["/chat/completions"],
+    modelId,
+    token: "expired-account-token",
+  })
+  tokenPool.rebuildModelIndex()
+  state.models = tokenPool.getAllModels()
+  queuedFetchResults.push(
+    new Response("unauthorized", { status: 401 }),
+    Response.json({
+      expires_at: 1_900_000_000,
+      refresh_in: 1800,
+      token: "refreshed-account-token",
+    }),
+    Response.json({
+      object: "list",
+      data: [createModel(modelId, ["/responses"])],
+    }),
+  )
+
+  const response = await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: modelId,
+      messages: [{ role: "user", content: "hello" }],
+    }),
+  })
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toEqual({
+    error: {
+      code: "endpoint_translation_unsupported",
+      message:
+        "The selected Copilot account no longer advertises the chosen endpoint.",
+      type: "invalid_request_error",
+    },
+  })
+  expect(upstreamRequests.map((request) => request.path)).toEqual([
+    "/chat/completions",
+    "/copilot_internal/v2/token",
+    "/models",
+  ])
+  expect(
+    upstreamRequests.filter((request) => request.path === "/chat/completions"),
+  ).toHaveLength(1)
+})

@@ -312,6 +312,31 @@ export class TokenPool {
   }
 
   /**
+   * Fail over only to an account whose raw catalog advertises the endpoint
+   * chosen for this request. Missing endpoint metadata retains the documented
+   * legacy Chat Completions assumption.
+   */
+  getNextAccountForModelEndpoint(
+    modelId: string,
+    endpoint: string,
+    exclude: Account,
+  ): Account | undefined {
+    const eligible = this.modelIndex.get(modelId)
+    if (!eligible || eligible.length === 0) return undefined
+
+    const alternatives = eligible.filter(
+      (account) =>
+        account.id !== exclude.id
+        && this.accountAdvertisesModelEndpoint(account, modelId, endpoint),
+    )
+    if (alternatives.length === 0) return undefined
+
+    const index = this.roundRobinIndex % alternatives.length
+    this.roundRobinIndex++
+    return alternatives[index]
+  }
+
+  /**
    * Mark an account as unhealthy and rebuild the model index.
    */
   markUnhealthy(account: Account): void {
@@ -401,6 +426,26 @@ export class TokenPool {
     return (this.modelIndex.get(modelId) ?? []).find(
       (account) => account.id === accountId,
     )
+  }
+
+  getModelForAccount(modelId: string, accountId: number): Model | undefined {
+    return this.accounts
+      .get(accountId)
+      ?.modelsData.find((model) => model.id === modelId)
+  }
+
+  accountAdvertisesModelEndpoint(
+    account: Account,
+    modelId: string,
+    endpoint: string,
+  ): boolean {
+    const model = account.modelsData.find(
+      (candidate) => candidate.id === modelId,
+    )
+    if (!model) return false
+    return model.supported_endpoints ?
+        model.supported_endpoints.includes(endpoint)
+      : endpoint === "/chat/completions"
   }
 
   getHealthyAccountIds(): Array<number> {

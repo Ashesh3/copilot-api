@@ -6,7 +6,11 @@ import { streamSSE } from "hono/streaming"
 
 import type { Model } from "~/services/copilot/get-models"
 
-import { getLastUsedAccountId } from "~/lib/account-router"
+import {
+  getLastUsedAccountId,
+  runWithRoutedModelSelection,
+  selectRoutedModel,
+} from "~/lib/account-router"
 import { awaitApproval } from "~/lib/approval"
 import { getConfig } from "~/lib/config"
 import {
@@ -616,9 +620,8 @@ const handleResponsesInner = async (
   expandCompactionItems(payload)
   disableParallelWebSearch(payload)
 
-  const selectedModel = state.models?.data.find(
-    (model) => model.id === payload.model,
-  )
+  const routedModel = selectRoutedModel(payload.model)
+  const selectedModel = routedModel.model
   const route = await prepareResponsesRoute(c, payload, selectedModel)
   const { decision, preparedPayload } = route
   if (decision.target === "/v1/messages") {
@@ -629,269 +632,276 @@ const handleResponsesInner = async (
 
   if (state.manualApprove) await awaitApproval()
 
-  if (decision.target === "/v1/messages") {
-    reportResponsesEndpointFallback(c, payload.model, decision)
-    return await handleWithAnthropicMessages(c, preparedPayload, {
-      ...nativeOptions,
-      requestedModel,
-      copilotSessionToken,
-    })
-  }
+  return await runWithRoutedModelSelection(routedModel, async () => {
+    if (decision.target === "/v1/messages") {
+      reportResponsesEndpointFallback(c, payload.model, decision)
+      return await handleWithAnthropicMessages(c, preparedPayload, {
+        ...nativeOptions,
+        requestedModel,
+        copilotSessionToken,
+      })
+    }
 
-  if (decision.target === "/chat/completions") {
-    // ChatCompletions has no hosted web-search tool. Downgrade it to the
-    // shared MCP-backed function loop only on this fallback path.
-    convertWebSearchTool(preparedPayload)
-    // ChatCompletions can't accept custom (freeform) tools, so rewrite
-    // apply_patch into a function tool only on this fallback path. The
-    // native /responses path supports custom tools and must pass them
-    // through unchanged (Codex Desktop aborts otherwise).
-    useFunctionApplyPatch(preparedPayload)
-    reportResponsesEndpointFallback(c, preparedPayload.model, decision)
-    setRequestContext(c, { provider: "Responses→ChatCompletions" })
-    return await handleWithChatCompletions(c, preparedPayload, {
-      requestedModel,
-      copilotSessionToken,
-    })
-  }
+    if (decision.target === "/chat/completions") {
+      // ChatCompletions has no hosted web-search tool. Downgrade it to the
+      // shared MCP-backed function loop only on this fallback path.
+      convertWebSearchTool(preparedPayload)
+      // ChatCompletions can't accept custom (freeform) tools, so rewrite
+      // apply_patch into a function tool only on this fallback path. The
+      // native /responses path supports custom tools and must pass them
+      // through unchanged (Codex Desktop aborts otherwise).
+      useFunctionApplyPatch(preparedPayload)
+      reportResponsesEndpointFallback(c, preparedPayload.model, decision)
+      setRequestContext(c, { provider: "Responses→ChatCompletions" })
+      return await handleWithChatCompletions(c, preparedPayload, {
+        requestedModel,
+        copilotSessionToken,
+      })
+    }
 
-  const { vision, initiator } = getResponsesRequestOptions(preparedPayload)
+    const { vision, initiator } = getResponsesRequestOptions(preparedPayload)
 
-  // Extract messages for Sentry span attribute
-  const inputMessages =
-    typeof preparedPayload.input === "string" ?
-      preparedPayload.input
-    : JSON.stringify(preparedPayload.input)
+    // Extract messages for Sentry span attribute
+    const inputMessages =
+      typeof preparedPayload.input === "string" ?
+        preparedPayload.input
+      : JSON.stringify(preparedPayload.input)
 
-  if (isStreamingRequested(preparedPayload)) {
-    logger.debug("Forwarding native Responses stream")
-    return await Sentry.startSpanManual(
-      createSentryChatSpanOptions({
-        inputMessages,
-        model: preparedPayload.model,
-        streaming: true,
-      }),
-      async (streamSpan, finish) => {
-        let spanFinished = false
-        const finishSpan = () => {
-          if (spanFinished) return
-          spanFinished = true
-          finish()
-        }
-
-        try {
-          const response = await createResponses(preparedPayload, {
-            copilotSessionToken,
-            vision,
-            initiator,
-            prepared: true,
-            signal: c.req.raw.signal,
-          })
-
-          const accountId = getLastUsedAccountId()
-          if (accountId !== undefined) {
-            setRequestContext(c, { accountId })
+    if (isStreamingRequested(preparedPayload)) {
+      logger.debug("Forwarding native Responses stream")
+      return await Sentry.startSpanManual(
+        createSentryChatSpanOptions({
+          inputMessages,
+          model: preparedPayload.model,
+          streaming: true,
+        }),
+        async (streamSpan, finish) => {
+          let spanFinished = false
+          const finishSpan = () => {
+            if (spanFinished) return
+            spanFinished = true
+            finish()
           }
 
-          if (!isAsyncIterable(response)) {
-            const hadWebSearch = response.output.some(
-              (item: ResponseOutputItem) =>
-                item.type === "function_call" && item.name === "web_search",
-            )
-            const du = extractDetailedUsage(response.usage)
-            streamSpan.setAttribute("gen_ai.usage.input_tokens", du.inputTokens)
-            streamSpan.setAttribute(
-              "gen_ai.usage.output_tokens",
-              du.outputTokens,
-            )
-            setDetailedTokenAttributes(streamSpan, {
-              cachedTokens: du.cachedTokens,
-              reasoningTokens: du.reasoningTokens,
+          try {
+            const response = await createResponses(preparedPayload, {
+              copilotSessionToken,
+              vision,
+              initiator,
+              prepared: true,
+              signal: c.req.raw.signal,
             })
-            setSentryOutputMessages(streamSpan, response.output_text)
-            finishSpan()
 
-            const resolved =
-              hadWebSearch ?
-                await resolveResponsesWebSearchCalls(
-                  response,
-                  preparedPayload,
-                  {
-                    copilotSessionToken,
-                    vision,
-                    initiator,
-                    signal: c.req.raw.signal,
-                  },
-                )
-              : response
+            const accountId = getLastUsedAccountId()
+            if (accountId !== undefined) {
+              setRequestContext(c, { accountId })
+            }
 
-            logger.debug("Forwarding native Responses result", {
-              model: resolved.model,
-              outputCount: resolved.output.length,
-              status: resolved.status,
-            })
-            return c.json(withRequestedResponseModel(resolved, requestedModel))
-          }
-
-          return streamSSE(c, async (stream) => {
-            try {
-              const bufferedChunks: Array<{
-                id?: string
-                event?: string
-                data?: string
-              }> = []
-              let hasWebSearchCall = false
-              let completedResult: ResponsesResult | null = null
-              let detailedUsage = extractDetailedUsage(null)
-              let responseText = ""
-
-              for await (const chunk of withSseHeartbeat(response, stream)) {
-                const chunkData = {
-                  id: (chunk as { id?: string }).id,
-                  event: (chunk as { event?: string }).event,
-                  data: (chunk as { data?: string }).data ?? "",
-                }
-                bufferedChunks.push(chunkData)
-
-                if (hasBufferedWebSearchCall(chunkData)) {
-                  hasWebSearchCall = true
-                }
-
-                const parsedResponse = getCompletedBufferedResponse(chunkData)
-                if (parsedResponse) {
-                  completedResult = parsedResponse
-                  detailedUsage = extractDetailedUsage(parsedResponse.usage)
-                  responseText = parsedResponse.output_text
-                }
-              }
-
+            if (!isAsyncIterable(response)) {
+              const hadWebSearch = response.output.some(
+                (item: ResponseOutputItem) =>
+                  item.type === "function_call" && item.name === "web_search",
+              )
+              const du = extractDetailedUsage(response.usage)
               streamSpan.setAttribute(
                 "gen_ai.usage.input_tokens",
-                detailedUsage.inputTokens,
+                du.inputTokens,
               )
               streamSpan.setAttribute(
                 "gen_ai.usage.output_tokens",
-                detailedUsage.outputTokens,
+                du.outputTokens,
               )
               setDetailedTokenAttributes(streamSpan, {
-                cachedTokens: detailedUsage.cachedTokens,
-                reasoningTokens: detailedUsage.reasoningTokens,
+                cachedTokens: du.cachedTokens,
+                reasoningTokens: du.reasoningTokens,
               })
-              setSentryOutputMessages(streamSpan, responseText)
-
-              if (hasWebSearchCall && completedResult) {
-                finishSpan()
-                // Inside the already-open stream: the resolver loops full
-                // generations plus live web fetches, so it needs keep-alives.
-                const resolved = await withHeartbeatWhilePending(
-                  Sentry.withActiveSpan(null, () =>
-                    resolveResponsesWebSearchCalls(
-                      completedResult,
-                      preparedPayload,
-                      {
-                        copilotSessionToken,
-                        vision,
-                        initiator,
-                        signal: c.req.raw.signal,
-                      },
-                    ),
-                  ),
-                  stream,
-                )
-                await emitResponsesResultAsStream(
-                  stream,
-                  withRequestedResponseModel(resolved, requestedModel),
-                )
-                return
-              }
-
-              const idTracker = createStreamIdTracker()
-              for (const chunk of bufferedChunks) {
-                const restoredData = rewriteResponseModelInEvent(
-                  chunk.data ?? "",
-                  requestedModel,
-                )
-                const processedData = fixStreamIds(
-                  restoredData,
-                  chunk.event,
-                  idTracker,
-                )
-                await stream.writeSSE({
-                  id: chunk.id,
-                  event: chunk.event,
-                  data: processedData,
-                })
-              }
-            } catch (error) {
-              if (isAbortError(error)) return
-              throw error
-            } finally {
+              setSentryOutputMessages(streamSpan, response.output_text)
               finishSpan()
+
+              const resolved =
+                hadWebSearch ?
+                  await resolveResponsesWebSearchCalls(
+                    response,
+                    preparedPayload,
+                    {
+                      copilotSessionToken,
+                      vision,
+                      initiator,
+                      signal: c.req.raw.signal,
+                    },
+                  )
+                : response
+
+              logger.debug("Forwarding native Responses result", {
+                model: resolved.model,
+                outputCount: resolved.output.length,
+                status: resolved.status,
+              })
+              return c.json(
+                withRequestedResponseModel(resolved, requestedModel),
+              )
             }
-          })
-        } catch (error) {
-          finishSpan()
-          throw error
+
+            return streamSSE(c, async (stream) => {
+              try {
+                const bufferedChunks: Array<{
+                  id?: string
+                  event?: string
+                  data?: string
+                }> = []
+                let hasWebSearchCall = false
+                let completedResult: ResponsesResult | null = null
+                let detailedUsage = extractDetailedUsage(null)
+                let responseText = ""
+
+                for await (const chunk of withSseHeartbeat(response, stream)) {
+                  const chunkData = {
+                    id: (chunk as { id?: string }).id,
+                    event: (chunk as { event?: string }).event,
+                    data: (chunk as { data?: string }).data ?? "",
+                  }
+                  bufferedChunks.push(chunkData)
+
+                  if (hasBufferedWebSearchCall(chunkData)) {
+                    hasWebSearchCall = true
+                  }
+
+                  const parsedResponse = getCompletedBufferedResponse(chunkData)
+                  if (parsedResponse) {
+                    completedResult = parsedResponse
+                    detailedUsage = extractDetailedUsage(parsedResponse.usage)
+                    responseText = parsedResponse.output_text
+                  }
+                }
+
+                streamSpan.setAttribute(
+                  "gen_ai.usage.input_tokens",
+                  detailedUsage.inputTokens,
+                )
+                streamSpan.setAttribute(
+                  "gen_ai.usage.output_tokens",
+                  detailedUsage.outputTokens,
+                )
+                setDetailedTokenAttributes(streamSpan, {
+                  cachedTokens: detailedUsage.cachedTokens,
+                  reasoningTokens: detailedUsage.reasoningTokens,
+                })
+                setSentryOutputMessages(streamSpan, responseText)
+
+                if (hasWebSearchCall && completedResult) {
+                  finishSpan()
+                  // Inside the already-open stream: the resolver loops full
+                  // generations plus live web fetches, so it needs keep-alives.
+                  const resolved = await withHeartbeatWhilePending(
+                    Sentry.withActiveSpan(null, () =>
+                      resolveResponsesWebSearchCalls(
+                        completedResult,
+                        preparedPayload,
+                        {
+                          copilotSessionToken,
+                          vision,
+                          initiator,
+                          signal: c.req.raw.signal,
+                        },
+                      ),
+                    ),
+                    stream,
+                  )
+                  await emitResponsesResultAsStream(
+                    stream,
+                    withRequestedResponseModel(resolved, requestedModel),
+                  )
+                  return
+                }
+
+                const idTracker = createStreamIdTracker()
+                for (const chunk of bufferedChunks) {
+                  const restoredData = rewriteResponseModelInEvent(
+                    chunk.data ?? "",
+                    requestedModel,
+                  )
+                  const processedData = fixStreamIds(
+                    restoredData,
+                    chunk.event,
+                    idTracker,
+                  )
+                  await stream.writeSSE({
+                    id: chunk.id,
+                    event: chunk.event,
+                    data: processedData,
+                  })
+                }
+              } catch (error) {
+                if (isAbortError(error)) return
+                throw error
+              } finally {
+                finishSpan()
+              }
+            })
+          } catch (error) {
+            finishSpan()
+            throw error
+          }
+        },
+      )
+    }
+
+    const { initialResult, hadWebSearch } = await Sentry.startSpan(
+      createSentryChatSpanOptions({
+        inputMessages,
+        model: preparedPayload.model,
+      }),
+      async (span) => {
+        const result = (await createResponses(preparedPayload, {
+          copilotSessionToken,
+          vision,
+          initiator,
+          prepared: true,
+          signal: c.req.raw.signal,
+        })) as ResponsesResult
+
+        const accountId = getLastUsedAccountId()
+        if (accountId !== undefined) {
+          setRequestContext(c, { accountId })
         }
+
+        const hadWebSearch = result.output.some(
+          (item: ResponseOutputItem) =>
+            item.type === "function_call" && item.name === "web_search",
+        )
+        const inputTokens = result.usage?.input_tokens ?? 0
+        const outputTokens = result.usage?.output_tokens ?? 0
+        span.setAttribute("gen_ai.usage.input_tokens", inputTokens)
+        span.setAttribute("gen_ai.usage.output_tokens", outputTokens)
+        const cachedTokens =
+          result.usage?.input_tokens_details?.cached_tokens ?? 0
+        const reasoningTokens =
+          result.usage?.output_tokens_details?.reasoning_tokens ?? 0
+        setDetailedTokenAttributes(span, { cachedTokens, reasoningTokens })
+        setSentryOutputMessages(span, result.output_text)
+
+        return { initialResult: result, hadWebSearch }
       },
     )
-  }
 
-  const { initialResult, hadWebSearch } = await Sentry.startSpan(
-    createSentryChatSpanOptions({
-      inputMessages,
-      model: preparedPayload.model,
-    }),
-    async (span) => {
-      const result = (await createResponses(preparedPayload, {
-        copilotSessionToken,
-        vision,
-        initiator,
-        prepared: true,
-        signal: c.req.raw.signal,
-      })) as ResponsesResult
+    const resolved =
+      hadWebSearch ?
+        await resolveResponsesWebSearchCalls(initialResult, preparedPayload, {
+          copilotSessionToken,
+          vision,
+          initiator,
+          signal: c.req.raw.signal,
+        })
+      : initialResult
 
-      const accountId = getLastUsedAccountId()
-      if (accountId !== undefined) {
-        setRequestContext(c, { accountId })
-      }
+    logger.debug("Forwarding native Responses result", {
+      model: resolved.model,
+      outputCount: resolved.output.length,
+      status: resolved.status,
+    })
 
-      const hadWebSearch = result.output.some(
-        (item: ResponseOutputItem) =>
-          item.type === "function_call" && item.name === "web_search",
-      )
-      const inputTokens = result.usage?.input_tokens ?? 0
-      const outputTokens = result.usage?.output_tokens ?? 0
-      span.setAttribute("gen_ai.usage.input_tokens", inputTokens)
-      span.setAttribute("gen_ai.usage.output_tokens", outputTokens)
-      const cachedTokens =
-        result.usage?.input_tokens_details?.cached_tokens ?? 0
-      const reasoningTokens =
-        result.usage?.output_tokens_details?.reasoning_tokens ?? 0
-      setDetailedTokenAttributes(span, { cachedTokens, reasoningTokens })
-      setSentryOutputMessages(span, result.output_text)
-
-      return { initialResult: result, hadWebSearch }
-    },
-  )
-
-  const resolved =
-    hadWebSearch ?
-      await resolveResponsesWebSearchCalls(initialResult, preparedPayload, {
-        copilotSessionToken,
-        vision,
-        initiator,
-        signal: c.req.raw.signal,
-      })
-    : initialResult
-
-  logger.debug("Forwarding native Responses result", {
-    model: resolved.model,
-    outputCount: resolved.output.length,
-    status: resolved.status,
+    return c.json(withRequestedResponseModel(resolved, requestedModel))
   })
-
-  return c.json(withRequestedResponseModel(resolved, requestedModel))
 }
 
 function resolveResponsesSessionToken(

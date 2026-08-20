@@ -28,6 +28,7 @@ const SAFE_EVENT_HEADER_NAMES = new Set([
   "x-github-request-id",
 ])
 const QUOTA_SNAPSHOT_PREFIX = "x-quota-snapshot-"
+const AFFINITY_CLIENT_METADATA_KEYS = new Set(["session_id", "thread_id"])
 
 export interface ParsedResponseCreateFrame {
   attribution: CopilotRequestAttribution
@@ -200,6 +201,15 @@ export function resolveResponsesContinuation(
     )
   }
   if (
+    typeof payload.model === "string"
+    && payload.model !== snapshotPayload.model
+  ) {
+    return continuationError(
+      "invalid_request_error",
+      "Continuation model must match the previous response model.",
+    )
+  }
+  if (
     !isContinuationInput(snapshotPayload.input)
     || !isContinuationInput(payload.input)
   ) {
@@ -224,14 +234,40 @@ export function rehydrateContinuationPayloadFromSnapshot(
     snapshotClone.input,
     payloadClone.input,
   )
+  const { model: _ignoredModel, ...safePayloadClone } = payloadClone
+  const clientMetadata = mergeContinuationClientMetadata(
+    snapshotClone.client_metadata,
+    payloadClone.client_metadata,
+  )
 
   return {
     ...snapshotClone,
-    ...payloadClone,
+    ...safePayloadClone,
+    ...(clientMetadata === undefined ?
+      {}
+    : { client_metadata: clientMetadata }),
     ...(mergedInput !== undefined ? { input: mergedInput } : {}),
     previous_response_id: undefined,
     generate: undefined,
   }
+}
+
+function mergeContinuationClientMetadata(
+  snapshotMetadata: ResponsesPayload["client_metadata"],
+  currentMetadata: ResponsesPayload["client_metadata"],
+): ResponsesPayload["client_metadata"] {
+  const snapshotRecord =
+    isRecord(snapshotMetadata) ? snapshotMetadata : undefined
+  const currentRecord = isRecord(currentMetadata) ? currentMetadata : undefined
+  if (!snapshotRecord) return currentRecord
+  if (!currentRecord) return snapshotRecord
+
+  const merged = structuredClone(currentRecord)
+  for (const key of AFFINITY_CLIENT_METADATA_KEYS) {
+    if (Object.hasOwn(snapshotRecord, key)) merged[key] = snapshotRecord[key]
+    else Reflect.deleteProperty(merged, key)
+  }
+  return merged
 }
 
 export function rehydrateContinuationPayload(

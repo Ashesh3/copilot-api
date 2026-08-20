@@ -8,7 +8,11 @@ import { streamSSE, type SSEMessage } from "hono/streaming"
 import type { EndpointRouteDecision } from "~/lib/endpoint-routing"
 import type { Model } from "~/services/copilot/get-models"
 
-import { getLastUsedAccountId } from "~/lib/account-router"
+import {
+  getLastUsedAccountId,
+  runWithRoutedModelSelection,
+  selectRoutedModel,
+} from "~/lib/account-router"
 import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
 import {
@@ -237,10 +241,8 @@ async function handleCompletionInner(
     reasoningEffort,
   })
 
-  // Find the selected model
-  const selectedModel = state.models?.data.find(
-    (model) => model.id === payload.model,
-  )
+  const routedModel = selectRoutedModel(payload.model)
+  const selectedModel = routedModel.model
 
   const decision = selectChatUpstreamEndpoint({ payload, selectedModel })
   if ("code" in decision) throw createEndpointTranslationError(decision)
@@ -250,15 +252,23 @@ async function handleCompletionInner(
 
   if (state.manualApprove) await awaitApproval()
 
-  return await dispatchCopilotCompletion(c, {
-    payload,
-    requestedModel,
-    reasoningEffort,
-    selectedModel,
-    decision,
-    nativeOptions: { ...nativeOptions, requestedModel, copilotSessionToken },
-    copilotSessionToken,
-  })
+  return await runWithRoutedModelSelection(
+    routedModel,
+    async () =>
+      await dispatchCopilotCompletion(c, {
+        payload,
+        requestedModel,
+        reasoningEffort,
+        selectedModel,
+        decision,
+        nativeOptions: {
+          ...nativeOptions,
+          requestedModel,
+          copilotSessionToken,
+        },
+        copilotSessionToken,
+      }),
+  )
 }
 
 async function dispatchCopilotCompletion(
