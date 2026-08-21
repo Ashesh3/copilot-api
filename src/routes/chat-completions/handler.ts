@@ -474,7 +474,12 @@ async function handleCustomProviderStreamingResponse(
           continue
         }
         let outChunk = chunk
-        const parsed = JSON.parse(chunk.data) as ChatCompletionChunk
+        const parsedValue = JSON.parse(chunk.data) as unknown
+        if (isReceivedChatStreamError(parsedValue)) {
+          await adapter.failReceived(parsedValue.error)
+          break
+        }
+        const parsed = parsedValue as ChatCompletionChunk
         if (parsed.usage) {
           setRequestContext(c, {
             inputTokens: parsed.usage.prompt_tokens,
@@ -990,7 +995,12 @@ const handleStreamingResponse = (
               }
               let outChunk = chunk
               // Capture usage from final chunk if available
-              const parsed = JSON.parse(chunk.data) as ChatCompletionChunk
+              const parsedValue = JSON.parse(chunk.data) as unknown
+              if (isReceivedChatStreamError(parsedValue)) {
+                await adapter.failReceived(parsedValue.error)
+                break
+              }
+              const parsed = parsedValue as ChatCompletionChunk
               if (parsed.usage) {
                 streamInputTokens = parsed.usage.prompt_tokens
                 streamOutputTokens = parsed.usage.completion_tokens
@@ -1059,11 +1069,23 @@ const isNonStreaming = (
   && response !== null
   && Object.hasOwn(response, "choices")
 
-function hasChatFinalChunk(chunk: ChatCompletionChunk): boolean {
-  return chunk.choices.some((choice) => {
+function hasChatFinalChunk(chunk: unknown): boolean {
+  if (typeof chunk !== "object" || chunk === null) return false
+  const choices = (chunk as { choices?: unknown }).choices
+  if (!Array.isArray(choices)) return false
+  return choices.some((choice) => {
+    if (typeof choice !== "object" || choice === null) return false
     const finishReason = (choice as { finish_reason?: unknown }).finish_reason
     return finishReason !== null && finishReason !== undefined
   })
+}
+
+function isReceivedChatStreamError(
+  value: unknown,
+): value is { error: unknown } {
+  return (
+    typeof value === "object" && value !== null && Object.hasOwn(value, "error")
+  )
 }
 
 function parseTrailingChatUsageChunk(

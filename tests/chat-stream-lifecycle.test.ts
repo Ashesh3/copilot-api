@@ -126,6 +126,43 @@ test.each([
   { name: "native", model: "chat-lifecycle-model" },
   { name: "custom", model: "custom-lifecycle-model" },
 ])(
+  "preserves one received $name Chat error without a generic duplicate or report",
+  async ({ model }) => {
+    const logSpy = spyOn(consola, "error")
+    const sentrySpy = spyOn(Sentry, "captureException").mockImplementation(
+      () => "event-id",
+    )
+    try {
+      const receivedError = {
+        type: "invalid_request_error",
+        message: `${model}-received-error`,
+        code: "invalid_value",
+      }
+      const responsePromise = postChat(model)
+      await waitForUpstreamController()
+      enqueueRaw(JSON.stringify({ error: receivedError }))
+      enqueueRaw("[DONE]")
+      upstreamController?.close()
+
+      const body = await (await responsePromise).text()
+      expect(errorFrames(body)).toEqual([{ error: receivedError }])
+      expect(doneCount(body)).toBe(1)
+      expect(body).not.toContain(
+        "An unexpected error occurred during streaming.",
+      )
+      expect(logSpy).not.toHaveBeenCalled()
+      expect(sentrySpy).not.toHaveBeenCalled()
+    } finally {
+      logSpy.mockRestore()
+      sentrySpy.mockRestore()
+    }
+  },
+)
+
+test.each([
+  { name: "native", model: "chat-lifecycle-model" },
+  { name: "custom", model: "custom-lifecycle-model" },
+])(
   "repairs a $name final chunk that lacks an upstream DONE sentinel",
   async ({ model }) => {
     const responsePromise = postChat(model)

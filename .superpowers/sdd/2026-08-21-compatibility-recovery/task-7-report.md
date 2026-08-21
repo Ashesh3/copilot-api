@@ -42,3 +42,21 @@
   - pass.
 
 No full test suite was run, per the task instruction.
+
+## P1 review fix: received native/custom Chat errors
+
+- Added mounted native and custom-provider coverage for in-band Chat error
+  objects.
+- RED: `task-7-review-red.log` reproduced one received error being rewritten
+  with a model field, followed by a second proxy-authored generic error.
+- The native/custom handlers now detect `{ error: ... }` before usage, model,
+  or choices processing and transition through `failReceived` without writing
+  the upstream frame separately.
+- The final-chunk predicate now validates runtime object and choices-array shape
+  before inspecting finish reasons.
+- GREEN: `tests/chat-stream-lifecycle.test.ts` passes 22 tests, including exact
+  one-error/one-`[DONE]` behavior with no HTTP report for both paths.
+- Final focused verification:
+  - Chat lifecycle, Responses fallback, Anthropic bridge, and live Chat
+    integration: 92 pass, 0 fail.
+  - Typecheck, build, selected lint, and `git diff --check`: pass.
