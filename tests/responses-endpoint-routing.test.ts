@@ -476,6 +476,113 @@ test("keeps native Responses priority for hosted web search", async () => {
   expect(lastUpstreamPayload).toHaveProperty("tools.0.type", "web_search")
 })
 
+test("preserves future native Responses data without fallback tool rewrites", async () => {
+  installModel({
+    supported_endpoints: ["/responses", "/v1/messages", "/chat/completions"],
+  })
+
+  const response = await postResponses({
+    input: [{ type: "future_input", future: { nested: true } }],
+    future_top_level: { retained: [1, 2] },
+    background: { future: true },
+    previous_response_id: "resp_previous",
+    context_management: { future: "shape" },
+    tools: [
+      {
+        type: "custom",
+        name: "apply_patch",
+        format: { type: "grammar", syntax: "lark", definition: "start: /.+/" },
+      },
+      { type: "web_search", external_web_access: true },
+      { type: "mcp", server_label: "native", future: { retained: true } },
+    ],
+    store: true,
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/responses")
+  expect(lastUpstreamPayload).toMatchObject({
+    future_top_level: { retained: [1, 2] },
+    background: { future: true },
+    previous_response_id: "resp_previous",
+    context_management: { future: "shape" },
+    store: false,
+    tools: [
+      { type: "custom", name: "apply_patch" },
+      { type: "web_search", external_web_access: true },
+      { type: "mcp", server_label: "native", future: { retained: true } },
+    ],
+  })
+  expect(lastUpstreamPayload).not.toHaveProperty("tools.0.parameters")
+  expect(lastUpstreamPayload).not.toHaveProperty("tools.1.name", "web_search")
+})
+
+test("preserves future native Responses data on the streaming first wire", async () => {
+  installModel({ supported_endpoints: ["/responses"] })
+  fetchMock.mockImplementationOnce((url, init) => {
+    const rawUrl = typeof url === "string" || url instanceof URL ? url : url.url
+    lastUpstreamPath = new URL(rawUrl).pathname
+    lastUpstreamPayload =
+      typeof init?.body === "string" ?
+        (JSON.parse(init.body) as Record<string, unknown>)
+      : undefined
+    return createTerminalResponsesStream(
+      "response.completed",
+      "stream-future-marker",
+    )
+  })
+
+  const response = await postResponses({
+    input: "hello",
+    stream: true,
+    future_top_level: { retained: true },
+    previous_response_id: "resp_stream_previous",
+    tools: [{ type: "future_tool", config: { mode: "native" } }],
+    store: true,
+  })
+  await response.text()
+
+  expect(lastUpstreamPath).toBe("/responses")
+  expect(lastUpstreamPayload).toMatchObject({
+    stream: true,
+    future_top_level: { retained: true },
+    previous_response_id: "resp_stream_previous",
+    tools: [{ type: "future_tool", config: { mode: "native" } }],
+    store: false,
+  })
+})
+
+test("strips native HTTP warmup control before the Responses wire", async () => {
+  installModel({ supported_endpoints: ["/responses"] })
+
+  const response = await postResponses({
+    input: "warmup",
+    generate: false,
+    future_top_level: { retained: true },
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/responses")
+  expect(lastUpstreamPayload).toMatchObject({
+    input: "warmup",
+    future_top_level: { retained: true },
+    store: false,
+  })
+  expect(lastUpstreamPayload).not.toHaveProperty("generate")
+})
+
+test("keeps future tools on the strict fallback boundary until Task 14", async () => {
+  installModel({ supported_endpoints: ["/chat/completions"] })
+
+  const response = await postResponses({
+    input: "hello",
+    tools: [{ type: "mcp", server_label: "native" }],
+  })
+
+  expect(response.status).toBe(400)
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
 test("normalizes Responses controls before Messages fallback conversion", async () => {
   installModel({ supported_endpoints: ["/v1/messages"] })
 

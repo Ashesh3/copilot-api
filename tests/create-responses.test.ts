@@ -1591,22 +1591,39 @@ test("keeps Responses header affinity over metadata and ignores malformed metada
   expect(capturedAffinity).toBeUndefined()
 })
 
-test("rejects previous_response_id for HTTP Responses API requests", async () => {
-  const error = await createResponses(
-    { model: "gpt-4o", input: "Hello", previous_response_id: "resp_previous" },
-    { vision: false, initiator: "user" },
-  ).catch((caught: unknown) => caught)
-  expect(error).toMatchObject({
-    response: { status: 400 },
-    clientBody: {
-      error: {
-        code: "unsupported_value",
-        param: "previous_response_id",
-        type: "invalid_request_error",
-      },
-    },
+test("preserves native Responses state, context, future fields, and tools", async () => {
+  state.models = responsesCapableModels
+  const payload = {
+    model: "gpt-4o",
+    input: [{ type: "future_input", future: { nested: true } }],
+    future_top_level: { retained: [1, 2] },
+    background: { future: true },
+    previous_response_id: "resp_previous",
+    service_tier: { future: "priority" },
+    context_management: { future: "shape" },
+    tools: [
+      { name: "safe malformed evidence" },
+      { type: "mcp", server_label: "native", future: { retained: true } },
+    ],
+    store: true,
+  }
+
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
   })
-  expect(fetchMock).not.toHaveBeenCalled()
+
+  expect(response.status).toBe(200)
+  expect(requestBodies).toHaveLength(1)
+  expect(requestBodies[0]).toEqual({
+    ...payload,
+    model: "gpt-4o",
+    store: false,
+    tools: [
+      { type: "mcp", server_label: "native", future: { retained: true } },
+    ],
+  })
 })
 
 test.each([

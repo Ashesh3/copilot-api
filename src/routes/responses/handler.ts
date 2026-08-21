@@ -104,7 +104,9 @@ import {
 import { canonicalizeAnthropicBeta } from "~/services/copilot/messages-contract"
 import { normalizeResponsesAttachmentsFailClosed } from "~/services/copilot/responses-attachments"
 import {
+  finalizeNativeResponsesRequest,
   finalizeResponsesRequest,
+  type PreparedResponsesSource,
   prepareResponsesRequest,
 } from "~/services/copilot/responses-contract"
 
@@ -744,7 +746,8 @@ function readResponseEventDataProperty(
 
 export const handleResponses = async (c: Context) => {
   const payload = await parseResponsesRequestBody(c)
-  prepareResponsesRequest(payload)
+  const preparedSource = prepareResponsesRequest(payload)
+  const sourcePayload = preparedSource.source
   const nativeOptions: NativeMessagesRequestOptions = {
     anthropicBeta: c.req.header("anthropic-beta"),
     anthropicVersion: c.req.header("anthropic-version"),
@@ -752,26 +755,28 @@ export const handleResponses = async (c: Context) => {
   }
   installRoutingAffinityFallback(
     resolveResponsesRoutingAffinity(
-      (payload as Record<string, unknown>).client_metadata,
+      (sourcePayload as Record<string, unknown>).client_metadata,
     ),
   )
-  const conversationId = setSentryConversationIdFromRequest(c, payload)
+  const conversationId = setSentryConversationIdFromRequest(c, sourcePayload)
 
-  const model = parseModelSuffix(payload.model).baseModel
+  const model = parseModelSuffix(sourcePayload.model).baseModel
 
   return await Sentry.startSpan(
     createSentryInvokeAgentSpanOptions(model, conversationId),
     async () => {
-      return await handleResponsesInner(c, payload, nativeOptions)
+      return await handleResponsesInner(c, {
+        legacyPayload: structuredClone(payload),
+        nativeOptions,
+        preparedSource,
+      })
     },
   )
 }
 
-async function parseResponsesRequestBody(
-  c: Context,
-): Promise<ResponsesPayload> {
+async function parseResponsesRequestBody(c: Context): Promise<unknown> {
   try {
-    return await c.req.json<ResponsesPayload>()
+    return await c.req.json<unknown>()
   } catch {
     throw createInvalidJsonBodyError()
   }
@@ -779,9 +784,17 @@ async function parseResponsesRequestBody(
 
 const handleResponsesInner = async (
   c: Context,
-  payload: ResponsesPayload,
-  nativeOptions: NativeMessagesRequestOptions,
+  options: {
+    legacyPayload: unknown
+    nativeOptions: NativeMessagesRequestOptions
+    preparedSource: PreparedResponsesSource
+  },
 ) => {
+  const payload = structuredClone(
+    options.preparedSource.source,
+  ) as ResponsesPayload
+  const legacyPayload = options.legacyPayload as ResponsesPayload
+  const nativeOptions = options.nativeOptions
   // Emit synthetic tool execution spans from tool results in input history
   emitResponsesToolSpans(payload.input)
 
@@ -795,6 +808,7 @@ const handleResponsesInner = async (
 
   payload.model = normalizeModelName(baseModel)
   const effectiveEffort = normalizeResponsesReasoning(payload, suffixEffort)
+  syncLegacyResponsesRouteState(legacyPayload, payload)
   const redirect = await resolveResponsesRedirect(c, {
     model: payload.model,
     effectiveEffort,
@@ -820,6 +834,7 @@ const handleResponsesInner = async (
     effort: redirectedEffort,
     preserveNumericEffort: typeof effectiveEffort === "number",
   })
+  syncLegacyResponsesRouteState(legacyPayload, payload)
   const finalEffort = redirectedEffort ?? effectiveEffort
 
   const copilotSessionToken = resolveResponsesSessionToken(c, {
@@ -827,6 +842,7 @@ const handleResponsesInner = async (
     redirectOccurred: redirect.redirected,
     requestedModel: baseModel,
   })
+  legacyPayload.model = payload.model
 
   setRequestContext(c, {
     requestedModel,
@@ -842,11 +858,19 @@ const handleResponsesInner = async (
 
   // Expand compaction items back into regular messages
   expandCompactionItems(payload)
-  disableParallelWebSearch(payload)
+  expandCompactionItems(legacyPayload)
 
   const routedModel = selectRoutedModel(payload.model)
   const selectedModel = routedModel.model
-  const route = await prepareResponsesRoute(c, payload, selectedModel)
+  const support = getModelEndpointSupport(selectedModel)
+  const route =
+    support.responses ?
+      prepareNativeResponsesHttpRoute({
+        payload,
+        preparedSource: options.preparedSource,
+        selectedModel,
+      })
+    : await prepareResponsesRoute(c, legacyPayload, selectedModel)
   const { decision, preparedPayload } = route
   if (decision.target === "/v1/messages") {
     recordCopilotMessagesBeta(
@@ -1054,6 +1078,20 @@ const handleResponsesInner = async (
   })
 }
 
+function syncLegacyResponsesRouteState(
+  legacyPayload: ResponsesPayload,
+  routedPayload: ResponsesPayload,
+): void {
+  legacyPayload.model = routedPayload.model
+  delete legacyPayload.reasoningEffort
+  delete legacyPayload.reasoning_effort
+  if (routedPayload.reasoning === undefined) {
+    delete legacyPayload.reasoning
+    return
+  }
+  legacyPayload.reasoning = structuredClone(routedPayload.reasoning)
+}
+
 function resolveResponsesSessionToken(
   c: Context,
   options: {
@@ -1090,6 +1128,40 @@ async function prepareResponsesRoute(
     selectedModel,
     signal: c.req.raw.signal,
   })
+}
+
+function prepareNativeResponsesHttpRoute(options: {
+  payload: ResponsesPayload
+  preparedSource: PreparedResponsesSource
+  selectedModel: Model | undefined
+}): {
+  decision: EndpointRouteDecision
+  preparedPayload: ResponsesPayload
+} {
+  const finalized = finalizeNativeResponsesRequest(
+    {
+      source: options.payload,
+      normalizationClasses: options.preparedSource.normalizationClasses,
+    },
+    {
+      model: options.payload.model,
+      defaultEffort: getModelReasoningConfig(options.payload.model)
+        ?.defaultEffort,
+      implicitDefault: usesImplicitReasoningDefault(options.payload.model),
+    },
+  )
+  const preparedPayload = stripResponsesWarmupControl(finalized.body)
+  disableParallelWebSearch(preparedPayload)
+  const decision = selectResponsesUpstreamEndpoint({
+    payload: preparedPayload,
+    selectedModel: options.selectedModel,
+  })
+  if ("code" in decision) throw createEndpointTranslationError(decision)
+  recordCopilotRequestNormalization("responses", [
+    ...finalized.normalizationClasses,
+  ])
+  recordCopilotEndpointRoute(decision)
+  return { decision, preparedPayload }
 }
 
 export async function prepareResponsesRouteForTransport(options: {
