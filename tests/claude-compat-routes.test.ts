@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test"
 
+import { setIpAllowlistForTest } from "../src/lib/ip-allowlist"
 import {
   isIpBlocked,
   recordFailedAttempt,
@@ -19,6 +20,7 @@ const VERIFIER = "v".repeat(64)
 let oauthStore: OAuthStore
 
 beforeEach(() => {
+  setIpAllowlistForTest([])
   state.apiKeyAuth = GATEWAY_KEY
   resetIpSecurityForTest()
   oauthStore = new OAuthStore()
@@ -26,6 +28,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  setIpAllowlistForTest([])
   resetIpSecurityForTest()
   state.apiKeyAuth = undefined
   setOAuthStoreForTest(null)

@@ -3,9 +3,14 @@ import type { Context } from "hono"
 import consola from "consola"
 
 import {
+  clearIpAllowlist,
   isManagedIpAllowed,
+  isManagedIpAllowedForTransparentProxy,
   isManagedIpDisabled,
   normalizeIpAddress,
+  promoteAuthenticatedIpAllowlistEntry,
+  removeIpAllowlistEntry,
+  setIpAllowlistEntryEnabled,
 } from "./ip-allowlist"
 
 export const AUTH_FAILURE_WINDOW_MS = 24 * 60 * 60 * 1000
@@ -31,6 +36,8 @@ const PEER_IP_HEADER = "x-copilot-peer-ip"
 const DEFAULT_TRUSTED_PROXY_CIDRS = "127.0.0.1/32,::1/128"
 const ipTracker = new Map<string, IpEntry>()
 const ipLeases = new Map<string, IpLease>()
+const authenticatedIps = new Set<string>()
+let securityOperation: Promise<void> = Promise.resolve()
 let trustedProxyCache: { raw: string; ranges: Array<CidrRange> } | undefined
 
 function ipv4ToBigInt(ip: string): bigint {
@@ -170,6 +177,23 @@ export async function isIpAllowedForWhitelistedRoute(
 ): Promise<boolean> {
   const normalized = normalizeIpAddress(ip)
   if (!normalized || (await isManagedIpDisabled(normalized))) return false
+  return (
+    isIpWhitelisted(normalized)
+    || (await isManagedIpAllowedForTransparentProxy(normalized))
+  )
+}
+
+export async function isIpAllowedForTransparentProxy(
+  ip: string,
+): Promise<boolean> {
+  return await isIpAllowedForWhitelistedRoute(ip)
+}
+
+export async function isIpAllowedForTranscription(
+  ip: string,
+): Promise<boolean> {
+  const normalized = normalizeIpAddress(ip)
+  if (!normalized || (await isManagedIpDisabled(normalized))) return false
   return isIpWhitelisted(normalized) || (await isManagedIpAllowed(normalized))
 }
 
@@ -197,6 +221,7 @@ export function isIpBanned(ip: string): boolean {
 export function isIpBlocked(ip: string): boolean {
   const normalized = normalizeIpAddress(ip)
   if (!normalized) return true
+  if (authenticatedIps.has(normalized)) return false
   if (isIpWhitelisted(normalized)) return false
   return hasActiveBan(normalized)
 }
@@ -204,6 +229,7 @@ export function isIpBlocked(ip: string): boolean {
 export function recordFailedAttempt(ip: string): number {
   const normalized = normalizeIpAddress(ip)
   if (!normalized) return AUTH_FAILURE_THRESHOLD
+  if (authenticatedIps.has(normalized)) return 0
 
   const currentTime = Date.now()
   const entry = ipTracker.get(normalized) ?? { failures: [] }
@@ -238,8 +264,76 @@ export function clearFailedAttempts(ip: string): boolean {
   return normalized ? ipTracker.delete(normalized) : false
 }
 
+/**
+ * A successfully resolved data-plane credential is sufficient proof to stop
+ * counting future failures from this client IP for the process lifetime. The
+ * persistent allowlist is best effort: auth success must survive a disk error.
+ */
+export async function trustAuthenticatedIp(ip: string): Promise<boolean> {
+  const normalized = normalizeIpAddress(ip)
+  if (!normalized) return false
+  return await serializeSecurityOperation(async () => {
+    authenticatedIps.add(normalized)
+    ipTracker.delete(normalized)
+    try {
+      await promoteAuthenticatedIpAllowlistEntry(normalized)
+    } catch (error) {
+      consola.error(
+        "[security] Failed to persist authenticated IP allowlist entry:",
+        error,
+      )
+    }
+    return true
+  })
+}
+
+export async function removeIpSecurityPolicy(ip: string): Promise<boolean> {
+  const normalized = normalizeIpAddress(ip)
+  if (!normalized) return false
+  return await serializeSecurityOperation(async () => {
+    const removedLease = ipLeases.delete(normalized)
+    const removedTrust = authenticatedIps.delete(normalized)
+    const removedDurable = await removeIpAllowlistEntry(normalized)
+    return removedLease || removedTrust || removedDurable
+  })
+}
+
+export async function setIpSecurityPolicyEnabled(ip: string, enabled: boolean) {
+  const normalized = normalizeIpAddress(ip)
+  if (!normalized) return null
+  return await serializeSecurityOperation(async () => {
+    if (!enabled) {
+      ipLeases.delete(normalized)
+      authenticatedIps.delete(normalized)
+    }
+    return await setIpAllowlistEntryEnabled(normalized, enabled)
+  })
+}
+
+export async function clearIpSecurityPolicy(): Promise<number> {
+  return await serializeSecurityOperation(async () => {
+    ipLeases.clear()
+    authenticatedIps.clear()
+    const removed = await clearIpAllowlist()
+    return removed.length
+  })
+}
+
+function serializeSecurityOperation<T>(
+  operation: () => Promise<T>,
+): Promise<T> {
+  const result = securityOperation.then(operation, operation)
+  securityOperation = result.then(
+    () => undefined,
+    () => undefined,
+  )
+  return result
+}
+
 export function resetIpSecurityForTest(): void {
   ipTracker.clear()
   ipLeases.clear()
+  authenticatedIps.clear()
+  securityOperation = Promise.resolve()
   trustedProxyCache = undefined
 }

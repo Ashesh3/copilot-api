@@ -1,6 +1,7 @@
-import { afterAll, beforeAll, expect, test } from "bun:test"
+import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test"
 import { randomBytes } from "node:crypto"
 
+import { setIpAllowlistForTest } from "~/lib/ip-allowlist"
 import { clearLlmDebugLogs, listLlmDebugLogs } from "~/lib/llm-debug-log"
 import {
   getAllModelRedirects,
@@ -65,6 +66,7 @@ const responsesModels = [
 ].slice(0, MAX_LIVE_MODEL_CANDIDATES)
 
 beforeAll(() => {
+  setIpAllowlistForTest([])
   previousGatewayKey = state.apiKeyAuth
   setModelRedirectsForTest([])
   if (responsesModels.length === 0) return
@@ -79,12 +81,17 @@ beforeAll(() => {
   })
 }, LIVE_TIMEOUT)
 
+beforeEach(() => {
+  setIpAllowlistForTest([])
+})
+
 afterAll(async () => {
   try {
     await localServer?.stop(true)
   } finally {
     clearLlmDebugLogs()
     state.apiKeyAuth = previousGatewayKey
+    setIpAllowlistForTest([])
     setModelRedirectsForTest(previousModelRedirects)
   }
 }, LIVE_TIMEOUT)

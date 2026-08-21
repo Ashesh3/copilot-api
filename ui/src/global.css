@@ -57,6 +57,7 @@ body {
 }
 
 .confirm-dialog {
+  direction: ltr;
   overflow-wrap: anywhere;
   word-break: break-word;
 }
@@ -70,6 +71,7 @@ body {
 .confirm-dialog .astryx-text {
   display: block;
   max-width: 100%;
+  text-align: left;
   white-space: normal;
   overflow-wrap: anywhere;
   word-break: break-word;

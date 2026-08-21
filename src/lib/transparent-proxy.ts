@@ -2,7 +2,7 @@ import type { Context } from "hono"
 
 import consola from "consola"
 
-import { extractClientIp, isIpAllowedForWhitelistedRoute } from "./ip-blocker"
+import { extractClientIp, isIpAllowedForTransparentProxy } from "./ip-blocker"
 import {
   createProxyRequestHeaders,
   createProxyResponseHeaders,
@@ -99,7 +99,7 @@ export async function isTransparentProxyClientWhitelisted(
   c: Context,
 ): Promise<boolean> {
   const clientIp = extractClientIp(c)
-  return clientIp !== null && (await isIpAllowedForWhitelistedRoute(clientIp))
+  return clientIp !== null && (await isIpAllowedForTransparentProxy(clientIp))
 }
 
 export async function transparentProxy(c: Context): Promise<Response> {

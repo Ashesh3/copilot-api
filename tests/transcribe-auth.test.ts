@@ -76,7 +76,7 @@ afterAll(() => {
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
 })
 
-test("configured API-key auth does not permanently whitelist transcribe IP", async () => {
+test("configured inference auth persistently authorizes the same IP for transcribe only", async () => {
   const clientIp = "203.0.113.44"
 
   const modelsResponse = await server.request("/v1/models", {
@@ -102,7 +102,43 @@ test("configured API-key auth does not permanently whitelist transcribe IP", asy
     body: formData,
   })
 
-  expect(transcribeResponse.status).toBe(401)
+  expect(transcribeResponse.status).toBe(200)
+
+  const transparentProxyResponse = await server.request("/api/desktop/update", {
+    headers: {
+      host: "claude.ai",
+      "x-copilot-peer-ip": "127.0.0.1",
+      "x-forwarded-for": clientIp,
+    },
+  })
+  expect(transparentProxyResponse.status).toBe(401)
+
+  const codexResponsesResponse = await server.request("/codex/responses", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-copilot-peer-ip": "127.0.0.1",
+      "x-forwarded-for": clientIp,
+    },
+    body: JSON.stringify({ instructions: "x", input: [] }),
+  })
+  expect(codexResponsesResponse.status).toBe(401)
+
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const wrongCredentialResponse = await server.request(
+      "/api/desktop/update",
+      {
+        headers: {
+          host: "claude.ai",
+          "x-api-key": "wrong-key",
+          "x-copilot-peer-ip": "127.0.0.1",
+          "x-forwarded-for": clientIp,
+        },
+      },
+    )
+    expect(wrongCredentialResponse.status).toBe(401)
+  }
+  expect(isIpBlocked(clientIp)).toBe(false)
 })
 
 test("transcribe still rejects an IP that has not authenticated", async () => {

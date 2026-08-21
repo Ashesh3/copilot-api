@@ -3,6 +3,7 @@ import {
   extractClientIpFromHeaders,
   isIpBlocked,
   recordFailedAttempt,
+  trustAuthenticatedIp,
 } from "./ip-blocker"
 
 export type ProtectedCredentialResult<T> =
@@ -19,6 +20,7 @@ export interface ProtectedCredentialOptions {
    * `401`; only the brute-force tracker is skipped.
    */
   recordFailures?: boolean
+  trustClientIp?: boolean
 }
 
 /**
@@ -36,13 +38,19 @@ export async function resolveProtectedCredential<T>(
   options: ProtectedCredentialOptions = {},
 ): Promise<ProtectedCredentialResult<T>> {
   const clientIp = extractClientIpFromHeaders(request.headers)
-  if (clientIp !== null && isIpBlocked(clientIp)) {
-    return { status: "blocked", clientIp }
-  }
-
   const credential = await resolve()
   if (credential !== null) {
+    if (clientIp !== null && options.trustClientIp) {
+      await trustAuthenticatedIp(clientIp)
+    }
+    if (clientIp !== null && isIpBlocked(clientIp)) {
+      return { status: "blocked", clientIp }
+    }
     return { status: "authorized", clientIp, credential }
+  }
+
+  if (clientIp !== null && isIpBlocked(clientIp)) {
+    return { status: "blocked", clientIp }
   }
 
   if (

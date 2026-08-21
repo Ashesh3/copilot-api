@@ -278,9 +278,14 @@ checks are recorded by normalized client IP. The third failure in a rolling
 Two denials are never recorded: a credential that resolves to a known principal
 but lacks the required kind or scope, and the Claude Code compatibility stubs
 that clients poll unprompted (telemetry, bootstrap, settings). Both still return
-`401`, and a ban earned on another surface still applies to them.
-Successful authentication does not erase prior failures or add the IP to the
-managed allowlist.
+`401`, and a ban earned on another surface still applies to them. Successful
+authoritative inference authentication clears prior failures, creates a
+process-local ban exemption, and persists an enabled allowlist entry for
+`/transcribe`. A new entry uses `source: "authenticated"`; an existing
+operator-created `manual` or `dashboard` entry is re-enabled and retains its
+source and transparent-proxy permission. Later missing or wrong credentials
+still return `401` but cannot re-ban that IP during the session. Newly automatic
+entries do not authorize credential-free transparent proxy inference.
 
 `config.json` also supports `auth.apiKeys`. When no startup key is active, those
 keys protect globally guarded API routes. If neither source configures a gateway
@@ -514,9 +519,14 @@ These are compatibility implementations, not hosted identity or cloud services.
   overrides on private networks where the client source address is preserved.
 
 The OAuth and bridge credentials above are the primary authorization boundary.
-Managed IP policy remains defense in depth for compatibility calls that need it;
-successful gateway or OAuth authentication never permanently promotes a source
-IP into that policy.
+After a gateway, inference-client, or correctly scoped OAuth credential
+authorizes a data-plane request, the resolved client IP is exempt from the
+process-local failure ban and is persisted as an enabled allowlist entry for
+`/transcribe`. New entries use the `authenticated` source; existing
+operator-created entries are re-enabled without changing their source or
+transparent-proxy permission. Missing or wrong credentials still return `401`;
+a newly automatic entry does not authorize credential-free transparent proxy
+inference.
 
 ### Codex Desktop
 
@@ -536,12 +546,14 @@ Origin. The gateway does not impose voice frame, audio, duration, idle,
 connection, or hourly traffic caps.
 
 Codex Desktop dictation at `POST /transcribe` is authorized only by the
-resolved managed/session-allowlisted client IP; a gateway credential does not
-grant access to that route. Current Desktop builds do not reliably attach their
-API-key credential to dictation. Add the source address observed by the gateway
-to the dashboard allowlist, then use the supplied trusted-host/TLS template and
-an intentional client-side host mapping. Transcript cleanup at
-`/codex/responses` remains credential-authenticated.
+resolved managed/session-allowlisted client IP. Current Desktop builds do not
+reliably attach their API-key credential to dictation, so a prior successful
+authoritative inference request automatically persists the observed IP for
+this route. An operator can also add it manually in the dashboard. Automatic
+authenticated entries do not permit credential-free transparent proxy calls;
+those still require credentials unless an operator-created allowlist entry or
+session lease applies. Transcript cleanup at `/codex/responses` remains
+credential-authenticated.
 
 Advanced TLS and proxy templates live under `nginx/`, including WebSocket
 upgrade headers and disabled response buffering without project-defined
@@ -834,8 +846,9 @@ WebSocket probes.
   capabilities for their respective routes.
 - **Trust IP headers only from exact proxy peers.** Configure
   `COPILOT_TRUSTED_PROXY_CIDRS` with the actual socket peers. Forwarding headers
-  from every other peer are ignored, and successful authentication does not
-  create a permanent IP allowlist entry.
+  from every other peer are ignored. Successful authoritative inference auth
+  persists the safely resolved IP for `/transcribe` and exempts it from the
+  process-local ban; it does not authorize credential-free inference.
 - **Protect the data directory.** It can contain GitHub tokens, gateway/provider
   keys, OAuth/admin digests, custom headers, routing policy, allowlists, and
   request history. Sensitive files and the directory are created with

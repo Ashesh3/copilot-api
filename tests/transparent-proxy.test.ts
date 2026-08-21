@@ -241,7 +241,7 @@ test("OAuth proxy sink rejects and records an explicitly invalid credential", as
   expect(fetchMock).not.toHaveBeenCalled()
 })
 
-test("OAuth proxy sink accepts a valid explicit credential unless the IP is banned", async () => {
+test("OAuth proxy sink valid explicit credentials recover actively banned IPs", async () => {
   const allowedIp = "198.51.100.22"
   const allowed = await server.request("/api/desktop/update", {
     headers: {
@@ -263,7 +263,8 @@ test("OAuth proxy sink accepts a valid explicit credential unless the IP is bann
       ...trustedHeaders(bannedIp),
     },
   })
-  expect(banned.status).toBe(401)
+  expect(banned.status).toBe(202)
+  expect(isIpBlocked(bannedIp)).toBe(false)
 })
 
 test("OAuth proxy sink accepts a valid explicit credential from an actively leased banned IP", async () => {

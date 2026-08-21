@@ -10,6 +10,7 @@ import {
   handleAddNebiusCustomProvider,
   handleAddReplacement,
   handleArchiveSession,
+  handleClearIpAllowlist,
   handleClearLlmDebugLogs,
   handleDeleteCustomProvider,
   handleDeleteFlag,
@@ -21,6 +22,7 @@ import {
   handleDeregisterEnvironment,
   handleDestroySession,
   handleGetLlmDebugLog,
+  handleGetCurrentIpAllowlistClient,
   handleGetSessionEvents,
   handleGetSettings,
   handleGetUsage,
@@ -163,7 +165,12 @@ dashboardRoutes.get("/api/usage-routing", handleGetUsageRouting)
 
 // IP Allowlist
 dashboardRoutes.get("/api/ip-allowlist", handleListIpAllowlist)
+dashboardRoutes.get(
+  "/api/ip-allowlist/current",
+  handleGetCurrentIpAllowlistClient,
+)
 dashboardRoutes.post("/api/ip-allowlist", handleSetIpAllowlistEntry)
+dashboardRoutes.delete("/api/ip-allowlist", handleClearIpAllowlist)
 dashboardRoutes.patch("/api/ip-allowlist/:ip", handleSetIpAllowlistEntry)
 dashboardRoutes.delete("/api/ip-allowlist/:ip", handleDeleteIpAllowlistEntry)
 

@@ -4,6 +4,7 @@ import {
   afterAll,
   afterEach,
   beforeAll,
+  beforeEach,
   describe,
   expect,
   mock,
@@ -22,6 +23,7 @@ import type { ModelsResponse } from "../src/services/copilot/get-models"
 import { setConfigForTest } from "../src/lib/config"
 import { getCopilotRequestAttribution } from "../src/lib/copilot-request-context"
 import { HTTPError, LocalHTTPError } from "../src/lib/error"
+import { setIpAllowlistForTest } from "../src/lib/ip-allowlist"
 import { isIpBlocked, resetIpSecurityForTest } from "../src/lib/ip-blocker"
 import { setModelRedirectsForTest } from "../src/lib/model-redirect"
 import {
@@ -151,6 +153,10 @@ afterAll(() => {
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
 })
 
+beforeEach(() => {
+  setIpAllowlistForTest([])
+})
+
 afterEach(() => {
   fetchMock.mockClear()
   lastRequestBody = undefined
@@ -169,6 +175,7 @@ afterEach(() => {
   setModelRedirectsForTest([])
   setConfigForTest(null)
   resetIpSecurityForTest()
+  setIpAllowlistForTest([])
   resetRoutingTelemetryForTest()
 })
 
@@ -425,7 +432,7 @@ describe("responses websocket upgrade handling", () => {
     ).toBe("upgraded")
   })
 
-  test("records missing and invalid upgrade credentials", async () => {
+  test("a valid inference upgrade recovers and promotes an actively banned IP", async () => {
     state.apiKeyAuth = "cli-secret"
     const clientIp = "198.51.100.91"
     const server = { upgrade: () => true }
@@ -456,7 +463,8 @@ describe("responses websocket upgrade handling", () => {
         }),
         server,
       ),
-    ).toBe("auth_failed")
+    ).toBe("upgraded")
+    expect(isIpBlocked(clientIp)).toBe(false)
   })
 
   test("allows multiple connections for one authenticated principal", async () => {

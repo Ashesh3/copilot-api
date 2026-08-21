@@ -10,9 +10,15 @@ import {
 } from "bun:test"
 import consola from "consola"
 
+import type { LlmDebugLogEntry } from "../src/lib/llm-debug-log"
 import type { ModelsResponse } from "../src/services/copilot/get-models"
 
 import { setConfigForTest } from "../src/lib/config"
+import {
+  clearLlmDebugLogs,
+  getLlmDebugLog,
+  listLlmDebugLogs,
+} from "../src/lib/llm-debug-log"
 import {
   getRoutingTelemetrySnapshot,
   resetRoutingTelemetryForTest,
@@ -50,6 +56,8 @@ interface ListedModel {
 type RequestBodyCheck = (body: Record<string, unknown>) => void
 
 let requests: Array<CapturedRequest>
+
+const CUSTOM_HEADER_VALUE = "private-custom-header-value"
 
 const models: ModelsResponse = {
   object: "list",
@@ -146,6 +154,7 @@ afterAll(() => {
 beforeEach(() => {
   fetchMock.mockClear()
   requests = []
+  clearLlmDebugLogs()
   process.env.CUSTOM_PROVIDER_API_KEY = "custom-key"
   state.models = models
   state.copilotToken = "copilot-token"
@@ -177,6 +186,7 @@ beforeEach(() => {
         type: "openai-compatible",
         baseUrl: "https://custom.example/v1",
         apiKeyEnv: "CUSTOM_PROVIDER_API_KEY",
+        headers: { "X-Custom-Trace": CUSTOM_HEADER_VALUE },
         models: [
           {
             id: "custom-chat-model",
@@ -230,6 +240,21 @@ function routingSnapshot() {
   })
 }
 
+function latestDebugLog(): LlmDebugLogEntry | undefined {
+  return getLlmDebugLog(listLlmDebugLogs().entries[0]?.id ?? "")
+}
+
+async function waitForLatestDebugStatus(
+  status: LlmDebugLogEntry["status"],
+): Promise<LlmDebugLogEntry | undefined> {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const entry = latestDebugLog()
+    if (entry?.status === status) return entry
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  }
+  return latestDebugLog()
+}
+
 function expectChatDispatch(
   response: Response,
   bodyCheck: RequestBodyCheck,
@@ -274,6 +299,7 @@ test("custom models appear in /v1/models with aliases and metadata", async () =>
 })
 
 test("chat request routes to custom provider by model id", async () => {
+  const infoSpy = spyOn(consola, "info")
   const response = await server.request("/v1/chat/completions", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -285,21 +311,55 @@ test("chat request routes to custom provider by model id", async () => {
   })
   const body = (await response.json()) as { model: string }
 
-  expect(response.status).toBe(200)
-  expect(body.model).toBe("custom-chat-model")
-  expect(requests).toHaveLength(1)
-  expect(requests[0]?.url).toBe("https://custom.example/v1/chat/completions")
-  expect(requests[0]?.body.model).toBe("custom-chat-model")
-  expect(requests[0]?.body.temperature).toBe(0.2)
-  expect(requests[0]?.headers.get("authorization")).toBe("Bearer custom-key")
+  try {
+    expect(response.status).toBe(200)
+    expect(body.model).toBe("custom-chat-model")
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.url).toBe("https://custom.example/v1/chat/completions")
+    expect(requests[0]?.body.model).toBe("custom-chat-model")
+    expect(requests[0]?.body.temperature).toBe(0.2)
+    expect(requests[0]?.headers.get("authorization")).toBe("Bearer custom-key")
 
-  expect(routingSnapshot().models[0]).toMatchObject({
-    accounts: [],
-    model: "custom-chat-model",
-    provider: "Custom Chat",
-    requests: 1,
-    upstreamCalls: 1,
-  })
+    const debug = await waitForLatestDebugStatus("complete")
+    expect(debug).toMatchObject({
+      status: "complete",
+      request: {
+        method: "POST",
+        path: "/chat/completions",
+        url: "https://custom.example/v1/chat/completions",
+        headers: {
+          Authorization: "Bearer custom-key",
+          "X-Custom-Trace": CUSTOM_HEADER_VALUE,
+          "content-type": "application/json",
+          accept: "application/json",
+        },
+        body: JSON.stringify(requests[0]?.body),
+      },
+      response: { status: 200, statusText: "" },
+    })
+    expect(debug?.response?.headers["content-type"]).toContain(
+      "application/json",
+    )
+    expect(debug?.response?.body).toContain('"id":"chatcmpl-custom"')
+
+    const terminal = JSON.stringify(infoSpy.mock.calls)
+    expect(terminal).toContain(
+      "Custom provider request: Custom Chat/custom-chat/custom-chat-model POST /chat/completions",
+    )
+    expect(terminal).not.toContain("custom-key")
+    expect(terminal).not.toContain(CUSTOM_HEADER_VALUE)
+    expect(terminal).not.toContain("custom.example")
+
+    expect(routingSnapshot().models[0]).toMatchObject({
+      accounts: [],
+      model: "custom-chat-model",
+      provider: "Custom Chat",
+      requests: 1,
+      upstreamCalls: 1,
+    })
+  } finally {
+    infoSpy.mockRestore()
+  }
 })
 
 test("Anthropic messages request routes to custom chat provider by model id", async () => {
@@ -329,6 +389,101 @@ test("Anthropic messages request routes to custom chat provider by model id", as
   expect(requests[0]?.body.max_tokens).toBe(1)
   expect(requests[0]?.body.reasoning_effort).toBe("high")
   expect(requests[0]?.headers.get("authorization")).toBe("Bearer custom-key")
+  expect(requests[0]?.headers.get("x-custom-trace")).toBe(CUSTOM_HEADER_VALUE)
+
+  const debug = await waitForLatestDebugStatus("complete")
+  expect(debug).toMatchObject({
+    status: "complete",
+    request: {
+      body: JSON.stringify(requests[0]?.body),
+      headers: {
+        Authorization: "Bearer custom-key",
+        "X-Custom-Trace": CUSTOM_HEADER_VALUE,
+      },
+      path: "/chat/completions",
+      url: "https://custom.example/v1/chat/completions",
+    },
+  })
+})
+
+test("streams custom-provider data before raw debug capture completes", async () => {
+  const chunk = JSON.stringify({
+    id: "chatcmpl-stream",
+    object: "chat.completion.chunk",
+    created: 1,
+    model: "custom-chat-model",
+    choices: [
+      {
+        index: 0,
+        delta: { content: "streamed immediately" },
+        finish_reason: null,
+        logprobs: null,
+      },
+    ],
+  })
+  const rawFrame = `data: ${chunk}\n\n`
+  let upstreamController:
+    | ReadableStreamDefaultController<Uint8Array>
+    | undefined
+  let upstreamClosed = false
+  fetchMock.mockImplementationOnce(
+    () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            upstreamController = controller
+            controller.enqueue(new TextEncoder().encode(rawFrame))
+          },
+        }),
+        { headers: { "content-type": "text/event-stream" } },
+      ),
+  )
+
+  const closeUpstream = () => {
+    if (!upstreamController || upstreamClosed) return
+    upstreamClosed = true
+    upstreamController.close()
+  }
+  const responsePromise = server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "custom-chat-model",
+      messages: [{ role: "user", content: "hello" }],
+      stream: true,
+    }),
+  })
+
+  try {
+    const earlyResponse = await Promise.race([
+      responsePromise,
+      new Promise<undefined>((resolve) =>
+        setTimeout(() => resolve(undefined), 100),
+      ),
+    ])
+    expect(earlyResponse).toBeInstanceOf(Response)
+    if (!earlyResponse) return
+
+    const reader = earlyResponse.body?.getReader()
+    if (!reader) throw new Error("Expected streaming response body")
+    const firstRead = (await reader.read()) as {
+      done: boolean
+      value?: Uint8Array
+    }
+    expect(firstRead.done).toBe(false)
+    expect(new TextDecoder().decode(firstRead.value)).toContain(
+      "streamed immediately",
+    )
+    expect(latestDebugLog()?.status).toBe("pending")
+
+    closeUpstream()
+    const complete = await waitForLatestDebugStatus("complete")
+    expect(complete?.response?.body).toBe(rawFrame)
+    await reader.cancel()
+  } finally {
+    closeUpstream()
+    await responsePromise
+  }
 })
 
 test.each([
@@ -832,6 +987,20 @@ test("embeddings request routes to Nebius config by alias", async () => {
   expect(requests[0]?.headers.get("authorization")).toBe("Bearer nebius-key")
   expect(requests[0]?.headers.get("x-provider")).toBe("nebius")
 
+  const debug = await waitForLatestDebugStatus("complete")
+  expect(debug).toMatchObject({
+    status: "complete",
+    request: {
+      body: JSON.stringify(requests[0]?.body),
+      headers: {
+        Authorization: "Bearer nebius-key",
+        "X-Provider": "nebius",
+      },
+      path: "/embeddings",
+      url: "https://api.studio.nebius.com/v1/embeddings",
+    },
+  })
+
   expect(routingSnapshot().models[0]).toMatchObject({
     accounts: [],
     model: "Qwen/Qwen3-Embedding-8B",
@@ -889,9 +1058,62 @@ test("does not log custom-provider upstream status text or body", async () => {
     const output = JSON.stringify(errorSpy.mock.calls)
     expect(output).not.toContain(statusMarker)
     expect(output).not.toContain(bodyMarker)
+
+    const debug = await waitForLatestDebugStatus("error")
+    expect(debug).toMatchObject({
+      status: "error",
+      response: {
+        status: 400,
+        statusText: statusMarker,
+      },
+    })
+    expect(debug?.response?.body).toContain(bodyMarker)
   } finally {
     errorSpy.mockRestore()
   }
+})
+
+test("records custom-provider transport and aborted lifecycles in raw LLM Debug", async () => {
+  const transportMarker = "custom-provider connection failed"
+  fetchMock.mockImplementationOnce(() => {
+    throw new Error(transportMarker)
+  })
+
+  const transportResponse = await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      messages: [{ role: "user", content: "hello" }],
+      model: "custom-chat-model",
+    }),
+  })
+  expect(transportResponse.status).toBe(500)
+  expect(getLlmDebugLog(listLlmDebugLogs().entries[0]?.id ?? "")).toMatchObject(
+    {
+      status: "error",
+      error: { message: transportMarker },
+    },
+  )
+
+  fetchMock.mockImplementationOnce(() => {
+    const error = new Error("custom provider request aborted")
+    error.name = "AbortError"
+    throw error
+  })
+  const abortedResponse = await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      messages: [{ role: "user", content: "hello" }],
+      model: "custom-chat-model",
+    }),
+  })
+  expect(abortedResponse.status).toBe(499)
+  expect(getLlmDebugLog(listLlmDebugLogs().entries[0]?.id ?? "")).toMatchObject(
+    {
+      status: "aborted",
+    },
+  )
 })
 
 test("missing custom provider API key returns a clear error", async () => {

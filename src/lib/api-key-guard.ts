@@ -6,10 +6,11 @@ import consola from "consola"
 import { resolveRequestCredential } from "./credential-resolver"
 import {
   extractClientIp,
-  isIpAllowedForWhitelistedRoute,
+  isIpAllowedForTransparentProxy,
   isIpBanned,
   isIpBlocked,
   recordFailedAttempt,
+  trustAuthenticatedIp,
 } from "./ip-blocker"
 import { sanitizeRequestDiagnosticReference } from "./request-diagnostics"
 import { state } from "./state"
@@ -46,16 +47,7 @@ export async function apiKeyGuard(
       "user:inference",
     ])
     if (credential) {
-      if (clientIp !== null && isIpBlocked(clientIp)) {
-        consola.warn(
-          `[api-key-guard] Blocked request from banned IP ${clientIp} → ${c.req.method} ${diagnosticPath}`,
-        )
-        Sentry.captureMessage(`Blocked banned IP: ${clientIp}`, {
-          level: "warning",
-          extra: { ip: clientIp, method: c.req.method, path: diagnosticPath },
-        })
-        return unauthorizedResponse(c)
-      }
+      if (clientIp !== null) await trustAuthenticatedIp(clientIp)
       await next()
       return
     }
@@ -81,7 +73,7 @@ export async function apiKeyGuard(
 
   if (
     clientIp !== null
-    && (await isIpAllowedForWhitelistedRoute(clientIp))
+    && (await isIpAllowedForTransparentProxy(clientIp))
     && isAllowedTransparentProxyRequest(c)
   ) {
     await next()

@@ -10,11 +10,11 @@ import {
   resolveRequestCredential,
 } from "~/lib/credential-resolver"
 import {
-  clearFailedAttempts,
   extractClientIp,
   isIpBanned,
   isIpBlocked,
   recordFailedAttempt,
+  trustAuthenticatedIp,
 } from "~/lib/ip-blocker"
 import { getOAuthStore } from "~/lib/oauth-store"
 import { resolveProtectedCredential } from "~/lib/protected-credential"
@@ -223,6 +223,7 @@ function requireOAuthScopes(scopes: ReadonlyArray<string>) {
     const auth = await resolveProtectedCredential(
       c.req.raw,
       async () => await resolveScopedOAuthCredential(c.req.raw, scopes),
+      { trustClientIp: scopes.includes("user:inference") },
     )
     if (auth.status !== "authorized") return oauthUnauthorized(c)
     await next()
@@ -289,7 +290,10 @@ function oauthScopeGuard(...scopes: Array<string>) {
     const auth = await resolveProtectedCredential(
       c.req.raw,
       async () => await resolveScopedOAuthCredential(c.req.raw, scopes),
-      { recordFailures: false },
+      {
+        recordFailures: false,
+        trustClientIp: scopes.includes("user:inference"),
+      },
     )
     if (auth.status !== "authorized") return oauthUnauthorized(c)
     await next()
@@ -337,7 +341,12 @@ oauthBrowserRoutes.post("/authorize", async (c) => {
 
   const credential = apiKey ? await resolveCredential(apiKey) : null
   if (credential?.kind === "gateway") {
-    if (clientIp !== null) clearFailedAttempts(clientIp)
+    if (
+      clientIp !== null
+      && authorizationRequest.scopes.includes("user:inference")
+    ) {
+      await trustAuthenticatedIp(clientIp)
+    }
     const code = await getOAuthStore().issueAuthorizationCode({
       ...authorizationRequest,
     })
@@ -363,7 +372,10 @@ oauthBrowserRoutes.post("/authorize", async (c) => {
     getAuthorizePage(queryString, "Invalid API key"),
     new URL(authorizationRequest.redirectUri),
   )
-  return new Response(response.body, { status: 401, headers: response.headers })
+  return new Response(response.body, {
+    status: 401,
+    headers: response.headers,
+  })
 })
 
 // GET /oauth/code/success — success page
@@ -745,9 +757,7 @@ oauthApiRoutes.all("*", async (c) => {
       if (clientIp !== null) recordFailedAttempt(clientIp)
       return oauthUnauthorized(c)
     }
-    if (clientIp !== null && isIpBlocked(clientIp)) {
-      return oauthUnauthorized(c)
-    }
+    if (clientIp !== null) await trustAuthenticatedIp(clientIp)
     return await transparentProxyWithCredential(c)
   }
 
