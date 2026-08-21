@@ -492,6 +492,52 @@ test("count_tokens preserves unnamed future native tools with nested fields", as
   })
 })
 
+test.each([
+  [
+    "opaque native tool records without name or type",
+    {
+      opaque: {
+        enabled: true,
+        nested: { mode: "opaque" },
+      },
+    },
+  ],
+  [
+    "future native tool records with numeric names",
+    {
+      type: "future_server_tool_20270101",
+      name: 3,
+      config: { enabled: true, nested: { mode: "opaque" } },
+    },
+  ],
+  [
+    "future native tool records with blank names",
+    {
+      type: "future_server_tool_20270101",
+      name: "   ",
+      config: { enabled: true, nested: { mode: "opaque" } },
+    },
+  ],
+] as const)("count_tokens preserves %s", async (_label, futureTool) => {
+  const response = await server.request("/v1/messages/count_tokens", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-opus-4.7-1m-internal",
+      messages: [{ role: "user", content: "hello" }],
+      tools: [futureTool],
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({ input_tokens: 42 })
+  expect(capturedRequests[0]?.body).toEqual({
+    model: "claude-opus-4.7-1m-internal",
+    messages: [{ role: "user", content: "hello" }],
+    tools: [futureTool],
+  })
+})
+
 test("count_tokens drops malformed whole message entries without a local semantic 400", async () => {
   const response = await server.request("/v1/messages/count_tokens", {
     method: "POST",

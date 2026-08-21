@@ -907,46 +907,11 @@ function sanitizeMessages(
   })
 }
 
-function sanitizeToolStringArray(value: unknown): Array<string> | undefined {
-  if (!Array.isArray(value)) {
-    return undefined
-  }
-  const sanitized: Array<string> = []
-  for (const item of value) {
-    if (typeof item !== "string") {
-      return undefined
-    }
-    sanitized.push(item)
-  }
-  return sanitized
-}
-
 function sanitizeTool(tool: unknown): AnthropicTool | null {
   if (!isRecord(tool)) {
     return null
   }
-  if (tool.name === undefined) {
-    return isNonEmptyString(tool.type) ? { ...tool, type: tool.type } : null
-  }
-  if (!isNonEmptyString(tool.name)) {
-    return null
-  }
-  const allowedDomains = sanitizeToolStringArray(tool.allowed_domains)
-  const blockedDomains = sanitizeToolStringArray(tool.blocked_domains)
-  return {
-    ...tool,
-    name: tool.name,
-    ...(typeof tool.type === "string" ? { type: tool.type } : {}),
-    ...(typeof tool.description === "string" ?
-      { description: tool.description }
-    : {}),
-    ...(isRecord(tool.input_schema) ? { input_schema: tool.input_schema } : {}),
-    ...(allowedDomains ? { allowed_domains: allowedDomains } : {}),
-    ...(blockedDomains ? { blocked_domains: blockedDomains } : {}),
-    ...(Number.isInteger(tool.max_uses) && Number(tool.max_uses) > 0 ?
-      { max_uses: Number(tool.max_uses) }
-    : {}),
-  }
+  return { ...tool }
 }
 
 function sanitizeTools(payload: AnthropicMessagesPayload): void {

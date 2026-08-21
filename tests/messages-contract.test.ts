@@ -416,6 +416,57 @@ test("preserves unnamed future native tool records with nested fields", () => {
   })
 })
 
+test.each([
+  [
+    "opaque native tools without name or type",
+    {
+      opaque: {
+        enabled: true,
+        nested: { mode: "opaque" },
+      },
+    },
+  ],
+  [
+    "future native tools with numeric names",
+    {
+      type: "future_server_tool_20270101",
+      name: 3,
+      config: {
+        enabled: true,
+        nested: { mode: "opaque" },
+      },
+    },
+  ],
+  [
+    "future native tools with blank names",
+    {
+      type: "future_server_tool_20270101",
+      name: "   ",
+      config: {
+        enabled: true,
+        nested: { mode: "opaque" },
+      },
+    },
+  ],
+] as const)(
+  "preserves %s during shared Messages preparation",
+  (_label, futureTool) => {
+    const prepared = prepareAnthropicMessagesRequest({
+      payload: {
+        model: "claude-current",
+        max_tokens: 64,
+        messages: [{ role: "user", content: "hello" }],
+        tools: [futureTool],
+      } as unknown as AnthropicMessagesPayload,
+      requireMaxTokens: true,
+    })
+
+    expect(prepared.body).toMatchObject({
+      tools: [futureTool],
+    })
+  },
+)
+
 test("drops malformed optional controls instead of rejecting the request", () => {
   const prepared = prepareAnthropicMessagesRequest({
     payload: {
@@ -441,7 +492,7 @@ test("drops malformed optional controls instead of rejecting the request", () =>
   })
 })
 
-test("drops malformed nested message and tool entries while preserving forward-compatible records", () => {
+test("drops malformed nested message entries while preserving safe tool records", () => {
   const futureBlock = {
     type: asAnthropicUnknownContentType("future_content_block_20270101"),
     future_payload: { enabled: true },
@@ -488,6 +539,10 @@ test("drops malformed nested message and tool entries while preserving forward-c
       },
     ],
     tools: [
+      {
+        name: 3,
+        input_schema: {},
+      },
       {
         name: "lookup",
         input_schema: { type: "object", properties: {} },

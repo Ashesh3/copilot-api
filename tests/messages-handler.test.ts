@@ -516,6 +516,56 @@ test("preserves unnamed future native tool records on the messages route", async
   })
 })
 
+test.each([
+  [
+    "opaque native tool records without name or type",
+    {
+      opaque: {
+        enabled: true,
+        nested: { mode: "opaque" },
+      },
+    },
+  ],
+  [
+    "future native tool records with numeric names",
+    {
+      type: "future_server_tool_20270101",
+      name: 3,
+      config: { enabled: true, nested: { mode: "opaque" } },
+    },
+  ],
+  [
+    "future native tool records with blank names",
+    {
+      type: "future_server_tool_20270101",
+      name: "   ",
+      config: { enabled: true, nested: { mode: "opaque" } },
+    },
+  ],
+] as const)(
+  "preserves %s on the messages route",
+  async (_label, futureTool) => {
+    state.models = structuredClone(nativeMessagesModels)
+
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-opus-4.8",
+        messages: [{ role: "user", content: "hello" }],
+        max_tokens: 1,
+        tools: [futureTool],
+      }),
+    })
+
+    expect(response.status).toBe(200)
+    expect(lastUpstreamUrl).toContain("/v1/messages")
+    expect(lastUpstreamPayload).toMatchObject({
+      tools: [futureTool],
+    })
+  },
+)
+
 test("drops malformed optional controls and invalid optional Anthropic headers", async () => {
   state.models = structuredClone(nativeMessagesModels)
 
