@@ -1129,9 +1129,6 @@ function normalizeMessageCacheControls(messages: unknown): boolean {
     if (!isRecord(message) || !Array.isArray(message.content)) {
       continue
     }
-    if (message.role !== "user" && message.role !== "assistant") {
-      continue
-    }
     for (const block of message.content) {
       normalized = normalizeContentBlockCacheControls(block) || normalized
     }

@@ -508,6 +508,200 @@ test("preserves opaque cache_control neighbors around document source content", 
   expect(prepared.normalizationClasses).toEqual([])
 })
 
+test("normalizes known cache_control slots inside future-role message content", () => {
+  const prepared = prepareAnthropicMessagesRequest({
+    payload: {
+      model: "claude-current",
+      max_tokens: 64,
+      messages: [
+        {
+          role: asAnthropicUnknownRole("future-role"),
+          content: [
+            {
+              type: "text",
+              text: "future text",
+              cache_control: {
+                type: "ephemeral",
+                ttl: "5m",
+                scope: "future-text",
+              },
+            },
+            {
+              type: "document",
+              source: {
+                type: "content",
+                content: [
+                  {
+                    type: "image",
+                    source: {
+                      type: "base64",
+                      media_type: "image/png",
+                      data: "AA==",
+                    },
+                    cache_control: {
+                      type: "ephemeral",
+                      ttl: "forever",
+                      scope: "future-image",
+                    } as never,
+                  },
+                ],
+              },
+            },
+            {
+              type: "tool_result",
+              tool_use_id: "toolu_1",
+              content: [
+                {
+                  type: "text",
+                  text: "result",
+                  cache_control: {
+                    type: "ephemeral",
+                    ttl: "1h",
+                    scope: "future-result",
+                  },
+                },
+              ],
+              cache_control: { type: "ephemeral", ttl: "never" } as never,
+            },
+          ],
+        },
+      ],
+    } as unknown as AnthropicMessagesPayload,
+    requireMaxTokens: true,
+  })
+
+  expect(prepared.normalizationClasses).toEqual(["cache_control"])
+  expect(prepared.body).toEqual({
+    model: "claude-current",
+    max_tokens: 64,
+    messages: [
+      {
+        role: asAnthropicUnknownRole("future-role"),
+        content: [
+          {
+            type: "text",
+            text: "future text",
+            cache_control: { type: "ephemeral", ttl: "5m" },
+          },
+          {
+            type: "document",
+            source: {
+              type: "content",
+              content: [
+                {
+                  type: "image",
+                  source: {
+                    type: "base64",
+                    media_type: "image/png",
+                    data: "AA==",
+                  },
+                  cache_control: { type: "ephemeral" },
+                },
+              ],
+            },
+          },
+          {
+            type: "tool_result",
+            tool_use_id: "toolu_1",
+            content: [
+              {
+                type: "text",
+                text: "result",
+                cache_control: { type: "ephemeral", ttl: "1h" },
+              },
+            ],
+            cache_control: { type: "ephemeral" },
+          },
+        ],
+      },
+    ],
+  })
+})
+
+test("preserves opaque neighbors while normalizing recognized future-role blocks", () => {
+  const payload = {
+    model: "claude-current",
+    max_tokens: 64,
+    messages: [
+      {
+        role: asAnthropicUnknownRole("future-role"),
+        content: [
+          {
+            type: "text",
+            text: "future text",
+            cache_control: { type: "ephemeral", ttl: "5m", scope: "trim-me" },
+            future_field: {
+              cache_control: { type: "ephemeral", scope: "future-text-opaque" },
+            },
+          },
+          {
+            type: asAnthropicUnknownContentType("future_block_20270101"),
+            cache_control: { type: "ephemeral", scope: "unknown-block-opaque" },
+            nested: {
+              cache_control: { type: "ephemeral", scope: "unknown-nested" },
+            },
+          },
+          {
+            type: "document",
+            source: {
+              type: "content",
+              content: [{ type: "text", text: "embedded" }],
+              cache_control: { type: "ephemeral", scope: "source-opaque" },
+            },
+            future_document_field: {
+              cache_control: { type: "ephemeral", scope: "document-opaque" },
+            },
+          },
+        ],
+      },
+    ],
+  } as unknown as AnthropicMessagesPayload
+
+  const prepared = prepareAnthropicMessagesRequest({
+    payload,
+    requireMaxTokens: true,
+  })
+
+  expect(prepared.normalizationClasses).toEqual(["cache_control"])
+  expect(prepared.body).toEqual({
+    model: "claude-current",
+    max_tokens: 64,
+    messages: [
+      {
+        role: asAnthropicUnknownRole("future-role"),
+        content: [
+          {
+            type: "text",
+            text: "future text",
+            cache_control: { type: "ephemeral", ttl: "5m" },
+            future_field: {
+              cache_control: { type: "ephemeral", scope: "future-text-opaque" },
+            },
+          },
+          {
+            type: asAnthropicUnknownContentType("future_block_20270101"),
+            cache_control: { type: "ephemeral", scope: "unknown-block-opaque" },
+            nested: {
+              cache_control: { type: "ephemeral", scope: "unknown-nested" },
+            },
+          },
+          {
+            type: "document",
+            source: {
+              type: "content",
+              content: [{ type: "text", text: "embedded" }],
+              cache_control: { type: "ephemeral", scope: "source-opaque" },
+            },
+            future_document_field: {
+              cache_control: { type: "ephemeral", scope: "document-opaque" },
+            },
+          },
+        ],
+      },
+    ],
+  })
+})
+
 test.each([
   ["model", { model: "", messages: [], max_tokens: 1 }],
   ["messages", { model: "claude", messages: [], max_tokens: 1 }],
