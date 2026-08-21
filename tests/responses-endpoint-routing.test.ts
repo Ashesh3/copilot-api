@@ -571,7 +571,7 @@ test("strips native HTTP warmup control before the Responses wire", async () => 
   expect(lastUpstreamPayload).not.toHaveProperty("generate")
 })
 
-test("keeps future tools on the strict fallback boundary until Task 14", async () => {
+test("omits future tools on the best-effort fallback boundary", async () => {
   installModel({ supported_endpoints: ["/chat/completions"] })
 
   const response = await postResponses({
@@ -579,8 +579,9 @@ test("keeps future tools on the strict fallback boundary until Task 14", async (
     tools: [{ type: "mcp", server_label: "native" }],
   })
 
-  expect(response.status).toBe(400)
-  expect(fetchMock).not.toHaveBeenCalled()
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/chat/completions")
+  expect(lastUpstreamPayload?.tools).toBeUndefined()
 })
 
 test("normalizes Responses controls before Messages fallback conversion", async () => {
@@ -608,7 +609,7 @@ test("normalizes Responses controls before Messages fallback conversion", async 
   })
 
   expect(response.status).toBe(200)
-  expect(lastUpstreamPayload).toHaveProperty("max_tokens", 16)
+  expect(lastUpstreamPayload).toHaveProperty("max_tokens", 1)
   expect(lastUpstreamPayload).toHaveProperty("tools.0.input_schema", {
     type: "object",
     properties: {},
@@ -653,7 +654,7 @@ test.each([
   },
 )
 
-test("rejects incompatible Messages sampling without upstream dispatch", async () => {
+test("omits incompatible Messages sampling and dispatches", async () => {
   installModel({ supported_endpoints: ["/v1/messages"] })
 
   const response = await postResponses({
@@ -662,14 +663,13 @@ test("rejects incompatible Messages sampling without upstream dispatch", async (
     top_p: 0.8,
   })
 
-  expect(response.status).toBe(400)
-  expect(fetchMock).not.toHaveBeenCalled()
-  expect(await response.json()).toMatchObject({
-    error: { code: "endpoint_translation_unsupported", param: "sampling" },
-  })
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/v1/messages")
+  expect(lastUpstreamPayload).toHaveProperty("temperature", 0.4)
+  expect(lastUpstreamPayload?.top_p).toBeUndefined()
 })
 
-test("rejects unsupported Messages reasoning effort without upstream dispatch", async () => {
+test("dispatches unsupported Messages reasoning effort best effort", async () => {
   installModel({
     supported_endpoints: ["/v1/messages"],
     reasoning_effort: [],
@@ -680,18 +680,12 @@ test("rejects unsupported Messages reasoning effort without upstream dispatch", 
     reasoning: { effort: "high", summary: "auto" },
   })
 
-  expect(response.status).toBe(400)
-  expect(fetchMock).not.toHaveBeenCalled()
-  expect(await response.json()).toMatchObject({
-    error: {
-      code: "endpoint_translation_unsupported",
-      param: "reasoning_effort",
-    },
-  })
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/v1/messages")
 })
 
 test.each(["concise", "detailed", "future_private_summary"])(
-  "rejects Messages-only unmapped reasoning summary %s without upstream",
+  "dispatches Messages-only unmapped reasoning summary %s best effort",
   async (summary) => {
     installModel({ supported_endpoints: ["/v1/messages"] })
 
@@ -700,14 +694,8 @@ test.each(["concise", "detailed", "future_private_summary"])(
       reasoning: { effort: "high", summary },
     })
 
-    expect(response.status).toBe(400)
-    expect(fetchMock).not.toHaveBeenCalled()
-    expect(await response.json()).toMatchObject({
-      error: {
-        code: "endpoint_translation_unsupported",
-        param: "reasoning_summary",
-      },
-    })
+    expect(response.status).toBe(200)
+    expect(lastUpstreamPath).toBe("/v1/messages")
   },
 )
 
@@ -1229,7 +1217,7 @@ test("fails locally when the model advertises no supported inference endpoint", 
   })
 })
 
-test("rejects Messages-only opaque reasoning without upstream dispatch", async () => {
+test("contextualizes Messages-only opaque reasoning and dispatches", async () => {
   installModel({ supported_endpoints: ["/v1/messages"] })
 
   const response = await postResponses({
@@ -1242,14 +1230,11 @@ test("rejects Messages-only opaque reasoning without upstream dispatch", async (
     ],
   })
 
-  expect(response.status).toBe(400)
-  expect(fetchMock).not.toHaveBeenCalled()
-  expect(await response.json()).toMatchObject({
-    error: {
-      code: "endpoint_translation_unsupported",
-      param: "opaque_reasoning",
-    },
-  })
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/v1/messages")
+  expect(JSON.stringify(lastUpstreamPayload)).toContain(
+    "Assistant reasoning context",
+  )
 })
 
 test.each([
@@ -1262,16 +1247,14 @@ test.each([
     name: "numeric role",
     item: { type: "message", role: 7, content: "hello" },
   },
-])("rejects Messages-only explicit message with $name", async ({ item }) => {
+])("maps Messages-only explicit message with $name", async ({ item }) => {
   installModel({ supported_endpoints: ["/v1/messages"] })
 
   const response = await postResponses({ input: [item] })
 
-  expect(response.status).toBe(400)
-  expect(fetchMock).not.toHaveBeenCalled()
-  expect(await response.json()).toMatchObject({
-    error: { code: "endpoint_translation_unsupported", param: "message_role" },
-  })
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/v1/messages")
+  expect(JSON.stringify(lastUpstreamPayload)).toContain("Future role content")
 })
 
 test.each([
@@ -1309,14 +1292,11 @@ test.each([
     ],
     param: "input_image",
   },
-])("rejects Messages-only $name without upstream", async ({ input, param }) => {
+])("degrades Messages-only $name and dispatches", async ({ input }) => {
   installModel({ supported_endpoints: ["/v1/messages"] })
   const response = await postResponses({ input })
-  expect(response.status).toBe(400)
-  expect(fetchMock).not.toHaveBeenCalled()
-  expect(await response.json()).toMatchObject({
-    error: { code: "endpoint_translation_unsupported", param },
-  })
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/v1/messages")
 })
 
 test.each([
@@ -1374,22 +1354,16 @@ test.each([
       { type: "message", role: "user", content: "continue" },
     ],
   },
-])("rejects Messages-only $name", async ({ input }) => {
+])("degrades Messages-only $name", async ({ input }) => {
   installModel({ supported_endpoints: ["/v1/messages"] })
 
   const response = await postResponses({ input })
 
-  expect(response.status).toBe(400)
-  expect(fetchMock).not.toHaveBeenCalled()
-  expect(await response.json()).toMatchObject({
-    error: {
-      code: "endpoint_translation_unsupported",
-      param: "tool_result_pairing",
-    },
-  })
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/v1/messages")
 })
 
-test("fetches a Messages image URL once before rejecting its failed normalization", async () => {
+test("fetches a Messages image URL once and degrades its failed normalization", async () => {
   installModel({ supported_endpoints: ["/v1/messages"] })
   fetchMock.mockImplementationOnce((url) => {
     const rawUrl = typeof url === "string" || url instanceof URL ? url : url.url
@@ -1415,15 +1389,12 @@ test("fetches a Messages image URL once before rejecting its failed normalizatio
     ],
   })
 
-  expect(response.status).toBe(400)
+  expect(response.status).toBe(200)
   expect(attachmentFetchCount).toBe(1)
-  expect(lastUpstreamPath).not.toBe("/v1/messages")
-  expect(await response.json()).toMatchObject({
-    error: {
-      code: "endpoint_translation_unsupported",
-      param: "message_content_part",
-    },
-  })
+  expect(lastUpstreamPath).toBe("/v1/messages")
+  expect(JSON.stringify(lastUpstreamPayload)).toContain(
+    "Image attachment unavailable",
+  )
 })
 
 test.each([
@@ -1510,7 +1481,7 @@ test("routes Responses compaction through the existing Chat preservation path", 
   expect(JSON.stringify(lastUpstreamPayload)).toContain("call_compact")
 })
 
-test("rejects an unsupported Responses translation before manual approval", async () => {
+test("approves an adapted Responses translation before dispatch", async () => {
   installModel({ supported_endpoints: ["/v1/messages"] })
   state.manualApprove = true
   const promptSpy = spyOn(consola, "prompt").mockResolvedValue(true as never)
@@ -1526,9 +1497,9 @@ test("rejects an unsupported Responses translation before manual approval", asyn
       ],
     })
 
-    expect(response.status).toBe(400)
-    expect(promptSpy).not.toHaveBeenCalled()
-    expect(fetchMock).not.toHaveBeenCalled()
+    expect(response.status).toBe(200)
+    expect(promptSpy).toHaveBeenCalledTimes(1)
+    expect(lastUpstreamPath).toBe("/v1/messages")
   } finally {
     promptSpy.mockRestore()
     state.manualApprove = false

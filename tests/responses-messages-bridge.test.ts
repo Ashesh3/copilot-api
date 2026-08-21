@@ -13,12 +13,119 @@ import {
 } from "~/routes/messages/anthropic-types"
 import { emitResponsesResultAsStream } from "~/routes/messages/web-search-helpers"
 import {
+  adaptResponsesToMessagesCandidate,
   anthropicResponseToResponsesResult,
+  executePreparedResponsesMessagesBridge,
   executeResponsesMessagesBridge,
   responsesPayloadToAnthropic,
 } from "~/routes/responses/messages-bridge"
 
 /* eslint-disable max-lines */
+
+test("adapts future Responses items and consumes Messages tool results once", async () => {
+  const source = {
+    model: "claude-current",
+    instructions: "system",
+    input: [
+      { type: "future_item", value: "private-future" },
+      {
+        type: "function_call",
+        call_id: "messages_call_0",
+        name: "one",
+        arguments: "not-json",
+      },
+      { type: "function_call", name: "two", arguments: 42 },
+      {
+        type: "function_call_output",
+        call_id: "messages_call_0",
+        output: "first",
+      },
+      {
+        type: "function_call_output",
+        call_id: "messages_call_0",
+        output: "duplicate",
+      },
+      { type: "message", role: "private-role", content: "keep" },
+    ],
+    max_output_tokens: null,
+    temperature: 0.1,
+    top_p: 0.9,
+    tools: [
+      { type: "function", name: "one", parameters: { type: "OBJECT" } },
+      { type: "future_tool", name: "private-tool" },
+    ],
+    tool_choice: { type: "private-choice" },
+  }
+
+  const candidate = await adaptResponsesToMessagesCandidate({ source })
+
+  expect(candidate.endpoint).toBe("/v1/messages")
+  expect(candidate.check.supported).toBe(true)
+  expect(candidate.payload.max_tokens).toBeUndefined()
+  expect(candidate.payload.top_p).toBeUndefined()
+  expect(JSON.stringify(candidate.payload)).toContain("not-json")
+  expect(JSON.stringify(candidate.payload)).toContain("duplicate")
+  expect(JSON.stringify(candidate.payload)).toContain("keep")
+  expect(JSON.stringify(candidate.check)).not.toContain("private-")
+  expect(source.tools[0]?.parameters?.type).toBe("OBJECT")
+})
+
+test("prepared Responses Messages executor skips source conversion", async () => {
+  let sentBody: Record<string, unknown> | undefined
+  state.copilotToken = "test-token"
+  globalThis.fetch = mock(
+    (_input: string | URL | Request, init?: RequestInit) => {
+      const body = typeof init?.body === "string" ? init.body : "{}"
+      sentBody = JSON.parse(body) as Record<string, unknown>
+      return Promise.resolve(
+        Response.json({
+          id: "msg_prepared",
+          type: "message",
+          role: "assistant",
+          model: "claude-current",
+          content: [{ type: "text", text: "ok" }],
+          stop_reason: "end_turn",
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }),
+      )
+    },
+  ) as unknown as typeof fetch
+  state.models = {
+    object: "list",
+    data: [
+      {
+        id: "claude-current",
+        name: "Claude",
+        object: "model",
+        version: "1",
+        supported_endpoints: ["/v1/messages"],
+        capabilities: {
+          family: "claude",
+          limits: { max_output_tokens: 1024 },
+          object: "model_capabilities",
+          supports: {},
+          tokenizer: "o200k_base",
+          type: "chat",
+        },
+      },
+    ],
+  }
+
+  const payload = {
+    model: "claude-current",
+    max_tokens: 128,
+    messages: [{ role: "user" as const, content: "hello" }],
+  }
+  const result = await executePreparedResponsesMessagesBridge({
+    payload,
+    responseContext: { model: "public-model", input: "hello" },
+    nativeOptions: { requestedModel: "public-model" },
+  })
+
+  expect(sentBody).toEqual({ ...payload, stream: false })
+  expect(result.model).toBe("public-model")
+})
 
 test("maps text image document function tools and results to Messages", async () => {
   const payload = await responsesPayloadToAnthropic({

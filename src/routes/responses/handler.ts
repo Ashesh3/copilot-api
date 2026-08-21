@@ -17,6 +17,7 @@ import {
   recordCopilotEndpointRoute,
   recordCopilotMessagesBeta,
   recordCopilotRequestNormalization,
+  recordCopilotTranslationFindings,
 } from "~/lib/copilot-contract-observability"
 import { sessionTokenMatchesModel } from "~/lib/copilot-session-token"
 import {
@@ -72,12 +73,9 @@ import {
 import { state } from "~/lib/state"
 import { tokenPool } from "~/lib/token-pool"
 import { emitResponsesToolSpans } from "~/lib/tool-spans"
+import { isResponsesCompactionRequest } from "~/services/copilot/compaction-payload"
 import {
-  fitResponsesCompactionPayload,
-  isResponsesCompactionRequest,
-} from "~/services/copilot/compaction-payload"
-import {
-  createChatCompletions,
+  createChatCompletionsWithProcessedPayload,
   type ChatCompletionChunk,
   type ChatCompletionResponse,
   type ChatCompletionsPayload,
@@ -114,9 +112,17 @@ import { type NativeMessagesRequestOptions } from "../messages/native-handler"
 import {
   emitResponsesResultAsStream,
   resolveResponsesWebSearchCalls,
-  resolveWebSearchCalls,
 } from "../messages/web-search-helpers"
-import { executeResponsesMessagesBridge } from "./messages-bridge"
+import {
+  type PreparedResponsesChatCompletion,
+  resolvePreparedResponsesWebSearchCalls,
+  type ResponsesChatCompletionFactory,
+} from "./chat-fallback-completion"
+import {
+  prepareResponsesCandidates,
+  selectResponsesCandidate,
+} from "./fallback-candidates"
+import { executePreparedResponsesMessagesBridge } from "./messages-bridge"
 import { createStreamIdTracker, fixStreamIds } from "./stream-id-sync"
 import {
   classifyResponsesTerminal,
@@ -862,16 +868,44 @@ const handleResponsesInner = async (
 
   const routedModel = selectRoutedModel(payload.model)
   const selectedModel = routedModel.model
-  const support = getModelEndpointSupport(selectedModel)
-  const route =
-    support.responses ?
-      prepareNativeResponsesHttpRoute({
-        payload,
-        preparedSource: options.preparedSource,
-        selectedModel,
-      })
-    : await prepareResponsesRoute(c, legacyPayload, selectedModel)
-  const { decision, preparedPayload } = route
+  const nativeFinalized = finalizeNativeResponsesRequest(
+    {
+      source: payload,
+      normalizationClasses: options.preparedSource.normalizationClasses,
+    },
+    {
+      model: payload.model,
+      defaultEffort: getModelReasoningConfig(payload.model)?.defaultEffort,
+      implicitDefault: usesImplicitReasoningDefault(payload.model),
+    },
+  )
+  const nativeBody = {
+    ...nativeFinalized,
+    body: stripResponsesWarmupControl(nativeFinalized.body),
+  }
+  disableParallelWebSearch(nativeBody.body)
+  const candidates = await prepareResponsesCandidates({
+    adaptationSource: payload,
+    finalReasoningEffort: finalEffort,
+    nativeBody,
+    preservedSource: options.preparedSource,
+    selectedModel,
+    signal: c.req.raw.signal,
+  })
+  const selection = selectResponsesCandidate({ candidates, selectedModel })
+  if ("code" in selection) throw createEndpointTranslationError(selection)
+  const { candidate, decision } = selection
+  recordCopilotRequestNormalization("responses", [
+    ...nativeFinalized.normalizationClasses,
+  ])
+  if (candidate.check.findings.length > 0) {
+    recordCopilotTranslationFindings(
+      "responses",
+      candidate.endpoint,
+      candidate.check,
+    )
+  }
+  recordCopilotEndpointRoute(decision)
   if (decision.target === "/v1/messages") {
     recordCopilotMessagesBeta(
       canonicalizeAnthropicBeta(nativeOptions.anthropicBeta),
@@ -881,31 +915,30 @@ const handleResponsesInner = async (
   if (state.manualApprove) await awaitApproval()
 
   return await runWithRoutedModelSelection(routedModel, async () => {
-    if (decision.target === "/v1/messages") {
+    if (candidate.endpoint === "/v1/messages") {
       reportResponsesEndpointFallback(c, payload.model, decision)
-      return await handleWithAnthropicMessages(c, preparedPayload, {
-        ...nativeOptions,
+      return await handleWithAnthropicMessages({
+        c,
+        preparedPayload: candidate.payload,
+        responseContext: payload,
+        nativeOptions: {
+          ...nativeOptions,
+          requestedModel,
+          copilotSessionToken,
+        },
+      })
+    }
+
+    if (candidate.endpoint === "/chat/completions") {
+      reportResponsesEndpointFallback(c, candidate.payload.model, decision)
+      setRequestContext(c, { provider: "Responses→ChatCompletions" })
+      return await handleWithChatCompletions(c, candidate.payload, {
         requestedModel,
         copilotSessionToken,
       })
     }
 
-    if (decision.target === "/chat/completions") {
-      // ChatCompletions has no hosted web-search tool. Downgrade it to the
-      // shared MCP-backed function loop only on this fallback path.
-      convertWebSearchTool(preparedPayload)
-      // ChatCompletions can't accept custom (freeform) tools, so rewrite
-      // apply_patch into a function tool only on this fallback path. The
-      // native /responses path supports custom tools and must pass them
-      // through unchanged (Codex Desktop aborts otherwise).
-      useFunctionApplyPatch(preparedPayload)
-      reportResponsesEndpointFallback(c, preparedPayload.model, decision)
-      setRequestContext(c, { provider: "Responses→ChatCompletions" })
-      return await handleWithChatCompletions(c, preparedPayload, {
-        requestedModel,
-        copilotSessionToken,
-      })
-    }
+    const preparedPayload = candidate.payload
 
     const { vision, initiator } = getResponsesRequestOptions(preparedPayload)
 
@@ -1115,55 +1148,6 @@ function resolveResponsesSessionToken(
     : undefined
 }
 
-async function prepareResponsesRoute(
-  c: Context,
-  payload: ResponsesPayload,
-  selectedModel: Model | undefined,
-): Promise<{
-  decision: EndpointRouteDecision
-  preparedPayload: ResponsesPayload
-}> {
-  return await prepareResponsesRouteForTransport({
-    payload,
-    selectedModel,
-    signal: c.req.raw.signal,
-  })
-}
-
-function prepareNativeResponsesHttpRoute(options: {
-  payload: ResponsesPayload
-  preparedSource: PreparedResponsesSource
-  selectedModel: Model | undefined
-}): {
-  decision: EndpointRouteDecision
-  preparedPayload: ResponsesPayload
-} {
-  const finalized = finalizeNativeResponsesRequest(
-    {
-      source: options.payload,
-      normalizationClasses: options.preparedSource.normalizationClasses,
-    },
-    {
-      model: options.payload.model,
-      defaultEffort: getModelReasoningConfig(options.payload.model)
-        ?.defaultEffort,
-      implicitDefault: usesImplicitReasoningDefault(options.payload.model),
-    },
-  )
-  const preparedPayload = stripResponsesWarmupControl(finalized.body)
-  disableParallelWebSearch(preparedPayload)
-  const decision = selectResponsesUpstreamEndpoint({
-    payload: preparedPayload,
-    selectedModel: options.selectedModel,
-  })
-  if ("code" in decision) throw createEndpointTranslationError(decision)
-  recordCopilotRequestNormalization("responses", [
-    ...finalized.normalizationClasses,
-  ])
-  recordCopilotEndpointRoute(decision)
-  return { decision, preparedPayload }
-}
-
 export async function prepareResponsesRouteForTransport(options: {
   payload: ResponsesPayload
   selectedModel: Model | undefined
@@ -1263,8 +1247,10 @@ const isAsyncIterable = <T>(value: unknown): value is AsyncIterable<T> =>
   Boolean(value)
   && typeof (value as AsyncIterable<T>)[Symbol.asyncIterator] === "function"
 
+type ResponsesChatCompletionResult = PreparedResponsesChatCompletion["response"]
+
 const isNonStreaming = (
-  response: Awaited<ReturnType<typeof createChatCompletions>>,
+  response: ResponsesChatCompletionResult,
 ): response is ChatCompletionResponse => Object.hasOwn(response, "choices")
 
 const isStreamingRequested = (payload: ResponsesPayload): boolean =>
@@ -2153,20 +2139,22 @@ async function processChatCompletionsChunk(
     : undefined
 }
 
-const handleWithAnthropicMessages = async (
-  c: Context,
-  payload: ResponsesPayload,
-  nativeOptions: NativeMessagesRequestOptions,
-) => {
-  const requestedModel = nativeOptions.requestedModel ?? payload.model
+const handleWithAnthropicMessages = async (options: {
+  c: Context
+  nativeOptions: NativeMessagesRequestOptions
+  preparedPayload: import("../messages/anthropic-types").AnthropicMessagesPayload
+  responseContext: ResponsesPayload
+}) => {
+  const { c, nativeOptions, preparedPayload, responseContext } = options
+  const requestedModel = nativeOptions.requestedModel ?? responseContext.model
   setRequestContext(c, { provider: "Responses→AnthropicMessages" })
-  const compaction = isResponsesCompactionRequest(payload)
-  if (!payload.stream) {
-    const result = await createAnthropicResponsesResult({
-      attachmentsNormalized: true,
+  const compaction = isResponsesCompactionRequest(responseContext)
+  if (!responseContext.stream) {
+    const result = await executePreparedResponsesMessagesBridge({
       compaction,
       nativeOptions,
-      payload,
+      payload: preparedPayload,
+      responseContext,
       signal: c.req.raw.signal,
     })
     setResponsesResultContext(c, result)
@@ -2175,11 +2163,11 @@ const handleWithAnthropicMessages = async (
 
   const upstreamController = new AbortController()
   const signal = AbortSignal.any([c.req.raw.signal, upstreamController.signal])
-  const pendingResult = createAnthropicResponsesResult({
-    attachmentsNormalized: true,
+  const pendingResult = executePreparedResponsesMessagesBridge({
     compaction,
     nativeOptions,
-    payload,
+    payload: preparedPayload,
+    responseContext,
     signal,
   })
   const preflush = await raceSsePreflush(pendingResult)
@@ -2224,23 +2212,6 @@ const handleWithAnthropicMessages = async (
   })
 }
 
-async function createAnthropicResponsesResult(options: {
-  attachmentsNormalized?: boolean
-  compaction: boolean
-  nativeOptions: NativeMessagesRequestOptions
-  payload: ResponsesPayload
-  signal: AbortSignal
-}): Promise<ResponsesResult> {
-  return await executeResponsesMessagesBridge({
-    attachmentsNormalized: options.attachmentsNormalized,
-    compaction: options.compaction,
-    nativeOptions: options.nativeOptions,
-    payload: options.payload,
-    preserveValidatedControls: true,
-    signal: options.signal,
-  })
-}
-
 function setResponsesResultContext(c: Context, result: ResponsesResult): void {
   const nativeAccountId = getLastUsedAccountId()
   if (nativeAccountId !== undefined) {
@@ -2253,26 +2224,29 @@ function setResponsesResultContext(c: Context, result: ResponsesResult): void {
   })
 }
 
-const handleWithChatCompletions = async (
+export const handleWithChatCompletions = async (
   c: Context,
-  payload: ResponsesPayload,
-  options: { requestedModel?: string; copilotSessionToken?: string } = {},
+  ccPayload: ChatCompletionsPayload,
+  options: {
+    completionFactory?: ResponsesChatCompletionFactory
+    requestedModel?: string
+    copilotSessionToken?: string
+  } = {},
 ) => {
-  const compaction = isResponsesCompactionRequest(payload)
-  const fitted = compaction ? fitResponsesCompactionPayload(payload) : null
-  const fallbackPayload = fitted?.payload ?? payload
-  if (fitted?.reduced) {
-    logger.warn("Reduced oversized Responses fallback compaction payload", {
-      originalBytes: fitted.originalBytes,
-      finalBytes: fitted.finalBytes,
-      omittedBinaryBlocks: fitted.omittedBinaryBlocks,
-      truncatedToolOutputBytes: fitted.truncatedToolOutputBytes,
+  const responseModel = options.requestedModel ?? ccPayload.model
+  const completionFactory: ResponsesChatCompletionFactory =
+    options.completionFactory
+    ?? (async (payload, factoryOptions) => {
+      const result = await createChatCompletionsWithProcessedPayload(payload, {
+        candidatePrepared: true,
+        copilotSessionToken: options.copilotSessionToken,
+        signal: factoryOptions.signal,
+      })
+      return {
+        ...result,
+        accountId: getLastUsedAccountId(),
+      }
     })
-  }
-  const ccPayload = responsesToChatCompletions(fallbackPayload, {
-    preserveCustomToolContext: compaction,
-  })
-  const responseModel = options.requestedModel ?? payload.model
   const needsWebSearch =
     ccPayload.tools?.some((tool) => tool.function.name === "web_search")
     ?? false
@@ -2284,39 +2258,31 @@ const handleWithChatCompletions = async (
   })
 
   // Non-streaming: span wraps the entire call + response processing
-  if (!fallbackPayload.stream) {
+  if (!ccPayload.stream) {
     return await Sentry.startSpan(
       createSentryChatSpanOptions({
         inputMessages: ccPayload.messages,
-        model: payload.model,
+        model: ccPayload.model,
       }),
       async (span) => {
-        const response = await createChatCompletions(ccPayload, {
-          compaction,
-          copilotSessionToken: options.copilotSessionToken,
+        const initial = await completionFactory(ccPayload, {
           signal: c.req.raw.signal,
         })
+        const response = initial.response
 
         // Track which account handled this request (multi-token mode)
-        const fallbackAccountId = getLastUsedAccountId()
-        if (fallbackAccountId !== undefined) {
-          setRequestContext(c, { accountId: fallbackAccountId })
+        if (initial.accountId !== undefined) {
+          setRequestContext(c, { accountId: initial.accountId })
         }
 
-        const initialResponse = response as ChatCompletionResponse
         const ccResponse =
           needsWebSearch ?
-            await resolveWebSearchCalls(initialResponse, ccPayload, {
-              abortSignal: c.req.raw.signal,
-              copilotSessionToken: options.copilotSessionToken,
-              createCompletion: async (nextPayload) =>
-                (await createChatCompletions(nextPayload, {
-                  compaction,
-                  copilotSessionToken: options.copilotSessionToken,
-                  signal: c.req.raw.signal,
-                })) as ChatCompletionResponse,
+            await resolvePreparedResponsesWebSearchCalls({
+              completionFactory,
+              initial,
+              signal: c.req.raw.signal,
             })
-          : initialResponse
+          : (response as ChatCompletionResponse)
         logger.debug("Received Chat fallback response", {
           choiceCount: ccResponse.choices.length,
           model: ccResponse.model,
@@ -2355,8 +2321,7 @@ const handleWithChatCompletions = async (
   if (needsWebSearch) {
     return handleStreamingChatFallbackWebSearch(c, {
       ccPayload,
-      compaction,
-      copilotSessionToken: options.copilotSessionToken,
+      completionFactory,
       responseModel,
     })
   }
@@ -2364,7 +2329,7 @@ const handleWithChatCompletions = async (
   return await Sentry.startSpanManual(
     createSentryChatSpanOptions({
       inputMessages: ccPayload.messages,
-      model: payload.model,
+      model: ccPayload.model,
       streaming: true,
     }),
     async (streamSpan, finish) => {
@@ -2376,15 +2341,13 @@ const handleWithChatCompletions = async (
       }
 
       try {
-        const response = await createChatCompletions(ccPayload, {
-          compaction,
-          copilotSessionToken: options.copilotSessionToken,
+        const initial = await completionFactory(ccPayload, {
           signal: c.req.raw.signal,
         })
+        const response = initial.response
 
-        const fallbackAccountId = getLastUsedAccountId()
-        if (fallbackAccountId !== undefined) {
-          setRequestContext(c, { accountId: fallbackAccountId })
+        if (initial.accountId !== undefined) {
+          setRequestContext(c, { accountId: initial.accountId })
         }
 
         if (isNonStreaming(response)) {
@@ -2510,8 +2473,7 @@ function handleStreamingChatFallbackWebSearch(
   c: Context,
   options: {
     ccPayload: ChatCompletionsPayload
-    compaction: boolean
-    copilotSessionToken?: string
+    completionFactory: ResponsesChatCompletionFactory
     responseModel: string
   },
 ): Response {
@@ -2535,20 +2497,13 @@ function handleStreamingChatFallbackWebSearch(
             stream: false,
             stream_options: null,
           }
-          const initial = (await createChatCompletions(payload, {
-            compaction: options.compaction,
-            copilotSessionToken: options.copilotSessionToken,
+          const initialCompletion = await options.completionFactory(payload, {
             signal: c.req.raw.signal,
-          })) as ChatCompletionResponse
-          const response = await resolveWebSearchCalls(initial, payload, {
-            abortSignal: c.req.raw.signal,
-            copilotSessionToken: options.copilotSessionToken,
-            createCompletion: async (nextPayload) =>
-              (await createChatCompletions(nextPayload, {
-                compaction: options.compaction,
-                copilotSessionToken: options.copilotSessionToken,
-                signal: c.req.raw.signal,
-              })) as ChatCompletionResponse,
+          })
+          const response = await resolvePreparedResponsesWebSearchCalls({
+            completionFactory: options.completionFactory,
+            initial: initialCompletion,
+            signal: c.req.raw.signal,
           })
           return chatCompletionToResponsesResult(
             response,

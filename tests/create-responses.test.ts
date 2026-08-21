@@ -1632,7 +1632,7 @@ test.each([
   ["previous_response_id", { previous_response_id: "resp_previous" }],
   ["service_tier", { service_tier: "priority" }],
 ] as const)(
-  "rejects stateful control %s before a chat-only Responses fallback",
+  "omits stateful control %s before a chat-only Responses fallback",
   async (param, extra) => {
     state.models = {
       object: "list",
@@ -1645,6 +1645,23 @@ test.each([
         },
       ],
     }
+    queuedResponses.push(
+      Response.json({
+        id: "chatcmpl_best_effort",
+        object: "chat.completion",
+        created: 1,
+        model: "chat-only-responses-model",
+        choices: [
+          {
+            index: 0,
+            message: { role: "assistant", content: "ok" },
+            finish_reason: "stop",
+            logprobs: null,
+          },
+        ],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      }),
+    )
 
     const response = await server.request("/v1/responses", {
       method: "POST",
@@ -1655,21 +1672,17 @@ test.each([
         ...extra,
       }),
     })
-    const body = (await response.json()) as Record<string, unknown>
-
-    expect(response.status).toBe(400)
-    expect(body).toMatchObject({
-      error: {
-        code: "unsupported_value",
-        param,
-        type: "invalid_request_error",
-      },
+    expect(response.status).toBe(200)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(lastRequestBody).toMatchObject({
+      model: "chat-only-responses-model",
+      messages: [{ role: "user", content: "Hello" }],
     })
-    expect(fetchMock).not.toHaveBeenCalled()
+    expect(lastRequestBody).not.toHaveProperty(param)
   },
 )
 
-test("rejects omitted function output before chat fallback reaches upstream", async () => {
+test("contextualizes omitted function output before chat fallback reaches upstream", async () => {
   const modelId = "chat-only-missing-function-output"
   state.models = {
     object: "list",
@@ -1682,6 +1695,23 @@ test("rejects omitted function output before chat fallback reaches upstream", as
       },
     ],
   }
+  queuedResponses.push(
+    Response.json({
+      id: "chatcmpl_missing_output",
+      object: "chat.completion",
+      created: 1,
+      model: modelId,
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: "ok" },
+          finish_reason: "stop",
+          logprobs: null,
+        },
+      ],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    }),
+  )
 
   const response = await server.request("/v1/responses", {
     method: "POST",
@@ -1692,17 +1722,9 @@ test("rejects omitted function output before chat fallback reaches upstream", as
     }),
   })
 
-  expect(response.status).toBe(400)
-  expect(fetchMock).not.toHaveBeenCalled()
-  expect(await response.json()).toEqual({
-    error: {
-      code: "endpoint_translation_unsupported",
-      message:
-        "The selected Copilot model cannot accept this request without losing required protocol data.",
-      param: "content_type",
-      type: "invalid_request_error",
-    },
-  })
+  expect(response.status).toBe(200)
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+  expect(JSON.stringify(lastRequestBody)).toContain("Unpaired tool result")
 })
 
 test("preserves prompt and conversation_id when sending Responses API requests", async () => {
