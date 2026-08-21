@@ -636,50 +636,6 @@ export const emitResponsesResultAsStream = async (
   })
 }
 
-export const emitResponsesFailureAsStream = async (
-  stream: ResponsesSSEWriter,
-  options: { responseId: string; model: string },
-): Promise<void> => {
-  const message = "Upstream request failed"
-  const result: ResponsesResult = {
-    id: options.responseId,
-    object: "response",
-    created_at: Math.floor(Date.now() / 1000),
-    model: options.model,
-    output: [],
-    output_text: "",
-    status: "failed",
-    usage: null,
-    error: { message },
-    incomplete_details: null,
-    instructions: null,
-    metadata: null,
-    parallel_tool_calls: true,
-    temperature: null,
-    tool_choice: "auto",
-    tools: [],
-    top_p: null,
-  }
-  await stream.writeSSE({
-    event: "error",
-    data: JSON.stringify({
-      type: "error",
-      code: "server_error",
-      message,
-      param: null,
-      sequence_number: 0,
-    }),
-  })
-  await stream.writeSSE({
-    event: "response.failed",
-    data: JSON.stringify({
-      type: "response.failed",
-      response: result,
-      sequence_number: 1,
-    }),
-  })
-}
-
 function getResponsesTerminalEvent(
   status: ResponsesResult["status"],
 ): "response.completed" | "response.failed" | "response.incomplete" {

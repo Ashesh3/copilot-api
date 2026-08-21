@@ -619,7 +619,7 @@ test("returns a synthetic Responses stream for a Messages fallback", async () =>
 })
 
 test.each(["response.failed", "error"])(
-  "sanitizes native %s events without losing partial output or event order",
+  "preserves native %s events without losing partial output or future fields",
   async (terminalType) => {
     installModel({ supported_endpoints: ["/responses"] })
     const privateMarker = `native-${terminalType}-private-marker`
@@ -640,8 +640,7 @@ test.each(["response.failed", "error"])(
     expect(response.status).toBe(200)
     expect(lastUpstreamPath).toBe("/responses")
     expect(body).toContain("partial-output")
-    expect(body).toContain("Upstream Responses stream failed.")
-    expect(body).not.toContain(privateMarker)
+    expect(body).toContain(privateMarker)
     expect(body).not.toContain("[DONE]")
     const eventOrder = body
       .split("\n")
@@ -657,30 +656,28 @@ test.each(["response.failed", "error"])(
       .split("\n")
       .filter((line) => line.startsWith("data: "))
       .map((line) => JSON.parse(line.slice(6)) as Record<string, unknown>)
-    const terminal = dataFrames.at(-1) as {
-      code?: string
-      message?: string
-      param?: string | null
-      response?: {
-        error?: {
-          code?: string
-          message?: string
-          param?: string | null
-          status?: number
+    const expectedTerminal: Record<string, unknown> =
+      terminalType === "error" ?
+        {
+          type: "error",
+          sequence_number: 2,
+          code: "server_error",
+          message: privateMarker,
+          param: "input",
+          status: 502,
         }
-      }
-      status?: number
-    }
-    const terminalError = terminal.response?.error ?? terminal
-    if (terminal.response) {
-      expect(terminal.response).toMatchObject({ output: [], output_text: "" })
-    }
-    expect(terminalError).toMatchObject({
-      code: "server_error",
-      message: "Upstream Responses stream failed.",
-      param: "input",
-      status: 502,
-    })
+      : (JSON.parse(
+          (
+            await createPrivateTerminalResponsesStream(
+              terminalType,
+              privateMarker,
+            ).text()
+          )
+            .split("\n")
+            .findLast((line) => line.startsWith("data: "))
+            ?.slice(6) ?? "{}",
+        ) as Record<string, unknown>)
+    expect(dataFrames.at(-1)).toEqual(expectedTerminal)
   },
 )
 
@@ -690,7 +687,7 @@ test.each([
   "response.failed",
   "error",
 ] as const)(
-  "mounted native Responses preserves sanitized %s terminal framing",
+  "mounted native Responses preserves %s terminal framing and data",
   async (terminalType) => {
     installModel({ supported_endpoints: ["/responses"] })
     const privateMarker = `native-${terminalType}-matrix-private-marker`
@@ -712,7 +709,7 @@ test.each([
     expect(response.status).toBe(200)
     expect(eventOrder.at(-1)).toBe(terminalType)
     expect(payloadTypes.at(-1)).toBe(terminalType)
-    expect(body).not.toContain(privateMarker)
+    expect(body).toContain(privateMarker)
   },
 )
 
@@ -754,11 +751,11 @@ test("uses the terminal SSE event name over a mismatched JSON type", async () =>
       object: "response",
       output: [],
       output_text: "",
-      usage: { input_tokens: 3, output_tokens: 2, total_tokens: 5 },
+      usage: null,
       error: {
         code: "server_error",
         message: "Upstream Responses stream failed.",
-        param: "input",
+        param: null,
         status: 502,
       },
       incomplete_details: null,
@@ -767,7 +764,7 @@ test("uses the terminal SSE event name over a mismatched JSON type", async () =>
   expect(body).not.toContain(privateMarker)
 })
 
-test("reconstructs terminal Responses frames from an explicit allowlist", async () => {
+test("preserves terminal Responses partial and future fields", async () => {
   installModel({ supported_endpoints: ["/responses"] })
   const privateMarker = "terminal-allowlist-private-marker"
   fetchMock.mockImplementationOnce(() =>
@@ -783,22 +780,15 @@ test("reconstructs terminal Responses frames from an explicit allowlist", async 
     .map((line) => JSON.parse(line.slice(6)) as Record<string, unknown>)
     .at(-1) as { response?: Record<string, unknown> }
 
-  expect(terminal.response).toEqual({
+  expect(terminal.response).toMatchObject({
     id: "resp_private_terminal",
     object: "response",
     status: "incomplete",
-    output: [],
-    output_text: "",
-    usage: { input_tokens: 3, output_tokens: 2, total_tokens: 5 },
-    error: {
-      code: "server_error",
-      message: "Upstream Responses stream failed.",
-      param: "input",
-      status: 502,
-    },
-    incomplete_details: { reason: "max_output_tokens" },
+    output_text: "partial-output",
+    metadata: { private: privateMarker },
+    incomplete_details: { reason: "max_output_tokens", private: privateMarker },
   })
-  expect(body).not.toContain(privateMarker)
+  expect(body).toContain(privateMarker)
 })
 
 test.each([
@@ -887,7 +877,7 @@ test.each([
   },
 )
 
-test("fails closed for HTTP response.completed without completed status", async () => {
+test("preserves sparse HTTP response.completed without reconstructing it", async () => {
   installModel({ supported_endpoints: ["/responses"] })
   fetchMock.mockImplementationOnce(() =>
     createRawTerminalResponsesStream(
@@ -913,13 +903,12 @@ test("fails closed for HTTP response.completed without completed status", async 
     .map((line) => JSON.parse(line.slice(6)) as { type?: string })
     .at(-1)
 
-  expect(terminal?.type).toBe("response.failed")
-  expect(body).toContain("Upstream Responses stream failed.")
-  expect(body).not.toContain("http-missing-status-private-marker")
+  expect(terminal?.type).toBe("response.completed")
+  expect(body).toContain("http-missing-status-private-marker")
   expect(body).not.toContain("[DONE]")
 })
 
-test("sanitizes native terminal events after the HTTP stream is committed", async () => {
+test("preserves native terminal events after the HTTP stream is committed", async () => {
   installModel({ supported_endpoints: ["/responses"] })
   delayNativeResponsesStream = true
   const privateMarker = "native-preflush-private-marker"
@@ -973,15 +962,17 @@ test("sanitizes native terminal events after the HTTP stream is committed", asyn
   const rest = await readRemaining(reader)
 
   expect(rest).toContain("partial-output")
-  expect(rest).toContain("Upstream Responses stream failed.")
-  expect(rest).not.toContain(privateMarker)
+  expect(rest).toContain(privateMarker)
   expect(rest).not.toContain("[DONE]")
   const terminalData = rest
     .split("\n")
     .filter((line) => line.startsWith("data: "))
     .map((line) => JSON.parse(line.slice(6)) as { response?: unknown })
     .at(-1)
-  expect(terminalData?.response).toMatchObject({ output: [], output_text: "" })
+  expect(terminalData?.response).toMatchObject({
+    id: "resp_preflush",
+    status: "failed",
+  })
 })
 
 test("fails closed for primitive terminal JSON after HTTP preflush", async () => {
