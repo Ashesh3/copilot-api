@@ -30,6 +30,22 @@ const corsModels: ModelsResponse = {
         type: "chat",
       },
     },
+    {
+      id: "gpt-5.2:medium",
+      name: "Virtual CORS Model",
+      object: "model",
+      version: "1",
+      model_picker_enabled: true,
+      supported_endpoints: ["/responses"],
+      capabilities: {
+        family: "gpt",
+        limits: {},
+        object: "model_capabilities",
+        supports: {},
+        tokenizer: "cl100k_base",
+        type: "chat",
+      },
+    },
   ],
 }
 
@@ -135,6 +151,8 @@ test.each([
   ["GET", "/v1/models"],
   ["GET", "/models/model.with-dashes"],
   ["GET", "/v1/models/model.with-dashes/"],
+  ["GET", "/models/claude-sonnet-4.6:high"],
+  ["GET", "/v1/models/gpt-5.2:medium"],
   ["POST", "/chat/completions"],
   ["POST", "/v1/chat/completions"],
   ["POST", "/embeddings"],

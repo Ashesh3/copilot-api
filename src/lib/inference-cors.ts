@@ -14,6 +14,12 @@ function exactPath(...paths: Array<string>): (pathname: string) => boolean {
   return (pathname) => allowed.has(pathname)
 }
 
+function isGoogleActionModelPath(pathname: string): boolean {
+  return /:(?:generateContent|streamGenerateContent|countTokens)$/.test(
+    pathname,
+  )
+}
+
 const INFERENCE_ROUTES: Array<InferenceCorsRoute> = [
   { method: "GET", matches: exactPath("/models", "/v1/models") },
   {
@@ -23,7 +29,7 @@ const INFERENCE_ROUTES: Array<InferenceCorsRoute> = [
         pathname.endsWith("/") ? pathname.slice(0, -1) : pathname
       return (
         /^\/(?:v1\/)?models\/[^/]+$/.test(normalized)
-        && !normalized.includes(":")
+        && !isGoogleActionModelPath(normalized)
         && normalized !== "/models/session"
       )
     },
