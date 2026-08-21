@@ -317,6 +317,7 @@ function safeReasoning(value: unknown): Record<string, unknown> {
 function safeFunctionCall(value: unknown): Record<string, unknown> | undefined {
   const callId = nonEmptyString(readRecordValue(value, "call_id"))
   const name = nonEmptyString(readRecordValue(value, "name"))
+  const namespace = nonEmptyString(readRecordValue(value, "namespace"))
   const argumentsValue = text(readRecordValue(value, "arguments"))
   if (
     callId === undefined
@@ -329,6 +330,7 @@ function safeFunctionCall(value: unknown): Record<string, unknown> | undefined {
     ...commonOutputFields(value, "function_call"),
     call_id: callId,
     name,
+    ...(namespace === undefined ? {} : { namespace }),
     arguments: argumentsValue,
   }
 }
