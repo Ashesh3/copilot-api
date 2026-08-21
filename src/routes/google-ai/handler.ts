@@ -26,6 +26,11 @@ import {
   recordCopilotTranslationFindings,
 } from "~/lib/copilot-contract-observability"
 import {
+  createCustomProviderChatCompletions,
+  resolveCustomProviderModel,
+  type CustomProviderModelReference,
+} from "~/lib/custom-providers"
+import {
   getModelEndpointSupport,
   selectEvaluatedCopilotCandidate,
 } from "~/lib/endpoint-routing"
@@ -447,12 +452,41 @@ export async function handleGoogleAI(c: Context) {
   const outputMode: GoogleStreamOutputMode =
     c.req.query("alt") === "sse" ? "sse" : "json"
 
-  // Apply silent model redirect — google-ai response format does not include
-  // a model field, so client-facing transparency is automatic.
+  const { baseModel, reasoningEffort: suffixEffort } =
+    parseModelSuffix(rawModel)
+  const customReferenceBeforeRedirect = resolveCustomGoogleModel(baseModel)
+  if (customReferenceBeforeRedirect) {
+    return await handleCustomGoogleRequest(c, {
+      isCount,
+      isStream,
+      model: baseModel,
+      outputMode,
+      rawModel,
+      reasoningEffort: normalizeReasoningEffortForModel(
+        normalizeModelName(baseModel),
+        suffixEffort,
+      ),
+      reference: customReferenceBeforeRedirect,
+    })
+  }
+
+  // Apply silent model redirect. The public modelVersion remains rawModel.
   const { model, reasoningEffort } = await resolveGoogleModelRedirect(
     c,
     rawModel,
   )
+  const customReference = resolveCustomGoogleModel(model)
+  if (customReference) {
+    return await handleCustomGoogleRequest(c, {
+      isCount,
+      isStream,
+      model,
+      outputMode,
+      rawModel,
+      reasoningEffort,
+      reference: customReference,
+    })
+  }
   const routedModel = selectRoutedModel(model)
   const selectedModel = routedModel.model
   const support = getModelEndpointSupport(selectedModel)
@@ -592,6 +626,104 @@ export async function handleGoogleAI(c: Context) {
         outputMode,
       }),
   )
+}
+
+function getGoogleCopilotModelIds(): Set<string> {
+  return new Set(state.models?.data.map((model) => model.id) ?? [])
+}
+
+function resolveCustomGoogleModel(
+  model: string,
+): CustomProviderModelReference | undefined {
+  return resolveCustomProviderModel({
+    model,
+    kind: "chat",
+    copilotModelIds: getGoogleCopilotModelIds(),
+  })
+}
+
+async function handleCustomGoogleRequest(
+  c: Context,
+  options: {
+    isCount: boolean
+    isStream: boolean
+    model: string
+    outputMode: GoogleStreamOutputMode
+    rawModel: string
+    reasoningEffort?: ReasoningEffort
+    reference: CustomProviderModelReference
+  },
+): Promise<Response> {
+  let parsed: unknown
+  try {
+    parsed = await c.req.json<unknown>()
+  } catch {
+    return googleActionError(c, "Invalid JSON request body")
+  }
+  let preparedGoogle
+  try {
+    preparedGoogle = prepareGoogleRequest(parsed)
+  } catch (error) {
+    if (error instanceof InvalidGoogleRequestBodyError) {
+      return googleActionError(c, "Invalid JSON request body")
+    }
+    throw error
+  }
+  const candidate = await adaptGoogleToChatCandidate({
+    source: preparedGoogle,
+    finalModel: options.model,
+    stream: options.isStream,
+    explicitReasoningEffort: options.reasoningEffort,
+    signal: c.req.raw.signal,
+    ...(options.isCount ?
+      { resolveAttachment: () => Promise.resolve(null) }
+    : {}),
+  })
+  if (!candidate.check.supported) {
+    throw createEndpointTranslationError({
+      blockers: ["message_shape"],
+      code: "endpoint_translation_unsupported",
+      source: "chat",
+    })
+  }
+  if (options.isCount) {
+    const totalTokens = await estimateTokenCount(candidate.payload)
+    setRequestContext(c, {
+      inputTokens: totalTokens,
+      requestedModel: options.rawModel,
+      model: options.reference.upstreamModel,
+      provider: options.reference.provider.name,
+      reasoningEffort: options.reasoningEffort,
+    })
+    return c.json({ totalTokens })
+  }
+  recordCopilotTranslationFindings("chat", candidate.endpoint, candidate.check)
+  setRequestContext(c, {
+    requestedModel: options.rawModel,
+    model: options.reference.upstreamModel,
+    provider: options.reference.provider.name,
+    reasoningEffort: options.reasoningEffort,
+  })
+  if (state.manualApprove) await awaitApproval()
+  const completionFactory: GoogleChatCompletionFactory = async (
+    payload,
+    factoryOptions,
+  ) => ({
+    processedPayload: structuredClone(payload),
+    response: await createCustomProviderChatCompletions(
+      options.reference,
+      payload,
+      {
+        signal: factoryOptions.signal,
+        reasoningEffort: options.reasoningEffort,
+      },
+    ),
+  })
+  return await handleWithChatCompletions(c, candidate.payload, {
+    completionFactory,
+    outputMode: options.outputMode,
+    requestedModel: options.rawModel,
+  })
 }
 
 /** Route to the correct upstream API based on model capabilities. */

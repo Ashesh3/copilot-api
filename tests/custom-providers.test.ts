@@ -19,6 +19,7 @@ import {
   resolveCustomProviderModel,
 } from "../src/lib/custom-providers"
 import { HTTPError } from "../src/lib/error"
+import { setModelRedirectsForTest } from "../src/lib/model-redirect"
 import {
   getRoutingTelemetrySnapshot,
   resetRoutingTelemetryForTest,
@@ -51,6 +52,28 @@ interface ListedModel {
   owned_by: string
   dimensions?: number
   alias?: boolean
+  kind?: string
+  supported_endpoints?: Array<string>
+}
+
+function createCustomProviderStreamChunk(
+  finishReason: null | "stop",
+  content?: string,
+) {
+  return {
+    id: "custom-stream",
+    object: "chat.completion.chunk",
+    created: 1,
+    model: "custom-chat-model",
+    choices: [
+      {
+        index: 0,
+        delta: content ? { role: "assistant", content } : {},
+        finish_reason: finishReason,
+        logprobs: null,
+      },
+    ],
+  }
 }
 
 type RequestBodyCheck = (body: Record<string, unknown>) => void
@@ -158,6 +181,7 @@ beforeEach(() => {
   state.apiKeyAuth = undefined
   state.isMultiToken = false
   resetRoutingTelemetryForTest()
+  setModelRedirectsForTest([])
   setConfigForTest({
     auth: { apiKeys: [] },
     customProviders: [
@@ -277,6 +301,14 @@ test("custom models appear in /v1/models with aliases and metadata", async () =>
   expect(body.data).toContainEqual(
     expect.objectContaining(aliasModel) as ListedModel,
   )
+  const customChat = body.data.find((entry) => entry.id === "custom-chat-model")
+  const customAlias = body.data.find(
+    (entry) => entry.id === "custom-chat-alias",
+  )
+  expect(customChat?.kind).toBe("chat")
+  expect(customAlias?.alias).toBe(true)
+  expect(customChat?.supported_endpoints ?? []).not.toContain("ws:/responses")
+  expect(customAlias?.supported_endpoints ?? []).not.toContain("ws:/responses")
 })
 
 test("chat request routes to custom provider by model id", async () => {
@@ -306,6 +338,351 @@ test("chat request routes to custom provider by model id", async () => {
     requests: 1,
     upstreamCalls: 1,
   })
+})
+
+test("redirected Responses and Google models resolve custom providers after redirect", async () => {
+  setModelRedirectsForTest([
+    {
+      id: "task-19d-custom-redirect",
+      enabled: true,
+      sourceModel: "custom-redirect-source",
+      targetModel: "custom-chat-alias",
+      sourceEffort: "all",
+    },
+  ])
+
+  for (const [path, body] of [
+    ["/v1/responses", { model: "custom-redirect-source", input: "hello" }],
+    [
+      "/v1beta/models/custom-redirect-source:generateContent",
+      { contents: [{ role: "user", parts: [{ text: "hello" }] }] },
+    ],
+  ] as const) {
+    const response = await server.request(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    })
+    expect(response.status).toBe(200)
+  }
+
+  expect(requests).toHaveLength(2)
+  expect(requests.map((request) => request.body.model)).toEqual([
+    "custom-chat-model",
+    "custom-chat-model",
+  ])
+})
+
+test("custom embedding aliases never dispatch chat through Responses or Google", async () => {
+  const responses = await server.request("/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: "qwen3-embedding-8b", input: "hello" }),
+  })
+  const google = await server.request(
+    "/v1beta/models/qwen3-embedding-8b:generateContent",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: "hello" }] }],
+      }),
+    },
+  )
+
+  expect(responses.status).not.toBe(200)
+  expect(google.status).not.toBe(200)
+  expect(requests).toHaveLength(0)
+})
+
+test("custom Responses compaction remains excluded from provider dispatch", async () => {
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "custom-chat-alias",
+      input: "compact this",
+      client_metadata: JSON.stringify({
+        "x-codex-turn-metadata": JSON.stringify({
+          request_kind: "compaction",
+        }),
+      }),
+    }),
+  })
+
+  expect(response.status).not.toBe(200)
+  expect(requests).toHaveLength(0)
+})
+
+test("custom Google countTokens is local and never calls a provider", async () => {
+  const response = await server.request(
+    "/v1beta/models/custom-chat-alias:countTokens",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: "hello" }] }],
+      }),
+    },
+  )
+  const body = (await response.json()) as { totalTokens: number }
+
+  expect(response.status).toBe(200)
+  expect(typeof body.totalTokens).toBe("number")
+  expect(requests).toHaveLength(0)
+})
+
+test.each([
+  {
+    name: "Responses HTTP",
+    path: "/v1/responses",
+    payload: {
+      model: "custom-chat-alias",
+      input: "hello from Responses",
+      temperature: 0.2,
+    },
+    expectedModel: "custom-chat-alias",
+  },
+  {
+    name: "Google generateContent",
+    path: "/v1beta/models/custom-chat-alias:generateContent",
+    payload: {
+      contents: [{ role: "user", parts: [{ text: "hello from Google" }] }],
+      generationConfig: { temperature: 0.2 },
+    },
+    expectedModel: "custom-chat-alias",
+  },
+])(
+  "$name routes the evaluated Chat candidate to the custom provider",
+  async ({ path, payload, expectedModel }) => {
+    const response = await server.request(path, {
+      method: "POST",
+      headers: {
+        authorization: "Bearer gateway-client-secret",
+        "content-type": "application/json",
+        "copilot-session-token": "copilot-session-secret",
+      },
+      body: JSON.stringify(payload),
+    })
+    const body = (await response.json()) as {
+      error?: unknown
+      model?: string
+      modelVersion?: string
+    }
+
+    expect(response.status).toBe(200)
+    expect(body.model ?? body.modelVersion).toBe(expectedModel)
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.url).toBe("https://custom.example/v1/chat/completions")
+    expect(requests[0]?.body).toMatchObject({
+      model: "custom-chat-model",
+      temperature: 0.2,
+    })
+    expect(requests[0]?.headers.get("authorization")).toBe("Bearer custom-key")
+    expect(JSON.stringify(requests[0]?.body)).not.toContain(
+      "copilot-session-secret",
+    )
+    expect(JSON.stringify(requests[0]?.body)).not.toContain(
+      "gateway-client-secret",
+    )
+  },
+)
+
+test("custom providers preserve public identity across Responses and Google streams", async () => {
+  const providerStream = [
+    ": keepalive",
+    "event: provider.future\nx-provider-field: ignored",
+    `data: ${JSON.stringify(createCustomProviderStreamChunk(null, "custom"))}`,
+    `data: ${JSON.stringify(createCustomProviderStreamChunk("stop"))}`,
+    `data: ${JSON.stringify({
+      id: "custom-stream",
+      object: "chat.completion.chunk",
+      created: 1,
+      model: "custom-chat-model",
+      choices: [],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    })}`,
+    "data: [DONE]",
+    "",
+  ].join("\n\n")
+  const streamResponse = (url: string, init?: RequestInit) => {
+    const body =
+      typeof init?.body === "string" ?
+        (JSON.parse(init.body) as Record<string, unknown>)
+      : {}
+    requests.push({ url, body, headers: new Headers(init?.headers) })
+    return new Response(providerStream, {
+      headers: { "content-type": "text/event-stream" },
+    })
+  }
+  fetchMock
+    .mockImplementationOnce(streamResponse)
+    .mockImplementationOnce(streamResponse)
+
+  const responses = await server.request("/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "custom-chat-alias",
+      input: "hello",
+      stream: true,
+    }),
+  })
+  const responsesText = await responses.text()
+  expect(responses.status).toBe(200)
+  expect(responsesText).toContain('"model":"custom-chat-alias"')
+  expect(responsesText.match(/event: response\.completed/g) ?? []).toHaveLength(
+    1,
+  )
+  expect(responsesText).not.toContain("response.failed")
+
+  const google = await server.request(
+    "/v1beta/models/custom-chat-alias:streamGenerateContent?alt=sse",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: "hello" }] }],
+      }),
+    },
+  )
+  const googleText = await google.text()
+  expect(google.status).toBe(200)
+  expect(googleText).toContain('"modelVersion":"custom-chat-alias"')
+  expect(googleText.match(/"finishReason":"STOP"/g) ?? []).toHaveLength(1)
+  expect(requests).toHaveLength(2)
+})
+
+test("custom provider web-search continuations never switch to Copilot", async () => {
+  const assistantToolCall = {
+    id: "chatcmpl-search",
+    object: "chat.completion",
+    created: 1,
+    model: "custom-chat-model",
+    choices: [
+      {
+        index: 0,
+        message: {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "search-1",
+              type: "function",
+              function: {
+                name: "web_search",
+                arguments: JSON.stringify({ query: "task 19d" }),
+              },
+            },
+          ],
+        },
+        finish_reason: "tool_calls",
+        logprobs: null,
+      },
+    ],
+    usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+  }
+  fetchMock
+    .mockImplementationOnce((url: string, init?: RequestInit) => {
+      requests.push({
+        url,
+        body:
+          typeof init?.body === "string" ?
+            (JSON.parse(init.body) as Record<string, unknown>)
+          : {},
+        headers: new Headers(init?.headers),
+      })
+      return Response.json(assistantToolCall)
+    })
+    .mockImplementationOnce((url: string, init?: RequestInit) => {
+      const body =
+        typeof init?.body === "string" ?
+          (JSON.parse(init.body) as Record<string, unknown>)
+        : {}
+      requests.push({ url, body, headers: new Headers(init?.headers) })
+      return Response.json({
+        id: "chatcmpl-final",
+        object: "chat.completion",
+        created: 2,
+        model: "custom-chat-model",
+        choices: [
+          {
+            index: 0,
+            message: { role: "assistant", content: "searched" },
+            finish_reason: "stop",
+            logprobs: null,
+          },
+        ],
+        usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 },
+      })
+    })
+
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "custom-chat-alias",
+      input: "search",
+      tools: [
+        {
+          type: "function",
+          name: "web_search",
+          description: "search",
+          parameters: {
+            type: "object",
+            properties: { query: { type: "string" } },
+            required: ["query"],
+          },
+          max_uses: 1,
+        },
+      ],
+    }),
+  })
+  const body = (await response.json()) as { model: string; output_text: string }
+
+  expect(response.status).toBe(200)
+  expect(body.model).toBe("custom-chat-alias")
+  expect(body.output_text).toBe("searched")
+  expect(requests).toHaveLength(2)
+  expect(requests.map((request) => request.url)).toEqual([
+    "https://custom.example/v1/chat/completions",
+    "https://custom.example/v1/chat/completions",
+  ])
+  expect(JSON.stringify(requests[1]?.body).includes('"role":"tool"')).toBe(true)
+})
+
+test.each([
+  {
+    name: "Responses",
+    path: "/v1/responses",
+    body: { model: "custom-chat-alias", input: "hello" },
+  },
+  {
+    name: "Google",
+    path: "/v1beta/models/custom-chat-alias:generateContent",
+    body: { contents: [{ role: "user", parts: [{ text: "hello" }] }] },
+  },
+])("$name preserves exact custom provider failures", async ({ path, body }) => {
+  const bytes = Uint8Array.from([0, 255, 13, 10, 65])
+  fetchMock.mockImplementationOnce(
+    () =>
+      new Response(bytes.slice(), {
+        status: 401,
+        headers: { "content-type": "application/octet-stream" },
+      }),
+  )
+
+  const response = await server.request(path, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  })
+
+  expect(response.status).toBe(401)
+  expect(response.headers.get("content-type")).toBe("application/octet-stream")
+  expect(Array.from(new Uint8Array(await response.arrayBuffer()))).toEqual(
+    Array.from(bytes),
+  )
 })
 
 test("custom Chat receives the tolerant native candidate without Copilot caching", async () => {

@@ -21,6 +21,11 @@ import {
 } from "~/lib/copilot-contract-observability"
 import { sessionTokenMatchesModel } from "~/lib/copilot-session-token"
 import {
+  createCustomProviderChatCompletions,
+  resolveCustomProviderModel,
+  type CustomProviderModelReference,
+} from "~/lib/custom-providers"
+import {
   type EndpointRouteDecision,
   type EndpointRouteFailure,
   getModelEndpointSupport,
@@ -123,6 +128,7 @@ import {
   selectResponsesCandidate,
 } from "./fallback-candidates"
 import { executePreparedResponsesMessagesBridge } from "./messages-bridge"
+import { adaptResponsesToChatCandidate } from "./responses-chat-adapter"
 import { getResponsesChatWebSearchMaxUses } from "./responses-chat-adapter"
 import { createStreamIdTracker, fixStreamIds } from "./stream-id-sync"
 import {
@@ -813,9 +819,22 @@ const handleResponsesInner = async (
     payload.model,
   )
 
-  payload.model = normalizeModelName(baseModel)
+  const customReferenceBeforeRedirect = resolveCustomResponsesModel(
+    baseModel,
+    payload,
+  )
+  payload.model =
+    customReferenceBeforeRedirect ? baseModel : normalizeModelName(baseModel)
   const effectiveEffort = normalizeResponsesReasoning(payload, suffixEffort)
   syncLegacyResponsesRouteState(legacyPayload, payload)
+  if (customReferenceBeforeRedirect) {
+    return await dispatchCustomResponsesRequest(c, {
+      finalEffort: effectiveEffort,
+      payload,
+      reference: customReferenceBeforeRedirect,
+      requestedModel,
+    })
+  }
   const redirect = await resolveResponsesRedirect(c, {
     model: payload.model,
     effectiveEffort,
@@ -843,6 +862,16 @@ const handleResponsesInner = async (
   })
   syncLegacyResponsesRouteState(legacyPayload, payload)
   const finalEffort = redirectedEffort ?? effectiveEffort
+
+  const customReference = resolveCustomResponsesModel(payload.model, payload)
+  if (customReference) {
+    return await dispatchCustomResponsesRequest(c, {
+      finalEffort,
+      payload,
+      reference: customReference,
+      requestedModel,
+    })
+  }
 
   const copilotSessionToken = resolveResponsesSessionToken(c, {
     payload,
@@ -1112,6 +1141,84 @@ const handleResponsesInner = async (
     })
 
     return c.json(withRequestedResponseModel(resolved, requestedModel))
+  })
+}
+
+function getResponsesCopilotModelIds(): Set<string> {
+  return new Set(state.models?.data.map((model) => model.id) ?? [])
+}
+
+function resolveCustomResponsesModel(
+  model: string,
+  payload?: ResponsesPayload,
+): CustomProviderModelReference | undefined {
+  if (payload && isResponsesCompactionRequest(payload)) return undefined
+  return resolveCustomProviderModel({
+    model,
+    kind: "chat",
+    copilotModelIds: getResponsesCopilotModelIds(),
+  })
+}
+
+async function dispatchCustomResponsesRequest(
+  c: Context,
+  options: {
+    finalEffort?: ResponsesReasoningEffort
+    payload: ResponsesPayload
+    reference: CustomProviderModelReference
+    requestedModel: string
+  },
+): Promise<Response> {
+  expandCompactionItems(options.payload)
+  const candidate = await adaptResponsesToChatCandidate({
+    source: options.payload,
+    finalModel: options.payload.model,
+    finalReasoningEffort: options.finalEffort,
+    signal: c.req.raw.signal,
+  })
+  if (!candidate.check.supported) {
+    throw createEndpointTranslationError({
+      blockers: candidate.check.findings
+        .filter((finding) => finding.severity === "fatal")
+        .map((finding) => finding.class),
+      code: "endpoint_translation_unsupported",
+      source: "responses",
+    })
+  }
+  recordCopilotTranslationFindings(
+    "responses",
+    candidate.endpoint,
+    candidate.check,
+  )
+  setRequestContext(c, {
+    requestedModel: options.requestedModel,
+    provider: options.reference.provider.name,
+    model: options.reference.upstreamModel,
+    reasoningEffort:
+      typeof options.finalEffort === "string" ? options.finalEffort : undefined,
+  })
+  if (state.manualApprove) await awaitApproval()
+  const completionFactory: ResponsesChatCompletionFactory = async (
+    payload,
+    factoryOptions,
+  ) => ({
+    processedPayload: structuredClone(payload),
+    response: await createCustomProviderChatCompletions(
+      options.reference,
+      payload,
+      {
+        signal: factoryOptions.signal,
+        reasoningEffort:
+          typeof options.finalEffort === "string" ?
+            options.finalEffort
+          : undefined,
+      },
+    ),
+  })
+  return await handleWithChatCompletions(c, candidate.payload, {
+    completionFactory,
+    requestedModel: options.requestedModel,
+    webSearchMaxUses: getResponsesChatWebSearchMaxUses(options.payload),
   })
 }
 
