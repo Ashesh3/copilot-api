@@ -35,7 +35,9 @@ export const fixStreamIds = (
   tracker: StreamIdTracker,
 ): string => {
   if (event !== undefined && isTerminalEventName(event)) {
-    return sanitizeResponsesStreamEvent({ data, event }).data ?? data
+    const sanitized = sanitizeResponsesStreamEvent({ data, event }).data ?? data
+    if (!sanitized) return sanitized
+    return synchronizeTerminalOutputIds(sanitized, tracker)
   }
   if (!data) return data
   const parsed = JSON.parse(data) as ResponseStreamEvent
@@ -67,6 +69,32 @@ const TERMINAL_EVENT_NAMES = new Set([
 
 function isTerminalEventName(value: string): boolean {
   return TERMINAL_EVENT_NAMES.has(value)
+}
+
+const synchronizeTerminalOutputIds = (
+  data: string,
+  tracker: StreamIdTracker,
+): string => {
+  const parsed = JSON.parse(data) as {
+    response?: { output?: Array<unknown> }
+  }
+  const output = parsed.response?.output
+  if (!Array.isArray(output)) return data
+  let changed = false
+  for (const [outputIndex, item] of output.entries()) {
+    const originalId = tracker.outputItems.get(outputIndex)
+    if (
+      originalId
+      && typeof item === "object"
+      && item !== null
+      && !Array.isArray(item)
+    ) {
+      const outputItem = item as Record<string, unknown>
+      outputItem.id = originalId
+      changed = true
+    }
+  }
+  return changed ? JSON.stringify(parsed) : data
 }
 
 const handleOutputItemAdded = (
