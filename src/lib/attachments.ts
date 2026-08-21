@@ -294,22 +294,24 @@ async function readBoundedResponseBody(
     response.body.getReader() as ReadableStreamDefaultReader<Uint8Array>
   const chunks: Array<Uint8Array> = []
   let total = 0
-  let cancelPending: Promise<void> | undefined
-  const cancelReader = (): Promise<void> => {
-    cancelPending ??= (async () => {
-      try {
-        await reader.cancel(signal.reason)
-      } catch {
-        // Cancellation is best-effort; the abort outcome remains authoritative.
-      }
-    })()
-    return cancelPending
+  let cancelStarted = false
+  const cancelReader = (): void => {
+    if (cancelStarted) return
+    cancelStarted = true
+    try {
+      void reader.cancel(signal.reason).catch(() => {})
+    } catch {
+      // Cancellation is best-effort; the abort outcome remains authoritative.
+    }
   }
   if (declared !== undefined && declared > maxBytes) {
     if (signal.aborted) throw signal.reason
-    await cancelReader()
-    reader.releaseLock()
-    return null
+    try {
+      cancelReader()
+      return null
+    } finally {
+      reader.releaseLock()
+    }
   }
   try {
     while (true) {
@@ -318,7 +320,7 @@ async function readBoundedResponseBody(
 
       let rejectAbort: ((reason?: unknown) => void) | undefined
       const onAbort = () => {
-        void cancelReader()
+        cancelReader()
         rejectAbort?.(
           signal.reason instanceof Error ?
             signal.reason
@@ -344,7 +346,7 @@ async function readBoundedResponseBody(
       const chunk = result.value
       if (!chunk) break
       if (total + chunk.byteLength > maxBytes) {
-        await cancelReader()
+        cancelReader()
         return null
       }
       chunks.push(chunk)
@@ -353,7 +355,7 @@ async function readBoundedResponseBody(
     return Buffer.concat(chunks, total)
   } catch (error) {
     if (signal.aborted) {
-      await cancelReader()
+      cancelReader()
       throw signal.reason
     }
     throw error

@@ -220,6 +220,92 @@ test("returns an empty attachment for a declared-oversize null body", async () =
   ).toEqual({ data: "", mediaType: "image/png" })
 })
 
+test("does not wait for declared-oversize body cancellation", async () => {
+  let cancelCalled = false
+  const body = new ReadableStream<Uint8Array>({
+    cancel() {
+      cancelCalled = true
+      return new Promise<void>(() => {})
+    },
+    pull() {
+      return new Promise<void>(() => {})
+    },
+  })
+
+  const result = await Promise.race([
+    attachmentsModule.fetchUrlAsDataUri("https://size.test/stuck.png", {
+      fetch: (() =>
+        Promise.resolve(
+          new Response(body, {
+            headers: {
+              "content-length": "4",
+              "content-type": "image/png",
+            },
+          }),
+        )) as unknown as typeof fetch,
+      maxBytes: 3,
+    }),
+    new Promise<"test-timeout">((resolve) => {
+      setTimeout(() => resolve("test-timeout"), 100)
+    }),
+  ])
+
+  expect(result).toBeNull()
+  expect(cancelCalled).toBe(true)
+  expect(body.locked).toBe(false)
+})
+
+test("suppresses a late declared-oversize cancellation rejection", async () => {
+  let rejectCancel: ((reason: Error) => void) | undefined
+  let cancelCalled = false
+  const body = new ReadableStream<Uint8Array>({
+    cancel() {
+      cancelCalled = true
+      return new Promise<void>((_resolve, reject) => {
+        rejectCancel = reject
+      })
+    },
+    pull() {
+      return new Promise<void>(() => {})
+    },
+  })
+  const unhandled: Array<unknown> = []
+  const onUnhandled = (event: Event) => {
+    const rejection = event as Event & { reason?: unknown }
+    unhandled.push(rejection.reason)
+    event.preventDefault()
+  }
+  globalThis.addEventListener("unhandledrejection", onUnhandled)
+  try {
+    expect(
+      await attachmentsModule.fetchUrlAsDataUri(
+        "https://size.test/reject.png",
+        {
+          fetch: (() =>
+            Promise.resolve(
+              new Response(body, {
+                headers: {
+                  "content-length": "4",
+                  "content-type": "image/png",
+                },
+              }),
+            )) as unknown as typeof fetch,
+          maxBytes: 3,
+        },
+      ),
+    ).toBeNull()
+    if (!rejectCancel) throw new Error("cancel was not requested")
+    rejectCancel(new Error("late cancel failure"))
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(cancelCalled).toBe(true)
+    expect(body.locked).toBe(false)
+    expect(unhandled).toEqual([])
+  } finally {
+    globalThis.removeEventListener("unhandledrejection", onUnhandled)
+  }
+})
+
 test("accepts exact byte cap and stops streamed overflow promptly", async () => {
   const exact = await attachmentsModule.fetchUrlAsDataUri(
     "https://size.test/exact.png",
