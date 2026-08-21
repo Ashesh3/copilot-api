@@ -349,38 +349,6 @@ test.each([
     code: "invalid_value",
     param: "messages",
   },
-  {
-    name: "missing max_tokens",
-    body: JSON.stringify({
-      model: "claude",
-      messages: [{ role: "user", content: "x" }],
-    }),
-    message: "max_tokens is required for Messages requests.",
-    code: "invalid_value",
-    param: "max_tokens",
-  },
-  {
-    name: "zero max_tokens",
-    body: JSON.stringify({
-      model: "claude",
-      messages: [{ role: "user", content: "x" }],
-      max_tokens: 0,
-    }),
-    message: "max_tokens is required for Messages requests.",
-    code: "invalid_value",
-    param: "max_tokens",
-  },
-  {
-    name: "fractional max_tokens",
-    body: JSON.stringify({
-      model: "claude",
-      messages: [{ role: "user", content: "x" }],
-      max_tokens: 1.5,
-    }),
-    message: "max_tokens is required for Messages requests.",
-    code: "invalid_value",
-    param: "max_tokens",
-  },
 ] as const)(
   "rejects public Messages $name before upstream dispatch",
   async ({ body, code, message, param }) => {
@@ -400,18 +368,7 @@ test.each([
 )
 
 test.each([
-  ["primitive metadata", { metadata: "private" }, "metadata"],
-  ["null tool choice", { tool_choice: null }, "tool_choice"],
-  ["primitive cache control", { cache_control: "ephemeral" }, "cache_control"],
-  ["primitive thinking", { thinking: true }, "thinking"],
-  ["primitive output config", { output_config: "high" }, "output_config"],
-  ["primitive system entry", { system: ["not-a-block"] }, "system"],
   ["primitive message entry", { messages: [null] }, "messages"],
-  [
-    "invalid message role",
-    { messages: [{ role: "system", content: "x" }] },
-    "messages",
-  ],
   [
     "primitive content entry",
     { messages: [{ role: "user", content: [null] }] },
@@ -442,11 +399,6 @@ test.each([
     "content",
   ],
   ["non-string tool name", { tools: [{ name: 3, input_schema: {} }] }, "tools"],
-  [
-    "function tool without schema",
-    { tools: [{ name: "missing_schema" }] },
-    "tools",
-  ],
 ] as const)(
   "rejects malformed valid-JSON Messages %s before upstream dispatch",
   async (_name, extra, param) => {
@@ -503,6 +455,107 @@ test("preserves a forward-compatible native content record", async () => {
   )
 })
 
+test("preserves system and future roles plus unknown native tool and top-level fields", async () => {
+  state.models = structuredClone(nativeMessagesModels)
+  const futureBlock = {
+    type: "future_native_block_20270101",
+    future_payload: { enabled: true },
+  }
+  const futureSystemBlock = {
+    type: "future_system_block_20270101",
+    future_payload: { enabled: true },
+  }
+  const futureTool = {
+    name: "lookup",
+    future_tool_field: { enabled: true },
+  }
+
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-opus-4.8",
+      system: [futureSystemBlock],
+      messages: [
+        { role: "system", content: "bootstrap" },
+        { role: "future-role", content: [futureBlock] },
+      ],
+      tools: [futureTool],
+      future_native_field: { enabled: true },
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamUrl).toContain("/v1/messages")
+  expect(lastUpstreamPayload).toMatchObject({
+    system: [futureSystemBlock],
+    messages: [
+      { role: "system", content: "bootstrap" },
+      { role: "future-role", content: [futureBlock] },
+    ],
+    tools: [futureTool],
+    future_native_field: { enabled: true },
+  })
+})
+
+test("drops malformed optional controls and invalid optional Anthropic headers", async () => {
+  state.models = structuredClone(nativeMessagesModels)
+
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "anthropic-beta": "PRIVATE_BAD_BETA value",
+      "anthropic-version": "PRIVATE_BAD_VERSION\u007f",
+      "x-model-provider-preference": "PRIVATE_BAD_PROVIDER\u007f",
+    },
+    body: JSON.stringify({
+      model: "claude-opus-4.8",
+      messages: [{ role: "user", content: "hello" }],
+      metadata: "private",
+      tool_choice: null,
+      cache_control: "ephemeral",
+      thinking: true,
+      output_config: "high",
+      system: ["not-a-block"],
+      stop_sequences: ["good", 3],
+      top_p: "0.8",
+      stream: "yes",
+      fallback_credit_token: 42,
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPayload).toEqual({
+    model: "claude-opus-4.8",
+    max_tokens: 64000,
+    messages: [{ role: "user", content: "hello" }],
+  })
+  expect(lastUpstreamHeaders?.get("anthropic-beta")).toBeNull()
+  expect(lastUpstreamHeaders?.get("anthropic-version")).toBe("2023-06-01")
+  expect(lastUpstreamHeaders?.get("x-model-provider-preference")).toBeNull()
+})
+
+test("fills a missing native max_tokens from model metadata at transport time", async () => {
+  state.models = structuredClone(nativeMessagesModels)
+
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-opus-4.8",
+      messages: [{ role: "user", content: "hello" }],
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPayload).toMatchObject({
+    model: "claude-opus-4.8",
+    max_tokens: 64000,
+    messages: [{ role: "user", content: "hello" }],
+  })
+})
+
 test("rejects malformed public Messages JSON before upstream dispatch", async () => {
   const response = await server.request("/v1/messages", {
     method: "POST",
@@ -522,41 +575,6 @@ test("rejects malformed public Messages JSON before upstream dispatch", async ()
   })
   expect(fetchMock).not.toHaveBeenCalled()
 })
-
-test.each([
-  ["anthropic-beta", "PRIVATE_BAD_BETA value", "anthropic_beta"],
-  ["anthropic-version", "PRIVATE_BAD_VERSION", "anthropic_version"],
-  [
-    "x-model-provider-preference",
-    "PRIVATE_BAD_PROVIDER",
-    "model_provider_preference",
-  ],
-] as const)(
-  "rejects an invalid public Messages %s header without exposing it",
-  async (name, value, param) => {
-    const response = await server.request("/v1/messages", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        [name]: value,
-      },
-      body: JSON.stringify({
-        model: "claude-opus-4.8",
-        messages: [{ role: "user", content: "hello" }],
-        max_tokens: 1,
-      }),
-    })
-    const body = await response.text()
-
-    expect(response.status).toBe(400)
-    expect(JSON.parse(body)).toMatchObject({
-      type: "error",
-      error: { code: "invalid_value", param },
-    })
-    expect(body).not.toContain("PRIVATE_")
-    expect(fetchMock).not.toHaveBeenCalled()
-  },
-)
 
 test("returns a safe Anthropic error for an upstream Messages failure", async () => {
   upstreamResponseOverride = Response.json(

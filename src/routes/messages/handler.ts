@@ -242,8 +242,7 @@ export async function handleCompletion(c: Context) {
     payload: rawPayload,
     requireMaxTokens: true,
   })
-  const anthropicPayload =
-    preparedMessages.body as unknown as AnthropicMessagesPayload
+  const anthropicPayload = preparedMessages.body
   const nativeOptions: NativeMessagesRequestOptions =
     validateAnthropicRequestHeaderOptions({
       anthropicBeta: c.req.header("anthropic-beta"),

@@ -31,7 +31,7 @@ export interface AnthropicTokenCountResult {
 }
 
 function selectCountTokensBody(
-  body: Record<string, unknown>,
+  body: AnthropicMessagesPayload,
 ): Record<string, unknown> {
   return Object.fromEntries(
     Object.entries(body).filter(([field]) => COUNT_TOKENS_FIELDS.has(field)),
@@ -70,7 +70,6 @@ export async function countAnthropicTokens(
     requireMaxTokens: false,
   })
   const body = selectCountTokensBody(prepared.body)
-  const snapshot = body as unknown as AnthropicMessagesPayload
   const { response } = await routedFetch(
     ANTHROPIC_COUNT_TOKENS_ENDPOINT,
     {
@@ -79,10 +78,10 @@ export async function countAnthropicTokens(
       signal: options.signal,
     },
     {
-      modelId: snapshot.model,
+      modelId: prepared.body.model,
       headerOptions: {
-        initiator: detectAnthropicInitiator(snapshot.messages),
-        vision: hasVisionContent(snapshot.messages),
+        initiator: detectAnthropicInitiator(prepared.body.messages),
+        vision: hasVisionContent(prepared.body.messages),
         ...prepared.headers,
       },
     },

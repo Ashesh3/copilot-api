@@ -1,8 +1,11 @@
 import { expect, test } from "bun:test"
 
-import type { AnthropicMessagesPayload } from "~/routes/messages/anthropic-types"
-
 import { LocalHTTPError } from "~/lib/error"
+import {
+  asAnthropicUnknownContentType,
+  asAnthropicUnknownRole,
+  type AnthropicMessagesPayload,
+} from "~/routes/messages/anthropic-types"
 import {
   canonicalizeAnthropicBeta,
   isAnthropicBetaIdentifier,
@@ -10,6 +13,25 @@ import {
   serializeAnthropicMessagesRequest,
   validateAnthropicRequestHeaderOptions,
 } from "~/services/copilot/messages-contract"
+
+function getOptionalHeaderField(
+  param: "anthropic_beta" | "anthropic_version" | "model_provider_preference",
+): "anthropicBeta" | "anthropicVersion" | "modelProviderPreference" {
+  switch (param) {
+    case "anthropic_beta": {
+      return "anthropicBeta"
+    }
+    case "anthropic_version": {
+      return "anthropicVersion"
+    }
+    case "model_provider_preference": {
+      return "modelProviderPreference"
+    }
+    default: {
+      throw new Error("Unexpected optional header field")
+    }
+  }
+}
 
 function expectFixedBodyError(action: () => unknown, marker: string): void {
   try {
@@ -124,7 +146,6 @@ test("defaults omitted native header options", () => {
   const prepared = prepareAnthropicMessagesRequest({
     payload: {
       model: "claude-current",
-      max_tokens: 1,
       messages: [{ role: "user", content: "hello" }],
     },
     requireMaxTokens: true,
@@ -149,19 +170,14 @@ test.each([
     options: { modelProviderPreference: "PRIVATE_BAD_PROVIDER\nvalue" },
     param: "model_provider_preference",
   },
-] as const)("rejects an invalid public $name header", ({ options, param }) => {
-  try {
-    validateAnthropicRequestHeaderOptions(options)
-    throw new Error("Expected header validation to fail")
-  } catch (error) {
-    expect(error).toBeInstanceOf(LocalHTTPError)
-    expect(error).toHaveProperty("clientBody.error.code", "invalid_value")
-    expect(error).toHaveProperty("clientBody.error.param", param)
-    expect(JSON.stringify((error as LocalHTTPError).clientBody)).not.toContain(
-      "PRIVATE_BAD",
+] as const)(
+  "omits an invalid public $name header option without exposing it",
+  ({ options, param }) => {
+    expect(validateAnthropicRequestHeaderOptions(options)).not.toHaveProperty(
+      getOptionalHeaderField(param),
     )
-  }
-})
+  },
+)
 
 test("normalizes every ephemeral cache marker without mutating the source", () => {
   const body = {
@@ -255,10 +271,6 @@ test.each(["30m", "forever"])(
 test.each([
   ["model", { model: "", messages: [], max_tokens: 1 }],
   ["messages", { model: "claude", messages: [], max_tokens: 1 }],
-  [
-    "max_tokens",
-    { model: "claude", messages: [{ role: "user", content: "x" }] },
-  ],
 ] as const)("validates required inference field %s", (param, payload) => {
   try {
     prepareAnthropicMessagesRequest({
@@ -282,23 +294,7 @@ test.each([
   }
 })
 
-test.each([0, -1, 1.5])(
-  "rejects non-positive or non-integer inference max_tokens %#",
-  (maxTokens) => {
-    expect(() =>
-      prepareAnthropicMessagesRequest({
-        payload: {
-          model: "claude",
-          messages: [{ role: "user", content: "x" }],
-          max_tokens: maxTokens,
-        },
-        requireMaxTokens: true,
-      }),
-    ).toThrow(LocalHTTPError)
-  },
-)
-
-test("does not require max_tokens for shared non-inference preparation", () => {
+test("does not require max_tokens during shared preparation", () => {
   expect(
     prepareAnthropicMessagesRequest({
       payload: {
@@ -311,18 +307,15 @@ test("does not require max_tokens for shared non-inference preparation", () => {
 })
 
 test.each([
-  ["undefined", undefined],
   ["string", "32"],
   ["null", null],
   ["zero", 0],
   ["negative", -1],
   ["fractional", 1.5],
-  ["NaN", Number.NaN],
-  ["infinity", Number.POSITIVE_INFINITY],
 ] as const)(
-  "rejects present invalid optional max_tokens: %s",
+  "drops present invalid optional max_tokens: %s",
   (_name, maxTokens) => {
-    try {
+    expect(
       prepareAnthropicMessagesRequest({
         payload: {
           model: "claude",
@@ -330,15 +323,96 @@ test.each([
           max_tokens: maxTokens,
         } as unknown as AnthropicMessagesPayload,
         requireMaxTokens: false,
-      })
-      throw new Error("Expected optional max_tokens validation to fail")
-    } catch (error) {
-      expect(error).toBeInstanceOf(LocalHTTPError)
-      expect(error).toHaveProperty("clientBody.error.code", "invalid_value")
-      expect(error).toHaveProperty("clientBody.error.param", "max_tokens")
-    }
+      }).body,
+    ).not.toHaveProperty("max_tokens")
   },
 )
+
+test.each([
+  ["undefined", undefined],
+  ["NaN", Number.NaN],
+  ["infinity", Number.POSITIVE_INFINITY],
+] as const)(
+  "keeps failing closed for non-JSON optional max_tokens: %s",
+  (_name, maxTokens) => {
+    expectFixedBodyError(
+      () =>
+        prepareAnthropicMessagesRequest({
+          payload: {
+            model: "claude",
+            messages: [{ role: "user", content: "x" }],
+            max_tokens: maxTokens,
+          } as unknown as AnthropicMessagesPayload,
+          requireMaxTokens: false,
+        }),
+      "PRIVATE_NON_JSON_MAX_TOKENS",
+    )
+  },
+)
+
+test("preserves system and future roles plus unknown native structures", () => {
+  const futureBlock = {
+    type: asAnthropicUnknownContentType("future_content_block_20270101"),
+    data: { enabled: true },
+  }
+  const futureSystemBlock = {
+    type: asAnthropicUnknownContentType("future_system_block_20270101"),
+    data: { enabled: true },
+  }
+  const prepared = prepareAnthropicMessagesRequest({
+    payload: {
+      model: "claude-current",
+      system: [futureSystemBlock],
+      messages: [
+        { role: asAnthropicUnknownRole("system"), content: "bootstrap" },
+        { role: asAnthropicUnknownRole("future-role"), content: [futureBlock] },
+      ],
+      tools: [
+        {
+          name: "lookup",
+          future_tool_flag: true,
+        },
+      ],
+      future_native_field: { enabled: true },
+    } as AnthropicMessagesPayload,
+    requireMaxTokens: true,
+  })
+
+  expect(prepared.body).toMatchObject({
+    system: [futureSystemBlock],
+    messages: [
+      { role: "system", content: "bootstrap" },
+      { role: "future-role", content: [futureBlock] },
+    ],
+    tools: [{ name: "lookup", future_tool_flag: true }],
+    future_native_field: { enabled: true },
+  })
+})
+
+test("drops malformed optional controls instead of rejecting the request", () => {
+  const prepared = prepareAnthropicMessagesRequest({
+    payload: {
+      model: "claude-current",
+      messages: [{ role: "user", content: "hello" }],
+      metadata: "private" as never,
+      tool_choice: null as never,
+      cache_control: "ephemeral" as never,
+      thinking: true as never,
+      output_config: "high" as never,
+      system: ["not-a-block"] as never,
+      stop_sequences: ["good", 3] as never,
+      top_p: "0.8" as never,
+      stream: "yes" as never,
+      fallback_credit_token: 42 as never,
+    } as AnthropicMessagesPayload,
+    requireMaxTokens: true,
+  })
+
+  expect(prepared.body).toEqual({
+    model: "claude-current",
+    messages: [{ role: "user", content: "hello" }],
+  })
+})
 
 test("rejects a throwing accessor without invoking or exposing it", () => {
   const marker = "PRIVATE_THROWING_GETTER"

@@ -36,7 +36,7 @@ const GATEWAY_ONLY_MESSAGES_FIELDS = new Set([
 ])
 
 export interface PreparedAnthropicMessagesRequest {
-  body: Record<string, unknown>
+  body: AnthropicMessagesPayload
   headers: AnthropicRequestHeaders
   normalizationClasses: Array<CopilotContractNormalizationClass>
 }
@@ -96,6 +96,10 @@ function createMessagesValidationError(
     message: `${param} is required for Messages requests.`,
     param,
   })
+}
+
+export function createMissingAnthropicMessagesMaxTokensError(): LocalHTTPError {
+  return createMessagesValidationError("max_tokens")
 }
 
 function createInvalidMessagesFieldError(param: string): LocalHTTPError {
@@ -289,7 +293,9 @@ function clonePlainJsonValue(
   }
 }
 
-function cloneAnthropicMessagesBody(payload: unknown): Record<string, unknown> {
+function cloneAnthropicMessagesBody(
+  payload: unknown,
+): AnthropicMessagesPayload {
   if (typeof payload !== "object" || payload === null) {
     throw createInvalidMessagesBodyError()
   }
@@ -306,18 +312,7 @@ function cloneAnthropicMessagesBody(payload: unknown): Record<string, unknown> {
   if (clone === INVALID_MESSAGES_JSON || !isRecord(clone)) {
     throw createInvalidMessagesJsonValueError()
   }
-  return clone
-}
-
-function validateRawMaxTokens(payload: unknown): void {
-  if (typeof payload !== "object" || payload === null || isProxy(payload))
-    return
-  const descriptors = getPlainJsonDescriptors(payload)
-  if (descriptors === INVALID_MESSAGES_JSON) return
-  if (!("max_tokens" in descriptors)) return
-  const data = readDataDescriptor(descriptors.max_tokens)
-  if (data === INVALID_MESSAGES_JSON) return
-  validateMaxTokens(data.value, true)
+  return clone as AnthropicMessagesPayload
 }
 
 function validateMaxTokens(value: unknown, required: boolean): void {
@@ -328,8 +323,7 @@ function validateMaxTokens(value: unknown, required: boolean): void {
 }
 
 function validateAnthropicMessagesPayload(
-  payload: Record<string, unknown>,
-  requireMaxTokens: boolean,
+  payload: AnthropicMessagesPayload,
 ): void {
   if (typeof payload.model !== "string" || payload.model.trim().length === 0) {
     throw createMessagesValidationError("model")
@@ -337,53 +331,37 @@ function validateAnthropicMessagesPayload(
   if (!Array.isArray(payload.messages) || payload.messages.length === 0) {
     throw createMessagesValidationError("messages")
   }
-  validateMaxTokens(payload.max_tokens, requireMaxTokens)
-  validateOptionalRecord(payload, "metadata", validateMetadata)
-  validateOptionalRecord(payload, "tool_choice", validateToolChoice)
-  validateOptionalRecord(payload, "cache_control", validateCacheControl)
-  validateOptionalRecord(payload, "thinking", validateThinking)
-  validateOptionalRecord(payload, "output_config", validateOutputConfig)
-  validateOptionalRecord(payload, "context_management")
-  validateOptionalRecord(payload, "stop_details")
-  validateSystem(payload.system)
   validateMessages(payload.messages)
   validateTools(payload.tools)
-  validateOptionalStringArray(payload, "stop_sequences")
-  validateOptionalFiniteNumber(payload, "temperature")
-  validateOptionalFiniteNumber(payload, "top_p")
-  validateOptionalFiniteNumber(payload, "top_k")
-  validateOptionalBoolean(payload, "stream")
-  validateOptionalString(payload, "fallback_credit_token")
-  if (
-    payload.service_tier !== undefined
-    && payload.service_tier !== "auto"
-    && payload.service_tier !== "standard_only"
-  ) {
-    throw createInvalidMessagesFieldError("service_tier")
-  }
-  if (payload.speed !== undefined && payload.speed !== "fast") {
-    throw createInvalidMessagesFieldError("speed")
-  }
 }
 
-function validateOptionalRecord(
+function deleteOwnField(
   parent: Record<string, unknown>,
   field: string,
-  validate?: (value: Record<string, unknown>) => void,
-): void {
-  const value = parent[field]
-  if (value === undefined) return
-  if (!isRecord(value)) throw createInvalidMessagesFieldError(field)
-  validate?.(value)
+): boolean {
+  if (!Object.hasOwn(parent, field)) return false
+  Reflect.deleteProperty(parent, field)
+  return true
 }
 
-function validateOptionalString(
+function normalizeOptionalRecord(
+  parent: Record<string, unknown>,
+  field: string,
+): Record<string, unknown> | undefined {
+  const value = parent[field]
+  if (value === undefined) return undefined
+  if (isRecord(value)) return value
+  deleteOwnField(parent, field)
+  return undefined
+}
+
+function normalizeOptionalString(
   parent: Record<string, unknown>,
   field: string,
 ): void {
   const value = parent[field]
   if (value !== undefined && typeof value !== "string") {
-    throw createInvalidMessagesFieldError(field)
+    deleteOwnField(parent, field)
   }
 }
 
@@ -393,17 +371,17 @@ function validateNonEmptyString(value: unknown, param: string): void {
   }
 }
 
-function validateOptionalBoolean(
+function normalizeOptionalBoolean(
   parent: Record<string, unknown>,
   field: string,
 ): void {
   const value = parent[field]
   if (value !== undefined && typeof value !== "boolean") {
-    throw createInvalidMessagesFieldError(field)
+    deleteOwnField(parent, field)
   }
 }
 
-function validateOptionalFiniteNumber(
+function normalizeOptionalFiniteNumber(
   parent: Record<string, unknown>,
   field: string,
 ): void {
@@ -412,11 +390,11 @@ function validateOptionalFiniteNumber(
     value !== undefined
     && (typeof value !== "number" || !Number.isFinite(value))
   ) {
-    throw createInvalidMessagesFieldError(field)
+    deleteOwnField(parent, field)
   }
 }
 
-function validateOptionalStringArray(
+function normalizeOptionalStringArray(
   parent: Record<string, unknown>,
   field: string,
 ): void {
@@ -425,55 +403,59 @@ function validateOptionalStringArray(
     value !== undefined
     && (!Array.isArray(value) || value.some((item) => typeof item !== "string"))
   ) {
-    throw createInvalidMessagesFieldError(field)
+    deleteOwnField(parent, field)
   }
 }
 
-function validateMetadata(value: Record<string, unknown>): void {
-  validateOptionalString(value, "user_id")
+function normalizeMaxTokens(payload: AnthropicMessagesPayload): void {
+  if (payload.max_tokens === undefined) return
+  try {
+    validateMaxTokens(payload.max_tokens, true)
+  } catch {
+    deleteOwnField(payload, "max_tokens")
+  }
 }
 
-function validateCacheControl(value: Record<string, unknown>): void {
-  if (value.type !== "ephemeral") {
-    throw createInvalidMessagesFieldError("cache_control.type")
-  }
-  if (value.ttl !== undefined && typeof value.ttl !== "string") {
-    throw createInvalidMessagesFieldError("cache_control.ttl")
-  }
-  validatePlainNestedValues(value, "cache_control")
+function normalizeMetadata(payload: AnthropicMessagesPayload): void {
+  const metadata = normalizeOptionalRecord(payload, "metadata")
+  if (!metadata) return
+  normalizeOptionalString(metadata, "user_id")
 }
 
-function validateToolChoice(value: Record<string, unknown>): void {
-  if (
-    value.type !== "auto"
-    && value.type !== "any"
-    && value.type !== "tool"
-    && value.type !== "none"
-  ) {
-    throw createInvalidMessagesFieldError("tool_choice.type")
-  }
-  if (value.name !== undefined) {
-    validateNonEmptyString(value.name, "tool_choice.name")
-  }
-  if (value.type === "tool" && value.name === undefined) {
-    throw createInvalidMessagesFieldError("tool_choice.name")
-  }
-  validateOptionalBoolean(value, "disable_parallel_tool_use")
-  validatePlainNestedValues(value, "tool_choice")
-}
-
-function validateThinking(value: Record<string, unknown>): void {
-  if (value.type !== "enabled" && value.type !== "adaptive") {
-    throw createInvalidMessagesFieldError("thinking.type")
+function normalizeToolChoice(payload: AnthropicMessagesPayload): void {
+  const toolChoice = normalizeOptionalRecord(payload, "tool_choice")
+  if (!toolChoice) return
+  if (toolChoice.type !== undefined && typeof toolChoice.type !== "string") {
+    deleteOwnField(payload, "tool_choice")
+    return
   }
   if (
-    value.budget_tokens !== undefined
-    && (!Number.isInteger(value.budget_tokens)
-      || Number(value.budget_tokens) <= 0)
+    toolChoice.name !== undefined
+    && (typeof toolChoice.name !== "string"
+      || toolChoice.name.trim().length === 0)
   ) {
-    throw createInvalidMessagesFieldError("thinking.budget_tokens")
+    deleteOwnField(toolChoice, "name")
   }
-  validatePlainNestedValues(value, "thinking")
+  normalizeOptionalBoolean(toolChoice, "disable_parallel_tool_use")
+  if (toolChoice.type === "tool" && typeof toolChoice.name !== "string") {
+    deleteOwnField(payload, "tool_choice")
+  }
+}
+
+function normalizeThinking(payload: AnthropicMessagesPayload): void {
+  const thinking = normalizeOptionalRecord(payload, "thinking")
+  if (!thinking) return
+  if (typeof thinking.type !== "string" || thinking.type.trim().length === 0) {
+    deleteOwnField(payload, "thinking")
+    return
+  }
+  if (
+    thinking.budget_tokens !== undefined
+    && (!Number.isInteger(thinking.budget_tokens)
+      || Number(thinking.budget_tokens) <= 0)
+  ) {
+    deleteOwnField(thinking, "budget_tokens")
+  }
 }
 
 const REASONING_EFFORTS = new Set([
@@ -486,47 +468,86 @@ const REASONING_EFFORTS = new Set([
   "max",
 ])
 
-function validateOutputConfig(value: Record<string, unknown>): void {
+function normalizeOutputFormat(outputConfig: Record<string, unknown>): void {
+  if (outputConfig.format === undefined) return
   if (
-    value.effort !== undefined
-    && (typeof value.effort !== "string"
-      || !REASONING_EFFORTS.has(value.effort))
+    !isRecord(outputConfig.format)
+    || typeof outputConfig.format.type !== "string"
+    || outputConfig.format.type.trim().length === 0
   ) {
-    throw createInvalidMessagesFieldError("output_config.effort")
+    deleteOwnField(outputConfig, "format")
   }
-  if (value.format !== undefined) {
-    if (!isRecord(value.format)) {
-      throw createInvalidMessagesFieldError("output_config.format")
-    }
-    validateNonEmptyString(value.format.type, "output_config.format.type")
-  }
-  if (value.task_budget !== undefined) {
-    if (!isRecord(value.task_budget) || value.task_budget.type !== "tokens") {
-      throw createInvalidMessagesFieldError("output_config.task_budget")
-    }
-    if (
-      !Number.isInteger(value.task_budget.total)
-      || Number(value.task_budget.total) <= 0
-      || (value.task_budget.remaining !== undefined
-        && (!Number.isInteger(value.task_budget.remaining)
-          || Number(value.task_budget.remaining) < 0))
-    ) {
-      throw createInvalidMessagesFieldError("output_config.task_budget")
-    }
-    validatePlainNestedValues(value.task_budget, "output_config.task_budget")
-  }
-  validatePlainNestedValues(value, "output_config")
 }
 
-function validateSystem(value: unknown): void {
-  if (value === undefined || typeof value === "string") return
-  if (!Array.isArray(value)) throw createInvalidMessagesFieldError("system")
-  for (const [index, block] of value.entries()) {
-    const param = `system.${index}`
-    if (!isRecord(block)) throw createInvalidMessagesFieldError(param)
-    validateNonEmptyString(block.type, `${param}.type`)
-    if (block.type === "text") validateTextBlock(block, param)
+function normalizeOutputTaskBudget(
+  outputConfig: Record<string, unknown>,
+): void {
+  const taskBudget = outputConfig.task_budget
+  if (taskBudget === undefined) return
+  if (
+    !isRecord(taskBudget)
+    || taskBudget.type !== "tokens"
+    || !Number.isInteger(taskBudget.total)
+    || Number(taskBudget.total) <= 0
+    || (taskBudget.remaining !== undefined
+      && (!Number.isInteger(taskBudget.remaining)
+        || Number(taskBudget.remaining) < 0))
+  ) {
+    deleteOwnField(outputConfig, "task_budget")
   }
+}
+
+function normalizeOutputConfig(payload: AnthropicMessagesPayload): void {
+  const outputConfig = normalizeOptionalRecord(payload, "output_config")
+  if (!outputConfig) return
+  if (
+    outputConfig.effort !== undefined
+    && (typeof outputConfig.effort !== "string"
+      || !REASONING_EFFORTS.has(outputConfig.effort))
+  ) {
+    deleteOwnField(outputConfig, "effort")
+  }
+  normalizeOutputFormat(outputConfig)
+  normalizeOutputTaskBudget(outputConfig)
+}
+
+function isValidSystemBlock(block: unknown): boolean {
+  if (!isRecord(block)) return false
+  if (typeof block.type !== "string" || block.type.trim().length === 0) {
+    return false
+  }
+  return block.type !== "text" || typeof block.text === "string"
+}
+
+function normalizeSystem(payload: AnthropicMessagesPayload): void {
+  if (payload.system === undefined || typeof payload.system === "string") return
+  if (
+    !Array.isArray(payload.system)
+    || !payload.system.every((block) => isValidSystemBlock(block))
+  ) {
+    deleteOwnField(payload, "system")
+  }
+}
+
+function normalizeOptionalPayloadFields(
+  payload: AnthropicMessagesPayload,
+): void {
+  normalizeMaxTokens(payload)
+  normalizeMetadata(payload)
+  normalizeToolChoice(payload)
+  normalizeThinking(payload)
+  normalizeOutputConfig(payload)
+  normalizeSystem(payload)
+  normalizeOptionalRecord(payload, "context_management")
+  normalizeOptionalRecord(payload, "stop_details")
+  normalizeOptionalStringArray(payload, "stop_sequences")
+  normalizeOptionalFiniteNumber(payload, "temperature")
+  normalizeOptionalFiniteNumber(payload, "top_p")
+  normalizeOptionalFiniteNumber(payload, "top_k")
+  normalizeOptionalBoolean(payload, "stream")
+  normalizeOptionalString(payload, "fallback_credit_token")
+  normalizeOptionalString(payload, "service_tier")
+  normalizeOptionalString(payload, "speed")
 }
 
 function validateMessages(value: unknown): void {
@@ -534,7 +555,7 @@ function validateMessages(value: unknown): void {
   for (const [index, message] of value.entries()) {
     const param = `messages.${index}`
     if (!isRecord(message)) throw createInvalidMessagesFieldError(param)
-    if (message.role !== "user" && message.role !== "assistant") {
+    if (typeof message.role !== "string" || message.role.trim().length === 0) {
       throw createInvalidMessagesFieldError(`${param}.role`)
     }
     if (typeof message.content === "string") continue
@@ -556,7 +577,7 @@ function validateMessages(value: unknown): void {
 function validateContentBlock(
   value: unknown,
   param: string,
-  role: "assistant" | "user",
+  _role: string,
 ): void {
   if (!isRecord(value)) throw createInvalidMessagesFieldError(param)
   validateNonEmptyString(value.type, `${param}.type`)
@@ -565,22 +586,17 @@ function validateContentBlock(
       if (typeof value.text !== "string") {
         throw createInvalidMessagesFieldError(`${param}.text`)
       }
-      validateNestedCacheControl(value, param)
       return
     }
     case "image": {
-      if (role !== "user") throw createInvalidMessagesFieldError(param)
       validateImageSource(value.source, `${param}.source`)
-      validateNestedCacheControl(value, param)
       return
     }
     case "document": {
-      if (role !== "user") throw createInvalidMessagesFieldError(param)
       validateDocumentBlock(value, param)
       return
     }
     case "tool_result": {
-      if (role !== "user") throw createInvalidMessagesFieldError(param)
       validateNonEmptyString(value.tool_use_id, `${param}.tool_use_id`)
       if (typeof value.content !== "string") {
         if (!Array.isArray(value.content)) {
@@ -590,22 +606,21 @@ function validateContentBlock(
           validateToolResultContent(nested, `${param}.content.${index}`)
         }
       }
-      validateOptionalBoolean(value, "is_error")
-      validateNestedCacheControl(value, param)
+      if (value.is_error !== undefined && typeof value.is_error !== "boolean") {
+        throw createInvalidMessagesFieldError(`${param}.is_error`)
+      }
       return
     }
     case "tool_use": {
-      if (role !== "assistant") throw createInvalidMessagesFieldError(param)
       validateNonEmptyString(value.id, `${param}.id`)
       validateNonEmptyString(value.name, `${param}.name`)
       if (!isRecord(value.input)) {
         throw createInvalidMessagesFieldError(`${param}.input`)
       }
-      validateNestedCacheControl(value, param)
       return
     }
     case "thinking": {
-      if (role !== "assistant" || typeof value.thinking !== "string") {
+      if (typeof value.thinking !== "string") {
         throw createInvalidMessagesFieldError(param)
       }
       if (
@@ -614,7 +629,6 @@ function validateContentBlock(
       ) {
         throw createInvalidMessagesFieldError(`${param}.signature`)
       }
-      validateNestedCacheControl(value, param)
       return
     }
     default: {
@@ -627,7 +641,6 @@ function validateToolResultContent(value: unknown, param: string): void {
   if (!isRecord(value)) throw createInvalidMessagesFieldError(param)
   if (value.type === "tool_reference") {
     validateNonEmptyString(value.tool_name, `${param}.tool_name`)
-    validateNestedCacheControl(value, param)
     return
   }
   validateContentBlock(value, param, "user")
@@ -640,34 +653,6 @@ function validateTextBlock(value: unknown, param: string): void {
     || typeof value.text !== "string"
   ) {
     throw createInvalidMessagesFieldError(param)
-  }
-  validateNestedCacheControl(value, param)
-}
-
-function validateNestedCacheControl(
-  value: Record<string, unknown>,
-  param: string,
-): void {
-  if (value.cache_control === undefined) return
-  if (!isRecord(value.cache_control)) {
-    throw createInvalidMessagesFieldError(`${param}.cache_control`)
-  }
-  validateCacheControl(value.cache_control)
-}
-
-function validatePlainNestedValues(
-  value: Record<string, unknown>,
-  param: string,
-): void {
-  for (const [key, nested] of Object.entries(value)) {
-    if (
-      nested !== null
-      && typeof nested === "object"
-      && !Array.isArray(nested)
-      && !isRecord(nested)
-    ) {
-      throw createInvalidMessagesFieldError(`${param}.${key}`)
-    }
   }
 }
 
@@ -778,41 +763,51 @@ function validateDocumentBlock(
     if (!isRecord(value.citations)) {
       throw createInvalidMessagesFieldError(`${param}.citations`)
     }
-    validateOptionalBoolean(value.citations, "enabled")
+    if (
+      value.citations.enabled !== undefined
+      && typeof value.citations.enabled !== "boolean"
+    ) {
+      throw createInvalidMessagesFieldError(`${param}.citations.enabled`)
+    }
   }
-  validateNestedCacheControl(value, param)
 }
 
 function validateTools(value: unknown): void {
   if (value === undefined) return
   if (!Array.isArray(value)) throw createInvalidMessagesFieldError("tools")
   for (const [index, tool] of value.entries()) {
-    const param = `tools.${index}`
-    if (!isRecord(tool)) throw createInvalidMessagesFieldError(param)
-    validateNonEmptyString(tool.name, `${param}.name`)
-    if (tool.type !== undefined)
-      validateNonEmptyString(tool.type, `${param}.type`)
-    if (
-      tool.description !== undefined
-      && typeof tool.description !== "string"
-    ) {
-      throw createInvalidMessagesFieldError(`${param}.description`)
-    }
-    if (tool.input_schema !== undefined && !isRecord(tool.input_schema)) {
-      throw createInvalidMessagesFieldError(`${param}.input_schema`)
-    }
-    if (tool.type === undefined && tool.input_schema === undefined) {
-      throw createInvalidMessagesFieldError(`${param}.input_schema`)
-    }
-    validateOptionalStringArray(tool, "allowed_domains")
-    validateOptionalStringArray(tool, "blocked_domains")
-    if (
-      tool.max_uses !== undefined
-      && (!Number.isInteger(tool.max_uses) || Number(tool.max_uses) <= 0)
-    ) {
-      throw createInvalidMessagesFieldError(`${param}.max_uses`)
-    }
-    validateNestedCacheControl(tool, param)
+    validateTool(tool, index)
+  }
+}
+
+function validateToolStringArray(value: unknown, param: string): void {
+  if (
+    value !== undefined
+    && (!Array.isArray(value) || value.some((item) => typeof item !== "string"))
+  ) {
+    throw createInvalidMessagesFieldError(param)
+  }
+}
+
+function validateTool(tool: unknown, index: number): void {
+  const param = `tools.${index}`
+  if (!isRecord(tool)) throw createInvalidMessagesFieldError(param)
+  validateNonEmptyString(tool.name, `${param}.name`)
+  if (tool.type !== undefined)
+    validateNonEmptyString(tool.type, `${param}.type`)
+  if (tool.description !== undefined && typeof tool.description !== "string") {
+    throw createInvalidMessagesFieldError(`${param}.description`)
+  }
+  if (tool.input_schema !== undefined && !isRecord(tool.input_schema)) {
+    throw createInvalidMessagesFieldError(`${param}.input_schema`)
+  }
+  validateToolStringArray(tool.allowed_domains, `${param}.allowed_domains`)
+  validateToolStringArray(tool.blocked_domains, `${param}.blocked_domains`)
+  if (
+    tool.max_uses !== undefined
+    && (!Number.isInteger(tool.max_uses) || Number(tool.max_uses) <= 0)
+  ) {
+    throw createInvalidMessagesFieldError(`${param}.max_uses`)
   }
 }
 
@@ -823,9 +818,9 @@ export function prepareAnthropicMessagesRequest(options: {
   payload: AnthropicMessagesPayload
   requireMaxTokens: boolean
 }): PreparedAnthropicMessagesRequest {
-  validateRawMaxTokens(options.payload)
   const body = cloneAnthropicMessagesBody(options.payload)
-  validateAnthropicMessagesPayload(body, options.requireMaxTokens)
+  validateAnthropicMessagesPayload(body)
+  normalizeOptionalPayloadFields(body)
   const normalizationClasses: Array<CopilotContractNormalizationClass> = []
   let removedGatewayField = false
   for (const field of GATEWAY_ONLY_MESSAGES_FIELDS) {
@@ -834,7 +829,9 @@ export function prepareAnthropicMessagesRequest(options: {
     removedGatewayField = true
   }
   if (removedGatewayField) normalizationClasses.push("gateway_only_fields")
-  if (hasCacheControlNormalization(body)) {
+  const cacheControlNormalized = hasCacheControlNormalization(body)
+  normalizeCacheControls(body)
+  if (cacheControlNormalized) {
     normalizationClasses.push("cache_control")
   }
 
@@ -860,11 +857,11 @@ function hasCacheControlNormalization(value: unknown): boolean {
   for (const [key, nested] of Object.entries(value)) {
     if (
       key === "cache_control"
-      && isRecord(nested)
-      && nested.type === "ephemeral"
-      && ((nested.ttl !== undefined
-        && nested.ttl !== "5m"
-        && nested.ttl !== "1h")
+      && (!isRecord(nested)
+        || nested.type !== "ephemeral"
+        || (nested.ttl !== undefined
+          && nested.ttl !== "5m"
+          && nested.ttl !== "1h")
         || Object.keys(nested).some(
           (nestedKey) => nestedKey !== "type" && nestedKey !== "ttl",
         ))
@@ -884,11 +881,11 @@ function normalizeCacheControls(value: unknown): void {
   if (!isRecord(value)) return
 
   for (const [key, nested] of Object.entries(value)) {
-    if (
-      key === "cache_control"
-      && isRecord(nested)
-      && nested.type === "ephemeral"
-    ) {
+    if (key === "cache_control") {
+      if (!isRecord(nested) || nested.type !== "ephemeral") {
+        Reflect.deleteProperty(value, key)
+        continue
+      }
       const cacheControl: NativeCacheControl = { type: "ephemeral" }
       if (nested.ttl === "5m" || nested.ttl === "1h") {
         cacheControl.ttl = nested.ttl

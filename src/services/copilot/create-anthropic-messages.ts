@@ -18,6 +18,7 @@ import { PRE_HEADER_MAX_DELAY_SECONDS } from "~/services/copilot/transport-retry
 import { fitAnthropicCompactionPayload } from "./compaction-payload"
 import { hasVisionContent } from "./copilot-client"
 import {
+  createMissingAnthropicMessagesMaxTokensError,
   normalizeAnthropicMessagesRequest,
   prepareAnthropicMessagesRequest,
   serializeAnthropicMessagesRequest,
@@ -89,28 +90,14 @@ export const createAnthropicMessages = async (
     signal?: AbortSignal
   },
 ): Promise<CreateAnthropicMessagesReturn> => {
-  const initialPrepared = prepareAnthropicMessagesRequest({
+  const prepared = prepareAnthropicMessagesRequest({
     anthropicBeta: options?.anthropicBeta,
     anthropicVersion: options?.anthropicVersion,
     modelProviderPreference: options?.modelProviderPreference,
     payload,
-    requireMaxTokens: !options?.preserveValidatedControls,
+    requireMaxTokens: false,
   })
-  const initialBody =
-    initialPrepared.body as unknown as AnthropicMessagesPayload
-  if (
-    options?.preserveValidatedControls
-    && initialBody.max_tokens === undefined
-  ) {
-    const maxTokens = getPositiveModelOutputLimit(initialBody.model)
-    if (maxTokens !== undefined) initialBody.max_tokens = maxTokens
-  }
-  const prepared = prepareAnthropicMessagesRequest({
-    ...initialPrepared.headers,
-    payload: initialBody,
-    requireMaxTokens: true,
-  })
-  const snapshot = prepared.body as unknown as AnthropicMessagesPayload
+  const snapshot = ensureTransportMaxTokens(prepared.body)
   const vision = hasVisionContent(snapshot.messages)
   const initiator =
     options?.initiator ?? detectAnthropicInitiator(snapshot.messages)
@@ -124,6 +111,18 @@ export const createAnthropicMessages = async (
     stream: Boolean(snapshot.stream),
     vision,
   })
+}
+
+function ensureTransportMaxTokens(
+  payload: AnthropicMessagesPayload,
+): AnthropicMessagesPayload {
+  if (payload.max_tokens !== undefined) return payload
+  const maxTokens = getPositiveModelOutputLimit(payload.model)
+  if (maxTokens === undefined) {
+    throw createMissingAnthropicMessagesMaxTokensError()
+  }
+  payload.max_tokens = maxTokens
+  return payload
 }
 
 async function dispatchAnthropicMessages(options: {

@@ -1,10 +1,31 @@
 // Anthropic API Types
 
+declare const anthropicUnknownRoleBrand: unique symbol
+declare const anthropicUnknownContentTypeBrand: unique symbol
+
+export type AnthropicUnknownRole = string & {
+  readonly [anthropicUnknownRoleBrand]: never
+}
+
+export type AnthropicUnknownContentType = string & {
+  readonly [anthropicUnknownContentTypeBrand]: never
+}
+
+export function asAnthropicUnknownRole(value: string): AnthropicUnknownRole {
+  return value as AnthropicUnknownRole
+}
+
+export function asAnthropicUnknownContentType(
+  value: string,
+): AnthropicUnknownContentType {
+  return value as AnthropicUnknownContentType
+}
+
 export interface AnthropicMessagesPayload extends Record<string, unknown> {
   model: string
   messages: Array<AnthropicMessage>
   max_tokens?: number
-  system?: string | Array<AnthropicTextBlock>
+  system?: string | Array<AnthropicSystemContentBlock>
   metadata?: Record<string, unknown> & {
     user_id?: string
   }
@@ -130,16 +151,26 @@ export interface AnthropicThinkingBlock extends Record<string, unknown> {
   cache_control?: AnthropicCacheControl
 }
 
+export interface AnthropicUnknownContentBlock extends Record<string, unknown> {
+  type: AnthropicUnknownContentType
+}
+
+export type AnthropicSystemContentBlock =
+  | AnthropicTextBlock
+  | AnthropicUnknownContentBlock
+
 export type AnthropicUserContentBlock =
   | AnthropicTextBlock
   | AnthropicImageBlock
   | AnthropicDocumentBlock
   | AnthropicToolResultBlock
+  | AnthropicUnknownContentBlock
 
 export type AnthropicAssistantContentBlock =
   | AnthropicTextBlock
   | AnthropicToolUseBlock
   | AnthropicThinkingBlock
+  | AnthropicUnknownContentBlock
 
 export interface AnthropicUserMessage extends Record<string, unknown> {
   role: "user"
@@ -151,7 +182,17 @@ export interface AnthropicAssistantMessage extends Record<string, unknown> {
   content: string | Array<AnthropicAssistantContentBlock>
 }
 
-export type AnthropicMessage = AnthropicUserMessage | AnthropicAssistantMessage
+export interface AnthropicCustomMessage extends Record<string, unknown> {
+  role: AnthropicUnknownRole
+  content:
+    | string
+    | Array<AnthropicUserContentBlock | AnthropicAssistantContentBlock>
+}
+
+export type AnthropicMessage =
+  | AnthropicUserMessage
+  | AnthropicAssistantMessage
+  | AnthropicCustomMessage
 
 export interface AnthropicTool extends Record<string, unknown> {
   type?: string
