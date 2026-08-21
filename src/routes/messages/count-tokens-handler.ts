@@ -10,7 +10,7 @@ import {
   resolveCustomProviderModel,
   type CustomProviderModelReference,
 } from "~/lib/custom-providers"
-import { createEndpointTranslationError, LocalHTTPError } from "~/lib/error"
+import { LocalHTTPError } from "~/lib/error"
 import {
   applyModelRedirect,
   formatModelRedirectResult,
@@ -39,7 +39,6 @@ import {
 
 import { type AnthropicMessagesPayload } from "./anthropic-types"
 import { translateToOpenAI } from "./non-stream-translation"
-import { checkMessagesToChatTranslation } from "./translation-fidelity"
 
 /**
  * Handles token counting for Anthropic messages.
@@ -145,14 +144,6 @@ async function countCustomProviderTokens(
 ) {
   const { anthropicPayload, customReference, requestedModel, targetEffort } =
     options
-  const translation = checkMessagesToChatTranslation(anthropicPayload)
-  if (!translation.supported) {
-    throw createEndpointTranslationError({
-      blockers: translation.blockers,
-      code: "endpoint_translation_unsupported",
-      source: "messages",
-    })
-  }
   setRequestContext(c, {
     requestedModel,
     model: customReference.upstreamModel,

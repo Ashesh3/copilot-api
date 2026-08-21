@@ -22,6 +22,7 @@ import {
   normalizeAnthropicMessagesRequest,
   prepareAnthropicMessagesRequest,
   serializeAnthropicMessagesRequest,
+  validateAnthropicRequestHeaderOptions,
 } from "./messages-contract"
 
 /**
@@ -38,6 +39,7 @@ import {
  */
 
 export const ANTHROPIC_MESSAGES_ENDPOINT = "/v1/messages"
+const DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
 
 export function modelSupportsNativeMessages(
   model: { supported_endpoints?: Array<string> } | undefined,
@@ -90,13 +92,33 @@ export const createAnthropicMessages = async (
     signal?: AbortSignal
   },
 ): Promise<CreateAnthropicMessagesReturn> => {
-  const prepared = prepareAnthropicMessagesRequest({
-    anthropicBeta: options?.anthropicBeta,
-    anthropicVersion: options?.anthropicVersion,
-    modelProviderPreference: options?.modelProviderPreference,
-    payload,
-    requireMaxTokens: false,
-  })
+  const prepared =
+    options?.preserveValidatedControls ?
+      (() => {
+        const preservedOptions = options
+        const sanitizedHeaders = validateAnthropicRequestHeaderOptions({
+          anthropicBeta: preservedOptions.anthropicBeta,
+          anthropicVersion: preservedOptions.anthropicVersion,
+          modelProviderPreference: preservedOptions.modelProviderPreference,
+        })
+        return {
+          body: normalizeAnthropicMessagesRequest(
+            payload,
+          ) as AnthropicMessagesPayload,
+          headers: {
+            ...sanitizedHeaders,
+            anthropicVersion:
+              sanitizedHeaders.anthropicVersion ?? DEFAULT_ANTHROPIC_VERSION,
+          },
+        }
+      })()
+    : prepareAnthropicMessagesRequest({
+        anthropicBeta: options?.anthropicBeta,
+        anthropicVersion: options?.anthropicVersion,
+        modelProviderPreference: options?.modelProviderPreference,
+        payload,
+        requireMaxTokens: false,
+      })
   const snapshot = ensureTransportMaxTokens(prepared.body)
   const vision = hasVisionContent(snapshot.messages)
   const initiator =

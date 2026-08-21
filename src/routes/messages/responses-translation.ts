@@ -6,7 +6,6 @@ import {
   getExtraPromptForModel,
   getReasoningEffortForModel,
 } from "~/lib/config"
-import { createEndpointTranslationError } from "~/lib/error"
 import {
   type ResponsesPayload,
   type ResponseInputContent,
@@ -43,13 +42,11 @@ import {
   type AnthropicImageBlock,
   type AnthropicMessage,
   type AnthropicMessagesPayload,
-  type AnthropicTextBlock,
   type AnthropicThinkingBlock,
   type AnthropicTool,
   type AnthropicToolResultBlock,
   type AnthropicToolUseBlock,
   type AnthropicUserContentBlock,
-  type AnthropicUserMessage,
 } from "./anthropic-types"
 import { sanitizeAnthropicMessages } from "./non-stream-translation"
 
@@ -122,15 +119,15 @@ const translateMessage = (
   message: AnthropicMessage,
   model: string,
 ): Array<ResponseInputItem> => {
-  if (message.role === "user") {
-    return translateUserMessage(message)
+  if (message.role === "assistant") {
+    return translateAssistantMessage(message, model)
   }
 
-  return translateAssistantMessage(message, model)
+  return translateUserMessage(message)
 }
 
 const translateUserMessage = (
-  message: AnthropicUserMessage,
+  message: Pick<AnthropicMessage, "content">,
 ): Array<ResponseInputItem> => {
   if (typeof message.content === "string") {
     return [createMessage("user", message.content)]
@@ -189,11 +186,19 @@ const translateAssistantMessage = (
     }
 
     if (block.type === "thinking") {
-      flushPendingContent(pendingContent, items, {
-        role: "assistant",
-        phase: assistantPhase,
-      })
-      items.push(createReasoningContent(block))
+      const reasoningContent = createReasoningContent(block)
+      if (!reasoningContent) {
+        continue
+      }
+      if (reasoningContent.type === "reasoning") {
+        flushPendingContent(pendingContent, items, {
+          role: "assistant",
+          phase: assistantPhase,
+        })
+        items.push(reasoningContent)
+        continue
+      }
+      pendingContent.push(reasoningContent)
       continue
     }
 
@@ -225,7 +230,7 @@ const translateUserContentBlock = (
       return createFileContent(block)
     }
     default: {
-      return undefined
+      return createTextContent(JSON.stringify(block))
     }
   }
 }
@@ -238,7 +243,7 @@ const translateAssistantContentBlock = (
       return createOutPutTextContent(block.text)
     }
     default: {
-      return undefined
+      return createOutPutTextContent(JSON.stringify(block))
     }
   }
 }
@@ -342,7 +347,7 @@ const createFileContent = (
 
 const createReasoningContent = (
   block: AnthropicThinkingBlock,
-): ResponseInputReasoning => {
+): ResponseInputReasoning | ResponseInputText | undefined => {
   // align with vscode-copilot-chat extractThinkingData, should add id, otherwise it will cause miss cache occasionally —— the usage input cached tokens to be 0
   // https://github.com/microsoft/vscode-copilot-chat/blob/main/src/platform/endpoint/node/responsesApi.ts#L162
   // when use in codex cli, reasoning id is empty, so it will cause miss cache occasionally
@@ -353,11 +358,7 @@ const createReasoningContent = (
   const summary =
     thinking ? [{ type: "summary_text" as const, text: thinking }] : []
   if (!signature || !id || signatureParts.length !== 2) {
-    throw createEndpointTranslationError({
-      blockers: ["thinking"],
-      code: "endpoint_translation_unsupported",
-      source: "messages",
-    })
+    return thinking ? createOutPutTextContent(thinking) : undefined
   }
   return {
     id,
@@ -387,7 +388,7 @@ const createFunctionCallOutput = (
 })
 
 const translateSystemPrompt = (
-  system: string | Array<AnthropicTextBlock> | undefined,
+  system: AnthropicMessagesPayload["system"],
   model: string,
 ): string | null => {
   if (!system) {
@@ -402,10 +403,14 @@ const translateSystemPrompt = (
 
   const text = system
     .map((block, index) => {
+      const blockText =
+        block.type === "text" && typeof block.text === "string" ?
+          block.text
+        : JSON.stringify(block)
       if (index === 0) {
-        return block.text + extraPrompt
+        return blockText + extraPrompt
       }
-      return block.text
+      return blockText
     })
     .join(" ")
   return text.length > 0 ? text : null

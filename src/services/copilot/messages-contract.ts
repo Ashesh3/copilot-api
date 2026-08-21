@@ -2,9 +2,23 @@
 import util from "node:util"
 
 import type { CopilotContractNormalizationClass } from "~/lib/copilot-contract-observability"
-import type { AnthropicMessagesPayload } from "~/routes/messages/anthropic-types"
 
 import { LocalHTTPError } from "~/lib/error"
+import {
+  asAnthropicUnknownContentType,
+  asAnthropicUnknownRole,
+  type AnthropicAssistantContentBlock,
+  type AnthropicDocumentBlock,
+  type AnthropicImageBlock,
+  type AnthropicMessage,
+  type AnthropicMessagesPayload,
+  type AnthropicSystemContentBlock,
+  type AnthropicTextBlock,
+  type AnthropicTool,
+  type AnthropicToolReferenceBlock,
+  type AnthropicToolUseBlock,
+  type AnthropicUserContentBlock,
+} from "~/routes/messages/anthropic-types"
 
 import {
   type AnthropicRequestHeaders,
@@ -45,6 +59,17 @@ type NativeCacheControl = {
   type: "ephemeral"
   ttl?: "5m" | "1h"
 }
+type SanitizedDocumentSourceContent =
+  | string
+  | Array<AnthropicTextBlock | AnthropicImageBlock>
+type SanitizedMessageContentBlock =
+  | AnthropicUserContentBlock
+  | AnthropicAssistantContentBlock
+type SanitizedToolResultContentBlock =
+  | AnthropicTextBlock
+  | AnthropicImageBlock
+  | AnthropicDocumentBlock
+  | AnthropicToolReferenceBlock
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -102,14 +127,6 @@ export function createMissingAnthropicMessagesMaxTokensError(): LocalHTTPError {
   return createMessagesValidationError("max_tokens")
 }
 
-function createInvalidMessagesFieldError(param: string): LocalHTTPError {
-  return createMessagesError({
-    code: "invalid_type",
-    message: `The Messages request contains an invalid ${param} field.`,
-    param: canonicalMessagesValidationParam(param),
-  })
-}
-
 function createInvalidMessagesBodyError(): LocalHTTPError {
   return createMessagesError({
     code: "invalid_type",
@@ -132,27 +149,6 @@ export function createInvalidAnthropicMessagesJsonError(): LocalHTTPError {
     message: "The Messages request body must contain valid JSON.",
     param: "body",
   })
-}
-
-function canonicalMessagesValidationParam(
-  param: string,
-): MessagesValidationParam {
-  if (param.startsWith("tools")) return "tools"
-  if (param.startsWith("tool_choice")) return "tool_choice"
-  if (param.startsWith("metadata")) return "metadata"
-  if (param.startsWith("thinking")) return "thinking"
-  if (param.startsWith("output_config.format")) return "format"
-  if (param.startsWith("output_config")) return "output_config"
-  if (param.startsWith("cache_control")) return "cache_control"
-  if (param.startsWith("system")) return "system"
-  if (param.includes(".source")) return "source"
-  if (param.includes(".content") || param.startsWith("content")) {
-    return "content"
-  }
-  if (param.startsWith("messages")) return "messages"
-  if (param === "model") return "model"
-  if (param === "max_tokens") return "max_tokens"
-  return "body"
 }
 
 function isProxy(value: object): boolean {
@@ -331,8 +327,8 @@ function validateAnthropicMessagesPayload(
   if (!Array.isArray(payload.messages) || payload.messages.length === 0) {
     throw createMessagesValidationError("messages")
   }
-  validateMessages(payload.messages)
-  validateTools(payload.tools)
+  payload.messages = sanitizeMessages(payload.messages)
+  sanitizeTools(payload)
 }
 
 function deleteOwnField(
@@ -362,12 +358,6 @@ function normalizeOptionalString(
   const value = parent[field]
   if (value !== undefined && typeof value !== "string") {
     deleteOwnField(parent, field)
-  }
-}
-
-function validateNonEmptyString(value: unknown, param: string): void {
-  if (typeof value !== "string" || value.trim().length === 0) {
-    throw createInvalidMessagesFieldError(param)
   }
 }
 
@@ -511,22 +501,423 @@ function normalizeOutputConfig(payload: AnthropicMessagesPayload): void {
   normalizeOutputTaskBudget(outputConfig)
 }
 
-function isValidSystemBlock(block: unknown): boolean {
-  if (!isRecord(block)) return false
-  if (typeof block.type !== "string" || block.type.trim().length === 0) {
-    return false
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0
+}
+
+function sanitizeTextBlock(
+  block: Record<string, unknown>,
+): AnthropicTextBlock | null {
+  if (block.type !== "text" || typeof block.text !== "string") {
+    return null
   }
-  return block.type !== "text" || typeof block.text === "string"
+  return { ...block, type: "text", text: block.text }
+}
+
+function sanitizeImageSource(
+  source: unknown,
+): AnthropicImageBlock["source"] | null {
+  if (!isRecord(source) || typeof source.type !== "string") {
+    return null
+  }
+  if (source.type === "url") {
+    if (typeof source.url !== "string") {
+      return null
+    }
+    return { ...source, type: "url", url: source.url }
+  }
+  if (
+    source.type !== "base64"
+    || (source.media_type !== "image/jpeg"
+      && source.media_type !== "image/png"
+      && source.media_type !== "image/gif"
+      && source.media_type !== "image/webp")
+    || typeof source.data !== "string"
+  ) {
+    return null
+  }
+  return {
+    ...source,
+    type: "base64",
+    media_type: source.media_type,
+    data: source.data,
+  }
+}
+
+function sanitizeImageBlock(
+  block: Record<string, unknown>,
+): AnthropicImageBlock | null {
+  const source = sanitizeImageSource(block.source)
+  if (!source) {
+    return null
+  }
+  return { ...block, type: "image", source }
+}
+
+function sanitizeDocumentSourceContent(
+  content: unknown,
+): SanitizedDocumentSourceContent | null {
+  if (typeof content === "string") {
+    return content
+  }
+  if (!Array.isArray(content)) {
+    return null
+  }
+  const sanitized: Array<AnthropicTextBlock | AnthropicImageBlock> = []
+  for (const block of content) {
+    if (!isRecord(block)) continue
+    if (block.type === "text") {
+      const text = sanitizeTextBlock(block)
+      if (text) sanitized.push(text)
+      continue
+    }
+    if (block.type === "image") {
+      const image = sanitizeImageBlock(block)
+      if (image) sanitized.push(image)
+    }
+  }
+  return sanitized
+}
+
+function sanitizeDocumentSource(
+  source: unknown,
+): AnthropicDocumentBlock["source"] | null {
+  if (!isRecord(source) || typeof source.type !== "string") {
+    return null
+  }
+  switch (source.type) {
+    case "base64": {
+      if (
+        !isNonEmptyString(source.media_type)
+        || typeof source.data !== "string"
+      ) {
+        return null
+      }
+      return {
+        ...source,
+        type: "base64",
+        media_type: source.media_type,
+        data: source.data,
+      }
+    }
+    case "text": {
+      if (typeof source.data !== "string") {
+        return null
+      }
+      return {
+        ...source,
+        type: "text",
+        data: source.data,
+        ...(typeof source.media_type === "string" ?
+          { media_type: source.media_type }
+        : {}),
+      }
+    }
+    case "url": {
+      if (typeof source.url !== "string") {
+        return null
+      }
+      return { ...source, type: "url", url: source.url }
+    }
+    case "content": {
+      const content = sanitizeDocumentSourceContent(source.content)
+      if (content === null) {
+        return null
+      }
+      return { ...source, type: "content", content }
+    }
+    default: {
+      return null
+    }
+  }
+}
+
+function sanitizeDocumentBlock(
+  block: Record<string, unknown>,
+): AnthropicDocumentBlock | null {
+  const source = sanitizeDocumentSource(block.source)
+  if (!source) {
+    return null
+  }
+  return {
+    ...block,
+    type: "document",
+    source,
+    ...(typeof block.title === "string" || block.title === null ?
+      { title: block.title }
+    : {}),
+    ...(typeof block.context === "string" || block.context === null ?
+      { context: block.context }
+    : {}),
+    ...((
+      block.citations === null
+      || (isRecord(block.citations)
+        && (block.citations.enabled === undefined
+          || typeof block.citations.enabled === "boolean"))
+    ) ?
+      { citations: block.citations }
+    : {}),
+  }
+}
+
+function sanitizeToolReferenceBlock(
+  block: Record<string, unknown>,
+): AnthropicToolReferenceBlock | null {
+  if (!isNonEmptyString(block.tool_name)) {
+    return null
+  }
+  return { ...block, type: "tool_reference", tool_name: block.tool_name }
+}
+
+function sanitizeToolResultContentBlock(
+  block: unknown,
+): SanitizedToolResultContentBlock | null {
+  if (!isRecord(block) || !isNonEmptyString(block.type)) {
+    return null
+  }
+  switch (block.type) {
+    case "text": {
+      return sanitizeTextBlock(block)
+    }
+    case "image": {
+      return sanitizeImageBlock(block)
+    }
+    case "document": {
+      return sanitizeDocumentBlock(block)
+    }
+    case "tool_reference": {
+      return sanitizeToolReferenceBlock(block)
+    }
+    default: {
+      return {
+        type: "text",
+        text: JSON.stringify(block),
+      }
+    }
+  }
+}
+
+function sanitizeToolResultContent(
+  content: unknown,
+): string | Array<SanitizedToolResultContentBlock> {
+  if (typeof content === "string") {
+    return content
+  }
+  if (!Array.isArray(content)) {
+    return []
+  }
+  const sanitized = content.flatMap((block) => {
+    const normalized = sanitizeToolResultContentBlock(block)
+    return normalized ? [normalized] : []
+  })
+  return sanitized
+}
+
+function sanitizeToolUseBlock(
+  block: Record<string, unknown>,
+): AnthropicToolUseBlock | null {
+  if (
+    !isNonEmptyString(block.id)
+    || !isNonEmptyString(block.name)
+    || !isRecord(block.input)
+  ) {
+    return null
+  }
+  return {
+    ...block,
+    type: "tool_use",
+    id: block.id,
+    input: block.input,
+    name: block.name,
+  }
+}
+
+function sanitizeThinkingBlock(
+  block: Record<string, unknown>,
+): AnthropicAssistantContentBlock | null {
+  if (typeof block.thinking !== "string") {
+    return null
+  }
+  return {
+    ...block,
+    type: "thinking",
+    thinking: block.thinking,
+    ...(typeof block.signature === "string" ?
+      { signature: block.signature }
+    : {}),
+  }
+}
+
+function sanitizeCompatibleContentBlock(
+  block: unknown,
+): SanitizedMessageContentBlock | null {
+  if (!isRecord(block) || !isNonEmptyString(block.type)) {
+    return null
+  }
+  switch (block.type) {
+    case "text": {
+      return sanitizeTextBlock(block)
+    }
+    case "image": {
+      return sanitizeImageBlock(block)
+    }
+    case "document": {
+      return sanitizeDocumentBlock(block)
+    }
+    case "tool_result": {
+      if (!isNonEmptyString(block.tool_use_id)) {
+        return null
+      }
+      return {
+        ...block,
+        type: "tool_result",
+        tool_use_id: block.tool_use_id,
+        content: sanitizeToolResultContent(block.content),
+        ...(typeof block.is_error === "boolean" ?
+          { is_error: block.is_error }
+        : {}),
+      }
+    }
+    case "tool_use": {
+      return sanitizeToolUseBlock(block)
+    }
+    case "thinking": {
+      return sanitizeThinkingBlock(block)
+    }
+    case "tool_reference": {
+      return sanitizeToolReferenceBlock(block)
+    }
+    default: {
+      return {
+        ...block,
+        type: asAnthropicUnknownContentType(block.type),
+      }
+    }
+  }
+}
+
+function sanitizeMessageContent(content: unknown): AnthropicMessage["content"] {
+  if (typeof content === "string") {
+    return content
+  }
+  if (!Array.isArray(content)) {
+    return []
+  }
+  return content.flatMap((block) => {
+    const sanitized = sanitizeCompatibleContentBlock(block)
+    return sanitized ? [sanitized] : []
+  })
+}
+
+function sanitizeMessage(message: unknown): AnthropicMessage | null {
+  if (!isRecord(message) || !isNonEmptyString(message.role)) {
+    return null
+  }
+  const content = sanitizeMessageContent(message.content)
+  if (message.role === "user") {
+    return { ...message, role: "user", content }
+  }
+  if (message.role === "assistant") {
+    return { ...message, role: "assistant", content }
+  }
+  return {
+    ...message,
+    role: asAnthropicUnknownRole(message.role),
+    content,
+  }
+}
+
+function sanitizeMessages(
+  messages: AnthropicMessagesPayload["messages"],
+): AnthropicMessagesPayload["messages"] {
+  return messages.flatMap((message) => {
+    const sanitized = sanitizeMessage(message)
+    return sanitized ? [sanitized] : []
+  })
+}
+
+function sanitizeToolStringArray(value: unknown): Array<string> | undefined {
+  if (!Array.isArray(value)) {
+    return undefined
+  }
+  const sanitized: Array<string> = []
+  for (const item of value) {
+    if (typeof item !== "string") {
+      return undefined
+    }
+    sanitized.push(item)
+  }
+  return sanitized
+}
+
+function sanitizeTool(tool: unknown): AnthropicTool | null {
+  if (!isRecord(tool) || !isNonEmptyString(tool.name)) {
+    return null
+  }
+  const allowedDomains = sanitizeToolStringArray(tool.allowed_domains)
+  const blockedDomains = sanitizeToolStringArray(tool.blocked_domains)
+  return {
+    ...tool,
+    name: tool.name,
+    ...(typeof tool.type === "string" ? { type: tool.type } : {}),
+    ...(typeof tool.description === "string" ?
+      { description: tool.description }
+    : {}),
+    ...(isRecord(tool.input_schema) ? { input_schema: tool.input_schema } : {}),
+    ...(allowedDomains ? { allowed_domains: allowedDomains } : {}),
+    ...(blockedDomains ? { blocked_domains: blockedDomains } : {}),
+    ...(Number.isInteger(tool.max_uses) && Number(tool.max_uses) > 0 ?
+      { max_uses: Number(tool.max_uses) }
+    : {}),
+  }
+}
+
+function sanitizeTools(payload: AnthropicMessagesPayload): void {
+  if (payload.tools === undefined) {
+    return
+  }
+  if (!Array.isArray(payload.tools)) {
+    deleteOwnField(payload, "tools")
+    return
+  }
+  const sanitized = payload.tools.flatMap((tool) => {
+    const normalized = sanitizeTool(tool)
+    return normalized ? [normalized] : []
+  })
+  if (sanitized.length === 0) {
+    deleteOwnField(payload, "tools")
+    return
+  }
+  payload.tools = sanitized
+}
+
+function sanitizeSystemBlock(
+  block: unknown,
+): AnthropicSystemContentBlock | null {
+  if (!isRecord(block) || !isNonEmptyString(block.type)) {
+    return null
+  }
+  if (block.type === "text") {
+    return sanitizeTextBlock(block)
+  }
+  return { ...block, type: asAnthropicUnknownContentType(block.type) }
 }
 
 function normalizeSystem(payload: AnthropicMessagesPayload): void {
   if (payload.system === undefined || typeof payload.system === "string") return
-  if (
-    !Array.isArray(payload.system)
-    || !payload.system.every((block) => isValidSystemBlock(block))
-  ) {
+  if (!Array.isArray(payload.system)) {
     deleteOwnField(payload, "system")
+    return
   }
+  const sanitized = payload.system.flatMap((block) => {
+    const normalized = sanitizeSystemBlock(block)
+    return normalized ? [normalized] : []
+  })
+  if (sanitized.length === 0) {
+    deleteOwnField(payload, "system")
+    return
+  }
+  payload.system = sanitized
 }
 
 function normalizeOptionalPayloadFields(
@@ -548,267 +939,6 @@ function normalizeOptionalPayloadFields(
   normalizeOptionalString(payload, "fallback_credit_token")
   normalizeOptionalString(payload, "service_tier")
   normalizeOptionalString(payload, "speed")
-}
-
-function validateMessages(value: unknown): void {
-  if (!Array.isArray(value)) throw createInvalidMessagesFieldError("messages")
-  for (const [index, message] of value.entries()) {
-    const param = `messages.${index}`
-    if (!isRecord(message)) throw createInvalidMessagesFieldError(param)
-    if (typeof message.role !== "string" || message.role.trim().length === 0) {
-      throw createInvalidMessagesFieldError(`${param}.role`)
-    }
-    if (typeof message.content === "string") continue
-    if (!Array.isArray(message.content)) {
-      throw createInvalidMessagesFieldError(`${param}.content`)
-    }
-    for (const [contentIndex, block] of message.content.entries()) {
-      validateContentBlock(
-        block,
-        `${param}.content.${contentIndex}`,
-        message.role,
-      )
-    }
-  }
-}
-
-// Wire-union validation is kept centralized so every caller fails identically.
-// eslint-disable-next-line complexity
-function validateContentBlock(
-  value: unknown,
-  param: string,
-  _role: string,
-): void {
-  if (!isRecord(value)) throw createInvalidMessagesFieldError(param)
-  validateNonEmptyString(value.type, `${param}.type`)
-  switch (value.type) {
-    case "text": {
-      if (typeof value.text !== "string") {
-        throw createInvalidMessagesFieldError(`${param}.text`)
-      }
-      return
-    }
-    case "image": {
-      validateImageSource(value.source, `${param}.source`)
-      return
-    }
-    case "document": {
-      validateDocumentBlock(value, param)
-      return
-    }
-    case "tool_result": {
-      validateNonEmptyString(value.tool_use_id, `${param}.tool_use_id`)
-      if (typeof value.content !== "string") {
-        if (!Array.isArray(value.content)) {
-          throw createInvalidMessagesFieldError(`${param}.content`)
-        }
-        for (const [index, nested] of value.content.entries()) {
-          validateToolResultContent(nested, `${param}.content.${index}`)
-        }
-      }
-      if (value.is_error !== undefined && typeof value.is_error !== "boolean") {
-        throw createInvalidMessagesFieldError(`${param}.is_error`)
-      }
-      return
-    }
-    case "tool_use": {
-      validateNonEmptyString(value.id, `${param}.id`)
-      validateNonEmptyString(value.name, `${param}.name`)
-      if (!isRecord(value.input)) {
-        throw createInvalidMessagesFieldError(`${param}.input`)
-      }
-      return
-    }
-    case "thinking": {
-      if (typeof value.thinking !== "string") {
-        throw createInvalidMessagesFieldError(param)
-      }
-      if (
-        value.signature !== undefined
-        && typeof value.signature !== "string"
-      ) {
-        throw createInvalidMessagesFieldError(`${param}.signature`)
-      }
-      return
-    }
-    default: {
-      return
-    }
-  }
-}
-
-function validateToolResultContent(value: unknown, param: string): void {
-  if (!isRecord(value)) throw createInvalidMessagesFieldError(param)
-  if (value.type === "tool_reference") {
-    validateNonEmptyString(value.tool_name, `${param}.tool_name`)
-    return
-  }
-  validateContentBlock(value, param, "user")
-}
-
-function validateTextBlock(value: unknown, param: string): void {
-  if (
-    !isRecord(value)
-    || value.type !== "text"
-    || typeof value.text !== "string"
-  ) {
-    throw createInvalidMessagesFieldError(param)
-  }
-}
-
-function validateImageSource(value: unknown, param: string): void {
-  if (!isRecord(value)) throw createInvalidMessagesFieldError(param)
-  if (value.type === "url") {
-    if (typeof value.url !== "string") {
-      throw createInvalidMessagesFieldError(`${param}.url`)
-    }
-    return
-  }
-  if (value.type !== "base64")
-    throw createInvalidMessagesFieldError(`${param}.type`)
-  if (
-    value.media_type !== "image/jpeg"
-    && value.media_type !== "image/png"
-    && value.media_type !== "image/gif"
-    && value.media_type !== "image/webp"
-  ) {
-    throw createInvalidMessagesFieldError(`${param}.media_type`)
-  }
-  if (typeof value.data !== "string") {
-    throw createInvalidMessagesFieldError(`${param}.data`)
-  }
-}
-
-// Document source variants share one exact public-boundary validator.
-// eslint-disable-next-line complexity
-function validateDocumentBlock(
-  value: Record<string, unknown>,
-  param: string,
-): void {
-  const source = value.source
-  if (!isRecord(source)) {
-    throw createInvalidMessagesFieldError(`${param}.source`)
-  }
-  switch (source.type) {
-    case "base64": {
-      validateNonEmptyString(source.media_type, `${param}.source.media_type`)
-      if (typeof source.data !== "string") {
-        throw createInvalidMessagesFieldError(`${param}.source.data`)
-      }
-      break
-    }
-    case "text": {
-      if (
-        source.media_type !== undefined
-        && typeof source.media_type !== "string"
-      ) {
-        throw createInvalidMessagesFieldError(`${param}.source.media_type`)
-      }
-      if (typeof source.data !== "string") {
-        throw createInvalidMessagesFieldError(`${param}.source.data`)
-      }
-      break
-    }
-    case "url": {
-      if (typeof source.url !== "string") {
-        throw createInvalidMessagesFieldError(`${param}.source.url`)
-      }
-      break
-    }
-    case "content": {
-      if (typeof source.content === "string") break
-      if (!Array.isArray(source.content)) {
-        throw createInvalidMessagesFieldError(`${param}.source.content`)
-      }
-      for (const [index, nested] of source.content.entries()) {
-        if (!isRecord(nested)) {
-          throw createInvalidMessagesFieldError(
-            `${param}.source.content.${index}`,
-          )
-        }
-        if (nested.type === "text") {
-          validateTextBlock(nested, `${param}.source.content.${index}`)
-        } else if (nested.type === "image") {
-          validateImageSource(
-            nested.source,
-            `${param}.source.content.${index}.source`,
-          )
-        } else {
-          throw createInvalidMessagesFieldError(
-            `${param}.source.content.${index}.type`,
-          )
-        }
-      }
-      break
-    }
-    default: {
-      throw createInvalidMessagesFieldError(`${param}.source.type`)
-    }
-  }
-  if (
-    value.title !== undefined
-    && value.title !== null
-    && typeof value.title !== "string"
-  ) {
-    throw createInvalidMessagesFieldError(`${param}.title`)
-  }
-  if (
-    value.context !== undefined
-    && value.context !== null
-    && typeof value.context !== "string"
-  ) {
-    throw createInvalidMessagesFieldError(`${param}.context`)
-  }
-  if (value.citations !== undefined && value.citations !== null) {
-    if (!isRecord(value.citations)) {
-      throw createInvalidMessagesFieldError(`${param}.citations`)
-    }
-    if (
-      value.citations.enabled !== undefined
-      && typeof value.citations.enabled !== "boolean"
-    ) {
-      throw createInvalidMessagesFieldError(`${param}.citations.enabled`)
-    }
-  }
-}
-
-function validateTools(value: unknown): void {
-  if (value === undefined) return
-  if (!Array.isArray(value)) throw createInvalidMessagesFieldError("tools")
-  for (const [index, tool] of value.entries()) {
-    validateTool(tool, index)
-  }
-}
-
-function validateToolStringArray(value: unknown, param: string): void {
-  if (
-    value !== undefined
-    && (!Array.isArray(value) || value.some((item) => typeof item !== "string"))
-  ) {
-    throw createInvalidMessagesFieldError(param)
-  }
-}
-
-function validateTool(tool: unknown, index: number): void {
-  const param = `tools.${index}`
-  if (!isRecord(tool)) throw createInvalidMessagesFieldError(param)
-  validateNonEmptyString(tool.name, `${param}.name`)
-  if (tool.type !== undefined)
-    validateNonEmptyString(tool.type, `${param}.type`)
-  if (tool.description !== undefined && typeof tool.description !== "string") {
-    throw createInvalidMessagesFieldError(`${param}.description`)
-  }
-  if (tool.input_schema !== undefined && !isRecord(tool.input_schema)) {
-    throw createInvalidMessagesFieldError(`${param}.input_schema`)
-  }
-  validateToolStringArray(tool.allowed_domains, `${param}.allowed_domains`)
-  validateToolStringArray(tool.blocked_domains, `${param}.blocked_domains`)
-  if (
-    tool.max_uses !== undefined
-    && (!Number.isInteger(tool.max_uses) || Number(tool.max_uses) <= 0)
-  ) {
-    throw createInvalidMessagesFieldError(`${param}.max_uses`)
-  }
 }
 
 export function prepareAnthropicMessagesRequest(options: {

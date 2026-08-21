@@ -400,8 +400,8 @@ test.each([
   ],
   ["non-string tool name", { tools: [{ name: 3, input_schema: {} }] }, "tools"],
 ] as const)(
-  "rejects malformed valid-JSON Messages %s before upstream dispatch",
-  async (_name, extra, param) => {
+  "best-effort handles malformed valid-JSON Messages %s before upstream dispatch",
+  async (_name, extra, _param) => {
     state.models = structuredClone(nativeMessagesModels)
     Object.assign(state.models.data[0], {
       id: "claude-opus-4.6",
@@ -418,16 +418,9 @@ test.each([
       }),
     })
 
-    expect(response.status).toBe(400)
-    expect(await response.json()).toMatchObject({
-      type: "error",
-      error: {
-        code: "invalid_type",
-        param,
-        type: "invalid_request_error",
-      },
-    })
-    expect(fetchMock).not.toHaveBeenCalled()
+    expect(response.status).toBe(200)
+    expect(lastUpstreamUrl).toContain("/v1/messages")
+    expect(fetchMock).toHaveBeenCalled()
   },
 )
 
@@ -924,6 +917,34 @@ test("does not forward native Messages headers to a Responses branch", async () 
   expect(lastUpstreamHeaders?.get("anthropic-beta")).toBeNull()
   expect(lastUpstreamHeaders?.get("anthropic-version")).toBeNull()
   expect(lastUpstreamHeaders?.get("x-model-provider-preference")).toBeNull()
+})
+
+test("routes forward-compatible Messages through Responses when native delivery is unavailable", async () => {
+  state.models = responsesOnlyMessagesModels
+
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-responses-only",
+      max_tokens: 64,
+      messages: [
+        {
+          role: "future-role",
+          content: [
+            {
+              type: "future_native_block_20270101",
+              future_payload: { enabled: true },
+            },
+            { type: "image", source: null },
+          ],
+        },
+      ],
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamUrl).toContain("/responses")
 })
 
 test("preserves ToolSearch tool references on the native messages route", async () => {

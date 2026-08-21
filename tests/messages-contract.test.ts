@@ -414,6 +414,62 @@ test("drops malformed optional controls instead of rejecting the request", () =>
   })
 })
 
+test("drops malformed nested message and tool entries while preserving forward-compatible records", () => {
+  const futureBlock = {
+    type: asAnthropicUnknownContentType("future_content_block_20270101"),
+    future_payload: { enabled: true },
+  }
+  const prepared = prepareAnthropicMessagesRequest({
+    payload: {
+      model: "claude-current",
+      messages: [
+        null,
+        {
+          role: asAnthropicUnknownRole("future-role"),
+          content: [null, futureBlock, { type: "image", source: null }],
+        },
+        {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: 1, name: "broken", input: {} },
+            { type: "tool_use", id: "tool-1", name: "lookup", input: {} },
+          ],
+        },
+      ],
+      tools: [
+        null,
+        { name: 3, input_schema: {} },
+        {
+          name: "lookup",
+          input_schema: { type: "object", properties: {} },
+          future_tool_flag: true,
+        },
+      ],
+    } as unknown as AnthropicMessagesPayload,
+    requireMaxTokens: true,
+  })
+
+  expect(prepared.body).toEqual({
+    model: "claude-current",
+    messages: [
+      { role: "future-role", content: [futureBlock] },
+      {
+        role: "assistant",
+        content: [
+          { type: "tool_use", id: "tool-1", name: "lookup", input: {} },
+        ],
+      },
+    ],
+    tools: [
+      {
+        name: "lookup",
+        input_schema: { type: "object", properties: {} },
+        future_tool_flag: true,
+      },
+    ],
+  })
+})
+
 test("rejects a throwing accessor without invoking or exposing it", () => {
   const marker = "PRIVATE_THROWING_GETTER"
   let reads = 0

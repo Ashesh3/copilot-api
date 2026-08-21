@@ -386,7 +386,7 @@ test("count_tokens estimates configured custom-provider models locally", async (
   expect(capturedRequests).toHaveLength(0)
 })
 
-test("count_tokens rejects custom-provider nested extensions before local translation", async () => {
+test("count_tokens best-effort estimates custom-provider nested extensions", async () => {
   const marker = "PRIVATE_CUSTOM_COUNT_SCHEMA"
   const response = await requestCountTokens({
     model: "custom-count-alias",
@@ -403,17 +403,10 @@ test("count_tokens rejects custom-provider nested extensions before local transl
       ],
     },
   })
-  const body = await response.text()
+  const body = (await response.json()) as Record<string, unknown>
 
-  expect(response.status).toBe(400)
-  expect(JSON.parse(body)).toMatchObject({
-    type: "error",
-    error: {
-      code: "endpoint_translation_unsupported",
-      param: "tool_extension",
-    },
-  })
-  expect(body).not.toContain(marker)
+  expect(response.status).toBe(200)
+  expect(body.input_tokens).toEqual(expect.any(Number))
   expect(capturedRequests).toHaveLength(0)
 })
 
@@ -435,15 +428,6 @@ test.each([
     body: { model: "claude-opus-4.7-1m-internal", messages: [] },
     code: "invalid_value",
     param: "messages",
-  },
-  {
-    name: "content block",
-    body: {
-      model: "claude-opus-4.7-1m-internal",
-      messages: [{ role: "user", content: [null] }],
-    },
-    code: "invalid_type",
-    param: "content",
   },
 ] as const)(
   "count_tokens returns machine metadata for malformed $name input",
@@ -481,6 +465,24 @@ test("count_tokens preserves future native tools without local schema policing",
   expect(response.status).toBe(200)
   expect(await response.json()).toEqual({ input_tokens: 42 })
   expect(capturedRequests[0]?.body).toEqual(body)
+})
+
+test("count_tokens drops malformed nested content instead of rejecting the request", async () => {
+  const response = await server.request("/v1/messages/count_tokens", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-opus-4.7-1m-internal",
+      messages: [{ role: "user", content: [null] }],
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({ input_tokens: 42 })
+  expect(capturedRequests[0]?.body).toEqual({
+    model: "claude-opus-4.7-1m-internal",
+    messages: [{ role: "user", content: [] }],
+  })
 })
 
 test("count_tokens returns invalid_json metadata without raw input", async () => {

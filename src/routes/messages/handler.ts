@@ -140,11 +140,6 @@ import {
   stripThinkingBlocks,
 } from "./thinking-recovery"
 import {
-  checkMessagesToChatTranslation,
-  checkMessagesNativeCompatibility,
-  checkMessagesToResponsesTranslation,
-} from "./translation-fidelity"
-import {
   emitAnthropicResponseAsStream,
   extractWebSearchCalls,
   hasWebSearchInChunks,
@@ -179,12 +174,12 @@ export function selectMessagesUpstreamEndpoint(options: {
       {
         endpoint: "/responses",
         reason: "endpoint_unavailable",
-        check: checkMessagesToResponsesTranslation(options.payload),
+        check: { supported: true, blockers: [] },
       },
       {
         endpoint: "/chat/completions",
         reason: "endpoint_unavailable",
-        check: checkMessagesToChatTranslation(options.payload),
+        check: { supported: true, blockers: [] },
       },
     ],
   })
@@ -366,14 +361,6 @@ async function handleCompletionInner(
 
   const customReference = resolveCustomChatModel(anthropicPayload.model)
   if (customReference) {
-    const customTranslation = checkMessagesToChatTranslation(anthropicPayload)
-    if (!customTranslation.supported) {
-      throw createEndpointTranslationError({
-        blockers: customTranslation.blockers,
-        code: "endpoint_translation_unsupported",
-        source: "messages",
-      })
-    }
     await normalizeAnthropicAttachments(anthropicPayload, c.req.raw.signal)
     await prepareMessagesPayloadForDispatch(c, {
       payload: anthropicPayload,
@@ -418,18 +405,6 @@ async function handleCompletionInner(
   if ("code" in routeDecision)
     throw createEndpointTranslationError(routeDecision)
   recordCopilotEndpointRoute(routeDecision)
-
-  if (routeDecision.target === "/v1/messages") {
-    const nativeCompatibility =
-      checkMessagesNativeCompatibility(anthropicPayload)
-    if (!nativeCompatibility.supported) {
-      throw createEndpointTranslationError({
-        blockers: nativeCompatibility.blockers,
-        code: "endpoint_translation_unsupported",
-        source: "messages",
-      })
-    }
-  }
 
   const attachmentsPrepared = routeDecision.target !== "/v1/messages"
   // Fidelity selection above must see the original semantic block shape.

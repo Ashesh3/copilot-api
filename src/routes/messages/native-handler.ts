@@ -183,6 +183,7 @@ export async function handleWithNativeMessages(
       }),
       async (span) => {
         const response = (await createNativeMessages(payload, options, {
+          preserveValidatedControls: true,
           signal: c.req.raw.signal,
         })) as AnthropicResponse
 
@@ -242,6 +243,7 @@ async function streamNativeMessages(
         ])
         const preflush = await raceSsePreflush(
           createNativeMessages(anthropicPayload, options, {
+            preserveValidatedControls: true,
             signal: upstreamSignal,
           }),
         )
@@ -390,6 +392,7 @@ export async function resolveNativeWebSearch(
     let response: AnthropicResponse
     try {
       response = (await createNativeMessages(payload, loopOptions, {
+        preserveValidatedControls: true,
         routedAccountPin,
         signal: options.signal,
       })) as AnthropicResponse
@@ -406,6 +409,7 @@ export async function resolveNativeWebSearch(
       const recovered = structuredClone(payload)
       if (!stripThinkingBlocks(recovered)) throw error
       response = (await createNativeMessages(recovered, loopOptions, {
+        preserveValidatedControls: true,
         routedAccountPin,
         signal: options.signal,
       })) as AnthropicResponse

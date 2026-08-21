@@ -1,4 +1,3 @@
-import { createEndpointTranslationError } from "~/lib/error"
 import {
   type ChatCompletionResponse,
   type ChatCompletionsPayload,
@@ -243,16 +242,16 @@ function translateAnthropicMessagesToOpenAI(
   const sanitizedMessages = sanitizeAnthropicMessages(anthropicMessages)
 
   const otherMessages = sanitizedMessages.flatMap((message) =>
-    message.role === "user" ?
-      handleUserMessage(message)
-    : handleAssistantMessage(message),
+    message.role === "assistant" ?
+      handleAssistantMessage(message)
+    : handleUserMessage(message),
   )
 
   return [...systemMessages, ...otherMessages]
 }
 
 function handleSystemPrompt(
-  system: string | Array<AnthropicTextBlock> | undefined,
+  system: AnthropicMessagesPayload["system"],
 ): Array<Message> {
   if (!system) {
     return []
@@ -261,12 +260,16 @@ function handleSystemPrompt(
   if (typeof system === "string") {
     return [{ role: "system", content: system }]
   } else {
-    const systemText = system.map((block) => block.text).join("\n\n")
+    const systemText = system
+      .map((block) =>
+        block.type === "text" ? block.text : JSON.stringify(block),
+      )
+      .join("\n\n")
     return [{ role: "system", content: systemText }]
   }
 }
 
-function handleUserMessage(message: AnthropicUserMessage): Array<Message> {
+function handleUserMessage(message: AnthropicMessage): Array<Message> {
   const newMessages: Array<Message> = []
 
   if (Array.isArray(message.content)) {
@@ -329,16 +332,6 @@ function handleAssistantMessage(
   const signedThinkingBlocks = thinkingBlocks.filter(
     (block) => block.signature && isValidReasoningSignature(block.signature),
   )
-  if (
-    signedThinkingBlocks.length > 1
-    || (signedThinkingBlocks.length === 1 && thinkingBlocks.length > 1)
-  ) {
-    throw createEndpointTranslationError({
-      blockers: ["mixed_thinking_blocks"],
-      code: "endpoint_translation_unsupported",
-      source: "messages",
-    })
-  }
 
   const textContent = textBlocks.map((block) => block.text).join("\n\n")
   const reasoningText = thinkingBlocks
@@ -347,7 +340,10 @@ function handleAssistantMessage(
       (thinking) => thinking.trim().length > 0 && thinking !== "Thinking...",
     )
     .join("\n\n")
-  const reasoningOpaque = signedThinkingBlocks[0]?.signature
+  const reasoningOpaque =
+    signedThinkingBlocks.length === 1 && thinkingBlocks.length === 1 ?
+      signedThinkingBlocks[0]?.signature
+    : undefined
 
   return [
     {
@@ -398,17 +394,6 @@ function mapContent(
   )
   if (!hasAttachment) {
     return content
-      .filter(
-        (
-          block,
-        ): block is
-          | AnthropicTextBlock
-          | AnthropicThinkingBlock
-          | AnthropicToolReferenceBlock =>
-          block.type === "text"
-          || block.type === "thinking"
-          || block.type === "tool_reference",
-      )
       .map((block) => {
         if (block.type === "text") return block.text
         if (block.type === "thinking") return block.thinking
@@ -465,7 +450,9 @@ function mapContent(
         contentParts.push({ type: "text", text: JSON.stringify(block) })
         break
       }
-      // No default
+      default: {
+        contentParts.push({ type: "text", text: JSON.stringify(block) })
+      }
     }
   }
   return contentParts
