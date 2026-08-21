@@ -310,6 +310,66 @@ describe("health and Direct Connect exposure", () => {
   })
 })
 
+describe("Direct Connect JSON boundaries", () => {
+  test("reject malformed and missing JSON before allocation", async () => {
+    process.env.COPILOT_API_ENABLE_DIRECT_CONNECT = "true"
+    const initialCount = listDirectConnectSessions().length
+
+    for (const request of [
+      {
+        body: "{",
+        headers: {
+          authorization: "Bearer gateway-secret",
+          "content-type": "application/json",
+        },
+        method: "POST",
+      },
+      {
+        headers: {
+          authorization: "Bearer gateway-secret",
+          "content-type": "application/json",
+        },
+        method: "POST",
+      },
+    ]) {
+      const response = await directConnectRoutes.request(
+        "http://localhost/",
+        request,
+      )
+      expect(response.status).toBe(400)
+      expect(await response.json()).toEqual({ error: "Invalid JSON" })
+      expect(listDirectConnectSessions()).toHaveLength(initialCount)
+    }
+
+    const valid = await directConnectRoutes.request("http://localhost/", {
+      body: JSON.stringify({ cwd: String.raw`C:\compat` }),
+      headers: {
+        authorization: "Bearer gateway-secret",
+        "content-type": "application/json",
+      },
+      method: "POST",
+    })
+    expect(valid.status).toBe(201)
+    expect((await valid.json()) as { work_dir: string }).toMatchObject({
+      work_dir: String.raw`C:\compat`,
+    })
+    expect(listDirectConnectSessions()).toHaveLength(initialCount + 1)
+  })
+
+  test("authenticates malformed requests before parsing", async () => {
+    process.env.COPILOT_API_ENABLE_DIRECT_CONNECT = "true"
+    const initialCount = listDirectConnectSessions().length
+    const response = await directConnectRoutes.request("http://localhost/", {
+      body: "{",
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    })
+
+    expect(response.status).toBe(401)
+    expect(listDirectConnectSessions()).toHaveLength(initialCount)
+  })
+})
+
 describe("voice WebSocket security", () => {
   test("rejects missing credentials before allocating a session", async () => {
     const upgrade = mock(() => true)

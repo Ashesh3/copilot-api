@@ -8,6 +8,7 @@ import {
 import { resolveRequestCredential } from "~/lib/credential-resolver"
 import { resolveProtectedCredential } from "~/lib/protected-credential"
 import { resolvePublicOrigin } from "~/lib/public-origin"
+import { readRequestJson } from "~/lib/request-json"
 
 import { createSession } from "../code-sessions/session-store"
 import {
@@ -52,15 +53,19 @@ async function requireEnvironmentCapability(
 // POST /bridge — Register bridge environment
 environmentsRoutes.post("/bridge", async (c) => {
   if (!(await requireOAuth(c.req.raw))) return unauthorized(c)
-  const body = await c.req.json<{
-    machine_name: string
-    directory: string
-    branch: string
-    git_repo_url?: string | null
-    max_sessions?: number
-    metadata?: Record<string, unknown>
-    environment_id?: string
-  }>()
+  const parsed = await readRequestJson(() =>
+    c.req.json<{
+      machine_name: string
+      directory: string
+      branch: string
+      git_repo_url?: string | null
+      max_sessions?: number
+      metadata?: Record<string, unknown>
+      environment_id?: string
+    }>(),
+  )
+  if (!parsed.ok) return c.json({ error: "Invalid JSON" }, 400)
+  const body = parsed.value
 
   const environmentId = body.environment_id ?? generateEnvironmentId()
   const secret = issueEnvironmentCapability(environmentId)
@@ -147,9 +152,12 @@ environmentsRoutes.post("/:id/work", async (c) => {
     return c.json({ error: "Environment not found" }, 404)
   }
 
-  const body = await c.req
-    .json<{ title?: string }>()
-    .catch(() => ({ title: undefined }))
+  const parsed =
+    c.req.raw.body === null ?
+      ({ ok: true, value: {} as { title?: string } } as const)
+    : await readRequestJson(() => c.req.json<{ title?: string }>())
+  if (!parsed.ok) return c.json({ error: "Invalid JSON" }, 400)
+  const body = parsed.value
   const session = createSession(
     body.title ?? `Session in ${env.machineName}`,
     [],

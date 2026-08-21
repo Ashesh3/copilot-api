@@ -3,6 +3,7 @@ import { Hono } from "hono"
 
 import { resolveRequestCredential } from "~/lib/credential-resolver"
 import { resolveProtectedCredential } from "~/lib/protected-credential"
+import { readRequestJson } from "~/lib/request-json"
 import { broadcastEvents } from "~/routes/code-sessions/event-bus"
 import {
   archiveSession,
@@ -127,9 +128,13 @@ sessionsRoutes.post("/:id/events", async (c) => {
 
   const { resolvedId } = result
 
-  const body = await c.req.json<{
-    events?: Array<Record<string, unknown>>
-  }>()
+  const parsed = await readRequestJson(() =>
+    c.req.json<{
+      events?: Array<Record<string, unknown>>
+    }>(),
+  )
+  if (!parsed.ok) return c.json({ error: "Invalid JSON" }, 400)
+  const body = parsed.value
 
   const events = body.events ?? []
   if (!Array.isArray(events)) {

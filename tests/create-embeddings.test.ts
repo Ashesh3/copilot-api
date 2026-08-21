@@ -87,3 +87,28 @@ test("preserves native embedding failure identity and exact route bytes", async 
     Array.from(body),
   )
 })
+
+test("returns a fixed invalid JSON error without dispatching embeddings", async () => {
+  for (const request of [
+    {
+      body: "{",
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    },
+    {
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    },
+  ]) {
+    fetchMock.mockClear()
+    const response = await server.request("/v1/embeddings", request)
+    const text = await response.text()
+
+    expect(response.status).toBe(400)
+    expect(text).toBe(
+      '{"error":{"code":"invalid_json","message":"The request body must contain valid JSON.","param":"body","type":"invalid_request_error"}}',
+    )
+    expect(text).not.toMatch(/SyntaxError|Unexpected|JSON Parse|Bun|Hono/)
+    expect(fetchMock).toHaveBeenCalledTimes(0)
+  }
+})
