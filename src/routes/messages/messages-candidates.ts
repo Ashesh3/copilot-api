@@ -8,11 +8,21 @@ import type {
   AnthropicTextBlock,
   AnthropicToolResultBlock,
   AnthropicUserContentBlock,
+  AnthropicToolUseBlock,
 } from "~/routes/messages/anthropic-types"
-import type { ChatCompletionsPayload } from "~/services/copilot/create-chat-completions"
-import type { ResponsesPayload } from "~/services/copilot/create-responses"
+import type {
+  ChatCompletionsPayload,
+  Message,
+  ToolCall,
+} from "~/services/copilot/create-chat-completions"
+import type {
+  ResponsesPayload,
+  ResponseFunctionCallOutputItem,
+  ResponseFunctionToolCallItem,
+} from "~/services/copilot/create-responses"
 import type { Model } from "~/services/copilot/get-models"
 
+import { fetchUrlAsDataUri } from "~/lib/attachments"
 import {
   createEvaluatedTranslationCheck,
   getModelEndpointSupport,
@@ -22,6 +32,7 @@ import { usesImplicitReasoningDefault } from "~/lib/model-suffix"
 import {
   isAnthropicTextBlock,
   isAnthropicToolResultBlock,
+  isAnthropicToolUseBlock,
 } from "~/routes/messages/anthropic-types"
 import { rewriteUnsupportedAssistantPrefill } from "~/services/copilot/create-chat-completions"
 import {
@@ -30,6 +41,7 @@ import {
 } from "~/services/copilot/responses-contract"
 
 import {
+  type AnthropicAttachmentResolver,
   normalizeAnthropicAttachments,
   normalizeAnthropicImages,
 } from "./attachment-normalization"
@@ -74,6 +86,225 @@ export interface PrepareMessagesCandidatesOptions {
   readonly signal?: AbortSignal
 }
 
+function createAttachmentResolver(): AnthropicAttachmentResolver {
+  const cache = new Map<string, ReturnType<typeof fetchUrlAsDataUri>>()
+  return async ({ expectPdf, signal, url }) => {
+    signal?.throwIfAborted()
+    const key = `${expectPdf ? "pdf" : "asset"}:${url}`
+    let pending = cache.get(key)
+    if (!pending) {
+      pending = fetchUrlAsDataUri(url, { expectPdf, signal })
+      cache.set(key, pending)
+    }
+    return await pending
+  }
+}
+
+interface ToolHistoryAssociations {
+  readonly callIdByBlock: ReadonlyMap<AnthropicToolUseBlock, string>
+  readonly resultIdByBlock: ReadonlyMap<AnthropicToolResultBlock, string>
+  readonly adapted: boolean
+  readonly orphaned: boolean
+}
+
+interface MutableToolHistoryState {
+  readonly callIdByBlock: Map<AnthropicToolUseBlock, string>
+  readonly pending: Map<string, Array<string>>
+  readonly reserved: Set<string>
+  readonly resultIdByBlock: Map<AnthropicToolResultBlock, string>
+  readonly used: Set<string>
+  adapted: boolean
+  orphaned: boolean
+}
+
+function reserveToolHistoryIds(source: AnthropicMessagesPayload): Set<string> {
+  const reserved = new Set<string>()
+  for (const message of source.messages) {
+    if (!Array.isArray(message.content)) continue
+    for (const block of message.content) {
+      if (isAnthropicToolUseBlock(block) && block.id.trim())
+        reserved.add(block.id)
+      if (isAnthropicToolResultBlock(block) && block.tool_use_id.trim()) {
+        reserved.add(block.tool_use_id)
+      }
+    }
+  }
+  return reserved
+}
+
+function allocateToolCallId(options: {
+  block: AnthropicToolUseBlock
+  blockIndex: number
+  messageIndex: number
+  state: MutableToolHistoryState
+}): void {
+  const { block, blockIndex, messageIndex, state } = options
+  const sourceId = block.id.trim()
+  let targetId = sourceId
+  if (!targetId || state.used.has(targetId)) {
+    const base = `messages_call_${messageIndex}_${blockIndex}`
+    targetId = base
+    let suffix = 0
+    while (state.reserved.has(targetId) || state.used.has(targetId)) {
+      suffix += 1
+      targetId = `${base}_${suffix}`
+    }
+    state.adapted = true
+  }
+  state.used.add(targetId)
+  state.callIdByBlock.set(block, targetId)
+  const queue = state.pending.get(sourceId) ?? []
+  queue.push(targetId)
+  state.pending.set(sourceId, queue)
+}
+
+function associateToolResult(
+  block: AnthropicToolResultBlock,
+  state: MutableToolHistoryState,
+): void {
+  const targetId = state.pending.get(block.tool_use_id.trim())?.shift()
+  if (targetId) state.resultIdByBlock.set(block, targetId)
+  else state.orphaned = true
+}
+
+function associateToolHistory(
+  source: AnthropicMessagesPayload,
+): ToolHistoryAssociations {
+  const state: MutableToolHistoryState = {
+    adapted: false,
+    callIdByBlock: new Map(),
+    orphaned: false,
+    pending: new Map(),
+    reserved: reserveToolHistoryIds(source),
+    resultIdByBlock: new Map(),
+    used: new Set(),
+  }
+  for (const [messageIndex, message] of source.messages.entries()) {
+    if (!Array.isArray(message.content)) continue
+    for (const [blockIndex, block] of message.content.entries()) {
+      if (isAnthropicToolUseBlock(block)) {
+        allocateToolCallId({ block, blockIndex, messageIndex, state })
+        continue
+      }
+      if (isAnthropicToolResultBlock(block)) associateToolResult(block, state)
+    }
+  }
+  return {
+    adapted: state.adapted,
+    callIdByBlock: state.callIdByBlock,
+    orphaned: state.orphaned,
+    resultIdByBlock: state.resultIdByBlock,
+  }
+}
+
+function collectChatToolHistoryTargets(options: {
+  source: AnthropicMessagesPayload
+  payload: ChatCompletionsPayload
+  associations: ToolHistoryAssociations
+}): {
+  calls: Array<{ source: AnthropicToolUseBlock; target: ToolCall }>
+  results: Array<{ source: AnthropicToolResultBlock; target: Message }>
+} {
+  const { associations, payload, source } = options
+  const calls: Array<{ source: AnthropicToolUseBlock; target: ToolCall }> = []
+  const results: Array<{ source: AnthropicToolResultBlock; target: Message }> =
+    []
+  for (const [messageIndex, message] of source.messages.entries()) {
+    if (!Array.isArray(message.content)) continue
+    const target = payload.messages[messageIndex]
+    for (const block of message.content) {
+      if (isAnthropicToolUseBlock(block)) {
+        const id = associations.callIdByBlock.get(block)
+        const targetCall = target.tool_calls?.find(
+          (call) => call.function.name === block.name,
+        )
+        if (id && targetCall) calls.push({ source: block, target: targetCall })
+      } else if (isAnthropicToolResultBlock(block)) {
+        const id = associations.resultIdByBlock.get(block)
+        const targetResult = payload.messages.find(
+          (candidate) =>
+            candidate.role === "tool"
+            && candidate.content === mapToolResultText(block.content),
+        )
+        if (id && targetResult)
+          results.push({ source: block, target: targetResult })
+      }
+    }
+  }
+  return { calls, results }
+}
+
+function applyChatToolHistory(
+  source: AnthropicMessagesPayload,
+  payload: ChatCompletionsPayload,
+  findings: Array<TranslationFinding>,
+): void {
+  const associations = associateToolHistory(source)
+  const { calls, results } = collectChatToolHistoryTargets({
+    associations,
+    payload,
+    source,
+  })
+  for (const item of calls) {
+    const id = associations.callIdByBlock.get(item.source)
+    if (id) item.target.id = id
+  }
+  for (const item of results) {
+    const id = associations.resultIdByBlock.get(item.source)
+    if (id) item.target.tool_call_id = id
+  }
+  if (associations.adapted || associations.orphaned) {
+    addFinding(findings, { class: "tool_history", severity: "adapted" })
+  }
+}
+
+function applyResponsesToolHistory(
+  source: AnthropicMessagesPayload,
+  payload: ResponsesPayload,
+  findings: Array<TranslationFinding>,
+): void {
+  if (!Array.isArray(payload.input)) return
+  const associations = associateToolHistory(source)
+  const calls = payload.input.filter(
+    (item): item is ResponseFunctionToolCallItem =>
+      item.type === "function_call",
+  )
+  const outputs = payload.input.filter(
+    (item): item is ResponseFunctionCallOutputItem =>
+      item.type === "function_call_output",
+  )
+  let callIndex = 0
+  let outputIndex = 0
+  for (const message of source.messages) {
+    if (!Array.isArray(message.content)) continue
+    for (const block of message.content) {
+      if (isAnthropicToolUseBlock(block)) {
+        const id = associations.callIdByBlock.get(block)
+        if (id && calls[callIndex]) calls[callIndex].call_id = id
+        callIndex += 1
+      } else if (isAnthropicToolResultBlock(block)) {
+        const id = associations.resultIdByBlock.get(block)
+        if (id && outputs[outputIndex]) outputs[outputIndex].call_id = id
+        outputIndex += 1
+      }
+    }
+  }
+  if (associations.adapted || associations.orphaned) {
+    addFinding(findings, { class: "tool_history", severity: "adapted" })
+  }
+}
+
+function mapToolResultText(
+  content: AnthropicToolResultBlock["content"],
+): string {
+  if (typeof content === "string") return content
+  return content
+    .map((block) =>
+      isAnthropicTextBlock(block) ? block.text : JSON.stringify(block),
+    )
+    .join("\n\n")
+}
+
 function hasMeaningfulMessages(payload: AnthropicMessagesPayload): boolean {
   return payload.messages.length > 0
 }
@@ -115,6 +346,7 @@ function adaptMessagesToChat(options: {
   const findings: Array<TranslationFinding> = []
   applyTranslatedToolFindings(source, findings)
   degradeChatFileParts(payload, findings)
+  applyChatToolHistory(source, payload, findings)
   const reasoningEnabled = Boolean(options.effortOverride || source.thinking)
   if (reasoningEnabled) {
     payload.temperature = 1
@@ -271,6 +503,7 @@ function adaptMessagesToResponses(options: {
   normalizeJsonSchemaResponseFormat(payload)
   const findings: Array<TranslationFinding> = []
   applyTranslatedToolFindings(source, findings)
+  applyResponsesToolHistory(source, payload, findings)
   if (source.stop_sequences !== undefined) {
     findings.push({ class: "sampling", severity: "omitted" })
   }
@@ -314,7 +547,11 @@ export async function prepareMessagesChatCandidate(options: {
   readonly signal?: AbortSignal
 }): Promise<MessagesChatCandidate> {
   const source = structuredClone(options.source)
-  await normalizeAnthropicAttachments(source, options.signal)
+  await normalizeAnthropicAttachments(
+    source,
+    options.signal,
+    createAttachmentResolver(),
+  )
   return adaptMessagesToChat({
     source,
     effortOverride: options.effortOverride,
@@ -326,9 +563,14 @@ export async function prepareMessagesCandidates(
   options: PrepareMessagesCandidatesOptions,
 ): Promise<PreparedMessagesCandidates> {
   const support = getModelEndpointSupport(options.selectedModel)
+  const resolveAttachment = createAttachmentResolver()
   const nativePayload = structuredClone(options.source)
   if (support.messages) {
-    await normalizeAnthropicImages(nativePayload, options.signal)
+    await normalizeAnthropicImages(
+      nativePayload,
+      options.signal,
+      resolveAttachment,
+    )
   }
   const finalizedNative = prepareNativeTools(nativePayload).payload
   if (!options.isCompact) mergeToolResultForCandidate(finalizedNative)
@@ -343,12 +585,6 @@ export async function prepareMessagesCandidates(
       options.selectedModel?.capabilities.limits?.max_output_tokens,
     )
   }
-  const translatedPayload = structuredClone(
-    support.messages ? nativePayload : options.source,
-  )
-  if (support.responses || support.chat) {
-    await normalizeAnthropicAttachments(translatedPayload, options.signal)
-  }
   const nativeCandidate = createCandidate({
     endpoint: "/v1/messages",
     payload: finalizedNative,
@@ -360,17 +596,33 @@ export async function prepareMessagesCandidates(
   }
   const responses =
     support.responses ?
-      adaptMessagesToResponses({
-        source: translatedPayload,
-        effortOverride: options.effortOverride,
-      })
+      await (async () => {
+        const source = structuredClone(options.source)
+        await normalizeAnthropicAttachments(
+          source,
+          options.signal,
+          resolveAttachment,
+        )
+        return adaptMessagesToResponses({
+          source,
+          effortOverride: options.effortOverride,
+        })
+      })()
     : undefined
   const chat =
     support.chat ?
-      adaptMessagesToChat({
-        source: translatedPayload,
-        effortOverride: options.effortOverride,
-      })
+      await (async () => {
+        const source = structuredClone(options.source)
+        await normalizeAnthropicAttachments(
+          source,
+          options.signal,
+          resolveAttachment,
+        )
+        return adaptMessagesToChat({
+          source,
+          effortOverride: options.effortOverride,
+        })
+      })()
     : undefined
   const ordered: Array<MessagesEndpointCandidate> = []
   if (support.messages) ordered.push(native)

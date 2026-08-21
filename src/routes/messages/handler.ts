@@ -549,6 +549,13 @@ async function handleCompletionInner(
         }
         const recoveredPayload = structuredClone(anthropicPayload)
         if (!stripThinkingBlocks(recoveredPayload)) throw error
+        const recoveredCandidates = await prepareMessagesCandidates({
+          source: recoveredPayload,
+          selectedModel: routingModel,
+          effortOverride,
+          isCompact,
+          signal: c.req.raw.signal,
+        })
         recordNonDefaultBehavior(c, {
           kind: "reasoning_retry_without_thinking",
           message: `Stripped thinking blocks after native /v1/messages rejected their signature for ${anthropicPayload.model}`,
@@ -562,10 +569,16 @@ async function handleCompletionInner(
         return await runWithPinnedRoutedAccount(
           accountId,
           async () =>
-            await handleWithNativeMessages(c, recoveredPayload, {
-              ...requestOptions,
-              retryBudget,
-            }),
+            await handleWithNativeMessages(
+              c,
+              recoveredCandidates.native.payload,
+              {
+                ...requestOptions,
+                compaction: recoveredCandidates.native.compaction,
+                retryBudget,
+                toolsPrepared: true,
+              },
+            ),
         )
       }
     }

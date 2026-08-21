@@ -1013,6 +1013,48 @@ test("recovers once from a deterministic native signature rejection", async () =
   debugSpy.mockRestore()
 })
 
+test("rebuilds native image preparation before signature recovery dispatch", async () => {
+  installModel({ supported_endpoints: ["/v1/messages"] })
+  queuedMessagesResults.push(
+    Response.json(
+      {
+        type: "error",
+        error: {
+          type: "invalid_request_error",
+          message: "Invalid signature in thinking block",
+        },
+      },
+      { status: 400 },
+    ),
+    nativeSuccess("recovered-image"),
+  )
+
+  const response = await postMessages({
+    messages: [
+      ...signedThinkingHistory(),
+      {
+        role: "user",
+        content: [
+          {
+            type: "image",
+            source: {
+              type: "url",
+              url: "https://attachment.test/recovery.png",
+            },
+          },
+        ],
+      },
+    ],
+  })
+
+  expect(response.status).toBe(200)
+  expect(upstreamBodies[1]).toHaveProperty(
+    "messages.3.content.0.source.type",
+    "base64",
+  )
+  expect(JSON.stringify(upstreamBodies[1])).not.toContain("native-signature")
+})
+
 test("finalizes native tool-result merging before the selected first wire", async () => {
   installModel({ supported_endpoints: ["/v1/messages"] })
 

@@ -286,3 +286,114 @@ test("degrades unsupported tools per target with bounded private findings", asyn
     "lookup_private",
   )
 })
+
+test("keys attachment cache by URL and expected PDF mode", async () => {
+  const sharedUrl = "https://attachment.test/shared"
+  await prepareMessagesCandidates({
+    source: createSource({
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "image", source: { type: "url", url: sharedUrl } },
+            {
+              type: "document",
+              source: { type: "url", url: sharedUrl },
+              title: "shared.pdf",
+            },
+          ],
+        },
+      ],
+    }),
+    selectedModel: {
+      ...selectedModel,
+      supported_endpoints: ["/responses", "/chat/completions"],
+    },
+  })
+
+  expect(attachmentFetchCount).toBe(2)
+})
+
+test("propagates the caller abort reason from attachment adaptation", async () => {
+  const controller = new AbortController()
+  const reason = new Error("PRIVATE_ABORT_REASON")
+  controller.abort(reason)
+
+  const error = await prepareMessagesCandidates({
+    source: createSource({
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "image",
+              source: { type: "url", url: "https://attachment.test/image.png" },
+            },
+          ],
+        },
+      ],
+    }),
+    selectedModel: { ...selectedModel, supported_endpoints: ["/responses"] },
+    signal: controller.signal,
+  }).catch((caught: unknown) => caught)
+
+  expect(error).toBe(reason)
+  expect(attachmentFetchCount).toBe(0)
+})
+
+test("associates duplicate and missing tool IDs without collisions", async () => {
+  const source = createSource({
+    messages: [
+      {
+        role: "assistant",
+        content: [
+          { type: "tool_use", id: "dup", name: "first", input: {} },
+          { type: "text", text: "between" },
+          { type: "tool_use", id: "dup", name: "second", input: {} },
+          { type: "tool_use", id: "", name: "third", input: {} },
+          {
+            type: "tool_use",
+            id: "messages_call_0_2",
+            name: "reserved",
+            input: {},
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "dup", content: "one" },
+          { type: "text", text: "interleaved" },
+          { type: "tool_result", tool_use_id: "dup", content: "two" },
+          { type: "tool_result", tool_use_id: "", content: "three" },
+          { type: "tool_result", tool_use_id: "dup", content: "orphan" },
+        ],
+      },
+    ],
+  })
+  const snapshot = structuredClone(source)
+  const candidates = await prepareMessagesCandidates({
+    source,
+    selectedModel: {
+      ...selectedModel,
+      supported_endpoints: ["/responses", "/chat/completions"],
+    },
+  })
+
+  const chat = JSON.stringify(candidates.chat?.payload)
+  const responses = JSON.stringify(candidates.responses?.payload)
+  expect(chat).toContain('"id":"dup"')
+  expect(chat).toContain('"id":"messages_call_0_2_1"')
+  expect(chat).toContain('"id":"messages_call_0_3"')
+  expect(chat).toContain('"tool_call_id":"messages_call_0_2_1"')
+  expect(responses).toContain('"call_id":"messages_call_0_2_1"')
+  expect(candidates.chat?.check.findings).toContainEqual({
+    class: "tool_history",
+    severity: "adapted",
+  })
+  expect(candidates.responses?.check.findings).toContainEqual({
+    class: "tool_history",
+    severity: "adapted",
+  })
+  expect(source).toEqual(snapshot)
+})

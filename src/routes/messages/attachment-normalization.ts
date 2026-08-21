@@ -1,6 +1,7 @@
 import consola from "consola"
 
 import {
+  type ParsedDataUri,
   attachmentOmittedNote,
   fetchUrlAsDataUri,
   isImageMediaType,
@@ -25,6 +26,20 @@ import {
   isAnthropicUserMessage,
 } from "./anthropic-types"
 
+export type AnthropicAttachmentResolver = (options: {
+  expectPdf: boolean
+  signal?: AbortSignal
+  url: string
+}) => Promise<ParsedDataUri | null>
+
+const defaultAttachmentResolver: AnthropicAttachmentResolver = async (
+  options,
+) =>
+  await fetchUrlAsDataUri(options.url, {
+    expectPdf: options.expectPdf,
+    signal: options.signal,
+  })
+
 /**
  * Normalize Anthropic attachment blocks before endpoint routing so the rest
  * of the pipeline only ever sees:
@@ -40,6 +55,7 @@ import {
 export async function normalizeAnthropicAttachments(
   payload: AnthropicMessagesPayload,
   signal?: AbortSignal,
+  resolveAttachment: AnthropicAttachmentResolver = defaultAttachmentResolver,
 ): Promise<void> {
   for (const message of payload.messages) {
     if (!isAnthropicUserMessage(message) || !Array.isArray(message.content)) {
@@ -49,7 +65,11 @@ export async function normalizeAnthropicAttachments(
     const normalized: Array<AnthropicUserContentBlock> = []
     for (const block of message.content) {
       if (isAnthropicToolResultBlock(block) && Array.isArray(block.content)) {
-        const inner = await normalizeToolResultContent(block.content, signal)
+        const inner = await normalizeToolResultContent(
+          block.content,
+          signal,
+          resolveAttachment,
+        )
         normalized.push({ ...block, content: inner })
         continue
       }
@@ -58,7 +78,9 @@ export async function normalizeAnthropicAttachments(
         continue
       }
 
-      normalized.push(...(await normalizeBlock(block, signal)))
+      normalized.push(
+        ...(await normalizeBlock(block, signal, resolveAttachment)),
+      )
     }
     message.content = normalized
   }
@@ -68,6 +90,7 @@ export async function normalizeAnthropicAttachments(
 export async function normalizeAnthropicImages(
   payload: AnthropicMessagesPayload,
   signal?: AbortSignal,
+  resolveAttachment: AnthropicAttachmentResolver = defaultAttachmentResolver,
 ): Promise<void> {
   for (const message of payload.messages) {
     if (!isAnthropicUserMessage(message) || !Array.isArray(message.content)) {
@@ -77,13 +100,19 @@ export async function normalizeAnthropicImages(
     const normalized: Array<AnthropicUserContentBlock> = []
     for (const block of message.content) {
       if (isAnthropicImageBlock(block)) {
-        normalized.push(await normalizeImageBlock(block, signal))
+        normalized.push(
+          await normalizeImageBlock(block, signal, resolveAttachment),
+        )
         continue
       }
       if (isAnthropicToolResultBlock(block) && Array.isArray(block.content)) {
         normalized.push({
           ...block,
-          content: await normalizeToolResultImages(block.content, signal),
+          content: await normalizeToolResultImages(
+            block.content,
+            signal,
+            resolveAttachment,
+          ),
         })
         continue
       }
@@ -100,12 +129,13 @@ export async function normalizeAnthropicImages(
 async function normalizeToolResultImages(
   content: Exclude<AnthropicToolResultBlock["content"], string>,
   signal?: AbortSignal,
+  resolveAttachment: AnthropicAttachmentResolver = defaultAttachmentResolver,
 ): Promise<Exclude<AnthropicToolResultBlock["content"], string>> {
   const normalized: Exclude<AnthropicToolResultBlock["content"], string> = []
   for (const block of content) {
     normalized.push(
       isAnthropicImageBlock(block) ?
-        await normalizeImageBlock(block, signal)
+        await normalizeImageBlock(block, signal, resolveAttachment)
       : block,
     )
   }
@@ -121,6 +151,7 @@ type NormalizableBlock =
 async function normalizeToolResultContent(
   content: Exclude<AnthropicToolResultBlock["content"], string>,
   signal?: AbortSignal,
+  resolveAttachment: AnthropicAttachmentResolver = defaultAttachmentResolver,
 ): Promise<
   Array<
     | AnthropicTextBlock
@@ -142,7 +173,7 @@ async function normalizeToolResultContent(
       normalized.push(block)
       continue
     }
-    normalized.push(...(await normalizeBlock(block, signal)))
+    normalized.push(...(await normalizeBlock(block, signal, resolveAttachment)))
   }
   return normalized
 }
@@ -150,12 +181,13 @@ async function normalizeToolResultContent(
 async function normalizeBlock(
   block: AnthropicInlineContentBlock,
   signal?: AbortSignal,
+  resolveAttachment: AnthropicAttachmentResolver = defaultAttachmentResolver,
 ): Promise<Array<NormalizableBlock>> {
   if (isAnthropicImageBlock(block)) {
-    return [await normalizeImageBlock(block, signal)]
+    return [await normalizeImageBlock(block, signal, resolveAttachment)]
   }
   if (isAnthropicDocumentBlock(block)) {
-    return await normalizeDocumentBlock(block, signal)
+    return await normalizeDocumentBlock(block, signal, resolveAttachment)
   }
   return [block]
 }
@@ -163,10 +195,15 @@ async function normalizeBlock(
 async function normalizeImageBlock(
   block: AnthropicImageBlock,
   signal?: AbortSignal,
+  resolveAttachment: AnthropicAttachmentResolver = defaultAttachmentResolver,
 ): Promise<AnthropicImageBlock | AnthropicTextBlock> {
   if (block.source.type !== "url") return block
 
-  const inlined = await fetchUrlAsDataUri(block.source.url, { signal })
+  const inlined = await resolveAttachment({
+    expectPdf: false,
+    signal,
+    url: block.source.url,
+  })
   if (inlined && isImageMediaType(inlined.mediaType)) {
     return {
       type: "image",
@@ -196,6 +233,7 @@ async function normalizeImageBlock(
 async function normalizeDocumentBlock(
   block: AnthropicDocumentBlock,
   signal?: AbortSignal,
+  resolveAttachment: AnthropicAttachmentResolver = defaultAttachmentResolver,
 ): Promise<Array<NormalizableBlock>> {
   const source = block.source
 
@@ -223,7 +261,12 @@ async function normalizeDocumentBlock(
     }
 
     case "url": {
-      return await normalizeUrlDocument(block, source.url, signal)
+      return await normalizeUrlDocument({
+        block,
+        url: source.url,
+        signal,
+        resolveAttachment,
+      })
     }
 
     case "content": {
@@ -237,7 +280,9 @@ async function normalizeDocumentBlock(
           if (inner.type === "text") {
             texts.push(inner.text)
           } else {
-            blocks.push(await normalizeImageBlock(inner, signal))
+            blocks.push(
+              await normalizeImageBlock(inner, signal, resolveAttachment),
+            )
           }
         }
       }
@@ -253,18 +298,20 @@ async function normalizeDocumentBlock(
   }
 }
 
-async function normalizeUrlDocument(
-  block: AnthropicDocumentBlock,
-  url: string,
-  signal?: AbortSignal,
-): Promise<Array<NormalizableBlock>> {
+async function normalizeUrlDocument(options: {
+  block: AnthropicDocumentBlock
+  url: string
+  signal?: AbortSignal
+  resolveAttachment: AnthropicAttachmentResolver
+}): Promise<Array<NormalizableBlock>> {
+  const { block, resolveAttachment, signal, url } = options
   if (!isSafeExternalHttpUrl(url)) {
     return [
       omittedDocumentNote(block, "the URL is unavailable for proxy recovery"),
     ]
   }
 
-  const inlined = await fetchUrlAsDataUri(url, { expectPdf: true, signal })
+  const inlined = await resolveAttachment({ expectPdf: true, signal, url })
 
   if (inlined && isPdfMediaType(inlined.mediaType)) {
     return [
