@@ -727,6 +727,25 @@ function captureHttpError(options: {
   })
 }
 
+export function reportHttpErrorForTransport(
+  inspection: HttpErrorInspection,
+  options: { method: string; path: string },
+): void {
+  logHttpError(inspection)
+  Sentry.captureException(new Error(inspection.safeMessage), {
+    tags: {
+      path: options.path,
+      method: options.method,
+      status: String(inspection.status),
+    },
+    extra: {
+      status: inspection.status,
+      validationClass: inspection.clientError?.fingerprint,
+      ...(inspection.kind === "upstream" ? upstreamBodyFields(inspection) : {}),
+    },
+  })
+}
+
 export function reportHttpError(
   c: Context,
   inspection: HttpErrorInspection,

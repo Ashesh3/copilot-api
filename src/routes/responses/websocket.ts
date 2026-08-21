@@ -2,7 +2,7 @@
 import consola from "consola"
 import { randomUUID } from "node:crypto"
 
-import type { SafeHttpErrorInspection } from "~/lib/error"
+import type { HttpErrorInspection } from "~/lib/error"
 import type { RoutingAffinity } from "~/lib/routing-affinity"
 import type { NativeMessagesRequestOptions } from "~/routes/messages/native-handler"
 
@@ -15,7 +15,7 @@ import {
   recordCopilotMessagesBeta,
 } from "~/lib/copilot-contract-observability"
 import { resolveRequestCredential } from "~/lib/credential-resolver"
-import { isHTTPError } from "~/lib/error"
+import { isHTTPError, reportHttpErrorForTransport } from "~/lib/error"
 import {
   applyModelRedirect,
   formatModelRedirectResult,
@@ -47,7 +47,6 @@ import {
 import {
   type ResponsesResult,
   createResponses,
-  SAFE_RESPONSES_STREAM_ERROR_MESSAGE,
   type ResponsesPayload,
 } from "~/services/copilot/create-responses"
 import { sanitizeAnthropicRequestHeaderOptions } from "~/services/copilot/messages-contract"
@@ -63,6 +62,10 @@ import {
 } from "./handler"
 import { executeResponsesMessagesBridge } from "./messages-bridge"
 import { createStreamIdTracker, fixStreamIds } from "./stream-id-sync"
+import {
+  emitResponsesFailureAsStream,
+  updateResponsesFailureState,
+} from "./stream-lifecycle"
 import { expandCompactionItems, getResponsesRequestOptions } from "./utils"
 import {
   classifyWebSocketTerminal,
@@ -76,6 +79,7 @@ import {
 } from "./websocket-lifecycle"
 import {
   addResponsesWebSocketMetadata,
+  mergeEffectiveNativeMessagesOptions,
   mergeContinuationInput,
   parseResponsesWebSocketFrame,
   rehydrateContinuationPayloadFromSnapshot,
@@ -92,6 +96,7 @@ export interface ResponsesWebSocketData {
   requestId: string
   affinity?: RoutingAffinity
   nativeMessagesOptions: NativeMessagesRequestOptions
+  effectiveNativeMessagesOptions: NativeMessagesRequestOptions
   responseSnapshots: Map<string, ResponsesPayload>
 }
 
@@ -108,6 +113,8 @@ export interface WebSocketErrorFrameOptions {
   param?: string
   requestId?: string
   type?: string
+  upstreamBody?: string | ReadonlyArray<number>
+  upstreamContentType?: string
 }
 
 interface ResponseCompletedFrame {
@@ -157,6 +164,7 @@ export async function tryUpgradeResponsesWebSocket(
     requestId,
     affinity,
     nativeMessagesOptions,
+    effectiveNativeMessagesOptions: { ...nativeMessagesOptions },
     responseSnapshots: new Map<string, ResponsesPayload>(),
   }
   if (!server.upgrade(req, { data })) return "no_match"
@@ -171,6 +179,9 @@ export const responsesWebSocket = {
 
   // Protocol validation and turn lifecycle intentionally share one dispatcher.
 
+  // The dispatcher is intentionally linear so every preflight/stream branch
+  // shares one turn owner and one terminal guard.
+  // eslint-disable-next-line complexity, max-lines-per-function
   async message(
     ws: ResponsesWebSocketState,
     message: string | Buffer | Uint8Array,
@@ -187,10 +198,19 @@ export const responsesWebSocket = {
     const {
       attribution,
       initiator,
+      nativeMessagesOptions,
       payload: parsedPayload,
       requestedModel,
     } = parsed.value
     parsedPayload.stream = true
+    ws.data.effectiveNativeMessagesOptions =
+      mergeEffectiveNativeMessagesOptions(
+        ws.data.effectiveNativeMessagesOptions,
+        nativeMessagesOptions,
+      )
+    const turnNativeMessagesOptions = {
+      ...ws.data.effectiveNativeMessagesOptions,
+    }
     const turn = createResponsesWebSocketTurn(ws.data, message)
     turn.requestedModel = requestedModel
     turn.model = requestedModel
@@ -213,29 +233,51 @@ export const responsesWebSocket = {
             initiator,
             payload,
             requestedModel,
+            nativeMessagesOptions: turnNativeMessagesOptions,
             turn,
           })
         },
       )
-      if (!turn.finalized) {
-        throw new WebSocketRequestError(
-          "Responses stream ended without a terminal frame",
-          502,
-          "server_error",
-          "server_error",
-        )
+      if (turn.terminal.state === "open") {
+        await failWebSocketTurn(ws, turn, { kind: "source_ended" })
       }
     } catch (error) {
-      const terminal = classifyWebSocketTerminal(error, turn)
+      const terminal = await classifyWebSocketTerminal(error, turn)
       const errorInspection = terminal.errorInspection
+      if (
+        terminal.terminalStatus !== "ABORTED"
+        && turn.outputStarted
+        && turn.terminal.state === "open"
+      ) {
+        await failWebSocketTurn(ws, turn, {
+          kind: "thrown",
+          error,
+          ...(errorInspection ? { inspection: errorInspection } : {}),
+        })
+        if (errorInspection?.kind === "upstream") {
+          reportHttpErrorForTransport(errorInspection, {
+            method: "POST",
+            path: "/responses",
+          })
+        }
+        return
+      }
       const normalized = normalizeWebSocketError(error, errorInspection)
-      finalizeResponsesWebSocketTurn(ws.data, turn, {
+      const committed = await turn.terminal.fail({
+        kind: "thrown",
         error,
-        ...terminal,
+        ...(errorInspection ? { inspection: errorInspection } : {}),
       })
       if (terminal.terminalStatus === "ABORTED") {
         consola.debug(`[responses-ws] ${turn.turnId} aborted`)
         return
+      }
+      if (!committed) return
+      if (errorInspection?.kind === "upstream") {
+        reportHttpErrorForTransport(errorInspection, {
+          method: "POST",
+          path: "/responses",
+        })
       }
       consola.error(`[responses-ws] ${turn.turnId} error`, {
         code: normalized.code,
@@ -255,6 +297,7 @@ export const responsesWebSocket = {
       const abortError = new Error("Responses WebSocket closed")
       abortError.name = "AbortError"
       turn.abortController.abort(abortError)
+      turn.terminal.abort()
       ensureResponsesWebSocketLifecycle(turn)
       finalizeResponsesWebSocketTurn(ws.data, turn, {
         error: abortError,
@@ -263,6 +306,7 @@ export const responsesWebSocket = {
       })
     }
     ws.data.responseSnapshots.clear()
+    ws.data.effectiveNativeMessagesOptions = {}
     consola.debug("[responses-ws] WebSocket closed")
   },
 }
@@ -323,10 +367,14 @@ function storeResponseSnapshot(
   snapshots.set(responseId, payload)
 }
 
+// Routing preparation and dispatch remain together to preserve the per-turn
+// request context through native and translated writers.
+// eslint-disable-next-line max-lines-per-function
 async function handleResponseCreate(
   ws: ResponsesWebSocketState,
   options: {
     initiator?: "agent" | "user"
+    nativeMessagesOptions: NativeMessagesRequestOptions
     payload: ResponsesPayload
     requestedModel: string | undefined
     turn: ResponsesWebSocketTurn
@@ -336,6 +384,7 @@ async function handleResponseCreate(
     initiator: initiatorOverride,
     payload,
     requestedModel,
+    nativeMessagesOptions,
     turn,
   } = options
   turn.requestedModel = requestedModel
@@ -370,11 +419,11 @@ async function handleResponseCreate(
   )
   const preparedPayload = route.preparedPayload
   if (route.decision.target === "/v1/messages") {
-    recordCopilotMessagesBeta(ws.data.nativeMessagesOptions.anthropicBeta)
+    recordCopilotMessagesBeta(nativeMessagesOptions.anthropicBeta)
   }
 
   if (isSyntheticWarmupRequest(preparedPayload)) {
-    handleSyntheticWarmupRequest(ws, preparedPayload, turn)
+    await handleSyntheticWarmupRequest(ws, preparedPayload, turn)
     return
   }
 
@@ -386,6 +435,7 @@ async function handleResponseCreate(
     if (
       await dispatchTranslatedWebSocketEndpoint({
         initiator,
+        nativeMessagesOptions,
         preparedPayload,
         requestedModel,
         routeTarget: route.decision.target,
@@ -410,7 +460,11 @@ async function handleResponseCreate(
 
     if (!isAsyncIterable(response)) {
       // Shouldn't happen since we forced stream: true, but handle gracefully
-      handleNonStreamingResponsesResult(ws, response, turn)
+      await handleNonStreamingResponsesResult(ws, {
+        payload: preparedPayload,
+        response,
+        turn,
+      })
       return
     }
 
@@ -424,43 +478,48 @@ async function handleResponseCreate(
         fixStreamIds(data, event, idTracker),
         getCopilotResponseHeaders(),
       )
-      recordResponseSnapshotFromFrame(
-        ws.data.responseSnapshots,
-        preparedPayload,
-        processed,
-      )
-      ws.send(processed)
-      finalizeFromResponsesFrame(ws.data, turn, processed)
-      if (turn.lifecycle?.isFinalized()) break
+      await emitTurnFrame(ws, turn, preparedPayload, processed, event)
+      if (turn.terminal.state !== "open") break
     }
   })
 }
 
-function handleNonStreamingResponsesResult(
+async function handleNonStreamingResponsesResult(
   ws: ResponsesWebSocketState,
-  response: ResponsesResult,
-  turn: ResponsesWebSocketTurn,
-): void {
-  sendResponsesWebSocketFrame(
+  options: {
+    payload: ResponsesPayload
+    response: ResponsesResult
+    turn: ResponsesWebSocketTurn
+  },
+): Promise<void> {
+  const { payload, response, turn } = options
+  await emitTurnFrame(
     ws,
+    turn,
+    payload,
     JSON.stringify({ type: "response.completed", response }),
+    "response.completed",
   )
-  finalizeResponsesWebSocketTurn(ws.data, turn, {
-    status: 200,
-    terminalStatus: "COMPLETE",
-  })
 }
 
 async function dispatchTranslatedWebSocketEndpoint(options: {
   initiator: "agent" | "user"
+  nativeMessagesOptions: NativeMessagesRequestOptions
   preparedPayload: ResponsesPayload
   requestedModel: string | undefined
   routeTarget: string
   turn: ResponsesWebSocketTurn
   ws: ResponsesWebSocketState
 }): Promise<boolean> {
-  const { initiator, preparedPayload, requestedModel, routeTarget, turn, ws } =
-    options
+  const {
+    initiator,
+    nativeMessagesOptions,
+    preparedPayload,
+    requestedModel,
+    routeTarget,
+    turn,
+    ws,
+  } = options
   if (routeTarget === "/v1/messages") {
     reportResponsesWebSocketEndpointFallback(
       preparedPayload.model,
@@ -468,7 +527,7 @@ async function dispatchTranslatedWebSocketEndpoint(options: {
     )
     await streamAnthropicMessagesOverWs({
       nativeOptions: {
-        ...ws.data.nativeMessagesOptions,
+        ...nativeMessagesOptions,
         initiatorOverride: initiator,
         requestedModel,
       },
@@ -524,58 +583,125 @@ async function waitForWebSocketTurn<T>(
   }
 }
 
+async function failWebSocketTurn(
+  ws: ResponsesWebSocketState,
+  turn: ResponsesWebSocketTurn,
+  failure:
+    | { kind: "source_ended" }
+    | { kind: "thrown"; error: unknown; inspection?: HttpErrorInspection },
+): Promise<boolean> {
+  if (
+    ws.data.closed
+    || turn.abortController.signal.aborted
+    || turn.terminal.state !== "open"
+  ) {
+    return false
+  }
+  const state = turn.failureState
+  if (state.model === "unknown" && turn.model) state.model = turn.model
+  const frames: Array<{ data: string; event?: string }> = []
+  await emitResponsesFailureAsStream(
+    {
+      aborted: false,
+      closed: false,
+      writeSSE: (data) => {
+        frames.push(data)
+        return Promise.resolve()
+      },
+    },
+    {
+      responseId: state.responseId,
+      model: state.model,
+      sequenceNumber: state.sequenceNumber,
+      ...(failure.kind === "thrown" && failure.inspection ?
+        { inspection: failure.inspection }
+      : {}),
+    },
+  )
+  for (const frame of frames) {
+    ws.send(
+      addResponsesWebSocketMetadata(frame.data, getCopilotResponseHeaders()),
+    )
+  }
+  return await turn.terminal.fail(failure)
+}
+
 // Terminal frame classification has intentionally explicit branches so close
 // races cannot overwrite a client-visible completion.
 
-function finalizeFromResponsesFrame(
-  data: ResponsesWebSocketData,
+// eslint-disable-next-line max-params
+async function emitTurnFrame(
+  ws: ResponsesWebSocketState,
   turn: ResponsesWebSocketTurn,
+  payload: ResponsesPayload,
   frame: string,
-): void {
+  eventName?: string,
+): Promise<boolean> {
+  if (
+    ws.data.closed
+    || turn.abortController.signal.aborted
+    || turn.terminal.state !== "open"
+  ) {
+    return false
+  }
   let parsed: {
-    message?: unknown
-    response?: { error?: { message?: unknown } | null; status?: unknown }
+    response?: { id?: unknown }
     type?: unknown
   }
   try {
     parsed = JSON.parse(frame) as typeof parsed
   } catch {
-    return
+    ws.send(frame)
+    return true
   }
 
-  if (parsed.type === "response.completed") {
-    const responseStatus = parsed.response?.status
-    if (responseStatus === "failed" || responseStatus === "incomplete") {
-      finalizeResponsesWebSocketTurn(data, turn, {
-        error: SAFE_RESPONSES_STREAM_ERROR_MESSAGE,
-        status: 502,
-        terminalStatus: "ERROR",
-      })
-      return
-    }
-    finalizeResponsesWebSocketTurn(data, turn, {
+  const terminalType =
+    (
+      eventName === "response.completed"
+      || eventName === "response.incomplete"
+      || eventName === "response.failed"
+      || eventName === "error"
+    ) ?
+      eventName
+    : parsed.type
+  const processed = addResponsesWebSocketMetadata(
+    frame,
+    getCopilotResponseHeaders(),
+  )
+  ws.send(processed)
+  turn.outputStarted = true
+  updateResponsesFailureState(turn.failureState, {
+    data: processed,
+    event: typeof terminalType === "string" ? terminalType : eventName,
+  })
+
+  if (terminalType === "response.completed") {
+    recordResponseSnapshotFromFrame(
+      ws.data.responseSnapshots,
+      payload,
+      processed,
+    )
+    return await turn.terminal.succeed({
+      kind: "completed",
       status: 200,
       terminalStatus: "COMPLETE",
     })
-    return
   }
-
-  if (parsed.type === "response.incomplete") {
-    finalizeResponsesWebSocketTurn(data, turn, {
-      error: "Responses stream ended incomplete",
-      status: 502,
-      terminalStatus: "ERROR",
+  if (terminalType === "response.incomplete") {
+    return await turn.terminal.succeed({
+      kind: "incomplete",
+      status: 200,
+      terminalStatus: "COMPLETE",
     })
-    return
   }
-
-  if (parsed.type === "response.failed" || parsed.type === "error") {
-    finalizeResponsesWebSocketTurn(data, turn, {
-      error: SAFE_RESPONSES_STREAM_ERROR_MESSAGE,
+  if (terminalType === "response.failed" || terminalType === "error") {
+    return await turn.terminal.succeed({
+      kind: "received_failure",
       status: 502,
       terminalStatus: "ERROR",
     })
   }
+  return true
 }
 
 function getRedirectReasoningEffort(
@@ -757,11 +883,11 @@ export function rehydrateWarmupPayload(
   return rehydrateContinuationPayloadFromSnapshot(warmupPayload, payload)
 }
 
-function handleSyntheticWarmupRequest(
+async function handleSyntheticWarmupRequest(
   ws: ResponsesWebSocketState,
   payload: ResponsesPayload,
   turn: ResponsesWebSocketTurn,
-): void {
+): Promise<void> {
   const responseId = `warmup_${randomUUID().replaceAll("-", "")}`
   storeResponseSnapshot(ws.data.responseSnapshots, responseId, payload)
 
@@ -785,8 +911,10 @@ function handleSyntheticWarmupRequest(
     top_p: payload.top_p ?? null,
   }
 
-  sendResponsesWebSocketFrame(
+  await emitTurnFrame(
     ws,
+    turn,
+    payload,
     JSON.stringify({
       type: "response.created",
       sequence_number: 0,
@@ -795,6 +923,7 @@ function handleSyntheticWarmupRequest(
         status: "in_progress",
       },
     }),
+    "response.created",
   )
 
   const completedFrame = JSON.stringify({
@@ -805,8 +934,7 @@ function handleSyntheticWarmupRequest(
       status: "completed",
     },
   })
-  sendResponsesWebSocketFrame(ws, completedFrame)
-  finalizeFromResponsesFrame(ws.data, turn, completedFrame)
+  await emitTurnFrame(ws, turn, payload, completedFrame, "response.completed")
 }
 
 async function streamAnthropicMessagesOverWs(options: {
@@ -829,16 +957,9 @@ async function streamAnthropicMessagesOverWs(options: {
   )
   throwIfWebSocketTurnAborted(turn)
   const wsStream = {
-    // eslint-disable-next-line @typescript-eslint/require-await
     writeSSE: async (data: { event?: string; data: string }) => {
       if (data.data === "[DONE]") return
-      const frame = addResponsesWebSocketMetadata(
-        data.data,
-        getCopilotResponseHeaders(),
-      )
-      recordResponseSnapshotFromFrame(ws.data.responseSnapshots, payload, frame)
-      ws.send(frame)
-      finalizeFromResponsesFrame(ws.data, turn, frame)
+      await emitTurnFrame(ws, turn, payload, data.data, data.event)
     },
   }
   await emitResponsesResultAsWebSocketFrames(wsStream, result)
@@ -920,16 +1041,9 @@ async function streamChatCompletionsOverWs(options: {
 
   // Reuse the CC→Responses streaming translator with a WebSocket-backed writer
   const wsStream = {
-    // eslint-disable-next-line @typescript-eslint/require-await
     writeSSE: async (data: { event?: string; data: string }) => {
       if (data.data === "[DONE]") return
-      const frame = addResponsesWebSocketMetadata(
-        data.data,
-        getCopilotResponseHeaders(),
-      )
-      recordResponseSnapshotFromFrame(ws.data.responseSnapshots, payload, frame)
-      ws.send(frame)
-      finalizeFromResponsesFrame(ws.data, turn, frame)
+      await emitTurnFrame(ws, turn, payload, data.data, data.event)
     },
   }
 
@@ -965,16 +1079,9 @@ async function streamChatWebSearchOverWs(options: {
       })) as ChatCompletionResponse,
   })
   const wsStream = {
-    // eslint-disable-next-line @typescript-eslint/require-await
     writeSSE: async (data: { event?: string; data: string }) => {
       if (data.data === "[DONE]") return
-      const frame = addResponsesWebSocketMetadata(
-        data.data,
-        getCopilotResponseHeaders(),
-      )
-      recordResponseSnapshotFromFrame(ws.data.responseSnapshots, payload, frame)
-      ws.send(frame)
-      finalizeFromResponsesFrame(ws.data, turn, frame)
+      await emitTurnFrame(ws, turn, payload, data.data, data.event)
     },
   }
   await streamChatCompletionsAsResponses(
@@ -1024,13 +1131,6 @@ function chatResponseAsStream(
       yield { data: "[DONE]" }
     },
   }
-}
-
-function sendResponsesWebSocketFrame(
-  ws: ResponsesWebSocketState,
-  frame: string,
-): void {
-  ws.send(addResponsesWebSocketMetadata(frame, getCopilotResponseHeaders()))
 }
 
 export function recordResponseSnapshotFromFrame(
@@ -1089,6 +1189,12 @@ export function sendWebSocketError(
         ...(options.param ? { param: options.param } : {}),
         type: options.type ?? "websocket_error",
         request_id: options.requestId ?? ws.data.requestId,
+        ...(options.upstreamBody === undefined ?
+          {}
+        : { upstream_body: options.upstreamBody }),
+        ...(options.upstreamContentType ?
+          { upstream_content_type: options.upstreamContentType }
+        : {}),
       },
     }),
   )
@@ -1096,7 +1202,7 @@ export function sendWebSocketError(
 
 function normalizeWebSocketError(
   error: unknown,
-  inspection?: SafeHttpErrorInspection,
+  inspection?: HttpErrorInspection,
 ): WebSocketErrorFrameOptions {
   if (isHTTPError(error) && error instanceof WebSocketRequestError) {
     return {
@@ -1117,6 +1223,18 @@ function normalizeWebSocketError(
       type: local.type,
     }
   }
+  if (inspection?.kind === "upstream") {
+    return {
+      code: mapHttpStatusToWebSocketErrorCode(inspection.status),
+      message: "Upstream request failed",
+      status: inspection.status,
+      type: "websocket_error",
+      upstreamBody: inspection.bodyText ?? Array.from(inspection.bodyBytes),
+      ...(inspection.contentType ?
+        { upstreamContentType: inspection.contentType }
+      : {}),
+    }
+  }
   if (inspection) {
     return {
       code: mapHttpStatusToWebSocketErrorCode(inspection.status),
@@ -1135,7 +1253,7 @@ function normalizeWebSocketError(
 }
 
 function mapLocalWebSocketErrorCode(
-  local: NonNullable<SafeHttpErrorInspection["localError"]>,
+  local: NonNullable<HttpErrorInspection["localError"]>,
   status: number,
 ): string {
   if (

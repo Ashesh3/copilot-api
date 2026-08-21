@@ -3,10 +3,12 @@ import type {
   ResponseInputItem,
   ResponsesPayload,
 } from "~/services/copilot/create-responses"
+import type { AnthropicRequestHeaderOptions } from "~/services/copilot/messages-contract"
 
 import { resolveCopilotRequestAttribution } from "~/lib/copilot-request-context"
 import { parseRoutingMetadataRecord } from "~/lib/routing-affinity"
 import { sanitizeCopilotHeaderValue } from "~/services/copilot/copilot-contract"
+import { sanitizeAnthropicRequestHeaderOptions } from "~/services/copilot/messages-contract"
 
 const FRAME_ENVELOPE_KEYS = new Set([
   "agent_task_id",
@@ -34,6 +36,7 @@ const AFFINITY_CLIENT_METADATA_KEYS = new Set(["session_id", "thread_id"])
 export interface ParsedResponseCreateFrame {
   attribution: CopilotRequestAttribution
   initiator?: "agent" | "user"
+  nativeMessagesOptions: AnthropicRequestHeaderOptions
   payload: ResponsesPayload
   requestedModel?: string
 }
@@ -81,28 +84,17 @@ export function parseResponsesWebSocketFrame(
     return parseError("bad_request", "Unsupported message type")
   }
 
-  const nestedResponse = isRecord(parsed.response) ? parsed.response : undefined
-  if (parsed.stream === false || nestedResponse?.stream === false) {
-    return parseError(
-      "invalid_request_error",
-      "Responses WebSocket requests must stream.",
-    )
-  }
   const payload = extractResponsesPayload(parsed)
+  payload.stream = true
 
   const initiator = parseInitiator(parsed, resolveFrameHeaders(parsed.headers))
-  if (initiator === null) {
-    return parseError(
-      "invalid_request_error",
-      "Responses WebSocket initiator must be user or agent.",
-    )
-  }
 
   return {
     ok: true,
     value: {
       attribution: resolveFrameAttribution(parsed),
       ...(initiator ? { initiator } : {}),
+      nativeMessagesOptions: extractNativeMessagesOptions(parsed.headers),
       payload,
       requestedModel: getRequestedModel(parsed),
     },
@@ -166,7 +158,14 @@ export function extractResponsesPayload(
   const topLevel = omitFrameEnvelope(frame)
   const nested =
     isRecord(frame.response) ? omitFrameEnvelope(frame.response) : {}
-  return { ...topLevel, ...nested } as ResponsesPayload
+  return structuredClone({ ...topLevel, ...nested }) as ResponsesPayload
+}
+
+export function mergeEffectiveNativeMessagesOptions(
+  current: AnthropicRequestHeaderOptions,
+  update: AnthropicRequestHeaderOptions,
+): AnthropicRequestHeaderOptions {
+  return { ...current, ...update }
 }
 
 export function resolveResponsesContinuation(
@@ -357,18 +356,35 @@ function resolveFrameAttribution(
 function parseInitiator(
   frame: Record<string, unknown>,
   headers: Headers,
-): "agent" | "user" | null | undefined {
-  if ("initiator" in frame) {
-    if (frame.initiator === "agent" || frame.initiator === "user") {
-      return frame.initiator
-    }
-    return null
+): "agent" | "user" | undefined {
+  if (
+    "initiator" in frame
+    && (frame.initiator === "agent" || frame.initiator === "user")
+  ) {
+    return frame.initiator
   }
 
   const headerValue = headers.get("x-initiator")
   return headerValue === "agent" || headerValue === "user" ?
       headerValue
     : undefined
+}
+
+function extractNativeMessagesOptions(
+  value: unknown,
+): AnthropicRequestHeaderOptions {
+  if (!isRecord(value)) return {}
+  const normalized = new Map<string, string>()
+  for (const [name, headerValue] of Object.entries(value)) {
+    if (typeof headerValue === "string") {
+      normalized.set(name.toLowerCase(), headerValue)
+    }
+  }
+  return sanitizeAnthropicRequestHeaderOptions({
+    anthropicBeta: normalized.get("anthropic-beta"),
+    anthropicVersion: normalized.get("anthropic-version"),
+    modelProviderPreference: normalized.get("x-model-provider-preference"),
+  })
 }
 
 function resolveFrameHeaders(value: unknown): Headers {
