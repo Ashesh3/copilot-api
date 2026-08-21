@@ -1,3 +1,5 @@
+/* eslint-disable max-lines -- focused Responses fallback integration matrix */
+import * as Sentry from "@sentry/bun"
 import {
   afterAll,
   afterEach,
@@ -8,9 +10,11 @@ import {
   spyOn,
   test,
 } from "bun:test"
+import consola from "consola"
 
 import type { ModelsResponse } from "../src/services/copilot/get-models"
 
+import { HTTPError } from "../src/lib/error"
 import { setModelRedirectsForTest } from "../src/lib/model-redirect"
 import { setModelSettingsForTest } from "../src/lib/model-settings"
 import { setSsePreflushDeadlineForTest } from "../src/lib/sse-lifecycle"
@@ -27,7 +31,20 @@ let nextResponsesStreamError:
   | { kind: "error"; marker: string }
   | { kind: "failed"; marker: string }
   | undefined
+let responsesStreamMode:
+  | "complete"
+  | "duplicate"
+  | "eof"
+  | "malformed"
+  | "received-error"
+  | "received-failed"
+  | "throw"
+  | "http-text"
+  | "http-binary" = "complete"
 let delayedResponsesController:
+  | ReadableStreamDefaultController<Uint8Array>
+  | undefined
+let responsesThrowController:
   | ReadableStreamDefaultController<Uint8Array>
   | undefined
 
@@ -235,17 +252,95 @@ function createResponsesSse(): Response {
       { headers: { "content-type": "text/event-stream" }, status: 200 },
     )
   }
-  return new Response(
+  const prefix =
     [
       `event: response.created\ndata: ${JSON.stringify(responsesCreatedEvent)}`,
       `event: response.output_text.delta\ndata: ${JSON.stringify(responsesTextDeltaEvent)}`,
-      `event: response.completed\ndata: ${JSON.stringify(responsesCompletedEvent)}`,
-    ].join("\n\n") + "\n\n",
-    {
-      status: 200,
-      headers: { "content-type": "text/event-stream" },
-    },
+    ].join("\n\n") + "\n\n"
+  if (responsesStreamMode === "eof") return responsesStream(prefix)
+  if (responsesStreamMode === "malformed") {
+    return responsesStream(
+      `${prefix}event: response.output_text.delta\ndata: {malformed\n\n`,
+    )
+  }
+  if (responsesStreamMode === "received-error") {
+    return responsesStream(
+      `${prefix}event: error\ndata: ${JSON.stringify({
+        type: "error",
+        code: "upstream_error",
+        message: "received Responses error",
+        param: null,
+        sequence_number: 2,
+      })}\n\n`,
+    )
+  }
+  if (responsesStreamMode === "received-failed") {
+    return responsesStream(
+      `${prefix}event: response.failed\ndata: ${JSON.stringify({
+        type: "response.failed",
+        sequence_number: 2,
+        response: {
+          ...responsesResult,
+          status: "failed",
+          error: { message: "received Responses failed" },
+        },
+      })}\n\n`,
+    )
+  }
+  if (
+    responsesStreamMode === "throw"
+    || responsesStreamMode === "http-text"
+    || responsesStreamMode === "http-binary"
+  ) {
+    const body =
+      responsesStreamMode === "http-binary" ?
+        Uint8Array.from([0x00, 0xff, 0x80, 0x41])
+      : new TextEncoder().encode("  exact Responses text\r\n  ")
+    const error = new HTTPError(
+      "HTTPError marker must not leak",
+      new Response(body.slice(), {
+        headers: {
+          "content-type":
+            responsesStreamMode === "http-binary" ?
+              "application/octet-stream"
+            : "text/plain; charset=utf-8",
+        },
+        status: 429,
+      }),
+    )
+    return new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(prefix))
+          if (responsesStreamMode === "throw") {
+            responsesThrowController = controller
+          } else {
+            queueMicrotask(() => controller.error(error))
+          }
+        },
+      }),
+      { headers: { "content-type": "text/event-stream" }, status: 200 },
+    )
+  }
+  const terminal = `event: response.completed\ndata: ${JSON.stringify(responsesCompletedEvent)}\n\n`
+  return responsesStream(
+    responsesStreamMode === "duplicate" ?
+      `${prefix}${terminal}${terminal}event: response.output_text.delta\ndata: ${JSON.stringify(
+        {
+          ...responsesTextDeltaEvent,
+          sequence_number: 3,
+          delta: "must-not-appear",
+        },
+      )}\n\n`
+    : `${prefix}${terminal}`,
   )
+}
+
+function responsesStream(body: string): Response {
+  return new Response(body, {
+    status: 200,
+    headers: { "content-type": "text/event-stream" },
+  })
 }
 
 const fetchMock = mock((url: string, init?: RequestInit) => {
@@ -324,7 +419,9 @@ beforeEach(() => {
   lastUpstreamHeaders = undefined
   delayBufferedWebSearchResponse = false
   nextResponsesStreamError = undefined
+  responsesStreamMode = "complete"
   delayedResponsesController = undefined
+  responsesThrowController = undefined
   state.accountType = "individual"
   state.copilotToken = "copilot-token"
   state.githubToken = "github-token"
@@ -784,7 +881,7 @@ test("streams responses-only models back as chat completion chunks", async () =>
 })
 
 test.each(["error", "failed"] as const)(
-  "uses fixed safe Chat output for Responses %s events",
+  "preserves received Chat output for Responses %s events",
   async (kind) => {
     const marker = `chat-responses-${kind}-private-marker`
     nextResponsesStreamError = { kind, marker }
@@ -800,10 +897,202 @@ test.each(["error", "failed"] as const)(
     })
     const body = await response.text()
 
-    expect(body).toContain("An unexpected error occurred during streaming.")
-    expect(body).not.toContain(marker)
+    expect(body).toContain(marker)
+    expect(chatErrorFrames(body)).toHaveLength(1)
+    expect(doneCount(body)).toBe(1)
   },
 )
+
+test.each(["eof", "malformed"] as const)(
+  "retains Responses partial output and fails once on %s",
+  async (mode) => {
+    responsesStreamMode = mode
+    const response = await postStreamingResponsesChat()
+    const body = await response.text()
+
+    expect(body).toContain("hello streamed")
+    expect(chatErrorFrames(body)).toHaveLength(1)
+    expect(doneCount(body)).toBe(1)
+    expect(body).not.toContain("private Responses transport marker")
+    expect(chatFinishFrames(body)).toHaveLength(0)
+  },
+)
+
+test("retains Responses partial output before a transport throw", async () => {
+  responsesStreamMode = "throw"
+  const response = await postStreamingResponsesChat()
+  const reader = requireResponseBody(response).getReader()
+  const partial = await readUntil(reader, (body) =>
+    body.includes("hello streamed"),
+  )
+  responsesThrowController?.error(
+    new Error("private Responses transport marker"),
+  )
+  const body = partial + (await readRemaining(reader))
+
+  expect(body).toContain("hello streamed")
+  expect(chatErrorFrames(body)).toHaveLength(1)
+  expect(doneCount(body)).toBe(1)
+  expect(body).not.toContain("private Responses transport marker")
+  expect(chatFinishFrames(body)).toHaveLength(0)
+})
+
+test.each(["received-error", "received-failed"] as const)(
+  "preserves one received Responses terminal for %s without reporting it",
+  async (mode) => {
+    responsesStreamMode = mode
+    const logSpy = spyOn(consola, "error")
+    const sentrySpy = spyOn(Sentry, "captureException").mockImplementation(
+      () => "event-id",
+    )
+    try {
+      const body = await (await postStreamingResponsesChat()).text()
+      expect(chatErrorFrames(body)).toHaveLength(1)
+      expect(body).toContain(
+        mode === "received-error" ?
+          "received Responses error"
+        : "received Responses failed",
+      )
+      expect(doneCount(body)).toBe(1)
+      expect(logSpy).not.toHaveBeenCalled()
+      expect(sentrySpy).not.toHaveBeenCalled()
+    } finally {
+      logSpy.mockRestore()
+      sentrySpy.mockRestore()
+    }
+  },
+)
+
+test("suppresses duplicate Responses terminals and post-terminal deltas", async () => {
+  responsesStreamMode = "duplicate"
+  const body = await (await postStreamingResponsesChat()).text()
+  expect(chatFinishFrames(body)).toHaveLength(1)
+  expect(doneCount(body)).toBe(1)
+  expect(body).not.toContain("must-not-appear")
+  expect(chatErrorFrames(body)).toEqual([])
+})
+
+test.each(["http-text", "http-binary"] as const)(
+  "preserves and reports one winning Responses %s HTTPError",
+  async (mode) => {
+    responsesStreamMode = mode
+    const logSpy = spyOn(consola, "error")
+    const sentrySpy = spyOn(Sentry, "captureException").mockImplementation(
+      () => "event-id",
+    )
+    try {
+      const body = await (await postStreamingResponsesChat()).text()
+      const error = chatErrorFrames(body)[0]?.error
+      expect(error).toEqual({
+        message:
+          mode === "http-text" ?
+            "  exact Responses text\r\n  "
+          : [0, 255, 128, 65],
+        type: "api_error",
+        content_type:
+          mode === "http-text" ?
+            "text/plain; charset=utf-8"
+          : "application/octet-stream",
+        status: 429,
+      })
+      expect(doneCount(body)).toBe(1)
+      expect(
+        logSpy.mock.calls.filter(
+          (call) =>
+            typeof call[0] === "object"
+            && call[0] !== null
+            && "upstreamResponseBodyBytes" in call[0],
+        ),
+      ).toHaveLength(1)
+      expect(sentrySpy).toHaveBeenCalledTimes(1)
+    } finally {
+      logSpy.mockRestore()
+      sentrySpy.mockRestore()
+    }
+  },
+)
+
+async function postStreamingResponsesChat(): Promise<Response> {
+  return await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "Say hello." }],
+      stream: true,
+    }),
+  })
+}
+
+function chatDataFrames(body: string): Array<Record<string, unknown>> {
+  return Array.from(
+    body.matchAll(/^data: (\{.*\})$/gm),
+    (match) => JSON.parse(match[1]) as Record<string, unknown>,
+  )
+}
+
+function chatErrorFrames(
+  body: string,
+): Array<{ error: Record<string, unknown> }> {
+  return chatDataFrames(body).filter(
+    (frame): frame is { error: Record<string, unknown> } =>
+      typeof frame.error === "object" && frame.error !== null,
+  )
+}
+
+function chatFinishFrames(body: string): Array<Record<string, unknown>> {
+  return chatDataFrames(body).filter((frame) => {
+    const choices = frame.choices
+    return (
+      Array.isArray(choices)
+      && choices.some(
+        (choice) =>
+          typeof choice === "object"
+          && choice !== null
+          && (choice as { finish_reason?: unknown }).finish_reason !== null
+          && (choice as { finish_reason?: unknown }).finish_reason
+            !== undefined,
+      )
+    )
+  })
+}
+
+function doneCount(body: string): number {
+  return Array.from(body.matchAll(/^data: \[DONE\]$/gm)).length
+}
+
+function requireResponseBody(response: Response): ReadableStream<Uint8Array> {
+  if (!response.body) throw new Error("Expected an SSE response body")
+  return response.body
+}
+
+async function readUntil(
+  reader: SseReader,
+  predicate: (body: string) => boolean,
+): Promise<string> {
+  const decoder = new TextDecoder()
+  let output = ""
+  while (!predicate(output)) {
+    const next = await reader.read()
+    if (next.done) return output
+    output += decoder.decode(next.value, { stream: true })
+  }
+  return output
+}
+
+async function readRemaining(reader: SseReader): Promise<string> {
+  const decoder = new TextDecoder()
+  let output = ""
+  while (true) {
+    const next = await reader.read()
+    if (next.done) return output
+    output += decoder.decode(next.value, { stream: true })
+  }
+}
+
+interface SseReader {
+  read: () => Promise<{ done: boolean; value?: Uint8Array }>
+}
 
 test("commits a keepalive while the buffered web-search fallback is pending", async () => {
   setSsePreflushDeadlineForTest(20)

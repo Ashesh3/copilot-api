@@ -29,7 +29,9 @@ import {
 import {
   createEndpointTranslationError,
   createInvalidJsonBodyError,
+  inspectHttpError,
   isAbortError,
+  isHTTPError,
 } from "~/lib/error"
 import {
   applyModelRedirect,
@@ -85,6 +87,7 @@ import {
   recordChatEndpointFallback,
   selectChatUpstreamEndpoint,
 } from "./responses-fallback-executor"
+import { createChatStreamTerminalAdapter } from "./stream-lifecycle"
 
 export { selectChatUpstreamEndpoint } from "./responses-fallback-executor"
 
@@ -440,28 +443,70 @@ async function handleCustomProviderStreamingResponse(
     )
   }
 
+  // eslint-disable-next-line complexity
   return streamSSE(c, async (stream) => {
+    const adapter = createChatStreamTerminalAdapter({ c, stream })
+    let finalSeen = false
+    stream.onAbort(() => {
+      adapter.abort()
+    })
     try {
       for await (const chunk of withSseHeartbeat(response, stream)) {
-        let outChunk = chunk
-        if (chunk.data && chunk.data !== "[DONE]") {
-          const parsed = JSON.parse(chunk.data) as ChatCompletionChunk
-          if (parsed.usage) {
+        if (adapter.lifecycle.state !== "open") break
+        if (!chunk.data) continue
+        if (chunk.data === "[DONE]") break
+        if (finalSeen) {
+          const usageChunk = parseTrailingChatUsageChunk(chunk.data)
+          if (!usageChunk) continue
+          if (usageChunk.usage) {
             setRequestContext(c, {
-              inputTokens: parsed.usage.prompt_tokens,
-              outputTokens: parsed.usage.completion_tokens,
+              inputTokens: usageChunk.usage.prompt_tokens,
+              outputTokens: usageChunk.usage.completion_tokens,
             })
           }
-          if (parsed.model !== options.requestedModel) {
-            parsed.model = options.requestedModel
-            outChunk = { ...chunk, data: JSON.stringify(parsed) }
+          if (usageChunk.model !== options.requestedModel) {
+            usageChunk.model = options.requestedModel
           }
+          await stream.writeSSE({
+            ...chunk,
+            data: JSON.stringify(usageChunk),
+          } as SSEMessage)
+          continue
+        }
+        let outChunk = chunk
+        const parsed = JSON.parse(chunk.data) as ChatCompletionChunk
+        if (parsed.usage) {
+          setRequestContext(c, {
+            inputTokens: parsed.usage.prompt_tokens,
+            outputTokens: parsed.usage.completion_tokens,
+          })
+        }
+        if (parsed.model !== options.requestedModel) {
+          parsed.model = options.requestedModel
+          outChunk = { ...chunk, data: JSON.stringify(parsed) }
         }
         await stream.writeSSE(outChunk as SSEMessage)
+        if (hasChatFinalChunk(parsed)) {
+          finalSeen = true
+        }
       }
+      await (finalSeen ?
+        adapter.succeedAfterFinalChunk()
+      : adapter.finishSource())
     } catch (error) {
-      if (isAbortError(error)) return
-      throw error
+      if (isAbortError(error)) {
+        adapter.abort()
+        return
+      }
+      await (finalSeen ?
+        adapter.succeedAfterFinalChunk()
+      : adapter.failAfterCommit({
+          kind: "thrown",
+          error,
+          ...(isHTTPError(error) ?
+            { inspection: await inspectHttpError(error) }
+          : {}),
+        }))
     }
   })
 }
@@ -557,7 +602,28 @@ async function executeCustomProviderWebSearchRequest(
 
   if (!requestedStream) return c.json(result)
   return streamSSE(c, async (stream) => {
-    await emitChatCompletionResponseAsStream(stream, result)
+    const adapter = createChatStreamTerminalAdapter({ c, stream })
+    stream.onAbort(() => {
+      adapter.abort()
+    })
+    try {
+      await emitChatCompletionResponseAsStream(stream, result, {
+        writeDone: false,
+      })
+      await adapter.succeedAfterFinalChunk()
+    } catch (error) {
+      if (isAbortError(error)) {
+        adapter.abort()
+        return
+      }
+      await adapter.failAfterCommit({
+        kind: "thrown",
+        error,
+        ...(isHTTPError(error) ?
+          { inspection: await inspectHttpError(error) }
+        : {}),
+      })
+    }
   })
 }
 
@@ -610,7 +676,28 @@ async function executeStreamingWebSearchRequest(
         : finalResponse
       setChatCompletionSpanResult(span, response)
       return streamSSE(c, async (stream) => {
-        await emitChatCompletionResponseAsStream(stream, response)
+        const adapter = createChatStreamTerminalAdapter({ c, stream })
+        stream.onAbort(() => {
+          adapter.abort()
+        })
+        try {
+          await emitChatCompletionResponseAsStream(stream, response, {
+            writeDone: false,
+          })
+          await adapter.succeedAfterFinalChunk()
+        } catch (error) {
+          if (isAbortError(error)) {
+            adapter.abort()
+            return
+          }
+          await adapter.failAfterCommit({
+            kind: "thrown",
+            error,
+            ...(isHTTPError(error) ?
+              { inspection: await inspectHttpError(error) }
+            : {}),
+          })
+        }
       })
     },
   )
@@ -817,6 +904,7 @@ const handleNonStreamingResponse = (
   return c.json(response)
 }
 
+// eslint-disable-next-line max-lines-per-function
 const handleStreamingResponse = (
   c: Context,
   payload: ChatCompletionsPayload & { model: string },
@@ -829,6 +917,7 @@ const handleStreamingResponse = (
       model: payload.model,
       streaming: true,
     }),
+    // eslint-disable-next-line max-lines-per-function
     async (span, finish) => {
       let spanFinished = false
       const finishSpan = () => {
@@ -858,37 +947,75 @@ const handleStreamingResponse = (
           return result
         }
 
+        // eslint-disable-next-line complexity
         return streamSSE(c, async (stream) => {
+          const adapter = createChatStreamTerminalAdapter({ c, stream })
+          let finalSeen = false
+          stream.onAbort(() => {
+            adapter.abort()
+          })
           try {
             let streamInputTokens = 0
             let streamOutputTokens = 0
             let streamCachedTokens = 0
 
             for await (const chunk of withSseHeartbeat(response, stream)) {
-              let outChunk = chunk
-              // Capture usage from final chunk if available
-              if (chunk.data && chunk.data !== "[DONE]") {
-                const parsed = JSON.parse(chunk.data) as ChatCompletionChunk
-                if (parsed.usage) {
-                  streamInputTokens = parsed.usage.prompt_tokens
-                  streamOutputTokens = parsed.usage.completion_tokens
+              if (adapter.lifecycle.state !== "open") break
+              if (!chunk.data) continue
+              if (chunk.data === "[DONE]") break
+              if (finalSeen) {
+                const usageChunk = parseTrailingChatUsageChunk(chunk.data)
+                if (!usageChunk) continue
+                if (usageChunk.usage) {
+                  streamInputTokens = usageChunk.usage.prompt_tokens
+                  streamOutputTokens = usageChunk.usage.completion_tokens
                   streamCachedTokens =
-                    parsed.usage.prompt_tokens_details?.cached_tokens ?? 0
+                    usageChunk.usage.prompt_tokens_details?.cached_tokens ?? 0
                   setRequestContext(c, {
-                    inputTokens: parsed.usage.prompt_tokens,
-                    outputTokens: parsed.usage.completion_tokens,
+                    inputTokens: usageChunk.usage.prompt_tokens,
+                    outputTokens: usageChunk.usage.completion_tokens,
                   })
                 }
                 if (
                   options.requestedModel
-                  && parsed.model !== options.requestedModel
+                  && usageChunk.model !== options.requestedModel
                 ) {
-                  parsed.model = options.requestedModel
-                  outChunk = { ...chunk, data: JSON.stringify(parsed) }
+                  usageChunk.model = options.requestedModel
                 }
+                await stream.writeSSE({
+                  ...chunk,
+                  data: JSON.stringify(usageChunk),
+                } as SSEMessage)
+                continue
+              }
+              let outChunk = chunk
+              // Capture usage from final chunk if available
+              const parsed = JSON.parse(chunk.data) as ChatCompletionChunk
+              if (parsed.usage) {
+                streamInputTokens = parsed.usage.prompt_tokens
+                streamOutputTokens = parsed.usage.completion_tokens
+                streamCachedTokens =
+                  parsed.usage.prompt_tokens_details?.cached_tokens ?? 0
+                setRequestContext(c, {
+                  inputTokens: parsed.usage.prompt_tokens,
+                  outputTokens: parsed.usage.completion_tokens,
+                })
+              }
+              if (
+                options.requestedModel
+                && parsed.model !== options.requestedModel
+              ) {
+                parsed.model = options.requestedModel
+                outChunk = { ...chunk, data: JSON.stringify(parsed) }
               }
               await stream.writeSSE(outChunk as SSEMessage)
+              if (hasChatFinalChunk(parsed)) {
+                finalSeen = true
+              }
             }
+            await (finalSeen ?
+              adapter.succeedAfterFinalChunk()
+            : adapter.finishSource())
 
             // Set token attributes after streaming completes - span is still open.
             span.setAttribute("gen_ai.usage.input_tokens", streamInputTokens)
@@ -900,8 +1027,19 @@ const handleStreamingResponse = (
               )
             }
           } catch (error) {
-            if (isAbortError(error)) return
-            throw error
+            if (isAbortError(error)) {
+              adapter.abort()
+              return
+            }
+            await (finalSeen ?
+              adapter.succeedAfterFinalChunk()
+            : adapter.failAfterCommit({
+                kind: "thrown",
+                error,
+                ...(isHTTPError(error) ?
+                  { inspection: await inspectHttpError(error) }
+                : {}),
+              }))
           } finally {
             finishSpan()
           }
@@ -920,3 +1058,21 @@ const isNonStreaming = (
   typeof response === "object"
   && response !== null
   && Object.hasOwn(response, "choices")
+
+function hasChatFinalChunk(chunk: ChatCompletionChunk): boolean {
+  return chunk.choices.some((choice) => {
+    const finishReason = (choice as { finish_reason?: unknown }).finish_reason
+    return finishReason !== null && finishReason !== undefined
+  })
+}
+
+function parseTrailingChatUsageChunk(
+  data: string,
+): ChatCompletionChunk | undefined {
+  try {
+    const chunk = JSON.parse(data) as ChatCompletionChunk
+    return chunk.choices.length === 0 && chunk.usage ? chunk : undefined
+  } catch {
+    return undefined
+  }
+}

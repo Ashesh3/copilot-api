@@ -393,6 +393,7 @@ export const emitChatCompletionResponseAsStream = async (
     writeSSE: (data: { event?: string; data: string }) => Promise<void>
   },
   response: ChatCompletionResponse,
+  options: { writeDone?: boolean } = {},
 ): Promise<void> => {
   for (const choice of response.choices) {
     await stream.writeSSE({
@@ -446,7 +447,9 @@ export const emitChatCompletionResponseAsStream = async (
       }),
     })
   }
-  await stream.writeSSE({ data: "[DONE]" })
+  if (options.writeDone !== false) {
+    await stream.writeSSE({ data: "[DONE]" })
+  }
 }
 
 const emitMessageStart = async (

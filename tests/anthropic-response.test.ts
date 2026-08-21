@@ -8,6 +8,7 @@ import type {
 } from "~/services/copilot/create-chat-completions"
 import type { ResponsesResult } from "~/services/copilot/create-responses"
 
+import { streamAnthropicAsChatCompletions } from "~/routes/chat-completions/anthropic-bridge"
 import {
   type AnthropicContentBlockDeltaEvent,
   type AnthropicMessageDeltaEvent,
@@ -1271,3 +1272,221 @@ describe("Mid-stream error reporting", () => {
     await streamTranslation.emitAnthropicStreamError(stream, new Error("boom"))
   })
 })
+
+describe("Chat from Messages stream lifecycle", () => {
+  test("returns success state after one final chunk without writing DONE", async () => {
+    const written: Array<string> = []
+    const usage = await streamAnthropicAsChatCompletions(
+      createChatStream(written),
+      iterateAnthropic([
+        {
+          type: "message_start",
+          message: { id: "msg_success", usage: { input_tokens: 7 } },
+        },
+        {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "text_delta", text: "hello" },
+        },
+        {
+          type: "message_delta",
+          delta: { stop_reason: "end_turn" },
+          usage: { output_tokens: 3 },
+        },
+        { type: "message_stop" },
+        { type: "message_stop" },
+      ]),
+      "claude",
+    )
+
+    expect(written).not.toContain("[DONE]")
+    expect(chatFinishChunks(written)).toHaveLength(1)
+    expect(usage.terminalSeen).toBe(true)
+  })
+
+  test("returns a received native error without writing a Chat terminal", async () => {
+    const written: Array<string> = []
+    const receivedFailure = {
+      type: "invalid_request_error",
+      message: "received Messages failure",
+    }
+    const usage = await streamAnthropicAsChatCompletions(
+      createChatStream(written),
+      iterateAnthropic([{ type: "error", error: receivedFailure }]),
+      "claude",
+    )
+
+    expect(usage.receivedFailure).toEqual(receivedFailure)
+    expect(usage.terminalSeen).toBe(false)
+    expect(written).toEqual([])
+  })
+
+  test("throws on malformed Anthropic SSE instead of silently skipping it", async () => {
+    const stream = createChatStream([])
+    const error = await streamAnthropicAsChatCompletions(
+      stream,
+      malformedAnthropicStream(),
+      "claude",
+    ).catch((caught: unknown) => caught)
+    expect(error).toBeInstanceOf(SyntaxError)
+  })
+
+  test("preserves split tool arguments while exposing unfinished EOF state", async () => {
+    const written: Array<string> = []
+    const usage = await streamAnthropicAsChatCompletions(
+      createChatStream(written),
+      iterateAnthropic([
+        {
+          type: "content_block_start",
+          index: 4,
+          content_block: {
+            type: "tool_use",
+            id: "tool_4",
+            name: "lookup",
+            input: {},
+          },
+        },
+        {
+          type: "content_block_delta",
+          index: 4,
+          delta: { type: "input_json_delta", partial_json: '{"city":' },
+        },
+        {
+          type: "content_block_delta",
+          index: 4,
+          delta: { type: "input_json_delta", partial_json: '"Paris"}' },
+        },
+      ]),
+      "claude",
+    )
+
+    expect(toolArguments(written)).toBe('{"city":"Paris"}')
+    expect(usage.terminalSeen).toBe(false)
+    expect(chatFinishChunks(written)).toEqual([])
+  })
+
+  test("keeps pause_turn distinct from an ordinary Chat stop", async () => {
+    const written: Array<string> = []
+    const usage = await streamAnthropicAsChatCompletions(
+      createChatStream(written),
+      iterateAnthropic([
+        {
+          type: "message_delta",
+          delta: { stop_reason: "pause_turn" },
+          usage: { output_tokens: 2 },
+        },
+        { type: "message_stop" },
+      ]),
+      "claude",
+    )
+
+    expect(chatFinishChunks(written)).toHaveLength(1)
+    expect(chatFinishChunks(written)[0]).toMatchObject({
+      copilot_stop_reason: "pause_turn",
+      choices: [{ finish_reason: "length" }],
+    })
+    expect(usage.terminalSeen).toBe(true)
+  })
+
+  test("suppresses a transport throw after message_stop", async () => {
+    const written: Array<string> = []
+    const usage = await streamAnthropicAsChatCompletions(
+      createChatStream(written),
+      terminalThenThrowAnthropicStream(),
+      "claude",
+    )
+
+    expect(usage.terminalSeen).toBe(true)
+    expect(chatFinishChunks(written)).toHaveLength(1)
+  })
+
+  test("maps refusal to content_filter", async () => {
+    const written: Array<string> = []
+    await streamAnthropicAsChatCompletions(
+      createChatStream(written),
+      iterateAnthropic([
+        {
+          type: "message_delta",
+          delta: { stop_reason: "refusal" },
+          usage: { output_tokens: 1 },
+        },
+        { type: "message_stop" },
+      ]),
+      "claude",
+    )
+
+    expect(chatFinishChunks(written)).toHaveLength(1)
+    expect(chatFinishChunks(written)[0]).toMatchObject({
+      choices: [{ finish_reason: "content_filter" }],
+    })
+  })
+})
+
+function createChatStream(written: Array<string>) {
+  return {
+    writeSSE: (chunk: { data: string }) => {
+      written.push(chunk.data)
+      return Promise.resolve()
+    },
+  }
+}
+
+async function* iterateAnthropic(events: Array<Record<string, unknown>>) {
+  for (const event of events) {
+    yield await Promise.resolve({ data: JSON.stringify(event) })
+  }
+}
+
+function parsedChatChunks(
+  written: Array<string>,
+): Array<Record<string, unknown>> {
+  return written
+    .filter((data) => data !== "[DONE]")
+    .map((data) => JSON.parse(data) as Record<string, unknown>)
+}
+
+function chatFinishChunks(
+  written: Array<string>,
+): Array<Record<string, unknown>> {
+  return parsedChatChunks(written).filter((chunk) => {
+    const choices = chunk.choices
+    return (
+      Array.isArray(choices)
+      && (choices[0] as { finish_reason?: unknown }).finish_reason !== null
+      && (choices[0] as { finish_reason?: unknown }).finish_reason !== undefined
+    )
+  })
+}
+
+async function* malformedAnthropicStream() {
+  yield await Promise.resolve({ data: "{malformed" })
+}
+
+async function* terminalThenThrowAnthropicStream() {
+  yield await Promise.resolve({
+    data: JSON.stringify({
+      type: "message_delta",
+      delta: { stop_reason: "end_turn" },
+      usage: { output_tokens: 1 },
+    }),
+  })
+  yield await Promise.resolve({
+    data: JSON.stringify({ type: "message_stop" }),
+  })
+  throw new Error("post-terminal Messages marker")
+}
+
+function toolArguments(written: Array<string>): string {
+  return parsedChatChunks(written)
+    .flatMap(
+      (chunk) =>
+        chunk.choices as Array<{
+          delta?: {
+            tool_calls?: Array<{ function?: { arguments?: string } }>
+          }
+        }>,
+    )
+    .flatMap((choice) => choice.delta?.tool_calls ?? [])
+    .map((tool) => tool.function?.arguments ?? "")
+    .join("")
+}

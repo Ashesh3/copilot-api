@@ -844,28 +844,27 @@ describe("streamAnthropicAsChatCompletions bridge", () => {
     expect(usage.outputTokens).toBe(3)
     expect(usage.responseText).toBe("hello")
 
-    expect(written.at(-1)).toBe("[DONE]")
-    const parsed = written
-      .filter((data) => data !== "[DONE]")
-      .map(
-        (data) =>
-          JSON.parse(data) as {
-            choices: Array<{
-              delta: { content?: string; role?: string }
-              finish_reason: string | null
-            }>
-            model: string
-          },
-      )
+    const parsed = written.map(
+      (data) =>
+        JSON.parse(data) as {
+          choices: Array<{
+            delta: { content?: string; role?: string }
+            finish_reason: string | null
+          }>
+          model: string
+        },
+    )
     expect(parsed[0].choices[0].delta.role).toBe("assistant")
     expect(parsed.some((c) => c.choices[0].delta.content === "hello")).toBe(
       true,
     )
     expect(parsed.at(-1)?.choices[0].finish_reason).toBe("stop")
     expect(parsed.every((c) => c.model === "claude-sonnet-4.6")).toBe(true)
+    expect(usage.terminalSeen).toBe(true)
+    expect(written).not.toContain("[DONE]")
   })
 
-  test("emits a fixed safe Chat error envelope for native stream errors", async () => {
+  test("returns a native stream error for the Chat lifecycle owner", async () => {
     const privateMarker = "native-stream-private-marker"
     const written: Array<string> = []
     const stream = {
@@ -885,22 +884,18 @@ describe("streamAnthropicAsChatCompletions bridge", () => {
       })
     }
 
-    await streamAnthropicAsChatCompletions(
+    const usage = await streamAnthropicAsChatCompletions(
       stream,
       iterate(),
       "claude-sonnet-4.6",
     )
 
-    const output = written.join("\n")
-    expect(output).not.toContain(privateMarker)
-    expect(JSON.parse(written[0] ?? "{}")).toEqual({
-      error: {
-        code: "upstream_error",
-        message: "Upstream stream failed",
-        type: "server_error",
-      },
+    expect(usage.receivedFailure).toEqual({
+      type: "api_error",
+      message: privateMarker,
     })
-    expect(written.at(-1)).toBe("[DONE]")
+    expect(usage.terminalSeen).toBe(false)
+    expect(written).toEqual([])
   })
 
   test("preserves fragmented thinking signatures before later tools", async () => {

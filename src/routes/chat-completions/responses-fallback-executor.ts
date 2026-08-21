@@ -16,7 +16,7 @@ import {
   getModelEndpointSupport,
   selectCopilotEndpoint,
 } from "~/lib/endpoint-routing"
-import { isAbortError } from "~/lib/error"
+import { inspectHttpError, isAbortError, isHTTPError } from "~/lib/error"
 import {
   recordNonDefaultBehavior,
   setRequestContext,
@@ -58,6 +58,7 @@ import {
   responsesResultToChatCompletion,
   streamResponsesAsChatCompletions,
 } from "./responses-fallback"
+import { createChatStreamTerminalAdapter } from "./stream-lifecycle"
 import {
   checkChatNativeRequirements,
   checkChatToMessagesTranslation,
@@ -378,16 +379,39 @@ function executeStreamingResponsesFallback(
         }
 
         return streamSSE(c, async (stream) => {
+          const adapter = createChatStreamTerminalAdapter({ c, stream })
+          stream.onAbort(() => {
+            adapter.abort()
+          })
           try {
-            const usage = await streamResponsesAsChatCompletions(
+            const result = await streamResponsesAsChatCompletions(
               stream,
               withSseHeartbeat(response, stream),
               options.requestedModel,
             )
-            setStreamUsage(c, span, usage)
+            setStreamUsage(c, span, result)
+            if (
+              result.terminal === "completed"
+              || result.terminal === "incomplete"
+            ) {
+              await adapter.succeedAfterFinalChunk()
+            } else if (result.receivedFailure) {
+              await adapter.failReceived(result.receivedFailure)
+            } else {
+              await adapter.finishSource()
+            }
           } catch (error) {
-            if (isAbortError(error)) return
-            await emitOpenAiStreamError(stream, error)
+            if (isAbortError(error)) {
+              adapter.abort()
+              return
+            }
+            await adapter.failAfterCommit({
+              kind: "thrown",
+              error,
+              ...(isHTTPError(error) ?
+                { inspection: await inspectHttpError(error) }
+              : {}),
+            })
           } finally {
             finishSpan()
           }
@@ -434,7 +458,11 @@ async function executeStreamingMcpWebSearchFallback(
   )
 
   return streamSSE(c, async (stream) => {
-    stream.onAbort(() => downstreamAbort.abort())
+    const adapter = createChatStreamTerminalAdapter({ c, stream })
+    stream.onAbort(() => {
+      downstreamAbort.abort()
+      adapter.abort()
+    })
     try {
       if (preflush.kind === "pending") await writeSseHeartbeat(stream)
       const response =
@@ -449,32 +477,24 @@ async function executeStreamingMcpWebSearchFallback(
         response,
         options.requestedModel,
       )
-      await emitChatCompletionResponseAsStream(stream, result)
+      await emitChatCompletionResponseAsStream(stream, result, {
+        writeDone: false,
+      })
+      await adapter.succeedAfterFinalChunk()
     } catch (error) {
-      if (isAbortError(error)) return
-      await emitOpenAiStreamError(stream, error)
+      if (isAbortError(error)) {
+        adapter.abort()
+        return
+      }
+      await adapter.failAfterCommit({
+        kind: "thrown",
+        error,
+        ...(isHTTPError(error) ?
+          { inspection: await inspectHttpError(error) }
+        : {}),
+      })
     }
   })
-}
-
-async function emitOpenAiStreamError(
-  stream: { writeSSE: (message: { data: string }) => Promise<void> },
-  _error: unknown,
-): Promise<void> {
-  Sentry.captureException(new Error("Chat fallback stream failed"))
-  consola.error("Chat Completions stream failed after headers were sent")
-  try {
-    await stream.writeSSE({
-      data: JSON.stringify({
-        error: {
-          message: "An unexpected error occurred during streaming.",
-          type: "api_error",
-        },
-      }),
-    })
-  } catch {
-    // The client is already gone; there is nobody left to inform.
-  }
 }
 
 function createSentrySpanOptions(options: PreparedResponsesFallback): {

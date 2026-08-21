@@ -65,8 +65,7 @@ type ResponseMessageWithEncryptedContent = ResponseMessage & {
   encrypted_content?: string | null
 }
 
-interface StreamState {
-  completed: boolean
+export interface ResponsesAsChatStreamState {
   accumulatedText: string
   created: number
   id: string
@@ -78,6 +77,17 @@ interface StreamState {
   toolArgumentEmittedByOutputIndex: Map<number, boolean>
   toolIndexByOutputIndex: Map<number, number>
   toolStartedByOutputIndex: Map<number, boolean>
+}
+
+export interface ResponsesAsChatStreamResult {
+  cachedTokens: number
+  inputTokens: number
+  outputTokens: number
+  reasoningTokens: number
+  receivedFailure?: ResponseStreamEvent
+  responseText: string
+  state: Readonly<ResponsesAsChatStreamState>
+  terminal: "completed" | "error" | "failed" | "incomplete" | undefined
 }
 
 const DEFAULT_CREATED_AT = 0
@@ -161,35 +171,40 @@ export async function streamResponsesAsChatCompletions(
   stream: WriteSseStream,
   responseStream: AsyncIterable<{ data?: string; event?: string }>,
   requestedModel: string,
-): Promise<{
-  cachedTokens: number
-  inputTokens: number
-  outputTokens: number
-  reasoningTokens: number
-  responseText: string
-}> {
+): Promise<ResponsesAsChatStreamResult> {
   const state = createStreamState(requestedModel)
   let finalUsage = extractUsage(null)
   let responseText = ""
+  let terminal: ResponsesAsChatStreamResult["terminal"]
+  let receivedFailure: ResponseStreamEvent | undefined
 
   for await (const chunk of responseStream) {
     if (!chunk.data || chunk.data === "[DONE]") continue
 
     const event = JSON.parse(chunk.data) as ResponseStreamEvent
-    const usage = await emitTranslatedEvent(stream, event, state)
+    const result = await emitTranslatedEvent(stream, event, state)
+    if (result.terminal) {
+      terminal = result.terminal
+      receivedFailure = result.receivedFailure
+      if (result.usage) {
+        finalUsage = result.usage
+        responseText = result.usage.responseText
+      }
+      break
+    }
+    const usage = result.usage
     if (usage) {
       finalUsage = usage
       responseText = usage.responseText
     }
   }
 
-  if (!state.completed) {
-    await writeDone(stream)
-  }
-
   return {
     ...finalUsage,
+    ...(receivedFailure ? { receivedFailure } : {}),
     responseText,
+    state,
+    terminal,
   }
 }
 
@@ -680,7 +695,10 @@ function mapResponsesUsageToChatStream(
   }
 }
 
-function setTextDeltaState(state: StreamState, delta: string): void {
+function setTextDeltaState(
+  state: ResponsesAsChatStreamState,
+  delta: string,
+): void {
   state.accumulatedText += delta
   state.textEmitted = true
 }
@@ -688,40 +706,39 @@ function setTextDeltaState(state: StreamState, delta: string): void {
 async function emitTranslatedEvent(
   stream: WriteSseStream,
   event: ResponseStreamEvent,
-  state: StreamState,
-): Promise<
-  | (ReturnType<typeof extractUsage> & {
-      responseText: string
-    })
-  | null
-> {
+  state: ResponsesAsChatStreamState,
+): Promise<{
+  receivedFailure?: ResponseStreamEvent
+  terminal?: ResponsesAsChatStreamResult["terminal"]
+  usage?: ReturnType<typeof extractUsage> & { responseText: string }
+}> {
   switch (event.type) {
     case "response.created": {
       await emitRoleChunk(stream, state, event.response)
-      return null
+      return {}
     }
     case "response.output_text.delta": {
       setTextDeltaState(state, event.delta)
       await emitDelta(stream, state, { content: event.delta })
-      return null
+      return {}
     }
     case "response.reasoning_text.delta":
     case "response.reasoning_summary_text.delta": {
       await emitDelta(stream, state, { reasoning_text: event.delta })
       // eslint-disable-next-line require-atomic-updates
       state.reasoningEmitted = true
-      return null
+      return {}
     }
     case "response.output_item.added": {
       await emitOutputItemAdded({ stream, state, event })
-      return null
+      return {}
     }
     case "response.function_call_arguments.delta": {
       await emitFunctionCallArguments(stream, state, {
         outputIndex: event.output_index,
         argumentsDelta: event.delta,
       })
-      return null
+      return {}
     }
     case "response.function_call_arguments.done": {
       await emitFunctionCallArgumentsDone(stream, state, {
@@ -729,7 +746,7 @@ async function emitTranslatedEvent(
         name: event.name,
         arguments: event.arguments,
       })
-      return null
+      return {}
     }
     case "response.output_item.done": {
       await emitOutputItemDone({
@@ -738,36 +755,37 @@ async function emitTranslatedEvent(
         outputIndex: event.output_index,
         item: event.item,
       })
-      return null
+      return {}
     }
     case "response.completed":
     case "response.incomplete": {
       await synthesizeMissingOutput(stream, state, event.response)
       await emitFinalChunk(stream, state, event.response)
-      await writeDone(stream)
-      // eslint-disable-next-line require-atomic-updates
-      state.completed = true
       return {
-        ...extractUsage(event.response.usage),
-        responseText:
-          getResponsesResultOutputText(event.response) || state.accumulatedText,
+        terminal:
+          event.type === "response.completed" ? "completed" : "incomplete",
+        usage: {
+          ...extractUsage(event.response.usage),
+          responseText:
+            getResponsesResultOutputText(event.response)
+            || state.accumulatedText,
+        },
       }
     }
     case "response.failed": {
-      throw new Error("Responses API stream failed")
+      return { terminal: "failed", receivedFailure: event }
     }
     case "error": {
-      throw new Error("Responses API stream failed")
+      return { terminal: "error", receivedFailure: event }
     }
     default: {
-      return null
+      return {}
     }
   }
 }
 
-function createStreamState(model: string): StreamState {
+function createStreamState(model: string): ResponsesAsChatStreamState {
   return {
-    completed: false,
     accumulatedText: "",
     created: DEFAULT_CREATED_AT,
     id: "chatcmpl_responses_fallback",
@@ -784,7 +802,7 @@ function createStreamState(model: string): StreamState {
 
 async function emitRoleChunk(
   stream: WriteSseStream,
-  state: StreamState,
+  state: ResponsesAsChatStreamState,
   response: Pick<ResponsesResult, "created_at" | "id">,
 ): Promise<void> {
   if (state.roleEmitted) return
@@ -797,7 +815,7 @@ async function emitRoleChunk(
 
 async function emitDelta(
   stream: WriteSseStream,
-  state: StreamState,
+  state: ResponsesAsChatStreamState,
   delta: ChatDelta,
 ): Promise<void> {
   await ensureRoleChunk(stream, state)
@@ -806,7 +824,7 @@ async function emitDelta(
 
 async function ensureRoleChunk(
   stream: WriteSseStream,
-  state: StreamState,
+  state: ResponsesAsChatStreamState,
 ): Promise<void> {
   if (state.roleEmitted) return
   await writeChunk({ stream, state, delta: { role: "assistant" } })
@@ -817,7 +835,7 @@ async function ensureRoleChunk(
 async function emitFunctionCallStart(options: {
   item: ResponseOutputFunctionCall
   outputIndex: number
-  state: StreamState
+  state: ResponsesAsChatStreamState
   stream: WriteSseStream
 }): Promise<void> {
   const { item, outputIndex, state, stream } = options
@@ -843,7 +861,7 @@ async function emitFunctionCallStart(options: {
 
 async function emitFunctionCallArguments(
   stream: WriteSseStream,
-  state: StreamState,
+  state: ResponsesAsChatStreamState,
   options: { argumentsDelta: string; outputIndex: number },
 ): Promise<void> {
   const toolIndex = getToolIndex(state, options.outputIndex)
@@ -862,7 +880,7 @@ async function emitFunctionCallArguments(
 
 async function emitFunctionCallArgumentsDone(
   stream: WriteSseStream,
-  state: StreamState,
+  state: ResponsesAsChatStreamState,
   options: { arguments: string; name: string; outputIndex: number },
 ): Promise<void> {
   if (state.toolArgumentEmittedByOutputIndex.get(options.outputIndex)) return
@@ -883,7 +901,7 @@ async function emitFunctionCallArgumentsDone(
 
 async function emitOutputItemAdded(options: {
   event: Extract<ResponseStreamEvent, { type: "response.output_item.added" }>
-  state: StreamState
+  state: ResponsesAsChatStreamState
   stream: WriteSseStream
 }): Promise<void> {
   const { event, state, stream } = options
@@ -900,7 +918,7 @@ async function emitOutputItemAdded(options: {
 async function emitOutputItemDone(options: {
   item: ResponseOutputItem
   outputIndex: number
-  state: StreamState
+  state: ResponsesAsChatStreamState
   stream: WriteSseStream
 }): Promise<void> {
   const { item, outputIndex, state, stream } = options
@@ -919,7 +937,7 @@ async function emitOutputItemDone(options: {
 
 async function emitReasoningDone(
   stream: WriteSseStream,
-  state: StreamState,
+  state: ResponsesAsChatStreamState,
   reasoning: ResponseOutputReasoning,
 ): Promise<void> {
   const delta: ChatDelta = {}
@@ -939,7 +957,7 @@ async function emitReasoningDone(
 
 async function synthesizeMissingOutput(
   stream: WriteSseStream,
-  state: StreamState,
+  state: ResponsesAsChatStreamState,
   response: ResponsesResult,
 ): Promise<void> {
   const reasoning = response.output.find(
@@ -966,7 +984,7 @@ async function synthesizeMissingOutput(
 
 async function emitFinalChunk(
   stream: WriteSseStream,
-  state: StreamState,
+  state: ResponsesAsChatStreamState,
   response: ResponsesResult,
 ): Promise<void> {
   await ensureRoleChunk(stream, state)
@@ -979,7 +997,10 @@ async function emitFinalChunk(
   })
 }
 
-function getToolIndex(state: StreamState, outputIndex: number): number {
+function getToolIndex(
+  state: ResponsesAsChatStreamState,
+  outputIndex: number,
+): number {
   const existing = state.toolIndexByOutputIndex.get(outputIndex)
   if (existing !== undefined) return existing
 
@@ -992,7 +1013,7 @@ function getToolIndex(state: StreamState, outputIndex: number): number {
 async function writeChunk(options: {
   delta: ChatDelta
   finishReason?: ChatCompletionChunk["choices"][number]["finish_reason"]
-  state: StreamState
+  state: ResponsesAsChatStreamState
   stream: WriteSseStream
   usage?: ResponseUsage | null
 }): Promise<void> {
@@ -1014,10 +1035,6 @@ async function writeChunk(options: {
   } satisfies ChatCompletionChunk
 
   await stream.writeSSE({ data: JSON.stringify(chunk) })
-}
-
-async function writeDone(stream: WriteSseStream): Promise<void> {
-  await stream.writeSSE({ data: "[DONE]" })
 }
 
 function extractUsage(usage: ResponseUsage | null | undefined): {
