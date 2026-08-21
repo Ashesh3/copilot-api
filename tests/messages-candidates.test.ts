@@ -343,6 +343,7 @@ test("propagates the caller abort reason from attachment adaptation", async () =
 
 test("associates duplicate and missing tool IDs without collisions", async () => {
   const source = createSource({
+    system: "system prefix",
     messages: [
       {
         role: "assistant",
@@ -387,6 +388,10 @@ test("associates duplicate and missing tool IDs without collisions", async () =>
   expect(chat).toContain('"id":"messages_call_0_3"')
   expect(chat).toContain('"tool_call_id":"messages_call_0_2_1"')
   expect(responses).toContain('"call_id":"messages_call_0_2_1"')
+  expect(chat).not.toContain('"tool_call_id":"dup","content":"orphan"')
+  expect(responses).not.toContain('"call_id":"dup","output":"orphan"')
+  expect(chat).toContain("[Orphaned tool result omitted]")
+  expect(responses).toContain("[Orphaned tool result omitted]")
   expect(candidates.chat?.check.findings).toContainEqual({
     class: "tool_history",
     severity: "adapted",

@@ -5,21 +5,14 @@ import type {
 import type { ReasoningEffort } from "~/lib/model-suffix"
 import type {
   AnthropicMessagesPayload,
+  AnthropicContentBlock,
   AnthropicTextBlock,
   AnthropicToolResultBlock,
   AnthropicUserContentBlock,
   AnthropicToolUseBlock,
 } from "~/routes/messages/anthropic-types"
-import type {
-  ChatCompletionsPayload,
-  Message,
-  ToolCall,
-} from "~/services/copilot/create-chat-completions"
-import type {
-  ResponsesPayload,
-  ResponseFunctionCallOutputItem,
-  ResponseFunctionToolCallItem,
-} from "~/services/copilot/create-responses"
+import type { ChatCompletionsPayload } from "~/services/copilot/create-chat-completions"
+import type { ResponsesPayload } from "~/services/copilot/create-responses"
 import type { Model } from "~/services/copilot/get-models"
 
 import { fetchUrlAsDataUri } from "~/lib/attachments"
@@ -197,112 +190,41 @@ function associateToolHistory(
   }
 }
 
-function collectChatToolHistoryTargets(options: {
-  source: AnthropicMessagesPayload
-  payload: ChatCompletionsPayload
-  associations: ToolHistoryAssociations
-}): {
-  calls: Array<{ source: AnthropicToolUseBlock; target: ToolCall }>
-  results: Array<{ source: AnthropicToolResultBlock; target: Message }>
-} {
-  const { associations, payload, source } = options
-  const calls: Array<{ source: AnthropicToolUseBlock; target: ToolCall }> = []
-  const results: Array<{ source: AnthropicToolResultBlock; target: Message }> =
-    []
-  for (const [messageIndex, message] of source.messages.entries()) {
-    if (!Array.isArray(message.content)) continue
-    const target = payload.messages[messageIndex]
-    for (const block of message.content) {
-      if (isAnthropicToolUseBlock(block)) {
-        const id = associations.callIdByBlock.get(block)
-        const targetCall = target.tool_calls?.find(
-          (call) => call.function.name === block.name,
-        )
-        if (id && targetCall) calls.push({ source: block, target: targetCall })
-      } else if (isAnthropicToolResultBlock(block)) {
-        const id = associations.resultIdByBlock.get(block)
-        const targetResult = payload.messages.find(
-          (candidate) =>
-            candidate.role === "tool"
-            && candidate.content === mapToolResultText(block.content),
-        )
-        if (id && targetResult)
-          results.push({ source: block, target: targetResult })
-      }
-    }
-  }
-  return { calls, results }
-}
-
-function applyChatToolHistory(
+function rewriteSourceToolHistoryForTarget(
   source: AnthropicMessagesPayload,
-  payload: ChatCompletionsPayload,
   findings: Array<TranslationFinding>,
 ): void {
   const associations = associateToolHistory(source)
-  const { calls, results } = collectChatToolHistoryTargets({
-    associations,
-    payload,
-    source,
-  })
-  for (const item of calls) {
-    const id = associations.callIdByBlock.get(item.source)
-    if (id) item.target.id = id
-  }
-  for (const item of results) {
-    const id = associations.resultIdByBlock.get(item.source)
-    if (id) item.target.tool_call_id = id
-  }
-  if (associations.adapted || associations.orphaned) {
-    addFinding(findings, { class: "tool_history", severity: "adapted" })
-  }
-}
-
-function applyResponsesToolHistory(
-  source: AnthropicMessagesPayload,
-  payload: ResponsesPayload,
-  findings: Array<TranslationFinding>,
-): void {
-  if (!Array.isArray(payload.input)) return
-  const associations = associateToolHistory(source)
-  const calls = payload.input.filter(
-    (item): item is ResponseFunctionToolCallItem =>
-      item.type === "function_call",
-  )
-  const outputs = payload.input.filter(
-    (item): item is ResponseFunctionCallOutputItem =>
-      item.type === "function_call_output",
-  )
-  let callIndex = 0
-  let outputIndex = 0
   for (const message of source.messages) {
     if (!Array.isArray(message.content)) continue
+    const content: Array<AnthropicContentBlock> = []
     for (const block of message.content) {
       if (isAnthropicToolUseBlock(block)) {
         const id = associations.callIdByBlock.get(block)
-        if (id && calls[callIndex]) calls[callIndex].call_id = id
-        callIndex += 1
-      } else if (isAnthropicToolResultBlock(block)) {
-        const id = associations.resultIdByBlock.get(block)
-        if (id && outputs[outputIndex]) outputs[outputIndex].call_id = id
-        outputIndex += 1
+        if (id) content.push({ ...block, id })
+        continue
+      }
+      if (!isAnthropicToolResultBlock(block)) {
+        content.push(block)
+        continue
+      }
+      const id = associations.resultIdByBlock.get(block)
+      const hasToolReference =
+        Array.isArray(block.content)
+        && block.content.some((item) => item.type === "tool_reference")
+      if (id) {
+        content.push({ ...block, tool_use_id: id })
+      } else if (hasToolReference) {
+        content.push({ type: "text", text: JSON.stringify(block.content) })
+      } else {
+        content.push({ type: "text", text: "[Orphaned tool result omitted]" })
       }
     }
+    message.content = content
   }
   if (associations.adapted || associations.orphaned) {
     addFinding(findings, { class: "tool_history", severity: "adapted" })
   }
-}
-
-function mapToolResultText(
-  content: AnthropicToolResultBlock["content"],
-): string {
-  if (typeof content === "string") return content
-  return content
-    .map((block) =>
-      isAnthropicTextBlock(block) ? block.text : JSON.stringify(block),
-    )
-    .join("\n\n")
 }
 
 function hasMeaningfulMessages(payload: AnthropicMessagesPayload): boolean {
@@ -337,16 +259,16 @@ function adaptMessagesToChat(options: {
 }): MessagesChatCandidate {
   const source = structuredClone(options.source)
   mergeToolResultForCandidate(source)
+  const findings: Array<TranslationFinding> = []
+  rewriteSourceToolHistoryForTarget(source, findings)
   const payload = translateToOpenAI(source)
   payload.model = normalizeModelName(payload.model)
   if (source.temperature === undefined) delete payload.temperature
   if (source.top_p === undefined) delete payload.top_p
   if (source.stop_sequences === undefined) delete payload.stop
   if (source.max_tokens === undefined) delete payload.max_tokens
-  const findings: Array<TranslationFinding> = []
   applyTranslatedToolFindings(source, findings)
   degradeChatFileParts(payload, findings)
-  applyChatToolHistory(source, payload, findings)
   const reasoningEnabled = Boolean(options.effortOverride || source.thinking)
   if (reasoningEnabled) {
     payload.temperature = 1
@@ -490,6 +412,8 @@ function adaptMessagesToResponses(options: {
   effortOverride?: ReasoningEffort
 }): MessagesResponsesCandidate {
   const source = structuredClone(options.source)
+  const findings: Array<TranslationFinding> = []
+  rewriteSourceToolHistoryForTarget(source, findings)
   const payload = translateAnthropicMessagesToResponsesPayload(
     source,
     options.effortOverride,
@@ -501,9 +425,7 @@ function adaptMessagesToResponses(options: {
     payload.max_output_tokens = COPILOT_RESPONSES_MIN_OUTPUT_TOKENS
   }
   normalizeJsonSchemaResponseFormat(payload)
-  const findings: Array<TranslationFinding> = []
   applyTranslatedToolFindings(source, findings)
-  applyResponsesToolHistory(source, payload, findings)
   if (source.stop_sequences !== undefined) {
     findings.push({ class: "sampling", severity: "omitted" })
   }
