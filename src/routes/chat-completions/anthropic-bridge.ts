@@ -9,6 +9,7 @@ import type {
   AnthropicResponse,
   AnthropicStreamEventData,
   AnthropicTextBlock,
+  AnthropicToolResultContentBlock,
   AnthropicToolResultBlock,
   AnthropicUserContentBlock,
 } from "~/routes/messages/anthropic-types"
@@ -28,6 +29,10 @@ import {
   setSentryOutputMessages,
 } from "~/lib/sentry"
 import { withSseHeartbeat } from "~/lib/sse-lifecycle"
+import {
+  isAnthropicToolResultBlock,
+  isAnthropicToolUseBlock,
+} from "~/routes/messages/anthropic-types"
 import {
   createNativeMessages,
   type NativeMessagesRequestOptions,
@@ -298,10 +303,17 @@ export async function chatPayloadToAnthropic(
     signal,
   )
 
-  const maxTokens =
-    normalized.max_tokens
-    ?? normalized.max_completion_tokens
-    ?? selectedModel?.capabilities.limits?.max_output_tokens
+  const hasMaxTokens = Object.hasOwn(normalized, "max_tokens")
+  const hasMaxCompletionTokens = Object.hasOwn(
+    normalized,
+    "max_completion_tokens",
+  )
+  const maxTokens = resolveBridgeMaxTokens({
+    hasMaxCompletionTokens,
+    hasMaxTokens,
+    normalized,
+    selectedModel,
+  })
   const toolChoice = convertToolChoice(normalized.tool_choice)
   const parallelChoice = applyParallelToolChoice(
     toolChoice,
@@ -312,7 +324,7 @@ export async function chatPayloadToAnthropic(
   return {
     model: normalized.model,
     messages,
-    ...(maxTokens === undefined ? {} : { max_tokens: maxTokens }),
+    ...maxTokens,
     ...(systemTexts.length > 0 ? { system: systemTexts.join("\n\n") } : {}),
     ...convertSamplingOptions(normalized),
     ...(normalized.stream ? { stream: true } : {}),
@@ -321,6 +333,24 @@ export async function chatPayloadToAnthropic(
     ...parallelChoice,
     ...convertChatReasoningOptions(normalized),
   }
+}
+
+function resolveBridgeMaxTokens(options: {
+  hasMaxCompletionTokens: boolean
+  hasMaxTokens: boolean
+  normalized: ChatCompletionsPayload & { model: string }
+  selectedModel?: Model
+}): Pick<AnthropicMessagesPayload, "max_tokens"> | Record<never, never> {
+  if (options.hasMaxTokens) {
+    return { max_tokens: options.normalized.max_tokens }
+  }
+  if (options.hasMaxCompletionTokens) {
+    return { max_tokens: options.normalized.max_completion_tokens }
+  }
+  const maxTokens =
+    options.selectedModel?.capabilities.limits?.max_output_tokens
+  if (maxTokens === undefined) return {}
+  return { max_tokens: maxTokens }
 }
 
 async function convertChatMessages(
@@ -443,14 +473,18 @@ async function convertToolResultContent(
   if (typeof content === "string") return content
   if (!Array.isArray(content)) return ""
 
-  const blocks: Array<
-    Exclude<AnthropicUserContentBlock, AnthropicToolResultBlock>
-  > = []
+  const blocks: Array<AnthropicToolResultContentBlock> = []
   for (const part of content) {
+    const converted = await convertOpenAIContentPartToAnthropic(part, signal)
     blocks.push(
-      ...((await convertOpenAIContentPartToAnthropic(part, signal)) as Array<
-        Exclude<AnthropicUserContentBlock, AnthropicToolResultBlock>
-      >),
+      ...converted.filter(
+        (
+          block,
+        ): block is Exclude<
+          AnthropicUserContentBlock,
+          AnthropicToolResultBlock
+        > => !isAnthropicToolResultBlock(block),
+      ),
     )
   }
   return blocks
@@ -521,9 +555,8 @@ export function anthropicResponseToChat(
   const reasoning = getAnthropicReasoning(response.content)
 
   const toolCalls: Array<ToolCall> = response.content
-    .filter((block) => block.type === "tool_use")
-    .map((block) => {
-      const toolUse = block
+    .filter((block) => isAnthropicToolUseBlock(block))
+    .map((toolUse) => {
       return {
         id: toolUse.id,
         type: "function" as const,

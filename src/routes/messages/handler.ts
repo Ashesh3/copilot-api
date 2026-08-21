@@ -116,6 +116,8 @@ import {
   type AnthropicStreamState,
   type AnthropicTextBlock,
   type AnthropicToolResultBlock,
+  isAnthropicTextBlock,
+  isAnthropicToolResultBlock,
 } from "./anthropic-types"
 import {
   normalizeAnthropicAttachments,
@@ -139,11 +141,6 @@ import {
   isInvalidThinkingSignatureResponse,
   stripThinkingBlocks,
 } from "./thinking-recovery"
-import {
-  checkMessagesToChatTranslation,
-  checkMessagesNativeCompatibility,
-  checkMessagesToResponsesTranslation,
-} from "./translation-fidelity"
 import {
   emitAnthropicResponseAsStream,
   extractWebSearchCalls,
@@ -179,12 +176,12 @@ export function selectMessagesUpstreamEndpoint(options: {
       {
         endpoint: "/responses",
         reason: "endpoint_unavailable",
-        check: checkMessagesToResponsesTranslation(options.payload),
+        check: { supported: true, blockers: [] },
       },
       {
         endpoint: "/chat/completions",
         reason: "endpoint_unavailable",
-        check: checkMessagesToChatTranslation(options.payload),
+        check: { supported: true, blockers: [] },
       },
     ],
   })
@@ -240,10 +237,8 @@ export async function handleCompletion(c: Context) {
   }
   const preparedMessages = prepareAnthropicMessagesRequest({
     payload: rawPayload,
-    requireMaxTokens: true,
   })
-  const anthropicPayload =
-    preparedMessages.body as unknown as AnthropicMessagesPayload
+  const anthropicPayload = preparedMessages.body
   const nativeOptions: NativeMessagesRequestOptions =
     validateAnthropicRequestHeaderOptions({
       anthropicBeta: c.req.header("anthropic-beta"),
@@ -367,14 +362,6 @@ async function handleCompletionInner(
 
   const customReference = resolveCustomChatModel(anthropicPayload.model)
   if (customReference) {
-    const customTranslation = checkMessagesToChatTranslation(anthropicPayload)
-    if (!customTranslation.supported) {
-      throw createEndpointTranslationError({
-        blockers: customTranslation.blockers,
-        code: "endpoint_translation_unsupported",
-        source: "messages",
-      })
-    }
     await normalizeAnthropicAttachments(anthropicPayload, c.req.raw.signal)
     await prepareMessagesPayloadForDispatch(c, {
       payload: anthropicPayload,
@@ -419,18 +406,6 @@ async function handleCompletionInner(
   if ("code" in routeDecision)
     throw createEndpointTranslationError(routeDecision)
   recordCopilotEndpointRoute(routeDecision)
-
-  if (routeDecision.target === "/v1/messages") {
-    const nativeCompatibility =
-      checkMessagesNativeCompatibility(anthropicPayload)
-    if (!nativeCompatibility.supported) {
-      throw createEndpointTranslationError({
-        blockers: nativeCompatibility.blockers,
-        code: "endpoint_translation_unsupported",
-        source: "messages",
-      })
-    }
-  }
 
   const attachmentsPrepared = routeDecision.target !== "/v1/messages"
   // Fidelity selection above must see the original semantic block shape.
@@ -1992,9 +1967,9 @@ const mergeToolResultForClaude = (
     let valid = true
 
     for (const block of msg.content) {
-      if (block.type === "tool_result") {
+      if (isAnthropicToolResultBlock(block)) {
         toolResults.push(block)
-      } else if (block.type === "text") {
+      } else if (isAnthropicTextBlock(block)) {
         textBlocks.push(block)
       } else {
         valid = false

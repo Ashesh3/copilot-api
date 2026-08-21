@@ -185,7 +185,7 @@ test("does not emit failure or leak rejection when abort races late failure", as
   }
 })
 
-test("emits an in-band Responses failure for a late conversion rejection", async () => {
+test("completes an in-band Responses stream for a late unknown Messages block", async () => {
   const response = await server.request("/v1/responses", createRequest())
   const reader = requireBody(response).getReader()
   const first = await reader.read()
@@ -193,11 +193,11 @@ test("emits an in-band Responses failure for a late conversion rejection", async
 
   resolveUpstream?.(
     Response.json({
-      id: "msg_invalid",
+      id: "msg_future",
       type: "message",
       role: "assistant",
       model: "route-model",
-      content: [{ type: "future_private_block", secret: "private" }],
+      content: [{ type: "future_block", value: "kept" }],
       stop_reason: "end_turn",
       stop_sequence: null,
       usage: { input_tokens: 1, output_tokens: 1 },
@@ -205,9 +205,10 @@ test("emits an in-band Responses failure for a late conversion rejection", async
   )
   const rest = await readRemaining(reader)
 
-  expect(rest).toContain("event: error")
-  expect(rest).toContain("event: response.failed")
-  expect(rest).not.toContain("private")
+  expect(rest).toContain("event: response.completed")
+  expect(rest).toContain("future_block")
+  expect(rest).not.toContain("event: error")
+  expect(rest).not.toContain("event: response.failed")
 })
 
 function createRequest(): RequestInit {

@@ -1,5 +1,6 @@
 import type {
   AnthropicAssistantContentBlock,
+  AnthropicInlineContentBlock,
   AnthropicMessage,
   AnthropicMessagesPayload,
   AnthropicResponse,
@@ -27,6 +28,12 @@ import {
   convertOpenAIContentPartToAnthropic,
   convertOpenAIToolsToAnthropic,
 } from "../chat-completions/anthropic-conversion"
+import {
+  isAnthropicAssistantMessage,
+  isAnthropicTextBlock,
+  isAnthropicToolResultBlock,
+  isAnthropicUserMessage,
+} from "../messages/anthropic-types"
 import { checkResponsesToMessagesTranslation } from "./translation-fidelity"
 
 export interface ResponsesMessagesBridgeOptions {
@@ -90,16 +97,12 @@ export async function responsesPayloadToAnthropic(
     payload.parallel_tool_calls,
     payload.tools,
   )
+  const hasMaxOutputTokens = Object.hasOwn(payload, "max_output_tokens")
 
   return {
     model: payload.model,
     messages,
-    ...((
-      payload.max_output_tokens === undefined
-      || payload.max_output_tokens === null
-    ) ?
-      {}
-    : { max_tokens: payload.max_output_tokens }),
+    ...(hasMaxOutputTokens ? { max_tokens: payload.max_output_tokens } : {}),
     ...(systemTexts.length > 0 ? { system: systemTexts.join("\n\n") } : {}),
     ...(payload.temperature === undefined || payload.temperature === null ?
       {}
@@ -208,7 +211,11 @@ function appendAssistantBlock(
   block: AnthropicAssistantContentBlock,
 ): void {
   const previous = messages.at(-1)
-  if (previous?.role === "assistant" && Array.isArray(previous.content)) {
+  if (
+    previous
+    && isAnthropicAssistantMessage(previous)
+    && Array.isArray(previous.content)
+  ) {
     previous.content.push(block)
     return
   }
@@ -220,7 +227,11 @@ function appendUserBlock(
   block: AnthropicUserContentBlock,
 ): void {
   const previous = messages.at(-1)
-  if (previous?.role === "user" && Array.isArray(previous.content)) {
+  if (
+    previous
+    && isAnthropicUserMessage(previous)
+    && Array.isArray(previous.content)
+  ) {
     previous.content.push(block)
     return
   }
@@ -231,19 +242,27 @@ async function convertResponsesUserContent(
   content: unknown,
   signal?: AbortSignal,
   options?: { attachmentsNormalized?: boolean },
-): Promise<Array<AnthropicUserContentBlock>> {
+): Promise<Array<AnthropicInlineContentBlock>> {
   if (typeof content === "string") {
     return content ? [{ type: "text", text: content }] : []
   }
   if (!Array.isArray(content)) return []
-  const blocks: Array<AnthropicUserContentBlock> = []
+  const blocks: Array<AnthropicInlineContentBlock> = []
   for (const part of content) {
     assertPreparedAttachment(part, options)
+    const converted = await convertOpenAIContentPartToAnthropic(
+      responsesContentPartToOpenAI(part as Record<string, unknown>),
+      signal,
+    )
     blocks.push(
-      ...(await convertOpenAIContentPartToAnthropic(
-        responsesContentPartToOpenAI(part as Record<string, unknown>),
-        signal,
-      )),
+      ...converted.filter(
+        (
+          block,
+        ): block is Exclude<
+          AnthropicUserContentBlock,
+          AnthropicToolResultBlock
+        > => !isAnthropicToolResultBlock(block),
+      ),
     )
   }
   return blocks
@@ -257,7 +276,7 @@ async function convertResponsesAssistantContent(
   const blocks = await convertResponsesUserContent(content, signal, options)
   return blocks.flatMap(
     (block): Array<AnthropicAssistantContentBlock> =>
-      block.type === "text" ? [block] : [],
+      isAnthropicTextBlock(block) ? [block] : [],
   )
 }
 
@@ -268,13 +287,7 @@ async function convertResponsesToolResult(
 ): Promise<AnthropicToolResultBlock["content"]> {
   if (typeof output === "string") return output
   if (!Array.isArray(output)) return ""
-  const blocks = await convertResponsesUserContent(output, signal, options)
-  return blocks.filter(
-    (block) =>
-      block.type === "text"
-      || block.type === "image"
-      || block.type === "document",
-  )
+  return await convertResponsesUserContent(output, signal, options)
 }
 
 function assertPreparedAttachment(
@@ -509,7 +522,8 @@ function convertAnthropicOutput(response: AnthropicResponse): {
   let reasoningIndex = 0
   for (const rawBlock of response.content) {
     const block = rawBlock as unknown as Record<string, unknown>
-    if (block.type === "thinking") {
+    const type = typeof block.type === "string" ? block.type : undefined
+    if (type === "thinking") {
       if (typeof block.thinking !== "string") throwResponseContentError()
       output.push(
         createReasoningOutput(
@@ -524,29 +538,41 @@ function convertAnthropicOutput(response: AnthropicResponse): {
       reasoningIndex += 1
       continue
     }
-    if (block.type === "text") {
+    if (type === "text") {
       if (typeof block.text !== "string") throwResponseContentError()
       text += block.text
       output.push(createTextOutput(response.id, block.text, messageIndex))
       messageIndex += 1
       continue
     }
-    if (
-      block.type !== "tool_use"
-      || typeof block.id !== "string"
-      || typeof block.name !== "string"
-      || !isRecordValue(block.input)
-    ) {
+    if (type === "tool_use") {
+      if (
+        typeof block.id !== "string"
+        || typeof block.name !== "string"
+        || !isRecordValue(block.input)
+      ) {
+        throwResponseContentError()
+      }
+      output.push(
+        createFunctionCallOutput(
+          block as unknown as Extract<
+            AnthropicResponse["content"][number],
+            { type: "tool_use" }
+          >,
+        ),
+      )
+      continue
+    }
+    if (!type) {
       throwResponseContentError()
     }
-    output.push(
-      createFunctionCallOutput(
-        block as unknown as Extract<
-          AnthropicResponse["content"][number],
-          { type: "tool_use" }
-        >,
-      ),
-    )
+    const fallbackText = stringifyUnknownAssistantBlock(block)
+    if (!fallbackText) {
+      continue
+    }
+    text += fallbackText
+    output.push(createTextOutput(response.id, fallbackText, messageIndex))
+    messageIndex += 1
   }
   return { output, text }
 }
@@ -561,6 +587,16 @@ function throwResponseContentError(): never {
     code: "endpoint_translation_unsupported",
     source: "messages",
   })
+}
+
+function stringifyUnknownAssistantBlock(
+  block: Record<string, unknown>,
+): string | null {
+  try {
+    return JSON.stringify(block)
+  } catch {
+    return null
+  }
 }
 
 function createReasoningOutput(

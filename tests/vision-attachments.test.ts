@@ -501,6 +501,46 @@ describe("chatPayloadToAnthropic bridge", () => {
     expect(anthropic.max_tokens).toBeUndefined()
   })
 
+  test("preserves an explicit null max_tokens without using model fallback", async () => {
+    const anthropic = await chatPayloadToAnthropic(
+      {
+        model: "claude-sonnet-4.6",
+        max_tokens: null,
+        messages: [{ role: "user", content: "hello" }],
+      },
+      {
+        id: "claude-sonnet-4.6",
+        name: "Claude Sonnet 4.6",
+        object: "model",
+        preview: false,
+        vendor: "anthropic",
+        version: "1",
+        model_picker_enabled: true,
+        capabilities: {
+          family: "claude",
+          limits: { max_output_tokens: 1024 },
+          object: "model_capabilities",
+          supports: {},
+          tokenizer: "cl100k_base",
+          type: "chat",
+        },
+      },
+    )
+
+    expect(anthropic).toHaveProperty("max_tokens", null)
+  })
+
+  test("preserves max_tokens precedence when max_completion_tokens is also present", async () => {
+    const anthropic = await chatPayloadToAnthropic({
+      model: "claude-sonnet-4.6",
+      max_tokens: null,
+      max_completion_tokens: 321,
+      messages: [{ role: "user", content: "hello" }],
+    })
+
+    expect(anthropic).toHaveProperty("max_tokens", null)
+  })
+
   test("maps file parts to document blocks and images to image blocks", async () => {
     const payload: ChatCompletionsPayload & { model: string } = {
       model: "claude-sonnet-4.6",

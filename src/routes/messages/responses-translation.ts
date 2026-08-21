@@ -6,7 +6,6 @@ import {
   getExtraPromptForModel,
   getReasoningEffortForModel,
 } from "~/lib/config"
-import { createEndpointTranslationError } from "~/lib/error"
 import {
   type ResponsesPayload,
   type ResponseInputContent,
@@ -38,18 +37,24 @@ import {
 import {
   type AnthropicAssistantContentBlock,
   type AnthropicAssistantMessage,
+  type AnthropicContentBlock,
   type AnthropicResponse,
   type AnthropicDocumentBlock,
   type AnthropicImageBlock,
   type AnthropicMessage,
   type AnthropicMessagesPayload,
-  type AnthropicTextBlock,
   type AnthropicThinkingBlock,
   type AnthropicTool,
   type AnthropicToolResultBlock,
   type AnthropicToolUseBlock,
-  type AnthropicUserContentBlock,
-  type AnthropicUserMessage,
+  isAnthropicAssistantMessage,
+  isAnthropicDocumentBlock,
+  isAnthropicImageBlock,
+  isAnthropicNamedTool,
+  isAnthropicTextBlock,
+  isAnthropicThinkingBlock,
+  isAnthropicToolResultBlock,
+  isAnthropicToolUseBlock,
 } from "./anthropic-types"
 import { sanitizeAnthropicMessages } from "./non-stream-translation"
 
@@ -122,15 +127,15 @@ const translateMessage = (
   message: AnthropicMessage,
   model: string,
 ): Array<ResponseInputItem> => {
-  if (message.role === "user") {
-    return translateUserMessage(message)
+  if (isAnthropicAssistantMessage(message)) {
+    return translateAssistantMessage(message, model)
   }
 
-  return translateAssistantMessage(message, model)
+  return translateUserMessage(message)
 }
 
 const translateUserMessage = (
-  message: AnthropicUserMessage,
+  message: Pick<AnthropicMessage, "content">,
 ): Array<ResponseInputItem> => {
   if (typeof message.content === "string") {
     return [createMessage("user", message.content)]
@@ -144,7 +149,7 @@ const translateUserMessage = (
   const pendingContent: Array<ResponseInputContent> = []
 
   for (const block of message.content) {
-    if (block.type === "tool_result") {
+    if (isAnthropicToolResultBlock(block)) {
       flushPendingContent(pendingContent, items, { role: "user" })
       items.push(createFunctionCallOutput(block))
       continue
@@ -179,7 +184,7 @@ const translateAssistantMessage = (
   const pendingContent: Array<ResponseInputContent> = []
 
   for (const block of message.content) {
-    if (block.type === "tool_use") {
+    if (isAnthropicToolUseBlock(block)) {
       flushPendingContent(pendingContent, items, {
         role: "assistant",
         phase: assistantPhase,
@@ -188,12 +193,20 @@ const translateAssistantMessage = (
       continue
     }
 
-    if (block.type === "thinking") {
-      flushPendingContent(pendingContent, items, {
-        role: "assistant",
-        phase: assistantPhase,
-      })
-      items.push(createReasoningContent(block))
+    if (isAnthropicThinkingBlock(block)) {
+      const reasoningContent = createReasoningContent(block)
+      if (!reasoningContent) {
+        continue
+      }
+      if (reasoningContent.type === "reasoning") {
+        flushPendingContent(pendingContent, items, {
+          role: "assistant",
+          phase: assistantPhase,
+        })
+        items.push(reasoningContent)
+        continue
+      }
+      pendingContent.push(reasoningContent)
       continue
     }
 
@@ -212,35 +225,27 @@ const translateAssistantMessage = (
 }
 
 const translateUserContentBlock = (
-  block: AnthropicUserContentBlock,
+  block: AnthropicContentBlock,
 ): ResponseInputContent | undefined => {
-  switch (block.type) {
-    case "text": {
-      return createTextContent(block.text)
-    }
-    case "image": {
-      return createImageContent(block)
-    }
-    case "document": {
-      return createFileContent(block)
-    }
-    default: {
-      return undefined
-    }
+  if (isAnthropicTextBlock(block)) {
+    return createTextContent(block.text)
   }
+  if (isAnthropicImageBlock(block)) {
+    return createImageContent(block)
+  }
+  if (isAnthropicDocumentBlock(block)) {
+    return createFileContent(block)
+  }
+  return createTextContent(JSON.stringify(block))
 }
 
 const translateAssistantContentBlock = (
   block: AnthropicAssistantContentBlock,
 ): ResponseInputContent | undefined => {
-  switch (block.type) {
-    case "text": {
-      return createOutPutTextContent(block.text)
-    }
-    default: {
-      return undefined
-    }
+  if (isAnthropicTextBlock(block)) {
+    return createOutPutTextContent(block.text)
   }
+  return createOutPutTextContent(JSON.stringify(block))
 }
 
 const flushPendingContent = (
@@ -342,7 +347,7 @@ const createFileContent = (
 
 const createReasoningContent = (
   block: AnthropicThinkingBlock,
-): ResponseInputReasoning => {
+): ResponseInputReasoning | ResponseInputText | undefined => {
   // align with vscode-copilot-chat extractThinkingData, should add id, otherwise it will cause miss cache occasionally —— the usage input cached tokens to be 0
   // https://github.com/microsoft/vscode-copilot-chat/blob/main/src/platform/endpoint/node/responsesApi.ts#L162
   // when use in codex cli, reasoning id is empty, so it will cause miss cache occasionally
@@ -353,11 +358,7 @@ const createReasoningContent = (
   const summary =
     thinking ? [{ type: "summary_text" as const, text: thinking }] : []
   if (!signature || !id || signatureParts.length !== 2) {
-    throw createEndpointTranslationError({
-      blockers: ["thinking"],
-      code: "endpoint_translation_unsupported",
-      source: "messages",
-    })
+    return thinking ? createOutPutTextContent(thinking) : undefined
   }
   return {
     id,
@@ -387,7 +388,7 @@ const createFunctionCallOutput = (
 })
 
 const translateSystemPrompt = (
-  system: string | Array<AnthropicTextBlock> | undefined,
+  system: AnthropicMessagesPayload["system"],
   model: string,
 ): string | null => {
   if (!system) {
@@ -402,10 +403,14 @@ const translateSystemPrompt = (
 
   const text = system
     .map((block, index) => {
+      const blockText =
+        block.type === "text" && typeof block.text === "string" ?
+          block.text
+        : JSON.stringify(block)
       if (index === 0) {
-        return block.text + extraPrompt
+        return blockText + extraPrompt
       }
-      return block.text
+      return blockText
     })
     .join(" ")
   return text.length > 0 ? text : null
@@ -428,7 +433,7 @@ const convertAnthropicTools = (
     }
 
     // Filter out other server-side tools without input_schema
-    if (tool.input_schema === undefined) {
+    if (!isAnthropicNamedTool(tool) || tool.input_schema === undefined) {
       continue
     }
 
@@ -437,7 +442,9 @@ const convertAnthropicTools = (
       name: tool.name,
       parameters: tool.input_schema,
       strict: false,
-      ...(tool.description ? { description: tool.description } : {}),
+      ...(typeof tool.description === "string" ?
+        { description: tool.description }
+      : {}),
     })
   }
 
@@ -772,26 +779,20 @@ const convertToolResultContent = (
   if (Array.isArray(content)) {
     const result: Array<ResponseInputContent> = []
     for (const block of content) {
-      switch (block.type) {
-        case "text": {
-          result.push(createTextContent(block.text))
-          break
-        }
-        case "image": {
-          result.push(createImageContent(block))
-          break
-        }
-        case "document": {
-          result.push(createFileContent(block))
-          break
-        }
-        case "tool_reference": {
-          result.push(createTextContent(JSON.stringify(block)))
-          break
-        }
-        default: {
-          break
-        }
+      if (isAnthropicTextBlock(block)) {
+        result.push(createTextContent(block.text))
+        continue
+      }
+      if (isAnthropicImageBlock(block)) {
+        result.push(createImageContent(block))
+        continue
+      }
+      if (isAnthropicDocumentBlock(block)) {
+        result.push(createFileContent(block))
+        continue
+      }
+      if (block.type === "tool_reference") {
+        result.push(createTextContent(JSON.stringify(block)))
       }
     }
     return result

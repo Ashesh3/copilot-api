@@ -3,10 +3,14 @@ import type { Context } from "hono"
 import consola from "consola"
 
 import {
+  recordCopilotMessagesBeta,
+  recordCopilotRequestNormalization,
+} from "~/lib/copilot-contract-observability"
+import {
   resolveCustomProviderModel,
   type CustomProviderModelReference,
 } from "~/lib/custom-providers"
-import { createEndpointTranslationError, LocalHTTPError } from "~/lib/error"
+import { LocalHTTPError } from "~/lib/error"
 import {
   applyModelRedirect,
   formatModelRedirectResult,
@@ -35,7 +39,6 @@ import {
 
 import { type AnthropicMessagesPayload } from "./anthropic-types"
 import { translateToOpenAI } from "./non-stream-translation"
-import { checkMessagesToChatTranslation } from "./translation-fidelity"
 
 /**
  * Handles token counting for Anthropic messages.
@@ -49,17 +52,21 @@ export async function handleCountTokens(c: Context) {
   }
   const anthropicPayload = prepareAnthropicMessagesRequest({
     payload: rawPayload,
-    requireMaxTokens: false,
-  }).body as unknown as AnthropicMessagesPayload
+  })
   const nativeHeaders = validateAnthropicRequestHeaderOptions({
     anthropicBeta: c.req.header("anthropic-beta"),
     anthropicVersion: c.req.header("anthropic-version"),
     modelProviderPreference: c.req.header("x-model-provider-preference"),
   })
-  installRoutingAffinityFallback(
-    resolveClaudeRoutingAffinity(anthropicPayload.metadata),
+  recordCopilotRequestNormalization(
+    "messages",
+    anthropicPayload.normalizationClasses,
   )
-  const requestedModel = anthropicPayload.model
+  recordCopilotMessagesBeta(nativeHeaders.anthropicBeta)
+  installRoutingAffinityFallback(
+    resolveClaudeRoutingAffinity(anthropicPayload.body.metadata),
+  )
+  const requestedModel = anthropicPayload.body.model
 
   const { baseModel, reasoningEffort: suffixEffort } =
     parseModelSuffix(requestedModel)
@@ -82,7 +89,7 @@ export async function handleCountTokens(c: Context) {
     targetModel,
     redirect.effort,
   )
-  anthropicPayload.model = targetModel
+  anthropicPayload.body.model = targetModel
 
   setRequestContext(c, {
     requestedModel,
@@ -93,7 +100,7 @@ export async function handleCountTokens(c: Context) {
   const customReference = resolveCustomCountModel(targetModel)
   if (customReference) {
     return await countCustomProviderTokens(c, {
-      anthropicPayload,
+      anthropicPayload: anthropicPayload.body,
       customReference,
       requestedModel,
       targetEffort,
@@ -105,8 +112,9 @@ export async function handleCountTokens(c: Context) {
   )
   if (!selectedModel) throw createCountTokensModelNotFoundError()
 
-  const result = await countAnthropicTokens(anthropicPayload, {
+  const result = await countAnthropicTokens(anthropicPayload.body, {
     ...nativeHeaders,
+    preserveValidatedControls: true,
     signal: c.req.raw.signal,
   })
 
@@ -136,14 +144,6 @@ async function countCustomProviderTokens(
 ) {
   const { anthropicPayload, customReference, requestedModel, targetEffort } =
     options
-  const translation = checkMessagesToChatTranslation(anthropicPayload)
-  if (!translation.supported) {
-    throw createEndpointTranslationError({
-      blockers: translation.blockers,
-      code: "endpoint_translation_unsupported",
-      source: "messages",
-    })
-  }
   setRequestContext(c, {
     requestedModel,
     model: customReference.upstreamModel,

@@ -1,7 +1,5 @@
 import { expect, mock, test } from "bun:test"
 
-import type { AnthropicResponse } from "~/routes/messages/anthropic-types"
-
 import { LocalHTTPError } from "~/lib/error"
 import { state } from "~/lib/state"
 import { chatPayloadToAnthropic } from "~/routes/chat-completions/anthropic-bridge"
@@ -9,6 +7,10 @@ import {
   convertOpenAIContentPartToAnthropic,
   convertOpenAIToolsToAnthropic,
 } from "~/routes/chat-completions/anthropic-conversion"
+import {
+  asAnthropicUnknownContentType,
+  type AnthropicResponse,
+} from "~/routes/messages/anthropic-types"
 import { emitResponsesResultAsStream } from "~/routes/messages/web-search-helpers"
 import {
   anthropicResponseToResponsesResult,
@@ -114,6 +116,16 @@ test("maps text image document function tools and results to Messages", async ()
   ])
 })
 
+test("preserves an explicit null max_output_tokens on the Responses bridge", async () => {
+  const payload = await responsesPayloadToAnthropic({
+    model: "claude-current",
+    input: "hello",
+    max_output_tokens: null,
+  })
+
+  expect(payload).toHaveProperty("max_tokens", null)
+})
+
 test("passes explicit native options through the Responses Messages bridge", async () => {
   const originalFetch = globalThis.fetch
   const originalAccountType = state.accountType
@@ -169,6 +181,88 @@ test("passes explicit native options through the Responses Messages bridge", asy
     state.copilotToken = originalCopilotToken
     // eslint-disable-next-line require-atomic-updates
     state.isMultiToken = originalIsMultiToken
+  }
+})
+
+test("does not default an explicit null max_output_tokens during native dispatch", async () => {
+  const originalFetch = globalThis.fetch
+  const originalAccountType = state.accountType
+  const originalCopilotToken = state.copilotToken
+  const originalIsMultiToken = state.isMultiToken
+  const originalModels = state.models
+  let requestBody: Record<string, unknown> | undefined
+  const fetchMock = mock(
+    (_url: string | URL | Request, init?: RequestInit): Response => {
+      requestBody =
+        typeof init?.body === "string" ?
+          (JSON.parse(init.body) as Record<string, unknown>)
+        : undefined
+      return Response.json({
+        id: "msg_explicit_null",
+        type: "message",
+        role: "assistant",
+        model: "claude-current",
+        content: [{ type: "text", text: "ok" }],
+        stop_reason: "end_turn",
+        stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      })
+    },
+  )
+
+  state.accountType = "individual"
+  state.copilotToken = "copilot-token"
+  state.isMultiToken = false
+  state.models = {
+    object: "list",
+    data: [
+      {
+        id: "claude-current",
+        name: "Claude Current",
+        object: "model",
+        preview: false,
+        vendor: "anthropic",
+        version: "1",
+        model_picker_enabled: true,
+        capabilities: {
+          family: "claude",
+          limits: { max_output_tokens: 1024 },
+          object: "model_capabilities",
+          supports: {},
+          tokenizer: "cl100k_base",
+          type: "chat",
+        },
+        supported_endpoints: ["/v1/messages"],
+      },
+    ],
+  }
+  ;(globalThis as unknown as { fetch: typeof fetch }).fetch =
+    fetchMock as unknown as typeof fetch
+
+  try {
+    const result = await executeResponsesMessagesBridge({
+      nativeOptions: {
+        anthropicVersion: "2023-06-01",
+      },
+      payload: {
+        model: "claude-current",
+        input: "hello",
+        max_output_tokens: null,
+      },
+    })
+
+    expect(result.model).toBe("claude-current")
+    expect(requestBody).toHaveProperty("max_tokens", null)
+  } finally {
+    ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
+    // eslint-disable-next-line require-atomic-updates
+    state.accountType = originalAccountType
+    // eslint-disable-next-line require-atomic-updates
+    state.copilotToken = originalCopilotToken
+    // eslint-disable-next-line require-atomic-updates
+    state.isMultiToken = originalIsMultiToken
+    // eslint-disable-next-line require-atomic-updates
+    state.models = originalModels
   }
 })
 
@@ -884,6 +978,65 @@ test("preserves interleaved Anthropic blocks and every thinking signature", () =
     },
     {
       id: "msg_msg_interleaved_1",
+      content: [{ type: "output_text", text: "omega", annotations: [] }],
+    },
+  ])
+})
+
+test("bridges future assistant blocks as text while preserving known block order", () => {
+  const response: AnthropicResponse = {
+    id: "msg_future",
+    type: "message",
+    role: "assistant",
+    model: "resolved",
+    content: [
+      { type: "text", text: "alpha" },
+      {
+        type: asAnthropicUnknownContentType("future_block_20270101"),
+        data: { ok: true },
+      },
+      {
+        type: "tool_use",
+        id: "call_1",
+        name: "lookup",
+        input: { query: "one" },
+      },
+      { type: "text", text: "omega" },
+    ],
+    stop_reason: "end_turn",
+    stop_sequence: null,
+    usage: { input_tokens: 1, output_tokens: 2 },
+  }
+
+  const result = anthropicResponseToResponsesResult(response, "requested")
+
+  expect(result.output.map((item) => item.type)).toEqual([
+    "message",
+    "message",
+    "function_call",
+    "message",
+  ])
+  expect(result.output_text).toBe(
+    'alpha{"type":"future_block_20270101","data":{"ok":true}}omega',
+  )
+  expect(result.output).toMatchObject([
+    {
+      id: "msg_msg_future",
+      content: [{ type: "output_text", text: "alpha", annotations: [] }],
+    },
+    {
+      id: "msg_msg_future_1",
+      content: [
+        {
+          type: "output_text",
+          text: '{"type":"future_block_20270101","data":{"ok":true}}',
+          annotations: [],
+        },
+      ],
+    },
+    { id: "fc_call_1", call_id: "call_1", name: "lookup" },
+    {
+      id: "msg_msg_future_2",
       content: [{ type: "output_text", text: "omega", annotations: [] }],
     },
   ])

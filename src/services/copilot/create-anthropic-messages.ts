@@ -18,9 +18,11 @@ import { PRE_HEADER_MAX_DELAY_SECONDS } from "~/services/copilot/transport-retry
 import { fitAnthropicCompactionPayload } from "./compaction-payload"
 import { hasVisionContent } from "./copilot-client"
 import {
+  createMissingAnthropicMessagesMaxTokensError,
   normalizeAnthropicMessagesRequest,
   prepareAnthropicMessagesRequest,
   serializeAnthropicMessagesRequest,
+  validateAnthropicRequestHeaderOptions,
 } from "./messages-contract"
 
 /**
@@ -37,6 +39,7 @@ import {
  */
 
 export const ANTHROPIC_MESSAGES_ENDPOINT = "/v1/messages"
+const DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
 
 export function modelSupportsNativeMessages(
   model: { supported_endpoints?: Array<string> } | undefined,
@@ -89,28 +92,33 @@ export const createAnthropicMessages = async (
     signal?: AbortSignal
   },
 ): Promise<CreateAnthropicMessagesReturn> => {
-  const initialPrepared = prepareAnthropicMessagesRequest({
-    anthropicBeta: options?.anthropicBeta,
-    anthropicVersion: options?.anthropicVersion,
-    modelProviderPreference: options?.modelProviderPreference,
-    payload,
-    requireMaxTokens: !options?.preserveValidatedControls,
-  })
-  const initialBody =
-    initialPrepared.body as unknown as AnthropicMessagesPayload
-  if (
-    options?.preserveValidatedControls
-    && initialBody.max_tokens === undefined
-  ) {
-    const maxTokens = getPositiveModelOutputLimit(initialBody.model)
-    if (maxTokens !== undefined) initialBody.max_tokens = maxTokens
-  }
-  const prepared = prepareAnthropicMessagesRequest({
-    ...initialPrepared.headers,
-    payload: initialBody,
-    requireMaxTokens: true,
-  })
-  const snapshot = prepared.body as unknown as AnthropicMessagesPayload
+  const prepared =
+    options?.preserveValidatedControls ?
+      (() => {
+        const preservedOptions = options
+        const sanitizedHeaders = validateAnthropicRequestHeaderOptions({
+          anthropicBeta: preservedOptions.anthropicBeta,
+          anthropicVersion: preservedOptions.anthropicVersion,
+          modelProviderPreference: preservedOptions.modelProviderPreference,
+        })
+        return {
+          body: normalizeAnthropicMessagesRequest(
+            payload,
+          ) as AnthropicMessagesPayload,
+          headers: {
+            ...sanitizedHeaders,
+            anthropicVersion:
+              sanitizedHeaders.anthropicVersion ?? DEFAULT_ANTHROPIC_VERSION,
+          },
+        }
+      })()
+    : prepareAnthropicMessagesRequest({
+        anthropicBeta: options?.anthropicBeta,
+        anthropicVersion: options?.anthropicVersion,
+        modelProviderPreference: options?.modelProviderPreference,
+        payload,
+      })
+  const snapshot = ensureTransportMaxTokens(prepared.body)
   const vision = hasVisionContent(snapshot.messages)
   const initiator =
     options?.initiator ?? detectAnthropicInitiator(snapshot.messages)
@@ -124,6 +132,18 @@ export const createAnthropicMessages = async (
     stream: Boolean(snapshot.stream),
     vision,
   })
+}
+
+function ensureTransportMaxTokens(
+  payload: AnthropicMessagesPayload,
+): AnthropicMessagesPayload {
+  if (payload.max_tokens !== undefined) return payload
+  const maxTokens = getPositiveModelOutputLimit(payload.model)
+  if (maxTokens === undefined) {
+    throw createMissingAnthropicMessagesMaxTokensError()
+  }
+  payload.max_tokens = maxTokens
+  return payload
 }
 
 async function dispatchAnthropicMessages(options: {

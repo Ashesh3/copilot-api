@@ -62,6 +62,7 @@ import {
   CAPI_RESPONSES_MAX_REQUEST_BYTES,
   RESPONSES_RECOVERY_MARGIN_BYTES,
 } from "../src/services/copilot/responses-payload-recovery"
+import { sanitizeResponsesStreamEvent } from "../src/services/copilot/responses-terminal-sanitizer"
 
 const originalApiKeyAuth = state.apiKeyAuth
 const originalFetch = globalThis.fetch
@@ -3730,6 +3731,83 @@ describe("responses websocket continuation handling", () => {
         content: [{ type: "output_text", text: "Done" }],
       },
       ...(followUpPayload.input as Array<ResponseInputItem>),
+    ])
+  })
+
+  test("rehydrates a sanitized namespaced function call before its output", () => {
+    const snapshots = new Map<string, ResponsesPayload>()
+    const priorPayload: ResponsesPayload = {
+      model: "gpt-5.6-sol",
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "Inspect the failure" }],
+        },
+      ],
+      stream: true,
+    }
+    const sanitized = sanitizeResponsesStreamEvent({
+      event: "response.completed",
+      data: JSON.stringify({
+        type: "response.completed",
+        sequence_number: 7,
+        response: {
+          id: "resp_namespaced_continuation",
+          object: "response",
+          status: "completed",
+          output: [
+            {
+              type: "function_call",
+              call_id: "call_spawn_agent",
+              name: "spawn_agent",
+              namespace: "collaboration",
+              arguments: '{"task_name":"inspect"}',
+              status: "completed",
+            },
+          ],
+          output_text: "",
+          usage: null,
+          error: null,
+          incomplete_details: null,
+        },
+      }),
+    })
+
+    recordResponseSnapshotFromFrame(
+      snapshots,
+      priorPayload,
+      sanitized.data ?? "",
+    )
+
+    const rehydrated = rehydrateContinuationPayload(snapshots, {
+      model: "gpt-5.6-sol",
+      previous_response_id: "resp_namespaced_continuation",
+      input: [
+        {
+          type: "function_call_output",
+          call_id: "call_spawn_agent",
+          output: "inspection complete",
+        },
+      ],
+      stream: true,
+    })
+
+    expect(rehydrated?.input).toEqual([
+      ...(priorPayload.input as Array<ResponseInputItem>),
+      {
+        type: "function_call",
+        call_id: "call_spawn_agent",
+        name: "spawn_agent",
+        namespace: "collaboration",
+        arguments: '{"task_name":"inspect"}',
+        status: "completed",
+      },
+      {
+        type: "function_call_output",
+        call_id: "call_spawn_agent",
+        output: "inspection complete",
+      },
     ])
   })
 

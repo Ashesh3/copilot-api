@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- hotfix extends an existing integration matrix */
 import {
   afterAll,
   beforeAll,
@@ -45,6 +46,8 @@ interface ListedModel {
   dimensions?: number
   alias?: boolean
 }
+
+type RequestBodyCheck = (body: Record<string, unknown>) => void
 
 let requests: Array<CapturedRequest>
 
@@ -189,6 +192,14 @@ beforeEach(() => {
           },
         ],
       },
+      {
+        id: "zenmux",
+        name: "ZenMux",
+        type: "openai-compatible",
+        baseUrl: "https://zenmux.example/v1",
+        apiKey: "zenmux-key",
+        models: [{ id: "z-ai/glm-5.3-free", kind: "chat" }],
+      },
     ],
   })
 })
@@ -217,6 +228,23 @@ function routingSnapshot() {
     multiToken: false,
     window: "1h",
   })
+}
+
+function expectChatDispatch(
+  response: Response,
+  bodyCheck: RequestBodyCheck,
+  options?: {
+    url?: string
+    requestCount?: number
+  },
+) {
+  const url = options?.url ?? "https://custom.example/v1/chat/completions"
+  const requestCount = options?.requestCount ?? 1
+  expect(response.status).toBe(200)
+  expect(requests).toHaveLength(requestCount)
+  const dispatched = requests.at(-1)
+  expect(dispatched?.url).toBe(url)
+  bodyCheck(dispatched?.body ?? {})
 }
 
 test("custom models appear in /v1/models with aliases and metadata", async () => {
@@ -304,15 +332,47 @@ test("Anthropic messages request routes to custom chat provider by model id", as
 })
 
 test.each([
-  ["root cache control", { cache_control: { type: "ephemeral" } }],
-  ["future root field", { future_native_field: true }],
-  [
-    "deferred native tool",
-    { tools: [{ type: "future_native_20270101", name: "future_native" }] },
-  ],
-  [
-    "document context",
-    {
+  {
+    name: "root cache control",
+    extra: { cache_control: { type: "ephemeral" } },
+    check: (body: Record<string, unknown>) => {
+      expect(body).toMatchObject({
+        model: "custom-chat-model",
+        max_tokens: 16,
+        messages: [{ role: "user", content: "hello" }],
+      })
+      expect(body).not.toHaveProperty("cache_control")
+    },
+  },
+  {
+    name: "future root field",
+    extra: { future_native_field: true },
+    check: (body: Record<string, unknown>) => {
+      expect(body).toMatchObject({
+        model: "custom-chat-model",
+        max_tokens: 16,
+        messages: [{ role: "user", content: "hello" }],
+      })
+      expect(body).not.toHaveProperty("future_native_field")
+    },
+  },
+  {
+    name: "deferred native tool",
+    extra: {
+      tools: [{ type: "future_native_20270101", name: "future_native" }],
+    },
+    check: (body: Record<string, unknown>) => {
+      expect(body).toMatchObject({
+        model: "custom-chat-model",
+        max_tokens: 16,
+        messages: [{ role: "user", content: "hello" }],
+      })
+      expect(body).not.toHaveProperty("tools")
+    },
+  },
+  {
+    name: "document context",
+    extra: {
       messages: [
         {
           role: "user",
@@ -326,10 +386,22 @@ test.each([
         },
       ],
     },
-  ],
-  [
-    "Responses thinking signature",
-    {
+    check: (body: Record<string, unknown>) => {
+      expect(body).toMatchObject({
+        model: "custom-chat-model",
+        max_tokens: 16,
+        messages: [
+          {
+            role: "user",
+            content: "<document>\nmust stay structural\nnotes\n</document>",
+          },
+        ],
+      })
+    },
+  },
+  {
+    name: "Responses thinking signature",
+    extra: {
       messages: [
         { role: "user", content: "hello" },
         {
@@ -340,10 +412,24 @@ test.each([
         },
       ],
     },
-  ],
+    check: (body: Record<string, unknown>) => {
+      expect(body).toMatchObject({
+        model: "custom-chat-model",
+        max_tokens: 16,
+        messages: [
+          { role: "user", content: "hello" },
+          { role: "assistant", content: null, reasoning_text: "private" },
+        ],
+      })
+      const assistantMessage = (
+        body.messages as Array<Record<string, unknown>> | undefined
+      )?.[1]
+      expect(assistantMessage).not.toHaveProperty("reasoning_opaque")
+    },
+  },
 ] as const)(
-  "rejects custom-provider Messages %s before lossy Chat conversion",
-  async (_name, extra) => {
+  "best-effort translates custom-provider Messages $name before Chat dispatch",
+  async ({ extra, check }) => {
     const response = await server.request("/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -355,19 +441,11 @@ test.each([
       }),
     })
 
-    expect(response.status).toBe(400)
-    expect(await response.json()).toMatchObject({
-      type: "error",
-      error: {
-        type: "invalid_request_error",
-        code: "endpoint_translation_unsupported",
-      },
-    })
-    expect(requests).toHaveLength(0)
+    expectChatDispatch(response, check)
   },
 )
 
-test("custom Messages rejects a versioned web-search schema before URL-image fetch", async () => {
+test("custom Messages dispatches a versioned web-search schema after URL-image fallback", async () => {
   const marker = "PRIVATE_CUSTOM_WEB_SEARCH_SCHEMA"
   const response = await server.request("/v1/messages", {
     method: "POST",
@@ -403,20 +481,39 @@ test("custom Messages rejects a versioned web-search schema before URL-image fet
       ],
     }),
   })
-  const body = await response.text()
 
-  expect(response.status).toBe(400)
-  expect(JSON.parse(body)).toMatchObject({
-    error: {
-      code: "endpoint_translation_unsupported",
-      param: "tool_extension",
+  expectChatDispatch(
+    response,
+    (requestBody) => {
+      expect(requestBody).toMatchObject({
+        model: "custom-chat-model",
+        max_tokens: 16,
+        messages: [
+          {
+            role: "user",
+            content:
+              '[image attachment "https://private.example/image.png" omitted: the URL could not be fetched by the proxy]',
+          },
+        ],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "web_search",
+            },
+          },
+        ],
+      })
+      expect(JSON.stringify(requestBody)).not.toContain(marker)
+      expect(JSON.stringify(requestBody)).not.toContain(
+        "endpoint_translation_unsupported",
+      )
     },
-  })
-  expect(body).not.toContain(marker)
-  expect(requests).toHaveLength(0)
+    { requestCount: 2 },
+  )
 })
 
-test("custom Messages rejects an unknown typed tool with a schema", async () => {
+test("custom Messages dispatches an unknown typed tool with a schema", async () => {
   const privateType = "PRIVATE_CUSTOM_NATIVE_TYPE"
   const privateName = "PRIVATE_CUSTOM_NATIVE_NAME"
   const response = await server.request("/v1/messages", {
@@ -435,18 +532,24 @@ test("custom Messages rejects an unknown typed tool with a schema", async () => 
       ],
     }),
   })
-  const body = await response.text()
 
-  expect(response.status).toBe(400)
-  expect(JSON.parse(body)).toMatchObject({
-    error: {
-      code: "endpoint_translation_unsupported",
-      param: "tool_type",
-    },
+  expectChatDispatch(response, (requestBody) => {
+    expect(requestBody).toMatchObject({
+      model: "custom-chat-model",
+      max_tokens: 16,
+      messages: [{ role: "user", content: "hello" }],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: privateName,
+            parameters: { type: "object", properties: {} },
+          },
+        },
+      ],
+    })
+    expect(JSON.stringify(requestBody)).not.toContain(privateType)
   })
-  expect(body).not.toContain(privateType)
-  expect(body).not.toContain(privateName)
-  expect(requests).toHaveLength(0)
 })
 
 test.each([
@@ -456,35 +559,49 @@ test.each([
   "web-search_20250305",
   "web_search_",
   "web_search__20250305",
-])("custom Messages rejects web-search lookalike type %s", async (type) => {
-  const response = await server.request("/v1/messages", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      model: "custom-chat-model",
-      max_tokens: 16,
-      messages: [{ role: "user", content: "hello" }],
-      tools: [
-        {
-          type,
-          name: "future_native",
-          input_schema: { type: "object", properties: {} },
-        },
-      ],
-    }),
-  })
+])(
+  "custom Messages dispatches web-search lookalike type %s as a function tool",
+  async (type) => {
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "custom-chat-model",
+        max_tokens: 16,
+        messages: [{ role: "user", content: "hello" }],
+        tools: [
+          {
+            type,
+            name: "future_native",
+            input_schema: { type: "object", properties: {} },
+          },
+        ],
+      }),
+    })
 
-  expect(response.status).toBe(400)
-  expect(await response.json()).toMatchObject({
-    error: {
-      code: "endpoint_translation_unsupported",
-      param: "tool_type",
-    },
-  })
-  expect(requests).toHaveLength(0)
-})
+    expectChatDispatch(response, (requestBody) => {
+      expect(requestBody).toMatchObject({
+        model: "custom-chat-model",
+        max_tokens: 16,
+        messages: [{ role: "user", content: "hello" }],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "future_native",
+              parameters: { type: "object", properties: {} },
+            },
+          },
+        ],
+      })
+      expect(JSON.stringify(requestBody)).not.toContain(
+        "endpoint_translation_unsupported",
+      )
+    })
+  },
+)
 
-test("custom Messages rejects document flattening before attachment normalization", async () => {
+test("custom Messages flattens documents before attachment normalization", async () => {
   const document = {
     type: "document",
     source: { type: "text", media_type: "text/plain", data: "custom notes" },
@@ -502,8 +619,19 @@ test("custom Messages rejects document flattening before attachment normalizatio
     }),
   })
 
-  expect(response.status).toBe(400)
-  expect(requests).toHaveLength(0)
+  expectChatDispatch(response, (requestBody) => {
+    expect(requestBody).toMatchObject({
+      model: "custom-chat-model",
+      max_tokens: 16,
+      messages: [
+        {
+          role: "user",
+          content:
+            '<document title="notes.txt">\ncustom context\ncustom notes\n</document>',
+        },
+      ],
+    })
+  })
 })
 
 test.each([
@@ -557,7 +685,7 @@ test.each([
     param: "format_extension",
   },
 ] as const)(
-  "rejects custom-provider nested $name without fetching or dispatching",
+  "best-effort translates custom-provider nested $name without local rejection",
   async ({ extra, param }) => {
     const response = await server.request("/v1/messages", {
       method: "POST",
@@ -569,20 +697,113 @@ test.each([
         ...extra,
       }),
     })
-    const body = await response.text()
 
-    expect(response.status).toBe(400)
-    expect(JSON.parse(body)).toMatchObject({
-      type: "error",
-      error: {
-        code: "endpoint_translation_unsupported",
-        param,
+    expectChatDispatch(
+      response,
+      (requestBody) => {
+        if (param === "source_extension") {
+          expect(requestBody).toMatchObject({
+            model: "custom-chat-model",
+            max_tokens: 16,
+            messages: [
+              {
+                role: "user",
+                content:
+                  '[image attachment "https://private.example/image.png" omitted: the URL could not be fetched by the proxy]',
+              },
+            ],
+          })
+          return
+        }
+
+        if (param === "tool_extension") {
+          expect(requestBody).toMatchObject({
+            model: "custom-chat-model",
+            max_tokens: 16,
+            messages: [{ role: "user", content: "hello" }],
+            tools: [
+              {
+                type: "function",
+                function: {
+                  name: "lookup",
+                  parameters: {
+                    type: "object",
+                    properties: {},
+                    private_custom_schema: true,
+                  },
+                },
+              },
+            ],
+          })
+          return
+        }
+
+        expect(requestBody).toMatchObject({
+          model: "custom-chat-model",
+          max_tokens: 16,
+          messages: [{ role: "user", content: "hello" }],
+          response_format: {
+            type: "json_object",
+            private_custom_format: true,
+          },
+        })
+        expect(JSON.stringify(requestBody)).not.toContain(
+          "endpoint_translation_unsupported",
+        )
       },
-    })
-    expect(body).not.toContain("private_custom")
-    expect(requests).toHaveLength(0)
+      {
+        requestCount: param === "source_extension" ? 2 : 1,
+      },
+    )
   },
 )
+
+test("Claude Code Messages cache-control routes to ZenMux custom provider", async () => {
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "z-ai/glm-5.3-free",
+      max_tokens: 16,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: "hello",
+              cache_control: { type: "ephemeral" },
+            },
+          ],
+        },
+      ],
+    }),
+  })
+  const body = (await response.json()) as { model: string }
+
+  expect(body.model).toBe("z-ai/glm-5.3-free")
+  expectChatDispatch(
+    response,
+    (requestBody) => {
+      expect(requestBody).toMatchObject({
+        model: "z-ai/glm-5.3-free",
+        max_tokens: 16,
+        messages: [{ role: "user", content: "hello" }],
+      })
+      expect(JSON.stringify(requestBody)).not.toContain("cache_control")
+    },
+    {
+      url: "https://zenmux.example/v1/chat/completions",
+    },
+  )
+  expect(routingSnapshot().models[0]).toMatchObject({
+    accounts: [],
+    model: "z-ai/glm-5.3-free",
+    provider: "ZenMux",
+    requests: 1,
+    upstreamCalls: 1,
+  })
+})
 
 test("embeddings request routes to Nebius config by alias", async () => {
   const response = await server.request("/v1/embeddings", {

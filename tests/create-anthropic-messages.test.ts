@@ -9,9 +9,11 @@ import {
 } from "bun:test"
 import consola from "consola"
 
-import type { AnthropicMessagesPayload } from "../src/routes/messages/anthropic-types"
-
 import { state } from "../src/lib/state"
+import {
+  asAnthropicUnknownRole,
+  type AnthropicMessagesPayload,
+} from "../src/routes/messages/anthropic-types"
 import { COMPACTION_PAYLOAD_MAX_BYTES } from "../src/services/copilot/compaction-payload"
 import { createAnthropicMessages } from "../src/services/copilot/create-anthropic-messages"
 
@@ -300,7 +302,7 @@ test("defaults bridge max_tokens from an advertised positive model limit", async
   }
 })
 
-test("rejects present undefined bridge max_tokens instead of defaulting it", async () => {
+test("keeps failing closed for non-JSON undefined bridge max_tokens", async () => {
   const previousModels = state.models
   state.models = {
     object: "list",
@@ -332,8 +334,8 @@ test("rejects present undefined bridge max_tokens instead of defaulting it", asy
       preserveValidatedControls: true,
     }).catch((caught: unknown) => caught)
 
-    expect(error).toHaveProperty("clientBody.error.code", "invalid_value")
-    expect(error).toHaveProperty("clientBody.error.param", "max_tokens")
+    expect(error).toHaveProperty("clientBody.error.code", "invalid_type")
+    expect(error).toHaveProperty("clientBody.error.param", "body")
     expect(fetchMock).not.toHaveBeenCalled()
     expect(payload).toHaveProperty("max_tokens", undefined)
   } finally {
@@ -389,15 +391,112 @@ test("preserves an explicit bridge max_tokens without catalog fallback", async (
   state.models = undefined
   const payload: AnthropicMessagesPayload = {
     model: "claude-bridge-explicit-limit",
-    max_tokens: 777,
+    max_tokens: 1,
     messages: [{ role: "user", content: "hello" }],
   }
 
   try {
     await createAnthropicMessages(payload, { preserveValidatedControls: true })
 
-    expect(capturedBody).toHaveProperty("max_tokens", 777)
-    expect(payload).toHaveProperty("max_tokens", 777)
+    expect(capturedBody).toHaveProperty("max_tokens", 1)
+    expect(payload).toHaveProperty("max_tokens", 1)
+  } finally {
+    // eslint-disable-next-line require-atomic-updates
+    state.models = previousModels
+  }
+})
+
+test("defaults a missing native transport max_tokens from model metadata", async () => {
+  const previousModels = state.models
+  state.models = {
+    object: "list",
+    data: [
+      {
+        id: "claude-transport-default",
+        name: "Claude Transport Default",
+        object: "model",
+        version: "1",
+        capabilities: {
+          family: "claude",
+          limits: { max_output_tokens: 2048 },
+          object: "model_capabilities",
+          supports: {},
+          tokenizer: "cl100k_base",
+          type: "chat",
+        },
+      },
+    ],
+  }
+  const payload: AnthropicMessagesPayload = {
+    model: "claude-transport-default",
+    messages: [
+      {
+        role: asAnthropicUnknownRole("system"),
+        content: "bootstrap",
+      },
+    ],
+  }
+
+  try {
+    await createAnthropicMessages(payload)
+
+    expect(capturedBody).toMatchObject({
+      model: "claude-transport-default",
+      max_tokens: 2048,
+      messages: [{ role: "system", content: "bootstrap" }],
+    })
+    expect(payload).not.toHaveProperty("max_tokens")
+  } finally {
+    // eslint-disable-next-line require-atomic-updates
+    state.models = previousModels
+  }
+})
+
+test("preserves an explicit zero max_tokens instead of defaulting it", async () => {
+  const previousModels = state.models
+  state.models = {
+    object: "list",
+    data: [
+      {
+        id: "claude-transport-default",
+        name: "Claude Transport Default",
+        object: "model",
+        preview: false,
+        vendor: "anthropic",
+        version: "1",
+        model_picker_enabled: true,
+        capabilities: {
+          family: "claude",
+          limits: { max_output_tokens: 2048 },
+          object: "model_capabilities",
+          supports: {},
+          tokenizer: "cl100k_base",
+          type: "chat",
+        },
+        supported_endpoints: ["/v1/messages"],
+      },
+    ],
+  }
+
+  const payload = {
+    model: "claude-transport-default",
+    max_tokens: 0,
+    messages: [
+      {
+        role: asAnthropicUnknownRole("system"),
+        content: "bootstrap",
+      },
+    ],
+  } as unknown as AnthropicMessagesPayload
+
+  try {
+    await createAnthropicMessages(payload)
+
+    expect(capturedBody).toMatchObject({
+      model: "claude-transport-default",
+      max_tokens: 0,
+      messages: [{ role: "system", content: "bootstrap" }],
+    })
   } finally {
     // eslint-disable-next-line require-atomic-updates
     state.models = previousModels

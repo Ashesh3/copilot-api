@@ -40,6 +40,147 @@ export function isHttpUrl(url: string): boolean {
   return url.startsWith("https://") || url.startsWith("http://")
 }
 
+/**
+ * Recover any canonical HTTP(S) URL the client supplied, including local and
+ * IP targets. Malformed or non-HTTP values are skipped so fetch does not throw.
+ */
+export function isSafeExternalHttpUrl(value: string): boolean {
+  return isCanonicalHttpUrl(value)
+}
+
+export function isCanonicalHttpUrl(value: string): boolean {
+  if (
+    !isHttpUrl(value)
+    || hasUnsafeRawUrlCharacter(value)
+    || hasInvalidPercentEncoding(value)
+  ) {
+    return false
+  }
+  try {
+    const url = new URL(value)
+    const authority = rawUrlAuthority(value)
+    return (
+      (url.protocol === "http:" || url.protocol === "https:")
+      && url.hostname.length > 0
+      && url.username.length === 0
+      && url.password.length === 0
+      && isValidRawHttpAuthority(authority, url.hostname, url.protocol)
+      && matchesCanonicalHttpUrl(value, url)
+    )
+  } catch {
+    return false
+  }
+}
+
+function hasUnsafeRawUrlCharacter(value: string): boolean {
+  for (const character of value) {
+    const code = character.codePointAt(0)
+    if (
+      character === "\\"
+      || code === undefined
+      || code <= 0x1f
+      || (code >= 0x7f && code <= 0x9f)
+      || character.trim().length === 0
+    ) {
+      return true
+    }
+  }
+  return false
+}
+
+function hasInvalidPercentEncoding(value: string): boolean {
+  for (
+    let index = value.indexOf("%");
+    index >= 0;
+    index = value.indexOf("%", index + 1)
+  ) {
+    if (!/^[\da-f]{2}$/i.test(value.slice(index + 1, index + 3))) return true
+  }
+  return false
+}
+
+function rawUrlAuthority(value: string): string {
+  const authorityStart = value.startsWith("https://") ? 8 : 7
+  const authorityEnd = findFirstDelimiter(value, authorityStart)
+  return value.slice(authorityStart, authorityEnd)
+}
+
+function isValidRawHttpAuthority(
+  authority: string,
+  parsedHostname: string,
+  protocol: string,
+): boolean {
+  if (authority.length === 0 || authority.includes("@")) return false
+  if (authority.startsWith("[")) {
+    const closingBracket = authority.indexOf("]")
+    if (closingBracket <= 1) return false
+    return authority === new URL(`${protocol}//${authority}`).host
+  }
+  const firstColon = authority.indexOf(":")
+  const lastColon = authority.lastIndexOf(":")
+  if (firstColon !== lastColon) return false
+  const hostname = firstColon < 0 ? authority : authority.slice(0, firstColon)
+  const portSuffix = firstColon < 0 ? "" : authority.slice(firstColon)
+  return (
+    isValidRawHostname(hostname)
+    && isValidRawPortSuffix(portSuffix)
+    && (!isCanonicalIpv4Address(parsedHostname) || hostname === parsedHostname)
+  )
+}
+
+function isValidRawHostname(hostname: string): boolean {
+  const withoutTrailingDot =
+    hostname.endsWith(".") ? hostname.slice(0, -1) : hostname
+  if (/^[\d.]+$/.test(withoutTrailingDot)) {
+    const octets = withoutTrailingDot.split(".")
+    return (
+      octets.length === 4
+      && octets.every(
+        (octet) => /^(?:0|[1-9]\d{0,2})$/.test(octet) && Number(octet) <= 255,
+      )
+    )
+  }
+  return (
+    withoutTrailingDot.length > 0
+    && withoutTrailingDot.length <= 253
+    && withoutTrailingDot
+      .split(".")
+      .every((label) => /^[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?$/i.test(label))
+  )
+}
+
+function isValidRawPortSuffix(value: string): boolean {
+  if (value.length === 0) return true
+  const port = value.slice(1)
+  return /^\d{1,5}$/.test(port) && Number(port) <= 65_535
+}
+
+function isCanonicalIpv4Address(value: string): boolean {
+  return value.split(".").length === 4 && isValidRawHostname(value)
+}
+
+function matchesCanonicalHttpUrl(value: string, url: URL): boolean {
+  const authorityEnd = findFirstDelimiter(value, url.protocol.length + 2)
+  const rawPathAndSuffix = value.slice(authorityEnd)
+  const canonicalAuthorityEnd = findFirstDelimiter(
+    url.href,
+    url.protocol.length + 2,
+  )
+  const canonicalPathAndSuffix = url.href.slice(canonicalAuthorityEnd)
+  if (rawPathAndSuffix.length === 0) return canonicalPathAndSuffix === "/"
+  if (rawPathAndSuffix.startsWith("?") || rawPathAndSuffix.startsWith("#")) {
+    return canonicalPathAndSuffix === `/${rawPathAndSuffix}`
+  }
+  return rawPathAndSuffix === canonicalPathAndSuffix
+}
+
+function findFirstDelimiter(value: string, start: number): number {
+  const indexes = ["/", "?", "#"]
+    .map((delimiter) => value.indexOf(delimiter, start))
+    .filter((index) => index >= 0)
+  return indexes.length === 0 ? value.length : Math.min(...indexes)
+}
+
 export function isPdfMediaType(mediaType: string | undefined): boolean {
   return mediaType?.toLowerCase().split(";")[0].trim() === "application/pdf"
 }

@@ -273,6 +273,21 @@ test.each(routeCases)(
   },
 )
 
+test("preserves explicit null max_tokens through the Chat to Messages bridge", async () => {
+  installModel({
+    id: "route-model",
+    supported_endpoints: ["/v1/messages"],
+  })
+
+  const response = await postChatRoute({
+    maxTokens: null,
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/v1/messages")
+  expect(lastUpstreamPayload).toHaveProperty("max_tokens", null)
+})
+
 test("emits one bounded Chat route event before dispatch", async () => {
   installModel({
     id: "route-model",
@@ -955,6 +970,8 @@ async function postChatRoute(options: {
   fileId?: boolean
   hasContent?: boolean
   hasTools?: boolean
+  maxCompletionTokens?: unknown
+  maxTokens?: unknown
   model?: string
   pdf?: boolean
   signedReasoning?: boolean
@@ -989,6 +1006,12 @@ async function postChatRoute(options: {
     body: JSON.stringify({
       model: options.model ?? "route-model",
       messages,
+      ...(options.maxTokens !== undefined ?
+        { max_tokens: options.maxTokens }
+      : {}),
+      ...(options.maxCompletionTokens !== undefined ?
+        { max_completion_tokens: options.maxCompletionTokens }
+      : {}),
       ...(options.hasTools || tools !== undefined ? { tools } : {}),
       ...(options.toolChoice !== undefined ?
         { tool_choice: options.toolChoice }

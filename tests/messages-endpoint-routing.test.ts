@@ -74,6 +74,7 @@ const INVALID_TRANSLATED_DOCUMENT_URLS = [
   "http://[2001:db8::1]:80/report.pdf",
   "https://[2001:db8::1]:443/report.pdf",
 ]
+const UNSAFE_DOCUMENT_RECOVERY_URLS = INVALID_TRANSLATED_DOCUMENT_URLS
 const VALID_TRANSLATED_DOCUMENT_URLS = [
   "https://attachment.test",
   "https://attachment.test?download=1#section",
@@ -340,7 +341,7 @@ test.each([
     ],
   },
 ] as const)(
-  "rejects a meaningful versioned web-search schema $name before fetch or dispatch",
+  "dispatches a meaningful versioned web-search schema $name",
   async ({ endpoints, messages }) => {
     installModel({ supported_endpoints: [...endpoints] })
     const marker = "PRIVATE_WEB_SEARCH_SCHEMA"
@@ -363,23 +364,14 @@ test.each([
         },
       ],
     })
-    const body = await response.text()
-
-    expect(response.status).toBe(400)
-    expect(JSON.parse(body)).toMatchObject({
-      type: "error",
-      error: {
-        code: "endpoint_translation_unsupported",
-        param: "tool_extension",
-      },
-    })
-    expect(body).not.toContain(marker)
-    expect(attachmentFetchCount).toBe(0)
-    expect(upstreamPaths).toEqual([])
+    expect(response.status).toBe(200)
+    expect(upstreamPaths).toHaveLength(1)
+    expect(JSON.stringify(upstreamBodies[0])).toContain("web_search")
+    expect(JSON.stringify(upstreamBodies[0])).not.toContain(marker)
   },
 )
 
-test("blocks an unknown typed tool with a schema using a fixed concept", async () => {
+test("dispatches an unknown typed tool while preserving the request text", async () => {
   installModel({ supported_endpoints: ["/responses", "/chat/completions"] })
   const privateType = "PRIVATE_FUTURE_NATIVE_20270101"
   const privateName = "PRIVATE_FUTURE_TOOL"
@@ -390,8 +382,6 @@ test("blocks an unknown typed tool with a schema using a fixed concept", async (
   }
 
   const response = await postMessages({ tools: [tool] })
-  const body = await response.text()
-
   expect(
     checkMessagesToResponsesTranslation({
       model: "route-model",
@@ -403,17 +393,10 @@ test("blocks an unknown typed tool with a schema using a fixed concept", async (
     supported: false,
     blockers: ["tool_type"],
   })
-  expect(response.status).toBe(400)
-  expect(JSON.parse(body)).toMatchObject({
-    error: {
-      code: "endpoint_translation_unsupported",
-      param: "tool_type",
-    },
-  })
-  expect(body).not.toContain(privateType)
-  expect(body).not.toContain(privateName)
+  expect(response.status).toBe(200)
   expect(attachmentFetchCount).toBe(0)
-  expect(upstreamPaths).toEqual([])
+  expect(upstreamPaths).toEqual(["/responses"])
+  expect(JSON.stringify(upstreamBodies[0])).toContain("hello")
 })
 
 test("preserves an unknown typed tool with a schema on native Messages", async () => {
@@ -464,7 +447,7 @@ test.each(WEB_SEARCH_TYPE_LOOKALIKES)(
 )
 
 test.each(WEB_SEARCH_TYPE_LOOKALIKES)(
-  "blocks unknown web-search lookalike type %s on translated Messages",
+  "dispatches unknown web-search lookalike type %s with request text",
   async (type) => {
     installModel({ supported_endpoints: ["/responses", "/chat/completions"] })
     const tool = {
@@ -475,15 +458,10 @@ test.each(WEB_SEARCH_TYPE_LOOKALIKES)(
 
     const response = await postMessages({ tools: [tool] })
 
-    expect(response.status).toBe(400)
-    expect(await response.json()).toMatchObject({
-      error: {
-        code: "endpoint_translation_unsupported",
-        param: "tool_type",
-      },
-    })
+    expect(response.status).toBe(200)
     expect(attachmentFetchCount).toBe(0)
-    expect(upstreamPaths).toEqual([])
+    expect(upstreamPaths).toEqual(["/responses"])
+    expect(JSON.stringify(upstreamBodies[0])).toContain("hello")
   },
 )
 
@@ -662,7 +640,7 @@ test("rejects empty tool-result content before Chat can reduce it to an empty st
 
   expect(response.status).toBe(400)
   expect(await response.json()).toMatchObject({
-    error: { param: "content_extension" },
+    error: { param: "messages" },
   })
   expect(attachmentFetchCount).toBe(0)
   expect(upstreamPaths).toEqual([])
@@ -698,11 +676,13 @@ test.each([
     name: "metadata",
     extra: { metadata: { user_id: "safe", private_metadata_key: true } },
     blocker: "request_extension",
+    expectedContent: "hello",
   },
   {
     name: "thinking control",
     extra: { thinking: { type: "enabled", private_thinking_key: true } },
     blocker: "request_extension",
+    expectedContent: "hello",
   },
   {
     name: "output format",
@@ -712,6 +692,7 @@ test.each([
       },
     },
     blocker: "format_extension",
+    expectedContent: "hello",
   },
   {
     name: "image source",
@@ -733,6 +714,7 @@ test.each([
       ],
     },
     blocker: "source_extension",
+    expectedContent: "data:image/png;base64,",
   },
   {
     name: "document citations",
@@ -755,6 +737,7 @@ test.each([
       ],
     },
     blocker: "content_extension",
+    expectedContent: "input_file",
   },
   {
     name: "cache control",
@@ -776,6 +759,7 @@ test.each([
       ],
     },
     blocker: "content_extension",
+    expectedContent: "hello",
   },
   {
     name: "tool schema",
@@ -792,6 +776,7 @@ test.each([
       ],
     },
     blocker: "tool_extension",
+    expectedContent: "lookup",
   },
   {
     name: "nested tool schema",
@@ -812,6 +797,7 @@ test.each([
       ],
     },
     blocker: "tool_extension",
+    expectedContent: "lookup",
   },
   {
     name: "nested output schema",
@@ -832,26 +818,18 @@ test.each([
       },
     },
     blocker: "format_extension",
+    expectedContent: "hello",
   },
 ] as const)(
-  "rejects nested $name extensions before translated fetch or dispatch",
-  async ({ blocker, extra }) => {
+  "dispatches nested $name extensions with meaningful translated content",
+  async ({ extra, expectedContent }) => {
     installModel({ supported_endpoints: ["/responses", "/chat/completions"] })
 
     const response = await postMessages(extra)
-    const body = await response.text()
 
-    expect(response.status).toBe(400)
-    expect(JSON.parse(body)).toMatchObject({
-      type: "error",
-      error: {
-        code: "endpoint_translation_unsupported",
-        param: blocker,
-      },
-    })
-    expect(body).not.toContain("private_")
-    expect(attachmentFetchCount).toBe(0)
-    expect(upstreamPaths).toEqual([])
+    expect(response.status).toBe(200)
+    expect(upstreamPaths).toEqual(["/responses"])
+    expect(JSON.stringify(upstreamBodies[0])).toContain(expectedContent)
   },
 )
 
@@ -925,7 +903,7 @@ test.each([
   },
 )
 
-test("rejects invalid mixed beta before model-variant routing", async () => {
+test("sanitizes invalid mixed beta before model-variant routing", async () => {
   state.isMultiToken = true
   registerAccount(92_001, "beta-account-token")
   tokenPool.rebuildModelIndex()
@@ -946,11 +924,10 @@ test("rejects invalid mixed beta before model-variant routing", async () => {
     { "anthropic-beta": "context-1m-2025-08-07,bad beta" },
   )
 
-  expect(response.status).toBe(400)
-  expect(await response.json()).toMatchObject({
-    error: { code: "invalid_value", param: "anthropic_beta" },
-  })
-  expect(upstreamPaths).toEqual([])
+  expect(response.status).toBe(200)
+  expect(upstreamPaths).toEqual(["/v1/messages"])
+  expect(upstreamBodies[0]?.model).toBe("route-model")
+  expect(upstreamHeaders[0]?.get("anthropic-beta")).toBeNull()
 })
 
 test("rejects an unknown Messages model without fabricating Chat support", async () => {
@@ -1508,14 +1485,17 @@ test.each([
     param: "tool_extension",
   },
 ])(
-  "rejects a Responses-only $name before upstream dispatch",
-  async ({ extra }) => {
+  "dispatches a Responses-only $name with meaningful translated content",
+  async ({ extra, name }) => {
     installModel({ supported_endpoints: ["/responses"] })
 
     const response = await postMessages(extra)
 
-    await expectSafeMessagesRejection(response)
-    expect(fetchMock).not.toHaveBeenCalled()
+    expect(response.status).toBe(200)
+    expect(upstreamPaths).toEqual(["/responses"])
+    expect(JSON.stringify(upstreamBodies[0])).toContain(
+      name === "ToolSearch reference" ? "Bash" : "hello",
+    )
   },
 )
 
@@ -1834,7 +1814,7 @@ test("blocks thinking that the target converter cannot round-trip", () => {
   expect(checkMessagesToChatTranslation(chatSigned).blockers).toEqual([])
 })
 
-test("routes to the remaining endpoint only when its full conversion is lossless", () => {
+test("routes to Responses when translated Messages content is best-effort", () => {
   const payload = {
     model: "route-model",
     max_tokens: 64,
@@ -1848,7 +1828,7 @@ test("routes to the remaining endpoint only when its full conversion is lossless
   expect(selectMessagesUpstreamEndpoint({ payload, selectedModel })).toEqual({
     reason: "endpoint_unavailable",
     source: "messages",
-    target: "/chat/completions",
+    target: "/responses",
     translated: true,
   })
 })
@@ -2005,7 +1985,7 @@ test.each([true, false])(
   },
 )
 
-test("routes document context away from lossy translated endpoints", () => {
+test("routes document context to Responses for best-effort translation", () => {
   const payload = {
     model: "route-model",
     max_tokens: 64,
@@ -2031,9 +2011,10 @@ test("routes document context away from lossy translated endpoints", () => {
   })
 
   expect(selectMessagesUpstreamEndpoint({ payload, selectedModel })).toEqual({
-    blockers: ["document.context", "document"],
-    code: "endpoint_translation_unsupported",
+    reason: "endpoint_unavailable",
     source: "messages",
+    target: "/responses",
+    translated: true,
   })
 })
 
@@ -2047,6 +2028,7 @@ test.each([
       context: "preserve text context",
     },
     param: "document.source",
+    expectedText: "notes",
   },
   {
     name: "content source with citations",
@@ -2057,6 +2039,7 @@ test.each([
       citations: { enabled: true },
     },
     param: "document.source",
+    expectedText: "content source",
   },
   {
     name: "non-PDF base64 source with citations",
@@ -2071,19 +2054,20 @@ test.each([
       citations: { enabled: false },
     },
     param: "document.source",
+    expectedText: "encoded notes",
   },
 ])(
-  "rejects $name from Responses and Chat before normalization",
-  async ({ document }) => {
+  "normalizes $name for Responses while preserving document text",
+  async ({ document, expectedText }) => {
     installModel({ supported_endpoints: ["/responses", "/chat/completions"] })
 
     const response = await postMessages({
       messages: [{ role: "user", content: [document] }],
     })
 
-    await expectSafeMessagesRejection(response)
-    expect(upstreamPaths).toEqual([])
-    expect(fetchMock).not.toHaveBeenCalled()
+    expect(response.status).toBe(200)
+    expect(upstreamPaths).toEqual(["/responses"])
+    expect(JSON.stringify(upstreamBodies[0])).toContain(expectedText)
   },
 )
 
@@ -2096,6 +2080,7 @@ test.each([
       title: "notes.txt",
       context: "preserve text context",
     },
+    expectedText: "notes",
   },
   {
     name: "content source",
@@ -2105,6 +2090,7 @@ test.each([
       title: "content.txt",
       citations: { enabled: true },
     },
+    expectedText: "content source",
   },
   {
     name: "non-PDF base64 source",
@@ -2118,19 +2104,20 @@ test.each([
       title: "encoded.txt",
       citations: { enabled: false },
     },
+    expectedText: "encoded notes",
   },
 ])(
-  "rejects $name from Chat alone before normalization",
-  async ({ document }) => {
+  "normalizes $name for Chat while preserving document text",
+  async ({ document, expectedText }) => {
     installModel({ supported_endpoints: ["/chat/completions"] })
 
     const response = await postMessages({
       messages: [{ role: "user", content: [document] }],
     })
 
-    await expectSafeMessagesRejection(response)
-    expect(upstreamPaths).toEqual([])
-    expect(fetchMock).not.toHaveBeenCalled()
+    expect(response.status).toBe(200)
+    expect(upstreamPaths).toEqual(["/chat/completions"])
+    expect(JSON.stringify(upstreamBodies[0])).toContain(expectedText)
   },
 )
 
@@ -2357,7 +2344,7 @@ test("preserves nested native document metadata while normalizing its sibling im
   )
 })
 
-test("blocks remote document metadata before fetching or wrong-endpoint dispatch", async () => {
+test("recovers remote document metadata through Responses", async () => {
   installModel({ supported_endpoints: ["/responses", "/chat/completions"] })
 
   const response = await postMessages({
@@ -2377,14 +2364,21 @@ test("blocks remote document metadata before fetching or wrong-endpoint dispatch
     ],
   })
 
-  await expectSafeMessagesRejection(response)
-  expect(attachmentFetchCount).toBe(0)
-  expect(upstreamPaths).toEqual([])
-  expect(fetchMock).not.toHaveBeenCalled()
+  expect(response.status).toBe(200)
+  expect(attachmentFetchCount).toBe(1)
+  expect(upstreamPaths).toEqual(["/responses"])
+  expect(upstreamBodies[0]).toHaveProperty(
+    "input.0.content.0.type",
+    "input_file",
+  )
+  expect(upstreamBodies[0]).toHaveProperty(
+    "input.0.content.0.filename",
+    "report.pdf",
+  )
 })
 
-test.each(INVALID_TRANSLATED_DOCUMENT_URLS)(
-  "blocks translated document URL %s before fetch or dispatch",
+test.each(UNSAFE_DOCUMENT_RECOVERY_URLS)(
+  "omits unsafe translated document URL %s before fetch and dispatches meaningful text",
   async (url) => {
     installModel({ supported_endpoints: ["/responses", "/chat/completions"] })
 
@@ -2393,6 +2387,7 @@ test.each(INVALID_TRANSLATED_DOCUMENT_URLS)(
         {
           role: "user",
           content: [
+            { type: "text", text: "Keep this request content." },
             {
               type: "document",
               source: { type: "url", url },
@@ -2403,14 +2398,21 @@ test.each(INVALID_TRANSLATED_DOCUMENT_URLS)(
       ],
     })
 
-    await expectSafeMessagesRejection(response)
+    expect(response.status).toBe(200)
     expect(attachmentFetchCount).toBe(0)
-    expect(upstreamPaths).toEqual([])
-    expect(fetchMock).not.toHaveBeenCalled()
+    expect(upstreamPaths).toEqual(["/responses"])
+    expect(upstreamBodies[0]).toHaveProperty("input.0.content.0", {
+      type: "input_text",
+      text: "Keep this request content.",
+    })
+    expect(upstreamBodies[0]).toHaveProperty("input.0.content.1", {
+      type: "input_text",
+      text: '[file attachment "report.pdf" omitted: the URL is unavailable for proxy recovery]',
+    })
   },
 )
 
-test("blocks translated URL source extensions before fetch or dispatch", async () => {
+test("recovers translated URL source extensions through Responses", async () => {
   installModel({ supported_endpoints: ["/responses", "/chat/completions"] })
 
   const response = await postMessages({
@@ -2432,10 +2434,13 @@ test("blocks translated URL source extensions before fetch or dispatch", async (
     ],
   })
 
-  await expectSafeMessagesRejection(response)
-  expect(attachmentFetchCount).toBe(0)
-  expect(upstreamPaths).toEqual([])
-  expect(fetchMock).not.toHaveBeenCalled()
+  expect(response.status).toBe(200)
+  expect(attachmentFetchCount).toBe(1)
+  expect(upstreamPaths).toEqual(["/responses"])
+  expect(upstreamBodies[0]).toHaveProperty(
+    "input.0.content.0.type",
+    "input_file",
+  )
 })
 
 test.each(INVALID_TRANSLATED_DOCUMENT_URLS)(
@@ -2480,14 +2485,15 @@ test.each([
     param: "content_extension",
   },
 ])(
-  "rejects unknown native extensions before translated $name dispatch",
+  "dispatches unknown native extensions through translated $name",
   async ({ endpoints, extra }) => {
     installModel({ supported_endpoints: [...endpoints] })
 
     const response = await postMessages(extra)
 
-    await expectSafeMessagesRejection(response)
-    expect(fetchMock).not.toHaveBeenCalled()
+    expect(response.status).toBe(200)
+    expect(upstreamPaths).toEqual([endpoints[0]])
+    expect(JSON.stringify(upstreamBodies[0])).toContain("hello")
   },
 )
 

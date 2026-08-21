@@ -177,24 +177,91 @@ test.each([
   ["negative", -1],
   ["fractional", 1.5],
 ] as const)(
-  "count_tokens rejects present invalid max_tokens: %s",
+  "count_tokens ignores present invalid max_tokens: %s",
   async (_name, maxTokens) => {
     const response = await requestCountTokens({
       body: { max_tokens: maxTokens },
     })
 
-    expect(response.status).toBe(400)
-    expect(await response.json()).toMatchObject({
-      type: "error",
-      error: {
-        code: "invalid_value",
-        param: "max_tokens",
-        type: "invalid_request_error",
-      },
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ input_tokens: 42 })
+    expect(capturedRequests).toHaveLength(1)
+    expect(capturedRequests[0]?.path).toBe("/v1/messages/count_tokens")
+    expect(capturedRequests[0]?.body).toEqual({
+      model: "claude-opus-4.7-1m-internal",
+      messages: [{ role: "user", content: "Hello" }],
     })
-    expect(capturedRequests).toHaveLength(0)
   },
 )
+
+test("count_tokens preserves system and future roles plus unknown native structures", async () => {
+  const futureBlock = {
+    type: "future_native_block_20270101",
+    future_payload: { enabled: true },
+  }
+  const futureTool = {
+    name: "lookup",
+    future_tool_field: { enabled: true },
+  }
+
+  const response = await requestCountTokens({
+    body: {
+      messages: [
+        { role: "system", content: "bootstrap" },
+        { role: "future-role", content: [futureBlock] },
+      ],
+      tools: [futureTool],
+      future_native_field: { enabled: true },
+    },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({ input_tokens: 42 })
+  expect(capturedRequests[0]?.body).toEqual({
+    model: "claude-opus-4.7-1m-internal",
+    messages: [
+      { role: "system", content: "bootstrap" },
+      { role: "future-role", content: [futureBlock] },
+    ],
+    tools: [futureTool],
+  })
+})
+
+test("count_tokens drops malformed optional controls and invalid optional headers", async () => {
+  const response = await requestCountTokens({
+    headers: {
+      "anthropic-beta": "PRIVATE_COUNT_BETA value",
+      "anthropic-version": "PRIVATE_COUNT_VERSION\u007f",
+      "x-model-provider-preference": "PRIVATE_COUNT_PROVIDER\u007f",
+    },
+    body: {
+      metadata: "private",
+      tool_choice: null,
+      thinking: true,
+      output_config: "high",
+      system: ["not-a-block"],
+      stop_sequences: ["good", 3],
+      top_p: "0.8",
+      stream: "yes",
+      fallback_credit_token: 42,
+      max_tokens: "32",
+    },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({ input_tokens: 42 })
+  expect(capturedRequests[0]?.body).toEqual({
+    model: "claude-opus-4.7-1m-internal",
+    messages: [{ role: "user", content: "Hello" }],
+  })
+  expect(capturedRequests[0]?.headers.get("anthropic-beta")).toBeNull()
+  expect(capturedRequests[0]?.headers.get("anthropic-version")).toBe(
+    "2023-06-01",
+  )
+  expect(
+    capturedRequests[0]?.headers.get("x-model-provider-preference"),
+  ).toBeNull()
+})
 
 test("count_tokens forwards prepared native headers", async () => {
   const response = await requestCountTokens({
@@ -319,7 +386,7 @@ test("count_tokens estimates configured custom-provider models locally", async (
   expect(capturedRequests).toHaveLength(0)
 })
 
-test("count_tokens rejects custom-provider nested extensions before local translation", async () => {
+test("count_tokens best-effort estimates custom-provider nested extensions", async () => {
   const marker = "PRIVATE_CUSTOM_COUNT_SCHEMA"
   const response = await requestCountTokens({
     model: "custom-count-alias",
@@ -336,17 +403,10 @@ test("count_tokens rejects custom-provider nested extensions before local transl
       ],
     },
   })
-  const body = await response.text()
+  const body = (await response.json()) as Record<string, unknown>
 
-  expect(response.status).toBe(400)
-  expect(JSON.parse(body)).toMatchObject({
-    type: "error",
-    error: {
-      code: "endpoint_translation_unsupported",
-      param: "tool_extension",
-    },
-  })
-  expect(body).not.toContain(marker)
+  expect(response.status).toBe(200)
+  expect(body.input_tokens).toEqual(expect.any(Number))
   expect(capturedRequests).toHaveLength(0)
 })
 
@@ -369,25 +429,6 @@ test.each([
     code: "invalid_value",
     param: "messages",
   },
-  {
-    name: "content block",
-    body: {
-      model: "claude-opus-4.7-1m-internal",
-      messages: [{ role: "user", content: [null] }],
-    },
-    code: "invalid_type",
-    param: "content",
-  },
-  {
-    name: "tools",
-    body: {
-      model: "claude-opus-4.7-1m-internal",
-      messages: [{ role: "user", content: "hello" }],
-      tools: [{ name: "missing_schema" }],
-    },
-    code: "invalid_type",
-    param: "tools",
-  },
 ] as const)(
   "count_tokens returns machine metadata for malformed $name input",
   async ({ body, code, param }) => {
@@ -407,6 +448,131 @@ test.each([
     expect(capturedRequests).toHaveLength(0)
   },
 )
+
+test("count_tokens preserves future native tools without local schema policing", async () => {
+  const body = {
+    model: "claude-opus-4.7-1m-internal",
+    messages: [{ role: "user", content: "hello" }],
+    tools: [{ name: "missing_schema" }],
+  }
+
+  const response = await server.request("/v1/messages/count_tokens", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({ input_tokens: 42 })
+  expect(capturedRequests[0]?.body).toEqual(body)
+})
+
+test("count_tokens preserves unnamed future native tools with nested fields", async () => {
+  const futureTool = {
+    type: "future_server_tool_20270101",
+    config: { enabled: true, nested: { mode: "opaque" } },
+  }
+
+  const response = await server.request("/v1/messages/count_tokens", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-opus-4.7-1m-internal",
+      messages: [{ role: "user", content: "hello" }],
+      tools: [futureTool],
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({ input_tokens: 42 })
+  expect(capturedRequests[0]?.body).toEqual({
+    model: "claude-opus-4.7-1m-internal",
+    messages: [{ role: "user", content: "hello" }],
+    tools: [futureTool],
+  })
+})
+
+test.each([
+  [
+    "opaque native tool records without name or type",
+    {
+      opaque: {
+        enabled: true,
+        nested: { mode: "opaque" },
+      },
+    },
+  ],
+  [
+    "future native tool records with numeric names",
+    {
+      type: "future_server_tool_20270101",
+      name: 3,
+      config: { enabled: true, nested: { mode: "opaque" } },
+    },
+  ],
+  [
+    "future native tool records with blank names",
+    {
+      type: "future_server_tool_20270101",
+      name: "   ",
+      config: { enabled: true, nested: { mode: "opaque" } },
+    },
+  ],
+] as const)("count_tokens preserves %s", async (_label, futureTool) => {
+  const response = await server.request("/v1/messages/count_tokens", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-opus-4.7-1m-internal",
+      messages: [{ role: "user", content: "hello" }],
+      tools: [futureTool],
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({ input_tokens: 42 })
+  expect(capturedRequests[0]?.body).toEqual({
+    model: "claude-opus-4.7-1m-internal",
+    messages: [{ role: "user", content: "hello" }],
+    tools: [futureTool],
+  })
+})
+
+test("count_tokens drops malformed whole message entries without a local semantic 400", async () => {
+  const response = await server.request("/v1/messages/count_tokens", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-opus-4.7-1m-internal",
+      messages: [null],
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({ input_tokens: 42 })
+  expect(capturedRequests[0]?.body).toEqual({
+    model: "claude-opus-4.7-1m-internal",
+    messages: [],
+  })
+})
+
+test("count_tokens drops malformed nested content instead of rejecting the request", async () => {
+  const response = await server.request("/v1/messages/count_tokens", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-opus-4.7-1m-internal",
+      messages: [{ role: "user", content: [null] }],
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({ input_tokens: 42 })
+  expect(capturedRequests[0]?.body).toEqual({
+    model: "claude-opus-4.7-1m-internal",
+    messages: [{ role: "user", content: [] }],
+  })
+})
 
 test("count_tokens returns invalid_json metadata without raw input", async () => {
   const marker = "PRIVATE_COUNT_INVALID_JSON"
@@ -429,27 +595,3 @@ test("count_tokens returns invalid_json metadata without raw input", async () =>
   expect(body).not.toContain(marker)
   expect(capturedRequests).toHaveLength(0)
 })
-
-test.each([
-  ["anthropic-beta", "PRIVATE_COUNT_BETA value", "anthropic_beta"],
-  ["anthropic-version", "PRIVATE_COUNT_VERSION", "anthropic_version"],
-  [
-    "x-model-provider-preference",
-    "PRIVATE_COUNT_PROVIDER",
-    "model_provider_preference",
-  ],
-] as const)(
-  "count_tokens rejects an invalid %s header locally",
-  async (name, value, param) => {
-    const response = await requestCountTokens({ headers: { [name]: value } })
-    const body = await response.text()
-
-    expect(response.status).toBe(400)
-    expect(JSON.parse(body)).toMatchObject({
-      type: "error",
-      error: { code: "invalid_value", param },
-    })
-    expect(body).not.toContain("PRIVATE_COUNT")
-    expect(capturedRequests).toHaveLength(0)
-  },
-)

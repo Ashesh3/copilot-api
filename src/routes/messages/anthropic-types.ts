@@ -1,10 +1,31 @@
 // Anthropic API Types
 
+declare const anthropicUnknownRoleBrand: unique symbol
+declare const anthropicUnknownContentTypeBrand: unique symbol
+
+export type AnthropicUnknownRole = string & {
+  readonly [anthropicUnknownRoleBrand]: never
+}
+
+export type AnthropicUnknownContentType = string & {
+  readonly [anthropicUnknownContentTypeBrand]: never
+}
+
+export function asAnthropicUnknownRole(value: string): AnthropicUnknownRole {
+  return value as AnthropicUnknownRole
+}
+
+export function asAnthropicUnknownContentType(
+  value: string,
+): AnthropicUnknownContentType {
+  return value as AnthropicUnknownContentType
+}
+
 export interface AnthropicMessagesPayload extends Record<string, unknown> {
   model: string
   messages: Array<AnthropicMessage>
-  max_tokens?: number
-  system?: string | Array<AnthropicTextBlock>
+  max_tokens?: number | null
+  system?: string | Array<AnthropicSystemContentBlock>
   metadata?: Record<string, unknown> & {
     user_id?: string
   }
@@ -100,17 +121,20 @@ export interface AnthropicToolReferenceBlock extends Record<string, unknown> {
   cache_control?: AnthropicCacheControl
 }
 
+export type AnthropicInlineContentBlock =
+  | AnthropicTextBlock
+  | AnthropicImageBlock
+  | AnthropicDocumentBlock
+  | AnthropicUnknownContentBlock
+
+export type AnthropicToolResultContentBlock =
+  | AnthropicInlineContentBlock
+  | AnthropicToolReferenceBlock
+
 export interface AnthropicToolResultBlock extends Record<string, unknown> {
   type: "tool_result"
   tool_use_id: string
-  content:
-    | string
-    | Array<
-        | AnthropicTextBlock
-        | AnthropicImageBlock
-        | AnthropicDocumentBlock
-        | AnthropicToolReferenceBlock
-      >
+  content: string | Array<AnthropicToolResultContentBlock>
   is_error?: boolean
   cache_control?: AnthropicCacheControl
 }
@@ -130,16 +154,28 @@ export interface AnthropicThinkingBlock extends Record<string, unknown> {
   cache_control?: AnthropicCacheControl
 }
 
-export type AnthropicUserContentBlock =
+export interface AnthropicUnknownContentBlock extends Record<string, unknown> {
+  type: AnthropicUnknownContentType
+}
+
+export type AnthropicSystemContentBlock =
   | AnthropicTextBlock
-  | AnthropicImageBlock
-  | AnthropicDocumentBlock
+  | AnthropicUnknownContentBlock
+
+export type AnthropicUserContentBlock =
+  | AnthropicInlineContentBlock
   | AnthropicToolResultBlock
 
 export type AnthropicAssistantContentBlock =
   | AnthropicTextBlock
   | AnthropicToolUseBlock
   | AnthropicThinkingBlock
+  | AnthropicUnknownContentBlock
+
+export type AnthropicContentBlock =
+  | AnthropicUserContentBlock
+  | AnthropicAssistantContentBlock
+  | AnthropicToolReferenceBlock
 
 export interface AnthropicUserMessage extends Record<string, unknown> {
   role: "user"
@@ -151,9 +187,17 @@ export interface AnthropicAssistantMessage extends Record<string, unknown> {
   content: string | Array<AnthropicAssistantContentBlock>
 }
 
-export type AnthropicMessage = AnthropicUserMessage | AnthropicAssistantMessage
+export interface AnthropicCustomMessage extends Record<string, unknown> {
+  role: AnthropicUnknownRole
+  content: string | Array<AnthropicContentBlock>
+}
 
-export interface AnthropicTool extends Record<string, unknown> {
+export type AnthropicMessage =
+  | AnthropicUserMessage
+  | AnthropicAssistantMessage
+  | AnthropicCustomMessage
+
+export interface AnthropicNamedTool extends Record<string, unknown> {
   type?: string
   name: string
   description?: string
@@ -162,6 +206,97 @@ export interface AnthropicTool extends Record<string, unknown> {
   blocked_domains?: Array<string>
   max_uses?: number
   cache_control?: AnthropicCacheControl
+}
+
+export interface AnthropicUnknownTool extends Record<string, unknown> {
+  type?: string
+  name?: unknown
+}
+
+export type AnthropicTool = AnthropicNamedTool | AnthropicUnknownTool
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null
+}
+
+export function isAnthropicUserMessage(
+  message: AnthropicMessage,
+): message is AnthropicUserMessage {
+  return message.role === "user"
+}
+
+export function isAnthropicAssistantMessage(
+  message: AnthropicMessage,
+): message is AnthropicAssistantMessage {
+  return message.role === "assistant"
+}
+
+export function isAnthropicTextBlock(
+  block: unknown,
+): block is AnthropicTextBlock {
+  return (
+    isRecord(block) && block.type === "text" && typeof block.text === "string"
+  )
+}
+
+export function isAnthropicImageBlock(
+  block: unknown,
+): block is AnthropicImageBlock {
+  return isRecord(block) && block.type === "image" && isRecord(block.source)
+}
+
+export function isAnthropicDocumentBlock(
+  block: unknown,
+): block is AnthropicDocumentBlock {
+  return isRecord(block) && block.type === "document" && isRecord(block.source)
+}
+
+export function isAnthropicToolReferenceBlock(
+  block: unknown,
+): block is AnthropicToolReferenceBlock {
+  return (
+    isRecord(block)
+    && block.type === "tool_reference"
+    && typeof block.tool_name === "string"
+  )
+}
+
+export function isAnthropicToolResultBlock(
+  block: unknown,
+): block is AnthropicToolResultBlock {
+  return (
+    isRecord(block)
+    && block.type === "tool_result"
+    && typeof block.tool_use_id === "string"
+  )
+}
+
+export function isAnthropicToolUseBlock(
+  block: unknown,
+): block is AnthropicToolUseBlock {
+  return (
+    isRecord(block)
+    && block.type === "tool_use"
+    && typeof block.id === "string"
+    && typeof block.name === "string"
+    && isRecord(block.input)
+  )
+}
+
+export function isAnthropicThinkingBlock(
+  block: unknown,
+): block is AnthropicThinkingBlock {
+  return (
+    isRecord(block)
+    && block.type === "thinking"
+    && typeof block.thinking === "string"
+  )
+}
+
+export function isAnthropicNamedTool(
+  tool: AnthropicTool,
+): tool is AnthropicNamedTool {
+  return typeof tool.name === "string" && tool.name.trim().length > 0
 }
 
 export interface AnthropicResponse extends Record<string, unknown> {

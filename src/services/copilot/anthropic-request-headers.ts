@@ -1,5 +1,3 @@
-import { LocalHTTPError } from "~/lib/error"
-
 import { sanitizeCopilotHeaderValue } from "./copilot-contract"
 
 export interface AnthropicRequestHeaderOptions {
@@ -65,53 +63,11 @@ export function validateAnthropicRequestHeaderOptions(options: {
   anthropicVersion?: string | null
   modelProviderPreference?: string | null
 }): AnthropicRequestHeaderOptions {
-  const sanitized = sanitizeAnthropicRequestHeaderOptions(options)
-  validateHeader({
-    input: options.anthropicBeta,
-    output: sanitized.anthropicBeta,
-    message: "The Anthropic-Beta header is invalid.",
-    param: "anthropic_beta",
-  })
-  validateHeader({
-    input: options.anthropicVersion,
-    output: sanitized.anthropicVersion,
-    message: "The anthropic-version header is invalid.",
-    param: "anthropic_version",
-  })
-  validateHeader({
-    input: options.modelProviderPreference,
-    output: sanitized.modelProviderPreference,
-    message: "The model provider preference header is invalid.",
-    param: "model_provider_preference",
-  })
-  return sanitized
+  return sanitizeAnthropicRequestHeaderOptions(options)
 }
 
 function sanitizeAnthropicHeaderValue(
   value: string | null | undefined,
 ): string | undefined {
   return sanitizeCopilotHeaderValue(value)
-}
-
-function validateHeader(options: {
-  input: string | null | undefined
-  message: string
-  output: string | undefined
-  param: "anthropic_beta" | "anthropic_version" | "model_provider_preference"
-}): void {
-  if (!options.input?.trim() || options.output !== undefined) return
-  const clientBody = {
-    type: "error",
-    error: {
-      type: "invalid_request_error",
-      code: "invalid_value",
-      message: options.message,
-      param: options.param,
-    },
-  }
-  throw new LocalHTTPError(
-    options.message,
-    Response.json(clientBody, { status: 400 }),
-    clientBody,
-  )
 }
