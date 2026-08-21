@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- Google protocol routing and stream lifecycle share request context */
 /**
  * Handler for Google Generative AI API format.
  * Accepts requests at /v1/models/{model}:generateContent and
@@ -20,7 +21,13 @@ import {
   type EndpointRouteDecision,
   type EndpointRouteFailure,
 } from "~/lib/endpoint-routing"
-import { createEndpointTranslationError, isAbortError } from "~/lib/error"
+import {
+  createEndpointTranslationError,
+  inspectHttpError,
+  isAbortError,
+  isHTTPError,
+  reportHttpError,
+} from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
 import {
   applyModelRedirect,
@@ -39,6 +46,11 @@ import {
 } from "~/lib/request-logger"
 import { withSseHeartbeat } from "~/lib/sse-lifecycle"
 import { state } from "~/lib/state"
+import {
+  type StreamTerminalFailure,
+  type StreamTerminalLifecycle,
+  createStreamTerminalLifecycle,
+} from "~/lib/stream-terminal-lifecycle"
 import { getTokenCount } from "~/lib/tokenizer"
 import {
   addPromptCaching,
@@ -69,7 +81,12 @@ import {
 import { sanitizeAnthropicRequestHeaderOptions } from "~/services/copilot/messages-contract"
 
 import type { AnthropicResponse } from "../messages/anthropic-types"
-import type { GoogleAIRequest } from "./google-ai-types"
+import type {
+  GoogleAIRequest,
+  GoogleAIResponse,
+  GoogleStreamChunk,
+  GoogleStreamFailure,
+} from "./google-ai-types"
 
 import {
   chatPayloadToAnthropic,
@@ -97,6 +114,202 @@ import {
 const logger = createHandlerLogger("google-ai-handler")
 
 const GOOGLE_ACTIONS = new Set(["generateContent", "streamGenerateContent"])
+const GOOGLE_STREAM_FAILURE_MESSAGE =
+  "Upstream stream ended before a terminal response"
+
+type GoogleStreamOutputMode = "json" | "sse"
+
+interface GoogleStreamOutput {
+  readonly aborted: boolean
+  readonly closed: boolean
+  writeChunk(chunk: GoogleStreamChunk): Promise<void>
+  wrapSource<T>(source: AsyncIterable<T>): AsyncIterable<T>
+  onAbort(callback: () => void): void
+}
+
+interface GoogleStreamTerminalAdapter {
+  readonly lifecycle: StreamTerminalLifecycle<GoogleAIResponse>
+  writePartial(chunk: GoogleAIResponse): Promise<void>
+  succeed(chunk: GoogleAIResponse): Promise<boolean>
+  failReceived(failure: GoogleStreamFailure): Promise<boolean>
+  failAfterCommit(failure: StreamTerminalFailure): Promise<boolean>
+  finishSource(): Promise<boolean>
+  abort(): boolean
+}
+
+function createLocalGoogleStreamFailure(): GoogleStreamFailure {
+  return {
+    error: {
+      code: 500,
+      message: GOOGLE_STREAM_FAILURE_MESSAGE,
+      status: "INTERNAL",
+    },
+  }
+}
+
+function createGoogleStreamFailure(
+  failure: StreamTerminalFailure,
+): GoogleStreamFailure {
+  if (failure.kind === "thrown" && failure.inspection?.kind === "upstream") {
+    const inspection = failure.inspection
+    return {
+      error: {
+        code: inspection.status,
+        message: inspection.bodyText ?? GOOGLE_STREAM_FAILURE_MESSAGE,
+        status: "INTERNAL",
+        ...(inspection.bodyText === undefined ?
+          { body_bytes: Array.from(inspection.bodyBytes) }
+        : {}),
+        ...(inspection.contentType ?
+          { content_type: inspection.contentType }
+        : {}),
+        upstream_status: inspection.status,
+      },
+    }
+  }
+  return createLocalGoogleStreamFailure()
+}
+
+function createGoogleStreamTerminalAdapter(options: {
+  c: Context
+  output: GoogleStreamOutput
+}): GoogleStreamTerminalAdapter {
+  let receivedFailure: GoogleStreamFailure | undefined
+  const lifecycle = createStreamTerminalLifecycle<GoogleAIResponse>({
+    isDownstreamAborted: () => options.output.aborted || options.output.closed,
+    onSuccess: async (chunk) => await options.output.writeChunk(chunk),
+    onFailure: async (failure) => {
+      await options.output.writeChunk(
+        receivedFailure ?? createGoogleStreamFailure(failure),
+      )
+      if (failure.kind === "thrown" && failure.inspection) {
+        reportHttpError(options.c, failure.inspection)
+      }
+    },
+  })
+  options.output.onAbort(() => lifecycle.abort())
+
+  return {
+    lifecycle,
+    writePartial: async (chunk) => {
+      if (lifecycle.state === "open") await options.output.writeChunk(chunk)
+    },
+    succeed: async (chunk) => await lifecycle.succeed(chunk),
+    async failReceived(failure) {
+      if (lifecycle.state !== "open") return false
+      receivedFailure = failure
+      return await lifecycle.fail({ kind: "thrown", error: failure })
+    },
+    failAfterCommit: async (failure) => await lifecycle.fail(failure),
+    finishSource: async () => await lifecycle.finishSource(),
+    abort: () => lifecycle.abort(),
+  }
+}
+
+async function failGoogleStreamAfterCommit(
+  adapter: GoogleStreamTerminalAdapter,
+  output: GoogleStreamOutput,
+  error: unknown,
+): Promise<void> {
+  if (isAbortError(error) || output.aborted || output.closed) {
+    adapter.abort()
+    return
+  }
+  const inspection =
+    isHTTPError(error) ? await inspectHttpError(error) : undefined
+  if (inspection?.status === 499) {
+    adapter.abort()
+    return
+  }
+  await adapter.failAfterCommit({
+    kind: "thrown",
+    error,
+    ...(inspection ? { inspection } : {}),
+  })
+}
+
+async function renderGoogleStream(
+  c: Context,
+  outputMode: GoogleStreamOutputMode,
+  consume: (output: GoogleStreamOutput) => Promise<void>,
+): Promise<Response> {
+  if (outputMode === "sse") {
+    return streamSSE(c, async (stream) => {
+      await consume({
+        get aborted() {
+          return stream.aborted
+        },
+        get closed() {
+          return stream.closed
+        },
+        writeChunk: async (chunk) => {
+          await stream.writeSSE({ data: JSON.stringify(chunk) })
+        },
+        wrapSource: <T>(source: AsyncIterable<T>) =>
+          withSseHeartbeat(source, stream),
+        onAbort: (callback) => stream.onAbort(callback),
+      })
+    })
+  }
+
+  const chunks: Array<GoogleStreamChunk> = []
+  const signal = c.req.raw.signal
+  await consume({
+    get aborted() {
+      return signal.aborted
+    },
+    closed: false,
+    writeChunk: (chunk) => {
+      chunks.push(chunk)
+      return Promise.resolve()
+    },
+    wrapSource: <T>(source: AsyncIterable<T>) => source,
+    onAbort: (callback) =>
+      signal.addEventListener("abort", callback, { once: true }),
+  })
+  return c.json(chunks)
+}
+
+function receivedGoogleFailure(value: unknown): GoogleStreamFailure {
+  if (typeof value !== "object" || value === null) {
+    return createLocalGoogleStreamFailure()
+  }
+  const record = value as Record<string, unknown>
+  const nested =
+    typeof record.error === "object" && record.error !== null ?
+      (record.error as Record<string, unknown>)
+    : record
+  let upstreamStatus: number | undefined
+  if (typeof nested.upstream_status === "number") {
+    upstreamStatus = nested.upstream_status
+  } else if (typeof nested.status === "number") {
+    upstreamStatus = nested.status
+  }
+  const bodyBytes =
+    (
+      Array.isArray(nested.body_bytes)
+      && nested.body_bytes.every((item) => typeof item === "number")
+    ) ?
+      ([...nested.body_bytes] as Array<number>)
+    : undefined
+  return {
+    error: {
+      code: upstreamStatus ?? 500,
+      message:
+        typeof nested.message === "string" ?
+          nested.message
+        : GOOGLE_STREAM_FAILURE_MESSAGE,
+      status: "INTERNAL",
+      ...(bodyBytes ? { body_bytes: bodyBytes } : {}),
+      ...(typeof nested.content_type === "string" ?
+        { content_type: nested.content_type }
+      : {}),
+      ...(upstreamStatus === undefined ?
+        {}
+      : { upstream_status: upstreamStatus }),
+    },
+  }
+}
 
 function googleActionError(c: Context, message: string): Response {
   return c.json(
@@ -251,6 +464,8 @@ export async function handleGoogleAI(c: Context) {
     return googleActionError(c, "Unsupported Google AI action")
   }
   const isStream = action === "streamGenerateContent"
+  const outputMode: GoogleStreamOutputMode =
+    c.req.query("alt") === "sse" ? "sse" : "json"
 
   // Apply silent model redirect — google-ai response format does not include
   // a model field, so client-facing transparency is automatic.
@@ -354,6 +569,7 @@ export async function handleGoogleAI(c: Context) {
     routeDecision,
     selectedModel,
     isStream,
+    outputMode,
     reasoningEffort,
   })
 }
@@ -367,15 +583,18 @@ async function dispatchGoogleRequest(
     routeDecision: EndpointRouteDecision
     selectedModel: Model | undefined
     isStream: boolean
+    outputMode: GoogleStreamOutputMode
     reasoningEffort?: ReasoningEffort
   },
 ) {
-  const { finalPayload, routeDecision, selectedModel, isStream } = options
+  const { finalPayload, routeDecision, selectedModel, isStream, outputMode } =
+    options
 
   if (routeDecision.target === "/responses") {
     consola.debug("[google-ai] Using Responses API")
     return await handleWithResponsesApi(c, finalPayload, {
       isStream,
+      outputMode,
       effortOverride: options.reasoningEffort,
     })
   }
@@ -386,11 +605,12 @@ async function dispatchGoogleRequest(
       requestedModel: options.requestedModel,
       selectedModel,
       isStream,
+      outputMode,
     })
   }
 
   consola.debug("[google-ai] Using ChatCompletions API")
-  return await handleWithChatCompletions(c, finalPayload)
+  return await handleWithChatCompletions(c, finalPayload, outputMode)
 }
 
 export function selectGoogleUpstreamEndpoint(options: {
@@ -455,12 +675,13 @@ function applyGoogleReasoningEffort(
 async function handleWithChatCompletions(
   c: Context,
   finalPayload: ChatCompletionsPayload,
+  outputMode: GoogleStreamOutputMode,
 ) {
   const needsWebSearch =
     finalPayload.tools?.some((tool) => isChatWebSearchFunctionTool(tool))
     ?? false
   if (needsWebSearch) {
-    return await handleChatCompletionsWithWebSearch(c, finalPayload)
+    return await handleChatCompletionsWithWebSearch(c, finalPayload, outputMode)
   }
 
   const response = await createChatCompletions(finalPayload, {
@@ -494,11 +715,12 @@ async function handleWithChatCompletions(
   // ─── Streaming Response ───
   logger.debug("Streaming response from Copilot")
 
-  return streamSSE(c, async (stream) => {
+  return await renderGoogleStream(c, outputMode, async (output) => {
+    const adapter = createGoogleStreamTerminalAdapter({ c, output })
     try {
       const streamState = createGoogleStreamState()
 
-      for await (const rawEvent of withSseHeartbeat(response, stream)) {
+      for await (const rawEvent of output.wrapSource(response)) {
         logger.debug("Copilot raw stream event:", JSON.stringify(rawEvent))
         if (rawEvent.data === "[DONE]") {
           break
@@ -520,14 +742,17 @@ async function handleWithChatCompletions(
 
         const googleChunk = translateChunkToGoogle(chunk, streamState)
         if (googleChunk) {
-          await stream.writeSSE({
-            data: JSON.stringify(googleChunk),
-          })
+          const finishReason = googleChunk.candidates[0]?.finishReason
+          if (finishReason !== null) {
+            await adapter.succeed(googleChunk)
+            break
+          }
+          await adapter.writePartial(googleChunk)
         }
       }
+      if (adapter.lifecycle.state === "open") await adapter.finishSource()
     } catch (error) {
-      if (isAbortError(error)) return
-      throw error
+      await failGoogleStreamAfterCommit(adapter, output, error)
     }
   })
 }
@@ -535,6 +760,7 @@ async function handleWithChatCompletions(
 async function handleChatCompletionsWithWebSearch(
   c: Context,
   payload: ChatCompletionsPayload,
+  outputMode: GoogleStreamOutputMode,
 ) {
   const requestedStream = Boolean(payload.stream)
   const bufferedPayload = { ...payload, stream: false }
@@ -554,37 +780,9 @@ async function handleChatCompletionsWithWebSearch(
 
   if (!requestedStream) return c.json(translateOpenAIToGoogle(result))
 
-  return streamSSE(c, async (stream) => {
-    const streamState = createGoogleStreamState()
-    for (const choice of result.choices) {
-      const chunk: ChatCompletionChunk = {
-        id: result.id,
-        object: "chat.completion.chunk",
-        created: result.created,
-        model: result.model,
-        choices: [
-          {
-            index: choice.index,
-            delta: {
-              role: "assistant",
-              content: choice.message.content,
-              reasoning_text: choice.message.reasoning_text,
-              reasoning_opaque: choice.message.reasoning_opaque,
-              tool_calls: choice.message.tool_calls?.map((toolCall, index) => ({
-                ...toolCall,
-                index,
-              })),
-            },
-            finish_reason: choice.finish_reason,
-            logprobs: choice.logprobs,
-          },
-        ],
-      }
-      const googleChunk = translateChunkToGoogle(chunk, streamState)
-      if (googleChunk) {
-        await stream.writeSSE({ data: JSON.stringify(googleChunk) })
-      }
-    }
+  return await renderGoogleStream(c, outputMode, async (output) => {
+    const adapter = createGoogleStreamTerminalAdapter({ c, output })
+    await adapter.succeed(translateOpenAIToGoogle(result))
   })
 }
 
@@ -596,6 +794,7 @@ async function handleWithAnthropicMessages(
   options: {
     selectedModel?: Model
     isStream: boolean
+    outputMode: GoogleStreamOutputMode
     requestedModel: string
   },
 ) {
@@ -652,7 +851,8 @@ async function handleWithAnthropicMessages(
   }
 
   // Anthropic SSE → ChatCompletions chunks → Google chunks
-  return streamSSE(c, async (stream) => {
+  return await renderGoogleStream(c, options.outputMode, async (output) => {
+    const adapter = createGoogleStreamTerminalAdapter({ c, output })
     try {
       const googleState = createGoogleStreamState()
       const chunkShim = {
@@ -668,21 +868,27 @@ async function handleWithAnthropicMessages(
           }
           const googleChunk = translateChunkToGoogle(chunk, googleState)
           if (googleChunk) {
-            await stream.writeSSE({ data: JSON.stringify(googleChunk) })
+            const finishReason = googleChunk.candidates[0]?.finishReason
+            if (finishReason !== null) {
+              await adapter.succeed(googleChunk)
+              return
+            }
+            await adapter.writePartial(googleChunk)
           }
         },
       }
-      await streamAnthropicAsChatCompletions(
+      const usage = await streamAnthropicAsChatCompletions(
         chunkShim,
-        withSseHeartbeat(
-          response as AsyncIterable<AnthropicStreamChunk>,
-          stream,
-        ),
+        output.wrapSource(response as AsyncIterable<AnthropicStreamChunk>),
         options.requestedModel,
       )
+      if (usage.receivedFailure !== undefined) {
+        await adapter.failReceived(receivedGoogleFailure(usage.receivedFailure))
+      } else if (adapter.lifecycle.state === "open") {
+        await adapter.finishSource()
+      }
     } catch (error) {
-      if (isAbortError(error)) return
-      throw error
+      await failGoogleStreamAfterCommit(adapter, output, error)
     }
   })
 }
@@ -692,9 +898,13 @@ async function handleWithAnthropicMessages(
 async function handleWithResponsesApi(
   c: Context,
   payload: ChatCompletionsPayload & { model: string },
-  options: { isStream: boolean; effortOverride?: ReasoningEffort },
+  options: {
+    isStream: boolean
+    outputMode: GoogleStreamOutputMode
+    effortOverride?: ReasoningEffort
+  },
 ) {
-  const { isStream, effortOverride } = options
+  const { isStream, outputMode, effortOverride } = options
   addPromptCaching(payload.messages, payload.tools ?? undefined)
   // Shared converter carries image_url and file parts through to
   // input_image/input_file (the local converter used to drop them)
@@ -713,6 +923,7 @@ async function handleWithResponsesApi(
   ) {
     return await handleResponsesMcpWebSearch(c, responsesPayload, {
       isStream,
+      outputMode,
       vision,
       initiator,
     })
@@ -749,11 +960,12 @@ async function handleWithResponsesApi(
   // ─── Streaming ───
   logger.debug("Streaming response from Copilot (Responses API)")
 
-  return streamSSE(c, async (stream) => {
+  return await renderGoogleStream(c, outputMode, async (output) => {
+    const adapter = createGoogleStreamTerminalAdapter({ c, output })
     try {
       const streamState = createGoogleStreamState()
 
-      for await (const chunk of withSseHeartbeat(response, stream)) {
+      for await (const chunk of output.wrapSource(response)) {
         const eventName = chunk.event
         if (eventName === "ping") continue
 
@@ -763,31 +975,37 @@ async function handleWithResponsesApi(
         logger.debug("Responses raw stream event:", data)
 
         const parsed = JSON.parse(data) as ResponseStreamEvent
-        const googleChunk = translateResponsesStreamEventToGoogle(
+        const result = translateResponsesStreamEventToGoogle(
           parsed,
           streamState,
         )
 
-        if (!googleChunk) continue
+        if (result.kind === "ignore") continue
+        if (result.kind === "received_failure") {
+          await adapter.failReceived(result.failure)
+          break
+        }
+        if (result.kind === "partial") {
+          await adapter.writePartial(result.chunk)
+          continue
+        }
 
-        // Capture usage from completed response
-        const isCompleted =
-          parsed.type === "response.completed"
-          || parsed.type === "response.incomplete"
-        if (isCompleted && parsed.response.usage) {
+        if (
+          (parsed.type === "response.completed"
+            || parsed.type === "response.incomplete")
+          && parsed.response.usage
+        ) {
           setRequestContext(c, {
             inputTokens: parsed.response.usage.input_tokens,
             outputTokens: parsed.response.usage.output_tokens,
           })
         }
-
-        await stream.writeSSE({
-          data: JSON.stringify(googleChunk),
-        })
+        await adapter.succeed(result.chunk)
+        break
       }
+      if (adapter.lifecycle.state === "open") await adapter.finishSource()
     } catch (error) {
-      if (isAbortError(error)) return
-      throw error
+      await failGoogleStreamAfterCommit(adapter, output, error)
     }
   })
 }
@@ -797,6 +1015,7 @@ async function handleResponsesMcpWebSearch(
   payload: ResponsesPayload,
   options: {
     isStream: boolean
+    outputMode: GoogleStreamOutputMode
     vision: boolean
     initiator: "agent" | "user"
   },
@@ -828,8 +1047,9 @@ async function handleResponsesMcpWebSearch(
   const googleResponse = translateResponsesResultToGoogle(result)
   if (!options.isStream) return c.json(googleResponse)
 
-  return streamSSE(c, async (stream) => {
-    await stream.writeSSE({ data: JSON.stringify(googleResponse) })
+  return await renderGoogleStream(c, options.outputMode, async (output) => {
+    const adapter = createGoogleStreamTerminalAdapter({ c, output })
+    await adapter.succeed(googleResponse)
   })
 }
 

@@ -119,6 +119,206 @@ test("preserves modelVersion and promptFeedback on streaming Responses translati
     createGoogleStreamState(),
   )
 
-  expect(translated?.modelVersion).toBe("gpt-4o-mini-2025-01-01")
-  expect(translated?.promptFeedback).toEqual({ blockReason: "SAFETY" })
+  expect(translated).toMatchObject({
+    kind: "success",
+    chunk: {
+      modelVersion: "gpt-4o-mini-2025-01-01",
+      promptFeedback: { blockReason: "SAFETY" },
+    },
+  })
+})
+
+test("flushes split tool calls in index order on every Chat terminal", () => {
+  const state = createGoogleStreamState()
+
+  expect(
+    translateChunkToGoogle(
+      {
+        id: "chunk-tools-1",
+        object: "chat.completion.chunk",
+        created: 1,
+        model: "gpt-4o-mini",
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  index: 1,
+                  id: "call_1",
+                  type: "function",
+                  function: { name: "get_", arguments: '{"city":"' },
+                },
+                {
+                  index: 0,
+                  id: "call_0",
+                  type: "function",
+                  function: { name: "find_", arguments: '{"q":"' },
+                },
+              ],
+            },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      },
+      state,
+    ),
+  ).toBeNull()
+
+  const terminal = translateChunkToGoogle(
+    {
+      id: "chunk-tools-2",
+      object: "chat.completion.chunk",
+      created: 1,
+      model: "gpt-4o-mini",
+      choices: [
+        {
+          index: 0,
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                function: { name: "docs", arguments: 'test"}' },
+              },
+              {
+                index: 1,
+                function: { name: "weather", arguments: 'Paris"}' },
+              },
+            ],
+          },
+          finish_reason: "stop",
+          logprobs: null,
+        },
+      ],
+    },
+    state,
+  )
+
+  expect(terminal?.candidates[0]?.finishReason).toBe("STOP")
+  expect(terminal?.candidates[0]?.content.parts).toEqual([
+    {
+      functionCall: {
+        name: "find_docs",
+        args: { q: "test" },
+      },
+    },
+    {
+      functionCall: {
+        name: "get_weather",
+        args: { city: "Paris" },
+      },
+    },
+  ])
+})
+
+test("classifies Responses completed and failed events as distinct terminal results", () => {
+  const completed = translateResponsesStreamEventToGoogle(
+    {
+      type: "response.completed",
+      sequence_number: 1,
+      response: {
+        id: "resp_completed",
+        object: "response",
+        created_at: 1,
+        model: "gpt-4o-mini",
+        output: [],
+        output_text: "",
+        status: "completed",
+        usage: null,
+        error: null,
+        incomplete_details: null,
+        instructions: null,
+        metadata: null,
+        parallel_tool_calls: true,
+        temperature: null,
+        tool_choice: "auto",
+        tools: [],
+        top_p: null,
+      },
+    } as Parameters<typeof translateResponsesStreamEventToGoogle>[0],
+    createGoogleStreamState(),
+  )
+  const failed = translateResponsesStreamEventToGoogle(
+    {
+      type: "response.failed",
+      sequence_number: 2,
+      response: {
+        id: "resp_failed",
+        object: "response",
+        created_at: 1,
+        model: "gpt-4o-mini",
+        output: [],
+        output_text: "",
+        status: "failed",
+        usage: null,
+        error: {
+          code: "upstream_error",
+          message: "  exact received failure\r\n",
+          status: 529,
+          upstream_status: 529,
+          content_type: "text/plain; charset=utf-8",
+          body_bytes: [32, 32, 101],
+        },
+        incomplete_details: null,
+        instructions: null,
+        metadata: null,
+        parallel_tool_calls: true,
+        temperature: null,
+        tool_choice: "auto",
+        tools: [],
+        top_p: null,
+      },
+    } as Parameters<typeof translateResponsesStreamEventToGoogle>[0],
+    createGoogleStreamState(),
+  )
+
+  expect(completed).toMatchObject({
+    kind: "success",
+    chunk: { candidates: [{ finishReason: "STOP" }] },
+  })
+  expect(failed).toEqual({
+    kind: "received_failure",
+    failure: {
+      error: {
+        code: 529,
+        message: "  exact received failure\r\n",
+        status: "INTERNAL",
+        body_bytes: [32, 32, 101],
+        content_type: "text/plain; charset=utf-8",
+        upstream_status: 529,
+      },
+    },
+  })
+})
+
+test("classifies a top-level Responses error as a received Google failure", () => {
+  const translated = translateResponsesStreamEventToGoogle(
+    {
+      type: "error",
+      sequence_number: 1,
+      code: "upstream_error",
+      message: "exact top-level error",
+      param: null,
+      status: 524,
+      upstream_status: 524,
+      content_type: "text/plain",
+      body_bytes: [101, 114, 114],
+    } as Parameters<typeof translateResponsesStreamEventToGoogle>[0],
+    createGoogleStreamState(),
+  )
+
+  expect(translated).toEqual({
+    kind: "received_failure",
+    failure: {
+      error: {
+        code: 524,
+        message: "exact top-level error",
+        status: "INTERNAL",
+        body_bytes: [101, 114, 114],
+        content_type: "text/plain",
+        upstream_status: 524,
+      },
+    },
+  })
 })

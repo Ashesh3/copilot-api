@@ -20,18 +20,13 @@ import type {
   GoogleCandidate,
   GoogleContent,
   GooglePart,
-  GoogleStreamChunk,
+  GoogleStreamFailure,
   GoogleUsageMetadata,
 } from "./google-ai-types"
 
 // ─── Finish Reason Mapping ───
 
-type OpenAIFinishReason =
-  | "stop"
-  | "length"
-  | "tool_calls"
-  | "content_filter"
-  | null
+type OpenAIFinishReason = string | null
 
 function mapFinishReason(
   reason: OpenAIFinishReason,
@@ -50,7 +45,7 @@ function mapFinishReason(
       return "STOP"
     }
     default: {
-      return null
+      return reason === null ? null : "OTHER"
     }
   }
 }
@@ -200,6 +195,9 @@ function accumulateToolCallDeltas(
   for (const tc of toolCallDeltas) {
     const existing = streamState.toolCalls.get(tc.index)
     if (existing) {
+      if (tc.function?.name) {
+        existing.name += tc.function.name
+      }
       if (tc.function?.arguments) {
         existing.arguments += tc.function.arguments
       }
@@ -218,15 +216,16 @@ function accumulateToolCallDeltas(
 function emitAccumulatedToolCalls(
   streamState: GoogleStreamState,
 ): Array<GooglePart> {
-  const parts: Array<GooglePart> = []
-  for (const [, tc] of streamState.toolCalls) {
-    parts.push({
-      functionCall: {
-        name: tc.name,
-        args: parseToolCallArgs(tc.arguments),
-      },
-    })
-  }
+  const parts = [...streamState.toolCalls.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(
+      ([, tc]): GooglePart => ({
+        functionCall: {
+          name: tc.name,
+          args: parseToolCallArgs(tc.arguments),
+        },
+      }),
+    )
   streamState.toolCalls.clear()
   return parts
 }
@@ -240,7 +239,7 @@ function buildStreamChunk(options: {
   index: number
   usage: ChatCompletionChunk["usage"]
   modelVersion?: string
-}): GoogleStreamChunk {
+}): GoogleAIResponse {
   const { parts, finishReason, index, usage, modelVersion } = options
   // Ensure at least empty text for non-tool-call finish
   if (parts.length === 0 && finishReason) {
@@ -270,7 +269,7 @@ function buildStreamChunk(options: {
 export function translateChunkToGoogle(
   chunk: ChatCompletionChunk,
   streamState: GoogleStreamState,
-): GoogleStreamChunk | null {
+): GoogleAIResponse | null {
   // Usage-only chunk (final chunk with no choices)
   if (chunk.choices.length === 0) {
     if (chunk.usage) {
@@ -298,7 +297,7 @@ export function translateChunkToGoogle(
   }
 
   // On finish, emit accumulated tool calls
-  if (choice.finish_reason === "tool_calls") {
+  if (choice.finish_reason !== null) {
     parts.push(...emitAccumulatedToolCalls(streamState))
   }
 
@@ -418,42 +417,108 @@ export function translateResponsesResultToGoogle(
  * Translate a single Responses API stream event → Google streaming chunk.
  * Returns null if the event doesn't produce a Google event.
  */
+export type GoogleResponsesStreamResult =
+  | { kind: "partial"; chunk: GoogleAIResponse }
+  | { kind: "success"; chunk: GoogleAIResponse }
+  | { kind: "received_failure"; failure: GoogleStreamFailure }
+  | { kind: "ignore" }
+
+const LOCAL_STREAM_FAILURE_MESSAGE =
+  "Upstream stream ended before a terminal response"
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null
+}
+
+function readNumber(
+  record: Record<string, unknown>,
+  key: string,
+): number | undefined {
+  const value = record[key]
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined
+}
+
+function readBodyBytes(
+  record: Record<string, unknown>,
+): Array<number> | undefined {
+  const value = record.body_bytes
+  if (
+    !Array.isArray(value)
+    || !value.every((item) => typeof item === "number")
+  ) {
+    return undefined
+  }
+  return [...value]
+}
+
+function createReceivedResponsesFailure(value: unknown): GoogleStreamFailure {
+  const record = isRecord(value) ? value : {}
+  const upstreamStatus =
+    readNumber(record, "upstream_status") ?? readNumber(record, "status")
+  const message =
+    typeof record.message === "string" ?
+      record.message
+    : LOCAL_STREAM_FAILURE_MESSAGE
+  const bodyBytes = readBodyBytes(record)
+  const contentType =
+    typeof record.content_type === "string" ? record.content_type : undefined
+
+  return {
+    error: {
+      code: upstreamStatus ?? 500,
+      message,
+      status: "INTERNAL",
+      ...(bodyBytes ? { body_bytes: bodyBytes } : {}),
+      ...(contentType ? { content_type: contentType } : {}),
+      ...(upstreamStatus === undefined ?
+        {}
+      : { upstream_status: upstreamStatus }),
+    },
+  }
+}
+
 export function translateResponsesStreamEventToGoogle(
   event: ResponseStreamEvent,
   _streamState: GoogleStreamState,
-): GoogleStreamChunk | null {
+): GoogleResponsesStreamResult {
   switch (event.type) {
     case "response.output_text.delta": {
       return {
-        candidates: [
-          {
-            content: { role: "model", parts: [{ text: event.delta }] },
-            finishReason: null,
-            index: 0,
-          },
-        ],
+        kind: "partial",
+        chunk: {
+          candidates: [
+            {
+              content: { role: "model", parts: [{ text: event.delta }] },
+              finishReason: null,
+              index: 0,
+            },
+          ],
+        },
       }
     }
 
     case "response.function_call_arguments.done": {
       return {
-        candidates: [
-          {
-            content: {
-              role: "model",
-              parts: [
-                {
-                  functionCall: {
-                    name: event.name,
-                    args: parseToolCallArgs(event.arguments),
+        kind: "partial",
+        chunk: {
+          candidates: [
+            {
+              content: {
+                role: "model",
+                parts: [
+                  {
+                    functionCall: {
+                      name: event.name,
+                      args: parseToolCallArgs(event.arguments),
+                    },
                   },
-                },
-              ],
+                ],
+              },
+              finishReason: null,
+              index: 0,
             },
-            finishReason: null,
-            index: 0,
-          },
-        ],
+          ],
+        },
       }
     }
 
@@ -464,21 +529,40 @@ export function translateResponsesStreamEventToGoogle(
         event.response.incomplete_details,
       )
       return {
-        candidates: [
-          {
-            content: { role: "model", parts: [{ text: "" }] },
-            finishReason,
-            index: 0,
-          },
-        ],
-        usageMetadata: translateResponsesUsage(event.response.usage),
-        modelVersion: event.response.model,
-        promptFeedback: getPromptFeedback(finishReason),
+        kind: "success",
+        chunk: {
+          candidates: [
+            {
+              content: { role: "model", parts: [{ text: "" }] },
+              finishReason,
+              index: 0,
+            },
+          ],
+          usageMetadata: translateResponsesUsage(event.response.usage),
+          modelVersion: event.response.model,
+          promptFeedback: getPromptFeedback(finishReason),
+        },
+      }
+    }
+
+    case "response.failed": {
+      return {
+        kind: "received_failure",
+        failure: createReceivedResponsesFailure(
+          (event.response as unknown as Record<string, unknown>).error,
+        ),
+      }
+    }
+
+    case "error": {
+      return {
+        kind: "received_failure",
+        failure: createReceivedResponsesFailure(event),
       }
     }
 
     default: {
-      return null
+      return { kind: "ignore" }
     }
   }
 }
