@@ -5,6 +5,7 @@ import type { CopilotContractNormalizationClass } from "~/lib/copilot-contract-o
 
 import { LocalHTTPError } from "~/lib/error"
 import {
+  type AnthropicContentBlock,
   asAnthropicUnknownContentType,
   asAnthropicUnknownRole,
   type AnthropicAssistantContentBlock,
@@ -15,9 +16,17 @@ import {
   type AnthropicSystemContentBlock,
   type AnthropicTextBlock,
   type AnthropicTool,
+  type AnthropicToolResultContentBlock,
   type AnthropicToolReferenceBlock,
   type AnthropicToolUseBlock,
+  type AnthropicUnknownContentBlock,
   type AnthropicUserContentBlock,
+  isAnthropicDocumentBlock,
+  isAnthropicImageBlock,
+  isAnthropicTextBlock,
+  isAnthropicThinkingBlock,
+  isAnthropicToolResultBlock,
+  isAnthropicToolUseBlock,
 } from "~/routes/messages/anthropic-types"
 
 import {
@@ -62,14 +71,7 @@ type NativeCacheControl = {
 type SanitizedDocumentSourceContent =
   | string
   | Array<AnthropicTextBlock | AnthropicImageBlock>
-type SanitizedMessageContentBlock =
-  | AnthropicUserContentBlock
-  | AnthropicAssistantContentBlock
-type SanitizedToolResultContentBlock =
-  | AnthropicTextBlock
-  | AnthropicImageBlock
-  | AnthropicDocumentBlock
-  | AnthropicToolReferenceBlock
+type SanitizedMessageContentBlock = AnthropicContentBlock
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -671,7 +673,7 @@ function sanitizeToolReferenceBlock(
 
 function sanitizeToolResultContentBlock(
   block: unknown,
-): SanitizedToolResultContentBlock | null {
+): AnthropicToolResultContentBlock | null {
   if (!isRecord(block) || !isNonEmptyString(block.type)) {
     return null
   }
@@ -689,17 +691,14 @@ function sanitizeToolResultContentBlock(
       return sanitizeToolReferenceBlock(block)
     }
     default: {
-      return {
-        type: "text",
-        text: JSON.stringify(block),
-      }
+      return sanitizeUnknownContentBlock(block)
     }
   }
 }
 
 function sanitizeToolResultContent(
   content: unknown,
-): string | Array<SanitizedToolResultContentBlock> {
+): string | Array<AnthropicToolResultContentBlock> {
   if (typeof content === "string") {
     return content
   }
@@ -748,6 +747,15 @@ function sanitizeThinkingBlock(
   }
 }
 
+function sanitizeUnknownContentBlock(
+  block: Record<string, unknown>,
+): AnthropicUnknownContentBlock {
+  return {
+    ...block,
+    type: asAnthropicUnknownContentType(String(block.type)),
+  }
+}
+
 function sanitizeCompatibleContentBlock(
   block: unknown,
 ): SanitizedMessageContentBlock | null {
@@ -788,15 +796,71 @@ function sanitizeCompatibleContentBlock(
       return sanitizeToolReferenceBlock(block)
     }
     default: {
-      return {
-        ...block,
-        type: asAnthropicUnknownContentType(block.type),
-      }
+      return sanitizeUnknownContentBlock(block)
     }
   }
 }
 
-function sanitizeMessageContent(content: unknown): AnthropicMessage["content"] {
+function sanitizeUserMessageContent(
+  content: unknown,
+): string | Array<AnthropicUserContentBlock> {
+  if (typeof content === "string") {
+    return content
+  }
+  if (!Array.isArray(content)) {
+    return []
+  }
+  const sanitizedBlocks: Array<AnthropicUserContentBlock> = []
+  for (const block of content) {
+    const sanitized = sanitizeCompatibleContentBlock(block)
+    if (!sanitized) {
+      continue
+    }
+    if (
+      isAnthropicTextBlock(sanitized)
+      || isAnthropicImageBlock(sanitized)
+      || isAnthropicDocumentBlock(sanitized)
+      || isAnthropicToolResultBlock(sanitized)
+    ) {
+      sanitizedBlocks.push(sanitized)
+      continue
+    }
+    sanitizedBlocks.push(sanitizeUnknownContentBlock(sanitized))
+  }
+  return sanitizedBlocks
+}
+
+function sanitizeAssistantMessageContent(
+  content: unknown,
+): string | Array<AnthropicAssistantContentBlock> {
+  if (typeof content === "string") {
+    return content
+  }
+  if (!Array.isArray(content)) {
+    return []
+  }
+  const sanitizedBlocks: Array<AnthropicAssistantContentBlock> = []
+  for (const block of content) {
+    const sanitized = sanitizeCompatibleContentBlock(block)
+    if (!sanitized) {
+      continue
+    }
+    if (
+      isAnthropicTextBlock(sanitized)
+      || isAnthropicToolUseBlock(sanitized)
+      || isAnthropicThinkingBlock(sanitized)
+    ) {
+      sanitizedBlocks.push(sanitized)
+      continue
+    }
+    sanitizedBlocks.push(sanitizeUnknownContentBlock(sanitized))
+  }
+  return sanitizedBlocks
+}
+
+function sanitizeCustomMessageContent(
+  content: unknown,
+): AnthropicMessage["content"] {
   if (typeof content === "string") {
     return content
   }
@@ -813,17 +877,24 @@ function sanitizeMessage(message: unknown): AnthropicMessage | null {
   if (!isRecord(message) || !isNonEmptyString(message.role)) {
     return null
   }
-  const content = sanitizeMessageContent(message.content)
   if (message.role === "user") {
-    return { ...message, role: "user", content }
+    return {
+      ...message,
+      role: "user",
+      content: sanitizeUserMessageContent(message.content),
+    }
   }
   if (message.role === "assistant") {
-    return { ...message, role: "assistant", content }
+    return {
+      ...message,
+      role: "assistant",
+      content: sanitizeAssistantMessageContent(message.content),
+    }
   }
   return {
     ...message,
     role: asAnthropicUnknownRole(message.role),
-    content,
+    content: sanitizeCustomMessageContent(message.content),
   }
 }
 
@@ -851,7 +922,13 @@ function sanitizeToolStringArray(value: unknown): Array<string> | undefined {
 }
 
 function sanitizeTool(tool: unknown): AnthropicTool | null {
-  if (!isRecord(tool) || !isNonEmptyString(tool.name)) {
+  if (!isRecord(tool)) {
+    return null
+  }
+  if (tool.name === undefined) {
+    return isNonEmptyString(tool.type) ? { ...tool, type: tool.type } : null
+  }
+  if (!isNonEmptyString(tool.name)) {
     return null
   }
   const allowedDomains = sanitizeToolStringArray(tool.allowed_domains)

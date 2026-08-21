@@ -9,6 +9,7 @@ import type {
   AnthropicResponse,
   AnthropicStreamEventData,
   AnthropicTextBlock,
+  AnthropicToolResultContentBlock,
   AnthropicToolResultBlock,
   AnthropicUserContentBlock,
 } from "~/routes/messages/anthropic-types"
@@ -28,6 +29,10 @@ import {
   setSentryOutputMessages,
 } from "~/lib/sentry"
 import { withSseHeartbeat } from "~/lib/sse-lifecycle"
+import {
+  isAnthropicToolResultBlock,
+  isAnthropicToolUseBlock,
+} from "~/routes/messages/anthropic-types"
 import {
   createNativeMessages,
   type NativeMessagesRequestOptions,
@@ -443,14 +448,18 @@ async function convertToolResultContent(
   if (typeof content === "string") return content
   if (!Array.isArray(content)) return ""
 
-  const blocks: Array<
-    Exclude<AnthropicUserContentBlock, AnthropicToolResultBlock>
-  > = []
+  const blocks: Array<AnthropicToolResultContentBlock> = []
   for (const part of content) {
+    const converted = await convertOpenAIContentPartToAnthropic(part, signal)
     blocks.push(
-      ...((await convertOpenAIContentPartToAnthropic(part, signal)) as Array<
-        Exclude<AnthropicUserContentBlock, AnthropicToolResultBlock>
-      >),
+      ...converted.filter(
+        (
+          block,
+        ): block is Exclude<
+          AnthropicUserContentBlock,
+          AnthropicToolResultBlock
+        > => !isAnthropicToolResultBlock(block),
+      ),
     )
   }
   return blocks
@@ -521,9 +530,8 @@ export function anthropicResponseToChat(
   const reasoning = getAnthropicReasoning(response.content)
 
   const toolCalls: Array<ToolCall> = response.content
-    .filter((block) => block.type === "tool_use")
-    .map((block) => {
-      const toolUse = block
+    .filter((block) => isAnthropicToolUseBlock(block))
+    .map((toolUse) => {
       return {
         id: toolUse.id,
         type: "function" as const,

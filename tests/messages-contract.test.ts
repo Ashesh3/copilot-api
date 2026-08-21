@@ -382,10 +382,37 @@ test("preserves system and future roles plus unknown native structures", () => {
     system: [futureSystemBlock],
     messages: [
       { role: "system", content: "bootstrap" },
-      { role: "future-role", content: [futureBlock] },
+      {
+        role: asAnthropicUnknownRole("future-role"),
+        content: [futureBlock],
+      },
     ],
     tools: [{ name: "lookup", future_tool_flag: true }],
     future_native_field: { enabled: true },
+  })
+})
+
+test("preserves unnamed future native tool records with nested fields", () => {
+  const futureTool = {
+    type: "future_server_tool_20270101",
+    config: {
+      enabled: true,
+      nested: { mode: "opaque" },
+    },
+  }
+
+  const prepared = prepareAnthropicMessagesRequest({
+    payload: {
+      model: "claude-current",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "hello" }],
+      tools: [futureTool],
+    } as unknown as AnthropicMessagesPayload,
+    requireMaxTokens: true,
+  })
+
+  expect(prepared.body).toMatchObject({
+    tools: [futureTool],
   })
 })
 
@@ -452,7 +479,7 @@ test("drops malformed nested message and tool entries while preserving forward-c
   expect(prepared.body).toEqual({
     model: "claude-current",
     messages: [
-      { role: "future-role", content: [futureBlock] },
+      { role: asAnthropicUnknownRole("future-role"), content: [futureBlock] },
       {
         role: "assistant",
         content: [

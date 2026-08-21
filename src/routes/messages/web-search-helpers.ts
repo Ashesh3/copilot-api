@@ -28,7 +28,12 @@ import {
   executeWebSearch,
 } from "~/services/copilot/mcp-web-search"
 
-import type { AnthropicResponse } from "./anthropic-types"
+import {
+  type AnthropicResponse,
+  isAnthropicTextBlock,
+  isAnthropicThinkingBlock,
+  isAnthropicToolUseBlock,
+} from "./anthropic-types"
 
 const stringifyResponsesInput = (input: ResponsesPayload["input"]): string =>
   typeof input === "string" ? input : JSON.stringify(input ?? [])
@@ -471,23 +476,12 @@ const emitContentBlock = async (
   block: AnthropicResponse["content"][0],
   index: number,
 ): Promise<void> => {
-  switch (block.type) {
-    case "text": {
-      await emitTextBlock(stream, block.text, index)
-
-      break
-    }
-    case "thinking": {
-      await emitThinkingBlock(stream, block, index)
-
-      break
-    }
-    case "tool_use": {
-      await emitToolUseBlock(stream, block, index)
-
-      break
-    }
-    // No default
+  if (isAnthropicTextBlock(block)) {
+    await emitTextBlock(stream, block.text, index)
+  } else if (isAnthropicThinkingBlock(block)) {
+    await emitThinkingBlock(stream, block, index)
+  } else if (isAnthropicToolUseBlock(block)) {
+    await emitToolUseBlock(stream, block, index)
   }
 
   await stream.writeSSE({

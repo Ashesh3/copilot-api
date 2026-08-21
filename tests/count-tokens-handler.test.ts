@@ -467,6 +467,49 @@ test("count_tokens preserves future native tools without local schema policing",
   expect(capturedRequests[0]?.body).toEqual(body)
 })
 
+test("count_tokens preserves unnamed future native tools with nested fields", async () => {
+  const futureTool = {
+    type: "future_server_tool_20270101",
+    config: { enabled: true, nested: { mode: "opaque" } },
+  }
+
+  const response = await server.request("/v1/messages/count_tokens", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-opus-4.7-1m-internal",
+      messages: [{ role: "user", content: "hello" }],
+      tools: [futureTool],
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({ input_tokens: 42 })
+  expect(capturedRequests[0]?.body).toEqual({
+    model: "claude-opus-4.7-1m-internal",
+    messages: [{ role: "user", content: "hello" }],
+    tools: [futureTool],
+  })
+})
+
+test("count_tokens drops malformed whole message entries without a local semantic 400", async () => {
+  const response = await server.request("/v1/messages/count_tokens", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-opus-4.7-1m-internal",
+      messages: [null],
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({ input_tokens: 42 })
+  expect(capturedRequests[0]?.body).toEqual({
+    model: "claude-opus-4.7-1m-internal",
+    messages: [],
+  })
+})
+
 test("count_tokens drops malformed nested content instead of rejecting the request", async () => {
   const response = await server.request("/v1/messages/count_tokens", {
     method: "POST",

@@ -10,11 +10,18 @@ import {
 import {
   type AnthropicDocumentBlock,
   type AnthropicImageBlock,
+  type AnthropicInlineContentBlock,
   type AnthropicMessagesPayload,
   type AnthropicTextBlock,
   type AnthropicToolReferenceBlock,
   type AnthropicToolResultBlock,
+  type AnthropicUnknownContentBlock,
   type AnthropicUserContentBlock,
+  isAnthropicDocumentBlock,
+  isAnthropicImageBlock,
+  isAnthropicToolReferenceBlock,
+  isAnthropicToolResultBlock,
+  isAnthropicUserMessage,
 } from "./anthropic-types"
 
 /**
@@ -34,13 +41,19 @@ export async function normalizeAnthropicAttachments(
   signal?: AbortSignal,
 ): Promise<void> {
   for (const message of payload.messages) {
-    if (message.role !== "user" || !Array.isArray(message.content)) continue
+    if (!isAnthropicUserMessage(message) || !Array.isArray(message.content)) {
+      continue
+    }
 
     const normalized: Array<AnthropicUserContentBlock> = []
     for (const block of message.content) {
-      if (block.type === "tool_result" && Array.isArray(block.content)) {
+      if (isAnthropicToolResultBlock(block) && Array.isArray(block.content)) {
         const inner = await normalizeToolResultContent(block.content, signal)
         normalized.push({ ...block, content: inner })
+        continue
+      }
+      if (isAnthropicToolResultBlock(block)) {
+        normalized.push(block)
         continue
       }
 
@@ -56,19 +69,25 @@ export async function normalizeAnthropicImages(
   signal?: AbortSignal,
 ): Promise<void> {
   for (const message of payload.messages) {
-    if (message.role !== "user" || !Array.isArray(message.content)) continue
+    if (!isAnthropicUserMessage(message) || !Array.isArray(message.content)) {
+      continue
+    }
 
     const normalized: Array<AnthropicUserContentBlock> = []
     for (const block of message.content) {
-      if (block.type === "image") {
+      if (isAnthropicImageBlock(block)) {
         normalized.push(await normalizeImageBlock(block, signal))
         continue
       }
-      if (block.type === "tool_result" && Array.isArray(block.content)) {
+      if (isAnthropicToolResultBlock(block) && Array.isArray(block.content)) {
         normalized.push({
           ...block,
           content: await normalizeToolResultImages(block.content, signal),
         })
+        continue
+      }
+      if (isAnthropicToolResultBlock(block)) {
+        normalized.push(block)
         continue
       }
       normalized.push(block)
@@ -84,7 +103,9 @@ async function normalizeToolResultImages(
   const normalized: Exclude<AnthropicToolResultBlock["content"], string> = []
   for (const block of content) {
     normalized.push(
-      block.type === "image" ? await normalizeImageBlock(block, signal) : block,
+      isAnthropicImageBlock(block) ?
+        await normalizeImageBlock(block, signal)
+      : block,
     )
   }
   return normalized
@@ -94,6 +115,7 @@ type NormalizableBlock =
   | AnthropicTextBlock
   | AnthropicImageBlock
   | AnthropicDocumentBlock
+  | AnthropicUnknownContentBlock
 
 async function normalizeToolResultContent(
   content: Exclude<AnthropicToolResultBlock["content"], string>,
@@ -103,6 +125,7 @@ async function normalizeToolResultContent(
     | AnthropicTextBlock
     | AnthropicImageBlock
     | AnthropicDocumentBlock
+    | AnthropicUnknownContentBlock
     | AnthropicToolReferenceBlock
   >
 > {
@@ -110,10 +133,11 @@ async function normalizeToolResultContent(
     | AnthropicTextBlock
     | AnthropicImageBlock
     | AnthropicDocumentBlock
+    | AnthropicUnknownContentBlock
     | AnthropicToolReferenceBlock
   > = []
   for (const block of content) {
-    if (block.type === "tool_reference") {
+    if (isAnthropicToolReferenceBlock(block)) {
       normalized.push(block)
       continue
     }
@@ -122,14 +146,14 @@ async function normalizeToolResultContent(
   return normalized
 }
 
-async function normalizeBlock<T extends AnthropicUserContentBlock>(
-  block: T | NormalizableBlock,
+async function normalizeBlock(
+  block: AnthropicInlineContentBlock,
   signal?: AbortSignal,
-): Promise<Array<T | NormalizableBlock>> {
-  if (block.type === "image") {
+): Promise<Array<NormalizableBlock>> {
+  if (isAnthropicImageBlock(block)) {
     return [await normalizeImageBlock(block, signal)]
   }
-  if (block.type === "document") {
+  if (isAnthropicDocumentBlock(block)) {
     return await normalizeDocumentBlock(block, signal)
   }
   return [block]
@@ -325,11 +349,13 @@ export function payloadHasPdfDocuments(
   payload: AnthropicMessagesPayload,
 ): boolean {
   for (const message of payload.messages) {
-    if (message.role !== "user" || !Array.isArray(message.content)) continue
+    if (!isAnthropicUserMessage(message) || !Array.isArray(message.content)) {
+      continue
+    }
     for (const block of message.content) {
       if (isPdfDocumentBlock(block)) return true
       if (
-        block.type === "tool_result"
+        isAnthropicToolResultBlock(block)
         && Array.isArray(block.content)
         && block.content.some((inner) => isPdfDocumentBlock(inner))
       ) {

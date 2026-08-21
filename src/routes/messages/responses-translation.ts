@@ -37,6 +37,7 @@ import {
 import {
   type AnthropicAssistantContentBlock,
   type AnthropicAssistantMessage,
+  type AnthropicContentBlock,
   type AnthropicResponse,
   type AnthropicDocumentBlock,
   type AnthropicImageBlock,
@@ -46,7 +47,14 @@ import {
   type AnthropicTool,
   type AnthropicToolResultBlock,
   type AnthropicToolUseBlock,
-  type AnthropicUserContentBlock,
+  isAnthropicAssistantMessage,
+  isAnthropicDocumentBlock,
+  isAnthropicImageBlock,
+  isAnthropicNamedTool,
+  isAnthropicTextBlock,
+  isAnthropicThinkingBlock,
+  isAnthropicToolResultBlock,
+  isAnthropicToolUseBlock,
 } from "./anthropic-types"
 import { sanitizeAnthropicMessages } from "./non-stream-translation"
 
@@ -119,7 +127,7 @@ const translateMessage = (
   message: AnthropicMessage,
   model: string,
 ): Array<ResponseInputItem> => {
-  if (message.role === "assistant") {
+  if (isAnthropicAssistantMessage(message)) {
     return translateAssistantMessage(message, model)
   }
 
@@ -141,7 +149,7 @@ const translateUserMessage = (
   const pendingContent: Array<ResponseInputContent> = []
 
   for (const block of message.content) {
-    if (block.type === "tool_result") {
+    if (isAnthropicToolResultBlock(block)) {
       flushPendingContent(pendingContent, items, { role: "user" })
       items.push(createFunctionCallOutput(block))
       continue
@@ -176,7 +184,7 @@ const translateAssistantMessage = (
   const pendingContent: Array<ResponseInputContent> = []
 
   for (const block of message.content) {
-    if (block.type === "tool_use") {
+    if (isAnthropicToolUseBlock(block)) {
       flushPendingContent(pendingContent, items, {
         role: "assistant",
         phase: assistantPhase,
@@ -185,7 +193,7 @@ const translateAssistantMessage = (
       continue
     }
 
-    if (block.type === "thinking") {
+    if (isAnthropicThinkingBlock(block)) {
       const reasoningContent = createReasoningContent(block)
       if (!reasoningContent) {
         continue
@@ -217,35 +225,27 @@ const translateAssistantMessage = (
 }
 
 const translateUserContentBlock = (
-  block: AnthropicUserContentBlock,
+  block: AnthropicContentBlock,
 ): ResponseInputContent | undefined => {
-  switch (block.type) {
-    case "text": {
-      return createTextContent(block.text)
-    }
-    case "image": {
-      return createImageContent(block)
-    }
-    case "document": {
-      return createFileContent(block)
-    }
-    default: {
-      return createTextContent(JSON.stringify(block))
-    }
+  if (isAnthropicTextBlock(block)) {
+    return createTextContent(block.text)
   }
+  if (isAnthropicImageBlock(block)) {
+    return createImageContent(block)
+  }
+  if (isAnthropicDocumentBlock(block)) {
+    return createFileContent(block)
+  }
+  return createTextContent(JSON.stringify(block))
 }
 
 const translateAssistantContentBlock = (
   block: AnthropicAssistantContentBlock,
 ): ResponseInputContent | undefined => {
-  switch (block.type) {
-    case "text": {
-      return createOutPutTextContent(block.text)
-    }
-    default: {
-      return createOutPutTextContent(JSON.stringify(block))
-    }
+  if (isAnthropicTextBlock(block)) {
+    return createOutPutTextContent(block.text)
   }
+  return createOutPutTextContent(JSON.stringify(block))
 }
 
 const flushPendingContent = (
@@ -433,7 +433,7 @@ const convertAnthropicTools = (
     }
 
     // Filter out other server-side tools without input_schema
-    if (tool.input_schema === undefined) {
+    if (!isAnthropicNamedTool(tool) || tool.input_schema === undefined) {
       continue
     }
 
@@ -442,7 +442,9 @@ const convertAnthropicTools = (
       name: tool.name,
       parameters: tool.input_schema,
       strict: false,
-      ...(tool.description ? { description: tool.description } : {}),
+      ...(typeof tool.description === "string" ?
+        { description: tool.description }
+      : {}),
     })
   }
 
@@ -777,26 +779,20 @@ const convertToolResultContent = (
   if (Array.isArray(content)) {
     const result: Array<ResponseInputContent> = []
     for (const block of content) {
-      switch (block.type) {
-        case "text": {
-          result.push(createTextContent(block.text))
-          break
-        }
-        case "image": {
-          result.push(createImageContent(block))
-          break
-        }
-        case "document": {
-          result.push(createFileContent(block))
-          break
-        }
-        case "tool_reference": {
-          result.push(createTextContent(JSON.stringify(block)))
-          break
-        }
-        default: {
-          break
-        }
+      if (isAnthropicTextBlock(block)) {
+        result.push(createTextContent(block.text))
+        continue
+      }
+      if (isAnthropicImageBlock(block)) {
+        result.push(createImageContent(block))
+        continue
+      }
+      if (isAnthropicDocumentBlock(block)) {
+        result.push(createFileContent(block))
+        continue
+      }
+      if (block.type === "tool_reference") {
+        result.push(createTextContent(JSON.stringify(block)))
       }
     }
     return result

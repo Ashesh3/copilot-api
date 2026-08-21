@@ -13,19 +13,28 @@ import {
 } from "~/services/copilot/mcp-web-search"
 
 import {
-  type AnthropicAssistantContentBlock,
+  type AnthropicContentBlock,
   type AnthropicAssistantMessage,
+  type AnthropicCustomMessage,
   type AnthropicMessage,
   type AnthropicMessagesPayload,
   type AnthropicResponse,
   type AnthropicTextBlock,
   type AnthropicThinkingBlock,
   type AnthropicTool,
-  type AnthropicToolReferenceBlock,
   type AnthropicToolResultBlock,
   type AnthropicToolUseBlock,
-  type AnthropicUserContentBlock,
   type AnthropicUserMessage,
+  isAnthropicAssistantMessage,
+  isAnthropicDocumentBlock,
+  isAnthropicImageBlock,
+  isAnthropicNamedTool,
+  isAnthropicTextBlock,
+  isAnthropicThinkingBlock,
+  isAnthropicToolReferenceBlock,
+  isAnthropicToolResultBlock,
+  isAnthropicToolUseBlock,
+  isAnthropicUserMessage,
 } from "./anthropic-types"
 import { mapOpenAIStopReasonToAnthropic } from "./utils"
 
@@ -129,10 +138,8 @@ const HARNESS_TOOL_USE_NAMES = new Set([
   "WebSearch",
 ])
 
-function isClaudeCodeHarnessUserMessage(
-  message: AnthropicUserMessage,
-): boolean {
-  if (typeof message.content !== "string") {
+function isClaudeCodeHarnessUserMessage(message: AnthropicMessage): boolean {
+  if (message.role !== "user" || typeof message.content !== "string") {
     return false
   }
 
@@ -190,7 +197,8 @@ function isHarnessOnlyToolResultMessage(
     message.content.length > 0
     && message.content.every(
       (block) =>
-        block.type === "tool_result" && isClaudeCodeHarnessToolResult(block),
+        isAnthropicToolResultBlock(block)
+        && isClaudeCodeHarnessToolResult(block),
     )
   )
 }
@@ -204,7 +212,8 @@ function isHarnessOnlyAssistantToolUseMessage(
     && message.content.length > 0
     && message.content.every(
       (block) =>
-        block.type === "tool_use" && HARNESS_TOOL_USE_NAMES.has(block.name),
+        isAnthropicToolUseBlock(block)
+        && HARNESS_TOOL_USE_NAMES.has(block.name),
     )
   )
 }
@@ -236,16 +245,20 @@ export function sanitizeAnthropicMessages(
 
 function translateAnthropicMessagesToOpenAI(
   anthropicMessages: Array<AnthropicMessage>,
-  system: string | Array<AnthropicTextBlock> | undefined,
+  system: AnthropicMessagesPayload["system"],
 ): Array<Message> {
   const systemMessages = handleSystemPrompt(system)
   const sanitizedMessages = sanitizeAnthropicMessages(anthropicMessages)
 
-  const otherMessages = sanitizedMessages.flatMap((message) =>
-    message.role === "assistant" ?
-      handleAssistantMessage(message)
-    : handleUserMessage(message),
-  )
+  const otherMessages = sanitizedMessages.flatMap((message) => {
+    if (isAnthropicAssistantMessage(message)) {
+      return handleAssistantMessage(message)
+    }
+    if (isAnthropicUserMessage(message)) {
+      return handleUserMessage(message)
+    }
+    return handleCustomRoleMessage(message)
+  })
 
   return [...systemMessages, ...otherMessages]
 }
@@ -262,23 +275,25 @@ function handleSystemPrompt(
   } else {
     const systemText = system
       .map((block) =>
-        block.type === "text" ? block.text : JSON.stringify(block),
+        isAnthropicTextBlock(block) ? block.text : JSON.stringify(block),
       )
       .join("\n\n")
     return [{ role: "system", content: systemText }]
   }
 }
 
-function handleUserMessage(message: AnthropicMessage): Array<Message> {
+function handleNonAssistantMessageContent(
+  content: string | Array<AnthropicContentBlock>,
+): Array<Message> {
   const newMessages: Array<Message> = []
 
-  if (Array.isArray(message.content)) {
-    const toolResultBlocks = message.content.filter(
+  if (Array.isArray(content)) {
+    const toolResultBlocks = content.filter(
       (block): block is AnthropicToolResultBlock =>
-        block.type === "tool_result",
+        isAnthropicToolResultBlock(block),
     )
-    const otherBlocks = message.content.filter(
-      (block) => block.type !== "tool_result",
+    const otherBlocks = content.filter(
+      (block) => !isAnthropicToolResultBlock(block),
     )
 
     // Tool results must come first to maintain protocol: tool_use -> tool_result -> user
@@ -299,11 +314,21 @@ function handleUserMessage(message: AnthropicMessage): Array<Message> {
   } else {
     newMessages.push({
       role: "user",
-      content: mapContent(message.content),
+      content: mapContent(content),
     })
   }
 
   return newMessages
+}
+
+function handleUserMessage(message: AnthropicUserMessage): Array<Message> {
+  return handleNonAssistantMessageContent(message.content)
+}
+
+function handleCustomRoleMessage(
+  message: AnthropicCustomMessage,
+): Array<Message> {
+  return handleNonAssistantMessageContent(message.content)
 }
 
 function handleAssistantMessage(
@@ -319,15 +344,15 @@ function handleAssistantMessage(
   }
 
   const toolUseBlocks = message.content.filter(
-    (block): block is AnthropicToolUseBlock => block.type === "tool_use",
+    (block): block is AnthropicToolUseBlock => isAnthropicToolUseBlock(block),
   )
 
   const textBlocks = message.content.filter(
-    (block): block is AnthropicTextBlock => block.type === "text",
+    (block): block is AnthropicTextBlock => isAnthropicTextBlock(block),
   )
 
   const thinkingBlocks = message.content.filter(
-    (block): block is AnthropicThinkingBlock => block.type === "thinking",
+    (block): block is AnthropicThinkingBlock => isAnthropicThinkingBlock(block),
   )
   const signedThinkingBlocks = thinkingBlocks.filter(
     (block) => block.signature && isValidReasoningSignature(block.signature),
@@ -374,13 +399,7 @@ function isValidReasoningSignature(
 }
 
 function mapContent(
-  content:
-    | string
-    | Array<
-        | AnthropicUserContentBlock
-        | AnthropicAssistantContentBlock
-        | AnthropicToolReferenceBlock
-      >,
+  content: string | Array<AnthropicContentBlock>,
 ): string | Array<ContentPart> | null {
   if (typeof content === "string") {
     return content
@@ -395,8 +414,8 @@ function mapContent(
   if (!hasAttachment) {
     return content
       .map((block) => {
-        if (block.type === "text") return block.text
-        if (block.type === "thinking") return block.thinking
+        if (isAnthropicTextBlock(block)) return block.text
+        if (isAnthropicThinkingBlock(block)) return block.thinking
         return JSON.stringify(block)
       })
       .join("\n\n")
@@ -404,56 +423,48 @@ function mapContent(
 
   const contentParts: Array<ContentPart> = []
   for (const block of content) {
-    switch (block.type) {
-      case "text": {
-        contentParts.push({ type: "text", text: block.text })
-
-        break
-      }
-      case "thinking": {
-        contentParts.push({ type: "text", text: block.thinking })
-
-        break
-      }
-      case "image": {
-        // url sources are inlined to base64 by normalizeAnthropicAttachments
-        if (block.source.type === "base64") {
-          contentParts.push({
-            type: "image_url",
-            image_url: {
-              url: `data:${block.source.media_type};base64,${block.source.data}`,
-            },
-          })
-        }
-
-        break
-      }
-      case "document": {
-        // Base64 PDFs become OpenAI `file` parts: custom providers accept
-        // them natively; the Copilot /chat/completions path downgrades them
-        // to a text note in normalizeChatAttachments. PDF-capable Copilot
-        // models are routed to /v1/messages or /responses before this
-        // translation runs.
-        if (block.source.type === "base64") {
-          contentParts.push({
-            type: "file",
-            file: {
-              filename: block.title ?? "document.pdf",
-              file_data: `data:${block.source.media_type};base64,${block.source.data}`,
-            },
-          })
-        }
-
-        break
-      }
-      case "tool_reference": {
-        contentParts.push({ type: "text", text: JSON.stringify(block) })
-        break
-      }
-      default: {
-        contentParts.push({ type: "text", text: JSON.stringify(block) })
-      }
+    if (isAnthropicTextBlock(block)) {
+      contentParts.push({ type: "text", text: block.text })
+      continue
     }
+    if (isAnthropicThinkingBlock(block)) {
+      contentParts.push({ type: "text", text: block.thinking })
+      continue
+    }
+    if (isAnthropicImageBlock(block)) {
+      // url sources are inlined to base64 by normalizeAnthropicAttachments
+      if (block.source.type === "base64") {
+        contentParts.push({
+          type: "image_url",
+          image_url: {
+            url: `data:${block.source.media_type};base64,${block.source.data}`,
+          },
+        })
+      }
+      continue
+    }
+    if (isAnthropicDocumentBlock(block)) {
+      // Base64 PDFs become OpenAI `file` parts: custom providers accept
+      // them natively; the Copilot /chat/completions path downgrades them
+      // to a text note in normalizeChatAttachments. PDF-capable Copilot
+      // models are routed to /v1/messages or /responses before this
+      // translation runs.
+      if (block.source.type === "base64") {
+        contentParts.push({
+          type: "file",
+          file: {
+            filename: block.title ?? "document.pdf",
+            file_data: `data:${block.source.media_type};base64,${block.source.data}`,
+          },
+        })
+      }
+      continue
+    }
+    if (isAnthropicToolReferenceBlock(block)) {
+      contentParts.push({ type: "text", text: JSON.stringify(block) })
+      continue
+    }
+    contentParts.push({ type: "text", text: JSON.stringify(block) })
   }
   return contentParts
 }
@@ -475,7 +486,7 @@ function translateAnthropicToolsToOpenAI(
     }
 
     // Filter out other server-side tools without input_schema
-    if (tool.input_schema === undefined) {
+    if (!isAnthropicNamedTool(tool) || tool.input_schema === undefined) {
       continue
     }
 
@@ -483,7 +494,8 @@ function translateAnthropicToolsToOpenAI(
       type: "function",
       function: {
         name: tool.name,
-        description: tool.description,
+        description:
+          typeof tool.description === "string" ? tool.description : undefined,
         parameters: tool.input_schema,
       },
     })

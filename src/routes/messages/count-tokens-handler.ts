@@ -115,6 +115,7 @@ export async function handleCountTokens(c: Context) {
 
   const result = await countAnthropicTokens(anthropicPayload.body, {
     ...nativeHeaders,
+    preserveValidatedControls: true,
     signal: c.req.raw.signal,
   })
 

@@ -491,6 +491,31 @@ test("preserves system and future roles plus unknown native tool and top-level f
   })
 })
 
+test("preserves unnamed future native tool records on the messages route", async () => {
+  state.models = structuredClone(nativeMessagesModels)
+  const futureTool = {
+    type: "future_server_tool_20270101",
+    config: { enabled: true, nested: { mode: "opaque" } },
+  }
+
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-opus-4.8",
+      messages: [{ role: "user", content: "hello" }],
+      max_tokens: 1,
+      tools: [futureTool],
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamUrl).toContain("/v1/messages")
+  expect(lastUpstreamPayload).toMatchObject({
+    tools: [futureTool],
+  })
+})
+
 test("drops malformed optional controls and invalid optional Anthropic headers", async () => {
   state.models = structuredClone(nativeMessagesModels)
 

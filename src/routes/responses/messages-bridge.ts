@@ -1,5 +1,6 @@
 import type {
   AnthropicAssistantContentBlock,
+  AnthropicInlineContentBlock,
   AnthropicMessage,
   AnthropicMessagesPayload,
   AnthropicResponse,
@@ -27,6 +28,12 @@ import {
   convertOpenAIContentPartToAnthropic,
   convertOpenAIToolsToAnthropic,
 } from "../chat-completions/anthropic-conversion"
+import {
+  isAnthropicAssistantMessage,
+  isAnthropicTextBlock,
+  isAnthropicToolResultBlock,
+  isAnthropicUserMessage,
+} from "../messages/anthropic-types"
 import { checkResponsesToMessagesTranslation } from "./translation-fidelity"
 
 export interface ResponsesMessagesBridgeOptions {
@@ -208,7 +215,11 @@ function appendAssistantBlock(
   block: AnthropicAssistantContentBlock,
 ): void {
   const previous = messages.at(-1)
-  if (previous?.role === "assistant" && Array.isArray(previous.content)) {
+  if (
+    previous
+    && isAnthropicAssistantMessage(previous)
+    && Array.isArray(previous.content)
+  ) {
     previous.content.push(block)
     return
   }
@@ -220,7 +231,11 @@ function appendUserBlock(
   block: AnthropicUserContentBlock,
 ): void {
   const previous = messages.at(-1)
-  if (previous?.role === "user" && Array.isArray(previous.content)) {
+  if (
+    previous
+    && isAnthropicUserMessage(previous)
+    && Array.isArray(previous.content)
+  ) {
     previous.content.push(block)
     return
   }
@@ -231,19 +246,27 @@ async function convertResponsesUserContent(
   content: unknown,
   signal?: AbortSignal,
   options?: { attachmentsNormalized?: boolean },
-): Promise<Array<AnthropicUserContentBlock>> {
+): Promise<Array<AnthropicInlineContentBlock>> {
   if (typeof content === "string") {
     return content ? [{ type: "text", text: content }] : []
   }
   if (!Array.isArray(content)) return []
-  const blocks: Array<AnthropicUserContentBlock> = []
+  const blocks: Array<AnthropicInlineContentBlock> = []
   for (const part of content) {
     assertPreparedAttachment(part, options)
+    const converted = await convertOpenAIContentPartToAnthropic(
+      responsesContentPartToOpenAI(part as Record<string, unknown>),
+      signal,
+    )
     blocks.push(
-      ...(await convertOpenAIContentPartToAnthropic(
-        responsesContentPartToOpenAI(part as Record<string, unknown>),
-        signal,
-      )),
+      ...converted.filter(
+        (
+          block,
+        ): block is Exclude<
+          AnthropicUserContentBlock,
+          AnthropicToolResultBlock
+        > => !isAnthropicToolResultBlock(block),
+      ),
     )
   }
   return blocks
@@ -257,7 +280,7 @@ async function convertResponsesAssistantContent(
   const blocks = await convertResponsesUserContent(content, signal, options)
   return blocks.flatMap(
     (block): Array<AnthropicAssistantContentBlock> =>
-      block.type === "text" ? [block] : [],
+      isAnthropicTextBlock(block) ? [block] : [],
   )
 }
 
@@ -268,13 +291,7 @@ async function convertResponsesToolResult(
 ): Promise<AnthropicToolResultBlock["content"]> {
   if (typeof output === "string") return output
   if (!Array.isArray(output)) return ""
-  const blocks = await convertResponsesUserContent(output, signal, options)
-  return blocks.filter(
-    (block) =>
-      block.type === "text"
-      || block.type === "image"
-      || block.type === "document",
-  )
+  return await convertResponsesUserContent(output, signal, options)
 }
 
 function assertPreparedAttachment(

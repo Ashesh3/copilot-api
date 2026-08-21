@@ -1,4 +1,7 @@
-import type { AnthropicMessagesPayload } from "./anthropic-types"
+import {
+  isAnthropicTextBlock,
+  type AnthropicMessagesPayload,
+} from "./anthropic-types"
 
 const subagentMarkerPrefix = "__SUBAGENT_MARKER__"
 
@@ -17,7 +20,7 @@ export const parseSubagentMarkerFromFirstUser = (
   }
 
   for (const block of firstUserMessage.content) {
-    if (block.type !== "text") {
+    if (!isAnthropicTextBlock(block)) {
       continue
     }
 

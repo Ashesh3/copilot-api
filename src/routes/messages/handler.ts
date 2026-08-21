@@ -116,6 +116,8 @@ import {
   type AnthropicStreamState,
   type AnthropicTextBlock,
   type AnthropicToolResultBlock,
+  isAnthropicTextBlock,
+  isAnthropicToolResultBlock,
 } from "./anthropic-types"
 import {
   normalizeAnthropicAttachments,
@@ -1966,9 +1968,9 @@ const mergeToolResultForClaude = (
     let valid = true
 
     for (const block of msg.content) {
-      if (block.type === "tool_result") {
+      if (isAnthropicToolResultBlock(block)) {
         toolResults.push(block)
-      } else if (block.type === "text") {
+      } else if (isAnthropicTextBlock(block)) {
         textBlocks.push(block)
       } else {
         valid = false
