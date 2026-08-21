@@ -1193,12 +1193,13 @@ function createCompletedResponseSnapshot(
       mergeContinuationInput(snapshotPayload.input, structuredClone(output))
     : snapshotPayload.input
 
-  return {
+  const snapshot: ResponsesPayload = {
     ...snapshotPayload,
     input: completedInput,
-    previous_response_id: undefined,
-    generate: undefined,
   }
+  delete snapshot.previous_response_id
+  delete snapshot.generate
+  return snapshot
 }
 
 export function sendWebSocketError(

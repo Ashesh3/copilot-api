@@ -108,7 +108,6 @@ import { canonicalizeAnthropicBeta } from "~/services/copilot/messages-contract"
 import { normalizeResponsesAttachmentsFailClosed } from "~/services/copilot/responses-attachments"
 import {
   finalizeNativeResponsesRequest,
-  finalizeResponsesRequest,
   type PreparedResponsesSource,
   prepareResponsesRequest,
 } from "~/services/copilot/responses-contract"
@@ -1267,7 +1266,9 @@ export async function prepareResponsesRouteForTransport(options: {
   decision: EndpointRouteDecision
   preparedPayload: ResponsesPayload
 }> {
-  const prepared = finalizeResponsesRequest(options.payload, {
+  const preparedSource = prepareResponsesRequest(options.payload)
+  const prepared = finalizeNativeResponsesRequest(preparedSource, {
+    model: options.payload.model,
     defaultEffort: getModelReasoningConfig(options.payload.model)
       ?.defaultEffort,
     implicitDefault: usesImplicitReasoningDefault(options.payload.model),
@@ -1303,7 +1304,9 @@ export async function prepareResponsesRouteForTransport(options: {
     }
   }
   if ("code" in decision) throw createEndpointTranslationError(decision)
-  recordCopilotRequestNormalization("responses", prepared.normalizationClasses)
+  recordCopilotRequestNormalization("responses", [
+    ...prepared.normalizationClasses,
+  ])
   recordCopilotEndpointRoute(decision)
   return { decision, preparedPayload }
 }

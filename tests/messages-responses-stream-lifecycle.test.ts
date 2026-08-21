@@ -186,7 +186,7 @@ test.each([false, true])(
       "content_block_stop",
       "error",
     ])
-    expect(body).not.toContain("responses-private-failure")
+    expect(body).toContain('"message":"responses-private-failure"')
     expect(body).not.toContain("message_delta")
     expect(body).not.toContain("message_stop")
   },

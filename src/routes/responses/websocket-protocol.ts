@@ -272,16 +272,17 @@ export function rehydrateContinuationPayloadFromSnapshot(
     payloadClone.client_metadata,
   )
 
-  return {
+  const merged: ResponsesPayload = {
     ...safeSnapshotClone,
     ...safePayloadClone,
     ...(clientMetadata === undefined ?
       {}
     : { client_metadata: clientMetadata }),
     ...(mergedInput !== undefined ? { input: mergedInput } : {}),
-    previous_response_id: undefined,
-    generate: undefined,
   }
+  delete merged.previous_response_id
+  delete merged.generate
+  return merged
 }
 
 function mergeContinuationClientMetadata(

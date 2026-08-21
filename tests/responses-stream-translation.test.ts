@@ -132,24 +132,26 @@ test.each([
     } satisfies ResponseErrorEvent,
   },
 ])(
-  "uses a fixed safe Anthropic message for upstream $name events",
+  "preserves the upstream Responses message for Anthropic $name events",
   ({ event }) => {
     const translated = translateResponsesStreamEvent(
       event,
       createResponsesStreamState(),
     )
     if (translated.kind !== "failure") throw new Error("Expected failure")
-    const output = JSON.stringify(translated.error)
-
     expect(translated.error).toEqual({
       type: "error",
       error: {
         type: "api_error",
-        message: "Upstream Responses stream failed.",
+        message:
+          event.type === "error" ?
+            "responses-error-private-marker"
+          : "responses-failed-private-marker",
+        ...(event.type === "error" ?
+          { code: "upstream_private_code", param: "private_param" }
+        : {}),
       },
     })
-    expect(output).not.toContain("private")
-    expect(output).not.toContain("upstream_private_code")
   },
 )
 

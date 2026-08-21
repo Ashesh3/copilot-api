@@ -27,7 +27,7 @@ function captureValidationError(payload: ResponsesPayload): LocalHTTPError {
   throw new Error("Expected Responses validation error")
 }
 
-const ALWAYS_BLOCKED_RESPONSES_TOOLS = [
+const LEGACY_RESPONSES_TOOL_TYPES = [
   "code_interpreter",
   "computer_use",
   "computer_use_preview",
@@ -617,24 +617,16 @@ test("accepts null stateful controls without forwarding them", () => {
   expect(body).not.toHaveProperty("service_tier")
 })
 
-test.each(ALWAYS_BLOCKED_RESPONSES_TOOLS)(
-  "rejects blocked native Responses tool %s",
+test.each(LEGACY_RESPONSES_TOOL_TYPES)(
+  "preserves formerly blocked native Responses tool %s",
   (type) => {
-    const error = captureValidationError({
+    const body = prepareLegacyResponsesRequestForTest({
       model: "gpt-current",
       input: "hello",
       tools: [{ type }],
-    })
+    }).body
 
-    expect(error.clientBody).toEqual({
-      error: {
-        code: "unsupported_value",
-        message:
-          "The Copilot Responses endpoint does not support one or more requested tools.",
-        param: "tools",
-        type: "invalid_request_error",
-      },
-    })
+    expect(body.tools).toEqual([{ type }])
   },
 )
 
@@ -727,16 +719,14 @@ test("trims Responses tool types without mutating the caller", () => {
   expect(tool.type).toBe("  client_future_tool  ")
 })
 
-test("blocks Responses tool types after trimming", () => {
-  const error = captureValidationError({
+test("preserves formerly blocked Responses tool types after trimming", () => {
+  const body = prepareLegacyResponsesRequestForTest({
     model: "gpt-current",
     input: "hello",
     tools: [{ type: "  code_interpreter  " }],
-  })
+  }).body
 
-  expect(error.clientBody).toMatchObject({
-    error: { code: "unsupported_value", param: "tools" },
-  })
+  expect(body.tools).toEqual([{ type: "code_interpreter" }])
 })
 
 test("rejects a changing Responses tool type getter without invoking it", () => {

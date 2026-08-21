@@ -116,14 +116,14 @@ export const translateResponsesStreamEvent = (
     case "response.failed": {
       return {
         kind: "failure",
-        error: buildErrorEvent(SAFE_RESPONSES_STREAM_ERROR_MESSAGE),
+        error: buildReceivedResponsesError(rawEvent.response.error),
       }
     }
 
     case "error": {
       return {
         kind: "failure",
-        error: buildErrorEvent(SAFE_RESPONSES_STREAM_ERROR_MESSAGE),
+        error: buildReceivedResponsesError(rawEvent),
       }
     }
 
@@ -599,6 +599,29 @@ export const buildErrorEvent = (message: string): AnthropicErrorEvent => ({
     message,
   },
 })
+
+function buildReceivedResponsesError(
+  error: {
+    message?: unknown
+    code?: unknown
+    param?: unknown
+    status?: unknown
+  } | null,
+): AnthropicErrorEvent {
+  if (!error || typeof error.message !== "string") {
+    return buildErrorEvent(SAFE_RESPONSES_STREAM_ERROR_MESSAGE)
+  }
+  return {
+    type: "error",
+    error: {
+      type: "api_error",
+      message: error.message,
+      ...(typeof error.code === "string" ? { code: error.code } : {}),
+      ...(typeof error.param === "string" ? { param: error.param } : {}),
+      ...(typeof error.status === "number" ? { status: error.status } : {}),
+    },
+  }
+}
 
 export const SAFE_RESPONSES_STREAM_ERROR_MESSAGE =
   "Upstream Responses stream failed."

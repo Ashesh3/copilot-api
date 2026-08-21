@@ -814,7 +814,7 @@ test("exported native Responses terminal contract matches mounted coverage", () 
       (row) => row.surface === "Native Responses terminal families",
     )?.behavior,
   ).toBe(
-    "sanitized response.completed, response.incomplete, response.failed, error",
+    "preserve response.completed, response.incomplete, response.failed, and error terminal objects in their established protocol representation; exactly one terminal",
   )
 })
 

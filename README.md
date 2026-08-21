@@ -52,6 +52,13 @@ See the [detailed Copilot API compatibility contract](docs/copilot-api-compatibi
 for field handling, endpoint precedence, streaming, affinity, and current
 feature-flag limitations.
 
+> [!WARNING]
+> Authenticated inference clients can direct attachment/file recovery to any
+> runtime-valid absolute HTTP(S) destination, including internal and
+> metadata-style targets, and final non-empty upstream failure bodies are
+> delivered to normal clients and ordinary logs/Sentry. Grant inference access
+> and network reach only where that authority is acceptable.
+
 | API family | Method and path | Support |
 | --- | --- | --- |
 | OpenAI Models | `GET /v1/models` | Live model discovery plus configured aliases, reasoning variants, redirect sources, and custom-provider models |
@@ -857,11 +864,22 @@ WebSocket probes.
   secret-like configuration and require an authenticated administrator session.
   Preserve full recovery backups through a separately protected filesystem
   process.
-- **Treat LLM Debug as raw credential-bearing data.** It intentionally preserves
-  exact captured request and response URLs, headers, and bodies without
+- **Restrict attachment network authority.** Authenticated callers can cause
+  attachment/file recovery to fetch any runtime-valid HTTP(S) destination and
+  redirect, including internal and metadata-style targets. Only abort, timeout,
+  byte, redirect, parsing, and media limits remain; restrict inference
+  credentials and runtime network reachability accordingly.
+- **Treat final upstream failure bodies as raw.** A non-empty final upstream
+  failure body can contain payload or credential material and is copied exactly
+  to the client, ordinary logs, and Sentry with its status and content type.
+  Protect their transport, retention, and access, and rotate credentials exposed
+  through those channels.
+- **Treat LLM Debug as broader raw credential-bearing data.** It intentionally
+  preserves exact captured request and response URLs, headers, and bodies without
   redaction, including credentials and session identifiers. Access requires an
   administrator session, and records expire from process memory after ten
-  minutes, but anyone viewing or exporting them receives the raw values.
+  minutes. It is broader than the final-error-body passthrough above, not the
+  only channel where that response body may appear.
 - **Use Sentry deliberately.** When `SENTRY_DSN` is set, AI prompt and completion
   content is recorded by default. Set `SENTRY_AI_RECORD_INPUTS=false` before
   handling sensitive data.

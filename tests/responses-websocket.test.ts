@@ -2361,45 +2361,34 @@ describe("responses websocket message handling", () => {
     })
   })
 
-  test("rejects stateful, blocked-tool, and invalid-context WebSocket turns before dispatch", async () => {
+  test("normalizes stateful controls and preserves formerly blocked native tools on WebSocket", async () => {
+    state.accountType = "individual"
+    state.copilotToken = "copilot-token"
     state.models = responsesCapableModels
     const ws = createTestWebSocket()
 
-    for (const payload of [
-      { model: "gpt-5.4", input: "Hello", store: true },
-      {
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
         model: "gpt-5.4",
         input: "Hello",
-        tools: [{ type: "code_interpreter" }],
-      },
-      {
-        model: "gpt-5.4",
-        input: "Hello",
+        store: true,
+        tools: [{ type: "code_interpreter", future: { retained: true } }],
         context_management: [{ type: "future_unknown" }],
-      },
-    ]) {
-      await responsesWebSocket.message(
-        ws,
-        JSON.stringify({ type: "response.create", ...payload }),
-      )
-    }
-
-    expect(fetchMock).not.toHaveBeenCalled()
-    expect(ws.data.closed).toBe(false)
-    const errorFrames = ws.sent.map(
-      (frame) =>
-        JSON.parse(frame) as {
-          error?: { param?: string }
-          type?: string
-        },
+      }),
     )
-    expect(errorFrames).toHaveLength(3)
-    expect(errorFrames[0]?.type).toBe("error")
-    expect(errorFrames[0]?.error?.param).toBe("store")
-    expect(errorFrames[1]?.type).toBe("error")
-    expect(errorFrames[1]?.error?.param).toBe("tools")
-    expect(errorFrames[2]?.type).toBe("error")
-    expect(errorFrames[2]?.error?.param).toBe("context_management")
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(lastRequestBody).toMatchObject({
+      store: false,
+      tools: [{ type: "code_interpreter", future: { retained: true } }],
+      context_management: [{ type: "future_unknown" }],
+    })
+    expect(ws.data.closed).toBe(false)
+    expect(ws.sent.some((frame) => frame.includes("response.completed"))).toBe(
+      true,
+    )
   })
 
   test("forwards safe translation errors before upstream and keeps the socket open", async () => {
@@ -3617,22 +3606,6 @@ describe("responses websocket warmup handling", () => {
   })
 
   test.each([
-    {
-      name: "stateful control",
-      configure: () => {
-        state.models = responsesCapableModels
-      },
-      payload: { store: true },
-      code: "unsupported_value",
-    },
-    {
-      name: "blocked tool",
-      configure: () => {
-        state.models = responsesCapableModels
-      },
-      payload: { tools: [{ type: "code_interpreter" }] },
-      code: "unsupported_value",
-    },
     {
       name: "missing endpoint",
       configure: () => {

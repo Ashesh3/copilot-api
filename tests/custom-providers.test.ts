@@ -27,6 +27,7 @@ import {
 } from "../src/lib/routing-telemetry"
 import { state } from "../src/lib/state"
 import { server } from "../src/server"
+import { resetWebSearchSessionsForTest } from "../src/services/copilot/mcp-web-search"
 import {
   adminHeaders,
   createTestAdminSession,
@@ -201,6 +202,7 @@ afterAll(() => {
 beforeEach(() => {
   fetchMock.mockClear()
   requests = []
+  resetWebSearchSessionsForTest()
   process.env.CUSTOM_PROVIDER_API_KEY = "custom-key"
   state.models = models
   state.copilotToken = "copilot-token"

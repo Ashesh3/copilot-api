@@ -321,9 +321,7 @@ describe("resolveResponsesContinuation core", () => {
           { role: "user", content: "first" },
           { role: "user", content: "second" },
         ],
-        previous_response_id: undefined,
         tools: [{ type: "function", name: "run" }],
-        generate: undefined,
       },
     })
     expect(snapshot).toEqual({
@@ -666,8 +664,6 @@ describe("resolveResponsesContinuation errors", () => {
           typed: { source: "caller" },
         },
         input: [userInput("prior history"), userInput("delta")],
-        previous_response_id: undefined,
-        generate: undefined,
       },
     })
     expect(snapshot.client_metadata).toEqual({

@@ -32,9 +32,16 @@ affected, include its exact version or digest.
   approved Origin.
 - Provider keys and sensitive custom headers are write-only through dashboard
   APIs. Configuration export and ordinary request logging redact recognized
-  secret fields and headers. LLM Debug is the intentional exception: its
-  administrator-only in-memory records preserve raw request and response data
-  for ten minutes.
+  request, header, and configuration secrets.
+- Final non-empty upstream error response bodies are intentionally replicated to
+  the normal client, ordinary logs, and Sentry with status and content type.
+  Response bodies are not a secret-redaction boundary.
+- Authenticated inference requesters can direct attachment/file recovery to any
+  runtime-valid HTTP(S) destination and redirect. There is no SSRF destination
+  policy; caller abort, timeout, byte, redirect, parsing, media, and
+  per-attachment degradation limits remain.
+- LLM Debug retains the broader administrator-only raw request and response
+  capture, including credentials, in process memory for ten minutes.
 - Remote Control uses short-lived, one-use, administrator/session-bound
   WebSocket tickets. Voice and Responses WebSockets authenticate before upgrade
   and retain protocol validation without local traffic or resource limits.
@@ -67,7 +74,7 @@ affected, include its exact version or digest.
 | ID | Status | Current resolution |
 | --- | --- | --- |
 | F-01 | Resolved | OAuth refresh no longer returns the gateway key. Opaque scoped access/refresh tokens, PKCE-bound one-use codes, rotation, replay-family revocation, and digested persistence replaced the simulated bearer exchange. |
-| F-02 | Resolved with an intentional raw-diagnostics exception | Dashboard authority moved to gateway-plus-password cookie sessions. Gateway credentials alone cannot access dashboard APIs; provider secrets are write-only and configuration exports redact recognized secrets. Administrator-only LLM Debug intentionally retains raw request and response data in process memory for ten minutes. |
+| F-02 | Resolved with intentional raw compatibility channels | Dashboard authority moved to gateway-plus-password cookie sessions. Gateway credentials alone cannot access dashboard APIs; provider secrets are write-only and configuration exports redact recognized secrets. Final non-empty upstream failure bodies intentionally pass through to normal clients, logs, and Sentry. Administrator-only LLM Debug remains the broader raw request/response capture in process memory for ten minutes. |
 | F-03 | Resolved | Remote Control requires short-lived, one-use, administrator/session-bound WebSocket tickets with Origin validation. |
 | F-04 | Resolved | Only exact metadata-free `GET /health/health` remains public. Direct Connect is disabled by default and authenticated when explicitly enabled. |
 | F-05 | Resolved | Voice WebSockets authenticate before upgrade, enforce Origin when supplied, validate protocol messages, and cancel transcription when callers disconnect. |
@@ -125,10 +132,16 @@ complete host/container isolation audit. Operators must:
    deployed image current.
 5. Install log rotation and monitor disk, connection, request, and upstream-cost
    usage.
-6. Rotate any credential that has appeared in logs, shell history, screenshots,
-   issue content, chat history, or a prior vulnerable response. Rotation is an
-   operator action and is never performed automatically by updates.
-7. Treat the data volume as sensitive. It can contain GitHub/provider
+6. Issue inference credentials only to trusted clients. If unrestricted
+   attachment HTTP(S) authority is unacceptable, constrain process/container
+   network reachability outside the application.
+7. Protect client transports plus log and Sentry access, retention, and export
+   as potentially payload- and credential-bearing.
+8. Rotate any credential that has appeared in a final upstream failure body,
+   LLM Debug, logs, Sentry, shell history, screenshots, issue content, chat
+   history, or a prior vulnerable response. Rotation is an operator action and
+   is never performed automatically by updates.
+9. Treat the data volume as sensitive. It can contain GitHub/provider
    credentials, configuration, digested sessions/tokens, prompts, and response
    metadata.
 

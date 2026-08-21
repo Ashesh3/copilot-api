@@ -217,15 +217,6 @@ const INVALID_RESPONSES_TOOL_SNAPSHOT = Symbol(
 )
 const JSON_OBJECT_INPUT_INSTRUCTION = "Respond with JSON."
 export const COPILOT_RESPONSES_MIN_OUTPUT_TOKENS = 16
-const ALWAYS_BLOCKED_RESPONSES_TOOLS = new Set([
-  "code_interpreter",
-  "computer_use",
-  "computer_use_preview",
-  "file_search",
-  "local_shell",
-  "mcp",
-  "mcp_list_tools",
-])
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null
@@ -482,17 +473,7 @@ function prepareResponsesTools(
   }
 
   return tools.map((tool) => {
-    const snapshot = getSafeResponsesToolSnapshot(tool)
-    const type = snapshot.type
-    if (ALWAYS_BLOCKED_RESPONSES_TOOLS.has(type)) {
-      throw createResponsesValidationError({
-        code: "unsupported_value",
-        message:
-          "The Copilot Responses endpoint does not support one or more requested tools.",
-        param: "tools",
-      })
-    }
-    return snapshot
+    return getSafeResponsesToolSnapshot(tool)
   })
 }
 

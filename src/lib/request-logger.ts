@@ -2,10 +2,10 @@ import type { Context, Next } from "hono"
 
 import * as Sentry from "@sentry/bun"
 
-import type { SafeHttpErrorInspection } from "./error"
+import type { HttpErrorInspection } from "./error"
 import type { RoutingTelemetryRequestState } from "./request-session"
 
-import { isHTTPError, snapshotSafeHttpError } from "./error"
+import { isHTTPError, snapshotHttpErrorMetadata } from "./error"
 import { isProxyObject } from "./plain-data-snapshot"
 import {
   sanitizeRequestDiagnosticReference,
@@ -59,7 +59,7 @@ export type LogicalRequestTerminalStatus =
 export interface LogicalRequestTerminalOptions {
   accountId?: number
   error?: unknown
-  errorInspection?: SafeHttpErrorInspection
+  errorInspection?: HttpErrorInspection
   status: number
   terminalStatus: LogicalRequestTerminalStatus
 }
@@ -172,7 +172,7 @@ function inspectionTerminalStatus(
 }
 
 function getErrorMessage(error: unknown): string | undefined {
-  if (isHTTPError(error)) return snapshotSafeHttpError(error).safeMessage
+  if (isHTTPError(error)) return snapshotHttpErrorMetadata(error).safeMessage
   if (isProxyObject(error)) return undefined
   try {
     if (!(error instanceof Error)) return primitiveErrorMessage(error)
