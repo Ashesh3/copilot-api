@@ -1,4 +1,4 @@
-/* eslint-disable max-lines -- Google protocol routing and stream lifecycle share request context */
+/* eslint-disable max-lines, max-lines-per-function, complexity, no-nested-ternary -- Google protocol routing and stream lifecycle share request context */
 /**
  * Handler for Google Generative AI API format.
  * Accepts requests at /v1/models/{model}:generateContent and
@@ -14,12 +14,20 @@ import { streamSSE } from "hono/streaming"
 
 import type { Model } from "~/services/copilot/get-models"
 
-import { getLastUsedAccountId } from "~/lib/account-router"
+import {
+  getLastUsedAccountId,
+  runWithRoutedModelSelection,
+  selectRoutedModel,
+} from "~/lib/account-router"
 import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
 import {
-  type EndpointRouteDecision,
-  type EndpointRouteFailure,
+  recordCopilotEndpointRoute,
+  recordCopilotTranslationFindings,
+} from "~/lib/copilot-contract-observability"
+import {
+  getModelEndpointSupport,
+  selectEvaluatedCopilotCandidate,
 } from "~/lib/endpoint-routing"
 import {
   createEndpointTranslationError,
@@ -38,7 +46,6 @@ import {
   type ReasoningEffort,
   normalizeReasoningEffortForModel,
   parseModelSuffix,
-  usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
 import {
   recordNonDefaultBehavior,
@@ -51,12 +58,7 @@ import {
   type StreamTerminalLifecycle,
   createStreamTerminalLifecycle,
 } from "~/lib/stream-terminal-lifecycle"
-import { getTokenCount } from "~/lib/tokenizer"
-import {
-  addPromptCaching,
-  detectInitiator,
-  hasVisionContent,
-} from "~/services/copilot/copilot-client"
+import { estimateTokenCount, getTokenCount } from "~/lib/tokenizer"
 import {
   createAnthropicMessages,
   detectAnthropicInitiator,
@@ -80,29 +82,34 @@ import {
 } from "~/services/copilot/mcp-web-search"
 import { sanitizeAnthropicRequestHeaderOptions } from "~/services/copilot/messages-contract"
 
+import type { AnthropicMessagesPayload } from "../messages/anthropic-types"
 import type { AnthropicResponse } from "../messages/anthropic-types"
 import type {
-  GoogleAIRequest,
   GoogleAIResponse,
   GoogleStreamChunk,
   GoogleStreamFailure,
 } from "./google-ai-types"
 
 import {
-  chatPayloadToAnthropic,
   streamAnthropicAsChatCompletions,
   anthropicResponseToChat,
 } from "../chat-completions/anthropic-bridge"
-import { chatCompletionsToResponses } from "../chat-completions/responses-fallback"
-import { selectChatUpstreamEndpoint } from "../chat-completions/responses-fallback-executor"
 import {
-  resolveResponsesWebSearchCalls,
-  resolveWebSearchCalls,
-} from "../messages/web-search-helpers"
+  type ChatEndpointCandidate,
+  orderPreparedChatCandidates,
+  prepareChatCandidates,
+} from "../chat-completions/chat-candidates"
+import { resolveResponsesWebSearchCalls } from "../messages/web-search-helpers"
+import { resolvePreparedResponsesWebSearchCalls } from "../responses/chat-fallback-completion"
 import {
-  inlineGoogleFileData,
-  translateGoogleToOpenAI,
-} from "./request-translation"
+  createCopilotGoogleChatCompletion,
+  type GoogleChatCompletionFactory,
+} from "./chat-completion"
+import {
+  InvalidGoogleRequestBodyError,
+  prepareGoogleRequest,
+} from "./google-request-normalization"
+import { adaptGoogleToChatCandidate } from "./request-translation"
 import {
   createGoogleStreamState,
   translateChunkToGoogle,
@@ -113,7 +120,11 @@ import {
 
 const logger = createHandlerLogger("google-ai-handler")
 
-const GOOGLE_ACTIONS = new Set(["generateContent", "streamGenerateContent"])
+const GOOGLE_ACTIONS = new Set([
+  "generateContent",
+  "streamGenerateContent",
+  "countTokens",
+])
 const GOOGLE_STREAM_FAILURE_MESSAGE =
   "Upstream stream ended before a terminal response"
 
@@ -337,38 +348,6 @@ function missingGoogleModelAction(c: Context): Response {
   )
 }
 
-function getUnsupportedGoogleRootFields(
-  payload: GoogleAIRequest,
-): Array<string> {
-  const unsupported: Array<string> = []
-
-  if (payload.cachedContent !== undefined) {
-    unsupported.push("cachedContent")
-  }
-  if (payload.labels !== undefined) {
-    unsupported.push("labels")
-  }
-  if (payload.safetySettings !== undefined) {
-    unsupported.push("safetySettings")
-  }
-
-  return unsupported
-}
-
-function getUnsupportedGoogleToolTypes(
-  payload: GoogleAIRequest,
-): Array<string> {
-  const unsupported = new Set<string>()
-
-  for (const tool of payload.tools ?? []) {
-    if (tool.codeExecution) {
-      unsupported.add("codeExecution")
-    }
-  }
-
-  return [...unsupported]
-}
-
 /**
  * Parse model name and action from the URL path segment.
  * e.g. "gemini-3-flash-preview:streamGenerateContent" → { model: "gemini-3-flash-preview", action: "streamGenerateContent" }
@@ -464,6 +443,7 @@ export async function handleGoogleAI(c: Context) {
     return googleActionError(c, "Unsupported Google AI action")
   }
   const isStream = action === "streamGenerateContent"
+  const isCount = action === "countTokens"
   const outputMode: GoogleStreamOutputMode =
     c.req.query("alt") === "sse" ? "sse" : "json"
 
@@ -476,82 +456,91 @@ export async function handleGoogleAI(c: Context) {
 
   logger.debug("Google AI request")
 
-  // Parse Google AI request body
-  const googlePayload = await c.req.json<GoogleAIRequest>()
-  logger.debug("Google AI request payload:", JSON.stringify(googlePayload))
-
-  // Inline http(s) fileData attachments (upstream rejects external URLs)
-  await inlineGoogleFileData(googlePayload, c.req.raw.signal)
-
-  const unsupportedRootFields = getUnsupportedGoogleRootFields(googlePayload)
-  if (unsupportedRootFields.length > 0) {
-    return c.json(
-      {
-        error: {
-          code: 400,
-          message: `Unsupported Google AI request field(s): ${unsupportedRootFields.join(", ")}`,
-          status: "INVALID_ARGUMENT",
-        },
-      },
-      400,
-    )
+  let parsed: unknown
+  try {
+    parsed = await c.req.json<unknown>()
+  } catch {
+    return googleActionError(c, "Invalid JSON request body")
   }
-
-  const unsupportedToolTypes = getUnsupportedGoogleToolTypes(googlePayload)
-  if (unsupportedToolTypes.length > 0) {
-    return c.json(
-      {
-        error: {
-          code: 400,
-          message: `Unsupported Google AI tool type(s): ${unsupportedToolTypes.join(", ")}`,
-          status: "INVALID_ARGUMENT",
-        },
-      },
-      400,
-    )
+  let preparedGoogle
+  try {
+    preparedGoogle = prepareGoogleRequest(parsed)
+  } catch (error) {
+    if (error instanceof InvalidGoogleRequestBodyError) {
+      return googleActionError(c, "Invalid JSON request body")
+    }
+    throw error
   }
-
-  // Translate Google → OpenAI ChatCompletions format
-  const openAIPayload = translateGoogleToOpenAI(googlePayload, model, isStream)
-  applyGoogleReasoningEffort(c, openAIPayload, reasoningEffort)
+  const googleCandidate = await adaptGoogleToChatCandidate({
+    source: preparedGoogle,
+    finalModel: model,
+    stream: isStream,
+    explicitReasoningEffort: reasoningEffort,
+    signal: c.req.raw.signal,
+  })
 
   // Apply auto-replacements
   const { payload: replacedPayload, appliedRules } =
-    await applyReplacementsToPayload(openAIPayload)
+    await applyReplacementsToPayload(googleCandidate.payload)
   const finalPayload = {
-    ...replacedPayload,
+    ...structuredClone(replacedPayload),
     model: normalizeModelName(replacedPayload.model),
   }
 
   // Find the selected model for token counting and capability checks
-  const selectedModel = state.models?.data.find(
-    (m) => m.id === finalPayload.model,
-  )
-
-  const routeDecision = selectGoogleUpstreamEndpoint({
-    payload: finalPayload,
+  const routedModel = selectRoutedModel(finalPayload.model)
+  const selectedModel = routedModel.model
+  const support = getModelEndpointSupport(selectedModel)
+  const candidates = await prepareChatCandidates({
+    nativeMessagesOptions: {},
+    reasoningEffort,
     selectedModel,
+    signal: c.req.raw.signal,
+    source:
+      finalPayload as unknown as import("../chat-completions/chat-contract").PreparedChatCompletionsSource,
+    sourceFindings: googleCandidate.check.findings,
+    support,
   })
-  if ("code" in routeDecision) {
-    throw createEndpointTranslationError(routeDecision)
-  }
+  const ordered = orderPreparedChatCandidates({
+    candidates,
+    selectedModel,
+    source:
+      finalPayload as unknown as import("../chat-completions/chat-contract").PreparedChatCompletionsSource,
+  })
+  const selection = selectEvaluatedCopilotCandidate({
+    candidates: ordered,
+    source: "chat",
+    support,
+  })
+  if ("code" in selection) throw createEndpointTranslationError(selection)
+  const { candidate, decision } = selection
+  recordCopilotTranslationFindings("chat", candidate.endpoint, candidate.check)
+  recordCopilotEndpointRoute(decision)
 
   setRequestContext(c, {
     requestedModel: rawModel,
     model: finalPayload.model,
-    provider: googleProviderName(routeDecision.target),
+    provider: googleProviderName(candidate.endpoint),
     replacements: appliedRules,
     reasoningEffort,
   })
 
-  // Calculate token count
+  const countPayload = candidates.chat?.payload ?? googleCandidate.payload
+  if (isCount) {
+    const totalTokens =
+      selectedModel ?
+        (await getTokenCount(countPayload, selectedModel)).input
+      : await estimateTokenCount(countPayload)
+    setRequestContext(c, { inputTokens: totalTokens })
+    return c.json({ totalTokens })
+  }
   try {
     if (selectedModel) {
-      const tokenCount = await getTokenCount(finalPayload, selectedModel)
+      const tokenCount = await getTokenCount(countPayload, selectedModel)
       setRequestContext(c, { inputTokens: tokenCount.input })
     }
   } catch {
-    // Token counting is best-effort
+    // Token counting is best effort for generation routes.
   }
 
   if (state.manualApprove) {
@@ -563,64 +552,58 @@ export async function handleGoogleAI(c: Context) {
   )
   logger.debug("Translated OpenAI payload:", JSON.stringify(finalPayload))
 
-  return await dispatchGoogleRequest(c, {
-    finalPayload,
-    requestedModel: rawModel,
-    routeDecision,
-    selectedModel,
-    isStream,
-    outputMode,
-    reasoningEffort,
-  })
+  return await runWithRoutedModelSelection(
+    routedModel,
+    async () =>
+      await dispatchGoogleRequest(c, {
+        candidate,
+        requestedModel: rawModel,
+        isStream,
+        outputMode,
+      }),
+  )
 }
 
 /** Route to the correct upstream API based on model capabilities. */
 async function dispatchGoogleRequest(
   c: Context,
   options: {
-    finalPayload: ChatCompletionsPayload & { model: string }
+    candidate: ChatEndpointCandidate
     requestedModel: string
-    routeDecision: EndpointRouteDecision
-    selectedModel: Model | undefined
     isStream: boolean
     outputMode: GoogleStreamOutputMode
-    reasoningEffort?: ReasoningEffort
   },
 ) {
-  const { finalPayload, routeDecision, selectedModel, isStream, outputMode } =
-    options
+  const { candidate, isStream, outputMode } = options
 
-  if (routeDecision.target === "/responses") {
+  if (candidate.endpoint === "/responses") {
     consola.debug("[google-ai] Using Responses API")
-    return await handleWithResponsesApi(c, finalPayload, {
+    return await handleWithResponsesApi(c, candidate.payload, {
       isStream,
       outputMode,
-      effortOverride: options.reasoningEffort,
+      requestedModel: options.requestedModel,
     })
   }
 
-  if (routeDecision.target === "/v1/messages") {
+  if (candidate.endpoint === "/v1/messages") {
     consola.debug("[google-ai] Using native /v1/messages")
-    return await handleWithAnthropicMessages(c, finalPayload, {
+    return await handleWithAnthropicMessages(c, candidate.payload, {
       requestedModel: options.requestedModel,
-      selectedModel,
       isStream,
       outputMode,
     })
   }
 
   consola.debug("[google-ai] Using ChatCompletions API")
-  return await handleWithChatCompletions(c, finalPayload, outputMode)
+  return await handleWithChatCompletions(c, candidate.payload, {
+    outputMode,
+    requestedModel: options.requestedModel,
+  })
 }
 
-export function selectGoogleUpstreamEndpoint(options: {
-  payload: ChatCompletionsPayload
-  selectedModel: Model | undefined
-}): EndpointRouteDecision | EndpointRouteFailure {
-  return selectChatUpstreamEndpoint(options)
-}
-
-function googleProviderName(endpoint: EndpointRouteDecision["target"]): string {
+function googleProviderName(
+  endpoint: ChatEndpointCandidate["endpoint"],
+): string {
   switch (endpoint) {
     case "/responses": {
       return "GoogleAI→Responses"
@@ -637,59 +620,36 @@ function googleProviderName(endpoint: EndpointRouteDecision["target"]): string {
   }
 }
 
-function payloadHasFileParts(payload: ChatCompletionsPayload): boolean {
-  return payload.messages.some(
-    (message) =>
-      Array.isArray(message.content)
-      && message.content.some((part) => part.type === "file"),
-  )
-}
-
-function applyGoogleReasoningEffort(
-  c: Context,
-  payload: ChatCompletionsPayload,
-  effort: ReasoningEffort | undefined,
-): void {
-  const extra = payload as unknown as Record<string, unknown>
-  if (!effort) {
-    delete extra.reasoning_effort
-    return
-  }
-  if (usesImplicitReasoningDefault(payload.model)) {
-    recordNonDefaultBehavior(c, {
-      kind: "reasoning_effort_implicit_default",
-      message: `${payload.model} is configured for implicit reasoning defaults; removing explicit reasoning_effort=${effort}`,
-      data: {
-        model: payload.model,
-        requestedEffort: effort,
-      },
-    })
-    delete extra.reasoning_effort
-    return
-  }
-  extra.reasoning_effort = effort
-}
-
 // ─── ChatCompletions path ───
 
-async function handleWithChatCompletions(
+export async function handleWithChatCompletions(
   c: Context,
   finalPayload: ChatCompletionsPayload,
-  outputMode: GoogleStreamOutputMode,
+  options: {
+    outputMode: GoogleStreamOutputMode
+    requestedModel: string
+    completionFactory?: GoogleChatCompletionFactory
+  },
 ) {
+  const completionFactory =
+    options.completionFactory ?? createCopilotGoogleChatCompletion
   const needsWebSearch =
     finalPayload.tools?.some((tool) => isChatWebSearchFunctionTool(tool))
     ?? false
   if (needsWebSearch) {
-    return await handleChatCompletionsWithWebSearch(c, finalPayload, outputMode)
+    return await handleChatCompletionsWithWebSearch(c, finalPayload, {
+      ...options,
+      completionFactory,
+    })
   }
 
-  const response = await createChatCompletions(finalPayload, {
+  const completion = await completionFactory(finalPayload, {
     signal: c.req.raw.signal,
   })
+  const response = completion.response
 
   // Track which account handled this request (multi-token mode)
-  const ccAccountId = getLastUsedAccountId()
+  const ccAccountId = completion.accountId
   if (ccAccountId !== undefined) {
     setRequestContext(c, { accountId: ccAccountId })
   }
@@ -708,14 +668,17 @@ async function handleWithChatCompletions(
       })
     }
 
-    const googleResponse = translateOpenAIToGoogle(response)
+    const googleResponse = translateOpenAIToGoogle(
+      response,
+      options.requestedModel,
+    )
     return c.json(googleResponse)
   }
 
   // ─── Streaming Response ───
   logger.debug("Streaming response from Copilot")
 
-  return await renderGoogleStream(c, outputMode, async (output) => {
+  return await renderGoogleStream(c, options.outputMode, async (output) => {
     const adapter = createGoogleStreamTerminalAdapter({ c, output })
     try {
       const streamState = createGoogleStreamState()
@@ -740,7 +703,11 @@ async function handleWithChatCompletions(
           })
         }
 
-        const googleChunk = translateChunkToGoogle(chunk, streamState)
+        const googleChunk = translateChunkToGoogle(
+          chunk,
+          streamState,
+          options.requestedModel,
+        )
         if (googleChunk) {
           const finishReason = googleChunk.candidates[0]?.finishReason
           if (finishReason !== null) {
@@ -760,16 +727,25 @@ async function handleWithChatCompletions(
 async function handleChatCompletionsWithWebSearch(
   c: Context,
   payload: ChatCompletionsPayload,
-  outputMode: GoogleStreamOutputMode,
+  options: {
+    outputMode: GoogleStreamOutputMode
+    requestedModel: string
+    completionFactory: GoogleChatCompletionFactory
+  },
 ) {
   const requestedStream = Boolean(payload.stream)
-  const bufferedPayload = { ...payload, stream: false }
-  const initial = (await createChatCompletions(bufferedPayload, {
+  const bufferedPayload = { ...structuredClone(payload), stream: false }
+  const initialPrepared = await options.completionFactory(bufferedPayload, {
     signal: c.req.raw.signal,
-  })) as ChatCompletionResponse
-  const result = await resolveWebSearchCalls(initial, bufferedPayload, {
-    abortSignal: c.req.raw.signal,
   })
+  const result = await resolvePreparedResponsesWebSearchCalls({
+    completionFactory: options.completionFactory,
+    initial: initialPrepared,
+    signal: c.req.raw.signal,
+  })
+  if (initialPrepared.accountId !== undefined) {
+    setRequestContext(c, { accountId: initialPrepared.accountId })
+  }
 
   if (result.usage) {
     setRequestContext(c, {
@@ -778,11 +754,14 @@ async function handleChatCompletionsWithWebSearch(
     })
   }
 
-  if (!requestedStream) return c.json(translateOpenAIToGoogle(result))
+  if (!requestedStream)
+    return c.json(translateOpenAIToGoogle(result, options.requestedModel))
 
-  return await renderGoogleStream(c, outputMode, async (output) => {
+  return await renderGoogleStream(c, options.outputMode, async (output) => {
     const adapter = createGoogleStreamTerminalAdapter({ c, output })
-    await adapter.succeed(translateOpenAIToGoogle(result))
+    await adapter.succeed(
+      translateOpenAIToGoogle(result, options.requestedModel),
+    )
   })
 }
 
@@ -790,44 +769,33 @@ async function handleChatCompletionsWithWebSearch(
 
 async function handleWithAnthropicMessages(
   c: Context,
-  payload: ChatCompletionsPayload & { model: string },
+  payload: AnthropicMessagesPayload,
   options: {
-    selectedModel?: Model
     isStream: boolean
     outputMode: GoogleStreamOutputMode
     requestedModel: string
   },
 ) {
-  const reason =
-    payloadHasFileParts(payload) ? "PDF file attachment" : undefined
   recordNonDefaultBehavior(c, {
     kind: "endpoint_fallback",
-    message:
-      reason ?
-        `${reason} routed ${payload.model} to native /v1/messages`
-      : `Model ${payload.model} routed to native /v1/messages`,
+    message: `Model ${payload.model} routed to native /v1/messages`,
     data: {
       model: payload.model,
       sourceEndpoint: "GoogleAI",
       targetEndpoint: "AnthropicMessages",
-      ...(reason ? { reason } : {}),
     },
   })
   setRequestContext(c, { provider: "GoogleAI→AnthropicMessages" })
 
-  const anthropicPayload = await chatPayloadToAnthropic(
-    payload,
-    options.selectedModel,
-    c.req.raw.signal,
-  )
   const nativeOptions = sanitizeAnthropicRequestHeaderOptions({
     anthropicBeta: c.req.header("anthropic-beta"),
     anthropicVersion: c.req.header("anthropic-version"),
     modelProviderPreference: c.req.header("x-model-provider-preference"),
   })
-  const response = await createAnthropicMessages(anthropicPayload, {
+  const response = await createAnthropicMessages(payload, {
     ...nativeOptions,
-    initiator: detectAnthropicInitiator(anthropicPayload.messages),
+    alreadyAdapted: true,
+    initiator: detectAnthropicInitiator(payload.messages),
     signal: c.req.raw.signal,
   })
 
@@ -847,7 +815,7 @@ async function handleWithAnthropicMessages(
         outputTokens: chatResponse.usage.completion_tokens,
       })
     }
-    return c.json(translateOpenAIToGoogle(chatResponse))
+    return c.json(translateOpenAIToGoogle(chatResponse, options.requestedModel))
   }
 
   // Anthropic SSE → ChatCompletions chunks → Google chunks
@@ -866,7 +834,11 @@ async function handleWithAnthropicMessages(
               outputTokens: chunk.usage.completion_tokens,
             })
           }
-          const googleChunk = translateChunkToGoogle(chunk, googleState)
+          const googleChunk = translateChunkToGoogle(
+            chunk,
+            googleState,
+            options.requestedModel,
+          )
           if (googleChunk) {
             const finishReason = googleChunk.candidates[0]?.finishReason
             if (finishReason !== null) {
@@ -897,20 +869,16 @@ async function handleWithAnthropicMessages(
 
 async function handleWithResponsesApi(
   c: Context,
-  payload: ChatCompletionsPayload & { model: string },
+  responsesPayload: ResponsesPayload,
   options: {
     isStream: boolean
     outputMode: GoogleStreamOutputMode
-    effortOverride?: ReasoningEffort
+    requestedModel: string
   },
 ) {
-  const { isStream, outputMode, effortOverride } = options
-  addPromptCaching(payload.messages, payload.tools ?? undefined)
-  // Shared converter carries image_url and file parts through to
-  // input_image/input_file (the local converter used to drop them)
-  const responsesPayload = chatCompletionsToResponses(payload, effortOverride)
-  const vision = hasVisionContent(payload.messages)
-  const initiator = detectInitiator(payload.messages)
+  const { isStream, outputMode } = options
+  const vision = JSON.stringify(responsesPayload.input).includes("input_image")
+  const initiator = detectResponsesInitiator(responsesPayload)
   logger.debug(
     "Translated Responses payload:",
     JSON.stringify(responsesPayload),
@@ -926,10 +894,12 @@ async function handleWithResponsesApi(
       outputMode,
       vision,
       initiator,
+      requestedModel: options.requestedModel,
     })
   }
 
   const response = await createResponses(responsesPayload, {
+    prepared: true,
     vision,
     initiator,
     signal: c.req.raw.signal,
@@ -953,7 +923,10 @@ async function handleWithResponsesApi(
       })
     }
 
-    const googleResponse = translateResponsesResultToGoogle(result)
+    const googleResponse = translateResponsesResultToGoogle(
+      result,
+      options.requestedModel,
+    )
     return c.json(googleResponse)
   }
 
@@ -978,6 +951,7 @@ async function handleWithResponsesApi(
         const result = translateResponsesStreamEventToGoogle(
           parsed,
           streamState,
+          options.requestedModel,
         )
 
         if (result.kind === "ignore") continue
@@ -1018,22 +992,28 @@ async function handleResponsesMcpWebSearch(
     outputMode: GoogleStreamOutputMode
     vision: boolean
     initiator: "agent" | "user"
+    requestedModel: string
   },
 ) {
-  payload.stream = false
+  const bufferedPayload = { ...structuredClone(payload), stream: false }
   const requestOptions = {
     vision: options.vision,
     initiator: options.initiator,
     signal: c.req.raw.signal,
+    prepared: true,
   }
   const initial = (await createResponses(
-    payload,
+    bufferedPayload,
     requestOptions,
   )) as ResponsesResult
   const result = await resolveResponsesWebSearchCalls(
     initial,
-    payload,
-    requestOptions,
+    bufferedPayload,
+    {
+      ...requestOptions,
+      createResponse: async (followUp) =>
+        (await createResponses(followUp, requestOptions)) as ResponsesResult,
+    },
   )
 
   const accountId = getLastUsedAccountId()
@@ -1044,7 +1024,10 @@ async function handleResponsesMcpWebSearch(
       outputTokens: result.usage.output_tokens,
     })
   }
-  const googleResponse = translateResponsesResultToGoogle(result)
+  const googleResponse = translateResponsesResultToGoogle(
+    result,
+    options.requestedModel,
+  )
   if (!options.isStream) return c.json(googleResponse)
 
   return await renderGoogleStream(c, options.outputMode, async (output) => {
@@ -1060,3 +1043,48 @@ const isNonStreamingCC = (
 const isAsyncIterable = <T>(value: unknown): value is AsyncIterable<T> =>
   Boolean(value)
   && typeof (value as AsyncIterable<T>)[Symbol.asyncIterator] === "function"
+
+function detectResponsesInitiator(payload: ResponsesPayload): "agent" | "user" {
+  if (!Array.isArray(payload.input)) return "user"
+  const last = payload.input.at(-1)
+  if (!last || typeof last !== "object") return "user"
+  if (last.type === "function_call_output" || last.type === "function_call") {
+    return "agent"
+  }
+  return last.type === "message" && last.role === "assistant" ? "agent" : "user"
+}
+
+/** Compatibility contract helper; runtime handling uses evaluated candidates. */
+export function selectGoogleUpstreamEndpoint(options: {
+  payload: ChatCompletionsPayload
+  selectedModel: Model | undefined
+}):
+  | import("~/lib/endpoint-routing").EndpointRouteDecision
+  | import("~/lib/endpoint-routing").EndpointRouteFailure {
+  const support = getModelEndpointSupport(options.selectedModel)
+  const endpoint =
+    support.chat ? "/chat/completions"
+    : (
+      options.selectedModel?.vendor?.toLowerCase() === "anthropic"
+      && support.messages
+    ) ?
+      "/v1/messages"
+    : support.responses ? "/responses"
+    : support.messages ? "/v1/messages"
+    : undefined
+  return endpoint ?
+      {
+        reason:
+          endpoint === "/chat/completions" ?
+            ("native" as const)
+          : ("endpoint_unavailable" as const),
+        source: "chat" as const,
+        target: endpoint,
+        translated: endpoint !== "/chat/completions",
+      }
+    : {
+        blockers: ["message_shape"],
+        code: "endpoint_translation_unsupported" as const,
+        source: "chat" as const,
+      }
+}

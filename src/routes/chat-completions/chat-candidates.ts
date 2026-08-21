@@ -1,6 +1,7 @@
 /* eslint-disable max-lines, complexity, max-lines-per-function, max-params, no-nested-ternary -- three dialect adapters share bounded protocol matrices */
 import type {
   EvaluatedEndpointCandidate,
+  ModelEndpointSupport,
   TranslationFinding,
 } from "~/lib/endpoint-routing"
 import type { ReasoningEffort } from "~/lib/model-suffix"
@@ -65,6 +66,12 @@ export interface PreparedChatCandidates {
   readonly responses: ResponsesChatCandidate
 }
 
+export interface SupportFilteredChatCandidates {
+  readonly chat?: NativeChatCandidate
+  readonly messages?: MessagesChatCandidate
+  readonly responses?: ResponsesChatCandidate
+}
+
 interface CandidateContext {
   readonly attachmentCache: Map<
     string,
@@ -98,6 +105,7 @@ export interface PrepareChatCandidatesOptions {
   readonly signal?: AbortSignal
   readonly source: PreparedChatCompletionsSource
   readonly sourceFindings?: ReadonlyArray<TranslationFinding>
+  readonly support?: ModelEndpointSupport
 }
 
 const FUTURE_ROLE_CONTEXT = "[Future role content]"
@@ -1156,29 +1164,104 @@ async function adaptChatToMessages(
   })
 }
 
+export function prepareChatCandidates(
+  options: PrepareChatCandidatesOptions & {
+    readonly support: ModelEndpointSupport
+  },
+): Promise<SupportFilteredChatCandidates>
+export function prepareChatCandidates(
+  options: PrepareChatCandidatesOptions,
+): Promise<PreparedChatCandidates>
 export async function prepareChatCandidates(
   options: PrepareChatCandidatesOptions,
-): Promise<PreparedChatCandidates> {
+): Promise<PreparedChatCandidates | SupportFilteredChatCandidates> {
   const attachmentCache: CandidateAttachmentCache = { values: new Map() }
-  const chat = await prepareNativeChatCandidate({
-    attachmentCache,
-    source: options.source,
-    signal: options.signal,
-    sourceFindings: options.sourceFindings,
-  })
-  const responses = adaptChatToResponses(
-    clone(options.source),
-    options.reasoningEffort,
-    options.sourceFindings ?? [],
-  )
-  const messages = await adaptChatToMessages(
-    clone(options.source),
-    options.selectedModel,
-    options.signal,
-    options.sourceFindings ?? [],
-    attachmentCache,
-  )
+  const support = options.support ?? {
+    chat: true,
+    responses: true,
+    messages: true,
+    embeddings: false,
+    responsesWebSocket: false,
+  }
+  const chat =
+    support.chat ?
+      await prepareNativeChatCandidate({
+        attachmentCache,
+        source: options.source,
+        signal: options.signal,
+        sourceFindings: options.sourceFindings,
+      })
+    : undefined
+  const responses =
+    support.responses ?
+      adaptChatToResponses(
+        clone(options.source),
+        options.reasoningEffort,
+        options.sourceFindings ?? [],
+      )
+    : undefined
+  const messages =
+    support.messages ?
+      await adaptChatToMessages(
+        clone(options.source),
+        options.selectedModel,
+        options.signal,
+        options.sourceFindings ?? [],
+        attachmentCache,
+      )
+    : undefined
   return { chat, responses, messages }
+}
+
+export function orderPreparedChatCandidates(options: {
+  readonly candidates: SupportFilteredChatCandidates
+  readonly selectedModel: Model | undefined
+  readonly source: PreparedChatCompletionsSource
+}): ReadonlyArray<ChatEndpointCandidate> {
+  const { candidates, selectedModel, source } = options
+  const vendor = selectedModel?.vendor?.trim().toLowerCase()
+  const family = selectedModel?.capabilities.family.trim().toLowerCase()
+  const anthropic =
+    vendor ? vendor === "anthropic"
+    : family ? family.startsWith("claude")
+    : (selectedModel?.id.toLowerCase().startsWith("claude-") ?? false)
+  const messagesPreferred =
+    source.messages.some(
+      (message) =>
+        Array.isArray(message.content)
+        && message.content.some(
+          (part) =>
+            isRecord(part)
+            && (part.type === "document" || part.type === "file"),
+        ),
+    )
+    || source.messages.some(
+      (message) =>
+        message.role === "assistant"
+        && typeof message.reasoning_text === "string"
+        && typeof message.reasoning_opaque === "string"
+        && !message.encrypted_content,
+    )
+    || typeof source.thinking_budget === "number"
+  const responsesPreferred =
+    source.messages.some(
+      (message) => typeof message.encrypted_content === "string",
+    )
+    || (source.tools ?? []).some(
+      (tool) =>
+        typeof tool.type === "string"
+        && /^web_search(?:_[a-z\d]+)*$/u.test(tool.type),
+    )
+  const preferred =
+    messagesPreferred && anthropic ?
+      [candidates.messages, candidates.responses, candidates.chat]
+    : responsesPreferred || messagesPreferred ?
+      [candidates.responses, candidates.messages, candidates.chat]
+    : anthropic ? [candidates.chat, candidates.messages, candidates.responses]
+    : [candidates.chat, candidates.responses, candidates.messages]
+  return preferred.filter(
+    (candidate): candidate is ChatEndpointCandidate => candidate !== undefined,
+  )
 }
 
 export async function prepareCustomProviderChatCandidate(options: {

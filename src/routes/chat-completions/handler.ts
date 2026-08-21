@@ -1,4 +1,4 @@
-/* eslint-disable max-lines, complexity, no-nested-ternary -- protocol routing, streaming, and fallback paths share request context */
+/* eslint-disable max-lines, complexity -- protocol routing, streaming, and fallback paths share request context */
 import type { Context } from "hono"
 
 import * as Sentry from "@sentry/bun"
@@ -79,7 +79,6 @@ import { isChatWebSearchFunctionTool } from "~/services/copilot/mcp-web-search"
 import { canonicalizeAnthropicBeta } from "~/services/copilot/messages-contract"
 
 import type { NativeMessagesRequestOptions } from "../messages/native-handler"
-import type { PreparedChatCandidates } from "./chat-candidates"
 
 import {
   emitChatCompletionResponseAsStream,
@@ -88,6 +87,7 @@ import {
 import { executeAnthropicBridge } from "./anthropic-bridge"
 import {
   type ChatEndpointCandidate,
+  orderPreparedChatCandidates,
   prepareChatCandidates,
   prepareCustomProviderChatCandidate,
 } from "./chat-candidates"
@@ -287,8 +287,9 @@ async function handleCompletionInner(
     signal: c.req.raw.signal,
     source: routableSource,
     sourceFindings,
+    support: getModelEndpointSupport(selectedModel),
   })
-  const orderedCandidates = orderChatCandidates({
+  const orderedCandidates = orderPreparedChatCandidates({
     candidates,
     selectedModel,
     source: routableSource,
@@ -303,7 +304,12 @@ async function handleCompletionInner(
   recordCopilotTranslationFindings("chat", candidate.endpoint, candidate.check)
   recordCopilotEndpointRoute(decision)
 
-  await setInputTokenContext(c, candidates.chat.payload, selectedModel)
+  const nativeChatPayload =
+    candidates.chat?.payload
+    ?? (structuredClone(routableSource) as unknown as ChatCompletionsPayload & {
+      model: string
+    })
+  await setInputTokenContext(c, nativeChatPayload, selectedModel)
 
   if (state.manualApprove) await awaitApproval()
 
@@ -311,7 +317,7 @@ async function handleCompletionInner(
     routedModel,
     async () =>
       await dispatchCopilotCompletion(c, {
-        sourcePayload: candidates.chat.payload,
+        sourcePayload: nativeChatPayload,
         candidate,
         requestedModel,
         reasoningEffort,
@@ -392,65 +398,6 @@ async function dispatchCopilotCompletion(
 
 function getCopilotModelIds(): Set<string> {
   return new Set(state.models?.data.map((model) => model.id) ?? [])
-}
-
-function orderChatCandidates(options: {
-  candidates: PreparedChatCandidates
-  selectedModel: Model | undefined
-  source: PreparedChatCompletionsSource
-}): ReadonlyArray<ChatEndpointCandidate> {
-  const { candidates, selectedModel, source } = options
-  const vendor = selectedModel?.vendor?.trim().toLowerCase()
-  const family = selectedModel?.capabilities.family.trim().toLowerCase()
-  const anthropic =
-    vendor ? vendor === "anthropic"
-    : family ? family.startsWith("claude")
-    : (selectedModel?.id.toLowerCase().startsWith("claude-") ?? false)
-  const messagesPreferred =
-    source.messages.some(
-      (message) =>
-        Array.isArray(message.content)
-        && message.content.some(
-          (part) =>
-            isRecordWithType(part, "document")
-            || isRecordWithType(part, "file"),
-        ),
-    )
-    || source.messages.some(
-      (message) =>
-        message.role === "assistant"
-        && typeof message.reasoning_text === "string"
-        && typeof message.reasoning_opaque === "string"
-        && !message.encrypted_content,
-    )
-    || typeof source.thinking_budget === "number"
-  const hasHostedWebSearch = (source.tools ?? []).some(
-    (tool) =>
-      typeof tool.type === "string"
-      && /^web_search(?:_[a-z\d]+)*$/.test(tool.type),
-  )
-  const responsesPreferred =
-    source.messages.some(
-      (message) => typeof message.encrypted_content === "string",
-    ) || hasHostedWebSearch
-
-  if (messagesPreferred && anthropic) {
-    return [candidates.messages, candidates.responses, candidates.chat]
-  }
-  if (responsesPreferred || messagesPreferred) {
-    return [candidates.responses, candidates.messages, candidates.chat]
-  }
-  return anthropic ?
-      [candidates.chat, candidates.messages, candidates.responses]
-    : [candidates.chat, candidates.responses, candidates.messages]
-}
-
-function isRecordWithType(value: unknown, type: string): boolean {
-  return (
-    typeof value === "object"
-    && value !== null
-    && (value as { type?: unknown }).type === type
-  )
 }
 
 async function setInputTokenContext(

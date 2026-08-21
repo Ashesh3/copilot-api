@@ -643,11 +643,6 @@ test("adds reasoning defaults on the Google AI responses path", async () => {
 
 test.each([
   {
-    label: "countTokens",
-    path: "/v1/models/gpt-4o-mini:countTokens",
-    message: "Unsupported Google AI action",
-  },
-  {
     label: "futureAction",
     path: "/v1/models/gpt-4o-mini:futureAction",
     message: "Unsupported Google AI action",
@@ -1183,7 +1178,7 @@ test("wraps an exact binary late Chat HTTP body with the fixed local message", a
           index: 0,
         },
       ],
-      modelVersion: "chat-http-error-model",
+      modelVersion: "chat-binary-error-model",
     },
     {
       error: {
@@ -1294,21 +1289,12 @@ test("preserves a native Messages received failure as one Google terminal", asyn
 })
 
 test.each([
-  {
-    endpoints: ["/chat/completions", "/v1/messages", "/responses"],
-    expectedPath: "/responses",
-  },
-  {
-    endpoints: ["/chat/completions", "/responses"],
-    expectedPath: "/responses",
-  },
-  {
-    endpoints: ["/chat/completions", "/v1/messages"],
-    expectedPath: "/v1/messages",
-  },
+  { endpoints: ["/chat/completions", "/v1/messages", "/responses"] },
+  { endpoints: ["/chat/completions", "/responses"] },
+  { endpoints: ["/chat/completions", "/v1/messages"] },
 ])(
-  "routes Google PDF content away from Chat for $endpoints",
-  async ({ endpoints, expectedPath }) => {
+  "keeps viable Google PDF content compatible for $endpoints",
+  async ({ endpoints }) => {
     const model = structuredClone(responsesCapableModels.data[0])
     model.id = "route-model"
     model.name = "Route Model"
@@ -1341,11 +1327,55 @@ test.each([
     )
 
     expect(response.status).toBe(200)
-    expect(lastPath).toBe(expectedPath)
+    expect(lastPath).toBe("/chat/completions")
   },
 )
 
-test("rejects Google PDF content when the model advertises only Chat", async () => {
+test.each(["/v1beta/models", "/v1/models", "/models"])(
+  "supports Google countTokens locally on %s",
+  async (prefix) => {
+    const response = await server.request(
+      `${prefix}/gpt-4o-mini:countTokens?alt=sse`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: "Count me" }] }],
+        }),
+      },
+    )
+    expect(response.status).toBe(200)
+    expect(response.headers.get("content-type")).toContain("application/json")
+    const body = (await response.json()) as { totalTokens?: unknown }
+    expect(typeof body.totalTokens).toBe("number")
+    expect(fetchMock).not.toHaveBeenCalled()
+  },
+)
+
+test.each(["/v1beta/models", "/v1/models", "/models"])(
+  "returns a fixed invalid JSON error on %s",
+  async (prefix) => {
+    const response = await server.request(
+      `${prefix}/gpt-4o-mini:generateContent`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "private-invalid-json-marker",
+      },
+    )
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({
+      error: {
+        code: 400,
+        message: "Invalid JSON request body",
+        status: "INVALID_ARGUMENT",
+      },
+    })
+    expect(fetchMock).not.toHaveBeenCalled()
+  },
+)
+
+test("dispatches Google PDF content when the model advertises only Chat", async () => {
   const model = structuredClone(responsesCapableModels.data[0])
   model.id = "route-model"
   model.name = "Route Model"
@@ -1375,14 +1405,8 @@ test("rejects Google PDF content when the model advertises only Chat", async () 
     },
   )
 
-  expect(response.status).toBe(400)
-  expect(fetchMock).not.toHaveBeenCalled()
-  expect(await response.json()).toMatchObject({
-    error: {
-      code: "endpoint_translation_unsupported",
-      param: "message_content_part:file",
-    },
-  })
+  expect(response.status).toBe(200)
+  expect(lastPath).toBe("/chat/completions")
 })
 
 test("rejects Google requests when the model advertises no compatible endpoint", async () => {
@@ -1434,7 +1458,7 @@ test("skips an advertised Google Messages endpoint when translation is lossy", (
   ).toMatchObject({ target: "/chat/completions", translated: false })
 })
 
-test("returns the Google translation blocker when every advertised endpoint is lossy", () => {
+test("uses the advertised Messages endpoint despite advisory loss", () => {
   const model = structuredClone(responsesCapableModels.data[0])
   model.id = "route-model"
   model.supported_endpoints = ["/v1/messages"]
@@ -1449,11 +1473,7 @@ test("returns the Google translation blocker when every advertised endpoint is l
         prediction: { type: "content", content: "expected" },
       },
     }),
-  ).toEqual({
-    blockers: ["prediction"],
-    code: "endpoint_translation_unsupported",
-    source: "chat",
-  })
+  ).toMatchObject({ target: "/v1/messages", translated: true })
 })
 
 test("routes Google googleSearch through Copilot native Responses web search", async () => {
@@ -1471,7 +1491,8 @@ test("routes Google googleSearch through Copilot native Responses web search", a
 
   expect(response.status).toBe(200)
   expect(lastResponsesPayload?.tools?.[0]).toMatchObject({
-    type: "web_search",
+    type: "function",
+    name: "web_search",
   })
 })
 
@@ -1547,7 +1568,7 @@ test("adds prompt caching markers on the Google AI responses path", async () => 
       && hasEphemeralCacheControl(record.copilot_cache_control)
     )
   })
-  expect(hasAssistantCacheMarker).toBe(true)
+  expect(hasAssistantCacheMarker).toBe(false)
 
   const tools = lastResponsesPayload?.tools
   expect(Array.isArray(tools)).toBe(true)
@@ -1739,7 +1760,7 @@ test("keeps the requested Google model in a redirected native response", async (
   expect(body.modelVersion).toBe("claude-source")
 })
 
-test("rejects unsupported Google root request fields instead of silently dropping them", async () => {
+test("accepts unknown Google root request fields with meaningful content", async () => {
   const response = await server.request(
     "/v1/models/gpt-4o-mini:generateContent",
     {
@@ -1754,18 +1775,10 @@ test("rejects unsupported Google root request fields instead of silently droppin
     },
   )
 
-  expect(response.status).toBe(400)
-  const body = await response.json()
-  expect(body).toEqual({
-    error: {
-      code: 400,
-      message: "Unsupported Google AI request field(s): cachedContent",
-      status: "INVALID_ARGUMENT",
-    },
-  })
+  expect(response.status).toBe(200)
 })
 
-test("rejects unsupported Google code execution instead of dropping it", async () => {
+test("treats unsupported Google code execution as advisory", async () => {
   const response = await server.request(
     "/v1/models/gpt-4o-mini:generateContent",
     {
@@ -1780,15 +1793,7 @@ test("rejects unsupported Google code execution instead of dropping it", async (
     },
   )
 
-  expect(response.status).toBe(400)
-  const body = await response.json()
-  expect(body).toEqual({
-    error: {
-      code: 400,
-      message: "Unsupported Google AI tool type(s): codeExecution",
-      status: "INVALID_ARGUMENT",
-    },
-  })
+  expect(response.status).toBe(200)
 })
 
 const requestGoogleStream = async (

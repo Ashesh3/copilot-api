@@ -97,6 +97,7 @@ function parseToolCallArgs(argsString: string): Record<string, unknown> {
  */
 export function translateOpenAIToGoogle(
   response: ChatCompletionResponse,
+  requestedModel?: string,
 ): GoogleAIResponse {
   const candidates: Array<GoogleCandidate> = response.choices.map((choice) => {
     const parts: Array<GooglePart> = []
@@ -147,7 +148,7 @@ export function translateOpenAIToGoogle(
   return {
     candidates,
     usageMetadata: translateUsage(response.usage),
-    modelVersion: response.model,
+    modelVersion: requestedModel ?? response.model,
     promptFeedback,
   }
 }
@@ -269,6 +270,7 @@ function buildStreamChunk(options: {
 export function translateChunkToGoogle(
   chunk: ChatCompletionChunk,
   streamState: GoogleStreamState,
+  requestedModel?: string,
 ): GoogleAIResponse | null {
   // Usage-only chunk (final chunk with no choices)
   if (chunk.choices.length === 0) {
@@ -276,7 +278,7 @@ export function translateChunkToGoogle(
       return {
         candidates: [],
         usageMetadata: translateUsage(chunk.usage),
-        modelVersion: chunk.model,
+        modelVersion: requestedModel ?? chunk.model,
       }
     }
     return null
@@ -311,7 +313,7 @@ export function translateChunkToGoogle(
     finishReason: choice.finish_reason,
     index: choice.index,
     usage: chunk.usage,
-    modelVersion: chunk.model,
+    modelVersion: requestedModel ?? chunk.model,
   })
 }
 
@@ -367,6 +369,7 @@ function isOutputTextBlock(block: unknown): block is ResponseOutputText {
  */
 export function translateResponsesResultToGoogle(
   result: ResponsesResult,
+  requestedModel?: string,
 ): GoogleAIResponse {
   const parts: Array<GooglePart> = []
 
@@ -408,7 +411,7 @@ export function translateResponsesResultToGoogle(
       },
     ],
     usageMetadata: translateResponsesUsage(result.usage),
-    modelVersion: result.model,
+    modelVersion: requestedModel ?? result.model,
     promptFeedback: getPromptFeedback(finishReason),
   }
 }
@@ -480,6 +483,7 @@ function createReceivedResponsesFailure(value: unknown): GoogleStreamFailure {
 export function translateResponsesStreamEventToGoogle(
   event: ResponseStreamEvent,
   _streamState: GoogleStreamState,
+  requestedModel?: string,
 ): GoogleResponsesStreamResult {
   switch (event.type) {
     case "response.output_text.delta": {
@@ -539,7 +543,7 @@ export function translateResponsesStreamEventToGoogle(
             },
           ],
           usageMetadata: translateResponsesUsage(event.response.usage),
-          modelVersion: event.response.model,
+          modelVersion: requestedModel ?? event.response.model,
           promptFeedback: getPromptFeedback(finishReason),
         },
       }

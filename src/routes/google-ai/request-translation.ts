@@ -1,439 +1,821 @@
-/**
- * Translate Google Generative AI request format → OpenAI ChatCompletions format.
- * This allows Copilot's ChatCompletions API to handle Google-format requests.
- */
-
+/* eslint-disable complexity, max-params, no-nested-ternary, require-atomic-updates, unicorn/consistent-function-scoping, @typescript-eslint/no-unsafe-return -- tolerant protocol adaptation is a bounded matrix */
+import type {
+  EvaluatedEndpointCandidate,
+  TranslationFinding,
+} from "~/lib/endpoint-routing"
+import type { ReasoningEffort } from "~/lib/model-suffix"
 import type {
   ChatCompletionsPayload,
   ContentPart,
   Message,
   Tool,
+  ToolCall,
 } from "~/services/copilot/create-chat-completions"
 
-import { fetchUrlAsDataUri, isHttpUrl, isPdfMediaType } from "~/lib/attachments"
+import {
+  type ParsedDataUri,
+  fetchUrlAsDataUri,
+  isHttpUrl,
+  isPdfMediaType,
+} from "~/lib/attachments"
+import { createEvaluatedTranslationCheck } from "~/lib/endpoint-routing"
 import { createWebSearchFunctionTool } from "~/services/copilot/mcp-web-search"
 
-import type {
-  GoogleAIRequest,
-  GoogleContent,
-  GoogleFileDataPart,
-  GoogleFunctionCallPart,
-  GoogleFunctionResponsePart,
-  GoogleInlineDataPart,
-  GooglePart,
-  GoogleTextPart,
-} from "./google-ai-types"
+import type { PreparedGoogleRequest } from "./google-request-normalization"
 
-/**
- * Fetch http(s) fileData parts and inline them as inlineData so the sync
- * translation (and upstream, which rejects external URLs) only ever sees
- * base64 payloads.
- */
-export async function inlineGoogleFileData(
-  payload: GoogleAIRequest,
-  signal?: AbortSignal,
-): Promise<void> {
-  for (const content of payload.contents) {
-    for (const [index, part] of content.parts.entries()) {
-      if (!isFileDataPart(part)) continue
+import { googleRecordEntries } from "./google-request-normalization"
 
-      const uri = part.fileData.fileUri
-      if (!isHttpUrl(uri)) continue
+export type GoogleChatCandidate = EvaluatedEndpointCandidate<
+  "/chat/completions",
+  ChatCompletionsPayload & { model: string }
+>
 
-      const inlined = await fetchUrlAsDataUri(uri, {
-        expectPdf: isPdfMediaType(part.fileData.mimeType),
-        signal,
-      })
-      content.parts[index] =
-        inlined ?
-          { inlineData: { mimeType: inlined.mediaType, data: inlined.data } }
-        : {
-            text: `[file attachment ${uri} omitted: the URL could not be fetched by the proxy]`,
-          }
+export interface AdaptGoogleToChatCandidateOptions {
+  readonly resolveAttachment?: GoogleAttachmentResolver
+  readonly explicitReasoningEffort?: ReasoningEffort
+  readonly finalModel: string
+  readonly signal?: AbortSignal
+  readonly source: PreparedGoogleRequest
+  readonly stream: boolean
+}
+
+export type GoogleAttachmentResolver = (options: {
+  readonly expectPdf: boolean
+  readonly signal?: AbortSignal
+  readonly value: string
+}) => Promise<ParsedDataUri | null>
+
+interface AdaptationState {
+  readonly attachmentCache: Map<string, Promise<ParsedDataUri | null>>
+  readonly findings: Array<TranslationFinding>
+  readonly pendingByName: Map<string, Array<string>>
+  readonly reservedIds: Set<string>
+  readonly usedIds: Set<string>
+  meaningful: boolean
+}
+
+const UNKNOWN_PART_CONTEXT = "[Unsupported Google content preserved as context]"
+const FUTURE_ROLE_CONTEXT = "[Future Google role content]"
+const ATTACHMENT_CONTEXT = "[Google attachment unavailable]"
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function addFinding(state: AdaptationState, finding: TranslationFinding): void {
+  if (
+    state.findings.some(
+      (current) =>
+        current.class === finding.class
+        && current.severity === finding.severity,
+    )
+  ) {
+    return
+  }
+  state.findings.push(finding)
+}
+
+function collectReservedIds(
+  source: Readonly<Record<string, unknown>>,
+): Set<string> {
+  const reserved = new Set<string>()
+  for (const content of googleRecordEntries(source.contents, () => {})) {
+    for (const part of googleRecordEntries(content.parts, () => {})) {
+      for (const value of [part.id, part.callId]) {
+        if (typeof value === "string" && value.trim()) reserved.add(value)
+      }
+      if (isRecord(part.functionCall)) {
+        const nested = part.functionCall.id
+        if (typeof nested === "string" && nested.trim()) reserved.add(nested)
+      }
     }
+  }
+  return reserved
+}
+
+function createState(source: PreparedGoogleRequest): AdaptationState {
+  return {
+    attachmentCache: new Map(),
+    findings: source.findings.map((finding) => ({ ...finding })),
+    meaningful: false,
+    pendingByName: new Map(),
+    reservedIds: collectReservedIds(source.source),
+    usedIds: new Set(),
   }
 }
 
-let toolCallCounter = 0
-
-function nextToolCallId(): string {
-  return `call_${Date.now()}_${toolCallCounter++}`
-}
-
-function isTextPart(part: GooglePart): part is GoogleTextPart {
-  return "text" in part
-}
-
-function isFunctionCallPart(part: GooglePart): part is GoogleFunctionCallPart {
-  return "functionCall" in part
-}
-
-function isFunctionResponsePart(
-  part: GooglePart,
-): part is GoogleFunctionResponsePart {
-  return "functionResponse" in part
-}
-
-function isInlineDataPart(part: GooglePart): part is GoogleInlineDataPart {
-  return "inlineData" in part
-}
-
-function isFileDataPart(part: GooglePart): part is GoogleFileDataPart {
-  return "fileData" in part
-}
-
-function isImageMimeType(mimeType: string): boolean {
-  return mimeType.toLowerCase().startsWith("image/")
-}
-
-function isSupportedImageUri(uri: string): boolean {
-  return (
-    uri.startsWith("https://")
-    || uri.startsWith("http://")
-    || uri.startsWith("data:")
+function records(
+  state: AdaptationState,
+  value: unknown,
+  findingClass: TranslationFinding["class"],
+): ReadonlyArray<Readonly<Record<string, unknown>>> {
+  return googleRecordEntries(value, () =>
+    addFinding(state, { class: findingClass, severity: "adapted" }),
   )
 }
 
-function flattenContentParts(
-  contentParts: Array<ContentPart>,
-): string | Array<ContentPart> | null {
-  if (contentParts.length === 0) {
-    return null
-  }
-
-  if (contentParts.every((part) => part.type === "text")) {
-    return (contentParts as Array<{ type: "text"; text: string }>)
-      .map((part) => part.text)
-      .join("")
-  }
-
-  return contentParts
+function asTextPart(text: string): ContentPart {
+  return { type: "text", text }
 }
 
-function translateContentParts(
-  parts: Array<GooglePart>,
-  options?: { includeThoughtText?: boolean },
-): string | Array<ContentPart> | null {
-  const includeThoughtText = options?.includeThoughtText ?? false
-  const contentParts: Array<ContentPart> = []
+function flattenParts(parts: Array<ContentPart>): string | Array<ContentPart> {
+  if (parts.every((part) => part.type === "text")) {
+    return parts.map((part) => (part as { text: string }).text).join("")
+  }
+  return parts
+}
 
-  for (const part of parts) {
-    if (isTextPart(part)) {
-      if (part.thought && !includeThoughtText) {
-        continue
-      }
-      contentParts.push({ type: "text", text: part.text })
-      continue
-    }
+function safeStringify(value: unknown): string {
+  if (typeof value === "string") return value
+  try {
+    return JSON.stringify(value ?? {})
+  } catch {
+    return "{}"
+  }
+}
 
-    if (isInlineDataPart(part)) {
-      const mimeType = part.inlineData.mimeType.toLowerCase()
-      if (isImageMimeType(mimeType)) {
-        contentParts.push({
+function callName(value: unknown, state: AdaptationState): string {
+  if (typeof value === "string" && value.trim()) return value
+  addFinding(state, { class: "tool_history", severity: "adapted" })
+  return "unknown_function"
+}
+
+function suppliedCallId(
+  part: Readonly<Record<string, unknown>>,
+): string | undefined {
+  for (const value of [
+    part.id,
+    part.callId,
+    isRecord(part.functionCall) ? part.functionCall.id : undefined,
+  ]) {
+    if (typeof value === "string" && value.trim()) return value
+  }
+  return undefined
+}
+
+function allocateCallId(
+  state: AdaptationState,
+  part: Readonly<Record<string, unknown>>,
+  contentIndex: number,
+  partIndex: number,
+): string {
+  const supplied = suppliedCallId(part)
+  if (supplied && !state.usedIds.has(supplied)) {
+    state.usedIds.add(supplied)
+    return supplied
+  }
+  const base = `call_${contentIndex}_${partIndex}`
+  let id = base
+  let suffix = 0
+  while (state.reservedIds.has(id) || state.usedIds.has(id)) {
+    suffix += 1
+    id = `${base}_${suffix}`
+  }
+  state.usedIds.add(id)
+  addFinding(state, { class: "tool_history", severity: "adapted" })
+  return id
+}
+
+function enqueueCall(state: AdaptationState, name: string, id: string): void {
+  const queue = state.pendingByName.get(name) ?? []
+  queue.push(id)
+  state.pendingByName.set(name, queue)
+}
+
+function dequeueCall(state: AdaptationState, name: string): string | undefined {
+  return state.pendingByName.get(name)?.shift()
+}
+
+async function attachmentPart(
+  state: AdaptationState,
+  raw: Readonly<Record<string, unknown>>,
+  signal: AbortSignal | undefined,
+  resolveAttachment: GoogleAttachmentResolver,
+): Promise<ContentPart> {
+  if (isRecord(raw.inlineData)) {
+    const mimeType = raw.inlineData.mimeType
+    const data = raw.inlineData.data
+    if (typeof mimeType === "string" && typeof data === "string") {
+      if (mimeType.toLowerCase().startsWith("image/")) {
+        state.meaningful = true
+        return {
           type: "image_url",
-          image_url: {
-            url: `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`,
-          },
-        })
-      } else if (mimeType.startsWith("application/pdf")) {
-        contentParts.push({
+          image_url: { url: `data:${mimeType};base64,${data}` },
+        }
+      }
+      if (isPdfMediaType(mimeType)) {
+        state.meaningful = true
+        return {
           type: "file",
           file: {
             filename: "document.pdf",
-            file_data: `data:application/pdf;base64,${part.inlineData.data}`,
+            file_data: `data:${mimeType};base64,${data}`,
           },
-        })
-      } else {
-        contentParts.push({
-          type: "text",
-          text: `[inlineData:${part.inlineData.mimeType}]`,
-        })
-      }
-      continue
-    }
-
-    if (isFileDataPart(part)) {
-      const uri = part.fileData.fileUri
-      if (isImageMimeType(part.fileData.mimeType) && isSupportedImageUri(uri)) {
-        contentParts.push({
-          type: "image_url",
-          image_url: { url: uri },
-        })
-      } else {
-        contentParts.push({
-          type: "text",
-          text: `[fileData:${part.fileData.mimeType}] ${uri}`,
-        })
-      }
-      continue
-    }
-  }
-
-  return flattenContentParts(contentParts)
-}
-
-/**
- * Convert Google contents array → OpenAI messages array.
- */
-function translateContents(contents: Array<GoogleContent>): Array<Message> {
-  const messages: Array<Message> = []
-
-  for (const content of contents) {
-    if (content.role === "user") {
-      // Check if this content has function responses (tool results)
-      const functionResponses = content.parts.filter((p) =>
-        isFunctionResponsePart(p),
-      )
-      const otherParts = content.parts.filter((p) => !isFunctionResponsePart(p))
-
-      // Emit tool result messages first
-      for (const part of functionResponses) {
-        messages.push({
-          role: "tool",
-          tool_call_id: findToolCallId(messages, part.functionResponse.name),
-          content: JSON.stringify(part.functionResponse.response),
-        })
-      }
-
-      // Emit regular user message if there are non-tool parts
-      if (otherParts.length > 0) {
-        const content = translateContentParts(otherParts)
-        if (content) {
-          messages.push({ role: "user", content })
         }
       }
-    } else {
-      // Model messages may contain text and/or function calls
-      const functionCalls = content.parts.filter((p) => isFunctionCallPart(p))
-
-      const modelContent = translateContentParts(content.parts)
-
-      const toolCalls =
-        functionCalls.length > 0 ?
-          functionCalls.map((part) => ({
-            id: nextToolCallId(),
-            type: "function" as const,
-            function: {
-              name: part.functionCall.name,
-              arguments: JSON.stringify(part.functionCall.args),
-            },
-          }))
-        : undefined
-
-      messages.push({
-        role: "assistant",
-        content: modelContent,
-        tool_calls: toolCalls,
-      })
     }
+    addFinding(state, { class: "attachment", severity: "adapted" })
+    state.meaningful = true
+    return asTextPart(ATTACHMENT_CONTEXT)
   }
 
+  if (isRecord(raw.fileData)) {
+    const mimeType = raw.fileData.mimeType
+    const uri = raw.fileData.fileUri
+    if (
+      typeof uri === "string"
+      && typeof mimeType === "string"
+      && isHttpUrl(uri)
+    ) {
+      const key = `${isPdfMediaType(mimeType) ? "pdf" : "asset"}:${uri}`
+      let pending = state.attachmentCache.get(key)
+      if (!pending) {
+        pending = resolveAttachment({
+          expectPdf: isPdfMediaType(mimeType),
+          signal,
+          value: uri,
+        })
+        state.attachmentCache.set(key, pending)
+      }
+      const parsed = await pending
+      if (parsed) {
+        state.meaningful = true
+        return parsed.mediaType.toLowerCase().startsWith("image/") ?
+            {
+              type: "image_url",
+              image_url: {
+                url: `data:${parsed.mediaType};base64,${parsed.data}`,
+              },
+            }
+          : {
+              type: "file",
+              file: {
+                filename: "document.pdf",
+                file_data: `data:${parsed.mediaType};base64,${parsed.data}`,
+              },
+            }
+      }
+    }
+    addFinding(state, { class: "attachment", severity: "adapted" })
+    state.meaningful = true
+    return asTextPart(ATTACHMENT_CONTEXT)
+  }
+
+  addFinding(state, { class: "content_part", severity: "adapted" })
+  state.meaningful = true
+  return asTextPart(UNKNOWN_PART_CONTEXT)
+}
+
+async function translateContentParts(
+  state: AdaptationState,
+  value: unknown,
+  signal: AbortSignal | undefined,
+  resolveAttachment: GoogleAttachmentResolver,
+): Promise<Array<ContentPart>> {
+  const output: Array<ContentPart> = []
+  const rawEntries =
+    Array.isArray(value) ? value
+    : value === undefined || value === null ? []
+    : [value]
+  if (
+    !Array.isArray(value)
+    && value !== undefined
+    && value !== null
+    && !isRecord(value)
+  ) {
+    addFinding(state, { class: "content_part", severity: "adapted" })
+  }
+  for (const raw of rawEntries) {
+    if (!isRecord(raw)) {
+      addFinding(state, { class: "content_part", severity: "adapted" })
+      state.meaningful = true
+      output.push(asTextPart(UNKNOWN_PART_CONTEXT))
+      continue
+    }
+    if (typeof raw.text === "string") {
+      if (!raw.thought && raw.text.length > 0) state.meaningful = true
+      if (!raw.thought) output.push(asTextPart(raw.text))
+      continue
+    }
+    if (raw.inlineData !== undefined || raw.fileData !== undefined) {
+      output.push(await attachmentPart(state, raw, signal, resolveAttachment))
+      continue
+    }
+    if (raw.functionCall !== undefined || raw.functionResponse !== undefined)
+      continue
+    addFinding(state, { class: "content_part", severity: "adapted" })
+    state.meaningful = true
+    output.push(asTextPart(UNKNOWN_PART_CONTEXT))
+  }
+  return output
+}
+
+function roleForContent(
+  state: AdaptationState,
+  value: unknown,
+): { role: "assistant" | "user"; prefix?: ContentPart } {
+  if (value === "model") return { role: "assistant" }
+  if (value === "user") return { role: "user" }
+  addFinding(state, { class: "message_role", severity: "adapted" })
+  return typeof value === "string" && value.trim().length > 0 ?
+      { role: "user", prefix: asTextPart(FUTURE_ROLE_CONTEXT) }
+    : { role: "user" }
+}
+
+async function translateContents(
+  state: AdaptationState,
+  value: unknown,
+  signal: AbortSignal | undefined,
+  resolveAttachment: GoogleAttachmentResolver,
+): Promise<Array<Message>> {
+  const messages: Array<Message> = []
+  const contents = records(state, value, "message_shape")
+  for (const [contentIndex, content] of contents.entries()) {
+    const role = roleForContent(state, content.role)
+    let run: Array<ContentPart> = role.prefix ? [role.prefix] : []
+    const flush = (): void => {
+      if (run.length === 0) return
+      messages.push({ role: role.role, content: flattenParts(run) })
+      run = []
+    }
+    const rawParts =
+      Array.isArray(content.parts) ? content.parts
+      : content.parts === undefined || content.parts === null ? []
+      : [content.parts]
+    for (const [partIndex, partValue] of rawParts.entries()) {
+      if (!isRecord(partValue)) {
+        run.push(asTextPart(UNKNOWN_PART_CONTEXT))
+        addFinding(state, { class: "content_part", severity: "adapted" })
+        state.meaningful = true
+        continue
+      }
+      if (isRecord(partValue.functionCall)) {
+        flush()
+        const name = callName(partValue.functionCall.name, state)
+        const id = allocateCallId(state, partValue, contentIndex, partIndex)
+        enqueueCall(state, name, id)
+        const call: ToolCall = {
+          id,
+          type: "function",
+          function: {
+            name,
+            arguments: safeStringify(partValue.functionCall.args),
+          },
+        }
+        messages.push({ role: "assistant", content: null, tool_calls: [call] })
+        state.meaningful = true
+        continue
+      }
+      if (isRecord(partValue.functionResponse)) {
+        flush()
+        const name = callName(partValue.functionResponse.name, state)
+        let id = dequeueCall(state, name)
+        if (!id) {
+          id = allocateCallId(state, {}, contentIndex, partIndex)
+          messages.push({
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id,
+                type: "function",
+                function: { name, arguments: "{}" },
+              },
+            ],
+          })
+        }
+        messages.push({
+          role: "tool",
+          tool_call_id: id,
+          content: safeStringify(partValue.functionResponse.response),
+        })
+        state.meaningful = true
+        continue
+      }
+      run.push(
+        ...(await translateContentParts(
+          state,
+          [partValue],
+          signal,
+          resolveAttachment,
+        )),
+      )
+    }
+    flush()
+  }
   return messages
 }
 
-/**
- * Find the tool_call_id for a function response by walking back through messages
- * to find the matching assistant tool_call by function name.
- */
-function findToolCallId(
-  messages: Array<Message>,
-  functionName: string,
-): string {
-  // Walk backwards to find the most recent assistant message with a matching tool call
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i]
-    if (msg.role === "assistant" && msg.tool_calls) {
-      const match = msg.tool_calls.find(
-        (tc) => tc.function.name === functionName,
-      )
-      if (match) return match.id
-    }
+async function translateSystem(
+  state: AdaptationState,
+  value: unknown,
+  signal: AbortSignal | undefined,
+  resolveAttachment: GoogleAttachmentResolver,
+): Promise<Message | undefined> {
+  if (!isRecord(value)) {
+    if (value !== undefined && value !== null)
+      addFinding(state, { class: "message_shape", severity: "adapted" })
+    return undefined
   }
-  // Fallback: generate a new ID if no match found
-  return nextToolCallId()
+  const parts = await translateContentParts(
+    state,
+    value.parts,
+    signal,
+    resolveAttachment,
+  )
+  return parts.length > 0 ?
+      { role: "system", content: flattenParts(parts) }
+    : undefined
 }
 
-/**
- * Convert Google tools → OpenAI tools format.
- */
-function translateTools(
-  tools: GoogleAIRequest["tools"],
-  allowedFunctionNames?: ReadonlySet<string>,
-): Array<Tool> | undefined {
-  if (!tools || tools.length === 0) return undefined
-
-  const openAITools: Array<Tool> = []
-
-  for (const tool of tools) {
-    if (tool.functionDeclarations) {
-      for (const decl of tool.functionDeclarations) {
-        if (
-          allowedFunctionNames
-          && allowedFunctionNames.size > 0
-          && !allowedFunctionNames.has(decl.name)
-        ) {
-          continue
-        }
-        openAITools.push({
-          type: "function",
-          function: {
-            name: decl.name,
-            description: decl.description,
-            parameters: normalizeToolParameters(decl.parameters ?? {}),
-          },
-        })
-      }
-    }
-    if (tool.googleSearch) {
-      openAITools.push(createWebSearchFunctionTool(tool.googleSearch))
-    }
-    // codeExecution has no equivalent on the ChatCompletions compatibility path.
-  }
-
-  return openAITools.length > 0 ? openAITools : undefined
-}
-
-/**
- * Remove $schema from tool parameters and ensure valid structure.
- * Copilot requires parameters to have at least { type: "object", properties: {} }.
- */
-function normalizeToolParameters(
-  params: Record<string, unknown>,
+function normalizeSchema(
+  value: unknown,
+  changed: { value: boolean },
 ): Record<string, unknown> {
-  const cleaned = { ...params }
-  delete cleaned.$schema
-  // Ensure minimum valid schema — Copilot rejects empty {} or {type:"object"} without properties
-  if (!cleaned.type) {
-    cleaned.type = "object"
+  if (!isRecord(value)) {
+    changed.value = true
+    return { type: "object", properties: {} }
   }
-  if (!cleaned.properties) {
-    cleaned.properties = {}
-  }
-  return cleaned
-}
-
-/**
- * Convert Google toolConfig → OpenAI tool_choice.
- */
-function translateToolChoice(
-  toolConfig: GoogleAIRequest["toolConfig"],
-): ChatCompletionsPayload["tool_choice"] {
-  if (!toolConfig?.functionCallingConfig) return undefined
-
-  const mode = toolConfig.functionCallingConfig.mode
-  switch (mode) {
-    case "AUTO": {
-      return "auto"
+  const output: Record<string, unknown> = {}
+  for (const [key, item] of Object.entries(value)) {
+    if (key === "$schema") {
+      changed.value = true
+      continue
     }
-    case "NONE": {
-      return "none"
-    }
-    case "ANY": {
-      const allowed = toolConfig.functionCallingConfig.allowedFunctionNames
-      if (allowed && allowed.length === 1) {
-        return {
-          type: "function",
-          function: { name: allowed[0] },
-        }
+    if (key === "type") {
+      if (typeof item === "string") {
+        const normalized = item.toLowerCase()
+        output.type = normalized
+        if (normalized !== item) changed.value = true
+      } else if (Array.isArray(item)) {
+        output.type = item.map((entry) =>
+          typeof entry === "string" ? entry.toLowerCase() : entry,
+        )
       }
-      return "required"
+      continue
     }
-    default: {
-      return undefined
+    if (
+      ["$defs", "definitions", "patternProperties", "properties"].includes(key)
+      && isRecord(item)
+    ) {
+      output[key] = Object.fromEntries(
+        Object.entries(item).map(([name, schema]) => [
+          name,
+          normalizeSchema(schema, changed),
+        ]),
+      )
+      continue
+    }
+    if (
+      [
+        "additionalItems",
+        "contains",
+        "else",
+        "if",
+        "items",
+        "not",
+        "propertyNames",
+        "then",
+      ].includes(key)
+    ) {
+      output[key] =
+        Array.isArray(item) ?
+          item.map((entry) => normalizeSchema(entry, changed))
+        : normalizeSchema(item, changed)
+      continue
+    }
+    if (["allOf", "anyOf", "oneOf"].includes(key) && Array.isArray(item)) {
+      output[key] = item.map((entry) => normalizeSchema(entry, changed))
+      continue
+    }
+    output[key] = structuredClone(item)
+  }
+  if (output.type === undefined) {
+    output.type = "object"
+    changed.value = true
+  }
+  if (output.type === "object" && !isRecord(output.properties)) {
+    output.properties = {}
+    changed.value = true
+  }
+  if (Array.isArray(output.required) && isRecord(output.properties)) {
+    const names = new Set(Object.keys(output.properties))
+    const repaired = Array.from(
+      new Set(
+        output.required.filter(
+          (item): item is string => typeof item === "string" && names.has(item),
+        ),
+      ),
+    )
+    if (JSON.stringify(repaired) !== JSON.stringify(output.required))
+      changed.value = true
+    output.required = repaired
+  }
+  return output
+}
+
+function translateTools(
+  state: AdaptationState,
+  value: unknown,
+): Array<Tool> | undefined {
+  const tools: Array<Tool> = []
+  for (const tool of records(state, value, "tool_shape")) {
+    for (const declaration of records(
+      state,
+      tool.functionDeclarations,
+      "tool_shape",
+    )) {
+      if (typeof declaration.name !== "string" || !declaration.name.trim()) {
+        addFinding(state, { class: "tool_shape", severity: "omitted" })
+        continue
+      }
+      const schemaSource =
+        isRecord(declaration.parameters) ? declaration.parameters
+        : isRecord(declaration.parametersJsonSchema) ?
+          declaration.parametersJsonSchema
+        : {}
+      const changed = { value: false }
+      const parameters = normalizeSchema(schemaSource, changed)
+      tools.push({
+        type: "function",
+        function: {
+          name: declaration.name,
+          ...(typeof declaration.description === "string" ?
+            { description: declaration.description }
+          : {}),
+          parameters,
+          ...(changed.value ? { strict: false } : {}),
+        },
+      })
+    }
+    if (isRecord(tool.googleSearch)) {
+      tools.push(createWebSearchFunctionTool(tool.googleSearch))
+    }
+    if (tool.codeExecution !== undefined) {
+      addFinding(state, { class: "tool_shape", severity: "omitted" })
+    }
+    const known = new Set([
+      "functionDeclarations",
+      "googleSearch",
+      "codeExecution",
+    ])
+    if (Object.keys(tool).some((key) => !known.has(key))) {
+      addFinding(state, { class: "tool_shape", severity: "omitted" })
     }
   }
+  return tools.length > 0 ? tools : undefined
 }
 
-/**
- * Extract system instruction from Google payload as an OpenAI system message.
- */
-function translateSystemInstruction(
-  systemInstruction: GoogleAIRequest["systemInstruction"],
-): Message | undefined {
-  if (!systemInstruction?.parts) return undefined
-
-  const systemText = systemInstruction.parts.map((p) => p.text).join("\n")
-  if (!systemText) return undefined
-
-  return { role: "system", content: systemText }
+function translateToolChoice(
+  state: AdaptationState,
+  value: unknown,
+  tools: Array<Tool> | undefined,
+): ChatCompletionsPayload["tool_choice"] {
+  if (
+    !tools?.length
+    || !isRecord(value)
+    || !isRecord(value.functionCallingConfig)
+  )
+    return undefined
+  const config = value.functionCallingConfig
+  const mode = typeof config.mode === "string" ? config.mode.toUpperCase() : ""
+  const allowed =
+    Array.isArray(config.allowedFunctionNames) ?
+      Array.from(
+        new Set(
+          config.allowedFunctionNames.filter(
+            (entry): entry is string =>
+              typeof entry === "string" && entry.trim().length > 0,
+          ),
+        ),
+      )
+    : []
+  if (mode === "AUTO") return "auto"
+  if (mode === "NONE") return "none"
+  if (mode === "ANY") {
+    const valid = allowed.filter((name) =>
+      tools.some((tool) => tool.function.name === name),
+    )
+    if (valid.length === 1)
+      return { type: "function", function: { name: valid[0] } }
+    if (valid.length > 1) {
+      tools.splice(
+        0,
+        tools.length,
+        ...tools.filter((tool) => valid.includes(tool.function.name)),
+      )
+    }
+    return "required"
+  }
+  addFinding(state, { class: "tool_choice", severity: "adapted" })
+  return "auto"
 }
 
-/**
- * Map Google generationConfig fields to OpenAI-compatible fields.
- */
-function mapGenerationConfigFields(
-  config: GoogleAIRequest["generationConfig"],
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined
+}
+
+function generationFields(
+  state: AdaptationState,
+  value: unknown,
 ): Partial<ChatCompletionsPayload> {
-  if (!config) return {}
+  if (!isRecord(value)) return {}
+  const output: Partial<ChatCompletionsPayload> = {}
+  const numberFields = [
+    ["maxOutputTokens", "max_tokens"],
+    ["temperature", "temperature"],
+    ["topP", "top_p"],
+    ["seed", "seed"],
+    ["frequencyPenalty", "frequency_penalty"],
+    ["presencePenalty", "presence_penalty"],
+  ] as const
+  for (const [sourceKey, targetKey] of numberFields) {
+    const sourceValue = value[sourceKey]
+    if (sourceValue === null || sourceValue === undefined) continue
+    const mapped = finiteNumber(sourceValue)
+    if (mapped === undefined)
+      addFinding(state, { class: "sampling", severity: "omitted" })
+    else (output as Record<string, unknown>)[targetKey] = mapped
+  }
+  if (
+    Array.isArray(value.stopSequences)
+    && value.stopSequences.every((entry) => typeof entry === "string")
+  ) {
+    output.stop = value.stopSequences
+  }
+  if (isRecord(value.responseSchema)) {
+    const changed = { value: false }
+    output.response_format = {
+      type: "json_schema",
+      json_schema: {
+        name: "google_response",
+        schema: normalizeSchema(value.responseSchema, changed),
+        strict: false,
+      },
+    }
+  } else if (value.responseMimeType === "application/json") {
+    output.response_format = { type: "json_object" }
+  }
+  if (isRecord(value.thinkingConfig)) {
+    const budget = finiteNumber(value.thinkingConfig.thinkingBudget)
+    if (budget !== undefined) output.thinking_budget = budget
+    if (
+      Object.keys(value.thinkingConfig).some(
+        (key) => key !== "thinkingBudget" && key !== "thinkingLevel",
+      )
+    ) {
+      addFinding(state, { class: "reasoning_state", severity: "adapted" })
+    }
+  }
+  const known = new Set([
+    "maxOutputTokens",
+    "temperature",
+    "topP",
+    "stopSequences",
+    "seed",
+    "frequencyPenalty",
+    "presencePenalty",
+    "responseMimeType",
+    "responseSchema",
+    "thinkingConfig",
+  ])
+  if (Object.keys(value).some((key) => !known.has(key))) {
+    addFinding(state, { class: "sampling", severity: "omitted" })
+  }
+  return output
+}
+
+export async function adaptGoogleToChatCandidate(
+  options: AdaptGoogleToChatCandidateOptions,
+): Promise<GoogleChatCandidate> {
+  const state = createState(options.source)
+  const resolveAttachment: GoogleAttachmentResolver =
+    options.resolveAttachment
+    ?? (async ({ expectPdf, signal, value }) =>
+      await fetchUrlAsDataUri(value, { expectPdf, signal }))
+  const messages: Array<Message> = []
+  const system = await translateSystem(
+    state,
+    options.source.source.systemInstruction,
+    options.signal,
+    resolveAttachment,
+  )
+  if (system) messages.push(system)
+  messages.push(
+    ...(await translateContents(
+      state,
+      options.source.source.contents,
+      options.signal,
+      resolveAttachment,
+    )),
+  )
+  const tools = translateTools(state, options.source.source.tools)
+  const payload: ChatCompletionsPayload & { model: string } = {
+    model: options.finalModel,
+    messages,
+    stream: options.stream,
+    ...(options.stream ? { stream_options: { include_usage: true } } : {}),
+    ...generationFields(state, options.source.source.generationConfig),
+    ...(tools ? { tools } : {}),
+    snippy: { enabled: false },
+  }
+  const toolChoice = translateToolChoice(
+    state,
+    options.source.source.toolConfig,
+    tools,
+  )
+  if (toolChoice !== undefined) payload.tool_choice = toolChoice
+  if (tools?.some((tool) => tool.function.name === "web_search")) {
+    payload.parallel_tool_calls = false
+  }
+  if (options.explicitReasoningEffort) {
+    payload.reasoning_effort = options.explicitReasoningEffort
+  } else if (
+    isRecord(options.source.source.generationConfig)
+    && isRecord(options.source.source.generationConfig.thinkingConfig)
+  ) {
+    const level =
+      options.source.source.generationConfig.thinkingConfig.thinkingLevel
+    if (level === "low" || level === "medium" || level === "high")
+      payload.reasoning_effort = level
+  }
+  for (const key of Object.keys(options.source.source)) {
+    if (
+      ![
+        "contents",
+        "generationConfig",
+        "systemInstruction",
+        "toolConfig",
+        "tools",
+      ].includes(key)
+    ) {
+      addFinding(state, { class: "unknown_top_level", severity: "omitted" })
+    }
+  }
+  if (!state.meaningful) {
+    addFinding(state, { class: "message_shape", severity: "fatal" })
+  }
   return {
-    max_tokens: config.maxOutputTokens,
-    temperature: config.temperature,
-    top_p: config.topP,
-    stop: config.stopSequences,
-    seed: config.seed,
-    frequency_penalty: config.frequencyPenalty,
-    presence_penalty: config.presencePenalty,
-    response_format:
-      config.responseMimeType === "application/json" ?
-        { type: "json_object" }
-      : undefined,
+    endpoint: "/chat/completions",
+    payload,
+    reason: "payload_requirement",
+    check: createEvaluatedTranslationCheck(state.findings),
   }
 }
 
-/**
- * Convert Google generationConfig → OpenAI-compatible config fields.
- */
-function translateGenerationConfig(
-  config: GoogleAIRequest["generationConfig"],
-  stream: boolean,
-): Partial<ChatCompletionsPayload> {
-  return {
-    stream,
-    stream_options: stream ? { include_usage: true } : undefined,
-    ...mapGenerationConfigFields(config),
-  }
-}
-
-/**
- * Main translation: Google Generative AI request → OpenAI ChatCompletions payload.
- */
+/** Legacy pure wrapper retained for callers migrating to the tolerant adapter. */
 export function translateGoogleToOpenAI(
-  googlePayload: GoogleAIRequest,
+  payload: Record<string, unknown>,
   model: string,
   stream: boolean,
 ): ChatCompletionsPayload {
-  const messages: Array<Message> = []
-
-  // System instruction → system message
-  const systemMessage = translateSystemInstruction(
-    googlePayload.systemInstruction,
-  )
-  if (systemMessage) {
-    messages.push(systemMessage)
+  const source: PreparedGoogleRequest = {
+    source: structuredClone(payload),
+    findings: [],
   }
-
-  // Contents → messages
-  messages.push(...translateContents(googlePayload.contents))
-
-  const allowedFunctionNames =
-    (
-      googlePayload.toolConfig?.functionCallingConfig?.mode === "ANY"
-      && googlePayload.toolConfig.functionCallingConfig.allowedFunctionNames
-    ) ?
-      new Set(
-        googlePayload.toolConfig.functionCallingConfig.allowedFunctionNames,
-      )
-    : undefined
-  const tools = translateTools(googlePayload.tools, allowedFunctionNames)
-
-  return {
+  // The legacy wrapper is intentionally synchronous and therefore retains
+  // external fileData as a fixed omission instead of performing network I/O.
+  const state = createState(source)
+  const messages: Array<Message> = []
+  const rawContents = googleRecordEntries(source.source.contents, () => {})
+  for (const content of rawContents) {
+    const role = content.role === "model" ? "assistant" : "user"
+    const parts = googleRecordEntries(content.parts, () => {})
+    const translated: Array<ContentPart> = parts.flatMap((part) => {
+      if (typeof part.text === "string") return [asTextPart(part.text)]
+      if (isRecord(part.inlineData)) {
+        const mimeType = part.inlineData.mimeType
+        const data = part.inlineData.data
+        if (typeof mimeType === "string" && typeof data === "string") {
+          return mimeType.toLowerCase().startsWith("image/") ?
+              [
+                {
+                  type: "image_url" as const,
+                  image_url: { url: `data:${mimeType};base64,${data}` },
+                },
+              ]
+            : [asTextPart(ATTACHMENT_CONTEXT)]
+        }
+      }
+      return [asTextPart(UNKNOWN_PART_CONTEXT)]
+    })
+    if (translated.length > 0)
+      messages.push({ role, content: flattenParts(translated) })
+  }
+  const tools = translateTools(state, source.source.tools)
+  const result: ChatCompletionsPayload = {
     model,
     messages,
-    ...translateGenerationConfig(googlePayload.generationConfig, stream),
-    tools,
-    tool_choice: translateToolChoice(googlePayload.toolConfig),
-    parallel_tool_calls:
-      tools?.some((tool) => tool.function.name === "web_search") ? false : true,
+    stream,
+    ...(stream ? { stream_options: { include_usage: true } } : {}),
+    ...generationFields(state, source.source.generationConfig),
+    ...(tools ? { tools } : {}),
     snippy: { enabled: false },
   }
+  const choice = translateToolChoice(state, source.source.toolConfig, tools)
+  if (choice !== undefined) result.tool_choice = choice
+  if (tools?.some((tool) => tool.function.name === "web_search")) {
+    result.parallel_tool_calls = false
+  }
+  return result
 }

@@ -8,6 +8,27 @@ import {
   translateResponsesStreamEventToGoogle,
 } from "../src/routes/google-ai/response-translation"
 
+test("uses an immutable public Google model override", () => {
+  const translated = translateOpenAIToGoogle(
+    {
+      id: "id",
+      object: "chat.completion",
+      created: 1,
+      model: "upstream-private-model",
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: "ok" },
+          logprobs: null,
+          finish_reason: "stop",
+        },
+      ],
+    },
+    "public-requested-model",
+  )
+  expect(translated.modelVersion).toBe("public-requested-model")
+})
+
 test("preserves modelVersion and promptFeedback on non-streaming chat completions translations", () => {
   const translated = translateOpenAIToGoogle({
     id: "chatcmpl-1",
