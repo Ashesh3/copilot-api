@@ -10,6 +10,7 @@ import path from "node:path"
 import {
   ERROR_ENVELOPE_CONTRACT,
   getGoogleRoutingContractRows,
+  RECOVERY_TARGET_CONTRACT,
   SESSION_TOKEN_PRIVACY_CONTRACT,
   STREAM_BEHAVIOR_CONTRACT,
 } from "~/lib/compatibility-contract"
@@ -668,6 +669,21 @@ test("documents behavior-derived stream, privacy, and error matrices", async () 
   expectMatrixRows(document, matrix.streams)
   expectMatrixRows(document, matrix.privacy)
   expectMatrixRows(document, matrix.errors)
+})
+
+test("enumerates the superseding upstream-error and attachment recovery targets", () => {
+  expect(RECOVERY_TARGET_CONTRACT).toEqual([
+    {
+      surface: "Final non-empty upstream HTTP error body",
+      behavior:
+        "exact in normal client, ordinary logs, and Sentry; preserve upstream status and content type",
+    },
+    {
+      surface: "Runtime-valid absolute HTTP(S) attachment/file URL",
+      behavior:
+        "fetchable without destination, DNS, IP, or redirect-target filtering; abort, time, byte, and redirect limits remain",
+    },
+  ])
 })
 
 test("documents the exact structured stream and privacy contract", async () => {

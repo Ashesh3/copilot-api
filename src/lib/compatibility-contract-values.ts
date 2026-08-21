@@ -72,3 +72,19 @@ export const ERROR_ENVELOPE_CONTRACT = [
     behavior: "Anthropic envelope with fixed safe message",
   },
 ] as const satisfies ReadonlyArray<CompatibilityContractRow>
+
+// These recovery targets supersede current behavior. They intentionally remain
+// independent from the behavior-derived contract rows until their runtime work
+// and documentation reconciliation are complete.
+export const RECOVERY_TARGET_CONTRACT = [
+  {
+    surface: "Final non-empty upstream HTTP error body",
+    behavior:
+      "exact in normal client, ordinary logs, and Sentry; preserve upstream status and content type",
+  },
+  {
+    surface: "Runtime-valid absolute HTTP(S) attachment/file URL",
+    behavior:
+      "fetchable without destination, DNS, IP, or redirect-target filtering; abort, time, byte, and redirect limits remain",
+  },
+] as const satisfies ReadonlyArray<CompatibilityContractRow>
