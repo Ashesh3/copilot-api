@@ -1,9 +1,15 @@
-import { expect, test } from "bun:test"
+import { afterEach, expect, mock, test } from "bun:test"
 
 import {
   prepareResponsesCandidates,
   selectResponsesCandidate,
 } from "~/routes/responses/fallback-candidates"
+
+const originalFetch = globalThis.fetch
+
+afterEach(() => {
+  globalThis.fetch = originalFetch
+})
 
 const selectedModel = {
   id: "gpt-test",
@@ -89,4 +95,50 @@ test("selects the cheapest viable translated candidate when native is unavailabl
   })
   if ("code" in selection) throw new Error("selection unexpectedly failed")
   expect(selection.candidate.endpoint).toBe("/chat/completions")
+})
+
+test("shares same-mode attachment promises while separating PDF expectation", async () => {
+  const requests: Array<string> = []
+  globalThis.fetch = mock((input: string | URL | Request) => {
+    requests.push(input instanceof Request ? input.url : input.toString())
+    return Promise.resolve(
+      new Response(new Uint8Array([1, 2, 3]), {
+        headers: { "content-type": "application/octet-stream" },
+      }),
+    )
+  }) as unknown as typeof fetch
+  const attachment = "HTTP://USER:PASS@PRIVATE.TEST:80/shared"
+  const source = {
+    source: {
+      model: "gpt-test",
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [
+            { type: "input_image", image_url: attachment },
+            { type: "input_image", image_url: attachment },
+            { type: "input_file", file_url: attachment, filename: "a.pdf" },
+          ],
+        },
+      ],
+      store: false,
+    },
+    normalizationClasses: [],
+  }
+
+  const candidates = await prepareResponsesCandidates({
+    preservedSource: source,
+    adaptationSource: source.source,
+    nativeBody: { body: source.source, normalizationClasses: [] },
+    selectedModel,
+  })
+
+  expect(requests).toEqual([
+    "http://USER:PASS@private.test/shared",
+    "http://USER:PASS@private.test/shared",
+  ])
+  expect(JSON.stringify(candidates.chat?.payload)).toContain("AQID")
+  expect(JSON.stringify(candidates.messages?.payload)).toContain("AQID")
+  expect(JSON.stringify(source)).toContain(attachment)
 })

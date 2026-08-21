@@ -20,6 +20,10 @@ export interface ParsedDataUri {
   data: string
 }
 
+export const ATTACHMENT_FETCH_MAX_BYTES = 3_145_728
+export const ATTACHMENT_FETCH_MAX_REDIRECTS = 5
+export const ATTACHMENT_FETCH_TIMEOUT_MS = 15_000
+
 const DATA_URI_RE = /^data:([^;,]+)(?:;[^,]*)?;base64,(.*)$/s
 
 export function parseDataUri(url: string): ParsedDataUri | null {
@@ -37,148 +41,18 @@ export function isDataUri(url: string): boolean {
 }
 
 export function isHttpUrl(url: string): boolean {
-  return url.startsWith("https://") || url.startsWith("http://")
+  return parseFetchableHttpUrl(url) !== null
 }
 
-/**
- * Recover any canonical HTTP(S) URL the client supplied, including local and
- * IP targets. Malformed or non-HTTP values are skipped so fetch does not throw.
- */
-export function isSafeExternalHttpUrl(value: string): boolean {
-  return isCanonicalHttpUrl(value)
-}
-
-export function isCanonicalHttpUrl(value: string): boolean {
-  if (
-    !isHttpUrl(value)
-    || hasUnsafeRawUrlCharacter(value)
-    || hasInvalidPercentEncoding(value)
-  ) {
-    return false
-  }
+export function parseFetchableHttpUrl(value: string): URL | null {
   try {
-    const url = new URL(value)
-    const authority = rawUrlAuthority(value)
-    return (
-      (url.protocol === "http:" || url.protocol === "https:")
-      && url.hostname.length > 0
-      && url.username.length === 0
-      && url.password.length === 0
-      && isValidRawHttpAuthority(authority, url.hostname, url.protocol)
-      && matchesCanonicalHttpUrl(value, url)
-    )
+    const parsed = new URL(value)
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ?
+        parsed
+      : null
   } catch {
-    return false
+    return null
   }
-}
-
-function hasUnsafeRawUrlCharacter(value: string): boolean {
-  for (const character of value) {
-    const code = character.codePointAt(0)
-    if (
-      character === "\\"
-      || code === undefined
-      || code <= 0x1f
-      || (code >= 0x7f && code <= 0x9f)
-      || character.trim().length === 0
-    ) {
-      return true
-    }
-  }
-  return false
-}
-
-function hasInvalidPercentEncoding(value: string): boolean {
-  for (
-    let index = value.indexOf("%");
-    index >= 0;
-    index = value.indexOf("%", index + 1)
-  ) {
-    if (!/^[\da-f]{2}$/i.test(value.slice(index + 1, index + 3))) return true
-  }
-  return false
-}
-
-function rawUrlAuthority(value: string): string {
-  const authorityStart = value.startsWith("https://") ? 8 : 7
-  const authorityEnd = findFirstDelimiter(value, authorityStart)
-  return value.slice(authorityStart, authorityEnd)
-}
-
-function isValidRawHttpAuthority(
-  authority: string,
-  parsedHostname: string,
-  protocol: string,
-): boolean {
-  if (authority.length === 0 || authority.includes("@")) return false
-  if (authority.startsWith("[")) {
-    const closingBracket = authority.indexOf("]")
-    if (closingBracket <= 1) return false
-    return authority === new URL(`${protocol}//${authority}`).host
-  }
-  const firstColon = authority.indexOf(":")
-  const lastColon = authority.lastIndexOf(":")
-  if (firstColon !== lastColon) return false
-  const hostname = firstColon < 0 ? authority : authority.slice(0, firstColon)
-  const portSuffix = firstColon < 0 ? "" : authority.slice(firstColon)
-  return (
-    isValidRawHostname(hostname)
-    && isValidRawPortSuffix(portSuffix)
-    && (!isCanonicalIpv4Address(parsedHostname) || hostname === parsedHostname)
-  )
-}
-
-function isValidRawHostname(hostname: string): boolean {
-  const withoutTrailingDot =
-    hostname.endsWith(".") ? hostname.slice(0, -1) : hostname
-  if (/^[\d.]+$/.test(withoutTrailingDot)) {
-    const octets = withoutTrailingDot.split(".")
-    return (
-      octets.length === 4
-      && octets.every(
-        (octet) => /^(?:0|[1-9]\d{0,2})$/.test(octet) && Number(octet) <= 255,
-      )
-    )
-  }
-  return (
-    withoutTrailingDot.length > 0
-    && withoutTrailingDot.length <= 253
-    && withoutTrailingDot
-      .split(".")
-      .every((label) => /^[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?$/i.test(label))
-  )
-}
-
-function isValidRawPortSuffix(value: string): boolean {
-  if (value.length === 0) return true
-  const port = value.slice(1)
-  return /^\d{1,5}$/.test(port) && Number(port) <= 65_535
-}
-
-function isCanonicalIpv4Address(value: string): boolean {
-  return value.split(".").length === 4 && isValidRawHostname(value)
-}
-
-function matchesCanonicalHttpUrl(value: string, url: URL): boolean {
-  const authorityEnd = findFirstDelimiter(value, url.protocol.length + 2)
-  const rawPathAndSuffix = value.slice(authorityEnd)
-  const canonicalAuthorityEnd = findFirstDelimiter(
-    url.href,
-    url.protocol.length + 2,
-  )
-  const canonicalPathAndSuffix = url.href.slice(canonicalAuthorityEnd)
-  if (rawPathAndSuffix.length === 0) return canonicalPathAndSuffix === "/"
-  if (rawPathAndSuffix.startsWith("?") || rawPathAndSuffix.startsWith("#")) {
-    return canonicalPathAndSuffix === `/${rawPathAndSuffix}`
-  }
-  return rawPathAndSuffix === canonicalPathAndSuffix
-}
-
-function findFirstDelimiter(value: string, start: number): number {
-  const indexes = ["/", "?", "#"]
-    .map((delimiter) => value.indexOf(delimiter, start))
-    .filter((index) => index >= 0)
-  return indexes.length === 0 ? value.length : Math.min(...indexes)
 }
 
 export function isPdfMediaType(mediaType: string | undefined): boolean {
@@ -217,49 +91,223 @@ export function mediaTypeFromFilename(
   return ext ? EXTENSION_MEDIA_TYPES[ext] : undefined
 }
 
+function createAttachmentAbort(options: {
+  callerSignal?: AbortSignal
+  timeoutMs: number
+}): {
+  abortState: AttachmentAbortState
+  cleanup: () => void
+  signal: AbortSignal
+} {
+  const controller = new AbortController()
+  const abortState: AttachmentAbortState = { source: null }
+  const onCallerAbort = () => {
+    if (abortState.source) return
+    abortState.source = "caller"
+    controller.abort(options.callerSignal?.reason)
+  }
+  options.callerSignal?.addEventListener("abort", onCallerAbort, { once: true })
+  const timer = setTimeout(() => {
+    if (abortState.source) return
+    abortState.source = "timeout"
+    controller.abort(
+      new DOMException("Attachment fetch timed out", "AbortError"),
+    )
+  }, options.timeoutMs)
+  return {
+    abortState,
+    cleanup: () => {
+      clearTimeout(timer)
+      options.callerSignal?.removeEventListener("abort", onCallerAbort)
+    },
+    signal: controller.signal,
+  }
+}
+
+async function fetchAttachmentResponse(options: {
+  fetchImplementation: typeof fetch
+  initialUrl: URL
+  maxRedirects: number
+  signal: AbortSignal
+}): Promise<{ response: Response; url: URL } | null> {
+  let currentUrl = options.initialUrl
+  let redirects = 0
+  while (true) {
+    const response = await options.fetchImplementation(currentUrl, {
+      credentials: "omit",
+      headers: { accept: "*/*" },
+      redirect: "manual",
+      signal: options.signal,
+    })
+    if (!REDIRECT_STATUSES.has(response.status)) {
+      return { response, url: currentUrl }
+    }
+    const location = response.headers.get("location")
+    if (!location || redirects >= options.maxRedirects) return null
+    const nextUrl = parseFetchableHttpUrl(new URL(location, currentUrl).href)
+    if (!nextUrl) return null
+    currentUrl = nextUrl
+    redirects += 1
+  }
+}
+
+function mediaTypeForResponse(options: {
+  expectPdf: boolean
+  response: Response
+  url: URL
+}): string {
+  const headerMediaType = options.response.headers
+    .get("content-type")
+    ?.split(";")[0]
+    .trim()
+    .toLowerCase()
+  return (
+    (headerMediaType && headerMediaType !== "application/octet-stream" ?
+      headerMediaType
+    : undefined)
+    ?? mediaTypeFromFilename(options.url.pathname)
+    ?? (options.expectPdf ? "application/pdf" : "application/octet-stream")
+  )
+}
+
 /**
  * Fetch an external http(s) attachment and inline it as a data URI.
  * Upstream Copilot rejects external URLs on every endpoint, so the proxy
  * fetches on the client's behalf. Returns null on any failure (caller
  * downgrades to a text note).
  */
+// eslint-disable-next-line complexity -- bounded transport outcome branches are explicit
 export async function fetchUrlAsDataUri(
-  url: string,
-  options?: { expectPdf?: boolean; signal?: AbortSignal },
+  value: string,
+  options?: FetchUrlAsDataUriOptions,
 ): Promise<ParsedDataUri | null> {
-  if (!isHttpUrl(url)) return null
+  let currentUrl = parseFetchableHttpUrl(value)
+  if (!currentUrl) return null
+  options?.signal?.throwIfAborted()
+  const fetchImplementation = options?.fetch ?? globalThis.fetch
+  const maxBytes = options?.maxBytes ?? ATTACHMENT_FETCH_MAX_BYTES
+  const maxRedirects = options?.maxRedirects ?? ATTACHMENT_FETCH_MAX_REDIRECTS
+  const timeoutMs = options?.timeoutMs ?? ATTACHMENT_FETCH_TIMEOUT_MS
+  const abort = createAttachmentAbort({
+    callerSignal: options?.signal,
+    timeoutMs,
+  })
 
   try {
-    const response = await fetch(url, {
-      headers: { accept: "*/*" },
-      signal: options?.signal,
+    const fetched = await fetchAttachmentResponse({
+      fetchImplementation,
+      initialUrl: currentUrl,
+      maxRedirects,
+      signal: abort.signal,
     })
+    if (!fetched) return null
+    const { response } = fetched
+    currentUrl = fetched.url
     if (!response.ok) {
       consola.warn(`Attachment fetch failed with HTTP ${response.status}`)
       return null
     }
 
-    const buffer = await response.arrayBuffer()
-    const headerMediaType = response.headers
-      .get("content-type")
-      ?.split(";")[0]
-      .trim()
-      .toLowerCase()
-    const mediaType =
-      (headerMediaType && headerMediaType !== "application/octet-stream" ?
-        headerMediaType
-      : undefined)
-      ?? mediaTypeFromFilename(new URL(url).pathname)
-      ?? (options?.expectPdf ? "application/pdf" : "application/octet-stream")
-
-    return {
-      mediaType,
-      data: Buffer.from(buffer).toString("base64"),
+    const buffer = await readBoundedResponseBody(response, maxBytes)
+    if (!buffer) {
+      consola.warn("Attachment fetch exceeded the byte limit")
+      return null
     }
-  } catch (error) {
-    if (options?.signal?.aborted) throw error
+    return {
+      mediaType: mediaTypeForResponse({
+        expectPdf: options?.expectPdf ?? false,
+        response,
+        url: currentUrl,
+      }),
+      data: buffer.toString("base64"),
+    }
+  } catch {
+    if (abort.abortState.source === "caller") throw options?.signal?.reason
+    if (abort.abortState.source === "timeout") return null
     consola.warn("Attachment fetch failed with a transport error")
     return null
+  } finally {
+    abort.cleanup()
+  }
+}
+
+export interface FetchUrlAsDataUriOptions {
+  expectPdf?: boolean
+  fetch?: typeof fetch
+  maxBytes?: number
+  maxRedirects?: number
+  signal?: AbortSignal
+  timeoutMs?: number
+}
+
+type AttachmentAbortState = { source: "caller" | "timeout" | null }
+
+export type AttachmentFetchResolver = (options: {
+  expectPdf: boolean
+  signal?: AbortSignal
+  value: string
+}) => Promise<ParsedDataUri | null>
+
+export function createAttachmentFetchResolver(options?: {
+  fetch?: typeof fetch
+}): AttachmentFetchResolver {
+  const values = new Map<string, Promise<ParsedDataUri | null>>()
+  return async ({ expectPdf, signal, value }) => {
+    signal?.throwIfAborted()
+    const key = `${expectPdf ? "pdf" : "asset"}:${value}`
+    let pending = values.get(key)
+    if (!pending) {
+      pending = fetchUrlAsDataUri(value, {
+        expectPdf,
+        fetch: options?.fetch,
+        signal,
+      })
+      values.set(key, pending)
+    }
+    return await pending
+  }
+}
+
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
+
+function parseContentLength(value: string | null): number | undefined {
+  if (!value || !/^\d+$/.test(value)) return undefined
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) ? parsed : undefined
+}
+
+async function readBoundedResponseBody(
+  response: Response,
+  maxBytes: number,
+): Promise<Buffer | null> {
+  const declared = parseContentLength(response.headers.get("content-length"))
+  if (declared !== undefined && declared > maxBytes) return null
+  if (!response.body) return Buffer.alloc(0)
+  const reader: ReadableStreamDefaultReader<Uint8Array> =
+    response.body.getReader() as ReadableStreamDefaultReader<Uint8Array>
+  const chunks: Array<Uint8Array> = []
+  let total = 0
+  try {
+    while (true) {
+      // Bun's Response.body reader is correctly Uint8Array at runtime, but the
+      // project DOM typings surface the read result as error-typed here.
+
+      const result: { done: boolean; value?: Uint8Array } = await reader.read()
+
+      if (result.done) break
+
+      const chunk = result.value
+      if (!chunk) break
+      if (total + chunk.byteLength > maxBytes) {
+        await reader.cancel()
+        return null
+      }
+      chunks.push(chunk)
+      total += chunk.byteLength
+    }
+    return Buffer.concat(chunks, total)
+  } finally {
+    reader.releaseLock()
   }
 }
 

@@ -6,7 +6,6 @@ import { routedFetch } from "~/lib/account-router"
 import {
   attachmentOmittedNote,
   fetchUrlAsDataUri,
-  isHttpUrl,
   pdfUnsupportedByModelNote,
   toDataUri,
 } from "~/lib/attachments"
@@ -188,7 +187,7 @@ async function normalizeChatContentPart(
   model: string,
   signal?: AbortSignal,
 ): Promise<ContentPart> {
-  if (part.type === "image_url" && isHttpUrl(part.image_url.url)) {
+  if (part.type === "image_url" && !part.image_url.url.startsWith("data:")) {
     const inlined = await fetchUrlAsDataUri(part.image_url.url, { signal })
     if (inlined) {
       return {
@@ -204,7 +203,6 @@ async function normalizeChatContentPart(
       type: "text",
       text: attachmentOmittedNote({
         kind: "image",
-        name: part.image_url.url,
         reason: "the URL could not be fetched by the proxy",
       }),
     }

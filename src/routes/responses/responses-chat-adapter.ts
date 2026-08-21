@@ -11,7 +11,7 @@ import type {
 } from "~/services/copilot/create-chat-completions"
 import type { ResponsesWireBody } from "~/services/copilot/responses-contract"
 
-import { fetchUrlAsDataUri, isHttpUrl } from "~/lib/attachments"
+import { fetchUrlAsDataUri } from "~/lib/attachments"
 import { getConfig } from "~/lib/config"
 import { createEvaluatedTranslationCheck } from "~/lib/endpoint-routing"
 import {
@@ -112,7 +112,7 @@ async function convertContent(
   content: unknown,
   findings: Array<TranslationFinding>,
   signal: AbortSignal | undefined,
-  attachmentCache: ResponsesAttachmentCache["values"],
+  resolveAttachment: ResponsesAttachmentCache["resolve"],
 ): Promise<string | Array<ContentPart>> {
   if (typeof content === "string") return content
   if (!Array.isArray(content)) return ""
@@ -134,12 +134,12 @@ async function convertContent(
       const url = typeof raw.image_url === "string" ? raw.image_url : undefined
       if (url) {
         let finalUrl = url
-        if (isHttpUrl(url)) {
-          const fetched =
-            attachmentCache.has(url) ?
-              (attachmentCache.get(url) ?? null)
-            : await fetchUrlAsDataUri(url, { signal })
-          attachmentCache.set(url, fetched)
+        if (!url.startsWith("data:")) {
+          const fetched = await resolveAttachment({
+            expectPdf: false,
+            signal,
+            value: url,
+          })
           if (fetched) {
             finalUrl = `data:${fetched.mediaType};base64,${fetched.data}`
           } else {
@@ -167,16 +167,12 @@ async function convertContent(
     if (raw.type === "input_file") {
       let fileData =
         typeof raw.file_data === "string" ? raw.file_data : undefined
-      if (
-        !fileData
-        && typeof raw.file_url === "string"
-        && isHttpUrl(raw.file_url)
-      ) {
-        const fetched =
-          attachmentCache.has(raw.file_url) ?
-            (attachmentCache.get(raw.file_url) ?? null)
-          : await fetchUrlAsDataUri(raw.file_url, { expectPdf: true, signal })
-        attachmentCache.set(raw.file_url, fetched)
+      if (!fileData && typeof raw.file_url === "string") {
+        const fetched = await resolveAttachment({
+          expectPdf: true,
+          signal,
+          value: raw.file_url,
+        })
         if (fetched)
           fileData = `data:${fetched.mediaType};base64,${fetched.data}`
       }
@@ -225,8 +221,10 @@ async function convertInput(
   sharedAttachmentCache: ResponsesAttachmentCache | undefined,
 ): Promise<Array<Message>> {
   const messages: Array<Message> = []
-  const attachmentCache: ResponsesAttachmentCache["values"] =
-    sharedAttachmentCache?.values ?? new Map<string, null>()
+  const resolveAttachment: ResponsesAttachmentCache["resolve"] =
+    sharedAttachmentCache?.resolve
+    ?? (async ({ expectPdf, signal, value }) =>
+      await fetchUrlAsDataUri(value, { expectPdf, signal }))
   if (typeof source.input === "string") {
     messages.push({ role: "user", content: source.input })
     return messages
@@ -373,7 +371,7 @@ async function convertInput(
         raw.content,
         state.findings,
         signal,
-        attachmentCache,
+        resolveAttachment,
       )
       if ((typeof content === "string" && content) || Array.isArray(content)) {
         messages.push({ role, content })

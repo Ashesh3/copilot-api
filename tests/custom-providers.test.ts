@@ -579,7 +579,7 @@ test("custom Messages dispatches a versioned web-search schema after URL-image f
           {
             role: "user",
             content:
-              '[image attachment "https://private.example/image.png" omitted: the URL could not be fetched by the proxy]',
+              "[image attachment omitted: the URL could not be fetched by the proxy]",
           },
         ],
         tools: [
@@ -796,7 +796,7 @@ test.each([
               {
                 role: "user",
                 content:
-                  '[image attachment "https://private.example/image.png" omitted: the URL could not be fetched by the proxy]',
+                  "[image attachment omitted: the URL could not be fetched by the proxy]",
               },
             ],
           })

@@ -12,7 +12,6 @@ import type {
 
 import {
   fetchUrlAsDataUri,
-  isHttpUrl,
   isPdfMediaType,
   parseDataUri,
 } from "~/lib/attachments"
@@ -57,7 +56,7 @@ async function convertImagePart(
   signal?: AbortSignal,
 ): Promise<AnthropicImageBlock> {
   let parsed = parseDataUri(url)
-  if (!parsed && isHttpUrl(url)) {
+  if (!parsed) {
     parsed = await fetchUrlAsDataUri(url, { signal })
   }
 

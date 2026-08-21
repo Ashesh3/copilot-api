@@ -23,7 +23,11 @@ import type {
 } from "~/services/copilot/create-responses"
 import type { Model } from "~/services/copilot/get-models"
 
-import { fetchUrlAsDataUri, isHttpUrl, parseDataUri } from "~/lib/attachments"
+import {
+  type AttachmentFetchResolver,
+  createAttachmentFetchResolver,
+  parseDataUri,
+} from "~/lib/attachments"
 import { createEvaluatedTranslationCheck } from "~/lib/endpoint-routing"
 import {
   getUnsupportedRequestParameters,
@@ -73,10 +77,7 @@ export interface SupportFilteredChatCandidates {
 }
 
 interface CandidateContext {
-  readonly attachmentCache: Map<
-    string,
-    Promise<Awaited<ReturnType<typeof fetchUrlAsDataUri>>>
-  >
+  readonly resolveAttachment: AttachmentFetchResolver
   readonly findings: Array<TranslationFinding>
   readonly pendingResultCallIds: Set<string>
   readonly reservedCallIds: Set<string>
@@ -84,10 +85,7 @@ interface CandidateContext {
 }
 
 interface CandidateAttachmentCache {
-  readonly values: Map<
-    string,
-    Promise<Awaited<ReturnType<typeof fetchUrlAsDataUri>>>
-  >
+  readonly resolve: AttachmentFetchResolver
 }
 
 interface NativeChatCandidateOptions {
@@ -140,7 +138,9 @@ function addFinding(
 function createContext(
   source: PreparedChatCompletionsSource,
   findings: ReadonlyArray<TranslationFinding> = [],
-  attachmentCache: CandidateAttachmentCache = { values: new Map() },
+  attachmentCache: CandidateAttachmentCache = {
+    resolve: createAttachmentFetchResolver(),
+  },
 ): CandidateContext {
   const reservedCallIds = new Set<string>()
   for (const message of source.messages) {
@@ -157,7 +157,7 @@ function createContext(
     }
   }
   return {
-    attachmentCache: attachmentCache.values,
+    resolveAttachment: attachmentCache.resolve,
     findings: findings.map((finding) => ({ ...finding })),
     pendingResultCallIds: new Set(),
     reservedCallIds,
@@ -170,11 +170,11 @@ async function fetchCandidateAttachment(
   url: string,
   signal: AbortSignal | undefined,
 ) {
-  const cached = context.attachmentCache.get(url)
-  if (cached) return await cached
-  const pending = fetchUrlAsDataUri(url, { signal })
-  context.attachmentCache.set(url, pending)
-  return await pending
+  return await context.resolveAttachment({
+    expectPdf: false,
+    signal,
+    value: url,
+  })
 }
 
 function createCallId(
@@ -335,13 +335,13 @@ async function normalizeNativeAttachments(
         part.type === "image_url"
         && isRecord(part.image_url)
         && typeof part.image_url.url === "string"
-        && isHttpUrl(part.image_url.url)
+        && !part.image_url.url.startsWith("data:")
       ) {
-        const cached = attachmentCache.values.get(part.image_url.url)
-        const pending =
-          cached ?? fetchUrlAsDataUri(part.image_url.url, { signal })
-        if (!cached) attachmentCache.values.set(part.image_url.url, pending)
-        const inlined = await pending
+        const inlined = await attachmentCache.resolve({
+          expectPdf: false,
+          signal,
+          value: part.image_url.url,
+        })
         parts.push(
           inlined ?
             {
@@ -385,7 +385,9 @@ export async function prepareNativeChatCandidate(
       payload.parallel_tool_calls = false
     }
   }
-  const attachmentCache = options.attachmentCache ?? { values: new Map() }
+  const attachmentCache = options.attachmentCache ?? {
+    resolve: createAttachmentFetchResolver(),
+  }
   if (options.applyCopilotSemantics !== false) {
     rewriteAssistantPrefill(payload)
     normalizeNativeSchema(payload)
@@ -827,7 +829,7 @@ async function convertAnthropicContent(
       && typeof raw.image_url.url === "string"
     ) {
       let parsed = parseDataUri(raw.image_url.url)
-      if (!parsed && isHttpUrl(raw.image_url.url)) {
+      if (!parsed) {
         parsed = await fetchCandidateAttachment(
           context,
           raw.image_url.url,
@@ -1193,7 +1195,9 @@ export function prepareChatCandidates(
 export async function prepareChatCandidates(
   options: PrepareChatCandidatesOptions,
 ): Promise<PreparedChatCandidates | SupportFilteredChatCandidates> {
-  const attachmentCache: CandidateAttachmentCache = { values: new Map() }
+  const attachmentCache: CandidateAttachmentCache = {
+    resolve: createAttachmentFetchResolver(),
+  }
   const support = options.support ?? {
     chat: true,
     responses: true,

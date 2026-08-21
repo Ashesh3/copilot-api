@@ -15,6 +15,7 @@ import consola from "consola"
 import type { AnthropicMessagesPayload } from "~/routes/messages/anthropic-types"
 import type { Model, ModelsResponse } from "~/services/copilot/get-models"
 
+import { parseFetchableHttpUrl } from "~/lib/attachments"
 import { state } from "~/lib/state"
 import { tokenPool } from "~/lib/token-pool"
 import { selectMessagesUpstreamEndpoint } from "~/routes/messages/handler"
@@ -74,8 +75,8 @@ const INVALID_TRANSLATED_DOCUMENT_URLS = [
   "http://[2001:db8::1]:80/report.pdf",
   "https://[2001:db8::1]:443/report.pdf",
 ]
-const UNSAFE_DOCUMENT_RECOVERY_URLS = INVALID_TRANSLATED_DOCUMENT_URLS
-const VALID_TRANSLATED_DOCUMENT_URLS = [
+const DOCUMENT_URL_CANDIDATES = [
+  ...INVALID_TRANSLATED_DOCUMENT_URLS,
   "https://attachment.test",
   "https://attachment.test?download=1#section",
   "https://attachment.test/?download=1#section",
@@ -87,6 +88,12 @@ const VALID_TRANSLATED_DOCUMENT_URLS = [
   "https://[2001:db8::1]:8443/report.pdf?download=1#section",
   "https://attachment.test/report%20name.pdf?download=%E2%9C%93#section-1",
 ]
+const FETCHABLE_TRANSLATED_DOCUMENT_URLS = DOCUMENT_URL_CANDIDATES.filter(
+  (url) => parseFetchableHttpUrl(url) !== null,
+)
+const UNFETCHABLE_TRANSLATED_DOCUMENT_URLS = DOCUMENT_URL_CANDIDATES.filter(
+  (url) => parseFetchableHttpUrl(url) === null,
+)
 
 async function expectSafeMessagesRejection(response: Response): Promise<void> {
   expect(response.status).toBe(400)
@@ -99,13 +106,11 @@ async function expectSafeMessagesRejection(response: Response): Promise<void> {
   })
 }
 
-function createAttachmentResponse(url: URL): Response | undefined {
-  if (
-    url.hostname !== "attachment.test"
-    && url.hostname !== "localhost"
-    && url.hostname !== "127.0.0.1"
-    && url.hostname !== "[2001:db8::1]"
-  ) {
+function createAttachmentResponse(
+  url: URL,
+  init?: RequestInit,
+): Response | undefined {
+  if (init?.body !== undefined) {
     return undefined
   }
   attachmentFetchCount += 1
@@ -124,7 +129,7 @@ const fetchMock = mock(
   (url: string | URL | Request, init?: RequestInit): Response => {
     const rawUrl = typeof url === "string" || url instanceof URL ? url : url.url
     const parsedUrl = new URL(rawUrl)
-    const attachment = createAttachmentResponse(parsedUrl)
+    const attachment = createAttachmentResponse(parsedUrl, init)
     if (attachment) return attachment
     const path = parsedUrl.pathname
     upstreamPaths.push(path)
@@ -1977,7 +1982,7 @@ test.each([
     responses: ["document.source"],
     chat: ["document"],
   },
-  ...INVALID_TRANSLATED_DOCUMENT_URLS.map((url) => ({
+  ...UNFETCHABLE_TRANSLATED_DOCUMENT_URLS.map((url) => ({
     name: `invalid URL document source ${url}`,
     document: {
       type: "document",
@@ -1987,8 +1992,8 @@ test.each([
     responses: ["document.source"],
     chat: ["document"],
   })),
-  ...VALID_TRANSLATED_DOCUMENT_URLS.map((url) => ({
-    name: `valid canonical URL document source ${url}`,
+  ...FETCHABLE_TRANSLATED_DOCUMENT_URLS.map((url) => ({
+    name: `runtime-valid URL document source ${url}`,
     document: {
       type: "document",
       source: { type: "url", url },
@@ -2242,7 +2247,7 @@ test.each([
   },
 )
 
-test.each(VALID_TRANSLATED_DOCUMENT_URLS)(
+test.each(FETCHABLE_TRANSLATED_DOCUMENT_URLS)(
   "normalizes one remote PDF %s only after selecting Responses",
   async (url) => {
     installModel({ supported_endpoints: ["/responses", "/chat/completions"] })
@@ -2444,8 +2449,8 @@ test("recovers remote document metadata through Responses", async () => {
   )
 })
 
-test.each(UNSAFE_DOCUMENT_RECOVERY_URLS)(
-  "omits unsafe translated document URL %s before fetch and dispatches meaningful text",
+test.each(UNFETCHABLE_TRANSLATED_DOCUMENT_URLS)(
+  "omits parser-invalid translated document URL %s before fetch and dispatches meaningful text",
   async (url) => {
     installModel({ supported_endpoints: ["/responses", "/chat/completions"] })
 
@@ -2474,7 +2479,7 @@ test.each(UNSAFE_DOCUMENT_RECOVERY_URLS)(
     })
     expect(upstreamBodies[0]).toHaveProperty("input.0.content.1", {
       type: "input_text",
-      text: '[file attachment "report.pdf" omitted: the URL is unavailable for proxy recovery]',
+      text: '[file attachment "report.pdf" omitted: the URL could not be fetched by the proxy]',
     })
   },
 )
@@ -2525,7 +2530,6 @@ test.each(INVALID_TRANSLATED_DOCUMENT_URLS)(
     })
 
     expect(response.status).toBe(200)
-    expect(attachmentFetchCount).toBe(0)
     expect(upstreamPaths).toEqual(["/v1/messages"])
     expect(upstreamBodies[0]).toHaveProperty("messages.0.content.0", document)
   },

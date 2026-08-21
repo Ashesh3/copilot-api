@@ -15,7 +15,7 @@ import type { ChatCompletionsPayload } from "~/services/copilot/create-chat-comp
 import type { ResponsesPayload } from "~/services/copilot/create-responses"
 import type { Model } from "~/services/copilot/get-models"
 
-import { fetchUrlAsDataUri } from "~/lib/attachments"
+import { createAttachmentFetchResolver } from "~/lib/attachments"
 import {
   createEvaluatedTranslationCheck,
   getModelEndpointSupport,
@@ -80,17 +80,9 @@ export interface PrepareMessagesCandidatesOptions {
 }
 
 function createAttachmentResolver(): AnthropicAttachmentResolver {
-  const cache = new Map<string, ReturnType<typeof fetchUrlAsDataUri>>()
-  return async ({ expectPdf, signal, url }) => {
-    signal?.throwIfAborted()
-    const key = `${expectPdf ? "pdf" : "asset"}:${url}`
-    let pending = cache.get(key)
-    if (!pending) {
-      pending = fetchUrlAsDataUri(url, { expectPdf, signal })
-      cache.set(key, pending)
-    }
-    return await pending
-  }
+  const resolve = createAttachmentFetchResolver()
+  return async ({ expectPdf, signal, url }) =>
+    await resolve({ expectPdf, signal, value: url })
 }
 
 interface ToolHistoryAssociations {

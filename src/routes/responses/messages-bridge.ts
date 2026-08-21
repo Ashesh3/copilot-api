@@ -27,7 +27,6 @@ import type { ResponsesWireBody } from "~/services/copilot/responses-contract"
 
 import {
   fetchUrlAsDataUri,
-  isHttpUrl,
   isLikelyBase64,
   parseDataUri,
 } from "~/lib/attachments"
@@ -126,7 +125,7 @@ async function convertTolerantResponsesContent(
   content: unknown,
   findings: Array<TranslationFinding>,
   signal: AbortSignal | undefined,
-  attachmentCache: ResponsesAttachmentCache["values"],
+  resolveAttachment: ResponsesAttachmentCache["resolve"],
 ): Promise<Array<AnthropicUserContentBlock>> {
   if (typeof content === "string") {
     return content ? [{ type: "text", text: content }] : []
@@ -153,12 +152,12 @@ async function convertTolerantResponsesContent(
       const value =
         typeof raw.image_url === "string" ? raw.image_url : undefined
       let parsed = value ? parseDataUri(value) : null
-      if (!parsed && value && isHttpUrl(value)) {
-        parsed =
-          attachmentCache.has(value) ?
-            (attachmentCache.get(value) ?? null)
-          : await fetchUrlAsDataUri(value, { signal })
-        attachmentCache.set(value, parsed)
+      if (!parsed && value) {
+        parsed = await resolveAttachment({
+          expectPdf: false,
+          signal,
+          value,
+        })
       }
       if (
         parsed
@@ -197,16 +196,12 @@ async function convertTolerantResponsesContent(
       ) {
         parsed = { data: raw.file_data, mediaType: "application/pdf" }
       }
-      if (
-        !parsed
-        && typeof raw.file_url === "string"
-        && isHttpUrl(raw.file_url)
-      ) {
-        parsed =
-          attachmentCache.has(raw.file_url) ?
-            (attachmentCache.get(raw.file_url) ?? null)
-          : await fetchUrlAsDataUri(raw.file_url, { expectPdf: true, signal })
-        attachmentCache.set(raw.file_url, parsed)
+      if (!parsed && typeof raw.file_url === "string") {
+        parsed = await resolveAttachment({
+          expectPdf: true,
+          signal,
+          value: raw.file_url,
+        })
       }
       if (parsed) {
         blocks.push({
@@ -244,8 +239,10 @@ async function convertTolerantResponsesInput(
 ): Promise<{ messages: Array<AnthropicMessage>; system: Array<string> }> {
   const messages: Array<AnthropicMessage> = []
   const system: Array<string> = []
-  const attachmentCache: ResponsesAttachmentCache["values"] =
-    sharedAttachmentCache?.values ?? new Map<string, null>()
+  const resolveAttachment: ResponsesAttachmentCache["resolve"] =
+    sharedAttachmentCache?.resolve
+    ?? (async ({ expectPdf, signal, value }) =>
+      await fetchUrlAsDataUri(value, { expectPdf, signal }))
   if (typeof source.instructions === "string" && source.instructions) {
     system.push(source.instructions)
   }
@@ -415,7 +412,7 @@ async function convertTolerantResponsesInput(
         raw.content,
         state.findings,
         signal,
-        attachmentCache,
+        resolveAttachment,
       )
       if (blocks.length === 0) continue
       if (assistant) {

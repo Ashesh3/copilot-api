@@ -6,7 +6,6 @@ import {
   fetchUrlAsDataUri,
   isImageMediaType,
   isPdfMediaType,
-  isSafeExternalHttpUrl,
 } from "~/lib/attachments"
 
 import {
@@ -224,7 +223,6 @@ async function normalizeImageBlock(
     type: "text",
     text: attachmentOmittedNote({
       kind: "image",
-      name: block.source.url,
       reason: "the URL could not be fetched by the proxy",
     }),
   }
@@ -305,12 +303,6 @@ async function normalizeUrlDocument(options: {
   resolveAttachment: AnthropicAttachmentResolver
 }): Promise<Array<NormalizableBlock>> {
   const { block, resolveAttachment, signal, url } = options
-  if (!isSafeExternalHttpUrl(url)) {
-    return [
-      omittedDocumentNote(block, "the URL is unavailable for proxy recovery"),
-    ]
-  }
-
   const inlined = await resolveAttachment({ expectPdf: true, signal, url })
 
   if (inlined && isPdfMediaType(inlined.mediaType)) {
@@ -353,11 +345,7 @@ async function normalizeUrlDocument(options: {
 
   consola.warn("Could not inline remote document attachment")
   return [
-    omittedDocumentNote(
-      block,
-      "the URL could not be fetched by the proxy",
-      url,
-    ),
+    omittedDocumentNote(block, "the URL could not be fetched by the proxy"),
   ]
 }
 

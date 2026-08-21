@@ -70,6 +70,60 @@ test("adapts future Responses items and consumes Messages tool results once", as
   expect(source.tools[0]?.parameters?.type).toBe("OBJECT")
 })
 
+test("fetches unrestricted Responses URLs for Messages with URI-free failure", async () => {
+  const originalFetch = globalThis.fetch
+  const requested: Array<string> = []
+  const marker = "responses-messages-secret"
+  globalThis.fetch = mock((input: string | URL | Request) => {
+    const value = input instanceof Request ? input.url : input.toString()
+    requested.push(value)
+    return Promise.resolve(
+      value.includes("ok.png") ?
+        new Response(new Uint8Array([1, 2, 3]), {
+          headers: { "content-type": "image/png" },
+        })
+      : new Response("", { status: 404 }),
+    )
+  }) as unknown as typeof fetch
+  try {
+    const candidate = await adaptResponsesToMessagesCandidate({
+      source: {
+        model: "claude-current",
+        input: [
+          {
+            type: "message",
+            role: "user",
+            content: [
+              { type: "input_text", text: "before" },
+              {
+                type: "input_image",
+                image_url: "HTTP://USER:PASS@127.1/ok.png",
+              },
+              {
+                type: "input_file",
+                file_url: `http://169.254.169.254/a.pdf?secret=${marker}`,
+              },
+              { type: "input_text", text: "after" },
+            ],
+          },
+        ],
+      },
+    })
+
+    expect(requested).toEqual([
+      "http://USER:PASS@127.0.0.1/ok.png",
+      `http://169.254.169.254/a.pdf?secret=${marker}`,
+    ])
+    expect(JSON.stringify(candidate.payload)).toContain("AQID")
+    expect(JSON.stringify(candidate.payload)).toContain("before")
+    expect(JSON.stringify(candidate.payload)).toContain("after")
+    expect(JSON.stringify(candidate.payload)).not.toContain(marker)
+  } finally {
+    // eslint-disable-next-line require-atomic-updates -- restore test-scoped global
+    globalThis.fetch = originalFetch
+  }
+})
+
 test("merges Responses format and effort in one Messages output config", async () => {
   const candidate = await adaptResponsesToMessagesCandidate({
     source: {

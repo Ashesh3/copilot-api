@@ -1,9 +1,11 @@
-import type { ParsedDataUri } from "~/lib/attachments"
+import type { AttachmentFetchResolver } from "~/lib/attachments"
+
+import { createAttachmentFetchResolver } from "~/lib/attachments"
 
 export interface ResponsesAttachmentCache {
-  readonly values: Map<string, ParsedDataUri | null>
+  readonly resolve: AttachmentFetchResolver
 }
 
 export function createResponsesAttachmentCache(): ResponsesAttachmentCache {
-  return { values: new Map() }
+  return { resolve: createAttachmentFetchResolver() }
 }

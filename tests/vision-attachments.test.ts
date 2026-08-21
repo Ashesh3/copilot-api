@@ -17,7 +17,7 @@ import type {
   ResponsesPayload,
 } from "~/services/copilot/create-responses"
 
-/* eslint-disable max-lines */
+/* eslint-disable max-lines, max-lines-per-function */
 import {
   isLikelyBase64,
   mediaTypeFromFilename,
@@ -39,6 +39,7 @@ import { translateToOpenAI } from "~/routes/messages/non-stream-translation"
 import { translateAnthropicMessagesToResponsesPayload } from "~/routes/messages/responses-translation"
 import { responsesToChatCompletions } from "~/routes/responses/handler"
 import { hasVisionContent } from "~/services/copilot/copilot-client"
+import { normalizeChatAttachments } from "~/services/copilot/create-chat-completions"
 import { normalizeResponsesAttachments } from "~/services/copilot/create-responses"
 
 const PDF_B64 = Buffer.from("%PDF-1.4 fake pdf").toString("base64")
@@ -377,6 +378,43 @@ describe("normalizeAnthropicAttachments", () => {
     ])
   })
 
+  test("fetches userinfo and normalized numeric attachment URLs without exposing them", async () => {
+    const requested: Array<string> = []
+    const marker = "private-query-marker"
+    globalThis.fetch = mock((input: string | URL | Request) => {
+      requested.push(input instanceof Request ? input.url : input.toString())
+      return Promise.resolve(new Response("", { status: 404 }))
+    }) as unknown as typeof fetch
+    const payload: AnthropicMessagesPayload = {
+      model: "gpt-current",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "before" },
+            {
+              type: "image",
+              source: {
+                type: "url",
+                url: `HTTP://USER:PASS@127.1/a.png?secret=${marker}`,
+              },
+            },
+            { type: "text", text: "after" },
+          ],
+        },
+      ],
+    }
+
+    await normalizeAnthropicAttachments(payload)
+
+    expect(requested).toEqual([
+      `http://USER:PASS@127.0.0.1/a.png?secret=${marker}`,
+    ])
+    expect(JSON.stringify(payload)).toContain("before")
+    expect(JSON.stringify(payload)).toContain("after")
+    expect(JSON.stringify(payload)).not.toContain(marker)
+  })
+
   test("inlines text-source documents as text blocks", async () => {
     const payload: AnthropicMessagesPayload = {
       model: "claude-sonnet-4.6",
@@ -579,6 +617,40 @@ describe("chatPayloadToAnthropic bridge", () => {
     expect(blocks[2].source?.media_type).toBe("application/pdf")
     expect(blocks[2].source?.data).toBe(PDF_B64)
     expect(blocks[2].title).toBe("spec.pdf")
+  })
+
+  test("fetches a runtime-valid remote image for Chat to Messages", async () => {
+    const requested: Array<string> = []
+    globalThis.fetch = mock((input: string | URL | Request) => {
+      requested.push(input instanceof Request ? input.url : input.toString())
+      return Promise.resolve(
+        new Response(new Uint8Array([1, 2, 3]), {
+          headers: { "content-type": "image/png" },
+        }),
+      )
+    }) as unknown as typeof fetch
+
+    const anthropic = await chatPayloadToAnthropic({
+      model: "claude-current",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "before" },
+            {
+              type: "image_url",
+              image_url: { url: "HTTP://USER:PASS@127.1/a.png" },
+            },
+            { type: "text", text: "after" },
+          ],
+        },
+      ],
+    })
+
+    expect(requested).toEqual(["http://USER:PASS@127.0.0.1/a.png"])
+    expect(JSON.stringify(anthropic)).toContain("AQID")
+    expect(JSON.stringify(anthropic)).toContain("before")
+    expect(JSON.stringify(anthropic)).toContain("after")
   })
 
   test("converts tool calls and tool results", async () => {
@@ -1176,6 +1248,103 @@ describe("normalizeResponsesAttachments", () => {
 
     expect(filePart.file_data).toBe(PDF_DATA_URI)
   })
+
+  test("fetches unrestricted native Responses URLs and degrades only failures", async () => {
+    const requested: Array<string> = []
+    const marker = "native-responses-secret"
+    globalThis.fetch = mock((input: string | URL | Request) => {
+      const value = input instanceof Request ? input.url : input.toString()
+      requested.push(value)
+      return Promise.resolve(
+        value.includes("ok.png") ?
+          new Response(new Uint8Array([1, 2, 3]), {
+            headers: { "content-type": "image/png" },
+          })
+        : new Response("", { status: 404 }),
+      )
+    }) as unknown as typeof fetch
+    const payload: ResponsesPayload = {
+      model: "gpt-5.4",
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [
+            { type: "input_text", text: "before" },
+            {
+              type: "input_image",
+              image_url: "HTTP://USER:PASS@127.1/ok.png",
+            },
+            {
+              type: "input_file",
+              file_url: `http://169.254.169.254/a.pdf?secret=${marker}`,
+            },
+            { type: "input_text", text: "after" },
+          ],
+        },
+      ],
+    }
+
+    await normalizeResponsesAttachments(payload)
+
+    expect(requested).toEqual([
+      "http://USER:PASS@127.0.0.1/ok.png",
+      `http://169.254.169.254/a.pdf?secret=${marker}`,
+    ])
+    expect(JSON.stringify(payload)).toContain("data:image/png;base64,AQID")
+    expect(JSON.stringify(payload)).toContain("before")
+    expect(JSON.stringify(payload)).toContain("after")
+    expect(JSON.stringify(payload)).not.toContain(marker)
+  })
+})
+
+test("native Chat fetches unrestricted images and emits a URI-free failure note", async () => {
+  const requested: Array<string> = []
+  const marker = "native-chat-secret"
+  globalThis.fetch = mock((input: string | URL | Request) => {
+    const value = input instanceof Request ? input.url : input.toString()
+    requested.push(value)
+    return Promise.resolve(
+      value.includes("ok.png") ?
+        new Response(new Uint8Array([1, 2, 3]), {
+          headers: { "content-type": "image/png" },
+        })
+      : new Response("", { status: 404 }),
+    )
+  }) as unknown as typeof fetch
+  const payload: ChatCompletionsPayload = {
+    model: "gpt-current",
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "before" },
+          {
+            type: "image_url",
+            image_url: { url: "HTTP://USER:PASS@127.1/ok.png" },
+          },
+          {
+            type: "image_url",
+            image_url: {
+              url: `http://169.254.169.254/fail.png?secret=${marker}`,
+            },
+          },
+          { type: "text", text: "after" },
+        ],
+      },
+    ],
+  }
+
+  await normalizeChatAttachments(payload)
+
+  expect(requested).toEqual([
+    "http://USER:PASS@127.0.0.1/ok.png",
+    `http://169.254.169.254/fail.png?secret=${marker}`,
+  ])
+  expect(JSON.stringify(payload)).toContain("data:image/png;base64,AQID")
+  expect(JSON.stringify(payload)).toContain("before")
+  expect(JSON.stringify(payload)).toContain("after")
+  expect(JSON.stringify(payload)).not.toContain(marker)
 })
 
 // ─── Google AI translation ───

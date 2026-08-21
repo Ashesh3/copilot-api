@@ -1,5 +1,5 @@
 /* eslint-disable max-lines-per-function -- protocol matrix remains grouped by adapter */
-import { describe, expect, test } from "bun:test"
+import { describe, expect, mock, test } from "bun:test"
 
 import {
   InvalidGoogleRequestBodyError,
@@ -241,6 +241,7 @@ describe("Google tolerant Chat adaptation", () => {
   })
 
   test("degrades failed URL attachment without exposing its URI", async () => {
+    const calls: Array<string> = []
     const candidate = await adapt(
       {
         contents: [
@@ -251,7 +252,8 @@ describe("Google tolerant Chat adaptation", () => {
               {
                 fileData: {
                   mimeType: "application/pdf",
-                  fileUri: "not-a-runtime-http-url?secret=marker",
+                  fileUri:
+                    "HTTP://USER:PASS@PRIVATE.TEST:80/a.pdf?secret=marker",
                 },
               },
               { text: "after" },
@@ -259,14 +261,45 @@ describe("Google tolerant Chat adaptation", () => {
           },
         ],
       },
-      { resolveAttachment: () => Promise.resolve(null) },
+      {
+        resolveAttachment: ({ value }) => {
+          calls.push(value)
+          return Promise.resolve(null)
+        },
+      },
     )
+    expect(calls).toEqual([
+      "HTTP://USER:PASS@PRIVATE.TEST:80/a.pdf?secret=marker",
+    ])
     expect(JSON.stringify(candidate.payload)).toContain("before")
     expect(JSON.stringify(candidate.payload)).toContain("after")
     expect(JSON.stringify(candidate.payload)).toContain(
       "[Google attachment unavailable]",
     )
     expect(JSON.stringify(candidate.payload)).not.toContain("secret=marker")
+  })
+
+  test("does not resolve parser-invalid attachment values", async () => {
+    const resolveAttachment = mock(() => Promise.resolve(null))
+    await adapt(
+      {
+        contents: [
+          {
+            role: "user",
+            parts: [
+              {
+                fileData: {
+                  mimeType: "application/pdf",
+                  fileUri: "file:///private.pdf",
+                },
+              },
+            ],
+          },
+        ],
+      },
+      { resolveAttachment },
+    )
+    expect(resolveAttachment).toHaveBeenCalledTimes(0)
   })
 
   test("caches identical attachment values separately by PDF expectation", async () => {

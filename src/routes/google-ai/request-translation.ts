@@ -15,8 +15,8 @@ import type {
 import {
   type ParsedDataUri,
   fetchUrlAsDataUri,
-  isHttpUrl,
   isPdfMediaType,
+  parseFetchableHttpUrl,
 } from "~/lib/attachments"
 import { createEvaluatedTranslationCheck } from "~/lib/endpoint-routing"
 import { createWebSearchFunctionTool } from "~/services/copilot/mcp-web-search"
@@ -225,7 +225,7 @@ async function attachmentPart(
     if (
       typeof uri === "string"
       && typeof mimeType === "string"
-      && isHttpUrl(uri)
+      && parseFetchableHttpUrl(uri)
     ) {
       const key = `${isPdfMediaType(mimeType) ? "pdf" : "asset"}:${uri}`
       let pending = state.attachmentCache.get(key)
@@ -793,14 +793,26 @@ export function translateGoogleToOpenAI(
         const mimeType = part.inlineData.mimeType
         const data = part.inlineData.data
         if (typeof mimeType === "string" && typeof data === "string") {
-          return mimeType.toLowerCase().startsWith("image/") ?
-              [
-                {
-                  type: "image_url" as const,
-                  image_url: { url: `data:${mimeType};base64,${data}` },
+          if (mimeType.toLowerCase().startsWith("image/")) {
+            return [
+              {
+                type: "image_url" as const,
+                image_url: { url: `data:${mimeType};base64,${data}` },
+              },
+            ]
+          }
+          if (isPdfMediaType(mimeType)) {
+            return [
+              {
+                type: "file" as const,
+                file: {
+                  filename: "document.pdf",
+                  file_data: `data:${mimeType};base64,${data}`,
                 },
-              ]
-            : [asTextPart(ATTACHMENT_CONTEXT)]
+              },
+            ]
+          }
+          return [asTextPart(ATTACHMENT_CONTEXT)]
         }
       }
       return [asTextPart(UNKNOWN_PART_CONTEXT)]

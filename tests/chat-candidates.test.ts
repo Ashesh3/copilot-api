@@ -1,10 +1,19 @@
 /* eslint-disable max-lines-per-function -- compact matrix shares one model fixture */
-import { describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, mock, test } from "bun:test"
 
 import type { Model } from "~/services/copilot/get-models"
 
-import { prepareChatCandidates } from "~/routes/chat-completions/chat-candidates"
+import {
+  prepareChatCandidates,
+  prepareCustomProviderChatCandidate,
+} from "~/routes/chat-completions/chat-candidates"
 import { prepareChatCompletionsRequest } from "~/routes/chat-completions/chat-contract"
+
+const originalFetch = globalThis.fetch
+
+afterEach(() => {
+  globalThis.fetch = originalFetch
+})
 
 const model = {
   id: "future-model",
@@ -607,5 +616,112 @@ describe("Chat endpoint candidates", () => {
       class: "attachment",
       severity: "omitted",
     })
+  })
+
+  test("fetches a runtime-valid noncanonical image once across advertised targets", async () => {
+    const requests: Array<string> = []
+    globalThis.fetch = mock((input: string | URL | Request) => {
+      requests.push(input instanceof Request ? input.url : input.toString())
+      return Promise.resolve(
+        new Response(new Uint8Array([1, 2, 3]), {
+          headers: { "content-type": "image/png" },
+        }),
+      )
+    }) as unknown as typeof fetch
+    const source = prepareChatCompletionsRequest({
+      model: "future-model",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "before" },
+            {
+              type: "image_url",
+              image_url: { url: "HTTP://USER:PASS@PRIVATE.TEST:80/a.png" },
+            },
+            { type: "text", text: "after" },
+          ],
+        },
+      ],
+    }).source
+
+    const candidates = await prepareChatCandidates({
+      source,
+      selectedModel: model,
+      nativeMessagesOptions: {},
+      support: {
+        chat: true,
+        responses: false,
+        messages: true,
+        embeddings: false,
+        responsesWebSocket: false,
+      },
+    })
+
+    expect(requests).toEqual(["http://USER:PASS@private.test/a.png"])
+    expect(JSON.stringify(candidates.chat?.payload)).toContain(
+      "data:image/png;base64,AQID",
+    )
+    expect(JSON.stringify(candidates.messages?.payload)).toContain("AQID")
+    expect(JSON.stringify(source)).toContain(
+      "HTTP://USER:PASS@PRIVATE.TEST:80/a.png",
+    )
+  })
+
+  test("performs zero attachment I/O for unadvertised Chat and Messages targets", async () => {
+    const fetchMock = mock(() => Promise.reject(new Error("must not fetch")))
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+    const source = prepareChatCompletionsRequest({
+      model: "future-model",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "image_url", image_url: { url: "http://127.1/a.png" } },
+          ],
+        },
+      ],
+    }).source
+
+    await prepareChatCandidates({
+      source,
+      selectedModel: model,
+      nativeMessagesOptions: {},
+      support: {
+        chat: false,
+        responses: true,
+        messages: false,
+        embeddings: false,
+        responsesWebSocket: false,
+      },
+    })
+
+    expect(fetchMock).toHaveBeenCalledTimes(0)
+  })
+
+  test("does not proxy-fetch custom-provider Chat attachments", async () => {
+    const fetchMock = mock(() => Promise.reject(new Error("must not fetch")))
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+    const source = prepareChatCompletionsRequest({
+      model: "provider-model",
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "image_url",
+              image_url: { url: "http://127.1/provider.png" },
+            },
+          ],
+        },
+      ],
+    }).source
+
+    const candidate = await prepareCustomProviderChatCandidate({ source })
+
+    expect(fetchMock).toHaveBeenCalledTimes(0)
+    expect(JSON.stringify(candidate.payload)).toContain(
+      "http://127.1/provider.png",
+    )
   })
 })

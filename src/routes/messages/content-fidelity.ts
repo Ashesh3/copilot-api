@@ -1,4 +1,4 @@
-import { isCanonicalHttpUrl } from "~/lib/attachments"
+import { parseFetchableHttpUrl } from "~/lib/attachments"
 
 import type {
   AnthropicDocumentBlock,
@@ -315,7 +315,7 @@ function isResponsesDocumentSource(block: Record<string, unknown>): boolean {
     return (
       hasExactlyKeys(source, ["type", "url"])
       && typeof source.url === "string"
-      && isCanonicalHttpUrl(source.url)
+      && parseFetchableHttpUrl(source.url) !== null
     )
   }
   return (

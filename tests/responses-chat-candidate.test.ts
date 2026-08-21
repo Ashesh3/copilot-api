@@ -1,7 +1,13 @@
-import { describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, mock, test } from "bun:test"
 
 import { adaptResponsesToChatCandidate } from "~/routes/responses/responses-chat-adapter"
 import { COMPACTION_PAYLOAD_MAX_BYTES } from "~/services/copilot/compaction-payload"
+
+const originalFetch = globalThis.fetch
+
+afterEach(() => {
+  globalThis.fetch = originalFetch
+})
 
 /* eslint-disable max-lines-per-function -- candidate matrix keeps source and exact target assertions together */
 
@@ -282,5 +288,53 @@ describe("Responses Chat fallback candidate", () => {
     ).toBeLessThanOrEqual(COMPACTION_PAYLOAD_MAX_BYTES)
     expect(JSON.stringify(candidate.payload)).toContain("call_compact")
     expect(JSON.stringify(source)).toContain(huge)
+  })
+
+  test("fetches unrestricted URLs and keeps attachment failures URI-free", async () => {
+    const requested: Array<string> = []
+    const marker = "responses-chat-secret"
+    globalThis.fetch = mock((input: string | URL | Request) => {
+      const value = input instanceof Request ? input.url : input.toString()
+      requested.push(value)
+      return Promise.resolve(
+        value.includes("ok.png") ?
+          new Response(new Uint8Array([1, 2, 3]), {
+            headers: { "content-type": "image/png" },
+          })
+        : new Response("", { status: 404 }),
+      )
+    }) as unknown as typeof fetch
+    const candidate = await adaptResponsesToChatCandidate({
+      source: {
+        model: "gpt-test",
+        input: [
+          {
+            type: "message",
+            role: "user",
+            content: [
+              { type: "input_text", text: "before" },
+              {
+                type: "input_image",
+                image_url: "HTTP://USER:PASS@127.1/ok.png",
+              },
+              {
+                type: "input_file",
+                file_url: `http://169.254.169.254/a.pdf?secret=${marker}`,
+              },
+              { type: "input_text", text: "after" },
+            ],
+          },
+        ],
+      },
+    })
+
+    expect(requested).toEqual([
+      "http://USER:PASS@127.0.0.1/ok.png",
+      `http://169.254.169.254/a.pdf?secret=${marker}`,
+    ])
+    expect(JSON.stringify(candidate.payload)).toContain("AQID")
+    expect(JSON.stringify(candidate.payload)).toContain("before")
+    expect(JSON.stringify(candidate.payload)).toContain("after")
+    expect(JSON.stringify(candidate.payload)).not.toContain(marker)
   })
 })
