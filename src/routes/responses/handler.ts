@@ -867,7 +867,9 @@ const handleResponsesInner = async (
   expandCompactionItems(payload)
   expandCompactionItems(legacyPayload)
 
-  const routedModel = selectRoutedModel(payload.model)
+  const routedModel = selectRoutedModel(payload.model, {
+    copilotSessionToken,
+  })
   const selectedModel = routedModel.model
   const nativeFinalized = finalizeNativeResponsesRequest(
     {

@@ -425,7 +425,9 @@ async function handleCompletionInner(
       inboundSessionToken
     : undefined
 
-  const routedModel = selectRoutedModel(anthropicPayload.model)
+  const routedModel = selectRoutedModel(anthropicPayload.model, {
+    copilotSessionToken,
+  })
   const selectedModel = routedModel.model
   if (state.models && !selectedModel) throw createMessagesModelNotFoundError()
   const routingModel =

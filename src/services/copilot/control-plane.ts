@@ -9,17 +9,11 @@ export interface EnableModelPolicyResult {
 }
 
 export interface CreateCopilotAutoSessionOptions {
-  hasImage: boolean
-  multiTurn?: Record<string, unknown>
-  previousUserMessages?: Array<string>
-  prompt: string
+  payload: Record<string, unknown>
   signal?: AbortSignal
-  tier?: string
 }
 
 export interface PredictCopilotIntentOptions {
-  availableModels: Array<string>
-  hasImage: boolean
   payload: Record<string, unknown>
   sessionToken: string
   signal?: AbortSignal
@@ -116,17 +110,7 @@ export async function createCopilotAutoSession(
   options: CreateCopilotAutoSessionOptions,
 ): Promise<Record<string, unknown>> {
   return await routedControlPlaneJson({
-    body: {
-      prompt: options.prompt,
-      has_image: options.hasImage,
-      ...(options.tier === undefined ? {} : { tier: options.tier }),
-      ...(options.multiTurn === undefined ?
-        {}
-      : { multi_turn: options.multiTurn }),
-      ...(options.previousUserMessages === undefined ?
-        {}
-      : { previous_user_messages: options.previousUserMessages }),
-    },
+    body: structuredClone(options.payload),
     path: "/auto",
     signal: options.signal,
   })
@@ -137,17 +121,8 @@ export async function predictCopilotIntent(
 ): Promise<Record<string, unknown>> {
   const sessionToken = sanitizeCopilotHeaderValue(options.sessionToken)
   if (!sessionToken) throw missingSessionTokenError()
-  const {
-    available_models: _ignoredAvailableModels,
-    has_image: _ignoredHasImage,
-    ...payload
-  } = options.payload
   return await routedControlPlaneJson({
-    body: {
-      ...payload,
-      available_models: options.availableModels,
-      has_image: options.hasImage,
-    },
+    body: structuredClone(options.payload),
     copilotSessionToken: sessionToken,
     path: "/models/session/intent",
     signal: options.signal,

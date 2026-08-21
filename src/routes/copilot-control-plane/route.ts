@@ -34,12 +34,6 @@ function isNonEmptyStringArray(value: unknown): value is Array<string> {
   )
 }
 
-function isStringArray(value: unknown): value is Array<string> {
-  return (
-    Array.isArray(value) && value.every((entry) => typeof entry === "string")
-  )
-}
-
 async function readJsonRecord(c: Context): Promise<Record<string, unknown>> {
   let value: unknown
   try {
@@ -51,69 +45,6 @@ async function readJsonRecord(c: Context): Promise<Record<string, unknown>> {
     throw createInvalidRequestError(
       "The request body must be a JSON object.",
       "body",
-    )
-  }
-  return value
-}
-
-function optionalBoolean(
-  body: Record<string, unknown>,
-  field: string,
-): boolean {
-  const value = body[field]
-  if (value === undefined) return false
-  if (typeof value !== "boolean") {
-    throw createInvalidRequestError(`${field} must be a boolean.`, field)
-  }
-  return value
-}
-
-function optionalPreviousUserMessages(
-  body: Record<string, unknown>,
-): Array<string> | undefined {
-  const value = body.previous_user_messages
-  if (value === undefined) return undefined
-  if (!isStringArray(value)) {
-    throw createInvalidRequestError(
-      "previous_user_messages must be an array of strings.",
-      "previous_user_messages",
-    )
-  }
-  return value
-}
-
-function optionalTier(body: Record<string, unknown>): string | undefined {
-  const value = body.tier
-  if (value === undefined) return undefined
-  if (typeof value !== "string") {
-    throw createInvalidRequestError("tier must be a string.", "tier")
-  }
-  return value
-}
-
-function optionalMultiTurn(
-  body: Record<string, unknown>,
-): Record<string, unknown> | undefined {
-  const value = body.multi_turn
-  if (value === undefined) return undefined
-  if (!isRecord(value)) {
-    throw createInvalidRequestError(
-      "multi_turn must be a JSON object.",
-      "multi_turn",
-    )
-  }
-  return value
-}
-
-function optionalRoutingIntent(
-  body: Record<string, unknown>,
-): string | undefined {
-  const value = body.routing_intent
-  if (value === undefined) return undefined
-  if (typeof value !== "string") {
-    throw createInvalidRequestError(
-      "routing_intent must be a string.",
-      "routing_intent",
     )
   }
   return value
@@ -160,12 +91,8 @@ async function handleAuto(c: Context): Promise<Response> {
       )
     }
     const result = await createCopilotAutoSession({
-      hasImage: optionalBoolean(body, "has_image"),
-      multiTurn: optionalMultiTurn(body),
-      previousUserMessages: optionalPreviousUserMessages(body),
-      prompt: body.prompt,
+      payload: structuredClone(body),
       signal: c.req.raw.signal,
-      tier: optionalTier(body),
     })
     recordControlPlaneContext(c, "auto", body.prompt.length)
     return c.json(result)
@@ -196,20 +123,8 @@ async function handleIntent(c: Context): Promise<Response> {
         "available_models",
       )
     }
-    const previousUserMessages = optionalPreviousUserMessages(body)
-    const routingIntent = optionalRoutingIntent(body)
     const result = await predictCopilotIntent({
-      availableModels: body.available_models,
-      hasImage: optionalBoolean(body, "has_image"),
-      payload: {
-        prompt: body.prompt,
-        ...(previousUserMessages === undefined ?
-          {}
-        : { previous_user_messages: previousUserMessages }),
-        ...(routingIntent === undefined ?
-          {}
-        : { routing_intent: routingIntent }),
-      },
+      payload: structuredClone(body),
       sessionToken: token,
       signal: c.req.raw.signal,
     })
