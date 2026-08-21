@@ -232,6 +232,63 @@ test("reports cache-control normalization before native serialization", () => {
   expect(prepared.normalizationClasses).toEqual(["cache_control"])
 })
 
+test("preserves opaque cache_control records outside Anthropic protocol slots", () => {
+  const payload = {
+    model: "claude-current",
+    max_tokens: 64,
+    metadata: {
+      user_id: "user-safe",
+      cache_control: { type: "ephemeral", scope: "metadata-opaque" },
+    },
+    future_native_field: {
+      cache_control: { type: "ephemeral", scope: "future-opaque" },
+    },
+    messages: [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "tool-1",
+            name: "lookup",
+            input: {
+              cache_control: { type: "ephemeral", scope: "input-opaque" },
+              nested: {
+                cache_control: { type: "ephemeral", scope: "input-nested" },
+              },
+            },
+          },
+        ],
+      },
+    ],
+    tools: [
+      {
+        name: "lookup",
+        input_schema: {
+          type: "object",
+          properties: {
+            cache_control: {
+              type: "object",
+              title: "opaque schema property",
+              nested: {
+                cache_control: { type: "ephemeral", scope: "schema-nested" },
+              },
+            },
+          },
+        },
+      },
+    ],
+  } as unknown as AnthropicMessagesPayload
+
+  const prepared = prepareAnthropicMessagesRequest({
+    payload,
+    requireMaxTokens: true,
+  })
+
+  expect(prepared.body).toEqual(payload)
+  expect(prepared.normalizationClasses).toEqual([])
+})
+
 test.each(["30m", "forever"])(
   "reports removal of unsupported cache-control ttl %s",
   (ttl) => {
@@ -267,6 +324,70 @@ test.each(["30m", "forever"])(
     })
   },
 )
+
+test("normalizes malformed cache_control only in known Anthropic slots", () => {
+  const prepared = prepareAnthropicMessagesRequest({
+    payload: {
+      model: "claude-current",
+      max_tokens: 64,
+      cache_control: { type: "ephemeral", ttl: "5m", scope: "global" },
+      system: [
+        {
+          type: "text",
+          text: "stable",
+          cache_control: { type: "ephemeral", ttl: "1h", scope: "global" },
+        },
+      ],
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "tool-1",
+              name: "lookup",
+              input: {
+                cache_control: { type: "ephemeral", scope: "input-opaque" },
+              },
+              cache_control: { type: "ephemeral", ttl: "forever" } as never,
+            },
+          ],
+        },
+      ],
+    } as unknown as AnthropicMessagesPayload,
+    requireMaxTokens: true,
+  })
+
+  expect(prepared.normalizationClasses).toEqual(["cache_control"])
+  expect(prepared.body).toEqual({
+    model: "claude-current",
+    max_tokens: 64,
+    cache_control: { type: "ephemeral", ttl: "5m" },
+    system: [
+      {
+        type: "text",
+        text: "stable",
+        cache_control: { type: "ephemeral", ttl: "1h" },
+      },
+    ],
+    messages: [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "tool-1",
+            name: "lookup",
+            input: {
+              cache_control: { type: "ephemeral", scope: "input-opaque" },
+            },
+            cache_control: { type: "ephemeral" },
+          },
+        ],
+      },
+    ],
+  })
+})
 
 test.each([
   ["model", { model: "", messages: [], max_tokens: 1 }],

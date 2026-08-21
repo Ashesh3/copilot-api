@@ -526,7 +526,8 @@ function convertAnthropicOutput(response: AnthropicResponse): {
   let reasoningIndex = 0
   for (const rawBlock of response.content) {
     const block = rawBlock as unknown as Record<string, unknown>
-    if (block.type === "thinking") {
+    const type = typeof block.type === "string" ? block.type : undefined
+    if (type === "thinking") {
       if (typeof block.thinking !== "string") throwResponseContentError()
       output.push(
         createReasoningOutput(
@@ -541,29 +542,41 @@ function convertAnthropicOutput(response: AnthropicResponse): {
       reasoningIndex += 1
       continue
     }
-    if (block.type === "text") {
+    if (type === "text") {
       if (typeof block.text !== "string") throwResponseContentError()
       text += block.text
       output.push(createTextOutput(response.id, block.text, messageIndex))
       messageIndex += 1
       continue
     }
-    if (
-      block.type !== "tool_use"
-      || typeof block.id !== "string"
-      || typeof block.name !== "string"
-      || !isRecordValue(block.input)
-    ) {
+    if (type === "tool_use") {
+      if (
+        typeof block.id !== "string"
+        || typeof block.name !== "string"
+        || !isRecordValue(block.input)
+      ) {
+        throwResponseContentError()
+      }
+      output.push(
+        createFunctionCallOutput(
+          block as unknown as Extract<
+            AnthropicResponse["content"][number],
+            { type: "tool_use" }
+          >,
+        ),
+      )
+      continue
+    }
+    if (!type) {
       throwResponseContentError()
     }
-    output.push(
-      createFunctionCallOutput(
-        block as unknown as Extract<
-          AnthropicResponse["content"][number],
-          { type: "tool_use" }
-        >,
-      ),
-    )
+    const fallbackText = stringifyUnknownAssistantBlock(block)
+    if (!fallbackText) {
+      continue
+    }
+    text += fallbackText
+    output.push(createTextOutput(response.id, fallbackText, messageIndex))
+    messageIndex += 1
   }
   return { output, text }
 }
@@ -578,6 +591,16 @@ function throwResponseContentError(): never {
     code: "endpoint_translation_unsupported",
     source: "messages",
   })
+}
+
+function stringifyUnknownAssistantBlock(
+  block: Record<string, unknown>,
+): string | null {
+  try {
+    return JSON.stringify(block)
+  } catch {
+    return null
+  }
 }
 
 function createReasoningOutput(

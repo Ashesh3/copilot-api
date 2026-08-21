@@ -1,7 +1,5 @@
 import { expect, mock, test } from "bun:test"
 
-import type { AnthropicResponse } from "~/routes/messages/anthropic-types"
-
 import { LocalHTTPError } from "~/lib/error"
 import { state } from "~/lib/state"
 import { chatPayloadToAnthropic } from "~/routes/chat-completions/anthropic-bridge"
@@ -9,6 +7,10 @@ import {
   convertOpenAIContentPartToAnthropic,
   convertOpenAIToolsToAnthropic,
 } from "~/routes/chat-completions/anthropic-conversion"
+import {
+  asAnthropicUnknownContentType,
+  type AnthropicResponse,
+} from "~/routes/messages/anthropic-types"
 import { emitResponsesResultAsStream } from "~/routes/messages/web-search-helpers"
 import {
   anthropicResponseToResponsesResult,
@@ -884,6 +886,65 @@ test("preserves interleaved Anthropic blocks and every thinking signature", () =
     },
     {
       id: "msg_msg_interleaved_1",
+      content: [{ type: "output_text", text: "omega", annotations: [] }],
+    },
+  ])
+})
+
+test("bridges future assistant blocks as text while preserving known block order", () => {
+  const response: AnthropicResponse = {
+    id: "msg_future",
+    type: "message",
+    role: "assistant",
+    model: "resolved",
+    content: [
+      { type: "text", text: "alpha" },
+      {
+        type: asAnthropicUnknownContentType("future_block_20270101"),
+        data: { ok: true },
+      },
+      {
+        type: "tool_use",
+        id: "call_1",
+        name: "lookup",
+        input: { query: "one" },
+      },
+      { type: "text", text: "omega" },
+    ],
+    stop_reason: "end_turn",
+    stop_sequence: null,
+    usage: { input_tokens: 1, output_tokens: 2 },
+  }
+
+  const result = anthropicResponseToResponsesResult(response, "requested")
+
+  expect(result.output.map((item) => item.type)).toEqual([
+    "message",
+    "message",
+    "function_call",
+    "message",
+  ])
+  expect(result.output_text).toBe(
+    'alpha{"type":"future_block_20270101","data":{"ok":true}}omega',
+  )
+  expect(result.output).toMatchObject([
+    {
+      id: "msg_msg_future",
+      content: [{ type: "output_text", text: "alpha", annotations: [] }],
+    },
+    {
+      id: "msg_msg_future_1",
+      content: [
+        {
+          type: "output_text",
+          text: '{"type":"future_block_20270101","data":{"ok":true}}',
+          annotations: [],
+        },
+      ],
+    },
+    { id: "fc_call_1", call_id: "call_1", name: "lookup" },
+    {
+      id: "msg_msg_future_2",
       content: [{ type: "output_text", text: "omega", annotations: [] }],
     },
   ])

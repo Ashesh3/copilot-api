@@ -25,6 +25,7 @@ import {
   isAnthropicImageBlock,
   isAnthropicTextBlock,
   isAnthropicThinkingBlock,
+  isAnthropicToolReferenceBlock,
   isAnthropicToolResultBlock,
   isAnthropicToolUseBlock,
 } from "~/routes/messages/anthropic-types"
@@ -1001,8 +1002,7 @@ export function prepareAnthropicMessagesRequest(options: {
     removedGatewayField = true
   }
   if (removedGatewayField) normalizationClasses.push("gateway_only_fields")
-  const cacheControlNormalized = hasCacheControlNormalization(body)
-  normalizeCacheControls(body)
+  const cacheControlNormalized = normalizeCacheControls(body)
   if (cacheControlNormalized) {
     normalizationClasses.push("cache_control")
   }
@@ -1020,53 +1020,121 @@ export function prepareAnthropicMessagesRequest(options: {
   }
 }
 
-function hasCacheControlNormalization(value: unknown): boolean {
-  if (Array.isArray(value)) {
-    return value.some((item) => hasCacheControlNormalization(item))
-  }
-  if (!isRecord(value)) return false
+function isNormalizedCacheControl(value: unknown): value is NativeCacheControl {
+  return (
+    isRecord(value)
+    && value.type === "ephemeral"
+    && (value.ttl === undefined || value.ttl === "5m" || value.ttl === "1h")
+    && Object.keys(value).every((key) => key === "type" || key === "ttl")
+  )
+}
 
-  for (const [key, nested] of Object.entries(value)) {
-    if (
-      key === "cache_control"
-      && (!isRecord(nested)
-        || nested.type !== "ephemeral"
-        || (nested.ttl !== undefined
-          && nested.ttl !== "5m"
-          && nested.ttl !== "1h")
-        || Object.keys(nested).some(
-          (nestedKey) => nestedKey !== "type" && nestedKey !== "ttl",
-        ))
-    ) {
-      return true
-    }
-    if (hasCacheControlNormalization(nested)) return true
+function normalizeCacheControlSlot(
+  container: Record<string, unknown>,
+): boolean {
+  if (!Object.hasOwn(container, "cache_control")) {
+    return false
+  }
+  const cacheControl = container.cache_control
+  if (isNormalizedCacheControl(cacheControl)) {
+    return false
+  }
+  if (!isRecord(cacheControl) || cacheControl.type !== "ephemeral") {
+    Reflect.deleteProperty(container, "cache_control")
+    return true
+  }
+
+  const normalized: NativeCacheControl = { type: "ephemeral" }
+  if (cacheControl.ttl === "5m" || cacheControl.ttl === "1h") {
+    normalized.ttl = cacheControl.ttl
+  }
+  container.cache_control = normalized
+  return true
+}
+
+function normalizeToolResultCacheControls(content: unknown): boolean {
+  if (!Array.isArray(content)) {
+    return false
+  }
+  let normalized = false
+  for (const block of content) {
+    normalized = normalizeContentBlockCacheControls(block) || normalized
+  }
+  return normalized
+}
+
+function normalizeContentBlockCacheControls(block: unknown): boolean {
+  if (
+    isAnthropicTextBlock(block)
+    || isAnthropicImageBlock(block)
+    || isAnthropicDocumentBlock(block)
+    || isAnthropicToolReferenceBlock(block)
+    || isAnthropicToolUseBlock(block)
+    || isAnthropicThinkingBlock(block)
+  ) {
+    return normalizeCacheControlSlot(block)
+  }
+  if (isAnthropicToolResultBlock(block)) {
+    let normalized = normalizeCacheControlSlot(block)
+    normalized = normalizeToolResultCacheControls(block.content) || normalized
+    return normalized
   }
   return false
 }
 
-function normalizeCacheControls(value: unknown): void {
-  if (Array.isArray(value)) {
-    for (const item of value) normalizeCacheControls(item)
-    return
+function normalizeSystemCacheControls(system: unknown): boolean {
+  if (!Array.isArray(system)) {
+    return false
   }
-  if (!isRecord(value)) return
-
-  for (const [key, nested] of Object.entries(value)) {
-    if (key === "cache_control") {
-      if (!isRecord(nested) || nested.type !== "ephemeral") {
-        Reflect.deleteProperty(value, key)
-        continue
-      }
-      const cacheControl: NativeCacheControl = { type: "ephemeral" }
-      if (nested.ttl === "5m" || nested.ttl === "1h") {
-        cacheControl.ttl = nested.ttl
-      }
-      value[key] = cacheControl
+  let normalized = false
+  for (const block of system) {
+    if (!isAnthropicTextBlock(block)) {
       continue
     }
-    normalizeCacheControls(nested)
+    normalized = normalizeCacheControlSlot(block) || normalized
   }
+  return normalized
+}
+
+function normalizeMessageCacheControls(messages: unknown): boolean {
+  if (!Array.isArray(messages)) {
+    return false
+  }
+  let normalized = false
+  for (const message of messages) {
+    if (!isRecord(message) || !Array.isArray(message.content)) {
+      continue
+    }
+    if (message.role !== "user" && message.role !== "assistant") {
+      continue
+    }
+    for (const block of message.content) {
+      normalized = normalizeContentBlockCacheControls(block) || normalized
+    }
+  }
+  return normalized
+}
+
+function normalizeToolCacheControls(tools: unknown): boolean {
+  if (!Array.isArray(tools)) {
+    return false
+  }
+  let normalized = false
+  for (const tool of tools) {
+    if (!isRecord(tool)) {
+      continue
+    }
+    normalized = normalizeCacheControlSlot(tool) || normalized
+  }
+  return normalized
+}
+
+function normalizeCacheControls(body: Record<string, unknown>): boolean {
+  let normalized = normalizeCacheControlSlot(body)
+  normalized = normalizeSystemCacheControls(body.system) || normalized
+  normalized = normalizeMessageCacheControls(body.messages) || normalized
+  normalized = normalizeToolCacheControls(body.tools) || normalized
+  return normalized
 }
 
 export function normalizeAnthropicMessagesRequest(
