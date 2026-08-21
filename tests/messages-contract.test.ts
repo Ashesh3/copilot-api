@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- exhaustive hostile-safe Messages contract coverage */
 import { expect, test } from "bun:test"
 
 import { LocalHTTPError } from "~/lib/error"
@@ -387,6 +388,124 @@ test("normalizes malformed cache_control only in known Anthropic slots", () => {
       },
     ],
   })
+})
+
+test("normalizes cache_control markers inside document source content blocks", () => {
+  const prepared = prepareAnthropicMessagesRequest({
+    payload: {
+      model: "claude-current",
+      max_tokens: 64,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "document",
+              source: {
+                type: "content",
+                content: [
+                  {
+                    type: "text",
+                    text: "embedded",
+                    cache_control: {
+                      type: "ephemeral",
+                      ttl: "1h",
+                      scope: "inner-text",
+                    },
+                  },
+                  {
+                    type: "image",
+                    source: {
+                      type: "base64",
+                      media_type: "image/png",
+                      data: "AA==",
+                    },
+                    cache_control: {
+                      type: "ephemeral",
+                      ttl: "forever",
+                      scope: "inner-image",
+                    } as never,
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    } as unknown as AnthropicMessagesPayload,
+    requireMaxTokens: true,
+  })
+
+  expect(prepared.normalizationClasses).toEqual(["cache_control"])
+  expect(prepared.body).toEqual({
+    model: "claude-current",
+    max_tokens: 64,
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "document",
+            source: {
+              type: "content",
+              content: [
+                {
+                  type: "text",
+                  text: "embedded",
+                  cache_control: { type: "ephemeral", ttl: "1h" },
+                },
+                {
+                  type: "image",
+                  source: {
+                    type: "base64",
+                    media_type: "image/png",
+                    data: "AA==",
+                  },
+                  cache_control: { type: "ephemeral" },
+                },
+              ],
+            },
+          },
+        ],
+      },
+    ],
+  })
+})
+
+test("preserves opaque cache_control neighbors around document source content", () => {
+  const payload = {
+    model: "claude-current",
+    max_tokens: 64,
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "document",
+            source: {
+              type: "content",
+              content: [{ type: "text", text: "embedded" }],
+              cache_control: { type: "ephemeral", scope: "source-opaque" },
+              future_nested: {
+                cache_control: { type: "ephemeral", scope: "future-opaque" },
+              },
+            },
+            future_document_field: {
+              cache_control: { type: "ephemeral", scope: "document-opaque" },
+            },
+          },
+        ],
+      },
+    ],
+  } as unknown as AnthropicMessagesPayload
+
+  const prepared = prepareAnthropicMessagesRequest({
+    payload,
+    requireMaxTokens: true,
+  })
+
+  expect(prepared.body).toEqual(payload)
+  expect(prepared.normalizationClasses).toEqual([])
 })
 
 test.each([

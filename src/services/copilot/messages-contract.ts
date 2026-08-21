@@ -1063,16 +1063,40 @@ function normalizeToolResultCacheControls(content: unknown): boolean {
   return normalized
 }
 
+function normalizeDocumentSourceContentCacheControls(
+  block: AnthropicDocumentBlock,
+): boolean {
+  if (block.source.type !== "content" || !Array.isArray(block.source.content)) {
+    return false
+  }
+  let normalized = false
+  for (const nestedBlock of block.source.content) {
+    if (
+      !isAnthropicTextBlock(nestedBlock)
+      && !isAnthropicImageBlock(nestedBlock)
+    ) {
+      continue
+    }
+    normalized = normalizeCacheControlSlot(nestedBlock) || normalized
+  }
+  return normalized
+}
+
 function normalizeContentBlockCacheControls(block: unknown): boolean {
   if (
     isAnthropicTextBlock(block)
     || isAnthropicImageBlock(block)
-    || isAnthropicDocumentBlock(block)
     || isAnthropicToolReferenceBlock(block)
     || isAnthropicToolUseBlock(block)
     || isAnthropicThinkingBlock(block)
   ) {
     return normalizeCacheControlSlot(block)
+  }
+  if (isAnthropicDocumentBlock(block)) {
+    let normalized = normalizeCacheControlSlot(block)
+    normalized =
+      normalizeDocumentSourceContentCacheControls(block) || normalized
+    return normalized
   }
   if (isAnthropicToolResultBlock(block)) {
     let normalized = normalizeCacheControlSlot(block)
