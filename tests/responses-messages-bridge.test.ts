@@ -116,6 +116,16 @@ test("maps text image document function tools and results to Messages", async ()
   ])
 })
 
+test("preserves an explicit null max_output_tokens on the Responses bridge", async () => {
+  const payload = await responsesPayloadToAnthropic({
+    model: "claude-current",
+    input: "hello",
+    max_output_tokens: null,
+  })
+
+  expect(payload).toHaveProperty("max_tokens", null)
+})
+
 test("passes explicit native options through the Responses Messages bridge", async () => {
   const originalFetch = globalThis.fetch
   const originalAccountType = state.accountType
@@ -163,6 +173,62 @@ test("passes explicit native options through the Responses Messages bridge", asy
     expect(headers?.get("anthropic-beta")).toBe("beta-one,beta-two")
     expect(headers?.get("anthropic-version")).toBe("2023-06-01")
     expect(headers?.get("x-model-provider-preference")).toBe("anthropic")
+  } finally {
+    ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
+    // eslint-disable-next-line require-atomic-updates
+    state.accountType = originalAccountType
+    // eslint-disable-next-line require-atomic-updates
+    state.copilotToken = originalCopilotToken
+    // eslint-disable-next-line require-atomic-updates
+    state.isMultiToken = originalIsMultiToken
+  }
+})
+
+test("does not default an explicit null max_output_tokens during native dispatch", async () => {
+  const originalFetch = globalThis.fetch
+  const originalAccountType = state.accountType
+  const originalCopilotToken = state.copilotToken
+  const originalIsMultiToken = state.isMultiToken
+  let requestBody: Record<string, unknown> | undefined
+  const fetchMock = mock(
+    (_url: string | URL | Request, init?: RequestInit): Response => {
+      requestBody =
+        typeof init?.body === "string" ?
+          (JSON.parse(init.body) as Record<string, unknown>)
+        : undefined
+      return Response.json({
+        id: "msg_explicit_null",
+        type: "message",
+        role: "assistant",
+        model: "claude-current",
+        content: [{ type: "text", text: "ok" }],
+        stop_reason: "end_turn",
+        stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      })
+    },
+  )
+
+  state.accountType = "individual"
+  state.copilotToken = "copilot-token"
+  state.isMultiToken = false
+  ;(globalThis as unknown as { fetch: typeof fetch }).fetch =
+    fetchMock as unknown as typeof fetch
+
+  try {
+    const result = await executeResponsesMessagesBridge({
+      nativeOptions: {
+        anthropicVersion: "2023-06-01",
+      },
+      payload: {
+        model: "claude-current",
+        input: "hello",
+        max_output_tokens: null,
+      },
+    })
+
+    expect(result.model).toBe("claude-current")
+    expect(requestBody).toHaveProperty("max_tokens", null)
   } finally {
     ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
     // eslint-disable-next-line require-atomic-updates

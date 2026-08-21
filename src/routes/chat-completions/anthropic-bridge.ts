@@ -303,10 +303,17 @@ export async function chatPayloadToAnthropic(
     signal,
   )
 
-  const maxTokens =
-    normalized.max_tokens
-    ?? normalized.max_completion_tokens
-    ?? selectedModel?.capabilities.limits?.max_output_tokens
+  const hasMaxTokens = Object.hasOwn(normalized, "max_tokens")
+  const hasMaxCompletionTokens = Object.hasOwn(
+    normalized,
+    "max_completion_tokens",
+  )
+  const maxTokens = resolveBridgeMaxTokens({
+    hasMaxCompletionTokens,
+    hasMaxTokens,
+    normalized,
+    selectedModel,
+  })
   const toolChoice = convertToolChoice(normalized.tool_choice)
   const parallelChoice = applyParallelToolChoice(
     toolChoice,
@@ -317,7 +324,7 @@ export async function chatPayloadToAnthropic(
   return {
     model: normalized.model,
     messages,
-    ...(maxTokens === undefined ? {} : { max_tokens: maxTokens }),
+    ...maxTokens,
     ...(systemTexts.length > 0 ? { system: systemTexts.join("\n\n") } : {}),
     ...convertSamplingOptions(normalized),
     ...(normalized.stream ? { stream: true } : {}),
@@ -326,6 +333,24 @@ export async function chatPayloadToAnthropic(
     ...parallelChoice,
     ...convertChatReasoningOptions(normalized),
   }
+}
+
+function resolveBridgeMaxTokens(options: {
+  hasMaxCompletionTokens: boolean
+  hasMaxTokens: boolean
+  normalized: ChatCompletionsPayload & { model: string }
+  selectedModel?: Model
+}): Pick<AnthropicMessagesPayload, "max_tokens"> | Record<never, never> {
+  if (options.hasMaxTokens) {
+    return { max_tokens: options.normalized.max_tokens }
+  }
+  if (options.hasMaxCompletionTokens) {
+    return { max_tokens: options.normalized.max_completion_tokens }
+  }
+  const maxTokens =
+    options.selectedModel?.capabilities.limits?.max_output_tokens
+  if (maxTokens === undefined) return {}
+  return { max_tokens: maxTokens }
 }
 
 async function convertChatMessages(

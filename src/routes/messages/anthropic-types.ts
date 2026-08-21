@@ -24,7 +24,7 @@ export function asAnthropicUnknownContentType(
 export interface AnthropicMessagesPayload extends Record<string, unknown> {
   model: string
   messages: Array<AnthropicMessage>
-  max_tokens?: number
+  max_tokens?: number | null
   system?: string | Array<AnthropicSystemContentBlock>
   metadata?: Record<string, unknown> & {
     user_id?: string

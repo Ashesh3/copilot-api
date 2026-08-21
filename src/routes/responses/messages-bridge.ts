@@ -97,16 +97,12 @@ export async function responsesPayloadToAnthropic(
     payload.parallel_tool_calls,
     payload.tools,
   )
+  const hasMaxOutputTokens = Object.hasOwn(payload, "max_output_tokens")
 
   return {
     model: payload.model,
     messages,
-    ...((
-      payload.max_output_tokens === undefined
-      || payload.max_output_tokens === null
-    ) ?
-      {}
-    : { max_tokens: payload.max_output_tokens }),
+    ...(hasMaxOutputTokens ? { max_tokens: payload.max_output_tokens } : {}),
     ...(systemTexts.length > 0 ? { system: systemTexts.join("\n\n") } : {}),
     ...(payload.temperature === undefined || payload.temperature === null ?
       {}
