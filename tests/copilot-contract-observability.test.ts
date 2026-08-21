@@ -6,7 +6,12 @@ import {
   type CopilotContractEvent,
   recordCopilotContractEvent,
   recordCopilotMessagesBeta,
+  recordCopilotTranslationFindings,
 } from "~/lib/copilot-contract-observability"
+import {
+  createEvaluatedTranslationCheck,
+  type EvaluatedTranslationCheck,
+} from "~/lib/endpoint-routing"
 
 function installDiagnosticSpies() {
   const attributes: Record<string, boolean | number | string> = {}
@@ -374,6 +379,300 @@ test.each(validRuntimeEvents)(
     }
   },
 )
+
+test("records sorted safe translation findings with recomputed cost", () => {
+  const diagnostics = installDiagnosticSpies()
+  const check = createEvaluatedTranslationCheck([
+    { class: "tool_history", severity: "adapted" },
+    { class: "content_part", severity: "omitted" },
+    { class: "tool_history", severity: "adapted" },
+  ])
+  try {
+    recordCopilotTranslationFindings("responses", "/chat/completions", {
+      ...check,
+      cost: 197,
+    })
+
+    expect(diagnostics.debug.mock.calls).toEqual([
+      [
+        "[copilot-contract]",
+        {
+          kind: "translation_findings",
+          protocol: "responses",
+          target: "/chat/completions",
+          findings: "content_part:omitted,tool_history:adapted",
+          findingCount: 2,
+          cost: 3,
+        },
+      ],
+    ])
+    expect(diagnostics.breadcrumb.mock.calls[0]?.[0]).toMatchObject({
+      data: {
+        findings: "content_part:omitted,tool_history:adapted",
+        findingCount: 2,
+        cost: 3,
+      },
+      message: "Copilot translation findings recorded",
+    })
+    expect(diagnostics.attributes).toMatchObject({
+      "copilot_api.contract.translation_findings.protocol": "responses",
+      "copilot_api.contract.translation_findings.target": "/chat/completions",
+      "copilot_api.contract.translation_findings.findings":
+        "content_part:omitted,tool_history:adapted",
+      "copilot_api.contract.translation_findings.finding_count": 2,
+      "copilot_api.contract.translation_findings.cost": 3,
+    })
+  } finally {
+    diagnostics.restore()
+  }
+})
+
+test("records fatal translation findings without exposing max-safe cost", () => {
+  const diagnostics = installDiagnosticSpies()
+  try {
+    recordCopilotTranslationFindings(
+      "messages",
+      "/responses",
+      createEvaluatedTranslationCheck([
+        { class: "message_shape", severity: "fatal" },
+      ]),
+    )
+
+    expect(diagnostics.debug.mock.calls[0]?.[1]).toEqual({
+      kind: "translation_findings",
+      protocol: "messages",
+      target: "/responses",
+      findings: "message_shape:fatal",
+      findingCount: 1,
+      fatal: true,
+    })
+    expect(JSON.stringify(diagnostics.debug.mock.calls)).not.toContain(
+      String(Number.MAX_SAFE_INTEGER),
+    )
+    expect(diagnostics.attributes).toMatchObject({
+      "copilot_api.contract.translation_findings.fatal": true,
+    })
+    expect(diagnostics.attributes).not.toHaveProperty(
+      "copilot_api.contract.translation_findings.cost",
+    )
+  } finally {
+    diagnostics.restore()
+  }
+})
+
+test("translation finding diagnostics no-op only for an empty check", () => {
+  const diagnostics = installDiagnosticSpies()
+  try {
+    const empty = createEvaluatedTranslationCheck([])
+    const exact = createEvaluatedTranslationCheck([
+      { class: "attachment", severity: "exact" },
+    ])
+    recordCopilotTranslationFindings("chat", "/chat/completions", empty)
+    recordCopilotTranslationFindings("chat", "/chat/completions", exact)
+
+    expect(diagnostics.debug.mock.calls).toHaveLength(1)
+    expect(diagnostics.debug.mock.calls[0]?.[1]).toMatchObject({
+      findings: "attachment:exact",
+      findingCount: 1,
+      cost: 0,
+    })
+  } finally {
+    diagnostics.restore()
+  }
+})
+
+test("bounds translation findings without slicing rendered tokens", () => {
+  const diagnostics = installDiagnosticSpies()
+  const classes = [
+    "attachment",
+    "content_part",
+    "context_management",
+    "message_role",
+    "message_shape",
+    "reasoning_state",
+    "sampling",
+    "stateful_controls",
+    "token_alias",
+    "tool_choice",
+    "tool_history",
+    "tool_shape",
+    "unknown_item",
+    "unknown_top_level",
+  ] as const
+  const findings = [
+    ...classes.map((findingClass) => ({
+      class: findingClass,
+      severity: "omitted" as const,
+    })),
+    ...classes.map((findingClass) => ({
+      class: findingClass,
+      severity: "adapted" as const,
+    })),
+    ...classes.slice(0, 4).map((findingClass) => ({
+      class: findingClass,
+      severity: "exact" as const,
+    })),
+    { class: "sampling" as const, severity: "fatal" as const },
+  ]
+  try {
+    recordCopilotTranslationFindings("responses", "/responses", {
+      mode: "evaluated",
+      findings,
+      cost: Number.MAX_SAFE_INTEGER,
+      supported: false,
+    })
+
+    const data = diagnostics.debug.mock.calls[0]?.[1] as {
+      findingCount: number
+      findings: string
+    }
+    const tokens = data.findings.split(",")
+    expect(data.findings.length).toBeLessThanOrEqual(256)
+    expect(data.findingCount).toBe(tokens.length)
+    expect(
+      tokens.every((token) =>
+        /^[a-z_]+:(?:exact|adapted|omitted)$/.test(token),
+      ),
+    ).toBe(true)
+    expect(data).not.toHaveProperty("fatal")
+  } finally {
+    diagnostics.restore()
+  }
+})
+
+test("ignores hostile translation findings without mutation or leakage", () => {
+  const diagnostics = installDiagnosticSpies()
+  const privateMarker = "private-translation-finding-marker"
+  let getterCalls = 0
+  const hostileFinding = Object.defineProperties(
+    {},
+    {
+      class: {
+        enumerable: true,
+        get() {
+          getterCalls += 1
+          throw new Error(privateMarker)
+        },
+      },
+      severity: { enumerable: true, value: "fatal" },
+      value: { enumerable: true, value: privateMarker },
+    },
+  )
+  const ordinaryCheck = {
+    mode: "evaluated",
+    findings: [
+      hostileFinding,
+      Object.create({
+        class: "message_shape",
+        severity: "fatal",
+        value: privateMarker,
+      }),
+      { class: privateMarker, severity: "adapted", value: privateMarker },
+      { class: "tool_shape", severity: "adapted" },
+    ],
+    cost: 245,
+    supported: true,
+  }
+  const before = ordinaryCheck.findings.slice()
+  const proxiedCheck = new Proxy(ordinaryCheck, {
+    get() {
+      getterCalls += 1
+      throw new Error(privateMarker)
+    },
+  })
+  try {
+    expect(() =>
+      recordCopilotTranslationFindings(
+        "chat",
+        "/responses",
+        proxiedCheck as never,
+      ),
+    ).not.toThrow()
+    expect(() =>
+      recordCopilotTranslationFindings(
+        "chat",
+        "/responses",
+        ordinaryCheck as never,
+      ),
+    ).not.toThrow()
+
+    expect(getterCalls).toBe(0)
+    expect(ordinaryCheck.findings).toEqual(before)
+    const output = JSON.stringify({
+      attributes: diagnostics.attributes,
+      breadcrumbs: diagnostics.breadcrumb.mock.calls,
+      logs: diagnostics.debug.mock.calls,
+    })
+    expect(output).toContain("tool_shape:adapted")
+    expect(output).not.toContain(privateMarker)
+    expect(output).not.toContain('"cost":245')
+  } finally {
+    diagnostics.restore()
+  }
+})
+
+test("translation finding diagnostics reject nonplain nested containers", () => {
+  const diagnostics = installDiagnosticSpies()
+  const nonplainFindings = [{ class: "tool_shape", severity: "adapted" }]
+  Reflect.setPrototypeOf(nonplainFindings, null)
+  class HostileCheck {
+    findings = [{ class: "tool_shape", severity: "adapted" }]
+  }
+  try {
+    recordCopilotTranslationFindings(
+      "chat",
+      "/responses",
+      new HostileCheck() as unknown as EvaluatedTranslationCheck,
+    )
+    recordCopilotContractEvent({
+      kind: "translation_findings",
+      protocol: "chat",
+      target: "/responses",
+      check: {
+        mode: "evaluated",
+        findings: nonplainFindings,
+        cost: 1,
+        supported: true,
+      },
+    } as never)
+
+    expect(diagnostics.debug.mock.calls).toHaveLength(0)
+  } finally {
+    diagnostics.restore()
+  }
+})
+
+test("translation finding diagnostics skip sparse and accessor entries", () => {
+  const diagnostics = installDiagnosticSpies()
+  let getterCalls = 0
+  const findings: Array<unknown> = Array.from({ length: 3 })
+  Object.defineProperty(findings, "1", {
+    enumerable: true,
+    get() {
+      getterCalls += 1
+      throw new Error("private-accessor-finding")
+    },
+  })
+  findings[2] = { class: "tool_choice", severity: "adapted" }
+
+  try {
+    recordCopilotTranslationFindings("chat", "/responses", {
+      mode: "evaluated",
+      findings,
+      cost: 0,
+      supported: true,
+    } as never)
+
+    expect(getterCalls).toBe(0)
+    expect(diagnostics.debug.mock.calls[0]?.[1]).toMatchObject({
+      findings: "tool_choice:adapted",
+      findingCount: 1,
+      cost: 1,
+    })
+  } finally {
+    diagnostics.restore()
+  }
+})
 
 test.each(validRuntimeEvents)(
   "ignores dangerous and nested hostile values for $kind",
