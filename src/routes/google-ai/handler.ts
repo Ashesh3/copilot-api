@@ -99,7 +99,6 @@ import {
   orderPreparedChatCandidates,
   prepareChatCandidates,
 } from "../chat-completions/chat-candidates"
-import { resolveResponsesWebSearchCalls } from "../messages/web-search-helpers"
 import { resolvePreparedResponsesWebSearchCalls } from "../responses/chat-fallback-completion"
 import {
   createCopilotGoogleChatCompletion,
@@ -117,6 +116,7 @@ import {
   translateResponsesResultToGoogle,
   translateResponsesStreamEventToGoogle,
 } from "./response-translation"
+import { resolvePreparedGoogleResponsesWebSearch } from "./responses-web-search"
 
 const logger = createHandlerLogger("google-ai-handler")
 
@@ -612,6 +612,7 @@ async function dispatchGoogleRequest(
       isStream,
       outputMode,
       requestedModel: options.requestedModel,
+      webSearchMaxUses: candidate.webSearchMaxUses,
     })
   }
 
@@ -658,6 +659,7 @@ export async function handleWithChatCompletions(
   options: {
     outputMode: GoogleStreamOutputMode
     requestedModel: string
+    webSearchMaxUses?: number
     completionFactory?: GoogleChatCompletionFactory
     webSearch?: (query: string, signal?: AbortSignal) => Promise<string>
   },
@@ -826,6 +828,7 @@ async function handleWithAnthropicMessages(
     isStream: boolean
     outputMode: GoogleStreamOutputMode
     requestedModel: string
+    webSearchMaxUses?: number
   },
 ) {
   recordNonDefaultBehavior(c, {
@@ -919,13 +922,18 @@ async function handleWithAnthropicMessages(
 
 // ─── Responses API path ───
 
-async function handleWithResponsesApi(
+export async function handleWithResponsesApi(
   c: Context,
   responsesPayload: ResponsesPayload,
   options: {
     isStream: boolean
     outputMode: GoogleStreamOutputMode
     requestedModel: string
+    webSearchMaxUses?: number
+    createResponse?: (
+      payload: ResponsesPayload,
+    ) => Promise<Awaited<ReturnType<typeof createResponses>>>
+    webSearch?: (query: string, signal?: AbortSignal) => Promise<string>
   },
 ) {
   const { isStream, outputMode } = options
@@ -947,15 +955,21 @@ async function handleWithResponsesApi(
       vision,
       initiator,
       requestedModel: options.requestedModel,
+      webSearchMaxUses: options.webSearchMaxUses,
+      createResponse: options.createResponse,
+      webSearch: options.webSearch,
     })
   }
 
-  const response = await createResponses(responsesPayload, {
-    prepared: true,
-    vision,
-    initiator,
-    signal: c.req.raw.signal,
-  })
+  const response =
+    options.createResponse ?
+      await options.createResponse(responsesPayload)
+    : await createResponses(responsesPayload, {
+        prepared: true,
+        vision,
+        initiator,
+        signal: c.req.raw.signal,
+      })
 
   // Track which account handled this request (multi-token mode)
   const respAccountId = getLastUsedAccountId()
@@ -1045,6 +1059,11 @@ async function handleResponsesMcpWebSearch(
     vision: boolean
     initiator: "agent" | "user"
     requestedModel: string
+    webSearchMaxUses?: number
+    createResponse?: (
+      payload: ResponsesPayload,
+    ) => Promise<Awaited<ReturnType<typeof createResponses>>>
+    webSearch?: (query: string, signal?: AbortSignal) => Promise<string>
   },
 ) {
   const bufferedPayload = { ...structuredClone(payload), stream: false }
@@ -1054,19 +1073,19 @@ async function handleResponsesMcpWebSearch(
     signal: c.req.raw.signal,
     prepared: true,
   }
-  const initial = (await createResponses(
-    bufferedPayload,
-    requestOptions,
-  )) as ResponsesResult
-  const result = await resolveResponsesWebSearchCalls(
+  const createResponse = async (nextPayload: ResponsesPayload) =>
+    (options.createResponse ?
+      await options.createResponse(nextPayload)
+    : await createResponses(nextPayload, requestOptions)) as ResponsesResult
+  const initial = await createResponse(bufferedPayload)
+  const result = await resolvePreparedGoogleResponsesWebSearch({
     initial,
-    bufferedPayload,
-    {
-      ...requestOptions,
-      createResponse: async (followUp) =>
-        (await createResponses(followUp, requestOptions)) as ResponsesResult,
-    },
-  )
+    payload: bufferedPayload,
+    maxUses: options.webSearchMaxUses,
+    signal: c.req.raw.signal,
+    createResponse,
+    webSearch: options.webSearch,
+  })
 
   const accountId = getLastUsedAccountId()
   if (accountId !== undefined) setRequestContext(c, { accountId })

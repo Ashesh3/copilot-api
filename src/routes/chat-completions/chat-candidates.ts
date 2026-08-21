@@ -46,10 +46,10 @@ export type NativeChatCandidate = EvaluatedEndpointCandidate<
   "/chat/completions",
   ChatCompletionsPayload
 >
-export type ResponsesChatCandidate = EvaluatedEndpointCandidate<
-  "/responses",
-  ResponsesPayload
->
+export interface ResponsesChatCandidate
+  extends EvaluatedEndpointCandidate<"/responses", ResponsesPayload> {
+  readonly webSearchMaxUses?: number
+}
 export type MessagesChatCandidate = EvaluatedEndpointCandidate<
   "/v1/messages",
   AnthropicMessagesPayload
@@ -764,13 +764,31 @@ function adaptChatToResponses(
   if (Array.isArray(payload.tools)) {
     addPromptCaching([], payload.tools)
   }
-  return createCandidate({
+  const candidate = createCandidate({
     endpoint: "/responses",
     payload,
     reason: "endpoint_unavailable",
     findings: candidateState.findings,
     meaningful: input.length > 0 || Boolean(payload.instructions),
   })
+  const webSearchMaxUses = getChatWebSearchMaxUses(source)
+  return {
+    ...candidate,
+    ...(webSearchMaxUses === undefined ? {} : { webSearchMaxUses }),
+  }
+}
+
+function getChatWebSearchMaxUses(
+  source: PreparedChatCompletionsSource,
+): number | undefined {
+  for (const tool of source.tools ?? []) {
+    if (!isRecord(tool.function) || tool.function.name !== "web_search") {
+      continue
+    }
+    const value = tool.function.max_uses
+    if (Number.isInteger(value) && Number(value) > 0) return Number(value)
+  }
+  return undefined
 }
 
 function parseAnthropicArguments(value: unknown): Record<string, unknown> {

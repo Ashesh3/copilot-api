@@ -6,6 +6,10 @@ import type {
   ChatCompletionResponse,
   ChatCompletionsPayload,
 } from "~/services/copilot/create-chat-completions"
+import type {
+  ResponsesPayload,
+  ResponsesResult,
+} from "~/services/copilot/create-responses"
 import type { Model } from "~/services/copilot/get-models"
 
 import {
@@ -22,6 +26,7 @@ import {
 } from "~/routes/google-ai/chat-completion"
 import { prepareGoogleRequest } from "~/routes/google-ai/google-request-normalization"
 import { handleWithChatCompletions } from "~/routes/google-ai/handler"
+import { handleWithResponsesApi } from "~/routes/google-ai/handler"
 import { adaptGoogleToChatCandidate } from "~/routes/google-ai/request-translation"
 
 const model = {
@@ -281,6 +286,102 @@ test("rejects an over-limit search batch before executing any search", async () 
   expect(searches).toBe(0)
 })
 
+test("preserves the Responses search lower bound through final synthesis", async () => {
+  const sent: Array<ResponsesPayload> = []
+  const queue: Array<ResponsesResult> = [
+    responsesSearchResult(["call-1"]),
+    responsesSearchResult([]),
+  ]
+  const app = new Hono()
+  app.get(
+    "/",
+    async (c) =>
+      await handleWithResponsesApi(
+        c,
+        {
+          model: "public",
+          input: [{ type: "message", role: "user", content: "search" }],
+          stream: false,
+          tools: [
+            {
+              type: "function",
+              name: "web_search",
+              parameters: { type: "object", properties: {} },
+              strict: false,
+            },
+          ],
+        },
+        {
+          isStream: false,
+          outputMode: "json",
+          requestedModel: "public",
+          webSearchMaxUses: 1,
+          createResponse: (payload) => {
+            sent.push(structuredClone(payload))
+            const result = queue.shift()
+            if (!result) throw new Error("Unexpected Responses send")
+            return Promise.resolve(result)
+          },
+          webSearch: () => Promise.resolve("search-result"),
+        },
+      ),
+  )
+  const response = await app.request("/")
+  expect(response.status).toBe(200)
+  expect(sent).toHaveLength(2)
+  expect(JSON.stringify(sent[1]?.input)).toContain("search-result")
+})
+
+test("rejects a Responses search batch above the lower bound atomically", async () => {
+  let searches = 0
+  const app = new Hono()
+  app.get("/", async (c) => {
+    try {
+      return await handleWithResponsesApi(
+        c,
+        {
+          model: "public",
+          input: [{ type: "message", role: "user", content: "search" }],
+          stream: false,
+          tools: [
+            {
+              type: "function",
+              name: "web_search",
+              parameters: { type: "object", properties: {} },
+              strict: false,
+            },
+          ],
+        },
+        {
+          isStream: false,
+          outputMode: "json",
+          requestedModel: "public",
+          webSearchMaxUses: 1,
+          createResponse: () =>
+            Promise.resolve(responsesSearchResult(["call-1", "call-2"])),
+          webSearch: () => {
+            searches += 1
+            return Promise.resolve("result")
+          },
+        },
+      )
+    } catch (error) {
+      if (
+        typeof error === "object"
+        && error !== null
+        && "response" in error
+        && error.response instanceof Response
+      ) {
+        return error.response
+      }
+      throw error
+    }
+  })
+  const response = await app.request("/")
+  expect(response.status).toBe(400)
+  expect(searches).toBe(0)
+})
+
 function chatResult(
   toolName?: string,
   callId?: string,
@@ -313,5 +414,34 @@ function chatResult(
         },
       },
     ],
+  }
+}
+
+function responsesSearchResult(callIds: Array<string>): ResponsesResult {
+  return {
+    id: "resp",
+    object: "response",
+    created_at: 1,
+    model: "upstream",
+    status: "completed",
+    output: callIds.map((callId) => ({
+      type: "function_call" as const,
+      id: callId,
+      call_id: callId,
+      name: "web_search",
+      arguments: '{"query":"q"}',
+      status: "completed" as const,
+    })),
+    output_text: "finished",
+    usage: null,
+    error: null,
+    incomplete_details: null,
+    instructions: null,
+    metadata: null,
+    parallel_tool_calls: false,
+    temperature: null,
+    tool_choice: "auto",
+    tools: [],
+    top_p: null,
   }
 }
