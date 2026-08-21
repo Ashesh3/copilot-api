@@ -166,15 +166,16 @@ test.each([
   expect(fetchMock).toHaveBeenCalledTimes(1)
 })
 
-test("rejects declared oversize before reading the body", async () => {
+test("cancels a declared-oversize body without retaining or reading content", async () => {
   let pulls = 0
+  let cancelled = false
   const body = new ReadableStream<Uint8Array>({
-    start(controller) {
-      controller.close()
+    cancel() {
+      cancelled = true
     },
-    pull(controller) {
+    pull() {
       pulls += 1
-      controller.enqueue(new Uint8Array([1]))
+      return new Promise<void>(() => {})
     },
   })
   const fetchMock = mock(() =>
@@ -194,7 +195,29 @@ test("rejects declared oversize before reading the body", async () => {
       maxBytes: 3,
     } as never),
   ).toBeNull()
-  expect(pulls).toBe(0)
+  expect(pulls).toBeLessThanOrEqual(1)
+  expect(cancelled).toBe(true)
+  expect(body.locked).toBe(false)
+})
+
+test("returns an empty attachment for a declared-oversize null body", async () => {
+  expect(
+    await attachmentsModule.fetchUrlAsDataUri(
+      "https://size.test/null-body.png",
+      {
+        fetch: (() =>
+          Promise.resolve(
+            new Response(null, {
+              headers: {
+                "content-length": "4",
+                "content-type": "image/png",
+              },
+            }),
+          )) as unknown as typeof fetch,
+        maxBytes: 3,
+      },
+    ),
+  ).toEqual({ data: "", mediaType: "image/png" })
 })
 
 test("accepts exact byte cap and stops streamed overflow promptly", async () => {

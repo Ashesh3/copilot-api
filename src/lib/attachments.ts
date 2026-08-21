@@ -289,7 +289,6 @@ async function readBoundedResponseBody(
   signal: AbortSignal,
 ): Promise<Buffer | null> {
   const declared = parseContentLength(response.headers.get("content-length"))
-  if (declared !== undefined && declared > maxBytes) return null
   if (!response.body) return Buffer.alloc(0)
   const reader: ReadableStreamDefaultReader<Uint8Array> =
     response.body.getReader() as ReadableStreamDefaultReader<Uint8Array>
@@ -305,6 +304,12 @@ async function readBoundedResponseBody(
       }
     })()
     return cancelPending
+  }
+  if (declared !== undefined && declared > maxBytes) {
+    if (signal.aborted) throw signal.reason
+    await cancelReader()
+    reader.releaseLock()
+    return null
   }
   try {
     while (true) {
