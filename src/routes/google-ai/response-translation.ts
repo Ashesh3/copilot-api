@@ -555,9 +555,22 @@ export function translateResponsesStreamEventToGoogle(
     }
 
     case "error": {
+      const eventRecord = event as unknown as Record<string, unknown>
+      const nestedError =
+        isRecord(eventRecord.error) ? eventRecord.error : eventRecord
+      const nestedRecord = { ...nestedError }
+      if (
+        readNumber(nestedRecord, "upstream_status") === undefined
+        && readNumber(nestedRecord, "status") === undefined
+      ) {
+        const topLevelStatus =
+          readNumber(eventRecord, "upstream_status")
+          ?? readNumber(eventRecord, "status")
+        if (topLevelStatus !== undefined) nestedRecord.status = topLevelStatus
+      }
       return {
         kind: "received_failure",
-        failure: createReceivedResponsesFailure(event),
+        failure: createReceivedResponsesFailure(nestedRecord),
       }
     }
 

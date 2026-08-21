@@ -128,13 +128,49 @@ test("preserves modelVersion and promptFeedback on streaming Responses translati
   })
 })
 
-test("flushes split tool calls in index order on every Chat terminal", () => {
-  const state = createGoogleStreamState()
+test.each(["stop", "tool_calls"] as const)(
+  "flushes split tool calls in index order on Chat %s",
+  (finishReason) => {
+    const state = createGoogleStreamState()
 
-  expect(
-    translateChunkToGoogle(
+    expect(
+      translateChunkToGoogle(
+        {
+          id: "chunk-tools-1",
+          object: "chat.completion.chunk",
+          created: 1,
+          model: "gpt-4o-mini",
+          choices: [
+            {
+              index: 0,
+              delta: {
+                tool_calls: [
+                  {
+                    index: 1,
+                    id: "call_1",
+                    type: "function",
+                    function: { name: "get_", arguments: '{"city":"' },
+                  },
+                  {
+                    index: 0,
+                    id: "call_0",
+                    type: "function",
+                    function: { name: "find_", arguments: '{"q":"' },
+                  },
+                ],
+              },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+        },
+        state,
+      ),
+    ).toBeNull()
+
+    const terminal = translateChunkToGoogle(
       {
-        id: "chunk-tools-1",
+        id: "chunk-tools-2",
         object: "chat.completion.chunk",
         created: 1,
         model: "gpt-4o-mini",
@@ -144,73 +180,40 @@ test("flushes split tool calls in index order on every Chat terminal", () => {
             delta: {
               tool_calls: [
                 {
-                  index: 1,
-                  id: "call_1",
-                  type: "function",
-                  function: { name: "get_", arguments: '{"city":"' },
+                  index: 0,
+                  function: { name: "docs", arguments: 'test"}' },
                 },
                 {
-                  index: 0,
-                  id: "call_0",
-                  type: "function",
-                  function: { name: "find_", arguments: '{"q":"' },
+                  index: 1,
+                  function: { name: "weather", arguments: 'Paris"}' },
                 },
               ],
             },
-            finish_reason: null,
+            finish_reason: finishReason,
             logprobs: null,
           },
         ],
       },
       state,
-    ),
-  ).toBeNull()
+    )
 
-  const terminal = translateChunkToGoogle(
-    {
-      id: "chunk-tools-2",
-      object: "chat.completion.chunk",
-      created: 1,
-      model: "gpt-4o-mini",
-      choices: [
-        {
-          index: 0,
-          delta: {
-            tool_calls: [
-              {
-                index: 0,
-                function: { name: "docs", arguments: 'test"}' },
-              },
-              {
-                index: 1,
-                function: { name: "weather", arguments: 'Paris"}' },
-              },
-            ],
-          },
-          finish_reason: "stop",
-          logprobs: null,
+    expect(terminal?.candidates[0]?.finishReason).toBe("STOP")
+    expect(terminal?.candidates[0]?.content.parts).toEqual([
+      {
+        functionCall: {
+          name: "find_docs",
+          args: { q: "test" },
         },
-      ],
-    },
-    state,
-  )
-
-  expect(terminal?.candidates[0]?.finishReason).toBe("STOP")
-  expect(terminal?.candidates[0]?.content.parts).toEqual([
-    {
-      functionCall: {
-        name: "find_docs",
-        args: { q: "test" },
       },
-    },
-    {
-      functionCall: {
-        name: "get_weather",
-        args: { city: "Paris" },
+      {
+        functionCall: {
+          name: "get_weather",
+          args: { city: "Paris" },
+        },
       },
-    },
-  ])
-})
+    ])
+  },
+)
 
 test("classifies Responses completed and failed events as distinct terminal results", () => {
   const completed = translateResponsesStreamEventToGoogle(
@@ -320,5 +323,70 @@ test("classifies a top-level Responses error as a received Google failure", () =
         upstream_status: 524,
       },
     },
+  })
+})
+
+test("preserves a nested top-level Responses error with top-level status fallback", () => {
+  const translated = translateResponsesStreamEventToGoogle(
+    {
+      type: "error",
+      sequence_number: 2,
+      status: 531,
+      error: {
+        message: "  nested exact body\r\n",
+        body_bytes: [32, 32, 110],
+        content_type: "text/plain; charset=utf-8",
+      },
+    } as unknown as Parameters<typeof translateResponsesStreamEventToGoogle>[0],
+    createGoogleStreamState(),
+  )
+
+  expect(translated).toEqual({
+    kind: "received_failure",
+    failure: {
+      error: {
+        code: 531,
+        message: "  nested exact body\r\n",
+        status: "INTERNAL",
+        body_bytes: [32, 32, 110],
+        content_type: "text/plain; charset=utf-8",
+        upstream_status: 531,
+      },
+    },
+  })
+})
+
+test("classifies a Responses incomplete event as a successful Google terminal", () => {
+  const incompleteResponse = {
+    id: "resp_incomplete",
+    object: "response",
+    created_at: 1,
+    model: "gpt-4o-mini",
+    output: [],
+    output_text: "",
+    status: "incomplete",
+    usage: null,
+    error: null,
+    incomplete_details: { reason: "max_output_tokens" },
+    instructions: null,
+    metadata: null,
+    parallel_tool_calls: true,
+    temperature: null,
+    tool_choice: "auto",
+    tools: [],
+    top_p: null,
+  }
+  const translated = translateResponsesStreamEventToGoogle(
+    {
+      type: "response.incomplete",
+      sequence_number: 1,
+      response: incompleteResponse,
+    } as Parameters<typeof translateResponsesStreamEventToGoogle>[0],
+    createGoogleStreamState(),
+  )
+
+  expect(translated).toMatchObject({
+    kind: "success",
+    chunk: { candidates: [{ finishReason: "MAX_TOKENS" }] },
   })
 })
