@@ -250,8 +250,9 @@ async function streamImmediateNativeResponses(
     for await (const chunk of withSseHeartbeat(options.response, stream)) {
       if (lifecycle.state !== "open") break
       const normalized = normalizeResponsesStreamChunk(chunk)
-      updateResponsesFailureState(failureState, normalized)
-      await writeNativeResponsesChunk(normalized, writeContext)
+      const outbound = processNativeResponsesChunk(normalized, writeContext)
+      updateResponsesFailureState(failureState, outbound)
+      await writeNativeResponsesChunk(outbound, stream)
       await commitReceivedResponsesTerminal(lifecycle, normalized.event)
     }
     await lifecycle.finishSource()
@@ -287,17 +288,21 @@ async function streamBufferedNativeResponses(
     for await (const chunk of withSseHeartbeat(options.response, stream)) {
       if (lifecycle.state !== "open") break
       const normalized = normalizeResponsesStreamChunk(chunk)
-      bufferedChunks.push(normalized)
-      updateResponsesFailureState(failureState, normalized)
+      const outbound = processNativeResponsesChunk(normalized, writeContext)
+      bufferedChunks.push(outbound)
+      updateResponsesFailureState(failureState, outbound)
       completedResult =
-        getCompletedBufferedResponse(normalized) ?? completedResult
+        getCompletedBufferedResponse(outbound) ?? completedResult
       const terminal = classifyResponsesTerminal(normalized.event)
-      if (terminal !== "response.failed" && terminal !== "error") continue
-      await writeBufferedNativeResponsesChunks(bufferedChunks, writeContext)
-      await lifecycle.fail({
-        kind: "thrown",
-        error: RECEIVED_RESPONSES_FAILURE,
-      })
+      if (!terminal) continue
+      if (terminal === "response.failed" || terminal === "error") {
+        await writeBufferedNativeResponsesChunks(bufferedChunks, stream)
+        await lifecycle.fail({
+          kind: "thrown",
+          error: RECEIVED_RESPONSES_FAILURE,
+        })
+      }
+      break
     }
     updateNativeResponsesSpan(options.streamSpan, completedResult)
     if (lifecycle.state !== "open") return
@@ -350,28 +355,39 @@ interface NativeResponsesWriteContext {
   idTracker: ReturnType<typeof createStreamIdTracker>
 }
 
-async function writeNativeResponsesChunk(
+function processNativeResponsesChunk(
   chunk: ResponsesStreamChunk,
   context: NativeResponsesWriteContext,
-): Promise<void> {
+): ResponsesStreamChunk {
   const restoredData = rewriteResponseModelInEvent(
     chunk.data ?? "",
     context.requestedModel,
   )
   const data = fixStreamIds(restoredData, chunk.event, context.idTracker)
-  await context.stream.writeSSE({
+  return {
     ...(typeof chunk.id === "string" ? { id: chunk.id } : {}),
     event: chunk.event,
     data,
+  }
+}
+
+async function writeNativeResponsesChunk(
+  chunk: ResponsesStreamChunk,
+  stream: NativeResponsesStreamWriter,
+): Promise<void> {
+  await stream.writeSSE({
+    ...(typeof chunk.id === "string" ? { id: chunk.id } : {}),
+    event: chunk.event,
+    data: chunk.data ?? "",
   })
 }
 
 async function writeBufferedNativeResponsesChunks(
   chunks: ReadonlyArray<ResponsesStreamChunk>,
-  context: NativeResponsesWriteContext,
+  stream: NativeResponsesStreamWriter,
 ): Promise<void> {
   for (const chunk of chunks) {
-    await writeNativeResponsesChunk(chunk, context)
+    await writeNativeResponsesChunk(chunk, stream)
   }
 }
 

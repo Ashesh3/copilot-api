@@ -230,7 +230,36 @@ function updateTextDelta(
     return
   }
   state.outputText += parsed.delta
-  state.output = createPartialTextOutput(state.outputText, parsed.item_id)
+  mergeTextOutputItem(state, parsed)
+}
+
+function mergeTextOutputItem(
+  state: ResponsesStreamFailureState,
+  parsed: Record<string, unknown>,
+): void {
+  const outputIndex =
+    typeof parsed.output_index === "number" ? parsed.output_index : 0
+  const current = state.output[outputIndex] as ResponseOutputItem | undefined
+  let itemId = "msg_partial"
+  if (typeof parsed.item_id === "string") {
+    itemId = parsed.item_id
+  } else if (typeof current?.id === "string") {
+    itemId = current.id
+  }
+  state.output[outputIndex] = {
+    ...(current?.type === "message" ? current : {}),
+    id: itemId,
+    type: "message",
+    role: "assistant",
+    status: "in_progress",
+    content: [
+      {
+        type: "output_text",
+        text: state.outputText,
+        annotations: [],
+      },
+    ],
+  }
 }
 
 function updateOutputItem(
