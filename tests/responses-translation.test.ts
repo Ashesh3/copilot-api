@@ -169,7 +169,13 @@ test.each([
   {
     name: "single unsigned",
     content: [{ type: "thinking", thinking: "unsigned" }],
-    errorParam: "thinking",
+    expected: [
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "unsigned" }],
+      },
+    ],
   },
   {
     name: "multiple unsigned",
@@ -177,7 +183,16 @@ test.each([
       { type: "thinking", thinking: "first" },
       { type: "thinking", thinking: "second" },
     ],
-    errorParam: "thinking",
+    expected: [
+      {
+        type: "message",
+        role: "assistant",
+        content: [
+          { type: "output_text", text: "first" },
+          { type: "output_text", text: "second" },
+        ],
+      },
+    ],
   },
   {
     name: "signed then unsigned",
@@ -185,7 +200,19 @@ test.each([
       { type: "thinking", thinking: "signed", signature: "sig-one@rs-one" },
       { type: "thinking", thinking: "unsigned" },
     ],
-    errorParam: "thinking",
+    expected: [
+      {
+        id: "rs-one",
+        type: "reasoning",
+        summary: [{ type: "summary_text", text: "signed" }],
+        encrypted_content: "sig-one",
+      },
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "unsigned" }],
+      },
+    ],
   },
   {
     name: "unsigned then signed",
@@ -193,26 +220,56 @@ test.each([
       { type: "thinking", thinking: "unsigned" },
       { type: "thinking", thinking: "signed", signature: "sig-two@rs-two" },
     ],
-    errorParam: "thinking",
+    expected: [
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "unsigned" }],
+      },
+      {
+        id: "rs-two",
+        type: "reasoning",
+        summary: [{ type: "summary_text", text: "signed" }],
+        encrypted_content: "sig-two",
+      },
+    ],
   },
   {
     name: "malformed signed",
     content: [
       { type: "thinking", thinking: "signed", signature: "missing-id" },
     ],
-    errorParam: "thinking",
+    expected: [
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "signed" }],
+      },
+    ],
   },
   {
     name: "signed with empty id",
     content: [{ type: "thinking", thinking: "signed", signature: "sig-one@" }],
-    errorParam: "thinking",
+    expected: [
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "signed" }],
+      },
+    ],
   },
   {
     name: "signed with extra separator",
     content: [
       { type: "thinking", thinking: "signed", signature: "sig@rs@extra" },
     ],
-    errorParam: "thinking",
+    expected: [
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "signed" }],
+      },
+    ],
   },
   {
     name: "multiple signed",
@@ -237,32 +294,19 @@ test.each([
   },
 ])(
   "preserves $name thinking blocks on Messages to Responses",
-  ({ content, errorParam, expected }) => {
-    const translate = () =>
-      translateAnthropicMessagesToResponsesPayload({
-        model: "gpt-5.4",
-        max_tokens: 64,
-        messages: [
-          {
-            role: "assistant",
-            content: [...content] as Array<AnthropicAssistantContentBlock>,
-          },
-        ],
-      })
+  ({ content, expected }) => {
+    const translated = translateAnthropicMessagesToResponsesPayload({
+      model: "gpt-5.4",
+      max_tokens: 64,
+      messages: [
+        {
+          role: "assistant",
+          content: [...content] as Array<AnthropicAssistantContentBlock>,
+        },
+      ],
+    })
 
-    if (errorParam) {
-      expect(translate).toThrow()
-      try {
-        translate()
-      } catch (error) {
-        expect(error).toMatchObject({
-          clientBody: { error: { param: errorParam } },
-        })
-      }
-      return
-    }
-
-    expect(translate().input as unknown).toEqual(expected)
+    expect(translated.input as unknown).toEqual(expected)
   },
 )
 

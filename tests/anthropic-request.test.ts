@@ -328,6 +328,7 @@ describe("Anthropic to OpenAI translation logic", () => {
         { type: "thinking", thinking: "signed", signature: "sig-first" },
         { type: "thinking", thinking: "unsigned" },
       ],
+      expectedReasoningText: "signed\n\nunsigned",
     },
     {
       name: "unsigned then signed",
@@ -335,21 +336,29 @@ describe("Anthropic to OpenAI translation logic", () => {
         { type: "thinking", thinking: "unsigned" },
         { type: "thinking", thinking: "signed", signature: "sig-last" },
       ],
+      expectedReasoningText: "unsigned\n\nsigned",
     },
   ])(
-    "rejects assistant history with mixed $name thinking blocks",
-    ({ content }) => {
-      expect(() =>
-        translateToOpenAI({
-          model: "claude-current",
-          messages: [
-            {
-              role: "assistant",
-              content: [...content] as Array<AnthropicAssistantContentBlock>,
-            },
-          ],
-        }),
-      ).toThrow()
+    "degrades assistant history with mixed $name thinking blocks",
+    ({ content, expectedReasoningText }) => {
+      const translated = translateToOpenAI({
+        model: "claude-current",
+        messages: [
+          {
+            role: "assistant",
+            content: [...content] as Array<AnthropicAssistantContentBlock>,
+          },
+        ],
+      })
+
+      expect(translated.messages).toEqual([
+        {
+          role: "assistant",
+          content: null,
+          reasoning_text: expectedReasoningText,
+        },
+      ])
+      expect(translated.messages[0]).not.toHaveProperty("reasoning_opaque")
     },
   )
 
