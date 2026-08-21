@@ -90,6 +90,7 @@ const synchronizeTerminalOutputIds = (
       && !Array.isArray(item)
     ) {
       const outputItem = item as Record<string, unknown>
+      if (outputItem.id === originalId) continue
       outputItem.id = originalId
       changed = true
     }

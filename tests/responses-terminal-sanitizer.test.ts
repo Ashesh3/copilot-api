@@ -137,6 +137,27 @@ test("stream ID synchronization repairs terminal item IDs without data loss", ()
   })
 })
 
+test("stream ID synchronization preserves matching terminal JSON bytes", () => {
+  const tracker = createStreamIdTracker()
+  fixStreamIds(
+    JSON.stringify({
+      type: "response.output_item.added",
+      output_index: 0,
+      item: { id: "item_stable", type: "future_tool_call" },
+    }),
+    "response.output_item.added",
+    tracker,
+  )
+  const terminal = `{
+  "type": "response.completed",
+  "response": {
+    "output": [{ "id": "item_stable", "type": "future_tool_call" }]
+  }
+}`
+
+  expect(fixStreamIds(terminal, "response.completed", tracker)).toBe(terminal)
+})
+
 test("preserves a safe function call namespace in completed output", () => {
   const sanitized = sanitizeResponsesStreamEvent({
     event: "response.completed",
