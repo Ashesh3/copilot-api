@@ -324,6 +324,185 @@ test("propagates caller abort during fetch and turns timeout into null", async (
   ).toBeNull()
 })
 
+test("cancels a pending body read and propagates the caller reason", async () => {
+  const controller = new AbortController()
+  const reason = new Error("caller aborted pending body")
+  let cancelled = false
+  let readStartedResolve: (() => void) | undefined
+  const readStarted = new Promise<void>((resolve) => {
+    readStartedResolve = resolve
+  })
+  const body = new ReadableStream<Uint8Array>({
+    cancel() {
+      cancelled = true
+    },
+    pull() {
+      readStartedResolve?.()
+      return new Promise<void>(() => {})
+    },
+  })
+  const promise = attachmentsModule.fetchUrlAsDataUri(
+    "https://abort.test/pending.png",
+    {
+      fetch: (() =>
+        Promise.resolve(
+          new Response(body, { headers: { "content-type": "image/png" } }),
+        )) as unknown as typeof fetch,
+      signal: controller.signal,
+      timeoutMs: 10_000,
+    },
+  )
+  await readStarted
+  controller.abort(reason)
+
+  try {
+    await promise
+    throw new Error("expected caller abort")
+  } catch (error) {
+    expect(error).toBe(reason)
+  }
+  expect(cancelled).toBe(true)
+  expect(body.locked).toBe(false)
+})
+
+test("cancels a pending body read on timeout without a late rejection", async () => {
+  let cancelled = false
+  let readStartedResolve: (() => void) | undefined
+  const readStarted = new Promise<void>((resolve) => {
+    readStartedResolve = resolve
+  })
+  const body = new ReadableStream<Uint8Array>({
+    cancel() {
+      cancelled = true
+    },
+    pull() {
+      readStartedResolve?.()
+      return new Promise<void>(() => {})
+    },
+  })
+  const promise = attachmentsModule.fetchUrlAsDataUri(
+    "https://abort.test/pending-timeout.png",
+    {
+      fetch: (() =>
+        Promise.resolve(
+          new Response(body, { headers: { "content-type": "image/png" } }),
+        )) as unknown as typeof fetch,
+      timeoutMs: 1,
+    },
+  )
+  await readStarted
+
+  expect(await promise).toBeNull()
+  expect(cancelled).toBe(true)
+  expect(body.locked).toBe(false)
+})
+
+test("evicts a rejected cache entry but retains ordinary null", async () => {
+  let calls = 0
+  const resolve = attachmentsModule.createAttachmentFetchResolver({
+    fetch: ((_input: string | URL | Request, init?: RequestInit) => {
+      calls += 1
+      if (calls === 1) {
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(
+              init.signal?.reason instanceof Error ?
+                init.signal.reason
+              : new Error("attachment aborted"),
+            ),
+          )
+        })
+      }
+      if (calls === 2) {
+        return Promise.resolve(
+          new Response(new Uint8Array([1]), {
+            headers: { "content-type": "image/png" },
+          }),
+        )
+      }
+      return Promise.resolve(new Response("", { status: 404 }))
+    }) as unknown as typeof fetch,
+  })
+  const controller = new AbortController()
+  const first = resolve({
+    expectPdf: false,
+    signal: controller.signal,
+    value: "https://cache.test/retry.png",
+  })
+  controller.abort(new Error("cancel first consumer"))
+  try {
+    await first
+    throw new Error("expected cache abort")
+  } catch (error) {
+    expect(error).toHaveProperty("message", "cancel first consumer")
+  }
+
+  expect(
+    await resolve({
+      expectPdf: false,
+      value: "https://cache.test/retry.png",
+    }),
+  ).toEqual({ data: "AQ==", mediaType: "image/png" })
+  expect(
+    await resolve({ expectPdf: false, value: "https://cache.test/null.png" }),
+  ).toBeNull()
+  expect(
+    await resolve({ expectPdf: false, value: "https://cache.test/null.png" }),
+  ).toBeNull()
+  expect(calls).toBe(3)
+})
+
+test("shares a concurrent rejected cache promise then retries after eviction", async () => {
+  let calls = 0
+  const resolve = attachmentsModule.createAttachmentFetchResolver({
+    fetch: ((_input: string | URL | Request, init?: RequestInit) => {
+      calls += 1
+      if (calls === 1) {
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(
+              init.signal?.reason instanceof Error ?
+                init.signal.reason
+              : new Error("attachment aborted"),
+            ),
+          )
+        })
+      }
+      return Promise.resolve(
+        new Response(new Uint8Array([2]), {
+          headers: { "content-type": "image/png" },
+        }),
+      )
+    }) as unknown as typeof fetch,
+  })
+  const controller = new AbortController()
+  const first = resolve({
+    expectPdf: false,
+    signal: controller.signal,
+    value: "https://cache.test/concurrent.png",
+  })
+  const second = resolve({
+    expectPdf: false,
+    signal: controller.signal,
+    value: "https://cache.test/concurrent.png",
+  })
+  controller.abort(new Error("cancel concurrent consumers"))
+
+  const settled = await Promise.allSettled([first, second])
+  expect(settled.map((result) => result.status)).toEqual([
+    "rejected",
+    "rejected",
+  ])
+  expect(calls).toBe(1)
+  expect(
+    await resolve({
+      expectPdf: false,
+      value: "https://cache.test/concurrent.png",
+    }),
+  ).toEqual({ data: "Ag==", mediaType: "image/png" })
+  expect(calls).toBe(2)
+})
+
 test.each([
   {
     expected: "image/jpeg",

@@ -54,7 +54,7 @@ export async function convertOpenAIContentPartToAnthropic(
 async function convertImagePart(
   url: string,
   signal?: AbortSignal,
-): Promise<AnthropicImageBlock> {
+): Promise<AnthropicImageBlock | AnthropicUserContentBlock> {
   let parsed = parseDataUri(url)
   if (!parsed) {
     parsed = await fetchUrlAsDataUri(url, { signal })
@@ -75,7 +75,8 @@ async function convertImagePart(
     }
   }
 
-  throwUnsupportedContentPart()
+  if (parseDataUri(url)) throwUnsupportedContentPart()
+  return { type: "text", text: "[Image attachment unavailable]" }
 }
 
 function convertFilePart(

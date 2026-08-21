@@ -208,7 +208,11 @@ export async function fetchUrlAsDataUri(
       return null
     }
 
-    const buffer = await readBoundedResponseBody(response, maxBytes)
+    const buffer = await readBoundedResponseBody(
+      response,
+      maxBytes,
+      abort.signal,
+    )
     if (!buffer) {
       consola.warn("Attachment fetch exceeded the byte limit")
       return null
@@ -263,6 +267,9 @@ export function createAttachmentFetchResolver(options?: {
         signal,
       })
       values.set(key, pending)
+      void pending.catch(() => {
+        if (values.get(key) === pending) values.delete(key)
+      })
     }
     return await pending
   }
@@ -279,6 +286,7 @@ function parseContentLength(value: string | null): number | undefined {
 async function readBoundedResponseBody(
   response: Response,
   maxBytes: number,
+  signal: AbortSignal,
 ): Promise<Buffer | null> {
   const declared = parseContentLength(response.headers.get("content-length"))
   if (declared !== undefined && declared > maxBytes) return null
@@ -287,25 +295,63 @@ async function readBoundedResponseBody(
     response.body.getReader() as ReadableStreamDefaultReader<Uint8Array>
   const chunks: Array<Uint8Array> = []
   let total = 0
+  let cancelPending: Promise<void> | undefined
+  const cancelReader = (): Promise<void> => {
+    cancelPending ??= (async () => {
+      try {
+        await reader.cancel(signal.reason)
+      } catch {
+        // Cancellation is best-effort; the abort outcome remains authoritative.
+      }
+    })()
+    return cancelPending
+  }
   try {
     while (true) {
       // Bun's Response.body reader is correctly Uint8Array at runtime, but the
       // project DOM typings surface the read result as error-typed here.
 
-      const result: { done: boolean; value?: Uint8Array } = await reader.read()
+      let rejectAbort: ((reason?: unknown) => void) | undefined
+      const onAbort = () => {
+        void cancelReader()
+        rejectAbort?.(
+          signal.reason instanceof Error ?
+            signal.reason
+          : new DOMException("Attachment fetch aborted", "AbortError"),
+        )
+      }
+      const abortPromise = new Promise<never>((_resolve, reject) => {
+        rejectAbort = reject
+        if (signal.aborted) onAbort()
+        else signal.addEventListener("abort", onAbort, { once: true })
+      })
+      let result: { done: boolean; value?: Uint8Array }
+      try {
+        result = await Promise.race([reader.read(), abortPromise])
+      } finally {
+        signal.removeEventListener("abort", onAbort)
+      }
+
+      if (signal.aborted) throw signal.reason
 
       if (result.done) break
 
       const chunk = result.value
       if (!chunk) break
       if (total + chunk.byteLength > maxBytes) {
-        await reader.cancel()
+        await cancelReader()
         return null
       }
       chunks.push(chunk)
       total += chunk.byteLength
     }
     return Buffer.concat(chunks, total)
+  } catch (error) {
+    if (signal.aborted) {
+      await cancelReader()
+      throw signal.reason
+    }
+    throw error
   } finally {
     reader.releaseLock()
   }

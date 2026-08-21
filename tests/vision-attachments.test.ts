@@ -653,6 +653,49 @@ describe("chatPayloadToAnthropic bridge", () => {
     expect(JSON.stringify(anthropic)).toContain("after")
   })
 
+  test.each([
+    { name: "HTTP failure", response: new Response("", { status: 404 }) },
+    {
+      name: "unsupported media",
+      response: new Response(new Uint8Array([1, 2]), {
+        headers: { "content-type": "text/plain" },
+      }),
+    },
+  ])(
+    "degrades a Chat to Messages image $name between sibling text",
+    async ({ response }) => {
+      globalThis.fetch = mock(() =>
+        Promise.resolve(response.clone()),
+      ) as unknown as typeof fetch
+
+      const anthropic = await chatPayloadToAnthropic({
+        model: "claude-current",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "before" },
+              {
+                type: "image_url",
+                image_url: {
+                  url: "https://private.test/fail.png?secret=marker",
+                },
+              },
+              { type: "text", text: "after" },
+            ],
+          },
+        ],
+      })
+
+      expect(anthropic.messages[0].content).toEqual([
+        { type: "text", text: "before" },
+        { type: "text", text: "[Image attachment unavailable]" },
+        { type: "text", text: "after" },
+      ])
+      expect(JSON.stringify(anthropic)).not.toContain("secret=marker")
+    },
+  )
+
   test("converts tool calls and tool results", async () => {
     const payload: ChatCompletionsPayload & { model: string } = {
       model: "claude-sonnet-4.6",
