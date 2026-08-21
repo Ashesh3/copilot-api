@@ -1,11 +1,14 @@
-/* eslint-disable max-lines -- protocol routing, streaming, and fallback paths share request context */
+/* eslint-disable max-lines, complexity, no-nested-ternary -- protocol routing, streaming, and fallback paths share request context */
 import type { Context } from "hono"
 
 import * as Sentry from "@sentry/bun"
 import consola from "consola"
 import { streamSSE, type SSEMessage } from "hono/streaming"
 
-import type { EndpointRouteDecision } from "~/lib/endpoint-routing"
+import type {
+  EndpointRouteDecision,
+  TranslationFinding,
+} from "~/lib/endpoint-routing"
 import type { Model } from "~/services/copilot/get-models"
 
 import {
@@ -19,6 +22,7 @@ import {
   recordCopilotEndpointRoute,
   recordCopilotMessagesBeta,
   recordCopilotRequestNormalization,
+  recordCopilotTranslationFindings,
 } from "~/lib/copilot-contract-observability"
 import { sessionTokenMatchesModel } from "~/lib/copilot-session-token"
 import {
@@ -26,6 +30,10 @@ import {
   resolveCustomProviderModel,
   type CustomProviderModelReference,
 } from "~/lib/custom-providers"
+import {
+  getModelEndpointSupport,
+  selectEvaluatedCopilotCandidate,
+} from "~/lib/endpoint-routing"
 import {
   createEndpointTranslationError,
   createInvalidJsonBodyError,
@@ -67,25 +75,29 @@ import {
   type ChatCompletionResponse,
   type ChatCompletionsPayload,
 } from "~/services/copilot/create-chat-completions"
-import {
-  createWebSearchFunctionTool,
-  isChatWebSearchFunctionTool,
-  isWebSearchToolType,
-} from "~/services/copilot/mcp-web-search"
+import { isChatWebSearchFunctionTool } from "~/services/copilot/mcp-web-search"
 import { canonicalizeAnthropicBeta } from "~/services/copilot/messages-contract"
 
 import type { NativeMessagesRequestOptions } from "../messages/native-handler"
+import type { PreparedChatCandidates } from "./chat-candidates"
 
 import {
   emitChatCompletionResponseAsStream,
   resolveWebSearchCalls,
 } from "../messages/web-search-helpers"
 import { executeAnthropicBridge } from "./anthropic-bridge"
-import { prepareChatCompletionsRequest } from "./chat-contract"
+import {
+  type ChatEndpointCandidate,
+  prepareChatCandidates,
+  prepareCustomProviderChatCandidate,
+} from "./chat-candidates"
+import {
+  type PreparedChatCompletionsSource,
+  prepareChatCompletionsRequest,
+} from "./chat-contract"
 import {
   executeResponsesFallback,
   recordChatEndpointFallback,
-  selectChatUpstreamEndpoint,
 } from "./responses-fallback-executor"
 import { createChatStreamTerminalAdapter } from "./stream-lifecycle"
 
@@ -94,35 +106,34 @@ export { selectChatUpstreamEndpoint } from "./responses-fallback-executor"
 export async function handleCompletion(c: Context) {
   const rawPayload = await parseChatRequestBody(c)
   const prepared = prepareChatCompletionsRequest(rawPayload)
-  const normalizedPayload = prepared.payload
+  const preparedSource = prepared.source
   const nativeOptions: NativeMessagesRequestOptions = {
     anthropicBeta: c.req.header("anthropic-beta"),
     anthropicVersion: c.req.header("anthropic-version"),
     modelProviderPreference: c.req.header("x-model-provider-preference"),
   }
-  const conversationId = setSentryConversationIdFromRequest(
-    c,
-    normalizedPayload,
-  )
+  const conversationId = setSentryConversationIdFromRequest(c, preparedSource)
 
   const model = normalizeModelName(
-    parseModelSuffix(normalizedPayload.model).baseModel,
+    parseModelSuffix(preparedSource.model).baseModel,
   )
 
   return await Sentry.startSpan(
     createSentryInvokeAgentSpanOptions(model, conversationId),
     async () => {
       recordCopilotRequestNormalization("chat", prepared.normalizationClasses)
-      return await handleCompletionInner(c, normalizedPayload, nativeOptions)
+      return await handleCompletionInner(c, {
+        preparedSource,
+        sourceFindings: prepared.findings,
+        nativeOptions,
+      })
     },
   )
 }
 
-async function parseChatRequestBody(
-  c: Context,
-): Promise<ChatCompletionsPayload> {
+async function parseChatRequestBody(c: Context): Promise<unknown> {
   try {
-    return await c.req.json<ChatCompletionsPayload>()
+    return await c.req.json<unknown>()
   } catch {
     throw createInvalidJsonBodyError()
   }
@@ -133,20 +144,27 @@ async function parseChatRequestBody(
 // eslint-disable-next-line max-lines-per-function
 async function handleCompletionInner(
   c: Context,
-  rawPayload: ChatCompletionsPayload,
-  nativeOptions: NativeMessagesRequestOptions,
+  options: {
+    nativeOptions: NativeMessagesRequestOptions
+    preparedSource: PreparedChatCompletionsSource
+    sourceFindings: ReadonlyArray<TranslationFinding>
+  },
 ) {
-  emitChatCompletionsToolSpans(rawPayload.messages)
+  const { nativeOptions, preparedSource, sourceFindings } = options
+  emitChatCompletionsToolSpans(preparedSource.messages)
 
-  const requestedModel = rawPayload.model
+  const requestedModel = preparedSource.model
 
   const { baseModel, reasoningEffort: suffixEffort } = parseModelSuffix(
-    rawPayload.model,
+    preparedSource.model,
   )
-  rawPayload.model = baseModel
+  const replacementSource = structuredClone(preparedSource)
+  replacementSource.model = baseModel
 
   const { payload: replacedPayload, appliedRules } =
-    await applyReplacementsToPayload(rawPayload)
+    await applyReplacementsToPayload(
+      replacementSource as unknown as ChatCompletionsPayload,
+    )
 
   const unnormalizedModel = replacedPayload.model
   const customReferenceBeforeCopilot = resolveCustomProviderModel({
@@ -163,9 +181,16 @@ async function handleCompletionInner(
   })
 
   if (customReferenceBeforeCopilot) {
-    convertHostedWebSearchTools(replacedPayload)
+    const customSource = structuredClone(
+      replacedPayload,
+    ) as unknown as PreparedChatCompletionsSource
+    customSource.model = unnormalizedModel
+    const customCandidate = await prepareCustomProviderChatCandidate({
+      source: customSource,
+      signal: c.req.raw.signal,
+    })
     const customPayload = {
-      ...replacedPayload,
+      ...customCandidate.payload,
       model: unnormalizedModel,
     }
     return await executeCustomProviderRequest(c, {
@@ -182,76 +207,103 @@ async function handleCompletionInner(
       model: normalizedModel,
       effort: requestedEffort,
     })
+  const redirectedSource = structuredClone(
+    replacedPayload,
+  ) as unknown as PreparedChatCompletionsSource
   applyRedirectedReasoningEffort({
     c,
-    payload: replacedPayload,
+    payload: redirectedSource as unknown as ChatCompletionsPayload,
     model: targetModel,
     effort: reasoningEffort,
   })
 
-  let payload = {
-    ...replacedPayload,
-    model: targetModel,
-  }
-  disableParallelWebSearch(payload)
+  redirectedSource.model = targetModel
 
   const customReference = resolveCustomProviderModel({
-    model: payload.model,
+    model: redirectedSource.model,
     kind: "chat",
     copilotModelIds: getCopilotModelIds(),
   })
   if (customReference) {
-    convertHostedWebSearchTools(payload)
+    const customCandidate = await prepareCustomProviderChatCandidate({
+      source: redirectedSource,
+      signal: c.req.raw.signal,
+    })
     return await executeCustomProviderRequest(c, {
       reference: customReference,
-      payload,
+      payload: customCandidate.payload,
       requestedModel,
       appliedRules,
       reasoningEffort,
     })
   }
 
-  const modelBeforeFallback = payload.model
-  payload = applyRoutableModelFallback(c, payload)
+  const modelBeforeFallback = redirectedSource.model
+  const fallbackPayload = applyRoutableModelFallback(
+    c,
+    redirectedSource as unknown as ChatCompletionsPayload & { model: string },
+  )
+  const routableSource = structuredClone(
+    fallbackPayload,
+  ) as unknown as PreparedChatCompletionsSource
   const inboundSessionToken = c.req.header("copilot-session-token")
   const copilotSessionToken =
     (
       sessionTokenMatchesModel({
         token: inboundSessionToken,
         requestedModel: baseModel,
-        finalModel: payload.model,
+        finalModel: routableSource.model,
         modelWasRedirected:
           replacedPayload.model !== baseModel
           || redirected
-          || payload.model !== modelBeforeFallback,
+          || routableSource.model !== modelBeforeFallback,
       })
     ) ?
       inboundSessionToken
     : undefined
 
   consola.debug("Prepared Chat request", {
-    messageCount: payload.messages.length,
-    model: payload.model,
-    stream: Boolean(payload.stream),
-    toolCount: payload.tools?.length ?? 0,
+    messageCount: routableSource.messages.length,
+    model: routableSource.model,
+    stream: Boolean(routableSource.stream),
+    toolCount: routableSource.tools?.length ?? 0,
   })
 
   setRequestContext(c, {
     requestedModel,
     provider: "ChatCompletions",
-    model: payload.model,
+    model: routableSource.model,
     replacements: appliedRules,
     reasoningEffort,
   })
 
-  const routedModel = selectRoutedModel(payload.model)
+  const routedModel = selectRoutedModel(routableSource.model)
   const selectedModel = routedModel.model
 
-  const decision = selectChatUpstreamEndpoint({ payload, selectedModel })
-  if ("code" in decision) throw createEndpointTranslationError(decision)
+  const candidates = await prepareChatCandidates({
+    nativeMessagesOptions: { ...nativeOptions },
+    reasoningEffort,
+    selectedModel,
+    signal: c.req.raw.signal,
+    source: routableSource,
+    sourceFindings,
+  })
+  const orderedCandidates = orderChatCandidates({
+    candidates,
+    selectedModel,
+    source: routableSource,
+  })
+  const selection = selectEvaluatedCopilotCandidate({
+    candidates: orderedCandidates,
+    source: "chat",
+    support: getModelEndpointSupport(selectedModel),
+  })
+  if ("code" in selection) throw createEndpointTranslationError(selection)
+  const { candidate, decision } = selection
+  recordCopilotTranslationFindings("chat", candidate.endpoint, candidate.check)
   recordCopilotEndpointRoute(decision)
 
-  await setInputTokenContext(c, payload, selectedModel)
+  await setInputTokenContext(c, candidates.chat.payload, selectedModel)
 
   if (state.manualApprove) await awaitApproval()
 
@@ -259,7 +311,8 @@ async function handleCompletionInner(
     routedModel,
     async () =>
       await dispatchCopilotCompletion(c, {
-        payload,
+        sourcePayload: candidates.chat.payload,
+        candidate,
         requestedModel,
         reasoningEffort,
         selectedModel,
@@ -278,7 +331,8 @@ async function dispatchCopilotCompletion(
   c: Context,
   options: {
     decision: EndpointRouteDecision
-    payload: ChatCompletionsPayload & { model: string }
+    candidate: ChatEndpointCandidate
+    sourcePayload: ChatCompletionsPayload & { model: string }
     requestedModel: string
     reasoningEffort?: ReasoningEffort
     selectedModel: Model | undefined
@@ -288,7 +342,8 @@ async function dispatchCopilotCompletion(
 ) {
   const {
     decision,
-    payload,
+    candidate,
+    sourcePayload,
     requestedModel,
     reasoningEffort,
     selectedModel,
@@ -300,12 +355,15 @@ async function dispatchCopilotCompletion(
       canonicalizeAnthropicBeta(nativeOptions.anthropicBeta),
     )
   }
-  if (decision.translated) recordChatEndpointFallback(c, payload, decision)
+  if (decision.translated) {
+    recordChatEndpointFallback(c, sourcePayload, decision)
+  }
 
-  switch (decision.target) {
+  switch (candidate.endpoint) {
     case "/responses": {
       return await executeResponsesFallback(c, {
-        payload,
+        payload: sourcePayload,
+        preparedPayload: candidate.payload,
         requestedModel,
         reasoningEffort,
         copilotSessionToken,
@@ -314,15 +372,14 @@ async function dispatchCopilotCompletion(
     case "/v1/messages": {
       return await executeAnthropicBridge(c, {
         nativeOptions,
-        payload,
+        payload: sourcePayload,
+        preparedPayload: candidate.payload,
         selectedModel,
       })
     }
     case "/chat/completions": {
-      if (payload.tools?.some((tool) => isWebSearchToolType(tool))) {
-        convertHostedWebSearchTools(payload)
-      }
-      return await executeRequest(c, payload, {
+      return await executeRequest(c, candidate.payload, {
+        candidatePrepared: true,
         requestedModel,
         copilotSessionToken,
       })
@@ -335,6 +392,65 @@ async function dispatchCopilotCompletion(
 
 function getCopilotModelIds(): Set<string> {
   return new Set(state.models?.data.map((model) => model.id) ?? [])
+}
+
+function orderChatCandidates(options: {
+  candidates: PreparedChatCandidates
+  selectedModel: Model | undefined
+  source: PreparedChatCompletionsSource
+}): ReadonlyArray<ChatEndpointCandidate> {
+  const { candidates, selectedModel, source } = options
+  const vendor = selectedModel?.vendor?.trim().toLowerCase()
+  const family = selectedModel?.capabilities.family.trim().toLowerCase()
+  const anthropic =
+    vendor ? vendor === "anthropic"
+    : family ? family.startsWith("claude")
+    : (selectedModel?.id.toLowerCase().startsWith("claude-") ?? false)
+  const messagesPreferred =
+    source.messages.some(
+      (message) =>
+        Array.isArray(message.content)
+        && message.content.some(
+          (part) =>
+            isRecordWithType(part, "document")
+            || isRecordWithType(part, "file"),
+        ),
+    )
+    || source.messages.some(
+      (message) =>
+        message.role === "assistant"
+        && typeof message.reasoning_text === "string"
+        && typeof message.reasoning_opaque === "string"
+        && !message.encrypted_content,
+    )
+    || typeof source.thinking_budget === "number"
+  const hasHostedWebSearch = (source.tools ?? []).some(
+    (tool) =>
+      typeof tool.type === "string"
+      && /^web_search(?:_[a-z\d]+)*$/.test(tool.type),
+  )
+  const responsesPreferred =
+    source.messages.some(
+      (message) => typeof message.encrypted_content === "string",
+    ) || hasHostedWebSearch
+
+  if (messagesPreferred && anthropic) {
+    return [candidates.messages, candidates.responses, candidates.chat]
+  }
+  if (responsesPreferred || messagesPreferred) {
+    return [candidates.responses, candidates.messages, candidates.chat]
+  }
+  return anthropic ?
+      [candidates.chat, candidates.messages, candidates.responses]
+    : [candidates.chat, candidates.responses, candidates.messages]
+}
+
+function isRecordWithType(value: unknown, type: string): boolean {
+  return (
+    typeof value === "object"
+    && value !== null
+    && (value as { type?: unknown }).type === type
+  )
 }
 
 async function setInputTokenContext(
@@ -443,7 +559,6 @@ async function handleCustomProviderStreamingResponse(
     )
   }
 
-  // eslint-disable-next-line complexity
   return streamSSE(c, async (stream) => {
     const adapter = createChatStreamTerminalAdapter({ c, stream })
     let finalSeen = false
@@ -519,7 +634,11 @@ async function handleCustomProviderStreamingResponse(
 const executeRequest = async (
   c: Context,
   payload: ChatCompletionsPayload & { model: string },
-  options: { requestedModel?: string; copilotSessionToken?: string } = {},
+  options: {
+    candidatePrepared?: boolean
+    requestedModel?: string
+    copilotSessionToken?: string
+  } = {},
 ) => {
   const needsWebSearch =
     payload.tools?.some((tool) => isChatWebSearchFunctionTool(tool)) ?? false
@@ -534,6 +653,7 @@ const executeRequest = async (
           await createChatCompletionsWithProcessedPayload(
             payload as ChatCompletionsPayload & { stream?: false | null },
             {
+              candidatePrepared: options.candidatePrepared,
               copilotSessionToken: options.copilotSessionToken,
               signal: c.req.raw.signal,
             },
@@ -632,27 +752,14 @@ async function executeCustomProviderWebSearchRequest(
   })
 }
 
-function convertHostedWebSearchTools(payload: ChatCompletionsPayload): void {
-  if (!payload.tools) return
-  payload.tools = payload.tools.map((tool) =>
-    isWebSearchToolType(tool) ? createWebSearchFunctionTool(tool) : tool,
-  )
-  payload.parallel_tool_calls = false
-}
-
-function disableParallelWebSearch(payload: ChatCompletionsPayload): void {
-  if (
-    Array.isArray(payload.tools)
-    && payload.tools.some((tool) => isChatWebSearchFunctionTool(tool))
-  ) {
-    payload.parallel_tool_calls = false
-  }
-}
-
 async function executeStreamingWebSearchRequest(
   c: Context,
   payload: ChatCompletionsPayload & { model: string },
-  options: { requestedModel?: string; copilotSessionToken?: string },
+  options: {
+    candidatePrepared?: boolean
+    requestedModel?: string
+    copilotSessionToken?: string
+  },
 ) {
   const bufferedPayload = { ...payload, stream: false as const }
   return await Sentry.startSpan(
@@ -664,6 +771,7 @@ async function executeStreamingWebSearchRequest(
     async (span) => {
       const { processedPayload, response: initial } =
         await createChatCompletionsWithProcessedPayload(bufferedPayload, {
+          candidatePrepared: options.candidatePrepared,
           copilotSessionToken: options.copilotSessionToken,
           signal: c.req.raw.signal,
         })
@@ -913,7 +1021,11 @@ const handleNonStreamingResponse = (
 const handleStreamingResponse = (
   c: Context,
   payload: ChatCompletionsPayload & { model: string },
-  options: { requestedModel?: string; copilotSessionToken?: string },
+  options: {
+    candidatePrepared?: boolean
+    requestedModel?: string
+    copilotSessionToken?: string
+  },
 ) => {
   consola.debug("Streaming response")
   return Sentry.startSpanManual(
@@ -933,6 +1045,7 @@ const handleStreamingResponse = (
 
       try {
         const response = await createChatCompletions(payload, {
+          candidatePrepared: options.candidatePrepared,
           copilotSessionToken: options.copilotSessionToken,
           signal: c.req.raw.signal,
         })
@@ -952,7 +1065,6 @@ const handleStreamingResponse = (
           return result
         }
 
-        // eslint-disable-next-line complexity
         return streamSSE(c, async (stream) => {
           const adapter = createChatStreamTerminalAdapter({ c, stream })
           let finalSeen = false

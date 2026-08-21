@@ -1,3 +1,4 @@
+/* eslint-disable no-nested-ternary -- prepared and compatibility transport branches remain explicit */
 import consola from "consola"
 import { events } from "fetch-event-stream"
 
@@ -86,6 +87,7 @@ export const createAnthropicMessages = async (
     copilotSessionToken?: string
     initiator?: "agent" | "user"
     modelProviderPreference?: string
+    alreadyAdapted?: boolean
     preserveValidatedControls?: boolean
     routedAccountPin?: RoutedAccountPin
     retryBudget?: RetryBudget
@@ -93,7 +95,23 @@ export const createAnthropicMessages = async (
   },
 ): Promise<CreateAnthropicMessagesReturn> => {
   const prepared =
-    options?.preserveValidatedControls ?
+    options?.alreadyAdapted ?
+      (() => {
+        const sanitizedHeaders = validateAnthropicRequestHeaderOptions({
+          anthropicBeta: options.anthropicBeta,
+          anthropicVersion: options.anthropicVersion,
+          modelProviderPreference: options.modelProviderPreference,
+        })
+        return {
+          body: structuredClone(payload),
+          headers: {
+            ...sanitizedHeaders,
+            anthropicVersion:
+              sanitizedHeaders.anthropicVersion ?? DEFAULT_ANTHROPIC_VERSION,
+          },
+        }
+      })()
+    : options?.preserveValidatedControls ?
       (() => {
         const preservedOptions = options
         const sanitizedHeaders = validateAnthropicRequestHeaderOptions({
@@ -127,7 +145,10 @@ export const createAnthropicMessages = async (
     initiator,
     options,
     modelId: snapshot.model,
-    preparedBody: normalizeAnthropicMessagesRequest(prepared.body),
+    preparedBody:
+      options?.alreadyAdapted ?
+        structuredClone(prepared.body)
+      : normalizeAnthropicMessagesRequest(prepared.body),
     preparedHeaders: prepared.headers,
     stream: Boolean(snapshot.stream),
     vision,

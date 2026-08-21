@@ -37,7 +37,6 @@ import {
   resolveResponsesWebSearchCalls,
 } from "~/routes/messages/web-search-helpers"
 import {
-  addPromptCaching,
   detectInitiator,
   hasVisionContent,
 } from "~/services/copilot/copilot-client"
@@ -68,6 +67,7 @@ import {
 interface ResponsesFallbackOptions {
   copilotSessionToken?: string
   payload: ChatCompletionsPayload & { model: string }
+  preparedPayload?: ResponsesPayload
   requestedModel: string
   reasoningEffort?: ReasoningEffort
 }
@@ -292,14 +292,11 @@ export async function executeResponsesFallback(
 function prepareResponsesFallback(
   options: ResponsesFallbackOptions,
 ): PreparedResponsesFallback {
-  addPromptCaching(options.payload.messages, options.payload.tools ?? undefined)
-
   return {
     copilotSessionToken: options.copilotSessionToken,
-    payload: chatCompletionsToResponses(
-      options.payload,
-      options.reasoningEffort,
-    ),
+    payload:
+      options.preparedPayload
+      ?? chatCompletionsToResponses(options.payload, options.reasoningEffort),
     originalPayload: options.payload,
     requestedModel: options.requestedModel,
     vision: hasVisionContent(options.payload.messages),
@@ -320,10 +317,10 @@ async function executeNonStreamingResponsesFallback(
         initiator: options.initiator,
         signal: c.req.raw.signal,
       }
-      const initial = (await createResponses(
-        options.payload,
-        requestOptions,
-      )) as ResponsesResult
+      const initial = (await createResponses(options.payload, {
+        ...requestOptions,
+        prepared: true,
+      })) as ResponsesResult
       const result =
         hasMcpWebSearch(options.payload) ?
           await resolveResponsesWebSearchCalls(
@@ -364,6 +361,7 @@ function executeStreamingResponsesFallback(
           vision: options.vision,
           initiator: options.initiator,
           signal: c.req.raw.signal,
+          prepared: true,
         })
 
         recordAccountContext(c)
@@ -445,6 +443,7 @@ async function executeStreamingMcpWebSearchFallback(
     copilotSessionToken: options.copilotSessionToken,
     vision: options.vision,
     initiator: options.initiator,
+    prepared: true,
     signal: upstreamSignal,
   }
   const preflush = await raceSsePreflush(

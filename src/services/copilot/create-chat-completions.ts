@@ -1,3 +1,4 @@
+/* eslint-disable complexity -- prepared and compatibility request paths intentionally share transport */
 import consola from "consola"
 import { events } from "fetch-event-stream"
 
@@ -322,7 +323,8 @@ interface StreamingRetryOptions {
   retriesRemaining?: number
 }
 
-interface ChatCompletionsRequestOptions {
+export interface ChatCompletionsRequestOptions {
+  candidatePrepared?: boolean
   compaction?: boolean
   copilotSessionToken?: string
   initiator?: "agent" | "user"
@@ -497,10 +499,15 @@ async function createChatCompletionsCore(
   payload: ChatCompletionsPayload,
   options?: ChatCompletionsRequestOptions,
 ): Promise<ChatCompletionsCoreResult> {
-  const normalizedPayload = normalizeChatCompletionsRequest(payload)
+  const normalizedPayload =
+    options?.candidatePrepared ?
+      structuredClone(payload)
+    : normalizeChatCompletionsRequest(payload)
   options?.signal?.throwIfAborted()
-  rewriteUnsupportedAssistantPrefill(normalizedPayload)
-  await normalizeChatAttachments(normalizedPayload, options?.signal)
+  if (!options?.candidatePrepared) {
+    rewriteUnsupportedAssistantPrefill(normalizedPayload)
+    await normalizeChatAttachments(normalizedPayload, options?.signal)
+  }
   options?.signal?.throwIfAborted()
   const vision = hasVisionContent(normalizedPayload.messages)
   const initiator = detectInitiator(
@@ -513,12 +520,14 @@ async function createChatCompletionsCore(
     initiator,
   }
 
-  normalizePayload(normalizedPayload)
-  injectJsonInstruction(normalizedPayload)
-  addPromptCaching(
-    normalizedPayload.messages,
-    normalizedPayload.tools ?? undefined,
-  )
+  if (!options?.candidatePrepared) {
+    normalizePayload(normalizedPayload)
+    injectJsonInstruction(normalizedPayload)
+    addPromptCaching(
+      normalizedPayload.messages,
+      normalizedPayload.tools ?? undefined,
+    )
+  }
 
   const outboundPayload = prepareChatCompletionsPayload(
     normalizedPayload,

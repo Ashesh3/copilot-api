@@ -308,6 +308,36 @@ test("chat request routes to custom provider by model id", async () => {
   })
 })
 
+test("custom Chat receives the tolerant native candidate without Copilot caching", async () => {
+  const response = await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "custom-chat-model",
+      messages: {
+        role: "future-private-role",
+        content: { type: "future-private-part", payload: true },
+      },
+      tools: { type: "future-private-tool", payload: true },
+      stream: false,
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(requests[0]?.body.messages).toEqual([
+    {
+      role: "future-private-role",
+      content: [{ type: "future-private-part", payload: true }],
+    },
+  ])
+  expect(requests[0]?.body.tools).toEqual([
+    { type: "future-private-tool", payload: true },
+  ])
+  expect(JSON.stringify(requests[0]?.body)).not.toContain(
+    "copilot_cache_control",
+  )
+})
+
 test("Anthropic messages request routes to custom chat provider by model id", async () => {
   const response = await server.request("/v1/messages?beta=true", {
     method: "POST",

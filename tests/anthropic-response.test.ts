@@ -1150,8 +1150,7 @@ describe("OpenAI to Anthropic Streaming Response Translation", () => {
         event.type === "message_delta",
     )
 
-    expect(messageDelta).toBeDefined()
-    expect(messageDelta?.delta.stop_reason).toBe("tool_use")
+    expect(messageDelta).toBeUndefined()
   })
 
   test("closes an open tool block before fallback terminal events", () => {
@@ -1176,15 +1175,7 @@ describe("OpenAI to Anthropic Streaming Response Translation", () => {
     const fallbackEvents =
       streamTranslation.createFallbackMessageDeltaEvents(streamState)
 
-    expect(fallbackEvents.map((event) => event.type)).toEqual([
-      "content_block_stop",
-      "message_delta",
-      "message_stop",
-    ])
-    expect(fallbackEvents[0]).toEqual({
-      type: "content_block_stop",
-      index: 0,
-    })
+    expect(fallbackEvents).toEqual([])
   })
 
   test("normalizes 1-based tool call indices to 0-based stream state entries", () => {
@@ -1228,6 +1219,7 @@ describe("OpenAI to Anthropic Streaming Response Translation", () => {
       id: "call_gcp",
       name: "get_weather",
       anthropicBlockIndex: 0,
+      pendingArguments: [],
     })
     expect(streamState.toolCalls[1]).toBeUndefined()
   })

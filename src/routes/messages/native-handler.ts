@@ -77,6 +77,7 @@ export interface NativeMessagesRequestOptions
 }
 
 type NativeMessagesDispatchOptions = {
+  alreadyAdapted?: boolean
   compaction?: boolean
   preserveValidatedControls?: boolean
   routedAccountPin?: RoutedAccountPin
@@ -97,6 +98,7 @@ export async function createNativeMessages(
   dispatchOptions?: NativeMessagesDispatchOptions,
 ): Promise<CreateAnthropicMessagesReturn> {
   return await createAnthropicMessages(payload, {
+    alreadyAdapted: dispatchOptions?.alreadyAdapted,
     anthropicBeta: nativeOptions.anthropicBeta,
     anthropicVersion: nativeOptions.anthropicVersion,
     compaction: dispatchOptions?.compaction,

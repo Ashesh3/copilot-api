@@ -1,4 +1,8 @@
+/* eslint-disable max-lines, complexity, no-nested-ternary -- strict compatibility wrapper and tolerant source preparation coexist during migration */
+import util from "node:util"
+
 import type { CopilotContractNormalizationClass } from "~/lib/copilot-contract-observability"
+import type { TranslationFinding } from "~/lib/endpoint-routing"
 import type { ChatCompletionsPayload } from "~/services/copilot/create-chat-completions"
 
 import { LocalHTTPError } from "~/lib/error"
@@ -475,13 +479,467 @@ function normalizeDeprecatedFunctionCall(
 }
 
 export interface PreparedChatCompletionsRequest {
-  payload: ChatCompletionsPayload
+  readonly findings: ReadonlyArray<TranslationFinding>
+  normalizationClasses: Array<CopilotContractNormalizationClass>
+  /** Compatibility alias for callers migrating to `source`. */
+  payload: PreparedChatCompletionsSource
+  source: PreparedChatCompletionsSource
+}
+
+export interface PreparedChatMessage extends Record<string, unknown> {
+  content?: unknown
+  role: string
+  tool_calls?: Array<Record<string, unknown>>
+}
+
+export interface PreparedChatCompletionsSource extends Record<string, unknown> {
+  messages: Array<PreparedChatMessage>
+  model: string
+  tools?: Array<Record<string, unknown>>
+}
+
+interface MutablePreparationState {
+  findings: Array<TranslationFinding>
   normalizationClasses: Array<CopilotContractNormalizationClass>
 }
 
+function addFinding(
+  state: MutablePreparationState,
+  finding: TranslationFinding,
+): void {
+  if (
+    state.findings.some(
+      (current) =>
+        current.class === finding.class
+        && current.severity === finding.severity,
+    )
+  ) {
+    return
+  }
+  state.findings.push(finding)
+}
+
+function addNormalizationClass(
+  state: MutablePreparationState,
+  value: CopilotContractNormalizationClass,
+): void {
+  if (!state.normalizationClasses.includes(value)) {
+    state.normalizationClasses.push(value)
+  }
+}
+
+function assertSnapshotSafe(
+  value: unknown,
+  seen = new WeakSet<object>(),
+): void {
+  if (
+    value === null
+    || typeof value === "string"
+    || typeof value === "boolean"
+    || (typeof value === "number" && Number.isFinite(value))
+  ) {
+    return
+  }
+  if (value === undefined) throw createInvalidChatBodyError()
+  if (typeof value !== "object") throw createInvalidChatBodyError()
+  if (util.types.isProxy(value)) throw createInvalidChatBodyError()
+  if (seen.has(value)) throw createInvalidChatBodyError()
+  seen.add(value)
+
+  let prototype: unknown
+  let descriptors: PropertyDescriptorMap
+  try {
+    prototype = Object.getPrototypeOf(value)
+    descriptors = Object.getOwnPropertyDescriptors(value)
+  } catch {
+    throw createInvalidChatBodyError()
+  }
+  if (
+    Array.isArray(value) ?
+      prototype !== Array.prototype
+    : prototype !== Object.prototype && prototype !== null
+  ) {
+    throw createInvalidChatBodyError()
+  }
+  if (Object.getOwnPropertySymbols(value).length > 0) {
+    throw createInvalidChatBodyError()
+  }
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index += 1) {
+      if (!Object.hasOwn(descriptors, String(index))) {
+        throw createInvalidChatBodyError()
+      }
+    }
+  }
+  for (const descriptor of Object.values(descriptors)) {
+    if (
+      typeof descriptor.value === "function"
+      || typeof descriptor.value === "symbol"
+      || typeof descriptor.value === "bigint"
+    ) {
+      throw createInvalidChatBodyError()
+    }
+    if (!Object.hasOwn(descriptor, "value")) throw createInvalidChatBodyError()
+    assertSnapshotSafe(descriptor.value, seen)
+  }
+  seen.delete(value)
+}
+
+function clonePreparedSource(payload: unknown): Record<string, unknown> {
+  if (!isPlainRecord(payload)) throw createInvalidChatBodyError()
+  assertSnapshotSafe(payload)
+  try {
+    return structuredClone(payload)
+  } catch {
+    throw createInvalidChatBodyError()
+  }
+}
+
+function normalizeContent(
+  value: unknown,
+  state: MutablePreparationState,
+): unknown {
+  if (value === null || typeof value === "string") return value
+  if (
+    typeof value === "boolean"
+    || (typeof value === "number" && Number.isFinite(value))
+  ) {
+    addFinding(state, { class: "content_part", severity: "adapted" })
+    return String(value)
+  }
+  if (isRecord(value)) {
+    addFinding(state, { class: "message_shape", severity: "adapted" })
+    return [value]
+  }
+  if (!Array.isArray(value)) return undefined
+
+  const parts: Array<unknown> = []
+  for (const part of value) {
+    if (part === null || part === undefined) {
+      addFinding(state, { class: "content_part", severity: "omitted" })
+      continue
+    }
+    if (isRecord(part)) {
+      parts.push(part)
+      continue
+    }
+    if (
+      typeof part === "string"
+      || typeof part === "boolean"
+      || (typeof part === "number" && Number.isFinite(part))
+    ) {
+      addFinding(state, { class: "content_part", severity: "adapted" })
+      parts.push({ type: "text", text: String(part) })
+      continue
+    }
+    addFinding(state, { class: "content_part", severity: "omitted" })
+  }
+  return parts
+}
+
+function normalizeToolCalls(
+  value: unknown,
+  state: MutablePreparationState,
+): Array<Record<string, unknown>> | undefined {
+  if (value === undefined || value === null) return undefined
+  const entries = Array.isArray(value) ? value : [value]
+  if (!Array.isArray(value)) {
+    addFinding(state, { class: "tool_history", severity: "adapted" })
+  }
+  const retained: Array<Record<string, unknown>> = []
+  for (const entry of entries) {
+    if (!isRecord(entry)) {
+      addFinding(state, { class: "tool_history", severity: "omitted" })
+      continue
+    }
+    retained.push(entry)
+  }
+  if (retained.length > 0) {
+    addFinding(state, { class: "tool_history", severity: "exact" })
+    return retained
+  }
+  return undefined
+}
+
+function hasMeaningfulContent(value: unknown): boolean {
+  if (typeof value === "string") return value.trim().length > 0
+  if (!Array.isArray(value)) return false
+  return value.some((part) => {
+    if (typeof part === "string") return part.trim().length > 0
+    return isRecord(part)
+  })
+}
+
+function hasMeaningfulMessage(message: PreparedChatMessage): boolean {
+  return (
+    hasMeaningfulContent(message.content)
+    || (Array.isArray(message.tool_calls) && message.tool_calls.length > 0)
+    || (message.role === "tool"
+      && typeof message.tool_call_id === "string"
+      && message.tool_call_id.trim().length > 0)
+    || [
+      message.reasoning_text,
+      message.reasoning_opaque,
+      message.encrypted_content,
+    ].some((value) => typeof value === "string" && value.trim().length > 0)
+  )
+}
+
+function prepareMessages(
+  value: unknown,
+  state: MutablePreparationState,
+): Array<PreparedChatMessage> {
+  const entries =
+    Array.isArray(value) ? value
+    : isRecord(value) ? [value]
+    : []
+  if (isRecord(value)) {
+    addFinding(state, { class: "message_shape", severity: "adapted" })
+  }
+  const messages: Array<PreparedChatMessage> = []
+  for (const entry of entries) {
+    if (!isRecord(entry)) {
+      addFinding(state, { class: "message_shape", severity: "omitted" })
+      continue
+    }
+    const message = entry as PreparedChatMessage
+    if (typeof message.role !== "string" || message.role.trim() === "") {
+      message.role = "user"
+      addFinding(state, { class: "message_role", severity: "adapted" })
+    } else if (!SUPPORTED_CHAT_ROLES.has(message.role)) {
+      addFinding(state, { class: "message_role", severity: "exact" })
+    }
+    if (hasOwn(message, "content")) {
+      const content = normalizeContent(message.content, state)
+      if (content === undefined) delete message.content
+      else message.content = content
+    }
+    const toolCalls = normalizeToolCalls(message.tool_calls, state)
+    if (toolCalls) message.tool_calls = toolCalls
+    else if (hasOwn(message, "tool_calls")) delete message.tool_calls
+    if (!hasMeaningfulMessage(message)) {
+      addFinding(state, { class: "message_shape", severity: "omitted" })
+      continue
+    }
+    messages.push(message)
+  }
+  return messages
+}
+
+function repairFunctionParameters(
+  value: unknown,
+  state: MutablePreparationState,
+): Record<string, unknown> {
+  const parameters = isRecord(value) ? value : {}
+  let changed = !isRecord(value)
+  if (typeof parameters.type !== "string" || parameters.type.trim() === "") {
+    parameters.type = "object"
+    changed = true
+  }
+  if (!isRecord(parameters.properties)) {
+    parameters.properties = {}
+    changed = true
+  }
+  if (changed) {
+    addFinding(state, { class: "tool_shape", severity: "adapted" })
+    addNormalizationClass(state, "function_parameters")
+  }
+  return parameters
+}
+
+function prepareModernTool(
+  value: unknown,
+  state: MutablePreparationState,
+): Record<string, unknown> | undefined {
+  if (
+    !isRecord(value)
+    || typeof value.type !== "string"
+    || !value.type.trim()
+  ) {
+    addFinding(state, { class: "tool_shape", severity: "omitted" })
+    return undefined
+  }
+  if (value.type !== "function") {
+    addFinding(state, { class: "tool_shape", severity: "exact" })
+    return value
+  }
+  if (
+    !isRecord(value.function)
+    || typeof value.function.name !== "string"
+    || !value.function.name.trim()
+  ) {
+    addFinding(state, { class: "tool_shape", severity: "omitted" })
+    return undefined
+  }
+  if (
+    value.function.description !== undefined
+    && typeof value.function.description !== "string"
+  ) {
+    delete value.function.description
+    addFinding(state, { class: "tool_shape", severity: "adapted" })
+  }
+  value.function.parameters = repairFunctionParameters(
+    value.function.parameters,
+    state,
+  )
+  return value
+}
+
+function prepareLegacyTool(
+  value: unknown,
+  state: MutablePreparationState,
+): Record<string, unknown> | undefined {
+  if (
+    !isRecord(value)
+    || typeof value.name !== "string"
+    || !value.name.trim()
+  ) {
+    addFinding(state, { class: "tool_shape", severity: "omitted" })
+    return undefined
+  }
+  const functionDefinition: Record<string, unknown> = {
+    name: value.name,
+    parameters: repairFunctionParameters(value.parameters, state),
+  }
+  if (typeof value.description === "string") {
+    functionDefinition.description = value.description
+  } else if (value.description !== undefined) {
+    addFinding(state, { class: "tool_shape", severity: "adapted" })
+  }
+  return { type: "function", function: functionDefinition }
+}
+
+function prepareTools(
+  source: Record<string, unknown>,
+  state: MutablePreparationState,
+): void {
+  const modernValue = source.tools
+  const modernEntries =
+    Array.isArray(modernValue) ? modernValue
+    : isRecord(modernValue) ? [modernValue]
+    : []
+  if (isRecord(modernValue)) {
+    addFinding(state, { class: "tool_shape", severity: "adapted" })
+  } else if (modernValue !== undefined && modernValue !== null) {
+    addFinding(state, { class: "tool_shape", severity: "omitted" })
+  }
+  const tools = modernEntries.flatMap((entry) => {
+    const prepared = prepareModernTool(entry, state)
+    return prepared ? [prepared] : []
+  })
+
+  const legacyValue = source.functions
+  const legacyEntries =
+    Array.isArray(legacyValue) ? legacyValue
+    : isRecord(legacyValue) ? [legacyValue]
+    : []
+  for (const entry of legacyEntries) {
+    const prepared = prepareLegacyTool(entry, state)
+    if (prepared) tools.push(prepared)
+  }
+  if (legacyEntries.length > 0) {
+    addNormalizationClass(state, "deprecated_functions")
+    addFinding(state, { class: "tool_shape", severity: "adapted" })
+  } else if (legacyValue !== undefined && legacyValue !== null) {
+    addFinding(state, { class: "tool_shape", severity: "omitted" })
+  }
+
+  if (tools.length > 0) source.tools = tools
+  else delete source.tools
+  delete source.functions
+}
+
+function prepareLegacyToolChoice(
+  source: Record<string, unknown>,
+  state: MutablePreparationState,
+): void {
+  if (!hasOwn(source, "function_call")) return
+  const legacy = source.function_call
+  if (!hasOwn(source, "tool_choice")) {
+    if (legacy === "none" || legacy === "auto") {
+      source.tool_choice = legacy
+      addNormalizationClass(state, "deprecated_function_call")
+      addFinding(state, { class: "tool_choice", severity: "adapted" })
+    } else if (
+      isRecord(legacy)
+      && typeof legacy.name === "string"
+      && legacy.name.trim()
+    ) {
+      source.tool_choice = {
+        type: "function",
+        function: { name: legacy.name },
+      }
+      addNormalizationClass(state, "deprecated_function_call")
+      addFinding(state, { class: "tool_choice", severity: "adapted" })
+    } else if (legacy !== undefined && legacy !== null) {
+      addFinding(state, { class: "tool_choice", severity: "omitted" })
+    }
+  }
+  delete source.function_call
+}
+
+function prepareTokenAliases(
+  source: Record<string, unknown>,
+  state: MutablePreparationState,
+): void {
+  for (const key of ["max_tokens", "max_completion_tokens"] as const) {
+    if (source[key] === null) {
+      if (key === "max_tokens") delete source.max_tokens
+      else delete source.max_completion_tokens
+      addFinding(state, { class: "token_alias", severity: "adapted" })
+    }
+  }
+  if (
+    source.max_tokens !== undefined
+    && source.max_completion_tokens !== undefined
+  ) {
+    addFinding(state, { class: "token_alias", severity: "exact" })
+  }
+}
+
 export function prepareChatCompletionsRequest(
-  payload: ChatCompletionsPayload,
+  payload: unknown,
 ): PreparedChatCompletionsRequest {
+  const source = clonePreparedSource(payload)
+  const state: MutablePreparationState = {
+    findings: [],
+    normalizationClasses: [],
+  }
+
+  if (typeof source.model !== "string" || source.model.trim() === "") {
+    throw createChatValidationError({
+      code: "invalid_value",
+      message: "The model field must be a non-empty string.",
+      param: "model",
+    })
+  }
+  const messages = prepareMessages(source.messages, state)
+  if (messages.length === 0) {
+    throw createChatValidationError({
+      code: "invalid_value",
+      message: "The messages field must contain a meaningful message.",
+      param: "messages",
+    })
+  }
+  source.messages = messages
+  prepareTools(source, state)
+  prepareLegacyToolChoice(source, state)
+  prepareTokenAliases(source, state)
+
+  const preparedSource = source as PreparedChatCompletionsSource
+  return {
+    findings: Object.freeze(
+      state.findings.map((finding) => Object.freeze(finding)),
+    ),
+    normalizationClasses: state.normalizationClasses,
+    payload: preparedSource,
+    source: preparedSource,
+  }
+}
+
+function prepareStrictChatCompletionsRequest(payload: ChatCompletionsPayload): {
+  payload: ChatCompletionsPayload
+} {
   if (!isPlainRecord(payload)) throw createInvalidChatBodyError()
 
   let normalized: ChatCompletionsPayload
@@ -533,11 +991,11 @@ export function prepareChatCompletionsRequest(
   }
   const functionNames = validateTools(normalized.tools)
   validateToolChoice(normalized.tool_choice, functionNames)
-  return { payload: normalized, normalizationClasses }
+  return { payload: normalized }
 }
 
 export function normalizeChatCompletionsRequest(
   payload: ChatCompletionsPayload,
 ): ChatCompletionsPayload {
-  return prepareChatCompletionsRequest(payload).payload
+  return prepareStrictChatCompletionsRequest(payload).payload
 }

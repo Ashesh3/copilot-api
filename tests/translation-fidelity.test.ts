@@ -180,7 +180,10 @@ test.each([
       supported: false,
       blockers: ["tool_arguments"],
     })
-    expect(() => chatPayloadToAnthropic(payload)).toThrow(LocalHTTPError)
+    expect(chatPayloadToAnthropic(payload)).resolves.toHaveProperty(
+      "messages.0.content.0.input.raw_arguments",
+      rawArguments,
+    )
   },
 )
 

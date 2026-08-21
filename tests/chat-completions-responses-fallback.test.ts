@@ -573,7 +573,7 @@ test("records one endpoint fallback event for a translated Chat request", async 
   }
 })
 
-test("rejects a lossy Chat to Responses fallback before upstream dispatch", async () => {
+test("degrades a lossy Chat to Responses fallback and dispatches", async () => {
   const response = await server.request("/v1/chat/completions", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -587,16 +587,8 @@ test("rejects a lossy Chat to Responses fallback before upstream dispatch", asyn
     }),
   })
 
-  expect(response.status).toBe(400)
-  expect(fetchMock).not.toHaveBeenCalled()
-  expect(await response.json()).toEqual({
-    error: {
-      code: "invalid_value",
-      message: "Tool calls and tool results must be complete and ordered.",
-      param: "messages",
-      type: "invalid_request_error",
-    },
-  })
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/responses")
 })
 
 test("omits tool controls when a chat fallback request has no tools", async () => {
@@ -782,8 +774,8 @@ test("routes chat json_schema as json_object with schema instruction for respons
   expect(lastUpstreamPayload?.input).toEqual([
     {
       type: "message",
-      role: "developer",
-      content: "Respond with JSON.",
+      role: "system",
+      content: "Return only JSON.",
     },
     {
       type: "message",

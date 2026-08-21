@@ -1,4 +1,3 @@
-/* eslint-disable max-lines -- Chat to Messages translation and stream state share protocol helpers */
 import type { Context } from "hono"
 
 import * as Sentry from "@sentry/bun"
@@ -18,13 +17,7 @@ import type { AnthropicStreamChunk } from "~/services/copilot/create-anthropic-m
 import type { Model } from "~/services/copilot/get-models"
 
 import { getLastUsedAccountId } from "~/lib/account-router"
-import {
-  assertEndpointTranslationSupported,
-  inspectHttpError,
-  isAbortError,
-  isHTTPError,
-  LocalHTTPError,
-} from "~/lib/error"
+import { inspectHttpError, isAbortError, isHTTPError } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
 import { setRequestContext } from "~/lib/request-logger"
 import {
@@ -62,7 +55,6 @@ import {
 } from "./anthropic-reasoning"
 import { normalizeChatCompletionsRequest } from "./chat-contract"
 import { createChatStreamTerminalAdapter } from "./stream-lifecycle"
-import { checkNormalizedChatToMessagesTranslation } from "./translation-fidelity"
 
 const logger = createHandlerLogger("anthropic-bridge")
 
@@ -77,6 +69,7 @@ export async function executeAnthropicBridge(
   options: {
     nativeOptions: NativeMessagesRequestOptions
     payload: ChatCompletionsPayload & { model: string }
+    preparedPayload?: AnthropicMessagesPayload
     selectedModel?: Model
   },
 ): Promise<Response> {
@@ -85,11 +78,10 @@ export async function executeAnthropicBridge(
 
   setRequestContext(c, { provider: "ChatCompletions→AnthropicMessages" })
 
-  const anthropicPayload = await chatPayloadToAnthropic(
-    payload,
-    selectedModel,
-    c.req.raw.signal,
-  )
+  const anthropicPayload =
+    options.preparedPayload
+    ?? (await chatPayloadToAnthropic(payload, selectedModel, c.req.raw.signal))
+  const alreadyAdapted = options.preparedPayload !== undefined
   logger.debug("Prepared Anthropic bridge request", {
     messageCount: anthropicPayload.messages.length,
     model: anthropicPayload.model,
@@ -116,6 +108,7 @@ export async function executeAnthropicBridge(
           anthropicPayload,
           nativeOptions,
           {
+            alreadyAdapted,
             signal: c.req.raw.signal,
           },
         )) as AnthropicResponse
@@ -147,6 +140,7 @@ export async function executeAnthropicBridge(
   }
 
   return await executeBridgeStreaming(c, {
+    alreadyAdapted,
     payload,
     anthropicPayload,
     nativeOptions,
@@ -162,8 +156,9 @@ async function executeBridgeWebSearch(
   },
 ): Promise<Response> {
   const requestedStream = Boolean(options.anthropicPayload.stream)
-  options.anthropicPayload.stream = false
-  const response = await resolveNativeWebSearch(options.anthropicPayload, {
+  const bufferedPayload = structuredClone(options.anthropicPayload)
+  bufferedPayload.stream = false
+  const response = await resolveNativeWebSearch(bufferedPayload, {
     ...options.nativeOptions,
     signal: c.req.raw.signal,
   })
@@ -224,6 +219,7 @@ async function executeBridgeStreaming(
   options: {
     payload: ChatCompletionsPayload & { model: string }
     anthropicPayload: AnthropicMessagesPayload
+    alreadyAdapted?: boolean
     nativeOptions: NativeMessagesRequestOptions
   },
 ): Promise<Response> {
@@ -249,6 +245,7 @@ async function executeBridgeStreaming(
           anthropicPayload,
           nativeOptions,
           {
+            alreadyAdapted: options.alreadyAdapted,
             signal: c.req.raw.signal,
           },
         )) as AsyncIterable<AnthropicStreamChunk>
@@ -331,14 +328,6 @@ export async function chatPayloadToAnthropic(
   signal?: AbortSignal,
 ): Promise<AnthropicMessagesPayload> {
   const normalized = normalizeChatCompletionsRequest(payload)
-  assertEndpointTranslationSupported(
-    {
-      blockers: [],
-      code: "endpoint_translation_unsupported",
-      source: "chat",
-    },
-    checkNormalizedChatToMessagesTranslation(normalized),
-  )
 
   const { systemTexts, messages } = await convertChatMessages(
     normalized.messages,
@@ -539,26 +528,9 @@ function safeParseArguments(rawArguments: string): Record<string, unknown> {
       return parsed as Record<string, unknown>
     }
   } catch {
-    throw createInvalidAnthropicToolArgumentsError()
+    return { raw_arguments: rawArguments }
   }
-  throw createInvalidAnthropicToolArgumentsError()
-}
-
-function createInvalidAnthropicToolArgumentsError(): LocalHTTPError {
-  const clientBody = {
-    error: {
-      code: "endpoint_translation_unsupported",
-      message:
-        "The selected Copilot model cannot accept this request without losing required protocol data.",
-      param: "tool_arguments",
-      type: "invalid_request_error",
-    },
-  }
-  return new LocalHTTPError(
-    "Tool call arguments must be a JSON object for Anthropic Messages.",
-    Response.json(clientBody, { status: 400 }),
-    clientBody,
-  )
+  return { raw_arguments: rawArguments }
 }
 
 function convertToolChoice(

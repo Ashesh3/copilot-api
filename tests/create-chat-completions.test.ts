@@ -732,6 +732,33 @@ test("exposes the processed clone without changing the direct response API", asy
   })
 })
 
+test("dispatches a prepared native candidate without semantic reprocessing", async () => {
+  const payload = {
+    model: "gpt-test",
+    messages: [
+      { role: "future-role", content: "future content" },
+      { role: "assistant", content: "keep prefill" },
+    ],
+    stream: true,
+    stream_options: { include_usage: false },
+    response_format: {
+      type: "json_schema",
+      json_schema: { schema: { type: "object" } },
+    },
+    future_top_level: { preserved: true },
+  } as unknown as ChatCompletionsPayload
+
+  const result = await createChatCompletionsWithProcessedPayload(payload, {
+    candidatePrepared: true,
+  })
+  expect(result.processedPayload).toEqual(payload)
+  expect(fetchMock).toHaveBeenCalled()
+  const sent = JSON.parse(
+    (fetchMock.mock.calls.at(-1)?.[1] as RequestInit).body as string,
+  ) as Record<string, unknown>
+  expect(sent).toEqual(payload as unknown as Record<string, unknown>)
+})
+
 test("isolates the processed snapshot from stream retry state", async () => {
   const overloadEvent = 'data: {"error":{"message":"Overloaded"}}'
   queuedResponses.push(
