@@ -1196,6 +1196,39 @@ beforeEach(() => {
   setModelSettingsForTest([])
 })
 
+test("preserves native Responses failure identity and exact route bytes", async () => {
+  state.models = responsesCapableModels
+  const body = new TextEncoder().encode('{"error":"responses"}\r\n  ')
+  const createUpstream = () =>
+    new Response(body.slice(), {
+      status: 409,
+      headers: { "content-type": "application/problem+json" },
+    })
+  const upstream = createUpstream()
+  queuedResponses.push(upstream)
+
+  const error = await createResponses(
+    { model: "gpt-4o", input: "hello" },
+    { vision: false, initiator: "user" },
+  ).catch((caught: unknown) => caught)
+
+  expect(error).toBeInstanceOf(HTTPError)
+  expect((error as HTTPError).response).toBe(upstream)
+  expect(upstream.bodyUsed).toBe(false)
+
+  queuedResponses.push(createUpstream())
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: "gpt-4o", input: "hello" }),
+  })
+  expect(response.status).toBe(409)
+  expect(response.headers.get("content-type")).toBe("application/problem+json")
+  expect(Array.from(new Uint8Array(await response.arrayBuffer()))).toEqual(
+    Array.from(body),
+  )
+})
+
 const sessionToken = (payload: Record<string, unknown>): string =>
   `e30.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.c2ln`
 

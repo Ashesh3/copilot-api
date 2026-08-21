@@ -227,7 +227,7 @@ async function handleResponse(
   payload: ChatCompletionsPayload,
 ) {
   if (!response.ok) {
-    await throwFailedResponse(response, payload)
+    throwFailedResponse(response, payload)
   }
 
   if (payload.stream) {
@@ -254,33 +254,21 @@ async function handleResponse(
     consola.error("Invalid JSON from Copilot")
     throw new HTTPError(
       "Invalid JSON response from upstream",
-      new Response(text, { status: 502 }),
+      new Response(null, { status: 502 }),
       payload,
     )
   }
 }
 
-const throwFailedResponse = async (
+const throwFailedResponse = (
   response: Response,
   payload: ChatCompletionsPayload,
-): Promise<never> => {
-  const errorBody = await response.clone().text()
-  const clientResponse =
-    response.status === 404 ?
-      new Response(errorBody, {
-        status: 502,
-        headers: response.headers,
-      })
-    : response
+): never => {
   consola.error(
     "Failed to create chat completions",
     `Status: ${response.status}`,
   )
-  throw new HTTPError(
-    "Failed to create chat completions",
-    clientResponse,
-    payload,
-  )
+  throw new HTTPError("Failed to create chat completions", response, payload)
 }
 
 const isOverloadStreamEvent = (event: StreamEvent | undefined): boolean => {
@@ -459,7 +447,7 @@ const handleStreamingResponse = async (
 ): Promise<AsyncIterable<StreamEvent>> => {
   const { payload, retry, retriesRemaining = 1 } = options
   if (!response.ok) {
-    await throwFailedResponse(response, payload)
+    throwFailedResponse(response, payload)
   }
 
   const stream = events(response) as AsyncIterable<StreamEvent>

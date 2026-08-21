@@ -15,7 +15,7 @@ import { Hono, type Context } from "hono"
 import type { ChatCompletionsPayload } from "../src/services/copilot/create-chat-completions"
 import type { ModelsResponse } from "../src/services/copilot/get-models"
 
-import { forwardError, LocalHTTPError } from "../src/lib/error"
+import { forwardError, HTTPError, LocalHTTPError } from "../src/lib/error"
 import {
   clearLlmDebugLogs,
   getLlmDebugLog,
@@ -342,7 +342,7 @@ test("forwards only matching model-scoped session tokens on Chat inference", asy
   expect(lastRequestHeaders?.get("copilot-session-token")).toBeNull()
 })
 
-test("keeps inference session tokens out of ordinary error diagnostics", async () => {
+test("preserves an upstream body even when it contains request metadata", async () => {
   state.models = {
     object: "list",
     data: [createLegacyMessagesModel("gpt-test")],
@@ -374,9 +374,9 @@ test("keeps inference session tokens out of ordinary error diagnostics", async (
     const body = await response.text()
 
     expect(response.status).toBe(400)
-    expect(
-      JSON.stringify([body, errorSpy.mock.calls, captureException.mock.calls]),
-    ).not.toContain(privateToken)
+    expect(body).toContain(privateToken)
+    expect(JSON.stringify(errorSpy.mock.calls)).toContain(privateToken)
+    expect(JSON.stringify(captureException.mock.calls)).toContain(privateToken)
 
     const rawDebug = getLlmDebugLog(listLlmDebugLogs().entries[0]?.id ?? "")
     expect(rawDebug?.request.headers["Copilot-Session-Token"]).toBe(
@@ -1063,33 +1063,53 @@ test("preserves final assistant messages when assistant prefill is unset", async
   )
 })
 
-test("rewrites upstream chat completions 404 responses to 502", async () => {
-  queuedResponses.push(
-    new Response("model not found", {
+test("preserves upstream chat 404 identity and exact route bytes", async () => {
+  const body = new TextEncoder().encode("model not found\r\n  ")
+  const createUpstream = () =>
+    new Response(body.slice(), {
       status: 404,
       headers: { "content-type": "text/plain" },
-    }),
-  )
+    })
+  const upstream = createUpstream()
+  queuedResponses.push(upstream)
 
-  try {
-    await createChatCompletions({
+  const error = await createChatCompletions({
+    model: "gpt-test",
+    messages: [{ role: "user", content: "hello" }],
+  }).catch((caught: unknown) => caught)
+
+  expect(error).toBeInstanceOf(HTTPError)
+  expect((error as HTTPError).response).toBe(upstream)
+  expect(upstream.bodyUsed).toBe(false)
+
+  state.models = {
+    object: "list",
+    data: [createLegacyMessagesModel("gpt-test")],
+  }
+  queuedResponses.push(createUpstream())
+  const response = await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
       model: "gpt-test",
       messages: [{ role: "user", content: "hello" }],
-    })
-    throw new Error("Expected createChatCompletions to reject")
-  } catch (error) {
-    expect(error).toHaveProperty("response.status", 502)
-  }
+    }),
+  })
+
+  expect(response.status).toBe(404)
+  expect(response.headers.get("content-type")).toBe("text/plain")
+  expect(Array.from(new Uint8Array(await response.arrayBuffer()))).toEqual(
+    Array.from(body),
+  )
 })
 
-test("does not log malformed upstream ChatCompletions bodies", async () => {
+test("keeps malformed successful Chat JSON local and bodyless", async () => {
   const privateMarker = "chat-invalid-json-private-marker"
-  queuedResponses.push(
-    new Response(privateMarker, {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    }),
-  )
+  const upstream = new Response(privateMarker, {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  })
+  queuedResponses.push(upstream)
   const errorSpy = spyOn(consola, "error")
 
   try {
@@ -1102,7 +1122,12 @@ test("does not log malformed upstream ChatCompletions bodies", async () => {
     } catch (error) {
       thrown = error
     }
-    expect(thrown).toHaveProperty("response.status", 502)
+    expect(thrown).toBeInstanceOf(HTTPError)
+    expect((thrown as HTTPError).response.status).toBe(502)
+    expect(
+      new Uint8Array(await (thrown as HTTPError).response.arrayBuffer()),
+    ).toEqual(new Uint8Array())
+    expect(upstream.bodyUsed).toBe(true)
     expect(JSON.stringify(errorSpy.mock.calls)).not.toContain(privateMarker)
   } finally {
     errorSpy.mockRestore()

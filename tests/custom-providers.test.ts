@@ -14,6 +14,12 @@ import type { ModelsResponse } from "../src/services/copilot/get-models"
 
 import { setConfigForTest } from "../src/lib/config"
 import {
+  createCustomProviderChatCompletions,
+  createCustomProviderEmbeddings,
+  resolveCustomProviderModel,
+} from "../src/lib/custom-providers"
+import { HTTPError } from "../src/lib/error"
+import {
   getRoutingTelemetrySnapshot,
   resetRoutingTelemetryForTest,
 } from "../src/lib/routing-telemetry"
@@ -865,18 +871,43 @@ test("records custom-provider transport failures without swallowing them", async
   })
 })
 
-test("does not log custom-provider upstream status text or body", async () => {
+test("preserves custom-provider chat response identity and exact bytes", async () => {
   const statusMarker = "custom-private-status"
-  const bodyMarker = "custom-private-body"
-  fetchMock.mockImplementationOnce(() =>
-    Response.json(
-      { error: { code: "invalid_request_body", message: bodyMarker } },
-      { status: 400, statusText: statusMarker },
-    ),
-  )
+  const body = new TextEncoder().encode(" custom-private-body\r\n")
+  const upstream = new Response(body.slice(), {
+    status: 400,
+    statusText: statusMarker,
+    headers: { "content-type": "application/problem+json" },
+  })
+  fetchMock.mockImplementationOnce(() => upstream)
   const errorSpy = spyOn(consola, "error")
 
   try {
+    const reference = resolveCustomProviderModel({
+      model: "custom-chat-model",
+      kind: "chat",
+      copilotModelIds: new Set(),
+    })
+    if (!reference) throw new TypeError("Expected custom chat reference")
+    const error = await createCustomProviderChatCompletions(reference, {
+      model: "custom-chat-model",
+      messages: [{ role: "user", content: "hello" }],
+    }).catch((caught: unknown) => caught)
+    expect(error).toBeInstanceOf(HTTPError)
+    expect((error as HTTPError).response).toBe(upstream)
+    expect(upstream.bodyUsed).toBe(false)
+
+    const output = JSON.stringify(errorSpy.mock.calls)
+    expect(output).not.toContain(statusMarker)
+
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Response(body.slice(), {
+          status: 400,
+          statusText: statusMarker,
+          headers: { "content-type": "application/problem+json" },
+        }),
+    )
     const response = await server.request("/v1/chat/completions", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -886,12 +917,96 @@ test("does not log custom-provider upstream status text or body", async () => {
       }),
     })
     expect(response.status).toBe(400)
-    const output = JSON.stringify(errorSpy.mock.calls)
-    expect(output).not.toContain(statusMarker)
-    expect(output).not.toContain(bodyMarker)
+    expect(response.headers.get("content-type")).toBe(
+      "application/problem+json",
+    )
+    expect(Array.from(new Uint8Array(await response.arrayBuffer()))).toEqual(
+      Array.from(body),
+    )
   } finally {
     errorSpy.mockRestore()
   }
+})
+
+test("preserves custom-provider embedding binary failures", async () => {
+  const body = Uint8Array.from([0, 255, 13, 10, 65])
+  const upstream = new Response(body.slice(), {
+    status: 422,
+    headers: { "content-type": "application/octet-stream" },
+  })
+  fetchMock.mockImplementationOnce(() => upstream)
+  const reference = resolveCustomProviderModel({
+    model: "qwen3-embedding-8b",
+    kind: "embedding",
+    copilotModelIds: new Set(),
+  })
+  if (!reference) throw new TypeError("Expected custom embedding reference")
+
+  const error = await createCustomProviderEmbeddings(reference, {
+    model: "qwen3-embedding-8b",
+    input: "hello",
+  }).catch((caught: unknown) => caught)
+  expect(error).toBeInstanceOf(HTTPError)
+  expect((error as HTTPError).response).toBe(upstream)
+  expect(upstream.bodyUsed).toBe(false)
+
+  fetchMock.mockImplementationOnce(
+    () =>
+      new Response(body.slice(), {
+        status: 422,
+        headers: { "content-type": "application/octet-stream" },
+      }),
+  )
+  const response = await server.request("/v1/embeddings", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: "qwen3-embedding-8b", input: "hello" }),
+  })
+  expect(response.status).toBe(422)
+  expect(response.headers.get("content-type")).toBe("application/octet-stream")
+  expect(Array.from(new Uint8Array(await response.arrayBuffer()))).toEqual(
+    Array.from(body),
+  )
+})
+
+test("keeps future-named custom SSE data after comments and unknown fields", async () => {
+  const chunk = {
+    id: "chunk_future",
+    object: "chat.completion.chunk",
+    created: 1,
+    model: "provider-model",
+    choices: [
+      {
+        index: 0,
+        delta: { role: "assistant", content: "future" },
+        finish_reason: null,
+      },
+    ],
+  }
+  fetchMock.mockImplementationOnce(
+    () =>
+      new Response(
+        `: keepalive\nx-future: ignored\n\nevent: provider.future\ndata: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`,
+        { headers: { "content-type": "text/event-stream" } },
+      ),
+  )
+
+  const response = await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "custom-chat-model",
+      messages: [{ role: "user", content: "hello" }],
+      stream: true,
+    }),
+  })
+  const text = await response.text()
+
+  expect(response.status).toBe(200)
+  expect(text).toContain("event: provider.future")
+  expect(text).toContain('"id":"chunk_future"')
+  expect(text).toContain('"model":"custom-chat-model"')
+  expect(text).toContain("data: [DONE]")
 })
 
 test("missing custom provider API key returns a clear error", async () => {

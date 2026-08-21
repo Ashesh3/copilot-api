@@ -746,19 +746,20 @@ test("tokenless model-session creation and Auto remain ordinary affinity-selecte
   ])
 })
 
-test("returns safe metadata and redacts control-plane error secrets", async () => {
+test("preserves control-plane error bytes and approved response metadata", async () => {
   const errorSpy = spyOn(consola, "error")
+  const body = new TextEncoder().encode(
+    '{"error":{"message":"session-secret private upstream body"}}\r\n  ',
+  )
   queuedResponses.push(
-    Response.json(
-      { error: { message: "session-secret private upstream body" } },
-      {
-        status: 400,
-        headers: {
-          "x-github-request-id": "safe-request-id",
-          "x-private-upstream": "private-metadata",
-        },
+    new Response(body.slice(), {
+      status: 400,
+      headers: {
+        "content-type": "application/problem+json",
+        "x-github-request-id": "safe-request-id",
+        "x-private-upstream": "private-metadata",
       },
-    ),
+    }),
   )
   let response: Response
   try {
@@ -770,10 +771,11 @@ test("returns safe metadata and redacts control-plane error secrets", async () =
     errorSpy.mockRestore()
   }
 
-  const body = await response.text()
   expect(response.status).toBe(400)
-  expect(body).not.toContain("session-secret")
-  expect(body).not.toContain("private upstream body")
+  expect(response.headers.get("content-type")).toBe("application/problem+json")
+  expect(Array.from(new Uint8Array(await response.arrayBuffer()))).toEqual(
+    Array.from(body),
+  )
   expect(response.headers.get("x-github-request-id")).toBe("safe-request-id")
   expect(response.headers.get("x-private-upstream")).toBeNull()
   expect(JSON.stringify(errorSpy.mock.calls)).not.toContain("session-secret")

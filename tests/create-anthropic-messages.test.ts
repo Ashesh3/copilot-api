@@ -9,15 +9,18 @@ import {
 } from "bun:test"
 import consola from "consola"
 
+import { HTTPError } from "../src/lib/error"
 import { state } from "../src/lib/state"
 import {
   asAnthropicUnknownRole,
   type AnthropicMessagesPayload,
 } from "../src/routes/messages/anthropic-types"
+import { server } from "../src/server"
 import { COMPACTION_PAYLOAD_MAX_BYTES } from "../src/services/copilot/compaction-payload"
 import { createAnthropicMessages } from "../src/services/copilot/create-anthropic-messages"
 
 const originalFetch = globalThis.fetch
+const originalModels = state.models
 let capturedBody: unknown
 let capturedHeaders: Headers | undefined
 const capturedHeaderAttempts: Array<Headers> = []
@@ -54,6 +57,7 @@ beforeAll(() => {
 })
 
 afterAll(() => {
+  state.models = originalModels
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
 })
 
@@ -218,6 +222,65 @@ test("does not log native Messages upstream status text or body", async () => {
   } finally {
     errorSpy.mockRestore()
   }
+})
+
+test("preserves native Messages failure identity and exact route bytes", async () => {
+  const body = new TextEncoder().encode('{"type":"future_error"}\r\n  ')
+  const createUpstream = () =>
+    new Response(body.slice(), {
+      status: 418,
+      headers: { "content-type": "application/problem+json" },
+    })
+  const upstream = createUpstream()
+  pendingResponse = Promise.resolve(upstream)
+  const payload = {
+    model: "claude-opus-4.8",
+    max_tokens: 16,
+    messages: [{ role: "user", content: "hello" }],
+  } as AnthropicMessagesPayload
+
+  const error = await createAnthropicMessages(payload).catch(
+    (caught: unknown) => caught,
+  )
+  expect(error).toBeInstanceOf(HTTPError)
+  expect((error as HTTPError).response).toBe(upstream)
+  expect(upstream.bodyUsed).toBe(false)
+
+  state.models = {
+    object: "list",
+    data: [
+      {
+        id: "claude-opus-4.8",
+        name: "Claude Opus",
+        object: "model",
+        preview: false,
+        vendor: "anthropic",
+        version: "1",
+        model_picker_enabled: true,
+        supported_endpoints: ["/v1/messages"],
+        capabilities: {
+          family: "claude",
+          limits: { max_output_tokens: 1024 },
+          object: "model_capabilities",
+          supports: {},
+          tokenizer: "cl100k_base",
+          type: "chat",
+        },
+      },
+    ],
+  }
+  pendingResponse = Promise.resolve(createUpstream())
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+  expect(response.status).toBe(418)
+  expect(response.headers.get("content-type")).toBe("application/problem+json")
+  expect(Array.from(new Uint8Array(await response.arrayBuffer()))).toEqual(
+    Array.from(body),
+  )
+  state.models = originalModels
 })
 
 test("preserves controls already validated by the Responses bridge", async () => {
