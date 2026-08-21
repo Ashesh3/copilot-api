@@ -178,7 +178,7 @@ beforeEach(() => {
   setModelSettingsForTest([])
 })
 
-test("rejects unsigned thinking before sending a Responses payload", async () => {
+test("degrades unsigned thinking into Responses text while preserving history", async () => {
   const response = await server.request("/v1/messages", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -196,15 +196,10 @@ test("rejects unsigned thinking before sending a Responses payload", async () =>
     }),
   })
 
-  expect(response.status).toBe(400)
-  expect(await response.json()).toMatchObject({
-    type: "error",
-    error: {
-      type: "invalid_request_error",
-      message: "The Copilot Messages request was rejected.",
-    },
-  })
-  expect(fetchMock).not.toHaveBeenCalled()
+  expect(response.status).toBe(200)
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+  expect(JSON.stringify(lastResponsesPayload)).toContain("unsigned history")
+  expect(JSON.stringify(lastResponsesPayload)).toContain("continue")
 })
 
 test("preserves output_config.format on the Anthropic responses path", async () => {

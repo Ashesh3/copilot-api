@@ -5,6 +5,7 @@ import {
   fetchUrlAsDataUri,
   isImageMediaType,
   isPdfMediaType,
+  isSafeExternalHttpUrl,
 } from "~/lib/attachments"
 
 import {
@@ -257,6 +258,12 @@ async function normalizeUrlDocument(
   url: string,
   signal?: AbortSignal,
 ): Promise<Array<NormalizableBlock>> {
+  if (!isSafeExternalHttpUrl(url)) {
+    return [
+      omittedDocumentNote(block, "the URL is unavailable for proxy recovery"),
+    ]
+  }
+
   const inlined = await fetchUrlAsDataUri(url, { expectPdf: true, signal })
 
   if (inlined && isPdfMediaType(inlined.mediaType)) {
