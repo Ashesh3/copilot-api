@@ -18,7 +18,6 @@ import { setModelRedirectsForTest } from "../src/lib/model-redirect"
 import { setModelSettingsForTest } from "../src/lib/model-settings"
 import { setSsePreflushDeadlineForTest } from "../src/lib/sse-lifecycle"
 import { state } from "../src/lib/state"
-import { trackMessageDelta } from "../src/routes/messages/native-handler"
 import { emitAnthropicStreamError } from "../src/routes/messages/stream-translation"
 import { server } from "../src/server"
 
@@ -29,8 +28,12 @@ let delayedStreamController:
 let delayedUpstreamAborted = false
 let lastUpstreamPath: string | undefined
 let streamMode:
-  | "finish-then-invalid"
+  | "chat-eof"
+  | "chat-received-error"
   | "native-late-http-error"
+  | "native-open-error-throw"
+  | "native-open-eof"
+  | "native-open-success"
   | "immediate"
   | "native-metadata"
   | "stall-body"
@@ -105,6 +108,131 @@ function createImmediateStream(): Response {
   )
 }
 
+function createChatEofStream(): Response {
+  const contentChunk = {
+    id: "chatcmpl-eof",
+    object: "chat.completion.chunk",
+    created: 1,
+    model: "gpt-4o",
+    choices: [
+      {
+        index: 0,
+        delta: { role: "assistant", content: "partial" },
+        finish_reason: null,
+        logprobs: null,
+      },
+    ],
+  }
+  return new Response(`data: ${JSON.stringify(contentChunk)}\n\n`, {
+    headers: { "content-type": "text/event-stream" },
+  })
+}
+
+function createChatReceivedErrorStream(): Response {
+  const contentChunk = {
+    id: "chatcmpl-received-error",
+    object: "chat.completion.chunk",
+    created: 1,
+    model: "gpt-4o",
+    choices: [
+      {
+        index: 0,
+        delta: { role: "assistant", content: "partial" },
+        finish_reason: null,
+        logprobs: null,
+      },
+    ],
+  }
+  return new Response(
+    `data: ${JSON.stringify(contentChunk)}\n\ndata: ${JSON.stringify({
+      error: { message: "chat received private marker" },
+    })}\n\ndata: {invalid-json\n\n`,
+    { headers: { "content-type": "text/event-stream" } },
+  )
+}
+
+function createNativeOpenStream(options: {
+  terminal: "eof" | "error-throw" | "success"
+}): Response {
+  const frames = [
+    {
+      event: "message_start",
+      data: {
+        type: "message_start",
+        message: {
+          id: "msg_open",
+          type: "message",
+          role: "assistant",
+          model: "claude-current",
+          content: [],
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 0 },
+        },
+      },
+    },
+    {
+      event: "content_block_start",
+      data: {
+        type: "content_block_start",
+        index: 3,
+        content_block: { type: "future_block", future: true },
+      },
+    },
+    {
+      event: "content_block_delta",
+      data: {
+        type: "content_block_delta",
+        index: 3,
+        delta: { type: "future_delta", future: "kept" },
+      },
+    },
+  ]
+  const prefix = frames
+    .map(
+      (frame) =>
+        `event: ${frame.event}\ndata: ${JSON.stringify(frame.data)}\n\n`,
+    )
+    .join("")
+  if (options.terminal === "eof") {
+    return new Response(prefix, {
+      headers: { "content-type": "text/event-stream" },
+    })
+  }
+  if (options.terminal === "success") {
+    return new Response(
+      `${prefix}event: message_delta\ndata: ${JSON.stringify({
+        type: "message_delta",
+        delta: { stop_reason: "end_turn", stop_sequence: null },
+        usage: { output_tokens: 1 },
+      })}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n`,
+      { headers: { "content-type": "text/event-stream" } },
+    )
+  }
+  const encoder = new TextEncoder()
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(prefix))
+        controller.enqueue(
+          encoder.encode(
+            `event: error\ndata: ${JSON.stringify({
+              type: "error",
+              error: { type: "api_error", message: "received-safe-error" },
+            })}\n\n`,
+          ),
+        )
+        setTimeout(
+          () =>
+            controller.error(new Error("iterator throw after received error")),
+          0,
+        )
+      },
+    }),
+    { headers: { "content-type": "text/event-stream" } },
+  )
+}
+
 function createNativeMetadataStream(): Response {
   const messageStart = {
     type: "message_start",
@@ -143,27 +271,6 @@ function createNativeMetadataStream(): Response {
       "data: [DONE]",
       "",
     ].join("\n\n"),
-    { headers: { "content-type": "text/event-stream" } },
-  )
-}
-
-function createFinishThenInvalidStream(): Response {
-  const finishChunk = {
-    id: "chatcmpl-finish-error",
-    object: "chat.completion.chunk",
-    created: 1,
-    model: "gpt-4o",
-    choices: [
-      {
-        index: 0,
-        delta: { role: "assistant" },
-        finish_reason: "stop",
-        logprobs: null,
-      },
-    ],
-  }
-  return new Response(
-    `data: ${JSON.stringify(finishChunk)}\n\ndata: {invalid-json\n\n`,
     { headers: { "content-type": "text/event-stream" } },
   )
 }
@@ -208,10 +315,20 @@ const fetchMock = mock((_url: string | URL | Request, init?: RequestInit) => {
     })
   }
   if (streamMode === "immediate") return createImmediateStream()
-  if (streamMode === "finish-then-invalid") {
-    return createFinishThenInvalidStream()
+  if (streamMode === "chat-eof") return createChatEofStream()
+  if (streamMode === "chat-received-error") {
+    return createChatReceivedErrorStream()
   }
   if (streamMode === "native-metadata") return createNativeMetadataStream()
+  if (streamMode === "native-open-eof") {
+    return createNativeOpenStream({ terminal: "eof" })
+  }
+  if (streamMode === "native-open-error-throw") {
+    return createNativeOpenStream({ terminal: "error-throw" })
+  }
+  if (streamMode === "native-open-success") {
+    return createNativeOpenStream({ terminal: "success" })
+  }
   if (streamMode === "native-late-http-error") {
     const encoder = new TextEncoder()
     return new Response(
@@ -396,18 +513,87 @@ test("keeps the Anthropic event order unchanged when the first event is immediat
   ])
 })
 
-test("does not emit a successful terminal pair when the upstream stream errors", async () => {
-  streamMode = "finish-then-invalid"
+test("closes Chat text and emits one error on EOF without finish", async () => {
+  streamMode = "chat-eof"
   const response = await server.request("/v1/messages", createMessagesRequest())
   const body = await response.text()
-  const eventTypes = Array.from(
-    body.matchAll(/^event: (.+)$/gm),
-    (match) => match[1],
-  )
+  expect(
+    Array.from(body.matchAll(/^event: (.+)$/gm), (match) => match[1]),
+  ).toEqual([
+    "message_start",
+    "content_block_start",
+    "content_block_delta",
+    "content_block_stop",
+    "error",
+  ])
+})
 
-  expect(eventTypes).toContain("error")
-  expect(eventTypes).not.toContain("message_delta")
-  expect(eventTypes).not.toContain("message_stop")
+test("preserves one Chat received error and ignores later malformed data", async () => {
+  streamMode = "chat-received-error"
+  const response = await server.request("/v1/messages", createMessagesRequest())
+  const body = await response.text()
+  expect(
+    Array.from(body.matchAll(/^event: (.+)$/gm), (match) => match[1]),
+  ).toEqual([
+    "message_start",
+    "content_block_start",
+    "content_block_delta",
+    "content_block_stop",
+    "error",
+  ])
+  expect(body).toContain("Upstream Chat stream failed.")
+  expect(body).not.toContain("chat received private marker")
+})
+
+test.each([
+  ["native-open-eof", "The Copilot Messages request failed."],
+  ["native-open-error-throw", "received-safe-error"],
+] as const)(
+  "closes native blocks before one error for %s",
+  async (mode, message) => {
+    streamMode = mode
+    state.models = nativeMessagesModels
+    const response = await server.request(
+      "/v1/messages",
+      createNativeMessagesRequest(),
+    )
+    const body = await response.text()
+    const payloads = Array.from(
+      body.matchAll(/^data: (\{.*\})$/gm),
+      (match) => JSON.parse(match[1]) as Record<string, unknown>,
+    )
+    expect(payloads.map((payload) => payload.type)).toEqual([
+      "message_start",
+      "content_block_start",
+      "content_block_delta",
+      "content_block_stop",
+      "error",
+    ])
+    expect(payloads[1]).toMatchObject({
+      content_block: { type: "future_block", future: true },
+    })
+    expect(payloads.at(-1)).toMatchObject({ error: { message } })
+  },
+)
+
+test("closes a native open block before the successful message_stop", async () => {
+  streamMode = "native-open-success"
+  state.models = nativeMessagesModels
+  const response = await server.request(
+    "/v1/messages",
+    createNativeMessagesRequest(),
+  )
+  const body = await response.text()
+  expect(
+    Array.from(body.matchAll(/^event: (.+)$/gm), (match) => match[1]),
+  ).toEqual([
+    "message_start",
+    "content_block_start",
+    "content_block_delta",
+    "message_delta",
+    "content_block_stop",
+    "message_stop",
+  ])
 })
 
 test.each([
@@ -420,7 +606,7 @@ test.each([
   [500, "api_error"],
 ] as const)(
   "mounted native Messages stream maps late HTTP %s to %s",
-  async (status, type) => {
+  async (status, _type) => {
     streamMode = "native-late-http-error"
     nativeLateErrorStatus = status
     state.models = nativeMessagesModels
@@ -449,7 +635,12 @@ test.each([
       "message_start",
       "error",
     ])
-    expect(payloads.at(-1)?.error?.type).toBe(type)
+    expect(payloads.at(-1)?.error?.type).toBe("api_error")
+    expect(payloads.at(-1)?.error).toMatchObject({
+      message: "{}",
+      status,
+      content_type: "application/json;charset=utf-8",
+    })
     expect(body).not.toContain("native stream private marker")
   },
 )
@@ -639,29 +830,4 @@ test("forwards native Messages metadata verbatim except for the requested model"
     { type: "message_stop" },
   ])
   expect(body).not.toContain("[DONE]")
-})
-
-test("tracks cumulative native cache usage without rebuilding the frame", () => {
-  const usage = { input: 5, output: 0, cached: 0, created: 0 }
-  const frame = JSON.stringify({
-    type: "message_delta",
-    delta: { stop_reason: "end_turn" },
-    usage: {
-      output_tokens: 3,
-      cache_read_input_tokens: 2,
-      cache_creation_input_tokens: 1,
-      cache_creation: { ephemeral_5m_input_tokens: 1 },
-    },
-    copilot_usage: { total_nano_aiu: 123 },
-  })
-
-  trackMessageDelta(frame, usage)
-
-  expect(usage).toEqual({ input: 5, output: 3, cached: 2, created: 1 })
-  expect(JSON.parse(frame)).toMatchObject({
-    usage: {
-      cache_creation: { ephemeral_5m_input_tokens: 1 },
-    },
-    copilot_usage: { total_nano_aiu: 123 },
-  })
 })

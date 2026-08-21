@@ -337,6 +337,57 @@ test("Anthropic messages request routes to custom chat provider by model id", as
   expect(requests[0]?.headers.get("authorization")).toBe("Bearer custom-key")
 })
 
+test("custom Messages stream closes partial text before one EOF error", async () => {
+  fetchMock.mockImplementationOnce((url: string, init?: RequestInit) => {
+    const body =
+      typeof init?.body === "string" ?
+        (JSON.parse(init.body) as Record<string, unknown>)
+      : {}
+    requests.push({ url, body, headers: new Headers(init?.headers) })
+    const chunk = {
+      id: "chatcmpl-custom-stream",
+      object: "chat.completion.chunk",
+      created: 1,
+      model: "glm-5.2",
+      choices: [
+        {
+          index: 0,
+          delta: { role: "assistant", content: "partial" },
+          finish_reason: null,
+          logprobs: null,
+        },
+      ],
+    }
+    return new Response(`data: ${JSON.stringify(chunk)}\n\n`, {
+      headers: { "content-type": "text/event-stream" },
+    })
+  })
+
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "glm-5.2",
+      messages: [{ role: "user", content: "hello" }],
+      max_tokens: 16,
+      stream: true,
+    }),
+  })
+  const body = await response.text()
+
+  expect(
+    Array.from(body.matchAll(/^event: (.+)$/gm), (match) => match[1]),
+  ).toEqual([
+    "message_start",
+    "content_block_start",
+    "content_block_delta",
+    "content_block_stop",
+    "error",
+  ])
+  expect(body).not.toContain("message_delta")
+  expect(body).not.toContain("message_stop")
+})
+
 test.each([
   {
     name: "root cache control",

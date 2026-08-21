@@ -8,7 +8,13 @@ import type { AnthropicRequestHeaderOptions } from "~/services/copilot/messages-
 import type { RetryBudget } from "~/services/copilot/transport-retry"
 
 import { getLastUsedAccountId } from "~/lib/account-router"
-import { HTTPError, isAbortError, LocalHTTPError } from "~/lib/error"
+import {
+  HTTPError,
+  inspectHttpError,
+  isAbortError,
+  isHTTPError,
+  LocalHTTPError,
+} from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
 import { setRequestContext } from "~/lib/request-logger"
 import {
@@ -40,11 +46,16 @@ import {
 } from "~/services/copilot/transport-retry"
 
 import {
+  type AnthropicErrorEvent,
   type AnthropicMessagesPayload,
   type AnthropicResponse,
+  type AnthropicStreamEventData,
   type AnthropicToolUseBlock,
 } from "./anthropic-types"
-import { emitAnthropicStreamError } from "./stream-translation"
+import {
+  createMessagesTerminalAdapter,
+  type MessagesTerminalAdapter,
+} from "./stream-lifecycle"
 import {
   isInvalidThinkingSignatureResponse,
   stripThinkingBlocks,
@@ -113,41 +124,167 @@ async function consumeNativeMessageStream(
   },
   response: AsyncIterable<AnthropicStreamChunk>,
   state: {
+    adapter: MessagesTerminalAdapter
+    lifecycle: NativeForwardingState
     requestedModel: string | undefined
     usage: NativeMessageUsage
   },
 ): Promise<string> {
-  const { requestedModel, usage } = state
   let responseText = ""
   for await (const chunk of withSseHeartbeat(response, stream)) {
-    if (!chunk.data) continue
-    // CAPI appends an OpenAI-style bare [DONE] sentinel after message_stop;
-    // strict Anthropic SDK parsers do not expect it.
-    if (!chunk.event && chunk.data.trim() === "[DONE]") continue
+    const result = await forwardNativeChunk(stream, chunk, state)
+    responseText += result.text
+    if (result.terminal) break
+  }
+  if (state.lifecycle.terminal === "succeeded") {
+    await state.adapter.succeed(async () => {
+      for (const event of closeNativeOpenBlocks(state.lifecycle)) {
+        await stream.writeSSE({
+          event: event.type,
+          data: JSON.stringify(event),
+        })
+      }
+      const pending = takePendingMessageStop(state.lifecycle)
+      if (pending) await stream.writeSSE(pending)
+    })
+  } else if (state.lifecycle.terminal === "open") {
+    await state.adapter.finishSource()
+  }
+  return responseText
+}
 
-    let data = chunk.data
-    switch (chunk.event) {
-      case "message_start": {
-        data = rewriteMessageStart(data, requestedModel, usage)
-        break
-      }
-      case "message_delta": {
-        trackMessageDelta(data, usage)
-        break
-      }
-      case "content_block_delta": {
-        responseText += extractTextDelta(data)
-        break
-      }
-      // No default
+async function forwardNativeChunk(
+  stream: Parameters<typeof consumeNativeMessageStream>[0],
+  chunk: AnthropicStreamChunk,
+  state: Parameters<typeof consumeNativeMessageStream>[2],
+): Promise<{ terminal: boolean; text: string }> {
+  if (!chunk.data || (!chunk.event && chunk.data.trim() === "[DONE]")) {
+    return { terminal: false, text: "" }
+  }
+  let data = chunk.data
+  const parsed = parseNativeEvent(data)
+  if (parsed === null) throw new SyntaxError("Malformed native Messages event")
+  switch (chunk.event) {
+    case "message_start": {
+      data = rewriteMessageStart(data, state.requestedModel, state.usage)
+      break
     }
-
+    case "message_delta": {
+      trackMessageDelta(data, state.usage)
+      break
+    }
+    // No default
+  }
+  const eventType = chunk.event ?? parsed.type
+  const terminal = await updateNativeLifecycle(state, eventType, parsed)
+  if (!terminal) {
     await stream.writeSSE({
       ...(chunk.event ? { event: chunk.event } : {}),
       data,
     })
+  } else if (eventType === "message_stop") {
+    setPendingMessageStop(state.lifecycle, chunk.event, data)
   }
-  return responseText
+  return {
+    terminal,
+    text: eventType === "content_block_delta" ? extractTextDelta(data) : "",
+  }
+}
+
+async function updateNativeLifecycle(
+  state: Parameters<typeof consumeNativeMessageStream>[2],
+  eventType: unknown,
+  parsed: Record<string, unknown>,
+): Promise<boolean> {
+  switch (eventType) {
+    case "content_block_start": {
+      const index = readNativeBlockIndex(parsed)
+      if (index !== undefined) state.lifecycle.openBlockIndices.add(index)
+      return false
+    }
+    case "content_block_stop": {
+      const index = readNativeBlockIndex(parsed)
+      if (index !== undefined) state.lifecycle.openBlockIndices.delete(index)
+      return false
+    }
+    case "message_start": {
+      state.lifecycle.messageStarted = true
+      return false
+    }
+    case "error": {
+      await state.adapter.failReceived(parsed as AnthropicErrorEvent)
+      // The adapter has committed the only failure terminal before this mark.
+      // eslint-disable-next-line require-atomic-updates
+      state.lifecycle.terminal = "failed"
+      return true
+    }
+    case "message_stop": {
+      state.lifecycle.terminal = "succeeded"
+      return true
+    }
+    default: {
+      return false
+    }
+  }
+}
+
+type NativeForwardingState = {
+  terminal: "open" | "succeeded" | "failed"
+  openBlockIndices: Set<number>
+  messageStarted: boolean
+  pendingMessageStop?: { data: string; event?: string }
+}
+
+function setPendingMessageStop(
+  state: NativeForwardingState,
+  event: string | undefined,
+  data: string,
+): void {
+  state.pendingMessageStop = { ...(event ? { event } : {}), data }
+}
+
+function takePendingMessageStop(
+  state: NativeForwardingState,
+): NativeForwardingState["pendingMessageStop"] {
+  const pending = state.pendingMessageStop
+  state.pendingMessageStop = undefined
+  return pending
+}
+
+function closeNativeOpenBlocks(
+  state: NativeForwardingState,
+): Array<AnthropicStreamEventData> {
+  const events = Array.from(state.openBlockIndices)
+    .sort((left, right) => left - right)
+    .map(
+      (index): AnthropicStreamEventData => ({
+        type: "content_block_stop",
+        index,
+      }),
+    )
+  state.openBlockIndices.clear()
+  return events
+}
+
+function parseNativeEvent(data: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(data) as unknown
+    return (
+        typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ) ?
+        (parsed as Record<string, unknown>)
+      : null
+  } catch {
+    return null
+  }
+}
+
+function readNativeBlockIndex(
+  parsed: Record<string, unknown> | null,
+): number | undefined {
+  return typeof parsed?.index === "number" && Number.isInteger(parsed.index) ?
+      parsed.index
+    : undefined
 }
 
 /**
@@ -252,6 +389,19 @@ async function streamNativeMessages(
           stream.onAbort(() => downstreamAbort.abort())
           const usage = { input: 0, output: 0, cached: 0, created: 0 }
           let responseText = ""
+          const lifecycle: NativeForwardingState = {
+            terminal: "open",
+            openBlockIndices: new Set(),
+            messageStarted: false,
+          }
+          const adapter = createMessagesTerminalAdapter({
+            c,
+            stream,
+            closeOpenBlocks: () => closeNativeOpenBlocks(lifecycle),
+          })
+          stream.onAbort(() => {
+            adapter.abort()
+          })
 
           try {
             if (preflush.kind === "pending") {
@@ -271,28 +421,22 @@ async function streamNativeMessages(
             responseText = await consumeNativeMessageStream(
               stream,
               asAnthropicStream(response),
-              { requestedModel, usage },
+              { adapter, lifecycle, requestedModel, usage },
             )
           } catch (error) {
-            if (isAbortError(error)) return
-            // Headers are already committed, so this must travel in-band.
-            await emitAnthropicStreamError(stream, error)
-          } finally {
-            setRequestContext(c, {
-              inputTokens: usage.input + usage.cached + usage.created,
-              outputTokens: usage.output,
-            })
-            streamSpan.setAttribute(
-              "gen_ai.usage.input_tokens",
-              usage.input + usage.cached + usage.created,
-            )
-            streamSpan.setAttribute("gen_ai.usage.output_tokens", usage.output)
-            if (usage.cached > 0) {
-              streamSpan.setAttribute(
-                "gen_ai.usage.input_tokens.cached",
-                usage.cached,
-              )
+            if (isAbortError(error)) {
+              adapter.abort()
+              return
             }
+            await adapter.fail({
+              kind: "thrown",
+              error,
+              ...(isHTTPError(error) ?
+                { inspection: await inspectHttpError(error) }
+              : {}),
+            })
+          } finally {
+            recordNativeStreamUsage(c, streamSpan, usage)
             setSentryOutputMessages(streamSpan, responseText)
             finishSpan()
           }
@@ -303,6 +447,20 @@ async function streamNativeMessages(
       }
     },
   )
+}
+
+function recordNativeStreamUsage(
+  c: Context,
+  streamSpan: Sentry.Span,
+  usage: NativeMessageUsage,
+): void {
+  const inputTokens = usage.input + usage.cached + usage.created
+  setRequestContext(c, { inputTokens, outputTokens: usage.output })
+  streamSpan.setAttribute("gen_ai.usage.input_tokens", inputTokens)
+  streamSpan.setAttribute("gen_ai.usage.output_tokens", usage.output)
+  if (usage.cached > 0) {
+    streamSpan.setAttribute("gen_ai.usage.input_tokens.cached", usage.cached)
+  }
 }
 
 function prepareNativeTools(payload: AnthropicMessagesPayload): {
@@ -368,7 +526,31 @@ async function handleWithMcpWebSearch(
       if (!requestedStream) return c.json(result)
 
       return streamSSE(c, async (stream) => {
-        await emitAnthropicResponseAsStream(stream, result)
+        const adapter = createMessagesTerminalAdapter({
+          c,
+          stream,
+          closeOpenBlocks: () => [],
+        })
+        stream.onAbort(() => {
+          adapter.abort()
+        })
+        try {
+          await adapter.succeed(async () => {
+            await emitAnthropicResponseAsStream(stream, result)
+          })
+        } catch (error) {
+          if (isAbortError(error)) {
+            adapter.abort()
+            return
+          }
+          await adapter.fail({
+            kind: "thrown",
+            error,
+            ...(isHTTPError(error) ?
+              { inspection: await inspectHttpError(error) }
+            : {}),
+          })
+        }
       })
     },
   )

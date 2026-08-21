@@ -20,7 +20,9 @@ function isToolBlockOpen(state: AnthropicStreamState): boolean {
   }
   // Check if the current block index corresponds to any known tool call
   return Object.values(state.toolCalls).some(
-    (tc) => tc.anthropicBlockIndex === state.contentBlockIndex,
+    (tc) =>
+      tc.anthropicBlockIndex === state.contentBlockIndex
+      && state.startedToolCallIndices?.has(tc.anthropicBlockIndex),
   )
 }
 
@@ -64,6 +66,21 @@ function closeThinkingBlockIfOpen(
     state.contentBlockIndex++
   }
   state.contentBlockOpen = false
+}
+
+export function closeAnthropicOpenBlocks(
+  state: AnthropicStreamState,
+): Array<AnthropicStreamEventData> {
+  const events: Array<AnthropicStreamEventData> = []
+  closeThinkingBlockIfOpen(state, events)
+  if (state.contentBlockOpen) {
+    events.push({
+      type: "content_block_stop",
+      index: state.contentBlockIndex,
+    })
+    state.contentBlockOpen = false
+  }
+  return events
 }
 
 export function extractCopilotChunkMetadata(chunk: ChatCompletionChunk):
@@ -131,20 +148,15 @@ function createMessageDeltaEvents(
 export function createFallbackMessageDeltaEvents(
   state: AnthropicStreamState,
 ): Array<AnthropicStreamEventData> {
-  // If message_delta was already sent, return empty
-  if (state.messageDeltaSent) {
+  if (
+    (state.terminal !== undefined && state.terminal !== "open")
+    || state.messageDeltaSent
+    || !state.pendingFinishReason
+  ) {
     return []
   }
 
-  const events: Array<AnthropicStreamEventData> = []
-
-  if (isToolBlockOpen(state)) {
-    events.push({
-      type: "content_block_stop",
-      index: state.contentBlockIndex,
-    })
-    state.contentBlockOpen = false
-  }
+  const events = closeAnthropicOpenBlocks(state)
 
   const usage = state.pendingUsage ?? {
     prompt_tokens: 0,
@@ -152,31 +164,15 @@ export function createFallbackMessageDeltaEvents(
     cached_tokens: 0,
   }
 
-  // If we have a pending finish_reason, send message_delta with whatever usage we have
-  if (state.pendingFinishReason) {
-    events.push(
-      ...createMessageDeltaEvents(
-        state.pendingFinishReason,
-        usage,
-        state.pendingCopilotUsage,
-      ),
-    )
-    state.messageDeltaSent = true
-    return events
-  }
-
-  if (Object.keys(state.toolCalls).length > 0) {
-    events.push(
-      ...createMessageDeltaEvents(
-        "tool_calls",
-        usage,
-        state.pendingCopilotUsage,
-      ),
-    )
-    state.messageDeltaSent = true
-    return events
-  }
-
+  events.push(
+    ...createMessageDeltaEvents(
+      state.pendingFinishReason,
+      usage,
+      state.pendingCopilotUsage,
+    ),
+  )
+  state.messageDeltaSent = true
+  state.terminal = "succeeded"
   return events
 }
 
@@ -328,8 +324,20 @@ export function translateChunkToAnthropicEvents(
   if (delta.tool_calls) {
     for (const toolCall of delta.tool_calls) {
       const normalizedToolIndex = normalizeToolCallIndex(toolCall.index, state)
+      const toolCallInfo = (state.toolCalls[normalizedToolIndex] ??= {
+        id: "",
+        name: "",
+        anthropicBlockIndex: state.contentBlockIndex,
+      })
+      if (toolCall.id) toolCallInfo.id += toolCall.id
+      if (toolCall.function?.name) toolCallInfo.name += toolCall.function.name
 
-      if (toolCall.id && toolCall.function?.name) {
+      state.startedToolCallIndices ??= new Set()
+      if (
+        !state.startedToolCallIndices.has(toolCallInfo.anthropicBlockIndex)
+        && toolCallInfo.id
+        && toolCallInfo.name
+      ) {
         // New tool call starting.
         closeThinkingBlockIfOpen(state, events)
 
@@ -343,40 +351,34 @@ export function translateChunkToAnthropicEvents(
           state.contentBlockOpen = false
         }
 
-        const anthropicBlockIndex = state.contentBlockIndex
-        state.toolCalls[normalizedToolIndex] = {
-          id: toolCall.id,
-          name: toolCall.function.name,
-          anthropicBlockIndex,
-        }
+        toolCallInfo.anthropicBlockIndex = state.contentBlockIndex
+        state.startedToolCallIndices.add(toolCallInfo.anthropicBlockIndex)
 
         events.push({
           type: "content_block_start",
-          index: anthropicBlockIndex,
+          index: toolCallInfo.anthropicBlockIndex,
           content_block: {
             type: "tool_use",
-            id: toolCall.id,
-            name: toolCall.function.name,
+            id: toolCallInfo.id,
+            name: toolCallInfo.name,
             input: {},
           },
         })
         state.contentBlockOpen = true
       }
 
-      if (toolCall.function?.arguments) {
-        const toolCallInfo = state.toolCalls[normalizedToolIndex]
-        // Tool call can still be empty
-        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-        if (toolCallInfo) {
-          events.push({
-            type: "content_block_delta",
-            index: toolCallInfo.anthropicBlockIndex,
-            delta: {
-              type: "input_json_delta",
-              partial_json: toolCall.function.arguments,
-            },
-          })
-        }
+      if (
+        toolCall.function?.arguments
+        && state.startedToolCallIndices.has(toolCallInfo.anthropicBlockIndex)
+      ) {
+        events.push({
+          type: "content_block_delta",
+          index: toolCallInfo.anthropicBlockIndex,
+          delta: {
+            type: "input_json_delta",
+            partial_json: toolCall.function.arguments,
+          },
+        })
       }
     }
   }

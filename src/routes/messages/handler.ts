@@ -36,7 +36,9 @@ import {
 import {
   createEndpointTranslationError,
   HTTPError,
+  inspectHttpError,
   isAbortError,
+  isHTTPError,
   LocalHTTPError,
 } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
@@ -78,9 +80,9 @@ import { tokenPool } from "~/lib/token-pool"
 import { getTokenCount } from "~/lib/tokenizer"
 import { emitAnthropicToolSpans } from "~/lib/tool-spans"
 import {
-  buildErrorEvent,
+  closeResponsesOpenBlocks,
+  createResponsesNormalTerminalEvents,
   createResponsesStreamState,
-  SAFE_RESPONSES_STREAM_ERROR_MESSAGE,
   translateResponsesStreamEvent,
 } from "~/routes/messages/responses-stream-translation"
 import {
@@ -132,8 +134,13 @@ import {
   translateToOpenAI,
 } from "./non-stream-translation"
 import {
+  createMessagesTerminalAdapter,
+  type MessagesTerminalAdapter,
+  writeAnthropicEvents,
+} from "./stream-lifecycle"
+import {
+  closeAnthropicOpenBlocks,
   createFallbackMessageDeltaEvents,
-  emitAnthropicStreamError,
   translateChunkToAnthropicEvents,
 } from "./stream-translation"
 import { parseSubagentMarkerFromFirstUser } from "./subagent-marker"
@@ -577,18 +584,26 @@ function setChatCompletionSpanResult(
 }
 
 const streamChatCompletionsWithWebSearch = async (
-  stream: {
-    writeSSE: (data: { event: string; data: string }) => Promise<void>
-  },
+  target: { stream: SSEStream; owner: MessagesStreamOwner },
   response: AsyncIterable<{ data?: string }>,
   requestedModel?: string,
 ): Promise<BufferedChatCompletionsResult> => {
+  const { stream, owner } = target
   const bufferedChunks: Array<ChatCompletionChunk> = []
 
   for await (const rawEvent of response) {
     if (rawEvent.data === "[DONE]") break
     if (!rawEvent.data) continue
-    bufferedChunks.push(JSON.parse(rawEvent.data) as ChatCompletionChunk)
+    const parsedValue = JSON.parse(rawEvent.data) as unknown
+    if (isReceivedChatStreamError(parsedValue)) {
+      await owner.adapter.failReceived(createReceivedChatMessagesError())
+      break
+    }
+    bufferedChunks.push(parsedValue as ChatCompletionChunk)
+  }
+
+  if (owner.adapter.lifecycle.state !== "open") {
+    return { hadWebSearch: false, initialResponse: null }
   }
 
   const initialResponse = reconstructFromChunks(bufferedChunks)
@@ -599,11 +614,13 @@ const streamChatCompletionsWithWebSearch = async (
 
   // No web_search calls — replay buffered chunks
   const streamState: AnthropicStreamState = {
+    terminal: "open",
     messageStartSent: false,
     contentBlockIndex: 0,
     contentBlockOpen: false,
     toolCalls: {},
   }
+  owner.setCloseOpenBlocks(() => closeAnthropicOpenBlocks(streamState))
 
   for (const chunk of bufferedChunks) {
     const events = translateChunkToAnthropicEvents(
@@ -619,20 +636,20 @@ const streamChatCompletionsWithWebSearch = async (
     }
   }
 
-  for (const event of createFallbackMessageDeltaEvents(streamState)) {
-    await stream.writeSSE({
-      event: event.type,
-      data: JSON.stringify(event),
+  await (streamState.pendingFinishReason ?
+    owner.adapter.succeed(async () => {
+      await writeAnthropicEvents(
+        stream,
+        createFallbackMessageDeltaEvents(streamState),
+      )
     })
-  }
+  : owner.adapter.finishSource())
 
   return { hadWebSearch: false, initialResponse }
 }
 
 const streamChatCompletionsDirect = async (
-  stream: {
-    writeSSE: (data: { event: string; data: string }) => Promise<void>
-  },
+  target: { stream: SSEStream; owner: MessagesStreamOwner },
   response: AsyncIterable<{ data?: string }>,
   requestedModel?: string,
 ): Promise<{
@@ -641,12 +658,15 @@ const streamChatCompletionsDirect = async (
   cachedTokens: number
   responseText: string
 }> => {
+  const { stream, owner } = target
   const streamState: AnthropicStreamState = {
+    terminal: "open",
     messageStartSent: false,
     contentBlockIndex: 0,
     contentBlockOpen: false,
     toolCalls: {},
   }
+  owner.setCloseOpenBlocks(() => closeAnthropicOpenBlocks(streamState))
 
   let streamInputTokens = 0
   let streamOutputTokens = 0
@@ -656,8 +676,12 @@ const streamChatCompletionsDirect = async (
   for await (const rawEvent of response) {
     if (rawEvent.data === "[DONE]") break
     if (!rawEvent.data) continue
-
-    const chunk = JSON.parse(rawEvent.data) as ChatCompletionChunk
+    const parsedValue = JSON.parse(rawEvent.data) as unknown
+    if (isReceivedChatStreamError(parsedValue)) {
+      await owner.adapter.failReceived(createReceivedChatMessagesError())
+      break
+    }
+    const chunk = parsedValue as ChatCompletionChunk
 
     if (chunk.usage) {
       streamInputTokens = chunk.usage.prompt_tokens
@@ -681,12 +705,14 @@ const streamChatCompletionsDirect = async (
     }
   }
 
-  for (const event of createFallbackMessageDeltaEvents(streamState)) {
-    await stream.writeSSE({
-      event: event.type,
-      data: JSON.stringify(event),
+  await (streamState.pendingFinishReason ?
+    owner.adapter.succeed(async () => {
+      await writeAnthropicEvents(
+        stream,
+        createFallbackMessageDeltaEvents(streamState),
+      )
     })
-  }
+  : owner.adapter.finishSource())
 
   return {
     inputTokens: streamInputTokens,
@@ -694,6 +720,24 @@ const streamChatCompletionsDirect = async (
     cachedTokens: streamCachedTokens,
     responseText: streamText,
   }
+}
+
+function createReceivedChatMessagesError() {
+  return {
+    type: "error" as const,
+    error: {
+      type: "api_error",
+      message: "Upstream Chat stream failed.",
+    },
+  }
+}
+
+function isReceivedChatStreamError(
+  value: unknown,
+): value is { error: unknown } {
+  return (
+    typeof value === "object" && value !== null && Object.hasOwn(value, "error")
+  )
 }
 
 const tryCountTokens = async (
@@ -1007,6 +1051,10 @@ const executeChatCompletions = async (
 
         return streamSSE(c, async (stream) => {
           stream.onAbort(() => downstreamAbort.abort())
+          const owner = createMessagesStreamOwner(c, stream)
+          stream.onAbort(() => {
+            owner.adapter.abort()
+          })
 
           try {
             if (preflush.kind === "pending") {
@@ -1030,7 +1078,7 @@ const executeChatCompletions = async (
 
             if (needsWebSearchBuffering) {
               const buffered = await streamChatCompletionsWithWebSearch(
-                stream,
+                { stream, owner },
                 withSseHeartbeat(
                   response as AsyncIterable<{ data?: string }>,
                   stream,
@@ -1060,13 +1108,15 @@ const executeChatCompletions = async (
                   resolved,
                   requestedModel,
                 )
-                await emitAnthropicResponseAsStream(stream, anthropicResponse)
+                await owner.adapter.succeed(async () => {
+                  await emitAnthropicResponseAsStream(stream, anthropicResponse)
+                })
               }
               return
             }
 
             const directResult = await streamChatCompletionsDirect(
-              stream,
+              { stream, owner },
               withSseHeartbeat(
                 response as AsyncIterable<{ data?: string }>,
                 stream,
@@ -1085,9 +1135,7 @@ const executeChatCompletions = async (
             setOptionalTokenDetails(streamSpan, directResult.cachedTokens)
             setSentryOutputMessages(streamSpan, directResult.responseText)
           } catch (error) {
-            if (isAbortError(error)) return
-            // Headers are already committed, so this must travel in-band.
-            await emitAnthropicStreamError(stream, error)
+            await failMessagesStream(owner.adapter, error)
           } finally {
             finishSpan()
           }
@@ -1210,7 +1258,17 @@ async function executeCustomProviderWebSearch(
 
   if (!requestedStream) return c.json(result)
   return streamSSE(c, async (stream) => {
-    await emitAnthropicResponseAsStream(stream, result)
+    const owner = createMessagesStreamOwner(c, stream)
+    stream.onAbort(() => {
+      owner.adapter.abort()
+    })
+    try {
+      await owner.adapter.succeed(async () => {
+        await emitAnthropicResponseAsStream(stream, result)
+      })
+    } catch (error) {
+      await failMessagesStream(owner.adapter, error)
+    }
   })
 }
 
@@ -1248,9 +1306,13 @@ async function handleCustomProviderChatCompletionStream(
         )
 
         return streamSSE(c, async (stream) => {
+          const owner = createMessagesStreamOwner(c, stream)
+          stream.onAbort(() => {
+            owner.adapter.abort()
+          })
           try {
             const directResult = await streamChatCompletionsDirect(
-              stream,
+              { stream, owner },
               withSseHeartbeat(
                 response as AsyncIterable<{ data?: string }>,
                 stream,
@@ -1273,9 +1335,7 @@ async function handleCustomProviderChatCompletionStream(
             setOptionalTokenDetails(streamSpan, directResult.cachedTokens)
             setSentryOutputMessages(streamSpan, directResult.responseText)
           } catch (error) {
-            if (isAbortError(error)) return
-            // Headers are already committed, so this must travel in-band.
-            await emitAnthropicStreamError(stream, error)
+            await failMessagesStream(owner.adapter, error)
           } finally {
             finishSpan()
           }
@@ -1289,30 +1349,69 @@ async function handleCustomProviderChatCompletionStream(
 }
 
 type SSEStream = {
-  writeSSE: (data: { event: string; data: string }) => Promise<void>
+  readonly aborted: boolean
+  readonly closed: boolean
+  writeSSE: (data: { event?: string; data: string }) => Promise<void>
+}
+
+type MessagesStreamOwner = {
+  adapter: MessagesTerminalAdapter
+  setCloseOpenBlocks(
+    closeOpenBlocks: () => Array<
+      import("./anthropic-types").AnthropicStreamEventData
+    >,
+  ): void
+}
+
+function createMessagesStreamOwner(
+  c: Context,
+  stream: SSEStream,
+): MessagesStreamOwner {
+  let closeOpenBlocks = EMPTY_MESSAGES_CLOSE
+  return {
+    adapter: createMessagesTerminalAdapter({
+      c,
+      stream,
+      closeOpenBlocks: () => closeOpenBlocks(),
+    }),
+    setCloseOpenBlocks(next) {
+      closeOpenBlocks = next
+    },
+  }
+}
+
+const EMPTY_MESSAGES_CLOSE = () =>
+  new Array<import("./anthropic-types").AnthropicStreamEventData>()
+
+async function failMessagesStream(
+  adapter: MessagesTerminalAdapter,
+  error: unknown,
+): Promise<void> {
+  if (isAbortError(error)) {
+    adapter.abort()
+    return
+  }
+  await adapter.fail({
+    kind: "thrown",
+    error,
+    ...(isHTTPError(error) ?
+      { inspection: await inspectHttpError(error) }
+    : {}),
+  })
 }
 
 type ResponsesStream = AsyncIterable<{ event?: string; data?: string }>
-
-const parseResponsesStreamError = (
-  parsed: ResponseStreamEvent,
-): string | null => {
-  if (parsed.type !== "error") return null
-  return SAFE_RESPONSES_STREAM_ERROR_MESSAGE
-}
 
 const writeResponsesEvents = async (
   stream: SSEStream,
   parsed: ResponseStreamEvent,
   streamState: ReturnType<typeof createResponsesStreamState>,
-): Promise<void> => {
-  const events = translateResponsesStreamEvent(parsed, streamState)
-  for (const event of events) {
-    await stream.writeSSE({
-      event: event.type,
-      data: JSON.stringify(event),
-    })
+): Promise<ReturnType<typeof translateResponsesStreamEvent>> => {
+  const result = translateResponsesStreamEvent(parsed, streamState)
+  if (result.kind === "events") {
+    await writeAnthropicEvents(stream, result.events)
   }
+  return result
 }
 
 const isWebSearchFunctionCall = (parsed: ResponseStreamEvent): boolean =>
@@ -1351,7 +1450,11 @@ const bufferResponsesStream = async (
     events.push(parsed)
 
     if (isWebSearchFunctionCall(parsed)) hasWebSearch = true
-    if (isResponseCompleted(parsed)) completedResult = parsed.response
+    if (parsed.type === "response.failed" || parsed.type === "error") break
+    if (isResponseCompleted(parsed)) {
+      completedResult = parsed.response
+      break
+    }
   }
 
   return { events, hasWebSearch, completedResult }
@@ -1359,43 +1462,37 @@ const bufferResponsesStream = async (
 
 const replayBufferedEvents = async (
   stream: SSEStream,
+  owner: MessagesStreamOwner,
   bufferedEvents: Array<ResponseStreamEvent>,
 ): Promise<void> => {
   const streamState = createResponsesStreamState()
-  let errorForwarded = false
+  owner.setCloseOpenBlocks(() => closeResponsesOpenBlocks(streamState))
 
   for (const parsed of bufferedEvents) {
-    const errorMsg = parseResponsesStreamError(parsed)
-    if (errorMsg) {
-      const errorEvent = buildErrorEvent(errorMsg)
-      await stream.writeSSE({
-        event: errorEvent.type,
-        data: JSON.stringify(errorEvent),
+    const result = await writeResponsesEvents(stream, parsed, streamState)
+    if (result.kind === "success") {
+      await owner.adapter.succeed(async () => {
+        await writeAnthropicEvents(
+          stream,
+          createResponsesNormalTerminalEvents(streamState, result.response),
+        )
       })
-      errorForwarded = true
-      continue
+      return
     }
-
-    await writeResponsesEvents(stream, parsed, streamState)
-    if (streamState.messageCompleted) break
+    if (result.kind === "failure") {
+      await owner.adapter.failReceived(result.error)
+      // The adapter has committed the only failure terminal before this mark.
+      // eslint-disable-next-line require-atomic-updates
+      streamState.terminal = "failed"
+      return
+    }
   }
-
-  if (!streamState.messageCompleted && !errorForwarded) {
-    logger.warn(
-      "Responses stream ended without completion; sending error event",
-    )
-    const errorEvent = buildErrorEvent(
-      "Responses stream ended without completion",
-    )
-    await stream.writeSSE({
-      event: errorEvent.type,
-      data: JSON.stringify(errorEvent),
-    })
-  }
+  await owner.adapter.finishSource()
 }
 
 const streamResponsesWithWebSearch = async (
   stream: SSEStream,
+  owner: MessagesStreamOwner,
   response: ResponsesStream,
 ): Promise<{
   hadWebSearch: boolean
@@ -1410,12 +1507,13 @@ const streamResponsesWithWebSearch = async (
     return { hadWebSearch: true, initialResult: completedResult }
   }
 
-  await replayBufferedEvents(stream, events)
+  await replayBufferedEvents(stream, owner, events)
   return { hadWebSearch: false, initialResult: completedResult }
 }
 
 const streamResponsesDirect = async (
   stream: SSEStream,
+  owner: MessagesStreamOwner,
   response: ResponsesStream,
 ): Promise<{
   inputTokens: number
@@ -1425,6 +1523,7 @@ const streamResponsesDirect = async (
   responseText: string
 }> => {
   const streamState = createResponsesStreamState()
+  owner.setCloseOpenBlocks(() => closeResponsesOpenBlocks(streamState))
   let streamInputTokens = 0
   let streamOutputTokens = 0
   let streamCachedTokens = 0
@@ -1439,16 +1538,6 @@ const streamResponsesDirect = async (
     if (!chunk.data) continue
 
     const parsed = JSON.parse(chunk.data) as ResponseStreamEvent
-    const errorMsg = parseResponsesStreamError(parsed)
-    if (errorMsg) {
-      const errorEvent = buildErrorEvent(errorMsg)
-      await stream.writeSSE({
-        event: errorEvent.type,
-        data: JSON.stringify(errorEvent),
-      })
-      continue
-    }
-
     // Capture usage from response.completed events
     if (isResponseCompleted(parsed) && parsed.response.usage) {
       streamInputTokens = parsed.response.usage.input_tokens
@@ -1460,22 +1549,26 @@ const streamResponsesDirect = async (
       responseText = parsed.response.output_text
     }
 
-    await writeResponsesEvents(stream, parsed, streamState)
-    if (streamState.messageCompleted) break
+    const result = await writeResponsesEvents(stream, parsed, streamState)
+    if (result.kind === "success") {
+      await owner.adapter.succeed(async () => {
+        await writeAnthropicEvents(
+          stream,
+          createResponsesNormalTerminalEvents(streamState, result.response),
+        )
+      })
+      break
+    }
+    if (result.kind === "failure") {
+      await owner.adapter.failReceived(result.error)
+      // The adapter has committed the only failure terminal before this mark.
+      // eslint-disable-next-line require-atomic-updates
+      streamState.terminal = "failed"
+      break
+    }
   }
 
-  if (!streamState.messageCompleted) {
-    logger.warn(
-      "Responses stream ended without completion; sending error event",
-    )
-    const errorEvent = buildErrorEvent(
-      "Responses stream ended without completion",
-    )
-    await stream.writeSSE({
-      event: errorEvent.type,
-      data: JSON.stringify(errorEvent),
-    })
-  }
+  if (streamState.terminal === "open") await owner.adapter.finishSource()
 
   return {
     inputTokens: streamInputTokens,
@@ -1601,10 +1694,15 @@ const executeResponsesApi = async (
           }
 
           return streamSSE(c, async (stream) => {
+            const owner = createMessagesStreamOwner(c, stream)
+            stream.onAbort(() => {
+              owner.adapter.abort()
+            })
             try {
               if (needsWebSearchBuffering) {
                 const buffered = await streamResponsesWithWebSearch(
                   stream,
+                  owner,
                   withSseHeartbeat(response as ResponsesStream, stream),
                 )
 
@@ -1659,13 +1757,19 @@ const executeResponsesApi = async (
                   const anthropicResponse =
                     translateResponsesResultToAnthropic(resolved)
                   if (requestedModel) anthropicResponse.model = requestedModel
-                  await emitAnthropicResponseAsStream(stream, anthropicResponse)
+                  await owner.adapter.succeed(async () => {
+                    await emitAnthropicResponseAsStream(
+                      stream,
+                      anthropicResponse,
+                    )
+                  })
                 }
                 return
               }
 
               const directUsage = await streamResponsesDirect(
                 stream,
+                owner,
                 withSseHeartbeat(response as ResponsesStream, stream),
               )
 
@@ -1684,9 +1788,7 @@ const executeResponsesApi = async (
               )
               setSentryOutputMessages(streamSpan, directUsage.responseText)
             } catch (error) {
-              if (isAbortError(error)) return
-              // Headers are already committed, so this must travel in-band.
-              await emitAnthropicStreamError(stream, error)
+              await failMessagesStream(owner.adapter, error)
             } finally {
               finishSpan()
             }

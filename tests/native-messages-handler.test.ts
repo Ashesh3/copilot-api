@@ -6,6 +6,7 @@ import { state } from "~/lib/state"
 import {
   handleWithNativeMessages,
   resolveNativeWebSearch,
+  trackMessageDelta,
 } from "~/routes/messages/native-handler"
 import { server } from "~/server"
 import { resetWebSearchSessionsForTest } from "~/services/copilot/mcp-web-search"
@@ -16,6 +17,27 @@ const nativeBodies: Array<Record<string, unknown>> = []
 let nativeAttempt = 0
 let repeatNativeSearch = false
 let searchInvocationCount = 0
+
+test("tracks cumulative native cache usage without rebuilding the frame", () => {
+  const usage = { input: 5, output: 0, cached: 0, created: 0 }
+  const frame = JSON.stringify({
+    type: "message_delta",
+    delta: { stop_reason: "end_turn" },
+    usage: {
+      output_tokens: 3,
+      cache_read_input_tokens: 2,
+      cache_creation_input_tokens: 1,
+      cache_creation: { ephemeral_5m_input_tokens: 1 },
+    },
+    copilot_usage: { total_nano_aiu: 123 },
+  })
+  trackMessageDelta(frame, usage)
+  expect(usage).toEqual({ input: 5, output: 3, cached: 2, created: 1 })
+  expect(JSON.parse(frame)).toMatchObject({
+    usage: { cache_creation: { ephemeral_5m_input_tokens: 1 } },
+    copilot_usage: { total_nano_aiu: 123 },
+  })
+})
 
 function jsonResponse(body: unknown): Response {
   return Response.json(body)

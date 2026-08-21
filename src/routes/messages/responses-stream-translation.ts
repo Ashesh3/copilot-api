@@ -1,11 +1,7 @@
 import {
-  type ResponseCompletedEvent,
   type ResponseCreatedEvent,
-  type ResponseErrorEvent,
-  type ResponseFailedEvent,
   type ResponseFunctionCallArgumentsDeltaEvent,
   type ResponseFunctionCallArgumentsDoneEvent,
-  type ResponseIncompleteEvent,
   type ResponseOutputItemAddedEvent,
   type ResponseOutputItemDoneEvent,
   type ResponseReasoningTextDeltaEvent,
@@ -17,38 +13,37 @@ import {
   type ResponseTextDoneEvent,
 } from "~/services/copilot/create-responses"
 
-import { type AnthropicStreamEventData } from "./anthropic-types"
+import {
+  type AnthropicErrorEvent,
+  type AnthropicStreamEventData,
+} from "./anthropic-types"
 import {
   THINKING_TEXT,
   translateResponsesResultToAnthropic,
 } from "./responses-translation"
 
-class FunctionCallArgumentsValidationError extends Error {
-  constructor(message: string) {
-    super(message)
-    this.name = "FunctionCallArgumentsValidationError"
-  }
-}
-
 export interface ResponsesStreamState {
   messageStartSent: boolean
-  messageCompleted: boolean
+  terminal: "open" | "succeeded" | "failed"
   nextContentBlockIndex: number
   blockIndexByKey: Map<string, number>
   openBlocks: Set<number>
   blockHasDelta: Set<number>
   functionCallStateByOutputIndex: Map<number, FunctionCallStreamState>
+  pendingFailure?: AnthropicErrorEvent
 }
 
-type FunctionCallStreamState = {
+export type FunctionCallStreamState = {
   blockIndex: number
   toolCallId: string
   name: string
+  pendingArguments: Array<string>
+  started?: boolean
 }
 
 export const createResponsesStreamState = (): ResponsesStreamState => ({
   messageStartSent: false,
-  messageCompleted: false,
+  terminal: "open",
   nextContentBlockIndex: 0,
   blockIndexByKey: new Map(),
   openBlocks: new Set(),
@@ -56,69 +51,99 @@ export const createResponsesStreamState = (): ResponsesStreamState => ({
   functionCallStateByOutputIndex: new Map(),
 })
 
+export type ResponsesTranslationResult =
+  | { kind: "events"; events: Array<AnthropicStreamEventData> }
+  | { kind: "success"; response: ResponsesResult }
+  | { kind: "failure"; error: AnthropicErrorEvent }
+
 export const translateResponsesStreamEvent = (
   rawEvent: ResponseStreamEvent,
   state: ResponsesStreamState,
-): Array<AnthropicStreamEventData> => {
+): ResponsesTranslationResult => {
+  if (state.terminal !== "open") return { kind: "events", events: [] }
   const eventType = rawEvent.type
   switch (eventType) {
     case "response.created": {
-      return handleResponseCreated(rawEvent, state)
+      return translatedEvents(handleResponseCreated(rawEvent, state))
     }
 
     case "response.output_item.added": {
-      return handleOutputItemAdded(rawEvent, state)
+      return translatedEvents(handleOutputItemAdded(rawEvent, state))
     }
 
     case "response.reasoning_summary_text.delta": {
-      return handleReasoningSummaryTextDelta(rawEvent, state)
+      return translatedEvents(handleReasoningSummaryTextDelta(rawEvent, state))
     }
 
     case "response.reasoning_text.delta": {
-      return handleReasoningTextDelta(rawEvent, state)
+      return translatedEvents(handleReasoningTextDelta(rawEvent, state))
     }
 
     case "response.output_text.delta": {
-      return handleOutputTextDelta(rawEvent, state)
+      return translatedEvents(handleOutputTextDelta(rawEvent, state))
     }
 
     case "response.reasoning_summary_text.done": {
-      return handleReasoningSummaryTextDone(rawEvent, state)
+      return translatedEvents(handleReasoningSummaryTextDone(rawEvent, state))
     }
 
     case "response.output_text.done": {
-      return handleOutputTextDone(rawEvent, state)
+      return translatedEvents(handleOutputTextDone(rawEvent, state))
     }
     case "response.output_item.done": {
-      return handleOutputItemDone(rawEvent, state)
+      return translatedEvents(handleOutputItemDone(rawEvent, state))
     }
 
     case "response.function_call_arguments.delta": {
-      return handleFunctionCallArgumentsDelta(rawEvent, state)
+      return translatedStateEvents(
+        state,
+        handleFunctionCallArgumentsDelta(rawEvent, state),
+      )
     }
 
     case "response.function_call_arguments.done": {
-      return handleFunctionCallArgumentsDone(rawEvent, state)
+      return translatedStateEvents(
+        state,
+        handleFunctionCallArgumentsDone(rawEvent, state),
+      )
     }
 
     case "response.completed":
     case "response.incomplete": {
-      return handleResponseCompleted(rawEvent, state)
+      return { kind: "success", response: rawEvent.response }
     }
 
     case "response.failed": {
-      return handleResponseFailed(rawEvent, state)
+      return {
+        kind: "failure",
+        error: buildErrorEvent(SAFE_RESPONSES_STREAM_ERROR_MESSAGE),
+      }
     }
 
     case "error": {
-      return handleErrorEvent(rawEvent, state)
+      return {
+        kind: "failure",
+        error: buildErrorEvent(SAFE_RESPONSES_STREAM_ERROR_MESSAGE),
+      }
     }
 
     default: {
-      return []
+      return { kind: "events", events: [] }
     }
   }
 }
+
+const translatedEvents = (
+  events: Array<AnthropicStreamEventData>,
+): ResponsesTranslationResult => ({ kind: "events", events })
+
+const translatedStateEvents = (
+  state: ResponsesStreamState,
+  events: Array<AnthropicStreamEventData>,
+): ResponsesTranslationResult =>
+  state.pendingFailure ?
+    { kind: "failure", error: state.pendingFailure }
+  : translatedEvents(events)
 
 // Helper handlers to keep translateResponsesStreamEvent concise
 const handleResponseCreated = (
@@ -140,23 +165,20 @@ const handleOutputItemAdded = (
 
   const { outputIndex, toolCallId, name, initialArguments } =
     functionCallDetails
-  const blockIndex = openFunctionCallBlock(state, {
+  openFunctionCallBlock(state, {
     outputIndex,
     toolCallId,
     name,
     events,
+    start: Boolean(initialArguments),
   })
 
   if (initialArguments !== undefined && initialArguments.length > 0) {
-    events.push({
-      type: "content_block_delta",
-      index: blockIndex,
-      delta: {
-        type: "input_json_delta",
-        partial_json: initialArguments,
-      },
+    appendFunctionArguments(state, {
+      outputIndex,
+      argumentsText: initialArguments,
+      events,
     })
-    state.blockHasDelta.add(blockIndex)
   }
 
   return events
@@ -215,32 +237,23 @@ const handleFunctionCallArgumentsDelta = (
     return events
   }
 
-  const blockIndex = openFunctionCallBlock(state, {
+  openFunctionCallBlock(state, {
     outputIndex,
     events,
   })
 
   const functionCallState =
     state.functionCallStateByOutputIndex.get(outputIndex)
-  if (!functionCallState) {
-    return handleFunctionCallArgumentsValidationError(
-      new FunctionCallArgumentsValidationError(
-        "Received function call arguments delta without an open tool call block.",
-      ),
-      state,
-      events,
-    )
+  if (!functionCallState?.started) {
+    functionCallState?.pendingArguments.push(deltaText)
+    return events
   }
 
-  events.push({
-    type: "content_block_delta",
-    index: blockIndex,
-    delta: {
-      type: "input_json_delta",
-      partial_json: deltaText,
-    },
+  appendFunctionArguments(state, {
+    outputIndex,
+    argumentsText: deltaText,
+    events,
   })
-  state.blockHasDelta.add(blockIndex)
 
   return events
 }
@@ -251,24 +264,28 @@ const handleFunctionCallArgumentsDone = (
 ): Array<AnthropicStreamEventData> => {
   const events = new Array<AnthropicStreamEventData>()
   const outputIndex = rawEvent.output_index
-  const blockIndex = openFunctionCallBlock(state, {
+  openFunctionCallBlock(state, {
     outputIndex,
+    name: rawEvent.name,
     events,
   })
+  const functionCallState =
+    state.functionCallStateByOutputIndex.get(outputIndex)
+  if (!functionCallState?.started)
+    return handleFunctionCallArgumentsValidationError(state, events)
 
   const finalArguments =
     typeof rawEvent.arguments === "string" ? rawEvent.arguments : undefined
 
-  if (!state.blockHasDelta.has(blockIndex) && finalArguments) {
-    events.push({
-      type: "content_block_delta",
-      index: blockIndex,
-      delta: {
-        type: "input_json_delta",
-        partial_json: finalArguments,
-      },
+  if (
+    !state.blockHasDelta.has(functionCallState.blockIndex)
+    && finalArguments
+  ) {
+    appendFunctionArguments(state, {
+      outputIndex,
+      argumentsText: finalArguments,
+      events,
     })
-    state.blockHasDelta.add(blockIndex)
   }
 
   state.functionCallStateByOutputIndex.delete(outputIndex)
@@ -403,14 +420,12 @@ const handleOutputTextDone = (
   return events
 }
 
-const handleResponseCompleted = (
-  rawEvent: ResponseCompletedEvent | ResponseIncompleteEvent,
+export const createResponsesNormalTerminalEvents = (
   state: ResponsesStreamState,
+  response: ResponsesResult,
 ): Array<AnthropicStreamEventData> => {
-  const response = rawEvent.response
-  const events = new Array<AnthropicStreamEventData>()
-
-  closeAllOpenBlocks(state, events)
+  if (state.terminal !== "open") return []
+  const events = closeResponsesOpenBlocks(state)
   const anthropic = translateResponsesResultToAnthropic(response)
   events.push(
     {
@@ -426,42 +441,15 @@ const handleResponseCompleted = (
     },
     { type: "message_stop" },
   )
-  state.messageCompleted = true
+  state.terminal = "succeeded"
   return events
-}
-
-const handleResponseFailed = (
-  _rawEvent: ResponseFailedEvent,
-  state: ResponsesStreamState,
-): Array<AnthropicStreamEventData> => {
-  const events = new Array<AnthropicStreamEventData>()
-  closeAllOpenBlocks(state, events)
-
-  events.push(buildErrorEvent(SAFE_RESPONSES_STREAM_ERROR_MESSAGE))
-  state.messageCompleted = true
-
-  return events
-}
-
-const handleErrorEvent = (
-  _rawEvent: ResponseErrorEvent,
-  state: ResponsesStreamState,
-): Array<AnthropicStreamEventData> => {
-  state.messageCompleted = true
-  return [buildErrorEvent(SAFE_RESPONSES_STREAM_ERROR_MESSAGE)]
 }
 
 const handleFunctionCallArgumentsValidationError = (
-  error: FunctionCallArgumentsValidationError,
   state: ResponsesStreamState,
   events: Array<AnthropicStreamEventData> = [],
 ): Array<AnthropicStreamEventData> => {
-  const reason = error.message
-
-  closeAllOpenBlocks(state, events)
-  state.messageCompleted = true
-
-  events.push(buildErrorEvent(reason))
+  state.pendingFailure = buildErrorEvent(SAFE_RESPONSES_STREAM_ERROR_MESSAGE)
 
   return events
 }
@@ -591,16 +579,20 @@ const closeOpenBlocks = (
   }
 }
 
-const closeAllOpenBlocks = (
+export const closeResponsesOpenBlocks = (
   state: ResponsesStreamState,
-  events: Array<AnthropicStreamEventData>,
-) => {
-  closeOpenBlocks(state, events)
-
+): Array<AnthropicStreamEventData> => {
+  const events = new Array<AnthropicStreamEventData>()
+  const indices = Array.from(state.openBlocks).sort(
+    (left, right) => left - right,
+  )
+  for (const blockIndex of indices) closeBlockIfOpen(state, blockIndex, events)
+  state.blockHasDelta.clear()
   state.functionCallStateByOutputIndex.clear()
+  return events
 }
 
-export const buildErrorEvent = (message: string): AnthropicStreamEventData => ({
+export const buildErrorEvent = (message: string): AnthropicErrorEvent => ({
   type: "error",
   error: {
     type: "api_error",
@@ -621,9 +613,10 @@ const openFunctionCallBlock = (
     toolCallId?: string
     name?: string
     events: Array<AnthropicStreamEventData>
+    start?: boolean
   },
 ): number => {
-  const { outputIndex, toolCallId, name, events } = params
+  const { outputIndex, toolCallId, name, events, start = true } = params
 
   let functionCallState = state.functionCallStateByOutputIndex.get(outputIndex)
 
@@ -631,21 +624,27 @@ const openFunctionCallBlock = (
     const blockIndex = state.nextContentBlockIndex
     state.nextContentBlockIndex += 1
 
-    const resolvedToolCallId = toolCallId ?? `tool_call_${blockIndex}`
-    const resolvedName = name ?? "function"
-
     functionCallState = {
       blockIndex,
-      toolCallId: resolvedToolCallId,
-      name: resolvedName,
+      toolCallId: toolCallId ?? "",
+      name: name ?? "",
+      pendingArguments: [],
     }
 
     state.functionCallStateByOutputIndex.set(outputIndex, functionCallState)
+  } else {
+    if (toolCallId) functionCallState.toolCallId += toolCallId
+    if (name) functionCallState.name += name
   }
 
   const { blockIndex } = functionCallState
 
-  if (!state.openBlocks.has(blockIndex)) {
+  if (
+    !state.openBlocks.has(blockIndex)
+    && start
+    && functionCallState.toolCallId
+    && functionCallState.name
+  ) {
     closeOpenBlocks(state, events)
     events.push({
       type: "content_block_start",
@@ -658,9 +657,48 @@ const openFunctionCallBlock = (
       },
     })
     state.openBlocks.add(blockIndex)
+    functionCallState.started = true
+    flushPendingFunctionArguments(state, outputIndex, events)
   }
 
   return blockIndex
+}
+
+function appendFunctionArguments(
+  state: ResponsesStreamState,
+  options: {
+    outputIndex: number
+    argumentsText: string
+    events: Array<AnthropicStreamEventData>
+  },
+): void {
+  const { outputIndex, argumentsText, events } = options
+  const functionCallState =
+    state.functionCallStateByOutputIndex.get(outputIndex)
+  if (!functionCallState?.started) {
+    functionCallState?.pendingArguments.push(argumentsText)
+    return
+  }
+  events.push({
+    type: "content_block_delta",
+    index: functionCallState.blockIndex,
+    delta: { type: "input_json_delta", partial_json: argumentsText },
+  })
+  state.blockHasDelta.add(functionCallState.blockIndex)
+}
+
+function flushPendingFunctionArguments(
+  state: ResponsesStreamState,
+  outputIndex: number,
+  events: Array<AnthropicStreamEventData>,
+): void {
+  const functionCallState =
+    state.functionCallStateByOutputIndex.get(outputIndex)
+  if (!functionCallState?.started) return
+  const pending = functionCallState.pendingArguments.splice(0)
+  for (const argumentsText of pending) {
+    appendFunctionArguments(state, { outputIndex, argumentsText, events })
+  }
 }
 
 type FunctionCallDetails = {

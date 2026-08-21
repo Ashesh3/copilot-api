@@ -662,7 +662,7 @@ test("rejects malformed public Messages JSON before upstream dispatch", async ()
   expect(fetchMock).not.toHaveBeenCalled()
 })
 
-test("returns a safe Anthropic error for an upstream Messages failure", async () => {
+test("returns the exact upstream body for a non-stream Messages failure", async () => {
   upstreamResponseOverride = Response.json(
     { error: { message: "messages-upstream-private-marker" } },
     { status: 400, statusText: "messages-status-private-marker" },
@@ -683,15 +683,14 @@ test("returns a safe Anthropic error for an upstream Messages failure", async ()
   const body = await response.text()
 
   expect(response.status).toBe(400)
-  expect(JSON.parse(body)).toEqual({
-    type: "error",
-    request_id: "req-messages-safe",
-    error: {
-      type: "invalid_request_error",
-      message: "The Copilot Messages request was rejected.",
-    },
-  })
-  expect(body).not.toContain("private-marker")
+  expect(response.headers.get("content-type")).toBe(
+    "application/json;charset=utf-8",
+  )
+  expect(body).toBe(
+    '{"error":{"message":"messages-upstream-private-marker"}}',
+  )
+  expect(body).not.toContain("messages-status-private-marker")
+  expect(body).not.toContain("req-messages-safe")
 })
 
 test("removes top_p when thinking is enabled on the chat completions path", async () => {

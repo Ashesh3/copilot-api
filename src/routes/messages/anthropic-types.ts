@@ -424,6 +424,9 @@ export interface AnthropicErrorEvent extends Record<string, unknown> {
   error: {
     type: string
     message: string
+    body_bytes?: Array<number>
+    content_type?: string
+    status?: number
     code?: string
     param?: string
     [key: string]: unknown
@@ -442,6 +445,7 @@ export type AnthropicStreamEventData =
 
 // State for streaming translation
 export interface AnthropicStreamState {
+  terminal?: "open" | "succeeded" | "failed"
   messageStartSent: boolean
   contentBlockIndex: number
   contentBlockOpen: boolean
@@ -452,6 +456,7 @@ export interface AnthropicStreamState {
       anthropicBlockIndex: number
     }
   }
+  startedToolCallIndices?: Set<number>
   toolCallIndexOffset?: 0 | 1
   // Track usage from chunks (may come separately from finish_reason)
   pendingUsage?: {
