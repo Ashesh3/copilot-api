@@ -1,3 +1,4 @@
+/* eslint-disable max-lines-per-function -- protocol matrix remains grouped by adapter */
 import { describe, expect, test } from "bun:test"
 
 import {
@@ -266,5 +267,48 @@ describe("Google tolerant Chat adaptation", () => {
       "[Google attachment unavailable]",
     )
     expect(JSON.stringify(candidate.payload)).not.toContain("secret=marker")
+  })
+
+  test("caches identical attachment values separately by PDF expectation", async () => {
+    const calls: Array<{ value: string; expectPdf: boolean }> = []
+    await adapt(
+      {
+        contents: [
+          {
+            role: "user",
+            parts: [
+              {
+                fileData: {
+                  mimeType: "application/pdf",
+                  fileUri: "https://attachment.test/a",
+                },
+              },
+              {
+                fileData: {
+                  mimeType: "image/png",
+                  fileUri: "https://attachment.test/a",
+                },
+              },
+              {
+                fileData: {
+                  mimeType: "application/pdf",
+                  fileUri: "https://attachment.test/a",
+                },
+              },
+            ],
+          },
+        ],
+      },
+      {
+        resolveAttachment: ({ value, expectPdf }) => {
+          calls.push({ value, expectPdf })
+          return Promise.resolve(null)
+        },
+      },
+    )
+    expect(calls).toEqual([
+      { value: "https://attachment.test/a", expectPdf: true },
+      { value: "https://attachment.test/a", expectPdf: false },
+    ])
   })
 })

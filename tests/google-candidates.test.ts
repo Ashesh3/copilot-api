@@ -1,6 +1,11 @@
 import { expect, test } from "bun:test"
+import { Hono } from "hono"
 
 import type { PreparedChatCompletionsSource } from "~/routes/chat-completions/chat-contract"
+import type {
+  ChatCompletionResponse,
+  ChatCompletionsPayload,
+} from "~/services/copilot/create-chat-completions"
 import type { Model } from "~/services/copilot/get-models"
 
 import {
@@ -16,6 +21,7 @@ import {
   type GoogleChatCompletionFactory,
 } from "~/routes/google-ai/chat-completion"
 import { prepareGoogleRequest } from "~/routes/google-ai/google-request-normalization"
+import { handleWithChatCompletions } from "~/routes/google-ai/handler"
 import { adaptGoogleToChatCandidate } from "~/routes/google-ai/request-translation"
 
 const model = {
@@ -126,3 +132,186 @@ test("exports a narrow provider completion factory contract", async () => {
   expect(result.processedPayload).not.toBe(payload)
   expect(typeof createCopilotGoogleChatCompletion).toBe("function")
 })
+
+test("uses one injected handler factory and advances from processed payload through bounded search", async () => {
+  const payloads: Array<ChatCompletionsPayload> = []
+  const responses = [
+    chatResult("web_search", "call-1"),
+    chatResult("web_search", "call-2"),
+    chatResult(undefined, undefined, "finished"),
+  ]
+  const factory: GoogleChatCompletionFactory = (payload) => {
+    payloads.push(structuredClone(payload))
+    const response = responses.shift()
+    if (!response) throw new Error("Unexpected completion")
+    return Promise.resolve({
+      processedPayload: {
+        ...structuredClone(payload),
+        messages: [
+          ...payload.messages,
+          { role: "system", content: `processed-${payloads.length}` },
+        ],
+      },
+      response,
+    })
+  }
+  const app = new Hono()
+  app.get("/", async (c) => {
+    try {
+      return await handleWithChatCompletions(
+        c,
+        {
+          model: "public",
+          messages: [{ role: "user", content: "search" }],
+          tools: [
+            {
+              type: "function",
+              function: {
+                name: "web_search",
+                parameters: { type: "object", properties: {} },
+                max_uses: 2,
+              } as never,
+            },
+          ],
+        },
+        {
+          outputMode: "json",
+          requestedModel: "public",
+          completionFactory: factory,
+          webSearch: (query) => Promise.resolve(`result:${query}`),
+        },
+      )
+    } catch (error) {
+      if (
+        typeof error === "object"
+        && error !== null
+        && "response" in error
+        && error.response instanceof Response
+      ) {
+        return error.response
+      }
+      throw error
+    }
+  })
+  const response = await app.request("/")
+  expect(response.status).toBe(200)
+  expect(payloads).toHaveLength(3)
+  expect(JSON.stringify(payloads[1]?.messages)).toContain("processed-1")
+  expect(JSON.stringify(payloads[2]?.messages)).toContain("processed-2")
+  expect((await response.json()) as object).toMatchObject({
+    modelVersion: "public",
+  })
+})
+
+test("rejects an over-limit search batch before executing any search", async () => {
+  let searches = 0
+  const app = new Hono()
+  app.get("/", async (c) => {
+    try {
+      return await handleWithChatCompletions(
+        c,
+        {
+          model: "public",
+          messages: [{ role: "user", content: "search" }],
+          tools: [
+            {
+              type: "function",
+              function: {
+                name: "web_search",
+                parameters: { type: "object", properties: {} },
+                max_uses: 1,
+              } as never,
+            },
+          ],
+        },
+        {
+          outputMode: "json",
+          requestedModel: "public",
+          completionFactory: () =>
+            Promise.resolve({
+              processedPayload: {
+                model: "public",
+                messages: [{ role: "user", content: "search" }],
+              },
+              response: {
+                ...chatResult("web_search", "call-1"),
+                choices: [
+                  {
+                    ...chatResult("web_search", "call-1").choices[0],
+                    message: {
+                      role: "assistant",
+                      content: null,
+                      tool_calls: [
+                        {
+                          id: "call-1",
+                          type: "function",
+                          function: { name: "web_search", arguments: "{}" },
+                        },
+                        {
+                          id: "call-2",
+                          type: "function",
+                          function: { name: "web_search", arguments: "{}" },
+                        },
+                      ],
+                    },
+                  },
+                ],
+              },
+            }),
+          webSearch: () => {
+            searches += 1
+            return Promise.resolve("result")
+          },
+        },
+      )
+    } catch (error) {
+      if (
+        typeof error === "object"
+        && error !== null
+        && "response" in error
+        && error.response instanceof Response
+      ) {
+        return error.response
+      }
+      throw error
+    }
+  })
+  const response = await app.request("/")
+  expect(response.status).toBe(400)
+  expect(searches).toBe(0)
+})
+
+function chatResult(
+  toolName?: string,
+  callId?: string,
+  content: string | null = null,
+): ChatCompletionResponse {
+  return {
+    id: "id",
+    object: "chat.completion",
+    created: 1,
+    model: "upstream-private",
+    choices: [
+      {
+        index: 0,
+        logprobs: null,
+        finish_reason: toolName ? "tool_calls" : "stop",
+        message: {
+          role: "assistant",
+          content,
+          ...(toolName && callId ?
+            {
+              tool_calls: [
+                {
+                  id: callId,
+                  type: "function",
+                  function: { name: toolName, arguments: '{"query":"q"}' },
+                },
+              ],
+            }
+          : {}),
+        },
+      },
+    ],
+  }
+}

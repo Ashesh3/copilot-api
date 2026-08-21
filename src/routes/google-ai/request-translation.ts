@@ -549,7 +549,13 @@ function translateTools(
       })
     }
     if (isRecord(tool.googleSearch)) {
-      tools.push(createWebSearchFunctionTool(tool.googleSearch))
+      const searchTool = createWebSearchFunctionTool(tool.googleSearch)
+      const maxUses = tool.googleSearch.max_uses
+      if (Number.isInteger(maxUses) && Number(maxUses) > 0) {
+        ;(searchTool.function as unknown as Record<string, unknown>).max_uses =
+          Number(maxUses)
+      }
+      tools.push(searchTool)
     }
     if (tool.codeExecution !== undefined) {
       addFinding(state, { class: "tool_shape", severity: "omitted" })

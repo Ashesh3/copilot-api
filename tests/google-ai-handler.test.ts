@@ -1352,6 +1352,55 @@ test.each(["/v1beta/models", "/v1/models", "/models"])(
   },
 )
 
+test("performs no attachment I/O when no endpoint is advertised", async () => {
+  const model = structuredClone(responsesCapableModels.data[0])
+  model.id = "no-route-file-model"
+  model.supported_endpoints = []
+  state.models = { object: "list", data: [model] }
+  const response = await server.request(
+    "/v1/models/no-route-file-model:generateContent",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [
+          {
+            role: "user",
+            parts: [
+              {
+                fileData: {
+                  mimeType: "application/pdf",
+                  fileUri: "https://attachment.test/private.pdf",
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    },
+  )
+  expect(response.status).toBe(400)
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
+test("estimates countTokens for an unknown model without inference dispatch", async () => {
+  state.models = { object: "list", data: [] }
+  const response = await server.request(
+    "/v1/models/future-custom-model:countTokens",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: "Count future" }] }],
+      }),
+    },
+  )
+  expect(response.status).toBe(200)
+  const body = (await response.json()) as { totalTokens?: unknown }
+  expect(typeof body.totalTokens).toBe("number")
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
 test.each(["/v1beta/models", "/v1/models", "/models"])(
   "returns a fixed invalid JSON error on %s",
   async (prefix) => {

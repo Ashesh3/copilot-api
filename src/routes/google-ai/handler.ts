@@ -453,6 +453,18 @@ export async function handleGoogleAI(c: Context) {
     c,
     rawModel,
   )
+  const routedModel = selectRoutedModel(model)
+  const selectedModel = routedModel.model
+  const support = getModelEndpointSupport(selectedModel)
+  const hasInferenceEndpoint =
+    support.chat || support.responses || support.messages
+  if (!isCount && !hasInferenceEndpoint) {
+    throw createEndpointTranslationError({
+      blockers: [],
+      code: "endpoint_translation_unsupported",
+      source: "chat",
+    })
+  }
 
   logger.debug("Google AI request")
 
@@ -471,6 +483,35 @@ export async function handleGoogleAI(c: Context) {
     }
     throw error
   }
+  if (isCount) {
+    const localCandidate = await adaptGoogleToChatCandidate({
+      source: preparedGoogle,
+      finalModel: model,
+      stream: false,
+      explicitReasoningEffort: reasoningEffort,
+      signal: c.req.raw.signal,
+      resolveAttachment: () => Promise.resolve(null),
+    })
+    if (!localCandidate.check.supported) {
+      throw createEndpointTranslationError({
+        blockers: ["message_shape"],
+        code: "endpoint_translation_unsupported",
+        source: "chat",
+      })
+    }
+    const totalTokens =
+      selectedModel ?
+        (await getTokenCount(localCandidate.payload, selectedModel)).input
+      : await estimateTokenCount(localCandidate.payload)
+    setRequestContext(c, {
+      inputTokens: totalTokens,
+      requestedModel: rawModel,
+      model,
+      provider: "GoogleAI",
+      reasoningEffort,
+    })
+    return c.json({ totalTokens })
+  }
   const googleCandidate = await adaptGoogleToChatCandidate({
     source: preparedGoogle,
     finalModel: model,
@@ -488,9 +529,6 @@ export async function handleGoogleAI(c: Context) {
   }
 
   // Find the selected model for token counting and capability checks
-  const routedModel = selectRoutedModel(finalPayload.model)
-  const selectedModel = routedModel.model
-  const support = getModelEndpointSupport(selectedModel)
   const candidates = await prepareChatCandidates({
     nativeMessagesOptions: {},
     reasoningEffort,
@@ -526,14 +564,6 @@ export async function handleGoogleAI(c: Context) {
   })
 
   const countPayload = candidates.chat?.payload ?? googleCandidate.payload
-  if (isCount) {
-    const totalTokens =
-      selectedModel ?
-        (await getTokenCount(countPayload, selectedModel)).input
-      : await estimateTokenCount(countPayload)
-    setRequestContext(c, { inputTokens: totalTokens })
-    return c.json({ totalTokens })
-  }
   try {
     if (selectedModel) {
       const tokenCount = await getTokenCount(countPayload, selectedModel)
@@ -629,6 +659,7 @@ export async function handleWithChatCompletions(
     outputMode: GoogleStreamOutputMode
     requestedModel: string
     completionFactory?: GoogleChatCompletionFactory
+    webSearch?: (query: string, signal?: AbortSignal) => Promise<string>
   },
 ) {
   const completionFactory =
@@ -731,6 +762,7 @@ async function handleChatCompletionsWithWebSearch(
     outputMode: GoogleStreamOutputMode
     requestedModel: string
     completionFactory: GoogleChatCompletionFactory
+    webSearch?: (query: string, signal?: AbortSignal) => Promise<string>
   },
 ) {
   const requestedStream = Boolean(payload.stream)
@@ -742,6 +774,8 @@ async function handleChatCompletionsWithWebSearch(
     completionFactory: options.completionFactory,
     initial: initialPrepared,
     signal: c.req.raw.signal,
+    maxUses: getGoogleChatWebSearchMaxUses(payload),
+    webSearch: options.webSearch,
   })
   if (initialPrepared.accountId !== undefined) {
     setRequestContext(c, { accountId: initialPrepared.accountId })
@@ -763,6 +797,24 @@ async function handleChatCompletionsWithWebSearch(
       translateOpenAIToGoogle(result, options.requestedModel),
     )
   })
+}
+
+function getGoogleChatWebSearchMaxUses(
+  payload: ChatCompletionsPayload,
+): number | undefined {
+  for (const tool of payload.tools ?? []) {
+    if (tool.function.name !== "web_search") continue
+    const maxUses = (tool as unknown as Record<string, unknown>).max_uses
+    if (Number.isInteger(maxUses) && Number(maxUses) > 0) {
+      return Number(maxUses)
+    }
+    const functionMax = (tool.function as unknown as Record<string, unknown>)
+      .max_uses
+    if (Number.isInteger(functionMax) && Number(functionMax) > 0) {
+      return Number(functionMax)
+    }
+  }
+  return undefined
 }
 
 // ─── Native /v1/messages path ───
