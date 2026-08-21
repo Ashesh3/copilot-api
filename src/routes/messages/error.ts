@@ -140,6 +140,24 @@ function createAnthropicStreamErrorFromInspection(
   const localBody = snapshotAnthropicErrorBody(inspection.localClientBody)
   if (localBody) return localBody
 
+  if (inspection.customProvider) {
+    const providerError = inspection.providerError
+    return {
+      type: "error",
+      error:
+        providerError ?
+          {
+            type: providerError.type,
+            message: providerError.message,
+            ...(providerError.code ? { code: providerError.code } : {}),
+          }
+        : {
+            type: anthropicErrorType(inspection.status),
+            message: "The custom provider request failed.",
+          },
+    }
+  }
+
   if (inspection.localError) {
     return {
       type: "error",

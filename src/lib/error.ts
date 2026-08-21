@@ -69,6 +69,44 @@ export class HTTPError extends Error {
   }
 }
 
+export interface SafeCustomProviderClientError {
+  readonly code?: string
+  readonly message: string
+  readonly type: string
+}
+
+interface CustomProviderHttpErrorSnapshot {
+  readonly providerError?: SafeCustomProviderClientError
+  readonly responseHeaders: Readonly<Record<string, string>>
+  readonly safeMessage: string
+  readonly status: number
+}
+
+interface CustomProviderHttpErrorOptions {
+  readonly requestPayload?: unknown
+  readonly responseBody: string
+}
+
+const CUSTOM_PROVIDER_HTTP_ERROR_SNAPSHOTS = new WeakMap<
+  HTTPError,
+  CustomProviderHttpErrorSnapshot
+>()
+
+export class CustomProviderHTTPError extends HTTPError {
+  constructor(
+    message: string,
+    response: Response,
+    options: CustomProviderHttpErrorOptions,
+  ) {
+    super(message, response, options.requestPayload)
+    CUSTOM_PROVIDER_HTTP_ERROR_SNAPSHOTS.set(this, {
+      providerError: snapshotCustomProviderClientError(options.responseBody),
+      safeMessage: "Custom provider request failed",
+      ...snapshotLocalResponse(response),
+    })
+  }
+}
+
 interface LocalHttpErrorSnapshot {
   readonly clientBody?: Readonly<Record<string, unknown>>
   readonly localError?: SafeLocalClientError
@@ -187,8 +225,10 @@ export interface SafeUpstreamClientError {
 
 export interface SafeHttpErrorInspection {
   readonly clientError?: SafeUpstreamClientError
+  readonly customProvider?: boolean
   readonly localError?: SafeLocalClientError
   readonly localClientBody?: Readonly<Record<string, unknown>>
+  readonly providerError?: SafeCustomProviderClientError
   readonly responseHeaders: Readonly<Record<string, string>>
   readonly safeMessage: string
   readonly status: number
@@ -218,6 +258,8 @@ const SENSITIVE_FIELD_PATTERN =
   /password|secret|api[_-]?key|authorization|cookie|access[_-]?token|refresh[_-]?token|client[_-]?secret|code[_-]?verifier|(?:conversation|session|thread)[_-]?id|prompt[_-]?cache[_-]?key|safety[_-]?identifier|user[_-]?id/i
 const SENSITIVE_ERROR_MESSAGE_PATTERN =
   /authorization|bearer\s|api[_ -]?key|password|secret|token|cookie/i
+const SAFE_PROVIDER_ERROR_METADATA_PATTERN = /^[\w.:-]{1,128}$/u
+const SAFE_PROVIDER_ERROR_MESSAGE_MAX_LENGTH = 2048
 const SAFE_HTTP_ERROR_MESSAGES = new Set([
   "Empty response body from upstream",
   "Failed to create chat completions",
@@ -296,6 +338,77 @@ function safeLocalClientError(
     ...(typeof record.param === "string" ? { param: record.param } : {}),
     type: record.type,
   } satisfies SafeLocalClientError)
+}
+
+function snapshotCustomProviderClientError(
+  responseBody: string,
+): SafeCustomProviderClientError | undefined {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(responseBody) as unknown
+  } catch {
+    return undefined
+  }
+  const snapshot = snapshotPlainDataRecord(parsed)
+  if (!snapshot) return undefined
+  const bodyError = snapshot.error
+  if (
+    typeof bodyError !== "object"
+    || bodyError === null
+    || Array.isArray(bodyError)
+  ) {
+    return undefined
+  }
+  const record = bodyError as Readonly<Record<string, unknown>>
+  const message = unwrapUpstreamErrorMessage(record.message)?.trim()
+  if (
+    !message
+    || message.length > SAFE_PROVIDER_ERROR_MESSAGE_MAX_LENGTH
+    || hasControlCharacter(message)
+    || hasSensitiveProviderErrorText(message)
+  ) {
+    return undefined
+  }
+  const metadata = safeProviderErrorMetadataSnapshot(record)
+  if (!metadata) return undefined
+  return Object.freeze({
+    ...(metadata.code ? { code: metadata.code } : {}),
+    message,
+    type: metadata.type,
+  })
+}
+
+function hasControlCharacter(value: string): boolean {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0) ?? 0
+    if (codePoint <= 31 || codePoint === 127) return true
+  }
+  return false
+}
+
+function safeProviderErrorMetadata(value: unknown): string | undefined {
+  return (
+      typeof value === "string"
+        && SAFE_PROVIDER_ERROR_METADATA_PATTERN.test(value)
+        && !hasSensitiveProviderErrorText(value)
+    ) ?
+      value
+    : undefined
+}
+
+function hasSensitiveProviderErrorText(value: string): boolean {
+  const terms = value.replaceAll(/[_.:-]+/gu, " ")
+  return SENSITIVE_ERROR_MESSAGE_PATTERN.test(terms)
+}
+
+function safeProviderErrorMetadataSnapshot(
+  record: Readonly<Record<string, unknown>>,
+): Pick<SafeCustomProviderClientError, "code" | "type"> | undefined {
+  const safeType = safeProviderErrorMetadata(record.type)
+  const code = safeProviderErrorMetadata(record.code)
+  if (record.type !== undefined && safeType === undefined) return undefined
+  if (record.code !== undefined && code === undefined) return undefined
+  return { ...(code ? { code } : {}), type: safeType ?? "api_error" }
 }
 
 const SAFE_LOCAL_ERROR_TYPES = new Set([
@@ -460,6 +573,16 @@ function readHttpErrorSnapshot(error: HTTPError): SafeHttpErrorSnapshot {
       status: localSnapshot.status,
     }
   }
+  const customProviderSnapshot = CUSTOM_PROVIDER_HTTP_ERROR_SNAPSHOTS.get(error)
+  if (customProviderSnapshot) {
+    return {
+      customProvider: true,
+      providerError: customProviderSnapshot.providerError,
+      responseHeaders: customProviderSnapshot.responseHeaders,
+      safeMessage: customProviderSnapshot.safeMessage,
+      status: customProviderSnapshot.status,
+    }
+  }
   const snapshot = snapshotDescriptorChain(error, {
     keys: HTTP_ERROR_DESCRIPTOR_KEYS,
     maxDepth: 6,
@@ -520,13 +643,17 @@ export function snapshotSafeHttpError(
 ): SafeHttpErrorInspection {
   const snapshot = readHttpErrorSnapshot(error)
   let safeMessage = snapshot.localError?.message ?? snapshot.safeMessage
-  if (snapshot.status === 402) safeMessage = "Copilot quota exhausted"
-  if (snapshot.status === 466) {
+  if (!snapshot.customProvider && snapshot.status === 402) {
+    safeMessage = "Copilot quota exhausted"
+  }
+  if (!snapshot.customProvider && snapshot.status === 466) {
     safeMessage = "Copilot client version mismatch"
   }
   return Object.freeze({
+    customProvider: snapshot.customProvider,
     localClientBody: snapshot.localClientBody,
     localError: snapshot.localError,
+    providerError: snapshot.providerError,
     responseHeaders: snapshot.responseHeaders,
     safeMessage,
     status: snapshot.status,
@@ -587,14 +714,18 @@ export async function inspectSafeHttpError(
     : undefined
   const clientError = safeUpstreamClientError(snapshot.status, parsedBody)
   let safeMessage = snapshot.localError?.message ?? snapshot.safeMessage
-  if (snapshot.status === 402) safeMessage = "Copilot quota exhausted"
-  if (snapshot.status === 466) {
+  if (!snapshot.customProvider && snapshot.status === 402) {
+    safeMessage = "Copilot quota exhausted"
+  }
+  if (!snapshot.customProvider && snapshot.status === 466) {
     safeMessage = "Copilot client version mismatch"
   }
   return Object.freeze({
     clientError,
+    customProvider: snapshot.customProvider,
     localClientBody: snapshot.localClientBody,
     localError: snapshot.localError,
+    providerError: snapshot.providerError,
     responseHeaders: snapshot.responseHeaders,
     safeMessage,
     status: snapshot.status,
@@ -608,6 +739,17 @@ function httpErrorResponse(c: Context, inspection: SafeHttpErrorInspection) {
   if (inspection.localClientBody) {
     return c.json(
       inspection.localClientBody,
+      inspection.status as ContentfulStatusCode,
+    )
+  }
+  if (inspection.customProvider) {
+    return c.json(
+      {
+        error: inspection.providerError ?? {
+          message: inspection.safeMessage,
+          type: "error",
+        },
+      },
       inspection.status as ContentfulStatusCode,
     )
   }

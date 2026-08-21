@@ -14,7 +14,7 @@ import type {
 import type { EmbeddingResponse } from "~/services/copilot/create-embeddings"
 
 import { getConfig, updateConfig } from "~/lib/config"
-import { HTTPError, LocalHTTPError } from "~/lib/error"
+import { CustomProviderHTTPError, LocalHTTPError } from "~/lib/error"
 import {
   getRoutingTelemetryRequestState,
   updateRoutingTelemetryRequestState,
@@ -471,13 +471,16 @@ async function throwCustomProviderError(
     createUpstreamErrorMessage(reference, path),
     `Status: ${response.status}`,
   )
-  throw new HTTPError(
+  throw new CustomProviderHTTPError(
     createUpstreamErrorMessage(reference, path),
     new Response(body, {
       status: response.status,
       headers: response.headers,
     }),
-    payload,
+    {
+      requestPayload: payload,
+      responseBody: body,
+    },
   )
 }
 
