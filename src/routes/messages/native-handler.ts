@@ -68,6 +68,7 @@ const MAX_NATIVE_WEB_SEARCH_USES = 8
 export interface NativeMessagesRequestOptions
   extends AnthropicRequestHeaderOptions {
   copilotSessionToken?: string
+  compaction?: boolean
   initiatorOverride?: "agent" | "user"
   originalStream?: boolean
   requestedModel?: string
@@ -351,6 +352,8 @@ export async function handleWithNativeMessages(
       }),
       async (span) => {
         const response = (await createNativeMessages(payload, options, {
+          alreadyAdapted: options.toolsPrepared,
+          compaction: options.compaction,
           preserveValidatedControls: true,
           signal: c.req.raw.signal,
         })) as AnthropicResponse
@@ -417,6 +420,8 @@ async function streamNativeMessages(
         ])
         const preflush = await raceSsePreflush(
           createNativeMessages(anthropicPayload, options, {
+            alreadyAdapted: options.toolsPrepared,
+            compaction: options.compaction,
             preserveValidatedControls: true,
             signal: upstreamSignal,
           }),
@@ -611,6 +616,8 @@ export async function resolveNativeWebSearch(
     let response: AnthropicResponse
     try {
       response = (await createNativeMessages(payload, loopOptions, {
+        alreadyAdapted: options.toolsPrepared,
+        compaction: options.compaction,
         preserveValidatedControls: true,
         routedAccountPin,
         signal: options.signal,
@@ -628,6 +635,8 @@ export async function resolveNativeWebSearch(
       const recovered = structuredClone(payload)
       if (!stripThinkingBlocks(recovered)) throw error
       response = (await createNativeMessages(recovered, loopOptions, {
+        alreadyAdapted: options.toolsPrepared,
+        compaction: options.compaction,
         preserveValidatedControls: true,
         routedAccountPin,
         signal: options.signal,

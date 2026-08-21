@@ -17,6 +17,7 @@ import {
   createEvaluatedTranslationCheck,
   getModelEndpointSupport,
 } from "~/lib/endpoint-routing"
+import { normalizeModelName } from "~/lib/model-resolver"
 import { usesImplicitReasoningDefault } from "~/lib/model-suffix"
 import {
   isAnthropicTextBlock,
@@ -49,15 +50,20 @@ export type MessagesChatCandidate = EvaluatedEndpointCandidate<
   ChatCompletionsPayload
 >
 export type MessagesEndpointCandidate =
-  | MessagesNativeCandidate
+  | PreparedMessagesNativeCandidate
   | MessagesResponsesCandidate
   | MessagesChatCandidate
 
 export interface PreparedMessagesCandidates {
-  readonly native: MessagesNativeCandidate
+  readonly native: PreparedMessagesNativeCandidate
   readonly responses?: MessagesResponsesCandidate
   readonly chat?: MessagesChatCandidate
   readonly ordered: ReadonlyArray<MessagesEndpointCandidate>
+}
+
+export interface PreparedMessagesNativeCandidate
+  extends MessagesNativeCandidate {
+  readonly compaction: boolean
 }
 
 export interface PrepareMessagesCandidatesOptions {
@@ -93,6 +99,7 @@ function createCandidate<
   }
 }
 
+// eslint-disable-next-line complexity -- target controls are finalized together
 function adaptMessagesToChat(options: {
   source: AnthropicMessagesPayload
   effortOverride?: ReasoningEffort
@@ -100,11 +107,14 @@ function adaptMessagesToChat(options: {
   const source = structuredClone(options.source)
   mergeToolResultForCandidate(source)
   const payload = translateToOpenAI(source)
+  payload.model = normalizeModelName(payload.model)
   if (source.temperature === undefined) delete payload.temperature
   if (source.top_p === undefined) delete payload.top_p
   if (source.stop_sequences === undefined) delete payload.stop
   if (source.max_tokens === undefined) delete payload.max_tokens
   const findings: Array<TranslationFinding> = []
+  applyTranslatedToolFindings(source, findings)
+  degradeChatFileParts(payload, findings)
   const reasoningEnabled = Boolean(options.effortOverride || source.thinking)
   if (reasoningEnabled) {
     payload.temperature = 1
@@ -112,13 +122,16 @@ function adaptMessagesToChat(options: {
       delete payload.top_p
       findings.push({ class: "sampling", severity: "omitted" })
     }
-    if (
-      options.effortOverride
-      && !usesImplicitReasoningDefault(payload.model)
-    ) {
-      payload.reasoning_effort = options.effortOverride
+    if (!usesImplicitReasoningDefault(payload.model)) {
+      payload.reasoning_effort = options.effortOverride ?? "medium"
     } else {
       delete payload.reasoning_effort
+    }
+    if (
+      source.thinking?.budget_tokens
+      && !usesImplicitReasoningDefault(payload.model)
+    ) {
+      payload.thinking_budget = source.thinking.budget_tokens
     }
   }
   rewriteUnsupportedAssistantPrefill(payload)
@@ -141,6 +154,55 @@ function adaptMessagesToChat(options: {
   })
 }
 
+function addFinding(
+  findings: Array<TranslationFinding>,
+  finding: TranslationFinding,
+): void {
+  if (
+    findings.some(
+      (current) =>
+        current.class === finding.class
+        && current.severity === finding.severity,
+    )
+  ) {
+    return
+  }
+  findings.push(finding)
+}
+
+function applyTranslatedToolFindings(
+  source: AnthropicMessagesPayload,
+  findings: Array<TranslationFinding>,
+): void {
+  for (const tool of source.tools ?? []) {
+    const type = typeof tool.type === "string" ? tool.type : undefined
+    if (type?.startsWith("web_search")) continue
+    if (
+      typeof tool.name === "string"
+      && tool.name.trim()
+      && tool.input_schema !== undefined
+      && type === undefined
+    ) {
+      continue
+    }
+    addFinding(findings, { class: "tool_shape", severity: "omitted" })
+  }
+}
+
+function degradeChatFileParts(
+  payload: ChatCompletionsPayload,
+  findings: Array<TranslationFinding>,
+): void {
+  for (const message of payload.messages) {
+    if (!Array.isArray(message.content)) continue
+    message.content = message.content.flatMap((part) => {
+      if (part.type !== "file") return [part]
+      addFinding(findings, { class: "attachment", severity: "omitted" })
+      return [{ type: "text" as const, text: "[File attachment unavailable]" }]
+    })
+  }
+}
+
 function mergeToolResultForCandidate(payload: AnthropicMessagesPayload): void {
   for (const message of payload.messages) {
     if (message.role !== "user" || !Array.isArray(message.content)) continue
@@ -158,6 +220,15 @@ function mergeToolResultForCandidate(payload: AnthropicMessagesPayload): void {
     }
     if (toolResults.length === 0 || textBlocks.length === 0) continue
     if (!supported) continue
+    if (
+      toolResults.some(
+        (block) =>
+          Array.isArray(block.content)
+          && block.content.some((content) => content.type === "tool_reference"),
+      )
+    ) {
+      continue
+    }
     const text = textBlocks.map((block) => block.text).join("\n\n")
     const last = toolResults.length - 1
     const mergedToolResults: Array<AnthropicToolResultBlock> = []
@@ -199,6 +270,7 @@ function adaptMessagesToResponses(options: {
   }
   normalizeJsonSchemaResponseFormat(payload)
   const findings: Array<TranslationFinding> = []
+  applyTranslatedToolFindings(source, findings)
   if (source.stop_sequences !== undefined) {
     findings.push({ class: "sampling", severity: "omitted" })
   }
@@ -259,6 +331,7 @@ export async function prepareMessagesCandidates(
     await normalizeAnthropicImages(nativePayload, options.signal)
   }
   const finalizedNative = prepareNativeTools(nativePayload).payload
+  if (!options.isCompact) mergeToolResultForCandidate(finalizedNative)
   if (
     finalizedNative.max_tokens === undefined
     && Number.isInteger(
@@ -276,11 +349,15 @@ export async function prepareMessagesCandidates(
   if (support.responses || support.chat) {
     await normalizeAnthropicAttachments(translatedPayload, options.signal)
   }
-  const native = createCandidate({
+  const nativeCandidate = createCandidate({
     endpoint: "/v1/messages",
     payload: finalizedNative,
     meaningful: hasMeaningfulMessages(options.source),
   })
+  const native: PreparedMessagesNativeCandidate = {
+    ...nativeCandidate,
+    compaction: options.isCompact === true,
+  }
   const responses =
     support.responses ?
       adaptMessagesToResponses({

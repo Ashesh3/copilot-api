@@ -716,6 +716,40 @@ test("removes top_p when thinking is enabled on the chat completions path", asyn
   expect(lastUpstreamPayload?.top_p).toBeUndefined()
 })
 
+test("prepared Chat fallback applies replacements before selection exactly once", async () => {
+  const { setReplacementsForTest } = await import("../src/lib/auto-replace")
+  setReplacementsForTest([
+    {
+      id: "review-replacement",
+      pattern: "PRIVATE_PREPARED_CHAT",
+      replacement: "MUTATED_AFTER_SELECTION",
+      isRegex: false,
+      enabled: true,
+    },
+  ])
+  try {
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-4o",
+        messages: [{ role: "user", content: "PRIVATE_PREPARED_CHAT" }],
+        max_tokens: 32,
+      }),
+    })
+
+    expect(response.status).toBe(200)
+    expect(JSON.stringify(lastUpstreamPayload)).not.toContain(
+      "PRIVATE_PREPARED_CHAT",
+    )
+    expect(JSON.stringify(lastUpstreamPayload)).toContain(
+      "MUTATED_AFTER_SELECTION",
+    )
+  } finally {
+    setReplacementsForTest([])
+  }
+})
+
 test("routes PDF documents to native /v1/messages and preserves thinking blocks", async () => {
   state.models = nativeMessagesModels
   const pdfB64 = Buffer.from("%PDF-1.4 regression test").toString("base64")

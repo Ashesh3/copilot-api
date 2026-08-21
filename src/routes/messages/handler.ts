@@ -118,6 +118,7 @@ import {
 import {
   type AnthropicMessagesPayload,
   type AnthropicStreamState,
+  isAnthropicTextBlock,
 } from "./anthropic-types"
 import {
   prepareMessagesChatCandidate,
@@ -198,31 +199,57 @@ export function selectMessagesUpstreamEndpoint(options: {
  */
 export { stripThinkingBlocks } from "./thinking-recovery"
 
-/**
- * Strip thinking blocks from assistant messages in multi-token mode.
- *
- * Thinking block signatures (reasoning_opaque / signature) are cryptographically
- * tied to the specific Copilot token that generated them. In multi-token mode,
- * round-robin may route the next request to a different account, making
- * previous signatures invalid. Stripping them avoids the wasted 400 round-trip.
- *
- * In single-token mode, signatures stay valid and thinking context is preserved.
- */
-function stripThinkingBlocksForMultiToken(
-  payload: AnthropicMessagesPayload,
-): void {
-  if (!state.isMultiToken) return
-
-  for (const msg of payload.messages) {
-    if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue
-    msg.content = msg.content.filter((block) => block.type !== "thinking")
-  }
-}
-
 const logger = createHandlerLogger("messages-handler")
 
 const compactSystemPromptStart =
   "You are a helpful AI assistant tasked with summarizing conversations"
+
+async function isKnownTranslatedSignatureError(
+  error: HTTPError,
+  reasoningEnabled: boolean,
+): Promise<boolean> {
+  if (await isInvalidThinkingSignatureResponse(error.response)) return true
+  const body = await error.response.clone().text()
+  return body.trim() === "Bad Request" && reasoningEnabled
+}
+
+function applyReplacedChatTextToMessages(
+  payload: AnthropicMessagesPayload,
+  replacedMessages: ChatCompletionsPayload["messages"],
+): void {
+  const replacementTexts = replacedMessages.flatMap((message) => {
+    if (typeof message.content === "string") return [message.content]
+    if (!Array.isArray(message.content)) return []
+    return message.content.flatMap((part) =>
+      part.type === "text" ? [part.text] : [],
+    )
+  })
+  const originalTextCount = payload.messages.reduce((count, message) => {
+    if (typeof message.content === "string") return count + 1
+    if (!Array.isArray(message.content)) return count
+    return (
+      count
+      + message.content.filter((block) => isAnthropicTextBlock(block)).length
+    )
+  }, 0)
+  if (replacementTexts.length !== originalTextCount) return
+  let replacementIndex = 0
+  for (const message of payload.messages) {
+    if (typeof message.content === "string") {
+      const replacement = replacementTexts[replacementIndex]
+      replacementIndex += 1
+      message.content = replacement
+      continue
+    }
+    if (!Array.isArray(message.content)) continue
+    for (const block of message.content) {
+      if (!isAnthropicTextBlock(block)) continue
+      const replacement = replacementTexts[replacementIndex]
+      replacementIndex += 1
+      block.text = replacement
+    }
+  }
+}
 
 const hasWebSearchToolInPayload = (
   tools: AnthropicMessagesPayload["tools"],
@@ -363,6 +390,16 @@ async function handleCompletionInner(
     redirect.redirected
     || applyModelVariantRouting(c, anthropicPayload, anthropicBeta)
 
+  const { payload: replacementPayload, appliedRules } =
+    await applyReplacementsToPayload(translateToOpenAI(anthropicPayload))
+  if (appliedRules.length > 0) {
+    setRequestContext(c, { replacements: appliedRules })
+    applyReplacedChatTextToMessages(
+      anthropicPayload,
+      replacementPayload.messages,
+    )
+  }
+
   const customReference = resolveCustomChatModel(anthropicPayload.model)
   if (customReference) {
     const customCandidate = await prepareMessagesChatCandidate({
@@ -378,11 +415,16 @@ async function handleCompletionInner(
       reasoningEffort:
         redirectEffort ?? getBodyReasoningEffort(anthropicPayload),
     })
-    return await handleWithChatCompletions(c, anthropicPayload, {
-      initiatorOverride,
-      effortOverride: redirectEffort,
-      preparedPayload: customCandidate.payload,
+    const customPayload = {
+      ...customCandidate.payload,
+      model: customReference.requestedModel,
+    }
+    return await executeCustomProviderChatCompletions(c, {
+      reference: customReference,
+      payload: customPayload,
       requestedModel,
+      appliedRules: [],
+      reasoningEffort: redirectEffort,
     })
   }
 
@@ -482,6 +524,7 @@ async function handleCompletionInner(
         originalStream: Boolean(anthropicPayload.stream),
         retryBudget,
         toolsPrepared: true,
+        compaction: candidate.compaction,
         copilotSessionToken,
         ...(initiatorOverride ? { initiatorOverride } : {}),
       }
@@ -534,6 +577,16 @@ async function handleCompletionInner(
         effortOverride,
         requestedModel,
         preparedPayload: candidate.payload,
+        rebuildPreparedPayload: async (source) =>
+          (
+            await prepareMessagesCandidates({
+              source,
+              selectedModel: routingModel,
+              effortOverride: undefined,
+              isCompact,
+              signal: c.req.raw.signal,
+            })
+          ).responses?.payload,
       })
     }
 
@@ -543,6 +596,16 @@ async function handleCompletionInner(
       effortOverride,
       requestedModel,
       preparedPayload: candidate.payload,
+      rebuildPreparedPayload: async (source) =>
+        (
+          await prepareMessagesCandidates({
+            source,
+            selectedModel: routingModel,
+            effortOverride: undefined,
+            isCompact,
+            signal: c.req.raw.signal,
+          })
+        ).chat?.payload,
     })
   })
 }
@@ -865,6 +928,9 @@ const handleWithChatCompletions = async (
     initiatorOverride?: "agent" | "user"
     effortOverride?: ReasoningEffort
     preparedPayload?: ChatCompletionsPayload
+    rebuildPreparedPayload?: (
+      source: AnthropicMessagesPayload,
+    ) => Promise<ChatCompletionsPayload | undefined>
     requestedModel?: string
   },
 ) => {
@@ -872,22 +938,19 @@ const handleWithChatCompletions = async (
     return await executeChatCompletions(c, anthropicPayload, options)
   } catch (error) {
     if (error instanceof HTTPError && error.response.status === 400) {
-      const body = await error.response.clone().text()
-      const isSignatureError =
-        body.includes("Invalid signature")
-        || body.includes("Invalid `signature`")
-      // Generic "Bad Request" with reasoning enabled means CAPI rejected
-      // because reasoning_opaque was missing or invalid on prior turns.
-      const isReasoningBadRequest =
-        body.trim() === "Bad Request"
-        && Boolean(options?.effortOverride || anthropicPayload.thinking)
-
-      if (
-        (isSignatureError || isReasoningBadRequest)
-        && stripThinkingBlocks(anthropicPayload)
-      ) {
-        const reason =
-          isSignatureError ? "invalid signature" : "Bad Request with reasoning"
+      const reasoningEnabled = Boolean(
+        options?.effortOverride || anthropicPayload.thinking,
+      )
+      if (await isKnownTranslatedSignatureError(error, reasoningEnabled)) {
+        const recoveredSource = structuredClone(anthropicPayload)
+        if (!stripThinkingBlocks(recoveredSource)) throw error
+        delete recoveredSource.thinking
+        const recoveredPrepared =
+          options?.rebuildPreparedPayload ?
+            await options.rebuildPreparedPayload(recoveredSource)
+          : undefined
+        if (!recoveredPrepared) throw error
+        const reason = "invalid signature"
         recordNonDefaultBehavior(c, {
           kind: "reasoning_retry_without_thinking",
           message: `Stripped thinking blocks due to ${reason}, retrying ChatCompletions without reasoning`,
@@ -900,10 +963,10 @@ const handleWithChatCompletions = async (
         // Fully downgrade reasoning: clear thinking config AND effortOverride.
         // Clearing effortOverride alone is insufficient — executeChatCompletions
         // re-adds reasoning_effort when anthropicPayload.thinking is present.
-        delete anthropicPayload.thinking
-        return await executeChatCompletions(c, anthropicPayload, {
+        return await executeChatCompletions(c, recoveredSource, {
           ...options,
           effortOverride: undefined,
+          preparedPayload: recoveredPrepared,
         })
       }
     }
@@ -919,6 +982,9 @@ const executeChatCompletions = async (
     initiatorOverride?: "agent" | "user"
     effortOverride?: ReasoningEffort
     preparedPayload?: ChatCompletionsPayload
+    rebuildPreparedPayload?: (
+      source: AnthropicMessagesPayload,
+    ) => Promise<ChatCompletionsPayload | undefined>
     requestedModel?: string
   },
 ) => {
@@ -929,19 +995,6 @@ const executeChatCompletions = async (
     preparedPayload,
     requestedModel,
   } = options ?? {}
-  const reasoningEnabled = Boolean(effortOverride || anthropicPayload.thinking)
-
-  // In multi-token mode, reasoning_opaque is cryptographically tied to a
-  // specific Copilot token. Stripping thinking blocks destroys reasoning_opaque,
-  // but CAPI requires it when reasoning is enabled — missing it causes 400.
-  // Preserve thinking blocks when reasoning is enabled so reasoning_opaque
-  // flows through; session routing keeps requests on the same account.
-  // If the signature IS invalid (wrong account), CAPI returns "Invalid
-  // signature" and the retry in handleWithChatCompletions handles it.
-  if (!reasoningEnabled) {
-    stripThinkingBlocksForMultiToken(anthropicPayload)
-  }
-
   const openAIPayload =
     preparedPayload ?
       structuredClone(preparedPayload)
@@ -950,7 +1003,7 @@ const executeChatCompletions = async (
   // Enable thinking/reasoning on the ChatCompletions path
   // Copilot API uses reasoning_effort to enable thinking (returns reasoning_text in response)
   // thinking_budget is also sent for models that support explicit budget control
-  if (anthropicPayload.thinking) {
+  if (!preparedPayload && anthropicPayload.thinking) {
     const extra = openAIPayload as unknown as Record<string, unknown>
     const usesImplicitDefault = usesImplicitReasoningDefault(
       normalizeModelName(openAIPayload.model),
@@ -983,7 +1036,8 @@ const executeChatCompletions = async (
     openAIPayload.temperature = 1
     delete openAIPayload.top_p
   } else if (
-    effortOverride
+    !preparedPayload
+    && effortOverride
     && !usesImplicitReasoningDefault(normalizeModelName(openAIPayload.model))
   ) {
     // Subagent/skill requests may set output_config.effort without a thinking
@@ -995,15 +1049,16 @@ const executeChatCompletions = async (
     delete openAIPayload.top_p
   }
 
-  const { payload: replacedPayload, appliedRules } =
-    await applyReplacementsToPayload(openAIPayload)
-  if (anthropicPayload.thinking) {
+  const replacedPayload = openAIPayload
+  const appliedRules: Array<string> = []
+  if (!preparedPayload && anthropicPayload.thinking) {
     applyThinkingBudget(
       replacedPayload,
       anthropicPayload.thinking.budget_tokens,
     )
   }
-  const customReference = resolveCustomChatModel(replacedPayload.model)
+  const customReference =
+    preparedPayload ? undefined : resolveCustomChatModel(replacedPayload.model)
   if (customReference) {
     const customPayload = {
       ...replacedPayload,
@@ -1682,6 +1737,9 @@ const handleWithResponsesApi = async (
     initiatorOverride?: "agent" | "user"
     effortOverride?: ReasoningEffort
     preparedPayload?: ResponsesPayload
+    rebuildPreparedPayload?: (
+      source: AnthropicMessagesPayload,
+    ) => Promise<ResponsesPayload | undefined>
     requestedModel?: string
   },
 ) => {
@@ -1689,20 +1747,19 @@ const handleWithResponsesApi = async (
     return await executeResponsesApi(c, anthropicPayload, options)
   } catch (error) {
     if (error instanceof HTTPError && error.response.status === 400) {
-      const body = await error.response.clone().text()
-      const isSignatureError =
-        body.includes("Invalid signature")
-        || body.includes("Invalid `signature`")
-      const isReasoningBadRequest =
-        body.trim() === "Bad Request"
-        && Boolean(options?.effortOverride || anthropicPayload.thinking)
-
-      if (
-        (isSignatureError || isReasoningBadRequest)
-        && stripThinkingBlocks(anthropicPayload)
-      ) {
-        const reason =
-          isSignatureError ? "invalid signature" : "Bad Request with reasoning"
+      const reasoningEnabled = Boolean(
+        options?.effortOverride || anthropicPayload.thinking,
+      )
+      if (await isKnownTranslatedSignatureError(error, reasoningEnabled)) {
+        const recoveredSource = structuredClone(anthropicPayload)
+        if (!stripThinkingBlocks(recoveredSource)) throw error
+        delete recoveredSource.thinking
+        const recoveredPrepared =
+          options?.rebuildPreparedPayload ?
+            await options.rebuildPreparedPayload(recoveredSource)
+          : undefined
+        if (!recoveredPrepared) throw error
+        const reason = "invalid signature"
         recordNonDefaultBehavior(c, {
           kind: "reasoning_retry_without_thinking",
           message: `Stripped thinking blocks due to ${reason}, retrying Responses without reasoning`,
@@ -1712,10 +1769,10 @@ const handleWithResponsesApi = async (
             endpoint: "Responses",
           },
         })
-        delete anthropicPayload.thinking
-        return await executeResponsesApi(c, anthropicPayload, {
+        return await executeResponsesApi(c, recoveredSource, {
           ...options,
           effortOverride: undefined,
+          preparedPayload: recoveredPrepared,
         })
       }
     }
@@ -1731,6 +1788,9 @@ const executeResponsesApi = async (
     initiatorOverride?: "agent" | "user"
     effortOverride?: ReasoningEffort
     preparedPayload?: ResponsesPayload
+    rebuildPreparedPayload?: (
+      source: AnthropicMessagesPayload,
+    ) => Promise<ResponsesPayload | undefined>
     requestedModel?: string
   },
 ) => {
@@ -1741,10 +1801,6 @@ const executeResponsesApi = async (
     preparedPayload,
     requestedModel,
   } = options ?? {}
-  const reasoningEnabled = Boolean(effortOverride || anthropicPayload.thinking)
-  if (!reasoningEnabled) {
-    stripThinkingBlocksForMultiToken(anthropicPayload)
-  }
   const responsesPayload =
     preparedPayload ?
       structuredClone(preparedPayload)

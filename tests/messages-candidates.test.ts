@@ -1,10 +1,35 @@
-import { expect, test } from "bun:test"
+import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
 
 import type { AnthropicMessagesPayload } from "~/routes/messages/anthropic-types"
 import type { Model } from "~/services/copilot/get-models"
 
 import { selectEvaluatedCopilotCandidate } from "~/lib/endpoint-routing"
 import { prepareMessagesCandidates } from "~/routes/messages/messages-candidates"
+
+const originalFetch = globalThis.fetch
+let attachmentFetchCount = 0
+
+const fetchMock = mock((url: string | URL | Request) => {
+  attachmentFetchCount += 1
+  const value = url instanceof Request ? url.url : String(url)
+  const isPdf = value.endsWith(".pdf")
+  return new Response(isPdf ? "%PDF-1.4 candidate" : "image", {
+    headers: { "content-type": isPdf ? "application/pdf" : "image/png" },
+  })
+})
+
+beforeAll(() => {
+  globalThis.fetch = fetchMock as unknown as typeof fetch
+})
+
+afterAll(() => {
+  globalThis.fetch = originalFetch
+})
+
+beforeEach(() => {
+  attachmentFetchCount = 0
+  fetchMock.mockClear()
+})
 
 const selectedModel: Model = {
   id: "claude-current",
@@ -160,5 +185,104 @@ test("ordinary translated candidates do not invent sampling or parallel defaults
   })
   expect(candidates.responses?.payload).not.toHaveProperty(
     "parallel_tool_calls",
+  )
+})
+
+test("does no attachment work for unadvertised translated candidates", async () => {
+  await prepareMessagesCandidates({
+    source: createSource({
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "image",
+              source: { type: "url", url: "https://attachment.test/image.png" },
+            },
+          ],
+        },
+      ],
+    }),
+    selectedModel: { ...selectedModel, supported_endpoints: ["/v1/messages"] },
+  })
+
+  expect(attachmentFetchCount).toBe(1)
+})
+
+test("shares one URL fetch while keeping Chat and Responses attachment semantics independent", async () => {
+  const candidates = await prepareMessagesCandidates({
+    source: createSource({
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "keep sibling" },
+            {
+              type: "document",
+              source: {
+                type: "url",
+                url: "https://attachment.test/report.pdf",
+              },
+              title: "report.pdf",
+            },
+          ],
+        },
+      ],
+    }),
+    selectedModel: {
+      ...selectedModel,
+      supported_endpoints: ["/responses", "/chat/completions"],
+    },
+  })
+
+  expect(attachmentFetchCount).toBe(1)
+  expect(JSON.stringify(candidates.responses?.payload)).toContain("input_file")
+  expect(JSON.stringify(candidates.responses?.payload)).toContain(
+    "keep sibling",
+  )
+  expect(JSON.stringify(candidates.chat?.payload)).not.toContain(
+    '"type":"file"',
+  )
+  expect(JSON.stringify(candidates.chat?.payload)).toContain("keep sibling")
+  expect(candidates.chat?.check.findings).toContainEqual({
+    class: "attachment",
+    severity: "omitted",
+  })
+})
+
+test("degrades unsupported tools per target with bounded private findings", async () => {
+  const candidates = await prepareMessagesCandidates({
+    source: createSource({
+      tools: [
+        {
+          name: "lookup_private",
+          input_schema: { type: "object", properties: {} },
+        },
+        {
+          type: "web_fetch_20250910",
+          name: "PRIVATE_WEB_FETCH",
+          allowed_domains: ["private.example"],
+        },
+      ],
+    }),
+    selectedModel: {
+      ...selectedModel,
+      supported_endpoints: ["/responses", "/chat/completions"],
+    },
+  })
+
+  expect(candidates.chat?.check.findings).toContainEqual({
+    class: "tool_shape",
+    severity: "omitted",
+  })
+  expect(candidates.responses?.check.findings).toContainEqual({
+    class: "tool_shape",
+    severity: "omitted",
+  })
+  expect(JSON.stringify(candidates.chat?.check.findings)).not.toContain(
+    "PRIVATE_WEB_FETCH",
+  )
+  expect(JSON.stringify(candidates.responses?.payload)).toContain(
+    "lookup_private",
   )
 })

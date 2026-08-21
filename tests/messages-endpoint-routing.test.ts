@@ -1013,6 +1013,32 @@ test("recovers once from a deterministic native signature rejection", async () =
   debugSpy.mockRestore()
 })
 
+test("finalizes native tool-result merging before the selected first wire", async () => {
+  installModel({ supported_endpoints: ["/v1/messages"] })
+
+  const response = await postMessages({
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "toolu_review",
+            content: "parsed",
+          },
+          { type: "text", text: "Use that result." },
+        ],
+      },
+    ],
+  })
+
+  expect(response.status).toBe(200)
+  expect(upstreamBodies[0]).toHaveProperty(
+    "messages.0.content.0.content",
+    "parsed\n\nUse that result.",
+  )
+})
+
 test("keeps native signature recovery on the account used by the first send", async () => {
   installModel({ supported_endpoints: ["/v1/messages"] })
   state.isMultiToken = true
