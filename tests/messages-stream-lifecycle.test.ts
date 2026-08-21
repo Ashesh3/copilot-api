@@ -590,8 +590,8 @@ test("closes a native open block before the successful message_stop", async () =
     "message_start",
     "content_block_start",
     "content_block_delta",
-    "message_delta",
     "content_block_stop",
+    "message_delta",
     "message_stop",
   ])
 })

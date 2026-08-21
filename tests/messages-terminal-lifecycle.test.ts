@@ -137,6 +137,31 @@ test("requires a real Chat finish reason before writing the success terminal", (
   expect(state.terminal).toBe("succeeded")
 })
 
+test("buffers Chat argument fragments until split tool identity is complete", () => {
+  const state = createChatState()
+  const translated = [
+    chatChunk({
+      tool_calls: [{ index: 0, function: { arguments: '{"q":"docs"}' } }],
+    }),
+    chatChunk({
+      tool_calls: [
+        {
+          index: 0,
+          id: "call_1",
+          type: "function",
+          function: { name: "lookup" },
+        },
+      ],
+    }),
+  ].flatMap((chunk) => translateChunkToAnthropicEvents(chunk, state))
+
+  expect(translated).toContainEqual({
+    type: "content_block_delta",
+    index: 0,
+    delta: { type: "input_json_delta", partial_json: '{"q":"docs"}' },
+  })
+})
+
 test("preserves exact textual and binary upstream failures once", async () => {
   for (const fixture of [
     {

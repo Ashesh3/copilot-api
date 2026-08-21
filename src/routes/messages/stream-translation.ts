@@ -328,9 +328,17 @@ export function translateChunkToAnthropicEvents(
         id: "",
         name: "",
         anthropicBlockIndex: state.contentBlockIndex,
+        pendingArguments: [],
       })
       if (toolCall.id) toolCallInfo.id += toolCall.id
       if (toolCall.function?.name) toolCallInfo.name += toolCall.function.name
+      const wasStarted =
+        state.startedToolCallIndices?.has(toolCallInfo.anthropicBlockIndex)
+        ?? false
+      if (toolCall.function?.arguments) {
+        toolCallInfo.pendingArguments ??= []
+        toolCallInfo.pendingArguments.push(toolCall.function.arguments)
+      }
 
       state.startedToolCallIndices ??= new Set()
       if (
@@ -365,11 +373,25 @@ export function translateChunkToAnthropicEvents(
           },
         })
         state.contentBlockOpen = true
+
+        for (const argumentsText of toolCallInfo.pendingArguments ?? []) {
+          events.push({
+            type: "content_block_delta",
+            index: toolCallInfo.anthropicBlockIndex,
+            delta: {
+              type: "input_json_delta",
+              partial_json: argumentsText,
+            },
+          })
+        }
+        toolCallInfo.pendingArguments = []
       }
 
       if (
         toolCall.function?.arguments
         && state.startedToolCallIndices.has(toolCallInfo.anthropicBlockIndex)
+        && wasStarted
+        && (toolCallInfo.pendingArguments?.length ?? 0) > 0
       ) {
         events.push({
           type: "content_block_delta",
@@ -379,6 +401,7 @@ export function translateChunkToAnthropicEvents(
             partial_json: toolCall.function.arguments,
           },
         })
+        toolCallInfo.pendingArguments = []
       }
     }
   }

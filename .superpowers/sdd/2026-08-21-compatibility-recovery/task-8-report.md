@@ -48,3 +48,35 @@ failures, and custom-provider Chat EOF.
 - `git diff --check`: pass.
 
 Per task direction, the full repository suite was not run.
+
+## Review fix round 1
+
+- Native success now defers both `message_delta` and `message_stop` until every
+  tracked open block has emitted `content_block_stop`.
+- Direct and explicit web-search-buffered Chat streams commit the first valid
+  non-null finish reason. Later iterator faults, received-error frames, and
+  malformed frames cannot replace it; trailing usage-only chunks are still
+  captured before the normal terminal is written.
+- Responses function calls now start when complete call id/name are present even
+  when the initial arguments string is empty, so incomplete, failure, and EOF
+  finalizers close a real `tool_use` block instead of losing the call.
+- Chat argument fragments that arrive before split id/name completion are
+  buffered per normalized tool index and flushed in order as soon as the
+  `tool_use` block starts. This is binding because the Chat chunk schema makes
+  id, name, and arguments independently optional.
+
+### Review-fix TDD evidence
+
+- RED focused run: 31 pass, 9 fail. The failures reproduced invalid native
+  terminal order, finish-then-throw/received-error replacement in direct and
+  buffered Chat paths, lost arguments-before-identity, and empty-argument
+  Responses tools disappearing before incomplete/failure/EOF.
+- A subsequent RED addition for trailing usage after finish failed in both
+  direct and buffered paths with `output_tokens: 0` instead of 7.
+- GREEN focused/adjacent suite: 142 pass, 0 fail, 562 expectations across nine
+  files.
+- `bun run typecheck`: pass.
+- Exact lint for all changed Task 8 source/tests: pass; only the existing
+  baseline-browser-mapping age advisory was printed.
+- `bun run build`: pass.
+- `git diff --check`: pass.

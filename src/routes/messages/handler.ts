@@ -590,16 +590,33 @@ const streamChatCompletionsWithWebSearch = async (
 ): Promise<BufferedChatCompletionsResult> => {
   const { stream, owner } = target
   const bufferedChunks: Array<ChatCompletionChunk> = []
+  let finalSeen = false
+  const iterator = response[Symbol.asyncIterator]()
 
-  for await (const rawEvent of response) {
-    if (rawEvent.data === "[DONE]") break
-    if (!rawEvent.data) continue
-    const parsedValue = JSON.parse(rawEvent.data) as unknown
-    if (isReceivedChatStreamError(parsedValue)) {
-      await owner.adapter.failReceived(createReceivedChatMessagesError())
-      break
+  try {
+    while (true) {
+      const next = await iterator.next()
+      if (next.done) break
+      const rawEvent = next.value
+      if (rawEvent.data === "[DONE]") break
+      if (!rawEvent.data) continue
+      const parsedValue = JSON.parse(rawEvent.data) as unknown
+      if (isReceivedChatStreamError(parsedValue)) {
+        await owner.adapter.failReceived(createReceivedChatMessagesError())
+        break
+      }
+      const chunk = parsedValue as ChatCompletionChunk
+      bufferedChunks.push(chunk)
+      if (hasChatFinishReason(chunk)) {
+        finalSeen = true
+        await consumeTrailingChatUsage(iterator, (usageChunk) => {
+          bufferedChunks.push(usageChunk)
+        })
+        break
+      }
     }
-    bufferedChunks.push(parsedValue as ChatCompletionChunk)
+  } catch (error) {
+    if (!finalSeen) throw error
   }
 
   if (owner.adapter.lifecycle.state !== "open") {
@@ -672,53 +689,105 @@ const streamChatCompletionsDirect = async (
   let streamOutputTokens = 0
   let streamCachedTokens = 0
   let streamText = ""
+  let finalSeen = false
+  const iterator = response[Symbol.asyncIterator]()
 
-  for await (const rawEvent of response) {
-    if (rawEvent.data === "[DONE]") break
-    if (!rawEvent.data) continue
-    const parsedValue = JSON.parse(rawEvent.data) as unknown
-    if (isReceivedChatStreamError(parsedValue)) {
-      await owner.adapter.failReceived(createReceivedChatMessagesError())
-      break
-    }
-    const chunk = parsedValue as ChatCompletionChunk
+  try {
+    while (true) {
+      const next = await iterator.next()
+      if (next.done) break
+      const rawEvent = next.value
+      if (rawEvent.data === "[DONE]") break
+      if (!rawEvent.data) continue
+      const parsedValue = JSON.parse(rawEvent.data) as unknown
+      if (isReceivedChatStreamError(parsedValue)) {
+        await owner.adapter.failReceived(createReceivedChatMessagesError())
+        break
+      }
+      const chunk = parsedValue as ChatCompletionChunk
 
-    if (chunk.usage) {
-      streamInputTokens = chunk.usage.prompt_tokens
-      streamOutputTokens = chunk.usage.completion_tokens
-      streamCachedTokens = chunk.usage.prompt_tokens_details?.cached_tokens ?? 0
-    }
-    for (const choice of chunk.choices) {
-      streamText += choice.delta.content ?? ""
-    }
+      if (chunk.usage) {
+        streamInputTokens = chunk.usage.prompt_tokens
+        streamOutputTokens = chunk.usage.completion_tokens
+        streamCachedTokens =
+          chunk.usage.prompt_tokens_details?.cached_tokens ?? 0
+      }
+      for (const choice of chunk.choices) {
+        streamText += choice.delta.content ?? ""
+      }
 
-    const events = translateChunkToAnthropicEvents(
-      chunk,
-      streamState,
-      requestedModel,
-    )
-    for (const event of events) {
-      await stream.writeSSE({
-        event: event.type,
-        data: JSON.stringify(event),
-      })
+      const events = translateChunkToAnthropicEvents(
+        chunk,
+        streamState,
+        requestedModel,
+      )
+      for (const event of events) {
+        await stream.writeSSE({
+          event: event.type,
+          data: JSON.stringify(event),
+        })
+      }
+      if (streamState.pendingFinishReason) {
+        finalSeen = true
+        await consumeTrailingChatUsage(iterator, (usageChunk) => {
+          if (!usageChunk.usage) return
+          streamInputTokens = usageChunk.usage.prompt_tokens
+          streamOutputTokens = usageChunk.usage.completion_tokens
+          streamCachedTokens =
+            usageChunk.usage.prompt_tokens_details?.cached_tokens ?? 0
+          translateChunkToAnthropicEvents(
+            usageChunk,
+            streamState,
+            requestedModel,
+          )
+        })
+        await owner.adapter.succeed(async () => {
+          await writeAnthropicEvents(
+            stream,
+            createFallbackMessageDeltaEvents(streamState),
+          )
+        })
+        break
+      }
     }
+  } catch (error) {
+    if (!finalSeen) throw error
   }
 
-  await (streamState.pendingFinishReason ?
-    owner.adapter.succeed(async () => {
-      await writeAnthropicEvents(
-        stream,
-        createFallbackMessageDeltaEvents(streamState),
-      )
-    })
-  : owner.adapter.finishSource())
+  if (!finalSeen) await owner.adapter.finishSource()
 
   return {
     inputTokens: streamInputTokens,
     outputTokens: streamOutputTokens,
     cachedTokens: streamCachedTokens,
     responseText: streamText,
+  }
+}
+
+const hasChatFinishReason = (chunk: ChatCompletionChunk): boolean =>
+  chunk.choices.some((choice) => choice.finish_reason !== null)
+
+const consumeTrailingChatUsage = async (
+  response: AsyncIterator<{ data?: string }>,
+  consume: (chunk: ChatCompletionChunk) => void,
+): Promise<void> => {
+  while (true) {
+    let next: IteratorResult<{ data?: string }>
+    try {
+      next = await response.next()
+    } catch {
+      return
+    }
+    if (next.done || next.value.data === "[DONE]") return
+    if (!next.value.data) continue
+    try {
+      const parsed = JSON.parse(next.value.data) as unknown
+      if (isReceivedChatStreamError(parsed)) return
+      const chunk = parsed as ChatCompletionChunk
+      if (chunk.choices.length === 0 && chunk.usage) consume(chunk)
+    } catch {
+      return
+    }
   }
 }
 

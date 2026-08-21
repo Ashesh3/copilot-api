@@ -170,7 +170,7 @@ const handleOutputItemAdded = (
     toolCallId,
     name,
     events,
-    start: Boolean(initialArguments),
+    start: initialArguments !== undefined,
   })
 
   if (initialArguments !== undefined && initialArguments.length > 0) {

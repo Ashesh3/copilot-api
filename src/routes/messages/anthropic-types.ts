@@ -454,6 +454,7 @@ export interface AnthropicStreamState {
       id: string
       name: string
       anthropicBlockIndex: number
+      pendingArguments?: Array<string>
     }
   }
   startedToolCallIndices?: Set<number>

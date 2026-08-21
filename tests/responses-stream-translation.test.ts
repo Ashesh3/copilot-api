@@ -260,3 +260,87 @@ test("preserves split Responses tool id and name before argument deltas", () => 
     },
   ])
 })
+
+test.each(["incomplete", "failed", "eof"] as const)(
+  "starts an empty-argument Responses tool before %s and closes it",
+  (terminal) => {
+    const state = createResponsesStreamState()
+    const added = translateResponsesStreamEvent(
+      {
+        type: "response.output_item.added",
+        sequence_number: 1,
+        output_index: 0,
+        item: {
+          id: "item_empty",
+          type: "function_call",
+          status: "in_progress",
+          call_id: "call_empty",
+          name: "lookup",
+          arguments: "",
+        },
+      } as never,
+      state,
+    )
+    if (added.kind !== "events") throw new Error("Expected events")
+
+    const terminalResult =
+      terminal === "eof" ? undefined : (
+        translateResponsesStreamEvent(
+          terminal === "incomplete" ?
+            ({
+              type: "response.incomplete",
+              sequence_number: 2,
+              response: {
+                id: "resp_empty",
+                object: "response",
+                created_at: 1,
+                status: "incomplete",
+                model: "gpt-4o",
+                output: [],
+                output_text: "",
+                parallel_tool_calls: true,
+                tool_choice: "auto",
+                tools: [],
+              },
+            } as never)
+          : ({
+              type: "response.failed",
+              sequence_number: 2,
+              response: {
+                id: "resp_empty",
+                object: "response",
+                created_at: 1,
+                status: "failed",
+                model: "gpt-4o",
+                output: [],
+                output_text: "",
+                parallel_tool_calls: true,
+                tool_choice: "auto",
+                tools: [],
+              },
+            } as never),
+          state,
+        )
+      )
+
+    expect(added.events).toEqual([
+      {
+        type: "content_block_start",
+        index: 0,
+        content_block: {
+          type: "tool_use",
+          id: "call_empty",
+          name: "lookup",
+          input: {},
+        },
+      },
+    ])
+    let expectedKind: "failure" | "success" | undefined
+    if (terminal === "incomplete") expectedKind = "success"
+    else if (terminal === "failed") expectedKind = "failure"
+    expect(terminalResult?.kind).toBe(expectedKind)
+    expect(closeResponsesOpenBlocks(state)).toEqual([
+      { type: "content_block_stop", index: 0 },
+    ])
+  },
+)

@@ -144,6 +144,8 @@ async function consumeNativeMessageStream(
           data: JSON.stringify(event),
         })
       }
+      const pendingDelta = takePendingNativeMessageDelta(state.lifecycle)
+      if (pendingDelta) await stream.writeSSE(pendingDelta)
       const pending = takePendingMessageStop(state.lifecycle)
       if (pending) await stream.writeSSE(pending)
     })
@@ -176,8 +178,11 @@ async function forwardNativeChunk(
     // No default
   }
   const eventType = chunk.event ?? parsed.type
+  if (eventType === "message_delta") {
+    setPendingNativeMessageDelta(state.lifecycle, chunk.event, data)
+  }
   const terminal = await updateNativeLifecycle(state, eventType, parsed)
-  if (!terminal) {
+  if (!terminal && eventType !== "message_delta") {
     await stream.writeSSE({
       ...(chunk.event ? { event: chunk.event } : {}),
       data,
@@ -232,7 +237,24 @@ type NativeForwardingState = {
   terminal: "open" | "succeeded" | "failed"
   openBlockIndices: Set<number>
   messageStarted: boolean
+  pendingMessageDelta?: { data: string; event?: string }
   pendingMessageStop?: { data: string; event?: string }
+}
+
+function setPendingNativeMessageDelta(
+  state: NativeForwardingState,
+  event: string | undefined,
+  data: string,
+): void {
+  state.pendingMessageDelta = { ...(event ? { event } : {}), data }
+}
+
+function takePendingNativeMessageDelta(
+  state: NativeForwardingState,
+): NativeForwardingState["pendingMessageDelta"] {
+  const pending = state.pendingMessageDelta
+  state.pendingMessageDelta = undefined
+  return pending
 }
 
 function setPendingMessageStop(
