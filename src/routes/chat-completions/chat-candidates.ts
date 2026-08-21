@@ -67,6 +67,8 @@ export interface PreparedChatCandidates {
 
 interface CandidateContext {
   readonly findings: Array<TranslationFinding>
+  readonly pendingResultCallIds: Set<string>
+  readonly reservedCallIds: Set<string>
   readonly usedCallIds: Set<string>
 }
 
@@ -116,10 +118,27 @@ function addFinding(
 }
 
 function createContext(
+  source: PreparedChatCompletionsSource,
   findings: ReadonlyArray<TranslationFinding> = [],
 ): CandidateContext {
+  const reservedCallIds = new Set<string>()
+  for (const message of source.messages) {
+    for (const toolCall of getToolCalls(message)) {
+      if (typeof toolCall.id === "string" && toolCall.id.trim()) {
+        reservedCallIds.add(toolCall.id)
+      }
+    }
+    if (
+      typeof message.tool_call_id === "string"
+      && message.tool_call_id.trim()
+    ) {
+      reservedCallIds.add(message.tool_call_id)
+    }
+  }
   return {
     findings: findings.map((finding) => ({ ...finding })),
+    pendingResultCallIds: new Set(),
+    reservedCallIds,
     usedCallIds: new Set(),
   }
 }
@@ -136,10 +155,21 @@ function createCallId(
     && !context.usedCallIds.has(supplied)
   ) {
     context.usedCallIds.add(supplied)
+    context.pendingResultCallIds.add(supplied)
     return supplied
   }
-  const generated = `chat_call_${messageIndex}_${callIndex}`
+  const base = `chat_call_${messageIndex}_${callIndex}`
+  let generated = base
+  let suffix = 0
+  while (
+    context.reservedCallIds.has(generated)
+    || context.usedCallIds.has(generated)
+  ) {
+    suffix += 1
+    generated = `${base}_${suffix}`
+  }
   context.usedCallIds.add(generated)
+  context.pendingResultCallIds.add(generated)
   addFinding(context.findings, {
     class: "tool_history",
     severity: "adapted",
@@ -527,7 +557,7 @@ function convertResponsesInput(
       if (
         typeof supplied === "string"
         && supplied.trim()
-        && context.usedCallIds.has(supplied)
+        && context.pendingResultCallIds.delete(supplied)
       ) {
         input.push({
           type: "function_call_output",
@@ -587,7 +617,7 @@ function adaptChatToResponses(
   sourceFindings: ReadonlyArray<TranslationFinding>,
 ): ResponsesChatCandidate {
   // eslint-disable-next-line @eslint-react/naming-convention/context-name -- protocol candidate state, not React context
-  const candidateState = createContext(sourceFindings)
+  const candidateState = createContext(source, sourceFindings)
   const input = convertResponsesInput(clone(source), candidateState)
   const tools = convertResponsesTools(source, candidateState.findings)
   const instructions = getInstructions(source)
@@ -933,7 +963,7 @@ async function convertAnthropicMessages(
       if (
         typeof supplied === "string"
         && supplied.trim()
-        && context.usedCallIds.has(supplied)
+        && context.pendingResultCallIds.delete(supplied)
       ) {
         messages.push({
           role: "user",
@@ -982,7 +1012,7 @@ async function adaptChatToMessages(
   sourceFindings: ReadonlyArray<TranslationFinding>,
 ): Promise<MessagesChatCandidate> {
   // eslint-disable-next-line @eslint-react/naming-convention/context-name -- protocol candidate state, not React context
-  const candidateState = createContext(sourceFindings)
+  const candidateState = createContext(source, sourceFindings)
   const converted = await convertAnthropicMessages(
     clone(source),
     candidateState,

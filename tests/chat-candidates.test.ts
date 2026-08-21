@@ -160,6 +160,197 @@ describe("Chat endpoint candidates", () => {
     ])
   })
 
+  test("consumes each translated tool call result pairing once", async () => {
+    const source = prepareChatCompletionsRequest({
+      model: "future-model",
+      messages: [
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: {
+            id: "call_a",
+            type: "function",
+            function: { name: "lookup", arguments: "{}" },
+          },
+        },
+        { role: "tool", tool_call_id: "call_a", content: "first result" },
+        { role: "tool", tool_call_id: "call_a", content: "second result" },
+      ],
+    }).source
+
+    const candidates = await prepareChatCandidates({
+      source,
+      selectedModel: model,
+      nativeMessagesOptions: {},
+    })
+
+    expect(candidates.responses.payload.input).toEqual([
+      {
+        type: "function_call",
+        call_id: "call_a",
+        name: "lookup",
+        arguments: "{}",
+        status: "completed",
+      },
+      {
+        type: "function_call_output",
+        call_id: "call_a",
+        output: "first result",
+      },
+      {
+        type: "message",
+        role: "user",
+        content: "[Unpaired tool result]\nsecond result",
+      },
+    ])
+    expect(candidates.messages.payload.messages).toEqual([
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "call_a",
+            name: "lookup",
+            input: {},
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "call_a",
+            content: "first result",
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: "[Unpaired tool result]\nsecond result",
+      },
+    ])
+  })
+
+  test("pairs interleaved translated tool results by ID", async () => {
+    const source = prepareChatCompletionsRequest({
+      model: "future-model",
+      messages: [
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: {
+            id: "call_a",
+            type: "function",
+            function: { name: "lookup", arguments: "{}" },
+          },
+        },
+        { role: "user", content: "interrupt" },
+        { role: "tool", tool_call_id: "call_a", content: "late result" },
+      ],
+    }).source
+
+    const candidates = await prepareChatCandidates({
+      source,
+      selectedModel: model,
+      nativeMessagesOptions: {},
+    })
+
+    expect(candidates.responses.payload.input).toEqual([
+      {
+        type: "function_call",
+        call_id: "call_a",
+        name: "lookup",
+        arguments: "{}",
+        status: "completed",
+      },
+      { type: "message", role: "user", content: "interrupt" },
+      {
+        type: "function_call_output",
+        call_id: "call_a",
+        output: "late result",
+      },
+    ])
+    expect(candidates.messages.payload.messages).toEqual([
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "call_a",
+            name: "lookup",
+            input: {},
+          },
+        ],
+      },
+      { role: "user", content: [{ type: "text", text: "interrupt" }] },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "call_a",
+            content: "late result",
+          },
+        ],
+      },
+    ])
+  })
+
+  test("keeps generated tool IDs distinct from every caller-supplied ID", async () => {
+    const source = prepareChatCompletionsRequest({
+      model: "future-model",
+      messages: [
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              type: "function",
+              function: { name: "generated", arguments: "{}" },
+            },
+            {
+              id: "chat_call_0_0",
+              type: "function",
+              function: { name: "reserved", arguments: "{}" },
+            },
+            {
+              id: "chat_call_0_0_1",
+              type: "function",
+              function: { name: "also_reserved", arguments: "{}" },
+            },
+          ],
+        },
+      ],
+    }).source
+
+    const candidates = await prepareChatCandidates({
+      source,
+      selectedModel: model,
+      nativeMessagesOptions: {},
+    })
+    const responseCalls = (
+      candidates.responses.payload.input as Array<Record<string, unknown>>
+    ).filter((item) => item.type === "function_call")
+    const messageToolUses = candidates.messages.payload.messages.flatMap(
+      (message) =>
+        Array.isArray(message.content) ?
+          message.content.filter((block) => block.type === "tool_use")
+        : [],
+    )
+
+    expect(responseCalls.map((item) => item.call_id)).toEqual([
+      "chat_call_0_0_2",
+      "chat_call_0_0",
+      "chat_call_0_0_1",
+    ])
+    expect(messageToolUses.map((block) => block.id)).toEqual([
+      "chat_call_0_0_2",
+      "chat_call_0_0",
+      "chat_call_0_0_1",
+    ])
+  })
+
   test("repairs schemas on target copies without changing source", async () => {
     const source = prepareChatCompletionsRequest({
       model: "future-model",
