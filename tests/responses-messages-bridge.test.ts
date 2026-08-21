@@ -375,7 +375,7 @@ test("passes explicit native options through the Responses Messages bridge", asy
   }
 })
 
-test("does not default an explicit null max_output_tokens during native dispatch", async () => {
+test("defaults translated null Responses max_output_tokens at Messages native dispatch", async () => {
   const originalFetch = globalThis.fetch
   const originalAccountType = state.accountType
   const originalCopilotToken = state.copilotToken
@@ -443,7 +443,7 @@ test("does not default an explicit null max_output_tokens during native dispatch
     })
 
     expect(result.model).toBe("claude-current")
-    expect(requestBody).toHaveProperty("max_tokens", null)
+    expect(requestBody).toHaveProperty("max_tokens", 1024)
   } finally {
     ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
     // eslint-disable-next-line require-atomic-updates

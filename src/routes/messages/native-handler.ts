@@ -74,6 +74,7 @@ export interface NativeMessagesRequestOptions
   routedAccountPin?: RoutedAccountPin
   retryBudget?: RetryBudget
   webSearchMaxUses?: number
+  toolsPrepared?: boolean
 }
 
 type NativeMessagesDispatchOptions = {
@@ -326,7 +327,13 @@ export async function handleWithNativeMessages(
 
   const requestedStream = Boolean(anthropicPayload.stream)
   const { payload, usesWebSearch, webSearchMaxUses } =
-    prepareNativeTools(anthropicPayload)
+    options.toolsPrepared ?
+      {
+        payload: structuredClone(anthropicPayload),
+        usesWebSearch: hasPreparedWebSearchTool(anthropicPayload.tools),
+        webSearchMaxUses: getNativeWebSearchLimit(anthropicPayload.tools),
+      }
+    : prepareNativeTools(anthropicPayload)
 
   if (usesWebSearch) {
     return await handleWithMcpWebSearch(c, payload, {
@@ -373,6 +380,12 @@ export async function handleWithNativeMessages(
   return await streamNativeMessages(c, payload, {
     ...options,
   })
+}
+
+function hasPreparedWebSearchTool(
+  tools: AnthropicMessagesPayload["tools"],
+): boolean {
+  return tools?.some((tool) => tool.name === "web_search") ?? false
 }
 
 async function streamNativeMessages(
@@ -487,7 +500,7 @@ function recordNativeStreamUsage(
   }
 }
 
-function prepareNativeTools(payload: AnthropicMessagesPayload): {
+export function prepareNativeTools(payload: AnthropicMessagesPayload): {
   payload: AnthropicMessagesPayload
   usesWebSearch: boolean
   webSearchMaxUses?: number
@@ -648,10 +661,6 @@ export async function resolveNativeWebSearch(
       })),
     )
 
-    if (searchUses >= maxSearchUses) {
-      throw createNativeWebSearchLimitError(maxSearchUses)
-    }
-
     payload = {
       ...payload,
       stream: false,
@@ -673,7 +682,9 @@ export async function resolveNativeWebSearch(
 function getNativeWebSearchLimit(
   tools: AnthropicMessagesPayload["tools"],
 ): number {
-  const callerLimit = tools?.find((tool) => isWebSearchToolType(tool))?.max_uses
+  const callerLimit = tools?.find(
+    (tool) => isWebSearchToolType(tool) || tool.name === "web_search",
+  )?.max_uses
   return Number.isInteger(callerLimit) && Number(callerLimit) > 0 ?
       Math.min(Number(callerLimit), MAX_NATIVE_WEB_SEARCH_USES)
     : MAX_NATIVE_WEB_SEARCH_USES

@@ -515,6 +515,43 @@ test("defaults a missing native transport max_tokens from model metadata", async
   }
 })
 
+test("defaults literal null native max_tokens from model metadata", async () => {
+  const previousModels = state.models
+  state.models = {
+    object: "list",
+    data: [
+      {
+        id: "claude-transport-null-default",
+        name: "Claude Transport Null Default",
+        object: "model",
+        version: "1",
+        capabilities: {
+          family: "claude",
+          limits: { max_output_tokens: 3072 },
+          object: "model_capabilities",
+          supports: {},
+          tokenizer: "cl100k_base",
+          type: "chat",
+        },
+      },
+    ],
+  }
+  const payload: AnthropicMessagesPayload = {
+    model: "claude-transport-null-default",
+    max_tokens: null,
+    messages: [{ role: "user", content: "hello" }],
+  }
+
+  try {
+    await createAnthropicMessages(payload)
+    expect(capturedBody).toHaveProperty("max_tokens", 3072)
+    expect(payload).toHaveProperty("max_tokens", null)
+  } finally {
+    // eslint-disable-next-line require-atomic-updates
+    state.models = previousModels
+  }
+})
+
 test("preserves an explicit zero max_tokens instead of defaulting it", async () => {
   const previousModels = state.models
   state.models = {
@@ -648,7 +685,7 @@ test("preserves beta, anthropic version, and provider preference on transport re
   }
 })
 
-test.each(["unicode-βeta", "latin-é", "safe-beta,bad\u0001beta"])(
+test.each(["unicode-βeta", "latin-é"])(
   "drops invalid beta %s before physical header dispatch",
   async (anthropicBeta) => {
     const payload = {
@@ -668,6 +705,20 @@ test.each(["unicode-βeta", "latin-é", "safe-beta,bad\u0001beta"])(
     })
   },
 )
+
+test("retains valid beta siblings when another segment is invalid", async () => {
+  const payload = {
+    model: "claude-opus-4.8",
+    max_tokens: 64,
+    messages: [{ role: "user", content: "hello" }],
+  } as AnthropicMessagesPayload
+
+  await createAnthropicMessages(payload, {
+    anthropicBeta: "safe-beta,bad\u0001beta,safe-beta",
+  })
+
+  expect(capturedHeaders?.get("anthropic-beta")).toBe("safe-beta")
+})
 
 test("uses one prepared snapshot when the caller mutates after invocation", async () => {
   let resolveResponse!: (response: Response) => void

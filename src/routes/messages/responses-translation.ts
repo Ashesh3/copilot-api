@@ -85,7 +85,7 @@ export const translateAnthropicMessagesToResponsesPayload = (
     model: payload.model,
     input,
     instructions: translateSystemPrompt(payload.system, payload.model),
-    temperature: 1, // reasoning high temperature fixed to 1
+    temperature: payload.temperature,
     top_p: payload.top_p,
     max_output_tokens: payload.max_tokens,
     tools: translatedTools,
@@ -98,16 +98,15 @@ export const translateAnthropicMessagesToResponsesPayload = (
     prompt_cache_key: promptCacheKey ?? undefined,
     stream: payload.stream,
     store: false,
-    parallel_tool_calls:
-      (
-        translatedTools?.some(
-          (tool) =>
-            (tool as { type?: string; name?: string }).type === "function"
-            && (tool as { name?: string }).name === "web_search",
-        )
-      ) ?
-        false
-      : true,
+    ...((
+      translatedTools?.some(
+        (tool) =>
+          (tool as { type?: string; name?: string }).type === "function"
+          && (tool as { name?: string }).name === "web_search",
+      )
+    ) ?
+      { parallel_tool_calls: false }
+    : {}),
     text:
       payload.output_config?.format ?
         { format: payload.output_config.format }

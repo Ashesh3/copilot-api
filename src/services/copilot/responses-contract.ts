@@ -216,7 +216,7 @@ const INVALID_RESPONSES_TOOL_SNAPSHOT = Symbol(
   "invalid Responses tool snapshot",
 )
 const JSON_OBJECT_INPUT_INSTRUCTION = "Respond with JSON."
-const COPILOT_RESPONSES_MIN_OUTPUT_TOKENS = 16
+export const COPILOT_RESPONSES_MIN_OUTPUT_TOKENS = 16
 const ALWAYS_BLOCKED_RESPONSES_TOOLS = new Set([
   "code_interpreter",
   "computer_use",
@@ -898,7 +898,7 @@ function normalizeFunctionToolParameters(payload: ResponsesWireBody): boolean {
   return changed
 }
 
-function normalizeJsonSchemaResponseFormat(
+export function normalizeJsonSchemaResponseFormat(
   payload: ResponsesWireBody,
 ): boolean {
   const format = payload.text?.format

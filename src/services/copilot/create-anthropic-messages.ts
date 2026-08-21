@@ -158,7 +158,9 @@ export const createAnthropicMessages = async (
 function ensureTransportMaxTokens(
   payload: AnthropicMessagesPayload,
 ): AnthropicMessagesPayload {
-  if (payload.max_tokens !== undefined) return payload
+  if (payload.max_tokens !== undefined && payload.max_tokens !== null) {
+    return payload
+  }
   const maxTokens = getPositiveModelOutputLimit(payload.model)
   if (maxTokens === undefined) {
     throw createMissingAnthropicMessagesMaxTokensError()

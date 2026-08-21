@@ -324,6 +324,9 @@ function validateAnthropicMessagesPayload(
     throw createMessagesValidationError("messages")
   }
   payload.messages = sanitizeMessages(payload.messages)
+  if (payload.messages.length === 0) {
+    throw createMessagesValidationError("messages")
+  }
   sanitizeTools(payload)
 }
 
@@ -974,6 +977,7 @@ export function prepareAnthropicMessagesRequest(options: {
   payload: AnthropicMessagesPayload
 }): PreparedAnthropicMessagesRequest {
   const body = cloneAnthropicMessagesBody(options.payload)
+  if (body.max_tokens === null) deleteOwnField(body, "max_tokens")
   validateAnthropicMessagesPayload(body)
   normalizeOptionalPayloadFields(body)
   const normalizationClasses: Array<CopilotContractNormalizationClass> = []

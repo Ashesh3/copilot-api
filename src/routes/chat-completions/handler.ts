@@ -670,6 +670,17 @@ const executeRequest = async (
             await resolveWebSearchCalls(response, processedPayload, {
               abortSignal: c.req.raw.signal,
               copilotSessionToken: options.copilotSessionToken,
+              createCompletion: async (followUpPayload) =>
+                (
+                  await createChatCompletionsWithProcessedPayload(
+                    followUpPayload,
+                    {
+                      candidatePrepared: true,
+                      copilotSessionToken: options.copilotSessionToken,
+                      signal: c.req.raw.signal,
+                    },
+                  )
+                ).response as ChatCompletionResponse,
             })
           : response
 
@@ -781,6 +792,14 @@ async function executeStreamingWebSearchRequest(
         {
           abortSignal: c.req.raw.signal,
           copilotSessionToken: options.copilotSessionToken,
+          createCompletion: async (followUpPayload) =>
+            (
+              await createChatCompletionsWithProcessedPayload(followUpPayload, {
+                candidatePrepared: true,
+                copilotSessionToken: options.copilotSessionToken,
+                signal: c.req.raw.signal,
+              })
+            ).response as ChatCompletionResponse,
         },
       )
       const response =

@@ -489,8 +489,11 @@ export const createResponses = async (
   // Zero-data retention enforcement
   body.store = false
 
-  // Inline external attachment URLs / normalize file_data to data URIs
-  await normalizeResponsesAttachments(body, signal)
+  // Completed evaluated candidates have already performed semantic attachment
+  // adaptation; unprepared sources still need the transport normalizer here.
+  if (!options.prepared) {
+    await normalizeResponsesAttachments(body, signal)
+  }
   signal?.throwIfAborted()
 
   const shouldFitCompactionPayload = shouldFitResponsesCompactionPayload(

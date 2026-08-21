@@ -59,8 +59,9 @@ export function translateToOpenAI(
     response_format: translateOutputFormatToOpenAI(payload.output_config),
     tools,
     tool_choice: translateAnthropicToolChoiceToOpenAI(payload.tool_choice),
-    parallel_tool_calls:
-      tools?.some((tool) => tool.function.name === "web_search") ? false : true,
+    ...(tools?.some((tool) => tool.function.name === "web_search") ?
+      { parallel_tool_calls: false }
+    : {}),
     snippy: { enabled: false },
     ...(payload.stream ? { stream_options: { include_usage: true } } : {}),
   }

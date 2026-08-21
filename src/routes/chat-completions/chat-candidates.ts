@@ -66,13 +66,25 @@ export interface PreparedChatCandidates {
 }
 
 interface CandidateContext {
+  readonly attachmentCache: Map<
+    string,
+    Promise<Awaited<ReturnType<typeof fetchUrlAsDataUri>>>
+  >
   readonly findings: Array<TranslationFinding>
   readonly pendingResultCallIds: Set<string>
   readonly reservedCallIds: Set<string>
   readonly usedCallIds: Set<string>
 }
 
+interface CandidateAttachmentCache {
+  readonly values: Map<
+    string,
+    Promise<Awaited<ReturnType<typeof fetchUrlAsDataUri>>>
+  >
+}
+
 interface NativeChatCandidateOptions {
+  readonly attachmentCache?: CandidateAttachmentCache
   readonly applyCopilotSemantics?: boolean
   readonly signal?: AbortSignal
   readonly source: PreparedChatCompletionsSource
@@ -120,6 +132,7 @@ function addFinding(
 function createContext(
   source: PreparedChatCompletionsSource,
   findings: ReadonlyArray<TranslationFinding> = [],
+  attachmentCache: CandidateAttachmentCache = { values: new Map() },
 ): CandidateContext {
   const reservedCallIds = new Set<string>()
   for (const message of source.messages) {
@@ -136,11 +149,24 @@ function createContext(
     }
   }
   return {
+    attachmentCache: attachmentCache.values,
     findings: findings.map((finding) => ({ ...finding })),
     pendingResultCallIds: new Set(),
     reservedCallIds,
     usedCallIds: new Set(),
   }
+}
+
+async function fetchCandidateAttachment(
+  context: CandidateContext,
+  url: string,
+  signal: AbortSignal | undefined,
+) {
+  const cached = context.attachmentCache.get(url)
+  if (cached) return await cached
+  const pending = fetchUrlAsDataUri(url, { signal })
+  context.attachmentCache.set(url, pending)
+  return await pending
 }
 
 function createCallId(
@@ -259,10 +285,13 @@ function normalizeNativeSchema(payload: ChatCompletionsPayload): void {
     payload.stream_options = { include_usage: true }
   }
   if (!isRecord(payload.response_format)) return
-  if (payload.response_format.type !== "json_schema") return
+  const formatType = payload.response_format.type
+  if (formatType !== "json_schema" && formatType !== "json_object") return
   const wrapper = payload.response_format.json_schema
   const schema = isRecord(wrapper) ? wrapper.schema : undefined
-  payload.response_format = { type: "json_object" }
+  if (formatType === "json_schema") {
+    payload.response_format = { type: "json_object" }
+  }
   let instruction =
     "IMPORTANT: You MUST respond with valid JSON only. No markdown, no code fences, no explanation — just raw JSON."
   if (schema !== undefined) {
@@ -286,6 +315,7 @@ function asContentPart(value: unknown): Record<string, unknown> | undefined {
 async function normalizeNativeAttachments(
   payload: ChatCompletionsPayload,
   signal: AbortSignal | undefined,
+  attachmentCache: CandidateAttachmentCache,
 ): Promise<void> {
   for (const message of payload.messages) {
     if (!Array.isArray(message.content)) continue
@@ -299,7 +329,11 @@ async function normalizeNativeAttachments(
         && typeof part.image_url.url === "string"
         && isHttpUrl(part.image_url.url)
       ) {
-        const inlined = await fetchUrlAsDataUri(part.image_url.url, { signal })
+        const cached = attachmentCache.values.get(part.image_url.url)
+        const pending =
+          cached ?? fetchUrlAsDataUri(part.image_url.url, { signal })
+        if (!cached) attachmentCache.values.set(part.image_url.url, pending)
+        const inlined = await pending
         parts.push(
           inlined ?
             {
@@ -343,10 +377,11 @@ export async function prepareNativeChatCandidate(
       payload.parallel_tool_calls = false
     }
   }
+  const attachmentCache = options.attachmentCache ?? { values: new Map() }
   if (options.applyCopilotSemantics !== false) {
     rewriteAssistantPrefill(payload)
     normalizeNativeSchema(payload)
-    await normalizeNativeAttachments(payload, options.signal)
+    await normalizeNativeAttachments(payload, options.signal, attachmentCache)
     addPromptCaching(payload.messages, payload.tools ?? undefined)
   }
   return createCandidate({
@@ -746,7 +781,7 @@ function parseAnthropicArguments(value: unknown): Record<string, unknown> {
 
 async function convertAnthropicContent(
   content: unknown,
-  findings: Array<TranslationFinding>,
+  context: CandidateContext,
   signal: AbortSignal | undefined,
 ): Promise<Array<AnthropicUserContentBlock>> {
   if (typeof content === "string") {
@@ -767,7 +802,11 @@ async function convertAnthropicContent(
     ) {
       let parsed = parseDataUri(raw.image_url.url)
       if (!parsed && isHttpUrl(raw.image_url.url)) {
-        parsed = await fetchUrlAsDataUri(raw.image_url.url, { signal })
+        parsed = await fetchCandidateAttachment(
+          context,
+          raw.image_url.url,
+          signal,
+        )
       }
       if (
         parsed
@@ -788,7 +827,10 @@ async function convertAnthropicContent(
           },
         })
       } else {
-        addFinding(findings, { class: "attachment", severity: "omitted" })
+        addFinding(context.findings, {
+          class: "attachment",
+          severity: "omitted",
+        })
       }
       continue
     }
@@ -810,7 +852,10 @@ async function convertAnthropicContent(
           : {}),
         })
       } else {
-        addFinding(findings, { class: "attachment", severity: "omitted" })
+        addFinding(context.findings, {
+          class: "attachment",
+          severity: "omitted",
+        })
       }
       continue
     }
@@ -818,7 +863,10 @@ async function convertAnthropicContent(
       blocks.push(clone(raw) as AnthropicUserContentBlock)
       continue
     }
-    addFinding(findings, { class: "content_part", severity: "adapted" })
+    addFinding(context.findings, {
+      class: "content_part",
+      severity: "adapted",
+    })
     blocks.push({ type: "text", text: UNKNOWN_CONTENT_CONTEXT })
   }
   return blocks
@@ -996,7 +1044,7 @@ async function convertAnthropicMessages(
     }
     const blocks = await convertAnthropicContent(
       message.content,
-      context.findings,
+      context,
       signal,
     )
     if (future) blocks.unshift({ type: "text", text: FUTURE_ROLE_CONTEXT })
@@ -1010,9 +1058,10 @@ async function adaptChatToMessages(
   selectedModel: Model | undefined,
   signal: AbortSignal | undefined,
   sourceFindings: ReadonlyArray<TranslationFinding>,
+  attachmentCache: CandidateAttachmentCache,
 ): Promise<MessagesChatCandidate> {
   // eslint-disable-next-line @eslint-react/naming-convention/context-name -- protocol candidate state, not React context
-  const candidateState = createContext(source, sourceFindings)
+  const candidateState = createContext(source, sourceFindings, attachmentCache)
   const converted = await convertAnthropicMessages(
     clone(source),
     candidateState,
@@ -1110,7 +1159,9 @@ async function adaptChatToMessages(
 export async function prepareChatCandidates(
   options: PrepareChatCandidatesOptions,
 ): Promise<PreparedChatCandidates> {
+  const attachmentCache: CandidateAttachmentCache = { values: new Map() }
   const chat = await prepareNativeChatCandidate({
+    attachmentCache,
     source: options.source,
     signal: options.signal,
     sourceFindings: options.sourceFindings,
@@ -1125,6 +1176,7 @@ export async function prepareChatCandidates(
     options.selectedModel,
     options.signal,
     options.sourceFindings ?? [],
+    attachmentCache,
   )
   return { chat, responses, messages }
 }

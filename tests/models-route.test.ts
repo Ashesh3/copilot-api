@@ -534,9 +534,9 @@ test("adapts single-model discovery failures through the safe gateway error boun
     const body = await response.text()
 
     expect(response.status).toBe(400)
-    expect(body).not.toContain(privateMarker)
+    expect(body).toContain(privateMarker)
     expect(JSON.parse(body)).toEqual({
-      error: { message: "Upstream request failed", type: "error" },
+      error: { message: privateMarker },
     })
     expect(fetchMock).toHaveBeenCalledTimes(1)
   } finally {

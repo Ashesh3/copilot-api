@@ -624,7 +624,7 @@ test("bounds cyclic, deep, and oversized tool-result traversal", () => {
   }
 })
 
-test("rejects empty tool-result content before Chat can reduce it to an empty string", async () => {
+test("keeps empty tool-result content eligible for tolerant Chat adaptation", async () => {
   installModel({ supported_endpoints: ["/chat/completions"] })
 
   const response = await postMessages({
@@ -638,12 +638,9 @@ test("rejects empty tool-result content before Chat can reduce it to an empty st
     ],
   })
 
-  expect(response.status).toBe(400)
-  expect(await response.json()).toMatchObject({
-    error: { param: "messages" },
-  })
+  expect(response.status).toBe(200)
   expect(attachmentFetchCount).toBe(0)
-  expect(upstreamPaths).toEqual([])
+  expect(upstreamPaths).toEqual(["/chat/completions"])
 })
 
 test("preserves recursively nested tool results on native Messages", async () => {
@@ -903,7 +900,7 @@ test.each([
   },
 )
 
-test("sanitizes invalid mixed beta before model-variant routing", async () => {
+test("retains valid beta identifiers before model-variant routing", async () => {
   state.isMultiToken = true
   registerAccount(92_001, "beta-account-token")
   tokenPool.rebuildModelIndex()
@@ -926,8 +923,10 @@ test("sanitizes invalid mixed beta before model-variant routing", async () => {
 
   expect(response.status).toBe(200)
   expect(upstreamPaths).toEqual(["/v1/messages"])
-  expect(upstreamBodies[0]?.model).toBe("route-model")
-  expect(upstreamHeaders[0]?.get("anthropic-beta")).toBeNull()
+  expect(upstreamBodies[0]?.model).toBe("route-model-1m")
+  expect(upstreamHeaders[0]?.get("anthropic-beta")).toBe(
+    "context-1m-2025-08-07",
+  )
 })
 
 test("rejects an unknown Messages model without fabricating Chat support", async () => {

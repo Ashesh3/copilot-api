@@ -22,6 +22,7 @@ import {
   recordCopilotEndpointRoute,
   recordCopilotMessagesBeta,
   recordCopilotRequestNormalization,
+  recordCopilotTranslationFindings,
 } from "~/lib/copilot-contract-observability"
 import { sessionTokenMatchesModel } from "~/lib/copilot-session-token"
 import {
@@ -31,7 +32,7 @@ import {
 } from "~/lib/custom-providers"
 import {
   getModelEndpointSupport,
-  selectCopilotEndpoint,
+  selectEvaluatedCopilotCandidate,
 } from "~/lib/endpoint-routing"
 import {
   createEndpointTranslationError,
@@ -98,6 +99,7 @@ import {
 } from "~/services/copilot/create-chat-completions"
 import {
   createResponses,
+  type ResponsesPayload,
   type ResponsesResult,
   type ResponseStreamEvent,
 } from "~/services/copilot/create-responses"
@@ -116,15 +118,11 @@ import {
 import {
   type AnthropicMessagesPayload,
   type AnthropicStreamState,
-  type AnthropicTextBlock,
-  type AnthropicToolResultBlock,
-  isAnthropicTextBlock,
-  isAnthropicToolResultBlock,
 } from "./anthropic-types"
 import {
-  normalizeAnthropicAttachments,
-  normalizeAnthropicImages,
-} from "./attachment-normalization"
+  prepareMessagesChatCandidate,
+  prepareMessagesCandidates,
+} from "./messages-candidates"
 import {
   handleWithNativeMessages,
   type NativeMessagesRequestOptions,
@@ -171,27 +169,25 @@ export function selectMessagesUpstreamEndpoint(options: {
         responses: false,
         responsesWebSocket: false,
       }
-  return selectCopilotEndpoint({
-    source: "messages",
-    support,
-    candidates: [
-      {
-        endpoint: "/v1/messages",
-        reason: "endpoint_unavailable",
-        check: { supported: true, blockers: [] },
-      },
-      {
-        endpoint: "/responses",
-        reason: "endpoint_unavailable",
-        check: { supported: true, blockers: [] },
-      },
-      {
-        endpoint: "/chat/completions",
-        reason: "endpoint_unavailable",
-        check: { supported: true, blockers: [] },
-      },
-    ],
+  const endpoints = ["/v1/messages", "/responses", "/chat/completions"] as const
+  const candidate = endpoints.find((endpoint) => {
+    if (endpoint === "/v1/messages") return support.messages
+    if (endpoint === "/responses") return support.responses
+    return support.chat
   })
+  if (!candidate) {
+    return {
+      blockers: [],
+      code: "endpoint_translation_unsupported",
+      source: "messages",
+    }
+  }
+  return {
+    reason: candidate === "/v1/messages" ? "native" : "endpoint_unavailable",
+    source: "messages",
+    target: candidate,
+    translated: candidate !== "/v1/messages",
+  }
 }
 
 /**
@@ -369,12 +365,12 @@ async function handleCompletionInner(
 
   const customReference = resolveCustomChatModel(anthropicPayload.model)
   if (customReference) {
-    await normalizeAnthropicAttachments(anthropicPayload, c.req.raw.signal)
-    await prepareMessagesPayloadForDispatch(c, {
-      payload: anthropicPayload,
-      isCompact,
-      attachmentsPrepared: true,
+    const customCandidate = await prepareMessagesChatCandidate({
+      source: anthropicPayload,
+      effortOverride: redirectEffort,
+      signal: c.req.raw.signal,
     })
+    if (state.manualApprove) await awaitApproval()
     setRequestContext(c, {
       requestedModel,
       model: anthropicPayload.model,
@@ -385,6 +381,7 @@ async function handleCompletionInner(
     return await handleWithChatCompletions(c, anthropicPayload, {
       initiatorOverride,
       effortOverride: redirectEffort,
+      preparedPayload: customCandidate.payload,
       requestedModel,
     })
   }
@@ -405,26 +402,46 @@ async function handleCompletionInner(
   const routedModel = selectRoutedModel(anthropicPayload.model)
   const selectedModel = routedModel.model
   if (state.models && !selectedModel) throw createMessagesModelNotFoundError()
+  const routingModel =
+    selectedModel
+    ?? ({
+      id: anthropicPayload.model,
+      name: anthropicPayload.model,
+      object: "model",
+      version: "unknown",
+      supported_endpoints: ["/chat/completions"],
+      capabilities: {
+        family: "unknown",
+        limits: {},
+        object: "model_capabilities",
+        supports: {},
+        tokenizer: "cl100k_base",
+        type: "chat",
+      },
+    } satisfies Model)
 
-  const routeDecision = selectMessagesUpstreamEndpoint({
-    payload: anthropicPayload,
-    selectedModel,
+  const candidates = await prepareMessagesCandidates({
+    source: anthropicPayload,
+    selectedModel: routingModel,
+    effortOverride: redirectEffort,
+    isCompact,
+    signal: c.req.raw.signal,
   })
-  if ("code" in routeDecision)
-    throw createEndpointTranslationError(routeDecision)
+  const selection = selectEvaluatedCopilotCandidate({
+    candidates: candidates.ordered,
+    source: "messages",
+    support: getModelEndpointSupport(routingModel),
+  })
+  if ("code" in selection) throw createEndpointTranslationError(selection)
+  const { candidate, decision: routeDecision } = selection
+  recordCopilotTranslationFindings(
+    "messages",
+    candidate.endpoint,
+    candidate.check,
+  )
   recordCopilotEndpointRoute(routeDecision)
 
-  const attachmentsPrepared = routeDecision.target !== "/v1/messages"
-  // Fidelity selection above must see the original semantic block shape.
-  // Only the chosen dispatch path may now rewrite its attachment transport.
-  if (attachmentsPrepared) {
-    await normalizeAnthropicAttachments(anthropicPayload, c.req.raw.signal)
-  }
-  await prepareMessagesPayloadForDispatch(c, {
-    payload: anthropicPayload,
-    isCompact,
-    attachmentsPrepared,
-  })
+  if (state.manualApprove) await awaitApproval()
 
   let apiType = "ChatCompletions"
   if (routeDecision.target === "/v1/messages") {
@@ -457,20 +474,21 @@ async function handleCompletionInner(
   })
 
   return await runWithRoutedModelSelection(routedModel, async () => {
-    if (routeDecision.target === "/v1/messages") {
+    if (candidate.endpoint === "/v1/messages") {
       const retryBudget = createRetryBudget()
       const requestOptions: NativeMessagesRequestOptions = {
         ...nativeOptions,
         requestedModel,
         originalStream: Boolean(anthropicPayload.stream),
         retryBudget,
+        toolsPrepared: true,
         copilotSessionToken,
         ...(initiatorOverride ? { initiatorOverride } : {}),
       }
       try {
         return await handleWithNativeMessages(
           c,
-          anthropicPayload,
+          candidate.payload,
           requestOptions,
         )
       } catch (error) {
@@ -509,12 +527,13 @@ async function handleCompletionInner(
       }
     }
 
-    if (routeDecision.target === "/responses") {
+    if (candidate.endpoint === "/responses") {
       return await handleWithResponsesApi(c, anthropicPayload, {
         copilotSessionToken,
         initiatorOverride,
         effortOverride,
         requestedModel,
+        preparedPayload: candidate.payload,
       })
     }
 
@@ -523,32 +542,9 @@ async function handleCompletionInner(
       initiatorOverride,
       effortOverride,
       requestedModel,
+      preparedPayload: candidate.payload,
     })
   })
-}
-
-async function prepareMessagesPayloadForDispatch(
-  c: Context,
-  options: {
-    attachmentsPrepared?: boolean
-    isCompact: boolean
-    payload: AnthropicMessagesPayload
-  },
-): Promise<void> {
-  const { attachmentsPrepared, isCompact, payload } = options
-  if (!attachmentsPrepared) {
-    // Native Messages can preserve accepted document sources and their
-    // metadata. It still needs external image URLs inlined for Copilot.
-    await normalizeAnthropicImages(payload, c.req.raw.signal)
-  }
-
-  if (isCompact) {
-    logger.debug("Is compact request:", isCompact)
-  } else {
-    mergeToolResultForClaude(payload)
-  }
-
-  if (state.manualApprove) await awaitApproval()
 }
 
 interface BufferedChatCompletionsResult {
@@ -868,6 +864,7 @@ const handleWithChatCompletions = async (
     copilotSessionToken?: string
     initiatorOverride?: "agent" | "user"
     effortOverride?: ReasoningEffort
+    preparedPayload?: ChatCompletionsPayload
     requestedModel?: string
   },
 ) => {
@@ -921,6 +918,7 @@ const executeChatCompletions = async (
     copilotSessionToken?: string
     initiatorOverride?: "agent" | "user"
     effortOverride?: ReasoningEffort
+    preparedPayload?: ChatCompletionsPayload
     requestedModel?: string
   },
 ) => {
@@ -928,6 +926,7 @@ const executeChatCompletions = async (
     copilotSessionToken,
     initiatorOverride,
     effortOverride,
+    preparedPayload,
     requestedModel,
   } = options ?? {}
   const reasoningEnabled = Boolean(effortOverride || anthropicPayload.thinking)
@@ -943,7 +942,10 @@ const executeChatCompletions = async (
     stripThinkingBlocksForMultiToken(anthropicPayload)
   }
 
-  const openAIPayload = translateToOpenAI(anthropicPayload)
+  const openAIPayload =
+    preparedPayload ?
+      structuredClone(preparedPayload)
+    : translateToOpenAI(anthropicPayload)
 
   // Enable thinking/reasoning on the ChatCompletions path
   // Copilot API uses reasoning_effort to enable thinking (returns reasoning_text in response)
@@ -1042,6 +1044,7 @@ const executeChatCompletions = async (
       }),
       async (span) => {
         const response = (await createChatCompletions(finalPayload, {
+          candidatePrepared: preparedPayload !== undefined,
           copilotSessionToken,
           initiator: initiatorOverride,
           signal: c.req.raw.signal,
@@ -1066,6 +1069,17 @@ const executeChatCompletions = async (
           copilotSessionToken,
           initiatorOverride,
           abortSignal: c.req.raw.signal,
+          ...(preparedPayload ?
+            {
+              createCompletion: async (payload) =>
+                (await createChatCompletions(payload, {
+                  candidatePrepared: true,
+                  copilotSessionToken,
+                  initiator: initiatorOverride,
+                  signal: c.req.raw.signal,
+                })) as ChatCompletionResponse,
+            }
+          : {}),
         })
       : initialResponse
 
@@ -1112,6 +1126,7 @@ const executeChatCompletions = async (
         ])
         const preflush = await raceSsePreflush(
           createChatCompletions(finalPayload, {
+            candidatePrepared: preparedPayload !== undefined,
             copilotSessionToken,
             initiator: initiatorOverride,
             signal: upstreamSignal,
@@ -1169,6 +1184,17 @@ const executeChatCompletions = async (
                       copilotSessionToken,
                       initiatorOverride,
                       abortSignal: upstreamSignal,
+                      ...(preparedPayload ?
+                        {
+                          createCompletion: async (payload) =>
+                            (await createChatCompletions(payload, {
+                              candidatePrepared: true,
+                              copilotSessionToken,
+                              initiator: initiatorOverride,
+                              signal: upstreamSignal,
+                            })) as ChatCompletionResponse,
+                        }
+                      : {}),
                     }),
                   ),
                   stream,
@@ -1655,6 +1681,7 @@ const handleWithResponsesApi = async (
     copilotSessionToken?: string
     initiatorOverride?: "agent" | "user"
     effortOverride?: ReasoningEffort
+    preparedPayload?: ResponsesPayload
     requestedModel?: string
   },
 ) => {
@@ -1703,6 +1730,7 @@ const executeResponsesApi = async (
     copilotSessionToken?: string
     initiatorOverride?: "agent" | "user"
     effortOverride?: ReasoningEffort
+    preparedPayload?: ResponsesPayload
     requestedModel?: string
   },
 ) => {
@@ -1710,16 +1738,20 @@ const executeResponsesApi = async (
     copilotSessionToken,
     initiatorOverride,
     effortOverride,
+    preparedPayload,
     requestedModel,
   } = options ?? {}
   const reasoningEnabled = Boolean(effortOverride || anthropicPayload.thinking)
   if (!reasoningEnabled) {
     stripThinkingBlocksForMultiToken(anthropicPayload)
   }
-  const responsesPayload = translateAnthropicMessagesToResponsesPayload(
-    anthropicPayload,
-    effortOverride,
-  )
+  const responsesPayload =
+    preparedPayload ?
+      structuredClone(preparedPayload)
+    : translateAnthropicMessagesToResponsesPayload(
+        anthropicPayload,
+        effortOverride,
+      )
   logger.debug("Prepared translated Responses request", {
     inputKind: Array.isArray(responsesPayload.input) ? "items" : "text",
     model: responsesPayload.model,
@@ -1755,6 +1787,7 @@ const executeResponsesApi = async (
             vision,
             initiator: initiatorOverride ?? initiator,
             signal: c.req.raw.signal,
+            prepared: preparedPayload !== undefined,
           })
 
           const responsesAccountId = getLastUsedAccountId()
@@ -1818,6 +1851,18 @@ const executeResponsesApi = async (
                           vision,
                           initiator: initiatorOverride ?? initiator,
                           signal: c.req.raw.signal,
+                          ...(preparedPayload ?
+                            {
+                              createResponse: async (payload) =>
+                                (await createResponses(payload, {
+                                  copilotSessionToken,
+                                  vision,
+                                  initiator: initiatorOverride ?? initiator,
+                                  signal: c.req.raw.signal,
+                                  prepared: true,
+                                })) as ResponsesResult,
+                            }
+                          : {}),
                         },
                       ),
                     ),
@@ -1881,6 +1926,7 @@ const executeResponsesApi = async (
         vision,
         initiator: initiatorOverride ?? initiator,
         signal: c.req.raw.signal,
+        prepared: preparedPayload !== undefined,
       })) as ResponsesResult
 
       const responsesAccountId = getLastUsedAccountId()
@@ -1913,6 +1959,18 @@ const executeResponsesApi = async (
         vision,
         initiator: initiatorOverride ?? initiator,
         signal: c.req.raw.signal,
+        ...(preparedPayload ?
+          {
+            createResponse: async (payload) =>
+              (await createResponses(payload, {
+                copilotSessionToken,
+                vision,
+                initiator: initiatorOverride ?? initiator,
+                signal: c.req.raw.signal,
+                prepared: true,
+              })) as ResponsesResult,
+          }
+        : {}),
       })
     : initialResult
 
@@ -2088,91 +2146,5 @@ const isCompactRequest = (
     (msg) =>
       typeof msg.text === "string"
       && msg.text.startsWith(compactSystemPromptStart),
-  )
-}
-
-const mergeContentWithText = (
-  tr: AnthropicToolResultBlock,
-  textBlock: AnthropicTextBlock,
-): AnthropicToolResultBlock => {
-  if (typeof tr.content === "string") {
-    return { ...tr, content: `${tr.content}\n\n${textBlock.text}` }
-  }
-  if (Array.isArray(tr.content)) {
-    return {
-      ...tr,
-      content: [...tr.content, textBlock],
-    }
-  }
-  // content is null/undefined — start fresh with just the text block
-  return { ...tr, content: [textBlock] }
-}
-
-const mergeContentWithTexts = (
-  tr: AnthropicToolResultBlock,
-  textBlocks: Array<AnthropicTextBlock>,
-): AnthropicToolResultBlock => {
-  if (typeof tr.content === "string") {
-    const appendedTexts = textBlocks.map((tb) => tb.text).join("\n\n")
-    return { ...tr, content: `${tr.content}\n\n${appendedTexts}` }
-  }
-  if (Array.isArray(tr.content)) {
-    return { ...tr, content: [...tr.content, ...textBlocks] }
-  }
-  // content is null/undefined
-  return { ...tr, content: [...textBlocks] }
-}
-
-const hasToolReference = (toolResult: AnthropicToolResultBlock): boolean =>
-  Array.isArray(toolResult.content)
-  && toolResult.content.some((block) => block.type === "tool_reference")
-
-const mergeToolResultForClaude = (
-  anthropicPayload: AnthropicMessagesPayload,
-): void => {
-  for (const msg of anthropicPayload.messages) {
-    if (msg.role !== "user" || !Array.isArray(msg.content)) continue
-
-    const toolResults: Array<AnthropicToolResultBlock> = []
-    const textBlocks: Array<AnthropicTextBlock> = []
-    let valid = true
-
-    for (const block of msg.content) {
-      if (isAnthropicToolResultBlock(block)) {
-        toolResults.push(block)
-      } else if (isAnthropicTextBlock(block)) {
-        textBlocks.push(block)
-      } else {
-        valid = false
-        break
-      }
-    }
-
-    if (
-      !valid
-      || toolResults.length === 0
-      || textBlocks.length === 0
-      || toolResults.some((toolResult) => hasToolReference(toolResult))
-    ) {
-      continue
-    }
-
-    msg.content = mergeToolResult(toolResults, textBlocks)
-  }
-}
-
-const mergeToolResult = (
-  toolResults: Array<AnthropicToolResultBlock>,
-  textBlocks: Array<AnthropicTextBlock>,
-): Array<AnthropicToolResultBlock> => {
-  // equal lengths -> pairwise merge
-  if (toolResults.length === textBlocks.length) {
-    return toolResults.map((tr, i) => mergeContentWithText(tr, textBlocks[i]))
-  }
-
-  // lengths differ -> append all textBlocks to the last tool_result
-  const lastIndex = toolResults.length - 1
-  return toolResults.map((tr, i) =>
-    i === lastIndex ? mergeContentWithTexts(tr, textBlocks) : tr,
   )
 }

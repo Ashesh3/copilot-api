@@ -85,15 +85,17 @@ test("deduplicates beta identifiers before enforcing the final byte limit", () =
   expect(canonicalizeAnthropicBeta(Array(80).fill(beta).join(","))).toBe(beta)
 })
 
-test("trims only comma-separator whitespace and rejects invalid segments", () => {
+test("trims comma whitespace and independently discards invalid beta segments", () => {
   expect(canonicalizeAnthropicBeta(" beta-one , beta-two ")).toBe(
     "beta-one,beta-two",
   )
-  expect(canonicalizeAnthropicBeta("beta-one,,beta-two")).toBeUndefined()
+  expect(canonicalizeAnthropicBeta("beta-one,,beta-two")).toBe(
+    "beta-one,beta-two",
+  )
   expect(canonicalizeAnthropicBeta("beta-one beta-two")).toBeUndefined()
-  expect(canonicalizeAnthropicBeta("safe-beta,bad\u0001beta")).toBeUndefined()
-  expect(canonicalizeAnthropicBeta("safe-beta,unicode-βeta")).toBeUndefined()
-  expect(canonicalizeAnthropicBeta("safe-beta,latin-é")).toBeUndefined()
+  expect(canonicalizeAnthropicBeta("safe-beta,bad\u0001beta")).toBe("safe-beta")
+  expect(canonicalizeAnthropicBeta("safe-beta,unicode-βeta")).toBe("safe-beta")
+  expect(canonicalizeAnthropicBeta("safe-beta,latin-é")).toBe("safe-beta")
 })
 
 test("rejects oversized canonical beta output", () => {
@@ -728,9 +730,20 @@ test("does not require max_tokens during shared preparation", () => {
   ).not.toHaveProperty("max_tokens")
 })
 
+test("treats literal null max_tokens as absent during shared preparation", () => {
+  expect(
+    prepareAnthropicMessagesRequest({
+      payload: {
+        model: "claude",
+        messages: [{ role: "user", content: "x" }],
+        max_tokens: null,
+      },
+    }).body,
+  ).not.toHaveProperty("max_tokens")
+})
+
 test.each([
   ["string", "32"],
-  ["null", null],
   ["zero", 0],
   ["negative", -1],
   ["fractional", 1.5],
@@ -748,6 +761,35 @@ test.each([
     ).toHaveProperty("max_tokens", maxTokens)
   },
 )
+
+test("rejects an all-invalid message list after sanitization", () => {
+  try {
+    prepareAnthropicMessagesRequest({
+      payload: {
+        model: "claude",
+        messages: [null],
+      } as unknown as AnthropicMessagesPayload,
+    })
+    throw new Error("Expected sanitized messages validation to fail")
+  } catch (error) {
+    expect(error).toHaveProperty(
+      "clientBody.error.message",
+      "messages is required for Messages requests.",
+    )
+    expect(error).toHaveProperty("clientBody.error.param", "messages")
+  }
+})
+
+test("retains a legal message whose content sanitizes to an empty array", () => {
+  expect(
+    prepareAnthropicMessagesRequest({
+      payload: {
+        model: "claude",
+        messages: [{ role: "user", content: [null] }],
+      } as unknown as AnthropicMessagesPayload,
+    }).body.messages,
+  ).toEqual([{ role: "user", content: [] }])
+})
 
 test.each([
   ["undefined", undefined],

@@ -35,7 +35,7 @@ type StreamEvent = {
 const hasOverloadText = (value: unknown): boolean =>
   typeof value === "string" && value.toLowerCase().includes("overloaded")
 
-const rewriteUnsupportedAssistantPrefill = (
+export const rewriteUnsupportedAssistantPrefill = (
   payload: ChatCompletionsPayload,
 ): void => {
   if (modelSupportsAssistantPrefill(payload.model)) return

@@ -418,9 +418,14 @@ test.each([
       }),
     })
 
-    expect(response.status).toBe(200)
-    expect(lastUpstreamUrl).toContain("/v1/messages")
-    expect(fetchMock).toHaveBeenCalled()
+    if (_name === "primitive message entry") {
+      expect(response.status).toBe(400)
+      expect(fetchMock).not.toHaveBeenCalled()
+    } else {
+      expect(response.status).toBe(200)
+      expect(lastUpstreamUrl).toContain("/v1/messages")
+      expect(fetchMock).toHaveBeenCalled()
+    }
   },
 )
 
@@ -686,9 +691,7 @@ test("returns the exact upstream body for a non-stream Messages failure", async 
   expect(response.headers.get("content-type")).toBe(
     "application/json;charset=utf-8",
   )
-  expect(body).toBe(
-    '{"error":{"message":"messages-upstream-private-marker"}}',
-  )
+  expect(body).toBe('{"error":{"message":"messages-upstream-private-marker"}}')
   expect(body).not.toContain("messages-status-private-marker")
   expect(body).not.toContain("req-messages-safe")
 })

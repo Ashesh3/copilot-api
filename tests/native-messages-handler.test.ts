@@ -16,6 +16,8 @@ const nativeHeaders: Array<Headers> = []
 const nativeBodies: Array<Record<string, unknown>> = []
 let nativeAttempt = 0
 let repeatNativeSearch = false
+let searchesBeforeFinal = 1
+let callsPerSearchResponse = 1
 let searchInvocationCount = 0
 
 test("tracks cumulative native cache usage without rebuilding the frame", () => {
@@ -78,20 +80,18 @@ const fetchMock = mock(
     nativeHeaders.push(new Headers(init?.headers))
     nativeBodies.push(body)
     nativeAttempt += 1
-    if (nativeAttempt === 1 || repeatNativeSearch) {
+    if (nativeAttempt <= searchesBeforeFinal || repeatNativeSearch) {
       return jsonResponse({
         id: "msg_search",
         type: "message",
         role: "assistant",
         model: "claude-current",
-        content: [
-          {
-            type: "tool_use",
-            id: "toolu_search",
-            name: "web_search",
-            input: { query: "current facts" },
-          },
-        ],
+        content: Array.from({ length: callsPerSearchResponse }, (_, index) => ({
+          type: "tool_use",
+          id: `toolu_search_${nativeAttempt}_${index}`,
+          name: "web_search",
+          input: { query: "current facts" },
+        })),
         stop_reason: "tool_use",
         stop_sequence: null,
         usage: { input_tokens: 1, output_tokens: 1 },
@@ -126,6 +126,8 @@ beforeEach(() => {
   nativeBodies.length = 0
   nativeAttempt = 0
   repeatNativeSearch = false
+  searchesBeforeFinal = 1
+  callsPerSearchResponse = 1
   searchInvocationCount = 0
   resetWebSearchSessionsForTest()
   state.accountType = "individual"
@@ -319,9 +321,57 @@ test.each([
       expect(error).toHaveProperty("response.status", 400)
     }
     expect(searchInvocationCount).toBe(expectedSearches)
-    expect(nativeAttempt).toBe(expectedSearches)
+    expect(nativeAttempt).toBe(expectedSearches + 1)
   },
 )
+
+test("allows the last permitted search and one final synthesis send", async () => {
+  searchesBeforeFinal = 2
+  const payload: AnthropicMessagesPayload = {
+    model: "claude-current",
+    max_tokens: 64,
+    messages: [{ role: "user", content: "Search twice, then answer." }],
+    tools: [
+      {
+        type: "web_search_20250305",
+        name: "web_search",
+        max_uses: 2,
+      },
+    ],
+  }
+
+  const response = await resolveNativeWebSearch(payload, {
+    signal: new AbortController().signal,
+  })
+
+  expect(response.id).toBe("msg_final")
+  expect(searchInvocationCount).toBe(2)
+  expect(nativeAttempt).toBe(3)
+})
+
+test("rejects an over-budget search batch before executing any call", async () => {
+  callsPerSearchResponse = 2
+  const payload: AnthropicMessagesPayload = {
+    model: "claude-current",
+    max_tokens: 64,
+    messages: [{ role: "user", content: "Search if the whole batch fits." }],
+    tools: [
+      {
+        type: "web_search_20250305",
+        name: "web_search",
+        max_uses: 1,
+      },
+    ],
+  }
+
+  const error = await resolveNativeWebSearch(payload, {
+    signal: new AbortController().signal,
+  }).catch((caught: unknown) => caught)
+
+  expect(error).toHaveProperty("response.status", 400)
+  expect(searchInvocationCount).toBe(0)
+  expect(nativeAttempt).toBe(1)
+})
 
 test("enforces the public native web-search limit after tool rewriting", async () => {
   repeatNativeSearch = true
@@ -366,7 +416,7 @@ test("enforces the public native web-search limit after tool rewriting", async (
   const body = await response.json()
 
   expect(searchInvocationCount).toBe(1)
-  expect(nativeAttempt).toBe(1)
+  expect(nativeAttempt).toBe(2)
   expect(response.status).toBe(400)
   expect(body).toMatchObject({
     type: "error",

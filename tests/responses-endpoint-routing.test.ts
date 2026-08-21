@@ -1486,7 +1486,7 @@ test("shares one translated attachment fetch before the selected native transfor
 
   expect(response.status).toBe(200)
   expect(lastUpstreamPath).toBe("/responses")
-  expect(attachmentFetchCount).toBe(2)
+  expect(attachmentFetchCount).toBe(1)
 })
 
 test("routes Responses compaction through the existing Chat preservation path", async () => {
