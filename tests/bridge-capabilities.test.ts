@@ -14,6 +14,7 @@ import { state } from "../src/lib/state"
 import { server } from "../src/server"
 
 const GATEWAY_KEY = "bridge-test-gateway-key-with-enough-entropy"
+const originalPublicBase = process.env.COPILOT_PUBLIC_BASE_URL
 
 function bearer(value: string): { authorization: string } {
   return { authorization: `Bearer ${value}` }
@@ -24,6 +25,7 @@ beforeEach(() => {
   resetIpSecurityForTest()
   setOAuthStoreForTest(new OAuthStore())
   resetBridgeCapabilitiesForTest()
+  delete process.env.COPILOT_PUBLIC_BASE_URL
 })
 
 afterEach(() => {
@@ -31,6 +33,29 @@ afterEach(() => {
   state.apiKeyAuth = undefined
   setOAuthStoreForTest(null)
   resetBridgeCapabilitiesForTest()
+  if (originalPublicBase === undefined)
+    delete process.env.COPILOT_PUBLIC_BASE_URL
+  else process.env.COPILOT_PUBLIC_BASE_URL = originalPublicBase
+})
+
+test("code-session bridges use the configured public API base", async () => {
+  process.env.COPILOT_PUBLIC_BASE_URL = "https://public.example.test/gateway"
+  const sessionResponse = await server.request("/v1/code/sessions", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(GATEWAY_KEY) },
+    body: JSON.stringify({ title: "Public origin" }),
+  })
+  const sessionId = (
+    (await sessionResponse.json()) as { session: { id: string } }
+  ).session.id
+  const bridge = await server.request(`/v1/code/sessions/${sessionId}/bridge`, {
+    method: "POST",
+    headers: bearer(GATEWAY_KEY),
+  })
+  expect(bridge.status).toBe(200)
+  expect((await bridge.json()) as { api_base_url: string }).toMatchObject({
+    api_base_url: "https://public.example.test/gateway",
+  })
 })
 
 test("code sessions require a scoped user credential", async () => {

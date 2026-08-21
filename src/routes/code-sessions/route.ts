@@ -10,6 +10,7 @@ import {
 import { resolveRequestCredential } from "~/lib/credential-resolver"
 import { recordFailedAttempt } from "~/lib/ip-blocker"
 import { resolveProtectedCredential } from "~/lib/protected-credential"
+import { resolvePublicOrigin } from "~/lib/public-origin"
 
 import type { InternalEvent } from "./types"
 
@@ -118,11 +119,7 @@ codeSessionsRoutes.post("/:id/bridge", (c) => {
   // Session exists (checked above), so bumpWorkerEpoch will always return a number
   const epoch = bumpWorkerEpoch(id) as number
 
-  const protocol =
-    c.req.header("x-forwarded-proto")
-    ?? (c.req.url.startsWith("https") ? "https" : "https")
-  const host = c.req.header("host") ?? "localhost"
-  const apiBaseUrl = `${protocol}://${host}`
+  const apiBaseUrl = resolvePublicOrigin(c.req.raw).toString()
 
   const workerJwt = issueWorkerCapability(id, epoch)
 

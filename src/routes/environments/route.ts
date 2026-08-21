@@ -7,6 +7,7 @@ import {
 } from "~/lib/bridge-capabilities"
 import { resolveRequestCredential } from "~/lib/credential-resolver"
 import { resolveProtectedCredential } from "~/lib/protected-credential"
+import { resolvePublicOrigin } from "~/lib/public-origin"
 
 import { createSession } from "../code-sessions/session-store"
 import {
@@ -154,11 +155,7 @@ environmentsRoutes.post("/:id/work", async (c) => {
     [],
   )
 
-  const protocol =
-    c.req.header("x-forwarded-proto")
-    ?? (c.req.url.startsWith("https") ? "https" : "https")
-  const host = c.req.header("host") ?? "localhost"
-  const apiBaseUrl = `${protocol}://${host}`
+  const apiBaseUrl = resolvePublicOrigin(c.req.raw).toString()
 
   const workItem = enqueueWork({ envId, sessionId: session.id, apiBaseUrl })
   if (!workItem) {

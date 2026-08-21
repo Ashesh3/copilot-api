@@ -145,16 +145,12 @@ export async function resolveCredential(
   rawCredential: string,
   requiredScopes: ReadonlyArray<string> = [],
 ): Promise<ResolvedCredential | null> {
+  const gatewayCredential = resolveGatewayCredential(
+    rawCredential,
+    requiredScopes,
+  )
+  if (gatewayCredential) return gatewayCredential
   if (!rawCredential) return null
-  for (const gatewayKey of configuredGatewayKeys()) {
-    if (!secretEquals(rawCredential, gatewayKey)) continue
-    const credential: ResolvedCredential = {
-      principalId: `gateway:${digest(gatewayKey).toString("hex").slice(0, 16)}`,
-      kind: "gateway",
-      scopes: new Set(["*"]),
-    }
-    return credentialHasScopes(credential, requiredScopes) ? credential : null
-  }
 
   const store = getOAuthStore()
   const oauthCredential = await store.resolveAccessToken(rawCredential)
@@ -182,6 +178,24 @@ export async function resolveCredential(
     return credentialHasScopes(credential, requiredScopes) ? credential : null
   }
 
+  return null
+}
+
+export function resolveGatewayCredential(
+  rawCredential: string,
+  requiredScopes: ReadonlyArray<string> = [],
+): ResolvedCredential | null {
+  const normalizedCredential = rawCredential.trim()
+  if (!normalizedCredential) return null
+  for (const gatewayKey of configuredGatewayKeys()) {
+    if (!secretEquals(normalizedCredential, gatewayKey)) continue
+    const credential: ResolvedCredential = {
+      principalId: `gateway:${digest(gatewayKey).toString("hex").slice(0, 16)}`,
+      kind: "gateway",
+      scopes: new Set(["*"]),
+    }
+    return credentialHasScopes(credential, requiredScopes) ? credential : null
+  }
   return null
 }
 

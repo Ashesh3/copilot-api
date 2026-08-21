@@ -7,11 +7,13 @@ import type { IssuedOAuthTokens } from "~/lib/oauth-store"
 import {
   credentialHasScopes,
   resolveCredential,
+  resolveGatewayCredential,
   resolveRequestCredential,
 } from "~/lib/credential-resolver"
 import {
   clearFailedAttempts,
   extractClientIp,
+  isIpAllowedForWhitelistedRoute,
   isIpBanned,
   isIpBlocked,
   recordFailedAttempt,
@@ -21,9 +23,7 @@ import { resolveProtectedCredential } from "~/lib/protected-credential"
 import { secureHtml } from "~/lib/secure-html"
 import {
   isAllowedTransparentProxyRequest,
-  isTransparentProxyClientWhitelisted,
   transparentProxy,
-  transparentProxyWithCredential,
 } from "~/lib/transparent-proxy"
 import { getUsageResponse } from "~/lib/usage-tracker"
 import { getFeatureFlags } from "~/routes/feature-flags/store"
@@ -731,27 +731,25 @@ oauthApiRoutes.all("*", async (c) => {
   }
 
   const clientIp = extractClientIp(c)
-  const credentialSupplied = [
-    "authorization",
-    "x-api-key",
-    "x-goog-api-key",
-  ].some((header) => c.req.raw.headers.has(header))
-
-  if (credentialSupplied) {
-    const credential = await resolveRequestCredential(c.req.raw, [
-      "user:inference",
-    ])
+  const gatewayHeaderPresent = c.req.raw.headers.has("x-copilot-gateway-key")
+  if (gatewayHeaderPresent) {
+    const credential = resolveGatewayCredential(
+      c.req.raw.headers.get("x-copilot-gateway-key") ?? "",
+      ["user:inference"],
+    )
     if (!credential) {
-      if (clientIp !== null) recordFailedAttempt(clientIp)
+      if (clientIp !== null && !isIpBanned(clientIp)) {
+        recordFailedAttempt(clientIp)
+      }
       return oauthUnauthorized(c)
     }
     if (clientIp !== null && isIpBlocked(clientIp)) {
       return oauthUnauthorized(c)
     }
-    return await transparentProxyWithCredential(c)
+    return await transparentProxy(c)
   }
 
-  if (await isTransparentProxyClientWhitelisted(c)) {
+  if (clientIp !== null && (await isIpAllowedForWhitelistedRoute(clientIp))) {
     return await transparentProxy(c)
   }
 

@@ -43,6 +43,16 @@ affected, include its exact version or digest.
 - Forwarding headers are honored only when the actual socket peer is in
   `COPILOT_TRUSTED_PROXY_CIDRS`. Successful authentication never permanently
   adds a client IP to the managed allowlist.
+- Public bridge and Direct Connect callback origins use a valid
+  `COPILOT_PUBLIC_BASE_URL`, a complete forwarded protocol/host pair only from
+  a trusted socket peer, or the direct request origin. Invalid configuration
+  falls back safely, and `X-Forwarded-For` never establishes proxy trust.
+- Transparent redirected provider traffic uses the dedicated
+  `x-copilot-gateway-key` for gateway authentication. Provider
+  `Authorization`, `x-api-key`, and `x-goog-api-key` values remain upstream
+  credentials; the dedicated header is removed before forwarding and has no
+  meaning on ordinary owned routes. An explicit invalid dedicated key cannot
+  fall back to IP authorization.
 - Failed protected credential checks use one shared rolling 24-hour IP tracker.
   The third failure bans the source for 24 hours and all denials remain uniform
   `401` responses. Public routes, session/CSRF semantic failures, compatibility

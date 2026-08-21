@@ -1,5 +1,7 @@
 import consola from "consola"
 
+import { toWebSocketUrl } from "~/lib/public-origin"
+
 export interface DirectConnectSession {
   id: string
   createdAt: number
@@ -18,7 +20,10 @@ function generateSessionId(): string {
   return `dc_${hex}`
 }
 
-export function createDirectConnectSession(cwd?: string): {
+export function createDirectConnectSession(
+  publicOrigin: URL,
+  cwd?: string,
+): {
   session_id: string
   ws_url: string
   work_dir?: string
@@ -33,7 +38,7 @@ export function createDirectConnectSession(cwd?: string): {
 
   return {
     session_id: id,
-    ws_url: `ws://localhost:4141/ws/direct/${id}`,
+    ws_url: toWebSocketUrl(publicOrigin, ["ws", "direct", id]).toString(),
     ...(cwd ? { work_dir: cwd } : {}),
   }
 }

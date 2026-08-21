@@ -40,6 +40,8 @@ import { server } from "../src/server"
 
 const originalGatewayKey = state.apiKeyAuth
 const originalDirectConnect = process.env.COPILOT_API_ENABLE_DIRECT_CONNECT
+const originalPublicBase = process.env.COPILOT_PUBLIC_BASE_URL
+const originalTrustedCidrs = process.env.COPILOT_TRUSTED_PROXY_CIDRS
 const originalAdminOrigin = process.env.COPILOT_ADMIN_ORIGIN
 const originalAdminPasswordHash = process.env.COPILOT_ADMIN_PASSWORD_HASH
 const TEST_ADMIN_ORIGIN = "https://admin.example.test"
@@ -66,6 +68,8 @@ beforeEach(async () => {
   resetDirectConnectForTest()
   resetIpSecurityForTest()
   delete process.env.COPILOT_API_ENABLE_DIRECT_CONNECT
+  delete process.env.COPILOT_PUBLIC_BASE_URL
+  delete process.env.COPILOT_TRUSTED_PROXY_CIDRS
 })
 
 afterEach(() => {
@@ -77,6 +81,12 @@ afterEach(() => {
   } else {
     process.env.COPILOT_API_ENABLE_DIRECT_CONNECT = originalDirectConnect
   }
+  if (originalPublicBase === undefined)
+    delete process.env.COPILOT_PUBLIC_BASE_URL
+  else process.env.COPILOT_PUBLIC_BASE_URL = originalPublicBase
+  if (originalTrustedCidrs === undefined)
+    delete process.env.COPILOT_TRUSTED_PROXY_CIDRS
+  else process.env.COPILOT_TRUSTED_PROXY_CIDRS = originalTrustedCidrs
   if (originalAdminOrigin === undefined) {
     delete process.env.COPILOT_ADMIN_ORIGIN
   } else {
@@ -135,6 +145,30 @@ describe("health and Direct Connect exposure", () => {
     ).toBe(200)
   })
 
+  test("Direct Connect returns the resolved public WebSocket URL", async () => {
+    process.env.COPILOT_API_ENABLE_DIRECT_CONNECT = "true"
+    process.env.COPILOT_PUBLIC_BASE_URL = "https://public.example.test/gateway"
+    const response = await directConnectRoutes.request(
+      "http://internal.example.test:8443/",
+      {
+        method: "POST",
+        headers: {
+          authorization: "Bearer gateway-secret",
+          "content-type": "application/json",
+        },
+        body: "{}",
+      },
+    )
+    expect(response.status).toBe(201)
+    const body = (await response.json()) as {
+      session_id: string
+      ws_url: string
+    }
+    expect(body.ws_url).toBe(
+      `wss://public.example.test/gateway/ws/direct/${body.session_id}`,
+    )
+  })
+
   test("Direct Connect HTTP auth failures count toward the shared ban", async () => {
     process.env.COPILOT_API_ENABLE_DIRECT_CONNECT = "true"
     const clientIp = "198.51.100.92"
@@ -187,7 +221,7 @@ describe("health and Direct Connect exposure", () => {
   test("start fetch returns uniform Direct Connect upgrade denials without breaking authorized upgrades", async () => {
     process.env.COPILOT_API_ENABLE_DIRECT_CONNECT = "true"
     const clientIp = "198.51.100.95"
-    const session = createDirectConnectSession()
+    const session = createDirectConnectSession(new URL("http://localhost/"))
     const startModule = (await import("../src/start")) as Record<
       string,
       unknown
@@ -229,7 +263,7 @@ describe("health and Direct Connect exposure", () => {
   })
 
   test("Direct Connect allows multiple handlers for one session", () => {
-    const session = createDirectConnectSession()
+    const session = createDirectConnectSession(new URL("http://localhost/"))
     const firstSend = mock(() => {})
     const secondSend = mock(() => {})
     const firstClose = mock(() => {})
@@ -251,9 +285,9 @@ describe("health and Direct Connect exposure", () => {
   })
 
   test("Direct Connect retains sessions without count eviction", () => {
-    const first = createDirectConnectSession()
+    const first = createDirectConnectSession(new URL("http://localhost/"))
     for (let index = 0; index < 20; index += 1) {
-      createDirectConnectSession()
+      createDirectConnectSession(new URL("http://localhost/"))
     }
     expect(listDirectConnectSessions()).toHaveLength(21)
     expect(
@@ -264,7 +298,7 @@ describe("health and Direct Connect exposure", () => {
   })
 
   test("Direct Connect closes binary frames without logging their contents", () => {
-    const session = createDirectConnectSession()
+    const session = createDirectConnectSession(new URL("http://localhost/"))
     const close = mock(() => {})
     const handlers = handleDirectConnectWebSocket(
       { send: () => {}, close },

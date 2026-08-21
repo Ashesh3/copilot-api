@@ -2,6 +2,7 @@ import { Hono } from "hono"
 
 import { resolveRequestCredential } from "~/lib/credential-resolver"
 import { resolveProtectedCredential } from "~/lib/protected-credential"
+import { resolvePublicOrigin } from "~/lib/public-origin"
 
 import {
   createDirectConnectSession,
@@ -42,7 +43,10 @@ directConnectRoutes.post("/", async (c) => {
     dangerously_skip_permissions?: boolean
   }>()
 
-  const sessionInfo = createDirectConnectSession(body.cwd)
+  const sessionInfo = createDirectConnectSession(
+    resolvePublicOrigin(c.req.raw),
+    body.cwd,
+  )
 
   return c.json(sessionInfo, 201)
 })
