@@ -36,6 +36,7 @@ import {
   type VoiceSession,
   voiceWebSocket,
 } from "../src/routes/voice/route"
+import { server } from "../src/server"
 
 const originalGatewayKey = state.apiKeyAuth
 const originalDirectConnect = process.env.COPILOT_API_ENABLE_DIRECT_CONNECT
@@ -89,19 +90,33 @@ afterEach(() => {
 })
 
 describe("health and Direct Connect exposure", () => {
-  test("health exposes only the exact liveness response", async () => {
-    const response = await healthRoutes.request("http://localhost/health")
-    expect(response.status).toBe(200)
-    expect(await response.json()).toEqual({ status: "ok" })
+  test("health exposes canonical and compatibility liveness routes before auth", async () => {
+    for (const pathname of ["/health", "/health/health"]) {
+      const response = await server.request(pathname)
+      expect(response.status).toBe(200)
+      expect(await response.json()).toEqual({ status: "ok" })
+    }
+
+    for (const [pathname, method] of [
+      ["/health", "POST"],
+      ["/health", "HEAD"],
+      ["/health/health", "POST"],
+      ["/health/unknown", "GET"],
+    ] as const) {
+      const response = await server.request(pathname, { method })
+      expect(response.status).toBe(404)
+      if (method !== "HEAD") {
+        expect(await response.json()).toEqual({ error: "Not found" })
+      }
+    }
+
+    for (const pathname of ["/", "/health"]) {
+      const response = await healthRoutes.request(`http://localhost${pathname}`)
+      expect(response.status).toBe(200)
+      expect(await response.json()).toEqual({ status: "ok" })
+    }
     expect(
-      (await healthRoutes.request("http://localhost/api/sessions")).status,
-    ).toBe(404)
-    expect(
-      (
-        await healthRoutes.request("http://localhost/health", {
-          method: "HEAD",
-        })
-      ).status,
+      (await healthRoutes.request("http://localhost/unknown")).status,
     ).toBe(404)
   })
 

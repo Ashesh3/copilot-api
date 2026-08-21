@@ -16,6 +16,7 @@ import type { ModelsResponse } from "../src/services/copilot/get-models"
 
 import { getGoogleRoutingContractRows } from "../src/lib/compatibility-contract"
 import { HTTPError } from "../src/lib/error"
+import { isIpBlocked, resetIpSecurityForTest } from "../src/lib/ip-blocker"
 import {
   clearLlmDebugLogs,
   getLlmDebugLog,
@@ -30,6 +31,7 @@ import { selectGoogleUpstreamEndpoint } from "../src/routes/google-ai/handler"
 import { server } from "../src/server"
 
 const originalFetch = globalThis.fetch
+const originalGatewayKey = state.apiKeyAuth
 
 let lastResponsesPayload: ResponsesPayload | undefined
 let lastHeaders: Record<string, string> | undefined
@@ -333,6 +335,8 @@ beforeAll(() => {
 
 afterAll(() => {
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
+  state.apiKeyAuth = originalGatewayKey
+  resetIpSecurityForTest()
 })
 
 beforeEach(() => {
@@ -354,8 +358,146 @@ beforeEach(() => {
   state.manualApprove = false
   state.debug = false
   state.verbose = false
+  state.apiKeyAuth = originalGatewayKey
   state.models = responsesCapableModels
+  resetIpSecurityForTest()
   setModelRedirectsForTest([])
+})
+
+test.each(["/v1beta/models", "/v1/models", "/models"] as const)(
+  "authenticates Google generation with a query credential on %s",
+  async (prefix) => {
+    state.apiKeyAuth = "google-gateway-key"
+    const response = await server.request(
+      `${prefix}/gpt-4o-mini:generateContent?key=google-gateway-key`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-copilot-peer-ip": "198.51.100.201",
+        },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: "Hello" }] }],
+        }),
+      },
+    )
+
+    expect(response.status).toBe(200)
+    expect(lastPath).toBe("/responses")
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  },
+)
+
+test("accepts equal Google credentials and rejects ambiguous credentials before dispatch", async () => {
+  state.apiKeyAuth = "google-gateway-key"
+  const path = "/v1/models/gpt-4o-mini:generateContent?key=google-gateway-key"
+  const body = JSON.stringify({
+    contents: [{ role: "user", parts: [{ text: "Hello" }] }],
+  })
+  const equal = await server.request(path, {
+    method: "POST",
+    headers: {
+      authorization: "Bearer google-gateway-key",
+      "content-type": "application/json",
+      "x-api-key": "google-gateway-key",
+      "x-copilot-peer-ip": "198.51.100.202",
+      "x-goog-api-key": "google-gateway-key",
+    },
+    body,
+  })
+  expect(equal.status).toBe(200)
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+
+  fetchMock.mockClear()
+  const ambiguous = await server.request(path, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-copilot-peer-ip": "198.51.100.203",
+      "x-goog-api-key": "different-key",
+    },
+    body,
+  })
+  expect(ambiguous.status).toBe(401)
+  expect(await ambiguous.json()).toEqual({
+    error: { message: "Unauthorized", type: "authentication_error" },
+  })
+  expect(ambiguous.headers.get("cache-control")).toBe("no-store")
+  expect(ambiguous.headers.get("www-authenticate")).toBe(
+    'Bearer realm="copilot-api"',
+  )
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
+test("treats invalid Google query credentials as supplied attempts without leaking them", async () => {
+  state.apiKeyAuth = "google-gateway-key"
+  const clientIp = "198.51.100.204"
+  const privateKey = "private-google-query-key"
+  const consoleWarn = spyOn(consola, "warn")
+  try {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const response = await server.request(
+        `/v1/models/gpt-4o-mini:generateContent?key=${privateKey}`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-copilot-peer-ip": clientIp,
+          },
+          body: "{}",
+        },
+      )
+      expect(response.status).toBe(401)
+    }
+    const diagnostics = JSON.stringify(consoleWarn.mock.calls)
+    expect(isIpBlocked(clientIp)).toBe(true)
+    expect(diagnostics).toContain("/v1/models/:modelAction")
+    expect(diagnostics).not.toContain(privateKey)
+    expect(fetchMock).not.toHaveBeenCalled()
+  } finally {
+    consoleWarn.mockRestore()
+  }
+})
+
+test("does not use query credentials outside exact Google actions", async () => {
+  state.apiKeyAuth = "google-gateway-key"
+  for (const pathname of [
+    "/v1/responses?key=google-gateway-key",
+    "/v1/models/gpt-4o-mini:futureAction?key=google-gateway-key",
+  ]) {
+    const response = await server.request(pathname, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-copilot-peer-ip": `198.51.100.${pathname.includes("responses") ? 205 : 206}`,
+      },
+      body: "{}",
+    })
+    expect(response.status).toBe(401)
+  }
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
+test("authenticates countTokens with a query credential without inference dispatch", async () => {
+  state.apiKeyAuth = "google-gateway-key"
+  const response = await server.request(
+    "/v1beta/models/gpt-4o-mini:countTokens?key=google-gateway-key",
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-copilot-peer-ip": "198.51.100.207",
+      },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: "Count me" }] }],
+      }),
+    },
+  )
+  expect(response.status).toBe(200)
+  expect(
+    typeof ((await response.json()) as { totalTokens?: unknown }).totalTokens,
+  ).toBe("number")
+  expect(fetchMock).not.toHaveBeenCalled()
 })
 
 test.each(["/v1beta/models", "/v1/models", "/models"] as const)(
@@ -604,7 +746,7 @@ test("preserves non-Google diagnostic paths while redacting query credentials", 
       sentryInfo.mock.calls,
     ])
 
-    expect(response.status).toBe(404)
+    expect(response.status).toBe(200)
     expect(diagnostics).toContain("/health")
     expect(diagnostics).toContain("alt=json")
     expect(diagnostics).not.toContain("non-google-query-secret")

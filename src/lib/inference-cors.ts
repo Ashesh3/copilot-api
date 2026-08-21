@@ -1,11 +1,65 @@
 import type { MiddlewareHandler } from "hono"
 
-const INFERENCE_PATHS = [
-  /^\/(?:v1\/)?models\/?$/,
-  /^\/(?:v1\/)?chat\/completions\/?$/,
-  /^\/(?:v1\/)?embeddings\/?$/,
-  /^\/v1\/messages(?:\/count_tokens)?\/?$/,
-  /^\/(?:v1\/)?responses(?:\/compact)?\/?$/,
+import { isGoogleApiCredentialPath } from "./credential-resolver"
+
+type InferenceMethod = "GET" | "POST"
+
+interface InferenceCorsRoute {
+  matches(pathname: string): boolean
+  method: InferenceMethod
+}
+
+function exactPath(...paths: Array<string>): (pathname: string) => boolean {
+  const allowed = new Set(paths.flatMap((path) => [path, `${path}/`]))
+  return (pathname) => allowed.has(pathname)
+}
+
+const INFERENCE_ROUTES: Array<InferenceCorsRoute> = [
+  { method: "GET", matches: exactPath("/models", "/v1/models") },
+  {
+    method: "GET",
+    matches: (pathname) => {
+      const normalized =
+        pathname.endsWith("/") ? pathname.slice(0, -1) : pathname
+      return (
+        /^\/(?:v1\/)?models\/[^/]+$/.test(normalized)
+        && !normalized.includes(":")
+        && normalized !== "/models/session"
+      )
+    },
+  },
+  {
+    method: "POST",
+    matches: exactPath("/chat/completions", "/v1/chat/completions"),
+  },
+  {
+    method: "POST",
+    matches: exactPath("/embeddings", "/v1/embeddings"),
+  },
+  {
+    method: "POST",
+    matches: exactPath("/v1/messages", "/v1/messages/count_tokens"),
+  },
+  {
+    method: "POST",
+    matches: exactPath(
+      "/responses",
+      "/responses/compact",
+      "/v1/responses",
+      "/v1/responses/compact",
+    ),
+  },
+  { method: "POST", matches: isGoogleApiCredentialPath },
+  {
+    method: "POST",
+    matches: exactPath("/alpha/search", "/v1/alpha/search"),
+  },
+  { method: "POST", matches: exactPath("/codex/responses") },
+  {
+    method: "POST",
+    matches: exactPath("/models/session", "/models/session/intent"),
+  },
+  { method: "POST", matches: exactPath("/auto") },
 ]
 
 function allowedOrigins(): Set<string> {
@@ -17,15 +71,27 @@ function allowedOrigins(): Set<string> {
   )
 }
 
-function isInferencePath(path: string): boolean {
-  return INFERENCE_PATHS.some((pattern) => pattern.test(path))
+function isInferenceRoute(
+  pathname: string,
+  method: string,
+): method is InferenceMethod {
+  if (method !== "GET" && method !== "POST") return false
+  return INFERENCE_ROUTES.some(
+    (route) => route.method === method && route.matches(pathname),
+  )
 }
 
 export const inferenceCors: MiddlewareHandler = async (c, next) => {
   const origin = c.req.header("origin")
-  const origins = allowedOrigins()
+  const originAllowed = origin !== undefined && allowedOrigins().has(origin)
+  const requestedMethod =
+    c.req.method === "OPTIONS" ?
+      c.req.header("access-control-request-method")
+    : c.req.method
   const allowed =
-    origin !== undefined && origins.has(origin) && isInferencePath(c.req.path)
+    originAllowed
+    && requestedMethod !== undefined
+    && isInferenceRoute(c.req.path, requestedMethod)
 
   if (c.req.method === "OPTIONS") {
     if (!allowed) return c.json({ error: "Not found" }, 404)

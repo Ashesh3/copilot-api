@@ -3,7 +3,10 @@ import type { Context, Next } from "hono"
 import * as Sentry from "@sentry/bun"
 import consola from "consola"
 
-import { resolveRequestCredential } from "./credential-resolver"
+import {
+  hasSuppliedRequestCredential,
+  resolveRequestCredential,
+} from "./credential-resolver"
 import {
   extractClientIp,
   isIpAllowedForWhitelistedRoute,
@@ -35,11 +38,7 @@ export async function apiKeyGuard(
     c.req.method,
     c.req.path,
   )
-  const credentialSupplied = [
-    "authorization",
-    "x-api-key",
-    "x-goog-api-key",
-  ].some((header) => c.req.raw.headers.has(header))
+  const credentialSupplied = hasSuppliedRequestCredential(c.req.raw)
 
   if (credentialSupplied) {
     const credential = await resolveRequestCredential(c.req.raw, [

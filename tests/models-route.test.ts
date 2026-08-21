@@ -56,6 +56,24 @@ const currentModel = {
   supported_endpoints: ["/responses"],
 } satisfies Model
 
+const implicitPickerModel = {
+  id: "gpt-picker-implicit-visible",
+  name: "GPT Picker Implicit Visible",
+  object: "model",
+  preview: false,
+  vendor: "openai",
+  version: "1",
+  capabilities: {
+    family: "gpt",
+    limits: {},
+    object: "model_capabilities",
+    supports: {},
+    tokenizer: "cl100k_base",
+    type: "chat",
+  },
+  supported_endpoints: ["/responses"],
+} satisfies Model
+
 interface ModelsRouteEntry {
   id: string
   alias?: boolean
@@ -310,6 +328,7 @@ beforeEach(() => {
           type: "chat",
         },
       },
+      structuredClone(implicitPickerModel),
       structuredClone(currentModel),
     ],
   } satisfies ModelsResponse
@@ -322,7 +341,7 @@ afterAll(() => {
   setModelRedirectsForTest([])
 })
 
-test("filters /models to picker-enabled or policy-enabled entries before adding virtual variants", async () => {
+test("shows models unless picker metadata explicitly disables them without enabled policy", async () => {
   const response = await server.request("/v1/models")
 
   expect(response.status).toBe(200)
@@ -337,6 +356,7 @@ test("filters /models to picker-enabled or policy-enabled entries before adding 
   expect(ids).toContain("claude-sonnet-4.6:max")
   expect(ids).toContain("gpt-5.2")
   expect(ids).toContain("gpt-5.2:medium")
+  expect(ids).toContain("gpt-picker-implicit-visible")
   expect(ids).not.toContain("claude-opus-4.7-1m-internal")
   expect(ids).not.toContain("claude-opus-4.7-1m-internal:high")
   expect(ids).not.toContain("gpt-5-mini")
@@ -501,6 +521,29 @@ test("serves the same normalized row from single-model discovery", async () => {
   expect(await single.json()).toEqual(
     listBody.data.find((entry) => entry.id === "gpt-current"),
   )
+})
+
+test("keeps list and detail visibility consistent for omitted and explicit picker metadata", async () => {
+  const listResponse = await server.request("/v1/models")
+  const listBody = (await listResponse.json()) as {
+    data: Array<Record<string, unknown>>
+  }
+  const implicit = listBody.data.find(
+    (entry) => entry.id === "gpt-picker-implicit-visible",
+  )
+  expect(implicit).toBeDefined()
+
+  const implicitDetail = await server.request(
+    "/v1/models/gpt-picker-implicit-visible",
+  )
+  expect(implicitDetail.status).toBe(200)
+  expect(await implicitDetail.json()).toEqual(implicit)
+
+  expect((await server.request("/v1/models/gpt-5.2")).status).toBe(200)
+  expect(
+    (await server.request("/v1/models/claude-opus-4.7-1m-internal")).status,
+  ).toBe(404)
+  expect((await server.request("/v1/models/gpt-5-mini")).status).toBe(404)
 })
 
 test("returns a safe not-found error for an unknown single model", async () => {

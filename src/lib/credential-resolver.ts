@@ -87,11 +87,36 @@ export function credentialHasScopes(
   )
 }
 
+export function isGoogleApiCredentialPath(pathname: string): boolean {
+  return /^\/(?:v1\/|v1beta\/)?models\/[^/]+:(?:generateContent|streamGenerateContent|countTokens)\/?$/.test(
+    pathname,
+  )
+}
+
+export function hasSuppliedRequestCredential(request: Request): boolean {
+  if (
+    ["authorization", "x-api-key", "x-goog-api-key"].some((header) =>
+      request.headers.has(header),
+    )
+  ) {
+    return true
+  }
+
+  const url = new URL(request.url)
+  return (
+    isGoogleApiCredentialPath(url.pathname)
+    && url.searchParams.getAll("key").some((value) => value.trim() !== "")
+  )
+}
+
 export function extractRequestCredential(request: Request): string | null {
   const candidates = [
     request.headers.get("x-api-key")?.trim(),
     request.headers.get("x-goog-api-key")?.trim(),
-  ].filter(Boolean)
+  ].filter(
+    (candidate): candidate is string =>
+      candidate !== undefined && candidate !== "",
+  )
   const authorization = request.headers.get("authorization")
   if (authorization) {
     const [scheme, ...rest] = authorization.trim().split(/\s+/)
@@ -99,6 +124,16 @@ export function extractRequestCredential(request: Request): string | null {
     const bearerToken = rest.join(" ").trim()
     if (!bearerToken) return null
     candidates.push(bearerToken)
+  }
+
+  const url = new URL(request.url)
+  if (isGoogleApiCredentialPath(url.pathname)) {
+    candidates.push(
+      ...url.searchParams
+        .getAll("key")
+        .map((candidate) => candidate.trim())
+        .filter(Boolean),
+    )
   }
 
   const uniqueCandidates = [...new Set(candidates)]
