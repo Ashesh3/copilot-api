@@ -90,7 +90,6 @@ export async function countAnthropicTokens(
         anthropicVersion: options.anthropicVersion,
         modelProviderPreference: options.modelProviderPreference,
         payload,
-        requireMaxTokens: false,
       })
   const body = selectCountTokensBody(prepared.body)
   const { response } = await routedFetch(

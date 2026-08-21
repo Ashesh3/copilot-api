@@ -52,7 +52,6 @@ export async function handleCountTokens(c: Context) {
   }
   const anthropicPayload = prepareAnthropicMessagesRequest({
     payload: rawPayload,
-    requireMaxTokens: false,
   })
   const nativeHeaders = validateAnthropicRequestHeaderOptions({
     anthropicBeta: c.req.header("anthropic-beta"),

@@ -117,7 +117,6 @@ export const createAnthropicMessages = async (
         anthropicVersion: options?.anthropicVersion,
         modelProviderPreference: options?.modelProviderPreference,
         payload,
-        requireMaxTokens: false,
       })
   const snapshot = ensureTransportMaxTokens(prepared.body)
   const vision = hasVisionContent(snapshot.messages)

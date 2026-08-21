@@ -314,13 +314,6 @@ function cloneAnthropicMessagesBody(
   return clone as AnthropicMessagesPayload
 }
 
-function validateMaxTokens(value: unknown, required: boolean): void {
-  if (value === undefined && !required) return
-  if (!Number.isInteger(value) || Number(value) <= 0) {
-    throw createMessagesValidationError("max_tokens")
-  }
-}
-
 function validateAnthropicMessagesPayload(
   payload: AnthropicMessagesPayload,
 ): void {
@@ -397,15 +390,6 @@ function normalizeOptionalStringArray(
     && (!Array.isArray(value) || value.some((item) => typeof item !== "string"))
   ) {
     deleteOwnField(parent, field)
-  }
-}
-
-function normalizeMaxTokens(payload: AnthropicMessagesPayload): void {
-  if (payload.max_tokens === undefined) return
-  try {
-    validateMaxTokens(payload.max_tokens, true)
-  } catch {
-    deleteOwnField(payload, "max_tokens")
   }
 }
 
@@ -966,7 +950,6 @@ function normalizeSystem(payload: AnthropicMessagesPayload): void {
 function normalizeOptionalPayloadFields(
   payload: AnthropicMessagesPayload,
 ): void {
-  normalizeMaxTokens(payload)
   normalizeMetadata(payload)
   normalizeToolChoice(payload)
   normalizeThinking(payload)
@@ -989,7 +972,6 @@ export function prepareAnthropicMessagesRequest(options: {
   anthropicVersion?: string
   modelProviderPreference?: string
   payload: AnthropicMessagesPayload
-  requireMaxTokens: boolean
 }): PreparedAnthropicMessagesRequest {
   const body = cloneAnthropicMessagesBody(options.payload)
   validateAnthropicMessagesPayload(body)

@@ -452,6 +452,57 @@ test("defaults a missing native transport max_tokens from model metadata", async
   }
 })
 
+test("preserves an explicit zero max_tokens instead of defaulting it", async () => {
+  const previousModels = state.models
+  state.models = {
+    object: "list",
+    data: [
+      {
+        id: "claude-transport-default",
+        name: "Claude Transport Default",
+        object: "model",
+        preview: false,
+        vendor: "anthropic",
+        version: "1",
+        model_picker_enabled: true,
+        capabilities: {
+          family: "claude",
+          limits: { max_output_tokens: 2048 },
+          object: "model_capabilities",
+          supports: {},
+          tokenizer: "cl100k_base",
+          type: "chat",
+        },
+        supported_endpoints: ["/v1/messages"],
+      },
+    ],
+  }
+
+  const payload = {
+    model: "claude-transport-default",
+    max_tokens: 0,
+    messages: [
+      {
+        role: asAnthropicUnknownRole("system"),
+        content: "bootstrap",
+      },
+    ],
+  } as unknown as AnthropicMessagesPayload
+
+  try {
+    await createAnthropicMessages(payload)
+
+    expect(capturedBody).toMatchObject({
+      model: "claude-transport-default",
+      max_tokens: 0,
+      messages: [{ role: "system", content: "bootstrap" }],
+    })
+  } finally {
+    // eslint-disable-next-line require-atomic-updates
+    state.models = previousModels
+  }
+})
+
 test("preserves native fields and forwards canonical prepared headers", async () => {
   const payload = {
     model: "claude-opus-4.8",

@@ -237,7 +237,6 @@ export async function handleCompletion(c: Context) {
   }
   const preparedMessages = prepareAnthropicMessagesRequest({
     payload: rawPayload,
-    requireMaxTokens: true,
   })
   const anthropicPayload = preparedMessages.body
   const nativeOptions: NativeMessagesRequestOptions =

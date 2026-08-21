@@ -624,6 +624,24 @@ test("fills a missing native max_tokens from model metadata at transport time", 
   })
 })
 
+test("allows chat fallback requests without max_tokens", async () => {
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "hello" }],
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPayload).toMatchObject({
+    model: "gpt-4o",
+    messages: [{ role: "user", content: "hello" }],
+  })
+  expect(lastUpstreamPayload).not.toHaveProperty("max_tokens")
+})
+
 test("rejects malformed public Messages JSON before upstream dispatch", async () => {
   const response = await server.request("/v1/messages", {
     method: "POST",

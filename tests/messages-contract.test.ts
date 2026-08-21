@@ -120,7 +120,6 @@ test("preserves native top-level fields and removes only gateway-local keys", ()
   } as AnthropicMessagesPayload
   const prepared = prepareAnthropicMessagesRequest({
     payload,
-    requireMaxTokens: true,
     anthropicBeta: "claude-code-20250219",
     anthropicVersion: "2023-06-01",
     modelProviderPreference: "anthropic",
@@ -149,7 +148,6 @@ test("defaults omitted native header options", () => {
       model: "claude-current",
       messages: [{ role: "user", content: "hello" }],
     },
-    requireMaxTokens: true,
   })
 
   expect(prepared.headers).toEqual({ anthropicVersion: "2023-06-01" })
@@ -227,7 +225,6 @@ test("reports cache-control normalization before native serialization", () => {
         },
       ],
     },
-    requireMaxTokens: true,
   })
 
   expect(prepared.normalizationClasses).toEqual(["cache_control"])
@@ -283,7 +280,6 @@ test("preserves opaque cache_control records outside Anthropic protocol slots", 
 
   const prepared = prepareAnthropicMessagesRequest({
     payload,
-    requireMaxTokens: true,
   })
 
   expect(prepared.body).toEqual(payload)
@@ -310,7 +306,6 @@ test.each(["30m", "forever"])(
           },
         ],
       },
-      requireMaxTokens: true,
     })
 
     expect(prepared.normalizationClasses).toEqual(["cache_control"])
@@ -356,7 +351,6 @@ test("normalizes malformed cache_control only in known Anthropic slots", () => {
         },
       ],
     } as unknown as AnthropicMessagesPayload,
-    requireMaxTokens: true,
   })
 
   expect(prepared.normalizationClasses).toEqual(["cache_control"])
@@ -433,7 +427,6 @@ test("normalizes cache_control markers inside document source content blocks", (
         },
       ],
     } as unknown as AnthropicMessagesPayload,
-    requireMaxTokens: true,
   })
 
   expect(prepared.normalizationClasses).toEqual(["cache_control"])
@@ -501,7 +494,6 @@ test("preserves opaque cache_control neighbors around document source content", 
 
   const prepared = prepareAnthropicMessagesRequest({
     payload,
-    requireMaxTokens: true,
   })
 
   expect(prepared.body).toEqual(payload)
@@ -567,7 +559,6 @@ test("normalizes known cache_control slots inside future-role message content", 
         },
       ],
     } as unknown as AnthropicMessagesPayload,
-    requireMaxTokens: true,
   })
 
   expect(prepared.normalizationClasses).toEqual(["cache_control"])
@@ -659,7 +650,6 @@ test("preserves opaque neighbors while normalizing recognized future-role blocks
 
   const prepared = prepareAnthropicMessagesRequest({
     payload,
-    requireMaxTokens: true,
   })
 
   expect(prepared.normalizationClasses).toEqual(["cache_control"])
@@ -709,7 +699,6 @@ test.each([
   try {
     prepareAnthropicMessagesRequest({
       payload: payload as unknown as AnthropicMessagesPayload,
-      requireMaxTokens: true,
     })
     throw new Error(`Expected ${param} validation to fail`)
   } catch (error) {
@@ -735,7 +724,6 @@ test("does not require max_tokens during shared preparation", () => {
         model: "claude",
         messages: [{ role: "user", content: "x" }],
       },
-      requireMaxTokens: false,
     }).body,
   ).not.toHaveProperty("max_tokens")
 })
@@ -747,7 +735,7 @@ test.each([
   ["negative", -1],
   ["fractional", 1.5],
 ] as const)(
-  "drops present invalid optional max_tokens: %s",
+  "preserves present safe-JSON max_tokens: %s",
   (_name, maxTokens) => {
     expect(
       prepareAnthropicMessagesRequest({
@@ -756,9 +744,8 @@ test.each([
           messages: [{ role: "user", content: "x" }],
           max_tokens: maxTokens,
         } as unknown as AnthropicMessagesPayload,
-        requireMaxTokens: false,
       }).body,
-    ).not.toHaveProperty("max_tokens")
+    ).toHaveProperty("max_tokens", maxTokens)
   },
 )
 
@@ -777,7 +764,6 @@ test.each([
             messages: [{ role: "user", content: "x" }],
             max_tokens: maxTokens,
           } as unknown as AnthropicMessagesPayload,
-          requireMaxTokens: false,
         }),
       "PRIVATE_NON_JSON_MAX_TOKENS",
     )
@@ -809,7 +795,6 @@ test("preserves system and future roles plus unknown native structures", () => {
       ],
       future_native_field: { enabled: true },
     } as AnthropicMessagesPayload,
-    requireMaxTokens: true,
   })
 
   expect(prepared.body).toMatchObject({
@@ -842,7 +827,6 @@ test("preserves unnamed future native tool records with nested fields", () => {
       messages: [{ role: "user", content: "hello" }],
       tools: [futureTool],
     } as unknown as AnthropicMessagesPayload,
-    requireMaxTokens: true,
   })
 
   expect(prepared.body).toMatchObject({
@@ -892,7 +876,6 @@ test.each([
         messages: [{ role: "user", content: "hello" }],
         tools: [futureTool],
       } as unknown as AnthropicMessagesPayload,
-      requireMaxTokens: true,
     })
 
     expect(prepared.body).toMatchObject({
@@ -917,7 +900,6 @@ test("drops malformed optional controls instead of rejecting the request", () =>
       stream: "yes" as never,
       fallback_credit_token: 42 as never,
     } as AnthropicMessagesPayload,
-    requireMaxTokens: true,
   })
 
   expect(prepared.body).toEqual({
@@ -958,7 +940,6 @@ test("drops malformed nested message entries while preserving safe tool records"
         },
       ],
     } as unknown as AnthropicMessagesPayload,
-    requireMaxTokens: true,
   })
 
   expect(prepared.body).toEqual({
@@ -1005,7 +986,6 @@ test("rejects a throwing accessor without invoking or exposing it", () => {
     () =>
       prepareAnthropicMessagesRequest({
         payload: payload as AnthropicMessagesPayload,
-        requireMaxTokens: true,
       }),
     marker,
   )
@@ -1028,7 +1008,6 @@ test("rejects a revoked proxy with a fixed body error", () => {
     () =>
       prepareAnthropicMessagesRequest({
         payload: revocable.proxy as AnthropicMessagesPayload,
-        requireMaxTokens: true,
       }),
     marker,
   )
@@ -1048,8 +1027,7 @@ test.each([
     } as AnthropicMessagesPayload
 
     expectFixedBodyError(
-      () =>
-        prepareAnthropicMessagesRequest({ payload, requireMaxTokens: true }),
+      () => prepareAnthropicMessagesRequest({ payload }),
       marker,
     )
     expect(payload.future_native_field).toBe(value)
@@ -1068,7 +1046,7 @@ test("rejects cyclic data with a fixed body error and preserves the source", () 
   } as AnthropicMessagesPayload
 
   expectFixedBodyError(
-    () => prepareAnthropicMessagesRequest({ payload, requireMaxTokens: true }),
+    () => prepareAnthropicMessagesRequest({ payload }),
     marker,
   )
   expect(futureNativeField.self).toBe(futureNativeField)
