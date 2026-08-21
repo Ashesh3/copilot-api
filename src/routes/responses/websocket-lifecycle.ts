@@ -1,6 +1,9 @@
 import type { HttpErrorInspection } from "~/lib/error"
 import type { RoutingAffinity } from "~/lib/routing-affinity"
-import type { StreamTerminalLifecycle } from "~/lib/stream-terminal-lifecycle"
+import type {
+  StreamTerminalFailure,
+  StreamTerminalLifecycle,
+} from "~/lib/stream-terminal-lifecycle"
 
 import { runWithCopilotContractObservabilityScope } from "~/lib/copilot-contract-observability"
 import {
@@ -35,6 +38,7 @@ import { createResponsesStreamFailureState } from "./stream-lifecycle"
 export interface ResponsesWebSocketTurn {
   abortController: AbortController
   failureState: ResponsesStreamFailureState
+  failureWriters: WeakMap<StreamTerminalFailure, () => Promise<void>>
   outputStarted: boolean
   terminal: StreamTerminalLifecycle<ResponsesWebSocketTerminalSuccess>
   inputLength: number
@@ -101,6 +105,7 @@ export function createResponsesWebSocketTurn(
   Object.assign(turn, {
     abortController,
     failureState: createResponsesStreamFailureState("unknown"),
+    failureWriters: new WeakMap(),
     inputLength: new TextEncoder().encode(message).byteLength,
     outputStarted: false,
     routingState: {},
@@ -117,6 +122,7 @@ export function createResponsesWebSocketTurn(
       })
     },
     onFailure: async (failure) => {
+      await turn.failureWriters.get(failure)?.()
       const terminal = await classifyWebSocketTerminal(
         failure.kind === "thrown" ? failure.error : undefined,
         turn,

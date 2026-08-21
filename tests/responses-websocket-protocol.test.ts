@@ -7,10 +7,22 @@ import type {
 } from "~/services/copilot/create-responses"
 
 import {
+  classifyEmittedWebSocketTerminal,
   mergeEffectiveNativeMessagesOptions,
   parseResponsesWebSocketFrame,
   resolveResponsesContinuation,
 } from "~/routes/responses/websocket-protocol"
+
+describe("classifyEmittedWebSocketTerminal", () => {
+  test("trusts the emitted JSON type over a mismatched raw event name", () => {
+    expect(
+      classifyEmittedWebSocketTerminal(
+        { type: "response.failed" },
+        "response.completed",
+      ),
+    ).toBe("response.failed")
+  })
+})
 
 describe("parseResponsesWebSocketFrame", () => {
   test("merges payload fields while keeping the protocol envelope out", () => {

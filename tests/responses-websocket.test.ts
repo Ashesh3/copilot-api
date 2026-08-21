@@ -2553,7 +2553,7 @@ describe("responses websocket message handling", () => {
   test.each([
     { eventType: "response.failed", terminalStatus: "ERROR" },
     { eventType: "response.incomplete", terminalStatus: "COMPLETE" },
-    { eventType: "response.completed", terminalStatus: "COMPLETE" },
+    { eventType: "response.completed", terminalStatus: "ERROR" },
     { eventType: "error", terminalStatus: "ERROR" },
   ])(
     "preserves native $eventType terminal frames unchanged",
@@ -2615,9 +2615,7 @@ describe("responses websocket message handling", () => {
         expect(infoOutput.match(new RegExp(terminalStatus, "g"))).toHaveLength(
           1,
         )
-        expect(ws.data.responseSnapshots.has("resp_terminal")).toBe(
-          eventType === "response.completed",
-        )
+        expect(ws.data.responseSnapshots.has("resp_terminal")).toBe(false)
       } finally {
         sentryLogSpy.mockRestore()
         captureSpy.mockRestore()
@@ -2669,7 +2667,7 @@ describe("responses websocket message handling", () => {
     },
   )
 
-  test("uses the native terminal SSE event name when JSON type disagrees", async () => {
+  test("classifies the post-sanitization emitted terminal type", async () => {
     state.copilotToken = "copilot-token"
     state.models = responsesCapableModels
     const privateMarker = "ws-mismatched-terminal-private-marker"
@@ -3301,6 +3299,13 @@ describe("responses websocket upstream handling", () => {
       ),
     )
     const ws = createTestWebSocket()
+    const originalSend = ws.send.bind(ws)
+    ws.send = (frame) => {
+      originalSend(frame)
+      if ((JSON.parse(frame) as { type?: string }).type === "error") {
+        responsesWebSocket.close(ws)
+      }
+    }
     ws.data.effectiveNativeMessagesOptions = {
       anthropicBeta: "beta-one",
     }
@@ -3321,13 +3326,78 @@ describe("responses websocket upstream handling", () => {
     const types = ws.sent.map(
       (frame) => (JSON.parse(frame) as { type?: string }).type,
     )
-    expect(types).toEqual([
-      "response.output_text.delta",
-      "error",
-      "response.failed",
-    ])
+    expect(types).toEqual(["response.output_text.delta", "error"])
     expect(ws.data.activeTurns.size).toBe(0)
   })
+
+  test("binds a concurrent failure writer to the winning failure identity", async () => {
+    const data = {
+      activeTurns: new Map<
+        number,
+        ReturnType<typeof createResponsesWebSocketTurn>
+      >(),
+      nextTurnSequence: 0,
+      requestId: "failure-race",
+    }
+    const turn = createResponsesWebSocketTurn(data, "failure-race")
+    const calls: Array<string> = []
+    const first = { kind: "thrown" as const, error: new Error("first") }
+    const second = { kind: "thrown" as const, error: new Error("second") }
+    turn.failureWriters.set(first, async () => {
+      await Promise.resolve()
+      calls.push("first")
+    })
+    turn.failureWriters.set(second, () => {
+      calls.push("second")
+      return Promise.resolve()
+    })
+
+    const results = await Promise.all([
+      turn.terminal.fail(first),
+      turn.terminal.fail(second),
+    ])
+
+    expect(results).toEqual([true, false])
+    expect(calls).toEqual(["first"])
+  })
+
+  test.each(["failed", "incomplete"])(
+    "does not snapshot response.completed with embedded %s status",
+    async (status) => {
+      state.models = responsesCapableModels
+      queuedResponses.push(
+        createRawResponsesTerminalSseResponse(
+          JSON.stringify({
+            type: "response.completed",
+            sequence_number: 2,
+            response: {
+              id: `resp_embedded_${status}`,
+              object: "response",
+              status,
+              output: [{ type: "future_output", value: status }],
+            },
+          }),
+        ),
+      )
+      const ws = createTestWebSocket()
+
+      await responsesWebSocket.message(
+        ws,
+        JSON.stringify({
+          type: "response.create",
+          model: "gpt-5.4",
+          input: status,
+        }),
+      )
+
+      expect(
+        (JSON.parse(ws.sent.at(-1) ?? "{}") as { type?: string }).type,
+      ).toBe("response.completed")
+      expect(ws.data.responseSnapshots.has(`resp_embedded_${status}`)).toBe(
+        false,
+      )
+    },
+  )
 
   test("preserves binary upstream HTTP error bytes in the terminal frame", async () => {
     state.copilotToken = "copilot-token"

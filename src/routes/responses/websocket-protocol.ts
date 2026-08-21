@@ -32,6 +32,18 @@ const SAFE_EVENT_HEADER_NAMES = new Set([
 ])
 const QUOTA_SNAPSHOT_PREFIX = "x-quota-snapshot-"
 const AFFINITY_CLIENT_METADATA_KEYS = new Set(["session_id", "thread_id"])
+const RESPONSES_TERMINAL_TYPES = new Set([
+  "error",
+  "response.completed",
+  "response.failed",
+  "response.incomplete",
+])
+
+export type EmittedWebSocketTerminal =
+  | "error"
+  | "response.completed"
+  | "response.failed"
+  | "response.incomplete"
 
 export interface ParsedResponseCreateFrame {
   attribution: CopilotRequestAttribution
@@ -166,6 +178,18 @@ export function mergeEffectiveNativeMessagesOptions(
   update: AnthropicRequestHeaderOptions,
 ): AnthropicRequestHeaderOptions {
   return { ...current, ...update }
+}
+
+export function classifyEmittedWebSocketTerminal(
+  parsed: { type?: unknown },
+  _eventName?: string,
+): EmittedWebSocketTerminal | undefined {
+  return (
+      typeof parsed.type === "string"
+        && RESPONSES_TERMINAL_TYPES.has(parsed.type)
+    ) ?
+      (parsed.type as EmittedWebSocketTerminal)
+    : undefined
 }
 
 export function resolveResponsesContinuation(

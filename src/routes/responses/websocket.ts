@@ -79,6 +79,7 @@ import {
 } from "./websocket-lifecycle"
 import {
   addResponsesWebSocketMetadata,
+  classifyEmittedWebSocketTerminal,
   mergeEffectiveNativeMessagesOptions,
   mergeContinuationInput,
   parseResponsesWebSocketFrame,
@@ -297,7 +298,7 @@ export const responsesWebSocket = {
       const abortError = new Error("Responses WebSocket closed")
       abortError.name = "AbortError"
       turn.abortController.abort(abortError)
-      turn.terminal.abort()
+      if (!turn.terminal.abort()) continue
       ensureResponsesWebSocketLifecycle(turn)
       finalizeResponsesWebSocketTurn(ws.data, turn, {
         error: abortError,
@@ -599,31 +600,43 @@ async function failWebSocketTurn(
   }
   const state = turn.failureState
   if (state.model === "unknown" && turn.model) state.model = turn.model
-  const frames: Array<{ data: string; event?: string }> = []
-  await emitResponsesFailureAsStream(
-    {
-      aborted: false,
-      closed: false,
-      writeSSE: (data) => {
-        frames.push(data)
-        return Promise.resolve()
+  const writeFailure = async () => {
+    await emitResponsesFailureAsStream(
+      {
+        get aborted() {
+          return turn.abortController.signal.aborted
+        },
+        get closed() {
+          return ws.data.closed
+        },
+        writeSSE: (data) => {
+          if (!ws.data.closed && !turn.abortController.signal.aborted) {
+            ws.send(
+              addResponsesWebSocketMetadata(
+                data.data,
+                getCopilotResponseHeaders(),
+              ),
+            )
+          }
+          return Promise.resolve()
+        },
       },
-    },
-    {
-      responseId: state.responseId,
-      model: state.model,
-      sequenceNumber: state.sequenceNumber,
-      ...(failure.kind === "thrown" && failure.inspection ?
-        { inspection: failure.inspection }
-      : {}),
-    },
-  )
-  for (const frame of frames) {
-    ws.send(
-      addResponsesWebSocketMetadata(frame.data, getCopilotResponseHeaders()),
+      {
+        responseId: state.responseId,
+        model: state.model,
+        sequenceNumber: state.sequenceNumber,
+        ...(failure.kind === "thrown" && failure.inspection ?
+          { inspection: failure.inspection }
+        : {}),
+      },
     )
   }
-  return await turn.terminal.fail(failure)
+  turn.failureWriters.set(failure, writeFailure)
+  try {
+    return await turn.terminal.fail(failure)
+  } finally {
+    turn.failureWriters.delete(failure)
+  }
 }
 
 // Terminal frame classification has intentionally explicit branches so close
@@ -655,15 +668,7 @@ async function emitTurnFrame(
     return true
   }
 
-  const terminalType =
-    (
-      eventName === "response.completed"
-      || eventName === "response.incomplete"
-      || eventName === "response.failed"
-      || eventName === "error"
-    ) ?
-      eventName
-    : parsed.type
+  const terminalType = classifyEmittedWebSocketTerminal(parsed, eventName)
   const processed = addResponsesWebSocketMetadata(
     frame,
     getCopilotResponseHeaders(),
@@ -676,11 +681,20 @@ async function emitTurnFrame(
   })
 
   if (terminalType === "response.completed") {
-    recordResponseSnapshotFromFrame(
-      ws.data.responseSnapshots,
-      payload,
-      processed,
-    )
+    const responseStatus = readEmittedResponseStatus(parsed)
+    if (responseStatus !== "failed" && responseStatus !== "incomplete") {
+      recordResponseSnapshotFromFrame(
+        ws.data.responseSnapshots,
+        payload,
+        processed,
+      )
+    } else {
+      return await turn.terminal.succeed({
+        kind: "received_failure",
+        status: 502,
+        terminalStatus: "ERROR",
+      })
+    }
     return await turn.terminal.succeed({
       kind: "completed",
       status: 200,
@@ -702,6 +716,13 @@ async function emitTurnFrame(
     })
   }
   return true
+}
+
+function readEmittedResponseStatus(parsed: {
+  response?: { id?: unknown }
+}): unknown {
+  const response = parsed.response as Record<string, unknown> | undefined
+  return response?.status
 }
 
 function getRedirectReasoningEffort(
