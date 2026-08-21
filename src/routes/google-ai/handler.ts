@@ -687,21 +687,27 @@ async function handleCustomGoogleRequest(
     })
   }
   if (options.isCount) {
-    const totalTokens = await estimateTokenCount(candidate.payload)
+    const { payload: replacedPayload, appliedRules } =
+      await applyReplacementsToPayload(candidate.payload)
+    const totalTokens = await estimateTokenCount(replacedPayload)
     setRequestContext(c, {
       inputTokens: totalTokens,
       requestedModel: options.rawModel,
       model: options.reference.upstreamModel,
       provider: options.reference.provider.name,
+      replacements: appliedRules,
       reasoningEffort: options.reasoningEffort,
     })
     return c.json({ totalTokens })
   }
+  const { payload: replacedPayload, appliedRules } =
+    await applyReplacementsToPayload(candidate.payload)
   recordCopilotTranslationFindings("chat", candidate.endpoint, candidate.check)
   setRequestContext(c, {
     requestedModel: options.rawModel,
     model: options.reference.upstreamModel,
     provider: options.reference.provider.name,
+    replacements: appliedRules,
     reasoningEffort: options.reasoningEffort,
   })
   if (state.manualApprove) await awaitApproval()
@@ -719,7 +725,7 @@ async function handleCustomGoogleRequest(
       },
     ),
   })
-  return await handleWithChatCompletions(c, candidate.payload, {
+  return await handleWithChatCompletions(c, replacedPayload, {
     completionFactory,
     outputMode: options.outputMode,
     requestedModel: options.rawModel,

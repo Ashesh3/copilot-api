@@ -12,6 +12,7 @@ import consola from "consola"
 
 import type { ModelsResponse } from "../src/services/copilot/get-models"
 
+import { setReplacementsForTest } from "../src/lib/auto-replace"
 import { setConfigForTest } from "../src/lib/config"
 import {
   createCustomProviderChatCompletions,
@@ -74,6 +75,31 @@ function createCustomProviderStreamChunk(
       },
     ],
   }
+}
+
+function createLateCustomProviderStreamResponse(upstream: Response): Response {
+  const encoder = new TextEncoder()
+  let emitted = false
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        if (!emitted) {
+          emitted = true
+          controller.enqueue(
+            encoder.encode(
+              `data: ${JSON.stringify(
+                createCustomProviderStreamChunk(null, "partial"),
+              )}\n\n`,
+            ),
+          )
+          return
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10))
+        controller.error(new HTTPError("late provider failure", upstream))
+      },
+    }),
+    { headers: { "content-type": "text/event-stream" } },
+  )
 }
 
 type RequestBodyCheck = (body: Record<string, unknown>) => void
@@ -182,6 +208,7 @@ beforeEach(() => {
   state.isMultiToken = false
   resetRoutingTelemetryForTest()
   setModelRedirectsForTest([])
+  setReplacementsForTest([])
   setConfigForTest({
     auth: { apiKeys: [] },
     customProviders: [
@@ -207,6 +234,7 @@ beforeEach(() => {
         type: "openai-compatible",
         baseUrl: "https://custom.example/v1",
         apiKeyEnv: "CUSTOM_PROVIDER_API_KEY",
+        headers: { "X-Custom-Provider": "provider-only" },
         models: [
           {
             id: "custom-chat-model",
@@ -220,6 +248,12 @@ beforeEach(() => {
             supportsStreaming: true,
             passReasoningEffort: true,
           },
+          {
+            id: "gpt-copilot",
+            aliases: ["custom-collision-alias"],
+            kind: "chat",
+            supportsStreaming: true,
+          },
         ],
       },
       {
@@ -232,6 +266,150 @@ beforeEach(() => {
       },
     ],
   })
+})
+
+test("custom provider resolution preserves alias, exact, collision, and kind precedence", () => {
+  const copilotModelIds = new Set(["gpt-copilot"])
+  expect(
+    resolveCustomProviderModel({
+      model: "custom-collision-alias",
+      kind: "chat",
+      copilotModelIds,
+    }),
+  ).toMatchObject({ matchedAlias: true, upstreamModel: "gpt-copilot" })
+  expect(
+    resolveCustomProviderModel({
+      model: "gpt-copilot",
+      kind: "chat",
+      copilotModelIds,
+    }),
+  ).toBeUndefined()
+  expect(
+    resolveCustomProviderModel({
+      model: "custom-chat-model",
+      kind: "chat",
+      copilotModelIds,
+    }),
+  ).toMatchObject({ matchedAlias: false, upstreamModel: "custom-chat-model" })
+  expect(
+    resolveCustomProviderModel({
+      model: "qwen3-embedding-8b",
+      kind: "chat",
+      copilotModelIds,
+    }),
+  ).toBeUndefined()
+  expect(
+    resolveCustomProviderModel({
+      model: "unknown-task-19d-model",
+      kind: "chat",
+      copilotModelIds,
+    }),
+  ).toBeUndefined()
+})
+
+test.each([
+  {
+    name: "Responses",
+    customPath: "/v1/responses",
+    customBody: { model: "custom-collision-alias", input: "hello" },
+    exactPath: "/v1/responses",
+    exactBody: { model: "gpt-copilot", input: "hello" },
+    unknownPath: "/v1/responses",
+    unknownBody: { model: "unknown-task-19d-model", input: "hello" },
+  },
+  {
+    name: "Google",
+    customPath: "/v1beta/models/custom-collision-alias:generateContent",
+    customBody: {
+      contents: [{ role: "user", parts: [{ text: "hello" }] }],
+    },
+    exactPath: "/v1beta/models/gpt-copilot:generateContent",
+    exactBody: {
+      contents: [{ role: "user", parts: [{ text: "hello" }] }],
+    },
+    unknownPath: "/v1beta/models/unknown-task-19d-model:generateContent",
+    unknownBody: {
+      contents: [{ role: "user", parts: [{ text: "hello" }] }],
+    },
+  },
+])(
+  "$name mounted collision and unknown precedence",
+  async ({
+    customPath,
+    customBody,
+    exactPath,
+    exactBody,
+    unknownPath,
+    unknownBody,
+  }) => {
+    const alias = await server.request(customPath, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(customBody),
+    })
+    expect(alias.status).toBe(200)
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.url).toBe("https://custom.example/v1/chat/completions")
+    expect(requests[0]?.body.model).toBe("gpt-copilot")
+
+    requests = []
+    const exact = await server.request(exactPath, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(exactBody),
+    })
+    expect(exact.status).toBe(200)
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.url).not.toBe(
+      "https://custom.example/v1/chat/completions",
+    )
+
+    requests = []
+    const unknown = await server.request(unknownPath, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(unknownBody),
+    })
+    expect(unknown.status).not.toBe(200)
+    expect(requests).toHaveLength(0)
+  },
+)
+
+test("custom Google applies detached replacements exactly once", async () => {
+  setReplacementsForTest([
+    {
+      id: "task-19d-google-replacement",
+      pattern: "PRIVATE_GOOGLE_REPLACEMENT",
+      replacement: "PUBLIC_GOOGLE_REPLACEMENT",
+      isRegex: false,
+      enabled: true,
+    },
+  ])
+
+  const response = await server.request(
+    "/v1beta/models/custom-chat-alias:generateContent",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [
+          {
+            role: "user",
+            parts: [{ text: "PRIVATE_GOOGLE_REPLACEMENT" }],
+          },
+        ],
+      }),
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(requests).toHaveLength(1)
+  expect(JSON.stringify(requests[0]?.body)).not.toContain(
+    "PRIVATE_GOOGLE_REPLACEMENT",
+  )
+  expect(JSON.stringify(requests[0]?.body)).toContain(
+    "PUBLIC_GOOGLE_REPLACEMENT",
+  )
 })
 
 function restoreEnv(name: string, value: string | undefined): void {
@@ -553,6 +731,129 @@ test("custom providers preserve public identity across Responses and Google stre
   expect(requests).toHaveLength(2)
 })
 
+test("custom Google stream supports JSON-array mode with public identity", async () => {
+  const providerStream = [
+    `data: ${JSON.stringify(createCustomProviderStreamChunk(null, "custom"))}`,
+    `data: ${JSON.stringify(createCustomProviderStreamChunk("stop"))}`,
+    "data: [DONE]",
+    "",
+  ].join("\n\n")
+  fetchMock.mockImplementationOnce(
+    () =>
+      new Response(providerStream, {
+        headers: { "content-type": "text/event-stream" },
+      }),
+  )
+
+  const response = await server.request(
+    "/v1beta/models/custom-chat-alias:streamGenerateContent",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: "hello" }] }],
+      }),
+    },
+  )
+  const body = (await response.json()) as Array<{
+    modelVersion: string
+    candidates: Array<{ finishReason: string | null }>
+  }>
+
+  expect(response.status).toBe(200)
+  expect(response.headers.get("content-type")).toContain("application/json")
+  expect(body.some((chunk) => chunk.modelVersion === "custom-chat-alias")).toBe(
+    true,
+  )
+  expect(
+    body.filter((chunk) => chunk.candidates[0]?.finishReason === "STOP"),
+  ).toHaveLength(1)
+})
+
+test("custom Google web-search continuations stay on the provider", async () => {
+  const toolCall = (id: string, query: string) => ({
+    id,
+    object: "chat.completion",
+    created: 1,
+    model: "custom-chat-model",
+    choices: [
+      {
+        index: 0,
+        message: {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id,
+              type: "function",
+              function: {
+                name: "web_search",
+                arguments: JSON.stringify({ query }),
+              },
+            },
+          ],
+        },
+        finish_reason: "tool_calls",
+        logprobs: null,
+      },
+    ],
+    usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+  })
+  const providerResponses = [
+    toolCall("google-search-1", "first"),
+    toolCall("google-search-2", "second"),
+    {
+      id: "google-search-final",
+      object: "chat.completion",
+      created: 2,
+      model: "custom-chat-model",
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: "searched twice" },
+          finish_reason: "stop",
+          logprobs: null,
+        },
+      ],
+      usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
+    },
+  ]
+  for (const providerResponse of providerResponses) {
+    fetchMock.mockImplementationOnce((url: string, init?: RequestInit) => {
+      const body =
+        typeof init?.body === "string" ?
+          (JSON.parse(init.body) as Record<string, unknown>)
+        : {}
+      requests.push({ url, body, headers: new Headers(init?.headers) })
+      return Response.json(providerResponse)
+    })
+  }
+
+  const response = await server.request(
+    "/v1beta/models/custom-chat-alias:generateContent",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: "search" }] }],
+        tools: [{ googleSearch: { max_uses: 2 } }],
+      }),
+    },
+  )
+  const body = (await response.json()) as { modelVersion: string }
+
+  expect(response.status).toBe(200)
+  expect(body.modelVersion).toBe("custom-chat-alias")
+  expect(requests).toHaveLength(3)
+  expect(
+    requests.every(
+      (request) => request.url === "https://custom.example/v1/chat/completions",
+    ),
+  ).toBe(true)
+  expect(JSON.stringify(requests[1]?.body)).toContain('"role":"tool"')
+  expect(JSON.stringify(requests[2]?.body)).toContain("google-search-2")
+})
+
 test("custom provider web-search continuations never switch to Copilot", async () => {
   const assistantToolCall = {
     id: "chatcmpl-search",
@@ -684,6 +985,189 @@ test.each([
     Array.from(bytes),
   )
 })
+
+test.each([
+  {
+    name: "Responses",
+    path: "/v1/responses",
+    body: { model: "custom-chat-alias", input: "hello" },
+  },
+  {
+    name: "Google",
+    path: "/v1beta/models/custom-chat-alias:generateContent",
+    body: { contents: [{ role: "user", parts: [{ text: "hello" }] }] },
+  },
+])(
+  "$name preserves whitespace-sensitive custom provider text failures",
+  async ({ path, body }) => {
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Response(" custom-private-body\r\n", {
+          status: 401,
+          headers: { "content-type": "text/plain; charset=utf-8" },
+        }),
+    )
+
+    const response = await server.request(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    })
+
+    expect(response.status).toBe(401)
+    expect(response.headers.get("content-type")).toBe(
+      "text/plain; charset=utf-8",
+    )
+    expect(await response.text()).toBe(" custom-private-body\r\n")
+  },
+)
+
+test.each([
+  {
+    name: "Responses",
+    path: "/v1/responses",
+    body: { model: "custom-chat-alias", input: "hello" },
+  },
+  {
+    name: "Google",
+    path: "/v1beta/models/custom-chat-alias:generateContent?key=query-private",
+    body: { contents: [{ role: "user", parts: [{ text: "hello" }] }] },
+  },
+])("$name isolates custom provider credentials", async ({ path, body }) => {
+  const clientSecrets = [
+    "gateway-private",
+    "cookie-private",
+    "native-api-private",
+    "google-api-private",
+    "session-private",
+    "anthropic-beta-private",
+    "anthropic-version-private",
+    "client-provider-private",
+    "query-private",
+  ]
+  const response = await server.request(path, {
+    method: "POST",
+    headers: {
+      authorization: "Bearer gateway-private",
+      "content-type": "application/json",
+      cookie: "session=cookie-private",
+      "x-api-key": "native-api-private",
+      "x-goog-api-key": "google-api-private",
+      "copilot-session-token": "session-private",
+      "anthropic-beta": "anthropic-beta-private",
+      "anthropic-version": "anthropic-version-private",
+      "x-provider-auth": "client-provider-private",
+    },
+    body: JSON.stringify(body),
+  })
+
+  expect(response.status).toBe(200)
+  expect(requests).toHaveLength(1)
+  const providerRequest = requests[0]
+  expect(providerRequest.headers.get("authorization")).toBe("Bearer custom-key")
+  expect(providerRequest.headers.get("x-custom-provider")).toBe("provider-only")
+  const serialized = JSON.stringify({
+    body: providerRequest.body,
+    headers: Object.fromEntries(providerRequest.headers.entries()),
+  })
+  for (const secret of clientSecrets) expect(serialized).not.toContain(secret)
+})
+
+test.each([
+  {
+    name: "Responses",
+    path: "/v1/responses",
+    body: { model: "custom-chat-alias", input: "hello", stream: true },
+    failurePattern: /event: response\.failed/g,
+  },
+  {
+    name: "Google",
+    path: "/v1beta/models/custom-chat-alias:streamGenerateContent?alt=sse",
+    body: {
+      contents: [{ role: "user", parts: [{ text: "hello" }] }],
+    },
+    failurePattern: /"status":"INTERNAL"/g,
+  },
+])(
+  "$name emits one late custom provider stream failure",
+  async ({ path, body, failurePattern }) => {
+    const upstream = new Response(" late-provider-body\r\n", {
+      status: 503,
+      headers: { "content-type": "text/plain" },
+    })
+    fetchMock.mockImplementationOnce(() =>
+      createLateCustomProviderStreamResponse(upstream),
+    )
+
+    const response = await server.request(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    })
+    const text = await response.text()
+
+    expect(response.status).toBe(200)
+    expect(text).toContain("partial")
+    expect(text.match(failurePattern) ?? []).toHaveLength(1)
+  },
+)
+
+test.each([
+  {
+    name: "Responses",
+    path: "/v1/responses",
+    body: { model: "custom-chat-alias", input: "hello", stream: true },
+  },
+  {
+    name: "Google",
+    path: "/v1beta/models/custom-chat-alias:streamGenerateContent?alt=sse",
+    body: {
+      contents: [{ role: "user", parts: [{ text: "hello" }] }],
+    },
+  },
+])(
+  "$name aborts custom provider streams without late output",
+  async ({ path, body }) => {
+    let controller: ReadableStreamDefaultController<Uint8Array> | undefined
+    const encoder = new TextEncoder()
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(streamController) {
+              controller = streamController
+              streamController.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify(
+                    createCustomProviderStreamChunk(null, "partial"),
+                  )}\n\n`,
+                ),
+              )
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    )
+
+    const response = await server.request(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    })
+    const reader = response.body?.getReader()
+    expect(reader).toBeDefined()
+    await reader?.read()
+    await reader?.cancel()
+    try {
+      controller?.error(new Error("late-after-abort"))
+    } catch {
+      // The cancelled stream may already reject direct controller writes.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(response.status).toBe(200)
+  },
+)
 
 test("custom Chat receives the tolerant native candidate without Copilot caching", async () => {
   const response = await server.request("/v1/chat/completions", {
