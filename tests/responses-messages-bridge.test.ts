@@ -189,6 +189,7 @@ test("does not default an explicit null max_output_tokens during native dispatch
   const originalAccountType = state.accountType
   const originalCopilotToken = state.copilotToken
   const originalIsMultiToken = state.isMultiToken
+  const originalModels = state.models
   let requestBody: Record<string, unknown> | undefined
   const fetchMock = mock(
     (_url: string | URL | Request, init?: RequestInit): Response => {
@@ -212,6 +213,29 @@ test("does not default an explicit null max_output_tokens during native dispatch
   state.accountType = "individual"
   state.copilotToken = "copilot-token"
   state.isMultiToken = false
+  state.models = {
+    object: "list",
+    data: [
+      {
+        id: "claude-current",
+        name: "Claude Current",
+        object: "model",
+        preview: false,
+        vendor: "anthropic",
+        version: "1",
+        model_picker_enabled: true,
+        capabilities: {
+          family: "claude",
+          limits: { max_output_tokens: 1024 },
+          object: "model_capabilities",
+          supports: {},
+          tokenizer: "cl100k_base",
+          type: "chat",
+        },
+        supported_endpoints: ["/v1/messages"],
+      },
+    ],
+  }
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch =
     fetchMock as unknown as typeof fetch
 
@@ -237,6 +261,8 @@ test("does not default an explicit null max_output_tokens during native dispatch
     state.copilotToken = originalCopilotToken
     // eslint-disable-next-line require-atomic-updates
     state.isMultiToken = originalIsMultiToken
+    // eslint-disable-next-line require-atomic-updates
+    state.models = originalModels
   }
 })
 

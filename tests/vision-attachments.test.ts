@@ -501,12 +501,11 @@ describe("chatPayloadToAnthropic bridge", () => {
     expect(anthropic.max_tokens).toBeUndefined()
   })
 
-  test("preserves an explicit null max_tokens over fallback fields", async () => {
+  test("preserves an explicit null max_tokens without using model fallback", async () => {
     const anthropic = await chatPayloadToAnthropic(
       {
         model: "claude-sonnet-4.6",
         max_tokens: null,
-        max_completion_tokens: 321,
         messages: [{ role: "user", content: "hello" }],
       },
       {
@@ -527,6 +526,17 @@ describe("chatPayloadToAnthropic bridge", () => {
         },
       },
     )
+
+    expect(anthropic).toHaveProperty("max_tokens", null)
+  })
+
+  test("preserves max_tokens precedence when max_completion_tokens is also present", async () => {
+    const anthropic = await chatPayloadToAnthropic({
+      model: "claude-sonnet-4.6",
+      max_tokens: null,
+      max_completion_tokens: 321,
+      messages: [{ role: "user", content: "hello" }],
+    })
 
     expect(anthropic).toHaveProperty("max_tokens", null)
   })

@@ -281,7 +281,6 @@ test("preserves explicit null max_tokens through the Chat to Messages bridge", a
 
   const response = await postChatRoute({
     maxTokens: null,
-    maxCompletionTokens: 321,
   })
 
   expect(response.status).toBe(200)
