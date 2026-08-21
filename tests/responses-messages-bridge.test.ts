@@ -70,6 +70,90 @@ test("adapts future Responses items and consumes Messages tool results once", as
   expect(source.tools[0]?.parameters?.type).toBe("OBJECT")
 })
 
+test("merges Responses format and effort in one Messages output config", async () => {
+  const candidate = await adaptResponsesToMessagesCandidate({
+    source: {
+      model: "claude-current",
+      input: "hello",
+      reasoning: { effort: "high" },
+      text: {
+        format: {
+          type: "json_schema",
+          name: "answer",
+          schema: {
+            type: "object",
+            properties: { answer: { type: "string" } },
+          },
+        },
+      },
+    },
+  })
+
+  expect(candidate.payload.output_config).toMatchObject({
+    effort: "high",
+    format: {
+      type: "json_schema",
+      name: "answer",
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: { answer: { type: "string" } },
+      },
+    },
+  })
+})
+
+test("pairs generated and duplicate Responses calls legally in Messages", async () => {
+  const source = {
+    model: "claude-current",
+    input: [
+      { type: "function_call", name: "missing", arguments: "{}" },
+      { type: "message", role: "user", content: "between" },
+      { type: "function_call_output", output: "missing-result" },
+      { type: "function_call", call_id: "dup", name: "one", arguments: "{}" },
+      { type: "message", role: "assistant", content: "still pending" },
+      { type: "function_call", call_id: "dup", name: "two", arguments: "{}" },
+      { type: "function_call_output", call_id: "dup", output: "first-result" },
+      { type: "function_call_output", call_id: "dup", output: "second-result" },
+    ],
+  }
+
+  const [first, second] = await Promise.all([
+    adaptResponsesToMessagesCandidate({ source }),
+    adaptResponsesToMessagesCandidate({ source }),
+  ])
+
+  expect(first.payload).toEqual(second.payload)
+  const toolUses = first.payload.messages.flatMap((message) =>
+    Array.isArray(message.content) ?
+      message.content.filter((block) => block.type === "tool_use")
+    : [],
+  )
+  const toolResults = first.payload.messages.flatMap((message) =>
+    Array.isArray(message.content) ?
+      message.content.filter((block) => block.type === "tool_result")
+    : [],
+  )
+  expect(toolUses.map((block) => block.id)).toEqual([
+    "responses_messages_call_0",
+    "dup",
+    "responses_messages_call_5",
+  ])
+  expect(toolResults).toEqual([
+    {
+      type: "tool_result",
+      tool_use_id: "responses_messages_call_0",
+      content: "missing-result",
+    },
+    { type: "tool_result", tool_use_id: "dup", content: "first-result" },
+    {
+      type: "tool_result",
+      tool_use_id: "responses_messages_call_5",
+      content: "second-result",
+    },
+  ])
+})
+
 test("prepared Responses Messages executor skips source conversion", async () => {
   let sentBody: Record<string, unknown> | undefined
   state.copilotToken = "test-token"

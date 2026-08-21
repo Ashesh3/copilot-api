@@ -22,6 +22,8 @@ import { createWebSearchFunctionTool } from "~/services/copilot/mcp-web-search"
 
 import type { ResponsesAttachmentCache } from "./attachment-cache"
 
+import { associateResponsesFunctionCalls } from "./tool-call-association"
+
 export type ResponsesChatCandidate = EvaluatedEndpointCandidate<
   "/chat/completions",
   ChatCompletionsPayload
@@ -35,12 +37,27 @@ export interface AdaptResponsesToChatOptions {
   readonly attachmentCache?: ResponsesAttachmentCache
 }
 
+export function getResponsesChatWebSearchMaxUses(
+  source: ResponsesWireBody,
+): number | undefined {
+  if (!Array.isArray(source.tools)) return undefined
+  for (const raw of source.tools) {
+    if (!isRecord(raw)) continue
+    const type = typeof raw.type === "string" ? raw.type : undefined
+    if (type !== "web_search" && !type?.startsWith("web_search_")) continue
+    if (
+      typeof raw.max_uses === "number"
+      && Number.isInteger(raw.max_uses)
+      && raw.max_uses > 0
+    ) {
+      return raw.max_uses
+    }
+  }
+  return undefined
+}
+
 interface AdapterState {
-  readonly consumedCallIds: Set<string>
   readonly findings: Array<TranslationFinding>
-  readonly pendingCallIds: Set<string>
-  readonly reservedCallIds: Set<string>
-  readonly usedCallIds: Set<string>
 }
 
 const FUTURE_ITEM_CONTEXT = "[Future Responses item]"
@@ -73,54 +90,8 @@ function addFinding(
   findings.push(finding)
 }
 
-function createState(source: ResponsesWireBody): AdapterState {
-  const reservedCallIds = new Set<string>()
-  if (Array.isArray(source.input)) {
-    for (const raw of source.input) {
-      if (!isRecord(raw)) continue
-      const callId = raw.call_id
-      if (typeof callId === "string" && callId.trim()) {
-        reservedCallIds.add(callId)
-      }
-    }
-  }
-  return {
-    consumedCallIds: new Set(),
-    findings: [],
-    pendingCallIds: new Set(),
-    reservedCallIds,
-    usedCallIds: new Set(),
-  }
-}
-
-function createCallId(
-  state: AdapterState,
-  itemIndex: number,
-  supplied: unknown,
-): string {
-  if (
-    typeof supplied === "string"
-    && supplied.trim()
-    && !state.usedCallIds.has(supplied)
-  ) {
-    state.usedCallIds.add(supplied)
-    state.pendingCallIds.add(supplied)
-    return supplied
-  }
-  const base = `responses_call_${itemIndex}_0`
-  let candidate = base
-  let suffix = 0
-  while (
-    state.reservedCallIds.has(candidate)
-    || state.usedCallIds.has(candidate)
-  ) {
-    suffix += 1
-    candidate = `${base}_${suffix}`
-  }
-  state.usedCallIds.add(candidate)
-  state.pendingCallIds.add(candidate)
-  addFinding(state.findings, { class: "tool_history", severity: "adapted" })
-  return candidate
+function createState(_source: ResponsesWireBody): AdapterState {
+  return { findings: [] }
 }
 
 function stringifyArguments(value: unknown): string {
@@ -261,6 +232,10 @@ async function convertInput(
     return messages
   }
   if (!Array.isArray(source.input)) return messages
+  const associations = associateResponsesFunctionCalls(
+    source.input,
+    (itemIndex) => `responses_call_${itemIndex}_0`,
+  )
 
   for (const [itemIndex, raw] of source.input.entries()) {
     if (!isRecord(raw)) {
@@ -275,7 +250,14 @@ async function convertInput(
     }
     const type = typeof raw.type === "string" ? raw.type : undefined
     if (type === "function_call") {
-      const id = createCallId(state, itemIndex, raw.call_id)
+      const id = associations.callIdByIndex.get(itemIndex)
+      if (!id) continue
+      if (associations.adaptedCallIndices.has(itemIndex)) {
+        addFinding(state.findings, {
+          class: "tool_history",
+          severity: "adapted",
+        })
+      }
       const name =
         typeof raw.name === "string" && raw.name.trim() ?
           raw.name
@@ -300,16 +282,11 @@ async function convertInput(
       continue
     }
     if (type === "function_call_output") {
-      const supplied = raw.call_id
-      if (
-        typeof supplied === "string"
-        && state.pendingCallIds.has(supplied)
-        && !state.consumedCallIds.has(supplied)
-      ) {
-        state.consumedCallIds.add(supplied)
+      const targetId = associations.outputCallIdByIndex.get(itemIndex)
+      if (targetId) {
         messages.push({
           role: "tool",
-          tool_call_id: supplied,
+          tool_call_id: targetId,
           content: stringifyUseful(raw.output),
         })
       } else {
@@ -409,20 +386,157 @@ async function convertInput(
   return messages
 }
 
+const JSON_SCHEMA_TYPES = new Set([
+  "array",
+  "boolean",
+  "integer",
+  "null",
+  "number",
+  "object",
+  "string",
+])
+
+function normalizeSchemaType(schema: Record<string, unknown>): boolean {
+  const value = schema.type
+  if (typeof value === "string") {
+    const normalized = value.toLowerCase()
+    if (JSON_SCHEMA_TYPES.has(normalized)) {
+      if (normalized === value) return false
+      schema.type = normalized
+      return true
+    }
+    delete schema.type
+    return true
+  }
+  if (!Array.isArray(value)) return false
+  const normalized = Array.from(
+    new Set(
+      value.flatMap((entry) => {
+        if (typeof entry !== "string") return []
+        const lowered = entry.toLowerCase()
+        return JSON_SCHEMA_TYPES.has(lowered) ? [lowered] : []
+      }),
+    ),
+  )
+  if (
+    normalized.length === value.length
+    && normalized.every((entry, index) => entry === value[index])
+  ) {
+    return false
+  }
+  if (normalized.length > 0) schema.type = normalized
+  else delete schema.type
+  return true
+}
+
+function repairSchemaNode(
+  schema: Record<string, unknown>,
+  seen: Set<object>,
+  forceObject: boolean,
+): boolean {
+  if (seen.has(schema)) return false
+  seen.add(schema)
+  let repaired = normalizeSchemaType(schema)
+  const hasProperties = isRecord(schema.properties)
+  if (forceObject || hasProperties) {
+    if (schema.type !== "object") {
+      schema.type = "object"
+      repaired = true
+    }
+    if (!hasProperties) {
+      schema.properties = {}
+      repaired = true
+    }
+  } else if (schema.type === "object") {
+    schema.properties = {}
+    repaired = true
+  }
+
+  const properties = isRecord(schema.properties) ? schema.properties : undefined
+  if (properties && schema.required !== undefined) {
+    const normalized =
+      Array.isArray(schema.required) ?
+        Array.from(
+          new Set(
+            schema.required.filter(
+              (entry): entry is string =>
+                typeof entry === "string" && Object.hasOwn(properties, entry),
+            ),
+          ),
+        )
+      : []
+    if (normalized.length > 0) {
+      const current = schema.required
+      if (
+        !Array.isArray(current)
+        || current.length !== normalized.length
+        || !current.every((entry, index) => entry === normalized[index])
+      ) {
+        schema.required = normalized
+        repaired = true
+      }
+    } else {
+      delete schema.required
+      repaired = true
+    }
+  }
+
+  for (const map of [
+    schema.properties,
+    schema.patternProperties,
+    schema.$defs,
+    schema.definitions,
+  ]) {
+    if (!isRecord(map)) continue
+    for (const value of Object.values(map)) {
+      if (isRecord(value) && repairSchemaNode(value, seen, false)) {
+        repaired = true
+      }
+    }
+  }
+  for (const value of [
+    schema.additionalItems,
+    schema.contains,
+    schema.propertyNames,
+    schema.not,
+    schema.if,
+    schema.then,
+    schema.else,
+  ]) {
+    if (isRecord(value) && repairSchemaNode(value, seen, false)) repaired = true
+  }
+  const items = schema.items
+  if (isRecord(items) && repairSchemaNode(items, seen, false)) repaired = true
+  else if (Array.isArray(items)) {
+    for (const value of items) {
+      if (isRecord(value) && repairSchemaNode(value, seen, false)) {
+        repaired = true
+      }
+    }
+  }
+  for (const collection of [
+    schema.anyOf,
+    schema.oneOf,
+    schema.allOf,
+    schema.prefixItems,
+  ]) {
+    if (!Array.isArray(collection)) continue
+    for (const value of collection) {
+      if (isRecord(value) && repairSchemaNode(value, seen, false)) {
+        repaired = true
+      }
+    }
+  }
+  return repaired
+}
+
 function repairSchema(value: unknown): {
   repaired: boolean
   schema: Record<string, unknown>
 } {
   const schema = isRecord(value) ? clone(value) : {}
-  let repaired = !isRecord(value)
-  if (schema.type !== "object") {
-    schema.type = "object"
-    repaired = true
-  }
-  if (!isRecord(schema.properties)) {
-    schema.properties = {}
-    repaired = true
-  }
+  const repaired =
+    !isRecord(value) || repairSchemaNode(schema, new Set<object>(), true)
   return { repaired, schema }
 }
 
@@ -465,6 +579,8 @@ function convertTools(
         }
       : raw.parameters,
     )
+    let strict = typeof raw.strict === "boolean" ? raw.strict : undefined
+    if (repaired.repaired) strict = false
     tools.push({
       type: "function",
       function: {
@@ -473,6 +589,7 @@ function convertTools(
           { description: raw.description }
         : {}),
         parameters: repaired.schema,
+        ...(strict === undefined ? {} : { strict }),
       },
     })
     if (repaired.repaired || isApplyPatch) {

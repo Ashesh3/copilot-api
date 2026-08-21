@@ -123,6 +123,7 @@ import {
   selectResponsesCandidate,
 } from "./fallback-candidates"
 import { executePreparedResponsesMessagesBridge } from "./messages-bridge"
+import { getResponsesChatWebSearchMaxUses } from "./responses-chat-adapter"
 import { createStreamIdTracker, fixStreamIds } from "./stream-id-sync"
 import {
   classifyResponsesTerminal,
@@ -935,6 +936,7 @@ const handleResponsesInner = async (
       return await handleWithChatCompletions(c, candidate.payload, {
         requestedModel,
         copilotSessionToken,
+        webSearchMaxUses: getResponsesChatWebSearchMaxUses(payload),
       })
     }
 
@@ -2112,7 +2114,6 @@ async function processChatCompletionsChunk(
 ): Promise<"response.completed" | "response.incomplete" | undefined> {
   if (chunk.id) state.responseId = `resp_${chunk.id}`
   if (chunk.created) state.createdAt = chunk.created
-  if (chunk.model) state.resolvedModel = chunk.model
   if (chunk.usage) state.usage = extractCCUsage(chunk.usage)
   const shouldCreateResponse = !state.responseCreated
   if (shouldCreateResponse) {
@@ -2231,6 +2232,7 @@ export const handleWithChatCompletions = async (
     completionFactory?: ResponsesChatCompletionFactory
     requestedModel?: string
     copilotSessionToken?: string
+    webSearchMaxUses?: number
   } = {},
 ) => {
   const responseModel = options.requestedModel ?? ccPayload.model
@@ -2280,6 +2282,7 @@ export const handleWithChatCompletions = async (
             await resolvePreparedResponsesWebSearchCalls({
               completionFactory,
               initial,
+              maxUses: options.webSearchMaxUses,
               signal: c.req.raw.signal,
             })
           : (response as ChatCompletionResponse)
@@ -2323,6 +2326,7 @@ export const handleWithChatCompletions = async (
       ccPayload,
       completionFactory,
       responseModel,
+      webSearchMaxUses: options.webSearchMaxUses,
     })
   }
 
@@ -2475,6 +2479,7 @@ function handleStreamingChatFallbackWebSearch(
     ccPayload: ChatCompletionsPayload
     completionFactory: ResponsesChatCompletionFactory
     responseModel: string
+    webSearchMaxUses?: number
   },
 ): Response {
   return streamSSE(c, async (stream) => {
@@ -2503,6 +2508,7 @@ function handleStreamingChatFallbackWebSearch(
           const response = await resolvePreparedResponsesWebSearchCalls({
             completionFactory: options.completionFactory,
             initial: initialCompletion,
+            maxUses: options.webSearchMaxUses,
             signal: c.req.raw.signal,
           })
           return chatCompletionToResponsesResult(

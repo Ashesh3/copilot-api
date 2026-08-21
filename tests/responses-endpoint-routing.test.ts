@@ -1454,6 +1454,41 @@ test.each([
   },
 )
 
+test("shares one translated attachment fetch before the selected native transform", async () => {
+  installModel({
+    supported_endpoints: ["/responses", "/chat/completions", "/v1/messages"],
+  })
+  fetchMock.mockImplementationOnce((url) => {
+    const rawUrl = typeof url === "string" || url instanceof URL ? url : url.url
+    if (new URL(rawUrl).hostname === "example.invalid") {
+      attachmentFetchCount += 1
+    }
+    return new Response("attachment-bytes", {
+      status: 200,
+      headers: { "content-type": "image/png" },
+    })
+  })
+
+  const response = await postResponses({
+    input: [
+      {
+        type: "message",
+        role: "user",
+        content: [
+          {
+            type: "input_image",
+            image_url: "https://example.invalid/shared.png",
+          },
+        ],
+      },
+    ],
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/responses")
+  expect(attachmentFetchCount).toBe(2)
+})
+
 test("routes Responses compaction through the existing Chat preservation path", async () => {
   installModel({ supported_endpoints: ["/v1/messages", "/chat/completions"] })
 
@@ -1500,6 +1535,37 @@ test("approves an adapted Responses translation before dispatch", async () => {
     expect(response.status).toBe(200)
     expect(promptSpy).toHaveBeenCalledTimes(1)
     expect(lastUpstreamPath).toBe("/v1/messages")
+  } finally {
+    promptSpy.mockRestore()
+    state.manualApprove = false
+  }
+})
+
+test("does not fetch attachments for unadvertised fallbacks before native approval", async () => {
+  installModel({ supported_endpoints: ["/responses"] })
+  state.manualApprove = true
+  const promptSpy = spyOn(consola, "prompt").mockResolvedValue(false as never)
+
+  try {
+    const response = await postResponses({
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [
+            { type: "input_text", text: "inspect only after approval" },
+            {
+              type: "input_image",
+              image_url: "https://example.invalid/native-only.png",
+            },
+          ],
+        },
+      ],
+    })
+
+    expect(response.status).toBe(403)
+    expect(promptSpy).toHaveBeenCalledTimes(1)
+    expect(attachmentFetchCount).toBe(0)
   } finally {
     promptSpy.mockRestore()
     state.manualApprove = false

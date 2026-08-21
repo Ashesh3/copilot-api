@@ -3,6 +3,8 @@ import { describe, expect, test } from "bun:test"
 import { adaptResponsesToChatCandidate } from "~/routes/responses/responses-chat-adapter"
 import { COMPACTION_PAYLOAD_MAX_BYTES } from "~/services/copilot/compaction-payload"
 
+/* eslint-disable max-lines-per-function -- candidate matrix keeps source and exact target assertions together */
+
 describe("Responses Chat fallback candidate", () => {
   test("adapts future items and collision-safe tool history without fatal rejection", async () => {
     const source = {
@@ -91,6 +93,157 @@ describe("Responses Chat fallback candidate", () => {
       class: "message_shape",
       severity: "fatal",
     })
+  })
+
+  test("repairs a cloned recursive function schema and clears strict only on repair", async () => {
+    const repairedSource = {
+      model: "gpt-test",
+      input: "hello",
+      tools: [
+        {
+          type: "function",
+          name: "lookup",
+          strict: true,
+          parameters: {
+            type: "OBJECT",
+            properties: {
+              nested: {
+                type: "OBJECT",
+                properties: { value: { type: "STRING" } },
+                required: ["missing"],
+              },
+              list: {
+                type: "ARRAY",
+                items: {
+                  type: "OBJECT",
+                  properties: { id: { type: "STRING" } },
+                },
+              },
+            },
+            required: ["nested", "unknown"],
+            anyOf: [
+              {
+                type: "OBJECT",
+                properties: { flag: { type: "BOOLEAN" } },
+              },
+            ],
+          },
+        },
+      ],
+    }
+    const validSource = {
+      model: "gpt-test",
+      input: "hello",
+      tools: [
+        {
+          type: "function",
+          name: "valid",
+          strict: true,
+          parameters: {
+            type: "object",
+            properties: { value: { type: "string" } },
+            required: ["value"],
+            additionalProperties: false,
+          },
+        },
+      ],
+    }
+    const repairedBefore = structuredClone(repairedSource)
+    const validBefore = structuredClone(validSource)
+
+    const repaired = await adaptResponsesToChatCandidate({
+      source: repairedSource,
+    })
+    const valid = await adaptResponsesToChatCandidate({ source: validSource })
+
+    expect(repairedSource).toEqual(repairedBefore)
+    expect(validSource).toEqual(validBefore)
+    expect(repaired.payload.tools?.[0]?.function).toMatchObject({
+      strict: false,
+      parameters: {
+        type: "object",
+        required: ["nested"],
+        properties: {
+          nested: {
+            type: "object",
+            properties: { value: { type: "string" } },
+          },
+          list: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: { id: { type: "string" } },
+            },
+          },
+        },
+        anyOf: [
+          {
+            type: "object",
+            properties: { flag: { type: "boolean" } },
+          },
+        ],
+      },
+    })
+    expect(valid.payload.tools?.[0]?.function).toEqual({
+      name: "valid",
+      strict: true,
+      parameters: validSource.tools[0].parameters,
+    })
+  })
+
+  test("pairs generated and duplicate call IDs with one result across interleaving", async () => {
+    const source = {
+      model: "gpt-test",
+      input: [
+        { type: "function_call", name: "missing", arguments: "{}" },
+        { type: "message", role: "user", content: "between" },
+        { type: "function_call_output", output: "missing-result" },
+        { type: "function_call", call_id: "dup", name: "one", arguments: "{}" },
+        { type: "message", role: "assistant", content: "still pending" },
+        { type: "function_call", call_id: "dup", name: "two", arguments: "{}" },
+        {
+          type: "function_call_output",
+          call_id: "dup",
+          output: "first-result",
+        },
+        {
+          type: "function_call_output",
+          call_id: "dup",
+          output: "second-result",
+        },
+      ],
+    }
+
+    const [first, second] = await Promise.all([
+      adaptResponsesToChatCandidate({ source }),
+      adaptResponsesToChatCandidate({ source }),
+    ])
+
+    expect(first.payload).toEqual(second.payload)
+    const calls = first.payload.messages.flatMap(
+      (message) => message.tool_calls ?? [],
+    )
+    const toolResults = first.payload.messages.filter(
+      (message) => message.role === "tool",
+    )
+    expect(calls.map((call) => call.id)).toEqual([
+      "responses_call_0_0",
+      "dup",
+      "responses_call_5_0",
+    ])
+    expect(toolResults).toEqual([
+      {
+        role: "tool",
+        tool_call_id: "responses_call_0_0",
+        content: "missing-result",
+      },
+      { role: "tool", tool_call_id: "dup", content: "first-result" },
+      {
+        role: "tool",
+        tool_call_id: "responses_call_5_0",
+        content: "second-result",
+      },
+    ])
   })
 
   test("fits reducible compaction after preserving custom history without mutating source", async () => {

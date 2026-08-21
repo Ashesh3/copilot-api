@@ -50,8 +50,8 @@ test("builds independent endpoint-correlated Responses candidates", async () => 
 
   expect(candidates.native.payload).toEqual(nativeBody.body)
   expect(candidates.native.payload).not.toBe(nativeBody.body)
-  expect(candidates.chat.payload.tools).toBeUndefined()
-  expect(candidates.messages.payload.tools).toBeUndefined()
+  expect(candidates.chat?.payload.tools).toBeUndefined()
+  expect(candidates.messages?.payload.tools).toBeUndefined()
   ;(candidates.native.payload.tools?.[0] as Record<string, unknown>).marker =
     "changed"
   expect(nativeBody.body.tools[0].marker).toBe("native-only")

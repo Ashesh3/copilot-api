@@ -497,6 +497,30 @@ test("maps Chat finish_reason length to one response.incomplete terminal", async
   })
 })
 
+test("keeps the public requested model across Chat fallback stream events", async () => {
+  installModel("/chat/completions")
+  const responsePromise = postResponses({ input: "hello", stream: true })
+  await waitForUpstreamController()
+  enqueueChatWithModel("provider-canonical-model", { content: "hello" })
+  const response = await responsePromise
+  const reader = requireBody(response).getReader()
+  enqueueChatWithModel("provider-canonical-model", {}, "stop")
+  enqueueRaw(undefined, "[DONE]")
+  upstreamController?.close()
+
+  const body = await readRemaining(reader)
+  const responseModels = dataFrames(body).flatMap((frame) => {
+    if (typeof frame !== "object" || frame === null) return []
+    const responseValue = (frame as { response?: unknown }).response
+    if (typeof responseValue !== "object" || responseValue === null) return []
+    const model = (responseValue as { model?: unknown }).model
+    return typeof model === "string" ? [model] : []
+  })
+  expect(responseModels.length).toBeGreaterThan(0)
+  expect(new Set(responseModels)).toEqual(new Set(["route-model"]))
+  expect(body).not.toContain("provider-canonical-model")
+})
+
 function installModel(endpoint: "/responses" | "/chat/completions"): void {
   state.models = {
     object: "list",
@@ -585,13 +609,21 @@ function enqueueChat(
   delta: Record<string, unknown>,
   finishReason: string | null = null,
 ): void {
+  enqueueChatWithModel("route-model", delta, finishReason)
+}
+
+function enqueueChatWithModel(
+  model: string,
+  delta: Record<string, unknown>,
+  finishReason: string | null = null,
+): void {
   enqueueRaw(
     undefined,
     JSON.stringify({
       id: "chatcmpl_lifecycle",
       object: "chat.completion.chunk",
       created: 7,
-      model: "route-model",
+      model,
       choices: [{ index: 0, delta, finish_reason: finishReason }],
     }),
   )

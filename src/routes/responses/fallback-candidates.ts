@@ -38,8 +38,8 @@ export type ResponsesEndpointCandidate =
   | ResponsesMessagesCandidate
 
 export interface PreparedResponsesCandidates {
-  readonly chat: ResponsesChatCandidate
-  readonly messages: ResponsesMessagesCandidate
+  readonly chat?: ResponsesChatCandidate
+  readonly messages?: ResponsesMessagesCandidate
   readonly native: ResponsesNativeCandidate
   readonly ordered: ReadonlyArray<ResponsesEndpointCandidate>
 }
@@ -58,30 +58,41 @@ export async function prepareResponsesCandidates(
 ): Promise<PreparedResponsesCandidates> {
   const finalModel = options.adaptationSource.model
   const attachmentCache = createResponsesAttachmentCache()
+  const support = getModelEndpointSupport(options.selectedModel)
   const native: ResponsesNativeCandidate = {
     endpoint: "/responses",
     reason: "endpoint_unavailable",
     payload: structuredClone(options.nativeBody.body),
     check: createEvaluatedTranslationCheck([]),
   }
-  const chat = await adaptResponsesToChatCandidate({
-    finalModel,
-    finalReasoningEffort: options.finalReasoningEffort,
-    signal: options.signal,
-    source: structuredClone(options.adaptationSource),
-    attachmentCache,
-  })
-  const messages = await adaptResponsesToMessagesCandidate({
-    finalModel,
-    finalReasoningEffort: options.finalReasoningEffort,
-    signal: options.signal,
-    source: structuredClone(options.adaptationSource),
-    attachmentCache,
-  })
+  const chat =
+    support.chat ?
+      await adaptResponsesToChatCandidate({
+        finalModel,
+        finalReasoningEffort: options.finalReasoningEffort,
+        signal: options.signal,
+        source: structuredClone(options.adaptationSource),
+        attachmentCache,
+      })
+    : undefined
+  const messages =
+    support.messages ?
+      await adaptResponsesToMessagesCandidate({
+        finalModel,
+        finalReasoningEffort: options.finalReasoningEffort,
+        signal: options.signal,
+        source: structuredClone(options.adaptationSource),
+        attachmentCache,
+      })
+    : undefined
   // Touch the preserved source only to assert cloneability at this boundary;
   // adapters consume the route-neutral clone, never the native-finalized body.
   structuredClone(options.preservedSource.source)
-  return { native, chat, messages, ordered: [native, chat, messages] }
+  const ordered: Array<ResponsesEndpointCandidate> = []
+  if (support.responses) ordered.push(native)
+  if (chat) ordered.push(chat)
+  if (messages) ordered.push(messages)
+  return { native, chat, messages, ordered }
 }
 
 export function selectResponsesCandidate(options: {
@@ -107,11 +118,14 @@ export function selectResponsesCandidate(options: {
     })
   const ordered =
     hasFileAttachment ?
-      [
-        options.candidates.native,
-        options.candidates.messages,
-        options.candidates.chat,
-      ]
+      [...options.candidates.ordered].sort((left, right) => {
+        const priority = {
+          "/responses": 0,
+          "/v1/messages": 1,
+          "/chat/completions": 2,
+        } as const
+        return priority[left.endpoint] - priority[right.endpoint]
+      })
     : options.candidates.ordered
   return selectEvaluatedCopilotCandidate({
     source: "responses",

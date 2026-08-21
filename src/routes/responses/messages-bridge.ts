@@ -51,6 +51,7 @@ import {
   isAnthropicToolResultBlock,
   isAnthropicUserMessage,
 } from "../messages/anthropic-types"
+import { associateResponsesFunctionCalls } from "./tool-call-association"
 import { checkResponsesToMessagesTranslation } from "./translation-fidelity"
 
 export interface ResponsesMessagesBridgeOptions {
@@ -63,11 +64,8 @@ export type ResponsesMessagesCandidate = EvaluatedEndpointCandidate<
 >
 
 interface TolerantMessagesState {
-  readonly consumedCallIds: Set<string>
+  readonly emittedCallIds: Set<string>
   readonly findings: Array<TranslationFinding>
-  readonly pendingCallIds: Set<string>
-  readonly reservedCallIds: Set<string>
-  readonly usedCallIds: Set<string>
 }
 
 const FUTURE_RESPONSES_ITEM_CONTEXT = "[Future Responses item]"
@@ -97,54 +95,12 @@ function addTranslationFinding(
 }
 
 function createTolerantMessagesState(
-  source: ResponsesWireBody,
+  _source: ResponsesWireBody,
 ): TolerantMessagesState {
-  const reservedCallIds = new Set<string>()
-  if (Array.isArray(source.input)) {
-    for (const raw of source.input) {
-      if (!isRecord(raw)) continue
-      if (typeof raw.call_id === "string" && raw.call_id.trim()) {
-        reservedCallIds.add(raw.call_id)
-      }
-    }
-  }
   return {
-    consumedCallIds: new Set(),
+    emittedCallIds: new Set(),
     findings: [],
-    pendingCallIds: new Set(),
-    reservedCallIds,
-    usedCallIds: new Set(),
   }
-}
-
-function allocateMessagesCallId(
-  state: TolerantMessagesState,
-  itemIndex: number,
-  supplied: unknown,
-): string {
-  if (
-    typeof supplied === "string"
-    && supplied.trim()
-    && !state.usedCallIds.has(supplied)
-  ) {
-    state.usedCallIds.add(supplied)
-    state.pendingCallIds.add(supplied)
-    return supplied
-  }
-  const base = `responses_messages_call_${itemIndex}`
-  let callId = base
-  let suffix = 0
-  while (state.reservedCallIds.has(callId) || state.usedCallIds.has(callId)) {
-    suffix += 1
-    callId = `${base}_${suffix}`
-  }
-  state.usedCallIds.add(callId)
-  state.pendingCallIds.add(callId)
-  addTranslationFinding(state.findings, {
-    class: "tool_history",
-    severity: "adapted",
-  })
-  return callId
 }
 
 function stringifyTolerantValue(value: unknown): string {
@@ -299,24 +255,10 @@ async function convertTolerantResponsesInput(
   }
   if (!Array.isArray(source.input)) return { messages, system }
 
-  const callerSuppliedCallIds = new Set<string>()
-  for (const raw of source.input) {
-    if (!isRecord(raw) || raw.type !== "function_call") continue
-    if (typeof raw.call_id === "string" && raw.call_id.trim()) {
-      callerSuppliedCallIds.add(raw.call_id)
-    }
-  }
-  const legalResultIds = new Set<string>()
-  for (const raw of source.input) {
-    if (!isRecord(raw) || raw.type !== "function_call_output") continue
-    if (
-      typeof raw.call_id === "string"
-      && callerSuppliedCallIds.has(raw.call_id)
-      && !legalResultIds.has(raw.call_id)
-    ) {
-      legalResultIds.add(raw.call_id)
-    }
-  }
+  const associations = associateResponsesFunctionCalls(
+    source.input,
+    (itemIndex) => `responses_messages_call_${itemIndex}`,
+  )
 
   for (const [itemIndex, raw] of source.input.entries()) {
     if (!isRecord(raw)) {
@@ -335,7 +277,14 @@ async function convertTolerantResponsesInput(
     }
     const type = typeof raw.type === "string" ? raw.type : undefined
     if (type === "function_call") {
-      const id = allocateMessagesCallId(state, itemIndex, raw.call_id)
+      const id = associations.callIdByIndex.get(itemIndex)
+      if (!id) continue
+      if (associations.adaptedCallIndices.has(itemIndex)) {
+        addTranslationFinding(state.findings, {
+          class: "tool_history",
+          severity: "adapted",
+        })
+      }
       const name =
         typeof raw.name === "string" && raw.name.trim() ?
           raw.name
@@ -347,10 +296,10 @@ async function convertTolerantResponsesInput(
         })
       }
       if (
-        typeof raw.call_id === "string"
-        && legalResultIds.has(raw.call_id)
+        associations.pairedCallIndices.has(itemIndex)
         && name !== "unknown_function"
       ) {
+        state.emittedCallIds.add(id)
         appendAssistantBlock(messages, {
           type: "tool_use",
           id,
@@ -362,7 +311,6 @@ async function convertTolerantResponsesInput(
           ),
         })
       } else {
-        state.pendingCallIds.delete(id)
         addTranslationFinding(state.findings, {
           class: "tool_history",
           severity: "adapted",
@@ -377,13 +325,8 @@ async function convertTolerantResponsesInput(
       continue
     }
     if (type === "function_call_output") {
-      const callId = raw.call_id
-      if (
-        typeof callId === "string"
-        && state.pendingCallIds.has(callId)
-        && !state.consumedCallIds.has(callId)
-      ) {
-        state.consumedCallIds.add(callId)
+      const callId = associations.outputCallIdByIndex.get(itemIndex)
+      if (callId && state.emittedCallIds.has(callId)) {
         appendUserBlock(messages, {
           type: "tool_result",
           tool_use_id: callId,
@@ -679,6 +622,7 @@ export async function adaptResponsesToMessagesCandidate(options: {
   const effort = source.reasoning?.effort
   if (typeof effort === "string") {
     payload.output_config = {
+      ...payload.output_config,
       effort: effort as NonNullable<
         AnthropicMessagesPayload["output_config"]
       >["effort"],
