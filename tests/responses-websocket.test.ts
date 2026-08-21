@@ -1205,6 +1205,76 @@ describe("responses websocket message handling", () => {
     expect(ws.data.activeTurns.size).toBe(0)
   })
 
+  test("does not retry a native WebSocket compatibility 400", async () => {
+    state.models = responsesCapableModels
+    queuedResponses.push(
+      Response.json(
+        {
+          error: {
+            code: "invalid_request_body",
+            message:
+              "Unsupported parameter: 'temperature' is not supported with this model.",
+          },
+        },
+        { status: 400 },
+      ),
+      createResponsesSseResponse("must_not_send"),
+    )
+    const ws = createTestWebSocket()
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "hello",
+        temperature: 1,
+      }),
+    )
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(
+      ws.sent.some(
+        (frame) => (JSON.parse(frame) as { type?: unknown }).type === "error",
+      ),
+    ).toBe(true)
+  })
+
+  test("does not retry a Chat-backed WebSocket compatibility 400", async () => {
+    installWebSocketEndpoint("/chat/completions")
+    queuedResponses.push(
+      Response.json(
+        {
+          error: {
+            code: "invalid_request_body",
+            message:
+              "Unsupported parameter: 'temperature' is not supported with this model.",
+          },
+        },
+        { status: 400 },
+      ),
+      createChatCompletionsSseResponse(),
+    )
+    const ws = createTestWebSocket()
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "hello",
+        temperature: 1,
+      }),
+    )
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(
+      ws.sent.some(
+        (frame) => (JSON.parse(frame) as { type?: unknown }).type === "error",
+      ),
+    ).toBe(true)
+  })
+
   test("completes a native turn when upstream omits terminal output_text", async () => {
     state.accountType = "individual"
     state.copilotToken = "copilot-token"

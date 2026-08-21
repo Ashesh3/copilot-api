@@ -2240,6 +2240,7 @@ export const handleWithChatCompletions = async (
     options.completionFactory
     ?? (async (payload, factoryOptions) => {
       const result = await createChatCompletionsWithProcessedPayload(payload, {
+        allowCompatibilityRetry: factoryOptions.allowCompatibilityRetry,
         candidatePrepared: true,
         copilotSessionToken: options.copilotSessionToken,
         signal: factoryOptions.signal,

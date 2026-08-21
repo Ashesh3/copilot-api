@@ -45,6 +45,7 @@ function completionWithCalls(callIds: Array<string>): ChatCompletionResponse {
 
 test("continues web search from every factory processed payload", async () => {
   const seen: Array<ChatCompletionsPayload> = []
+  const retryFlags: Array<boolean | undefined> = []
   const processedMarkers = ["processed-one", "processed-two"]
   let call = 0
   const initialPayload: ChatCompletionsPayload = {
@@ -60,8 +61,12 @@ test("continues web search from every factory processed payload", async () => {
       },
     ],
   }
-  const factory = (payload: ChatCompletionsPayload) => {
+  const factory = (
+    payload: ChatCompletionsPayload,
+    options: { allowCompatibilityRetry?: boolean },
+  ) => {
     seen.push(structuredClone(payload))
+    retryFlags.push(options.allowCompatibilityRetry)
     const marker = processedMarkers[call]
     const processedPayload = {
       ...payload,
@@ -88,6 +93,7 @@ test("continues web search from every factory processed payload", async () => {
 
   expect(result.choices[0]?.message.content).toBe("done")
   expect(seen).toHaveLength(2)
+  expect(retryFlags).toEqual([false, false])
   expect(JSON.stringify(seen[1])).toContain("processed-one")
 })
 

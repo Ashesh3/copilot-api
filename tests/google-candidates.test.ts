@@ -208,6 +208,96 @@ test("uses one injected handler factory and advances from processed payload thro
   })
 })
 
+test("marks every Google Chat web-search continuation as post-output", async () => {
+  const retryFlags: Array<boolean | undefined> = []
+  const responses = [
+    chatResult("web_search", "call-1"),
+    chatResult(undefined, undefined, "finished"),
+  ]
+  const app = new Hono()
+  app.get(
+    "/",
+    async (c) =>
+      await handleWithChatCompletions(
+        c,
+        {
+          model: "public",
+          messages: [{ role: "user", content: "search" }],
+          tools: [
+            {
+              type: "function",
+              function: {
+                name: "web_search",
+                parameters: { type: "object", properties: {} },
+              },
+            },
+          ],
+        },
+        {
+          outputMode: "json",
+          requestedModel: "public",
+          completionFactory: (payload, options) => {
+            retryFlags.push(options.allowCompatibilityRetry)
+            const response = responses.shift()
+            if (!response) throw new Error("Unexpected completion")
+            return Promise.resolve({
+              processedPayload: structuredClone(payload),
+              response,
+            })
+          },
+          webSearch: () => Promise.resolve("result"),
+        },
+      ),
+  )
+
+  expect((await app.request("/")).status).toBe(200)
+  expect(retryFlags).toEqual([undefined, false])
+})
+
+test("uses a separate post-output Google Responses continuation factory", async () => {
+  const sends: Array<ResponsesPayload> = []
+  const retryFlags: Array<boolean | undefined> = []
+  const queue = [responsesSearchResult(["call-1"]), responsesSearchResult([])]
+  const app = new Hono()
+  app.get(
+    "/",
+    async (c) =>
+      await handleWithResponsesApi(
+        c,
+        {
+          model: "public",
+          input: [{ type: "message", role: "user", content: "search" }],
+          stream: false,
+          tools: [
+            {
+              type: "function",
+              name: "web_search",
+              parameters: { type: "object", properties: {} },
+              strict: false,
+            },
+          ],
+        },
+        {
+          isStream: false,
+          outputMode: "json",
+          requestedModel: "public",
+          createResponse: (payload, options) => {
+            sends.push(structuredClone(payload))
+            retryFlags.push(options.allowCompatibilityRetry)
+            const result = queue.shift()
+            if (!result) throw new Error("Unexpected Responses send")
+            return Promise.resolve(result)
+          },
+          webSearch: () => Promise.resolve("result"),
+        },
+      ),
+  )
+
+  expect((await app.request("/")).status).toBe(200)
+  expect(sends).toHaveLength(2)
+  expect(retryFlags).toEqual([undefined, false])
+})
+
 test("rejects an over-limit search batch before executing any search", async () => {
   let searches = 0
   const app = new Hono()

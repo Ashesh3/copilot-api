@@ -450,6 +450,7 @@ async function handleResponseCreate(
     // Native responses streaming
     const response = await waitForWebSocketTurn(
       createResponses(preparedPayload, {
+        allowCompatibilityRetry: false,
         vision,
         initiator,
         prepared: true,
@@ -529,6 +530,7 @@ async function dispatchTranslatedWebSocketEndpoint(options: {
     await streamAnthropicMessagesOverWs({
       nativeOptions: {
         ...nativeMessagesOptions,
+        allowCompatibilityRetry: false,
         initiatorOverride: initiator,
         requestedModel,
       },
@@ -1051,6 +1053,7 @@ async function streamChatCompletionsOverWs(options: {
 
   const response = await waitForWebSocketTurn(
     createChatCompletions(ccPayload, {
+      allowCompatibilityRetry: false,
       compaction,
       initiator,
       signal: turn.abortController.signal,
@@ -1084,6 +1087,7 @@ async function streamChatWebSearchOverWs(options: {
   ccPayload.stream_options = null
   const initial = (await waitForWebSocketTurn(
     createChatCompletions(ccPayload, {
+      allowCompatibilityRetry: false,
       compaction,
       initiator,
       signal: turn.abortController.signal,
@@ -1094,6 +1098,7 @@ async function streamChatWebSearchOverWs(options: {
     abortSignal: turn.abortController.signal,
     createCompletion: async (nextPayload) =>
       (await createChatCompletions(nextPayload, {
+        allowCompatibilityRetry: false,
         compaction,
         initiator,
         signal: turn.abortController.signal,

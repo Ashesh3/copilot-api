@@ -27,7 +27,10 @@ export interface PreparedResponsesChatCompletion {
 
 export type ResponsesChatCompletionFactory = (
   payload: ChatCompletionsPayload,
-  options: { readonly signal?: AbortSignal },
+  options: {
+    readonly allowCompatibilityRetry?: boolean
+    readonly signal?: AbortSignal
+  },
 ) => Promise<PreparedResponsesChatCompletion>
 
 function webSearchCalls(response: ChatCompletionResponse): Array<ToolCall> {
@@ -98,6 +101,7 @@ export async function resolvePreparedResponsesWebSearchCalls(options: {
       tool_choice: "auto",
     }
     const next = await options.completionFactory(nextPayload, {
+      allowCompatibilityRetry: false,
       signal: options.signal,
     })
     current = next.response as ChatCompletionResponse

@@ -622,6 +622,7 @@ const executeRequest = async (
                   await createChatCompletionsWithProcessedPayload(
                     followUpPayload,
                     {
+                      allowCompatibilityRetry: false,
                       candidatePrepared: true,
                       copilotSessionToken: options.copilotSessionToken,
                       signal: c.req.raw.signal,
@@ -742,6 +743,7 @@ async function executeStreamingWebSearchRequest(
           createCompletion: async (followUpPayload) =>
             (
               await createChatCompletionsWithProcessedPayload(followUpPayload, {
+                allowCompatibilityRetry: false,
                 candidatePrepared: true,
                 copilotSessionToken: options.copilotSessionToken,
                 signal: c.req.raw.signal,

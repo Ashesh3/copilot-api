@@ -773,7 +773,11 @@ async function handleChatCompletionsWithWebSearch(
     signal: c.req.raw.signal,
   })
   const result = await resolvePreparedResponsesWebSearchCalls({
-    completionFactory: options.completionFactory,
+    completionFactory: (nextPayload, factoryOptions) =>
+      options.completionFactory(nextPayload, {
+        ...factoryOptions,
+        allowCompatibilityRetry: false,
+      }),
     initial: initialPrepared,
     signal: c.req.raw.signal,
     maxUses: getGoogleChatWebSearchMaxUses(payload),
@@ -932,6 +936,7 @@ export async function handleWithResponsesApi(
     webSearchMaxUses?: number
     createResponse?: (
       payload: ResponsesPayload,
+      options: { readonly allowCompatibilityRetry?: boolean },
     ) => Promise<Awaited<ReturnType<typeof createResponses>>>
     webSearch?: (query: string, signal?: AbortSignal) => Promise<string>
   },
@@ -963,7 +968,7 @@ export async function handleWithResponsesApi(
 
   const response =
     options.createResponse ?
-      await options.createResponse(responsesPayload)
+      await options.createResponse(responsesPayload, {})
     : await createResponses(responsesPayload, {
         prepared: true,
         vision,
@@ -1062,6 +1067,7 @@ async function handleResponsesMcpWebSearch(
     webSearchMaxUses?: number
     createResponse?: (
       payload: ResponsesPayload,
+      options: { readonly allowCompatibilityRetry?: boolean },
     ) => Promise<Awaited<ReturnType<typeof createResponses>>>
     webSearch?: (query: string, signal?: AbortSignal) => Promise<string>
   },
@@ -1073,17 +1079,26 @@ async function handleResponsesMcpWebSearch(
     signal: c.req.raw.signal,
     prepared: true,
   }
-  const createResponse = async (nextPayload: ResponsesPayload) =>
+  const createInitialResponse = async (nextPayload: ResponsesPayload) =>
     (options.createResponse ?
-      await options.createResponse(nextPayload)
+      await options.createResponse(nextPayload, {})
     : await createResponses(nextPayload, requestOptions)) as ResponsesResult
-  const initial = await createResponse(bufferedPayload)
+  const createFollowUpResponse = async (nextPayload: ResponsesPayload) =>
+    (options.createResponse ?
+      await options.createResponse(nextPayload, {
+        allowCompatibilityRetry: false,
+      })
+    : await createResponses(nextPayload, {
+        ...requestOptions,
+        allowCompatibilityRetry: false,
+      })) as ResponsesResult
+  const initial = await createInitialResponse(bufferedPayload)
   const result = await resolvePreparedGoogleResponsesWebSearch({
     initial,
     payload: bufferedPayload,
     maxUses: options.webSearchMaxUses,
     signal: c.req.raw.signal,
-    createResponse,
+    createResponse: createFollowUpResponse,
     webSearch: options.webSearch,
   })
 

@@ -21,7 +21,10 @@ export interface PreparedGoogleChatCompletion {
 
 export type GoogleChatCompletionFactory = (
   payload: ChatCompletionsPayload,
-  options: { readonly signal?: AbortSignal },
+  options: {
+    readonly allowCompatibilityRetry?: boolean
+    readonly signal?: AbortSignal
+  },
 ) => Promise<PreparedGoogleChatCompletion>
 
 export const createCopilotGoogleChatCompletion: GoogleChatCompletionFactory =
@@ -29,6 +32,7 @@ export const createCopilotGoogleChatCompletion: GoogleChatCompletionFactory =
     const completion = await createChatCompletionsWithProcessedPayload(
       payload,
       {
+        allowCompatibilityRetry: options.allowCompatibilityRetry,
         candidatePrepared: true,
         signal: options.signal,
       },
