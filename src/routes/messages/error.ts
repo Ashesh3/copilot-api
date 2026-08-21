@@ -7,12 +7,12 @@ import consola from "consola"
 import { ANTHROPIC_HTTP_ERROR_STATUS_TYPES } from "~/lib/compatibility-contract-values"
 import {
   HTTP_TOO_MANY_REQUESTS_STATUS,
-  type SafeHttpErrorInspection,
-  inspectSafeHttpError,
+  type HttpErrorInspection,
+  inspectHttpError,
   isAbortError,
   isHTTPError,
-  reportSafeHttpError,
-  snapshotSafeHttpError,
+  reportHttpError,
+  snapshotHttpErrorMetadata,
 } from "~/lib/error"
 import { getRequestId } from "~/lib/request-session"
 
@@ -131,11 +131,13 @@ export function createAnthropicStreamError(
       },
     }
   }
-  return createAnthropicStreamErrorFromInspection(snapshotSafeHttpError(error))
+  return createAnthropicStreamErrorFromInspection(
+    snapshotHttpErrorMetadata(error),
+  )
 }
 
 function createAnthropicStreamErrorFromInspection(
-  inspection: SafeHttpErrorInspection,
+  inspection: HttpErrorInspection,
 ): AnthropicErrorEvent {
   const localBody = snapshotAnthropicErrorBody(inspection.localClientBody)
   if (localBody) return localBody
@@ -186,13 +188,26 @@ export async function forwardMessagesError(
   }
 
   if (isHTTPError(error)) {
-    const inspection = await inspectSafeHttpError(error)
-    if (inspection.status === 499) {
+    const metadata = snapshotHttpErrorMetadata(error)
+    if (metadata.status === 499) {
       consola.debug("Client disconnected (upstream 499)")
       return c.body(null, 499 as ContentfulStatusCode)
     }
 
-    reportSafeHttpError(c, inspection)
+    const inspection = await inspectHttpError(error)
+    reportHttpError(c, inspection)
+    if (inspection.kind === "upstream") {
+      return c.body(
+        inspection.bodyBytes.slice(),
+        inspection.status as ContentfulStatusCode,
+        {
+          ...inspection.responseHeaders,
+          ...(inspection.contentType ?
+            { "content-type": inspection.contentType }
+          : {}),
+        },
+      )
+    }
     for (const [name, value] of Object.entries(inspection.responseHeaders)) {
       c.header(name, value)
     }

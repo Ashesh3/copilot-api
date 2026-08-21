@@ -18,8 +18,10 @@ import { getRoutingAffinity } from "~/lib/routing-affinity"
 import packageJson from "../../package.json" with { type: "json" }
 
 /**
- * Ordinary Sentry telemetry never records AI request/response bodies. Raw
- * capture is restricted to the administrator-only LLM Debug facility.
+ * Ordinary Sentry telemetry never records AI request/response bodies. The one
+ * explicit ordinary-telemetry exception is an owned final upstream HTTP
+ * failure body. Other raw capture remains restricted to administrator-only
+ * LLM Debug.
  */
 export function shouldRecordAiContent(): boolean {
   return false
@@ -61,6 +63,11 @@ const STATSIG_CLIENT_KEY_RE = /(^|[?&])k=[^&#\s"'<>]*/g
 const GOOGLE_PRIVATE_MODEL_ACTION_REFERENCE =
   /\/(?:v1beta\/models|v1\/models|models)\/([^/?#\s"'<>]+)/gi
 const SENTRY_SCRUB_MAX_DEPTH = 64
+const OPAQUE_UPSTREAM_RESPONSE_FIELDS = new Set([
+  "upstreamResponseBody",
+  "upstreamResponseBodyBytes",
+  "upstreamResponseContentType",
+])
 
 type HeaderTuple = [string, unknown]
 
@@ -125,7 +132,10 @@ function inspectLocalStatsigContext(
 ): InspectionResult<boolean> {
   if (
     entries.some(
-      ({ value }) => typeof value === "string" && containsStatsigHost(value),
+      ({ key, value }) =>
+        !OPAQUE_UPSTREAM_RESPONSE_FIELDS.has(key)
+        && typeof value === "string"
+        && containsStatsigHost(value),
     )
   )
     return { complete: true, value: true }
@@ -185,6 +195,7 @@ function scrubStatsigClientKeyDataSafely(
     context.inheritedStatsigContext || statsigInspection.value
   if (localStatsigContext) context.seen.set(value, true)
   for (const { key, value: nestedValue } of inspected.value) {
+    if (OPAQUE_UPSTREAM_RESPONSE_FIELDS.has(key)) continue
     if (isRoutingAffinityHeader(key)) {
       if (!setOwnDataValue(value, key, FILTERED_VALUE))
         result = UNCERTAIN_SCRUB_RESULT
@@ -248,6 +259,7 @@ function scrubGoogleRouteData(
   const inspected = inspectOwnDataEntries(value)
   let result = inspected.complete ? SAFE_SCRUB_RESULT : UNCERTAIN_SCRUB_RESULT
   for (const { key, value: nestedValue } of inspected.value) {
+    if (OPAQUE_UPSTREAM_RESPONSE_FIELDS.has(key)) continue
     if (typeof nestedValue === "string") {
       const scrubbed = sanitizeGoogleRouteString(key, nestedValue, context)
       if (scrubbed !== nestedValue && !setOwnDataValue(value, key, scrubbed))
@@ -286,7 +298,8 @@ function findGoogleRouteValues(
   }
   seen.add(value)
 
-  for (const [, entry] of ownDataEntries(value)) {
+  for (const [key, entry] of ownDataEntries(value)) {
+    if (OPAQUE_UPSTREAM_RESPONSE_FIELDS.has(key)) continue
     if (typeof entry === "string") {
       const matches = entry.matchAll(GOOGLE_PRIVATE_MODEL_ACTION_REFERENCE)
       for (const match of matches) {
@@ -334,7 +347,8 @@ function findGoogleRequestMethod(
   const directMethod = findDirectGoogleRequestMethod(value, entries)
   if (directMethod) return directMethod
 
-  for (const [, entry] of entries) {
+  for (const [key, entry] of entries) {
+    if (OPAQUE_UPSTREAM_RESPONSE_FIELDS.has(key)) continue
     if (typeof entry === "string") {
       const separator = entry.indexOf(" ")
       if (separator > 0) {
@@ -525,6 +539,7 @@ function scrubHeaderContainer(
   const inspected = inspectOwnDataEntries(value)
   let result = inspected.complete ? SAFE_SCRUB_RESULT : UNCERTAIN_SCRUB_RESULT
   for (const { key, value: nestedValue } of inspected.value) {
+    if (OPAQUE_UPSTREAM_RESPONSE_FIELDS.has(key)) continue
     if (isSensitiveHeader(key)) {
       if (!setOwnDataValue(value, key, FILTERED_VALUE))
         result = UNCERTAIN_SCRUB_RESULT
@@ -569,6 +584,7 @@ function scrubNestedHeaders(
   const inspected = inspectOwnDataEntries(value)
   let result = inspected.complete ? SAFE_SCRUB_RESULT : UNCERTAIN_SCRUB_RESULT
   for (const { key, value: nestedValue } of inspected.value) {
+    if (OPAQUE_UPSTREAM_RESPONSE_FIELDS.has(key)) continue
     const semanticHeaderName = sensitiveSemanticHeaderName(key)
     if (semanticHeaderName && isSensitiveHeader(semanticHeaderName)) {
       if (!setOwnDataValue(value, key, FILTERED_VALUE))
