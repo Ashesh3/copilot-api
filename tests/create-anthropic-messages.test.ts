@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- native transport fixtures and compatibility coverage share one singleton fetch */
 import {
   afterAll,
   beforeAll,
@@ -24,6 +25,8 @@ const originalModels = state.models
 let capturedBody: unknown
 let capturedHeaders: Headers | undefined
 const capturedHeaderAttempts: Array<Headers> = []
+const capturedBodies: Array<Record<string, unknown>> = []
+const queuedResponses: Array<Response> = []
 let pendingResponse: Promise<Response> | undefined
 
 const fetchMock = mock((_url: string | URL | Request, init?: RequestInit) => {
@@ -31,10 +34,12 @@ const fetchMock = mock((_url: string | URL | Request, init?: RequestInit) => {
     throw new TypeError("Expected native Messages JSON body")
   }
   capturedBody = JSON.parse(init.body) as unknown
+  capturedBodies.push(capturedBody as Record<string, unknown>)
   capturedHeaders = new Headers(init.headers)
   capturedHeaderAttempts.push(capturedHeaders)
   return (
-    pendingResponse
+    queuedResponses.shift()
+    ?? pendingResponse
     ?? new Response(
       JSON.stringify({
         id: "msg_cache_control",
@@ -66,10 +71,74 @@ beforeEach(() => {
   capturedBody = undefined
   capturedHeaders = undefined
   capturedHeaderAttempts.length = 0
+  capturedBodies.length = 0
+  queuedResponses.length = 0
   pendingResponse = undefined
   state.accountType = "individual"
   state.copilotToken = "copilot-token"
   state.isMultiToken = false
+})
+
+test("retries exact native thinking signature failure after stripping only thinking", async () => {
+  queuedResponses.push(
+    Response.json(
+      {
+        type: "error",
+        error: {
+          type: "invalid_request_error",
+          message: "Invalid signature in thinking block",
+        },
+      },
+      { status: 400 },
+    ),
+    Response.json({
+      id: "msg_retry",
+      type: "message",
+      role: "assistant",
+      model: "claude-opus-4.8",
+      content: [{ type: "text", text: "ok" }],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    }),
+  )
+  const payload = {
+    model: "claude-opus-4.8",
+    max_tokens: 64,
+    messages: [
+      { role: "user", content: "hello" },
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "private", signature: "bad" },
+          { type: "text", text: "kept" },
+        ],
+      },
+    ],
+  } as AnthropicMessagesPayload
+  const source = structuredClone(payload)
+
+  const result = await createAnthropicMessages(payload, {
+    alreadyAdapted: true,
+    copilotSessionToken: "messages-session-fixed",
+  })
+
+  expect(result).toHaveProperty("id", "msg_retry")
+  expect(payload).toEqual(source)
+  expect(capturedBodies).toHaveLength(2)
+  expect(capturedBodies[0]).toEqual(source)
+  expect(capturedBodies[1]).toEqual({
+    ...source,
+    messages: [
+      { role: "user", content: "hello" },
+      { role: "assistant", content: [{ type: "text", text: "kept" }] },
+    ],
+  })
+  expect(
+    capturedHeaderAttempts.map((headers) =>
+      headers.get("copilot-session-token"),
+    ),
+  ).toEqual(["messages-session-fixed", "messages-session-fixed"])
 })
 
 test("serializes native cache controls using Copilot's supported wire shape", async () => {

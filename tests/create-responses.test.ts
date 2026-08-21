@@ -1196,6 +1196,45 @@ beforeEach(() => {
   setModelSettingsForTest([])
 })
 
+test("retries one exact unsupported Responses control after store enforcement", async () => {
+  queuedResponses.push(
+    Response.json(
+      {
+        error: {
+          code: "invalid_request_body",
+          message:
+            "Unsupported parameter: 'top_p' is not supported with this model.",
+        },
+      },
+      { status: 400 },
+    ),
+    createSuccessResponse(),
+  )
+  const payload = {
+    model: "gpt-4o",
+    input: "hello",
+    top_p: 0.9,
+    temperature: 0.2,
+  } as ResponsesPayload
+  const source = structuredClone(payload)
+
+  await createResponses(payload, {
+    vision: false,
+    initiator: "user",
+    copilotSessionToken: "responses-session-fixed",
+  })
+
+  expect(payload).toEqual(source)
+  expect(requestBodies).toHaveLength(2)
+  expect(requestBodies[0]).toMatchObject({ store: false, top_p: 0.9 })
+  expect(requestBodies[1]).toEqual(
+    Object.fromEntries(
+      Object.entries(requestBodies[0]).filter(([key]) => key !== "top_p"),
+    ),
+  )
+  expect(requestBodies[1]).not.toHaveProperty("top_p")
+})
+
 test("preserves native Responses failure identity and exact route bytes", async () => {
   state.models = responsesCapableModels
   const body = new TextEncoder().encode('{"error":"responses"}\r\n  ')

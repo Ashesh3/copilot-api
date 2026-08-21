@@ -51,6 +51,7 @@ const capturedAffinities: Array<RoutingAffinity | undefined> = []
 const capturedAuthorization: Array<string | undefined> = []
 let metadataAffinityFetchCount = 0
 let lastRequestBody: Record<string, unknown> | undefined
+let requestBodies: Array<Record<string, unknown>> = []
 let lastRequestHeaders: Headers | undefined
 
 const sessionToken = (payload: Record<string, unknown>): string =>
@@ -153,6 +154,7 @@ const fetchMock = mock(
       metadataAffinityFetchCount += 1
     }
     lastRequestBody = body
+    if (body) requestBodies.push(body)
     lastRequestHeaders = new Headers(opts.headers)
     void opts
     return queuedResponses.shift() ?? createDefaultResponse()
@@ -176,6 +178,7 @@ beforeEach(() => {
   queuedResponses.length = 0
   capturedAffinities.length = 0
   lastRequestBody = undefined
+  requestBodies = []
   lastRequestHeaders = undefined
   capturedAuthorization.length = 0
   metadataAffinityFetchCount = 0
@@ -184,6 +187,144 @@ beforeEach(() => {
   setModelRedirectsForTest([])
   clearLlmDebugLogs()
   resetRoutingTelemetryForTest()
+})
+
+test("retries one exact unsupported Chat control on the finalized wire clone", async () => {
+  queuedResponses.push(
+    Response.json(
+      {
+        error: {
+          code: "invalid_request_body",
+          message:
+            "Unsupported parameter: 'temperature' is not supported with this model.",
+        },
+      },
+      { status: 400 },
+    ),
+    createDefaultResponse(),
+  )
+  const payload = {
+    model: "gpt-test",
+    messages: [{ role: "user", content: "hello" }],
+    temperature: 0,
+    top_p: 0.7,
+  } as ChatCompletionsPayload
+  const source = structuredClone(payload)
+
+  const result = await createChatCompletionsWithProcessedPayload(payload, {
+    candidatePrepared: true,
+    copilotSessionToken: "session-stays-fixed",
+  })
+
+  expect(payload).toEqual(source)
+  expect(requestBodies).toHaveLength(2)
+  expect(requestBodies[0]).toEqual(source as unknown as Record<string, unknown>)
+  expect(requestBodies[1]).toEqual({
+    model: "gpt-test",
+    messages: [{ role: "user", content: "hello" }],
+    top_p: 0.7,
+  })
+  expect(result.processedPayload).toEqual(
+    requestBodies[1] as unknown as ChatCompletionsPayload,
+  )
+  expect(
+    fetchMock.mock.calls.map((call) =>
+      new Headers(call[1].headers).get("copilot-session-token"),
+    ),
+  ).toEqual(["session-stays-fixed", "session-stays-fixed"])
+})
+
+test("uses one account selection and account token for a Chat compatibility retry", async () => {
+  const model = "chat-compatibility-pin-model"
+  const account = tokenPool.addAccount("github-compat-pin", "individual", 2101)
+  account.copilotToken = "compatibility-pin-token"
+  account.healthy = true
+  account.models = new Set([model])
+  account.modelsData = [createLegacyMessagesModel(model)]
+  tokenPool.rebuildModelIndex()
+  state.isMultiToken = true
+  state.models = { object: "list", data: [createLegacyMessagesModel(model)] }
+  queuedResponses.push(
+    Response.json(
+      {
+        error: {
+          code: "invalid_request_body",
+          message:
+            "Unsupported parameter: 'temperature' is not supported with this model.",
+        },
+      },
+      { status: 400 },
+    ),
+    createDefaultResponse(),
+  )
+
+  await createChatCompletions(
+    {
+      model,
+      messages: [{ role: "user", content: "hello" }],
+      temperature: 1,
+    },
+    { candidatePrepared: true },
+  )
+
+  const lastCalls = fetchMock.mock.calls.slice(-2)
+  expect(
+    lastCalls.map((call) => new Headers(call[1].headers).get("authorization")),
+  ).toEqual([
+    "Bearer compatibility-pin-token",
+    "Bearer compatibility-pin-token",
+  ])
+  const usage = getRoutingTelemetrySnapshot({
+    accounts: [{ id: 2101, accountType: "individual", healthy: true }],
+    multiToken: true,
+    window: "1h",
+  })
+  expect(usage.totals).toMatchObject({ retries: 1, upstreamCalls: 2 })
+  expect(
+    usage.selectionModes.sticky
+      + usage.selectionModes.default
+      + usage.selectionModes.single,
+  ).toBe(1)
+})
+
+test("preserves only the final Chat compatibility failure response", async () => {
+  queuedResponses.push(
+    Response.json(
+      {
+        error: {
+          code: "invalid_request_body",
+          message:
+            "Unsupported parameter: 'temperature' is not supported with this model.",
+        },
+      },
+      { status: 400 },
+    ),
+    new Response("second failure\r\n  ", {
+      status: 422,
+      headers: { "content-type": "text/plain" },
+    }),
+  )
+
+  let error: unknown
+  try {
+    await createChatCompletions(
+      {
+        model: "gpt-test",
+        messages: [{ role: "user", content: "hello" }],
+        temperature: 1,
+      },
+      { candidatePrepared: true },
+    )
+  } catch (caught: unknown) {
+    error = caught
+  }
+
+  expect(error).toBeInstanceOf(HTTPError)
+  if (!(error instanceof HTTPError)) throw new Error("Expected HTTPError")
+  expect(error.response.status).toBe(422)
+  expect(error.response.headers.get("content-type")).toBe("text/plain")
+  expect(error.response.bodyUsed).toBe(false)
+  expect(await error.response.text()).toBe("second failure\r\n  ")
 })
 
 test("forwards only matching model-scoped session tokens on Chat inference", async () => {

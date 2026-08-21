@@ -4,15 +4,16 @@ import type { Context } from "hono"
 import * as Sentry from "@sentry/bun"
 import { streamSSE } from "hono/streaming"
 
+import type { RoutedAccountPin } from "~/lib/account-router"
 import type {
   EndpointRouteDecision,
   EndpointRouteFailure,
 } from "~/lib/endpoint-routing"
 import type { Model } from "~/services/copilot/get-models"
+import type { RetryBudget } from "~/services/copilot/transport-retry"
 
 import {
   getLastUsedAccountId,
-  runWithPinnedRoutedAccount,
   runWithRoutedModelSelection,
   selectRoutedModel,
 } from "~/lib/account-router"
@@ -36,7 +37,6 @@ import {
 } from "~/lib/endpoint-routing"
 import {
   createEndpointTranslationError,
-  HTTPError,
   inspectHttpError,
   isAbortError,
   isHTTPError,
@@ -110,10 +110,7 @@ import {
   prepareAnthropicMessagesRequest,
   validateAnthropicRequestHeaderOptions,
 } from "~/services/copilot/messages-contract"
-import {
-  consumeExtraSend,
-  createRetryBudget,
-} from "~/services/copilot/transport-retry"
+import { createRetryBudget } from "~/services/copilot/transport-retry"
 
 import {
   type AnthropicMessagesPayload,
@@ -143,10 +140,6 @@ import {
   translateChunkToAnthropicEvents,
 } from "./stream-translation"
 import { parseSubagentMarkerFromFirstUser } from "./subagent-marker"
-import {
-  isInvalidThinkingSignatureResponse,
-  stripThinkingBlocks,
-} from "./thinking-recovery"
 import {
   emitAnthropicResponseAsStream,
   extractWebSearchCalls,
@@ -203,15 +196,6 @@ const logger = createHandlerLogger("messages-handler")
 
 const compactSystemPromptStart =
   "You are a helpful AI assistant tasked with summarizing conversations"
-
-async function isKnownTranslatedSignatureError(
-  error: HTTPError,
-  reasoningEnabled: boolean,
-): Promise<boolean> {
-  if (await isInvalidThinkingSignatureResponse(error.response)) return true
-  const body = await error.response.clone().text()
-  return body.trim() === "Bad Request" && reasoningEnabled
-}
 
 function applyReplacedChatTextToMessages(
   payload: AnthropicMessagesPayload,
@@ -516,71 +500,25 @@ async function handleCompletionInner(
   })
 
   return await runWithRoutedModelSelection(routedModel, async () => {
+    const retryBudget = createRetryBudget()
+    const routedAccountPin: RoutedAccountPin = {}
     if (candidate.endpoint === "/v1/messages") {
-      const retryBudget = createRetryBudget()
       const requestOptions: NativeMessagesRequestOptions = {
         ...nativeOptions,
         requestedModel,
         originalStream: Boolean(anthropicPayload.stream),
         retryBudget,
+        routedAccountPin,
         toolsPrepared: true,
         compaction: candidate.compaction,
         copilotSessionToken,
         ...(initiatorOverride ? { initiatorOverride } : {}),
       }
-      try {
-        return await handleWithNativeMessages(
-          c,
-          candidate.payload,
-          requestOptions,
-        )
-      } catch (error) {
-        if (
-          requestOptions.originalStream
-          || !(error instanceof HTTPError)
-          || error.response.status !== 400
-          || !(await isInvalidThinkingSignatureResponse(error.response))
-        ) {
-          throw error
-        }
-
-        if (!consumeExtraSend(retryBudget)) {
-          throw error
-        }
-        const recoveredPayload = structuredClone(anthropicPayload)
-        if (!stripThinkingBlocks(recoveredPayload)) throw error
-        const recoveredCandidates = await prepareMessagesCandidates({
-          source: recoveredPayload,
-          selectedModel: routingModel,
-          effortOverride,
-          isCompact,
-          signal: c.req.raw.signal,
-        })
-        recordNonDefaultBehavior(c, {
-          kind: "reasoning_retry_without_thinking",
-          message: `Stripped thinking blocks after native /v1/messages rejected their signature for ${anthropicPayload.model}`,
-          data: {
-            model: anthropicPayload.model,
-            reason: "invalid signature",
-            endpoint: "AnthropicMessages",
-          },
-        })
-        const accountId = getLastUsedAccountId()
-        return await runWithPinnedRoutedAccount(
-          accountId,
-          async () =>
-            await handleWithNativeMessages(
-              c,
-              recoveredCandidates.native.payload,
-              {
-                ...requestOptions,
-                compaction: recoveredCandidates.native.compaction,
-                retryBudget,
-                toolsPrepared: true,
-              },
-            ),
-        )
-      }
+      return await handleWithNativeMessages(
+        c,
+        candidate.payload,
+        requestOptions,
+      )
     }
 
     if (candidate.endpoint === "/responses") {
@@ -589,17 +527,9 @@ async function handleCompletionInner(
         initiatorOverride,
         effortOverride,
         requestedModel,
+        retryBudget,
+        routedAccountPin,
         preparedPayload: candidate.payload,
-        rebuildPreparedPayload: async (source) =>
-          (
-            await prepareMessagesCandidates({
-              source,
-              selectedModel: routingModel,
-              effortOverride: undefined,
-              isCompact,
-              signal: c.req.raw.signal,
-            })
-          ).responses?.payload,
       })
     }
 
@@ -608,17 +538,9 @@ async function handleCompletionInner(
       initiatorOverride,
       effortOverride,
       requestedModel,
+      retryBudget,
+      routedAccountPin,
       preparedPayload: candidate.payload,
-      rebuildPreparedPayload: async (source) =>
-        (
-          await prepareMessagesCandidates({
-            source,
-            selectedModel: routingModel,
-            effortOverride: undefined,
-            isCompact,
-            signal: c.req.raw.signal,
-          })
-        ).chat?.payload,
     })
   })
 }
@@ -941,51 +863,11 @@ const handleWithChatCompletions = async (
     initiatorOverride?: "agent" | "user"
     effortOverride?: ReasoningEffort
     preparedPayload?: ChatCompletionsPayload
-    rebuildPreparedPayload?: (
-      source: AnthropicMessagesPayload,
-    ) => Promise<ChatCompletionsPayload | undefined>
     requestedModel?: string
+    retryBudget?: RetryBudget
+    routedAccountPin?: RoutedAccountPin
   },
-) => {
-  try {
-    return await executeChatCompletions(c, anthropicPayload, options)
-  } catch (error) {
-    if (error instanceof HTTPError && error.response.status === 400) {
-      const reasoningEnabled = Boolean(
-        options?.effortOverride || anthropicPayload.thinking,
-      )
-      if (await isKnownTranslatedSignatureError(error, reasoningEnabled)) {
-        const recoveredSource = structuredClone(anthropicPayload)
-        if (!stripThinkingBlocks(recoveredSource)) throw error
-        delete recoveredSource.thinking
-        const recoveredPrepared =
-          options?.rebuildPreparedPayload ?
-            await options.rebuildPreparedPayload(recoveredSource)
-          : undefined
-        if (!recoveredPrepared) throw error
-        const reason = "invalid signature"
-        recordNonDefaultBehavior(c, {
-          kind: "reasoning_retry_without_thinking",
-          message: `Stripped thinking blocks due to ${reason}, retrying ChatCompletions without reasoning`,
-          data: {
-            model: anthropicPayload.model,
-            reason,
-            endpoint: "ChatCompletions",
-          },
-        })
-        // Fully downgrade reasoning: clear thinking config AND effortOverride.
-        // Clearing effortOverride alone is insufficient — executeChatCompletions
-        // re-adds reasoning_effort when anthropicPayload.thinking is present.
-        return await executeChatCompletions(c, recoveredSource, {
-          ...options,
-          effortOverride: undefined,
-          preparedPayload: recoveredPrepared,
-        })
-      }
-    }
-    throw error
-  }
-}
+) => await executeChatCompletions(c, anthropicPayload, options)
 
 const executeChatCompletions = async (
   c: Context,
@@ -995,10 +877,9 @@ const executeChatCompletions = async (
     initiatorOverride?: "agent" | "user"
     effortOverride?: ReasoningEffort
     preparedPayload?: ChatCompletionsPayload
-    rebuildPreparedPayload?: (
-      source: AnthropicMessagesPayload,
-    ) => Promise<ChatCompletionsPayload | undefined>
     requestedModel?: string
+    retryBudget?: RetryBudget
+    routedAccountPin?: RoutedAccountPin
   },
 ) => {
   const {
@@ -1007,6 +888,8 @@ const executeChatCompletions = async (
     effortOverride,
     preparedPayload,
     requestedModel,
+    retryBudget,
+    routedAccountPin,
   } = options ?? {}
   const openAIPayload =
     preparedPayload ?
@@ -1115,6 +998,8 @@ const executeChatCompletions = async (
           candidatePrepared: preparedPayload !== undefined,
           copilotSessionToken,
           initiator: initiatorOverride,
+          retryBudget,
+          routedAccountPin,
           signal: c.req.raw.signal,
         })) as ChatCompletionResponse
 
@@ -1141,6 +1026,7 @@ const executeChatCompletions = async (
             {
               createCompletion: async (payload) =>
                 (await createChatCompletions(payload, {
+                  allowCompatibilityRetry: false,
                   candidatePrepared: true,
                   copilotSessionToken,
                   initiator: initiatorOverride,
@@ -1197,6 +1083,8 @@ const executeChatCompletions = async (
             candidatePrepared: preparedPayload !== undefined,
             copilotSessionToken,
             initiator: initiatorOverride,
+            retryBudget,
+            routedAccountPin,
             signal: upstreamSignal,
           }),
         )
@@ -1256,6 +1144,7 @@ const executeChatCompletions = async (
                         {
                           createCompletion: async (payload) =>
                             (await createChatCompletions(payload, {
+                              allowCompatibilityRetry: false,
                               candidatePrepared: true,
                               copilotSessionToken,
                               initiator: initiatorOverride,
@@ -1750,48 +1639,11 @@ const handleWithResponsesApi = async (
     initiatorOverride?: "agent" | "user"
     effortOverride?: ReasoningEffort
     preparedPayload?: ResponsesPayload
-    rebuildPreparedPayload?: (
-      source: AnthropicMessagesPayload,
-    ) => Promise<ResponsesPayload | undefined>
     requestedModel?: string
+    retryBudget?: RetryBudget
+    routedAccountPin?: RoutedAccountPin
   },
-) => {
-  try {
-    return await executeResponsesApi(c, anthropicPayload, options)
-  } catch (error) {
-    if (error instanceof HTTPError && error.response.status === 400) {
-      const reasoningEnabled = Boolean(
-        options?.effortOverride || anthropicPayload.thinking,
-      )
-      if (await isKnownTranslatedSignatureError(error, reasoningEnabled)) {
-        const recoveredSource = structuredClone(anthropicPayload)
-        if (!stripThinkingBlocks(recoveredSource)) throw error
-        delete recoveredSource.thinking
-        const recoveredPrepared =
-          options?.rebuildPreparedPayload ?
-            await options.rebuildPreparedPayload(recoveredSource)
-          : undefined
-        if (!recoveredPrepared) throw error
-        const reason = "invalid signature"
-        recordNonDefaultBehavior(c, {
-          kind: "reasoning_retry_without_thinking",
-          message: `Stripped thinking blocks due to ${reason}, retrying Responses without reasoning`,
-          data: {
-            model: anthropicPayload.model,
-            reason,
-            endpoint: "Responses",
-          },
-        })
-        return await executeResponsesApi(c, recoveredSource, {
-          ...options,
-          effortOverride: undefined,
-          preparedPayload: recoveredPrepared,
-        })
-      }
-    }
-    throw error
-  }
-}
+) => await executeResponsesApi(c, anthropicPayload, options)
 
 const executeResponsesApi = async (
   c: Context,
@@ -1801,10 +1653,9 @@ const executeResponsesApi = async (
     initiatorOverride?: "agent" | "user"
     effortOverride?: ReasoningEffort
     preparedPayload?: ResponsesPayload
-    rebuildPreparedPayload?: (
-      source: AnthropicMessagesPayload,
-    ) => Promise<ResponsesPayload | undefined>
     requestedModel?: string
+    retryBudget?: RetryBudget
+    routedAccountPin?: RoutedAccountPin
   },
 ) => {
   const {
@@ -1813,6 +1664,8 @@ const executeResponsesApi = async (
     effortOverride,
     preparedPayload,
     requestedModel,
+    retryBudget,
+    routedAccountPin,
   } = options ?? {}
   const responsesPayload =
     preparedPayload ?
@@ -1857,6 +1710,8 @@ const executeResponsesApi = async (
             initiator: initiatorOverride ?? initiator,
             signal: c.req.raw.signal,
             prepared: preparedPayload !== undefined,
+            retryBudget,
+            routedAccountPin,
           })
 
           const responsesAccountId = getLastUsedAccountId()
@@ -1924,6 +1779,7 @@ const executeResponsesApi = async (
                             {
                               createResponse: async (payload) =>
                                 (await createResponses(payload, {
+                                  allowCompatibilityRetry: false,
                                   copilotSessionToken,
                                   vision,
                                   initiator: initiatorOverride ?? initiator,
@@ -1996,6 +1852,8 @@ const executeResponsesApi = async (
         initiator: initiatorOverride ?? initiator,
         signal: c.req.raw.signal,
         prepared: preparedPayload !== undefined,
+        retryBudget,
+        routedAccountPin,
       })) as ResponsesResult
 
       const responsesAccountId = getLastUsedAccountId()
@@ -2032,6 +1890,7 @@ const executeResponsesApi = async (
           {
             createResponse: async (payload) =>
               (await createResponses(payload, {
+                allowCompatibilityRetry: false,
                 copilotSessionToken,
                 vision,
                 initiator: initiatorOverride ?? initiator,

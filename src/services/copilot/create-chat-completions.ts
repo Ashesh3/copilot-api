@@ -2,6 +2,10 @@
 import consola from "consola"
 import { events } from "fetch-event-stream"
 
+import type { RoutedAccountPin } from "~/lib/account-router"
+import type { UpstreamSendReason } from "~/lib/routing-telemetry"
+import type { RetryBudget } from "~/services/copilot/transport-retry"
+
 import { routedFetch } from "~/lib/account-router"
 import {
   attachmentOmittedNote,
@@ -17,9 +21,15 @@ import {
   detectInitiator,
   addPromptCaching,
 } from "~/services/copilot/copilot-client"
-import { PRE_HEADER_MAX_DELAY_SECONDS } from "~/services/copilot/transport-retry"
+import {
+  claimCompatibilityRetry,
+  consumeExtraSend,
+  createRetryBudget,
+  PRE_HEADER_MAX_DELAY_SECONDS,
+} from "~/services/copilot/transport-retry"
 
 import { fitChatCompletionsCompactionPayload } from "./compaction-payload"
+import { classifyCompatibilityRetry } from "./compatibility-retry"
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null
@@ -317,15 +327,18 @@ const createBufferedEventStream = (
 
 interface StreamingRetryOptions {
   payload: ChatCompletionsPayload
-  retry: () => Promise<Response>
+  retry: () => Promise<Response | undefined>
   retriesRemaining?: number
 }
 
 export interface ChatCompletionsRequestOptions {
+  allowCompatibilityRetry?: boolean
   candidatePrepared?: boolean
   compaction?: boolean
   copilotSessionToken?: string
   initiator?: "agent" | "user"
+  routedAccountPin?: RoutedAccountPin
+  retryBudget?: RetryBudget
   signal?: AbortSignal
 }
 
@@ -356,6 +369,43 @@ interface ChatUpstreamAttempt {
   response: Response
 }
 
+interface ChatOperationState {
+  routedAccountPin: RoutedAccountPin
+  retryBudget: RetryBudget
+}
+
+async function retryChatCompatibility(options: {
+  attempt: ChatUpstreamAttempt
+  operation: ChatOperationState
+  signal?: AbortSignal
+}): Promise<ChatUpstreamAttempt> {
+  const { attempt, operation } = options
+  const decision = await classifyCompatibilityRetry({
+    body: attempt.payload as unknown as Record<string, unknown>,
+    endpoint: "/chat/completions",
+    response: attempt.response,
+  })
+  if (decision.kind === "none") return attempt
+  const retryPayload = structuredClone(attempt.payload)
+  if (
+    !decision.normalize(retryPayload as unknown as Record<string, unknown>)
+    || !claimCompatibilityRetry(operation.retryBudget)
+  ) {
+    return attempt
+  }
+  return {
+    headerOptions: attempt.headerOptions,
+    payload: retryPayload,
+    response: await dispatchChatCompletions(retryPayload, {
+      headerOptions: attempt.headerOptions,
+      operation,
+      reason: "compatibility_retry",
+      recordSelection: false,
+      signal: options.signal,
+    }),
+  }
+}
+
 const prepareChatCompletionsPayload = (
   payload: ChatCompletionsPayload,
   compaction: boolean | undefined,
@@ -378,7 +428,8 @@ const dispatchChatCompletions = async (
   payload: ChatCompletionsPayload,
   options: {
     headerOptions: ChatHeaderOptions
-    reason?: "http_retry"
+    operation: ChatOperationState
+    reason?: UpstreamSendReason
     recordSelection?: boolean
     signal?: AbortSignal
   },
@@ -391,6 +442,8 @@ const dispatchChatCompletions = async (
       headerOptions: options.headerOptions,
       reason: options.reason,
       recordSelection: options.recordSelection,
+      routedAccountPin: options.operation.routedAccountPin,
+      retryBudget: options.operation.retryBudget,
       maxHttpRetryDelaySeconds:
         payload.stream ? PRE_HEADER_MAX_DELAY_SECONDS : undefined,
     },
@@ -402,11 +455,13 @@ const dispatchWithImageFallback = async (options: {
   compaction: boolean | undefined
   headerOptions: ChatHeaderOptions
   outboundPayload: ChatCompletionsPayload
+  operation: ChatOperationState
   signal?: AbortSignal
   sourcePayload: ChatCompletionsPayload
 }): Promise<ChatUpstreamAttempt> => {
   const response = await dispatchChatCompletions(options.outboundPayload, {
     headerOptions: options.headerOptions,
+    operation: options.operation,
     signal: options.signal,
   })
   if (response.status !== 413 || !options.headerOptions.vision) {
@@ -418,6 +473,13 @@ const dispatchWithImageFallback = async (options: {
   }
 
   consola.warn("413 Payload Too Large with images, retrying without images")
+  if (!consumeExtraSend(options.operation.retryBudget)) {
+    return {
+      response,
+      payload: options.outboundPayload,
+      headerOptions: options.headerOptions,
+    }
+  }
   removeImages(options.sourcePayload)
   const retryPayload = prepareChatCompletionsPayload(
     options.sourcePayload,
@@ -430,6 +492,7 @@ const dispatchWithImageFallback = async (options: {
   }
   const retryResponse = await dispatchChatCompletions(retryPayload, {
     headerOptions: retryHeaderOptions,
+    operation: options.operation,
     reason: "http_retry",
     recordSelection: false,
     signal: options.signal,
@@ -464,8 +527,12 @@ const handleStreamingResponse = async (
 
   consola.warn("Stream overload detected on first event, retrying")
   await iterator.return?.()
-
   const retryResponse = await retry()
+  if (!retryResponse) {
+    return createBufferedEventStream(first.value, {
+      next: () => Promise.resolve({ done: true, value: undefined }),
+    })
+  }
   return handleStreamingResponse(retryResponse, {
     ...options,
     retriesRemaining: retriesRemaining - 1,
@@ -531,22 +598,37 @@ async function createChatCompletionsCore(
     normalizedPayload,
     options?.compaction,
   )
+  const operation: ChatOperationState = {
+    routedAccountPin: options?.routedAccountPin ?? {},
+    retryBudget: options?.retryBudget ?? createRetryBudget(),
+  }
 
-  const active = await dispatchWithImageFallback({
+  const initialAttempt = await dispatchWithImageFallback({
     compaction: options?.compaction,
     headerOptions: headerOpts,
     outboundPayload,
+    operation,
     signal: options?.signal,
     sourcePayload: normalizedPayload,
   })
+  const active =
+    options?.allowCompatibilityRetry === false ?
+      initialAttempt
+    : await retryChatCompatibility({
+        attempt: initialAttempt,
+        operation,
+        signal: options?.signal,
+      })
   if (normalizedPayload.stream) {
     return {
       processedPayload: active.payload,
       response: await handleStreamingResponse(active.response, {
         payload: active.payload,
         retry: async () => {
+          if (!consumeExtraSend(operation.retryBudget)) return undefined
           return await dispatchChatCompletions(active.payload, {
             headerOptions: active.headerOptions,
+            operation,
             reason: "http_retry",
             recordSelection: false,
             signal: options?.signal,

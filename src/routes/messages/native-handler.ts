@@ -9,7 +9,6 @@ import type { RetryBudget } from "~/services/copilot/transport-retry"
 
 import { getLastUsedAccountId } from "~/lib/account-router"
 import {
-  HTTPError,
   inspectHttpError,
   isAbortError,
   isHTTPError,
@@ -40,10 +39,7 @@ import {
   executeWebSearch,
   isWebSearchToolType,
 } from "~/services/copilot/mcp-web-search"
-import {
-  consumeExtraSend,
-  createRetryBudget,
-} from "~/services/copilot/transport-retry"
+import { createRetryBudget } from "~/services/copilot/transport-retry"
 
 import {
   type AnthropicErrorEvent,
@@ -56,10 +52,6 @@ import {
   createMessagesTerminalAdapter,
   type MessagesTerminalAdapter,
 } from "./stream-lifecycle"
-import {
-  isInvalidThinkingSignatureResponse,
-  stripThinkingBlocks,
-} from "./thinking-recovery"
 import { emitAnthropicResponseAsStream } from "./web-search-helpers"
 
 const logger = createHandlerLogger("messages-native-handler")
@@ -67,6 +59,7 @@ const MAX_NATIVE_WEB_SEARCH_USES = 8
 
 export interface NativeMessagesRequestOptions
   extends AnthropicRequestHeaderOptions {
+  allowCompatibilityRetry?: boolean
   copilotSessionToken?: string
   compaction?: boolean
   initiatorOverride?: "agent" | "user"
@@ -79,6 +72,7 @@ export interface NativeMessagesRequestOptions
 }
 
 type NativeMessagesDispatchOptions = {
+  allowCompatibilityRetry?: boolean
   alreadyAdapted?: boolean
   compaction?: boolean
   preserveValidatedControls?: boolean
@@ -101,6 +95,9 @@ export async function createNativeMessages(
 ): Promise<CreateAnthropicMessagesReturn> {
   return await createAnthropicMessages(payload, {
     alreadyAdapted: dispatchOptions?.alreadyAdapted,
+    allowCompatibilityRetry:
+      dispatchOptions?.allowCompatibilityRetry
+      ?? nativeOptions.allowCompatibilityRetry,
     anthropicBeta: nativeOptions.anthropicBeta,
     anthropicVersion: nativeOptions.anthropicVersion,
     compaction: dispatchOptions?.compaction,
@@ -613,36 +610,15 @@ export async function resolveNativeWebSearch(
 
   while (true) {
     iteration += 1
-    let response: AnthropicResponse
-    try {
-      response = (await createNativeMessages(payload, loopOptions, {
-        alreadyAdapted: options.toolsPrepared,
-        compaction: options.compaction,
-        preserveValidatedControls: true,
-        routedAccountPin,
-        signal: options.signal,
-      })) as AnthropicResponse
-    } catch (error) {
-      if (
-        options.originalStream !== true
-        || !(error instanceof HTTPError)
-        || error.response.status !== 400
-        || !(await isInvalidThinkingSignatureResponse(error.response))
-      ) {
-        throw error
-      }
-      if (!consumeExtraSend(retryBudget)) throw error
-      const recovered = structuredClone(payload)
-      if (!stripThinkingBlocks(recovered)) throw error
-      response = (await createNativeMessages(recovered, loopOptions, {
-        alreadyAdapted: options.toolsPrepared,
-        compaction: options.compaction,
-        preserveValidatedControls: true,
-        routedAccountPin,
-        signal: options.signal,
-      })) as AnthropicResponse
-      payload = recovered
-    }
+    const response = (await createNativeMessages(payload, loopOptions, {
+      alreadyAdapted: options.toolsPrepared,
+      allowCompatibilityRetry:
+        iteration === 1 && options.allowCompatibilityRetry !== false,
+      compaction: options.compaction,
+      preserveValidatedControls: true,
+      routedAccountPin,
+      signal: options.signal,
+    })) as AnthropicResponse
     const calls = response.content.filter(
       (block): block is AnthropicToolUseBlock =>
         block.type === "tool_use" && block.name === "web_search",

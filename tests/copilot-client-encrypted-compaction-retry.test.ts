@@ -20,7 +20,7 @@ import {
 } from "../src/lib/routing-telemetry"
 import { state } from "../src/lib/state"
 import { copilotFetch } from "../src/services/copilot/copilot-client"
-import { MAX_ROUTED_SENDS } from "../src/services/copilot/transport-retry"
+import { createRetryBudget } from "../src/services/copilot/transport-retry"
 
 const originalFetch = globalThis.fetch
 const queuedResults: Array<Response> = []
@@ -144,10 +144,9 @@ test("retries encrypted compaction verification failures within the shared send 
       },
     )
 
-    expect(response.status).toBe(200)
-    expect(llmSends()).toHaveLength(MAX_ROUTED_SENDS)
+    expect(response.status).toBe(400)
+    expect(llmSends()).toHaveLength(2)
     expect(llmSends().map(({ init }) => init?.body)).toEqual([
-      requestBody,
       requestBody,
       requestBody,
     ])
@@ -156,17 +155,13 @@ test("retries encrypted compaction verification failures within the shared send 
         ({ init }) =>
           (init?.headers as Record<string, string> | undefined)?.Authorization,
       ),
-    ).toEqual([
-      AUTH_HEADERS.Authorization,
-      AUTH_HEADERS.Authorization,
-      AUTH_HEADERS.Authorization,
-    ])
+    ).toEqual([AUTH_HEADERS.Authorization, AUTH_HEADERS.Authorization])
     const requestIds = llmSends().map(
       ({ init }) =>
         (init?.headers as Record<string, string> | undefined)?.["X-Request-Id"],
     )
     expect(requestIds[0]).toBe("req-compaction-initial")
-    expect(new Set(requestIds).size).toBe(MAX_ROUTED_SENDS)
+    expect(new Set(requestIds).size).toBe(2)
     expect(JSON.stringify(warnSpy.mock.calls)).not.toContain(privateMarker)
 
     const usage = getRoutingTelemetrySnapshot({
@@ -176,22 +171,22 @@ test("retries encrypted compaction verification failures within the shared send 
     })
     expect(usage.totals).toMatchObject({
       failovers: 0,
-      retries: 2,
-      upstreamCalls: MAX_ROUTED_SENDS,
+      retries: 1,
+      upstreamCalls: 2,
     })
     expect(usage.models[0]?.accounts).toEqual([
-      { accountId: 7, share: 1, upstreamCalls: MAX_ROUTED_SENDS },
+      { accountId: 7, share: 1, upstreamCalls: 2 },
     ])
 
     await new Promise((resolve) => setTimeout(resolve, 0))
     const debugEntries = listLlmDebugLogs().entries
-    expect(debugEntries).toHaveLength(MAX_ROUTED_SENDS)
+    expect(debugEntries).toHaveLength(2)
     expect(debugEntries.map(({ responseStatus }) => responseStatus)).toEqual([
-      200, 400, 400,
+      400, 400,
     ])
     expect(
       debugEntries.map(({ id }) => getLlmDebugLog(id)?.request.body),
-    ).toEqual([requestBody, requestBody, requestBody])
+    ).toEqual([requestBody, requestBody])
   } finally {
     warnSpy.mockRestore()
   }
@@ -211,7 +206,18 @@ test("returns the final encrypted compaction failure after exhausting the shared
   })
 
   expect(response.status).toBe(400)
-  expect(llmSends()).toHaveLength(MAX_ROUTED_SENDS)
+  expect(llmSends()).toHaveLength(2)
+})
+
+test("does not retry encrypted compaction when the shared budget is exhausted", async () => {
+  queuedResults.push(encryptedVerificationFailure(), new Response("{}"))
+  const response = await copilotFetch(
+    "/responses",
+    { body: compactionRequestBody(), headers: AUTH_HEADERS, method: "POST" },
+    { retryBudget: createRetryBudget({ extraSends: 0 }) },
+  )
+  expect(response.status).toBe(400)
+  expect(llmSends()).toHaveLength(1)
 })
 
 for (const failureText of ["could not be decrypted", "could not be parsed"]) {

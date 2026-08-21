@@ -134,6 +134,7 @@ export const resolveWebSearchCalls = async (
           createCompletion ?
             await createCompletion(currentPayload)
           : ((await createChatCompletions(currentPayload, {
+              allowCompatibilityRetry: false,
               copilotSessionToken,
               initiator: initiatorOverride,
               signal: abortSignal,
@@ -236,10 +237,10 @@ export const resolveResponsesWebSearchCalls = async (
         const result =
           requestOptions.createResponse ?
             await requestOptions.createResponse(currentPayload)
-          : ((await createResponses(
-              currentPayload,
-              requestOptions,
-            )) as ResponsesResult)
+          : ((await createResponses(currentPayload, {
+              ...requestOptions,
+              allowCompatibilityRetry: false,
+            })) as ResponsesResult)
 
         const inputTokens = result.usage?.input_tokens ?? 0
         const outputTokens = result.usage?.output_tokens ?? 0

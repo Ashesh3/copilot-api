@@ -1209,7 +1209,7 @@ test.each([
   },
 )
 
-test("does not recover a streaming native signature rejection", async () => {
+test("recovers a streaming native signature rejection before output", async () => {
   installModel({ supported_endpoints: ["/v1/messages"] })
   queuedMessagesResults.push(
     Response.json(
@@ -1230,8 +1230,8 @@ test("does not recover a streaming native signature rejection", async () => {
     stream: true,
   })
 
-  expect(response.status).toBe(400)
-  expect(upstreamPaths).toEqual(["/v1/messages"])
+  expect(response.status).toBe(200)
+  expect(upstreamPaths).toEqual(["/v1/messages", "/v1/messages"])
 })
 
 test("streaming native web search keeps recovery inside the loop and emits Anthropic SSE", async () => {
