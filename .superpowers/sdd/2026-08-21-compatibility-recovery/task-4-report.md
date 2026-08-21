@@ -70,3 +70,24 @@ The selected-file lint command emits the existing advisory that
   bytes including a binary embedding failure, status-text exclusion from the
   provider helper log, and tolerant SSE future-frame coverage.
 - `getModels`: focused ownership and body/status-text logging test.
+
+## Review fix round 1
+
+- The control-plane wire test now captures `consola.error` calls before
+  restoring its spy. It uses separate raw-body and request-session markers,
+  proving the raw upstream body is reported while request header metadata is
+  not introduced into logs.
+- The new embeddings and models test files snapshot and restore every mutated
+  `state` field, including models where applicable, so their results do not
+  depend on file execution order.
+- `getModels` now reuses the allowlisted safe message `Failed to get models`.
+  Its focused test asserts both the thrown message and Task 3's inspected safe
+  message. Before the source correction, this strengthened test failed with
+  `Failed to get Copilot models` and the captured safe message would have fallen
+  back to `Upstream request failed`.
+- Review-fix focused check: **22 pass, 0 fail, 155 assertions**.
+- Final Task 4 focused suite after review fixes: **187 pass, 0 fail, 773
+  assertions**.
+- Fresh `bun run typecheck`, `bun run build`, exact-file lint, and
+  `git diff --check` all exited 0. The same existing
+  `baseline-browser-mapping` advisory remains expected during lint.

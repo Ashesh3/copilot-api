@@ -748,9 +748,9 @@ test("tokenless model-session creation and Auto remain ordinary affinity-selecte
 
 test("preserves control-plane error bytes and approved response metadata", async () => {
   const errorSpy = spyOn(consola, "error")
-  const body = new TextEncoder().encode(
-    '{"error":{"message":"session-secret private upstream body"}}\r\n  ',
-  )
+  const rawBodyMarker = "raw-control-plane-body-marker"
+  const requestSessionMarker = "request-session-marker"
+  const body = new TextEncoder().encode(`${rawBodyMarker}\r\n  `)
   queuedResponses.push(
     new Response(body.slice(), {
       status: 400,
@@ -762,11 +762,13 @@ test("preserves control-plane error bytes and approved response metadata", async
     }),
   )
   let response: Response
+  let logOutput: string
   try {
     response = await server.request("/models/session", {
       method: "POST",
-      headers: { "Copilot-Session-Token": "session-secret" },
+      headers: { "Copilot-Session-Token": requestSessionMarker },
     })
+    logOutput = JSON.stringify(errorSpy.mock.calls)
   } finally {
     errorSpy.mockRestore()
   }
@@ -778,5 +780,6 @@ test("preserves control-plane error bytes and approved response metadata", async
   )
   expect(response.headers.get("x-github-request-id")).toBe("safe-request-id")
   expect(response.headers.get("x-private-upstream")).toBeNull()
-  expect(JSON.stringify(errorSpy.mock.calls)).not.toContain("session-secret")
+  expect(logOutput).toContain(rawBodyMarker)
+  expect(logOutput).not.toContain(requestSessionMarker)
 })

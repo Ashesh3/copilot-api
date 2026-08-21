@@ -9,8 +9,8 @@ export const getModels = async () => {
   })
 
   if (!response.ok) {
-    consola.error("Failed to get Copilot models", `Status: ${response.status}`)
-    throw new HTTPError("Failed to get Copilot models", response)
+    consola.error("Failed to get models", `Status: ${response.status}`)
+    throw new HTTPError("Failed to get models", response)
   }
 
   return (await response.json()) as ModelsResponse

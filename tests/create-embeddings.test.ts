@@ -6,6 +6,9 @@ import { server } from "~/server"
 import { createEmbeddings } from "~/services/copilot/create-embeddings"
 
 const originalFetch = globalThis.fetch
+const originalAccountType = state.accountType
+const originalCopilotToken = state.copilotToken
+const originalIsMultiToken = state.isMultiToken
 const originalModels = state.models
 let queuedResponse: Response
 
@@ -17,6 +20,9 @@ beforeAll(() => {
 })
 
 afterAll(() => {
+  state.accountType = originalAccountType
+  state.copilotToken = originalCopilotToken
+  state.isMultiToken = originalIsMultiToken
   state.models = originalModels
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
 })

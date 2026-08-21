@@ -9,11 +9,14 @@ import {
 } from "bun:test"
 import consola from "consola"
 
-import { HTTPError } from "~/lib/error"
+import { HTTPError, inspectHttpError } from "~/lib/error"
 import { state } from "~/lib/state"
 import { getModels } from "~/services/copilot/get-models"
 
 const originalFetch = globalThis.fetch
+const originalAccountType = state.accountType
+const originalCopilotToken = state.copilotToken
+const originalIsMultiToken = state.isMultiToken
 let queuedResponse: Response
 
 const fetchMock = mock(() => queuedResponse)
@@ -24,6 +27,9 @@ beforeAll(() => {
 })
 
 afterAll(() => {
+  state.accountType = originalAccountType
+  state.copilotToken = originalCopilotToken
+  state.isMultiToken = originalIsMultiToken
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
 })
 
@@ -48,9 +54,12 @@ test("getModels preserves the original failure response without logging its body
   try {
     const error = await getModels().catch((caught: unknown) => caught)
     expect(error).toBeInstanceOf(HTTPError)
-    expect((error as HTTPError).message).toBe("Failed to get Copilot models")
+    expect((error as HTTPError).message).toBe("Failed to get models")
     expect((error as HTTPError).response).toBe(upstream)
     expect(upstream.bodyUsed).toBe(false)
+    expect((await inspectHttpError(error as HTTPError)).safeMessage).toBe(
+      "Failed to get models",
+    )
     const output = JSON.stringify(errorSpy.mock.calls)
     expect(output).not.toContain(bodyMarker)
     expect(output).not.toContain(statusMarker)
