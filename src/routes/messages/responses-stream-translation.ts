@@ -402,6 +402,7 @@ const handleReasoningSummaryTextDone = (
         thinking: text,
       },
     })
+    state.blockHasDelta.add(blockIndex)
   }
 
   return events

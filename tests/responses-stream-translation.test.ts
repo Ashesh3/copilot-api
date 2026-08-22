@@ -9,6 +9,7 @@ import type {
   ResponseFunctionCallArgumentsDeltaEvent,
   ResponseOutputItemDoneEvent,
   ResponseReasoningTextDeltaEvent,
+  ResponseReasoningSummaryTextDoneEvent,
 } from "../src/services/copilot/create-responses"
 
 import {
@@ -96,6 +97,59 @@ test("emits no thinking block for empty unsigned Responses reasoning", () => {
   if (result.kind !== "events") throw new Error("Expected events")
   expect(result.events).toEqual([])
   expect(state.openBlocks.size).toBe(0)
+})
+
+test("does not repeat a done-only reasoning summary before its signature", () => {
+  const state = createResponsesStreamState()
+  const summary = translateResponsesStreamEvent(
+    {
+      type: "response.reasoning_summary_text.done",
+      sequence_number: 1,
+      item_id: "rs_done",
+      output_index: 0,
+      summary_index: 0,
+      text: "visible reasoning",
+    } satisfies ResponseReasoningSummaryTextDoneEvent,
+    state,
+  )
+  const itemDone = translateResponsesStreamEvent(
+    {
+      type: "response.output_item.done",
+      sequence_number: 2,
+      output_index: 0,
+      item: {
+        id: "rs_done",
+        type: "reasoning",
+        summary: [{ type: "summary_text", text: "visible reasoning" }],
+        encrypted_content: "encrypted-state",
+      },
+    } as ResponseOutputItemDoneEvent,
+    state,
+  )
+
+  if (summary.kind !== "events" || itemDone.kind !== "events") {
+    throw new Error("Expected events")
+  }
+  expect([...summary.events, ...itemDone.events]).toEqual([
+    {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "thinking", thinking: "" },
+    },
+    {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "thinking_delta", thinking: "visible reasoning" },
+    },
+    {
+      type: "content_block_delta",
+      index: 0,
+      delta: {
+        type: "signature_delta",
+        signature: "encrypted-state@rs_done",
+      },
+    },
+  ])
 })
 
 test("preserves Responses recommendation and Copilot usage in Anthropic events", () => {
