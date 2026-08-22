@@ -118,7 +118,7 @@ test("stream ID synchronization repairs terminal item IDs without data loss", ()
       }),
       "response.completed",
       tracker,
-    ),
+    ) ?? "",
   ) as Record<string, unknown>
 
   expect(synchronized).toEqual({

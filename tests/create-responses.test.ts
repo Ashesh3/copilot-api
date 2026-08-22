@@ -951,7 +951,7 @@ test("stream ID synchronization delegates terminal primitives to sanitization", 
         '["stream-sync-private-marker"]',
         "response.completed",
         createStreamIdTracker(),
-      ),
+      ) ?? "",
     ) as unknown,
   ).toEqual({
     type: "response.failed",
@@ -1044,7 +1044,9 @@ test.each([
   "sanitizes empty $event data before stream ID synchronization",
   ({ event, expected }) => {
     expect(
-      JSON.parse(fixStreamIds("", event, createStreamIdTracker())) as unknown,
+      JSON.parse(
+        fixStreamIds("", event, createStreamIdTracker()) ?? "",
+      ) as unknown,
     ).toEqual(expected)
   },
 )
@@ -1053,6 +1055,26 @@ test("leaves an empty nonterminal heartbeat unchanged during ID sync", () => {
   expect(
     fixStreamIds("", "response.output_text.delta", createStreamIdTracker()),
   ).toBe("")
+})
+
+test("skips malformed nonterminal JSON during stream ID synchronization", () => {
+  expect(
+    fixStreamIds(
+      "{malformed-private-frame",
+      "response.output_text.delta",
+      createStreamIdTracker(),
+    ),
+  ).toBeUndefined()
+})
+
+test("throws on malformed terminal JSON during stream ID synchronization", () => {
+  expect(() =>
+    fixStreamIds(
+      "{malformed-private-terminal",
+      "response.completed",
+      createStreamIdTracker(),
+    ),
+  ).toThrow(SyntaxError)
 })
 
 test("stream ID synchronization does not mutate a readonly terminal record", () => {

@@ -31,6 +31,7 @@ import type {
   ResponseUsage,
 } from "~/services/copilot/create-responses"
 
+import { parseRecoverableStreamJson } from "~/lib/recoverable-stream-json"
 import {
   createHostedWebSearchTool,
   isChatWebSearchFunctionTool,
@@ -171,7 +172,13 @@ export async function streamResponsesAsChatCompletions(
   for await (const chunk of responseStream) {
     if (!chunk.data || chunk.data === "[DONE]") continue
 
-    const event = JSON.parse(chunk.data) as ResponseStreamEvent
+    const event = parseRecoverableStreamJson({
+      data: chunk.data,
+      event: chunk.event,
+      protocol: "Responses-to-Chat",
+      terminal: isResponsesTerminalEvent(chunk.event),
+    }) as ResponseStreamEvent | undefined
+    if (event === undefined) continue
     const result = await emitTranslatedEvent(stream, event, state)
     if (result.terminal) {
       terminal = result.terminal
@@ -196,6 +203,15 @@ export async function streamResponsesAsChatCompletions(
     state,
     terminal,
   }
+}
+
+function isResponsesTerminalEvent(event: string | undefined): boolean {
+  return (
+    event === "error"
+    || event === "response.completed"
+    || event === "response.failed"
+    || event === "response.incomplete"
+  )
 }
 
 function convertMessagesToResponsesInput(

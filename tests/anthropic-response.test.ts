@@ -1555,13 +1555,26 @@ describe("Chat from Messages stream lifecycle", () => {
     expect(written).toEqual([])
   })
 
-  test("throws on malformed Anthropic SSE instead of silently skipping it", async () => {
-    const stream = createChatStream([])
+  test("skips a malformed Messages delta before one valid Chat terminal", async () => {
+    const written: Array<string> = []
+    const usage = await streamAnthropicAsChatCompletions(
+      createChatStream(written),
+      malformedThenTerminalAnthropicStream(),
+      "claude",
+    )
+
+    expect(usage.terminalSeen).toBe(true)
+    expect(chatFinishChunks(written)).toHaveLength(1)
+    expect(written.join("\n")).not.toContain("{malformed")
+  })
+
+  test("throws on malformed Messages terminal JSON", async () => {
     const error = await streamAnthropicAsChatCompletions(
-      stream,
-      malformedAnthropicStream(),
+      createChatStream([]),
+      malformedTerminalAnthropicStream(),
       "claude",
     ).catch((caught: unknown) => caught)
+
     expect(error).toBeInstanceOf(SyntaxError)
   })
 
@@ -1694,6 +1707,25 @@ function chatFinishChunks(
 
 async function* malformedAnthropicStream() {
   yield await Promise.resolve({ data: "{malformed" })
+}
+
+async function* malformedThenTerminalAnthropicStream() {
+  yield* malformedAnthropicStream()
+  yield await Promise.resolve({
+    data: JSON.stringify({
+      type: "message_delta",
+      delta: { stop_reason: "end_turn" },
+      usage: { output_tokens: 1 },
+    }),
+  })
+  yield await Promise.resolve({
+    event: "message_stop",
+    data: JSON.stringify({ type: "message_stop" }),
+  })
+}
+
+async function* malformedTerminalAnthropicStream() {
+  yield await Promise.resolve({ event: "message_stop", data: "{malformed" })
 }
 
 async function* terminalThenThrowAnthropicStream() {

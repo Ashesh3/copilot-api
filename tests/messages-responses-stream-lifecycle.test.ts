@@ -21,6 +21,8 @@ import { server } from "../src/server"
 
 const originalFetch = globalThis.fetch
 let streamMode:
+  | "malformed-recover"
+  | "malformed-terminal"
   | "received-direct"
   | "received-buffered"
   | "text"
@@ -195,7 +197,31 @@ function terminalFirstResponse(): Response {
   )
 }
 
+function malformedRecoveryResponse(terminal: boolean): Response {
+  const completed = {
+    ...responseSnapshot,
+    status: "completed",
+    usage: { input_tokens: 2, output_tokens: 1, total_tokens: 3 },
+  }
+  return new Response(
+    `${prefixFrames()}event: ${terminal ? "response.completed" : "response.output_text.delta"}\ndata: {malformed\n\n${
+      terminal ? "" : (
+        `event: response.completed\ndata: ${JSON.stringify({
+          type: "response.completed",
+          sequence_number: 3,
+          response: completed,
+        })}\n\n`
+      )
+    }`,
+    { headers: { "content-type": "text/event-stream" } },
+  )
+}
+
 const fetchMock = mock(() => {
+  if (streamMode === "malformed-recover")
+    return malformedRecoveryResponse(false)
+  if (streamMode === "malformed-terminal")
+    return malformedRecoveryResponse(true)
   if (streamMode === "unsigned-reasoning") return unsignedReasoningResponse()
   if (streamMode === "terminal-first") return terminalFirstResponse()
   if (streamMode === "received-direct" || streamMode === "received-buffered") {
@@ -281,6 +307,29 @@ test("mounts a terminal-first Responses stream with one complete lifecycle", asy
     "message_stop",
   ])
   expect(body).toContain('"id":"resp_messages_lifecycle"')
+})
+
+test("skips a malformed Responses delta before one Messages terminal", async () => {
+  streamMode = "malformed-recover"
+  const body = await (
+    await server.request("/v1/messages", createRequest(false))
+  ).text()
+
+  expect(eventTypes(body).at(-2)).toBe("message_delta")
+  expect(eventTypes(body).at(-1)).toBe("message_stop")
+  expect(eventTypes(body).filter((type) => type === "error")).toHaveLength(0)
+  expect(body).not.toContain("{malformed")
+})
+
+test("fails once for malformed Responses terminal JSON", async () => {
+  streamMode = "malformed-terminal"
+  const body = await (
+    await server.request("/v1/messages", createRequest(false))
+  ).text()
+
+  expect(eventTypes(body).filter((type) => type === "error")).toHaveLength(1)
+  expect(eventTypes(body)).not.toContain("message_stop")
+  expect(body).not.toContain("{malformed")
 })
 
 test.each([

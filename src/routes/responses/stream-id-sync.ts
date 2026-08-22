@@ -19,6 +19,7 @@ import type {
   ResponseStreamEvent,
 } from "~/services/copilot/create-responses"
 
+import { parseRecoverableStreamJson } from "~/lib/recoverable-stream-json"
 import { sanitizeResponsesStreamEvent } from "~/services/copilot/create-responses"
 
 interface StreamIdTracker {
@@ -33,14 +34,28 @@ export const fixStreamIds = (
   data: string,
   event: string | undefined,
   tracker: StreamIdTracker,
-): string => {
+): string | undefined => {
   if (event !== undefined && isTerminalEventName(event)) {
+    if (data) {
+      parseRecoverableStreamJson({
+        data,
+        event,
+        protocol: "Responses",
+        terminal: true,
+      })
+    }
     const sanitized = sanitizeResponsesStreamEvent({ data, event }).data ?? data
     if (!sanitized) return sanitized
     return synchronizeTerminalOutputIds(sanitized, tracker)
   }
   if (!data) return data
-  const parsed = JSON.parse(data) as ResponseStreamEvent
+  const parsed = parseRecoverableStreamJson({
+    data,
+    event,
+    protocol: "Responses",
+    terminal: false,
+  }) as ResponseStreamEvent | undefined
+  if (parsed === undefined) return undefined
   switch (event) {
     case "response.output_item.added": {
       return handleOutputItemAdded(

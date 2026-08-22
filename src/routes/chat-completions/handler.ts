@@ -53,6 +53,7 @@ import {
   parseModelSuffix,
   usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
+import { hasNonNullStreamError } from "~/lib/recoverable-stream-json"
 import {
   recordNonDefaultBehavior,
   setRequestContext,
@@ -554,7 +555,7 @@ async function handleCustomProviderStreamingResponse(
         }
         let outChunk = chunk
         const parsedValue = JSON.parse(chunk.data) as unknown
-        if (isReceivedChatStreamError(parsedValue)) {
+        if (hasNonNullStreamError(parsedValue)) {
           await adapter.failReceived(parsedValue.error)
           break
         }
@@ -1099,7 +1100,7 @@ const handleStreamingResponse = (
               let outChunk = chunk
               // Capture usage from final chunk if available
               const parsedValue = JSON.parse(chunk.data) as unknown
-              if (isReceivedChatStreamError(parsedValue)) {
+              if (hasNonNullStreamError(parsedValue)) {
                 await adapter.failReceived(parsedValue.error)
                 break
               }
@@ -1181,14 +1182,6 @@ function hasChatFinalChunk(chunk: unknown): boolean {
     const finishReason = (choice as { finish_reason?: unknown }).finish_reason
     return finishReason !== null && finishReason !== undefined
   })
-}
-
-function isReceivedChatStreamError(
-  value: unknown,
-): value is { error: unknown } {
-  return (
-    typeof value === "object" && value !== null && Object.hasOwn(value, "error")
-  )
 }
 
 function parseTrailingChatUsageChunk(

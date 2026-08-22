@@ -1,3 +1,4 @@
+/* eslint-disable max-lines */
 import {
   afterAll,
   afterEach,
@@ -28,7 +29,9 @@ let delayedStreamController:
 let delayedUpstreamAborted = false
 let lastUpstreamPath: string | undefined
 let streamMode:
+  | "chat-error-null"
   | "chat-eof"
+  | "chat-malformed-recover"
   | "chat-received-error"
   | "native-late-http-error"
   | "native-open-error-throw"
@@ -126,6 +129,40 @@ function createChatEofStream(): Response {
   return new Response(`data: ${JSON.stringify(contentChunk)}\n\n`, {
     headers: { "content-type": "text/event-stream" },
   })
+}
+
+function createChatRecoveryStream(options: { errorNull?: boolean }): Response {
+  const contentChunk = {
+    id: "chatcmpl-recover",
+    object: "chat.completion.chunk",
+    created: 1,
+    model: "gpt-4o",
+    ...(options.errorNull ? { error: null } : {}),
+    choices: [
+      {
+        index: 0,
+        delta: { role: "assistant", content: "recovered" },
+        finish_reason: null,
+        logprobs: null,
+      },
+    ],
+  }
+  const terminalChunk = {
+    ...contentChunk,
+    choices: [
+      {
+        index: 0,
+        delta: {},
+        finish_reason: "stop",
+        logprobs: null,
+      },
+    ],
+  }
+  const malformed = options.errorNull ? "" : "data: {malformed\n\n"
+  return new Response(
+    `${malformed}data: ${JSON.stringify(contentChunk)}\n\ndata: ${JSON.stringify(terminalChunk)}\n\ndata: [DONE]\n\n`,
+    { headers: { "content-type": "text/event-stream" } },
+  )
 }
 
 function createChatReceivedErrorStream(): Response {
@@ -316,6 +353,12 @@ const fetchMock = mock((_url: string | URL | Request, init?: RequestInit) => {
   }
   if (streamMode === "immediate") return createImmediateStream()
   if (streamMode === "chat-eof") return createChatEofStream()
+  if (streamMode === "chat-malformed-recover") {
+    return createChatRecoveryStream({})
+  }
+  if (streamMode === "chat-error-null") {
+    return createChatRecoveryStream({ errorNull: true })
+  }
   if (streamMode === "chat-received-error") {
     return createChatReceivedErrorStream()
   }
@@ -526,6 +569,29 @@ test("closes Chat text and emits one error on EOF without finish", async () => {
     "content_block_stop",
     "error",
   ])
+})
+
+test("skips a malformed Chat delta before one Messages terminal", async () => {
+  streamMode = "chat-malformed-recover"
+  const body = await (
+    await server.request("/v1/messages", createMessagesRequest())
+  ).text()
+
+  expect(body).toContain("recovered")
+  expect(body.match(/event: message_stop/g) ?? []).toHaveLength(1)
+  expect(body).not.toContain("event: error")
+  expect(body).not.toContain("{malformed")
+})
+
+test("treats Chat error null as a normal Messages chunk", async () => {
+  streamMode = "chat-error-null"
+  const body = await (
+    await server.request("/v1/messages", createMessagesRequest())
+  ).text()
+
+  expect(body).toContain("recovered")
+  expect(body.match(/event: message_stop/g) ?? []).toHaveLength(1)
+  expect(body).not.toContain("event: error")
 })
 
 test("preserves one Chat received error and ignores later malformed data", async () => {

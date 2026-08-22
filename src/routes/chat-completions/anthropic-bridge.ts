@@ -1,3 +1,4 @@
+/* eslint-disable max-lines */
 import type { Context } from "hono"
 
 import * as Sentry from "@sentry/bun"
@@ -19,6 +20,7 @@ import type { Model } from "~/services/copilot/get-models"
 import { getLastUsedAccountId } from "~/lib/account-router"
 import { inspectHttpError, isAbortError, isHTTPError } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
+import { parseRecoverableStreamJson } from "~/lib/recoverable-stream-json"
 import { setRequestContext } from "~/lib/request-logger"
 import {
   createSentryChatSpanOptions,
@@ -735,7 +737,13 @@ export async function streamAnthropicAsChatCompletions(
     if (state.terminalSeen || receivedFailure !== undefined) break
     if (!chunk.data || chunk.data.trim() === "[DONE]") continue
 
-    const event = JSON.parse(chunk.data) as AnthropicStreamEventData
+    const event = parseRecoverableStreamJson({
+      data: chunk.data,
+      event: chunk.event,
+      protocol: "Messages-to-Chat",
+      terminal: chunk.event === "error" || chunk.event === "message_stop",
+    }) as AnthropicStreamEventData | undefined
+    if (event === undefined) continue
 
     receivedFailure = await handleBridgeStreamEvent(event, context)
     if (event.type === "message_stop" || event.type === "error") break

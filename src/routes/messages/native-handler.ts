@@ -15,6 +15,7 @@ import {
   LocalHTTPError,
 } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
+import { parseRecoverableStreamJson } from "~/lib/recoverable-stream-json"
 import { setRequestContext } from "~/lib/request-logger"
 import {
   createSentryChatSpanOptions,
@@ -165,8 +166,8 @@ async function forwardNativeChunk(
     return { terminal: false, text: "" }
   }
   let data = chunk.data
-  const parsed = parseNativeEvent(data)
-  if (parsed === null) throw new SyntaxError("Malformed native Messages event")
+  const parsed = parseNativeEvent(data, chunk.event)
+  if (parsed === undefined) return { terminal: false, text: "" }
   switch (chunk.event) {
     case "message_start": {
       data = rewriteMessageStart(data, state.requestedModel, state.usage)
@@ -289,21 +290,25 @@ function closeNativeOpenBlocks(
   return events
 }
 
-function parseNativeEvent(data: string): Record<string, unknown> | null {
-  try {
-    const parsed = JSON.parse(data) as unknown
-    return (
-        typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
-      ) ?
-        (parsed as Record<string, unknown>)
-      : null
-  } catch {
-    return null
-  }
+function parseNativeEvent(
+  data: string,
+  event: string | undefined,
+): Record<string, unknown> | undefined {
+  const parsed = parseRecoverableStreamJson({
+    data,
+    event,
+    protocol: "native Messages",
+    terminal: event === "error" || event === "message_stop",
+  })
+  return (
+      typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+    ) ?
+      (parsed as Record<string, unknown>)
+    : undefined
 }
 
 function readNativeBlockIndex(
-  parsed: Record<string, unknown> | null,
+  parsed: Record<string, unknown> | undefined,
 ): number | undefined {
   return typeof parsed?.index === "number" && Number.isInteger(parsed.index) ?
       parsed.index

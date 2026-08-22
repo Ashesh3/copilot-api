@@ -39,6 +39,7 @@ import {
   usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
 import { resolveProtectedCredential } from "~/lib/protected-credential"
+import { parseRecoverableStreamJson } from "~/lib/recoverable-stream-json"
 import { reportNonDefaultBehavior } from "~/lib/request-logger"
 import { getCopilotResponseHeaders } from "~/lib/request-session"
 import {
@@ -518,8 +519,10 @@ async function handleResponseCreate(
       if (!data) continue
 
       const event = (chunk as { event?: string }).event
+      const synchronized = fixStreamIds(data, event, idTracker)
+      if (synchronized === undefined) continue
       const processed = addResponsesWebSocketMetadata(
-        fixStreamIds(data, event, idTracker),
+        synchronized,
         getCopilotResponseHeaders(),
       )
       await emitTurnFrame(ws, turn, candidate.payload, processed, event)
@@ -778,16 +781,13 @@ async function emitTurnFrame(
   ) {
     return false
   }
-  let parsed: {
-    response?: { id?: unknown }
-    type?: unknown
-  }
-  try {
-    parsed = JSON.parse(frame) as typeof parsed
-  } catch {
-    ws.send(frame)
-    return true
-  }
+  const parsed = parseRecoverableStreamJson({
+    data: frame,
+    event: eventName,
+    protocol: "Responses WebSocket",
+    terminal: isResponsesTerminalEventName(eventName),
+  }) as { response?: { id?: unknown }; type?: unknown } | undefined
+  if (parsed === undefined) return true
 
   const terminalType = classifyEmittedWebSocketTerminal(parsed, eventName)
   const processed = addResponsesWebSocketMetadata(
@@ -845,6 +845,15 @@ async function emitTurnFrame(
     })
   }
   return true
+}
+
+function isResponsesTerminalEventName(event: string | undefined): boolean {
+  return (
+    event === "error"
+    || event === "response.completed"
+    || event === "response.failed"
+    || event === "response.incomplete"
+  )
 }
 
 function readEmittedResponseStatus(parsed: {

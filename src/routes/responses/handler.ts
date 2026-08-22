@@ -54,6 +54,10 @@ import {
   usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
 import {
+  hasNonNullStreamError,
+  parseRecoverableStreamJson,
+} from "~/lib/recoverable-stream-json"
+import {
   recordNonDefaultBehavior,
   setRequestContext,
 } from "~/lib/request-logger"
@@ -265,6 +269,7 @@ async function streamImmediateNativeResponses(
       if (lifecycle.state !== "open") break
       const normalized = normalizeResponsesStreamChunk(chunk)
       const outbound = processNativeResponsesChunk(normalized, writeContext)
+      if (outbound === undefined) continue
       updateResponsesFailureState(failureState, outbound)
       await writeNativeResponsesChunk(outbound, stream)
       await commitReceivedResponsesTerminal(lifecycle, normalized.event)
@@ -303,6 +308,7 @@ async function streamBufferedNativeResponses(
       if (lifecycle.state !== "open") break
       const normalized = normalizeResponsesStreamChunk(chunk)
       const outbound = processNativeResponsesChunk(normalized, writeContext)
+      if (outbound === undefined) continue
       bufferedChunks.push(outbound)
       updateResponsesFailureState(failureState, outbound)
       completedResult =
@@ -372,12 +378,13 @@ interface NativeResponsesWriteContext {
 function processNativeResponsesChunk(
   chunk: ResponsesStreamChunk,
   context: NativeResponsesWriteContext,
-): ResponsesStreamChunk {
+): ResponsesStreamChunk | undefined {
   const restoredData = rewriteResponseModelInEvent(
     chunk.data ?? "",
     context.requestedModel,
   )
   const data = fixStreamIds(restoredData, chunk.event, context.idTracker)
+  if (data === undefined) return undefined
   return {
     ...(typeof chunk.id === "string" ? { id: chunk.id } : {}),
     event: chunk.event,
@@ -2216,7 +2223,16 @@ const streamChatCompletionsAsResponsesWithState = async (options: {
     if (rawEvent.data === "[DONE]") break
     if (!rawEvent.data) continue
 
-    const chunk = JSON.parse(rawEvent.data) as ChatCompletionChunk
+    const chunk = parseRecoverableStreamJson({
+      data: rawEvent.data,
+      event: rawEvent.event,
+      protocol: "Chat-to-Responses",
+      terminal: false,
+    }) as ChatCompletionChunk | undefined
+    if (chunk === undefined) continue
+    if (hasNonNullStreamError(chunk)) {
+      throw chunk.error
+    }
     if (s.pendingFinishReason) {
       if (chunk.usage) s.usage = extractCCUsage(chunk.usage)
       continue

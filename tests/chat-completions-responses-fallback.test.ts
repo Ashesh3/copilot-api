@@ -36,6 +36,8 @@ let responsesStreamMode:
   | "duplicate"
   | "eof"
   | "malformed"
+  | "malformed-recover"
+  | "malformed-terminal"
   | "received-error"
   | "received-failed"
   | "throw"
@@ -323,6 +325,16 @@ function createResponsesSse(): Response {
     )
   }
   const terminal = `event: response.completed\ndata: ${JSON.stringify(responsesCompletedEvent)}\n\n`
+  if (responsesStreamMode === "malformed-recover") {
+    return responsesStream(
+      `${prefix}event: response.output_text.delta\ndata: {malformed\n\n${terminal}`,
+    )
+  }
+  if (responsesStreamMode === "malformed-terminal") {
+    return responsesStream(
+      `${prefix}event: response.completed\ndata: {malformed\n\n`,
+    )
+  }
   return responsesStream(
     responsesStreamMode === "duplicate" ?
       `${prefix}${terminal}${terminal}event: response.output_text.delta\ndata: ${JSON.stringify(
@@ -909,6 +921,27 @@ test.each(["eof", "malformed"] as const)(
     expect(chatFinishFrames(body)).toHaveLength(0)
   },
 )
+
+test("skips a malformed Responses delta before one valid Chat terminal", async () => {
+  responsesStreamMode = "malformed-recover"
+  const body = await (await postStreamingResponsesChat()).text()
+
+  expect(body).toContain("hello streamed")
+  expect(chatFinishFrames(body)).toHaveLength(1)
+  expect(chatErrorFrames(body)).toEqual([])
+  expect(doneCount(body)).toBe(1)
+  expect(body).not.toContain("{malformed")
+})
+
+test("fails once for a malformed Responses terminal", async () => {
+  responsesStreamMode = "malformed-terminal"
+  const body = await (await postStreamingResponsesChat()).text()
+
+  expect(chatFinishFrames(body)).toEqual([])
+  expect(chatErrorFrames(body)).toHaveLength(1)
+  expect(doneCount(body)).toBe(1)
+  expect(body).not.toContain("{malformed")
+})
 
 test("retains Responses partial output before a transport throw", async () => {
   responsesStreamMode = "throw"

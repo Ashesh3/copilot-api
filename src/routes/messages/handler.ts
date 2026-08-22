@@ -56,6 +56,10 @@ import {
   usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
 import {
+  hasNonNullStreamError,
+  parseRecoverableStreamJson,
+} from "~/lib/recoverable-stream-json"
+import {
   recordNonDefaultBehavior,
   setRequestContext,
 } from "~/lib/request-logger"
@@ -599,8 +603,13 @@ const streamChatCompletionsWithWebSearch = async (
       const rawEvent = next.value
       if (rawEvent.data === "[DONE]") break
       if (!rawEvent.data) continue
-      const parsedValue = JSON.parse(rawEvent.data) as unknown
-      if (isReceivedChatStreamError(parsedValue)) {
+      const parsedValue = parseRecoverableStreamJson({
+        data: rawEvent.data,
+        protocol: "Chat-to-Messages",
+        terminal: false,
+      })
+      if (parsedValue === undefined) continue
+      if (hasNonNullStreamError(parsedValue)) {
         await owner.adapter.failReceived(createReceivedChatMessagesError())
         break
       }
@@ -698,8 +707,13 @@ const streamChatCompletionsDirect = async (
       const rawEvent = next.value
       if (rawEvent.data === "[DONE]") break
       if (!rawEvent.data) continue
-      const parsedValue = JSON.parse(rawEvent.data) as unknown
-      if (isReceivedChatStreamError(parsedValue)) {
+      const parsedValue = parseRecoverableStreamJson({
+        data: rawEvent.data,
+        protocol: "Chat-to-Messages",
+        terminal: false,
+      })
+      if (parsedValue === undefined) continue
+      if (hasNonNullStreamError(parsedValue)) {
         await owner.adapter.failReceived(createReceivedChatMessagesError())
         break
       }
@@ -781,7 +795,7 @@ const consumeTrailingChatUsage = async (
     if (!next.value.data) continue
     try {
       const parsed = JSON.parse(next.value.data) as unknown
-      if (isReceivedChatStreamError(parsed)) return
+      if (hasNonNullStreamError(parsed)) return
       const chunk = parsed as ChatCompletionChunk
       if (chunk.choices.length === 0 && chunk.usage) consume(chunk)
     } catch {
@@ -798,14 +812,6 @@ function createReceivedChatMessagesError() {
       message: "Upstream Chat stream failed.",
     },
   }
-}
-
-function isReceivedChatStreamError(
-  value: unknown,
-): value is { error: unknown } {
-  return (
-    typeof value === "object" && value !== null && Object.hasOwn(value, "error")
-  )
 }
 
 const tryCountTokens = async (
@@ -1518,7 +1524,13 @@ const bufferResponsesStream = async (
     }
     if (!chunk.data) continue
 
-    const parsed = JSON.parse(chunk.data) as ResponseStreamEvent
+    const parsed = parseRecoverableStreamJson({
+      data: chunk.data,
+      event: chunk.event,
+      protocol: "Responses-to-Messages",
+      terminal: isResponsesTerminalEventName(chunk.event),
+    }) as ResponseStreamEvent | undefined
+    if (parsed === undefined) continue
     events.push(parsed)
 
     if (isWebSearchFunctionCall(parsed)) hasWebSearch = true
@@ -1609,7 +1621,13 @@ const streamResponsesDirect = async (
     }
     if (!chunk.data) continue
 
-    const parsed = JSON.parse(chunk.data) as ResponseStreamEvent
+    const parsed = parseRecoverableStreamJson({
+      data: chunk.data,
+      event: chunk.event,
+      protocol: "Responses-to-Messages",
+      terminal: isResponsesTerminalEventName(chunk.event),
+    }) as ResponseStreamEvent | undefined
+    if (parsed === undefined) continue
     // Capture usage from response.completed events
     if (isResponseCompleted(parsed) && parsed.response.usage) {
       streamInputTokens = parsed.response.usage.input_tokens
@@ -1649,6 +1667,15 @@ const streamResponsesDirect = async (
     reasoningTokens: streamReasoningTokens,
     responseText,
   }
+}
+
+function isResponsesTerminalEventName(event: string | undefined): boolean {
+  return (
+    event === "error"
+    || event === "response.completed"
+    || event === "response.failed"
+    || event === "response.incomplete"
+  )
 }
 
 const handleWithResponsesApi = async (

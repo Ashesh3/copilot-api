@@ -53,6 +53,10 @@ import {
   parseModelSuffix,
 } from "~/lib/model-suffix"
 import {
+  hasNonNullStreamError,
+  parseRecoverableStreamJson,
+} from "~/lib/recoverable-stream-json"
+import {
   recordNonDefaultBehavior,
   setRequestContext,
 } from "~/lib/request-logger"
@@ -865,7 +869,16 @@ export async function handleWithChatCompletions(
           continue
         }
 
-        const chunk = JSON.parse(rawEvent.data) as ChatCompletionChunk
+        const chunk = parseRecoverableStreamJson({
+          data: rawEvent.data,
+          protocol: "Chat-to-Google",
+          terminal: false,
+        }) as ChatCompletionChunk | undefined
+        if (chunk === undefined) continue
+        if (hasNonNullStreamError(chunk)) {
+          await adapter.failReceived(receivedGoogleFailure(chunk.error))
+          break
+        }
 
         // Capture usage for logging
         if (chunk.usage) {
@@ -1030,7 +1043,16 @@ async function handleWithAnthropicMessages(
       const chunkShim = {
         writeSSE: async ({ data }: { data: string }) => {
           if (data === "[DONE]") return
-          const chunk = JSON.parse(data) as ChatCompletionChunk
+          const chunk = parseRecoverableStreamJson({
+            data,
+            protocol: "Messages-via-Chat-to-Google",
+            terminal: false,
+          }) as ChatCompletionChunk | undefined
+          if (chunk === undefined) return
+          if (hasNonNullStreamError(chunk)) {
+            await adapter.failReceived(receivedGoogleFailure(chunk.error))
+            return
+          }
           if (!Array.isArray(chunk.choices)) return
           if (chunk.usage) {
             setRequestContext(c, {
@@ -1167,7 +1189,13 @@ export async function handleWithResponsesApi(
 
         logger.debug("Responses raw stream event:", data)
 
-        const parsed = JSON.parse(data) as ResponseStreamEvent
+        const parsed = parseRecoverableStreamJson({
+          data,
+          event: eventName,
+          protocol: "Responses-to-Google",
+          terminal: isResponsesTerminalEventName(eventName),
+        }) as ResponseStreamEvent | undefined
+        if (parsed === undefined) continue
         const result = translateResponsesStreamEventToGoogle(
           parsed,
           streamState,
@@ -1202,6 +1230,15 @@ export async function handleWithResponsesApi(
       await failGoogleStreamAfterCommit(adapter, output, error)
     }
   })
+}
+
+function isResponsesTerminalEventName(event: string | undefined): boolean {
+  return (
+    event === "error"
+    || event === "response.completed"
+    || event === "response.failed"
+    || event === "response.incomplete"
+  )
 }
 
 async function handleResponsesMcpWebSearch(
