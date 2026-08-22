@@ -16,6 +16,7 @@ import {
   routedFetch,
   runWithRoutedModelSelection,
   selectRoutedModel,
+  type RoutedAccountPin,
 } from "~/lib/account-router"
 import { LocalHTTPError } from "~/lib/error"
 import {
@@ -25,6 +26,10 @@ import {
 } from "~/lib/llm-debug-log"
 import { setModelRedirectsForTest } from "~/lib/model-redirect"
 import { setModelSettingsForTest } from "~/lib/model-settings"
+import {
+  getRoutingTelemetrySnapshot,
+  resetRoutingTelemetryForTest,
+} from "~/lib/routing-telemetry"
 import { state } from "~/lib/state"
 import { tokenPool } from "~/lib/token-pool"
 import { server } from "~/server"
@@ -240,6 +245,7 @@ beforeEach(() => {
   onAttachmentFetch = undefined
   fetchMock.mockClear()
   clearLlmDebugLogs()
+  resetRoutingTelemetryForTest()
   state.accountType = "individual"
   state.copilotToken = "single-token-fallback"
   state.githubToken = "github-token"
@@ -296,9 +302,9 @@ test.each([
     ).find(
       (candidate) =>
         tokenPool.getAccountForModelBySession(modelId, candidate)?.id
-        === 52_401,
+        === 52_402,
     )
-    if (!affinityKey) throw new TypeError("Expected issuer affinity")
+    if (!affinityKey) throw new TypeError("Expected ordinary B affinity")
     const token = sessionToken({ modelId, subject: "issuer-a" })
 
     const response = await server.request(path, {
@@ -313,6 +319,12 @@ test.each([
 
     expect(response.status).toBe(200)
     expect(upstreamSessionTokens).toEqual([{ path: upstreamPath, token }])
+    expect(upstreamRequests).toEqual([
+      {
+        authorization: "Bearer tid=issuer-a;exp=1900000000",
+        path: upstreamPath,
+      },
+    ])
     const debugEntry = getLlmDebugLog(
       listLlmDebugLogs().entries.find((entry) => entry.path === upstreamPath)
         ?.id ?? "",
@@ -386,7 +398,7 @@ test("omits a session issued by account A when eligibility moves inference to ac
   }
 })
 
-test("fails closed when the issuer becomes unhealthy", async () => {
+test("omits the session token when the issuer becomes unhealthy", async () => {
   const modelId = "session-continuity-issuer-unhealthy"
   const accountA = registerAccount({
     accountId: 52_401,
@@ -430,7 +442,7 @@ test("fails closed when the issuer becomes unhealthy", async () => {
   expect(upstreamSessionTokens).toEqual([{ path: "/responses", token: null }])
 })
 
-test("fails closed when adding an account changes the affinity winner", async () => {
+test("preserves issuer selection when adding an account changes the affinity winner", async () => {
   const modelId = "session-continuity-account-addition"
   const accountA = registerAccount({
     accountId: 52_401,
@@ -480,10 +492,10 @@ test("fails closed when adding an account changes the affinity winner", async ()
   })
 
   expect(response.status).toBe(200)
-  expect(upstreamSessionTokens).toEqual([{ path: "/responses", token: null }])
+  expect(upstreamSessionTokens).toEqual([{ path: "/responses", token }])
 })
 
-test("fails closed after a no-affinity account-order change", async () => {
+test("preserves issuer selection after a no-affinity account-order change", async () => {
   const modelId = "session-continuity-account-order"
   const accountA = registerAccount({
     accountId: 52_401,
@@ -522,7 +534,7 @@ test("fails closed after a no-affinity account-order change", async () => {
   })
 
   expect(response.status).toBe(200)
-  expect(upstreamSessionTokens).toEqual([{ path: "/responses", token: null }])
+  expect(upstreamSessionTokens).toEqual([{ path: "/responses", token }])
 })
 
 test("pins an unidentified forwarded session token instead of failing over to another issuer", async () => {
@@ -564,6 +576,172 @@ test("pins an unidentified forwarded session token instead of failing over to an
       path: "/chat/completions",
     },
   ])
+})
+
+test("uses the issuer account for endpoint evaluation and transport", async () => {
+  const modelId = "session-continuity-endpoint-coherence"
+  registerAccount({
+    accountId: 52_401,
+    endpoints: ["/responses"],
+    modelId,
+    token: "tid=issuer-a;exp=1900000000",
+  })
+  registerAccount({
+    accountId: 52_402,
+    endpoints: ["/chat/completions"],
+    modelId,
+    token: "tid=issuer-b;exp=1900000000",
+  })
+  tokenPool.rebuildModelIndex()
+  state.models = tokenPool.getAllModels()
+  const affinityKey = Array.from(
+    { length: 10_000 },
+    (_, index) => `issuer-endpoint-${index}`,
+  ).find(
+    (candidate) =>
+      tokenPool.getAccountForModelBySession(modelId, candidate)?.id === 52_402,
+  )
+  if (!affinityKey) throw new TypeError("Expected ordinary B affinity")
+  const token = sessionToken({ modelId, subject: "issuer-a" })
+
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "copilot-session-token": token,
+      "x-client-session-id": affinityKey,
+    },
+    body: JSON.stringify({ model: modelId, input: "hello" }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(upstreamRequests).toEqual([
+    {
+      authorization: "Bearer tid=issuer-a;exp=1900000000",
+      path: "/responses",
+    },
+  ])
+  expect(upstreamSessionTokens).toEqual([{ path: "/responses", token }])
+
+  const snapshot = getRoutingTelemetrySnapshot({
+    accounts: [
+      { id: 52_401, accountType: "individual", healthy: true },
+      { id: 52_402, accountType: "individual", healthy: true },
+    ],
+    multiToken: true,
+    window: "1h",
+  })
+  expect(snapshot.selectionModes.sticky).toBe(1)
+  expect(
+    snapshot.accounts.find(({ accountId }) => accountId === 52_401),
+  ).toMatchObject({
+    expectedSelections: 1,
+    selected: 1,
+  })
+  expect(
+    snapshot.accounts.find(({ accountId }) => accountId === 52_402),
+  ).toMatchObject({
+    expectedSelections: 0,
+    selected: 0,
+  })
+  expect(JSON.stringify(snapshot)).not.toContain(token)
+  expect(JSON.stringify(snapshot)).not.toContain("issuer-a")
+})
+
+test("keeps a populated account pin authoritative over issuer preference", async () => {
+  const modelId = "session-continuity-explicit-pin"
+  registerAccount({
+    accountId: 52_401,
+    endpoints: ["/responses"],
+    modelId,
+    token: "tid=issuer-a;exp=1900000000",
+  })
+  registerAccount({
+    accountId: 52_402,
+    endpoints: ["/responses"],
+    modelId,
+    token: "tid=issuer-b;exp=1900000000",
+  })
+  tokenPool.rebuildModelIndex()
+  const pin: RoutedAccountPin = { accountId: 52_402 }
+
+  await routedFetch(
+    "/responses",
+    { method: "POST", body: JSON.stringify({ model: modelId }) },
+    {
+      headerOptions: {
+        copilotSessionToken: sessionToken({
+          modelId,
+          subject: "issuer-a",
+        }),
+      },
+      modelId,
+      routedAccountPin: pin,
+    },
+  )
+
+  expect(upstreamRequests).toEqual([
+    {
+      authorization: "Bearer tid=issuer-b;exp=1900000000",
+      path: "/responses",
+    },
+  ])
+  expect(upstreamSessionTokens).toEqual([{ path: "/responses", token: null }])
+})
+
+test("inherits the selected account into an empty retry pin and fails closed if it becomes unavailable", async () => {
+  const modelId = "session-continuity-empty-pin"
+  const accountA = registerAccount({
+    accountId: 52_401,
+    endpoints: ["/responses"],
+    modelId,
+    token: "tid=issuer-a;exp=1900000000",
+  })
+  registerAccount({
+    accountId: 52_402,
+    endpoints: ["/responses"],
+    modelId,
+    token: "tid=issuer-b;exp=1900000000",
+  })
+  tokenPool.rebuildModelIndex()
+  const token = sessionToken({ modelId, subject: "issuer-a" })
+  const selection = selectRoutedModel(modelId, {
+    copilotSessionToken: token,
+  })
+  const retryPin: RoutedAccountPin = {}
+
+  await runWithRoutedModelSelection(selection, async () => {
+    await routedFetch(
+      "/responses",
+      { method: "POST", body: JSON.stringify({ model: modelId }) },
+      {
+        headerOptions: { copilotSessionToken: token },
+        modelId,
+        routedAccountPin: retryPin,
+      },
+    )
+  })
+
+  expect(retryPin).toEqual({
+    accountId: accountA.id,
+    eligibleAccountIds: [accountA.id],
+    selectionMode: "default",
+  })
+  tokenPool.markUnhealthy(accountA)
+  const beforeRetry = upstreamRequests.length
+  const result = await routedFetch(
+    "/responses",
+    { method: "POST", body: JSON.stringify({ model: modelId }) },
+    {
+      headerOptions: { copilotSessionToken: token },
+      modelId,
+      recordSelection: false,
+      routedAccountPin: retryPin,
+    },
+  )
+
+  expect(result.response.status).toBe(403)
+  expect(upstreamRequests).toHaveLength(beforeRetry)
 })
 
 test.each([

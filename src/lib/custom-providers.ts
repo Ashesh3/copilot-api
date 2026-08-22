@@ -510,21 +510,15 @@ function createUpstreamErrorMessage(
   return `Custom provider ${reference.provider.name} failed ${path} for model ${reference.upstreamModel}`
 }
 
-async function throwCustomProviderError(
-  context: CustomProviderErrorContext,
-): Promise<never> {
+function throwCustomProviderError(context: CustomProviderErrorContext): never {
   const { response, reference, path, payload } = context
-  const body = await response.clone().text()
   consola.error(
     createUpstreamErrorMessage(reference, path),
     `Status: ${response.status}`,
   )
   throw new HTTPError(
     createUpstreamErrorMessage(reference, path),
-    new Response(body, {
-      status: response.status,
-      headers: response.headers,
-    }),
+    response,
     payload,
   )
 }
@@ -566,7 +560,7 @@ export async function createCustomProviderChatCompletions(
   })
 
   if (!response.ok) {
-    await throwCustomProviderError({
+    throwCustomProviderError({
       response,
       reference,
       path: "/chat/completions",
@@ -632,7 +626,7 @@ export async function createCustomProviderEmbeddings(
   })
 
   if (!response.ok) {
-    await throwCustomProviderError({
+    throwCustomProviderError({
       response,
       reference,
       path: "/embeddings",

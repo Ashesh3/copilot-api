@@ -34,6 +34,10 @@ import {
   isAnthropicThinkingBlock,
   isAnthropicToolUseBlock,
 } from "./anthropic-types"
+import {
+  createWebSearchBudget,
+  readPositiveWebSearchLimit,
+} from "./web-search-budget"
 
 const stringifyResponsesInput = (input: ResponsesPayload["input"]): string =>
   typeof input === "string" ? input : JSON.stringify(input ?? [])
@@ -49,6 +53,35 @@ const findResponsesWebSearchTool = (payload: ResponsesPayload): unknown =>
       (tool as { type?: string; name?: string }).type === "function"
       && (tool as { name?: string }).name === "web_search",
   )
+
+const readChatWebSearchMaxUses = (
+  payload: ChatCompletionsPayload,
+): number | undefined => {
+  const tool = findChatWebSearchTool(payload)
+  if (typeof tool !== "object" || tool === null || !("function" in tool)) {
+    return undefined
+  }
+  const fn = tool.function
+  if (typeof fn !== "object" || fn === null) return undefined
+  return readPositiveWebSearchLimit((fn as Record<string, unknown>).max_uses)
+}
+
+const readResponsesWebSearchMaxUses = (
+  payload: ResponsesPayload,
+): number | undefined => {
+  for (const tool of payload.tools ?? []) {
+    const source = tool as Record<string, unknown>
+    if (
+      source.type !== "web_search"
+      && (source.type !== "function" || source.name !== "web_search")
+    ) {
+      continue
+    }
+    const maxUses = readPositiveWebSearchLimit(source.max_uses)
+    if (maxUses !== undefined) return maxUses
+  }
+  return undefined
+}
 
 // --- ChatCompletions web search resolution ---
 
@@ -67,6 +100,7 @@ export const resolveWebSearchCalls = async (
     initiatorOverride?: "agent" | "user"
     abortSignal?: AbortSignal
     copilotSessionToken?: string
+    maxUses?: number
     createCompletion?: (
       payload: ChatCompletionsPayload,
     ) => Promise<ChatCompletionResponse>
@@ -76,16 +110,22 @@ export const resolveWebSearchCalls = async (
     initiatorOverride,
     abortSignal,
     copilotSessionToken,
+    maxUses,
     createCompletion,
   } = options
   let current = response
   let currentPayload = payload
   let iteration = 0
+  const budget = createWebSearchBudget(
+    readChatWebSearchMaxUses(payload),
+    maxUses,
+  )
 
   while (true) {
     iteration += 1
     const webSearchCalls = extractWebSearchCalls(current)
     if (webSearchCalls.length === 0) return current
+    budget.claimBatch(webSearchCalls.length)
 
     consola.info(
       `Executing ${webSearchCalls.length} web search(es), iteration ${iteration}`,
@@ -134,6 +174,7 @@ export const resolveWebSearchCalls = async (
           createCompletion ?
             await createCompletion(currentPayload)
           : ((await createChatCompletions(currentPayload, {
+              allowCompatibilityRetry: false,
               copilotSessionToken,
               initiator: initiatorOverride,
               signal: abortSignal,
@@ -161,12 +202,17 @@ export const resolveResponsesWebSearchCalls = async (
     initiator: "agent" | "user"
     copilotSessionToken?: string
     signal?: AbortSignal
+    maxUses?: number
     createResponse?: (payload: ResponsesPayload) => Promise<ResponsesResult>
   },
 ): Promise<ResponsesResult> => {
   let current = result
   let currentPayload = payload
   let iteration = 0
+  const budget = createWebSearchBudget(
+    readResponsesWebSearchMaxUses(payload),
+    requestOptions.maxUses,
+  )
 
   while (true) {
     iteration += 1
@@ -175,6 +221,7 @@ export const resolveResponsesWebSearchCalls = async (
         item.type === "function_call" && item.name === "web_search",
     )
     if (webSearchCalls.length === 0) return current
+    budget.claimBatch(webSearchCalls.length)
 
     consola.info(
       `Executing ${webSearchCalls.length} web search(es) via Responses API, iteration ${iteration}`,
@@ -236,10 +283,10 @@ export const resolveResponsesWebSearchCalls = async (
         const result =
           requestOptions.createResponse ?
             await requestOptions.createResponse(currentPayload)
-          : ((await createResponses(
-              currentPayload,
-              requestOptions,
-            )) as ResponsesResult)
+          : ((await createResponses(currentPayload, {
+              ...requestOptions,
+              allowCompatibilityRetry: false,
+            })) as ResponsesResult)
 
         const inputTokens = result.usage?.input_tokens ?? 0
         const outputTokens = result.usage?.output_tokens ?? 0
@@ -375,6 +422,8 @@ type SSEWriter = {
   writeSSE: (data: { event: string; data: string }) => Promise<void>
 }
 
+const MAX_UNKNOWN_CONTENT_BLOCK_TEXT_LENGTH = 16_384
+
 export const emitAnthropicResponseAsStream = async (
   stream: SSEWriter,
   response: AnthropicResponse,
@@ -393,6 +442,7 @@ export const emitChatCompletionResponseAsStream = async (
     writeSSE: (data: { event?: string; data: string }) => Promise<void>
   },
   response: ChatCompletionResponse,
+  options: { writeDone?: boolean } = {},
 ): Promise<void> => {
   for (const choice of response.choices) {
     await stream.writeSSE({
@@ -446,7 +496,9 @@ export const emitChatCompletionResponseAsStream = async (
       }),
     })
   }
-  await stream.writeSSE({ data: "[DONE]" })
+  if (options.writeDone !== false) {
+    await stream.writeSSE({ data: "[DONE]" })
+  }
 }
 
 const emitMessageStart = async (
@@ -482,12 +534,24 @@ const emitContentBlock = async (
     await emitThinkingBlock(stream, block, index)
   } else if (isAnthropicToolUseBlock(block)) {
     await emitToolUseBlock(stream, block, index)
+  } else {
+    await emitTextBlock(stream, stringifyUnknownContentBlock(block), index)
   }
 
   await stream.writeSSE({
     event: "content_block_stop",
     data: JSON.stringify({ type: "content_block_stop", index }),
   })
+}
+
+const stringifyUnknownContentBlock = (block: unknown): string => {
+  let serialized: string
+  try {
+    serialized = JSON.stringify(block)
+  } catch {
+    serialized = "[Unrepresentable content block]"
+  }
+  return serialized.slice(0, MAX_UNKNOWN_CONTENT_BLOCK_TEXT_LENGTH)
 }
 
 const emitTextBlock = async (
@@ -632,50 +696,6 @@ export const emitResponsesResultAsStream = async (
       type: terminalEvent,
       response: result,
       sequence_number: seqNum,
-    }),
-  })
-}
-
-export const emitResponsesFailureAsStream = async (
-  stream: ResponsesSSEWriter,
-  options: { responseId: string; model: string },
-): Promise<void> => {
-  const message = "Upstream request failed"
-  const result: ResponsesResult = {
-    id: options.responseId,
-    object: "response",
-    created_at: Math.floor(Date.now() / 1000),
-    model: options.model,
-    output: [],
-    output_text: "",
-    status: "failed",
-    usage: null,
-    error: { message },
-    incomplete_details: null,
-    instructions: null,
-    metadata: null,
-    parallel_tool_calls: true,
-    temperature: null,
-    tool_choice: "auto",
-    tools: [],
-    top_p: null,
-  }
-  await stream.writeSSE({
-    event: "error",
-    data: JSON.stringify({
-      type: "error",
-      code: "server_error",
-      message,
-      param: null,
-      sequence_number: 0,
-    }),
-  })
-  await stream.writeSSE({
-    event: "response.failed",
-    data: JSON.stringify({
-      type: "response.failed",
-      response: result,
-      sequence_number: 1,
     }),
   })
 }

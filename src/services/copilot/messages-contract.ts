@@ -324,6 +324,9 @@ function validateAnthropicMessagesPayload(
     throw createMessagesValidationError("messages")
   }
   payload.messages = sanitizeMessages(payload.messages)
+  if (payload.messages.length === 0) {
+    throw createMessagesValidationError("messages")
+  }
   sanitizeTools(payload)
 }
 
@@ -515,10 +518,9 @@ function sanitizeImageSource(
   }
   if (
     source.type !== "base64"
-    || (source.media_type !== "image/jpeg"
-      && source.media_type !== "image/png"
-      && source.media_type !== "image/gif"
-      && source.media_type !== "image/webp")
+    || !isNonEmptyString(source.media_type)
+    || !source.media_type.startsWith("image/")
+    || source.media_type.slice("image/".length).trim().length === 0
     || typeof source.data !== "string"
   ) {
     return null
@@ -526,7 +528,7 @@ function sanitizeImageSource(
   return {
     ...source,
     type: "base64",
-    media_type: source.media_type,
+    media_type: source.media_type as `image/${string}`,
     data: source.data,
   }
 }
@@ -700,18 +702,14 @@ function sanitizeToolResultContent(
 function sanitizeToolUseBlock(
   block: Record<string, unknown>,
 ): AnthropicToolUseBlock | null {
-  if (
-    !isNonEmptyString(block.id)
-    || !isNonEmptyString(block.name)
-    || !isRecord(block.input)
-  ) {
+  if (!isNonEmptyString(block.id) || !isNonEmptyString(block.name)) {
     return null
   }
   return {
     ...block,
     type: "tool_use",
     id: block.id,
-    input: block.input,
+    input: isRecord(block.input) ? block.input : {},
     name: block.name,
   }
 }
@@ -720,7 +718,7 @@ function sanitizeThinkingBlock(
   block: Record<string, unknown>,
 ): AnthropicAssistantContentBlock | null {
   if (typeof block.thinking !== "string") {
-    return null
+    return sanitizeUnknownContentBlock(block)
   }
   return {
     ...block,
@@ -792,11 +790,10 @@ function sanitizeUserMessageContent(
   if (typeof content === "string") {
     return content
   }
-  if (!Array.isArray(content)) {
-    return []
-  }
+  const blocks = isRecord(content) ? [content] : content
+  if (!Array.isArray(blocks)) return String(blocks)
   const sanitizedBlocks: Array<AnthropicUserContentBlock> = []
-  for (const block of content) {
+  for (const block of blocks) {
     const sanitized = sanitizeCompatibleContentBlock(block)
     if (!sanitized) {
       continue
@@ -821,11 +818,10 @@ function sanitizeAssistantMessageContent(
   if (typeof content === "string") {
     return content
   }
-  if (!Array.isArray(content)) {
-    return []
-  }
+  const blocks = isRecord(content) ? [content] : content
+  if (!Array.isArray(blocks)) return String(blocks)
   const sanitizedBlocks: Array<AnthropicAssistantContentBlock> = []
-  for (const block of content) {
+  for (const block of blocks) {
     const sanitized = sanitizeCompatibleContentBlock(block)
     if (!sanitized) {
       continue
@@ -849,27 +845,28 @@ function sanitizeCustomMessageContent(
   if (typeof content === "string") {
     return content
   }
-  if (!Array.isArray(content)) {
-    return []
-  }
-  return content.flatMap((block) => {
+  const blocks = isRecord(content) ? [content] : content
+  if (!Array.isArray(blocks)) return String(blocks)
+  return blocks.flatMap((block) => {
     const sanitized = sanitizeCompatibleContentBlock(block)
     return sanitized ? [sanitized] : []
   })
 }
 
 function sanitizeMessage(message: unknown): AnthropicMessage | null {
-  if (!isRecord(message) || !isNonEmptyString(message.role)) {
-    return null
-  }
-  if (message.role === "user") {
+  if (!isRecord(message)) return null
+  const role =
+    typeof message.role === "string" && message.role.trim() ?
+      message.role
+    : "user"
+  if (role === "user") {
     return {
       ...message,
       role: "user",
       content: sanitizeUserMessageContent(message.content),
     }
   }
-  if (message.role === "assistant") {
+  if (role === "assistant") {
     return {
       ...message,
       role: "assistant",
@@ -878,7 +875,7 @@ function sanitizeMessage(message: unknown): AnthropicMessage | null {
   }
   return {
     ...message,
-    role: asAnthropicUnknownRole(message.role),
+    role: asAnthropicUnknownRole(role),
     content: sanitizeCustomMessageContent(message.content),
   }
 }
@@ -974,6 +971,7 @@ export function prepareAnthropicMessagesRequest(options: {
   payload: AnthropicMessagesPayload
 }): PreparedAnthropicMessagesRequest {
   const body = cloneAnthropicMessagesBody(options.payload)
+  if (body.max_tokens === null) deleteOwnField(body, "max_tokens")
   validateAnthropicMessagesPayload(body)
   normalizeOptionalPayloadFields(body)
   const normalizationClasses: Array<CopilotContractNormalizationClass> = []

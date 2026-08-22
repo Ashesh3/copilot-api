@@ -53,19 +53,30 @@ export const MAX_ROUTED_SENDS = 3
  * `MAX_RETRIES` so one invocation cannot drain the shared allowance.
  */
 export interface RetryBudget {
+  compatibilityRetryUsed: boolean
   remaining: number
 }
 
 export function createRetryBudget(options?: {
   extraSends?: number
 }): RetryBudget {
-  return { remaining: options?.extraSends ?? MAX_ROUTED_SENDS - 1 }
+  return {
+    compatibilityRetryUsed: false,
+    remaining: options?.extraSends ?? MAX_ROUTED_SENDS - 1,
+  }
 }
 
 /** Claim one shared extra-send allowance. Returns false when exhausted. */
 export function consumeExtraSend(budget: RetryBudget): boolean {
   if (budget.remaining <= 0) return false
   budget.remaining -= 1
+  return true
+}
+
+/** Claim the single deterministic compatibility resend for a routed call. */
+export function claimCompatibilityRetry(budget: RetryBudget): boolean {
+  if (budget.compatibilityRetryUsed || !consumeExtraSend(budget)) return false
+  budget.compatibilityRetryUsed = true
   return true
 }
 

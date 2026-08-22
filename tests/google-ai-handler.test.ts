@@ -15,7 +15,9 @@ import type { ResponsesPayload } from "../src/services/copilot/create-responses"
 import type { ModelsResponse } from "../src/services/copilot/get-models"
 
 import { getGoogleRoutingContractRows } from "../src/lib/compatibility-contract"
+import { HTTPError } from "../src/lib/error"
 import { setIpAllowlistForTest } from "../src/lib/ip-allowlist"
+import { isIpBlocked, resetIpSecurityForTest } from "../src/lib/ip-blocker"
 import {
   clearLlmDebugLogs,
   getLlmDebugLog,
@@ -30,11 +32,18 @@ import { selectGoogleUpstreamEndpoint } from "../src/routes/google-ai/handler"
 import { server } from "../src/server"
 
 const originalFetch = globalThis.fetch
+const originalGatewayKey = state.apiKeyAuth
 
 let lastResponsesPayload: ResponsesPayload | undefined
 let lastHeaders: Record<string, string> | undefined
 let lastPath: string | undefined
 let lastBody: Record<string, unknown> | undefined
+let chatStreamBody: string | undefined
+let responsesStreamBody: string | undefined
+let chatStreamResponse: Response | undefined
+let responsesStreamResponse: Response | undefined
+let messagesStreamBody: string | undefined
+let messagesStreamResponse: Response | undefined
 
 function parseRequestBody(init?: RequestInit): ResponsesPayload {
   if (typeof init?.body !== "string") {
@@ -49,6 +58,69 @@ function hasEphemeralCacheControl(value: unknown): boolean {
     typeof value === "object"
     && value !== null
     && (value as { type?: unknown }).type === "ephemeral"
+  )
+}
+
+function createLateChatHttpErrorResponse(upstream: Response): Response {
+  const encoder = new TextEncoder()
+  let emitted = false
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        if (!emitted) {
+          emitted = true
+          controller.enqueue(
+            encoder.encode(
+              `data: ${JSON.stringify({
+                id: "chat-late-error",
+                object: "chat.completion.chunk",
+                created: 1,
+                model: "chat-http-error-model",
+                choices: [
+                  {
+                    index: 0,
+                    delta: { content: "partial" },
+                    finish_reason: null,
+                    logprobs: null,
+                  },
+                ],
+              })}\n\n`,
+            ),
+          )
+          return
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10))
+        controller.error(new HTTPError("Late upstream failure", upstream))
+      },
+    }),
+    { headers: { "content-type": "text/event-stream" } },
+  )
+}
+
+function createLateSseHttpErrorResponse(
+  event: string,
+  data: Record<string, unknown>,
+  upstream: Response,
+): Response {
+  const encoder = new TextEncoder()
+  let emitted = false
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        if (!emitted) {
+          emitted = true
+          controller.enqueue(
+            encoder.encode(
+              `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`,
+            ),
+          )
+          return
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10))
+        controller.error(new HTTPError("Late upstream failure", upstream))
+      },
+    }),
+    { headers: { "content-type": "text/event-stream" } },
   )
 }
 
@@ -116,42 +188,44 @@ const fetchMock = mock((url: string, init?: RequestInit) => {
 
   if (lastPath === "/v1/messages") {
     if ((lastBody as { stream?: unknown } | undefined)?.stream === true) {
+      if (messagesStreamResponse) return messagesStreamResponse
       return new Response(
-        [
-          `event: message_start\ndata: ${JSON.stringify({
-            type: "message_start",
-            message: {
-              id: "message-placeholder",
-              type: "message",
-              role: "assistant",
-              content: [],
-              model: "route-model",
-              usage: { input_tokens: 1, output_tokens: 0 },
-            },
-          })}`,
-          `event: content_block_start\ndata: ${JSON.stringify({
-            type: "content_block_start",
-            index: 0,
-            content_block: { type: "text", text: "" },
-          })}`,
-          `event: content_block_delta\ndata: ${JSON.stringify({
-            type: "content_block_delta",
-            index: 0,
-            delta: { type: "text_delta", text: "hello" },
-          })}`,
-          `event: content_block_stop\ndata: ${JSON.stringify({
-            type: "content_block_stop",
-            index: 0,
-          })}`,
-          `event: message_delta\ndata: ${JSON.stringify({
-            type: "message_delta",
-            delta: { stop_reason: "end_turn", stop_sequence: null },
-            usage: { output_tokens: 1 },
-          })}`,
-          'event: message_stop\ndata: {"type":"message_stop"}',
-          "data: [DONE]",
-          "",
-        ].join("\n\n"),
+        messagesStreamBody
+          ?? [
+            `event: message_start\ndata: ${JSON.stringify({
+              type: "message_start",
+              message: {
+                id: "message-placeholder",
+                type: "message",
+                role: "assistant",
+                content: [],
+                model: "route-model",
+                usage: { input_tokens: 1, output_tokens: 0 },
+              },
+            })}`,
+            `event: content_block_start\ndata: ${JSON.stringify({
+              type: "content_block_start",
+              index: 0,
+              content_block: { type: "text", text: "" },
+            })}`,
+            `event: content_block_delta\ndata: ${JSON.stringify({
+              type: "content_block_delta",
+              index: 0,
+              delta: { type: "text_delta", text: "hello" },
+            })}`,
+            `event: content_block_stop\ndata: ${JSON.stringify({
+              type: "content_block_stop",
+              index: 0,
+            })}`,
+            `event: message_delta\ndata: ${JSON.stringify({
+              type: "message_delta",
+              delta: { stop_reason: "end_turn", stop_sequence: null },
+              usage: { output_tokens: 1 },
+            })}`,
+            'event: message_stop\ndata: {"type":"message_stop"}',
+            "data: [DONE]",
+            "",
+          ].join("\n\n"),
         { headers: { "content-type": "text/event-stream" } },
       )
     }
@@ -167,6 +241,45 @@ const fetchMock = mock((url: string, init?: RequestInit) => {
     })
   }
   if (lastPath === "/chat/completions") {
+    if ((lastBody as { stream?: unknown } | undefined)?.stream === true) {
+      if (chatStreamResponse) return chatStreamResponse
+      return new Response(
+        chatStreamBody
+          ?? [
+            `data: ${JSON.stringify({
+              id: "chat-stream",
+              object: "chat.completion.chunk",
+              created: 1,
+              model: "route-model",
+              choices: [
+                {
+                  index: 0,
+                  delta: { content: "hello" },
+                  finish_reason: null,
+                  logprobs: null,
+                },
+              ],
+            })}`,
+            `data: ${JSON.stringify({
+              id: "chat-stream",
+              object: "chat.completion.chunk",
+              created: 1,
+              model: "route-model",
+              choices: [
+                {
+                  index: 0,
+                  delta: {},
+                  finish_reason: "stop",
+                  logprobs: null,
+                },
+              ],
+            })}`,
+            "data: [DONE]",
+            "",
+          ].join("\n\n"),
+        { headers: { "content-type": "text/event-stream" } },
+      )
+    }
     return Response.json({
       id: "chat-placeholder",
       object: "chat.completion",
@@ -187,6 +300,29 @@ const fetchMock = mock((url: string, init?: RequestInit) => {
       },
     })
   }
+  if ((lastBody as { stream?: unknown } | undefined)?.stream === true) {
+    if (responsesStreamResponse) return responsesStreamResponse
+    return new Response(
+      responsesStreamBody
+        ?? [
+          `event: response.output_text.delta\ndata: ${JSON.stringify({
+            type: "response.output_text.delta",
+            sequence_number: 1,
+            item_id: "msg_1",
+            output_index: 0,
+            content_index: 0,
+            delta: "hello",
+          })}`,
+          `event: response.completed\ndata: ${JSON.stringify({
+            type: "response.completed",
+            sequence_number: 2,
+            response: responsesResult,
+          })}`,
+          "",
+        ].join("\n\n"),
+      { headers: { "content-type": "text/event-stream" } },
+    )
+  }
   return new Response(JSON.stringify(responsesResult), {
     status: 200,
     headers: { "content-type": "application/json" },
@@ -200,6 +336,8 @@ beforeAll(() => {
 
 afterAll(() => {
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
+  state.apiKeyAuth = originalGatewayKey
+  resetIpSecurityForTest()
 })
 
 beforeEach(() => {
@@ -209,6 +347,12 @@ beforeEach(() => {
   lastHeaders = undefined
   lastPath = undefined
   lastBody = undefined
+  chatStreamBody = undefined
+  responsesStreamBody = undefined
+  chatStreamResponse = undefined
+  responsesStreamResponse = undefined
+  messagesStreamBody = undefined
+  messagesStreamResponse = undefined
   state.accountType = "individual"
   state.copilotToken = "copilot-token"
   state.githubToken = "github-token"
@@ -216,8 +360,146 @@ beforeEach(() => {
   state.manualApprove = false
   state.debug = false
   state.verbose = false
+  state.apiKeyAuth = originalGatewayKey
   state.models = responsesCapableModels
+  resetIpSecurityForTest()
   setModelRedirectsForTest([])
+})
+
+test.each(["/v1beta/models", "/v1/models", "/models"] as const)(
+  "authenticates Google generation with a query credential on %s",
+  async (prefix) => {
+    state.apiKeyAuth = "google-gateway-key"
+    const response = await server.request(
+      `${prefix}/gpt-4o-mini:generateContent?key=google-gateway-key`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-copilot-peer-ip": "198.51.100.201",
+        },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: "Hello" }] }],
+        }),
+      },
+    )
+
+    expect(response.status).toBe(200)
+    expect(lastPath).toBe("/responses")
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  },
+)
+
+test("accepts equal Google credentials and rejects ambiguous credentials before dispatch", async () => {
+  state.apiKeyAuth = "google-gateway-key"
+  const path = "/v1/models/gpt-4o-mini:generateContent?key=google-gateway-key"
+  const body = JSON.stringify({
+    contents: [{ role: "user", parts: [{ text: "Hello" }] }],
+  })
+  const equal = await server.request(path, {
+    method: "POST",
+    headers: {
+      authorization: "Bearer google-gateway-key",
+      "content-type": "application/json",
+      "x-api-key": "google-gateway-key",
+      "x-copilot-peer-ip": "198.51.100.202",
+      "x-goog-api-key": "google-gateway-key",
+    },
+    body,
+  })
+  expect(equal.status).toBe(200)
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+
+  fetchMock.mockClear()
+  const ambiguous = await server.request(path, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-copilot-peer-ip": "198.51.100.203",
+      "x-goog-api-key": "different-key",
+    },
+    body,
+  })
+  expect(ambiguous.status).toBe(401)
+  expect(await ambiguous.json()).toEqual({
+    error: { message: "Unauthorized", type: "authentication_error" },
+  })
+  expect(ambiguous.headers.get("cache-control")).toBe("no-store")
+  expect(ambiguous.headers.get("www-authenticate")).toBe(
+    'Bearer realm="copilot-api"',
+  )
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
+test("treats invalid Google query credentials as supplied attempts without leaking them", async () => {
+  state.apiKeyAuth = "google-gateway-key"
+  const clientIp = "198.51.100.204"
+  const privateKey = "private-google-query-key"
+  const consoleWarn = spyOn(consola, "warn")
+  try {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const response = await server.request(
+        `/v1/models/gpt-4o-mini:generateContent?key=${privateKey}`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-copilot-peer-ip": clientIp,
+          },
+          body: "{}",
+        },
+      )
+      expect(response.status).toBe(401)
+    }
+    const diagnostics = JSON.stringify(consoleWarn.mock.calls)
+    expect(isIpBlocked(clientIp)).toBe(true)
+    expect(diagnostics).toContain("/v1/models/:modelAction")
+    expect(diagnostics).not.toContain(privateKey)
+    expect(fetchMock).not.toHaveBeenCalled()
+  } finally {
+    consoleWarn.mockRestore()
+  }
+})
+
+test("does not use query credentials outside exact Google actions", async () => {
+  state.apiKeyAuth = "google-gateway-key"
+  for (const pathname of [
+    "/v1/responses?key=google-gateway-key",
+    "/v1/models/gpt-4o-mini:futureAction?key=google-gateway-key",
+  ]) {
+    const response = await server.request(pathname, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-copilot-peer-ip": `198.51.100.${pathname.includes("responses") ? 205 : 206}`,
+      },
+      body: "{}",
+    })
+    expect(response.status).toBe(401)
+  }
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
+test("authenticates countTokens with a query credential without inference dispatch", async () => {
+  state.apiKeyAuth = "google-gateway-key"
+  const response = await server.request(
+    "/v1beta/models/gpt-4o-mini:countTokens?key=google-gateway-key",
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-copilot-peer-ip": "198.51.100.207",
+      },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: "Count me" }] }],
+      }),
+    },
+  )
+  expect(response.status).toBe(200)
+  expect(
+    typeof ((await response.json()) as { totalTokens?: unknown }).totalTokens,
+  ).toBe("number")
+  expect(fetchMock).not.toHaveBeenCalled()
 })
 
 test.each(["/v1beta/models", "/v1/models", "/models"] as const)(
@@ -466,7 +748,7 @@ test("preserves non-Google diagnostic paths while redacting query credentials", 
       sentryInfo.mock.calls,
     ])
 
-    expect(response.status).toBe(404)
+    expect(response.status).toBe(200)
     expect(diagnostics).toContain("/health")
     expect(diagnostics).toContain("alt=json")
     expect(diagnostics).not.toContain("non-google-query-secret")
@@ -504,11 +786,6 @@ test("adds reasoning defaults on the Google AI responses path", async () => {
 })
 
 test.each([
-  {
-    label: "countTokens",
-    path: "/v1/models/gpt-4o-mini:countTokens",
-    message: "Unsupported Google AI action",
-  },
   {
     label: "futureAction",
     path: "/v1/models/gpt-4o-mini:futureAction",
@@ -549,6 +826,63 @@ test.each([
     })
   },
 )
+
+test("flushes a pending Chat tool call as the Google EOF terminal", async () => {
+  const model = structuredClone(responsesCapableModels.data[0])
+  model.id = "chat-tool-eof"
+  model.supported_endpoints = ["/chat/completions"]
+  state.models = { object: "list", data: [model] }
+  chatStreamBody = `data: ${JSON.stringify({
+    id: "chat-tool-eof",
+    object: "chat.completion.chunk",
+    created: 1,
+    model: "private-upstream-model",
+    choices: [
+      {
+        index: 0,
+        delta: {
+          tool_calls: [
+            {
+              index: 0,
+              id: "call_weather",
+              type: "function",
+              function: {
+                name: "get_weather",
+                arguments: '{"city":"Paris"}',
+              },
+            },
+          ],
+        },
+        finish_reason: null,
+        logprobs: null,
+      },
+    ],
+  })}\n\n`
+
+  const response = await requestGoogleStream(model.id)
+  expect(await response.json()).toEqual([
+    {
+      candidates: [
+        {
+          content: {
+            role: "model",
+            parts: [
+              {
+                functionCall: {
+                  name: "get_weather",
+                  args: { city: "Paris" },
+                },
+              },
+            ],
+          },
+          finishReason: "STOP",
+          index: 0,
+        },
+      ],
+      modelVersion: "chat-tool-eof",
+    },
+  ])
+})
 
 test.each(["/v1beta/models", "/v1/models", "/models"] as const)(
   "does not expose an unknown Google route or inspect its body for %s",
@@ -738,16 +1072,295 @@ test("mounted Google routes match the exported routing contract", async () => {
   }
 })
 
-test("routes streaming Google text to an advertised Messages-only endpoint", async () => {
+test.each([
+  { suffix: "", contentType: "application/json", sse: false },
+  { suffix: "?alt=json", contentType: "application/json", sse: false },
+  { suffix: "?alt=sse", contentType: "text/event-stream", sse: true },
+  { suffix: "?alt=legacy", contentType: "application/json", sse: false },
+])(
+  "routes streaming Google text to Messages-only output for $suffix",
+  async ({ suffix, contentType, sse }) => {
+    const model = structuredClone(responsesCapableModels.data[0])
+    model.id = "route-model"
+    model.name = "Route Model"
+    model.vendor = "anthropic"
+    model.supported_endpoints = ["/v1/messages"]
+    state.models = { object: "list", data: [model] }
+
+    const response = await server.request(
+      `/v1/models/route-model:streamGenerateContent${suffix}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: "Hello" }] }],
+        }),
+      },
+    )
+
+    expect(response.status).toBe(200)
+    expect(lastPath).toBe("/v1/messages")
+    const body = await response.text()
+    expect(response.headers.get("content-type")).toContain(contentType)
+    expect(body).toContain("hello")
+    const chunks =
+      sse ?
+        [...body.matchAll(/^data: (.+)$/gm)].map(
+          (match) => JSON.parse(match[1]) as Record<string, unknown>,
+        )
+      : (JSON.parse(body) as Array<Record<string, unknown>>)
+    expect(chunks.filter((chunk) => "candidates" in chunk)).toHaveLength(2)
+    expect(chunks.at(-1)).toMatchObject({
+      candidates: [{ finishReason: "STOP" }],
+    })
+    if (sse) {
+      expect(body).toContain("data:")
+    } else {
+      expect(body).not.toContain("data:")
+      expect(body).not.toContain(": keepalive")
+    }
+  },
+)
+
+test("emits one Google failure after partial Chat output ends without a terminal", async () => {
   const model = structuredClone(responsesCapableModels.data[0])
-  model.id = "route-model"
-  model.name = "Route Model"
-  model.vendor = "anthropic"
-  model.supported_endpoints = ["/v1/messages"]
+  model.id = "chat-stream-model"
+  model.supported_endpoints = ["/chat/completions"]
   state.models = { object: "list", data: [model] }
+  chatStreamBody = `data: ${JSON.stringify({
+    id: "chat-partial",
+    object: "chat.completion.chunk",
+    created: 1,
+    model: "chat-stream-model",
+    choices: [
+      {
+        index: 0,
+        delta: { content: "partial" },
+        finish_reason: null,
+        logprobs: null,
+      },
+    ],
+  })}\n\ndata: [DONE]\n\n`
 
   const response = await server.request(
-    "/v1/models/route-model:streamGenerateContent",
+    "/v1/models/chat-stream-model:streamGenerateContent",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: "Hello" }] }],
+      }),
+    },
+  )
+  const chunks = (await response.json()) as Array<Record<string, unknown>>
+
+  expect(response.status).toBe(200)
+  expect(chunks).toHaveLength(2)
+  expect(chunks[0]).toMatchObject({
+    candidates: [
+      { content: { parts: [{ text: "partial" }] }, finishReason: null },
+    ],
+  })
+  expect(chunks[1]).toEqual({
+    error: {
+      code: 500,
+      message: "Upstream stream ended before a terminal response",
+      status: "INTERNAL",
+    },
+  })
+})
+
+test("stops after the first valid Chat terminal and ignores trailing malformed data", async () => {
+  const model = structuredClone(responsesCapableModels.data[0])
+  model.id = "chat-terminal-model"
+  model.supported_endpoints = ["/chat/completions"]
+  state.models = { object: "list", data: [model] }
+  chatStreamBody = [
+    `data: ${JSON.stringify({
+      id: "chat-terminal",
+      object: "chat.completion.chunk",
+      created: 1,
+      model: "chat-terminal-model",
+      choices: [
+        {
+          index: 0,
+          delta: {},
+          finish_reason: "stop",
+          logprobs: null,
+        },
+      ],
+    })}`,
+    "data: {not-json",
+    "",
+  ].join("\n\n")
+
+  const response = await server.request(
+    "/v1/models/chat-terminal-model:streamGenerateContent?alt=sse",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: "Hello" }] }],
+      }),
+    },
+  )
+  const body = await response.text()
+
+  expect(body.match(/"finishReason":"STOP"/g) ?? []).toHaveLength(1)
+  expect(body).not.toContain('"error"')
+})
+
+test("maps Responses failed to one received Google failure and stops", async () => {
+  const receivedMessage = "  received response failure\r\n"
+  responsesStreamBody = [
+    `event: response.output_text.delta\ndata: ${JSON.stringify({
+      type: "response.output_text.delta",
+      sequence_number: 1,
+      item_id: "msg_1",
+      output_index: 0,
+      content_index: 0,
+      delta: "partial",
+    })}`,
+    `event: response.failed\ndata: ${JSON.stringify({
+      type: "response.failed",
+      sequence_number: 2,
+      response: {
+        ...responsesResult,
+        status: "failed",
+        error: {
+          code: "upstream_error",
+          message: receivedMessage,
+          status: 529,
+          upstream_status: 529,
+          content_type: "text/plain",
+        },
+      },
+    })}`,
+    `event: response.completed\ndata: ${JSON.stringify({
+      type: "response.completed",
+      sequence_number: 3,
+      response: responsesResult,
+    })}`,
+    "",
+  ].join("\n\n")
+
+  const response = await server.request(
+    "/v1/models/gpt-4o-mini:streamGenerateContent",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: "Hello" }] }],
+      }),
+    },
+  )
+  const chunks = (await response.json()) as Array<Record<string, unknown>>
+
+  expect(chunks).toHaveLength(2)
+  expect(chunks[0]).toMatchObject({
+    candidates: [{ content: { parts: [{ text: "partial" }] } }],
+  })
+  expect(chunks[1]).toEqual({
+    error: {
+      code: 529,
+      message: receivedMessage,
+      status: "INTERNAL",
+      content_type: "text/plain",
+      upstream_status: 529,
+    },
+  })
+})
+
+test.each([
+  { suffix: "", contentType: "application/json" },
+  { suffix: "?alt=sse", contentType: "text/event-stream" },
+])(
+  "wraps an exact late Chat HTTP text body once for $suffix",
+  async ({ suffix, contentType }) => {
+    const model = structuredClone(responsesCapableModels.data[0])
+    model.id = "chat-http-error-model"
+    model.supported_endpoints = ["/chat/completions"]
+    state.models = { object: "list", data: [model] }
+    const exactBody = "  upstream late body\r\n"
+    chatStreamResponse = createLateChatHttpErrorResponse(
+      new Response(exactBody, {
+        status: 529,
+        headers: { "content-type": "text/plain; charset=utf-8" },
+      }),
+    )
+    const consoleError = spyOn(consola, "error")
+    const captureException = spyOn(
+      Sentry,
+      "captureException",
+    ).mockImplementation(() => "event-id")
+
+    try {
+      const response = await server.request(
+        `/v1/models/chat-http-error-model:streamGenerateContent${suffix}`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ role: "user", parts: [{ text: "Hello" }] }],
+          }),
+        },
+      )
+      const body = await response.text()
+      const failures: Array<Record<string, unknown>> =
+        suffix ?
+          [...body.matchAll(/^data: (.+)$/gm)].map(
+            (match) => JSON.parse(match[1]) as Record<string, unknown>,
+          )
+        : (JSON.parse(body) as Array<Record<string, unknown>>)
+
+      expect(response.status).toBe(200)
+      expect(response.headers.get("content-type")).toContain(contentType)
+      expect(failures).toEqual([
+        {
+          candidates: [
+            {
+              content: { role: "model", parts: [{ text: "partial" }] },
+              finishReason: null,
+              index: 0,
+            },
+          ],
+          modelVersion: "chat-http-error-model",
+        },
+        {
+          error: {
+            code: 529,
+            message: exactBody,
+            status: "INTERNAL",
+            content_type: "text/plain; charset=utf-8",
+            upstream_status: 529,
+          },
+        },
+      ])
+      expect(captureException).toHaveBeenCalledTimes(1)
+      expect(consoleError.mock.calls).toContainEqual([
+        expect.objectContaining({ upstreamResponseBody: exactBody }),
+      ])
+    } finally {
+      consoleError.mockRestore()
+      captureException.mockRestore()
+    }
+  },
+)
+
+test("wraps an exact binary late Chat HTTP body with the fixed local message", async () => {
+  const model = structuredClone(responsesCapableModels.data[0])
+  model.id = "chat-binary-error-model"
+  model.supported_endpoints = ["/chat/completions"]
+  state.models = { object: "list", data: [model] }
+  chatStreamResponse = createLateChatHttpErrorResponse(
+    new Response(new Uint8Array([0, 255, 1, 128]), {
+      status: 502,
+      headers: { "content-type": "application/octet-stream" },
+    }),
+  )
+
+  const response = await server.request(
+    "/v1/models/chat-binary-error-model:streamGenerateContent",
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -757,29 +1370,132 @@ test("routes streaming Google text to an advertised Messages-only endpoint", asy
     },
   )
 
-  expect(response.status).toBe(200)
-  expect(lastPath).toBe("/v1/messages")
-  const body = await response.text()
-  expect(response.headers.get("content-type")).toContain("text/event-stream")
-  expect(body).toContain("hello")
+  expect(await response.json()).toEqual([
+    {
+      candidates: [
+        {
+          content: { role: "model", parts: [{ text: "partial" }] },
+          finishReason: null,
+          index: 0,
+        },
+      ],
+      modelVersion: "chat-binary-error-model",
+    },
+    {
+      error: {
+        code: 502,
+        message: "Upstream stream ended before a terminal response",
+        status: "INTERNAL",
+        body_bytes: [0, 255, 1, 128],
+        content_type: "application/octet-stream",
+        upstream_status: 502,
+      },
+    },
+  ])
+})
+
+test("turns a non-empty malformed Chat frame into one local terminal failure", async () => {
+  const model = structuredClone(responsesCapableModels.data[0])
+  model.id = "chat-malformed-model"
+  model.supported_endpoints = ["/chat/completions"]
+  state.models = { object: "list", data: [model] }
+  chatStreamBody = "data: {not-json\n\n"
+
+  const response = await server.request(
+    "/v1/models/chat-malformed-model:streamGenerateContent",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: "Hello" }] }],
+      }),
+    },
+  )
+
+  expect(await response.json()).toEqual([
+    {
+      error: {
+        code: 500,
+        message: "Upstream stream ended before a terminal response",
+        status: "INTERNAL",
+      },
+    },
+  ])
+})
+
+test("preserves a native Messages received failure as one Google terminal", async () => {
+  const model = structuredClone(responsesCapableModels.data[0])
+  model.id = "messages-error-model"
+  model.vendor = "anthropic"
+  model.supported_endpoints = ["/v1/messages"]
+  state.models = { object: "list", data: [model] }
+  messagesStreamBody = [
+    `event: message_start\ndata: ${JSON.stringify({
+      type: "message_start",
+      message: {
+        id: "msg_error",
+        type: "message",
+        role: "assistant",
+        content: [],
+        model: "messages-error-model",
+        usage: { input_tokens: 1, output_tokens: 0 },
+      },
+    })}`,
+    `event: content_block_start\ndata: ${JSON.stringify({
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "text", text: "" },
+    })}`,
+    `event: content_block_delta\ndata: ${JSON.stringify({
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "text_delta", text: "partial" },
+    })}`,
+    `event: error\ndata: ${JSON.stringify({
+      type: "error",
+      error: {
+        type: "api_error",
+        message: "  exact messages failure\r\n",
+        status: 527,
+        body_bytes: [32, 32, 101],
+        content_type: "text/plain",
+      },
+    })}`,
+    "",
+  ].join("\n\n")
+
+  const response = await server.request(
+    "/v1/models/messages-error-model:streamGenerateContent",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: "Hello" }] }],
+      }),
+    },
+  )
+  const chunks = (await response.json()) as Array<Record<string, unknown>>
+
+  expect(chunks.at(-1)).toEqual({
+    error: {
+      code: 527,
+      message: "  exact messages failure\r\n",
+      status: "INTERNAL",
+      body_bytes: [32, 32, 101],
+      content_type: "text/plain",
+      upstream_status: 527,
+    },
+  })
+  expect(chunks.filter((chunk) => "error" in chunk)).toHaveLength(1)
 })
 
 test.each([
-  {
-    endpoints: ["/chat/completions", "/v1/messages", "/responses"],
-    expectedPath: "/responses",
-  },
-  {
-    endpoints: ["/chat/completions", "/responses"],
-    expectedPath: "/responses",
-  },
-  {
-    endpoints: ["/chat/completions", "/v1/messages"],
-    expectedPath: "/v1/messages",
-  },
+  { endpoints: ["/chat/completions", "/v1/messages", "/responses"] },
+  { endpoints: ["/chat/completions", "/responses"] },
+  { endpoints: ["/chat/completions", "/v1/messages"] },
 ])(
-  "routes Google PDF content away from Chat for $endpoints",
-  async ({ endpoints, expectedPath }) => {
+  "keeps viable Google PDF content compatible for $endpoints",
+  async ({ endpoints }) => {
     const model = structuredClone(responsesCapableModels.data[0])
     model.id = "route-model"
     model.name = "Route Model"
@@ -812,11 +1528,104 @@ test.each([
     )
 
     expect(response.status).toBe(200)
-    expect(lastPath).toBe(expectedPath)
+    expect(lastPath).toBe("/chat/completions")
   },
 )
 
-test("rejects Google PDF content when the model advertises only Chat", async () => {
+test.each(["/v1beta/models", "/v1/models", "/models"])(
+  "supports Google countTokens locally on %s",
+  async (prefix) => {
+    const response = await server.request(
+      `${prefix}/gpt-4o-mini:countTokens?alt=sse`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: "Count me" }] }],
+        }),
+      },
+    )
+    expect(response.status).toBe(200)
+    expect(response.headers.get("content-type")).toContain("application/json")
+    const body = (await response.json()) as { totalTokens?: unknown }
+    expect(typeof body.totalTokens).toBe("number")
+    expect(fetchMock).not.toHaveBeenCalled()
+  },
+)
+
+test("performs no attachment I/O when no endpoint is advertised", async () => {
+  const model = structuredClone(responsesCapableModels.data[0])
+  model.id = "no-route-file-model"
+  model.supported_endpoints = []
+  state.models = { object: "list", data: [model] }
+  const response = await server.request(
+    "/v1/models/no-route-file-model:generateContent",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [
+          {
+            role: "user",
+            parts: [
+              {
+                fileData: {
+                  mimeType: "application/pdf",
+                  fileUri: "https://attachment.test/private.pdf",
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    },
+  )
+  expect(response.status).toBe(400)
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
+test("estimates countTokens for an unknown model without inference dispatch", async () => {
+  state.models = { object: "list", data: [] }
+  const response = await server.request(
+    "/v1/models/future-custom-model:countTokens",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: "Count future" }] }],
+      }),
+    },
+  )
+  expect(response.status).toBe(200)
+  const body = (await response.json()) as { totalTokens?: unknown }
+  expect(typeof body.totalTokens).toBe("number")
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
+test.each(["/v1beta/models", "/v1/models", "/models"])(
+  "returns a fixed invalid JSON error on %s",
+  async (prefix) => {
+    const response = await server.request(
+      `${prefix}/gpt-4o-mini:generateContent`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "private-invalid-json-marker",
+      },
+    )
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({
+      error: {
+        code: 400,
+        message: "Invalid JSON request body",
+        status: "INVALID_ARGUMENT",
+      },
+    })
+    expect(fetchMock).not.toHaveBeenCalled()
+  },
+)
+
+test("dispatches Google PDF content when the model advertises only Chat", async () => {
   const model = structuredClone(responsesCapableModels.data[0])
   model.id = "route-model"
   model.name = "Route Model"
@@ -846,14 +1655,8 @@ test("rejects Google PDF content when the model advertises only Chat", async () 
     },
   )
 
-  expect(response.status).toBe(400)
-  expect(fetchMock).not.toHaveBeenCalled()
-  expect(await response.json()).toMatchObject({
-    error: {
-      code: "endpoint_translation_unsupported",
-      param: "message_content_part:file",
-    },
-  })
+  expect(response.status).toBe(200)
+  expect(lastPath).toBe("/chat/completions")
 })
 
 test("rejects Google requests when the model advertises no compatible endpoint", async () => {
@@ -905,7 +1708,7 @@ test("skips an advertised Google Messages endpoint when translation is lossy", (
   ).toMatchObject({ target: "/chat/completions", translated: false })
 })
 
-test("returns the Google translation blocker when every advertised endpoint is lossy", () => {
+test("uses the advertised Messages endpoint despite advisory loss", () => {
   const model = structuredClone(responsesCapableModels.data[0])
   model.id = "route-model"
   model.supported_endpoints = ["/v1/messages"]
@@ -920,11 +1723,7 @@ test("returns the Google translation blocker when every advertised endpoint is l
         prediction: { type: "content", content: "expected" },
       },
     }),
-  ).toEqual({
-    blockers: ["prediction"],
-    code: "endpoint_translation_unsupported",
-    source: "chat",
-  })
+  ).toMatchObject({ target: "/v1/messages", translated: true })
 })
 
 test("routes Google googleSearch through Copilot native Responses web search", async () => {
@@ -942,7 +1741,8 @@ test("routes Google googleSearch through Copilot native Responses web search", a
 
   expect(response.status).toBe(200)
   expect(lastResponsesPayload?.tools?.[0]).toMatchObject({
-    type: "web_search",
+    type: "function",
+    name: "web_search",
   })
 })
 
@@ -1018,7 +1818,7 @@ test("adds prompt caching markers on the Google AI responses path", async () => 
       && hasEphemeralCacheControl(record.copilot_cache_control)
     )
   })
-  expect(hasAssistantCacheMarker).toBe(true)
+  expect(hasAssistantCacheMarker).toBe(false)
 
   const tools = lastResponsesPayload?.tools
   expect(Array.isArray(tools)).toBe(true)
@@ -1210,7 +2010,7 @@ test("keeps the requested Google model in a redirected native response", async (
   expect(body.modelVersion).toBe("claude-source")
 })
 
-test("rejects unsupported Google root request fields instead of silently dropping them", async () => {
+test("accepts unknown Google root request fields with meaningful content", async () => {
   const response = await server.request(
     "/v1/models/gpt-4o-mini:generateContent",
     {
@@ -1225,18 +2025,10 @@ test("rejects unsupported Google root request fields instead of silently droppin
     },
   )
 
-  expect(response.status).toBe(400)
-  const body = await response.json()
-  expect(body).toEqual({
-    error: {
-      code: 400,
-      message: "Unsupported Google AI request field(s): cachedContent",
-      status: "INVALID_ARGUMENT",
-    },
-  })
+  expect(response.status).toBe(200)
 })
 
-test("rejects unsupported Google code execution instead of dropping it", async () => {
+test("treats unsupported Google code execution as advisory", async () => {
   const response = await server.request(
     "/v1/models/gpt-4o-mini:generateContent",
     {
@@ -1251,13 +2043,230 @@ test("rejects unsupported Google code execution instead of dropping it", async (
     },
   )
 
-  expect(response.status).toBe(400)
-  const body = await response.json()
-  expect(body).toEqual({
-    error: {
-      code: 400,
-      message: "Unsupported Google AI tool type(s): codeExecution",
-      status: "INVALID_ARGUMENT",
-    },
-  })
+  expect(response.status).toBe(200)
 })
+
+const requestGoogleStream = async (
+  model: string,
+  suffix = "",
+  tools?: Array<Record<string, unknown>>,
+): Promise<Response> =>
+  await server.request(`/v1/models/${model}:streamGenerateContent${suffix}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      contents: [{ role: "user", parts: [{ text: "Hello" }] }],
+      ...(tools ? { tools } : {}),
+    }),
+  })
+
+const localGoogleFailure = {
+  error: {
+    code: 500,
+    message: "Upstream stream ended before a terminal response",
+    status: "INTERNAL",
+  },
+}
+
+test("preserves a nested top-level Responses error through the mounted route", async () => {
+  responsesStreamBody = `event: error\ndata: ${JSON.stringify({
+    type: "error",
+    sequence_number: 1,
+    status: 531,
+    error: {
+      message: "  nested mounted body\r\n",
+      body_bytes: [32, 32, 109],
+      content_type: "text/plain",
+    },
+  })}\n\n`
+
+  const response = await requestGoogleStream("gpt-4o-mini")
+  expect(await response.json()).toEqual([
+    {
+      error: {
+        code: 531,
+        message: "  nested mounted body\r\n",
+        status: "INTERNAL",
+        body_bytes: [32, 32, 109],
+        content_type: "text/plain",
+        upstream_status: 531,
+      },
+    },
+  ])
+})
+
+test.each([
+  { endpoint: "/v1/messages" as const, kind: "Messages" },
+  { endpoint: "/responses" as const, kind: "Responses" },
+])(
+  "emits one local Google failure when $kind ends at EOF",
+  async ({ endpoint }) => {
+    const model = structuredClone(responsesCapableModels.data[0])
+    model.id = `eof-${endpoint.slice(1).replaceAll("/", "-")}`
+    model.vendor = endpoint === "/v1/messages" ? "anthropic" : "openai"
+    model.supported_endpoints = [endpoint]
+    state.models = { object: "list", data: [model] }
+    if (endpoint === "/v1/messages") {
+      messagesStreamBody =
+        'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_eof","type":"message","role":"assistant","content":[],"model":"eof","usage":{"input_tokens":1,"output_tokens":0}}}\n\n'
+    } else {
+      responsesStreamBody = `event: response.output_text.delta\ndata: ${JSON.stringify(
+        {
+          type: "response.output_text.delta",
+          sequence_number: 1,
+          item_id: "msg_eof",
+          output_index: 0,
+          content_index: 0,
+          delta: "partial",
+        },
+      )}\n\n`
+    }
+
+    const response = await requestGoogleStream(model.id)
+    const chunks = (await response.json()) as Array<Record<string, unknown>>
+    expect(chunks.at(-1)).toEqual(localGoogleFailure)
+    expect(chunks.filter((chunk) => "error" in chunk)).toHaveLength(1)
+  },
+)
+
+test("emits a Responses completed terminal in SSE mode", async () => {
+  const response = await requestGoogleStream("gpt-4o-mini", "?alt=sse")
+  const body = await response.text()
+  const chunks = [...body.matchAll(/^data: (.+)$/gm)].map(
+    (match) => JSON.parse(match[1]) as Record<string, unknown>,
+  )
+
+  expect(response.headers.get("content-type")).toContain("text/event-stream")
+  expect(chunks.at(-1)).toMatchObject({
+    candidates: [{ finishReason: "STOP" }],
+  })
+  expect(chunks.filter((chunk) => "error" in chunk)).toHaveLength(0)
+})
+
+test.each([
+  { endpoint: "/chat/completions" as const, suffix: "?alt=sse", sse: true },
+  { endpoint: "/responses" as const, suffix: "", sse: false },
+])(
+  "emits buffered $endpoint web search in the selected Google mode",
+  async ({ endpoint, suffix, sse }) => {
+    const model = structuredClone(responsesCapableModels.data[0])
+    model.id = `search-${endpoint.slice(1).replaceAll("/", "-")}`
+    model.supported_endpoints = [endpoint]
+    state.models = { object: "list", data: [model] }
+
+    const response = await requestGoogleStream(model.id, suffix, [
+      { googleSearch: { blockedDomains: ["blocked.example"] } },
+    ])
+    const body = await response.text()
+    const chunks =
+      sse ?
+        [...body.matchAll(/^data: (.+)$/gm)].map(
+          (match) => JSON.parse(match[1]) as Record<string, unknown>,
+        )
+      : (JSON.parse(body) as Array<Record<string, unknown>>)
+
+    expect(response.headers.get("content-type")).toContain(
+      sse ? "text/event-stream" : "application/json",
+    )
+    expect(chunks).toHaveLength(1)
+    expect(chunks[0]).toMatchObject({
+      candidates: [{ finishReason: "STOP" }],
+    })
+  },
+)
+
+test.each([
+  { endpoint: "/v1/messages" as const, kind: "Messages" },
+  { endpoint: "/responses" as const, kind: "Responses" },
+])(
+  "emits one local Google failure for malformed $kind data",
+  async ({ endpoint }) => {
+    const model = structuredClone(responsesCapableModels.data[0])
+    model.id = `malformed-${endpoint.slice(1).replaceAll("/", "-")}`
+    model.vendor = endpoint === "/v1/messages" ? "anthropic" : "openai"
+    model.supported_endpoints = [endpoint]
+    state.models = { object: "list", data: [model] }
+    if (endpoint === "/v1/messages") {
+      messagesStreamBody = "event: message_start\ndata: {not-json\n\n"
+    } else {
+      responsesStreamBody =
+        "event: response.output_text.delta\ndata: {not-json\n\n"
+    }
+
+    const response = await requestGoogleStream(model.id)
+    const chunks = (await response.json()) as Array<Record<string, unknown>>
+    expect(chunks.at(-1)).toEqual(localGoogleFailure)
+    expect(chunks.filter((chunk) => "error" in chunk)).toHaveLength(1)
+  },
+)
+
+test.each([
+  { endpoint: "/v1/messages" as const, kind: "Messages" },
+  { endpoint: "/responses" as const, kind: "Responses" },
+])(
+  "preserves and reports one late $kind HTTP failure",
+  async ({ endpoint }) => {
+    const model = structuredClone(responsesCapableModels.data[0])
+    model.id = `late-${endpoint.slice(1).replaceAll("/", "-")}`
+    model.vendor = endpoint === "/v1/messages" ? "anthropic" : "openai"
+    model.supported_endpoints = [endpoint]
+    state.models = { object: "list", data: [model] }
+    const exactBody = `  late ${endpoint} body\r\n`
+    const upstream = new Response(exactBody, {
+      status: 530,
+      headers: { "content-type": "text/plain; charset=utf-8" },
+    })
+    if (endpoint === "/v1/messages") {
+      messagesStreamResponse = createLateSseHttpErrorResponse(
+        "message_start",
+        {
+          type: "message_start",
+          message: {
+            id: "msg_late",
+            type: "message",
+            role: "assistant",
+            content: [],
+            model: model.id,
+            usage: { input_tokens: 1, output_tokens: 0 },
+          },
+        },
+        upstream,
+      )
+    } else {
+      responsesStreamResponse = createLateSseHttpErrorResponse(
+        "response.output_text.delta",
+        {
+          type: "response.output_text.delta",
+          sequence_number: 1,
+          item_id: "msg_late",
+          output_index: 0,
+          content_index: 0,
+          delta: "partial",
+        },
+        upstream,
+      )
+    }
+    const captureException = spyOn(
+      Sentry,
+      "captureException",
+    ).mockImplementation(() => "event-id")
+
+    try {
+      const response = await requestGoogleStream(model.id)
+      const chunks = (await response.json()) as Array<Record<string, unknown>>
+      expect(chunks.at(-1)).toEqual({
+        error: {
+          code: 530,
+          message: exactBody,
+          status: "INTERNAL",
+          content_type: "text/plain; charset=utf-8",
+          upstream_status: 530,
+        },
+      })
+      expect(chunks.filter((chunk) => "error" in chunk)).toHaveLength(1)
+      expect(captureException).toHaveBeenCalledTimes(1)
+    } finally {
+      captureException.mockRestore()
+    }
+  },
+)

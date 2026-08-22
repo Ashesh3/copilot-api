@@ -533,6 +533,105 @@ test("registers Statsig redaction hooks for all Sentry send callbacks", () => {
   )
 })
 
+test("preserves exact upstream body fields while scrubbing surrounding Sentry event data", () => {
+  const options = createSentryInitOptions(
+    "https://public@example.ingest.sentry.io/1",
+  )
+  const body =
+    "  Authorization: Bearer final-secret\r\nhttps://ab.chatgpt.com/v1/initialize?k=raw-key\r\n/v1beta/models/private-model:private-action?key=body-key  "
+  const bodyBytes = Array.from(new TextEncoder().encode(body))
+  const event = {
+    request: {
+      method: "POST",
+      url: "https://gateway.example/v1beta/models/sibling-model:sibling-action?key=sibling-key",
+      headers: { authorization: "Bearer sibling-secret" },
+    },
+    extra: {
+      upstreamResponseBody: body,
+      upstreamResponseBodyBytes: bodyBytes,
+      upstreamResponseContentType: "text/plain",
+      sibling: {
+        url: "https://ab.chatgpt.com/v1/initialize?k=sibling-statsig-key",
+      },
+    },
+  }
+  const beforeSend = options.beforeSend as
+    | ((value: typeof event) => typeof event | null)
+    | undefined
+
+  expect(beforeSend?.(event)).toBe(event)
+  expect(event.extra.upstreamResponseBody).toBe(body)
+  expect(event.extra.upstreamResponseBodyBytes).toEqual(bodyBytes)
+  expect(event.request.headers.authorization).toBe("[Filtered]")
+  expect(event.request.url).not.toContain("sibling-model")
+  expect(event.request.url).not.toContain("sibling-action")
+  expect(event.request.url).not.toContain("sibling-key")
+  expect(event.extra.sibling.url).toBe(
+    "https://ab.chatgpt.com/v1/initialize?k=[Filtered]",
+  )
+})
+
+test("preserves exact upstream body fields while scrubbing surrounding Sentry log data", () => {
+  const options = createSentryInitOptions(
+    "https://public@example.ingest.sentry.io/1",
+  )
+  const body =
+    "https://ab.chatgpt.com/v1/initialize?k=raw-log-key /models/private-log-model:private-log-action?token=body-token"
+  const bodyBytes = Array.from(new TextEncoder().encode(body))
+  const log = {
+    attributes: {
+      upstreamResponseBody: body,
+      upstreamResponseBodyBytes: bodyBytes,
+      upstreamResponseContentType: "text/plain",
+      request: {
+        method: "POST",
+        url: "https://gateway.example/models/sibling-log-model:sibling-log-action?token=sibling-token",
+        headers: { authorization: "Bearer sibling-log-secret" },
+      },
+      statsig: {
+        url: "https://ab.chatgpt.com/v1/initialize?k=sibling-log-key",
+      },
+    },
+  }
+  const beforeSendLog = options.beforeSendLog as
+    | ((value: typeof log) => typeof log | null)
+    | undefined
+
+  expect(beforeSendLog?.(log)).toBe(log)
+  expect(log.attributes.upstreamResponseBody).toBe(body)
+  expect(log.attributes.upstreamResponseBodyBytes).toEqual(bodyBytes)
+  expect(log.attributes.request.headers.authorization).toBe("[Filtered]")
+  expect(log.attributes.request.url).not.toContain("sibling-log-model")
+  expect(log.attributes.request.url).not.toContain("sibling-log-action")
+  expect(log.attributes.request.url).not.toContain("sibling-token")
+  expect(log.attributes.statsig.url).toBe(
+    "https://ab.chatgpt.com/v1/initialize?k=[Filtered]",
+  )
+})
+
+test("preserves an exact binary upstream body byte array through Sentry scrubbing", () => {
+  const options = createSentryInitOptions(
+    "https://public@example.ingest.sentry.io/1",
+  )
+  const bodyBytes = [0, 255, 128, 65, 13, 10]
+  const event = {
+    extra: {
+      upstreamResponseBody: bodyBytes,
+      upstreamResponseBodyBytes: bodyBytes,
+      upstreamResponseContentType: "application/octet-stream",
+    },
+  }
+  const beforeSend = options.beforeSend as
+    | ((value: typeof event) => typeof event | null)
+    | undefined
+
+  expect(beforeSend?.(event)).toBe(event)
+  expect(event.extra.upstreamResponseBody).toEqual([0, 255, 128, 65, 13, 10])
+  expect(event.extra.upstreamResponseBodyBytes).toEqual([
+    0, 255, 128, 65, 13, 10,
+  ])
+})
+
 test("scrubs affinity headers from every Sentry send callback", () => {
   const options = createSentryInitOptions(
     "https://public@example.ingest.sentry.io/1",

@@ -87,11 +87,36 @@ export function credentialHasScopes(
   )
 }
 
+export function isGoogleApiCredentialPath(pathname: string): boolean {
+  return /^\/(?:v1\/|v1beta\/)?models\/[^/]+:(?:generateContent|streamGenerateContent|countTokens)\/?$/.test(
+    pathname,
+  )
+}
+
+export function hasSuppliedRequestCredential(request: Request): boolean {
+  if (
+    ["authorization", "x-api-key", "x-goog-api-key"].some((header) =>
+      request.headers.has(header),
+    )
+  ) {
+    return true
+  }
+
+  const url = new URL(request.url)
+  return (
+    isGoogleApiCredentialPath(url.pathname)
+    && url.searchParams.getAll("key").some((value) => value.trim() !== "")
+  )
+}
+
 export function extractRequestCredential(request: Request): string | null {
   const candidates = [
     request.headers.get("x-api-key")?.trim(),
     request.headers.get("x-goog-api-key")?.trim(),
-  ].filter(Boolean)
+  ].filter(
+    (candidate): candidate is string =>
+      candidate !== undefined && candidate !== "",
+  )
   const authorization = request.headers.get("authorization")
   if (authorization) {
     const [scheme, ...rest] = authorization.trim().split(/\s+/)
@@ -99,6 +124,16 @@ export function extractRequestCredential(request: Request): string | null {
     const bearerToken = rest.join(" ").trim()
     if (!bearerToken) return null
     candidates.push(bearerToken)
+  }
+
+  const url = new URL(request.url)
+  if (isGoogleApiCredentialPath(url.pathname)) {
+    candidates.push(
+      ...url.searchParams
+        .getAll("key")
+        .map((candidate) => candidate.trim())
+        .filter(Boolean),
+    )
   }
 
   const uniqueCandidates = [...new Set(candidates)]
@@ -110,16 +145,12 @@ export async function resolveCredential(
   rawCredential: string,
   requiredScopes: ReadonlyArray<string> = [],
 ): Promise<ResolvedCredential | null> {
+  const gatewayCredential = resolveGatewayCredential(
+    rawCredential,
+    requiredScopes,
+  )
+  if (gatewayCredential) return gatewayCredential
   if (!rawCredential) return null
-  for (const gatewayKey of configuredGatewayKeys()) {
-    if (!secretEquals(rawCredential, gatewayKey)) continue
-    const credential: ResolvedCredential = {
-      principalId: `gateway:${digest(gatewayKey).toString("hex").slice(0, 16)}`,
-      kind: "gateway",
-      scopes: new Set(["*"]),
-    }
-    return credentialHasScopes(credential, requiredScopes) ? credential : null
-  }
 
   const store = getOAuthStore()
   const oauthCredential = await store.resolveAccessToken(rawCredential)
@@ -147,6 +178,24 @@ export async function resolveCredential(
     return credentialHasScopes(credential, requiredScopes) ? credential : null
   }
 
+  return null
+}
+
+export function resolveGatewayCredential(
+  rawCredential: string,
+  requiredScopes: ReadonlyArray<string> = [],
+): ResolvedCredential | null {
+  const normalizedCredential = rawCredential.trim()
+  if (!normalizedCredential) return null
+  for (const gatewayKey of configuredGatewayKeys()) {
+    if (!secretEquals(normalizedCredential, gatewayKey)) continue
+    const credential: ResolvedCredential = {
+      principalId: `gateway:${digest(gatewayKey).toString("hex").slice(0, 16)}`,
+      kind: "gateway",
+      scopes: new Set(["*"]),
+    }
+    return credentialHasScopes(credential, requiredScopes) ? credential : null
+  }
   return null
 }
 

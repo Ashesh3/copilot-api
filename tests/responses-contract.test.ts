@@ -6,15 +6,21 @@ import type { ResponsesPayload } from "~/services/copilot/create-responses"
 
 import { LocalHTTPError } from "~/lib/error"
 import { setModelSettingsForTest } from "~/lib/model-settings"
+import { snapshotPlainDataRecord } from "~/lib/plain-data-snapshot"
 import {
   applyResponsesReasoningDefaults,
+  finalizeNativeResponsesRequest,
   finalizeResponsesRequest,
   prepareResponsesRequest,
 } from "~/services/copilot/responses-contract"
 
+function prepareLegacyResponsesRequestForTest(payload: ResponsesPayload) {
+  return finalizeResponsesRequest(payload, { implicitDefault: false })
+}
+
 function captureValidationError(payload: ResponsesPayload): LocalHTTPError {
   try {
-    prepareResponsesRequest(payload)
+    prepareLegacyResponsesRequestForTest(payload)
   } catch (error) {
     expect(error).toBeInstanceOf(LocalHTTPError)
     return error as LocalHTTPError
@@ -22,7 +28,7 @@ function captureValidationError(payload: ResponsesPayload): LocalHTTPError {
   throw new Error("Expected Responses validation error")
 }
 
-const ALWAYS_BLOCKED_RESPONSES_TOOLS = [
+const LEGACY_RESPONSES_TOOL_TYPES = [
   "code_interpreter",
   "computer_use",
   "computer_use_preview",
@@ -45,8 +51,14 @@ const FORWARDED_RESPONSES_TOOLS = [
   "client_future_tool",
 ]
 
+function createDeepRecord(): Record<string, unknown> {
+  let nested: Record<string, unknown> = { value: "leaf" }
+  for (let index = 0; index < 24; index += 1) nested = { nested }
+  return nested
+}
+
 test("preserves the reviewed current Responses field inventory", () => {
-  const result = prepareResponsesRequest({
+  const result = prepareLegacyResponsesRequestForTest({
     model: "gpt-5.6-sol",
     input: [
       {
@@ -80,9 +92,49 @@ test("preserves the reviewed current Responses field inventory", () => {
   expect(JSON.stringify(result.body)).toContain("prompt_cache_breakpoint")
 })
 
+test("accepts a deep, long Responses source while generic snapshots stay strict", () => {
+  const payload = {
+    model: "gpt-current",
+    input: Array.from({ length: 2_049 }, () => ({
+      role: "user",
+      content: createDeepRecord(),
+    })),
+  }
+
+  expect(prepareResponsesRequest(payload).source.input).toHaveLength(2_049)
+  expect(snapshotPlainDataRecord(payload)).toBeUndefined()
+})
+
+test("preserves more than 2,048 safe Responses tools in the request snapshot", () => {
+  const tools = Array.from({ length: 2_049 }, (_, index) => ({
+    type: "function",
+    name: `tool_${index}`,
+  }))
+
+  const prepared = prepareResponsesRequest({
+    model: "gpt-current",
+    input: "hello",
+    tools,
+  })
+
+  expect(prepared.source.tools).toEqual(tools)
+})
+
+test("rejects Responses tool arrays above the request snapshot boundary", () => {
+  const tools = Array.from({ length: 65_537 }, () => ({ type: "function" }))
+
+  expect(() =>
+    prepareResponsesRequest({
+      model: "gpt-current",
+      input: "hello",
+      tools,
+    }),
+  ).toThrow(LocalHTTPError)
+})
+
 test("reports only fixed classes for wire-changing Responses normalization", () => {
-  const result = prepareResponsesRequest({
-    model: "gpt-5.6-sol",
+  const result = prepareLegacyResponsesRequestForTest({
+    model: "gpt-current",
     input: "hello",
     max_output_tokens: 1,
     temperature: 0.3,
@@ -118,7 +170,7 @@ test("reports final reasoning and sampling normalization classes", () => {
 })
 
 test("reports every stateless control removed from the Responses wire", () => {
-  const prepared = prepareResponsesRequest({
+  const prepared = prepareLegacyResponsesRequestForTest({
     model: "gpt-current",
     input: "hello",
     store: false,
@@ -136,8 +188,8 @@ test("reports every stateless control removed from the Responses wire", () => {
   expect(prepared.normalizationClasses).toEqual(["stateless_controls"])
 })
 
-test("reports JSON-schema required filtering and deduplication", () => {
-  const prepared = prepareResponsesRequest({
+test("preserves caller json_schema required fields exactly", () => {
+  const prepared = prepareLegacyResponsesRequestForTest({
     model: "gpt-current",
     input: "hello",
     text: {
@@ -159,10 +211,10 @@ test("reports JSON-schema required filtering and deduplication", () => {
 
   expect(prepared.body.text?.format).toMatchObject({
     schema: {
-      required: ["answer", "confidence"],
+      required: ["answer", "answer", "unknown", 7],
     },
   })
-  expect(prepared.normalizationClasses).toEqual(["json_schema"])
+  expect(prepared.normalizationClasses).toEqual([])
 })
 
 test.each([
@@ -184,10 +236,10 @@ test.each([
       properties: { answer: { type: "string" } },
       required: ["answer", "answer"],
     },
-    expectedClasses: ["json_schema"],
+    expectedClasses: [],
   },
 ])("classifies JSON-schema mutation exactly for $name", (entry) => {
-  const prepared = prepareResponsesRequest({
+  const prepared = prepareLegacyResponsesRequestForTest({
     model: "gpt-current",
     input: "hello",
     text: {
@@ -224,7 +276,7 @@ test.each([
   extra: Record<string, unknown>
   expectedClasses: Array<CopilotContractNormalizationClass>
 }>)("classifies empty tool mutation exactly for $name", (entry) => {
-  const prepared = prepareResponsesRequest({
+  const prepared = prepareLegacyResponsesRequestForTest({
     model: "gpt-current",
     input: "hello",
     ...entry.extra,
@@ -251,7 +303,7 @@ test.each([
     expectedClasses: ["stateless_controls"],
   },
 ])("classifies stateless mutation exactly for $name", (entry) => {
-  const prepared = prepareResponsesRequest({
+  const prepared = prepareLegacyResponsesRequestForTest({
     model: "gpt-current",
     input: "hello",
     ...entry.extra,
@@ -261,7 +313,7 @@ test.each([
 })
 
 test("reports JSON-object instruction injection", () => {
-  const prepared = prepareResponsesRequest({
+  const prepared = prepareLegacyResponsesRequestForTest({
     model: "gpt-current",
     input: "plain response",
     text: { format: { type: "json_object" } },
@@ -305,7 +357,7 @@ test("reports configured unsupported sampling removal", () => {
 })
 
 test("keeps reasoning disabled without requesting summaries or encrypted state", () => {
-  const body = prepareResponsesRequest({
+  const body = prepareLegacyResponsesRequestForTest({
     model: "gpt-5.6-sol",
     input: "hello",
     reasoning: { effort: "none" },
@@ -323,7 +375,7 @@ test("keeps reasoning disabled without requesting summaries or encrypted state",
 })
 
 test("removes encrypted reasoning inclusion when reasoning is disabled", () => {
-  const body = prepareResponsesRequest({
+  const body = prepareLegacyResponsesRequestForTest({
     model: "gpt-current",
     input: "hello",
     reasoning: { effort: "none", summary: "detailed" },
@@ -341,7 +393,7 @@ test("removes encrypted reasoning inclusion when reasoning is disabled", () => {
 })
 
 test("preserves integer reasoning effort", () => {
-  const body = prepareResponsesRequest({
+  const body = prepareLegacyResponsesRequestForTest({
     model: "gpt-current",
     input: "hello",
     reasoning: { effort: 2048 },
@@ -358,7 +410,7 @@ test("preserves integer reasoning effort", () => {
 })
 
 test("adds encrypted reasoning inclusion once", () => {
-  const body = prepareResponsesRequest({
+  const body = prepareLegacyResponsesRequestForTest({
     model: "gpt-current",
     input: "hello",
     include: ["reasoning.encrypted_content"],
@@ -376,7 +428,7 @@ test("adds encrypted reasoning inclusion once", () => {
 })
 
 test("canonicalizes duplicate encrypted reasoning includes", () => {
-  const body = prepareResponsesRequest({
+  const body = prepareLegacyResponsesRequestForTest({
     model: "gpt-current",
     input: "hello",
     include: [
@@ -415,7 +467,7 @@ test("requires a non-empty Responses model before preparation", () => {
 })
 
 test("treats null reasoning as absent", () => {
-  const body = prepareResponsesRequest({
+  const body = prepareLegacyResponsesRequestForTest({
     model: "gpt-current",
     input: "hello",
     reasoning: null,
@@ -433,7 +485,7 @@ test("treats null reasoning as absent", () => {
 test.each(["compaction", "truncate"])(
   "accepts %s context management",
   (type) => {
-    const body = prepareResponsesRequest({
+    const body = prepareLegacyResponsesRequestForTest({
       model: "gpt-current",
       input: "hello",
       context_management: [
@@ -448,7 +500,7 @@ test.each(["compaction", "truncate"])(
 )
 
 test("accepts null context management without forwarding it", () => {
-  const body = prepareResponsesRequest({
+  const body = prepareLegacyResponsesRequestForTest({
     model: "gpt-current",
     input: "hello",
     context_management: null,
@@ -507,14 +559,18 @@ test.each([
   ["service_tier", { service_tier: "priority" }],
 ] as const)("rejects unsupported stateful control %s", (param, extra) => {
   expect(() =>
-    prepareResponsesRequest({
+    prepareLegacyResponsesRequestForTest({
       model: "gpt-5.6-sol",
       input: "hello",
       ...extra,
     }),
   ).toThrow(LocalHTTPError)
   try {
-    prepareResponsesRequest({ model: "gpt-5.6-sol", input: "hello", ...extra })
+    prepareLegacyResponsesRequestForTest({
+      model: "gpt-5.6-sol",
+      input: "hello",
+      ...extra,
+    })
   } catch (error) {
     expect((error as LocalHTTPError).clientBody).toMatchObject({
       error: { code: "unsupported_value", param },
@@ -523,7 +579,7 @@ test.each([
 })
 
 test("accepts stateless false and null values without forwarding them", () => {
-  const body = prepareResponsesRequest({
+  const body = prepareLegacyResponsesRequestForTest({
     model: "gpt-5.6-sol",
     input: "hello",
     store: false,
@@ -536,7 +592,7 @@ test("accepts stateless false and null values without forwarding them", () => {
 })
 
 test("omits unknown top-level fields but preserves unknown nested fields", () => {
-  const body = prepareResponsesRequest({
+  const body = prepareLegacyResponsesRequestForTest({
     model: "gpt-5.6-sol",
     input: [
       {
@@ -593,7 +649,7 @@ test("rejects an empty previous_response_id as unsupported", () => {
 })
 
 test("accepts null stateful controls without forwarding them", () => {
-  const body = prepareResponsesRequest({
+  const body = prepareLegacyResponsesRequestForTest({
     model: "gpt-5.6-sol",
     input: "hello",
     store: null,
@@ -608,24 +664,16 @@ test("accepts null stateful controls without forwarding them", () => {
   expect(body).not.toHaveProperty("service_tier")
 })
 
-test.each(ALWAYS_BLOCKED_RESPONSES_TOOLS)(
-  "rejects blocked native Responses tool %s",
+test.each(LEGACY_RESPONSES_TOOL_TYPES)(
+  "preserves formerly blocked native Responses tool %s",
   (type) => {
-    const error = captureValidationError({
+    const body = prepareLegacyResponsesRequestForTest({
       model: "gpt-current",
       input: "hello",
       tools: [{ type }],
-    })
+    }).body
 
-    expect(error.clientBody).toEqual({
-      error: {
-        code: "unsupported_value",
-        message:
-          "The Copilot Responses endpoint does not support one or more requested tools.",
-        param: "tools",
-        type: "invalid_request_error",
-      },
-    })
+    expect(body.tools).toEqual([{ type }])
   },
 )
 
@@ -642,7 +690,7 @@ test.each(FORWARDED_RESPONSES_TOOLS)(
           strict: false,
         }
       : { type, name: "run", future_option: { enabled: true } }
-    const body = prepareResponsesRequest({
+    const body = prepareLegacyResponsesRequestForTest({
       model: "gpt-current",
       input: "hello",
       tools: [tool],
@@ -706,7 +754,7 @@ test("rejects non-plain Responses tool records", () => {
 
 test("trims Responses tool types without mutating the caller", () => {
   const tool = { type: "  client_future_tool  ", name: "run" }
-  const body = prepareResponsesRequest({
+  const body = prepareLegacyResponsesRequestForTest({
     model: "gpt-current",
     input: "hello",
     tools: [tool],
@@ -718,16 +766,14 @@ test("trims Responses tool types without mutating the caller", () => {
   expect(tool.type).toBe("  client_future_tool  ")
 })
 
-test("blocks Responses tool types after trimming", () => {
-  const error = captureValidationError({
+test("preserves formerly blocked Responses tool types after trimming", () => {
+  const body = prepareLegacyResponsesRequestForTest({
     model: "gpt-current",
     input: "hello",
     tools: [{ type: "  code_interpreter  " }],
-  })
+  }).body
 
-  expect(error.clientBody).toMatchObject({
-    error: { code: "unsupported_value", param: "tools" },
-  })
+  expect(body.tools).toEqual([{ type: "code_interpreter" }])
 })
 
 test("rejects a changing Responses tool type getter without invoking it", () => {
@@ -909,7 +955,7 @@ test("canonicalizes a hostile thrown proxy without inspecting it", () => {
 
   let caught: unknown
   try {
-    prepareResponsesRequest({
+    prepareLegacyResponsesRequestForTest({
       model: "gpt-current",
       input: "hello",
       tools: [tool],
@@ -935,7 +981,7 @@ test.each([
   { name: "null", tools: null },
   { name: "empty", tools: [] },
 ])("removes Responses tool controls when tools are $name", ({ tools }) => {
-  const body = prepareResponsesRequest({
+  const body = prepareLegacyResponsesRequestForTest({
     model: "gpt-current",
     input: "hello",
     tools: tools as ResponsesPayload["tools"],
@@ -949,7 +995,7 @@ test.each([
 })
 
 test("preserves Responses tool controls when a real tool is available", () => {
-  const body = prepareResponsesRequest({
+  const body = prepareLegacyResponsesRequestForTest({
     model: "gpt-current",
     input: "hello",
     tools: [
@@ -984,7 +1030,7 @@ test("prepares a new top-level body without mutating caller values", () => {
     background: false,
   }
 
-  const result = prepareResponsesRequest(payload)
+  const result = prepareLegacyResponsesRequestForTest(payload)
 
   expect(result.body).not.toBe(payload)
   expect(result.body.input).not.toBe(payload.input)
@@ -993,3 +1039,294 @@ test("prepares a new top-level body without mutating caller values", () => {
     parameters: { type: "object", properties: {} },
   })
 })
+
+test("preserves unknown native Responses source data with store as the sole override", () => {
+  const payload = {
+    model: "gpt-current",
+    input: [
+      {
+        type: "future_input",
+        future_item: { nested: [1, { enabled: true }] },
+      },
+    ],
+    future_top_level: { mode: "native" },
+    background: { future: true },
+    previous_response_id: 17,
+    service_tier: ["future"],
+    context_management: { future: "shape" },
+    store: { requested: true },
+    tools: [{ name: "missing-type", future: true }],
+  }
+
+  const prepared = prepareResponsesRequest(payload)
+
+  expect(prepared.source as Record<string, unknown>).toEqual({
+    ...payload,
+    store: false,
+  })
+  expect(prepared.normalizationClasses).toEqual(["stateless_controls"])
+  expect(prepared.source).not.toBe(payload)
+  expect(prepared.source.input).not.toBe(payload.input)
+  expect(prepared.source.future_top_level).not.toBe(payload.future_top_level)
+  expect(payload.store).toEqual({ requested: true })
+})
+
+test.each([
+  { name: "absent", extra: {} },
+  { name: "true", extra: { store: true } },
+  { name: "false", extra: { store: false } },
+  { name: "null", extra: { store: null } },
+  { name: "string", extra: { store: "future" } },
+  { name: "record", extra: { store: { future: true } } },
+])("forces native Responses source store false when $name", ({ extra }) => {
+  const prepared = prepareResponsesRequest({
+    model: "gpt-current",
+    input: "hello",
+    ...extra,
+  })
+
+  expect(prepared.source.store).toBe(false)
+  expect(prepared.normalizationClasses).toEqual(
+    extra.store === false ? [] : ["stateless_controls"],
+  )
+})
+
+test("finalizes native Responses tools without filtering source evidence", () => {
+  const payload = {
+    model: "gpt-current",
+    input: "hello",
+    tools: [
+      null,
+      { name: "missing-type", future: true },
+      {
+        type: "  mcp  ",
+        server_label: "native",
+        future: { retained: true },
+      },
+      {
+        type: "function",
+        name: "lookup",
+        parameters: { properties: { query: { type: "string" } } },
+      },
+      { type: "future_tool", config: { mode: "native" } },
+    ],
+    tool_choice: { type: "future_choice" },
+    parallel_tool_calls: "future",
+  }
+
+  const prepared = prepareResponsesRequest(payload)
+  const finalized = finalizeNativeResponsesRequest(prepared, {
+    model: "gpt-current",
+    implicitDefault: false,
+  })
+
+  expect((prepared.source as Record<string, unknown>).tools).toEqual(
+    payload.tools,
+  )
+  expect(finalized.body.tools).toEqual([
+    {
+      type: "mcp",
+      server_label: "native",
+      future: { retained: true },
+    },
+    {
+      type: "function",
+      name: "lookup",
+      parameters: {
+        type: "object",
+        properties: { query: { type: "string" } },
+      },
+    },
+    { type: "future_tool", config: { mode: "native" } },
+  ])
+  expect(finalized.body.tool_choice).toEqual({ type: "future_choice" })
+  expect((finalized.body as Record<string, unknown>).parallel_tool_calls).toBe(
+    "future",
+  )
+  expect(prepared.source as Record<string, unknown>).toEqual({
+    ...payload,
+    store: false,
+  })
+})
+
+test("normalizes a singleton native Responses tool only in the final wire", () => {
+  const tool = { type: "  computer_use_preview  ", display_width: 1024 }
+  const prepared = prepareResponsesRequest({
+    model: "gpt-current",
+    input: "hello",
+    tools: tool,
+  })
+  const finalized = finalizeNativeResponsesRequest(prepared, {
+    model: "gpt-current",
+    implicitDefault: false,
+  })
+
+  expect((prepared.source as Record<string, unknown>).tools).toEqual(tool)
+  expect(finalized.body.tools).toEqual([
+    { type: "computer_use_preview", display_width: 1024 },
+  ])
+  expect(tool.type).toBe("  computer_use_preview  ")
+})
+
+test("skips a hostile native Responses tool sibling without invoking it", () => {
+  let reads = 0
+  const hostileTool = Object.defineProperty({}, "type", {
+    enumerable: true,
+    get() {
+      reads += 1
+      throw new Error("unsafe tool getter")
+    },
+  })
+  const prepared = prepareResponsesRequest({
+    model: "gpt-current",
+    input: "hello",
+    tools: [hostileTool, { type: "future_tool", config: { enabled: true } }],
+  })
+  const finalized = finalizeNativeResponsesRequest(prepared, {
+    model: "gpt-current",
+    implicitDefault: false,
+  })
+
+  expect(reads).toBe(0)
+  expect(prepared.source.tools).toEqual([
+    { type: "future_tool", config: { enabled: true } },
+  ])
+  expect(finalized.body.tools).toEqual([
+    { type: "future_tool", config: { enabled: true } },
+  ])
+})
+
+test("removes native Responses tool controls when every tool is unusable", () => {
+  const prepared = prepareResponsesRequest({
+    model: "gpt-current",
+    input: "hello",
+    tools: [null, { name: "missing" }, { type: "  " }, 17],
+    tool_choice: { type: "future_choice" },
+    parallel_tool_calls: "future",
+  })
+  const finalized = finalizeNativeResponsesRequest(prepared, {
+    model: "gpt-current",
+    implicitDefault: false,
+  })
+
+  expect((prepared.source as Record<string, unknown>).tools).toEqual([
+    null,
+    { name: "missing" },
+    { type: "  " },
+    17,
+  ])
+  expect(finalized.body).not.toHaveProperty("tools")
+  expect(finalized.body).not.toHaveProperty("tool_choice")
+  expect(finalized.body).not.toHaveProperty("parallel_tool_calls")
+  expect(finalized.normalizationClasses).toEqual([
+    "stateless_controls",
+    "empty_tool_controls",
+  ])
+})
+
+test("keeps native source and repeated finalizations deeply independent", () => {
+  const payload = {
+    model: "requested-model",
+    input: [{ role: "user", content: [{ type: "input_text", text: "hello" }] }],
+    reasoning: { effort: null, future: { retained: true } },
+    text: {
+      format: {
+        type: "json_schema",
+        name: "answer",
+        schema: { type: "object", properties: { answer: { type: "string" } } },
+      },
+    },
+    max_output_tokens: 1,
+    temperature: 0.4,
+  }
+  const prepared = prepareResponsesRequest(payload)
+  const first = finalizeNativeResponsesRequest(prepared, {
+    model: "resolved-model",
+    defaultEffort: "medium",
+    implicitDefault: false,
+  })
+  const second = finalizeNativeResponsesRequest(prepared, {
+    model: "resolved-model",
+    defaultEffort: "medium",
+    implicitDefault: false,
+  })
+
+  expect(first.body).toEqual(second.body)
+  expect(first.body).not.toBe(second.body)
+  expect(first.body.input).not.toBe(second.body.input)
+  expect(prepared.source.model).toBe("requested-model")
+  expect(prepared.source.max_output_tokens).toBe(1)
+  expect(prepared.source.text).toEqual(payload.text)
+  expect(payload.reasoning).toEqual({
+    effort: null,
+    future: { retained: true },
+  })
+  ;(first.body.input as Array<Record<string, unknown>>)[0].role = "mutated"
+  expect(second.body.input).toEqual(payload.input)
+  expect(prepared.source.input).toEqual(payload.input)
+  expect(payload.input[0]?.role).toBe("user")
+})
+
+test("rejects hostile native Responses data outside tools without observing it", () => {
+  let reads = 0
+  const metadata = Object.defineProperty({}, "private", {
+    enumerable: true,
+    get() {
+      reads += 1
+      throw new Error("unsafe source getter")
+    },
+  })
+
+  const error = captureNativeSourceValidationError({
+    model: "gpt-current",
+    input: "hello",
+    metadata,
+  })
+
+  expect(error.response.status).toBe(400)
+  expect(error.clientBody).toMatchObject({
+    error: { code: "invalid_type", param: "body" },
+  })
+  expect(reads).toBe(0)
+})
+
+test.each([
+  {
+    name: "cycle",
+    create: () => {
+      const value: Record<string, unknown> = {}
+      value.self = value
+      return value
+    },
+  },
+  { name: "BigInt", create: () => 1n },
+  { name: "nonfinite number", create: () => Number.POSITIVE_INFINITY },
+  { name: "undefined array entry", create: () => [undefined] },
+  {
+    name: "shared alias",
+    create: () => {
+      const shared = { value: true }
+      return { first: shared, second: shared }
+    },
+  },
+])("rejects native Responses $name source data", ({ create }) => {
+  const error = captureNativeSourceValidationError({
+    model: "gpt-current",
+    input: "hello",
+    future: create(),
+  })
+
+  expect(error.clientBody).toMatchObject({
+    error: { code: "invalid_type", param: "body" },
+  })
+})
+
+function captureNativeSourceValidationError(payload: unknown): LocalHTTPError {
+  try {
+    prepareResponsesRequest(payload)
+  } catch (error) {
+    expect(error).toBeInstanceOf(LocalHTTPError)
+    return error as LocalHTTPError
+  }
+  throw new Error("Expected native Responses source validation error")
+}

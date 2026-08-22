@@ -1,34 +1,22 @@
 import { randomUUID } from "node:crypto"
 
-interface UpstreamErrorBody {
-  error?: {
-    code?: unknown
-    message?: unknown
-  }
-}
+import { classifyCompatibilityRetry } from "./compatibility-retry"
 
-const hasNativeCompactionEncryptedContent = (
+const parseRequestBody = (
   requestInit: RequestInit | undefined,
-): boolean => {
-  if (typeof requestInit?.body !== "string") return false
-
+): Record<string, unknown> | undefined => {
+  if (typeof requestInit?.body !== "string") return undefined
   try {
-    const payload = JSON.parse(requestInit.body) as { input?: unknown }
-    if (!Array.isArray(payload.input)) return false
-    return payload.input.some(
-      (item) =>
-        typeof item === "object"
-        && item !== null
-        && !Array.isArray(item)
-        && (item as Record<string, unknown>).type === "compaction"
-        && typeof (item as Record<string, unknown>).encrypted_content
-          === "string"
-        && Boolean(
-          (item as Record<string, unknown>).encrypted_content as string,
-        ),
-    )
+    const payload: unknown = JSON.parse(requestInit.body)
+    return (
+        typeof payload === "object"
+          && payload !== null
+          && !Array.isArray(payload)
+      ) ?
+        (payload as Record<string, unknown>)
+      : undefined
   } catch {
-    return false
+    return undefined
   }
 }
 
@@ -37,31 +25,17 @@ export const isEncryptedCompactionVerificationError = async (
   response: Response,
   requestInit: RequestInit | undefined,
 ): Promise<boolean> => {
-  if (
-    path !== "/responses"
-    || response.status !== 400
-    || !hasNativeCompactionEncryptedContent(requestInit)
-  ) {
-    return false
-  }
-
-  let body: UpstreamErrorBody
-  try {
-    body = (await response.clone().json()) as UpstreamErrorBody
-  } catch {
-    return false
-  }
-
-  const code = body.error?.code
-  const message = body.error?.message
-  if (code !== "invalid_encrypted_content" && code !== "invalid_request_body") {
-    return false
-  }
-  if (typeof message !== "string") return false
-
-  const normalized = message.toLowerCase().replaceAll(/\s+/gu, " ")
-  return /\bencrypted content(?: \S+)? could not be (?:verified|decrypted|parsed)/u.test(
-    normalized,
+  if (path !== "/responses") return false
+  const body = parseRequestBody(requestInit)
+  if (!body) return false
+  return (
+    (
+      await classifyCompatibilityRetry({
+        body,
+        endpoint: "/responses",
+        response,
+      })
+    ).kind === "encrypted_compaction_verification"
   )
 }
 

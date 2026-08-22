@@ -181,6 +181,20 @@ test("OAuth authorize page allows the exact manual callback origin", async () =>
   )
 })
 
+test("OAuth authorize rejects a missing api_key without throwing", async () => {
+  const response = await server.request(
+    `/oauth/authorize?${authorizationQuery().toString()}`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "",
+    },
+  )
+
+  expect(response.status).toBe(401)
+  expect(await response.text()).toContain("Invalid API key")
+})
+
 test("invalid OAuth API key response retains the callback origin", async () => {
   const response = await server.request(
     `/oauth/authorize?${authorizationQuery("http://localhost:43124/callback").toString()}`,

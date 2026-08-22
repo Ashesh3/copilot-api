@@ -265,6 +265,31 @@ export class TokenPool {
     return this.selectAccountBySession(eligible, clientSessionId)
   }
 
+  /** Return a detached view of the healthy, enabled accounts for a model. */
+  getEligibleAccountsForModel(modelId: string): Array<Account> {
+    return [...(this.modelIndex.get(modelId) ?? [])]
+  }
+
+  /** Select deterministically from an explicit request-local candidate set. */
+  selectAccountBySession(
+    accounts: ReadonlyArray<Account>,
+    clientSessionId?: string,
+  ): Account | undefined {
+    const first = accounts.at(0)
+    if (!first || !clientSessionId) return first
+
+    let winner = first
+    let winnerScore = this.rendezvousScore(clientSessionId, winner.id)
+    for (const candidate of accounts.slice(1)) {
+      const candidateScore = this.rendezvousScore(clientSessionId, candidate.id)
+      if (candidateScore > winnerScore) {
+        winner = candidate
+        winnerScore = candidateScore
+      }
+    }
+    return winner
+  }
+
   /**
    * Select a healthy account for a control-plane request.
    *
@@ -526,25 +551,6 @@ export class TokenPool {
     return createHash("sha256")
       .update(`${affinityKey}\0${accountId}`)
       .digest("hex")
-  }
-
-  private selectAccountBySession(
-    accounts: Array<Account>,
-    clientSessionId?: string,
-  ): Account | undefined {
-    const first = accounts.at(0)
-    if (!first || !clientSessionId) return first
-
-    let winner = first
-    let winnerScore = this.rendezvousScore(clientSessionId, winner.id)
-    for (const candidate of accounts.slice(1)) {
-      const candidateScore = this.rendezvousScore(clientSessionId, candidate.id)
-      if (candidateScore > winnerScore) {
-        winner = candidate
-        winnerScore = candidateScore
-      }
-    }
-    return winner
   }
 
   private getHealthyCount(): number {

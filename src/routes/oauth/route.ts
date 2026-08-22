@@ -7,10 +7,12 @@ import type { IssuedOAuthTokens } from "~/lib/oauth-store"
 import {
   credentialHasScopes,
   resolveCredential,
+  resolveGatewayCredential,
   resolveRequestCredential,
 } from "~/lib/credential-resolver"
 import {
   extractClientIp,
+  isIpAllowedForWhitelistedRoute,
   isIpBanned,
   isIpBlocked,
   recordFailedAttempt,
@@ -21,9 +23,7 @@ import { resolveProtectedCredential } from "~/lib/protected-credential"
 import { secureHtml } from "~/lib/secure-html"
 import {
   isAllowedTransparentProxyRequest,
-  isTransparentProxyClientWhitelisted,
   transparentProxy,
-  transparentProxyWithCredential,
 } from "~/lib/transparent-proxy"
 import { getUsageResponse } from "~/lib/usage-tracker"
 import { getFeatureFlags } from "~/routes/feature-flags/store"
@@ -337,7 +337,10 @@ oauthBrowserRoutes.post("/authorize", async (c) => {
   const clientIp = extractClientIp(c)
 
   const body = await readOAuthBody(c)
-  const apiKey = body?.api_key.trim() ?? ""
+  // Sparse form bodies are valid inputs even though the filtered record type is
+  // string-valued for keys that are present.
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+  const apiKey = body?.api_key?.trim() ?? ""
 
   const credential = apiKey ? await resolveCredential(apiKey) : null
   if (credential?.kind === "gateway") {
@@ -743,25 +746,23 @@ oauthApiRoutes.all("*", async (c) => {
   }
 
   const clientIp = extractClientIp(c)
-  const credentialSupplied = [
-    "authorization",
-    "x-api-key",
-    "x-goog-api-key",
-  ].some((header) => c.req.raw.headers.has(header))
-
-  if (credentialSupplied) {
-    const credential = await resolveRequestCredential(c.req.raw, [
-      "user:inference",
-    ])
+  const gatewayHeaderPresent = c.req.raw.headers.has("x-copilot-gateway-key")
+  if (gatewayHeaderPresent) {
+    const credential = resolveGatewayCredential(
+      c.req.raw.headers.get("x-copilot-gateway-key") ?? "",
+      ["user:inference"],
+    )
     if (!credential) {
-      if (clientIp !== null) recordFailedAttempt(clientIp)
+      if (clientIp !== null && !isIpBanned(clientIp)) {
+        recordFailedAttempt(clientIp)
+      }
       return oauthUnauthorized(c)
     }
     if (clientIp !== null) await trustAuthenticatedIp(clientIp)
-    return await transparentProxyWithCredential(c)
+    return await transparentProxy(c)
   }
 
-  if (await isTransparentProxyClientWhitelisted(c)) {
+  if (clientIp !== null && (await isIpAllowedForWhitelistedRoute(clientIp))) {
     return await transparentProxy(c)
   }
 

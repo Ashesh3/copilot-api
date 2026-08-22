@@ -7,6 +7,7 @@ import {
   type RoutingAffinity,
 } from "~/lib/routing-affinity"
 import { state } from "~/lib/state"
+import { tokenPool } from "~/lib/token-pool"
 import { server } from "~/server"
 import { COMPACTION_PAYLOAD_MAX_BYTES } from "~/services/copilot/compaction-payload"
 import {
@@ -16,12 +17,15 @@ import {
 
 const originalFetch = globalThis.fetch
 const originalModels = state.models
+const compactAccountIds = [24_001, 24_002]
 let capturedAffinity: RoutingAffinity | undefined
 let lastRequestBody: Record<string, unknown> | undefined
 let lastRequestUrl: string | undefined
+let lastUpstreamHeaders: Headers | undefined
 
 const fetchMock = mock((url: string, init?: RequestInit) => {
   capturedAffinity = getRoutingAffinity()
+  lastUpstreamHeaders = new Headers(init?.headers)
   lastRequestUrl = url
   lastRequestBody =
     typeof init?.body === "string" ?
@@ -68,6 +72,8 @@ beforeAll(() => {
 })
 
 afterAll(() => {
+  for (const accountId of compactAccountIds)
+    tokenPool.removeAccountForTest(accountId)
   state.models = originalModels
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
 })
@@ -76,6 +82,7 @@ beforeEach(() => {
   capturedAffinity = undefined
   lastRequestBody = undefined
   lastRequestUrl = undefined
+  lastUpstreamHeaders = undefined
   fetchMock.mockClear()
   state.accountType = "individual"
   state.copilotToken = "copilot-token"
@@ -142,6 +149,49 @@ test("compact installs metadata affinity and preserves header precedence", async
 
   await compactRequest("not json")
   expect(capturedAffinity).toBeUndefined()
+})
+
+test("compact routes Codex forks through the parent account and session", async () => {
+  const model = state.models?.data[0]
+  if (!model) throw new TypeError("Expected compact model")
+  for (const [id, token] of [
+    [24_001, "compact-child-token"],
+    [24_002, "compact-parent-token"],
+  ] as const) {
+    const account = tokenPool.addAccount(`github-${id}`, "individual", id)
+    account.copilotToken = token
+    account.healthy = true
+    account.models = new Set([model.id])
+    account.modelsData = [model]
+  }
+  tokenPool.rebuildModelIndex()
+  state.isMultiToken = true
+
+  const response = await compactRequest(
+    {
+      session_id: "compact-child-0",
+      thread_id: "compact-child-0",
+      "x-codex-turn-metadata": JSON.stringify({
+        forked_from_thread_id: "compact-parent-0",
+      }),
+    },
+    { "session-id": "compact-child-0" },
+  )
+
+  expect(response.status).toBe(200)
+  expect(capturedAffinity).toEqual({
+    key: "compact-parent-0",
+    source: "codex_thread",
+  })
+  expect(lastUpstreamHeaders?.get("authorization")).toBe(
+    "Bearer compact-parent-token",
+  )
+  expect(lastUpstreamHeaders?.get("x-client-session-id")).toBe(
+    "47a2a41d-1ae9-500d-9021-a53db070bb88",
+  )
+  expect(lastUpstreamHeaders?.get("x-interaction-id")).toBe(
+    "47a2a41d-1ae9-500d-9021-a53db070bb88",
+  )
 })
 
 test(

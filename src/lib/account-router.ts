@@ -1,6 +1,7 @@
 import consola from "consola"
 import { AsyncLocalStorage } from "node:async_hooks"
 
+import type { RoutedAccountPin } from "~/lib/account-routing-selection"
 import type { RoutingAffinitySource } from "~/lib/routing-affinity"
 import type { Account } from "~/lib/token-pool"
 import type {
@@ -10,6 +11,10 @@ import type {
 import type { Model } from "~/services/copilot/get-models"
 import type { RetryBudget } from "~/services/copilot/transport-retry"
 
+import {
+  selectCandidateAccount,
+  selectModelAccount,
+} from "~/lib/account-routing-selection"
 import { sessionTokenMatchesAccount } from "~/lib/copilot-session-token"
 import { HTTPError, LocalHTTPError } from "~/lib/error"
 import {
@@ -50,9 +55,7 @@ function routedModelDiagnosticSuffix(modelId: string): string {
     )
 }
 
-export interface RoutedAccountPin {
-  accountId?: number
-}
+export type { RoutedAccountPin } from "~/lib/account-routing-selection"
 
 export function runWithPinnedRoutedAccount<T>(
   accountId: number | undefined,
@@ -79,25 +82,38 @@ export interface RoutedModelSelection {
   model?: Model
 }
 
+export interface RoutedModelSelectionOptions {
+  copilotSessionToken?: string
+}
+
 /**
  * Select the account before endpoint routing, then expose that account's raw
  * model row as the endpoint authority. The returned mutable pin keeps the
  * later transport dispatch coherent and follows an eligible unidentified
  * failover without retaining any session-to-account mapping.
  */
-export function selectRoutedModel(modelId: string): RoutedModelSelection {
+export function selectRoutedModel(
+  modelId: string,
+  options?: RoutedModelSelectionOptions,
+): RoutedModelSelection {
   const fallbackModel = state.models?.data.find((model) => model.id === modelId)
   if (!state.isMultiToken) return { model: fallbackModel }
 
-  const account = selectRoutedAccount({
+  const selection = selectRoutedAccount({
     affinityKey: getEffectiveAffinityKey(),
+    copilotSessionToken: options?.copilotSessionToken,
     modelId,
     routedAccountPin: undefined,
   })
+  const account = selection.account
   if (!account) return { model: fallbackModel }
 
   return {
-    accountPin: { accountId: account.id },
+    accountPin: {
+      accountId: account.id,
+      eligibleAccountIds: selection.eligibleAccountIds,
+      selectionMode: selection.selectionMode,
+    },
     model: tokenPool.getModelForAccount(modelId, account.id) ?? fallbackModel,
   }
 }
@@ -142,25 +158,15 @@ function getEffectiveAffinityKey(): string | undefined {
 
 function selectRoutedAccount(options: {
   affinityKey: string | undefined
+  copilotSessionToken?: string
   modelId: string
   routedAccountPin: RoutedAccountPin | undefined
-}): Account | undefined {
-  const { affinityKey, modelId, routedAccountPin } = options
-  if (routedAccountPin?.accountId !== undefined) {
-    return tokenPool.getEligibleAccountForModel(
-      modelId,
-      routedAccountPin.accountId,
-    )
-  }
-  const pinnedAccountId = pinnedRoutedAccountStorage.getStore()
-  if (pinnedAccountId !== undefined) {
-    return tokenPool.getEligibleAccountForModel(modelId, pinnedAccountId)
-  }
-  const selectedAccountId = selectedRoutedAccountStorage.getStore()?.accountId
-  if (selectedAccountId !== undefined) {
-    return tokenPool.getEligibleAccountForModel(modelId, selectedAccountId)
-  }
-  return tokenPool.getAccountForModelBySession(modelId, affinityKey)
+}) {
+  return selectModelAccount({
+    ...options,
+    pinnedAccountId: pinnedRoutedAccountStorage.getStore(),
+    selectedAccountPin: selectedRoutedAccountStorage.getStore(),
+  })
 }
 
 type RoutedFetchResult = {
@@ -737,13 +743,19 @@ export async function routedControlPlaneFetch(
     return { response, account: undefined }
   }
 
-  const account =
-    options.modelId ?
-      tokenPool.getAccountAdvertisingModelBySession(
-        options.modelId,
-        affinityKey,
-      )
-    : tokenPool.getHealthyAccountBySession(affinityKey)
+  const candidates = tokenPool
+    .getAllAccounts()
+    .filter(
+      (account) =>
+        account.healthy
+        && (options.modelId === undefined
+          || account.models.has(options.modelId)),
+    )
+  const account = selectCandidateAccount({
+    affinityKey,
+    candidates,
+    copilotSessionToken: options.copilotSessionToken,
+  }).account
   if (!account) {
     return createNoControlPlaneAccountResult()
   }
@@ -844,11 +856,19 @@ export async function routedFetch(
   }
 
   const affinityKey = getEffectiveAffinityKey()
-  const account = selectRoutedAccount({
+  const selection = selectRoutedAccount({
     affinityKey,
+    copilotSessionToken: headerOptions?.copilotSessionToken,
     modelId,
     routedAccountPin,
   })
+  const account = selection.account
+  const mutableAccountPin = routedAccountPin ?? selectedAccountPin
+  if (mutableAccountPin && account) {
+    mutableAccountPin.accountId = account.id
+    mutableAccountPin.eligibleAccountIds = [...selection.eligibleAccountIds]
+    mutableAccountPin.selectionMode = selection.selectionMode
+  }
   if (!account) {
     if (tokenPool.hasKnownModel(modelId)) {
       const response = createNoEnabledAccountResponse(modelId)
@@ -876,14 +896,13 @@ export async function routedFetch(
     recordSelection({
       accountId: account.id,
       affinitySource: getRoutingAffinity()?.source,
-      eligibleAccountIds: tokenPool.getEligibleAccountIdsForModel(modelId),
-      mode: affinityKey ? "sticky" : "default",
+      eligibleAccountIds: selection.eligibleAccountIds,
+      mode: selection.selectionMode,
       model: modelId,
     })
   }
 
   const result = await fetchWithRoutedAccount(boundContext, account, reason)
-  const mutableAccountPin = routedAccountPin ?? selectedAccountPin
   if (mutableAccountPin && result.account) {
     mutableAccountPin.accountId = result.account.id
   }

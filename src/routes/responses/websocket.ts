@@ -2,20 +2,29 @@
 import consola from "consola"
 import { randomUUID } from "node:crypto"
 
-import type { SafeHttpErrorInspection } from "~/lib/error"
+import type { CopilotInferenceEndpoint } from "~/lib/endpoint-routing"
+import type { HttpErrorInspection } from "~/lib/error"
 import type { RoutingAffinity } from "~/lib/routing-affinity"
 import type { NativeMessagesRequestOptions } from "~/routes/messages/native-handler"
+import type { Model } from "~/services/copilot/get-models"
 
 import {
   runWithRoutedModelSelection,
   selectRoutedModel,
 } from "~/lib/account-router"
 import {
+  recordCopilotEndpointRoute,
   recordCopilotContractEvent,
   recordCopilotMessagesBeta,
+  recordCopilotRequestNormalization,
+  recordCopilotTranslationFindings,
 } from "~/lib/copilot-contract-observability"
 import { resolveRequestCredential } from "~/lib/credential-resolver"
-import { isHTTPError } from "~/lib/error"
+import {
+  createEndpointTranslationError,
+  isHTTPError,
+  reportHttpErrorForTransport,
+} from "~/lib/error"
 import {
   applyModelRedirect,
   formatModelRedirectResult,
@@ -23,46 +32,59 @@ import {
 import { normalizeModelName } from "~/lib/model-resolver"
 import {
   type ReasoningEffort,
+  getModelReasoningConfig,
   normalizeReasoningEffortForModel,
   parseReasoningEffort,
   parseModelSuffix,
   usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
 import { resolveProtectedCredential } from "~/lib/protected-credential"
+import { parseRecoverableStreamJson } from "~/lib/recoverable-stream-json"
 import { reportNonDefaultBehavior } from "~/lib/request-logger"
 import { getCopilotResponseHeaders } from "~/lib/request-session"
 import {
+  resolveResponsesForkRoutingAffinity,
   resolveResponsesRoutingAffinity,
   resolveRoutingAffinityFromHeaders,
 } from "~/lib/routing-affinity"
-import { resolveWebSearchCalls } from "~/routes/messages/web-search-helpers"
-import {
-  fitResponsesCompactionPayload,
-  isResponsesCompactionRequest,
-} from "~/services/copilot/compaction-payload"
+import { isResponsesCompactionRequest } from "~/services/copilot/compaction-payload"
 import {
   createChatCompletions,
+  createChatCompletionsWithProcessedPayload,
   type ChatCompletionResponse,
 } from "~/services/copilot/create-chat-completions"
 import {
   type ResponsesResult,
   createResponses,
-  SAFE_RESPONSES_STREAM_ERROR_MESSAGE,
   type ResponsesPayload,
 } from "~/services/copilot/create-responses"
 import { sanitizeAnthropicRequestHeaderOptions } from "~/services/copilot/messages-contract"
+import {
+  finalizeNativeResponsesRequest,
+  prepareResponsesRequest,
+} from "~/services/copilot/responses-contract"
 
 import {
-  convertWebSearchTool,
+  resolvePreparedResponsesWebSearchCalls,
+  type ResponsesChatCompletionFactory,
+} from "./chat-fallback-completion"
+import {
+  prepareResponsesCandidates,
+  type ResponsesEndpointCandidate,
+  selectResponsesCandidate,
+} from "./fallback-candidates"
+import {
   disableParallelWebSearch,
   normalizeResponsesReasoning,
-  prepareResponsesRouteForTransport,
-  responsesToChatCompletions,
   streamChatCompletionsAsResponses,
-  useFunctionApplyPatch,
 } from "./handler"
-import { executeResponsesMessagesBridge } from "./messages-bridge"
+import { executePreparedResponsesMessagesBridge } from "./messages-bridge"
+import { getResponsesChatWebSearchMaxUses } from "./responses-chat-adapter"
 import { createStreamIdTracker, fixStreamIds } from "./stream-id-sync"
+import {
+  emitResponsesFailureAsStream,
+  updateResponsesFailureState,
+} from "./stream-lifecycle"
 import { expandCompactionItems, getResponsesRequestOptions } from "./utils"
 import {
   classifyWebSocketTerminal,
@@ -76,6 +98,8 @@ import {
 } from "./websocket-lifecycle"
 import {
   addResponsesWebSocketMetadata,
+  classifyEmittedWebSocketTerminal,
+  mergeEffectiveNativeMessagesOptions,
   mergeContinuationInput,
   parseResponsesWebSocketFrame,
   rehydrateContinuationPayloadFromSnapshot,
@@ -92,6 +116,7 @@ export interface ResponsesWebSocketData {
   requestId: string
   affinity?: RoutingAffinity
   nativeMessagesOptions: NativeMessagesRequestOptions
+  effectiveNativeMessagesOptions: NativeMessagesRequestOptions
   responseSnapshots: Map<string, ResponsesPayload>
 }
 
@@ -108,12 +133,32 @@ export interface WebSocketErrorFrameOptions {
   param?: string
   requestId?: string
   type?: string
+  upstreamBody?: string | ReadonlyArray<number>
+  upstreamContentType?: string
+}
+
+interface ResponsesWebSocketDependencies {
+  readonly webSearch?: (query: string, signal?: AbortSignal) => Promise<string>
+}
+
+let responsesWebSocketDependencies: ResponsesWebSocketDependencies = {}
+
+export function setResponsesWebSocketDependenciesForTest(
+  dependencies: ResponsesWebSocketDependencies,
+): () => void {
+  const previous = responsesWebSocketDependencies
+  responsesWebSocketDependencies = dependencies
+  return () => {
+    responsesWebSocketDependencies = previous
+  }
 }
 
 interface ResponseCompletedFrame {
   response?: {
     id?: unknown
+    incomplete_details?: unknown
     output?: unknown
+    status?: unknown
   }
   type?: string
 }
@@ -158,6 +203,7 @@ export async function tryUpgradeResponsesWebSocket(
     requestId,
     affinity,
     nativeMessagesOptions,
+    effectiveNativeMessagesOptions: { ...nativeMessagesOptions },
     responseSnapshots: new Map<string, ResponsesPayload>(),
   }
   if (!server.upgrade(req, { data })) return "no_match"
@@ -172,6 +218,9 @@ export const responsesWebSocket = {
 
   // Protocol validation and turn lifecycle intentionally share one dispatcher.
 
+  // The dispatcher is intentionally linear so every preflight/stream branch
+  // shares one turn owner and one terminal guard.
+  // eslint-disable-next-line complexity, max-lines-per-function
   async message(
     ws: ResponsesWebSocketState,
     message: string | Buffer | Uint8Array,
@@ -188,10 +237,19 @@ export const responsesWebSocket = {
     const {
       attribution,
       initiator,
+      nativeMessagesOptions,
       payload: parsedPayload,
       requestedModel,
     } = parsed.value
     parsedPayload.stream = true
+    ws.data.effectiveNativeMessagesOptions =
+      mergeEffectiveNativeMessagesOptions(
+        ws.data.effectiveNativeMessagesOptions,
+        nativeMessagesOptions,
+      )
+    const turnNativeMessagesOptions = {
+      ...ws.data.effectiveNativeMessagesOptions,
+    }
     const turn = createResponsesWebSocketTurn(ws.data, message)
     turn.requestedModel = requestedModel
     turn.model = requestedModel
@@ -214,29 +272,51 @@ export const responsesWebSocket = {
             initiator,
             payload,
             requestedModel,
+            nativeMessagesOptions: turnNativeMessagesOptions,
             turn,
           })
         },
       )
-      if (!turn.finalized) {
-        throw new WebSocketRequestError(
-          "Responses stream ended without a terminal frame",
-          502,
-          "server_error",
-          "server_error",
-        )
+      if (turn.terminal.state === "open") {
+        await failWebSocketTurn(ws, turn, { kind: "source_ended" })
       }
     } catch (error) {
-      const terminal = classifyWebSocketTerminal(error, turn)
+      const terminal = await classifyWebSocketTerminal(error, turn)
       const errorInspection = terminal.errorInspection
+      if (
+        terminal.terminalStatus !== "ABORTED"
+        && turn.outputStarted
+        && turn.terminal.state === "open"
+      ) {
+        await failWebSocketTurn(ws, turn, {
+          kind: "thrown",
+          error,
+          ...(errorInspection ? { inspection: errorInspection } : {}),
+        })
+        if (errorInspection?.kind === "upstream") {
+          reportHttpErrorForTransport(errorInspection, {
+            method: "POST",
+            path: "/responses",
+          })
+        }
+        return
+      }
       const normalized = normalizeWebSocketError(error, errorInspection)
-      finalizeResponsesWebSocketTurn(ws.data, turn, {
+      const committed = await turn.terminal.fail({
+        kind: "thrown",
         error,
-        ...terminal,
+        ...(errorInspection ? { inspection: errorInspection } : {}),
       })
       if (terminal.terminalStatus === "ABORTED") {
         consola.debug(`[responses-ws] ${turn.turnId} aborted`)
         return
+      }
+      if (!committed) return
+      if (errorInspection?.kind === "upstream") {
+        reportHttpErrorForTransport(errorInspection, {
+          method: "POST",
+          path: "/responses",
+        })
       }
       consola.error(`[responses-ws] ${turn.turnId} error`, {
         code: normalized.code,
@@ -256,6 +336,7 @@ export const responsesWebSocket = {
       const abortError = new Error("Responses WebSocket closed")
       abortError.name = "AbortError"
       turn.abortController.abort(abortError)
+      if (!turn.terminal.abort()) continue
       ensureResponsesWebSocketLifecycle(turn)
       finalizeResponsesWebSocketTurn(ws.data, turn, {
         error: abortError,
@@ -264,6 +345,7 @@ export const responsesWebSocket = {
       })
     }
     ws.data.responseSnapshots.clear()
+    ws.data.effectiveNativeMessagesOptions = {}
     consola.debug("[responses-ws] WebSocket closed")
   },
 }
@@ -312,8 +394,13 @@ async function prepareResponseCreate(
       : "rehydrated",
   })
   const payload = resolution.payload
+  const forkAffinity = resolveResponsesForkRoutingAffinity(
+    payload.client_metadata,
+    data.affinity,
+  )
+  if (forkAffinity) data.affinity = forkAffinity
   const frameAffinity = resolveResponsesRoutingAffinity(payload.client_metadata)
-  return { affinity: data.affinity ?? frameAffinity, payload }
+  return { affinity: forkAffinity ?? data.affinity ?? frameAffinity, payload }
 }
 
 function storeResponseSnapshot(
@@ -324,10 +411,14 @@ function storeResponseSnapshot(
   snapshots.set(responseId, payload)
 }
 
+// Routing preparation and dispatch remain together to preserve the per-turn
+// request context through native and translated writers.
+// eslint-disable-next-line max-lines-per-function
 async function handleResponseCreate(
   ws: ResponsesWebSocketState,
   options: {
     initiator?: "agent" | "user"
+    nativeMessagesOptions: NativeMessagesRequestOptions
     payload: ResponsesPayload
     requestedModel: string | undefined
     turn: ResponsesWebSocketTurn
@@ -337,6 +428,7 @@ async function handleResponseCreate(
     initiator: initiatorOverride,
     payload,
     requestedModel,
+    nativeMessagesOptions,
     turn,
   } = options
   turn.requestedModel = requestedModel
@@ -361,35 +453,37 @@ async function handleResponseCreate(
 
   const routedModel = selectRoutedModel(payload.model)
   const selectedModel = routedModel.model
-  const route = await waitForWebSocketTurn(
-    prepareResponsesRouteForTransport({
+  const selectedCandidate = await waitForWebSocketTurn(
+    prepareResponsesWebSocketCandidate({
       payload,
+      reasoningEffort,
       selectedModel,
       signal: turn.abortController.signal,
     }),
     turn,
   )
-  const preparedPayload = route.preparedPayload
-  if (route.decision.target === "/v1/messages") {
-    recordCopilotMessagesBeta(ws.data.nativeMessagesOptions.anthropicBeta)
+  const candidate = selectedCandidate.candidate
+  if (selectedCandidate.endpoint === "/v1/messages") {
+    recordCopilotMessagesBeta(nativeMessagesOptions.anthropicBeta)
   }
 
-  if (isSyntheticWarmupRequest(preparedPayload)) {
-    handleSyntheticWarmupRequest(ws, preparedPayload, turn)
+  if (isSyntheticWarmupRequest(payload)) {
+    await handleSyntheticWarmupRequest(ws, payload, turn)
     return
   }
 
   const { vision, initiator: inferredInitiator } =
-    getResponsesRequestOptions(preparedPayload)
+    getResponsesRequestOptions(payload)
   const initiator = initiatorOverride ?? inferredInitiator
 
   await runWithRoutedModelSelection(routedModel, async () => {
     if (
       await dispatchTranslatedWebSocketEndpoint({
         initiator,
-        preparedPayload,
+        nativeMessagesOptions,
+        candidate,
+        responseContext: payload,
         requestedModel,
-        routeTarget: route.decision.target,
         turn,
         ws,
       })
@@ -397,9 +491,14 @@ async function handleResponseCreate(
       return
     }
 
+    if (candidate.endpoint !== "/responses") {
+      throw new TypeError("Expected a native Responses WebSocket candidate")
+    }
+
     // Native responses streaming
     const response = await waitForWebSocketTurn(
-      createResponses(preparedPayload, {
+      createResponses(candidate.payload, {
+        allowCompatibilityRetry: false,
         vision,
         initiator,
         prepared: true,
@@ -411,7 +510,11 @@ async function handleResponseCreate(
 
     if (!isAsyncIterable(response)) {
       // Shouldn't happen since we forced stream: true, but handle gracefully
-      handleNonStreamingResponsesResult(ws, response, turn)
+      await handleNonStreamingResponsesResult(ws, {
+        payload: candidate.payload,
+        response,
+        turn,
+      })
       return
     }
 
@@ -421,81 +524,151 @@ async function handleResponseCreate(
       if (!data) continue
 
       const event = (chunk as { event?: string }).event
+      const synchronized = fixStreamIds(data, event, idTracker)
+      if (synchronized === undefined) continue
       const processed = addResponsesWebSocketMetadata(
-        fixStreamIds(data, event, idTracker),
+        synchronized,
         getCopilotResponseHeaders(),
       )
-      recordResponseSnapshotFromFrame(
-        ws.data.responseSnapshots,
-        preparedPayload,
-        processed,
-      )
-      ws.send(processed)
-      finalizeFromResponsesFrame(ws.data, turn, processed)
-      if (turn.lifecycle?.isFinalized()) break
+      await emitTurnFrame(ws, turn, candidate.payload, processed, event)
+      if (turn.terminal.state !== "open") break
     }
   })
 }
 
-function handleNonStreamingResponsesResult(
+async function handleNonStreamingResponsesResult(
   ws: ResponsesWebSocketState,
-  response: ResponsesResult,
-  turn: ResponsesWebSocketTurn,
-): void {
-  sendResponsesWebSocketFrame(
+  options: {
+    payload: ResponsesPayload
+    response: ResponsesResult
+    turn: ResponsesWebSocketTurn
+  },
+): Promise<void> {
+  const { payload, response, turn } = options
+  await emitTurnFrame(
     ws,
+    turn,
+    payload,
     JSON.stringify({ type: "response.completed", response }),
+    "response.completed",
   )
-  finalizeResponsesWebSocketTurn(ws.data, turn, {
-    status: 200,
-    terminalStatus: "COMPLETE",
-  })
 }
 
 async function dispatchTranslatedWebSocketEndpoint(options: {
+  candidate: ResponsesEndpointCandidate
   initiator: "agent" | "user"
-  preparedPayload: ResponsesPayload
+  nativeMessagesOptions: NativeMessagesRequestOptions
+  responseContext: ResponsesPayload
   requestedModel: string | undefined
-  routeTarget: string
   turn: ResponsesWebSocketTurn
   ws: ResponsesWebSocketState
 }): Promise<boolean> {
-  const { initiator, preparedPayload, requestedModel, routeTarget, turn, ws } =
-    options
-  if (routeTarget === "/v1/messages") {
+  const {
+    candidate,
+    initiator,
+    nativeMessagesOptions,
+    responseContext,
+    requestedModel,
+    turn,
+    ws,
+  } = options
+  if (candidate.endpoint === "/v1/messages") {
     reportResponsesWebSocketEndpointFallback(
-      preparedPayload.model,
+      candidate.payload.model,
       "AnthropicMessages",
     )
     await streamAnthropicMessagesOverWs({
       nativeOptions: {
-        ...ws.data.nativeMessagesOptions,
+        ...nativeMessagesOptions,
+        allowCompatibilityRetry: false,
         initiatorOverride: initiator,
         requestedModel,
       },
-      payload: preparedPayload,
+      payload: candidate.payload,
+      responseContext,
       turn,
       ws,
     })
     return true
   }
 
-  if (routeTarget !== "/chat/completions") return false
-  convertWebSearchTool(preparedPayload)
-  // Rewrite custom apply_patch to a function tool only for the CC fallback.
-  // Native /responses must keep the freeform tool intact.
-  useFunctionApplyPatch(preparedPayload)
+  if (candidate.endpoint !== "/chat/completions") return false
   reportResponsesWebSocketEndpointFallback(
-    preparedPayload.model,
+    candidate.payload.model,
     "ChatCompletions",
   )
   await streamChatCompletionsOverWs({
     initiator,
-    payload: preparedPayload,
+    payload: candidate.payload,
+    responseContext,
     turn,
     ws,
   })
   return true
+}
+
+async function prepareResponsesWebSocketCandidate(options: {
+  payload: ResponsesPayload
+  reasoningEffort: ReasoningEffort | undefined
+  selectedModel: Model | undefined
+  signal?: AbortSignal
+}): Promise<{
+  candidate: ResponsesEndpointCandidate
+  endpoint: CopilotInferenceEndpoint
+}> {
+  const candidate = await prepareEvaluatedResponsesWebSocketCandidate({
+    ...options,
+    evaluationOnly: isSyntheticWarmupRequest(options.payload),
+  })
+  return {
+    candidate,
+    endpoint: candidate.endpoint,
+  }
+}
+
+async function prepareEvaluatedResponsesWebSocketCandidate(options: {
+  evaluationOnly?: boolean
+  payload: ResponsesPayload
+  reasoningEffort: ReasoningEffort | undefined
+  selectedModel: Model | undefined
+  signal?: AbortSignal
+}): Promise<ResponsesEndpointCandidate> {
+  const evaluationPayload = structuredClone(options.payload)
+  if (options.evaluationOnly) delete evaluationPayload.generate
+  const preparedSource = prepareResponsesRequest(evaluationPayload)
+  const nativeBody = finalizeNativeResponsesRequest(preparedSource, {
+    model: evaluationPayload.model,
+    defaultEffort: getModelReasoningConfig(evaluationPayload.model)
+      ?.defaultEffort,
+    implicitDefault: usesImplicitReasoningDefault(evaluationPayload.model),
+  })
+  disableParallelWebSearch(nativeBody.body)
+  const candidates = await prepareResponsesCandidates({
+    adaptationSource: preparedSource.source,
+    finalReasoningEffort: options.reasoningEffort,
+    nativeBody,
+    preservedSource: preparedSource,
+    resolveRemoteAttachments: !options.evaluationOnly,
+    selectedModel: options.selectedModel,
+    signal: options.signal,
+  })
+  const selection = selectResponsesCandidate({
+    candidates,
+    selectedModel: options.selectedModel,
+  })
+  if ("code" in selection) throw createEndpointTranslationError(selection)
+  recordCopilotRequestNormalization("responses", [
+    ...nativeBody.normalizationClasses,
+  ])
+  if (selection.candidate.check.findings.length > 0) {
+    recordCopilotTranslationFindings(
+      "responses",
+      selection.candidate.endpoint,
+      selection.candidate.check,
+    )
+  }
+  recordCopilotEndpointRoute(selection.decision)
+  return selection.candidate
 }
 
 async function waitForWebSocketTurn<T>(
@@ -525,58 +698,159 @@ async function waitForWebSocketTurn<T>(
   }
 }
 
+async function failWebSocketTurn(
+  ws: ResponsesWebSocketState,
+  turn: ResponsesWebSocketTurn,
+  failure:
+    | { kind: "source_ended" }
+    | { kind: "thrown"; error: unknown; inspection?: HttpErrorInspection },
+): Promise<boolean> {
+  if (
+    ws.data.closed
+    || turn.abortController.signal.aborted
+    || turn.terminal.state !== "open"
+  ) {
+    return false
+  }
+  const state = turn.failureState
+  if (state.model === "unknown" && turn.model) state.model = turn.model
+  const writeFailure = async () => {
+    await emitResponsesFailureAsStream(
+      {
+        get aborted() {
+          return turn.abortController.signal.aborted
+        },
+        get closed() {
+          return ws.data.closed
+        },
+        writeSSE: (data) => {
+          if (!ws.data.closed && !turn.abortController.signal.aborted) {
+            ws.send(
+              addResponsesWebSocketMetadata(
+                data.data,
+                getCopilotResponseHeaders(),
+              ),
+            )
+          }
+          return Promise.resolve()
+        },
+      },
+      {
+        responseId: state.responseId,
+        model: state.model,
+        sequenceNumber: state.sequenceNumber,
+        ...(failure.kind === "thrown" && failure.inspection ?
+          { inspection: failure.inspection }
+        : {}),
+      },
+    )
+  }
+  turn.failureWriters.set(failure, writeFailure)
+  try {
+    return await turn.terminal.fail(failure)
+  } finally {
+    turn.failureWriters.delete(failure)
+  }
+}
+
 // Terminal frame classification has intentionally explicit branches so close
 // races cannot overwrite a client-visible completion.
 
-function finalizeFromResponsesFrame(
-  data: ResponsesWebSocketData,
+// eslint-disable-next-line max-params
+async function emitTurnFrame(
+  ws: ResponsesWebSocketState,
   turn: ResponsesWebSocketTurn,
+  payload: ResponsesPayload,
   frame: string,
-): void {
-  let parsed: {
-    message?: unknown
-    response?: { error?: { message?: unknown } | null; status?: unknown }
-    type?: unknown
+  eventName?: string,
+): Promise<boolean> {
+  if (
+    ws.data.closed
+    || turn.abortController.signal.aborted
+    || turn.terminal.state !== "open"
+  ) {
+    return false
   }
-  try {
-    parsed = JSON.parse(frame) as typeof parsed
-  } catch {
-    return
-  }
+  const parsed = parseRecoverableStreamJson({
+    data: frame,
+    event: eventName,
+    protocol: "Responses WebSocket",
+    terminal: isResponsesTerminalEventName(eventName),
+  }) as { response?: { id?: unknown }; type?: unknown } | undefined
+  if (parsed === undefined) return true
 
-  if (parsed.type === "response.completed") {
-    const responseStatus = parsed.response?.status
-    if (responseStatus === "failed" || responseStatus === "incomplete") {
-      finalizeResponsesWebSocketTurn(data, turn, {
-        error: SAFE_RESPONSES_STREAM_ERROR_MESSAGE,
+  const terminalType = classifyEmittedWebSocketTerminal(parsed, eventName)
+  const processed = addResponsesWebSocketMetadata(
+    frame,
+    getCopilotResponseHeaders(),
+  )
+  ws.send(processed)
+  turn.outputStarted = true
+  updateResponsesFailureState(turn.failureState, {
+    data: processed,
+    event: typeof terminalType === "string" ? terminalType : eventName,
+  })
+
+  if (terminalType === "response.completed") {
+    const responseStatus = readEmittedResponseStatus(parsed)
+    if (responseStatus !== "failed") {
+      recordResponseSnapshotFromFrame(
+        ws.data.responseSnapshots,
+        payload,
+        processed,
+      )
+    }
+    if (responseStatus === "failed") {
+      return await turn.terminal.succeed({
+        kind: "received_failure",
         status: 502,
         terminalStatus: "ERROR",
       })
-      return
     }
-    finalizeResponsesWebSocketTurn(data, turn, {
+    if (responseStatus === "incomplete") {
+      return await turn.terminal.succeed({
+        kind: "incomplete",
+        status: 200,
+        terminalStatus: "COMPLETE",
+      })
+    }
+    return await turn.terminal.succeed({
+      kind: "completed",
       status: 200,
       terminalStatus: "COMPLETE",
     })
-    return
   }
-
-  if (parsed.type === "response.incomplete") {
-    finalizeResponsesWebSocketTurn(data, turn, {
-      error: "Responses stream ended incomplete",
-      status: 502,
-      terminalStatus: "ERROR",
+  if (terminalType === "response.incomplete") {
+    return await turn.terminal.succeed({
+      kind: "incomplete",
+      status: 200,
+      terminalStatus: "COMPLETE",
     })
-    return
   }
-
-  if (parsed.type === "response.failed" || parsed.type === "error") {
-    finalizeResponsesWebSocketTurn(data, turn, {
-      error: SAFE_RESPONSES_STREAM_ERROR_MESSAGE,
+  if (terminalType === "response.failed" || terminalType === "error") {
+    return await turn.terminal.succeed({
+      kind: "received_failure",
       status: 502,
       terminalStatus: "ERROR",
     })
   }
+  return true
+}
+
+function isResponsesTerminalEventName(event: string | undefined): boolean {
+  return (
+    event === "error"
+    || event === "response.completed"
+    || event === "response.failed"
+    || event === "response.incomplete"
+  )
+}
+
+function readEmittedResponseStatus(parsed: {
+  response?: { id?: unknown }
+}): unknown {
+  const response = parsed.response as Record<string, unknown> | undefined
+  return response?.status
 }
 
 function getRedirectReasoningEffort(
@@ -758,11 +1032,11 @@ export function rehydrateWarmupPayload(
   return rehydrateContinuationPayloadFromSnapshot(warmupPayload, payload)
 }
 
-function handleSyntheticWarmupRequest(
+async function handleSyntheticWarmupRequest(
   ws: ResponsesWebSocketState,
   payload: ResponsesPayload,
   turn: ResponsesWebSocketTurn,
-): void {
+): Promise<void> {
   const responseId = `warmup_${randomUUID().replaceAll("-", "")}`
   storeResponseSnapshot(ws.data.responseSnapshots, responseId, payload)
 
@@ -786,8 +1060,10 @@ function handleSyntheticWarmupRequest(
     top_p: payload.top_p ?? null,
   }
 
-  sendResponsesWebSocketFrame(
+  await emitTurnFrame(
     ws,
+    turn,
+    payload,
     JSON.stringify({
       type: "response.created",
       sequence_number: 0,
@@ -796,6 +1072,7 @@ function handleSyntheticWarmupRequest(
         status: "in_progress",
       },
     }),
+    "response.created",
   )
 
   const completedFrame = JSON.stringify({
@@ -806,40 +1083,35 @@ function handleSyntheticWarmupRequest(
       status: "completed",
     },
   })
-  sendResponsesWebSocketFrame(ws, completedFrame)
-  finalizeFromResponsesFrame(ws.data, turn, completedFrame)
+  await emitTurnFrame(ws, turn, payload, completedFrame, "response.completed")
 }
 
 async function streamAnthropicMessagesOverWs(options: {
   nativeOptions: NativeMessagesRequestOptions
-  payload: ResponsesPayload
+  payload: Extract<
+    ResponsesEndpointCandidate,
+    { endpoint: "/v1/messages" }
+  >["payload"]
+  responseContext: ResponsesPayload
   turn: ResponsesWebSocketTurn
   ws: ResponsesWebSocketState
 }): Promise<void> {
-  const { nativeOptions, payload, turn, ws } = options
+  const { nativeOptions, payload, responseContext, turn, ws } = options
   const result = await waitForWebSocketTurn(
-    executeResponsesMessagesBridge({
-      attachmentsNormalized: true,
-      compaction: isResponsesCompactionRequest(payload),
+    executePreparedResponsesMessagesBridge({
+      compaction: isResponsesCompactionRequest(responseContext),
       nativeOptions,
       payload,
-      preserveValidatedControls: true,
+      responseContext,
       signal: turn.abortController.signal,
     }),
     turn,
   )
   throwIfWebSocketTurnAborted(turn)
   const wsStream = {
-    // eslint-disable-next-line @typescript-eslint/require-await
     writeSSE: async (data: { event?: string; data: string }) => {
       if (data.data === "[DONE]") return
-      const frame = addResponsesWebSocketMetadata(
-        data.data,
-        getCopilotResponseHeaders(),
-      )
-      recordResponseSnapshotFromFrame(ws.data.responseSnapshots, payload, frame)
-      ws.send(frame)
-      finalizeFromResponsesFrame(ws.data, turn, frame)
+      await emitTurnFrame(ws, turn, responseContext, data.data, data.event)
     },
   }
   await emitResponsesResultAsWebSocketFrames(wsStream, result)
@@ -872,35 +1144,28 @@ async function emitResponsesResultAsWebSocketFrames(
 
 async function streamChatCompletionsOverWs(options: {
   initiator: "agent" | "user"
-  payload: ResponsesPayload
+  payload: Extract<
+    ResponsesEndpointCandidate,
+    { endpoint: "/chat/completions" }
+  >["payload"]
+  responseContext: ResponsesPayload
   turn: ResponsesWebSocketTurn
   ws: ResponsesWebSocketState
 }): Promise<void> {
-  const { initiator, payload, turn, ws } = options
-  const compaction = isResponsesCompactionRequest(payload)
-  const fitted = compaction ? fitResponsesCompactionPayload(payload) : null
-  const fallbackPayload = fitted?.payload ?? payload
-  if (fitted?.reduced) {
-    consola.warn("Reduced oversized WebSocket fallback compaction payload", {
-      originalBytes: fitted.originalBytes,
-      finalBytes: fitted.finalBytes,
-      omittedBinaryBlocks: fitted.omittedBinaryBlocks,
-      truncatedToolOutputBytes: fitted.truncatedToolOutputBytes,
-    })
-  }
-  const ccPayload = responsesToChatCompletions(fallbackPayload, {
-    preserveCustomToolContext: compaction,
-  })
+  const { initiator, payload, responseContext, turn, ws } = options
+  const compaction = isResponsesCompactionRequest(responseContext)
+  const ccPayload = structuredClone(payload)
   const needsWebSearch =
     ccPayload.tools?.some((tool) => tool.function.name === "web_search")
     ?? false
   if (needsWebSearch) {
     await streamChatWebSearchOverWs({
       ws,
-      payload,
+      responseContext,
       ccPayload,
       compaction,
       initiator,
+      maxUses: getResponsesChatWebSearchMaxUses(responseContext),
       turn,
     })
     return
@@ -910,6 +1175,8 @@ async function streamChatCompletionsOverWs(options: {
 
   const response = await waitForWebSocketTurn(
     createChatCompletions(ccPayload, {
+      allowCompatibilityRetry: false,
+      candidatePrepared: true,
       compaction,
       initiator,
       signal: turn.abortController.signal,
@@ -921,67 +1188,77 @@ async function streamChatCompletionsOverWs(options: {
 
   // Reuse the CC→Responses streaming translator with a WebSocket-backed writer
   const wsStream = {
-    // eslint-disable-next-line @typescript-eslint/require-await
     writeSSE: async (data: { event?: string; data: string }) => {
       if (data.data === "[DONE]") return
-      const frame = addResponsesWebSocketMetadata(
-        data.data,
-        getCopilotResponseHeaders(),
-      )
-      recordResponseSnapshotFromFrame(ws.data.responseSnapshots, payload, frame)
-      ws.send(frame)
-      finalizeFromResponsesFrame(ws.data, turn, frame)
+      await emitTurnFrame(ws, turn, responseContext, data.data, data.event)
     },
   }
 
-  await streamChatCompletionsAsResponses(wsStream, ccStream, payload.model)
+  await streamChatCompletionsAsResponses(
+    wsStream,
+    ccStream,
+    responseContext.model,
+  )
 }
 
 async function streamChatWebSearchOverWs(options: {
   ws: ResponsesWebSocketState
-  payload: ResponsesPayload
-  ccPayload: ReturnType<typeof responsesToChatCompletions>
+  responseContext: ResponsesPayload
+  ccPayload: Extract<
+    ResponsesEndpointCandidate,
+    { endpoint: "/chat/completions" }
+  >["payload"]
   compaction: boolean
   initiator: "agent" | "user"
+  maxUses?: number
   turn: ResponsesWebSocketTurn
 }): Promise<void> {
-  const { ws, payload, ccPayload, compaction, initiator, turn } = options
+  const {
+    ws,
+    responseContext,
+    ccPayload,
+    compaction,
+    initiator,
+    maxUses,
+    turn,
+  } = options
   ccPayload.stream = false
   ccPayload.stream_options = null
-  const initial = (await waitForWebSocketTurn(
-    createChatCompletions(ccPayload, {
+  const completionFactory: ResponsesChatCompletionFactory = async (
+    payload,
+    factoryOptions,
+  ) =>
+    await createChatCompletionsWithProcessedPayload(payload, {
+      allowCompatibilityRetry: false,
+      candidatePrepared: true,
       compaction,
       initiator,
+      signal: factoryOptions.signal,
+    })
+  const initial = await waitForWebSocketTurn(
+    completionFactory(ccPayload, {
+      allowCompatibilityRetry: false,
       signal: turn.abortController.signal,
     }),
     turn,
-  )) as ChatCompletionResponse
-  const response = await resolveWebSearchCalls(initial, ccPayload, {
-    abortSignal: turn.abortController.signal,
-    createCompletion: async (nextPayload) =>
-      (await createChatCompletions(nextPayload, {
-        compaction,
-        initiator,
-        signal: turn.abortController.signal,
-      })) as ChatCompletionResponse,
+  )
+  const response = await resolvePreparedResponsesWebSearchCalls({
+    completionFactory,
+    initial,
+    maxUses,
+    signal: turn.abortController.signal,
+    webSearch: responsesWebSocketDependencies.webSearch,
   })
   const wsStream = {
-    // eslint-disable-next-line @typescript-eslint/require-await
     writeSSE: async (data: { event?: string; data: string }) => {
       if (data.data === "[DONE]") return
-      const frame = addResponsesWebSocketMetadata(
-        data.data,
-        getCopilotResponseHeaders(),
-      )
-      recordResponseSnapshotFromFrame(ws.data.responseSnapshots, payload, frame)
-      ws.send(frame)
-      finalizeFromResponsesFrame(ws.data, turn, frame)
+      await emitTurnFrame(ws, turn, responseContext, data.data, data.event)
     },
   }
   await streamChatCompletionsAsResponses(
     wsStream,
     chatResponseAsStream(response),
-    payload.model,
+    responseContext.model,
   )
 }
 
@@ -1027,13 +1304,6 @@ function chatResponseAsStream(
   }
 }
 
-function sendResponsesWebSocketFrame(
-  ws: ResponsesWebSocketState,
-  frame: string,
-): void {
-  ws.send(addResponsesWebSocketMetadata(frame, getCopilotResponseHeaders()))
-}
-
 export function recordResponseSnapshotFromFrame(
   responseSnapshots: Map<string, ResponsesPayload>,
   payload: ResponsesPayload,
@@ -1068,12 +1338,13 @@ function createCompletedResponseSnapshot(
       mergeContinuationInput(snapshotPayload.input, structuredClone(output))
     : snapshotPayload.input
 
-  return {
+  const snapshot: ResponsesPayload = {
     ...snapshotPayload,
     input: completedInput,
-    previous_response_id: undefined,
-    generate: undefined,
   }
+  delete snapshot.previous_response_id
+  delete snapshot.generate
+  return snapshot
 }
 
 export function sendWebSocketError(
@@ -1090,6 +1361,12 @@ export function sendWebSocketError(
         ...(options.param ? { param: options.param } : {}),
         type: options.type ?? "websocket_error",
         request_id: options.requestId ?? ws.data.requestId,
+        ...(options.upstreamBody === undefined ?
+          {}
+        : { upstream_body: options.upstreamBody }),
+        ...(options.upstreamContentType ?
+          { upstream_content_type: options.upstreamContentType }
+        : {}),
       },
     }),
   )
@@ -1097,13 +1374,14 @@ export function sendWebSocketError(
 
 function normalizeWebSocketError(
   error: unknown,
-  inspection?: SafeHttpErrorInspection,
+  inspection?: HttpErrorInspection,
 ): WebSocketErrorFrameOptions {
   if (isHTTPError(error) && error instanceof WebSocketRequestError) {
+    const status = error.response.status
     return {
-      code: error.errorCode,
+      code: normalizeLocalWebSocketErrorCode(error.errorCode, status),
       message: error.message,
-      status: error.response.status,
+      status,
       type: error.errorType,
     }
   }
@@ -1116,6 +1394,20 @@ function normalizeWebSocketError(
       ...(local.param ? { param: local.param } : {}),
       status: inspection.status,
       type: local.type,
+    }
+  }
+  if (inspection?.kind === "upstream") {
+    return {
+      code:
+        inspection.clientError?.code
+        ?? mapHttpStatusToWebSocketErrorCode(inspection.status),
+      message: "Upstream request failed",
+      status: inspection.status,
+      type: "websocket_error",
+      upstreamBody: inspection.bodyText ?? Array.from(inspection.bodyBytes),
+      ...(inspection.contentType ?
+        { upstreamContentType: inspection.contentType }
+      : {}),
     }
   }
   if (inspection) {
@@ -1136,22 +1428,18 @@ function normalizeWebSocketError(
 }
 
 function mapLocalWebSocketErrorCode(
-  local: NonNullable<SafeHttpErrorInspection["localError"]>,
+  local: NonNullable<HttpErrorInspection["localError"]>,
   status: number,
 ): string {
-  if (
-    local.type === "session_affinity_error"
-    || local.type === "account_unavailable"
-  ) {
-    return mapHttpStatusToWebSocketErrorCode(status)
-  }
-  if (
-    local.code === "compaction_payload_too_large"
-    || local.code === "responses_payload_too_large"
-  ) {
-    return "request_too_large"
-  }
-  return local.code ?? mapHttpStatusToWebSocketErrorCode(status)
+  return normalizeLocalWebSocketErrorCode(local.code, status)
+}
+
+function normalizeLocalWebSocketErrorCode(
+  code: string | undefined,
+  status: number,
+): string {
+  if (status >= 400 && status < 500) return "bad_request"
+  return code ?? mapHttpStatusToWebSocketErrorCode(status)
 }
 
 function mapHttpStatusToWebSocketErrorCode(status: number): string {

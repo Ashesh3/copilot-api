@@ -2,6 +2,8 @@ import { Hono } from "hono"
 
 import { resolveRequestCredential } from "~/lib/credential-resolver"
 import { resolveProtectedCredential } from "~/lib/protected-credential"
+import { resolvePublicOrigin } from "~/lib/public-origin"
+import { readRequestJson } from "~/lib/request-json"
 
 import {
   createDirectConnectSession,
@@ -38,12 +40,19 @@ directConnectRoutes.use("*", async (c, next) => {
 
 // POST / — Create a direct-connect session
 directConnectRoutes.post("/", async (c) => {
-  const body = await c.req.json<{
-    cwd?: string
-    dangerously_skip_permissions?: boolean
-  }>()
+  const parsed = await readRequestJson(() =>
+    c.req.json<{
+      cwd?: string
+      dangerously_skip_permissions?: boolean
+    }>(),
+  )
+  if (!parsed.ok) return c.json({ error: "Invalid JSON" }, 400)
+  const body = parsed.value
 
-  const sessionInfo = createDirectConnectSession(body.cwd)
+  const sessionInfo = createDirectConnectSession(
+    resolvePublicOrigin(c.req.raw),
+    body.cwd,
+  )
 
   return c.json(sessionInfo, 201)
 })

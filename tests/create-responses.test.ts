@@ -35,7 +35,7 @@ import {
   type ResponsesPayload,
 } from "../src/services/copilot/create-responses"
 
-test("sanitizes an unknown terminal shape through the direct event helper", () => {
+test("fails closed when the terminal event name conflicts with its JSON type", () => {
   const privateMarker = "direct-terminal-private-marker"
   const sanitized = sanitizeResponsesStreamEvent({
     event: "response.failed",
@@ -75,7 +75,7 @@ test("sanitizes an unknown terminal shape through the direct event helper", () =
   expect(sanitized.data).not.toContain(privateMarker)
 })
 
-test("reconstructs a completed terminal event from an explicit allowlist", () => {
+test("preserves a completed terminal event without a field allowlist", () => {
   const privateMarker = "completed-allowlist-private-marker"
   const data = JSON.stringify({
     type: "response.completed",
@@ -169,75 +169,12 @@ test("reconstructs a completed terminal event from an explicit allowlist", () =>
 
   expect(sanitized).not.toBe(event)
   expect(sanitized.event).toBe("response.completed")
-  expect(JSON.parse(sanitized.data ?? "{}") as unknown).toEqual({
-    type: "response.completed",
-    sequence_number: 3,
-    response: {
-      id: "resp_completed",
-      object: "response",
-      created_at: 1_700_000_000,
-      model: "gpt-public",
-      status: "completed",
-      output: [
-        {
-          id: "msg_completed",
-          type: "message",
-          role: "assistant",
-          status: "completed",
-          content: [
-            {
-              type: "output_text",
-              text: "done",
-              annotations: [
-                {
-                  type: "url_citation",
-                  start_index: 0,
-                  end_index: 4,
-                  title: "Public source",
-                  url: "https://example.com/source",
-                },
-              ],
-            },
-          ],
-        },
-        {
-          id: "rs_completed",
-          type: "reasoning",
-          status: "completed",
-          summary: [
-            {
-              type: "summary_text",
-              text: "Checked the public state.",
-            },
-          ],
-          encrypted_content: "encrypted-client-state",
-        },
-        {
-          id: "fc_completed",
-          type: "function_call",
-          call_id: "call_completed",
-          name: "lookup",
-          arguments: '{"id":7}',
-          status: "completed",
-        },
-      ],
-      output_text: "done",
-      usage: {
-        input_tokens: 1,
-        output_tokens: 1,
-        total_tokens: 2,
-        input_tokens_details: { cached_tokens: 1 },
-        output_tokens_details: { reasoning_tokens: 1 },
-      },
-      error: null,
-      incomplete_details: null,
-    },
-  })
-  expect(sanitized.data).not.toBe(data)
-  expect(sanitized.data).not.toContain(privateMarker)
+  expect(JSON.parse(sanitized.data ?? "{}") as unknown).toEqual(
+    JSON.parse(data) as unknown,
+  )
+  expect(sanitized.data).toBe(data)
+  expect(sanitized.data).toContain(privateMarker)
 })
-
-const missingOutputTextPrivateMarker = "missing-output-text-private-marker"
 
 test("preserves explicit empty completed output_text over derivable text", () => {
   const sanitized = sanitizeResponsesStreamEvent({
@@ -303,7 +240,7 @@ test("preserves explicit empty completed output_text over derivable text", () =>
   })
 })
 
-test("derives missing completed output_text only from assistant messages", () => {
+test("does not derive a missing completed output_text", () => {
   const privateMarker = "assistant-only-derived-output-text-private-marker"
   const sanitized = sanitizeResponsesStreamEvent({
     event: "response.completed",
@@ -385,95 +322,16 @@ test("derives missing completed output_text only from assistant messages", () =>
   })
 
   expect(sanitized.event).toBe("response.completed")
-  expect(JSON.parse(sanitized.data ?? "{}") as unknown).toEqual({
-    type: "response.completed",
-    sequence_number: 6,
-    response: {
-      id: "resp_assistant_only_output_text",
-      object: "response",
-      status: "completed",
-      output: [
-        {
-          id: "msg_user_output_text",
-          type: "message",
-          status: "completed",
-          content: [
-            {
-              type: "output_text",
-              text: "user-text",
-              annotations: [],
-            },
-          ],
-        },
-        {
-          id: "msg_missing_role_output_text",
-          type: "message",
-          status: "completed",
-          content: [
-            {
-              type: "output_text",
-              text: "missing-role-text",
-              annotations: [],
-            },
-          ],
-        },
-        {
-          id: "msg_invalid_role_output_text",
-          type: "message",
-          status: "completed",
-          content: [
-            {
-              type: "output_text",
-              text: "invalid-role-text",
-              annotations: [],
-            },
-          ],
-        },
-        {
-          id: "msg_assistant_output_text",
-          type: "message",
-          role: "assistant",
-          status: "completed",
-          content: [
-            {
-              type: "output_text",
-              text: "assistant-text",
-              annotations: [],
-            },
-          ],
-        },
-      ],
-      output_text: "assistant-text",
-      usage: null,
-      error: null,
-      incomplete_details: null,
-    },
-  })
-  expect(sanitized.data).not.toContain(privateMarker)
+  const completed = JSON.parse(sanitized.data ?? "{}") as {
+    response?: Record<string, unknown>
+  }
+  expect(completed.response).not.toHaveProperty("output_text")
+  expect(completed.response?.metadata).toEqual({ private: privateMarker })
+  expect(sanitized.data).toContain(privateMarker)
 })
 
 test.each([
   {
-    expectedOutput: [
-      {
-        id: "msg_first",
-        type: "message",
-        role: "assistant",
-        status: "completed",
-        content: [
-          { type: "output_text", text: "first", annotations: [] },
-          { type: "refusal", refusal: "declined" },
-        ],
-      },
-      {
-        id: "msg_second",
-        type: "message",
-        role: "assistant",
-        status: "completed",
-        content: [{ type: "output_text", text: "second", annotations: [] }],
-      },
-    ],
-    expectedOutputText: "firstsecond",
     name: "assistant text",
     output: [
       {
@@ -486,15 +344,15 @@ test.each([
             type: "output_text",
             text: "first",
             annotations: [],
-            provider: missingOutputTextPrivateMarker,
+            provider: "missing-output-text-private-marker",
           },
           {
             type: "refusal",
             refusal: "declined",
-            provider: missingOutputTextPrivateMarker,
+            provider: "missing-output-text-private-marker",
           },
         ],
-        metadata: { private: missingOutputTextPrivateMarker },
+        metadata: { private: "missing-output-text-private-marker" },
       },
       {
         id: "msg_second",
@@ -506,25 +364,14 @@ test.each([
             type: "output_text",
             text: "second",
             annotations: [],
-            provider: missingOutputTextPrivateMarker,
+            provider: "missing-output-text-private-marker",
           },
         ],
-        metadata: { private: missingOutputTextPrivateMarker },
+        metadata: { private: "missing-output-text-private-marker" },
       },
     ],
   },
   {
-    expectedOutput: [
-      {
-        id: "fc_tool_only",
-        type: "function_call",
-        call_id: "call_tool_only",
-        name: "lookup",
-        arguments: '{"id":7}',
-        status: "completed",
-      },
-    ],
-    expectedOutputText: "",
     name: "tool-only output",
     output: [
       {
@@ -534,19 +381,19 @@ test.each([
         name: "lookup",
         arguments: '{"id":7}',
         status: "completed",
-        private: missingOutputTextPrivateMarker,
+        private: "missing-output-text-private-marker",
       },
     ],
   },
 ])(
-  "reconstructs missing output_text for completed $name",
-  ({ expectedOutput, expectedOutputText, output }) => {
+  "preserves completed $name without synthesizing output_text",
+  ({ output }) => {
     const event = {
       event: "response.completed",
       data: JSON.stringify({
         type: "response.completed",
         sequence_number: 5,
-        provider: missingOutputTextPrivateMarker,
+        provider: "missing-output-text-private-marker",
         response: {
           id: "resp_missing_output_text",
           object: "response",
@@ -555,7 +402,7 @@ test.each([
           usage: null,
           error: null,
           incomplete_details: null,
-          provider: missingOutputTextPrivateMarker,
+          provider: "missing-output-text-private-marker",
         },
       }),
     }
@@ -563,110 +410,18 @@ test.each([
     const sanitized = sanitizeResponsesStreamEvent(event)
 
     expect(sanitized.event).toBe("response.completed")
-    expect(JSON.parse(sanitized.data ?? "{}") as unknown).toEqual({
-      type: "response.completed",
-      sequence_number: 5,
-      response: {
-        id: "resp_missing_output_text",
-        object: "response",
-        status: "completed",
-        output: expectedOutput,
-        output_text: expectedOutputText,
-        usage: null,
-        error: null,
-        incomplete_details: null,
-      },
-    })
-    expect(sanitized.data).not.toContain(missingOutputTextPrivateMarker)
+    const completed = JSON.parse(sanitized.data ?? "{}") as {
+      response?: Record<string, unknown>
+    }
+    expect(completed.response?.output).toEqual(output)
+    expect(completed.response).not.toHaveProperty("output_text")
+    expect(sanitized.data).toContain("missing-output-text-private-marker")
   },
 )
 
-test("preserves reviewed completed tool output families without private fields", () => {
+test("preserves completed tool output families with future fields", () => {
   const privateMarker = "completed-tool-private-marker"
-  const sanitized = sanitizeResponsesStreamEvent({
-    event: "response.completed",
-    data: JSON.stringify({
-      type: "response.completed",
-      sequence_number: 4,
-      response: {
-        id: "resp_tools",
-        object: "response",
-        status: "completed",
-        output: [
-          {
-            id: "computer_1",
-            call_id: "call_computer",
-            type: "computer_call",
-            status: "completed",
-            action: {
-              type: "click",
-              button: "left",
-              x: 12,
-              y: 34,
-              private: privateMarker,
-            },
-            pending_safety_checks: [{ message: privateMarker }],
-            private: privateMarker,
-          },
-          {
-            id: "custom_1",
-            call_id: "call_custom",
-            type: "custom_tool_call",
-            name: "shell",
-            input: "pwd",
-            status: "completed",
-            private: privateMarker,
-          },
-          {
-            id: "file_1",
-            type: "file_search_call",
-            status: "completed",
-            queries: ["incident", 7, "timeline"],
-            results: [
-              {
-                file_id: "file_a",
-                filename: "incident.txt",
-                score: 0.9,
-                text: "reviewed excerpt",
-                attributes: { private: privateMarker },
-                private: privateMarker,
-              },
-            ],
-            private: privateMarker,
-          },
-          {
-            id: "mcp_1",
-            call_id: "call_mcp",
-            type: "mcp_call",
-            name: "lookup",
-            arguments: '{"id":1}',
-            server_label: "inventory",
-            output: "found",
-            error: null,
-            status: "completed",
-            private: privateMarker,
-          },
-          {
-            id: "web_1",
-            type: "web_search_call",
-            status: "completed",
-            action: {
-              type: "search",
-              query: "current status",
-              private: privateMarker,
-            },
-            private: privateMarker,
-          },
-        ],
-        output_text: "",
-        usage: null,
-        error: null,
-        incomplete_details: null,
-      },
-    }),
-  })
-
-  expect(JSON.parse(sanitized.data ?? "{}") as unknown).toEqual({
+  const terminal = {
     type: "response.completed",
     sequence_number: 4,
     response: {
@@ -679,7 +434,15 @@ test("preserves reviewed completed tool output families without private fields",
           call_id: "call_computer",
           type: "computer_call",
           status: "completed",
-          action: { type: "click", button: "left", x: 12, y: 34 },
+          action: {
+            type: "click",
+            button: "left",
+            x: 12,
+            y: 34,
+            private: privateMarker,
+          },
+          pending_safety_checks: [{ message: privateMarker }],
+          private: privateMarker,
         },
         {
           id: "custom_1",
@@ -688,20 +451,24 @@ test("preserves reviewed completed tool output families without private fields",
           name: "shell",
           input: "pwd",
           status: "completed",
+          private: privateMarker,
         },
         {
           id: "file_1",
           type: "file_search_call",
           status: "completed",
-          queries: ["incident", "timeline"],
+          queries: ["incident", 7, "timeline"],
           results: [
             {
               file_id: "file_a",
               filename: "incident.txt",
               score: 0.9,
               text: "reviewed excerpt",
+              attributes: { private: privateMarker },
+              private: privateMarker,
             },
           ],
+          private: privateMarker,
         },
         {
           id: "mcp_1",
@@ -713,12 +480,18 @@ test("preserves reviewed completed tool output families without private fields",
           output: "found",
           error: null,
           status: "completed",
+          private: privateMarker,
         },
         {
           id: "web_1",
           type: "web_search_call",
           status: "completed",
-          action: { type: "search", query: "current status" },
+          action: {
+            type: "search",
+            query: "current status",
+            private: privateMarker,
+          },
+          private: privateMarker,
         },
       ],
       output_text: "",
@@ -726,8 +499,14 @@ test("preserves reviewed completed tool output families without private fields",
       error: null,
       incomplete_details: null,
     },
+  }
+  const sanitized = sanitizeResponsesStreamEvent({
+    event: "response.completed",
+    data: JSON.stringify(terminal),
   })
-  expect(sanitized.data).not.toContain(privateMarker)
+
+  expect(JSON.parse(sanitized.data ?? "{}") as unknown).toEqual(terminal)
+  expect(sanitized.data).toContain(privateMarker)
 })
 
 test.each([
@@ -795,7 +574,7 @@ test.each([
       incomplete_details: null,
     },
   },
-])("fails closed for malformed completed shape with $name", ({ response }) => {
+])("preserves parseable completed shape with $name", ({ response }) => {
   const sanitized = sanitizeResponsesStreamEvent({
     event: "response.completed",
     data: JSON.stringify({
@@ -805,13 +584,12 @@ test.each([
     }),
   })
 
-  expect(sanitized.event).toBe("response.failed")
-  expect(JSON.parse(sanitized.data ?? "{}") as { type?: string }).toMatchObject(
-    {
-      type: "response.failed",
-    },
-  )
-  expect(sanitized.data).not.toContain("private")
+  expect(sanitized.event).toBe("response.completed")
+  expect(JSON.parse(sanitized.data ?? "{}") as unknown).toEqual({
+    type: "response.completed",
+    sequence_number: 3,
+    response,
+  })
 })
 
 test.each([
@@ -1073,7 +851,7 @@ test.each([
   },
 )
 
-test("fails closed for response.completed without a sequence number", () => {
+test("preserves response.completed without a sequence number", () => {
   const sanitized = sanitizeResponsesStreamEvent({
     event: "response.completed",
     data: JSON.stringify({
@@ -1091,10 +869,10 @@ test("fails closed for response.completed without a sequence number", () => {
     }),
   })
 
-  expect(sanitized.event).toBe("response.failed")
+  expect(sanitized.event).toBe("response.completed")
   expect(JSON.parse(sanitized.data ?? "{}") as { type?: string }).toMatchObject(
     {
-      type: "response.failed",
+      type: "response.completed",
     },
   )
 })
@@ -1105,7 +883,7 @@ test.each([
   { response: { status: "failed" }, name: "failed status" },
   { response: { status: "incomplete" }, name: "incomplete status" },
   { response: "private-response-string", name: "primitive response" },
-])("fails closed for response.completed with $name", ({ response }) => {
+])("preserves response.completed with $name", ({ response }) => {
   const sanitized = sanitizeResponsesStreamEvent({
     event: "response.completed",
     data: JSON.stringify({
@@ -1117,23 +895,12 @@ test.each([
   })
 
   expect(JSON.parse(sanitized.data ?? "{}") as unknown).toEqual({
-    type: "response.failed",
+    type: "response.completed",
     sequence_number: 4,
-    response: {
-      output: [],
-      output_text: "",
-      usage: null,
-      error: {
-        code: "server_error",
-        message: "Upstream Responses stream failed.",
-        param: null,
-        status: 502,
-      },
-      incomplete_details: null,
-    },
+    response,
+    private: "completed-private-marker",
   })
-  expect(sanitized.data).not.toContain("completed-private-marker")
-  expect(sanitized.data).not.toContain("private-response-string")
+  expect(sanitized.data).toContain("completed-private-marker")
 })
 
 test("fails closed when the terminal event name and JSON type disagree", () => {
@@ -1184,7 +951,7 @@ test("stream ID synchronization delegates terminal primitives to sanitization", 
         '["stream-sync-private-marker"]',
         "response.completed",
         createStreamIdTracker(),
-      ),
+      ) ?? "",
     ) as unknown,
   ).toEqual({
     type: "response.failed",
@@ -1277,7 +1044,9 @@ test.each([
   "sanitizes empty $event data before stream ID synchronization",
   ({ event, expected }) => {
     expect(
-      JSON.parse(fixStreamIds("", event, createStreamIdTracker())) as unknown,
+      JSON.parse(
+        fixStreamIds("", event, createStreamIdTracker()) ?? "",
+      ) as unknown,
     ).toEqual(expected)
   },
 )
@@ -1286,6 +1055,26 @@ test("leaves an empty nonterminal heartbeat unchanged during ID sync", () => {
   expect(
     fixStreamIds("", "response.output_text.delta", createStreamIdTracker()),
   ).toBe("")
+})
+
+test("skips malformed nonterminal JSON during stream ID synchronization", () => {
+  expect(
+    fixStreamIds(
+      "{malformed-private-frame",
+      "response.output_text.delta",
+      createStreamIdTracker(),
+    ),
+  ).toBeUndefined()
+})
+
+test("throws on malformed terminal JSON during stream ID synchronization", () => {
+  expect(() =>
+    fixStreamIds(
+      "{malformed-private-terminal",
+      "response.completed",
+      createStreamIdTracker(),
+    ),
+  ).toThrow(SyntaxError)
 })
 
 test("stream ID synchronization does not mutate a readonly terminal record", () => {
@@ -1427,6 +1216,78 @@ beforeEach(() => {
   resetRoutingTelemetryForTest()
   setModelRedirectsForTest([])
   setModelSettingsForTest([])
+})
+
+test("retries one exact unsupported Responses control after store enforcement", async () => {
+  queuedResponses.push(
+    Response.json(
+      {
+        error: {
+          code: "invalid_request_body",
+          message:
+            "Unsupported parameter: 'top_p' is not supported with this model.",
+        },
+      },
+      { status: 400 },
+    ),
+    createSuccessResponse(),
+  )
+  const payload = {
+    model: "gpt-4o",
+    input: "hello",
+    top_p: 0.9,
+    temperature: 0.2,
+  } as ResponsesPayload
+  const source = structuredClone(payload)
+
+  await createResponses(payload, {
+    vision: false,
+    initiator: "user",
+    copilotSessionToken: "responses-session-fixed",
+  })
+
+  expect(payload).toEqual(source)
+  expect(requestBodies).toHaveLength(2)
+  expect(requestBodies[0]).toMatchObject({ store: false, top_p: 0.9 })
+  expect(requestBodies[1]).toEqual(
+    Object.fromEntries(
+      Object.entries(requestBodies[0]).filter(([key]) => key !== "top_p"),
+    ),
+  )
+  expect(requestBodies[1]).not.toHaveProperty("top_p")
+})
+
+test("preserves native Responses failure identity and exact route bytes", async () => {
+  state.models = responsesCapableModels
+  const body = new TextEncoder().encode('{"error":"responses"}\r\n  ')
+  const createUpstream = () =>
+    new Response(body.slice(), {
+      status: 409,
+      headers: { "content-type": "application/problem+json" },
+    })
+  const upstream = createUpstream()
+  queuedResponses.push(upstream)
+
+  const error = await createResponses(
+    { model: "gpt-4o", input: "hello" },
+    { vision: false, initiator: "user" },
+  ).catch((caught: unknown) => caught)
+
+  expect(error).toBeInstanceOf(HTTPError)
+  expect((error as HTTPError).response).toBe(upstream)
+  expect(upstream.bodyUsed).toBe(false)
+
+  queuedResponses.push(createUpstream())
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: "gpt-4o", input: "hello" }),
+  })
+  expect(response.status).toBe(409)
+  expect(response.headers.get("content-type")).toBe("application/problem+json")
+  expect(Array.from(new Uint8Array(await response.arrayBuffer()))).toEqual(
+    Array.from(body),
+  )
 })
 
 const sessionToken = (payload: Record<string, unknown>): string =>
@@ -1760,6 +1621,60 @@ test("installs Responses client metadata affinity before provider dispatch", asy
   }
 })
 
+test("routes Codex forks through the parent account and upstream session", async () => {
+  const modelId = "responses-fork-affinity-model"
+  const model = {
+    ...responsesCapableModels.data[0],
+    id: modelId,
+    name: modelId,
+  }
+  state.models = { data: [model], object: "list" }
+  for (const [id, token] of [
+    [2201, "responses-fork-parent-token"],
+    [2202, "responses-fork-child-token"],
+  ] as const) {
+    const account = tokenPool.addAccount(`github-${id}`, "individual", id)
+    account.copilotToken = token
+    account.healthy = true
+    account.models = new Set([modelId])
+    account.modelsData = [model]
+  }
+  tokenPool.rebuildModelIndex()
+  state.isMultiToken = true
+
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "session-id": "fork-child-1",
+    },
+    body: JSON.stringify({
+      model: modelId,
+      input: "continue the fork",
+      client_metadata: {
+        session_id: "fork-child-1",
+        thread_id: "fork-child-1",
+        "x-codex-turn-metadata": JSON.stringify({
+          forked_from_thread_id: "fork-parent-0",
+        }),
+      },
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(capturedAffinity).toEqual({
+    key: "fork-parent-0",
+    source: "codex_thread",
+  })
+  expect(capturedAuthorization).toEqual(["Bearer responses-fork-parent-token"])
+  expect(lastUpstreamHeaders?.get("x-client-session-id")).toBe(
+    "81e3167a-de1a-5ffa-8c20-f832dc0e2909",
+  )
+  expect(lastUpstreamHeaders?.get("x-interaction-id")).toBe(
+    "81e3167a-de1a-5ffa-8c20-f832dc0e2909",
+  )
+})
+
 test("keeps Responses header affinity over metadata and ignores malformed metadata", async () => {
   state.models = responsesCapableModels
   await server.request("/v1/responses", {
@@ -1791,22 +1706,39 @@ test("keeps Responses header affinity over metadata and ignores malformed metada
   expect(capturedAffinity).toBeUndefined()
 })
 
-test("rejects previous_response_id for HTTP Responses API requests", async () => {
-  const error = await createResponses(
-    { model: "gpt-4o", input: "Hello", previous_response_id: "resp_previous" },
-    { vision: false, initiator: "user" },
-  ).catch((caught: unknown) => caught)
-  expect(error).toMatchObject({
-    response: { status: 400 },
-    clientBody: {
-      error: {
-        code: "unsupported_value",
-        param: "previous_response_id",
-        type: "invalid_request_error",
-      },
-    },
+test("preserves native Responses state, context, future fields, and tools", async () => {
+  state.models = responsesCapableModels
+  const payload = {
+    model: "gpt-4o",
+    input: [{ type: "future_input", future: { nested: true } }],
+    future_top_level: { retained: [1, 2] },
+    background: { future: true },
+    previous_response_id: "resp_previous",
+    service_tier: { future: "priority" },
+    context_management: { future: "shape" },
+    tools: [
+      { name: "safe malformed evidence" },
+      { type: "mcp", server_label: "native", future: { retained: true } },
+    ],
+    store: true,
+  }
+
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
   })
-  expect(fetchMock).not.toHaveBeenCalled()
+
+  expect(response.status).toBe(200)
+  expect(requestBodies).toHaveLength(1)
+  expect(requestBodies[0]).toEqual({
+    ...payload,
+    model: "gpt-4o",
+    store: false,
+    tools: [
+      { type: "mcp", server_label: "native", future: { retained: true } },
+    ],
+  })
 })
 
 test.each([
@@ -1815,7 +1747,7 @@ test.each([
   ["previous_response_id", { previous_response_id: "resp_previous" }],
   ["service_tier", { service_tier: "priority" }],
 ] as const)(
-  "rejects stateful control %s before a chat-only Responses fallback",
+  "omits stateful control %s before a chat-only Responses fallback",
   async (param, extra) => {
     state.models = {
       object: "list",
@@ -1828,6 +1760,23 @@ test.each([
         },
       ],
     }
+    queuedResponses.push(
+      Response.json({
+        id: "chatcmpl_best_effort",
+        object: "chat.completion",
+        created: 1,
+        model: "chat-only-responses-model",
+        choices: [
+          {
+            index: 0,
+            message: { role: "assistant", content: "ok" },
+            finish_reason: "stop",
+            logprobs: null,
+          },
+        ],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      }),
+    )
 
     const response = await server.request("/v1/responses", {
       method: "POST",
@@ -1838,21 +1787,17 @@ test.each([
         ...extra,
       }),
     })
-    const body = (await response.json()) as Record<string, unknown>
-
-    expect(response.status).toBe(400)
-    expect(body).toMatchObject({
-      error: {
-        code: "unsupported_value",
-        param,
-        type: "invalid_request_error",
-      },
+    expect(response.status).toBe(200)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(lastRequestBody).toMatchObject({
+      model: "chat-only-responses-model",
+      messages: [{ role: "user", content: "Hello" }],
     })
-    expect(fetchMock).not.toHaveBeenCalled()
+    expect(lastRequestBody).not.toHaveProperty(param)
   },
 )
 
-test("rejects omitted function output before chat fallback reaches upstream", async () => {
+test("contextualizes omitted function output before chat fallback reaches upstream", async () => {
   const modelId = "chat-only-missing-function-output"
   state.models = {
     object: "list",
@@ -1865,6 +1810,23 @@ test("rejects omitted function output before chat fallback reaches upstream", as
       },
     ],
   }
+  queuedResponses.push(
+    Response.json({
+      id: "chatcmpl_missing_output",
+      object: "chat.completion",
+      created: 1,
+      model: modelId,
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: "ok" },
+          finish_reason: "stop",
+          logprobs: null,
+        },
+      ],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    }),
+  )
 
   const response = await server.request("/v1/responses", {
     method: "POST",
@@ -1875,17 +1837,9 @@ test("rejects omitted function output before chat fallback reaches upstream", as
     }),
   })
 
-  expect(response.status).toBe(400)
-  expect(fetchMock).not.toHaveBeenCalled()
-  expect(await response.json()).toEqual({
-    error: {
-      code: "endpoint_translation_unsupported",
-      message:
-        "The selected Copilot model cannot accept this request without losing required protocol data.",
-      param: "content_type",
-      type: "invalid_request_error",
-    },
-  })
+  expect(response.status).toBe(200)
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+  expect(JSON.stringify(lastRequestBody)).toContain("Unpaired tool result")
 })
 
 test("preserves prompt and conversation_id when sending Responses API requests", async () => {
@@ -2286,7 +2240,7 @@ test("normalizes Responses function tool parameter schemas before forwarding", a
   ])
 })
 
-test("normalizes json_schema response format object schemas before forwarding", async () => {
+test("preserves optional and open json_schema response format object schemas", async () => {
   await createResponses(
     {
       model: "gpt-4o",
@@ -2331,7 +2285,6 @@ test("normalizes json_schema response format object schemas before forwarding", 
       name: "ExtractedEntities",
       schema: {
         type: "object",
-        additionalProperties: false,
         properties: {
           episode_indices: {
             type: "array",
@@ -2341,7 +2294,6 @@ test("normalizes json_schema response format object schemas before forwarding", 
             type: "array",
             items: {
               type: "object",
-              additionalProperties: false,
               properties: {
                 name: { type: "string" },
                 type: { type: "string" },
@@ -2350,7 +2302,7 @@ test("normalizes json_schema response format object schemas before forwarding", 
             },
           },
         },
-        required: ["entities", "episode_indices"],
+        required: ["entities"],
       },
     },
   })

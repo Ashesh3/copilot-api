@@ -1,3 +1,4 @@
+/* eslint-disable max-lines */
 import type { Context } from "hono"
 
 import * as Sentry from "@sentry/bun"
@@ -17,12 +18,9 @@ import type { AnthropicStreamChunk } from "~/services/copilot/create-anthropic-m
 import type { Model } from "~/services/copilot/get-models"
 
 import { getLastUsedAccountId } from "~/lib/account-router"
-import {
-  assertEndpointTranslationSupported,
-  isAbortError,
-  LocalHTTPError,
-} from "~/lib/error"
+import { inspectHttpError, isAbortError, isHTTPError } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
+import { parseRecoverableStreamJson } from "~/lib/recoverable-stream-json"
 import { setRequestContext } from "~/lib/request-logger"
 import {
   createSentryChatSpanOptions,
@@ -58,7 +56,7 @@ import {
   getAnthropicReasoning,
 } from "./anthropic-reasoning"
 import { normalizeChatCompletionsRequest } from "./chat-contract"
-import { checkNormalizedChatToMessagesTranslation } from "./translation-fidelity"
+import { createChatStreamTerminalAdapter } from "./stream-lifecycle"
 
 const logger = createHandlerLogger("anthropic-bridge")
 
@@ -73,6 +71,7 @@ export async function executeAnthropicBridge(
   options: {
     nativeOptions: NativeMessagesRequestOptions
     payload: ChatCompletionsPayload & { model: string }
+    preparedPayload?: AnthropicMessagesPayload
     selectedModel?: Model
   },
 ): Promise<Response> {
@@ -81,11 +80,10 @@ export async function executeAnthropicBridge(
 
   setRequestContext(c, { provider: "ChatCompletions→AnthropicMessages" })
 
-  const anthropicPayload = await chatPayloadToAnthropic(
-    payload,
-    selectedModel,
-    c.req.raw.signal,
-  )
+  const anthropicPayload =
+    options.preparedPayload
+    ?? (await chatPayloadToAnthropic(payload, selectedModel, c.req.raw.signal))
+  const alreadyAdapted = options.preparedPayload !== undefined
   logger.debug("Prepared Anthropic bridge request", {
     messageCount: anthropicPayload.messages.length,
     model: anthropicPayload.model,
@@ -112,6 +110,7 @@ export async function executeAnthropicBridge(
           anthropicPayload,
           nativeOptions,
           {
+            alreadyAdapted,
             signal: c.req.raw.signal,
           },
         )) as AnthropicResponse
@@ -143,6 +142,7 @@ export async function executeAnthropicBridge(
   }
 
   return await executeBridgeStreaming(c, {
+    alreadyAdapted,
     payload,
     anthropicPayload,
     nativeOptions,
@@ -158,8 +158,9 @@ async function executeBridgeWebSearch(
   },
 ): Promise<Response> {
   const requestedStream = Boolean(options.anthropicPayload.stream)
-  options.anthropicPayload.stream = false
-  const response = await resolveNativeWebSearch(options.anthropicPayload, {
+  const bufferedPayload = structuredClone(options.anthropicPayload)
+  bufferedPayload.stream = false
+  const response = await resolveNativeWebSearch(bufferedPayload, {
     ...options.nativeOptions,
     signal: c.req.raw.signal,
   })
@@ -171,29 +172,47 @@ async function executeBridgeWebSearch(
 
   if (!requestedStream) return c.json(result)
   return streamSSE(c, async (stream) => {
-    const chunk: ChatCompletionChunk = {
-      id: result.id,
-      object: "chat.completion.chunk",
-      created: result.created,
-      model: result.model,
-      choices: result.choices.map((choice) => ({
-        index: choice.index,
-        delta: {
-          role: "assistant",
-          content: choice.message.content,
-          reasoning_text: choice.message.reasoning_text,
-          tool_calls: choice.message.tool_calls?.map((toolCall, index) => ({
-            ...toolCall,
-            index,
-          })),
-        },
-        finish_reason: choice.finish_reason,
-        logprobs: choice.logprobs,
-      })),
-      usage: result.usage,
+    const adapter = createChatStreamTerminalAdapter({ c, stream })
+    stream.onAbort(() => {
+      adapter.abort()
+    })
+    try {
+      const chunk: ChatCompletionChunk = {
+        id: result.id,
+        object: "chat.completion.chunk",
+        created: result.created,
+        model: result.model,
+        choices: result.choices.map((choice) => ({
+          index: choice.index,
+          delta: {
+            role: "assistant",
+            content: choice.message.content,
+            reasoning_text: choice.message.reasoning_text,
+            tool_calls: choice.message.tool_calls?.map((toolCall, index) => ({
+              ...toolCall,
+              index,
+            })),
+          },
+          finish_reason: choice.finish_reason,
+          logprobs: choice.logprobs,
+        })),
+        usage: result.usage,
+      }
+      await stream.writeSSE({ data: JSON.stringify(chunk) })
+      await adapter.succeedAfterFinalChunk()
+    } catch (error) {
+      if (isAbortError(error)) {
+        adapter.abort()
+        return
+      }
+      await adapter.failAfterCommit({
+        kind: "thrown",
+        error,
+        ...(isHTTPError(error) ?
+          { inspection: await inspectHttpError(error) }
+        : {}),
+      })
     }
-    await stream.writeSSE({ data: JSON.stringify(chunk) })
-    await stream.writeSSE({ data: "[DONE]" })
   })
 }
 
@@ -202,6 +221,7 @@ async function executeBridgeStreaming(
   options: {
     payload: ChatCompletionsPayload & { model: string }
     anthropicPayload: AnthropicMessagesPayload
+    alreadyAdapted?: boolean
     nativeOptions: NativeMessagesRequestOptions
   },
 ): Promise<Response> {
@@ -227,6 +247,7 @@ async function executeBridgeStreaming(
           anthropicPayload,
           nativeOptions,
           {
+            alreadyAdapted: options.alreadyAdapted,
             signal: c.req.raw.signal,
           },
         )) as AsyncIterable<AnthropicStreamChunk>
@@ -234,12 +255,23 @@ async function executeBridgeStreaming(
         recordAccountContext(c)
 
         return streamSSE(c, async (stream) => {
+          const adapter = createChatStreamTerminalAdapter({ c, stream })
+          stream.onAbort(() => {
+            adapter.abort()
+          })
           try {
             const usage = await streamAnthropicAsChatCompletions(
               stream,
               withSseHeartbeat(response, stream),
               requestedModel,
             )
+            if (usage.receivedFailure) {
+              await adapter.failReceived(usage.receivedFailure)
+            } else if (usage.terminalSeen) {
+              await adapter.succeedAfterFinalChunk()
+            } else {
+              await adapter.finishSource()
+            }
             setRequestContext(c, {
               inputTokens: usage.inputTokens,
               outputTokens: usage.outputTokens,
@@ -260,8 +292,17 @@ async function executeBridgeStreaming(
             }
             setSentryOutputMessages(streamSpan, usage.responseText)
           } catch (error) {
-            if (isAbortError(error)) return
-            throw error
+            if (isAbortError(error)) {
+              adapter.abort()
+              return
+            }
+            await adapter.failAfterCommit({
+              kind: "thrown",
+              error,
+              ...(isHTTPError(error) ?
+                { inspection: await inspectHttpError(error) }
+              : {}),
+            })
           } finally {
             finishSpan()
           }
@@ -289,14 +330,6 @@ export async function chatPayloadToAnthropic(
   signal?: AbortSignal,
 ): Promise<AnthropicMessagesPayload> {
   const normalized = normalizeChatCompletionsRequest(payload)
-  assertEndpointTranslationSupported(
-    {
-      blockers: [],
-      code: "endpoint_translation_unsupported",
-      source: "chat",
-    },
-    checkNormalizedChatToMessagesTranslation(normalized),
-  )
 
   const { systemTexts, messages } = await convertChatMessages(
     normalized.messages,
@@ -341,11 +374,11 @@ function resolveBridgeMaxTokens(options: {
   normalized: ChatCompletionsPayload & { model: string }
   selectedModel?: Model
 }): Pick<AnthropicMessagesPayload, "max_tokens"> | Record<never, never> {
-  if (options.hasMaxTokens) {
-    return { max_tokens: options.normalized.max_tokens }
-  }
   if (options.hasMaxCompletionTokens) {
     return { max_tokens: options.normalized.max_completion_tokens }
+  }
+  if (options.hasMaxTokens) {
+    return { max_tokens: options.normalized.max_tokens }
   }
   const maxTokens =
     options.selectedModel?.capabilities.limits?.max_output_tokens
@@ -427,7 +460,11 @@ function convertSamplingOptions(
     ...(payload.temperature !== undefined && payload.temperature !== null ?
       { temperature: payload.temperature }
     : {}),
-    ...(payload.top_p !== undefined && payload.top_p !== null ?
+    ...((
+      payload.temperature === undefined
+      && payload.top_p !== undefined
+      && payload.top_p !== null
+    ) ?
       { top_p: payload.top_p }
     : {}),
     ...(payload.stop ?
@@ -497,26 +534,9 @@ function safeParseArguments(rawArguments: string): Record<string, unknown> {
       return parsed as Record<string, unknown>
     }
   } catch {
-    throw createInvalidAnthropicToolArgumentsError()
+    return { raw_arguments: rawArguments }
   }
-  throw createInvalidAnthropicToolArgumentsError()
-}
-
-function createInvalidAnthropicToolArgumentsError(): LocalHTTPError {
-  const clientBody = {
-    error: {
-      code: "endpoint_translation_unsupported",
-      message:
-        "The selected Copilot model cannot accept this request without losing required protocol data.",
-      param: "tool_arguments",
-      type: "invalid_request_error",
-    },
-  }
-  return new LocalHTTPError(
-    "Tool call arguments must be a JSON object for Anthropic Messages.",
-    Response.json(clientBody, { status: 400 }),
-    clientBody,
-  )
+  return { raw_arguments: rawArguments }
 }
 
 function convertToolChoice(
@@ -607,6 +627,9 @@ function mapStopReason(
     case "max_tokens": {
       return "length"
     }
+    case "pause_turn": {
+      return "length"
+    }
     case "tool_use": {
       return "tool_calls"
     }
@@ -631,8 +654,10 @@ interface BridgeStreamState {
   outputTokens: number
   cachedTokens: number
   responseText: string
+  anthropicStopReason: AnthropicResponse["stop_reason"]
   finishReason: "stop" | "length" | "tool_calls" | "content_filter" | null
   signatureByBlockIndex: Map<number, string>
+  terminalSeen: boolean
 }
 
 type WriteBridgeChunk = (
@@ -640,13 +665,13 @@ type WriteBridgeChunk = (
   options?: {
     finishReason?: BridgeStreamState["finishReason"]
     usage?: ChatCompletionChunk["usage"]
+    copilotStopReason?: "pause_turn"
   },
 ) => Promise<void>
 
 interface BridgeStreamContext {
   state: BridgeStreamState
   writeChunk: WriteBridgeChunk
-  writeRaw: (data: string) => Promise<void>
 }
 
 export async function streamAnthropicAsChatCompletions(
@@ -657,7 +682,9 @@ export async function streamAnthropicAsChatCompletions(
   inputTokens: number
   outputTokens: number
   cachedTokens: number
+  receivedFailure?: unknown
   responseText: string
+  terminalSeen: boolean
 }> {
   const state: BridgeStreamState = {
     id: "chatcmpl_anthropic_bridge",
@@ -669,12 +696,16 @@ export async function streamAnthropicAsChatCompletions(
     outputTokens: 0,
     cachedTokens: 0,
     responseText: "",
+    anthropicStopReason: null,
     finishReason: null,
     signatureByBlockIndex: new Map(),
+    terminalSeen: false,
   }
 
   const writeChunk: WriteBridgeChunk = async (delta, options) => {
-    const chunk: ChatCompletionChunk = {
+    const chunk: ChatCompletionChunk & {
+      copilot_stop_reason?: "pause_turn"
+    } = {
       id: state.id,
       object: "chat.completion.chunk",
       created: state.created,
@@ -688,6 +719,9 @@ export async function streamAnthropicAsChatCompletions(
         },
       ],
       ...(options?.usage ? { usage: options.usage } : {}),
+      ...(options?.copilotStopReason ?
+        { copilot_stop_reason: options.copilotStopReason }
+      : {}),
     }
     await stream.writeSSE({ data: JSON.stringify(chunk) })
   }
@@ -695,35 +729,41 @@ export async function streamAnthropicAsChatCompletions(
   const context: BridgeStreamContext = {
     state,
     writeChunk,
-    writeRaw: async (data) => stream.writeSSE({ data }),
   }
 
+  let receivedFailure: unknown
+
   for await (const chunk of response) {
+    if (state.terminalSeen || receivedFailure !== undefined) break
     if (!chunk.data || chunk.data.trim() === "[DONE]") continue
 
-    let event: AnthropicStreamEventData
-    try {
-      event = JSON.parse(chunk.data) as AnthropicStreamEventData
-    } catch {
-      continue
-    }
+    const event = parseRecoverableStreamJson({
+      data: chunk.data,
+      event: chunk.event,
+      protocol: "Messages-to-Chat",
+      terminal: chunk.event === "error" || chunk.event === "message_stop",
+    }) as AnthropicStreamEventData | undefined
+    if (event === undefined) continue
 
-    await handleBridgeStreamEvent(event, context)
+    receivedFailure = await handleBridgeStreamEvent(event, context)
+    if (event.type === "message_stop" || event.type === "error") break
   }
 
   return {
     inputTokens: state.inputTokens + state.cachedTokens,
     outputTokens: state.outputTokens,
     cachedTokens: state.cachedTokens,
+    ...(receivedFailure === undefined ? {} : { receivedFailure }),
     responseText: state.responseText,
+    terminalSeen: state.terminalSeen,
   }
 }
 
 async function handleBridgeStreamEvent(
   event: AnthropicStreamEventData,
   context: BridgeStreamContext,
-): Promise<void> {
-  const { state, writeChunk, writeRaw } = context
+): Promise<unknown> {
+  const { state, writeChunk } = context
 
   switch (event.type) {
     case "message_start": {
@@ -765,11 +805,13 @@ async function handleBridgeStreamEvent(
         }
       }
       if (event.delta.stop_reason) {
+        state.anthropicStopReason = event.delta.stop_reason
         state.finishReason = mapStopReason(event.delta.stop_reason)
       }
       break
     }
     case "message_stop": {
+      if (state.terminalSeen) break
       await writeChunk(
         {},
         {
@@ -781,29 +823,23 @@ async function handleBridgeStreamEvent(
               state.inputTokens + state.cachedTokens + state.outputTokens,
             prompt_tokens_details: { cached_tokens: state.cachedTokens },
           },
+          ...(state.anthropicStopReason === "pause_turn" ?
+            { copilotStopReason: "pause_turn" }
+          : {}),
         },
       )
-      await writeRaw("[DONE]")
+      state.terminalSeen = true
       break
     }
     case "error": {
       logger.warn("Native messages stream failed")
-      await writeRaw(
-        JSON.stringify({
-          error: {
-            code: "upstream_error",
-            message: "Upstream stream failed",
-            type: "server_error",
-          },
-        }),
-      )
-      await writeRaw("[DONE]")
-      break
+      return event.error
     }
     default: {
       break
     }
   }
+  return undefined
 }
 
 async function handleBridgeContentDelta(

@@ -52,6 +52,13 @@ See the [detailed Copilot API compatibility contract](docs/copilot-api-compatibi
 for field handling, endpoint precedence, streaming, affinity, and current
 feature-flag limitations.
 
+> [!WARNING]
+> Authenticated inference clients can direct attachment/file recovery to any
+> runtime-valid absolute HTTP(S) destination, including internal and
+> metadata-style targets, and final non-empty upstream failure bodies are
+> delivered to normal clients and ordinary logs/Sentry. Grant inference access
+> and network reach only where that authority is acceptable.
+
 | API family | Method and path | Support |
 | --- | --- | --- |
 | OpenAI Models | `GET /v1/models` | Live model discovery plus configured aliases, reasoning variants, redirect sources, and custom-provider models |
@@ -515,6 +522,10 @@ These are compatibility implementations, not hosted identity or cloud services.
 - Direct Connect compatibility stubs are disabled by default. When explicitly
   enabled for private development, `/sessions` and `/ws/direct/:sessionId`
   require an inference-capable credential.
+- Callback URLs use a valid `COPILOT_PUBLIC_BASE_URL` first, otherwise a
+  complete forwarded protocol/host pair from a trusted socket peer, otherwise
+  the direct request origin. A configured path prefix must be stripped by the
+  reverse proxy before Bun's internal `/ws/direct/:sessionId` upgrade route.
 - GrowthBook feature evaluation and the feature-flag UI support client behavior
   overrides on private networks where the client source address is preserved.
 
@@ -638,6 +649,7 @@ files.
 | `COPILOT_ADMIN_PASSWORD_HASH` | Direct and Docker | Optional authoritative Argon2id PHC verifier for the administrator password; suitable for 1Password/Varlock |
 | `COPILOT_ADMIN_ORIGIN` | Direct and Docker | Exact browser origin allowed for dashboard mutations; set this explicitly for a proxied deployment |
 | `COPILOT_TRUSTED_PROXY_CIDRS` | Direct and Docker | Comma-separated socket-peer CIDRs allowed to supply forwarding headers; defaults to loopback only |
+| `COPILOT_PUBLIC_BASE_URL` | Direct and Docker | Optional externally reachable absolute HTTP(S) base for bridge and Direct Connect callback URLs; may include a deployment path prefix |
 | `COPILOT_API_ENABLE_DIRECT_CONNECT` | Direct and Docker | Set to `true` only to enable the authenticated experimental Direct Connect routes; disabled by default |
 | `COPILOT_INFERENCE_CORS_ORIGINS` | Direct and Docker | Optional comma-separated exact browser origins for inference-only CORS; disabled by default |
 | `COPILOT_VOICE_ORIGIN` | Direct and Docker | Optional exact browser Origin for the Claude voice WebSocket; supplied Origins must match |
@@ -805,13 +817,21 @@ The proxy must:
 - allow long-lived SSE and WebSocket connections;
 - avoid local request pacing, connection caps, finite body caps, and
   client/proxy/send timeouts; and
-- forward the gateway credential without logging it.
+- forward `x-copilot-gateway-key` to the application without logging it for
+  transparent redirected provider traffic, while preserving provider
+  `Authorization`, `x-api-key`, and `x-goog-api-key` headers end-to-end.
 
 The application reads forwarding headers only when the actual Bun socket peer
 falls within a configured trusted CIDR. Direct clients are identified by their
 socket address and cannot gain allowlist status by supplying `X-Real-IP` or
 `X-Forwarded-For`. Keep the trusted list exact: do not use a broad private range
 when only one local proxy address is required.
+
+For transparent redirected Anthropic hosts, gateway authentication is a
+separate `x-copilot-gateway-key` channel. The application removes that header
+before upstream forwarding. Provider credentials are not gateway credentials.
+An explicit invalid dedicated key is denied and cannot fall back to managed or
+leased-IP authorization; an absent key may use that existing IP policy.
 
 An exact trusted peer is insufficient when an upstream TCP load balancer
 source-NATs every client to that peer: every caller then shares the load
@@ -857,11 +877,22 @@ WebSocket probes.
   secret-like configuration and require an authenticated administrator session.
   Preserve full recovery backups through a separately protected filesystem
   process.
-- **Treat LLM Debug as raw credential-bearing data.** It intentionally preserves
-  exact captured request and response URLs, headers, and bodies without
+- **Restrict attachment network authority.** Authenticated callers can cause
+  attachment/file recovery to fetch any runtime-valid HTTP(S) destination and
+  redirect, including internal and metadata-style targets. Only abort, timeout,
+  byte, redirect, parsing, and media limits remain; restrict inference
+  credentials and runtime network reachability accordingly.
+- **Treat final upstream failure bodies as raw.** A non-empty final upstream
+  failure body can contain payload or credential material and is copied exactly
+  to the client, ordinary logs, and Sentry with its status and content type.
+  Protect their transport, retention, and access, and rotate credentials exposed
+  through those channels.
+- **Treat LLM Debug as broader raw credential-bearing data.** It intentionally
+  preserves exact captured request and response URLs, headers, and bodies without
   redaction, including credentials and session identifiers. Access requires an
   administrator session, and records expire from process memory after ten
-  minutes, but anyone viewing or exporting them receives the raw values.
+  minutes. It is broader than the final-error-body passthrough above, not the
+  only channel where that response body may appear.
 - **Use Sentry deliberately.** When `SENTRY_DSN` is set, AI prompt and completion
   content is recorded by default. Set `SENTRY_AI_RECORD_INPUTS=false` before
   handling sensitive data.

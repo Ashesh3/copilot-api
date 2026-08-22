@@ -755,7 +755,7 @@ test("invalid supplied credential cannot use transparent-proxy allowlist", async
       {
         headers: {
           host: "api.anthropic.com",
-          "x-api-key": "wrong-key",
+          "x-copilot-gateway-key": "wrong-key",
           "x-copilot-peer-ip": ip,
         },
       },

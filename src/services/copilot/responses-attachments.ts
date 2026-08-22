@@ -2,7 +2,6 @@ import {
   attachmentOmittedNote,
   fetchUrlAsDataUri,
   isDataUri,
-  isHttpUrl,
   isLikelyBase64,
   mediaTypeFromFilename,
   toDataUri,
@@ -54,7 +53,7 @@ async function normalizeInputFile(
     }
     return stripFileUrl(part)
   }
-  if (!fileUrl || !isHttpUrl(fileUrl)) return part
+  if (!fileUrl) return part
 
   const inlined = await fetchUrlAsDataUri(fileUrl, {
     expectPdf: true,
@@ -64,7 +63,14 @@ async function normalizeInputFile(
     return stripFileUrl({
       ...part,
       filename:
-        part.filename ?? new URL(fileUrl).pathname.split("/").pop() ?? null,
+        part.filename
+        ?? (() => {
+          try {
+            return new URL(fileUrl).pathname.split("/").pop() ?? null
+          } catch {
+            return null
+          }
+        })(),
       file_data: toDataUri(inlined.mediaType, inlined.data),
     })
   }
@@ -73,7 +79,7 @@ async function normalizeInputFile(
         type: "input_text",
         text: attachmentOmittedNote({
           kind: "file",
-          name: part.filename ?? fileUrl,
+          name: part.filename,
           reason: "the URL could not be fetched by the proxy",
         }),
       }
@@ -89,7 +95,11 @@ async function normalizeContentPart(
   },
 ): Promise<ResponseInputContent> {
   const { failClosed, resizeImage, signal } = options
-  if (isInputImage(part) && part.image_url && isHttpUrl(part.image_url)) {
+  if (
+    isInputImage(part)
+    && part.image_url
+    && !part.image_url.startsWith("data:")
+  ) {
     const inlined = await fetchUrlAsDataUri(part.image_url, { signal })
     if (inlined) {
       return await normalizeContentPart(
@@ -102,7 +112,6 @@ async function normalizeContentPart(
           type: "input_text",
           text: attachmentOmittedNote({
             kind: "image",
-            name: part.image_url,
             reason: "the URL could not be fetched by the proxy",
           }),
         }

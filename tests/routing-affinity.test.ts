@@ -3,6 +3,7 @@ import { expect, test } from "bun:test"
 import { getClientSessionId } from "~/lib/request-session"
 import {
   getRoutingAffinity,
+  installResponsesRoutingAffinity,
   installRoutingAffinityFallback,
   normalizeRoutingAffinityKey,
   resolveClaudeRoutingAffinity,
@@ -109,6 +110,85 @@ test("extracts Responses session then thread metadata best effort", () => {
   expect(
     resolveResponsesRoutingAffinity({ thread_id: "x".repeat(513) }),
   ).toBeUndefined()
+})
+
+test("routes Codex forks with the parent thread before the child session", () => {
+  for (const clientMetadata of [
+    {
+      session_id: "fork-child",
+      thread_id: "fork-child",
+      "x-codex-turn-metadata": {
+        forked_from_thread_id: " fork-parent ",
+      },
+    },
+    JSON.stringify({
+      session_id: "fork-child",
+      thread_id: "fork-child",
+      "x-codex-turn-metadata": JSON.stringify({
+        forked_from_thread_id: " fork-parent ",
+      }),
+    }),
+  ]) {
+    expect(resolveResponsesRoutingAffinity(clientMetadata)).toEqual({
+      key: "fork-parent",
+      source: "codex_thread",
+    })
+  }
+})
+
+test("ignores malformed Codex fork metadata", () => {
+  expect(
+    resolveResponsesRoutingAffinity({
+      session_id: "fork-child",
+      "x-codex-turn-metadata": "not json",
+    }),
+  ).toEqual({ key: "fork-child", source: "codex_metadata" })
+  expect(
+    resolveResponsesRoutingAffinity({
+      session_id: "fork-child",
+      "x-codex-turn-metadata": JSON.stringify({
+        forked_from_thread_id: "x".repeat(513),
+      }),
+    }),
+  ).toEqual({ key: "fork-child", source: "codex_metadata" })
+})
+
+test("preserves unrelated header affinity over Codex fork metadata", () => {
+  const clientMetadata = {
+    session_id: "fork-child",
+    thread_id: "fork-child",
+    "x-codex-turn-metadata": JSON.stringify({
+      forked_from_thread_id: "fork-parent",
+    }),
+  }
+
+  runWithRoutingAffinity(
+    { key: "unrelated-header", source: "copilot_session" },
+    () => {
+      installResponsesRoutingAffinity(clientMetadata)
+      expect(getRoutingAffinity()).toEqual({
+        key: "unrelated-header",
+        source: "copilot_session",
+      })
+    },
+  )
+})
+
+test("preserves higher-priority headers that reuse the child id", () => {
+  const clientMetadata = {
+    session_id: "shared-child-id",
+    thread_id: "shared-child-id",
+    "x-codex-turn-metadata": JSON.stringify({
+      forked_from_thread_id: "fork-parent",
+    }),
+  }
+
+  for (const source of ["claude_session", "copilot_session"] as const) {
+    runWithRoutingAffinity({ key: "shared-child-id", source }, () => {
+      installResponsesRoutingAffinity(clientMetadata)
+      expect(getRoutingAffinity()).toEqual({ key: "shared-child-id", source })
+    })
+  }
 })
 
 test("keeps mutable affinity state and never overwrites an existing value", () => {
