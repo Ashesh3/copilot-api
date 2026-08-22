@@ -6,8 +6,116 @@ import { LocalHTTPError } from "../src/lib/error"
 import {
   assertResponsesChatFallbackTranslation,
   responsesToChatCompletions,
+  streamChatCompletionsAsResponses,
   useFunctionApplyPatch,
 } from "../src/routes/responses/handler"
+
+function chatStream(
+  chunks: Array<Record<string, unknown> | "[DONE]">,
+): AsyncIterable<{ data: string }> {
+  return {
+    async *[Symbol.asyncIterator]() {
+      for (const chunk of chunks) {
+        await Promise.resolve()
+        yield { data: chunk === "[DONE]" ? chunk : JSON.stringify(chunk) }
+      }
+    },
+  }
+}
+
+test("preserves trailing Chat usage before completing a Responses stream", async () => {
+  const events: Array<{ data: Record<string, unknown>; event?: string }> = []
+  const stream = {
+    writeSSE(message: { data: string; event?: string }) {
+      events.push({
+        data: JSON.parse(message.data) as Record<string, unknown>,
+        ...(message.event ? { event: message.event } : {}),
+      })
+      return Promise.resolve()
+    },
+  }
+
+  const source = chatStream([
+    {
+      id: "chat_trailing_usage",
+      created: 1,
+      model: "chat-only",
+      choices: [
+        {
+          index: 0,
+          delta: { content: "kept" },
+          finish_reason: "stop",
+        },
+      ],
+    },
+    {
+      id: "chat_trailing_usage",
+      created: 1,
+      model: "chat-only",
+      choices: [],
+      usage: {
+        prompt_tokens: 11,
+        completion_tokens: 7,
+        total_tokens: 18,
+        prompt_tokens_details: { cached_tokens: 3 },
+      },
+    },
+    "[DONE]",
+  ])
+
+  const outcome = await streamChatCompletionsAsResponses(
+    stream,
+    source,
+    "requested-model",
+  )
+  const terminals = events.filter(
+    (event) =>
+      event.event === "response.completed"
+      || event.event === "response.incomplete",
+  )
+
+  expect(outcome.terminal).toBe("response.completed")
+  expect(terminals).toHaveLength(1)
+  expect(terminals[0]?.data.response).toMatchObject({
+    output_text: "kept",
+    usage: {
+      input_tokens: 11,
+      output_tokens: 7,
+      total_tokens: 18,
+      input_tokens_details: { cached_tokens: 3 },
+    },
+  })
+})
+
+test("ignores Chat output deltas received after its finish chunk", async () => {
+  const events: Array<{ data: Record<string, unknown>; event?: string }> = []
+  const stream = {
+    writeSSE(message: { data: string; event?: string }) {
+      events.push({
+        data: JSON.parse(message.data) as Record<string, unknown>,
+        ...(message.event ? { event: message.event } : {}),
+      })
+      return Promise.resolve()
+    },
+  }
+
+  const source = chatStream([
+    {
+      choices: [
+        { index: 0, delta: { content: "before" }, finish_reason: "stop" },
+      ],
+    },
+    {
+      choices: [{ index: 0, delta: { content: "after" }, finish_reason: null }],
+    },
+    "[DONE]",
+  ])
+
+  await streamChatCompletionsAsResponses(stream, source, "requested-model")
+
+  expect(JSON.stringify(events)).toContain("before")
+  expect(JSON.stringify(events)).not.toContain("after")
+})
 
 test("keeps non-apply_patch custom tools unchanged on the native responses path", () => {
   const payload = {

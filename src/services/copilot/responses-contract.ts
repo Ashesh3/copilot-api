@@ -1,11 +1,27 @@
+/* eslint-disable max-lines -- legacy and tolerant Responses contracts coexist until Task 14 */
 import type { CopilotContractNormalizationClass } from "~/lib/copilot-contract-observability"
 
 import { LocalHTTPError } from "~/lib/error"
 import { getUnsupportedRequestParameters } from "~/lib/model-settings"
+import {
+  isProxyObject,
+  REQUEST_SNAPSHOT_MAX_ARRAY_LENGTH,
+  snapshotRequestPlainDataRecord,
+} from "~/lib/plain-data-snapshot"
 
 import type { ResponseInputMessage, ResponsesPayload } from "./create-responses"
 
 export type ResponsesWireBody = ResponsesPayload & Record<string, unknown>
+
+export interface PreparedResponsesSource {
+  readonly source: ResponsesWireBody
+  readonly normalizationClasses: ReadonlyArray<CopilotContractNormalizationClass>
+}
+
+export interface FinalizedNativeResponsesRequest {
+  readonly body: ResponsesWireBody
+  readonly normalizationClasses: ReadonlyArray<CopilotContractNormalizationClass>
+}
 
 export interface PreparedResponsesRequest {
   body: ResponsesWireBody
@@ -15,6 +31,11 @@ export interface PreparedResponsesRequest {
 export interface FinalizeResponsesRequestOptions {
   defaultEffort?: string
   implicitDefault: boolean
+}
+
+export interface FinalizeNativeResponsesRequestOptions
+  extends FinalizeResponsesRequestOptions {
+  model: string
 }
 
 export function applyResponsesReasoningDefaults(options: {
@@ -77,7 +98,7 @@ export function finalizeResponsesRequest(
   payload: ResponsesPayload,
   options: FinalizeResponsesRequestOptions,
 ): PreparedResponsesRequest {
-  const prepared = prepareResponsesRequest(payload)
+  const prepared = prepareLegacyResponsesRequest(payload)
   if (
     shouldFinalizeResponsesReasoning(prepared.body, options)
     && applyResponsesReasoningDefaults({
@@ -93,6 +114,55 @@ export function finalizeResponsesRequest(
   )
   if (samplingClass) prepared.normalizationClasses.push(samplingClass)
   return prepared
+}
+
+export function finalizeNativeResponsesRequest(
+  prepared: PreparedResponsesSource,
+  options: FinalizeNativeResponsesRequestOptions,
+): FinalizedNativeResponsesRequest {
+  const sourceSnapshot = snapshotRequestPlainDataRecord(prepared.source)
+  if (!sourceSnapshot) {
+    throw createResponsesValidationError({
+      code: "invalid_type",
+      message: "The request body must be a JSON object.",
+      param: "body",
+    })
+  }
+  const body = structuredClone(sourceSnapshot) as ResponsesWireBody
+  const normalizationClasses = [...prepared.normalizationClasses]
+  body.model = options.model
+  body.store = false
+
+  const toolsClass = finalizeNativeResponsesTools(body)
+  if (toolsClass) normalizationClasses.push(toolsClass)
+  if (ensureJsonObjectInputMentionsJson(body)) {
+    normalizationClasses.push("json_object_instruction")
+  }
+  if (normalizeFunctionToolParameters(body)) {
+    normalizationClasses.push("function_parameters")
+  }
+  if (normalizeJsonSchemaResponseFormat(body)) {
+    normalizationClasses.push("json_schema")
+  }
+  if (canonicalizeEncryptedReasoningInclude(body)) {
+    normalizationClasses.push("encrypted_reasoning_include")
+  }
+  if (clampMaxOutputTokens(body)) {
+    normalizationClasses.push("max_output_tokens")
+  }
+  if (
+    shouldFinalizeResponsesReasoning(body, options)
+    && applyResponsesReasoningDefaults({
+      body,
+      defaultEffort: options.defaultEffort,
+      implicitDefault: options.implicitDefault,
+    })
+  ) {
+    normalizationClasses.push("reasoning_defaults")
+  }
+  const samplingClass = removeUnsupportedResponsesRequestParameters(body)
+  if (samplingClass) normalizationClasses.push(samplingClass)
+  return { body, normalizationClasses }
 }
 
 function shouldFinalizeResponsesReasoning(
@@ -146,17 +216,9 @@ const OMIT_FIELD = Symbol("omit Responses field")
 const INVALID_RESPONSES_TOOL_SNAPSHOT = Symbol(
   "invalid Responses tool snapshot",
 )
+class ResponsesToolsSnapshotLimitError extends Error {}
 const JSON_OBJECT_INPUT_INSTRUCTION = "Respond with JSON."
-const COPILOT_RESPONSES_MIN_OUTPUT_TOKENS = 16
-const ALWAYS_BLOCKED_RESPONSES_TOOLS = new Set([
-  "code_interpreter",
-  "computer_use",
-  "computer_use_preview",
-  "file_search",
-  "local_shell",
-  "mcp",
-  "mcp_list_tools",
-])
+export const COPILOT_RESPONSES_MIN_OUTPUT_TOKENS = 16
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null
@@ -183,6 +245,19 @@ export function createResponsesValidationError(options: {
 }
 
 export function prepareResponsesRequest(
+  payload: unknown,
+): PreparedResponsesSource {
+  const sourceSnapshot = snapshotResponsesSource(payload)
+  const normalizationClasses: Array<CopilotContractNormalizationClass> = []
+  if (sourceSnapshot.store !== false) {
+    normalizationClasses.push("stateless_controls")
+  }
+  const source = structuredClone(sourceSnapshot)
+  source.store = false
+  return { source, normalizationClasses }
+}
+
+function prepareLegacyResponsesRequest(
   payload: ResponsesPayload,
 ): PreparedResponsesRequest {
   validateResponsesBody(payload)
@@ -230,6 +305,121 @@ export function prepareResponsesRequest(
   }
 
   return { body, normalizationClasses }
+}
+
+function snapshotResponsesSource(payload: unknown): ResponsesWireBody {
+  const sourceCandidate = createResponsesSourceSnapshotCandidate(payload)
+  const snapshot = snapshotRequestPlainDataRecord(sourceCandidate)
+  if (!snapshot) {
+    throw createResponsesValidationError({
+      code: "invalid_type",
+      message: "The request body must be a JSON object.",
+      param: "body",
+    })
+  }
+
+  const model = snapshot.model
+  if (typeof model !== "string" || model.trim() === "") {
+    throw createResponsesValidationError({
+      code: "invalid_value",
+      message: "The model field must be a non-empty string.",
+      param: "model",
+    })
+  }
+  return snapshot as ResponsesWireBody
+}
+
+function createResponsesSourceSnapshotCandidate(
+  payload: unknown,
+): Record<string, unknown> | undefined {
+  if (!isRecord(payload) || Array.isArray(payload) || isProxyObject(payload)) {
+    return undefined
+  }
+  try {
+    const prototype = Object.getPrototypeOf(payload) as unknown
+    if (prototype !== Object.prototype && prototype !== null) return undefined
+    const descriptors = Object.getOwnPropertyDescriptors(payload)
+    const source: Record<string, unknown> = {}
+    for (const key of Reflect.ownKeys(descriptors)) {
+      if (typeof key !== "string") return undefined
+      const descriptor = descriptors[key]
+      if (!descriptor.enumerable || !("value" in descriptor)) {
+        return undefined
+      }
+      if (key === "tools") {
+        const tools = snapshotResponsesSourceTools(descriptor.value)
+        if (tools !== undefined) source.tools = tools
+        continue
+      }
+      source[key] = descriptor.value
+    }
+    return source
+  } catch (error) {
+    if (error instanceof ResponsesToolsSnapshotLimitError) {
+      throw createResponsesValidationError({
+        code: "invalid_value",
+        message: `The tools field must contain at most ${REQUEST_SNAPSHOT_MAX_ARRAY_LENGTH.toLocaleString("en-US")} items.`,
+        param: "tools",
+      })
+    }
+    return undefined
+  }
+}
+
+function snapshotResponsesSourceTools(tools: unknown): unknown {
+  if (!Array.isArray(tools)) return snapshotResponsesToolEvidence(tools)
+  let descriptors: Record<PropertyKey, PropertyDescriptor | undefined>
+  try {
+    if (
+      isProxyObject(tools)
+      || Object.getPrototypeOf(tools) !== Array.prototype
+    ) {
+      return undefined
+    }
+    descriptors = Object.getOwnPropertyDescriptors(tools) as unknown as Record<
+      PropertyKey,
+      PropertyDescriptor | undefined
+    >
+  } catch {
+    return undefined
+  }
+  const lengthDescriptor = descriptors.length
+  if (
+    !lengthDescriptor
+    || !("value" in lengthDescriptor)
+    || !Number.isSafeInteger(lengthDescriptor.value)
+    || lengthDescriptor.value < 0
+  ) {
+    return undefined
+  }
+  if (lengthDescriptor.value > REQUEST_SNAPSHOT_MAX_ARRAY_LENGTH) {
+    throw new ResponsesToolsSnapshotLimitError()
+  }
+  const length = lengthDescriptor.value as number
+  if (
+    Reflect.ownKeys(descriptors).some(
+      (key) =>
+        typeof key !== "string"
+        || (key !== "length" && (!/^\d+$/u.test(key) || Number(key) >= length)),
+    )
+  ) {
+    return undefined
+  }
+  const snapshot: Array<unknown> = []
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = descriptors[String(index)]
+    if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) {
+      continue
+    }
+    const item = snapshotResponsesToolEvidence(descriptor.value)
+    if (item !== undefined) snapshot.push(item)
+  }
+  return snapshot
+}
+
+function snapshotResponsesToolEvidence(value: unknown): unknown {
+  const wrapper = snapshotRequestPlainDataRecord({ value })
+  return wrapper?.value
 }
 
 function validateResponsesBody(payload: ResponsesPayload): void {
@@ -294,18 +484,44 @@ function prepareResponsesTools(
   }
 
   return tools.map((tool) => {
-    const snapshot = getSafeResponsesToolSnapshot(tool)
-    const type = snapshot.type
-    if (ALWAYS_BLOCKED_RESPONSES_TOOLS.has(type)) {
-      throw createResponsesValidationError({
-        code: "unsupported_value",
-        message:
-          "The Copilot Responses endpoint does not support one or more requested tools.",
-        param: "tools",
-      })
-    }
-    return snapshot
+    return getSafeResponsesToolSnapshot(tool)
   })
+}
+
+function finalizeNativeResponsesTools(
+  payload: ResponsesWireBody,
+): CopilotContractNormalizationClass | undefined {
+  const suppliedTools = (payload as Record<string, unknown>).tools
+  let candidates: Array<unknown>
+  if (Array.isArray(suppliedTools)) {
+    candidates = suppliedTools
+  } else if (suppliedTools === undefined || suppliedTools === null) {
+    candidates = []
+  } else {
+    candidates = [suppliedTools]
+  }
+  const tools = candidates.flatMap((tool) => {
+    const snapshot = getSafeNativeResponsesToolSnapshot(tool)
+    return snapshot ? [snapshot] : []
+  })
+  if (tools.length > 0) {
+    payload.tools = tools
+    return undefined
+  }
+  payload.tools = []
+  return normalizeEmptyToolControls(payload) ? "empty_tool_controls" : undefined
+}
+
+function getSafeNativeResponsesToolSnapshot(
+  tool: unknown,
+): (Record<string, unknown> & { type: string }) | undefined {
+  const snapshot = snapshotRequestPlainDataRecord(tool)
+  if (!snapshot) return undefined
+  const type = snapshot.type
+  if (typeof type !== "string" || type.trim() === "") return undefined
+  const writable = structuredClone(snapshot) as Record<string, unknown>
+  writable.type = type.trim()
+  return writable as Record<string, unknown> & { type: string }
 }
 
 function getSafeResponsesToolSnapshot(
@@ -674,144 +890,8 @@ function normalizeFunctionToolParameters(payload: ResponsesWireBody): boolean {
   return changed
 }
 
-function normalizeJsonSchemaResponseFormat(
-  payload: ResponsesWireBody,
+export function normalizeJsonSchemaResponseFormat(
+  _payload: ResponsesWireBody,
 ): boolean {
-  const format = payload.text?.format
-  if (!isRecord(format) || format.type !== "json_schema") return false
-
-  return normalizeJsonSchemaObject(format.schema)
-}
-
-function normalizeJsonSchemaObject(
-  schema: unknown,
-  seen = new Set<object>(),
-): boolean {
-  if (!isRecord(schema)) return false
-  if (seen.has(schema)) return false
-  seen.add(schema)
-  const objectChanged = normalizeObjectSchemaDefaults(schema)
-  const mapsChanged = normalizeSchemaMaps(schema, seen)
-  const valuesChanged = normalizeSchemaValues(schema, seen)
-  const arraysChanged = normalizeSchemaArrays(schema, seen)
-  return objectChanged || mapsChanged || valuesChanged || arraysChanged
-}
-
-function normalizeObjectSchemaDefaults(
-  schema: Record<string, unknown>,
-): boolean {
-  if (schema.type !== "object" && !isRecord(schema.properties)) return false
-  let changed = false
-  if (schema.additionalProperties === undefined) {
-    schema.additionalProperties = false
-    changed = true
-  }
-  return normalizeJsonSchemaRequired(schema) || changed
-}
-
-function normalizeSchemaMaps(
-  schema: Record<string, unknown>,
-  seen: Set<object>,
-): boolean {
-  let changed = false
-  for (const value of [
-    schema.properties,
-    schema.patternProperties,
-    schema.$defs,
-    schema.definitions,
-  ]) {
-    if (normalizeSchemaMap(value, seen)) changed = true
-  }
-  return changed
-}
-
-function normalizeSchemaValues(
-  schema: Record<string, unknown>,
-  seen: Set<object>,
-): boolean {
-  let changed = false
-  for (const value of [
-    schema.items,
-    schema.additionalItems,
-    schema.contains,
-    schema.propertyNames,
-    schema.not,
-    schema.if,
-    schema.then,
-    schema.else,
-  ]) {
-    if (normalizeSchemaValue(value, seen)) changed = true
-  }
-  return changed
-}
-
-function normalizeSchemaArrays(
-  schema: Record<string, unknown>,
-  seen: Set<object>,
-): boolean {
-  let changed = false
-  for (const value of [schema.anyOf, schema.oneOf, schema.allOf]) {
-    if (normalizeSchemaArray(value, seen)) changed = true
-  }
-  return changed
-}
-
-function normalizeJsonSchemaRequired(schema: Record<string, unknown>): boolean {
-  if (!isRecord(schema.properties)) return false
-
-  const propertyKeys = Object.keys(schema.properties)
-  if (propertyKeys.length === 0) return false
-
-  const existingRequired =
-    Array.isArray(schema.required) ?
-      schema.required.filter((key): key is string => typeof key === "string")
-    : []
-  const propertyKeySet = new Set(propertyKeys)
-  const required = new Set(
-    existingRequired.filter((key) => propertyKeySet.has(key)),
-  )
-
-  for (const key of propertyKeys) {
-    required.add(key)
-  }
-
-  const normalizedRequired = [...required]
-  const existingValue = schema.required
-  if (
-    Array.isArray(existingValue)
-    && existingValue.length === normalizedRequired.length
-    && existingValue.every((key, index) => key === normalizedRequired[index])
-  ) {
-    return false
-  }
-  schema.required = normalizedRequired
-  return true
-}
-
-function normalizeSchemaMap(value: unknown, seen: Set<object>): boolean {
-  if (!isRecord(value)) return false
-
-  let changed = false
-  for (const schema of Object.values(value)) {
-    if (normalizeJsonSchemaObject(schema, seen)) changed = true
-  }
-  return changed
-}
-
-function normalizeSchemaArray(value: unknown, seen: Set<object>): boolean {
-  if (!Array.isArray(value)) return false
-
-  let changed = false
-  for (const schema of value) {
-    if (normalizeJsonSchemaObject(schema, seen)) changed = true
-  }
-  return changed
-}
-
-function normalizeSchemaValue(value: unknown, seen: Set<object>): boolean {
-  if (Array.isArray(value)) {
-    return normalizeSchemaArray(value, seen)
-  }
-
-  return normalizeJsonSchemaObject(value, seen)
+  return false
 }

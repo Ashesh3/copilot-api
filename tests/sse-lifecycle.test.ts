@@ -1,4 +1,4 @@
-import { describe, expect, test, beforeEach } from "bun:test"
+import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { events } from "fetch-event-stream"
 
 import {
@@ -66,6 +66,10 @@ beforeEach(() => {
   resetSseHeartbeatCountForTest()
 })
 
+afterEach(() => {
+  delete process.env.COPILOT_API_DISABLE_SSE_HEARTBEAT
+})
+
 describe("withSseHeartbeat", () => {
   test("withSseHeartbeat writes nothing when chunks arrive faster than the interval", async () => {
     const sink = createSink()
@@ -101,6 +105,24 @@ describe("withSseHeartbeat", () => {
     expect(sink.writes.every((entry) => entry === SSE_HEARTBEAT_COMMENT)).toBe(
       true,
     )
+  })
+
+  test("withSseHeartbeat honors the heartbeat kill switch without changing values", async () => {
+    process.env.COPILOT_API_DISABLE_SSE_HEARTBEAT = "1"
+    const sink = createSink()
+    const received: Array<string> = []
+
+    for await (const value of withSseHeartbeat(
+      pacedSource(["only"], INTERVAL_MS * 6),
+      sink,
+      INTERVAL_MS,
+    )) {
+      received.push(value)
+    }
+
+    expect(received).toEqual(["only"])
+    expect(heartbeatsIn(sink)).toEqual([])
+    expect(getSseHeartbeatCount()).toBe(0)
   })
 
   test("withSseHeartbeat stops heartbeating once the source completes", async () => {

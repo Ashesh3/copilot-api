@@ -40,6 +40,8 @@ import { mapOpenAIStopReasonToAnthropic } from "./utils"
 
 // Payload translation
 
+const MAX_UNKNOWN_ASSISTANT_BLOCK_TEXT_LENGTH = 16_384
+
 export function translateToOpenAI(
   payload: AnthropicMessagesPayload,
 ): ChatCompletionsPayload {
@@ -54,16 +56,28 @@ export function translateToOpenAI(
     stop: payload.stop_sequences,
     stream: payload.stream,
     temperature: payload.temperature,
-    top_p: payload.top_p,
+    ...(payload.temperature === undefined ? { top_p: payload.top_p } : {}),
     user: payload.metadata?.user_id,
     response_format: translateOutputFormatToOpenAI(payload.output_config),
     tools,
-    tool_choice: translateAnthropicToolChoiceToOpenAI(payload.tool_choice),
-    parallel_tool_calls:
-      tools?.some((tool) => tool.function.name === "web_search") ? false : true,
+    ...(tools ? createTranslatedToolChoice(payload.tool_choice, tools) : {}),
+    ...(tools?.some((tool) => tool.function.name === "web_search") ?
+      { parallel_tool_calls: false }
+    : {}),
     snippy: { enabled: false },
     ...(payload.stream ? { stream_options: { include_usage: true } } : {}),
   }
+}
+
+function createTranslatedToolChoice(
+  anthropicToolChoice: AnthropicMessagesPayload["tool_choice"],
+  translatedTools: ReadonlyArray<Tool>,
+): Pick<ChatCompletionsPayload, "tool_choice"> {
+  const toolChoice = translateAnthropicToolChoiceToOpenAI(
+    anthropicToolChoice,
+    translatedTools,
+  )
+  return toolChoice === undefined ? {} : { tool_choice: toolChoice }
 }
 
 function translateOutputFormatToOpenAI(
@@ -97,150 +111,10 @@ function translateModelName(model: string): string {
   return model
 }
 
-const HARNESS_USER_PREFIXES = [
-  "<available-deferred-tools>",
-  "<system-reminder>\nSessionStart hook additional context:",
-  "<system-reminder>\n# MCP Server Instructions",
-  "<system-reminder>\nThe following skills are available for use with the Skill tool:",
-  "<system-reminder>\nThe task tools haven't been used recently.",
-]
-
-const HARNESS_TOOL_RESULT_MARKERS = [
-  "IMPORTANT: This message and these instructions are NOT part of the actual user conversation.",
-  String.raw`\session-memory\summary.md`,
-  "The task tools haven't been used recently.",
-]
-
-const HARNESS_TOOL_USE_NAMES = new Set([
-  "AskUserQuestion",
-  "CronCreate",
-  "CronDelete",
-  "CronList",
-  "EnterPlanMode",
-  "EnterWorktree",
-  "ExitPlanMode",
-  "ExitWorktree",
-  "LSP",
-  "ListMcpResourcesTool",
-  "NotebookEdit",
-  "ReadMcpResourceTool",
-  "SendMessage",
-  "Skill",
-  "TaskCreate",
-  "TaskGet",
-  "TaskList",
-  "TaskOutput",
-  "TaskStop",
-  "TaskUpdate",
-  "TeamCreate",
-  "TeamDelete",
-  "WebFetch",
-  "WebSearch",
-])
-
-function isClaudeCodeHarnessUserMessage(message: AnthropicMessage): boolean {
-  if (message.role !== "user" || typeof message.content !== "string") {
-    return false
-  }
-
-  const content = message.content.trimStart()
-  return HARNESS_USER_PREFIXES.some((prefix) => content.startsWith(prefix))
-}
-
-function getToolResultText(
-  content: AnthropicToolResultBlock["content"],
-): string | null {
-  if (typeof content === "string") {
-    return content
-  }
-
-  const textBlocks = content.filter(
-    (block): block is AnthropicTextBlock => block.type === "text",
-  )
-  if (textBlocks.length !== content.length) {
-    return null
-  }
-
-  return textBlocks.map((block) => block.text).join("\n\n")
-}
-
-function isClaudeCodeHarnessToolResult(
-  block: AnthropicToolResultBlock,
-): boolean {
-  const text = getToolResultText(block.content)?.trim()
-  if (!text) {
-    return false
-  }
-
-  if (text === "Tool loaded.") {
-    return true
-  }
-
-  if (
-    text.startsWith("only Edit on ")
-    && text.includes(String.raw`\session-memory\summary.md is allowed`)
-  ) {
-    return true
-  }
-
-  return HARNESS_TOOL_RESULT_MARKERS.some((marker) => text.includes(marker))
-}
-
-function isHarnessOnlyToolResultMessage(
-  message: AnthropicMessage | undefined,
-): message is AnthropicUserMessage {
-  if (!message || message.role !== "user" || !Array.isArray(message.content)) {
-    return false
-  }
-
-  return (
-    message.content.length > 0
-    && message.content.every(
-      (block) =>
-        isAnthropicToolResultBlock(block)
-        && isClaudeCodeHarnessToolResult(block),
-    )
-  )
-}
-
-function isHarnessOnlyAssistantToolUseMessage(
-  message: AnthropicMessage,
-): message is AnthropicAssistantMessage {
-  return (
-    message.role === "assistant"
-    && Array.isArray(message.content)
-    && message.content.length > 0
-    && message.content.every(
-      (block) =>
-        isAnthropicToolUseBlock(block)
-        && HARNESS_TOOL_USE_NAMES.has(block.name),
-    )
-  )
-}
-
 export function sanitizeAnthropicMessages(
   messages: Array<AnthropicMessage>,
 ): Array<AnthropicMessage> {
-  const sanitized: Array<AnthropicMessage> = []
-
-  for (let index = 0; index < messages.length; index++) {
-    const message = messages[index]
-
-    if (message.role === "user" && isClaudeCodeHarnessUserMessage(message)) {
-      continue
-    }
-
-    if (
-      isHarnessOnlyAssistantToolUseMessage(message)
-      && isHarnessOnlyToolResultMessage(messages[index + 1])
-    ) {
-      index++
-      continue
-    }
-    sanitized.push(message)
-  }
-
-  return sanitized
+  return messages
 }
 
 function translateAnthropicMessagesToOpenAI(
@@ -347,28 +221,46 @@ function handleAssistantMessage(
     (block): block is AnthropicToolUseBlock => isAnthropicToolUseBlock(block),
   )
 
-  const textBlocks = message.content.filter(
-    (block): block is AnthropicTextBlock => isAnthropicTextBlock(block),
-  )
-
   const thinkingBlocks = message.content.filter(
     (block): block is AnthropicThinkingBlock => isAnthropicThinkingBlock(block),
   )
   const signedThinkingBlocks = thinkingBlocks.filter(
     (block) => block.signature && isValidReasoningSignature(block.signature),
   )
+  const preserveThinkingAsContext =
+    hasMultipleThinkingWithSignature(thinkingBlocks)
+  const representativeThinking =
+    preserveThinkingAsContext ? signedThinkingBlocks[0] : undefined
 
-  const textContent = textBlocks.map((block) => block.text).join("\n\n")
-  const reasoningText = thinkingBlocks
-    .map((block) => block.thinking)
+  const textContent = message.content
     .filter(
-      (thinking) => thinking.trim().length > 0 && thinking !== "Thinking...",
+      (block) =>
+        isAnthropicTextBlock(block)
+        || (!isAnthropicToolUseBlock(block)
+          && (preserveThinkingAsContext || !isAnthropicThinkingBlock(block))),
+    )
+    .map((block) =>
+      isAnthropicTextBlock(block) ?
+        block.text
+      : JSON.stringify(block).slice(0, MAX_UNKNOWN_ASSISTANT_BLOCK_TEXT_LENGTH),
     )
     .join("\n\n")
-  const reasoningOpaque =
-    signedThinkingBlocks.length === 1 && thinkingBlocks.length === 1 ?
-      signedThinkingBlocks[0]?.signature
-    : undefined
+  const reasoningText =
+    preserveThinkingAsContext ?
+      (representativeThinking?.thinking ?? "")
+    : thinkingBlocks
+        .map((block) => block.thinking)
+        .filter(
+          (thinking) =>
+            thinking.trim().length > 0 && thinking !== "Thinking...",
+        )
+        .join("\n\n")
+  let reasoningOpaque: string | undefined
+  if (preserveThinkingAsContext) {
+    reasoningOpaque = representativeThinking?.signature
+  } else if (signedThinkingBlocks.length === 1 && thinkingBlocks.length === 1) {
+    reasoningOpaque = signedThinkingBlocks[0]?.signature
+  }
 
   return [
     {
@@ -390,6 +282,33 @@ function handleAssistantMessage(
       : {}),
     },
   ]
+}
+
+function hasMultipleThinkingWithSignature(
+  thinkingBlocks: ReadonlyArray<AnthropicThinkingBlock>,
+): boolean {
+  return (
+    thinkingBlocks.length > 1
+    && thinkingBlocks.some(
+      (block) =>
+        typeof block.signature === "string" && block.signature.length > 0,
+    )
+  )
+}
+
+export function hasUnrepresentableChatThinkingHistory(
+  messages: ReadonlyArray<AnthropicMessage>,
+): boolean {
+  return messages.some(
+    (message) =>
+      isAnthropicAssistantMessage(message)
+      && Array.isArray(message.content)
+      && hasMultipleThinkingWithSignature(
+        message.content.filter((block): block is AnthropicThinkingBlock =>
+          isAnthropicThinkingBlock(block),
+        ),
+      ),
+  )
 }
 
 function isValidReasoningSignature(
@@ -485,8 +404,10 @@ function translateAnthropicToolsToOpenAI(
       continue
     }
 
-    // Filter out other server-side tools without input_schema
-    if (!isAnthropicNamedTool(tool) || tool.input_schema === undefined) {
+    if (
+      !isAnthropicNamedTool(tool)
+      || (tool.type !== undefined && tool.input_schema === undefined)
+    ) {
       continue
     }
 
@@ -496,7 +417,7 @@ function translateAnthropicToolsToOpenAI(
         name: tool.name,
         description:
           typeof tool.description === "string" ? tool.description : undefined,
-        parameters: tool.input_schema,
+        parameters: tool.input_schema ?? { type: "object", properties: {} },
       },
     })
   }
@@ -506,6 +427,7 @@ function translateAnthropicToolsToOpenAI(
 
 function translateAnthropicToolChoiceToOpenAI(
   anthropicToolChoice: AnthropicMessagesPayload["tool_choice"],
+  translatedTools: ReadonlyArray<Tool>,
 ): ChatCompletionsPayload["tool_choice"] {
   if (!anthropicToolChoice) {
     return undefined
@@ -519,7 +441,12 @@ function translateAnthropicToolChoiceToOpenAI(
       return "required"
     }
     case "tool": {
-      if (anthropicToolChoice.name) {
+      if (
+        anthropicToolChoice.name
+        && translatedTools.some(
+          (tool) => tool.function.name === anthropicToolChoice.name,
+        )
+      ) {
         return {
           type: "function",
           function: { name: anthropicToolChoice.name },
@@ -568,7 +495,9 @@ function extractContentFromChoices(response: ChatCompletionResponse): {
       allThinkingBlocks.push({
         type: "thinking",
         thinking: choice.message.reasoning_text,
-        signature: choice.message.reasoning_opaque ?? "",
+        ...(choice.message.reasoning_opaque ?
+          { signature: choice.message.reasoning_opaque }
+        : {}),
       })
     }
 

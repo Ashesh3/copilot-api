@@ -1507,11 +1507,17 @@ test("bounds pre-header retry delay without weakening the send budget", () => {
   // invariants must be untouched.
   expect(MAX_ROUTED_SENDS).toBe(3)
   expect(MAX_RETRIES).toBe(1)
-  expect(createRetryBudget()).toEqual({ remaining: MAX_ROUTED_SENDS - 1 })
+  expect(createRetryBudget()).toEqual({
+    compatibilityRetryUsed: false,
+    remaining: MAX_ROUTED_SENDS - 1,
+  })
 })
 
 test("allows a caller to reserve the retry budget for one exact recovery send", () => {
-  expect(createRetryBudget({ extraSends: 0 })).toEqual({ remaining: 0 })
+  expect(createRetryBudget({ extraSends: 0 })).toEqual({
+    compatibilityRetryUsed: false,
+    remaining: 0,
+  })
 })
 
 test("caps Retry-After only when the caller opts into the streaming pre-header ceiling", async () => {

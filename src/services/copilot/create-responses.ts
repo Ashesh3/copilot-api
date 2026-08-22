@@ -1,6 +1,9 @@
 import consola from "consola"
 import { events } from "fetch-event-stream"
 
+import type { RoutedAccountPin } from "~/lib/account-router"
+import type { RetryBudget } from "~/services/copilot/transport-retry"
+
 import { routedFetch } from "~/lib/account-router"
 import { getReasoningEffortForModel } from "~/lib/config"
 import { HTTPError } from "~/lib/error"
@@ -8,12 +11,17 @@ import {
   getModelReasoningConfig,
   usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
-import { PRE_HEADER_MAX_DELAY_SECONDS } from "~/services/copilot/transport-retry"
+import {
+  claimCompatibilityRetry,
+  createRetryBudget,
+  PRE_HEADER_MAX_DELAY_SECONDS,
+} from "~/services/copilot/transport-retry"
 
 import {
   fitResponsesCompactionPayload,
   isResponsesCompactionRequest,
 } from "./compaction-payload"
+import { classifyCompatibilityRetry } from "./compatibility-retry"
 import { normalizeResponsesAttachments } from "./responses-attachments"
 import {
   finalizeResponsesRequest,
@@ -416,12 +424,15 @@ async function* sanitizeResponsesStream(response: Response): ResponsesStream {
 }
 
 interface ResponsesRequestOptions {
+  allowCompatibilityRetry?: boolean
   vision: boolean
   initiator: "agent" | "user"
   copilotSessionToken?: string
   signal?: AbortSignal
   compaction?: boolean
   prepared?: boolean
+  routedAccountPin?: RoutedAccountPin
+  retryBudget?: RetryBudget
 }
 
 const logOrdinaryRecovery = (
@@ -469,6 +480,8 @@ function shouldFitResponsesCompactionPayload(
   return explicitlyRequested === true || isResponsesCompactionRequest(payload)
 }
 
+// Compatibility preparation adds one guarded branch to the existing request pipeline.
+// eslint-disable-next-line complexity
 export const createResponses = async (
   payload: ResponsesPayload,
   options: ResponsesRequestOptions,
@@ -489,8 +502,11 @@ export const createResponses = async (
   // Zero-data retention enforcement
   body.store = false
 
-  // Inline external attachment URLs / normalize file_data to data URIs
-  await normalizeResponsesAttachments(body, signal)
+  // Completed evaluated candidates have already performed semantic attachment
+  // adaptation; unprepared sources still need the transport normalizer here.
+  if (!options.prepared) {
+    await normalizeResponsesAttachments(body, signal)
+  }
   signal?.throwIfAborted()
 
   const shouldFitCompactionPayload = shouldFitResponsesCompactionPayload(
@@ -506,8 +522,11 @@ export const createResponses = async (
     vision: hasResponsesAttachment(preparedPayload),
     initiator,
   }
+  const retryBudget = options.retryBudget ?? createRetryBudget()
+  const routedAccountPin = options.routedAccountPin ?? {}
 
-  const { response } = await routedFetch(
+  let activePayload = preparedPayload
+  let { response } = await routedFetch(
     "/responses",
     { method: "POST", body: JSON.stringify(preparedPayload), signal },
     {
@@ -515,12 +534,46 @@ export const createResponses = async (
       headerOptions: headerOpts,
       maxHttpRetryDelaySeconds:
         body.stream ? PRE_HEADER_MAX_DELAY_SECONDS : undefined,
+      routedAccountPin,
+      retryBudget,
     },
   )
 
+  const compatibilityDecision =
+    options.allowCompatibilityRetry === false ?
+      { kind: "none" as const }
+    : await classifyCompatibilityRetry({
+        body: activePayload,
+        endpoint: "/responses",
+        response,
+      })
+  if (compatibilityDecision.kind !== "none") {
+    const retryPayload = structuredClone(activePayload)
+    if (
+      compatibilityDecision.normalize(retryPayload)
+      && claimCompatibilityRetry(retryBudget)
+    ) {
+      activePayload = retryPayload
+      ;({ response } = await routedFetch(
+        "/responses",
+        { method: "POST", body: JSON.stringify(retryPayload), signal },
+        {
+          modelId: body.model,
+          headerOptions: headerOpts,
+          maxHttpRetryDelaySeconds:
+            body.stream ? PRE_HEADER_MAX_DELAY_SECONDS : undefined,
+          reason: "compatibility_retry",
+          recordSelection: false,
+          routedAccountPin,
+          retryBudget,
+        },
+      ))
+    }
+  }
+
   if (!response.ok) {
     consola.error("Failed to create responses")
-    throw new HTTPError("Failed to create responses", response, preparedPayload)
+    throw new HTTPError("Failed to create responses", response, activePayload)
   }
 
   if (body.stream) {

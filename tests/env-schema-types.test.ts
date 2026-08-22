@@ -67,6 +67,16 @@ test("keeps tracked environment typings synchronized with Varlock generation", a
     )?.[0]
     expect(generatedDeclaration).toBe("  COPILOT_INTEGRATION_ID?: string;")
     expect(trackedDeclaration).toBe(generatedDeclaration)
+    const generatedPublicBaseDeclaration = generated.match(
+      /^ {2}COPILOT_PUBLIC_BASE_URL\??: string;$/mu,
+    )?.[0]
+    const trackedPublicBaseDeclaration = tracked.match(
+      /^ {2}COPILOT_PUBLIC_BASE_URL\??: string;$/mu,
+    )?.[0]
+    expect(generatedPublicBaseDeclaration).toBe(
+      "  COPILOT_PUBLIC_BASE_URL?: string;",
+    )
+    expect(trackedPublicBaseDeclaration).toBe(generatedPublicBaseDeclaration)
   } finally {
     await fs.rm(temporaryDirectory, { force: true, recursive: true })
   }

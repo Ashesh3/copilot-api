@@ -48,6 +48,7 @@ export function createProxyRequestHeaders(request: Request): Headers {
 
   headers.delete("content-length")
   headers.delete("host")
+  headers.delete("x-copilot-gateway-key")
   headers.set("accept-encoding", "identity")
   return headers
 }

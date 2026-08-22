@@ -5,14 +5,18 @@ import { z } from "zod"
 import type {
   ChatCompletionChunk,
   ChatCompletionResponse,
+  Delta,
 } from "~/services/copilot/create-chat-completions"
 import type { ResponsesResult } from "~/services/copilot/create-responses"
 
+import { streamAnthropicAsChatCompletions } from "~/routes/chat-completions/anthropic-bridge"
 import {
   type AnthropicContentBlockDeltaEvent,
+  type AnthropicInputJsonDelta,
   type AnthropicMessageDeltaEvent,
   type AnthropicMessageStartEvent,
   type AnthropicResponse,
+  type AnthropicStreamEventData,
   type AnthropicStreamState,
 } from "~/routes/messages/anthropic-types"
 import { translateToAnthropic } from "~/routes/messages/non-stream-translation"
@@ -75,6 +79,39 @@ const anthropicStreamEventSchema = z.looseObject({
 
 function isValidAnthropicStreamEvent(payload: unknown): boolean {
   return anthropicStreamEventSchema.safeParse(payload).success
+}
+
+function isInputJsonDeltaEvent(
+  event: AnthropicStreamEventData,
+): event is AnthropicContentBlockDeltaEvent & {
+  delta: AnthropicInputJsonDelta
+} {
+  return (
+    event.type === "content_block_delta"
+    && event.delta.type === "input_json_delta"
+  )
+}
+
+function createInterleavedToolChunk(
+  toolCalls: NonNullable<
+    ChatCompletionChunk["choices"][number]["delta"]["tool_calls"]
+  >,
+  finishReason: ChatCompletionChunk["choices"][number]["finish_reason"] = null,
+): ChatCompletionChunk {
+  return {
+    id: "cmpl-interleaved-split-tools",
+    object: "chat.completion.chunk",
+    created: 1,
+    model: "gpt-current",
+    choices: [
+      {
+        index: 0,
+        delta: { tool_calls: toolCalls },
+        finish_reason: finishReason,
+        logprobs: null,
+      },
+    ],
+  }
 }
 
 test("types and preserves unknown fields in native Messages deltas", () => {
@@ -343,6 +380,91 @@ describe("OpenAI to Anthropic Non-Streaming Response Translation", () => {
     } else {
       throw new Error("Expected text block")
     }
+  })
+
+  test.each([undefined, ""])(
+    "omits an empty non-stream thinking signature for reasoning_opaque=%p",
+    (reasoningOpaque) => {
+      const response: ChatCompletionResponse = {
+        id: "chatcmpl-unsigned-thinking",
+        object: "chat.completion",
+        created: 1677652288,
+        model: "claude-current",
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: "assistant",
+              content: null,
+              reasoning_text: "private reasoning",
+              ...(reasoningOpaque === undefined ?
+                {}
+              : { reasoning_opaque: reasoningOpaque }),
+            },
+            finish_reason: "stop",
+            logprobs: null,
+          },
+        ],
+        usage: {
+          prompt_tokens: 5,
+          completion_tokens: 3,
+          total_tokens: 8,
+        },
+      }
+
+      expect(translateToAnthropic(response).content).toEqual([
+        { type: "thinking", thinking: "private reasoning" },
+      ])
+    },
+  )
+
+  test("preserves signed and unsigned non-stream thinking block order", () => {
+    const response: ChatCompletionResponse = {
+      id: "chatcmpl-signed-thinking",
+      object: "chat.completion",
+      created: 1677652288,
+      model: "claude-current",
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: null,
+            reasoning_text: "private reasoning",
+            reasoning_opaque: "opaque-thinking-state",
+          },
+          finish_reason: "stop",
+          logprobs: null,
+        },
+        {
+          index: 1,
+          message: {
+            role: "assistant",
+            content: null,
+            reasoning_text: "unsigned follow-up reasoning",
+          },
+          finish_reason: "stop",
+          logprobs: null,
+        },
+      ],
+      usage: {
+        prompt_tokens: 5,
+        completion_tokens: 3,
+        total_tokens: 8,
+      },
+    }
+
+    expect(translateToAnthropic(response).content).toEqual([
+      {
+        type: "thinking",
+        thinking: "private reasoning",
+        signature: "opaque-thinking-state",
+      },
+      {
+        type: "thinking",
+        thinking: "unsigned follow-up reasoning",
+      },
+    ])
   })
 
   test("should translate a response with tool calls", () => {
@@ -1086,6 +1208,96 @@ describe("OpenAI to Anthropic Streaming Response Translation", () => {
     expect(signatureIndex).toBeLessThan(toolStartIndex)
   })
 
+  const openBlockBeforeThinkingCases: Array<{
+    name: string
+    firstDelta: Delta
+    firstBlockType: "text" | "tool_use"
+  }> = [
+    {
+      name: "text",
+      firstDelta: { content: "answer first" },
+      firstBlockType: "text",
+    },
+    {
+      name: "tool",
+      firstDelta: {
+        tool_calls: [
+          {
+            index: 0,
+            id: "call_lookup",
+            type: "function" as const,
+            function: { name: "lookup", arguments: '{"q":"docs"}' },
+          },
+        ],
+      },
+      firstBlockType: "tool_use",
+    },
+  ]
+
+  test.each(openBlockBeforeThinkingCases)(
+    "closes an open $name block before opening thinking",
+    ({ firstDelta, firstBlockType }) => {
+      const streamState: AnthropicStreamState = {
+        messageStartSent: false,
+        contentBlockIndex: 0,
+        contentBlockOpen: false,
+        toolCalls: {},
+      }
+      const chunks: Array<ChatCompletionChunk> = [
+        {
+          id: "cmpl-block-to-thinking",
+          object: "chat.completion.chunk",
+          created: 1,
+          model: "gpt-current",
+          choices: [
+            {
+              index: 0,
+              delta: { role: "assistant", ...firstDelta },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+        },
+        {
+          id: "cmpl-block-to-thinking",
+          object: "chat.completion.chunk",
+          created: 1,
+          model: "gpt-current",
+          choices: [
+            {
+              index: 0,
+              delta: { reasoning_text: "thinking now" },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+        },
+      ]
+
+      const events = chunks.flatMap((chunk) =>
+        translateChunkToAnthropicEvents(chunk, streamState),
+      )
+      const firstStart = events.findIndex(
+        (event) =>
+          event.type === "content_block_start"
+          && event.content_block.type === firstBlockType,
+      )
+      const firstStop = events.findIndex(
+        (event) => event.type === "content_block_stop" && event.index === 0,
+      )
+      const thinkingStart = events.findIndex(
+        (event) =>
+          event.type === "content_block_start"
+          && event.content_block.type === "thinking"
+          && event.index === 1,
+      )
+
+      expect(firstStart).toBeGreaterThan(-1)
+      expect(firstStop).toBeGreaterThan(firstStart)
+      expect(thinkingStart).toBeGreaterThan(firstStop)
+    },
+  )
+
   test("normalizes missing finish_reason to tool_use when a tool-call stream ends", () => {
     const openAIStream: Array<ChatCompletionChunk> = [
       {
@@ -1149,8 +1361,7 @@ describe("OpenAI to Anthropic Streaming Response Translation", () => {
         event.type === "message_delta",
     )
 
-    expect(messageDelta).toBeDefined()
-    expect(messageDelta?.delta.stop_reason).toBe("tool_use")
+    expect(messageDelta).toBeUndefined()
   })
 
   test("closes an open tool block before fallback terminal events", () => {
@@ -1175,15 +1386,7 @@ describe("OpenAI to Anthropic Streaming Response Translation", () => {
     const fallbackEvents =
       streamTranslation.createFallbackMessageDeltaEvents(streamState)
 
-    expect(fallbackEvents.map((event) => event.type)).toEqual([
-      "content_block_stop",
-      "message_delta",
-      "message_stop",
-    ])
-    expect(fallbackEvents[0]).toEqual({
-      type: "content_block_stop",
-      index: 0,
-    })
+    expect(fallbackEvents).toEqual([])
   })
 
   test("normalizes 1-based tool call indices to 0-based stream state entries", () => {
@@ -1227,8 +1430,205 @@ describe("OpenAI to Anthropic Streaming Response Translation", () => {
       id: "call_gcp",
       name: "get_weather",
       anthropicBlockIndex: 0,
+      pendingArguments: [],
     })
     expect(streamState.toolCalls[1]).toBeUndefined()
+  })
+
+  test("keeps distinct upstream tool indices in first-seen local slots", () => {
+    const streamState: AnthropicStreamState = {
+      messageStartSent: false,
+      contentBlockIndex: 0,
+      contentBlockOpen: false,
+      toolCalls: {},
+    }
+
+    const events = translateChunkToAnthropicEvents(
+      {
+        id: "cmpl-interleaved-tools",
+        object: "chat.completion.chunk",
+        created: 1,
+        model: "gpt-current",
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  index: 1,
+                  id: "call_one",
+                  type: "function",
+                  function: { name: "first", arguments: "{}" },
+                },
+                {
+                  index: 0,
+                  id: "call_zero",
+                  type: "function",
+                  function: { name: "second", arguments: "{}" },
+                },
+              ],
+            },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      },
+      streamState,
+    )
+    events.push(
+      ...translateChunkToAnthropicEvents(
+        {
+          id: "cmpl-interleaved-tools",
+          object: "chat.completion.chunk",
+          created: 1,
+          model: "gpt-current",
+          choices: [
+            {
+              index: 0,
+              delta: {},
+              finish_reason: "tool_calls",
+              logprobs: null,
+            },
+          ],
+        },
+        streamState,
+      ),
+    )
+
+    expect(streamState.toolCallStateIndexByUpstreamIndex).toEqual(
+      new Map([
+        [1, 0],
+        [0, 1],
+      ]),
+    )
+    expect(streamState.toolCalls[0].id).toBe("call_one")
+    expect(streamState.toolCalls[1].id).toBe("call_zero")
+    expect(
+      events.filter((event) => event.type === "content_block_start"),
+    ).toMatchObject([
+      {
+        index: 0,
+        content_block: { type: "tool_use", id: "call_one", name: "first" },
+      },
+      {
+        index: 1,
+        content_block: { type: "tool_use", id: "call_zero", name: "second" },
+      },
+    ])
+    expect(
+      events.filter(
+        (event) =>
+          event.type === "content_block_delta"
+          && event.delta.type === "input_json_delta",
+      ),
+    ).toMatchObject([
+      { index: 0, delta: { partial_json: "{}" } },
+      { index: 1, delta: { partial_json: "{}" } },
+    ])
+  })
+
+  test("keeps interleaved split tool deltas inside first-seen open blocks", () => {
+    const streamState: AnthropicStreamState = {
+      messageStartSent: false,
+      contentBlockIndex: 0,
+      contentBlockOpen: false,
+      toolCalls: {},
+    }
+    const chunks = [
+      createInterleavedToolChunk([
+        {
+          index: 1,
+          id: "call_one",
+          type: "function",
+          function: { name: "first", arguments: '{"one":' },
+        },
+      ]),
+      createInterleavedToolChunk([
+        {
+          index: 0,
+          id: "call_zero",
+          type: "function",
+          function: { name: "second", arguments: '{"two":' },
+        },
+      ]),
+      createInterleavedToolChunk([
+        { index: 1, function: { arguments: '"alpha"}' } },
+      ]),
+      createInterleavedToolChunk([
+        { index: 0, function: { arguments: '"beta"}' } },
+      ]),
+      createInterleavedToolChunk([], "tool_calls"),
+    ]
+
+    const events = chunks.flatMap((chunk) =>
+      translateChunkToAnthropicEvents(chunk, streamState),
+    )
+    const openBlocks = new Set<number>()
+    const starts = new Map<number, number>()
+    const stops = new Map<number, number>()
+
+    for (const event of events) {
+      switch (event.type) {
+        case "content_block_start": {
+          expect(openBlocks.has(event.index)).toBe(false)
+          openBlocks.add(event.index)
+          starts.set(event.index, (starts.get(event.index) ?? 0) + 1)
+
+          break
+        }
+        case "content_block_delta": {
+          expect(openBlocks.has(event.index)).toBe(true)
+
+          break
+        }
+        case "content_block_stop": {
+          expect(openBlocks.has(event.index)).toBe(true)
+          openBlocks.delete(event.index)
+          stops.set(event.index, (stops.get(event.index) ?? 0) + 1)
+
+          break
+        }
+        // No default
+      }
+    }
+
+    expect(openBlocks).toEqual(new Set())
+    expect(starts).toEqual(
+      new Map([
+        [0, 1],
+        [1, 1],
+      ]),
+    )
+    expect(stops).toEqual(starts)
+    expect(
+      events.filter(
+        (event) =>
+          event.type === "content_block_start"
+          && event.content_block.type === "tool_use",
+      ),
+    ).toMatchObject([
+      {
+        index: 0,
+        content_block: { id: "call_one", name: "first" },
+      },
+      {
+        index: 1,
+        content_block: { id: "call_zero", name: "second" },
+      },
+    ])
+    expect(
+      events
+        .filter((event) => isInputJsonDeltaEvent(event))
+        .map((event) => ({
+          index: event.index,
+          partialJson: event.delta.partial_json,
+        })),
+    ).toEqual([
+      { index: 0, partialJson: '{"one":' },
+      { index: 0, partialJson: '"alpha"}' },
+      { index: 1, partialJson: '{"two":' },
+      { index: 1, partialJson: '"beta"}' },
+    ])
   })
 })
 
@@ -1271,3 +1671,253 @@ describe("Mid-stream error reporting", () => {
     await streamTranslation.emitAnthropicStreamError(stream, new Error("boom"))
   })
 })
+
+describe("Chat from Messages stream lifecycle", () => {
+  test("returns success state after one final chunk without writing DONE", async () => {
+    const written: Array<string> = []
+    const usage = await streamAnthropicAsChatCompletions(
+      createChatStream(written),
+      iterateAnthropic([
+        {
+          type: "message_start",
+          message: { id: "msg_success", usage: { input_tokens: 7 } },
+        },
+        {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "text_delta", text: "hello" },
+        },
+        {
+          type: "message_delta",
+          delta: { stop_reason: "end_turn" },
+          usage: { output_tokens: 3 },
+        },
+        { type: "message_stop" },
+        { type: "message_stop" },
+      ]),
+      "claude",
+    )
+
+    expect(written).not.toContain("[DONE]")
+    expect(chatFinishChunks(written)).toHaveLength(1)
+    expect(usage.terminalSeen).toBe(true)
+  })
+
+  test("returns a received native error without writing a Chat terminal", async () => {
+    const written: Array<string> = []
+    const receivedFailure = {
+      type: "invalid_request_error",
+      message: "received Messages failure",
+    }
+    const usage = await streamAnthropicAsChatCompletions(
+      createChatStream(written),
+      iterateAnthropic([{ type: "error", error: receivedFailure }]),
+      "claude",
+    )
+
+    expect(usage.receivedFailure).toEqual(receivedFailure)
+    expect(usage.terminalSeen).toBe(false)
+    expect(written).toEqual([])
+  })
+
+  test("skips a malformed Messages delta before one valid Chat terminal", async () => {
+    const written: Array<string> = []
+    const usage = await streamAnthropicAsChatCompletions(
+      createChatStream(written),
+      malformedThenTerminalAnthropicStream(),
+      "claude",
+    )
+
+    expect(usage.terminalSeen).toBe(true)
+    expect(chatFinishChunks(written)).toHaveLength(1)
+    expect(written.join("\n")).not.toContain("{malformed")
+  })
+
+  test("throws on malformed Messages terminal JSON", async () => {
+    const error = await streamAnthropicAsChatCompletions(
+      createChatStream([]),
+      malformedTerminalAnthropicStream(),
+      "claude",
+    ).catch((caught: unknown) => caught)
+
+    expect(error).toBeInstanceOf(SyntaxError)
+  })
+
+  test("preserves split tool arguments while exposing unfinished EOF state", async () => {
+    const written: Array<string> = []
+    const usage = await streamAnthropicAsChatCompletions(
+      createChatStream(written),
+      iterateAnthropic([
+        {
+          type: "content_block_start",
+          index: 4,
+          content_block: {
+            type: "tool_use",
+            id: "tool_4",
+            name: "lookup",
+            input: {},
+          },
+        },
+        {
+          type: "content_block_delta",
+          index: 4,
+          delta: { type: "input_json_delta", partial_json: '{"city":' },
+        },
+        {
+          type: "content_block_delta",
+          index: 4,
+          delta: { type: "input_json_delta", partial_json: '"Paris"}' },
+        },
+      ]),
+      "claude",
+    )
+
+    expect(toolArguments(written)).toBe('{"city":"Paris"}')
+    expect(usage.terminalSeen).toBe(false)
+    expect(chatFinishChunks(written)).toEqual([])
+  })
+
+  test("keeps pause_turn distinct from an ordinary Chat stop", async () => {
+    const written: Array<string> = []
+    const usage = await streamAnthropicAsChatCompletions(
+      createChatStream(written),
+      iterateAnthropic([
+        {
+          type: "message_delta",
+          delta: { stop_reason: "pause_turn" },
+          usage: { output_tokens: 2 },
+        },
+        { type: "message_stop" },
+      ]),
+      "claude",
+    )
+
+    expect(chatFinishChunks(written)).toHaveLength(1)
+    expect(chatFinishChunks(written)[0]).toMatchObject({
+      copilot_stop_reason: "pause_turn",
+      choices: [{ finish_reason: "length" }],
+    })
+    expect(usage.terminalSeen).toBe(true)
+  })
+
+  test("suppresses a transport throw after message_stop", async () => {
+    const written: Array<string> = []
+    const usage = await streamAnthropicAsChatCompletions(
+      createChatStream(written),
+      terminalThenThrowAnthropicStream(),
+      "claude",
+    )
+
+    expect(usage.terminalSeen).toBe(true)
+    expect(chatFinishChunks(written)).toHaveLength(1)
+  })
+
+  test("maps refusal to content_filter", async () => {
+    const written: Array<string> = []
+    await streamAnthropicAsChatCompletions(
+      createChatStream(written),
+      iterateAnthropic([
+        {
+          type: "message_delta",
+          delta: { stop_reason: "refusal" },
+          usage: { output_tokens: 1 },
+        },
+        { type: "message_stop" },
+      ]),
+      "claude",
+    )
+
+    expect(chatFinishChunks(written)).toHaveLength(1)
+    expect(chatFinishChunks(written)[0]).toMatchObject({
+      choices: [{ finish_reason: "content_filter" }],
+    })
+  })
+})
+
+function createChatStream(written: Array<string>) {
+  return {
+    writeSSE: (chunk: { data: string }) => {
+      written.push(chunk.data)
+      return Promise.resolve()
+    },
+  }
+}
+
+async function* iterateAnthropic(events: Array<Record<string, unknown>>) {
+  for (const event of events) {
+    yield await Promise.resolve({ data: JSON.stringify(event) })
+  }
+}
+
+function parsedChatChunks(
+  written: Array<string>,
+): Array<Record<string, unknown>> {
+  return written
+    .filter((data) => data !== "[DONE]")
+    .map((data) => JSON.parse(data) as Record<string, unknown>)
+}
+
+function chatFinishChunks(
+  written: Array<string>,
+): Array<Record<string, unknown>> {
+  return parsedChatChunks(written).filter((chunk) => {
+    const choices = chunk.choices
+    return (
+      Array.isArray(choices)
+      && (choices[0] as { finish_reason?: unknown }).finish_reason !== null
+      && (choices[0] as { finish_reason?: unknown }).finish_reason !== undefined
+    )
+  })
+}
+
+async function* malformedAnthropicStream() {
+  yield await Promise.resolve({ data: "{malformed" })
+}
+
+async function* malformedThenTerminalAnthropicStream() {
+  yield* malformedAnthropicStream()
+  yield await Promise.resolve({
+    data: JSON.stringify({
+      type: "message_delta",
+      delta: { stop_reason: "end_turn" },
+      usage: { output_tokens: 1 },
+    }),
+  })
+  yield await Promise.resolve({
+    event: "message_stop",
+    data: JSON.stringify({ type: "message_stop" }),
+  })
+}
+
+async function* malformedTerminalAnthropicStream() {
+  yield await Promise.resolve({ event: "message_stop", data: "{malformed" })
+}
+
+async function* terminalThenThrowAnthropicStream() {
+  yield await Promise.resolve({
+    data: JSON.stringify({
+      type: "message_delta",
+      delta: { stop_reason: "end_turn" },
+      usage: { output_tokens: 1 },
+    }),
+  })
+  yield await Promise.resolve({
+    data: JSON.stringify({ type: "message_stop" }),
+  })
+  throw new Error("post-terminal Messages marker")
+}
+
+function toolArguments(written: Array<string>): string {
+  return parsedChatChunks(written)
+    .flatMap(
+      (chunk) =>
+        chunk.choices as Array<{
+          delta?: {
+            tool_calls?: Array<{ function?: { arguments?: string } }>
+          }
+        }>,
+    )
+    .flatMap((choice) => choice.delta?.tool_calls ?? [])
+    .map((tool) => tool.function?.arguments ?? "")
+    .join("")
+}

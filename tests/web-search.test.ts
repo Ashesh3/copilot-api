@@ -4,12 +4,21 @@ import type {
   ChatCompletionResponse,
   ChatCompletionsPayload,
 } from "../src/services/copilot/create-chat-completions"
+import type {
+  ResponsesPayload,
+  ResponsesResult,
+} from "../src/services/copilot/create-responses"
 
 import { state } from "../src/lib/state"
 import { chatCompletionsToResponses } from "../src/routes/chat-completions/responses-fallback"
 import { translateGoogleToOpenAI } from "../src/routes/google-ai/request-translation"
+import { asAnthropicUnknownContentType } from "../src/routes/messages/anthropic-types"
 import { translateToOpenAI } from "../src/routes/messages/non-stream-translation"
-import { resolveWebSearchCalls } from "../src/routes/messages/web-search-helpers"
+import {
+  emitAnthropicResponseAsStream,
+  resolveResponsesWebSearchCalls,
+  resolveWebSearchCalls,
+} from "../src/routes/messages/web-search-helpers"
 import { convertWebSearchTool } from "../src/routes/responses/handler"
 import {
   buildWebSearchQuery,
@@ -19,6 +28,58 @@ import {
 } from "../src/services/copilot/mcp-web-search"
 
 const originalFetch = globalThis.fetch
+
+test("streams future Messages blocks as balanced bounded text blocks", async () => {
+  const frames = new Array<{ event: string; data: string }>()
+
+  await emitAnthropicResponseAsStream(
+    {
+      writeSSE(frame) {
+        frames.push(frame)
+        return Promise.resolve()
+      },
+    },
+    {
+      id: "msg_future",
+      type: "message",
+      role: "assistant",
+      content: [
+        {
+          type: asAnthropicUnknownContentType("future_block_20270101"),
+          payload: "x".repeat(20_000),
+        },
+      ],
+      model: "test-model",
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    },
+  )
+
+  const blockFrames = frames.filter((frame) =>
+    frame.event.startsWith("content_block_"),
+  )
+  expect(blockFrames.map((frame) => frame.event)).toEqual([
+    "content_block_start",
+    "content_block_delta",
+    "content_block_stop",
+  ])
+  expect(JSON.parse(blockFrames[0]?.data ?? "{}")).toMatchObject({
+    index: 0,
+    content_block: { type: "text", text: "" },
+  })
+  const delta = JSON.parse(blockFrames[1]?.data ?? "{}") as {
+    delta?: { type?: string; text?: string }
+  }
+  expect(delta.delta?.type).toBe("text_delta")
+  expect(delta.delta?.text).toContain('"type":"future_block_20270101"')
+  expect(delta.delta?.text?.length).toBeLessThanOrEqual(16_384)
+  expect(JSON.parse(blockFrames[2]?.data ?? "{}")).toEqual({
+    type: "content_block_stop",
+    index: 0,
+  })
+})
+
 type BunTimeoutRequestInit = RequestInit & { timeout?: boolean | number }
 const fetchMock = mock((_url: string, init?: RequestInit) => {
   const body = JSON.parse(
@@ -41,6 +102,119 @@ const fetchMock = mock((_url: string, init?: RequestInit) => {
     { headers: { "content-type": "text/event-stream" } },
   )
 })
+
+const makeChatSearchResponse = (
+  count: number,
+  id = `chat-${count}`,
+): ChatCompletionResponse => ({
+  id,
+  object: "chat.completion",
+  created: 1,
+  model: "test-model",
+  choices: [
+    {
+      index: 0,
+      message: {
+        role: "assistant",
+        content: count === 0 ? "Final grounded answer." : null,
+        ...(count === 0 ?
+          {}
+        : {
+            tool_calls: Array.from({ length: count }, (_, index) => ({
+              id: `${id}-call-${index}`,
+              type: "function" as const,
+              function: {
+                name: "web_search",
+                arguments: `{"query":"query ${index}"}`,
+              },
+            })),
+          }),
+      },
+      logprobs: null,
+      finish_reason: count === 0 ? "stop" : "tool_calls",
+    },
+  ],
+})
+
+const makeResponsesSearchResult = (
+  count: number,
+  id = `response-${count}`,
+): ResponsesResult => ({
+  id,
+  object: "response",
+  created_at: 1,
+  model: "test-model",
+  output:
+    count === 0 ?
+      [
+        {
+          id: `${id}-message`,
+          type: "message",
+          role: "assistant",
+          status: "completed",
+          content: [
+            {
+              type: "output_text",
+              text: "Final grounded answer.",
+              annotations: [],
+            },
+          ],
+        },
+      ]
+    : Array.from({ length: count }, (_, index) => ({
+        id: `${id}-item-${index}`,
+        type: "function_call" as const,
+        call_id: `${id}-call-${index}`,
+        name: "web_search",
+        arguments: `{"query":"query ${index}"}`,
+        status: "completed" as const,
+      })),
+  output_text: count === 0 ? "Final grounded answer." : "",
+  status: "completed",
+  error: null,
+  incomplete_details: null,
+  instructions: null,
+  metadata: null,
+  parallel_tool_calls: true,
+  temperature: null,
+  tool_choice: "auto",
+  tools: [],
+  top_p: null,
+})
+
+const chatSearchPayload = (maxUses?: number): ChatCompletionsPayload => ({
+  model: "test-model",
+  messages: [{ role: "user", content: "Answer with current facts." }],
+  tools: [
+    {
+      type: "function",
+      function: {
+        name: "web_search",
+        parameters: { type: "object", properties: {} },
+        ...(maxUses === undefined ? {} : { max_uses: maxUses }),
+      },
+    },
+  ],
+})
+
+const responsesSearchPayload = (maxUses?: number): ResponsesPayload => ({
+  model: "test-model",
+  input: "Answer with current facts.",
+  tools: [
+    {
+      type: "web_search",
+      ...(maxUses === undefined ? {} : { max_uses: maxUses }),
+    },
+  ],
+})
+
+const mcpSearchCallCount = (): number =>
+  fetchMock.mock.calls.filter(([, init]) => {
+    if (typeof init?.body !== "string") return false
+    return (
+      (JSON.parse(init.body) as { method?: string }).method === "tools/call"
+    )
+  }).length
 
 beforeAll(() => {
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch =
@@ -257,4 +431,186 @@ test("executes MCP web search and feeds the result back to the same model loop",
   expect(typeof content === "string" ? content : "").toContain(
     "https://example.com",
   )
+})
+
+test("bounds Chat web search at eight calls and permits final synthesis", async () => {
+  let completions = 0
+  const result = await resolveWebSearchCalls(
+    makeChatSearchResponse(8),
+    chatSearchPayload(),
+    {
+      createCompletion: () => {
+        completions += 1
+        return Promise.resolve(makeChatSearchResponse(0, "chat-final"))
+      },
+    },
+  )
+
+  expect(result.choices[0]?.message.content).toBe("Final grounded answer.")
+  expect(mcpSearchCallCount()).toBe(8)
+  expect(completions).toBe(1)
+})
+
+test("rejects an oversized first Chat web-search batch atomically", async () => {
+  let completions = 0
+  let caught: unknown
+  try {
+    await resolveWebSearchCalls(
+      makeChatSearchResponse(9),
+      chatSearchPayload(),
+      {
+        createCompletion: () => {
+          completions += 1
+          return Promise.resolve(makeChatSearchResponse(0))
+        },
+      },
+    )
+  } catch (error) {
+    caught = error
+  }
+
+  expect(caught).toMatchObject({
+    clientBody: { error: { code: "web_search_limit_exceeded" } },
+  })
+  expect(mcpSearchCallCount()).toBe(0)
+  expect(completions).toBe(0)
+})
+
+test("rejects a later aggregate-oversized Chat batch without partial searches", async () => {
+  let completions = 0
+  let caught: unknown
+  try {
+    await resolveWebSearchCalls(
+      makeChatSearchResponse(7),
+      chatSearchPayload(),
+      {
+        createCompletion: () => {
+          completions += 1
+          return Promise.resolve(makeChatSearchResponse(2, "chat-later"))
+        },
+      },
+    )
+  } catch (error) {
+    caught = error
+  }
+
+  expect(caught).toMatchObject({
+    clientBody: { error: { code: "web_search_limit_exceeded" } },
+  })
+  expect(mcpSearchCallCount()).toBe(7)
+  expect(completions).toBe(1)
+})
+
+test("lowers the Chat web-search budget from the initial source tool", async () => {
+  let caught: unknown
+  try {
+    await resolveWebSearchCalls(
+      makeChatSearchResponse(3),
+      chatSearchPayload(2),
+      { createCompletion: () => Promise.resolve(makeChatSearchResponse(0)) },
+    )
+  } catch (error) {
+    caught = error
+  }
+
+  expect(caught).toMatchObject({
+    clientBody: { error: { code: "web_search_limit_exceeded" } },
+  })
+  expect(mcpSearchCallCount()).toBe(0)
+})
+
+test("bounds Responses web search at eight calls and permits final synthesis", async () => {
+  let completions = 0
+  const result = await resolveResponsesWebSearchCalls(
+    makeResponsesSearchResult(8),
+    responsesSearchPayload(),
+    {
+      vision: false,
+      initiator: "user",
+      createResponse: () => {
+        completions += 1
+        return Promise.resolve(makeResponsesSearchResult(0, "response-final"))
+      },
+    },
+  )
+
+  expect(result.output_text).toBe("Final grounded answer.")
+  expect(mcpSearchCallCount()).toBe(8)
+  expect(completions).toBe(1)
+})
+
+test("rejects an oversized first Responses web-search batch atomically", async () => {
+  let completions = 0
+  let caught: unknown
+  try {
+    await resolveResponsesWebSearchCalls(
+      makeResponsesSearchResult(9),
+      responsesSearchPayload(),
+      {
+        vision: false,
+        initiator: "user",
+        createResponse: () => {
+          completions += 1
+          return Promise.resolve(makeResponsesSearchResult(0))
+        },
+      },
+    )
+  } catch (error) {
+    caught = error
+  }
+
+  expect(caught).toMatchObject({
+    clientBody: { error: { code: "web_search_limit_exceeded" } },
+  })
+  expect(mcpSearchCallCount()).toBe(0)
+  expect(completions).toBe(0)
+})
+
+test("rejects a later aggregate-oversized Responses batch without partial searches", async () => {
+  let completions = 0
+  let caught: unknown
+  try {
+    await resolveResponsesWebSearchCalls(
+      makeResponsesSearchResult(7),
+      responsesSearchPayload(),
+      {
+        vision: false,
+        initiator: "user",
+        createResponse: () => {
+          completions += 1
+          return Promise.resolve(makeResponsesSearchResult(2, "response-later"))
+        },
+      },
+    )
+  } catch (error) {
+    caught = error
+  }
+
+  expect(caught).toMatchObject({
+    clientBody: { error: { code: "web_search_limit_exceeded" } },
+  })
+  expect(mcpSearchCallCount()).toBe(7)
+  expect(completions).toBe(1)
+})
+
+test("lowers the Responses web-search budget from the initial source tool", async () => {
+  let caught: unknown
+  try {
+    await resolveResponsesWebSearchCalls(
+      makeResponsesSearchResult(3),
+      responsesSearchPayload(2),
+      {
+        vision: false,
+        initiator: "user",
+        createResponse: () => Promise.resolve(makeResponsesSearchResult(0)),
+      },
+    )
+  } catch (error) {
+    caught = error
+  }
+
+  expect(caught).toMatchObject({
+    clientBody: { error: { code: "web_search_limit_exceeded" } },
+  })
+  expect(mcpSearchCallCount()).toBe(0)
 })

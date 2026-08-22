@@ -85,15 +85,17 @@ test("deduplicates beta identifiers before enforcing the final byte limit", () =
   expect(canonicalizeAnthropicBeta(Array(80).fill(beta).join(","))).toBe(beta)
 })
 
-test("trims only comma-separator whitespace and rejects invalid segments", () => {
+test("trims comma whitespace and independently discards invalid beta segments", () => {
   expect(canonicalizeAnthropicBeta(" beta-one , beta-two ")).toBe(
     "beta-one,beta-two",
   )
-  expect(canonicalizeAnthropicBeta("beta-one,,beta-two")).toBeUndefined()
+  expect(canonicalizeAnthropicBeta("beta-one,,beta-two")).toBe(
+    "beta-one,beta-two",
+  )
   expect(canonicalizeAnthropicBeta("beta-one beta-two")).toBeUndefined()
-  expect(canonicalizeAnthropicBeta("safe-beta,bad\u0001beta")).toBeUndefined()
-  expect(canonicalizeAnthropicBeta("safe-beta,unicode-βeta")).toBeUndefined()
-  expect(canonicalizeAnthropicBeta("safe-beta,latin-é")).toBeUndefined()
+  expect(canonicalizeAnthropicBeta("safe-beta,bad\u0001beta")).toBe("safe-beta")
+  expect(canonicalizeAnthropicBeta("safe-beta,unicode-βeta")).toBe("safe-beta")
+  expect(canonicalizeAnthropicBeta("safe-beta,latin-é")).toBe("safe-beta")
 })
 
 test("rejects oversized canonical beta output", () => {
@@ -728,9 +730,20 @@ test("does not require max_tokens during shared preparation", () => {
   ).not.toHaveProperty("max_tokens")
 })
 
+test("treats literal null max_tokens as absent during shared preparation", () => {
+  expect(
+    prepareAnthropicMessagesRequest({
+      payload: {
+        model: "claude",
+        messages: [{ role: "user", content: "x" }],
+        max_tokens: null,
+      },
+    }).body,
+  ).not.toHaveProperty("max_tokens")
+})
+
 test.each([
   ["string", "32"],
-  ["null", null],
   ["zero", 0],
   ["negative", -1],
   ["fractional", 1.5],
@@ -748,6 +761,35 @@ test.each([
     ).toHaveProperty("max_tokens", maxTokens)
   },
 )
+
+test("rejects an all-invalid message list after sanitization", () => {
+  try {
+    prepareAnthropicMessagesRequest({
+      payload: {
+        model: "claude",
+        messages: [null],
+      } as unknown as AnthropicMessagesPayload,
+    })
+    throw new Error("Expected sanitized messages validation to fail")
+  } catch (error) {
+    expect(error).toHaveProperty(
+      "clientBody.error.message",
+      "messages is required for Messages requests.",
+    )
+    expect(error).toHaveProperty("clientBody.error.param", "messages")
+  }
+})
+
+test("retains a legal message whose content sanitizes to an empty array", () => {
+  expect(
+    prepareAnthropicMessagesRequest({
+      payload: {
+        model: "claude",
+        messages: [{ role: "user", content: [null] }],
+      } as unknown as AnthropicMessagesPayload,
+    }).body.messages,
+  ).toEqual([{ role: "user", content: [] }])
+})
 
 test.each([
   ["undefined", undefined],
@@ -809,6 +851,25 @@ test("preserves system and future roles plus unknown native structures", () => {
     tools: [{ name: "lookup", future_tool_flag: true }],
     future_native_field: { enabled: true },
   })
+})
+
+test("normalizes missing roles and scalar or singleton content without dropping future roles", () => {
+  const prepared = prepareAnthropicMessagesRequest({
+    payload: {
+      model: "claude-current",
+      messages: [
+        { content: { type: "text", text: "singleton" } },
+        { role: 7, content: true },
+        { role: asAnthropicUnknownRole("future-role"), content: 12 },
+      ],
+    } as unknown as AnthropicMessagesPayload,
+  })
+
+  expect(prepared.body.messages).toEqual([
+    { role: "user", content: [{ type: "text", text: "singleton" }] },
+    { role: "user", content: "true" },
+    { role: asAnthropicUnknownRole("future-role"), content: "12" },
+  ])
 })
 
 test("preserves unnamed future native tool records with nested fields", () => {
@@ -965,6 +1026,111 @@ test("drops malformed nested message entries while preserving safe tool records"
       },
     ],
   })
+})
+
+test("preserves future base64 image media types without mutating the source", () => {
+  const payload = {
+    model: "claude-current",
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "image",
+            source: {
+              type: "base64",
+              media_type: "image/avif",
+              data: "AAAA",
+            },
+          },
+        ],
+      },
+    ],
+  } as unknown as AnthropicMessagesPayload
+  const snapshot = structuredClone(payload)
+
+  const prepared = prepareAnthropicMessagesRequest({ payload })
+
+  expect(prepared.body.messages).toEqual(snapshot.messages)
+  expect(payload).toEqual(snapshot)
+})
+
+test.each([null, "scalar input", ["array input"]])(
+  "coerces non-record tool input %p while preserving call-result identity and source",
+  (input) => {
+    const payload = {
+      model: "claude-current",
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "tool-1",
+              name: "lookup",
+              input,
+              future_call_field: { keep: true },
+            },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "tool-1", content: "result" },
+          ],
+        },
+      ],
+    } as unknown as AnthropicMessagesPayload
+    const snapshot = structuredClone(payload)
+
+    const prepared = prepareAnthropicMessagesRequest({ payload })
+
+    expect(prepared.body.messages).toEqual([
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "tool-1",
+            name: "lookup",
+            input: {},
+            future_call_field: { keep: true },
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "tool-1", content: "result" },
+        ],
+      },
+    ])
+    expect(payload).toEqual(snapshot)
+  },
+)
+
+test("preserves malformed thinking as unknown source data", () => {
+  const payload = {
+    model: "claude-current",
+    messages: [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "thinking",
+            thinking: { future: "opaque-thought" },
+            signature: 17,
+          },
+        ],
+      },
+    ],
+  } as unknown as AnthropicMessagesPayload
+  const snapshot = structuredClone(payload)
+
+  const prepared = prepareAnthropicMessagesRequest({ payload })
+
+  expect(prepared.body.messages).toEqual(snapshot.messages)
+  expect(payload).toEqual(snapshot)
 })
 
 test("rejects a throwing accessor without invoking or exposing it", () => {

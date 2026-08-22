@@ -9,23 +9,8 @@ export const getModels = async () => {
   })
 
   if (!response.ok) {
-    const errorBody = await response.text()
-    let errorDetails: string
-    try {
-      const parsed: unknown = JSON.parse(errorBody)
-      errorDetails = JSON.stringify(parsed, null, 2)
-    } catch {
-      errorDetails = errorBody || "(empty response)"
-    }
-    consola.error(
-      `Failed to get models from /models\n`
-        + `Status: ${response.status} ${response.statusText}\n`
-        + `Response: ${errorDetails}`,
-    )
-    throw new HTTPError(
-      `Failed to get models: ${response.status} ${response.statusText}`,
-      response,
-    )
+    consola.error("Failed to get models", `Status: ${response.status}`)
+    throw new HTTPError("Failed to get models", response)
   }
 
   return (await response.json()) as ModelsResponse

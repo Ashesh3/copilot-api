@@ -1,7 +1,11 @@
 import type { TranslationCheck } from "~/lib/endpoint-routing"
 import type { ResponsesPayload } from "~/services/copilot/create-responses"
 
-import { isHttpUrl, isPdfMediaType, parseDataUri } from "~/lib/attachments"
+import {
+  isPdfMediaType,
+  parseDataUri,
+  parseFetchableHttpUrl,
+} from "~/lib/attachments"
 
 const CHAT_UNSUPPORTED_TOOL_SEMANTICS = new Set([
   "custom",
@@ -188,7 +192,7 @@ function scanInputImage(
     const imageUrl = content.image_url as string
     const parsed = parseDataUri(imageUrl)
     if (
-      !isHttpUrl(imageUrl)
+      !parseFetchableHttpUrl(imageUrl)
       && (!parsed || !MESSAGES_IMAGE_MEDIA_TYPES.has(parsed.mediaType))
     ) {
       addBlocker(blockers, "input_image")
@@ -327,10 +331,8 @@ function scanFunctionPairing(options: {
     return
   }
   if (typeof item.call_id !== "string" || item.call_id.length === 0) return
-  if (
-    state.phase === "idle"
-    || state.callIds[state.resultIndex] !== item.call_id
-  ) {
+  if (state.phase === "idle") return
+  if (state.callIds[state.resultIndex] !== item.call_id) {
     addBlocker(blockers, "tool_result_pairing")
     return
   }

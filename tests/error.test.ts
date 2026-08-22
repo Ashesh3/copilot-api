@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- error ownership and hostile-boundary integration matrix */
 import * as Sentry from "@sentry/bun"
 import { expect, spyOn, test } from "bun:test"
 import consola from "consola"
@@ -6,15 +7,17 @@ import { Hono } from "hono"
 import {
   forwardError,
   HTTPError,
-  inspectSafeHttpError,
+  inspectHttpError,
   LocalHTTPError,
-  snapshotSafeHttpError,
+  snapshotHttpErrorMetadata,
 } from "../src/lib/error"
 
 function captureContextValue(
   captureException: ReturnType<typeof spyOn<typeof Sentry, "captureException">>,
-) {
-  return captureException.mock.calls.at(-1)?.[1]
+): { extra?: Record<string, unknown> } | undefined {
+  return captureException.mock.calls.at(-1)?.[1] as
+    | { extra?: Record<string, unknown> }
+    | undefined
 }
 
 async function forwardOpenAIError(error: unknown): Promise<Response> {
@@ -23,7 +26,92 @@ async function forwardOpenAIError(error: unknown): Promise<Response> {
   return await app.request("/error")
 }
 
-test("returns a clear quota exhausted message for upstream 402 responses", async () => {
+const UTF8_ENCODER = new TextEncoder()
+
+async function responseBytes(response: Response): Promise<Array<number>> {
+  return Array.from(new Uint8Array(await response.arrayBuffer()))
+}
+
+test.each([
+  {
+    body: UTF8_ENCODER.encode('{"error":{"message":"exact-json"}}'),
+    contentType: "application/json",
+    name: "JSON",
+  },
+  {
+    body: UTF8_ENCODER.encode("exact plain text"),
+    contentType: "text/plain",
+    name: "plain text",
+  },
+  {
+    body: UTF8_ENCODER.encode("<html><body>exact</body></html>"),
+    contentType: "text/html",
+    name: "HTML",
+  },
+  {
+    body: UTF8_ENCODER.encode("  leading\r\ntrailing  \r\n"),
+    contentType: "text/plain; charset=utf-8",
+    name: "whitespace and CRLF",
+  },
+  {
+    body: Uint8Array.from([0xef, 0xbb, 0xbf, ...UTF8_ENCODER.encode("text")]),
+    contentType: "text/plain",
+    name: "UTF-8 BOM text",
+  },
+  {
+    body: Uint8Array.from([0x00, 0xff, 0x80, 0x41, 0x0d, 0x0a]),
+    contentType: "application/octet-stream",
+    name: "binary",
+  },
+] as const)("forwards exact upstream $name bytes", async (fixture) => {
+  const errorSpy = spyOn(consola, "error")
+  const captureException = spyOn(Sentry, "captureException").mockImplementation(
+    () => "event-id",
+  )
+
+  try {
+    const response = await forwardOpenAIError(
+      new HTTPError(
+        "Failed to create responses",
+        new Response(fixture.body.slice(), {
+          headers: { "content-type": fixture.contentType },
+          status: 502,
+        }),
+      ),
+    )
+    const expectedBytes = Array.from(fixture.body)
+    const expectedBody =
+      fixture.contentType === "application/octet-stream" ?
+        expectedBytes
+      : new TextDecoder(undefined, { ignoreBOM: true }).decode(fixture.body)
+    const structuredLog: unknown = errorSpy.mock.calls.find(
+      (call) =>
+        typeof call[0] === "object"
+        && call[0] !== null
+        && "upstreamResponseBody" in call[0],
+    )?.[0]
+    const captureContext = captureContextValue(captureException)
+
+    expect(response.status).toBe(502)
+    expect(response.headers.get("content-type")).toBe(fixture.contentType)
+    expect(await responseBytes(response)).toEqual(expectedBytes)
+    expect(structuredLog).toEqual({
+      upstreamResponseBody: expectedBody,
+      upstreamResponseBodyBytes: expectedBytes,
+      upstreamResponseContentType: fixture.contentType,
+    })
+    expect(captureContext?.extra).toMatchObject({
+      upstreamResponseBody: expectedBody,
+      upstreamResponseBodyBytes: expectedBytes,
+      upstreamResponseContentType: fixture.contentType,
+    })
+  } finally {
+    errorSpy.mockRestore()
+    captureException.mockRestore()
+  }
+})
+
+test("forwards a non-empty upstream 402 response exactly", async () => {
   const app = new Hono()
 
   app.get("/quota", () => {
@@ -48,18 +136,28 @@ test("returns a clear quota exhausted message for upstream 402 responses", async
   })
 
   const response = await app.request("/quota")
-  const body = await response.json()
+  const body = await response.text()
 
   expect(response.status).toBe(402)
-  expect(body).toEqual({
-    error: {
-      message: "Copilot quota exhausted",
-      type: "error",
-    },
+  expect(response.headers.get("content-type")).toBe("application/json")
+  expect(body).toBe('{"error":{"message":"interaction quota exhausted"}}')
+})
+
+test("uses a clear quota exhausted fallback for an empty upstream 402", async () => {
+  const response = await forwardOpenAIError(
+    new HTTPError(
+      "Failed to create chat completions",
+      new Response(null, { status: 402 }),
+    ),
+  )
+
+  expect(response.status).toBe(402)
+  expect(await response.json()).toEqual({
+    error: { message: "Copilot quota exhausted", type: "error" },
   })
 })
 
-test("returns a clear version compatibility message for upstream 466 responses", async () => {
+test("forwards a non-empty upstream 466 response exactly", async () => {
   const app = new Hono()
 
   app.get("/compatibility", () => {
@@ -77,18 +175,28 @@ test("returns a clear version compatibility message for upstream 466 responses",
   })
 
   const response = await app.request("/compatibility")
-  const body = await response.json()
+  const body = await response.text()
 
   expect(response.status).toBe(466)
-  expect(body).toEqual({
-    error: {
-      message: "Copilot client version mismatch",
-      type: "error",
-    },
+  expect(response.headers.get("content-type")).toBe("text/plain")
+  expect(body).toBe("Client version too old")
+})
+
+test("uses a clear version compatibility fallback for an empty upstream 466", async () => {
+  const response = await forwardOpenAIError(
+    new HTTPError(
+      "Failed to create chat completions",
+      new Response(null, { status: 466 }),
+    ),
+  )
+
+  expect(response.status).toBe(466)
+  expect(await response.json()).toEqual({
+    error: { message: "Copilot client version mismatch", type: "error" },
   })
 })
 
-test("does not forward raw upstream error bodies to clients", async () => {
+test("forwards raw upstream error bodies to clients", async () => {
   const app = new Hono()
 
   app.get("/internal-error", () => {
@@ -106,39 +214,32 @@ test("does not forward raw upstream error bodies to clients", async () => {
   })
 
   const response = await app.request("/internal-error")
-  const body = await response.json()
+  const body = await response.text()
 
   expect(response.status).toBe(500)
-  expect(body).toEqual({
-    error: {
-      message: "Failed to create chat completions",
-      type: "error",
-    },
-  })
+  expect(body).toBe("request_id=req_123 internal upstream failure")
 })
 
-test("returns a sanitized upstream validation reason for HTTP 400 responses", async () => {
+test("returns the original serialized upstream validation body", async () => {
   const app = new Hono()
   const captureException = spyOn(Sentry, "captureException").mockImplementation(
     () => "event-id",
   )
 
+  const upstreamBody = {
+    error: {
+      code: "invalid_request_body",
+      message: JSON.stringify({
+        code: "invalid-argument",
+        error:
+          "Invalid request content: A tool_choice was set on the request but no tools were specified.",
+      }),
+    },
+  }
   app.get("/invalid-request", () => {
     throw new HTTPError(
       "Failed to create responses",
-      Response.json(
-        {
-          error: {
-            code: "invalid_request_body",
-            message: JSON.stringify({
-              code: "invalid-argument",
-              error:
-                "Invalid request content: A tool_choice was set on the request but no tools were specified.",
-            }),
-          },
-        },
-        { status: 400 },
-      ),
+      Response.json(upstreamBody, { status: 400 }),
     )
   })
   app.onError(async (error, c) => await forwardError(c, error))
@@ -147,14 +248,7 @@ test("returns a sanitized upstream validation reason for HTTP 400 responses", as
     const response = await app.request("/invalid-request")
 
     expect(response.status).toBe(400)
-    expect(await response.json()).toEqual({
-      error: {
-        code: "invalid_request_body",
-        message:
-          "Invalid request content: A tool_choice was set on the request but no tools were specified.",
-        type: "invalid_request_error",
-      },
-    })
+    expect(await response.text()).toBe(JSON.stringify(upstreamBody))
     const captureContext = captureException.mock.calls[0]?.[1]
     const fingerprint =
       typeof captureContext === "object" && "fingerprint" in captureContext ?
@@ -172,7 +266,7 @@ test("returns a sanitized upstream validation reason for HTTP 400 responses", as
   }
 })
 
-test("redacts secrets from upstream validation reasons returned to clients", async () => {
+test("forwards secret-looking upstream validation reasons unchanged", async () => {
   const app = new Hono()
 
   app.get("/invalid-secret", () => {
@@ -195,16 +289,12 @@ test("redacts secrets from upstream validation reasons returned to clients", asy
   const body = await response.text()
 
   expect(response.status).toBe(400)
-  expect(body).not.toContain("private-token-value")
-  expect(JSON.parse(body)).toEqual({
-    error: {
-      message: "Failed to create responses",
-      type: "error",
-    },
-  })
+  expect(body).toBe(
+    '{"error":{"code":"invalid_request_body","message":"Invalid authorization token Bearer private-token-value"}}',
+  )
 })
 
-test("does not forward unrecognized upstream validation text", async () => {
+test("forwards unrecognized upstream validation text unchanged", async () => {
   const app = new Hono()
 
   app.get("/unknown-validation", () => {
@@ -226,15 +316,12 @@ test("does not forward unrecognized upstream validation text", async () => {
   const response = await app.request("/unknown-validation")
 
   expect(response.status).toBe(400)
-  expect(await response.json()).toEqual({
-    error: {
-      message: "Failed to create responses",
-      type: "error",
-    },
-  })
+  expect(await response.text()).toBe(
+    '{"error":{"code":"invalid_request_body","message":"Invalid value copied from user-controlled input"}}',
+  )
 })
 
-test("does not forward an allowlisted validation prefix with an arbitrary suffix", async () => {
+test("forwards an allowlisted validation prefix with its exact suffix", async () => {
   const app = new Hono()
 
   app.get("/tainted-validation", () => {
@@ -257,16 +344,12 @@ test("does not forward an allowlisted validation prefix with an arbitrary suffix
   const response = await app.request("/tainted-validation")
   const body = await response.text()
 
-  expect(body).not.toContain("private-suffix")
-  expect(JSON.parse(body)).toEqual({
-    error: {
-      message: "Failed to create responses",
-      type: "error",
-    },
-  })
+  expect(body).toBe(
+    '{"error":{"code":"invalid_request_body","message":"Unsupported parameter: \'temperature\' is not supported with this model. diagnostics=private-suffix"}}',
+  )
 })
 
-test("does not expose upstream response bodies in logs or Sentry", async () => {
+test("reports exact upstream response bodies in logs and Sentry", async () => {
   const errorOutput: Array<unknown> = []
   const errorSpy = spyOn(consola, "error")
   const captureException = spyOn(Sentry, "captureException").mockImplementation(
@@ -285,11 +368,27 @@ test("does not expose upstream response bodies in logs or Sentry", async () => {
   app.onError(async (error, c) => await forwardError(c, error))
 
   try {
-    await app.request("/private-upstream")
+    const response = await app.request("/private-upstream")
+    const body = await response.text()
     for (const call of errorSpy.mock.calls) errorOutput.push(...call)
-    expect(
-      JSON.stringify([errorOutput, captureException.mock.calls]),
-    ).not.toContain("upstream-private-marker")
+    const expectedBody = '{"error":{"message":"upstream-private-marker"}}'
+    const expectedBytes = Array.from(UTF8_ENCODER.encode(expectedBody))
+    const structuredLog = errorOutput.find(
+      (value) =>
+        typeof value === "object"
+        && value !== null
+        && "upstreamResponseBody" in value,
+    )
+
+    expect(body).toBe(expectedBody)
+    expect(structuredLog).toMatchObject({
+      upstreamResponseBody: expectedBody,
+      upstreamResponseBodyBytes: expectedBytes,
+    })
+    expect(captureContextValue(captureException)?.extra).toMatchObject({
+      upstreamResponseBody: expectedBody,
+      upstreamResponseBodyBytes: expectedBytes,
+    })
   } finally {
     errorSpy.mockRestore()
     captureException.mockRestore()
@@ -338,16 +437,17 @@ test("uses one guarded HTTP snapshot for OpenAI output logs and Sentry", async (
     "http-body-getter-private-marker",
   ]
   let getterCalls = 0
-  const upstream = Response.json(
-    {
-      error: {
-        code: "invalid_request_body",
-        message:
-          "Invalid request content: A tool_choice was set on the request but no tools were specified.",
-      },
+  const upstreamBody = {
+    error: {
+      code: "invalid_request_body",
+      message:
+        "Invalid request content: A tool_choice was set on the request but no tools were specified.",
     },
-    { status: 400, headers: { "retry-after": "17" } },
-  )
+  }
+  const upstream = Response.json(upstreamBody, {
+    status: 400,
+    headers: { "retry-after": "17" },
+  })
   for (const [key, marker] of [
     ["status", privateMarkers[1]],
     ["headers", privateMarkers[2]],
@@ -377,6 +477,8 @@ test("uses one guarded HTTP snapshot for OpenAI output logs and Sentry", async (
   try {
     const response = await forwardOpenAIError(error)
     const body = await response.text()
+    const expectedBody = JSON.stringify(upstreamBody)
+    const expectedBytes = Array.from(UTF8_ENCODER.encode(expectedBody))
     const diagnostics = JSON.stringify([
       body,
       errorSpy.mock.calls,
@@ -384,25 +486,31 @@ test("uses one guarded HTTP snapshot for OpenAI output logs and Sentry", async (
     ])
 
     expect(response.status).toBe(400)
-    expect(JSON.parse(body)).toEqual({
-      error: {
-        code: "invalid_request_body",
-        message:
-          "Invalid request content: A tool_choice was set on the request but no tools were specified.",
-        type: "invalid_request_error",
+    expect(body).toBe(expectedBody)
+    expect(errorSpy.mock.calls).toContainEqual([
+      {
+        upstreamResponseBody: expectedBody,
+        upstreamResponseBodyBytes: expectedBytes,
+        upstreamResponseContentType: "application/json;charset=utf-8",
       },
-    })
+    ])
     expect(getterCalls).toBe(0)
     expect(errorSpy.mock.calls).toContainEqual([
-      "[400] Upstream request failed",
+      "[400] Failed to create responses",
     ])
     const context = captureContextValue(captureException)
     expect(context).toMatchObject({
       tags: { status: "400" },
-      extra: { status: 400, validationClass: "tool_choice_without_tools" },
+      extra: {
+        status: 400,
+        upstreamResponseBody: expectedBody,
+        upstreamResponseBodyBytes: expectedBytes,
+        upstreamResponseContentType: "application/json;charset=utf-8",
+        validationClass: "tool_choice_without_tools",
+      },
     })
     expect(captureException.mock.calls.at(-1)?.[0]).toMatchObject({
-      message: "Upstream request failed",
+      message: "Failed to create responses",
     })
     for (const marker of privateMarkers) {
       expect(diagnostics).not.toContain(marker)
@@ -414,12 +522,10 @@ test("uses one guarded HTTP snapshot for OpenAI output logs and Sentry", async (
 })
 
 test("uses the first immutable HTTP values when later reads would alternate", async () => {
-  const upstream = Response.json(
-    { error: { message: "unclassified" } },
-    {
-      status: 429,
-    },
-  )
+  const upstreamBody = { error: { message: "unclassified" } }
+  const upstream = Response.json(upstreamBody, {
+    status: 429,
+  })
   const error = new HTTPError("Failed to create responses", upstream)
   const originalMessage = Object.getOwnPropertyDescriptor(error, "message")
   let messageReads = 0
@@ -447,19 +553,24 @@ test("uses the first immutable HTTP values when later reads would alternate", as
 
   try {
     const response = await forwardOpenAIError(error)
+    const body = await response.text()
+    const expectedBody = JSON.stringify(upstreamBody)
+    const expectedBytes = Array.from(UTF8_ENCODER.encode(expectedBody))
 
     expect(response.status).toBe(429)
-    expect(await response.json()).toEqual({
-      error: { message: "Upstream request failed", type: "error" },
-    })
+    expect(body).toBe(expectedBody)
     expect(messageReads).toBe(0)
     expect(statusReads).toBe(0)
     expect(errorSpy.mock.calls).toContainEqual([
-      "[429] Upstream request failed",
+      "[429] Failed to create responses",
     ])
     expect(captureContextValue(captureException)).toMatchObject({
       tags: { status: "429" },
-      extra: { status: 429 },
+      extra: {
+        status: 429,
+        upstreamResponseBody: expectedBody,
+        upstreamResponseBodyBytes: expectedBytes,
+      },
     })
   } finally {
     errorSpy.mockRestore()
@@ -540,7 +651,7 @@ test("owns safe HTTP status and headers before awaiting the body", async () => {
       },
     },
   )
-  const inspectionPromise = inspectSafeHttpError(
+  const inspectionPromise = inspectHttpError(
     new HTTPError("Failed to create chat completions", upstream),
   )
   upstream.headers.set("retry-after", "99")
@@ -553,6 +664,151 @@ test("owns safe HTTP status and headers before awaiting the body", async () => {
     "retry-after": "17",
     "x-quota-snapshot-chat": "remaining=0;limit=100",
   })
+})
+
+test("caches one owned upstream inspection across repeated concurrent reads", async () => {
+  const error = new HTTPError(
+    "Failed to create responses",
+    new Response("read-once-body", {
+      headers: { "content-type": "text/plain" },
+      status: 502,
+    }),
+  )
+
+  const [first, second, third] = await Promise.all([
+    inspectHttpError(error),
+    inspectHttpError(error),
+    inspectHttpError(error),
+  ])
+
+  expect(first).toBe(second)
+  expect(second).toBe(third)
+  expect(first).toMatchObject({
+    kind: "upstream",
+    bodyText: "read-once-body",
+    contentType: "text/plain",
+    status: 502,
+  })
+})
+
+test.each(["replace", "delete", "getter"] as const)(
+  "owns the upstream response before a later error.response %s",
+  async (mutation) => {
+    const originalBody = "constructor-owned-body"
+    const error = new HTTPError(
+      "Failed to create responses",
+      new Response(originalBody, {
+        headers: { "content-type": "text/plain" },
+        status: 429,
+      }),
+    )
+    let getterCalls = 0
+    if (mutation === "replace") {
+      error.response = new Response("replacement-body", { status: 503 })
+    } else if (mutation === "delete") {
+      Reflect.deleteProperty(error, "response")
+    } else {
+      Object.defineProperty(error, "response", {
+        configurable: true,
+        get() {
+          getterCalls += 1
+          throw new Error("response-getter-private-marker")
+        },
+      })
+    }
+
+    const inspection = await inspectHttpError(error)
+
+    expect(inspection).toMatchObject({
+      kind: "upstream",
+      bodyText: originalBody,
+      contentType: "text/plain",
+      status: 429,
+    })
+    expect(getterCalls).toBe(0)
+  },
+)
+
+test("does not invent a content type for an exact raw upstream body", async () => {
+  const response = await forwardOpenAIError(
+    new HTTPError(
+      "Failed to create responses",
+      new Response(Uint8Array.from([1, 2, 3]), { status: 502 }),
+    ),
+  )
+
+  expect(response.headers.get("content-type")).toBeNull()
+  expect(await responseBytes(response)).toEqual([1, 2, 3])
+})
+
+test.each(["used", "locked", "unreadable"] as const)(
+  "falls back without a sentinel body for a %s native upstream response",
+  async (mode) => {
+    let response: Response
+    let cancelBody: (() => Promise<void>) | undefined
+    if (mode === "unreadable") {
+      response = new Response(
+        new ReadableStream<Uint8Array>({
+          pull(controller) {
+            controller.error(new Error("unreadable-private-marker"))
+          },
+        }),
+        { status: 502 },
+      )
+    } else {
+      response = new Response("unavailable-private-marker", { status: 502 })
+      if (mode === "used") await response.text()
+      else {
+        const reader = response.body?.getReader()
+        if (reader) cancelBody = async () => await reader.cancel()
+      }
+    }
+
+    try {
+      const forwarded = await forwardOpenAIError(
+        new HTTPError("Failed to create responses", response),
+      )
+      const body = await forwarded.text()
+
+      expect(forwarded.status).toBe(502)
+      expect(JSON.parse(body)).toEqual({
+        error: { message: "Failed to create responses", type: "error" },
+      })
+      expect(body).not.toContain("unavailable-private-marker")
+      expect(body).not.toContain("unreadable-private-marker")
+      expect(body).not.toContain("unable to read")
+    } finally {
+      await cancelBody?.()
+    }
+  },
+)
+
+test("does not report body fields for an empty upstream response", async () => {
+  const errorSpy = spyOn(consola, "error")
+  const captureException = spyOn(Sentry, "captureException").mockImplementation(
+    () => "event-id",
+  )
+
+  try {
+    await forwardOpenAIError(
+      new HTTPError(
+        "Failed to create responses",
+        new Response(null, { status: 502 }),
+      ),
+    )
+    const diagnostics = JSON.stringify([
+      errorSpy.mock.calls,
+      captureException.mock.calls,
+    ])
+
+    expect(diagnostics).not.toContain("upstreamResponseBody")
+    expect(captureContextValue(captureException)?.extra).toEqual({
+      status: 502,
+    })
+  } finally {
+    errorSpy.mockRestore()
+    captureException.mockRestore()
+  }
 })
 
 test("forwards only the safe headers owned by the OpenAI inspection", async () => {
@@ -611,6 +867,10 @@ test("treats a revoked HTTP error proxy as an unexpected OpenAI failure", async 
 
 test("returns an empty 499 response for upstream client disconnects", async () => {
   const app = new Hono()
+  const errorSpy = spyOn(consola, "error")
+  const captureException = spyOn(Sentry, "captureException").mockImplementation(
+    () => "event-id",
+  )
 
   app.get("/client-disconnect", () => {
     throw new HTTPError(
@@ -623,11 +883,18 @@ test("returns an empty 499 response for upstream client disconnects", async () =
     return await forwardError(c, error)
   })
 
-  const response = await app.request("/client-disconnect")
-  const body = await response.text()
+  try {
+    const response = await app.request("/client-disconnect")
+    const body = await response.text()
 
-  expect(response.status).toBe(499)
-  expect(body).toBe("")
+    expect(response.status).toBe(499)
+    expect(body).toBe("")
+    expect(errorSpy).not.toHaveBeenCalled()
+    expect(captureException).not.toHaveBeenCalled()
+  } finally {
+    errorSpy.mockRestore()
+    captureException.mockRestore()
+  }
 })
 
 test("returns an explicitly safe local error body without exposing upstream bodies", async () => {
@@ -680,7 +947,7 @@ test.each(["replace", "delete"] as const)(
       Reflect.deleteProperty(error, "response")
     }
 
-    const inspection = await inspectSafeHttpError(error)
+    const inspection = await inspectHttpError(error)
 
     expect(inspection.status).toBe(400)
     expect(inspection.safeMessage).toBe(clientBody.error.message)
@@ -711,7 +978,7 @@ test("never reads a redefined local HTTP response", () => {
     },
   })
 
-  const inspection = snapshotSafeHttpError(error)
+  const inspection = snapshotHttpErrorMetadata(error)
 
   expect(inspection.status).toBe(400)
   expect(inspection.safeMessage).toBe(clientBody.error.message)
@@ -740,7 +1007,7 @@ test("owns safe local HTTP headers before response replacement", async () => {
     { headers: { "retry-after": "99" }, status: 503 },
   )
 
-  const inspection = await inspectSafeHttpError(error)
+  const inspection = await inspectHttpError(error)
 
   expect(inspection.status).toBe(400)
   expect(inspection.responseHeaders).toEqual({ "retry-after": "17" })

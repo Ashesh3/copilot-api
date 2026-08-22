@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- one audit file covers the complete compatibility document */
 import * as Sentry from "@sentry/bun"
 import { expect, spyOn, test } from "bun:test"
 import consola from "consola"
@@ -8,6 +9,7 @@ import os from "node:os"
 import path from "node:path"
 
 import {
+  ATTACHMENT_URL_CONTRACT,
   ERROR_ENVELOPE_CONTRACT,
   getGoogleRoutingContractRows,
   SESSION_TOKEN_PRIVACY_CONTRACT,
@@ -26,7 +28,7 @@ import {
   getModelEndpointSupport,
   selectCopilotEndpoint,
 } from "~/lib/endpoint-routing"
-import { HTTPError, forwardError } from "~/lib/error"
+import { HTTPError, LocalHTTPError, forwardError } from "~/lib/error"
 import {
   clearLlmDebugLogs,
   getLlmDebugLog,
@@ -55,13 +57,14 @@ const requiredHeadings = [
   "## Streaming and WebSocket termination and continuation semantics",
   "## Multi-account and session-token constraints",
   "## Intentional gateway extensions",
-  "## Error privacy and LLM Debug exception",
+  "## Upstream error passthrough, request/header privacy, and LLM Debug",
   "## Verification matrix and last-audited date",
   "## Residual feature-flag, account, and provider limitations",
 ] as const
 
 const routeMatrix = [
   { method: "GET", canonical: "/v1/models", alias: "/models" },
+  { method: "GET", canonical: "/v1beta/models" },
   {
     method: "GET",
     canonical: "/v1/models/:model",
@@ -100,6 +103,9 @@ const googleDocumentedRoutes = [
   "/v1beta/models/:model:streamGenerateContent",
   "/v1/models/:model:streamGenerateContent",
   "/models/:model:streamGenerateContent",
+  "/v1beta/models/:model:countTokens",
+  "/v1/models/:model:countTokens",
+  "/models/:model:countTokens",
 ] as const
 
 const representativeForbiddenModelIds = `o1 o3-mini codex-mini-latest
@@ -372,22 +378,34 @@ async function probeThrownNativeStreamFailures(privateMarker: string): Promise<{
 
 // The behavior matrix intentionally probes every public diagnostic boundary.
 
+// This executable cross-boundary audit intentionally keeps its related probes
+// together so the generated documentation matrices cannot drift independently.
+// eslint-disable-next-line max-lines-per-function
 async function deriveCompatibilityMatrix(): Promise<{
   errors: Record<string, string>
   privacy: Record<string, string>
   streams: Record<string, string>
 }> {
-  const privateMarker = "compatibility-private-marker"
-  const nativeFailures = await probeThrownNativeStreamFailures(privateMarker)
+  const runtimeFailureMarker = "synthetic-runtime-failure-marker"
+  const nativeFailures =
+    await probeThrownNativeStreamFailures(runtimeFailureMarker)
   expect(nativeFailures.chatBody).toContain("partial-chat")
-  expect(nativeFailures.chatBody).not.toContain("event: error")
-  expect(nativeFailures.chatBody).not.toContain(privateMarker)
-  expect(nativeFailures.responsesBody).not.toContain("buffered-responses-delta")
-  expect(nativeFailures.responsesBody).not.toContain("event: error")
-  expect(nativeFailures.responsesBody).not.toContain(privateMarker)
+  expect(nativeFailures.chatBody.match(/\[DONE\]/g)).toHaveLength(1)
+  expect(nativeFailures.chatBody).toContain('"error"')
+  expect(nativeFailures.chatBody).not.toContain(runtimeFailureMarker)
+  expect(nativeFailures.responsesBody).toContain("buffered-responses-delta")
+  expect(nativeFailures.responsesBody.match(/^event: error$/gm)).toHaveLength(1)
+  expect(
+    nativeFailures.responsesBody.match(/^event: response.failed$/gm),
+  ).toHaveLength(1)
+  expect(nativeFailures.responsesBody).not.toContain(runtimeFailureMarker)
 
   clearLlmDebugLogs()
-  const token = jwt({ selected_model: "model-placeholder" })
+  const requestSecretMarker = "synthetic-request-header-secret-marker"
+  const token = jwt({
+    marker: requestSecretMarker,
+    selected_model: "model-placeholder",
+  })
   try {
     const debugId = startLlmDebugLog({
       method: "POST",
@@ -474,53 +492,109 @@ async function deriveCompatibilityMatrix(): Promise<{
     }),
   ).toBe(false)
 
-  const error = new HTTPError(
-    `private upstream error ${token}`,
-    Response.json(
-      { error: { message: `${privateMarker} ${token}` } },
-      { status: 500 },
-    ),
-  )
+  const approvedBody =
+    "  synthetic-approved-upstream-body-marker\r\nline 2  \r\n"
+  const approvedBytes = Array.from(new TextEncoder().encode(approvedBody))
+  const binaryBytes = [0, 255, 128, 65, 13, 10]
   const errorLog = spyOn(consola, "error")
   const captureException = spyOn(Sentry, "captureException").mockImplementation(
     () => "event-id",
   )
   const openAIApp = new Hono()
-  openAIApp.get("/error", async (c) => await forwardError(c, error))
+  openAIApp.get(
+    "/error",
+    async (c) =>
+      await forwardError(
+        c,
+        new HTTPError(
+          "Failed to create responses",
+          new Response(approvedBody, {
+            headers: { "content-type": "text/plain; charset=utf-8" },
+            status: 502,
+          }),
+        ),
+      ),
+  )
   const messagesApp = new Hono()
-  messagesApp.get("/error", async (c) => await forwardMessagesError(c, error))
+  messagesApp.get(
+    "/error",
+    async (c) =>
+      await forwardMessagesError(
+        c,
+        new HTTPError(
+          "Failed to create responses",
+          new Response(Uint8Array.from(binaryBytes), {
+            headers: { "content-type": "application/octet-stream" },
+            status: 429,
+          }),
+        ),
+      ),
+  )
   try {
-    const openAIBody = (await (
-      await openAIApp.request("/error")
-    ).json()) as Record<string, unknown>
-    const messagesBody = (await (
-      await messagesApp.request("/error")
-    ).json()) as Record<string, unknown>
-    expect(openAIBody).toEqual({
-      error: { message: "Upstream request failed", type: "error" },
-    })
-    expect(messagesBody).toEqual({
-      type: "error",
-      error: {
-        type: "api_error",
-        message: "The Copilot Messages request failed.",
-      },
-    })
-    expect(
-      JSON.stringify([
-        openAIBody,
-        messagesBody,
-        errorLog.mock.calls,
-        captureException.mock.calls,
-      ]),
-    ).not.toContain(token)
-    expect(JSON.stringify([openAIBody, messagesBody])).not.toContain(
-      privateMarker,
+    const openAIResponse = await openAIApp.request("/error")
+    const messagesResponse = await messagesApp.request("/error")
+    expect(openAIResponse.status).toBe(502)
+    expect(openAIResponse.headers.get("content-type")).toBe(
+      "text/plain; charset=utf-8",
     )
+    expect(await openAIResponse.text()).toBe(approvedBody)
+    expect(messagesResponse.status).toBe(429)
+    expect(messagesResponse.headers.get("content-type")).toBe(
+      "application/octet-stream",
+    )
+    expect(
+      Array.from(new Uint8Array(await messagesResponse.arrayBuffer())),
+    ).toEqual(binaryBytes)
+
+    const diagnostics = JSON.stringify([
+      errorLog.mock.calls,
+      captureException.mock.calls,
+    ])
+    expect(diagnostics).toContain("synthetic-approved-upstream-body-marker")
+    expect(diagnostics).toContain(JSON.stringify(approvedBytes))
+    expect(diagnostics).toContain(JSON.stringify(binaryBytes))
+    expect(diagnostics).not.toContain(requestSecretMarker)
   } finally {
     errorLog.mockRestore()
     captureException.mockRestore()
   }
+
+  const localBody = {
+    error: {
+      code: "invalid_request",
+      message: "The request is locally invalid.",
+      param: "body",
+      type: "invalid_request_error",
+    },
+  }
+  const localResponse = await forwardOpenAIErrorForDocument(
+    new LocalHTTPError(
+      localBody.error.message,
+      Response.json(localBody, { status: 400 }),
+      localBody,
+    ),
+  )
+  expect(localResponse.status).toBe(400)
+  expect(await localResponse.json()).toEqual(localBody)
+  const emptyResponse = await forwardOpenAIErrorForDocument(
+    new HTTPError(
+      "Failed to create responses",
+      new Response(null, { status: 502 }),
+    ),
+  )
+  expect(await emptyResponse.json()).toEqual({
+    error: { message: "Failed to create responses", type: "error" },
+  })
+  const runtimeResponse = await forwardOpenAIErrorForDocument(
+    new Error(runtimeFailureMarker),
+  )
+  expect(await runtimeResponse.json()).toEqual({
+    error: {
+      code: "internal_error",
+      message: "Internal server error",
+      type: "server_error",
+    },
+  })
 
   const messagePaths = [...registeredRoutes()]
     .filter((route) => route.startsWith("POST /v1/messages"))
@@ -540,6 +614,14 @@ async function deriveCompatibilityMatrix(): Promise<{
       STREAM_BEHAVIOR_CONTRACT.map((row) => [row.surface, row.behavior]),
     ),
   }
+}
+
+async function forwardOpenAIErrorForDocument(
+  error: unknown,
+): Promise<Response> {
+  const app = new Hono()
+  app.get("/error", async (c) => await forwardError(c, error))
+  return await app.request("/error")
 }
 
 function expectMatrixRows(
@@ -607,13 +689,12 @@ test("documents the registered route matrix and reviewed endpoint authority", as
   for (const route of googleDocumentedRoutes) {
     expect(text).toContain(`\`POST ${route}\``)
   }
-  expect(text).not.toContain(":countTokens")
   expectMatrixRows(text, googleRouteMatrix())
   expect(normalizedText).toContain(
-    "Only `generateContent` and `streamGenerateContent` are supported public Google actions.",
+    "`generateContent`, `streamGenerateContent`, and `countTokens` are supported public Google actions on each listed route prefix.",
   )
   expect(normalizedText).toContain(
-    "A missing action suffix or any other suffix, including `countTokens`, returns a local Google `400` before body parsing or upstream dispatch.",
+    "A missing action suffix or any other suffix returns a local Google `400` before body parsing or upstream dispatch.",
   )
   expect(normalizedText).toContain(
     "Ordinary request, authentication, console, and Sentry diagnostics use the Google route template instead of the model/action segment, and debug logging does not inspect bodies for unsupported actions.",
@@ -670,6 +751,16 @@ test("documents behavior-derived stream, privacy, and error matrices", async () 
   expectMatrixRows(document, matrix.errors)
 })
 
+test("defines the live attachment recovery authority", () => {
+  expect(ATTACHMENT_URL_CONTRACT).toEqual([
+    {
+      surface: "Runtime-valid absolute HTTP(S) attachment/file URL",
+      behavior:
+        "fetchable without destination, DNS, IP, userinfo, or redirect-target filtering; caller abort, timeout, byte, and redirect limits remain",
+    },
+  ])
+})
+
 test("documents the exact structured stream and privacy contract", async () => {
   const document = await readFile(documentPath, "utf8")
   const matrix = await deriveCompatibilityMatrix()
@@ -688,6 +779,9 @@ test("documents the exact structured stream and privacy contract", async () => {
   )
   expect(documentContractTable(document, "error-envelope")).toEqual(
     Object.entries(matrix.errors),
+  )
+  expect(documentContractTable(document, "attachment-url")).toEqual(
+    ATTACHMENT_URL_CONTRACT.map(({ behavior, surface }) => [surface, behavior]),
   )
 })
 
@@ -742,7 +836,7 @@ test("keeps the mounted Messages status oracle independent of production contrac
   }
 })
 
-test("contains no private paths, credentials, hosts, or raw data", async () => {
+test("contains no private paths, credentials, hosts, or fixture data", async () => {
   const text = await readFile(documentPath, "utf8")
 
   for (const forbidden of [
@@ -754,7 +848,8 @@ test("contains no private paths, credentials, hosts, or raw data", async () => {
     "10.0.0.",
     "internal-host.tld",
     "api.githubcopilot.com",
-    "private-upstream-marker",
+    "synthetic-approved-upstream-body-marker",
+    "synthetic-request-header-secret-marker",
     "raw prompt",
     "raw user data",
   ]) {

@@ -36,9 +36,12 @@ import {
   type VoiceSession,
   voiceWebSocket,
 } from "../src/routes/voice/route"
+import { server } from "../src/server"
 
 const originalGatewayKey = state.apiKeyAuth
 const originalDirectConnect = process.env.COPILOT_API_ENABLE_DIRECT_CONNECT
+const originalPublicBase = process.env.COPILOT_PUBLIC_BASE_URL
+const originalTrustedCidrs = process.env.COPILOT_TRUSTED_PROXY_CIDRS
 const originalAdminOrigin = process.env.COPILOT_ADMIN_ORIGIN
 const originalAdminPasswordHash = process.env.COPILOT_ADMIN_PASSWORD_HASH
 const TEST_ADMIN_ORIGIN = "https://admin.example.test"
@@ -65,6 +68,8 @@ beforeEach(async () => {
   resetDirectConnectForTest()
   resetIpSecurityForTest()
   delete process.env.COPILOT_API_ENABLE_DIRECT_CONNECT
+  delete process.env.COPILOT_PUBLIC_BASE_URL
+  delete process.env.COPILOT_TRUSTED_PROXY_CIDRS
 })
 
 afterEach(() => {
@@ -76,6 +81,12 @@ afterEach(() => {
   } else {
     process.env.COPILOT_API_ENABLE_DIRECT_CONNECT = originalDirectConnect
   }
+  if (originalPublicBase === undefined)
+    delete process.env.COPILOT_PUBLIC_BASE_URL
+  else process.env.COPILOT_PUBLIC_BASE_URL = originalPublicBase
+  if (originalTrustedCidrs === undefined)
+    delete process.env.COPILOT_TRUSTED_PROXY_CIDRS
+  else process.env.COPILOT_TRUSTED_PROXY_CIDRS = originalTrustedCidrs
   if (originalAdminOrigin === undefined) {
     delete process.env.COPILOT_ADMIN_ORIGIN
   } else {
@@ -89,19 +100,36 @@ afterEach(() => {
 })
 
 describe("health and Direct Connect exposure", () => {
-  test("health exposes only the exact liveness response", async () => {
-    const response = await healthRoutes.request("http://localhost/health")
-    expect(response.status).toBe(200)
-    expect(await response.json()).toEqual({ status: "ok" })
+  test("health exposes canonical and compatibility liveness routes before auth", async () => {
+    for (const pathname of ["/health", "/health/health"]) {
+      const response = await server.request(pathname)
+      expect(response.status).toBe(200)
+      expect(await response.json()).toEqual({ status: "ok" })
+    }
+
+    for (const pathname of ["/health", "/health/health"]) {
+      const response = await server.request(pathname, { method: "HEAD" })
+      expect(response.status).toBe(200)
+      expect(await response.text()).toBe("")
+    }
+
+    for (const [pathname, method] of [
+      ["/health", "POST"],
+      ["/health/health", "POST"],
+      ["/health/unknown", "GET"],
+    ] as const) {
+      const response = await server.request(pathname, { method })
+      expect(response.status).toBe(404)
+      expect(await response.json()).toEqual({ error: "Not found" })
+    }
+
+    for (const pathname of ["/", "/health"]) {
+      const response = await healthRoutes.request(`http://localhost${pathname}`)
+      expect(response.status).toBe(200)
+      expect(await response.json()).toEqual({ status: "ok" })
+    }
     expect(
-      (await healthRoutes.request("http://localhost/api/sessions")).status,
-    ).toBe(404)
-    expect(
-      (
-        await healthRoutes.request("http://localhost/health", {
-          method: "HEAD",
-        })
-      ).status,
+      (await healthRoutes.request("http://localhost/unknown")).status,
     ).toBe(404)
   })
 
@@ -118,6 +146,30 @@ describe("health and Direct Connect exposure", () => {
         })
       ).status,
     ).toBe(200)
+  })
+
+  test("Direct Connect returns the resolved public WebSocket URL", async () => {
+    process.env.COPILOT_API_ENABLE_DIRECT_CONNECT = "true"
+    process.env.COPILOT_PUBLIC_BASE_URL = "https://public.example.test/gateway"
+    const response = await directConnectRoutes.request(
+      "http://internal.example.test:8443/",
+      {
+        method: "POST",
+        headers: {
+          authorization: "Bearer gateway-secret",
+          "content-type": "application/json",
+        },
+        body: "{}",
+      },
+    )
+    expect(response.status).toBe(201)
+    const body = (await response.json()) as {
+      session_id: string
+      ws_url: string
+    }
+    expect(body.ws_url).toBe(
+      `wss://public.example.test/gateway/ws/direct/${body.session_id}`,
+    )
   })
 
   test("Direct Connect HTTP auth failures count toward the shared ban", async () => {
@@ -172,7 +224,7 @@ describe("health and Direct Connect exposure", () => {
   test("start fetch returns uniform Direct Connect upgrade denials without breaking authorized upgrades", async () => {
     process.env.COPILOT_API_ENABLE_DIRECT_CONNECT = "true"
     const clientIp = "198.51.100.95"
-    const session = createDirectConnectSession()
+    const session = createDirectConnectSession(new URL("http://localhost/"))
     const startModule = (await import("../src/start")) as Record<
       string,
       unknown
@@ -214,7 +266,7 @@ describe("health and Direct Connect exposure", () => {
   })
 
   test("Direct Connect allows multiple handlers for one session", () => {
-    const session = createDirectConnectSession()
+    const session = createDirectConnectSession(new URL("http://localhost/"))
     const firstSend = mock(() => {})
     const secondSend = mock(() => {})
     const firstClose = mock(() => {})
@@ -236,9 +288,9 @@ describe("health and Direct Connect exposure", () => {
   })
 
   test("Direct Connect retains sessions without count eviction", () => {
-    const first = createDirectConnectSession()
+    const first = createDirectConnectSession(new URL("http://localhost/"))
     for (let index = 0; index < 20; index += 1) {
-      createDirectConnectSession()
+      createDirectConnectSession(new URL("http://localhost/"))
     }
     expect(listDirectConnectSessions()).toHaveLength(21)
     expect(
@@ -249,7 +301,7 @@ describe("health and Direct Connect exposure", () => {
   })
 
   test("Direct Connect closes binary frames without logging their contents", () => {
-    const session = createDirectConnectSession()
+    const session = createDirectConnectSession(new URL("http://localhost/"))
     const close = mock(() => {})
     const handlers = handleDirectConnectWebSocket(
       { send: () => {}, close },
@@ -258,6 +310,66 @@ describe("health and Direct Connect exposure", () => {
     handlers.onMessage(new Uint8Array([1, 2, 3]))
     expect(close).toHaveBeenCalledWith(4007, "Binary frames not supported")
     handlers.onClose()
+  })
+})
+
+describe("Direct Connect JSON boundaries", () => {
+  test("reject malformed and missing JSON before allocation", async () => {
+    process.env.COPILOT_API_ENABLE_DIRECT_CONNECT = "true"
+    const initialCount = listDirectConnectSessions().length
+
+    for (const request of [
+      {
+        body: "{",
+        headers: {
+          authorization: "Bearer gateway-secret",
+          "content-type": "application/json",
+        },
+        method: "POST",
+      },
+      {
+        headers: {
+          authorization: "Bearer gateway-secret",
+          "content-type": "application/json",
+        },
+        method: "POST",
+      },
+    ]) {
+      const response = await directConnectRoutes.request(
+        "http://localhost/",
+        request,
+      )
+      expect(response.status).toBe(400)
+      expect(await response.json()).toEqual({ error: "Invalid JSON" })
+      expect(listDirectConnectSessions()).toHaveLength(initialCount)
+    }
+
+    const valid = await directConnectRoutes.request("http://localhost/", {
+      body: JSON.stringify({ cwd: String.raw`C:\compat` }),
+      headers: {
+        authorization: "Bearer gateway-secret",
+        "content-type": "application/json",
+      },
+      method: "POST",
+    })
+    expect(valid.status).toBe(201)
+    expect((await valid.json()) as { work_dir: string }).toMatchObject({
+      work_dir: String.raw`C:\compat`,
+    })
+    expect(listDirectConnectSessions()).toHaveLength(initialCount + 1)
+  })
+
+  test("authenticates malformed requests before parsing", async () => {
+    process.env.COPILOT_API_ENABLE_DIRECT_CONNECT = "true"
+    const initialCount = listDirectConnectSessions().length
+    const response = await directConnectRoutes.request("http://localhost/", {
+      body: "{",
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    })
+
+    expect(response.status).toBe(401)
+    expect(listDirectConnectSessions()).toHaveLength(initialCount)
   })
 })
 

@@ -227,6 +227,20 @@ test("count_tokens preserves system and future roles plus unknown native structu
   })
 })
 
+test("count_tokens rejects an all-invalid message list after sanitization", async () => {
+  const response = await requestCountTokens({ body: { messages: [null] } })
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toMatchObject({
+    type: "error",
+    error: {
+      message: "messages is required for Messages requests.",
+      param: "messages",
+    },
+  })
+  expect(capturedRequests).toHaveLength(0)
+})
+
 test("count_tokens drops malformed optional controls and invalid optional headers", async () => {
   const response = await requestCountTokens({
     headers: {
@@ -341,6 +355,40 @@ test("count_tokens returns an Anthropic model-not-found error", async () => {
   expect(capturedRequests).toHaveLength(0)
 })
 
+test("count_tokens uses the normalized requested model while the catalog is unavailable", async () => {
+  state.models = undefined
+  responseFactory = () => Response.json({ input_tokens: 61 })
+
+  const response = await requestCountTokens({ model: "claude-opus-4-7" })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({ input_tokens: 61 })
+  expect(capturedRequests).toHaveLength(1)
+  expect(capturedRequests[0]?.path).toBe("/v1/messages/count_tokens")
+  expect(capturedRequests[0]?.body).toEqual({
+    model: "claude-opus-4.7",
+    messages: [{ role: "user", content: "Hello" }],
+  })
+})
+
+test("count_tokens preserves upstream failures while the catalog is unavailable", async () => {
+  state.models = undefined
+  const upstreamBody = '{"private":"catalog-outage-upstream"}\n'
+  responseFactory = () =>
+    new Response(upstreamBody, {
+      status: 409,
+      headers: { "content-type": "application/problem+json" },
+    })
+
+  const response = await requestCountTokens({ model: "claude-opus-4-7" })
+
+  expect(response.status).toBe(409)
+  expect(response.headers.get("content-type")).toBe("application/problem+json")
+  expect(await response.text()).toBe(upstreamBody)
+  expect(capturedRequests).toHaveLength(1)
+  expect(capturedRequests[0]?.body).toHaveProperty("model", "claude-opus-4.7")
+})
+
 test("count_tokens propagates an upstream HTTP status", async () => {
   responseFactory = () =>
     Response.json(
@@ -365,17 +413,16 @@ test("count_tokens propagates an upstream HTTP status", async () => {
   expect(response.status).toBe(400)
   expect(body).toEqual({
     type: "error",
-    request_id: "req-count-safe",
     error: {
       type: "invalid_request_error",
-      message: "The Copilot Messages request was rejected.",
+      message: "private upstream",
     },
   })
   expect(response.headers.get("retry-after")).toBe("17")
   expect(response.headers.get("x-quota-snapshot-premium_interactions")).toBe(
     "remaining=0;limit=100",
   )
-  expect(JSON.stringify(body)).not.toContain("private upstream")
+  expect(JSON.stringify(body)).toContain("private upstream")
 })
 
 test("count_tokens estimates configured custom-provider models locally", async () => {
@@ -538,7 +585,7 @@ test.each([
   })
 })
 
-test("count_tokens drops malformed whole message entries without a local semantic 400", async () => {
+test("count_tokens rejects malformed whole message entries when none survive", async () => {
   const response = await server.request("/v1/messages/count_tokens", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -548,12 +595,12 @@ test("count_tokens drops malformed whole message entries without a local semanti
     }),
   })
 
-  expect(response.status).toBe(200)
-  expect(await response.json()).toEqual({ input_tokens: 42 })
-  expect(capturedRequests[0]?.body).toEqual({
-    model: "claude-opus-4.7-1m-internal",
-    messages: [],
+  expect(response.status).toBe(400)
+  expect(await response.json()).toMatchObject({
+    type: "error",
+    error: { message: "messages is required for Messages requests." },
   })
+  expect(capturedRequests).toHaveLength(0)
 })
 
 test("count_tokens drops malformed nested content instead of rejecting the request", async () => {

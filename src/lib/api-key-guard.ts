@@ -3,7 +3,11 @@ import type { Context, Next } from "hono"
 import * as Sentry from "@sentry/bun"
 import consola from "consola"
 
-import { resolveRequestCredential } from "./credential-resolver"
+import {
+  hasSuppliedRequestCredential,
+  resolveGatewayCredential,
+  resolveRequestCredential,
+} from "./credential-resolver"
 import {
   extractClientIp,
   isIpAllowedForWhitelistedRoute,
@@ -15,6 +19,12 @@ import { sanitizeRequestDiagnosticReference } from "./request-diagnostics"
 import { state } from "./state"
 import { isAllowedTransparentProxyRequest } from "./transparent-proxy"
 
+const verifiedTransparentRequests = new WeakSet<Request>()
+
+export function isVerifiedTransparentProxyRequest(request: Request): boolean {
+  return verifiedTransparentRequests.has(request)
+}
+
 /**
  * API key guard middleware. Invalid credentials receive a small, bounded and
  * uniform authentication response.
@@ -22,6 +32,17 @@ import { isAllowedTransparentProxyRequest } from "./transparent-proxy"
  * Only active when state.apiKeyAuth is set (via --api-key-auth CLI flag).
  */
 export async function apiKeyGuard(
+  c: Context,
+  next: Next,
+): Promise<Response | undefined> {
+  if (isAllowedTransparentProxyRequest(c)) {
+    return await guardTransparentProxyRequest(c, next)
+  }
+
+  return await guardOrdinaryRequest(c, next)
+}
+
+async function guardOrdinaryRequest(
   c: Context,
   next: Next,
 ): Promise<Response | undefined> {
@@ -35,11 +56,7 @@ export async function apiKeyGuard(
     c.req.method,
     c.req.path,
   )
-  const credentialSupplied = [
-    "authorization",
-    "x-api-key",
-    "x-goog-api-key",
-  ].some((header) => c.req.raw.headers.has(header))
+  const credentialSupplied = hasSuppliedRequestCredential(c.req.raw)
 
   if (credentialSupplied) {
     const credential = await resolveRequestCredential(c.req.raw, [
@@ -79,15 +96,6 @@ export async function apiKeyGuard(
     return unauthorizedResponse(c)
   }
 
-  if (
-    clientIp !== null
-    && (await isIpAllowedForWhitelistedRoute(clientIp))
-    && isAllowedTransparentProxyRequest(c)
-  ) {
-    await next()
-    return
-  }
-
   if (clientIp !== null && isIpBlocked(clientIp)) {
     consola.warn(
       `[api-key-guard] Blocked request from banned IP ${clientIp} → ${c.req.method} ${diagnosticPath}`,
@@ -116,6 +124,42 @@ export async function apiKeyGuard(
   }
 
   return unauthorizedResponse(c)
+}
+
+async function guardTransparentProxyRequest(
+  c: Context,
+  next: Next,
+): Promise<Response | undefined> {
+  const clientIp = extractClientIp(c)
+  const gatewayHeaderPresent = c.req.raw.headers.has("x-copilot-gateway-key")
+  const rawGatewayCredential =
+    c.req.raw.headers.get("x-copilot-gateway-key") ?? ""
+
+  let authorized = false
+  if (gatewayHeaderPresent) {
+    authorized =
+      resolveGatewayCredential(rawGatewayCredential, ["user:inference"])
+      !== null
+    if (authorized && clientIp !== null && isIpBlocked(clientIp)) {
+      return unauthorizedResponse(c)
+    }
+  } else if (clientIp !== null) {
+    authorized = await isIpAllowedForWhitelistedRoute(clientIp)
+  }
+
+  if (!authorized) {
+    if (clientIp !== null && !isIpBanned(clientIp)) {
+      recordFailedAttempt(clientIp)
+    }
+    return unauthorizedResponse(c)
+  }
+
+  verifiedTransparentRequests.add(c.req.raw)
+  try {
+    await next()
+  } finally {
+    verifiedTransparentRequests.delete(c.req.raw)
+  }
 }
 
 function unauthorizedResponse(c: Context): Response {
