@@ -45,10 +45,10 @@ import {
   resolveResponsesRoutingAffinity,
   resolveRoutingAffinityFromHeaders,
 } from "~/lib/routing-affinity"
-import { resolveWebSearchCalls } from "~/routes/messages/web-search-helpers"
 import { isResponsesCompactionRequest } from "~/services/copilot/compaction-payload"
 import {
   createChatCompletions,
+  createChatCompletionsWithProcessedPayload,
   type ChatCompletionResponse,
 } from "~/services/copilot/create-chat-completions"
 import {
@@ -63,6 +63,10 @@ import {
 } from "~/services/copilot/responses-contract"
 
 import {
+  resolvePreparedResponsesWebSearchCalls,
+  type ResponsesChatCompletionFactory,
+} from "./chat-fallback-completion"
+import {
   prepareResponsesCandidates,
   type ResponsesNativeCandidate,
   type ResponsesEndpointCandidate,
@@ -75,6 +79,7 @@ import {
   streamChatCompletionsAsResponses,
 } from "./handler"
 import { executePreparedResponsesMessagesBridge } from "./messages-bridge"
+import { getResponsesChatWebSearchMaxUses } from "./responses-chat-adapter"
 import { createStreamIdTracker, fixStreamIds } from "./stream-id-sync"
 import {
   emitResponsesFailureAsStream,
@@ -130,6 +135,22 @@ export interface WebSocketErrorFrameOptions {
   type?: string
   upstreamBody?: string | ReadonlyArray<number>
   upstreamContentType?: string
+}
+
+interface ResponsesWebSocketDependencies {
+  readonly webSearch?: (query: string, signal?: AbortSignal) => Promise<string>
+}
+
+let responsesWebSocketDependencies: ResponsesWebSocketDependencies = {}
+
+export function setResponsesWebSocketDependenciesForTest(
+  dependencies: ResponsesWebSocketDependencies,
+): () => void {
+  const previous = responsesWebSocketDependencies
+  responsesWebSocketDependencies = dependencies
+  return () => {
+    responsesWebSocketDependencies = previous
+  }
 }
 
 interface ResponseCompletedFrame {
@@ -1135,6 +1156,7 @@ async function streamChatCompletionsOverWs(options: {
       ccPayload,
       compaction,
       initiator,
+      maxUses: getResponsesChatWebSearchMaxUses(responseContext),
       turn,
     })
     return
@@ -1179,32 +1201,44 @@ async function streamChatWebSearchOverWs(options: {
   >["payload"]
   compaction: boolean
   initiator: "agent" | "user"
+  maxUses?: number
   turn: ResponsesWebSocketTurn
 }): Promise<void> {
-  const { ws, responseContext, ccPayload, compaction, initiator, turn } =
-    options
+  const {
+    ws,
+    responseContext,
+    ccPayload,
+    compaction,
+    initiator,
+    maxUses,
+    turn,
+  } = options
   ccPayload.stream = false
   ccPayload.stream_options = null
-  const initial = (await waitForWebSocketTurn(
-    createChatCompletions(ccPayload, {
+  const completionFactory: ResponsesChatCompletionFactory = async (
+    payload,
+    factoryOptions,
+  ) =>
+    await createChatCompletionsWithProcessedPayload(payload, {
       allowCompatibilityRetry: false,
       candidatePrepared: true,
       compaction,
       initiator,
+      signal: factoryOptions.signal,
+    })
+  const initial = await waitForWebSocketTurn(
+    completionFactory(ccPayload, {
+      allowCompatibilityRetry: false,
       signal: turn.abortController.signal,
     }),
     turn,
-  )) as ChatCompletionResponse
-  const response = await resolveWebSearchCalls(initial, ccPayload, {
-    abortSignal: turn.abortController.signal,
-    createCompletion: async (nextPayload) =>
-      (await createChatCompletions(nextPayload, {
-        allowCompatibilityRetry: false,
-        candidatePrepared: true,
-        compaction,
-        initiator,
-        signal: turn.abortController.signal,
-      })) as ChatCompletionResponse,
+  )
+  const response = await resolvePreparedResponsesWebSearchCalls({
+    completionFactory,
+    initial,
+    maxUses,
+    signal: turn.abortController.signal,
+    webSearch: responsesWebSocketDependencies.webSearch,
   })
   const wsStream = {
     writeSSE: async (data: { event?: string; data: string }) => {

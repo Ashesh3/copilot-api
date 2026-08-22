@@ -49,6 +49,7 @@ import {
   responsesWebSocket,
   rehydrateWarmupPayload,
   sendWebSocketError,
+  setResponsesWebSocketDependenciesForTest,
   tryUpgradeResponsesWebSocket,
 } from "../src/routes/responses/websocket"
 import {
@@ -75,6 +76,7 @@ let lastRequestBody: Record<string, unknown> | undefined
 let capturedAffinity: RoutingAffinity | undefined
 const capturedAuthorization: Array<string | null> = []
 const capturedUpstreamHeaders: Array<Headers> = []
+let restoreResponsesWebSocketDependencies: (() => void) | undefined
 
 interface WebSocketMetadataCase {
   expectedHeaders: Record<string, string> | undefined
@@ -151,6 +153,8 @@ afterAll(() => {
 })
 
 afterEach(() => {
+  restoreResponsesWebSocketDependencies?.()
+  restoreResponsesWebSocketDependencies = undefined
   fetchMock.mockClear()
   lastRequestBody = undefined
   capturedAffinity = undefined
@@ -2444,6 +2448,80 @@ describe("responses websocket message handling", () => {
     )
   })
 
+  test("allows final WebSocket synthesis after exactly the source search limit", async () => {
+    installWebSocketEndpoint("/chat/completions")
+    const searches: Array<string> = []
+    restoreResponsesWebSocketDependencies =
+      setResponsesWebSocketDependenciesForTest({
+        webSearch: (query) => {
+          searches.push(query)
+          return Promise.resolve(`result-${searches.length}`)
+        },
+      })
+    queuedResponses.push(
+      createChatCompletionsResponseWithWebSearchCalls(["search-1", "search-2"]),
+      createChatCompletionsResponse("final synthesis"),
+    )
+    const ws = createTestWebSocket()
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "search and synthesize",
+        tools: [{ type: "web_search", max_uses: 2 }],
+      }),
+    )
+
+    expect(searches).toHaveLength(2)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(lastRequestBody).toMatchObject({
+      stream: false,
+      tool_choice: "auto",
+    })
+    expect(JSON.stringify(lastRequestBody)).toContain("result-1")
+    expect(JSON.stringify(lastRequestBody)).toContain("result-2")
+    expect(ws.sent.some((frame) => frame.includes("final synthesis"))).toBe(
+      true,
+    )
+    expect(ws.sent.at(-1)).toContain("response.completed")
+  })
+
+  test("rejects an over-budget WebSocket search batch before partial execution", async () => {
+    installWebSocketEndpoint("/chat/completions")
+    let searches = 0
+    restoreResponsesWebSocketDependencies =
+      setResponsesWebSocketDependenciesForTest({
+        webSearch: () => {
+          searches += 1
+          return Promise.resolve("unexpected")
+        },
+      })
+    queuedResponses.push(
+      createChatCompletionsResponseWithWebSearchCalls(["search-1", "search-2"]),
+    )
+    const ws = createTestWebSocket()
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "do not partially search",
+        tools: [{ type: "web_search", max_uses: 1 }],
+      }),
+    )
+
+    expect(searches).toBe(0)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(ws.sent.at(-1) ?? "{}")).toMatchObject({
+      type: "error",
+      status: 400,
+      error: { code: "web_search_limit_exceeded" },
+    })
+  })
+
   test("fits rehydrated compaction turns on ChatCompletions fallback", async () => {
     state.accountType = "individual"
     state.copilotToken = "copilot-token"
@@ -4387,6 +4465,53 @@ function createChatCompletionsSseResponse(): Response {
   return new Response(`data: ${content}\n\ndata: ${done}\n\ndata: [DONE]\n\n`, {
     headers: { "content-type": "text/event-stream" },
     status: 200,
+  })
+}
+
+function createChatCompletionsResponse(content: string): Response {
+  return Response.json({
+    id: "chatcmpl_ws_search",
+    object: "chat.completion",
+    created: 1,
+    model: "gpt-5.4",
+    choices: [
+      {
+        index: 0,
+        message: { role: "assistant", content },
+        finish_reason: "stop",
+        logprobs: null,
+      },
+    ],
+  })
+}
+
+function createChatCompletionsResponseWithWebSearchCalls(
+  callIds: Array<string>,
+): Response {
+  return Response.json({
+    id: "chatcmpl_ws_search",
+    object: "chat.completion",
+    created: 1,
+    model: "gpt-5.4",
+    choices: [
+      {
+        index: 0,
+        message: {
+          role: "assistant",
+          content: null,
+          tool_calls: callIds.map((id) => ({
+            id,
+            type: "function",
+            function: {
+              name: "web_search",
+              arguments: JSON.stringify({ query: id }),
+            },
+          })),
+        },
+        finish_reason: "tool_calls",
+        logprobs: null,
+      },
+    ],
   })
 }
 
