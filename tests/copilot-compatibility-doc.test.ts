@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- one audit file covers the complete compatibility document */
 import * as Sentry from "@sentry/bun"
 import { expect, spyOn, test } from "bun:test"
 import consola from "consola"
@@ -63,6 +64,7 @@ const requiredHeadings = [
 
 const routeMatrix = [
   { method: "GET", canonical: "/v1/models", alias: "/models" },
+  { method: "GET", canonical: "/v1beta/models" },
   {
     method: "GET",
     canonical: "/v1/models/:model",

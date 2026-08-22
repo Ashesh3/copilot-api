@@ -33,7 +33,7 @@ authentication model is documented in the main README.
 
 | Family | Method and canonical route | Aliases and notes |
 | --- | --- | --- |
-| Model discovery | `GET /v1/models` | `GET /models` |
+| Model discovery | `GET /v1/models` | `GET /models`; `GET /v1beta/models` |
 | Single-model discovery | `GET /v1/models/:model` | `GET /models/:model` |
 | Model policy | `POST /v1/models/:model/policy` | `POST /models/:model/policy`; account-aware passthrough, not a local policy emulator |
 | Chat Completions | `POST /v1/chat/completions` | `POST /chat/completions` |
@@ -47,7 +47,7 @@ authentication model is documented in the main README.
 | Google-style generation | `POST /v1beta/models/:model:generateContent` | `POST /v1/models/:model:generateContent`; `POST /models/:model:generateContent` |
 | Google-style streaming | `POST /v1beta/models/:model:streamGenerateContent` | `POST /v1/models/:model:streamGenerateContent`; `POST /models/:model:streamGenerateContent` |
 | Google-style token count | `POST /v1beta/models/:model:countTokens` | `POST /v1/models/:model:countTokens`; `POST /models/:model:countTokens`; local/native count only, no generation |
-| Liveness | `GET /health` | `GET /health/health`; unauthenticated and data-free, other methods/children return `404` |
+| Liveness | `GET` or `HEAD /health` | `GET` or `HEAD /health/health`; unauthenticated and data-free, other methods/children return `404` |
 | Model session | `POST /models/session` | Opaque model-session passthrough |
 | Model-session intent | `POST /models/session/intent` | Requires a valid `Copilot-Session-Token` header |
 | Auto selection | `POST /auto` | Account and feature availability remain upstream-authoritative |
