@@ -160,6 +160,19 @@ describe("Anthropic to OpenAI translation logic", () => {
     expect(isValidChatCompletionRequest(openAIPayload)).toBe(true)
   })
 
+  test("retains temperature and omits top_p when translating Messages to Chat", () => {
+    const translated = translateToOpenAI({
+      model: "gpt-current",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "hello" }],
+      temperature: 0.3,
+      top_p: 0.8,
+    })
+
+    expect(translated.temperature).toBe(0.3)
+    expect(translated).not.toHaveProperty("top_p")
+  })
+
   test("preserves tool references as explicit text on Chat Completions", () => {
     const openAIPayload = translateToOpenAI({
       model: "gpt-4o",

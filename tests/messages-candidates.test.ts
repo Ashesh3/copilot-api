@@ -319,8 +319,8 @@ test("ordinary translated candidates do not invent sampling or parallel defaults
 
   expect(candidates.chat?.payload).toMatchObject({
     temperature: 0.2,
-    top_p: 0.9,
   })
+  expect(candidates.chat?.payload).not.toHaveProperty("top_p")
   expect(candidates.chat?.payload).not.toHaveProperty("parallel_tool_calls")
   expect(candidates.responses?.payload).toMatchObject({
     temperature: 0.2,

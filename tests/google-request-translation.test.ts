@@ -25,6 +25,12 @@ const adapt = async (
     resolveAttachment: options.resolveAttachment,
   })
 
+function createDeepGooglePart(): Record<string, unknown> {
+  let part: Record<string, unknown> = { text: "leaf" }
+  for (let index = 0; index < 24; index += 1) part = { nested: part }
+  return part
+}
+
 describe("Google request preparation", () => {
   test("snapshots an open detached source without reading accessors", () => {
     const payload = {
@@ -49,6 +55,17 @@ describe("Google request preparation", () => {
       InvalidGoogleRequestBodyError,
     )
     expect(reads).toBe(0)
+  })
+
+  test("accepts deep and long Google request histories", () => {
+    const prepared = prepareGoogleRequest({
+      contents: Array.from({ length: 2_049 }, () => ({
+        role: "user",
+        parts: [createDeepGooglePart()],
+      })),
+    })
+
+    expect(prepared.source.contents).toHaveLength(2_049)
   })
 
   test("rejects non-record roots with the fixed local error", () => {

@@ -6,6 +6,7 @@ import type { ResponsesPayload } from "~/services/copilot/create-responses"
 
 import { LocalHTTPError } from "~/lib/error"
 import { setModelSettingsForTest } from "~/lib/model-settings"
+import { snapshotPlainDataRecord } from "~/lib/plain-data-snapshot"
 import {
   applyResponsesReasoningDefaults,
   finalizeNativeResponsesRequest,
@@ -50,6 +51,12 @@ const FORWARDED_RESPONSES_TOOLS = [
   "client_future_tool",
 ]
 
+function createDeepRecord(): Record<string, unknown> {
+  let nested: Record<string, unknown> = { value: "leaf" }
+  for (let index = 0; index < 24; index += 1) nested = { nested }
+  return nested
+}
+
 test("preserves the reviewed current Responses field inventory", () => {
   const result = prepareLegacyResponsesRequestForTest({
     model: "gpt-5.6-sol",
@@ -83,6 +90,19 @@ test("preserves the reviewed current Responses field inventory", () => {
     snippy: { enabled: false },
   })
   expect(JSON.stringify(result.body)).toContain("prompt_cache_breakpoint")
+})
+
+test("accepts a deep, long Responses source while generic snapshots stay strict", () => {
+  const payload = {
+    model: "gpt-current",
+    input: Array.from({ length: 2_049 }, () => ({
+      role: "user",
+      content: createDeepRecord(),
+    })),
+  }
+
+  expect(prepareResponsesRequest(payload).source.input).toHaveLength(2_049)
+  expect(snapshotPlainDataRecord(payload)).toBeUndefined()
 })
 
 test("reports only fixed classes for wire-changing Responses normalization", () => {
@@ -141,7 +161,7 @@ test("reports every stateless control removed from the Responses wire", () => {
   expect(prepared.normalizationClasses).toEqual(["stateless_controls"])
 })
 
-test("reports JSON-schema required filtering and deduplication", () => {
+test("preserves caller json_schema required fields exactly", () => {
   const prepared = prepareLegacyResponsesRequestForTest({
     model: "gpt-current",
     input: "hello",
@@ -164,10 +184,10 @@ test("reports JSON-schema required filtering and deduplication", () => {
 
   expect(prepared.body.text?.format).toMatchObject({
     schema: {
-      required: ["answer", "confidence"],
+      required: ["answer", "answer", "unknown", 7],
     },
   })
-  expect(prepared.normalizationClasses).toEqual(["json_schema"])
+  expect(prepared.normalizationClasses).toEqual([])
 })
 
 test.each([
@@ -189,7 +209,7 @@ test.each([
       properties: { answer: { type: "string" } },
       required: ["answer", "answer"],
     },
-    expectedClasses: ["json_schema"],
+    expectedClasses: [],
   },
 ])("classifies JSON-schema mutation exactly for $name", (entry) => {
   const prepared = prepareLegacyResponsesRequestForTest({

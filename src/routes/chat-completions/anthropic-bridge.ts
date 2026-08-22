@@ -372,11 +372,11 @@ function resolveBridgeMaxTokens(options: {
   normalized: ChatCompletionsPayload & { model: string }
   selectedModel?: Model
 }): Pick<AnthropicMessagesPayload, "max_tokens"> | Record<never, never> {
-  if (options.hasMaxTokens) {
-    return { max_tokens: options.normalized.max_tokens }
-  }
   if (options.hasMaxCompletionTokens) {
     return { max_tokens: options.normalized.max_completion_tokens }
+  }
+  if (options.hasMaxTokens) {
+    return { max_tokens: options.normalized.max_tokens }
   }
   const maxTokens =
     options.selectedModel?.capabilities.limits?.max_output_tokens
@@ -458,7 +458,11 @@ function convertSamplingOptions(
     ...(payload.temperature !== undefined && payload.temperature !== null ?
       { temperature: payload.temperature }
     : {}),
-    ...(payload.top_p !== undefined && payload.top_p !== null ?
+    ...((
+      payload.temperature === undefined
+      && payload.top_p !== undefined
+      && payload.top_p !== null
+    ) ?
       { top_p: payload.top_p }
     : {}),
     ...(payload.stop ?

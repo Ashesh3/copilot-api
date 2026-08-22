@@ -79,7 +79,6 @@ describe("Chat endpoint candidates", () => {
     expect(candidates.messages.payload).not.toBe(candidates.chat.payload)
 
     expect(candidates.chat.payload).toMatchObject({
-      max_tokens: 11,
       max_completion_tokens: 22,
       future_top_level: { private: true },
     })
@@ -89,7 +88,7 @@ describe("Chat endpoint candidates", () => {
     })
     expect(candidates.responses.payload.max_output_tokens).toBe(22)
     expect(candidates.responses.payload.store).toBe(false)
-    expect(candidates.messages.payload.max_tokens).toBe(11)
+    expect(candidates.messages.payload.max_tokens).toBe(22)
     expect(JSON.stringify(candidates.responses.check)).not.toContain(
       "future-private",
     )
@@ -597,7 +596,6 @@ describe("Chat endpoint candidates", () => {
     })
 
     expect(candidates.chat.payload).toMatchObject({
-      max_tokens: 11,
       max_completion_tokens: 22,
       temperature: 0.3,
       top_p: 0.9,
@@ -609,7 +607,7 @@ describe("Chat endpoint candidates", () => {
     expect(candidates.responses.payload.text).toEqual({
       format: { type: "json_object" },
     })
-    expect(candidates.messages.payload.max_tokens).toBe(11)
+    expect(candidates.messages.payload.max_tokens).toBe(22)
     expect(candidates.messages.payload.temperature).toBe(0.3)
     expect(candidates.messages.payload).not.toHaveProperty("top_p")
   })

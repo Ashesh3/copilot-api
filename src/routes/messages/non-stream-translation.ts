@@ -56,11 +56,13 @@ export function translateToOpenAI(
     stop: payload.stop_sequences,
     stream: payload.stream,
     temperature: payload.temperature,
-    top_p: payload.top_p,
+    ...(payload.temperature === undefined ? { top_p: payload.top_p } : {}),
     user: payload.metadata?.user_id,
     response_format: translateOutputFormatToOpenAI(payload.output_config),
     tools,
-    tool_choice: translateAnthropicToolChoiceToOpenAI(payload.tool_choice),
+    ...(tools ?
+      { tool_choice: translateAnthropicToolChoiceToOpenAI(payload.tool_choice) }
+    : {}),
     ...(tools?.some((tool) => tool.function.name === "web_search") ?
       { parallel_tool_calls: false }
     : {}),

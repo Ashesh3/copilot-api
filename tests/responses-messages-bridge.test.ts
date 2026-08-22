@@ -150,7 +150,6 @@ test("merges Responses format and effort in one Messages output config", async (
       name: "answer",
       schema: {
         type: "object",
-        additionalProperties: false,
         properties: { answer: { type: "string" } },
       },
     },
@@ -1023,16 +1022,6 @@ test.each([
     param: "input_image",
   },
   {
-    name: "orphan tool result",
-    payload: {
-      model: "claude-current",
-      input: [
-        { type: "function_call_output", call_id: "call_1", output: "done" },
-      ],
-    },
-    param: "tool_result_pairing",
-  },
-  {
     name: "non-object function arguments",
     payload: {
       model: "claude-current",
@@ -1072,6 +1061,26 @@ test.each([
   expect((error as LocalHTTPError).clientBody).toMatchObject({
     error: { code: "endpoint_translation_unsupported", param },
   })
+})
+
+test("preserves bounded orphan tool results as user text without a call association", async () => {
+  const payload = await responsesPayloadToAnthropic({
+    model: "claude-current",
+    input: [
+      {
+        type: "function_call_output",
+        call_id: "missing",
+        output: "x".repeat(20_000),
+      },
+    ],
+  })
+
+  expect(payload.messages).toEqual([
+    {
+      role: "user",
+      content: `[Orphaned tool result]\n${"x".repeat(16_384)}`,
+    },
+  ])
 })
 
 test("refuses opaque Responses reasoning before Messages conversion", async () => {

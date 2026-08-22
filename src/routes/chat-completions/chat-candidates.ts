@@ -1118,10 +1118,9 @@ async function adaptChatToMessages(
     ...(converted.system.length > 0 ?
       { system: converted.system.join("\n\n") }
     : {}),
-    ...(typeof source.max_tokens === "number" ?
-      { max_tokens: source.max_tokens }
-    : typeof source.max_completion_tokens === "number" ?
+    ...(typeof source.max_completion_tokens === "number" ?
       { max_tokens: source.max_completion_tokens }
+    : typeof source.max_tokens === "number" ? { max_tokens: source.max_tokens }
     : selectedModel?.capabilities.limits?.max_output_tokens ?
       { max_tokens: selectedModel.capabilities.limits.max_output_tokens }
     : {}),

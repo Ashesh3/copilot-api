@@ -790,11 +790,10 @@ function sanitizeUserMessageContent(
   if (typeof content === "string") {
     return content
   }
-  if (!Array.isArray(content)) {
-    return []
-  }
+  const blocks = isRecord(content) ? [content] : content
+  if (!Array.isArray(blocks)) return String(blocks)
   const sanitizedBlocks: Array<AnthropicUserContentBlock> = []
-  for (const block of content) {
+  for (const block of blocks) {
     const sanitized = sanitizeCompatibleContentBlock(block)
     if (!sanitized) {
       continue
@@ -819,11 +818,10 @@ function sanitizeAssistantMessageContent(
   if (typeof content === "string") {
     return content
   }
-  if (!Array.isArray(content)) {
-    return []
-  }
+  const blocks = isRecord(content) ? [content] : content
+  if (!Array.isArray(blocks)) return String(blocks)
   const sanitizedBlocks: Array<AnthropicAssistantContentBlock> = []
-  for (const block of content) {
+  for (const block of blocks) {
     const sanitized = sanitizeCompatibleContentBlock(block)
     if (!sanitized) {
       continue
@@ -847,27 +845,28 @@ function sanitizeCustomMessageContent(
   if (typeof content === "string") {
     return content
   }
-  if (!Array.isArray(content)) {
-    return []
-  }
-  return content.flatMap((block) => {
+  const blocks = isRecord(content) ? [content] : content
+  if (!Array.isArray(blocks)) return String(blocks)
+  return blocks.flatMap((block) => {
     const sanitized = sanitizeCompatibleContentBlock(block)
     return sanitized ? [sanitized] : []
   })
 }
 
 function sanitizeMessage(message: unknown): AnthropicMessage | null {
-  if (!isRecord(message) || !isNonEmptyString(message.role)) {
-    return null
-  }
-  if (message.role === "user") {
+  if (!isRecord(message)) return null
+  const role =
+    typeof message.role === "string" && message.role.trim() ?
+      message.role
+    : "user"
+  if (role === "user") {
     return {
       ...message,
       role: "user",
       content: sanitizeUserMessageContent(message.content),
     }
   }
-  if (message.role === "assistant") {
+  if (role === "assistant") {
     return {
       ...message,
       role: "assistant",
@@ -876,7 +875,7 @@ function sanitizeMessage(message: unknown): AnthropicMessage | null {
   }
   return {
     ...message,
-    role: asAnthropicUnknownRole(message.role),
+    role: asAnthropicUnknownRole(role),
     content: sanitizeCustomMessageContent(message.content),
   }
 }

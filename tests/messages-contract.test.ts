@@ -853,6 +853,25 @@ test("preserves system and future roles plus unknown native structures", () => {
   })
 })
 
+test("normalizes missing roles and scalar or singleton content without dropping future roles", () => {
+  const prepared = prepareAnthropicMessagesRequest({
+    payload: {
+      model: "claude-current",
+      messages: [
+        { content: { type: "text", text: "singleton" } },
+        { role: 7, content: true },
+        { role: asAnthropicUnknownRole("future-role"), content: 12 },
+      ],
+    } as unknown as AnthropicMessagesPayload,
+  })
+
+  expect(prepared.body.messages).toEqual([
+    { role: "user", content: [{ type: "text", text: "singleton" }] },
+    { role: "user", content: "true" },
+    { role: asAnthropicUnknownRole("future-role"), content: "12" },
+  ])
+})
+
 test("preserves unnamed future native tool records with nested fields", () => {
   const futureTool = {
     type: "future_server_tool_20270101",

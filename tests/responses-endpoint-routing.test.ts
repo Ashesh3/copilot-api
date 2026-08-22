@@ -255,13 +255,11 @@ test.each([
       expect(lastUpstreamPayload).not.toHaveProperty("tools")
       expect(lastUpstreamPayload).not.toHaveProperty("tool_choice")
       expect(lastUpstreamPayload?.max_output_tokens).toBe(16)
-      expect(lastUpstreamPayload).toHaveProperty(
+      expect(lastUpstreamPayload).not.toHaveProperty(
         "text.format.schema.additionalProperties",
-        false,
       )
-      expect(lastUpstreamPayload).toHaveProperty(
+      expect(lastUpstreamPayload).not.toHaveProperty(
         "text.format.schema.required",
-        ["answer"],
       )
     }
   },
@@ -614,9 +612,8 @@ test("normalizes Responses controls before Messages fallback conversion", async 
     type: "object",
     properties: {},
   })
-  expect(lastUpstreamPayload).toHaveProperty(
+  expect(lastUpstreamPayload).not.toHaveProperty(
     "output_config.format.schema.additionalProperties",
-    false,
   )
 })
 

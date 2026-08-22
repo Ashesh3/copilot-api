@@ -893,7 +893,8 @@ function prepareTokenAliases(
     source.max_tokens !== undefined
     && source.max_completion_tokens !== undefined
   ) {
-    addFinding(state, { class: "token_alias", severity: "exact" })
+    delete source.max_tokens
+    addFinding(state, { class: "token_alias", severity: "adapted" })
   }
 }
 
@@ -972,11 +973,7 @@ function prepareStrictChatCompletionsRequest(payload: ChatCompletionsPayload): {
     && normalized.max_completion_tokens !== undefined
     && normalized.max_completion_tokens !== null
   ) {
-    throw createChatValidationError({
-      code: "invalid_request",
-      message: "max_tokens and max_completion_tokens are mutually exclusive.",
-      param: "max_tokens",
-    })
+    delete normalized.max_tokens
   }
 
   const normalizationClasses: Array<CopilotContractNormalizationClass> = []

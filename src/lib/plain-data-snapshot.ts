@@ -3,6 +3,27 @@ import util from "node:util"
 const SNAPSHOT_MAX_DEPTH = 16
 const SNAPSHOT_MAX_NODES = 2048
 const SNAPSHOT_MAX_ARRAY_LENGTH = SNAPSHOT_MAX_NODES
+const REQUEST_SNAPSHOT_MAX_DEPTH = 64
+const REQUEST_SNAPSHOT_MAX_NODES = 65_536
+const REQUEST_SNAPSHOT_MAX_ARRAY_LENGTH = REQUEST_SNAPSHOT_MAX_NODES
+
+interface SnapshotLimits {
+  readonly maxArrayLength: number
+  readonly maxDepth: number
+  readonly maxNodes: number
+}
+
+const GENERIC_SNAPSHOT_LIMITS: SnapshotLimits = {
+  maxArrayLength: SNAPSHOT_MAX_ARRAY_LENGTH,
+  maxDepth: SNAPSHOT_MAX_DEPTH,
+  maxNodes: SNAPSHOT_MAX_NODES,
+}
+
+const REQUEST_SNAPSHOT_LIMITS: SnapshotLimits = {
+  maxArrayLength: REQUEST_SNAPSHOT_MAX_ARRAY_LENGTH,
+  maxDepth: REQUEST_SNAPSHOT_MAX_DEPTH,
+  maxNodes: REQUEST_SNAPSHOT_MAX_NODES,
+}
 
 type DescriptorMap = Readonly<
   Record<PropertyKey, PropertyDescriptor | undefined>
@@ -15,6 +36,7 @@ interface SnapshotState {
 
 interface SnapshotContext {
   readonly depth: number
+  readonly limits: SnapshotLimits
   readonly state: SnapshotState
 }
 
@@ -80,7 +102,7 @@ function snapshotArray(
   descriptors: DescriptorMap,
   context: SnapshotContext,
 ): SnapshotResult {
-  const { depth, state } = context
+  const { depth, limits, state } = context
   if (readPrototype(value) !== Array.prototype) return SNAPSHOT_FAILURE
   const lengthDescriptor = descriptors.length
   if (
@@ -93,7 +115,7 @@ function snapshotArray(
     return SNAPSHOT_FAILURE
   }
   const length = lengthDescriptor.value
-  if (length > SNAPSHOT_MAX_ARRAY_LENGTH) return SNAPSHOT_FAILURE
+  if (length > limits.maxArrayLength) return SNAPSHOT_FAILURE
   const keys = Reflect.ownKeys(descriptors)
   if (
     keys.some(
@@ -111,7 +133,11 @@ function snapshotArray(
     if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
       return SNAPSHOT_FAILURE
     }
-    const item = snapshotValue(descriptor.value, state, depth + 1)
+    const item = snapshotValue(descriptor.value, {
+      depth: depth + 1,
+      limits,
+      state,
+    })
     if (!item.ok) return SNAPSHOT_FAILURE
     clone[index] = item.value
   }
@@ -123,7 +149,7 @@ function snapshotRecord(
   descriptors: DescriptorMap,
   context: SnapshotContext,
 ): SnapshotResult {
-  const { depth, state } = context
+  const { depth, limits, state } = context
   const prototype = readPrototype(value)
   if (prototype !== Object.prototype && prototype !== null) {
     return SNAPSHOT_FAILURE
@@ -135,7 +161,11 @@ function snapshotRecord(
     if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
       return SNAPSHOT_FAILURE
     }
-    const nested = snapshotValue(descriptor.value, state, depth + 1)
+    const nested = snapshotValue(descriptor.value, {
+      depth: depth + 1,
+      limits,
+      state,
+    })
     if (!nested.ok) return SNAPSHOT_FAILURE
     Object.defineProperty(clone, key, {
       configurable: false,
@@ -149,22 +179,22 @@ function snapshotRecord(
 
 function snapshotValue(
   value: unknown,
-  state: SnapshotState,
-  depth: number,
+  context: SnapshotContext,
 ): SnapshotResult {
+  const { depth, limits, state } = context
   const primitive = snapshotPrimitive(value)
   if (primitive) return primitive
   if (
     typeof value !== "object"
     || value === null
-    || depth > SNAPSHOT_MAX_DEPTH
+    || depth > limits.maxDepth
     || isProxyObject(value)
     || state.seen.has(value)
   ) {
     return SNAPSHOT_FAILURE
   }
   state.nodes += 1
-  if (state.nodes > SNAPSHOT_MAX_NODES) return SNAPSHOT_FAILURE
+  if (state.nodes > limits.maxNodes) return SNAPSHOT_FAILURE
   state.seen.add(value)
   const descriptors = readDescriptors(value)
   if (!descriptors) return SNAPSHOT_FAILURE
@@ -175,23 +205,40 @@ function snapshotValue(
     return SNAPSHOT_FAILURE
   }
   if (isArray) {
-    return snapshotArray(value as Array<unknown>, descriptors, { depth, state })
+    return snapshotArray(value as Array<unknown>, descriptors, {
+      depth,
+      limits,
+      state,
+    })
   }
-  return snapshotRecord(value, descriptors, { depth, state })
+  return snapshotRecord(value, descriptors, { depth, limits, state })
 }
 
-export function snapshotPlainDataRecord(
+function snapshotPlainDataRecordWithLimits(
   value: unknown,
+  limits: SnapshotLimits,
 ): Readonly<Record<string, unknown>> | undefined {
-  const snapshot = snapshotValue(
-    value,
-    { nodes: 0, seen: new WeakSet<object>() },
-    0,
-  )
+  const snapshot = snapshotValue(value, {
+    depth: 0,
+    limits,
+    state: { nodes: 0, seen: new WeakSet<object>() },
+  })
   if (!snapshot.ok) return undefined
   const result = snapshot.value
   if (typeof result !== "object" || result === null || Array.isArray(result)) {
     return undefined
   }
   return result as Readonly<Record<string, unknown>>
+}
+
+export function snapshotPlainDataRecord(
+  value: unknown,
+): Readonly<Record<string, unknown>> | undefined {
+  return snapshotPlainDataRecordWithLimits(value, GENERIC_SNAPSHOT_LIMITS)
+}
+
+export function snapshotRequestPlainDataRecord(
+  value: unknown,
+): Readonly<Record<string, unknown>> | undefined {
+  return snapshotPlainDataRecordWithLimits(value, REQUEST_SNAPSHOT_LIMITS)
 }

@@ -109,7 +109,7 @@ export function chatCompletionsToResponses(
     temperature: normalized.temperature,
     top_p: normalized.top_p,
     max_output_tokens:
-      normalized.max_tokens ?? normalized.max_completion_tokens,
+      normalized.max_completion_tokens ?? normalized.max_tokens,
     user: normalized.user,
     snippy: normalized.snippy,
     ...(hasTools ?

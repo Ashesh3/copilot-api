@@ -568,7 +568,7 @@ describe("chatPayloadToAnthropic bridge", () => {
     expect(anthropic).toHaveProperty("max_tokens", null)
   })
 
-  test("preserves max_tokens precedence when max_completion_tokens is also present", async () => {
+  test("prefers max_completion_tokens when both token aliases are present", async () => {
     const anthropic = await chatPayloadToAnthropic({
       model: "claude-sonnet-4.6",
       max_tokens: null,
@@ -576,7 +576,7 @@ describe("chatPayloadToAnthropic bridge", () => {
       messages: [{ role: "user", content: "hello" }],
     })
 
-    expect(anthropic).toHaveProperty("max_tokens", null)
+    expect(anthropic).toHaveProperty("max_tokens", 321)
   })
 
   test("maps file parts to document blocks and images to image blocks", async () => {

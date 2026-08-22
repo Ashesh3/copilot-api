@@ -27,6 +27,17 @@ test("keeps Anthropics max_tokens when translating to Responses payload", () => 
   expect(translated.max_output_tokens).toBe(64)
 })
 
+test("omits tool_choice when no Messages tools translate to Responses", () => {
+  const translated = translateAnthropicMessagesToResponsesPayload({
+    model: "gpt-current",
+    max_tokens: 64,
+    messages: [{ role: "user", content: "hello" }],
+    tool_choice: { type: "any" },
+  })
+
+  expect(translated).not.toHaveProperty("tool_choice")
+})
+
 test("preserves tool references as explicit text on Responses", () => {
   const translated = translateAnthropicMessagesToResponsesPayload({
     model: "gpt-5.4",

@@ -2164,7 +2164,7 @@ test("normalizes Responses function tool parameter schemas before forwarding", a
   ])
 })
 
-test("normalizes json_schema response format object schemas before forwarding", async () => {
+test("preserves optional and open json_schema response format object schemas", async () => {
   await createResponses(
     {
       model: "gpt-4o",
@@ -2209,7 +2209,6 @@ test("normalizes json_schema response format object schemas before forwarding", 
       name: "ExtractedEntities",
       schema: {
         type: "object",
-        additionalProperties: false,
         properties: {
           episode_indices: {
             type: "array",
@@ -2219,7 +2218,6 @@ test("normalizes json_schema response format object schemas before forwarding", 
             type: "array",
             items: {
               type: "object",
-              additionalProperties: false,
               properties: {
                 name: { type: "string" },
                 type: { type: "string" },
@@ -2228,7 +2226,7 @@ test("normalizes json_schema response format object schemas before forwarding", 
             },
           },
         },
-        required: ["entities", "episode_indices"],
+        required: ["entities"],
       },
     },
   })

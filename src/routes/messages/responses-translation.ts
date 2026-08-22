@@ -75,7 +75,10 @@ export const translateAnthropicMessagesToResponsesPayload = (
   }
 
   const translatedTools = convertAnthropicTools(payload.tools)
-  const toolChoice = convertAnthropicToolChoice(payload.tool_choice)
+  const toolChoice =
+    translatedTools ?
+      convertAnthropicToolChoice(payload.tool_choice)
+    : undefined
 
   const { safetyIdentifier, promptCacheKey } = parseUserId(
     payload.metadata?.user_id,
@@ -89,7 +92,7 @@ export const translateAnthropicMessagesToResponsesPayload = (
     top_p: payload.top_p,
     max_output_tokens: payload.max_tokens,
     tools: translatedTools,
-    tool_choice: toolChoice,
+    ...(toolChoice === undefined ? {} : { tool_choice: toolChoice }),
     metadata:
       payload.metadata?.user_id === undefined ?
         undefined

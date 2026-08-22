@@ -448,9 +448,6 @@ function repairOutputSchema(value: unknown): Record<string, unknown> {
   if (schema.type === undefined && isRecord(schema.properties)) {
     schema.type = "object"
   }
-  if (schema.type === "object" && schema.additionalProperties === undefined) {
-    schema.additionalProperties = false
-  }
   if (isRecord(schema.properties)) {
     for (const [key, property] of Object.entries(schema.properties)) {
       schema.properties[key] = repairOutputSchema(property)
@@ -785,6 +782,7 @@ async function convertResponsesInput(
   systemTexts: Array<string>
 }> {
   const messages: Array<AnthropicMessage> = []
+  const emittedToolCallIds = new Set<string>()
   const systemTexts: Array<string> = []
   if (typeof input === "string") {
     messages.push({ role: "user", content: input })
@@ -793,12 +791,20 @@ async function convertResponsesInput(
   if (!Array.isArray(input)) return { messages, systemTexts }
 
   for (const item of input) {
-    await appendResponsesItem({ item, messages, options, signal, systemTexts })
+    await appendResponsesItem({
+      emittedToolCallIds,
+      item,
+      messages,
+      options,
+      signal,
+      systemTexts,
+    })
   }
   return { messages, systemTexts }
 }
 
 async function appendResponsesItem(options: {
+  emittedToolCallIds: Set<string>
   item: ResponseInputItem
   messages: Array<AnthropicMessage>
   options?: { attachmentsNormalized?: boolean }
@@ -818,10 +824,18 @@ async function appendResponsesItem(options: {
       name,
       input: safeParseArguments(argumentsText),
     })
+    if (callId) options.emittedToolCallIds.add(callId)
     return
   }
   if (type === "function_call_output") {
     const callId = typeof item.call_id === "string" ? item.call_id : ""
+    if (!callId || !options.emittedToolCallIds.has(callId)) {
+      options.messages.push({
+        role: "user",
+        content: `[Orphaned tool result]\n${serializeOrphanToolResult(item.output)}`,
+      })
+      return
+    }
     appendUserBlock(options.messages, {
       type: "tool_result",
       tool_use_id: callId,
@@ -863,6 +877,15 @@ async function appendResponsesItem(options: {
     role: "user",
     content: messageContent,
   })
+}
+
+function serializeOrphanToolResult(value: unknown): string {
+  if (typeof value === "string") return value.slice(0, 16_384)
+  try {
+    return JSON.stringify(value).slice(0, 16_384)
+  } catch {
+    return ""
+  }
 }
 
 function appendAssistantBlock(

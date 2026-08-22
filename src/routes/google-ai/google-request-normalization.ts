@@ -1,6 +1,6 @@
 import type { TranslationFinding } from "~/lib/endpoint-routing"
 
-import { snapshotPlainDataRecord } from "~/lib/plain-data-snapshot"
+import { snapshotRequestPlainDataRecord } from "~/lib/plain-data-snapshot"
 
 export interface PreparedGoogleRequest {
   readonly source: Readonly<Record<string, unknown>>
@@ -15,7 +15,7 @@ export class InvalidGoogleRequestBodyError extends Error {
 }
 
 export function prepareGoogleRequest(payload: unknown): PreparedGoogleRequest {
-  const source = snapshotPlainDataRecord(payload)
+  const source = snapshotRequestPlainDataRecord(payload)
   if (!source) throw new InvalidGoogleRequestBodyError()
   return { source, findings: [] }
 }

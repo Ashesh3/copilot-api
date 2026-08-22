@@ -141,7 +141,7 @@ describe("tolerant Chat source preparation", () => {
     expect(modernParameters).toEqual({ type: "", properties: null })
   })
 
-  test("drops null token aliases while retaining simultaneous nonnull aliases", () => {
+  test("drops null token aliases and prefers max_completion_tokens", () => {
     const nulls = prepareChatCompletionsRequest({
       model: "future-model",
       messages: [{ role: "user", content: "hello" }],
@@ -158,9 +158,20 @@ describe("tolerant Chat source preparation", () => {
     expect(nulls.source).not.toHaveProperty("max_tokens")
     expect(nulls.source).not.toHaveProperty("max_completion_tokens")
     expect(dual.source).toMatchObject({
+      max_completion_tokens: 22,
+    })
+    expect(dual.source).not.toHaveProperty("max_tokens")
+  })
+
+  test("prefers max_completion_tokens when translating dual token aliases", () => {
+    const prepared = prepareChatCompletionsRequest({
+      model: "future-model",
+      messages: [{ role: "user", content: "hello" }],
       max_tokens: 11,
       max_completion_tokens: 22,
     })
+
+    expect(prepared.source.max_completion_tokens).toBe(22)
   })
 
   test("owns a detached serializable source snapshot", () => {

@@ -5,7 +5,7 @@ import { LocalHTTPError } from "~/lib/error"
 import { getUnsupportedRequestParameters } from "~/lib/model-settings"
 import {
   isProxyObject,
-  snapshotPlainDataRecord,
+  snapshotRequestPlainDataRecord,
 } from "~/lib/plain-data-snapshot"
 
 import type { ResponseInputMessage, ResponsesPayload } from "./create-responses"
@@ -119,7 +119,7 @@ export function finalizeNativeResponsesRequest(
   prepared: PreparedResponsesSource,
   options: FinalizeNativeResponsesRequestOptions,
 ): FinalizedNativeResponsesRequest {
-  const sourceSnapshot = snapshotPlainDataRecord(prepared.source)
+  const sourceSnapshot = snapshotRequestPlainDataRecord(prepared.source)
   if (!sourceSnapshot) {
     throw createResponsesValidationError({
       code: "invalid_type",
@@ -307,7 +307,7 @@ function prepareLegacyResponsesRequest(
 
 function snapshotResponsesSource(payload: unknown): ResponsesWireBody {
   const sourceCandidate = createResponsesSourceSnapshotCandidate(payload)
-  const snapshot = snapshotPlainDataRecord(sourceCandidate)
+  const snapshot = snapshotRequestPlainDataRecord(sourceCandidate)
   if (!snapshot) {
     throw createResponsesValidationError({
       code: "invalid_type",
@@ -407,7 +407,7 @@ function snapshotResponsesSourceTools(tools: unknown): unknown {
 }
 
 function snapshotResponsesToolEvidence(value: unknown): unknown {
-  const wrapper = snapshotPlainDataRecord({ value })
+  const wrapper = snapshotRequestPlainDataRecord({ value })
   return wrapper?.value
 }
 
@@ -504,7 +504,7 @@ function finalizeNativeResponsesTools(
 function getSafeNativeResponsesToolSnapshot(
   tool: unknown,
 ): (Record<string, unknown> & { type: string }) | undefined {
-  const snapshot = snapshotPlainDataRecord(tool)
+  const snapshot = snapshotRequestPlainDataRecord(tool)
   if (!snapshot) return undefined
   const type = snapshot.type
   if (typeof type !== "string" || type.trim() === "") return undefined
@@ -880,143 +880,7 @@ function normalizeFunctionToolParameters(payload: ResponsesWireBody): boolean {
 }
 
 export function normalizeJsonSchemaResponseFormat(
-  payload: ResponsesWireBody,
+  _payload: ResponsesWireBody,
 ): boolean {
-  const format = payload.text?.format
-  if (!isRecord(format) || format.type !== "json_schema") return false
-
-  return normalizeJsonSchemaObject(format.schema)
-}
-
-function normalizeJsonSchemaObject(
-  schema: unknown,
-  seen = new Set<object>(),
-): boolean {
-  if (!isRecord(schema)) return false
-  if (seen.has(schema)) return false
-  seen.add(schema)
-  const objectChanged = normalizeObjectSchemaDefaults(schema)
-  const mapsChanged = normalizeSchemaMaps(schema, seen)
-  const valuesChanged = normalizeSchemaValues(schema, seen)
-  const arraysChanged = normalizeSchemaArrays(schema, seen)
-  return objectChanged || mapsChanged || valuesChanged || arraysChanged
-}
-
-function normalizeObjectSchemaDefaults(
-  schema: Record<string, unknown>,
-): boolean {
-  if (schema.type !== "object" && !isRecord(schema.properties)) return false
-  let changed = false
-  if (schema.additionalProperties === undefined) {
-    schema.additionalProperties = false
-    changed = true
-  }
-  return normalizeJsonSchemaRequired(schema) || changed
-}
-
-function normalizeSchemaMaps(
-  schema: Record<string, unknown>,
-  seen: Set<object>,
-): boolean {
-  let changed = false
-  for (const value of [
-    schema.properties,
-    schema.patternProperties,
-    schema.$defs,
-    schema.definitions,
-  ]) {
-    if (normalizeSchemaMap(value, seen)) changed = true
-  }
-  return changed
-}
-
-function normalizeSchemaValues(
-  schema: Record<string, unknown>,
-  seen: Set<object>,
-): boolean {
-  let changed = false
-  for (const value of [
-    schema.items,
-    schema.additionalItems,
-    schema.contains,
-    schema.propertyNames,
-    schema.not,
-    schema.if,
-    schema.then,
-    schema.else,
-  ]) {
-    if (normalizeSchemaValue(value, seen)) changed = true
-  }
-  return changed
-}
-
-function normalizeSchemaArrays(
-  schema: Record<string, unknown>,
-  seen: Set<object>,
-): boolean {
-  let changed = false
-  for (const value of [schema.anyOf, schema.oneOf, schema.allOf]) {
-    if (normalizeSchemaArray(value, seen)) changed = true
-  }
-  return changed
-}
-
-function normalizeJsonSchemaRequired(schema: Record<string, unknown>): boolean {
-  if (!isRecord(schema.properties)) return false
-
-  const propertyKeys = Object.keys(schema.properties)
-  if (propertyKeys.length === 0) return false
-
-  const existingRequired =
-    Array.isArray(schema.required) ?
-      schema.required.filter((key): key is string => typeof key === "string")
-    : []
-  const propertyKeySet = new Set(propertyKeys)
-  const required = new Set(
-    existingRequired.filter((key) => propertyKeySet.has(key)),
-  )
-
-  for (const key of propertyKeys) {
-    required.add(key)
-  }
-
-  const normalizedRequired = [...required]
-  const existingValue = schema.required
-  if (
-    Array.isArray(existingValue)
-    && existingValue.length === normalizedRequired.length
-    && existingValue.every((key, index) => key === normalizedRequired[index])
-  ) {
-    return false
-  }
-  schema.required = normalizedRequired
-  return true
-}
-
-function normalizeSchemaMap(value: unknown, seen: Set<object>): boolean {
-  if (!isRecord(value)) return false
-
-  let changed = false
-  for (const schema of Object.values(value)) {
-    if (normalizeJsonSchemaObject(schema, seen)) changed = true
-  }
-  return changed
-}
-
-function normalizeSchemaArray(value: unknown, seen: Set<object>): boolean {
-  if (!Array.isArray(value)) return false
-
-  let changed = false
-  for (const schema of value) {
-    if (normalizeJsonSchemaObject(schema, seen)) changed = true
-  }
-  return changed
-}
-
-function normalizeSchemaValue(value: unknown, seen: Set<object>): boolean {
-  if (Array.isArray(value)) {
-    return normalizeSchemaArray(value, seen)
-  }
-
-  return normalizeJsonSchemaObject(value, seen)
+  return false
 }

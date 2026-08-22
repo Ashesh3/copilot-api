@@ -331,10 +331,8 @@ function scanFunctionPairing(options: {
     return
   }
   if (typeof item.call_id !== "string" || item.call_id.length === 0) return
-  if (
-    state.phase === "idle"
-    || state.callIds[state.resultIndex] !== item.call_id
-  ) {
+  if (state.phase === "idle") return
+  if (state.callIds[state.resultIndex] !== item.call_id) {
     addBlocker(blockers, "tool_result_pairing")
     return
   }
