@@ -1028,34 +1028,34 @@ test.each([
     path: "/v1beta/models/custom-chat-alias:generateContent",
     body: { contents: [{ role: "user", parts: [{ text: "hello" }] }] },
   },
-])("$name fails closed for binary custom provider failures", async ({
-  path,
-  body,
-}) => {
-  const bytes = Uint8Array.from([0, 255, 13, 10, 65])
-  fetchMock.mockImplementationOnce(
-    () =>
-      new Response(bytes.slice(), {
-        status: 401,
-        headers: { "content-type": "application/octet-stream" },
-      }),
-  )
+])(
+  "$name fails closed for binary custom provider failures",
+  async ({ path, body }) => {
+    const bytes = Uint8Array.from([0, 255, 13, 10, 65])
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Response(bytes.slice(), {
+          status: 401,
+          headers: { "content-type": "application/octet-stream" },
+        }),
+    )
 
-  const response = await server.request(path, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  })
+    const response = await server.request(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    })
 
-  expect(response.status).toBe(401)
-  expect(response.headers.get("content-type")).toContain("application/json")
-  expect(await response.json()).toEqual({
-    error: {
-      message: "Custom provider request failed",
-      type: "error",
-    },
-  })
-})
+    expect(response.status).toBe(401)
+    expect(response.headers.get("content-type")).toContain("application/json")
+    expect(await response.json()).toEqual({
+      error: {
+        message: "Custom provider request failed",
+        type: "error",
+      },
+    })
+  },
+)
 
 test.each([
   {

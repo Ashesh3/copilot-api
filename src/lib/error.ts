@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- centralized HTTP error boundary and hostile input validation */
 import type { Context } from "hono"
 import type { ContentfulStatusCode } from "hono/utils/http-status"
 
