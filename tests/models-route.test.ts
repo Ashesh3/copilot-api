@@ -14,6 +14,19 @@ import { server } from "../src/server"
 const originalModels = state.models
 const originalFetch = globalThis.fetch
 
+test("serves model discovery at the Google v1beta collection route", async () => {
+  state.models = { object: "list", data: [currentModel] }
+  state.copilotToken = "copilot-token"
+
+  const response = await server.request("/v1beta/models")
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    object: "list",
+    data: [{ id: "gpt-current" }],
+  })
+})
+
 function restoreCopilotToken(token: string | undefined): void {
   state.copilotToken = token
 }

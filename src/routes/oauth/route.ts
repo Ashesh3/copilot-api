@@ -333,7 +333,10 @@ oauthBrowserRoutes.post("/authorize", async (c) => {
   const clientIp = extractClientIp(c)
 
   const body = await readOAuthBody(c)
-  const apiKey = body?.api_key.trim() ?? ""
+  // Sparse form bodies are valid inputs even though the filtered record type is
+  // string-valued for keys that are present.
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+  const apiKey = body?.api_key?.trim() ?? ""
 
   const credential = apiKey ? await resolveCredential(apiKey) : null
   if (credential?.kind === "gateway") {

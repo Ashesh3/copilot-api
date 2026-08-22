@@ -245,6 +245,7 @@ server.route("/alpha/search", codexSearchRoutes)
 // Compatibility with tools that expect v1/ prefix
 server.route("/v1/chat/completions", completionRoutes)
 server.route("/v1/models", modelRoutes)
+server.route("/v1beta/models", modelRoutes)
 server.route("/v1/embeddings", embeddingRoutes)
 server.route("/v1/responses", responsesRoutes)
 server.route("/v1/alpha/search", codexSearchRoutes)

@@ -107,9 +107,14 @@ describe("health and Direct Connect exposure", () => {
       expect(await response.json()).toEqual({ status: "ok" })
     }
 
+    for (const pathname of ["/health", "/health/health"]) {
+      const response = await server.request(pathname, { method: "HEAD" })
+      expect(response.status).toBe(200)
+      expect(await response.text()).toBe("")
+    }
+
     for (const [pathname, method] of [
       ["/health", "POST"],
-      ["/health", "HEAD"],
       ["/health/health", "POST"],
       ["/health/unknown", "GET"],
     ] as const) {
