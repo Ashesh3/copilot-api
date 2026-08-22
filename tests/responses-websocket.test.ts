@@ -1354,7 +1354,7 @@ describe("responses websocket message handling", () => {
       )
 
       expect(terminal?.type).toBe("response.completed")
-      expect(terminal?.response).not.toHaveProperty("output_text")
+      expect(terminal?.response?.output_text).toBe("Hello world")
       expect(
         frames.some(
           (frame) => frame.type === "error" || frame.type === "response.failed",
@@ -1659,7 +1659,7 @@ describe("responses websocket message handling", () => {
       type: "error",
       status: 400,
       error: {
-        code: "bad_request",
+        code: "invalid_request_error",
         message: "Continuation model must match the previous response model.",
         type: "invalid_request_error",
         request_id: "req-test",
@@ -3176,7 +3176,7 @@ describe("responses websocket message handling", () => {
       expect(errorFrame.type).toBe("error")
       expect(errorFrame.status).toBe(400)
       expect(errorFrame.error).toEqual({
-        code: "bad_request",
+        code: "previous_response_not_found",
         message:
           "The previous response is not available on this WebSocket connection.",
         type: "invalid_request_error",
@@ -3238,7 +3238,7 @@ describe("responses websocket message handling", () => {
         type: "error",
         status: 400,
         error: {
-          code: "bad_request",
+          code: "invalid_request_error",
           message,
           type: "invalid_request_error",
           request_id: "req-test",

@@ -56,7 +56,7 @@ describe("Google AI - POST /v1/models/{model}:generateContent", () => {
     "streamGenerateContent (streaming)",
     async () => {
       const res = await postJSON(
-        "/v1/models/gpt-4o-mini:streamGenerateContent",
+        "/v1/models/gpt-4o-mini:streamGenerateContent?alt=sse",
         {
           contents: [
             { role: "user", parts: [{ text: "Say hello in one word." }] },
