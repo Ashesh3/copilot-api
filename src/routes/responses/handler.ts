@@ -1484,6 +1484,7 @@ interface CCStreamState {
   nextOutputIndex: number
   usage: { inputTokens?: number; outputTokens?: number; cachedTokens?: number }
   responseCreated: boolean
+  pendingFinishReason?: string
 }
 
 type WriteEventFn = (event: string, data: unknown) => Promise<void>
@@ -1939,6 +1940,13 @@ const buildCCResponseResult = (
     output_tokens: state.usage.outputTokens ?? 0,
     total_tokens:
       (state.usage.inputTokens ?? 0) + (state.usage.outputTokens ?? 0),
+    ...(state.usage.cachedTokens === undefined ?
+      {}
+    : {
+        input_tokens_details: {
+          cached_tokens: state.usage.cachedTokens,
+        },
+      }),
   },
   error: null,
   incomplete_details: null,
@@ -2208,12 +2216,16 @@ const streamChatCompletionsAsResponsesWithState = async (options: {
     if (rawEvent.data === "[DONE]") break
     if (!rawEvent.data) continue
 
-    terminal =
-      (await processChatCompletionsChunk(
-        s,
-        JSON.parse(rawEvent.data) as ChatCompletionChunk,
-        writeEvent,
-      )) ?? terminal
+    const chunk = JSON.parse(rawEvent.data) as ChatCompletionChunk
+    if (s.pendingFinishReason) {
+      if (chunk.usage) s.usage = extractCCUsage(chunk.usage)
+      continue
+    }
+    await processChatCompletionsChunk(s, chunk, writeEvent)
+  }
+
+  if (!terminal && s.pendingFinishReason) {
+    terminal = await emitDoneEvents(s, s.pendingFinishReason, writeEvent)
   }
 
   return { state: s, terminal }
@@ -2223,7 +2235,9 @@ async function processChatCompletionsChunk(
   state: CCStreamState,
   chunk: ChatCompletionChunk,
   writeEvent: WriteEventFn,
-): Promise<"response.completed" | "response.incomplete" | undefined> {
+): Promise<void> {
+  // The state is request-local and processed serially by the owning iterator.
+
   if (chunk.id) state.responseId = `resp_${chunk.id}`
   if (chunk.created) state.createdAt = chunk.created
   if (chunk.usage) state.usage = extractCCUsage(chunk.usage)
@@ -2241,15 +2255,16 @@ async function processChatCompletionsChunk(
     })
   }
   const choice = chunk.choices.at(0)
-  if (!choice?.delta) return undefined
-  const content = choice.delta.content as string | undefined
-  if (content) await emitTextDelta(state, content, writeEvent)
-  for (const toolCall of choice.delta.tool_calls ?? []) {
-    await emitToolCallDelta(state, toolCall, writeEvent)
+  if (choice?.delta) {
+    const content = choice.delta.content as string | undefined
+    if (content) await emitTextDelta(state, content, writeEvent)
+    for (const toolCall of choice.delta.tool_calls ?? []) {
+      await emitToolCallDelta(state, toolCall, writeEvent)
+    }
   }
-  return choice.finish_reason ?
-      await emitDoneEvents(state, choice.finish_reason, writeEvent)
-    : undefined
+  const finishReason = choice?.finish_reason
+  // eslint-disable-next-line require-atomic-updates
+  if (finishReason) state.pendingFinishReason = finishReason
 }
 
 const handleWithAnthropicMessages = async (options: {

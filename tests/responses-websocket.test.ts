@@ -3507,9 +3507,10 @@ describe("responses websocket upstream handling", () => {
     expect(calls).toEqual(["first"])
   })
 
-  test.each(["failed", "incomplete"])(
+  test.each(["failed"])(
     "does not snapshot response.completed with embedded %s status",
     async (status) => {
+      state.copilotToken = "copilot-token"
       state.models = responsesCapableModels
       queuedResponses.push(
         createRawResponsesTerminalSseResponse(
@@ -3544,6 +3545,45 @@ describe("responses websocket upstream handling", () => {
       )
     },
   )
+
+  test("snapshots response.completed carrying an incomplete partial response", async () => {
+    state.copilotToken = "copilot-token"
+    state.models = responsesCapableModels
+    queuedResponses.push(
+      createRawResponsesTerminalSseResponse(
+        JSON.stringify({
+          type: "response.completed",
+          sequence_number: 2,
+          response: {
+            id: "resp_embedded_incomplete",
+            object: "response",
+            status: "incomplete",
+            incomplete_details: { reason: "max_output_tokens" },
+            output: [
+              {
+                type: "message",
+                role: "assistant",
+                status: "incomplete",
+                content: [{ type: "output_text", text: "partial" }],
+              },
+            ],
+          },
+        }),
+      ),
+    )
+    const ws = createTestWebSocket()
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "incomplete",
+      }),
+    )
+
+    expect(ws.data.responseSnapshots.has("resp_embedded_incomplete")).toBe(true)
+  })
 
   test("preserves binary upstream HTTP error bytes in the terminal frame", async () => {
     state.copilotToken = "copilot-token"
@@ -4052,6 +4092,64 @@ describe("responses websocket continuation handling", () => {
         content: [{ type: "output_text", text: "Done" }],
       },
       ...(followUpPayload.input as Array<ResponseInputItem>),
+    ])
+  })
+
+  test("preserves partial snapshots from completed events marked incomplete", () => {
+    const snapshots = new Map<string, ResponsesPayload>()
+    const priorPayload: ResponsesPayload = {
+      model: "gpt-5.4",
+      input: "First",
+      stream: true,
+    }
+
+    recordResponseSnapshotFromFrame(
+      snapshots,
+      priorPayload,
+      JSON.stringify({
+        type: "response.completed",
+        response: {
+          id: "resp_partial_completed",
+          status: "incomplete",
+          incomplete_details: { reason: "max_output_tokens" },
+          output: [
+            {
+              id: "msg_partial",
+              type: "message",
+              role: "assistant",
+              status: "incomplete",
+              content: [{ type: "output_text", text: "Partial answer" }],
+            },
+          ],
+        },
+      }),
+    )
+
+    const rehydrated = rehydrateContinuationPayload(snapshots, {
+      model: "gpt-5.4",
+      previous_response_id: "resp_partial_completed",
+      input: "Continue",
+      stream: true,
+    })
+
+    expect(rehydrated?.input).toEqual([
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "First" }],
+      },
+      {
+        id: "msg_partial",
+        type: "message",
+        role: "assistant",
+        status: "incomplete",
+        content: [{ type: "output_text", text: "Partial answer" }],
+      },
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "Continue" }],
+      },
     ])
   })
 

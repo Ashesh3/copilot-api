@@ -156,7 +156,9 @@ export function setResponsesWebSocketDependenciesForTest(
 interface ResponseCompletedFrame {
   response?: {
     id?: unknown
+    incomplete_details?: unknown
     output?: unknown
+    status?: unknown
   }
   type?: string
 }
@@ -801,17 +803,25 @@ async function emitTurnFrame(
 
   if (terminalType === "response.completed") {
     const responseStatus = readEmittedResponseStatus(parsed)
-    if (responseStatus !== "failed" && responseStatus !== "incomplete") {
+    if (responseStatus !== "failed") {
       recordResponseSnapshotFromFrame(
         ws.data.responseSnapshots,
         payload,
         processed,
       )
-    } else {
+    }
+    if (responseStatus === "failed") {
       return await turn.terminal.succeed({
         kind: "received_failure",
         status: 502,
         terminalStatus: "ERROR",
+      })
+    }
+    if (responseStatus === "incomplete") {
+      return await turn.terminal.succeed({
+        kind: "incomplete",
+        status: 200,
+        terminalStatus: "COMPLETE",
       })
     }
     return await turn.terminal.succeed({
