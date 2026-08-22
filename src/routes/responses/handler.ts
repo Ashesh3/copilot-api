@@ -17,8 +17,14 @@ import {
   recordCopilotEndpointRoute,
   recordCopilotMessagesBeta,
   recordCopilotRequestNormalization,
+  recordCopilotTranslationFindings,
 } from "~/lib/copilot-contract-observability"
 import { sessionTokenMatchesModel } from "~/lib/copilot-session-token"
+import {
+  createCustomProviderChatCompletions,
+  resolveCustomProviderModel,
+  type CustomProviderModelReference,
+} from "~/lib/custom-providers"
 import {
   type EndpointRouteDecision,
   type EndpointRouteFailure,
@@ -30,6 +36,8 @@ import {
   createEndpointTranslationError,
   createInvalidJsonBodyError,
   isAbortError,
+  isHTTPError,
+  inspectHttpError,
 } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
 import {
@@ -46,13 +54,14 @@ import {
   usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
 import {
+  hasNonNullStreamError,
+  parseRecoverableStreamJson,
+} from "~/lib/recoverable-stream-json"
+import {
   recordNonDefaultBehavior,
   setRequestContext,
 } from "~/lib/request-logger"
-import {
-  installRoutingAffinityFallback,
-  resolveResponsesRoutingAffinity,
-} from "~/lib/routing-affinity"
+import { installResponsesRoutingAffinity } from "~/lib/routing-affinity"
 import {
   createSentryChatSpanOptions,
   createSentryInvokeAgentSpanOptions,
@@ -61,6 +70,7 @@ import {
 } from "~/lib/sentry"
 import {
   raceSsePreflush,
+  type SseHeartbeatSink,
   unwrapSsePreflushSettlement,
   withHeartbeatWhilePending,
   withSseHeartbeat,
@@ -69,12 +79,9 @@ import {
 import { state } from "~/lib/state"
 import { tokenPool } from "~/lib/token-pool"
 import { emitResponsesToolSpans } from "~/lib/tool-spans"
+import { isResponsesCompactionRequest } from "~/services/copilot/compaction-payload"
 import {
-  fitResponsesCompactionPayload,
-  isResponsesCompactionRequest,
-} from "~/services/copilot/compaction-payload"
-import {
-  createChatCompletions,
+  createChatCompletionsWithProcessedPayload,
   type ChatCompletionChunk,
   type ChatCompletionResponse,
   type ChatCompletionsPayload,
@@ -101,19 +108,38 @@ import {
 import { canonicalizeAnthropicBeta } from "~/services/copilot/messages-contract"
 import { normalizeResponsesAttachmentsFailClosed } from "~/services/copilot/responses-attachments"
 import {
-  finalizeResponsesRequest,
+  finalizeNativeResponsesRequest,
+  type PreparedResponsesSource,
   prepareResponsesRequest,
 } from "~/services/copilot/responses-contract"
 
 import { type NativeMessagesRequestOptions } from "../messages/native-handler"
 import {
-  emitResponsesFailureAsStream,
   emitResponsesResultAsStream,
   resolveResponsesWebSearchCalls,
-  resolveWebSearchCalls,
 } from "../messages/web-search-helpers"
-import { executeResponsesMessagesBridge } from "./messages-bridge"
+import {
+  type PreparedResponsesChatCompletion,
+  resolvePreparedResponsesWebSearchCalls,
+  type ResponsesChatCompletionFactory,
+} from "./chat-fallback-completion"
+import {
+  prepareResponsesCandidates,
+  selectResponsesCandidate,
+} from "./fallback-candidates"
+import { executePreparedResponsesMessagesBridge } from "./messages-bridge"
+import { adaptResponsesToChatCandidate } from "./responses-chat-adapter"
+import { getResponsesChatWebSearchMaxUses } from "./responses-chat-adapter"
 import { createStreamIdTracker, fixStreamIds } from "./stream-id-sync"
+import {
+  classifyResponsesTerminal,
+  createPartialTextOutput,
+  createResponsesStreamFailureState,
+  createResponsesTerminalLifecycle,
+  RECEIVED_RESPONSES_FAILURE,
+  type ResponsesStreamChunk,
+  updateResponsesFailureState,
+} from "./stream-lifecycle"
 import {
   checkResponsesToChatTranslation,
   checkResponsesToMessagesTranslation,
@@ -174,26 +200,6 @@ const setDetailedTokenAttributes = (
   }
 }
 
-const hasBufferedWebSearchCall = (chunkData: {
-  event?: string
-  data?: string
-}): boolean => {
-  if (!chunkData.data || chunkData.event !== "response.output_item.done") {
-    return false
-  }
-
-  try {
-    const parsed = JSON.parse(chunkData.data) as {
-      item?: { type?: string; name?: string }
-    }
-    return (
-      parsed.item?.type === "function_call" && parsed.item.name === "web_search"
-    )
-  } catch {
-    return false
-  }
-}
-
 const getCompletedBufferedResponse = (chunkData: {
   event?: string
   data?: string
@@ -214,6 +220,242 @@ const getCompletedBufferedResponse = (chunkData: {
   } catch {
     return null
   }
+}
+
+interface NativeResponsesStreamWriter extends SseHeartbeatSink {
+  writeSSE: (data: {
+    id?: string
+    event?: string
+    data: string
+  }) => Promise<void>
+}
+
+interface NativeResponsesStreamOptions {
+  c: Context
+  copilotSessionToken?: string
+  finishSpan: () => void
+  initiator: "agent" | "user"
+  preparedPayload: ResponsesPayload
+  requestedModel: string
+  response: AsyncIterable<ResponsesStreamChunk>
+  streamSpan: Sentry.Span
+  vision: boolean
+}
+
+async function streamImmediateNativeResponses(
+  stream: NativeResponsesStreamWriter,
+  options: NativeResponsesStreamOptions,
+): Promise<void> {
+  const failureState = createResponsesStreamFailureState(options.requestedModel)
+  const lifecycle = createResponsesTerminalLifecycle({
+    c: options.c,
+    stream,
+    state: failureState,
+  })
+  const idTracker = createStreamIdTracker()
+  const writeContext = {
+    stream,
+    requestedModel: options.requestedModel,
+    idTracker,
+  }
+  stream.onAbort?.(() => {
+    lifecycle.abort()
+  })
+  try {
+    for await (const chunk of withSseHeartbeat(options.response, stream)) {
+      if (lifecycle.state !== "open") break
+      const normalized = normalizeResponsesStreamChunk(chunk)
+      const outbound = processNativeResponsesChunk(normalized, writeContext)
+      if (outbound === undefined) continue
+      updateResponsesFailureState(failureState, outbound)
+      await writeNativeResponsesChunk(outbound, stream)
+      await commitReceivedResponsesTerminal(lifecycle, normalized.event)
+    }
+    await lifecycle.finishSource()
+  } catch (error) {
+    await failResponsesLifecycle(lifecycle, stream, error)
+  } finally {
+    options.finishSpan()
+  }
+}
+
+async function streamBufferedNativeResponses(
+  stream: NativeResponsesStreamWriter,
+  options: NativeResponsesStreamOptions,
+): Promise<void> {
+  const failureState = createResponsesStreamFailureState(options.requestedModel)
+  const lifecycle = createResponsesTerminalLifecycle({
+    c: options.c,
+    stream,
+    state: failureState,
+  })
+  const bufferedChunks: Array<ResponsesStreamChunk> = []
+  const idTracker = createStreamIdTracker()
+  const writeContext = {
+    stream,
+    requestedModel: options.requestedModel,
+    idTracker,
+  }
+  let completedResult: ResponsesResult | null = null
+  stream.onAbort?.(() => {
+    lifecycle.abort()
+  })
+  try {
+    for await (const chunk of withSseHeartbeat(options.response, stream)) {
+      if (lifecycle.state !== "open") break
+      const normalized = normalizeResponsesStreamChunk(chunk)
+      const outbound = processNativeResponsesChunk(normalized, writeContext)
+      if (outbound === undefined) continue
+      bufferedChunks.push(outbound)
+      updateResponsesFailureState(failureState, outbound)
+      completedResult =
+        getCompletedBufferedResponse(outbound) ?? completedResult
+      const terminal = classifyResponsesTerminal(normalized.event)
+      if (!terminal) continue
+      if (terminal === "response.failed" || terminal === "error") {
+        await writeBufferedNativeResponsesChunks(bufferedChunks, stream)
+        await lifecycle.fail({
+          kind: "thrown",
+          error: RECEIVED_RESPONSES_FAILURE,
+        })
+      }
+      break
+    }
+    updateNativeResponsesSpan(options.streamSpan, completedResult)
+    if (lifecycle.state !== "open") return
+    if (!completedResult) {
+      await lifecycle.finishSource()
+      return
+    }
+    const terminalResult = completedResult
+    options.finishSpan()
+    const resolved = await withHeartbeatWhilePending(
+      Sentry.withActiveSpan(null, () =>
+        resolveResponsesWebSearchCalls(
+          terminalResult,
+          options.preparedPayload,
+          {
+            copilotSessionToken: options.copilotSessionToken,
+            vision: options.vision,
+            initiator: options.initiator,
+            signal: options.c.req.raw.signal,
+          },
+        ),
+      ),
+      stream,
+    )
+    await emitResponsesResultAsStream(
+      stream,
+      withRequestedResponseModel(resolved, options.requestedModel),
+    )
+    await lifecycle.succeed("synthetic")
+  } catch (error) {
+    await failResponsesLifecycle(lifecycle, stream, error)
+  } finally {
+    options.finishSpan()
+  }
+}
+
+function normalizeResponsesStreamChunk(
+  chunk: ResponsesStreamChunk,
+): ResponsesStreamChunk {
+  return {
+    id: chunk.id,
+    event: chunk.event,
+    data: chunk.data ?? "",
+  }
+}
+
+interface NativeResponsesWriteContext {
+  stream: NativeResponsesStreamWriter
+  requestedModel: string
+  idTracker: ReturnType<typeof createStreamIdTracker>
+}
+
+function processNativeResponsesChunk(
+  chunk: ResponsesStreamChunk,
+  context: NativeResponsesWriteContext,
+): ResponsesStreamChunk | undefined {
+  const restoredData = rewriteResponseModelInEvent(
+    chunk.data ?? "",
+    context.requestedModel,
+  )
+  const data = fixStreamIds(restoredData, chunk.event, context.idTracker)
+  if (data === undefined) return undefined
+  return {
+    ...(typeof chunk.id === "string" ? { id: chunk.id } : {}),
+    event: chunk.event,
+    data,
+  }
+}
+
+async function writeNativeResponsesChunk(
+  chunk: ResponsesStreamChunk,
+  stream: NativeResponsesStreamWriter,
+): Promise<void> {
+  await stream.writeSSE({
+    ...(typeof chunk.id === "string" ? { id: chunk.id } : {}),
+    event: chunk.event,
+    data: chunk.data ?? "",
+  })
+}
+
+async function writeBufferedNativeResponsesChunks(
+  chunks: ReadonlyArray<ResponsesStreamChunk>,
+  stream: NativeResponsesStreamWriter,
+): Promise<void> {
+  for (const chunk of chunks) {
+    await writeNativeResponsesChunk(chunk, stream)
+  }
+}
+
+async function commitReceivedResponsesTerminal(
+  lifecycle: ReturnType<typeof createResponsesTerminalLifecycle>,
+  event: string | undefined,
+): Promise<void> {
+  const terminal = classifyResponsesTerminal(event)
+  if (terminal === "response.completed" || terminal === "response.incomplete") {
+    await lifecycle.succeed(terminal)
+    return
+  }
+  if (terminal === "response.failed" || terminal === "error") {
+    await lifecycle.fail({
+      kind: "thrown",
+      error: RECEIVED_RESPONSES_FAILURE,
+    })
+  }
+}
+
+async function failResponsesLifecycle(
+  lifecycle: ReturnType<typeof createResponsesTerminalLifecycle>,
+  stream: NativeResponsesStreamWriter,
+  error: unknown,
+): Promise<void> {
+  if (isAbortError(error) || stream.aborted || stream.closed) {
+    lifecycle.abort()
+    return
+  }
+  const inspection =
+    isHTTPError(error) ? await inspectHttpError(error) : undefined
+  if (inspection?.status === 499) {
+    lifecycle.abort()
+    return
+  }
+  await lifecycle.fail({ kind: "thrown", error, inspection })
+}
+
+function updateNativeResponsesSpan(
+  streamSpan: Sentry.Span,
+  result: ResponsesResult | null,
+): void {
+  const usage = extractDetailedUsage(result?.usage)
+  streamSpan.setAttribute("gen_ai.usage.input_tokens", usage.inputTokens)
+  streamSpan.setAttribute("gen_ai.usage.output_tokens", usage.outputTokens)
+  setDetailedTokenAttributes(streamSpan, {
+    cachedTokens: usage.cachedTokens,
+    reasoningTokens: usage.reasoningTokens,
+  })
+  setSentryOutputMessages(streamSpan, result?.output_text ?? "")
 }
 
 type ResponsesReasoningEffort = ReasoningEffort | number
@@ -520,34 +762,35 @@ function readResponseEventDataProperty(
 
 export const handleResponses = async (c: Context) => {
   const payload = await parseResponsesRequestBody(c)
-  prepareResponsesRequest(payload)
+  const preparedSource = prepareResponsesRequest(payload)
+  const sourcePayload = preparedSource.source
   const nativeOptions: NativeMessagesRequestOptions = {
     anthropicBeta: c.req.header("anthropic-beta"),
     anthropicVersion: c.req.header("anthropic-version"),
     modelProviderPreference: c.req.header("x-model-provider-preference"),
   }
-  installRoutingAffinityFallback(
-    resolveResponsesRoutingAffinity(
-      (payload as Record<string, unknown>).client_metadata,
-    ),
+  installResponsesRoutingAffinity(
+    (sourcePayload as Record<string, unknown>).client_metadata,
   )
-  const conversationId = setSentryConversationIdFromRequest(c, payload)
+  const conversationId = setSentryConversationIdFromRequest(c, sourcePayload)
 
-  const model = parseModelSuffix(payload.model).baseModel
+  const model = parseModelSuffix(sourcePayload.model).baseModel
 
   return await Sentry.startSpan(
     createSentryInvokeAgentSpanOptions(model, conversationId),
     async () => {
-      return await handleResponsesInner(c, payload, nativeOptions)
+      return await handleResponsesInner(c, {
+        legacyPayload: structuredClone(payload),
+        nativeOptions,
+        preparedSource,
+      })
     },
   )
 }
 
-async function parseResponsesRequestBody(
-  c: Context,
-): Promise<ResponsesPayload> {
+async function parseResponsesRequestBody(c: Context): Promise<unknown> {
   try {
-    return await c.req.json<ResponsesPayload>()
+    return await c.req.json<unknown>()
   } catch {
     throw createInvalidJsonBodyError()
   }
@@ -555,9 +798,17 @@ async function parseResponsesRequestBody(
 
 const handleResponsesInner = async (
   c: Context,
-  payload: ResponsesPayload,
-  nativeOptions: NativeMessagesRequestOptions,
+  options: {
+    legacyPayload: unknown
+    nativeOptions: NativeMessagesRequestOptions
+    preparedSource: PreparedResponsesSource
+  },
 ) => {
+  const payload = structuredClone(
+    options.preparedSource.source,
+  ) as ResponsesPayload
+  const legacyPayload = options.legacyPayload as ResponsesPayload
+  const nativeOptions = options.nativeOptions
   // Emit synthetic tool execution spans from tool results in input history
   emitResponsesToolSpans(payload.input)
 
@@ -569,8 +820,22 @@ const handleResponsesInner = async (
     payload.model,
   )
 
-  payload.model = normalizeModelName(baseModel)
+  const customReferenceBeforeRedirect = resolveCustomResponsesModel(
+    baseModel,
+    payload,
+  )
+  payload.model =
+    customReferenceBeforeRedirect ? baseModel : normalizeModelName(baseModel)
   const effectiveEffort = normalizeResponsesReasoning(payload, suffixEffort)
+  syncLegacyResponsesRouteState(legacyPayload, payload)
+  if (customReferenceBeforeRedirect) {
+    return await dispatchCustomResponsesRequest(c, {
+      finalEffort: effectiveEffort,
+      payload,
+      reference: customReferenceBeforeRedirect,
+      requestedModel,
+    })
+  }
   const redirect = await resolveResponsesRedirect(c, {
     model: payload.model,
     effectiveEffort,
@@ -596,13 +861,25 @@ const handleResponsesInner = async (
     effort: redirectedEffort,
     preserveNumericEffort: typeof effectiveEffort === "number",
   })
+  syncLegacyResponsesRouteState(legacyPayload, payload)
   const finalEffort = redirectedEffort ?? effectiveEffort
+
+  const customReference = resolveCustomResponsesModel(payload.model, payload)
+  if (customReference) {
+    return await dispatchCustomResponsesRequest(c, {
+      finalEffort,
+      payload,
+      reference: customReference,
+      requestedModel,
+    })
+  }
 
   const copilotSessionToken = resolveResponsesSessionToken(c, {
     payload,
     redirectOccurred: redirect.redirected,
     requestedModel: baseModel,
   })
+  legacyPayload.model = payload.model
 
   setRequestContext(c, {
     requestedModel,
@@ -618,12 +895,50 @@ const handleResponsesInner = async (
 
   // Expand compaction items back into regular messages
   expandCompactionItems(payload)
-  disableParallelWebSearch(payload)
+  expandCompactionItems(legacyPayload)
 
-  const routedModel = selectRoutedModel(payload.model)
+  const routedModel = selectRoutedModel(payload.model, {
+    copilotSessionToken,
+  })
   const selectedModel = routedModel.model
-  const route = await prepareResponsesRoute(c, payload, selectedModel)
-  const { decision, preparedPayload } = route
+  const nativeFinalized = finalizeNativeResponsesRequest(
+    {
+      source: payload,
+      normalizationClasses: options.preparedSource.normalizationClasses,
+    },
+    {
+      model: payload.model,
+      defaultEffort: getModelReasoningConfig(payload.model)?.defaultEffort,
+      implicitDefault: usesImplicitReasoningDefault(payload.model),
+    },
+  )
+  const nativeBody = {
+    ...nativeFinalized,
+    body: stripResponsesWarmupControl(nativeFinalized.body),
+  }
+  disableParallelWebSearch(nativeBody.body)
+  const candidates = await prepareResponsesCandidates({
+    adaptationSource: payload,
+    finalReasoningEffort: finalEffort,
+    nativeBody,
+    preservedSource: options.preparedSource,
+    selectedModel,
+    signal: c.req.raw.signal,
+  })
+  const selection = selectResponsesCandidate({ candidates, selectedModel })
+  if ("code" in selection) throw createEndpointTranslationError(selection)
+  const { candidate, decision } = selection
+  recordCopilotRequestNormalization("responses", [
+    ...nativeFinalized.normalizationClasses,
+  ])
+  if (candidate.check.findings.length > 0) {
+    recordCopilotTranslationFindings(
+      "responses",
+      candidate.endpoint,
+      candidate.check,
+    )
+  }
+  recordCopilotEndpointRoute(decision)
   if (decision.target === "/v1/messages") {
     recordCopilotMessagesBeta(
       canonicalizeAnthropicBeta(nativeOptions.anthropicBeta),
@@ -633,31 +948,31 @@ const handleResponsesInner = async (
   if (state.manualApprove) await awaitApproval()
 
   return await runWithRoutedModelSelection(routedModel, async () => {
-    if (decision.target === "/v1/messages") {
+    if (candidate.endpoint === "/v1/messages") {
       reportResponsesEndpointFallback(c, payload.model, decision)
-      return await handleWithAnthropicMessages(c, preparedPayload, {
-        ...nativeOptions,
-        requestedModel,
-        copilotSessionToken,
+      return await handleWithAnthropicMessages({
+        c,
+        preparedPayload: candidate.payload,
+        responseContext: payload,
+        nativeOptions: {
+          ...nativeOptions,
+          requestedModel,
+          copilotSessionToken,
+        },
       })
     }
 
-    if (decision.target === "/chat/completions") {
-      // ChatCompletions has no hosted web-search tool. Downgrade it to the
-      // shared MCP-backed function loop only on this fallback path.
-      convertWebSearchTool(preparedPayload)
-      // ChatCompletions can't accept custom (freeform) tools, so rewrite
-      // apply_patch into a function tool only on this fallback path. The
-      // native /responses path supports custom tools and must pass them
-      // through unchanged (Codex Desktop aborts otherwise).
-      useFunctionApplyPatch(preparedPayload)
-      reportResponsesEndpointFallback(c, preparedPayload.model, decision)
+    if (candidate.endpoint === "/chat/completions") {
+      reportResponsesEndpointFallback(c, candidate.payload.model, decision)
       setRequestContext(c, { provider: "Responses→ChatCompletions" })
-      return await handleWithChatCompletions(c, preparedPayload, {
+      return await handleWithChatCompletions(c, candidate.payload, {
         requestedModel,
         copilotSessionToken,
+        webSearchMaxUses: getResponsesChatWebSearchMaxUses(payload),
       })
     }
+
+    const preparedPayload = candidate.payload
 
     const { vision, initiator } = getResponsesRequestOptions(preparedPayload)
 
@@ -742,101 +1057,27 @@ const handleResponsesInner = async (
               )
             }
 
+            const nativeStreamOptions = {
+              c,
+              copilotSessionToken,
+              finishSpan,
+              initiator,
+              preparedPayload,
+              requestedModel,
+              response,
+              streamSpan,
+              vision,
+            }
+            const emulatesWebSearch =
+              preparedPayload.tools?.some((tool) =>
+                isResponsesWebSearchFunctionTool(tool),
+              ) ?? false
             return streamSSE(c, async (stream) => {
-              try {
-                const bufferedChunks: Array<{
-                  id?: string
-                  event?: string
-                  data?: string
-                }> = []
-                let hasWebSearchCall = false
-                let completedResult: ResponsesResult | null = null
-                let detailedUsage = extractDetailedUsage(null)
-                let responseText = ""
-
-                for await (const chunk of withSseHeartbeat(response, stream)) {
-                  const chunkData = {
-                    id: (chunk as { id?: string }).id,
-                    event: (chunk as { event?: string }).event,
-                    data: (chunk as { data?: string }).data ?? "",
-                  }
-                  bufferedChunks.push(chunkData)
-
-                  if (hasBufferedWebSearchCall(chunkData)) {
-                    hasWebSearchCall = true
-                  }
-
-                  const parsedResponse = getCompletedBufferedResponse(chunkData)
-                  if (parsedResponse) {
-                    completedResult = parsedResponse
-                    detailedUsage = extractDetailedUsage(parsedResponse.usage)
-                    responseText = parsedResponse.output_text
-                  }
-                }
-
-                streamSpan.setAttribute(
-                  "gen_ai.usage.input_tokens",
-                  detailedUsage.inputTokens,
-                )
-                streamSpan.setAttribute(
-                  "gen_ai.usage.output_tokens",
-                  detailedUsage.outputTokens,
-                )
-                setDetailedTokenAttributes(streamSpan, {
-                  cachedTokens: detailedUsage.cachedTokens,
-                  reasoningTokens: detailedUsage.reasoningTokens,
-                })
-                setSentryOutputMessages(streamSpan, responseText)
-
-                if (hasWebSearchCall && completedResult) {
-                  finishSpan()
-                  // Inside the already-open stream: the resolver loops full
-                  // generations plus live web fetches, so it needs keep-alives.
-                  const resolved = await withHeartbeatWhilePending(
-                    Sentry.withActiveSpan(null, () =>
-                      resolveResponsesWebSearchCalls(
-                        completedResult,
-                        preparedPayload,
-                        {
-                          copilotSessionToken,
-                          vision,
-                          initiator,
-                          signal: c.req.raw.signal,
-                        },
-                      ),
-                    ),
-                    stream,
-                  )
-                  await emitResponsesResultAsStream(
-                    stream,
-                    withRequestedResponseModel(resolved, requestedModel),
-                  )
-                  return
-                }
-
-                const idTracker = createStreamIdTracker()
-                for (const chunk of bufferedChunks) {
-                  const restoredData = rewriteResponseModelInEvent(
-                    chunk.data ?? "",
-                    requestedModel,
-                  )
-                  const processedData = fixStreamIds(
-                    restoredData,
-                    chunk.event,
-                    idTracker,
-                  )
-                  await stream.writeSSE({
-                    id: chunk.id,
-                    event: chunk.event,
-                    data: processedData,
-                  })
-                }
-              } catch (error) {
-                if (isAbortError(error)) return
-                throw error
-              } finally {
-                finishSpan()
+              if (emulatesWebSearch) {
+                await streamBufferedNativeResponses(stream, nativeStreamOptions)
+                return
               }
+              await streamImmediateNativeResponses(stream, nativeStreamOptions)
             })
           } catch (error) {
             finishSpan()
@@ -904,6 +1145,98 @@ const handleResponsesInner = async (
   })
 }
 
+function getResponsesCopilotModelIds(): Set<string> {
+  return new Set(state.models?.data.map((model) => model.id) ?? [])
+}
+
+function resolveCustomResponsesModel(
+  model: string,
+  payload?: ResponsesPayload,
+): CustomProviderModelReference | undefined {
+  if (payload && isResponsesCompactionRequest(payload)) return undefined
+  return resolveCustomProviderModel({
+    model,
+    kind: "chat",
+    copilotModelIds: getResponsesCopilotModelIds(),
+  })
+}
+
+async function dispatchCustomResponsesRequest(
+  c: Context,
+  options: {
+    finalEffort?: ResponsesReasoningEffort
+    payload: ResponsesPayload
+    reference: CustomProviderModelReference
+    requestedModel: string
+  },
+): Promise<Response> {
+  expandCompactionItems(options.payload)
+  const candidate = await adaptResponsesToChatCandidate({
+    source: options.payload,
+    finalModel: options.payload.model,
+    finalReasoningEffort: options.finalEffort,
+    signal: c.req.raw.signal,
+  })
+  if (!candidate.check.supported) {
+    throw createEndpointTranslationError({
+      blockers: candidate.check.findings
+        .filter((finding) => finding.severity === "fatal")
+        .map((finding) => finding.class),
+      code: "endpoint_translation_unsupported",
+      source: "responses",
+    })
+  }
+  recordCopilotTranslationFindings(
+    "responses",
+    candidate.endpoint,
+    candidate.check,
+  )
+  setRequestContext(c, {
+    requestedModel: options.requestedModel,
+    provider: options.reference.provider.name,
+    model: options.reference.upstreamModel,
+    reasoningEffort:
+      typeof options.finalEffort === "string" ? options.finalEffort : undefined,
+  })
+  if (state.manualApprove) await awaitApproval()
+  const completionFactory: ResponsesChatCompletionFactory = async (
+    payload,
+    factoryOptions,
+  ) => ({
+    processedPayload: structuredClone(payload),
+    response: await createCustomProviderChatCompletions(
+      options.reference,
+      payload,
+      {
+        signal: factoryOptions.signal,
+        reasoningEffort:
+          typeof options.finalEffort === "string" ?
+            options.finalEffort
+          : undefined,
+      },
+    ),
+  })
+  return await handleWithChatCompletions(c, candidate.payload, {
+    completionFactory,
+    requestedModel: options.requestedModel,
+    webSearchMaxUses: getResponsesChatWebSearchMaxUses(options.payload),
+  })
+}
+
+function syncLegacyResponsesRouteState(
+  legacyPayload: ResponsesPayload,
+  routedPayload: ResponsesPayload,
+): void {
+  legacyPayload.model = routedPayload.model
+  delete legacyPayload.reasoningEffort
+  delete legacyPayload.reasoning_effort
+  if (routedPayload.reasoning === undefined) {
+    delete legacyPayload.reasoning
+    return
+  }
+  legacyPayload.reasoning = structuredClone(routedPayload.reasoning)
+}
+
 function resolveResponsesSessionToken(
   c: Context,
   options: {
@@ -927,21 +1260,6 @@ function resolveResponsesSessionToken(
     : undefined
 }
 
-async function prepareResponsesRoute(
-  c: Context,
-  payload: ResponsesPayload,
-  selectedModel: Model | undefined,
-): Promise<{
-  decision: EndpointRouteDecision
-  preparedPayload: ResponsesPayload
-}> {
-  return await prepareResponsesRouteForTransport({
-    payload,
-    selectedModel,
-    signal: c.req.raw.signal,
-  })
-}
-
 export async function prepareResponsesRouteForTransport(options: {
   payload: ResponsesPayload
   selectedModel: Model | undefined
@@ -950,7 +1268,9 @@ export async function prepareResponsesRouteForTransport(options: {
   decision: EndpointRouteDecision
   preparedPayload: ResponsesPayload
 }> {
-  const prepared = finalizeResponsesRequest(options.payload, {
+  const preparedSource = prepareResponsesRequest(options.payload)
+  const prepared = finalizeNativeResponsesRequest(preparedSource, {
+    model: options.payload.model,
     defaultEffort: getModelReasoningConfig(options.payload.model)
       ?.defaultEffort,
     implicitDefault: usesImplicitReasoningDefault(options.payload.model),
@@ -986,7 +1306,9 @@ export async function prepareResponsesRouteForTransport(options: {
     }
   }
   if ("code" in decision) throw createEndpointTranslationError(decision)
-  recordCopilotRequestNormalization("responses", prepared.normalizationClasses)
+  recordCopilotRequestNormalization("responses", [
+    ...prepared.normalizationClasses,
+  ])
   recordCopilotEndpointRoute(decision)
   return { decision, preparedPayload }
 }
@@ -1041,8 +1363,10 @@ const isAsyncIterable = <T>(value: unknown): value is AsyncIterable<T> =>
   Boolean(value)
   && typeof (value as AsyncIterable<T>)[Symbol.asyncIterator] === "function"
 
+type ResponsesChatCompletionResult = PreparedResponsesChatCompletion["response"]
+
 const isNonStreaming = (
-  response: Awaited<ReturnType<typeof createChatCompletions>>,
+  response: ResponsesChatCompletionResult,
 ): response is ChatCompletionResponse => Object.hasOwn(response, "choices")
 
 const isStreamingRequested = (payload: ResponsesPayload): boolean =>
@@ -1162,6 +1486,7 @@ interface CCStreamState {
   nextOutputIndex: number
   usage: { inputTokens?: number; outputTokens?: number; cachedTokens?: number }
   responseCreated: boolean
+  pendingFinishReason?: string
 }
 
 type WriteEventFn = (event: string, data: unknown) => Promise<void>
@@ -1179,6 +1504,24 @@ const createCCStreamState = (model: string): CCStreamState => ({
   usage: {},
   responseCreated: false,
 })
+
+function ccFailureOutput(state: CCStreamState): Array<ResponseOutputItem> {
+  const output = createPartialTextOutput(
+    state.accumulatedText,
+    state.messageItemId,
+  )
+  for (const [, call] of state.functionCalls) {
+    output.push({
+      id: call.itemId,
+      type: "function_call",
+      call_id: call.callId,
+      name: call.name,
+      arguments: call.arguments,
+      status: "in_progress",
+    })
+  }
+  return output
+}
 
 const convertInputToMessages = (
   input: ResponsesPayload["input"],
@@ -1599,6 +1942,13 @@ const buildCCResponseResult = (
     output_tokens: state.usage.outputTokens ?? 0,
     total_tokens:
       (state.usage.inputTokens ?? 0) + (state.usage.outputTokens ?? 0),
+    ...(state.usage.cachedTokens === undefined ?
+      {}
+    : {
+        input_tokens_details: {
+          cached_tokens: state.usage.cachedTokens,
+        },
+      }),
   },
   error: null,
   incomplete_details: null,
@@ -1699,7 +2049,7 @@ const emitDoneEvents = async (
   s: CCStreamState,
   finishReason: string,
   writeEvent: WriteEventFn,
-): Promise<void> => {
+): Promise<"response.completed" | "response.incomplete"> => {
   if (s.accumulatedText) {
     await emitTextDoneEvents(s, writeEvent)
   }
@@ -1708,7 +2058,7 @@ const emitDoneEvents = async (
     await emitFunctionCallDoneEvents(s, fcState, writeEvent)
   }
 
-  await emitResponseCompleted(s, finishReason, writeEvent)
+  return await emitResponseCompleted(s, finishReason, writeEvent)
 }
 
 const emitTextDoneEvents = async (
@@ -1777,7 +2127,7 @@ const emitResponseCompleted = async (
   s: CCStreamState,
   finishReason: string,
   writeEvent: WriteEventFn,
-): Promise<void> => {
+): Promise<"response.completed" | "response.incomplete"> => {
   const finalOutput: Array<ResponseOutputItem> = []
 
   if (s.accumulatedText) {
@@ -1820,11 +2170,14 @@ const emitResponseCompleted = async (
   })
   finalResult.incomplete_details = incompleteDetails
 
-  await writeEvent("response.completed", {
+  const terminalEvent =
+    finishReason === "length" ? "response.incomplete" : "response.completed"
+  await writeEvent(terminalEvent, {
     response: finalResult,
     sequence_number: s.seqNum++,
-    type: "response.completed",
+    type: terminalEvent,
   })
+  return terminalEvent
 }
 
 export const streamChatCompletionsAsResponses = async (
@@ -1834,80 +2187,113 @@ export const streamChatCompletionsAsResponses = async (
   ccStream: AsyncIterable<{ data?: string; event?: string }>,
   model: string,
 ): Promise<{
-  inputTokens?: number
-  outputTokens?: number
-  cachedTokens?: number
-  responseText: string
+  state: CCStreamState
+  terminal?: "response.completed" | "response.incomplete"
+}> =>
+  await streamChatCompletionsAsResponsesWithState({
+    stream,
+    ccStream,
+    state: createCCStreamState(model),
+  })
+
+const streamChatCompletionsAsResponsesWithState = async (options: {
+  stream: {
+    writeSSE: (data: { event?: string; data: string }) => Promise<void>
+  }
+  ccStream: AsyncIterable<{ data?: string; event?: string }>
+  state: CCStreamState
+}): Promise<{
+  state: CCStreamState
+  terminal?: "response.completed" | "response.incomplete"
 }> => {
-  const s = createCCStreamState(model)
+  const s = options.state
+  let terminal: "response.completed" | "response.incomplete" | undefined
 
   const writeEvent: WriteEventFn = async (event, data) => {
-    await stream.writeSSE({ event, data: JSON.stringify(data) })
+    await options.stream.writeSSE({ event, data: JSON.stringify(data) })
   }
 
-  for await (const rawEvent of ccStream) {
+  for await (const rawEvent of options.ccStream) {
+    if (terminal) break
     if (rawEvent.data === "[DONE]") break
     if (!rawEvent.data) continue
 
-    const chunk = JSON.parse(rawEvent.data) as ChatCompletionChunk
-    if (chunk.id) s.responseId = `resp_${chunk.id}`
-    if (chunk.created) s.createdAt = chunk.created
-    if (chunk.model) s.resolvedModel = chunk.model
-
-    if (chunk.usage) {
-      s.usage = extractCCUsage(chunk.usage)
+    const chunk = parseRecoverableStreamJson({
+      data: rawEvent.data,
+      event: rawEvent.event,
+      protocol: "Chat-to-Responses",
+      terminal: false,
+    }) as ChatCompletionChunk | undefined
+    if (chunk === undefined) continue
+    if (hasNonNullStreamError(chunk)) {
+      throw chunk.error
     }
-
-    if (!s.responseCreated) {
-      const skeleton = buildCCResponseResult(s, [], {
-        status: "in_progress",
-        outputText: "",
-      })
-      await writeEvent("response.created", {
-        response: skeleton,
-        sequence_number: s.seqNum++,
-        type: "response.created",
-      })
-      s.responseCreated = true
+    if (s.pendingFinishReason) {
+      if (chunk.usage) s.usage = extractCCUsage(chunk.usage)
+      continue
     }
-
-    const delta = chunk.choices.at(0)?.delta
-    if (!delta) continue
-
-    const content = delta.content as string | undefined
-    if (content) {
-      await emitTextDelta(s, content, writeEvent)
-    }
-
-    if (delta.tool_calls) {
-      for (const tc of delta.tool_calls) {
-        await emitToolCallDelta(s, tc, writeEvent)
-      }
-    }
-
-    const finishReason = chunk.choices.at(0)?.finish_reason
-    if (finishReason) {
-      await emitDoneEvents(s, finishReason, writeEvent)
-    }
+    await processChatCompletionsChunk(s, chunk, writeEvent)
   }
 
-  return { ...s.usage, responseText: s.accumulatedText }
+  if (!terminal && s.pendingFinishReason) {
+    terminal = await emitDoneEvents(s, s.pendingFinishReason, writeEvent)
+  }
+
+  return { state: s, terminal }
 }
 
-const handleWithAnthropicMessages = async (
-  c: Context,
-  payload: ResponsesPayload,
-  nativeOptions: NativeMessagesRequestOptions,
-) => {
-  const requestedModel = nativeOptions.requestedModel ?? payload.model
+async function processChatCompletionsChunk(
+  state: CCStreamState,
+  chunk: ChatCompletionChunk,
+  writeEvent: WriteEventFn,
+): Promise<void> {
+  // The state is request-local and processed serially by the owning iterator.
+
+  if (chunk.id) state.responseId = `resp_${chunk.id}`
+  if (chunk.created) state.createdAt = chunk.created
+  if (chunk.usage) state.usage = extractCCUsage(chunk.usage)
+  const shouldCreateResponse = !state.responseCreated
+  if (shouldCreateResponse) {
+    state.responseCreated = true
+    const skeleton = buildCCResponseResult(state, [], {
+      status: "in_progress",
+      outputText: "",
+    })
+    await writeEvent("response.created", {
+      response: skeleton,
+      sequence_number: state.seqNum++,
+      type: "response.created",
+    })
+  }
+  const choice = chunk.choices.at(0)
+  if (choice?.delta) {
+    const content = choice.delta.content as string | undefined
+    if (content) await emitTextDelta(state, content, writeEvent)
+    for (const toolCall of choice.delta.tool_calls ?? []) {
+      await emitToolCallDelta(state, toolCall, writeEvent)
+    }
+  }
+  const finishReason = choice?.finish_reason
+  // eslint-disable-next-line require-atomic-updates
+  if (finishReason) state.pendingFinishReason = finishReason
+}
+
+const handleWithAnthropicMessages = async (options: {
+  c: Context
+  nativeOptions: NativeMessagesRequestOptions
+  preparedPayload: import("../messages/anthropic-types").AnthropicMessagesPayload
+  responseContext: ResponsesPayload
+}) => {
+  const { c, nativeOptions, preparedPayload, responseContext } = options
+  const requestedModel = nativeOptions.requestedModel ?? responseContext.model
   setRequestContext(c, { provider: "Responses→AnthropicMessages" })
-  const compaction = isResponsesCompactionRequest(payload)
-  if (!payload.stream) {
-    const result = await createAnthropicResponsesResult({
-      attachmentsNormalized: true,
+  const compaction = isResponsesCompactionRequest(responseContext)
+  if (!responseContext.stream) {
+    const result = await executePreparedResponsesMessagesBridge({
       compaction,
       nativeOptions,
-      payload,
+      payload: preparedPayload,
+      responseContext,
       signal: c.req.raw.signal,
     })
     setResponsesResultContext(c, result)
@@ -1916,17 +2302,27 @@ const handleWithAnthropicMessages = async (
 
   const upstreamController = new AbortController()
   const signal = AbortSignal.any([c.req.raw.signal, upstreamController.signal])
-  const pendingResult = createAnthropicResponsesResult({
-    attachmentsNormalized: true,
+  const pendingResult = executePreparedResponsesMessagesBridge({
     compaction,
     nativeOptions,
-    payload,
+    payload: preparedPayload,
+    responseContext,
     signal,
   })
   const preflush = await raceSsePreflush(pendingResult)
 
   return streamSSE(c, async (stream) => {
     stream.onAbort(() => upstreamController.abort())
+    const failureState = createResponsesStreamFailureState(requestedModel)
+    failureState.responseId = "resp_messages_failed"
+    const lifecycle = createResponsesTerminalLifecycle({
+      c,
+      stream,
+      state: failureState,
+    })
+    stream.onAbort(() => {
+      lifecycle.abort()
+    })
     try {
       if (preflush.kind === "pending") await writeSseHeartbeat(stream)
       const result =
@@ -1938,31 +2334,20 @@ const handleWithAnthropicMessages = async (
       if (stream.aborted || stream.closed) return
       setResponsesResultContext(c, result)
       await emitResponsesResultAsStream(stream, result)
+      await lifecycle.succeed("synthetic")
     } catch (error) {
-      if (isAbortError(error)) return
-      if (stream.aborted || stream.closed) return
-      await emitResponsesFailureAsStream(stream, {
-        responseId: "resp_messages_failed",
-        model: requestedModel,
-      })
+      if (isAbortError(error) || stream.aborted || stream.closed) {
+        lifecycle.abort()
+        return
+      }
+      const inspection =
+        isHTTPError(error) ? await inspectHttpError(error) : undefined
+      if (inspection?.status === 499) {
+        lifecycle.abort()
+        return
+      }
+      await lifecycle.fail({ kind: "thrown", error, inspection })
     }
-  })
-}
-
-async function createAnthropicResponsesResult(options: {
-  attachmentsNormalized?: boolean
-  compaction: boolean
-  nativeOptions: NativeMessagesRequestOptions
-  payload: ResponsesPayload
-  signal: AbortSignal
-}): Promise<ResponsesResult> {
-  return await executeResponsesMessagesBridge({
-    attachmentsNormalized: options.attachmentsNormalized,
-    compaction: options.compaction,
-    nativeOptions: options.nativeOptions,
-    payload: options.payload,
-    preserveValidatedControls: true,
-    signal: options.signal,
   })
 }
 
@@ -1978,26 +2363,31 @@ function setResponsesResultContext(c: Context, result: ResponsesResult): void {
   })
 }
 
-const handleWithChatCompletions = async (
+export const handleWithChatCompletions = async (
   c: Context,
-  payload: ResponsesPayload,
-  options: { requestedModel?: string; copilotSessionToken?: string } = {},
+  ccPayload: ChatCompletionsPayload,
+  options: {
+    completionFactory?: ResponsesChatCompletionFactory
+    requestedModel?: string
+    copilotSessionToken?: string
+    webSearchMaxUses?: number
+  } = {},
 ) => {
-  const compaction = isResponsesCompactionRequest(payload)
-  const fitted = compaction ? fitResponsesCompactionPayload(payload) : null
-  const fallbackPayload = fitted?.payload ?? payload
-  if (fitted?.reduced) {
-    logger.warn("Reduced oversized Responses fallback compaction payload", {
-      originalBytes: fitted.originalBytes,
-      finalBytes: fitted.finalBytes,
-      omittedBinaryBlocks: fitted.omittedBinaryBlocks,
-      truncatedToolOutputBytes: fitted.truncatedToolOutputBytes,
+  const responseModel = options.requestedModel ?? ccPayload.model
+  const completionFactory: ResponsesChatCompletionFactory =
+    options.completionFactory
+    ?? (async (payload, factoryOptions) => {
+      const result = await createChatCompletionsWithProcessedPayload(payload, {
+        allowCompatibilityRetry: factoryOptions.allowCompatibilityRetry,
+        candidatePrepared: true,
+        copilotSessionToken: options.copilotSessionToken,
+        signal: factoryOptions.signal,
+      })
+      return {
+        ...result,
+        accountId: getLastUsedAccountId(),
+      }
     })
-  }
-  const ccPayload = responsesToChatCompletions(fallbackPayload, {
-    preserveCustomToolContext: compaction,
-  })
-  const responseModel = options.requestedModel ?? payload.model
   const needsWebSearch =
     ccPayload.tools?.some((tool) => tool.function.name === "web_search")
     ?? false
@@ -2009,39 +2399,32 @@ const handleWithChatCompletions = async (
   })
 
   // Non-streaming: span wraps the entire call + response processing
-  if (!fallbackPayload.stream) {
+  if (!ccPayload.stream) {
     return await Sentry.startSpan(
       createSentryChatSpanOptions({
         inputMessages: ccPayload.messages,
-        model: payload.model,
+        model: ccPayload.model,
       }),
       async (span) => {
-        const response = await createChatCompletions(ccPayload, {
-          compaction,
-          copilotSessionToken: options.copilotSessionToken,
+        const initial = await completionFactory(ccPayload, {
           signal: c.req.raw.signal,
         })
+        const response = initial.response
 
         // Track which account handled this request (multi-token mode)
-        const fallbackAccountId = getLastUsedAccountId()
-        if (fallbackAccountId !== undefined) {
-          setRequestContext(c, { accountId: fallbackAccountId })
+        if (initial.accountId !== undefined) {
+          setRequestContext(c, { accountId: initial.accountId })
         }
 
-        const initialResponse = response as ChatCompletionResponse
         const ccResponse =
           needsWebSearch ?
-            await resolveWebSearchCalls(initialResponse, ccPayload, {
-              abortSignal: c.req.raw.signal,
-              copilotSessionToken: options.copilotSessionToken,
-              createCompletion: async (nextPayload) =>
-                (await createChatCompletions(nextPayload, {
-                  compaction,
-                  copilotSessionToken: options.copilotSessionToken,
-                  signal: c.req.raw.signal,
-                })) as ChatCompletionResponse,
+            await resolvePreparedResponsesWebSearchCalls({
+              completionFactory,
+              initial,
+              maxUses: options.webSearchMaxUses,
+              signal: c.req.raw.signal,
             })
-          : initialResponse
+          : (response as ChatCompletionResponse)
         logger.debug("Received Chat fallback response", {
           choiceCount: ccResponse.choices.length,
           model: ccResponse.model,
@@ -2078,18 +2461,18 @@ const handleWithChatCompletions = async (
   logger.debug("ChatCompletions fallback streaming")
 
   if (needsWebSearch) {
-    return await handleStreamingChatFallbackWebSearch(c, {
+    return handleStreamingChatFallbackWebSearch(c, {
       ccPayload,
-      compaction,
-      copilotSessionToken: options.copilotSessionToken,
+      completionFactory,
       responseModel,
+      webSearchMaxUses: options.webSearchMaxUses,
     })
   }
 
   return await Sentry.startSpanManual(
     createSentryChatSpanOptions({
       inputMessages: ccPayload.messages,
-      model: payload.model,
+      model: ccPayload.model,
       streaming: true,
     }),
     async (streamSpan, finish) => {
@@ -2101,15 +2484,13 @@ const handleWithChatCompletions = async (
       }
 
       try {
-        const response = await createChatCompletions(ccPayload, {
-          compaction,
-          copilotSessionToken: options.copilotSessionToken,
+        const initial = await completionFactory(ccPayload, {
           signal: c.req.raw.signal,
         })
+        const response = initial.response
 
-        const fallbackAccountId = getLastUsedAccountId()
-        if (fallbackAccountId !== undefined) {
-          setRequestContext(c, { accountId: fallbackAccountId })
+        if (initial.accountId !== undefined) {
+          setRequestContext(c, { accountId: initial.accountId })
         }
 
         if (isNonStreaming(response)) {
@@ -2145,36 +2526,80 @@ const handleWithChatCompletions = async (
         }
 
         return streamSSE(c, async (sseStream) => {
+          const chatState = createCCStreamState(responseModel)
+          const failureState = createResponsesStreamFailureState(responseModel)
+          const lifecycle = createResponsesTerminalLifecycle({
+            c,
+            stream: sseStream,
+            state: failureState,
+          })
+          sseStream.onAbort(() => {
+            lifecycle.abort()
+          })
           try {
             const ccStream = response as AsyncIterable<{
               data?: string
               event?: string
             }>
-            const streamUsage = await streamChatCompletionsAsResponses(
-              sseStream,
-              withSseHeartbeat(ccStream, sseStream),
-              responseModel,
-            )
+            const outcome = await streamChatCompletionsAsResponsesWithState({
+              stream: sseStream,
+              ccStream: withSseHeartbeat(ccStream, sseStream),
+              state: chatState,
+            })
+            failureState.responseId = outcome.state.responseId
+            failureState.model = outcome.state.resolvedModel
+            failureState.createdAt = outcome.state.createdAt
+            failureState.sequenceNumber = outcome.state.seqNum
+            failureState.outputText = outcome.state.accumulatedText
+            failureState.output = ccFailureOutput(outcome.state)
+            failureState.usage =
+              buildCCResponseResult(outcome.state, [], {
+                status: "in_progress",
+                outputText: outcome.state.accumulatedText,
+              }).usage ?? null
+            await (outcome.terminal ?
+              lifecycle.succeed(outcome.terminal)
+            : lifecycle.finishSource())
 
             setRequestContext(c, {
-              inputTokens: streamUsage.inputTokens,
-              outputTokens: streamUsage.outputTokens,
+              inputTokens: outcome.state.usage.inputTokens,
+              outputTokens: outcome.state.usage.outputTokens,
             })
 
             streamSpan.setAttribute(
               "gen_ai.usage.input_tokens",
-              streamUsage.inputTokens ?? 0,
+              outcome.state.usage.inputTokens ?? 0,
             )
             streamSpan.setAttribute(
               "gen_ai.usage.output_tokens",
-              streamUsage.outputTokens ?? 0,
+              outcome.state.usage.outputTokens ?? 0,
             )
-            const cachedTokens = streamUsage.cachedTokens ?? 0
+            const cachedTokens = outcome.state.usage.cachedTokens ?? 0
             setDetailedTokenAttributes(streamSpan, { cachedTokens })
-            setSentryOutputMessages(streamSpan, streamUsage.responseText)
+            setSentryOutputMessages(streamSpan, outcome.state.accumulatedText)
           } catch (error) {
-            if (isAbortError(error)) return
-            throw error
+            failureState.responseId = chatState.responseId
+            failureState.model = chatState.resolvedModel
+            failureState.createdAt = chatState.createdAt
+            failureState.sequenceNumber = chatState.seqNum
+            failureState.outputText = chatState.accumulatedText
+            failureState.output = ccFailureOutput(chatState)
+            failureState.usage =
+              buildCCResponseResult(chatState, [], {
+                status: "in_progress",
+                outputText: chatState.accumulatedText,
+              }).usage ?? null
+            if (isAbortError(error) || sseStream.aborted || sseStream.closed) {
+              lifecycle.abort()
+              return
+            }
+            const inspection =
+              isHTTPError(error) ? await inspectHttpError(error) : undefined
+            if (inspection?.status === 499) {
+              lifecycle.abort()
+              return
+            }
+            await lifecycle.fail({ kind: "thrown", error, inspection })
           } finally {
             finishSpan()
           }
@@ -2187,37 +2612,69 @@ const handleWithChatCompletions = async (
   )
 }
 
-async function handleStreamingChatFallbackWebSearch(
+function handleStreamingChatFallbackWebSearch(
   c: Context,
   options: {
     ccPayload: ChatCompletionsPayload
-    compaction: boolean
-    copilotSessionToken?: string
+    completionFactory: ResponsesChatCompletionFactory
     responseModel: string
+    webSearchMaxUses?: number
   },
-): Promise<Response> {
-  const payload = { ...options.ccPayload, stream: false, stream_options: null }
-  const initial = (await createChatCompletions(payload, {
-    compaction: options.compaction,
-    copilotSessionToken: options.copilotSessionToken,
-    signal: c.req.raw.signal,
-  })) as ChatCompletionResponse
-  const response = await resolveWebSearchCalls(initial, payload, {
-    abortSignal: c.req.raw.signal,
-    copilotSessionToken: options.copilotSessionToken,
-    createCompletion: async (nextPayload) =>
-      (await createChatCompletions(nextPayload, {
-        compaction: options.compaction,
-        copilotSessionToken: options.copilotSessionToken,
-        signal: c.req.raw.signal,
-      })) as ChatCompletionResponse,
-  })
-  const result = chatCompletionToResponsesResult(
-    response,
-    options.responseModel,
-  )
-
+): Response {
   return streamSSE(c, async (stream) => {
-    await emitResponsesResultAsStream(stream, result)
+    const failureState = createResponsesStreamFailureState(
+      options.responseModel,
+    )
+    const lifecycle = createResponsesTerminalLifecycle({
+      c,
+      stream,
+      state: failureState,
+    })
+    stream.onAbort(() => {
+      lifecycle.abort()
+    })
+    try {
+      const result = await withHeartbeatWhilePending(
+        (async () => {
+          const payload = {
+            ...options.ccPayload,
+            stream: false,
+            stream_options: null,
+          }
+          const initialCompletion = await options.completionFactory(payload, {
+            signal: c.req.raw.signal,
+          })
+          const response = await resolvePreparedResponsesWebSearchCalls({
+            completionFactory: options.completionFactory,
+            initial: initialCompletion,
+            maxUses: options.webSearchMaxUses,
+            signal: c.req.raw.signal,
+          })
+          return chatCompletionToResponsesResult(
+            response,
+            options.responseModel,
+          )
+        })(),
+        stream,
+      )
+      if (stream.aborted || stream.closed) {
+        lifecycle.abort()
+        return
+      }
+      await emitResponsesResultAsStream(stream, result)
+      await lifecycle.succeed("synthetic")
+    } catch (error) {
+      if (isAbortError(error) || stream.aborted || stream.closed) {
+        lifecycle.abort()
+        return
+      }
+      const inspection =
+        isHTTPError(error) ? await inspectHttpError(error) : undefined
+      if (inspection?.status === 499) {
+        lifecycle.abort()
+        return
+      }
+      await lifecycle.fail({ kind: "thrown", error, inspection })
+    }
   })
 }

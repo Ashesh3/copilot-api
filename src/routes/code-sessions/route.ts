@@ -10,6 +10,8 @@ import {
 import { resolveRequestCredential } from "~/lib/credential-resolver"
 import { recordFailedAttempt } from "~/lib/ip-blocker"
 import { resolveProtectedCredential } from "~/lib/protected-credential"
+import { resolvePublicOrigin } from "~/lib/public-origin"
+import { readRequestJson } from "~/lib/request-json"
 
 import type { InternalEvent } from "./types"
 
@@ -78,11 +80,15 @@ codeSessionsRoutes.use("/:id/worker", requireWorkerCapability)
 codeSessionsRoutes.use("/:id/worker/*", requireWorkerCapability)
 // POST / — Create a code session
 codeSessionsRoutes.post("/", async (c) => {
-  const body = await c.req.json<{
-    title?: string
-    bridge?: string
-    tags?: Array<string>
-  }>()
+  const parsed = await readRequestJson(() =>
+    c.req.json<{
+      title?: string
+      bridge?: string
+      tags?: Array<string>
+    }>(),
+  )
+  if (!parsed.ok) return c.json({ error: "Invalid JSON" }, 400)
+  const body = parsed.value
 
   const session = createSession(
     body.title ?? "Untitled Session",
@@ -118,11 +124,7 @@ codeSessionsRoutes.post("/:id/bridge", (c) => {
   // Session exists (checked above), so bumpWorkerEpoch will always return a number
   const epoch = bumpWorkerEpoch(id) as number
 
-  const protocol =
-    c.req.header("x-forwarded-proto")
-    ?? (c.req.url.startsWith("https") ? "https" : "https")
-  const host = c.req.header("host") ?? "localhost"
-  const apiBaseUrl = `${protocol}://${host}`
+  const apiBaseUrl = resolvePublicOrigin(c.req.raw).toString()
 
   const workerJwt = issueWorkerCapability(id, epoch)
 
@@ -139,7 +141,9 @@ codeSessionsRoutes.post("/:id/bridge", (c) => {
 // PATCH /:id — Update session
 codeSessionsRoutes.patch("/:id", async (c) => {
   const id = c.req.param("id")
-  const body = await c.req.json<{ title?: string }>()
+  const parsed = await readRequestJson(() => c.req.json<{ title?: string }>())
+  if (!parsed.ok) return c.json({ error: "Invalid JSON" }, 400)
+  const body = parsed.value
 
   const session = getSession(id)
   if (!session) {
@@ -187,16 +191,20 @@ codeSessionsRoutes.post("/:id/worker/register", async (c) => {
 // PUT /:id/worker — Report worker state
 codeSessionsRoutes.put("/:id/worker", async (c) => {
   const id = c.req.param("id")
-  const body = await c.req.json<{
-    worker_epoch: number
-    worker_status?: string
-    external_metadata?: Record<string, unknown> | null
-    requires_action_details?: {
-      tool_name?: string
-      action_description?: string
-      request_id?: string
-    } | null
-  }>()
+  const parsed = await readRequestJson(() =>
+    c.req.json<{
+      worker_epoch: number
+      worker_status?: string
+      external_metadata?: Record<string, unknown> | null
+      requires_action_details?: {
+        tool_name?: string
+        action_description?: string
+        request_id?: string
+      } | null
+    }>(),
+  )
+  if (!parsed.ok) return c.json({ error: "Invalid JSON" }, 400)
+  const body = parsed.value
 
   const session = getSession(id)
   if (!session) {
@@ -235,7 +243,11 @@ codeSessionsRoutes.get("/:id/worker", (c) => {
 // POST /:id/worker/heartbeat — Worker heartbeat
 codeSessionsRoutes.post("/:id/worker/heartbeat", async (c) => {
   const id = c.req.param("id")
-  const body = await c.req.json<{ worker_epoch: number }>()
+  const parsed = await readRequestJson(() =>
+    c.req.json<{ worker_epoch: number }>(),
+  )
+  if (!parsed.ok) return c.json({ error: "Invalid JSON" }, 400)
+  const body = parsed.value
 
   const ok = heartbeat(id, body.worker_epoch)
   if (!ok) {
@@ -248,10 +260,14 @@ codeSessionsRoutes.post("/:id/worker/heartbeat", async (c) => {
 // POST /:id/worker/events — Write client events
 codeSessionsRoutes.post("/:id/worker/events", async (c) => {
   const id = c.req.param("id")
-  const body = await c.req.json<{
-    worker_epoch: number
-    events: Array<{ payload: Record<string, unknown>; ephemeral?: boolean }>
-  }>()
+  const parsed = await readRequestJson(() =>
+    c.req.json<{
+      worker_epoch: number
+      events: Array<{ payload: Record<string, unknown>; ephemeral?: boolean }>
+    }>(),
+  )
+  if (!parsed.ok) return c.json({ error: "Invalid JSON" }, 400)
+  const body = parsed.value
   if (!Array.isArray(body.events)) {
     return c.json({ error: "Invalid event batch" }, 400)
   }
@@ -289,14 +305,18 @@ codeSessionsRoutes.post("/:id/worker/events/delivery", (c) => {
 // POST /:id/worker/internal-events — Write internal events
 codeSessionsRoutes.post("/:id/worker/internal-events", async (c) => {
   const id = c.req.param("id")
-  const body = await c.req.json<{
-    worker_epoch: number
-    events: Array<{
-      payload: Record<string, unknown>
-      is_compaction?: boolean
-      agent_id?: string
-    }>
-  }>()
+  const parsed = await readRequestJson(() =>
+    c.req.json<{
+      worker_epoch: number
+      events: Array<{
+        payload: Record<string, unknown>
+        is_compaction?: boolean
+        agent_id?: string
+      }>
+    }>(),
+  )
+  if (!parsed.ok) return c.json({ error: "Invalid JSON" }, 400)
+  const body = parsed.value
   if (!Array.isArray(body.events)) {
     return c.json({ error: "Invalid event batch" }, 400)
   }
@@ -456,7 +476,11 @@ codeSessionsRoutes.get("/:id/worker/events/stream", (c) => {
 // POST /:id/events — Post event to session
 codeSessionsRoutes.post("/:id/events", async (c) => {
   const id = c.req.param("id")
-  const body = await c.req.json<{ payload: Record<string, unknown> }>()
+  const parsed = await readRequestJson(() =>
+    c.req.json<{ payload: Record<string, unknown> }>(),
+  )
+  if (!parsed.ok) return c.json({ error: "Invalid JSON" }, 400)
+  const body = parsed.value
 
   const payloadType =
     "type" in body.payload ? String(body.payload.type) : "unknown"

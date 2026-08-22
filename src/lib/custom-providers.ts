@@ -16,6 +16,13 @@ import type { EmbeddingResponse } from "~/services/copilot/create-embeddings"
 import { getConfig, updateConfig } from "~/lib/config"
 import { CustomProviderHTTPError, LocalHTTPError } from "~/lib/error"
 import {
+  abortLlmDebugLog,
+  failLlmDebugLog,
+  finishLlmDebugLog,
+  startLlmDebugLog,
+  toLlmDebugLogError,
+} from "~/lib/llm-debug-log"
+import {
   getRoutingTelemetryRequestState,
   updateRoutingTelemetryRequestState,
 } from "~/lib/request-session"
@@ -426,19 +433,26 @@ async function fetchCustomProvider(
 ): Promise<Response> {
   const { reference, path, payload, options } = request
   const url = providerUrl(reference.provider, path)
-
-  consola.debug(
-    `Custom provider request: ${reference.provider.id}/${reference.upstreamModel} ${path}`,
-  )
-
   const headers = buildHeaders(reference.provider)
+  const body = JSON.stringify(payload)
+  consola.info(
+    `Custom provider request: ${reference.provider.name}/${reference.provider.id}/${reference.upstreamModel} POST ${path}`,
+  )
+  const logId = startLlmDebugLog({
+    method: "POST",
+    path,
+    requestBody: body,
+    requestHeaders: headers,
+    url,
+  })
   try {
     const response = await fetch(url, {
       method: "POST",
       headers,
-      body: JSON.stringify(payload),
+      body,
       signal: options?.signal,
     })
+    void captureCustomProviderDebugResponse(logId, response)
     recordCustomProviderCall({
       outcome: customProviderOutcome(response),
       path,
@@ -446,12 +460,46 @@ async function fetchCustomProvider(
     })
     return response
   } catch (error) {
+    if (isAbortLikeError(error)) {
+      abortLlmDebugLog(logId, { error })
+    } else {
+      failLlmDebugLog(logId, error)
+    }
     recordCustomProviderCall({
       outcome: isAbortLikeError(error) ? "aborted" : "transport_error",
       path,
       reference,
     })
     throw error
+  }
+}
+
+async function captureCustomProviderDebugResponse(
+  logId: string,
+  response: Response,
+): Promise<void> {
+  const headers = Object.fromEntries(response.headers.entries())
+  try {
+    const body = await response.clone().text()
+    finishLlmDebugLog(logId, {
+      body,
+      headers,
+      status: response.status,
+      statusText: response.statusText,
+    })
+  } catch (error) {
+    const debugResponse = {
+      body: null,
+      bodyReadError: toLlmDebugLogError(error),
+      headers,
+      status: response.status,
+      statusText: response.statusText,
+    }
+    if (isAbortLikeError(error)) {
+      abortLlmDebugLog(logId, { error, response: debugResponse })
+      return
+    }
+    finishLlmDebugLog(logId, debugResponse)
   }
 }
 
@@ -473,10 +521,7 @@ async function throwCustomProviderError(
   )
   throw new CustomProviderHTTPError(
     createUpstreamErrorMessage(reference, path),
-    new Response(body, {
-      status: response.status,
-      headers: response.headers,
-    }),
+    response,
     {
       requestPayload: payload,
       responseBody: body,

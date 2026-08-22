@@ -5,7 +5,8 @@ import {
   createCustomProviderEmbeddings,
   resolveCustomProviderModel,
 } from "~/lib/custom-providers"
-import { forwardError } from "~/lib/error"
+import { createInvalidJsonBodyError, forwardError } from "~/lib/error"
+import { readRequestJson } from "~/lib/request-json"
 import { setRequestContext } from "~/lib/request-logger"
 import { state } from "~/lib/state"
 import {
@@ -17,7 +18,9 @@ export const embeddingRoutes = new Hono()
 
 embeddingRoutes.post("/", async (c) => {
   try {
-    const payload = await c.req.json<EmbeddingRequest>()
+    const parsed = await readRequestJson(() => c.req.json<EmbeddingRequest>())
+    if (!parsed.ok) throw createInvalidJsonBodyError()
+    const payload = parsed.value
     const customReference = resolveCustomProviderModel({
       model: payload.model,
       kind: "embedding",

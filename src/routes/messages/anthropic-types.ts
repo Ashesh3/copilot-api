@@ -77,7 +77,7 @@ export interface AnthropicImageBlock extends Record<string, unknown> {
   source:
     | (Record<string, unknown> & {
         type: "base64"
-        media_type: "image/jpeg" | "image/png" | "image/gif" | "image/webp"
+        media_type: `image/${string}`
         data: string
       })
     | (Record<string, unknown> & {
@@ -424,6 +424,9 @@ export interface AnthropicErrorEvent extends Record<string, unknown> {
   error: {
     type: string
     message: string
+    body_bytes?: Array<number>
+    content_type?: string
+    status?: number
     code?: string
     param?: string
     [key: string]: unknown
@@ -442,6 +445,7 @@ export type AnthropicStreamEventData =
 
 // State for streaming translation
 export interface AnthropicStreamState {
+  terminal?: "open" | "succeeded" | "failed"
   messageStartSent: boolean
   contentBlockIndex: number
   contentBlockOpen: boolean
@@ -450,9 +454,12 @@ export interface AnthropicStreamState {
       id: string
       name: string
       anthropicBlockIndex: number
+      pendingArguments?: Array<string>
     }
   }
-  toolCallIndexOffset?: 0 | 1
+  startedToolCallIndices?: Set<number>
+  toolCallStateIndexByUpstreamIndex?: Map<number, number>
+  activeToolCallStateIndex?: number
   // Track usage from chunks (may come separately from finish_reason)
   pendingUsage?: {
     prompt_tokens: number

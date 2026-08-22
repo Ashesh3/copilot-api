@@ -146,5 +146,16 @@ export interface GoogleUsageMetadata {
 
 // ─── Streaming Types ───
 
-/** Each SSE event in streamGenerateContent is a full GoogleAIResponse */
-export type GoogleStreamChunk = GoogleAIResponse
+export interface GoogleStreamFailure {
+  error: {
+    code: number
+    message: string
+    status: "INTERNAL"
+    body_bytes?: Array<number>
+    content_type?: string
+    upstream_status?: number
+  }
+}
+
+/** Each streamGenerateContent item is a response chunk or terminal failure. */
+export type GoogleStreamChunk = GoogleAIResponse | GoogleStreamFailure

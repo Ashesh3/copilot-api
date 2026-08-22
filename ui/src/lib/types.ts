@@ -276,10 +276,31 @@ export interface RoutingTelemetrySnapshot {
 export interface IpAllowlistEntry {
   ip: string
   enabled: boolean
-  source: "dashboard" | "manual"
+  source: "authenticated" | "dashboard" | "manual"
   createdAt: string
   updatedAt: string
   lastSeenAt?: string
+}
+
+export function ipAddressPlaceholder(currentIp: string | null): string {
+  return currentIp ?? "203.0.113.10"
+}
+
+export function ipAddressForSubmission(
+  input: string,
+  currentIp: string | null,
+): string | null {
+  return input.trim() || currentIp
+}
+
+type GetRequest = <T>(path: string) => Promise<T>
+type BodyRequest = <T>(path: string, body?: unknown) => Promise<T>
+
+export class IpAddressRequiredError extends Error {
+  constructor() {
+    super("IP address is required")
+    this.name = "IpAddressRequiredError"
+  }
 }
 
 export interface LlmDebugEntry {
@@ -381,4 +402,46 @@ export interface SettingsData {
   codexCleanupModel: string | null
   codexCleanupModelDefault: string | undefined
   availableModels: Array<string>
+}
+
+export interface SettingsBundle {
+  settings: SettingsData
+  allowlist: Array<IpAllowlistEntry>
+  currentIp: string | null
+}
+
+export async function loadSettingsBundle(
+  requestGet: GetRequest,
+): Promise<SettingsBundle> {
+  const [settings, allowlist, currentIp] = await Promise.all([
+    requestGet<SettingsData>("/dashboard/api/settings"),
+    requestGet<Array<IpAllowlistEntry>>("/dashboard/api/ip-allowlist"),
+    requestGet<{ ip: string | null }>("/dashboard/api/ip-allowlist/current")
+      .then((result) => result.ip)
+      .catch(() => null),
+  ])
+
+  return { settings, allowlist, currentIp }
+}
+
+export async function addIpAllowlistEntry(
+  input: string,
+  currentIp: string | null,
+  requestPost: BodyRequest,
+): Promise<void> {
+  const ip = ipAddressForSubmission(input, currentIp)
+  if (!ip) throw new IpAddressRequiredError()
+
+  await requestPost("/dashboard/api/ip-allowlist", {
+    ip,
+    enabled: true,
+  })
+}
+
+export function clearIpAllowlist(
+  requestDelete: BodyRequest,
+): Promise<{ success: true; cleared: number }> {
+  return requestDelete<{ success: true; cleared: number }>(
+    "/dashboard/api/ip-allowlist",
+  )
 }

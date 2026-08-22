@@ -28,7 +28,8 @@ function unauthorized(c: {
  * Auth model: managed/session IP allowlist only. Credentials do not authorize
  * this route. Current Codex Desktop builds request auth attachment but do not
  * provide an API-key bearer for `/transcribe`, so the resolved client IP must
- * be explicitly enabled through the dashboard or covered by an active lease.
+ * be enabled through the dashboard, covered by an active lease, or previously
+ * persisted after authoritative inference authentication.
  *
  * Codex MAY or MAY NOT attach `originator: Codex Desktop` and a
  * `User-Agent: Codex Desktop/...` header depending on whether the gateway

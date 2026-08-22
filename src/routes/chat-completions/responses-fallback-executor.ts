@@ -16,7 +16,7 @@ import {
   getModelEndpointSupport,
   selectCopilotEndpoint,
 } from "~/lib/endpoint-routing"
-import { isAbortError } from "~/lib/error"
+import { inspectHttpError, isAbortError, isHTTPError } from "~/lib/error"
 import {
   recordNonDefaultBehavior,
   setRequestContext,
@@ -37,7 +37,6 @@ import {
   resolveResponsesWebSearchCalls,
 } from "~/routes/messages/web-search-helpers"
 import {
-  addPromptCaching,
   detectInitiator,
   hasVisionContent,
 } from "~/services/copilot/copilot-client"
@@ -58,6 +57,7 @@ import {
   responsesResultToChatCompletion,
   streamResponsesAsChatCompletions,
 } from "./responses-fallback"
+import { createChatStreamTerminalAdapter } from "./stream-lifecycle"
 import {
   checkChatNativeRequirements,
   checkChatToMessagesTranslation,
@@ -67,8 +67,10 @@ import {
 interface ResponsesFallbackOptions {
   copilotSessionToken?: string
   payload: ChatCompletionsPayload & { model: string }
+  preparedPayload?: ResponsesPayload
   requestedModel: string
   reasoningEffort?: ReasoningEffort
+  webSearchMaxUses?: number
 }
 
 interface PreparedResponsesFallback {
@@ -78,6 +80,7 @@ interface PreparedResponsesFallback {
   payload: ResponsesPayload
   requestedModel: string
   vision: boolean
+  webSearchMaxUses?: number
 }
 
 interface UnexpectedNonStreamOptions {
@@ -291,16 +294,14 @@ export async function executeResponsesFallback(
 function prepareResponsesFallback(
   options: ResponsesFallbackOptions,
 ): PreparedResponsesFallback {
-  addPromptCaching(options.payload.messages, options.payload.tools ?? undefined)
-
   return {
     copilotSessionToken: options.copilotSessionToken,
-    payload: chatCompletionsToResponses(
-      options.payload,
-      options.reasoningEffort,
-    ),
+    payload:
+      options.preparedPayload
+      ?? chatCompletionsToResponses(options.payload, options.reasoningEffort),
     originalPayload: options.payload,
     requestedModel: options.requestedModel,
+    webSearchMaxUses: options.webSearchMaxUses,
     vision: hasVisionContent(options.payload.messages),
     initiator: detectInitiator(options.payload.messages),
   }
@@ -319,17 +320,16 @@ async function executeNonStreamingResponsesFallback(
         initiator: options.initiator,
         signal: c.req.raw.signal,
       }
-      const initial = (await createResponses(
-        options.payload,
-        requestOptions,
-      )) as ResponsesResult
+      const initial = (await createResponses(options.payload, {
+        ...requestOptions,
+        prepared: true,
+      })) as ResponsesResult
       const result =
         hasMcpWebSearch(options.payload) ?
-          await resolveResponsesWebSearchCalls(
-            initial,
-            options.payload,
-            requestOptions,
-          )
+          await resolveResponsesWebSearchCalls(initial, options.payload, {
+            ...requestOptions,
+            maxUses: options.webSearchMaxUses,
+          })
         : initial
 
       recordAccountContext(c)
@@ -363,6 +363,7 @@ function executeStreamingResponsesFallback(
           vision: options.vision,
           initiator: options.initiator,
           signal: c.req.raw.signal,
+          prepared: true,
         })
 
         recordAccountContext(c)
@@ -378,16 +379,39 @@ function executeStreamingResponsesFallback(
         }
 
         return streamSSE(c, async (stream) => {
+          const adapter = createChatStreamTerminalAdapter({ c, stream })
+          stream.onAbort(() => {
+            adapter.abort()
+          })
           try {
-            const usage = await streamResponsesAsChatCompletions(
+            const result = await streamResponsesAsChatCompletions(
               stream,
               withSseHeartbeat(response, stream),
               options.requestedModel,
             )
-            setStreamUsage(c, span, usage)
+            setStreamUsage(c, span, result)
+            if (
+              result.terminal === "completed"
+              || result.terminal === "incomplete"
+            ) {
+              await adapter.succeedAfterFinalChunk()
+            } else if (result.receivedFailure) {
+              await adapter.failReceived(result.receivedFailure)
+            } else {
+              await adapter.finishSource()
+            }
           } catch (error) {
-            if (isAbortError(error)) return
-            await emitOpenAiStreamError(stream, error)
+            if (isAbortError(error)) {
+              adapter.abort()
+              return
+            }
+            await adapter.failAfterCommit({
+              kind: "thrown",
+              error,
+              ...(isHTTPError(error) ?
+                { inspection: await inspectHttpError(error) }
+              : {}),
+            })
           } finally {
             finishSpan()
           }
@@ -421,20 +445,24 @@ async function executeStreamingMcpWebSearchFallback(
     copilotSessionToken: options.copilotSessionToken,
     vision: options.vision,
     initiator: options.initiator,
+    prepared: true,
     signal: upstreamSignal,
   }
   const preflush = await raceSsePreflush(
     createResponses(payload, requestOptions).then(async (initial) =>
-      resolveResponsesWebSearchCalls(
-        initial as ResponsesResult,
-        payload,
-        requestOptions,
-      ),
+      resolveResponsesWebSearchCalls(initial as ResponsesResult, payload, {
+        ...requestOptions,
+        maxUses: options.webSearchMaxUses,
+      }),
     ),
   )
 
   return streamSSE(c, async (stream) => {
-    stream.onAbort(() => downstreamAbort.abort())
+    const adapter = createChatStreamTerminalAdapter({ c, stream })
+    stream.onAbort(() => {
+      downstreamAbort.abort()
+      adapter.abort()
+    })
     try {
       if (preflush.kind === "pending") await writeSseHeartbeat(stream)
       const response =
@@ -449,32 +477,24 @@ async function executeStreamingMcpWebSearchFallback(
         response,
         options.requestedModel,
       )
-      await emitChatCompletionResponseAsStream(stream, result)
+      await emitChatCompletionResponseAsStream(stream, result, {
+        writeDone: false,
+      })
+      await adapter.succeedAfterFinalChunk()
     } catch (error) {
-      if (isAbortError(error)) return
-      await emitOpenAiStreamError(stream, error)
+      if (isAbortError(error)) {
+        adapter.abort()
+        return
+      }
+      await adapter.failAfterCommit({
+        kind: "thrown",
+        error,
+        ...(isHTTPError(error) ?
+          { inspection: await inspectHttpError(error) }
+        : {}),
+      })
     }
   })
-}
-
-async function emitOpenAiStreamError(
-  stream: { writeSSE: (message: { data: string }) => Promise<void> },
-  _error: unknown,
-): Promise<void> {
-  Sentry.captureException(new Error("Chat fallback stream failed"))
-  consola.error("Chat Completions stream failed after headers were sent")
-  try {
-    await stream.writeSSE({
-      data: JSON.stringify({
-        error: {
-          message: "An unexpected error occurred during streaming.",
-          type: "api_error",
-        },
-      }),
-    })
-  } catch {
-    // The client is already gone; there is nobody left to inform.
-  }
 }
 
 function createSentrySpanOptions(options: PreparedResponsesFallback): {

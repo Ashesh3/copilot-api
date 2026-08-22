@@ -52,6 +52,13 @@ See the [detailed Copilot API compatibility contract](docs/copilot-api-compatibi
 for field handling, endpoint precedence, streaming, affinity, and current
 feature-flag limitations.
 
+> [!WARNING]
+> Authenticated inference clients can direct attachment/file recovery to any
+> runtime-valid absolute HTTP(S) destination, including internal and
+> metadata-style targets, and final non-empty upstream failure bodies are
+> delivered to normal clients and ordinary logs/Sentry. Grant inference access
+> and network reach only where that authority is acceptable.
+
 | API family | Method and path | Support |
 | --- | --- | --- |
 | OpenAI Models | `GET /v1/models` | Live model discovery plus configured aliases, reasoning variants, redirect sources, and custom-provider models |
@@ -278,9 +285,14 @@ checks are recorded by normalized client IP. The third failure in a rolling
 Two denials are never recorded: a credential that resolves to a known principal
 but lacks the required kind or scope, and the Claude Code compatibility stubs
 that clients poll unprompted (telemetry, bootstrap, settings). Both still return
-`401`, and a ban earned on another surface still applies to them.
-Successful authentication does not erase prior failures or add the IP to the
-managed allowlist.
+`401`, and a ban earned on another surface still applies to them. Successful
+authoritative inference authentication clears prior failures, creates a
+process-local ban exemption, and persists an enabled allowlist entry for
+`/transcribe`. A new entry uses `source: "authenticated"`; an existing
+operator-created `manual` or `dashboard` entry is re-enabled and retains its
+source and transparent-proxy permission. Later missing or wrong credentials
+still return `401` but cannot re-ban that IP during the session. Newly automatic
+entries do not authorize credential-free transparent proxy inference.
 
 `config.json` also supports `auth.apiKeys`. When no startup key is active, those
 keys protect globally guarded API routes. If neither source configures a gateway
@@ -510,13 +522,22 @@ These are compatibility implementations, not hosted identity or cloud services.
 - Direct Connect compatibility stubs are disabled by default. When explicitly
   enabled for private development, `/sessions` and `/ws/direct/:sessionId`
   require an inference-capable credential.
+- Callback URLs use a valid `COPILOT_PUBLIC_BASE_URL` first, otherwise a
+  complete forwarded protocol/host pair from a trusted socket peer, otherwise
+  the direct request origin. A configured path prefix must be stripped by the
+  reverse proxy before Bun's internal `/ws/direct/:sessionId` upgrade route.
 - GrowthBook feature evaluation and the feature-flag UI support client behavior
   overrides on private networks where the client source address is preserved.
 
 The OAuth and bridge credentials above are the primary authorization boundary.
-Managed IP policy remains defense in depth for compatibility calls that need it;
-successful gateway or OAuth authentication never permanently promotes a source
-IP into that policy.
+After a gateway, inference-client, or correctly scoped OAuth credential
+authorizes a data-plane request, the resolved client IP is exempt from the
+process-local failure ban and is persisted as an enabled allowlist entry for
+`/transcribe`. New entries use the `authenticated` source; existing
+operator-created entries are re-enabled without changing their source or
+transparent-proxy permission. Missing or wrong credentials still return `401`;
+a newly automatic entry does not authorize credential-free transparent proxy
+inference.
 
 ### Codex Desktop
 
@@ -536,12 +557,14 @@ Origin. The gateway does not impose voice frame, audio, duration, idle,
 connection, or hourly traffic caps.
 
 Codex Desktop dictation at `POST /transcribe` is authorized only by the
-resolved managed/session-allowlisted client IP; a gateway credential does not
-grant access to that route. Current Desktop builds do not reliably attach their
-API-key credential to dictation. Add the source address observed by the gateway
-to the dashboard allowlist, then use the supplied trusted-host/TLS template and
-an intentional client-side host mapping. Transcript cleanup at
-`/codex/responses` remains credential-authenticated.
+resolved managed/session-allowlisted client IP. Current Desktop builds do not
+reliably attach their API-key credential to dictation, so a prior successful
+authoritative inference request automatically persists the observed IP for
+this route. An operator can also add it manually in the dashboard. Automatic
+authenticated entries do not permit credential-free transparent proxy calls;
+those still require credentials unless an operator-created allowlist entry or
+session lease applies. Transcript cleanup at `/codex/responses` remains
+credential-authenticated.
 
 Advanced TLS and proxy templates live under `nginx/`, including WebSocket
 upgrade headers and disabled response buffering without project-defined
@@ -626,6 +649,7 @@ files.
 | `COPILOT_ADMIN_PASSWORD_HASH` | Direct and Docker | Optional authoritative Argon2id PHC verifier for the administrator password; suitable for 1Password/Varlock |
 | `COPILOT_ADMIN_ORIGIN` | Direct and Docker | Exact browser origin allowed for dashboard mutations; set this explicitly for a proxied deployment |
 | `COPILOT_TRUSTED_PROXY_CIDRS` | Direct and Docker | Comma-separated socket-peer CIDRs allowed to supply forwarding headers; defaults to loopback only |
+| `COPILOT_PUBLIC_BASE_URL` | Direct and Docker | Optional externally reachable absolute HTTP(S) base for bridge and Direct Connect callback URLs; may include a deployment path prefix |
 | `COPILOT_API_ENABLE_DIRECT_CONNECT` | Direct and Docker | Set to `true` only to enable the authenticated experimental Direct Connect routes; disabled by default |
 | `COPILOT_INFERENCE_CORS_ORIGINS` | Direct and Docker | Optional comma-separated exact browser origins for inference-only CORS; disabled by default |
 | `COPILOT_VOICE_ORIGIN` | Direct and Docker | Optional exact browser Origin for the Claude voice WebSocket; supplied Origins must match |
@@ -793,13 +817,21 @@ The proxy must:
 - allow long-lived SSE and WebSocket connections;
 - avoid local request pacing, connection caps, finite body caps, and
   client/proxy/send timeouts; and
-- forward the gateway credential without logging it.
+- forward `x-copilot-gateway-key` to the application without logging it for
+  transparent redirected provider traffic, while preserving provider
+  `Authorization`, `x-api-key`, and `x-goog-api-key` headers end-to-end.
 
 The application reads forwarding headers only when the actual Bun socket peer
 falls within a configured trusted CIDR. Direct clients are identified by their
 socket address and cannot gain allowlist status by supplying `X-Real-IP` or
 `X-Forwarded-For`. Keep the trusted list exact: do not use a broad private range
 when only one local proxy address is required.
+
+For transparent redirected Anthropic hosts, gateway authentication is a
+separate `x-copilot-gateway-key` channel. The application removes that header
+before upstream forwarding. Provider credentials are not gateway credentials.
+An explicit invalid dedicated key is denied and cannot fall back to managed or
+leased-IP authorization; an absent key may use that existing IP policy.
 
 An exact trusted peer is insufficient when an upstream TCP load balancer
 source-NATs every client to that peer: every caller then shares the load
@@ -834,8 +866,9 @@ WebSocket probes.
   capabilities for their respective routes.
 - **Trust IP headers only from exact proxy peers.** Configure
   `COPILOT_TRUSTED_PROXY_CIDRS` with the actual socket peers. Forwarding headers
-  from every other peer are ignored, and successful authentication does not
-  create a permanent IP allowlist entry.
+  from every other peer are ignored. Successful authoritative inference auth
+  persists the safely resolved IP for `/transcribe` and exempts it from the
+  process-local ban; it does not authorize credential-free inference.
 - **Protect the data directory.** It can contain GitHub tokens, gateway/provider
   keys, OAuth/admin digests, custom headers, routing policy, allowlists, and
   request history. Sensitive files and the directory are created with
@@ -844,11 +877,22 @@ WebSocket probes.
   secret-like configuration and require an authenticated administrator session.
   Preserve full recovery backups through a separately protected filesystem
   process.
-- **Treat LLM Debug as raw credential-bearing data.** It intentionally preserves
-  exact captured request and response URLs, headers, and bodies without
+- **Restrict attachment network authority.** Authenticated callers can cause
+  attachment/file recovery to fetch any runtime-valid HTTP(S) destination and
+  redirect, including internal and metadata-style targets. Only abort, timeout,
+  byte, redirect, parsing, and media limits remain; restrict inference
+  credentials and runtime network reachability accordingly.
+- **Treat final upstream failure bodies as raw.** A non-empty final upstream
+  failure body can contain payload or credential material and is copied exactly
+  to the client, ordinary logs, and Sentry with its status and content type.
+  Protect their transport, retention, and access, and rotate credentials exposed
+  through those channels.
+- **Treat LLM Debug as broader raw credential-bearing data.** It intentionally
+  preserves exact captured request and response URLs, headers, and bodies without
   redaction, including credentials and session identifiers. Access requires an
   administrator session, and records expire from process memory after ten
-  minutes, but anyone viewing or exporting them receives the raw values.
+  minutes. It is broader than the final-error-body passthrough above, not the
+  only channel where that response body may appear.
 - **Use Sentry deliberately.** When `SENTRY_DSN` is set, AI prompt and completion
   content is recorded by default. Set `SENTRY_AI_RECORD_INPUTS=false` before
   handling sensitive data.

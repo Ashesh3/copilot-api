@@ -14,7 +14,10 @@ import {
 } from "~/lib/routing-affinity"
 
 import { authenticateAdminRequest } from "./lib/admin-auth"
-import { apiKeyGuard } from "./lib/api-key-guard"
+import {
+  apiKeyGuard,
+  isVerifiedTransparentProxyRequest,
+} from "./lib/api-key-guard"
 import { forwardError } from "./lib/error"
 import { inferenceCors } from "./lib/inference-cors"
 import { createAuthMiddleware } from "./lib/request-auth"
@@ -206,7 +209,17 @@ server.route("/backend-api", computerUsePolicyRoutes)
 server.route("", computerUsePolicyRoutes)
 
 server.use(apiKeyGuard)
-server.use("*", createAuthMiddleware())
+const inferenceAuth = createAuthMiddleware()
+server.use("*", async (c, next) => {
+  if (isVerifiedTransparentProxyRequest(c.req.raw)) {
+    await next()
+    return
+  }
+  // The middleware's Hono generic is broader than this server instance, but
+  // the runtime Context/Next contract is identical.
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
+  await inferenceAuth(c, next)
+})
 
 // Direct Connect is disabled by default and, when explicitly enabled for
 // private development, remains behind both normal authentication layers.
@@ -232,6 +245,7 @@ server.route("/alpha/search", codexSearchRoutes)
 // Compatibility with tools that expect v1/ prefix
 server.route("/v1/chat/completions", completionRoutes)
 server.route("/v1/models", modelRoutes)
+server.route("/v1beta/models", modelRoutes)
 server.route("/v1/embeddings", embeddingRoutes)
 server.route("/v1/responses", responsesRoutes)
 server.route("/v1/alpha/search", codexSearchRoutes)

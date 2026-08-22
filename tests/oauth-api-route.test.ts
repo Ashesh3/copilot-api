@@ -5,6 +5,7 @@ import os from "node:os"
 import path from "node:path"
 
 import { resolveCredential } from "../src/lib/credential-resolver"
+import { listIpAllowlist, setIpAllowlistForTest } from "../src/lib/ip-allowlist"
 import {
   isIpBlocked,
   recordFailedAttempt,
@@ -48,6 +49,7 @@ function authorizationQuery(
 }
 
 beforeEach(async () => {
+  setIpAllowlistForTest([])
   state.apiKeyAuth = "test-secret-key"
   resetIpSecurityForTest()
   consola.warn = mock(() => {}) as unknown as typeof consola.warn
@@ -60,6 +62,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   resetIpSecurityForTest()
+  setIpAllowlistForTest([])
   setOAuthStoreForTest(null)
   const directory = temporaryDirectory
   temporaryDirectory = undefined
@@ -178,6 +181,20 @@ test("OAuth authorize page allows the exact manual callback origin", async () =>
   )
 })
 
+test("OAuth authorize rejects a missing api_key without throwing", async () => {
+  const response = await server.request(
+    `/oauth/authorize?${authorizationQuery().toString()}`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "",
+    },
+  )
+
+  expect(response.status).toBe(401)
+  expect(await response.text()).toContain("Invalid API key")
+})
+
 test("invalid OAuth API key response retains the callback origin", async () => {
   const response = await server.request(
     `/oauth/authorize?${authorizationQuery("http://localhost:43124/callback").toString()}`,
@@ -216,6 +233,33 @@ test("a valid OAuth login recovers a client from an active IP ban", async () => 
 
   expect(response.status).toBe(302)
   expect(isIpBlocked(clientIp)).toBe(false)
+})
+
+test("a profile-only OAuth login does not recover or allowlist a banned IP", async () => {
+  const clientIp = "198.51.100.92"
+  const query = authorizationQuery()
+  query.set("scope", "user:profile")
+  const headers = {
+    "content-type": "application/x-www-form-urlencoded",
+    "x-copilot-peer-ip": clientIp,
+  }
+  recordFailedAttempt(clientIp)
+  recordFailedAttempt(clientIp)
+  recordFailedAttempt(clientIp)
+  expect(isIpBlocked(clientIp)).toBe(true)
+
+  const response = await server.request(
+    `/oauth/authorize?${query.toString()}`,
+    {
+      method: "POST",
+      headers,
+      body: new URLSearchParams({ api_key: "test-secret-key" }).toString(),
+    },
+  )
+
+  expect(response.status).toBe(302)
+  expect(isIpBlocked(clientIp)).toBe(true)
+  expect(await listIpAllowlist()).toEqual([])
 })
 
 test("unknown credentials across surfaces share the IP tracker", async () => {
@@ -311,6 +355,41 @@ test("a recognized credential denied for scope never feeds the IP ban tracker", 
   }
 
   expect(isIpBlocked(clientIp)).toBe(false)
+})
+
+test("a wrong-scope OAuth credential cannot recover an actively banned IP", async () => {
+  const store = new OAuthStore(oauthStorePath)
+  setOAuthStoreForTest(store)
+  const code = await store.issueAuthorizationCode({
+    clientId: oauthClientId,
+    redirectUri: oauthRedirectUri,
+    scopes: ["user:profile"],
+    state: oauthState,
+    codeChallenge: createPkceChallenge(oauthVerifier),
+  })
+  const exchanged = await store.exchangeAuthorizationCode({
+    code,
+    clientId: oauthClientId,
+    redirectUri: oauthRedirectUri,
+    state: oauthState,
+    codeVerifier: oauthVerifier,
+  })
+  if (exchanged.status !== "ok") throw new Error("Failed to issue test token")
+
+  const clientIp = "198.51.100.79"
+  recordFailedAttempt(clientIp)
+  recordFailedAttempt(clientIp)
+  recordFailedAttempt(clientIp)
+  const response = await server.request("/api/claude_code/metrics", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${exchanged.tokens.accessToken}`,
+      "x-copilot-peer-ip": clientIp,
+    },
+  })
+
+  expect(response.status).toBe(401)
+  expect(isIpBlocked(clientIp)).toBe(true)
 })
 
 async function authorizeAndExchange(): Promise<{

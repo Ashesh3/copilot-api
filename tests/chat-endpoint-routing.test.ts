@@ -66,6 +66,8 @@ test.each([
 const originalFetch = globalThis.fetch
 let lastUpstreamPath: string | undefined
 let lastUpstreamPayload: Record<string, unknown> | undefined
+let queuedChatResponse: Record<string, unknown> | undefined
+let mcpSearchCalls = 0
 
 const fetchMock = mock((url: string | URL | Request, init?: RequestInit) => {
   const rawUrl = typeof url === "string" || url instanceof URL ? url : url.url
@@ -74,6 +76,25 @@ const fetchMock = mock((url: string | URL | Request, init?: RequestInit) => {
     typeof init?.body === "string" ?
       (JSON.parse(init.body) as Record<string, unknown>)
     : undefined
+
+  if (lastUpstreamPath === "/mcp/readonly") {
+    if (lastUpstreamPayload?.method === "initialize") {
+      return new Response(
+        'data: {"jsonrpc":"2.0","id":"init","result":{}}\n\n',
+        {
+          headers: {
+            "content-type": "text/event-stream",
+            "Mcp-Session-Id": "route-session",
+          },
+        },
+      )
+    }
+    mcpSearchCalls += 1
+    return new Response(
+      'data: {"jsonrpc":"2.0","id":"search","result":{"content":[{"type":"text","text":"current result"}]}}\n\n',
+      { headers: { "content-type": "text/event-stream" } },
+    )
+  }
 
   if (lastUpstreamPath === "/responses") {
     return Response.json({
@@ -128,6 +149,11 @@ const fetchMock = mock((url: string | URL | Request, init?: RequestInit) => {
     typeof init?.body === "string" ?
       (JSON.parse(init.body) as { model?: string })
     : {}
+  if (queuedChatResponse) {
+    const queued = queuedChatResponse
+    queuedChatResponse = undefined
+    return Response.json(queued)
+  }
   return Response.json({
     id: "chatcmpl_route",
     object: "chat.completion",
@@ -157,6 +183,8 @@ beforeEach(() => {
   fetchMock.mockClear()
   lastUpstreamPath = undefined
   lastUpstreamPayload = undefined
+  queuedChatResponse = undefined
+  mcpSearchCalls = 0
   state.accountType = "individual"
   state.copilotToken = "copilot-token"
   state.githubToken = "github-token"
@@ -210,31 +238,31 @@ const routeCases: Array<RouteCase> = [
     name: "prefers Messages for PDF content when Chat and Messages exist",
     endpoints: ["/chat/completions", "/v1/messages"],
     pdf: true,
-    expected: "/v1/messages",
+    expected: "/chat/completions",
   },
   {
     name: "prefers Responses for hosted web search when available",
     endpoints: ["/chat/completions", "/responses"],
     webSearch: true,
-    expected: "/responses",
+    expected: "/chat/completions",
   },
   {
     name: "prefers Messages for signed Anthropic reasoning",
     endpoints: ["/chat/completions", "/v1/messages", "/responses"],
     signedReasoning: true,
-    expected: "/v1/messages",
+    expected: "/chat/completions",
   },
   {
     name: "prefers Messages for an Anthropic thinking budget",
     endpoints: ["/chat/completions", "/v1/messages", "/responses"],
     thinkingBudget: true,
-    expected: "/v1/messages",
+    expected: "/chat/completions",
   },
   {
     name: "prefers Responses for encrypted OpenAI reasoning",
     endpoints: ["/chat/completions", "/v1/messages", "/responses"],
     encryptedReasoning: true,
-    expected: "/responses",
+    expected: "/chat/completions",
   },
 ]
 
@@ -273,7 +301,7 @@ test.each(routeCases)(
   },
 )
 
-test("preserves explicit null max_tokens through the Chat to Messages bridge", async () => {
+test("treats explicit null max_tokens as absent in the Chat to Messages bridge", async () => {
   installModel({
     id: "route-model",
     supported_endpoints: ["/v1/messages"],
@@ -285,7 +313,7 @@ test("preserves explicit null max_tokens through the Chat to Messages bridge", a
 
   expect(response.status).toBe(200)
   expect(lastUpstreamPath).toBe("/v1/messages")
-  expect(lastUpstreamPayload).toHaveProperty("max_tokens", null)
+  expect(lastUpstreamPayload).toHaveProperty("max_tokens", 1024)
 })
 
 test("emits one bounded Chat route event before dispatch", async () => {
@@ -323,7 +351,7 @@ test("emits one bounded Chat route event before dispatch", async () => {
   }
 })
 
-test("rejects a Messages-only custom grammar without upstream dispatch", async () => {
+test("degrades a Messages-only custom grammar and dispatches", async () => {
   installModel({
     id: "route-model",
     supported_endpoints: ["/v1/messages"],
@@ -331,17 +359,8 @@ test("rejects a Messages-only custom grammar without upstream dispatch", async (
 
   const response = await postChatRoute({ customGrammar: true })
 
-  expect(response.status).toBe(400)
-  expect(fetchMock).not.toHaveBeenCalled()
-  expect(await response.json()).toEqual({
-    error: {
-      code: "endpoint_translation_unsupported",
-      message:
-        "The selected Copilot model cannot accept this request without losing required protocol data.",
-      param: "custom_tool_grammar",
-      type: "invalid_request_error",
-    },
-  })
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/v1/messages")
 })
 
 test.each([
@@ -365,27 +384,21 @@ test.each([
     },
     param: "tool_semantics",
   },
-])(
-  "rejects Messages-only $name without upstream dispatch",
-  async ({ body, param }) => {
-    installModel({
-      id: "route-model",
-      supported_endpoints: ["/v1/messages"],
-    })
+])("degrades Messages-only $name and dispatches", async ({ body }) => {
+  installModel({
+    id: "route-model",
+    supported_endpoints: ["/v1/messages"],
+  })
 
-    const response = await server.request("/v1/chat/completions", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model: "route-model", stream: false, ...body }),
-    })
+  const response = await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: "route-model", stream: false, ...body }),
+  })
 
-    expect(response.status).toBe(400)
-    expect(fetchMock).not.toHaveBeenCalled()
-    expect(await response.json()).toMatchObject({
-      error: { code: "endpoint_translation_unsupported", param },
-    })
-  },
-)
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/v1/messages")
+})
 
 test("routes file_id through Responses instead of losing it on Messages", async () => {
   installModel({
@@ -403,7 +416,7 @@ test("routes file_id through Responses instead of losing it on Messages", async 
   )
 })
 
-test("rejects custom tools on a Chat-only model before upstream dispatch", async () => {
+test("preserves custom tools on a Chat-only model", async () => {
   installModel({
     id: "route-model",
     supported_endpoints: ["/chat/completions"],
@@ -411,11 +424,61 @@ test("rejects custom tools on a Chat-only model before upstream dispatch", async
 
   const response = await postChatRoute({ customGrammar: true })
 
-  expect(response.status).toBe(400)
-  expect(fetchMock).not.toHaveBeenCalled()
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPayload?.tools).toEqual([
+    {
+      type: "custom",
+      format: { type: "grammar", syntax: "lark" },
+      copilot_cache_control: { type: "ephemeral" },
+    },
+  ])
 })
 
-test("rejects file sources on a Chat-only model before upstream dispatch", async () => {
+test("enforces hosted Chat max_uses without leaking it upstream", async () => {
+  installModel({
+    id: "route-model",
+    supported_endpoints: ["/chat/completions"],
+  })
+  queuedChatResponse = {
+    id: "chat_search",
+    object: "chat.completion",
+    created: 1,
+    model: "route-model",
+    choices: [
+      {
+        index: 0,
+        message: {
+          role: "assistant",
+          content: null,
+          tool_calls: Array.from({ length: 3 }, (_, index) => ({
+            id: `call-${index}`,
+            type: "function",
+            function: {
+              name: "web_search",
+              arguments: `{"query":"query ${index}"}`,
+            },
+          })),
+        },
+        finish_reason: "tool_calls",
+        logprobs: null,
+      },
+    ],
+  }
+
+  const response = await postChatRoute({
+    tools: [{ type: "web_search", max_uses: 2 }],
+  })
+  const body = await response.json()
+
+  expect(response.status).toBe(400)
+  expect(body).toMatchObject({
+    error: { code: "web_search_limit_exceeded" },
+  })
+  expect(mcpSearchCalls).toBe(0)
+  expect(JSON.stringify(lastUpstreamPayload)).not.toContain("max_uses")
+})
+
+test("degrades file sources on a Chat-only model", async () => {
   installModel({
     id: "route-model",
     supported_endpoints: ["/chat/completions"],
@@ -423,11 +486,11 @@ test("rejects file sources on a Chat-only model before upstream dispatch", async
 
   const response = await postChatRoute({ fileId: true })
 
-  expect(response.status).toBe(400)
-  expect(fetchMock).not.toHaveBeenCalled()
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/chat/completions")
 })
 
-test("rejects document content on a Chat-only model before upstream dispatch", async () => {
+test("preserves unknown document content on a Chat-only model", async () => {
   installModel({
     id: "route-model",
     supported_endpoints: ["/chat/completions"],
@@ -435,8 +498,8 @@ test("rejects document content on a Chat-only model before upstream dispatch", a
 
   const response = await postChatRoute({ document: true })
 
-  expect(response.status).toBe(400)
-  expect(fetchMock).not.toHaveBeenCalled()
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/chat/completions")
 })
 
 test.each([
@@ -458,7 +521,7 @@ test.each([
   },
 )
 
-test("rejects unsupported document sources on a Messages-only model", async () => {
+test("preserves future document sources on a Messages-only model", async () => {
   installModel({
     id: "route-model",
     supported_endpoints: ["/v1/messages"],
@@ -473,14 +536,14 @@ test("rejects unsupported document sources on a Messages-only model", async () =
     ],
   })
 
-  expect(response.status).toBe(400)
-  expect(fetchMock).not.toHaveBeenCalled()
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/v1/messages")
 })
 
 test.each([
   { name: "primitive content", content: [7] },
   { name: "typeless content", content: [{ text: "hello" }] },
-])("rejects $name on a Chat-only model", async ({ content }) => {
+])("recovers $name on a Chat-only model", async ({ content }) => {
   installModel({
     id: "route-model",
     supported_endpoints: ["/chat/completions"],
@@ -488,15 +551,15 @@ test.each([
 
   const response = await postChatRoute({ content })
 
-  expect(response.status).toBe(400)
-  expect(fetchMock).not.toHaveBeenCalled()
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/chat/completions")
 })
 
 test.each([
   { name: "numeric scalar", content: 7 },
   { name: "object scalar", content: { text: "hello" } },
 ])(
-  "rejects $name message content on a Chat-only model",
+  "recovers $name message content on a Chat-only model",
   async ({ content }) => {
     installModel({
       id: "route-model",
@@ -505,8 +568,8 @@ test.each([
 
     const response = await postChatRoute({ content })
 
-    expect(response.status).toBe(400)
-    expect(fetchMock).not.toHaveBeenCalled()
+    expect(response.status).toBe(200)
+    expect(lastUpstreamPath).toBe("/chat/completions")
   },
 )
 
@@ -514,20 +577,19 @@ test.each([
   { name: "Responses", endpoints: ["/chat/completions", "/responses"] },
   { name: "Messages", endpoints: ["/chat/completions", "/v1/messages"] },
 ])(
-  "rejects scalar message content before Chat can fall back to $name",
+  "recovers scalar message content before Chat can fall back to $name",
   async ({ endpoints }) => {
     installModel({ id: "route-model", supported_endpoints: [...endpoints] })
 
     const response = await postChatRoute({ content: { text: "hello" } })
 
-    await expectSafeChatContractError(response, "messages")
-    expect(fetchMock).not.toHaveBeenCalled()
+    expect(response.status).toBe(200)
+    expect(lastUpstreamPath).toBe("/chat/completions")
   },
 )
 
 test.each([
   { name: "string", content: "hello" },
-  { name: "null", content: null },
   { name: "validated array", content: [{ type: "text", text: "hello" }] },
 ])("accepts $name message content on Chat", async ({ content }) => {
   installModel({
@@ -544,7 +606,7 @@ test.each([
 test.each([
   { name: "object", tools: { type: "function" } },
   { name: "string", tools: "private-tools" },
-])("rejects non-array $name tools on a Chat-only model", async ({ tools }) => {
+])("recovers non-array $name tools on a Chat-only model", async ({ tools }) => {
   installModel({
     id: "route-model",
     supported_endpoints: ["/chat/completions"],
@@ -552,22 +614,21 @@ test.each([
 
   const response = await postChatRoute({ tools })
 
-  expect(response.status).toBe(400)
-  expect(fetchMock).not.toHaveBeenCalled()
+  expect(response.status).toBe(200)
 })
 
 test.each([
   { name: "Responses", endpoints: ["/chat/completions", "/responses"] },
   { name: "Messages", endpoints: ["/chat/completions", "/v1/messages"] },
 ])(
-  "rejects non-array tools before Chat can fall back to $name",
+  "recovers non-array tools before Chat can fall back to $name",
   async ({ endpoints }) => {
     installModel({ id: "route-model", supported_endpoints: [...endpoints] })
 
     const response = await postChatRoute({ tools: { type: "function" } })
 
-    await expectSafeChatContractError(response, "tools")
-    expect(fetchMock).not.toHaveBeenCalled()
+    expect(response.status).toBe(200)
+    expect(lastUpstreamPath).toBe("/chat/completions")
   },
 )
 
@@ -609,7 +670,7 @@ test.each([
     name: "named function",
     toolChoice: { type: "function", function: { name: "lookup" } },
   },
-])("rejects $name choice when no tools exist", async ({ toolChoice }) => {
+])("preserves $name choice when no tools exist", async ({ toolChoice }) => {
   installModel({
     id: "route-model",
     supported_endpoints: ["/chat/completions"],
@@ -617,8 +678,7 @@ test.each([
 
   const response = await postChatRoute({ tools: [], toolChoice })
 
-  expect(response.status).toBe(400)
-  expect(fetchMock).not.toHaveBeenCalled()
+  expect(response.status).toBe(200)
 })
 
 test.each([
@@ -653,7 +713,7 @@ test.each([
     toolChoice: { type: "function", function: { name: "lookup" } },
   },
 ])(
-  "rejects $name without usable tools before endpoint selection",
+  "preserves $name without usable tools before endpoint selection",
   async ({ endpoints, toolChoice }) => {
     installModel({ id: "route-model", supported_endpoints: [...endpoints] })
 
@@ -662,8 +722,8 @@ test.each([
       toolChoice,
     })
 
-    await expectSafeChatContractError(response, "tool_choice")
-    expect(fetchMock).not.toHaveBeenCalled()
+    expect(response.status).toBe(200)
+    expect(lastUpstreamPath).toBe("/chat/completions")
   },
 )
 
@@ -695,7 +755,7 @@ test.each([
     name: "blank function name",
     tools: [{ type: "function", function: { name: "", parameters: {} } }],
   },
-])("rejects a $name tool on a Chat-only model", async ({ tools }) => {
+])("skips a $name tool on a Chat-only model", async ({ tools }) => {
   installModel({
     id: "route-model",
     supported_endpoints: ["/chat/completions"],
@@ -703,11 +763,10 @@ test.each([
 
   const response = await postChatRoute({ tools: [...tools] })
 
-  expect(response.status).toBe(400)
-  expect(fetchMock).not.toHaveBeenCalled()
+  expect(response.status).toBe(200)
 })
 
-test("rejects a malformed native tool choice on a Chat-only model", async () => {
+test("preserves a future native tool choice on a Chat-only model", async () => {
   installModel({
     id: "route-model",
     supported_endpoints: ["/chat/completions"],
@@ -717,8 +776,7 @@ test("rejects a malformed native tool choice on a Chat-only model", async () => 
     toolChoice: { type: "web_search", function: null },
   })
 
-  expect(response.status).toBe(400)
-  expect(fetchMock).not.toHaveBeenCalled()
+  expect(response.status).toBe(200)
 })
 
 test("keeps valid text function tools and choices on Chat", async () => {
@@ -772,7 +830,7 @@ test.each([
   { name: "Responses", endpoints: ["/chat/completions", "/responses"] },
   { name: "Messages", endpoints: ["/chat/completions", "/v1/messages"] },
 ])(
-  "rejects a missing named function before Chat can fall back to $name",
+  "preserves a missing named function for native Chat",
   async ({ endpoints }) => {
     installModel({ id: "route-model", supported_endpoints: [...endpoints] })
 
@@ -781,8 +839,8 @@ test.each([
       toolChoice: { type: "function", function: { name: "missing" } },
     })
 
-    await expectSafeChatContractError(response, "tool_choice")
-    expect(fetchMock).not.toHaveBeenCalled()
+    expect(response.status).toBe(200)
+    expect(lastUpstreamPath).toBe("/chat/completions")
   },
 )
 
@@ -823,7 +881,7 @@ test("reports only the advertised Responses blocker", () => {
   })
 })
 
-test("rejects an unsupported translation before manual approval", async () => {
+test("reaches manual approval for a best-effort translation", async () => {
   installModel({
     id: "route-model",
     supported_endpoints: ["/v1/messages"],
@@ -834,9 +892,9 @@ test("rejects an unsupported translation before manual approval", async () => {
   try {
     const response = await postChatRoute({ customGrammar: true })
 
-    expect(response.status).toBe(400)
-    expect(promptSpy).not.toHaveBeenCalled()
-    expect(fetchMock).not.toHaveBeenCalled()
+    expect(response.status).toBe(200)
+    expect(promptSpy).toHaveBeenCalledTimes(1)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   } finally {
     promptSpy.mockRestore()
     state.manualApprove = false
@@ -1092,18 +1150,4 @@ function createFunctionTool(name: string): Record<string, unknown> {
       parameters: { type: "object", properties: {} },
     },
   }
-}
-
-async function expectSafeChatContractError(
-  response: Response,
-  param: string,
-): Promise<void> {
-  expect(response.status).toBe(400)
-  const body: unknown = await response.json()
-  expect(body).toMatchObject({
-    error: {
-      param,
-      type: "invalid_request_error",
-    },
-  })
 }

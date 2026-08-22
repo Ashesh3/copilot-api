@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- native transport fixtures and compatibility coverage share one singleton fetch */
 import {
   afterAll,
   beforeAll,
@@ -9,18 +10,23 @@ import {
 } from "bun:test"
 import consola from "consola"
 
+import { HTTPError } from "../src/lib/error"
 import { state } from "../src/lib/state"
 import {
   asAnthropicUnknownRole,
   type AnthropicMessagesPayload,
 } from "../src/routes/messages/anthropic-types"
+import { server } from "../src/server"
 import { COMPACTION_PAYLOAD_MAX_BYTES } from "../src/services/copilot/compaction-payload"
 import { createAnthropicMessages } from "../src/services/copilot/create-anthropic-messages"
 
 const originalFetch = globalThis.fetch
+const originalModels = state.models
 let capturedBody: unknown
 let capturedHeaders: Headers | undefined
 const capturedHeaderAttempts: Array<Headers> = []
+const capturedBodies: Array<Record<string, unknown>> = []
+const queuedResponses: Array<Response> = []
 let pendingResponse: Promise<Response> | undefined
 
 const fetchMock = mock((_url: string | URL | Request, init?: RequestInit) => {
@@ -28,10 +34,12 @@ const fetchMock = mock((_url: string | URL | Request, init?: RequestInit) => {
     throw new TypeError("Expected native Messages JSON body")
   }
   capturedBody = JSON.parse(init.body) as unknown
+  capturedBodies.push(capturedBody as Record<string, unknown>)
   capturedHeaders = new Headers(init.headers)
   capturedHeaderAttempts.push(capturedHeaders)
   return (
-    pendingResponse
+    queuedResponses.shift()
+    ?? pendingResponse
     ?? new Response(
       JSON.stringify({
         id: "msg_cache_control",
@@ -54,6 +62,7 @@ beforeAll(() => {
 })
 
 afterAll(() => {
+  state.models = originalModels
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
 })
 
@@ -62,10 +71,74 @@ beforeEach(() => {
   capturedBody = undefined
   capturedHeaders = undefined
   capturedHeaderAttempts.length = 0
+  capturedBodies.length = 0
+  queuedResponses.length = 0
   pendingResponse = undefined
   state.accountType = "individual"
   state.copilotToken = "copilot-token"
   state.isMultiToken = false
+})
+
+test("retries exact native thinking signature failure after stripping only thinking", async () => {
+  queuedResponses.push(
+    Response.json(
+      {
+        type: "error",
+        error: {
+          type: "invalid_request_error",
+          message: "Invalid signature in thinking block",
+        },
+      },
+      { status: 400 },
+    ),
+    Response.json({
+      id: "msg_retry",
+      type: "message",
+      role: "assistant",
+      model: "claude-opus-4.8",
+      content: [{ type: "text", text: "ok" }],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    }),
+  )
+  const payload = {
+    model: "claude-opus-4.8",
+    max_tokens: 64,
+    messages: [
+      { role: "user", content: "hello" },
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "private", signature: "bad" },
+          { type: "text", text: "kept" },
+        ],
+      },
+    ],
+  } as AnthropicMessagesPayload
+  const source = structuredClone(payload)
+
+  const result = await createAnthropicMessages(payload, {
+    alreadyAdapted: true,
+    copilotSessionToken: "messages-session-fixed",
+  })
+
+  expect(result).toHaveProperty("id", "msg_retry")
+  expect(payload).toEqual(source)
+  expect(capturedBodies).toHaveLength(2)
+  expect(capturedBodies[0]).toEqual(source)
+  expect(capturedBodies[1]).toEqual({
+    ...source,
+    messages: [
+      { role: "user", content: "hello" },
+      { role: "assistant", content: [{ type: "text", text: "kept" }] },
+    ],
+  })
+  expect(
+    capturedHeaderAttempts.map((headers) =>
+      headers.get("copilot-session-token"),
+    ),
+  ).toEqual(["messages-session-fixed", "messages-session-fixed"])
 })
 
 test("serializes native cache controls using Copilot's supported wire shape", async () => {
@@ -218,6 +291,65 @@ test("does not log native Messages upstream status text or body", async () => {
   } finally {
     errorSpy.mockRestore()
   }
+})
+
+test("preserves native Messages failure identity and exact route bytes", async () => {
+  const body = new TextEncoder().encode('{"type":"future_error"}\r\n  ')
+  const createUpstream = () =>
+    new Response(body.slice(), {
+      status: 418,
+      headers: { "content-type": "application/problem+json" },
+    })
+  const upstream = createUpstream()
+  pendingResponse = Promise.resolve(upstream)
+  const payload = {
+    model: "claude-opus-4.8",
+    max_tokens: 16,
+    messages: [{ role: "user", content: "hello" }],
+  } as AnthropicMessagesPayload
+
+  const error = await createAnthropicMessages(payload).catch(
+    (caught: unknown) => caught,
+  )
+  expect(error).toBeInstanceOf(HTTPError)
+  expect((error as HTTPError).response).toBe(upstream)
+  expect(upstream.bodyUsed).toBe(false)
+
+  state.models = {
+    object: "list",
+    data: [
+      {
+        id: "claude-opus-4.8",
+        name: "Claude Opus",
+        object: "model",
+        preview: false,
+        vendor: "anthropic",
+        version: "1",
+        model_picker_enabled: true,
+        supported_endpoints: ["/v1/messages"],
+        capabilities: {
+          family: "claude",
+          limits: { max_output_tokens: 1024 },
+          object: "model_capabilities",
+          supports: {},
+          tokenizer: "cl100k_base",
+          type: "chat",
+        },
+      },
+    ],
+  }
+  pendingResponse = Promise.resolve(createUpstream())
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+  expect(response.status).toBe(418)
+  expect(response.headers.get("content-type")).toBe("application/problem+json")
+  expect(Array.from(new Uint8Array(await response.arrayBuffer()))).toEqual(
+    Array.from(body),
+  )
+  state.models = originalModels
 })
 
 test("preserves controls already validated by the Responses bridge", async () => {
@@ -452,6 +584,43 @@ test("defaults a missing native transport max_tokens from model metadata", async
   }
 })
 
+test("defaults literal null native max_tokens from model metadata", async () => {
+  const previousModels = state.models
+  state.models = {
+    object: "list",
+    data: [
+      {
+        id: "claude-transport-null-default",
+        name: "Claude Transport Null Default",
+        object: "model",
+        version: "1",
+        capabilities: {
+          family: "claude",
+          limits: { max_output_tokens: 3072 },
+          object: "model_capabilities",
+          supports: {},
+          tokenizer: "cl100k_base",
+          type: "chat",
+        },
+      },
+    ],
+  }
+  const payload: AnthropicMessagesPayload = {
+    model: "claude-transport-null-default",
+    max_tokens: null,
+    messages: [{ role: "user", content: "hello" }],
+  }
+
+  try {
+    await createAnthropicMessages(payload)
+    expect(capturedBody).toHaveProperty("max_tokens", 3072)
+    expect(payload).toHaveProperty("max_tokens", null)
+  } finally {
+    // eslint-disable-next-line require-atomic-updates
+    state.models = previousModels
+  }
+})
+
 test("preserves an explicit zero max_tokens instead of defaulting it", async () => {
   const previousModels = state.models
   state.models = {
@@ -585,7 +754,7 @@ test("preserves beta, anthropic version, and provider preference on transport re
   }
 })
 
-test.each(["unicode-βeta", "latin-é", "safe-beta,bad\u0001beta"])(
+test.each(["unicode-βeta", "latin-é"])(
   "drops invalid beta %s before physical header dispatch",
   async (anthropicBeta) => {
     const payload = {
@@ -605,6 +774,20 @@ test.each(["unicode-βeta", "latin-é", "safe-beta,bad\u0001beta"])(
     })
   },
 )
+
+test("retains valid beta siblings when another segment is invalid", async () => {
+  const payload = {
+    model: "claude-opus-4.8",
+    max_tokens: 64,
+    messages: [{ role: "user", content: "hello" }],
+  } as AnthropicMessagesPayload
+
+  await createAnthropicMessages(payload, {
+    anthropicBeta: "safe-beta,bad\u0001beta,safe-beta",
+  })
+
+  expect(capturedHeaders?.get("anthropic-beta")).toBe("safe-beta")
+})
 
 test("uses one prepared snapshot when the caller mutates after invocation", async () => {
   let resolveResponse!: (response: Response) => void

@@ -1,3 +1,4 @@
+/* eslint-disable no-nested-ternary -- prepared and compatibility transport branches remain explicit */
 import consola from "consola"
 import { events } from "fetch-event-stream"
 
@@ -13,9 +14,14 @@ import { routedFetch } from "~/lib/account-router"
 import { getModelEndpointSupport } from "~/lib/endpoint-routing"
 import { HTTPError } from "~/lib/error"
 import { state } from "~/lib/state"
-import { PRE_HEADER_MAX_DELAY_SECONDS } from "~/services/copilot/transport-retry"
+import {
+  claimCompatibilityRetry,
+  createRetryBudget,
+  PRE_HEADER_MAX_DELAY_SECONDS,
+} from "~/services/copilot/transport-retry"
 
 import { fitAnthropicCompactionPayload } from "./compaction-payload"
+import { classifyCompatibilityRetry } from "./compatibility-retry"
 import { hasVisionContent } from "./copilot-client"
 import {
   createMissingAnthropicMessagesMaxTokensError,
@@ -80,12 +86,14 @@ function getPositiveModelOutputLimit(modelId: string): number | undefined {
 export const createAnthropicMessages = async (
   payload: AnthropicMessagesPayload,
   options?: {
+    allowCompatibilityRetry?: boolean
     anthropicBeta?: string
     anthropicVersion?: string
     compaction?: boolean
     copilotSessionToken?: string
     initiator?: "agent" | "user"
     modelProviderPreference?: string
+    alreadyAdapted?: boolean
     preserveValidatedControls?: boolean
     routedAccountPin?: RoutedAccountPin
     retryBudget?: RetryBudget
@@ -93,7 +101,23 @@ export const createAnthropicMessages = async (
   },
 ): Promise<CreateAnthropicMessagesReturn> => {
   const prepared =
-    options?.preserveValidatedControls ?
+    options?.alreadyAdapted ?
+      (() => {
+        const sanitizedHeaders = validateAnthropicRequestHeaderOptions({
+          anthropicBeta: options.anthropicBeta,
+          anthropicVersion: options.anthropicVersion,
+          modelProviderPreference: options.modelProviderPreference,
+        })
+        return {
+          body: structuredClone(payload),
+          headers: {
+            ...sanitizedHeaders,
+            anthropicVersion:
+              sanitizedHeaders.anthropicVersion ?? DEFAULT_ANTHROPIC_VERSION,
+          },
+        }
+      })()
+    : options?.preserveValidatedControls ?
       (() => {
         const preservedOptions = options
         const sanitizedHeaders = validateAnthropicRequestHeaderOptions({
@@ -122,12 +146,20 @@ export const createAnthropicMessages = async (
   const vision = hasVisionContent(snapshot.messages)
   const initiator =
     options?.initiator ?? detectAnthropicInitiator(snapshot.messages)
+  const operationOptions = {
+    ...options,
+    routedAccountPin: options?.routedAccountPin ?? {},
+    retryBudget: options?.retryBudget ?? createRetryBudget(),
+  }
 
   return await dispatchAnthropicMessages({
     initiator,
-    options,
+    options: operationOptions,
     modelId: snapshot.model,
-    preparedBody: normalizeAnthropicMessagesRequest(prepared.body),
+    preparedBody:
+      options?.alreadyAdapted ?
+        structuredClone(prepared.body)
+      : normalizeAnthropicMessagesRequest(prepared.body),
     preparedHeaders: prepared.headers,
     stream: Boolean(snapshot.stream),
     vision,
@@ -137,7 +169,9 @@ export const createAnthropicMessages = async (
 function ensureTransportMaxTokens(
   payload: AnthropicMessagesPayload,
 ): AnthropicMessagesPayload {
-  if (payload.max_tokens !== undefined) return payload
+  if (payload.max_tokens !== undefined && payload.max_tokens !== null) {
+    return payload
+  }
   const maxTokens = getPositiveModelOutputLimit(payload.model)
   if (maxTokens === undefined) {
     throw createMissingAnthropicMessagesMaxTokensError()
@@ -146,10 +180,11 @@ function ensureTransportMaxTokens(
   return payload
 }
 
-async function dispatchAnthropicMessages(options: {
+interface AnthropicDispatchOptions {
   initiator: "agent" | "user"
   options:
     | {
+        allowCompatibilityRetry?: boolean
         compaction?: boolean
         copilotSessionToken?: string
         routedAccountPin?: RoutedAccountPin
@@ -166,9 +201,74 @@ async function dispatchAnthropicMessages(options: {
   }
   stream: boolean
   vision: boolean
-}): Promise<CreateAnthropicMessagesReturn> {
-  const { initiator, modelId, preparedBody, preparedHeaders, stream, vision } =
-    options
+}
+
+interface AnthropicAttempt {
+  body: Record<string, unknown>
+  response: Response
+}
+
+async function dispatchAnthropicAttempt(
+  options: AnthropicDispatchOptions,
+  body: Record<string, unknown>,
+  retry: boolean,
+): Promise<Response> {
+  return (
+    await routedFetch(
+      ANTHROPIC_MESSAGES_ENDPOINT,
+      {
+        method: "POST",
+        body: serializeAnthropicMessagesRequest(body),
+        signal: options.options?.signal,
+      },
+      {
+        modelId: options.modelId,
+        headerOptions: {
+          copilotSessionToken: options.options?.copilotSessionToken,
+          vision: options.vision,
+          initiator: options.initiator,
+          ...options.preparedHeaders,
+        },
+        maxHttpRetryDelaySeconds:
+          options.stream ? PRE_HEADER_MAX_DELAY_SECONDS : undefined,
+        ...(retry ? { reason: "compatibility_retry" as const } : {}),
+        ...(retry ? { recordSelection: false } : {}),
+        routedAccountPin: options.options?.routedAccountPin,
+        retryBudget: options.options?.retryBudget,
+      },
+    )
+  ).response
+}
+
+async function retryAnthropicCompatibility(
+  options: AnthropicDispatchOptions,
+  attempt: AnthropicAttempt,
+): Promise<AnthropicAttempt> {
+  if (options.options?.allowCompatibilityRetry === false) return attempt
+  const decision = await classifyCompatibilityRetry({
+    body: attempt.body,
+    endpoint: ANTHROPIC_MESSAGES_ENDPOINT,
+    response: attempt.response,
+  })
+  if (decision.kind === "none") return attempt
+  const retryBody = structuredClone(attempt.body)
+  if (
+    !decision.normalize(retryBody)
+    || !options.options?.retryBudget
+    || !claimCompatibilityRetry(options.options.retryBudget)
+  ) {
+    return attempt
+  }
+  return {
+    body: retryBody,
+    response: await dispatchAnthropicAttempt(options, retryBody, true),
+  }
+}
+
+async function dispatchAnthropicMessages(
+  options: AnthropicDispatchOptions,
+): Promise<CreateAnthropicMessagesReturn> {
+  const { preparedBody, stream } = options
 
   const fitted =
     options.options?.compaction ?
@@ -184,27 +284,11 @@ async function dispatchAnthropicMessages(options: {
     })
   }
 
-  const { response } = await routedFetch(
-    ANTHROPIC_MESSAGES_ENDPOINT,
-    {
-      method: "POST",
-      body: serializeAnthropicMessagesRequest(body),
-      signal: options.options?.signal,
-    },
-    {
-      modelId,
-      headerOptions: {
-        copilotSessionToken: options.options?.copilotSessionToken,
-        vision,
-        initiator,
-        ...preparedHeaders,
-      },
-      maxHttpRetryDelaySeconds:
-        stream ? PRE_HEADER_MAX_DELAY_SECONDS : undefined,
-      routedAccountPin: options.options?.routedAccountPin,
-      retryBudget: options.options?.retryBudget,
-    },
-  )
+  const attempt = await retryAnthropicCompatibility(options, {
+    body,
+    response: await dispatchAnthropicAttempt(options, body, false),
+  })
+  const { body: activeBody, response } = attempt
 
   if (!response.ok) {
     consola.error(
@@ -214,7 +298,7 @@ async function dispatchAnthropicMessages(options: {
     throw new HTTPError(
       "Failed to create native Anthropic messages",
       response,
-      body,
+      activeBody,
     )
   }
 

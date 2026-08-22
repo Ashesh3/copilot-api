@@ -4,14 +4,19 @@ import path from "node:path"
 
 const root = path.join(import.meta.dir, "..")
 
-function readFiles(directory: string, extensions: ReadonlySet<string>): string {
+function readFiles(
+  directory: string,
+  extensions: ReadonlySet<string>,
+  excludedRelativePaths: ReadonlySet<string> = new Set(),
+): string {
   const contents: Array<string> = []
   for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
     const fullPath = path.join(directory, entry.name)
     if (entry.isDirectory()) {
-      contents.push(readFiles(fullPath, extensions))
+      contents.push(readFiles(fullPath, extensions, excludedRelativePaths))
     } else if (
       entry.name !== "page-generated.ts"
+      && !excludedRelativePaths.has(path.relative(root, fullPath))
       && extensions.has(path.extname(entry.name))
     ) {
       contents.push(
@@ -31,7 +36,11 @@ test("application source contains no local traffic or resource limits", () => {
     false,
   )
 
-  const source = readFiles(path.join(root, "src"), new Set([".ts", ".tsx"]))
+  const source = readFiles(
+    path.join(root, "src"),
+    new Set([".ts", ".tsx"]),
+    new Set([path.join("src", "lib", "attachments.ts")]),
+  )
   for (const forbidden of [
     "checkRateLimit",
     "rateLimitSeconds",
@@ -59,6 +68,16 @@ test("application source contains no local traffic or resource limits", () => {
     /\bMAX_(?:PASSWORD_LENGTH|ADMIN_SESSIONS|ATTACHMENT_BYTES|WORKER_CAPABILITIES|ENVIRONMENT_CAPABILITIES|CREDENTIAL_LENGTH|FLAG_NAME_LENGTH|FLAG_COUNT|SERIALIZED_VALUE_LENGTH|WEB_SEARCH_ITERATIONS|OAUTH_QUERY_LENGTH|OAUTH_BODY_BYTES|OAUTH_FIELD_LENGTH|AUTHORIZATION_CODES|TOKEN_FAMILIES|REFRESH_TOKENS_PER_FAMILY|INFERENCE_CREDENTIALS|STORE_FILE_BYTES|CONSECUTIVE_FUNCTION_CALL_WHITESPACE)\b/,
   )
   expect(source).not.toContain("DEFAULT_MAX_TOKENS")
+
+  const attachmentSource = fs.readFileSync(
+    path.join(root, "src", "lib", "attachments.ts"),
+    "utf8",
+  )
+  expect(attachmentSource).toContain("ATTACHMENT_FETCH_MAX_BYTES")
+  expect(attachmentSource).toContain("ATTACHMENT_FETCH_MAX_REDIRECTS")
+  expect(attachmentSource).toContain("ATTACHMENT_FETCH_TIMEOUT_MS")
+  expect(attachmentSource).not.toContain("AbortSignal.timeout")
+  expect(attachmentSource).not.toContain("MAX_ATTACHMENT_BYTES")
 
   const startSource = fs.readFileSync(
     path.join(root, "src", "start.ts"),

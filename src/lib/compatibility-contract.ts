@@ -5,6 +5,7 @@ import { selectGoogleUpstreamEndpoint } from "~/routes/google-ai/handler"
 
 export {
   ANTHROPIC_HTTP_ERROR_STATUS_TYPES,
+  ATTACHMENT_URL_CONTRACT,
   ERROR_ENVELOPE_CONTRACT,
   SESSION_TOKEN_PRIVACY_CONTRACT,
   STREAM_BEHAVIOR_CONTRACT,

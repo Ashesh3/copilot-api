@@ -5,10 +5,11 @@ import consola from "consola"
 import { resolveRequestCredential } from "./credential-resolver"
 import {
   extractClientIp,
-  isIpAllowedForWhitelistedRoute,
+  isIpAllowedForTransparentProxy,
+  isIpAllowedForTranscription,
   isIpBanned,
-  isIpBlocked,
   recordFailedAttempt,
+  trustAuthenticatedIp,
 } from "./ip-blocker"
 
 export interface CodexDesktopAuthResult {
@@ -28,11 +29,13 @@ export interface CodexDesktopAuthResult {
  *      main process passes `isDesktopAuthAllowedUrl()` and attaches
  *      `Authorization: Bearer <token>` automatically. We accept the request
  *      if that bearer (or `x-api-key` / `x-goog-api-key`) matches an active
- *      gateway key. Successful authentication never mutates IP policy.
+ *      gateway key. Successful authentication creates the standard
+ *      data-plane IP trust and `/transcribe` persistence entry.
  *
  *   2. **IP whitelist fallback.** Preserves the original behavior for callers
  *      that hit these endpoints without an API key — e.g. a machine where
- *      an IP explicitly added from the dashboard.
+ *      an IP explicitly added from the dashboard. Automatic authenticated
+ *      entries are deliberately excluded from this inference fallback.
  *
  * Returns `{ allowed: false }` with a `consola.warn` log when neither path
  * succeeds. Active bans are identified separately for logging and policy.
@@ -50,9 +53,7 @@ export async function authorizeCodexDesktopRequest(
 
   if (credentialSupplied) {
     if (await resolveRequestCredential(c.req.raw, ["user:inference"])) {
-      if (clientIp !== null && isIpBlocked(clientIp)) {
-        return { allowed: false, banned: true, clientIp }
-      }
+      if (clientIp !== null) await trustAuthenticatedIp(clientIp)
       return { allowed: true, banned: false, clientIp }
     }
 
@@ -63,7 +64,7 @@ export async function authorizeCodexDesktopRequest(
     return { allowed: false, banned: false, clientIp }
   }
 
-  if (clientIp !== null && (await isIpAllowedForWhitelistedRoute(clientIp))) {
+  if (clientIp !== null && (await isIpAllowedForTransparentProxy(clientIp))) {
     return { allowed: true, banned: false, clientIp }
   }
 
@@ -93,7 +94,7 @@ export async function authorizeCodexDesktopIpRequest(
 ): Promise<CodexDesktopAuthResult> {
   const clientIp = extractClientIp(c)
 
-  if (clientIp !== null && (await isIpAllowedForWhitelistedRoute(clientIp))) {
+  if (clientIp !== null && (await isIpAllowedForTranscription(clientIp))) {
     return { allowed: true, banned: false, clientIp }
   }
 

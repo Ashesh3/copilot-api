@@ -4,15 +4,16 @@ import type { Context } from "hono"
 import * as Sentry from "@sentry/bun"
 import { streamSSE } from "hono/streaming"
 
+import type { RoutedAccountPin } from "~/lib/account-router"
 import type {
   EndpointRouteDecision,
   EndpointRouteFailure,
 } from "~/lib/endpoint-routing"
 import type { Model } from "~/services/copilot/get-models"
+import type { RetryBudget } from "~/services/copilot/transport-retry"
 
 import {
   getLastUsedAccountId,
-  runWithPinnedRoutedAccount,
   runWithRoutedModelSelection,
   selectRoutedModel,
 } from "~/lib/account-router"
@@ -22,6 +23,7 @@ import {
   recordCopilotEndpointRoute,
   recordCopilotMessagesBeta,
   recordCopilotRequestNormalization,
+  recordCopilotTranslationFindings,
 } from "~/lib/copilot-contract-observability"
 import { sessionTokenMatchesModel } from "~/lib/copilot-session-token"
 import {
@@ -31,12 +33,13 @@ import {
 } from "~/lib/custom-providers"
 import {
   getModelEndpointSupport,
-  selectCopilotEndpoint,
+  selectEvaluatedCopilotCandidate,
 } from "~/lib/endpoint-routing"
 import {
   createEndpointTranslationError,
-  HTTPError,
+  inspectHttpError,
   isAbortError,
+  isHTTPError,
   LocalHTTPError,
 } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
@@ -52,6 +55,10 @@ import {
   parseModelSuffix,
   usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
+import {
+  hasNonNullStreamError,
+  parseRecoverableStreamJson,
+} from "~/lib/recoverable-stream-json"
 import {
   recordNonDefaultBehavior,
   setRequestContext,
@@ -78,9 +85,9 @@ import { tokenPool } from "~/lib/token-pool"
 import { getTokenCount } from "~/lib/tokenizer"
 import { emitAnthropicToolSpans } from "~/lib/tool-spans"
 import {
-  buildErrorEvent,
+  closeResponsesOpenBlocks,
+  createResponsesNormalTerminalEvents,
   createResponsesStreamState,
-  SAFE_RESPONSES_STREAM_ERROR_MESSAGE,
   translateResponsesStreamEvent,
 } from "~/routes/messages/responses-stream-translation"
 import {
@@ -96,6 +103,7 @@ import {
 } from "~/services/copilot/create-chat-completions"
 import {
   createResponses,
+  type ResponsesPayload,
   type ResponsesResult,
   type ResponseStreamEvent,
 } from "~/services/copilot/create-responses"
@@ -106,23 +114,17 @@ import {
   prepareAnthropicMessagesRequest,
   validateAnthropicRequestHeaderOptions,
 } from "~/services/copilot/messages-contract"
-import {
-  consumeExtraSend,
-  createRetryBudget,
-} from "~/services/copilot/transport-retry"
+import { createRetryBudget } from "~/services/copilot/transport-retry"
 
 import {
   type AnthropicMessagesPayload,
   type AnthropicStreamState,
-  type AnthropicTextBlock,
-  type AnthropicToolResultBlock,
   isAnthropicTextBlock,
-  isAnthropicToolResultBlock,
 } from "./anthropic-types"
 import {
-  normalizeAnthropicAttachments,
-  normalizeAnthropicImages,
-} from "./attachment-normalization"
+  prepareMessagesChatCandidate,
+  prepareMessagesCandidates,
+} from "./messages-candidates"
 import {
   handleWithNativeMessages,
   type NativeMessagesRequestOptions,
@@ -132,15 +134,16 @@ import {
   translateToOpenAI,
 } from "./non-stream-translation"
 import {
+  createMessagesTerminalAdapter,
+  type MessagesTerminalAdapter,
+  writeAnthropicEvents,
+} from "./stream-lifecycle"
+import {
+  closeAnthropicOpenBlocks,
   createFallbackMessageDeltaEvents,
-  emitAnthropicStreamError,
   translateChunkToAnthropicEvents,
 } from "./stream-translation"
 import { parseSubagentMarkerFromFirstUser } from "./subagent-marker"
-import {
-  isInvalidThinkingSignatureResponse,
-  stripThinkingBlocks,
-} from "./thinking-recovery"
 import {
   emitAnthropicResponseAsStream,
   extractWebSearchCalls,
@@ -164,27 +167,25 @@ export function selectMessagesUpstreamEndpoint(options: {
         responses: false,
         responsesWebSocket: false,
       }
-  return selectCopilotEndpoint({
-    source: "messages",
-    support,
-    candidates: [
-      {
-        endpoint: "/v1/messages",
-        reason: "endpoint_unavailable",
-        check: { supported: true, blockers: [] },
-      },
-      {
-        endpoint: "/responses",
-        reason: "endpoint_unavailable",
-        check: { supported: true, blockers: [] },
-      },
-      {
-        endpoint: "/chat/completions",
-        reason: "endpoint_unavailable",
-        check: { supported: true, blockers: [] },
-      },
-    ],
+  const endpoints = ["/v1/messages", "/responses", "/chat/completions"] as const
+  const candidate = endpoints.find((endpoint) => {
+    if (endpoint === "/v1/messages") return support.messages
+    if (endpoint === "/responses") return support.responses
+    return support.chat
   })
+  if (!candidate) {
+    return {
+      blockers: [],
+      code: "endpoint_translation_unsupported",
+      source: "messages",
+    }
+  }
+  return {
+    reason: candidate === "/v1/messages" ? "native" : "endpoint_unavailable",
+    source: "messages",
+    target: candidate,
+    translated: candidate !== "/v1/messages",
+  }
 }
 
 /**
@@ -195,31 +196,48 @@ export function selectMessagesUpstreamEndpoint(options: {
  */
 export { stripThinkingBlocks } from "./thinking-recovery"
 
-/**
- * Strip thinking blocks from assistant messages in multi-token mode.
- *
- * Thinking block signatures (reasoning_opaque / signature) are cryptographically
- * tied to the specific Copilot token that generated them. In multi-token mode,
- * round-robin may route the next request to a different account, making
- * previous signatures invalid. Stripping them avoids the wasted 400 round-trip.
- *
- * In single-token mode, signatures stay valid and thinking context is preserved.
- */
-function stripThinkingBlocksForMultiToken(
-  payload: AnthropicMessagesPayload,
-): void {
-  if (!state.isMultiToken) return
-
-  for (const msg of payload.messages) {
-    if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue
-    msg.content = msg.content.filter((block) => block.type !== "thinking")
-  }
-}
-
 const logger = createHandlerLogger("messages-handler")
 
 const compactSystemPromptStart =
   "You are a helpful AI assistant tasked with summarizing conversations"
+
+function applyReplacedChatTextToMessages(
+  payload: AnthropicMessagesPayload,
+  replacedMessages: ChatCompletionsPayload["messages"],
+): void {
+  const replacementTexts = replacedMessages.flatMap((message) => {
+    if (typeof message.content === "string") return [message.content]
+    if (!Array.isArray(message.content)) return []
+    return message.content.flatMap((part) =>
+      part.type === "text" ? [part.text] : [],
+    )
+  })
+  const originalTextCount = payload.messages.reduce((count, message) => {
+    if (typeof message.content === "string") return count + 1
+    if (!Array.isArray(message.content)) return count
+    return (
+      count
+      + message.content.filter((block) => isAnthropicTextBlock(block)).length
+    )
+  }, 0)
+  if (replacementTexts.length !== originalTextCount) return
+  let replacementIndex = 0
+  for (const message of payload.messages) {
+    if (typeof message.content === "string") {
+      const replacement = replacementTexts[replacementIndex]
+      replacementIndex += 1
+      message.content = replacement
+      continue
+    }
+    if (!Array.isArray(message.content)) continue
+    for (const block of message.content) {
+      if (!isAnthropicTextBlock(block)) continue
+      const replacement = replacementTexts[replacementIndex]
+      replacementIndex += 1
+      block.text = replacement
+    }
+  }
+}
 
 const hasWebSearchToolInPayload = (
   tools: AnthropicMessagesPayload["tools"],
@@ -360,14 +378,24 @@ async function handleCompletionInner(
     redirect.redirected
     || applyModelVariantRouting(c, anthropicPayload, anthropicBeta)
 
+  const { payload: replacementPayload, appliedRules } =
+    await applyReplacementsToPayload(translateToOpenAI(anthropicPayload))
+  if (appliedRules.length > 0) {
+    setRequestContext(c, { replacements: appliedRules })
+    applyReplacedChatTextToMessages(
+      anthropicPayload,
+      replacementPayload.messages,
+    )
+  }
+
   const customReference = resolveCustomChatModel(anthropicPayload.model)
   if (customReference) {
-    await normalizeAnthropicAttachments(anthropicPayload, c.req.raw.signal)
-    await prepareMessagesPayloadForDispatch(c, {
-      payload: anthropicPayload,
-      isCompact,
-      attachmentsPrepared: true,
+    const customCandidate = await prepareMessagesChatCandidate({
+      source: anthropicPayload,
+      effortOverride: redirectEffort,
+      signal: c.req.raw.signal,
     })
+    if (state.manualApprove) await awaitApproval()
     setRequestContext(c, {
       requestedModel,
       model: anthropicPayload.model,
@@ -375,10 +403,17 @@ async function handleCompletionInner(
       reasoningEffort:
         redirectEffort ?? getBodyReasoningEffort(anthropicPayload),
     })
-    return await handleWithChatCompletions(c, anthropicPayload, {
-      initiatorOverride,
-      effortOverride: redirectEffort,
+    const customPayload = {
+      ...customCandidate.payload,
+      model: customReference.requestedModel,
+    }
+    return await executeCustomProviderChatCompletions(c, {
+      reference: customReference,
+      payload: customPayload,
       requestedModel,
+      appliedRules: [],
+      reasoningEffort: redirectEffort,
+      webSearchMaxUses: customCandidate.webSearchMaxUses,
     })
   }
 
@@ -395,29 +430,51 @@ async function handleCompletionInner(
       inboundSessionToken
     : undefined
 
-  const routedModel = selectRoutedModel(anthropicPayload.model)
+  const routedModel = selectRoutedModel(anthropicPayload.model, {
+    copilotSessionToken,
+  })
   const selectedModel = routedModel.model
   if (state.models && !selectedModel) throw createMessagesModelNotFoundError()
+  const routingModel =
+    selectedModel
+    ?? ({
+      id: anthropicPayload.model,
+      name: anthropicPayload.model,
+      object: "model",
+      version: "unknown",
+      supported_endpoints: ["/chat/completions"],
+      capabilities: {
+        family: "unknown",
+        limits: {},
+        object: "model_capabilities",
+        supports: {},
+        tokenizer: "cl100k_base",
+        type: "chat",
+      },
+    } satisfies Model)
 
-  const routeDecision = selectMessagesUpstreamEndpoint({
-    payload: anthropicPayload,
-    selectedModel,
+  const candidates = await prepareMessagesCandidates({
+    source: anthropicPayload,
+    selectedModel: routingModel,
+    effortOverride: redirectEffort,
+    isCompact,
+    signal: c.req.raw.signal,
   })
-  if ("code" in routeDecision)
-    throw createEndpointTranslationError(routeDecision)
+  const selection = selectEvaluatedCopilotCandidate({
+    candidates: candidates.ordered,
+    source: "messages",
+    support: getModelEndpointSupport(routingModel),
+  })
+  if ("code" in selection) throw createEndpointTranslationError(selection)
+  const { candidate, decision: routeDecision } = selection
+  recordCopilotTranslationFindings(
+    "messages",
+    candidate.endpoint,
+    candidate.check,
+  )
   recordCopilotEndpointRoute(routeDecision)
 
-  const attachmentsPrepared = routeDecision.target !== "/v1/messages"
-  // Fidelity selection above must see the original semantic block shape.
-  // Only the chosen dispatch path may now rewrite its attachment transport.
-  if (attachmentsPrepared) {
-    await normalizeAnthropicAttachments(anthropicPayload, c.req.raw.signal)
-  }
-  await prepareMessagesPayloadForDispatch(c, {
-    payload: anthropicPayload,
-    isCompact,
-    attachmentsPrepared,
-  })
+  if (state.manualApprove) await awaitApproval()
 
   let apiType = "ChatCompletions"
   if (routeDecision.target === "/v1/messages") {
@@ -450,64 +507,37 @@ async function handleCompletionInner(
   })
 
   return await runWithRoutedModelSelection(routedModel, async () => {
-    if (routeDecision.target === "/v1/messages") {
-      const retryBudget = createRetryBudget()
+    const retryBudget = createRetryBudget()
+    const routedAccountPin: RoutedAccountPin = {}
+    if (candidate.endpoint === "/v1/messages") {
       const requestOptions: NativeMessagesRequestOptions = {
         ...nativeOptions,
         requestedModel,
         originalStream: Boolean(anthropicPayload.stream),
         retryBudget,
+        routedAccountPin,
+        toolsPrepared: true,
+        compaction: candidate.compaction,
         copilotSessionToken,
         ...(initiatorOverride ? { initiatorOverride } : {}),
       }
-      try {
-        return await handleWithNativeMessages(
-          c,
-          anthropicPayload,
-          requestOptions,
-        )
-      } catch (error) {
-        if (
-          requestOptions.originalStream
-          || !(error instanceof HTTPError)
-          || error.response.status !== 400
-          || !(await isInvalidThinkingSignatureResponse(error.response))
-        ) {
-          throw error
-        }
-
-        if (!consumeExtraSend(retryBudget)) {
-          throw error
-        }
-        const recoveredPayload = structuredClone(anthropicPayload)
-        if (!stripThinkingBlocks(recoveredPayload)) throw error
-        recordNonDefaultBehavior(c, {
-          kind: "reasoning_retry_without_thinking",
-          message: `Stripped thinking blocks after native /v1/messages rejected their signature for ${anthropicPayload.model}`,
-          data: {
-            model: anthropicPayload.model,
-            reason: "invalid signature",
-            endpoint: "AnthropicMessages",
-          },
-        })
-        const accountId = getLastUsedAccountId()
-        return await runWithPinnedRoutedAccount(
-          accountId,
-          async () =>
-            await handleWithNativeMessages(c, recoveredPayload, {
-              ...requestOptions,
-              retryBudget,
-            }),
-        )
-      }
+      return await handleWithNativeMessages(
+        c,
+        candidate.payload,
+        requestOptions,
+      )
     }
 
-    if (routeDecision.target === "/responses") {
+    if (candidate.endpoint === "/responses") {
       return await handleWithResponsesApi(c, anthropicPayload, {
         copilotSessionToken,
         initiatorOverride,
         effortOverride,
         requestedModel,
+        retryBudget,
+        routedAccountPin,
+        preparedPayload: candidate.payload,
+        webSearchMaxUses: candidate.webSearchMaxUses,
       })
     }
 
@@ -516,32 +546,12 @@ async function handleCompletionInner(
       initiatorOverride,
       effortOverride,
       requestedModel,
+      retryBudget,
+      routedAccountPin,
+      preparedPayload: candidate.payload,
+      webSearchMaxUses: candidate.webSearchMaxUses,
     })
   })
-}
-
-async function prepareMessagesPayloadForDispatch(
-  c: Context,
-  options: {
-    attachmentsPrepared?: boolean
-    isCompact: boolean
-    payload: AnthropicMessagesPayload
-  },
-): Promise<void> {
-  const { attachmentsPrepared, isCompact, payload } = options
-  if (!attachmentsPrepared) {
-    // Native Messages can preserve accepted document sources and their
-    // metadata. It still needs external image URLs inlined for Copilot.
-    await normalizeAnthropicImages(payload, c.req.raw.signal)
-  }
-
-  if (isCompact) {
-    logger.debug("Is compact request:", isCompact)
-  } else {
-    mergeToolResultForClaude(payload)
-  }
-
-  if (state.manualApprove) await awaitApproval()
 }
 
 interface BufferedChatCompletionsResult {
@@ -577,18 +587,48 @@ function setChatCompletionSpanResult(
 }
 
 const streamChatCompletionsWithWebSearch = async (
-  stream: {
-    writeSSE: (data: { event: string; data: string }) => Promise<void>
-  },
+  target: { stream: SSEStream; owner: MessagesStreamOwner },
   response: AsyncIterable<{ data?: string }>,
   requestedModel?: string,
 ): Promise<BufferedChatCompletionsResult> => {
+  const { stream, owner } = target
   const bufferedChunks: Array<ChatCompletionChunk> = []
+  let finalSeen = false
+  const iterator = response[Symbol.asyncIterator]()
 
-  for await (const rawEvent of response) {
-    if (rawEvent.data === "[DONE]") break
-    if (!rawEvent.data) continue
-    bufferedChunks.push(JSON.parse(rawEvent.data) as ChatCompletionChunk)
+  try {
+    while (true) {
+      const next = await iterator.next()
+      if (next.done) break
+      const rawEvent = next.value
+      if (rawEvent.data === "[DONE]") break
+      if (!rawEvent.data) continue
+      const parsedValue = parseRecoverableStreamJson({
+        data: rawEvent.data,
+        protocol: "Chat-to-Messages",
+        terminal: false,
+      })
+      if (parsedValue === undefined) continue
+      if (hasNonNullStreamError(parsedValue)) {
+        await owner.adapter.failReceived(createReceivedChatMessagesError())
+        break
+      }
+      const chunk = parsedValue as ChatCompletionChunk
+      bufferedChunks.push(chunk)
+      if (hasChatFinishReason(chunk)) {
+        finalSeen = true
+        await consumeTrailingChatUsage(iterator, (usageChunk) => {
+          bufferedChunks.push(usageChunk)
+        })
+        break
+      }
+    }
+  } catch (error) {
+    if (!finalSeen) throw error
+  }
+
+  if (owner.adapter.lifecycle.state !== "open") {
+    return { hadWebSearch: false, initialResponse: null }
   }
 
   const initialResponse = reconstructFromChunks(bufferedChunks)
@@ -599,11 +639,13 @@ const streamChatCompletionsWithWebSearch = async (
 
   // No web_search calls — replay buffered chunks
   const streamState: AnthropicStreamState = {
+    terminal: "open",
     messageStartSent: false,
     contentBlockIndex: 0,
     contentBlockOpen: false,
     toolCalls: {},
   }
+  owner.setCloseOpenBlocks(() => closeAnthropicOpenBlocks(streamState))
 
   for (const chunk of bufferedChunks) {
     const events = translateChunkToAnthropicEvents(
@@ -619,20 +661,20 @@ const streamChatCompletionsWithWebSearch = async (
     }
   }
 
-  for (const event of createFallbackMessageDeltaEvents(streamState)) {
-    await stream.writeSSE({
-      event: event.type,
-      data: JSON.stringify(event),
+  await (streamState.pendingFinishReason ?
+    owner.adapter.succeed(async () => {
+      await writeAnthropicEvents(
+        stream,
+        createFallbackMessageDeltaEvents(streamState),
+      )
     })
-  }
+  : owner.adapter.finishSource())
 
   return { hadWebSearch: false, initialResponse }
 }
 
 const streamChatCompletionsDirect = async (
-  stream: {
-    writeSSE: (data: { event: string; data: string }) => Promise<void>
-  },
+  target: { stream: SSEStream; owner: MessagesStreamOwner },
   response: AsyncIterable<{ data?: string }>,
   requestedModel?: string,
 ): Promise<{
@@ -641,58 +683,134 @@ const streamChatCompletionsDirect = async (
   cachedTokens: number
   responseText: string
 }> => {
+  const { stream, owner } = target
   const streamState: AnthropicStreamState = {
+    terminal: "open",
     messageStartSent: false,
     contentBlockIndex: 0,
     contentBlockOpen: false,
     toolCalls: {},
   }
+  owner.setCloseOpenBlocks(() => closeAnthropicOpenBlocks(streamState))
 
   let streamInputTokens = 0
   let streamOutputTokens = 0
   let streamCachedTokens = 0
   let streamText = ""
+  let finalSeen = false
+  const iterator = response[Symbol.asyncIterator]()
 
-  for await (const rawEvent of response) {
-    if (rawEvent.data === "[DONE]") break
-    if (!rawEvent.data) continue
-
-    const chunk = JSON.parse(rawEvent.data) as ChatCompletionChunk
-
-    if (chunk.usage) {
-      streamInputTokens = chunk.usage.prompt_tokens
-      streamOutputTokens = chunk.usage.completion_tokens
-      streamCachedTokens = chunk.usage.prompt_tokens_details?.cached_tokens ?? 0
-    }
-    for (const choice of chunk.choices) {
-      streamText += choice.delta.content ?? ""
-    }
-
-    const events = translateChunkToAnthropicEvents(
-      chunk,
-      streamState,
-      requestedModel,
-    )
-    for (const event of events) {
-      await stream.writeSSE({
-        event: event.type,
-        data: JSON.stringify(event),
+  try {
+    while (true) {
+      const next = await iterator.next()
+      if (next.done) break
+      const rawEvent = next.value
+      if (rawEvent.data === "[DONE]") break
+      if (!rawEvent.data) continue
+      const parsedValue = parseRecoverableStreamJson({
+        data: rawEvent.data,
+        protocol: "Chat-to-Messages",
+        terminal: false,
       })
+      if (parsedValue === undefined) continue
+      if (hasNonNullStreamError(parsedValue)) {
+        await owner.adapter.failReceived(createReceivedChatMessagesError())
+        break
+      }
+      const chunk = parsedValue as ChatCompletionChunk
+
+      if (chunk.usage) {
+        streamInputTokens = chunk.usage.prompt_tokens
+        streamOutputTokens = chunk.usage.completion_tokens
+        streamCachedTokens =
+          chunk.usage.prompt_tokens_details?.cached_tokens ?? 0
+      }
+      for (const choice of chunk.choices) {
+        streamText += choice.delta.content ?? ""
+      }
+
+      const events = translateChunkToAnthropicEvents(
+        chunk,
+        streamState,
+        requestedModel,
+      )
+      for (const event of events) {
+        await stream.writeSSE({
+          event: event.type,
+          data: JSON.stringify(event),
+        })
+      }
+      if (streamState.pendingFinishReason) {
+        finalSeen = true
+        await consumeTrailingChatUsage(iterator, (usageChunk) => {
+          if (!usageChunk.usage) return
+          streamInputTokens = usageChunk.usage.prompt_tokens
+          streamOutputTokens = usageChunk.usage.completion_tokens
+          streamCachedTokens =
+            usageChunk.usage.prompt_tokens_details?.cached_tokens ?? 0
+          translateChunkToAnthropicEvents(
+            usageChunk,
+            streamState,
+            requestedModel,
+          )
+        })
+        await owner.adapter.succeed(async () => {
+          await writeAnthropicEvents(
+            stream,
+            createFallbackMessageDeltaEvents(streamState),
+          )
+        })
+        break
+      }
     }
+  } catch (error) {
+    if (!finalSeen) throw error
   }
 
-  for (const event of createFallbackMessageDeltaEvents(streamState)) {
-    await stream.writeSSE({
-      event: event.type,
-      data: JSON.stringify(event),
-    })
-  }
+  if (!finalSeen) await owner.adapter.finishSource()
 
   return {
     inputTokens: streamInputTokens,
     outputTokens: streamOutputTokens,
     cachedTokens: streamCachedTokens,
     responseText: streamText,
+  }
+}
+
+const hasChatFinishReason = (chunk: ChatCompletionChunk): boolean =>
+  chunk.choices.some((choice) => choice.finish_reason !== null)
+
+const consumeTrailingChatUsage = async (
+  response: AsyncIterator<{ data?: string }>,
+  consume: (chunk: ChatCompletionChunk) => void,
+): Promise<void> => {
+  while (true) {
+    let next: IteratorResult<{ data?: string }>
+    try {
+      next = await response.next()
+    } catch {
+      return
+    }
+    if (next.done || next.value.data === "[DONE]") return
+    if (!next.value.data) continue
+    try {
+      const parsed = JSON.parse(next.value.data) as unknown
+      if (hasNonNullStreamError(parsed)) return
+      const chunk = parsed as ChatCompletionChunk
+      if (chunk.choices.length === 0 && chunk.usage) consume(chunk)
+    } catch {
+      return
+    }
+  }
+}
+
+function createReceivedChatMessagesError() {
+  return {
+    type: "error" as const,
+    error: {
+      type: "api_error",
+      message: "Upstream Chat stream failed.",
+    },
   }
 }
 
@@ -755,51 +873,13 @@ const handleWithChatCompletions = async (
     copilotSessionToken?: string
     initiatorOverride?: "agent" | "user"
     effortOverride?: ReasoningEffort
+    preparedPayload?: ChatCompletionsPayload
     requestedModel?: string
+    retryBudget?: RetryBudget
+    routedAccountPin?: RoutedAccountPin
+    webSearchMaxUses?: number
   },
-) => {
-  try {
-    return await executeChatCompletions(c, anthropicPayload, options)
-  } catch (error) {
-    if (error instanceof HTTPError && error.response.status === 400) {
-      const body = await error.response.clone().text()
-      const isSignatureError =
-        body.includes("Invalid signature")
-        || body.includes("Invalid `signature`")
-      // Generic "Bad Request" with reasoning enabled means CAPI rejected
-      // because reasoning_opaque was missing or invalid on prior turns.
-      const isReasoningBadRequest =
-        body.trim() === "Bad Request"
-        && Boolean(options?.effortOverride || anthropicPayload.thinking)
-
-      if (
-        (isSignatureError || isReasoningBadRequest)
-        && stripThinkingBlocks(anthropicPayload)
-      ) {
-        const reason =
-          isSignatureError ? "invalid signature" : "Bad Request with reasoning"
-        recordNonDefaultBehavior(c, {
-          kind: "reasoning_retry_without_thinking",
-          message: `Stripped thinking blocks due to ${reason}, retrying ChatCompletions without reasoning`,
-          data: {
-            model: anthropicPayload.model,
-            reason,
-            endpoint: "ChatCompletions",
-          },
-        })
-        // Fully downgrade reasoning: clear thinking config AND effortOverride.
-        // Clearing effortOverride alone is insufficient — executeChatCompletions
-        // re-adds reasoning_effort when anthropicPayload.thinking is present.
-        delete anthropicPayload.thinking
-        return await executeChatCompletions(c, anthropicPayload, {
-          ...options,
-          effortOverride: undefined,
-        })
-      }
-    }
-    throw error
-  }
-}
+) => await executeChatCompletions(c, anthropicPayload, options)
 
 const executeChatCompletions = async (
   c: Context,
@@ -808,34 +888,32 @@ const executeChatCompletions = async (
     copilotSessionToken?: string
     initiatorOverride?: "agent" | "user"
     effortOverride?: ReasoningEffort
+    preparedPayload?: ChatCompletionsPayload
     requestedModel?: string
+    retryBudget?: RetryBudget
+    routedAccountPin?: RoutedAccountPin
+    webSearchMaxUses?: number
   },
 ) => {
   const {
     copilotSessionToken,
     initiatorOverride,
     effortOverride,
+    preparedPayload,
     requestedModel,
+    retryBudget,
+    routedAccountPin,
+    webSearchMaxUses,
   } = options ?? {}
-  const reasoningEnabled = Boolean(effortOverride || anthropicPayload.thinking)
-
-  // In multi-token mode, reasoning_opaque is cryptographically tied to a
-  // specific Copilot token. Stripping thinking blocks destroys reasoning_opaque,
-  // but CAPI requires it when reasoning is enabled — missing it causes 400.
-  // Preserve thinking blocks when reasoning is enabled so reasoning_opaque
-  // flows through; session routing keeps requests on the same account.
-  // If the signature IS invalid (wrong account), CAPI returns "Invalid
-  // signature" and the retry in handleWithChatCompletions handles it.
-  if (!reasoningEnabled) {
-    stripThinkingBlocksForMultiToken(anthropicPayload)
-  }
-
-  const openAIPayload = translateToOpenAI(anthropicPayload)
+  const openAIPayload =
+    preparedPayload ?
+      structuredClone(preparedPayload)
+    : translateToOpenAI(anthropicPayload)
 
   // Enable thinking/reasoning on the ChatCompletions path
   // Copilot API uses reasoning_effort to enable thinking (returns reasoning_text in response)
   // thinking_budget is also sent for models that support explicit budget control
-  if (anthropicPayload.thinking) {
+  if (!preparedPayload && anthropicPayload.thinking) {
     const extra = openAIPayload as unknown as Record<string, unknown>
     const usesImplicitDefault = usesImplicitReasoningDefault(
       normalizeModelName(openAIPayload.model),
@@ -868,7 +946,8 @@ const executeChatCompletions = async (
     openAIPayload.temperature = 1
     delete openAIPayload.top_p
   } else if (
-    effortOverride
+    !preparedPayload
+    && effortOverride
     && !usesImplicitReasoningDefault(normalizeModelName(openAIPayload.model))
   ) {
     // Subagent/skill requests may set output_config.effort without a thinking
@@ -880,15 +959,16 @@ const executeChatCompletions = async (
     delete openAIPayload.top_p
   }
 
-  const { payload: replacedPayload, appliedRules } =
-    await applyReplacementsToPayload(openAIPayload)
-  if (anthropicPayload.thinking) {
+  const replacedPayload = openAIPayload
+  const appliedRules: Array<string> = []
+  if (!preparedPayload && anthropicPayload.thinking) {
     applyThinkingBudget(
       replacedPayload,
       anthropicPayload.thinking.budget_tokens,
     )
   }
-  const customReference = resolveCustomChatModel(replacedPayload.model)
+  const customReference =
+    preparedPayload ? undefined : resolveCustomChatModel(replacedPayload.model)
   if (customReference) {
     const customPayload = {
       ...replacedPayload,
@@ -929,8 +1009,11 @@ const executeChatCompletions = async (
       }),
       async (span) => {
         const response = (await createChatCompletions(finalPayload, {
+          candidatePrepared: preparedPayload !== undefined,
           copilotSessionToken,
           initiator: initiatorOverride,
+          retryBudget,
+          routedAccountPin,
           signal: c.req.raw.signal,
         })) as ChatCompletionResponse
 
@@ -953,6 +1036,19 @@ const executeChatCompletions = async (
           copilotSessionToken,
           initiatorOverride,
           abortSignal: c.req.raw.signal,
+          maxUses: webSearchMaxUses,
+          ...(preparedPayload ?
+            {
+              createCompletion: async (payload) =>
+                (await createChatCompletions(payload, {
+                  allowCompatibilityRetry: false,
+                  candidatePrepared: true,
+                  copilotSessionToken,
+                  initiator: initiatorOverride,
+                  signal: c.req.raw.signal,
+                })) as ChatCompletionResponse,
+            }
+          : {}),
         })
       : initialResponse
 
@@ -999,14 +1095,21 @@ const executeChatCompletions = async (
         ])
         const preflush = await raceSsePreflush(
           createChatCompletions(finalPayload, {
+            candidatePrepared: preparedPayload !== undefined,
             copilotSessionToken,
             initiator: initiatorOverride,
+            retryBudget,
+            routedAccountPin,
             signal: upstreamSignal,
           }),
         )
 
         return streamSSE(c, async (stream) => {
           stream.onAbort(() => downstreamAbort.abort())
+          const owner = createMessagesStreamOwner(c, stream)
+          stream.onAbort(() => {
+            owner.adapter.abort()
+          })
 
           try {
             if (preflush.kind === "pending") {
@@ -1030,7 +1133,7 @@ const executeChatCompletions = async (
 
             if (needsWebSearchBuffering) {
               const buffered = await streamChatCompletionsWithWebSearch(
-                stream,
+                { stream, owner },
                 withSseHeartbeat(
                   response as AsyncIterable<{ data?: string }>,
                   stream,
@@ -1052,6 +1155,19 @@ const executeChatCompletions = async (
                       copilotSessionToken,
                       initiatorOverride,
                       abortSignal: upstreamSignal,
+                      maxUses: webSearchMaxUses,
+                      ...(preparedPayload ?
+                        {
+                          createCompletion: async (payload) =>
+                            (await createChatCompletions(payload, {
+                              allowCompatibilityRetry: false,
+                              candidatePrepared: true,
+                              copilotSessionToken,
+                              initiator: initiatorOverride,
+                              signal: upstreamSignal,
+                            })) as ChatCompletionResponse,
+                        }
+                      : {}),
                     }),
                   ),
                   stream,
@@ -1060,13 +1176,15 @@ const executeChatCompletions = async (
                   resolved,
                   requestedModel,
                 )
-                await emitAnthropicResponseAsStream(stream, anthropicResponse)
+                await owner.adapter.succeed(async () => {
+                  await emitAnthropicResponseAsStream(stream, anthropicResponse)
+                })
               }
               return
             }
 
             const directResult = await streamChatCompletionsDirect(
-              stream,
+              { stream, owner },
               withSseHeartbeat(
                 response as AsyncIterable<{ data?: string }>,
                 stream,
@@ -1085,9 +1203,7 @@ const executeChatCompletions = async (
             setOptionalTokenDetails(streamSpan, directResult.cachedTokens)
             setSentryOutputMessages(streamSpan, directResult.responseText)
           } catch (error) {
-            if (isAbortError(error)) return
-            // Headers are already committed, so this must travel in-band.
-            await emitAnthropicStreamError(stream, error)
+            await failMessagesStream(owner.adapter, error)
           } finally {
             finishSpan()
           }
@@ -1108,10 +1224,17 @@ async function executeCustomProviderChatCompletions(
     requestedModel?: string
     appliedRules: Array<string>
     reasoningEffort?: ReasoningEffort
+    webSearchMaxUses?: number
   },
 ) {
-  const { reference, payload, requestedModel, appliedRules, reasoningEffort } =
-    options
+  const {
+    reference,
+    payload,
+    requestedModel,
+    appliedRules,
+    reasoningEffort,
+    webSearchMaxUses,
+  } = options
   const responseModel = requestedModel ?? payload.model
 
   logger.debug(
@@ -1132,6 +1255,7 @@ async function executeCustomProviderChatCompletions(
       payload,
       responseModel,
       reasoningEffort,
+      webSearchMaxUses,
     })
   }
 
@@ -1181,6 +1305,7 @@ async function executeCustomProviderWebSearch(
     payload: ChatCompletionsPayload
     responseModel: string
     reasoningEffort?: ReasoningEffort
+    webSearchMaxUses?: number
   },
 ) {
   const requestedStream = Boolean(options.payload.stream)
@@ -1201,6 +1326,7 @@ async function executeCustomProviderWebSearch(
   const resolved = await resolveWebSearchCalls(initial, payload, {
     abortSignal: c.req.raw.signal,
     createCompletion,
+    maxUses: options.webSearchMaxUses,
   })
   setRequestContext(c, {
     inputTokens: resolved.usage?.prompt_tokens,
@@ -1210,7 +1336,17 @@ async function executeCustomProviderWebSearch(
 
   if (!requestedStream) return c.json(result)
   return streamSSE(c, async (stream) => {
-    await emitAnthropicResponseAsStream(stream, result)
+    const owner = createMessagesStreamOwner(c, stream)
+    stream.onAbort(() => {
+      owner.adapter.abort()
+    })
+    try {
+      await owner.adapter.succeed(async () => {
+        await emitAnthropicResponseAsStream(stream, result)
+      })
+    } catch (error) {
+      await failMessagesStream(owner.adapter, error)
+    }
   })
 }
 
@@ -1248,9 +1384,13 @@ async function handleCustomProviderChatCompletionStream(
         )
 
         return streamSSE(c, async (stream) => {
+          const owner = createMessagesStreamOwner(c, stream)
+          stream.onAbort(() => {
+            owner.adapter.abort()
+          })
           try {
             const directResult = await streamChatCompletionsDirect(
-              stream,
+              { stream, owner },
               withSseHeartbeat(
                 response as AsyncIterable<{ data?: string }>,
                 stream,
@@ -1273,9 +1413,7 @@ async function handleCustomProviderChatCompletionStream(
             setOptionalTokenDetails(streamSpan, directResult.cachedTokens)
             setSentryOutputMessages(streamSpan, directResult.responseText)
           } catch (error) {
-            if (isAbortError(error)) return
-            // Headers are already committed, so this must travel in-band.
-            await emitAnthropicStreamError(stream, error)
+            await failMessagesStream(owner.adapter, error)
           } finally {
             finishSpan()
           }
@@ -1289,30 +1427,69 @@ async function handleCustomProviderChatCompletionStream(
 }
 
 type SSEStream = {
-  writeSSE: (data: { event: string; data: string }) => Promise<void>
+  readonly aborted: boolean
+  readonly closed: boolean
+  writeSSE: (data: { event?: string; data: string }) => Promise<void>
+}
+
+type MessagesStreamOwner = {
+  adapter: MessagesTerminalAdapter
+  setCloseOpenBlocks(
+    closeOpenBlocks: () => Array<
+      import("./anthropic-types").AnthropicStreamEventData
+    >,
+  ): void
+}
+
+function createMessagesStreamOwner(
+  c: Context,
+  stream: SSEStream,
+): MessagesStreamOwner {
+  let closeOpenBlocks = EMPTY_MESSAGES_CLOSE
+  return {
+    adapter: createMessagesTerminalAdapter({
+      c,
+      stream,
+      closeOpenBlocks: () => closeOpenBlocks(),
+    }),
+    setCloseOpenBlocks(next) {
+      closeOpenBlocks = next
+    },
+  }
+}
+
+const EMPTY_MESSAGES_CLOSE = () =>
+  new Array<import("./anthropic-types").AnthropicStreamEventData>()
+
+async function failMessagesStream(
+  adapter: MessagesTerminalAdapter,
+  error: unknown,
+): Promise<void> {
+  if (isAbortError(error)) {
+    adapter.abort()
+    return
+  }
+  await adapter.fail({
+    kind: "thrown",
+    error,
+    ...(isHTTPError(error) ?
+      { inspection: await inspectHttpError(error) }
+    : {}),
+  })
 }
 
 type ResponsesStream = AsyncIterable<{ event?: string; data?: string }>
-
-const parseResponsesStreamError = (
-  parsed: ResponseStreamEvent,
-): string | null => {
-  if (parsed.type !== "error") return null
-  return SAFE_RESPONSES_STREAM_ERROR_MESSAGE
-}
 
 const writeResponsesEvents = async (
   stream: SSEStream,
   parsed: ResponseStreamEvent,
   streamState: ReturnType<typeof createResponsesStreamState>,
-): Promise<void> => {
-  const events = translateResponsesStreamEvent(parsed, streamState)
-  for (const event of events) {
-    await stream.writeSSE({
-      event: event.type,
-      data: JSON.stringify(event),
-    })
+): Promise<ReturnType<typeof translateResponsesStreamEvent>> => {
+  const result = translateResponsesStreamEvent(parsed, streamState)
+  if (result.kind === "events") {
+    await writeAnthropicEvents(stream, result.events)
   }
+  return result
 }
 
 const isWebSearchFunctionCall = (parsed: ResponseStreamEvent): boolean =>
@@ -1347,11 +1524,21 @@ const bufferResponsesStream = async (
     }
     if (!chunk.data) continue
 
-    const parsed = JSON.parse(chunk.data) as ResponseStreamEvent
+    const parsed = parseRecoverableStreamJson({
+      data: chunk.data,
+      event: chunk.event,
+      protocol: "Responses-to-Messages",
+      terminal: isResponsesTerminalEventName(chunk.event),
+    }) as ResponseStreamEvent | undefined
+    if (parsed === undefined) continue
     events.push(parsed)
 
     if (isWebSearchFunctionCall(parsed)) hasWebSearch = true
-    if (isResponseCompleted(parsed)) completedResult = parsed.response
+    if (parsed.type === "response.failed" || parsed.type === "error") break
+    if (isResponseCompleted(parsed)) {
+      completedResult = parsed.response
+      break
+    }
   }
 
   return { events, hasWebSearch, completedResult }
@@ -1359,43 +1546,37 @@ const bufferResponsesStream = async (
 
 const replayBufferedEvents = async (
   stream: SSEStream,
+  owner: MessagesStreamOwner,
   bufferedEvents: Array<ResponseStreamEvent>,
 ): Promise<void> => {
   const streamState = createResponsesStreamState()
-  let errorForwarded = false
+  owner.setCloseOpenBlocks(() => closeResponsesOpenBlocks(streamState))
 
   for (const parsed of bufferedEvents) {
-    const errorMsg = parseResponsesStreamError(parsed)
-    if (errorMsg) {
-      const errorEvent = buildErrorEvent(errorMsg)
-      await stream.writeSSE({
-        event: errorEvent.type,
-        data: JSON.stringify(errorEvent),
+    const result = await writeResponsesEvents(stream, parsed, streamState)
+    if (result.kind === "success") {
+      await owner.adapter.succeed(async () => {
+        await writeAnthropicEvents(
+          stream,
+          createResponsesNormalTerminalEvents(streamState, result.response),
+        )
       })
-      errorForwarded = true
-      continue
+      return
     }
-
-    await writeResponsesEvents(stream, parsed, streamState)
-    if (streamState.messageCompleted) break
+    if (result.kind === "failure") {
+      await owner.adapter.failReceived(result.error)
+      // The adapter has committed the only failure terminal before this mark.
+      // eslint-disable-next-line require-atomic-updates
+      streamState.terminal = "failed"
+      return
+    }
   }
-
-  if (!streamState.messageCompleted && !errorForwarded) {
-    logger.warn(
-      "Responses stream ended without completion; sending error event",
-    )
-    const errorEvent = buildErrorEvent(
-      "Responses stream ended without completion",
-    )
-    await stream.writeSSE({
-      event: errorEvent.type,
-      data: JSON.stringify(errorEvent),
-    })
-  }
+  await owner.adapter.finishSource()
 }
 
 const streamResponsesWithWebSearch = async (
   stream: SSEStream,
+  owner: MessagesStreamOwner,
   response: ResponsesStream,
 ): Promise<{
   hadWebSearch: boolean
@@ -1410,12 +1591,13 @@ const streamResponsesWithWebSearch = async (
     return { hadWebSearch: true, initialResult: completedResult }
   }
 
-  await replayBufferedEvents(stream, events)
+  await replayBufferedEvents(stream, owner, events)
   return { hadWebSearch: false, initialResult: completedResult }
 }
 
 const streamResponsesDirect = async (
   stream: SSEStream,
+  owner: MessagesStreamOwner,
   response: ResponsesStream,
 ): Promise<{
   inputTokens: number
@@ -1425,6 +1607,7 @@ const streamResponsesDirect = async (
   responseText: string
 }> => {
   const streamState = createResponsesStreamState()
+  owner.setCloseOpenBlocks(() => closeResponsesOpenBlocks(streamState))
   let streamInputTokens = 0
   let streamOutputTokens = 0
   let streamCachedTokens = 0
@@ -1438,17 +1621,13 @@ const streamResponsesDirect = async (
     }
     if (!chunk.data) continue
 
-    const parsed = JSON.parse(chunk.data) as ResponseStreamEvent
-    const errorMsg = parseResponsesStreamError(parsed)
-    if (errorMsg) {
-      const errorEvent = buildErrorEvent(errorMsg)
-      await stream.writeSSE({
-        event: errorEvent.type,
-        data: JSON.stringify(errorEvent),
-      })
-      continue
-    }
-
+    const parsed = parseRecoverableStreamJson({
+      data: chunk.data,
+      event: chunk.event,
+      protocol: "Responses-to-Messages",
+      terminal: isResponsesTerminalEventName(chunk.event),
+    }) as ResponseStreamEvent | undefined
+    if (parsed === undefined) continue
     // Capture usage from response.completed events
     if (isResponseCompleted(parsed) && parsed.response.usage) {
       streamInputTokens = parsed.response.usage.input_tokens
@@ -1460,22 +1639,26 @@ const streamResponsesDirect = async (
       responseText = parsed.response.output_text
     }
 
-    await writeResponsesEvents(stream, parsed, streamState)
-    if (streamState.messageCompleted) break
+    const result = await writeResponsesEvents(stream, parsed, streamState)
+    if (result.kind === "success") {
+      await owner.adapter.succeed(async () => {
+        await writeAnthropicEvents(
+          stream,
+          createResponsesNormalTerminalEvents(streamState, result.response),
+        )
+      })
+      break
+    }
+    if (result.kind === "failure") {
+      await owner.adapter.failReceived(result.error)
+      // The adapter has committed the only failure terminal before this mark.
+      // eslint-disable-next-line require-atomic-updates
+      streamState.terminal = "failed"
+      break
+    }
   }
 
-  if (!streamState.messageCompleted) {
-    logger.warn(
-      "Responses stream ended without completion; sending error event",
-    )
-    const errorEvent = buildErrorEvent(
-      "Responses stream ended without completion",
-    )
-    await stream.writeSSE({
-      event: errorEvent.type,
-      data: JSON.stringify(errorEvent),
-    })
-  }
+  if (streamState.terminal === "open") await owner.adapter.finishSource()
 
   return {
     inputTokens: streamInputTokens,
@@ -1486,6 +1669,15 @@ const streamResponsesDirect = async (
   }
 }
 
+function isResponsesTerminalEventName(event: string | undefined): boolean {
+  return (
+    event === "error"
+    || event === "response.completed"
+    || event === "response.failed"
+    || event === "response.incomplete"
+  )
+}
+
 const handleWithResponsesApi = async (
   c: Context,
   anthropicPayload: AnthropicMessagesPayload,
@@ -1493,46 +1685,13 @@ const handleWithResponsesApi = async (
     copilotSessionToken?: string
     initiatorOverride?: "agent" | "user"
     effortOverride?: ReasoningEffort
+    preparedPayload?: ResponsesPayload
     requestedModel?: string
+    retryBudget?: RetryBudget
+    routedAccountPin?: RoutedAccountPin
+    webSearchMaxUses?: number
   },
-) => {
-  try {
-    return await executeResponsesApi(c, anthropicPayload, options)
-  } catch (error) {
-    if (error instanceof HTTPError && error.response.status === 400) {
-      const body = await error.response.clone().text()
-      const isSignatureError =
-        body.includes("Invalid signature")
-        || body.includes("Invalid `signature`")
-      const isReasoningBadRequest =
-        body.trim() === "Bad Request"
-        && Boolean(options?.effortOverride || anthropicPayload.thinking)
-
-      if (
-        (isSignatureError || isReasoningBadRequest)
-        && stripThinkingBlocks(anthropicPayload)
-      ) {
-        const reason =
-          isSignatureError ? "invalid signature" : "Bad Request with reasoning"
-        recordNonDefaultBehavior(c, {
-          kind: "reasoning_retry_without_thinking",
-          message: `Stripped thinking blocks due to ${reason}, retrying Responses without reasoning`,
-          data: {
-            model: anthropicPayload.model,
-            reason,
-            endpoint: "Responses",
-          },
-        })
-        delete anthropicPayload.thinking
-        return await executeResponsesApi(c, anthropicPayload, {
-          ...options,
-          effortOverride: undefined,
-        })
-      }
-    }
-    throw error
-  }
-}
+) => await executeResponsesApi(c, anthropicPayload, options)
 
 const executeResponsesApi = async (
   c: Context,
@@ -1541,23 +1700,30 @@ const executeResponsesApi = async (
     copilotSessionToken?: string
     initiatorOverride?: "agent" | "user"
     effortOverride?: ReasoningEffort
+    preparedPayload?: ResponsesPayload
     requestedModel?: string
+    retryBudget?: RetryBudget
+    routedAccountPin?: RoutedAccountPin
+    webSearchMaxUses?: number
   },
 ) => {
   const {
     copilotSessionToken,
     initiatorOverride,
     effortOverride,
+    preparedPayload,
     requestedModel,
+    retryBudget,
+    routedAccountPin,
+    webSearchMaxUses,
   } = options ?? {}
-  const reasoningEnabled = Boolean(effortOverride || anthropicPayload.thinking)
-  if (!reasoningEnabled) {
-    stripThinkingBlocksForMultiToken(anthropicPayload)
-  }
-  const responsesPayload = translateAnthropicMessagesToResponsesPayload(
-    anthropicPayload,
-    effortOverride,
-  )
+  const responsesPayload =
+    preparedPayload ?
+      structuredClone(preparedPayload)
+    : translateAnthropicMessagesToResponsesPayload(
+        anthropicPayload,
+        effortOverride,
+      )
   logger.debug("Prepared translated Responses request", {
     inputKind: Array.isArray(responsesPayload.input) ? "items" : "text",
     model: responsesPayload.model,
@@ -1593,6 +1759,9 @@ const executeResponsesApi = async (
             vision,
             initiator: initiatorOverride ?? initiator,
             signal: c.req.raw.signal,
+            prepared: preparedPayload !== undefined,
+            retryBudget,
+            routedAccountPin,
           })
 
           const responsesAccountId = getLastUsedAccountId()
@@ -1601,10 +1770,15 @@ const executeResponsesApi = async (
           }
 
           return streamSSE(c, async (stream) => {
+            const owner = createMessagesStreamOwner(c, stream)
+            stream.onAbort(() => {
+              owner.adapter.abort()
+            })
             try {
               if (needsWebSearchBuffering) {
                 const buffered = await streamResponsesWithWebSearch(
                   stream,
+                  owner,
                   withSseHeartbeat(response as ResponsesStream, stream),
                 )
 
@@ -1651,6 +1825,20 @@ const executeResponsesApi = async (
                           vision,
                           initiator: initiatorOverride ?? initiator,
                           signal: c.req.raw.signal,
+                          maxUses: webSearchMaxUses,
+                          ...(preparedPayload ?
+                            {
+                              createResponse: async (payload) =>
+                                (await createResponses(payload, {
+                                  allowCompatibilityRetry: false,
+                                  copilotSessionToken,
+                                  vision,
+                                  initiator: initiatorOverride ?? initiator,
+                                  signal: c.req.raw.signal,
+                                  prepared: true,
+                                })) as ResponsesResult,
+                            }
+                          : {}),
                         },
                       ),
                     ),
@@ -1659,13 +1847,19 @@ const executeResponsesApi = async (
                   const anthropicResponse =
                     translateResponsesResultToAnthropic(resolved)
                   if (requestedModel) anthropicResponse.model = requestedModel
-                  await emitAnthropicResponseAsStream(stream, anthropicResponse)
+                  await owner.adapter.succeed(async () => {
+                    await emitAnthropicResponseAsStream(
+                      stream,
+                      anthropicResponse,
+                    )
+                  })
                 }
                 return
               }
 
               const directUsage = await streamResponsesDirect(
                 stream,
+                owner,
                 withSseHeartbeat(response as ResponsesStream, stream),
               )
 
@@ -1684,9 +1878,7 @@ const executeResponsesApi = async (
               )
               setSentryOutputMessages(streamSpan, directUsage.responseText)
             } catch (error) {
-              if (isAbortError(error)) return
-              // Headers are already committed, so this must travel in-band.
-              await emitAnthropicStreamError(stream, error)
+              await failMessagesStream(owner.adapter, error)
             } finally {
               finishSpan()
             }
@@ -1710,6 +1902,9 @@ const executeResponsesApi = async (
         vision,
         initiator: initiatorOverride ?? initiator,
         signal: c.req.raw.signal,
+        prepared: preparedPayload !== undefined,
+        retryBudget,
+        routedAccountPin,
       })) as ResponsesResult
 
       const responsesAccountId = getLastUsedAccountId()
@@ -1742,6 +1937,20 @@ const executeResponsesApi = async (
         vision,
         initiator: initiatorOverride ?? initiator,
         signal: c.req.raw.signal,
+        maxUses: webSearchMaxUses,
+        ...(preparedPayload ?
+          {
+            createResponse: async (payload) =>
+              (await createResponses(payload, {
+                allowCompatibilityRetry: false,
+                copilotSessionToken,
+                vision,
+                initiator: initiatorOverride ?? initiator,
+                signal: c.req.raw.signal,
+                prepared: true,
+              })) as ResponsesResult,
+          }
+        : {}),
       })
     : initialResult
 
@@ -1917,91 +2126,5 @@ const isCompactRequest = (
     (msg) =>
       typeof msg.text === "string"
       && msg.text.startsWith(compactSystemPromptStart),
-  )
-}
-
-const mergeContentWithText = (
-  tr: AnthropicToolResultBlock,
-  textBlock: AnthropicTextBlock,
-): AnthropicToolResultBlock => {
-  if (typeof tr.content === "string") {
-    return { ...tr, content: `${tr.content}\n\n${textBlock.text}` }
-  }
-  if (Array.isArray(tr.content)) {
-    return {
-      ...tr,
-      content: [...tr.content, textBlock],
-    }
-  }
-  // content is null/undefined — start fresh with just the text block
-  return { ...tr, content: [textBlock] }
-}
-
-const mergeContentWithTexts = (
-  tr: AnthropicToolResultBlock,
-  textBlocks: Array<AnthropicTextBlock>,
-): AnthropicToolResultBlock => {
-  if (typeof tr.content === "string") {
-    const appendedTexts = textBlocks.map((tb) => tb.text).join("\n\n")
-    return { ...tr, content: `${tr.content}\n\n${appendedTexts}` }
-  }
-  if (Array.isArray(tr.content)) {
-    return { ...tr, content: [...tr.content, ...textBlocks] }
-  }
-  // content is null/undefined
-  return { ...tr, content: [...textBlocks] }
-}
-
-const hasToolReference = (toolResult: AnthropicToolResultBlock): boolean =>
-  Array.isArray(toolResult.content)
-  && toolResult.content.some((block) => block.type === "tool_reference")
-
-const mergeToolResultForClaude = (
-  anthropicPayload: AnthropicMessagesPayload,
-): void => {
-  for (const msg of anthropicPayload.messages) {
-    if (msg.role !== "user" || !Array.isArray(msg.content)) continue
-
-    const toolResults: Array<AnthropicToolResultBlock> = []
-    const textBlocks: Array<AnthropicTextBlock> = []
-    let valid = true
-
-    for (const block of msg.content) {
-      if (isAnthropicToolResultBlock(block)) {
-        toolResults.push(block)
-      } else if (isAnthropicTextBlock(block)) {
-        textBlocks.push(block)
-      } else {
-        valid = false
-        break
-      }
-    }
-
-    if (
-      !valid
-      || toolResults.length === 0
-      || textBlocks.length === 0
-      || toolResults.some((toolResult) => hasToolReference(toolResult))
-    ) {
-      continue
-    }
-
-    msg.content = mergeToolResult(toolResults, textBlocks)
-  }
-}
-
-const mergeToolResult = (
-  toolResults: Array<AnthropicToolResultBlock>,
-  textBlocks: Array<AnthropicTextBlock>,
-): Array<AnthropicToolResultBlock> => {
-  // equal lengths -> pairwise merge
-  if (toolResults.length === textBlocks.length) {
-    return toolResults.map((tr, i) => mergeContentWithText(tr, textBlocks[i]))
-  }
-
-  // lengths differ -> append all textBlocks to the last tool_result
-  const lastIndex = toolResults.length - 1
-  return toolResults.map((tr, i) =>
-    i === lastIndex ? mergeContentWithTexts(tr, textBlocks) : tr,
   )
 }

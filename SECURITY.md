@@ -32,17 +32,39 @@ affected, include its exact version or digest.
   approved Origin.
 - Provider keys and sensitive custom headers are write-only through dashboard
   APIs. Configuration export and ordinary request logging redact recognized
-  secret fields and headers. LLM Debug is the intentional exception: its
-  administrator-only in-memory records preserve raw request and response data
-  for ten minutes.
+  request, header, and configuration secrets.
+- Final non-empty upstream error response bodies are intentionally replicated to
+  the normal client, ordinary logs, and Sentry with status and content type.
+  Custom-provider bodies are excluded from ordinary logs and Sentry but remain
+  available to the normal client and administrator-only LLM Debug.
+- Authenticated inference requesters can direct attachment/file recovery to any
+  runtime-valid HTTP(S) destination and redirect. There is no SSRF destination
+  policy; caller abort, timeout, byte, redirect, parsing, media, and
+  per-attachment degradation limits remain.
+- LLM Debug retains the broader administrator-only raw request and response
+  capture, including credentials, in process memory for ten minutes.
 - Remote Control uses short-lived, one-use, administrator/session-bound
   WebSocket tickets. Voice and Responses WebSockets authenticate before upgrade
   and retain protocol validation without local traffic or resource limits.
 - Direct Connect is disabled by default. The only public health route is exact
   `GET /health/health`.
 - Forwarding headers are honored only when the actual socket peer is in
-  `COPILOT_TRUSTED_PROXY_CIDRS`. Successful authentication never permanently
-  adds a client IP to the managed allowlist.
+  `COPILOT_TRUSTED_PROXY_CIDRS`. Successful authoritative inference auth
+  exempts the resolved IP from the process-local failure ban and persists an
+  enabled entry for `/transcribe`. New entries use source `authenticated`;
+  existing operator-created entries are re-enabled while preserving their
+  source and transparent-proxy permission. Newly automatic entries never
+  authorize credential-free transparent proxy inference.
+- Public bridge and Direct Connect callback origins use a valid
+  `COPILOT_PUBLIC_BASE_URL`, a complete forwarded protocol/host pair only from
+  a trusted socket peer, or the direct request origin. Invalid configuration
+  falls back safely, and `X-Forwarded-For` never establishes proxy trust.
+- Transparent redirected provider traffic uses the dedicated
+  `x-copilot-gateway-key` for gateway authentication. Provider
+  `Authorization`, `x-api-key`, and `x-goog-api-key` values remain upstream
+  credentials; the dedicated header is removed before forwarding and has no
+  meaning on ordinary owned routes. An explicit invalid dedicated key cannot
+  fall back to IP authorization.
 - Failed protected credential checks use one shared rolling 24-hour IP tracker.
   The third failure bans the source for 24 hours and all denials remain uniform
   `401` responses. Public routes, session/CSRF semantic failures, compatibility
@@ -57,11 +79,11 @@ affected, include its exact version or digest.
 | ID | Status | Current resolution |
 | --- | --- | --- |
 | F-01 | Resolved | OAuth refresh no longer returns the gateway key. Opaque scoped access/refresh tokens, PKCE-bound one-use codes, rotation, replay-family revocation, and digested persistence replaced the simulated bearer exchange. |
-| F-02 | Resolved with an intentional raw-diagnostics exception | Dashboard authority moved to gateway-plus-password cookie sessions. Gateway credentials alone cannot access dashboard APIs; provider secrets are write-only and configuration exports redact recognized secrets. Administrator-only LLM Debug intentionally retains raw request and response data in process memory for ten minutes. |
+| F-02 | Resolved with intentional raw compatibility channels | Dashboard authority moved to gateway-plus-password cookie sessions. Gateway credentials alone cannot access dashboard APIs; provider secrets are write-only and configuration exports redact recognized secrets. Final non-empty upstream failure bodies intentionally pass through to normal clients, logs, and Sentry. Administrator-only LLM Debug remains the broader raw request/response capture in process memory for ten minutes. |
 | F-03 | Resolved | Remote Control requires short-lived, one-use, administrator/session-bound WebSocket tickets with Origin validation. |
 | F-04 | Resolved | Only exact metadata-free `GET /health/health` remains public. Direct Connect is disabled by default and authenticated when explicitly enabled. |
 | F-05 | Resolved | Voice WebSockets authenticate before upgrade, enforce Origin when supplied, validate protocol messages, and cancel transcription when callers disconnect. |
-| F-06 | Resolved with documented Codex compatibility exceptions | Forwarded headers are accepted only from configured socket peers; Compose binds the backend to loopback; auth does not auto-promote IPs. The Codex spoof template forwards only exact `POST /transcribe`. The Statsig spoof template forwards only `/v1/initialize`, `/v1/download`, and `/v1/check`; behind a source-NATing load balancer, deploying it explicitly accepts that all downstream callers share the edge's allowlisted identity. |
+| F-06 | Resolved with documented Codex compatibility exceptions | Forwarded headers are accepted only from configured socket peers; Compose binds the backend to loopback. Authoritative inference auth promotes only the safely resolved IP to a persistent `/transcribe` entry and process-local ban exemption. New entries use source `authenticated`; existing operator entries retain their source and transparent-proxy permission when re-enabled. Missing/wrong credentials remain `401`, and newly automatic entries do not authorize transparent proxy inference. The Codex spoof template forwards only exact `POST /transcribe`. The Statsig spoof template forwards only `/v1/initialize`, `/v1/download`, and `/v1/check`; behind a source-NATing load balancer, deploying it explicitly accepts that all downstream callers share the edge's allowlisted identity. |
 | F-07 | Resolved | Nginx templates use hostname-specific route/method allowlists and a final default denial instead of catch-all proxying. |
 | F-08 | Resolved | Protected credential failures share a rolling three-strike, 24-hour IP ban and return uniform no-store `401` responses. Authorization failures by an already-recognized principal and denials on compatibility stubs stay off the tracker so a legitimate client cannot ban itself. Supplied Nginx policy adds no pacing, connection, finite body, or I/O timeout controls. |
 | F-11 | Resolved for the tracked dependency baseline | Hono, Undici, Sentry, Bun, and related runtime dependencies were upgraded; `srvx` was removed; the Bun image is digest-pinned; production audit is a CI gate. |
@@ -115,10 +137,16 @@ complete host/container isolation audit. Operators must:
    deployed image current.
 5. Install log rotation and monitor disk, connection, request, and upstream-cost
    usage.
-6. Rotate any credential that has appeared in logs, shell history, screenshots,
-   issue content, chat history, or a prior vulnerable response. Rotation is an
-   operator action and is never performed automatically by updates.
-7. Treat the data volume as sensitive. It can contain GitHub/provider
+6. Issue inference credentials only to trusted clients. If unrestricted
+   attachment HTTP(S) authority is unacceptable, constrain process/container
+   network reachability outside the application.
+7. Protect client transports plus log and Sentry access, retention, and export
+   as potentially payload- and credential-bearing.
+8. Rotate any credential that has appeared in a final upstream failure body,
+   LLM Debug, logs, Sentry, shell history, screenshots, issue content, chat
+   history, or a prior vulnerable response. Rotation is an operator action and
+   is never performed automatically by updates.
+9. Treat the data volume as sensitive. It can contain GitHub/provider
    credentials, configuration, digested sessions/tokens, prompts, and response
    metadata.
 

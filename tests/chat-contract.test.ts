@@ -285,17 +285,23 @@ describe("Chat request validation", () => {
     })
   })
 
-  test("rejects max_tokens with max_completion_tokens", () => {
-    expectValidationError(
-      () =>
-        normalizeChatCompletionsRequest({
-          model: "gpt-current",
-          messages: [{ role: "user", content: "hello" }],
-          max_tokens: 128,
-          max_completion_tokens: 128,
-        }),
-      { code: "invalid_request", param: "max_tokens" },
-    )
+  test("prefers max_completion_tokens when both token aliases are present", () => {
+    expect(
+      normalizeChatCompletionsRequest({
+        model: "gpt-current",
+        messages: [{ role: "user", content: "hello" }],
+        max_tokens: 128,
+        max_completion_tokens: 256,
+      }),
+    ).toMatchObject({ max_completion_tokens: 256 })
+    expect(
+      normalizeChatCompletionsRequest({
+        model: "gpt-current",
+        messages: [{ role: "user", content: "hello" }],
+        max_tokens: 128,
+        max_completion_tokens: 256,
+      }),
+    ).not.toHaveProperty("max_tokens")
   })
 
   test("rejects an empty model", () => {

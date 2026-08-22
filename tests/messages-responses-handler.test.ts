@@ -234,11 +234,9 @@ test("preserves output_config.format on the Anthropic responses path", async () 
       type: "json_schema",
       schema: {
         type: "object",
-        additionalProperties: false,
         properties: {
           answer: { type: "string" },
         },
-        required: ["answer"],
       },
     },
   })

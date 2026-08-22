@@ -4,6 +4,7 @@ import {
   afterAll,
   afterEach,
   beforeAll,
+  beforeEach,
   describe,
   expect,
   mock,
@@ -22,10 +23,10 @@ import type { ModelsResponse } from "../src/services/copilot/get-models"
 import { setConfigForTest } from "../src/lib/config"
 import { getCopilotRequestAttribution } from "../src/lib/copilot-request-context"
 import { HTTPError, LocalHTTPError } from "../src/lib/error"
+import { setIpAllowlistForTest } from "../src/lib/ip-allowlist"
 import { isIpBlocked, resetIpSecurityForTest } from "../src/lib/ip-blocker"
 import { setModelRedirectsForTest } from "../src/lib/model-redirect"
 import {
-  createRoutingTelemetryRequestState,
   getCopilotResponseHeaders,
   getLastUsedRoutedAccountId,
   setCopilotResponseHeader,
@@ -50,6 +51,7 @@ import {
   responsesWebSocket,
   rehydrateWarmupPayload,
   sendWebSocketError,
+  setResponsesWebSocketDependenciesForTest,
   tryUpgradeResponsesWebSocket,
 } from "../src/routes/responses/websocket"
 import {
@@ -76,6 +78,7 @@ let lastRequestBody: Record<string, unknown> | undefined
 let capturedAffinity: RoutingAffinity | undefined
 const capturedAuthorization: Array<string | null> = []
 const capturedUpstreamHeaders: Array<Headers> = []
+let restoreResponsesWebSocketDependencies: (() => void) | undefined
 
 interface WebSocketMetadataCase {
   expectedHeaders: Record<string, string> | undefined
@@ -151,7 +154,13 @@ afterAll(() => {
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
 })
 
+beforeEach(() => {
+  setIpAllowlistForTest([])
+})
+
 afterEach(() => {
+  restoreResponsesWebSocketDependencies?.()
+  restoreResponsesWebSocketDependencies = undefined
   fetchMock.mockClear()
   lastRequestBody = undefined
   capturedAffinity = undefined
@@ -169,6 +178,7 @@ afterEach(() => {
   setModelRedirectsForTest([])
   setConfigForTest(null)
   resetIpSecurityForTest()
+  setIpAllowlistForTest([])
   resetRoutingTelemetryForTest()
 })
 
@@ -425,7 +435,7 @@ describe("responses websocket upgrade handling", () => {
     ).toBe("upgraded")
   })
 
-  test("records missing and invalid upgrade credentials", async () => {
+  test("a valid inference upgrade recovers and promotes an actively banned IP", async () => {
     state.apiKeyAuth = "cli-secret"
     const clientIp = "198.51.100.91"
     const server = { upgrade: () => true }
@@ -456,7 +466,8 @@ describe("responses websocket upgrade handling", () => {
         }),
         server,
       ),
-    ).toBe("auth_failed")
+    ).toBe("upgraded")
+    expect(isIpBlocked(clientIp)).toBe(false)
   })
 
   test("allows multiple connections for one authenticated principal", async () => {
@@ -545,16 +556,15 @@ describe("responses websocket message handling", () => {
     const ws = createTestWebSocket()
     ws.data.nextTurnSequence = 5
     for (let index = 1; index <= 5; index += 1) {
+      const turnData = {
+        activeTurns: ws.data.activeTurns,
+        nextTurnSequence: index - 1,
+        requestId: "test",
+      }
+      const turn = createResponsesWebSocketTurn(turnData, "")
       ws.data.activeTurns.set(index, {
-        abortController: new AbortController(),
-        finalized: false,
-        inputLength: 0,
-        routingState: {},
-        telemetryState: createRoutingTelemetryRequestState(
-          "Responses WebSocket",
-        ),
+        ...turn,
         sequence: index,
-        turnId: `test:${index}`,
       })
     }
     await responsesWebSocket.message(
@@ -665,7 +675,7 @@ describe("responses websocket message handling", () => {
     },
   )
 
-  test("rejects stream false before starting a turn and remains usable", async () => {
+  test("coerces stream false and remains usable", async () => {
     state.models = responsesCapableModels
     const ws = createTestWebSocket()
 
@@ -679,16 +689,15 @@ describe("responses websocket message handling", () => {
       }),
     )
 
-    expect(ws.data.nextTurnSequence).toBe(0)
+    expect(ws.data.nextTurnSequence).toBe(1)
     expect(ws.data.activeTurns.size).toBe(0)
-    expect(JSON.parse(ws.sent[0] ?? "{}")).toMatchObject({
-      type: "error",
-      status: 400,
-      error: {
-        code: "invalid_request_error",
-        message: "Responses WebSocket requests must stream.",
-      },
-    })
+    expect(
+      ws.sent.some(
+        (frame) =>
+          (JSON.parse(frame) as { type?: string }).type
+          === "response.completed",
+      ),
+    ).toBe(true)
 
     await responsesWebSocket.message(
       ws,
@@ -1146,7 +1155,7 @@ describe("responses websocket message handling", () => {
       expect(frame).toMatchObject({
         status: 400,
         error: {
-          code: "endpoint_translation_unsupported",
+          code: "bad_request",
           message: safeMessage,
           type: "invalid_request_error",
         },
@@ -1158,7 +1167,7 @@ describe("responses websocket message handling", () => {
         terminalStatus: "REJECTED",
       })
       expect(structuredLog).toMatchObject({
-        code: "endpoint_translation_unsupported",
+        code: "bad_request",
         status: 400,
       })
       expect(telemetry.models[0]).toMatchObject({
@@ -1206,6 +1215,77 @@ describe("responses websocket message handling", () => {
     expect(lastRequestBody?.previous_response_id).toBeUndefined()
     expect(ws.data.responseSnapshots.has("resp_ws")).toBe(true)
     expect(ws.data.activeTurns.size).toBe(0)
+  })
+
+  test("does not retry a native WebSocket compatibility 400", async () => {
+    state.copilotToken = "copilot-token"
+    state.models = responsesCapableModels
+    queuedResponses.push(
+      Response.json(
+        {
+          error: {
+            code: "invalid_request_body",
+            message:
+              "Unsupported parameter: 'temperature' is not supported with this model.",
+          },
+        },
+        { status: 400 },
+      ),
+      createResponsesSseResponse("must_not_send"),
+    )
+    const ws = createTestWebSocket()
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "hello",
+        temperature: 1,
+      }),
+    )
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(ws.sent.at(-1) ?? "{}")).toMatchObject({
+      type: "error",
+      status: 400,
+      error: { code: "invalid_request_body" },
+    })
+  })
+
+  test("does not retry a Chat-backed WebSocket compatibility 400", async () => {
+    installWebSocketEndpoint("/chat/completions")
+    queuedResponses.push(
+      Response.json(
+        {
+          error: {
+            code: "invalid_request_body",
+            message:
+              "Unsupported parameter: 'temperature' is not supported with this model.",
+          },
+        },
+        { status: 400 },
+      ),
+      createChatCompletionsSseResponse(),
+    )
+    const ws = createTestWebSocket()
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "hello",
+        temperature: 1,
+      }),
+    )
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(ws.sent.at(-1) ?? "{}")).toMatchObject({
+      type: "error",
+      status: 400,
+      error: { code: "invalid_request_body" },
+    })
   })
 
   test("completes a native turn when upstream omits terminal output_text", async () => {
@@ -1274,7 +1354,7 @@ describe("responses websocket message handling", () => {
       )
 
       expect(terminal?.type).toBe("response.completed")
-      expect(terminal?.response?.output_text).toBe("Hello world")
+      expect(terminal?.response).not.toHaveProperty("output_text")
       expect(
         frames.some(
           (frame) => frame.type === "error" || frame.type === "response.failed",
@@ -1340,6 +1420,124 @@ describe("responses websocket message handling", () => {
       }),
     )
     expect(capturedAffinity).toBeUndefined()
+  })
+
+  test("routes a Codex fork through the parent account and upstream session", async () => {
+    const model = "ws-fork-affinity-model"
+    const firstAccount = tokenPool.addAccount(
+      "github-ws-fork-a",
+      "individual",
+      webSocketAccountIds[0],
+    )
+    firstAccount.copilotToken = "ws-fork-child-token"
+    firstAccount.healthy = true
+    firstAccount.models = new Set([model])
+    firstAccount.modelsData = [createWebSocketModel(model)]
+    const secondAccount = tokenPool.addAccount(
+      "github-ws-fork-b",
+      "individual",
+      webSocketAccountIds[1],
+    )
+    secondAccount.copilotToken = "ws-fork-parent-token"
+    secondAccount.healthy = true
+    secondAccount.models = new Set([model])
+    secondAccount.modelsData = [createWebSocketModel(model)]
+    tokenPool.rebuildModelIndex()
+    state.isMultiToken = true
+    queuedResponses.push(
+      createResponsesSseResponse("resp_fork_affinity"),
+      createResponsesSseResponse("resp_fork_follow_up"),
+    )
+
+    const ws = createTestWebSocket()
+    ws.data.affinity = {
+      key: "fork-child-1",
+      source: "codex_session",
+    }
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model,
+        input: "continue the fork",
+        client_metadata: {
+          session_id: "fork-child-1",
+          thread_id: "fork-child-1",
+          "x-codex-turn-metadata": JSON.stringify({
+            forked_from_thread_id: "fork-parent-0",
+          }),
+        },
+      }),
+    )
+
+    expect(capturedAffinity).toEqual({
+      key: "fork-parent-0",
+      source: "codex_thread",
+    })
+    expect(capturedAuthorization).toEqual(["Bearer ws-fork-parent-token"])
+    expect(capturedUpstreamHeaders[0]?.get("x-client-session-id")).toBe(
+      "81e3167a-de1a-5ffa-8c20-f832dc0e2909",
+    )
+    expect(capturedUpstreamHeaders[0]?.get("x-interaction-id")).toBe(
+      "81e3167a-de1a-5ffa-8c20-f832dc0e2909",
+    )
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model,
+        input: "continue after the first fork turn",
+        client_metadata: {
+          session_id: "fork-child-1",
+          thread_id: "fork-child-1",
+        },
+      }),
+    )
+
+    expect(capturedAuthorization).toEqual([
+      "Bearer ws-fork-parent-token",
+      "Bearer ws-fork-parent-token",
+    ])
+    expect(
+      capturedUpstreamHeaders.map((headers) =>
+        headers.get("x-client-session-id"),
+      ),
+    ).toEqual([
+      "81e3167a-de1a-5ffa-8c20-f832dc0e2909",
+      "81e3167a-de1a-5ffa-8c20-f832dc0e2909",
+    ])
+  })
+
+  test("preserves unrelated WebSocket handshake affinity over fork metadata", async () => {
+    state.models = responsesCapableModels
+    queuedResponses.push(createResponsesSseResponse("resp_fork_unrelated"))
+    const ws = createTestWebSocket()
+    ws.data.affinity = {
+      key: "unrelated-handshake",
+      source: "copilot_session",
+    }
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "independent request",
+        client_metadata: {
+          session_id: "fork-child",
+          thread_id: "fork-child",
+          "x-codex-turn-metadata": JSON.stringify({
+            forked_from_thread_id: "fork-parent",
+          }),
+        },
+      }),
+    )
+
+    expect(capturedAffinity).toEqual({
+      key: "unrelated-handshake",
+      source: "copilot_session",
+    })
   })
 
   test("inherits affinity from a completed continuation snapshot", async () => {
@@ -1461,7 +1659,7 @@ describe("responses websocket message handling", () => {
       type: "error",
       status: 400,
       error: {
-        code: "invalid_request_error",
+        code: "bad_request",
         message: "Continuation model must match the previous response model.",
         type: "invalid_request_error",
         request_id: "req-test",
@@ -2042,6 +2240,55 @@ describe("responses websocket message handling", () => {
     expect(ws.data.responseSnapshots.has("msg_ws_headers")).toBe(true)
   })
 
+  test("persists only frame native Messages options across turns", async () => {
+    installWebSocketEndpoint("/v1/messages")
+    queuedResponses.push(
+      createAnthropicMessageResponse("msg_ws_frame_one"),
+      createAnthropicMessageResponse("msg_ws_frame_two"),
+    )
+    const ws = createTestWebSocket()
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "one",
+        headers: {
+          "anthropic-beta": "beta-one,beta-one",
+          "anthropic-version": "2024-01-01",
+          "x-model-provider-preference": "anthropic",
+          authorization: "Bearer must-not-pass",
+          "copilot-session-token": "must-not-pass",
+          "x-agent-task-id": "task-first",
+        },
+      }),
+    )
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "two",
+      }),
+    )
+
+    expect(capturedUpstreamHeaders).toHaveLength(2)
+    for (const headers of capturedUpstreamHeaders) {
+      expect(headers.get("anthropic-beta")).toBe("beta-one")
+      expect(headers.get("anthropic-version")).toBe("2024-01-01")
+      expect(headers.get("x-model-provider-preference")).toBe("anthropic")
+      expect(headers.get("authorization")).not.toBe("Bearer must-not-pass")
+      expect(headers.get("copilot-session-token")).not.toBe("must-not-pass")
+    }
+    expect(capturedUpstreamHeaders[0]?.get("x-agent-task-id")).toBe(
+      "task-first",
+    )
+    expect(capturedUpstreamHeaders[1]?.get("x-agent-task-id")).not.toBe(
+      "task-first",
+    )
+  })
+
   test("reports the requested model after a Messages WebSocket redirect", async () => {
     const requestedModel = "claude-ws-alias"
     const targetModel = "claude-ws-target"
@@ -2241,52 +2488,41 @@ describe("responses websocket message handling", () => {
     expect(JSON.parse(ws.sent.at(-1) ?? "{}")).toMatchObject({
       type: "error",
       status: 400,
-      error: { code: "endpoint_translation_unsupported" },
+      error: { code: "bad_request" },
     })
   })
 
-  test("rejects stateful, blocked-tool, and invalid-context WebSocket turns before dispatch", async () => {
+  test("normalizes stateful controls and preserves formerly blocked native tools on WebSocket", async () => {
+    state.accountType = "individual"
+    state.copilotToken = "copilot-token"
     state.models = responsesCapableModels
     const ws = createTestWebSocket()
 
-    for (const payload of [
-      { model: "gpt-5.4", input: "Hello", store: true },
-      {
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
         model: "gpt-5.4",
         input: "Hello",
-        tools: [{ type: "code_interpreter" }],
-      },
-      {
-        model: "gpt-5.4",
-        input: "Hello",
+        store: true,
+        tools: [{ type: "code_interpreter", future: { retained: true } }],
         context_management: [{ type: "future_unknown" }],
-      },
-    ]) {
-      await responsesWebSocket.message(
-        ws,
-        JSON.stringify({ type: "response.create", ...payload }),
-      )
-    }
-
-    expect(fetchMock).not.toHaveBeenCalled()
-    expect(ws.data.closed).toBe(false)
-    const errorFrames = ws.sent.map(
-      (frame) =>
-        JSON.parse(frame) as {
-          error?: { param?: string }
-          type?: string
-        },
+      }),
     )
-    expect(errorFrames).toHaveLength(3)
-    expect(errorFrames[0]?.type).toBe("error")
-    expect(errorFrames[0]?.error?.param).toBe("store")
-    expect(errorFrames[1]?.type).toBe("error")
-    expect(errorFrames[1]?.error?.param).toBe("tools")
-    expect(errorFrames[2]?.type).toBe("error")
-    expect(errorFrames[2]?.error?.param).toBe("context_management")
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(lastRequestBody).toMatchObject({
+      store: false,
+      tools: [{ type: "code_interpreter", future: { retained: true } }],
+      context_management: [{ type: "future_unknown" }],
+    })
+    expect(ws.data.closed).toBe(false)
+    expect(ws.sent.some((frame) => frame.includes("response.completed"))).toBe(
+      true,
+    )
   })
 
-  test("forwards safe translation errors before upstream and keeps the socket open", async () => {
+  test("dispatches the exact tolerant Chat candidate for reasoning, future items, and references", async () => {
     state.accountType = "individual"
     state.copilotToken = "copilot-token"
     state.models = {
@@ -2297,6 +2533,7 @@ describe("responses websocket message handling", () => {
       })),
     }
     const ws = createTestWebSocket()
+    queuedResponses.push(createChatCompletionsSseResponse())
 
     await responsesWebSocket.message(
       ws,
@@ -2307,26 +2544,108 @@ describe("responses websocket message handling", () => {
           {
             type: "reasoning",
             encrypted_content: "private-encrypted-state",
-            summary: [],
+            summary: [{ type: "summary_text", text: "visible summary" }],
           },
+          { type: "future_item", payload: "future-private-value" },
+          {
+            type: "item_reference",
+            id: "item-reference-private-value",
+          },
+          { type: "message", role: "user", content: "finish" },
         ],
       }),
     )
 
-    expect(fetchMock).not.toHaveBeenCalled()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(ws.data.closed).toBe(false)
     expect(ws.data.activeTurns.size).toBe(0)
-    expect(JSON.parse(ws.sent.at(-1) ?? "{}")).toEqual({
+    expect(lastRequestBody).toEqual({
+      model: "gpt-5.4",
+      messages: [
+        { role: "assistant", content: "visible summary" },
+        { role: "user", content: "[Future Responses item]" },
+        { role: "user", content: "[Future Responses item]" },
+        { role: "user", content: "finish" },
+      ],
+      stream: true,
+      stream_options: { include_usage: true },
+    })
+    expect(ws.sent.some((frame) => frame.includes("response.completed"))).toBe(
+      true,
+    )
+  })
+
+  test("allows final WebSocket synthesis after exactly the source search limit", async () => {
+    installWebSocketEndpoint("/chat/completions")
+    const searches: Array<string> = []
+    restoreResponsesWebSocketDependencies =
+      setResponsesWebSocketDependenciesForTest({
+        webSearch: (query) => {
+          searches.push(query)
+          return Promise.resolve(`result-${searches.length}`)
+        },
+      })
+    queuedResponses.push(
+      createChatCompletionsResponseWithWebSearchCalls(["search-1", "search-2"]),
+      createChatCompletionsResponse("final synthesis"),
+    )
+    const ws = createTestWebSocket()
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "search and synthesize",
+        tools: [{ type: "web_search", max_uses: 2 }],
+      }),
+    )
+
+    expect(searches).toHaveLength(2)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(lastRequestBody).toMatchObject({
+      stream: false,
+      tool_choice: "auto",
+    })
+    expect(JSON.stringify(lastRequestBody)).toContain("result-1")
+    expect(JSON.stringify(lastRequestBody)).toContain("result-2")
+    expect(ws.sent.some((frame) => frame.includes("final synthesis"))).toBe(
+      true,
+    )
+    expect(ws.sent.at(-1)).toContain("response.completed")
+  })
+
+  test("rejects an over-budget WebSocket search batch before partial execution", async () => {
+    installWebSocketEndpoint("/chat/completions")
+    let searches = 0
+    restoreResponsesWebSocketDependencies =
+      setResponsesWebSocketDependenciesForTest({
+        webSearch: () => {
+          searches += 1
+          return Promise.resolve("unexpected")
+        },
+      })
+    queuedResponses.push(
+      createChatCompletionsResponseWithWebSearchCalls(["search-1", "search-2"]),
+    )
+    const ws = createTestWebSocket()
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "do not partially search",
+        tools: [{ type: "web_search", max_uses: 1 }],
+      }),
+    )
+
+    expect(searches).toBe(0)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(ws.sent.at(-1) ?? "{}")).toMatchObject({
       type: "error",
       status: 400,
-      error: {
-        code: "endpoint_translation_unsupported",
-        message:
-          "The selected Copilot model cannot accept this request without losing required protocol data.",
-        param: "opaque_reasoning",
-        type: "invalid_request_error",
-        request_id: "req-test",
-      },
+      error: { code: "bad_request" },
     })
   })
 
@@ -2484,6 +2803,8 @@ describe("responses websocket message handling", () => {
       expect(upstreamSignal?.aborted).toBe(true)
       expect(ws.data.closed).toBe(true)
       expect(ws.data.activeTurns.size).toBe(0)
+      expect(ws.data.effectiveNativeMessagesOptions).toEqual({})
+      expect(ws.data.responseSnapshots.size).toBe(0)
       expect(infoLines.filter((line) => line.includes("STARTED"))).toHaveLength(
         1,
       )
@@ -2503,13 +2824,13 @@ describe("responses websocket message handling", () => {
   })
 
   test.each([
-    { eventType: "response.failed", name: "response.failed" },
-    { eventType: "response.incomplete", name: "response.incomplete" },
-    { eventType: "response.completed", name: "failed response.completed" },
-    { eventType: "error", name: "error" },
+    { eventType: "response.failed", terminalStatus: "ERROR" },
+    { eventType: "response.incomplete", terminalStatus: "COMPLETE" },
+    { eventType: "response.completed", terminalStatus: "ERROR" },
+    { eventType: "error", terminalStatus: "ERROR" },
   ])(
-    "sanitizes native $name terminal frames across clients and diagnostics",
-    async ({ eventType }) => {
+    "preserves native $eventType terminal frames unchanged",
+    async ({ eventType, terminalStatus }) => {
       state.copilotToken = "copilot-token"
       state.models = responsesCapableModels
       const privateMarker = `ws-${eventType}-private-marker`
@@ -2540,8 +2861,7 @@ describe("responses websocket message handling", () => {
 
         const clientOutput = ws.sent.join("\n")
         expect(clientOutput).toContain("partial-output")
-        expect(clientOutput).toContain("Upstream Responses stream failed.")
-        expect(clientOutput).not.toContain(privateMarker)
+        expect(clientOutput).toContain(privateMarker)
         expect(clientOutput).not.toContain("[DONE]")
 
         const terminal = JSON.parse(ws.sent.at(-1) ?? "{}") as {
@@ -2560,23 +2880,15 @@ describe("responses websocket message handling", () => {
           status?: number
           type?: string
         }
+        expect(terminal.type).toBe(eventType)
         const terminalError = terminal.response?.error ?? terminal
-        expect(terminalError.code).toBe("server_error")
-        expect(terminalError.message).toBe("Upstream Responses stream failed.")
-        expect(terminalError.param).toBe("input")
-        expect(terminalError.status ?? terminal.status).toBe(502)
+        expect(terminalError.message).toBe(privateMarker)
 
         const infoOutput = JSON.stringify(infoSpy.mock.calls)
-        expect(infoOutput.match(/ERROR/g)).toHaveLength(1)
-        expect(infoOutput).not.toContain("COMPLETE")
-        const diagnostics = JSON.stringify({
-          breadcrumbs: breadcrumbSpy.mock.calls,
-          captured: captureSpy.mock.calls,
-          consola: errorSpy.mock.calls,
-          lifecycle: infoSpy.mock.calls,
-          sentry: sentryLogSpy.mock.calls,
-        })
-        expect(diagnostics).not.toContain(privateMarker)
+        expect(infoOutput.match(new RegExp(terminalStatus, "g"))).toHaveLength(
+          1,
+        )
+        expect(ws.data.responseSnapshots.has("resp_terminal")).toBe(false)
       } finally {
         sentryLogSpy.mockRestore()
         captureSpy.mockRestore()
@@ -2624,12 +2936,11 @@ describe("responses websocket message handling", () => {
       expect(terminal.headers).toEqual({
         "x-copilot-service-request-id": `service-${eventType}`,
       })
-      expect(terminal).not.toHaveProperty("private")
-      expect(JSON.stringify(terminal)).not.toContain("terminal-private-field")
+      expect(terminal.private).toBe("terminal-private-field")
     },
   )
 
-  test("uses the native terminal SSE event name when JSON type disagrees", async () => {
+  test("classifies the post-sanitization emitted terminal type", async () => {
     state.copilotToken = "copilot-token"
     state.models = responsesCapableModels
     const privateMarker = "ws-mismatched-terminal-private-marker"
@@ -2666,7 +2977,7 @@ describe("responses websocket message handling", () => {
       error: {
         code: "server_error",
         message: "Upstream Responses stream failed.",
-        param: "input",
+        param: null,
         status: 502,
       },
       incomplete_details: null,
@@ -2753,7 +3064,7 @@ describe("responses websocket message handling", () => {
     },
   )
 
-  test("treats missing completed status as an error terminal", async () => {
+  test("treats missing completed status as a successful terminal", async () => {
     state.copilotToken = "copilot-token"
     state.models = responsesCapableModels
     queuedResponses.push(
@@ -2783,14 +3094,12 @@ describe("responses websocket message handling", () => {
     )
 
     const terminal = JSON.parse(ws.sent.at(-1) ?? "{}") as {
-      response?: { error?: { message?: string } }
+      response?: { id?: string; private?: string }
       type?: string
     }
-    expect(terminal.type).toBe("response.failed")
-    expect(terminal.response?.error?.message).toBe(
-      "Upstream Responses stream failed.",
-    )
-    expect(ws.sent.join("\n")).not.toContain("ws-missing-status-private-marker")
+    expect(terminal.type).toBe("response.completed")
+    expect(terminal.response?.private).toBe("ws-missing-status-private-marker")
+    expect(ws.data.responseSnapshots.has("resp_missing_status")).toBe(true)
     expect(ws.data.activeTurns.size).toBe(0)
   })
 
@@ -2867,7 +3176,7 @@ describe("responses websocket message handling", () => {
       expect(errorFrame.type).toBe("error")
       expect(errorFrame.status).toBe(400)
       expect(errorFrame.error).toEqual({
-        code: "previous_response_not_found",
+        code: "bad_request",
         message:
           "The previous response is not available on this WebSocket connection.",
         type: "invalid_request_error",
@@ -2929,7 +3238,7 @@ describe("responses websocket message handling", () => {
         type: "error",
         status: 400,
         error: {
-          code: "invalid_request_error",
+          code: "bad_request",
           message,
           type: "invalid_request_error",
           request_id: "req-test",
@@ -3143,7 +3452,7 @@ describe("responses websocket upstream handling", () => {
     }
     expect(errorFrame.type).toBe("error")
     expect(errorFrame.status).toBe(413)
-    expect(errorFrame.error?.code).toBe("request_too_large")
+    expect(errorFrame.error?.code).toBe("bad_request")
     expect(errorFrame.error?.message).toContain(
       "safe compaction payload budget",
     )
@@ -3237,13 +3546,202 @@ describe("responses websocket upstream handling", () => {
     )
 
     const errorFrame = JSON.parse(ws.sent[0] ?? "{}") as {
-      error?: { code?: string }
+      error?: {
+        code?: string
+        upstream_body?: string
+        upstream_content_type?: string
+      }
       status?: number
       type?: string
     }
     expect(errorFrame.type).toBe("error")
     expect(errorFrame.status).toBe(400)
     expect(errorFrame.error?.code).toBe("bad_request")
+    expect(errorFrame.error?.upstream_body).toBe(
+      JSON.stringify({ error: { message: "Too many requests" } }),
+    )
+    expect(errorFrame.error?.upstream_content_type).toBe("application/json")
+  })
+
+  test("emits one Responses failure family when a native source ends after a delta", async () => {
+    state.models = responsesCapableModels
+    queuedResponses.push(
+      new Response(
+        'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","sequence_number":1,"item_id":"msg_eof","output_index":0,"content_index":0,"delta":"partial"}\n\n',
+        { headers: { "content-type": "text/event-stream" } },
+      ),
+    )
+    const ws = createTestWebSocket()
+    const originalSend = ws.send.bind(ws)
+    ws.send = (frame) => {
+      originalSend(frame)
+      if ((JSON.parse(frame) as { type?: string }).type === "error") {
+        responsesWebSocket.close(ws)
+      }
+    }
+    ws.data.effectiveNativeMessagesOptions = {
+      anthropicBeta: "beta-one",
+    }
+    ws.data.responseSnapshots.set("resp_close_state", {
+      model: "gpt-5.4",
+      input: [],
+    })
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "eof",
+      }),
+    )
+
+    const types = ws.sent.map(
+      (frame) => (JSON.parse(frame) as { type?: string }).type,
+    )
+    expect(types).toEqual(["response.output_text.delta", "error"])
+    expect(ws.data.activeTurns.size).toBe(0)
+  })
+
+  test("binds a concurrent failure writer to the winning failure identity", async () => {
+    const data = {
+      activeTurns: new Map<
+        number,
+        ReturnType<typeof createResponsesWebSocketTurn>
+      >(),
+      nextTurnSequence: 0,
+      requestId: "failure-race",
+    }
+    const turn = createResponsesWebSocketTurn(data, "failure-race")
+    const calls: Array<string> = []
+    const first = { kind: "thrown" as const, error: new Error("first") }
+    const second = { kind: "thrown" as const, error: new Error("second") }
+    turn.failureWriters.set(first, async () => {
+      await Promise.resolve()
+      calls.push("first")
+    })
+    turn.failureWriters.set(second, () => {
+      calls.push("second")
+      return Promise.resolve()
+    })
+
+    const results = await Promise.all([
+      turn.terminal.fail(first),
+      turn.terminal.fail(second),
+    ])
+
+    expect(results).toEqual([true, false])
+    expect(calls).toEqual(["first"])
+  })
+
+  test.each(["failed"])(
+    "does not snapshot response.completed with embedded %s status",
+    async (status) => {
+      state.copilotToken = "copilot-token"
+      state.models = responsesCapableModels
+      queuedResponses.push(
+        createRawResponsesTerminalSseResponse(
+          JSON.stringify({
+            type: "response.completed",
+            sequence_number: 2,
+            response: {
+              id: `resp_embedded_${status}`,
+              object: "response",
+              status,
+              output: [{ type: "future_output", value: status }],
+            },
+          }),
+        ),
+      )
+      const ws = createTestWebSocket()
+
+      await responsesWebSocket.message(
+        ws,
+        JSON.stringify({
+          type: "response.create",
+          model: "gpt-5.4",
+          input: status,
+        }),
+      )
+
+      expect(
+        (JSON.parse(ws.sent.at(-1) ?? "{}") as { type?: string }).type,
+      ).toBe("response.completed")
+      expect(ws.data.responseSnapshots.has(`resp_embedded_${status}`)).toBe(
+        false,
+      )
+    },
+  )
+
+  test("snapshots response.completed carrying an incomplete partial response", async () => {
+    state.copilotToken = "copilot-token"
+    state.models = responsesCapableModels
+    queuedResponses.push(
+      createRawResponsesTerminalSseResponse(
+        JSON.stringify({
+          type: "response.completed",
+          sequence_number: 2,
+          response: {
+            id: "resp_embedded_incomplete",
+            object: "response",
+            status: "incomplete",
+            incomplete_details: { reason: "max_output_tokens" },
+            output: [
+              {
+                type: "message",
+                role: "assistant",
+                status: "incomplete",
+                content: [{ type: "output_text", text: "partial" }],
+              },
+            ],
+          },
+        }),
+      ),
+    )
+    const ws = createTestWebSocket()
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "incomplete",
+      }),
+    )
+
+    expect(ws.data.responseSnapshots.has("resp_embedded_incomplete")).toBe(true)
+  })
+
+  test("preserves binary upstream HTTP error bytes in the terminal frame", async () => {
+    state.copilotToken = "copilot-token"
+    state.models = responsesCapableModels
+    queuedFetchHandlers.push(() => {
+      throw new HTTPError(
+        "Failed to create responses",
+        new Response(new Uint8Array([0, 255, 1, 2]), {
+          status: 502,
+          headers: { "content-type": "application/octet-stream" },
+        }),
+      )
+    })
+    const ws = createTestWebSocket()
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: [],
+      }),
+    )
+
+    expect(JSON.parse(ws.sent[0] ?? "{}")).toMatchObject({
+      status: 502,
+      error: {
+        upstream_body: [0, 255, 1, 2],
+        upstream_content_type: "application/octet-stream",
+      },
+    })
   })
 
   test("uses one immutable HTTP inspection for WebSocket reporting", async () => {
@@ -3307,7 +3805,10 @@ describe("responses websocket upstream handling", () => {
       )
       const errorValues: Array<unknown> = errorSpy.mock.calls.flat()
       const wsLog = errorValues.find(
-        (value) => typeof value === "object" && value !== null,
+        (value) =>
+          typeof value === "object"
+          && value !== null
+          && "upstreamResponseBody" in value,
       )
 
       expect(errorFrame.status).toBe(429)
@@ -3317,8 +3818,11 @@ describe("responses websocket upstream handling", () => {
       })
       expect(lifecycleLine).toContain("REJECTED")
       expect(lifecycleLine).toContain("429")
-      expect(lifecycleLine).toContain("Upstream request failed")
-      expect(wsLog).toMatchObject({ status: 429 })
+      expect(lifecycleLine).toContain("Failed to create responses")
+      expect(wsLog).toMatchObject({
+        upstreamResponseBody: "{}",
+        upstreamResponseBodyBytes: [123, 125],
+      })
       expect(getterCalls).toBe(0)
       for (const marker of privateMarkers) {
         expect(diagnostics).not.toContain(marker)
@@ -3357,22 +3861,6 @@ describe("responses websocket warmup handling", () => {
 
   test.each([
     {
-      name: "stateful control",
-      configure: () => {
-        state.models = responsesCapableModels
-      },
-      payload: { store: true },
-      code: "unsupported_value",
-    },
-    {
-      name: "blocked tool",
-      configure: () => {
-        state.models = responsesCapableModels
-      },
-      payload: { tools: [{ type: "code_interpreter" }] },
-      code: "unsupported_value",
-    },
-    {
       name: "missing endpoint",
       configure: () => {
         state.models = {
@@ -3384,7 +3872,7 @@ describe("responses websocket warmup handling", () => {
         }
       },
       payload: {},
-      code: "endpoint_translation_unsupported",
+      code: "bad_request",
     },
   ])(
     "rejects warmup $name before success",
@@ -3414,7 +3902,7 @@ describe("responses websocket warmup handling", () => {
     },
   )
 
-  test("selects a Messages-only warmup without dispatching upstream", async () => {
+  test("evaluates a tolerant Messages-only warmup without dispatching upstream", async () => {
     state.models = {
       ...responsesCapableModels,
       data: responsesCapableModels.data.map((model) => ({
@@ -3430,7 +3918,10 @@ describe("responses websocket warmup handling", () => {
       JSON.stringify({
         type: "response.create",
         model: "gpt-5.4",
-        input: "warmup",
+        input: [
+          { type: "future_item", payload: "private-future-value" },
+          { type: "message", role: "user", content: "warmup" },
+        ],
         generate: false,
         tools: [],
         tool_choice: "none",
@@ -3443,7 +3934,87 @@ describe("responses websocket warmup handling", () => {
       true,
     )
     const snapshot = ws.data.responseSnapshots.values().next().value
-    expect(snapshot).toMatchObject({ model: "gpt-5.4", stream: true })
+    expect(snapshot).toMatchObject({
+      model: "gpt-5.4",
+      input: [
+        { type: "future_item", payload: "private-future-value" },
+        { type: "message", role: "user", content: "warmup" },
+      ],
+      stream: true,
+    })
+    expect(snapshot).not.toHaveProperty("generate")
+  })
+
+  test("evaluates a tolerant Chat-only warmup without dispatching upstream", async () => {
+    installWebSocketEndpoint("/chat/completions")
+    const ws = createTestWebSocket()
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: [
+          { type: "future_item", payload: "private-future-value" },
+          { type: "message", role: "user", content: "warmup" },
+        ],
+        generate: false,
+        tools: [],
+      }),
+    )
+
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(ws.sent.some((frame) => frame.includes("response.completed"))).toBe(
+      true,
+    )
+    expect(ws.data.responseSnapshots.values().next().value).toMatchObject({
+      model: "gpt-5.4",
+      input: [
+        { type: "future_item", payload: "private-future-value" },
+        { type: "message", role: "user", content: "warmup" },
+      ],
+      stream: true,
+    })
+    expect(ws.data.responseSnapshots.values().next().value).not.toHaveProperty(
+      "generate",
+    )
+  })
+
+  test("evaluates attachment-bearing tolerant warmups without attachment I/O", async () => {
+    installWebSocketEndpoint("/chat/completions")
+    const ws = createTestWebSocket()
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: [
+          { type: "future_item", payload: "private-future-value" },
+          {
+            type: "message",
+            role: "user",
+            content: [
+              { type: "input_text", text: "warmup" },
+              {
+                type: "input_image",
+                image_url: "https://attachments.invalid/private.png",
+              },
+            ],
+          },
+        ],
+        generate: false,
+        tools: [],
+      }),
+    )
+
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(ws.sent.some((frame) => frame.includes("response.completed"))).toBe(
+      true,
+    )
+    expect(
+      JSON.stringify(ws.data.responseSnapshots.values().next().value),
+    ).toContain("https://attachments.invalid/private.png")
   })
 
   test("preserves native header options across warmup continuation", async () => {
@@ -3734,6 +4305,64 @@ describe("responses websocket continuation handling", () => {
     ])
   })
 
+  test("preserves partial snapshots from completed events marked incomplete", () => {
+    const snapshots = new Map<string, ResponsesPayload>()
+    const priorPayload: ResponsesPayload = {
+      model: "gpt-5.4",
+      input: "First",
+      stream: true,
+    }
+
+    recordResponseSnapshotFromFrame(
+      snapshots,
+      priorPayload,
+      JSON.stringify({
+        type: "response.completed",
+        response: {
+          id: "resp_partial_completed",
+          status: "incomplete",
+          incomplete_details: { reason: "max_output_tokens" },
+          output: [
+            {
+              id: "msg_partial",
+              type: "message",
+              role: "assistant",
+              status: "incomplete",
+              content: [{ type: "output_text", text: "Partial answer" }],
+            },
+          ],
+        },
+      }),
+    )
+
+    const rehydrated = rehydrateContinuationPayload(snapshots, {
+      model: "gpt-5.4",
+      previous_response_id: "resp_partial_completed",
+      input: "Continue",
+      stream: true,
+    })
+
+    expect(rehydrated?.input).toEqual([
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "First" }],
+      },
+      {
+        id: "msg_partial",
+        type: "message",
+        role: "assistant",
+        status: "incomplete",
+        content: [{ type: "output_text", text: "Partial answer" }],
+      },
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "Continue" }],
+      },
+    ])
+  })
+
   test("rehydrates a sanitized namespaced function call before its output", () => {
     const snapshots = new Map<string, ResponsesPayload>()
     const priorPayload: ResponsesPayload = {
@@ -3889,6 +4518,7 @@ function createTestWebSocket(data?: ResponsesWebSocketData): {
       requestId: "req-test",
       affinity: { key: "session-test", source: "claude_session" },
       nativeMessagesOptions: {},
+      effectiveNativeMessagesOptions: {},
       responseSnapshots: new Map(),
     },
     sent,
@@ -4143,6 +4773,53 @@ function createChatCompletionsSseResponse(): Response {
   return new Response(`data: ${content}\n\ndata: ${done}\n\ndata: [DONE]\n\n`, {
     headers: { "content-type": "text/event-stream" },
     status: 200,
+  })
+}
+
+function createChatCompletionsResponse(content: string): Response {
+  return Response.json({
+    id: "chatcmpl_ws_search",
+    object: "chat.completion",
+    created: 1,
+    model: "gpt-5.4",
+    choices: [
+      {
+        index: 0,
+        message: { role: "assistant", content },
+        finish_reason: "stop",
+        logprobs: null,
+      },
+    ],
+  })
+}
+
+function createChatCompletionsResponseWithWebSearchCalls(
+  callIds: Array<string>,
+): Response {
+  return Response.json({
+    id: "chatcmpl_ws_search",
+    object: "chat.completion",
+    created: 1,
+    model: "gpt-5.4",
+    choices: [
+      {
+        index: 0,
+        message: {
+          role: "assistant",
+          content: null,
+          tool_calls: callIds.map((id) => ({
+            id,
+            type: "function",
+            function: {
+              name: "web_search",
+              arguments: JSON.stringify({ query: id }),
+            },
+          })),
+        },
+        finish_reason: "tool_calls",
+        logprobs: null,
+      },
+    ],
   })
 }
 

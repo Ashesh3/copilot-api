@@ -20,12 +20,11 @@ export function canonicalizeAnthropicBeta(
   const trimmed = value?.trim()
   if (!trimmed) return undefined
 
-  const identifiers = trimmed.split(",").map((beta) => beta.trim())
-  if (
-    identifiers.some((identifier) => !isAnthropicBetaIdentifier(identifier))
-  ) {
-    return undefined
-  }
+  const identifiers = trimmed
+    .split(",")
+    .map((beta) => beta.trim())
+    .filter((identifier) => isAnthropicBetaIdentifier(identifier))
+  if (identifiers.length === 0) return undefined
   const canonical = [...new Set(identifiers)].join(",")
   return sanitizeCopilotHeaderValue(canonical)
 }

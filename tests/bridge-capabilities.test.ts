@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test"
+import { spyOn } from "bun:test"
+import consola from "consola"
 
 import {
   authorizeEnvironmentCapability,
@@ -8,29 +10,67 @@ import {
   issueWorkerCapability,
   resetBridgeCapabilitiesForTest,
 } from "../src/lib/bridge-capabilities"
+import { setIpAllowlistForTest } from "../src/lib/ip-allowlist"
 import { isIpBlocked, resetIpSecurityForTest } from "../src/lib/ip-blocker"
 import { OAuthStore, setOAuthStoreForTest } from "../src/lib/oauth-store"
 import { state } from "../src/lib/state"
+import {
+  getClientEvents,
+  getInternalEvents,
+  getSession,
+  listSessions,
+} from "../src/routes/code-sessions/session-store"
+import {
+  getEnvironment,
+  listEnvironments,
+} from "../src/routes/environments/environment-store"
 import { server } from "../src/server"
 
 const GATEWAY_KEY = "bridge-test-gateway-key-with-enough-entropy"
+const originalPublicBase = process.env.COPILOT_PUBLIC_BASE_URL
 
 function bearer(value: string): { authorization: string } {
   return { authorization: `Bearer ${value}` }
 }
 
 beforeEach(() => {
+  setIpAllowlistForTest([])
   state.apiKeyAuth = GATEWAY_KEY
   resetIpSecurityForTest()
   setOAuthStoreForTest(new OAuthStore())
   resetBridgeCapabilitiesForTest()
+  delete process.env.COPILOT_PUBLIC_BASE_URL
 })
 
 afterEach(() => {
+  setIpAllowlistForTest([])
   resetIpSecurityForTest()
   state.apiKeyAuth = undefined
   setOAuthStoreForTest(null)
   resetBridgeCapabilitiesForTest()
+  if (originalPublicBase === undefined)
+    delete process.env.COPILOT_PUBLIC_BASE_URL
+  else process.env.COPILOT_PUBLIC_BASE_URL = originalPublicBase
+})
+
+test("code-session bridges use the configured public API base", async () => {
+  process.env.COPILOT_PUBLIC_BASE_URL = "https://public.example.test/gateway"
+  const sessionResponse = await server.request("/v1/code/sessions", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...bearer(GATEWAY_KEY) },
+    body: JSON.stringify({ title: "Public origin" }),
+  })
+  const sessionId = (
+    (await sessionResponse.json()) as { session: { id: string } }
+  ).session.id
+  const bridge = await server.request(`/v1/code/sessions/${sessionId}/bridge`, {
+    method: "POST",
+    headers: bearer(GATEWAY_KEY),
+  })
+  expect(bridge.status).toBe(200)
+  expect((await bridge.json()) as { api_base_url: string }).toMatchObject({
+    api_base_url: "https://public.example.test/gateway",
+  })
 })
 
 test("code sessions require a scoped user credential", async () => {
@@ -368,4 +408,228 @@ test("code-session writes accept large bodies and event batches", async () => {
   )
   expect(workerBatch.status).toBe(200)
   expect(isIpBlocked(clientIp)).toBe(false)
+})
+
+test("private JSON readers reject malformed bodies before mutating stores", async () => {
+  const seedResponse = await server.request("/v1/code/sessions", {
+    body: JSON.stringify({ title: "Malformed boundary seed" }),
+    headers: { "content-type": "application/json", ...bearer(GATEWAY_KEY) },
+    method: "POST",
+  })
+  const sessionId = ((await seedResponse.json()) as { session: { id: string } })
+    .session.id
+  const bridge = await server.request(`/v1/code/sessions/${sessionId}/bridge`, {
+    headers: bearer(GATEWAY_KEY),
+    method: "POST",
+  })
+  const worker = (await bridge.json()) as {
+    worker_epoch: number
+    worker_jwt: string
+  }
+  const environmentId = `env_json_${crypto.randomUUID().replaceAll("-", "")}`
+  const environmentResponse = await server.request("/v1/environments/bridge", {
+    body: JSON.stringify({
+      branch: "main",
+      directory: String.raw`C:\repo`,
+      environment_id: environmentId,
+      machine_name: "json-boundary",
+    }),
+    headers: { "content-type": "application/json", ...bearer(GATEWAY_KEY) },
+    method: "POST",
+  })
+  expect(environmentResponse.status).toBe(200)
+
+  const snapshots = {
+    clientEvents: getClientEvents(sessionId, 0).length,
+    environmentCount: listEnvironments().length,
+    environmentQueue: getEnvironment(environmentId)?.workQueue.length,
+    internalEvents: getInternalEvents(sessionId).length,
+    sessionCount: listSessions().length,
+    session: { ...getSession(sessionId) },
+  }
+  const marker = "peripheral-json-secret-marker"
+  const logSpy = spyOn(consola, "info")
+
+  try {
+    const cases: Array<{
+      headers: Record<string, string>
+      method: string
+      path: string
+    }> = [
+      {
+        headers: bearer(GATEWAY_KEY),
+        method: "POST",
+        path: "/v1/code/sessions",
+      },
+      {
+        headers: bearer(GATEWAY_KEY),
+        method: "PATCH",
+        path: `/v1/code/sessions/${sessionId}`,
+      },
+      {
+        headers: bearer(worker.worker_jwt),
+        method: "PUT",
+        path: `/v1/code/sessions/${sessionId}/worker`,
+      },
+      {
+        headers: bearer(worker.worker_jwt),
+        method: "POST",
+        path: `/v1/code/sessions/${sessionId}/worker/heartbeat`,
+      },
+      {
+        headers: bearer(worker.worker_jwt),
+        method: "POST",
+        path: `/v1/code/sessions/${sessionId}/worker/events`,
+      },
+      {
+        headers: bearer(worker.worker_jwt),
+        method: "POST",
+        path: `/v1/code/sessions/${sessionId}/worker/internal-events`,
+      },
+      {
+        headers: bearer(GATEWAY_KEY),
+        method: "POST",
+        path: `/v1/code/sessions/${sessionId}/events`,
+      },
+      {
+        headers: bearer(GATEWAY_KEY),
+        method: "POST",
+        path: "/v1/environments/bridge",
+      },
+      {
+        headers: bearer(GATEWAY_KEY),
+        method: "POST",
+        path: `/v1/environments/${environmentId}/work`,
+      },
+    ]
+
+    for (const testCase of cases) {
+      const response = await server.request(testCase.path, {
+        body: `{${marker}`,
+        headers: {
+          "content-type": "application/json",
+          ...testCase.headers,
+        },
+        method: testCase.method,
+      })
+      const text = await response.text()
+      expect(response.status).toBe(400)
+      expect(text).toBe('{"error":"Invalid JSON"}')
+      expect(text).not.toMatch(/SyntaxError|Unexpected|JSON Parse|Bun|Hono/)
+    }
+  } finally {
+    const capturedLogs = JSON.stringify(logSpy.mock.calls)
+    logSpy.mockRestore()
+    expect(capturedLogs).not.toContain(marker)
+    expect(capturedLogs).not.toMatch(
+      /SyntaxError|Unexpected|JSON Parse|Bun|Hono/,
+    )
+  }
+
+  expect(listSessions()).toHaveLength(snapshots.sessionCount)
+  expect(listEnvironments()).toHaveLength(snapshots.environmentCount)
+  expect(getEnvironment(environmentId)?.workQueue).toHaveLength(
+    snapshots.environmentQueue ?? 0,
+  )
+  expect(getClientEvents(sessionId, 0)).toHaveLength(snapshots.clientEvents)
+  expect(getInternalEvents(sessionId)).toHaveLength(snapshots.internalEvents)
+  expect(getSession(sessionId)).toMatchObject(snapshots.session)
+})
+
+test("peripheral JSON boundaries preserve authentication and bodyless exceptions", async () => {
+  const sessionResponse = await server.request("/v1/code/sessions", {
+    body: JSON.stringify({ title: "Bodyless controls" }),
+    headers: { "content-type": "application/json", ...bearer(GATEWAY_KEY) },
+    method: "POST",
+  })
+  const sessionId = (
+    (await sessionResponse.json()) as { session: { id: string } }
+  ).session.id
+  const bridge = await server.request(`/v1/code/sessions/${sessionId}/bridge`, {
+    headers: bearer(GATEWAY_KEY),
+    method: "POST",
+  })
+  const worker = (await bridge.json()) as {
+    worker_epoch: number
+    worker_jwt: string
+  }
+
+  const registration = await server.request(
+    `/v1/code/sessions/${sessionId}/worker/register`,
+    { headers: bearer(worker.worker_jwt), method: "POST" },
+  )
+  expect(registration.status).toBe(200)
+  expect((await registration.json()) as { worker_epoch: number }).toMatchObject(
+    {
+      worker_epoch: worker.worker_epoch + 1,
+    },
+  )
+
+  for (const path of ["/v1/code/sessions", "/v1/environments/bridge"]) {
+    const response = await server.request(path, {
+      body: "{",
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    })
+    expect(response.status).toBe(401)
+  }
+
+  const environmentId = `env_empty_${crypto.randomUUID().replaceAll("-", "")}`
+  const environmentResponse = await server.request("/v1/environments/bridge", {
+    body: JSON.stringify({
+      branch: "main",
+      directory: String.raw`C:\repo`,
+      environment_id: environmentId,
+      machine_name: "empty-boundary",
+    }),
+    headers: { "content-type": "application/json", ...bearer(GATEWAY_KEY) },
+    method: "POST",
+  })
+  expect(environmentResponse.status).toBe(200)
+
+  for (const body of [undefined, "{}"] as const) {
+    const beforeSessions = listSessions().length
+    const beforeQueue = getEnvironment(environmentId)?.workQueue.length ?? 0
+    const response = await server.request(
+      `/v1/environments/${environmentId}/work`,
+      {
+        ...(body === undefined ? {} : { body }),
+        headers: { "content-type": "application/json", ...bearer(GATEWAY_KEY) },
+        method: "POST",
+      },
+    )
+    expect(response.status).toBe(200)
+    expect(listSessions()).toHaveLength(beforeSessions + 1)
+    expect(getEnvironment(environmentId)?.workQueue).toHaveLength(
+      beforeQueue + 1,
+    )
+  }
+
+  const beforeWhitespaceSessions = listSessions().length
+  const beforeWhitespaceQueue =
+    getEnvironment(environmentId)?.workQueue.length ?? 0
+  const whitespace = await server.request(
+    `/v1/environments/${environmentId}/work`,
+    {
+      body: " ",
+      headers: { "content-type": "application/json", ...bearer(GATEWAY_KEY) },
+      method: "POST",
+    },
+  )
+  expect(whitespace.status).toBe(400)
+  expect(await whitespace.json()).toEqual({ error: "Invalid JSON" })
+  expect(listSessions()).toHaveLength(beforeWhitespaceSessions)
+  expect(getEnvironment(environmentId)?.workQueue).toHaveLength(
+    beforeWhitespaceQueue,
+  )
+
+  const unknown = await server.request(
+    "/v1/environments/env_missing_json_boundary/work",
+    {
+      body: "{",
+      headers: { "content-type": "application/json", ...bearer(GATEWAY_KEY) },
+      method: "POST",
+    },
+  )
+  expect(unknown.status).toBe(404)
 })

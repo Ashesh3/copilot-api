@@ -1,5 +1,7 @@
 import type { Context } from "hono"
 
+import consola from "consola"
+
 import { getAdminAuthStatus } from "~/lib/admin-auth"
 import {
   addReplacement,
@@ -24,11 +26,14 @@ import {
 import {
   isValidIpAddress,
   listIpAllowlist,
-  removeIpAllowlistEntry,
-  setIpAllowlistEntryEnabled,
   upsertIpAllowlistEntry,
 } from "~/lib/ip-allowlist"
-import { unwhitelistIp } from "~/lib/ip-blocker"
+import {
+  clearIpSecurityPolicy,
+  extractClientIp,
+  removeIpSecurityPolicy,
+  setIpSecurityPolicyEnabled,
+} from "~/lib/ip-blocker"
 import {
   clearLlmDebugLogs,
   getLlmDebugLog,
@@ -906,6 +911,10 @@ export async function handleListIpAllowlist(c: Context) {
   return c.json(await listIpAllowlist())
 }
 
+export function handleGetCurrentIpAllowlistClient(c: Context) {
+  return c.json({ ip: extractClientIp(c) })
+}
+
 export async function handleSetIpAllowlistEntry(c: Context) {
   const body = await c.req.json<IpAllowlistRequestBody>().catch(() => null)
   if (body === null) return c.json({ error: "Invalid JSON body" }, 400)
@@ -923,7 +932,7 @@ export async function handleSetIpAllowlistEntry(c: Context) {
   const entry =
     enabled === undefined ?
       await upsertIpAllowlistEntry(ip, { source: "manual" })
-    : await setIpAllowlistEntryEnabled(ip, enabled)
+    : await setIpSecurityPolicyEnabled(ip, enabled)
 
   if (entry === null)
     return c.json({ error: "Valid IP address is required" }, 400)
@@ -932,10 +941,26 @@ export async function handleSetIpAllowlistEntry(c: Context) {
 
 export async function handleDeleteIpAllowlistEntry(c: Context) {
   const ip = c.req.param("ip") ?? ""
-  const removed = await removeIpAllowlistEntry(ip)
+  const removed = await removeIpSecurityPolicy(ip).catch((error: unknown) => {
+    consola.error("Failed to remove IP allowlist entry:", error)
+    return null
+  })
+  if (removed === null) {
+    return c.json({ error: "Failed to save IP allowlist" }, 500)
+  }
   if (!removed) return c.json({ error: "IP address not found" }, 404)
-  unwhitelistIp(ip)
   return c.json({ success: true })
+}
+
+export async function handleClearIpAllowlist(c: Context) {
+  const cleared = await clearIpSecurityPolicy().catch((error: unknown) => {
+    consola.error("Failed to clear IP allowlist:", error)
+    return null
+  })
+  if (cleared === null) {
+    return c.json({ error: "Failed to save IP allowlist" }, 500)
+  }
+  return c.json({ success: true, cleared })
 }
 
 export function handleListLlmDebugLogs(c: Context) {

@@ -17,6 +17,7 @@ export type UpstreamOutcome =
   | "aborted"
 export type UpstreamSendReason =
   | "initial"
+  | "compatibility_retry"
   | "http_retry"
   | "transport_retry"
   | "token_refresh"
@@ -210,6 +211,7 @@ const VALID_OUTCOMES = new Set<UpstreamOutcome>([
 ])
 const VALID_REASONS = new Set<UpstreamSendReason>([
   "initial",
+  "compatibility_retry",
   "http_retry",
   "transport_retry",
   "token_refresh",
@@ -221,6 +223,7 @@ const VALID_SELECTION_MODES = new Set<RoutingSelectionMode>([
   "single",
 ])
 const RETRY_REASONS = new Set<UpstreamSendReason>([
+  "compatibility_retry",
   "http_retry",
   "transport_retry",
   "token_refresh",
