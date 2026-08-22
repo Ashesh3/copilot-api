@@ -404,7 +404,10 @@ function translateAnthropicToolsToOpenAI(
       continue
     }
 
-    if (!isAnthropicNamedTool(tool)) {
+    if (
+      !isAnthropicNamedTool(tool)
+      || (tool.type !== undefined && tool.input_schema === undefined)
+    ) {
       continue
     }
 

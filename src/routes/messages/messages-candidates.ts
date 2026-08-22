@@ -363,7 +363,7 @@ function applyTranslatedToolFindings(
     if (
       typeof tool.name === "string"
       && tool.name.trim()
-      && type === undefined
+      && (type === undefined || tool.input_schema !== undefined)
     ) {
       continue
     }

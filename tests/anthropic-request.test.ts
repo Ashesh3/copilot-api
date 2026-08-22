@@ -217,6 +217,21 @@ describe("Anthropic to OpenAI translation logic", () => {
     expect(translated).not.toHaveProperty("tool_choice")
   })
 
+  test("omits typed server tools from the Chat fallback", () => {
+    const translated = translateToOpenAI({
+      model: "gpt-current",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "hello" }],
+      tools: [{ name: "lookup" }, { type: "bash_20250124", name: "bash" }],
+      tool_choice: { type: "tool", name: "bash" },
+    })
+
+    expect(translated.tools?.map((tool) => tool.function.name)).toEqual([
+      "lookup",
+    ])
+    expect(translated).not.toHaveProperty("tool_choice")
+  })
+
   test("preserves tool references as explicit text on Chat Completions", () => {
     const openAIPayload = translateToOpenAI({
       model: "gpt-4o",

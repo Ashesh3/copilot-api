@@ -80,6 +80,22 @@ test("omits a Responses tool choice when its named tool did not translate", () =
   expect(translated).not.toHaveProperty("tool_choice")
 })
 
+test("omits typed server tools from the Responses fallback", () => {
+  const translated = translateAnthropicMessagesToResponsesPayload({
+    model: "gpt-current",
+    max_tokens: 64,
+    messages: [{ role: "user", content: "hello" }],
+    tools: [
+      { name: "lookup" },
+      { type: "future_native_20270101", name: "future_native" },
+    ],
+    tool_choice: { type: "tool", name: "future_native" },
+  })
+
+  expect(translated.tools?.map((tool) => tool.name)).toEqual(["lookup"])
+  expect(translated).not.toHaveProperty("tool_choice")
+})
+
 test("preserves tool references as explicit text on Responses", () => {
   const translated = translateAnthropicMessagesToResponsesPayload({
     model: "gpt-5.4",
