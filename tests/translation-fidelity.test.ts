@@ -1597,13 +1597,17 @@ test.each([
       { type: "function_call_output", call_id: "call_1", output: "y" },
     ],
   },
-])("rejects Responses to Messages $name", ({ input }) => {
+])("classifies Responses to Messages $name", ({ name, input }) => {
   expect(
     checkResponsesToMessagesTranslation({
       model: "claude-current",
       input,
     } as unknown as ResponsesPayload),
-  ).toEqual({ supported: false, blockers: ["tool_result_pairing"] })
+  ).toEqual(
+    name === "mismatched result" ?
+      { supported: false, blockers: ["tool_result_pairing"] }
+    : { supported: true, blockers: [] },
+  )
 })
 
 test.each([
@@ -1833,7 +1837,7 @@ test.each([
       } as ResponsesPayload),
     ).toEqual({
       supported: false,
-      blockers: ["tool_result_pairing", blocker],
+      blockers: [blocker],
     })
   },
 )
@@ -1999,10 +2003,7 @@ test.each([
   },
 ])("rejects explicit malformed Responses $name", ({ item, blocker }) => {
   const payload = { model: "chat-only", input: [item] } as ResponsesPayload
-  const messagesBlockers =
-    item.type === "function_call_output" ?
-      ["tool_result_pairing", blocker]
-    : [blocker]
+  const messagesBlockers = [blocker]
 
   expect(checkResponsesToChatTranslation(payload)).toEqual({
     supported: false,
@@ -2030,7 +2031,7 @@ test("rejects omitted function output on both Responses translation targets", ()
   })
   expect(checkResponsesToMessagesTranslation(payload)).toEqual({
     supported: false,
-    blockers: ["tool_result_pairing", "content_type"],
+    blockers: ["content_type"],
   })
 
   try {
