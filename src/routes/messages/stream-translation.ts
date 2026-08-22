@@ -66,13 +66,13 @@ function startNextToolCallIfReady(
 ): boolean {
   if (state.activeToolCallStateIndex !== undefined) return false
 
-  state.startedToolCallIndices ??= new Set()
+  const startedToolCallIndices = (state.startedToolCallIndices ??= new Set())
   const stateIndices = Object.keys(state.toolCalls)
     .map(Number)
     .sort((a, b) => a - b)
   const nextStateIndex = stateIndices.find((stateIndex) => {
     const toolCallInfo = state.toolCalls[stateIndex]
-    return !state.startedToolCallIndices.has(toolCallInfo.anthropicBlockIndex)
+    return !startedToolCallIndices.has(toolCallInfo.anthropicBlockIndex)
   })
   if (nextStateIndex === undefined) return false
 
@@ -82,7 +82,7 @@ function startNextToolCallIfReady(
   closeThinkingBlockIfOpen(state, events)
   closeCurrentContentBlock(state, events)
   toolCallInfo.anthropicBlockIndex = state.contentBlockIndex
-  state.startedToolCallIndices.add(toolCallInfo.anthropicBlockIndex)
+  startedToolCallIndices.add(toolCallInfo.anthropicBlockIndex)
   state.activeToolCallStateIndex = nextStateIndex
   state.contentBlockOpen = true
   events.push({

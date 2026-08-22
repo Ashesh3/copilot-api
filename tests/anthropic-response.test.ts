@@ -5,6 +5,7 @@ import { z } from "zod"
 import type {
   ChatCompletionChunk,
   ChatCompletionResponse,
+  Delta,
 } from "~/services/copilot/create-chat-completions"
 import type { ResponsesResult } from "~/services/copilot/create-responses"
 
@@ -1207,7 +1208,11 @@ describe("OpenAI to Anthropic Streaming Response Translation", () => {
     expect(signatureIndex).toBeLessThan(toolStartIndex)
   })
 
-  test.each([
+  const openBlockBeforeThinkingCases: Array<{
+    name: string
+    firstDelta: Delta
+    firstBlockType: "text" | "tool_use"
+  }> = [
     {
       name: "text",
       firstDelta: { content: "answer first" },
@@ -1227,7 +1232,9 @@ describe("OpenAI to Anthropic Streaming Response Translation", () => {
       },
       firstBlockType: "tool_use",
     },
-  ])(
+  ]
+
+  test.each(openBlockBeforeThinkingCases)(
     "closes an open $name block before opening thinking",
     ({ firstDelta, firstBlockType }) => {
       const streamState: AnthropicStreamState = {

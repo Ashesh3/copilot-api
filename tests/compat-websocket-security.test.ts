@@ -120,9 +120,7 @@ describe("health and Direct Connect exposure", () => {
     ] as const) {
       const response = await server.request(pathname, { method })
       expect(response.status).toBe(404)
-      if (method !== "HEAD") {
-        expect(await response.json()).toEqual({ error: "Not found" })
-      }
+      expect(await response.json()).toEqual({ error: "Not found" })
     }
 
     for (const pathname of ["/", "/health"]) {
