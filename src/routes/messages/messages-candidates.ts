@@ -78,6 +78,17 @@ export interface PreparedMessagesNativeCandidate
   readonly compaction: boolean
 }
 
+const ORPHAN_TOOL_RESULT_PREFIX = "[Orphaned tool result]"
+const ORPHAN_TOOL_RESULT_MAX_CHARS = 16_384
+
+function serializeOrphanToolResult(
+  content: AnthropicToolResultBlock["content"],
+): string {
+  const serialized =
+    typeof content === "string" ? content : JSON.stringify(content)
+  return serialized.slice(0, ORPHAN_TOOL_RESULT_MAX_CHARS)
+}
+
 export interface PrepareMessagesCandidatesOptions {
   readonly source: AnthropicMessagesPayload
   readonly selectedModel: Model | undefined
@@ -216,7 +227,10 @@ function rewriteSourceToolHistoryForTarget(
       } else if (hasToolReference) {
         content.push({ type: "text", text: JSON.stringify(block.content) })
       } else {
-        content.push({ type: "text", text: "[Orphaned tool result omitted]" })
+        content.push({
+          type: "text",
+          text: `${ORPHAN_TOOL_RESULT_PREFIX}\n${serializeOrphanToolResult(block.content)}`,
+        })
       }
     }
     message.content = content

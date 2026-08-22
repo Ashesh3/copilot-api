@@ -533,8 +533,8 @@ test("associates duplicate and missing tool IDs without collisions", async () =>
   expect(responses).toContain('"call_id":"messages_call_0_2_1"')
   expect(chat).not.toContain('"tool_call_id":"dup","content":"orphan"')
   expect(responses).not.toContain('"call_id":"dup","output":"orphan"')
-  expect(chat).toContain("[Orphaned tool result omitted]")
-  expect(responses).toContain("[Orphaned tool result omitted]")
+  expect(chat).toContain(String.raw`[Orphaned tool result]\norphan`)
+  expect(responses).toContain(String.raw`[Orphaned tool result]\norphan`)
   expect(candidates.chat?.check.findings).toContainEqual({
     class: "tool_history",
     severity: "adapted",
