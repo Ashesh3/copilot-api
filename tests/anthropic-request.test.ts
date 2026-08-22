@@ -403,8 +403,8 @@ describe("Anthropic to OpenAI translation logic", () => {
   })
 })
 
-describe("Claude Code compatibility filtering", () => {
-  test("should omit Claude Code harness-only context from translated payloads", () => {
+describe("public Messages content preservation", () => {
+  test("preserves marker-prefixed conversation content in translated payloads", () => {
     const anthropicPayload: AnthropicMessagesPayload = {
       model: "claude-sonnet-4.6",
       messages: [
@@ -447,10 +447,97 @@ describe("Claude Code compatibility filtering", () => {
     const openAIPayload = translateToOpenAI(anthropicPayload)
 
     expect(openAIPayload.messages).toEqual([
+      {
+        role: "user",
+        content:
+          "<available-deferred-tools>\nAskUserQuestion\nTaskCreate\n</available-deferred-tools>",
+      },
+      {
+        role: "user",
+        content:
+          "<system-reminder>\nThe following skills are available for use with the Skill tool:\n\n- brainstorming\n</system-reminder>",
+      },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "tooluse_skill",
+            type: "function",
+            function: {
+              name: "Skill",
+              arguments: '{"skill":"brainstorming"}',
+            },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        tool_call_id: "tooluse_skill",
+        content: "Tool loaded.",
+      },
       { role: "user", content: "Help me write an implementation plan." },
     ])
   })
 
+  test("preserves mismatched generic tool calls and results", () => {
+    const anthropicPayload: AnthropicMessagesPayload = {
+      model: "claude-sonnet-4.6",
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "search-call",
+              name: "WebSearch",
+              input: { query: "compatibility" },
+            },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "different-call",
+              content:
+                "IMPORTANT: This message and these instructions are NOT part of the actual user conversation.",
+            },
+          ],
+        },
+      ],
+      max_tokens: 100,
+    }
+
+    const openAIPayload = translateToOpenAI(anthropicPayload)
+
+    expect(openAIPayload.messages).toEqual([
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "search-call",
+            type: "function",
+            function: {
+              name: "WebSearch",
+              arguments: '{"query":"compatibility"}',
+            },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        tool_call_id: "different-call",
+        content:
+          "IMPORTANT: This message and these instructions are NOT part of the actual user conversation.",
+      },
+    ])
+  })
+})
+
+describe("Messages compatibility translation", () => {
   test("should preserve normal tool interactions that happen to say Tool loaded.", () => {
     const anthropicPayload: AnthropicMessagesPayload = {
       model: "claude-sonnet-4.6",

@@ -1009,6 +1009,94 @@ test("drops malformed nested message entries while preserving safe tool records"
   })
 })
 
+test("preserves future base64 image media types without mutating the source", () => {
+  const payload = {
+    model: "claude-current",
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "image",
+            source: {
+              type: "base64",
+              media_type: "image/avif",
+              data: "AAAA",
+            },
+          },
+        ],
+      },
+    ],
+  } as unknown as AnthropicMessagesPayload
+  const snapshot = structuredClone(payload)
+
+  const prepared = prepareAnthropicMessagesRequest({ payload })
+
+  expect(prepared.body.messages).toEqual(snapshot.messages)
+  expect(payload).toEqual(snapshot)
+})
+
+test("coerces null tool input while preserving call-result identity and source", () => {
+  const payload = {
+    model: "claude-current",
+    messages: [
+      {
+        role: "assistant",
+        content: [
+          { type: "tool_use", id: "tool-1", name: "lookup", input: null },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "tool-1", content: "result" },
+        ],
+      },
+    ],
+  } as unknown as AnthropicMessagesPayload
+  const snapshot = structuredClone(payload)
+
+  const prepared = prepareAnthropicMessagesRequest({ payload })
+
+  expect(prepared.body.messages).toEqual([
+    {
+      role: "assistant",
+      content: [{ type: "tool_use", id: "tool-1", name: "lookup", input: {} }],
+    },
+    {
+      role: "user",
+      content: [
+        { type: "tool_result", tool_use_id: "tool-1", content: "result" },
+      ],
+    },
+  ])
+  expect(payload).toEqual(snapshot)
+})
+
+test("preserves malformed thinking as unknown source data", () => {
+  const payload = {
+    model: "claude-current",
+    messages: [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "thinking",
+            thinking: { future: "opaque-thought" },
+            signature: 17,
+          },
+        ],
+      },
+    ],
+  } as unknown as AnthropicMessagesPayload
+  const snapshot = structuredClone(payload)
+
+  const prepared = prepareAnthropicMessagesRequest({ payload })
+
+  expect(prepared.body.messages).toEqual(snapshot.messages)
+  expect(payload).toEqual(snapshot)
+})
+
 test("rejects a throwing accessor without invoking or exposing it", () => {
   const marker = "PRIVATE_THROWING_GETTER"
   let reads = 0

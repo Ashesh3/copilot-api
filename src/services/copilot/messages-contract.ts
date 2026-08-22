@@ -518,10 +518,9 @@ function sanitizeImageSource(
   }
   if (
     source.type !== "base64"
-    || (source.media_type !== "image/jpeg"
-      && source.media_type !== "image/png"
-      && source.media_type !== "image/gif"
-      && source.media_type !== "image/webp")
+    || !isNonEmptyString(source.media_type)
+    || !source.media_type.startsWith("image/")
+    || source.media_type.slice("image/".length).trim().length === 0
     || typeof source.data !== "string"
   ) {
     return null
@@ -529,7 +528,7 @@ function sanitizeImageSource(
   return {
     ...source,
     type: "base64",
-    media_type: source.media_type,
+    media_type: source.media_type as `image/${string}`,
     data: source.data,
   }
 }
@@ -706,7 +705,7 @@ function sanitizeToolUseBlock(
   if (
     !isNonEmptyString(block.id)
     || !isNonEmptyString(block.name)
-    || !isRecord(block.input)
+    || (block.input !== null && !isRecord(block.input))
   ) {
     return null
   }
@@ -714,7 +713,7 @@ function sanitizeToolUseBlock(
     ...block,
     type: "tool_use",
     id: block.id,
-    input: block.input,
+    input: block.input ?? {},
     name: block.name,
   }
 }
@@ -723,7 +722,7 @@ function sanitizeThinkingBlock(
   block: Record<string, unknown>,
 ): AnthropicAssistantContentBlock | null {
   if (typeof block.thinking !== "string") {
-    return null
+    return sanitizeUnknownContentBlock(block)
   }
   return {
     ...block,

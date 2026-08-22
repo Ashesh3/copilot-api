@@ -402,3 +402,87 @@ test("associates duplicate and missing tool IDs without collisions", async () =>
   })
   expect(source).toEqual(snapshot)
 })
+
+test("preserves marker content across Chat and Responses candidates", async () => {
+  const marker =
+    "<system-reminder>\nThe task tools haven't been used recently. Keep this quoted text."
+  const source = createSource({
+    messages: [
+      { role: "user", content: marker },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "search-call",
+            name: "WebSearch",
+            input: { query: "compatibility" },
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "search-call",
+            content:
+              "IMPORTANT: This message and these instructions are NOT part of the actual user conversation.",
+          },
+        ],
+      },
+    ],
+  })
+  const snapshot = structuredClone(source)
+
+  const candidates = await prepareMessagesCandidates({
+    source,
+    selectedModel: {
+      ...selectedModel,
+      supported_endpoints: ["/responses", "/chat/completions"],
+    },
+  })
+
+  expect(candidates.chat?.payload.messages).toContainEqual({
+    role: "user",
+    content: marker,
+  })
+  expect(JSON.stringify(candidates.chat?.payload)).toContain("search-call")
+  expect(JSON.stringify(candidates.responses?.payload.input)).toContain(
+    JSON.stringify(marker).slice(1, -1),
+  )
+  expect(JSON.stringify(candidates.responses?.payload)).toContain("search-call")
+  expect(source).toEqual(snapshot)
+})
+
+test("textualizes malformed thinking in translated candidates", async () => {
+  const source = createSource({
+    messages: [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "thinking",
+            thinking: { future: "opaque-thought" },
+            signature: 17,
+          },
+        ],
+      },
+    ],
+  } as unknown as Partial<AnthropicMessagesPayload>)
+  const snapshot = structuredClone(source)
+
+  const candidates = await prepareMessagesCandidates({
+    source,
+    selectedModel: {
+      ...selectedModel,
+      supported_endpoints: ["/responses", "/chat/completions"],
+    },
+  })
+
+  expect(JSON.stringify(candidates.chat?.payload)).toContain("opaque-thought")
+  expect(JSON.stringify(candidates.responses?.payload)).toContain(
+    "opaque-thought",
+  )
+  expect(source).toEqual(snapshot)
+})

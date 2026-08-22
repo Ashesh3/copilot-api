@@ -77,7 +77,7 @@ export interface AnthropicImageBlock extends Record<string, unknown> {
   source:
     | (Record<string, unknown> & {
         type: "base64"
-        media_type: "image/jpeg" | "image/png" | "image/gif" | "image/webp"
+        media_type: `image/${string}`
         data: string
       })
     | (Record<string, unknown> & {
