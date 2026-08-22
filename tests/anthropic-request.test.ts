@@ -173,6 +173,50 @@ describe("Anthropic to OpenAI translation logic", () => {
     expect(translated).not.toHaveProperty("top_p")
   })
 
+  test("defaults a schema-less named tool without closing its Chat schema", () => {
+    const translated = translateToOpenAI({
+      model: "gpt-current",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "hello" }],
+      tools: [{ name: "lookup", description: "Look something up" }],
+      tool_choice: { type: "tool", name: "lookup" },
+    })
+
+    expect(translated.tools).toEqual([
+      {
+        type: "function",
+        function: {
+          name: "lookup",
+          description: "Look something up",
+          parameters: { type: "object", properties: {} },
+        },
+      },
+    ])
+    expect(translated.tool_choice).toEqual({
+      type: "function",
+      function: { name: "lookup" },
+    })
+    expect(translated.tools?.[0]?.function.parameters).not.toHaveProperty(
+      "required",
+    )
+    expect(translated.tools?.[0]?.function.parameters).not.toHaveProperty(
+      "additionalProperties",
+    )
+  })
+
+  test("omits a Chat tool choice when its named tool did not translate", () => {
+    const translated = translateToOpenAI({
+      model: "gpt-current",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "hello" }],
+      tools: [{ name: "kept", input_schema: { type: "object" } }, { name: 3 }],
+      tool_choice: { type: "tool", name: "3" },
+    } as unknown as AnthropicMessagesPayload)
+
+    expect(translated.tools).toHaveLength(1)
+    expect(translated).not.toHaveProperty("tool_choice")
+  })
+
   test("preserves tool references as explicit text on Chat Completions", () => {
     const openAIPayload = translateToOpenAI({
       model: "gpt-4o",

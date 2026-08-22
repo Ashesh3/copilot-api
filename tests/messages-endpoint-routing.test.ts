@@ -311,6 +311,63 @@ test.each([
 
 test.each([
   {
+    endpoint: "/v1/messages",
+    expectedTool: {
+      name: "lookup",
+      description: "Look something up",
+    },
+    expectedChoice: { type: "tool", name: "lookup" },
+  },
+  {
+    endpoint: "/chat/completions",
+    expectedTool: {
+      type: "function",
+      function: {
+        name: "lookup",
+        description: "Look something up",
+        parameters: { type: "object", properties: {} },
+      },
+    },
+    expectedChoice: {
+      type: "function",
+      function: { name: "lookup" },
+    },
+  },
+  {
+    endpoint: "/responses",
+    expectedTool: {
+      type: "function",
+      name: "lookup",
+      description: "Look something up",
+      parameters: { type: "object", properties: {} },
+      strict: false,
+    },
+    expectedChoice: { type: "function", name: "lookup" },
+  },
+] as const)(
+  "preserves a schema-less named tool on $endpoint wire dispatch",
+  async ({ endpoint, expectedChoice, expectedTool }) => {
+    installModel({ supported_endpoints: [endpoint] })
+
+    const response = await postMessages({
+      tools: [{ name: "lookup", description: "Look something up" }],
+      tool_choice: { type: "tool", name: "lookup" },
+    })
+
+    expect(response.status).toBe(200)
+    expect(upstreamPaths).toEqual([endpoint])
+    expect(upstreamBodies[0]).toHaveProperty("tools.0", expectedTool)
+    expect(upstreamBodies[0]).toHaveProperty("tool_choice", expectedChoice)
+    const serializedTool = JSON.stringify(
+      (upstreamBodies[0]?.tools as Array<unknown> | undefined)?.[0],
+    )
+    expect(serializedTool).not.toContain('"required"')
+    expect(serializedTool).not.toContain('"additionalProperties"')
+  },
+)
+
+test.each([
+  {
     name: "on translated routing without a URL image",
     endpoints: ["/responses", "/chat/completions"],
     messages: [{ role: "user", content: "search" }],

@@ -77,7 +77,7 @@ export const translateAnthropicMessagesToResponsesPayload = (
   const translatedTools = convertAnthropicTools(payload.tools)
   const toolChoice =
     translatedTools ?
-      convertAnthropicToolChoice(payload.tool_choice)
+      convertAnthropicToolChoice(payload.tool_choice, translatedTools)
     : undefined
 
   const { safetyIdentifier, promptCacheKey } = parseUserId(
@@ -434,15 +434,14 @@ const convertAnthropicTools = (
       continue
     }
 
-    // Filter out other server-side tools without input_schema
-    if (!isAnthropicNamedTool(tool) || tool.input_schema === undefined) {
+    if (!isAnthropicNamedTool(tool)) {
       continue
     }
 
     result.push({
       type: "function",
       name: tool.name,
-      parameters: tool.input_schema,
+      parameters: tool.input_schema ?? { type: "object", properties: {} },
       strict: false,
       ...(typeof tool.description === "string" ?
         { description: tool.description }
@@ -455,7 +454,8 @@ const convertAnthropicTools = (
 
 const convertAnthropicToolChoice = (
   choice: AnthropicMessagesPayload["tool_choice"],
-): ToolChoiceOptions | ToolChoiceFunction => {
+  translatedTools: ReadonlyArray<Tool>,
+): ToolChoiceOptions | ToolChoiceFunction | undefined => {
   if (!choice) {
     return "auto"
   }
@@ -468,7 +468,14 @@ const convertAnthropicToolChoice = (
       return "required"
     }
     case "tool": {
-      return choice.name ? { type: "function", name: choice.name } : "auto"
+      return (
+          choice.name
+            && translatedTools.some(
+              (tool) => tool.type === "function" && tool.name === choice.name,
+            )
+        ) ?
+          { type: "function", name: choice.name }
+        : undefined
     }
     case "none": {
       return "none"

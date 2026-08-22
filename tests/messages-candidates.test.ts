@@ -430,6 +430,44 @@ test("degrades unsupported tools per target with bounded private findings", asyn
   )
 })
 
+test("treats schema-less named tools as translated candidates", async () => {
+  const candidates = await prepareMessagesCandidates({
+    source: createSource({
+      tools: [{ name: "lookup", description: "Look something up" }],
+      tool_choice: { type: "tool", name: "lookup" },
+    }),
+    selectedModel: {
+      ...selectedModel,
+      supported_endpoints: ["/responses", "/chat/completions"],
+    },
+  })
+
+  expect(candidates.chat?.check.findings).not.toContainEqual({
+    class: "tool_shape",
+    severity: "omitted",
+  })
+  expect(candidates.responses?.check.findings).not.toContainEqual({
+    class: "tool_shape",
+    severity: "omitted",
+  })
+  expect(candidates.chat?.payload).toHaveProperty(
+    "tools.0.function.parameters",
+    { type: "object", properties: {} },
+  )
+  expect(candidates.chat?.payload).toHaveProperty("tool_choice", {
+    type: "function",
+    function: { name: "lookup" },
+  })
+  expect(candidates.responses?.payload).toHaveProperty("tools.0.parameters", {
+    type: "object",
+    properties: {},
+  })
+  expect(candidates.responses?.payload).toHaveProperty("tool_choice", {
+    type: "function",
+    name: "lookup",
+  })
+})
+
 test("keys attachment cache by URL and expected PDF mode", async () => {
   const sharedUrl = "https://attachment.test/shared"
   await prepareMessagesCandidates({

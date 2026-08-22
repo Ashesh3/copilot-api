@@ -60,15 +60,24 @@ export function translateToOpenAI(
     user: payload.metadata?.user_id,
     response_format: translateOutputFormatToOpenAI(payload.output_config),
     tools,
-    ...(tools ?
-      { tool_choice: translateAnthropicToolChoiceToOpenAI(payload.tool_choice) }
-    : {}),
+    ...(tools ? createTranslatedToolChoice(payload.tool_choice, tools) : {}),
     ...(tools?.some((tool) => tool.function.name === "web_search") ?
       { parallel_tool_calls: false }
     : {}),
     snippy: { enabled: false },
     ...(payload.stream ? { stream_options: { include_usage: true } } : {}),
   }
+}
+
+function createTranslatedToolChoice(
+  anthropicToolChoice: AnthropicMessagesPayload["tool_choice"],
+  translatedTools: ReadonlyArray<Tool>,
+): Pick<ChatCompletionsPayload, "tool_choice"> {
+  const toolChoice = translateAnthropicToolChoiceToOpenAI(
+    anthropicToolChoice,
+    translatedTools,
+  )
+  return toolChoice === undefined ? {} : { tool_choice: toolChoice }
 }
 
 function translateOutputFormatToOpenAI(
@@ -395,8 +404,7 @@ function translateAnthropicToolsToOpenAI(
       continue
     }
 
-    // Filter out other server-side tools without input_schema
-    if (!isAnthropicNamedTool(tool) || tool.input_schema === undefined) {
+    if (!isAnthropicNamedTool(tool)) {
       continue
     }
 
@@ -406,7 +414,7 @@ function translateAnthropicToolsToOpenAI(
         name: tool.name,
         description:
           typeof tool.description === "string" ? tool.description : undefined,
-        parameters: tool.input_schema,
+        parameters: tool.input_schema ?? { type: "object", properties: {} },
       },
     })
   }
@@ -416,6 +424,7 @@ function translateAnthropicToolsToOpenAI(
 
 function translateAnthropicToolChoiceToOpenAI(
   anthropicToolChoice: AnthropicMessagesPayload["tool_choice"],
+  translatedTools: ReadonlyArray<Tool>,
 ): ChatCompletionsPayload["tool_choice"] {
   if (!anthropicToolChoice) {
     return undefined
@@ -429,7 +438,12 @@ function translateAnthropicToolChoiceToOpenAI(
       return "required"
     }
     case "tool": {
-      if (anthropicToolChoice.name) {
+      if (
+        anthropicToolChoice.name
+        && translatedTools.some(
+          (tool) => tool.function.name === anthropicToolChoice.name,
+        )
+      ) {
         return {
           type: "function",
           function: { name: anthropicToolChoice.name },

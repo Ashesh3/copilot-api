@@ -38,6 +38,48 @@ test("omits tool_choice when no Messages tools translate to Responses", () => {
   expect(translated).not.toHaveProperty("tool_choice")
 })
 
+test("defaults a schema-less named tool without closing its Responses schema", () => {
+  const translated = translateAnthropicMessagesToResponsesPayload({
+    model: "gpt-current",
+    max_tokens: 64,
+    messages: [{ role: "user", content: "hello" }],
+    tools: [{ name: "lookup", description: "Look something up" }],
+    tool_choice: { type: "tool", name: "lookup" },
+  })
+
+  expect(translated.tools).toEqual([
+    {
+      type: "function",
+      name: "lookup",
+      description: "Look something up",
+      parameters: { type: "object", properties: {} },
+      strict: false,
+    },
+  ])
+  expect(translated.tool_choice).toEqual({
+    type: "function",
+    name: "lookup",
+  })
+  const parameters = (
+    translated.tools?.[0] as { parameters?: Record<string, unknown> }
+  ).parameters
+  expect(parameters).not.toHaveProperty("required")
+  expect(parameters).not.toHaveProperty("additionalProperties")
+})
+
+test("omits a Responses tool choice when its named tool did not translate", () => {
+  const translated = translateAnthropicMessagesToResponsesPayload({
+    model: "gpt-current",
+    max_tokens: 64,
+    messages: [{ role: "user", content: "hello" }],
+    tools: [{ name: "kept", input_schema: { type: "object" } }, { name: 3 }],
+    tool_choice: { type: "tool", name: "3" },
+  } as unknown as AnthropicMessagesPayload)
+
+  expect(translated.tools).toHaveLength(1)
+  expect(translated).not.toHaveProperty("tool_choice")
+})
+
 test("preserves tool references as explicit text on Responses", () => {
   const translated = translateAnthropicMessagesToResponsesPayload({
     model: "gpt-5.4",
