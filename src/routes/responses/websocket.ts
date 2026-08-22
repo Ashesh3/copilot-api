@@ -780,8 +780,9 @@ async function emitTurnFrame(
   if (parsed === undefined) return true
 
   const terminalType = classifyEmittedWebSocketTerminal(parsed, eventName)
+  const completedFrame = addWebSocketCompletedOutputText(frame, parsed)
   const processed = addResponsesWebSocketMetadata(
-    frame,
+    completedFrame,
     getCopilotResponseHeaders(),
   )
   ws.send(processed)
@@ -835,6 +836,45 @@ async function emitTurnFrame(
     })
   }
   return true
+}
+
+function addWebSocketCompletedOutputText(
+  frame: string,
+  parsed: { response?: { id?: unknown }; type?: unknown },
+): string {
+  if (parsed.type !== "response.completed") return frame
+  const response = parsed.response as Record<string, unknown> | undefined
+  if (!response || Object.hasOwn(response, "output_text")) return frame
+  if (!Array.isArray(response.output)) return frame
+
+  let outputText = ""
+  for (const item of response.output) {
+    if (
+      !isWebSocketRecord(item)
+      || item.type !== "message"
+      || item.role !== "assistant"
+    )
+      continue
+    if (!Array.isArray(item.content)) continue
+    for (const block of item.content) {
+      if (
+        isWebSocketRecord(block)
+        && block.type === "output_text"
+        && typeof block.text === "string"
+      ) {
+        outputText += block.text
+      }
+    }
+  }
+
+  return JSON.stringify({
+    ...(parsed as Record<string, unknown>),
+    response: { ...response, output_text: outputText },
+  })
+}
+
+function isWebSocketRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
 function isResponsesTerminalEventName(event: string | undefined): boolean {
@@ -1379,7 +1419,7 @@ function normalizeWebSocketError(
   if (isHTTPError(error) && error instanceof WebSocketRequestError) {
     const status = error.response.status
     return {
-      code: normalizeLocalWebSocketErrorCode(error.errorCode, status),
+      code: error.errorCode,
       message: error.message,
       status,
       type: error.errorType,
