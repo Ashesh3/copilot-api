@@ -355,6 +355,40 @@ test("count_tokens returns an Anthropic model-not-found error", async () => {
   expect(capturedRequests).toHaveLength(0)
 })
 
+test("count_tokens uses the normalized requested model while the catalog is unavailable", async () => {
+  state.models = undefined
+  responseFactory = () => Response.json({ input_tokens: 61 })
+
+  const response = await requestCountTokens({ model: "claude-opus-4-7" })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({ input_tokens: 61 })
+  expect(capturedRequests).toHaveLength(1)
+  expect(capturedRequests[0]?.path).toBe("/v1/messages/count_tokens")
+  expect(capturedRequests[0]?.body).toEqual({
+    model: "claude-opus-4.7",
+    messages: [{ role: "user", content: "Hello" }],
+  })
+})
+
+test("count_tokens preserves upstream failures while the catalog is unavailable", async () => {
+  state.models = undefined
+  const upstreamBody = '{"private":"catalog-outage-upstream"}\n'
+  responseFactory = () =>
+    new Response(upstreamBody, {
+      status: 409,
+      headers: { "content-type": "application/problem+json" },
+    })
+
+  const response = await requestCountTokens({ model: "claude-opus-4-7" })
+
+  expect(response.status).toBe(409)
+  expect(response.headers.get("content-type")).toBe("application/problem+json")
+  expect(await response.text()).toBe(upstreamBody)
+  expect(capturedRequests).toHaveLength(1)
+  expect(capturedRequests[0]?.body).toHaveProperty("model", "claude-opus-4.7")
+})
+
 test("count_tokens propagates an upstream HTTP status", async () => {
   responseFactory = () =>
     Response.json(
