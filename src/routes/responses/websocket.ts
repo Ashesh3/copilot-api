@@ -2,20 +2,29 @@
 import consola from "consola"
 import { randomUUID } from "node:crypto"
 
+import type { CopilotInferenceEndpoint } from "~/lib/endpoint-routing"
 import type { HttpErrorInspection } from "~/lib/error"
 import type { RoutingAffinity } from "~/lib/routing-affinity"
 import type { NativeMessagesRequestOptions } from "~/routes/messages/native-handler"
+import type { Model } from "~/services/copilot/get-models"
 
 import {
   runWithRoutedModelSelection,
   selectRoutedModel,
 } from "~/lib/account-router"
 import {
+  recordCopilotEndpointRoute,
   recordCopilotContractEvent,
   recordCopilotMessagesBeta,
+  recordCopilotRequestNormalization,
+  recordCopilotTranslationFindings,
 } from "~/lib/copilot-contract-observability"
 import { resolveRequestCredential } from "~/lib/credential-resolver"
-import { isHTTPError, reportHttpErrorForTransport } from "~/lib/error"
+import {
+  createEndpointTranslationError,
+  isHTTPError,
+  reportHttpErrorForTransport,
+} from "~/lib/error"
 import {
   applyModelRedirect,
   formatModelRedirectResult,
@@ -23,6 +32,7 @@ import {
 import { normalizeModelName } from "~/lib/model-resolver"
 import {
   type ReasoningEffort,
+  getModelReasoningConfig,
   normalizeReasoningEffortForModel,
   parseReasoningEffort,
   parseModelSuffix,
@@ -36,10 +46,7 @@ import {
   resolveRoutingAffinityFromHeaders,
 } from "~/lib/routing-affinity"
 import { resolveWebSearchCalls } from "~/routes/messages/web-search-helpers"
-import {
-  fitResponsesCompactionPayload,
-  isResponsesCompactionRequest,
-} from "~/services/copilot/compaction-payload"
+import { isResponsesCompactionRequest } from "~/services/copilot/compaction-payload"
 import {
   createChatCompletions,
   type ChatCompletionResponse,
@@ -50,17 +57,24 @@ import {
   type ResponsesPayload,
 } from "~/services/copilot/create-responses"
 import { sanitizeAnthropicRequestHeaderOptions } from "~/services/copilot/messages-contract"
+import {
+  finalizeNativeResponsesRequest,
+  prepareResponsesRequest,
+} from "~/services/copilot/responses-contract"
 
 import {
-  convertWebSearchTool,
+  prepareResponsesCandidates,
+  type ResponsesNativeCandidate,
+  type ResponsesEndpointCandidate,
+  selectResponsesCandidate,
+} from "./fallback-candidates"
+import {
   disableParallelWebSearch,
   normalizeResponsesReasoning,
   prepareResponsesRouteForTransport,
-  responsesToChatCompletions,
   streamChatCompletionsAsResponses,
-  useFunctionApplyPatch,
 } from "./handler"
-import { executeResponsesMessagesBridge } from "./messages-bridge"
+import { executePreparedResponsesMessagesBridge } from "./messages-bridge"
 import { createStreamIdTracker, fixStreamIds } from "./stream-id-sync"
 import {
   emitResponsesFailureAsStream,
@@ -410,26 +424,27 @@ async function handleResponseCreate(
 
   const routedModel = selectRoutedModel(payload.model)
   const selectedModel = routedModel.model
-  const route = await waitForWebSocketTurn(
-    prepareResponsesRouteForTransport({
+  const selectedCandidate = await waitForWebSocketTurn(
+    prepareResponsesWebSocketCandidate({
       payload,
+      reasoningEffort,
       selectedModel,
       signal: turn.abortController.signal,
     }),
     turn,
   )
-  const preparedPayload = route.preparedPayload
-  if (route.decision.target === "/v1/messages") {
+  const candidate = selectedCandidate.candidate
+  if (selectedCandidate.endpoint === "/v1/messages") {
     recordCopilotMessagesBeta(nativeMessagesOptions.anthropicBeta)
   }
 
-  if (isSyntheticWarmupRequest(preparedPayload)) {
-    await handleSyntheticWarmupRequest(ws, preparedPayload, turn)
+  if (isSyntheticWarmupRequest(payload)) {
+    await handleSyntheticWarmupRequest(ws, payload, turn)
     return
   }
 
   const { vision, initiator: inferredInitiator } =
-    getResponsesRequestOptions(preparedPayload)
+    getResponsesRequestOptions(payload)
   const initiator = initiatorOverride ?? inferredInitiator
 
   await runWithRoutedModelSelection(routedModel, async () => {
@@ -437,9 +452,9 @@ async function handleResponseCreate(
       await dispatchTranslatedWebSocketEndpoint({
         initiator,
         nativeMessagesOptions,
-        preparedPayload,
+        candidate,
+        responseContext: payload,
         requestedModel,
-        routeTarget: route.decision.target,
         turn,
         ws,
       })
@@ -447,9 +462,13 @@ async function handleResponseCreate(
       return
     }
 
+    if (candidate.endpoint !== "/responses") {
+      throw new TypeError("Expected a native Responses WebSocket candidate")
+    }
+
     // Native responses streaming
     const response = await waitForWebSocketTurn(
-      createResponses(preparedPayload, {
+      createResponses(candidate.payload, {
         allowCompatibilityRetry: false,
         vision,
         initiator,
@@ -463,7 +482,7 @@ async function handleResponseCreate(
     if (!isAsyncIterable(response)) {
       // Shouldn't happen since we forced stream: true, but handle gracefully
       await handleNonStreamingResponsesResult(ws, {
-        payload: preparedPayload,
+        payload: candidate.payload,
         response,
         turn,
       })
@@ -480,7 +499,7 @@ async function handleResponseCreate(
         fixStreamIds(data, event, idTracker),
         getCopilotResponseHeaders(),
       )
-      await emitTurnFrame(ws, turn, preparedPayload, processed, event)
+      await emitTurnFrame(ws, turn, candidate.payload, processed, event)
       if (turn.terminal.state !== "open") break
     }
   })
@@ -505,26 +524,26 @@ async function handleNonStreamingResponsesResult(
 }
 
 async function dispatchTranslatedWebSocketEndpoint(options: {
+  candidate: ResponsesEndpointCandidate
   initiator: "agent" | "user"
   nativeMessagesOptions: NativeMessagesRequestOptions
-  preparedPayload: ResponsesPayload
+  responseContext: ResponsesPayload
   requestedModel: string | undefined
-  routeTarget: string
   turn: ResponsesWebSocketTurn
   ws: ResponsesWebSocketState
 }): Promise<boolean> {
   const {
+    candidate,
     initiator,
     nativeMessagesOptions,
-    preparedPayload,
+    responseContext,
     requestedModel,
-    routeTarget,
     turn,
     ws,
   } = options
-  if (routeTarget === "/v1/messages") {
+  if (candidate.endpoint === "/v1/messages") {
     reportResponsesWebSocketEndpointFallback(
-      preparedPayload.model,
+      candidate.payload.model,
       "AnthropicMessages",
     )
     await streamAnthropicMessagesOverWs({
@@ -534,29 +553,106 @@ async function dispatchTranslatedWebSocketEndpoint(options: {
         initiatorOverride: initiator,
         requestedModel,
       },
-      payload: preparedPayload,
+      payload: candidate.payload,
+      responseContext,
       turn,
       ws,
     })
     return true
   }
 
-  if (routeTarget !== "/chat/completions") return false
-  convertWebSearchTool(preparedPayload)
-  // Rewrite custom apply_patch to a function tool only for the CC fallback.
-  // Native /responses must keep the freeform tool intact.
-  useFunctionApplyPatch(preparedPayload)
+  if (candidate.endpoint !== "/chat/completions") return false
   reportResponsesWebSocketEndpointFallback(
-    preparedPayload.model,
+    candidate.payload.model,
     "ChatCompletions",
   )
   await streamChatCompletionsOverWs({
     initiator,
-    payload: preparedPayload,
+    payload: candidate.payload,
+    responseContext,
     turn,
     ws,
   })
   return true
+}
+
+async function prepareResponsesWebSocketCandidate(options: {
+  payload: ResponsesPayload
+  reasoningEffort: ReasoningEffort | undefined
+  selectedModel: Model | undefined
+  signal?: AbortSignal
+}): Promise<{
+  candidate: ResponsesEndpointCandidate
+  endpoint: CopilotInferenceEndpoint
+}> {
+  if (isSyntheticWarmupRequest(options.payload)) {
+    const route = await prepareResponsesRouteForTransport({
+      payload: options.payload,
+      selectedModel: options.selectedModel,
+      signal: options.signal,
+    })
+    return {
+      candidate: createWarmupResponsesCandidate(route.preparedPayload),
+      endpoint: route.decision.target,
+    }
+  }
+  const candidate = await prepareEvaluatedResponsesWebSocketCandidate(options)
+  return {
+    candidate,
+    endpoint: candidate.endpoint,
+  }
+}
+
+function createWarmupResponsesCandidate(
+  payload: ResponsesPayload,
+): ResponsesNativeCandidate {
+  return {
+    endpoint: "/responses",
+    reason: "endpoint_unavailable",
+    payload,
+    check: { mode: "evaluated", findings: [], cost: 0, supported: true },
+  }
+}
+
+async function prepareEvaluatedResponsesWebSocketCandidate(options: {
+  payload: ResponsesPayload
+  reasoningEffort: ReasoningEffort | undefined
+  selectedModel: Model | undefined
+  signal?: AbortSignal
+}): Promise<ResponsesEndpointCandidate> {
+  const preparedSource = prepareResponsesRequest(options.payload)
+  const nativeBody = finalizeNativeResponsesRequest(preparedSource, {
+    model: options.payload.model,
+    defaultEffort: getModelReasoningConfig(options.payload.model)
+      ?.defaultEffort,
+    implicitDefault: usesImplicitReasoningDefault(options.payload.model),
+  })
+  disableParallelWebSearch(nativeBody.body)
+  const candidates = await prepareResponsesCandidates({
+    adaptationSource: preparedSource.source,
+    finalReasoningEffort: options.reasoningEffort,
+    nativeBody,
+    preservedSource: preparedSource,
+    selectedModel: options.selectedModel,
+    signal: options.signal,
+  })
+  const selection = selectResponsesCandidate({
+    candidates,
+    selectedModel: options.selectedModel,
+  })
+  if ("code" in selection) throw createEndpointTranslationError(selection)
+  recordCopilotRequestNormalization("responses", [
+    ...nativeBody.normalizationClasses,
+  ])
+  if (selection.candidate.check.findings.length > 0) {
+    recordCopilotTranslationFindings(
+      "responses",
+      selection.candidate.endpoint,
+      selection.candidate.check,
+    )
+  }
+  recordCopilotEndpointRoute(selection.decision)
+  return selection.candidate
 }
 
 async function waitForWebSocketTurn<T>(
@@ -962,18 +1058,21 @@ async function handleSyntheticWarmupRequest(
 
 async function streamAnthropicMessagesOverWs(options: {
   nativeOptions: NativeMessagesRequestOptions
-  payload: ResponsesPayload
+  payload: Extract<
+    ResponsesEndpointCandidate,
+    { endpoint: "/v1/messages" }
+  >["payload"]
+  responseContext: ResponsesPayload
   turn: ResponsesWebSocketTurn
   ws: ResponsesWebSocketState
 }): Promise<void> {
-  const { nativeOptions, payload, turn, ws } = options
+  const { nativeOptions, payload, responseContext, turn, ws } = options
   const result = await waitForWebSocketTurn(
-    executeResponsesMessagesBridge({
-      attachmentsNormalized: true,
-      compaction: isResponsesCompactionRequest(payload),
+    executePreparedResponsesMessagesBridge({
+      compaction: isResponsesCompactionRequest(responseContext),
       nativeOptions,
       payload,
-      preserveValidatedControls: true,
+      responseContext,
       signal: turn.abortController.signal,
     }),
     turn,
@@ -982,7 +1081,7 @@ async function streamAnthropicMessagesOverWs(options: {
   const wsStream = {
     writeSSE: async (data: { event?: string; data: string }) => {
       if (data.data === "[DONE]") return
-      await emitTurnFrame(ws, turn, payload, data.data, data.event)
+      await emitTurnFrame(ws, turn, responseContext, data.data, data.event)
     },
   }
   await emitResponsesResultAsWebSocketFrames(wsStream, result)
@@ -1015,32 +1114,24 @@ async function emitResponsesResultAsWebSocketFrames(
 
 async function streamChatCompletionsOverWs(options: {
   initiator: "agent" | "user"
-  payload: ResponsesPayload
+  payload: Extract<
+    ResponsesEndpointCandidate,
+    { endpoint: "/chat/completions" }
+  >["payload"]
+  responseContext: ResponsesPayload
   turn: ResponsesWebSocketTurn
   ws: ResponsesWebSocketState
 }): Promise<void> {
-  const { initiator, payload, turn, ws } = options
-  const compaction = isResponsesCompactionRequest(payload)
-  const fitted = compaction ? fitResponsesCompactionPayload(payload) : null
-  const fallbackPayload = fitted?.payload ?? payload
-  if (fitted?.reduced) {
-    consola.warn("Reduced oversized WebSocket fallback compaction payload", {
-      originalBytes: fitted.originalBytes,
-      finalBytes: fitted.finalBytes,
-      omittedBinaryBlocks: fitted.omittedBinaryBlocks,
-      truncatedToolOutputBytes: fitted.truncatedToolOutputBytes,
-    })
-  }
-  const ccPayload = responsesToChatCompletions(fallbackPayload, {
-    preserveCustomToolContext: compaction,
-  })
+  const { initiator, payload, responseContext, turn, ws } = options
+  const compaction = isResponsesCompactionRequest(responseContext)
+  const ccPayload = structuredClone(payload)
   const needsWebSearch =
     ccPayload.tools?.some((tool) => tool.function.name === "web_search")
     ?? false
   if (needsWebSearch) {
     await streamChatWebSearchOverWs({
       ws,
-      payload,
+      responseContext,
       ccPayload,
       compaction,
       initiator,
@@ -1054,6 +1145,7 @@ async function streamChatCompletionsOverWs(options: {
   const response = await waitForWebSocketTurn(
     createChatCompletions(ccPayload, {
       allowCompatibilityRetry: false,
+      candidatePrepared: true,
       compaction,
       initiator,
       signal: turn.abortController.signal,
@@ -1067,27 +1159,36 @@ async function streamChatCompletionsOverWs(options: {
   const wsStream = {
     writeSSE: async (data: { event?: string; data: string }) => {
       if (data.data === "[DONE]") return
-      await emitTurnFrame(ws, turn, payload, data.data, data.event)
+      await emitTurnFrame(ws, turn, responseContext, data.data, data.event)
     },
   }
 
-  await streamChatCompletionsAsResponses(wsStream, ccStream, payload.model)
+  await streamChatCompletionsAsResponses(
+    wsStream,
+    ccStream,
+    responseContext.model,
+  )
 }
 
 async function streamChatWebSearchOverWs(options: {
   ws: ResponsesWebSocketState
-  payload: ResponsesPayload
-  ccPayload: ReturnType<typeof responsesToChatCompletions>
+  responseContext: ResponsesPayload
+  ccPayload: Extract<
+    ResponsesEndpointCandidate,
+    { endpoint: "/chat/completions" }
+  >["payload"]
   compaction: boolean
   initiator: "agent" | "user"
   turn: ResponsesWebSocketTurn
 }): Promise<void> {
-  const { ws, payload, ccPayload, compaction, initiator, turn } = options
+  const { ws, responseContext, ccPayload, compaction, initiator, turn } =
+    options
   ccPayload.stream = false
   ccPayload.stream_options = null
   const initial = (await waitForWebSocketTurn(
     createChatCompletions(ccPayload, {
       allowCompatibilityRetry: false,
+      candidatePrepared: true,
       compaction,
       initiator,
       signal: turn.abortController.signal,
@@ -1099,6 +1200,7 @@ async function streamChatWebSearchOverWs(options: {
     createCompletion: async (nextPayload) =>
       (await createChatCompletions(nextPayload, {
         allowCompatibilityRetry: false,
+        candidatePrepared: true,
         compaction,
         initiator,
         signal: turn.abortController.signal,
@@ -1107,13 +1209,13 @@ async function streamChatWebSearchOverWs(options: {
   const wsStream = {
     writeSSE: async (data: { event?: string; data: string }) => {
       if (data.data === "[DONE]") return
-      await emitTurnFrame(ws, turn, payload, data.data, data.event)
+      await emitTurnFrame(ws, turn, responseContext, data.data, data.event)
     },
   }
   await streamChatCompletionsAsResponses(
     wsStream,
     chatResponseAsStream(response),
-    payload.model,
+    responseContext.model,
   )
 }
 

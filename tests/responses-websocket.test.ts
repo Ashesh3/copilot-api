@@ -2391,7 +2391,7 @@ describe("responses websocket message handling", () => {
     )
   })
 
-  test("forwards safe translation errors before upstream and keeps the socket open", async () => {
+  test("dispatches the exact tolerant Chat candidate for reasoning, future items, and references", async () => {
     state.accountType = "individual"
     state.copilotToken = "copilot-token"
     state.models = {
@@ -2402,6 +2402,7 @@ describe("responses websocket message handling", () => {
       })),
     }
     const ws = createTestWebSocket()
+    queuedResponses.push(createChatCompletionsSseResponse())
 
     await responsesWebSocket.message(
       ws,
@@ -2412,27 +2413,35 @@ describe("responses websocket message handling", () => {
           {
             type: "reasoning",
             encrypted_content: "private-encrypted-state",
-            summary: [],
+            summary: [{ type: "summary_text", text: "visible summary" }],
           },
+          { type: "future_item", payload: "future-private-value" },
+          {
+            type: "item_reference",
+            id: "item-reference-private-value",
+          },
+          { type: "message", role: "user", content: "finish" },
         ],
       }),
     )
 
-    expect(fetchMock).not.toHaveBeenCalled()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(ws.data.closed).toBe(false)
     expect(ws.data.activeTurns.size).toBe(0)
-    expect(JSON.parse(ws.sent.at(-1) ?? "{}")).toEqual({
-      type: "error",
-      status: 400,
-      error: {
-        code: "endpoint_translation_unsupported",
-        message:
-          "The selected Copilot model cannot accept this request without losing required protocol data.",
-        param: "opaque_reasoning",
-        type: "invalid_request_error",
-        request_id: "req-test",
-      },
+    expect(lastRequestBody).toEqual({
+      model: "gpt-5.4",
+      messages: [
+        { role: "assistant", content: "visible summary" },
+        { role: "user", content: "[Future Responses item]" },
+        { role: "user", content: "[Future Responses item]" },
+        { role: "user", content: "finish" },
+      ],
+      stream: true,
+      stream_options: { include_usage: true },
     })
+    expect(ws.sent.some((frame) => frame.includes("response.completed"))).toBe(
+      true,
+    )
   })
 
   test("fits rehydrated compaction turns on ChatCompletions fallback", async () => {
