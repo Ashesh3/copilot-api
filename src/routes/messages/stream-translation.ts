@@ -14,18 +14,6 @@ import {
 import { createAnthropicStreamError } from "./error"
 import { mapOpenAIStopReasonToAnthropic } from "./utils"
 
-function isToolBlockOpen(state: AnthropicStreamState): boolean {
-  if (!state.contentBlockOpen) {
-    return false
-  }
-  // Check if the current block index corresponds to any known tool call
-  return Object.values(state.toolCalls).some(
-    (tc) =>
-      tc.anthropicBlockIndex === state.contentBlockIndex
-      && state.startedToolCallIndices?.has(tc.anthropicBlockIndex),
-  )
-}
-
 function normalizeToolCallIndex(
   index: number,
   state: AnthropicStreamState,
@@ -39,17 +27,99 @@ function normalizeToolCallIndex(
   return localStateIndex
 }
 
-function closeNonThinkingBlockIfOpen(
+function closeCurrentContentBlock(
   state: AnthropicStreamState,
   events: Array<AnthropicStreamEventData>,
 ): void {
-  if (!state.contentBlockOpen || state.thinkingBlockOpen) return
+  if (!state.contentBlockOpen) return
   events.push({
     type: "content_block_stop",
     index: state.contentBlockIndex,
   })
   state.contentBlockIndex++
   state.contentBlockOpen = false
+  state.activeToolCallStateIndex = undefined
+}
+
+function flushActiveToolArguments(
+  state: AnthropicStreamState,
+  events: Array<AnthropicStreamEventData>,
+): void {
+  if (state.activeToolCallStateIndex === undefined) return
+  const toolCallInfo = state.toolCalls[state.activeToolCallStateIndex]
+
+  for (const argumentsText of toolCallInfo.pendingArguments?.splice(0) ?? []) {
+    events.push({
+      type: "content_block_delta",
+      index: toolCallInfo.anthropicBlockIndex,
+      delta: {
+        type: "input_json_delta",
+        partial_json: argumentsText,
+      },
+    })
+  }
+}
+
+function startNextToolCallIfReady(
+  state: AnthropicStreamState,
+  events: Array<AnthropicStreamEventData>,
+): boolean {
+  if (state.activeToolCallStateIndex !== undefined) return false
+
+  state.startedToolCallIndices ??= new Set()
+  const stateIndices = Object.keys(state.toolCalls)
+    .map(Number)
+    .sort((a, b) => a - b)
+  const nextStateIndex = stateIndices.find((stateIndex) => {
+    const toolCallInfo = state.toolCalls[stateIndex]
+    return !state.startedToolCallIndices.has(toolCallInfo.anthropicBlockIndex)
+  })
+  if (nextStateIndex === undefined) return false
+
+  const toolCallInfo = state.toolCalls[nextStateIndex]
+  if (!toolCallInfo.id || !toolCallInfo.name) return false
+
+  closeThinkingBlockIfOpen(state, events)
+  closeCurrentContentBlock(state, events)
+  toolCallInfo.anthropicBlockIndex = state.contentBlockIndex
+  state.startedToolCallIndices.add(toolCallInfo.anthropicBlockIndex)
+  state.activeToolCallStateIndex = nextStateIndex
+  state.contentBlockOpen = true
+  events.push({
+    type: "content_block_start",
+    index: toolCallInfo.anthropicBlockIndex,
+    content_block: {
+      type: "tool_use",
+      id: toolCallInfo.id,
+      name: toolCallInfo.name,
+      input: {},
+    },
+  })
+  flushActiveToolArguments(state, events)
+  return true
+}
+
+function flushPendingToolCallBlocks(
+  state: AnthropicStreamState,
+  events: Array<AnthropicStreamEventData>,
+): void {
+  while (true) {
+    if (state.activeToolCallStateIndex !== undefined) {
+      flushActiveToolArguments(state, events)
+      closeCurrentContentBlock(state, events)
+      continue
+    }
+    if (!startNextToolCallIfReady(state, events)) return
+  }
+}
+
+function closeNonThinkingBlockIfOpen(
+  state: AnthropicStreamState,
+  events: Array<AnthropicStreamEventData>,
+): void {
+  if (state.thinkingBlockOpen) return
+  flushPendingToolCallBlocks(state, events)
+  closeCurrentContentBlock(state, events)
 }
 
 function closeThinkingBlockIfOpen(
@@ -88,13 +158,8 @@ export function closeAnthropicOpenBlocks(
 ): Array<AnthropicStreamEventData> {
   const events: Array<AnthropicStreamEventData> = []
   closeThinkingBlockIfOpen(state, events)
-  if (state.contentBlockOpen) {
-    events.push({
-      type: "content_block_stop",
-      index: state.contentBlockIndex,
-    })
-    state.contentBlockOpen = false
-  }
+  flushPendingToolCallBlocks(state, events)
+  closeCurrentContentBlock(state, events)
   return events
 }
 
@@ -304,16 +369,7 @@ export function translateChunkToAnthropicEvents(
   if (delta.content) {
     // Close thinking block if it was open before starting text
     closeThinkingBlockIfOpen(state, events)
-
-    if (isToolBlockOpen(state)) {
-      // A tool block was open, so close it before starting a text block.
-      events.push({
-        type: "content_block_stop",
-        index: state.contentBlockIndex,
-      })
-      state.contentBlockIndex++
-      state.contentBlockOpen = false
-    }
+    flushPendingToolCallBlocks(state, events)
 
     if (!state.contentBlockOpen) {
       events.push({
@@ -348,76 +404,13 @@ export function translateChunkToAnthropicEvents(
       })
       if (toolCall.id) toolCallInfo.id += toolCall.id
       if (toolCall.function?.name) toolCallInfo.name += toolCall.function.name
-      const wasStarted =
-        state.startedToolCallIndices?.has(toolCallInfo.anthropicBlockIndex)
-        ?? false
       if (toolCall.function?.arguments) {
         toolCallInfo.pendingArguments ??= []
         toolCallInfo.pendingArguments.push(toolCall.function.arguments)
       }
-
-      state.startedToolCallIndices ??= new Set()
-      if (
-        !state.startedToolCallIndices.has(toolCallInfo.anthropicBlockIndex)
-        && toolCallInfo.id
-        && toolCallInfo.name
-      ) {
-        // New tool call starting.
-        closeThinkingBlockIfOpen(state, events)
-
-        if (state.contentBlockOpen) {
-          // Close any previously open block.
-          events.push({
-            type: "content_block_stop",
-            index: state.contentBlockIndex,
-          })
-          state.contentBlockIndex++
-          state.contentBlockOpen = false
-        }
-
-        toolCallInfo.anthropicBlockIndex = state.contentBlockIndex
-        state.startedToolCallIndices.add(toolCallInfo.anthropicBlockIndex)
-
-        events.push({
-          type: "content_block_start",
-          index: toolCallInfo.anthropicBlockIndex,
-          content_block: {
-            type: "tool_use",
-            id: toolCallInfo.id,
-            name: toolCallInfo.name,
-            input: {},
-          },
-        })
-        state.contentBlockOpen = true
-
-        for (const argumentsText of toolCallInfo.pendingArguments ?? []) {
-          events.push({
-            type: "content_block_delta",
-            index: toolCallInfo.anthropicBlockIndex,
-            delta: {
-              type: "input_json_delta",
-              partial_json: argumentsText,
-            },
-          })
-        }
-        toolCallInfo.pendingArguments = []
-      }
-
-      if (
-        toolCall.function?.arguments
-        && state.startedToolCallIndices.has(toolCallInfo.anthropicBlockIndex)
-        && wasStarted
-        && (toolCallInfo.pendingArguments?.length ?? 0) > 0
-      ) {
-        events.push({
-          type: "content_block_delta",
-          index: toolCallInfo.anthropicBlockIndex,
-          delta: {
-            type: "input_json_delta",
-            partial_json: toolCall.function.arguments,
-          },
-        })
-        toolCallInfo.pendingArguments = []
+      startNextToolCallIfReady(state, events)
+      if (state.activeToolCallStateIndex === normalizedToolIndex) {
+        flushActiveToolArguments(state, events)
       }
     }
   }
@@ -425,14 +418,8 @@ export function translateChunkToAnthropicEvents(
   if (choice.finish_reason) {
     // Close thinking block if still open
     closeThinkingBlockIfOpen(state, events)
-
-    if (state.contentBlockOpen) {
-      events.push({
-        type: "content_block_stop",
-        index: state.contentBlockIndex,
-      })
-      state.contentBlockOpen = false
-    }
+    flushPendingToolCallBlocks(state, events)
+    closeCurrentContentBlock(state, events)
 
     state.pendingFinishReason = choice.finish_reason
   }

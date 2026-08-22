@@ -11,9 +11,11 @@ import type { ResponsesResult } from "~/services/copilot/create-responses"
 import { streamAnthropicAsChatCompletions } from "~/routes/chat-completions/anthropic-bridge"
 import {
   type AnthropicContentBlockDeltaEvent,
+  type AnthropicInputJsonDelta,
   type AnthropicMessageDeltaEvent,
   type AnthropicMessageStartEvent,
   type AnthropicResponse,
+  type AnthropicStreamEventData,
   type AnthropicStreamState,
 } from "~/routes/messages/anthropic-types"
 import { translateToAnthropic } from "~/routes/messages/non-stream-translation"
@@ -76,6 +78,39 @@ const anthropicStreamEventSchema = z.looseObject({
 
 function isValidAnthropicStreamEvent(payload: unknown): boolean {
   return anthropicStreamEventSchema.safeParse(payload).success
+}
+
+function isInputJsonDeltaEvent(
+  event: AnthropicStreamEventData,
+): event is AnthropicContentBlockDeltaEvent & {
+  delta: AnthropicInputJsonDelta
+} {
+  return (
+    event.type === "content_block_delta"
+    && event.delta.type === "input_json_delta"
+  )
+}
+
+function createInterleavedToolChunk(
+  toolCalls: NonNullable<
+    ChatCompletionChunk["choices"][number]["delta"]["tool_calls"]
+  >,
+  finishReason: ChatCompletionChunk["choices"][number]["finish_reason"] = null,
+): ChatCompletionChunk {
+  return {
+    id: "cmpl-interleaved-split-tools",
+    object: "chat.completion.chunk",
+    created: 1,
+    model: "gpt-current",
+    choices: [
+      {
+        index: 0,
+        delta: { tool_calls: toolCalls },
+        finish_reason: finishReason,
+        logprobs: null,
+      },
+    ],
+  }
 }
 
 test("types and preserves unknown fields in native Messages deltas", () => {
@@ -1433,6 +1468,25 @@ describe("OpenAI to Anthropic Streaming Response Translation", () => {
       },
       streamState,
     )
+    events.push(
+      ...translateChunkToAnthropicEvents(
+        {
+          id: "cmpl-interleaved-tools",
+          object: "chat.completion.chunk",
+          created: 1,
+          model: "gpt-current",
+          choices: [
+            {
+              index: 0,
+              delta: {},
+              finish_reason: "tool_calls",
+              logprobs: null,
+            },
+          ],
+        },
+        streamState,
+      ),
+    )
 
     expect(streamState.toolCallStateIndexByUpstreamIndex).toEqual(
       new Map([
@@ -1463,6 +1517,110 @@ describe("OpenAI to Anthropic Streaming Response Translation", () => {
     ).toMatchObject([
       { index: 0, delta: { partial_json: "{}" } },
       { index: 1, delta: { partial_json: "{}" } },
+    ])
+  })
+
+  test("keeps interleaved split tool deltas inside first-seen open blocks", () => {
+    const streamState: AnthropicStreamState = {
+      messageStartSent: false,
+      contentBlockIndex: 0,
+      contentBlockOpen: false,
+      toolCalls: {},
+    }
+    const chunks = [
+      createInterleavedToolChunk([
+        {
+          index: 1,
+          id: "call_one",
+          type: "function",
+          function: { name: "first", arguments: '{"one":' },
+        },
+      ]),
+      createInterleavedToolChunk([
+        {
+          index: 0,
+          id: "call_zero",
+          type: "function",
+          function: { name: "second", arguments: '{"two":' },
+        },
+      ]),
+      createInterleavedToolChunk([
+        { index: 1, function: { arguments: '"alpha"}' } },
+      ]),
+      createInterleavedToolChunk([
+        { index: 0, function: { arguments: '"beta"}' } },
+      ]),
+      createInterleavedToolChunk([], "tool_calls"),
+    ]
+
+    const events = chunks.flatMap((chunk) =>
+      translateChunkToAnthropicEvents(chunk, streamState),
+    )
+    const openBlocks = new Set<number>()
+    const starts = new Map<number, number>()
+    const stops = new Map<number, number>()
+
+    for (const event of events) {
+      switch (event.type) {
+        case "content_block_start": {
+          expect(openBlocks.has(event.index)).toBe(false)
+          openBlocks.add(event.index)
+          starts.set(event.index, (starts.get(event.index) ?? 0) + 1)
+
+          break
+        }
+        case "content_block_delta": {
+          expect(openBlocks.has(event.index)).toBe(true)
+
+          break
+        }
+        case "content_block_stop": {
+          expect(openBlocks.has(event.index)).toBe(true)
+          openBlocks.delete(event.index)
+          stops.set(event.index, (stops.get(event.index) ?? 0) + 1)
+
+          break
+        }
+        // No default
+      }
+    }
+
+    expect(openBlocks).toEqual(new Set())
+    expect(starts).toEqual(
+      new Map([
+        [0, 1],
+        [1, 1],
+      ]),
+    )
+    expect(stops).toEqual(starts)
+    expect(
+      events.filter(
+        (event) =>
+          event.type === "content_block_start"
+          && event.content_block.type === "tool_use",
+      ),
+    ).toMatchObject([
+      {
+        index: 0,
+        content_block: { id: "call_one", name: "first" },
+      },
+      {
+        index: 1,
+        content_block: { id: "call_zero", name: "second" },
+      },
+    ])
+    expect(
+      events
+        .filter((event) => isInputJsonDeltaEvent(event))
+        .map((event) => ({
+          index: event.index,
+          partialJson: event.delta.partial_json,
+        })),
+    ).toEqual([
+      { index: 0, partialJson: '{"one":' },
+      { index: 0, partialJson: '"alpha"}' },
+      { index: 1, partialJson: '{"two":' },
+      { index: 1, partialJson: '"beta"}' },
     ])
   })
 })

@@ -459,6 +459,7 @@ export interface AnthropicStreamState {
   }
   startedToolCallIndices?: Set<number>
   toolCallStateIndexByUpstreamIndex?: Map<number, number>
+  activeToolCallStateIndex?: number
   // Track usage from chunks (may come separately from finish_reason)
   pendingUsage?: {
     prompt_tokens: number
