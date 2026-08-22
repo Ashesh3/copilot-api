@@ -14,7 +14,7 @@ import type {
 import type { EmbeddingResponse } from "~/services/copilot/create-embeddings"
 
 import { getConfig, updateConfig } from "~/lib/config"
-import { HTTPError, LocalHTTPError } from "~/lib/error"
+import { LocalHTTPError, SensitiveHTTPError } from "~/lib/error"
 import {
   abortLlmDebugLog,
   failLlmDebugLog,
@@ -516,7 +516,7 @@ function throwCustomProviderError(context: CustomProviderErrorContext): never {
     createUpstreamErrorMessage(reference, path),
     `Status: ${response.status}`,
   )
-  throw new HTTPError(
+  throw new SensitiveHTTPError(
     createUpstreamErrorMessage(reference, path),
     response,
     payload,

@@ -72,6 +72,8 @@ export class HTTPError extends Error {
   }
 }
 
+export class SensitiveHTTPError extends HTTPError {}
+
 interface LocalHttpErrorSnapshot {
   readonly clientBody?: Readonly<Record<string, unknown>>
   readonly localError?: SafeLocalClientError
@@ -192,6 +194,7 @@ interface HttpErrorInspectionBase {
   readonly responseHeaders: Readonly<Record<string, string>>
   readonly safeMessage: string
   readonly status: number
+  readonly suppressResponseBodyDiagnostics?: true
 }
 
 export interface UpstreamFailureSnapshot {
@@ -562,9 +565,16 @@ function readHttpErrorCapture(error: HTTPError): HttpErrorResponseCapture {
   )
 }
 
+function getHttpErrorDiagnosticPolicy(error: HTTPError) {
+  return error instanceof SensitiveHTTPError ?
+      { suppressResponseBodyDiagnostics: true as const }
+    : {}
+}
+
 export function snapshotHttpErrorMetadata(
   error: HTTPError,
 ): HttpErrorInspection {
+  const diagnosticPolicy = getHttpErrorDiagnosticPolicy(error)
   const localSnapshot = snapshotLocalHttpError(error)
   if (localSnapshot) {
     return Object.freeze({
@@ -577,6 +587,7 @@ export function snapshotHttpErrorMetadata(
         localSnapshot.localError?.message ?? localSnapshot.safeMessage,
       ),
       status: localSnapshot.status,
+      ...diagnosticPolicy,
     })
   }
   const snapshot = readHttpErrorCapture(error)
@@ -585,6 +596,7 @@ export function snapshotHttpErrorMetadata(
     responseHeaders: snapshot.responseHeaders,
     safeMessage: fallbackSafeMessage(snapshot.status, snapshot.safeMessage),
     status: snapshot.status,
+    ...diagnosticPolicy,
   })
 }
 
@@ -618,6 +630,7 @@ function classifyUpstreamBody(
 async function inspectCapturedHttpError(
   error: HTTPError,
 ): Promise<HttpErrorInspection> {
+  const diagnosticPolicy = getHttpErrorDiagnosticPolicy(error)
   const localSnapshot = snapshotLocalHttpError(error)
   if (localSnapshot) return snapshotHttpErrorMetadata(error)
 
@@ -638,6 +651,7 @@ async function inspectCapturedHttpError(
       responseHeaders: snapshot.responseHeaders,
       safeMessage: fallbackSafeMessage(snapshot.status, snapshot.safeMessage),
       status: snapshot.status,
+      ...diagnosticPolicy,
     })
   }
   if (bodyBytes.byteLength === 0) {
@@ -646,6 +660,7 @@ async function inspectCapturedHttpError(
       responseHeaders: snapshot.responseHeaders,
       safeMessage: fallbackSafeMessage(snapshot.status, snapshot.safeMessage),
       status: snapshot.status,
+      ...diagnosticPolicy,
     })
   }
 
@@ -663,6 +678,7 @@ async function inspectCapturedHttpError(
     responseHeaders: snapshot.responseHeaders,
     safeMessage: fallbackSafeMessage(snapshot.status, snapshot.safeMessage),
     status: snapshot.status,
+    ...diagnosticPolicy,
   })
 }
 
@@ -689,7 +705,10 @@ function upstreamBodyFields(inspection: UpstreamHttpErrorInspection) {
 
 function logHttpError(inspection: HttpErrorInspection): void {
   consola.error(`[${inspection.status}] ${inspection.safeMessage}`)
-  if (inspection.kind === "upstream") {
+  if (
+    inspection.kind === "upstream"
+    && !inspection.suppressResponseBodyDiagnostics
+  ) {
     consola.error(upstreamBodyFields(inspection))
   }
   if (inspection.clientError) {
@@ -722,7 +741,12 @@ function captureHttpError(options: {
     extra: {
       status: inspection.status,
       validationClass: inspection.clientError?.fingerprint,
-      ...(inspection.kind === "upstream" ? upstreamBodyFields(inspection) : {}),
+      ...((
+        inspection.kind === "upstream"
+        && !inspection.suppressResponseBodyDiagnostics
+      ) ?
+        upstreamBodyFields(inspection)
+      : {}),
     },
   })
 }
@@ -741,7 +765,12 @@ export function reportHttpErrorForTransport(
     extra: {
       status: inspection.status,
       validationClass: inspection.clientError?.fingerprint,
-      ...(inspection.kind === "upstream" ? upstreamBodyFields(inspection) : {}),
+      ...((
+        inspection.kind === "upstream"
+        && !inspection.suppressResponseBodyDiagnostics
+      ) ?
+        upstreamBodyFields(inspection)
+      : {}),
     },
   })
 }

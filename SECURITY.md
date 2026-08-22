@@ -35,7 +35,8 @@ affected, include its exact version or digest.
   request, header, and configuration secrets.
 - Final non-empty upstream error response bodies are intentionally replicated to
   the normal client, ordinary logs, and Sentry with status and content type.
-  Response bodies are not a secret-redaction boundary.
+  Custom-provider bodies are excluded from ordinary logs and Sentry but remain
+  available to the normal client and administrator-only LLM Debug.
 - Authenticated inference requesters can direct attachment/file recovery to any
   runtime-valid HTTP(S) destination and redirect. There is no SSRF destination
   policy; caller abort, timeout, byte, redirect, parsing, media, and
