@@ -72,6 +72,7 @@ const FUTURE_RESPONSES_ROLE_CONTEXT = "[Future role content]"
 const RESPONSES_REASONING_CONTEXT = "[Assistant reasoning context]"
 const RESPONSES_TOOL_CONTEXT = "[Non-function tool context]"
 const RESPONSES_UNPAIRED_RESULT_CONTEXT = "[Unpaired tool result]"
+const MAX_ASSISTANT_FALLBACK_TEXT_LENGTH = 16_384
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -1182,7 +1183,18 @@ function convertAnthropicOutput(response: AnthropicResponse): {
     const block = rawBlock as unknown as Record<string, unknown>
     const type = typeof block.type === "string" ? block.type : undefined
     if (type === "thinking") {
-      if (typeof block.thinking !== "string") throwResponseContentError()
+      if (typeof block.thinking !== "string") {
+        const converted = appendAssistantBlockFallback({
+          block,
+          messageIndex,
+          output,
+          responseId: response.id,
+          text,
+        })
+        messageIndex = converted.messageIndex
+        text = converted.text
+        continue
+      }
       output.push(
         createReasoningOutput(
           response.id,
@@ -1197,7 +1209,18 @@ function convertAnthropicOutput(response: AnthropicResponse): {
       continue
     }
     if (type === "text") {
-      if (typeof block.text !== "string") throwResponseContentError()
+      if (typeof block.text !== "string") {
+        const converted = appendAssistantBlockFallback({
+          block,
+          messageIndex,
+          output,
+          responseId: response.id,
+          text,
+        })
+        messageIndex = converted.messageIndex
+        text = converted.text
+        continue
+      }
       text += block.text
       output.push(createTextOutput(response.id, block.text, messageIndex))
       messageIndex += 1
@@ -1209,7 +1232,16 @@ function convertAnthropicOutput(response: AnthropicResponse): {
         || typeof block.name !== "string"
         || !isRecordValue(block.input)
       ) {
-        throwResponseContentError()
+        const converted = appendAssistantBlockFallback({
+          block,
+          messageIndex,
+          output,
+          responseId: response.id,
+          text,
+        })
+        messageIndex = converted.messageIndex
+        text = converted.text
+        continue
       }
       output.push(
         createFunctionCallOutput(
@@ -1224,13 +1256,15 @@ function convertAnthropicOutput(response: AnthropicResponse): {
     if (!type) {
       throwResponseContentError()
     }
-    const fallbackText = stringifyUnknownAssistantBlock(block)
-    if (!fallbackText) {
-      continue
-    }
-    text += fallbackText
-    output.push(createTextOutput(response.id, fallbackText, messageIndex))
-    messageIndex += 1
+    const converted = appendAssistantBlockFallback({
+      block,
+      messageIndex,
+      output,
+      responseId: response.id,
+      text,
+    })
+    messageIndex = converted.messageIndex
+    text = converted.text
   }
   return { output, text }
 }
@@ -1251,9 +1285,32 @@ function stringifyUnknownAssistantBlock(
   block: Record<string, unknown>,
 ): string | null {
   try {
-    return JSON.stringify(block)
+    const serialized = JSON.stringify(block)
+    return serialized.length <= MAX_ASSISTANT_FALLBACK_TEXT_LENGTH ?
+        serialized
+      : serialized.slice(0, MAX_ASSISTANT_FALLBACK_TEXT_LENGTH)
   } catch {
     return null
+  }
+}
+
+function appendAssistantBlockFallback(options: {
+  block: Record<string, unknown>
+  messageIndex: number
+  output: Array<ResponseOutputItem>
+  responseId: string
+  text: string
+}): { messageIndex: number; text: string } {
+  const fallbackText = stringifyUnknownAssistantBlock(options.block)
+  if (!fallbackText) {
+    return { messageIndex: options.messageIndex, text: options.text }
+  }
+  options.output.push(
+    createTextOutput(options.responseId, fallbackText, options.messageIndex),
+  )
+  return {
+    messageIndex: options.messageIndex + 1,
+    text: options.text + fallbackText,
   }
 }
 

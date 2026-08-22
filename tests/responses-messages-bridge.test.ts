@@ -1287,6 +1287,128 @@ test("bridges future assistant blocks as text while preserving known block order
   ])
 })
 
+test.each([
+  {
+    name: "numeric thinking",
+    block: { type: "thinking", thinking: 42, signature: "sig-invalid" },
+  },
+  {
+    name: "object text",
+    block: { type: "text", text: { answer: "future" } },
+  },
+  {
+    name: "null tool input",
+    block: {
+      type: "tool_use",
+      id: "call_invalid",
+      name: "lookup",
+      input: null,
+    },
+  },
+])(
+  "textualizes Anthropic $name instead of rejecting the response",
+  ({ block }) => {
+    const response = {
+      id: "msg_malformed_known",
+      type: "message",
+      role: "assistant",
+      model: "resolved",
+      content: [block],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 2 },
+    } as unknown as AnthropicResponse
+
+    const result = anthropicResponseToResponsesResult(response, "requested")
+    const expectedText = JSON.stringify(block)
+
+    expect(result.output).toEqual([
+      {
+        id: "msg_msg_malformed_known",
+        type: "message",
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text: expectedText, annotations: [] }],
+      },
+    ])
+    expect(result.output_text).toBe(expectedText)
+  },
+)
+
+test("preserves malformed known Anthropic block order without mutating the source", () => {
+  const content = [
+    { type: "text", text: "alpha" },
+    { type: "thinking", thinking: 17, signature: "sig-invalid" },
+    { type: "text", text: { answer: "future" } },
+    { type: "tool_use", id: "call_invalid", name: "lookup", input: null },
+    {
+      type: "tool_use",
+      id: "call_valid",
+      name: "lookup",
+      input: { query: "status" },
+    },
+    { type: "text", text: "omega" },
+  ]
+  const sourceSnapshot = structuredClone(content)
+  const response = {
+    id: "msg_malformed_order",
+    type: "message",
+    role: "assistant",
+    model: "resolved",
+    content,
+    stop_reason: "end_turn",
+    stop_sequence: null,
+    usage: { input_tokens: 1, output_tokens: 2 },
+  } as unknown as AnthropicResponse
+
+  const result = anthropicResponseToResponsesResult(response, "requested")
+
+  expect(result.output.map((item) => item.type)).toEqual([
+    "message",
+    "message",
+    "message",
+    "message",
+    "function_call",
+    "message",
+  ])
+  expect(result.output_text).toBe(
+    'alpha{"type":"thinking","thinking":17,"signature":"sig-invalid"}'
+      + '{"type":"text","text":{"answer":"future"}}'
+      + '{"type":"tool_use","id":"call_invalid","name":"lookup","input":null}'
+      + "omega",
+  )
+  expect(result.output[4]).toMatchObject({
+    type: "function_call",
+    call_id: "call_valid",
+    name: "lookup",
+    arguments: '{"query":"status"}',
+  })
+  expect(content).toEqual(sourceSnapshot)
+})
+
+test("bounds malformed Anthropic assistant block text", () => {
+  const response = {
+    id: "msg_malformed_bounded",
+    type: "message",
+    role: "assistant",
+    model: "resolved",
+    content: [{ type: "text", text: { value: "x".repeat(20_000) } }],
+    stop_reason: "end_turn",
+    stop_sequence: null,
+    usage: { input_tokens: 1, output_tokens: 2 },
+  } as unknown as AnthropicResponse
+
+  const result = anthropicResponseToResponsesResult(response, "requested")
+
+  expect(result.output_text).toHaveLength(16_384)
+  expect(result.output).toMatchObject([
+    {
+      type: "message",
+      content: [{ type: "output_text", text: result.output_text }],
+    },
+  ])
+})
+
 test("maps Anthropic max-token and refusal stops to Responses status", () => {
   const base: AnthropicResponse = {
     id: "msg_stop",
