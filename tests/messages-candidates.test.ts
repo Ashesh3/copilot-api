@@ -546,6 +546,43 @@ test("associates duplicate and missing tool IDs without collisions", async () =>
   expect(source).toEqual(snapshot)
 })
 
+test("falls back safely for cyclic orphaned tool-result content", async () => {
+  const cyclicContent: Array<unknown> = []
+  cyclicContent.push(cyclicContent)
+  const source = createSource({
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "missing",
+            content:
+              cyclicContent as unknown as Array<AnthropicToolResultContentBlock>,
+          },
+        ],
+      },
+    ],
+  })
+
+  const candidates = await prepareMessagesCandidates({
+    source,
+    selectedModel: {
+      ...selectedModel,
+      supported_endpoints: ["/responses", "/chat/completions"],
+    },
+  })
+
+  const chat = JSON.stringify(candidates.chat?.payload)
+  const responses = JSON.stringify(candidates.responses?.payload)
+  expect(chat).toContain(String.raw`[Orphaned tool result]\n`)
+  expect(responses).toContain(String.raw`[Orphaned tool result]\n`)
+  expect(chat).toContain("[Unserializable content]")
+  expect(responses).toContain("[Unserializable content]")
+  expect(chat).not.toContain('"tool_call_id":"missing"')
+  expect(responses).not.toContain('"call_id":"missing"')
+})
+
 test("preserves marker content across Chat and Responses candidates", async () => {
   const marker =
     "<system-reminder>\nThe task tools haven't been used recently. Keep this quoted text."

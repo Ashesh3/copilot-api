@@ -5,6 +5,7 @@ import { LocalHTTPError } from "~/lib/error"
 import { getUnsupportedRequestParameters } from "~/lib/model-settings"
 import {
   isProxyObject,
+  REQUEST_SNAPSHOT_MAX_ARRAY_LENGTH,
   snapshotRequestPlainDataRecord,
 } from "~/lib/plain-data-snapshot"
 
@@ -215,6 +216,7 @@ const OMIT_FIELD = Symbol("omit Responses field")
 const INVALID_RESPONSES_TOOL_SNAPSHOT = Symbol(
   "invalid Responses tool snapshot",
 )
+class ResponsesToolsSnapshotLimitError extends Error {}
 const JSON_OBJECT_INPUT_INSTRUCTION = "Respond with JSON."
 export const COPILOT_RESPONSES_MIN_OUTPUT_TOKENS = 16
 
@@ -352,7 +354,14 @@ function createResponsesSourceSnapshotCandidate(
       source[key] = descriptor.value
     }
     return source
-  } catch {
+  } catch (error) {
+    if (error instanceof ResponsesToolsSnapshotLimitError) {
+      throw createResponsesValidationError({
+        code: "invalid_value",
+        message: `The tools field must contain at most ${REQUEST_SNAPSHOT_MAX_ARRAY_LENGTH.toLocaleString("en-US")} items.`,
+        param: "tools",
+      })
+    }
     return undefined
   }
 }
@@ -380,9 +389,11 @@ function snapshotResponsesSourceTools(tools: unknown): unknown {
     || !("value" in lengthDescriptor)
     || !Number.isSafeInteger(lengthDescriptor.value)
     || lengthDescriptor.value < 0
-    || lengthDescriptor.value > 2048
   ) {
     return undefined
+  }
+  if (lengthDescriptor.value > REQUEST_SNAPSHOT_MAX_ARRAY_LENGTH) {
+    throw new ResponsesToolsSnapshotLimitError()
   }
   const length = lengthDescriptor.value as number
   if (

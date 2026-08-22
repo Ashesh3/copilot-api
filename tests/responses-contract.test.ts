@@ -105,6 +105,33 @@ test("accepts a deep, long Responses source while generic snapshots stay strict"
   expect(snapshotPlainDataRecord(payload)).toBeUndefined()
 })
 
+test("preserves more than 2,048 safe Responses tools in the request snapshot", () => {
+  const tools = Array.from({ length: 2_049 }, (_, index) => ({
+    type: "function",
+    name: `tool_${index}`,
+  }))
+
+  const prepared = prepareResponsesRequest({
+    model: "gpt-current",
+    input: "hello",
+    tools,
+  })
+
+  expect(prepared.source.tools).toEqual(tools)
+})
+
+test("rejects Responses tool arrays above the request snapshot boundary", () => {
+  const tools = Array.from({ length: 65_537 }, () => ({ type: "function" }))
+
+  expect(() =>
+    prepareResponsesRequest({
+      model: "gpt-current",
+      input: "hello",
+      tools,
+    }),
+  ).toThrow(LocalHTTPError)
+})
+
 test("reports only fixed classes for wire-changing Responses normalization", () => {
   const result = prepareLegacyResponsesRequestForTest({
     model: "gpt-current",

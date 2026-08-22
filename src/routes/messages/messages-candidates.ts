@@ -80,12 +80,20 @@ export interface PreparedMessagesNativeCandidate
 
 const ORPHAN_TOOL_RESULT_PREFIX = "[Orphaned tool result]"
 const ORPHAN_TOOL_RESULT_MAX_CHARS = 16_384
+const UNSERIALIZABLE_ORPHAN_TOOL_RESULT = "[Unserializable content]"
 
 function serializeOrphanToolResult(
   content: AnthropicToolResultBlock["content"],
 ): string {
-  const serialized =
-    typeof content === "string" ? content : JSON.stringify(content)
+  if (typeof content === "string") {
+    return content.slice(0, ORPHAN_TOOL_RESULT_MAX_CHARS)
+  }
+  let serialized: string
+  try {
+    serialized = JSON.stringify(content)
+  } catch {
+    serialized = UNSERIALIZABLE_ORPHAN_TOOL_RESULT
+  }
   return serialized.slice(0, ORPHAN_TOOL_RESULT_MAX_CHARS)
 }
 
