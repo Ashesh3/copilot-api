@@ -442,7 +442,9 @@ export const createResponsesNormalTerminalEvents = (
   response: ResponsesResult,
 ): Array<AnthropicStreamEventData> => {
   if (state.terminal !== "open") return []
-  const events = closeResponsesOpenBlocks(state)
+  const events = new Array<AnthropicStreamEventData>()
+  if (!state.messageStartSent) events.push(...messageStart(state, response))
+  events.push(...closeResponsesOpenBlocks(state))
   const anthropic = translateResponsesResultToAnthropic(response)
   events.push(
     {
@@ -548,7 +550,7 @@ const openThinkingBlockIfNeeded = (
 ): number => {
   //thinking blocks has multiple summary_index, should combine into one block
   const summaryIndex = 0
-  const key = getBlockKey(outputIndex, summaryIndex)
+  const key = `thinking:${getBlockKey(outputIndex, summaryIndex)}`
   let blockIndex = state.blockIndexByKey.get(key)
 
   if (blockIndex === undefined) {

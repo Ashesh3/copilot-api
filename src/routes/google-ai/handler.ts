@@ -116,6 +116,7 @@ import {
 import { adaptGoogleToChatCandidate } from "./request-translation"
 import {
   createGoogleStreamState,
+  flushGoogleStreamStateAtEnd,
   translateChunkToGoogle,
   translateOpenAIToGoogle,
   translateResponsesResultToGoogle,
@@ -888,7 +889,13 @@ export async function handleWithChatCompletions(
           await adapter.writePartial(googleChunk)
         }
       }
-      if (adapter.lifecycle.state === "open") await adapter.finishSource()
+      if (adapter.lifecycle.state === "open") {
+        const terminal = flushGoogleStreamStateAtEnd(
+          streamState,
+          options.requestedModel,
+        )
+        await (terminal ? adapter.succeed(terminal) : adapter.finishSource())
+      }
     } catch (error) {
       await failGoogleStreamAfterCommit(adapter, output, error)
     }
@@ -1054,7 +1061,11 @@ async function handleWithAnthropicMessages(
       if (usage.receivedFailure !== undefined) {
         await adapter.failReceived(receivedGoogleFailure(usage.receivedFailure))
       } else if (adapter.lifecycle.state === "open") {
-        await adapter.finishSource()
+        const terminal = flushGoogleStreamStateAtEnd(
+          googleState,
+          options.requestedModel,
+        )
+        await (terminal ? adapter.succeed(terminal) : adapter.finishSource())
       }
     } catch (error) {
       await failGoogleStreamAfterCommit(adapter, output, error)

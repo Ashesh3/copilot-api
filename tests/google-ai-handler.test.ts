@@ -825,6 +825,63 @@ test.each([
   },
 )
 
+test("flushes a pending Chat tool call as the Google EOF terminal", async () => {
+  const model = structuredClone(responsesCapableModels.data[0])
+  model.id = "chat-tool-eof"
+  model.supported_endpoints = ["/chat/completions"]
+  state.models = { object: "list", data: [model] }
+  chatStreamBody = `data: ${JSON.stringify({
+    id: "chat-tool-eof",
+    object: "chat.completion.chunk",
+    created: 1,
+    model: "private-upstream-model",
+    choices: [
+      {
+        index: 0,
+        delta: {
+          tool_calls: [
+            {
+              index: 0,
+              id: "call_weather",
+              type: "function",
+              function: {
+                name: "get_weather",
+                arguments: '{"city":"Paris"}',
+              },
+            },
+          ],
+        },
+        finish_reason: null,
+        logprobs: null,
+      },
+    ],
+  })}\n\n`
+
+  const response = await requestGoogleStream(model.id)
+  expect(await response.json()).toEqual([
+    {
+      candidates: [
+        {
+          content: {
+            role: "model",
+            parts: [
+              {
+                functionCall: {
+                  name: "get_weather",
+                  args: { city: "Paris" },
+                },
+              },
+            ],
+          },
+          finishReason: "STOP",
+          index: 0,
+        },
+      ],
+      modelVersion: "chat-tool-eof",
+    },
+  ])
+})
+
 test.each(["/v1beta/models", "/v1/models", "/models"] as const)(
   "does not expose an unknown Google route or inspect its body for %s",
   async (prefix) => {

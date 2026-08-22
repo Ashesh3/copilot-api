@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 
 import {
   createGoogleStreamState,
+  flushGoogleStreamStateAtEnd,
   translateChunkToGoogle,
   translateOpenAIToGoogle,
   translateResponsesResultToGoogle,
@@ -235,6 +236,68 @@ test.each(["stop", "tool_calls"] as const)(
     ])
   },
 )
+
+test("flushes usable pending Chat tool calls at EOF", () => {
+  const state = createGoogleStreamState()
+  translateChunkToGoogle(
+    {
+      id: "chunk-tool-eof",
+      object: "chat.completion.chunk",
+      created: 1,
+      model: "private-upstream-model",
+      choices: [
+        {
+          index: 0,
+          delta: {
+            tool_calls: [
+              {
+                index: 2,
+                id: "call_eof",
+                type: "function",
+                function: {
+                  name: "get_weather",
+                  arguments: '{"city":"Paris"}',
+                },
+              },
+            ],
+          },
+          finish_reason: null,
+          logprobs: null,
+        },
+      ],
+    },
+    state,
+  )
+
+  expect(flushGoogleStreamStateAtEnd(state, "public-model")).toEqual({
+    candidates: [
+      {
+        content: {
+          role: "model",
+          parts: [
+            {
+              functionCall: {
+                name: "get_weather",
+                args: { city: "Paris" },
+              },
+            },
+          ],
+        },
+        finishReason: "STOP",
+        index: 0,
+      },
+    ],
+    modelVersion: "public-model",
+  })
+  expect(flushGoogleStreamStateAtEnd(state, "public-model")).toBeNull()
+})
+
+test("does not turn unusable pending Chat tool fragments into a terminal", () => {
+  const state = createGoogleStreamState()
+  state.toolCalls.set(0, { name: "", arguments: '{"q":"docs"}' })
+
+  expect(flushGoogleStreamStateAtEnd(state, "public-model")).toBeNull()
+})
 
 test("classifies Responses completed and failed events as distinct terminal results", () => {
   const completed = translateResponsesStreamEventToGoogle(

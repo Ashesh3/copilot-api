@@ -30,11 +30,26 @@ function normalizeToolCallIndex(
   index: number,
   state: AnthropicStreamState,
 ): number {
-  if (state.toolCallIndexOffset === undefined) {
-    state.toolCallIndexOffset = index === 0 ? 0 : 1
-  }
+  state.toolCallStateIndexByUpstreamIndex ??= new Map()
+  const existing = state.toolCallStateIndexByUpstreamIndex.get(index)
+  if (existing !== undefined) return existing
 
-  return Math.max(0, index - state.toolCallIndexOffset)
+  const localStateIndex = state.toolCallStateIndexByUpstreamIndex.size
+  state.toolCallStateIndexByUpstreamIndex.set(index, localStateIndex)
+  return localStateIndex
+}
+
+function closeNonThinkingBlockIfOpen(
+  state: AnthropicStreamState,
+  events: Array<AnthropicStreamEventData>,
+): void {
+  if (!state.contentBlockOpen || state.thinkingBlockOpen) return
+  events.push({
+    type: "content_block_stop",
+    index: state.contentBlockIndex,
+  })
+  state.contentBlockIndex++
+  state.contentBlockOpen = false
 }
 
 function closeThinkingBlockIfOpen(
@@ -256,6 +271,7 @@ export function translateChunkToAnthropicEvents(
   // Handle reasoning_text (Claude thinking via CAPI)
   if (delta.reasoning_text) {
     if (!state.thinkingBlockOpen) {
+      closeNonThinkingBlockIfOpen(state, events)
       // Open a new thinking content block
       state.thinkingBlockIndex = state.contentBlockIndex
       events.push({
@@ -327,7 +343,7 @@ export function translateChunkToAnthropicEvents(
       const toolCallInfo = (state.toolCalls[normalizedToolIndex] ??= {
         id: "",
         name: "",
-        anthropicBlockIndex: state.contentBlockIndex,
+        anthropicBlockIndex: -1,
         pendingArguments: [],
       })
       if (toolCall.id) toolCallInfo.id += toolCall.id

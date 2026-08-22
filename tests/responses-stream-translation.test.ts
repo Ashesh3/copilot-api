@@ -205,6 +205,96 @@ test("preserves Responses recommendation and Copilot usage in Anthropic events",
   ])
 })
 
+test("prepends message_start when a Responses terminal arrives first", () => {
+  const state = createResponsesStreamState()
+  const response = {
+    id: "resp_terminal_first",
+    object: "response",
+    created_at: 1,
+    model: "gpt-current",
+    output: [],
+    output_text: "",
+    status: "completed",
+    usage: { input_tokens: 2, output_tokens: 0, total_tokens: 2 },
+    error: null,
+    incomplete_details: null,
+    instructions: null,
+    metadata: null,
+    parallel_tool_calls: true,
+    temperature: null,
+    tool_choice: "auto",
+    tools: [],
+    top_p: null,
+  } as ResponseCompletedEvent["response"]
+
+  const events = createResponsesNormalTerminalEvents(state, response)
+  expect(events.map((event) => event.type)).toEqual([
+    "message_start",
+    "message_delta",
+    "message_stop",
+  ])
+  expect(events[0]).toMatchObject({
+    type: "message_start",
+    message: {
+      id: "resp_terminal_first",
+      model: "gpt-current",
+    },
+  })
+  expect(createResponsesNormalTerminalEvents(state, response)).toEqual([])
+})
+
+test("closes Responses text before opening thinking at the next index", () => {
+  const state = createResponsesStreamState()
+  const text = translateResponsesStreamEvent(
+    {
+      type: "response.output_text.delta",
+      sequence_number: 1,
+      item_id: "msg_1",
+      output_index: 0,
+      content_index: 0,
+      delta: "answer",
+    },
+    state,
+  )
+  const thinking = translateResponsesStreamEvent(
+    {
+      type: "response.reasoning_text.delta",
+      sequence_number: 2,
+      output_index: 0,
+      content_index: 0,
+      delta: "reconsidering",
+    } as ResponseReasoningTextDeltaEvent,
+    state,
+  )
+
+  if (text.kind !== "events" || thinking.kind !== "events") {
+    throw new Error("Expected translated events")
+  }
+  expect([...text.events, ...thinking.events]).toEqual([
+    {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "text", text: "" },
+    },
+    {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "text_delta", text: "answer" },
+    },
+    { type: "content_block_stop", index: 0 },
+    {
+      type: "content_block_start",
+      index: 1,
+      content_block: { type: "thinking", thinking: "" },
+    },
+    {
+      type: "content_block_delta",
+      index: 1,
+      delta: { type: "thinking_delta", thinking: "reconsidering" },
+    },
+  ])
+})
+
 test.each([
   {
     name: "response.failed",

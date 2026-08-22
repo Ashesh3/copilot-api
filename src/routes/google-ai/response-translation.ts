@@ -231,6 +231,36 @@ function emitAccumulatedToolCalls(
   return parts
 }
 
+export function flushGoogleStreamStateAtEnd(
+  streamState: GoogleStreamState,
+  requestedModel?: string,
+): GoogleAIResponse | null {
+  const parts = [...streamState.toolCalls.entries()]
+    .sort(([left], [right]) => left - right)
+    .filter(([, toolCall]) => toolCall.name.length > 0)
+    .map(
+      ([, toolCall]): GooglePart => ({
+        functionCall: {
+          name: toolCall.name,
+          args: parseToolCallArgs(toolCall.arguments),
+        },
+      }),
+    )
+  streamState.toolCalls.clear()
+  if (parts.length === 0) return null
+
+  return {
+    candidates: [
+      {
+        content: { role: "model", parts },
+        finishReason: "STOP",
+        index: 0,
+      },
+    ],
+    ...(requestedModel === undefined ? {} : { modelVersion: requestedModel }),
+  }
+}
+
 /**
  * Build a Google streaming chunk from parts and optional finish/usage info.
  */

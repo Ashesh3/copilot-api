@@ -25,7 +25,8 @@ let streamMode:
   | "received-buffered"
   | "text"
   | "binary"
-  | "unsigned-reasoning" = "received-direct"
+  | "unsigned-reasoning"
+  | "terminal-first" = "received-direct"
 
 const models: ModelsResponse = {
   object: "list",
@@ -178,8 +179,25 @@ function unsignedReasoningResponse(): Response {
   )
 }
 
+function terminalFirstResponse(): Response {
+  const completed = {
+    ...responseSnapshot,
+    status: "completed",
+    usage: { input_tokens: 2, output_tokens: 0, total_tokens: 2 },
+  }
+  return new Response(
+    `event: response.completed\ndata: ${JSON.stringify({
+      type: "response.completed",
+      sequence_number: 0,
+      response: completed,
+    })}\n\n`,
+    { headers: { "content-type": "text/event-stream" } },
+  )
+}
+
 const fetchMock = mock(() => {
   if (streamMode === "unsigned-reasoning") return unsignedReasoningResponse()
+  if (streamMode === "terminal-first") return terminalFirstResponse()
   if (streamMode === "received-direct" || streamMode === "received-buffered") {
     return receivedFailureResponse()
   }
@@ -250,6 +268,19 @@ test("mounts unsigned Responses reasoning as one balanced thinking block", async
   expect(body).toContain('"thinking":"visible reasoning"')
   expect(body).not.toContain("signature_delta")
   expect(body).not.toContain("@rs_unsigned")
+})
+
+test("mounts a terminal-first Responses stream with one complete lifecycle", async () => {
+  streamMode = "terminal-first"
+  const response = await server.request("/v1/messages", createRequest(false))
+  const body = await response.text()
+
+  expect(eventTypes(body)).toEqual([
+    "message_start",
+    "message_delta",
+    "message_stop",
+  ])
+  expect(body).toContain('"id":"resp_messages_lifecycle"')
 })
 
 test.each([

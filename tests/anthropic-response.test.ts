@@ -1172,6 +1172,90 @@ describe("OpenAI to Anthropic Streaming Response Translation", () => {
     expect(signatureIndex).toBeLessThan(toolStartIndex)
   })
 
+  test.each([
+    {
+      name: "text",
+      firstDelta: { content: "answer first" },
+      firstBlockType: "text",
+    },
+    {
+      name: "tool",
+      firstDelta: {
+        tool_calls: [
+          {
+            index: 0,
+            id: "call_lookup",
+            type: "function" as const,
+            function: { name: "lookup", arguments: '{"q":"docs"}' },
+          },
+        ],
+      },
+      firstBlockType: "tool_use",
+    },
+  ])(
+    "closes an open $name block before opening thinking",
+    ({ firstDelta, firstBlockType }) => {
+      const streamState: AnthropicStreamState = {
+        messageStartSent: false,
+        contentBlockIndex: 0,
+        contentBlockOpen: false,
+        toolCalls: {},
+      }
+      const chunks: Array<ChatCompletionChunk> = [
+        {
+          id: "cmpl-block-to-thinking",
+          object: "chat.completion.chunk",
+          created: 1,
+          model: "gpt-current",
+          choices: [
+            {
+              index: 0,
+              delta: { role: "assistant", ...firstDelta },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+        },
+        {
+          id: "cmpl-block-to-thinking",
+          object: "chat.completion.chunk",
+          created: 1,
+          model: "gpt-current",
+          choices: [
+            {
+              index: 0,
+              delta: { reasoning_text: "thinking now" },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+        },
+      ]
+
+      const events = chunks.flatMap((chunk) =>
+        translateChunkToAnthropicEvents(chunk, streamState),
+      )
+      const firstStart = events.findIndex(
+        (event) =>
+          event.type === "content_block_start"
+          && event.content_block.type === firstBlockType,
+      )
+      const firstStop = events.findIndex(
+        (event) => event.type === "content_block_stop" && event.index === 0,
+      )
+      const thinkingStart = events.findIndex(
+        (event) =>
+          event.type === "content_block_start"
+          && event.content_block.type === "thinking"
+          && event.index === 1,
+      )
+
+      expect(firstStart).toBeGreaterThan(-1)
+      expect(firstStop).toBeGreaterThan(firstStart)
+      expect(thinkingStart).toBeGreaterThan(firstStop)
+    },
+  )
+
   test("normalizes missing finish_reason to tool_use when a tool-call stream ends", () => {
     const openAIStream: Array<ChatCompletionChunk> = [
       {
@@ -1307,6 +1391,79 @@ describe("OpenAI to Anthropic Streaming Response Translation", () => {
       pendingArguments: [],
     })
     expect(streamState.toolCalls[1]).toBeUndefined()
+  })
+
+  test("keeps distinct upstream tool indices in first-seen local slots", () => {
+    const streamState: AnthropicStreamState = {
+      messageStartSent: false,
+      contentBlockIndex: 0,
+      contentBlockOpen: false,
+      toolCalls: {},
+    }
+
+    const events = translateChunkToAnthropicEvents(
+      {
+        id: "cmpl-interleaved-tools",
+        object: "chat.completion.chunk",
+        created: 1,
+        model: "gpt-current",
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  index: 1,
+                  id: "call_one",
+                  type: "function",
+                  function: { name: "first", arguments: "{}" },
+                },
+                {
+                  index: 0,
+                  id: "call_zero",
+                  type: "function",
+                  function: { name: "second", arguments: "{}" },
+                },
+              ],
+            },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      },
+      streamState,
+    )
+
+    expect(streamState.toolCallStateIndexByUpstreamIndex).toEqual(
+      new Map([
+        [1, 0],
+        [0, 1],
+      ]),
+    )
+    expect(streamState.toolCalls[0].id).toBe("call_one")
+    expect(streamState.toolCalls[1].id).toBe("call_zero")
+    expect(
+      events.filter((event) => event.type === "content_block_start"),
+    ).toMatchObject([
+      {
+        index: 0,
+        content_block: { type: "tool_use", id: "call_one", name: "first" },
+      },
+      {
+        index: 1,
+        content_block: { type: "tool_use", id: "call_zero", name: "second" },
+      },
+    ])
+    expect(
+      events.filter(
+        (event) =>
+          event.type === "content_block_delta"
+          && event.delta.type === "input_json_delta",
+      ),
+    ).toMatchObject([
+      { index: 0, delta: { partial_json: "{}" } },
+      { index: 1, delta: { partial_json: "{}" } },
+    ])
   })
 })
 
