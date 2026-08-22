@@ -32,6 +32,7 @@ import {
   resetRoutingTelemetryForTest,
 } from "../src/lib/routing-telemetry"
 import { state } from "../src/lib/state"
+import { createAnthropicStreamError } from "../src/routes/messages/error"
 import { server } from "../src/server"
 import { resetWebSearchSessionsForTest } from "../src/services/copilot/mcp-web-search"
 import {
@@ -1027,28 +1028,34 @@ test.each([
     path: "/v1beta/models/custom-chat-alias:generateContent",
     body: { contents: [{ role: "user", parts: [{ text: "hello" }] }] },
   },
-])("$name preserves exact custom provider failures", async ({ path, body }) => {
-  const bytes = Uint8Array.from([0, 255, 13, 10, 65])
-  fetchMock.mockImplementationOnce(
-    () =>
-      new Response(bytes.slice(), {
-        status: 401,
-        headers: { "content-type": "application/octet-stream" },
-      }),
-  )
+])(
+  "$name fails closed for binary custom provider failures",
+  async ({ path, body }) => {
+    const bytes = Uint8Array.from([0, 255, 13, 10, 65])
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Response(bytes.slice(), {
+          status: 401,
+          headers: { "content-type": "application/octet-stream" },
+        }),
+    )
 
-  const response = await server.request(path, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  })
+    const response = await server.request(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    })
 
-  expect(response.status).toBe(401)
-  expect(response.headers.get("content-type")).toBe("application/octet-stream")
-  expect(Array.from(new Uint8Array(await response.arrayBuffer()))).toEqual(
-    Array.from(bytes),
-  )
-})
+    expect(response.status).toBe(401)
+    expect(response.headers.get("content-type")).toContain("application/json")
+    expect(await response.json()).toEqual({
+      error: {
+        message: "Custom provider request failed",
+        type: "error",
+      },
+    })
+  },
+)
 
 test.each([
   {
@@ -1062,7 +1069,7 @@ test.each([
     body: { contents: [{ role: "user", parts: [{ text: "hello" }] }] },
   },
 ])(
-  "$name preserves whitespace-sensitive custom provider text failures",
+  "$name fails closed for whitespace-sensitive custom provider text failures",
   async ({ path, body }) => {
     fetchMock.mockImplementationOnce(
       () =>
@@ -1079,10 +1086,15 @@ test.each([
     })
 
     expect(response.status).toBe(401)
-    expect(response.headers.get("content-type")).toBe(
-      "text/plain; charset=utf-8",
-    )
-    expect(await response.text()).toBe(" custom-private-body\r\n")
+    expect(response.headers.get("content-type")).toContain("application/json")
+    const responseBody = await response.text()
+    expect(JSON.parse(responseBody)).toEqual({
+      error: {
+        message: "Custom provider request failed",
+        type: "error",
+      },
+    })
+    expect(responseBody).not.toContain("custom-private-body")
   },
 )
 
@@ -1912,6 +1924,247 @@ test("Claude Code Messages cache-control routes to ZenMux custom provider", asyn
   })
 })
 
+test.each([
+  {
+    endpoint: "/v1/chat/completions",
+    expected: {
+      error: {
+        code: "free_quota_exhausted",
+        message: "The free model allowance has been exhausted.",
+        type: "insufficient_balance",
+      },
+    },
+    payload: {
+      model: "z-ai/glm-5.3-free",
+      messages: [{ role: "user", content: "hello" }],
+      stream: true,
+    },
+  },
+  {
+    endpoint: "/v1/messages?beta=true",
+    expected: {
+      type: "error",
+      request_id: "req-zenmux-quota",
+      error: {
+        code: "free_quota_exhausted",
+        message: "The free model allowance has been exhausted.",
+        type: "insufficient_balance",
+      },
+    },
+    payload: {
+      model: "z-ai/glm-5.3-free",
+      max_tokens: 16,
+      messages: [{ role: "user", content: "hello" }],
+      stream: true,
+    },
+  },
+] as const)(
+  "returns ZenMux's structured 402 error through $endpoint",
+  async ({ endpoint, expected, payload }) => {
+    fetchMock.mockImplementationOnce((url: string, init?: RequestInit) => {
+      const body =
+        typeof init?.body === "string" ?
+          (JSON.parse(init.body) as Record<string, unknown>)
+        : {}
+      requests.push({ url, body, headers: new Headers(init?.headers) })
+      return Response.json(
+        {
+          error: {
+            code: "free_quota_exhausted",
+            message: "The free model allowance has been exhausted.",
+            type: "insufficient_balance",
+          },
+        },
+        { status: 402 },
+      )
+    })
+
+    const response = await server.request(endpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-request-id": "req-zenmux-quota",
+      },
+      body: JSON.stringify(payload),
+    })
+
+    expect(response.status).toBe(402)
+    expect(await response.json()).toEqual(expected)
+    expect(requests.at(-1)?.url).toBe(
+      "https://zenmux.example/v1/chat/completions",
+    )
+  },
+)
+
+test("preserves a custom-provider 402 in an Anthropic stream error event", async () => {
+  fetchMock.mockImplementationOnce((url: string, init?: RequestInit) => {
+    const body =
+      typeof init?.body === "string" ?
+        (JSON.parse(init.body) as Record<string, unknown>)
+      : {}
+    requests.push({ url, body, headers: new Headers(init?.headers) })
+    return Response.json(
+      {
+        error: {
+          code: "free_quota_exhausted",
+          message: "The free model allowance has been exhausted.",
+          type: "api_error",
+        },
+      },
+      { status: 402 },
+    )
+  })
+  const reference = resolveCustomProviderModel({
+    model: "z-ai/glm-5.3-free",
+    kind: "chat",
+  })
+  if (!reference) throw new Error("ZenMux test provider was not resolved")
+
+  let providerError: unknown
+  try {
+    await createCustomProviderChatCompletions(reference, {
+      model: "z-ai/glm-5.3-free",
+      messages: [{ role: "user", content: "hello" }],
+      stream: true,
+    })
+  } catch (error) {
+    providerError = error
+  }
+
+  expect(createAnthropicStreamError(providerError)).toEqual({
+    type: "error",
+    error: {
+      code: "free_quota_exhausted",
+      message: "The free model allowance has been exhausted.",
+      type: "api_error",
+    },
+  })
+})
+
+test.each([
+  {
+    body: {
+      error: {
+        code: "credential_error",
+        message: "Bearer private-provider-token was rejected.",
+        type: "authentication_error",
+      },
+    },
+    name: "credential-bearing",
+  },
+  {
+    body: {
+      error: {
+        code: "api_key_sk_live_private_provider_value",
+        message: "Provider authentication failed.",
+        type: "authentication_error",
+      },
+    },
+    name: "secret-code",
+  },
+  {
+    body: {
+      error: {
+        code: "api.key.sk_live.private_provider_value",
+        message: "Provider authentication failed.",
+        type: "authentication_error",
+      },
+    },
+    name: "punctuated-secret-code",
+  },
+  {
+    body: {
+      error: {
+        code: "credential_error",
+        message: "Provider authentication failed.",
+        type: "token_private_provider_value",
+      },
+    },
+    name: "secret-type",
+  },
+  {
+    body: {
+      error: {
+        code: "credential_error",
+        message: "Bearer: private-provider-token was rejected.",
+        type: "authentication_error",
+      },
+    },
+    name: "punctuated-bearer-message",
+  },
+  {
+    body: {
+      error: {
+        code: "credential_error",
+        message: "Provider authentication failed.",
+        type: "bearer:sk_live_private_provider_value",
+      },
+    },
+    name: "punctuated-secret-type",
+  },
+  {
+    body: { detail: { reason: "provider-private-detail" } },
+    name: "malformed",
+  },
+] as const)(
+  "fails closed for a $name custom-provider 402 body",
+  async ({ body, name }) => {
+    for (const endpoint of ["/v1/chat/completions", "/v1/messages?beta=true"]) {
+      fetchMock.mockImplementationOnce((url: string, init?: RequestInit) => {
+        const requestBody =
+          typeof init?.body === "string" ?
+            (JSON.parse(init.body) as Record<string, unknown>)
+          : {}
+        requests.push({
+          url,
+          body: requestBody,
+          headers: new Headers(init?.headers),
+        })
+        return Response.json(body, { status: 402 })
+      })
+
+      const isMessages = endpoint.startsWith("/v1/messages")
+      const response = await server.request(endpoint, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-request-id": `req-zenmux-${name}`,
+        },
+        body: JSON.stringify({
+          model: "z-ai/glm-5.3-free",
+          ...(isMessages ? { max_tokens: 16 } : {}),
+          messages: [{ role: "user", content: "hello" }],
+          stream: true,
+        }),
+      })
+      const responseBody = await response.text()
+
+      expect(response.status).toBe(402)
+      expect(JSON.parse(responseBody)).toEqual(
+        isMessages ?
+          {
+            type: "error",
+            request_id: `req-zenmux-${name}`,
+            error: {
+              type: "api_error",
+              message: "The custom provider request failed.",
+            },
+          }
+        : {
+            error: {
+              message: "Custom provider request failed",
+              type: "error",
+            },
+          },
+      )
+      expect(responseBody).not.toContain("Copilot quota exhausted")
+      expect(responseBody).not.toContain("private-provider-token")
+      expect(responseBody).not.toContain("private_provider_value")
+      expect(responseBody).not.toContain("provider-private-detail")
+    }
+  },
+)
+
 test("embeddings request routes to Nebius config by alias", async () => {
   const response = await server.request("/v1/embeddings", {
     method: "POST",
@@ -1986,7 +2239,7 @@ test("records custom-provider transport failures without swallowing them", async
   })
 })
 
-test("preserves custom-provider chat response identity and exact bytes", async () => {
+test("preserves custom-provider chat identity while sanitizing failures", async () => {
   const statusMarker = "custom-private-status"
   const bodyMarker = "custom-private-body"
   const body = new TextEncoder().encode(` ${bodyMarker}\r\n`)
@@ -2034,9 +2287,17 @@ test("preserves custom-provider chat response identity and exact bytes", async (
       }),
     })
     expect(response.status).toBe(400)
+    const responseBody = await response.text()
     const output = JSON.stringify(errorSpy.mock.calls)
     expect(output).not.toContain(statusMarker)
     expect(output).not.toContain(bodyMarker)
+    expect(JSON.parse(responseBody)).toEqual({
+      error: {
+        message: "Custom provider request failed",
+        type: "error",
+      },
+    })
+    expect(responseBody).not.toContain(bodyMarker)
 
     const debug = await waitForLatestDebugStatus("error")
     expect(debug).toMatchObject({
@@ -2047,12 +2308,7 @@ test("preserves custom-provider chat response identity and exact bytes", async (
       },
     })
     expect(debug?.response?.body).toContain(bodyMarker)
-    expect(response.headers.get("content-type")).toBe(
-      "application/problem+json",
-    )
-    expect(Array.from(new Uint8Array(await response.arrayBuffer()))).toEqual(
-      Array.from(body),
-    )
+    expect(response.headers.get("content-type")).toContain("application/json")
   } finally {
     errorSpy.mockRestore()
   }
@@ -2101,7 +2357,7 @@ test("records custom-provider transport and aborted lifecycles in raw LLM Debug"
   )
 })
 
-test("preserves custom-provider embedding binary failures", async () => {
+test("preserves custom-provider embedding identity while sanitizing failures", async () => {
   const body = Uint8Array.from([0, 255, 13, 10, 65])
   const upstream = new Response(body.slice(), {
     status: 422,
@@ -2136,10 +2392,13 @@ test("preserves custom-provider embedding binary failures", async () => {
     body: JSON.stringify({ model: "qwen3-embedding-8b", input: "hello" }),
   })
   expect(response.status).toBe(422)
-  expect(response.headers.get("content-type")).toBe("application/octet-stream")
-  expect(Array.from(new Uint8Array(await response.arrayBuffer()))).toEqual(
-    Array.from(body),
-  )
+  expect(response.headers.get("content-type")).toContain("application/json")
+  expect(await response.json()).toEqual({
+    error: {
+      message: "Custom provider request failed",
+      type: "error",
+    },
+  })
 })
 
 test("keeps future-named custom SSE data after comments and unknown fields", async () => {

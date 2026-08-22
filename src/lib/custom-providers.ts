@@ -14,7 +14,7 @@ import type {
 import type { EmbeddingResponse } from "~/services/copilot/create-embeddings"
 
 import { getConfig, updateConfig } from "~/lib/config"
-import { LocalHTTPError, SensitiveHTTPError } from "~/lib/error"
+import { CustomProviderHTTPError, LocalHTTPError } from "~/lib/error"
 import {
   abortLlmDebugLog,
   failLlmDebugLog,
@@ -510,16 +510,22 @@ function createUpstreamErrorMessage(
   return `Custom provider ${reference.provider.name} failed ${path} for model ${reference.upstreamModel}`
 }
 
-function throwCustomProviderError(context: CustomProviderErrorContext): never {
+async function throwCustomProviderError(
+  context: CustomProviderErrorContext,
+): Promise<never> {
   const { response, reference, path, payload } = context
+  const body = await response.clone().text()
   consola.error(
     createUpstreamErrorMessage(reference, path),
     `Status: ${response.status}`,
   )
-  throw new SensitiveHTTPError(
+  throw new CustomProviderHTTPError(
     createUpstreamErrorMessage(reference, path),
     response,
-    payload,
+    {
+      requestPayload: payload,
+      responseBody: body,
+    },
   )
 }
 
@@ -560,7 +566,7 @@ export async function createCustomProviderChatCompletions(
   })
 
   if (!response.ok) {
-    throwCustomProviderError({
+    await throwCustomProviderError({
       response,
       reference,
       path: "/chat/completions",
@@ -626,7 +632,7 @@ export async function createCustomProviderEmbeddings(
   })
 
   if (!response.ok) {
-    throwCustomProviderError({
+    await throwCustomProviderError({
       response,
       reference,
       path: "/embeddings",
