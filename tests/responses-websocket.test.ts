@@ -1342,6 +1342,124 @@ describe("responses websocket message handling", () => {
     expect(capturedAffinity).toBeUndefined()
   })
 
+  test("routes a Codex fork through the parent account and upstream session", async () => {
+    const model = "ws-fork-affinity-model"
+    const firstAccount = tokenPool.addAccount(
+      "github-ws-fork-a",
+      "individual",
+      webSocketAccountIds[0],
+    )
+    firstAccount.copilotToken = "ws-fork-child-token"
+    firstAccount.healthy = true
+    firstAccount.models = new Set([model])
+    firstAccount.modelsData = [createWebSocketModel(model)]
+    const secondAccount = tokenPool.addAccount(
+      "github-ws-fork-b",
+      "individual",
+      webSocketAccountIds[1],
+    )
+    secondAccount.copilotToken = "ws-fork-parent-token"
+    secondAccount.healthy = true
+    secondAccount.models = new Set([model])
+    secondAccount.modelsData = [createWebSocketModel(model)]
+    tokenPool.rebuildModelIndex()
+    state.isMultiToken = true
+    queuedResponses.push(
+      createResponsesSseResponse("resp_fork_affinity"),
+      createResponsesSseResponse("resp_fork_follow_up"),
+    )
+
+    const ws = createTestWebSocket()
+    ws.data.affinity = {
+      key: "fork-child-1",
+      source: "codex_session",
+    }
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model,
+        input: "continue the fork",
+        client_metadata: {
+          session_id: "fork-child-1",
+          thread_id: "fork-child-1",
+          "x-codex-turn-metadata": JSON.stringify({
+            forked_from_thread_id: "fork-parent-0",
+          }),
+        },
+      }),
+    )
+
+    expect(capturedAffinity).toEqual({
+      key: "fork-parent-0",
+      source: "codex_thread",
+    })
+    expect(capturedAuthorization).toEqual(["Bearer ws-fork-parent-token"])
+    expect(capturedUpstreamHeaders[0]?.get("x-client-session-id")).toBe(
+      "81e3167a-de1a-5ffa-8c20-f832dc0e2909",
+    )
+    expect(capturedUpstreamHeaders[0]?.get("x-interaction-id")).toBe(
+      "81e3167a-de1a-5ffa-8c20-f832dc0e2909",
+    )
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model,
+        input: "continue after the first fork turn",
+        client_metadata: {
+          session_id: "fork-child-1",
+          thread_id: "fork-child-1",
+        },
+      }),
+    )
+
+    expect(capturedAuthorization).toEqual([
+      "Bearer ws-fork-parent-token",
+      "Bearer ws-fork-parent-token",
+    ])
+    expect(
+      capturedUpstreamHeaders.map((headers) =>
+        headers.get("x-client-session-id"),
+      ),
+    ).toEqual([
+      "81e3167a-de1a-5ffa-8c20-f832dc0e2909",
+      "81e3167a-de1a-5ffa-8c20-f832dc0e2909",
+    ])
+  })
+
+  test("preserves unrelated WebSocket handshake affinity over fork metadata", async () => {
+    state.models = responsesCapableModels
+    queuedResponses.push(createResponsesSseResponse("resp_fork_unrelated"))
+    const ws = createTestWebSocket()
+    ws.data.affinity = {
+      key: "unrelated-handshake",
+      source: "copilot_session",
+    }
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "independent request",
+        client_metadata: {
+          session_id: "fork-child",
+          thread_id: "fork-child",
+          "x-codex-turn-metadata": JSON.stringify({
+            forked_from_thread_id: "fork-parent",
+          }),
+        },
+      }),
+    )
+
+    expect(capturedAffinity).toEqual({
+      key: "unrelated-handshake",
+      source: "copilot_session",
+    })
+  })
+
   test("inherits affinity from a completed continuation snapshot", async () => {
     state.accountType = "individual"
     state.copilotToken = "copilot-token"

@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks"
 
 const MAX_AFFINITY_KEY_LENGTH = 512
+const CODEX_TURN_METADATA_KEY = "x-codex-turn-metadata"
 
 export type RoutingAffinitySource =
   | "claude_session"
@@ -80,12 +81,43 @@ export function resolveClaudeRoutingAffinity(
 export function resolveResponsesRoutingAffinity(
   clientMetadata: unknown,
 ): RoutingAffinity | undefined {
+  const forkAffinity = resolveResponsesForkRoutingAffinity(clientMetadata)
+  if (forkAffinity) return forkAffinity
+
   const metadata = parseRoutingMetadataRecord(clientMetadata)
   if (!metadata) return undefined
   return (
     affinity(metadata.session_id, "codex_metadata")
     ?? affinity(metadata.thread_id, "codex_thread")
   )
+}
+
+export function resolveResponsesForkRoutingAffinity(
+  clientMetadata: unknown,
+  currentAffinity?: RoutingAffinity,
+): RoutingAffinity | undefined {
+  const metadata = parseRoutingMetadataRecord(clientMetadata)
+  if (!metadata) return undefined
+  const turnMetadata = parseRoutingMetadataRecord(
+    metadata[CODEX_TURN_METADATA_KEY],
+  )
+  const forkAffinity = affinity(
+    turnMetadata?.forked_from_thread_id,
+    "codex_thread",
+  )
+  if (!forkAffinity || !currentAffinity) return forkAffinity
+  if (
+    currentAffinity.source !== "codex_session"
+    && currentAffinity.source !== "codex_thread"
+  ) {
+    return undefined
+  }
+
+  const sessionId = normalizeRoutingAffinityKey(metadata.session_id)
+  const threadId = normalizeRoutingAffinityKey(metadata.thread_id)
+  return currentAffinity.key === sessionId || currentAffinity.key === threadId ?
+      forkAffinity
+    : undefined
 }
 
 export function runWithRoutingAffinity<T>(
@@ -107,4 +139,22 @@ export function installRoutingAffinityFallback(
   const state = routingAffinityStorage.getStore()
   if (!state || state.affinity || !fallback) return
   state.affinity = fallback
+}
+
+export function installResponsesRoutingAffinity(clientMetadata: unknown): void {
+  const state = routingAffinityStorage.getStore()
+  if (!state) return
+
+  const forkAffinity = resolveResponsesForkRoutingAffinity(
+    clientMetadata,
+    state.affinity,
+  )
+  if (forkAffinity) {
+    state.affinity = forkAffinity
+    return
+  }
+
+  if (state.affinity) return
+  const affinity = resolveResponsesRoutingAffinity(clientMetadata)
+  if (affinity) state.affinity = affinity
 }

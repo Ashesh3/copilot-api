@@ -32,6 +32,7 @@ import { resolveProtectedCredential } from "~/lib/protected-credential"
 import { reportNonDefaultBehavior } from "~/lib/request-logger"
 import { getCopilotResponseHeaders } from "~/lib/request-session"
 import {
+  resolveResponsesForkRoutingAffinity,
   resolveResponsesRoutingAffinity,
   resolveRoutingAffinityFromHeaders,
 } from "~/lib/routing-affinity"
@@ -311,8 +312,13 @@ async function prepareResponseCreate(
       : "rehydrated",
   })
   const payload = resolution.payload
+  const forkAffinity = resolveResponsesForkRoutingAffinity(
+    payload.client_metadata,
+    data.affinity,
+  )
+  if (forkAffinity) data.affinity = forkAffinity
   const frameAffinity = resolveResponsesRoutingAffinity(payload.client_metadata)
-  return { affinity: data.affinity ?? frameAffinity, payload }
+  return { affinity: forkAffinity ?? data.affinity ?? frameAffinity, payload }
 }
 
 function storeResponseSnapshot(
