@@ -1036,14 +1036,47 @@ test("preserves future base64 image media types without mutating the source", ()
   expect(payload).toEqual(snapshot)
 })
 
-test("coerces null tool input while preserving call-result identity and source", () => {
-  const payload = {
-    model: "claude-current",
-    messages: [
+test.each([null, "scalar input", ["array input"]])(
+  "coerces non-record tool input %p while preserving call-result identity and source",
+  (input) => {
+    const payload = {
+      model: "claude-current",
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "tool-1",
+              name: "lookup",
+              input,
+              future_call_field: { keep: true },
+            },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "tool-1", content: "result" },
+          ],
+        },
+      ],
+    } as unknown as AnthropicMessagesPayload
+    const snapshot = structuredClone(payload)
+
+    const prepared = prepareAnthropicMessagesRequest({ payload })
+
+    expect(prepared.body.messages).toEqual([
       {
         role: "assistant",
         content: [
-          { type: "tool_use", id: "tool-1", name: "lookup", input: null },
+          {
+            type: "tool_use",
+            id: "tool-1",
+            name: "lookup",
+            input: {},
+            future_call_field: { keep: true },
+          },
         ],
       },
       {
@@ -1052,26 +1085,10 @@ test("coerces null tool input while preserving call-result identity and source",
           { type: "tool_result", tool_use_id: "tool-1", content: "result" },
         ],
       },
-    ],
-  } as unknown as AnthropicMessagesPayload
-  const snapshot = structuredClone(payload)
-
-  const prepared = prepareAnthropicMessagesRequest({ payload })
-
-  expect(prepared.body.messages).toEqual([
-    {
-      role: "assistant",
-      content: [{ type: "tool_use", id: "tool-1", name: "lookup", input: {} }],
-    },
-    {
-      role: "user",
-      content: [
-        { type: "tool_result", tool_use_id: "tool-1", content: "result" },
-      ],
-    },
-  ])
-  expect(payload).toEqual(snapshot)
-})
+    ])
+    expect(payload).toEqual(snapshot)
+  },
+)
 
 test("preserves malformed thinking as unknown source data", () => {
   const payload = {

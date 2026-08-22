@@ -216,13 +216,17 @@ function handleAssistantMessage(
   const signedThinkingBlocks = thinkingBlocks.filter(
     (block) => block.signature && isValidReasoningSignature(block.signature),
   )
+  const preserveThinkingAsContext =
+    hasMultipleThinkingWithSignature(thinkingBlocks)
+  const representativeThinking =
+    preserveThinkingAsContext ? signedThinkingBlocks[0] : undefined
 
   const textContent = message.content
     .filter(
       (block) =>
         isAnthropicTextBlock(block)
         || (!isAnthropicToolUseBlock(block)
-          && !isAnthropicThinkingBlock(block)),
+          && (preserveThinkingAsContext || !isAnthropicThinkingBlock(block))),
     )
     .map((block) =>
       isAnthropicTextBlock(block) ?
@@ -230,16 +234,22 @@ function handleAssistantMessage(
       : JSON.stringify(block).slice(0, MAX_UNKNOWN_ASSISTANT_BLOCK_TEXT_LENGTH),
     )
     .join("\n\n")
-  const reasoningText = thinkingBlocks
-    .map((block) => block.thinking)
-    .filter(
-      (thinking) => thinking.trim().length > 0 && thinking !== "Thinking...",
-    )
-    .join("\n\n")
-  const reasoningOpaque =
-    signedThinkingBlocks.length === 1 && thinkingBlocks.length === 1 ?
-      signedThinkingBlocks[0]?.signature
-    : undefined
+  const reasoningText =
+    preserveThinkingAsContext ?
+      (representativeThinking?.thinking ?? "")
+    : thinkingBlocks
+        .map((block) => block.thinking)
+        .filter(
+          (thinking) =>
+            thinking.trim().length > 0 && thinking !== "Thinking...",
+        )
+        .join("\n\n")
+  let reasoningOpaque: string | undefined
+  if (preserveThinkingAsContext) {
+    reasoningOpaque = representativeThinking?.signature
+  } else if (signedThinkingBlocks.length === 1 && thinkingBlocks.length === 1) {
+    reasoningOpaque = signedThinkingBlocks[0]?.signature
+  }
 
   return [
     {
@@ -261,6 +271,33 @@ function handleAssistantMessage(
       : {}),
     },
   ]
+}
+
+function hasMultipleThinkingWithSignature(
+  thinkingBlocks: ReadonlyArray<AnthropicThinkingBlock>,
+): boolean {
+  return (
+    thinkingBlocks.length > 1
+    && thinkingBlocks.some(
+      (block) =>
+        typeof block.signature === "string" && block.signature.length > 0,
+    )
+  )
+}
+
+export function hasUnrepresentableChatThinkingHistory(
+  messages: ReadonlyArray<AnthropicMessage>,
+): boolean {
+  return messages.some(
+    (message) =>
+      isAnthropicAssistantMessage(message)
+      && Array.isArray(message.content)
+      && hasMultipleThinkingWithSignature(
+        message.content.filter((block): block is AnthropicThinkingBlock =>
+          isAnthropicThinkingBlock(block),
+        ),
+      ),
+  )
 }
 
 function isValidReasoningSignature(

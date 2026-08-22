@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
 
 import type {
+  AnthropicAssistantContentBlock,
   AnthropicMessagesPayload,
   AnthropicToolResultContentBlock,
 } from "~/routes/messages/anthropic-types"
@@ -9,6 +10,7 @@ import type { Model } from "~/services/copilot/get-models"
 import { selectEvaluatedCopilotCandidate } from "~/lib/endpoint-routing"
 import { asAnthropicUnknownContentType } from "~/routes/messages/anthropic-types"
 import { prepareMessagesCandidates } from "~/routes/messages/messages-candidates"
+import { prepareAnthropicMessagesRequest } from "~/services/copilot/messages-contract"
 
 const originalFetch = globalThis.fetch
 let attachmentFetchCount = 0
@@ -143,6 +145,81 @@ test("appends text after existing array tool-result content without losing metad
   ])
   expect(source).toEqual(snapshot)
 })
+
+test.each(["scalar input", ["array input"]])(
+  "keeps a tool call paired across Chat and Responses after coercing input %p",
+  async (input) => {
+    const rawSource = createSource({
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "toolu_malformed",
+              name: "lookup",
+              input,
+              future_call_field: { keep: true },
+            },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "toolu_malformed",
+              content: "result",
+            },
+          ],
+        },
+      ],
+    } as unknown as Partial<AnthropicMessagesPayload>)
+    const rawSnapshot = structuredClone(rawSource)
+    const prepared = prepareAnthropicMessagesRequest({ payload: rawSource })
+    const preparedSnapshot = structuredClone(prepared.body)
+
+    const candidates = await prepareMessagesCandidates({
+      source: prepared.body,
+      selectedModel: {
+        ...selectedModel,
+        supported_endpoints: ["/responses", "/chat/completions"],
+      },
+    })
+
+    expect(candidates.chat?.endpoint).toBe("/chat/completions")
+    expect(candidates.responses?.endpoint).toBe("/responses")
+    expect(candidates.chat?.payload.messages).toEqual([
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "toolu_malformed",
+            type: "function",
+            function: { name: "lookup", arguments: "{}" },
+          },
+        ],
+      },
+      { role: "tool", tool_call_id: "toolu_malformed", content: "result" },
+    ])
+    expect(candidates.responses?.payload.input).toContainEqual({
+      type: "function_call",
+      call_id: "toolu_malformed",
+      name: "lookup",
+      arguments: "{}",
+      status: "completed",
+    })
+    expect(candidates.responses?.payload.input).toContainEqual({
+      type: "function_call_output",
+      call_id: "toolu_malformed",
+      output: "result",
+      status: "completed",
+    })
+    expect(rawSource).toEqual(rawSnapshot)
+    expect(prepared.body).toEqual(preparedSnapshot)
+  },
+)
 
 test("preserves Messages web-search max uses out of band for translated candidates", async () => {
   const candidates = await prepareMessagesCandidates({
@@ -552,3 +629,78 @@ test("textualizes malformed thinking in translated candidates", async () => {
   )
   expect(source).toEqual(snapshot)
 })
+
+test.each([
+  {
+    name: "signed and signed",
+    thinking: [
+      { type: "thinking", thinking: "first", signature: "sig-first" },
+      { type: "thinking", thinking: "second", signature: "sig-second" },
+    ],
+    representativeSignature: "sig-first",
+  },
+  {
+    name: "signed and unsigned",
+    thinking: [
+      { type: "thinking", thinking: "signed", signature: "sig-only" },
+      { type: "thinking", thinking: "unsigned" },
+    ],
+    representativeSignature: "sig-only",
+  },
+])(
+  "preserves $name thinking context only in the lossy Chat candidate",
+  async ({ representativeSignature, thinking }) => {
+    const source = createSource({
+      messages: [
+        {
+          role: "assistant",
+          content: structuredClone(
+            thinking,
+          ) as unknown as Array<AnthropicAssistantContentBlock>,
+        },
+      ],
+    })
+    const snapshot = structuredClone(source)
+
+    const candidates = await prepareMessagesCandidates({
+      source,
+      selectedModel: {
+        ...selectedModel,
+        supported_endpoints: [
+          "/v1/messages",
+          "/responses",
+          "/chat/completions",
+        ],
+      },
+    })
+
+    expect(candidates.native.endpoint).toBe("/v1/messages")
+    expect(candidates.responses?.endpoint).toBe("/responses")
+    expect(candidates.chat?.endpoint).toBe("/chat/completions")
+    expect(candidates.native.payload.messages).toEqual(source.messages)
+    const responsesPayload = JSON.stringify(candidates.responses?.payload)
+    for (const block of thinking) {
+      expect(responsesPayload).toContain(block.thinking)
+    }
+    const chatMessage = candidates.chat?.payload.messages[0]
+    expect(chatMessage?.reasoning_text).toBe(thinking[0].thinking)
+    expect(chatMessage?.reasoning_opaque).toBe(representativeSignature)
+    const chatContent =
+      typeof chatMessage?.content === "string" ? chatMessage.content : ""
+    for (const block of thinking) {
+      expect(chatContent).toContain(block.thinking)
+      if ("signature" in block) {
+        expect(chatContent).toContain(block.signature)
+      }
+    }
+    expect(candidates.chat?.check.findings).toContainEqual({
+      class: "reasoning_state",
+      severity: "adapted",
+    })
+    expect(candidates.responses?.check.findings).not.toContainEqual({
+      class: "reasoning_state",
+      severity: "adapted",
+    })
+    expect(source).toEqual(snapshot)
+  },
+)

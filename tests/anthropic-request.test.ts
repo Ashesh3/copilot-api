@@ -330,7 +330,9 @@ describe("Anthropic to OpenAI translation logic", () => {
         { type: "thinking", thinking: "signed", signature: "sig-first" },
         { type: "thinking", thinking: "unsigned" },
       ],
-      expectedReasoningText: "signed\n\nunsigned",
+      expectedContent:
+        '{"type":"thinking","thinking":"signed","signature":"sig-first"}\n\n{"type":"thinking","thinking":"unsigned"}',
+      expectedReasoningOpaque: "sig-first",
     },
     {
       name: "unsigned then signed",
@@ -338,11 +340,13 @@ describe("Anthropic to OpenAI translation logic", () => {
         { type: "thinking", thinking: "unsigned" },
         { type: "thinking", thinking: "signed", signature: "sig-last" },
       ],
-      expectedReasoningText: "unsigned\n\nsigned",
+      expectedContent:
+        '{"type":"thinking","thinking":"unsigned"}\n\n{"type":"thinking","thinking":"signed","signature":"sig-last"}',
+      expectedReasoningOpaque: "sig-last",
     },
   ])(
     "degrades assistant history with mixed $name thinking blocks",
-    ({ content, expectedReasoningText }) => {
+    ({ content, expectedContent, expectedReasoningOpaque }) => {
       const translated = translateToOpenAI({
         model: "claude-current",
         messages: [
@@ -356,13 +360,45 @@ describe("Anthropic to OpenAI translation logic", () => {
       expect(translated.messages).toEqual([
         {
           role: "assistant",
-          content: null,
-          reasoning_text: expectedReasoningText,
+          content: expectedContent,
+          reasoning_text: "signed",
+          reasoning_opaque: expectedReasoningOpaque,
         },
       ])
-      expect(translated.messages[0]).not.toHaveProperty("reasoning_opaque")
     },
   )
+
+  test("preserves multiple signed thinking blocks as ordered Chat context", () => {
+    const source: AnthropicMessagesPayload = {
+      model: "claude-current",
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "before" },
+            { type: "thinking", thinking: "first", signature: "sig-first" },
+            { type: "text", text: "between" },
+            { type: "thinking", thinking: "second", signature: "sig-second" },
+            { type: "text", text: "after" },
+          ],
+        },
+      ],
+    }
+    const snapshot = structuredClone(source)
+
+    const translated = translateToOpenAI(source)
+
+    expect(translated.messages).toEqual([
+      {
+        role: "assistant",
+        content:
+          'before\n\n{"type":"thinking","thinking":"first","signature":"sig-first"}\n\nbetween\n\n{"type":"thinking","thinking":"second","signature":"sig-second"}\n\nafter',
+        reasoning_text: "first",
+        reasoning_opaque: "sig-first",
+      },
+    ])
+    expect(source).toEqual(snapshot)
+  })
 
   test("should handle thinking blocks with tool calls", () => {
     const anthropicPayload: AnthropicMessagesPayload = {

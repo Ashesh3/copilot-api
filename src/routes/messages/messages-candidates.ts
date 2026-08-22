@@ -40,7 +40,10 @@ import {
   normalizeAnthropicImages,
 } from "./attachment-normalization"
 import { prepareNativeTools } from "./native-handler"
-import { translateToOpenAI } from "./non-stream-translation"
+import {
+  hasUnrepresentableChatThinkingHistory,
+  translateToOpenAI,
+} from "./non-stream-translation"
 import { translateAnthropicMessagesToResponsesPayload } from "./responses-translation"
 
 export type MessagesNativeCandidate = EvaluatedEndpointCandidate<
@@ -258,6 +261,9 @@ function adaptMessagesToChat(options: {
   const findings: Array<TranslationFinding> = []
   rewriteSourceToolHistoryForTarget(source, findings)
   const payload = translateToOpenAI(source)
+  if (hasUnrepresentableChatThinkingHistory(source.messages)) {
+    findings.push({ class: "reasoning_state", severity: "adapted" })
+  }
   payload.model = normalizeModelName(payload.model)
   if (source.temperature === undefined) delete payload.temperature
   if (source.top_p === undefined) delete payload.top_p

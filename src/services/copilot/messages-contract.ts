@@ -702,18 +702,14 @@ function sanitizeToolResultContent(
 function sanitizeToolUseBlock(
   block: Record<string, unknown>,
 ): AnthropicToolUseBlock | null {
-  if (
-    !isNonEmptyString(block.id)
-    || !isNonEmptyString(block.name)
-    || (block.input !== null && !isRecord(block.input))
-  ) {
+  if (!isNonEmptyString(block.id) || !isNonEmptyString(block.name)) {
     return null
   }
   return {
     ...block,
     type: "tool_use",
     id: block.id,
-    input: block.input ?? {},
+    input: isRecord(block.input) ? block.input : {},
     name: block.name,
   }
 }
