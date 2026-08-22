@@ -34,6 +34,10 @@ import {
   isAnthropicThinkingBlock,
   isAnthropicToolUseBlock,
 } from "./anthropic-types"
+import {
+  createWebSearchBudget,
+  readPositiveWebSearchLimit,
+} from "./web-search-budget"
 
 const stringifyResponsesInput = (input: ResponsesPayload["input"]): string =>
   typeof input === "string" ? input : JSON.stringify(input ?? [])
@@ -49,6 +53,35 @@ const findResponsesWebSearchTool = (payload: ResponsesPayload): unknown =>
       (tool as { type?: string; name?: string }).type === "function"
       && (tool as { name?: string }).name === "web_search",
   )
+
+const readChatWebSearchMaxUses = (
+  payload: ChatCompletionsPayload,
+): number | undefined => {
+  const tool = findChatWebSearchTool(payload)
+  if (typeof tool !== "object" || tool === null || !("function" in tool)) {
+    return undefined
+  }
+  const fn = tool.function
+  if (typeof fn !== "object" || fn === null) return undefined
+  return readPositiveWebSearchLimit((fn as Record<string, unknown>).max_uses)
+}
+
+const readResponsesWebSearchMaxUses = (
+  payload: ResponsesPayload,
+): number | undefined => {
+  for (const tool of payload.tools ?? []) {
+    const source = tool as Record<string, unknown>
+    if (
+      source.type !== "web_search"
+      && (source.type !== "function" || source.name !== "web_search")
+    ) {
+      continue
+    }
+    const maxUses = readPositiveWebSearchLimit(source.max_uses)
+    if (maxUses !== undefined) return maxUses
+  }
+  return undefined
+}
 
 // --- ChatCompletions web search resolution ---
 
@@ -67,6 +100,7 @@ export const resolveWebSearchCalls = async (
     initiatorOverride?: "agent" | "user"
     abortSignal?: AbortSignal
     copilotSessionToken?: string
+    maxUses?: number
     createCompletion?: (
       payload: ChatCompletionsPayload,
     ) => Promise<ChatCompletionResponse>
@@ -76,16 +110,22 @@ export const resolveWebSearchCalls = async (
     initiatorOverride,
     abortSignal,
     copilotSessionToken,
+    maxUses,
     createCompletion,
   } = options
   let current = response
   let currentPayload = payload
   let iteration = 0
+  const budget = createWebSearchBudget(
+    readChatWebSearchMaxUses(payload),
+    maxUses,
+  )
 
   while (true) {
     iteration += 1
     const webSearchCalls = extractWebSearchCalls(current)
     if (webSearchCalls.length === 0) return current
+    budget.claimBatch(webSearchCalls.length)
 
     consola.info(
       `Executing ${webSearchCalls.length} web search(es), iteration ${iteration}`,
@@ -162,12 +202,17 @@ export const resolveResponsesWebSearchCalls = async (
     initiator: "agent" | "user"
     copilotSessionToken?: string
     signal?: AbortSignal
+    maxUses?: number
     createResponse?: (payload: ResponsesPayload) => Promise<ResponsesResult>
   },
 ): Promise<ResponsesResult> => {
   let current = result
   let currentPayload = payload
   let iteration = 0
+  const budget = createWebSearchBudget(
+    readResponsesWebSearchMaxUses(payload),
+    requestOptions.maxUses,
+  )
 
   while (true) {
     iteration += 1
@@ -176,6 +221,7 @@ export const resolveResponsesWebSearchCalls = async (
         item.type === "function_call" && item.name === "web_search",
     )
     if (webSearchCalls.length === 0) return current
+    budget.claimBatch(webSearchCalls.length)
 
     consola.info(
       `Executing ${webSearchCalls.length} web search(es) via Responses API, iteration ${iteration}`,
