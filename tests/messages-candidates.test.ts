@@ -94,6 +94,22 @@ test("builds detached endpoint-correlated Messages candidates", async () => {
   )
 })
 
+test("preserves Messages web-search max uses out of band for translated candidates", async () => {
+  const candidates = await prepareMessagesCandidates({
+    source: createSource({
+      tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 2 }],
+    }),
+    selectedModel,
+  })
+
+  expect(candidates.chat?.webSearchMaxUses).toBe(2)
+  expect(candidates.responses?.webSearchMaxUses).toBe(2)
+  expect(JSON.stringify(candidates.chat?.payload)).not.toContain("max_uses")
+  expect(JSON.stringify(candidates.responses?.payload)).not.toContain(
+    "max_uses",
+  )
+})
+
 test("Chat candidate maps controls without unconditional sampling or parallel defaults", async () => {
   const ordinary = await prepareMessagesCandidates({
     source: createSource({

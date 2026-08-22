@@ -70,6 +70,7 @@ interface ResponsesFallbackOptions {
   preparedPayload?: ResponsesPayload
   requestedModel: string
   reasoningEffort?: ReasoningEffort
+  webSearchMaxUses?: number
 }
 
 interface PreparedResponsesFallback {
@@ -79,6 +80,7 @@ interface PreparedResponsesFallback {
   payload: ResponsesPayload
   requestedModel: string
   vision: boolean
+  webSearchMaxUses?: number
 }
 
 interface UnexpectedNonStreamOptions {
@@ -299,6 +301,7 @@ function prepareResponsesFallback(
       ?? chatCompletionsToResponses(options.payload, options.reasoningEffort),
     originalPayload: options.payload,
     requestedModel: options.requestedModel,
+    webSearchMaxUses: options.webSearchMaxUses,
     vision: hasVisionContent(options.payload.messages),
     initiator: detectInitiator(options.payload.messages),
   }
@@ -323,11 +326,10 @@ async function executeNonStreamingResponsesFallback(
       })) as ResponsesResult
       const result =
         hasMcpWebSearch(options.payload) ?
-          await resolveResponsesWebSearchCalls(
-            initial,
-            options.payload,
-            requestOptions,
-          )
+          await resolveResponsesWebSearchCalls(initial, options.payload, {
+            ...requestOptions,
+            maxUses: options.webSearchMaxUses,
+          })
         : initial
 
       recordAccountContext(c)
@@ -448,11 +450,10 @@ async function executeStreamingMcpWebSearchFallback(
   }
   const preflush = await raceSsePreflush(
     createResponses(payload, requestOptions).then(async (initial) =>
-      resolveResponsesWebSearchCalls(
-        initial as ResponsesResult,
-        payload,
-        requestOptions,
-      ),
+      resolveResponsesWebSearchCalls(initial as ResponsesResult, payload, {
+        ...requestOptions,
+        maxUses: options.webSearchMaxUses,
+      }),
     ),
   )
 

@@ -46,18 +46,21 @@ import type {
   PreparedChatMessage,
 } from "./chat-contract"
 
-export type NativeChatCandidate = EvaluatedEndpointCandidate<
-  "/chat/completions",
-  ChatCompletionsPayload
->
+export interface NativeChatCandidate
+  extends EvaluatedEndpointCandidate<
+    "/chat/completions",
+    ChatCompletionsPayload
+  > {
+  readonly webSearchMaxUses?: number
+}
 export interface ResponsesChatCandidate
   extends EvaluatedEndpointCandidate<"/responses", ResponsesPayload> {
   readonly webSearchMaxUses?: number
 }
-export type MessagesChatCandidate = EvaluatedEndpointCandidate<
-  "/v1/messages",
-  AnthropicMessagesPayload
->
+export interface MessagesChatCandidate
+  extends EvaluatedEndpointCandidate<"/v1/messages", AnthropicMessagesPayload> {
+  readonly webSearchMaxUses?: number
+}
 
 export type ChatEndpointCandidate =
   | NativeChatCandidate
@@ -394,13 +397,18 @@ export async function prepareNativeChatCandidate(
     await normalizeNativeAttachments(payload, options.signal, attachmentCache)
     addPromptCaching(payload.messages, payload.tools ?? undefined)
   }
-  return createCandidate({
+  const candidate = createCandidate({
     endpoint: "/chat/completions",
     payload,
     reason: "endpoint_unavailable",
     findings,
     meaningful: hasMeaningfulMessages(payload.messages),
   })
+  const webSearchMaxUses = getChatWebSearchMaxUses(options.source)
+  return {
+    ...candidate,
+    ...(webSearchMaxUses === undefined ? {} : { webSearchMaxUses }),
+  }
 }
 
 function convertResponseContent(
@@ -783,14 +791,17 @@ function adaptChatToResponses(
 function getChatWebSearchMaxUses(
   source: PreparedChatCompletionsSource,
 ): number | undefined {
+  let limit: number | undefined
   for (const tool of source.tools ?? []) {
-    if (!isRecord(tool.function) || tool.function.name !== "web_search") {
-      continue
-    }
-    const value = tool.function.max_uses
-    if (Number.isInteger(value) && Number(value) > 0) return Number(value)
+    const value =
+      isWebSearchToolType(tool) ? tool.max_uses
+      : isRecord(tool.function) && tool.function.name === "web_search" ?
+        tool.function.max_uses
+      : undefined
+    if (!Number.isInteger(value) || Number(value) <= 0) continue
+    limit = Math.min(limit ?? Number(value), Number(value))
   }
-  return undefined
+  return limit
 }
 
 function parseAnthropicArguments(value: unknown): Record<string, unknown> {
@@ -1175,13 +1186,18 @@ async function adaptChatToMessages(
       }
     }
   }
-  return createCandidate({
+  const candidate = createCandidate({
     endpoint: "/v1/messages",
     payload,
     reason: "endpoint_unavailable",
     findings: candidateState.findings,
     meaningful: converted.messages.length > 0 || converted.system.length > 0,
   })
+  const webSearchMaxUses = getChatWebSearchMaxUses(source)
+  return {
+    ...candidate,
+    ...(webSearchMaxUses === undefined ? {} : { webSearchMaxUses }),
+  }
 }
 
 export function prepareChatCandidates(

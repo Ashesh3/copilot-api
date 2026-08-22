@@ -28,6 +28,7 @@ import {
   isAnthropicToolUseBlock,
 } from "~/routes/messages/anthropic-types"
 import { rewriteUnsupportedAssistantPrefill } from "~/services/copilot/create-chat-completions"
+import { isWebSearchToolType } from "~/services/copilot/mcp-web-search"
 import {
   COPILOT_RESPONSES_MIN_OUTPUT_TOKENS,
   normalizeJsonSchemaResponseFormat,
@@ -46,14 +47,17 @@ export type MessagesNativeCandidate = EvaluatedEndpointCandidate<
   "/v1/messages",
   AnthropicMessagesPayload
 >
-export type MessagesResponsesCandidate = EvaluatedEndpointCandidate<
-  "/responses",
-  ResponsesPayload
->
-export type MessagesChatCandidate = EvaluatedEndpointCandidate<
-  "/chat/completions",
-  ChatCompletionsPayload
->
+export interface MessagesResponsesCandidate
+  extends EvaluatedEndpointCandidate<"/responses", ResponsesPayload> {
+  readonly webSearchMaxUses?: number
+}
+export interface MessagesChatCandidate
+  extends EvaluatedEndpointCandidate<
+    "/chat/completions",
+    ChatCompletionsPayload
+  > {
+  readonly webSearchMaxUses?: number
+}
 export type MessagesEndpointCandidate =
   | PreparedMessagesNativeCandidate
   | MessagesResponsesCandidate
@@ -292,12 +296,17 @@ function adaptMessagesToChat(options: {
   } else {
     delete payload.parallel_tool_calls
   }
-  return createCandidate({
+  const candidate = createCandidate({
     endpoint: "/chat/completions",
     payload,
     findings,
     meaningful: payload.messages.length > 0,
   })
+  const webSearchMaxUses = getMessagesWebSearchMaxUses(source)
+  return {
+    ...candidate,
+    ...(webSearchMaxUses === undefined ? {} : { webSearchMaxUses }),
+  }
 }
 
 function addFinding(
@@ -445,7 +454,7 @@ function adaptMessagesToResponses(options: {
   } else {
     delete payload.parallel_tool_calls
   }
-  return createCandidate({
+  const candidate = createCandidate({
     endpoint: "/responses",
     payload,
     findings,
@@ -453,6 +462,24 @@ function adaptMessagesToResponses(options: {
       (Array.isArray(payload.input) && payload.input.length > 0)
       || Boolean(payload.instructions),
   })
+  const webSearchMaxUses = getMessagesWebSearchMaxUses(source)
+  return {
+    ...candidate,
+    ...(webSearchMaxUses === undefined ? {} : { webSearchMaxUses }),
+  }
+}
+
+function getMessagesWebSearchMaxUses(
+  source: AnthropicMessagesPayload,
+): number | undefined {
+  let limit: number | undefined
+  for (const tool of source.tools ?? []) {
+    if (!isWebSearchToolType(tool) && tool.name !== "web_search") continue
+    const value = tool.max_uses
+    if (!Number.isInteger(value) || Number(value) <= 0) continue
+    limit = Math.min(limit ?? Number(value), Number(value))
+  }
+  return limit
 }
 
 export async function prepareMessagesChatCandidate(options: {

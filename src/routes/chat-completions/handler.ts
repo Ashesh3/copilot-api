@@ -199,6 +199,7 @@ async function handleCompletionInner(
       requestedModel,
       appliedRules,
       reasoningEffort: requestedEffort,
+      webSearchMaxUses: customCandidate.webSearchMaxUses,
     })
   }
 
@@ -235,6 +236,7 @@ async function handleCompletionInner(
       requestedModel,
       appliedRules,
       reasoningEffort,
+      webSearchMaxUses: customCandidate.webSearchMaxUses,
     })
   }
 
@@ -375,11 +377,15 @@ async function dispatchCopilotCompletion(
         requestedModel,
         reasoningEffort,
         copilotSessionToken,
+        webSearchMaxUses: candidate.webSearchMaxUses,
       })
     }
     case "/v1/messages": {
       return await executeAnthropicBridge(c, {
-        nativeOptions,
+        nativeOptions: {
+          ...nativeOptions,
+          webSearchMaxUses: candidate.webSearchMaxUses,
+        },
         payload: sourcePayload,
         preparedPayload: candidate.payload,
         selectedModel,
@@ -390,6 +396,7 @@ async function dispatchCopilotCompletion(
         candidatePrepared: true,
         requestedModel,
         copilotSessionToken,
+        webSearchMaxUses: candidate.webSearchMaxUses,
       })
     }
     default: {
@@ -425,10 +432,17 @@ async function executeCustomProviderRequest(
     requestedModel: string
     appliedRules: Array<string>
     reasoningEffort?: ReasoningEffort
+    webSearchMaxUses?: number
   },
 ) {
-  const { reference, payload, requestedModel, appliedRules, reasoningEffort } =
-    options
+  const {
+    reference,
+    payload,
+    requestedModel,
+    appliedRules,
+    reasoningEffort,
+    webSearchMaxUses,
+  } = options
 
   consola.debug(
     `Routing custom chat model ${requestedModel} to ${reference.provider.id}/${reference.upstreamModel}`,
@@ -450,6 +464,7 @@ async function executeCustomProviderRequest(
       payload,
       requestedModel,
       reasoningEffort,
+      webSearchMaxUses,
     })
   }
 
@@ -587,6 +602,7 @@ const executeRequest = async (
     candidatePrepared?: boolean
     requestedModel?: string
     copilotSessionToken?: string
+    webSearchMaxUses?: number
   } = {},
 ) => {
   const needsWebSearch =
@@ -619,6 +635,7 @@ const executeRequest = async (
             await resolveWebSearchCalls(response, processedPayload, {
               abortSignal: c.req.raw.signal,
               copilotSessionToken: options.copilotSessionToken,
+              maxUses: options.webSearchMaxUses,
               createCompletion: async (followUpPayload) =>
                 (
                   await createChatCompletionsWithProcessedPayload(
@@ -656,6 +673,7 @@ async function executeCustomProviderWebSearchRequest(
     payload: ChatCompletionsPayload & { model: string }
     requestedModel: string
     reasoningEffort?: ReasoningEffort
+    webSearchMaxUses?: number
   },
 ) {
   const requestedStream = Boolean(options.payload.stream)
@@ -676,6 +694,7 @@ async function executeCustomProviderWebSearchRequest(
   const resolved = await resolveWebSearchCalls(initial, payload, {
     abortSignal: c.req.raw.signal,
     createCompletion,
+    maxUses: options.webSearchMaxUses,
   })
   const result = { ...resolved, model: options.requestedModel }
 
@@ -720,6 +739,7 @@ async function executeStreamingWebSearchRequest(
     candidatePrepared?: boolean
     requestedModel?: string
     copilotSessionToken?: string
+    webSearchMaxUses?: number
   },
 ) {
   const bufferedPayload = { ...payload, stream: false as const }
@@ -742,6 +762,7 @@ async function executeStreamingWebSearchRequest(
         {
           abortSignal: c.req.raw.signal,
           copilotSessionToken: options.copilotSessionToken,
+          maxUses: options.webSearchMaxUses,
           createCompletion: async (followUpPayload) =>
             (
               await createChatCompletionsWithProcessedPayload(followUpPayload, {

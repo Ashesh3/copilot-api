@@ -66,6 +66,8 @@ test.each([
 const originalFetch = globalThis.fetch
 let lastUpstreamPath: string | undefined
 let lastUpstreamPayload: Record<string, unknown> | undefined
+let queuedChatResponse: Record<string, unknown> | undefined
+let mcpSearchCalls = 0
 
 const fetchMock = mock((url: string | URL | Request, init?: RequestInit) => {
   const rawUrl = typeof url === "string" || url instanceof URL ? url : url.url
@@ -74,6 +76,25 @@ const fetchMock = mock((url: string | URL | Request, init?: RequestInit) => {
     typeof init?.body === "string" ?
       (JSON.parse(init.body) as Record<string, unknown>)
     : undefined
+
+  if (lastUpstreamPath === "/mcp/readonly") {
+    if (lastUpstreamPayload?.method === "initialize") {
+      return new Response(
+        'data: {"jsonrpc":"2.0","id":"init","result":{}}\n\n',
+        {
+          headers: {
+            "content-type": "text/event-stream",
+            "Mcp-Session-Id": "route-session",
+          },
+        },
+      )
+    }
+    mcpSearchCalls += 1
+    return new Response(
+      'data: {"jsonrpc":"2.0","id":"search","result":{"content":[{"type":"text","text":"current result"}]}}\n\n',
+      { headers: { "content-type": "text/event-stream" } },
+    )
+  }
 
   if (lastUpstreamPath === "/responses") {
     return Response.json({
@@ -128,6 +149,11 @@ const fetchMock = mock((url: string | URL | Request, init?: RequestInit) => {
     typeof init?.body === "string" ?
       (JSON.parse(init.body) as { model?: string })
     : {}
+  if (queuedChatResponse) {
+    const queued = queuedChatResponse
+    queuedChatResponse = undefined
+    return Response.json(queued)
+  }
   return Response.json({
     id: "chatcmpl_route",
     object: "chat.completion",
@@ -157,6 +183,8 @@ beforeEach(() => {
   fetchMock.mockClear()
   lastUpstreamPath = undefined
   lastUpstreamPayload = undefined
+  queuedChatResponse = undefined
+  mcpSearchCalls = 0
   state.accountType = "individual"
   state.copilotToken = "copilot-token"
   state.githubToken = "github-token"
@@ -404,6 +432,50 @@ test("preserves custom tools on a Chat-only model", async () => {
       copilot_cache_control: { type: "ephemeral" },
     },
   ])
+})
+
+test("enforces hosted Chat max_uses without leaking it upstream", async () => {
+  installModel({
+    id: "route-model",
+    supported_endpoints: ["/chat/completions"],
+  })
+  queuedChatResponse = {
+    id: "chat_search",
+    object: "chat.completion",
+    created: 1,
+    model: "route-model",
+    choices: [
+      {
+        index: 0,
+        message: {
+          role: "assistant",
+          content: null,
+          tool_calls: Array.from({ length: 3 }, (_, index) => ({
+            id: `call-${index}`,
+            type: "function",
+            function: {
+              name: "web_search",
+              arguments: `{"query":"query ${index}"}`,
+            },
+          })),
+        },
+        finish_reason: "tool_calls",
+        logprobs: null,
+      },
+    ],
+  }
+
+  const response = await postChatRoute({
+    tools: [{ type: "web_search", max_uses: 2 }],
+  })
+  const body = await response.json()
+
+  expect(response.status).toBe(400)
+  expect(body).toMatchObject({
+    error: { code: "web_search_limit_exceeded" },
+  })
+  expect(mcpSearchCalls).toBe(0)
+  expect(JSON.stringify(lastUpstreamPayload)).not.toContain("max_uses")
 })
 
 test("degrades file sources on a Chat-only model", async () => {

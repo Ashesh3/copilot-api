@@ -24,12 +24,15 @@ import {
   checkMessagesToResponsesTranslation,
 } from "~/routes/messages/translation-fidelity"
 import { server } from "~/server"
+import { resetWebSearchSessionsForTest } from "~/services/copilot/mcp-web-search"
 
 const originalFetch = globalThis.fetch
 const upstreamBodies: Array<Record<string, unknown>> = []
 const upstreamHeaders: Array<Headers> = []
 const upstreamPaths: Array<string> = []
 const queuedMessagesResults: Array<Error | Response> = []
+const queuedChatResults: Array<Response> = []
+const queuedResponsesResults: Array<Response> = []
 let attachmentFetchCount = 0
 const TEST_ACCOUNT_IDS = [91_001, 91_002, 92_001, 92_002, 93_001, 93_002]
 const INVALID_TRANSLATED_DOCUMENT_URLS = [
@@ -126,6 +129,7 @@ function createAttachmentResponse(
 }
 
 const fetchMock = mock(
+  // eslint-disable-next-line complexity -- fixture branches mirror independent upstream protocols
   (url: string | URL | Request, init?: RequestInit): Response => {
     const rawUrl = typeof url === "string" || url instanceof URL ? url : url.url
     const parsedUrl = new URL(rawUrl)
@@ -174,6 +178,8 @@ const fetchMock = mock(
       )
     }
     if (path === "/responses") {
+      const queued = queuedResponsesResults.shift()
+      if (queued) return queued
       return Response.json({
         id: "resp_route",
         object: "response",
@@ -203,6 +209,8 @@ const fetchMock = mock(
       })
     }
     if (path === "/chat/completions") {
+      const queued = queuedChatResults.shift()
+      if (queued) return queued
       return Response.json({
         id: "chat_route",
         object: "chat.completion",
@@ -245,6 +253,9 @@ beforeEach(() => {
   upstreamHeaders.length = 0
   upstreamPaths.length = 0
   queuedMessagesResults.length = 0
+  queuedChatResults.length = 0
+  queuedResponsesResults.length = 0
+  resetWebSearchSessionsForTest()
   attachmentFetchCount = 0
   state.accountType = "individual"
   state.copilotToken = "copilot-token"
@@ -1335,6 +1346,92 @@ test("native web-search iterations emit one final metadata event", async () => {
     debugSpy.mockRestore()
   }
 })
+
+test.each([
+  { endpoint: "/chat/completions", name: "Chat" },
+  { endpoint: "/responses", name: "Responses" },
+])(
+  "enforces translated Messages max_uses on $name without wire metadata",
+  async ({ endpoint }) => {
+    installModel({ supported_endpoints: [endpoint] })
+    const threeCalls = Array.from({ length: 3 }, (_, index) => ({
+      id: `item-${index}`,
+      type: "function_call",
+      call_id: `call-${index}`,
+      name: "web_search",
+      arguments: `{"query":"query ${index}"}`,
+      status: "completed",
+    }))
+    if (endpoint === "/chat/completions") {
+      queuedChatResults.push(
+        Response.json({
+          id: "chat_search_limit",
+          object: "chat.completion",
+          created: 1,
+          model: "route-model",
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: threeCalls.map((call) => ({
+                  id: call.call_id,
+                  type: "function",
+                  function: {
+                    name: call.name,
+                    arguments: call.arguments,
+                  },
+                })),
+              },
+              finish_reason: "tool_calls",
+              logprobs: null,
+            },
+          ],
+        }),
+      )
+    } else {
+      queuedResponsesResults.push(
+        Response.json({
+          id: "response_search_limit",
+          object: "response",
+          created_at: 1,
+          model: "route-model",
+          output: threeCalls,
+          output_text: "",
+          status: "completed",
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+          error: null,
+          incomplete_details: null,
+          instructions: null,
+          metadata: null,
+          parallel_tool_calls: false,
+          temperature: null,
+          tool_choice: "auto",
+          tools: [],
+          top_p: null,
+        }),
+      )
+    }
+
+    const response = await postMessages({
+      tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 2 }],
+    })
+    const body = await response.json()
+    const inferenceBodies = upstreamPaths.flatMap((path, index) =>
+      path === endpoint ? [upstreamBodies[index]] : [],
+    )
+
+    expect(response.status).toBe(400)
+    expect(body).toMatchObject({
+      error: { code: "web_search_limit_exceeded" },
+    })
+    expect(
+      upstreamBodies.filter((body) => body.method === "tools/call"),
+    ).toHaveLength(0)
+    expect(JSON.stringify(inferenceBodies)).not.toContain("max_uses")
+  },
+)
 
 test("native web-search follow-ups keep an issuer-matched session token on one account", async () => {
   installModel({ supported_endpoints: ["/v1/messages"] })

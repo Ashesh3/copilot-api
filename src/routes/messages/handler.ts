@@ -409,6 +409,7 @@ async function handleCompletionInner(
       requestedModel,
       appliedRules: [],
       reasoningEffort: redirectEffort,
+      webSearchMaxUses: customCandidate.webSearchMaxUses,
     })
   }
 
@@ -532,6 +533,7 @@ async function handleCompletionInner(
         retryBudget,
         routedAccountPin,
         preparedPayload: candidate.payload,
+        webSearchMaxUses: candidate.webSearchMaxUses,
       })
     }
 
@@ -543,6 +545,7 @@ async function handleCompletionInner(
       retryBudget,
       routedAccountPin,
       preparedPayload: candidate.payload,
+      webSearchMaxUses: candidate.webSearchMaxUses,
     })
   })
 }
@@ -868,6 +871,7 @@ const handleWithChatCompletions = async (
     requestedModel?: string
     retryBudget?: RetryBudget
     routedAccountPin?: RoutedAccountPin
+    webSearchMaxUses?: number
   },
 ) => await executeChatCompletions(c, anthropicPayload, options)
 
@@ -882,6 +886,7 @@ const executeChatCompletions = async (
     requestedModel?: string
     retryBudget?: RetryBudget
     routedAccountPin?: RoutedAccountPin
+    webSearchMaxUses?: number
   },
 ) => {
   const {
@@ -892,6 +897,7 @@ const executeChatCompletions = async (
     requestedModel,
     retryBudget,
     routedAccountPin,
+    webSearchMaxUses,
   } = options ?? {}
   const openAIPayload =
     preparedPayload ?
@@ -1024,6 +1030,7 @@ const executeChatCompletions = async (
           copilotSessionToken,
           initiatorOverride,
           abortSignal: c.req.raw.signal,
+          maxUses: webSearchMaxUses,
           ...(preparedPayload ?
             {
               createCompletion: async (payload) =>
@@ -1142,6 +1149,7 @@ const executeChatCompletions = async (
                       copilotSessionToken,
                       initiatorOverride,
                       abortSignal: upstreamSignal,
+                      maxUses: webSearchMaxUses,
                       ...(preparedPayload ?
                         {
                           createCompletion: async (payload) =>
@@ -1210,10 +1218,17 @@ async function executeCustomProviderChatCompletions(
     requestedModel?: string
     appliedRules: Array<string>
     reasoningEffort?: ReasoningEffort
+    webSearchMaxUses?: number
   },
 ) {
-  const { reference, payload, requestedModel, appliedRules, reasoningEffort } =
-    options
+  const {
+    reference,
+    payload,
+    requestedModel,
+    appliedRules,
+    reasoningEffort,
+    webSearchMaxUses,
+  } = options
   const responseModel = requestedModel ?? payload.model
 
   logger.debug(
@@ -1234,6 +1249,7 @@ async function executeCustomProviderChatCompletions(
       payload,
       responseModel,
       reasoningEffort,
+      webSearchMaxUses,
     })
   }
 
@@ -1283,6 +1299,7 @@ async function executeCustomProviderWebSearch(
     payload: ChatCompletionsPayload
     responseModel: string
     reasoningEffort?: ReasoningEffort
+    webSearchMaxUses?: number
   },
 ) {
   const requestedStream = Boolean(options.payload.stream)
@@ -1303,6 +1320,7 @@ async function executeCustomProviderWebSearch(
   const resolved = await resolveWebSearchCalls(initial, payload, {
     abortSignal: c.req.raw.signal,
     createCompletion,
+    maxUses: options.webSearchMaxUses,
   })
   setRequestContext(c, {
     inputTokens: resolved.usage?.prompt_tokens,
@@ -1644,6 +1662,7 @@ const handleWithResponsesApi = async (
     requestedModel?: string
     retryBudget?: RetryBudget
     routedAccountPin?: RoutedAccountPin
+    webSearchMaxUses?: number
   },
 ) => await executeResponsesApi(c, anthropicPayload, options)
 
@@ -1658,6 +1677,7 @@ const executeResponsesApi = async (
     requestedModel?: string
     retryBudget?: RetryBudget
     routedAccountPin?: RoutedAccountPin
+    webSearchMaxUses?: number
   },
 ) => {
   const {
@@ -1668,6 +1688,7 @@ const executeResponsesApi = async (
     requestedModel,
     retryBudget,
     routedAccountPin,
+    webSearchMaxUses,
   } = options ?? {}
   const responsesPayload =
     preparedPayload ?
@@ -1777,6 +1798,7 @@ const executeResponsesApi = async (
                           vision,
                           initiator: initiatorOverride ?? initiator,
                           signal: c.req.raw.signal,
+                          maxUses: webSearchMaxUses,
                           ...(preparedPayload ?
                             {
                               createResponse: async (payload) =>
@@ -1888,6 +1910,7 @@ const executeResponsesApi = async (
         vision,
         initiator: initiatorOverride ?? initiator,
         signal: c.req.raw.signal,
+        maxUses: webSearchMaxUses,
         ...(preparedPayload ?
           {
             createResponse: async (payload) =>

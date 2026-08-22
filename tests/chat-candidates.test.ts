@@ -98,6 +98,33 @@ describe("Chat endpoint candidates", () => {
     )
   })
 
+  test("preserves hosted Chat web-search max uses out of band", async () => {
+    const source = prepareChatCompletionsRequest({
+      model: "future-model",
+      messages: [{ role: "user", content: "search" }],
+      tools: [
+        {
+          type: "web_search",
+          max_uses: 2,
+          filters: { allowed_domains: ["example.com"] },
+        },
+      ],
+    }).source
+
+    const candidates = await prepareChatCandidates({
+      source,
+      selectedModel: model,
+      nativeMessagesOptions: {},
+    })
+
+    expect(candidates.chat.webSearchMaxUses).toBe(2)
+    expect(candidates.responses.webSearchMaxUses).toBe(2)
+    expect(JSON.stringify(candidates.chat.payload)).not.toContain("max_uses")
+    expect(JSON.stringify(candidates.responses.payload)).not.toContain(
+      "max_uses",
+    )
+  })
+
   test("uses deterministic request-local tool IDs and target argument fallbacks", async () => {
     const source = prepareChatCompletionsRequest({
       model: "future-model",
