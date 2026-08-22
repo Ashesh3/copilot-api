@@ -16,6 +16,7 @@ import type { ModelsResponse } from "../src/services/copilot/get-models"
 
 import { getGoogleRoutingContractRows } from "../src/lib/compatibility-contract"
 import { HTTPError } from "../src/lib/error"
+import { setIpAllowlistForTest } from "../src/lib/ip-allowlist"
 import { isIpBlocked, resetIpSecurityForTest } from "../src/lib/ip-blocker"
 import {
   clearLlmDebugLogs,
@@ -340,6 +341,7 @@ afterAll(() => {
 })
 
 beforeEach(() => {
+  setIpAllowlistForTest([])
   fetchMock.mockClear()
   lastResponsesPayload = undefined
   lastHeaders = undefined

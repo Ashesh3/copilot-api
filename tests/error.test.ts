@@ -9,6 +9,7 @@ import {
   HTTPError,
   inspectHttpError,
   LocalHTTPError,
+  SensitiveHTTPError,
   snapshotHttpErrorMetadata,
 } from "../src/lib/error"
 
@@ -105,6 +106,39 @@ test.each([
       upstreamResponseBodyBytes: expectedBytes,
       upstreamResponseContentType: fixture.contentType,
     })
+  } finally {
+    errorSpy.mockRestore()
+    captureException.mockRestore()
+  }
+})
+
+test("forwards sensitive upstream bytes without body diagnostics", async () => {
+  const bodyMarker = "sensitive-upstream-body"
+  const body = UTF8_ENCODER.encode(bodyMarker)
+  const errorSpy = spyOn(consola, "error")
+  const captureException = spyOn(Sentry, "captureException").mockImplementation(
+    () => "event-id",
+  )
+
+  try {
+    const response = await forwardOpenAIError(
+      new SensitiveHTTPError(
+        "Custom provider request failed",
+        new Response(body.slice(), {
+          headers: { "content-type": "text/plain" },
+          status: 400,
+        }),
+      ),
+    )
+    const captureContext = captureContextValue(captureException)
+
+    expect(response.status).toBe(400)
+    expect(await response.text()).toBe(bodyMarker)
+    expect(JSON.stringify(errorSpy.mock.calls)).not.toContain(bodyMarker)
+    expect(captureContext?.extra).not.toHaveProperty("upstreamResponseBody")
+    expect(captureContext?.extra).not.toHaveProperty(
+      "upstreamResponseBodyBytes",
+    )
   } finally {
     errorSpy.mockRestore()
     captureException.mockRestore()

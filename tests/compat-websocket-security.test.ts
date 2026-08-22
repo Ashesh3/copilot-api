@@ -5,6 +5,7 @@ import {
   setAdminAuthTestMode,
   setupAdminAuth,
 } from "../src/lib/admin-auth"
+import { setIpAllowlistForTest } from "../src/lib/ip-allowlist"
 import {
   isIpBlocked,
   leaseIp,
@@ -54,6 +55,7 @@ function voiceUpgradeRequest(): Request {
 }
 
 beforeEach(async () => {
+  setIpAllowlistForTest([])
   delete process.env.COPILOT_ADMIN_PASSWORD_HASH
   state.apiKeyAuth = "gateway-secret"
   process.env.COPILOT_ADMIN_ORIGIN = TEST_ADMIN_ORIGIN
@@ -76,6 +78,7 @@ afterEach(() => {
   state.apiKeyAuth = originalGatewayKey
   setAdminAuthTestMode(false)
   resetIpSecurityForTest()
+  setIpAllowlistForTest([])
   if (originalDirectConnect === undefined) {
     delete process.env.COPILOT_API_ENABLE_DIRECT_CONNECT
   } else {
@@ -189,7 +192,7 @@ describe("health and Direct Connect exposure", () => {
     expect(isIpBlocked(clientIp)).toBe(true)
   })
 
-  test("Direct Connect WebSocket auth rejects banned IPs", async () => {
+  test("Direct Connect WebSocket auth recovers a banned IP with a valid credential", async () => {
     process.env.COPILOT_API_ENABLE_DIRECT_CONNECT = "true"
     const clientIp = "198.51.100.93"
     const startModule = (await import("../src/start")) as Record<
@@ -218,7 +221,8 @@ describe("health and Direct Connect exposure", () => {
     expect(isIpBlocked(clientIp)).toBe(true)
     expect(
       await (authorize as (request: Request) => Promise<string>)(request),
-    ).toBe("blocked")
+    ).toBe("authorized")
+    expect(isIpBlocked(clientIp)).toBe(false)
   })
 
   test("start fetch returns uniform Direct Connect upgrade denials without breaking authorized upgrades", async () => {
@@ -260,9 +264,9 @@ describe("health and Direct Connect exposure", () => {
     expect(upgrade).toHaveBeenCalledTimes(1)
 
     expect((await fetchUpgrade()).status).toBe(401)
-    expect(isIpBlocked(clientIp)).toBe(true)
-    expect((await fetchUpgrade("gateway-secret")).status).toBe(401)
-    expect(upgrade).toHaveBeenCalledTimes(1)
+    expect(isIpBlocked(clientIp)).toBe(false)
+    expect(await fetchUpgrade("gateway-secret")).toBeUndefined()
+    expect(upgrade).toHaveBeenCalledTimes(2)
   })
 
   test("Direct Connect allows multiple handlers for one session", () => {
@@ -401,6 +405,28 @@ describe("voice WebSocket security", () => {
     }
     expect(isIpBlocked(clientIp)).toBe(true)
     expect(upgrade).not.toHaveBeenCalled()
+  })
+
+  test("a valid voice inference credential recovers an actively banned IP", async () => {
+    const clientIp = "198.51.100.98"
+    const upgrade = mock(() => true)
+    recordFailedAttempt(clientIp)
+    recordFailedAttempt(clientIp)
+    recordFailedAttempt(clientIp)
+    expect(isIpBlocked(clientIp)).toBe(true)
+
+    expect(
+      await tryUpgradeVoiceWebSocket(
+        new Request("http://localhost/api/ws/speech_to_text/voice_stream", {
+          headers: {
+            authorization: "Bearer gateway-secret",
+            "x-copilot-peer-ip": clientIp,
+          },
+        }),
+        { upgrade },
+      ),
+    ).toBe("upgraded")
+    expect(isIpBlocked(clientIp)).toBe(false)
   })
 
   test("accepts multiple voice connections for one gateway principal", async () => {

@@ -180,6 +180,7 @@ export async function tryUpgradeResponsesWebSocket(
   const auth = await resolveProtectedCredential(
     req,
     async () => await resolveRequestCredential(req, ["user:inference"]),
+    { trustClientIp: true },
   )
   if (auth.status !== "authorized") return "auth_failed"
 

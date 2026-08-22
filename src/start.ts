@@ -234,6 +234,7 @@ export async function isDirectConnectUpgradeAuthorized(
   const auth = await resolveProtectedCredential(
     request,
     async () => await resolveRequestCredential(request, ["user:inference"]),
+    { trustClientIp: true },
   )
   if (auth.status === "authorized") return "authorized"
   return auth.status === "blocked" ? "blocked" : "unauthorized"

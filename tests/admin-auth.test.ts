@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, expect, test } from "bun:test"
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test"
+import fs from "node:fs/promises"
 
 import {
   ADMIN_CSRF_COOKIE,
@@ -10,6 +11,7 @@ import {
   initializeAdminAuth,
   validateAdminPasswordHash,
 } from "../src/lib/admin-auth"
+import { setIpAllowlistForTest } from "../src/lib/ip-allowlist"
 import {
   isIpBlocked,
   leaseIp,
@@ -60,6 +62,7 @@ async function setup(): Promise<AdminCookies> {
 }
 
 beforeEach(() => {
+  setIpAllowlistForTest([])
   originalAdminPasswordHash = process.env.COPILOT_ADMIN_PASSWORD_HASH
   delete process.env.COPILOT_ADMIN_PASSWORD_HASH
   setAdminAuthTestMode(true)
@@ -69,6 +72,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  setIpAllowlistForTest([])
   setAdminAuthTestMode(false)
   state.apiKeyAuth = undefined
   delete process.env.COPILOT_ADMIN_ORIGIN
@@ -497,10 +501,17 @@ test("admin session accesses reads and mutations require CSRF and Origin", async
 
 test("admin sessions can access sensitive dashboard routes without reauthentication", async () => {
   const cookies = await setup()
-  const response = await server.request("/dashboard/api/settings/export", {
-    headers: { cookie: cookies.cookie },
-  })
-  expect(response.status).toBe(200)
+  const readFile = spyOn(fs, "readFile").mockRejectedValue(
+    Object.assign(new Error("missing test fixture"), { code: "ENOENT" }),
+  )
+  try {
+    const response = await server.request("/dashboard/api/settings/export", {
+      headers: { cookie: cookies.cookie },
+    })
+    expect(response.status).toBe(200)
+  } finally {
+    readFile.mockRestore()
+  }
 })
 
 test("admin password change revokes prior sessions", async () => {

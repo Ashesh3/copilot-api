@@ -14,6 +14,7 @@ import {
   isIpBanned,
   isIpBlocked,
   recordFailedAttempt,
+  trustAuthenticatedIp,
 } from "./ip-blocker"
 import { sanitizeRequestDiagnosticReference } from "./request-diagnostics"
 import { state } from "./state"
@@ -63,16 +64,7 @@ async function guardOrdinaryRequest(
       "user:inference",
     ])
     if (credential) {
-      if (clientIp !== null && isIpBlocked(clientIp)) {
-        consola.warn(
-          `[api-key-guard] Blocked request from banned IP ${clientIp} → ${c.req.method} ${diagnosticPath}`,
-        )
-        Sentry.captureMessage(`Blocked banned IP: ${clientIp}`, {
-          level: "warning",
-          extra: { ip: clientIp, method: c.req.method, path: diagnosticPath },
-        })
-        return unauthorizedResponse(c)
-      }
+      if (clientIp !== null) await trustAuthenticatedIp(clientIp)
       await next()
       return
     }
@@ -140,9 +132,7 @@ async function guardTransparentProxyRequest(
     authorized =
       resolveGatewayCredential(rawGatewayCredential, ["user:inference"])
       !== null
-    if (authorized && clientIp !== null && isIpBlocked(clientIp)) {
-      return unauthorizedResponse(c)
-    }
+    if (authorized && clientIp !== null) await trustAuthenticatedIp(clientIp)
   } else if (clientIp !== null) {
     authorized = await isIpAllowedForWhitelistedRoute(clientIp)
   }

@@ -28,6 +28,7 @@ directConnectRoutes.use("*", async (c, next) => {
   const auth = await resolveProtectedCredential(
     c.req.raw,
     async () => await resolveRequestCredential(c.req.raw, ["user:inference"]),
+    { trustClientIp: true },
   )
   if (auth.status !== "authorized") {
     c.header("Cache-Control", "no-store")

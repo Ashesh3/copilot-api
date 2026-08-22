@@ -176,6 +176,7 @@ export async function tryUpgradeVoiceWebSocket(
   const auth = await resolveProtectedCredential(
     req,
     async () => await resolveRequestCredential(req, ["voice:transcribe"]),
+    { trustClientIp: true },
   )
   if (auth.status !== "authorized") return "auth_failed"
 

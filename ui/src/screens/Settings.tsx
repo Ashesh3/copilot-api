@@ -13,9 +13,7 @@ import { HStack, VStack } from "@astryxdesign/core/Stack"
 import { pixel, proportional } from "@astryxdesign/core/Table"
 import { Heading, Text } from "@astryxdesign/core/Text"
 import { TextInput } from "@astryxdesign/core/TextInput"
-import { useState } from "react"
-
-import type { IpAllowlistEntry, SettingsData } from "../lib/types"
+import { useRef, useState } from "react"
 
 import {
   ConfirmButton,
@@ -30,20 +28,21 @@ import { ResponsivePair } from "../components/ResponsivePair"
 import { DownloadIcon, PlusIcon, Trash2Icon } from "../icons"
 import { ApiError, api, del, get, patch, post } from "../lib/api"
 import { useToast } from "../lib/toast"
+import {
+  IpAddressRequiredError,
+  addIpAllowlistEntry,
+  clearIpAllowlist,
+  ipAddressPlaceholder,
+  loadSettingsBundle,
+  type IpAllowlistEntry,
+  type SettingsBundle,
+} from "../lib/types"
 import { useAsyncData } from "../lib/usePolling"
 
 type IpRow = IpAllowlistEntry & Record<string, unknown>
 
-interface SettingsBundle {
-  settings: SettingsData
-  allowlist: Array<IpAllowlistEntry>
-}
-
 function loadBundle(): Promise<SettingsBundle> {
-  return Promise.all([
-    get<SettingsData>("/dashboard/api/settings"),
-    get<Array<IpAllowlistEntry>>("/dashboard/api/ip-allowlist"),
-  ]).then(([settings, allowlist]) => ({ settings, allowlist }))
+  return loadSettingsBundle(get)
 }
 
 function errorMessage(caught: unknown, fallback: string): string {
@@ -66,12 +65,19 @@ export default function SettingsScreen() {
   const [cleanupDraft, setCleanupDraft] = useState<string>()
   const [isSavingCleanup, setIsSavingCleanup] = useState(false)
   const [newIp, setNewIp] = useState("")
+  const [isAddingIp, setIsAddingIp] = useState(false)
+  const isAddingIpRef = useRef(false)
   const [currentPassword, setCurrentPassword] = useState("")
   const [newPassword, setNewPassword] = useState("")
   const [confirmPassword, setConfirmPassword] = useState("")
   const [isChangingPassword, setIsChangingPassword] = useState(false)
 
   const cleanupValue = cleanupDraft ?? data?.settings.codexCleanupModel ?? ""
+
+  const setAddingIp = (value: boolean) => {
+    isAddingIpRef.current = value
+    setIsAddingIp(value)
+  }
 
   const handleExport = async () => {
     try {
@@ -138,20 +144,21 @@ export default function SettingsScreen() {
   }
 
   const handleAddIp = async () => {
-    if (!newIp.trim()) {
-      toast.error("IP address is required")
-      return
-    }
+    if (isAddingIpRef.current) return
+    setAddingIp(true)
     try {
-      await post("/dashboard/api/ip-allowlist", {
-        ip: newIp.trim(),
-        enabled: true,
-      })
+      await addIpAllowlistEntry(newIp, data?.currentIp ?? null, post)
       toast.success("IP added")
       setNewIp("")
       reload()
     } catch (caught) {
-      toast.error(errorMessage(caught, "Failed to add IP"))
+      toast.error(
+        caught instanceof IpAddressRequiredError ?
+          caught.message
+        : errorMessage(caught, "Failed to add IP"),
+      )
+    } finally {
+      setAddingIp(false)
     }
   }
 
@@ -174,6 +181,19 @@ export default function SettingsScreen() {
       reload()
     } catch (caught) {
       toast.error(errorMessage(caught, "Failed to remove IP"))
+    }
+  }
+
+  const handleClearAllowlist = async () => {
+    try {
+      const result = await clearIpAllowlist(del)
+      toast.success(
+        `Cleared ${result.cleared} IP${result.cleared === 1 ? "" : "s"}`,
+      )
+      reload()
+    } catch (caught) {
+      toast.error(errorMessage(caught, "Failed to clear IP allowlist"))
+      throw caught
     }
   }
 
@@ -401,20 +421,31 @@ export default function SettingsScreen() {
                   label="IP address"
                   value={newIp}
                   onChange={setNewIp}
-                  placeholder="203.0.113.10"
+                  placeholder={ipAddressPlaceholder(data.currentIp)}
                   width="min(100%, 320px)"
                 />
                 <Button
                   label="Add"
                   variant="secondary"
                   icon={<PlusIcon />}
+                  isLoading={isAddingIp}
+                  isDisabled={isAddingIp}
                   onClick={handleAddIp}
                 />
               </HStack>
+              {data.allowlist.length > 0 ?
+                <ConfirmButton
+                  label="Clear all"
+                  confirmTitle="Clear IP allowlist"
+                  confirmDescription="Remove every IP address from the allowlist?"
+                  confirmActionLabel="Clear all"
+                  onConfirm={handleClearAllowlist}
+                />
+              : null}
               {data.allowlist.length === 0 ?
                 <EmptyState
                   title="No allowlisted IPs"
-                  description="Detect your public IP or add one manually."
+                  description="Add an IP address to allow access to /transcribe."
                 />
               : <DataTable
                   data={data.allowlist as Array<IpRow>}

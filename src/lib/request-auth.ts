@@ -97,6 +97,7 @@ export function createAuthMiddleware(
           : await resolveRequestCredential(c.req.raw, ["user:inference"])
         return credential || null
       },
+      { trustClientIp: true },
     )
     if (auth.status !== "authorized") {
       return createUnauthorizedResponse(c)

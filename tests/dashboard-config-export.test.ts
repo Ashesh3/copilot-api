@@ -1,5 +1,6 @@
-import { afterEach, expect, test } from "bun:test"
+import { expect, test } from "bun:test"
 import { unzipSync } from "fflate"
+import { Hono } from "hono"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
@@ -9,18 +10,10 @@ import {
   getConfigExportFilename,
 } from "../src/lib/config-export"
 import { DASHBOARD_HTML } from "../src/routes/dashboard/page-generated"
+import { createExportSettingsHandler } from "../src/routes/dashboard/settings-export"
 import { server } from "../src/server"
-import {
-  adminHeaders,
-  createTestAdminSession,
-  resetTestAdminSession,
-} from "./helpers/admin-session"
 
 const textDecoder = new TextDecoder()
-
-afterEach(() => {
-  resetTestAdminSession()
-})
 
 async function withTempDir<T>(
   callback: (directory: string) => Promise<T>,
@@ -90,18 +83,24 @@ test("dashboard config export endpoint is authenticated and returns a zip", asyn
   )
   expect(unauthorizedResponse.status).toBe(401)
 
-  const admin = await createTestAdminSession()
-  const response = await server.request("/dashboard/api/settings/export", {
-    headers: adminHeaders(admin, false),
-  })
+  await withTempDir(async (directory) => {
+    const app = new Hono()
+    app.get(
+      "/settings/export",
+      createExportSettingsHandler(() =>
+        createConfigExportZip({ appDir: directory }),
+      ),
+    )
+    const response = await app.request("/settings/export")
 
-  expect(response.status).toBe(200)
-  expect(response.headers.get("content-type")).toContain("application/zip")
-  expect(response.headers.get("content-disposition")).toMatch(
-    /^attachment; filename="copilot-api-config-\d{2}-\d{2}-\d{4}-\d{2}-\d{2}\.zip"$/,
-  )
-  const zipBytes = new Uint8Array(await response.arrayBuffer())
-  expect(() => unzipSync(zipBytes)).not.toThrow()
+    expect(response.status).toBe(200)
+    expect(response.headers.get("content-type")).toContain("application/zip")
+    expect(response.headers.get("content-disposition")).toMatch(
+      /^attachment; filename="copilot-api-config-\d{2}-\d{2}-\d{4}-\d{2}-\d{2}\.zip"$/,
+    )
+    const zipBytes = new Uint8Array(await response.arrayBuffer())
+    expect(() => unzipSync(zipBytes)).not.toThrow()
+  })
 })
 
 test("dashboard bundle ships the config export controls", () => {

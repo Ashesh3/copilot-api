@@ -10,6 +10,7 @@ import {
   issueWorkerCapability,
   resetBridgeCapabilitiesForTest,
 } from "../src/lib/bridge-capabilities"
+import { setIpAllowlistForTest } from "../src/lib/ip-allowlist"
 import { isIpBlocked, resetIpSecurityForTest } from "../src/lib/ip-blocker"
 import { OAuthStore, setOAuthStoreForTest } from "../src/lib/oauth-store"
 import { state } from "../src/lib/state"
@@ -33,6 +34,7 @@ function bearer(value: string): { authorization: string } {
 }
 
 beforeEach(() => {
+  setIpAllowlistForTest([])
   state.apiKeyAuth = GATEWAY_KEY
   resetIpSecurityForTest()
   setOAuthStoreForTest(new OAuthStore())
@@ -41,6 +43,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  setIpAllowlistForTest([])
   resetIpSecurityForTest()
   state.apiKeyAuth = undefined
   setOAuthStoreForTest(null)

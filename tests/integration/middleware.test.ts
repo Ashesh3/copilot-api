@@ -1,6 +1,7 @@
 import { describe, test, expect, beforeAll, afterEach } from "bun:test"
 
 import { apiKeyGuard } from "~/lib/api-key-guard"
+import { setIpAllowlistForTest } from "~/lib/ip-allowlist"
 import { isIpBlocked, resetIpSecurityForTest } from "~/lib/ip-blocker"
 import { state } from "~/lib/state"
 import { server } from "~/server"
@@ -336,11 +337,13 @@ function requestProtectedRoute(
 beforeAll(async () => {
   await initializeTestState()
   originalApiKeyAuth = state.apiKeyAuth
+  setIpAllowlistForTest([])
 }, TEST_TIMEOUT)
 
 afterEach(() => {
   state.apiKeyAuth = originalApiKeyAuth
   resetIpSecurityForTest()
+  setIpAllowlistForTest([])
 })
 
 describe("Middleware", () => {
@@ -438,7 +441,8 @@ describe("Middleware", () => {
                 "x-copilot-peer-ip": clientIp,
               },
             })
-            expect(banned.status, `${route.name} shared ban`).toBe(401)
+            expect(banned.status, `${route.name} valid recovery`).toBe(200)
+            expect(isIpBlocked(clientIp), route.name).toBe(false)
           }
         }
       },
@@ -463,7 +467,7 @@ describe("Middleware", () => {
     )
 
     test(
-      "successful authentication does not clear prior failures",
+      "successful authentication clears prior failures and prevents a later re-ban",
       async () => {
         state.apiKeyAuth = "test-secret-key-12345"
         const clientIp = "198.51.100.82"
@@ -495,7 +499,22 @@ describe("Middleware", () => {
             })
           ).status,
         ).toBe(401)
-        expect(isIpBlocked(clientIp)).toBe(true)
+        expect(isIpBlocked(clientIp)).toBe(false)
+
+        const unrelatedIp = "198.51.100.83"
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          expect(
+            (
+              await request("/v1/models", {
+                headers: {
+                  "x-api-key": "wrong-key",
+                  "x-copilot-peer-ip": unrelatedIp,
+                },
+              })
+            ).status,
+          ).toBe(401)
+        }
+        expect(isIpBlocked(unrelatedIp)).toBe(true)
       },
       TEST_TIMEOUT,
     )
