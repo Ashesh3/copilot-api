@@ -12,8 +12,10 @@ import type {
 import { state } from "../src/lib/state"
 import { chatCompletionsToResponses } from "../src/routes/chat-completions/responses-fallback"
 import { translateGoogleToOpenAI } from "../src/routes/google-ai/request-translation"
+import { asAnthropicUnknownContentType } from "../src/routes/messages/anthropic-types"
 import { translateToOpenAI } from "../src/routes/messages/non-stream-translation"
 import {
+  emitAnthropicResponseAsStream,
   resolveResponsesWebSearchCalls,
   resolveWebSearchCalls,
 } from "../src/routes/messages/web-search-helpers"
@@ -26,6 +28,58 @@ import {
 } from "../src/services/copilot/mcp-web-search"
 
 const originalFetch = globalThis.fetch
+
+test("streams future Messages blocks as balanced bounded text blocks", async () => {
+  const frames = new Array<{ event: string; data: string }>()
+
+  await emitAnthropicResponseAsStream(
+    {
+      writeSSE(frame) {
+        frames.push(frame)
+        return Promise.resolve()
+      },
+    },
+    {
+      id: "msg_future",
+      type: "message",
+      role: "assistant",
+      content: [
+        {
+          type: asAnthropicUnknownContentType("future_block_20270101"),
+          payload: "x".repeat(20_000),
+        },
+      ],
+      model: "test-model",
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    },
+  )
+
+  const blockFrames = frames.filter((frame) =>
+    frame.event.startsWith("content_block_"),
+  )
+  expect(blockFrames.map((frame) => frame.event)).toEqual([
+    "content_block_start",
+    "content_block_delta",
+    "content_block_stop",
+  ])
+  expect(JSON.parse(blockFrames[0]?.data ?? "{}")).toMatchObject({
+    index: 0,
+    content_block: { type: "text", text: "" },
+  })
+  const delta = JSON.parse(blockFrames[1]?.data ?? "{}") as {
+    delta?: { type?: string; text?: string }
+  }
+  expect(delta.delta?.type).toBe("text_delta")
+  expect(delta.delta?.text).toContain('"type":"future_block_20270101"')
+  expect(delta.delta?.text?.length).toBeLessThanOrEqual(16_384)
+  expect(JSON.parse(blockFrames[2]?.data ?? "{}")).toEqual({
+    type: "content_block_stop",
+    index: 0,
+  })
+})
+
 type BunTimeoutRequestInit = RequestInit & { timeout?: boolean | number }
 const fetchMock = mock((_url: string, init?: RequestInit) => {
   const body = JSON.parse(

@@ -518,12 +518,16 @@ const mapOutputToAnthropicContent = (
   for (const item of output) {
     switch (item.type) {
       case "reasoning": {
-        const thinkingText = extractReasoningText(item)
+        const thinkingText = extractReasoningText(item, {
+          useFallback: Boolean(item.encrypted_content),
+        })
         if (thinkingText.length > 0) {
           contentBlocks.push({
             type: "thinking",
             thinking: thinkingText,
-            signature: (item.encrypted_content ?? "") + "@" + item.id,
+            ...(item.encrypted_content ?
+              { signature: `${item.encrypted_content}@${item.id}` }
+            : {}),
           })
         }
         break
@@ -591,7 +595,10 @@ const combineMessageTextContent = (
   return aggregated
 }
 
-const extractReasoningText = (item: ResponseOutputReasoning): string => {
+const extractReasoningText = (
+  item: ResponseOutputReasoning,
+  options: { useFallback?: boolean } = {},
+): string => {
   const segments: Array<string> = []
 
   const collectFromBlocks = (blocks?: Array<ResponseReasoningBlock>) => {
@@ -612,7 +619,8 @@ const extractReasoningText = (item: ResponseOutputReasoning): string => {
 
   const text = segments.join("").trim()
   // Compatible with opencode, it will filter out blocks where the thinking text is empty, so we add a default thinking text here
-  return text.length > 0 ? text : THINKING_TEXT
+  if (text.length > 0) return text
+  return options.useFallback ? THINKING_TEXT : ""
 }
 
 const createToolUseContentBlock = (

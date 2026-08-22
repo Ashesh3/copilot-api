@@ -20,8 +20,12 @@ import { state } from "../src/lib/state"
 import { server } from "../src/server"
 
 const originalFetch = globalThis.fetch
-let streamMode: "received-direct" | "received-buffered" | "text" | "binary" =
-  "received-direct"
+let streamMode:
+  | "received-direct"
+  | "received-buffered"
+  | "text"
+  | "binary"
+  | "unsigned-reasoning" = "received-direct"
 
 const models: ModelsResponse = {
   object: "list",
@@ -138,11 +142,49 @@ function thrownFailureResponse(): Response {
   )
 }
 
-const fetchMock = mock(() =>
-  streamMode === "received-direct" || streamMode === "received-buffered" ?
-    receivedFailureResponse()
-  : thrownFailureResponse(),
-)
+function unsignedReasoningResponse(): Response {
+  const completed = {
+    ...responseSnapshot,
+    status: "completed",
+    output: [
+      {
+        id: "rs_unsigned",
+        type: "reasoning",
+        summary: [{ type: "summary_text", text: "visible reasoning" }],
+        encrypted_content: null,
+      },
+    ],
+  }
+  return new Response(
+    [
+      `event: response.created\ndata: ${JSON.stringify({
+        type: "response.created",
+        sequence_number: 0,
+        response: responseSnapshot,
+      })}`,
+      `event: response.output_item.done\ndata: ${JSON.stringify({
+        type: "response.output_item.done",
+        sequence_number: 1,
+        output_index: 0,
+        item: completed.output[0],
+      })}`,
+      `event: response.completed\ndata: ${JSON.stringify({
+        type: "response.completed",
+        sequence_number: 2,
+        response: completed,
+      })}`,
+    ].join("\n\n") + "\n\n",
+    { headers: { "content-type": "text/event-stream" } },
+  )
+}
+
+const fetchMock = mock(() => {
+  if (streamMode === "unsigned-reasoning") return unsignedReasoningResponse()
+  if (streamMode === "received-direct" || streamMode === "received-buffered") {
+    return receivedFailureResponse()
+  }
+  return thrownFailureResponse()
+})
 
 beforeAll(() => {
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch =
@@ -191,6 +233,24 @@ test.each([false, true])(
     expect(body).not.toContain("message_stop")
   },
 )
+
+test("mounts unsigned Responses reasoning as one balanced thinking block", async () => {
+  streamMode = "unsigned-reasoning"
+  const response = await server.request("/v1/messages", createRequest(false))
+  const body = await response.text()
+
+  expect(eventTypes(body)).toEqual([
+    "message_start",
+    "content_block_start",
+    "content_block_delta",
+    "content_block_stop",
+    "message_delta",
+    "message_stop",
+  ])
+  expect(body).toContain('"thinking":"visible reasoning"')
+  expect(body).not.toContain("signature_delta")
+  expect(body).not.toContain("@rs_unsigned")
+})
 
 test.each([
   {

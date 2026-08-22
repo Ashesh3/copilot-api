@@ -7,6 +7,8 @@ import type {
   AnthropicMessagesPayload,
 } from "~/routes/messages/anthropic-types"
 
+import { asAnthropicUnknownContentType } from "~/routes/messages/anthropic-types"
+
 import { stripThinkingBlocks } from "../src/routes/messages/handler"
 import { translateToOpenAI } from "../src/routes/messages/non-stream-translation"
 import { translateAnthropicMessagesToResponsesPayload } from "../src/routes/messages/responses-translation"
@@ -400,6 +402,86 @@ describe("Anthropic to OpenAI translation logic", () => {
     expect(assistantMessage?.content).toBe("I'll check the weather for you.")
     expect(assistantMessage?.tool_calls).toHaveLength(1)
     expect(assistantMessage?.tool_calls?.[0].function.name).toBe("get_weather")
+  })
+
+  test("preserves future assistant blocks in source order beside valid blocks", () => {
+    const anthropicPayload: AnthropicMessagesPayload = {
+      model: "claude-current",
+      max_tokens: 128,
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "before" },
+            {
+              type: asAnthropicUnknownContentType(
+                "future_assistant_block_20270101",
+              ),
+              future_payload: { enabled: true },
+            },
+            { type: "text", text: "after" },
+            {
+              type: "thinking",
+              thinking: "private reasoning",
+              signature: "native-signature",
+            },
+            {
+              type: "tool_use",
+              id: "call_future",
+              name: "lookup",
+              input: { query: "docs" },
+            },
+          ],
+        },
+      ],
+    }
+    const snapshot = structuredClone(anthropicPayload)
+
+    const translated = translateToOpenAI(anthropicPayload)
+
+    expect(translated.messages[0]).toMatchObject({
+      role: "assistant",
+      content:
+        'before\n\n{"type":"future_assistant_block_20270101","future_payload":{"enabled":true}}\n\nafter',
+      reasoning_text: "private reasoning",
+      reasoning_opaque: "native-signature",
+      tool_calls: [
+        {
+          id: "call_future",
+          type: "function",
+          function: { name: "lookup", arguments: '{"query":"docs"}' },
+        },
+      ],
+    })
+    expect(anthropicPayload).toEqual(snapshot)
+  })
+
+  test("bounds future assistant block JSON without dropping neighboring text", () => {
+    const translated = translateToOpenAI({
+      model: "claude-current",
+      max_tokens: 128,
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "before" },
+            {
+              type: asAnthropicUnknownContentType(
+                "future_assistant_block_20270101",
+              ),
+              payload: "x".repeat(20_000),
+            },
+            { type: "text", text: "after" },
+          ],
+        },
+      ],
+    })
+
+    const content = translated.messages[0]?.content
+    expect(typeof content).toBe("string")
+    expect(content).toStartWith("before\n\n")
+    expect(content).toEndWith("\n\nafter")
+    expect((content as string).length).toBeLessThanOrEqual(16_400)
   })
 })
 

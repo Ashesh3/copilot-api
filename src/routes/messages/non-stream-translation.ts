@@ -40,6 +40,8 @@ import { mapOpenAIStopReasonToAnthropic } from "./utils"
 
 // Payload translation
 
+const MAX_UNKNOWN_ASSISTANT_BLOCK_TEXT_LENGTH = 16_384
+
 export function translateToOpenAI(
   payload: AnthropicMessagesPayload,
 ): ChatCompletionsPayload {
@@ -208,27 +210,26 @@ function handleAssistantMessage(
     (block): block is AnthropicToolUseBlock => isAnthropicToolUseBlock(block),
   )
 
-  const textBlocks = message.content.filter(
-    (block): block is AnthropicTextBlock => isAnthropicTextBlock(block),
-  )
-
   const thinkingBlocks = message.content.filter(
     (block): block is AnthropicThinkingBlock => isAnthropicThinkingBlock(block),
-  )
-  const unknownBlocks = message.content.filter(
-    (block) =>
-      !isAnthropicToolUseBlock(block)
-      && !isAnthropicTextBlock(block)
-      && !isAnthropicThinkingBlock(block),
   )
   const signedThinkingBlocks = thinkingBlocks.filter(
     (block) => block.signature && isValidReasoningSignature(block.signature),
   )
 
-  const textContent = [
-    ...textBlocks.map((block) => block.text),
-    ...unknownBlocks.map((block) => JSON.stringify(block)),
-  ].join("\n\n")
+  const textContent = message.content
+    .filter(
+      (block) =>
+        isAnthropicTextBlock(block)
+        || (!isAnthropicToolUseBlock(block)
+          && !isAnthropicThinkingBlock(block)),
+    )
+    .map((block) =>
+      isAnthropicTextBlock(block) ?
+        block.text
+      : JSON.stringify(block).slice(0, MAX_UNKNOWN_ASSISTANT_BLOCK_TEXT_LENGTH),
+    )
+    .join("\n\n")
   const reasoningText = thinkingBlocks
     .map((block) => block.thinking)
     .filter(

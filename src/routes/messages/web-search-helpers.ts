@@ -422,6 +422,8 @@ type SSEWriter = {
   writeSSE: (data: { event: string; data: string }) => Promise<void>
 }
 
+const MAX_UNKNOWN_CONTENT_BLOCK_TEXT_LENGTH = 16_384
+
 export const emitAnthropicResponseAsStream = async (
   stream: SSEWriter,
   response: AnthropicResponse,
@@ -532,12 +534,24 @@ const emitContentBlock = async (
     await emitThinkingBlock(stream, block, index)
   } else if (isAnthropicToolUseBlock(block)) {
     await emitToolUseBlock(stream, block, index)
+  } else {
+    await emitTextBlock(stream, stringifyUnknownContentBlock(block), index)
   }
 
   await stream.writeSSE({
     event: "content_block_stop",
     data: JSON.stringify({ type: "content_block_stop", index }),
   })
+}
+
+const stringifyUnknownContentBlock = (block: unknown): string => {
+  let serialized: string
+  try {
+    serialized = JSON.stringify(block)
+  } catch {
+    serialized = "[Unrepresentable content block]"
+  }
+  return serialized.slice(0, MAX_UNKNOWN_CONTENT_BLOCK_TEXT_LENGTH)
 }
 
 const emitTextBlock = async (

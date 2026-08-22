@@ -196,33 +196,49 @@ const handleOutputItemDone = (
   }
 
   const outputIndex = rawEvent.output_index
-  const blockIndex = openThinkingBlockIfNeeded(state, outputIndex, events)
-  const signature = (item.encrypted_content ?? "") + "@" + item.id
-  if (signature) {
-    // Compatible with opencode, it will filter out blocks where the thinking text is empty, so we add a default thinking text here
-    if (!item.summary || item.summary.length === 0) {
-      events.push({
-        type: "content_block_delta",
-        index: blockIndex,
-        delta: {
-          type: "thinking_delta",
-          thinking: THINKING_TEXT,
-        },
-      })
-    }
+  const reasoningText = extractReasoningText(item)
+  const encryptedContent = item.encrypted_content
+  if (!reasoningText && !encryptedContent) {
+    return events
+  }
 
+  const blockIndex = openThinkingBlockIfNeeded(state, outputIndex, events)
+  const emittedThinkingText = reasoningText || THINKING_TEXT
+  if (!state.blockHasDelta.has(blockIndex)) {
+    events.push({
+      type: "content_block_delta",
+      index: blockIndex,
+      delta: {
+        type: "thinking_delta",
+        thinking: emittedThinkingText,
+      },
+    })
+    state.blockHasDelta.add(blockIndex)
+  }
+
+  if (encryptedContent) {
     events.push({
       type: "content_block_delta",
       index: blockIndex,
       delta: {
         type: "signature_delta",
-        signature,
+        signature: `${encryptedContent}@${item.id}`,
       },
     })
     state.blockHasDelta.add(blockIndex)
   }
 
   return events
+}
+
+const extractReasoningText = (
+  item: Extract<ResponseOutputItemDoneEvent["item"], { type: "reasoning" }>,
+): string => {
+  const blocks = [...(item.summary ?? []), ...(item.content ?? [])]
+  return blocks
+    .map((block) => (typeof block.text === "string" ? block.text : ""))
+    .join("")
+    .trim()
 }
 
 const handleFunctionCallArgumentsDelta = (

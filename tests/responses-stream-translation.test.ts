@@ -7,6 +7,7 @@ import type {
   ResponseErrorEvent,
   ResponseFailedEvent,
   ResponseFunctionCallArgumentsDeltaEvent,
+  ResponseOutputItemDoneEvent,
   ResponseReasoningTextDeltaEvent,
 } from "../src/services/copilot/create-responses"
 
@@ -39,6 +40,62 @@ test("translates Responses reasoning_text deltas to Anthropic thinking deltas", 
     type: "thinking_delta",
     thinking: "raw reasoning",
   })
+})
+
+test("emits unsigned thinking when completed Responses reasoning has no encrypted content", () => {
+  const state = createResponsesStreamState()
+  const result = translateResponsesStreamEvent(
+    {
+      type: "response.output_item.done",
+      sequence_number: 2,
+      output_index: 0,
+      item: {
+        id: "rs_unsigned",
+        type: "reasoning",
+        summary: [{ type: "summary_text", text: "visible reasoning" }],
+        encrypted_content: null,
+      },
+    } as unknown as ResponseOutputItemDoneEvent,
+    state,
+  )
+
+  if (result.kind !== "events") throw new Error("Expected events")
+  expect(result.events).toEqual([
+    {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "thinking", thinking: "" },
+    },
+    {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "thinking_delta", thinking: "visible reasoning" },
+    },
+  ])
+  expect(JSON.stringify(result.events)).not.toContain("signature_delta")
+  expect(JSON.stringify(result.events)).not.toContain("@rs_unsigned")
+})
+
+test("emits no thinking block for empty unsigned Responses reasoning", () => {
+  const state = createResponsesStreamState()
+  const result = translateResponsesStreamEvent(
+    {
+      type: "response.output_item.done",
+      sequence_number: 2,
+      output_index: 0,
+      item: {
+        id: "rs_empty",
+        type: "reasoning",
+        summary: [],
+        encrypted_content: null,
+      },
+    } as unknown as ResponseOutputItemDoneEvent,
+    state,
+  )
+
+  if (result.kind !== "events") throw new Error("Expected events")
+  expect(result.events).toEqual([])
+  expect(state.openBlocks.size).toBe(0)
 })
 
 test("preserves Responses recommendation and Copilot usage in Anthropic events", () => {

@@ -310,6 +310,70 @@ test.each([
   },
 )
 
+test("returns unsigned thinking when Responses reasoning omits encrypted content", () => {
+  const response = {
+    id: "resp_unsigned_reasoning",
+    object: "response",
+    created_at: 1,
+    model: "gpt-current",
+    output: [
+      {
+        id: "rs_unsigned",
+        type: "reasoning",
+        summary: [{ type: "summary_text", text: "visible reasoning" }],
+        encrypted_content: null,
+      },
+    ],
+    output_text: "",
+    status: "completed",
+    usage: null,
+    error: null,
+    incomplete_details: null,
+    instructions: null,
+    metadata: null,
+    parallel_tool_calls: true,
+    temperature: null,
+    tool_choice: "auto",
+    tools: [],
+    top_p: null,
+  } as unknown as ResponsesResult
+
+  expect(translateResponsesResultToAnthropic(response).content).toEqual([
+    { type: "thinking", thinking: "visible reasoning" },
+  ])
+})
+
+test("omits empty unsigned Responses reasoning without synthetic text", () => {
+  const response = {
+    id: "resp_empty_reasoning",
+    object: "response",
+    created_at: 1,
+    model: "gpt-current",
+    output: [
+      {
+        id: "rs_empty",
+        type: "reasoning",
+        summary: [],
+        encrypted_content: null,
+      },
+    ],
+    output_text: "",
+    status: "completed",
+    usage: null,
+    error: null,
+    incomplete_details: null,
+    instructions: null,
+    metadata: null,
+    parallel_tool_calls: true,
+    temperature: null,
+    tool_choice: "auto",
+    tools: [],
+    top_p: null,
+  } as unknown as ResponsesResult
+
+  expect(translateResponsesResultToAnthropic(response).content).toEqual([])
+})
+
 test("preserves integer Responses reasoning effort across named suffixes", () => {
   const payload = {
     model: "gpt-current",
