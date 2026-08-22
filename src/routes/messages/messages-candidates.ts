@@ -392,14 +392,17 @@ function mergeToolResultForCandidate(payload: AnthropicMessagesPayload): void {
         mergedToolResults.push(block)
         continue
       }
+      let mergedContent: AnthropicToolResultBlock["content"] = textBlocks
+      if (typeof block.content === "string") {
+        mergedContent = `${block.content}\n\n${text}`
+      } else if (Array.isArray(block.content)) {
+        mergedContent = [...block.content, ...textBlocks]
+      }
       const merged: AnthropicToolResultBlock = {
         ...block,
         type: "tool_result",
         tool_use_id: block.tool_use_id,
-        content:
-          typeof block.content === "string" ?
-            `${block.content}\n\n${text}`
-          : textBlocks,
+        content: mergedContent,
       }
       mergedToolResults.push(merged)
     }

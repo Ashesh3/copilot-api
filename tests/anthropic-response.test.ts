@@ -346,6 +346,91 @@ describe("OpenAI to Anthropic Non-Streaming Response Translation", () => {
     }
   })
 
+  test.each([undefined, ""])(
+    "omits an empty non-stream thinking signature for reasoning_opaque=%p",
+    (reasoningOpaque) => {
+      const response: ChatCompletionResponse = {
+        id: "chatcmpl-unsigned-thinking",
+        object: "chat.completion",
+        created: 1677652288,
+        model: "claude-current",
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: "assistant",
+              content: null,
+              reasoning_text: "private reasoning",
+              ...(reasoningOpaque === undefined ?
+                {}
+              : { reasoning_opaque: reasoningOpaque }),
+            },
+            finish_reason: "stop",
+            logprobs: null,
+          },
+        ],
+        usage: {
+          prompt_tokens: 5,
+          completion_tokens: 3,
+          total_tokens: 8,
+        },
+      }
+
+      expect(translateToAnthropic(response).content).toEqual([
+        { type: "thinking", thinking: "private reasoning" },
+      ])
+    },
+  )
+
+  test("preserves signed and unsigned non-stream thinking block order", () => {
+    const response: ChatCompletionResponse = {
+      id: "chatcmpl-signed-thinking",
+      object: "chat.completion",
+      created: 1677652288,
+      model: "claude-current",
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: null,
+            reasoning_text: "private reasoning",
+            reasoning_opaque: "opaque-thinking-state",
+          },
+          finish_reason: "stop",
+          logprobs: null,
+        },
+        {
+          index: 1,
+          message: {
+            role: "assistant",
+            content: null,
+            reasoning_text: "unsigned follow-up reasoning",
+          },
+          finish_reason: "stop",
+          logprobs: null,
+        },
+      ],
+      usage: {
+        prompt_tokens: 5,
+        completion_tokens: 3,
+        total_tokens: 8,
+      },
+    }
+
+    expect(translateToAnthropic(response).content).toEqual([
+      {
+        type: "thinking",
+        thinking: "private reasoning",
+        signature: "opaque-thinking-state",
+      },
+      {
+        type: "thinking",
+        thinking: "unsigned follow-up reasoning",
+      },
+    ])
+  })
+
   test("should translate a response with tool calls", () => {
     const openAIResponse: ChatCompletionResponse = {
       id: "chatcmpl-456",

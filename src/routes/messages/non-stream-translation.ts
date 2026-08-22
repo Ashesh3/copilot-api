@@ -439,7 +439,9 @@ function extractContentFromChoices(response: ChatCompletionResponse): {
       allThinkingBlocks.push({
         type: "thinking",
         thinking: choice.message.reasoning_text,
-        signature: choice.message.reasoning_opaque ?? "",
+        ...(choice.message.reasoning_opaque ?
+          { signature: choice.message.reasoning_opaque }
+        : {}),
       })
     }
 

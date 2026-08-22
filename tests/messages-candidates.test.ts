@@ -1,9 +1,13 @@
 import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
 
-import type { AnthropicMessagesPayload } from "~/routes/messages/anthropic-types"
+import type {
+  AnthropicMessagesPayload,
+  AnthropicToolResultContentBlock,
+} from "~/routes/messages/anthropic-types"
 import type { Model } from "~/services/copilot/get-models"
 
 import { selectEvaluatedCopilotCandidate } from "~/lib/endpoint-routing"
+import { asAnthropicUnknownContentType } from "~/routes/messages/anthropic-types"
 import { prepareMessagesCandidates } from "~/routes/messages/messages-candidates"
 
 const originalFetch = globalThis.fetch
@@ -92,6 +96,52 @@ test("builds detached endpoint-correlated Messages candidates", async () => {
   expect("candidate" in selection && selection.candidate).toBe(
     candidates.native,
   )
+})
+
+test("appends text after existing array tool-result content without losing metadata", async () => {
+  const existingContent: Array<AnthropicToolResultContentBlock> = [
+    {
+      type: "text" as const,
+      text: "nested result",
+      cache_control: { type: "ephemeral" as const, ttl: "1h" as const },
+    },
+    {
+      type: asAnthropicUnknownContentType("future_result_block"),
+      nested: { keep: true },
+    },
+  ]
+  const source = createSource({
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "toolu_array",
+            content: existingContent,
+            cache_control: { type: "ephemeral", ttl: "5m" },
+          },
+          { type: "text", text: "Use this result." },
+        ],
+      },
+    ],
+  })
+  const snapshot = structuredClone(source)
+
+  const candidates = await prepareMessagesCandidates({
+    source,
+    selectedModel,
+  })
+
+  expect(candidates.native.payload.messages[0].content).toEqual([
+    {
+      type: "tool_result",
+      tool_use_id: "toolu_array",
+      content: [...existingContent, { type: "text", text: "Use this result." }],
+      cache_control: { type: "ephemeral", ttl: "5m" },
+    },
+  ])
+  expect(source).toEqual(snapshot)
 })
 
 test("preserves Messages web-search max uses out of band for translated candidates", async () => {
