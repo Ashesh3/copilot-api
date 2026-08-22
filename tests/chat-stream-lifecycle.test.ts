@@ -162,6 +162,38 @@ test.each([
 test.each([
   { name: "native", model: "chat-lifecycle-model" },
   { name: "custom", model: "custom-lifecycle-model" },
+])("treats $name Chat error null as a normal chunk", async ({ model }) => {
+  const responsePromise = postChat(model)
+  await waitForUpstreamController()
+  enqueueRaw(
+    JSON.stringify({
+      id: "chat_error_null",
+      object: "chat.completion.chunk",
+      created: 1,
+      model,
+      error: null,
+      choices: [
+        {
+          index: 0,
+          delta: { content: "kept" },
+          finish_reason: "stop",
+          logprobs: null,
+        },
+      ],
+    }),
+  )
+  enqueueRaw("[DONE]")
+  upstreamController?.close()
+
+  const body = await (await responsePromise).text()
+  expect(body).toContain("kept")
+  expect(errorFrames(body)).toEqual([])
+  expect(doneCount(body)).toBe(1)
+})
+
+test.each([
+  { name: "native", model: "chat-lifecycle-model" },
+  { name: "custom", model: "custom-lifecycle-model" },
 ])(
   "repairs a $name final chunk that lacks an upstream DONE sentinel",
   async ({ model }) => {
