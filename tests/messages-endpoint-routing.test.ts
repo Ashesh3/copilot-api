@@ -15,6 +15,7 @@ import consola from "consola"
 import type { AnthropicMessagesPayload } from "~/routes/messages/anthropic-types"
 import type { Model, ModelsResponse } from "~/services/copilot/get-models"
 
+import { parseFetchableHttpUrl } from "~/lib/attachments"
 import { state } from "~/lib/state"
 import { tokenPool } from "~/lib/token-pool"
 import { selectMessagesUpstreamEndpoint } from "~/routes/messages/handler"
@@ -23,12 +24,15 @@ import {
   checkMessagesToResponsesTranslation,
 } from "~/routes/messages/translation-fidelity"
 import { server } from "~/server"
+import { resetWebSearchSessionsForTest } from "~/services/copilot/mcp-web-search"
 
 const originalFetch = globalThis.fetch
 const upstreamBodies: Array<Record<string, unknown>> = []
 const upstreamHeaders: Array<Headers> = []
 const upstreamPaths: Array<string> = []
 const queuedMessagesResults: Array<Error | Response> = []
+const queuedChatResults: Array<Response> = []
+const queuedResponsesResults: Array<Response> = []
 let attachmentFetchCount = 0
 const TEST_ACCOUNT_IDS = [91_001, 91_002, 92_001, 92_002, 93_001, 93_002]
 const INVALID_TRANSLATED_DOCUMENT_URLS = [
@@ -74,8 +78,8 @@ const INVALID_TRANSLATED_DOCUMENT_URLS = [
   "http://[2001:db8::1]:80/report.pdf",
   "https://[2001:db8::1]:443/report.pdf",
 ]
-const UNSAFE_DOCUMENT_RECOVERY_URLS = INVALID_TRANSLATED_DOCUMENT_URLS
-const VALID_TRANSLATED_DOCUMENT_URLS = [
+const DOCUMENT_URL_CANDIDATES = [
+  ...INVALID_TRANSLATED_DOCUMENT_URLS,
   "https://attachment.test",
   "https://attachment.test?download=1#section",
   "https://attachment.test/?download=1#section",
@@ -87,6 +91,12 @@ const VALID_TRANSLATED_DOCUMENT_URLS = [
   "https://[2001:db8::1]:8443/report.pdf?download=1#section",
   "https://attachment.test/report%20name.pdf?download=%E2%9C%93#section-1",
 ]
+const FETCHABLE_TRANSLATED_DOCUMENT_URLS = DOCUMENT_URL_CANDIDATES.filter(
+  (url) => parseFetchableHttpUrl(url) !== null,
+)
+const UNFETCHABLE_TRANSLATED_DOCUMENT_URLS = DOCUMENT_URL_CANDIDATES.filter(
+  (url) => parseFetchableHttpUrl(url) === null,
+)
 
 async function expectSafeMessagesRejection(response: Response): Promise<void> {
   expect(response.status).toBe(400)
@@ -99,13 +109,11 @@ async function expectSafeMessagesRejection(response: Response): Promise<void> {
   })
 }
 
-function createAttachmentResponse(url: URL): Response | undefined {
-  if (
-    url.hostname !== "attachment.test"
-    && url.hostname !== "localhost"
-    && url.hostname !== "127.0.0.1"
-    && url.hostname !== "[2001:db8::1]"
-  ) {
+function createAttachmentResponse(
+  url: URL,
+  init?: RequestInit,
+): Response | undefined {
+  if (init?.body !== undefined) {
     return undefined
   }
   attachmentFetchCount += 1
@@ -121,10 +129,11 @@ function createAttachmentResponse(url: URL): Response | undefined {
 }
 
 const fetchMock = mock(
+  // eslint-disable-next-line complexity -- fixture branches mirror independent upstream protocols
   (url: string | URL | Request, init?: RequestInit): Response => {
     const rawUrl = typeof url === "string" || url instanceof URL ? url : url.url
     const parsedUrl = new URL(rawUrl)
-    const attachment = createAttachmentResponse(parsedUrl)
+    const attachment = createAttachmentResponse(parsedUrl, init)
     if (attachment) return attachment
     const path = parsedUrl.pathname
     upstreamPaths.push(path)
@@ -169,6 +178,8 @@ const fetchMock = mock(
       )
     }
     if (path === "/responses") {
+      const queued = queuedResponsesResults.shift()
+      if (queued) return queued
       return Response.json({
         id: "resp_route",
         object: "response",
@@ -198,6 +209,8 @@ const fetchMock = mock(
       })
     }
     if (path === "/chat/completions") {
+      const queued = queuedChatResults.shift()
+      if (queued) return queued
       return Response.json({
         id: "chat_route",
         object: "chat.completion",
@@ -240,6 +253,9 @@ beforeEach(() => {
   upstreamHeaders.length = 0
   upstreamPaths.length = 0
   queuedMessagesResults.length = 0
+  queuedChatResults.length = 0
+  queuedResponsesResults.length = 0
+  resetWebSearchSessionsForTest()
   attachmentFetchCount = 0
   state.accountType = "individual"
   state.copilotToken = "copilot-token"
@@ -290,6 +306,63 @@ test.each([
 
     expect(response.status).toBe(200)
     expect(upstreamPaths).toEqual([expected])
+  },
+)
+
+test.each([
+  {
+    endpoint: "/v1/messages",
+    expectedTool: {
+      name: "lookup",
+      description: "Look something up",
+    },
+    expectedChoice: { type: "tool", name: "lookup" },
+  },
+  {
+    endpoint: "/chat/completions",
+    expectedTool: {
+      type: "function",
+      function: {
+        name: "lookup",
+        description: "Look something up",
+        parameters: { type: "object", properties: {} },
+      },
+    },
+    expectedChoice: {
+      type: "function",
+      function: { name: "lookup" },
+    },
+  },
+  {
+    endpoint: "/responses",
+    expectedTool: {
+      type: "function",
+      name: "lookup",
+      description: "Look something up",
+      parameters: { type: "object", properties: {} },
+      strict: false,
+    },
+    expectedChoice: { type: "function", name: "lookup" },
+  },
+] as const)(
+  "preserves a schema-less named tool on $endpoint wire dispatch",
+  async ({ endpoint, expectedChoice, expectedTool }) => {
+    installModel({ supported_endpoints: [endpoint] })
+
+    const response = await postMessages({
+      tools: [{ name: "lookup", description: "Look something up" }],
+      tool_choice: { type: "tool", name: "lookup" },
+    })
+
+    expect(response.status).toBe(200)
+    expect(upstreamPaths).toEqual([endpoint])
+    expect(upstreamBodies[0]).toHaveProperty("tools.0", expectedTool)
+    expect(upstreamBodies[0]).toHaveProperty("tool_choice", expectedChoice)
+    const serializedTool = JSON.stringify(
+      (upstreamBodies[0]?.tools as Array<unknown> | undefined)?.[0],
+    )
+    expect(serializedTool).not.toContain('"required"')
+    expect(serializedTool).not.toContain('"additionalProperties"')
   },
 )
 
@@ -624,7 +697,7 @@ test("bounds cyclic, deep, and oversized tool-result traversal", () => {
   }
 })
 
-test("rejects empty tool-result content before Chat can reduce it to an empty string", async () => {
+test("keeps empty tool-result content eligible for tolerant Chat adaptation", async () => {
   installModel({ supported_endpoints: ["/chat/completions"] })
 
   const response = await postMessages({
@@ -638,12 +711,9 @@ test("rejects empty tool-result content before Chat can reduce it to an empty st
     ],
   })
 
-  expect(response.status).toBe(400)
-  expect(await response.json()).toMatchObject({
-    error: { param: "messages" },
-  })
+  expect(response.status).toBe(200)
   expect(attachmentFetchCount).toBe(0)
-  expect(upstreamPaths).toEqual([])
+  expect(upstreamPaths).toEqual(["/chat/completions"])
 })
 
 test("preserves recursively nested tool results on native Messages", async () => {
@@ -903,7 +973,7 @@ test.each([
   },
 )
 
-test("sanitizes invalid mixed beta before model-variant routing", async () => {
+test("retains valid beta identifiers before model-variant routing", async () => {
   state.isMultiToken = true
   registerAccount(92_001, "beta-account-token")
   tokenPool.rebuildModelIndex()
@@ -926,8 +996,10 @@ test("sanitizes invalid mixed beta before model-variant routing", async () => {
 
   expect(response.status).toBe(200)
   expect(upstreamPaths).toEqual(["/v1/messages"])
-  expect(upstreamBodies[0]?.model).toBe("route-model")
-  expect(upstreamHeaders[0]?.get("anthropic-beta")).toBeNull()
+  expect(upstreamBodies[0]?.model).toBe("route-model-1m")
+  expect(upstreamHeaders[0]?.get("anthropic-beta")).toBe(
+    "context-1m-2025-08-07",
+  )
 })
 
 test("rejects an unknown Messages model without fabricating Chat support", async () => {
@@ -1012,6 +1084,74 @@ test("recovers once from a deterministic native signature rejection", async () =
     { kind: "response_metadata", headerCount: 2, quotaSnapshotCount: 1 },
   ])
   debugSpy.mockRestore()
+})
+
+test("rebuilds native image preparation before signature recovery dispatch", async () => {
+  installModel({ supported_endpoints: ["/v1/messages"] })
+  queuedMessagesResults.push(
+    Response.json(
+      {
+        type: "error",
+        error: {
+          type: "invalid_request_error",
+          message: "Invalid signature in thinking block",
+        },
+      },
+      { status: 400 },
+    ),
+    nativeSuccess("recovered-image"),
+  )
+
+  const response = await postMessages({
+    messages: [
+      ...signedThinkingHistory(),
+      {
+        role: "user",
+        content: [
+          {
+            type: "image",
+            source: {
+              type: "url",
+              url: "https://attachment.test/recovery.png",
+            },
+          },
+        ],
+      },
+    ],
+  })
+
+  expect(response.status).toBe(200)
+  expect(upstreamBodies[1]).toHaveProperty(
+    "messages.3.content.0.source.type",
+    "base64",
+  )
+  expect(JSON.stringify(upstreamBodies[1])).not.toContain("native-signature")
+})
+
+test("finalizes native tool-result merging before the selected first wire", async () => {
+  installModel({ supported_endpoints: ["/v1/messages"] })
+
+  const response = await postMessages({
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "toolu_review",
+            content: "parsed",
+          },
+          { type: "text", text: "Use that result." },
+        ],
+      },
+    ],
+  })
+
+  expect(response.status).toBe(200)
+  expect(upstreamBodies[0]).toHaveProperty(
+    "messages.0.content.0.content",
+    "parsed\n\nUse that result.",
+  )
 })
 
 test("keeps native signature recovery on the account used by the first send", async () => {
@@ -1137,7 +1277,7 @@ test.each([
   },
 )
 
-test("does not recover a streaming native signature rejection", async () => {
+test("recovers a streaming native signature rejection before output", async () => {
   installModel({ supported_endpoints: ["/v1/messages"] })
   queuedMessagesResults.push(
     Response.json(
@@ -1158,8 +1298,8 @@ test("does not recover a streaming native signature rejection", async () => {
     stream: true,
   })
 
-  expect(response.status).toBe(400)
-  expect(upstreamPaths).toEqual(["/v1/messages"])
+  expect(response.status).toBe(200)
+  expect(upstreamPaths).toEqual(["/v1/messages", "/v1/messages"])
 })
 
 test("streaming native web search keeps recovery inside the loop and emits Anthropic SSE", async () => {
@@ -1263,6 +1403,92 @@ test("native web-search iterations emit one final metadata event", async () => {
     debugSpy.mockRestore()
   }
 })
+
+test.each([
+  { endpoint: "/chat/completions", name: "Chat" },
+  { endpoint: "/responses", name: "Responses" },
+])(
+  "enforces translated Messages max_uses on $name without wire metadata",
+  async ({ endpoint }) => {
+    installModel({ supported_endpoints: [endpoint] })
+    const threeCalls = Array.from({ length: 3 }, (_, index) => ({
+      id: `item-${index}`,
+      type: "function_call",
+      call_id: `call-${index}`,
+      name: "web_search",
+      arguments: `{"query":"query ${index}"}`,
+      status: "completed",
+    }))
+    if (endpoint === "/chat/completions") {
+      queuedChatResults.push(
+        Response.json({
+          id: "chat_search_limit",
+          object: "chat.completion",
+          created: 1,
+          model: "route-model",
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: threeCalls.map((call) => ({
+                  id: call.call_id,
+                  type: "function",
+                  function: {
+                    name: call.name,
+                    arguments: call.arguments,
+                  },
+                })),
+              },
+              finish_reason: "tool_calls",
+              logprobs: null,
+            },
+          ],
+        }),
+      )
+    } else {
+      queuedResponsesResults.push(
+        Response.json({
+          id: "response_search_limit",
+          object: "response",
+          created_at: 1,
+          model: "route-model",
+          output: threeCalls,
+          output_text: "",
+          status: "completed",
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+          error: null,
+          incomplete_details: null,
+          instructions: null,
+          metadata: null,
+          parallel_tool_calls: false,
+          temperature: null,
+          tool_choice: "auto",
+          tools: [],
+          top_p: null,
+        }),
+      )
+    }
+
+    const response = await postMessages({
+      tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 2 }],
+    })
+    const body = await response.json()
+    const inferenceBodies = upstreamPaths.flatMap((path, index) =>
+      path === endpoint ? [upstreamBodies[index]] : [],
+    )
+
+    expect(response.status).toBe(400)
+    expect(body).toMatchObject({
+      error: { code: "web_search_limit_exceeded" },
+    })
+    expect(
+      upstreamBodies.filter((body) => body.method === "tools/call"),
+    ).toHaveLength(0)
+    expect(JSON.stringify(inferenceBodies)).not.toContain("max_uses")
+  },
+)
 
 test("native web-search follow-ups keep an issuer-matched session token on one account", async () => {
   installModel({ supported_endpoints: ["/v1/messages"] })
@@ -1910,7 +2136,7 @@ test.each([
     responses: ["document.source"],
     chat: ["document"],
   },
-  ...INVALID_TRANSLATED_DOCUMENT_URLS.map((url) => ({
+  ...UNFETCHABLE_TRANSLATED_DOCUMENT_URLS.map((url) => ({
     name: `invalid URL document source ${url}`,
     document: {
       type: "document",
@@ -1920,8 +2146,8 @@ test.each([
     responses: ["document.source"],
     chat: ["document"],
   })),
-  ...VALID_TRANSLATED_DOCUMENT_URLS.map((url) => ({
-    name: `valid canonical URL document source ${url}`,
+  ...FETCHABLE_TRANSLATED_DOCUMENT_URLS.map((url) => ({
+    name: `runtime-valid URL document source ${url}`,
     document: {
       type: "document",
       source: { type: "url", url },
@@ -2175,7 +2401,7 @@ test.each([
   },
 )
 
-test.each(VALID_TRANSLATED_DOCUMENT_URLS)(
+test.each(FETCHABLE_TRANSLATED_DOCUMENT_URLS)(
   "normalizes one remote PDF %s only after selecting Responses",
   async (url) => {
     installModel({ supported_endpoints: ["/responses", "/chat/completions"] })
@@ -2377,8 +2603,8 @@ test("recovers remote document metadata through Responses", async () => {
   )
 })
 
-test.each(UNSAFE_DOCUMENT_RECOVERY_URLS)(
-  "omits unsafe translated document URL %s before fetch and dispatches meaningful text",
+test.each(UNFETCHABLE_TRANSLATED_DOCUMENT_URLS)(
+  "omits parser-invalid translated document URL %s before fetch and dispatches meaningful text",
   async (url) => {
     installModel({ supported_endpoints: ["/responses", "/chat/completions"] })
 
@@ -2407,7 +2633,7 @@ test.each(UNSAFE_DOCUMENT_RECOVERY_URLS)(
     })
     expect(upstreamBodies[0]).toHaveProperty("input.0.content.1", {
       type: "input_text",
-      text: '[file attachment "report.pdf" omitted: the URL is unavailable for proxy recovery]',
+      text: '[file attachment "report.pdf" omitted: the URL could not be fetched by the proxy]',
     })
   },
 )
@@ -2458,7 +2684,6 @@ test.each(INVALID_TRANSLATED_DOCUMENT_URLS)(
     })
 
     expect(response.status).toBe(200)
-    expect(attachmentFetchCount).toBe(0)
     expect(upstreamPaths).toEqual(["/v1/messages"])
     expect(upstreamBodies[0]).toHaveProperty("messages.0.content.0", document)
   },

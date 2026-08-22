@@ -7,6 +7,9 @@ import type {
   ClientDialect,
   CopilotInferenceEndpoint,
   EndpointRouteDecision,
+  EvaluatedTranslationCheck,
+  TranslationFindingClass,
+  TranslationFindingSeverity,
 } from "~/lib/endpoint-routing"
 
 import {
@@ -44,6 +47,12 @@ export type CopilotContractEvent =
       classes: Array<CopilotContractNormalizationClass>
     }
   | {
+      kind: "translation_findings"
+      protocol: ClientDialect
+      target: CopilotInferenceEndpoint
+      check: EvaluatedTranslationCheck
+    }
+  | {
       kind: "messages_beta"
       count: number
     }
@@ -67,6 +76,7 @@ type SafeDiagnostic = {
 const MAX_COUNT = 65_535
 const MAX_NORMALIZATION_INPUTS = 64
 const MAX_NORMALIZATION_TEXT_LENGTH = 256
+const MAX_TRANSLATION_FINDINGS = 32
 const CLIENT_DIALECTS = new Set<ClientDialect>([
   "chat",
   "messages",
@@ -99,6 +109,36 @@ const NORMALIZATION_CLASSES = new Set<CopilotContractNormalizationClass>([
   "stateless_controls",
   "unsupported_sampling",
 ])
+const TRANSLATION_FINDING_CLASSES = new Set<TranslationFindingClass>([
+  "attachment",
+  "content_part",
+  "context_management",
+  "message_role",
+  "message_shape",
+  "reasoning_state",
+  "sampling",
+  "stateful_controls",
+  "token_alias",
+  "tool_choice",
+  "tool_history",
+  "tool_shape",
+  "unknown_item",
+  "unknown_top_level",
+])
+const TRANSLATION_FINDING_SEVERITIES = new Set<TranslationFindingSeverity>([
+  "exact",
+  "adapted",
+  "omitted",
+  "fatal",
+])
+const TRANSLATION_FINDING_COSTS: Record<
+  Exclude<TranslationFindingSeverity, "fatal">,
+  number
+> = {
+  exact: 0,
+  adapted: 1,
+  omitted: 2,
+}
 const contractObservabilityStorage = new AsyncLocalStorage<{
   responseMetadataAvailable: boolean
 }>()
@@ -141,6 +181,19 @@ export function recordCopilotRequestNormalization(
     kind: "request_normalization",
     protocol,
     classes,
+  })
+}
+
+export function recordCopilotTranslationFindings(
+  protocol: ClientDialect,
+  target: CopilotInferenceEndpoint,
+  check: EvaluatedTranslationCheck,
+): void {
+  recordCopilotContractEvent({
+    kind: "translation_findings",
+    protocol,
+    target,
+    check,
   })
 }
 
@@ -263,6 +316,9 @@ function createSafeDiagnostic(event: unknown): SafeDiagnostic | undefined {
         }),
       }
     }
+    case "translation_findings": {
+      return createSafeTranslationDiagnostic(values)
+    }
     case "messages_beta": {
       const count = boundCount(values.count)
       const data = { kind, count }
@@ -298,6 +354,36 @@ function createSafeDiagnostic(event: unknown): SafeDiagnostic | undefined {
     default: {
       return undefined
     }
+  }
+}
+
+function createSafeTranslationDiagnostic(
+  values: Record<string, unknown>,
+): SafeDiagnostic | undefined {
+  const protocol = allowlisted(values.protocol, CLIENT_DIALECTS)
+  const target = allowlisted(values.target, COPILOT_ENDPOINTS)
+  const findings = normalizeTranslationFindings(values.check)
+  if (!protocol || !target || !findings) return undefined
+  const outcome: SafeContractData =
+    findings.fatal ? { fatal: true } : { cost: findings.cost }
+  const data: SafeContractData = {
+    kind: "translation_findings",
+    protocol,
+    target,
+    findings: findings.text,
+    findingCount: findings.count,
+    ...outcome,
+  }
+  return {
+    data,
+    message: "Copilot translation findings recorded",
+    attributes: prefixAttributes("translation_findings", {
+      protocol,
+      target,
+      findings: findings.text,
+      finding_count: findings.count,
+      ...outcome,
+    }),
   }
 }
 
@@ -350,16 +436,76 @@ function normalizeClasses(
   return { count: included.length, text: included.join(",") }
 }
 
-function getSafeArrayValues(value: unknown): Array<unknown> | undefined {
+function normalizeTranslationFindings(value: unknown):
+  | {
+      count: number
+      cost: number
+      fatal: boolean
+      text: string
+    }
+  | undefined {
+  const check = getSafeDataProperties(value)
+  if (!check) return undefined
+  const entries = getSafeArrayValues(check.findings, MAX_TRANSLATION_FINDINGS)
+  if (!entries) return undefined
+
+  const tokens = new Map<string, { severity: TranslationFindingSeverity }>()
+  for (const entry of entries) {
+    const finding = getSafeDataProperties(entry)
+    if (!finding) continue
+    const findingClass = allowlisted(finding.class, TRANSLATION_FINDING_CLASSES)
+    const severity = allowlisted(
+      finding.severity,
+      TRANSLATION_FINDING_SEVERITIES,
+    )
+    if (!findingClass || !severity) continue
+    const token = `${findingClass}:${severity}`
+    if (!tokens.has(token)) tokens.set(token, { severity })
+  }
+  if (tokens.size === 0) return undefined
+
+  let cost = 0
+  let fatal = false
+  for (const { severity } of tokens.values()) {
+    if (severity === "fatal") {
+      fatal = true
+    } else {
+      cost = Math.min(255, cost + TRANSLATION_FINDING_COSTS[severity])
+    }
+  }
+
+  const included: Array<string> = []
+  let length = 0
+  for (const token of [...tokens.keys()].sort()) {
+    const nextLength = length + (included.length === 0 ? 0 : 1) + token.length
+    if (nextLength > MAX_NORMALIZATION_TEXT_LENGTH) break
+    included.push(token)
+    length = nextLength
+  }
+  if (included.length === 0) return undefined
+  return {
+    count: included.length,
+    cost,
+    fatal,
+    text: included.join(","),
+  }
+}
+
+function getSafeArrayValues(
+  value: unknown,
+  maximumInputs = MAX_NORMALIZATION_INPUTS,
+): Array<unknown> | undefined {
   try {
     if (util.types.isProxy(value)) return undefined
     if (!Array.isArray(value)) return undefined
     if (Object.getPrototypeOf(value) !== Array.prototype) return undefined
     const descriptors = Object.getOwnPropertyDescriptors(value)
-    const length = Math.min(value.length, MAX_NORMALIZATION_INPUTS)
+    const length = Math.min(value.length, maximumInputs)
     const result: Array<unknown> = []
     for (let index = 0; index < length; index += 1) {
-      const descriptor = descriptors[String(index)]
+      const name = String(index)
+      if (!Object.hasOwn(descriptors, name)) continue
+      const descriptor = descriptors[name]
       if (Object.hasOwn(descriptor, "value")) {
         result.push(descriptor.value)
       }

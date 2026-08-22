@@ -53,10 +53,10 @@ import {
   abortableSleep,
   BACKOFF_FACTOR,
   BASE_DELAY_SECONDS,
+  claimCompatibilityRetry,
   createRetryBudget,
   createRetryClaim,
   createTransportChain,
-  consumeExtraSend,
   handleTransportFailure,
   isAbortLikeError,
   logChainResponse,
@@ -276,15 +276,6 @@ export function isDeterministic400(body: string): boolean {
   if (body.trim() === "Bad Request") return true
 
   return false
-}
-
-async function isDeterministic400Response(
-  response: Response,
-): Promise<boolean> {
-  const body = await response.clone().text()
-  if (!isDeterministic400(body)) return false
-  consola.warn("Deterministic HTTP 400, skipping retry")
-  return true
 }
 
 // --- Header Normalization ---
@@ -681,7 +672,6 @@ async function classifyResponse(options: {
       )
       return { kind: "retry-encrypted-compaction" }
     }
-    await isDeterministic400Response(response)
     return { kind: "return" }
   }
 
@@ -730,7 +720,7 @@ async function applyRetryResponseAction(options: {
   return {
     requestInit: refreshRequestIdForRetry(requestInit),
     retryBackoffExtraSeconds,
-    telemetryReason: "http_retry",
+    telemetryReason: "compatibility_retry",
   }
 }
 
@@ -752,7 +742,7 @@ export async function copilotFetch(
   // own limit, so one copilotFetch can never drain the whole budget.
   const claimRetry: RetryClaim = createRetryClaim(budget)
   const claimEncryptedCompactionRetry: RetryClaim = () =>
-    consumeExtraSend(budget)
+    claimCompatibilityRetry(budget)
   const chain = createTransportChain(path, randomUUID())
   const maxAttempts = MAX_ROUTED_SENDS
   let retryBackoffExtraSeconds = INITIAL_RETRY_BACKOFF_EXTRA_SECONDS

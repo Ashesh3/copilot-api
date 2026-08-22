@@ -15,7 +15,7 @@ import { Hono, type Context } from "hono"
 import type { ChatCompletionsPayload } from "../src/services/copilot/create-chat-completions"
 import type { ModelsResponse } from "../src/services/copilot/get-models"
 
-import { forwardError, LocalHTTPError } from "../src/lib/error"
+import { forwardError, HTTPError, LocalHTTPError } from "../src/lib/error"
 import {
   clearLlmDebugLogs,
   getLlmDebugLog,
@@ -51,6 +51,7 @@ const capturedAffinities: Array<RoutingAffinity | undefined> = []
 const capturedAuthorization: Array<string | undefined> = []
 let metadataAffinityFetchCount = 0
 let lastRequestBody: Record<string, unknown> | undefined
+let requestBodies: Array<Record<string, unknown>> = []
 let lastRequestHeaders: Headers | undefined
 
 const sessionToken = (payload: Record<string, unknown>): string =>
@@ -153,6 +154,7 @@ const fetchMock = mock(
       metadataAffinityFetchCount += 1
     }
     lastRequestBody = body
+    if (body) requestBodies.push(body)
     lastRequestHeaders = new Headers(opts.headers)
     void opts
     return queuedResponses.shift() ?? createDefaultResponse()
@@ -176,6 +178,7 @@ beforeEach(() => {
   queuedResponses.length = 0
   capturedAffinities.length = 0
   lastRequestBody = undefined
+  requestBodies = []
   lastRequestHeaders = undefined
   capturedAuthorization.length = 0
   metadataAffinityFetchCount = 0
@@ -184,6 +187,144 @@ beforeEach(() => {
   setModelRedirectsForTest([])
   clearLlmDebugLogs()
   resetRoutingTelemetryForTest()
+})
+
+test("retries one exact unsupported Chat control on the finalized wire clone", async () => {
+  queuedResponses.push(
+    Response.json(
+      {
+        error: {
+          code: "invalid_request_body",
+          message:
+            "Unsupported parameter: 'temperature' is not supported with this model.",
+        },
+      },
+      { status: 400 },
+    ),
+    createDefaultResponse(),
+  )
+  const payload = {
+    model: "gpt-test",
+    messages: [{ role: "user", content: "hello" }],
+    temperature: 0,
+    top_p: 0.7,
+  } as ChatCompletionsPayload
+  const source = structuredClone(payload)
+
+  const result = await createChatCompletionsWithProcessedPayload(payload, {
+    candidatePrepared: true,
+    copilotSessionToken: "session-stays-fixed",
+  })
+
+  expect(payload).toEqual(source)
+  expect(requestBodies).toHaveLength(2)
+  expect(requestBodies[0]).toEqual(source as unknown as Record<string, unknown>)
+  expect(requestBodies[1]).toEqual({
+    model: "gpt-test",
+    messages: [{ role: "user", content: "hello" }],
+    top_p: 0.7,
+  })
+  expect(result.processedPayload).toEqual(
+    requestBodies[1] as unknown as ChatCompletionsPayload,
+  )
+  expect(
+    fetchMock.mock.calls.map((call) =>
+      new Headers(call[1].headers).get("copilot-session-token"),
+    ),
+  ).toEqual(["session-stays-fixed", "session-stays-fixed"])
+})
+
+test("uses one account selection and account token for a Chat compatibility retry", async () => {
+  const model = "chat-compatibility-pin-model"
+  const account = tokenPool.addAccount("github-compat-pin", "individual", 2101)
+  account.copilotToken = "compatibility-pin-token"
+  account.healthy = true
+  account.models = new Set([model])
+  account.modelsData = [createLegacyMessagesModel(model)]
+  tokenPool.rebuildModelIndex()
+  state.isMultiToken = true
+  state.models = { object: "list", data: [createLegacyMessagesModel(model)] }
+  queuedResponses.push(
+    Response.json(
+      {
+        error: {
+          code: "invalid_request_body",
+          message:
+            "Unsupported parameter: 'temperature' is not supported with this model.",
+        },
+      },
+      { status: 400 },
+    ),
+    createDefaultResponse(),
+  )
+
+  await createChatCompletions(
+    {
+      model,
+      messages: [{ role: "user", content: "hello" }],
+      temperature: 1,
+    },
+    { candidatePrepared: true },
+  )
+
+  const lastCalls = fetchMock.mock.calls.slice(-2)
+  expect(
+    lastCalls.map((call) => new Headers(call[1].headers).get("authorization")),
+  ).toEqual([
+    "Bearer compatibility-pin-token",
+    "Bearer compatibility-pin-token",
+  ])
+  const usage = getRoutingTelemetrySnapshot({
+    accounts: [{ id: 2101, accountType: "individual", healthy: true }],
+    multiToken: true,
+    window: "1h",
+  })
+  expect(usage.totals).toMatchObject({ retries: 1, upstreamCalls: 2 })
+  expect(
+    usage.selectionModes.sticky
+      + usage.selectionModes.default
+      + usage.selectionModes.single,
+  ).toBe(1)
+})
+
+test("preserves only the final Chat compatibility failure response", async () => {
+  queuedResponses.push(
+    Response.json(
+      {
+        error: {
+          code: "invalid_request_body",
+          message:
+            "Unsupported parameter: 'temperature' is not supported with this model.",
+        },
+      },
+      { status: 400 },
+    ),
+    new Response("second failure\r\n  ", {
+      status: 422,
+      headers: { "content-type": "text/plain" },
+    }),
+  )
+
+  let error: unknown
+  try {
+    await createChatCompletions(
+      {
+        model: "gpt-test",
+        messages: [{ role: "user", content: "hello" }],
+        temperature: 1,
+      },
+      { candidatePrepared: true },
+    )
+  } catch (caught: unknown) {
+    error = caught
+  }
+
+  expect(error).toBeInstanceOf(HTTPError)
+  if (!(error instanceof HTTPError)) throw new Error("Expected HTTPError")
+  expect(error.response.status).toBe(422)
+  expect(error.response.headers.get("content-type")).toBe("text/plain")
+  expect(error.response.bodyUsed).toBe(false)
+  expect(await error.response.text()).toBe("second failure\r\n  ")
 })
 
 test("forwards only matching model-scoped session tokens on Chat inference", async () => {
@@ -342,7 +483,7 @@ test("forwards only matching model-scoped session tokens on Chat inference", asy
   expect(lastRequestHeaders?.get("copilot-session-token")).toBeNull()
 })
 
-test("keeps inference session tokens out of ordinary error diagnostics", async () => {
+test("preserves an upstream body even when it contains request metadata", async () => {
   state.models = {
     object: "list",
     data: [createLegacyMessagesModel("gpt-test")],
@@ -374,9 +515,9 @@ test("keeps inference session tokens out of ordinary error diagnostics", async (
     const body = await response.text()
 
     expect(response.status).toBe(400)
-    expect(
-      JSON.stringify([body, errorSpy.mock.calls, captureException.mock.calls]),
-    ).not.toContain(privateToken)
+    expect(body).toContain(privateToken)
+    expect(JSON.stringify(errorSpy.mock.calls)).toContain(privateToken)
+    expect(JSON.stringify(captureException.mock.calls)).toContain(privateToken)
 
     const rawDebug = getLlmDebugLog(listLlmDebugLogs().entries[0]?.id ?? "")
     expect(rawDebug?.request.headers["Copilot-Session-Token"]).toBe(
@@ -732,6 +873,33 @@ test("exposes the processed clone without changing the direct response API", asy
   })
 })
 
+test("dispatches a prepared native candidate without semantic reprocessing", async () => {
+  const payload = {
+    model: "gpt-test",
+    messages: [
+      { role: "future-role", content: "future content" },
+      { role: "assistant", content: "keep prefill" },
+    ],
+    stream: true,
+    stream_options: { include_usage: false },
+    response_format: {
+      type: "json_schema",
+      json_schema: { schema: { type: "object" } },
+    },
+    future_top_level: { preserved: true },
+  } as unknown as ChatCompletionsPayload
+
+  const result = await createChatCompletionsWithProcessedPayload(payload, {
+    candidatePrepared: true,
+  })
+  expect(result.processedPayload).toEqual(payload)
+  expect(fetchMock).toHaveBeenCalled()
+  const sent = JSON.parse(
+    (fetchMock.mock.calls.at(-1)?.[1] as RequestInit).body as string,
+  ) as Record<string, unknown>
+  expect(sent).toEqual(payload as unknown as Record<string, unknown>)
+})
+
 test("isolates the processed snapshot from stream retry state", async () => {
   const overloadEvent = 'data: {"error":{"message":"Overloaded"}}'
   queuedResponses.push(
@@ -1063,33 +1231,53 @@ test("preserves final assistant messages when assistant prefill is unset", async
   )
 })
 
-test("rewrites upstream chat completions 404 responses to 502", async () => {
-  queuedResponses.push(
-    new Response("model not found", {
+test("preserves upstream chat 404 identity and exact route bytes", async () => {
+  const body = new TextEncoder().encode("model not found\r\n  ")
+  const createUpstream = () =>
+    new Response(body.slice(), {
       status: 404,
       headers: { "content-type": "text/plain" },
-    }),
-  )
+    })
+  const upstream = createUpstream()
+  queuedResponses.push(upstream)
 
-  try {
-    await createChatCompletions({
+  const error = await createChatCompletions({
+    model: "gpt-test",
+    messages: [{ role: "user", content: "hello" }],
+  }).catch((caught: unknown) => caught)
+
+  expect(error).toBeInstanceOf(HTTPError)
+  expect((error as HTTPError).response).toBe(upstream)
+  expect(upstream.bodyUsed).toBe(false)
+
+  state.models = {
+    object: "list",
+    data: [createLegacyMessagesModel("gpt-test")],
+  }
+  queuedResponses.push(createUpstream())
+  const response = await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
       model: "gpt-test",
       messages: [{ role: "user", content: "hello" }],
-    })
-    throw new Error("Expected createChatCompletions to reject")
-  } catch (error) {
-    expect(error).toHaveProperty("response.status", 502)
-  }
+    }),
+  })
+
+  expect(response.status).toBe(404)
+  expect(response.headers.get("content-type")).toBe("text/plain")
+  expect(Array.from(new Uint8Array(await response.arrayBuffer()))).toEqual(
+    Array.from(body),
+  )
 })
 
-test("does not log malformed upstream ChatCompletions bodies", async () => {
+test("keeps malformed successful Chat JSON local and bodyless", async () => {
   const privateMarker = "chat-invalid-json-private-marker"
-  queuedResponses.push(
-    new Response(privateMarker, {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    }),
-  )
+  const upstream = new Response(privateMarker, {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  })
+  queuedResponses.push(upstream)
   const errorSpy = spyOn(consola, "error")
 
   try {
@@ -1102,7 +1290,12 @@ test("does not log malformed upstream ChatCompletions bodies", async () => {
     } catch (error) {
       thrown = error
     }
-    expect(thrown).toHaveProperty("response.status", 502)
+    expect(thrown).toBeInstanceOf(HTTPError)
+    expect((thrown as HTTPError).response.status).toBe(502)
+    expect(
+      new Uint8Array(await (thrown as HTTPError).response.arrayBuffer()),
+    ).toEqual(new Uint8Array())
+    expect(upstream.bodyUsed).toBe(true)
     expect(JSON.stringify(errorSpy.mock.calls)).not.toContain(privateMarker)
   } finally {
     errorSpy.mockRestore()

@@ -7,6 +7,8 @@ import type {
   AnthropicMessagesPayload,
 } from "~/routes/messages/anthropic-types"
 
+import { asAnthropicUnknownContentType } from "~/routes/messages/anthropic-types"
+
 import { stripThinkingBlocks } from "../src/routes/messages/handler"
 import { translateToOpenAI } from "../src/routes/messages/non-stream-translation"
 import { translateAnthropicMessagesToResponsesPayload } from "../src/routes/messages/responses-translation"
@@ -156,6 +158,78 @@ describe("Anthropic to OpenAI translation logic", () => {
 
     const openAIPayload = translateToOpenAI(anthropicPayload)
     expect(isValidChatCompletionRequest(openAIPayload)).toBe(true)
+  })
+
+  test("retains temperature and omits top_p when translating Messages to Chat", () => {
+    const translated = translateToOpenAI({
+      model: "gpt-current",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "hello" }],
+      temperature: 0.3,
+      top_p: 0.8,
+    })
+
+    expect(translated.temperature).toBe(0.3)
+    expect(translated).not.toHaveProperty("top_p")
+  })
+
+  test("defaults a schema-less named tool without closing its Chat schema", () => {
+    const translated = translateToOpenAI({
+      model: "gpt-current",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "hello" }],
+      tools: [{ name: "lookup", description: "Look something up" }],
+      tool_choice: { type: "tool", name: "lookup" },
+    })
+
+    expect(translated.tools).toEqual([
+      {
+        type: "function",
+        function: {
+          name: "lookup",
+          description: "Look something up",
+          parameters: { type: "object", properties: {} },
+        },
+      },
+    ])
+    expect(translated.tool_choice).toEqual({
+      type: "function",
+      function: { name: "lookup" },
+    })
+    expect(translated.tools?.[0]?.function.parameters).not.toHaveProperty(
+      "required",
+    )
+    expect(translated.tools?.[0]?.function.parameters).not.toHaveProperty(
+      "additionalProperties",
+    )
+  })
+
+  test("omits a Chat tool choice when its named tool did not translate", () => {
+    const translated = translateToOpenAI({
+      model: "gpt-current",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "hello" }],
+      tools: [{ name: "kept", input_schema: { type: "object" } }, { name: 3 }],
+      tool_choice: { type: "tool", name: "3" },
+    } as unknown as AnthropicMessagesPayload)
+
+    expect(translated.tools).toHaveLength(1)
+    expect(translated).not.toHaveProperty("tool_choice")
+  })
+
+  test("omits typed server tools from the Chat fallback", () => {
+    const translated = translateToOpenAI({
+      model: "gpt-current",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "hello" }],
+      tools: [{ name: "lookup" }, { type: "bash_20250124", name: "bash" }],
+      tool_choice: { type: "tool", name: "bash" },
+    })
+
+    expect(translated.tools?.map((tool) => tool.function.name)).toEqual([
+      "lookup",
+    ])
+    expect(translated).not.toHaveProperty("tool_choice")
   })
 
   test("preserves tool references as explicit text on Chat Completions", () => {
@@ -328,7 +402,9 @@ describe("Anthropic to OpenAI translation logic", () => {
         { type: "thinking", thinking: "signed", signature: "sig-first" },
         { type: "thinking", thinking: "unsigned" },
       ],
-      expectedReasoningText: "signed\n\nunsigned",
+      expectedContent:
+        '{"type":"thinking","thinking":"signed","signature":"sig-first"}\n\n{"type":"thinking","thinking":"unsigned"}',
+      expectedReasoningOpaque: "sig-first",
     },
     {
       name: "unsigned then signed",
@@ -336,11 +412,13 @@ describe("Anthropic to OpenAI translation logic", () => {
         { type: "thinking", thinking: "unsigned" },
         { type: "thinking", thinking: "signed", signature: "sig-last" },
       ],
-      expectedReasoningText: "unsigned\n\nsigned",
+      expectedContent:
+        '{"type":"thinking","thinking":"unsigned"}\n\n{"type":"thinking","thinking":"signed","signature":"sig-last"}',
+      expectedReasoningOpaque: "sig-last",
     },
   ])(
     "degrades assistant history with mixed $name thinking blocks",
-    ({ content, expectedReasoningText }) => {
+    ({ content, expectedContent, expectedReasoningOpaque }) => {
       const translated = translateToOpenAI({
         model: "claude-current",
         messages: [
@@ -354,13 +432,45 @@ describe("Anthropic to OpenAI translation logic", () => {
       expect(translated.messages).toEqual([
         {
           role: "assistant",
-          content: null,
-          reasoning_text: expectedReasoningText,
+          content: expectedContent,
+          reasoning_text: "signed",
+          reasoning_opaque: expectedReasoningOpaque,
         },
       ])
-      expect(translated.messages[0]).not.toHaveProperty("reasoning_opaque")
     },
   )
+
+  test("preserves multiple signed thinking blocks as ordered Chat context", () => {
+    const source: AnthropicMessagesPayload = {
+      model: "claude-current",
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "before" },
+            { type: "thinking", thinking: "first", signature: "sig-first" },
+            { type: "text", text: "between" },
+            { type: "thinking", thinking: "second", signature: "sig-second" },
+            { type: "text", text: "after" },
+          ],
+        },
+      ],
+    }
+    const snapshot = structuredClone(source)
+
+    const translated = translateToOpenAI(source)
+
+    expect(translated.messages).toEqual([
+      {
+        role: "assistant",
+        content:
+          'before\n\n{"type":"thinking","thinking":"first","signature":"sig-first"}\n\nbetween\n\n{"type":"thinking","thinking":"second","signature":"sig-second"}\n\nafter',
+        reasoning_text: "first",
+        reasoning_opaque: "sig-first",
+      },
+    ])
+    expect(source).toEqual(snapshot)
+  })
 
   test("should handle thinking blocks with tool calls", () => {
     const anthropicPayload: AnthropicMessagesPayload = {
@@ -401,10 +511,90 @@ describe("Anthropic to OpenAI translation logic", () => {
     expect(assistantMessage?.tool_calls).toHaveLength(1)
     expect(assistantMessage?.tool_calls?.[0].function.name).toBe("get_weather")
   })
+
+  test("preserves future assistant blocks in source order beside valid blocks", () => {
+    const anthropicPayload: AnthropicMessagesPayload = {
+      model: "claude-current",
+      max_tokens: 128,
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "before" },
+            {
+              type: asAnthropicUnknownContentType(
+                "future_assistant_block_20270101",
+              ),
+              future_payload: { enabled: true },
+            },
+            { type: "text", text: "after" },
+            {
+              type: "thinking",
+              thinking: "private reasoning",
+              signature: "native-signature",
+            },
+            {
+              type: "tool_use",
+              id: "call_future",
+              name: "lookup",
+              input: { query: "docs" },
+            },
+          ],
+        },
+      ],
+    }
+    const snapshot = structuredClone(anthropicPayload)
+
+    const translated = translateToOpenAI(anthropicPayload)
+
+    expect(translated.messages[0]).toMatchObject({
+      role: "assistant",
+      content:
+        'before\n\n{"type":"future_assistant_block_20270101","future_payload":{"enabled":true}}\n\nafter',
+      reasoning_text: "private reasoning",
+      reasoning_opaque: "native-signature",
+      tool_calls: [
+        {
+          id: "call_future",
+          type: "function",
+          function: { name: "lookup", arguments: '{"query":"docs"}' },
+        },
+      ],
+    })
+    expect(anthropicPayload).toEqual(snapshot)
+  })
+
+  test("bounds future assistant block JSON without dropping neighboring text", () => {
+    const translated = translateToOpenAI({
+      model: "claude-current",
+      max_tokens: 128,
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "before" },
+            {
+              type: asAnthropicUnknownContentType(
+                "future_assistant_block_20270101",
+              ),
+              payload: "x".repeat(20_000),
+            },
+            { type: "text", text: "after" },
+          ],
+        },
+      ],
+    })
+
+    const content = translated.messages[0]?.content
+    expect(typeof content).toBe("string")
+    expect(content).toStartWith("before\n\n")
+    expect(content).toEndWith("\n\nafter")
+    expect((content as string).length).toBeLessThanOrEqual(16_400)
+  })
 })
 
-describe("Claude Code compatibility filtering", () => {
-  test("should omit Claude Code harness-only context from translated payloads", () => {
+describe("public Messages content preservation", () => {
+  test("preserves marker-prefixed conversation content in translated payloads", () => {
     const anthropicPayload: AnthropicMessagesPayload = {
       model: "claude-sonnet-4.6",
       messages: [
@@ -447,10 +637,97 @@ describe("Claude Code compatibility filtering", () => {
     const openAIPayload = translateToOpenAI(anthropicPayload)
 
     expect(openAIPayload.messages).toEqual([
+      {
+        role: "user",
+        content:
+          "<available-deferred-tools>\nAskUserQuestion\nTaskCreate\n</available-deferred-tools>",
+      },
+      {
+        role: "user",
+        content:
+          "<system-reminder>\nThe following skills are available for use with the Skill tool:\n\n- brainstorming\n</system-reminder>",
+      },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "tooluse_skill",
+            type: "function",
+            function: {
+              name: "Skill",
+              arguments: '{"skill":"brainstorming"}',
+            },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        tool_call_id: "tooluse_skill",
+        content: "Tool loaded.",
+      },
       { role: "user", content: "Help me write an implementation plan." },
     ])
   })
 
+  test("preserves mismatched generic tool calls and results", () => {
+    const anthropicPayload: AnthropicMessagesPayload = {
+      model: "claude-sonnet-4.6",
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "search-call",
+              name: "WebSearch",
+              input: { query: "compatibility" },
+            },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "different-call",
+              content:
+                "IMPORTANT: This message and these instructions are NOT part of the actual user conversation.",
+            },
+          ],
+        },
+      ],
+      max_tokens: 100,
+    }
+
+    const openAIPayload = translateToOpenAI(anthropicPayload)
+
+    expect(openAIPayload.messages).toEqual([
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "search-call",
+            type: "function",
+            function: {
+              name: "WebSearch",
+              arguments: '{"query":"compatibility"}',
+            },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        tool_call_id: "different-call",
+        content:
+          "IMPORTANT: This message and these instructions are NOT part of the actual user conversation.",
+      },
+    ])
+  })
+})
+
+describe("Messages compatibility translation", () => {
   test("should preserve normal tool interactions that happen to say Tool loaded.", () => {
     const anthropicPayload: AnthropicMessagesPayload = {
       model: "claude-sonnet-4.6",

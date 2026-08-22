@@ -10,6 +10,11 @@ import {
 } from "~/routes/messages/error"
 
 const app = new Hono()
+const UTF8_ENCODER = new TextEncoder()
+
+async function responseBytes(response: Response): Promise<Array<number>> {
+  return Array.from(new Uint8Array(await response.arrayBuffer()))
+}
 
 async function forwardAnthropicError(
   error: unknown,
@@ -85,13 +90,10 @@ app.get("/error", async (c) => {
     c,
     new HTTPError(
       "upstream-runtime-private-marker",
-      Response.json(
-        { error: { message: "private-upstream-marker" } },
-        {
-          status: Number(kind),
-          statusText: "private-status-marker",
-        },
-      ),
+      new Response(null, {
+        status: Number(kind),
+        statusText: "private-status-marker",
+      }),
     ),
   )
 })
@@ -235,6 +237,53 @@ test.each([
   },
 )
 
+test.each([
+  {
+    body: UTF8_ENCODER.encode('{"error":{"message":"exact-json"}}'),
+    contentType: "application/json",
+    name: "JSON",
+  },
+  {
+    body: UTF8_ENCODER.encode("exact text"),
+    contentType: "text/plain",
+    name: "text",
+  },
+  {
+    body: UTF8_ENCODER.encode("  <html>exact</html>\r\n"),
+    contentType: "text/html",
+    name: "HTML and whitespace",
+  },
+  {
+    body: Uint8Array.from([0x00, 0xff, 0x80, 0x41]),
+    contentType: "application/octet-stream",
+    name: "binary",
+  },
+] as const)(
+  "forwards exact upstream $name bytes instead of an Anthropic envelope",
+  async (fixture) => {
+    const response = await forwardAnthropicError(
+      new HTTPError(
+        "Failed to create responses",
+        new Response(fixture.body.slice(), {
+          headers: {
+            "content-type": fixture.contentType,
+            "retry-after": "17",
+            "x-private-upstream": "private-header-marker",
+          },
+          status: 429,
+        }),
+      ),
+      "req-must-not-be-injected",
+    )
+
+    expect(response.status).toBe(429)
+    expect(response.headers.get("content-type")).toBe(fixture.contentType)
+    expect(response.headers.get("retry-after")).toBe("17")
+    expect(response.headers.get("x-private-upstream")).toBeNull()
+    expect(await responseBytes(response)).toEqual(Array.from(fixture.body))
+  },
+)
+
 test("does not preserve a non-Anthropic local body", async () => {
   const response = await app.request("/error?kind=invalid-local", {
     headers: { "x-request-id": "req-invalid-local" },
@@ -279,10 +328,11 @@ test("uses one guarded HTTP snapshot for Messages output logs and Sentry", async
     "messages-body-getter-private-marker",
   ]
   let getterCalls = 0
-  const upstream = Response.json(
-    { error: { message: "messages-body-private-marker" } },
-    { status: 429, headers: { "retry-after": "17" } },
-  )
+  const upstreamBody = { error: { message: "messages-body-private-marker" } }
+  const upstream = Response.json(upstreamBody, {
+    status: 429,
+    headers: { "retry-after": "17" },
+  })
   for (const [key, marker] of [
     ["status", privateMarkers[1]],
     ["headers", privateMarkers[2]],
@@ -312,6 +362,8 @@ test("uses one guarded HTTP snapshot for Messages output logs and Sentry", async
   try {
     const response = await forwardAnthropicError(error, "req-snapshot")
     const body = await response.text()
+    const expectedBody = JSON.stringify(upstreamBody)
+    const expectedBytes = Array.from(UTF8_ENCODER.encode(expectedBody))
     const diagnostics = JSON.stringify([
       body,
       errorSpy.mock.calls,
@@ -319,25 +371,29 @@ test("uses one guarded HTTP snapshot for Messages output logs and Sentry", async
     ])
 
     expect(response.status).toBe(429)
-    expect(JSON.parse(body)).toEqual({
-      type: "error",
-      request_id: "req-snapshot",
-      error: {
-        type: "rate_limit_error",
-        message: "Copilot rate limit exceeded.",
-      },
-    })
+    expect(body).toBe(expectedBody)
     expect(getterCalls).toBe(0)
     expect(errorSpy.mock.calls).toContainEqual([
-      "[429] Upstream request failed",
+      "[429] Failed to create responses",
     ])
     expect(captureException.mock.calls.at(-1)?.[0]).toMatchObject({
-      message: "Upstream request failed",
+      message: "Failed to create responses",
     })
     expect(captureException.mock.calls.at(-1)?.[1]).toMatchObject({
       tags: { status: "429" },
-      extra: { status: 429 },
+      extra: {
+        status: 429,
+        upstreamResponseBody: expectedBody,
+        upstreamResponseBodyBytes: expectedBytes,
+      },
     })
+    expect(errorSpy.mock.calls).toContainEqual([
+      {
+        upstreamResponseBody: expectedBody,
+        upstreamResponseBodyBytes: expectedBytes,
+        upstreamResponseContentType: "application/json;charset=utf-8",
+      },
+    ])
     for (const marker of privateMarkers) {
       expect(diagnostics).not.toContain(marker)
     }
@@ -373,10 +429,17 @@ test("forwards only the safe headers owned by the Messages inspection", async ()
   expect(response.headers.get("x-private-upstream")).toBeNull()
 })
 
-test("does not preserve an Anthropic-shaped body on a non-local HTTP error", async () => {
+test("preserves an Anthropic-shaped body exactly on a non-local HTTP error", async () => {
+  const upstreamBody = {
+    type: "error",
+    error: {
+      type: "invalid_request_error",
+      message: "upstream-anthropic-body",
+    },
+  }
   const error = new HTTPError(
     "Failed to create responses",
-    Response.json({}, { status: 400 }),
+    Response.json(upstreamBody, { status: 400 }),
   ) as HTTPError & { clientBody?: unknown }
   error.clientBody = {
     type: "error",
@@ -390,8 +453,32 @@ test("does not preserve an Anthropic-shaped body on a non-local HTTP error", asy
   const body = await response.text()
 
   expect(response.status).toBe(400)
-  expect(JSON.parse(body)).toEqual(fixedInvalidRequestBody())
+  expect(body).toBe(JSON.stringify(upstreamBody))
   expect(body).not.toContain("forged-local-private-marker")
+})
+
+test("returns an empty unreported Messages response for upstream 499", async () => {
+  const errorSpy = spyOn(consola, "error")
+  const captureException = spyOn(Sentry, "captureException").mockImplementation(
+    () => "event-id",
+  )
+
+  try {
+    const response = await forwardAnthropicError(
+      new HTTPError(
+        "Failed to create responses",
+        new Response("must-not-forward", { status: 499 }),
+      ),
+    )
+
+    expect(response.status).toBe(499)
+    expect(await response.text()).toBe("")
+    expect(errorSpy).not.toHaveBeenCalled()
+    expect(captureException).not.toHaveBeenCalled()
+  } finally {
+    errorSpy.mockRestore()
+    captureException.mockRestore()
+  }
 })
 
 test("adapts a hostile local Anthropic getter without invoking it", async () => {

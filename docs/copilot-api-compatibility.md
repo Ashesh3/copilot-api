@@ -33,7 +33,7 @@ authentication model is documented in the main README.
 
 | Family | Method and canonical route | Aliases and notes |
 | --- | --- | --- |
-| Model discovery | `GET /v1/models` | `GET /models` |
+| Model discovery | `GET /v1/models` | `GET /models`; `GET /v1beta/models` |
 | Single-model discovery | `GET /v1/models/:model` | `GET /models/:model` |
 | Model policy | `POST /v1/models/:model/policy` | `POST /models/:model/policy`; account-aware passthrough, not a local policy emulator |
 | Chat Completions | `POST /v1/chat/completions` | `POST /chat/completions` |
@@ -46,6 +46,8 @@ authentication model is documented in the main README.
 | Search compatibility | `POST /v1/alpha/search` | `POST /alpha/search` |
 | Google-style generation | `POST /v1beta/models/:model:generateContent` | `POST /v1/models/:model:generateContent`; `POST /models/:model:generateContent` |
 | Google-style streaming | `POST /v1beta/models/:model:streamGenerateContent` | `POST /v1/models/:model:streamGenerateContent`; `POST /models/:model:streamGenerateContent` |
+| Google-style token count | `POST /v1beta/models/:model:countTokens` | `POST /v1/models/:model:countTokens`; `POST /models/:model:countTokens`; local/native count only, no generation |
+| Liveness | `GET` or `HEAD /health` | `GET` or `HEAD /health/health`; unauthenticated and data-free, other methods/children return `404` |
 | Model session | `POST /models/session` | Opaque model-session passthrough |
 | Model-session intent | `POST /models/session/intent` | Requires a valid `Copilot-Session-Token` header |
 | Auto selection | `POST /auto` | Account and feature availability remain upstream-authoritative |
@@ -53,12 +55,14 @@ authentication model is documented in the main README.
 Other client-integration surfaces are documented in the README. They do not
 change the inference contracts described here.
 
-Only `generateContent` and `streamGenerateContent` are supported public Google
-actions. A missing action suffix or any other suffix, including `countTokens`,
-returns a local Google `400` before body parsing or upstream dispatch. It is not
-a token-count API. Ordinary request, authentication, console, and Sentry
-diagnostics use the Google route template instead of the model/action segment,
-and debug logging does not inspect bodies for unsupported actions.
+`generateContent`, `streamGenerateContent`, and `countTokens` are supported
+public Google actions on each listed route prefix. Count requests return
+`totalTokens` through native counting when available or the local estimator and
+never dispatch generation. A missing action suffix or any other suffix returns
+a local Google `400` before body parsing or upstream dispatch. Ordinary request,
+authentication, console, and Sentry diagnostics use the Google route template
+instead of the model/action segment, and debug logging does not inspect bodies
+for unsupported actions.
 
 ## Model discovery and endpoint routing
 
@@ -66,21 +70,29 @@ Discovery preserves current upstream metadata, then adds configured aliases,
 reasoning-effort variants, redirect sources, virtual entries, and custom
 provider entries. Visibility is still constrained by live account catalogs,
 model policy, account health, and per-account routing configuration.
+An omitted model-picker flag is visible; only explicit `false` hides a model by
+default. Advertised custom chat models and aliases are reachable through Chat,
+Responses HTTP, and Google generate/stream adapters. Responses WebSocket and
+compaction remain outside custom-provider chat dispatch, while custom Google
+counting remains local and generation-free.
 
 Routing resolves the requested alias, effort, and redirect before selecting the
 final upstream protocol. Selection then follows these rules:
 
 1. prefer the caller's native dialect when the selected model advertises it;
-2. otherwise choose an advertised endpoint only when every required request
-   concept has a lossless translation;
-3. allow request content, such as a document, to select a more capable
-   advertised endpoint; and
+2. prepare a detached candidate for each advertised dialect, repairing,
+   textualizing, or omitting target-incompatible optional concepts;
+3. rank candidates using native preference, bounded translation cost, request
+   content, and advisory findings, then dispatch the exact evaluated payload;
+   and
 4. return a local protocol-native `400` with
-   `endpoint_translation_unsupported` when a safe translation is unavailable.
+   `endpoint_translation_unsupported` only when no endpoint is advertised or
+   adaptation leaves no meaningful request.
 
-A bridge must fail closed rather than discard reasoning state, tool calls or
-results, call IDs, media, structured-output controls, cache controls,
-continuation identity, or terminal stream state.
+Translation findings are bounded telemetry, not source-schema rejection gates.
+Required tool-call/result association, schema repairs, generated IDs, media,
+reasoning, and terminal state are request-local, deterministic, and do not
+mutate the caller or sibling candidates.
 
 Google-style generation uses the same endpoint authority after lossless Google
 to Chat normalization:
@@ -102,14 +114,11 @@ local compatibility transport and does not promise direct upstream WebSocket use
 
 ## Responses accepted, normalized, rejected, and local fields
 
-Accepted and forwarded fields include the reviewed current Responses surface:
-model and input, instructions, output limits, metadata, tools and tool controls,
-reasoning and encrypted-reasoning inclusion, text and structured-output
-controls, sampling controls, prompt-cache controls, context management,
-truncation, safety attribution, client metadata, task controls, and supported
-extension fields. Unknown top-level fields are omitted at the final upstream
-boundary; nested data inside accepted fields is preserved unless a documented
-normalization applies.
+Native Responses preparation preserves the caller's detached JSON surface,
+including future top-level fields, input items, tools, state/context fields, and
+extensions. It overrides `store` to `false` and applies only target-required
+normalization and hostile-serialization guards. The prepared source remains
+separate from the final wire object.
 
 Normalized behavior includes:
 
@@ -117,21 +126,21 @@ Normalized behavior includes:
 - `reasoning.effort: "none"` removing reasoning summaries and encrypted
   reasoning inclusion, while enabled reasoning receives compatible defaults;
 - duplicate encrypted-reasoning include entries collapsing to one;
-- empty `tools` removing `tools`, `tool_choice`, and `parallel_tool_calls`;
-- function schemas receiving object parameters and properties when omitted;
-- compatible JSON-object and JSON-schema normalization;
+- function schemas receiving nonmutating recursive compatibility repairs;
+- compatible JSON-object and JSON-schema normalization without a permanent
+  known-tool blocklist;
 - output limits below the upstream floor being raised to the supported floor;
 - `context_management: null` and unsupported sampling fields being omitted when
   required by model configuration; and
-- `store: false` remaining stateless while unsupported stateful controls are
-  removed before transport.
+- `store: false` remaining stateless while compatible future state/context
+  controls remain available to native Responses transport.
 
-Rejected fields and shapes include invalid bodies or models, malformed context
-management, non-plain tool definitions, explicitly stored or background
-requests, service tiers, direct HTTP `previous_response_id`, and tools that the
-reviewed Responses contract always blocks. Syntactically accepted pass-through
-tools or task controls remain subject to account, provider, and feature-flag
-authorization.
+Invalid JSON, a missing model, hostile values that cannot be detached or
+serialized, and a post-adaptation request with no meaningful input remain local
+errors. Unknown optional items, tools, reasoning records, references, malformed
+call history, media, and structured controls otherwise degrade best effort on
+Chat or Messages fallbacks. Advertised candidates are fully adapted before
+selection; unadvertised candidates do not perform attachment I/O.
 
 Local Responses fields and behavior include compatibility compaction, payload
 size recovery, media normalization, WebP conversion where required, and the
@@ -140,60 +149,57 @@ do not imply upstream stored-response support.
 
 ## Messages body, header, and count-tokens behavior
 
-Messages inference requires a non-empty `model`, a non-empty `messages` array,
-and `max_tokens`. Token counting requires `model` and `messages`, but not
-`max_tokens`. The native body uses a clone-and-denylist boundary: plain JSON
-fields and nested content are preserved, including system blocks, text, image,
-document, thinking, tool-use, tool-result, cache-control, fallback-credit,
-effort, compaction, and future provider-compatible fields. Gateway-only helper
-fields are removed.
+Messages inference requires a non-empty `model` and at least one usable message
+after tolerant sanitization. A literal `max_tokens: null` is treated as absent;
+when the selected target needs a limit the gateway derives one. Token counting
+requires `model` and usable messages but not `max_tokens`. The native body uses
+a clone-and-denylist boundary: compatible plain JSON fields and nested content
+are preserved, including system blocks, text, image, document, thinking,
+tool-use, tool-result, cache-control, fallback-credit, effort, compaction, and
+future provider fields. Gateway-only helper fields are removed.
 
 Messages normalization includes:
 
-- validating content blocks, tool history, tools, thinking, metadata, output
-  configuration, and media source shapes without mutating the caller's body;
+- retaining usable content, tool history, future roles/blocks, metadata, output
+  configuration, and media without mutating the caller's body;
 - reducing every ephemeral `cache_control` object to `type` plus a valid `5m`
   or `1h` TTL;
-- canonicalizing `Anthropic-Beta` comma spacing and duplicates;
+- filtering, trimming, and deduplicating `Anthropic-Beta` per token;
 - forwarding a valid inbound `anthropic-version`, or using `2023-06-01` when
   absent;
 - forwarding a valid `X-Model-Provider-Preference`; and
 - preserving valid sampling and effort controls for upstream model/provider
   handling.
 
-Malformed bodies, headers, required fields, tools, media, cache markers, or
-lossy endpoint translations receive an Anthropic-shaped local error. Unknown
-plain JSON fields are preserved for native Messages; malformed non-JSON or
-hostile object shapes are rejected.
+Malformed JSON, missing required routing fields, a message list with no retained
+usable entry, or hostile object shapes receive an Anthropic-shaped local error.
+Messages, Chat, and Responses candidates are prepared independently; selection
+uses the evaluated candidate and does not force Chat parallel tools, Responses
+sampling defaults, or target controls not supplied by the request.
 
 For Copilot models, `/v1/messages/count_tokens` calls the upstream native token
 counter with the normalized model, messages, system prompt, tools, tool choice,
 media context, version, beta, provider preference, affinity, and cancellation
-context. It never replaces an upstream failure with a constant token count.
-Configured custom chat providers may use the local estimator only after a
-lossless Messages-to-Chat check.
+context. An extension-rich request that cannot use native counting falls back
+to the local estimator rather than generation; it never returns a constant
+count. Configured custom chat providers use the same completed Chat candidate
+for local estimation.
 
 ## Chat compatibility behavior
 
-Chat accepts the reviewed OpenAI-style message roles and content, modern tools,
-deprecated function declarations, token limits, string or array stop values,
-sampling and log-probability controls, reasoning effort, thinking budget,
-prediction, structured output, stream options, penalties, seed, user metadata,
-signed reasoning history, and supported attachments.
+Chat prepares one detached source snapshot and separate native Chat, Responses,
+and Messages candidates. It tolerates future roles, scalar/null/singleton
+content, incomplete or interleaved tool history, legacy functions, arbitrary
+tool choice, future parts/tools, reasoning, structured output, sampling, stop
+controls, and attachments. Target adapters associate calls/results once,
+generate collision-safe request-local IDs when needed, repair schemas
+recursively, and preserve native JSON where possible.
 
-Normalization clones the request, completes missing function parameter-schema
-objects, converts deprecated `functions` into modern function tools, appends
-them after modern tools, and removes the deprecated fields. An explicit modern
-`tool_choice` takes precedence over deprecated `function_call`. Streaming may
-request usage automatically, JSON output receives compatibility instructions,
-and attachments are normalized only after the final endpoint is selected.
-
-Chat rejects malformed bodies, empty models or messages, invalid roles or
-content parts, incomplete or misordered tool-call history, invalid tool
-selection, and simultaneous non-null `max_tokens` and
-`max_completion_tokens`. When native Chat is unavailable, fallback to Responses
-or Messages occurs only after a lossless fidelity check; otherwise the request
-fails with `endpoint_translation_unsupported`.
+Only malformed JSON, a missing model, no usable messages, hostile values, or a
+post-adaptation candidate with no meaningful request are hard local failures.
+Native preference and translated cost determine selection; the exact evaluated
+candidate is dispatched, with resource transforms such as attachment inlining
+performed only for the chosen advertised path.
 
 ## Streaming and WebSocket termination and continuation semantics
 
@@ -202,42 +208,42 @@ Responses streams do not add `[DONE]`. Messages streams preserve Anthropic
 event names and ordering. Messages streams remove the trailing bare `[DONE]`
 that the upstream compatibility layer may append after `message_stop`.
 
-Post-commit behavior is path- and failure-class-specific:
+Every committed dialect has one terminal owner. Successful completed and
+incomplete terminals remain successful; received failed/error terminals remain
+visible without a conflicting second terminal. Partial output is retained.
 
 <!-- compatibility-contract:stream-behavior:start -->
 | Surface | Behavior |
 | --- | --- |
-| Messages handled HTTP failure | error event with invalid_request_error, authentication_error, permission_error, not_found_error, request_too_large, rate_limit_error, api_error |
+| Messages handled HTTP failure | exactly one dialect-correct error outcome after closing open blocks; preserve partial output and the owned upstream failure representation when present (invalid_request_error, authentication_error, permission_error, not_found_error, request_too_large, rate_limit_error, api_error) |
 | Synthetic Responses-from-Messages failure | error then response.failed |
-| Native Responses terminal families | sanitized response.completed, response.incomplete, response.failed, error |
-| Thrown native Chat transport failure | written chunks then close without synthesized error event |
-| Thrown native Responses transport failure | buffered unwritten chunks may be absent when the stream closes |
+| Native Responses terminal families | preserve response.completed, response.incomplete, response.failed, and error terminal objects in their established protocol representation; exactly one terminal |
+| Committed Chat stream failure | preserve emitted partial chunks, then emit one Chat error event and one [DONE]; no writes after abort |
+| Source end and abort | clean EOF without a terminal synthesizes one dialect-local failure; abort or detach emits nothing further |
 <!-- compatibility-contract:stream-behavior:end -->
 
-Messages maps handled HTTP failures to the status-derived error types listed
-above. The synthetic Responses-from-Messages path emits both its safe error and
-failed terminal events. Native Responses preserves sanitized
-`response.incomplete`, `response.failed`, or `error` families supplied by
-upstream. Valid completed events remain `response.completed`; when upstream
-omits the optional `response.output_text` convenience field, the proxy derives
-missing `response.output_text` by concatenating sanitized assistant
-`output_text` blocks in output order. Malformed completed events fail closed as
-`response.failed`.
-A thrown transport or runtime failure after commitment on native Chat or native
-Responses may instead be recorded while the stream closes without a newly
-synthesized error event. Only events already written downstream remain visible;
-buffered but unwritten events are not promised as partial output.
+Committed non-abort failures emit one dialect-correct failure outcome; Chat also
+emits exactly one `[DONE]`. Messages closes open thinking/text/tool blocks before
+its error. Responses local/source-end failures emit `error` then
+`response.failed`; upstream terminal objects are preserved as the established
+protocol representation permits. Clean source end without a terminal fails
+once, while abort or detach performs no later write or report. A received HTTP
+failure body follows the exact passthrough policy below rather than an
+independent stream reserialization rule.
 
-A logical routed call shares a maximum of three upstream sends across transport
-recovery, account reinitialization, eligible failover, and narrow protocol
-recovery. Deterministic validation failures are not retried, and a stream is not
-replayed after substantive output.
+A logical routed call shares a maximum of three upstream sends. One closed
+classifier may claim one same-account, same-session compatibility retry before
+output for encrypted compaction, tool choice without tools, unsupported
+temperature/top-p, or invalid thinking signatures. Unknown validation failures,
+WebSocket sends, and continuations after output are never compatibility-retried;
+the final attempt alone owns any failure body.
 
 The Responses WebSocket accepts JSON text frames with
 `type: "response.create"`. Binary frames, invalid JSON, unsupported message
-types, invalid initiators, and explicit `stream: false` receive recoverable
-error frames while the socket remains open. `response.processed` is not treated
-as a create request.
+types, and invalid initiators receive recoverable error frames while the socket
+remains open. `stream: false` is coerced to the streaming transport. A visible
+`response.incomplete` is a valid terminal, and `response.processed` is not
+treated as a create request.
 
 Successful Responses WebSocket turns can create snapshots for continuation.
 Only response IDs issued on the current WebSocket connection are valid. A stale
@@ -277,6 +283,10 @@ receive an existing `Copilot-Session-Token`. `POST /models/session/intent`
 requires that header. `POST /auto` accepts its typed selection body but remains
 subject to upstream account and feature availability. Model policy and session
 operations are routed account-aware; they are not broadcast to every account.
+Complete parseable Auto and intent records are forwarded without projecting
+away future fields. Initial account selection may use bounded session-token
+issuer proof, then endpoint evaluation, dispatch, and any retry share the same
+request-local numeric pin without a persistent session/account map.
 
 The session token is an opaque secret, not gateway authentication, and the
 gateway never persists it. Ordinary logs, telemetry, Sentry, and configuration
@@ -320,52 +330,79 @@ These extensions preserve public protocol framing, but their local state does
 not become upstream state. Custom providers also remain limited to their
 configured protocol families.
 
-## Error privacy and LLM Debug exception
+Platform compatibility also includes explicit-origin CORS only for approved
+inference methods and paths, optional `COPILOT_PUBLIC_BASE_URL` callback origin
+selection with trusted-peer forwarding fallback, and transparent provider
+proxy authentication through the dedicated `x-copilot-gateway-key`. Provider
+authorization and API-key headers remain upstream credentials and the dedicated
+gateway header is removed before forwarding. Peripheral routes with required
+JSON readers return fixed parse-only `400` responses before side effects;
+bodyless worker registration and permissive session PATCH behavior remain.
 
-Chat and Responses HTTP errors use an OpenAI/Copilot-shaped envelope. Messages
-and count-tokens errors use an Anthropic-shaped envelope. HTTP status,
-`Retry-After`, safe quota headers, request IDs, and allowlisted machine-readable
-error classes are preserved when available. Quota exhaustion maps to `402`,
-deprecated client versions to `466`, and unknown upstream bodies or messages to
-fixed local text.
+When inlining is required, Chat image URLs, Responses `image_url` and
+`file_url`, Anthropic URL image/document inputs, and Google `fileData.fileUri`
+all use the same unrestricted HTTP(S) recovery authority. Loopback, private,
+link-local, intranet, literal-IP, metadata-style, userinfo, and redirected
+destinations are not filtered. Parseability, caller abort, timeout, byte and
+redirect caps, media conversion, URI-free diagnostics, and per-attachment
+degradation remain enforced.
+
+<!-- compatibility-contract:attachment-url:start -->
+| Surface | Behavior |
+| --- | --- |
+| Runtime-valid absolute HTTP(S) attachment/file URL | fetchable without destination, DNS, IP, userinfo, or redirect-target filtering; caller abort, timeout, byte, and redirect limits remain |
+<!-- compatibility-contract:attachment-url:end -->
+
+## Upstream error passthrough, request/header privacy, and LLM Debug
+
+A received final non-empty upstream HTTP failure body is returned unchanged to
+the client with its upstream status and content type. Equality includes JSON,
+non-JSON, leading/trailing whitespace and CRLF, and binary bytes as the target
+dialect permits. The same owned body representation is intentionally attached
+to ordinary error logs and Sentry.
 
 <!-- compatibility-contract:error-envelope:start -->
 | Surface | Behavior |
 | --- | --- |
-| Chat and Responses HTTP | OpenAI/Copilot envelope with fixed safe message |
-| /v1/messages and /v1/messages/count_tokens | Anthropic envelope with fixed safe message |
+| Final non-empty upstream HTTP failure | exact response body in normal client, ordinary logs, and Sentry; preserve upstream status and content type |
+| Local, empty-body, unreadable-body, or transport-only failure | use the existing dialect/protocol-shaped proxy-authored fallback |
 <!-- compatibility-contract:error-envelope:end -->
 
-Outside LLM Debug, ordinary client errors, logs, telemetry, Sentry events, and
-configuration exports do not expose request bodies, prompts, credentials,
-session tokens, beta-header contents, attachment URLs, encrypted reasoning, or
-unreviewed upstream error bodies.
+Local, empty-body, unreadable-body, transport-only, source-end, and abort cases
+continue to use their existing protocol-shaped proxy fallbacks and do not
+fabricate upstream bytes. The approved raw material is only the received final
+upstream response body. Request bodies, prompts, credentials, session tokens,
+request and response headers, beta values, attachment URLs, encrypted reasoning,
+and configuration exports keep their established ordinary client/log/Sentry
+controls. Header allowlisting and recursive scrubbing remain independent of
+body forwarding.
 
-Administrator-only LLM Debug is the deliberate exception. It keeps exact
-short-lived request and response captures for authorized diagnosis and replay.
-It may therefore contain forwarded credentials, including a session token. It
-is process-local, expires after ten minutes, and must be treated as
-credential-bearing material. This exception does not relax any ordinary
-logging, telemetry, Sentry, configuration-export, or client-error boundary.
+Administrator-only LLM Debug remains the broader raw capture. It keeps exact
+short-lived request and response attempts for authorized diagnosis and replay,
+including URLs, headers, bodies, and forwarded credentials. It is process-local,
+expires after ten minutes, and must be treated as credential-bearing material;
+it is no longer the only channel where a final upstream failure body can appear.
 
 ## Verification matrix and last-audited date
 
-Last audited: 2026-08-17
+Last audited: 2026-08-22
 
 | Contract area | Automated evidence | Targeted verification |
 | --- | --- | --- |
 | Version, integration identity, and safe headers | Contract, client, model, and response-metadata tests | Confirm current discovery metadata parses without truncation |
 | Model discovery and endpoint precedence | Model-route and endpoint-routing matrices | Compare route choices with live `supported_endpoints` |
-| Responses fields, tools, media, and streaming | Request-contract, handler, payload-recovery, media, and stream-lifecycle tests | Exercise native HTTP and explicit cache controls where enabled |
+| Responses fields, tools, media, and streaming | Request-contract, evaluated-candidate, payload-recovery, media, and stream-lifecycle tests | Exercise native and translated endpoint choices where advertised |
 | Messages fields, headers, counting, and streaming | Messages-contract, header, handler, count-token, error, and lifecycle tests | Exercise native Messages and native token counting where advertised |
-| Chat fields and bridges | Chat-contract, routing, translation-fidelity, and fallback tests | Exercise native and lossless fallback paths available to the account |
+| Chat fields and bridges | Chat-contract, tolerant candidate routing, translation-fidelity, and fallback tests | Exercise native and best-effort fallback paths available to the account |
 | WebSocket validation and continuation | Protocol, lifecycle, routing, security, and continuation tests | Complete a two-turn current-connection continuation |
 | Account affinity and session token | Routing-affinity, account-router, control-plane, and token-scope tests | Confirm one affinity identity remains account-consistent |
-| Errors, privacy, and observability | Error, Sentry, logger, secret-scan, and administrator-debug tests | Inspect ordinary diagnostics for secret-free classifications |
-| Regression extensions | Search, compaction, payload recovery, custom-provider, redirect, Google-style, and client-compatibility tests | Probe only extensions enabled in the deployment |
+| Attachment recovery authority | Destination, redirect, abort, timeout, byte/redirect-limit, logging, and per-adapter tests | Confirm inference clients have only the intended resource-bounded network authority |
+| Errors, privacy, and observability | Exact-body client/log/Sentry, independent header redaction, local fallback, and administrator-debug tests | Confirm response-body equality without weakening request/header controls |
+| Regression extensions | Search, compaction, retry, custom-provider reachability, control-plane, CORS, health, public-origin, transparent-proxy, Google/count, and client-compatibility tests | Probe only extensions enabled in the deployment |
 
 Contract changes require focused red-green coverage, the full repository test
-suite, lint, type checking, build, diff validation, and a fresh privacy scan.
+suite, lint, type checking, build, diff validation, and a tracked-diff scan for
+committed credentials, private paths, and unapproved request/header leakage.
 Live probes are capability-gated and must not be used to bypass upstream
 authorization.
 

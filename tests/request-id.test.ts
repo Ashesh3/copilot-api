@@ -923,7 +923,7 @@ test("uses the guarded HTTP snapshot for logical request reporting", () => {
     const diagnostics = JSON.stringify(infoSpy.mock.calls)
 
     expect(getterCalls).toBe(0)
-    expect(diagnostics).toContain("Upstream request failed")
+    expect(diagnostics).toContain("Failed to create responses")
     for (const marker of privateMarkers) {
       expect(diagnostics).not.toContain(marker)
     }
@@ -996,6 +996,7 @@ test("uses a provided HTTP inspection for logical status and message", () => {
     lifecycle.finalize({
       error,
       errorInspection: {
+        kind: "local",
         localError: {
           code: "invalid_value",
           message: "The model field must be a non-empty string.",

@@ -110,7 +110,8 @@ export async function handleCountTokens(c: Context) {
   const selectedModel = state.models?.data.find(
     (model) => model.id === targetModel,
   )
-  if (!selectedModel) throw createCountTokensModelNotFoundError()
+  if (state.models && !selectedModel)
+    throw createCountTokensModelNotFoundError()
 
   const result = await countAnthropicTokens(anthropicPayload.body, {
     ...nativeHeaders,

@@ -255,13 +255,11 @@ test.each([
       expect(lastUpstreamPayload).not.toHaveProperty("tools")
       expect(lastUpstreamPayload).not.toHaveProperty("tool_choice")
       expect(lastUpstreamPayload?.max_output_tokens).toBe(16)
-      expect(lastUpstreamPayload).toHaveProperty(
+      expect(lastUpstreamPayload).not.toHaveProperty(
         "text.format.schema.additionalProperties",
-        false,
       )
-      expect(lastUpstreamPayload).toHaveProperty(
+      expect(lastUpstreamPayload).not.toHaveProperty(
         "text.format.schema.required",
-        ["answer"],
       )
     }
   },
@@ -476,6 +474,114 @@ test("keeps native Responses priority for hosted web search", async () => {
   expect(lastUpstreamPayload).toHaveProperty("tools.0.type", "web_search")
 })
 
+test("preserves future native Responses data without fallback tool rewrites", async () => {
+  installModel({
+    supported_endpoints: ["/responses", "/v1/messages", "/chat/completions"],
+  })
+
+  const response = await postResponses({
+    input: [{ type: "future_input", future: { nested: true } }],
+    future_top_level: { retained: [1, 2] },
+    background: { future: true },
+    previous_response_id: "resp_previous",
+    context_management: { future: "shape" },
+    tools: [
+      {
+        type: "custom",
+        name: "apply_patch",
+        format: { type: "grammar", syntax: "lark", definition: "start: /.+/" },
+      },
+      { type: "web_search", external_web_access: true },
+      { type: "mcp", server_label: "native", future: { retained: true } },
+    ],
+    store: true,
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/responses")
+  expect(lastUpstreamPayload).toMatchObject({
+    future_top_level: { retained: [1, 2] },
+    background: { future: true },
+    previous_response_id: "resp_previous",
+    context_management: { future: "shape" },
+    store: false,
+    tools: [
+      { type: "custom", name: "apply_patch" },
+      { type: "web_search", external_web_access: true },
+      { type: "mcp", server_label: "native", future: { retained: true } },
+    ],
+  })
+  expect(lastUpstreamPayload).not.toHaveProperty("tools.0.parameters")
+  expect(lastUpstreamPayload).not.toHaveProperty("tools.1.name", "web_search")
+})
+
+test("preserves future native Responses data on the streaming first wire", async () => {
+  installModel({ supported_endpoints: ["/responses"] })
+  fetchMock.mockImplementationOnce((url, init) => {
+    const rawUrl = typeof url === "string" || url instanceof URL ? url : url.url
+    lastUpstreamPath = new URL(rawUrl).pathname
+    lastUpstreamPayload =
+      typeof init?.body === "string" ?
+        (JSON.parse(init.body) as Record<string, unknown>)
+      : undefined
+    return createTerminalResponsesStream(
+      "response.completed",
+      "stream-future-marker",
+    )
+  })
+
+  const response = await postResponses({
+    input: "hello",
+    stream: true,
+    future_top_level: { retained: true },
+    previous_response_id: "resp_stream_previous",
+    tools: [{ type: "future_tool", config: { mode: "native" } }],
+    store: true,
+  })
+  await response.text()
+
+  expect(lastUpstreamPath).toBe("/responses")
+  expect(lastUpstreamPayload).toMatchObject({
+    stream: true,
+    future_top_level: { retained: true },
+    previous_response_id: "resp_stream_previous",
+    tools: [{ type: "future_tool", config: { mode: "native" } }],
+    store: false,
+  })
+})
+
+test("strips native HTTP warmup control before the Responses wire", async () => {
+  installModel({ supported_endpoints: ["/responses"] })
+
+  const response = await postResponses({
+    input: "warmup",
+    generate: false,
+    future_top_level: { retained: true },
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/responses")
+  expect(lastUpstreamPayload).toMatchObject({
+    input: "warmup",
+    future_top_level: { retained: true },
+    store: false,
+  })
+  expect(lastUpstreamPayload).not.toHaveProperty("generate")
+})
+
+test("omits future tools on the best-effort fallback boundary", async () => {
+  installModel({ supported_endpoints: ["/chat/completions"] })
+
+  const response = await postResponses({
+    input: "hello",
+    tools: [{ type: "mcp", server_label: "native" }],
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/chat/completions")
+  expect(lastUpstreamPayload?.tools).toBeUndefined()
+})
+
 test("normalizes Responses controls before Messages fallback conversion", async () => {
   installModel({ supported_endpoints: ["/v1/messages"] })
 
@@ -501,14 +607,13 @@ test("normalizes Responses controls before Messages fallback conversion", async 
   })
 
   expect(response.status).toBe(200)
-  expect(lastUpstreamPayload).toHaveProperty("max_tokens", 16)
+  expect(lastUpstreamPayload).toHaveProperty("max_tokens", 1)
   expect(lastUpstreamPayload).toHaveProperty("tools.0.input_schema", {
     type: "object",
     properties: {},
   })
-  expect(lastUpstreamPayload).toHaveProperty(
+  expect(lastUpstreamPayload).not.toHaveProperty(
     "output_config.format.schema.additionalProperties",
-    false,
   )
 })
 
@@ -546,7 +651,7 @@ test.each([
   },
 )
 
-test("rejects incompatible Messages sampling without upstream dispatch", async () => {
+test("omits incompatible Messages sampling and dispatches", async () => {
   installModel({ supported_endpoints: ["/v1/messages"] })
 
   const response = await postResponses({
@@ -555,14 +660,13 @@ test("rejects incompatible Messages sampling without upstream dispatch", async (
     top_p: 0.8,
   })
 
-  expect(response.status).toBe(400)
-  expect(fetchMock).not.toHaveBeenCalled()
-  expect(await response.json()).toMatchObject({
-    error: { code: "endpoint_translation_unsupported", param: "sampling" },
-  })
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/v1/messages")
+  expect(lastUpstreamPayload).toHaveProperty("temperature", 0.4)
+  expect(lastUpstreamPayload?.top_p).toBeUndefined()
 })
 
-test("rejects unsupported Messages reasoning effort without upstream dispatch", async () => {
+test("dispatches unsupported Messages reasoning effort best effort", async () => {
   installModel({
     supported_endpoints: ["/v1/messages"],
     reasoning_effort: [],
@@ -573,18 +677,12 @@ test("rejects unsupported Messages reasoning effort without upstream dispatch", 
     reasoning: { effort: "high", summary: "auto" },
   })
 
-  expect(response.status).toBe(400)
-  expect(fetchMock).not.toHaveBeenCalled()
-  expect(await response.json()).toMatchObject({
-    error: {
-      code: "endpoint_translation_unsupported",
-      param: "reasoning_effort",
-    },
-  })
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/v1/messages")
 })
 
 test.each(["concise", "detailed", "future_private_summary"])(
-  "rejects Messages-only unmapped reasoning summary %s without upstream",
+  "dispatches Messages-only unmapped reasoning summary %s best effort",
   async (summary) => {
     installModel({ supported_endpoints: ["/v1/messages"] })
 
@@ -593,14 +691,8 @@ test.each(["concise", "detailed", "future_private_summary"])(
       reasoning: { effort: "high", summary },
     })
 
-    expect(response.status).toBe(400)
-    expect(fetchMock).not.toHaveBeenCalled()
-    expect(await response.json()).toMatchObject({
-      error: {
-        code: "endpoint_translation_unsupported",
-        param: "reasoning_summary",
-      },
-    })
+    expect(response.status).toBe(200)
+    expect(lastUpstreamPath).toBe("/v1/messages")
   },
 )
 
@@ -619,7 +711,7 @@ test("returns a synthetic Responses stream for a Messages fallback", async () =>
 })
 
 test.each(["response.failed", "error"])(
-  "sanitizes native %s events without losing partial output or event order",
+  "preserves native %s events without losing partial output or future fields",
   async (terminalType) => {
     installModel({ supported_endpoints: ["/responses"] })
     const privateMarker = `native-${terminalType}-private-marker`
@@ -640,8 +732,7 @@ test.each(["response.failed", "error"])(
     expect(response.status).toBe(200)
     expect(lastUpstreamPath).toBe("/responses")
     expect(body).toContain("partial-output")
-    expect(body).toContain("Upstream Responses stream failed.")
-    expect(body).not.toContain(privateMarker)
+    expect(body).toContain(privateMarker)
     expect(body).not.toContain("[DONE]")
     const eventOrder = body
       .split("\n")
@@ -657,30 +748,28 @@ test.each(["response.failed", "error"])(
       .split("\n")
       .filter((line) => line.startsWith("data: "))
       .map((line) => JSON.parse(line.slice(6)) as Record<string, unknown>)
-    const terminal = dataFrames.at(-1) as {
-      code?: string
-      message?: string
-      param?: string | null
-      response?: {
-        error?: {
-          code?: string
-          message?: string
-          param?: string | null
-          status?: number
+    const expectedTerminal: Record<string, unknown> =
+      terminalType === "error" ?
+        {
+          type: "error",
+          sequence_number: 2,
+          code: "server_error",
+          message: privateMarker,
+          param: "input",
+          status: 502,
         }
-      }
-      status?: number
-    }
-    const terminalError = terminal.response?.error ?? terminal
-    if (terminal.response) {
-      expect(terminal.response).toMatchObject({ output: [], output_text: "" })
-    }
-    expect(terminalError).toMatchObject({
-      code: "server_error",
-      message: "Upstream Responses stream failed.",
-      param: "input",
-      status: 502,
-    })
+      : (JSON.parse(
+          (
+            await createPrivateTerminalResponsesStream(
+              terminalType,
+              privateMarker,
+            ).text()
+          )
+            .split("\n")
+            .findLast((line) => line.startsWith("data: "))
+            ?.slice(6) ?? "{}",
+        ) as Record<string, unknown>)
+    expect(dataFrames.at(-1)).toEqual(expectedTerminal)
   },
 )
 
@@ -690,7 +779,7 @@ test.each([
   "response.failed",
   "error",
 ] as const)(
-  "mounted native Responses preserves sanitized %s terminal framing",
+  "mounted native Responses preserves %s terminal framing and data",
   async (terminalType) => {
     installModel({ supported_endpoints: ["/responses"] })
     const privateMarker = `native-${terminalType}-matrix-private-marker`
@@ -712,7 +801,7 @@ test.each([
     expect(response.status).toBe(200)
     expect(eventOrder.at(-1)).toBe(terminalType)
     expect(payloadTypes.at(-1)).toBe(terminalType)
-    expect(body).not.toContain(privateMarker)
+    expect(body).toContain(privateMarker)
   },
 )
 
@@ -722,7 +811,7 @@ test("exported native Responses terminal contract matches mounted coverage", () 
       (row) => row.surface === "Native Responses terminal families",
     )?.behavior,
   ).toBe(
-    "sanitized response.completed, response.incomplete, response.failed, error",
+    "preserve response.completed, response.incomplete, response.failed, and error terminal objects in their established protocol representation; exactly one terminal",
   )
 })
 
@@ -754,11 +843,11 @@ test("uses the terminal SSE event name over a mismatched JSON type", async () =>
       object: "response",
       output: [],
       output_text: "",
-      usage: { input_tokens: 3, output_tokens: 2, total_tokens: 5 },
+      usage: null,
       error: {
         code: "server_error",
         message: "Upstream Responses stream failed.",
-        param: "input",
+        param: null,
         status: 502,
       },
       incomplete_details: null,
@@ -767,7 +856,7 @@ test("uses the terminal SSE event name over a mismatched JSON type", async () =>
   expect(body).not.toContain(privateMarker)
 })
 
-test("reconstructs terminal Responses frames from an explicit allowlist", async () => {
+test("preserves terminal Responses partial and future fields", async () => {
   installModel({ supported_endpoints: ["/responses"] })
   const privateMarker = "terminal-allowlist-private-marker"
   fetchMock.mockImplementationOnce(() =>
@@ -783,22 +872,15 @@ test("reconstructs terminal Responses frames from an explicit allowlist", async 
     .map((line) => JSON.parse(line.slice(6)) as Record<string, unknown>)
     .at(-1) as { response?: Record<string, unknown> }
 
-  expect(terminal.response).toEqual({
+  expect(terminal.response).toMatchObject({
     id: "resp_private_terminal",
     object: "response",
     status: "incomplete",
-    output: [],
-    output_text: "",
-    usage: { input_tokens: 3, output_tokens: 2, total_tokens: 5 },
-    error: {
-      code: "server_error",
-      message: "Upstream Responses stream failed.",
-      param: "input",
-      status: 502,
-    },
-    incomplete_details: { reason: "max_output_tokens" },
+    output_text: "partial-output",
+    metadata: { private: privateMarker },
+    incomplete_details: { reason: "max_output_tokens", private: privateMarker },
   })
-  expect(body).not.toContain(privateMarker)
+  expect(body).toContain(privateMarker)
 })
 
 test.each([
@@ -887,7 +969,7 @@ test.each([
   },
 )
 
-test("fails closed for HTTP response.completed without completed status", async () => {
+test("preserves sparse HTTP response.completed without reconstructing it", async () => {
   installModel({ supported_endpoints: ["/responses"] })
   fetchMock.mockImplementationOnce(() =>
     createRawTerminalResponsesStream(
@@ -913,13 +995,12 @@ test("fails closed for HTTP response.completed without completed status", async 
     .map((line) => JSON.parse(line.slice(6)) as { type?: string })
     .at(-1)
 
-  expect(terminal?.type).toBe("response.failed")
-  expect(body).toContain("Upstream Responses stream failed.")
-  expect(body).not.toContain("http-missing-status-private-marker")
+  expect(terminal?.type).toBe("response.completed")
+  expect(body).toContain("http-missing-status-private-marker")
   expect(body).not.toContain("[DONE]")
 })
 
-test("sanitizes native terminal events after the HTTP stream is committed", async () => {
+test("preserves native terminal events after the HTTP stream is committed", async () => {
   installModel({ supported_endpoints: ["/responses"] })
   delayNativeResponsesStream = true
   const privateMarker = "native-preflush-private-marker"
@@ -973,15 +1054,17 @@ test("sanitizes native terminal events after the HTTP stream is committed", asyn
   const rest = await readRemaining(reader)
 
   expect(rest).toContain("partial-output")
-  expect(rest).toContain("Upstream Responses stream failed.")
-  expect(rest).not.toContain(privateMarker)
+  expect(rest).toContain(privateMarker)
   expect(rest).not.toContain("[DONE]")
   const terminalData = rest
     .split("\n")
     .filter((line) => line.startsWith("data: "))
     .map((line) => JSON.parse(line.slice(6)) as { response?: unknown })
     .at(-1)
-  expect(terminalData?.response).toMatchObject({ output: [], output_text: "" })
+  expect(terminalData?.response).toMatchObject({
+    id: "resp_preflush",
+    status: "failed",
+  })
 })
 
 test("fails closed for primitive terminal JSON after HTTP preflush", async () => {
@@ -1131,7 +1214,7 @@ test("fails locally when the model advertises no supported inference endpoint", 
   })
 })
 
-test("rejects Messages-only opaque reasoning without upstream dispatch", async () => {
+test("contextualizes Messages-only opaque reasoning and dispatches", async () => {
   installModel({ supported_endpoints: ["/v1/messages"] })
 
   const response = await postResponses({
@@ -1144,14 +1227,11 @@ test("rejects Messages-only opaque reasoning without upstream dispatch", async (
     ],
   })
 
-  expect(response.status).toBe(400)
-  expect(fetchMock).not.toHaveBeenCalled()
-  expect(await response.json()).toMatchObject({
-    error: {
-      code: "endpoint_translation_unsupported",
-      param: "opaque_reasoning",
-    },
-  })
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/v1/messages")
+  expect(JSON.stringify(lastUpstreamPayload)).toContain(
+    "Assistant reasoning context",
+  )
 })
 
 test.each([
@@ -1164,16 +1244,14 @@ test.each([
     name: "numeric role",
     item: { type: "message", role: 7, content: "hello" },
   },
-])("rejects Messages-only explicit message with $name", async ({ item }) => {
+])("maps Messages-only explicit message with $name", async ({ item }) => {
   installModel({ supported_endpoints: ["/v1/messages"] })
 
   const response = await postResponses({ input: [item] })
 
-  expect(response.status).toBe(400)
-  expect(fetchMock).not.toHaveBeenCalled()
-  expect(await response.json()).toMatchObject({
-    error: { code: "endpoint_translation_unsupported", param: "message_role" },
-  })
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/v1/messages")
+  expect(JSON.stringify(lastUpstreamPayload)).toContain("Future role content")
 })
 
 test.each([
@@ -1211,14 +1289,11 @@ test.each([
     ],
     param: "input_image",
   },
-])("rejects Messages-only $name without upstream", async ({ input, param }) => {
+])("degrades Messages-only $name and dispatches", async ({ input }) => {
   installModel({ supported_endpoints: ["/v1/messages"] })
   const response = await postResponses({ input })
-  expect(response.status).toBe(400)
-  expect(fetchMock).not.toHaveBeenCalled()
-  expect(await response.json()).toMatchObject({
-    error: { code: "endpoint_translation_unsupported", param },
-  })
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/v1/messages")
 })
 
 test.each([
@@ -1276,22 +1351,16 @@ test.each([
       { type: "message", role: "user", content: "continue" },
     ],
   },
-])("rejects Messages-only $name", async ({ input }) => {
+])("degrades Messages-only $name", async ({ input }) => {
   installModel({ supported_endpoints: ["/v1/messages"] })
 
   const response = await postResponses({ input })
 
-  expect(response.status).toBe(400)
-  expect(fetchMock).not.toHaveBeenCalled()
-  expect(await response.json()).toMatchObject({
-    error: {
-      code: "endpoint_translation_unsupported",
-      param: "tool_result_pairing",
-    },
-  })
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/v1/messages")
 })
 
-test("fetches a Messages image URL once before rejecting its failed normalization", async () => {
+test("fetches a Messages image URL once and degrades its failed normalization", async () => {
   installModel({ supported_endpoints: ["/v1/messages"] })
   fetchMock.mockImplementationOnce((url) => {
     const rawUrl = typeof url === "string" || url instanceof URL ? url : url.url
@@ -1317,15 +1386,12 @@ test("fetches a Messages image URL once before rejecting its failed normalizatio
     ],
   })
 
-  expect(response.status).toBe(400)
+  expect(response.status).toBe(200)
   expect(attachmentFetchCount).toBe(1)
-  expect(lastUpstreamPath).not.toBe("/v1/messages")
-  expect(await response.json()).toMatchObject({
-    error: {
-      code: "endpoint_translation_unsupported",
-      param: "message_content_part",
-    },
-  })
+  expect(lastUpstreamPath).toBe("/v1/messages")
+  expect(JSON.stringify(lastUpstreamPayload)).toContain(
+    "Image attachment unavailable",
+  )
 })
 
 test.each([
@@ -1385,6 +1451,41 @@ test.each([
   },
 )
 
+test("shares one translated attachment fetch before the selected native transform", async () => {
+  installModel({
+    supported_endpoints: ["/responses", "/chat/completions", "/v1/messages"],
+  })
+  fetchMock.mockImplementationOnce((url) => {
+    const rawUrl = typeof url === "string" || url instanceof URL ? url : url.url
+    if (new URL(rawUrl).hostname === "example.invalid") {
+      attachmentFetchCount += 1
+    }
+    return new Response("attachment-bytes", {
+      status: 200,
+      headers: { "content-type": "image/png" },
+    })
+  })
+
+  const response = await postResponses({
+    input: [
+      {
+        type: "message",
+        role: "user",
+        content: [
+          {
+            type: "input_image",
+            image_url: "https://example.invalid/shared.png",
+          },
+        ],
+      },
+    ],
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/responses")
+  expect(attachmentFetchCount).toBe(1)
+})
+
 test("routes Responses compaction through the existing Chat preservation path", async () => {
   installModel({ supported_endpoints: ["/v1/messages", "/chat/completions"] })
 
@@ -1412,7 +1513,7 @@ test("routes Responses compaction through the existing Chat preservation path", 
   expect(JSON.stringify(lastUpstreamPayload)).toContain("call_compact")
 })
 
-test("rejects an unsupported Responses translation before manual approval", async () => {
+test("approves an adapted Responses translation before dispatch", async () => {
   installModel({ supported_endpoints: ["/v1/messages"] })
   state.manualApprove = true
   const promptSpy = spyOn(consola, "prompt").mockResolvedValue(true as never)
@@ -1428,9 +1529,40 @@ test("rejects an unsupported Responses translation before manual approval", asyn
       ],
     })
 
-    expect(response.status).toBe(400)
-    expect(promptSpy).not.toHaveBeenCalled()
-    expect(fetchMock).not.toHaveBeenCalled()
+    expect(response.status).toBe(200)
+    expect(promptSpy).toHaveBeenCalledTimes(1)
+    expect(lastUpstreamPath).toBe("/v1/messages")
+  } finally {
+    promptSpy.mockRestore()
+    state.manualApprove = false
+  }
+})
+
+test("does not fetch attachments for unadvertised fallbacks before native approval", async () => {
+  installModel({ supported_endpoints: ["/responses"] })
+  state.manualApprove = true
+  const promptSpy = spyOn(consola, "prompt").mockResolvedValue(false as never)
+
+  try {
+    const response = await postResponses({
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [
+            { type: "input_text", text: "inspect only after approval" },
+            {
+              type: "input_image",
+              image_url: "https://example.invalid/native-only.png",
+            },
+          ],
+        },
+      ],
+    })
+
+    expect(response.status).toBe(403)
+    expect(promptSpy).toHaveBeenCalledTimes(1)
+    expect(attachmentFetchCount).toBe(0)
   } finally {
     promptSpy.mockRestore()
     state.manualApprove = false

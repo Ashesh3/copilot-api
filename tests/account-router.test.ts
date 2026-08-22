@@ -978,7 +978,7 @@ test("records final response metadata once when affinity rejection throws", asyn
   }
 })
 
-test("retries encrypted Responses compaction failures on the selected account", async () => {
+test("returns the second encrypted Responses compaction failure after one selected-account retry", async () => {
   const modelId = "router-encrypted-compaction-retry"
   registerAccount(1021, modelId, "selected-copilot-token")
   registerAccount(1022, modelId, "alternate-copilot-token")
@@ -1019,14 +1019,22 @@ test("retries encrypted Responses compaction failures on the selected account", 
     )
   queuedResults.push(
     encryptedFailure(),
-    encryptedFailure(),
-    new Response("{}", {
-      status: 200,
-      headers: {
-        "x-github-request-id": "final-compaction-attempt",
-        "x-quota-snapshot-premium": "final-quota",
+    Response.json(
+      {
+        error: {
+          code: "invalid_request_body",
+          message: "The final encrypted content could not be verified. ",
+        },
       },
-    }),
+      {
+        status: 400,
+        headers: {
+          "content-type": "application/problem+json",
+          "x-github-request-id": "final-compaction-attempt",
+          "x-quota-snapshot-premium": "final-quota",
+        },
+      },
+    ),
   )
   const debugSpy = spyOn(consola, "debug")
 
@@ -1045,16 +1053,20 @@ test("retries encrypted Responses compaction failures on the selected account", 
     )
     const { response, account } = result
 
-    expect(response.status).toBe(200)
+    expect(response.status).toBe(400)
+    expect(response.headers.get("content-type")).toBe(
+      "application/problem+json",
+    )
+    expect(await response.text()).toBe(
+      '{"error":{"code":"invalid_request_body","message":"The final encrypted content could not be verified. "}}',
+    )
     expect(account).toBeDefined()
-    expect(capturedRequests).toHaveLength(3)
+    expect(capturedRequests).toHaveLength(2)
     expect(capturedRequests.map(({ init }) => init?.body)).toEqual([
-      requestBody,
       requestBody,
       requestBody,
     ])
     expect(llmAuthorizationHeaders()).toEqual([
-      `Bearer ${account?.copilotToken}`,
       `Bearer ${account?.copilotToken}`,
       `Bearer ${account?.copilotToken}`,
     ])

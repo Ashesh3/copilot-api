@@ -22,7 +22,7 @@ export const modelRoutes = new Hono()
 
 function isModelVisible(model: Model): boolean {
   return (
-    model.model_picker_enabled === true || model.policy?.state === "enabled"
+    model.model_picker_enabled !== false || model.policy?.state === "enabled"
   )
 }
 

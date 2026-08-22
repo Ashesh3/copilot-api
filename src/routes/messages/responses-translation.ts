@@ -75,7 +75,10 @@ export const translateAnthropicMessagesToResponsesPayload = (
   }
 
   const translatedTools = convertAnthropicTools(payload.tools)
-  const toolChoice = convertAnthropicToolChoice(payload.tool_choice)
+  const toolChoice =
+    translatedTools ?
+      convertAnthropicToolChoice(payload.tool_choice, translatedTools)
+    : undefined
 
   const { safetyIdentifier, promptCacheKey } = parseUserId(
     payload.metadata?.user_id,
@@ -85,11 +88,11 @@ export const translateAnthropicMessagesToResponsesPayload = (
     model: payload.model,
     input,
     instructions: translateSystemPrompt(payload.system, payload.model),
-    temperature: 1, // reasoning high temperature fixed to 1
+    temperature: payload.temperature,
     top_p: payload.top_p,
     max_output_tokens: payload.max_tokens,
     tools: translatedTools,
-    tool_choice: toolChoice,
+    ...(toolChoice === undefined ? {} : { tool_choice: toolChoice }),
     metadata:
       payload.metadata?.user_id === undefined ?
         undefined
@@ -98,16 +101,15 @@ export const translateAnthropicMessagesToResponsesPayload = (
     prompt_cache_key: promptCacheKey ?? undefined,
     stream: payload.stream,
     store: false,
-    parallel_tool_calls:
-      (
-        translatedTools?.some(
-          (tool) =>
-            (tool as { type?: string; name?: string }).type === "function"
-            && (tool as { name?: string }).name === "web_search",
-        )
-      ) ?
-        false
-      : true,
+    ...((
+      translatedTools?.some(
+        (tool) =>
+          (tool as { type?: string; name?: string }).type === "function"
+          && (tool as { name?: string }).name === "web_search",
+      )
+    ) ?
+      { parallel_tool_calls: false }
+    : {}),
     text:
       payload.output_config?.format ?
         { format: payload.output_config.format }
@@ -432,15 +434,17 @@ const convertAnthropicTools = (
       continue
     }
 
-    // Filter out other server-side tools without input_schema
-    if (!isAnthropicNamedTool(tool) || tool.input_schema === undefined) {
+    if (
+      !isAnthropicNamedTool(tool)
+      || (tool.type !== undefined && tool.input_schema === undefined)
+    ) {
       continue
     }
 
     result.push({
       type: "function",
       name: tool.name,
-      parameters: tool.input_schema,
+      parameters: tool.input_schema ?? { type: "object", properties: {} },
       strict: false,
       ...(typeof tool.description === "string" ?
         { description: tool.description }
@@ -453,7 +457,8 @@ const convertAnthropicTools = (
 
 const convertAnthropicToolChoice = (
   choice: AnthropicMessagesPayload["tool_choice"],
-): ToolChoiceOptions | ToolChoiceFunction => {
+  translatedTools: ReadonlyArray<Tool>,
+): ToolChoiceOptions | ToolChoiceFunction | undefined => {
   if (!choice) {
     return "auto"
   }
@@ -466,7 +471,14 @@ const convertAnthropicToolChoice = (
       return "required"
     }
     case "tool": {
-      return choice.name ? { type: "function", name: choice.name } : "auto"
+      return (
+          choice.name
+            && translatedTools.some(
+              (tool) => tool.type === "function" && tool.name === choice.name,
+            )
+        ) ?
+          { type: "function", name: choice.name }
+        : undefined
     }
     case "none": {
       return "none"
@@ -519,12 +531,16 @@ const mapOutputToAnthropicContent = (
   for (const item of output) {
     switch (item.type) {
       case "reasoning": {
-        const thinkingText = extractReasoningText(item)
+        const thinkingText = extractReasoningText(item, {
+          useFallback: Boolean(item.encrypted_content),
+        })
         if (thinkingText.length > 0) {
           contentBlocks.push({
             type: "thinking",
             thinking: thinkingText,
-            signature: (item.encrypted_content ?? "") + "@" + item.id,
+            ...(item.encrypted_content ?
+              { signature: `${item.encrypted_content}@${item.id}` }
+            : {}),
           })
         }
         break
@@ -592,7 +608,10 @@ const combineMessageTextContent = (
   return aggregated
 }
 
-const extractReasoningText = (item: ResponseOutputReasoning): string => {
+const extractReasoningText = (
+  item: ResponseOutputReasoning,
+  options: { useFallback?: boolean } = {},
+): string => {
   const segments: Array<string> = []
 
   const collectFromBlocks = (blocks?: Array<ResponseReasoningBlock>) => {
@@ -613,7 +632,8 @@ const extractReasoningText = (item: ResponseOutputReasoning): string => {
 
   const text = segments.join("").trim()
   // Compatible with opencode, it will filter out blocks where the thinking text is empty, so we add a default thinking text here
-  return text.length > 0 ? text : THINKING_TEXT
+  if (text.length > 0) return text
+  return options.useFallback ? THINKING_TEXT : ""
 }
 
 const createToolUseContentBlock = (

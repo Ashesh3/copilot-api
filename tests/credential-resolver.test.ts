@@ -5,6 +5,8 @@ import path from "node:path"
 
 import {
   extractRequestCredential,
+  hasSuppliedRequestCredential,
+  isGoogleApiCredentialPath,
   registerCredentialProvider,
   resolveRequestCredentialKind,
 } from "../src/lib/credential-resolver"
@@ -43,6 +45,13 @@ function bearer(token: string): Request {
   return new Request("http://localhost/protected", {
     headers: { authorization: `Bearer ${token}` },
   })
+}
+
+function request(pathname: string, headers?: Record<string, string>): Request {
+  return new Request(
+    `http://localhost${pathname}`,
+    headers === undefined ? undefined : { headers: new Headers(headers) },
+  )
 }
 
 async function issueOAuthToken(): Promise<string> {
@@ -107,6 +116,107 @@ test("rejects ambiguous credentials and accepts long credential values", () => {
       }),
     ),
   ).toBe(longCredential)
+})
+
+test("recognizes only exact Google API credential action paths", () => {
+  for (const prefix of ["", "/v1", "/v1beta"]) {
+    for (const action of [
+      "generateContent",
+      "streamGenerateContent",
+      "countTokens",
+    ]) {
+      const pathname = `${prefix}/models/model.with-dashes:${action}`
+      expect(isGoogleApiCredentialPath(pathname)).toBe(true)
+      expect(isGoogleApiCredentialPath(`${pathname}/`)).toBe(true)
+    }
+  }
+
+  for (const pathname of [
+    "/models",
+    "/v1/models",
+    "/v1beta/models",
+    "/models/:generateContent",
+    "/models/a/b:generateContent",
+    "/v2/models/x:generateContent",
+    "/models/x:futureAction",
+    "/models/x:GenerateContent",
+    "/proxy/v1/models/x:generateContent",
+    "/v1/responses",
+    "/v1/models/x:generateContent/extra",
+    "/v1/models/x:generateContent//",
+  ]) {
+    expect(isGoogleApiCredentialPath(pathname)).toBe(false)
+  }
+})
+
+test("collects, trims, and deduplicates Google query and header credentials", () => {
+  const googlePath = "/v1/models/model.with-dashes:generateContent"
+  expect(extractRequestCredential(request(`${googlePath}?key=shared`))).toBe(
+    "shared",
+  )
+  expect(
+    extractRequestCredential(
+      request(`${googlePath}?key=%20shared%20`, {
+        authorization: "Bearer shared",
+        "x-api-key": " shared ",
+        "x-goog-api-key": "shared",
+      }),
+    ),
+  ).toBe("shared")
+  expect(
+    extractRequestCredential(
+      request(`${googlePath}?key=first&key=second`, {
+        "x-goog-api-key": "first",
+      }),
+    ),
+  ).toBeNull()
+  expect(
+    extractRequestCredential(
+      request(`${googlePath}?key=shared&key=%20shared%20`),
+    ),
+  ).toBe("shared")
+  expect(
+    extractRequestCredential(request(`${googlePath}?key=&key=shared`)),
+  ).toBe("shared")
+  expect(
+    extractRequestCredential(request(`${googlePath}?key=first&key=second`)),
+  ).toBeNull()
+})
+
+test("limits query credentials to Google actions and preserves supplied-attempt semantics", () => {
+  const googlePath = "/v1beta/models/x:countTokens"
+  expect(
+    hasSuppliedRequestCredential(request(`${googlePath}?key=shared`)),
+  ).toBe(true)
+  expect(hasSuppliedRequestCredential(request(`${googlePath}?key=%20`))).toBe(
+    false,
+  )
+  expect(extractRequestCredential(request(`${googlePath}?key=%20`))).toBeNull()
+
+  for (const pathname of [
+    "/v1/responses?key=shared",
+    "/v1/models/x:futureAction?key=shared",
+    "/v2/models/x:generateContent?key=shared",
+    "/v1/responses?next=/v1/models/x:generateContent&key=shared",
+  ]) {
+    expect(hasSuppliedRequestCredential(request(pathname))).toBe(false)
+    expect(extractRequestCredential(request(pathname))).toBeNull()
+  }
+
+  const suppliedHeaders: Array<Record<string, string>> = [
+    { "x-api-key": "" },
+    { "x-goog-api-key": "" },
+    { authorization: "" },
+    { authorization: "Basic malformed" },
+  ]
+  for (const headers of suppliedHeaders) {
+    expect(
+      hasSuppliedRequestCredential(request("/v1/responses", headers)),
+    ).toBe(true)
+    expect(
+      extractRequestCredential(request("/v1/responses", headers)),
+    ).toBeNull()
+  }
 })
 
 test("dispatches worker, environment, and admin through typed providers", async () => {

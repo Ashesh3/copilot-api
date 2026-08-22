@@ -1,5 +1,9 @@
-import type { SafeHttpErrorInspection } from "~/lib/error"
+import type { HttpErrorInspection } from "~/lib/error"
 import type { RoutingAffinity } from "~/lib/routing-affinity"
+import type {
+  StreamTerminalFailure,
+  StreamTerminalLifecycle,
+} from "~/lib/stream-terminal-lifecycle"
 
 import { runWithCopilotContractObservabilityScope } from "~/lib/copilot-contract-observability"
 import {
@@ -9,8 +13,8 @@ import {
 import {
   isAbortError,
   isHTTPError,
+  inspectHttpError,
   LocalHTTPError,
-  snapshotSafeHttpError,
 } from "~/lib/error"
 import {
   type LogicalRequestLifecycle,
@@ -25,10 +29,18 @@ import {
   routingTelemetryStorage,
 } from "~/lib/request-session"
 import { runWithRoutingAffinity } from "~/lib/routing-affinity"
+import { createStreamTerminalLifecycle } from "~/lib/stream-terminal-lifecycle"
+
+import type { ResponsesStreamFailureState } from "./stream-lifecycle"
+
+import { createResponsesStreamFailureState } from "./stream-lifecycle"
 
 export interface ResponsesWebSocketTurn {
   abortController: AbortController
-  finalized: boolean
+  failureState: ResponsesStreamFailureState
+  failureWriters: WeakMap<StreamTerminalFailure, () => Promise<void>>
+  outputStarted: boolean
+  terminal: StreamTerminalLifecycle<ResponsesWebSocketTerminalSuccess>
   inputLength: number
   lifecycle?: LogicalRequestLifecycle
   model?: string
@@ -38,6 +50,18 @@ export interface ResponsesWebSocketTurn {
   telemetryState: RoutingTelemetryRequestState
   sequence: number
   turnId: string
+}
+
+export type ResponsesWebSocketTerminalSuccess = {
+  kind: "completed" | "incomplete" | "received_failure"
+  status: number
+  terminalStatus: "COMPLETE" | "ERROR"
+}
+
+export interface WebSocketTerminalClassification {
+  errorInspection?: HttpErrorInspection
+  status: number
+  terminalStatus: "ERROR" | "REJECTED" | "ABORTED"
 }
 
 interface ResponsesWebSocketLifecycleData {
@@ -76,15 +100,39 @@ export function createResponsesWebSocketTurn(
   message: string,
 ): ResponsesWebSocketTurn {
   const sequence = ++data.nextTurnSequence
-  const turn: ResponsesWebSocketTurn = {
-    abortController: new AbortController(),
-    finalized: false,
+  const abortController = new AbortController()
+  const turn = {} as ResponsesWebSocketTurn
+  Object.assign(turn, {
+    abortController,
+    failureState: createResponsesStreamFailureState("unknown"),
+    failureWriters: new WeakMap(),
     inputLength: new TextEncoder().encode(message).byteLength,
+    outputStarted: false,
     routingState: {},
     telemetryState: createRoutingTelemetryRequestState("Responses WebSocket"),
     sequence,
     turnId: `${data.requestId}:${sequence}`,
-  }
+  })
+  turn.terminal = createStreamTerminalLifecycle({
+    isDownstreamAborted: () => abortController.signal.aborted,
+    onSuccess: (success) => {
+      finalizeResponsesWebSocketTurn(data, turn, {
+        status: success.status,
+        terminalStatus: success.terminalStatus,
+      })
+    },
+    onFailure: async (failure) => {
+      await turn.failureWriters.get(failure)?.()
+      const terminal = await classifyWebSocketTerminal(
+        failure.kind === "thrown" ? failure.error : undefined,
+        turn,
+      )
+      finalizeResponsesWebSocketTurn(data, turn, {
+        error: failure.kind === "thrown" ? failure.error : undefined,
+        ...terminal,
+      })
+    },
+  })
   data.activeTurns.set(sequence, turn)
   return turn
 }
@@ -120,20 +168,19 @@ export function finalizeResponsesWebSocketTurn(
   turn: ResponsesWebSocketTurn,
   options: {
     error?: unknown
-    errorInspection?: SafeHttpErrorInspection
+    errorInspection?: HttpErrorInspection
     status: number
     terminalStatus: "COMPLETE" | "ERROR" | "REJECTED" | "ABORTED"
   },
 ): void {
   const lifecycle = ensureResponsesWebSocketLifecycle(turn)
-  const finalized = lifecycle.finalize({
+  lifecycle.finalize({
     accountId: turn.routingState.lastUsedAccountId,
     error: options.error,
     errorInspection: options.errorInspection,
     status: options.status,
     terminalStatus: options.terminalStatus,
   })
-  if (finalized) turn.finalized = true
   data.activeTurns.delete(turn.sequence)
 }
 
@@ -148,19 +195,15 @@ export function throwIfWebSocketTurnAborted(
   throw error
 }
 
-export function classifyWebSocketTerminal(
+export async function classifyWebSocketTerminal(
   error: unknown,
   turn: ResponsesWebSocketTurn,
-): {
-  errorInspection?: SafeHttpErrorInspection
-  status: number
-  terminalStatus: "ERROR" | "REJECTED" | "ABORTED"
-} {
+): Promise<WebSocketTerminalClassification> {
   if (turn.abortController.signal.aborted || isAbortError(error)) {
     return { status: 499, terminalStatus: "ABORTED" }
   }
   if (isHTTPError(error)) {
-    const errorInspection = snapshotSafeHttpError(error)
+    const errorInspection = await inspectHttpError(error)
     const { status } = errorInspection
     return {
       errorInspection,

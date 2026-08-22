@@ -1,3 +1,4 @@
+/* eslint-disable max-lines, max-lines-per-function */
 import { describe, expect, test } from "bun:test"
 
 import type {
@@ -6,9 +7,22 @@ import type {
 } from "~/services/copilot/create-responses"
 
 import {
+  classifyEmittedWebSocketTerminal,
+  mergeEffectiveNativeMessagesOptions,
   parseResponsesWebSocketFrame,
   resolveResponsesContinuation,
 } from "~/routes/responses/websocket-protocol"
+
+describe("classifyEmittedWebSocketTerminal", () => {
+  test("trusts the emitted JSON type over a mismatched raw event name", () => {
+    expect(
+      classifyEmittedWebSocketTerminal(
+        { type: "response.failed" },
+        "response.completed",
+      ),
+    ).toBe("response.failed")
+  })
+})
 
 describe("parseResponsesWebSocketFrame", () => {
   test("merges payload fields while keeping the protocol envelope out", () => {
@@ -56,6 +70,7 @@ describe("parseResponsesWebSocketFrame", () => {
           model: "gpt-nested",
           stream: true,
         },
+        nativeMessagesOptions: {},
         requestedModel: "gpt-nested",
       },
     })
@@ -82,7 +97,8 @@ describe("parseResponsesWebSocketFrame", () => {
           agentTaskId: "task-top",
           parentAgentId: "parent-header",
         },
-        payload: { model: "gpt-current" },
+        payload: { model: "gpt-current", stream: true },
+        nativeMessagesOptions: {},
         requestedModel: "gpt-current",
       },
     })
@@ -102,7 +118,8 @@ describe("parseResponsesWebSocketFrame", () => {
       value: {
         attribution: {},
         initiator: "user",
-        payload: { model: "gpt-current" },
+        payload: { model: "gpt-current", stream: true },
+        nativeMessagesOptions: {},
         requestedModel: "gpt-current",
       },
     })
@@ -126,7 +143,8 @@ describe("parseResponsesWebSocketFrame", () => {
       ok: true,
       value: {
         attribution: {},
-        payload: { model: "gpt-current" },
+        payload: { model: "gpt-current", stream: true },
+        nativeMessagesOptions: {},
         requestedModel: "gpt-current",
       },
     })
@@ -172,7 +190,7 @@ describe("parseResponsesWebSocketFrame", () => {
       frame: { stream: false, response: { stream: true } },
       name: "overridden top-level",
     },
-  ])("rejects explicit $name stream false", ({ frame }) => {
+  ])("coerces explicit $name stream false", ({ frame }) => {
     const result = parseResponsesWebSocketFrame(
       JSON.stringify({
         type: "response.create",
@@ -182,19 +200,12 @@ describe("parseResponsesWebSocketFrame", () => {
       }),
     )
 
-    expect(result).toEqual({
-      ok: false,
-      error: {
-        code: "invalid_request_error",
-        message: "Responses WebSocket requests must stream.",
-        status: 400,
-        type: "invalid_request_error",
-      },
-    })
+    expect(result.ok).toBe(true)
+    if (result.ok) expect(result.value.payload.stream).toBe(true)
   })
 
   test.each([null, false, "assistant", 1])(
-    "rejects invalid top-level initiator %p",
+    "omits invalid top-level initiator %p",
     (initiator) => {
       const result = parseResponsesWebSocketFrame(
         JSON.stringify({
@@ -204,17 +215,61 @@ describe("parseResponsesWebSocketFrame", () => {
         }),
       )
 
-      expect(result).toEqual({
-        ok: false,
-        error: {
-          code: "invalid_request_error",
-          message: "Responses WebSocket initiator must be user or agent.",
-          status: 400,
-          type: "invalid_request_error",
-        },
-      })
+      expect(result.ok).toBe(true)
+      if (result.ok) expect(result.value.initiator).toBeUndefined()
     },
   )
+
+  test("extracts only sanitized native Messages options case-insensitively", () => {
+    const result = parseResponsesWebSocketFrame(
+      JSON.stringify({
+        type: "response.create",
+        model: "claude-sonnet-4.5",
+        headers: {
+          "AnThRoPiC-BeTa": "tools-2024-04-04, tools-2024-04-04",
+          "ANTHROPIC-VERSION": "2023-06-01",
+          "X-Model-Provider-Preference": "anthropic",
+          authorization: "Bearer must-not-persist",
+          "copilot-session-token": "must-not-persist",
+          "x-agent-task-id": "task-one",
+        },
+      }),
+    )
+
+    expect(result).toEqual({
+      ok: true,
+      value: {
+        attribution: { agentTaskId: "task-one" },
+        payload: { model: "claude-sonnet-4.5", stream: true },
+        nativeMessagesOptions: {
+          anthropicBeta: "tools-2024-04-04",
+          anthropicVersion: "2023-06-01",
+          modelProviderPreference: "anthropic",
+        },
+        requestedModel: "claude-sonnet-4.5",
+      },
+    })
+  })
+})
+
+describe("mergeEffectiveNativeMessagesOptions", () => {
+  test("merges supplied sanitized fields into a fresh object", () => {
+    const current = {
+      anthropicBeta: "beta-one",
+      anthropicVersion: "2023-06-01",
+      modelProviderPreference: "anthropic",
+    }
+    const merged = mergeEffectiveNativeMessagesOptions(current, {
+      anthropicVersion: "2024-01-01",
+    })
+
+    expect(merged).toEqual({
+      anthropicBeta: "beta-one",
+      anthropicVersion: "2024-01-01",
+      modelProviderPreference: "anthropic",
+    })
+    expect(merged).not.toBe(current)
+  })
 })
 
 function userInput(text: string): ResponseInputItem {
@@ -266,9 +321,7 @@ describe("resolveResponsesContinuation core", () => {
           { role: "user", content: "first" },
           { role: "user", content: "second" },
         ],
-        previous_response_id: undefined,
         tools: [{ type: "function", name: "run" }],
-        generate: undefined,
       },
     })
     expect(snapshot).toEqual({
@@ -611,8 +664,6 @@ describe("resolveResponsesContinuation errors", () => {
           typed: { source: "caller" },
         },
         input: [userInput("prior history"), userInput("delta")],
-        previous_response_id: undefined,
-        generate: undefined,
       },
     })
     expect(snapshot.client_metadata).toEqual({
@@ -725,7 +776,7 @@ describe("parseResponsesWebSocketFrame attribution precedence", () => {
   )
 
   test.each([null, false, "assistant", 1])(
-    "rejects invalid present top-level initiator %p instead of retaining header",
+    "treats invalid present top-level initiator %p as absent",
     (initiator) => {
       const result = parseResponsesWebSocketFrame(
         JSON.stringify({
@@ -736,14 +787,9 @@ describe("parseResponsesWebSocketFrame attribution precedence", () => {
         }),
       )
 
-      expect(result).toEqual({
-        ok: false,
-        error: {
-          code: "invalid_request_error",
-          message: "Responses WebSocket initiator must be user or agent.",
-          status: 400,
-          type: "invalid_request_error",
-        },
+      expect(result).toMatchObject({
+        ok: true,
+        value: { initiator: "agent" },
       })
     },
   )

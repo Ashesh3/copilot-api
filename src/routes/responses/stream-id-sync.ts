@@ -19,6 +19,7 @@ import type {
   ResponseStreamEvent,
 } from "~/services/copilot/create-responses"
 
+import { parseRecoverableStreamJson } from "~/lib/recoverable-stream-json"
 import { sanitizeResponsesStreamEvent } from "~/services/copilot/create-responses"
 
 interface StreamIdTracker {
@@ -33,12 +34,28 @@ export const fixStreamIds = (
   data: string,
   event: string | undefined,
   tracker: StreamIdTracker,
-): string => {
+): string | undefined => {
   if (event !== undefined && isTerminalEventName(event)) {
-    return sanitizeResponsesStreamEvent({ data, event }).data ?? data
+    if (data) {
+      parseRecoverableStreamJson({
+        data,
+        event,
+        protocol: "Responses",
+        terminal: true,
+      })
+    }
+    const sanitized = sanitizeResponsesStreamEvent({ data, event }).data ?? data
+    if (!sanitized) return sanitized
+    return synchronizeTerminalOutputIds(sanitized, tracker)
   }
   if (!data) return data
-  const parsed = JSON.parse(data) as ResponseStreamEvent
+  const parsed = parseRecoverableStreamJson({
+    data,
+    event,
+    protocol: "Responses",
+    terminal: false,
+  }) as ResponseStreamEvent | undefined
+  if (parsed === undefined) return undefined
   switch (event) {
     case "response.output_item.added": {
       return handleOutputItemAdded(
@@ -67,6 +84,33 @@ const TERMINAL_EVENT_NAMES = new Set([
 
 function isTerminalEventName(value: string): boolean {
   return TERMINAL_EVENT_NAMES.has(value)
+}
+
+const synchronizeTerminalOutputIds = (
+  data: string,
+  tracker: StreamIdTracker,
+): string => {
+  const parsed = JSON.parse(data) as {
+    response?: { output?: Array<unknown> }
+  }
+  const output = parsed.response?.output
+  if (!Array.isArray(output)) return data
+  let changed = false
+  for (const [outputIndex, item] of output.entries()) {
+    const originalId = tracker.outputItems.get(outputIndex)
+    if (
+      originalId
+      && typeof item === "object"
+      && item !== null
+      && !Array.isArray(item)
+    ) {
+      const outputItem = item as Record<string, unknown>
+      if (outputItem.id === originalId) continue
+      outputItem.id = originalId
+      changed = true
+    }
+  }
+  return changed ? JSON.stringify(parsed) : data
 }
 
 const handleOutputItemAdded = (

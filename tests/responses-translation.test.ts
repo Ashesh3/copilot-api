@@ -27,6 +27,75 @@ test("keeps Anthropics max_tokens when translating to Responses payload", () => 
   expect(translated.max_output_tokens).toBe(64)
 })
 
+test("omits tool_choice when no Messages tools translate to Responses", () => {
+  const translated = translateAnthropicMessagesToResponsesPayload({
+    model: "gpt-current",
+    max_tokens: 64,
+    messages: [{ role: "user", content: "hello" }],
+    tool_choice: { type: "any" },
+  })
+
+  expect(translated).not.toHaveProperty("tool_choice")
+})
+
+test("defaults a schema-less named tool without closing its Responses schema", () => {
+  const translated = translateAnthropicMessagesToResponsesPayload({
+    model: "gpt-current",
+    max_tokens: 64,
+    messages: [{ role: "user", content: "hello" }],
+    tools: [{ name: "lookup", description: "Look something up" }],
+    tool_choice: { type: "tool", name: "lookup" },
+  })
+
+  expect(translated.tools).toEqual([
+    {
+      type: "function",
+      name: "lookup",
+      description: "Look something up",
+      parameters: { type: "object", properties: {} },
+      strict: false,
+    },
+  ])
+  expect(translated.tool_choice).toEqual({
+    type: "function",
+    name: "lookup",
+  })
+  const parameters = (
+    translated.tools?.[0] as { parameters?: Record<string, unknown> }
+  ).parameters
+  expect(parameters).not.toHaveProperty("required")
+  expect(parameters).not.toHaveProperty("additionalProperties")
+})
+
+test("omits a Responses tool choice when its named tool did not translate", () => {
+  const translated = translateAnthropicMessagesToResponsesPayload({
+    model: "gpt-current",
+    max_tokens: 64,
+    messages: [{ role: "user", content: "hello" }],
+    tools: [{ name: "kept", input_schema: { type: "object" } }, { name: 3 }],
+    tool_choice: { type: "tool", name: "3" },
+  } as unknown as AnthropicMessagesPayload)
+
+  expect(translated.tools).toHaveLength(1)
+  expect(translated).not.toHaveProperty("tool_choice")
+})
+
+test("omits typed server tools from the Responses fallback", () => {
+  const translated = translateAnthropicMessagesToResponsesPayload({
+    model: "gpt-current",
+    max_tokens: 64,
+    messages: [{ role: "user", content: "hello" }],
+    tools: [
+      { name: "lookup" },
+      { type: "future_native_20270101", name: "future_native" },
+    ],
+    tool_choice: { type: "tool", name: "future_native" },
+  })
+
+  expect(translated.tools?.map((tool) => tool.name)).toEqual(["lookup"])
+  expect(translated).not.toHaveProperty("tool_choice")
+})
+
 test("preserves tool references as explicit text on Responses", () => {
   const translated = translateAnthropicMessagesToResponsesPayload({
     model: "gpt-5.4",
@@ -309,6 +378,70 @@ test.each([
     expect(translated.input as unknown).toEqual(expected)
   },
 )
+
+test("returns unsigned thinking when Responses reasoning omits encrypted content", () => {
+  const response = {
+    id: "resp_unsigned_reasoning",
+    object: "response",
+    created_at: 1,
+    model: "gpt-current",
+    output: [
+      {
+        id: "rs_unsigned",
+        type: "reasoning",
+        summary: [{ type: "summary_text", text: "visible reasoning" }],
+        encrypted_content: null,
+      },
+    ],
+    output_text: "",
+    status: "completed",
+    usage: null,
+    error: null,
+    incomplete_details: null,
+    instructions: null,
+    metadata: null,
+    parallel_tool_calls: true,
+    temperature: null,
+    tool_choice: "auto",
+    tools: [],
+    top_p: null,
+  } as unknown as ResponsesResult
+
+  expect(translateResponsesResultToAnthropic(response).content).toEqual([
+    { type: "thinking", thinking: "visible reasoning" },
+  ])
+})
+
+test("omits empty unsigned Responses reasoning without synthetic text", () => {
+  const response = {
+    id: "resp_empty_reasoning",
+    object: "response",
+    created_at: 1,
+    model: "gpt-current",
+    output: [
+      {
+        id: "rs_empty",
+        type: "reasoning",
+        summary: [],
+        encrypted_content: null,
+      },
+    ],
+    output_text: "",
+    status: "completed",
+    usage: null,
+    error: null,
+    incomplete_details: null,
+    instructions: null,
+    metadata: null,
+    parallel_tool_calls: true,
+    temperature: null,
+    tool_choice: "auto",
+    tools: [],
+    top_p: null,
+  } as unknown as ResponsesResult
+
+  expect(translateResponsesResultToAnthropic(response).content).toEqual([])
+})
 
 test("preserves integer Responses reasoning effort across named suffixes", () => {
   const payload = {

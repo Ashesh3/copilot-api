@@ -13,6 +13,10 @@ import { LocalHTTPError } from "~/lib/error"
 import { setModelSettingsForTest } from "~/lib/model-settings"
 import { state } from "~/lib/state"
 import { createResponses } from "~/services/copilot/create-responses"
+import {
+  finalizeNativeResponsesRequest,
+  prepareResponsesRequest,
+} from "~/services/copilot/responses-contract"
 
 const originalFetch = globalThis.fetch
 let lastRequestBody: Record<string, unknown> | undefined
@@ -50,6 +54,52 @@ beforeEach(() => {
   state.githubToken = "github-token"
   state.isMultiToken = false
   setModelSettingsForTest([])
+})
+
+test("sends a finalized tolerant native Responses body without preparing again", async () => {
+  const caller = {
+    model: "gpt-4o",
+    input: [{ type: "future_item", content: { future: true } }],
+    future_top_level: { retained: [1, 2] },
+    background: { future: true },
+    previous_response_id: "resp_previous",
+    service_tier: { future: "priority" },
+    context_management: { future: "shape" },
+    tools: [
+      { name: "malformed evidence" },
+      { type: "mcp", server_label: "native", future: { retained: true } },
+    ],
+    store: true,
+  }
+  const prepared = prepareResponsesRequest(caller)
+  const finalized = finalizeNativeResponsesRequest(prepared, {
+    model: "gpt-4o",
+    implicitDefault: false,
+  })
+
+  await createResponses(finalized.body, {
+    vision: false,
+    initiator: "user",
+    prepared: true,
+  })
+
+  expect(lastRequestBody).toEqual(finalized.body)
+  expect(lastRequestBody).toMatchObject({
+    future_top_level: { retained: [1, 2] },
+    background: { future: true },
+    previous_response_id: "resp_previous",
+    service_tier: { future: "priority" },
+    context_management: { future: "shape" },
+    store: false,
+    tools: [
+      { type: "mcp", server_label: "native", future: { retained: true } },
+    ],
+  })
+  expect(prepared.source as Record<string, unknown>).toEqual({
+    ...caller,
+    store: false,
+  })
+  expect(caller.store).toBe(true)
 })
 
 test("omits sampling parameters for GPT-5.6 reasoning requests", async () => {

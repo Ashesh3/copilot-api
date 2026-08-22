@@ -16,7 +16,7 @@ export const ANTHROPIC_HTTP_ERROR_STATUS_TYPES = [
 export const STREAM_BEHAVIOR_CONTRACT = [
   {
     surface: "Messages handled HTTP failure",
-    behavior: `error event with ${ANTHROPIC_HTTP_ERROR_STATUS_TYPES.map(({ type }) => type).join(", ")}`,
+    behavior: `exactly one dialect-correct error outcome after closing open blocks; preserve partial output and the owned upstream failure representation when present (${ANTHROPIC_HTTP_ERROR_STATUS_TYPES.map(({ type }) => type).join(", ")})`,
   },
   {
     surface: "Synthetic Responses-from-Messages failure",
@@ -25,15 +25,17 @@ export const STREAM_BEHAVIOR_CONTRACT = [
   {
     surface: "Native Responses terminal families",
     behavior:
-      "sanitized response.completed, response.incomplete, response.failed, error",
+      "preserve response.completed, response.incomplete, response.failed, and error terminal objects in their established protocol representation; exactly one terminal",
   },
   {
-    surface: "Thrown native Chat transport failure",
-    behavior: "written chunks then close without synthesized error event",
+    surface: "Committed Chat stream failure",
+    behavior:
+      "preserve emitted partial chunks, then emit one Chat error event and one [DONE]; no writes after abort",
   },
   {
-    surface: "Thrown native Responses transport failure",
-    behavior: "buffered unwritten chunks may be absent when the stream closes",
+    surface: "Source end and abort",
+    behavior:
+      "clean EOF without a terminal synthesizes one dialect-local failure; abort or detach emits nothing further",
   },
 ] as const satisfies ReadonlyArray<CompatibilityContractRow>
 
@@ -64,11 +66,21 @@ export const SESSION_TOKEN_PRIVACY_CONTRACT = [
 
 export const ERROR_ENVELOPE_CONTRACT = [
   {
-    surface: "Chat and Responses HTTP",
-    behavior: "OpenAI/Copilot envelope with fixed safe message",
+    surface: "Final non-empty upstream HTTP failure",
+    behavior:
+      "exact response body in normal client, ordinary logs, and Sentry; preserve upstream status and content type",
   },
   {
-    surface: "/v1/messages and /v1/messages/count_tokens",
-    behavior: "Anthropic envelope with fixed safe message",
+    surface: "Local, empty-body, unreadable-body, or transport-only failure",
+    behavior:
+      "use the existing dialect/protocol-shaped proxy-authored fallback",
+  },
+] as const satisfies ReadonlyArray<CompatibilityContractRow>
+
+export const ATTACHMENT_URL_CONTRACT = [
+  {
+    surface: "Runtime-valid absolute HTTP(S) attachment/file URL",
+    behavior:
+      "fetchable without destination, DNS, IP, userinfo, or redirect-target filtering; caller abort, timeout, byte, and redirect limits remain",
   },
 ] as const satisfies ReadonlyArray<CompatibilityContractRow>

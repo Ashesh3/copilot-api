@@ -1,3 +1,4 @@
+import * as Sentry from "@sentry/bun"
 import {
   afterAll,
   afterEach,
@@ -6,11 +7,14 @@ import {
   expect,
   mock,
   test,
+  spyOn,
 } from "bun:test"
+import consola from "consola"
 
 import type { ModelsResponse } from "~/services/copilot/get-models"
 
 import { STREAM_BEHAVIOR_CONTRACT } from "~/lib/compatibility-contract-values"
+import { HTTPError } from "~/lib/error"
 import { setModelRedirectsForTest } from "~/lib/model-redirect"
 import { setModelSettingsForTest } from "~/lib/model-settings"
 import { setSsePreflushDeadlineForTest } from "~/lib/sse-lifecycle"
@@ -164,6 +168,80 @@ test("emits an in-band Responses failure for a late upstream rejection", async (
   }
 })
 
+test.each([
+  {
+    body: new TextEncoder().encode("  exact messages text\r\n  "),
+    contentType: "text/plain; charset=utf-8",
+    field: "message",
+  },
+  {
+    body: Uint8Array.from([0x00, 0xff, 0x80, 0x41]),
+    contentType: "application/octet-stream",
+    field: "body_bytes",
+  },
+] as const)(
+  "emits and reports an exact late Messages HTTPError $field once",
+  async (fixture) => {
+    const errorSpy = spyOn(consola, "error")
+    const sentrySpy = spyOn(Sentry, "captureException").mockImplementation(
+      () => "event-id",
+    )
+    try {
+      const response = await server.request("/v1/responses", createRequest())
+      const reader = requireBody(response).getReader()
+      await reader.read()
+      rejectUpstream?.(
+        new HTTPError(
+          "HTTPError private message",
+          new Response(fixture.body.slice(), {
+            headers: { "content-type": fixture.contentType },
+            status: 429,
+            statusText: "Private Status",
+          }),
+          { private_request: "private request" },
+        ),
+      )
+      const rest = await readRemaining(reader)
+      const frames = Array.from(
+        rest.matchAll(/^data: (\{.*\})$/gm),
+        (match) => JSON.parse(match[1]) as Record<string, unknown>,
+      )
+      const expected =
+        fixture.field === "message" ?
+          new TextDecoder(undefined, { ignoreBOM: true }).decode(fixture.body)
+        : Array.from(fixture.body)
+      for (const frame of frames.slice(-2)) {
+        const error = frameError(frame)
+        expect(error[fixture.field]).toEqual(expected)
+        expect(error.status).toBe(429)
+        expect(error.content_type).toBe(fixture.contentType)
+      }
+      expect(
+        errorSpy.mock.calls.filter(
+          (call) =>
+            typeof call[0] === "object"
+            && call[0] !== null
+            && "upstreamResponseBodyBytes" in call[0],
+        ),
+      ).toHaveLength(1)
+      expect(
+        sentrySpy.mock.calls.filter((call) => hasUpstreamBodyExtra(call[1])),
+      ).toHaveLength(1)
+      const diagnostics = JSON.stringify([
+        rest,
+        errorSpy.mock.calls,
+        sentrySpy.mock.calls,
+      ])
+      expect(diagnostics).not.toContain("HTTPError private message")
+      expect(diagnostics).not.toContain("Private Status")
+      expect(diagnostics).not.toContain("private request")
+    } finally {
+      errorSpy.mockRestore()
+      sentrySpy.mockRestore()
+    }
+  },
+)
+
 test("does not emit failure or leak rejection when abort races late failure", async () => {
   const unhandled: Array<unknown> = []
   const onUnhandled = (event: Event): void => {
@@ -248,4 +326,23 @@ async function readRemaining(reader: {
     if (next.done) return output
     output += decoder.decode(next.value, { stream: true })
   }
+}
+
+function frameError(frame: Record<string, unknown>): Record<string, unknown> {
+  const response = frame.response
+  if (typeof response !== "object" || response === null) return frame
+  const error = (response as Record<string, unknown>).error
+  return typeof error === "object" && error !== null ?
+      (error as Record<string, unknown>)
+    : frame
+}
+
+function hasUpstreamBodyExtra(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false
+  const extra = (value as Record<string, unknown>).extra
+  return (
+    typeof extra === "object"
+    && extra !== null
+    && "upstreamResponseBodyBytes" in extra
+  )
 }
