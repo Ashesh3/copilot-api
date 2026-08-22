@@ -61,10 +61,7 @@ import {
   recordNonDefaultBehavior,
   setRequestContext,
 } from "~/lib/request-logger"
-import {
-  installRoutingAffinityFallback,
-  resolveResponsesRoutingAffinity,
-} from "~/lib/routing-affinity"
+import { installResponsesRoutingAffinity } from "~/lib/routing-affinity"
 import {
   createSentryChatSpanOptions,
   createSentryInvokeAgentSpanOptions,
@@ -772,10 +769,8 @@ export const handleResponses = async (c: Context) => {
     anthropicVersion: c.req.header("anthropic-version"),
     modelProviderPreference: c.req.header("x-model-provider-preference"),
   }
-  installRoutingAffinityFallback(
-    resolveResponsesRoutingAffinity(
-      (sourcePayload as Record<string, unknown>).client_metadata,
-    ),
+  installResponsesRoutingAffinity(
+    (sourcePayload as Record<string, unknown>).client_metadata,
   )
   const conversationId = setSentryConversationIdFromRequest(c, sourcePayload)
 

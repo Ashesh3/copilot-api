@@ -1621,6 +1621,60 @@ test("installs Responses client metadata affinity before provider dispatch", asy
   }
 })
 
+test("routes Codex forks through the parent account and upstream session", async () => {
+  const modelId = "responses-fork-affinity-model"
+  const model = {
+    ...responsesCapableModels.data[0],
+    id: modelId,
+    name: modelId,
+  }
+  state.models = { data: [model], object: "list" }
+  for (const [id, token] of [
+    [2201, "responses-fork-parent-token"],
+    [2202, "responses-fork-child-token"],
+  ] as const) {
+    const account = tokenPool.addAccount(`github-${id}`, "individual", id)
+    account.copilotToken = token
+    account.healthy = true
+    account.models = new Set([modelId])
+    account.modelsData = [model]
+  }
+  tokenPool.rebuildModelIndex()
+  state.isMultiToken = true
+
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "session-id": "fork-child-1",
+    },
+    body: JSON.stringify({
+      model: modelId,
+      input: "continue the fork",
+      client_metadata: {
+        session_id: "fork-child-1",
+        thread_id: "fork-child-1",
+        "x-codex-turn-metadata": JSON.stringify({
+          forked_from_thread_id: "fork-parent-0",
+        }),
+      },
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(capturedAffinity).toEqual({
+    key: "fork-parent-0",
+    source: "codex_thread",
+  })
+  expect(capturedAuthorization).toEqual(["Bearer responses-fork-parent-token"])
+  expect(lastUpstreamHeaders?.get("x-client-session-id")).toBe(
+    "81e3167a-de1a-5ffa-8c20-f832dc0e2909",
+  )
+  expect(lastUpstreamHeaders?.get("x-interaction-id")).toBe(
+    "81e3167a-de1a-5ffa-8c20-f832dc0e2909",
+  )
+})
+
 test("keeps Responses header affinity over metadata and ignores malformed metadata", async () => {
   state.models = responsesCapableModels
   await server.request("/v1/responses", {

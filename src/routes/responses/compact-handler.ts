@@ -6,10 +6,7 @@ import { randomUUID } from "node:crypto"
 import { createHandlerLogger } from "~/lib/logger"
 import { parseModelSuffix } from "~/lib/model-suffix"
 import { setRequestContext } from "~/lib/request-logger"
-import {
-  installRoutingAffinityFallback,
-  resolveResponsesRoutingAffinity,
-} from "~/lib/routing-affinity"
+import { installResponsesRoutingAffinity } from "~/lib/routing-affinity"
 import { state } from "~/lib/state"
 import {
   type CompactionPayloadFitResult,
@@ -247,9 +244,7 @@ const reportCompactionReduction = (
 
 export const handleCompact = async (c: Context) => {
   const body = await c.req.json<CompactRequestBody>()
-  installRoutingAffinityFallback(
-    resolveResponsesRoutingAffinity(body.client_metadata),
-  )
+  installResponsesRoutingAffinity(body.client_metadata)
 
   const { baseModel } = parseModelSuffix(body.model)
   const model = baseModel
