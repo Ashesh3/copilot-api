@@ -1147,7 +1147,7 @@ describe("responses websocket message handling", () => {
       expect(frame).toMatchObject({
         status: 400,
         error: {
-          code: "endpoint_translation_unsupported",
+          code: "bad_request",
           message: safeMessage,
           type: "invalid_request_error",
         },
@@ -1159,7 +1159,7 @@ describe("responses websocket message handling", () => {
         terminalStatus: "REJECTED",
       })
       expect(structuredLog).toMatchObject({
-        code: "endpoint_translation_unsupported",
+        code: "bad_request",
         status: 400,
       })
       expect(telemetry.models[0]).toMatchObject({
@@ -1210,6 +1210,7 @@ describe("responses websocket message handling", () => {
   })
 
   test("does not retry a native WebSocket compatibility 400", async () => {
+    state.copilotToken = "copilot-token"
     state.models = responsesCapableModels
     queuedResponses.push(
       Response.json(
@@ -1237,11 +1238,11 @@ describe("responses websocket message handling", () => {
     )
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
-    expect(
-      ws.sent.some(
-        (frame) => (JSON.parse(frame) as { type?: unknown }).type === "error",
-      ),
-    ).toBe(true)
+    expect(JSON.parse(ws.sent.at(-1) ?? "{}")).toMatchObject({
+      type: "error",
+      status: 400,
+      error: { code: "invalid_request_body" },
+    })
   })
 
   test("does not retry a Chat-backed WebSocket compatibility 400", async () => {
@@ -1272,11 +1273,11 @@ describe("responses websocket message handling", () => {
     )
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
-    expect(
-      ws.sent.some(
-        (frame) => (JSON.parse(frame) as { type?: unknown }).type === "error",
-      ),
-    ).toBe(true)
+    expect(JSON.parse(ws.sent.at(-1) ?? "{}")).toMatchObject({
+      type: "error",
+      status: 400,
+      error: { code: "invalid_request_body" },
+    })
   })
 
   test("completes a native turn when upstream omits terminal output_text", async () => {
@@ -1532,7 +1533,7 @@ describe("responses websocket message handling", () => {
       type: "error",
       status: 400,
       error: {
-        code: "invalid_request_error",
+        code: "bad_request",
         message: "Continuation model must match the previous response model.",
         type: "invalid_request_error",
         request_id: "req-test",
@@ -2361,7 +2362,7 @@ describe("responses websocket message handling", () => {
     expect(JSON.parse(ws.sent.at(-1) ?? "{}")).toMatchObject({
       type: "error",
       status: 400,
-      error: { code: "endpoint_translation_unsupported" },
+      error: { code: "bad_request" },
     })
   })
 
@@ -2518,7 +2519,7 @@ describe("responses websocket message handling", () => {
     expect(JSON.parse(ws.sent.at(-1) ?? "{}")).toMatchObject({
       type: "error",
       status: 400,
-      error: { code: "web_search_limit_exceeded" },
+      error: { code: "bad_request" },
     })
   })
 
@@ -3049,7 +3050,7 @@ describe("responses websocket message handling", () => {
       expect(errorFrame.type).toBe("error")
       expect(errorFrame.status).toBe(400)
       expect(errorFrame.error).toEqual({
-        code: "previous_response_not_found",
+        code: "bad_request",
         message:
           "The previous response is not available on this WebSocket connection.",
         type: "invalid_request_error",
@@ -3111,7 +3112,7 @@ describe("responses websocket message handling", () => {
         type: "error",
         status: 400,
         error: {
-          code: "invalid_request_error",
+          code: "bad_request",
           message,
           type: "invalid_request_error",
           request_id: "req-test",
@@ -3325,7 +3326,7 @@ describe("responses websocket upstream handling", () => {
     }
     expect(errorFrame.type).toBe("error")
     expect(errorFrame.status).toBe(413)
-    expect(errorFrame.error?.code).toBe("request_too_large")
+    expect(errorFrame.error?.code).toBe("bad_request")
     expect(errorFrame.error?.message).toContain(
       "safe compaction payload budget",
     )
@@ -3745,7 +3746,7 @@ describe("responses websocket warmup handling", () => {
         }
       },
       payload: {},
-      code: "endpoint_translation_unsupported",
+      code: "bad_request",
     },
   ])(
     "rejects warmup $name before success",
@@ -3775,7 +3776,7 @@ describe("responses websocket warmup handling", () => {
     },
   )
 
-  test("selects a Messages-only warmup without dispatching upstream", async () => {
+  test("evaluates a tolerant Messages-only warmup without dispatching upstream", async () => {
     state.models = {
       ...responsesCapableModels,
       data: responsesCapableModels.data.map((model) => ({
@@ -3791,7 +3792,10 @@ describe("responses websocket warmup handling", () => {
       JSON.stringify({
         type: "response.create",
         model: "gpt-5.4",
-        input: "warmup",
+        input: [
+          { type: "future_item", payload: "private-future-value" },
+          { type: "message", role: "user", content: "warmup" },
+        ],
         generate: false,
         tools: [],
         tool_choice: "none",
@@ -3804,7 +3808,87 @@ describe("responses websocket warmup handling", () => {
       true,
     )
     const snapshot = ws.data.responseSnapshots.values().next().value
-    expect(snapshot).toMatchObject({ model: "gpt-5.4", stream: true })
+    expect(snapshot).toMatchObject({
+      model: "gpt-5.4",
+      input: [
+        { type: "future_item", payload: "private-future-value" },
+        { type: "message", role: "user", content: "warmup" },
+      ],
+      stream: true,
+    })
+    expect(snapshot).not.toHaveProperty("generate")
+  })
+
+  test("evaluates a tolerant Chat-only warmup without dispatching upstream", async () => {
+    installWebSocketEndpoint("/chat/completions")
+    const ws = createTestWebSocket()
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: [
+          { type: "future_item", payload: "private-future-value" },
+          { type: "message", role: "user", content: "warmup" },
+        ],
+        generate: false,
+        tools: [],
+      }),
+    )
+
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(ws.sent.some((frame) => frame.includes("response.completed"))).toBe(
+      true,
+    )
+    expect(ws.data.responseSnapshots.values().next().value).toMatchObject({
+      model: "gpt-5.4",
+      input: [
+        { type: "future_item", payload: "private-future-value" },
+        { type: "message", role: "user", content: "warmup" },
+      ],
+      stream: true,
+    })
+    expect(ws.data.responseSnapshots.values().next().value).not.toHaveProperty(
+      "generate",
+    )
+  })
+
+  test("evaluates attachment-bearing tolerant warmups without attachment I/O", async () => {
+    installWebSocketEndpoint("/chat/completions")
+    const ws = createTestWebSocket()
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: [
+          { type: "future_item", payload: "private-future-value" },
+          {
+            type: "message",
+            role: "user",
+            content: [
+              { type: "input_text", text: "warmup" },
+              {
+                type: "input_image",
+                image_url: "https://attachments.invalid/private.png",
+              },
+            ],
+          },
+        ],
+        generate: false,
+        tools: [],
+      }),
+    )
+
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(ws.sent.some((frame) => frame.includes("response.completed"))).toBe(
+      true,
+    )
+    expect(
+      JSON.stringify(ws.data.responseSnapshots.values().next().value),
+    ).toContain("https://attachments.invalid/private.png")
   })
 
   test("preserves native header options across warmup continuation", async () => {

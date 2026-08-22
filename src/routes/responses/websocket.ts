@@ -69,14 +69,12 @@ import {
 } from "./chat-fallback-completion"
 import {
   prepareResponsesCandidates,
-  type ResponsesNativeCandidate,
   type ResponsesEndpointCandidate,
   selectResponsesCandidate,
 } from "./fallback-candidates"
 import {
   disableParallelWebSearch,
   normalizeResponsesReasoning,
-  prepareResponsesRouteForTransport,
   streamChatCompletionsAsResponses,
 } from "./handler"
 import { executePreparedResponsesMessagesBridge } from "./messages-bridge"
@@ -611,47 +609,31 @@ async function prepareResponsesWebSocketCandidate(options: {
   candidate: ResponsesEndpointCandidate
   endpoint: CopilotInferenceEndpoint
 }> {
-  if (isSyntheticWarmupRequest(options.payload)) {
-    const route = await prepareResponsesRouteForTransport({
-      payload: options.payload,
-      selectedModel: options.selectedModel,
-      signal: options.signal,
-    })
-    return {
-      candidate: createWarmupResponsesCandidate(route.preparedPayload),
-      endpoint: route.decision.target,
-    }
-  }
-  const candidate = await prepareEvaluatedResponsesWebSocketCandidate(options)
+  const candidate = await prepareEvaluatedResponsesWebSocketCandidate({
+    ...options,
+    evaluationOnly: isSyntheticWarmupRequest(options.payload),
+  })
   return {
     candidate,
     endpoint: candidate.endpoint,
   }
 }
 
-function createWarmupResponsesCandidate(
-  payload: ResponsesPayload,
-): ResponsesNativeCandidate {
-  return {
-    endpoint: "/responses",
-    reason: "endpoint_unavailable",
-    payload,
-    check: { mode: "evaluated", findings: [], cost: 0, supported: true },
-  }
-}
-
 async function prepareEvaluatedResponsesWebSocketCandidate(options: {
+  evaluationOnly?: boolean
   payload: ResponsesPayload
   reasoningEffort: ReasoningEffort | undefined
   selectedModel: Model | undefined
   signal?: AbortSignal
 }): Promise<ResponsesEndpointCandidate> {
-  const preparedSource = prepareResponsesRequest(options.payload)
+  const evaluationPayload = structuredClone(options.payload)
+  if (options.evaluationOnly) delete evaluationPayload.generate
+  const preparedSource = prepareResponsesRequest(evaluationPayload)
   const nativeBody = finalizeNativeResponsesRequest(preparedSource, {
-    model: options.payload.model,
-    defaultEffort: getModelReasoningConfig(options.payload.model)
+    model: evaluationPayload.model,
+    defaultEffort: getModelReasoningConfig(evaluationPayload.model)
       ?.defaultEffort,
-    implicitDefault: usesImplicitReasoningDefault(options.payload.model),
+    implicitDefault: usesImplicitReasoningDefault(evaluationPayload.model),
   })
   disableParallelWebSearch(nativeBody.body)
   const candidates = await prepareResponsesCandidates({
@@ -659,6 +641,7 @@ async function prepareEvaluatedResponsesWebSocketCandidate(options: {
     finalReasoningEffort: options.reasoningEffort,
     nativeBody,
     preservedSource: preparedSource,
+    resolveRemoteAttachments: !options.evaluationOnly,
     selectedModel: options.selectedModel,
     signal: options.signal,
   })
@@ -1387,10 +1370,11 @@ function normalizeWebSocketError(
   inspection?: HttpErrorInspection,
 ): WebSocketErrorFrameOptions {
   if (isHTTPError(error) && error instanceof WebSocketRequestError) {
+    const status = error.response.status
     return {
-      code: error.errorCode,
+      code: normalizeLocalWebSocketErrorCode(error.errorCode, status),
       message: error.message,
-      status: error.response.status,
+      status,
       type: error.errorType,
     }
   }
@@ -1407,7 +1391,9 @@ function normalizeWebSocketError(
   }
   if (inspection?.kind === "upstream") {
     return {
-      code: mapHttpStatusToWebSocketErrorCode(inspection.status),
+      code:
+        inspection.clientError?.code
+        ?? mapHttpStatusToWebSocketErrorCode(inspection.status),
       message: "Upstream request failed",
       status: inspection.status,
       type: "websocket_error",
@@ -1438,19 +1424,15 @@ function mapLocalWebSocketErrorCode(
   local: NonNullable<HttpErrorInspection["localError"]>,
   status: number,
 ): string {
-  if (
-    local.type === "session_affinity_error"
-    || local.type === "account_unavailable"
-  ) {
-    return mapHttpStatusToWebSocketErrorCode(status)
-  }
-  if (
-    local.code === "compaction_payload_too_large"
-    || local.code === "responses_payload_too_large"
-  ) {
-    return "request_too_large"
-  }
-  return local.code ?? mapHttpStatusToWebSocketErrorCode(status)
+  return normalizeLocalWebSocketErrorCode(local.code, status)
+}
+
+function normalizeLocalWebSocketErrorCode(
+  code: string | undefined,
+  status: number,
+): string {
+  if (status >= 400 && status < 500) return "bad_request"
+  return code ?? mapHttpStatusToWebSocketErrorCode(status)
 }
 
 function mapHttpStatusToWebSocketErrorCode(status: number): string {

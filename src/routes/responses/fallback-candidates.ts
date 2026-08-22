@@ -49,6 +49,7 @@ export interface PrepareResponsesCandidatesOptions {
   readonly finalReasoningEffort?: string | number
   readonly nativeBody: FinalizedNativeResponsesRequest
   readonly preservedSource: PreparedResponsesSource
+  readonly resolveRemoteAttachments?: boolean
   readonly selectedModel: Model | undefined
   readonly signal?: AbortSignal
 }
@@ -57,7 +58,9 @@ export async function prepareResponsesCandidates(
   options: PrepareResponsesCandidatesOptions,
 ): Promise<PreparedResponsesCandidates> {
   const finalModel = options.adaptationSource.model
-  const attachmentCache = createResponsesAttachmentCache()
+  const attachmentCache = createResponsesAttachmentCache({
+    resolveRemote: options.resolveRemoteAttachments,
+  })
   const support = getModelEndpointSupport(options.selectedModel)
   const native: ResponsesNativeCandidate = {
     endpoint: "/responses",

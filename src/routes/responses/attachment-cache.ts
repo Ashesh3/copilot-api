@@ -6,6 +6,16 @@ export interface ResponsesAttachmentCache {
   readonly resolve: AttachmentFetchResolver
 }
 
-export function createResponsesAttachmentCache(): ResponsesAttachmentCache {
-  return { resolve: createAttachmentFetchResolver() }
+export function createResponsesAttachmentCache(options?: {
+  readonly resolveRemote?: boolean
+}): ResponsesAttachmentCache {
+  return {
+    resolve:
+      options?.resolveRemote === false ?
+        ({ signal }) => {
+          signal?.throwIfAborted()
+          return Promise.resolve(null)
+        }
+      : createAttachmentFetchResolver(),
+  }
 }
