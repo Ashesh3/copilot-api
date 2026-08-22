@@ -9,6 +9,12 @@ secrets/
 # aider
 .aider*
 
+# local agent and editor workspace files
+/.claude/
+/.impeccable/
+/.superpowers/
+/.vscode/
+
 # eslint cache
 .eslintcache
 
