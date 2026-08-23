@@ -63,6 +63,11 @@ Generation and WebSocket locations disable request and response buffering for
 streaming and inherit the maximum-duration server settings so a quiet upstream
 does not fall back to Nginx's 60-second default.
 
+The public OpenAI-compatible transcription location publishes only
+`POST /v1/audio/transcriptions` and disables request buffering so multipart
+audio can stream over HTTP/1.1 to the application without Nginx first spooling
+the upload.
+
 The public template adds baseline browser headers with `always`, including to
 Nginx-generated denials. It deliberately does not set Content Security Policy;
 the application generates a per-response nonce and the OAuth pages add only a

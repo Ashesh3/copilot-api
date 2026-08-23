@@ -42,6 +42,19 @@ test("public nginx template denies known pre-auth compatibility surfaces", async
   expect(template).toContain("^/(?:v1/)?alpha/search/?$")
 })
 
+test("public nginx template exposes the canonical transcription upload route", async () => {
+  const template = await read("sites-available/public-domain.conf.template")
+  const location = template.match(
+    /location = \/v1\/audio\/transcriptions \{([\s\S]*?)\n {2}\}/,
+  )?.[1]
+
+  expect(location).toBeDefined()
+  expect(location).toContain("limit_except POST { deny all; }")
+  expect(location).toContain("proxy_pass {{UPSTREAM_URL}};")
+  expect(location).toContain("proxy_http_version 1.1;")
+  expect(location).toContain("proxy_request_buffering off;")
+})
+
 test("Claude spoof template exposes only authenticated compatibility families", async () => {
   const template = await read("sites-available/spoof-domains.conf.template")
   expect(template).toContain("^/v1/code/sessions")

@@ -81,6 +81,7 @@ export function isGoogleModelActionRequest(
  * be classified before debug logging considers cloning or reading the body.
  */
 export function shouldOmitRequestBodyFromDiagnostics(path: string): boolean {
+  if (/^\/v1\/audio\/transcriptions\/?(?:[?#]|$)/.test(path)) return true
   if (!isGoogleModelActionPath(path)) return false
   return !SUPPORTED_GOOGLE_MODEL_ACTION_PATH.test(path)
 }

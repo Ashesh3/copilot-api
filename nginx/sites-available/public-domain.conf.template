@@ -89,6 +89,13 @@ server {
     proxy_pass {{UPSTREAM_URL}};
   }
 
+  location = /v1/audio/transcriptions {
+    limit_except POST { deny all; }
+    proxy_pass {{UPSTREAM_URL}};
+    proxy_http_version 1.1;
+    proxy_request_buffering off;
+  }
+
   # Codex Desktop's standalone web.run tool uses the typed alpha/search API
   # instead of embedding a hosted web_search tool in a Responses request.
   location ~ ^/(?:v1/)?alpha/search/?$ {

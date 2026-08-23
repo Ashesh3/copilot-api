@@ -178,6 +178,15 @@ const protectedRoutes: Array<ProtectedRoute> = [
     }),
   },
   {
+    name: "v1 audio transcriptions",
+    method: "POST",
+    path: "/v1/audio/transcriptions",
+    mountedMethod: "POST",
+    mountedPath: "/v1/audio/transcriptions",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({}),
+  },
+  {
     name: "v1 responses compact",
     method: "POST",
     path: "/v1/responses/compact",
@@ -349,7 +358,7 @@ afterEach(() => {
 describe("Middleware", () => {
   describe("API key guard", () => {
     test("protected route matrix entries map to mounted routes", () => {
-      expect(protectedRoutes).toHaveLength(30)
+      expect(protectedRoutes).toHaveLength(31)
 
       const guardIndex = server.routes.findIndex(
         (route) => route.handler === apiKeyGuard,

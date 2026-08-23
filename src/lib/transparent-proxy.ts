@@ -37,6 +37,7 @@ const OWNED_ROUTE_PREFIXES = [
   "/sessions",
   "/transcribe",
   "/usage",
+  "/v1/audio/transcriptions",
   "/v1/chat/completions",
   "/v1/code",
   "/v1/embeddings",

@@ -67,13 +67,15 @@ feature-flag limitations.
 | Responses compaction | `POST /v1/responses/compact` | Compatibility compaction that returns a proxy-generated `response.compaction` item |
 | Responses WebSocket | WebSocket upgrade on `/v1/responses` or `/responses` | Stateful Responses-style streaming over WebSocket; this is not the OpenAI Realtime API |
 | OpenAI Embeddings | `POST /v1/embeddings` | Copilot embeddings or a configured custom embedding provider |
+| OpenAI Audio Transcriptions | `POST /v1/audio/transcriptions` | OpenAI-compatible multipart transcription backed by Groq; `whisper-1` maps to the configured Groq Whisper model |
 | Anthropic Messages | `POST /v1/messages` | Streaming and non-streaming Messages translation, including native routing where available |
 | Anthropic token count | `POST /v1/messages/count_tokens` | Compatibility token counting |
 | Google Generative AI | `POST /v1/models/:model:generateContent` | Non-streaming Google request and response translation |
 | Google Generative AI streaming | `POST /v1/models/:model:streamGenerateContent` | Streaming Google translation |
 
-The OpenAI routes also work without the `/v1` prefix. Google routes are
-available under `/v1/models`, `/v1beta/models`, and `/models`.
+Most OpenAI inference routes also work without the `/v1` prefix. Audio
+transcriptions use only the canonical `/v1/audio/transcriptions` route. Google
+routes are available under `/v1/models`, `/v1beta/models`, and `/models`.
 
 Model availability is account-specific and changes upstream. Query
 `GET /v1/models` instead of relying on a hardcoded model list.
@@ -197,6 +199,26 @@ OPENAI_API_KEY=local-placeholder
 
 When gateway authentication is enabled, replace the placeholder with the
 configured gateway key.
+
+Audio transcription uses the same `/v1` base URL and gateway key. It requires
+`GROQ_API_KEY` (or `groqApiKey` in `config.json`):
+
+```sh
+curl http://127.0.0.1:4141/v1/audio/transcriptions \
+  -H "Authorization: Bearer replace-with-gateway-key" \
+  -F "file=@recording.webm" \
+  -F "model=whisper-1" \
+  -F "response_format=json"
+```
+
+The `whisper-1` compatibility name maps to `groqModel`, which defaults to
+`whisper-large-v3-turbo`. Groq-native `whisper-large-v3` and
+`whisper-large-v3-turbo` model IDs are also accepted. OpenAI-only GPT
+transcription and diarization models are rejected with an OpenAI-shaped `400`
+because Groq cannot serve those model contracts. The Whisper-compatible
+`json`, `text`, `verbose_json`, `srt`, and `vtt` response formats are supported;
+SRT and VTT are rendered from Groq's verbose segment timestamps. Other
+multipart fields are forwarded unchanged.
 
 ### Anthropic-compatible clients and Claude Code
 
@@ -542,6 +564,8 @@ inference.
 ### Codex Desktop
 
 - `POST /transcribe` provides dictation through Groq speech-to-text.
+- `POST /v1/audio/transcriptions` provides the separately authenticated
+  OpenAI-compatible transcription API.
 - `POST /codex/responses` provides configurable transcript cleanup.
 - Statsig overrides can be managed in the dashboard and applied through the
   Statsig proxy middleware. The dedicated nginx template publishes only
@@ -549,7 +573,8 @@ inference.
   default-denied.
 
 Set `GROQ_API_KEY` or the equivalent `groqApiKey` config field to enable speech
-transcription. The voice WebSocket endpoint is
+transcription. Set `groqModel` in `config.json` to change the model used for
+`whisper-1` and the Codex/voice paths. The voice WebSocket endpoint is
 `/api/ws/speech_to_text/voice_stream`. It authenticates the upgrade with an
 OAuth `voice:transcribe` entitlement (derived for Claude Code from
 `user:inference`) before allocating audio state. It also validates any supplied
