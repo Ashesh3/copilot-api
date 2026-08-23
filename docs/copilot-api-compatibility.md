@@ -43,6 +43,7 @@ authentication model is documented in the main README.
 | Anthropic Messages | `POST /v1/messages` | No prefix-free alias |
 | Anthropic token count | `POST /v1/messages/count_tokens` | No prefix-free alias |
 | Embeddings | `POST /v1/embeddings` | `POST /embeddings` |
+| Audio transcriptions | `POST /v1/audio/transcriptions` | No prefix-free alias; Groq-backed Whisper compatibility |
 | Search compatibility | `POST /v1/alpha/search` | `POST /alpha/search` |
 | Google-style generation | `POST /v1beta/models/:model:generateContent` | `POST /v1/models/:model:generateContent`; `POST /models/:model:generateContent` |
 | Google-style streaming | `POST /v1beta/models/:model:streamGenerateContent` | `POST /v1/models/:model:streamGenerateContent`; `POST /models/:model:streamGenerateContent` |
@@ -54,6 +55,23 @@ authentication model is documented in the main README.
 
 Other client-integration surfaces are documented in the README. They do not
 change the inference contracts described here.
+
+## Audio transcription compatibility
+
+`POST /v1/audio/transcriptions` accepts the OpenAI multipart request shape and
+uses the gateway's normal inference authentication. The required `file` and
+`model` fields are validated locally. Other multipart fields, including
+`language`, `prompt`, `temperature`, and timestamp controls, are forwarded to
+Groq without local rewriting. JSON, text, and verbose JSON responses pass
+through; SRT and VTT are rendered from Groq verbose segment timestamps.
+
+The OpenAI Whisper compatibility name maps to the configured `groqModel`, whose
+default and currently accepted native model IDs are documented in the README.
+Models whose contracts Groq cannot serve, including OpenAI GPT transcription
+and diarization models, receive a local OpenAI-shaped `400` instead of silent
+substitution. Groq response bodies, status codes, content types, and text or
+subtitle formats are preserved. Requests and upstream outcomes appear in
+routing telemetry under the Groq provider without recording audio contents.
 
 `generateContent`, `streamGenerateContent`, and `countTokens` are supported
 public Google actions on each listed route prefix. Count requests return

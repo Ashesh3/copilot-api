@@ -32,6 +32,7 @@ import {
   runWithRequestDiagnostics,
 } from "./lib/request-session"
 import { transparentProxy } from "./lib/transparent-proxy"
+import { audioTranscriptionRoutes } from "./routes/audio-transcriptions/route"
 import { completionRoutes } from "./routes/chat-completions/route"
 import { claudeCompatibilityRoutes } from "./routes/claude-compat/route"
 import { codeSessionsRoutes } from "./routes/code-sessions/route"
@@ -76,6 +77,7 @@ export function getRoutingSourceProtocol(path: string): string {
   if (path.includes("/responses")) return "Responses"
   if (path.includes("/chat/completions")) return "Chat Completions"
   if (path.includes("/embeddings")) return "Embeddings"
+  if (path.includes("/audio/transcriptions")) return "Audio Transcriptions"
   if (path.endsWith("/complete")) return "Legacy Complete"
   if (path.includes("/search")) return "Search"
   return "HTTP"
@@ -247,6 +249,7 @@ server.route("/v1/chat/completions", completionRoutes)
 server.route("/v1/models", modelRoutes)
 server.route("/v1beta/models", modelRoutes)
 server.route("/v1/embeddings", embeddingRoutes)
+server.route("/v1/audio/transcriptions", audioTranscriptionRoutes)
 server.route("/v1/responses", responsesRoutes)
 server.route("/v1/alpha/search", codexSearchRoutes)
 
