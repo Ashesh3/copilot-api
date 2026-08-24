@@ -1,10 +1,10 @@
 import { Hono } from "hono"
-import { deleteCookie, setCookie } from "hono/cookie"
+import { deleteCookie, generateCookie, setCookie } from "hono/cookie"
 
 import {
   ADMIN_CSRF_COOKIE,
-  ADMIN_SESSION_ABSOLUTE_MS,
   ADMIN_SESSION_COOKIE,
+  ADMIN_SESSION_TTL_MS,
   authenticateAdminRequest,
   changeAdminPassword,
   getAdminAuthStatus,
@@ -42,21 +42,67 @@ function setSessionCookies(
   c: Parameters<typeof setCookie>[0],
   session: CreatedAdminSession,
 ): void {
-  const maxAge = Math.floor(ADMIN_SESSION_ABSOLUTE_MS / 1000)
-  setCookie(c, ADMIN_SESSION_COOKIE, session.token, {
+  setSessionCookieValues(c, session.token, session.csrfToken)
+}
+
+function setSessionCookieValues(
+  c: Parameters<typeof setCookie>[0],
+  token: string,
+  csrfToken: string,
+): void {
+  const maxAge = Math.floor(ADMIN_SESSION_TTL_MS / 1000)
+  setCookie(c, ADMIN_SESSION_COOKIE, token, {
     secure: true,
     httpOnly: true,
     sameSite: "Strict",
     path: "/",
     maxAge,
   })
-  setCookie(c, ADMIN_CSRF_COOKIE, session.csrfToken, {
+  setCookie(c, ADMIN_CSRF_COOKIE, csrfToken, {
     secure: true,
     httpOnly: false,
     sameSite: "Strict",
     path: "/",
     maxAge,
   })
+}
+
+function readCookie(request: Request, name: string): string | undefined {
+  const header = request.headers.get("cookie")
+  if (!header) return undefined
+  let value: string | undefined
+  for (const segment of header.split(";")) {
+    const separator = segment.indexOf("=")
+    if (separator < 1 || segment.slice(0, separator).trim() !== name) continue
+    value = segment.slice(separator + 1).trim()
+  }
+  return value
+}
+
+export function getRefreshedSessionCookieHeaders(
+  request: Request,
+): Array<string> {
+  const token = readCookie(request, ADMIN_SESSION_COOKIE)
+  const csrfToken = readCookie(request, ADMIN_CSRF_COOKIE)
+  if (!token || !csrfToken) return []
+
+  const maxAge = Math.floor(ADMIN_SESSION_TTL_MS / 1000)
+  return [
+    generateCookie(ADMIN_SESSION_COOKIE, token, {
+      secure: true,
+      httpOnly: true,
+      sameSite: "Strict",
+      path: "/",
+      maxAge,
+    }),
+    generateCookie(ADMIN_CSRF_COOKIE, csrfToken, {
+      secure: true,
+      httpOnly: false,
+      sameSite: "Strict",
+      path: "/",
+      maxAge,
+    }),
+  ]
 }
 
 function clearSessionCookies(c: Parameters<typeof deleteCookie>[0]): void {
@@ -89,6 +135,9 @@ dashboardAuthRoutes.get("/session", async (c) => {
   noStore(c)
   const session = await authenticateAdminRequest(c.req.raw)
   if (!session) return authenticationFailed(c)
+  for (const cookie of getRefreshedSessionCookieHeaders(c.req.raw)) {
+    c.header("Set-Cookie", cookie, { append: true })
+  }
   return c.json({
     authenticated: true,
     expiresAt: session.expiresAt,

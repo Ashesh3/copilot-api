@@ -9,6 +9,7 @@ import {
 } from "./descriptor-chain"
 
 export const LLM_DEBUG_HISTORY_WINDOW_MS = 10 * 60 * 1000
+const LLM_DEBUG_FAILURE_HISTORY_WINDOW_MS = 60 * 60 * 1000
 
 type HeaderRecord = Record<string, string>
 
@@ -99,11 +100,13 @@ interface StartLlmDebugLogInput {
   url: string
 }
 
-const LOG_QUEUE_COMPACT_THRESHOLD = 1024
+interface LlmDebugExpiration {
+  deadlineMs: number
+  id: string
+}
 
-let logs: Array<LlmDebugLogEntry | undefined> = []
 let logIndex = new Map<string, LlmDebugLogEntry>()
-let firstLogIndex = 0
+let expirationHeap: Array<LlmDebugExpiration> = []
 let pruneTimer: ReturnType<typeof setTimeout> | undefined
 let pruneTimerDeadlineMs: number | undefined
 
@@ -229,14 +232,75 @@ function clearPruneTimer(): void {
   pruneTimerDeadlineMs = undefined
 }
 
+function swapExpirations(left: number, right: number): void {
+  const value = expirationHeap[left]
+  expirationHeap[left] = expirationHeap[right]
+  expirationHeap[right] = value
+}
+
+function pushExpiration(expiration: LlmDebugExpiration): void {
+  expirationHeap.push(expiration)
+  let index = expirationHeap.length - 1
+  while (index > 0) {
+    const parentIndex = Math.floor((index - 1) / 2)
+    const parent = expirationHeap[parentIndex]
+    if (parent.deadlineMs <= expiration.deadlineMs) break
+    expirationHeap[index] = parent
+    index = parentIndex
+  }
+  expirationHeap[index] = expiration
+}
+
+function popExpiration(): LlmDebugExpiration | undefined {
+  if (expirationHeap.length === 0) return undefined
+  const first = expirationHeap[0]
+  const last = expirationHeap.pop()
+  if (expirationHeap.length === 0) return first
+
+  expirationHeap[0] = last as LlmDebugExpiration
+  let index = 0
+  while (true) {
+    const leftIndex = index * 2 + 1
+    if (leftIndex >= expirationHeap.length) break
+    const rightIndex = leftIndex + 1
+    let childIndex = leftIndex
+    if (
+      rightIndex < expirationHeap.length
+      && expirationHeap[rightIndex].deadlineMs
+        < expirationHeap[leftIndex].deadlineMs
+    ) {
+      childIndex = rightIndex
+    }
+    if (
+      expirationHeap[index].deadlineMs <= expirationHeap[childIndex].deadlineMs
+    ) {
+      break
+    }
+    swapExpirations(index, childIndex)
+    index = childIndex
+  }
+  return first
+}
+
+function discardStaleExpirations(): void {
+  while (expirationHeap.length > 0) {
+    const expiration = expirationHeap[0]
+    const entry = logIndex.get(expiration.id)
+    if (entry && getExpirationDeadlineMs(entry) === expiration.deadlineMs) {
+      return
+    }
+    popExpiration()
+  }
+}
+
 function schedulePrune(): void {
-  const oldest = logs[firstLogIndex]
-  if (!oldest) {
+  discardStaleExpirations()
+  if (expirationHeap.length === 0) {
     clearPruneTimer()
     return
   }
+  const deadlineMs = expirationHeap[0].deadlineMs
 
-  const deadlineMs = oldest.startedAtMs + LLM_DEBUG_HISTORY_WINDOW_MS
   if (pruneTimerDeadlineMs === deadlineMs) return
 
   clearPruneTimer()
@@ -250,59 +314,50 @@ function schedulePrune(): void {
   pruneTimer.unref()
 }
 
+function getExpirationDeadlineMs(entry: LlmDebugLogEntry): number {
+  const retentionMs =
+    entry.status === "complete" ?
+      LLM_DEBUG_HISTORY_WINDOW_MS
+    : LLM_DEBUG_FAILURE_HISTORY_WINDOW_MS
+  return entry.startedAtMs + retentionMs
+}
+
+function indexExpiration(entry: LlmDebugLogEntry): void {
+  pushExpiration({
+    deadlineMs: getExpirationDeadlineMs(entry),
+    id: entry.id,
+  })
+  schedulePrune()
+}
+
 function prune(nowMs = Date.now()): void {
-  const cutoff = nowMs - LLM_DEBUG_HISTORY_WINDOW_MS
-  while (firstLogIndex < logs.length) {
-    const entry = logs[firstLogIndex]
-    if (!entry || entry.startedAtMs > cutoff) break
-    logIndex.delete(entry.id)
-    logs[firstLogIndex] = undefined
-    firstLogIndex += 1
+  if (pruneTimerDeadlineMs !== undefined && pruneTimerDeadlineMs > nowMs) {
+    return
   }
 
-  if (firstLogIndex === logs.length) {
-    logs = []
-    logIndex = new Map()
-    firstLogIndex = 0
-  } else if (
-    firstLogIndex >= LOG_QUEUE_COMPACT_THRESHOLD
-    && firstLogIndex * 2 >= logs.length
-  ) {
-    logs = logs.slice(firstLogIndex)
-    logIndex = new Map(logIndex)
-    firstLogIndex = 0
+  if (pruneTimerDeadlineMs !== undefined) clearPruneTimer()
+  discardStaleExpirations()
+  while (expirationHeap[0]?.deadlineMs <= nowMs) {
+    const expiration = popExpiration()
+    if (!expiration) break
+    const entry = logIndex.get(expiration.id)
+    if (entry && getExpirationDeadlineMs(entry) === expiration.deadlineMs) {
+      logIndex.delete(expiration.id)
+    }
+    discardStaleExpirations()
   }
   schedulePrune()
 }
 
 function insertLog(entry: LlmDebugLogEntry): void {
-  const last = logs.at(-1)
-  if (!last || last.startedAtMs <= entry.startedAtMs) {
-    logs.push(entry)
-  } else {
-    let low = firstLogIndex
-    let high = logs.length
-    while (low < high) {
-      const middle = Math.floor((low + high) / 2)
-      const middleEntry = logs[middle]
-      if (middleEntry && middleEntry.startedAtMs <= entry.startedAtMs) {
-        low = middle + 1
-      } else {
-        high = middle
-      }
-    }
-    logs.splice(low, 0, entry)
-  }
   logIndex.set(entry.id, entry)
+  indexExpiration(entry)
 }
 
 function getActiveLogs(): Array<LlmDebugLogEntry> {
-  const active: Array<LlmDebugLogEntry> = []
-  for (let index = firstLogIndex; index < logs.length; index++) {
-    const entry = logs[index]
-    if (entry) active.push(entry)
-  }
-  return active
+  return [...logIndex.values()].sort(
+    (left, right) => left.startedAtMs - right.startedAtMs,
+  )
 }
 
 function cloneEntry(entry: LlmDebugLogEntry): LlmDebugLogEntry {
@@ -475,7 +530,7 @@ export function startLlmDebugLog(input: StartLlmDebugLogInput): string {
   const requestBody = input.requestBody
 
   const id = randomUUID()
-  insertLog({
+  const entry: LlmDebugLogEntry = {
     id,
     model: inferModel(requestBody),
     request: {
@@ -491,8 +546,8 @@ export function startLlmDebugLog(input: StartLlmDebugLogInput): string {
     startedAtMs,
     status: "pending",
     stream: inferStream(requestBody),
-  })
-  schedulePrune()
+  }
+  insertLog(entry)
 
   return id
 }
@@ -518,6 +573,7 @@ export function finishLlmDebugLog(
     response.bodyReadError || response.status < 200 || response.status >= 300 ?
       "error"
     : "complete"
+  if (entry.status === "complete") indexExpiration(entry)
 }
 
 export function failLlmDebugLog(
@@ -575,8 +631,7 @@ export function getLlmDebugLog(id: string): LlmDebugLogEntry | undefined {
 }
 
 export function clearLlmDebugLogs(): void {
-  logs = []
   logIndex = new Map()
-  firstLogIndex = 0
+  expirationHeap = []
   clearPruneTimer()
 }
