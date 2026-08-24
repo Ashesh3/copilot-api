@@ -53,7 +53,10 @@ import {
   handleUpdateReplacement,
   handleUpsertCustomProvider,
 } from "./api"
-import { dashboardAuthRoutes } from "./auth-route"
+import {
+  dashboardAuthRoutes,
+  getRefreshedSessionCookieHeaders,
+} from "./auth-route"
 import { handleReplayLlmDebugLog } from "./llm-debug-replay"
 import { DASHBOARD_HTML } from "./page-generated"
 import { handleExportSettings } from "./settings-export"
@@ -82,6 +85,9 @@ dashboardRoutes.use("/api/*", async (c, next) => {
     )
   }
   await next()
+  for (const cookie of getRefreshedSessionCookieHeaders(c.req.raw)) {
+    c.header("Set-Cookie", cookie, { append: true })
+  }
 })
 
 // Overview

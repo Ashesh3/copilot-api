@@ -231,7 +231,7 @@ test("returns defensive clones of raw entries", () => {
 
 test("prunes entries older than the retention window", () => {
   const now = Date.now()
-  startLlmDebugLog({
+  const oldId = startLlmDebugLog({
     method: "POST",
     path: "/responses",
     requestBody: JSON.stringify({ model: "old-model" }),
@@ -239,6 +239,11 @@ test("prunes entries older than the retention window", () => {
     startedAtMs: now - LLM_DEBUG_HISTORY_WINDOW_MS - 1,
     url: "https://example.test/responses",
   })
+  finishLlmDebugLog(
+    oldId,
+    { body: "{}", headers: {}, status: 200, statusText: "OK" },
+    now - LLM_DEBUG_HISTORY_WINDOW_MS,
+  )
   const freshId = startLlmDebugLog({
     method: "POST",
     path: "/responses",
@@ -252,6 +257,140 @@ test("prunes entries older than the retention window", () => {
   expect(list.count).toBe(1)
   expect(list.entries[0]?.id).toBe(freshId)
   expect(list.entries[0]?.model).toBe("fresh-model")
+})
+
+test("retains unsuccessful entries for one hour while successful entries expire after ten minutes", () => {
+  jest.useFakeTimers()
+  const startedAtMs = Date.UTC(2026, 7, 24)
+  jest.setSystemTime(startedAtMs)
+
+  const completeId = startLlmDebugLog({
+    method: "POST",
+    path: "/responses",
+    requestBody: JSON.stringify({ model: "complete-model" }),
+    requestHeaders: {},
+    url: "https://example.test/responses",
+  })
+  finishLlmDebugLog(completeId, {
+    body: "{}",
+    headers: {},
+    status: 200,
+    statusText: "OK",
+  })
+
+  const nonSuccessId = startLlmDebugLog({
+    method: "POST",
+    path: "/responses",
+    requestBody: JSON.stringify({ model: "non-success-model" }),
+    requestHeaders: {},
+    url: "https://example.test/responses",
+  })
+  finishLlmDebugLog(nonSuccessId, {
+    body: '{"error":"upstream failure"}',
+    headers: { "content-type": "application/json" },
+    status: 503,
+    statusText: "Service Unavailable",
+  })
+
+  const erroredId = startLlmDebugLog({
+    method: "POST",
+    path: "/responses",
+    requestBody: JSON.stringify({ model: "errored-model" }),
+    requestHeaders: {},
+    url: "https://example.test/responses",
+  })
+  failLlmDebugLog(erroredId, new Error("transport failure"))
+
+  const abortedId = startLlmDebugLog({
+    method: "POST",
+    path: "/responses",
+    requestBody: JSON.stringify({ model: "aborted-model" }),
+    requestHeaders: {},
+    url: "https://example.test/responses",
+  })
+  abortLlmDebugLog(abortedId, { error: new Error("client disconnected") })
+
+  jest.setSystemTime(startedAtMs + LLM_DEBUG_HISTORY_WINDOW_MS + 1)
+  expect(
+    listLlmDebugLogs()
+      .entries.map((entry) => entry.id)
+      .sort(),
+  ).toEqual([abortedId, erroredId, nonSuccessId].sort())
+  expect(getLlmDebugLog(completeId)).toBeUndefined()
+
+  jest.setSystemTime(startedAtMs + 60 * 60 * 1000 + 1)
+  expect(listLlmDebugLogs().count).toBe(0)
+})
+
+test("retains requests that become unsuccessful after ten minutes", () => {
+  jest.useFakeTimers()
+  const startedAtMs = Date.UTC(2026, 7, 24)
+  jest.setSystemTime(startedAtMs)
+  const id = startLlmDebugLog({
+    method: "POST",
+    path: "/responses",
+    requestBody: JSON.stringify({ model: "slow-failure-model" }),
+    requestHeaders: {},
+    url: "https://example.test/responses",
+  })
+
+  jest.setSystemTime(startedAtMs + LLM_DEBUG_HISTORY_WINDOW_MS + 1)
+  failLlmDebugLog(
+    id,
+    new Error("late transport failure"),
+    startedAtMs + LLM_DEBUG_HISTORY_WINDOW_MS + 1,
+  )
+
+  expect(getLlmDebugLog(id)?.status).toBe("error")
+  jest.setSystemTime(startedAtMs + 60 * 60 * 1000 + 1)
+  expect(getLlmDebugLog(id)).toBeUndefined()
+})
+
+test("keeps timestamp ordering after a newer successful entry expires", () => {
+  jest.useFakeTimers()
+  const startedAtMs = Date.UTC(2026, 7, 24)
+  jest.setSystemTime(startedAtMs)
+
+  const retainedErrorId = startLlmDebugLog({
+    method: "POST",
+    path: "/responses",
+    requestBody: JSON.stringify({ model: "retained-error" }),
+    requestHeaders: {},
+    startedAtMs,
+    url: "https://example.test/responses",
+  })
+  failLlmDebugLog(retainedErrorId, new Error("upstream failure"), startedAtMs)
+
+  const expiredSuccessId = startLlmDebugLog({
+    method: "POST",
+    path: "/responses",
+    requestBody: JSON.stringify({ model: "expired-success" }),
+    requestHeaders: {},
+    startedAtMs: startedAtMs + 1,
+    url: "https://example.test/responses",
+  })
+  finishLlmDebugLog(
+    expiredSuccessId,
+    { body: "{}", headers: {}, status: 200, statusText: "OK" },
+    startedAtMs + 1,
+  )
+
+  jest.setSystemTime(startedAtMs + LLM_DEBUG_HISTORY_WINDOW_MS + 2)
+  expect(getLlmDebugLog(expiredSuccessId)).toBeUndefined()
+
+  const backdatedId = startLlmDebugLog({
+    method: "POST",
+    path: "/responses",
+    requestBody: JSON.stringify({ model: "backdated-pending" }),
+    requestHeaders: {},
+    startedAtMs: startedAtMs - 1,
+    url: "https://example.test/responses",
+  })
+
+  expect(listLlmDebugLogs().entries.map((entry) => entry.id)).toEqual([
+    retainedErrorId,
+    backdatedId,
+  ])
 })
 
 test("retains complete previews inside the retention window", () => {
@@ -271,13 +410,19 @@ test("retains complete previews inside the retention window", () => {
 test("evicts expired entries while idle and releases the backing store", () => {
   jest.useFakeTimers()
   const startedAtMs = Date.now()
-  startLlmDebugLog({
+  const id = startLlmDebugLog({
     method: "POST",
     path: "/responses",
     requestBody: JSON.stringify({ model: "idle-model", input: "retained" }),
     requestHeaders: {},
     startedAtMs,
     url: "https://example.test/responses",
+  })
+  finishLlmDebugLog(id, {
+    body: "{}",
+    headers: {},
+    status: 200,
+    statusText: "OK",
   })
 
   jest.advanceTimersByTime(LLM_DEBUG_HISTORY_WINDOW_MS)

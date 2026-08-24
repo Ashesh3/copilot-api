@@ -3,8 +3,6 @@ import fs from "node:fs/promises"
 
 import {
   ADMIN_CSRF_COOKIE,
-  ADMIN_SESSION_ABSOLUTE_MS,
-  ADMIN_SESSION_IDLE_MS,
   ADMIN_SESSION_COOKIE,
   setAdminAuthTestMode,
   setAdminAuthClockForTest,
@@ -25,6 +23,7 @@ const GATEWAY_KEY = "test-gateway-key-that-is-long-and-random"
 const ADMIN_PASSWORD = "correct horse battery staple"
 const ROTATED_ADMIN_PASSWORD = "rotated administrator password"
 const ORIGIN = "https://ai.ashesh.dev"
+const MONTH_MS = 30 * 24 * 60 * 60 * 1000
 
 let originalAdminPasswordHash: string | undefined
 
@@ -905,41 +904,52 @@ test("logout revokes the current server-side session and expires cookies", async
   expect(afterLogout.status).toBe(401)
 })
 
-test("administrator sessions enforce idle and absolute expiry", async () => {
+test("administrator sessions renew a one-month ttl while the dashboard is active", async () => {
+  const testClock = { nowMs: Date.UTC(2026, 6, 12) }
+  const startedAt = testClock.nowMs
+  setAdminAuthClockForTest({ now: () => testClock.nowMs })
+  const cookies = await setup()
+
+  // eslint-disable-next-line require-atomic-updates
+  testClock.nowMs = startedAt + 24 * 60 * 60 * 1000
+  const activeNextDay = await server.request("/dashboard/api/overview", {
+    headers: { cookie: cookies.cookie },
+  })
+  expect(activeNextDay.status).toBe(200)
+  expect(
+    readSetCookies(activeNextDay).some((cookie) =>
+      /^__Host-copilot_admin=.*; Max-Age=2592000; Path=\/; HttpOnly; Secure; SameSite=Strict$/.test(
+        cookie,
+      ),
+    ),
+  ).toBe(true)
+  expect(
+    readSetCookies(activeNextDay).some((cookie) =>
+      /^__Host-copilot_admin_csrf=.*; Max-Age=2592000; Path=\/; Secure; SameSite=Strict$/.test(
+        cookie,
+      ),
+    ),
+  ).toBe(true)
+
+  // eslint-disable-next-line require-atomic-updates
+  testClock.nowMs = startedAt + MONTH_MS + 1
+  const activePastOriginalExpiry = await server.request(
+    "/dashboard/api/overview",
+    { headers: { cookie: cookies.cookie } },
+  )
+  expect(activePastOriginalExpiry.status).toBe(200)
+})
+
+test("administrator sessions expire after one month without activity", async () => {
   let currentTime = Date.UTC(2026, 6, 12)
   setAdminAuthClockForTest({ now: () => currentTime })
-  const idleCookies = await setup()
+  const cookies = await setup()
 
-  currentTime += ADMIN_SESSION_IDLE_MS + 1
-  const idleExpired = await server.request("/dashboard/api/overview", {
-    headers: { cookie: idleCookies.cookie },
+  currentTime += MONTH_MS + 1
+  const expired = await server.request("/dashboard/api/overview", {
+    headers: { cookie: cookies.cookie },
   })
-  expect(idleExpired.status).toBe(401)
-
-  setAdminAuthTestMode(true)
-  state.apiKeyAuth = GATEWAY_KEY
-  // eslint-disable-next-line require-atomic-updates
-  currentTime = Date.UTC(2026, 6, 12)
-  setAdminAuthClockForTest({ now: () => currentTime })
-  const absoluteCookies = await setup()
-  for (
-    let elapsed = ADMIN_SESSION_IDLE_MS / 2;
-    elapsed < ADMIN_SESSION_ABSOLUTE_MS;
-    elapsed += ADMIN_SESSION_IDLE_MS / 2
-  ) {
-    // eslint-disable-next-line require-atomic-updates
-    currentTime = Date.UTC(2026, 6, 12) + elapsed
-    const active = await server.request("/dashboard/api/overview", {
-      headers: { cookie: absoluteCookies.cookie },
-    })
-    expect(active.status).toBe(200)
-  }
-  // eslint-disable-next-line require-atomic-updates
-  currentTime = Date.UTC(2026, 6, 12) + ADMIN_SESSION_ABSOLUTE_MS + 1
-  const absoluteExpired = await server.request("/dashboard/api/overview", {
-    headers: { cookie: absoluteCookies.cookie },
-  })
-  expect(absoluteExpired.status).toBe(401)
+  expect(expired.status).toBe(401)
 })
 
 test("dashboard responses carry hardening headers and no wildcard CORS", async () => {

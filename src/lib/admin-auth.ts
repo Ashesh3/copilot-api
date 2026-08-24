@@ -12,8 +12,7 @@ import { getActiveApiKeys } from "./request-auth"
 export const ADMIN_SESSION_COOKIE = "__Host-copilot_admin"
 export const ADMIN_CSRF_COOKIE = "__Host-copilot_admin_csrf"
 export const ADMIN_PASSWORD_MIN_LENGTH = 4
-export const ADMIN_SESSION_ABSOLUTE_MS = 30 * 24 * 60 * 60 * 1000
-export const ADMIN_SESSION_IDLE_MS = 12 * 60 * 60 * 1000
+export const ADMIN_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000
 
 const LAST_SEEN_WRITE_INTERVAL_MS = 5 * 60 * 1000
 const ENV_ADMIN_SESSION_VERSION_PREFIX = "env:"
@@ -491,7 +490,7 @@ async function createAdminSession(): Promise<CreatedAdminSession> {
     sessionVersion: current.sessionVersion,
     createdAt: currentTime,
     lastSeenAt: currentTime,
-    expiresAt: currentTime + ADMIN_SESSION_ABSOLUTE_MS,
+    expiresAt: currentTime + ADMIN_SESSION_TTL_MS,
   }
   data.sessions.push(record)
   data.sessions.sort((a, b) => b.lastSeenAt - a.lastSeenAt)
@@ -507,10 +506,7 @@ function pruneSessions(
 ): boolean {
   const before = data.sessions.length
   data.sessions = data.sessions.filter(
-    (session) =>
-      session.sessionVersion === version
-      && session.expiresAt > now
-      && session.lastSeenAt + ADMIN_SESSION_IDLE_MS > now,
+    (session) => session.sessionVersion === version && session.expiresAt > now,
   )
   return data.sessions.length !== before
 }
@@ -531,8 +527,8 @@ function parseCookieHeader(header: string | null): Record<string, string> {
   return cookies
 }
 
-// Authentication deliberately evaluates cookie, CSRF, origin, expiry, idle,
-// and session version in one place.
+// Authentication deliberately evaluates cookie, CSRF, origin, expiry, and
+// session version in one place.
 
 async function resolveAdminSession(
   request: Request,
@@ -573,6 +569,7 @@ async function resolveAdminSession(
   }
   const shouldPersist =
     currentTime - session.lastSeenAt >= LAST_SEEN_WRITE_INTERVAL_MS
+  session.expiresAt = currentTime + ADMIN_SESSION_TTL_MS
   if (shouldPersist) session.lastSeenAt = currentTime
   if (pruned || shouldPersist) {
     sessionsData = data
