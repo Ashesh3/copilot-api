@@ -108,7 +108,7 @@ test("rejects oversized canonical beta output", () => {
   ).toBeUndefined()
 })
 
-test("preserves native top-level fields and removes only gateway-local keys", () => {
+test("preserves native top-level fields and removes Copilot-unsupported keys", () => {
   const payload = {
     model: "claude-current",
     max_tokens: 512,
@@ -116,6 +116,7 @@ test("preserves native top-level fields and removes only gateway-local keys", ()
     cache_control: { type: "ephemeral", ttl: "5m" },
     fallback_credit_token: "opaque",
     context_management: { edits: [{ type: "clear_tool_uses_20250919" }] },
+    diagnostics: { previous_message_id: "msg_previous" },
     future_native_field: { enabled: true },
     _gateway_compaction: true,
     _json_schema: { type: "object" },
@@ -134,13 +135,47 @@ test("preserves native top-level fields and removes only gateway-local keys", ()
   })
   expect(prepared.body).not.toHaveProperty("_gateway_compaction")
   expect(prepared.body).not.toHaveProperty("_json_schema")
+  expect(prepared.body).not.toHaveProperty("diagnostics")
   expect(prepared.normalizationClasses).toEqual(["gateway_only_fields"])
   expect(payload).toHaveProperty("_gateway_compaction", true)
   expect(payload).toHaveProperty("_json_schema", { type: "object" })
+  expect(payload).toHaveProperty("diagnostics", {
+    previous_message_id: "msg_previous",
+  })
   expect(prepared.headers).toEqual({
     anthropicBeta: "claude-code-20250219",
     anthropicVersion: "2023-06-01",
     modelProviderPreference: "anthropic",
+  })
+})
+
+test("omits Claude diagnostics at native Messages serialization", () => {
+  const body = {
+    model: "claude-opus-5",
+    max_tokens: 64,
+    messages: [{ role: "user", content: "hello" }],
+    diagnostics: { previous_message_id: "msg_previous" },
+    thinking: { type: "adaptive" },
+    output_config: { effort: "xhigh" },
+    context_management: {
+      edits: [{ type: "clear_thinking_20251015", keep: "all" }],
+    },
+    future_native_field: { enabled: true },
+  }
+
+  expect(JSON.parse(serializeAnthropicMessagesRequest(body))).toEqual({
+    model: "claude-opus-5",
+    max_tokens: 64,
+    messages: [{ role: "user", content: "hello" }],
+    thinking: { type: "adaptive" },
+    output_config: { effort: "xhigh" },
+    context_management: {
+      edits: [{ type: "clear_thinking_20251015", keep: "all" }],
+    },
+    future_native_field: { enabled: true },
+  })
+  expect(body).toHaveProperty("diagnostics", {
+    previous_message_id: "msg_previous",
   })
 })
 

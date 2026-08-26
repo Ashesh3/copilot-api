@@ -629,6 +629,37 @@ test("fills a missing native max_tokens from model metadata at transport time", 
   })
 })
 
+test("strips Claude diagnostics before native Messages dispatch", async () => {
+  state.models = structuredClone(nativeMessagesModels)
+
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-opus-4.8",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "hello" }],
+      thinking: { type: "adaptive" },
+      context_management: {
+        edits: [{ type: "clear_thinking_20251015", keep: "all" }],
+      },
+      output_config: { effort: "xhigh" },
+      diagnostics: { previous_message_id: null },
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+  expect(lastUpstreamPayload).not.toHaveProperty("diagnostics")
+  expect(lastUpstreamPayload).toMatchObject({
+    thinking: { type: "adaptive" },
+    output_config: { effort: "xhigh" },
+    context_management: {
+      edits: [{ type: "clear_thinking_20251015", keep: "all" }],
+    },
+  })
+})
+
 test("allows chat fallback requests without max_tokens", async () => {
   const response = await server.request("/v1/messages", {
     method: "POST",
