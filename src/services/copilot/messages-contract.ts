@@ -57,6 +57,7 @@ type PlainJsonClone =
 const GATEWAY_ONLY_MESSAGES_FIELDS = new Set([
   "_gateway_compaction",
   "_json_schema",
+  "diagnostics",
 ])
 
 export interface PreparedAnthropicMessagesRequest {
@@ -1142,6 +1143,7 @@ export function normalizeAnthropicMessagesRequest(
   body: Record<string, unknown>,
 ): Record<string, unknown> {
   const normalized = cloneAnthropicMessagesBody(body)
+  Reflect.deleteProperty(normalized, "diagnostics")
   normalizeCacheControls(normalized)
   return normalized
 }
