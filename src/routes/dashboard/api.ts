@@ -63,6 +63,11 @@ import {
 } from "~/lib/routing-telemetry"
 import { state } from "~/lib/state"
 import { tokenPool } from "~/lib/token-pool"
+import {
+  trustedJwtDigestStore,
+  TrustedJwtDigestConflictError,
+  TrustedJwtDigestValidationError,
+} from "~/lib/trusted-jwt-digests"
 import { getUsageResponse } from "~/lib/usage-tracker"
 import {
   archiveSession,
@@ -168,6 +173,25 @@ interface IpAllowlistRequestBody {
 type CustomProviderParseResult =
   | { ok: true; body: ValidCustomProviderBody }
   | { ok: false; error: string }
+
+function isExactRecord(
+  value: unknown,
+  expectedKeys: ReadonlyArray<string>,
+): value is Record<string, unknown> {
+  if (
+    typeof value !== "object"
+    || value === null
+    || Array.isArray(value)
+    || Object.getPrototypeOf(value) !== Object.prototype
+  ) {
+    return false
+  }
+  const keys = Object.keys(value)
+  return (
+    keys.length === expectedKeys.length
+    && expectedKeys.every((key) => Object.hasOwn(value, key))
+  )
+}
 
 function formatUptime(ms: number): string {
   const totalSeconds = Math.floor(ms / 1000)
@@ -965,6 +989,61 @@ export async function handleClearIpAllowlist(c: Context) {
     return c.json({ error: "Failed to save IP allowlist" }, 500)
   }
   return c.json({ success: true, cleared })
+}
+
+export function handleListTrustedJwtDigests(c: Context) {
+  return c.json(trustedJwtDigestStore.list())
+}
+
+export async function handleAddTrustedJwtDigest(c: Context) {
+  const body = await c.req.json<unknown>().catch(() => null)
+  if (!isExactRecord(body, ["label", "digest"])) {
+    return c.json({ error: "label and digest are required" }, 400)
+  }
+
+  try {
+    return c.json(
+      trustedJwtDigestStore.add({
+        label: body.label as string,
+        digest: body.digest as string,
+      }),
+    )
+  } catch (error) {
+    if (error instanceof TrustedJwtDigestConflictError) {
+      return c.json({ error: error.message }, 409)
+    }
+    if (error instanceof TrustedJwtDigestValidationError) {
+      return c.json({ error: error.message }, 400)
+    }
+    throw error
+  }
+}
+
+export async function handleSetTrustedJwtDigestEnabled(c: Context) {
+  const body = await c.req.json<unknown>().catch(() => null)
+  if (!isExactRecord(body, ["enabled"]) || typeof body.enabled !== "boolean") {
+    return c.json({ error: "enabled must be a boolean" }, 400)
+  }
+
+  try {
+    const entry = trustedJwtDigestStore.setEnabled(
+      c.req.param("id") ?? "",
+      body.enabled,
+    )
+    if (!entry) return c.json({ error: "Trusted JWT digest not found" }, 404)
+    return c.json(entry)
+  } catch (error) {
+    if (error instanceof TrustedJwtDigestValidationError) {
+      return c.json({ error: error.message }, 400)
+    }
+    throw error
+  }
+}
+
+export function handleDeleteTrustedJwtDigest(c: Context) {
+  const removed = trustedJwtDigestStore.remove(c.req.param("id") ?? "")
+  if (!removed) return c.json({ error: "Trusted JWT digest not found" }, 404)
+  return c.json({ success: true })
 }
 
 export function handleListLlmDebugLogs(c: Context) {
