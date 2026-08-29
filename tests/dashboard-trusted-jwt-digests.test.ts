@@ -5,6 +5,7 @@ import {
   trustedJwtDigestStore,
   type TrustedJwtDigestEntry,
 } from "~/lib/trusted-jwt-digests"
+import { DASHBOARD_HTML } from "~/routes/dashboard/page-generated"
 import { server } from "~/server"
 
 import {
@@ -31,6 +32,12 @@ function withoutCsrfHeaders(): Record<string, string> {
     "content-type": "application/json",
   }
 }
+
+test("generated dashboard exposes trusted JWT digest controls", () => {
+  expect(DASHBOARD_HTML).toContain("Trusted JWT Digests")
+  expect(DASHBOARD_HTML).toContain("/dashboard/api/trusted-jwt-digests")
+  expect(DASHBOARD_HTML).not.toContain("Paste raw JWT")
+})
 
 beforeEach(async () => {
   trustedJwtDigestStore.replaceForTest([])

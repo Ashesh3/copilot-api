@@ -44,6 +44,7 @@ test("settings loader requests the current IP with the settings and allowlist", 
       "/dashboard/api/settings": settings,
       "/dashboard/api/ip-allowlist": allowlist,
       "/dashboard/api/ip-allowlist/current": { ip: "198.51.100.24" },
+      "/dashboard/api/trusted-jwt-digests": [],
     }
     return Promise.resolve(responses[path] as T)
   }
@@ -53,12 +54,14 @@ test("settings loader requests the current IP with the settings and allowlist", 
     settings,
     allowlist,
     currentIp: "198.51.100.24",
+    trustedJwtDigests: [],
   })
   expect(paths.sort()).toEqual(
     [
       "/dashboard/api/settings",
       "/dashboard/api/ip-allowlist",
       "/dashboard/api/ip-allowlist/current",
+      "/dashboard/api/trusted-jwt-digests",
     ].sort(),
   )
 })
@@ -71,6 +74,9 @@ test("settings loader keeps the page available when current-IP lookup fails", as
     if (path === "/dashboard/api/ip-allowlist") {
       return Promise.resolve(allowlist as T)
     }
+    if (path === "/dashboard/api/trusted-jwt-digests") {
+      return Promise.resolve([] as T)
+    }
     return Promise.reject(new Error("current IP unavailable"))
   }
 
@@ -79,6 +85,7 @@ test("settings loader keeps the page available when current-IP lookup fails", as
     settings,
     allowlist,
     currentIp: null,
+    trustedJwtDigests: [],
   })
 })
 

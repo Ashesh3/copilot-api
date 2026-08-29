@@ -284,6 +284,15 @@ export interface IpAllowlistEntry {
   lastSeenAt?: string
 }
 
+export interface TrustedJwtDigestEntry {
+  id: string
+  label: string
+  digest: string
+  enabled: boolean
+  createdAt: string
+  updatedAt: string
+}
+
 export function ipAddressPlaceholder(currentIp: string | null): string {
   return currentIp ?? "203.0.113.10"
 }
@@ -302,6 +311,13 @@ export class IpAddressRequiredError extends Error {
   constructor() {
     super("IP address is required")
     this.name = "IpAddressRequiredError"
+  }
+}
+
+export class TrustedJwtDigestInputError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "TrustedJwtDigestInputError"
   }
 }
 
@@ -410,20 +426,26 @@ export interface SettingsBundle {
   settings: SettingsData
   allowlist: Array<IpAllowlistEntry>
   currentIp: string | null
+  trustedJwtDigests: Array<TrustedJwtDigestEntry>
 }
 
 export async function loadSettingsBundle(
   requestGet: GetRequest,
 ): Promise<SettingsBundle> {
-  const [settings, allowlist, currentIp] = await Promise.all([
-    requestGet<SettingsData>("/dashboard/api/settings"),
-    requestGet<Array<IpAllowlistEntry>>("/dashboard/api/ip-allowlist"),
-    requestGet<{ ip: string | null }>("/dashboard/api/ip-allowlist/current")
-      .then((result) => result.ip)
-      .catch(() => null),
-  ])
+  const [settings, allowlist, currentIp, trustedJwtDigests] = await Promise.all(
+    [
+      requestGet<SettingsData>("/dashboard/api/settings"),
+      requestGet<Array<IpAllowlistEntry>>("/dashboard/api/ip-allowlist"),
+      requestGet<{ ip: string | null }>("/dashboard/api/ip-allowlist/current")
+        .then((result) => result.ip)
+        .catch(() => null),
+      requestGet<Array<TrustedJwtDigestEntry>>(
+        "/dashboard/api/trusted-jwt-digests",
+      ),
+    ],
+  )
 
-  return { settings, allowlist, currentIp }
+  return { settings, allowlist, currentIp, trustedJwtDigests }
 }
 
 export async function addIpAllowlistEntry(
@@ -438,6 +460,36 @@ export async function addIpAllowlistEntry(
     ip,
     enabled: true,
   })
+}
+
+export function trustedJwtDigestForSubmission(
+  labelInput: string,
+  digestInput: string,
+): { label: string; digest: string } {
+  const label = labelInput.trim()
+  const digest = digestInput.trim().toLowerCase()
+
+  if (!label) {
+    throw new TrustedJwtDigestInputError("Device label is required")
+  }
+  if (!/^[a-f\d]{64}$/.test(digest)) {
+    throw new TrustedJwtDigestInputError(
+      "SHA-256 digest must be exactly 64 hexadecimal characters",
+    )
+  }
+
+  return { label, digest }
+}
+
+export async function addTrustedJwtDigest(
+  label: string,
+  digest: string,
+  requestPost: BodyRequest,
+): Promise<void> {
+  await requestPost(
+    "/dashboard/api/trusted-jwt-digests",
+    trustedJwtDigestForSubmission(label, digest),
+  )
 }
 
 export function clearIpAllowlist(

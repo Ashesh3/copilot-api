@@ -31,15 +31,18 @@ import { useToast } from "../lib/toast"
 import {
   IpAddressRequiredError,
   addIpAllowlistEntry,
+  addTrustedJwtDigest,
   clearIpAllowlist,
   ipAddressPlaceholder,
   loadSettingsBundle,
   type IpAllowlistEntry,
   type SettingsBundle,
+  type TrustedJwtDigestEntry,
 } from "../lib/types"
 import { useAsyncData } from "../lib/usePolling"
 
 type IpRow = IpAllowlistEntry & Record<string, unknown>
+type TrustedJwtDigestRow = TrustedJwtDigestEntry & Record<string, unknown>
 
 function loadBundle(): Promise<SettingsBundle> {
   return loadSettingsBundle(get)
@@ -67,6 +70,9 @@ export default function SettingsScreen() {
   const [newIp, setNewIp] = useState("")
   const [isAddingIp, setIsAddingIp] = useState(false)
   const isAddingIpRef = useRef(false)
+  const [newJwtLabel, setNewJwtLabel] = useState("")
+  const [newJwtDigest, setNewJwtDigest] = useState("")
+  const [isAddingJwtDigest, setIsAddingJwtDigest] = useState(false)
   const [currentPassword, setCurrentPassword] = useState("")
   const [newPassword, setNewPassword] = useState("")
   const [confirmPassword, setConfirmPassword] = useState("")
@@ -197,6 +203,47 @@ export default function SettingsScreen() {
     }
   }
 
+  const handleAddJwtDigest = async () => {
+    if (isAddingJwtDigest) return
+    setIsAddingJwtDigest(true)
+    try {
+      await addTrustedJwtDigest(newJwtLabel, newJwtDigest, post)
+      toast.success("Trusted JWT digest added")
+      setNewJwtLabel("")
+      setNewJwtDigest("")
+      reload()
+    } catch (caught) {
+      toast.error(errorMessage(caught, "Failed to add trusted JWT digest"))
+    } finally {
+      setIsAddingJwtDigest(false)
+    }
+  }
+
+  const handleToggleJwtDigest = async (id: string, enabled: boolean) => {
+    try {
+      await patch(
+        `/dashboard/api/trusted-jwt-digests/${encodeURIComponent(id)}`,
+        { enabled },
+      )
+      toast.success(
+        enabled ? "Trusted JWT digest enabled" : "Trusted JWT digest disabled",
+      )
+      reload()
+    } catch (caught) {
+      toast.error(errorMessage(caught, "Failed to update trusted JWT digest"))
+    }
+  }
+
+  const handleRemoveJwtDigest = async (id: string) => {
+    try {
+      await del(`/dashboard/api/trusted-jwt-digests/${encodeURIComponent(id)}`)
+      toast.success("Trusted JWT digest deleted")
+      reload()
+    } catch (caught) {
+      toast.error(errorMessage(caught, "Failed to delete trusted JWT digest"))
+    }
+  }
+
   const cleanupOptions: Array<SelectorOptionType> =
     data ?
       [
@@ -272,6 +319,60 @@ export default function SettingsScreen() {
           confirmTitle="Remove IP"
           confirmDescription={`Remove "${item.ip}" from the allowlist?`}
           onConfirm={() => handleRemoveIp(item.ip)}
+        />
+      ),
+    },
+  ]
+
+  const trustedJwtDigestColumns: Array<TableColumn<TrustedJwtDigestRow>> = [
+    {
+      key: "label",
+      header: "Device",
+      width: proportional(1),
+      renderCell: (item) => <Text>{item.label}</Text>,
+    },
+    {
+      key: "digest",
+      header: "SHA-256 digest",
+      width: proportional(2),
+      renderCell: (item) => (
+        <span title={item.digest}>
+          <MonoText>{item.digest}</MonoText>
+        </span>
+      ),
+    },
+    {
+      key: "enabled",
+      header: "Enabled",
+      width: pixel(72),
+      renderCell: (item) => (
+        <TogglePill
+          label={`Toggle ${item.label}`}
+          value={item.enabled}
+          onChange={(next) => handleToggleJwtDigest(item.id, next)}
+        />
+      ),
+    },
+    {
+      key: "createdAt",
+      header: "Created",
+      width: pixel(112),
+      renderCell: (item) => <RelTime ts={item.createdAt} />,
+    },
+    {
+      key: "actions",
+      header: "",
+      width: pixel(56),
+      align: "end",
+      renderCell: (item) => (
+        <ConfirmButton
+          label="Delete"
+          isIconOnly
+          icon={<Trash2Icon />}
+          size="sm"
+          confirmTitle="Delete trusted JWT digest"
+          confirmDescription={`Delete the trusted digest for "${item.label}"?`}
+          onConfirm={() => handleRemoveJwtDigest(item.id)}
         />
       ),
     },
@@ -451,6 +552,52 @@ export default function SettingsScreen() {
                   data={data.allowlist as Array<IpRow>}
                   columns={ipColumns}
                   idKey="ip"
+                />
+              }
+            </VStack>
+          </Card>
+
+          <Card>
+            <VStack gap={4}>
+              <HStack gap={2} vAlign="center" wrap="wrap">
+                <Heading level={3}>Trusted JWT Digests</Heading>
+                <Badge variant="neutral" label="Inference only" />
+              </HStack>
+              <Text type="supporting">
+                Generate a local Codex ChatGPT auth file with the repository
+                PowerShell script, then paste only its SHA-256 digest here.
+              </Text>
+              <HStack gap={2} vAlign="end" wrap="wrap">
+                <TextInput
+                  label="Device label"
+                  value={newJwtLabel}
+                  onChange={setNewJwtLabel}
+                  width="min(100%, 240px)"
+                />
+                <TextInput
+                  label="SHA-256 digest"
+                  value={newJwtDigest}
+                  onChange={setNewJwtDigest}
+                  width="min(100%, 420px)"
+                />
+                <Button
+                  label="Add"
+                  variant="secondary"
+                  icon={<PlusIcon />}
+                  isLoading={isAddingJwtDigest}
+                  isDisabled={isAddingJwtDigest}
+                  onClick={handleAddJwtDigest}
+                />
+              </HStack>
+              {data.trustedJwtDigests.length === 0 ?
+                <EmptyState
+                  title="No trusted JWT digests"
+                  description="Generate a digest on the Codex PC, then register it here."
+                />
+              : <DataTable
+                  data={data.trustedJwtDigests as Array<TrustedJwtDigestRow>}
+                  columns={trustedJwtDigestColumns}
+                  idKey="id"
                 />
               }
             </VStack>
