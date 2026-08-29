@@ -114,12 +114,6 @@ function resolveConfiguredInferenceCredential(
   rawCredential: string,
   requiredScopes: ReadonlyArray<string>,
 ): ResolvedCredential | null | undefined {
-  const environmentCredential = resolveEnvironmentInferenceCredential(
-    rawCredential,
-    requiredScopes,
-  )
-  if (environmentCredential !== undefined) return environmentCredential
-
   const managedEntry =
     trustedJwtDigestStore.findEnabledCredential(rawCredential)
   if (managedEntry) {
@@ -132,6 +126,13 @@ function resolveConfiguredInferenceCredential(
   }
 
   if (trustedJwtDigestStore.matchesCredentialDigest(rawCredential)) return null
+
+  const environmentCredential = resolveEnvironmentInferenceCredential(
+    rawCredential,
+    requiredScopes,
+  )
+  if (environmentCredential !== undefined) return environmentCredential
+
   return undefined
 }
 
@@ -340,6 +341,15 @@ export async function resolveRequestCredentialKind(
       context.requiredScopes,
     )
     return credential?.kind === kind ? credential : null
+  }
+  if (kind === "worker" || kind === "environment") {
+    const rawCredential = extractRequestCredential(request)
+    if (
+      rawCredential !== null
+      && isConfiguredInferenceCredential(rawCredential)
+    ) {
+      return null
+    }
   }
   const provider = externalCredentialProviders.get(kind)
   if (!provider) return null

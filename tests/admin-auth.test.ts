@@ -1,4 +1,6 @@
+/* eslint-disable max-lines -- admin auth integration coverage intentionally shares process state */
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test"
+import { createHash } from "node:crypto"
 import fs from "node:fs/promises"
 
 import {
@@ -17,6 +19,7 @@ import {
   resetIpSecurityForTest,
 } from "../src/lib/ip-blocker"
 import { state } from "../src/lib/state"
+import { trustedJwtDigestStore } from "../src/lib/trusted-jwt-digests"
 import { server } from "../src/server"
 
 const GATEWAY_KEY = "test-gateway-key-that-is-long-and-random"
@@ -50,6 +53,25 @@ function cookiesFrom(response: Response): AdminCookies {
   return { cookie: `${session}; ${csrfCookie}`, csrf }
 }
 
+function adminSessionToken(cookies: AdminCookies): string {
+  const prefix = `${ADMIN_SESSION_COOKIE}=`
+  const segment = cookies.cookie
+    .split("; ")
+    .find((value) => value.startsWith(prefix))
+  expect(segment).toBeTruthy()
+  return segment?.slice(prefix.length) ?? ""
+}
+
+function sha256Hex(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex")
+}
+
+async function requestOverview(cookie: string): Promise<Response> {
+  return await server.request("/dashboard/api/overview", {
+    headers: { cookie },
+  })
+}
+
 async function setup(): Promise<AdminCookies> {
   const response = await server.request("/dashboard/auth/setup", {
     method: "POST",
@@ -66,6 +88,7 @@ beforeEach(() => {
   delete process.env.COPILOT_ADMIN_PASSWORD_HASH
   setAdminAuthTestMode(true)
   resetIpSecurityForTest()
+  trustedJwtDigestStore.replaceForTest([])
   state.apiKeyAuth = GATEWAY_KEY
   process.env.COPILOT_ADMIN_ORIGIN = ORIGIN
 })
@@ -82,6 +105,7 @@ afterEach(() => {
   }
   setAdminAuthClockForTest()
   resetIpSecurityForTest()
+  trustedJwtDigestStore.resetAfterTest()
 })
 
 test("first admin setup requires the gateway key and a four-character password", async () => {
@@ -496,6 +520,32 @@ test("admin session accesses reads and mutations require CSRF and Origin", async
     },
   )
   expect(mutation.status).toBe(200)
+})
+
+test("managed JWT rows reserve issued administrator sessions until deleted", async () => {
+  const cookies = await setup()
+  const token = adminSessionToken(cookies)
+  const digest = sha256Hex(token)
+
+  expect((await requestOverview(cookies.cookie)).status).toBe(200)
+
+  const entry = trustedJwtDigestStore.add({
+    label: "Administrator collision",
+    digest,
+  })
+  expect((await requestOverview(cookies.cookie)).status).toBe(401)
+
+  trustedJwtDigestStore.setEnabled(entry.id, false)
+  expect((await requestOverview(cookies.cookie)).status).toBe(401)
+
+  const digestCookie = cookies.cookie.replace(
+    `${ADMIN_SESSION_COOKIE}=${token}`,
+    `${ADMIN_SESSION_COOKIE}=${digest}`,
+  )
+  expect((await requestOverview(digestCookie)).status).toBe(401)
+
+  trustedJwtDigestStore.remove(entry.id)
+  expect((await requestOverview(cookies.cookie)).status).toBe(200)
 })
 
 test("admin sessions can access sensitive dashboard routes without reauthentication", async () => {

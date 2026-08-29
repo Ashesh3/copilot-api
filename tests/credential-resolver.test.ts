@@ -159,6 +159,36 @@ test("limits dashboard-managed JWT digests to inference scope", async () => {
   expect(await resolveCredential(rawCredential)).toBeNull()
 })
 
+test("managed JWT rows override duplicate environment digests until deleted", async () => {
+  const rawCredential = "managed-environment-duplicate.jwt.signature"
+  const digest = sha256Hex(rawCredential)
+  process.env.COPILOT_INFERENCE_CREDENTIAL_SHA256S = digest
+  const entry = trustedJwtDigestStore.add({
+    label: "Managed migration",
+    digest,
+  })
+
+  expect(
+    await resolveCredential(rawCredential, ["user:inference"]),
+  ).toMatchObject({
+    principalId: `inference-managed:${entry.id}`,
+    kind: "inference-client",
+  })
+  expect(await resolveCredential(digest)).toBeNull()
+
+  trustedJwtDigestStore.setEnabled(entry.id, false)
+  expect(await resolveCredential(rawCredential, ["user:inference"])).toBeNull()
+  expect(await resolveCredential(digest)).toBeNull()
+
+  trustedJwtDigestStore.remove(entry.id)
+  expect(
+    await resolveCredential(rawCredential, ["user:inference"]),
+  ).toMatchObject({
+    principalId: `inference-env:${digest.slice(0, 16)}`,
+    kind: "inference-client",
+  })
+})
+
 test("does not elevate a managed digest through gateway fallback", async () => {
   const rawCredential = "gateway-secret"
   const entry = trustedJwtDigestStore.add({

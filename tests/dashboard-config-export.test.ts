@@ -43,6 +43,25 @@ test("config export zips only app config files that exist", async () => {
     )
     await fs.writeFile(path.join(directory, "model_settings.json"), "[]\n")
     await fs.writeFile(path.join(directory, "ip_allowlist.json"), "[]\n")
+    const trustedJwtSentinel =
+      "trusted-jwt-export-sentinel-86bb7cf9be3a4d8bbadad2579d959fad"
+    await fs.writeFile(
+      path.join(directory, "trusted_jwt_digests.json"),
+      JSON.stringify({
+        version: 1,
+        entries: [
+          {
+            id: "4ca1053b-ee40-48b8-9180-40bfe56ba825",
+            label: trustedJwtSentinel,
+            digest:
+              "d934d4e72ee1f3a3cff8eac158c6640d604e1e29ec82cdbfd795b250058e5c94",
+            enabled: true,
+            createdAt: "2026-08-29T00:00:00.000Z",
+            updatedAt: "2026-08-29T00:00:00.000Z",
+          },
+        ],
+      }),
+    )
     await fs.writeFile(path.join(directory, "usage.json"), '{"records":[]}\n')
     await fs.writeFile(path.join(directory, "github_token"), "ghu_secret")
     await fs.writeFile(path.join(directory, "logs", "messages.log"), "skip")
@@ -66,8 +85,21 @@ test("config export zips only app config files that exist", async () => {
       '"featureGates"',
     )
     expect(entries["usage.json"]).toBeUndefined()
+    expect(entries["trusted_jwt_digests.json"]).toBeUndefined()
     expect(entries["github_token"]).toBeUndefined()
     expect(entries["logs/messages.log"]).toBeUndefined()
+    expect(
+      Object.values(entries).some((entry) =>
+        decodeEntry(entry).includes(trustedJwtSentinel),
+      ),
+    ).toBe(false)
+    expect(
+      Object.values(entries).some((entry) =>
+        decodeEntry(entry).includes(
+          "d934d4e72ee1f3a3cff8eac158c6640d604e1e29ec82cdbfd795b250058e5c94",
+        ),
+      ),
+    ).toBe(false)
   })
 })
 

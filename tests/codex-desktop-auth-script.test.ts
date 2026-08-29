@@ -4,13 +4,20 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 
-const powershell = Bun.which("pwsh") ?? Bun.which("powershell")
-const powershellExecutable = powershell ?? ""
+const powershellExecutables = [Bun.which("pwsh"), Bun.which("powershell")]
+  .filter((value): value is string => value !== null)
+  .filter(
+    (value, index, values) =>
+      values.findIndex(
+        (candidate) => candidate.toLowerCase() === value.toLowerCase(),
+      ) === index,
+  )
+const powershellExecutable = powershellExecutables[0] ?? ""
 const scriptPath = path.resolve(
   import.meta.dir,
   "../scripts/enable-codex-desktop-chatgpt-auth.ps1",
 )
-const powershellTest = test.skipIf(powershell === null)
+const powershellTest = test.skipIf(powershellExecutables.length === 0)
 const environmentExclusions = [
   "config.toml",
   "hosts",
@@ -60,13 +67,16 @@ interface ScriptResult {
 async function runPowerShellScript(
   arguments_: Array<string>,
   environment?: Record<string, string | undefined>,
+  executable = powershellExecutable,
 ): Promise<ScriptResult> {
   const process = Bun.spawn(
     [
-      powershellExecutable,
+      executable,
       "-NoLogo",
       "-NoProfile",
       "-NonInteractive",
+      "-ExecutionPolicy",
+      "Bypass",
       "-File",
       scriptPath,
       ...arguments_,
@@ -92,6 +102,56 @@ async function runPowerShellScript(
     digest: digestMatch?.[1] ?? "",
     backupPath: backupLine?.slice("Backup path: ".length).trim() ?? "",
   }
+}
+
+for (const executable of powershellExecutables) {
+  const engine = path.basename(executable)
+  test(`creates and replaces auth safely with ${engine}`, async () => {
+    await withTemporaryCodexHome(async (codexHome) => {
+      const first = await runPowerShellScript(
+        [
+          "-CodexHome",
+          codexHome,
+          "-Email",
+          "engine@example.invalid",
+          "-SkipClipboard",
+        ],
+        undefined,
+        executable,
+      )
+      const original = await readAuth(codexHome)
+      const second = await runPowerShellScript(
+        [
+          "-CodexHome",
+          codexHome,
+          "-Email",
+          "engine@example.invalid",
+          "-SkipClipboard",
+        ],
+        undefined,
+        executable,
+      )
+      const replacement = await readAuth(codexHome)
+      const output = `${first.stdout}\n${first.stderr}\n${second.stdout}\n${second.stderr}`
+
+      expect(first.exitCode).toBe(0)
+      expect(second.exitCode).toBe(0)
+      expect(second.digest).toBe(
+        createHash("sha256")
+          .update(replacement.auth.tokens.access_token, "utf8")
+          .digest("hex"),
+      )
+      expect(await fs.readFile(second.backupPath)).toEqual(original.bytes)
+      expect(await listRelativeFiles(codexHome)).toEqual([
+        "auth.json",
+        path.relative(codexHome, second.backupPath).replaceAll("\\", "/"),
+      ])
+      expect(output).not.toContain(original.auth.tokens.access_token)
+      expect(output).not.toContain(original.auth.tokens.refresh_token)
+      expect(output).not.toContain(replacement.auth.tokens.access_token)
+      expect(output).not.toContain(replacement.auth.tokens.refresh_token)
+    })
+  })
 }
 
 async function runScript(codexHome: string): Promise<ScriptResult> {
