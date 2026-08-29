@@ -4,6 +4,7 @@ import { setAdminAuthTestMode } from "../src/lib/admin-auth"
 import { setIpAllowlistForTest } from "../src/lib/ip-allowlist"
 import { resetIpSecurityForTest } from "../src/lib/ip-blocker"
 import { state } from "../src/lib/state"
+import { trustedJwtDigestStore } from "../src/lib/trusted-jwt-digests"
 import { server } from "../src/server"
 
 const GATEWAY_KEY = "test-gateway-key-that-is-long-and-random"
@@ -48,6 +49,7 @@ beforeEach(() => {
   process.env.COPILOT_ADMIN_ORIGIN = ORIGIN
   state.apiKeyAuth = GATEWAY_KEY
   setInferenceCredentialDigests(undefined)
+  trustedJwtDigestStore.replaceForTest([])
 })
 
 afterEach(() => {
@@ -66,6 +68,7 @@ afterEach(() => {
     process.env.COPILOT_ADMIN_PASSWORD_HASH = originalAdminPasswordHash
   }
   setInferenceCredentialDigests(originalInferenceCredentialDigests)
+  trustedJwtDigestStore.resetAfterTest()
 })
 
 test("digest-listed gateway credentials cannot set up or log in as administrator", async () => {
@@ -89,4 +92,27 @@ test("digest-listed gateway credentials cannot set up or log in as administrator
   state.apiKeyAuth = GATEWAY_DIGEST
   setInferenceCredentialDigests(GATEWAY_DIGEST)
   expect((await adminRequest("setup", GATEWAY_DIGEST)).status).toBe(401)
+})
+
+test("dashboard-managed gateway credentials cannot set up or log in as administrator", async () => {
+  const entry = trustedJwtDigestStore.add({
+    label: "Gateway collision",
+    digest: GATEWAY_DIGEST,
+  })
+  expect((await adminRequest("setup")).status).toBe(401)
+
+  trustedJwtDigestStore.setEnabled(entry.id, false)
+  expect((await adminRequest("setup")).status).toBe(401)
+
+  trustedJwtDigestStore.remove(entry.id)
+  expect((await adminRequest("setup")).status).toBe(201)
+
+  const loginEntry = trustedJwtDigestStore.add({
+    label: "Gateway login collision",
+    digest: GATEWAY_DIGEST,
+  })
+  expect((await adminRequest("login")).status).toBe(401)
+
+  trustedJwtDigestStore.setEnabled(loginEntry.id, false)
+  expect((await adminRequest("login")).status).toBe(401)
 })

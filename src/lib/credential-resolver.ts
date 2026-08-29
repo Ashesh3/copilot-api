@@ -3,6 +3,7 @@ import { createHash, timingSafeEqual } from "node:crypto"
 import { getConfig } from "./config"
 import { getOAuthStore } from "./oauth-store"
 import { state } from "./state"
+import { trustedJwtDigestStore } from "./trusted-jwt-digests"
 
 export type CredentialKind =
   | "gateway"
@@ -73,7 +74,7 @@ function configuredInferenceCredentialDigests(): Array<Buffer> {
   ].map((candidate) => Buffer.from(candidate, "hex"))
 }
 
-function isConfiguredInferenceCredentialDigest(value: string): boolean {
+function isEnvironmentInferenceCredentialDigest(value: string): boolean {
   const normalized = value.trim()
   if (!SHA256_HEX_PATTERN.test(normalized)) return false
   const candidate = Buffer.from(normalized, "hex")
@@ -82,7 +83,14 @@ function isConfiguredInferenceCredentialDigest(value: string): boolean {
   )
 }
 
-function resolveConfiguredInferenceCredential(
+function isInferenceCredentialDigest(value: string): boolean {
+  return (
+    isEnvironmentInferenceCredentialDigest(value)
+    || trustedJwtDigestStore.containsDigestLiteral(value)
+  )
+}
+
+function resolveEnvironmentInferenceCredential(
   rawCredential: string,
   requiredScopes: ReadonlyArray<string>,
 ): ResolvedCredential | null | undefined {
@@ -102,12 +110,38 @@ function resolveConfiguredInferenceCredential(
   return credentialHasScopes(credential, requiredScopes) ? credential : null
 }
 
+function resolveConfiguredInferenceCredential(
+  rawCredential: string,
+  requiredScopes: ReadonlyArray<string>,
+): ResolvedCredential | null | undefined {
+  const environmentCredential = resolveEnvironmentInferenceCredential(
+    rawCredential,
+    requiredScopes,
+  )
+  if (environmentCredential !== undefined) return environmentCredential
+
+  const managedEntry =
+    trustedJwtDigestStore.findEnabledCredential(rawCredential)
+  if (managedEntry) {
+    const credential: ResolvedCredential = {
+      principalId: `inference-managed:${managedEntry.id}`,
+      kind: "inference-client",
+      scopes: new Set(["user:inference"]),
+    }
+    return credentialHasScopes(credential, requiredScopes) ? credential : null
+  }
+
+  if (trustedJwtDigestStore.matchesCredentialDigest(rawCredential)) return null
+  return undefined
+}
+
 export function isConfiguredInferenceCredential(
   rawCredential: string,
 ): boolean {
   return (
-    isConfiguredInferenceCredentialDigest(rawCredential)
-    || resolveConfiguredInferenceCredential(rawCredential, []) !== undefined
+    isInferenceCredentialDigest(rawCredential)
+    || resolveEnvironmentInferenceCredential(rawCredential, []) !== undefined
+    || trustedJwtDigestStore.matchesCredentialDigest(rawCredential)
   )
 }
 
@@ -208,7 +242,7 @@ export async function resolveCredential(
   requiredScopes: ReadonlyArray<string> = [],
 ): Promise<ResolvedCredential | null> {
   if (!rawCredential) return null
-  if (isConfiguredInferenceCredentialDigest(rawCredential)) return null
+  if (isInferenceCredentialDigest(rawCredential)) return null
 
   const configuredInferenceCredential = resolveConfiguredInferenceCredential(
     rawCredential,
