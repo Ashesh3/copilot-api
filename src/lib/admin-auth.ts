@@ -3,6 +3,7 @@ import fs from "node:fs/promises"
 
 import {
   registerCredentialProvider,
+  resolveGatewayCredential,
   resolveRequestCredentialKind,
 } from "./credential-resolver"
 import { extractClientIpFromHeaders, isIpBlocked } from "./ip-blocker"
@@ -320,12 +321,7 @@ function validatePassword(password: string): string | null {
 }
 
 function gatewayKeyMatches(candidate: string): boolean {
-  const activeKeys = getActiveApiKeys()
-  let matched = false
-  for (const key of activeKeys) {
-    matched = safeEqual(candidate, key) || matched
-  }
-  return activeKeys.length > 0 && matched
+  return resolveGatewayCredential(candidate) !== null
 }
 
 export async function getAdminAuthStatus(): Promise<{

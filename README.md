@@ -272,7 +272,13 @@ Copilot API separates these credential boundaries:
 3. **OAuth and inference credentials** are independent, scoped credentials.
    The OAuth flow never returns the gateway key. Claude Code receives a
    one-hour opaque access token and a rotating 30-day refresh token; an API key
-   created through OAuth is a separate inference-only credential.
+   created through OAuth is a separate inference-only credential. Operators
+   can also register client-held inference secrets by placing only their
+   SHA-256 hex digests in `COPILOT_INFERENCE_CREDENTIAL_SHA256S`. Hash the
+   credential after trimming leading and trailing whitespace; the digest text
+   is not itself accepted as a credential. Registered secrets can call
+   inference routes but cannot bootstrap OAuth, read profile data, create API
+   keys, or access administrator routes.
 4. **Administrator sessions** are server-side sessions established with both
    the gateway key and an administrator password. The browser stores a Secure,
    HttpOnly session cookie and a separate SameSite-strict CSRF cookie, not the
@@ -671,6 +677,7 @@ files.
 | `COPILOT_INTEGRATION_ID` | Direct and Docker | Copilot integration identifier; defaults to `vscode-chat` for backwards-compatible entitlement behavior. Use an assigned integration ID when available; do not copy a first-party client ID merely to imitate that client. |
 | `DATA_DIR` | Direct and Docker | Override the persistent data directory |
 | `COPILOT_API_KEY_AUTH` | Direct and Docker | Gateway key and sole environment-based gateway credential; direct usage also requires the `--api-key-auth` flag without a value |
+| `COPILOT_INFERENCE_CREDENTIAL_SHA256S` | Direct and Docker | Optional comma-separated SHA-256 hex digests of trimmed client-held inference secrets; matching credentials receive only `user:inference` scope and digest text is rejected |
 | `COPILOT_ADMIN_PASSWORD_HASH` | Direct and Docker | Optional authoritative Argon2id PHC verifier for the administrator password; suitable for 1Password/Varlock |
 | `COPILOT_ADMIN_ORIGIN` | Direct and Docker | Exact browser origin allowed for dashboard mutations; set this explicitly for a proxied deployment |
 | `COPILOT_TRUSTED_PROXY_CIDRS` | Direct and Docker | Comma-separated socket-peer CIDRs allowed to supply forwarding headers; defaults to loopback only |

@@ -1,13 +1,17 @@
 import { afterEach, beforeEach, expect, test } from "bun:test"
+import { createHash } from "node:crypto"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 
+import { setConfigForTest } from "../src/lib/config"
 import {
   extractRequestCredential,
   hasSuppliedRequestCredential,
   isGoogleApiCredentialPath,
   registerCredentialProvider,
+  resolveCredential,
+  resolveGatewayCredential,
   resolveRequestCredentialKind,
 } from "../src/lib/credential-resolver"
 import {
@@ -18,6 +22,8 @@ import {
 import { state } from "../src/lib/state"
 
 const originalGatewayKey = state.apiKeyAuth
+const originalInferenceCredentialDigests =
+  process.env.COPILOT_INFERENCE_CREDENTIAL_SHA256S
 const clientId = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 const redirectUri = "http://localhost:54545/callback"
 const verifier = "v".repeat(64)
@@ -33,11 +39,20 @@ beforeEach(async () => {
   store = new OAuthStore(path.join(temporaryDirectory, "oauth_tokens.json"))
   setOAuthStoreForTest(store)
   state.apiKeyAuth = "gateway-secret"
+  setConfigForTest({ auth: { apiKeys: [] } })
+  delete process.env.COPILOT_INFERENCE_CREDENTIAL_SHA256S
 })
 
 afterEach(async () => {
   setOAuthStoreForTest(null)
+  setConfigForTest(null)
   state.apiKeyAuth = originalGatewayKey
+  if (originalInferenceCredentialDigests === undefined) {
+    delete process.env.COPILOT_INFERENCE_CREDENTIAL_SHA256S
+  } else {
+    process.env.COPILOT_INFERENCE_CREDENTIAL_SHA256S =
+      originalInferenceCredentialDigests
+  }
   await fs.rm(temporaryDirectory, { recursive: true, force: true })
 })
 
@@ -73,6 +88,10 @@ async function issueOAuthToken(): Promise<string> {
   return result.tokens.accessToken
 }
 
+function sha256Hex(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex")
+}
+
 test("distinguishes gateway, OAuth, and inference-client credentials", async () => {
   const oauthToken = await issueOAuthToken()
   const inferenceKey = await store.mintInferenceCredential()
@@ -95,6 +114,97 @@ test("distinguishes gateway, OAuth, and inference-client credentials", async () 
   expect(
     await resolveRequestCredentialKind(bearer(oauthToken), "gateway"),
   ).toBeNull()
+})
+
+test("limits configured digest credentials to inference scope", async () => {
+  const rawCredential = "test-codex-desktop-token"
+  process.env.COPILOT_INFERENCE_CREDENTIAL_SHA256S =
+    "a3b73b87238555863cbe9291649bd56227b8871aaa7bfc052d9f704bbfce8585"
+
+  expect(
+    await resolveCredential(rawCredential, ["user:inference"]),
+  ).toMatchObject({
+    kind: "inference-client",
+    principalId: "inference-env:a3b73b8723855586",
+    scopes: new Set(["user:inference"]),
+  })
+  expect(await resolveCredential(rawCredential, ["user:profile"])).toBeNull()
+  expect(
+    await resolveCredential(rawCredential, ["org:create_api_key"]),
+  ).toBeNull()
+})
+
+test("does not elevate a configured inference digest through gateway fallback", async () => {
+  process.env.COPILOT_INFERENCE_CREDENTIAL_SHA256S = sha256Hex("gateway-secret")
+
+  expect(
+    await resolveCredential("gateway-secret", ["user:inference"]),
+  ).toMatchObject({ kind: "inference-client" })
+  expect(await resolveCredential("gateway-secret", ["user:profile"])).toBeNull()
+  expect(resolveGatewayCredential("gateway-secret")).toBeNull()
+
+  process.env.COPILOT_INFERENCE_CREDENTIAL_SHA256S = sha256Hex("gateway-secret")
+  expect(resolveGatewayCredential(" gateway-secret ")).toBeNull()
+
+  state.apiKeyAuth = " gateway-secret "
+  expect(resolveGatewayCredential("gateway-secret")).toBeNull()
+
+  state.apiKeyAuth = undefined
+  setConfigForTest({
+    auth: { apiKeys: ["gateway-secret", " gateway-secret "] },
+  })
+  expect(resolveGatewayCredential("gateway-secret")).toBeNull()
+
+  const digestLiteral = sha256Hex("inference-only-secret")
+  process.env.COPILOT_INFERENCE_CREDENTIAL_SHA256S = digestLiteral
+  state.apiKeyAuth = digestLiteral
+  expect(resolveGatewayCredential(digestLiteral)).toBeNull()
+  expect(await resolveCredential(digestLiteral)).toBeNull()
+})
+
+test("preserves internal bearer whitespace for inference classification", async () => {
+  state.apiKeyAuth = "inference secret"
+  process.env.COPILOT_INFERENCE_CREDENTIAL_SHA256S =
+    sha256Hex("inference  secret")
+
+  expect(
+    await resolveRequestCredentialKind(
+      bearer("inference  secret"),
+      "inference-client",
+      { requiredScopes: ["user:inference"] },
+    ),
+  ).toMatchObject({ kind: "inference-client" })
+  expect(
+    await resolveRequestCredentialKind(bearer("inference  secret"), "gateway"),
+  ).toBeNull()
+})
+
+test("does not elevate a configured inference digest through OAuth fallback", async () => {
+  const oauthToken = await issueOAuthToken()
+  process.env.COPILOT_INFERENCE_CREDENTIAL_SHA256S = sha256Hex(oauthToken)
+
+  expect(await resolveCredential(oauthToken, ["user:profile"])).toBeNull()
+})
+
+test("accepts configured digest lists without treating digests as secrets", async () => {
+  const firstCredential = "first-codex-desktop-token"
+  const secondCredential = "second-codex-desktop-token"
+  const firstDigest = sha256Hex(firstCredential)
+  const secondDigest = sha256Hex(secondCredential)
+  process.env.COPILOT_INFERENCE_CREDENTIAL_SHA256S = [
+    "not-a-sha256-digest",
+    firstDigest.toUpperCase(),
+    secondDigest,
+  ].join(",")
+
+  expect(await resolveCredential(firstCredential)).toMatchObject({
+    kind: "inference-client",
+  })
+  expect(await resolveCredential(secondCredential)).toMatchObject({
+    kind: "inference-client",
+  })
+  expect(await resolveCredential(firstDigest)).toBeNull()
+  expect(await resolveCredential("unconfigured-token")).toBeNull()
 })
 
 test("rejects ambiguous credentials and accepts long credential values", () => {

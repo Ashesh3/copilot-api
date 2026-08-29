@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test"
 import consola from "consola"
+import { createHash } from "node:crypto"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
@@ -24,6 +25,8 @@ import {
 import { server } from "../src/server"
 
 const originalApiKeyAuth = state.apiKeyAuth
+const originalInferenceCredentialDigests =
+  process.env.COPILOT_INFERENCE_CREDENTIAL_SHA256S
 const originalWarn = consola.warn
 const oauthClientId = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 const oauthRedirectUri = "https://platform.claude.com/oauth/code/callback"
@@ -33,6 +36,14 @@ const oauthVerifier = "v".repeat(64)
 const oauthState = "state-with-enough-entropy-123456789"
 let temporaryDirectory: string | undefined
 let oauthStorePath: string | undefined
+
+function setInferenceCredentialDigests(value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env.COPILOT_INFERENCE_CREDENTIAL_SHA256S
+  } else {
+    process.env.COPILOT_INFERENCE_CREDENTIAL_SHA256S = value
+  }
+}
 
 function authorizationQuery(
   redirectUri: string = oauthRedirectUri,
@@ -51,6 +62,7 @@ function authorizationQuery(
 beforeEach(async () => {
   setIpAllowlistForTest([])
   state.apiKeyAuth = "test-secret-key"
+  setInferenceCredentialDigests(undefined)
   resetIpSecurityForTest()
   consola.warn = mock(() => {}) as unknown as typeof consola.warn
   temporaryDirectory = await fs.mkdtemp(
@@ -64,6 +76,7 @@ afterEach(async () => {
   resetIpSecurityForTest()
   setIpAllowlistForTest([])
   setOAuthStoreForTest(null)
+  setInferenceCredentialDigests(originalInferenceCredentialDigests)
   const directory = temporaryDirectory
   temporaryDirectory = undefined
   oauthStorePath = undefined
@@ -437,6 +450,66 @@ async function authorizeAndExchange(): Promise<{
     token_type: string
   }
 }
+
+function sha256Hex(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex")
+}
+
+async function issueAuthorizationCode(): Promise<string> {
+  const authorizeResponse = await server.request(
+    `/oauth/authorize?${authorizationQuery().toString()}`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ api_key: "test-secret-key" }).toString(),
+    },
+  )
+  expect(authorizeResponse.status).toBe(302)
+  const location = authorizeResponse.headers.get("location")
+  const code = new URL(location ?? oauthRedirectUri).searchParams.get("code")
+  expect(code).toStartWith("cc_code_")
+  return code ?? ""
+}
+
+test("digest-listed OAuth grants cannot mint broader credentials", async () => {
+  setInferenceCredentialDigests(sha256Hex("test-secret-key"))
+  const bootstrapResponse = await server.request(
+    `/oauth/authorize?${authorizationQuery().toString()}`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ api_key: " test-secret-key " }).toString(),
+    },
+  )
+  expect(bootstrapResponse.status).toBe(401)
+
+  setInferenceCredentialDigests(undefined)
+  const code = await issueAuthorizationCode()
+  setInferenceCredentialDigests(sha256Hex(code))
+
+  const codeResponse = await server.request("/v1/oauth/token", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: oauthRedirectUri,
+      client_id: oauthClientId,
+      code_verifier: oauthVerifier,
+      state: oauthState,
+    }),
+  })
+  expect(codeResponse.status).toBe(400)
+  expect(await codeResponse.json()).toEqual({ error: "invalid_grant" })
+
+  setInferenceCredentialDigests(undefined)
+  const tokens = await authorizeAndExchange()
+  setInferenceCredentialDigests(sha256Hex(tokens.refresh_token))
+
+  const refreshResponse = await refreshOauthToken(tokens.refresh_token)
+  expect(refreshResponse.status).toBe(400)
+  expect(await refreshResponse.json()).toEqual({ error: "invalid_grant" })
+})
 
 test("rejects arbitrary refresh tokens without disclosing the gateway key", async () => {
   const response = await server.request("/v1/oauth/token", {

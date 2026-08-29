@@ -6,6 +6,7 @@ import type { IssuedOAuthTokens } from "~/lib/oauth-store"
 
 import {
   credentialHasScopes,
+  isConfiguredInferenceCredential,
   resolveCredential,
   resolveGatewayCredential,
   resolveRequestCredential,
@@ -244,6 +245,9 @@ async function handleAuthorizationCodeGrant(
   ) {
     return oauthError(c, "invalid_grant")
   }
+  if (isConfiguredInferenceCredential(body.code)) {
+    return oauthError(c, "invalid_grant")
+  }
 
   const exchange = await getOAuthStore().exchangeAuthorizationCode({
     code: body.code,
@@ -261,6 +265,9 @@ async function handleRefreshTokenGrant(
   body: Record<string, string>,
 ): Promise<Response> {
   if (!body.refresh_token) return oauthError(c, "invalid_grant")
+  if (isConfiguredInferenceCredential(body.refresh_token)) {
+    return oauthError(c, "invalid_grant")
+  }
   const requestedScopes = body.scope ? parseScopes(body.scope) : undefined
   if (requestedScopes !== undefined && !areAllowedScopes(requestedScopes)) {
     return oauthError(c, "invalid_scope")
@@ -339,8 +346,8 @@ oauthBrowserRoutes.post("/authorize", async (c) => {
   const body = await readOAuthBody(c)
   // Sparse form bodies are valid inputs even though the filtered record type is
   // string-valued for keys that are present.
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-  const apiKey = body?.api_key?.trim() ?? ""
+
+  const apiKey = body?.api_key ?? ""
 
   const credential = apiKey ? await resolveCredential(apiKey) : null
   if (credential?.kind === "gateway") {

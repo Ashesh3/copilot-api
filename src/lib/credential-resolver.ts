@@ -46,13 +46,69 @@ const OAUTH_SCOPES = new Set([
   "user:file_upload",
   "org:create_api_key",
 ])
+const SHA256_HEX_PATTERN = /^[a-f\d]{64}$/i
 
 function digest(value: string): Buffer {
+  // SHA-256 is intentional for random, high-entropy bearer credential lookup.
+  // This is not a human-password verifier; the operator supplies only the
+  // digest and the raw credential remains client-side.
   return createHash("sha256").update(value, "utf8").digest()
 }
 
 function secretEquals(left: string, right: string): boolean {
   return timingSafeEqual(digest(left), digest(right))
+}
+
+function configuredInferenceCredentialDigests(): Array<Buffer> {
+  const configured = process.env.COPILOT_INFERENCE_CREDENTIAL_SHA256S
+  if (!configured) return []
+
+  return [
+    ...new Set(
+      configured
+        .split(",")
+        .map((candidate) => candidate.trim().toLowerCase())
+        .filter((candidate) => SHA256_HEX_PATTERN.test(candidate)),
+    ),
+  ].map((candidate) => Buffer.from(candidate, "hex"))
+}
+
+function isConfiguredInferenceCredentialDigest(value: string): boolean {
+  const normalized = value.trim()
+  if (!SHA256_HEX_PATTERN.test(normalized)) return false
+  const candidate = Buffer.from(normalized, "hex")
+  return configuredInferenceCredentialDigests().some((configuredDigest) =>
+    timingSafeEqual(candidate, configuredDigest),
+  )
+}
+
+function resolveConfiguredInferenceCredential(
+  rawCredential: string,
+  requiredScopes: ReadonlyArray<string>,
+): ResolvedCredential | null | undefined {
+  const normalizedCredential = rawCredential.trim()
+  if (!normalizedCredential) return undefined
+  const credentialDigest = digest(normalizedCredential)
+  const matchedDigest = configuredInferenceCredentialDigests().find(
+    (configuredDigest) => timingSafeEqual(credentialDigest, configuredDigest),
+  )
+  if (!matchedDigest) return undefined
+
+  const credential: ResolvedCredential = {
+    principalId: `inference-env:${matchedDigest.toString("hex").slice(0, 16)}`,
+    kind: "inference-client",
+    scopes: new Set(["user:inference"]),
+  }
+  return credentialHasScopes(credential, requiredScopes) ? credential : null
+}
+
+export function isConfiguredInferenceCredential(
+  rawCredential: string,
+): boolean {
+  return (
+    isConfiguredInferenceCredentialDigest(rawCredential)
+    || resolveConfiguredInferenceCredential(rawCredential, []) !== undefined
+  )
 }
 
 function configuredGatewayKeys(): Array<string> {
@@ -119,9 +175,15 @@ export function extractRequestCredential(request: Request): string | null {
   )
   const authorization = request.headers.get("authorization")
   if (authorization) {
-    const [scheme, ...rest] = authorization.trim().split(/\s+/)
-    if (scheme.toLowerCase() !== "bearer") return null
-    const bearerToken = rest.join(" ").trim()
+    const normalizedAuthorization = authorization.trim()
+    const separator = normalizedAuthorization.search(/\s/)
+    if (
+      separator <= 0
+      || normalizedAuthorization.slice(0, separator).toLowerCase() !== "bearer"
+    ) {
+      return null
+    }
+    const bearerToken = normalizedAuthorization.slice(separator).trimStart()
     if (!bearerToken) return null
     candidates.push(bearerToken)
   }
@@ -145,12 +207,22 @@ export async function resolveCredential(
   rawCredential: string,
   requiredScopes: ReadonlyArray<string> = [],
 ): Promise<ResolvedCredential | null> {
+  if (!rawCredential) return null
+  if (isConfiguredInferenceCredentialDigest(rawCredential)) return null
+
+  const configuredInferenceCredential = resolveConfiguredInferenceCredential(
+    rawCredential,
+    requiredScopes,
+  )
+  if (configuredInferenceCredential !== undefined) {
+    return configuredInferenceCredential
+  }
+
   const gatewayCredential = resolveGatewayCredential(
     rawCredential,
     requiredScopes,
   )
   if (gatewayCredential) return gatewayCredential
-  if (!rawCredential) return null
 
   const store = getOAuthStore()
   const oauthCredential = await store.resolveAccessToken(rawCredential)
@@ -187,6 +259,7 @@ export function resolveGatewayCredential(
 ): ResolvedCredential | null {
   const normalizedCredential = rawCredential.trim()
   if (!normalizedCredential) return null
+  if (isConfiguredInferenceCredential(normalizedCredential)) return null
   for (const gatewayKey of configuredGatewayKeys()) {
     if (!secretEquals(normalizedCredential, gatewayKey)) continue
     const credential: ResolvedCredential = {

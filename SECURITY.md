@@ -22,7 +22,12 @@ affected, include its exact version or digest.
 - OAuth codes and tokens are opaque, scoped, stored as digests, bound to S256
   PKCE/client/redirect/state, rotated on refresh, and revocable. OAuth never
   returns the gateway key. Claude's `create_api_key` compatibility route mints a
-  separate inference-only credential.
+  separate inference-only credential. Operators may also register only the
+  SHA-256 digests of client-held secrets through
+  `COPILOT_INFERENCE_CREDENTIAL_SHA256S`; credentials are trimmed before
+  hashing, digest text is rejected, and matches resolve solely to
+  `user:inference` with no gateway, OAuth profile, key-creation, or
+  administrator authority.
 - The dashboard requires the gateway key plus an Argon2id administrator
   password at login. The verifier can be stored locally or supplied
   authoritatively through `COPILOT_ADMIN_PASSWORD_HASH`; environment rotations
