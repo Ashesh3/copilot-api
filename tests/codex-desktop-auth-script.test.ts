@@ -11,8 +11,6 @@ const scriptPath = path.resolve(
   "../scripts/enable-codex-desktop-chatgpt-auth.ps1",
 )
 const powershellTest = test.skipIf(powershell === null)
-const replacementObserverEnvironmentVariable =
-  "CODEX_AUTH_TEST_REPLACEMENT_OBSERVER_PATH"
 const environmentExclusions = [
   "config.toml",
   "hosts",
@@ -341,11 +339,11 @@ powershellTest(
 )
 
 powershellTest(
-  "uses the permanent backup as the atomic replacement backup destination",
+  "ignores process environment paths and writes nothing outside Codex home",
   async () => {
     await withTemporaryCodexHome(async (codexHome, root) => {
       const firstResult = await runScript(codexHome)
-      const observerPath = path.join(root, "replacement-observer.txt")
+      const outsidePath = path.join(root, "outside-write.txt")
       const secondResult = await runPowerShellScript(
         [
           "-CodexHome",
@@ -356,20 +354,18 @@ powershellTest(
         ],
         {
           ...globalThis.process.env,
-          [replacementObserverEnvironmentVariable]: observerPath,
+          CODEX_AUTH_TEST_REPLACEMENT_OBSERVER_PATH: outsidePath,
         },
       )
-      const observedReplacementBackupPath = (
-        await fs.readFile(observerPath, "utf8")
-      ).trim()
 
       expect(firstResult.exitCode).toBe(0)
       expect(secondResult.exitCode).toBe(0)
-      expect(observedReplacementBackupPath).toBe(secondResult.backupPath)
-      expect(await listRelativeFiles(codexHome)).toEqual([
-        "auth.json",
-        path.relative(codexHome, secondResult.backupPath).replaceAll("\\", "/"),
-      ])
+      expect(
+        await fs.stat(outsidePath).then(
+          () => true,
+          () => false,
+        ),
+      ).toBeFalse()
     })
   },
 )

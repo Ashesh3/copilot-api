@@ -114,7 +114,6 @@ $authPath = Join-Path $CodexHome 'auth.json'
 $temporaryPath = Join-Path $CodexHome ".auth.json.$([Guid]::NewGuid().ToString('N')).tmp"
 $backupPath = $null
 $utf8NoBom = New-Object Text.UTF8Encoding($false)
-$replacementObserverPath = [Environment]::GetEnvironmentVariable('CODEX_AUTH_TEST_REPLACEMENT_OBSERVER_PATH', 'Process')
 
 try {
   $authJson = ($auth | ConvertTo-Json -Depth 10) + [Environment]::NewLine
@@ -132,9 +131,6 @@ try {
 
     [IO.Directory]::CreateDirectory($backupDirectory) | Out-Null
     $backupPath = Join-Path $backupDirectory 'auth.json'
-    if (-not [string]::IsNullOrWhiteSpace($replacementObserverPath)) {
-      [IO.File]::WriteAllText($replacementObserverPath, $backupPath, $utf8NoBom)
-    }
     [IO.File]::Replace($temporaryPath, $authPath, $backupPath)
   }
   else {
