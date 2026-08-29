@@ -12,6 +12,7 @@ import type { Context } from "hono"
 import consola from "consola"
 import { streamSSE } from "hono/streaming"
 
+import type { ModelRedirectVerbosity } from "~/lib/model-redirect"
 import type { Model } from "~/services/copilot/get-models"
 
 import {
@@ -382,6 +383,7 @@ async function resolveGoogleModelRedirect(
 ): Promise<{
   model: string
   reasoningEffort?: ReasoningEffort
+  verbosity?: ModelRedirectVerbosity
 }> {
   const { baseModel, reasoningEffort: suffixEffort } =
     parseModelSuffix(rawModel)
@@ -411,6 +413,7 @@ async function resolveGoogleModelRedirect(
         sourceEffort: requestedEffort,
         targetModel: redirect.model,
         targetEffort: redirect.effort,
+        targetVerbosity: redirect.verbosity,
         ruleId: redirect.ruleId,
         ruleIds: redirect.ruleIds?.join(","),
       },
@@ -435,6 +438,7 @@ async function resolveGoogleModelRedirect(
   return {
     model: targetModel,
     reasoningEffort,
+    verbosity: redirect.verbosity,
   }
 }
 
@@ -476,10 +480,8 @@ export async function handleGoogleAI(c: Context) {
   }
 
   // Apply silent model redirect. The public modelVersion remains rawModel.
-  const { model, reasoningEffort } = await resolveGoogleModelRedirect(
-    c,
-    rawModel,
-  )
+  const { model, reasoningEffort, verbosity } =
+    await resolveGoogleModelRedirect(c, rawModel)
   const customReference = resolveCustomGoogleModel(model)
   if (customReference) {
     return await handleCustomGoogleRequest(c, {
@@ -571,6 +573,7 @@ export async function handleGoogleAI(c: Context) {
   const candidates = await prepareChatCandidates({
     nativeMessagesOptions: {},
     reasoningEffort,
+    responsesVerbosity: verbosity,
     selectedModel,
     signal: c.req.raw.signal,
     source:

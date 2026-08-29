@@ -4,6 +4,7 @@ import type {
   ModelEndpointSupport,
   TranslationFinding,
 } from "~/lib/endpoint-routing"
+import type { ModelRedirectVerbosity } from "~/lib/model-redirect"
 import type { ReasoningEffort } from "~/lib/model-suffix"
 import type {
   AnthropicAssistantContentBlock,
@@ -102,6 +103,7 @@ interface NativeChatCandidateOptions {
 export interface PrepareChatCandidatesOptions {
   readonly nativeMessagesOptions: Record<string, unknown>
   readonly reasoningEffort?: ReasoningEffort
+  readonly responsesVerbosity?: ModelRedirectVerbosity
   readonly selectedModel: Model | undefined
   readonly signal?: AbortSignal
   readonly source: PreparedChatCompletionsSource
@@ -667,6 +669,7 @@ function getInstructions(source: PreparedChatCompletionsSource): string | null {
 function adaptChatToResponses(
   source: PreparedChatCompletionsSource,
   reasoningEffort: ReasoningEffort | undefined,
+  verbosity: ModelRedirectVerbosity | undefined,
   sourceFindings: ReadonlyArray<TranslationFinding>,
 ): ResponsesChatCandidate {
   // eslint-disable-next-line @eslint-react/naming-convention/context-name -- protocol candidate state, not React context
@@ -770,6 +773,9 @@ function adaptChatToResponses(
         severity: "omitted",
       })
     }
+  }
+  if (verbosity) {
+    payload.text = payload.text ? { ...payload.text, verbosity } : { verbosity }
   }
   if (Array.isArray(payload.tools)) {
     addPromptCaching([], payload.tools)
@@ -1234,6 +1240,7 @@ export async function prepareChatCandidates(
       adaptChatToResponses(
         clone(options.source),
         options.reasoningEffort,
+        options.responsesVerbosity,
         options.sourceFindings ?? [],
       )
     : undefined

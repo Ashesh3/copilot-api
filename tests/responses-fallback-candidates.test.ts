@@ -97,6 +97,38 @@ test("selects the cheapest viable translated candidate when native is unavailabl
   expect(selection.candidate.endpoint).toBe("/chat/completions")
 })
 
+test("keeps redirect verbosity out of translated candidate scoring", async () => {
+  const source = {
+    source: {
+      model: "gpt-test",
+      input: [{ type: "message", role: "user", content: "hello" }],
+      store: false,
+    },
+    normalizationClasses: [],
+  }
+  const model = {
+    ...selectedModel,
+    supported_endpoints: ["/chat/completions", "/v1/messages"],
+  }
+
+  const candidates = await prepareResponsesCandidates({
+    preservedSource: source,
+    adaptationSource: source.source,
+    nativeBody: { body: source.source, normalizationClasses: [] },
+    responsesVerbosity: "high",
+    selectedModel: model,
+  })
+
+  expect(candidates.native.payload.text).toEqual({ verbosity: "high" })
+  expect(candidates.chat?.check.findings).toEqual([])
+  const selection = selectResponsesCandidate({
+    candidates,
+    selectedModel: model,
+  })
+  if ("code" in selection) throw new Error("selection unexpectedly failed")
+  expect(selection.candidate.endpoint).toBe("/chat/completions")
+})
+
 test("shares same-mode attachment promises while separating PDF expectation", async () => {
   const requests: Array<string> = []
   globalThis.fetch = mock((input: string | URL | Request) => {

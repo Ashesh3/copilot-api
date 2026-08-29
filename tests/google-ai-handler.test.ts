@@ -390,6 +390,34 @@ test.each(["/v1beta/models", "/v1/models", "/models"] as const)(
   },
 )
 
+test("applies redirect verbosity to Google generation routed through Responses", async () => {
+  setModelRedirectsForTest([
+    {
+      id: "google-to-responses-verbosity",
+      sourceModel: "gpt-4o-mini",
+      sourceEffort: "all",
+      targetModel: "gpt-4o-mini",
+      targetVerbosity: "medium",
+      enabled: true,
+    },
+  ])
+
+  const response = await server.request(
+    "/v1beta/models/gpt-4o-mini:generateContent",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: "Explain this." }] }],
+      }),
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(lastPath).toBe("/responses")
+  expect(lastResponsesPayload?.text).toEqual({ verbosity: "medium" })
+})
+
 test("accepts equal Google credentials and rejects ambiguous credentials before dispatch", async () => {
   state.apiKeyAuth = "google-gateway-key"
   const path = "/v1/models/gpt-4o-mini:generateContent?key=google-gateway-key"

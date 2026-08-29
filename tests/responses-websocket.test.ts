@@ -1217,6 +1217,43 @@ describe("responses websocket message handling", () => {
     expect(ws.data.activeTurns.size).toBe(0)
   })
 
+  test("applies redirect verbosity to native Responses WebSocket turns", async () => {
+    state.accountType = "individual"
+    state.copilotToken = "copilot-token"
+    state.models = responsesCapableModels
+    setModelRedirectsForTest([
+      {
+        id: "responses-websocket-verbosity",
+        sourceModel: "gpt-5.4",
+        sourceEffort: "all",
+        targetModel: "gpt-5.4",
+        targetVerbosity: "high",
+        enabled: true,
+      },
+    ])
+    queuedResponses.push(createResponsesSseResponse("resp_ws_verbosity"))
+    const ws = createTestWebSocket()
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4",
+        input: "Explain this.",
+        text: {
+          verbosity: "low",
+          format: { type: "json_object" },
+        },
+      }),
+    )
+
+    expect(lastRequestBody?.text).toEqual({
+      verbosity: "high",
+      format: { type: "json_object" },
+    })
+    expect(ws.data.responseSnapshots.has("resp_ws_verbosity")).toBe(true)
+  })
+
   test("does not retry a native WebSocket compatibility 400", async () => {
     state.copilotToken = "copilot-token"
     state.models = responsesCapableModels
@@ -1577,6 +1614,68 @@ describe("responses websocket message handling", () => {
       source: "codex_metadata",
     })
     expect(lastRequestBody?.previous_response_id).toBeUndefined()
+  })
+
+  test("normalizes redirected continuation models with the requested verbosity", async () => {
+    const modelA = "ws-verbosity-cycle-a"
+    const modelB = "ws-verbosity-cycle-b"
+    state.accountType = "individual"
+    state.copilotToken = "copilot-token"
+    state.models = {
+      object: "list",
+      data: [
+        { ...responsesCapableModels.data[0], id: modelA, name: modelA },
+        { ...responsesCapableModels.data[0], id: modelB, name: modelB },
+      ],
+    }
+    setModelRedirectsForTest([
+      {
+        id: "verbosity-cycle-a-to-b",
+        sourceModel: modelA,
+        sourceEffort: "all",
+        targetModel: modelB,
+        targetVerbosity: "high",
+        enabled: true,
+      },
+      {
+        id: "verbosity-cycle-b-to-a",
+        sourceModel: modelB,
+        sourceEffort: "all",
+        targetModel: modelA,
+        targetVerbosity: "low",
+        enabled: true,
+      },
+    ])
+    queuedResponses.push(
+      createResponsesSseResponse("resp_verbosity_cycle_parent"),
+      createResponsesSseResponse("resp_verbosity_cycle_child"),
+    )
+    const ws = createTestWebSocket()
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: modelA,
+        input: "first",
+        text: { verbosity: "low" },
+      }),
+    )
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: modelA,
+        input: "follow-up",
+        previous_response_id: "resp_verbosity_cycle_parent",
+        text: { verbosity: "low" },
+      }),
+    )
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(ws.data.responseSnapshots.has("resp_verbosity_cycle_child")).toBe(
+      true,
+    )
   })
 
   test("rejects model or affinity replacement locally and keeps the socket on the original account", async () => {

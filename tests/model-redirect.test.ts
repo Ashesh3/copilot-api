@@ -62,6 +62,118 @@ test("all effort catch-all preserves requested effort", async () => {
   expect(redirect.effort).toBe("medium")
 })
 
+test("applies a verbosity-only redirect when the model and effort stay unchanged", async () => {
+  setModelRedirectsForTest([
+    {
+      id: "sol-high-verbosity",
+      sourceModel: "gpt-5.6-sol-fast",
+      sourceEffort: "all",
+      targetModel: "gpt-5.6-sol-fast",
+      targetVerbosity: "high",
+      enabled: true,
+    },
+  ])
+
+  const redirect = await applyModelRedirect({
+    model: "gpt-5.6-sol-fast",
+    effort: "max",
+    verbosity: "low",
+  })
+
+  expect(redirect).toMatchObject({
+    model: "gpt-5.6-sol-fast",
+    effort: "max",
+    verbosity: "high",
+    redirected: true,
+    originalVerbosity: "low",
+    ruleIds: ["sol-high-verbosity"],
+  })
+  expect(formatModelRedirectResult(redirect)).toBe(
+    "gpt-5.6-sol-fast:max [verbosity=low] -> gpt-5.6-sol-fast:max [verbosity=high]",
+  )
+})
+
+test("uses the last explicit verbosity override in a redirect chain", async () => {
+  setModelRedirectsForTest([
+    {
+      id: "source-to-middle",
+      sourceModel: "source-model",
+      sourceEffort: "all",
+      targetModel: "middle-model",
+      targetVerbosity: "medium",
+      enabled: true,
+    },
+    {
+      id: "middle-to-next",
+      sourceModel: "middle-model",
+      sourceEffort: "all",
+      targetModel: "next-model",
+      enabled: true,
+    },
+    {
+      id: "next-to-final",
+      sourceModel: "next-model",
+      sourceEffort: "all",
+      targetModel: "final-model",
+      targetVerbosity: "high",
+      enabled: true,
+    },
+  ])
+
+  const redirect = await applyModelRedirect({
+    model: "source-model",
+    effort: "medium",
+    verbosity: "low",
+  })
+
+  expect(redirect).toMatchObject({
+    model: "final-model",
+    effort: "medium",
+    verbosity: "high",
+    ruleIds: ["source-to-middle", "middle-to-next", "next-to-final"],
+  })
+  expect(redirect.redirectChain?.map((step) => step.targetVerbosity)).toEqual([
+    "medium",
+    "medium",
+    "high",
+  ])
+})
+
+test("continues past an already satisfied verbosity-only rule", async () => {
+  setModelRedirectsForTest([
+    {
+      id: "keep-high",
+      sourceModel: "model-a",
+      sourceEffort: "all",
+      targetModel: "model-a",
+      targetVerbosity: "high",
+      enabled: true,
+    },
+    {
+      id: "route-to-b",
+      sourceModel: "model-a",
+      sourceEffort: "all",
+      targetModel: "model-b",
+      targetVerbosity: "medium",
+      enabled: true,
+    },
+  ])
+
+  const redirect = await applyModelRedirect({
+    model: "model-a",
+    effort: "high",
+    verbosity: "high",
+  })
+
+  expect(redirect).toMatchObject({
+    model: "model-b",
+    effort: "high",
+    verbosity: "medium",
+    redirected: true,
+    ruleIds: ["route-to-b"],
+  })
+})
+
 test("follows chained redirects and applies final target effort", async () => {
   setModelRedirectsForTest([
     {

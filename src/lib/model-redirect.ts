@@ -6,6 +6,7 @@ import type { ReasoningEffort } from "~/lib/model-suffix"
 import { PATHS } from "./paths"
 
 export type ModelRedirectEffortFilter = "all" | "default" | ReasoningEffort
+export type ModelRedirectVerbosity = "low" | "medium" | "high"
 
 export const MODEL_REDIRECT_EFFORT_FILTERS: Array<ModelRedirectEffortFilter> = [
   "all",
@@ -39,6 +40,7 @@ export interface ModelRedirectRule {
   sourceEffort: ModelRedirectEffortFilter
   targetModel: string
   targetEffort?: ReasoningEffort
+  targetVerbosity?: ModelRedirectVerbosity
   enabled: boolean
 }
 
@@ -77,6 +79,14 @@ function normalizeTargetEffort(value: unknown): ReasoningEffort | undefined {
   return isReasoningEffort(value) ? value : undefined
 }
 
+function normalizeTargetVerbosity(
+  value: unknown,
+): ModelRedirectVerbosity | undefined {
+  return value === "low" || value === "medium" || value === "high" ?
+      value
+    : undefined
+}
+
 function normalizeRule(raw: unknown): ModelRedirectRule | undefined {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return undefined
@@ -98,6 +108,7 @@ function normalizeRule(raw: unknown): ModelRedirectRule | undefined {
     sourceEffort: normalizeSourceEffort(value.sourceEffort),
     targetModel: value.targetModel,
     targetEffort: normalizeTargetEffort(value.targetEffort),
+    targetVerbosity: normalizeTargetVerbosity(value.targetVerbosity),
     enabled: typeof value.enabled === "boolean" ? value.enabled : true,
   }
 }
@@ -209,6 +220,7 @@ export async function addModelRedirect(
     name?: string
     sourceEffort?: ModelRedirectEffortFilter | "max"
     targetEffort?: ReasoningEffort | "max"
+    targetVerbosity?: ModelRedirectVerbosity
   },
 ): Promise<ModelRedirectRule> {
   await ensureLoaded()
@@ -219,6 +231,7 @@ export async function addModelRedirect(
     sourceEffort: normalizeSourceEffort(options?.sourceEffort),
     targetModel,
     targetEffort: normalizeTargetEffort(options?.targetEffort),
+    targetVerbosity: normalizeTargetVerbosity(options?.targetVerbosity),
     enabled: true,
   }
   redirects.push(rule)
@@ -245,6 +258,7 @@ export async function updateModelRedirect(
     sourceEffort?: ModelRedirectEffortFilter | "max"
     targetModel?: string
     targetEffort?: ReasoningEffort | "max" | null
+    targetVerbosity?: ModelRedirectVerbosity | null
     enabled?: boolean
   },
 ): Promise<ModelRedirectRule | null> {
@@ -260,6 +274,9 @@ export async function updateModelRedirect(
   if (updates.targetModel !== undefined) rule.targetModel = updates.targetModel
   if (updates.targetEffort !== undefined) {
     rule.targetEffort = normalizeTargetEffort(updates.targetEffort)
+  }
+  if (updates.targetVerbosity !== undefined) {
+    rule.targetVerbosity = normalizeTargetVerbosity(updates.targetVerbosity)
   }
   if (updates.enabled !== undefined) rule.enabled = updates.enabled
 
@@ -308,9 +325,11 @@ export async function clearModelRedirects(): Promise<void> {
 export interface ModelRedirectResult {
   model: string
   effort?: ReasoningEffort
+  verbosity?: ModelRedirectVerbosity
   redirected: boolean
   originalModel?: string
   originalEffort?: ReasoningEffort
+  originalVerbosity?: ModelRedirectVerbosity
   ruleId?: string
   ruleIds?: Array<string>
   redirectChain?: Array<ModelRedirectStep>
@@ -319,6 +338,7 @@ export interface ModelRedirectResult {
 export interface ModelRedirectRequest {
   model: string
   effort?: ReasoningEffort
+  verbosity?: ModelRedirectVerbosity
   modelOnly?: boolean
 }
 
@@ -329,6 +349,8 @@ export interface ModelRedirectStep {
   sourceEffort?: ReasoningEffort
   targetModel: string
   targetEffort?: ReasoningEffort
+  sourceVerbosity?: ModelRedirectVerbosity
+  targetVerbosity?: ModelRedirectVerbosity
 }
 
 interface MatchedRedirectRule {
@@ -376,8 +398,9 @@ function formatModelWithEffort(
 function getRedirectStateKey(
   model: string,
   effort: ReasoningEffort | undefined,
+  verbosity: ModelRedirectVerbosity | undefined,
 ): string {
-  return formatModelWithEffort(model, effort ?? undefined)
+  return `${formatModelWithEffort(model, effort ?? undefined)}\u0000${verbosity ?? ""}`
 }
 
 function createRedirectStep(options: {
@@ -385,8 +408,10 @@ function createRedirectStep(options: {
   rule: ModelRedirectRule
   sourceEffort: ReasoningEffort | undefined
   sourceModel: string
+  sourceVerbosity: ModelRedirectVerbosity | undefined
 }): ModelRedirectStep {
-  const { modelOnly, rule, sourceEffort, sourceModel } = options
+  const { modelOnly, rule, sourceEffort, sourceModel, sourceVerbosity } =
+    options
   return {
     ruleId: rule.id,
     ruleName: rule.name,
@@ -394,7 +419,20 @@ function createRedirectStep(options: {
     sourceEffort: modelOnly ? undefined : sourceEffort,
     targetModel: rule.targetModel,
     targetEffort: modelOnly ? undefined : (rule.targetEffort ?? sourceEffort),
+    sourceVerbosity,
+    targetVerbosity: rule.targetVerbosity ?? sourceVerbosity,
   }
+}
+
+function formatModelRedirectState(options: {
+  effort?: ReasoningEffort
+  model: string
+  verbosity?: ModelRedirectVerbosity
+}): string {
+  const modelWithEffort = formatModelWithEffort(options.model, options.effort)
+  return options.verbosity ?
+      `${modelWithEffort} [verbosity=${options.verbosity}]`
+    : modelWithEffort
 }
 
 export function formatModelRedirectResult(
@@ -402,13 +440,21 @@ export function formatModelRedirectResult(
 ): string {
   const chain = redirect.redirectChain
   if (!chain || chain.length === 0) {
-    return formatModelWithEffort(redirect.model, redirect.effort)
+    return formatModelRedirectState(redirect)
   }
 
   return [
-    formatModelWithEffort(chain[0].sourceModel, chain[0].sourceEffort),
+    formatModelRedirectState({
+      model: chain[0].sourceModel,
+      effort: chain[0].sourceEffort,
+      verbosity: chain[0].sourceVerbosity,
+    }),
     ...chain.map((step) =>
-      formatModelWithEffort(step.targetModel, step.targetEffort),
+      formatModelRedirectState({
+        model: step.targetModel,
+        effort: step.targetEffort,
+        verbosity: step.targetVerbosity,
+      }),
     ),
   ].join(" -> ")
 }
@@ -426,29 +472,38 @@ export async function applyModelRedirect(
   await ensureLoaded()
   const originalModel = typeof input === "string" ? input : input.model
   const originalEffort = typeof input === "string" ? undefined : input.effort
+  const originalVerbosity =
+    typeof input === "string" ? undefined : input.verbosity
   const modelOnly = typeof input === "string" ? false : input.modelOnly === true
   let model = originalModel
   let effort = originalEffort
+  let verbosity = originalVerbosity
   const redirectChain: Array<ModelRedirectStep> = []
   const seen = new Set<string>()
   let nextRuleIndex = 0
 
   while (redirectChain.length < MAX_REDIRECT_CHAIN_LENGTH) {
-    seen.add(getRedirectStateKey(model, effort))
+    seen.add(getRedirectStateKey(model, effort, verbosity))
 
     const match = findMatchingRedirectRule(model, effort, nextRuleIndex)
     if (!match) break
 
-    const currentKey = getRedirectStateKey(model, effort)
+    const currentKey = getRedirectStateKey(model, effort, verbosity)
     const step = createRedirectStep({
       modelOnly,
       rule: match.rule,
       sourceEffort: effort,
       sourceModel: model,
+      sourceVerbosity: verbosity,
     })
-    const nextKey = getRedirectStateKey(step.targetModel, step.targetEffort)
+    const nextKey = getRedirectStateKey(
+      step.targetModel,
+      step.targetEffort,
+      step.targetVerbosity,
+    )
     if (nextKey === currentKey) {
-      break
+      nextRuleIndex = match.index + 1
+      continue
     }
     if (seen.has(nextKey)) {
       consola.warn(
@@ -460,11 +515,12 @@ export async function applyModelRedirect(
     redirectChain.push(step)
     model = step.targetModel
     effort = step.targetEffort
+    verbosity = step.targetVerbosity
     nextRuleIndex = match.index + 1
   }
 
   if (redirectChain.length === 0) {
-    return { model, effort, redirected: false }
+    return { model, effort, verbosity, redirected: false }
   }
 
   if (redirectChain.length >= MAX_REDIRECT_CHAIN_LENGTH) {
@@ -476,9 +532,11 @@ export async function applyModelRedirect(
   const result: ModelRedirectResult = {
     model,
     effort,
+    verbosity,
     redirected: true,
     originalModel,
     originalEffort,
+    originalVerbosity,
     ruleId: redirectChain[0]?.ruleId,
     ruleIds: redirectChain.map((step) => step.ruleId),
     redirectChain,

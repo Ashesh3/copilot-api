@@ -3,6 +3,7 @@ import type {
   EvaluatedEndpointSelection,
   EndpointRouteFailure,
 } from "~/lib/endpoint-routing"
+import type { ModelRedirectVerbosity } from "~/lib/model-redirect"
 import type { ResponsesPayload } from "~/services/copilot/create-responses"
 import type { Model } from "~/services/copilot/get-models"
 import type {
@@ -26,6 +27,7 @@ import {
   adaptResponsesToChatCandidate,
   type ResponsesChatCandidate,
 } from "./responses-chat-adapter"
+import { applyResponsesVerbosity } from "./utils"
 
 export type ResponsesNativeCandidate = EvaluatedEndpointCandidate<
   "/responses",
@@ -50,6 +52,7 @@ export interface PrepareResponsesCandidatesOptions {
   readonly nativeBody: FinalizedNativeResponsesRequest
   readonly preservedSource: PreparedResponsesSource
   readonly resolveRemoteAttachments?: boolean
+  readonly responsesVerbosity?: ModelRedirectVerbosity
   readonly selectedModel: Model | undefined
   readonly signal?: AbortSignal
 }
@@ -62,10 +65,12 @@ export async function prepareResponsesCandidates(
     resolveRemote: options.resolveRemoteAttachments,
   })
   const support = getModelEndpointSupport(options.selectedModel)
+  const nativePayload = structuredClone(options.nativeBody.body)
+  applyResponsesVerbosity(nativePayload, options.responsesVerbosity)
   const native: ResponsesNativeCandidate = {
     endpoint: "/responses",
     reason: "endpoint_unavailable",
-    payload: structuredClone(options.nativeBody.body),
+    payload: nativePayload,
     check: createEvaluatedTranslationCheck([]),
   }
   const chat =

@@ -507,6 +507,37 @@ test("routes legacy chat completions requests for responses-only models through 
   })
 })
 
+test("applies redirect verbosity only to the Responses candidate", async () => {
+  setModelRedirectsForTest([
+    {
+      id: "chat-to-responses-verbosity",
+      sourceModel: "gpt-5.5",
+      sourceEffort: "all",
+      targetModel: "gpt-5.5",
+      targetVerbosity: "medium",
+      enabled: true,
+    },
+  ])
+
+  const response = await server.request("/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "Say hello." }],
+      response_format: { type: "json_object" },
+      stream: false,
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/responses")
+  expect(lastUpstreamPayload?.text).toEqual({
+    format: { type: "json_object" },
+    verbosity: "medium",
+  })
+})
+
 test("passes explicit native beta, version, and provider preference through Chat to Messages", async () => {
   state.models = messagesOnlyModels
 

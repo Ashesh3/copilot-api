@@ -2,6 +2,7 @@ import type {
   EvaluatedEndpointCandidate,
   TranslationFinding,
 } from "~/lib/endpoint-routing"
+import type { ModelRedirectVerbosity } from "~/lib/model-redirect"
 import type { ReasoningEffort } from "~/lib/model-suffix"
 import type {
   AnthropicMessagesPayload,
@@ -101,6 +102,7 @@ export interface PrepareMessagesCandidatesOptions {
   readonly source: AnthropicMessagesPayload
   readonly selectedModel: Model | undefined
   readonly effortOverride?: ReasoningEffort
+  readonly responsesVerbosity?: ModelRedirectVerbosity
   readonly isCompact?: boolean
   readonly signal?: AbortSignal
 }
@@ -441,6 +443,7 @@ function mergeToolResultForCandidate(payload: AnthropicMessagesPayload): void {
 function adaptMessagesToResponses(options: {
   source: AnthropicMessagesPayload
   effortOverride?: ReasoningEffort
+  verbosity?: ModelRedirectVerbosity
 }): MessagesResponsesCandidate {
   const source = structuredClone(options.source)
   const findings: Array<TranslationFinding> = []
@@ -449,6 +452,12 @@ function adaptMessagesToResponses(options: {
     source,
     options.effortOverride,
   )
+  if (options.verbosity) {
+    payload.text =
+      payload.text ?
+        { ...payload.text, verbosity: options.verbosity }
+      : { verbosity: options.verbosity }
+  }
   if (
     typeof payload.max_output_tokens === "number"
     && payload.max_output_tokens < COPILOT_RESPONSES_MIN_OUTPUT_TOKENS
@@ -577,6 +586,7 @@ export async function prepareMessagesCandidates(
         return adaptMessagesToResponses({
           source,
           effortOverride: options.effortOverride,
+          verbosity: options.responsesVerbosity,
         })
       })()
     : undefined

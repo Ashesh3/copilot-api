@@ -67,6 +67,7 @@ export interface ResponsesPayload {
   truncation?: string | Record<string, unknown> | null
   text?: {
     format?: { type: string; [key: string]: unknown } | null
+    verbosity?: "low" | "medium" | "high"
   } | null
   generate?: boolean | null
   task_budget?: {

@@ -340,6 +340,7 @@ async function handleCompletionInner(
         sourceEffort: requestedEffort,
         targetModel: redirect.model,
         targetEffort: redirect.effort,
+        targetVerbosity: redirect.verbosity,
         ruleId: redirect.ruleId,
         ruleIds: redirect.ruleIds?.join(","),
       },
@@ -457,6 +458,7 @@ async function handleCompletionInner(
     source: anthropicPayload,
     selectedModel: routingModel,
     effortOverride: redirectEffort,
+    responsesVerbosity: redirect.verbosity,
     isCompact,
     signal: c.req.raw.signal,
   })

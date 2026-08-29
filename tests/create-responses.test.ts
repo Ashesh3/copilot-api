@@ -2117,6 +2117,40 @@ test("keeps numeric Responses redirects model-only across the HTTP route", async
   }
 })
 
+test("overrides Responses verbosity without replacing other text controls", async () => {
+  state.models = responsesCapableModels
+  setModelRedirectsForTest([
+    {
+      id: "responses-verbosity-only",
+      sourceModel: "gpt-4o",
+      sourceEffort: "all",
+      targetModel: "gpt-4o",
+      targetVerbosity: "high",
+      enabled: true,
+    },
+  ])
+
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-4o",
+      input: "Explain the result.",
+      text: {
+        verbosity: "low",
+        format: { type: "json_object" },
+      },
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastRequestBody?.model).toBe("gpt-4o")
+  expect(lastRequestBody?.text).toEqual({
+    verbosity: "high",
+    format: { type: "json_object" },
+  })
+})
+
 test("dispatches zero from the top-level Responses reasoning alias", async () => {
   state.models = responsesCapableModels
 

@@ -1079,6 +1079,40 @@ test("does not forward native Messages headers to a Responses branch", async () 
   expect(lastUpstreamHeaders?.get("x-model-provider-preference")).toBeNull()
 })
 
+test("applies redirect verbosity to a Messages request routed through Responses", async () => {
+  state.models = responsesOnlyMessagesModels
+  setModelRedirectsForTest([
+    {
+      id: "messages-to-responses-verbosity",
+      sourceModel: "gpt-responses-only",
+      sourceEffort: "all",
+      targetModel: "gpt-responses-only",
+      targetVerbosity: "high",
+      enabled: true,
+    },
+  ])
+
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-responses-only",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "Explain this." }],
+      output_config: { format: { type: "json_object" } },
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamUrl).toContain("/responses")
+  expect(
+    (lastUpstreamPayload as Record<string, unknown> | undefined)?.text,
+  ).toEqual({
+    format: { type: "json_object" },
+    verbosity: "high",
+  })
+})
+
 test("routes forward-compatible Messages through Responses when native delivery is unavailable", async () => {
   state.models = responsesOnlyMessagesModels
 
