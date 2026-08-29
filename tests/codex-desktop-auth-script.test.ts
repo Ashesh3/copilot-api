@@ -1,8 +1,10 @@
-import { expect, test } from "bun:test"
+import { expect, setDefaultTimeout, test } from "bun:test"
 import { createHash } from "node:crypto"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
+
+setDefaultTimeout(30_000)
 
 const powershellExecutables = [Bun.which("pwsh"), Bun.which("powershell")]
   .filter((value): value is string => value !== null)

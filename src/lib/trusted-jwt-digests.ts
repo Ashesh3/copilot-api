@@ -228,6 +228,8 @@ function persistEntries(
 }
 
 function digestCredential(rawCredential: string): Buffer {
+  // Random bearer/JWT lookup contract, not human-password verification.
+  // lgtm [js/insufficient-password-hash]
   return createHash("sha256").update(rawCredential.trim(), "utf8").digest()
 }
 
