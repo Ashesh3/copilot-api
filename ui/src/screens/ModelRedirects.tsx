@@ -18,6 +18,7 @@ import type {
   ModelRedirect,
   RedirectSourceEffort,
   RedirectTargetEffort,
+  RedirectTargetVerbosity,
 } from "../lib/types"
 
 import {
@@ -69,6 +70,13 @@ const TARGET_EFFORT_OPTIONS = [
   { value: "max", label: "Max" },
 ]
 
+const TARGET_VERBOSITY_OPTIONS = [
+  { value: TARGET_PRESERVE, label: "Preserve verbosity" },
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" },
+]
+
 function capitalizeWord(value: string): string {
   return value === "xhigh" ? "XHigh" : (
       value.charAt(0).toUpperCase() + value.slice(1)
@@ -87,12 +95,19 @@ function targetEffortBadgeLabel(
   return effort ? capitalizeWord(effort) : "preserve"
 }
 
+function targetVerbosityBadgeLabel(
+  verbosity: RedirectTargetVerbosity | null | undefined,
+): string {
+  return verbosity ? capitalizeWord(verbosity) : "preserve"
+}
+
 interface RedirectFormState {
   name: string
   sourceModel: string
   sourceEffort: RedirectSourceEffort
   targetModel: string
   targetEffort: string
+  targetVerbosity: string
 }
 
 const EMPTY_FORM: RedirectFormState = {
@@ -101,6 +116,7 @@ const EMPTY_FORM: RedirectFormState = {
   sourceEffort: "all",
   targetModel: "",
   targetEffort: TARGET_PRESERVE,
+  targetVerbosity: TARGET_PRESERVE,
 }
 
 function toRequestBody(form: RedirectFormState) {
@@ -111,6 +127,8 @@ function toRequestBody(form: RedirectFormState) {
     targetModel: form.targetModel.trim(),
     targetEffort:
       form.targetEffort === TARGET_PRESERVE ? null : form.targetEffort,
+    targetVerbosity:
+      form.targetVerbosity === TARGET_PRESERVE ? null : form.targetVerbosity,
   }
 }
 
@@ -136,6 +154,7 @@ export default function ModelRedirectsScreen() {
       sourceEffort: row.sourceEffort,
       targetModel: row.targetModel,
       targetEffort: row.targetEffort ?? TARGET_PRESERVE,
+      targetVerbosity: row.targetVerbosity ?? TARGET_PRESERVE,
     })
   }
 
@@ -268,6 +287,17 @@ export default function ModelRedirectsScreen() {
             label={targetEffortBadgeLabel(item.targetEffort)}
           />
         </HStack>
+      ),
+    },
+    {
+      key: "verbosity",
+      header: "Verbosity",
+      width: pixel(104),
+      renderCell: (item) => (
+        <Badge
+          variant="neutral"
+          label={targetVerbosityBadgeLabel(item.targetVerbosity)}
+        />
       ),
     },
     {
@@ -426,6 +456,14 @@ export default function ModelRedirectsScreen() {
                 options={TARGET_EFFORT_OPTIONS}
               />
             </FormLayout>
+            <Selector
+              label="Target verbosity"
+              value={form.targetVerbosity}
+              onChange={(value) =>
+                setForm((f) => ({ ...f, targetVerbosity: value }))
+              }
+              options={TARGET_VERBOSITY_OPTIONS}
+            />
           </FormLayout>
           <HStack gap={2} hAlign="end">
             {editingId ?

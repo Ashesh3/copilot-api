@@ -105,18 +105,26 @@ test("dashboard admin session can manage replacements and model redirects", asyn
         sourceModel: "claude-source",
         targetModel: "claude-target",
         name: "admin-redirect",
+        targetVerbosity: "medium",
       }),
     },
   )
   expect(createRedirect.status).toBe(200)
-  const redirect = (await createRedirect.json()) as { id: string }
+  const redirect = (await createRedirect.json()) as {
+    id: string
+    targetVerbosity?: string
+  }
   expect(redirect.id).toBeTruthy()
+  expect(redirect.targetVerbosity).toBe("medium")
   expect(await getAllModelRedirects()).toHaveLength(1)
 
   const listRedirects = await server.request("/dashboard/api/model-redirects", {
     headers: adminHeaders(session, false),
   })
   expect(listRedirects.status).toBe(200)
+  expect(await listRedirects.json()).toMatchObject([
+    { id: redirect.id, targetVerbosity: "medium" },
+  ])
 })
 
 test("dashboard mutations reject missing admin session even with gateway key", async () => {

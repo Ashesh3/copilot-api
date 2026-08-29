@@ -42,6 +42,7 @@ import {
 import {
   addModelRedirect,
   getAllModelRedirects,
+  type ModelRedirectVerbosity,
   moveModelRedirect,
   removeModelRedirect,
   toggleModelRedirect,
@@ -436,6 +437,7 @@ export async function handleAddModelRedirect(c: Context) {
     name?: string
     sourceEffort?: RedirectSourceEffort
     targetEffort?: RedirectTargetEffort
+    targetVerbosity?: ModelRedirectVerbosity
   }>()
   if (!body.sourceModel || !body.targetModel) {
     return c.json({ error: "sourceModel and targetModel are required" }, 400)
@@ -444,6 +446,7 @@ export async function handleAddModelRedirect(c: Context) {
     name: body.name,
     sourceEffort: body.sourceEffort,
     targetEffort: body.targetEffort,
+    targetVerbosity: body.targetVerbosity,
   })
   return c.json(rule)
 }
@@ -470,6 +473,7 @@ export async function handleUpdateModelRedirect(c: Context) {
     sourceEffort?: RedirectSourceEffort
     targetModel?: string
     targetEffort?: RedirectTargetEffort | null
+    targetVerbosity?: ModelRedirectVerbosity | null
     enabled?: boolean
   }>()
   const rule = await updateModelRedirect(id, body)

@@ -28,6 +28,7 @@ import {
 import {
   applyModelRedirect,
   formatModelRedirectResult,
+  type ModelRedirectVerbosity,
 } from "~/lib/model-redirect"
 import { normalizeModelName } from "~/lib/model-resolver"
 import {
@@ -85,7 +86,11 @@ import {
   emitResponsesFailureAsStream,
   updateResponsesFailureState,
 } from "./stream-lifecycle"
-import { expandCompactionItems, getResponsesRequestOptions } from "./utils"
+import {
+  expandCompactionItems,
+  getResponsesRequestOptions,
+  getResponsesVerbosity,
+} from "./utils"
 import {
   classifyWebSocketTerminal,
   createResponsesWebSocketTurn,
@@ -434,10 +439,11 @@ async function handleResponseCreate(
   turn.requestedModel = requestedModel
   turn.model = requestedModel
 
-  const reasoningEffort = await waitForWebSocketTurn(
+  const routing = await waitForWebSocketTurn(
     applyResponsesWebSocketRouting(payload),
     turn,
   )
+  const reasoningEffort = routing.reasoningEffort
   throwIfWebSocketTurnAborted(turn)
   turn.model = payload.model
   turn.reasoningEffort = reasoningEffort
@@ -457,6 +463,7 @@ async function handleResponseCreate(
     prepareResponsesWebSocketCandidate({
       payload,
       reasoningEffort,
+      responsesVerbosity: routing.responsesVerbosity,
       selectedModel,
       signal: turn.abortController.signal,
     }),
@@ -610,6 +617,7 @@ async function dispatchTranslatedWebSocketEndpoint(options: {
 async function prepareResponsesWebSocketCandidate(options: {
   payload: ResponsesPayload
   reasoningEffort: ReasoningEffort | undefined
+  responsesVerbosity?: ModelRedirectVerbosity
   selectedModel: Model | undefined
   signal?: AbortSignal
 }): Promise<{
@@ -630,6 +638,7 @@ async function prepareEvaluatedResponsesWebSocketCandidate(options: {
   evaluationOnly?: boolean
   payload: ResponsesPayload
   reasoningEffort: ReasoningEffort | undefined
+  responsesVerbosity?: ModelRedirectVerbosity
   selectedModel: Model | undefined
   signal?: AbortSignal
 }): Promise<ResponsesEndpointCandidate> {
@@ -649,6 +658,7 @@ async function prepareEvaluatedResponsesWebSocketCandidate(options: {
     nativeBody,
     preservedSource: preparedSource,
     resolveRemoteAttachments: !options.evaluationOnly,
+    responsesVerbosity: options.responsesVerbosity,
     selectedModel: options.selectedModel,
     signal: options.signal,
   })
@@ -901,7 +911,10 @@ function getRedirectReasoningEffort(
 
 async function applyResponsesWebSocketRouting(
   payload: ResponsesPayload,
-): Promise<ReasoningEffort | undefined> {
+): Promise<{
+  reasoningEffort: ReasoningEffort | undefined
+  responsesVerbosity: ModelRedirectVerbosity | undefined
+}> {
   const { baseModel, reasoningEffort: suffixEffort } = parseModelSuffix(
     payload.model,
   )
@@ -910,6 +923,7 @@ async function applyResponsesWebSocketRouting(
   const redirect = await resolveResponsesWebSocketRedirect(
     payload.model,
     effectiveEffort,
+    getResponsesVerbosity(payload),
   )
 
   // eslint-disable-next-line require-atomic-updates
@@ -925,7 +939,11 @@ async function applyResponsesWebSocketRouting(
     redirected: true,
   })
   applyRedirectedResponsesEffort(payload, payload.model, redirectedEffort)
-  return redirectedEffort ?? getRedirectReasoningEffort(effectiveEffort)
+  return {
+    reasoningEffort:
+      redirectedEffort ?? getRedirectReasoningEffort(effectiveEffort),
+    responsesVerbosity: redirect.verbosity,
+  }
 }
 
 async function normalizeRequestedWebSocketModel(
@@ -942,6 +960,7 @@ async function normalizeRequestedWebSocketModel(
   const redirect = await applyModelRedirect({
     model: normalizedModel,
     effort: getRedirectReasoningEffort(effectiveEffort),
+    verbosity: getResponsesVerbosity(payload),
   })
   return normalizeModelName(redirect.model)
 }
@@ -951,6 +970,7 @@ async function resolveResponsesWebSocketRedirect(
   effectiveEffort:
     | NonNullable<ResponsesPayload["reasoning"]>["effort"]
     | undefined,
+  verbosity?: ModelRedirectVerbosity,
 ): Promise<Awaited<ReturnType<typeof applyModelRedirect>>> {
   const redirectRawEffort = getRedirectReasoningEffort(effectiveEffort)
   const requestedEffort = normalizeReasoningEffortForModel(
@@ -963,7 +983,11 @@ async function resolveResponsesWebSocketRedirect(
     effectiveEffort: requestedEffort,
   })
 
-  const redirect = await applyModelRedirect({ model, effort: requestedEffort })
+  const redirect = await applyModelRedirect({
+    model,
+    effort: requestedEffort,
+    verbosity,
+  })
   if (redirect.redirected) {
     reportNonDefaultBehavior({
       kind: "model_redirect",
@@ -973,6 +997,7 @@ async function resolveResponsesWebSocketRedirect(
         sourceEffort: requestedEffort,
         targetModel: redirect.model,
         targetEffort: redirect.effort,
+        targetVerbosity: redirect.verbosity,
         ruleId: redirect.ruleId,
         ruleIds: redirect.ruleIds?.join(","),
         transport: "websocket",

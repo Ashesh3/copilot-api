@@ -43,6 +43,7 @@ import { createHandlerLogger } from "~/lib/logger"
 import {
   applyModelRedirect,
   formatModelRedirectResult,
+  type ModelRedirectVerbosity,
 } from "~/lib/model-redirect"
 import { normalizeModelName } from "~/lib/model-resolver"
 import {
@@ -144,7 +145,11 @@ import {
   checkResponsesToChatTranslation,
   checkResponsesToMessagesTranslation,
 } from "./translation-fidelity"
-import { expandCompactionItems, getResponsesRequestOptions } from "./utils"
+import {
+  expandCompactionItems,
+  getResponsesRequestOptions,
+  getResponsesVerbosity,
+} from "./utils"
 
 const logger = createHandlerLogger("responses-handler")
 
@@ -550,7 +555,11 @@ function applyRedirectedResponsesEffort(options: {
 
 async function resolveResponsesRedirect(
   c: Context,
-  request: { model: string; effectiveEffort?: ResponsesReasoningEffort },
+  request: {
+    model: string
+    effectiveEffort?: ResponsesReasoningEffort
+    verbosity?: ModelRedirectVerbosity
+  },
 ): Promise<Awaited<ReturnType<typeof applyModelRedirect>>> {
   const redirectRawEffort = getRedirectReasoningEffort(request.effectiveEffort)
   const requestedEffort = normalizeReasoningEffortForModel(
@@ -566,6 +575,7 @@ async function resolveResponsesRedirect(
   const redirect = await applyModelRedirect({
     model: request.model,
     effort: requestedEffort,
+    verbosity: request.verbosity,
     modelOnly: typeof request.effectiveEffort === "number",
   })
   if (redirect.redirected) {
@@ -578,6 +588,7 @@ async function resolveResponsesRedirect(
         sourceEffort: numericEffort ? undefined : requestedEffort,
         targetModel: redirect.model,
         targetEffort: numericEffort ? undefined : redirect.effort,
+        targetVerbosity: redirect.verbosity,
         ruleId: redirect.ruleId,
         ruleIds: redirect.ruleIds?.join(","),
       },
@@ -839,6 +850,7 @@ const handleResponsesInner = async (
   const redirect = await resolveResponsesRedirect(c, {
     model: payload.model,
     effectiveEffort,
+    verbosity: getResponsesVerbosity(payload),
   })
   // eslint-disable-next-line require-atomic-updates
   payload.model = normalizeModelName(redirect.model)
@@ -922,6 +934,7 @@ const handleResponsesInner = async (
     finalReasoningEffort: finalEffort,
     nativeBody,
     preservedSource: options.preparedSource,
+    responsesVerbosity: redirect.verbosity,
     selectedModel,
     signal: c.req.raw.signal,
   })
@@ -1232,9 +1245,9 @@ function syncLegacyResponsesRouteState(
   delete legacyPayload.reasoning_effort
   if (routedPayload.reasoning === undefined) {
     delete legacyPayload.reasoning
-    return
+  } else {
+    legacyPayload.reasoning = structuredClone(routedPayload.reasoning)
   }
-  legacyPayload.reasoning = structuredClone(routedPayload.reasoning)
 }
 
 function resolveResponsesSessionToken(

@@ -79,6 +79,7 @@ export type ReasoningEffort =
 
 export type RedirectSourceEffort = "all" | "default" | ReasoningEffort
 export type RedirectTargetEffort = ReasoningEffort
+export type RedirectTargetVerbosity = "low" | "medium" | "high"
 
 export interface ModelRedirectConflict {
   id: string
@@ -92,6 +93,7 @@ export interface ModelRedirect {
   sourceEffort: RedirectSourceEffort
   targetModel: string
   targetEffort?: RedirectTargetEffort
+  targetVerbosity?: RedirectTargetVerbosity
   enabled: boolean
   conflicts: Array<ModelRedirectConflict>
 }

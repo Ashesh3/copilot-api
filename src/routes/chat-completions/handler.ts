@@ -44,6 +44,7 @@ import {
 import {
   applyModelRedirect,
   formatModelRedirectResult,
+  type ModelRedirectVerbosity,
 } from "~/lib/model-redirect"
 import { normalizeModelName } from "~/lib/model-resolver"
 import {
@@ -204,7 +205,7 @@ async function handleCompletionInner(
     })
   }
 
-  const { targetModel, reasoningEffort, redirected } =
+  const { targetModel, reasoningEffort, redirected, verbosity } =
     await resolveRedirectedModel(c, {
       model: normalizedModel,
       effort: requestedEffort,
@@ -288,6 +289,7 @@ async function handleCompletionInner(
   const candidates = await prepareChatCandidates({
     nativeMessagesOptions: { ...nativeOptions },
     reasoningEffort,
+    responsesVerbosity: verbosity,
     selectedModel,
     signal: c.req.raw.signal,
     source: routableSource,
@@ -865,6 +867,7 @@ async function resolveRedirectedModel(
   reasoningEffort?: ReasoningEffort
   redirected: boolean
   targetModel: string
+  verbosity?: ModelRedirectVerbosity
 }> {
   const redirect = await applyModelRedirect(request)
   if (redirect.redirected) {
@@ -892,7 +895,12 @@ async function resolveRedirectedModel(
     requestedEffort: redirect.effort,
     effectiveEffort: reasoningEffort,
   })
-  return { targetModel, reasoningEffort, redirected: redirect.redirected }
+  return {
+    targetModel,
+    reasoningEffort,
+    redirected: redirect.redirected,
+    verbosity: redirect.verbosity,
+  }
 }
 
 function reportClampedRedirectEffort(

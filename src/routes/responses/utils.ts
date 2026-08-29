@@ -1,7 +1,25 @@
+import type { ModelRedirectVerbosity } from "~/lib/model-redirect"
 import type {
   ResponseInputItem,
   ResponsesPayload,
 } from "~/services/copilot/create-responses"
+
+export function getResponsesVerbosity(
+  payload: ResponsesPayload,
+): ModelRedirectVerbosity | undefined {
+  const verbosity = payload.text?.verbosity
+  return verbosity === "low" || verbosity === "medium" || verbosity === "high" ?
+      verbosity
+    : undefined
+}
+
+export function applyResponsesVerbosity(
+  payload: ResponsesPayload,
+  verbosity: ModelRedirectVerbosity | undefined,
+): void {
+  if (!verbosity) return
+  payload.text = payload.text ? { ...payload.text, verbosity } : { verbosity }
+}
 
 export const getResponsesRequestOptions = (
   payload: ResponsesPayload,
