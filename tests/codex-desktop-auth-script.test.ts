@@ -11,6 +11,8 @@ const scriptPath = path.resolve(
   "../scripts/enable-codex-desktop-chatgpt-auth.ps1",
 )
 const powershellTest = test.skipIf(powershell === null)
+const replacementObserverEnvironmentVariable =
+  "CODEX_AUTH_TEST_REPLACEMENT_OBSERVER_PATH"
 const environmentExclusions = [
   "config.toml",
   "hosts",
@@ -334,6 +336,40 @@ powershellTest(
           .relative(path.join(codexHome, "backups"), result.backupPath)
           .startsWith(".."),
       ).toBeFalse()
+    })
+  },
+)
+
+powershellTest(
+  "uses the permanent backup as the atomic replacement backup destination",
+  async () => {
+    await withTemporaryCodexHome(async (codexHome, root) => {
+      const firstResult = await runScript(codexHome)
+      const observerPath = path.join(root, "replacement-observer.txt")
+      const secondResult = await runPowerShellScript(
+        [
+          "-CodexHome",
+          codexHome,
+          "-Email",
+          "device@example.invalid",
+          "-SkipClipboard",
+        ],
+        {
+          ...globalThis.process.env,
+          [replacementObserverEnvironmentVariable]: observerPath,
+        },
+      )
+      const observedReplacementBackupPath = (
+        await fs.readFile(observerPath, "utf8")
+      ).trim()
+
+      expect(firstResult.exitCode).toBe(0)
+      expect(secondResult.exitCode).toBe(0)
+      expect(observedReplacementBackupPath).toBe(secondResult.backupPath)
+      expect(await listRelativeFiles(codexHome)).toEqual([
+        "auth.json",
+        path.relative(codexHome, secondResult.backupPath).replaceAll("\\", "/"),
+      ])
     })
   },
 )
