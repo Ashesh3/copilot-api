@@ -56,6 +56,15 @@ export type CoercedEnvSchema = {
   COPILOT_API_KEY_AUTH?: string;
 
   /**
+   * **COPILOT_INFERENCE_CREDENTIAL_SHA256S** 🔐 _sensitive_
+   * Comma-separated SHA-256 hex digests of trimmed client-held inference
+   * credentials. Matches receive only user:inference scope and never gateway,
+   * OAuth profile, API-key creation, or administrator authority. Digest text is
+   * not itself a credential.
+   */
+  COPILOT_INFERENCE_CREDENTIAL_SHA256S?: string;
+
+  /**
    * **COPILOT_ADMIN_PASSWORD_HASH** 🔐 _sensitive_
    * Precomputed Argon2id PHC string for the administrator password. When set,
    * this is authoritative and the dashboard cannot change the password locally.
