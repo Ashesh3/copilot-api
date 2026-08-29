@@ -2,6 +2,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto"
 import fs from "node:fs/promises"
 
 import {
+  isConfiguredInferenceCredential,
   registerCredentialProvider,
   resolveGatewayCredential,
   resolveRequestCredentialKind,
@@ -523,6 +524,13 @@ function parseCookieHeader(header: string | null): Record<string, string> {
   return cookies
 }
 
+function resolveAdminSessionToken(
+  cookies: Readonly<Record<string, string>>,
+): string | null {
+  const token = cookies[ADMIN_SESSION_COOKIE]
+  return token && !isConfiguredInferenceCredential(token) ? token : null
+}
+
 // Authentication deliberately evaluates cookie, CSRF, origin, expiry, and
 // session version in one place.
 
@@ -536,7 +544,7 @@ async function resolveAdminSession(
   const currentTime = now()
   const pruned = pruneSessions(data, current.sessionVersion, currentTime)
   const cookies = parseCookieHeader(request.headers.get("cookie"))
-  const token = cookies[ADMIN_SESSION_COOKIE]
+  const token = resolveAdminSessionToken(cookies)
   if (!token) {
     if (pruned) await enqueueWrite(PATHS.ADMIN_SESSIONS_PATH, data)
     return null

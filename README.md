@@ -479,7 +479,7 @@ Open `/dashboard` on the same host as the API. The dashboard includes:
 - request replacements and ordered model redirects;
 - per-model settings and per-account model routing;
 - custom provider configuration;
-- managed IP allowlists; and
+- managed IP allowlists and managed inference-only Codex JWT digests; and
 - settings inspection and ZIP export.
 
 On first use, the dashboard prompts for the gateway key and a new administrator
@@ -578,6 +578,26 @@ inference.
   `/v1/initialize`, `/v1/download`, and `/v1/check`; every other path remains
   default-denied.
 
+From a repository checkout on Windows, generate the local ChatGPT-shaped
+compatibility identity with:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\enable-codex-desktop-chatgpt-auth.ps1
+```
+
+The script backs up an existing `%USERPROFILE%\.codex\auth.json` before writing
+the replacement. The new file is a local compatibility identity, not a real
+OpenAI or ChatGPT login. The script prints and attempts to copy a 64-character
+SHA-256 digest; paste only that digest plus a device label into **Settings →
+Trusted JWT Digests**, or send those values to an administrator. This
+deployment's production portal is
+[`https://ai.ashesh.dev/dashboard#settings`](https://ai.ashesh.dev/dashboard#settings);
+other deployments use `/dashboard#settings` on their own gateway.
+
+After the digest is registered, fully quit and reopen Codex Desktop. The script
+deliberately does not configure `config.toml`, certificates, hosts/DNS,
+environment variables, networking, or any other deployment prerequisite.
+
 Set `GROQ_API_KEY` or the equivalent `groqApiKey` config field to enable speech
 transcription. Set `groqModel` in `config.json` to change the model used for
 `whisper-1` and the Codex/voice paths. The voice WebSocket endpoint is
@@ -660,6 +680,7 @@ The default data directory is `~/.local/share/copilot-api`. Override it with
 | `feature_flags.json` | GrowthBook/Claude Code flag overrides |
 | `statsig_overrides.json` | Codex/ChatGPT Statsig overrides |
 | `ip_allowlist.json` | Managed IP allowlist entries |
+| `trusted_jwt_digests.json` | Dashboard-managed SHA-256 digests for inference-only local Codex JWTs |
 | `oauth_tokens.json` | SHA-256 digests and metadata for OAuth codes, token families, and generated inference credentials |
 | `admin_auth.json` | Locally managed Argon2id verifier, or a non-secret marker that permanently records migration to environment-managed auth |
 | `admin_sessions.json` | Digested server-side administrator sessions and CSRF state |

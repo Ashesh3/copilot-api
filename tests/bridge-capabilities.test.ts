@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test"
 import { spyOn } from "bun:test"
 import consola from "consola"
+import { createHash } from "node:crypto"
 
 import {
   authorizeEnvironmentCapability,
@@ -14,6 +15,7 @@ import { setIpAllowlistForTest } from "../src/lib/ip-allowlist"
 import { isIpBlocked, resetIpSecurityForTest } from "../src/lib/ip-blocker"
 import { OAuthStore, setOAuthStoreForTest } from "../src/lib/oauth-store"
 import { state } from "../src/lib/state"
+import { trustedJwtDigestStore } from "../src/lib/trusted-jwt-digests"
 import {
   getClientEvents,
   getInternalEvents,
@@ -33,12 +35,17 @@ function bearer(value: string): { authorization: string } {
   return { authorization: `Bearer ${value}` }
 }
 
+function sha256Hex(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex")
+}
+
 beforeEach(() => {
   setIpAllowlistForTest([])
   state.apiKeyAuth = GATEWAY_KEY
   resetIpSecurityForTest()
   setOAuthStoreForTest(new OAuthStore())
   resetBridgeCapabilitiesForTest()
+  trustedJwtDigestStore.replaceForTest([])
   delete process.env.COPILOT_PUBLIC_BASE_URL
 })
 
@@ -48,6 +55,7 @@ afterEach(() => {
   state.apiKeyAuth = undefined
   setOAuthStoreForTest(null)
   resetBridgeCapabilitiesForTest()
+  trustedJwtDigestStore.resetAfterTest()
   if (originalPublicBase === undefined)
     delete process.env.COPILOT_PUBLIC_BASE_URL
   else process.env.COPILOT_PUBLIC_BASE_URL = originalPublicBase
@@ -335,6 +343,76 @@ test("environment capabilities are opaque and environment-bound", async () => {
       "env_second",
     ),
   ).toBe(false)
+})
+
+test("managed JWT rows reserve issued bridge capabilities until deleted", async () => {
+  const workerSessionId = "cse_managed_collision"
+  const environmentId = "env_managed_collision"
+  const worker = issueWorkerCapability(workerSessionId)
+  const environment = issueEnvironmentCapability(environmentId)
+  const workerRequest = new Request("https://example.test", {
+    headers: bearer(worker),
+  })
+  const environmentRequest = new Request("https://example.test", {
+    headers: bearer(environment),
+  })
+
+  expect(
+    await authorizeWorkerCapability(workerRequest, workerSessionId),
+  ).not.toBeNull()
+  expect(
+    await authorizeEnvironmentCapability(environmentRequest, environmentId),
+  ).toBe(true)
+
+  const workerEntry = trustedJwtDigestStore.add({
+    label: "Worker collision",
+    digest: sha256Hex(worker),
+  })
+  const environmentEntry = trustedJwtDigestStore.add({
+    label: "Environment collision",
+    digest: sha256Hex(environment),
+  })
+
+  expect(
+    await authorizeWorkerCapability(workerRequest, workerSessionId),
+  ).toBeNull()
+  expect(
+    await authorizeEnvironmentCapability(environmentRequest, environmentId),
+  ).toBe(false)
+  expect(
+    await authorizeWorkerCapability(
+      new Request("https://example.test", {
+        headers: bearer(workerEntry.digest),
+      }),
+      workerSessionId,
+    ),
+  ).toBeNull()
+  expect(
+    await authorizeEnvironmentCapability(
+      new Request("https://example.test", {
+        headers: bearer(environmentEntry.digest),
+      }),
+      environmentId,
+    ),
+  ).toBe(false)
+
+  trustedJwtDigestStore.setEnabled(workerEntry.id, false)
+  trustedJwtDigestStore.setEnabled(environmentEntry.id, false)
+  expect(
+    await authorizeWorkerCapability(workerRequest, workerSessionId),
+  ).toBeNull()
+  expect(
+    await authorizeEnvironmentCapability(environmentRequest, environmentId),
+  ).toBe(false)
+
+  trustedJwtDigestStore.remove(workerEntry.id)
+  trustedJwtDigestStore.remove(environmentEntry.id)
+  expect(
+    await authorizeWorkerCapability(workerRequest, workerSessionId),
+  ).not.toBeNull()
+  expect(
+    await authorizeEnvironmentCapability(environmentRequest, environmentId),
+  ).toBe(true)
 })
 
 test("bridge capability stores do not evict active credentials by count", async () => {

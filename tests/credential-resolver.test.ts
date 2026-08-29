@@ -20,6 +20,7 @@ import {
   setOAuthStoreForTest,
 } from "../src/lib/oauth-store"
 import { state } from "../src/lib/state"
+import { trustedJwtDigestStore } from "../src/lib/trusted-jwt-digests"
 
 const originalGatewayKey = state.apiKeyAuth
 const originalInferenceCredentialDigests =
@@ -41,6 +42,7 @@ beforeEach(async () => {
   state.apiKeyAuth = "gateway-secret"
   setConfigForTest({ auth: { apiKeys: [] } })
   delete process.env.COPILOT_INFERENCE_CREDENTIAL_SHA256S
+  trustedJwtDigestStore.replaceForTest([])
 })
 
 afterEach(async () => {
@@ -53,6 +55,7 @@ afterEach(async () => {
     process.env.COPILOT_INFERENCE_CREDENTIAL_SHA256S =
       originalInferenceCredentialDigests
   }
+  trustedJwtDigestStore.resetAfterTest()
   await fs.rm(temporaryDirectory, { recursive: true, force: true })
 })
 
@@ -134,6 +137,81 @@ test("limits configured digest credentials to inference scope", async () => {
   ).toBeNull()
 })
 
+test("limits dashboard-managed JWT digests to inference scope", async () => {
+  const rawCredential = "managed.jwt.signature"
+  const digest = sha256Hex(rawCredential)
+  const entry = trustedJwtDigestStore.add({ label: "Laptop", digest })
+
+  expect(
+    await resolveCredential(rawCredential, ["user:inference"]),
+  ).toMatchObject({
+    principalId: `inference-managed:${entry.id}`,
+    kind: "inference-client",
+    scopes: new Set(["user:inference"]),
+  })
+  expect(await resolveCredential(rawCredential, ["user:profile"])).toBeNull()
+  expect(
+    await resolveCredential(rawCredential, ["org:create_api_key"]),
+  ).toBeNull()
+  expect(await resolveCredential(digest)).toBeNull()
+
+  trustedJwtDigestStore.setEnabled(entry.id, false)
+  expect(await resolveCredential(rawCredential)).toBeNull()
+})
+
+test("managed JWT rows override duplicate environment digests until deleted", async () => {
+  const rawCredential = "managed-environment-duplicate.jwt.signature"
+  const digest = sha256Hex(rawCredential)
+  process.env.COPILOT_INFERENCE_CREDENTIAL_SHA256S = digest
+  const entry = trustedJwtDigestStore.add({
+    label: "Managed migration",
+    digest,
+  })
+
+  expect(
+    await resolveCredential(rawCredential, ["user:inference"]),
+  ).toMatchObject({
+    principalId: `inference-managed:${entry.id}`,
+    kind: "inference-client",
+  })
+  expect(await resolveCredential(digest)).toBeNull()
+
+  trustedJwtDigestStore.setEnabled(entry.id, false)
+  expect(await resolveCredential(rawCredential, ["user:inference"])).toBeNull()
+  expect(await resolveCredential(digest)).toBeNull()
+
+  trustedJwtDigestStore.remove(entry.id)
+  expect(
+    await resolveCredential(rawCredential, ["user:inference"]),
+  ).toMatchObject({
+    principalId: `inference-env:${digest.slice(0, 16)}`,
+    kind: "inference-client",
+  })
+})
+
+test("does not elevate a managed digest through gateway fallback", async () => {
+  const rawCredential = "gateway-secret"
+  const entry = trustedJwtDigestStore.add({
+    label: "Gateway collision",
+    digest: sha256Hex(rawCredential),
+  })
+
+  expect(
+    await resolveCredential(rawCredential, ["user:inference"]),
+  ).toMatchObject({ kind: "inference-client" })
+  expect(await resolveCredential(rawCredential, ["user:profile"])).toBeNull()
+  expect(resolveGatewayCredential(rawCredential)).toBeNull()
+
+  trustedJwtDigestStore.setEnabled(entry.id, false)
+  expect(await resolveCredential(rawCredential)).toBeNull()
+  expect(resolveGatewayCredential(rawCredential)).toBeNull()
+
+  trustedJwtDigestStore.remove(entry.id)
+  expect(resolveGatewayCredential(rawCredential)).toMatchObject({
+    kind: "gateway",
+  })
+})
+
 test("does not elevate a configured inference digest through gateway fallback", async () => {
   process.env.COPILOT_INFERENCE_CREDENTIAL_SHA256S = sha256Hex("gateway-secret")
 
@@ -184,6 +262,24 @@ test("does not elevate a configured inference digest through OAuth fallback", as
   process.env.COPILOT_INFERENCE_CREDENTIAL_SHA256S = sha256Hex(oauthToken)
 
   expect(await resolveCredential(oauthToken, ["user:profile"])).toBeNull()
+})
+
+test("does not elevate a managed digest through OAuth fallback", async () => {
+  const oauthToken = await issueOAuthToken()
+  const entry = trustedJwtDigestStore.add({
+    label: "OAuth collision",
+    digest: sha256Hex(oauthToken),
+  })
+
+  expect(await resolveCredential(oauthToken, ["user:profile"])).toBeNull()
+
+  trustedJwtDigestStore.setEnabled(entry.id, false)
+  expect(await resolveCredential(oauthToken, ["user:profile"])).toBeNull()
+
+  trustedJwtDigestStore.remove(entry.id)
+  expect(await resolveCredential(oauthToken, ["user:profile"])).toMatchObject({
+    kind: "oauth",
+  })
 })
 
 test("accepts configured digest lists without treating digests as secrets", async () => {

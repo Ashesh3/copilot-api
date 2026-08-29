@@ -6,6 +6,7 @@ import { getSession } from "~/routes/code-sessions/session-store"
 import { mintRemoteWebSocketTicket } from "~/routes/remote/ws-security"
 
 import {
+  handleAddTrustedJwtDigest,
   handleAddModelRedirect,
   handleAddNebiusCustomProvider,
   handleAddReplacement,
@@ -18,6 +19,7 @@ import {
   handleDeleteModelRedirect,
   handleDeleteModelSettings,
   handleDeleteStatsigOverride,
+  handleDeleteTrustedJwtDigest,
   handleDeleteReplacement,
   handleDeregisterEnvironment,
   handleDestroySession,
@@ -37,6 +39,7 @@ import {
   handleListModelSettings,
   handleListReplacements,
   handleListStatsigOverrides,
+  handleListTrustedJwtDigests,
   handleListSessions,
   handleMoveModelRedirect,
   handleOverview,
@@ -46,6 +49,7 @@ import {
   handleSetModelSettings,
   handleSetModelRouting,
   handleSetStatsigOverride,
+  handleSetTrustedJwtDigestEnabled,
   handleStartEnvironmentSession,
   handleToggleModelRedirect,
   handleToggleReplacement,
@@ -179,6 +183,18 @@ dashboardRoutes.post("/api/ip-allowlist", handleSetIpAllowlistEntry)
 dashboardRoutes.delete("/api/ip-allowlist", handleClearIpAllowlist)
 dashboardRoutes.patch("/api/ip-allowlist/:ip", handleSetIpAllowlistEntry)
 dashboardRoutes.delete("/api/ip-allowlist/:ip", handleDeleteIpAllowlistEntry)
+
+// Trusted JWT Digests
+dashboardRoutes.get("/api/trusted-jwt-digests", handleListTrustedJwtDigests)
+dashboardRoutes.post("/api/trusted-jwt-digests", handleAddTrustedJwtDigest)
+dashboardRoutes.patch(
+  "/api/trusted-jwt-digests/:id",
+  handleSetTrustedJwtDigestEnabled,
+)
+dashboardRoutes.delete(
+  "/api/trusted-jwt-digests/:id",
+  handleDeleteTrustedJwtDigest,
+)
 
 // LLM Debug Logs
 dashboardRoutes.get("/api/llm-debug", handleListLlmDebugLogs)
