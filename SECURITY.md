@@ -28,6 +28,12 @@ affected, include its exact version or digest.
   hashing, digest text is rejected, and matches resolve solely to
   `user:inference` with no gateway, OAuth profile, key-creation, or
   administrator authority.
+- The dashboard-managed trusted Codex JWT registry stores only SHA-256 digests.
+  An enabled raw credential whose digest matches receives only
+  `user:inference`; the literal digest is rejected as a credential. Adding,
+  enabling, disabling, or deleting registry entries requires an administrator
+  session plus the existing CSRF and Origin checks. The registry remains
+  excluded from sanitized configuration exports.
 - The dashboard requires the gateway key plus an Argon2id administrator
   password at login. The verifier can be stored locally or supplied
   authoritatively through `COPILOT_ADMIN_PASSWORD_HASH`; environment rotations
