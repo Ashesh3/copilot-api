@@ -1,4 +1,5 @@
 import { expect, mock, test } from "bun:test"
+import crypto from "node:crypto"
 import { createHash, randomUUID } from "node:crypto"
 import nodeFs from "node:fs"
 import fs from "node:fs/promises"
@@ -183,17 +184,41 @@ test("all-record matching includes enabled and disabled managed credentials", as
   })
 })
 
-test("credential matching compares against every managed digest", async () => {
+test("credential matching compares against every enabled and disabled digest", async () => {
   await withTestDir((directory) => {
-    const rawCredential = "last.header.payload"
+    const rawCredential = "first.header.payload"
     const store = createTrustedJwtDigestStore(
       path.join(directory, "trusted_jwt_digests.json"),
     )
-    store.add({ label: "First", digest: sha256("first.header.payload") })
-    const last = store.add({ label: "Last", digest: sha256(rawCredential) })
+    const first = store.add({ label: "First", digest: sha256(rawCredential) })
+    store.add({ label: "Enabled", digest: sha256("enabled.header.payload") })
+    const disabled = store.add({
+      label: "Disabled",
+      digest: sha256("disabled.header.payload"),
+    })
+    store.setEnabled(disabled.id, false)
+    let comparisonCount = 0
+    const originalTimingSafeEqual = crypto.timingSafeEqual
+    const countingTimingSafeEqual: typeof crypto.timingSafeEqual = (
+      left,
+      right,
+    ) => {
+      comparisonCount += 1
+      return originalTimingSafeEqual(left, right)
+    }
+    crypto.timingSafeEqual = mock(
+      countingTimingSafeEqual,
+    ) as typeof crypto.timingSafeEqual
 
-    expect(store.matchesCredentialDigest(rawCredential)).toBe(true)
-    expect(store.findEnabledCredential(rawCredential)?.id).toBe(last.id)
+    try {
+      expect(store.matchesCredentialDigest(rawCredential)).toBe(true)
+      expect(comparisonCount).toBe(3)
+      comparisonCount = 0
+      expect(store.findEnabledCredential(rawCredential)?.id).toBe(first.id)
+      expect(comparisonCount).toBe(3)
+    } finally {
+      crypto.timingSafeEqual = originalTimingSafeEqual
+    }
   })
 })
 

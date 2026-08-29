@@ -1,4 +1,5 @@
-import { createHash, randomUUID, timingSafeEqual } from "node:crypto"
+import crypto from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import fs from "node:fs"
 import path from "node:path"
 
@@ -49,6 +50,8 @@ interface TrustedJwtDigestFile {
 const DIGEST_PATTERN = /^[a-f\d]{64}$/i
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+// eslint-disable-next-line no-control-regex -- labels must reject ASCII controls
+const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/
 const MAX_LABEL_LENGTH = 80
 const FILE_FIELDS = new Set(["entries", "version"])
 const ENTRY_FIELDS = new Set([
@@ -85,14 +88,7 @@ function normalizeLabel(value: unknown): string {
   if (label.length > MAX_LABEL_LENGTH) {
     return validationError("label must not exceed 80 characters")
   }
-  if (
-    Array.from(label).some((character) => {
-      const codePoint = character.codePointAt(0)
-      return (
-        codePoint !== undefined && (codePoint <= 0x1f || codePoint === 0x7f)
-      )
-    })
-  ) {
+  if (CONTROL_CHARACTER_PATTERN.test(label)) {
     return validationError("label must not contain control characters")
   }
   return label
@@ -239,7 +235,10 @@ function matchesDigest(
   credentialDigest: Buffer,
   entry: TrustedJwtDigestEntry,
 ): boolean {
-  return timingSafeEqual(credentialDigest, Buffer.from(entry.digest, "hex"))
+  return crypto.timingSafeEqual(
+    credentialDigest,
+    Buffer.from(entry.digest, "hex"),
+  )
 }
 
 function matchCredentialEntries(
