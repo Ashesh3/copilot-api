@@ -129,6 +129,93 @@ function compactRequest(
   })
 }
 
+function compressedCompactRequest(
+  clientMetadata: unknown,
+  input: Array<ResponseInputItem> = [],
+) {
+  const body = Bun.zstdCompressSync(
+    JSON.stringify({
+      model: "gpt-compact",
+      input,
+      prompt_cache_key: "must-not-be-affinity",
+      client_metadata: clientMetadata,
+    }),
+  )
+  return server.request("/v1/responses/compact", {
+    method: "POST",
+    headers: {
+      "content-encoding": "zstd",
+      "content-type": "application/json",
+    },
+    body,
+  })
+}
+
+test("compact decodes zstd-compressed Codex resume requests", async () => {
+  const response = await compressedCompactRequest({
+    session_id: "compressed-compact",
+  })
+
+  expect(response.status).toBe(200)
+  expect(capturedAffinity).toEqual({
+    key: "compressed-compact",
+    source: "codex_metadata",
+  })
+  expect(lastRequestUrl).toEndWith("/responses")
+})
+
+test("compact returns a fixed 400 for malformed zstd JSON", async () => {
+  const response = await server.request("/v1/responses/compact", {
+    method: "POST",
+    headers: {
+      "content-encoding": "zstd",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "gpt-compact",
+      input: [],
+      client_metadata: { session_id: "not-compressed" },
+    }),
+  })
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toEqual({
+    error: {
+      code: "invalid_json",
+      message: "The request body must contain valid JSON.",
+      param: "body",
+      type: "invalid_request_error",
+    },
+  })
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
+test.each([
+  { name: "unencoded", contentEncoding: undefined },
+  { name: "identity-encoded", contentEncoding: "identity" },
+])(
+  "compact preserves the existing 500 for $name malformed JSON",
+  async ({ contentEncoding }) => {
+    const headers = new Headers({ "content-type": "application/json" })
+    if (contentEncoding) headers.set("content-encoding", contentEncoding)
+    const response = await server.request("/v1/responses/compact", {
+      method: "POST",
+      headers,
+      body: "{",
+    })
+
+    expect(response.status).toBe(500)
+    expect(await response.json()).toEqual({
+      error: {
+        code: "internal_error",
+        message: "Internal server error",
+        type: "server_error",
+      },
+    })
+    expect(fetchMock).not.toHaveBeenCalled()
+  },
+)
+
 test("compact installs metadata affinity and preserves header precedence", async () => {
   expect((await compactRequest({ session_id: "compact-body" })).status).toBe(
     200,

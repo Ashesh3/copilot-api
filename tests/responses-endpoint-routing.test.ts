@@ -17,6 +17,7 @@ import { setModelRedirectsForTest } from "~/lib/model-redirect"
 import { setModelSettingsForTest } from "~/lib/model-settings"
 import { state } from "~/lib/state"
 import { selectResponsesUpstreamEndpoint } from "~/routes/responses/handler"
+import { readResponsesRequestJson } from "~/routes/responses/request-json"
 import { server } from "~/server"
 
 /* eslint-disable max-lines */
@@ -180,6 +181,119 @@ test.each([
   expect(response.status).toBe(200)
   expect(lastUpstreamPath).toBe(expected)
 })
+
+test("decodes zstd-compressed Codex HTTP continuations before routing", async () => {
+  installModel({ supported_endpoints: ["/responses"] })
+
+  const response = await postZstdResponses({ input: "continue" })
+
+  expect(response.status).toBe(200)
+  expect(lastUpstreamPath).toBe("/responses")
+  expect(lastUpstreamPayload?.input).toBe("continue")
+})
+
+test("rejects a plain JSON body mislabeled as zstd", async () => {
+  installModel({ supported_endpoints: ["/responses"] })
+
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: {
+      "content-encoding": "zstd",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ model: "route-model", input: "not compressed" }),
+  })
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toEqual({
+    error: {
+      code: "invalid_json",
+      message: "The request body must contain valid JSON.",
+      param: "body",
+      type: "invalid_request_error",
+    },
+  })
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
+test("preserves client aborts while decoding zstd requests", async () => {
+  const abortError = new DOMException("client disconnected", "AbortError")
+  const request = new Request("http://localhost/v1/responses", {
+    method: "POST",
+    headers: {
+      "content-encoding": "zstd",
+      "content-type": "application/json",
+    },
+    body: new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(abortError)
+      },
+    }),
+  })
+
+  let caught: unknown
+  try {
+    await readResponsesRequestJson(request)
+  } catch (error) {
+    caught = error
+  }
+  expect(caught).toBe(abortError)
+})
+
+test("rejects unsupported Responses request content encodings", async () => {
+  installModel({ supported_endpoints: ["/responses"] })
+
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: {
+      "content-encoding": "gzip",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ model: "route-model", input: "hello" }),
+  })
+
+  expect(response.status).toBe(415)
+  expect(await response.json()).toEqual({
+    error: {
+      code: "unsupported_value",
+      message: "The request content encoding must be identity or zstd.",
+      param: "content_encoding",
+      type: "invalid_request_error",
+    },
+  })
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
+test(
+  "rejects zstd request expansion beyond the inbound Responses limit",
+  async () => {
+    installModel({ supported_endpoints: ["/responses"] })
+    const expandedBytes = 64 * 1024 * 1024 + 1
+    const body = Bun.zstdCompressSync(Buffer.alloc(expandedBytes, 0x20))
+
+    const response = await server.request("/v1/responses", {
+      method: "POST",
+      headers: {
+        "content-encoding": "zstd",
+        "content-type": "application/json",
+      },
+      body,
+    })
+
+    expect(response.status).toBe(413)
+    expect(await response.json()).toEqual({
+      error: {
+        code: "request_too_large",
+        message:
+          "The decompressed request body exceeds the supported size limit.",
+        param: "body",
+        type: "invalid_request_error",
+      },
+    })
+    expect(fetchMock).not.toHaveBeenCalled()
+  },
+  { timeout: 15_000 },
+)
 
 test("passes explicit native beta, version, and provider preference through Responses to Messages", async () => {
   installModel({ supported_endpoints: ["/v1/messages"] })
@@ -1598,6 +1712,26 @@ function postResponses(
       method: "POST",
       headers: { "content-type": "application/json", ...headers },
       body: JSON.stringify({ model: "route-model", ...extra }),
+    }),
+  )
+}
+
+function postZstdResponses(
+  extra: Record<string, unknown>,
+  headers?: Record<string, string>,
+): Promise<Response> {
+  const body = Bun.zstdCompressSync(
+    JSON.stringify({ model: "route-model", ...extra }),
+  )
+  return Promise.resolve(
+    server.request("/v1/responses", {
+      method: "POST",
+      headers: {
+        "content-encoding": "zstd",
+        "content-type": "application/json",
+        ...headers,
+      },
+      body,
     }),
   )
 }
