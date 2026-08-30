@@ -26,6 +26,7 @@ import {
 } from "~/services/copilot/create-responses"
 
 import { getCompactionPrompt } from "./compact-prompt"
+import { readResponsesRequestJson } from "./request-json"
 import { expandCompactionItems, getResponsesRequestOptions } from "./utils"
 
 const logger = createHandlerLogger("compact-handler")
@@ -243,7 +244,7 @@ const reportCompactionReduction = (
 }
 
 export const handleCompact = async (c: Context) => {
-  const body = await c.req.json<CompactRequestBody>()
+  const body = await readResponsesRequestJson<CompactRequestBody>(c.req.raw)
   installResponsesRoutingAffinity(body.client_metadata)
 
   const { baseModel } = parseModelSuffix(body.model)

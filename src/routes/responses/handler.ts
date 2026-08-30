@@ -129,6 +129,7 @@ import {
   selectResponsesCandidate,
 } from "./fallback-candidates"
 import { executePreparedResponsesMessagesBridge } from "./messages-bridge"
+import { readResponsesRequestJson } from "./request-json"
 import { adaptResponsesToChatCandidate } from "./responses-chat-adapter"
 import { getResponsesChatWebSearchMaxUses } from "./responses-chat-adapter"
 import { createStreamIdTracker, fixStreamIds } from "./stream-id-sync"
@@ -801,8 +802,9 @@ export const handleResponses = async (c: Context) => {
 
 async function parseResponsesRequestBody(c: Context): Promise<unknown> {
   try {
-    return await c.req.json<unknown>()
-  } catch {
+    return await readResponsesRequestJson(c.req.raw)
+  } catch (error) {
+    if (isHTTPError(error) || isAbortError(error)) throw error
     throw createInvalidJsonBodyError()
   }
 }
