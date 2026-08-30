@@ -6,7 +6,7 @@
 
 **Architecture:** A new synchronous, atomic `trusted_jwt_digests.json` store supplies an immutable snapshot to the existing credential resolver and CRUD operations to authenticated dashboard routes. The Windows PowerShell script never contacts the server: it writes only `auth.json`, backs up the previous file, and outputs the digest that an administrator pastes into the Settings page.
 
-**Tech Stack:** Bun 1.3.14, strict TypeScript, Hono, React dashboard, Bun test runner, Windows PowerShell 5.1/PowerShell 7, Node cryptography primitives, GitHub Actions.
+**Tech Stack:** Bun 1.4.0, strict TypeScript, Hono, React dashboard, Bun test runner, Windows PowerShell 5.1/PowerShell 7, Node cryptography primitives, GitHub Actions.
 
 **Spec:** `docs/superpowers/specs/2026-08-29-trusted-jwt-digests-design.md`
 
@@ -893,7 +893,7 @@ Expected: all focused tests pass, changed-file lint exits 0, and typecheck exits
 
 - [ ] **Step 4: Run the complete CI-equivalent verification**
 
-Use the pinned Bun 1.3.14 runtime. Run:
+Use the pinned Bun 1.4.0 runtime. Run:
 
 ```powershell
 bun run lint:all

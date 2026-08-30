@@ -4,16 +4,16 @@
 
 **Goal:** Prevent ordinary native CAPI Responses turns from exceeding the 32 MiB serialized request limit by mirroring Copilot Runtime's image-downscale and binary-removal recovery without truncating ordinary text.
 
-**Architecture:** Add an immutable asynchronous Responses recovery utility that measures the exact sanitized JSON body, uses Bun 1.3.14's built-in image codecs to shrink inline images toward the 32 MiB-minus-64 KiB recovery target, then replaces historical and finally current inline binaries with explicit breadcrumbs if necessary. Integrate it at `createResponses`, the shared final HTTP/WebSocket transport boundary, while leaving PR #51's 30 MiB compaction reducer unchanged.
+**Architecture:** Add an immutable asynchronous Responses recovery utility that measures the exact sanitized JSON body, uses Bun 1.4.0's built-in image codecs to shrink inline images toward the 32 MiB-minus-64 KiB recovery target, then replaces historical and finally current inline binaries with explicit breadcrumbs if necessary. Integrate it at `createResponses`, the shared final HTTP/WebSocket transport boundary, while leaving PR #51's 30 MiB compaction reducer unchanged.
 
-**Tech Stack:** TypeScript, Bun 1.3.14 `Bun.Image`, Bun test runner, existing Responses transport and `LocalHTTPError`.
+**Tech Stack:** TypeScript, Bun 1.4.0 `Bun.Image`, Bun test runner, existing Responses transport and `LocalHTTPError`.
 
 ---
 
 ## File Structure
 
 - Create `src/services/copilot/responses-payload-recovery.ts`: exact byte accounting, current-turn classification, recursive binary discovery, Bun image resizing, historical/current removal, safe local 413, and recovery statistics.
-- Create `tests/responses-payload-recovery.test.ts`: small-budget unit tests for immutable planning plus a Bun 1.3.14 image-codec integration test.
+- Create `tests/responses-payload-recovery.test.ts`: small-budget unit tests for immutable planning plus a Bun 1.4.0 image-codec integration test.
 - Modify `src/services/copilot/create-responses.ts`: asynchronously recover ordinary sanitized Responses payloads before first dispatch and remove the nested-image-blind post-413 retry.
 - Modify `tests/create-responses.test.ts`: cover final-transport recovery, one-dispatch behavior, unchanged small requests, and safe local failure.
 - Modify `tests/responses-websocket.test.ts`: reproduce an oversized ordinary rehydrated continuation and assert the single upstream body is below the CAPI cap.
@@ -226,9 +226,9 @@ Expected: all recovery tests pass.
 - Modify: `tests/responses-payload-recovery.test.ts`
 - Modify: `src/services/copilot/responses-payload-recovery.ts`
 
-- [ ] **Step 1: Add a real-codec test that runs on Bun 1.3.14**
+- [ ] **Step 1: Add a real-codec test that runs on Bun 1.4.0**
 
-Use the existing valid 1x1 PNG fixture and append binary padding before base64 encoding so the data URI is oversized while remaining decodable. Gate only the local Bun 1.3.10 environment, not CI:
+Use the existing valid 1x1 PNG fixture and append binary padding before base64 encoding so the data URI is oversized while remaining decodable. Gate only runtimes without `Bun.Image`, not CI:
 
 ```ts
 const supportsBunImage = typeof Bun.Image === "function"
@@ -254,7 +254,7 @@ test.skipIf(!supportsBunImage)(
 Run in the repository container runtime:
 
 ```powershell
-docker run --rm -v "${PWD}:/app" -w /app oven/bun:1.3.14-alpine bun test tests/responses-payload-recovery.test.ts
+docker run --rm -v "${PWD}:/app" -w /app oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb bun test tests/responses-payload-recovery.test.ts
 ```
 
 Expected: FAIL because `resizeResponsesImage` is not implemented.
@@ -273,16 +273,16 @@ Export `resizeResponsesImage` as the default `ResponsesImageResizer`:
 - return `invalid` on Bun image/decode errors, `unshrinkable` when valid media cannot reach the target, and `resized` with the fitted data URI on success; and
 - check `signal?.throwIfAborted()` before every awaited terminal.
 
-- [ ] **Step 4: Verify GREEN on Bun 1.3.14 and the local focused suite**
+- [ ] **Step 4: Verify GREEN on Bun 1.4.0 and the local focused suite**
 
 Run:
 
 ```powershell
-docker run --rm -v "${PWD}:/app" -w /app oven/bun:1.3.14-alpine bun test tests/responses-payload-recovery.test.ts
+docker run --rm -v "${PWD}:/app" -w /app oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb bun test tests/responses-payload-recovery.test.ts
 bun test tests/responses-payload-recovery.test.ts
 ```
 
-Expected: Docker runs every test green; local Bun 1.3.10 skips only the real-codec test and passes all planner tests.
+Expected: Docker and local Bun 1.4.0 run every test green, including the real-codec test.
 
 ### Task 4: Enforce ordinary recovery at the final Responses boundary
 
@@ -428,7 +428,7 @@ docker build -t copilot-api-ordinary-recovery-test .
 docker run --rm --entrypoint bun copilot-api-ordinary-recovery-test test tests/responses-payload-recovery.test.ts
 ```
 
-Expected: real-codec recovery test passes on the same Bun 1.3.14 Alpine base used in production.
+Expected: real-codec recovery test passes on the same Bun 1.4.0 Alpine base used in production.
 
 - [ ] **Step 3: Audit scope and preservation requirements**
 

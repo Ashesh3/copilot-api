@@ -59,7 +59,7 @@ Consumes Phase 1 interfaces and produces:
 Exit gate:
 
 - focused plus live Chat/Responses/tool tests pass;
-- media verification runs under pinned Bun 1.3.14 if affected;
+- media verification runs under pinned Bun 1.4.0 if affected;
 - code review has no unresolved Critical/Important findings.
 
 ### Phase 3: Messages and count-tokens parity

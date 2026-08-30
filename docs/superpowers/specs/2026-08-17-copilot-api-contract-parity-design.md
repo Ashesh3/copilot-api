@@ -865,7 +865,7 @@ Before completion:
 
 - every new focused test passes after first demonstrating the intended failure;
 - `bun test` passes with only documented platform skips;
-- pinned Bun 1.3.14 media tests pass if media code changes;
+- pinned Bun 1.4.0 media tests pass if media code changes;
 - `bun run lint:all` has no new errors or warnings;
 - `bun run typecheck` passes;
 - `bun run build` passes;

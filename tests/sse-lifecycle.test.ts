@@ -24,6 +24,23 @@ const INTERVAL_MS = 10
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms))
 
+type ProcessUnhandledRejectionListener = (
+  reason: unknown,
+  promise: Promise<unknown>,
+) => void
+
+interface ProcessUnhandledRejectionCleanup {
+  off: (
+    event: "unhandledRejection",
+    listener: ProcessUnhandledRejectionListener,
+  ) => NodeJS.Process
+}
+
+// Bun 1.4 adds a memoryPressure-specific Process.off overload that masks the
+// inherited EventEmitter overloads. Keep this test listener strongly typed.
+const processUnhandledRejectionCleanup =
+  process as unknown as ProcessUnhandledRejectionCleanup
+
 interface RecordingSink extends SseHeartbeatSink {
   abort: () => void
   abortListeners: Set<() => void>
@@ -263,7 +280,7 @@ describe("withSseHeartbeat", () => {
       await sleep(INTERVAL_MS * 2)
       expect(unhandled).toEqual([])
     } finally {
-      process.off("unhandledRejection", onUnhandled)
+      processUnhandledRejectionCleanup.off("unhandledRejection", onUnhandled)
     }
   })
 
@@ -463,7 +480,7 @@ async function captureUnhandled(
     await sleep(INTERVAL_MS * 2)
     return unhandled
   } finally {
-    process.off("unhandledRejection", listener)
+    processUnhandledRejectionCleanup.off("unhandledRejection", listener)
     setSsePreflushDeadlineForTest()
   }
 }
