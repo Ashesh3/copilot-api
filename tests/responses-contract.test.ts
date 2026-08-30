@@ -556,7 +556,6 @@ test.each([
   ["store", { store: true }],
   ["background", { background: true }],
   ["previous_response_id", { previous_response_id: "resp_external" }],
-  ["service_tier", { service_tier: "priority" }],
 ] as const)("rejects unsupported stateful control %s", (param, extra) => {
   expect(() =>
     prepareLegacyResponsesRequestForTest({
@@ -576,6 +575,47 @@ test.each([
       error: { code: "unsupported_value", param },
     })
   }
+})
+
+test.each(["priority", "standard", "future-tier"])(
+  "removes service tier %s from the Responses wire",
+  (serviceTier) => {
+    const result = prepareLegacyResponsesRequestForTest({
+      model: "gpt-5.6-sol",
+      input: "hello",
+      service_tier: serviceTier,
+    })
+
+    expect(result.body).not.toHaveProperty("service_tier")
+    expect(result.normalizationClasses).toContain("stateless_controls")
+  },
+)
+
+test("removes service tier from the tolerant native Responses finalization", () => {
+  const prepared = prepareResponsesRequest({
+    model: "gpt-5.6-sol",
+    input: "hello",
+    service_tier: "priority",
+  })
+  const finalized = finalizeNativeResponsesRequest(prepared, {
+    model: "gpt-5.6-sol-fast",
+    implicitDefault: false,
+  })
+
+  expect(prepared.source.service_tier).toBe("priority")
+  expect(finalized.body.model).toBe("gpt-5.6-sol-fast")
+  expect(finalized.body).not.toHaveProperty("service_tier")
+})
+
+test("classifies service tier stripping when store is already false", () => {
+  const prepared = prepareResponsesRequest({
+    model: "gpt-5.6-sol",
+    input: "hello",
+    service_tier: "priority",
+    store: false,
+  })
+
+  expect(prepared.normalizationClasses).toEqual(["stateless_controls"])
 })
 
 test("accepts stateless false and null values without forwarding them", () => {
@@ -623,17 +663,14 @@ test.each([
   })
 })
 
-test.each([
-  ["previous_response_id", 1],
-  ["service_tier", false],
-] as const)("rejects invalid typed stateful control %s", (param, value) => {
+test("rejects an invalid typed previous_response_id", () => {
   const error = captureValidationError({
     model: "gpt-5.6-sol",
     input: "hello",
-    [param]: value,
+    previous_response_id: 1 as never,
   })
   expect(error.clientBody).toMatchObject({
-    error: { code: "invalid_type", param },
+    error: { code: "invalid_type", param: "previous_response_id" },
   })
 })
 

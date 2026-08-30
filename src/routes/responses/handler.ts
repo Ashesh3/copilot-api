@@ -132,6 +132,7 @@ import { executePreparedResponsesMessagesBridge } from "./messages-bridge"
 import { readResponsesRequestJson } from "./request-json"
 import { adaptResponsesToChatCandidate } from "./responses-chat-adapter"
 import { getResponsesChatWebSearchMaxUses } from "./responses-chat-adapter"
+import { applyResponsesServiceTierRouting } from "./service-tier"
 import { createStreamIdTracker, fixStreamIds } from "./stream-id-sync"
 import {
   classifyResponsesTerminal,
@@ -729,7 +730,7 @@ function withRequestedResponseModel(
   return { ...result, model: requestedModel }
 }
 
-function rewriteResponseModelInEvent(
+export function rewriteResponseModelInEvent(
   data: string,
   requestedModel: string,
 ): string {
@@ -841,11 +842,17 @@ const handleResponsesInner = async (
     customReferenceBeforeRedirect ? baseModel : normalizeModelName(baseModel)
   const effectiveEffort = normalizeResponsesReasoning(payload, suffixEffort)
   syncLegacyResponsesRouteState(legacyPayload, payload)
-  if (customReferenceBeforeRedirect) {
+  const directCustomReference = getDirectCustomResponsesReference(
+    customReferenceBeforeRedirect,
+    payload,
+  )
+  if (directCustomReference) {
+    applyResponsesServiceTierRouting(c, payload)
+    syncLegacyResponsesRouteState(legacyPayload, payload)
     return await dispatchCustomResponsesRequest(c, {
       finalEffort: effectiveEffort,
       payload,
-      reference: customReferenceBeforeRedirect,
+      reference: directCustomReference,
       requestedModel,
     })
   }
@@ -876,9 +883,18 @@ const handleResponsesInner = async (
     preserveNumericEffort: typeof effectiveEffort === "number",
   })
   syncLegacyResponsesRouteState(legacyPayload, payload)
+  const serviceTierRouting = applyResponsesServiceTierRouting(c, payload, {
+    allowCustomProvider: !isResponsesCompactionRequest(payload),
+    customReference: resolveCustomResponsesModel(payload.model, payload),
+  })
+  applyResponsesServiceTierRouting(undefined, legacyPayload)
+  syncLegacyResponsesRouteState(legacyPayload, payload)
   const finalEffort = redirectedEffort ?? effectiveEffort
 
-  const customReference = resolveCustomResponsesModel(payload.model, payload)
+  const customReference = resolveRoutedCustomResponsesModel(
+    serviceTierRouting.customReference,
+    payload,
+  )
   if (customReference) {
     return await dispatchCustomResponsesRequest(c, {
       finalEffort,
@@ -890,7 +906,10 @@ const handleResponsesInner = async (
 
   const copilotSessionToken = resolveResponsesSessionToken(c, {
     payload,
-    redirectOccurred: redirect.redirected,
+    redirectOccurred: [
+      redirect.redirected,
+      serviceTierRouting.redirected,
+    ].includes(true),
     requestedModel: baseModel,
   })
   legacyPayload.model = payload.model
@@ -1174,6 +1193,22 @@ function resolveCustomResponsesModel(
     kind: "chat",
     copilotModelIds: getResponsesCopilotModelIds(),
   })
+}
+
+function getDirectCustomResponsesReference(
+  reference: CustomProviderModelReference | undefined,
+  payload: ResponsesPayload,
+): CustomProviderModelReference | undefined {
+  return payload.service_tier === "priority" ? undefined : reference
+}
+
+function resolveRoutedCustomResponsesModel(
+  serviceTierReference: CustomProviderModelReference | undefined,
+  payload: ResponsesPayload,
+): CustomProviderModelReference | undefined {
+  return (
+    serviceTierReference ?? resolveCustomResponsesModel(payload.model, payload)
+  )
 }
 
 async function dispatchCustomResponsesRequest(

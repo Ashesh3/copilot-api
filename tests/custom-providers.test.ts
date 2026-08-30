@@ -27,11 +27,13 @@ import {
   listLlmDebugLogs,
 } from "../src/lib/llm-debug-log"
 import { setModelRedirectsForTest } from "../src/lib/model-redirect"
+import { setModelRoutingOverridesForTest } from "../src/lib/model-routing"
 import {
   getRoutingTelemetrySnapshot,
   resetRoutingTelemetryForTest,
 } from "../src/lib/routing-telemetry"
 import { state } from "../src/lib/state"
+import { tokenPool } from "../src/lib/token-pool"
 import { createAnthropicStreamError } from "../src/routes/messages/error"
 import { server } from "../src/server"
 import { resetWebSearchSessionsForTest } from "../src/services/copilot/mcp-web-search"
@@ -48,6 +50,7 @@ const originalModels = state.models
 const originalCopilotToken = state.copilotToken
 const originalApiKeyAuth = state.apiKeyAuth
 const originalIsMultiToken = state.isMultiToken
+const customFastCollisionAccountId = 24_001
 
 let fetchMock: ReturnType<typeof mock>
 interface CapturedRequest {
@@ -198,6 +201,7 @@ beforeAll(() => {
 })
 
 afterAll(() => {
+  tokenPool.removeAccountForTest(customFastCollisionAccountId)
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
   restoreEnv("CUSTOM_PROVIDER_API_KEY", originalCustomApiKey)
   setConfigForTest(null)
@@ -209,6 +213,7 @@ afterAll(() => {
 })
 
 beforeEach(() => {
+  tokenPool.removeAccountForTest(customFastCollisionAccountId)
   fetchMock.mockClear()
   requests = []
   clearLlmDebugLogs()
@@ -220,6 +225,7 @@ beforeEach(() => {
   state.isMultiToken = false
   resetRoutingTelemetryForTest()
   setModelRedirectsForTest([])
+  setModelRoutingOverridesForTest({})
   setReplacementsForTest([])
   setConfigForTest({
     auth: { apiKeys: [] },
@@ -254,6 +260,11 @@ beforeEach(() => {
           {
             id: "custom-chat-model",
             aliases: ["custom-chat-alias"],
+            kind: "chat",
+            supportsStreaming: true,
+          },
+          {
+            id: "custom-chat-model-fast",
             kind: "chat",
             supportsStreaming: true,
           },
@@ -616,6 +627,108 @@ test("redirected Responses and Google models resolve custom providers after redi
   ])
 })
 
+test("priority Responses requests use configured custom fast models", async () => {
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "custom-chat-model",
+      input: "hello",
+      service_tier: "priority",
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(requests).toHaveLength(1)
+  expect(requests[0]?.body.model).toBe("custom-chat-model-fast")
+  expect(requests[0]?.body).not.toHaveProperty("service_tier")
+})
+
+test("priority Responses aliases use the canonical custom fast model", async () => {
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "custom-chat-alias",
+      input: "hello",
+      service_tier: "priority",
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(requests).toHaveLength(1)
+  expect(requests[0]?.body.model).toBe("custom-chat-model-fast")
+})
+
+test("priority Responses requests can use a custom fast model when Copilot routing disables the collision", async () => {
+  const collidingModel = {
+    ...models.data[0],
+    id: "custom-chat-model-fast",
+    name: "Disabled Copilot Fast Collision",
+  }
+  state.models = { object: "list", data: [...models.data, collidingModel] }
+  const account = tokenPool.addAccount(
+    "github-custom-fast-collision",
+    "individual",
+    customFastCollisionAccountId,
+  )
+  account.copilotToken = "custom-fast-collision-token"
+  account.healthy = true
+  account.models = new Set([collidingModel.id])
+  account.modelsData = [collidingModel]
+  setModelRoutingOverridesForTest({
+    [collidingModel.id]: { "24001": false },
+  })
+  tokenPool.rebuildModelIndex()
+  state.isMultiToken = true
+
+  try {
+    const response = await server.request("/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "custom-chat-model",
+        input: "hello",
+        service_tier: "priority",
+      }),
+    })
+
+    expect(response.status).toBe(200)
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.url).toBe("https://custom.example/v1/chat/completions")
+    expect(requests[0]?.body.model).toBe("custom-chat-model-fast")
+  } finally {
+    tokenPool.removeAccountForTest(customFastCollisionAccountId)
+    state.isMultiToken = false
+  }
+})
+
+test("priority Responses requests can move from a custom normal model to a Copilot fast model", async () => {
+  const copilotFastModel = {
+    ...models.data[0],
+    id: "custom-chat-model-fast",
+    name: "Copilot Fast Destination",
+  }
+  state.models = { object: "list", data: [...models.data, copilotFastModel] }
+
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "custom-chat-model",
+      input: "hello",
+      service_tier: "priority",
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(requests).toHaveLength(1)
+  expect(requests[0]?.url).not.toBe(
+    "https://custom.example/v1/chat/completions",
+  )
+  expect(requests[0]?.body.model).toBe("custom-chat-model-fast")
+})
+
 test("custom embedding aliases never dispatch chat through Responses or Google", async () => {
   const responses = await server.request("/v1/responses", {
     method: "POST",
@@ -645,6 +758,26 @@ test("custom Responses compaction remains excluded from provider dispatch", asyn
     body: JSON.stringify({
       model: "custom-chat-alias",
       input: "compact this",
+      client_metadata: JSON.stringify({
+        "x-codex-turn-metadata": JSON.stringify({
+          request_kind: "compaction",
+        }),
+      }),
+    }),
+  })
+
+  expect(response.status).not.toBe(200)
+  expect(requests).toHaveLength(0)
+})
+
+test("priority Responses compaction does not dispatch to a custom-only fast model", async () => {
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "custom-chat-model",
+      input: "compact this",
+      service_tier: "priority",
       client_metadata: JSON.stringify({
         "x-codex-turn-metadata": JSON.stringify({
           request_kind: "compaction",

@@ -502,6 +502,7 @@ export const createResponses = async (
 
   // Zero-data retention enforcement
   body.store = false
+  delete body.service_tier
 
   // Completed evaluated candidates have already performed semantic attachment
   // adaptation; unprepared sources still need the transport normalizer here.
