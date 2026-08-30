@@ -11,6 +11,7 @@ import {
 
 import { HTTPError } from "../src/lib/error"
 import { setModelRedirectsForTest } from "../src/lib/model-redirect"
+import { setModelRoutingOverridesForTest } from "../src/lib/model-routing"
 import { setModelSettingsForTest } from "../src/lib/model-settings"
 import {
   getRoutingAffinity,
@@ -1106,7 +1107,7 @@ test("stream ID synchronization does not mutate a readonly terminal record", () 
 const originalFetch = globalThis.fetch
 const originalModels = state.models
 const originalIsMultiToken = state.isMultiToken
-const addedAccountIds = [2201, 2202, 2211, 2212]
+const addedAccountIds = [2201, 2202, 2211, 2212, 2221, 2222]
 let lastRequestBody: Record<string, unknown> | undefined
 let requestBodies: Array<Record<string, unknown>>
 let queuedResponses: Array<Response>
@@ -1215,7 +1216,26 @@ beforeEach(() => {
   state.isMultiToken = false
   resetRoutingTelemetryForTest()
   setModelRedirectsForTest([])
+  setModelRoutingOverridesForTest({})
   setModelSettingsForTest([])
+})
+
+test("removes service tier from already-prepared Responses transport payloads", async () => {
+  await createResponses(
+    {
+      model: "gpt-4o",
+      input: "hello",
+      service_tier: "priority",
+    },
+    {
+      vision: false,
+      initiator: "user",
+      prepared: true,
+    },
+  )
+
+  expect(requestBodies).toHaveLength(1)
+  expect(requestBodies[0]).not.toHaveProperty("service_tier")
 })
 
 test("retries one exact unsupported Responses control after store enforcement", async () => {
@@ -1732,13 +1752,347 @@ test("preserves native Responses state, context, future fields, and tools", asyn
   expect(response.status).toBe(200)
   expect(requestBodies).toHaveLength(1)
   expect(requestBodies[0]).toEqual({
-    ...payload,
     model: "gpt-4o",
+    input: payload.input,
+    future_top_level: payload.future_top_level,
+    background: payload.background,
+    previous_response_id: payload.previous_response_id,
+    context_management: payload.context_management,
     store: false,
     tools: [
       { type: "mcp", server_label: "native", future: { retained: true } },
     ],
   })
+  expect(requestBodies[0]).not.toHaveProperty("service_tier")
+})
+
+test("routes priority Responses requests to an available fast model", async () => {
+  const normalModel = {
+    ...responsesCapableModels.data[0],
+    id: "gpt-5.6-sol",
+    name: "GPT-5.6 Sol",
+  }
+  const fastModel = {
+    ...responsesCapableModels.data[0],
+    id: "gpt-5.6-sol-fast",
+    name: "GPT-5.6 Sol Fast",
+  }
+  state.models = { object: "list", data: [normalModel, fastModel] }
+
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: normalModel.id,
+      input: "Hello",
+      service_tier: "priority",
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(requestBodies).toHaveLength(1)
+  expect(requestBodies[0]?.model).toBe(fastModel.id)
+  expect(requestBodies[0]).not.toHaveProperty("service_tier")
+})
+
+test("removes non-priority service tiers without changing the model", async () => {
+  const normalModel = {
+    ...responsesCapableModels.data[0],
+    id: "gpt-service-tier-standard",
+    name: "GPT Service Tier Standard",
+  }
+  state.models = { object: "list", data: [normalModel] }
+
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: normalModel.id,
+      input: "Hello",
+      service_tier: "standard",
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(requestBodies[0]?.model).toBe(normalModel.id)
+  expect(requestBodies[0]).not.toHaveProperty("service_tier")
+})
+
+test("keeps the normal model when no fast variant is available", async () => {
+  const normalModel = {
+    ...responsesCapableModels.data[0],
+    id: "gpt-priority-no-fast",
+    name: "GPT Priority No Fast",
+  }
+  state.models = { object: "list", data: [normalModel] }
+
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: normalModel.id,
+      input: "Hello",
+      service_tier: "priority",
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(requestBodies[0]?.model).toBe(normalModel.id)
+  expect(requestBodies[0]).not.toHaveProperty("service_tier")
+})
+
+test("applies priority fast routing after configured model redirects", async () => {
+  const requestedModel = {
+    ...responsesCapableModels.data[0],
+    id: "gpt-priority-source",
+    name: "GPT Priority Source",
+  }
+  const redirectedModel = {
+    ...responsesCapableModels.data[0],
+    id: "gpt-priority-target",
+    name: "GPT Priority Target",
+  }
+  const fastModel = {
+    ...responsesCapableModels.data[0],
+    id: "gpt-priority-target-fast",
+    name: "GPT Priority Target Fast",
+  }
+  state.models = {
+    object: "list",
+    data: [requestedModel, redirectedModel, fastModel],
+  }
+  setModelRedirectsForTest([
+    {
+      id: "priority-target-redirect",
+      sourceModel: requestedModel.id,
+      sourceEffort: "all",
+      targetModel: redirectedModel.id,
+      enabled: true,
+    },
+  ])
+
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: requestedModel.id,
+      input: "Hello",
+      service_tier: "priority",
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(requestBodies[0]?.model).toBe(fastModel.id)
+  expect(requestBodies[0]).not.toHaveProperty("service_tier")
+})
+
+test("does not change reasoning effort when routing to the fast model", async () => {
+  const normalModel = {
+    ...responsesCapableModels.data[0],
+    id: "gpt-priority-effort",
+    name: "GPT Priority Effort",
+    capabilities: {
+      ...responsesCapableModels.data[0].capabilities,
+      supports: { reasoning_effort: ["high"] },
+    },
+  }
+  const fastModel = {
+    ...responsesCapableModels.data[0],
+    id: "gpt-priority-effort-fast",
+    name: "GPT Priority Effort Fast",
+    capabilities: {
+      ...responsesCapableModels.data[0].capabilities,
+      supports: { reasoning_effort: ["low"] },
+    },
+  }
+  state.models = { object: "list", data: [normalModel, fastModel] }
+
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: normalModel.id,
+      input: "Hello",
+      reasoning: { effort: "high" },
+      service_tier: "priority",
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(requestBodies[0]?.model).toBe(fastModel.id)
+  expect(requestBodies[0]?.reasoning).toMatchObject({ effort: "high" })
+})
+
+test("keeps the normal model when every fast-model account is disabled", async () => {
+  const normalModel = {
+    ...responsesCapableModels.data[0],
+    id: "gpt-priority-disabled",
+    name: "GPT Priority Disabled",
+  }
+  const fastModel = {
+    ...responsesCapableModels.data[0],
+    id: "gpt-priority-disabled-fast",
+    name: "GPT Priority Disabled Fast",
+  }
+  state.models = { object: "list", data: [normalModel, fastModel] }
+  const account = tokenPool.addAccount("github-2221", "individual", 2221)
+  account.copilotToken = "responses-priority-disabled-token"
+  account.healthy = true
+  account.models = new Set([normalModel.id, fastModel.id])
+  account.modelsData = [normalModel, fastModel]
+  setModelRoutingOverridesForTest({ [fastModel.id]: { "2221": false } })
+  tokenPool.rebuildModelIndex()
+  state.isMultiToken = true
+
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: normalModel.id,
+      input: "Hello",
+      service_tier: "priority",
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(requestBodies[0]?.model).toBe(normalModel.id)
+  expect(requestBodies[0]).not.toHaveProperty("service_tier")
+})
+
+test("keeps the normal model when a fast catalog entry has no enabled account", async () => {
+  const normalModel = {
+    ...responsesCapableModels.data[0],
+    id: "gpt-priority-unroutable",
+    name: "GPT Priority Unroutable",
+  }
+  const fastModel = {
+    ...responsesCapableModels.data[0],
+    id: "gpt-priority-unroutable-fast",
+    name: "GPT Priority Unroutable Fast",
+  }
+  state.models = { object: "list", data: [normalModel, fastModel] }
+  const account = tokenPool.addAccount("github-2222", "individual", 2222)
+  account.copilotToken = "responses-priority-unroutable-token"
+  account.healthy = true
+  account.models = new Set([normalModel.id])
+  account.modelsData = [normalModel]
+  tokenPool.rebuildModelIndex()
+  state.isMultiToken = true
+
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: normalModel.id,
+      input: "Hello",
+      service_tier: "priority",
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(requestBodies[0]?.model).toBe(normalModel.id)
+  expect(requestBodies[0]).not.toHaveProperty("service_tier")
+})
+
+test("does not append a second fast suffix", async () => {
+  const fastModel = {
+    ...responsesCapableModels.data[0],
+    id: "gpt-already-fast",
+    name: "GPT Already Fast",
+  }
+  state.models = { object: "list", data: [fastModel] }
+
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: fastModel.id,
+      input: "Hello",
+      service_tier: "priority",
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(requestBodies[0]?.model).toBe(fastModel.id)
+  expect(requestBodies[0]).not.toHaveProperty("service_tier")
+})
+
+test("suppresses model-scoped session tokens after priority fast routing", async () => {
+  const normalModel = {
+    ...responsesCapableModels.data[0],
+    id: "gpt-priority-session",
+    name: "GPT Priority Session",
+  }
+  const fastModel = {
+    ...responsesCapableModels.data[0],
+    id: "gpt-priority-session-fast",
+    name: "GPT Priority Session Fast",
+  }
+  state.models = { object: "list", data: [normalModel, fastModel] }
+  const fastToken = sessionToken({ selected_model: fastModel.id })
+
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "copilot-session-token": fastToken,
+    },
+    body: JSON.stringify({
+      model: normalModel.id,
+      input: "Hello",
+      service_tier: "priority",
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(requestBodies[0]?.model).toBe(fastModel.id)
+  expect(lastUpstreamHeaders?.get("copilot-session-token")).toBeNull()
+})
+
+test("routes priority mode before selecting a chat fallback endpoint", async () => {
+  const normalModel = {
+    ...responsesCapableModels.data[0],
+    id: "chat-priority-model",
+    name: "Chat Priority Model",
+    supported_endpoints: ["/chat/completions"],
+  }
+  const fastModel = {
+    ...normalModel,
+    id: "chat-priority-model-fast",
+    name: "Chat Priority Model Fast",
+  }
+  state.models = { object: "list", data: [normalModel, fastModel] }
+  queuedResponses.push(
+    Response.json({
+      id: "chatcmpl_priority",
+      object: "chat.completion",
+      created: 1,
+      model: fastModel.id,
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: "ok" },
+          finish_reason: "stop",
+          logprobs: null,
+        },
+      ],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    }),
+  )
+
+  const response = await server.request("/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: normalModel.id,
+      input: "Hello",
+      service_tier: "priority",
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(lastRequestBody?.model).toBe(fastModel.id)
+  expect(lastRequestBody).not.toHaveProperty("service_tier")
 })
 
 test.each([

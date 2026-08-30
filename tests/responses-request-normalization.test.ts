@@ -88,13 +88,13 @@ test("sends a finalized tolerant native Responses body without preparing again",
     future_top_level: { retained: [1, 2] },
     background: { future: true },
     previous_response_id: "resp_previous",
-    service_tier: { future: "priority" },
     context_management: { future: "shape" },
     store: false,
     tools: [
       { type: "mcp", server_label: "native", future: { retained: true } },
     ],
   })
+  expect(lastRequestBody).not.toHaveProperty("service_tier")
   expect(prepared.source as Record<string, unknown>).toEqual({
     ...caller,
     store: false,

@@ -1254,6 +1254,178 @@ describe("responses websocket message handling", () => {
     expect(ws.data.responseSnapshots.has("resp_ws_verbosity")).toBe(true)
   })
 
+  test("routes priority WebSocket turns to the available fast model", async () => {
+    const normalModel = {
+      ...responsesCapableModels.data[0],
+      id: "gpt-ws-priority",
+      name: "GPT WS Priority",
+    }
+    const fastModel = {
+      ...responsesCapableModels.data[0],
+      id: "gpt-ws-priority-fast",
+      name: "GPT WS Priority Fast",
+    }
+    state.accountType = "individual"
+    state.copilotToken = "copilot-token"
+    state.models = { object: "list", data: [normalModel, fastModel] }
+    queuedResponses.push(createResponsesSseResponse("resp_ws_priority"))
+    const ws = createTestWebSocket()
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: normalModel.id,
+        input: "Use fast mode",
+        service_tier: "priority",
+      }),
+    )
+
+    expect(lastRequestBody?.model).toBe(fastModel.id)
+    expect(lastRequestBody).not.toHaveProperty("service_tier")
+    const completed = ws.sent
+      .map(
+        (frame) =>
+          JSON.parse(frame) as {
+            response?: { model?: string }
+            type?: string
+          },
+      )
+      .find((frame) => frame.type === "response.completed")
+    expect(completed?.response?.model).toBe(normalModel.id)
+    expect(ws.data.responseSnapshots.has("resp_ws_priority")).toBe(true)
+  })
+
+  test("does not change WebSocket reasoning effort when routing to fast", async () => {
+    const normalModel = {
+      ...responsesCapableModels.data[0],
+      id: "gpt-ws-priority-effort",
+      name: "GPT WS Priority Effort",
+      capabilities: {
+        ...responsesCapableModels.data[0].capabilities,
+        supports: { reasoning_effort: ["high"] },
+      },
+    }
+    const fastModel = {
+      ...responsesCapableModels.data[0],
+      id: "gpt-ws-priority-effort-fast",
+      name: "GPT WS Priority Effort Fast",
+      capabilities: {
+        ...responsesCapableModels.data[0].capabilities,
+        supports: { reasoning_effort: ["low"] },
+      },
+    }
+    state.accountType = "individual"
+    state.copilotToken = "copilot-token"
+    state.models = { object: "list", data: [normalModel, fastModel] }
+    queuedResponses.push(createResponsesSseResponse("resp_ws_priority_effort"))
+    const ws = createTestWebSocket()
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: normalModel.id,
+        input: "Use fast mode",
+        reasoning: { effort: "high" },
+        service_tier: "priority",
+      }),
+    )
+
+    expect(lastRequestBody?.model).toBe(fastModel.id)
+    expect(lastRequestBody?.reasoning).toMatchObject({ effort: "high" })
+  })
+
+  test("keeps priority WebSocket continuations on the fast snapshot model", async () => {
+    const normalModel = {
+      ...responsesCapableModels.data[0],
+      id: "gpt-ws-priority-continuation",
+      name: "GPT WS Priority Continuation",
+    }
+    const fastModel = {
+      ...responsesCapableModels.data[0],
+      id: "gpt-ws-priority-continuation-fast",
+      name: "GPT WS Priority Continuation Fast",
+    }
+    state.accountType = "individual"
+    state.copilotToken = "copilot-token"
+    state.models = { object: "list", data: [normalModel, fastModel] }
+    queuedResponses.push(
+      createResponsesSseResponse("resp_ws_priority_parent"),
+      createResponsesSseResponse("resp_ws_priority_child"),
+    )
+    const ws = createTestWebSocket()
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: normalModel.id,
+        input: "First",
+        service_tier: "priority",
+      }),
+    )
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: normalModel.id,
+        input: "Continue",
+        previous_response_id: "resp_ws_priority_parent",
+        service_tier: "priority",
+      }),
+    )
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(lastRequestBody?.model).toBe(fastModel.id)
+    expect(lastRequestBody).not.toHaveProperty("service_tier")
+    expect(ws.data.responseSnapshots.has("resp_ws_priority_child")).toBe(true)
+  })
+
+  test("does not route WebSocket turns to custom-only fast models", async () => {
+    const normalModel = {
+      ...responsesCapableModels.data[0],
+      id: "gpt-ws-custom-only-fast",
+      name: "GPT WS Custom Only Fast",
+    }
+    state.accountType = "individual"
+    state.copilotToken = "copilot-token"
+    state.models = { object: "list", data: [normalModel] }
+    setConfigForTest({
+      customProviders: [
+        {
+          id: "ws-fast-provider",
+          name: "WS Fast Provider",
+          type: "openai-compatible",
+          baseUrl: "https://ws-fast.example/v1",
+          apiKey: "ws-fast-key",
+          models: [
+            {
+              id: `${normalModel.id}-fast`,
+              kind: "chat",
+              supportsStreaming: true,
+            },
+          ],
+        },
+      ],
+    })
+    queuedResponses.push(createResponsesSseResponse("resp_ws_normal"))
+    const ws = createTestWebSocket()
+
+    await responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model: normalModel.id,
+        input: "Use supported WebSocket routing",
+        service_tier: "priority",
+      }),
+    )
+
+    expect(lastRequestBody?.model).toBe(normalModel.id)
+    expect(lastRequestBody).not.toHaveProperty("service_tier")
+  })
+
   test("does not retry a native WebSocket compatibility 400", async () => {
     state.copilotToken = "copilot-token"
     state.models = responsesCapableModels

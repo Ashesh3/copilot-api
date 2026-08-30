@@ -132,6 +132,7 @@ export function finalizeNativeResponsesRequest(
   const normalizationClasses = [...prepared.normalizationClasses]
   body.model = options.model
   body.store = false
+  delete body.service_tier
 
   const toolsClass = finalizeNativeResponsesTools(body)
   if (toolsClass) normalizationClasses.push(toolsClass)
@@ -249,7 +250,10 @@ export function prepareResponsesRequest(
 ): PreparedResponsesSource {
   const sourceSnapshot = snapshotResponsesSource(payload)
   const normalizationClasses: Array<CopilotContractNormalizationClass> = []
-  if (sourceSnapshot.store !== false) {
+  if (
+    sourceSnapshot.store !== false
+    || sourceSnapshot.service_tier !== undefined
+  ) {
     normalizationClasses.push("stateless_controls")
   }
   const source = structuredClone(sourceSnapshot)
@@ -714,13 +718,6 @@ function validateStatefulControls(payload: ResponsesPayload): void {
     unsupportedMessage:
       "The Copilot Responses endpoint does not support previous-response continuation.",
   })
-  validateStringStatefulControl({
-    param: "service_tier",
-    value: payload.service_tier,
-    invalidTypeMessage: "The service_tier field must be a string.",
-    unsupportedMessage:
-      "The Copilot Responses endpoint does not support service tiers.",
-  })
 }
 
 function validateBooleanStatefulControl(options: {
@@ -751,7 +748,7 @@ function validateBooleanStatefulControl(options: {
 }
 
 function validateStringStatefulControl(options: {
-  param: "previous_response_id" | "service_tier"
+  param: "previous_response_id"
   value: unknown
   invalidTypeMessage: string
   unsupportedMessage: string

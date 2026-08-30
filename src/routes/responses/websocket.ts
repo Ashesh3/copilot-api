@@ -77,10 +77,12 @@ import {
 import {
   disableParallelWebSearch,
   normalizeResponsesReasoning,
+  rewriteResponseModelInEvent,
   streamChatCompletionsAsResponses,
 } from "./handler"
 import { executePreparedResponsesMessagesBridge } from "./messages-bridge"
 import { getResponsesChatWebSearchMaxUses } from "./responses-chat-adapter"
+import { applyResponsesServiceTierRouting } from "./service-tier"
 import { createStreamIdTracker, fixStreamIds } from "./stream-id-sync"
 import {
   emitResponsesFailureAsStream,
@@ -791,8 +793,12 @@ async function emitTurnFrame(
 
   const terminalType = classifyEmittedWebSocketTerminal(parsed, eventName)
   const completedFrame = addWebSocketCompletedOutputText(frame, parsed)
+  const publicFrame =
+    turn.requestedModel ?
+      rewriteResponseModelInEvent(completedFrame, turn.requestedModel)
+    : completedFrame
   const processed = addResponsesWebSocketMetadata(
-    completedFrame,
+    publicFrame,
     getCopilotResponseHeaders(),
   )
   ws.send(processed)
@@ -939,6 +945,9 @@ async function applyResponsesWebSocketRouting(
     redirected: true,
   })
   applyRedirectedResponsesEffort(payload, payload.model, redirectedEffort)
+  applyResponsesServiceTierRouting(undefined, payload, {
+    allowCustomProvider: false,
+  })
   return {
     reasoningEffort:
       redirectedEffort ?? getRedirectReasoningEffort(effectiveEffort),
@@ -962,7 +971,12 @@ async function normalizeRequestedWebSocketModel(
     effort: getRedirectReasoningEffort(effectiveEffort),
     verbosity: getResponsesVerbosity(payload),
   })
-  return normalizeModelName(redirect.model)
+  const normalizedPayload = structuredClone(payload)
+  normalizedPayload.model = normalizeModelName(redirect.model)
+  applyResponsesServiceTierRouting(undefined, normalizedPayload, {
+    allowCustomProvider: false,
+  })
+  return normalizedPayload.model
 }
 
 async function resolveResponsesWebSocketRedirect(
