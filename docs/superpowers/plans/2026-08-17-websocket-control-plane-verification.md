@@ -1114,7 +1114,7 @@ Expected: all commands exit 0. Record existing warnings separately and prove no 
 
 - [ ] **Step 5: Run pinned Bun media verification when applicable**
 
-If any media/attachment/payload-recovery file changed, run the existing pinned Bun 1.3.14 verification environment for:
+If any media/attachment/payload-recovery file changed, run the existing pinned Bun 1.4.0 verification environment for:
 
 ```powershell
 bun test tests/responses-webp-normalization.test.ts tests/responses-payload-recovery.test.ts tests/create-responses-payload-recovery.test.ts tests/vision-attachments.test.ts

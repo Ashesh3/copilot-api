@@ -6,7 +6,7 @@
 
 **Architecture:** Keep the existing top-level native Messages allowlist, then apply one JSON serializer replacer at the provider boundary. The replacer recognizes only properties named `cache_control` whose value is an ephemeral marker, reconstructs the supported wire object, and leaves every other value unchanged. Exercise this through `createAnthropicMessages` so the regression test validates the real routed fetch body.
 
-**Tech Stack:** Bun 1.3.14, TypeScript, Bun test runner, native Anthropic Messages compatibility layer.
+**Tech Stack:** Bun 1.4.0, TypeScript, Bun test runner, native Anthropic Messages compatibility layer.
 
 ---
 

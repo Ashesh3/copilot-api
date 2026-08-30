@@ -1069,7 +1069,7 @@ Expected: exit 0 with no new warnings.
 
 - [ ] **Step 4: Verify pinned Bun media coverage when media code moved**
 
-If this plan changes media normalization/recovery files, run the repository's pinned Bun 1.3.14 command used by the existing payload-recovery workflow for:
+If this plan changes media normalization/recovery files, run the repository's pinned Bun 1.4.0 command used by the existing payload-recovery workflow for:
 
 ```powershell
 bun test tests/responses-webp-normalization.test.ts tests/responses-payload-recovery.test.ts tests/create-responses-payload-recovery.test.ts
