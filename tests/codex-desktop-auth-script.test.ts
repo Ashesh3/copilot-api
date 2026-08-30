@@ -264,10 +264,10 @@ powershellTest("writes the required local ChatGPT JWT claims", async () => {
     expect(payload["https://api.openai.com/profile"]).toEqual({
       email: "device@example.invalid",
     })
-    expect(userId).toMatch(/^local-dictation-[a-f0-9]{32}$/)
-    expect(accountId).toMatch(/^local-dictation-[a-f0-9]{32}$/)
-    expect(userId).not.toBe(accountId)
-    expect(payload.sub).toBe(userId)
+    expect(userId).toBe("copilot-api")
+    expect(accountId).toBe("copilot-api")
+    expect(payload.sub).toBe("copilot-api")
+    expect(auth.tokens.account_id).toBe("copilot-api")
     expect(payload.iat).toBeGreaterThanOrEqual(before)
     expect(payload.iat).toBeLessThanOrEqual(after)
     expect(payload["https://api.openai.com/auth"].chatgpt_plan_type).toBe(
@@ -345,32 +345,42 @@ powershellTest("never prints the JWT or refresh token", async () => {
   })
 })
 
-powershellTest("generates independent credentials on every run", async () => {
-  await withTemporaryCodexHome(async (codexHome) => {
-    const firstResult = await runScript(codexHome)
-    const { auth: firstAuth } = await readAuth(codexHome)
-    const secondResult = await runScript(codexHome)
-    const { auth: secondAuth } = await readAuth(codexHome)
-    const firstPayload = getJwtPayload(firstAuth.tokens.access_token)
-    const secondPayload = getJwtPayload(secondAuth.tokens.access_token)
+powershellTest(
+  "generates independent credentials with a stable compatibility identity",
+  async () => {
+    await withTemporaryCodexHome(async (codexHome) => {
+      const firstResult = await runScript(codexHome)
+      const { auth: firstAuth } = await readAuth(codexHome)
+      const secondResult = await runScript(codexHome)
+      const { auth: secondAuth } = await readAuth(codexHome)
+      const firstPayload = getJwtPayload(firstAuth.tokens.access_token)
+      const secondPayload = getJwtPayload(secondAuth.tokens.access_token)
 
-    expect(firstResult.exitCode).toBe(0)
-    expect(secondResult.exitCode).toBe(0)
-    expect(secondAuth.tokens.access_token).not.toBe(
-      firstAuth.tokens.access_token,
-    )
-    expect(secondAuth.tokens.refresh_token).not.toBe(
-      firstAuth.tokens.refresh_token,
-    )
-    expect(
-      secondPayload["https://api.openai.com/auth"].chatgpt_user_id,
-    ).not.toBe(firstPayload["https://api.openai.com/auth"].chatgpt_user_id)
-    expect(
-      secondPayload["https://api.openai.com/auth"].chatgpt_account_id,
-    ).not.toBe(firstPayload["https://api.openai.com/auth"].chatgpt_account_id)
-    expect(secondResult.digest).not.toBe(firstResult.digest)
-  })
-})
+      expect(firstResult.exitCode).toBe(0)
+      expect(secondResult.exitCode).toBe(0)
+      expect(secondAuth.tokens.access_token).not.toBe(
+        firstAuth.tokens.access_token,
+      )
+      expect(secondAuth.tokens.refresh_token).not.toBe(
+        firstAuth.tokens.refresh_token,
+      )
+      expect(secondPayload["https://api.openai.com/auth"].chatgpt_user_id).toBe(
+        firstPayload["https://api.openai.com/auth"].chatgpt_user_id,
+      )
+      expect(
+        secondPayload["https://api.openai.com/auth"].chatgpt_account_id,
+      ).toBe(firstPayload["https://api.openai.com/auth"].chatgpt_account_id)
+      expect(secondPayload.sub).toBe("copilot-api")
+      expect(secondPayload["https://api.openai.com/auth"].chatgpt_user_id).toBe(
+        "copilot-api",
+      )
+      expect(
+        secondPayload["https://api.openai.com/auth"].chatgpt_account_id,
+      ).toBe("copilot-api")
+      expect(secondResult.digest).not.toBe(firstResult.digest)
+    })
+  },
+)
 
 powershellTest(
   "backs up an existing auth file byte-for-byte before replacing it",
