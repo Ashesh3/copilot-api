@@ -65,8 +65,8 @@ else {
   $Email = $Email.Trim()
 }
 
-$userId = "local-dictation-$([Guid]::NewGuid().ToString('N'))"
-$accountId = "local-dictation-$([Guid]::NewGuid().ToString('N'))"
+$userId = 'copilot-api'
+$accountId = 'copilot-api'
 $issuedAt = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 
 $header = [ordered]@{
