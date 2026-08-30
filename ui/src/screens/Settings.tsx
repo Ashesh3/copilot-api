@@ -19,6 +19,7 @@ import {
   ConfirmButton,
   DataTable,
   EmptyState,
+  IconAction,
   MonoText,
   RelTime,
   TogglePill,
@@ -26,7 +27,7 @@ import {
 import { Page } from "../components/Page"
 import { ResponsivePair } from "../components/ResponsivePair"
 import { DownloadIcon, PlusIcon, Trash2Icon } from "../icons"
-import { ApiError, api, del, get, patch, post } from "../lib/api"
+import { ApiError, del, get, patch, post } from "../lib/api"
 import { useToast } from "../lib/toast"
 import {
   IpAddressRequiredError,
@@ -73,10 +74,6 @@ export default function SettingsScreen() {
   const [newJwtLabel, setNewJwtLabel] = useState("")
   const [newJwtDigest, setNewJwtDigest] = useState("")
   const [isAddingJwtDigest, setIsAddingJwtDigest] = useState(false)
-  const [currentPassword, setCurrentPassword] = useState("")
-  const [newPassword, setNewPassword] = useState("")
-  const [confirmPassword, setConfirmPassword] = useState("")
-  const [isChangingPassword, setIsChangingPassword] = useState(false)
 
   const cleanupValue = cleanupDraft ?? data?.settings.codexCleanupModel ?? ""
 
@@ -108,28 +105,6 @@ export default function SettingsScreen() {
       toast.error(
         caught instanceof Error ? caught.message : "Failed to export config",
       )
-    }
-  }
-
-  const handleChangePassword = async () => {
-    if (newPassword !== confirmPassword) {
-      toast.error("New passwords do not match")
-      return
-    }
-    setIsChangingPassword(true)
-    try {
-      await api("PUT", "/dashboard/auth/password", {
-        currentPassword,
-        newPassword,
-      })
-      setCurrentPassword("")
-      setNewPassword("")
-      setConfirmPassword("")
-      toast.success("Administrator password changed; other sessions revoked")
-    } catch (caught) {
-      toast.error(errorMessage(caught, "Failed to change password"))
-    } finally {
-      setIsChangingPassword(false)
     }
   }
 
@@ -311,14 +286,11 @@ export default function SettingsScreen() {
       width: pixel(56),
       align: "end",
       renderCell: (item) => (
-        <ConfirmButton
-          label="Remove"
-          isIconOnly
+        <IconAction
+          label={`Remove ${item.ip}`}
           icon={<Trash2Icon />}
-          size="sm"
-          confirmTitle="Remove IP"
-          confirmDescription={`Remove "${item.ip}" from the allowlist?`}
-          onConfirm={() => handleRemoveIp(item.ip)}
+          variant="destructive"
+          onClick={() => handleRemoveIp(item.ip)}
         />
       ),
     },
@@ -401,161 +373,126 @@ export default function SettingsScreen() {
       : null}
 
       {data ?
-        <ResponsivePair minWidth={540}>
-          <Card>
-            <VStack gap={4}>
-              <Heading level={3}>Server Configuration</Heading>
-              <MetadataList columns={2}>
-                <MetadataListItem label="Version">
-                  {data.settings.version}
-                </MetadataListItem>
-                <MetadataListItem label="Port">
-                  {data.settings.port}
-                </MetadataListItem>
-                <MetadataListItem label="Host">
-                  {data.settings.host}
-                </MetadataListItem>
-                <MetadataListItem label="API Key Configured">
-                  {boolBadge(data.settings.authEnabled)}
-                </MetadataListItem>
-                <MetadataListItem label="Multi-Token Mode">
-                  {boolBadge(data.settings.multiToken)}
-                </MetadataListItem>
-                <MetadataListItem label="Sentry Enabled">
-                  {boolBadge(data.settings.sentryEnabled)}
-                </MetadataListItem>
-                <MetadataListItem label="Groq Enabled">
-                  {boolBadge(data.settings.groqEnabled)}
-                </MetadataListItem>
-                <MetadataListItem label="Data Directory">
-                  <MonoText>{data.settings.dataDir}</MonoText>
-                </MetadataListItem>
-                <MetadataListItem label="Debug Mode">
-                  {boolBadge(data.settings.debug)}
-                </MetadataListItem>
-                <MetadataListItem label="Verbose Logging">
-                  {boolBadge(data.settings.verbose)}
-                </MetadataListItem>
-              </MetadataList>
-
-              <Divider />
-
+        <VStack gap={4}>
+          <ResponsivePair minWidth={470}>
+            <Card>
               <VStack gap={4}>
-                <HStack gap={2} vAlign="center" wrap="wrap">
-                  <Heading level={4}>Codex Dictation Cleanup</Heading>
-                  <Badge variant="neutral" label="Used by /codex/responses" />
-                </HStack>
-                <Selector
-                  label="Cleanup model"
-                  options={cleanupOptions}
-                  value={cleanupValue}
-                  onChange={setCleanupDraft}
-                />
+                <Heading level={3}>Server Configuration</Heading>
+                <MetadataList columns={2}>
+                  <MetadataListItem label="Version">
+                    {data.settings.version}
+                  </MetadataListItem>
+                  <MetadataListItem label="Port">
+                    {data.settings.port}
+                  </MetadataListItem>
+                  <MetadataListItem label="Host">
+                    {data.settings.host}
+                  </MetadataListItem>
+                  <MetadataListItem label="API Key Configured">
+                    {boolBadge(data.settings.authEnabled)}
+                  </MetadataListItem>
+                  <MetadataListItem label="Multi-Token Mode">
+                    {boolBadge(data.settings.multiToken)}
+                  </MetadataListItem>
+                  <MetadataListItem label="Sentry Enabled">
+                    {boolBadge(data.settings.sentryEnabled)}
+                  </MetadataListItem>
+                  <MetadataListItem label="Groq Enabled">
+                    {boolBadge(data.settings.groqEnabled)}
+                  </MetadataListItem>
+                  <MetadataListItem label="Data Directory">
+                    <MonoText>{data.settings.dataDir}</MonoText>
+                  </MetadataListItem>
+                  <MetadataListItem label="Debug Mode">
+                    {boolBadge(data.settings.debug)}
+                  </MetadataListItem>
+                  <MetadataListItem label="Verbose Logging">
+                    {boolBadge(data.settings.verbose)}
+                  </MetadataListItem>
+                </MetadataList>
+
+                <Divider />
+
+                <VStack gap={4}>
+                  <HStack gap={2} vAlign="center" wrap="wrap">
+                    <Heading level={4}>Codex Dictation Cleanup</Heading>
+                    <Badge variant="neutral" label="Used by /codex/responses" />
+                  </HStack>
+                  <Selector
+                    label="Cleanup model"
+                    options={cleanupOptions}
+                    value={cleanupValue}
+                    onChange={setCleanupDraft}
+                  />
+                  <HStack hAlign="end">
+                    <Button
+                      label="Save"
+                      variant="primary"
+                      isLoading={isSavingCleanup}
+                      onClick={handleSaveCleanup}
+                    />
+                  </HStack>
+                </VStack>
+
+                <Divider />
+
                 <HStack hAlign="end">
                   <Button
-                    label="Save"
-                    variant="primary"
-                    isLoading={isSavingCleanup}
-                    onClick={handleSaveCleanup}
+                    label="Export sanitized config"
+                    variant="secondary"
+                    icon={<DownloadIcon />}
+                    onClick={() => void handleExport()}
                   />
                 </HStack>
               </VStack>
-            </VStack>
-          </Card>
+            </Card>
 
-          <Card>
-            <VStack gap={4}>
-              <Heading level={3}>Administrator Security</Heading>
-              <Button
-                label="Export sanitized config"
-                variant="secondary"
-                icon={<DownloadIcon />}
-                onClick={() => void handleExport()}
-              />
-              {data.settings.passwordManagedExternally ?
-                <Banner
-                  status="info"
-                  title="Password managed by the environment"
-                  description="Update COPILOT_ADMIN_PASSWORD_HASH in the secret manager and restart the server to rotate it."
-                />
-              : <>
+            <Card>
+              <VStack gap={4}>
+                <HStack gap={2} vAlign="center" wrap="wrap">
+                  <Heading level={3}>IP Allowlist</Heading>
+                  <Badge variant="neutral" label="Used by /transcribe" />
+                </HStack>
+                <HStack gap={2} vAlign="end" wrap="wrap">
                   <TextInput
-                    type="password"
-                    label="Current admin password"
-                    value={currentPassword}
-                    onChange={setCurrentPassword}
-                  />
-                  <TextInput
-                    type="password"
-                    label="New admin password"
-                    value={newPassword}
-                    onChange={setNewPassword}
-                  />
-                  <TextInput
-                    type="password"
-                    label="Confirm new password"
-                    value={confirmPassword}
-                    onChange={setConfirmPassword}
+                    label="IP address"
+                    value={newIp}
+                    onChange={setNewIp}
+                    placeholder={ipAddressPlaceholder(data.currentIp)}
+                    width="min(100%, 320px)"
                   />
                   <Button
-                    label="Change administrator password"
-                    variant="primary"
-                    isLoading={isChangingPassword}
-                    isDisabled={
-                      !currentPassword || !newPassword || !confirmPassword
-                    }
-                    onClick={() => void handleChangePassword()}
+                    label="Add"
+                    variant="secondary"
+                    icon={<PlusIcon />}
+                    isLoading={isAddingIp}
+                    isDisabled={isAddingIp}
+                    onClick={handleAddIp}
                   />
-                </>
-              }
-            </VStack>
-          </Card>
-
-          <Card>
-            <VStack gap={4}>
-              <HStack gap={2} vAlign="center" wrap="wrap">
-                <Heading level={3}>IP Allowlist</Heading>
-                <Badge variant="neutral" label="Used by /transcribe" />
-              </HStack>
-              <HStack gap={2} vAlign="end" wrap="wrap">
-                <TextInput
-                  label="IP address"
-                  value={newIp}
-                  onChange={setNewIp}
-                  placeholder={ipAddressPlaceholder(data.currentIp)}
-                  width="min(100%, 320px)"
-                />
-                <Button
-                  label="Add"
-                  variant="secondary"
-                  icon={<PlusIcon />}
-                  isLoading={isAddingIp}
-                  isDisabled={isAddingIp}
-                  onClick={handleAddIp}
-                />
-              </HStack>
-              {data.allowlist.length > 0 ?
-                <ConfirmButton
-                  label="Clear all"
-                  confirmTitle="Clear IP allowlist"
-                  confirmDescription="Remove every IP address from the allowlist?"
-                  confirmActionLabel="Clear all"
-                  onConfirm={handleClearAllowlist}
-                />
-              : null}
-              {data.allowlist.length === 0 ?
-                <EmptyState
-                  title="No allowlisted IPs"
-                  description="Add an IP address to allow access to /transcribe."
-                />
-              : <DataTable
-                  data={data.allowlist as Array<IpRow>}
-                  columns={ipColumns}
-                  idKey="ip"
-                />
-              }
-            </VStack>
-          </Card>
+                </HStack>
+                {data.allowlist.length > 0 ?
+                  <ConfirmButton
+                    label="Clear all"
+                    confirmTitle="Clear IP allowlist"
+                    confirmDescription="Remove every IP address from the allowlist?"
+                    confirmActionLabel="Clear all"
+                    onConfirm={handleClearAllowlist}
+                  />
+                : null}
+                {data.allowlist.length === 0 ?
+                  <EmptyState
+                    title="No allowlisted IPs"
+                    description="Add an IP address to allow access to /transcribe."
+                  />
+                : <DataTable
+                    data={data.allowlist as Array<IpRow>}
+                    columns={ipColumns}
+                    idKey="ip"
+                  />
+                }
+              </VStack>
+            </Card>
+          </ResponsivePair>
 
           <Card>
             <VStack gap={4}>
@@ -602,7 +539,7 @@ export default function SettingsScreen() {
               }
             </VStack>
           </Card>
-        </ResponsivePair>
+        </VStack>
       : null}
     </Page>
   )
