@@ -20,7 +20,7 @@ export interface CodexDesktopAuthResult {
 
 /**
  * Credential-aware auth for Codex Desktop endpoints that do not go through the
- * standard `apiKeyGuard` middleware (currently `/codex/responses`).
+ * standard `apiKeyGuard` middleware.
  *
  * Two paths are accepted:
  *
@@ -80,19 +80,38 @@ export async function authorizeCodexDesktopRequest(
 }
 
 /**
- * IP-only authorization for Codex Desktop dictation.
+ * Credential-aware authorization for Codex Desktop dictation.
  *
- * `/transcribe` deliberately ignores credentials because current Desktop
- * builds do not attach the API-key credential to this request reliably. Only
- * an enabled managed allowlist entry or an active session lease can authorize
- * the resolved client IP. Forwarding headers remain trusted only when the
- * actual socket peer is configured as a trusted proxy.
+ * Current Desktop builds attach the active ChatGPT-shaped bearer when the
+ * configured URL passes their trusted-host check. Accepting that credential
+ * makes the Cloudflare/public-host path independent of a changing client IP.
+ * Older builds that omit credentials retain the enabled managed allowlist or
+ * active session-lease fallback. A supplied invalid credential fails closed
+ * instead of falling through to IP authorization.
  */
-export async function authorizeCodexDesktopIpRequest(
+export async function authorizeCodexDesktopTranscriptionRequest(
   c: Context,
   routeName: string,
 ): Promise<CodexDesktopAuthResult> {
   const clientIp = extractClientIp(c)
+  const credentialSupplied = [
+    "authorization",
+    "x-api-key",
+    "x-goog-api-key",
+  ].some((header) => c.req.raw.headers.has(header))
+
+  if (credentialSupplied) {
+    if (await resolveRequestCredential(c.req.raw, ["user:inference"])) {
+      if (clientIp !== null) await trustAuthenticatedIp(clientIp)
+      return { allowed: true, banned: false, clientIp }
+    }
+
+    if (clientIp !== null) recordFailedAttempt(clientIp)
+    consola.warn(
+      `[${routeName}] Rejected: invalid credential from IP ${clientIp ?? "(unknown)"}`,
+    )
+    return { allowed: false, banned: false, clientIp }
+  }
 
   if (clientIp !== null && (await isIpAllowedForTranscription(clientIp))) {
     return { allowed: true, banned: false, clientIp }
@@ -104,7 +123,7 @@ export async function authorizeCodexDesktopIpRequest(
 
   if (clientIp !== null) recordFailedAttempt(clientIp)
   consola.warn(
-    `[${routeName}] Rejected: IP ${clientIp ?? "(unknown)"} not whitelisted`,
+    `[${routeName}] Rejected: IP ${clientIp ?? "(unknown)"} not whitelisted and no valid credential`,
   )
   return { allowed: false, banned: false, clientIp }
 }

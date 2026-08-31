@@ -607,11 +607,12 @@ OAuth `voice:transcribe` entitlement (derived for Claude Code from
 Origin. The gateway does not impose voice frame, audio, duration, idle,
 connection, or hourly traffic caps.
 
-Codex Desktop dictation at `POST /transcribe` is authorized only by the
-resolved managed/session-allowlisted client IP. Current Desktop builds do not
-reliably attach their API-key credential to dictation, so a prior successful
-authoritative inference request automatically persists the observed IP for
-this route. An operator can also add it manually in the dashboard. Automatic
+Codex Desktop dictation at `POST /transcribe` accepts a valid inference-capable
+bearer or API key. Successful credential authentication also persists the
+resolved client IP for older Desktop builds that omit credentials on later
+dictation requests. An operator can add an IP manually in the dashboard, and
+active session leases remain valid fallbacks. An invalid supplied credential
+fails closed instead of falling through to IP authorization. Automatic
 authenticated entries do not permit credential-free transparent proxy calls;
 those still require credentials unless an operator-created allowlist entry or
 session lease applies. Transcript cleanup at `/codex/responses` remains

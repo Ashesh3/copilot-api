@@ -63,10 +63,14 @@ Generation and WebSocket locations disable request and response buffering for
 streaming and inherit the maximum-duration server settings so a quiet upstream
 does not fall back to Nginx's 60-second default.
 
-The public OpenAI-compatible transcription location publishes only
-`POST /v1/audio/transcriptions` and disables request buffering so multipart
-audio can stream over HTTP/1.1 to the application without Nginx first spooling
-the upload.
+The public transcription locations publish only exact
+`POST /v1/audio/transcriptions` and `POST /transcribe`. The first is the
+OpenAI-compatible API; the second is Codex Desktop's composer-dictation
+fallback. Both disable request buffering so multipart audio can stream over
+HTTP/1.1 to the application without Nginx first spooling the upload. The
+application independently authenticates the OpenAI-compatible route with an
+inference credential and the Codex fallback with either a valid inference
+credential or its managed/session transcription IP allowlist.
 
 The public template adds baseline browser headers with `always`, including to
 Nginx-generated denials. It deliberately does not set Content Security Policy;
@@ -109,11 +113,13 @@ Then verify the boundary from outside the origin:
 5. The same upgrade with a valid gateway, OAuth, or inference credential returns
    `101 Switching Protocols`.
 6. A normal authenticated `POST /v1/responses` still works.
-7. Spoofed `X-Real-IP`, `X-Forwarded-For`, and `CF-Connecting-IP` headers from a
+7. Exact `POST /transcribe` reaches the application rather than Nginx's
+   default `404`; unsupported methods remain denied.
+8. Spoofed `X-Real-IP`, `X-Forwarded-For`, and `CF-Connecting-IP` headers from a
    non-trusted TCP peer do not authorize IP-gated routes.
-8. `nginx -T` contains no `limit_req`, `limit_req_zone`, or `limit_conn`, and
+9. `nginx -T` contains no `limit_req`, `limit_req_zone`, or `limit_conn`, and
    each TLS proxy server has the maximum-duration client/read/send directives.
-9. The Statsig hostname proxies only `/v1/initialize`, `/v1/download`, and
+10. The Statsig hostname proxies only `/v1/initialize`, `/v1/download`, and
    `/v1/check`; an unrelated path returns `404`.
 
 Keep origin ports firewalled or loopback-bound. The public hostname policy does

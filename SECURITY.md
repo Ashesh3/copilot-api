@@ -60,9 +60,11 @@ affected, include its exact version or digest.
 - Direct Connect is disabled by default. The only public health route is exact
   `GET /health/health`.
 - Forwarding headers are honored only when the actual socket peer is in
-  `COPILOT_TRUSTED_PROXY_CIDRS`. Successful authoritative inference auth
-  exempts the resolved IP from the process-local failure ban and persists an
-  enabled entry for `/transcribe`. New entries use source `authenticated`;
+  `COPILOT_TRUSTED_PROXY_CIDRS`. `/transcribe` accepts a valid inference
+  credential directly and retains managed/session IP authorization for clients
+  that omit credentials. Successful authoritative inference auth exempts the
+  resolved IP from the process-local failure ban and persists an enabled entry
+  for `/transcribe`. New entries use source `authenticated`;
   existing operator-created entries are re-enabled while preserving their
   source and transparent-proxy permission. Newly automatic entries never
   authorize credential-free transparent proxy inference.
@@ -94,7 +96,7 @@ affected, include its exact version or digest.
 | F-03 | Resolved | Remote Control requires short-lived, one-use, administrator/session-bound WebSocket tickets with Origin validation. |
 | F-04 | Resolved | Only exact metadata-free `GET /health/health` remains public. Direct Connect is disabled by default and authenticated when explicitly enabled. |
 | F-05 | Resolved | Voice WebSockets authenticate before upgrade, enforce Origin when supplied, validate protocol messages, and cancel transcription when callers disconnect. |
-| F-06 | Resolved with documented Codex compatibility exceptions | Forwarded headers are accepted only from configured socket peers; Compose binds the backend to loopback. Authoritative inference auth promotes only the safely resolved IP to a persistent `/transcribe` entry and process-local ban exemption. New entries use source `authenticated`; existing operator entries retain their source and transparent-proxy permission when re-enabled. Missing/wrong credentials remain `401`, and newly automatic entries do not authorize transparent proxy inference. The Codex spoof template forwards only exact `POST /transcribe`. The Statsig spoof template forwards only `/v1/initialize`, `/v1/download`, and `/v1/check`; behind a source-NATing load balancer, deploying it explicitly accepts that all downstream callers share the edge's allowlisted identity. |
+| F-06 | Resolved with documented Codex compatibility exceptions | Forwarded headers are accepted only from configured socket peers; Compose binds the backend to loopback. `/transcribe` accepts valid inference credentials directly and falls back to managed/session IP authorization only when no credential is supplied; invalid supplied credentials fail closed. Successful auth promotes only the safely resolved IP to a persistent `/transcribe` entry and process-local ban exemption. New entries use source `authenticated`; existing operator entries retain their source and transparent-proxy permission when re-enabled. Newly automatic entries do not authorize transparent proxy inference. The Codex spoof and public templates forward only exact `POST /transcribe`. The Statsig spoof template forwards only `/v1/initialize`, `/v1/download`, and `/v1/check`; behind a source-NATing load balancer, deploying it explicitly accepts that all downstream callers share the edge's allowlisted identity. |
 | F-07 | Resolved | Nginx templates use hostname-specific route/method allowlists and a final default denial instead of catch-all proxying. |
 | F-08 | Resolved | Protected credential failures share a rolling three-strike, 24-hour IP ban and return uniform no-store `401` responses. Authorization failures by an already-recognized principal and denials on compatibility stubs stay off the tracker so a legitimate client cannot ban itself. Supplied Nginx policy adds no pacing, connection, finite body, or I/O timeout controls. |
 | F-11 | Resolved for the tracked dependency baseline | Hono, Undici, Sentry, Bun, and related runtime dependencies were upgraded; `srvx` was removed; the Bun image is digest-pinned; production audit is a CI gate. |
