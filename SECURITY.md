@@ -142,8 +142,10 @@ configuration. This record covers application and supplied edge controls, not a
 complete host/container isolation audit. Operators must:
 
 1. Bind the backend to loopback or a private container network.
-2. Render the current files under `nginx/`; do not restore a catch-all
-   `proxy_pass` or a POST-only Responses location.
+2. Render and separately install the current files under `nginx/`; the Compose
+   `update.sh` does not modify or reload host Nginx. Confirm the installed
+   result with `nginx -T`, and do not restore a catch-all `proxy_pass` or a
+   POST-only Responses location.
 3. Set `COPILOT_ADMIN_ORIGIN` to the exact external dashboard origin and
    `COPILOT_TRUSTED_PROXY_CIDRS` to the exact Nginx-to-application socket peers.
 4. Keep Cloudflare/proxy allowlists, certificates, dependencies, and the

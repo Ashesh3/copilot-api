@@ -845,6 +845,13 @@ proxy CIDRs, the updater preserves those two non-secret values from the running
 container. Review upstream changes before running it; do not use it to erase
 local deployment edits.
 
+`update.sh` updates only the repository checkout and Compose application. It
+does not render, install, validate, or reload the host Nginx configuration. If
+an update changes anything under `nginx/`, deploy the matching rendered vhost
+separately, confirm the active configuration with `nginx -T`, run `nginx -t`,
+and reload Nginx. A healthy rebuilt container does not prove that a new edge
+route is active.
+
 On Windows, `start.bat` starts the development server on `127.0.0.1` and opens
 the same-origin operator dashboard. Set `COPILOT_API_KEY_AUTH` in the invoking
 environment first; the launcher refuses to start without it. It no longer opens
@@ -908,6 +915,12 @@ placeholder, keep `--api-key-auth` enabled, and validate the generated server
 configuration before exposing it. See [nginx/README.md](nginx/README.md) for
 the template matrix, installation checks, Cloudflare CIDR maintenance, and
 WebSocket probes.
+
+For Codex Desktop dictation, every public or spoof hostname used by the client
+must publish exact `POST /transcribe`. An empty diagnostic POST should reach the
+application and return JSON with `x-request-id` rather than an Nginx HTML 404;
+the end-to-end acceptance check is an authenticated multipart audio upload that
+returns `200` with `{ "text": "..." }`.
 
 ## Security and privacy
 

@@ -94,7 +94,7 @@ test("public templates keep IP-only compatibility routes narrowly scoped", async
   expect(statsigTemplate).toContain("location / { return 404; }")
 })
 
-test("Codex dictation uses app IP auth while cleanup requires a bearer", async () => {
+test("Codex dictation streams multipart uploads while cleanup requires a bearer", async () => {
   const template = await read(
     "sites-available/codex-desktop-spoof.conf.template",
   )
@@ -103,7 +103,10 @@ test("Codex dictation uses app IP auth while cleanup requires a bearer", async (
     /location = \/transcribe \{([\s\S]*?)\n {2}\}/,
   )?.[1]
   expect(transcribeLocation).toBeDefined()
+  expect(transcribeLocation).toContain("limit_except POST { deny all; }")
   expect(transcribeLocation).toContain("proxy_pass {{UPSTREAM_URL}};")
+  expect(transcribeLocation).toContain("proxy_http_version 1.1;")
+  expect(transcribeLocation).toContain("proxy_request_buffering off;")
   expect(transcribeLocation).not.toContain("$http_authorization")
 
   expect(template).toMatch(

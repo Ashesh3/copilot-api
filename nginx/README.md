@@ -96,12 +96,25 @@ IPv6 ranges).
 
 ## Install and validate
 
-After rendering placeholders:
+The files in this directory are source templates, not the active host
+configuration. Pulling the repository or running the root `update.sh` rebuilds
+the Compose application only; it does not copy files into `/etc/nginx`, run
+`nginx -t`, or reload Nginx. Any change under `nginx/` therefore requires a
+separate edge deployment.
+
+After rendering every placeholder, compare the candidate with the installed
+vhost, retain a rollback copy, install the candidate, and then run:
 
 ```sh
 sudo nginx -t
 sudo systemctl reload nginx
+sudo systemctl is-active nginx
 ```
+
+Use `sudo nginx -T` after the reload to confirm that the active configuration,
+not merely the repository template, contains every newly required location.
+Do not treat a healthy Docker container or successful `update.sh` run as proof
+that an Nginx route was deployed.
 
 Then verify the boundary from outside the origin:
 
@@ -113,13 +126,16 @@ Then verify the boundary from outside the origin:
 5. The same upgrade with a valid gateway, OAuth, or inference credential returns
    `101 Switching Protocols`.
 6. A normal authenticated `POST /v1/responses` still works.
-7. Exact `POST /transcribe` reaches the application rather than Nginx's
-   default `404`; unsupported methods remain denied.
-8. Spoofed `X-Real-IP`, `X-Forwarded-For`, and `CF-Connecting-IP` headers from a
+7. An empty exact `POST /transcribe` reaches the application and returns an
+   application JSON error with `x-request-id`, rather than Nginx's HTML `404`;
+   unsupported methods remain denied.
+8. An authenticated multipart audio upload to `POST /transcribe` returns `200`
+   with a JSON `text` value.
+9. Spoofed `X-Real-IP`, `X-Forwarded-For`, and `CF-Connecting-IP` headers from a
    non-trusted TCP peer do not authorize IP-gated routes.
-9. `nginx -T` contains no `limit_req`, `limit_req_zone`, or `limit_conn`, and
+10. `nginx -T` contains no `limit_req`, `limit_req_zone`, or `limit_conn`, and
    each TLS proxy server has the maximum-duration client/read/send directives.
-10. The Statsig hostname proxies only `/v1/initialize`, `/v1/download`, and
+11. The Statsig hostname proxies only `/v1/initialize`, `/v1/download`, and
    `/v1/check`; an unrelated path returns `404`.
 
 Keep origin ports firewalled or loopback-bound. The public hostname policy does
