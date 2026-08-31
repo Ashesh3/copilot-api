@@ -1,4 +1,6 @@
 # Codex Desktop dictation domain spoofing.
+# The root update.sh does not install or reload this host configuration; render
+# and deploy it separately, then validate with nginx -t and inspect nginx -T.
 #
 # Codex Desktop's renderer attaches `X-OpenAI-Attach-Auth` / `X-OpenAI-Attach-Integrity-State`
 # headers to ALL fetches, and the main process refuses to forward them unless
@@ -11,10 +13,10 @@
 #
 # Workaround: spoof an `*.openai.com` hostname locally — pin it to this
 # gateway via DNS or `/etc/hosts`, terminate TLS here with a cert signed by
-# a CA the client trusts, and proxy to copilot-api on :4141. Current Desktop
-# builds do not reliably produce an API-key bearer for `/transcribe`, so that
-# exact route uses the application's managed/session IP allowlist.
-# `/codex/responses` remains bearer-authenticated.
+# a CA the client trusts, and proxy to copilot-api on :4141. `/transcribe`
+# accepts a valid inference credential and retains the application's
+# managed/session IP fallback for Desktop builds that omit credentials.
+# `/codex/responses` remains credential-authenticated.
 #
 # Set on the client:
 #   CODEX_API_BASE_URL=https://{{CODEX_DESKTOP_SPOOF_PRIMARY_HOST}}
@@ -54,12 +56,12 @@ server {
 
   location = /transcribe {
     limit_except POST { deny all; }
-    # The application authorizes this exact compatibility route by its resolved
-    # managed/session-allowlisted client IP. Nginx overwrites forwarding headers
-    # above so clients cannot choose the address evaluated by the application.
+    # The application accepts a valid inference credential and otherwise uses
+    # its managed/session IP fallback. Nginx overwrites forwarding headers so
+    # clients cannot choose the address evaluated by that fallback.
     proxy_pass {{UPSTREAM_URL}};
     proxy_http_version 1.1;
-    chunked_transfer_encoding on;
+    proxy_request_buffering off;
   }
 
   location = /codex/responses {

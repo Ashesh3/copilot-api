@@ -6,6 +6,8 @@ map $http_upgrade $connection_upgrade {
 # Public API/dashboard hostname template.
 # Required placeholders are documented in ../README.md. Keep both maps in the
 # nginx http context (a file under sites-enabled is normally included there).
+# The root update.sh does not install or reload this host configuration; render
+# and deploy it separately, then validate with nginx -t and inspect nginx -T.
 
 # Normal Responses API calls use POST. Codex Desktop's Responses WebSocket
 # transport uses an authenticated GET upgrade on the same paths. Reject plain
