@@ -1,4 +1,5 @@
 import { afterAll, beforeEach, expect, mock, test } from "bun:test"
+import { createHash } from "node:crypto"
 
 import { setConfigForTest } from "../src/lib/config"
 import { setIpAllowlistForTest } from "../src/lib/ip-allowlist"
@@ -11,6 +12,7 @@ import {
   unwhitelistIp,
 } from "../src/lib/ip-blocker"
 import { state } from "../src/lib/state"
+import { trustedJwtDigestStore } from "../src/lib/trusted-jwt-digests"
 import { server } from "../src/server"
 
 const originalApiKeyAuth = state.apiKeyAuth
@@ -44,6 +46,7 @@ beforeEach(() => {
     auth: { apiKeys: ["config-secret"] },
     groqApiKey: "groq-secret",
   })
+  trustedJwtDigestStore.replaceForTest([])
   setIpAllowlistForTest([])
   fetchMock.mockClear()
   chatCompletionsMock.mockClear()
@@ -73,6 +76,7 @@ afterAll(() => {
   state.models = originalModels
   state.copilotToken = originalCopilotToken
   setConfigForTest(null)
+  trustedJwtDigestStore.resetAfterTest()
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
 })
 
@@ -196,7 +200,7 @@ test("managed allowlist accepts a different IPv6 address for transcribe", async 
   expect(response.status).toBe(200)
 })
 
-test("transcribe: a valid bearer does not replace IP allowlisting", async () => {
+test("transcribe: a valid bearer directly authorizes and persists the IP fallback", async () => {
   const clientIp = "203.0.113.50"
   expect(isIpWhitelisted(clientIp)).toBe(false)
 
@@ -213,12 +217,55 @@ test("transcribe: a valid bearer does not replace IP allowlisting", async () => 
     body: formData,
   })
 
-  expect(response.status).toBe(401)
-  expect(fetchMock).not.toHaveBeenCalled()
+  expect(response.status).toBe(200)
+  expect(fetchMock).toHaveBeenCalledTimes(1)
   expect(isIpWhitelisted(clientIp)).toBe(false)
+
+  const fallbackFormData = new FormData()
+  fallbackFormData.append(
+    "file",
+    new Blob(["audio"], { type: "audio/webm" }),
+    "a.webm",
+  )
+  const fallback = await server.request("/transcribe", {
+    method: "POST",
+    headers: {
+      "x-copilot-peer-ip": "127.0.0.1",
+      "x-forwarded-for": clientIp,
+    },
+    body: fallbackFormData,
+  })
+  expect(fallback.status).toBe(200)
+  expect(fetchMock).toHaveBeenCalledTimes(2)
 })
 
-test("transcribe: a valid x-api-key does not replace IP allowlisting", async () => {
+test("transcribe: a dashboard-managed ChatGPT-shaped JWT authorizes dictation", async () => {
+  const clientIp = "203.0.113.57"
+  const token = "header.chatgpt-shaped-payload.signature"
+  trustedJwtDigestStore.add({
+    label: "Codex Desktop",
+    digest: createHash("sha256").update(token, "utf8").digest("hex"),
+  })
+
+  const formData = new FormData()
+  formData.append("file", new Blob(["audio"], { type: "audio/webm" }), "a.webm")
+
+  const response = await server.request("/transcribe", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "x-copilot-peer-ip": "127.0.0.1",
+      "x-forwarded-for": clientIp,
+    },
+    body: formData,
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({ text: "hello from dictation" })
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+})
+
+test("transcribe: a valid x-api-key directly authorizes dictation", async () => {
   const clientIp = "203.0.113.51"
 
   const formData = new FormData()
@@ -234,12 +281,12 @@ test("transcribe: a valid x-api-key does not replace IP allowlisting", async () 
     body: formData,
   })
 
-  expect(response.status).toBe(401)
-  expect(fetchMock).not.toHaveBeenCalled()
+  expect(response.status).toBe(200)
+  expect(fetchMock).toHaveBeenCalledTimes(1)
   expect(isIpWhitelisted(clientIp)).toBe(false)
 })
 
-test("transcribe: credentials are ignored for an allowlisted IP", async () => {
+test("transcribe: an invalid supplied credential cannot fall through to an allowlisted IP", async () => {
   const clientIp = "203.0.113.52"
   setIpAllowlistForTest([{ ip: clientIp, enabled: true }])
 
@@ -256,9 +303,8 @@ test("transcribe: credentials are ignored for an allowlisted IP", async () => {
     body: formData,
   })
 
-  expect(response.status).toBe(200)
-  expect(await response.json()).toEqual({ text: "hello from dictation" })
-  expect(fetchMock).toHaveBeenCalledTimes(1)
+  expect(response.status).toBe(401)
+  expect(fetchMock).not.toHaveBeenCalled()
   expect(isIpWhitelisted(clientIp)).toBe(false)
 })
 
@@ -352,7 +398,7 @@ test("Codex credential-free allowlists bypass bans without clearing history", as
   expect(isIpBlocked(leasedIp)).toBe(true)
 })
 
-test("transcribe: API-key configuration does not change the IP-only gate", async () => {
+test("transcribe: an invalid bearer cannot authorize a fresh IP", async () => {
   setConfigForTest({ groqApiKey: "groq-secret" })
   const clientIp = "203.0.113.53"
 
@@ -370,7 +416,7 @@ test("transcribe: API-key configuration does not change the IP-only gate", async
   })
   expect(reject.status).toBe(401)
 
-  // A supplied bearer is irrelevant when the source IP is not allowlisted.
+  // A supplied invalid bearer fails closed.
   const rejectBearer = await server.request("/transcribe", {
     method: "POST",
     headers: {
@@ -525,7 +571,7 @@ test("codex-responses: an active lease suppresses a ban after valid credential a
   expect(response.status).toBe(200)
 })
 
-test("transcribe: --api-key-auth CLI key does not replace IP allowlisting", async () => {
+test("transcribe: --api-key-auth CLI key directly authorizes dictation", async () => {
   state.apiKeyAuth = "cli-secret"
   setConfigForTest({ groqApiKey: "groq-secret" }) // no config keys
   const clientIp = "203.0.113.56"
@@ -543,7 +589,7 @@ test("transcribe: --api-key-auth CLI key does not replace IP allowlisting", asyn
     body: formData,
   })
 
-  expect(response.status).toBe(401)
-  expect(fetchMock).not.toHaveBeenCalled()
+  expect(response.status).toBe(200)
+  expect(fetchMock).toHaveBeenCalledTimes(1)
   expect(isIpWhitelisted(clientIp)).toBe(false)
 })

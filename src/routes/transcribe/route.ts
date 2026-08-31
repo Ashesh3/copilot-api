@@ -1,7 +1,7 @@
 import consola from "consola"
 import { Hono } from "hono"
 
-import { authorizeCodexDesktopIpRequest } from "~/lib/codex-desktop-auth"
+import { authorizeCodexDesktopTranscriptionRequest } from "~/lib/codex-desktop-auth"
 import { transcribe } from "~/routes/voice/groq-stt"
 
 export const transcribeRoutes = new Hono()
@@ -25,11 +25,10 @@ function unauthorized(c: {
  *   - file       (audio blob, typically audio/webm)
  *   - language   (optional, e.g. "en")
  *
- * Auth model: managed/session IP allowlist only. Credentials do not authorize
- * this route. Current Codex Desktop builds request auth attachment but do not
- * provide an API-key bearer for `/transcribe`, so the resolved client IP must
- * be enabled through the dashboard, covered by an active lease, or previously
- * persisted after authoritative inference authentication.
+ * Auth model: a valid inference-capable bearer/API key, with a managed/session
+ * IP allowlist fallback for older Desktop builds that omit credentials. A
+ * successful credential also persists the resolved client IP for subsequent
+ * credential-free compatibility requests.
  *
  * Codex MAY or MAY NOT attach `originator: Codex Desktop` and a
  * `User-Agent: Codex Desktop/...` header depending on whether the gateway
@@ -40,7 +39,7 @@ function unauthorized(c: {
  * Response shape required by Codex's renderer: { "text": "..." }
  */
 transcribeRoutes.post("/", async (c) => {
-  const auth = await authorizeCodexDesktopIpRequest(c, "transcribe")
+  const auth = await authorizeCodexDesktopTranscriptionRequest(c, "transcribe")
   if (!auth.allowed) {
     return unauthorized(c)
   }

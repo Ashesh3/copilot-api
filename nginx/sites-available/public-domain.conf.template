@@ -96,6 +96,17 @@ server {
     proxy_request_buffering off;
   }
 
+  # Codex Desktop posts recorded composer dictation to this compatibility
+  # route after its streaming transcription attempt falls back. The
+  # application accepts a valid inference credential and retains its
+  # managed/session transcription IP allowlist for older clients.
+  location = /transcribe {
+    limit_except POST { deny all; }
+    proxy_pass {{UPSTREAM_URL}};
+    proxy_http_version 1.1;
+    proxy_request_buffering off;
+  }
+
   # Codex Desktop's standalone web.run tool uses the typed alpha/search API
   # instead of embedding a hosted web_search tool in a Responses request.
   location ~ ^/(?:v1/)?alpha/search/?$ {
