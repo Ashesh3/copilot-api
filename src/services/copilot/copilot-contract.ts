@@ -2,7 +2,7 @@ import { Buffer } from "node:buffer"
 import util from "node:util"
 
 export const COPILOT_API_VERSION = "2026-08-01"
-export const DEFAULT_COPILOT_INTEGRATION_ID = "vscode-chat"
+export const DEFAULT_COPILOT_INTEGRATION_ID = "copilot-sdk"
 
 const MAX_INTEGRATION_ID_LENGTH = 128
 const MAX_SAFE_RESPONSE_HEADER_VALUE_LENGTH = 8 * 1024

@@ -1,28 +1,233 @@
 #!/usr/bin/env node
 
 import { defineCommand } from "citty"
-import consola from "consola"
+import { createConsola } from "consola"
+import { createInterface } from "node:readline"
 
-import { PATHS, ensurePaths } from "./lib/paths"
-import { state } from "./lib/state"
-import { setupGitHubToken } from "./lib/token"
+import { HTTPError } from "./lib/error"
+import {
+  DEFAULT_GITHUB_DOMAIN,
+  formatGitHubCredential,
+  isGitHubEnterpriseCloud,
+  normalizeGitHubDomain,
+  resolveCopilotApiBaseUrl,
+} from "./lib/github-instance"
+import { copilotHeaders } from "./services/copilot/copilot-client"
+import { createCopilotTransportInit } from "./services/copilot/transport-options"
+import { loginViaWebFlow } from "./services/github/auth-flow"
+import { getCopilotToken } from "./services/github/get-copilot-token"
+import { getCopilotUsage } from "./services/github/get-copilot-usage"
+import { getDeviceCode } from "./services/github/get-device-code"
+import { getGitHubUser } from "./services/github/get-user"
+import { pollAccessToken } from "./services/github/poll-access-token"
 
-interface RunAuthOptions {
+const authLogger = createConsola({
+  stderr: process.stderr,
+  stdout: process.stderr,
+})
+
+export interface RunAuthOptions {
+  deviceCode: boolean
+  host?: string
   verbose: boolean
-  showToken: boolean
+  webFlow: boolean
+}
+
+export interface AuthTextPrompt {
+  close: () => void
+  question: (message: string) => Promise<string>
+  write: (message: string) => void
+}
+
+interface AuthTextPromptStreams {
+  input?: NodeJS.ReadableStream
+  output?: Pick<NodeJS.WritableStream, "write">
+}
+
+interface NumberedChoice<T extends string> {
+  label: string
+  value: T
+}
+
+export function createAuthTextPrompt(
+  streams: AuthTextPromptStreams = {},
+): AuthTextPrompt {
+  const input = streams.input ?? process.stdin
+  const output = streams.output ?? process.stderr
+  const lineReader = createInterface({
+    input,
+    crlfDelay: Infinity,
+    terminal: false,
+  })
+  const lines = lineReader[Symbol.asyncIterator]()
+
+  return {
+    close() {
+      lineReader.close()
+    },
+    async question(message) {
+      output.write(message)
+      const result = await lines.next()
+      if (result.done) throw new Error("Authentication cancelled")
+      return result.value.trim()
+    },
+    write(message) {
+      output.write(message)
+    },
+  }
+}
+
+export async function promptNumberedChoice<T extends string>(
+  prompt: AuthTextPrompt,
+  message: string,
+  choices: Array<NumberedChoice<T>>,
+): Promise<T> {
+  prompt.write(`${message}\n`)
+  for (const [index, choice] of choices.entries()) {
+    prompt.write(`  ${index + 1}. ${choice.label}\n`)
+  }
+
+  while (true) {
+    const answer = await prompt.question(`Enter 1-${choices.length}: `)
+    for (const [index, choice] of choices.entries()) {
+      if (answer === String(index + 1)) return choice.value
+    }
+    prompt.write(`Please enter a number from 1 to ${choices.length}.\n`)
+  }
+}
+
+function prefersLoopbackWebFlow(): boolean {
+  if (!process.stdin.isTTY || !process.stderr.isTTY) return false
+  const remoteMarkers = [
+    process.env.SSH_CONNECTION,
+    process.env.SSH_CLIENT,
+    process.env.SSH_TTY,
+    process.env.CODESPACES,
+    process.env.REMOTE_CONTAINERS,
+    process.env.CI,
+  ]
+  return remoteMarkers.every((marker) => !marker)
+}
+
+export async function selectInstanceDomain(
+  host?: string,
+  prompt?: AuthTextPrompt,
+): Promise<string> {
+  if (host) return normalizeGitHubDomain(host)
+  if (!prompt) throw new Error("Authentication prompt is unavailable")
+
+  const account = await promptNumberedChoice(
+    prompt,
+    "What account do you want to log into?",
+    [
+      { label: "GitHub.com", value: "github.com" },
+      {
+        label: "GitHub Enterprise Cloud (*.ghe.com)",
+        value: "enterprise",
+      },
+    ],
+  )
+  if (account === "github.com") return DEFAULT_GITHUB_DOMAIN
+
+  const enterpriseHost = await prompt.question(
+    "Enter your GitHub Enterprise instance domain (for example, msft.ghe.com): ",
+  )
+  if (!enterpriseHost) throw new Error("Authentication cancelled")
+  return normalizeGitHubDomain(enterpriseHost)
+}
+
+export async function selectAuthMethod(
+  options: RunAuthOptions,
+  prompt?: AuthTextPrompt,
+  preferWebFlow = prefersLoopbackWebFlow(),
+): Promise<"device" | "web"> {
+  if (options.deviceCode) return "device"
+  if (options.webFlow) return "web"
+  if (!prompt) throw new Error("Authentication prompt is unavailable")
+
+  const web: NumberedChoice<"web"> = {
+    label: "Sign in with your browser",
+    value: "web",
+  }
+  const device: NumberedChoice<"device"> = {
+    label: "Sign in with a device code",
+    value: "device",
+  }
+  const optionsList = preferWebFlow ? [web, device] : [device, web]
+  optionsList[0] = {
+    ...optionsList[0],
+    label: `${optionsList[0]?.label} (recommended)`,
+  }
+
+  return await promptNumberedChoice(
+    prompt,
+    "How do you want to sign in?",
+    optionsList,
+  )
+}
+
+async function deviceCodeLogin(instanceDomain: string): Promise<string> {
+  authLogger.start("Requesting device code from GitHub...")
+  const response = await getDeviceCode(instanceDomain)
+  authLogger.box(
+    `Open ${response.verification_uri}\nand enter code: ${response.user_code}`,
+  )
+  authLogger.start("Waiting for authorization...")
+  return await pollAccessToken(response, instanceDomain)
 }
 
 export async function runAuth(options: RunAuthOptions): Promise<void> {
   if (options.verbose) {
-    consola.level = 5
-    consola.info("Verbose logging enabled")
+    authLogger.level = 5
+    authLogger.info("Verbose logging enabled")
   }
 
-  state.showToken = options.showToken
+  const requiresPrompt =
+    !options.host || (!options.deviceCode && !options.webFlow)
+  const prompt = requiresPrompt ? createAuthTextPrompt() : undefined
+  let instanceDomain: string
+  let method: "device" | "web"
+  try {
+    instanceDomain = await selectInstanceDomain(options.host, prompt)
+    method = await selectAuthMethod(options, prompt)
+  } finally {
+    prompt?.close()
+  }
+  const token =
+    method === "device" ?
+      await deviceCodeLogin(instanceDomain)
+    : await loginViaWebFlow(instanceDomain, (url) => {
+        authLogger.info("Opening GitHub authorization in your browser...")
+        authLogger.info(`If the browser does not open, visit: ${url}`)
+      })
+  const user = await getGitHubUser(token, instanceDomain)
+  if (isGitHubEnterpriseCloud(instanceDomain)) {
+    const copilotUser = await getCopilotUsage(token, instanceDomain)
+    const baseUrl = resolveCopilotApiBaseUrl(
+      instanceDomain,
+      copilotUser.endpoints?.api,
+      "enterprise",
+    )
+    const response = await fetch(
+      `${baseUrl}/models`,
+      createCopilotTransportInit({
+        headers: copilotHeaders({ copilotToken: token }),
+      }),
+    )
+    if (!response.ok) {
+      throw new HTTPError(
+        `Failed to validate Copilot model access (HTTP ${response.status})`,
+        response,
+      )
+    }
+  } else {
+    await getCopilotToken({ githubToken: token, instanceDomain })
+  }
+  const envEntry = formatGitHubCredential({ instanceDomain, token })
 
-  await ensurePaths()
-  await setupGitHubToken({ force: true })
-  consola.success("GitHub token written to", PATHS.GITHUB_TOKEN_PATH)
+  authLogger.success(`Signed in as ${user.login} on ${instanceDomain}`)
+  authLogger.info("Add this entry to GITHUB_TOKENS:")
+  process.stdout.write(`${envEntry}\n`)
 }
 
 export const auth = defineCommand({
@@ -37,16 +242,30 @@ export const auth = defineCommand({
       default: false,
       description: "Enable verbose logging",
     },
-    "show-token": {
+    host: {
+      type: "string",
+      description: "GitHub.com or a GitHub Enterprise Cloud *.ghe.com host",
+    },
+    "device-code": {
       type: "boolean",
       default: false,
-      description: "Show GitHub token on auth",
+      description: "Use the GitHub device code flow",
+    },
+    "web-flow": {
+      type: "boolean",
+      default: false,
+      description: "Use the browser OAuth flow with a loopback callback",
     },
   },
   run({ args }) {
+    if (args["device-code"] && args["web-flow"]) {
+      throw new Error("--device-code and --web-flow cannot be used together")
+    }
     return runAuth({
+      deviceCode: args["device-code"],
+      host: args.host,
       verbose: args.verbose,
-      showToken: args["show-token"],
+      webFlow: args["web-flow"],
     })
   },
 })

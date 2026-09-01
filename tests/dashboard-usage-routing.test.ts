@@ -27,6 +27,7 @@ const ACCOUNT_ID = 9201
 const account: Account = {
   accountType: "individual",
   copilotToken: SECRET_COPILOT_TOKEN,
+  githubInstanceDomain: "github.com",
   githubToken: SECRET_GITHUB_TOKEN,
   githubUsername: "octocat",
   healthy: true,

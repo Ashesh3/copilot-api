@@ -3,8 +3,15 @@ import { createHash, randomUUID } from "node:crypto"
 
 import type { Model, ModelsResponse } from "~/services/copilot/get-models"
 
-import { GITHUB_API_BASE_URL } from "~/lib/api-config"
+import { GITHUB_USER_AGENT } from "~/lib/api-config"
 import { HTTPError } from "~/lib/error"
+import {
+  DEFAULT_GITHUB_DOMAIN,
+  githubApiBaseUrl,
+  isGitHubEnterpriseCloud,
+  normalizeGitHubDomain,
+  resolveCopilotApiBaseUrl,
+} from "~/lib/github-instance"
 import {
   hasModelRoutingOverride,
   isModelEnabledForAccount,
@@ -12,6 +19,7 @@ import {
 import { state } from "~/lib/state"
 import { COPILOT_API_VERSION } from "~/services/copilot/copilot-contract"
 import { createCopilotTransportInit } from "~/services/copilot/transport-options"
+import { getCopilotUsage } from "~/services/github/get-copilot-usage"
 import { getGitHubUser } from "~/services/github/get-user"
 
 // --- Account ---
@@ -19,13 +27,21 @@ import { getGitHubUser } from "~/services/github/get-user"
 export interface Account {
   id: number
   githubToken: string
+  githubInstanceDomain: string
   githubUsername?: string
   copilotToken?: string
   copilotTokenExpiry?: number
+  copilotApiBaseUrl?: string
   models: Set<string>
   modelsData: Array<Model>
   accountType: string
   healthy: boolean
+}
+
+interface AddAccountOptions {
+  accountType: string
+  githubInstanceDomain?: string
+  id: number
 }
 
 type ModelsSnapshotListener = (models: ModelsResponse) => void
@@ -43,6 +59,9 @@ function hasModelId(value: unknown): value is Model {
 // --- Copilot Token Response ---
 
 interface CopilotTokenResponse {
+  endpoints?: {
+    api?: string
+  }
   expires_at: number
   refresh_in: number
   token: string
@@ -92,16 +111,30 @@ export class TokenPool {
   /**
    * Create and store a new Account.
    */
-  addAccount(githubToken: string, accountType: string, id: number): Account {
+  addAccount(
+    githubToken: string,
+    accountTypeOrOptions: string | AddAccountOptions,
+    id?: number,
+  ): Account {
+    const options: AddAccountOptions =
+      typeof accountTypeOrOptions === "string" ?
+        {
+          accountType: accountTypeOrOptions,
+          id: id ?? this.accounts.size,
+        }
+      : accountTypeOrOptions
     const account: Account = {
-      id,
+      id: options.id,
       githubToken,
-      accountType,
+      githubInstanceDomain: normalizeGitHubDomain(
+        options.githubInstanceDomain ?? DEFAULT_GITHUB_DOMAIN,
+      ),
+      accountType: options.accountType,
       models: new Set(),
       modelsData: [],
       healthy: false,
     }
-    this.accounts.set(id, account)
+    this.accounts.set(options.id, account)
     return account
   }
 
@@ -110,12 +143,34 @@ export class TokenPool {
    * and set up an auto-refresh timer.
    */
   async initializeAccount(account: Account, showToken = false): Promise<void> {
-    const tokenData = await this.fetchCopilotToken(account)
+    if (isGitHubEnterpriseCloud(account.githubInstanceDomain)) {
+      await this.initializeEnterpriseAccount(account)
+      return
+    }
 
+    const tokenData = this.validateCopilotTokenResponse(
+      await this.fetchCopilotToken(account),
+    )
+    const copilotApiBaseUrl = this.resolveCopilotApiBaseUrl(account, tokenData)
+
+    const modelsResponse = await this.fetchModels(
+      account,
+      copilotApiBaseUrl,
+      tokenData.token,
+    )
+    const modelsData = this.validateModelsResponse(modelsResponse)
+
+    // Commit only after both control-plane requests succeed.
     // eslint-disable-next-line require-atomic-updates
     account.copilotToken = tokenData.token
     // eslint-disable-next-line require-atomic-updates
     account.copilotTokenExpiry = tokenData.expires_at
+    // eslint-disable-next-line require-atomic-updates
+    account.copilotApiBaseUrl = copilotApiBaseUrl
+    // eslint-disable-next-line require-atomic-updates
+    account.modelsData = modelsData
+    // eslint-disable-next-line require-atomic-updates
+    account.models = new Set(modelsData.map((model) => model.id))
     // eslint-disable-next-line require-atomic-updates
     account.healthy = true
 
@@ -128,14 +183,6 @@ export class TokenPool {
     consola.debug(
       `Account #${account.id} Copilot token fetched (expires_at=${tokenData.expires_at})`,
     )
-
-    // Fetch models for this account
-    const baseUrl = this.getBaseUrl(account)
-    const modelsResponse = await this.fetchModels(account, baseUrl)
-    // eslint-disable-next-line require-atomic-updates
-    account.modelsData = modelsResponse.data
-    // eslint-disable-next-line require-atomic-updates
-    account.models = new Set(modelsResponse.data.map((m) => m.id))
 
     void this.resolveGitHubUsername(account)
 
@@ -158,11 +205,21 @@ export class TokenPool {
     account: Account,
     showToken = false,
   ): Promise<void> {
-    const tokenData = await this.fetchCopilotToken(account)
-    // eslint-disable-next-line require-atomic-updates
+    if (isGitHubEnterpriseCloud(account.githubInstanceDomain)) {
+      await this.reinitializeAccount(account, showToken)
+      return
+    }
+
+    const tokenData = this.validateCopilotTokenResponse(
+      await this.fetchCopilotToken(account),
+    )
+    const copilotApiBaseUrl = this.resolveCopilotApiBaseUrl(account, tokenData)
+
     account.copilotToken = tokenData.token
-    // eslint-disable-next-line require-atomic-updates
+
     account.copilotTokenExpiry = tokenData.expires_at
+
+    account.copilotApiBaseUrl = copilotApiBaseUrl
 
     if (showToken) {
       consola.info(
@@ -399,9 +456,11 @@ export class TokenPool {
    * Return the correct Copilot API base URL for an account's type.
    */
   getBaseUrl(account: Account): string {
-    return account.accountType === "individual" ?
-        "https://api.githubcopilot.com"
-      : `https://api.${account.accountType}.githubcopilot.com`
+    return resolveCopilotApiBaseUrl(
+      account.githubInstanceDomain,
+      account.copilotApiBaseUrl,
+      account.accountType,
+    )
   }
 
   /**
@@ -563,7 +622,10 @@ export class TokenPool {
 
   private async resolveGitHubUsername(account: Account): Promise<void> {
     try {
-      const user = await getGitHubUser(account.githubToken)
+      const user = await getGitHubUser(
+        account.githubToken,
+        account.githubInstanceDomain,
+      )
       // eslint-disable-next-line require-atomic-updates
       account.githubUsername = user.login
     } catch (error) {
@@ -583,12 +645,18 @@ export class TokenPool {
     account: Account,
     showToken: boolean,
   ): Promise<void> {
+    if (isGitHubEnterpriseCloud(account.githubInstanceDomain)) {
+      await this.initializeEnterpriseAccount(account, true)
+      return
+    }
+
     const tokenData = this.validateCopilotTokenResponse(
       await this.fetchCopilotToken(account),
     )
+    const copilotApiBaseUrl = this.resolveCopilotApiBaseUrl(account, tokenData)
     const modelsResponse = await this.fetchModels(
       account,
-      this.getBaseUrl(account),
+      copilotApiBaseUrl,
       tokenData.token,
     )
     const modelsData = this.validateModelsResponse(modelsResponse)
@@ -599,6 +667,8 @@ export class TokenPool {
     account.copilotToken = tokenData.token
     // eslint-disable-next-line require-atomic-updates
     account.copilotTokenExpiry = tokenData.expires_at
+    // eslint-disable-next-line require-atomic-updates
+    account.copilotApiBaseUrl = copilotApiBaseUrl
     // eslint-disable-next-line require-atomic-updates
     account.modelsData = modelsData
     // eslint-disable-next-line require-atomic-updates
@@ -642,6 +712,61 @@ export class TokenPool {
     return response as CopilotTokenResponse
   }
 
+  private resolveCopilotApiBaseUrl(
+    account: Account,
+    response: CopilotTokenResponse,
+  ): string {
+    return resolveCopilotApiBaseUrl(
+      account.githubInstanceDomain,
+      response.endpoints?.api,
+      account.accountType,
+    )
+  }
+
+  private async initializeEnterpriseAccount(
+    account: Account,
+    publishModels = false,
+  ): Promise<void> {
+    const copilotUser = await getCopilotUsage(
+      account.githubToken,
+      account.githubInstanceDomain,
+    )
+    const copilotApiBaseUrl = resolveCopilotApiBaseUrl(
+      account.githubInstanceDomain,
+      copilotUser.endpoints?.api,
+      "enterprise",
+    )
+    const modelsResponse = await this.fetchModels(
+      account,
+      copilotApiBaseUrl,
+      account.githubToken,
+    )
+    const modelsData = this.validateModelsResponse(modelsResponse)
+
+    // Commit only after both control-plane requests succeed.
+
+    account.copilotToken = account.githubToken
+
+    account.copilotTokenExpiry = undefined
+
+    account.copilotApiBaseUrl = copilotApiBaseUrl
+
+    account.modelsData = modelsData
+
+    account.models = new Set(modelsData.map((model) => model.id))
+
+    account.healthy = true
+
+    account.githubUsername = copilotUser.login ?? account.githubUsername
+
+    this.clearRefreshTimer(account.id)
+    this.rebuildModelIndex()
+    if (publishModels) this.onModelsChanged?.(this.getAllModels())
+    consola.info(
+      `Account #${account.id} (${account.accountType}): ${account.models.size} models available`,
+    )
+  }
+
   private validateModelsResponse(response: unknown): Array<Model> {
     if (
       typeof response !== "object"
@@ -661,12 +786,13 @@ export class TokenPool {
     account: Account,
   ): Promise<CopilotTokenResponse> {
     const response = await fetch(
-      `${GITHUB_API_BASE_URL}/copilot_internal/v2/token`,
+      `${githubApiBaseUrl(account.githubInstanceDomain)}/copilot_internal/v2/token`,
       {
         headers: {
           "content-type": "application/json",
           accept: "application/json",
           authorization: `token ${account.githubToken}`,
+          "user-agent": GITHUB_USER_AGENT,
         },
       },
     )
@@ -721,6 +847,7 @@ export class TokenPool {
       accept: "application/json",
       Authorization: `Bearer ${copilotToken}`,
       "Copilot-Integration-Id": state.copilotIntegrationId,
+      "Copilot-Harness-Id": "copilot-sdk",
       "editor-version": `vscode/${this.vsCodeVersion}`,
       "Openai-Intent": "conversation-agent",
       "X-GitHub-Api-Version": COPILOT_API_VERSION,
@@ -737,10 +864,7 @@ export class TokenPool {
     showToken: boolean,
   ): void {
     // Clear any existing timer for this account
-    const existing = this.refreshTimers.get(account.id)
-    if (existing) {
-      clearInterval(existing)
-    }
+    this.clearRefreshTimer(account.id)
 
     const timer = setInterval(() => {
       consola.debug(`Reinitializing account #${account.id}`)
@@ -754,6 +878,12 @@ export class TokenPool {
     }, intervalMs)
 
     this.refreshTimers.set(account.id, timer)
+  }
+
+  private clearRefreshTimer(accountId: number): void {
+    const existing = this.refreshTimers.get(accountId)
+    if (existing) clearInterval(existing)
+    this.refreshTimers.delete(accountId)
   }
 }
 

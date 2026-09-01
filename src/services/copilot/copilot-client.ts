@@ -9,6 +9,10 @@ import {
   mergeCopilotRequestAttribution,
 } from "~/lib/copilot-request-context"
 import {
+  isGitHubEnterpriseCloud,
+  resolveCopilotApiBaseUrl,
+} from "~/lib/github-instance"
+import {
   abortLlmDebugLog,
   failLlmDebugLog,
   finishLlmDebugLog,
@@ -91,9 +95,11 @@ export function setHttpRetrySleepForTest(sleep?: HttpRetrySleep): void {
 // --- Base URL ---
 
 export function copilotBaseUrl(): string {
-  return state.accountType === "individual" ?
-      "https://api.githubcopilot.com"
-    : `https://api.${state.accountType}.githubcopilot.com`
+  return resolveCopilotApiBaseUrl(
+    state.githubInstanceDomain,
+    state.copilotApiBaseUrl,
+    state.accountType,
+  )
 }
 
 // --- Headers ---
@@ -189,6 +195,7 @@ export function copilotHeaders(
     Authorization: `Bearer ${token}`,
     "User-Agent": "copilot-api",
     "Copilot-Integration-Id": state.copilotIntegrationId,
+    "Copilot-Harness-Id": "copilot-sdk",
     "editor-version": `vscode/${state.vsCodeVersion ?? "1.104.3"}`,
     "Openai-Intent": attribution.openaiIntent ?? "conversation-agent",
     "X-GitHub-Api-Version": COPILOT_API_VERSION,
@@ -419,7 +426,10 @@ function setAuthorizationHeader(
 
 function canRefreshSingleToken401(response: Response): boolean {
   return (
-    response.status === 401 && !state.isMultiToken && Boolean(state.githubToken)
+    response.status === 401
+    && !state.isMultiToken
+    && !isGitHubEnterpriseCloud(state.githubInstanceDomain)
+    && Boolean(state.githubToken)
   )
 }
 
@@ -556,6 +566,13 @@ async function refreshTokenForRetry(
   consola.warn(`HTTP 401 on ${path}, refreshing Copilot token`)
   const tokenData = await getCopilotToken()
   setCurrentCopilotToken(tokenData.token)
+  if (tokenData.endpoints?.api) {
+    state.copilotApiBaseUrl = resolveCopilotApiBaseUrl(
+      state.githubInstanceDomain,
+      tokenData.endpoints.api,
+      state.accountType,
+    )
+  }
 
   return {
     ...requestInit,
@@ -734,7 +751,6 @@ export async function copilotFetch(
     telemetry?: CopilotTelemetryOptions
   },
 ): Promise<Response> {
-  const url = `${fetchOptions?.baseUrl ?? copilotBaseUrl()}${path}`
   const budget = fetchOptions?.retryBudget ?? createRetryBudget()
   const maxHttpRetryDelaySeconds =
     fetchOptions?.maxHttpRetryDelaySeconds ?? MAX_DELAY_SECONDS
@@ -757,6 +773,7 @@ export async function copilotFetch(
     let debugLogId: string | undefined
     const attemptStartedAtMs = Date.now()
     chain.attempt = attempt
+    const url = `${fetchOptions?.baseUrl ?? copilotBaseUrl()}${path}`
 
     try {
       const headers = toHeaderRecord(requestInit?.headers)

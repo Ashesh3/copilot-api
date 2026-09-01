@@ -8,10 +8,15 @@ import invariant from "tiny-invariant"
 import { resolveApiKeyAuth } from "~/lib/api-key-auth-config"
 
 import packageJson from "../package.json" with { type: "json" }
-import { getStoredTokens } from "./lib/accounts-store"
+import { getStoredCredentials } from "./lib/accounts-store"
 import { initializeAdminAuth } from "./lib/admin-auth"
 import { mergeConfigWithDefaults } from "./lib/config"
 import { resolveRequestCredential } from "./lib/credential-resolver"
+import {
+  type GitHubCredential,
+  parseGitHubCredential,
+  parseGitHubCredentials,
+} from "./lib/github-instance"
 import { ensureModelRoutingOverridesLoaded } from "./lib/model-routing"
 import { ensureModelSettingsLoaded } from "./lib/model-settings"
 import { generateVirtualModels } from "./lib/model-suffix"
@@ -125,33 +130,36 @@ async function initializeMultiToken(
   options: RunServerOptions,
 ): Promise<boolean> {
   // Collect tokens: env var takes priority, then stored file
-  let tokens: Array<string> = []
+  let credentials: Array<GitHubCredential> = []
   const githubTokensEnv = process.env.GITHUB_TOKENS
   if (githubTokensEnv) {
-    tokens = githubTokensEnv
-      .split(",")
-      .map((t) => t.trim())
-      .filter((t) => t.length > 0)
+    credentials = parseGitHubCredentials(githubTokensEnv)
   }
 
-  if (tokens.length === 0) {
-    tokens = await getStoredTokens()
+  if (credentials.length === 0) {
+    credentials = await getStoredCredentials()
   } else {
     // Env vars supplied tokens — never touch token files in this process
     setEnvOnlyTokens(true)
   }
 
   // Need at least 2 tokens for multi-token mode
-  if (tokens.length < 2) return false
+  if (credentials.length < 2) return false
 
   state.isMultiToken = true
-  consola.info(`Multi-token mode: ${tokens.length} GitHub tokens configured`)
+  consola.info(
+    `Multi-token mode: ${credentials.length} GitHub tokens configured`,
+  )
 
   tokenPool.setSessionId(state.sessionId)
 
   // Add all accounts
-  const accounts = tokens.map((token, i) =>
-    tokenPool.addAccount(token, options.accountType, i),
+  const accounts = credentials.map((credential, i) =>
+    tokenPool.addAccount(credential.token, {
+      accountType: options.accountType,
+      githubInstanceDomain: credential.instanceDomain,
+      id: i,
+    }),
   )
 
   // Initialize each account, log warnings on failure
@@ -181,7 +189,9 @@ async function initializeMultiToken(
   // Backwards compatibility: set state tokens to first healthy account
   const firstHealthy = healthyAccounts[0]
   state.copilotToken = firstHealthy.copilotToken
+  state.copilotApiBaseUrl = firstHealthy.copilotApiBaseUrl
   state.githubToken = firstHealthy.githubToken
+  state.githubInstanceDomain = firstHealthy.githubInstanceDomain
 
   // Cache VS Code version and pass to token pool
   await cacheVSCodeVersion()
@@ -200,15 +210,20 @@ async function initializeTokens(options: RunServerOptions): Promise<void> {
   if (multiTokenActive) return
 
   // Check if GITHUB_TOKENS has exactly 1 token — use it directly
-  const envTokens = process.env.GITHUB_TOKENS?.split(",")
-    .map((t) => t.trim())
-    .filter((t) => t.length > 0)
-  if (envTokens && envTokens.length === 1) {
-    state.githubToken = envTokens[0]
+  const envCredentials =
+    process.env.GITHUB_TOKENS ?
+      parseGitHubCredentials(process.env.GITHUB_TOKENS)
+    : undefined
+  if (envCredentials && envCredentials.length === 1) {
+    const [credential] = envCredentials
+    state.githubToken = credential.token
+    state.githubInstanceDomain = credential.instanceDomain
     setEnvOnlyTokens(true)
     consola.info("Using GitHub token from GITHUB_TOKENS")
   } else if (options.githubToken) {
-    state.githubToken = options.githubToken
+    const credential = parseGitHubCredential(options.githubToken)
+    state.githubToken = credential.token
+    state.githubInstanceDomain = credential.instanceDomain
     setEnvOnlyTokens(true)
     consola.info("Using provided GitHub token")
   } else {
@@ -580,7 +595,7 @@ export const start = defineCommand({
       alias: "g",
       type: "string",
       description:
-        "Provide GitHub token directly (must be generated using the `auth` subcommand)",
+        "Provide instance_domain:token or a bare GitHub.com token directly",
     },
     "claude-code": {
       alias: "c",

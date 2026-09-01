@@ -1,20 +1,28 @@
 import {
   GITHUB_APP_SCOPES,
-  GITHUB_BASE_URL,
   GITHUB_CLIENT_ID,
   standardHeaders,
 } from "~/lib/api-config"
 import { HTTPError } from "~/lib/error"
+import { DEFAULT_GITHUB_DOMAIN, githubBaseUrl } from "~/lib/github-instance"
 
-export async function getDeviceCode(): Promise<DeviceCodeResponse> {
-  const response = await fetch(`${GITHUB_BASE_URL}/login/device/code`, {
-    method: "POST",
-    headers: standardHeaders(),
-    body: JSON.stringify({
-      client_id: GITHUB_CLIENT_ID,
-      scope: GITHUB_APP_SCOPES,
-    }),
-  })
+export async function getDeviceCode(
+  instanceDomain = DEFAULT_GITHUB_DOMAIN,
+): Promise<DeviceCodeResponse> {
+  const response = await fetch(
+    `${githubBaseUrl(instanceDomain)}/login/device/code`,
+    {
+      method: "POST",
+      headers: {
+        ...standardHeaders(),
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        client_id: GITHUB_CLIENT_ID,
+        scope: GITHUB_APP_SCOPES.replaceAll(" ", ","),
+      }),
+    },
+  )
 
   if (!response.ok) throw new HTTPError("Failed to get device code", response)
 

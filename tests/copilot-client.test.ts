@@ -45,6 +45,16 @@ import {
 } from "../src/services/copilot/transport-retry"
 
 const originalFetch = globalThis.fetch
+const originalState = {
+  accountType: state.accountType,
+  copilotApiBaseUrl: state.copilotApiBaseUrl,
+  copilotIntegrationId: state.copilotIntegrationId,
+  copilotToken: state.copilotToken,
+  githubInstanceDomain: state.githubInstanceDomain,
+  githubToken: state.githubToken,
+  isMultiToken: state.isMultiToken,
+  sessionId: state.sessionId,
+}
 const queuedResults: Array<Error | QueuedThrow | Response> = []
 const capturedRequests: Array<{ url: string; init?: RequestInit }> = []
 const transportEvents: Array<{
@@ -135,6 +145,7 @@ afterAll(() => {
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
   setTransportEventSinkForTest()
   setHttpRetrySleepForTest()
+  Object.assign(state, originalState)
 })
 
 beforeEach(() => {
@@ -150,8 +161,10 @@ beforeEach(() => {
   clearLlmDebugLogs()
   resetRoutingTelemetryForTest()
   state.accountType = "individual"
+  state.githubInstanceDomain = "github.com"
   state.githubToken = "github-token"
   state.copilotToken = "expired-copilot-token"
+  state.copilotApiBaseUrl = undefined
   state.copilotIntegrationId = DEFAULT_COPILOT_INTEGRATION_ID
   state.isMultiToken = false
 })
@@ -165,11 +178,24 @@ test.each([
   expect(copilotBaseUrl()).toBe(expected)
 })
 
+test("uses the enterprise data-residency Copilot host", () => {
+  state.githubInstanceDomain = "msft.ghe.com"
+  state.accountType = "enterprise"
+  expect(copilotBaseUrl()).toBe("https://copilot-api.msft.ghe.com")
+})
+
+test("uses the endpoint discovered during Copilot token exchange", () => {
+  state.githubInstanceDomain = "github.ghe.com"
+  state.copilotApiBaseUrl = "https://copilot-api.github.ghe.com"
+  expect(copilotBaseUrl()).toBe("https://copilot-api.github.ghe.com")
+})
+
 test("uses one current API version and the configured integration id", () => {
   state.copilotIntegrationId = "assigned-integration"
   const headers = copilotHeaders()
   expect(headers["X-GitHub-Api-Version"]).toBe("2026-08-01")
   expect(headers["Copilot-Integration-Id"]).toBe("assigned-integration")
+  expect(headers["Copilot-Harness-Id"]).toBe("copilot-sdk")
 })
 
 test("refreshes the single-token copilot token and retries the request after a 401", async () => {
@@ -204,6 +230,52 @@ test("refreshes the single-token copilot token and retries the request after a 4
   expect(capturedRequests[2]?.init?.headers).toMatchObject({
     Authorization: "Bearer fresh-copilot-token",
   })
+})
+
+test("does not run the legacy token exchange after an enterprise OAuth 401", async () => {
+  state.githubInstanceDomain = "msft.ghe.com"
+  state.accountType = "enterprise"
+  state.copilotApiBaseUrl = "https://copilot-api.msft.ghe.com"
+  queuedResults.push(new Response("Unauthorized", { status: 401 }))
+
+  const response = await copilotFetch("/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: "Bearer expired-copilot-token",
+      "content-type": "application/json",
+    },
+  })
+
+  expect(response.status).toBe(401)
+  expect(capturedRequests.map(({ url }) => url)).toEqual([
+    "https://copilot-api.msft.ghe.com/chat/completions",
+  ])
+})
+
+test("moves a single-token retry to the newly discovered Copilot host", async () => {
+  state.copilotApiBaseUrl = "https://api.githubcopilot.com"
+  queuedResults.push(
+    new Response("Unauthorized", { status: 401 }),
+    Response.json({
+      endpoints: { api: "https://api.enterprise.githubcopilot.com" },
+      token: "fresh-rerouted-copilot-token",
+      expires_at: 1_900_000_000,
+      refresh_in: 1800,
+    }),
+    new Response("{}", { status: 200 }),
+  )
+
+  const response = await copilotFetch("/responses", {
+    method: "POST",
+    headers: { Authorization: "Bearer expired-copilot-token" },
+  })
+
+  expect(response.status).toBe(200)
+  expect(capturedRequests.map(({ url }) => url)).toEqual([
+    "https://api.githubcopilot.com/responses",
+    "https://api.github.com/copilot_internal/v2/token",
+    "https://api.enterprise.githubcopilot.com/responses",
+  ])
 })
 
 test("retries transient 408 and 504 upstream responses", async () => {

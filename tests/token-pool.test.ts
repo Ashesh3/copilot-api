@@ -218,6 +218,44 @@ test("keeps a 60-second minimum refresh interval", () => {
   expect(tokenPoolModule.getTokenRefreshIntervalMs(100)).toBe(60_000)
 })
 
+test("uses the enterprise OAuth token directly for tenant model discovery", async () => {
+  const pool = new tokenPoolModule.TokenPool()
+  pools.add(pool)
+  const account = pool.addAccount("enterprise-github-token", {
+    accountType: "enterprise",
+    githubInstanceDomain: "msft.ghe.com",
+    id: 810,
+  })
+  queuedResults.push(
+    Response.json({
+      login: "enterprise-user",
+      endpoints: { api: "https://copilot-api.msft.ghe.com" },
+    }),
+    modelsResponse([createModel(MODEL_A)]),
+  )
+
+  await pool.initializeAccount(account)
+
+  expect(capturedRequests[0]?.url).toBe(
+    "https://api.msft.ghe.com/copilot_internal/user",
+  )
+  expect(capturedRequests[0]?.init?.headers).toMatchObject({
+    authorization: "Bearer enterprise-github-token",
+  })
+  expect(capturedRequests[1]?.url).toBe(
+    "https://copilot-api.msft.ghe.com/models",
+  )
+  expect(capturedRequests[1]?.init?.headers).toMatchObject({
+    Authorization: "Bearer enterprise-github-token",
+    "Copilot-Harness-Id": "copilot-sdk",
+  })
+  expect(capturedRequests).toHaveLength(2)
+  expect(account.copilotToken).toBe("enterprise-github-token")
+  expect(account.copilotTokenExpiry).toBeUndefined()
+  expect(account.githubUsername).toBe("enterprise-user")
+  expect(pool.getBaseUrl(account)).toBe("https://copilot-api.msft.ghe.com")
+})
+
 test("uses the current Copilot contract for multi-token model discovery", async () => {
   const pool = new tokenPoolModule.TokenPool()
   pools.add(pool)

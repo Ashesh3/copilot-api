@@ -47,7 +47,11 @@ import {
 const originalFetch = globalThis.fetch
 const originalCustomApiKey = process.env.CUSTOM_PROVIDER_API_KEY
 const originalModels = state.models
+const originalAccountType = state.accountType
+const originalGitHubToken = state.githubToken
+const originalGitHubInstanceDomain = state.githubInstanceDomain
 const originalCopilotToken = state.copilotToken
+const originalCopilotApiBaseUrl = state.copilotApiBaseUrl
 const originalApiKeyAuth = state.apiKeyAuth
 const originalIsMultiToken = state.isMultiToken
 const customFastCollisionAccountId = 24_001
@@ -206,7 +210,11 @@ afterAll(() => {
   restoreEnv("CUSTOM_PROVIDER_API_KEY", originalCustomApiKey)
   setConfigForTest(null)
   state.models = originalModels
+  state.accountType = originalAccountType
+  state.githubToken = originalGitHubToken
+  state.githubInstanceDomain = originalGitHubInstanceDomain
   state.copilotToken = originalCopilotToken
+  state.copilotApiBaseUrl = originalCopilotApiBaseUrl
   state.apiKeyAuth = originalApiKeyAuth
   state.isMultiToken = originalIsMultiToken
   resetTestAdminSession()
@@ -220,7 +228,11 @@ beforeEach(() => {
   resetWebSearchSessionsForTest()
   process.env.CUSTOM_PROVIDER_API_KEY = "custom-key"
   state.models = models
+  state.accountType = "individual"
+  state.githubToken = undefined
+  state.githubInstanceDomain = "github.com"
   state.copilotToken = "copilot-token"
+  state.copilotApiBaseUrl = undefined
   state.apiKeyAuth = undefined
   state.isMultiToken = false
   resetRoutingTelemetryForTest()

@@ -28,6 +28,7 @@ const accounts: Array<Account> = [
   {
     id: ACCOUNT_ID,
     accountType: "individual",
+    githubInstanceDomain: "github.com",
     githubToken: GITHUB_TOKEN,
     githubUsername: "octocat",
     healthy: true,
@@ -37,6 +38,7 @@ const accounts: Array<Account> = [
   {
     id: ACCOUNT_WITHOUT_USERNAME_ID,
     accountType: "business",
+    githubInstanceDomain: "github.com",
     githubToken: GITHUB_TOKEN_WITHOUT_USERNAME,
     healthy: false,
     models: new Set(),

@@ -4,9 +4,13 @@ import type { ModelsResponse } from "~/services/copilot/get-models"
 
 import { DEFAULT_COPILOT_INTEGRATION_ID } from "~/services/copilot/copilot-contract"
 
+import { DEFAULT_GITHUB_DOMAIN } from "./github-instance"
+
 export interface State {
   githubToken?: string
+  githubInstanceDomain: string
   copilotToken?: string
+  copilotApiBaseUrl?: string
 
   accountType: string
   copilotIntegrationId: string
@@ -25,6 +29,7 @@ export interface State {
 }
 
 export const state: State = {
+  githubInstanceDomain: DEFAULT_GITHUB_DOMAIN,
   accountType: "individual",
   copilotIntegrationId: DEFAULT_COPILOT_INTEGRATION_ID,
   sessionId: randomUUID(),
