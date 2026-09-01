@@ -6,7 +6,7 @@ import {
   addAccount as storeAddAccount,
   removeAccount as storeRemoveAccount,
 } from "~/lib/accounts-store"
-import { GITHUB_API_BASE_URL } from "~/lib/api-config"
+import { GITHUB_USER_AGENT } from "~/lib/api-config"
 import {
   addReplacement,
   applyReplacements,
@@ -24,6 +24,12 @@ import {
   removeCustomProvider,
   upsertCustomProvider,
 } from "~/lib/custom-providers"
+import {
+  DEFAULT_GITHUB_DOMAIN,
+  githubApiBaseUrl,
+  isGitHubEnterpriseCloud,
+  normalizeGitHubDomain,
+} from "~/lib/github-instance"
 import { ensurePaths, PATHS } from "~/lib/paths"
 import { tokenPool } from "~/lib/token-pool"
 import { getDeviceCode } from "~/services/github/get-device-code"
@@ -372,7 +378,9 @@ async function listAccounts(): Promise<void> {
   consola.info(`\n👤 Stored accounts (${stored.length}):\n`)
   for (const [i, account] of stored.entries()) {
     const label = account.label ? ` (${account.label})` : ""
-    console.log(`  ${i + 1}. ${maskToken(account.token)}${label}`)
+    const instance =
+      account.instanceDomain ? ` [${account.instanceDomain}]` : ""
+    console.log(`  ${i + 1}. ${maskToken(account.token)}${instance}${label}`)
   }
   console.log()
 }
@@ -404,6 +412,7 @@ async function showAccountDetails(): Promise<void> {
 
     consola.info(`\n🔍 Account #${account.id}`)
     consola.info(`  Token: ${maskToken(account.githubToken)}`)
+    consola.info(`  GitHub instance: ${account.githubInstanceDomain}`)
     consola.info(`  Type: ${account.accountType}`)
     consola.info(`  Status: ${account.healthy ? "✓ healthy" : "✗ unhealthy"}`)
     consola.info(`  Models (${account.models.size}):`)
@@ -424,7 +433,7 @@ async function showAccountDetails(): Promise<void> {
   const options = stored.map((account, i) => {
     const label = account.label ? ` (${account.label})` : ""
     return {
-      label: `${i + 1}. ${maskToken(account.token)}${label}`,
+      label: `${i + 1}. ${maskToken(account.token)}${account.instanceDomain ? ` [${account.instanceDomain}]` : ""}${label}`,
       value: String(i),
     }
   })
@@ -438,6 +447,9 @@ async function showAccountDetails(): Promise<void> {
 
   consola.info(`\n🔍 Account #${Number(selected) + 1}`)
   consola.info(`  Token: ${maskToken(account.token)}`)
+  consola.info(
+    `  GitHub instance: ${account.instanceDomain ?? DEFAULT_GITHUB_DOMAIN}`,
+  )
   if (account.label) consola.info(`  Label: ${account.label}`)
   consola.info("  (Start the server to see models and health status)")
   console.log()
@@ -461,9 +473,11 @@ async function addAccountMenu(): Promise<void> {
   }
 
   let token: string
+  const instanceDomain = await promptGitHubInstanceDomain()
+  if (!instanceDomain) return
 
   if (method === "device-code") {
-    const result = await loginViaDeviceCode()
+    const result = await loginViaDeviceCode(instanceDomain)
     if (!result) return
     token = result
   } else {
@@ -482,13 +496,17 @@ async function addAccountMenu(): Promise<void> {
   consola.start("Validating token with Copilot API...")
 
   try {
+    const isEnterprise = isGitHubEnterpriseCloud(instanceDomain)
+    const endpoint =
+      isEnterprise ? "/copilot_internal/user" : "/copilot_internal/v2/token"
     const response = await fetch(
-      `${GITHUB_API_BASE_URL}/copilot_internal/v2/token`,
+      `${githubApiBaseUrl(instanceDomain)}${endpoint}`,
       {
         headers: {
           "content-type": "application/json",
           accept: "application/json",
-          authorization: `token ${token}`,
+          authorization: `${isEnterprise ? "Bearer" : "token"} ${token}`,
+          "user-agent": GITHUB_USER_AGENT,
         },
       },
     )
@@ -518,21 +536,53 @@ async function addAccountMenu(): Promise<void> {
     typeof label === "symbol" || !label ? undefined : label.trim() || undefined
 
   // Save to store
-  const accounts = await storeAddAccount(token, labelValue)
+  const accounts = await storeAddAccount(token, labelValue, instanceDomain)
   consola.success(`Account saved! (${accounts.length} total)`)
 }
 
-async function loginViaDeviceCode(): Promise<string | undefined> {
+async function promptGitHubInstanceDomain(): Promise<string | undefined> {
+  const target = await consola.prompt(
+    "Which GitHub instance is this account on?",
+    {
+      type: "select",
+      options: [
+        { label: "GitHub.com", value: "github.com" },
+        {
+          label: "GitHub Enterprise Cloud (*.ghe.com)",
+          value: "enterprise",
+        },
+      ],
+    },
+  )
+  if (typeof target === "symbol") return undefined
+  if (target === "github.com") return DEFAULT_GITHUB_DOMAIN
+
+  const host = await consola.prompt("Enter the GitHub Enterprise domain:", {
+    type: "text",
+    placeholder: "msft.ghe.com",
+  })
+  if (typeof host === "symbol" || !host) return undefined
+  try {
+    return normalizeGitHubDomain(host)
+  } catch (error) {
+    consola.error(error instanceof Error ? error.message : String(error))
+    return undefined
+  }
+}
+
+async function loginViaDeviceCode(
+  instanceDomain: string,
+): Promise<string | undefined> {
   try {
     consola.start("Requesting device code from GitHub...")
-    const deviceCode = await getDeviceCode()
+    const deviceCode = await getDeviceCode(instanceDomain)
 
     consola.box(
       `Open ${deviceCode.verification_uri}\nand enter code: ${deviceCode.user_code}`,
     )
 
     consola.start("Waiting for authorization...")
-    const token = await pollAccessToken(deviceCode)
+    const token = await pollAccessToken(deviceCode, instanceDomain)
 
     consola.success("Login successful!")
     return token
@@ -552,7 +602,7 @@ async function removeAccountMenu(): Promise<void> {
   const options = stored.map((account, i) => {
     const label = account.label ? ` (${account.label})` : ""
     return {
-      label: `${i + 1}. ${maskToken(account.token)}${label}`,
+      label: `${i + 1}. ${maskToken(account.token)}${account.instanceDomain ? ` [${account.instanceDomain}]` : ""}${label}`,
       value: String(i),
     }
   })
@@ -570,9 +620,10 @@ async function removeAccountMenu(): Promise<void> {
   const index = Number(selected)
   const account = stored[index]
   const label = account.label ? ` (${account.label})` : ""
+  const instance = account.instanceDomain ? ` [${account.instanceDomain}]` : ""
 
   const confirm = await consola.prompt(
-    `Remove account ${maskToken(account.token)}${label}?`,
+    `Remove account ${maskToken(account.token)}${instance}${label}?`,
     { type: "confirm", initial: false },
   )
 

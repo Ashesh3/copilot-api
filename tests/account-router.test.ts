@@ -173,6 +173,24 @@ function registerAccount(
   account.healthy = true
 }
 
+function registerEnterpriseAccount(
+  id: number,
+  modelId: string,
+  instanceDomain: string,
+): void {
+  const githubToken = `enterprise-token-${id}`
+  const account = tokenPool.addAccount(githubToken, {
+    accountType: "enterprise",
+    githubInstanceDomain: instanceDomain,
+    id,
+  })
+  account.copilotToken = githubToken
+  account.copilotApiBaseUrl = `https://copilot-api.${instanceDomain}`
+  account.models = new Set([modelId])
+  account.modelsData = [createModel(modelId)]
+  account.healthy = true
+}
+
 function findKeyForAccount(modelId: string, accountId: number): string {
   const key = Array.from(
     { length: 1000 },
@@ -794,6 +812,42 @@ test("fails over to the next account immediately after a multi-token 401", async
   expect(capturedRequests[4]?.init?.headers).toMatchObject({
     Authorization: "Bearer secondary-copilot-token",
   })
+})
+
+test("reinitializes an enterprise account once and preserves its instance after a persistent 401", async () => {
+  const modelId = "enterprise-401-preserves-instance"
+  registerEnterpriseAccount(1003, modelId, "msft.ghe.com")
+  registerEnterpriseAccount(1004, modelId, "github.ghe.com")
+  tokenPool.rebuildModelIndex()
+
+  queuedResults.push(
+    new Response("Unauthorized", { status: 401 }),
+    Response.json({
+      endpoints: { api: "https://copilot-api.msft.ghe.com" },
+      login: "enterprise-user",
+    }),
+    modelsResponse([modelId]),
+    new Response("Unauthorized", { status: 401 }),
+  )
+
+  const { response, account } = await routedFetch(
+    "/chat/completions",
+    { method: "POST" },
+    { modelId },
+  )
+
+  expect(response.status).toBe(401)
+  expect(account?.id).toBe(1003)
+  expect(capturedRequests.map(({ url }) => url)).toEqual([
+    "https://copilot-api.msft.ghe.com/chat/completions",
+    "https://api.msft.ghe.com/copilot_internal/user",
+    "https://copilot-api.msft.ghe.com/models",
+    "https://copilot-api.msft.ghe.com/chat/completions",
+  ])
+  expect(llmAuthorizationHeaders()).toEqual([
+    "Bearer enterprise-token-1003",
+    "Bearer enterprise-token-1003",
+  ])
 })
 
 test("records final response metadata once after a 403 account failover", async () => {

@@ -159,7 +159,9 @@ bunx --bun @ashsec/copilot-api@latest start --host 127.0.0.1 --api-key-auth
 ```
 
 On the first run, follow the GitHub device-authentication prompt. The resulting
-token and configuration are stored under the application data directory.
+token and configuration are stored under the application data directory. To
+generate a reusable environment entry for GitHub.com or GitHub Enterprise Cloud
+without storing it, run `copilot-api auth`.
 
 List the models available to that account:
 
@@ -262,9 +264,10 @@ currently translated.
 
 Copilot API separates these credential boundaries:
 
-1. **GitHub credentials** authenticate the server to GitHub Copilot. Obtain one
-   through device authentication, `auth`, `--github-token`, stored accounts, or
-   `GITHUB_TOKENS`.
+1. **GitHub credentials** authenticate the server to GitHub Copilot. Generate a
+   reusable entry with `auth`, supply one through `--github-token` or
+   `GITHUB_TOKENS`, manage stored accounts with `config`, or let `start` run its
+   legacy first-use GitHub.com device flow.
 2. **Gateway credentials** authenticate trusted data-plane clients and bootstrap
    OAuth and the administrator account. `COPILOT_API_KEY_AUTH` is the gateway
    key and sole environment-based gateway credential. Direct usage requires
@@ -447,25 +450,31 @@ Configure accounts interactively:
 bunx --bun @ashsec/copilot-api@latest config
 ```
 
-Or provide comma-separated tokens without writing token files:
+Or provide comma-separated tokens without writing token files. Prefix an
+enterprise token with its bare `*.ghe.com` instance domain; bare tokens default
+to GitHub.com:
 
 ```dotenv
-GITHUB_TOKENS=first-github-token,second-github-token
+GITHUB_TOKENS=msft.ghe.com:first-enterprise-token,github.ghe.com:second-enterprise-token,public-github-token
 ```
 
-At startup, each account exchanges its GitHub token, fetches its available
-models, and contributes healthy models to a shared eligibility index. Dashboard
-model-routing overrides can disable a model on a specific account.
+At startup, GitHub.com accounts exchange their GitHub token for a short-lived
+Copilot token, while GHE Cloud accounts use their OAuth token directly. Each
+account resolves its Copilot endpoint, fetches its available models, and
+contributes healthy models to a shared eligibility index. Dashboard model-
+routing overrides can disable a model on a specific account.
 
 Requests carrying `X-Claude-Code-Session-Id` select an eligible account
 deterministically so a session stays on the same account. Without that header,
 the first eligible account is used. On `401`, the selected account is refreshed
 and retried. After a remaining `401`, `403`, `429`, or a network error, the
-router attempts at most one eligible alternative account; `401` and `403` mark
-the failed account unhealthy, while `429` does not. A known model disabled for
-every account returns a local `403`; an unknown model falls back to the first
-healthy account. Multi-account mode is for availability, model coverage, and
-session affinity, not unrestricted load balancing.
+router attempts at most one eligible alternative account on the same GitHub
+instance; GHE Cloud authentication rejections stay on that instance instead of
+crossing tenant boundaries. Accounts that fail startup validation are marked
+unhealthy, while a runtime `429` does not change account health. A known model
+disabled for every account returns a local `403`; an unknown model falls back to
+the first healthy account. Multi-account mode is for availability, model
+coverage, and session affinity, not unrestricted load balancing.
 
 ## Operator dashboard
 
@@ -628,7 +637,7 @@ request pacing, body caps, or proxy timeouts.
 
 | Command | Purpose |
 | --- | --- |
-| `auth` | Run GitHub device authentication without starting the server |
+| `auth` | Acquire and print a reusable GitHub.com or GHE Cloud token entry without starting the server |
 | `start` | Authenticate if needed and start the gateway |
 | `admin` | Reset local administrator auth or generate an environment verifier |
 | `check-usage` | Print current GitHub Copilot quota information |
@@ -646,9 +655,9 @@ Run a command with `--help` to inspect the installed version's current options.
 | `--verbose` | `-v` | off | Enable verbose logging |
 | `--account-type <type>` | `-a` | `individual` | `individual`, `business`, or `enterprise` Copilot routing |
 | `--manual` |  | off | Prompt before forwarding Chat Completions, Messages, Responses HTTP, and Google requests |
-| `--github-token <token>` | `-g` | unset | Use an existing GitHub token for this process |
+| `--github-token <entry>` | `-g` | unset | Use one `instance_domain:token` entry or a bare GitHub.com token for this process |
 | `--claude-code` | `-c` | off | Generate a Claude Code launch command from the current model list |
-| `--show-token` |  | off | Print full GitHub and Copilot tokens; sensitive troubleshooting only |
+| `--show-token` |  | off | Print full GitHub and Copilot credentials; for GHE Cloud these are the same OAuth secret; sensitive troubleshooting only |
 | `--proxy-env` |  | off | Reserved proxy initializer; currently ineffective because the supported Bun server path skips it |
 | `--insecure` |  | off | Disable TLS certificate verification; unsafe outside controlled debugging |
 | `--debug` | `-d` | off | Log raw incoming URLs, headers, and most top-level JSON fields; sensitive troubleshooting only |
@@ -659,7 +668,9 @@ Run a command with `--help` to inspect the installed version's current options.
 | Command | Option | Description |
 | --- | --- | --- |
 | `auth` | `--verbose`, `-v` | Enable verbose authentication logs |
-| `auth` | `--show-token` | Print the full GitHub token after authentication |
+| `auth` | `--host <host>` | Skip the account picker and authenticate with GitHub.com or a `*.ghe.com` host |
+| `auth` | `--device-code` | Use the device-code flow |
+| `auth` | `--web-flow` | Use browser OAuth with a loopback callback |
 | `admin` | `--reset` | Interactively remove local admin auth and revoke every dashboard session |
 | `admin` | `--hash-password` | Prompt twice with hidden input and print an Argon2id verifier for `COPILOT_ADMIN_PASSWORD_HASH` |
 | `debug` | `--json` | Emit diagnostic information as JSON |
@@ -672,7 +683,7 @@ The default data directory is `~/.local/share/copilot-api`. Override it with
 | File | Contents |
 | --- | --- |
 | `github_token` | Legacy/single GitHub token storage |
-| `github_tokens.json` | Stored GitHub accounts and optional labels |
+| `github_tokens.json` | Stored GitHub accounts, instance domains, and optional labels |
 | `config.json` | Gateway keys, custom providers, prompt/model defaults, voice settings |
 | `replacements.json` | Request replacement rules |
 | `model_redirects.json` | Ordered model redirect rules |
@@ -695,8 +706,8 @@ files.
 
 | Variable | Scope | Purpose |
 | --- | --- | --- |
-| `GITHUB_TOKENS` | Direct and Docker | Comma-separated GitHub tokens; two or more enable multi-account mode |
-| `COPILOT_INTEGRATION_ID` | Direct and Docker | Copilot integration identifier; defaults to `vscode-chat` for backwards-compatible entitlement behavior. Use an assigned integration ID when available; do not copy a first-party client ID merely to imitate that client. |
+| `GITHUB_TOKENS` | Direct and Docker | Comma-separated `instance_domain:token` or bare GitHub.com tokens; two or more enable multi-account mode |
+| `COPILOT_INTEGRATION_ID` | Direct and Docker | Copilot integration identifier; defaults to `copilot-sdk`, matching the current Copilot SDK client contract. Use an assigned integration ID when available; do not copy a first-party client ID merely to imitate that client. |
 | `DATA_DIR` | Direct and Docker | Override the persistent data directory |
 | `COPILOT_API_KEY_AUTH` | Direct and Docker | Gateway key and sole environment-based gateway credential; direct usage also requires the `--api-key-auth` flag without a value |
 | `COPILOT_INFERENCE_CREDENTIAL_SHA256S` | Direct and Docker | Optional comma-separated SHA-256 hex digests of trimmed client-held inference secrets; matching credentials receive only `user:inference` scope and digest text is rejected |
@@ -734,11 +745,12 @@ the `start` command; do not append `start` to normal `docker run` arguments.
 
 ```sh
 docker build -t copilot-api .
-docker volume create copilot-api-data
-docker run --rm -it -v copilot-api-data:/app/data copilot-api --auth
+docker run --rm -it copilot-api --auth
 ```
 
 `--auth` is an image-entrypoint shortcut and must be the first image argument.
+It prints a reusable token entry but does not persist it. Add the printed value
+to `GITHUB_TOKENS` in the environment file used to start the service.
 
 ### Start a protected container
 
@@ -747,6 +759,7 @@ Create an environment file outside the repository/build context, for example
 
 ```dotenv
 COPILOT_HOST=0.0.0.0
+GITHUB_TOKENS=msft.ghe.com:replace-with-the-printed-token
 COPILOT_API_KEY_AUTH=replace-with-a-long-random-key
 COPILOT_ADMIN_ORIGIN=https://your-domain.example
 COPILOT_TRUSTED_PROXY_CIDRS=172.19.0.1/32,127.0.0.1/32,::1/128
@@ -771,6 +784,7 @@ automatic secret-management flow:
 ```sh
 docker volume create copilot-api_copilot-data
 docker compose run --rm copilot-api --auth
+# Add the printed entry to GITHUB_TOKENS in .env, then start the service.
 docker compose up -d --build
 ```
 
@@ -779,6 +793,7 @@ as the deployment settings:
 
 ```dotenv
 COPILOT_HOST=0.0.0.0
+GITHUB_TOKENS=msft.ghe.com:replace-with-the-printed-token
 COPILOT_API_KEY_AUTH=replace-with-a-long-random-key
 COPILOT_ADMIN_ORIGIN=https://your-domain.example
 # Set this to the exact host-side Docker bridge address observed by the app.

@@ -13,6 +13,7 @@ test("pins the reviewed cumulative Copilot API contract", () => {
 })
 
 test("keeps the compatibility integration default", () => {
+  expect(DEFAULT_COPILOT_INTEGRATION_ID).toBe("copilot-sdk")
   expect(resolveCopilotIntegrationId(undefined)).toBe(
     DEFAULT_COPILOT_INTEGRATION_ID,
   )

@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- routing, recovery, and affinity share request-local state */
 import consola from "consola"
 import { AsyncLocalStorage } from "node:async_hooks"
 
@@ -17,6 +18,7 @@ import {
 } from "~/lib/account-routing-selection"
 import { sessionTokenMatchesAccount } from "~/lib/copilot-session-token"
 import { HTTPError, LocalHTTPError } from "~/lib/error"
+import { isGitHubEnterpriseCloud } from "~/lib/github-instance"
 import {
   getClientSessionId,
   getLastUsedRoutedAccountId,
@@ -44,6 +46,25 @@ const pinnedRoutedAccountStorage = new AsyncLocalStorage<number | undefined>()
 const selectedRoutedAccountStorage = new AsyncLocalStorage<
   RoutedAccountPin | undefined
 >()
+
+function shouldPreserveAuthRejectedAccount(
+  account: Account,
+  response: Response,
+): boolean {
+  return (
+    isGitHubEnterpriseCloud(account.githubInstanceDomain)
+    && (response.status === 401 || response.status === 403)
+  )
+}
+
+function canFailOverBetweenAccounts(
+  currentAccount: Account,
+  nextAccount: Account,
+): boolean {
+  return (
+    nextAccount.githubInstanceDomain === currentAccount.githubInstanceDomain
+  )
+}
 
 function routedModelDiagnostic(modelId: string): string {
   return shouldSuppressRequestModelDiagnostics() ? "omitted" : modelId
@@ -510,11 +531,14 @@ async function failoverToAccount(
     path,
     retryBudget,
   } = context
-  const next = tokenPool.getNextAccountForModelEndpoint(
-    modelId,
-    path,
-    currentAccount,
-  )
+  const next = tokenPool
+    .getEligibleAccountsForModel(modelId)
+    .find(
+      (account) =>
+        account.id !== currentAccount.id
+        && canFailOverBetweenAccounts(currentAccount, account)
+        && tokenPool.accountAdvertisesModelEndpoint(account, modelId, path),
+    )
   if (!next) {
     return undefined
   }
@@ -592,6 +616,10 @@ async function fetchWithRoutedAccount(
     return { response, account }
   }
   if (context.sessionTokenPinsAccount) {
+    return { response, account }
+  }
+
+  if (shouldPreserveAuthRejectedAccount(account, response)) {
     return { response, account }
   }
 
