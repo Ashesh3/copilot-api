@@ -872,7 +872,7 @@ test("Messages routes from the affinity-selected account's raw endpoint catalog"
   ])
 })
 
-test("unidentified failover skips accounts that do not advertise the chosen endpoint", async () => {
+test("unidentified auth rejection preserves the selected endpoint-authoritative account", async () => {
   const modelId = "account-aware-failover"
   registerAccount({
     accountId: 52_401,
@@ -912,20 +912,16 @@ test("unidentified failover skips accounts that do not advertise the chosen endp
     }),
   })
 
-  expect(response.status).toBe(200)
+  expect(response.status).toBe(403)
   expect(upstreamRequests).toEqual([
     {
       authorization: "Bearer first-account-token",
       path: "/chat/completions",
     },
-    {
-      authorization: "Bearer eligible-failover-token",
-      path: "/chat/completions",
-    },
   ])
 })
 
-test("does not resend after refresh removes the chosen endpoint", async () => {
+test("does not reinitialize or resend after a public OAuth 401", async () => {
   const modelId = "account-aware-refresh"
   registerAccount({
     accountId: 52_401,
@@ -935,18 +931,7 @@ test("does not resend after refresh removes the chosen endpoint", async () => {
   })
   tokenPool.rebuildModelIndex()
   state.models = tokenPool.getAllModels()
-  queuedFetchResults.push(
-    new Response("unauthorized", { status: 401 }),
-    Response.json({
-      expires_at: 1_900_000_000,
-      refresh_in: 1800,
-      token: "refreshed-account-token",
-    }),
-    Response.json({
-      object: "list",
-      data: [createModel(modelId, ["/responses"])],
-    }),
-  )
+  queuedFetchResults.push(new Response("unauthorized", { status: 401 }))
 
   const response = await server.request("/v1/chat/completions", {
     method: "POST",
@@ -957,20 +942,13 @@ test("does not resend after refresh removes the chosen endpoint", async () => {
     }),
   })
 
-  expect(response.status).toBe(400)
-  expect(await response.json()).toEqual({
-    error: {
-      code: "endpoint_translation_unsupported",
-      message:
-        "The selected Copilot account no longer advertises the chosen endpoint.",
-      type: "invalid_request_error",
-    },
-  })
+  expect(response.status).toBe(401)
   expect(upstreamRequests.map((request) => request.path)).toEqual([
     "/chat/completions",
-    "/copilot_internal/v2/token",
-    "/models",
   ])
+  expect(
+    upstreamRequests.some((request) => request.path.includes("/v2/token")),
+  ).toBe(false)
   expect(
     upstreamRequests.filter((request) => request.path === "/chat/completions"),
   ).toHaveLength(1)

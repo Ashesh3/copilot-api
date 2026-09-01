@@ -28,7 +28,6 @@ import { generateEnvScript } from "./lib/shell"
 import { state } from "./lib/state"
 import { setupCopilotToken, setupGitHubToken } from "./lib/token"
 import { tokenPool } from "./lib/token-pool"
-import { cacheModels } from "./lib/utils"
 import { isDirectConnectEnabled } from "./routes/direct-connect/route"
 import {
   DIRECT_CONNECT_WS_PATH,
@@ -151,8 +150,6 @@ async function initializeMultiToken(
     `Multi-token mode: ${credentials.length} GitHub tokens configured`,
   )
 
-  tokenPool.setSessionId(state.sessionId)
-
   // Add all accounts
   const accounts = credentials.map((credential, i) =>
     tokenPool.addAccount(credential.token, {
@@ -195,10 +192,6 @@ async function initializeMultiToken(
 
   // Cache VS Code version and pass to token pool
   await cacheVSCodeVersion()
-  if (state.vsCodeVersion) {
-    tokenPool.setVSCodeVersion(state.vsCodeVersion)
-  }
-
   return true
 }
 
@@ -232,7 +225,6 @@ async function initializeTokens(options: RunServerOptions): Promise<void> {
 
   await setupCopilotToken()
   await cacheVSCodeVersion()
-  await cacheModels()
 }
 
 async function initializePersistentConfig(): Promise<void> {
@@ -607,7 +599,7 @@ export const start = defineCommand({
     "show-token": {
       type: "boolean",
       default: false,
-      description: "Show GitHub and Copilot tokens on fetch and refresh",
+      description: "Show the GitHub/Copilot OAuth credential during setup",
     },
     "proxy-env": {
       type: "boolean",

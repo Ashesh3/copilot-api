@@ -4,16 +4,13 @@ import fs from "node:fs/promises"
 import { addAccount, getStoredCredentials } from "~/lib/accounts-store"
 import {
   DEFAULT_GITHUB_DOMAIN,
-  isGitHubEnterpriseCloud,
   parseGitHubCredential,
-  resolveCopilotApiBaseUrl,
 } from "~/lib/github-instance"
 import { isEnvOnlyTokens, PATHS } from "~/lib/paths"
-import { getCopilotToken } from "~/services/github/get-copilot-token"
-import { getCopilotUsage } from "~/services/github/get-copilot-usage"
 import { getDeviceCode } from "~/services/github/get-device-code"
 import { getGitHubUser } from "~/services/github/get-user"
 import { pollAccessToken } from "~/services/github/poll-access-token"
+import { resolveCopilotOAuth } from "~/services/github/resolve-copilot-oauth"
 
 import { HTTPError } from "./error"
 import { state } from "./state"
@@ -24,56 +21,22 @@ const writeGithubToken = (token: string) =>
   fs.writeFile(PATHS.GITHUB_TOKEN_PATH, token)
 
 export const setupCopilotToken = async () => {
-  if (isGitHubEnterpriseCloud(state.githubInstanceDomain)) {
-    if (!state.githubToken) throw new Error("GitHub token is not set")
-    const copilotUser = await getCopilotUsage(
-      state.githubToken,
-      state.githubInstanceDomain,
-    )
-    state.copilotToken = state.githubToken
-    state.copilotApiBaseUrl = resolveCopilotApiBaseUrl(
-      state.githubInstanceDomain,
-      copilotUser.endpoints?.api,
-      "enterprise",
-    )
-    consola.debug("GitHub Enterprise Copilot OAuth token validated")
-    return
-  }
+  if (!state.githubToken) throw new Error("GitHub token is not set")
+  const resolved = await resolveCopilotOAuth({
+    accountType: state.accountType,
+    githubToken: state.githubToken,
+    instanceDomain: state.githubInstanceDomain,
+  })
+  Object.assign(state, {
+    copilotApiBaseUrl: resolved.baseUrl,
+    copilotToken: resolved.token,
+    models: resolved.models,
+  })
 
-  const { endpoints, token, refresh_in } = await getCopilotToken()
-  // eslint-disable-next-line require-atomic-updates
-  state.copilotToken = token
-  state.copilotApiBaseUrl = resolveCopilotApiBaseUrl(
-    state.githubInstanceDomain,
-    endpoints?.api,
-    state.accountType,
-  )
-
-  // Display the Copilot token to the screen
-  consola.debug("GitHub Copilot Token fetched successfully!")
+  consola.debug("GitHub Copilot OAuth token validated")
   if (state.showToken) {
-    consola.info("Copilot token:", token)
+    consola.info("Copilot token:", resolved.token)
   }
-
-  const refreshInterval = (refresh_in - 60) * 1000
-  setInterval(async () => {
-    consola.debug("Refreshing Copilot token")
-    try {
-      const { endpoints, token } = await getCopilotToken()
-      state.copilotToken = token
-      state.copilotApiBaseUrl = resolveCopilotApiBaseUrl(
-        state.githubInstanceDomain,
-        endpoints?.api,
-        state.accountType,
-      )
-      consola.debug("Copilot token refreshed")
-      if (state.showToken) {
-        consola.info("Refreshed Copilot token:", token)
-      }
-    } catch (error) {
-      consola.error("Failed to refresh Copilot token:", error)
-    }
-  }, refreshInterval)
 }
 
 interface SetupGitHubTokenOptions {

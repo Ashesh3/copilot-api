@@ -89,11 +89,13 @@ function createModel(id: string): Model {
   }
 }
 
-function tokenResponse(token: string): Response {
+function copilotUserResponse(
+  login = "github-user",
+  api = "https://api.githubcopilot.com",
+): Response {
   return Response.json({
-    expires_at: 1_900_000_000,
-    refresh_in: 1800,
-    token,
+    endpoints: { api },
+    login,
   })
 }
 
@@ -126,9 +128,9 @@ function snapshotAccount(account: tokenPoolModule.Account) {
   }
 }
 
-function tokenRequests() {
+function copilotUserRequests() {
   return capturedRequests.filter(({ url }) =>
-    url.includes("/copilot_internal/v2/token"),
+    url.includes("/copilot_internal/user"),
   )
 }
 
@@ -210,14 +212,6 @@ test("resets model-routing test overrides after isolated use", () => {
   expect(isModelEnabledForAccount(MODEL_A, 1)).toBe(true)
 })
 
-test("uses a 120-second buffer when scheduling token refresh", () => {
-  expect(tokenPoolModule.getTokenRefreshIntervalMs(1800)).toBe(1_680_000)
-})
-
-test("keeps a 60-second minimum refresh interval", () => {
-  expect(tokenPoolModule.getTokenRefreshIntervalMs(100)).toBe(60_000)
-})
-
 test("uses the enterprise OAuth token directly for tenant model discovery", async () => {
   const pool = new tokenPoolModule.TokenPool()
   pools.add(pool)
@@ -256,13 +250,51 @@ test("uses the enterprise OAuth token directly for tenant model discovery", asyn
   expect(pool.getBaseUrl(account)).toBe("https://copilot-api.msft.ghe.com")
 })
 
+test("uses a GitHub.com OAuth token directly for model discovery", async () => {
+  const pool = new tokenPoolModule.TokenPool()
+  pools.add(pool)
+  const account = pool.addAccount("github-oauth-token", "individual", 811)
+  queuedResults.push(
+    copilotUserResponse(
+      "public-user",
+      "https://api.individual.githubcopilot.com",
+    ),
+    modelsResponse([createModel(MODEL_A)]),
+  )
+
+  await pool.initializeAccount(account)
+
+  expect(capturedRequests.map(({ url }) => url)).toEqual([
+    "https://api.github.com/copilot_internal/user",
+    "https://api.individual.githubcopilot.com/models",
+  ])
+  expect(capturedRequests[0]?.init?.headers).toMatchObject({
+    authorization: "Bearer github-oauth-token",
+  })
+  expect(capturedRequests[1]?.init?.headers).toMatchObject({
+    Authorization: "Bearer github-oauth-token",
+    "Copilot-Harness-Id": "copilot-sdk",
+  })
+  expect(account.copilotToken).toBe("github-oauth-token")
+  expect(account.copilotTokenExpiry).toBeUndefined()
+  expect(account.githubUsername).toBe("public-user")
+  expect(pool.getBaseUrl(account)).toBe(
+    "https://api.individual.githubcopilot.com",
+  )
+  expect(
+    capturedRequests.some(({ url }) =>
+      url.includes("/copilot_internal/v2/token"),
+    ),
+  ).toBe(false)
+})
+
 test("uses the current Copilot contract for multi-token model discovery", async () => {
   const pool = new tokenPoolModule.TokenPool()
   pools.add(pool)
   const account = createInitializedAccount(pool)
   state.copilotIntegrationId = "assigned-integration"
   queuedResults.push(
-    tokenResponse("copilot-token-contract"),
+    copilotUserResponse(),
     modelsResponse([createModel(MODEL_A)]),
   )
 
@@ -279,14 +311,15 @@ test("reinitializes token and models as one account update", async () => {
   pools.add(pool)
   const account = createInitializedAccount(pool)
   queuedResults.push(
-    tokenResponse("fresh-copilot-token"),
+    copilotUserResponse("refreshed-user"),
     modelsResponse([createModel(MODEL_B)]),
   )
 
   await pool.reinitializeAccount(account)
 
-  expect(account.copilotToken).toBe("fresh-copilot-token")
-  expect(account.copilotTokenExpiry).toBe(1_900_000_000)
+  expect(account.copilotToken).toBe("github-token-reinitialize")
+  expect(account.copilotTokenExpiry).toBeUndefined()
+  expect(account.githubUsername).toBe("refreshed-user")
   expect(account.models).toEqual(new Set([MODEL_B]))
   expect(account.modelsData.map((model) => model.id)).toEqual([MODEL_B])
   expect(account.healthy).toBe(true)
@@ -298,7 +331,7 @@ test("preserves account state when reinitialization fails", async () => {
   const account = createInitializedAccount(pool)
   const before = snapshotAccount(account)
   queuedResults.push(
-    tokenResponse("unused-fresh-token"),
+    copilotUserResponse(),
     new Response("model outage", { status: 503 }),
   )
 
@@ -316,7 +349,7 @@ test("rejects malformed model discovery before mutating account state", async ()
   const account = createInitializedAccount(pool)
   const before = snapshotAccount(account)
   queuedResults.push(
-    tokenResponse("unused-malformed-token"),
+    copilotUserResponse(),
     Response.json({ data: null, object: "list" }),
   )
 
@@ -328,20 +361,14 @@ test("rejects malformed model discovery before mutating account state", async ()
   expect(snapshotAccount(account)).toEqual(before)
 })
 
-test("rejects malformed token exchange before model discovery or mutation", async () => {
-  const malformedPayloads = [
-    { expires_at: 1_900_000_000, refresh_in: 1800 },
-    { expires_at: "invalid", refresh_in: 1800, token: "fresh-token" },
-    { expires_at: 1_900_000_000, refresh_in: null, token: "fresh-token" },
-  ]
-
-  for (const [index, payload] of malformedPayloads.entries()) {
+test("preserves account state when Copilot user discovery fails", async () => {
+  for (const [index, status] of [401, 403, 503].entries()) {
     const modelRequestCountBefore = modelRequests().length
     const pool = new tokenPoolModule.TokenPool()
     pools.add(pool)
     const account = createInitializedAccount(pool)
     const before = snapshotAccount(account)
-    queuedResults.push(Response.json(payload))
+    queuedResults.push(new Response("discovery failed", { status }))
 
     const error = await pool
       .reinitializeAccount(account)
@@ -350,7 +377,7 @@ test("rejects malformed token exchange before model discovery or mutation", asyn
     expect(error).toBeInstanceOf(Error)
     expect(snapshotAccount(account)).toEqual(before)
     expect(modelRequests()).toHaveLength(modelRequestCountBefore)
-    expect(tokenRequests()).toHaveLength(index + 1)
+    expect(copilotUserRequests()).toHaveLength(index + 1)
   }
 })
 
@@ -371,7 +398,7 @@ test("publishes the merged model snapshot only after reinitialization commits", 
   secondAccount.modelsData = [createModel("model-c")]
   pool.rebuildModelIndex()
   queuedResults.push(
-    tokenResponse("published-fresh-token"),
+    copilotUserResponse(),
     modelsResponse([createModel(MODEL_B)]),
   )
 
@@ -389,7 +416,7 @@ test("coalesces concurrent account reinitialization", async () => {
   pools.add(pool)
   const account = createInitializedAccount(pool)
   const deferredModels = createDeferredFetchResponse()
-  queuedResults.push(tokenResponse("coalesced-token"), deferredModels)
+  queuedResults.push(copilotUserResponse(), deferredModels)
 
   const first = pool.reinitializeAccount(account)
   const second = pool.reinitializeAccount(account)
@@ -397,9 +424,9 @@ test("coalesces concurrent account reinitialization", async () => {
   deferredModels.resolveResponse(modelsResponse([createModel(MODEL_B)]))
   await Promise.all([first, second])
 
-  expect(tokenRequests()).toHaveLength(1)
+  expect(copilotUserRequests()).toHaveLength(1)
   expect(modelRequests()).toHaveLength(1)
-  expect(account.copilotToken).toBe("coalesced-token")
+  expect(account.copilotToken).toBe("github-token-reinitialize")
   expect(account.models).toEqual(new Set([MODEL_B]))
 })
 

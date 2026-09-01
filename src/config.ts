@@ -6,7 +6,6 @@ import {
   addAccount as storeAddAccount,
   removeAccount as storeRemoveAccount,
 } from "~/lib/accounts-store"
-import { GITHUB_USER_AGENT } from "~/lib/api-config"
 import {
   addReplacement,
   applyReplacements,
@@ -26,14 +25,13 @@ import {
 } from "~/lib/custom-providers"
 import {
   DEFAULT_GITHUB_DOMAIN,
-  githubApiBaseUrl,
-  isGitHubEnterpriseCloud,
   normalizeGitHubDomain,
 } from "~/lib/github-instance"
 import { ensurePaths, PATHS } from "~/lib/paths"
 import { tokenPool } from "~/lib/token-pool"
 import { getDeviceCode } from "~/services/github/get-device-code"
 import { pollAccessToken } from "~/services/github/poll-access-token"
+import { resolveCopilotOAuth } from "~/services/github/resolve-copilot-oauth"
 
 type MenuAction =
   | "list"
@@ -496,29 +494,12 @@ async function addAccountMenu(): Promise<void> {
   consola.start("Validating token with Copilot API...")
 
   try {
-    const isEnterprise = isGitHubEnterpriseCloud(instanceDomain)
-    const endpoint =
-      isEnterprise ? "/copilot_internal/user" : "/copilot_internal/v2/token"
-    const response = await fetch(
-      `${githubApiBaseUrl(instanceDomain)}${endpoint}`,
-      {
-        headers: {
-          "content-type": "application/json",
-          accept: "application/json",
-          authorization: `${isEnterprise ? "Bearer" : "token"} ${token}`,
-          "user-agent": GITHUB_USER_AGENT,
-        },
-      },
-    )
-
-    if (!response.ok) {
-      const body = await response.text()
-      consola.error(
-        `Token validation failed: ${response.status} ${response.statusText}`,
-      )
-      consola.error(body)
-      return
-    }
+    await resolveCopilotOAuth({
+      accountType:
+        instanceDomain === DEFAULT_GITHUB_DOMAIN ? "individual" : "enterprise",
+      githubToken: token,
+      instanceDomain,
+    })
 
     consola.success("Token is valid and has Copilot access!")
   } catch (error) {

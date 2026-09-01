@@ -120,9 +120,8 @@ Responses compaction.
 - Routes by model ID or alias with deterministic collision behavior.
 - Uses multiple GitHub accounts only when at least two tokens are configured.
 - Builds a per-model eligible-account index, supports per-account model
-  enablement, keeps Claude Code sessions on a stable account, refreshes tokens,
-  and performs one alternate-account failover for upstream authentication,
-  quota, and network errors.
+  enablement, keeps Claude Code sessions on a stable account, and performs one
+  same-instance alternate-account failover for quota and transient failures.
 
 ### Operations
 
@@ -452,29 +451,34 @@ bunx --bun @ashsec/copilot-api@latest config
 
 Or provide comma-separated tokens without writing token files. Prefix an
 enterprise token with its bare `*.ghe.com` instance domain; bare tokens default
-to GitHub.com:
+to GitHub.com. OAuth/user tokens (`gho_`, `ghu_`) are the supported default.
+Fine-grained personal access tokens (`github_pat_`) work only where GitHub has
+enabled direct Copilot API PAT authentication (currently a controlled/staff
+capability); classic `ghp_` tokens are not supported by the current Copilot SDK
+authentication contract:
 
 ```dotenv
 GITHUB_TOKENS=msft.ghe.com:first-enterprise-token,github.ghe.com:second-enterprise-token,public-github-token
 ```
 
-At startup, GitHub.com accounts exchange their GitHub token for a short-lived
-Copilot token, while GHE Cloud accounts use their OAuth token directly. Each
-account resolves its Copilot endpoint, fetches its available models, and
-contributes healthy models to a shared eligibility index. Dashboard model-
-routing overrides can disable a model on a specific account.
+At startup, both GitHub.com and GHE Cloud accounts validate their GitHub OAuth
+token through `/copilot_internal/user`, resolve the returned Copilot endpoint,
+and use that same bearer for model discovery and inference. Each healthy account
+contributes its models to a shared eligibility index. Dashboard model-routing
+overrides can disable a model on a specific account.
 
 Requests carrying `X-Claude-Code-Session-Id` select an eligible account
 deterministically so a session stays on the same account. Without that header,
-the first eligible account is used. On `401`, the selected account is refreshed
-and retried. After a remaining `401`, `403`, `429`, or a network error, the
-router attempts at most one eligible alternative account on the same GitHub
-instance; GHE Cloud authentication rejections stay on that instance instead of
-crossing tenant boundaries. Accounts that fail startup validation are marked
-unhealthy, while a runtime `429` does not change account health. A known model
-disabled for every account returns a local `403`; an unknown model falls back to
-the first healthy account. Multi-account mode is for availability, model
-coverage, and session affinity, not unrestricted load balancing.
+the first eligible account is used. Authentication rejections remain on the
+selected account and are not retried with another identity. A `421` response
+refreshes that account's advertised Copilot endpoint and model catalog, then
+retries once on the same identity. Other eligible failover stays within the same
+GitHub instance, so GHE tenant boundaries are never crossed. Accounts that fail
+startup validation are marked unhealthy, while a runtime `429` does not change
+account health. A known model disabled for every account returns a local `403`;
+an unknown model falls back to the first healthy account. Multi-account mode is
+for availability, model coverage, and session affinity, not unrestricted load
+balancing.
 
 ## Operator dashboard
 
@@ -657,7 +661,7 @@ Run a command with `--help` to inspect the installed version's current options.
 | `--manual` |  | off | Prompt before forwarding Chat Completions, Messages, Responses HTTP, and Google requests |
 | `--github-token <entry>` | `-g` | unset | Use one `instance_domain:token` entry or a bare GitHub.com token for this process |
 | `--claude-code` | `-c` | off | Generate a Claude Code launch command from the current model list |
-| `--show-token` |  | off | Print full GitHub and Copilot credentials; for GHE Cloud these are the same OAuth secret; sensitive troubleshooting only |
+| `--show-token` |  | off | Print the full GitHub/Copilot OAuth credential; sensitive troubleshooting only |
 | `--proxy-env` |  | off | Reserved proxy initializer; currently ineffective because the supported Bun server path skips it |
 | `--insecure` |  | off | Disable TLS certificate verification; unsafe outside controlled debugging |
 | `--debug` | `-d` | off | Log raw incoming URLs, headers, and most top-level JSON fields; sensitive troubleshooting only |

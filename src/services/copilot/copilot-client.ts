@@ -8,10 +8,7 @@ import {
   getCopilotRequestAttribution,
   mergeCopilotRequestAttribution,
 } from "~/lib/copilot-request-context"
-import {
-  isGitHubEnterpriseCloud,
-  resolveCopilotApiBaseUrl,
-} from "~/lib/github-instance"
+import { resolveCopilotApiBaseUrl } from "~/lib/github-instance"
 import {
   abortLlmDebugLog,
   failLlmDebugLog,
@@ -39,7 +36,7 @@ import {
   COPILOT_API_VERSION,
   sanitizeCopilotHeaderValue,
 } from "~/services/copilot/copilot-contract"
-import { getCopilotToken } from "~/services/github/get-copilot-token"
+import { rediscoverCopilotOAuthBaseUrl } from "~/services/github/resolve-copilot-oauth"
 
 import type { RetryBudget, RetryClaim } from "./transport-retry"
 
@@ -410,31 +407,26 @@ function failLlmDebugAttempt(logId: string | undefined, error: unknown): void {
   failLlmDebugLog(logId, error)
 }
 
-function setAuthorizationHeader(
-  headers: Record<string, string>,
-  token: string,
-): Record<string, string> {
-  const value = `Bearer ${token}`
-  const nextHeaders = { ...headers, Authorization: value }
-
-  if ("authorization" in nextHeaders) {
-    nextHeaders.authorization = value
-  }
-
-  return nextHeaders
-}
-
-function canRefreshSingleToken401(response: Response): boolean {
-  return (
-    response.status === 401
-    && !state.isMultiToken
-    && !isGitHubEnterpriseCloud(state.githubInstanceDomain)
-    && Boolean(state.githubToken)
-  )
-}
-
 function isRetryableStatus(response: Response): boolean {
   return RETRYABLE_STATUSES.has(response.status)
+}
+
+async function rediscoverSingleTokenEndpoint(): Promise<string | undefined> {
+  if (state.isMultiToken || !state.githubToken) return undefined
+
+  try {
+    return await rediscoverCopilotOAuthBaseUrl({
+      accountType: state.accountType,
+      currentBaseUrl: copilotBaseUrl(),
+      githubToken: state.githubToken,
+      instanceDomain: state.githubInstanceDomain,
+    })
+  } catch (error) {
+    consola.warn("Failed to rediscover Copilot endpoint after HTTP 421", {
+      errorClass: error instanceof Error ? error.name : "Unknown",
+    })
+    return undefined
+  }
 }
 
 function outcomeForResponse(response: Response): UpstreamOutcome {
@@ -517,10 +509,6 @@ async function fetchCopilotAttempt(options: {
   }
 }
 
-function setCurrentCopilotToken(token: string): void {
-  state.copilotToken = token
-}
-
 // --- Retry Delay Calculation ---
 
 function parseRetryAfterSeconds(
@@ -557,28 +545,6 @@ function applyRetryJitter(delaySeconds: number): number {
 }
 
 // --- Fetch with Retry ---
-
-async function refreshTokenForRetry(
-  headers: Record<string, string>,
-  requestInit: RequestInit | undefined,
-  path: string,
-): Promise<RequestInit> {
-  consola.warn(`HTTP 401 on ${path}, refreshing Copilot token`)
-  const tokenData = await getCopilotToken()
-  setCurrentCopilotToken(tokenData.token)
-  if (tokenData.endpoints?.api) {
-    state.copilotApiBaseUrl = resolveCopilotApiBaseUrl(
-      state.githubInstanceDomain,
-      tokenData.endpoints.api,
-      state.accountType,
-    )
-  }
-
-  return {
-    ...requestInit,
-    headers: setAuthorizationHeader(headers, tokenData.token),
-  }
-}
 
 function planHttpRetryDelaySeconds(options: {
   attempt: number
@@ -638,9 +604,9 @@ function recordFinalResponseHeaders(response: Response): void {
 }
 
 type ResponseAction =
+  | { kind: "rediscover-endpoint" }
   | { kind: "retry-encrypted-compaction" }
   | { delaySeconds: number; kind: "retry-status" }
-  | { kind: "refresh-token" }
   | { kind: "return" }
 
 interface RetryResponseState {
@@ -649,20 +615,23 @@ interface RetryResponseState {
   telemetryReason: UpstreamSendReason
 }
 
-/** Decide what an upstream response means, claiming budget for any resend. */
+/** Decide what an upstream response means and whether it merits recovery. */
 async function classifyResponse(options: {
   attempt: number
   claimEncryptedCompactionRetry: RetryClaim
+  endpointRediscoveryAttempted: boolean
   claimRetry: RetryClaim
   maxHttpRetryDelaySeconds: number
   path: string
   requestInit: RequestInit | undefined
   response: Response
   retryBackoffExtraSeconds: number
+  baseUrl?: string
 }): Promise<ResponseAction> {
   const {
     attempt,
     claimEncryptedCompactionRetry,
+    endpointRediscoveryAttempted,
     claimRetry,
     maxHttpRetryDelaySeconds,
     path,
@@ -671,8 +640,12 @@ async function classifyResponse(options: {
     retryBackoffExtraSeconds,
   } = options
 
-  if (canRefreshSingleToken401(response) && claimRetry()) {
-    return { kind: "refresh-token" }
+  if (
+    response.status === 421
+    && options.baseUrl === undefined
+    && !endpointRediscoveryAttempted
+  ) {
+    return { kind: "rediscover-endpoint" }
   }
 
   if (response.status === 400) {
@@ -710,18 +683,19 @@ async function classifyResponse(options: {
 
 async function applyRetryResponseAction(options: {
   action: Exclude<ResponseAction, { kind: "return" }>
-  path: string
   requestInit: RequestInit | undefined
   retryBackoffExtraSeconds: number
-}): Promise<RetryResponseState> {
-  const { action, path, requestInit, retryBackoffExtraSeconds } = options
+}): Promise<RetryResponseState | undefined> {
+  const { action, requestInit, retryBackoffExtraSeconds } = options
 
-  if (action.kind === "refresh-token") {
-    const headers = toHeaderRecord(requestInit?.headers)
+  if (action.kind === "rediscover-endpoint") {
+    const baseUrl = await rediscoverSingleTokenEndpoint()
+    if (!baseUrl) return undefined
+    state.copilotApiBaseUrl = baseUrl
     return {
-      requestInit: await refreshTokenForRetry(headers, requestInit, path),
+      requestInit: refreshRequestIdForRetry(requestInit),
       retryBackoffExtraSeconds,
-      telemetryReason: "token_refresh",
+      telemetryReason: "compatibility_retry",
     }
   }
 
@@ -741,6 +715,8 @@ async function applyRetryResponseAction(options: {
   }
 }
 
+// Keep the retry state machine in one scope so all resends share one budget.
+// eslint-disable-next-line complexity, max-lines-per-function
 export async function copilotFetch(
   path: string,
   init?: RequestInit,
@@ -759,6 +735,7 @@ export async function copilotFetch(
   const claimRetry: RetryClaim = createRetryClaim(budget)
   const claimEncryptedCompactionRetry: RetryClaim = () =>
     claimCompatibilityRetry(budget)
+  let endpointRediscoveryAttempted = false
   const chain = createTransportChain(path, randomUUID())
   const maxAttempts = MAX_ROUTED_SENDS
   let retryBackoffExtraSeconds = INITIAL_RETRY_BACKOFF_EXTRA_SECONDS
@@ -796,23 +773,37 @@ export async function copilotFetch(
       const action = await classifyResponse({
         attempt,
         claimEncryptedCompactionRetry,
+        endpointRediscoveryAttempted,
         claimRetry,
         maxHttpRetryDelaySeconds,
         path,
         requestInit,
         response,
         retryBackoffExtraSeconds,
+        baseUrl: fetchOptions?.baseUrl,
       })
 
       if (action.kind !== "return") {
         lastResponse = response
         clearCopilotResponseHeaders()
+        if (action.kind === "rediscover-endpoint") {
+          endpointRediscoveryAttempted = true
+        }
         const next = await applyRetryResponseAction({
           action,
-          path,
           requestInit,
           retryBackoffExtraSeconds,
         })
+        if (!next) {
+          logChainResponse(
+            chain,
+            Date.now() - attemptStartedAtMs,
+            response.status,
+          )
+          recordFinalResponseHeaders(response)
+          markCopilotContractResponseMetadataAvailable()
+          return response
+        }
         requestInit = next.requestInit
         retryBackoffExtraSeconds = next.retryBackoffExtraSeconds
         telemetryState.reason = next.telemetryReason
