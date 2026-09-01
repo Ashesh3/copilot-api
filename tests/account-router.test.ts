@@ -39,78 +39,8 @@ type FetchResultFactory = (
   url: string,
   init?: RequestInit,
 ) => Promise<Response> | Response
-const queuedResults: Array<
-  DeferredFetchResponse | Error | FetchResultFactory | Response
-> = []
+const queuedResults: Array<Error | FetchResultFactory | Response> = []
 const capturedRequests: Array<{ url: string; init?: RequestInit }> = []
-
-interface DeferredFetchResponse {
-  requestStarted: Promise<void>
-  rejectResponse(error: Error): void
-  resolveResponse(response: Response): void
-  startRequest(): Promise<Response>
-}
-
-function createDeferredFetchResponse(): DeferredFetchResponse {
-  let rejectResponse!: (error: Error) => void
-  let resolveRequestStarted!: () => void
-  let resolveResponse!: (response: Response) => void
-  const requestStarted = new Promise<void>((resolve) => {
-    resolveRequestStarted = resolve
-  })
-  const responsePromise = new Promise<Response>((resolve, reject) => {
-    resolveResponse = resolve
-    rejectResponse = reject
-  })
-
-  return {
-    requestStarted,
-    rejectResponse,
-    resolveResponse,
-    startRequest() {
-      resolveRequestStarted()
-      return responsePromise
-    },
-  }
-}
-
-function createObservedGitHubUserResponse(login: string): {
-  loginRead: Promise<void>
-  response: Response
-} {
-  let resolveLoginRead!: () => void
-  const loginRead = new Promise<void>((resolve) => {
-    resolveLoginRead = resolve
-  })
-  const response = new Response(JSON.stringify({ login }), {
-    status: 200,
-    headers: { "content-type": "application/json" },
-  })
-  Object.defineProperty(response, "json", {
-    value: () =>
-      Promise.resolve({
-        get login() {
-          resolveLoginRead()
-          return login
-        },
-      }),
-  })
-  return { loginRead, response }
-}
-
-function createWarningObserver(): {
-  implementation: typeof consola.warn
-  observed: Promise<void>
-} {
-  let resolveObserved!: () => void
-  const observed = new Promise<void>((resolve) => {
-    resolveObserved = resolve
-  })
-  const implementation = Object.assign(resolveObserved, {
-    raw: resolveObserved,
-  })
-  return { implementation, observed }
-}
 
 function getRequestUrl(url: string | URL | Request): string {
   if (typeof url === "string") {
@@ -138,7 +68,7 @@ const fetchMock = mock((url: string | URL | Request, init?: RequestInit) => {
     return next(requestUrl, init)
   }
 
-  return next instanceof Response ? next : next.startRequest()
+  return next
 })
 
 function createModel(id: string): Model {
@@ -220,45 +150,11 @@ function findAnotherKeyForAccount(
   return key
 }
 
-function copilotTokenResponse(token: string): Response {
-  return Response.json({
-    expires_at: 1_900_000_000,
-    refresh_in: 1800,
-    token,
-  })
-}
-
 function modelsResponse(modelIds: Array<string>): Response {
   return Response.json({
     data: modelIds.map((modelId) => createModel(modelId)),
     object: "list",
   })
-}
-
-function queuePersistent401Reinitialization(
-  freshToken: string,
-  modelIds: Array<string>,
-): void {
-  queuedResults.push(
-    new Response("Unauthorized", { status: 401 }),
-    copilotTokenResponse(freshToken),
-    modelsResponse(modelIds),
-    new Response("Unauthorized", { status: 401 }),
-  )
-}
-
-function queueUrlAwarePersistent401(
-  freshToken: string,
-  modelIds: Array<string>,
-): void {
-  const responder: FetchResultFactory = (url) => {
-    if (url.includes("/copilot_internal/v2/token")) {
-      return copilotTokenResponse(freshToken)
-    }
-    if (url.endsWith("/models")) return modelsResponse(modelIds)
-    return new Response("Unauthorized", { status: 401 })
-  }
-  queuedResults.push(responder, responder, responder, responder, responder)
 }
 
 function llmAuthorizationHeaders(): Array<string | null> {
@@ -328,6 +224,11 @@ beforeEach(() => {
   capturedRequests.length = 0
   setModelRoutingOverridesForTest({})
   state.isMultiToken = true
+  state.githubToken = "github-token"
+  state.copilotToken = "copilot-token"
+  state.githubInstanceDomain = "github.com"
+  state.accountType = "individual"
+  state.copilotApiBaseUrl = undefined
   state.sessionId = "router-test-session"
 })
 
@@ -443,7 +344,7 @@ test("returns local 503 without sending when no account advertises a policy mode
   expect(capturedRequests).toHaveLength(0)
 })
 
-test("reinitializes a selected control-plane account without cross-account failover", async () => {
+test("returns a selected control-plane 401 without reinitialization or cross-account failover", async () => {
   registerAccount(13_031, "model-a", "tid=control-plane-issuer;exp=expired")
   registerAccount(13_032, "model-a", "tid=alternate-issuer;exp=current")
   tokenPool.rebuildModelIndex()
@@ -454,14 +355,8 @@ test("reinitializes a selected control-plane account without cross-account failo
     (candidate) =>
       tokenPool.getHealthyAccountBySession(candidate)?.id === 13_031,
   )
-  if (!affinityKey)
-    throw new TypeError("Expected reinitialization affinity key")
-  queuedResults.push(
-    new Response("Unauthorized", { status: 401 }),
-    copilotTokenResponse("tid=control-plane-issuer;exp=fresh"),
-    modelsResponse(["model-a"]),
-    Response.json({ refreshed: true }),
-  )
+  if (!affinityKey) throw new TypeError("Expected control-plane affinity key")
+  queuedResults.push(new Response("Unauthorized", { status: 401 }))
 
   const { account, response } = await runWithRoutingAffinity(
     { key: affinityKey, source: "copilot_session" },
@@ -474,18 +369,65 @@ test("reinitializes a selected control-plane account without cross-account failo
       }),
   )
 
-  expect(response.status).toBe(200)
+  expect(response.status).toBe(401)
   expect(account?.id).toBe(13_031)
   expect(llmAuthorizationHeaders()).toEqual([
     "Bearer tid=control-plane-issuer;exp=expired",
-    "Bearer tid=control-plane-issuer;exp=fresh",
   ])
   expect(llmAuthorizationHeaders()).not.toContain(
     "Bearer tid=alternate-issuer;exp=current",
   )
 })
 
-test("rejects a control-plane resend when refresh changes the selected account issuer", async () => {
+test("rediscovers a selected control-plane account after a 421", async () => {
+  registerAccount(13_033, "model-a", "oauth-control-primary")
+  registerAccount(13_034, "model-a", "oauth-control-secondary")
+  tokenPool.rebuildModelIndex()
+  const account = tokenPool.getEligibleAccountForModel("model-a", 13_033)
+  if (!account) throw new TypeError("Expected selected control-plane account")
+  account.githubToken = "oauth-control-primary"
+  account.copilotApiBaseUrl = "https://api.githubcopilot.com"
+  const affinityKey = Array.from(
+    { length: 1000 },
+    (_, index) => `control-plane-misdirected-${index}`,
+  ).find(
+    (candidate) =>
+      tokenPool.getHealthyAccountBySession(candidate)?.id === account.id,
+  )
+  if (!affinityKey) throw new TypeError("Expected control-plane affinity key")
+  queuedResults.push(
+    new Response("Misdirected Request", { status: 421 }),
+    Response.json({
+      endpoints: { api: "https://api.business.githubcopilot.com" },
+      login: "control-primary",
+    }),
+    modelsResponse(["model-a"]),
+    Response.json({ session: "created" }),
+  )
+
+  const result = await runWithRoutingAffinity(
+    { key: affinityKey, source: "copilot_session" },
+    async () => await routedControlPlaneFetch({ path: "/models/session" }),
+  )
+
+  expect(result.response.status).toBe(200)
+  expect(result.account?.id).toBe(account.id)
+  expect(account.copilotApiBaseUrl).toBe(
+    "https://api.business.githubcopilot.com",
+  )
+  expect(capturedRequests.map(({ url }) => url)).toEqual([
+    "https://api.githubcopilot.com/models/session",
+    "https://api.github.com/copilot_internal/user",
+    "https://api.business.githubcopilot.com/models",
+    "https://api.business.githubcopilot.com/models/session",
+  ])
+  expect(llmAuthorizationHeaders()).toEqual([
+    "Bearer oauth-control-primary",
+    "Bearer oauth-control-primary",
+  ])
+})
+
+test("does not resend a control-plane request after the selected account rejects it", async () => {
   const matchingSessionToken = `e30.${Buffer.from(
     JSON.stringify({ sub: "original-issuer" }),
   ).toString("base64url")}.c2ln`
@@ -500,11 +442,7 @@ test("rejects a control-plane resend when refresh changes the selected account i
       tokenPool.getHealthyAccountBySession(candidate)?.id === 13_041,
   )
   if (!affinityKey) throw new TypeError("Expected changed-issuer affinity")
-  queuedResults.push(
-    new Response("Unauthorized", { status: 401 }),
-    copilotTokenResponse("tid=new-issuer;exp=fresh"),
-    modelsResponse(["model-a"]),
-  )
+  queuedResults.push(new Response("Unauthorized", { status: 401 }))
 
   const result = await runWithRoutingAffinity(
     { key: affinityKey, source: "copilot_session" },
@@ -515,20 +453,11 @@ test("rejects a control-plane resend when refresh changes the selected account i
       }),
   )
 
-  expect(result.response.status).toBe(409)
-  expect(result.localError?.clientBody).toEqual({
-    error: {
-      code: "session_account_continuity_error",
-      message: "The Copilot session token does not match the selected account.",
-      type: "session_affinity_error",
-    },
-  })
+  expect(result.response.status).toBe(401)
+  expect(result.localError).toBeUndefined()
   expect(llmAuthorizationHeaders()).toEqual([
     "Bearer tid=original-issuer;exp=expired",
   ])
-  expect(llmAuthorizationHeaders()).not.toContain(
-    "Bearer tid=new-issuer;exp=fresh",
-  )
   expect(llmAuthorizationHeaders()).not.toContain(
     "Bearer tid=alternate-issuer;exp=current",
   )
@@ -547,6 +476,30 @@ test("uses the configured token for single-token control-plane calls", async () 
   ).toBe("Bearer single-control-plane-token")
 })
 
+test("rediscovers a single-token control-plane endpoint after 421", async () => {
+  state.isMultiToken = false
+  state.githubToken = "single-github-token"
+  state.copilotToken = "single-control-plane-token"
+  state.copilotApiBaseUrl = "https://api.githubcopilot.com"
+  queuedResults.push(
+    new Response("Misdirected Request", { status: 421 }),
+    Response.json({
+      endpoints: { api: "https://api.business.githubcopilot.com" },
+    }),
+    Response.json({ refreshed: true }),
+  )
+
+  const result = await routedControlPlaneFetch({ path: "/models/session" })
+
+  expect(result.response.status).toBe(200)
+  expect(capturedRequests.map(({ url }) => url)).toEqual([
+    "https://api.githubcopilot.com/models/session",
+    "https://api.github.com/copilot_internal/user",
+    "https://api.business.githubcopilot.com/models/session",
+  ])
+  expect(state.copilotApiBaseUrl).toBe("https://api.business.githubcopilot.com")
+})
+
 async function routedFetchWithAffinity(modelId: string, key: string) {
   return await runWithRoutingAffinity(
     { key, source: "copilot_session" },
@@ -561,7 +514,7 @@ test("keeps an identified session on its hashed account after persistent 401", a
   registerAccount(12_002, modelId, "alternate-token")
   tokenPool.rebuildModelIndex()
   const key = findKeyForAccount(modelId, 12_001)
-  queuePersistent401Reinitialization("fresh-bound-token", [modelId])
+  queuedResults.push(new Response("Unauthorized", { status: 401 }))
 
   const error = await routedFetchWithAffinity(modelId, key).catch(
     (caught: unknown) => caught,
@@ -577,6 +530,7 @@ test("keeps an identified session on its hashed account after persistent 401", a
     },
   })
   expect(tokenPool.getEligibleAccountForModel(modelId, 12_001)).toBeDefined()
+  expect(llmAuthorizationHeaders()).toEqual(["Bearer bound-token"])
   expect(llmAuthorizationHeaders()).not.toContain("Bearer alternate-token")
 })
 
@@ -587,10 +541,9 @@ test("one request rejection cannot remap another session", async () => {
   tokenPool.rebuildModelIndex()
   const rejectedKey = findKeyForAccount(modelId, 12_011)
   const unaffectedKey = findAnotherKeyForAccount(modelId, 12_011, rejectedKey)
-  queueUrlAwarePersistent401("refreshed-home", [modelId])
+  queuedResults.push(new Response("Unauthorized", { status: 401 }))
 
   await routedFetchWithAffinity(modelId, rejectedKey).catch(() => undefined)
-  queuedResults.length = 0
   queuedResults.push(new Response("{}", { status: 200 }))
   const result = await routedFetchWithAffinity(modelId, unaffectedKey)
 
@@ -623,18 +576,13 @@ test("returns a local conflict for identified 403 without failover", async () =>
   expect(tokenPool.getHealthyAccountIds()).toContain(12_021)
 })
 
-test("reports reinitialization when the same-account retry returns 403", async () => {
-  const modelId = "identified-reinitialized-403-affinity"
-  registerAccount(12_025, modelId, "reinitialized-forbidden-home")
-  registerAccount(12_026, modelId, "reinitialized-forbidden-alternate")
+test("does not reinitialize or retry an identified account after 401", async () => {
+  const modelId = "identified-direct-oauth-401-affinity"
+  registerAccount(12_025, modelId, "direct-oauth-home")
+  registerAccount(12_026, modelId, "direct-oauth-alternate")
   tokenPool.rebuildModelIndex()
   const key = findKeyForAccount(modelId, 12_025)
-  queuedResults.push(
-    new Response("Unauthorized", { status: 401 }),
-    copilotTokenResponse("fresh-reinitialized-forbidden-home"),
-    modelsResponse([modelId]),
-    new Response("Forbidden", { status: 403 }),
-  )
+  queuedResults.push(new Response("Unauthorized", { status: 401 }))
 
   const error = await routedFetchWithAffinity(modelId, key).catch(
     (caught: unknown) => caught,
@@ -645,11 +593,12 @@ test("reports reinitialization when the same-account retry returns 403", async (
     error: {
       code: "session_account_rejected",
       message:
-        "The bound account rejected this conversation after successful account reinitialization; affinity was preserved and no cross-account retry was attempted.",
+        "The bound account rejected this conversation; affinity was preserved and no cross-account retry was attempted.",
     },
   })
-  expect(llmAuthorizationHeaders()).not.toContain(
-    "Bearer reinitialized-forbidden-alternate",
+  expect(llmAuthorizationHeaders()).toEqual(["Bearer direct-oauth-home"])
+  expect(capturedRequests.every(({ url }) => !url.includes("/v2/token"))).toBe(
+    true,
   )
 })
 
@@ -688,8 +637,8 @@ test("keeps identified 429 retries on the hashed account", async () => {
   ])
 })
 
-test("returns local 503 without failover when reinitialization fails", async () => {
-  const modelId = "identified-reinitialization-failure"
+test("preserves account state when an identified direct OAuth request returns 401", async () => {
+  const modelId = "identified-direct-oauth-rejection"
   registerAccount(12_041, modelId, "preserved-home")
   registerAccount(12_042, modelId, "unused-alternate")
   tokenPool.rebuildModelIndex()
@@ -697,23 +646,19 @@ test("returns local 503 without failover when reinitialization fails", async () 
   const account = tokenPool.getEligibleAccountForModel(modelId, 12_041)
   if (!account) throw new TypeError("Expected bound account")
   const originalModelsData = account.modelsData
-  queuedResults.push(
-    new Response("Unauthorized", { status: 401 }),
-    copilotTokenResponse("unused-fresh-token"),
-    new Response("model outage", { status: 503 }),
-  )
+  queuedResults.push(new Response("Unauthorized", { status: 401 }))
 
   const error = await routedFetchWithAffinity(modelId, key).catch(
     (caught: unknown) => caught,
   )
 
   expect(error).toBeInstanceOf(LocalHTTPError)
-  expect((error as LocalHTTPError).response.status).toBe(503)
+  expect((error as LocalHTTPError).response.status).toBe(409)
   expect((error as LocalHTTPError).clientBody).toMatchObject({
     error: {
       account_id: 12_041,
-      code: "account_reinitialization_failed",
-      type: "account_unavailable",
+      code: "session_account_rejected",
+      type: "session_affinity_error",
     },
   })
   expect(account.copilotToken).toBe("preserved-home")
@@ -772,8 +717,8 @@ test("preserves legacy WebSocket affinity and typed affinity precedence", async 
   expect(typedResult.account?.id).toBe(typedPreferred.id)
 })
 
-test("fails over to the next account immediately after a multi-token 401", async () => {
-  const modelId = "router-401-failover-test"
+test("preserves an unidentified public OAuth account after a 401", async () => {
+  const modelId = "router-public-oauth-401-test"
   registerAccount(1001, modelId, "primary-copilot-token")
   registerAccount(1002, modelId, "secondary-copilot-token")
   tokenPool.rebuildModelIndex()
@@ -783,13 +728,6 @@ test("fails over to the next account immediately after a multi-token 401", async
       status: 401,
       headers: { "retry-after": "0" },
     }),
-    copilotTokenResponse("fresh-primary-copilot-token"),
-    modelsResponse([modelId]),
-    new Response("Unauthorized", {
-      status: 401,
-      headers: { "retry-after": "0" },
-    }),
-    new Response("{}", { status: 200 }),
   )
 
   const { response, account } = await routedFetch(
@@ -798,37 +736,22 @@ test("fails over to the next account immediately after a multi-token 401", async
     { modelId },
   )
 
-  expect(response.status).toBe(200)
-  expect(account?.id).toBe(1002)
-  expect(capturedRequests).toHaveLength(5)
+  expect(response.status).toBe(401)
+  expect(account?.id).toBe(1001)
+  expect(capturedRequests).toHaveLength(1)
   expect(capturedRequests[0]?.init?.headers).toMatchObject({
     Authorization: "Bearer primary-copilot-token",
   })
-  expect(capturedRequests[1]?.url).toContain("/copilot_internal/v2/token")
-  expect(capturedRequests[2]?.url).toContain("/models")
-  expect(capturedRequests[3]?.init?.headers).toMatchObject({
-    Authorization: "Bearer fresh-primary-copilot-token",
-  })
-  expect(capturedRequests[4]?.init?.headers).toMatchObject({
-    Authorization: "Bearer secondary-copilot-token",
-  })
+  expect(capturedRequests[0]?.url).not.toContain("/copilot_internal/v2/token")
 })
 
-test("reinitializes an enterprise account once and preserves its instance after a persistent 401", async () => {
+test("preserves an enterprise account and instance after a 401", async () => {
   const modelId = "enterprise-401-preserves-instance"
   registerEnterpriseAccount(1003, modelId, "msft.ghe.com")
   registerEnterpriseAccount(1004, modelId, "github.ghe.com")
   tokenPool.rebuildModelIndex()
 
-  queuedResults.push(
-    new Response("Unauthorized", { status: 401 }),
-    Response.json({
-      endpoints: { api: "https://copilot-api.msft.ghe.com" },
-      login: "enterprise-user",
-    }),
-    modelsResponse([modelId]),
-    new Response("Unauthorized", { status: 401 }),
-  )
+  queuedResults.push(new Response("Unauthorized", { status: 401 }))
 
   const { response, account } = await routedFetch(
     "/chat/completions",
@@ -840,17 +763,170 @@ test("reinitializes an enterprise account once and preserves its instance after 
   expect(account?.id).toBe(1003)
   expect(capturedRequests.map(({ url }) => url)).toEqual([
     "https://copilot-api.msft.ghe.com/chat/completions",
-    "https://api.msft.ghe.com/copilot_internal/user",
-    "https://copilot-api.msft.ghe.com/models",
-    "https://copilot-api.msft.ghe.com/chat/completions",
+  ])
+  expect(llmAuthorizationHeaders()).toEqual(["Bearer enterprise-token-1003"])
+})
+
+test("rediscovers a 421 endpoint and retries the same account once", async () => {
+  const modelId = "router-misdirected-endpoint"
+  registerAccount(1005, modelId, "oauth-primary")
+  registerAccount(1006, modelId, "oauth-secondary")
+  tokenPool.rebuildModelIndex()
+  const account = tokenPool.getEligibleAccountForModel(modelId, 1005)
+  if (!account) throw new TypeError("Expected selected account")
+  account.githubToken = "github-primary"
+  account.copilotToken = "github-primary"
+  account.copilotApiBaseUrl = "https://api.githubcopilot.com"
+  tokenPool.rebuildModelIndex()
+
+  queuedResults.push(
+    new Response("Misdirected Request", { status: 421 }),
+    Response.json({
+      endpoints: { api: "https://api.enterprise.githubcopilot.com" },
+      login: "primary-user",
+    }),
+    modelsResponse([modelId]),
+    new Response("{}", { status: 200 }),
+  )
+
+  const { response, account: usedAccount } = await routedFetch(
+    "/chat/completions",
+    { method: "POST" },
+    { modelId },
+  )
+
+  expect(response.status).toBe(200)
+  expect(usedAccount?.id).toBe(1005)
+  expect(account.copilotApiBaseUrl).toBe(
+    "https://api.enterprise.githubcopilot.com",
+  )
+  expect(account.githubUsername).toBe("primary-user")
+  expect(capturedRequests.map(({ url }) => url)).toEqual([
+    "https://api.githubcopilot.com/chat/completions",
+    "https://api.github.com/copilot_internal/user",
+    "https://api.enterprise.githubcopilot.com/models",
+    "https://api.enterprise.githubcopilot.com/chat/completions",
   ])
   expect(llmAuthorizationHeaders()).toEqual([
-    "Bearer enterprise-token-1003",
-    "Bearer enterprise-token-1003",
+    "Bearer github-primary",
+    "Bearer github-primary",
   ])
 })
 
-test("records final response metadata once after a 403 account failover", async () => {
+test("bounds repeated 421 responses to one same-account recovery", async () => {
+  const modelId = "router-repeated-misdirected-endpoint"
+  registerAccount(10_051, modelId, "oauth-primary")
+  registerAccount(10_052, modelId, "oauth-secondary")
+  tokenPool.rebuildModelIndex()
+  const account = tokenPool.getEligibleAccountForModel(modelId, 10_051)
+  if (!account) throw new TypeError("Expected selected account")
+  account.githubToken = "oauth-primary"
+  account.copilotToken = "oauth-primary"
+  account.copilotApiBaseUrl = "https://api.githubcopilot.com"
+
+  queuedResults.push(
+    new Response("first misdirect", { status: 421 }),
+    Response.json({
+      endpoints: { api: "https://api.business.githubcopilot.com" },
+    }),
+    modelsResponse([modelId]),
+    new Response("second misdirect", { status: 421 }),
+  )
+
+  const { response, account: usedAccount } = await routedFetch(
+    "/chat/completions",
+    { method: "POST" },
+    { modelId },
+  )
+
+  expect(response.status).toBe(421)
+  expect(await response.text()).toBe("second misdirect")
+  expect(usedAccount?.id).toBe(10_051)
+  expect(capturedRequests.map(({ url }) => url)).toEqual([
+    "https://api.githubcopilot.com/chat/completions",
+    "https://api.github.com/copilot_internal/user",
+    "https://api.business.githubcopilot.com/models",
+    "https://api.business.githubcopilot.com/chat/completions",
+  ])
+  expect(llmAuthorizationHeaders()).toEqual([
+    "Bearer oauth-primary",
+    "Bearer oauth-primary",
+  ])
+})
+
+test("returns the original 421 when endpoint rediscovery fails", async () => {
+  const modelId = "router-misdirected-discovery-failure"
+  registerAccount(1007, modelId, "oauth-primary")
+  registerAccount(1008, modelId, "oauth-secondary")
+  tokenPool.rebuildModelIndex()
+  const account = tokenPool.getEligibleAccountForModel(modelId, 1007)
+  if (!account) throw new TypeError("Expected selected account")
+  const originalModelsData = account.modelsData
+  const originalModels = account.models
+  account.copilotApiBaseUrl = "https://api.githubcopilot.com"
+  tokenPool.rebuildModelIndex()
+
+  queuedResults.push(
+    new Response("Misdirected Request", { status: 421 }),
+    new Response("discovery unavailable", { status: 503 }),
+  )
+
+  const { response, account: usedAccount } = await routedFetch(
+    "/chat/completions",
+    { method: "POST" },
+    { modelId },
+  )
+
+  expect(response.status).toBe(421)
+  expect(await response.text()).toBe("Misdirected Request")
+  expect(usedAccount?.id).toBe(1007)
+  expect(account.copilotApiBaseUrl).toBe("https://api.githubcopilot.com")
+  expect(account.models).toBe(originalModels)
+  expect(account.modelsData).toBe(originalModelsData)
+  expect(capturedRequests.map(({ url }) => url)).toEqual([
+    "https://api.githubcopilot.com/chat/completions",
+    "https://api.github.com/copilot_internal/user",
+  ])
+  expect(llmAuthorizationHeaders()).toEqual(["Bearer oauth-primary"])
+})
+
+test("does not resend a 421 after rediscovery removes endpoint authority", async () => {
+  const modelId = "router-misdirected-endpoint-removed"
+  registerAccount(1009, modelId, "oauth-primary")
+  registerAccount(1010, modelId, "oauth-secondary")
+  tokenPool.rebuildModelIndex()
+  const account = tokenPool.getEligibleAccountForModel(modelId, 1009)
+  if (!account) throw new TypeError("Expected selected account")
+  account.copilotApiBaseUrl = "https://api.githubcopilot.com"
+  tokenPool.rebuildModelIndex()
+
+  const refreshedModel = createModel(modelId)
+  refreshedModel.supported_endpoints = ["/responses"]
+  queuedResults.push(
+    new Response("Misdirected Request", { status: 421 }),
+    Response.json({
+      endpoints: { api: "https://api.enterprise.githubcopilot.com" },
+    }),
+    Response.json({ data: [refreshedModel], object: "list" }),
+  )
+
+  const error = await routedFetch(
+    "/chat/completions",
+    { method: "POST" },
+    { modelId },
+  ).catch((caught: unknown) => caught)
+
+  expect(error).toBeInstanceOf(LocalHTTPError)
+  expect((error as LocalHTTPError).response.status).toBe(400)
+  expect(capturedRequests.map(({ url }) => url)).toEqual([
+    "https://api.githubcopilot.com/chat/completions",
+    "https://api.github.com/copilot_internal/user",
+    "https://api.enterprise.githubcopilot.com/models",
+  ])
+  expect(llmAuthorizationHeaders()).toEqual(["Bearer oauth-primary"])
+})
+
+test("records final response metadata once after a returned 403", async () => {
   const modelId = "router-metadata-failover"
   registerAccount(10_031, modelId, "metadata-primary")
   registerAccount(10_032, modelId, "metadata-secondary")
@@ -860,29 +936,21 @@ test("records final response metadata once after a 403 account failover", async 
       status: 403,
       headers: { "x-github-request-id": "failed-attempt" },
     }),
-    new Response("{}", {
-      status: 200,
-      headers: {
-        "x-github-request-id": "final-attempt",
-        "x-quota-snapshot-premium": "final-quota",
-      },
-    }),
   )
   const debugSpy = spyOn(consola, "debug")
 
   try {
     const { result, headers } = await routedFetchWithMetadataStore(modelId)
 
-    expect(result.response.status).toBe(200)
+    expect(result.response.status).toBe(403)
     expect(headers).toEqual({
-      "x-github-request-id": "final-attempt",
-      "x-quota-snapshot-premium": "final-quota",
+      "x-github-request-id": "failed-attempt",
     })
     expect(responseMetadataEvents(debugSpy.mock.calls)).toEqual([
       {
         kind: "response_metadata",
-        headerCount: 2,
-        quotaSnapshotCount: 1,
+        headerCount: 1,
+        quotaSnapshotCount: 0,
       },
     ])
   } finally {
@@ -918,8 +986,8 @@ test("records final response metadata once after a transport retry", async () =>
   }
 })
 
-test("records final response metadata once after same-account reinitialization", async () => {
-  const modelId = "router-metadata-reinitialize"
+test("records final response metadata once after a direct OAuth 401", async () => {
+  const modelId = "router-metadata-direct-oauth-401"
   registerAccount(10_051, modelId, "metadata-expired")
   tokenPool.rebuildModelIndex()
   queuedResults.push(
@@ -927,19 +995,13 @@ test("records final response metadata once after same-account reinitialization",
       status: 401,
       headers: { "x-github-request-id": "expired-attempt" },
     }),
-    copilotTokenResponse("metadata-fresh"),
-    modelsResponse([modelId]),
-    new Response("{}", {
-      status: 200,
-      headers: { "x-github-request-id": "reinitialized-final" },
-    }),
   )
   const debugSpy = spyOn(consola, "debug")
 
   try {
     const { result } = await routedFetchWithMetadataStore(modelId)
 
-    expect(result.response.status).toBe(200)
+    expect(result.response.status).toBe(401)
     expect(responseMetadataEvents(debugSpy.mock.calls)).toEqual([
       {
         kind: "response_metadata",
@@ -947,6 +1009,8 @@ test("records final response metadata once after same-account reinitialization",
         quotaSnapshotCount: 0,
       },
     ])
+    expect(capturedRequests).toHaveLength(1)
+    expect(capturedRequests[0]?.url).not.toContain("/v2/token")
   } finally {
     debugSpy.mockRestore()
   }
@@ -989,12 +1053,6 @@ test("records final response metadata once when affinity rejection throws", asyn
     new Response("Unauthorized", {
       status: 401,
       headers: { "x-github-request-id": "affinity-first" },
-    }),
-    copilotTokenResponse("metadata-affinity-fresh"),
-    modelsResponse([modelId]),
-    new Response("Unauthorized", {
-      status: 401,
-      headers: { "x-github-request-id": "affinity-final" },
     }),
   )
   const debugSpy = spyOn(consola, "debug")
@@ -1143,8 +1201,8 @@ test("returns the second encrypted Responses compaction failure after one select
   }
 })
 
-test("refreshes a multi-token account and retries after a 401", async () => {
-  const modelId = "router-401-refresh-test"
+test("returns a public OAuth 401 without token exchange or retry", async () => {
+  const modelId = "router-public-oauth-401-test"
   registerAccount(1011, modelId, "expired-copilot-token")
   tokenPool.rebuildModelIndex()
 
@@ -1152,9 +1210,6 @@ test("refreshes a multi-token account and retries after a 401", async () => {
     new Response("IDE token expired: unauthorized: token expired\n", {
       status: 401,
     }),
-    copilotTokenResponse("fresh-copilot-token"),
-    modelsResponse([modelId]),
-    new Response("{}", { status: 200 }),
   )
 
   const { response, account } = await routedFetch(
@@ -1163,262 +1218,84 @@ test("refreshes a multi-token account and retries after a 401", async () => {
     { modelId },
   )
 
-  expect(response.status).toBe(200)
+  expect(response.status).toBe(401)
   expect(account?.id).toBe(1011)
-  expect(account?.copilotToken).toBe("fresh-copilot-token")
-  expect(capturedRequests).toHaveLength(4)
+  expect(account?.copilotToken).toBe("expired-copilot-token")
+  expect(capturedRequests).toHaveLength(1)
   expect(capturedRequests[0]?.init?.headers).toMatchObject({
     Authorization: "Bearer expired-copilot-token",
   })
-  expect(capturedRequests[1]?.url).toContain("/copilot_internal/v2/token")
-  expect(capturedRequests[1]?.init?.headers).toMatchObject({
-    authorization: "token github-token-1011",
-  })
-  expect(capturedRequests[2]?.url).toContain("/models")
-  expect(capturedRequests[3]?.init?.headers).toMatchObject({
-    Authorization: "Bearer fresh-copilot-token",
-  })
+  expect(capturedRequests[0]?.url).not.toContain("/copilot_internal/v2/token")
 })
 
-test("disables pooling for multi-token model discovery", async () => {
+test("discovers public OAuth models without legacy token exchange", async () => {
   const account = tokenPool.addAccount("github-model-token", "individual", 1110)
-  const githubUserResponse = createDeferredFetchResponse()
-  const observedGitHubUser = createObservedGitHubUserResponse("model-user")
   queuedResults.push(
-    new Response(
-      JSON.stringify({
-        token: "copilot-model-token",
-        expires_at: 1_900_000_000,
-        refresh_in: 1800,
-      }),
-      { status: 200, headers: { "content-type": "application/json" } },
-    ),
+    Response.json({
+      endpoints: { api: "https://api.githubcopilot.com" },
+      login: "model-user",
+    }),
     new Response(JSON.stringify({ object: "list", data: [] }), {
       status: 200,
       headers: { "content-type": "application/json" },
     }),
-    githubUserResponse,
   )
 
-  const initialization = tokenPool.initializeAccount(account)
-  await githubUserResponse.requestStarted
-  githubUserResponse.resolveResponse(observedGitHubUser.response)
-  await observedGitHubUser.loginRead
-  await initialization
+  await tokenPool.initializeAccount(account)
 
+  expect(capturedRequests[0]?.url).toBe(
+    "https://api.github.com/copilot_internal/user",
+  )
+  expect(
+    new Headers(capturedRequests[0]?.init?.headers).get("authorization"),
+  ).toBe("Bearer github-model-token")
   expect(capturedRequests[1]?.url).toContain("/models")
   expect(capturedRequests[1]?.init?.keepalive).toBe(false)
+  expect(account.copilotToken).toBe("github-model-token")
+  expect(account.githubUsername).toBe("model-user")
+  expect(capturedRequests.every(({ url }) => !url.includes("/v2/token"))).toBe(
+    true,
+  )
 })
 
-test("resolves the GitHub username during account initialization", async () => {
+test("updates the GitHub username during direct OAuth revalidation", async () => {
   const account = tokenPool.addAccount(
     "github-username-token",
     "individual",
     1111,
   )
-  const githubUserResponse = createDeferredFetchResponse()
-  const observedGitHubUser = createObservedGitHubUserResponse("octocat")
   queuedResults.push(
-    new Response(
-      JSON.stringify({
-        token: "copilot-username-token",
-        expires_at: 1_900_000_000,
-        refresh_in: 1800,
-      }),
-      { status: 200, headers: { "content-type": "application/json" } },
-    ),
+    Response.json({
+      endpoints: { api: "https://api.githubcopilot.com" },
+      login: "octocat",
+    }),
     new Response(JSON.stringify({ object: "list", data: [] }), {
       status: 200,
       headers: { "content-type": "application/json" },
     }),
-    githubUserResponse,
   )
 
-  const initialization = tokenPool.initializeAccount(account)
-  await githubUserResponse.requestStarted
-  githubUserResponse.resolveResponse(observedGitHubUser.response)
-  await observedGitHubUser.loginRead
-  await initialization
+  await tokenPool.initializeAccount(account)
 
   queuedResults.push(
-    new Response(
-      JSON.stringify({
-        token: "refreshed-copilot-username-token",
-        expires_at: 1_900_003_600,
-        refresh_in: 1800,
-      }),
-      { status: 200, headers: { "content-type": "application/json" } },
-    ),
+    Response.json({
+      endpoints: { api: "https://api.githubcopilot.com" },
+      login: "octocat-refreshed",
+    }),
+    modelsResponse([]),
   )
-  await tokenPool.refreshAccountToken(account)
+  await tokenPool.reinitializeAccount(account)
 
-  expect(account.githubUsername).toBe("octocat")
-  expect(capturedRequests[2]?.url).toBe("https://api.github.com/user")
-  expect(capturedRequests[2]?.init?.headers).toMatchObject({
-    authorization: "token github-username-token",
-  })
+  expect(account.githubUsername).toBe("octocat-refreshed")
   expect(
     capturedRequests.filter(
-      (request) => request.url === "https://api.github.com/user",
+      (request) =>
+        request.url === "https://api.github.com/copilot_internal/user",
     ),
-  ).toHaveLength(1)
-})
-
-test("does not block account initialization while GitHub username lookup is pending", async () => {
-  const account = tokenPool.addAccount(
-    "github-username-deferred-token",
-    "individual",
-    1114,
+  ).toHaveLength(2)
+  expect(capturedRequests.every(({ url }) => !url.includes("/v2/token"))).toBe(
+    true,
   )
-  const githubUserResponse = createDeferredFetchResponse()
-  const observedGitHubUser = createObservedGitHubUserResponse("deferred-user")
-  queuedResults.push(
-    new Response(
-      JSON.stringify({
-        token: "copilot-username-deferred-token",
-        expires_at: 1_900_000_000,
-        refresh_in: 1800,
-      }),
-      { status: 200, headers: { "content-type": "application/json" } },
-    ),
-    new Response(JSON.stringify({ object: "list", data: [] }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    }),
-    githubUserResponse,
-  )
-
-  let initializationSettled = false
-  const initialization = tokenPool.initializeAccount(account).then(() => {
-    initializationSettled = true
-  })
-  try {
-    await githubUserResponse.requestStarted
-    // requestStarted resolves before initializeAccount returns. Its completion
-    // reaction is therefore already queued; one microtask lets it run without
-    // releasing the still-pending GitHub response.
-    await Promise.resolve()
-
-    expect(initializationSettled).toBe(true)
-    expect(account.healthy).toBe(true)
-    expect(account.githubUsername).toBeUndefined()
-    expect(
-      capturedRequests.filter(
-        (request) => request.url === "https://api.github.com/user",
-      ),
-    ).toHaveLength(1)
-  } finally {
-    githubUserResponse.resolveResponse(observedGitHubUser.response)
-    await initialization
-    await observedGitHubUser.loginRead
-  }
-
-  expect(account.githubUsername).toBe("deferred-user")
-  expect(
-    capturedRequests.filter(
-      (request) => request.url === "https://api.github.com/user",
-    ),
-  ).toHaveLength(1)
-})
-
-test("keeps an account healthy when GitHub username lookup fails", async () => {
-  const account = tokenPool.addAccount(
-    "github-username-failure-token",
-    "individual",
-    1112,
-  )
-  const githubUserResponse = createDeferredFetchResponse()
-  queuedResults.push(
-    new Response(
-      JSON.stringify({
-        token: "copilot-username-failure-token",
-        expires_at: 1_900_000_000,
-        refresh_in: 1800,
-      }),
-      { status: 200, headers: { "content-type": "application/json" } },
-    ),
-    new Response(JSON.stringify({ object: "list", data: [] }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    }),
-    githubUserResponse,
-  )
-
-  const warnSpy = spyOn(consola, "warn")
-  const warningObserver = createWarningObserver()
-  warnSpy.mockImplementation(warningObserver.implementation)
-  let warningOutput: string
-  try {
-    const initialization = tokenPool.initializeAccount(account)
-    await githubUserResponse.requestStarted
-    githubUserResponse.resolveResponse(
-      new Response("Service unavailable", { status: 503 }),
-    )
-    await warningObserver.observed
-    await initialization
-    warningOutput = warnSpy.mock.calls
-      .map((args) => args.map(String).join(" "))
-      .join("\n")
-  } finally {
-    warnSpy.mockRestore()
-  }
-
-  expect(account.healthy).toBe(true)
-  expect(account.githubUsername).toBeUndefined()
-  expect(capturedRequests[2]?.url).toBe("https://api.github.com/user")
-  expect(warningOutput).toContain("account #1112")
-  expect(warningOutput).toContain("HTTP 503")
-  expect(warningOutput).not.toContain("github-username-failure-token")
-})
-
-test("redacts arbitrary GitHub username lookup error messages", async () => {
-  const account = tokenPool.addAccount(
-    "github-username-redaction-token",
-    "individual",
-    1113,
-  )
-  const githubUserResponse = createDeferredFetchResponse()
-  queuedResults.push(
-    new Response(
-      JSON.stringify({
-        token: "copilot-username-redaction-token",
-        expires_at: 1_900_000_000,
-        refresh_in: 1800,
-      }),
-      { status: 200, headers: { "content-type": "application/json" } },
-    ),
-    new Response(JSON.stringify({ object: "list", data: [] }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    }),
-    githubUserResponse,
-  )
-
-  const warnSpy = spyOn(consola, "warn")
-  const warningObserver = createWarningObserver()
-  warnSpy.mockImplementation(warningObserver.implementation)
-  let warningOutput: string
-  try {
-    const initialization = tokenPool.initializeAccount(account)
-    await githubUserResponse.requestStarted
-    githubUserResponse.rejectResponse(
-      new Error("request failed for github-username-redaction-token"),
-    )
-    await warningObserver.observed
-    await initialization
-    warningOutput = warnSpy.mock.calls
-      .map((args) => args.map(String).join(" "))
-      .join("\n")
-  } finally {
-    warnSpy.mockRestore()
-  }
-
-  expect(account.healthy).toBe(true)
-  expect(account.githubUsername).toBeUndefined()
-  expect(warningOutput).toContain("account #1113")
-  expect(warningOutput).toContain("Error")
-  expect(warningOutput).not.toContain("request failed")
-  expect(warningOutput).not.toContain("github-username-redaction-token")
 })
 
 test("does not fail over aborted multi-token requests", async () => {
@@ -1511,7 +1388,7 @@ test("omits fallback model diagnostics only inside a suppressed request scope", 
   }
 })
 
-test("refreshes the fallback account for unknown models after a 401", async () => {
+test("preserves the fallback account after a public OAuth 401", async () => {
   const modelId = "gpt-4.1-mini"
   registerAccount(1013, "different-known-model", "expired-fallback-token")
   tokenPool.rebuildModelIndex()
@@ -1525,9 +1402,6 @@ test("refreshes the fallback account for unknown models after a 401", async () =
     new Response("IDE token expired: unauthorized: token expired\n", {
       status: 401,
     }),
-    copilotTokenResponse("fresh-fallback-token"),
-    modelsResponse(["different-known-model"]),
-    new Response("{}", { status: 200 }),
   )
 
   const { response, account } = await routedFetch(
@@ -1536,18 +1410,14 @@ test("refreshes the fallback account for unknown models after a 401", async () =
     { modelId },
   )
 
-  expect(response.status).toBe(200)
+  expect(response.status).toBe(401)
   expect(account?.id).toBe(expectedAccount.id)
-  expect(account?.copilotToken).toBe("fresh-fallback-token")
-  expect(capturedRequests).toHaveLength(4)
+  expect(account?.copilotToken).toBe("expired-fallback-token")
+  expect(capturedRequests).toHaveLength(1)
   expect(capturedRequests[0]?.init?.headers).toMatchObject({
     Authorization: "Bearer expired-fallback-token",
   })
-  expect(capturedRequests[1]?.url).toContain("/copilot_internal/v2/token")
-  expect(capturedRequests[2]?.url).toContain("/models")
-  expect(capturedRequests[3]?.init?.headers).toMatchObject({
-    Authorization: "Bearer fresh-fallback-token",
-  })
+  expect(capturedRequests[0]?.url).not.toContain("/copilot_internal/v2/token")
 })
 
 test("does not expose last used account globally outside request context", async () => {
@@ -1621,12 +1491,7 @@ test("does not fail over to an account where the model is disabled", async () =>
   setModelRoutingOverridesForTest({ [modelId]: { "1009": false } })
   tokenPool.rebuildModelIndex()
 
-  queuedResults.push(
-    new Response("Unauthorized", { status: 401 }),
-    copilotTokenResponse("fresh-enabled-failover-primary"),
-    modelsResponse([modelId]),
-    new Response("Unauthorized", { status: 401 }),
-  )
+  queuedResults.push(new Response("Unauthorized", { status: 401 }))
 
   const { response, account } = await routedFetch(
     "/chat/completions",
@@ -1636,14 +1501,9 @@ test("does not fail over to an account where the model is disabled", async () =>
 
   expect(response.status).toBe(401)
   expect(account?.id).toBe(1008)
-  expect(capturedRequests).toHaveLength(4)
+  expect(capturedRequests).toHaveLength(1)
   expect(capturedRequests[0]?.init?.headers).toMatchObject({
     Authorization: "Bearer enabled-failover-primary",
-  })
-  expect(capturedRequests[1]?.url).toContain("/copilot_internal/v2/token")
-  expect(capturedRequests[2]?.url).toContain("/models")
-  expect(capturedRequests[3]?.init?.headers).toMatchObject({
-    Authorization: "Bearer fresh-enabled-failover-primary",
   })
 })
 
@@ -1701,65 +1561,29 @@ test("does not switch accounts on a transport connection error", async () => {
   }
 })
 
-test("caps sends across a 401 refresh-resend and a failover transport retry", async () => {
-  // Exact repro: 401 -> refresh -> 401 -> failover -> ECONNRESET -> would-be
-  // success. The fourth LLM send must never be issued.
-  const modelId = "router-401-refresh-then-failover"
+test("stops after the first public OAuth 401 without consuming retry budget", async () => {
+  const modelId = "router-public-oauth-401-budget"
   registerAccount(1105, modelId, "expired-primary-token")
   registerAccount(1106, modelId, "budget-failover-token")
   tokenPool.rebuildModelIndex()
 
-  const tokenResponse = () =>
-    new Response(
-      JSON.stringify({
-        token: "fresh-copilot-token",
-        expires_at: 1_900_000_000,
-        refresh_in: 1800,
-      }),
-      { status: 200, headers: { "content-type": "application/json" } },
-    )
-
   queuedResults.push(
     new Response("unauthorized: token expired\n", { status: 401 }),
-    tokenResponse(),
-    modelsResponse([modelId]),
-    new Response("unauthorized: token expired\n", { status: 401 }),
-    Object.assign(
-      new Error(
-        "The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()",
-      ),
-      { code: "ECONNRESET", errno: 0 },
-    ),
-    // A fourth LLM send would consume this; the budget must prevent it.
-    new Response("{}", { status: 200 }),
   )
 
-  let thrownError: unknown
-  try {
-    await routedFetch("/chat/completions", { method: "POST" }, { modelId })
-  } catch (error) {
-    thrownError = error
-  }
-
-  expect((thrownError as Error | undefined)?.message).toContain(
-    "socket connection",
+  const result = await routedFetch(
+    "/chat/completions",
+    { method: "POST" },
+    { modelId },
   )
+  expect(result.response.status).toBe(401)
+  expect(result.account?.id).toBe(1105)
 
-  const llmSends = capturedRequests.filter(
-    (request) =>
-      !request.url.includes("/copilot_internal/")
-      && !request.url.endsWith("/models"),
-  )
-  expect(llmSends).toHaveLength(3)
-  expect(llmSends[0]?.init?.headers).toMatchObject({
+  expect(capturedRequests).toHaveLength(1)
+  expect(capturedRequests[0]?.init?.headers).toMatchObject({
     Authorization: "Bearer expired-primary-token",
   })
-  expect(llmSends[1]?.init?.headers).toMatchObject({
-    Authorization: "Bearer fresh-copilot-token",
-  })
-  expect(llmSends[2]?.init?.headers).toMatchObject({
-    Authorization: "Bearer budget-failover-token",
-  })
+  expect(capturedRequests[0]?.url).not.toContain("/v2/token")
 })
 
 test("caps total sends across a 429 failover and a transport retry", async () => {

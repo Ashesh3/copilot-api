@@ -4,22 +4,16 @@ import { defineCommand } from "citty"
 import { createConsola } from "consola"
 import { createInterface } from "node:readline"
 
-import { HTTPError } from "./lib/error"
 import {
   DEFAULT_GITHUB_DOMAIN,
   formatGitHubCredential,
-  isGitHubEnterpriseCloud,
   normalizeGitHubDomain,
-  resolveCopilotApiBaseUrl,
 } from "./lib/github-instance"
-import { copilotHeaders } from "./services/copilot/copilot-client"
-import { createCopilotTransportInit } from "./services/copilot/transport-options"
 import { loginViaWebFlow } from "./services/github/auth-flow"
-import { getCopilotToken } from "./services/github/get-copilot-token"
-import { getCopilotUsage } from "./services/github/get-copilot-usage"
 import { getDeviceCode } from "./services/github/get-device-code"
 import { getGitHubUser } from "./services/github/get-user"
 import { pollAccessToken } from "./services/github/poll-access-token"
+import { resolveCopilotOAuth } from "./services/github/resolve-copilot-oauth"
 
 const authLogger = createConsola({
   stderr: process.stderr,
@@ -201,28 +195,12 @@ export async function runAuth(options: RunAuthOptions): Promise<void> {
         authLogger.info(`If the browser does not open, visit: ${url}`)
       })
   const user = await getGitHubUser(token, instanceDomain)
-  if (isGitHubEnterpriseCloud(instanceDomain)) {
-    const copilotUser = await getCopilotUsage(token, instanceDomain)
-    const baseUrl = resolveCopilotApiBaseUrl(
-      instanceDomain,
-      copilotUser.endpoints?.api,
-      "enterprise",
-    )
-    const response = await fetch(
-      `${baseUrl}/models`,
-      createCopilotTransportInit({
-        headers: copilotHeaders({ copilotToken: token }),
-      }),
-    )
-    if (!response.ok) {
-      throw new HTTPError(
-        `Failed to validate Copilot model access (HTTP ${response.status})`,
-        response,
-      )
-    }
-  } else {
-    await getCopilotToken({ githubToken: token, instanceDomain })
-  }
+  await resolveCopilotOAuth({
+    accountType:
+      instanceDomain === DEFAULT_GITHUB_DOMAIN ? "individual" : "enterprise",
+    githubToken: token,
+    instanceDomain,
+  })
   const envEntry = formatGitHubCredential({ instanceDomain, token })
 
   authLogger.success(`Signed in as ${user.login} on ${instanceDomain}`)

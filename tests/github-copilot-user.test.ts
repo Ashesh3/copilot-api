@@ -9,30 +9,44 @@ afterEach(() => {
   globalThis.fetch = originalFetch
 })
 
-test("fetches enterprise Copilot user metadata with an OAuth bearer", async () => {
-  let request: Request | undefined
-  globalThis.fetch = mock(
-    (input: string | URL | Request, init?: RequestInit) => {
-      request =
-        input instanceof Request ?
-          new Request(input, init)
-        : new Request(input.toString(), init)
-      return Promise.resolve(
-        Response.json({
-          login: "enterprise-user",
-          endpoints: { api: "https://copilot-api.msft.ghe.com" },
-        }),
-      )
-    },
-  ) as unknown as typeof fetch
+test.each([
+  {
+    domain: "github.com",
+    expectedUrl: "https://api.github.com/copilot_internal/user",
+    endpoint: "https://api.enterprise.githubcopilot.com",
+  },
+  {
+    domain: "msft.ghe.com",
+    expectedUrl: "https://api.msft.ghe.com/copilot_internal/user",
+    endpoint: "https://copilot-api.msft.ghe.com",
+  },
+])(
+  "fetches $domain Copilot user metadata with an OAuth bearer",
+  async ({ domain, endpoint, expectedUrl }) => {
+    let request: Request | undefined
+    globalThis.fetch = mock(
+      (input: string | URL | Request, init?: RequestInit) => {
+        request =
+          input instanceof Request ?
+            new Request(input, init)
+          : new Request(input.toString(), init)
+        return Promise.resolve(
+          Response.json({
+            login: "enterprise-user",
+            endpoints: { api: endpoint },
+          }),
+        )
+      },
+    ) as unknown as typeof fetch
 
-  const result = await getCopilotUsage("gho_enterprise", "msft.ghe.com")
+    const result = await getCopilotUsage("gho_oauth", domain)
 
-  expect(request?.url).toBe("https://api.msft.ghe.com/copilot_internal/user")
-  expect(request?.headers.get("authorization")).toBe("Bearer gho_enterprise")
-  expect(result.login).toBe("enterprise-user")
-  expect(result.endpoints?.api).toBe("https://copilot-api.msft.ghe.com")
-})
+    expect(request?.url).toBe(expectedUrl)
+    expect(request?.headers.get("authorization")).toBe("Bearer gho_oauth")
+    expect(result.login).toBe("enterprise-user")
+    expect(result.endpoints?.api).toBe(endpoint)
+  },
+)
 
 test("includes the safe HTTP status when Copilot user discovery fails", async () => {
   globalThis.fetch = mock(() =>

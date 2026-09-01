@@ -4,8 +4,7 @@ import fs from "node:fs/promises"
 import { PATHS } from "~/lib/paths"
 import { state } from "~/lib/state"
 import { server } from "~/server"
-import { getModels } from "~/services/copilot/get-models"
-import { getCopilotToken } from "~/services/github/get-copilot-token"
+import { resolveCopilotOAuth } from "~/services/github/resolve-copilot-oauth"
 
 export const TEST_TIMEOUT = 60_000
 
@@ -35,13 +34,16 @@ async function doInit(): Promise<void> {
   }
   state.githubToken = githubToken
 
-  // Get Copilot token
-  const { token } = await getCopilotToken()
-  state.copilotToken = token
-
-  // Fetch and cache models
-  const models = await getModels()
-  state.models = models
+  const resolved = await resolveCopilotOAuth({
+    accountType: state.accountType,
+    githubToken,
+    instanceDomain: state.githubInstanceDomain,
+  })
+  Object.assign(state, {
+    copilotApiBaseUrl: resolved.baseUrl,
+    copilotToken: resolved.token,
+    models: resolved.models,
+  })
 }
 
 export async function request(

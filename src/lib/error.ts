@@ -339,7 +339,6 @@ const SAFE_HTTP_ERROR_MESSAGES = new Set([
   "Failed to create embeddings",
   "Failed to create responses",
   "Failed to get Copilot usage",
-  "Failed to get Copilot token",
   "Failed to get device code",
   "Failed to get GitHub user",
   "Failed to get models",
@@ -493,7 +492,6 @@ const SAFE_LOCAL_ERROR_TYPES = new Set([
   "server_error",
 ])
 const SAFE_LOCAL_ERROR_CODES = new Set([
-  "account_reinitialization_failed",
   "bad_request",
   "compaction_payload_too_large",
   "endpoint_translation_unsupported",

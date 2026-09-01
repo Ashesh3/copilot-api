@@ -1,4 +1,3 @@
-/* eslint-disable max-lines -- routing, recovery, and affinity share request-local state */
 import consola from "consola"
 import { AsyncLocalStorage } from "node:async_hooks"
 
@@ -17,8 +16,7 @@ import {
   selectModelAccount,
 } from "~/lib/account-routing-selection"
 import { sessionTokenMatchesAccount } from "~/lib/copilot-session-token"
-import { HTTPError, LocalHTTPError } from "~/lib/error"
-import { isGitHubEnterpriseCloud } from "~/lib/github-instance"
+import { LocalHTTPError } from "~/lib/error"
 import {
   getClientSessionId,
   getLastUsedRoutedAccountId,
@@ -41,20 +39,14 @@ import {
 
 // --- Constants ---
 
-const FAILOVER_STATUSES = new Set([401, 403, 429])
+const FAILOVER_STATUSES = new Set([429])
 const pinnedRoutedAccountStorage = new AsyncLocalStorage<number | undefined>()
 const selectedRoutedAccountStorage = new AsyncLocalStorage<
   RoutedAccountPin | undefined
 >()
 
-function shouldPreserveAuthRejectedAccount(
-  account: Account,
-  response: Response,
-): boolean {
-  return (
-    isGitHubEnterpriseCloud(account.githubInstanceDomain)
-    && (response.status === 401 || response.status === 403)
-  )
+function shouldPreserveAuthRejectedAccount(response: Response): boolean {
+  return response.status === 401 || response.status === 403
 }
 
 function canFailOverBetweenAccounts(
@@ -374,67 +366,29 @@ async function fetchWithAccount(
   )
 }
 
-function createSessionAccountRejectedError(
-  account: Account,
-  afterReinitialization: boolean,
-): LocalHTTPError {
-  const message =
-    afterReinitialization ?
-      "The bound account rejected this conversation after successful account reinitialization; affinity was preserved and no cross-account retry was attempted."
-    : "The bound account rejected this conversation; affinity was preserved and no cross-account retry was attempted."
-  const clientBody = {
-    error: {
-      account_id: account.id,
-      code: "session_account_rejected",
-      message,
-      type: "session_affinity_error",
-    },
-  }
-  return new LocalHTTPError(
-    clientBody.error.message,
-    Response.json(clientBody, { status: 409 }),
-    clientBody,
-  )
-}
-
-function createAccountReinitializationFailedError(
-  account: Account,
-): LocalHTTPError {
-  const clientBody = {
-    error: {
-      account_id: account.id,
-      code: "account_reinitialization_failed",
-      message:
-        "The bound account could not be reinitialized; affinity was preserved and no cross-account retry was attempted.",
-      type: "account_unavailable",
-    },
-  }
-  return new LocalHTTPError(
-    clientBody.error.message,
-    Response.json(clientBody, { status: 503 }),
-    clientBody,
-  )
-}
-
-async function reinitializeAndRetryAccount(
+async function recoverMisdirectedAccount(
   options: AccountFetchOptions,
+  originalResponse: Response,
 ): Promise<Response> {
   const { account, path, retryBudget } = options
+  if (retryBudget.remaining <= 0) {
+    consola.warn(
+      `[Account #${account.id}] Send budget exhausted after HTTP 421 on ${path}; returning the original response`,
+    )
+    return originalResponse
+  }
+
+  consola.warn(
+    `[Account #${account.id}] HTTP 421 on ${path}, rediscovering the Copilot endpoint`,
+  )
+
   try {
-    consola.warn(
-      `[Account #${account.id}] HTTP 401 on ${path}, reinitializing account credentials and models`,
-    )
     await tokenPool.reinitializeAccount(account, state.showToken)
-  } catch (error) {
+  } catch {
     consola.warn(
-      `[Account #${account.id}] Account reinitialization failed after HTTP 401 on ${path}`,
-      error instanceof HTTPError ?
-        { status: error.response.status }
-      : {
-          errorClass: error instanceof Error ? error.name : "Unknown",
-        },
+      `[Account #${account.id}] Copilot endpoint rediscovery failed after HTTP 421; returning the original response`,
     )
-    throw createAccountReinitializationFailedError(account)
+    return originalResponse
   }
 
   if (
@@ -448,15 +402,32 @@ async function reinitializeAndRetryAccount(
     throw createEndpointUnavailableError()
   }
 
-  // The resend is an extra upstream send and is charged like any other.
   if (!consumeExtraSend(retryBudget)) {
     consola.warn(
-      `[Account #${account.id}] Send budget exhausted after 401 on ${path}, not resending`,
+      `[Account #${account.id}] Send budget exhausted after HTTP 421 on ${path}; returning the original response`,
     )
-    return new Response(null, { status: 401 })
+    return originalResponse
   }
 
-  return await fetchWithAccount({ ...options, reason: "token_refresh" })
+  return await fetchWithAccount({ ...options, reason: "http_retry" })
+}
+
+function createSessionAccountRejectedError(account: Account): LocalHTTPError {
+  const message =
+    "The bound account rejected this conversation; affinity was preserved and no cross-account retry was attempted."
+  const clientBody = {
+    error: {
+      account_id: account.id,
+      code: "session_account_rejected",
+      message,
+      type: "session_affinity_error",
+    },
+  }
+  return new LocalHTTPError(
+    clientBody.error.message,
+    Response.json(clientBody, { status: 409 }),
+    clientBody,
+  )
 }
 
 async function fetchWithFallbackAccount(
@@ -578,7 +549,7 @@ async function fetchWithRoutedAccount(
   const { headerOptions, init, maxHttpRetryDelaySeconds, path, retryBudget } =
     context
 
-  let response = await fetchWithAccount({
+  const accountOptions: AccountFetchOptions = {
     account,
     enforceEndpointAuthority: context.enforceEndpointAuthority,
     headerOptions,
@@ -588,29 +559,23 @@ async function fetchWithRoutedAccount(
     path,
     reason,
     retryBudget,
-  })
-  let reinitialized = false
-
-  if (response.status === 401) {
-    response = await reinitializeAndRetryAccount({
-      account,
-      enforceEndpointAuthority: context.enforceEndpointAuthority,
-      headerOptions,
-      init,
-      maxHttpRetryDelaySeconds,
-      modelId: context.modelId,
-      path,
-      reason: "token_refresh",
-      retryBudget,
-    })
-    reinitialized = true
   }
-
+  let response = await fetchWithAccount(accountOptions)
+  if (response.status === 421) {
+    response = await recoverMisdirectedAccount(accountOptions, response)
+    if (
+      context.affinityKey
+      && (response.status === 401 || response.status === 403)
+    ) {
+      throw createSessionAccountRejectedError(account)
+    }
+    return { response, account }
+  }
   if (
     context.affinityKey
     && (response.status === 401 || response.status === 403)
   ) {
-    throw createSessionAccountRejectedError(account, reinitialized)
+    throw createSessionAccountRejectedError(account)
   }
   if (context.affinityKey) {
     return { response, account }
@@ -619,7 +584,7 @@ async function fetchWithRoutedAccount(
     return { response, account }
   }
 
-  if (shouldPreserveAuthRejectedAccount(account, response)) {
+  if (shouldPreserveAuthRejectedAccount(response)) {
     return { response, account }
   }
 
@@ -806,8 +771,8 @@ export async function routedControlPlaneFetch(
   let response: Response
   try {
     response = await fetchWithAccount(accountOptions)
-    if (response.status === 401) {
-      response = await reinitializeAndRetryAccount(accountOptions)
+    if (response.status === 421) {
+      response = await recoverMisdirectedAccount(accountOptions, response)
     }
   } catch (error) {
     if (error instanceof LocalHTTPError) {
@@ -824,10 +789,11 @@ export async function routedControlPlaneFetch(
  *
  * In single-token mode, builds headers from headerOptions and delegates
  * to `copilotFetch`.
- * In multi-token mode, selects an account for the requested model,
- * builds headers with that account's token, issues the request, and on
- * unidentified 401/403/429 attempts one failover to an alternative account.
- * Identified conversations never move away from their hash-selected account.
+ * In multi-token mode, selects an account for the requested model and builds
+ * headers with that account's token. A 421 rediscovery retry stays on that
+ * account. Authentication rejections never cross identities; unidentified 429
+ * responses may fail over once within the same GitHub instance. Identified
+ * conversations never move away from their hash-selected account.
  *
  * Transport failures are NOT failed over. `copilotFetch` retries them in
  * place; every account resolves to the same Copilot host, so switching

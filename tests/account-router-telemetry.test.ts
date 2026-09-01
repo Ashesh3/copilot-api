@@ -89,22 +89,12 @@ beforeEach(() => {
   state.sessionId = "router-telemetry-test"
 })
 
-test("separates token refresh retries from account failover", async () => {
+test("keeps direct OAuth authentication rejection separate from failover", async () => {
   const modelId = "router-telemetry-failover"
   registerAccount(1001, modelId, "primary")
   registerAccount(1002, modelId, "secondary")
   tokenPool.rebuildModelIndex()
-  queuedResults.push(
-    new Response("Unauthorized", { status: 401 }),
-    Response.json({
-      token: "fresh",
-      expires_at: 1_900_000_000,
-      refresh_in: 1800,
-    }),
-    Response.json({ data: [createModel(modelId)], object: "list" }),
-    new Response("Unauthorized", { status: 401 }),
-    new Response("{}", { status: 200 }),
-  )
+  queuedResults.push(new Response("Unauthorized", { status: 401 }))
 
   const result = await routedFetch(
     "/chat/completions",
@@ -112,18 +102,17 @@ test("separates token refresh retries from account failover", async () => {
     { modelId },
   )
 
-  expect(result.response.status).toBe(200)
-  expect(result.account?.id).toBe(1002)
+  expect(result.response.status).toBe(401)
+  expect(result.account?.id).toBe(1001)
   const usage = snapshot()
   expect(usage.totals).toMatchObject({
-    failovers: 1,
-    retries: 1,
-    upstreamCalls: 3,
+    failovers: 0,
+    retries: 0,
+    upstreamCalls: 1,
   })
   expect(usage.selectionModes).toEqual({ default: 1, single: 0, sticky: 0 })
   expect(usage.models[0]?.accounts).toEqual([
-    { accountId: 1001, share: 2 / 3, upstreamCalls: 2 },
-    { accountId: 1002, share: 1 / 3, upstreamCalls: 1 },
+    { accountId: 1001, share: 1, upstreamCalls: 1 },
   ])
   expect(
     usage.accounts.map(({ expectedSelections, selected }) => ({

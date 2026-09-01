@@ -184,7 +184,7 @@ test("uses the enterprise data-residency Copilot host", () => {
   expect(copilotBaseUrl()).toBe("https://copilot-api.msft.ghe.com")
 })
 
-test("uses the endpoint discovered during Copilot token exchange", () => {
+test("uses the endpoint discovered during Copilot authentication", () => {
   state.githubInstanceDomain = "github.ghe.com"
   state.copilotApiBaseUrl = "https://copilot-api.github.ghe.com"
   expect(copilotBaseUrl()).toBe("https://copilot-api.github.ghe.com")
@@ -198,22 +198,8 @@ test("uses one current API version and the configured integration id", () => {
   expect(headers["Copilot-Harness-Id"]).toBe("copilot-sdk")
 })
 
-test("refreshes the single-token copilot token and retries the request after a 401", async () => {
-  queuedResults.push(
-    new Response("Unauthorized", { status: 401 }),
-    new Response(
-      JSON.stringify({
-        token: "fresh-copilot-token",
-        expires_at: 1_900_000_000,
-        refresh_in: 1800,
-      }),
-      {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      },
-    ),
-    new Response("{}", { status: 200 }),
-  )
+test("does not exchange or retry an immutable public OAuth token after a 401", async () => {
+  queuedResults.push(new Response("Unauthorized", { status: 401 }))
 
   const response = await copilotFetch("/chat/completions", {
     method: "POST",
@@ -223,16 +209,198 @@ test("refreshes the single-token copilot token and retries the request after a 4
     },
   })
 
-  expect(response.status).toBe(200)
-  expect(capturedRequests).toHaveLength(3)
-  expect(capturedRequests[1]?.url).toContain("/copilot_internal/v2/token")
-  expect(state.copilotToken).toBe("fresh-copilot-token")
-  expect(capturedRequests[2]?.init?.headers).toMatchObject({
-    Authorization: "Bearer fresh-copilot-token",
-  })
+  expect(response.status).toBe(401)
+  expect(capturedRequests.map(({ url }) => url)).toEqual([
+    "https://api.githubcopilot.com/chat/completions",
+  ])
+  expect(state.copilotToken).toBe("expired-copilot-token")
 })
 
-test("does not run the legacy token exchange after an enterprise OAuth 401", async () => {
+test("rediscovers a changed public OAuth endpoint and retries one 421", async () => {
+  state.copilotApiBaseUrl = "https://api.individual.githubcopilot.com"
+  queuedResults.push(
+    new Response("Misdirected Request", { status: 421 }),
+    Response.json({
+      endpoints: { api: "https://api.business.githubcopilot.com" },
+    }),
+    new Response("{}", { status: 200 }),
+  )
+
+  const response = await copilotFetch("/responses", {
+    method: "POST",
+    headers: {
+      Authorization: "Bearer expired-copilot-token",
+      "content-type": "application/json",
+      "X-Request-Id": "stale-endpoint-request",
+    },
+  })
+
+  expect(response.status).toBe(200)
+  expect(capturedRequests.map(({ url }) => url)).toEqual([
+    "https://api.individual.githubcopilot.com/responses",
+    "https://api.github.com/copilot_internal/user",
+    "https://api.business.githubcopilot.com/responses",
+  ])
+  expect(
+    new Headers(capturedRequests[1]?.init?.headers).get("authorization"),
+  ).toBe("Bearer github-token")
+  expect(
+    new Headers(capturedRequests[2]?.init?.headers).get("authorization"),
+  ).toBe("Bearer expired-copilot-token")
+  expect(
+    new Headers(capturedRequests[2]?.init?.headers).get("x-request-id"),
+  ).not.toBe("stale-endpoint-request")
+  expect(state.copilotApiBaseUrl).toBe("https://api.business.githubcopilot.com")
+})
+
+test("retries at most once after 421 endpoint rediscovery", async () => {
+  state.copilotApiBaseUrl = "https://api.individual.githubcopilot.com"
+  queuedResults.push(
+    new Response("first misdirect", { status: 421 }),
+    Response.json({
+      endpoints: { api: "https://api.business.githubcopilot.com" },
+    }),
+    new Response("second misdirect", {
+      status: 421,
+      headers: { "x-github-request-id": "second-421" },
+    }),
+  )
+
+  const response = await copilotFetch("/responses", {
+    method: "POST",
+    headers: { Authorization: "Bearer expired-copilot-token" },
+  })
+
+  expect(response.status).toBe(421)
+  expect(response.headers.get("x-github-request-id")).toBe("second-421")
+  expect(capturedRequests.map(({ url }) => url)).toEqual([
+    "https://api.individual.githubcopilot.com/responses",
+    "https://api.github.com/copilot_internal/user",
+    "https://api.business.githubcopilot.com/responses",
+  ])
+})
+
+test("preserves the original 421 when endpoint rediscovery fails", async () => {
+  state.copilotApiBaseUrl = "https://api.individual.githubcopilot.com"
+  queuedResults.push(
+    new Response("Misdirected Request", {
+      status: 421,
+      headers: { "x-github-request-id": "original-421" },
+    }),
+    new Response("Unavailable", { status: 503 }),
+  )
+
+  const response = await copilotFetch("/responses", {
+    method: "POST",
+    headers: { Authorization: "Bearer expired-copilot-token" },
+  })
+
+  expect(response.status).toBe(421)
+  expect(response.headers.get("x-github-request-id")).toBe("original-421")
+  expect(capturedRequests.map(({ url }) => url)).toEqual([
+    "https://api.individual.githubcopilot.com/responses",
+    "https://api.github.com/copilot_internal/user",
+  ])
+  expect(state.copilotApiBaseUrl).toBe(
+    "https://api.individual.githubcopilot.com",
+  )
+})
+
+test("preserves the original 421 when rediscovery returns the same endpoint", async () => {
+  state.copilotApiBaseUrl = "https://api.individual.githubcopilot.com"
+  queuedResults.push(
+    new Response("Misdirected Request", { status: 421 }),
+    Response.json({
+      endpoints: { api: "https://api.individual.githubcopilot.com" },
+    }),
+  )
+
+  const response = await copilotFetch("/responses", {
+    method: "POST",
+    headers: { Authorization: "Bearer expired-copilot-token" },
+  })
+
+  expect(response.status).toBe(421)
+  expect(capturedRequests).toHaveLength(2)
+})
+
+test("preserves the original 421 when rediscovery omits a trusted endpoint", async () => {
+  state.copilotApiBaseUrl = "https://api.individual.githubcopilot.com"
+  queuedResults.push(
+    new Response("Misdirected Request", { status: 421 }),
+    Response.json({ login: "octocat" }),
+  )
+
+  const response = await copilotFetch("/responses", {
+    method: "POST",
+    headers: { Authorization: "Bearer expired-copilot-token" },
+  })
+
+  expect(response.status).toBe(421)
+  expect(state.copilotApiBaseUrl).toBe(
+    "https://api.individual.githubcopilot.com",
+  )
+  expect(capturedRequests).toHaveLength(2)
+})
+
+test("does not rediscover a caller-pinned account endpoint after 421", async () => {
+  queuedResults.push(new Response("Misdirected Request", { status: 421 }))
+
+  const response = await copilotFetch(
+    "/responses",
+    {
+      method: "POST",
+      headers: { Authorization: "Bearer account-token" },
+    },
+    { baseUrl: "https://api.business.githubcopilot.com" },
+  )
+
+  expect(response.status).toBe(421)
+  expect(capturedRequests.map(({ url }) => url)).toEqual([
+    "https://api.business.githubcopilot.com/responses",
+  ])
+})
+
+test("allows 421 endpoint recovery after a compatibility retry", async () => {
+  state.copilotApiBaseUrl = "https://api.individual.githubcopilot.com"
+  queuedResults.push(
+    Response.json(
+      {
+        error: {
+          code: "invalid_request_body",
+          message: "The encrypted content could not be verified.",
+        },
+      },
+      { status: 400 },
+    ),
+    new Response("Misdirected Request", { status: 421 }),
+    Response.json({
+      endpoints: { api: "https://api.business.githubcopilot.com" },
+    }),
+    new Response("{}", { status: 200 }),
+  )
+
+  const response = await copilotFetch("/responses", {
+    method: "POST",
+    body: JSON.stringify({
+      input: [{ encrypted_content: "opaque", type: "compaction" }],
+    }),
+    headers: {
+      Authorization: "Bearer expired-copilot-token",
+      "content-type": "application/json",
+    },
+  })
+
+  expect(response.status).toBe(200)
+  expect(capturedRequests.map(({ url }) => url)).toEqual([
+    "https://api.individual.githubcopilot.com/responses",
+    "https://api.individual.githubcopilot.com/responses",
+    "https://api.github.com/copilot_internal/user",
+    "https://api.business.githubcopilot.com/responses",
+  ])
+})
+
+test("does not exchange or retry an immutable enterprise OAuth token after a 401", async () => {
   state.githubInstanceDomain = "msft.ghe.com"
   state.accountType = "enterprise"
   state.copilotApiBaseUrl = "https://copilot-api.msft.ghe.com"
@@ -252,30 +420,20 @@ test("does not run the legacy token exchange after an enterprise OAuth 401", asy
   ])
 })
 
-test("moves a single-token retry to the newly discovered Copilot host", async () => {
+test("does not move a public OAuth request to another host after a 401", async () => {
   state.copilotApiBaseUrl = "https://api.githubcopilot.com"
-  queuedResults.push(
-    new Response("Unauthorized", { status: 401 }),
-    Response.json({
-      endpoints: { api: "https://api.enterprise.githubcopilot.com" },
-      token: "fresh-rerouted-copilot-token",
-      expires_at: 1_900_000_000,
-      refresh_in: 1800,
-    }),
-    new Response("{}", { status: 200 }),
-  )
+  queuedResults.push(new Response("Unauthorized", { status: 401 }))
 
   const response = await copilotFetch("/responses", {
     method: "POST",
     headers: { Authorization: "Bearer expired-copilot-token" },
   })
 
-  expect(response.status).toBe(200)
+  expect(response.status).toBe(401)
   expect(capturedRequests.map(({ url }) => url)).toEqual([
     "https://api.githubcopilot.com/responses",
-    "https://api.github.com/copilot_internal/v2/token",
-    "https://api.enterprise.githubcopilot.com/responses",
   ])
+  expect(state.copilotApiBaseUrl).toBe("https://api.githubcopilot.com")
 })
 
 test("retries transient 408 and 504 upstream responses", async () => {
@@ -1300,31 +1458,16 @@ test("caps a 503 followed by an ECONNRESET at two sends", async () => {
   expect(capturedRequests).toHaveLength(2)
 })
 
-test("caps a 401 refresh followed by an ECONNRESET at two LLM sends", async () => {
-  queuedResults.push(
-    new Response("Unauthorized", { status: 401 }),
-    new Response(
-      JSON.stringify({
-        token: "fresh-copilot-token",
-        expires_at: 1_900_000_000,
-        refresh_in: 1800,
-      }),
-      { status: 200, headers: { "content-type": "application/json" } },
-    ),
-    bunSocketClosedError(),
-  )
+test("does not spend the retry budget after an OAuth 401", async () => {
+  queuedResults.push(new Response("Unauthorized", { status: 401 }))
 
-  let thrownError: unknown
-  try {
-    await copilotFetch("/responses", { method: "POST", headers: AUTH_HEADERS })
-  } catch (error) {
-    thrownError = error
-  }
+  const response = await copilotFetch("/responses", {
+    method: "POST",
+    headers: AUTH_HEADERS,
+  })
 
-  expect((thrownError as Error | undefined)?.message).toContain(
-    "socket connection",
-  )
-  expect(llmSends()).toHaveLength(2)
+  expect(response.status).toBe(401)
+  expect(llmSends()).toHaveLength(1)
 })
 
 test("keeps the same X-Request-Id across a transport retry", async () => {
@@ -1484,22 +1627,16 @@ test("emits no transport telemetry when only an HTTP status was retried", async 
   expect(transportEvents).toHaveLength(0)
 })
 
-test("emits no transport telemetry when only a 401 refresh was retried", async () => {
-  queuedResults.push(
-    new Response("Unauthorized", { status: 401 }),
-    new Response(
-      JSON.stringify({
-        token: "fresh-copilot-token",
-        expires_at: 1_900_000_000,
-        refresh_in: 1800,
-      }),
-      { status: 200, headers: { "content-type": "application/json" } },
-    ),
-    new Response("{}", { status: 200 }),
-  )
+test("emits no transport telemetry for an OAuth 401", async () => {
+  queuedResults.push(new Response("Unauthorized", { status: 401 }))
 
-  await copilotFetch("/responses", { method: "POST", headers: AUTH_HEADERS })
+  const response = await copilotFetch("/responses", {
+    method: "POST",
+    headers: AUTH_HEADERS,
+  })
 
+  expect(response.status).toBe(401)
+  expect(capturedRequests).toHaveLength(1)
   expect(transportEvents).toHaveLength(0)
 })
 

@@ -998,16 +998,7 @@ describe("responses websocket message handling", () => {
       "session-test",
     )
     if (!selected) throw new TypeError("Expected selected WebSocket account")
-    queuedResponses.push(
-      new Response("Unauthorized", { status: 401 }),
-      Response.json({
-        expires_at: 1_900_000_000,
-        refresh_in: 1800,
-        token: "websocket-refreshed-token",
-      }),
-      Response.json({ data: [model], object: "list" }),
-      new Response("Unauthorized", { status: 401 }),
-    )
+    queuedResponses.push(new Response("Unauthorized", { status: 401 }))
     const ws = createTestWebSocket()
 
     await responsesWebSocket.message(
@@ -1030,7 +1021,7 @@ describe("responses websocket message handling", () => {
       error: {
         code: "bad_request",
         message:
-          "The bound account rejected this conversation after successful account reinitialization; affinity was preserved and no cross-account retry was attempted.",
+          "The bound account rejected this conversation; affinity was preserved and no cross-account retry was attempted.",
         type: "session_affinity_error",
       },
     })

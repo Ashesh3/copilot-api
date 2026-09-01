@@ -1,14 +1,10 @@
 import consola from "consola"
-import { createHash, randomUUID } from "node:crypto"
+import { createHash } from "node:crypto"
 
 import type { Model, ModelsResponse } from "~/services/copilot/get-models"
 
-import { GITHUB_USER_AGENT } from "~/lib/api-config"
-import { HTTPError } from "~/lib/error"
 import {
   DEFAULT_GITHUB_DOMAIN,
-  githubApiBaseUrl,
-  isGitHubEnterpriseCloud,
   normalizeGitHubDomain,
   resolveCopilotApiBaseUrl,
 } from "~/lib/github-instance"
@@ -17,10 +13,7 @@ import {
   isModelEnabledForAccount,
 } from "~/lib/model-routing"
 import { state } from "~/lib/state"
-import { COPILOT_API_VERSION } from "~/services/copilot/copilot-contract"
-import { createCopilotTransportInit } from "~/services/copilot/transport-options"
-import { getCopilotUsage } from "~/services/github/get-copilot-usage"
-import { getGitHubUser } from "~/services/github/get-user"
+import { resolveCopilotOAuth } from "~/services/github/resolve-copilot-oauth"
 
 // --- Account ---
 
@@ -46,31 +39,6 @@ interface AddAccountOptions {
 
 type ModelsSnapshotListener = (models: ModelsResponse) => void
 
-function hasModelId(value: unknown): value is Model {
-  return (
-    typeof value === "object"
-    && value !== null
-    && "id" in value
-    && typeof value.id === "string"
-    && value.id.length > 0
-  )
-}
-
-// --- Copilot Token Response ---
-
-interface CopilotTokenResponse {
-  endpoints?: {
-    api?: string
-  }
-  expires_at: number
-  refresh_in: number
-  token: string
-}
-
-export function getTokenRefreshIntervalMs(refreshInSeconds: number): number {
-  return Math.max((refreshInSeconds - 120) * 1000, 60_000)
-}
-
 export function maskTokenForLog(token: string): string {
   if (token.length <= 8) {
     return token
@@ -86,26 +54,9 @@ export class TokenPool {
   private modelIndex: Map<string, Array<Account>> = new Map()
   private readonly onModelsChanged: ModelsSnapshotListener | undefined
   private roundRobinIndex = 0
-  private refreshTimers: Map<number, ReturnType<typeof setInterval>> = new Map()
-  private sessionId: string = randomUUID()
-  private vsCodeVersion = "1.104.3"
 
   constructor(onModelsChanged?: ModelsSnapshotListener) {
     this.onModelsChanged = onModelsChanged
-  }
-
-  /**
-   * Set the VS Code version used in Copilot request headers.
-   */
-  setVSCodeVersion(version: string): void {
-    this.vsCodeVersion = version
-  }
-
-  /**
-   * Set the session ID used in Copilot request headers.
-   */
-  setSessionId(sessionId: string): void {
-    this.sessionId = sessionId
   }
 
   /**
@@ -138,107 +89,13 @@ export class TokenPool {
     return account
   }
 
-  /**
-   * Exchange a GitHub token for a Copilot token, fetch available models,
-   * and set up an auto-refresh timer.
-   */
+  /** Resolve a GitHub OAuth credential and fetch its available models. */
   async initializeAccount(account: Account, showToken = false): Promise<void> {
-    if (isGitHubEnterpriseCloud(account.githubInstanceDomain)) {
-      await this.initializeEnterpriseAccount(account)
-      return
-    }
-
-    const tokenData = this.validateCopilotTokenResponse(
-      await this.fetchCopilotToken(account),
-    )
-    const copilotApiBaseUrl = this.resolveCopilotApiBaseUrl(account, tokenData)
-
-    const modelsResponse = await this.fetchModels(
-      account,
-      copilotApiBaseUrl,
-      tokenData.token,
-    )
-    const modelsData = this.validateModelsResponse(modelsResponse)
-
-    // Commit only after both control-plane requests succeed.
-    // eslint-disable-next-line require-atomic-updates
-    account.copilotToken = tokenData.token
-    // eslint-disable-next-line require-atomic-updates
-    account.copilotTokenExpiry = tokenData.expires_at
-    // eslint-disable-next-line require-atomic-updates
-    account.copilotApiBaseUrl = copilotApiBaseUrl
-    // eslint-disable-next-line require-atomic-updates
-    account.modelsData = modelsData
-    // eslint-disable-next-line require-atomic-updates
-    account.models = new Set(modelsData.map((model) => model.id))
-    // eslint-disable-next-line require-atomic-updates
-    account.healthy = true
-
-    if (showToken) {
-      consola.info(
-        `Account #${account.id} Copilot token: ${maskTokenForLog(tokenData.token)}`,
-      )
-    }
-
-    consola.debug(
-      `Account #${account.id} Copilot token fetched (expires_at=${tokenData.expires_at})`,
-    )
-
-    void this.resolveGitHubUsername(account)
-
-    consola.info(
-      `Account #${account.id} (${account.accountType}): ${account.models.size} models available`,
-    )
-
-    // Rebuild model index now that this account is healthy with models
-    this.rebuildModelIndex()
-
-    // Set up auto-refresh timer
-    const refreshMs = getTokenRefreshIntervalMs(tokenData.refresh_in)
-    this.setupRefreshTimer(account, refreshMs, showToken)
+    await this.initializeOAuthAccount(account, false, showToken)
   }
 
   /**
-   * Refresh a single account's Copilot token immediately.
-   */
-  async refreshAccountToken(
-    account: Account,
-    showToken = false,
-  ): Promise<void> {
-    if (isGitHubEnterpriseCloud(account.githubInstanceDomain)) {
-      await this.reinitializeAccount(account, showToken)
-      return
-    }
-
-    const tokenData = this.validateCopilotTokenResponse(
-      await this.fetchCopilotToken(account),
-    )
-    const copilotApiBaseUrl = this.resolveCopilotApiBaseUrl(account, tokenData)
-
-    account.copilotToken = tokenData.token
-
-    account.copilotTokenExpiry = tokenData.expires_at
-
-    account.copilotApiBaseUrl = copilotApiBaseUrl
-
-    if (showToken) {
-      consola.info(
-        `Account #${account.id} refreshed Copilot token: ${maskTokenForLog(tokenData.token)}`,
-      )
-    }
-
-    if (!account.healthy) {
-      account.healthy = true
-      consola.info(`Account #${account.id} recovered, marking healthy`)
-      this.rebuildModelIndex()
-    }
-
-    const refreshMs = getTokenRefreshIntervalMs(tokenData.refresh_in)
-    this.setupRefreshTimer(account, refreshMs, showToken)
-  }
-
-  /**
-   * Re-exchange credentials and refresh model eligibility as one atomic update.
+   * Re-resolve credentials and refresh model eligibility as one atomic update.
    * Concurrent callers for the same account share the same control-plane work.
    */
   async reinitializeAccount(
@@ -375,50 +232,6 @@ export class TokenPool {
   }
 
   /**
-   * Failover: pick the next account for a model, excluding the failed one.
-   * Returns undefined if no alternative is available.
-   */
-  getNextAccountForModel(
-    modelId: string,
-    exclude: Account,
-  ): Account | undefined {
-    const eligible = this.modelIndex.get(modelId)
-    if (!eligible || eligible.length === 0) return undefined
-
-    const alternatives = eligible.filter((a) => a.id !== exclude.id)
-    if (alternatives.length === 0) return undefined
-
-    const index = this.roundRobinIndex % alternatives.length
-    this.roundRobinIndex++
-    return alternatives[index]
-  }
-
-  /**
-   * Fail over only to an account whose raw catalog advertises the endpoint
-   * chosen for this request. Missing endpoint metadata retains the documented
-   * legacy Chat Completions assumption.
-   */
-  getNextAccountForModelEndpoint(
-    modelId: string,
-    endpoint: string,
-    exclude: Account,
-  ): Account | undefined {
-    const eligible = this.modelIndex.get(modelId)
-    if (!eligible || eligible.length === 0) return undefined
-
-    const alternatives = eligible.filter(
-      (account) =>
-        account.id !== exclude.id
-        && this.accountAdvertisesModelEndpoint(account, modelId, endpoint),
-    )
-    if (alternatives.length === 0) return undefined
-
-    const index = this.roundRobinIndex % alternatives.length
-    this.roundRobinIndex++
-    return alternatives[index]
-  }
-
-  /**
    * Mark an account as unhealthy and rebuild the model index.
    */
   markUnhealthy(account: Account): void {
@@ -463,16 +276,10 @@ export class TokenPool {
     )
   }
 
-  /**
-   * Clear all refresh timers.
-   */
+  /** Clear pending account reinitializations. */
   dispose(): void {
-    for (const timer of this.refreshTimers.values()) {
-      clearInterval(timer)
-    }
-    this.refreshTimers.clear()
     this.accountReinitializations.clear()
-    consola.debug("TokenPool disposed, all refresh timers cleared")
+    consola.debug("TokenPool disposed")
   }
 
   /**
@@ -490,9 +297,6 @@ export class TokenPool {
   }
 
   removeAccountForTest(accountId: number): void {
-    const timer = this.refreshTimers.get(accountId)
-    if (timer) clearInterval(timer)
-    this.refreshTimers.delete(accountId)
     this.accounts.delete(accountId)
     this.rebuildModelIndex()
   }
@@ -620,270 +424,47 @@ export class TokenPool {
     return count
   }
 
-  private async resolveGitHubUsername(account: Account): Promise<void> {
-    try {
-      const user = await getGitHubUser(
-        account.githubToken,
-        account.githubInstanceDomain,
-      )
-      // eslint-disable-next-line require-atomic-updates
-      account.githubUsername = user.login
-    } catch (error) {
-      let detail = "Unknown error"
-      if (error instanceof HTTPError) {
-        detail = `HTTP ${error.response.status}`
-      } else if (error instanceof Error) {
-        detail = error.name
-      }
-      consola.warn(
-        `Failed to resolve GitHub username for account #${account.id}: ${detail}`,
-      )
-    }
-  }
-
   private async performAccountReinitialization(
     account: Account,
     showToken: boolean,
   ): Promise<void> {
-    if (isGitHubEnterpriseCloud(account.githubInstanceDomain)) {
-      await this.initializeEnterpriseAccount(account, true)
-      return
-    }
-
-    const tokenData = this.validateCopilotTokenResponse(
-      await this.fetchCopilotToken(account),
-    )
-    const copilotApiBaseUrl = this.resolveCopilotApiBaseUrl(account, tokenData)
-    const modelsResponse = await this.fetchModels(
-      account,
-      copilotApiBaseUrl,
-      tokenData.token,
-    )
-    const modelsData = this.validateModelsResponse(modelsResponse)
-    const models = new Set(modelsData.map((model) => model.id))
-
-    // Commit only after both control-plane requests succeed.
-    // eslint-disable-next-line require-atomic-updates
-    account.copilotToken = tokenData.token
-    // eslint-disable-next-line require-atomic-updates
-    account.copilotTokenExpiry = tokenData.expires_at
-    // eslint-disable-next-line require-atomic-updates
-    account.copilotApiBaseUrl = copilotApiBaseUrl
-    // eslint-disable-next-line require-atomic-updates
-    account.modelsData = modelsData
-    // eslint-disable-next-line require-atomic-updates
-    account.models = models
-    // eslint-disable-next-line require-atomic-updates
-    account.healthy = true
-
-    if (showToken) {
-      consola.info(
-        `Account #${account.id} reinitialized Copilot token: ${maskTokenForLog(tokenData.token)}`,
-      )
-    }
-
-    this.rebuildModelIndex()
-    this.onModelsChanged?.(this.getAllModels())
-    this.setupRefreshTimer(
-      account,
-      getTokenRefreshIntervalMs(tokenData.refresh_in),
-      showToken,
-    )
+    await this.initializeOAuthAccount(account, true, showToken)
   }
 
-  private validateCopilotTokenResponse(
-    response: unknown,
-  ): CopilotTokenResponse {
-    if (
-      typeof response !== "object"
-      || response === null
-      || !("token" in response)
-      || typeof response.token !== "string"
-      || response.token.length === 0
-      || !("expires_at" in response)
-      || typeof response.expires_at !== "number"
-      || !Number.isFinite(response.expires_at)
-      || !("refresh_in" in response)
-      || typeof response.refresh_in !== "number"
-      || !Number.isFinite(response.refresh_in)
-    ) {
-      throw new TypeError("Invalid Copilot token response")
-    }
-    return response as CopilotTokenResponse
-  }
-
-  private resolveCopilotApiBaseUrl(
-    account: Account,
-    response: CopilotTokenResponse,
-  ): string {
-    return resolveCopilotApiBaseUrl(
-      account.githubInstanceDomain,
-      response.endpoints?.api,
-      account.accountType,
-    )
-  }
-
-  private async initializeEnterpriseAccount(
+  private async initializeOAuthAccount(
     account: Account,
     publishModels = false,
+    showToken = false,
   ): Promise<void> {
-    const copilotUser = await getCopilotUsage(
-      account.githubToken,
-      account.githubInstanceDomain,
-    )
-    const copilotApiBaseUrl = resolveCopilotApiBaseUrl(
-      account.githubInstanceDomain,
-      copilotUser.endpoints?.api,
-      "enterprise",
-    )
-    const modelsResponse = await this.fetchModels(
-      account,
-      copilotApiBaseUrl,
-      account.githubToken,
-    )
-    const modelsData = this.validateModelsResponse(modelsResponse)
+    const resolved = await resolveCopilotOAuth({
+      accountType: account.accountType,
+      githubToken: account.githubToken,
+      instanceDomain: account.githubInstanceDomain,
+    })
+    const modelsData = resolved.models.data
 
     // Commit only after both control-plane requests succeed.
 
-    account.copilotToken = account.githubToken
+    Object.assign(account, {
+      copilotApiBaseUrl: resolved.baseUrl,
+      copilotToken: resolved.token,
+      copilotTokenExpiry: undefined,
+      githubUsername: resolved.login ?? account.githubUsername,
+      healthy: true,
+      models: new Set(modelsData.map((model) => model.id)),
+      modelsData,
+    })
 
-    account.copilotTokenExpiry = undefined
-
-    account.copilotApiBaseUrl = copilotApiBaseUrl
-
-    account.modelsData = modelsData
-
-    account.models = new Set(modelsData.map((model) => model.id))
-
-    account.healthy = true
-
-    account.githubUsername = copilotUser.login ?? account.githubUsername
-
-    this.clearRefreshTimer(account.id)
     this.rebuildModelIndex()
     if (publishModels) this.onModelsChanged?.(this.getAllModels())
+    if (showToken) {
+      consola.info(
+        `Account #${account.id} Copilot token: ${maskTokenForLog(resolved.token)}`,
+      )
+    }
     consola.info(
       `Account #${account.id} (${account.accountType}): ${account.models.size} models available`,
     )
-  }
-
-  private validateModelsResponse(response: unknown): Array<Model> {
-    if (
-      typeof response !== "object"
-      || response === null
-      || !("object" in response)
-      || response.object !== "list"
-      || !("data" in response)
-      || !Array.isArray(response.data)
-      || !response.data.every((model: unknown) => hasModelId(model))
-    ) {
-      throw new TypeError("Invalid Copilot models response")
-    }
-    return response.data
-  }
-
-  private async fetchCopilotToken(
-    account: Account,
-  ): Promise<CopilotTokenResponse> {
-    const response = await fetch(
-      `${githubApiBaseUrl(account.githubInstanceDomain)}/copilot_internal/v2/token`,
-      {
-        headers: {
-          "content-type": "application/json",
-          accept: "application/json",
-          authorization: `token ${account.githubToken}`,
-          "user-agent": GITHUB_USER_AGENT,
-        },
-      },
-    )
-
-    if (!response.ok) {
-      throw new HTTPError(
-        `Failed to get Copilot token for account #${account.id}`,
-        response,
-      )
-    }
-
-    return (await response.json()) as CopilotTokenResponse
-  }
-
-  private async fetchModels(
-    account: Account,
-    baseUrl: string,
-    copilotToken = account.copilotToken,
-  ): Promise<ModelsResponse> {
-    const response = await fetch(
-      `${baseUrl}/models`,
-      createCopilotTransportInit({
-        headers: this.buildCopilotHeaders(account, copilotToken),
-      }),
-    )
-
-    if (!response.ok) {
-      consola.error(
-        `Failed to fetch models for account #${account.id}: ${response.status} ${response.statusText}`,
-      )
-      throw new HTTPError(
-        `Failed to fetch models for account #${account.id}: ${response.status}`,
-        response,
-      )
-    }
-
-    return (await response.json()) as ModelsResponse
-  }
-
-  private buildCopilotHeaders(
-    account: Account,
-    copilotToken = account.copilotToken,
-  ): Record<string, string> {
-    if (!copilotToken) {
-      throw new Error(
-        `Copilot token not set for account #${account.id}. Cannot build request headers.`,
-      )
-    }
-
-    return {
-      "content-type": "application/json",
-      accept: "application/json",
-      Authorization: `Bearer ${copilotToken}`,
-      "Copilot-Integration-Id": state.copilotIntegrationId,
-      "Copilot-Harness-Id": "copilot-sdk",
-      "editor-version": `vscode/${this.vsCodeVersion}`,
-      "Openai-Intent": "conversation-agent",
-      "X-GitHub-Api-Version": COPILOT_API_VERSION,
-      "X-Request-Id": randomUUID(),
-      "X-Interaction-Id": this.sessionId,
-      "X-Client-Session-Id": this.sessionId,
-      "X-Interaction-Type": "conversation-agent",
-    }
-  }
-
-  private setupRefreshTimer(
-    account: Account,
-    intervalMs: number,
-    showToken: boolean,
-  ): void {
-    // Clear any existing timer for this account
-    this.clearRefreshTimer(account.id)
-
-    const timer = setInterval(() => {
-      consola.debug(`Reinitializing account #${account.id}`)
-      void this.reinitializeAccount(account, showToken).catch(
-        (error: unknown) => {
-          consola.error(`Failed to reinitialize account #${account.id}`, {
-            errorClass: error instanceof Error ? error.name : "Unknown",
-          })
-        },
-      )
-    }, intervalMs)
-
-    this.refreshTimers.set(account.id, timer)
-  }
-
-  private clearRefreshTimer(accountId: number): void {
-    const existing = this.refreshTimers.get(accountId)
-    if (existing) clearInterval(existing)
-    this.refreshTimers.delete(accountId)
   }
 }
 
