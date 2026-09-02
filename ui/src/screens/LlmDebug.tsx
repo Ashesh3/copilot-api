@@ -53,6 +53,7 @@ import {
   Trash2Icon,
 } from "../icons"
 import { ApiError, del, get } from "../lib/api"
+import { formatDuration } from "../lib/duration-format"
 import { parseJsonBody } from "../lib/json-tree"
 import { requestPayloadView } from "../lib/llm-debug-detail-view"
 import { navigate, useHashRoute } from "../lib/router"
@@ -268,7 +269,7 @@ function LlmDebugListView() {
             —
           </Text>
         : <Text type="supporting" color="secondary">
-            {row.durationMs} ms
+            {formatDuration(row.durationMs)}
           </Text>,
     },
     {
@@ -696,7 +697,7 @@ function LlmDebugDetailView({ id }: { id: string }) {
                   <RelTime ts={data.startedAt} />
                   {data.durationMs === undefined ? null : (
                     <Text type="supporting" color="secondary">
-                      {data.durationMs} ms
+                      {formatDuration(data.durationMs)}
                     </Text>
                   )}
                 </HStack>

@@ -68,6 +68,26 @@ function renderAnthropicInspector(): string {
   )
 }
 
+function renderTimedInspector(durationMs: number): string {
+  return renderToStaticMarkup(
+    createElement(ResponseInspector, {
+      durationMs,
+      id: "timed-response",
+      responseIdentity: "timed-response-session",
+      response: {
+        body: '{"id":"response-1","output":[]}',
+        headers: { "content-type": "application/json" },
+        status: 200,
+        statusText: "OK",
+      },
+      onCopyError: () => {},
+      onCopySuccess: () => {},
+      onExport: () => {},
+      onExportError: () => {},
+    }),
+  )
+}
+
 test("labels the selected response view as a region", () => {
   const markup = renderPartialInspector()
 
@@ -87,4 +107,9 @@ test("renders assembled Anthropic Messages output instead of an unknown format",
   expect(markup).toContain("Final English response")
   expect(markup).toContain("Events (6)")
   expect(markup).not.toContain("This response format is not recognized")
+})
+
+test("renders response duration in a human-friendly unit", () => {
+  expect(renderTimedInspector(138_000)).toContain("2.3m")
+  expect(renderTimedInspector(138_000)).not.toContain("138,000 ms")
 })
