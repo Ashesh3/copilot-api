@@ -612,6 +612,25 @@ SHA-256 digest; paste only that digest plus a device label into **Settings →
 Trusted JWT Digests** on your gateway's `/dashboard#settings` page, or send
 those values to an administrator.
 
+Configure these root-level keys in `%USERPROFILE%\.codex\config.toml` before
+starting Codex Desktop:
+
+```toml
+openai_base_url = "https://gateway.example.com/v1"
+chatgpt_base_url = "https://codex-gateway.openai.com"
+cli_auth_credentials_store = "file"
+```
+
+`codex-gateway.openai.com` is a replaceable, locally spoofed example hostname,
+not the public gateway hostname. Map it to the gateway in the Windows hosts
+file, issue a trusted TLS certificate for that exact name, and render the
+exact-route/default-deny Codex Desktop Nginx template for it. The template's
+Computer Use URL-policy route is optional and intentionally permissive; omit it
+from managed-auth-only deployments as described in the canonical guide. Missing
+the base-URL setting can cause rapid, repeated successful refresh requests while
+inference never begins. See the canonical guide below for the complete hosts,
+certificate, and Nginx steps.
+
 Current Codex builds proactively refresh ChatGPT-shaped credentials. Set the
 following user environment variable before fully quitting and reopening Codex
 Desktop:

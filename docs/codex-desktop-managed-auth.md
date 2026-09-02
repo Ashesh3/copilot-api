@@ -2,8 +2,9 @@
 
 This is the canonical procedure for using a locally generated ChatGPT-shaped
 identity with `copilot-api`. It does not patch Codex binaries and does not run a
-proxy or interceptor. The only client-side changes are Codex configuration, a
-user environment variable, and the generated `%USERPROFILE%\.codex\auth.json`.
+client-side proxy or interceptor. The client changes are Codex configuration, a
+user environment variable, one hosts-file mapping, trust for the spoof
+listener's dedicated CA, and the generated `%USERPROFILE%\.codex\auth.json`.
 
 ## How it works
 
@@ -23,9 +24,38 @@ both refresh and inference.
 
 Deploy a reviewed `copilot-api` revision containing the managed refresh route.
 The public Nginx hostname must publish exact `POST /v1/codex/auth/refresh` from
-`nginx/sites-available/public-domain.conf.template`. If clients use the locally
-mapped trusted OpenAI hostname, publish the same exact route from
-`nginx/sites-available/codex-desktop-spoof.conf.template`.
+`nginx/sites-available/public-domain.conf.template`. Codex also needs a locally
+mapped `*.openai.com` hostname for ChatGPT-hosted service calls. Render
+`nginx/sites-available/codex-desktop-spoof.conf.template` for that hostname;
+this guide uses `codex-gateway.openai.com` as a replaceable example.
+
+The spoof listener needs a TLS certificate whose Subject Alternative Name
+contains the exact hostname, signed by a CA trusted by the Windows client. Keep
+the certificate key on the gateway and trust the dedicated CA only on intended
+client machines. Do not expose a broad catch-all proxy for the spoof hostname.
+For the example host, render at least these template values:
+
+```text
+{{CODEX_DESKTOP_SPOOF_PRIMARY_HOST}} = codex-gateway.openai.com
+{{CODEX_DESKTOP_SPOOF_SERVER_NAMES}} = codex-gateway.openai.com
+{{UPSTREAM_URL}} = http://127.0.0.1:4141
+```
+
+The rendered server block must therefore contain
+`server_name codex-gateway.openai.com;`, the exact supported locations from the
+template, and `location / { return 404; }`. The default denial is intentional:
+unsupported ChatGPT-hosted services stay on the local gateway and receive a
+fast `404` instead of receiving the synthetic credential at the real service.
+
+The tracked template also contains an optional exact
+`/backend-api/aura/site_status` location for Computer Use. It is not required
+for managed authentication. When retained, the application responds with
+`x-codex-browser-use-security-mode: disabled-for-local-testing` and
+intentionally allows every HTTP(S) browser URL for operator-controlled local
+testing. For a managed-auth-only deployment, remove the exact
+`/backend-api/aura/site_status` location from the rendered candidate before
+installing it. Retain that location only when the operator explicitly accepts
+the disabled URL policy.
 
 The root `update.sh` updates the Compose application only. It does not install or
 reload host Nginx. Render every placeholder, inspect the candidate, retain a
@@ -37,20 +67,44 @@ sudo systemctl reload nginx
 sudo nginx -T
 ```
 
-Confirm `nginx -T` contains an exact POST-only location for the route. Do not
-add a catch-all proxy.
+Confirm `nginx -T` contains the exact spoof `server_name`, an exact POST-only
+location for the refresh route, the chosen presence or absence of the optional
+Computer Use location, and the default-deny location. Do not add a catch-all
+proxy.
 
 ## 2. Configure Codex Desktop on Windows
 
-Keep credentials in the Codex file store and point inference at the gateway in
+Keep credentials in the Codex file store, point inference at the public gateway,
+and point ChatGPT-hosted service calls at the locally mapped spoof hostname in
 `%USERPROFILE%\.codex\config.toml`:
 
 ```toml
 openai_base_url = "https://gateway.example.com/v1"
+chatgpt_base_url = "https://codex-gateway.openai.com"
 cli_auth_credentials_store = "file"
 ```
 
-Replace `gateway.example.com` with your gateway's public hostname.
+Keep all three keys at the TOML document root, before the first `[table]`
+heading, and define each key only once. Replace `gateway.example.com` with your
+gateway's public hostname. You may replace `codex-gateway` with another unused
+label, but the resulting hostname must still end in `.openai.com` and must match
+the hosts entry, certificate Subject Alternative Name, and Nginx `server_name`
+exactly.
+
+Open an elevated editor and add the spoof hostname to
+`C:\Windows\System32\drivers\etc\hosts` on each Codex Desktop client:
+
+```text
+<GATEWAY_IP> codex-gateway.openai.com
+```
+
+Replace `<GATEWAY_IP>` with the gateway address reachable from that client. Do
+not map the public inference hostname unless that deployment separately requires
+it. Flush cached DNS after changing the file:
+
+```powershell
+ipconfig /flushdns
+```
 
 Set the supported refresh endpoint override for the current Windows user:
 
@@ -132,16 +186,21 @@ paste the JWT, refresh token, or complete `auth.json` into the dashboard.
 ## 5. Restart and verify
 
 Fully quit Codex Desktop, including background processes, then reopen it so it
-reads the user environment variable and replacement `auth.json`.
+reads `config.toml`, the user environment variable, the hosts mapping, and the
+replacement `auth.json`.
 
 Verify in this order:
 
-1. `codex login status` reports ChatGPT authentication.
-2. The app continues to show the account after an explicit account refresh.
-3. Gateway logs show `POST /v1/codex/auth/refresh` returning `200` without
-   logging credential material.
-4. A normal authenticated `/v1/responses` request succeeds.
-5. Disable the digest temporarily and confirm the next refresh returns OAuth
+1. `[Net.Dns]::GetHostAddresses('codex-gateway.openai.com')` includes the
+   configured gateway address.
+2. `curl.exe -sS -o NUL -w "%{http_code}" https://codex-gateway.openai.com/`
+   completes TLS validation and returns `404` from the default-deny location.
+3. `codex login status` reports ChatGPT authentication.
+4. The app continues to show the account after an explicit account refresh.
+5. Gateway logs show `POST /v1/codex/auth/refresh` returning `200` without
+   logging credential material or repeating continuously while the app is idle.
+6. A normal authenticated `/v1/responses` request succeeds.
+7. Disable the digest temporarily and confirm the next refresh returns OAuth
    `invalid_grant`; re-enable it before normal use.
 
 Model discovery may still contact ChatGPT in current builds. A configured local
@@ -150,8 +209,11 @@ the managed refresh endpoint.
 
 ## Rollback
 
-Fully quit Codex Desktop. Restore the most recent backup `auth.json`, then remove
-the refresh override if returning to normal OpenAI authentication:
+Fully quit Codex Desktop. Restore the most recent backup `auth.json`. If
+returning to normal OpenAI authentication, also restore the previous
+`chatgpt_base_url` configuration (or remove the locally added key), remove only
+the hosts-file line added for the spoof hostname, and remove the refresh
+override:
 
 ```powershell
 [Environment]::SetEnvironmentVariable(
@@ -174,6 +236,12 @@ Codex Desktop only after the intended `auth.json` is in place.
   deployment.
 - **OAuth `invalid_grant`:** the token is old-format, malformed, unknown,
   disabled, or deleted. Run the current script and register its new digest.
+- **Rapid, repeated successful refresh requests:** a stream of `200` responses
+  from `/v1/codex/auth/refresh` can mean `chatgpt_base_url` is absent, duplicated,
+  nested under the wrong TOML table, or still targets a real ChatGPT service.
+  Confirm the root-level value uses the locally mapped `*.openai.com` hostname,
+  then verify the hosts entry, certificate trust, rendered Nginx `server_name`,
+  and default `404` before restarting Codex Desktop.
 - **The script used fallbacks:** Windows exposed no usable email or full name.
   Rerun interactively, or pass `-FullName` and `-Email`.
 - **Restore required:** use the exact backup path printed by the script; do not
