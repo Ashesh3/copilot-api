@@ -21,6 +21,7 @@ import type {
 } from "../lib/responses-body"
 
 import { CopyIcon } from "../icons"
+import { formatDuration } from "../lib/duration-format"
 import { jsonCopyErrorMessage } from "../lib/json-tree"
 import {
   initialResponseInspectorViewState,
@@ -595,7 +596,7 @@ function ResponseInspectorSession({
           </Text>
           {durationMs === undefined ? null : (
             <Text type="supporting" color="secondary">
-              {durationMs.toLocaleString()} ms
+              {formatDuration(durationMs)}
             </Text>
           )}
         </HStack>
