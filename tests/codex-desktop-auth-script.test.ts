@@ -50,12 +50,19 @@ interface JwtPayload {
   email: string
   "https://api.openai.com/profile": {
     email: string
+    name: string
   }
   "https://api.openai.com/auth": {
     chatgpt_user_id: string
     chatgpt_plan_type: string
     chatgpt_account_id: string
   }
+}
+
+interface WindowsDiscoveryResult {
+  email: string
+  fullName: string
+  userName: string
 }
 
 interface ScriptResult {
@@ -66,25 +73,43 @@ interface ScriptResult {
   backupPath: string
 }
 
+interface PowerShellRunOptions {
+  nonInteractiveSwitch?: string
+  environment?: Record<string, string | undefined>
+  executable?: string
+  stdin?: string
+}
+
 async function runPowerShellScript(
   arguments_: Array<string>,
-  environment?: Record<string, string | undefined>,
-  executable = powershellExecutable,
+  options: PowerShellRunOptions = {},
 ): Promise<ScriptResult> {
+  const executable = options.executable ?? powershellExecutable
   const process = Bun.spawn(
     [
       executable,
       "-NoLogo",
       "-NoProfile",
-      "-NonInteractive",
+      ...(options.stdin === undefined ?
+        [options.nonInteractiveSwitch ?? "-NonInteractive"]
+      : []),
       "-ExecutionPolicy",
       "Bypass",
       "-File",
       scriptPath,
       ...arguments_,
     ],
-    { env: environment, stdout: "pipe", stderr: "pipe" },
+    {
+      env: options.environment,
+      stdin: options.stdin === undefined ? undefined : "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    },
   )
+  if (options.stdin !== undefined) {
+    await process.stdin.write(options.stdin)
+    await process.stdin.end()
+  }
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(process.stdout).text(),
     new Response(process.stderr).text(),
@@ -116,10 +141,11 @@ for (const executable of powershellExecutables) {
           codexHome,
           "-Email",
           "engine@example.invalid",
+          "-FullName",
+          "Engine User",
           "-SkipClipboard",
         ],
-        undefined,
-        executable,
+        { executable },
       )
       const original = await readAuth(codexHome)
       const second = await runPowerShellScript(
@@ -128,10 +154,11 @@ for (const executable of powershellExecutables) {
           codexHome,
           "-Email",
           "engine@example.invalid",
+          "-FullName",
+          "Engine User",
           "-SkipClipboard",
         ],
-        undefined,
-        executable,
+        { executable },
       )
       const replacement = await readAuth(codexHome)
       const output = `${first.stdout}\n${first.stderr}\n${second.stdout}\n${second.stderr}`
@@ -154,6 +181,54 @@ for (const executable of powershellExecutables) {
       expect(output).not.toContain(replacement.auth.tokens.refresh_token)
     })
   })
+
+  test(`never prompts in -NonInteractive mode with ${engine}`, async () => {
+    await withTemporaryCodexHome(async (codexHome) => {
+      const result = await runPowerShellScript(
+        [
+          "-CodexHome",
+          codexHome,
+          "-FullName",
+          "Only Name",
+          "-PromptForIdentity",
+          "-SkipWindowsIdentityDiscovery",
+          "-SkipClipboard",
+        ],
+        { executable },
+      )
+      const { auth } = await readAuth(codexHome)
+      const payload = getJwtPayload(auth.tokens.access_token)
+
+      expect(result.exitCode).toBe(0)
+      expect(result.stderr).toBe("")
+      expect(payload["https://api.openai.com/profile"].name).toBe("Only Name")
+      expect(payload.email).toMatch(/^codex-[\w-]+@local\.invalid$/)
+    })
+  })
+
+  test(`never prompts with abbreviated -noni mode using ${engine}`, async () => {
+    await withTemporaryCodexHome(async (codexHome) => {
+      const result = await runPowerShellScript(
+        [
+          "-CodexHome",
+          codexHome,
+          "-FullName",
+          "Only Name",
+          "-PromptForIdentity",
+          "-SkipWindowsIdentityDiscovery",
+          "-SkipClipboard",
+        ],
+        { executable, nonInteractiveSwitch: "-noni" },
+      )
+      const { auth } = await readAuth(codexHome)
+      const payload = getJwtPayload(auth.tokens.access_token)
+
+      expect(result.exitCode).toBe(0)
+      expect(result.stderr).toBe("")
+      expect(payload["https://api.openai.com/profile"].name).toBe("Only Name")
+      expect(payload.email).toMatch(/^codex-[\w-]+@local\.invalid$/)
+    })
+  })
 }
 
 async function runScript(codexHome: string): Promise<ScriptResult> {
@@ -162,6 +237,8 @@ async function runScript(codexHome: string): Promise<ScriptResult> {
     codexHome,
     "-Email",
     "device@example.invalid",
+    "-FullName",
+    "copilot-api",
     "-SkipClipboard",
   ])
 }
@@ -171,9 +248,86 @@ async function runScriptWithDefaultEmail(
   machineName: string,
 ): Promise<ScriptResult> {
   return await runPowerShellScript(
-    ["-CodexHome", codexHome, "-SkipClipboard"],
-    { ...globalThis.process.env, COMPUTERNAME: machineName },
+    [
+      "-CodexHome",
+      codexHome,
+      "-FullName",
+      "copilot-api",
+      "-SkipWindowsIdentityDiscovery",
+      "-SkipClipboard",
+    ],
+    {
+      environment: {
+        ...globalThis.process.env,
+        CODEX_AUTH_EMAIL: "",
+        COMPUTERNAME: machineName,
+      },
+    },
   )
+}
+
+async function getExpectedWindowsDiscovery(
+  executable = powershellExecutable,
+): Promise<WindowsDiscoveryResult> {
+  const script = String.raw`
+$identity = [ordered]@{
+  FullName = $null
+  Email = $null
+  UserName = [string][Environment]::UserName
+}
+try {
+  Add-Type -AssemblyName System.DirectoryServices.AccountManagement -ErrorAction Stop
+  $principal = [System.DirectoryServices.AccountManagement.UserPrincipal]::Current
+  if ($null -ne $principal) {
+    if (-not [string]::IsNullOrWhiteSpace($principal.DisplayName)) { $identity.FullName = $principal.DisplayName.Trim() }
+    if (-not [string]::IsNullOrWhiteSpace($principal.EmailAddress)) { $identity.Email = $principal.EmailAddress.Trim() }
+    elseif (-not [string]::IsNullOrWhiteSpace($principal.UserPrincipalName)) { $identity.Email = $principal.UserPrincipalName.Trim() }
+    if (-not [string]::IsNullOrWhiteSpace($principal.SamAccountName)) { $identity.UserName = $principal.SamAccountName.Trim() }
+  }
+} catch {}
+if ([string]::IsNullOrWhiteSpace($identity.FullName)) {
+  try {
+    if (Get-Command Get-LocalUser -ErrorAction SilentlyContinue) {
+      $localUser = Get-LocalUser -Name $identity.UserName -ErrorAction Stop
+      if (-not [string]::IsNullOrWhiteSpace($localUser.FullName)) { $identity.FullName = $localUser.FullName.Trim() }
+    }
+  } catch {}
+}
+if ([string]::IsNullOrWhiteSpace($identity.FullName) -and -not [string]::IsNullOrWhiteSpace($identity.UserName)) {
+  try {
+    $escaped = $identity.UserName.Replace("'", "''")
+    $account = Get-CimInstance Win32_UserAccount -Filter "Name='$escaped'" -ErrorAction Stop | Where-Object { $_.LocalAccount } | Select-Object -First 1
+    if ($null -ne $account -and -not [string]::IsNullOrWhiteSpace($account.FullName)) { $identity.FullName = $account.FullName.Trim() }
+  } catch {}
+}
+$identity | ConvertTo-Json -Compress
+`
+  const process = Bun.spawn(
+    [
+      executable,
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      script,
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  )
+  const [stdout, exitCode] = await Promise.all([
+    new Response(process.stdout).text(),
+    process.exited,
+  ])
+  expect(exitCode).toBe(0)
+  const parsed = JSON.parse(stdout) as {
+    Email?: string | null
+    FullName?: string | null
+    UserName?: string | null
+  }
+  return {
+    email: parsed.Email ?? "",
+    fullName: parsed.FullName ?? "",
+    userName: parsed.UserName ?? "",
+  }
 }
 
 async function withTemporaryCodexHome(
@@ -207,6 +361,11 @@ function getJwtPayload(jwt: string): JwtPayload {
   return decodeJwtPart(jwt.split(".")[1] ?? "") as JwtPayload
 }
 
+function getJwtFromRefreshToken(refreshToken: string): string {
+  const encodedJwt = refreshToken.replace(/^local_codex_v1\./, "")
+  return Buffer.from(encodedJwt, "base64url").toString("utf8")
+}
+
 async function listRelativeFiles(root: string): Promise<Array<string>> {
   const results: Array<string> = []
 
@@ -235,7 +394,10 @@ powershellTest("writes the exact ChatGPT auth file shape", async () => {
     expect(auth.auth_mode).toBe("chatgpt")
     expect(auth.OPENAI_API_KEY).toBeNull()
     expect(auth.tokens.id_token).toBe(auth.tokens.access_token)
-    expect(auth.tokens.refresh_token).toMatch(/^local_[\w-]+$/)
+    expect(auth.tokens.refresh_token).toMatch(/^local_codex_v1\.[\w-]+$/)
+    expect(getJwtFromRefreshToken(auth.tokens.refresh_token)).toBe(
+      auth.tokens.access_token,
+    )
     expect(auth.tokens.account_id).toBe(
       getJwtPayload(auth.tokens.access_token)["https://api.openai.com/auth"]
         .chatgpt_account_id,
@@ -263,11 +425,12 @@ powershellTest("writes the required local ChatGPT JWT claims", async () => {
     expect(payload.email).toBe("device@example.invalid")
     expect(payload["https://api.openai.com/profile"]).toEqual({
       email: "device@example.invalid",
+      name: "copilot-api",
     })
-    expect(userId).toBe("copilot-api")
-    expect(accountId).toBe("copilot-api")
-    expect(payload.sub).toBe("copilot-api")
-    expect(auth.tokens.account_id).toBe("copilot-api")
+    expect(userId).toBe("device")
+    expect(accountId).toBe("device")
+    expect(payload.sub).toBe("device")
+    expect(auth.tokens.account_id).toBe("device")
     expect(payload.iat).toBeGreaterThanOrEqual(before)
     expect(payload.iat).toBeLessThanOrEqual(after)
     expect(payload["https://api.openai.com/auth"].chatgpt_plan_type).toBe(
@@ -346,7 +509,7 @@ powershellTest("never prints the JWT or refresh token", async () => {
 })
 
 powershellTest(
-  "generates independent credentials with a stable compatibility identity",
+  "generates independent credentials with a stable identity derived from email",
   async () => {
     await withTemporaryCodexHome(async (codexHome) => {
       const firstResult = await runScript(codexHome)
@@ -370,14 +533,168 @@ powershellTest(
       expect(
         secondPayload["https://api.openai.com/auth"].chatgpt_account_id,
       ).toBe(firstPayload["https://api.openai.com/auth"].chatgpt_account_id)
-      expect(secondPayload.sub).toBe("copilot-api")
+      expect(secondPayload.sub).toBe("device")
       expect(secondPayload["https://api.openai.com/auth"].chatgpt_user_id).toBe(
-        "copilot-api",
+        "device",
       )
       expect(
         secondPayload["https://api.openai.com/auth"].chatgpt_account_id,
-      ).toBe("copilot-api")
+      ).toBe("device")
       expect(secondResult.digest).not.toBe(firstResult.digest)
+    })
+  },
+)
+
+powershellTest(
+  "uses explicit full name and email and derives a normalized user id",
+  async () => {
+    await withTemporaryCodexHome(async (codexHome) => {
+      const result = await runPowerShellScript([
+        "-CodexHome",
+        codexHome,
+        "-FullName",
+        "  Ashesh Kumar  ",
+        "-Email",
+        "  Ashesh.Kumar+Codex@Example.COM  ",
+        "-SkipClipboard",
+      ])
+      const { auth } = await readAuth(codexHome)
+      const payload = getJwtPayload(auth.tokens.access_token)
+
+      expect(result.exitCode).toBe(0)
+      expect(payload.email).toBe("Ashesh.Kumar+Codex@Example.COM")
+      expect(payload["https://api.openai.com/profile"]).toEqual({
+        email: "Ashesh.Kumar+Codex@Example.COM",
+        name: "Ashesh Kumar",
+      })
+      expect(payload.sub).toBe("ashesh.kumar-codex")
+      expect(payload["https://api.openai.com/auth"].chatgpt_user_id).toBe(
+        "ashesh.kumar-codex",
+      )
+      expect(auth.tokens.account_id).toBe("ashesh.kumar-codex")
+    })
+  },
+)
+
+powershellTest(
+  "uses configured identity overrides when parameters are absent",
+  async () => {
+    await withTemporaryCodexHome(async (codexHome) => {
+      const result = await runPowerShellScript(
+        ["-CodexHome", codexHome, "-SkipClipboard"],
+        {
+          environment: {
+            ...globalThis.process.env,
+            CODEX_AUTH_FULL_NAME: "Friendly Windows User",
+            CODEX_AUTH_EMAIL: "friendly.windows@example.com",
+          },
+        },
+      )
+      const { auth } = await readAuth(codexHome)
+      const payload = getJwtPayload(auth.tokens.access_token)
+
+      expect(result.exitCode).toBe(0)
+      expect(payload.email).toBe("friendly.windows@example.com")
+      expect(payload["https://api.openai.com/profile"].name).toBe(
+        "Friendly Windows User",
+      )
+      expect(payload.sub).toBe("friendly.windows")
+    })
+  },
+)
+
+powershellTest(
+  "discovers the available Windows account name without prompting",
+  async () => {
+    const expected = await getExpectedWindowsDiscovery()
+    await withTemporaryCodexHome(async (codexHome) => {
+      const result = await runPowerShellScript([
+        "-CodexHome",
+        codexHome,
+        "-SkipClipboard",
+      ])
+      const { auth } = await readAuth(codexHome)
+      const payload = getJwtPayload(auth.tokens.access_token)
+
+      expect(result.exitCode).toBe(0)
+      if (expected.fullName) {
+        expect(payload["https://api.openai.com/profile"].name).toBe(
+          expected.fullName,
+        )
+      } else {
+        expect(payload["https://api.openai.com/profile"].name).not.toBe("")
+      }
+      if (expected.email) expect(payload.email).toBe(expected.email)
+      expect(payload.sub).not.toBe("")
+    })
+  },
+)
+
+powershellTest(
+  "prompts for missing identity values and uses entered answers",
+  async () => {
+    await withTemporaryCodexHome(async (codexHome) => {
+      const result = await runPowerShellScript(
+        [
+          "-CodexHome",
+          codexHome,
+          "-PromptForIdentity",
+          "-SkipWindowsIdentityDiscovery",
+          "-SkipClipboard",
+        ],
+        {
+          environment: {
+            ...globalThis.process.env,
+            USERNAME: "",
+            COMPUTERNAME: "Prompt PC",
+          },
+          executable: powershellExecutable,
+          stdin: "Prompt Person\nPrompt.Person@example.com\n",
+        },
+      )
+      const { auth } = await readAuth(codexHome)
+      const payload = getJwtPayload(auth.tokens.access_token)
+
+      expect(result.exitCode).toBe(0)
+      expect(payload["https://api.openai.com/profile"].name).toBe(
+        "Prompt Person",
+      )
+      expect(payload.email).toBe("Prompt.Person@example.com")
+      expect(payload.sub).toBe("prompt.person")
+    })
+  },
+)
+
+powershellTest(
+  "uses documented defaults when identity prompts are accepted empty",
+  async () => {
+    await withTemporaryCodexHome(async (codexHome) => {
+      const result = await runPowerShellScript(
+        [
+          "-CodexHome",
+          codexHome,
+          "-PromptForIdentity",
+          "-SkipWindowsIdentityDiscovery",
+          "-SkipClipboard",
+        ],
+        {
+          environment: {
+            ...globalThis.process.env,
+            USERNAME: "",
+            COMPUTERNAME: "Fallback PC",
+          },
+          executable: powershellExecutable,
+          stdin: "\n\n",
+        },
+      )
+      const { auth } = await readAuth(codexHome)
+      const payload = getJwtPayload(auth.tokens.access_token)
+
+      expect(result.exitCode).toBe(0)
+      expect(payload["https://api.openai.com/profile"].name).toBe("copilot-api")
+      expect(payload.email).toBe("codex-fallback-pc@local.invalid")
+      expect(payload.sub).toBe("copilot-api")
+      expect(auth.tokens.account_id).toBe("copilot-api")
     })
   },
 )
@@ -422,11 +739,15 @@ powershellTest(
           codexHome,
           "-Email",
           "device@example.invalid",
+          "-FullName",
+          "copilot-api",
           "-SkipClipboard",
         ],
         {
-          ...globalThis.process.env,
-          CODEX_AUTH_TEST_REPLACEMENT_OBSERVER_PATH: outsidePath,
+          environment: {
+            ...globalThis.process.env,
+            CODEX_AUTH_TEST_REPLACEMENT_OBSERVER_PATH: outsidePath,
+          },
         },
       )
 

@@ -1,5 +1,10 @@
 # Trusted Codex JWT Digests Implementation Plan
 
+> Historical implementation plan for the original digest registry. It is
+> retained only as implementation history, not as setup or maintenance
+> documentation. Use `docs/codex-desktop-managed-auth.md` for the current
+> identity, refresh-token, environment, deployment, and rollback procedure.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a Windows script that writes a unique ChatGPT-shaped Codex `auth.json` and outputs its SHA-256 digest, plus administrator dashboard controls that persistently trust, disable, and delete those inference-only digests.
@@ -741,8 +746,12 @@ async function runScript(codexHome: string): Promise<{
 
 Write tests that verify:
 
-1. `auth.json` contains `auth_mode: "chatgpt"`, `OPENAI_API_KEY: null`, equal access/ID JWTs, a `local_` refresh token, matching account IDs, and `last_refresh: "2099-01-01T00:00:00Z"`.
-2. JWT header/payload contain the exact issuer, audience, email/profile, distinct user/account IDs matching `^local-dictation-[a-f0-9]{32}$`, `plus` plan, and subject equal to the user ID.
+1. Historical tests expected `auth_mode: "chatgpt"`, equal access/ID JWTs,
+   an opaque `local_` refresh token, and matching account claims. The current
+   executable contract is documented and tested in
+   `docs/codex-desktop-managed-auth.md`.
+2. Historical generated IDs were random `local-dictation-*` values. Current
+   user/account IDs are friendly and stable for the selected identity.
 3. The third segment is non-empty and every JWT segment is base64url text.
 4. The printed digest equals Node SHA-256 of the access token.
 5. Stdout/stderr contain neither the raw JWT nor refresh token.
@@ -792,12 +801,16 @@ function Get-Sha256Hex([string]$Value) {
 Build ordered header/payload objects with:
 
 ```powershell
-$userId = "local-dictation-$([Guid]::NewGuid().ToString('N'))"
-$accountId = "local-dictation-$([Guid]::NewGuid().ToString('N'))"
+# Historical sketch only; current identity derivation is implemented by the
+# tracked script and documented in docs/codex-desktop-managed-auth.md.
+$userId = '<historical-generated-id>'
+$accountId = '<historical-generated-id>'
 $issuedAt = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 ```
 
-Generate the JWT by joining the header, payload, and a 32-random-byte base64url signature segment with periods. Generate the refresh token with the `local_` prefix followed by 32 random bytes encoded as base64url.
+Historical implementation originally generated an opaque random refresh token.
+That behavior is obsolete in current Codex Desktop builds; use the versioned
+managed refresh-token format described in `docs/codex-desktop-managed-auth.md`.
 
 Serialize the exact auth shape with `ConvertTo-Json -Depth 10`, append one newline, and write it with `New-Object Text.UTF8Encoding($false)` to a same-directory temporary file. If an existing `auth.json` exists:
 
@@ -866,7 +879,9 @@ State explicitly:
 - the user/admin pastes only that digest plus a device label into **Settings → Trusted JWT Digests**;
 - `https://ai.ashesh.dev/dashboard#settings` is the production portal for this deployment;
 - the user must fully quit/reopen Codex Desktop after the file changes;
-- the script deliberately does not configure `config.toml`, certificates, hosts/DNS, environment variables, or networking.
+- the script deliberately does not configure `config.toml`, certificates,
+  hosts/DNS, environment variables, or networking; the required user-scoped
+  refresh override is a separate step in `docs/codex-desktop-managed-auth.md`.
 
 Add `trusted_jwt_digests.json` to the persistent-data table with the description `Dashboard-managed SHA-256 digests for inference-only local Codex JWTs`.
 

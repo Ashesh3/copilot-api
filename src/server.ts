@@ -36,6 +36,7 @@ import { audioTranscriptionRoutes } from "./routes/audio-transcriptions/route"
 import { completionRoutes } from "./routes/chat-completions/route"
 import { claudeCompatibilityRoutes } from "./routes/claude-compat/route"
 import { codeSessionsRoutes } from "./routes/code-sessions/route"
+import { codexAuthRoutes } from "./routes/codex-auth/route"
 import { codexResponsesRoutes } from "./routes/codex-responses/route"
 import { codexSearchRoutes } from "./routes/codex-search/route"
 import { computerUsePolicyRoutes } from "./routes/computer-use-policy/route"
@@ -202,6 +203,10 @@ server.route("/health", healthRoutes)
 server.route("/transcribe", transcribeRoutes)
 // Codex Desktop dictation transcript cleanup — auth via IP whitelist
 server.route("/codex/responses", codexResponsesRoutes)
+// Codex Desktop synthetic ChatGPT identities refresh without an Authorization
+// header. The versioned refresh token is validated against the managed JWT
+// digest registry inside this narrowly scoped route.
+server.route("/v1/codex/auth", codexAuthRoutes)
 // Codex Desktop cloud-task endpoints. Returning a fast 404 lets Desktop fall
 // back to local-only views instead of hanging behind proxy/auth silent drops.
 server.route("/wham", whamRoutes)

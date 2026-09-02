@@ -124,6 +124,24 @@ test("Codex Computer Use policy is an exact GET-only spoof route", async () => {
   )
 })
 
+test("Codex managed auth refresh is an exact POST-only route", async () => {
+  const [publicTemplate, codexTemplate] = await Promise.all([
+    read("sites-available/public-domain.conf.template"),
+    read("sites-available/codex-desktop-spoof.conf.template"),
+  ])
+
+  for (const template of [publicTemplate, codexTemplate]) {
+    const location = template.match(
+      /location = \/v1\/codex\/auth\/refresh \{([\s\S]*?)\n {2}\}/,
+    )?.[1]
+    expect(location).toBeDefined()
+    expect(location).toContain("limit_except POST { deny all; }")
+    expect(location).toContain("proxy_pass {{UPSTREAM_URL}};")
+    expect(location).toContain("proxy_http_version 1.1;")
+    expect(location).toContain("proxy_request_buffering off;")
+  }
+})
+
 test("Claude subscriber compatibility routes keep exact methods", async () => {
   const template = await read("sites-available/spoof-domains.conf.template")
 

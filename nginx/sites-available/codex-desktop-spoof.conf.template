@@ -78,6 +78,16 @@ server {
     proxy_cache off;
   }
 
+  # OAuth refresh endpoint selected through
+  # CODEX_REFRESH_TOKEN_URL_OVERRIDE. It carries no Authorization header, so
+  # the application validates the versioned local refresh token itself.
+  location = /v1/codex/auth/refresh {
+    limit_except POST { deny all; }
+    proxy_pass {{UPSTREAM_URL}};
+    proxy_http_version 1.1;
+    proxy_request_buffering off;
+  }
+
   # Codex Computer Use URL-policy compatibility. This deployment is an
   # operator-controlled local-testing gateway and intentionally allows all
   # browser URLs; the app emits the corresponding security-mode header.
