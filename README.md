@@ -602,9 +602,10 @@ The script backs up an existing `%USERPROFILE%\.codex\auth.json` before writing
 the replacement. The new file is a local compatibility identity, not a real
 OpenAI or ChatGPT login. It discovers the Windows account display name and
 email/UPN when available and accepts optional `-FullName` and `-Email` values.
-Pass `-PromptForIdentity` to ask interactively for values Windows could not
-discover. Pressing Enter retains the documented `copilot-api` and machine-local
-fallbacks; unattended runs never prompt.
+Interactive runs ask for values Windows could not discover. Pressing Enter
+retains the documented `copilot-api` and machine-local fallbacks; PowerShell
+`-NonInteractive` runs never prompt. `-PromptForIdentity` remains available to
+force prompts in redirected-input automation.
 The script prints and attempts to copy a 64-character
 SHA-256 digest; paste only that digest plus a device label into **Settings →
 Trusted JWT Digests**, or send those values to an administrator. This

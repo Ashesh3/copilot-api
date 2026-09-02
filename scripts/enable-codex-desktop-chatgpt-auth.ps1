@@ -192,7 +192,8 @@ function Get-FriendlyUserId(
 }
 
 function Test-NonInteractivePowerShell {
-  foreach ($argument in [Environment]::GetCommandLineArgs()) {
+  $commandLineArguments = [Environment]::GetCommandLineArgs()
+  foreach ($argument in $commandLineArguments) {
     if ($argument -match '^(?i)-noni(?:n(?:t(?:e(?:r(?:a(?:c(?:t(?:i(?:v(?:e)?)?)?)?)?)?)?)?)?)?$') {
       return $true
     }
@@ -239,7 +240,7 @@ if (-not [string]::IsNullOrWhiteSpace($Email)) {
   $Email = $Email.Trim()
 }
 
-$canPrompt = $PromptForIdentity -and -not (Test-NonInteractivePowerShell)
+$canPrompt = -not (Test-NonInteractivePowerShell) -and ($PromptForIdentity -or -not [Console]::IsInputRedirected)
 if ($canPrompt -and [string]::IsNullOrWhiteSpace($FullName)) {
   $enteredFullName = Read-Host 'Full name [copilot-api]'
   if (-not [string]::IsNullOrWhiteSpace($enteredFullName)) {

@@ -74,9 +74,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\enable-codex-deskt
 
 The script accepts optional `-FullName` and `-Email` values. When they are not
 provided it tries the current Windows account display name, email/UPN, local
-user record, and Windows username. Pass `-PromptForIdentity` when an interactive
-run should ask for values that remain unavailable. Press Enter to accept the
-fallback values:
+user record, and Windows username. Normal interactive runs ask for values that
+remain unavailable. Press Enter to accept the fallback values:
 
 - full name: `copilot-api`
 - email: `codex-<sanitized-computer-name>@local.invalid`
@@ -92,7 +91,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\enable-codex-deskt
   -SkipClipboard
 ```
 
-To prompt for missing values instead:
+When standard input is redirected but prompts are still intentional, opt in
+explicitly:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\enable-codex-desktop-chatgpt-auth.ps1 `
@@ -173,6 +173,6 @@ Codex Desktop only after the intended `auth.json` is in place.
 - **OAuth `invalid_grant`:** the token is old-format, malformed, unknown,
   disabled, or deleted. Run the current script and register its new digest.
 - **The script used fallbacks:** Windows exposed no usable email or full name.
-  Rerun with `-PromptForIdentity`, or pass `-FullName` and `-Email`.
+  Rerun interactively, or pass `-FullName` and `-Email`.
 - **Restore required:** use the exact backup path printed by the script; do not
   edit a backup in place.
