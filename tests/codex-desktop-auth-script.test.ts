@@ -202,7 +202,7 @@ for (const executable of powershellExecutables) {
       expect(result.exitCode).toBe(0)
       expect(result.stderr).toBe("")
       expect(payload["https://api.openai.com/profile"].name).toBe("Only Name")
-      expect(payload.email).toMatch(/^codex-[\w-]+@local\.invalid$/)
+      expect(payload.email).toBe("only@copilot-api.local")
     })
   })
 
@@ -226,7 +226,7 @@ for (const executable of powershellExecutables) {
       expect(result.exitCode).toBe(0)
       expect(result.stderr).toBe("")
       expect(payload["https://api.openai.com/profile"].name).toBe("Only Name")
-      expect(payload.email).toMatch(/^codex-[\w-]+@local\.invalid$/)
+      expect(payload.email).toBe("only@copilot-api.local")
     })
   })
 }
@@ -245,14 +245,14 @@ async function runScript(codexHome: string): Promise<ScriptResult> {
 
 async function runScriptWithDefaultEmail(
   codexHome: string,
-  machineName: string,
+  fullName: string,
 ): Promise<ScriptResult> {
   return await runPowerShellScript(
     [
       "-CodexHome",
       codexHome,
       "-FullName",
-      "copilot-api",
+      fullName,
       "-SkipWindowsIdentityDiscovery",
       "-SkipClipboard",
     ],
@@ -260,7 +260,6 @@ async function runScriptWithDefaultEmail(
       environment: {
         ...globalThis.process.env,
         CODEX_AUTH_EMAIL: "",
-        COMPUTERNAME: machineName,
       },
     },
   )
@@ -662,12 +661,7 @@ powershellTest(
       expect(payload.email).toBe("Prompt.Person@example.com")
       expect(payload.sub).toBe("prompt.person")
     })
-  },
-)
 
-powershellTest(
-  "uses documented defaults when identity prompts are accepted empty",
-  async () => {
     await withTemporaryCodexHome(async (codexHome) => {
       const result = await runPowerShellScript(
         [
@@ -692,7 +686,7 @@ powershellTest(
 
       expect(result.exitCode).toBe(0)
       expect(payload["https://api.openai.com/profile"].name).toBe("copilot-api")
-      expect(payload.email).toBe("codex-fallback-pc@local.invalid")
+      expect(payload.email).toBe("copilot-api@copilot-api.local")
       expect(payload.sub).toBe("copilot-api")
       expect(auth.tokens.account_id).toBe("copilot-api")
     })
@@ -813,25 +807,25 @@ powershellTest(
 )
 
 powershellTest(
-  "derives the default email from a sanitized machine name with a fallback",
+  "derives the default email from a sanitized first name with a safe fallback",
   async () => {
     await withTemporaryCodexHome(async (codexHome) => {
       const sanitizedResult = await runScriptWithDefaultEmail(
         codexHome,
-        "  My___WINDOWS PC!!  ",
+        "  Ashesh!!! Kumar  ",
       )
       const { auth: sanitizedAuth } = await readAuth(codexHome)
       const sanitizedPayload = getJwtPayload(sanitizedAuth.tokens.access_token)
 
       expect(sanitizedResult.exitCode).toBe(0)
-      expect(sanitizedPayload.email).toBe("codex-my-windows-pc@local.invalid")
+      expect(sanitizedPayload.email).toBe("ashesh@copilot-api.local")
 
       const fallbackResult = await runScriptWithDefaultEmail(codexHome, "___")
       const { auth: fallbackAuth } = await readAuth(codexHome)
       const fallbackPayload = getJwtPayload(fallbackAuth.tokens.access_token)
 
       expect(fallbackResult.exitCode).toBe(0)
-      expect(fallbackPayload.email).toBe("codex-windows-pc@local.invalid")
+      expect(fallbackPayload.email).toBe("copilot-api@copilot-api.local")
     })
   },
 )

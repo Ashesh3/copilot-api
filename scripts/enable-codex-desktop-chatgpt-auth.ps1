@@ -46,13 +46,20 @@ function Get-Sha256Hex([string]$Value) {
   }
 }
 
-function Get-DefaultEmail([string]$MachineName) {
-  $sanitizedMachineName = $MachineName.ToLowerInvariant() -replace '[^a-z0-9]+', '-'
-  $sanitizedMachineName = $sanitizedMachineName.Trim('-')
-  if ([string]::IsNullOrWhiteSpace($sanitizedMachineName)) {
-    $sanitizedMachineName = 'windows-pc'
+function Get-DefaultEmail([AllowNull()][string]$SelectedFullName) {
+  $normalizedFullName = [string]$SelectedFullName
+  $normalizedFullName = $normalizedFullName.Trim()
+  $firstName = @($normalizedFullName -split '\s+' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) |
+    Select-Object -First 1
+  $sanitizedFirstName = 'copilot-api'
+  if ($null -ne $firstName) {
+    $candidateFirstName = ([string]$firstName).ToLowerInvariant() -replace '[^a-z0-9]+', '-'
+    $candidateFirstName = $candidateFirstName.Trim('-')
+    if (-not [string]::IsNullOrWhiteSpace($candidateFirstName)) {
+      $sanitizedFirstName = $candidateFirstName
+    }
   }
-  return "codex-$sanitizedMachineName@local.invalid"
+  return "$sanitizedFirstName@copilot-api.local"
 }
 
 function Test-EmailAddress([string]$Value) {
@@ -210,8 +217,6 @@ if ([string]::IsNullOrWhiteSpace($CodexHome)) {
 
 $CodexHome = [IO.Path]::GetFullPath($CodexHome)
 
-$machineName = [string]$env:COMPUTERNAME
-$defaultEmail = Get-DefaultEmail $machineName
 if ([string]::IsNullOrWhiteSpace($FullName) -and -not [string]::IsNullOrWhiteSpace($env:CODEX_AUTH_FULL_NAME)) {
   $FullName = $env:CODEX_AUTH_FULL_NAME
 }
@@ -247,6 +252,7 @@ if ($canPrompt -and [string]::IsNullOrWhiteSpace($FullName)) {
     $FullName = $enteredFullName.Trim()
   }
 }
+$defaultEmail = Get-DefaultEmail $FullName
 if ($canPrompt -and [string]::IsNullOrWhiteSpace($Email)) {
   $enteredEmail = Read-Host "Email [$defaultEmail]"
   if (-not [string]::IsNullOrWhiteSpace($enteredEmail)) {

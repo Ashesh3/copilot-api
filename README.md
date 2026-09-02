@@ -603,7 +603,8 @@ the replacement. The new file is a local compatibility identity, not a real
 OpenAI or ChatGPT login. It discovers the Windows account display name and
 email/UPN when available and accepts optional `-FullName` and `-Email` values.
 Interactive runs ask for values Windows could not discover. Pressing Enter
-retains the documented `copilot-api` and machine-local fallbacks; PowerShell
+uses the discovered or entered first name for `<firstname>@copilot-api.local`,
+with `copilot-api@copilot-api.local` as the final fallback; PowerShell
 `-NonInteractive` runs never prompt. `-PromptForIdentity` remains available to
 force prompts in redirected-input automation.
 The script prints and attempts to copy a 64-character
