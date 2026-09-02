@@ -2,6 +2,9 @@
 param(
   [string]$CodexHome,
   [string]$Email,
+  [string]$FullName,
+  [switch]$PromptForIdentity,
+  [switch]$SkipWindowsIdentityDiscovery,
   [switch]$SkipClipboard
 )
 
@@ -43,6 +46,160 @@ function Get-Sha256Hex([string]$Value) {
   }
 }
 
+function Get-DefaultEmail([string]$MachineName) {
+  $sanitizedMachineName = $MachineName.ToLowerInvariant() -replace '[^a-z0-9]+', '-'
+  $sanitizedMachineName = $sanitizedMachineName.Trim('-')
+  if ([string]::IsNullOrWhiteSpace($sanitizedMachineName)) {
+    $sanitizedMachineName = 'windows-pc'
+  }
+  return "codex-$sanitizedMachineName@local.invalid"
+}
+
+function Test-EmailAddress([string]$Value) {
+  if ([string]::IsNullOrWhiteSpace($Value)) {
+    return $false
+  }
+  try {
+    $address = New-Object Net.Mail.MailAddress($Value.Trim())
+    return $address.Address -eq $Value.Trim()
+  }
+  catch {
+    return $false
+  }
+}
+
+function ConvertTo-FriendlyName([string]$Value) {
+  if ([string]::IsNullOrWhiteSpace($Value)) {
+    return $null
+  }
+  $words = @($Value.Trim() -split '[._\-\s]+' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+  if ($words.Count -eq 0) {
+    return $null
+  }
+  $culture = [Globalization.CultureInfo]::CurrentCulture
+  return ($words | ForEach-Object { $culture.TextInfo.ToTitleCase($_.ToLower($culture)) }) -join ' '
+}
+
+function Get-WindowsIdentity {
+  $identity = [ordered]@{
+    FullName = $null
+    Email = $null
+    UserName = [string][Environment]::UserName
+  }
+
+  if ($SkipWindowsIdentityDiscovery) {
+    return $identity
+  }
+
+  try {
+    Add-Type -AssemblyName System.DirectoryServices.AccountManagement -ErrorAction Stop
+    $principal = [System.DirectoryServices.AccountManagement.UserPrincipal]::Current
+    if ($null -ne $principal) {
+      if (-not [string]::IsNullOrWhiteSpace($principal.DisplayName)) {
+        $identity.FullName = $principal.DisplayName.Trim()
+      }
+      if (Test-EmailAddress ([string]$principal.EmailAddress)) {
+        $identity.Email = $principal.EmailAddress.Trim()
+      }
+      elseif (Test-EmailAddress ([string]$principal.UserPrincipalName)) {
+        $identity.Email = $principal.UserPrincipalName.Trim()
+      }
+      if (-not [string]::IsNullOrWhiteSpace($principal.SamAccountName)) {
+        $identity.UserName = $principal.SamAccountName.Trim()
+      }
+    }
+  }
+  catch {
+    # Continue through Windows-local discovery fallbacks.
+  }
+
+  if ([string]::IsNullOrWhiteSpace($identity.FullName)) {
+    try {
+      $localUserCommand = Get-Command Get-LocalUser -ErrorAction SilentlyContinue
+      if ($null -ne $localUserCommand -and -not [string]::IsNullOrWhiteSpace($identity.UserName)) {
+        $localUser = Get-LocalUser -Name $identity.UserName -ErrorAction Stop
+        if (-not [string]::IsNullOrWhiteSpace($localUser.FullName)) {
+          $identity.FullName = $localUser.FullName.Trim()
+        }
+      }
+    }
+    catch {
+      # Windows PowerShell editions without LocalAccounts continue to CIM.
+    }
+  }
+
+  if ([string]::IsNullOrWhiteSpace($identity.FullName) -and -not [string]::IsNullOrWhiteSpace($identity.UserName)) {
+    try {
+      $escapedUserName = $identity.UserName.Replace("'", "''")
+      $account = Get-CimInstance Win32_UserAccount -Filter "Name='$escapedUserName'" -ErrorAction Stop |
+        Where-Object { $_.LocalAccount } |
+        Select-Object -First 1
+      if ($null -ne $account -and -not [string]::IsNullOrWhiteSpace($account.FullName)) {
+        $identity.FullName = $account.FullName.Trim()
+      }
+    }
+    catch {
+      # A friendly username fallback is still available below.
+    }
+  }
+
+  if ([string]::IsNullOrWhiteSpace($identity.Email)) {
+    try {
+      $upn = (& whoami.exe /upn 2>$null | Out-String).Trim()
+      if (Test-EmailAddress $upn) {
+        $identity.Email = $upn
+      }
+    }
+    catch {
+      # Local accounts commonly have no UPN.
+    }
+  }
+
+  if ([string]::IsNullOrWhiteSpace($identity.FullName)) {
+    $identity.FullName = ConvertTo-FriendlyName $identity.UserName
+  }
+  return $identity
+}
+
+function Get-FriendlyUserId(
+  [string]$SelectedEmail,
+  [string]$SelectedFullName,
+  [string]$WindowsUserName,
+  [bool]$HasUserEmail,
+  [bool]$UsedFallbackIdentity
+) {
+  if ($UsedFallbackIdentity) {
+    return 'copilot-api'
+  }
+
+  $candidate = $null
+  if ($HasUserEmail -and (Test-EmailAddress $SelectedEmail)) {
+    $candidate = $SelectedEmail.Substring(0, $SelectedEmail.LastIndexOf('@'))
+  }
+  if ([string]::IsNullOrWhiteSpace($candidate)) {
+    $candidate = $SelectedFullName
+  }
+  if ([string]::IsNullOrWhiteSpace($candidate)) {
+    $candidate = $WindowsUserName
+  }
+
+  $userId = ([string]$candidate).ToLowerInvariant() -replace '[^a-z0-9._-]+', '-'
+  $userId = ($userId -replace '-{2,}', '-').Trim([char[]]'._-')
+  if ([string]::IsNullOrWhiteSpace($userId)) {
+    return 'copilot-api'
+  }
+  return $userId
+}
+
+function Test-NonInteractivePowerShell {
+  foreach ($argument in [Environment]::GetCommandLineArgs()) {
+    if ($argument -match '^(?i)-noni(?:n(?:t(?:e(?:r(?:a(?:c(?:t(?:i(?:v(?:e)?)?)?)?)?)?)?)?)?)?$') {
+      return $true
+    }
+  }
+  return $false
+}
+
 if ([string]::IsNullOrWhiteSpace($CodexHome)) {
   if ([string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
     throw 'Unable to determine the current user profile. Supply -CodexHome.'
@@ -52,21 +209,64 @@ if ([string]::IsNullOrWhiteSpace($CodexHome)) {
 
 $CodexHome = [IO.Path]::GetFullPath($CodexHome)
 
-if ([string]::IsNullOrWhiteSpace($Email)) {
-  $machineName = [string]$env:COMPUTERNAME
-  $sanitizedMachineName = $machineName.ToLowerInvariant() -replace '[^a-z0-9]+', '-'
-  $sanitizedMachineName = $sanitizedMachineName.Trim('-')
-  if ([string]::IsNullOrWhiteSpace($sanitizedMachineName)) {
-    $sanitizedMachineName = 'windows-pc'
-  }
-  $Email = "codex-$sanitizedMachineName@local.invalid"
+$machineName = [string]$env:COMPUTERNAME
+$defaultEmail = Get-DefaultEmail $machineName
+if ([string]::IsNullOrWhiteSpace($FullName) -and -not [string]::IsNullOrWhiteSpace($env:CODEX_AUTH_FULL_NAME)) {
+  $FullName = $env:CODEX_AUTH_FULL_NAME
 }
-else {
+if ([string]::IsNullOrWhiteSpace($Email) -and -not [string]::IsNullOrWhiteSpace($env:CODEX_AUTH_EMAIL)) {
+  $Email = $env:CODEX_AUTH_EMAIL
+}
+$windowsIdentity = [ordered]@{
+  FullName = $null
+  Email = $null
+  UserName = [string][Environment]::UserName
+}
+if ([string]::IsNullOrWhiteSpace($FullName) -or [string]::IsNullOrWhiteSpace($Email)) {
+  $windowsIdentity = Get-WindowsIdentity
+  if ([string]::IsNullOrWhiteSpace($FullName)) {
+    $FullName = $windowsIdentity.FullName
+  }
+  if ([string]::IsNullOrWhiteSpace($Email)) {
+    $Email = $windowsIdentity.Email
+  }
+}
+
+if (-not [string]::IsNullOrWhiteSpace($FullName)) {
+  $FullName = $FullName.Trim()
+}
+if (-not [string]::IsNullOrWhiteSpace($Email)) {
   $Email = $Email.Trim()
 }
 
-$userId = 'copilot-api'
-$accountId = 'copilot-api'
+$canPrompt = $PromptForIdentity -and -not (Test-NonInteractivePowerShell)
+if ($canPrompt -and [string]::IsNullOrWhiteSpace($FullName)) {
+  $enteredFullName = Read-Host 'Full name [copilot-api]'
+  if (-not [string]::IsNullOrWhiteSpace($enteredFullName)) {
+    $FullName = $enteredFullName.Trim()
+  }
+}
+if ($canPrompt -and [string]::IsNullOrWhiteSpace($Email)) {
+  $enteredEmail = Read-Host "Email [$defaultEmail]"
+  if (-not [string]::IsNullOrWhiteSpace($enteredEmail)) {
+    $Email = $enteredEmail.Trim()
+  }
+}
+
+$usedFallbackIdentity = [string]::IsNullOrWhiteSpace($FullName) -and [string]::IsNullOrWhiteSpace($Email)
+$hasUserEmail = -not [string]::IsNullOrWhiteSpace($Email)
+if ([string]::IsNullOrWhiteSpace($FullName)) {
+  $FullName = 'copilot-api'
+}
+if ([string]::IsNullOrWhiteSpace($Email)) {
+  $Email = $defaultEmail
+}
+if (-not (Test-EmailAddress $Email)) {
+  throw 'Email must be a valid email address.'
+}
+
+$userId = Get-FriendlyUserId $Email $FullName $windowsIdentity.UserName $hasUserEmail $usedFallbackIdentity
+$accountId = $userId
 $issuedAt = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 
 $header = [ordered]@{
@@ -81,6 +281,7 @@ $payload = [ordered]@{
   email = $Email
   'https://api.openai.com/profile' = [ordered]@{
     email = $Email
+    name = $FullName
   }
   'https://api.openai.com/auth' = [ordered]@{
     chatgpt_user_id = $userId
@@ -94,7 +295,7 @@ $jwt = @(
   ConvertTo-JsonBase64Url $payload
   New-RandomBase64Url 32
 ) -join '.'
-$refreshToken = "local_$(New-RandomBase64Url 32)"
+$refreshToken = "local_codex_v1.$(ConvertTo-Base64Url ([Text.Encoding]::UTF8.GetBytes($jwt)))"
 $digest = Get-Sha256Hex $jwt
 
 $auth = [ordered]@{

@@ -13,7 +13,7 @@ The canonical application and Docker setup remains in the repository
 | --------------------------------------------------- | ----------------------------------------------- | ----------------------------------------------------------------------------- |
 | `sites-available/public-domain.conf.template`       | Normal public API/dashboard hostname            | Inference APIs, scoped OAuth, dashboard, Remote Control, exact health         |
 | `sites-available/spoof-domains.conf.template`       | Claude API and platform compatibility hostnames | Claude API/OAuth/session compatibility allowlists                             |
-| `sites-available/codex-desktop-spoof.conf.template` | Locally mapped trusted `*.openai.com` hostname  | Authenticated Codex dictation and transcript cleanup only                     |
+| `sites-available/codex-desktop-spoof.conf.template` | Locally mapped trusted `*.openai.com` hostname  | Codex dictation, transcript cleanup, managed auth refresh, and URL policy      |
 | `sites-available/codex-statsig-spoof.conf.template` | Locally mapped `ab.chatgpt.com`                 | Exact Statsig initialize/download/check routes; all other paths denied         |
 
 Do not combine these server blocks onto one broad hostname. Do not add a
@@ -131,12 +131,18 @@ Then verify the boundary from outside the origin:
    unsupported methods remain denied.
 8. An authenticated multipart audio upload to `POST /transcribe` returns `200`
    with a JSON `text` value.
-9. Spoofed `X-Real-IP`, `X-Forwarded-For`, and `CF-Connecting-IP` headers from a
+9. Exact `POST /v1/codex/auth/refresh` reaches the application while GET and
+   adjacent paths remain denied. A valid enabled managed identity returns
+   `200`; an unknown or disabled digest returns OAuth `invalid_grant`.
+10. Spoofed `X-Real-IP`, `X-Forwarded-For`, and `CF-Connecting-IP` headers from a
    non-trusted TCP peer do not authorize IP-gated routes.
-10. `nginx -T` contains no `limit_req`, `limit_req_zone`, or `limit_conn`, and
+11. `nginx -T` contains no `limit_req`, `limit_req_zone`, or `limit_conn`, and
    each TLS proxy server has the maximum-duration client/read/send directives.
-11. The Statsig hostname proxies only `/v1/initialize`, `/v1/download`, and
+12. The Statsig hostname proxies only `/v1/initialize`, `/v1/download`, and
    `/v1/check`; an unrelated path returns `404`.
+
+See [../docs/codex-desktop-managed-auth.md](../docs/codex-desktop-managed-auth.md)
+for the complete Windows client and digest-registration procedure.
 
 Keep origin ports firewalled or loopback-bound. The public hostname policy does
 not protect a separately reachable backend listener.

@@ -1,5 +1,11 @@
 # Trusted Codex JWT Digests Design
 
+> Historical design for the original digest registry. Current Codex Desktop
+> builds also require the managed refresh procedure in
+> `docs/codex-desktop-managed-auth.md`; where this document describes a random
+> opaque refresh token or no environment setting, the current runbook
+> supersedes it.
+
 ## Goal
 
 Let a Windows user generate the local ChatGPT-shaped `auth.json` required by
@@ -75,9 +81,11 @@ Desktop build:
 - `https://api.openai.com/auth.chatgpt_plan_type: "plus"`
 - `https://api.openai.com/auth.chatgpt_account_id`
 
-The user ID and account ID will be distinct, randomly generated local IDs. The
-third JWT segment and the local refresh token will use cryptographically random
-bytes. The access token and ID token will contain the same JWT.
+The current script derives a stable friendly user/account ID from the selected
+email, full name, or Windows username. The third JWT segment remains random. The
+refresh token is now a versioned base64url envelope containing the same JWT so
+the managed refresh endpoint can validate its registered digest. The access
+token and ID token contain the same JWT.
 
 The resulting file will contain:
 
@@ -88,7 +96,7 @@ The resulting file will contain:
   "tokens": {
     "id_token": "<local JWT>",
     "access_token": "<same local JWT>",
-    "refresh_token": "<local random value>",
+    "refresh_token": "local_codex_v1.<base64url local JWT>",
     "account_id": "<matching account claim>"
   },
   "last_refresh": "2099-01-01T00:00:00Z"
@@ -247,6 +255,8 @@ The README will document:
 - that the printed digest must be registered by an administrator;
 - that the script intentionally does not configure certificates, hostnames,
   environment variables, networking, or `config.toml`;
+- that current clients require `CODEX_REFRESH_TOKEN_URL_OVERRIDE` to point at
+  the gateway's exact managed refresh route;
 - that users should fully quit and reopen Codex Desktop after changing
   `auth.json`.
 
@@ -286,7 +296,7 @@ The README will document:
 Run the script against a temporary `-CodexHome` and verify:
 
 - the expected JSON shape and claim values;
-- unique IDs, JWTs, refresh tokens, and digests across runs;
+- friendly stable IDs plus unique JWTs, refresh tokens, and digests across runs;
 - the reported digest equals SHA-256 of the written access token;
 - access and ID tokens match;
 - `account_id` matches the JWT account claim;
@@ -318,7 +328,8 @@ JWT digest without interrupting the existing Codex Desktop session.
 - Automatic submission to the dashboard
 - Certificate or HTTPS interception setup
 - hosts-file, DNS, proxy, or firewall changes
-- environment-variable changes
+- environment-variable changes performed by the script (the documented user
+  refresh override remains a separate operator action)
 - `config.toml` changes
 - Real OpenAI authentication or token signing
 - macOS or Linux setup scripts

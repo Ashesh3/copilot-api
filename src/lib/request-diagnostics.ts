@@ -82,6 +82,7 @@ export function isGoogleModelActionRequest(
  */
 export function shouldOmitRequestBodyFromDiagnostics(path: string): boolean {
   if (/^\/v1\/audio\/transcriptions\/?(?:[?#]|$)/.test(path)) return true
+  if (/^\/v1\/codex\/auth\/refresh\/?(?:[?#]|$)/.test(path)) return true
   if (!isGoogleModelActionPath(path)) return false
   return !SUPPORTED_GOOGLE_MODEL_ACTION_PATH.test(path)
 }
