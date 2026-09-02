@@ -858,7 +858,7 @@ git commit -m "Add Codex ChatGPT auth generator script"
 
 **Interfaces:**
 - Documents script: `scripts/enable-codex-desktop-chatgpt-auth.ps1`.
-- Documents portal: `https://ai.ashesh.dev/dashboard#settings` and generic `/dashboard#settings`.
+- Documents the gateway-relative `/dashboard#settings` portal.
 - Documents persisted file: `trusted_jwt_digests.json`.
 
 - [ ] **Step 1: Document the complete two-party flow**
@@ -877,7 +877,7 @@ State explicitly:
 - it writes a local compatibility identity, not a real OpenAI login;
 - it prints and attempts to copy a 64-character SHA-256 digest;
 - the user/admin pastes only that digest plus a device label into **Settings → Trusted JWT Digests**;
-- `https://ai.ashesh.dev/dashboard#settings` is the production portal for this deployment;
+- `/dashboard#settings` is the portal path on the deployment gateway;
 - the user must fully quit/reopen Codex Desktop after the file changes;
 - the script deliberately does not configure `config.toml`, certificates,
   hosts/DNS, environment variables, or networking; the required user-scoped
@@ -951,7 +951,7 @@ If the generated page was already committed unchanged in Task 4, stage only READ
 **Interfaces:**
 - Deploy target: repository default branch, verified before merge (currently `master`).
 - Production checkout: `/root/copilot-api`.
-- Public dashboard: `https://ai.ashesh.dev/dashboard#settings`.
+- Public dashboard: `/dashboard#settings` on the deployment gateway.
 
 - [ ] **Step 1: Review the branch against the approved spec**
 
@@ -1052,7 +1052,7 @@ If managed verification fails, restore the backed-up `.env`, run `./update.sh`, 
 
 - [ ] **Step 8: Verify the live dashboard workflow**
 
-Through an authenticated administrator browser session at `https://ai.ashesh.dev/dashboard#settings`:
+Through an authenticated administrator browser session at the deployment gateway's `/dashboard#settings` page:
 
 1. confirm **Trusted JWT Digests** appears next to IP Allowlist on a wide viewport;
 2. add a temporary test digest with a non-production label;

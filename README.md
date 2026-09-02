@@ -609,10 +609,8 @@ with `copilot-api@copilot-api.local` as the final fallback; PowerShell
 force prompts in redirected-input automation.
 The script prints and attempts to copy a 64-character
 SHA-256 digest; paste only that digest plus a device label into **Settings →
-Trusted JWT Digests**, or send those values to an administrator. This
-deployment's production portal is
-[`https://ai.ashesh.dev/dashboard#settings`](https://ai.ashesh.dev/dashboard#settings);
-other deployments use `/dashboard#settings` on their own gateway.
+Trusted JWT Digests** on your gateway's `/dashboard#settings` page, or send
+those values to an administrator.
 
 Current Codex builds proactively refresh ChatGPT-shaped credentials. Set the
 following user environment variable before fully quitting and reopening Codex
@@ -621,10 +619,12 @@ Desktop:
 ```powershell
 [Environment]::SetEnvironmentVariable(
   'CODEX_REFRESH_TOKEN_URL_OVERRIDE',
-  'https://ai.ashesh.dev/v1/codex/auth/refresh',
+  'https://gateway.example.com/v1/codex/auth/refresh',
   'User'
 )
 ```
+
+Replace `gateway.example.com` with your gateway's public hostname.
 
 The script deliberately does not configure `config.toml`, certificates,
 hosts/DNS, environment variables, networking, or any other deployment

@@ -46,16 +46,18 @@ Keep credentials in the Codex file store and point inference at the gateway in
 `%USERPROFILE%\.codex\config.toml`:
 
 ```toml
-openai_base_url = "https://ai.ashesh.dev/v1"
+openai_base_url = "https://gateway.example.com/v1"
 cli_auth_credentials_store = "file"
 ```
+
+Replace `gateway.example.com` with your gateway's public hostname.
 
 Set the supported refresh endpoint override for the current Windows user:
 
 ```powershell
 [Environment]::SetEnvironmentVariable(
   'CODEX_REFRESH_TOKEN_URL_OVERRIDE',
-  'https://ai.ashesh.dev/v1/codex/auth/refresh',
+  'https://gateway.example.com/v1/codex/auth/refresh',
   'User'
 )
 ```
@@ -123,10 +125,9 @@ TRUSTED_JWT_SHA256_BEGIN
 TRUSTED_JWT_SHA256_END
 ```
 
-Open [`https://ai.ashesh.dev/dashboard#settings`](https://ai.ashesh.dev/dashboard#settings),
-add a useful device label under **Trusted JWT Digests**, and paste only that
-64-character SHA-256 digest. Never paste the JWT, refresh token, or complete
-`auth.json` into the dashboard.
+Open your gateway's `/dashboard#settings` page, add a useful device label under
+**Trusted JWT Digests**, and paste only that 64-character SHA-256 digest. Never
+paste the JWT, refresh token, or complete `auth.json` into the dashboard.
 
 ## 5. Restart and verify
 

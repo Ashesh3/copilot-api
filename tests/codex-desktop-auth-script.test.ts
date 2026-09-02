@@ -798,9 +798,7 @@ powershellTest(
       expect(result.exitCode).toBe(0)
       expect(result.stdout).toContain("Clipboard skipped")
       expect(result.stdout).toContain("Copy the digest from the marker block")
-      expect(result.stdout).toContain(
-        "https://ai.ashesh.dev/dashboard#settings",
-      )
+      expect(result.stdout).toContain("your gateway's /dashboard#settings page")
       expect(result.stdout).toContain("quit and reopen Codex Desktop")
     })
   },

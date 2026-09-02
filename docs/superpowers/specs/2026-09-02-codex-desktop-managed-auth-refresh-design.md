@@ -34,10 +34,13 @@ The client environment variable points directly at the public gateway:
 ```powershell
 [Environment]::SetEnvironmentVariable(
   'CODEX_REFRESH_TOKEN_URL_OVERRIDE',
-  'https://ai.ashesh.dev/v1/codex/auth/refresh',
+  'https://gateway.example.com/v1/codex/auth/refresh',
   'User'
 )
 ```
+
+Here, `gateway.example.com` stands for the deployment's public gateway
+hostname.
 
 `POST /v1/codex/auth/refresh` is mounted before the normal inference guard because
 the OAuth request carries no Authorization header. The endpoint:

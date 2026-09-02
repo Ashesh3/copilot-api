@@ -25,7 +25,7 @@ import { server } from "../src/server"
 const GATEWAY_KEY = "test-gateway-key-that-is-long-and-random"
 const ADMIN_PASSWORD = "correct horse battery staple"
 const ROTATED_ADMIN_PASSWORD = "rotated administrator password"
-const ORIGIN = "https://ai.ashesh.dev"
+const ORIGIN = "https://gateway.example.com"
 const MONTH_MS = 30 * 24 * 60 * 60 * 1000
 
 let originalAdminPasswordHash: string | undefined

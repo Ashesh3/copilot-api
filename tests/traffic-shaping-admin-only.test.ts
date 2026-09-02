@@ -133,7 +133,7 @@ test("dashboard mutations reject missing admin session even with gateway key", a
     headers: {
       authorization: `Bearer ${GATEWAY_KEY}`,
       "content-type": "application/json",
-      origin: "https://ai.ashesh.dev",
+      origin: "https://gateway.example.com",
     },
     body: JSON.stringify({
       pattern: "should-not-work",

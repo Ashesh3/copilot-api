@@ -8,7 +8,7 @@ import {
 import { state } from "../../src/lib/state"
 import { server } from "../../src/server"
 
-export const TEST_ADMIN_ORIGIN = "https://ai.ashesh.dev"
+export const TEST_ADMIN_ORIGIN = "https://gateway.example.com"
 export const TEST_GATEWAY_KEY = "test-dashboard-gateway-key-with-enough-entropy"
 export const TEST_ADMIN_PASSWORD = "test dashboard administrator password"
 
