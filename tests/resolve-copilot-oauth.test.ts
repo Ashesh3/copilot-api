@@ -45,7 +45,9 @@ test("resolves public OAuth through Copilot user discovery and reuses the bearer
   expect(
     requests.map((request) => request.headers.get("authorization")),
   ).toEqual(["Bearer gho_public", "Bearer gho_public"])
-  expect(requests[1]?.headers.get("copilot-integration-id")).toBe("copilot-sdk")
+  expect(requests[1]?.headers.get("copilot-integration-id")).toBe(
+    "copilot-developer-cli",
+  )
   expect(requests[1]?.headers.get("copilot-harness-id")).toBe("copilot-sdk")
   expect(result).toMatchObject({
     baseUrl: "https://api.enterprise.githubcopilot.com",

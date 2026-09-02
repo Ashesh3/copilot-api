@@ -12,8 +12,8 @@ test("pins the reviewed cumulative Copilot API contract", () => {
   expect(COPILOT_API_VERSION).toBe("2026-08-01")
 })
 
-test("keeps the compatibility integration default", () => {
-  expect(DEFAULT_COPILOT_INTEGRATION_ID).toBe("copilot-sdk")
+test("uses the Copilot CLI integration default", () => {
+  expect(DEFAULT_COPILOT_INTEGRATION_ID).toBe("copilot-developer-cli")
   expect(resolveCopilotIntegrationId(undefined)).toBe(
     DEFAULT_COPILOT_INTEGRATION_ID,
   )

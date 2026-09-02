@@ -732,7 +732,7 @@ files.
 | Variable | Scope | Purpose |
 | --- | --- | --- |
 | `GITHUB_TOKENS` | Direct and Docker | Comma-separated `instance_domain:token` or bare GitHub.com tokens; two or more enable multi-account mode |
-| `COPILOT_INTEGRATION_ID` | Direct and Docker | Copilot integration identifier; defaults to `copilot-sdk`, matching the current Copilot SDK client contract. Use an assigned integration ID when available; do not copy a first-party client ID merely to imitate that client. |
+| `COPILOT_INTEGRATION_ID` | Direct and Docker | Copilot integration identifier; defaults to `copilot-developer-cli` for the stable Copilot CLI model catalog. Override it when the deployment has its own assigned integration ID. |
 | `DATA_DIR` | Direct and Docker | Override the persistent data directory |
 | `COPILOT_API_KEY_AUTH` | Direct and Docker | Gateway key and sole environment-based gateway credential; direct usage also requires the `--api-key-auth` flag without a value |
 | `COPILOT_INFERENCE_CREDENTIAL_SHA256S` | Direct and Docker | Optional comma-separated SHA-256 hex digests of trimmed client-held inference secrets; matching credentials receive only `user:inference` scope and digest text is rejected |
