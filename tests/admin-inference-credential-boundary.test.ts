@@ -11,7 +11,7 @@ const GATEWAY_KEY = "test-gateway-key-that-is-long-and-random"
 const GATEWAY_DIGEST =
   "df2e72644a61cfed6c45f096088b19630fe03aac69c6f2e3757f0ea81107901c"
 const ADMIN_PASSWORD = "correct horse battery staple"
-const ORIGIN = "https://ai.ashesh.dev"
+const ORIGIN = "https://gateway.example.com"
 
 const originalAdminOrigin = process.env.COPILOT_ADMIN_ORIGIN
 const originalAdminPasswordHash = process.env.COPILOT_ADMIN_PASSWORD_HASH

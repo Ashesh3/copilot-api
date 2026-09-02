@@ -72,7 +72,7 @@ test("Docker Compose preserves automatic secret-management integration", async (
   expect(envFile).toContain(".env")
 })
 
-test("deployment defaults contain no private hostname or obsolete setup guide", async () => {
+test("deployment defaults remain portable and omit obsolete setup guidance", async () => {
   const [
     compose,
     schema,
@@ -80,7 +80,6 @@ test("deployment defaults contain no private hostname or obsolete setup guide", 
     security,
     nginxReadme,
     updater,
-    adminAuth,
     startSource,
     windowsLauncher,
     generatedEnvTypes,
@@ -91,13 +90,11 @@ test("deployment defaults contain no private hostname or obsolete setup guide", 
     readRepositoryFile("SECURITY.md"),
     readRepositoryFile("nginx/README.md"),
     readRepositoryFile("update.sh"),
-    readRepositoryFile("src/lib/admin-auth.ts"),
     readRepositoryFile("src/start.ts"),
     readRepositoryFile("start.bat"),
     readRepositoryFile("env.d.ts"),
   ])
 
-  expect(compose).not.toContain("ai.ashesh.dev")
   expect(compose).not.toContain("172.19.0.1")
   expect(compose).not.toContain("setup.md")
   expect(compose).toContain("COPILOT_ADMIN_ORIGIN=${COPILOT_ADMIN_ORIGIN:-}")
@@ -119,7 +116,6 @@ test("deployment defaults contain no private hostname or obsolete setup guide", 
     "preserve_running_setting COPILOT_TRUSTED_PROXY_CIDRS",
   )
   expect(updater).toContain('if [ "${health:-none}" != "healthy" ]')
-  expect(adminAuth).not.toContain("ai.ashesh.dev")
   expect(startSource).not.toContain("ericc-ch.github.io")
   expect(startSource).toContain("Operator Dashboard")
   expect(windowsLauncher).toContain(

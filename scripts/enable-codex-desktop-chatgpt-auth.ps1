@@ -370,5 +370,5 @@ Write-Output $clipboardStatus
 Write-Output 'TRUSTED_JWT_SHA256_BEGIN'
 Write-Output $digest
 Write-Output 'TRUSTED_JWT_SHA256_END'
-Write-Output 'Register only this SHA-256 digest at https://ai.ashesh.dev/dashboard#settings or send it to an administrator.'
+Write-Output "Register only this SHA-256 digest on your gateway's /dashboard#settings page or send it to an administrator."
 Write-Output 'After registration, fully quit and reopen Codex Desktop.'
