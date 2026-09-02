@@ -697,7 +697,7 @@ param(
 ```
 
 - Default `CodexHome`: the current user's `.codex` directory.
-- Default email: the `codex-` prefix, a lowercase sanitized machine name, and the `@local.invalid` suffix.
+- Default email: a lowercase sanitized first name plus `@copilot-api.local`, or `copilot-api@copilot-api.local` when no usable first name is available.
 - Stable output markers:
 
 ```text

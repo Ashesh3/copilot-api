@@ -71,8 +71,9 @@ Interactive runs prompt when a value is still missing. `-PromptForIdentity`
 also permits intentional prompts with redirected standard input. Pressing Enter
 accepts the shown fallback. PowerShell non-interactive runs never block: the
 fallback name is
-`copilot-api`, and the fallback email remains
-`codex-<sanitized-machine-name>@local.invalid`.
+`copilot-api`, and the fallback email uses the selected first name as
+`<sanitized-first-name>@copilot-api.local`, falling back finally to
+`copilot-api@copilot-api.local`.
 
 The script derives both `sub`/`chatgpt_user_id` and `chatgpt_account_id` from a
 normalized identifier based on the selected email local part, then full name,

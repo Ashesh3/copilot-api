@@ -78,7 +78,8 @@ user record, and Windows username. Normal interactive runs ask for values that
 remain unavailable. Press Enter to accept the fallback values:
 
 - full name: `copilot-api`
-- email: `codex-<sanitized-computer-name>@local.invalid`
+- email: `<sanitized-first-name>@copilot-api.local`; if no usable first name is
+  available, `copilot-api@copilot-api.local`
 - user/account ID: derived from email, then name or Windows username; the final
   fallback is `copilot-api`
 
