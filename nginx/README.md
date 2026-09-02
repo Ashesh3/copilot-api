@@ -53,6 +53,47 @@ The other hostname templates enumerate their placeholders in comments at the
 top of each file. Render every placeholder; a value left in `{{BRACES}}` should
 be treated as a deployment error.
 
+## Codex Desktop spoof hostname
+
+Managed Codex Desktop clients should set `chatgpt_base_url` to an operator-chosen
+`*.openai.com` hostname that is mapped locally to the gateway. For example:
+
+```toml
+chatgpt_base_url = "https://codex-gateway.openai.com"
+```
+
+Add the matching entry to the Windows hosts file on each client:
+
+```text
+<GATEWAY_IP> codex-gateway.openai.com
+```
+
+Render `sites-available/codex-desktop-spoof.conf.template` with that same name as
+both `CODEX_DESKTOP_SPOOF_PRIMARY_HOST` and the only required
+`CODEX_DESKTOP_SPOOF_SERVER_NAMES` value. The active configuration must include:
+
+```nginx
+server_name codex-gateway.openai.com;
+
+# Keep the exact supported locations from the template above this rule.
+location / { return 404; }
+```
+
+The TLS certificate Subject Alternative Name must contain the exact spoof
+hostname, and its issuing CA must be trusted by the Windows client. Do not proxy
+the default location to a real ChatGPT service: unsupported calls should fail
+locally with `404`, without forwarding the synthetic bearer. If a different
+`*.openai.com` label is chosen, use it consistently in `config.toml`, the hosts
+file, the certificate, and `server_name`.
+
+The template's exact `/backend-api/aura/site_status` location is optional and is
+not required for managed authentication. If retained, the application returns
+`x-codex-browser-use-security-mode: disabled-for-local-testing` and permits
+every HTTP(S) browser URL for operator-controlled local Computer Use. Remove
+that exact location from the rendered vhost for a managed-auth-only deployment.
+Keep it only after explicitly accepting the disabled URL policy; never replace
+it with a broader route.
+
 The two top-level `map` directives must remain in the Nginx `http` context.
 The Responses map is security-sensitive: normal API traffic is `POST`, while
 Codex Desktop opens an authenticated WebSocket with `GET` and

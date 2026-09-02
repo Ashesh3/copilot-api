@@ -18,12 +18,17 @@
 # managed/session IP fallback for Desktop builds that omit credentials.
 # `/codex/responses` remains credential-authenticated.
 #
-# Set on the client:
+# Set in the client's root-level `%USERPROFILE%\.codex\config.toml`:
+#   chatgpt_base_url = "https://codex-gateway.openai.com"
+#
+# Add the same name to the client's hosts file, mapped to this gateway. Set this
+# environment variable too when using the dictation and transcript-cleanup
+# compatibility routes:
 #   CODEX_API_BASE_URL=https://{{CODEX_DESKTOP_SPOOF_PRIMARY_HOST}}
 #
 # Placeholders (substitute when rendering):
-#   {{CODEX_DESKTOP_SPOOF_PRIMARY_HOST}}  e.g. voice.openai.com
-#   {{CODEX_DESKTOP_SPOOF_SERVER_NAMES}}  e.g. voice.openai.com codex.openai.com gateway.openai.com
+#   {{CODEX_DESKTOP_SPOOF_PRIMARY_HOST}}  e.g. codex-gateway.openai.com
+#   {{CODEX_DESKTOP_SPOOF_SERVER_NAMES}}  e.g. codex-gateway.openai.com
 #   {{CODEX_DESKTOP_SPOOF_SSL_CERTIFICATE_PATH}}      e.g. /root/certs/openai-spoof.crt
 #   {{CODEX_DESKTOP_SPOOF_SSL_CERTIFICATE_KEY_PATH}}  e.g. /root/certs/openai-spoof.key
 #   {{UPSTREAM_URL}}                       e.g. http://localhost:4141
@@ -88,13 +93,17 @@ server {
     proxy_request_buffering off;
   }
 
-  # Codex Computer Use URL-policy compatibility. This deployment is an
-  # operator-controlled local-testing gateway and intentionally allows all
-  # browser URLs; the app emits the corresponding security-mode header.
+  # OPTIONAL: Codex Computer Use URL-policy compatibility. This is not required
+  # for managed authentication. If retained, the operator explicitly accepts
+  # that this local-testing route allows every HTTP(S) browser URL and the app
+  # emits `x-codex-browser-use-security-mode: disabled-for-local-testing`.
+  # Remove this exact location from managed-auth-only rendered configurations.
   location = /backend-api/aura/site_status {
     limit_except GET { deny all; }
     proxy_pass {{UPSTREAM_URL}};
   }
 
+  # Keep unsupported ChatGPT-hosted services on the local gateway. Never replace
+  # this default denial with a catch-all proxy to the real service.
   location / { return 404; }
 }
