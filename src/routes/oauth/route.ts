@@ -649,9 +649,12 @@ oauthApiRoutes.get("/claude_code/policy_limits", oauthSessionGuard, (c) =>
   c.json({ limits: {}, policies: [] }),
 )
 
-// GET /api/claude_code/settings
+// GET /api/claude_code/settings — remote managed settings. Claude Code treats
+// 204 (and 404) as an explicit "no policy configured" result. A successful
+// JSON response must instead contain its uuid/checksum/settings envelope, so a
+// bare object is a parse error in current clients.
 oauthApiRoutes.get("/claude_code/settings", oauthSessionGuard, (c) =>
-  c.json({}),
+  c.body(null, 204),
 )
 
 // PUT /api/claude_code/settings

@@ -338,6 +338,17 @@ test("compatibility stub routes never feed the IP ban tracker", async () => {
   expect(isIpBlocked(clientIp)).toBe(false)
 })
 
+test("remote managed settings reports that no organization policy is configured", async () => {
+  const tokens = await authorizeAndExchange()
+  const response = await server.request("/api/claude_code/settings", {
+    headers: { authorization: `Bearer ${tokens.access_token}` },
+  })
+
+  expect(response.status).toBe(204)
+  expect(await response.text()).toBe("")
+  expect(response.headers.get("cache-control")).toBe("no-store")
+})
+
 test("a recognized credential denied for scope never feeds the IP ban tracker", async () => {
   const tokens = await authorizeAndExchange()
   const mintResponse = await server.request(
