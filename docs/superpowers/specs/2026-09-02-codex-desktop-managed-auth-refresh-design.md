@@ -67,9 +67,10 @@ route. All surrounding paths remain default-denied.
 4. Windows username for a friendly display-name fallback;
 5. `whoami /upn` for an email-shaped UPN.
 
-Runs prompt only when `-PromptForIdentity` is explicitly supplied and a value
-is still missing. Pressing Enter accepts the shown fallback. Non-interactive
-runs never block: the fallback name is
+Interactive runs prompt when a value is still missing. `-PromptForIdentity`
+also permits intentional prompts with redirected standard input. Pressing Enter
+accepts the shown fallback. PowerShell non-interactive runs never block: the
+fallback name is
 `copilot-api`, and the fallback email remains
 `codex-<sanitized-machine-name>@local.invalid`.
 
