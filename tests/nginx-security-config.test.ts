@@ -142,6 +142,45 @@ test("Codex managed auth refresh is an exact POST-only route", async () => {
   }
 })
 
+test("Codex plugin compatibility exposes only read-only catalog paths", async () => {
+  const [publicTemplate, codexTemplate] = await Promise.all([
+    read("sites-available/public-domain.conf.template"),
+    read("sites-available/codex-desktop-spoof.conf.template"),
+  ])
+
+  for (const template of [publicTemplate, codexTemplate]) {
+    const location = template.match(
+      /location ~ \^\/ps\/plugins\/\(\?:home\|list\|search\|installed\|suggested\/codex\|workspace\/\(\?:created\|shared\)\)\$ \{([\s\S]*?)\n {2}\}/,
+    )?.[1]
+    expect(location).toBeDefined()
+    expect(location).toContain("limit_except GET { deny all; }")
+    expect(location).toContain('if ($http_authorization = "") { return 404; }')
+    expect(location).toContain("access_log off;")
+    expect(location).toContain("proxy_pass {{UPSTREAM_URL}};")
+    expect(location).toContain("proxy_http_version 1.1;")
+    expect(location).not.toContain("proxy_set_header Authorization")
+    expect(location).not.toContain("proxy_pass https://chatgpt.com")
+
+    const detailLocation = template.match(
+      /location ~ "\^\/ps\/plugins\/\(\?:plugins_\[0-9a-f\]\{32\}\|\(\?:plugins~\)\?Plugin_\[0-9a-f\]\{32\}\|plugin_\[A-Za-z0-9\]\[A-Za-z0-9_-\]\{0,247\}\)\$" \{([\s\S]*?)\n {2}\}/,
+    )?.[1]
+    expect(detailLocation).toBeDefined()
+    expect(detailLocation).toContain("limit_except GET { deny all; }")
+    expect(detailLocation).toContain("access_log off;")
+
+    const categoryLocation = template.match(
+      /location ~ \^\/ps\/plugin-categories\/\[a-z0-9\]\+\(\?:-\[a-z0-9\]\+\)\*\/plugins\$ \{([\s\S]*?)\n {2}\}/,
+    )?.[1]
+    expect(categoryLocation).toBeDefined()
+    expect(categoryLocation).toContain("limit_except GET { deny all; }")
+    expect(categoryLocation).toContain("access_log off;")
+  }
+
+  expect(codexTemplate).not.toContain("/ps/plugins/*")
+  expect(codexTemplate).not.toContain("location /ps/")
+  expect(codexTemplate).toContain("location / { return 404; }")
+})
+
 test("Claude subscriber compatibility routes keep exact methods", async () => {
   const template = await read("sites-available/spoof-domains.conf.template")
 

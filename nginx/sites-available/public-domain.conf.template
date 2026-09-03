@@ -159,6 +159,35 @@ server {
     proxy_request_buffering off;
   }
 
+  # Read-only Codex plugin-service compatibility for managed Desktop clients.
+  # The application validates the local managed bearer and never forwards it to
+  # ChatGPT; account-scoped cloud catalogs return empty JSON contracts.
+  location ~ ^/ps/plugins/(?:home|list|search|installed|suggested/codex|workspace/(?:created|shared))$ {
+    limit_except GET { deny all; }
+    if ($http_authorization = "") { return 404; }
+    # Search terms and page cursors are user data; do not retain the raw query
+    # string in the default Nginx access log.
+    access_log off;
+    proxy_pass {{UPSTREAM_URL}};
+    proxy_http_version 1.1;
+  }
+
+  location ~ "^/ps/plugins/(?:plugins_[0-9a-f]{32}|(?:plugins~)?Plugin_[0-9a-f]{32}|plugin_[A-Za-z0-9][A-Za-z0-9_-]{0,247})$" {
+    limit_except GET { deny all; }
+    if ($http_authorization = "") { return 404; }
+    access_log off;
+    proxy_pass {{UPSTREAM_URL}};
+    proxy_http_version 1.1;
+  }
+
+  location ~ ^/ps/plugin-categories/[a-z0-9]+(?:-[a-z0-9]+)*/plugins$ {
+    limit_except GET { deny all; }
+    if ($http_authorization = "") { return 404; }
+    access_log off;
+    proxy_pass {{UPSTREAM_URL}};
+    proxy_http_version 1.1;
+  }
+
   location = /dashboard {
     limit_except GET { deny all; }
     proxy_pass {{UPSTREAM_URL}};

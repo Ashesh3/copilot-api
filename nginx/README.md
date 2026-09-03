@@ -13,7 +13,7 @@ The canonical application and Docker setup remains in the repository
 | --------------------------------------------------- | ----------------------------------------------- | ----------------------------------------------------------------------------- |
 | `sites-available/public-domain.conf.template`       | Normal public API/dashboard hostname            | Inference APIs, scoped OAuth, dashboard, Remote Control, exact health         |
 | `sites-available/spoof-domains.conf.template`       | Claude API and platform compatibility hostnames | Claude API/OAuth/session compatibility allowlists                             |
-| `sites-available/codex-desktop-spoof.conf.template` | Locally mapped trusted `*.openai.com` hostname  | Codex dictation, transcript cleanup, managed auth refresh, and URL policy      |
+| `sites-available/codex-desktop-spoof.conf.template` | Locally mapped trusted `*.openai.com` hostname  | Codex dictation, plugin compatibility, managed auth refresh, and URL policy    |
 | `sites-available/codex-statsig-spoof.conf.template` | Locally mapped `ab.chatgpt.com`                 | Exact Statsig initialize/download/check routes; all other paths denied         |
 
 Do not combine these server blocks onto one broad hostname. Do not add a
@@ -93,6 +93,18 @@ every HTTP(S) browser URL for operator-controlled local Computer Use. Remove
 that exact location from the rendered vhost for a managed-auth-only deployment.
 Keep it only after explicitly accepting the disabled URL policy; never replace
 it with a broader route.
+
+The anchored `/ps/plugins/...` location is the read-only plugin-service
+compatibility surface for managed synthetic identities. The application
+validates the local inference-client bearer before responding. It fetches only
+the anonymous public `/home` directory metadata plus strict public plugin-card
+details, with every client credential and account header omitted. Category
+preview pages are derived from `/home`; account- or workspace-scoped cloud reads return
+empty compatible pages. Access logging is disabled on these routes so plugin
+search terms and cursors are not retained. Local and Git marketplace discovery,
+search, install, remove, and upgrade continue through Codex's local app-server.
+Do not broaden these locations to `/ps/`, add mutation paths, or proxy the
+synthetic bearer to ChatGPT.
 
 The two top-level `map` directives must remain in the Nginx `http` context.
 The Responses map is security-sensitive: normal API traffic is `POST`, while
@@ -175,11 +187,15 @@ Then verify the boundary from outside the origin:
 9. Exact `POST /v1/codex/auth/refresh` reaches the application while GET and
    adjacent paths remain denied. A valid enabled managed identity returns
    `200`; an unknown or disabled digest returns OAuth `invalid_grant`.
-10. Spoofed `X-Real-IP`, `X-Forwarded-For`, and `CF-Connecting-IP` headers from a
+10. An authenticated exact `GET /ps/plugins/home` returns JSON, while an
+    unauthenticated request, a mutation, and an adjacent `/ps/plugins/...` path
+    remain denied. Inspect upstream capture or tests to confirm that the local
+    bearer, cookies, and account ID are not forwarded.
+11. Spoofed `X-Real-IP`, `X-Forwarded-For`, and `CF-Connecting-IP` headers from a
    non-trusted TCP peer do not authorize IP-gated routes.
-11. `nginx -T` contains no `limit_req`, `limit_req_zone`, or `limit_conn`, and
+12. `nginx -T` contains no `limit_req`, `limit_req_zone`, or `limit_conn`, and
    each TLS proxy server has the maximum-duration client/read/send directives.
-12. The Statsig hostname proxies only `/v1/initialize`, `/v1/download`, and
+13. The Statsig hostname proxies only `/v1/initialize`, `/v1/download`, and
    `/v1/check`; an unrelated path returns `404`.
 
 See [../docs/codex-desktop-managed-auth.md](../docs/codex-desktop-managed-auth.md)

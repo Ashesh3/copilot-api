@@ -586,6 +586,12 @@ inference.
 - `POST /v1/audio/transcriptions` provides the separately authenticated
   OpenAI-compatible transcription API.
 - `POST /codex/responses` provides configurable transcript cleanup.
+- `GET /ps/plugins/home`, strict public plugin-detail reads, and category reads
+  derived from `/home` provide public Codex browsing without forwarding the
+  local synthetic credential to ChatGPT.
+- Read-only `/ps/plugins/list`, `/search`, `/installed`, `/suggested/codex`,
+  and workspace directory compatibility responses keep Codex's configured
+  local and Git marketplaces usable when the ChatGPT identity is synthetic.
 - Statsig overrides can be managed in the dashboard and applied through the
   Statsig proxy middleware. The dedicated nginx template publishes only
   `/v1/initialize`, `/v1/download`, and `/v1/check`; every other path remains
@@ -630,6 +636,15 @@ from managed-auth-only deployments as described in the canonical guide. Missing
 the base-URL setting can cause rapid, repeated successful refresh requests while
 inference never begins. See the canonical guide below for the complete hosts,
 certificate, and Nginx steps.
+
+The plugin compatibility surface restores browsing, searching, installing,
+removing, and upgrading plugins from configured local or Git marketplaces. The
+public directory, its nine-card category previews, and public card details are
+browse-only in this mode. A synthetic local JWT is not a real ChatGPT session,
+so account/workspace cloud catalogs, remote connector installation, and remote
+plugin mutations remain unavailable. The gateway
+returns empty JSON contracts for those account-scoped reads and never forwards
+the synthetic bearer to `chatgpt.com`.
 
 Current Codex builds proactively refresh ChatGPT-shaped credentials. Set the
 following user environment variable before fully quitting and reopening Codex
