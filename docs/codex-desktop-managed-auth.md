@@ -57,6 +57,19 @@ testing. For a managed-auth-only deployment, remove the exact
 installing it. Retain that location only when the operator explicitly accepts
 the disabled URL policy.
 
+The tracked template publishes an anchored, GET-only `/ps/plugins/...`
+compatibility family. Codex's current plugin page treats failure of the hosted
+plugin directory as a page-wide failure even when its local marketplaces loaded
+successfully. The application therefore validates the managed local bearer,
+fetches anonymous public `/home` metadata without forwarding any credential,
+cookie, or account header, derives nine-card category previews from that document,
+allows strict anonymous public-card detail reads, and returns empty compatible
+responses for account-scoped cloud catalog reads. This restores local and Git
+marketplace browsing, search, installation, removal, and upgrades. It does not
+turn the synthetic JWT into a ChatGPT session: remote cloud installs,
+connectors, personal/workspace cloud directories, and sharing remain
+unsupported.
+
 The root `update.sh` updates the Compose application only. It does not install or
 reload host Nginx. Render every placeholder, inspect the candidate, retain a
 rollback copy, then run:
@@ -68,9 +81,9 @@ sudo nginx -T
 ```
 
 Confirm `nginx -T` contains the exact spoof `server_name`, an exact POST-only
-location for the refresh route, the chosen presence or absence of the optional
-Computer Use location, and the default-deny location. Do not add a catch-all
-proxy.
+location for the refresh route, the anchored GET-only plugin compatibility
+location, the chosen presence or absence of the optional Computer Use location,
+and the default-deny location. Do not add a catch-all proxy.
 
 ## 2. Configure Codex Desktop on Windows
 
@@ -200,7 +213,11 @@ Verify in this order:
 5. Gateway logs show `POST /v1/codex/auth/refresh` returning `200` without
    logging credential material or repeating continuously while the app is idle.
 6. A normal authenticated `/v1/responses` request succeeds.
-7. Disable the digest temporarily and confirm the next refresh returns OAuth
+7. The Plugins page loads without an Nginx HTML error, public category previews
+   and card details render, configured local and Git marketplaces are visible,
+   local search works, and a reversible local plugin install/remove succeeds.
+   Public cloud cards are browse-only in this synthetic-auth mode.
+8. Disable the digest temporarily and confirm the next refresh returns OAuth
    `invalid_grant`; re-enable it before normal use.
 
 Model discovery may still contact ChatGPT in current builds. A configured local
@@ -234,6 +251,12 @@ Codex Desktop only after the intended `auth.json` is in place.
 - **Gateway `404`:** the application revision or host Nginx location is stale.
   Inspect `nginx -T`; a successful `update.sh` alone is not proof of edge
   deployment.
+- **Plugins page shows an Nginx HTML `404`:** the active spoof vhost does not
+  contain the anchored `/ps/plugins/...` compatibility location. Update both
+  the application and the host Nginx configuration, then fully restart Codex.
+- **Public plugin card will not install:** expected with a synthetic identity.
+  Use the corresponding local/curated marketplace entry when available, or a
+  genuine ChatGPT session for hosted remote plugins and connectors.
 - **OAuth `invalid_grant`:** the token is old-format, malformed, unknown,
   disabled, or deleted. Run the current script and register its new digest.
 - **Rapid, repeated successful refresh requests:** a stream of `200` responses

@@ -8,12 +8,15 @@ import { createHash } from "node:crypto"
 
 import { getModelSettings } from "~/lib/model-settings"
 import {
+  isCodexPluginCategoryRequest,
+  isCodexPluginSearchRequest,
   isGoogleModelActionRequest,
   sanitizeRequestDiagnosticReference,
   sanitizeSensitiveDiagnosticQuery,
 } from "~/lib/request-diagnostics"
 import { getRequestId } from "~/lib/request-session"
 import { getRoutingAffinity } from "~/lib/routing-affinity"
+import { scrubCodexPluginSearchData } from "~/lib/sentry-plugin-search"
 
 import packageJson from "../../package.json" with { type: "json" }
 
@@ -618,6 +621,7 @@ function scrubSensitiveData<T>(event: T): T | null {
       }) === UNCERTAIN_SCRUB_RESULT
     )
       return null
+    if (!scrubCodexPluginSearchData(event)) return null
     const googleRequestMethod = findGoogleRequestMethod(event)
     if (
       googleRequestMethod
@@ -697,7 +701,15 @@ export function applySentryRequestDiagnosticsToScope(
   scope: Sentry.Scope,
   request: SentryRequestDiagnostics,
 ): void {
-  if (!isGoogleModelActionRequest(request.method, request.path)) return
+  const isPrivatePluginQuery =
+    isCodexPluginSearchRequest(request.method, request.path)
+    || isCodexPluginCategoryRequest(request.method, request.path)
+  if (
+    !isGoogleModelActionRequest(request.method, request.path)
+    && !isPrivatePluginQuery
+  ) {
+    return
+  }
 
   const path = sanitizeRequestDiagnosticReference(
     request.method,
@@ -712,6 +724,9 @@ export function applySentryRequestDiagnosticsToScope(
     normalizedRequest: {
       ...currentRequest,
       method: request.method,
+      ...(isPrivatePluginQuery && {
+        query_string: undefined,
+      }),
       url,
     },
   })
