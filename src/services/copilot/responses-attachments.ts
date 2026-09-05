@@ -1,6 +1,8 @@
+import type { AttachmentFetchResolver } from "~/lib/attachments"
+
 import {
   attachmentOmittedNote,
-  fetchUrlAsDataUri,
+  createAttachmentFetchResolver,
   isDataUri,
   isLikelyBase64,
   mediaTypeFromFilename,
@@ -28,6 +30,13 @@ const isInputImage = (value: unknown): value is ResponseInputImage =>
 const isInputFile = (value: unknown): value is ResponseInputFile =>
   isRecord(value) && value.type === "input_file"
 
+interface ResponsesAttachmentNormalizationOptions {
+  failClosed?: boolean
+  resizeImage: ResponsesImageResizer
+  resolveAttachment: AttachmentFetchResolver
+  signal?: AbortSignal
+}
+
 function stripFileUrl(part: ResponseInputFile): ResponseInputFile {
   if (part.file_url === undefined || part.file_url === null) return part
   const { file_url: _fileUrl, ...rest } = part
@@ -36,8 +45,7 @@ function stripFileUrl(part: ResponseInputFile): ResponseInputFile {
 
 async function normalizeInputFile(
   part: ResponseInputFile,
-  signal?: AbortSignal,
-  options?: { failClosed?: boolean },
+  options: ResponsesAttachmentNormalizationOptions,
 ): Promise<ResponseInputContent> {
   const { file_url: fileUrl, file_data: fileData } = part
   if (fileData) {
@@ -55,9 +63,10 @@ async function normalizeInputFile(
   }
   if (!fileUrl) return part
 
-  const inlined = await fetchUrlAsDataUri(fileUrl, {
+  const inlined = await options.resolveAttachment({
     expectPdf: true,
-    signal,
+    signal: options.signal,
+    value: fileUrl,
   })
   if (inlined) {
     return stripFileUrl({
@@ -74,7 +83,7 @@ async function normalizeInputFile(
       file_data: toDataUri(inlined.mediaType, inlined.data),
     })
   }
-  return options?.failClosed ? part : (
+  return options.failClosed ? part : (
       {
         type: "input_text",
         text: attachmentOmittedNote({
@@ -88,11 +97,7 @@ async function normalizeInputFile(
 
 async function normalizeContentPart(
   part: ResponseInputContent,
-  options: {
-    failClosed?: boolean
-    resizeImage: ResponsesImageResizer
-    signal?: AbortSignal
-  },
+  options: ResponsesAttachmentNormalizationOptions,
 ): Promise<ResponseInputContent> {
   const { failClosed, resizeImage, signal } = options
   if (
@@ -100,7 +105,11 @@ async function normalizeContentPart(
     && part.image_url
     && !part.image_url.startsWith("data:")
   ) {
-    const inlined = await fetchUrlAsDataUri(part.image_url, { signal })
+    const inlined = await options.resolveAttachment({
+      expectPdf: false,
+      signal,
+      value: part.image_url,
+    })
     if (inlined) {
       return await normalizeContentPart(
         { ...part, image_url: toDataUri(inlined.mediaType, inlined.data) },
@@ -137,18 +146,14 @@ async function normalizeContentPart(
     }
   }
   if (isInputFile(part)) {
-    return await normalizeInputFile(part, signal, { failClosed })
+    return await normalizeInputFile(part, options)
   }
   return part
 }
 
 async function normalizeContentArray(
   content: Array<ResponseInputContent>,
-  options: {
-    failClosed?: boolean
-    resizeImage: ResponsesImageResizer
-    signal?: AbortSignal
-  },
+  options: ResponsesAttachmentNormalizationOptions,
 ): Promise<Array<ResponseInputContent>> {
   const normalized: Array<ResponseInputContent> = []
   for (const part of content) {
@@ -164,7 +169,18 @@ export async function normalizeResponsesAttachments(
 ): Promise<void> {
   await normalizeResponsesAttachmentsWithOptions(payload, {
     resizeImage,
+    resolveAttachment: createAttachmentFetchResolver(),
     signal,
+  })
+}
+
+export async function normalizeResponsesAttachmentsForDispatch(
+  payload: ResponsesPayload,
+  options: { resolveAttachment: AttachmentFetchResolver; signal?: AbortSignal },
+): Promise<void> {
+  await normalizeResponsesAttachmentsWithOptions(payload, {
+    ...options,
+    resizeImage: resizeResponsesImage,
   })
 }
 
@@ -175,30 +191,22 @@ export async function normalizeResponsesAttachmentsFailClosed(
   await normalizeResponsesAttachmentsWithOptions(payload, {
     failClosed: true,
     resizeImage: resizeResponsesImage,
+    resolveAttachment: createAttachmentFetchResolver(),
     signal,
   })
 }
 
 async function normalizeResponsesAttachmentsWithOptions(
   payload: Pick<ResponsesPayload, "input"> & Record<string, unknown>,
-  options: {
-    failClosed?: boolean
-    resizeImage: ResponsesImageResizer
-    signal?: AbortSignal
-  },
+  options: ResponsesAttachmentNormalizationOptions,
 ): Promise<void> {
-  const { failClosed = false, resizeImage, signal } = options
   if (!Array.isArray(payload.input)) return
 
   const normalizedInput: Array<ResponseInputItem> = []
   for (const item of payload.input) {
     if (isInputImage(item) || isInputFile(item)) {
       normalizedInput.push(
-        (await normalizeContentPart(item, {
-          failClosed,
-          resizeImage,
-          signal,
-        })) as ResponseInputItem,
+        (await normalizeContentPart(item, options)) as ResponseInputItem,
       )
       continue
     }
@@ -207,7 +215,7 @@ async function normalizeResponsesAttachmentsWithOptions(
         ...item,
         content: await normalizeContentArray(
           item.content as Array<ResponseInputContent>,
-          { failClosed, resizeImage, signal },
+          options,
         ),
       })
       continue
@@ -217,7 +225,7 @@ async function normalizeResponsesAttachmentsWithOptions(
         ...item,
         output: await normalizeContentArray(
           item.output as Array<ResponseInputContent>,
-          { failClosed, resizeImage, signal },
+          options,
         ),
       })
       continue
@@ -225,11 +233,7 @@ async function normalizeResponsesAttachmentsWithOptions(
     if (isRecord(item) && isInputImage(item.output)) {
       normalizedInput.push({
         ...item,
-        output: await normalizeContentPart(item.output, {
-          failClosed,
-          resizeImage,
-          signal,
-        }),
+        output: await normalizeContentPart(item.output, options),
       })
       continue
     }

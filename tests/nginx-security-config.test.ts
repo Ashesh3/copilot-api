@@ -51,7 +51,11 @@ test("public nginx template exposes only the exact transcription upload routes",
     )?.[1]
 
     expect(location).toBeDefined()
-    expect(location).toContain("limit_except POST { deny all; }")
+    expect(location).toContain(
+      route === "/v1/audio/transcriptions" ?
+        "limit_except POST OPTIONS { deny all; }"
+      : "limit_except POST { deny all; }",
+    )
     expect(location).toContain("proxy_pass {{UPSTREAM_URL}};")
     expect(location).toContain("proxy_http_version 1.1;")
     expect(location).toContain("proxy_request_buffering off;")
@@ -257,13 +261,13 @@ test("WebSocket locations keep exact methods without local lifetimes", async () 
   )
   expect(publicTemplate).toContain("~*^GET:websocket$ 1;")
   expect(publicTemplate).toMatch(
-    /location ~ \^\/\(\?:v1\/\)\?responses\/\?\$ \{[\s\S]*?limit_except GET POST \{ deny all; \}[\s\S]*?if \(\$responses_route_allowed = 0\) \{ return 404; \}/,
+    /location ~ \^\/\(\?:v1\/\)\?responses\/\?\$ \{[\s\S]*?limit_except GET POST OPTIONS \{ deny all; \}[\s\S]*?if \(\$responses_route_allowed = 0\) \{ return 404; \}/,
   )
   expect(publicTemplate).toMatch(
-    /location ~ \^\/\(\?:v1\/\)\?\(\?:embeddings\|responses\/compact\)\/\?\$ \{[\s\S]*?limit_except POST \{ deny all; \}/,
+    /location ~ \^\/\(\?:v1\/\)\?\(\?:embeddings\|responses\/compact\)\/\?\$ \{[^{}]*limit_except POST OPTIONS \{ deny all; \}/,
   )
   expect(publicTemplate).toMatch(
-    /location ~ \^\/\(\?:v1\/\)\?alpha\/search\/\?\$ \{[\s\S]*?limit_except POST \{ deny all; \}/,
+    /location ~ \^\/\(\?:v1\/\)\?alpha\/search\/\?\$ \{[^{}]*limit_except POST OPTIONS \{ deny all; \}/,
   )
   expect(spoofTemplate).toMatch(
     /location ~ \^\/api\/ws\/speech_to_text\/voice_stream\/\??[\s\S]*?limit_except GET \{ deny all; \}/,
@@ -277,7 +281,7 @@ test("authenticated generation streams disable buffering without timeouts", asyn
   ])
 
   expect(publicTemplate).toMatch(
-    /location ~ \^\/\(\?:v1\/\)\?\(\?:chat\/completions\|messages\)\/\?\$ \{[\s\S]*?limit_except POST \{ deny all; \}[\s\S]*?proxy_http_version 1\.1;[\s\S]*?proxy_buffering off;/,
+    /location ~ \^\/\(\?:v1\/\)\?\(\?:chat\/completions\|messages\)\/\?\$ \{[^{}]*limit_except POST OPTIONS \{ deny all; \}(?:(?!\n {2}\})[\s\S])*?proxy_http_version 1\.1;(?:(?!\n {2}\})[\s\S])*?proxy_buffering off;/,
   )
   expect(spoofTemplate).toMatch(
     /location ~ \^\/v1\/messages\/\?\$ \{[\s\S]*?limit_except POST \{ deny all; \}[\s\S]*?proxy_http_version 1\.1;[\s\S]*?proxy_buffering off;/,

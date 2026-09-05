@@ -5,6 +5,7 @@ import * as Sentry from "@sentry/bun"
 import { streamSSE } from "hono/streaming"
 
 import type {
+  AnthropicAssistantContentBlock,
   AnthropicMessage,
   AnthropicMessagesPayload,
   AnthropicResponse,
@@ -53,6 +54,7 @@ import {
   applyParallelToolChoice,
   convertChatReasoningOptions,
   createAssistantBlocks,
+  decodeAnthropicContent,
   getAnthropicReasoning,
 } from "./anthropic-reasoning"
 import { normalizeChatCompletionsRequest } from "./chat-contract"
@@ -439,6 +441,8 @@ async function convertChatMessages(
 }
 
 function convertAssistantMessage(message: Message): AnthropicMessage | null {
+  const nativeContent = decodeAnthropicContent(message.reasoning_opaque)
+  if (nativeContent) return { role: "assistant", content: nativeContent }
   const blocks = createAssistantBlocks(message)
   const text = contentToPlainText(message.content)
   if (text) blocks.push({ type: "text", text })
@@ -653,10 +657,12 @@ interface BridgeStreamState {
   inputTokens: number
   outputTokens: number
   cachedTokens: number
+  cacheWriteTokens: number
   responseText: string
   anthropicStopReason: AnthropicResponse["stop_reason"]
   finishReason: "stop" | "length" | "tool_calls" | "content_filter" | null
-  signatureByBlockIndex: Map<number, string>
+  contentByBlockIndex: Map<number, AnthropicAssistantContentBlock>
+  toolArgumentsByBlockIndex: Map<number, string>
   terminalSeen: boolean
 }
 
@@ -695,10 +701,12 @@ export async function streamAnthropicAsChatCompletions(
     inputTokens: 0,
     outputTokens: 0,
     cachedTokens: 0,
+    cacheWriteTokens: 0,
     responseText: "",
     anthropicStopReason: null,
     finishReason: null,
-    signatureByBlockIndex: new Map(),
+    contentByBlockIndex: new Map(),
+    toolArgumentsByBlockIndex: new Map(),
     terminalSeen: false,
   }
 
@@ -750,7 +758,8 @@ export async function streamAnthropicAsChatCompletions(
   }
 
   return {
-    inputTokens: state.inputTokens + state.cachedTokens,
+    inputTokens:
+      state.inputTokens + state.cachedTokens + state.cacheWriteTokens,
     outputTokens: state.outputTokens,
     cachedTokens: state.cachedTokens,
     ...(receivedFailure === undefined ? {} : { receivedFailure }),
@@ -768,8 +777,7 @@ async function handleBridgeStreamEvent(
   switch (event.type) {
     case "message_start": {
       state.id = event.message.id
-      state.inputTokens = event.message.usage.input_tokens
-      state.cachedTokens = event.message.usage.cache_read_input_tokens ?? 0
+      updateBridgeUsage(state, event.message.usage)
       if (!state.roleEmitted) {
         state.roleEmitted = true
         await writeChunk({ role: "assistant" })
@@ -777,6 +785,11 @@ async function handleBridgeStreamEvent(
       break
     }
     case "content_block_start": {
+      state.contentByBlockIndex.set(
+        event.index,
+        structuredClone(event.content_block),
+      )
+      await emitBridgeInitialContent(event.content_block, context)
       if (event.content_block.type === "tool_use") {
         const toolIndex = state.nextToolIndex++
         state.toolIndexByBlockIndex.set(event.index, toolIndex)
@@ -793,17 +806,20 @@ async function handleBridgeStreamEvent(
       }
       break
     }
+    case "content_block_stop": {
+      const block = state.contentByBlockIndex.get(event.index)
+      const argumentsText = state.toolArgumentsByBlockIndex.get(event.index)
+      if (block?.type === "tool_use" && argumentsText !== undefined) {
+        block.input = safeParseArguments(argumentsText)
+      }
+      break
+    }
     case "content_block_delta": {
       await handleBridgeContentDelta(event, context)
       break
     }
     case "message_delta": {
-      if (event.usage) {
-        state.outputTokens = event.usage.output_tokens
-        if (event.usage.input_tokens !== undefined) {
-          state.inputTokens = event.usage.input_tokens
-        }
-      }
+      if (event.usage) updateBridgeUsage(state, event.usage)
       if (event.delta.stop_reason) {
         state.anthropicStopReason = event.delta.stop_reason
         state.finishReason = mapStopReason(event.delta.stop_reason)
@@ -811,24 +827,7 @@ async function handleBridgeStreamEvent(
       break
     }
     case "message_stop": {
-      if (state.terminalSeen) break
-      await writeChunk(
-        {},
-        {
-          finishReason: state.finishReason ?? "stop",
-          usage: {
-            prompt_tokens: state.inputTokens + state.cachedTokens,
-            completion_tokens: state.outputTokens,
-            total_tokens:
-              state.inputTokens + state.cachedTokens + state.outputTokens,
-            prompt_tokens_details: { cached_tokens: state.cachedTokens },
-          },
-          ...(state.anthropicStopReason === "pause_turn" ?
-            { copilotStopReason: "pause_turn" }
-          : {}),
-        },
-      )
-      state.terminalSeen = true
+      await finishBridgeStream(context)
       break
     }
     case "error": {
@@ -842,19 +841,86 @@ async function handleBridgeStreamEvent(
   return undefined
 }
 
+async function emitBridgeInitialContent(
+  block: AnthropicAssistantContentBlock,
+  { state, writeChunk }: BridgeStreamContext,
+): Promise<void> {
+  if (
+    block.type === "thinking"
+    && typeof block.thinking === "string"
+    && block.thinking
+  ) {
+    await writeChunk({ reasoning_text: block.thinking })
+  }
+  if (block.type === "text" && typeof block.text === "string" && block.text) {
+    state.responseText += block.text
+    await writeChunk({ content: block.text })
+  }
+}
+
+async function finishBridgeStream({
+  state,
+  writeChunk,
+}: BridgeStreamContext): Promise<void> {
+  if (state.terminalSeen) return
+  const { reasoning_opaque: reasoningOpaque } = getAnthropicReasoning(
+    [...state.contentByBlockIndex.entries()]
+      .sort(([left], [right]) => left - right)
+      .map(([, block]) => block),
+  )
+  const promptTokens =
+    state.inputTokens + state.cachedTokens + state.cacheWriteTokens
+  await writeChunk(
+    reasoningOpaque ? { reasoning_opaque: reasoningOpaque } : {},
+    {
+      finishReason: state.finishReason ?? "stop",
+      usage: {
+        prompt_tokens: promptTokens,
+        completion_tokens: state.outputTokens,
+        total_tokens: promptTokens + state.outputTokens,
+        prompt_tokens_details: { cached_tokens: state.cachedTokens },
+      },
+      ...(state.anthropicStopReason === "pause_turn" ?
+        { copilotStopReason: "pause_turn" }
+      : {}),
+    },
+  )
+  // eslint-disable-next-line require-atomic-updates -- one awaited event loop owns this stream state
+  state.terminalSeen = true
+}
+
+function updateBridgeUsage(
+  state: BridgeStreamState,
+  usage: Partial<AnthropicResponse["usage"]>,
+): void {
+  state.inputTokens = usage.input_tokens ?? state.inputTokens
+  state.outputTokens = usage.output_tokens ?? state.outputTokens
+  state.cachedTokens = usage.cache_read_input_tokens ?? state.cachedTokens
+  state.cacheWriteTokens =
+    usage.cache_creation_input_tokens ?? state.cacheWriteTokens
+}
+
 async function handleBridgeContentDelta(
   event: Extract<AnthropicStreamEventData, { type: "content_block_delta" }>,
   context: BridgeStreamContext,
 ): Promise<void> {
   const { state, writeChunk } = context
+  const block = state.contentByBlockIndex.get(event.index)
 
   switch (event.delta.type) {
     case "text_delta": {
+      if (block?.type === "text" && typeof block.text === "string")
+        block.text += event.delta.text
       state.responseText += event.delta.text
       await writeChunk({ content: event.delta.text })
       break
     }
     case "input_json_delta": {
+      state.toolArgumentsByBlockIndex.set(
+        event.index,
+        (state.toolArgumentsByBlockIndex.get(event.index) ?? "")
+          + event.delta.partial_json,
+      )
       const toolIndex = state.toolIndexByBlockIndex.get(event.index)
       if (toolIndex !== undefined) {
         await writeChunk({
@@ -869,14 +935,16 @@ async function handleBridgeContentDelta(
       break
     }
     case "signature_delta": {
-      const signature =
-        (state.signatureByBlockIndex.get(event.index) ?? "")
-        + event.delta.signature
-      state.signatureByBlockIndex.set(event.index, signature)
-      await writeChunk({ reasoning_opaque: signature })
+      if (block?.type === "thinking") {
+        block.signature =
+          (typeof block.signature === "string" ? block.signature : "")
+          + event.delta.signature
+      }
       break
     }
     case "thinking_delta": {
+      if (block?.type === "thinking" && typeof block.thinking === "string")
+        block.thinking += event.delta.thinking
       await writeChunk({ reasoning_text: event.delta.thinking })
       break
     }

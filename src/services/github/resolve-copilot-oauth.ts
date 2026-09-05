@@ -12,6 +12,7 @@ import { getCopilotUsage } from "./get-copilot-usage"
 
 export interface ResolvedCopilotOAuth {
   baseUrl: string
+  accountSubject?: string
   login?: string
   models: ModelsResponse
   token: string
@@ -56,6 +57,7 @@ async function discoverCopilotOAuth(options: {
       options.accountType,
     ),
     login: copilotUser.login,
+    accountSubject: copilotUser.analytics_tracking_id,
     token: options.githubToken,
   }
 }

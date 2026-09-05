@@ -9,7 +9,39 @@ import type {
   ResponseMessage,
 } from "~/services/copilot/create-chat-completions"
 
-import { createEndpointTranslationError } from "~/lib/error"
+const NATIVE_CONTENT_PREFIX = "copilot-anthropic-content-v1:"
+
+// Keep the native ordering and signed bytes separate from Chat's readable
+// projections. Only the simple leading thinking block fits the legacy pair.
+export function decodeAnthropicContent(
+  opaque: unknown,
+): Array<AnthropicAssistantContentBlock> | undefined {
+  if (typeof opaque !== "string" || !opaque.startsWith(NATIVE_CONTENT_PREFIX))
+    return undefined
+  try {
+    const content: unknown = JSON.parse(
+      Buffer.from(
+        opaque.slice(NATIVE_CONTENT_PREFIX.length),
+        "base64",
+      ).toString("utf8"),
+    )
+    if (
+      Array.isArray(content)
+      && content.length > 0
+      && content.every(
+        (block: unknown) =>
+          typeof block === "object"
+          && block !== null
+          && !Array.isArray(block)
+          && typeof (block as { type?: unknown }).type === "string",
+      )
+    )
+      return content as Array<AnthropicAssistantContentBlock>
+  } catch {
+    // Unrecognized opaque values retain the existing signature fallback.
+  }
+  return undefined
+}
 
 export function createAssistantBlocks(
   message: Message,
@@ -30,23 +62,23 @@ export function getAnthropicReasoning(
   const thinkingBlocks = content.filter(
     (block): block is AnthropicThinkingBlock => block.type === "thinking",
   )
-  const signedThinkingBlocks = thinkingBlocks.filter((block) => block.signature)
-  if (
-    signedThinkingBlocks.length > 1
-    || (signedThinkingBlocks.length === 1 && thinkingBlocks.length > 1)
-  ) {
-    throw createEndpointTranslationError({
-      blockers: ["multiple_signed_thinking_blocks"],
-      code: "endpoint_translation_unsupported",
-      source: "chat",
-    })
-  }
   const reasoningText = thinkingBlocks
     .map((block) => block.thinking)
     .join("\n\n")
-  const reasoningOpaque = thinkingBlocks
-    .map((block) => block.signature)
-    .find(Boolean)
+  const hasRedacted = content.some(
+    (block) => block.type === "redacted_thinking",
+  )
+  const needsEnvelope =
+    hasRedacted
+    || (thinkingBlocks.some((block) => block.signature)
+      && (thinkingBlocks.length > 1
+        || content[0] !== thinkingBlocks[0]
+        || !thinkingBlocks[0].thinking))
+  const reasoningOpaque =
+    needsEnvelope ?
+      NATIVE_CONTENT_PREFIX
+      + Buffer.from(JSON.stringify(content)).toString("base64")
+    : thinkingBlocks[0]?.signature
   return {
     ...(reasoningText ? { reasoning_text: reasoningText } : {}),
     ...(reasoningOpaque ? { reasoning_opaque: reasoningOpaque } : {}),

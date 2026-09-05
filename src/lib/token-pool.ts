@@ -23,6 +23,7 @@ export interface Account {
   githubInstanceDomain: string
   githubUsername?: string
   copilotToken?: string
+  copilotAccountSubject?: string
   copilotTokenExpiry?: number
   copilotApiBaseUrl?: string
   models: Set<string>
@@ -448,6 +449,7 @@ export class TokenPool {
     Object.assign(account, {
       copilotApiBaseUrl: resolved.baseUrl,
       copilotToken: resolved.token,
+      copilotAccountSubject: resolved.accountSubject,
       copilotTokenExpiry: undefined,
       githubUsername: resolved.login ?? account.githubUsername,
       healthy: true,

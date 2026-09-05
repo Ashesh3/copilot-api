@@ -238,7 +238,7 @@ const routeCases: Array<RouteCase> = [
     name: "prefers Messages for PDF content when Chat and Messages exist",
     endpoints: ["/chat/completions", "/v1/messages"],
     pdf: true,
-    expected: "/chat/completions",
+    expected: "/v1/messages",
   },
   {
     name: "prefers Responses for hosted web search when available",

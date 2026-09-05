@@ -41,7 +41,7 @@ export interface AnthropicMessagesPayload extends Record<string, unknown> {
     disable_parallel_tool_use?: boolean
   }
   thinking?: Record<string, unknown> & {
-    type: "enabled" | "adaptive"
+    type: "enabled" | "adaptive" | "disabled"
     budget_tokens?: number
   }
   service_tier?: "auto" | "standard_only"
@@ -154,6 +154,12 @@ export interface AnthropicThinkingBlock extends Record<string, unknown> {
   cache_control?: AnthropicCacheControl
 }
 
+export interface AnthropicRedactedThinkingBlock
+  extends Record<string, unknown> {
+  type: "redacted_thinking"
+  data: string
+}
+
 export interface AnthropicUnknownContentBlock extends Record<string, unknown> {
   type: AnthropicUnknownContentType
 }
@@ -170,6 +176,7 @@ export type AnthropicAssistantContentBlock =
   | AnthropicTextBlock
   | AnthropicToolUseBlock
   | AnthropicThinkingBlock
+  | AnthropicRedactedThinkingBlock
   | AnthropicUnknownContentBlock
 
 export type AnthropicContentBlock =

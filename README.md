@@ -94,6 +94,15 @@ Model availability is account-specific and changes upstream. Query
 - Supports Responses over HTTP and WebSocket, including continuation requests
   and compatibility compaction.
 
+Compaction preserves the final summary across multiple output blocks and
+reports incomplete or empty summaries as failures, so clients can retain their
+original history. Models advertising only Messages use that endpoint for
+compaction. When native Chat would lose an attachment, routing prefers an
+advertised endpoint that can carry it; text fallback remains available when no
+compatible representation exists. Translated signed Anthropic reasoning uses
+an opaque round-trip representation in `reasoning_opaque`; clients should echo
+it unchanged with the assistant message.
+
 ### Model control
 
 - Builds discovery results from the live models available to the authenticated
@@ -359,6 +368,12 @@ router is mounted below `/health`. Direct Connect is disabled unless
 
 ### Discovery and reasoning variants
 
+Copilot clients that send `Copilot-Integration-Id` or `Copilot-Harness-Id`
+receive picker-hidden utility models as well, so background operations such as
+session naming retain the upstream catalog. Generic pickers keep their existing
+visibility rules. Google discovery includes a `models` projection with callable
+`models/<id>` resource names alongside the existing OpenAI `data` list.
+
 `GET /v1/models` combines:
 
 - live models visible to healthy Copilot accounts;
@@ -428,11 +443,12 @@ Provider coverage is intentionally scoped:
 
 | Provider model kind | Client-facing routes |
 | --- | --- |
-| `chat` | Chat Completions and Anthropic Messages |
+| `chat` | Chat Completions, Anthropic Messages, Responses HTTP, and Google generation/streaming |
 | `embedding` | Embeddings only |
 
-Custom providers do not automatically handle Responses HTTP/WebSocket,
-Responses compaction, or Google-compatible routes.
+Custom providers do not handle Responses WebSocket or compaction. Embedding
+responses preserve float or base64 encoding and validate the effective request
+dimensions when a dimension count is configured.
 
 A configured custom alias wins provider resolution and is the safest way to
 force custom-provider routing; the first configured matching provider wins. If
@@ -441,6 +457,12 @@ wins. `passReasoningEffort` opts the provider or model into forwarding the
 normalized requested effort; without opt-in, `reasoning_effort` is removed.
 
 ## Multiple Copilot accounts
+
+Auto Mode session tokens are bound to the authenticated account tracking ID
+returned by Copilot user discovery. This supports direct OAuth credentials
+without exchanging them for a legacy token or persisting session-token maps.
+Model-session acquisition preserves caller-supplied model hints; refresh remains
+token-only.
 
 Multi-account mode activates only when at least two GitHub tokens are available.
 Configure accounts interactively:
@@ -527,7 +549,8 @@ only in process memory, expire after ten minutes, and are pruned during
 debug-store operations. It observes Chat Completions, Responses, Embeddings,
 and Messages attempts. Replay is narrower and supports logged Chat Completions
 and Responses attempts only; replay execution obtains fresh server-side
-authorization instead of sending the captured authorization header. Debug
+authorization and keeps the original configured provider destination. A removed
+or changed provider returns an explicit replay error. Debug
 detail, replay, provider-secret changes, configuration export, and other
 sensitive operations require the authenticated administrator session.
 

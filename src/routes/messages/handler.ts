@@ -393,6 +393,7 @@ async function handleCompletionInner(
   if (customReference) {
     const customCandidate = await prepareMessagesChatCandidate({
       source: anthropicPayload,
+      applyCopilotSemantics: false,
       effortOverride: redirectEffort,
       signal: c.req.raw.signal,
     })
@@ -458,6 +459,8 @@ async function handleCompletionInner(
     source: anthropicPayload,
     selectedModel: routingModel,
     effortOverride: redirectEffort,
+    preserveNativeBodyEffort:
+      suffixEffort === undefined && !redirect.redirected,
     responsesVerbosity: redirect.verbosity,
     isCompact,
     signal: c.req.raw.signal,

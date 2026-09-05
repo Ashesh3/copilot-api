@@ -21,14 +21,17 @@ function isGoogleActionModelPath(pathname: string): boolean {
 }
 
 const INFERENCE_ROUTES: Array<InferenceCorsRoute> = [
-  { method: "GET", matches: exactPath("/models", "/v1/models") },
+  {
+    method: "GET",
+    matches: exactPath("/models", "/v1/models", "/v1beta/models"),
+  },
   {
     method: "GET",
     matches: (pathname) => {
       const normalized =
         pathname.endsWith("/") ? pathname.slice(0, -1) : pathname
       return (
-        /^\/(?:v1\/)?models\/[^/]+$/.test(normalized)
+        /^\/(?:v1\/|v1beta\/)?models\/[^/]+$/.test(normalized)
         && !isGoogleActionModelPath(normalized)
         && normalized !== "/models/session"
       )
@@ -56,6 +59,7 @@ const INFERENCE_ROUTES: Array<InferenceCorsRoute> = [
     ),
   },
   { method: "POST", matches: isGoogleApiCredentialPath },
+  { method: "POST", matches: exactPath("/v1/audio/transcriptions") },
   {
     method: "POST",
     matches: exactPath("/alpha/search", "/v1/alpha/search"),
@@ -66,6 +70,40 @@ const INFERENCE_ROUTES: Array<InferenceCorsRoute> = [
     matches: exactPath("/models/session", "/models/session/intent"),
   },
   { method: "POST", matches: exactPath("/auto") },
+]
+
+const INFERENCE_REQUEST_HEADERS = [
+  "authorization",
+  "content-type",
+  "x-api-key",
+  "x-goog-api-key",
+  "x-goog-api-client",
+  "anthropic-version",
+  "anthropic-beta",
+  "anthropic-dangerous-direct-browser-access",
+  "openai-organization",
+  "openai-project",
+  "openai-beta",
+  "x-request-id",
+  "x-client-request-id",
+  "x-client-session-id",
+  "x-claude-code-session-id",
+  "session-id",
+  "thread-id",
+  "x-session-id",
+  "x-conversation-id",
+  "copilot-session-token",
+  "copilot-integration-id",
+  "copilot-harness-id",
+  "x-stainless-retry-count",
+  "x-stainless-timeout",
+  "x-stainless-lang",
+  "x-stainless-package-version",
+  "x-stainless-os",
+  "x-stainless-arch",
+  "x-stainless-runtime",
+  "x-stainless-runtime-version",
+  "x-stainless-helper-method",
 ]
 
 function allowedOrigins(): Set<string> {
@@ -105,7 +143,7 @@ export const inferenceCors: MiddlewareHandler = async (c, next) => {
     c.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
     c.header(
       "Access-Control-Allow-Headers",
-      "authorization, content-type, x-api-key, x-goog-api-key",
+      INFERENCE_REQUEST_HEADERS.join(", "),
     )
     c.header("Access-Control-Max-Age", "600")
     c.header("Vary", "Origin")

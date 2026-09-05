@@ -372,6 +372,7 @@ async function captureLlmDebugResponse(
 }
 
 function startLlmDebugAttempt(opts: {
+  accountId?: number
   headers: Record<string, string>
   path: string
   requestInit: RequestInit | undefined
@@ -381,6 +382,7 @@ function startLlmDebugAttempt(opts: {
   if (!isLlmDebugPath(path)) return undefined
 
   return startLlmDebugLog({
+    upstream: { kind: "copilot", accountId: opts.accountId },
     method: requestInit?.method ?? "GET",
     path,
     requestBody: bodyToDebugString(requestInit?.body),
@@ -755,7 +757,13 @@ export async function copilotFetch(
     try {
       const headers = toHeaderRecord(requestInit?.headers)
 
-      debugLogId = startLlmDebugAttempt({ headers, path, requestInit, url })
+      debugLogId = startLlmDebugAttempt({
+        headers,
+        path,
+        requestInit,
+        url,
+        accountId: telemetryState.telemetry?.accountId,
+      })
 
       const transportInit = createCopilotTransportInit({
         ...requestInit,

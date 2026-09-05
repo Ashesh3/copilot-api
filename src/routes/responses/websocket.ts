@@ -504,6 +504,8 @@ async function handleResponseCreate(
       throw new TypeError("Expected a native Responses WebSocket candidate")
     }
 
+    await waitForWebSocketTurn(candidate.prepareForDispatch(), turn)
+
     // Native responses streaming
     const response = await waitForWebSocketTurn(
       createResponses(candidate.payload, {

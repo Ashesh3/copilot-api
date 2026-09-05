@@ -277,19 +277,42 @@ export function selectEvaluatedCopilotCandidate<
   const native = eligible.find(
     (candidate) => candidate.endpoint === nativeEndpoint,
   )
+  const reasoningPreserving = eligible.filter((candidate) =>
+    candidate.check.findings.some(
+      (finding) =>
+        finding.class === "reasoning_state" && finding.severity === "exact",
+    ),
+  )
+  const losesAttachment = (candidate: Candidate): boolean =>
+    candidate.check.findings.some(
+      (finding) =>
+        finding.class === "attachment" && finding.severity === "omitted",
+    )
+  // Native preference applies unless it deletes an attachment an advertised
+  // candidate can carry. Retain the native best effort when every route loses it.
+  const attachmentPreserving =
+    native && losesAttachment(native) ?
+      eligible.filter((candidate) => !losesAttachment(candidate))
+    : []
+  let preferred = eligible
+  if (attachmentPreserving.length > 0) preferred = attachmentPreserving
+  if (reasoningPreserving.length > 0) preferred = reasoningPreserving
+  const hasPayloadRequirement = preferred !== eligible
   const candidate =
-    native
-    ?? eligible.reduce<Candidate | undefined>((selected, current) => {
+    (hasPayloadRequirement ? undefined : native)
+    ?? preferred.reduce<Candidate | undefined>((selected, current) => {
       if (!selected || current.check.cost < selected.check.cost) return current
       return selected
     }, undefined)
 
   if (candidate) {
     const translated = candidate.endpoint !== nativeEndpoint
+    const translatedReason =
+      hasPayloadRequirement ? "payload_requirement" : candidate.reason
     return {
       candidate,
       decision: {
-        reason: translated ? candidate.reason : "native",
+        reason: translated ? translatedReason : "native",
         source: options.source,
         target: candidate.endpoint,
         translated,

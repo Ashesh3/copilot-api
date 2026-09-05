@@ -1006,6 +1006,7 @@ const handleResponsesInner = async (
       })
     }
 
+    await candidate.prepareForDispatch()
     const preparedPayload = candidate.payload
 
     const { vision, initiator } = getResponsesRequestOptions(preparedPayload)

@@ -128,6 +128,7 @@ import {
   translateResponsesStreamEventToGoogle,
 } from "./response-translation"
 import { resolvePreparedGoogleResponsesWebSearch } from "./responses-web-search"
+import { withGoogleStreamTailDeadline } from "./stream-tail"
 
 const logger = createHandlerLogger("google-ai-handler")
 
@@ -822,8 +823,9 @@ export async function handleWithChatCompletions(
     })
   }
 
+  const upstreamAbort = new AbortController()
   const completion = await completionFactory(finalPayload, {
-    signal: c.req.raw.signal,
+    signal: AbortSignal.any([c.req.raw.signal, upstreamAbort.signal]),
   })
   const response = completion.response
 
@@ -859,10 +861,16 @@ export async function handleWithChatCompletions(
 
   return await renderGoogleStream(c, options.outputMode, async (output) => {
     const adapter = createGoogleStreamTerminalAdapter({ c, output })
+    let pendingTerminal: GoogleAIResponse | undefined
+    output.onAbort(() => upstreamAbort.abort())
     try {
       const streamState = createGoogleStreamState()
 
-      for await (const rawEvent of output.wrapSource(response)) {
+      for await (const rawEvent of withGoogleStreamTailDeadline(
+        output.wrapSource(response),
+        () => pendingTerminal !== undefined,
+        () => upstreamAbort.abort(),
+      )) {
         logger.debug("Copilot raw stream event:", JSON.stringify(rawEvent))
         if (rawEvent.data === "[DONE]") {
           break
@@ -876,8 +884,23 @@ export async function handleWithChatCompletions(
           data: rawEvent.data,
           protocol: "Chat-to-Google",
           terminal: false,
-        }) as ChatCompletionChunk | undefined
-        if (chunk === undefined) continue
+        }) as ChatCompletionChunk | null | undefined
+        if (chunk === undefined || chunk === null) continue
+        // A finish reason completes content, but include_usage may follow it.
+        if (pendingTerminal) {
+          if (!chunk.usage) continue
+          setRequestContext(c, {
+            inputTokens: chunk.usage.prompt_tokens,
+            outputTokens: chunk.usage.completion_tokens,
+          })
+          pendingTerminal.usageMetadata = translateChunkToGoogle(
+            { ...chunk, choices: [] },
+            streamState,
+            options.requestedModel,
+          )?.usageMetadata
+          if (Array.isArray(chunk.choices) && chunk.choices.length === 0) break
+          continue
+        }
         if (hasNonNullStreamError(chunk)) {
           await adapter.failReceived(receivedGoogleFailure(chunk.error))
           break
@@ -898,22 +921,25 @@ export async function handleWithChatCompletions(
         )
         if (googleChunk) {
           const finishReason = googleChunk.candidates[0]?.finishReason
-          if (finishReason !== null) {
-            await adapter.succeed(googleChunk)
-            break
+          if (googleChunk.candidates.length > 0 && finishReason !== null) {
+            pendingTerminal = googleChunk
+            continue
           }
           await adapter.writePartial(googleChunk)
         }
       }
       if (adapter.lifecycle.state === "open") {
-        const terminal = flushGoogleStreamStateAtEnd(
-          streamState,
-          options.requestedModel,
-        )
+        const terminal =
+          pendingTerminal
+          ?? flushGoogleStreamStateAtEnd(streamState, options.requestedModel)
         await (terminal ? adapter.succeed(terminal) : adapter.finishSource())
       }
     } catch (error) {
-      await failGoogleStreamAfterCommit(adapter, output, error)
+      await (pendingTerminal && !output.aborted && !isAbortError(error) ?
+        adapter.succeed(pendingTerminal)
+      : failGoogleStreamAfterCommit(adapter, output, error))
+    } finally {
+      upstreamAbort.abort()
     }
   })
 }

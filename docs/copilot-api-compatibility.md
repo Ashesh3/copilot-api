@@ -89,7 +89,13 @@ reasoning-effort variants, redirect sources, virtual entries, and custom
 provider entries. Visibility is still constrained by live account catalogs,
 model policy, account health, and per-account routing configuration.
 An omitted model-picker flag is visible; only explicit `false` hides a model by
-default. Advertised custom chat models and aliases are reachable through Chat,
+default. Copilot catalog requests carrying `Copilot-Integration-Id` or
+`Copilot-Harness-Id` also include picker-hidden utility rows. Google discovery
+adds callable `models/<id>` entries under `models` while preserving `data`.
+Reserved characters in the ID are percent-encoded in the resource name so
+namespaced custom models round-trip through SDK detail and generation calls.
+
+Advertised custom chat models and aliases are reachable through Chat,
 Responses HTTP, and Google generate/stream adapters. Responses WebSocket and
 compaction remain outside custom-provider chat dispatch, while custom Google
 counting remains local and generation-free.
@@ -97,7 +103,9 @@ counting remains local and generation-free.
 Routing resolves the requested alias, effort, and redirect before selecting the
 final upstream protocol. Selection then follows these rules:
 
-1. prefer the caller's native dialect when the selected model advertises it;
+1. prefer the caller's native dialect when the selected model advertises it,
+   except when an advertised alternative preserves otherwise lost attachments
+   or exact signed native reasoning;
 2. prepare a detached candidate for each advertised dialect, repairing,
    textualizing, or omitting target-incompatible optional concepts;
 3. rank candidates using native preference, bounded translation cost, request
@@ -111,6 +119,20 @@ Translation findings are bounded telemetry, not source-schema rejection gates.
 Required tool-call/result association, schema repairs, generated IDs, media,
 reasoning, and terminal state are request-local, deterministic, and do not
 mutate the caller or sibling candidates.
+
+Native Responses attachments are normalized once before HTTP or WebSocket
+dispatch, using the same resource cache as evaluated alternatives. Synthetic
+WebSocket warmups do not fetch attachment URLs. Chat/Messages translation
+preserves supported tool-result images and PDFs; custom providers do not inherit
+Copilot-only PDF degradation. Interleaved or redacted Anthropic content uses an
+opaque native-content envelope in `reasoning_opaque` for exact ordered replay.
+This includes signature-only thinking. When Messages is unavailable, other
+dialects retain readable projections and omit the gateway-specific envelope
+instead of forwarding it as an upstream encrypted identifier.
+
+Compaction selects an advertised endpoint, including Messages-only models,
+aggregates final summary text, and returns a failure for empty, failed, or
+truncated generations instead of issuing a replacement compaction item.
 
 Google-style generation uses the same endpoint authority after lossless Google
 to Chat normalization:
@@ -289,7 +311,9 @@ In multi-account mode, affinity is necessary but not sufficient for session
 continuity. Separate control-plane and inference calls first use the normal
 deterministic affinity selector. A session token is then forwarded only when
 its bounded issuer subject matches the selected account's bounded current
-issuer assignment. Health, eligibility, account membership, token format, or
+issuer identity from authenticated user discovery (`analytics_tracking_id`),
+with legacy bearer `tid` assignments retained as a fallback. Health,
+eligibility, account membership, token format, or
 configuration-order changes can therefore lose exact session continuity, but
 they cannot cause cross-account replay: inference omits the token and continues
 ordinarily, while token-required control-plane calls reject locally. Calls
@@ -297,8 +321,12 @@ without affinity retain conservative first-eligible selection and make the
 same issuer-proof check. No session-token-to-account map is stored.
 
 `POST /models/session` creates or refreshes a model-scoped session and may
-receive an existing `Copilot-Session-Token`. `POST /models/session/intent`
-requires that header. `POST /auto` accepts its typed selection body but remains
+receive an existing `Copilot-Session-Token`.
+Acquisition preserves caller-supplied model hints and additive options; a
+missing body retains the Auto default. Refresh remains token-only.
+
+`POST /models/session/intent` requires that header. `POST /auto` accepts its
+typed selection body but remains
 subject to upstream account and feature availability. Model policy and session
 operations are routed account-aware; they are not broadcast to every account.
 Complete parseable Auto and intent records are forwarded without projecting
@@ -349,7 +377,14 @@ not become upstream state. Custom providers also remain limited to their
 configured protocol families.
 
 Platform compatibility also includes explicit-origin CORS only for approved
-inference methods and paths, optional `COPILOT_PUBLIC_BASE_URL` callback origin
+inference methods and paths, including the normal Anthropic/OpenAI/Google
+browser SDK headers. The public Nginx template forwards OPTIONS to that origin
+policy and publishes Google generation, model details/policy, and Auto/session
+routes through narrow locations. Provider replay stays on the recorded
+configured destination with fresh credentials; deleted or changed destinations
+return a local error instead of falling back to Copilot.
+
+Other platform compatibility includes optional `COPILOT_PUBLIC_BASE_URL` callback origin
 selection with trusted-peer forwarding fallback, and transparent provider
 proxy authentication through the dedicated `x-copilot-gateway-key`. Provider
 authorization and API-key headers remain upstream credentials and the dedicated

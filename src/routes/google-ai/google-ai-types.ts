@@ -48,6 +48,7 @@ export interface GoogleFileDataPart {
 
 export interface GoogleFunctionCallPart {
   functionCall: {
+    id?: string
     name: string
     args: Record<string, unknown>
   }
@@ -56,6 +57,7 @@ export interface GoogleFunctionCallPart {
 
 export interface GoogleFunctionResponsePart {
   functionResponse: {
+    id?: string
     name: string
     response: Record<string, unknown>
   }
@@ -76,6 +78,7 @@ export interface GoogleGenerationConfig {
   seed?: number
   responseMimeType?: string
   responseSchema?: Record<string, unknown>
+  responseJsonSchema?: Record<string, unknown>
   responseModalities?: Array<string>
   thinkingConfig?: Record<string, unknown>
   audioTimestamp?: boolean
@@ -93,6 +96,7 @@ export interface GoogleFunctionDeclaration {
   name: string
   description?: string
   parameters?: Record<string, unknown>
+  parametersJsonSchema?: Record<string, unknown>
 }
 
 export interface GoogleToolConfig {

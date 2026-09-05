@@ -1,9 +1,6 @@
 import type { Account } from "~/lib/token-pool"
 
-import {
-  inspectCopilotBearerTokenIssuer,
-  inspectCopilotSessionToken,
-} from "~/lib/copilot-session-token"
+import { sessionTokenMatchesAccount } from "~/lib/copilot-session-token"
 import { tokenPool } from "~/lib/token-pool"
 
 export interface RoutedAccountPin {
@@ -29,16 +26,14 @@ export function selectCandidateAccount(options: {
   candidates: ReadonlyArray<Account>
   copilotSessionToken?: string
 }): RoutedAccountSelection {
-  const issuerSubject =
-    options.copilotSessionToken ?
-      inspectCopilotSessionToken(options.copilotSessionToken)?.issuerSubject
-    : undefined
   const issuerCandidates =
-    issuerSubject ?
-      options.candidates.filter(
-        (account) =>
-          inspectCopilotBearerTokenIssuer(account.copilotToken)
-          === issuerSubject,
+    options.copilotSessionToken ?
+      options.candidates.filter((account) =>
+        sessionTokenMatchesAccount({
+          accountSubject: account.copilotAccountSubject,
+          accountToken: account.copilotToken,
+          sessionToken: options.copilotSessionToken,
+        }),
       )
     : []
   const candidates =

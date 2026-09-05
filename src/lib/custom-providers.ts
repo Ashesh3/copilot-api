@@ -11,7 +11,10 @@ import type {
   ChatCompletionResponse,
   ChatCompletionsPayload,
 } from "~/services/copilot/create-chat-completions"
-import type { EmbeddingResponse } from "~/services/copilot/create-embeddings"
+import type {
+  EmbeddingRequest,
+  EmbeddingResponse,
+} from "~/services/copilot/create-embeddings"
 
 import { getConfig, updateConfig } from "~/lib/config"
 import { CustomProviderHTTPError, LocalHTTPError } from "~/lib/error"
@@ -439,6 +442,7 @@ async function fetchCustomProvider(
     `Custom provider request: ${reference.provider.name}/${reference.provider.id}/${reference.upstreamModel} POST ${path}`,
   )
   const logId = startLlmDebugLog({
+    upstream: { kind: "custom", providerId: reference.provider.id },
     method: "POST",
     path,
     requestBody: body,
@@ -584,14 +588,21 @@ export async function createCustomProviderChatCompletions(
 function validateEmbeddingResponse(
   response: EmbeddingResponse,
   reference: CustomProviderModelReference,
+  requestedDimensions?: number,
 ): void {
-  if (!reference.model.dimensions) return
+  const expectedDimensions = requestedDimensions ?? reference.model.dimensions
+  if (!expectedDimensions) return
 
   for (const item of response.data) {
-    if (item.embedding.length !== reference.model.dimensions) {
+    const dimensions =
+      typeof item.embedding === "string" ?
+        Buffer.from(item.embedding, "base64").byteLength
+        / Float32Array.BYTES_PER_ELEMENT
+      : item.embedding.length
+    if (dimensions !== expectedDimensions) {
       const clientBody = {
         error: {
-          message: `Embedding dimension mismatch for ${reference.upstreamModel}: expected ${reference.model.dimensions}, got ${item.embedding.length}`,
+          message: `Embedding dimension mismatch for ${reference.upstreamModel}: expected ${expectedDimensions}, got ${dimensions}`,
           type: "upstream_response_error",
           provider: reference.provider.id,
           model: reference.upstreamModel,
@@ -617,7 +628,7 @@ function normalizeEmbeddingIndexes(
 
 export async function createCustomProviderEmbeddings(
   reference: CustomProviderModelReference,
-  payload: { input: string | Array<string>; model: string },
+  payload: EmbeddingRequest,
   options?: CustomProviderRequestOptions,
 ): Promise<EmbeddingResponse> {
   const outgoing = {
@@ -643,8 +654,54 @@ export async function createCustomProviderEmbeddings(
   const body = normalizeEmbeddingIndexes(
     (await response.json()) as EmbeddingResponse,
   )
-  validateEmbeddingResponse(body, reference)
+  validateEmbeddingResponse(body, reference, payload.dimensions)
   return body
+}
+
+/** Replay only a still-configured provider destination using its current credentials. */
+export async function replayCustomProviderRequest(options: {
+  providerId: string
+  originalUrl: string
+  payload: Record<string, unknown>
+  signal?: AbortSignal
+}): Promise<Response> {
+  const provider = getCustomProviders().find(
+    (entry) => entry.id === options.providerId,
+  )
+  const model = provider?.models.find(
+    (entry) => entry.kind === "chat" && entry.id === options.payload.model,
+  )
+  if (
+    !provider
+    || !model
+    || providerUrl(provider, "/chat/completions") !== options.originalUrl
+  ) {
+    const clientBody = {
+      error: {
+        code: "replay_provider_unavailable",
+        type: "configuration_error",
+        message:
+          "The original provider destination or model is no longer configured.",
+      },
+    }
+    throw new LocalHTTPError(
+      clientBody.error.message,
+      Response.json(clientBody, { status: 409 }),
+      clientBody,
+    )
+  }
+  return await fetchCustomProvider({
+    reference: {
+      provider,
+      model,
+      requestedModel: model.id,
+      upstreamModel: model.id,
+      matchedAlias: false,
+    },
+    path: "/chat/completions",
+    payload: options.payload,
+    options: { signal: options.signal },
+  })
 }
 
 function redactProviderRequestPayload(

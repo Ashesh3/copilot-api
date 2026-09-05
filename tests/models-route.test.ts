@@ -24,6 +24,17 @@ test("serves model discovery at the Google v1beta collection route", async () =>
   expect(await response.json()).toMatchObject({
     object: "list",
     data: [{ id: "gpt-current" }],
+    models: [
+      {
+        name: "models/gpt-current",
+        displayName: "GPT Current",
+        supportedGenerationMethods: [
+          "generateContent",
+          "streamGenerateContent",
+          "countTokens",
+        ],
+      },
+    ],
   })
 })
 

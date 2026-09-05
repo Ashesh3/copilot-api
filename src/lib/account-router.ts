@@ -275,6 +275,7 @@ function createSessionAccountContinuityError(): LocalHTTPError {
 }
 
 function bindSessionTokenToAccount(options: {
+  accountSubject?: string
   accountToken: string | undefined
   headerOptions: CopilotHeaderOptions | undefined
   requireContinuity?: boolean
@@ -290,6 +291,7 @@ function bindSessionTokenToAccount(options: {
     }
   }
   const matches = sessionTokenMatchesAccount({
+    accountSubject: options.accountSubject,
     accountToken: options.accountToken,
     sessionToken,
   })
@@ -339,6 +341,7 @@ async function fetchWithAccount(
     throw createEndpointUnavailableError()
   }
   const boundHeaderOptions = bindSessionTokenToAccount({
+    accountSubject: account.copilotAccountSubject,
     accountToken: account.copilotToken,
     headerOptions,
     requireContinuity: options.requireSessionTokenContinuity,
@@ -438,6 +441,7 @@ async function fetchWithFallbackAccount(
   const account = tokenPool.getFirstHealthyAccount()
   if (account) {
     const binding = bindSessionTokenToAccount({
+      accountSubject: account.copilotAccountSubject,
       accountToken: account.copilotToken,
       headerOptions,
     })
@@ -877,6 +881,7 @@ export async function routedFetch(
   }
 
   const binding = bindSessionTokenToAccount({
+    accountSubject: account.copilotAccountSubject,
     accountToken: account.copilotToken,
     headerOptions: context.headerOptions,
   })

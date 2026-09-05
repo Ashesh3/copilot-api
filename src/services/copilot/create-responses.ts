@@ -237,6 +237,7 @@ export interface ResponseOutputMessage {
   type: "message"
   role: "assistant"
   status: "completed" | "in_progress" | "incomplete"
+  phase?: "commentary" | "final_answer"
   content?: Array<ResponseOutputContentBlock>
 }
 
