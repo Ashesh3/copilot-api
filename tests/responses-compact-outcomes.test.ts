@@ -256,44 +256,52 @@ test.each([
   },
 )
 
-test("Messages-only compaction retains custom tool history accepted by ordinary Responses", async () => {
-  setEndpoints(["/v1/messages"])
-  result = {
-    id: "msg_summary",
-    type: "message",
-    role: "assistant",
-    model: "compact-model",
-    content: [{ type: "text", text: "The tool result is retained." }],
-    stop_reason: "end_turn",
-    stop_sequence: null,
-    usage: { input_tokens: 10, output_tokens: 5 },
-  }
-  const response = await server.request("/v1/responses/compact", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
+test.each([
+  ["string", "BUILD SUCCEEDED"],
+  ["text blocks", [{ type: "input_text", text: "BUILD SUCCEEDED" }]],
+  ["structured object", { result: "BUILD SUCCEEDED" }],
+] as const)(
+  "Messages-only compaction retains %s custom tool output",
+  async (_kind, output) => {
+    setEndpoints(["/v1/messages"])
+    result = {
+      id: "msg_summary",
+      type: "message",
+      role: "assistant",
       model: "compact-model",
-      input: [
-        {
-          type: "custom_tool_call",
-          call_id: "call_summary",
-          name: "exec",
-          input: "run build",
-        },
-        {
-          type: "custom_tool_call_output",
-          call_id: "call_summary",
-          output: "BUILD SUCCEEDED",
-        },
-        { role: "user", content: "Keep the build result." },
-      ],
-    }),
-  })
-  expect(await readSummary(response)).toBe("The tool result is retained.")
-  expect(upstreamPath).toBe("/v1/messages")
-  expect(JSON.stringify(upstreamBody)).toContain("BUILD SUCCEEDED")
-  expect(JSON.stringify(upstreamBody)).toContain("run build")
-})
+      content: [{ type: "text", text: "The tool result is retained." }],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 10, output_tokens: 5 },
+    }
+    const response = await server.request("/v1/responses/compact", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "compact-model",
+        input: [
+          {
+            type: "custom_tool_call",
+            call_id: "call_summary",
+            name: "exec",
+            input: "run build",
+          },
+          {
+            type: "custom_tool_call_output",
+            call_id: "call_summary",
+            output,
+          },
+          { role: "user", content: "Keep the build result." },
+        ],
+      }),
+    })
+    expect(await readSummary(response)).toBe("The tool result is retained.")
+    expect(upstreamPath).toBe("/v1/messages")
+    expect(JSON.stringify(upstreamBody)).toContain("BUILD SUCCEEDED")
+    expect(JSON.stringify(upstreamBody)).toContain("run build")
+    expect(JSON.stringify(upstreamBody)).not.toContain("[object Object]")
+  },
+)
 
 test("ordinary Responses still forwards an incomplete generation", async () => {
   result = {
