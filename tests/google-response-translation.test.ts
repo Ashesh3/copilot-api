@@ -224,12 +224,14 @@ test.each(["stop", "tool_calls"] as const)(
       {
         functionCall: {
           name: "find_docs",
+          id: "call_0",
           args: { q: "test" },
         },
       },
       {
         functionCall: {
           name: "get_weather",
+          id: "call_1",
           args: { city: "Paris" },
         },
       },
@@ -278,6 +280,7 @@ test("flushes usable pending Chat tool calls at EOF", () => {
             {
               functionCall: {
                 name: "get_weather",
+                id: "call_eof",
                 args: { city: "Paris" },
               },
             },

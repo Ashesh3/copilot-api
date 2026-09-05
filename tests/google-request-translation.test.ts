@@ -148,7 +148,9 @@ describe("Google tolerant Chat adaptation", () => {
         .flatMap((message) => message.tool_calls?.map((call) => call.id) ?? []),
     ).toEqual(["call_0_1", "call_0_1_1"])
     expect(
-      messages.slice(2).map((message) => [message.role, message.tool_call_id]),
+      messages
+        .filter((message) => message.role !== "assistant")
+        .map((message) => [message.role, message.tool_call_id]),
     ).toEqual([
       ["tool", "call_0_1"],
       ["user", undefined],
@@ -194,7 +196,7 @@ describe("Google tolerant Chat adaptation", () => {
               type: "array",
               items: {
                 type: "object",
-                required: ["value"],
+                required: ["value", "missing"],
                 properties: { value: { type: "string" } },
               },
             },

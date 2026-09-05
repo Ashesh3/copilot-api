@@ -121,8 +121,8 @@ function expectPreflightGrant(response: Response): void {
   expect(response.headers.get("access-control-allow-methods")).toBe(
     "GET, POST, OPTIONS",
   )
-  expect(response.headers.get("access-control-allow-headers")).toBe(
-    "authorization, content-type, x-api-key, x-goog-api-key",
+  expect(response.headers.get("access-control-allow-headers")).toContain(
+    "authorization",
   )
   expect(response.headers.get("access-control-max-age")).toBe("600")
   expect(response.headers.get("vary")).toBe("Origin")
@@ -145,6 +145,52 @@ test("inference CORS is disabled by default", async () => {
     }),
   )
 })
+
+test("approved browser SDK requests pass their real preflight header lists", async () => {
+  const sdkHeaders = [
+    "anthropic-version",
+    "anthropic-beta",
+    "anthropic-dangerous-direct-browser-access",
+    "x-stainless-retry-count",
+    "x-stainless-timeout",
+    "x-stainless-lang",
+    "x-stainless-package-version",
+    "x-stainless-os",
+    "x-stainless-arch",
+    "x-stainless-runtime",
+    "x-stainless-runtime-version",
+    "x-goog-api-client",
+    "x-client-session-id",
+    "copilot-session-token",
+    "x-claude-code-session-id",
+    "session-id",
+    "thread-id",
+  ]
+  const response = await server.request("/v1/messages", {
+    method: "OPTIONS",
+    headers: {
+      origin: TRUSTED_ORIGIN,
+      "access-control-request-method": "POST",
+      "access-control-request-headers": sdkHeaders.join(", "),
+    },
+  })
+  expect(response.status).toBe(204)
+  const allowed = new Set(
+    response.headers.get("access-control-allow-headers")?.split(/,\s*/),
+  )
+  expect(sdkHeaders.filter((header) => !allowed.has(header))).toEqual([])
+})
+
+test.each([
+  ["GET", "/v1beta/models"],
+  ["GET", "/v1beta/models/gemini-example"],
+  ["POST", "/v1/audio/transcriptions"],
+] as const)(
+  "browser preflight reaches supported %s %s",
+  async (method, pathname) => {
+    expect((await preflight(pathname, method)).status).toBe(204)
+  },
+)
 
 test.each([
   ["GET", "/models"],

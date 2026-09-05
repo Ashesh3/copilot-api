@@ -8,10 +8,10 @@ import type { ModelRedirectVerbosity } from "~/lib/model-redirect"
 import type { ReasoningEffort } from "~/lib/model-suffix"
 import type {
   AnthropicAssistantContentBlock,
+  AnthropicInlineContentBlock,
   AnthropicMessage,
   AnthropicMessagesPayload,
   AnthropicTool,
-  AnthropicUserContentBlock,
 } from "~/routes/messages/anthropic-types"
 import type {
   ChatCompletionsPayload,
@@ -27,7 +27,10 @@ import type { Model } from "~/services/copilot/get-models"
 import {
   type AttachmentFetchResolver,
   createAttachmentFetchResolver,
+  isLikelyBase64,
+  mediaTypeFromFilename,
   parseDataUri,
+  toDataUri,
 } from "~/lib/attachments"
 import { createEvaluatedTranslationCheck } from "~/lib/endpoint-routing"
 import {
@@ -46,6 +49,8 @@ import type {
   PreparedChatCompletionsSource,
   PreparedChatMessage,
 } from "./chat-contract"
+
+import { decodeAnthropicContent } from "./anthropic-reasoning"
 
 export interface NativeChatCandidate
   extends EvaluatedEndpointCandidate<
@@ -329,6 +334,7 @@ async function normalizeNativeAttachments(
   payload: ChatCompletionsPayload,
   signal: AbortSignal | undefined,
   attachmentCache: CandidateAttachmentCache,
+  findings: Array<TranslationFinding>,
 ): Promise<void> {
   for (const message of payload.messages) {
     if (!Array.isArray(message.content)) continue
@@ -361,6 +367,7 @@ async function normalizeNativeAttachments(
         continue
       }
       if (part.type === "file") {
+        addFinding(findings, { class: "attachment", severity: "omitted" })
         parts.push({ type: "text", text: "[File attachment unavailable]" })
         continue
       }
@@ -376,6 +383,11 @@ export async function prepareNativeChatCandidate(
   const payload = clone(options.source) as unknown as ChatCompletionsPayload
   const findings =
     options.sourceFindings?.map((finding) => ({ ...finding })) ?? []
+  for (const message of payload.messages) {
+    if (!decodeAnthropicContent(message.reasoning_opaque)) continue
+    delete message.reasoning_opaque
+    addFinding(findings, { class: "reasoning_state", severity: "omitted" })
+  }
   if (Array.isArray(payload.tools)) {
     payload.tools = payload.tools.map((tool) =>
       isWebSearchToolType(tool) ? createWebSearchFunctionTool(tool) : tool,
@@ -396,7 +408,12 @@ export async function prepareNativeChatCandidate(
   if (options.applyCopilotSemantics !== false) {
     rewriteAssistantPrefill(payload)
     normalizeNativeSchema(payload)
-    await normalizeNativeAttachments(payload, options.signal, attachmentCache)
+    await normalizeNativeAttachments(
+      payload,
+      options.signal,
+      attachmentCache,
+      findings,
+    )
     addPromptCaching(payload.messages, payload.tools ?? undefined)
   }
   const candidate = createCandidate({
@@ -453,7 +470,7 @@ function convertResponseContent(
           { filename: raw.file.filename }
         : {}),
         ...(typeof raw.file.file_data === "string" ?
-          { file_data: raw.file.file_data }
+          { file_data: normalizeFileData(raw.file) }
         : {}),
         ...(typeof raw.file.file_id === "string" ?
           { file_id: raw.file.file_id }
@@ -558,6 +575,14 @@ function convertResponsesInput(
       continue
     }
     if (message.role === "assistant") {
+      const nativeReasoning = decodeAnthropicContent(message.reasoning_opaque)
+      if (nativeReasoning) {
+        delete message.reasoning_opaque
+        addFinding(context.findings, {
+          class: "reasoning_state",
+          severity: "omitted",
+        })
+      }
       if (
         typeof message.encrypted_content === "string"
         || typeof message.reasoning_text === "string"
@@ -608,6 +633,19 @@ function convertResponsesInput(
       continue
     }
     if (message.role === "tool") {
+      if (
+        Array.isArray(message.content)
+        && message.content.some(
+          (part) =>
+            isRecord(part)
+            && ["document", "file", "image_url"].includes(String(part.type)),
+        )
+      ) {
+        addFinding(context.findings, {
+          class: "attachment",
+          severity: "omitted",
+        })
+      }
       const supplied = message.tool_call_id
       if (
         typeof supplied === "string"
@@ -810,6 +848,13 @@ function getChatWebSearchMaxUses(
   return limit
 }
 
+function normalizeFileData(file: Record<string, unknown>): string {
+  const data = typeof file.file_data === "string" ? file.file_data : ""
+  if (!isLikelyBase64(data)) return data
+  const filename = typeof file.filename === "string" ? file.filename : undefined
+  return toDataUri(mediaTypeFromFilename(filename) ?? "application/pdf", data)
+}
+
 function parseAnthropicArguments(value: unknown): Record<string, unknown> {
   if (typeof value === "string") {
     try {
@@ -828,12 +873,12 @@ async function convertAnthropicContent(
   content: unknown,
   context: CandidateContext,
   signal: AbortSignal | undefined,
-): Promise<Array<AnthropicUserContentBlock>> {
+): Promise<Array<AnthropicInlineContentBlock>> {
   if (typeof content === "string") {
     return content ? [{ type: "text", text: content }] : []
   }
   if (!Array.isArray(content)) return []
-  const blocks: Array<AnthropicUserContentBlock> = []
+  const blocks: Array<AnthropicInlineContentBlock> = []
   for (const raw of content) {
     if (!isRecord(raw)) continue
     if (raw.type === "text" && typeof raw.text === "string") {
@@ -882,7 +927,7 @@ async function convertAnthropicContent(
     if (raw.type === "file" && isRecord(raw.file)) {
       const parsed =
         typeof raw.file.file_data === "string" ?
-          parseDataUri(raw.file.file_data)
+          parseDataUri(normalizeFileData(raw.file))
         : null
       if (parsed) {
         blocks.push({
@@ -905,7 +950,7 @@ async function convertAnthropicContent(
       continue
     }
     if (raw.type === "document" && isRecord(raw.source)) {
-      blocks.push(clone(raw) as AnthropicUserContentBlock)
+      blocks.push(clone(raw) as AnthropicInlineContentBlock)
       continue
     }
     addFinding(context.findings, {
@@ -1011,6 +1056,19 @@ async function convertAnthropicMessages(
       continue
     }
     if (message.role === "assistant") {
+      const nativeContent =
+        !message.encrypted_content ?
+          decodeAnthropicContent(message.reasoning_opaque)
+        : undefined
+      if (nativeContent) {
+        addFinding(context.findings, {
+          class: "reasoning_state",
+          severity: "exact",
+        })
+        registerNativeToolCalls(nativeContent, context)
+        messages.push({ role: "assistant", content: nativeContent })
+        continue
+      }
       const blocks: Array<AnthropicAssistantContentBlock> = []
       if (
         typeof message.reasoning_text === "string"
@@ -1064,7 +1122,14 @@ async function convertAnthropicMessages(
             {
               type: "tool_result",
               tool_use_id: supplied,
-              content: contentText(message.content),
+              content:
+                typeof message.content === "string" ?
+                  message.content
+                : await convertAnthropicContent(
+                    message.content,
+                    context,
+                    signal,
+                  ),
             },
           ],
         })
@@ -1096,6 +1161,17 @@ async function convertAnthropicMessages(
     if (blocks.length > 0) messages.push({ role: "user", content: blocks })
   }
   return { messages, system }
+}
+
+function registerNativeToolCalls(
+  blocks: Array<AnthropicAssistantContentBlock>,
+  context: CandidateContext,
+): void {
+  for (const block of blocks) {
+    if (block.type !== "tool_use" || typeof block.id !== "string") continue
+    context.pendingResultCallIds.add(block.id)
+    context.usedCallIds.add(block.id)
+  }
 }
 
 async function adaptChatToMessages(

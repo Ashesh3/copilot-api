@@ -3,11 +3,19 @@ import type { Context } from "hono"
 import consola from "consola"
 import { randomUUID } from "node:crypto"
 
+import type { AnthropicResponse } from "~/routes/messages/anthropic-types"
+import type { Model } from "~/services/copilot/get-models"
+
+import {
+  runWithRoutedModelSelection,
+  selectRoutedModel,
+} from "~/lib/account-router"
+import { getModelEndpointSupport } from "~/lib/endpoint-routing"
 import { createHandlerLogger } from "~/lib/logger"
 import { parseModelSuffix } from "~/lib/model-suffix"
 import { setRequestContext } from "~/lib/request-logger"
 import { installResponsesRoutingAffinity } from "~/lib/routing-affinity"
-import { state } from "~/lib/state"
+import { createNativeMessages } from "~/routes/messages/native-handler"
 import {
   type CompactionPayloadFitResult,
   fitResponsesCompactionPayload,
@@ -26,12 +34,17 @@ import {
 } from "~/services/copilot/create-responses"
 
 import { getCompactionPrompt } from "./compact-prompt"
+import {
+  chatCompactionSummary,
+  type CompactionSummary,
+  messagesCompactionSummary,
+  responsesCompactionSummary,
+} from "./compact-summary"
+import { adaptResponsesToMessagesCandidate } from "./messages-bridge"
 import { readResponsesRequestJson } from "./request-json"
 import { expandCompactionItems, getResponsesRequestOptions } from "./utils"
 
 const logger = createHandlerLogger("compact-handler")
-
-const RESPONSES_ENDPOINT = "/responses"
 
 interface CompactRequestBody {
   model: string
@@ -54,47 +67,6 @@ interface CompactedResponse {
   created_at: number
   output: Array<CompactionItem>
   usage: ResponseUsage | null
-}
-
-/**
- * Extract text output from a Responses API result.
- */
-const extractTextFromResponsesResult = (result: ResponsesResult): string => {
-  for (const item of result.output) {
-    if (item.type === "message" && item.content) {
-      for (const block of item.content) {
-        const outputBlock = block as { type?: string; text?: string }
-        if (outputBlock.type === "output_text" && outputBlock.text) {
-          return outputBlock.text
-        }
-      }
-    }
-  }
-  return result.output_text
-}
-
-/**
- * Extract text output from a ChatCompletions response.
- */
-const extractTextFromCCResult = (result: ChatCompletionResponse): string => {
-  const choice = result.choices[0]
-  return choice.message.content ?? ""
-}
-
-/**
- * Map ChatCompletions usage to ResponseUsage format.
- */
-const mapCCUsage = (
-  usage: ChatCompletionResponse["usage"],
-): ResponseUsage | null => {
-  if (!usage) return null
-  return {
-    input_tokens: usage.prompt_tokens,
-    output_tokens: usage.completion_tokens,
-    total_tokens: usage.total_tokens,
-    input_tokens_details: { cached_tokens: 0 },
-    output_tokens_details: { reasoning_tokens: 0 },
-  }
 }
 
 /**
@@ -243,6 +215,35 @@ const reportCompactionReduction = (
   })
 }
 
+async function compactWithMessages(
+  c: Context,
+  responsesPayload: ResponsesPayload,
+  selectedModel: Model | undefined,
+): Promise<CompactionSummary> {
+  setRequestContext(c, { provider: "Compact→AnthropicMessages" })
+  const fitted = fitResponsesCompactionPayload(responsesPayload)
+  reportCompactionReduction("Reduced oversized compact summary payload", fitted)
+  const { payload } = await adaptResponsesToMessagesCandidate({
+    source: fitted.payload,
+    signal: c.req.raw.signal,
+  })
+  payload.stream = false
+  const outputLimit = selectedModel?.capabilities.limits?.max_output_tokens
+  if (Number.isInteger(outputLimit) && Number(outputLimit) > 0) {
+    payload.max_tokens = outputLimit
+  }
+  const response = await createNativeMessages(
+    payload,
+    {
+      anthropicBeta: c.req.header("anthropic-beta"),
+      anthropicVersion: c.req.header("anthropic-version"),
+      modelProviderPreference: c.req.header("x-model-provider-preference"),
+    },
+    { compaction: true, signal: c.req.raw.signal },
+  )
+  return messagesCompactionSummary(response as AnthropicResponse)
+}
+
 export const handleCompact = async (c: Context) => {
   const body = await readResponsesRequestJson<CompactRequestBody>(c.req.raw)
   installResponsesRoutingAffinity(body.client_metadata)
@@ -283,61 +284,58 @@ export const handleCompact = async (c: Context) => {
     tool_choice: "none",
     store: false,
   }
-  // Check if the model supports native /responses
-  const selectedModel = state.models?.data.find((m) => m.id === model)
-  const supportsResponses =
-    selectedModel?.supported_endpoints?.includes(RESPONSES_ENDPOINT) ?? false
+  const routedModel = selectRoutedModel(model)
+  const support = getModelEndpointSupport(routedModel.model)
+  const { summaryText, usage } = await runWithRoutedModelSelection(
+    routedModel,
+    async () => {
+      if (support.responses) {
+        // Use native Responses API
+        const fitted = fitResponsesCompactionPayload(responsesPayload)
+        const fittedPayload = fitted.payload
+        reportCompactionReduction(
+          "Reduced oversized compact summary payload",
+          fitted,
+        )
+        const { vision, initiator } = getResponsesRequestOptions(fittedPayload)
+        const response = await createResponses(fittedPayload, {
+          vision,
+          initiator,
+          signal: c.req.raw.signal,
+          compaction: true,
+        })
 
-  let summaryText: string
-  let usage: ResponseUsage | null
+        const result = response as ResponsesResult
+        logger.debug("Compact Responses result received")
+        return responsesCompactionSummary(result)
+      }
+      if (support.messages && !support.chat) {
+        return await compactWithMessages(c, responsesPayload, routedModel.model)
+      }
+      // Fall back to ChatCompletions
+      consola.debug(
+        `[compact] Model ${model} does not support /responses, falling back to ChatCompletions`,
+      )
+      setRequestContext(c, { provider: "Compact→ChatCompletions" })
+      const ccPayload: ChatCompletionsPayload = {
+        model,
+        messages: [
+          { role: "system", content: compactionPrompt },
+          ...convertInputToMessages(expandedInput),
+        ],
+        stream: false,
+        temperature: 0,
+      }
 
-  if (supportsResponses) {
-    // Use native Responses API
-    const fitted = fitResponsesCompactionPayload(responsesPayload)
-    const fittedPayload = fitted.payload
-    reportCompactionReduction(
-      "Reduced oversized compact summary payload",
-      fitted,
-    )
-    const { vision, initiator } = getResponsesRequestOptions(fittedPayload)
-    const response = await createResponses(fittedPayload, {
-      vision,
-      initiator,
-      signal: c.req.raw.signal,
-      compaction: true,
-    })
-
-    const result = response as ResponsesResult
-    summaryText = extractTextFromResponsesResult(result)
-    usage = result.usage ?? null
-
-    logger.debug("Compact Responses result received")
-  } else {
-    // Fall back to ChatCompletions
-    consola.debug(
-      `[compact] Model ${model} does not support /responses, falling back to ChatCompletions`,
-    )
-    setRequestContext(c, { provider: "Compact→ChatCompletions" })
-    const ccPayload: ChatCompletionsPayload = {
-      model,
-      messages: [
-        { role: "system", content: compactionPrompt },
-        ...convertInputToMessages(expandedInput),
-      ],
-      stream: false,
-      temperature: 0,
-    }
-
-    const response = await createChatCompletions(ccPayload, {
-      compaction: true,
-      signal: c.req.raw.signal,
-    })
-    const result = response as ChatCompletionResponse
-    summaryText = extractTextFromCCResult(result)
-    usage = mapCCUsage(result.usage)
-
-    logger.debug("Compact ChatCompletions result received")
-  }
+      const response = await createChatCompletions(ccPayload, {
+        compaction: true,
+        signal: c.req.raw.signal,
+      })
+      const result = response as ChatCompletionResponse
+      logger.debug("Compact ChatCompletions result received")
+      return chatCompactionSummary(result)
+    },
+  )
 
   if (usage) {
     setRequestContext(c, {

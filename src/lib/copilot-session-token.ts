@@ -237,6 +237,7 @@ export function inspectCopilotBearerTokenIssuer(
 }
 
 export function sessionTokenMatchesAccount(options: {
+  accountSubject?: string
   accountToken: string | undefined
   sessionToken: string | undefined
 }): boolean {
@@ -244,7 +245,9 @@ export function sessionTokenMatchesAccount(options: {
   const sessionIssuer = inspectCopilotSessionToken(
     options.sessionToken,
   )?.issuerSubject
-  const accountIssuer = inspectCopilotBearerTokenIssuer(options.accountToken)
+  const accountIssuer =
+    boundedIssuerSubject(options.accountSubject)
+    ?? inspectCopilotBearerTokenIssuer(options.accountToken)
   return Boolean(
     sessionIssuer && accountIssuer && sessionIssuer === accountIssuer,
   )

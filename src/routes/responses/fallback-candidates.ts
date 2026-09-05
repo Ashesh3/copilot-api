@@ -17,6 +17,7 @@ import {
   getModelEndpointSupport,
   selectEvaluatedCopilotCandidate,
 } from "~/lib/endpoint-routing"
+import { normalizeResponsesAttachmentsForDispatch } from "~/services/copilot/responses-attachments"
 
 import { createResponsesAttachmentCache } from "./attachment-cache"
 import {
@@ -32,7 +33,9 @@ import { applyResponsesVerbosity } from "./utils"
 export type ResponsesNativeCandidate = EvaluatedEndpointCandidate<
   "/responses",
   ResponsesPayload
->
+> & {
+  readonly prepareForDispatch: () => Promise<void>
+}
 
 export type ResponsesEndpointCandidate =
   | ResponsesNativeCandidate
@@ -67,11 +70,24 @@ export async function prepareResponsesCandidates(
   const support = getModelEndpointSupport(options.selectedModel)
   const nativePayload = structuredClone(options.nativeBody.body)
   applyResponsesVerbosity(nativePayload, options.responsesVerbosity)
+  let nativePreparation: Promise<void> | undefined
   const native: ResponsesNativeCandidate = {
     endpoint: "/responses",
     reason: "endpoint_unavailable",
     payload: nativePayload,
     check: createEvaluatedTranslationCheck([]),
+    prepareForDispatch: () => {
+      // Defer native media work until real dispatch, then reuse any remote
+      // resources fetched while evaluating translated candidates.
+      nativePreparation ??= normalizeResponsesAttachmentsForDispatch(
+        nativePayload,
+        {
+          signal: options.signal,
+          resolveAttachment: attachmentCache.resolve,
+        },
+      )
+      return nativePreparation
+    },
   }
   const chat =
     support.chat ?

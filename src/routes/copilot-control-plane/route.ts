@@ -70,8 +70,29 @@ function recordControlPlaneContext(
 
 async function handleModelSession(c: Context): Promise<Response> {
   try {
+    const existingToken = sessionToken(c)
+    let payload: Record<string, unknown> | undefined
+    if (!existingToken) {
+      const text = await c.req.text()
+      if (text.trim()) {
+        let value: unknown
+        try {
+          value = JSON.parse(text)
+        } catch {
+          throw createInvalidJsonBodyError()
+        }
+        if (!isRecord(value)) {
+          throw createInvalidRequestError(
+            "The request body must be a JSON object.",
+            "body",
+          )
+        }
+        payload = value
+      }
+    }
     const result = await createCopilotModelSession({
-      existingToken: sessionToken(c),
+      existingToken,
+      payload,
       signal: c.req.raw.signal,
     })
     recordControlPlaneContext(c, "model-session", 0)

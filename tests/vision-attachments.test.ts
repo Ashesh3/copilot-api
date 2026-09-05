@@ -29,6 +29,7 @@ import {
   chatPayloadToAnthropic,
   streamAnthropicAsChatCompletions,
 } from "~/routes/chat-completions/anthropic-bridge"
+import { decodeAnthropicContent } from "~/routes/chat-completions/anthropic-reasoning"
 import { chatCompletionsToResponses } from "~/routes/chat-completions/responses-fallback"
 import { translateGoogleToOpenAI } from "~/routes/google-ai/request-translation"
 import {
@@ -792,25 +793,30 @@ describe("anthropicResponseToChat bridge", () => {
     expect(chat.usage?.prompt_tokens_details?.cached_tokens).toBe(90)
   })
 
-  test("rejects multiple signed thinking blocks", () => {
-    expect(() =>
-      anthropicResponseToChat(
-        {
-          id: "msg_multi_reasoning",
-          type: "message",
-          role: "assistant",
-          model: "claude-sonnet-4.6",
-          content: [
-            { type: "thinking", thinking: "first", signature: "sig-first" },
-            { type: "thinking", thinking: "second", signature: "sig-second" },
-          ],
-          stop_reason: "end_turn",
-          stop_sequence: null,
-          usage: { input_tokens: 1, output_tokens: 2 },
-        },
-        "claude-sonnet-4.6",
-      ),
-    ).toThrow()
+  test("preserves multiple signed thinking blocks in native replay state", () => {
+    const chat = anthropicResponseToChat(
+      {
+        id: "msg_multi_reasoning",
+        type: "message",
+        role: "assistant",
+        model: "claude-sonnet-4.6",
+        content: [
+          { type: "thinking", thinking: "first", signature: "sig-first" },
+          { type: "thinking", thinking: "second", signature: "sig-second" },
+        ],
+        stop_reason: "end_turn",
+        stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 2 },
+      },
+      "claude-sonnet-4.6",
+    )
+    expect(chat.choices[0].message.reasoning_text).toBe("first\n\nsecond")
+    expect(
+      decodeAnthropicContent(chat.choices[0].message.reasoning_opaque),
+    ).toEqual([
+      { type: "thinking", thinking: "first", signature: "sig-first" },
+      { type: "thinking", thinking: "second", signature: "sig-second" },
+    ])
   })
 
   test.each([
@@ -828,22 +834,23 @@ describe("anthropicResponseToChat bridge", () => {
         { type: "thinking", thinking: "signed", signature: "sig-last" },
       ],
     },
-  ])("rejects mixed $name thinking blocks", ({ content }) => {
-    expect(() =>
-      anthropicResponseToChat(
-        {
-          id: "msg_mixed_reasoning",
-          type: "message",
-          role: "assistant",
-          model: "claude-sonnet-4.6",
-          content: [...content] as AnthropicResponse["content"],
-          stop_reason: "end_turn",
-          stop_sequence: null,
-          usage: { input_tokens: 1, output_tokens: 2 },
-        },
-        "claude-sonnet-4.6",
-      ),
-    ).toThrow()
+  ])("preserves mixed $name thinking blocks", ({ content }) => {
+    const chat = anthropicResponseToChat(
+      {
+        id: "msg_mixed_reasoning",
+        type: "message",
+        role: "assistant",
+        model: "claude-sonnet-4.6",
+        content: [...content] as AnthropicResponse["content"],
+        stop_reason: "end_turn",
+        stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 2 },
+      },
+      "claude-sonnet-4.6",
+    )
+    expect(
+      decodeAnthropicContent(chat.choices[0].message.reasoning_opaque),
+    ).toEqual([...content] as AnthropicResponse["content"])
   })
 
   test("preserves multiple unsigned thinking blocks without a signature", () => {
@@ -1013,7 +1020,7 @@ describe("streamAnthropicAsChatCompletions bridge", () => {
     expect(written).toEqual([])
   })
 
-  test("preserves fragmented thinking signatures before later tools", async () => {
+  test("emits one complete thinking signature after later tools", async () => {
     const events = [
       {
         data: JSON.stringify({
@@ -1022,6 +1029,13 @@ describe("streamAnthropicAsChatCompletions bridge", () => {
             id: "msg_signed",
             usage: { input_tokens: 1, output_tokens: 0 },
           },
+        }),
+      },
+      {
+        data: JSON.stringify({
+          type: "content_block_start",
+          index: 0,
+          content_block: { type: "thinking", thinking: "", signature: "" },
         }),
       },
       {
@@ -1057,6 +1071,7 @@ describe("streamAnthropicAsChatCompletions bridge", () => {
           },
         }),
       },
+      { data: JSON.stringify({ type: "message_stop" }) },
     ]
     const written: Array<string> = []
     const stream = {
@@ -1084,7 +1099,8 @@ describe("streamAnthropicAsChatCompletions bridge", () => {
     )
     const toolIndex = deltas.findIndex((delta) => delta.tool_calls)
     expect(signatureIndex).toBeGreaterThan(-1)
-    expect(toolIndex).toBeGreaterThan(signatureIndex)
+    expect(signatureIndex).toBeGreaterThan(toolIndex)
+    expect(deltas.filter((delta) => delta.reasoning_opaque)).toHaveLength(1)
   })
 })
 

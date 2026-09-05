@@ -94,13 +94,18 @@ export async function enableCopilotModelPolicy(
 
 export async function createCopilotModelSession(options: {
   existingToken?: string
+  payload?: Record<string, unknown>
   signal?: AbortSignal
 }): Promise<Record<string, unknown>> {
   const existingToken = sanitizeCopilotHeaderValue(options.existingToken)
   return await routedControlPlaneJson({
     ...(existingToken ?
       { copilotSessionToken: existingToken }
-    : { body: { auto_mode: { model_hints: ["auto"] } } }),
+    : {
+        body: structuredClone(
+          options.payload ?? { auto_mode: { model_hints: ["auto"] } },
+        ),
+      }),
     path: "/models/session",
     signal: options.signal,
   })

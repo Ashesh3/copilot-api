@@ -1,4 +1,4 @@
-/* eslint-disable complexity, max-params, no-nested-ternary, require-atomic-updates, unicorn/consistent-function-scoping, @typescript-eslint/no-unsafe-return -- tolerant protocol adaptation is a bounded matrix */
+/* eslint-disable complexity, max-params, no-nested-ternary, require-atomic-updates, unicorn/consistent-function-scoping -- tolerant protocol adaptation is a bounded matrix */
 import type {
   EvaluatedEndpointCandidate,
   TranslationFinding,
@@ -24,6 +24,7 @@ import { createWebSearchFunctionTool } from "~/services/copilot/mcp-web-search"
 import type { PreparedGoogleRequest } from "./google-request-normalization"
 
 import { googleRecordEntries } from "./google-request-normalization"
+import { normalizeGoogleSchema } from "./schema"
 
 export type GoogleChatCandidate = EvaluatedEndpointCandidate<
   "/chat/completions",
@@ -49,6 +50,7 @@ interface AdaptationState {
   readonly attachmentCache: Map<string, Promise<ParsedDataUri | null>>
   readonly findings: Array<TranslationFinding>
   readonly pendingByName: Map<string, Array<string>>
+  readonly pendingById: Map<string, string>
   readonly reservedIds: Set<string>
   readonly usedIds: Set<string>
   meaningful: boolean
@@ -99,6 +101,7 @@ function createState(source: PreparedGoogleRequest): AdaptationState {
     findings: source.findings.map((finding) => ({ ...finding })),
     meaningful: false,
     pendingByName: new Map(),
+    pendingById: new Map(),
     reservedIds: collectReservedIds(source.source),
     usedIds: new Set(),
   }
@@ -153,6 +156,10 @@ function suppliedCallId(
   return undefined
 }
 
+function responseCallId(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined
+}
+
 function allocateCallId(
   state: AdaptationState,
   part: Readonly<Record<string, unknown>>,
@@ -180,10 +187,23 @@ function enqueueCall(state: AdaptationState, name: string, id: string): void {
   const queue = state.pendingByName.get(name) ?? []
   queue.push(id)
   state.pendingByName.set(name, queue)
+  state.pendingById.set(id, name)
 }
 
-function dequeueCall(state: AdaptationState, name: string): string | undefined {
-  return state.pendingByName.get(name)?.shift()
+function dequeueCall(
+  state: AdaptationState,
+  name: string,
+  suppliedId: string | undefined,
+): string | undefined {
+  const id = suppliedId ?? state.pendingByName.get(name)?.[0]
+  if (!id) return undefined
+  const pendingName = state.pendingById.get(id)
+  if (pendingName === undefined) return undefined
+  const queue = state.pendingByName.get(pendingName)
+  const index = queue?.indexOf(id) ?? -1
+  if (index >= 0) queue?.splice(index, 1)
+  state.pendingById.delete(id)
+  return id
 }
 
 async function attachmentPart(
@@ -329,14 +349,27 @@ async function translateContents(
   resolveAttachment: GoogleAttachmentResolver,
 ): Promise<Array<Message>> {
   const messages: Array<Message> = []
-  const contents = records(state, value, "message_shape")
-  for (const [contentIndex, content] of contents.entries()) {
+  for (const [contentIndex, content] of records(
+    state,
+    value,
+    "message_shape",
+  ).entries()) {
     const role = roleForContent(state, content.role)
     let run: Array<ContentPart> = role.prefix ? [role.prefix] : []
+    let calls: Array<ToolCall> = []
     const flush = (): void => {
-      if (run.length === 0) return
-      messages.push({ role: role.role, content: flattenParts(run) })
+      if (run.length === 0 && calls.length === 0) return
+      messages.push(
+        calls.length > 0 ?
+          {
+            role: "assistant",
+            content: run.length > 0 ? flattenParts(run) : null,
+            tool_calls: calls,
+          }
+        : { role: role.role, content: flattenParts(run) },
+      )
       run = []
+      calls = []
     }
     const rawParts =
       Array.isArray(content.parts) ? content.parts
@@ -350,28 +383,32 @@ async function translateContents(
         continue
       }
       if (isRecord(partValue.functionCall)) {
-        flush()
         const name = callName(partValue.functionCall.name, state)
         const id = allocateCallId(state, partValue, contentIndex, partIndex)
         enqueueCall(state, name, id)
-        const call: ToolCall = {
+        calls.push({
           id,
           type: "function",
           function: {
             name,
             arguments: safeStringify(partValue.functionCall.args),
           },
-        }
-        messages.push({ role: "assistant", content: null, tool_calls: [call] })
+        })
         state.meaningful = true
         continue
       }
       if (isRecord(partValue.functionResponse)) {
         flush()
         const name = callName(partValue.functionResponse.name, state)
-        let id = dequeueCall(state, name)
+        const suppliedId = responseCallId(partValue.functionResponse.id)
+        let id = dequeueCall(state, name, suppliedId)
         if (!id) {
-          id = allocateCallId(state, {}, contentIndex, partIndex)
+          id = allocateCallId(
+            state,
+            { id: suppliedId },
+            contentIndex,
+            partIndex,
+          )
           messages.push({
             role: "assistant",
             content: null,
@@ -428,92 +465,6 @@ async function translateSystem(
     : undefined
 }
 
-function normalizeSchema(
-  value: unknown,
-  changed: { value: boolean },
-): Record<string, unknown> {
-  if (!isRecord(value)) {
-    changed.value = true
-    return { type: "object", properties: {} }
-  }
-  const output: Record<string, unknown> = {}
-  for (const [key, item] of Object.entries(value)) {
-    if (key === "$schema") {
-      changed.value = true
-      continue
-    }
-    if (key === "type") {
-      if (typeof item === "string") {
-        const normalized = item.toLowerCase()
-        output.type = normalized
-        if (normalized !== item) changed.value = true
-      } else if (Array.isArray(item)) {
-        output.type = item.map((entry) =>
-          typeof entry === "string" ? entry.toLowerCase() : entry,
-        )
-      }
-      continue
-    }
-    if (
-      ["$defs", "definitions", "patternProperties", "properties"].includes(key)
-      && isRecord(item)
-    ) {
-      output[key] = Object.fromEntries(
-        Object.entries(item).map(([name, schema]) => [
-          name,
-          normalizeSchema(schema, changed),
-        ]),
-      )
-      continue
-    }
-    if (
-      [
-        "additionalItems",
-        "contains",
-        "else",
-        "if",
-        "items",
-        "not",
-        "propertyNames",
-        "then",
-      ].includes(key)
-    ) {
-      output[key] =
-        Array.isArray(item) ?
-          item.map((entry) => normalizeSchema(entry, changed))
-        : normalizeSchema(item, changed)
-      continue
-    }
-    if (["allOf", "anyOf", "oneOf"].includes(key) && Array.isArray(item)) {
-      output[key] = item.map((entry) => normalizeSchema(entry, changed))
-      continue
-    }
-    output[key] = structuredClone(item)
-  }
-  if (output.type === undefined) {
-    output.type = "object"
-    changed.value = true
-  }
-  if (output.type === "object" && !isRecord(output.properties)) {
-    output.properties = {}
-    changed.value = true
-  }
-  if (Array.isArray(output.required) && isRecord(output.properties)) {
-    const names = new Set(Object.keys(output.properties))
-    const repaired = Array.from(
-      new Set(
-        output.required.filter(
-          (item): item is string => typeof item === "string" && names.has(item),
-        ),
-      ),
-    )
-    if (JSON.stringify(repaired) !== JSON.stringify(output.required))
-      changed.value = true
-    output.required = repaired
-  }
-  return output
-}
-
 function translateTools(
   state: AdaptationState,
   value: unknown,
@@ -533,9 +484,9 @@ function translateTools(
         isRecord(declaration.parameters) ? declaration.parameters
         : isRecord(declaration.parametersJsonSchema) ?
           declaration.parametersJsonSchema
-        : {}
+        : undefined
       const changed = { value: false }
-      const parameters = normalizeSchema(schemaSource, changed)
+      const parameters = normalizeGoogleSchema(schemaSource, changed)
       tools.push({
         type: "function",
         function: {
@@ -649,13 +600,17 @@ function generationFields(
   ) {
     output.stop = value.stopSequences
   }
-  if (isRecord(value.responseSchema)) {
+  const responseSchema =
+    isRecord(value.responseSchema) ?
+      value.responseSchema
+    : value.responseJsonSchema
+  if (isRecord(responseSchema)) {
     const changed = { value: false }
     output.response_format = {
       type: "json_schema",
       json_schema: {
         name: "google_response",
-        schema: normalizeSchema(value.responseSchema, changed),
+        schema: normalizeGoogleSchema(responseSchema, changed),
         strict: false,
       },
     }
@@ -683,6 +638,7 @@ function generationFields(
     "presencePenalty",
     "responseMimeType",
     "responseSchema",
+    "responseJsonSchema",
     "thinkingConfig",
   ])
   if (Object.keys(value).some((key) => !known.has(key))) {

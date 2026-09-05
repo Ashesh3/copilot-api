@@ -384,7 +384,7 @@ async function convertTolerantResponsesInput(
         messages,
         type.endsWith("output") ? "user" : "assistant",
         RESPONSES_TOOL_CONTEXT,
-        [raw.call_id, raw.name, raw.output ?? raw.input]
+        [raw.call_id, raw.name, stringifyTolerantValue(raw.output ?? raw.input)]
           .filter(Boolean)
           .join("\n"),
       )

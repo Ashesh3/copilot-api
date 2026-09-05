@@ -19,6 +19,17 @@ The canonical application and Docker setup remains in the repository
 Do not combine these server blocks onto one broad hostname. Do not add a
 catch-all `proxy_pass`.
 
+The public template publishes model collections/details/policy, Google
+generate/stream/count actions, and Copilot Auto/session endpoints. It forwards
+OPTIONS on supported inference locations to the application's CORS policy.
+Set `COPILOT_INFERENCE_CORS_ORIGINS` to the exact browser origins to enable
+cross-origin SDK calls; authentication remains required. The CORS policy covers
+the Anthropic, OpenAI, and Google SDK headers, including session affinity.
+
+Run `RUN_NGINX_TESTS=1 bun test tests/nginx-public-routes.test.ts` with Docker
+available to verify the rendered public template against a local upstream.
+The test creates and removes its own container and leaves deployed vhosts alone.
+
 The Statsig application boundary authorizes managed client IPs. If a shared
 load balancer source-NATs clients, the application sees the load balancer as the
 caller and cannot distinguish downstream clients. Deploying the Statsig

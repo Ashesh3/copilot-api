@@ -43,6 +43,9 @@ export interface LlmDebugLogResponse {
 }
 
 export interface LlmDebugLogEntry {
+  upstream?:
+    | { kind: "custom"; providerId: string }
+    | { kind: "copilot"; accountId?: number }
   durationMs?: number
   endedAt?: string
   error?: LlmDebugLogError
@@ -91,6 +94,7 @@ interface AbortLlmDebugLogOptions {
 }
 
 interface StartLlmDebugLogInput {
+  upstream?: LlmDebugLogEntry["upstream"]
   method: string
   path: string
   requestBody: string | null
@@ -532,6 +536,7 @@ export function startLlmDebugLog(input: StartLlmDebugLogInput): string {
   const id = randomUUID()
   const entry: LlmDebugLogEntry = {
     id,
+    ...(input.upstream ? { upstream: { ...input.upstream } } : {}),
     model: inferModel(requestBody),
     request: {
       body: requestBody,

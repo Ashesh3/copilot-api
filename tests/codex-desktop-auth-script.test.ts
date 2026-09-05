@@ -332,7 +332,9 @@ $identity | ConvertTo-Json -Compress
 async function withTemporaryCodexHome(
   callback: (codexHome: string, root: string) => Promise<void>,
 ): Promise<void> {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "codex-auth-script-"))
+  const root = await fs.realpath(
+    await fs.mkdtemp(path.join(os.tmpdir(), "codex-auth-script-")),
+  )
   const codexHome = path.join(root, ".codex")
   try {
     await callback(codexHome, root)

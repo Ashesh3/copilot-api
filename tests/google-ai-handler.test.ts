@@ -898,6 +898,7 @@ test("flushes a pending Chat tool call as the Google EOF terminal", async () => 
               {
                 functionCall: {
                   name: "get_weather",
+                  id: "call_weather",
                   args: { city: "Paris" },
                 },
               },
@@ -1238,6 +1239,143 @@ test("stops after the first valid Chat terminal and ignores trailing malformed d
   expect(body).not.toContain('"error"')
 })
 
+test("Google Responses stream preserves call IDs from output items for next-turn results", async () => {
+  responsesStreamBody = [
+    {
+      type: "response.output_item.added",
+      sequence_number: 1,
+      output_index: 0,
+      item: {
+        type: "function_call",
+        id: "fc_lookup",
+        call_id: "call_lookup",
+        name: "lookup",
+        arguments: "",
+      },
+    },
+    {
+      type: "response.function_call_arguments.done",
+      sequence_number: 2,
+      output_index: 0,
+      item_id: "fc_lookup",
+      arguments: '{"key":"A"}',
+    },
+    {
+      type: "response.completed",
+      sequence_number: 3,
+      response: { ...responsesResult, output: [] },
+    },
+  ]
+    .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+    .join("")
+  const response = await server.request(
+    "/v1beta/models/gpt-4o-mini:streamGenerateContent",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: "lookup" }] }],
+      }),
+    },
+  )
+  const events = (await response.json()) as Array<{
+    candidates: Array<{ content: { parts: Array<unknown> } }>
+  }>
+  expect(events[0].candidates[0].content.parts).toEqual([
+    { functionCall: { id: "call_lookup", name: "lookup", args: { key: "A" } } },
+  ])
+  const next = await server.request(
+    "/v1beta/models/gpt-4o-mini:generateContent",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [
+          { role: "user", parts: [{ text: "lookup" }] },
+          events[0].candidates[0].content,
+          {
+            role: "user",
+            parts: [
+              {
+                functionResponse: {
+                  id: "call_lookup",
+                  name: "lookup",
+                  response: { answer: 1 },
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    },
+  )
+  expect(next.status).toBe(200)
+  expect(lastResponsesPayload?.input).toContainEqual({
+    type: "function_call_output",
+    call_id: "call_lookup",
+    output: '{"answer":1}',
+  })
+})
+
+test.each(["/chat/completions", "/responses", "/v1/messages"])(
+  "Google preserves schemas at the real Copilot %s dispatch",
+  async (endpoint) => {
+    const model = structuredClone(responsesCapableModels.data[0])
+    model.supported_endpoints = [endpoint]
+    state.models = { object: "list", data: [model] }
+    const schema = {
+      $defs: { scalar: { type: "string" } },
+      properties: {
+        nullable: { anyOf: [{ type: "string" }, { type: "null" }] },
+        referenced: { $ref: "#/$defs/scalar" },
+      },
+      required: ["nullable"],
+    }
+    const response = await server.request(
+      "/v1beta/models/gpt-4o-mini:generateContent",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: "Use tool" }] }],
+          tools: [
+            {
+              functionDeclarations: [
+                { name: "lookup", parametersJsonSchema: schema },
+              ],
+            },
+          ],
+          generationConfig: {
+            responseMimeType: "application/json",
+            responseJsonSchema: schema,
+          },
+        }),
+      },
+    )
+    expect(response.status).toBe(200)
+    expect(lastPath).toBe(endpoint)
+    const tools = lastBody?.tools as Array<{
+      function?: { parameters?: unknown }
+      input_schema?: unknown
+      parameters?: unknown
+    }>
+    expect(
+      tools[0].function?.parameters
+        ?? tools[0].parameters
+        ?? tools[0].input_schema,
+    ).toEqual(schema)
+    expect(JSON.stringify(lastBody)).toContain("referenced")
+    if (endpoint !== "/v1/messages")
+      expect(JSON.stringify(lastBody)).toContain(
+        "MUST conform to this JSON schema",
+      )
+    else
+      expect(lastBody?.output_config).toMatchObject({
+        format: { type: "json_schema", schema },
+      })
+  },
+)
+
 test("maps Responses failed to one received Google failure and stops", async () => {
   const receivedMessage = "  received response failure\r\n"
   responsesStreamBody = [
@@ -1518,12 +1656,18 @@ test("preserves a native Messages received failure as one Google terminal", asyn
 })
 
 test.each([
-  { endpoints: ["/chat/completions", "/v1/messages", "/responses"] },
-  { endpoints: ["/chat/completions", "/responses"] },
-  { endpoints: ["/chat/completions", "/v1/messages"] },
+  {
+    endpoints: ["/chat/completions", "/v1/messages", "/responses"],
+    expected: "/responses",
+  },
+  { endpoints: ["/chat/completions", "/responses"], expected: "/responses" },
+  {
+    endpoints: ["/chat/completions", "/v1/messages"],
+    expected: "/v1/messages",
+  },
 ])(
   "keeps viable Google PDF content compatible for $endpoints",
-  async ({ endpoints }) => {
+  async ({ endpoints, expected }) => {
     const model = structuredClone(responsesCapableModels.data[0])
     model.id = "route-model"
     model.name = "Route Model"
@@ -1556,7 +1700,8 @@ test.each([
     )
 
     expect(response.status).toBe(200)
-    expect(lastPath).toBe("/chat/completions")
+    expect(lastPath).toBe(expected)
+    expect(JSON.stringify(lastBody)).toContain("JVBERi0=")
   },
 )
 

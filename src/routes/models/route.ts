@@ -1,4 +1,4 @@
-import { Hono } from "hono"
+import { Hono, type Context } from "hono"
 
 import type { Model } from "~/services/copilot/get-models"
 
@@ -289,16 +289,18 @@ function getOneMillionContextAliasModels(
   })
 }
 
-export async function buildModelDiscoveryListings(): Promise<
-  Array<ModelDiscoveryListing>
-> {
+export async function buildModelDiscoveryListings(
+  options: { includeHidden?: boolean } = {},
+): Promise<Array<ModelDiscoveryListing>> {
   if (!state.models) {
     // This should be handled by startup logic, but as a fallback.
     await cacheModels()
   }
 
   const visibleModels =
-    state.models?.data.filter((model) => isModelVisible(model)) ?? []
+    state.models?.data.filter(
+      (model) => options.includeHidden || isModelVisible(model),
+    ) ?? []
 
   const allModels = state.models?.data ?? []
   const allCopilotModels = allModels.map((model) =>
@@ -350,11 +352,54 @@ export async function buildModelDiscoveryListings(): Promise<
   return [...discoveryModels, ...customModels]
 }
 
+function wantsCopilotCatalog(c: Context): boolean {
+  return Boolean(
+    c.req.header("copilot-integration-id")?.trim()
+      || c.req.header("copilot-harness-id")?.trim(),
+  )
+}
+
+function toGoogleModelListing(
+  model: ModelDiscoveryListing,
+): Record<string, unknown> {
+  const limits = model.capabilities?.limits
+  const isEmbedding =
+    model.kind === "embedding"
+    || model.capabilities?.type === "embeddings"
+    || model.capabilities?.type === "embedding"
+  const endpoints = model.supported_endpoints
+  const canGenerate =
+    !isEmbedding
+    && (!endpoints
+      || endpoints.some((endpoint) =>
+        ["/chat/completions", "/responses", "/v1/messages"].includes(endpoint),
+      ))
+  return {
+    name: `models/${encodeURIComponent(model.id)}`,
+    displayName: model.display_name ?? model.name ?? model.id,
+    ...(model.version ? { version: model.version } : {}),
+    ...(limits?.max_prompt_tokens === undefined ?
+      {}
+    : { inputTokenLimit: limits.max_prompt_tokens }),
+    ...(limits?.max_output_tokens === undefined ?
+      {}
+    : { outputTokenLimit: limits.max_output_tokens }),
+    supportedGenerationMethods:
+      canGenerate ?
+        ["generateContent", "streamGenerateContent", "countTokens"]
+      : [],
+  }
+}
+
 modelRoutes.get("/", async (c) => {
   try {
+    const data = await buildModelDiscoveryListings({
+      includeHidden: wantsCopilotCatalog(c),
+    })
     return c.json({
       object: "list",
-      data: await buildModelDiscoveryListings(),
+      data,
+      models: data.map((model) => toGoogleModelListing(model)),
       has_more: false,
     })
   } catch (error) {
@@ -381,16 +426,21 @@ modelRoutes.post("/:model/policy", async (c) => {
 
 modelRoutes.get("/:model", async (c) => {
   try {
-    const model = (await buildModelDiscoveryListings()).find(
-      (entry) => entry.id === c.req.param("model"),
-    )
+    const model = (
+      await buildModelDiscoveryListings({
+        includeHidden: wantsCopilotCatalog(c),
+      })
+    ).find((entry) => entry.id === c.req.param("model"))
     if (!model) {
       return c.json(
         { error: { message: "Model not found", type: "not_found_error" } },
         404,
       )
     }
-    return c.json(model)
+    const google =
+      c.req.path.startsWith("/v1beta/models/")
+      || Boolean(c.req.header("x-goog-api-client"))
+    return c.json(google ? { ...model, ...toGoogleModelListing(model) } : model)
   } catch (error) {
     return await forwardError(c, error)
   }

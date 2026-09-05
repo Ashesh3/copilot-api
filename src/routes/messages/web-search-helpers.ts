@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- native stream blocks and web search share the same response emitter */
 import * as Sentry from "@sentry/bun"
 import consola from "consola"
 
@@ -534,6 +535,15 @@ const emitContentBlock = async (
     await emitThinkingBlock(stream, block, index)
   } else if (isAnthropicToolUseBlock(block)) {
     await emitToolUseBlock(stream, block, index)
+  } else if (block.type === "redacted_thinking") {
+    await stream.writeSSE({
+      event: "content_block_start",
+      data: JSON.stringify({
+        type: "content_block_start",
+        index,
+        content_block: block,
+      }),
+    })
   } else {
     await emitTextBlock(stream, stringifyUnknownContentBlock(block), index)
   }

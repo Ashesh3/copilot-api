@@ -102,6 +102,7 @@ export interface PrepareMessagesCandidatesOptions {
   readonly source: AnthropicMessagesPayload
   readonly selectedModel: Model | undefined
   readonly effortOverride?: ReasoningEffort
+  readonly preserveNativeBodyEffort?: boolean
   readonly responsesVerbosity?: ModelRedirectVerbosity
   readonly isCompact?: boolean
   readonly signal?: AbortSignal
@@ -279,6 +280,7 @@ function createCandidate<
 function adaptMessagesToChat(options: {
   source: AnthropicMessagesPayload
   effortOverride?: ReasoningEffort
+  applyCopilotSemantics?: boolean
 }): MessagesChatCandidate {
   const source = structuredClone(options.source)
   mergeToolResultForCandidate(source)
@@ -294,8 +296,9 @@ function adaptMessagesToChat(options: {
   if (source.stop_sequences === undefined) delete payload.stop
   if (source.max_tokens === undefined) delete payload.max_tokens
   applyTranslatedToolFindings(source, findings)
-  degradeChatFileParts(payload, findings)
-  const reasoningEnabled = Boolean(options.effortOverride || source.thinking)
+  if (options.applyCopilotSemantics !== false)
+    degradeChatFileParts(payload, findings)
+  const reasoningEnabled = isReasoningEnabled(source, options.effortOverride)
   if (reasoningEnabled) {
     payload.temperature = 1
     if (payload.top_p !== undefined) {
@@ -353,6 +356,14 @@ function addFinding(
     return
   }
   findings.push(finding)
+}
+
+function isReasoningEnabled(
+  source: AnthropicMessagesPayload,
+  effortOverride?: ReasoningEffort,
+): boolean {
+  if (effortOverride !== undefined) return effortOverride !== "none"
+  return source.thinking !== undefined && source.thinking.type !== "disabled"
 }
 
 function applyTranslatedToolFindings(
@@ -440,6 +451,7 @@ function mergeToolResultForCandidate(payload: AnthropicMessagesPayload): void {
   }
 }
 
+// eslint-disable-next-line complexity -- preserve explicit sampling and reasoning controls across dialects
 function adaptMessagesToResponses(options: {
   source: AnthropicMessagesPayload
   effortOverride?: ReasoningEffort
@@ -469,7 +481,7 @@ function adaptMessagesToResponses(options: {
   if (source.stop_sequences !== undefined) {
     findings.push({ class: "sampling", severity: "omitted" })
   }
-  const reasoningEnabled = Boolean(options.effortOverride || source.thinking)
+  const reasoningEnabled = isReasoningEnabled(source, options.effortOverride)
   if (reasoningEnabled) {
     payload.temperature = 1
     if (payload.top_p !== undefined) {
@@ -479,6 +491,15 @@ function adaptMessagesToResponses(options: {
   } else {
     payload.temperature = source.temperature
     payload.top_p = source.top_p
+    if (
+      source.thinking?.type === "disabled"
+      || options.effortOverride === "none"
+    ) {
+      payload.reasoning = { effort: "none" }
+      payload.include = payload.include?.filter(
+        (item) => item !== "reasoning.encrypted_content",
+      )
+    }
   }
   const usesWebSearch = payload.tools?.some(
     (tool) =>
@@ -524,6 +545,7 @@ function getMessagesWebSearchMaxUses(
 export async function prepareMessagesChatCandidate(options: {
   readonly source: AnthropicMessagesPayload
   readonly effortOverride?: ReasoningEffort
+  readonly applyCopilotSemantics?: boolean
   readonly signal?: AbortSignal
 }): Promise<MessagesChatCandidate> {
   const source = structuredClone(options.source)
@@ -535,6 +557,7 @@ export async function prepareMessagesChatCandidate(options: {
   return adaptMessagesToChat({
     source,
     effortOverride: options.effortOverride,
+    applyCopilotSemantics: options.applyCopilotSemantics,
   })
 }
 
@@ -545,6 +568,15 @@ export async function prepareMessagesCandidates(
   const support = getModelEndpointSupport(options.selectedModel)
   const resolveAttachment = createAttachmentResolver()
   const nativePayload = structuredClone(options.source)
+  if (
+    options.effortOverride !== undefined
+    && !options.preserveNativeBodyEffort
+  ) {
+    nativePayload.output_config = {
+      ...nativePayload.output_config,
+      effort: options.effortOverride,
+    }
+  }
   if (support.messages) {
     await normalizeAnthropicImages(
       nativePayload,

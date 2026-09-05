@@ -12,6 +12,7 @@ import type {
   ResponseOutputText,
   ResponsesResult,
   ResponseStreamEvent,
+  ResponseFunctionCallArgumentsDoneEvent,
   ResponseUsage,
 } from "~/services/copilot/create-responses"
 
@@ -112,6 +113,7 @@ export function translateOpenAIToGoogle(
       for (const toolCall of choice.message.tool_calls) {
         parts.push({
           functionCall: {
+            id: toolCall.id,
             name: toolCall.function.name,
             args: parseToolCallArgs(toolCall.function.arguments),
           },
@@ -163,18 +165,22 @@ export interface GoogleStreamState {
   toolCalls: Map<
     number,
     {
+      id?: string
       name: string
       arguments: string
     }
   >
   /** Whether we've emitted any content yet */
   hasContent: boolean
+  /** Responses item IDs are distinct from the IDs clients return with tool results. */
+  responseCallIds: Map<string, { id: string; name: string }>
 }
 
 export function createGoogleStreamState(): GoogleStreamState {
   return {
     toolCalls: new Map(),
     hasContent: false,
+    responseCallIds: new Map(),
   }
 }
 
@@ -196,6 +202,7 @@ function accumulateToolCallDeltas(
   for (const tc of toolCallDeltas) {
     const existing = streamState.toolCalls.get(tc.index)
     if (existing) {
+      if (tc.id) existing.id = tc.id
       if (tc.function?.name) {
         existing.name += tc.function.name
       }
@@ -204,6 +211,7 @@ function accumulateToolCallDeltas(
       }
     } else {
       streamState.toolCalls.set(tc.index, {
+        id: tc.id,
         name: tc.function?.name ?? "",
         arguments: tc.function?.arguments ?? "",
       })
@@ -222,6 +230,7 @@ function emitAccumulatedToolCalls(
     .map(
       ([, tc]): GooglePart => ({
         functionCall: {
+          ...(tc.id ? { id: tc.id } : {}),
           name: tc.name,
           args: parseToolCallArgs(tc.arguments),
         },
@@ -241,6 +250,7 @@ export function flushGoogleStreamStateAtEnd(
     .map(
       ([, toolCall]): GooglePart => ({
         functionCall: {
+          ...(toolCall.id ? { id: toolCall.id } : {}),
           name: toolCall.name,
           args: parseToolCallArgs(toolCall.arguments),
         },
@@ -414,6 +424,7 @@ export function translateResponsesResultToGoogle(
       const funcCall = item
       parts.push({
         functionCall: {
+          id: funcCall.call_id,
           name: funcCall.name,
           args: parseToolCallArgs(funcCall.arguments),
         },
@@ -512,9 +523,16 @@ function createReceivedResponsesFailure(value: unknown): GoogleStreamFailure {
 
 export function translateResponsesStreamEventToGoogle(
   event: ResponseStreamEvent,
-  _streamState: GoogleStreamState,
+  streamState: GoogleStreamState,
   requestedModel?: string,
 ): GoogleResponsesStreamResult {
+  if (
+    event.type === "response.output_item.added"
+    || event.type === "response.output_item.done"
+  ) {
+    rememberResponseCallId(event, streamState)
+    return { kind: "ignore" }
+  }
   switch (event.type) {
     case "response.output_text.delta": {
       return {
@@ -532,28 +550,7 @@ export function translateResponsesStreamEventToGoogle(
     }
 
     case "response.function_call_arguments.done": {
-      return {
-        kind: "partial",
-        chunk: {
-          candidates: [
-            {
-              content: {
-                role: "model",
-                parts: [
-                  {
-                    functionCall: {
-                      name: event.name,
-                      args: parseToolCallArgs(event.arguments),
-                    },
-                  },
-                ],
-              },
-              finishReason: null,
-              index: 0,
-            },
-          ],
-        },
-      }
+      return responseFunctionCallChunk(event, streamState)
     }
 
     case "response.completed":
@@ -611,5 +608,51 @@ export function translateResponsesStreamEventToGoogle(
     default: {
       return { kind: "ignore" }
     }
+  }
+}
+
+function responseFunctionCallChunk(
+  event: ResponseFunctionCallArgumentsDoneEvent,
+  state: GoogleStreamState,
+): GoogleResponsesStreamResult {
+  return {
+    kind: "partial",
+    chunk: {
+      candidates: [
+        {
+          content: {
+            role: "model",
+            parts: [
+              {
+                functionCall: {
+                  id: state.responseCallIds.get(event.item_id)?.id,
+                  name:
+                    state.responseCallIds.get(event.item_id)?.name
+                    ?? event.name,
+                  args: parseToolCallArgs(event.arguments),
+                },
+              },
+            ],
+          },
+          finishReason: null,
+          index: 0,
+        },
+      ],
+    },
+  }
+}
+
+function rememberResponseCallId(
+  event: Extract<
+    ResponseStreamEvent,
+    { type: "response.output_item.added" | "response.output_item.done" }
+  >,
+  state: GoogleStreamState,
+): void {
+  if (event.item.type === "function_call" && event.item.id) {
+    state.responseCallIds.set(event.item.id, {
+      id: event.item.call_id,
+      name: event.item.name,
+    })
   }
 }

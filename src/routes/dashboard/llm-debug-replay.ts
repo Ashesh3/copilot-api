@@ -4,7 +4,9 @@ import type { ChatCompletionsPayload } from "~/services/copilot/create-chat-comp
 import type { ResponsesPayload } from "~/services/copilot/create-responses"
 
 import { routedFetch } from "~/lib/account-router"
-import { getLlmDebugLog } from "~/lib/llm-debug-log"
+import { replayCustomProviderRequest } from "~/lib/custom-providers"
+import { getLlmDebugLog, type LlmDebugLogEntry } from "~/lib/llm-debug-log"
+import { tokenPool } from "~/lib/token-pool"
 import { getResponsesRequestOptions } from "~/routes/responses/utils"
 import {
   detectInitiator,
@@ -232,6 +234,20 @@ function parseReplayResponse(body: string): {
   return { parsed, streamEvents: [], summary }
 }
 
+function replayAccountAvailable(
+  entry: LlmDebugLogEntry,
+  modelId: string,
+): boolean {
+  if (
+    entry.upstream?.kind !== "copilot"
+    || entry.upstream.accountId === undefined
+  )
+    return true
+  return Boolean(
+    tokenPool.getEligibleAccountForModel(modelId, entry.upstream.accountId),
+  )
+}
+
 export async function handleReplayLlmDebugLog(c: Context) {
   const id = c.req.param("id") ?? ""
   const entry = getLlmDebugLog(id)
@@ -253,19 +269,45 @@ export async function handleReplayLlmDebugLog(c: Context) {
   const modelId = extractReplayModel(parsedBody.payload)
   if (!modelId) return c.json({ error: "body.model is required" }, 400)
 
+  if (!replayAccountAvailable(entry, modelId)) {
+    return c.json(
+      {
+        error:
+          "The original Copilot account is unavailable for this replay model.",
+      },
+      409,
+    )
+  }
+
   const startedAtMs = Date.now()
-  const { response } = await routedFetch(
-    path,
-    {
-      body: JSON.stringify(parsedBody.payload),
-      method: "POST",
-      signal: c.req.raw.signal,
-    },
-    {
-      headerOptions: replayHeaderOptions(path, parsedBody.payload),
-      modelId,
-    },
-  )
+  const response =
+    entry.upstream?.kind === "custom" ?
+      await replayCustomProviderRequest({
+        providerId: entry.upstream.providerId,
+        originalUrl: entry.request.url,
+        payload: parsedBody.payload,
+        signal: c.req.raw.signal,
+      })
+    : (
+        await routedFetch(
+          path,
+          {
+            body: JSON.stringify(parsedBody.payload),
+            method: "POST",
+            signal: c.req.raw.signal,
+          },
+          {
+            headerOptions: replayHeaderOptions(path, parsedBody.payload),
+            modelId,
+            ...((
+              entry.upstream?.kind === "copilot"
+              && entry.upstream.accountId !== undefined
+            ) ?
+              { routedAccountPin: { accountId: entry.upstream.accountId } }
+            : {}),
+          },
+        )
+      ).response
   const responseBody = await response.text()
   const durationMs = Date.now() - startedAtMs
   const replayResponse = parseReplayResponse(responseBody)
