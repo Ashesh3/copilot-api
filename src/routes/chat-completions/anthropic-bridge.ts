@@ -190,6 +190,7 @@ async function executeBridgeWebSearch(
             role: "assistant",
             content: choice.message.content,
             reasoning_text: choice.message.reasoning_text,
+            reasoning_opaque: choice.message.reasoning_opaque,
             tool_calls: choice.message.tool_calls?.map((toolCall, index) => ({
               ...toolCall,
               index,

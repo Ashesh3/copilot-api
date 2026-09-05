@@ -521,25 +521,59 @@ function readChatChunks(wire: string): Array<ChatCompletionChunk> {
     .map((line) => JSON.parse(line.slice(6)) as ChatCompletionChunk)
 }
 
-test.each([false, true])(
-  "Chat delivers and exactly replays ordered signed/redacted content (stream=%s)",
-  async (streaming) => {
+test.each([
+  { streaming: false, webSearch: false },
+  { streaming: true, webSearch: false },
+  { streaming: false, webSearch: true },
+  { streaming: true, webSearch: true },
+])(
+  "Chat delivers and exactly replays ordered signed/redacted content (stream=$streaming, web_search=$webSearch)",
+  async ({ streaming, webSearch }) => {
+    const tools = [
+      ...(webSearch ? [{ type: "web_search" }] : []),
+      {
+        type: "function",
+        function: {
+          name: "capture",
+          parameters: {
+            type: "object",
+            properties: { value: { type: "number" } },
+          },
+        },
+      },
+    ]
     resultOverride =
-      streaming ?
+      streaming && !webSearch ?
         sse(signedEvents())
       : Response.json({
           ...nativeResult(signedContent),
           stop_reason: "tool_use",
         })
-    const response = await post("/v1/chat/completions", { stream: streaming })
+    const response = await post("/v1/chat/completions", {
+      stream: streaming,
+      tools,
+    })
     expect(response.status).toBe(200)
+    expect(calls).toHaveLength(1)
+    expect(new URL(calls[0].url).pathname).toBe("/v1/messages")
+    if (webSearch) expect(calls[0].body.stream).toBe(false)
+    const chunks =
+      streaming ? readChatChunks(await response.clone().text()) : []
     const assistant = await readChatAssistant(response, streaming)
     expect(assistant.content).toContain("answer")
     expect(assistant.reasoning_text).toContain("first thought")
     expect(assistant.reasoning_text).toContain("second thought")
+    expect(assistant.tool_calls).toEqual([
+      {
+        id: "call_1",
+        type: "function",
+        function: { name: "capture", arguments: '{"value":1}' },
+      },
+    ])
     expect(
       (
         await post("/v1/chat/completions", {
+          tools,
           messages: [
             { role: "user", content: "hello" },
             assistant,
@@ -556,6 +590,11 @@ test.each([false, true])(
       "messages.2.content.0.type",
       "tool_result",
     )
+    if (streaming) {
+      expect(
+        chunks.filter((chunk) => chunk.choices[0]?.delta.reasoning_opaque),
+      ).toHaveLength(1)
+    }
   },
 )
 
