@@ -60,7 +60,7 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
       - name: Generate SPDX SBOM
-        uses: anchore/sbom-action@26ca99d710488389d655c50441b85fbf22179c0b # v0
+        uses: anchore/sbom-action@4b8c29d790e45fe4e30d1b3ecf75f20d802e5dee # v0
         with:
           image: ${{ env.REGISTRY }}/${{ github.repository }}@${{ steps.build.outputs.digest }}
           artifact-name: copilot-api.spdx.json
