@@ -246,7 +246,9 @@ async function assertRetained(
         sql: "SELECT value FROM capi_metadata WHERE key='history_collection_lifetime'",
         args: [],
       })
-      expect(JSON.parse(String(row.value))).toMatchObject({ knownLostRecords: 2 })
+      expect(JSON.parse(String(row.value))).toMatchObject({
+        knownLostRecords: 2,
+      })
     }
     expect(
       await session.query({

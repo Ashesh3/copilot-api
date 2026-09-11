@@ -33,7 +33,7 @@ useProtocolDatabase()
 
 const gateway = "admission-fixture-gateway"
 const managed = "admission-fixture-managed.jwt"
-const oauth = "cc_at_admission-fixture-oauth"
+const fixtureAccessToken = "cc_at_admission-fixture-access-token"
 const clientIp = "198.51.100.20"
 const originalState = { ...state }
 const originalFetch = globalThis.fetch
@@ -137,7 +137,7 @@ beforeEach(async () => {
     },
     {
       sql: "INSERT INTO capi_oauth_access(digest,family_id,principal_id,client_id,scopes_json,created_at,expires_at) VALUES(?,'admission-family','admission:oauth','fixture-client','[\"user:inference\",\"user:profile\"]',0,1)",
-      args: [hashOAuthSecret(oauth)],
+      args: [hashOAuthSecret(fixtureAccessToken)],
     },
     {
       sql: "INSERT INTO capi_ip_allowlist(ip,enabled,source,created_at,updated_at,last_seen_at) VALUES(?,1,'authenticated',0,0,1)",
@@ -211,7 +211,7 @@ async function upgradedSocket(credential: string) {
 test.each([
   { kind: "gateway", key: gateway, queryCount: 3, readCount: 3 },
   { kind: "managed", key: managed, queryCount: 2, readCount: 2 },
-  { kind: "OAuth", key: oauth, queryCount: 5, readCount: 4 },
+  { kind: "OAuth", key: fixtureAccessToken, queryCount: 5, readCount: 4 },
 ])(
   "$kind classification performs each credential lookup once",
   async ({ key, queryCount, readCount }) => {
@@ -225,7 +225,7 @@ test.each([
 test.each([
   { kind: "gateway", key: gateway, queryCount: 5, readCount: 5 },
   { kind: "managed", key: managed, queryCount: 4, readCount: 4 },
-  { kind: "OAuth", key: oauth, queryCount: 7, readCount: 6 },
+  { kind: "OAuth", key: fixtureAccessToken, queryCount: 7, readCount: 6 },
 ])(
   "HTTP $kind admission performs one revision, credential and IP check",
   async ({ key, queryCount, readCount }) => {
@@ -250,7 +250,7 @@ test.each([
 test.each([
   { kind: "gateway", key: gateway, queryCount: 4, readCount: 4 },
   { kind: "managed", key: managed, queryCount: 3, readCount: 3 },
-  { kind: "OAuth", key: oauth, queryCount: 6, readCount: 5 },
+  { kind: "OAuth", key: fixtureAccessToken, queryCount: 6, readCount: 5 },
 ])(
   "WebSocket $kind turn completes with one fresh admission",
   async ({ key, queryCount, readCount }) => {
@@ -275,8 +275,8 @@ test.each([
 )
 
 test("OAuth revocation without a revision change rejects the next HTTP request and existing socket turn", async () => {
-  const ws = await upgradedSocket(oauth)
-  const repeatedRequest = request(oauth)
+  const ws = await upgradedSocket(fixtureAccessToken)
+  const repeatedRequest = request(fixtureAccessToken)
   expect((await server.fetch(repeatedRequest)).status).toBe(200)
   const frame = JSON.stringify({
     type: "response.create",
@@ -289,7 +289,7 @@ test("OAuth revocation without a revision change rejects the next HTTP request a
   )
   const storage = getStorageRuntime().storage
   const revision = await getStoreRevision(storage)
-  await new OAuthStore({ storage }).revokeToken(oauth)
+  await new OAuthStore({ storage }).revokeToken(fixtureAccessToken)
   expect(await getStoreRevision(storage)).toBe(revision)
   expect((await server.fetch(repeatedRequest)).status).toBe(401)
   ws.frames.length = 0
