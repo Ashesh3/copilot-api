@@ -50,12 +50,12 @@ test("file database persists and has exactly SQLite-managed sidecars", async () 
   ).toEqual([{ id: 7 }])
 })
 
-test("connection verifies FK FULL and bounded busy timeout", async () => {
+test("connection preserves FK and FULL durability without native busy waiting", async () => {
   const { storage } = fixture()
   for (const [name, value] of [
     ["foreign_keys", 1],
     ["synchronous", 2],
-    ["busy_timeout", 5000],
+    ["busy_timeout", 0],
   ] as const) {
     const rows = await storage.read((s) => s.query(sql(`PRAGMA ${name}`)))
     expect(Object.values(rows[0])[0]).toBe(value)

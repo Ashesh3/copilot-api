@@ -165,7 +165,7 @@ test("routing usage returns current in-memory model and call totals", async () =
   })
 })
 
-test("Usage screen keeps existing cards and adds live routing observability", () => {
+test("Usage screen keeps recent and lifetime totals with routing observability", () => {
   const usageSource = fs.readFileSync(
     path.join(import.meta.dir, "..", "ui", "src", "screens", "Usage.tsx"),
     "utf8",
@@ -208,7 +208,10 @@ test("Usage screen keeps existing cards and adds live routing observability", ()
   expect(usageSource).toContain("Upstream calls")
   expect(usageSource).toContain("Retries")
   expect(usageSource).toContain("Failovers")
-  expect(usageSource).toContain("Process lifetime")
+  expect(usageSource).toContain("Lifetime:")
+  expect(usageSource).toContain("detailed history retained for 24 hours")
+  expect(usageSource).not.toContain("Process lifetime")
+  expect(usageSource).not.toContain("Live in-memory activity")
   expect(usageSource).toContain('header: "Share"')
   expect(usageSource).toContain("selections")
   expect(usageSource).toContain("call share")

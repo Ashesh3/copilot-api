@@ -113,7 +113,7 @@ test("a real read-only CLI command creates no history run and leaves a live gate
   }
 })
 
-test("idle maintenance renews the run and prunes routing minutes and receipts while retaining usage and lifetime counters", async () => {
+test("idle maintenance renews the run and prunes detail and receipts while retaining numeric usage totals", async () => {
   const fixture = await createRuntimeStorage()
   try {
     await initializeStorageRuntime(fixture)
@@ -138,7 +138,13 @@ test("idle maintenance renews the run and prunes routing minutes and receipts wh
     await history.writer.flush()
     now += 86400_000 + 60_000
     await Bun.sleep(1100)
-    expect((await history.repository.readUsage(0)).buckets).toHaveLength(1)
+    expect((await history.repository.readUsage(0)).buckets).toHaveLength(0)
+    expect(
+      await history.repository.readUsageTotals(now - 86400_000),
+    ).toMatchObject({
+      window: { requests: 0 },
+      lifetime: { requestCount: 1 },
+    })
     expect((await history.repository.readRouting(0)).buckets).toHaveLength(0)
     expect((await history.repository.readRouting(0)).lifetime).toEqual({
       requests: 1,

@@ -178,6 +178,7 @@ async function legacyBackup(
 async function assertRetained(
   storage: Storage,
   version: number,
+  compacted = false,
 ): Promise<void> {
   await storage.read(async (session) => {
     expect(
@@ -221,13 +222,13 @@ async function assertRetained(
         sql: "SELECT request_count FROM capi_usage_minutes",
         args: [],
       }),
-    ).toEqual([{ request_count: 2 }])
+    ).toEqual([])
     expect(
       await session.query({
         sql: "SELECT payload_json FROM capi_routing_minutes",
         args: [],
       }),
-    ).toEqual([{ payload_json: '{"requests":2}' }])
+    ).toEqual([])
     expect(
       await session.query({
         sql: "SELECT value_json FROM capi_settings",
@@ -239,7 +240,14 @@ async function assertRetained(
         sql: "SELECT id,lost_records FROM capi_collection_gaps",
         args: [],
       }),
-    ).toEqual([{ id: "keep-gap", lost_records: 2 }])
+    ).toEqual(compacted ? [] : [{ id: "keep-gap", lost_records: 2 }])
+    if (compacted) {
+      const [row] = await session.query({
+        sql: "SELECT value FROM capi_metadata WHERE key='history_collection_lifetime'",
+        args: [],
+      })
+      expect(JSON.parse(String(row.value))).toMatchObject({ knownLostRecords: 2 })
+    }
     expect(
       await session.query({
         sql: "SELECT name FROM sqlite_master WHERE name LIKE 'capi_debug%'",
@@ -290,7 +298,7 @@ test.each([2, 3, 4])(
             .phase,
         ).toBe("complete")
         await migrateStorage(target)
-        await assertRetained(target, version)
+        await assertRetained(target, version, true)
       })
     } finally {
       await fixture.close()

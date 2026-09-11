@@ -204,18 +204,36 @@ export interface ModelRouting {
 }
 
 export interface UsageSection {
-  utilization?: number
   tokens_used?: number
   request_count?: number
-  resets_at?: number
   total_tokens?: number
-  total_input_tokens?: number
-  total_output_tokens?: number
+  total_input_tokens: number
+  total_output_tokens: number
   total_requests?: number
   first_request_at?: number | null
 }
 
-export type UsageData = Record<string, UsageSection>
+export interface UsageData {
+  twenty_four_hour: UsageSection & {
+    tokens_used: number
+    request_count: number
+  }
+  lifetime: UsageSection & {
+    total_tokens: number
+    total_requests: number
+    first_request_at: number | null
+  }
+  collection?: {
+    pendingRecords: number
+    pendingBytes: number
+    droppedRecords: number
+    lastSuccessfulFlush: number | null
+    degraded: boolean
+    knownLostRecords: number
+    knownLostBytes: number
+    unknownGaps: number
+  }
+}
 
 export type RoutingWindow = "15m" | "1h" | "6h" | "24h"
 export type RoutingBalanceStatus =

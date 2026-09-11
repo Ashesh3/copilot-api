@@ -16,7 +16,7 @@ export async function admitWebSocketTurn(
   try {
     const runtime = getStorageRuntime()
     await runtime.snapshot.refreshIfChanged()
-    await getAccountsService().refreshRuntime()
+    await getAccountsService().refreshRuntime(runtime.snapshot.get().revision)
     if (!(await resolveRequestCredential(request, requiredScopes))) {
       return { status: "unauthorized" }
     }

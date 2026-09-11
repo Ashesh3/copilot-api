@@ -4,10 +4,12 @@ import * as Sentry from "@sentry/bun"
 import consola from "consola"
 
 import {
+  extractRequestCredential,
   hasSuppliedRequestCredential,
   resolveGatewayCredential,
   resolveRequestCredential,
 } from "./credential-resolver"
+import { withVerifiedInferenceAdmission } from "./inference-admission"
 import {
   extractClientIp,
   isIpAllowedForWhitelistedRoute,
@@ -54,12 +56,17 @@ async function guardOrdinaryRequest(
   const credentialSupplied = hasSuppliedRequestCredential(c.req.raw)
 
   if (credentialSupplied) {
+    const rawCredential = extractRequestCredential(c.req.raw)
     const credential = await resolveRequestCredential(c.req.raw, [
       "user:inference",
     ])
     if (credential) {
       if (clientIp !== null) await trustAuthenticatedIp(clientIp)
-      await next()
+      await withVerifiedInferenceAdmission(
+        c,
+        { rawCredential, clientIp, credential },
+        next,
+      )
       return
     }
 

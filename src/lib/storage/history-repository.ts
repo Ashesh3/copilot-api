@@ -11,7 +11,9 @@ import type {
   PendingHistoryRecord,
 } from "~/lib/telemetry-writer"
 
+import { decodeArchivedCollectionStatus } from "~/lib/storage/history-bookkeeping"
 import { reconcileRuns, renewRun } from "~/lib/storage/history-lifecycle"
+import { pruneHistoryCounters } from "~/lib/storage/history-retention"
 
 export function isHistoryRecordKind(
   value: unknown,
@@ -32,6 +34,10 @@ export interface UsageHistory {
     requestCount: number
     firstRequestAt: number | null
   }
+}
+export interface UsageTotals {
+  window: { inputTokens: number; outputTokens: number; requests: number }
+  lifetime: UsageHistory["lifetime"]
 }
 export interface CollectionStatus {
   knownLostRecords: number
@@ -59,6 +65,10 @@ export interface HistoryRepository {
     cutoff: number,
     pending?: ReadonlyArray<PendingHistoryRecord>,
   ): Promise<UsageHistory>
+  readUsageTotals(
+    cutoff: number,
+    pending?: ReadonlyArray<PendingHistoryRecord>,
+  ): Promise<UsageTotals>
   readRouting(
     cutoff: number,
     pending?: ReadonlyArray<PendingHistoryRecord>,
@@ -141,6 +151,30 @@ function addUsage(data: UsageHistory, record: HistoryRecord, cutoff: number) {
       requestCount,
       ...(typeof p.model === "string" && p.model ? { model: p.model } : {}),
     })
+}
+
+function usageLifetime(row: Record<string, unknown>): UsageHistory["lifetime"] {
+  return {
+    inputTokens: number(row.input_tokens),
+    outputTokens: number(row.output_tokens),
+    requestCount: number(row.request_count),
+    firstRequestAt:
+      row.first_request_at === null ? null : number(row.first_request_at),
+  }
+}
+
+function addUsageTotals(
+  totals: UsageTotals,
+  record: HistoryRecord,
+  cutoff: number,
+) {
+  const data: UsageHistory = { buckets: [], lifetime: totals.lifetime }
+  addUsage(data, record, cutoff)
+  for (const bucket of data.buckets) {
+    totals.window.inputTokens += bucket.inputTokens
+    totals.window.outputTokens += bucket.outputTokens
+    totals.window.requests += bucket.requestCount
+  }
 }
 async function applyUsageBatch(
   session: SqlSession,
@@ -244,18 +278,6 @@ async function applyRoutingBatch(
     args: [String(selected[0].recordedAt)],
   })
 }
-async function pruneCounters(session: SqlSession, now: number): Promise<void> {
-  await session.execute({
-    sql: "DELETE FROM capi_routing_minutes WHERE minute < ?",
-    args: [minute(now - 86400_000)],
-  })
-  // One day exceeds five-minute queue age and the adapters' 30-second deadline.
-  await session.execute({
-    sql: "DELETE FROM capi_applied_operations WHERE kind = 'history_batch' AND created_at < ?",
-    args: [now - 86400_000],
-  })
-}
-
 async function readCollectionStatus(
   session: SqlSession,
   options: CollectionStatusOptions & {
@@ -273,7 +295,7 @@ async function readCollectionStatus(
     args.push(options.until)
   }
   const rows = await session.query({
-    sql: `SELECT COALESCE(SUM(lost_records), 0) AS records, COALESCE(SUM(lost_bytes), 0) AS bytes, COALESCE(SUM(CASE WHEN kind = 'unknown' THEN 1 ELSE 0 END), 0) AS unknown_count FROM capi_collection_gaps${clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : ""}`,
+    sql: `SELECT COALESCE(SUM(lost_records), 0) AS records, COALESCE(SUM(lost_bytes), 0) AS bytes, COALESCE(SUM(CASE WHEN kind = 'unknown' THEN 1 ELSE 0 END), 0) AS unknown_count, (SELECT value FROM capi_metadata WHERE key='history_collection_lifetime') AS archived FROM capi_collection_gaps${clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : ""}`,
     args,
   })
   const status = {
@@ -281,6 +303,7 @@ async function readCollectionStatus(
     knownLostBytes: number(rows[0]?.bytes),
     unknownGaps: number(rows[0]?.unknown_count),
   }
+  addArchivedCollection(status, rows[0]?.archived, options)
   for (const record of await uncommitted(session, options.pending)) {
     if (record.kind !== "collection-gap") continue
     const payload = historyObject(record.payload)
@@ -297,6 +320,18 @@ async function readCollectionStatus(
     }
   }
   return status
+}
+
+function addArchivedCollection(
+  status: CollectionStatus,
+  value: unknown,
+  options: CollectionStatusOptions,
+): void {
+  if (options.since !== undefined || options.until !== undefined) return
+  const archived = decodeArchivedCollectionStatus(value)
+  status.knownLostRecords += archived.knownLostRecords
+  status.knownLostBytes += archived.knownLostBytes
+  status.unknownGaps += archived.unknownGaps
 }
 // eslint-disable-next-line max-lines-per-function -- Repository methods share a backend and process-run identity.
 export function createHistoryRepository(
@@ -350,11 +385,10 @@ export function createHistoryRepository(
             sql: "UPDATE capi_process_runs SET last_flush_at = ? WHERE id = ?",
             args: [now, options.runId],
           })
-        await pruneCounters(session, now)
       })
     },
     async prune(now) {
-      await storage.transaction((session) => pruneCounters(session, now))
+      await storage.transaction((session) => pruneHistoryCounters(session, now))
     },
     async startRun(id, now) {
       await storage.transaction(async (s) => {
@@ -364,13 +398,14 @@ export function createHistoryRepository(
           args: [id, now],
         })
         await renewRun(s, id, now)
+        await pruneHistoryCounters(s, now)
       })
     },
     async heartbeatRun(id, now) {
       await storage.transaction(async (s) => {
         await reconcileRuns(s, id, now)
         await renewRun(s, id, now)
-        await pruneCounters(s, now)
+        await pruneHistoryCounters(s, now)
       })
     },
     async endRun(id, now) {
@@ -408,19 +443,34 @@ export function createHistoryRepository(
               { model: row.model }
             : {}),
           })),
-          lifetime: {
-            inputTokens: number(totals.input_tokens),
-            outputTokens: number(totals.output_tokens),
-            requestCount: number(totals.request_count),
-            firstRequestAt:
-              totals.first_request_at === null ?
-                null
-              : number(totals.first_request_at),
-          },
+          lifetime: usageLifetime(totals),
         }
         for (const record of await uncommitted(s, pending))
           if (record.kind === "usage") addUsage(data, record, cutoff)
         return data
+      })
+    },
+    readUsageTotals(cutoff, pending = []) {
+      return storage.read(async (session) => {
+        const [lifetime] = await session.query({
+          sql: "SELECT * FROM capi_usage_lifetime WHERE id = 1",
+          args: [],
+        })
+        const [windows] = await session.query({
+          sql: "SELECT TOTAL(input_tokens) AS input_tokens, TOTAL(output_tokens) AS output_tokens, TOTAL(request_count) AS requests FROM capi_usage_minutes WHERE minute >= ?",
+          args: [cutoff],
+        })
+        const totals: UsageTotals = {
+          window: {
+            inputTokens: number(windows.input_tokens),
+            outputTokens: number(windows.output_tokens),
+            requests: number(windows.requests),
+          },
+          lifetime: usageLifetime(lifetime),
+        }
+        for (const record of await uncommitted(session, pending))
+          if (record.kind === "usage") addUsageTotals(totals, record, cutoff)
+        return totals
       })
     },
     async readRouting(cutoff, pending = []) {

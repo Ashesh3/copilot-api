@@ -14,6 +14,10 @@ import {
   accountIntegrationTables,
 } from "~/lib/storage/migrations/004-account-integration"
 import { removeActivityMigration } from "~/lib/storage/migrations/005-remove-activity"
+import {
+  historyRetentionIndexes,
+  historyRetentionMigration,
+} from "~/lib/storage/migrations/006-history-retention"
 
 export const storageMigrations = [
   initialMigration,
@@ -21,30 +25,36 @@ export const storageMigrations = [
   memoryOnlyDebugMigration,
   accountIntegrationMigration,
   removeActivityMigration,
+  historyRetentionMigration,
 ] as const
 
-export const currentSchemaVersion = removeActivityMigration.version
+export const currentSchemaVersion = historyRetentionMigration.version
 const versionTwoTables = { ...initialTables, ...gatewaySecretTables }
 const versionThreeTables = Object.fromEntries(
   Object.entries(versionTwoTables).filter(([name]) => name !== "capi_debug"),
 )
 export const schemaThreeTables = versionThreeTables
 const versionFourTables = { ...versionThreeTables, ...accountIntegrationTables }
-export const currentTables = Object.fromEntries(
+const versionFiveTables = Object.fromEntries(
   Object.entries(versionFourTables).filter(
     ([name]) => name !== "capi_activity",
   ),
 )
+export const currentTables = versionFiveTables
 const versionThreeIndexes = Object.fromEntries(
   Object.entries(initialIndexes).filter(
     ([, target]) => !target.startsWith("capi_debug("),
   ),
 )
-export const currentIndexes = Object.fromEntries(
+const versionFiveIndexes = Object.fromEntries(
   Object.entries(versionThreeIndexes).filter(
     ([, target]) => !target.startsWith("capi_activity("),
   ),
 )
+export const currentIndexes = {
+  ...versionFiveIndexes,
+  ...historyRetentionIndexes,
+}
 export const currentCounterKeys = ["config_revision"] as const
 
 /** Preflight validates the applied schema before any destructive migration. */
@@ -68,6 +78,13 @@ export function storageSchema(version: number) {
         tables: version === 3 ? versionThreeTables : versionFourTables,
         indexes: versionThreeIndexes,
         counterKeys: [...currentCounterKeys, "history_activity_generation"],
+      }
+    }
+    case 5: {
+      return {
+        tables: versionFiveTables,
+        indexes: versionFiveIndexes,
+        counterKeys: currentCounterKeys,
       }
     }
     case currentSchemaVersion: {

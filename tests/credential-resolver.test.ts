@@ -184,6 +184,7 @@ test("digest literals cannot authenticate even when they collide with gateway ra
     })
   })
   expect(await resolveCredential(literal)).toBeNull()
+  expect(await resolveCredential(`  ${literal}  `)).toBeNull()
   expect(await resolveGatewayCredential(literal)).toBeNull()
   expect(await resolveCredential(credentialDigest("gateway-secret"))).toBeNull()
 })

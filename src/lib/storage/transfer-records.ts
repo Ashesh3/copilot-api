@@ -8,6 +8,7 @@ import type {
 } from "~/lib/storage/types"
 
 import { StorageSchemaError } from "~/lib/storage/errors"
+import { decodeArchivedCollectionStatus } from "~/lib/storage/history-bookkeeping"
 import {
   currentSchemaVersion,
   currentTables,
@@ -58,6 +59,7 @@ const metadataKeys = [
   ...REQUIRED_TRANSFER_METADATA_KEYS,
   "history_routing_lifetime",
   "history_routing_started_at",
+  "history_collection_lifetime",
 ]
 
 function definition(
@@ -182,6 +184,11 @@ export function validateTransferRecord(
         && !legacyMetadataKey(value.key, version)))
   )
     throw new StorageSchemaError("Invalid transferred metadata")
+  if (
+    record.table === "capi_metadata"
+    && value.key === "history_collection_lifetime"
+  )
+    decodeArchivedCollectionStatus(value.value)
   return value as Record<string, SqlValue>
 }
 

@@ -105,9 +105,10 @@ affected, include its exact version or digest.
   `401` responses. Public routes, session/CSRF semantic failures, compatibility
   stubs, and denials of a credential that already resolves to a known principal
   do not record credential failures; an active ban still blocks all of them.
-- User regular expressions run through RE2-compatible matching. Usage details
-  retain complete minute/model aggregates while lifetime totals remain
-  cumulative.
+- User regular expressions run through RE2-compatible matching. Usage retains
+  a rolling 24-hour window of minute/model aggregates with separate cumulative
+  lifetime numbers; no request bodies or seven-day rollup are stored. Cleanup
+  runs at startup and periodically, rather than imposing a database byte cap.
 
 ## 2026 public-exposure remediation
 
@@ -125,7 +126,7 @@ affected, include its exact version or digest.
 | F-12 | Resolved | Global wildcard CORS was removed. Optional CORS is restricted to configured exact origins and inference-only paths. |
 | F-13 | Resolved | Dashboard login uses server-side Secure/HttpOnly sessions instead of browser bearer storage. Nonce CSP and browser-hardening headers protect application responses; the public Nginx template applies baseline headers to edge denials. |
 | F-15 | Partially addressed; host/container scope remains operator-owned | The tracked Compose bind is loopback-only, build context excludes common secret material, and application data files use restrictive modes. Rootless/read-only filesystem, capability drops, and host resource policy are not claimed by this application audit. |
-| F-17 | Resolved in application/deployment assets | Usage details retain complete minute/model aggregates with separate lifetime totals and coalesced atomic writes. An optional Nginx logrotate policy is supplied for operator-managed logs. |
+| F-17 | Resolved in application/deployment assets | Usage/routing minute detail has rolling 24-hour retention, separate numeric lifetime totals, and coalesced atomic writes. Retired collection details become lifetime counters. Active authority and durable reconciliation records are preserved; this is not a fixed database-size guarantee. An optional Nginx logrotate policy is supplied for operator-managed logs. |
 | F-18 | Resolved | Replacements use RE2-compatible matching; unsafe object names are rejected; the legacy inline-handler feature page was removed. |
 | F-20 | Resolved for current repository settings/workflows | Runtime audit, CodeQL, dependency review, image scanning, SBOM, SHA-pinned actions, secret scanning/push protection, and read-only workflow defaults are enabled. Dependabot update PRs are disabled. Branch review count is zero for the sole maintainer; CI/CodeQL still run on pull requests. |
 
