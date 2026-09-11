@@ -20,7 +20,7 @@ export const storageAdmission: MiddlewareHandler = async (context, next) => {
   }
   try {
     await runtime.snapshot.refreshIfChanged()
-    await getAccountsService().refreshRuntime()
+    await getAccountsService().refreshRuntime(runtime.snapshot.get().revision)
     const result = await withRequestSnapshot(runtime.snapshot.get(), () =>
       withAccountLeases(context.req.raw.signal, async () => {
         await next()

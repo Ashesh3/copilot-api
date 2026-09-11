@@ -65,12 +65,12 @@ test("usage receipt and all deltas commit atomically and replay exactly once", a
   expect(revision[0]?.value).toBe("0")
 })
 
-test("pruning retains old usage minutes and lifetime totals", async () => {
+test("pruning removes expired usage detail and retains lifetime totals", async () => {
   const { repository } = await fixture()
   const now = Date.now()
   await repository.applyBatch("old", [usage(now - 90 * 86400_000)])
   await repository.prune(now)
-  expect((await repository.readUsage(0)).buckets).toHaveLength(1)
+  expect((await repository.readUsage(0)).buckets).toHaveLength(0)
   expect((await repository.readUsage(now)).lifetime.requestCount).toBe(1)
 })
 
@@ -133,7 +133,7 @@ test("idle runtimes renew their lease and closing one preserves the other run an
   expect((await restarted.repository.collectionStatus()).unknownGaps).toBe(0)
 })
 
-test("collection loss stays durable across pruning and its time window matches pending records", async () => {
+test("collection loss totals survive pruning while expired interval detail is removed", async () => {
   const { repository } = await fixture()
   const now = Date.now()
   const losses: Array<HistoryRecord> = [
@@ -180,9 +180,9 @@ test("collection loss stays durable across pruning and its time window matches p
     unknownGaps: 1,
   })
   expect(await repository.collectionStatus(window)).toEqual({
-    knownLostRecords: 3,
-    knownLostBytes: 200,
-    unknownGaps: 1,
+    knownLostRecords: 0,
+    knownLostBytes: 0,
+    unknownGaps: 0,
   })
 })
 
@@ -217,11 +217,7 @@ test("legacy unknown loss is repaired only with clean-run evidence and genuine l
         args: [],
       }),
     ),
-  ).toEqual([
-    { id: "real-clean-loss" },
-    { id: "unclean-old-legacy" },
-    { id: "unclean-recent-legacy" },
-  ])
+  ).toEqual([{ id: "real-clean-loss" }, { id: "unclean-recent-legacy" }])
 })
 
 test("routing aggregation preserves prototype-like route keys as data", async () => {

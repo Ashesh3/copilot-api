@@ -7,9 +7,12 @@ import { createCredentialsRepository } from "~/lib/storage/credentials-repositor
 import { getStorageRuntime } from "~/lib/storage/runtime"
 
 import {
+  credentialHasScopes,
   extractRequestCredential,
   resolveRequestCredential,
 } from "./credential-resolver"
+import { getVerifiedInferenceAdmission } from "./inference-admission"
+import { extractClientIp, isIpBlocked } from "./ip-blocker"
 import { resolveProtectedCredential } from "./protected-credential"
 
 interface AuthMiddlewareOptions {
@@ -77,6 +80,16 @@ export function createAuthMiddleware(
 
     if (allowUnauthenticatedPaths.includes(c.req.path)) {
       return next()
+    }
+
+    if (!options.getApiKeys) {
+      const admitted = getVerifiedInferenceAdmission(c)
+      if (admitted && credentialHasScopes(admitted, ["user:inference"])) {
+        const clientIp = extractClientIp(c)
+        return clientIp !== null && isIpBlocked(clientIp) ?
+            createUnauthorizedResponse(c)
+          : next()
+      }
     }
 
     const apiKeys = options.getApiKeys?.() ?? []

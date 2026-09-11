@@ -555,9 +555,9 @@ integration overrides (`004`), and removes Activity and its stored history (`005
 The database upgrade discards the obsolete debug and Activity tables. LLM Debug, usage totals,
 account settings, and the other dashboard pages remain available.
 
-`GET /usage` returns current Copilot quota data. Dashboard utilization instead
-uses committed minute/model usage buckets and lifetime counters; committed old
-usage is retained. Diagnostic and routing detail has bounded retention. Pending
+`GET /usage` returns current Copilot quota data. Dashboard usage instead
+shows Last 24 hours and Lifetime token/request totals. Usage/model and routing
+detail older than 24 hours is deleted; lifetime numbers remain. Pending
 usage/routing telemetry is bounded to 2,000 records, 16 MiB, and five minutes.
 LLM Debug has its own process-local count and memory budget; pressure evicts
 whole captures instead of rewriting captured bodies. Collection-gap indicators

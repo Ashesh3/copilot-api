@@ -1,5 +1,10 @@
 # Usage Routing Observability
 
+> Historical design: the storage and usage-card contract below was superseded
+> by the [2026-09-11 retention design](2026-09-11-performance-storage-admission-design.md).
+> Current usage exposes only Last 24 hours and Lifetime, with 24-hour persisted
+> routing detail and numeric lifetime counters.
+
 ## Goal
 
 Redesign the Usage page into a live routing-observability surface while keeping

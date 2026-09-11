@@ -103,7 +103,7 @@ test.each([1, 2] as const)(
     expect(state.retired).toEqual([])
     expect(state.metadata).toEqual([
       { key: "config_revision", value: "7" },
-      { key: "schema_version", value: "5" },
+      { key: "schema_version", value: "6" },
       { key: "store_id", value: storeId },
     ])
     expect(state.activity).toEqual([])

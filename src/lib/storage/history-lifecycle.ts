@@ -2,10 +2,8 @@ import type { SqlSession } from "~/lib/storage/types"
 
 export const HISTORY_RUN_LEASE_MS = 300_000
 
-export async function reconcileRuns(
+export async function reconcileLegacyCleanRuns(
   session: SqlSession,
-  id: string,
-  now: number,
 ): Promise<void> {
   // Older versions inferred loss from every open run. A confirmed clean close
   // disproves that legacy inference, but does not erase real recorded losses.
@@ -13,6 +11,14 @@ export async function reconcileRuns(
     sql: "DELETE FROM capi_collection_gaps WHERE id = 'unclean-' || process_run_id AND kind = 'unknown' AND json_extract(payload_json, '$.reason') IS NULL AND process_run_id IN (SELECT id FROM capi_process_runs WHERE clean = 1)",
     args: [],
   })
+}
+
+export async function reconcileRuns(
+  session: SqlSession,
+  id: string,
+  now: number,
+): Promise<void> {
+  await reconcileLegacyCleanRuns(session)
   await session.execute({
     sql: "INSERT INTO capi_collection_gaps (id, process_run_id, started_at, ended_at, kind, payload_json) SELECT 'unclean-' || id, id, COALESCE(last_flush_at, started_at), COALESCE(json_extract(payload_json, '$.heartbeatAt'), last_flush_at, started_at) + ?, 'unknown', json_object('reason', 'expired-run-lease') FROM capi_process_runs WHERE clean = 0 AND ended_at IS NULL AND id <> ? AND COALESCE(json_extract(payload_json, '$.heartbeatAt'), last_flush_at, started_at) < ? ON CONFLICT(id) DO NOTHING",
     args: [HISTORY_RUN_LEASE_MS, id, now - HISTORY_RUN_LEASE_MS],

@@ -470,14 +470,22 @@ export class AccountsService {
   }
 
   /** Read durable revision and metadata only; upstream work runs in the background. */
-  async refreshRuntime(): Promise<void> {
-    const observedRevision = await getStoreRevision(this.repository.storage)
-    do {
-      this.refreshing ??= this.loadRuntime().finally(() => {
+  async refreshRuntime(observedRevision?: number): Promise<void> {
+    const beforeRead = this.revision
+    const revision =
+      observedRevision ?? (await getStoreRevision(this.repository.storage))
+    if (
+      !Number.isSafeInteger(revision)
+      || revision < 0
+      || (observedRevision === undefined && revision < beforeRead)
+    )
+      throw new StorageSchemaError("Account revision moved backwards")
+    while (this.revision < revision) {
+      this.refreshing ??= this.loadRuntime(revision).finally(() => {
         this.refreshing = undefined
       })
       await this.refreshing
-    } while (this.revision < observedRevision)
+    }
   }
 
   async whenIdle(): Promise<void> {
@@ -573,10 +581,12 @@ export class AccountsService {
     )
   }
 
-  private async loadRuntime(): Promise<void> {
-    if ((await getStoreRevision(this.repository.storage)) === this.revision)
-      return
+  private async loadRuntime(observedRevision: number): Promise<void> {
     const snapshot = await this.repository.snapshot()
+    if (snapshot.revision < observedRevision)
+      throw new StorageSchemaError(
+        "Account snapshot is behind its metadata revision",
+      )
     const runtime = peekStorageRuntime()
     if (runtime?.storage === this.repository.storage)
       await runtime.snapshot.refreshIfChanged()

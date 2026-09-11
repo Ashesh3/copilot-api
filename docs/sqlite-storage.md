@@ -253,8 +253,9 @@ bun src/main.ts storage import-legacy --from /absolute/legacy-data \
 Source drift, invalid input, duplicate/conflicting identities, occupied targets,
 and revision changes reject the transfer. Supported account, configuration,
 policy, OAuth, administrator, and usage inputs preserve stable account IDs and
-committed minute/model usage. Administrator sessions are invalidated. Source
-files are never rewritten or removed.
+lifetime usage totals and the most recent 24 hours of minute/model usage.
+Administrator sessions are invalidated. Source files are never rewritten or
+removed.
 
 To include selected legacy environment credentials, add `--from-env` to both
 preview and apply with the same environment. It reads `GITHUB_TOKENS` (or
@@ -266,21 +267,40 @@ accounts, providers, readiness, and history before retiring the old deployment.
 
 ## History, outages, and readiness
 
-Committed usage minute/model buckets and lifetime counters are retained. Routing
-minute detail retains 24 hours. Activity was removed in version 5.1.0. LLM Debug
-keeps original request/response text, headers, URLs, and errors only in the
+Committed usage and routing minute detail have rolling 24-hour retention.
+Older detail is deleted during migration, collector startup, transfer completion,
+and idle maintenance. Cleanup uses minute boundaries and runs every 30 seconds
+while the collector is active; locks, outages, or a stopped server can defer it.
+Future-dated records in compatible imported archives retain their timestamps
+rather than being rewritten, and expire as their retention boundary passes.
+Only scalar lifetime token/request totals persist beyond that window. The usage
+API and dashboard expose Last 24 hours and Lifetime; five-hour and seven-day
+sections are removed, and no seven-day rollup is stored. Activity was removed
+in version 5.1.0. LLM Debug keeps original request/response text, headers, URLs,
+and errors only in the
 serving process's capture store. Successful captures expire ten minutes after
 `startedAt`; other statuses expire after one hour. The store is capped at 2,000
 entries and a shared 128 MiB working budget, with whole-entry eviction and one
 oversized entry allowed alone. Clear and restart remove captures.
 
 Migration `003` removes persistent debug captures, `004` adds account integration
-IDs, and `005` drops Activity. The current schema has 27 application tables.
+IDs, `005` drops Activity, and `006` prunes usage/routing detail to 24 hours and
+indexes receipt cleanup by kind and time. The current schema still has
+27 application tables.
 Existing external archives and operator copies are not erased by migration.
+
+Maintenance compacts collection-gap intervals older than 24 hours into one
+set of lifetime loss counters, removes unreferenced clean process-run records,
+and deletes expired administrator sessions and temporary login records.
+Active credentials and durable mutation receipts remain authoritative and are
+not deleted just because they are old. Unclean process identities also remain
+so a paused process can resume safely. Configuration, identity, and receipt
+growth can still increase database size. SQLite reuses freed pages; history
+expiry does not force an immediate reduction in the file's size.
 
 The pending telemetry queue carries usage, routing, and collection-gap records.
 It retries writes and is bounded to 2,000 records, 16 MiB, and five minutes.
-Outages and pressure can drop records; collection gaps remain explicit. This
+Outages and pressure can drop records; recent collection gaps remain explicit. This
 queue does not make database-backed request admission independent of SQLite
 availability. A missing, inaccessible, or locked local database can still affect
 request admission.

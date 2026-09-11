@@ -1,8 +1,9 @@
 # Database table review
 
-This source audit covers the 27 application tables in schema 5. Schema 3 removed
+This source audit covers the 27 application tables in schema 6. Schema 3 removed
 `capi_debug`, schema 4 added per-account integration IDs, and schema 5 removed
-`capi_activity`. The table definitions come from
+`capi_activity`. Schema 6 adds selective receipt indexing and 24-hour detail
+retention without adding a table. The table definitions come from
 [migration 001](../src/lib/storage/migrations/001-initial.ts),
 [migration 002](../src/lib/storage/migrations/002-gateway-secrets.ts), and the
 [current schema](../src/lib/storage/schema.ts).
@@ -13,16 +14,17 @@ database was queried for this review. SQLite system objects and indexes
 are excluded from the count. Every baseline application table has a source
 consumer; none is wholly unused.
 
-The LLM Debug persistence correction and Activity removal are implemented. Broader cleanup below
-is proposed for review and has not been performed. "Keep" means needed for the
-current feature and behavior; it does not mean every installation uses that
-feature.
+LLM Debug remains outside the database. Usage/routing detail now has rolling
+24-hour retention, and retired operational detail is compacted or removed.
+Remaining proposals below are separate from the implemented retention policy.
+"Keep" means needed for the current feature and behavior; it does not mean every
+installation uses that feature.
 
 | Table | Why it exists / what it stores | Actual retention | Review direction |
 | --- | --- | --- | --- |
 | [capi_metadata](../src/lib/storage/migrations.ts) | Store identity, schema/config revisions, transfer markers, and routing lifetime counters. Startup and configuration reads/writes use these values. | Persistent small set; temporary transfer markers removed on completion. | Keep. Remove only retired keys through migrations. |
 | [capi_schema_migrations](../src/lib/storage/migrations.ts) | Applied migration versions, names, checksums, and timestamps. Startup checks database compatibility. | One row per applied migration. | Keep. |
-| [capi_applied_operations](../src/lib/storage/operations.ts) | Mutation receipts: operation ID, actor, input digest, committed revision, and safe result metadata. Used to reconcile uncertain commits and avoid duplicate writes. | History-batch receipts pruned after 24 hours during flush and idle maintenance; other receipts have no routine cleanup. | Keep the mechanism; review a bounded receipt lifetime. |
+| [capi_applied_operations](../src/lib/storage/operations.ts) | Mutation receipts: operation ID, actor, input digest, committed revision, and safe result metadata. Used to reconcile uncertain commits and avoid duplicate writes. | History-batch receipts pruned after 24 hours at startup and during idle maintenance; other receipts have no routine cleanup. | Keep the mechanism; non-history receipts preserve durable retry/unknown-commit identities. |
 | [capi_settings](../src/lib/storage/settings-repository.ts) | Current app configuration, replacements, model redirects/settings/routing/fallbacks, feature flags, and Statsig overrides, with revisions. | Current values overwritten; persistent. | Keep. Already consolidates eight settings domains. |
 | [capi_accounts](../src/lib/storage/accounts-repository.ts) | Stable upstream account IDs, domain/user/login/label, enabled/deletion state, and validation/credential revisions. Used by account management and routing. | Persistent; deleted accounts leave metadata tombstones. | Keep for Copilot accounts. Stable IDs preserve associations. |
 | [capi_account_credentials](../src/lib/storage/accounts-repository.ts) | Recoverable upstream OAuth token for each account. Loaded into the account pool for upstream authentication. | Replaced on credential changes; deleted on account removal. | Keep data. Separate table permits metadata reads without tokens. |
@@ -34,47 +36,31 @@ feature.
 | [capi_inference_credentials](../src/lib/storage/policy-repository.ts) | Hashed inference-only credentials, principal/scopes, kind, label, and enabled/revoked state. Used for managed JWT digests and OAuth-issued API keys. | No expiry; explicit revocation. Managed entries can be deleted. | Keep if these client credentials are wanted. Already shares two credential kinds. |
 | [capi_ip_allowlist](../src/lib/storage/policy-repository.ts) | Allowed IPs, enabled/source state, and timestamps. Read by access policy and updated by administrators or authenticated promotion. | Until removed/cleared; no automatic expiry. | Keep if retaining IP allowlisting. |
 | [capi_admin](../src/lib/storage/admin-repository.ts) | Singleton administrator password hash and session version. Used by dashboard setup/login/password changes. | Persistent singleton. | Keep for administrator authentication. |
-| [capi_admin_sessions](../src/lib/storage/admin-repository.ts) | Hashed session/CSRF tokens, session version, and expiry. Used for dashboard authentication, logout, and invalidation. | Rolling 30-day validity; login deletes expired/old-version rows, logout deletes its row, password change deletes all. | Keep for restart-persistent logins; memory-only would require login after restart. |
-| [capi_setup_codes](../src/lib/storage/admin-repository.ts) | Hashed one-time CLI setup codes and consumed/invalidated timestamps. Connects a separate CLI setup command to the dashboard. | Valid 15 minutes; expired/consumed rows have no routine cleanup. Restore clears them. | Keep cross-process setup; prune completed/expired records. |
-| [capi_device_login_intents](../src/lib/storage/device-login-repository.ts) | Pending GitHub device-login codes, owner, polling lease, expiry, and resulting account. Used by dashboard account onboarding. | Upstream-defined expiry; codes cleared on completion/cancel/failure. Expired codes clear only if revisited by polling; rows have no routine cleanup. | Candidate for memory-only pending state, or keep coordination with prompt cleanup. |
-| [capi_oauth_codes](../src/lib/storage/oauth-repository.ts) | Hashed temporary authorization codes, client/redirect/scopes/state, and PKCE binding. Used for code exchange. | Valid 2 minutes and single-use. Consumed rows remain; expired unconsumed rows delete only if presented again. | Keep OAuth exchange; prune or make pending grants transient. |
+| [capi_admin_sessions](../src/lib/storage/admin-repository.ts) | Hashed session/CSRF tokens, session version, and expiry. Used for dashboard authentication, logout, and invalidation. | Rolling 30-day validity; login and idle maintenance delete expired/old-version rows, logout deletes its row, password change deletes all. | Keep for restart-persistent logins; memory-only would require login after restart. |
+| [capi_setup_codes](../src/lib/storage/admin-repository.ts) | Hashed one-time CLI setup codes and consumed/invalidated timestamps. Connects a separate CLI setup command to the dashboard. | Valid 15 minutes; records expired for over 24 hours are deleted by maintenance. Restore clears them. | Keep cross-process setup; expired records are now pruned. |
+| [capi_device_login_intents](../src/lib/storage/device-login-repository.ts) | Pending GitHub device-login codes, owner, polling lease, expiry, and resulting account. Used by dashboard account onboarding. | Upstream-defined expiry; codes cleared on completion/cancel/failure. rows expired for over 24 hours are deleted by maintenance. | Keep coordination; expired rows now receive routine cleanup. |
+| [capi_oauth_codes](../src/lib/storage/oauth-repository.ts) | Hashed temporary authorization codes, client/redirect/scopes/state, and PKCE binding. Used for code exchange. | Valid 2 minutes and single-use. records expired for over 24 hours are removed by maintenance. | Keep OAuth exchange; expired grants are now pruned. |
 | [capi_oauth_families](../src/lib/storage/oauth-repository.ts) | Groups related access/refresh tokens under one client/principal/grant for collective revocation. | Until revoked; revoked rows retained. | Keep grant grouping if OAuth remains. |
 | [capi_oauth_access](../src/lib/storage/oauth-repository.ts) | Access-token digests with family/client/principal/scopes. Used to authorize OAuth clients. | Valid until explicit revocation; each refresh adds an access token; no cleanup. | Keep data; consider combining access and refresh rows in a typed-token table. |
 | [capi_oauth_refresh](../src/lib/storage/oauth-repository.ts) | Refresh-token digests and grant binding. Used to issue additional access tokens. | Deliberately reusable until explicit revocation; no cleanup. | Possible consolidation with access tokens while preserving their distinct authority. |
-| [capi_usage_minutes](../src/lib/storage/history-repository.ts) | Minute/model input/output token totals and request counts. Powers 5-hour and 7-day usage summaries; no request/response bodies. | All committed buckets retained, including imported history; the runtime usage reader requests only 7 days. | Keep counters; decide whether older minute detail is useful. |
+| [capi_usage_minutes](../src/lib/storage/history-repository.ts) | Minute/model input/output token totals and request counts; no request or response bodies. Powers the Last 24 hours summary. | At most the recent 24-hour window for normal runtime timestamps; older detail deleted during migration, startup/idle maintenance and transfer completion. | Keep recent counters; lifetime numbers use the singleton below. |
 | [capi_usage_lifetime](../src/lib/storage/history-repository.ts) | Singleton lifetime token/request totals and first-request time. Used by usage summaries. | Persistent singleton. | Keep if lifetime totals are wanted; permits independent pruning of old minute detail. |
-| [capi_routing_minutes](../src/lib/storage/history-repository.ts) | Minute aggregates of calls, retries, failovers, outcomes, models, routes, and accounts. Powers the routing dashboard. | 24-hour detail, pruned during history flushes and idle maintenance; lifetime totals retained in metadata. | Optional analytics. Simplify unused dimension/account columns if kept. |
+| [capi_routing_minutes](../src/lib/storage/history-repository.ts) | Minute aggregates of calls, retries, failovers, outcomes, models, routes, and accounts. Powers the routing dashboard. | 24-hour detail, pruned at startup and during idle maintenance; lifetime totals retained in metadata. | Optional analytics. Simplify unused dimension/account columns if kept. |
 | [capi_imports](../src/lib/storage/legacy-import.ts) | Completed legacy-import receipt with source digest, revision, timestamp, and counts. Prevents duplicate import of the same source. | Permanent; used by import commands. | Could move into metadata or an existing receipt store while preserving deduplication. |
-| [capi_process_runs](../src/lib/storage/history-repository.ts) | History-collector startup, last flush, clean shutdown, and end timestamps. Detects potentially unflushed prior runs. | One row per startup; no cleanup. | Could consolidate with collection-gap state or retain only necessary recent runs. |
-| [capi_collection_gaps](../src/lib/storage/history-repository.ts) | Lost-record/byte counts and unknown intervals after queue drops, uncertain writes, or unclean shutdowns. Feeds collection-status indicators. | No cleanup; reader sums all rows. | Could compact into counters plus recent incident detail while retaining incomplete-history reporting. |
+| [capi_process_runs](../src/lib/storage/history-repository.ts) | History-collector startup, last flush, clean shutdown, and end timestamps. Detects potentially unflushed prior runs. | Clean ended runs older than 24 hours are removed when no retained gap references them. Unclean identities remain so a paused process can resume. | Clean history is bounded; unclean process identities need explicit recovery semantics before deletion. |
+| [capi_collection_gaps](../src/lib/storage/history-repository.ts) | Lost-record/byte counts and unknown intervals after queue drops, uncertain writes, or unclean shutdowns. Feeds collection-status indicators. | Intervals older than 24 hours are atomically replaced by fixed lifetime numeric counters in metadata. Recent interval detail remains. | Implemented compaction preserves lifetime loss reporting; expired time-window details are intentionally unavailable. |
 
-## Cleanup proposals for review
+## Retention boundaries
 
-1. **Expire temporary records physically.** Delete completed/expired device-login
-   intents, setup codes, and OAuth codes after an agreed reconciliation window.
-   Today expiry usually stops their use without deleting the row. Moving device
-   login and OAuth codes into memory would also remove their tables, but pending
-   sign-ins would fail across restart or another server instance. Setup codes
-   still need shared state because their CLI issuer is a separate process.
-2. **Choose usage-detail retention.** The
-   [usage reader](../src/lib/usage-tracker.ts) only requests seven days. Pruning
-   older minute/model buckets would retain those summaries and lifetime totals,
-   but remove historical detail from future backups. Indefinite retention is
-   currently documented behavior, so this is a product decision.
-3. **Bound operational bookkeeping.** Keep mutation receipts long enough to
-   reconcile retries and uncertain commits; removing them too early can permit
-   duplicate operations. Compact old process runs and collection gaps into
-   aggregate loss counters plus recent incidents. Current UI consumers need
-   collection totals, not an unlimited incident ledger.
-4. **Reduce tables where it simplifies the model.** Import receipts could use
-   existing metadata. OAuth access and refresh records could share one typed
-   table while keeping scope checks and family revocation. A shared secret store
-   could replace several one-to-one secret tables, but requires careful access,
-   deletion, export, and restore rules and saves little compared with pruning
-   accumulated rows.
-5. **Decide whether optional history should survive restart.** Routing analytics
-   have active readers but could be memory-only if their history is disposable.
-   Activity is removed and LLM Debug is already memory-only.
+Usage and routing have rolling 24-hour retention of minute detail; there is no
+seven-day rollup. Only lifetime scalar token/request/loss totals persist beyond
+the detail window. LLM Debug and Activity have no runtime database tables.
+Startup and idle maintenance remove expired transient login records and compact
+old collection gaps. Cleanup uses minute boundaries and a 30-second maintenance
+cadence; locks, outages, or a stopped collector can defer it. Compatible imported
+future timestamps are preserved and expire as their retention boundary passes.
+
+The database is not a fixed byte-size file: configured accounts, active credential digests, operator settings and reconciliation receipts are durable authority, and their size follows configured use. Deleting an active OAuth token solely by age would break an existing client; dropping a mutation receipt prematurely could replay a previously committed change. Those rows are preserved. SQLite can reuse freed pages; deleting old rows does not force the file to shrink immediately.
 
 Small schema candidates also exist: the routing writer always uses
 `dimension_key='aggregate'` and never fills SQL `account_id`; account breakdown
@@ -89,9 +75,7 @@ revocation, even when imported expiry metadata exists; see the
 age would change client compatibility. Keep gateway credentials separate from
 inference-only authority even if their storage is later consolidated.
 
-History idle maintenance renews process-run leases and prunes routing-minute
-detail and history-batch receipts even without a nonempty flush. It does not
-prune committed usage history or general mutation receipts.
+History idle maintenance renews process-run leases and prunes usage/routing detail and history-batch receipts even without a nonempty flush. General mutation receipts and active credentials remain available for reconciliation and authorization.
 
 ## LLM Debug correction and upgrade
 

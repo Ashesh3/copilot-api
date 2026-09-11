@@ -24,6 +24,7 @@ import {
   StorageCommitUnknownError,
   StorageSchemaError,
 } from "~/lib/storage/errors"
+import { pruneHistoryCounters } from "~/lib/storage/history-retention"
 import { parseStorageCounter } from "~/lib/storage/migrations"
 import { readStoreRevision } from "~/lib/storage/operations"
 import {
@@ -129,7 +130,7 @@ class RecordDecoder {
   // The metadata table arrives first; its schema row selects validation before
   // history rows arrive. The final authenticated manifest must agree with it.
   private sourceVersion?: number
-  private readonly tableOrder = transferTablesForSchema(2)
+  private tableOrder = transferTablesForSchema(2)
   readonly counts: Record<string, number> = {}
   readonly retainedCounts: Record<string, number> = {}
   manifest?: TransferManifest
@@ -368,6 +369,7 @@ class RecordDecoder {
       )
         invalid()
       this.sourceVersion = version
+      this.tableOrder = transferTablesForSchema(version)
       return {
         ...record,
         value: { key: "schema_version", value: String(currentSchemaVersion) },
@@ -528,7 +530,7 @@ export async function discardIncompleteTransfer(
       args: [randomUUID()],
     })
     await session.execute({
-      sql: "DELETE FROM capi_metadata WHERE key IN ('history_routing_lifetime','history_routing_started_at')",
+      sql: "DELETE FROM capi_metadata WHERE key IN ('history_routing_lifetime','history_routing_started_at','history_collection_lifetime')",
       args: [],
     })
     await session.execute({
@@ -630,6 +632,8 @@ export async function restoreBackup(
         })
         if (rows[0]?.count !== count) invalid()
       }
+      operationSignal.throwIfAborted()
+      await pruneHistoryCounters(session, Date.now())
       operationSignal.throwIfAborted()
       await session.execute({
         sql: "DELETE FROM capi_admin_sessions",

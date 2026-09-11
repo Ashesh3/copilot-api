@@ -13,11 +13,12 @@ import {
 
 test("restore writes retained history in bounded multi-row batches", async () => {
   await withTransferStorage(async (source) => {
+    const now = Math.floor(Date.now() / 60000) * 60000
     await source.transaction(async (session) => {
       for (let index = 0; index < 1000; index++)
         await session.execute({
           sql: "INSERT INTO capi_usage_minutes(minute,model,input_tokens,output_tokens,request_count) VALUES(?,?,1,2,1)",
-          args: [index * 60000, "fixture"],
+          args: [now - index * 60000, "fixture"],
         })
     })
     const backup = await streamBytes(

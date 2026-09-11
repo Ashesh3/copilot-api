@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto"
+import { setImmediate as yieldToEventLoop } from "node:timers/promises"
 
 import type { HistoryRepository } from "~/lib/storage/history-repository"
 import type { JsonValue, Storage } from "~/lib/storage/types"
@@ -291,6 +292,7 @@ export function createTelemetryWriter(
         for (let batch = 0; batch < 20; batch++) {
           await flushOnce()
           if (failed || (!count() && gaps.size === 0)) break
+          await yieldToEventLoop()
         }
       }).finally(() => {
         flushing = undefined
@@ -330,6 +332,8 @@ export function createTelemetryWriter(
             do {
               await flushOnce()
               if (failed) break
+              if ((count() || gaps.size > 0) && Date.now() < flushDeadline)
+                await yieldToEventLoop()
             } while ((count() || gaps.size > 0) && Date.now() < flushDeadline)
           }),
           new Promise<void>((resolve) => {

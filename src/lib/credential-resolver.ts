@@ -144,11 +144,12 @@ export async function resolveCredential(
   requiredScopes: ReadonlyArray<string> = [],
 ): Promise<ResolvedCredential | null> {
   if (!rawCredential) return null
-  if (await credentialsRepository().isDigestLiteral(rawCredential)) return null
+  const normalizedCredential = rawCredential.trim()
+  if (await credentialsRepository().isDigestLiteral(normalizedCredential))
+    return null
 
-  const configured = await credentialsRepository().inference(
-    rawCredential.trim(),
-  )
+  const configured =
+    await credentialsRepository().inference(normalizedCredential)
   if (configured !== undefined) {
     if (!configured) return null
     const credential: ResolvedCredential = {
@@ -159,8 +160,8 @@ export async function resolveCredential(
     return credentialHasScopes(credential, requiredScopes) ? credential : null
   }
 
-  const gatewayCredential = await resolveGatewayCredential(
-    rawCredential,
+  const gatewayCredential = await matchGatewayCredential(
+    normalizedCredential,
     requiredScopes,
   )
   if (gatewayCredential) return gatewayCredential
@@ -201,6 +202,13 @@ export async function resolveGatewayCredential(
   const normalizedCredential = rawCredential.trim()
   if (!normalizedCredential) return null
   if (await isConfiguredInferenceCredential(normalizedCredential)) return null
+  return await matchGatewayCredential(normalizedCredential, requiredScopes)
+}
+
+async function matchGatewayCredential(
+  normalizedCredential: string,
+  requiredScopes: ReadonlyArray<string>,
+): Promise<ResolvedCredential | null> {
   const match = await credentialsRepository().gateway(normalizedCredential)
   if (!match) return null
   const credential: ResolvedCredential = {

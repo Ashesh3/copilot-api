@@ -4,7 +4,7 @@ import { getHistoryRuntime, getTelemetryWriter } from "~/lib/telemetry-writer"
 
 const STORAGE_VERSION = 2
 const MINUTE_MS = 60_000
-const SEVEN_DAY_MS = 7 * 24 * 60 * MINUTE_MS
+const DAY_MS = 24 * 60 * MINUTE_MS
 
 interface LegacyUsageRecord {
   timestamp: number
@@ -273,52 +273,43 @@ export function recordUsage(
 }
 
 function sumBuckets(buckets: Array<UsageBucket>): {
-  tokens: number
+  inputTokens: number
+  outputTokens: number
   requests: number
 } {
   return buckets.reduce(
     (sum, bucket) => ({
-      tokens: sum.tokens + bucket.inputTokens + bucket.outputTokens,
+      inputTokens: sum.inputTokens + bucket.inputTokens,
+      outputTokens: sum.outputTokens + bucket.outputTokens,
       requests: sum.requests + bucket.requestCount,
     }),
-    { tokens: 0, requests: 0 },
+    { inputTokens: 0, outputTokens: 0, requests: 0 },
   )
 }
 
 export async function getUsageResponse(): Promise<Record<string, unknown>> {
   const now = Date.now()
   const runtime = testData ? undefined : getHistoryRuntime()
+  const cutoff = minuteFor(now - DAY_MS)
   const data =
-    testData
-    ?? (await getHistoryRuntime().writer.read((pending) =>
-      getHistoryRuntime().repository.readUsage(
-        minuteFor(now - SEVEN_DAY_MS),
-        pending,
-      ),
-    ))
-
-  const fiveHoursAgo = minuteFor(now - 5 * 60 * MINUTE_MS)
-  const sevenDaysAgo = minuteFor(now - SEVEN_DAY_MS)
-  const fiveHour = sumBuckets(
-    data.buckets.filter((bucket) => bucket.timestamp >= fiveHoursAgo),
-  )
-  const sevenDay = sumBuckets(
-    data.buckets.filter((bucket) => bucket.timestamp >= sevenDaysAgo),
-  )
+    testData ?
+      {
+        window: sumBuckets(
+          testData.buckets.filter((bucket) => bucket.timestamp >= cutoff),
+        ),
+        lifetime: testData.lifetime,
+      }
+    : await getHistoryRuntime().writer.read((pending) =>
+        getHistoryRuntime().repository.readUsageTotals(cutoff, pending),
+      )
   const lifetimeTokens = data.lifetime.inputTokens + data.lifetime.outputTokens
 
   return {
-    five_hour: {
-      utilization: fiveHour.tokens / 10_000_000,
-      resets_at: Math.floor((now + 5 * 60 * MINUTE_MS) / 1000),
-      tokens_used: fiveHour.tokens,
-      request_count: fiveHour.requests,
-    },
-    seven_day: {
-      utilization: sevenDay.tokens / 50_000_000,
-      resets_at: Math.floor((now + SEVEN_DAY_MS) / 1000),
-      tokens_used: sevenDay.tokens,
-      request_count: sevenDay.requests,
+    twenty_four_hour: {
+      tokens_used: data.window.inputTokens + data.window.outputTokens,
+      request_count: data.window.requests,
+      total_input_tokens: data.window.inputTokens,
+      total_output_tokens: data.window.outputTokens,
     },
     ...(runtime ?
       {

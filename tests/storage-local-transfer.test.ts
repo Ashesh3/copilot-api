@@ -226,6 +226,7 @@ async function seedSource(storage: Storage) {
       payload: { lostRecords: 2, lostBytes: 64 },
     },
   ])
+  await history.prune(now)
   await history.endRun("transfer-process", now + 1)
   return {
     accountIds: [account.value.id, enterprise.value.id],
@@ -297,15 +298,7 @@ async function verifyRepositories(
   ).not.toBeNull()
   const history = createHistoryRepository(storage)
   expect(await history.readUsage(0)).toMatchObject({
-    buckets: [
-      {
-        timestamp: 60_000,
-        model: "old-model",
-        inputTokens: 11,
-        outputTokens: 17,
-        requestCount: 2,
-      },
-    ],
+    buckets: [],
     lifetime: {
       inputTokens: 11,
       outputTokens: 17,

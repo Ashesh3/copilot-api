@@ -1,5 +1,10 @@
 # Usage Routing Observability Implementation Plan
 
+> Historical plan: the storage and three-card contract below was superseded
+> by the [2026-09-11 retention plan](2026-09-11-performance-storage-admission.md).
+> Current usage exposes only Last 24 hours and Lifetime; routing detail has
+> 24-hour persisted retention with numeric lifetime counters.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add bounded, process-memory routing telemetry and redesign the Usage page to show client requests, actual upstream calls, retries, failovers, per-model traffic, account balance, and route breakdowns without changing the existing three usage cards.

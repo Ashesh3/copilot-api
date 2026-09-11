@@ -20,6 +20,46 @@ import {
   getStorageDeadline,
 } from "~/lib/storage/operation-budget"
 
+function isSqliteBusy(error: unknown): boolean {
+  return (
+    typeof error === "object"
+    && error !== null
+    && "code" in error
+    && /^SQLITE_(?:BUSY|LOCKED)/.test(String(error.code))
+  )
+}
+
+function checkDeadline(expires: number): void {
+  if (Date.now() >= expires) throw new StorageUnavailableError("timeout")
+}
+
+async function waitForLock(expires: number): Promise<void> {
+  checkDeadline(expires)
+  await Bun.sleep(Math.max(1, Math.min(10, expires - Date.now())))
+}
+
+async function queryRows(
+  database: Database,
+  statement: SqlStatement,
+  options: { expires: number; readOnly: boolean; signal: AbortSignal },
+): Promise<ReadonlyArray<Record<string, unknown>>> {
+  for (;;) {
+    checkDeadline(options.expires)
+    if (options.signal.aborted) throw new StorageUnavailableError()
+    try {
+      return normalizeRows(database.query(statement.sql).all(...statement.args))
+    } catch (error) {
+      if (!options.readOnly || !database.inTransaction || !isSqliteBusy(error))
+        throw storageError(error)
+      // Only validated read statements can retry within the same snapshot.
+      // A write failure still poisons its scope before any later SQL runs.
+      await waitForLock(options.expires)
+    }
+  }
+}
+
+type Acquisition<T> = { acquired: false } | { acquired: true; value: T }
+
 export class LocalSqliteStorage implements Storage {
   private readonly databasePath: string
   private readonly db: Database
@@ -38,13 +78,13 @@ export class LocalSqliteStorage implements Storage {
       })
       if (process.platform !== "win32") chmodSync(path, 0o600)
       db.run(
-        "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000",
+        "PRAGMA busy_timeout=0; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL",
       )
       for (const [name, wanted] of [
         ["journal_mode", "wal"],
         ["foreign_keys", 1n],
         ["synchronous", 2n],
-        ["busy_timeout", 5000n],
+        ["busy_timeout", 0n],
       ] as const) {
         const row = db.query(`PRAGMA ${name}`).get() as Record<
           string,
@@ -60,19 +100,14 @@ export class LocalSqliteStorage implements Storage {
     }
   }
 
-  private driver(expires: number): SqlSession {
+  private driver(
+    expires: number,
+    readOnly: boolean,
+    signal: AbortSignal,
+  ): SqlSession {
     return {
-      query: (statement) => {
-        try {
-          if (Date.now() >= expires)
-            throw new StorageUnavailableError("timeout")
-          return Promise.resolve(
-            normalizeRows(this.db.query(statement.sql).all(...statement.args)),
-          )
-        } catch (error) {
-          return Promise.reject(storageError(error))
-        }
-      },
+      query: (statement) =>
+        queryRows(this.db, statement, { expires, readOnly, signal }),
       execute: (statement) => {
         try {
           if (Date.now() >= expires)
@@ -98,48 +133,76 @@ export class LocalSqliteStorage implements Storage {
       Date.now() + 30_000,
       getStorageDeadline() ?? Infinity,
     )
-    return deadlinePromise(
-      this.queue.run(() =>
-        operationContext.run(this, async () => {
-          if (expires <= Date.now())
-            throw new StorageUnavailableError("timeout")
-          if (this.closed) throw new StorageUnavailableError()
-          const scope = scopedSession(this.driver(expires), readOnly)
-          let begun = false
-          try {
-            this.db.run(readOnly ? "BEGIN" : "BEGIN IMMEDIATE")
-            begun = true
-            const result = await deadlinePromise(
-              Promise.resolve().then(() => work(scope.session)),
-              expires,
-            )
-            await scope.finish()
-            if (Date.now() >= expires)
-              throw new StorageUnavailableError("timeout")
-            this.db.run("COMMIT")
-            return result
-          } catch (error) {
-            scope.revoke()
-            await scope.finish().catch(() => {})
-            let rolledBack = begun && !this.db.inTransaction
-            if (begun && this.db.inTransaction) {
-              try {
-                this.db.run("ROLLBACK")
-                rolledBack = true
-              } catch {
-                this.closed = true
-                this.db.close()
-              }
+    for (;;) {
+      const result = await deadlinePromise(
+        this.queue.run(() =>
+          operationContext.run(this, async (): Promise<Acquisition<T>> => {
+            checkDeadline(expires)
+            if (this.closed) throw new StorageUnavailableError()
+            try {
+              this.db.run(readOnly ? "BEGIN" : "BEGIN IMMEDIATE")
+            } catch (error) {
+              if (!this.db.inTransaction && isSqliteBusy(error))
+                return { acquired: false }
+              throw storageError(error, !this.db.inTransaction)
             }
-            if (error instanceof Error && !("code" in error)) throw error
-            throw storageError(error, rolledBack || !begun)
-          } finally {
-            scope.revoke()
-          }
-        }),
-      ),
-      expires,
+            return {
+              acquired: true,
+              value: await this.completeOperation(work, readOnly, expires),
+            }
+          }),
+        ),
+        expires,
+      )
+      if (result.acquired) return result.value
+      // An unsuccessful BEGIN owns no transaction. Release the connection's
+      // queue before waiting so WAL readers can pass a contended writer.
+      await waitForLock(expires)
+    }
+  }
+
+  private async completeOperation<T>(
+    work: (session: SqlSession) => Promise<T>,
+    readOnly: boolean,
+    expires: number,
+  ): Promise<T> {
+    const cancelled = new AbortController()
+    const scope = scopedSession(
+      this.driver(expires, readOnly, cancelled.signal),
+      readOnly,
     )
+    try {
+      const result = await deadlinePromise(
+        Promise.resolve().then(() => {
+          checkDeadline(expires)
+          return work(scope.session)
+        }),
+        expires,
+      )
+      await scope.finish()
+      checkDeadline(expires)
+      this.db.run("COMMIT")
+      return result
+    } catch (error) {
+      scope.revoke()
+      cancelled.abort()
+      await scope.finish().catch(() => {})
+      let rolledBack = !this.db.inTransaction
+      if (this.db.inTransaction) {
+        try {
+          this.db.run("ROLLBACK")
+          rolledBack = true
+        } catch {
+          this.closed = true
+          this.db.close()
+        }
+      }
+      if (error instanceof Error && !("code" in error)) throw error
+      throw storageError(error, rolledBack)
+    } finally {
+      scope.revoke()
+      cancelled.abort()
+    }
   }
 
   read<T>(work: (session: SqlSession) => Promise<T>): Promise<T> {
@@ -159,13 +222,15 @@ export class LocalSqliteStorage implements Storage {
       safeIntegers: true,
     })
     const expires = Date.now() + (options.timeoutMs ?? 1_800_000)
-    database.run("PRAGMA query_only=ON; PRAGMA busy_timeout=5000; BEGIN")
+    const cancelled = new AbortController()
     const scope = scopedSession(
       {
-        query: async (statement) =>
-          await Promise.resolve(
-            normalizeRows(database.query(statement.sql).all(...statement.args)),
-          ),
+        query: (statement) =>
+          queryRows(database, statement, {
+            expires,
+            readOnly: true,
+            signal: cancelled.signal,
+          }),
         execute: () => Promise.reject(new StorageUnavailableError()),
       },
       true,
@@ -174,24 +239,32 @@ export class LocalSqliteStorage implements Storage {
     const abort = new Promise<never>((_resolve, reject) => {
       aborted = () => {
         scope.revoke()
+        cancelled.abort()
         reject(new StorageUnavailableError())
       }
       options.signal?.addEventListener("abort", aborted, { once: true })
     })
     try {
+      database.run("PRAGMA busy_timeout=0; PRAGMA query_only=ON; BEGIN")
+      options.signal?.throwIfAborted()
       const result = await deadlinePromise(
         Promise.race([work(scope.session), abort]),
         expires,
       )
       await scope.finish()
+      checkDeadline(expires)
       database.run("COMMIT")
       return result
     } finally {
       scope.revoke()
+      cancelled.abort()
       if (aborted) options.signal?.removeEventListener("abort", aborted)
       await scope.finish().catch(() => {})
-      if (database.inTransaction) database.run("ROLLBACK")
-      database.close()
+      try {
+        if (database.inTransaction) database.run("ROLLBACK")
+      } finally {
+        database.close()
+      }
     }
   }
   transaction<T>(work: (session: SqlSession) => Promise<T>): Promise<T> {

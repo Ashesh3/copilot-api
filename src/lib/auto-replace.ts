@@ -92,6 +92,50 @@ const SYSTEM_REPLACEMENTS: Array<ReplacementRule> = [
 
 let testReplacements: Array<ReplacementRule> | undefined
 
+interface CompiledReplacement {
+  readonly rule: ReplacementRule
+  readonly regex?: RE2JS
+}
+
+interface ReplacementSet {
+  readonly user: ReadonlyArray<ReplacementRule>
+  readonly all: ReadonlyArray<CompiledReplacement>
+}
+
+// Committed values are immutable and retained by their request snapshot. Weak
+// keys keep old requests correct without retaining retired settings forever.
+const replacementSets = new WeakMap<object, ReplacementSet>()
+const emptyReplacements: Array<ReplacementRule> = []
+const systemRules = SYSTEM_REPLACEMENTS.map((rule) => ({
+  rule,
+  regex: RE2JS.compile(rule.pattern),
+}))
+
+function compileReplacement(rule: ReplacementRule): CompiledReplacement {
+  return {
+    rule,
+    ...(rule.isRegex && rule.enabled ?
+      { regex: RE2JS.compile(rule.pattern) }
+    : {}),
+  }
+}
+
+function currentReplacementSet(): ReplacementSet {
+  const stored = testReplacements ?? getLoadedSetting("replacements")
+  const source = stored === undefined ? emptyReplacements : stored
+  if (!Array.isArray(source))
+    throw new StorageSchemaError("Invalid replacement rules")
+  const cached = replacementSets.get(source)
+  if (cached) return cached
+  const user = testReplacements ?? validateStoredReplacements(source)
+  const result = {
+    user,
+    all: [...systemRules, ...user.map((rule) => compileReplacement(rule))],
+  }
+  replacementSets.set(source, result)
+  return result
+}
+
 export function validateStoredReplacements(
   value: unknown,
 ): Array<ReplacementRule> {
@@ -106,10 +150,7 @@ export function validateStoredReplacements(
 }
 
 function currentReplacements(): Array<ReplacementRule> {
-  return structuredClone(
-    testReplacements
-      ?? validateStoredReplacements(getLoadedSetting("replacements")),
-  )
+  return structuredClone([...currentReplacementSet().user])
 }
 
 async function mutateReplacements<T>(
@@ -240,13 +281,14 @@ export async function clearUserReplacements(): Promise<void> {
  */
 function applyRule(
   text: string,
-  rule: ReplacementRule,
+  compiled: CompiledReplacement,
 ): { result: string; matched: boolean } {
+  const { rule, regex } = compiled
   if (!rule.enabled) return { result: text, matched: false }
 
   if (rule.isRegex) {
     try {
-      const regex = RE2JS.compile(rule.pattern)
+      if (!regex) return { result: text, matched: false }
       const matcher = regex.matcher(text)
       const chunks: Array<string> = []
       let cursor = 0
@@ -328,15 +370,23 @@ export interface ReplacementResult {
 export async function applyReplacements(
   text: string,
 ): Promise<ReplacementResult> {
+  return await Promise.resolve(
+    applyCompiledReplacements(text, currentReplacementSet().all),
+  )
+}
+
+function applyCompiledReplacements(
+  text: string,
+  rules: ReadonlyArray<CompiledReplacement>,
+): ReplacementResult {
   let result = text
-  const allRules = await getAllReplacements()
   const appliedRules: Array<string> = []
 
-  for (const rule of allRules) {
-    const { result: newResult, matched } = applyRule(result, rule)
+  for (const compiled of rules) {
+    const { result: newResult, matched } = applyRule(result, compiled)
     if (matched) {
       result = newResult
-      appliedRules.push(rule.name || rule.id)
+      appliedRules.push(compiled.rule.name || compiled.rule.id)
     }
   }
 
@@ -356,49 +406,46 @@ export async function applyReplacementsToPayload(
   payload: ChatCompletionsPayload,
 ): Promise<PayloadReplacementResult> {
   const allAppliedRules: Array<string> = []
+  const rules = currentReplacementSet().all
 
-  const processedMessages = await Promise.all(
-    payload.messages.map(async (message) => {
-      if (typeof message.content === "string") {
-        const { text, appliedRules } = await applyReplacements(message.content)
-        allAppliedRules.push(...appliedRules)
-        return { ...message, content: text }
+  const processedMessages = payload.messages.map((message) => {
+    if (typeof message.content === "string") {
+      const { text, appliedRules } = applyCompiledReplacements(
+        message.content,
+        rules,
+      )
+      allAppliedRules.push(...appliedRules)
+      return { ...message, content: text }
+    }
+
+    // Handle array content (multimodal)
+    if (Array.isArray(message.content)) {
+      return {
+        ...message,
+        content: message.content.map((part) => {
+          if (typeof part === "object" && part.type === "text" && part.text) {
+            const { text, appliedRules } = applyCompiledReplacements(
+              part.text,
+              rules,
+            )
+            allAppliedRules.push(...appliedRules)
+            return { ...part, text }
+          }
+          return part
+        }),
       }
+    }
 
-      // Handle array content (multimodal)
-      if (Array.isArray(message.content)) {
-        return {
-          ...message,
-          content: await Promise.all(
-            message.content.map(async (part) => {
-              if (
-                typeof part === "object"
-                && part.type === "text"
-                && part.text
-              ) {
-                const { text, appliedRules } = await applyReplacements(
-                  part.text,
-                )
-                allAppliedRules.push(...appliedRules)
-                return { ...part, text }
-              }
-              return part
-            }),
-          ),
-        }
-      }
-
-      return message
-    }),
-  )
+    return message
+  })
 
   // Deduplicate rule names
   const uniqueRules = [...new Set(allAppliedRules)]
 
-  return {
+  return await Promise.resolve({
     payload: { ...payload, messages: processedMessages },
     appliedRules: uniqueRules,
-  }
+  })
 }
 
 export function setReplacementsForTest(rules: Array<ReplacementRule>): void {

@@ -6,7 +6,6 @@ import { Banner } from "@astryxdesign/core/Banner"
 import { Button } from "@astryxdesign/core/Button"
 import { Card } from "@astryxdesign/core/Card"
 import { Grid } from "@astryxdesign/core/Grid"
-import { ProgressBar } from "@astryxdesign/core/ProgressBar"
 import {
   SegmentedControl,
   SegmentedControlItem,
@@ -39,7 +38,7 @@ import {
 } from "../components/common"
 import { Page } from "../components/Page"
 import { ResponsivePair } from "../components/ResponsivePair"
-import { ChartBarIcon, SearchIcon } from "../icons"
+import { SearchIcon } from "../icons"
 import { get } from "../lib/api"
 import { useAsyncData, useDelayedPolling } from "../lib/usePolling"
 
@@ -55,30 +54,6 @@ function loadRoutingUsage(
   return get<RoutingTelemetrySnapshot>(
     `/dashboard/api/usage-routing?window=${window}`,
   )
-}
-
-function humanizeKey(key: string): string {
-  return key
-    .split("_")
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(" ")
-}
-
-function progressVariant(utilization: number): "success" | "warning" | "error" {
-  if (utilization > 0.9) return "error"
-  if (utilization >= 0.7) return "warning"
-  return "success"
-}
-
-function fmtCountdown(resetsAtSeconds: number): string {
-  const diffSec = Math.max(0, resetsAtSeconds - Math.floor(Date.now() / 1000))
-  const days = Math.floor(diffSec / 86400)
-  const hours = Math.floor((diffSec % 86400) / 3600)
-  const minutes = Math.floor((diffSec % 3600) / 60)
-
-  if (days > 0) return `resets in ${days}d ${hours}h`
-  if (hours > 0) return `resets in ${hours}h ${minutes}m`
-  return `resets in ${minutes}m`
 }
 
 function fmtPercent(value: number, digits = 1): string {
@@ -130,24 +105,7 @@ function UsageSectionCard({
   return (
     <Card>
       <VStack gap={3}>
-        <Heading level={3}>{humanizeKey(name)}</Heading>
-
-        {section.utilization !== undefined ?
-          <VStack gap={1}>
-            <ProgressBar
-              label={`${humanizeKey(name)} utilization`}
-              value={section.utilization * 100}
-              hasValueLabel
-              formatValueLabel={(value) => `${value.toFixed(1)}% used`}
-              variant={progressVariant(section.utilization)}
-            />
-            {section.resets_at !== undefined ?
-              <Text type="supporting" color="secondary">
-                {fmtCountdown(section.resets_at)}
-              </Text>
-            : null}
-          </VStack>
-        : null}
+        <Heading level={3}>{name}</Heading>
 
         {section.first_request_at != null ?
           <HStack gap={1}>
@@ -177,22 +135,10 @@ function UsageSectionCard({
 }
 
 function UsageCards({ data }: { data: UsageData }) {
-  const sectionEntries = Object.entries(data)
-  if (sectionEntries.length === 0) {
-    return (
-      <EmptyState
-        icon={<ChartBarIcon />}
-        title="No usage data"
-        description="Usage sections will appear here once requests start flowing."
-      />
-    )
-  }
-
   return (
     <Grid columns={{ minWidth: 320 }} gap={4}>
-      {sectionEntries.map(([name, section]) => (
-        <UsageSectionCard key={name} name={name} section={section} />
-      ))}
+      <UsageSectionCard name="Last 24 hours" section={data.twenty_four_hour} />
+      <UsageSectionCard name="Lifetime" section={data.lifetime} />
     </Grid>
   )
 }
@@ -283,7 +229,7 @@ function RoutingPulse({ data }: { data: RoutingTelemetrySnapshot }) {
         <VStack gap={0.5}>
           <Heading level={2}>Routing pulse</Heading>
           <Text type="supporting" color="secondary">
-            Live in-memory activity · detailed history retained for 24 hours
+            Recent activity · detailed history retained for 24 hours
           </Text>
         </VStack>
         <div className="usage-pulse-layout">
@@ -309,8 +255,8 @@ function RoutingPulse({ data }: { data: RoutingTelemetrySnapshot }) {
               supporting={`${fmtPercent(data.totals.requests > 0 ? data.totals.failovers / data.totals.requests : 0)} of requests`}
             />
             <Text type="supporting" color="secondary">
-              Process lifetime: {data.lifetime.requests.toLocaleString()}{" "}
-              requests · {data.lifetime.upstreamCalls.toLocaleString()} calls ·{" "}
+              Lifetime: {data.lifetime.requests.toLocaleString()} requests ·{" "}
+              {data.lifetime.upstreamCalls.toLocaleString()} calls ·{" "}
               {data.lifetime.retries.toLocaleString()} retries ·{" "}
               {data.lifetime.failovers.toLocaleString()} failovers
             </Text>
@@ -735,7 +681,7 @@ export default function UsageScreen() {
 
       {!usage.data && usage.loading ?
         <Grid columns={{ minWidth: 320 }} gap={4}>
-          {Array.from({ length: 3 }, (_, index) => (
+          {Array.from({ length: 2 }, (_, index) => (
             <Skeleton key={index} height={160} index={index} />
           ))}
         </Grid>
@@ -743,6 +689,20 @@ export default function UsageScreen() {
 
       {usage.data ?
         <UsageCards data={usage.data} />
+      : null}
+
+      {(
+        usage.data?.collection
+        && (usage.data.collection.degraded
+          || usage.data.collection.droppedRecords > 0
+          || usage.data.collection.knownLostRecords > 0
+          || usage.data.collection.unknownGaps > 0)
+      ) ?
+        <Banner
+          status="warning"
+          title="Usage history may be incomplete"
+          description="Some usage records could not be saved. Totals include the records available."
+        />
       : null}
 
       {routing.error ?
