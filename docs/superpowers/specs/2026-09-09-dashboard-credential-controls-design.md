@@ -19,7 +19,7 @@ the one-time deployment operation, not application configuration or a default.
 ## Storage and migration
 
 Keep migration `001` immutable. Add migration `002` and sequential,
-checksum-verified migration handling for local SQLite and Turso.
+checksum-verified migration handling for local SQLite.
 
 The new `capi_gateway_secrets` table contains:
 
@@ -59,9 +59,10 @@ accepted as schema-version-2 backups and never revive digest-only gateway
 access. Explicit legacy JSON/environment import remains available only when
 it supplies the actual raw keys and writes both rows.
 
-Configuration exports remain redacted and exclude recoverable gateway and
-provider secrets. The new database state contains raw secrets, and encrypted
-backups contain them inside the encrypted payload.
+Native database downloads include recoverable gateway and provider secrets and
+require the current administrator password, session, CSRF, and Origin checks.
+The `.sqlite` file is not encrypted. Local CLI archives contain the same secrets
+inside an encrypted payload; see the [storage runbook](../../sqlite-storage.md).
 
 ## Gateway API
 
@@ -173,7 +174,9 @@ revisions, and editing/removing individual stored headers.
 
 Both reveal routes are exercised with missing/invalid administrator sessions,
 missing/invalid CSRF tokens, and wrong origins. Tests prove secrets do not
-appear in lists, operation receipts, errors, diagnostics, or redacted exports.
+appear in lists, operation receipts, errors, or credential-control diagnostics.
+Database downloads include stored secrets only after their separate session,
+password, CSRF, and Origin checks pass.
 Encrypted backup/restore and legacy raw-input import are covered end to end.
 
 UI coverage exercises mask/eye/copy behavior, custom/generated inputs, late

@@ -10,7 +10,7 @@ if not exist node_modules (
     echo.
 )
 
-echo Both Turso variables are optional. Without them, SQLite uses the local data directory.
+echo Persistence uses Bun's built-in SQLite in the local data directory.
 echo For first setup, run: bun src/main.ts admin --setup-code
 
 echo Starting server...

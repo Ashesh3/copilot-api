@@ -1,5 +1,9 @@
 # Raw LLM Debug Capture Implementation Plan
 
+This historical plan's configuration ZIP export references are superseded by
+the complete administrator database download. Raw captures remain process-local
+and are excluded; see the [storage runbook](../../sqlite-storage.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make the ten-minute administrator-only LLM Debug store preserve and expose every captured request and response value without redaction or rewriting.

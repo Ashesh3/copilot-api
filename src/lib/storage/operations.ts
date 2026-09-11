@@ -38,7 +38,6 @@ const sensitiveKeys = new Set([
   "githubtoken",
   "providertoken",
   "databasetoken",
-  "tursoauthtoken",
   "apikey",
   "password",
   "passwordhash",

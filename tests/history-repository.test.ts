@@ -9,47 +9,11 @@ import type { HistoryRecord } from "~/lib/telemetry-writer"
 import { createHistoryRepository } from "~/lib/storage/history-repository"
 import { LocalSqliteStorage } from "~/lib/storage/local-sqlite"
 import { migrateStorage } from "~/lib/storage/migrations"
-import { TursoStorage } from "~/lib/storage/turso"
-import {
-  createHistoryRuntime,
-  createTelemetryWriter,
-} from "~/lib/telemetry-writer"
-
-import { createFakeTursoFetch, testConfig } from "./helpers/turso-transport"
+import { createHistoryRuntime } from "~/lib/telemetry-writer"
 
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => {
   for (const close of cleanup.splice(0)) await close()
-})
-
-test("Turso SDK transport retries a lost history commit without duplicate usage", async () => {
-  const options = { loseFirstCommitResponse: false }
-  const transport = createFakeTursoFetch(options)
-  const storage = new TursoStorage(testConfig())
-  const repository = createHistoryRepository(storage)
-  const writer = createTelemetryWriter(
-    repository,
-    { now: Date.now },
-    { autoFlush: false },
-  )
-  try {
-    await migrateStorage(storage)
-    options.loseFirstCommitResponse = true
-    writer.enqueue(usage(Date.now()))
-    await writer.flush()
-    expect(writer.status().pendingRecords).toBe(1)
-    expect(
-      (await writer.read((pending) => repository.readUsage(0, pending)))
-        .lifetime.requestCount,
-    ).toBe(1)
-    await writer.flush()
-    expect(writer.status().pendingRecords).toBe(0)
-    expect((await repository.readUsage(0)).lifetime.requestCount).toBe(1)
-  } finally {
-    await writer.close(500)
-    await storage.close()
-    transport.close()
-  }
 })
 
 async function fixture() {

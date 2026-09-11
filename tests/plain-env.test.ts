@@ -29,8 +29,7 @@ test("runtime and dependency manifests contain no secret-manager integration", a
 test("the plain environment example documents deployment inputs without schema decorators", async () => {
   const example = await Bun.file(path.join(root, ".env.example")).text()
   for (const key of [
-    "TURSO_DATABASE_URL",
-    "TURSO_AUTH_TOKEN",
+    "DATA_DIR",
     "COPILOT_INTEGRATION_ID",
     "COPILOT_HOST",
     "COPILOT_ADMIN_ORIGIN",
@@ -47,11 +46,10 @@ test.each([undefined, "shell-value"])(
     try {
       await fs.writeFile(
         path.join(directory, ".env"),
-        "TURSO_DATABASE_URL=turso://fixture.example\nTURSO_AUTH_TOKEN=fixture-token\nCOPILOT_INTEGRATION_ID=dotenv-value\n",
+        "DATA_DIR=./fixture-data\nCOPILOT_INTEGRATION_ID=dotenv-value\n",
       )
       const env = { ...process.env }
-      delete env.TURSO_DATABASE_URL
-      delete env.TURSO_AUTH_TOKEN
+      delete env.DATA_DIR
       delete env.COPILOT_INTEGRATION_ID
       if (override) env.COPILOT_INTEGRATION_ID = override
       const moduleUrl = pathToFileURL(
@@ -64,7 +62,7 @@ test.each([undefined, "shell-value"])(
           `import { resolveStorageConfig } from ${JSON.stringify(moduleUrl)};
          const c = resolveStorageConfig();
          console.log(JSON.stringify({kind:c.kind, integration:process.env.COPILOT_INTEGRATION_ID,
-           paired:c.kind==="turso" && c.authToken==="fixture-token"}));`,
+           path:c.path}));`,
         ],
         { cwd: directory, env, stdout: "pipe", stderr: "pipe" },
       )
@@ -76,9 +74,9 @@ test.each([undefined, "shell-value"])(
       expect(exitCode).toBe(0)
       expect(stderr).toBe("")
       expect(JSON.parse(stdout)).toEqual({
-        kind: "turso",
+        kind: "sqlite",
         integration: override ?? "dotenv-value",
-        paired: true,
+        path: path.join(directory, "fixture-data", "copilot-api.sqlite"),
       })
     } finally {
       await fs.rm(directory, { recursive: true, force: true })

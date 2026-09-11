@@ -363,9 +363,10 @@ issuer proof, then endpoint evaluation, dispatch, and any retry share the same
 request-local numeric pin without a persistent session/account map.
 
 The session token is an opaque secret, not gateway authentication, and the
-gateway never persists it. Ordinary logs, telemetry, Sentry, and configuration
-exports never expose `Copilot-Session-Token`. Administrator-only LLM Debug
-also redacts session tokens before bounded captures enter its database queue. Inference requires both bounded model matching and, in multi-account
+gateway never persists it. Ordinary logs, telemetry, and Sentry redact
+`Copilot-Session-Token`. Administrator-only LLM Debug retains the value in raw
+process-local captures. Native database downloads contain all stored secrets,
+but do not include those transient captures. Inference requires both bounded model matching and, in multi-account
 mode, bounded issuer proof for the selected account. A mismatch, unknown proof,
 malformed token, or model redirect prevents forwarding. Refresh and intent
 calls with a token require the same issuer proof and otherwise return a fixed
@@ -378,7 +379,7 @@ replay is possible.
 | --- | --- |
 | Administrator-only LLM Debug | session token value is retained in raw capture |
 | Ordinary handler logs | session token value is redacted |
-| Configuration export | token-keyed values are redacted |
+| Database export | complete stored database, including secrets; transient session tokens are not persisted |
 | Inference forwarding | multi-account mode also requires issuer proof for the selected account |
 | Token-required control plane | issuer mismatch or unknown proof is rejected locally without upstream send |
 <!-- compatibility-contract:session-token-privacy:end -->
@@ -452,8 +453,8 @@ Local, empty-body, unreadable-body, transport-only, source-end, and abort cases
 continue to use their existing protocol-shaped proxy fallbacks and do not
 fabricate upstream bytes. The approved raw material is only the received final
 upstream response body. Request bodies, prompts, credentials, session tokens,
-request and response headers, beta values, attachment URLs, encrypted reasoning,
-and configuration exports keep their established ordinary client/log/Sentry
+request and response headers, beta values, attachment URLs, and encrypted reasoning
+keep their established ordinary client/log/Sentry
 controls. Header allowlisting and recursive scrubbing remain independent of
 body forwarding.
 
@@ -464,6 +465,11 @@ or interrupted captures after one hour, with earlier capacity eviction possible.
 Replay requires a complete eligible capture and obtains fresh credentials.
 Raw captures can contain sensitive values. Final upstream
 HTTP failure bodies retain their separate passthrough contract above.
+
+The administrator database download is a complete, unencrypted `.sqlite` file.
+It includes stored credentials and history, requires the current administrator
+password as well as session/CSRF/Origin checks, and excludes process-local
+captures. See the [storage runbook](sqlite-storage.md#export-the-database).
 
 ## Verification matrix and last-audited date
 

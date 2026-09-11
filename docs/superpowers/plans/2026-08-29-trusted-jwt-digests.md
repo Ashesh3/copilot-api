@@ -1,5 +1,9 @@
 # Trusted Codex JWT Digests Implementation Plan
 
+Current digest storage uses SQLite and is included in complete administrator
+database downloads. This supersedes the historical file/export exclusions in
+this plan; see the [storage runbook](../../sqlite-storage.md).
+
 > Historical implementation plan for the original digest registry. It is
 > retained only as implementation history, not as setup or maintenance
 > documentation. Use `docs/codex-desktop-managed-auth.md` for the current

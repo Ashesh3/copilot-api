@@ -7,8 +7,6 @@ const root = resolve(import.meta.dir, "../../.superpowers/test-data/auth-misc")
 mkdirSync(root, { recursive: true })
 const directory = mkdtempSync(join(root, "suite-"))
 process.env.DATA_DIR = directory
-delete process.env.TURSO_DATABASE_URL
-delete process.env.TURSO_AUTH_TOKEN
 
 afterAll(() => {
   const checked = resolve(directory)

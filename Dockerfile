@@ -19,7 +19,7 @@ COPY --from=builder /app/dist ./dist
 
 EXPOSE 4141
 
-# Default local SQLite directory; optional Turso mode does not write here.
+# Bun's built-in SQLite stores its database and sidecars in the mounted directory.
 ENV DATA_DIR=/app/data
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

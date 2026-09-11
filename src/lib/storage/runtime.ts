@@ -24,9 +24,7 @@ import { validateStatsigOverrides } from "~/routes/statsig-overrides/store"
 
 export interface StorageRuntime {
   storage: Storage
-  config:
-    | { readonly kind: "sqlite"; readonly path: string }
-    | { readonly kind: "turso"; readonly url: string }
+  config: StorageConfig
   settings: SnapshotRepository
   snapshot: SnapshotManager
   close(): Promise<void>
@@ -52,7 +50,6 @@ async function openRuntime(options: {
   const storage = options.storage ?? createStorage(selected)
   try {
     const readiness = await probeStorage(storage, {
-      kind: selected.kind,
       requireSchema: false,
     })
     if (!readiness.ready) {
@@ -88,11 +85,7 @@ async function openRuntime(options: {
     let closing: Promise<void> | undefined
     const runtime: StorageRuntime = {
       storage,
-      config: Object.freeze(
-        selected.kind === "sqlite" ?
-          { kind: "sqlite", path: selected.path }
-        : { kind: "turso", url: selected.url },
-      ),
+      config: Object.freeze({ kind: "sqlite", path: selected.path }),
       settings,
       snapshot,
       close() {

@@ -20,7 +20,7 @@ import {
   RelTime,
   TogglePill,
 } from "../components/common"
-import { DatabaseBackup } from "../components/DatabaseBackup"
+import { DatabaseExport } from "../components/DatabaseExport"
 import { Page } from "../components/Page"
 import { StoredCredentials } from "../components/StoredCredentials"
 import { PlusIcon, Trash2Icon } from "../icons"
@@ -103,32 +103,6 @@ export default function SettingsScreen() {
   const setAddingIp = (value: boolean) => {
     isAddingIpRef.current = value
     setIsAddingIp(value)
-  }
-
-  const handleExport = async () => {
-    try {
-      const response = await fetch("/dashboard/api/settings/export", {
-        credentials: "same-origin",
-      })
-      if (!response.ok) {
-        throw new Error(`Export failed with status ${response.status}`)
-      }
-      const blob = await response.blob()
-      const disposition = response.headers.get("content-disposition") ?? ""
-      const match = /filename="?([^";]+)"?/.exec(disposition)
-      const filename = match?.[1] ?? "copilot-api-config.zip"
-      const url = URL.createObjectURL(blob)
-      const link = document.createElement("a")
-      link.href = url
-      link.download = filename
-      link.click()
-      URL.revokeObjectURL(url)
-      toast.success("Config exported")
-    } catch (caught) {
-      toast.error(
-        caught instanceof Error ? caught.message : "Failed to export config",
-      )
-    }
   }
 
   const handleSaveCleanup = async () => {
@@ -683,7 +657,7 @@ export default function SettingsScreen() {
                   </HStack>
                 </VStack>
               </Card>
-              <DatabaseBackup onExport={() => void handleExport()} />
+              <DatabaseExport />
             </section>
           </div>
         </div>

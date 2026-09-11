@@ -154,10 +154,7 @@ async function prepare(input: LegacyImportInput) {
   const usedEnvironment: Record<string, string> = {}
   const env = (name: string): string | undefined => {
     if (!input.includeEnvironment) return undefined
-    if (
-      !/^[A-Z_]\w*$/i.test(name)
-      || ["DATA_DIR", "TURSO_AUTH_TOKEN", "TURSO_DATABASE_URL"].includes(name)
-    )
+    if (!/^[A-Z_]\w*$/i.test(name) || name === "DATA_DIR")
       invalid("Invalid legacy credential environment name")
     const value = (input.environment ?? process.env)[name]?.trim()
     if (value) usedEnvironment[name] = value

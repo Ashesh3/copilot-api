@@ -1,5 +1,9 @@
 # Raw LLM Debug Capture Design
 
+This historical design's configuration ZIP export references are superseded by
+the complete administrator database download. Raw captures remain process-local
+and are excluded; see the [storage runbook](../../sqlite-storage.md).
+
 **Date:** 2026-08-10
 **Status:** Approved
 

@@ -9,32 +9,27 @@ import type { SqlStatement, SqlValue } from "~/lib/storage/types"
 import { createStorage } from "~/lib/storage/client"
 import { StorageConflictError, StorageSchemaError } from "~/lib/storage/errors"
 
-import { createFakeTursoFetch, testConfig } from "./helpers/turso-transport"
-
 const sql = (sql: string) => ({ sql, args: [] })
 
-function fixture(backend: "sqlite" | "turso") {
+function fixture() {
   const dir = mkdtempSync(join(tmpdir(), "capi-contract-"))
-  const remote = backend === "turso" ? createFakeTursoFetch() : undefined
-  const storage = createStorage(
-    remote ? testConfig() : (
-      { kind: "sqlite", path: join(dir, "copilot-api.sqlite") }
-    ),
-  )
+  const storage = createStorage({
+    kind: "sqlite",
+    path: join(dir, "copilot-api.sqlite"),
+  })
   return {
     storage,
     async close() {
       await storage.close()
-      remote?.close()
       rmSync(dir, { recursive: true, force: true })
     },
   }
 }
 
-for (const backend of ["sqlite", "turso"] as const) {
+for (const backend of ["sqlite"] as const) {
   describe(`${backend} shared storage contract`, () => {
     test("FK, unique and cascading deletes work with awaited rollback", async () => {
-      const f = fixture(backend)
+      const f = fixture()
       try {
         await f.storage.atomicBatch([
           sql("CREATE TABLE parent(id INTEGER PRIMARY KEY)"),
@@ -65,7 +60,7 @@ for (const backend of ["sqlite", "turso"] as const) {
       }
     })
     test("DDL rolls back with its failing atomic batch", async () => {
-      const f = fixture(backend)
+      const f = fixture()
       try {
         await expect(
           f.storage.atomicBatch([
@@ -87,7 +82,7 @@ for (const backend of ["sqlite", "turso"] as const) {
       }
     })
     test("SQL boundaries reject transaction controls and connection mutation", async () => {
-      const f = fixture(backend)
+      const f = fixture()
       try {
         for (const statement of [
           "COMMIT",
@@ -109,7 +104,7 @@ for (const backend of ["sqlite", "turso"] as const) {
       }
     })
     test("64-bit integers BLOB null text and numeric values normalize identically", async () => {
-      const f = fixture(backend)
+      const f = fixture()
       try {
         const result = await f.storage.read((s) =>
           s.query({
@@ -139,7 +134,7 @@ for (const backend of ["sqlite", "turso"] as const) {
       }
     })
     test("queued session calls finish before committing, rejected unawaited calls roll back", async () => {
-      const f = fixture(backend)
+      const f = fixture()
       try {
         await f.storage.atomicBatch([
           sql("CREATE TABLE sample(id INTEGER PRIMARY KEY)"),
@@ -161,7 +156,7 @@ for (const backend of ["sqlite", "turso"] as const) {
   })
   describe(`${backend} session admission regressions`, () => {
     test("automatic rollback poisons the session before its queued write can autocommit", async () => {
-      const f = fixture(backend)
+      const f = fixture()
       try {
         await f.storage.atomicBatch([
           sql("CREATE TABLE sample(id INTEGER PRIMARY KEY)"),
@@ -187,7 +182,7 @@ for (const backend of ["sqlite", "turso"] as const) {
       }
     })
     test("mutating queued statement SQL cannot commit before callback rollback", async () => {
-      const f = fixture(backend)
+      const f = fixture()
       try {
         await f.storage.atomicBatch([sql("CREATE TABLE sample(id)")])
         await expect(
@@ -208,7 +203,7 @@ for (const backend of ["sqlite", "turso"] as const) {
       }
     })
     test("queued parameter arrays and binary values are copied at admission", async () => {
-      const f = fixture(backend)
+      const f = fixture()
       try {
         const rows = await f.storage.read(async (s) => {
           const bytes = new Uint8Array([1, 2, 255])
@@ -231,7 +226,7 @@ for (const backend of ["sqlite", "turso"] as const) {
       }
     })
     test("atomic batch copies statements and bound bytes before queueing", async () => {
-      const f = fixture(backend)
+      const f = fixture()
       try {
         await f.storage.atomicBatch([sql("CREATE TABLE sample(value BLOB)")])
         const bytes = new Uint8Array([1, 2])

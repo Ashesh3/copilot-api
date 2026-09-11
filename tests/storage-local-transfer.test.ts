@@ -14,8 +14,6 @@ import { createBackupStream } from "~/lib/config-backup"
 import { createPkceChallenge, OAuthStore } from "~/lib/oauth-store"
 import { AccountsRepository } from "~/lib/storage/accounts-repository"
 import { createAdminRepository } from "~/lib/storage/admin-repository"
-import { createStorage } from "~/lib/storage/client"
-import { resolveStorageConfig } from "~/lib/storage/config"
 import {
   createCredentialsRepository,
   credentialDigest,
@@ -44,9 +42,9 @@ import { bytesStream, streamBytes } from "./helpers/transfer-storage"
 
 const testRoot = resolve(
   import.meta.dir,
-  "../.superpowers/test-data/remote-transfer",
+  "../.superpowers/test-data/local-transfer",
 )
-const password = "remote-transfer-fixture-password"
+const password = "local-transfer-fixture-password"
 
 async function mutation(
   storage: Storage,
@@ -56,7 +54,7 @@ async function mutation(
   return {
     operationId: randomUUID(),
     expectedRevision: await getStoreRevision(storage),
-    actorId: "test:remote-transfer",
+    actorId: "test:local-transfer",
     kind,
     inputDigest,
   }
@@ -427,10 +425,10 @@ test("isolated transfer wrapper rejects non-owned SQL before dispatch", () => {
     expect(() => namespace.rewrite({ sql, args: [] })).toThrow()
 })
 
-test("SQLite simulates the isolated remote namespace and leaves unrelated application tables intact", async () => {
+test("SQLite transfer preserves identities and leaves unrelated application tables intact", async () => {
   await mkdir(testRoot, { recursive: true })
   const directory = await mkdtemp(join(testRoot, "simulation-"))
-  const backend = new LocalSqliteStorage(join(directory, "remote.sqlite"))
+  const backend = new LocalSqliteStorage(join(directory, "replacement.sqlite"))
   try {
     await backend.atomicBatch([
       { sql: "CREATE TABLE capi_sentinel(value TEXT)", args: [] },
@@ -455,24 +453,6 @@ test("SQLite simulates the isolated remote namespace and leaves unrelated applic
     await removeFixtureDirectory(directory)
   }
 }, 60_000)
-
-test.skipIf(process.env.CAP_STORAGE_REMOTE_TEST !== "1")(
-  "encrypted local -> remote -> local transfer preserves persisted identities and credentials",
-  async () => {
-    const config = resolveStorageConfig()
-    if (config.kind !== "turso")
-      throw new Error(
-        "Remote transfer acceptance requires explicit Turso test configuration",
-      )
-    const backend = createStorage(config)
-    try {
-      await runTransfer(backend)
-    } finally {
-      await backend.close()
-    }
-  },
-  300_000,
-)
 
 async function removeFixtureDirectory(directory: string) {
   const checked = resolve(directory)

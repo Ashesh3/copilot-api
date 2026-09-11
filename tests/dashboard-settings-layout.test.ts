@@ -109,15 +109,21 @@ test("settings groups credentials, access controls and administration after a co
   expect(access).toContain('aria-label="Trusted JWT digests"')
   const administration = markup.slice(administrationIndex)
   expect(administration).toContain("Administrator password")
-  expect(administration).toContain("Encrypted database backup")
+  expect(administration).toContain("Export database")
   expect(markup).not.toContain('role="tablist"')
 })
 
-test("settings keeps sanitized export beside backup without admin security copy", () => {
+test("settings provides one complete SQLite export with current password and sensitive-file copy", () => {
   const markup = renderSettings()
-  const backupMarkup = markup.slice(markup.indexOf("Encrypted database backup"))
+  const backupMarkup = markup.slice(markup.indexOf("Export database"))
 
-  expect(backupMarkup).toContain("Export sanitized config")
+  expect(backupMarkup).toContain("Current administrator password")
+  expect(backupMarkup).toContain("Download database")
+  expect(backupMarkup).toContain("not encrypted")
+  expect(backupMarkup).toContain("credentials")
+  expect(backupMarkup).not.toContain("Backup password")
+  expect(backupMarkup).not.toContain("Export sanitized config")
+  expect(backupMarkup).not.toContain("Encrypted database backup")
   expect(markup).not.toContain("Administrator Security")
   expect(markup).not.toContain("Password managed by the environment")
   expect(markup).not.toContain("COPILOT_ADMIN_PASSWORD_HASH")

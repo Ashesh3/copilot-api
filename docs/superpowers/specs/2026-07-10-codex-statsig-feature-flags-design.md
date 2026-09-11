@@ -1,5 +1,9 @@
 # Codex Statsig Feature Flags Design
 
+This historical design's file persistence and configuration export details are
+superseded by SQLite settings and the complete administrator database download;
+see the [storage runbook](../../sqlite-storage.md).
+
 ## Summary
 
 Add ChatGPT/Codex Desktop feature-flag controls to the existing dashboard while preserving the current Claude Code GrowthBook controls. Codex Desktop traffic redirected from `ab.chatgpt.com` will be proxied to the real Statsig service, and configured local overrides will be merged into full initialization responses.

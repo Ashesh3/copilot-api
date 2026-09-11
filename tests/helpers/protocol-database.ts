@@ -6,8 +6,6 @@ const root = resolve(import.meta.dir, "../../.superpowers/test-data/protocol")
 await mkdir(root, { recursive: true })
 const directory = await mkdtemp(join(root, "suite-"))
 process.env.DATA_DIR = directory
-delete process.env.TURSO_DATABASE_URL
-delete process.env.TURSO_AUTH_TOKEN
 
 // Import application modules only after redirecting all file-backed paths.
 const { closeStorageRuntime, initializeStorageRuntime, getStorageRuntime } =

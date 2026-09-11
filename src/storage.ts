@@ -54,8 +54,7 @@ async function hiddenPassword(): Promise<string> {
 export const storage = defineCommand({
   meta: {
     name: "storage",
-    description:
-      "Explicit read-only legacy import and encrypted logical backup/restore; database selection never transfers data",
+    description: "Local SQLite legacy import and encrypted backup/restore",
   },
   subCommands: {
     "discard-incomplete": defineCommand({
@@ -157,7 +156,7 @@ export const storage = defineCommand({
       meta: {
         name: "restore",
         description:
-          "Restore to the explicitly configured empty replacement DATA_DIR or Turso database; serving database is retained for rollback",
+          "Restore to an empty replacement SQLite DATA_DIR; retain the serving database for rollback",
       },
       args: { input: { type: "string", required: true } },
       async run({ args }) {

@@ -82,8 +82,6 @@ test("a real read-only CLI command creates no history run and leaves a live gate
         env: {
           ...process.env,
           DATA_DIR: fixture.directory,
-          TURSO_DATABASE_URL: "",
-          TURSO_AUTH_TOKEN: "",
         },
         stdout: "pipe",
         stderr: "pipe",
