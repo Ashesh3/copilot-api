@@ -18,12 +18,10 @@ import {
 } from "../src/lib/llm-debug-log"
 import { LocalSqliteStorage } from "../src/lib/storage/local-sqlite"
 import { migrateStorage } from "../src/lib/storage/migrations"
-import { TursoStorage } from "../src/lib/storage/turso"
 import {
   createHistoryRuntime,
   type HistoryRuntime,
 } from "../src/lib/telemetry-writer"
-import { createFakeTursoFetch, testConfig } from "./helpers/turso-transport"
 
 let storage: LocalSqliteStorage
 let history: HistoryRuntime
@@ -195,43 +193,6 @@ test("database history lifecycle cannot reload, interrupt or delete process-loca
   // eslint-disable-next-line require-atomic-updates -- Isolated sequential test lifecycle.
   history = await createHistoryRuntime(storage, { autoFlush: false })
   expect((await listLlmDebugLogs()).count).toBe(0)
-})
-
-test("debug operations send no Turso requests and keep raw results only in memory", async () => {
-  await history.close(500)
-  const transport = createFakeTursoFetch()
-  const remote = new TursoStorage(testConfig())
-  let runtime: HistoryRuntime | undefined
-  try {
-    await migrateStorage(remote)
-    runtime = await createHistoryRuntime(remote, { autoFlush: false })
-    const requestCount = transport.requests.length
-    const id = start()
-    finishLlmDebugLog(id, {
-      body: '{"output":"active-secret", "api_key":"response-secret"}',
-      headers: { "set-cookie": "private=response-cookie" },
-      status: 200,
-      statusText: "OK",
-    })
-    const entry = await getLlmDebugLog(id)
-    expect(entry).toMatchObject({ status: "complete", replayable: true })
-    expect(entry?.request.headers.authorization).toBe("Bearer active-secret")
-    expect(entry?.response?.body).toBe(
-      '{"output":"active-secret", "api_key":"response-secret"}',
-    )
-    expect(entry?.response?.headers["set-cookie"]).toBe(
-      "private=response-cookie",
-    )
-    expect((await listLlmDebugLogs()).count).toBe(1)
-    await clearLlmDebugLogs()
-    expect(transport.requests.length).toBe(requestCount)
-    expect(runtime.writer.status().pendingRecords).toBe(0)
-  } finally {
-    await clearLlmDebugLogs()
-    await runtime?.close(500)
-    await remote.close()
-    transport.close()
-  }
 })
 
 test("debug remains available while the selected database is unavailable", async () => {

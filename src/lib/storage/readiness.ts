@@ -1,28 +1,20 @@
 import type { StorageFailureReason } from "~/lib/storage/errors"
 import type { Storage } from "~/lib/storage/types"
 
-import {
-  StorageSchemaError,
-  StorageUnavailableError,
-  storageError,
-} from "~/lib/storage/errors"
-import { TursoStorage } from "~/lib/storage/turso"
+import { StorageUnavailableError, storageError } from "~/lib/storage/errors"
 
 export interface StorageReadiness {
   ready: boolean
-  engine: "sqlite" | "turso"
+  engine: "sqlite"
   sqliteVersion?: string
-  engineVersion?: string
   reason?: StorageFailureReason | "schema_missing" | "schema_invalid"
 }
 
 export async function probeStorage(
   storage: Storage,
-  options: { kind?: "sqlite" | "turso"; requireSchema?: boolean } = {},
+  options: { requireSchema?: boolean } = {},
 ): Promise<StorageReadiness> {
-  const engine =
-    options.kind ?? (storage instanceof TursoStorage ? "turso" : "sqlite")
-  const result: StorageReadiness = { ready: false, engine }
+  const result: StorageReadiness = { ready: false, engine: "sqlite" }
   try {
     await storage.read(async (session) => {
       const ping = await session.query({ sql: "SELECT 1 AS ok", args: [] })
@@ -38,23 +30,6 @@ export async function probeStorage(
         throw new StorageUnavailableError("unsupported_engine")
       result.sqliteVersion = sqlite[0].version
     })
-    if (engine === "turso") {
-      try {
-        const rows = await storage.read((session) =>
-          session.query({ sql: "SELECT turso_version() AS version", args: [] }),
-        )
-        if (
-          typeof rows[0]?.version !== "string"
-          || !/^[\w.+ -]{1,80}$/.test(rows[0].version)
-        )
-          throw new StorageUnavailableError("unsupported_engine")
-        result.engineVersion = rows[0].version
-      } catch (error) {
-        if (error instanceof StorageSchemaError)
-          throw new StorageUnavailableError("unsupported_engine")
-        throw error
-      }
-    }
     if (options.requireSchema !== false) {
       const rows = await storage.read((session) =>
         session.query({

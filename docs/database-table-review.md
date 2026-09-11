@@ -1,15 +1,15 @@
 # Database table review
 
-This source audit covers the 29 application tables in schema 2. Schema 3 removes
-`capi_debug`, leaving 28 application tables. Version 5.1.0 schema 5 also removes
-`capi_activity`, leaving 27 tables, and schema 4 adds per-account integration IDs. The table definitions come from
+This source audit covers the 27 application tables in schema 5. Schema 3 removed
+`capi_debug`, schema 4 added per-account integration IDs, and schema 5 removed
+`capi_activity`. The table definitions come from
 [migration 001](../src/lib/storage/migrations/001-initial.ts),
 [migration 002](../src/lib/storage/migrations/002-gateway-secrets.ts), and the
 [current schema](../src/lib/storage/schema.ts).
 
 Tables are created regardless of whether their associated feature is used.
 Their existence does not establish live use or stored row counts. No live
-database was queried for this review. SQLite/Turso system objects and indexes
+database was queried for this review. SQLite system objects and indexes
 are excluded from the count. Every baseline application table has a source
 consumer; none is wholly unused.
 
@@ -20,9 +20,9 @@ feature.
 
 | Table | Why it exists / what it stores | Actual retention | Review direction |
 | --- | --- | --- | --- |
-| [capi_metadata](../src/lib/storage/migrations.ts) | Store identity, schema/config revisions, Activity clear generation, transfer markers, and routing lifetime counters. Startup and configuration reads/writes use these values. | Persistent small set; temporary transfer markers removed on completion. | Keep. Remove only retired keys through migrations. |
+| [capi_metadata](../src/lib/storage/migrations.ts) | Store identity, schema/config revisions, transfer markers, and routing lifetime counters. Startup and configuration reads/writes use these values. | Persistent small set; temporary transfer markers removed on completion. | Keep. Remove only retired keys through migrations. |
 | [capi_schema_migrations](../src/lib/storage/migrations.ts) | Applied migration versions, names, checksums, and timestamps. Startup checks database compatibility. | One row per applied migration. | Keep. |
-| [capi_applied_operations](../src/lib/storage/operations.ts) | Mutation receipts: operation ID, actor, input digest, committed revision, and safe result metadata. Used to reconcile uncertain commits and avoid duplicate writes. | History-batch receipts pruned after 24 hours during flush; other receipts have no routine cleanup. | Keep the mechanism; review a bounded receipt lifetime. |
+| [capi_applied_operations](../src/lib/storage/operations.ts) | Mutation receipts: operation ID, actor, input digest, committed revision, and safe result metadata. Used to reconcile uncertain commits and avoid duplicate writes. | History-batch receipts pruned after 24 hours during flush and idle maintenance; other receipts have no routine cleanup. | Keep the mechanism; review a bounded receipt lifetime. |
 | [capi_settings](../src/lib/storage/settings-repository.ts) | Current app configuration, replacements, model redirects/settings/routing/fallbacks, feature flags, and Statsig overrides, with revisions. | Current values overwritten; persistent. | Keep. Already consolidates eight settings domains. |
 | [capi_accounts](../src/lib/storage/accounts-repository.ts) | Stable upstream account IDs, domain/user/login/label, enabled/deletion state, and validation/credential revisions. Used by account management and routing. | Persistent; deleted accounts leave metadata tombstones. | Keep for Copilot accounts. Stable IDs preserve associations. |
 | [capi_account_credentials](../src/lib/storage/accounts-repository.ts) | Recoverable upstream OAuth token for each account. Loaded into the account pool for upstream authentication. | Replaced on credential changes; deleted on account removal. | Keep data. Separate table permits metadata reads without tokens. |
@@ -43,9 +43,7 @@ feature.
 | [capi_oauth_refresh](../src/lib/storage/oauth-repository.ts) | Refresh-token digests and grant binding. Used to issue additional access tokens. | Deliberately reusable until explicit revocation; no cleanup. | Possible consolidation with access tokens while preserving their distinct authority. |
 | [capi_usage_minutes](../src/lib/storage/history-repository.ts) | Minute/model input/output token totals and request counts. Powers 5-hour and 7-day usage summaries; no request/response bodies. | All committed buckets retained, including imported history; the runtime usage reader requests only 7 days. | Keep counters; decide whether older minute detail is useful. |
 | [capi_usage_lifetime](../src/lib/storage/history-repository.ts) | Singleton lifetime token/request totals and first-request time. Used by usage summaries. | Persistent singleton. | Keep if lifetime totals are wanted; permits independent pruning of old minute detail. |
-| [capi_routing_minutes](../src/lib/storage/history-repository.ts) | Minute aggregates of calls, retries, failovers, outcomes, models, routes, and accounts. Powers the routing dashboard. | 24-hour detail, pruned during history flushes; lifetime totals retained in metadata. | Optional analytics. Simplify unused dimension/account columns if kept. |
-| [capi_activity](../src/lib/logger.ts) | Sanitized handler log level, handler, message, timestamps, clear generation, and size. Used by the separate Activity page; does not contain LLM Debug body captures. | 7 days, at most 50,000 records or 64 MiB; pressure can evict sooner. Explicit clear; expiry deletes during history flushes. | Optional durable diagnostics; memory-only would lose Activity history on restart. |
-| [capi_debug](../src/lib/storage/migrations/003-memory-only-debug.ts) | Schema-2 LLM Debug request/response captures and replay details. This was the source of debug-page SQL reads. | Schema 3 drops the table. Captures now live in memory: success 10 minutes, all other statuses 1 hour from `startedAt`, at most 2,000 entries with a shared 16 MiB capture budget. | Removed from persistence. Clear removes captures immediately; restart loses them. |
+| [capi_routing_minutes](../src/lib/storage/history-repository.ts) | Minute aggregates of calls, retries, failovers, outcomes, models, routes, and accounts. Powers the routing dashboard. | 24-hour detail, pruned during history flushes and idle maintenance; lifetime totals retained in metadata. | Optional analytics. Simplify unused dimension/account columns if kept. |
 | [capi_imports](../src/lib/storage/legacy-import.ts) | Completed legacy-import receipt with source digest, revision, timestamp, and counts. Prevents duplicate import of the same source. | Permanent; used by import commands. | Could move into metadata or an existing receipt store while preserving deduplication. |
 | [capi_process_runs](../src/lib/storage/history-repository.ts) | History-collector startup, last flush, clean shutdown, and end timestamps. Detects potentially unflushed prior runs. | One row per startup; no cleanup. | Could consolidate with collection-gap state or retain only necessary recent runs. |
 | [capi_collection_gaps](../src/lib/storage/history-repository.ts) | Lost-record/byte counts and unknown intervals after queue drops, uncertain writes, or unclean shutdowns. Feeds collection-status indicators. | No cleanup; reader sums all rows. | Could compact into counters plus recent incident detail while retaining incomplete-history reporting. |
@@ -74,14 +72,14 @@ feature.
    could replace several one-to-one secret tables, but requires careful access,
    deletion, export, and restore rules and saves little compared with pruning
    accumulated rows.
-5. **Decide whether optional history should survive restart.** Activity and
-   routing analytics have active readers but could be memory-only if their
-   history is disposable. LLM Debug is already memory-only under schema 3.
+5. **Decide whether optional history should survive restart.** Routing analytics
+   have active readers but could be memory-only if their history is disposable.
+   Activity is removed and LLM Debug is already memory-only.
 
 Small schema candidates also exist: the routing writer always uses
 `dimension_key='aggregate'` and never fills SQL `account_id`; account breakdown
-is inside the aggregate JSON. Activity never fills its SQL `account_id` either.
-Their account indexes and gateway `last_used_at` have no current runtime use.
+is inside the aggregate JSON. Its account index and gateway `last_used_at` have
+no current runtime use.
 These should be changed through a schema migration with their consumers, since
 startup validates the expected schema.
 
@@ -91,23 +89,22 @@ revocation, even when imported expiry metadata exists; see the
 age would change client compatibility. Keep gateway credentials separate from
 inference-only authority even if their storage is later consolidated.
 
-Activity expiry is enforced on reads, but physical pruning occurs during
-nonempty history flushes. The repository's standalone `prune()` method has no
-production caller, so an idle database can retain expired Activity rows until
-the next flush.
+History idle maintenance renews process-run leases and prunes routing-minute
+detail and history-batch receipts even without a nonempty flush. It does not
+prune committed usage history or general mutation receipts.
 
 ## LLM Debug correction and upgrade
 
 The [capture store](../src/lib/llm-debug-log.ts) and
 [capture budget](../src/lib/debug-capture.ts) now use process memory. Migration
 003 drops the old table and its generation metadata when the upgraded server
-initializes the selected SQLite or Turso database. New backups exclude debug
+initializes the local SQLite database. Database downloads and CLI archives exclude debug
 captures; [restore](../src/lib/storage/restore.ts) accepts schema-2 backups while
 skipping their retired debug records and generation metadata.
 
-This does not erase existing backup files, database-provider snapshots, or
-provider retention copies. A checked-out code change does not establish that a
+This does not erase existing backup files or operator retention copies.
+A checked-out code change does not establish that a
 deployment has run the migration. Console and Sentry payload logging retain
 their requested behavior; the correction covers the LLM Debug page and its
-database storage. Historical design documents remain unchanged as records of
-the earlier implementation.
+database storage. Current setup, native download, and recovery procedures are
+in the [SQLite runbook](sqlite-storage.md).

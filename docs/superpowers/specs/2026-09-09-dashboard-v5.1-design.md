@@ -8,15 +8,15 @@ Use the existing favicon image in the sidebar heading with rounded corners. Remo
 
 Accounts use compact rows with identity, status, model count and accessible icon actions. Existing skeleton styling covers the initial account fetch. A row can expand for reconnect and integration settings without making every row taller.
 
-Settings remains one page unless the user chooses tabs. Group compact credentials/transcription, administration/backup, and access controls. Put server facts in a compact summary. Use content-sized cards and bounded, independently scrolling allowlists, so a long IP list does not displace JWT controls or create blank grid cells. Preserve all existing credential, backup, password, IP and JWT operations. Verify desktop, narrow viewport, light and dark themes.
+Settings remains one page unless the user chooses tabs. Group compact credentials/transcription, administration, and access controls. Put server facts in a compact summary. Use content-sized cards and bounded, independently scrolling allowlists, so a long IP list does not displace JWT controls or create blank grid cells. Preserve credential, password, IP and JWT operations. The current Export database action replaces the old export and backup panels; see the [storage runbook](../../sqlite-storage.md). Verify desktop, narrow viewport, light and dark themes.
 
 ## Exact LLM debug capture
 
-Retain original request/response body strings, headers and URLs without secret filtering or JSON/SSE reconstruction. Keep successful retention at ten minutes and unsuccessful retention at one hour. Capture must not alter or delay the client stream. Preserve true read/transport failure reporting; do not claim an incomplete capture is complete. Remove replay denial and warnings caused solely by redaction. Old already-redacted entries cannot be reconstructed. Other logs and sanitized configuration export keep their existing behavior.
+Retain original request/response body strings, headers and URLs without secret filtering or JSON/SSE reconstruction. Keep successful retention at ten minutes and unsuccessful retention at one hour. Capture must not alter or delay the client stream. Preserve true read/transport failure reporting; do not claim an incomplete capture is complete. Remove replay denial and warnings caused solely by redaction. Old already-redacted entries cannot be reconstructed. Other logs keep their existing behavior. Current native database downloads contain stored secrets and exclude process-local captures.
 
 User followup: LLM Debug must label fallback-generated attempts with a warning/info badge and clear reason, source and resulting model; distinguish cached continuation from a new HTTP 422. Preserve pending/failed attempt metadata as well as successful responses.
 
-Upstream sync: PR119 merged memory-only debug storage to master as e9e06e6. Preserve this contract: no captured data in SQLite/Turso or backups, clear/restart discard captures, exact TTL timer removes idle captures. Large transient stream buffers may spill anonymously and close after collection. Upstream applied migration003 remains byte-for-byte unchanged; account override migration becomes004 and Activity removal005.
+Upstream sync: PR119 merged memory-only debug storage to master as e9e06e6. Preserve this contract: no captured data in SQLite or backups, clear/restart discard captures, exact TTL timer removes idle captures. Large transient stream buffers may spill anonymously and close after collection. Upstream applied migration003 remains byte-for-byte unchanged; account override migration becomes004 and Activity removal005.
 
 ## Activity removal (user revision)
 

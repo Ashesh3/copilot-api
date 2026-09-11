@@ -50,7 +50,7 @@ test("repository configuration does not support a gateway key file", async () =>
   }
 })
 
-test("Docker Compose loads ordinary environment files and forwards the Turso pair", async () => {
+test("Docker Compose loads ordinary environment files and persists SQLite in its data volume", async () => {
   const compose = YAML.parse(await readRepositoryFile("docker-compose.yml"))
   const root = requireRecord(compose, "Docker Compose document")
   const services = requireRecord(root.services, "services")
@@ -64,8 +64,7 @@ test("Docker Compose loads ordinary environment files and forwards the Turso pai
   )
   expect(copilotApi.env_file).toEqual([{ path: ".env", required: false }])
   expect(environment.some((value) => value.startsWith("OP_"))).toBe(false)
-  expect(environment).toContain("TURSO_DATABASE_URL")
-  expect(environment).toContain("TURSO_AUTH_TOKEN")
+  expect(copilotApi.volumes).toContain("copilot-data:/app/data")
 })
 
 test("deployment defaults remain portable and omit obsolete setup guidance", async () => {
@@ -93,7 +92,7 @@ test("deployment defaults remain portable and omit obsolete setup guidance", asy
   expect(compose).not.toContain("setup.md")
   expect(compose).toContain("COPILOT_ADMIN_ORIGIN=${COPILOT_ADMIN_ORIGIN:-}")
   expect(example).not.toContain("COPILOT_PORT")
-  expect(example).toContain("TURSO_DATABASE_URL")
+  expect(example).toContain("DATA_DIR=")
   expect(example).not.toContain("COPILOT_ADMIN_PASSWORD_HASH=")
   expect(readme).not.toContain("recent password reauthentication")
   expect(security).toContain("2026 public-exposure remediation")

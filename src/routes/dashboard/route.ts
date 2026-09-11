@@ -68,6 +68,7 @@ import {
   createDashboardCredentialRoutes,
   createDashboardProviderSecretRoutes,
 } from "./credentials"
+import { handleExportDatabase } from "./database-export"
 import {
   handleClearFallbackCache,
   handleGetFallbacks,
@@ -75,8 +76,6 @@ import {
 } from "./fallbacks"
 import { handleReplayLlmDebugLog } from "./llm-debug-replay"
 import { DASHBOARD_HTML } from "./page-generated"
-import { handleBackupSettings } from "./settings-backup"
-import { handleExportSettings } from "./settings-export"
 
 export const dashboardRoutes = new Hono()
 
@@ -233,8 +232,7 @@ dashboardRoutes.delete("/api/llm-debug", handleClearLlmDebugLogs)
 
 // Settings
 dashboardRoutes.get("/api/settings", handleGetSettings)
-dashboardRoutes.get("/api/settings/export", handleExportSettings)
-dashboardRoutes.post("/api/settings/backup", handleBackupSettings)
+dashboardRoutes.post("/api/database/export", handleExportDatabase)
 dashboardRoutes.post(
   "/api/settings/codex-cleanup-model",
   handleSetCodexCleanupModel,

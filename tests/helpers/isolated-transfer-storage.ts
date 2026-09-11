@@ -40,11 +40,9 @@ export function isolatedNamespace(underlying: Storage) {
 
   function rewrite(statement: SqlStatement): SqlStatement {
     if (
-      [
-        "SELECT 1 AS ok",
-        "SELECT sqlite_version() AS version",
-        "SELECT turso_version() AS version",
-      ].includes(statement.sql)
+      ["SELECT 1 AS ok", "SELECT sqlite_version() AS version"].includes(
+        statement.sql,
+      )
       && statement.args.length === 0
     )
       return statement

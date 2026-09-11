@@ -49,8 +49,9 @@ export const SESSION_TOKEN_PRIVACY_CONTRACT = [
     behavior: "session token value is redacted",
   },
   {
-    surface: "Configuration export",
-    behavior: "token-keyed values are redacted",
+    surface: "Database export",
+    behavior:
+      "complete stored database, including secrets; transient session tokens are not persisted",
   },
   {
     surface: "Inference forwarding",

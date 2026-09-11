@@ -42,7 +42,6 @@
   },
   "dependencies": {
     "@sentry/bun": "^10.65.0",
-    "@tursodatabase/serverless": "1.4.0",
     "citty": "^0.1.6",
     "clipboardy": "^5.0.0",
     "consola": "^3.4.2",

@@ -36,7 +36,7 @@ Parent confirmed retention of the compatible bearer lookup design with explicit 
 
 ## Verification
 
-49 tests passed / 0 failed, 233 assertions in fresh local runs with synthetic credentials, isolated DATA_DIR/TEMP/TMP, and Turso variables cleared before imports:
+49 tests passed / 0 failed, 233 assertions in fresh local runs with synthetic credentials and isolated DATA_DIR/TEMP/TMP:
 
 - Independent triage probes: 2 pass, 6 assertions; PKCE standard S256 vector and one-character manual gateway plus actual Argon2 verification.
 - Administrator auth: 13 pass, 76 assertions; setup, login, password changes, rollback, session invalidation, Argon2 bounds, and OAuth preservation.

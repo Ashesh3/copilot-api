@@ -10,8 +10,6 @@ const testRoot = resolve(
   "../.superpowers/test-data/astra-storage",
 )
 process.env.DATA_DIR = testRoot
-delete process.env.TURSO_DATABASE_URL
-delete process.env.TURSO_AUTH_TOKEN
 
 const auth = await import("~/lib/admin-auth")
 const { mergeConfigWithDefaults, setConfigForTest } = await import(

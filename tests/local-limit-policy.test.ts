@@ -68,7 +68,6 @@ test("application source contains no local traffic or resource limits", () => {
       path.join("src", "lib", "attachments.ts"),
       path.join("src", "lib", "shutdown.ts"),
       path.join("src", "lib", "storage", "local-sqlite.ts"),
-      path.join("src", "lib", "storage", "turso.ts"),
       path.join("src", "lib", "storage", "types.ts"),
       path.join("src", "lib", "storage", "transfer-records.ts"),
     ]),

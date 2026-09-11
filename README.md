@@ -23,10 +23,10 @@ workflows.
 > upstream restrictions.
 
 > [!IMPORTANT]
-> **Upgrading to 4.0.0:** durable state now lives in SQLite (default) or optional Turso.
+> **Persistent data:** durable state lives in local SQLite using Bun's built-in driver.
 > Existing JSON files and credential environment variables are not loaded automatically.
 > Keep the old data, import explicitly into an empty replacement database, verify it,
-> and only then switch the serving deployment. See the [migration runbook](docs/turso-storage.md#explicit-legacy-import).
+> and only then switch the serving deployment. See the [migration runbook](docs/sqlite-storage.md#explicit-legacy-import).
 
 ## Contents
 
@@ -142,7 +142,7 @@ Responses compaction.
 
 - Integrated dashboard for usage, sessions, environments, request inspection,
   replay, model redirects/settings/routing, custom providers, replacements,
-  feature flags, IP allowlists, and configuration export.
+  feature flags, IP allowlists, and complete SQLite database download.
 - Current GitHub Copilot quota reporting through both the CLI and `GET /usage`.
 - Durable minute/model request and token aggregates plus lifetime totals, with
   collection-gap indicators for lost or uncertain telemetry.
@@ -172,7 +172,7 @@ bun src/main.ts admin --setup-code
 bun src/main.ts start --host 127.0.0.1
 ```
 
-Without the optional Turso pair, this uses `copilot-api.sqlite` in `DATA_DIR`
+This uses `copilot-api.sqlite` in `DATA_DIR`
 (default `~/.local/share/copilot-api`). Open
 `http://127.0.0.1:4141/dashboard` and enter the printed setup code, a new long
 random gateway key, and an administrator password. The code expires after 15
@@ -181,7 +181,7 @@ minutes and can be used once. No GitHub account is needed to open setup.
 Add GitHub.com or GitHub Enterprise Cloud accounts through the dashboard. The
 account registry and credentials are stored in the selected database. Existing
 JSON files and environment credentials are imported only through an explicit
-migration command; see the [storage runbook](docs/turso-storage.md).
+migration command; see the [storage runbook](docs/sqlite-storage.md).
 
 List the models available to that account:
 
@@ -416,8 +416,8 @@ The dashboard is the recommended interface for these controls:
 - **Model routing** enables or disables a model for an individual Copilot
   account.
 
-These settings persist in the selected database and can be inspected through
-the dashboard and sanitized configuration export.
+These settings persist in local SQLite and can be inspected through the
+dashboard. Administrator database downloads include their committed values.
 
 ### Custom OpenAI-compatible providers
 
@@ -508,7 +508,7 @@ Open `/dashboard` on the same host as the API. The dashboard includes:
 - compact GitHub account controls with optional per-account integration IDs;
 - custom provider configuration;
 - managed IP allowlists and managed inference-only Codex JWT digests; and
-- settings inspection and ZIP export.
+- settings inspection and complete SQLite database download.
 
 On first use, the dashboard prompts for a CLI-issued setup code, a new gateway
 key, and an administrator password. Later logins require the key and password. The browser receives a Secure, HttpOnly,
@@ -532,7 +532,7 @@ docker compose up -d copilot-api
 
 LLM Debug retains original outbound request and response bodies, URLs, headers,
 and error details in server memory only, without sensitive-value filtering or
-JSON/SSE reconstruction. Captures never enter SQLite, Turso, or application backups.
+JSON/SSE reconstruction. Captures never enter SQLite or application backups.
 Successful captures expire after ten minutes; failed or
 interrupted captures after one hour. Capacity limits can evict entries sooner.
 Replay supports complete replayable Chat Completions and Responses captures,
@@ -542,8 +542,8 @@ expired entries and removed or changed providers remain unavailable.
 Large response captures use an anonymous temporary file while collecting the
 stream; the file is removed when capture finishes, and retained captures are
 process-local. Clear and restart remove captures. Capture follows downstream consumption with bounded read-ahead.
-Read-only containers need a writable temporary directory, supplied by
-the Turso Compose example's `/tmp` tmpfs mount.
+Read-only containers need writable mounts for `/app/data` and a temporary
+directory such as `/tmp`.
 
 In GitHub Accounts, expand an account's settings to enter an Integration ID.
 Leave it blank to use the hardcoded `copilot-developer-cli` default shown in the
@@ -563,11 +563,13 @@ LLM Debug has its own process-local count and memory budget; pressure evicts
 whole captures instead of rewriting captured bodies. Collection-gap indicators
 report known loss and uncertainty instead of claiming complete history.
 
-Sanitized ZIP export excludes credential and history tables and replaces
-secret-like configuration values with `[REDACTED]`. It cannot restore secrets.
-For recovery or moving between SQLite and Turso, use the separate
-password-encrypted logical backup and restore commands in the
-[storage runbook](docs/turso-storage.md).
+Settings provides **Export database**. Enter the current administrator password
+to download a consistent `.sqlite` snapshot of all committed database state,
+including credentials, administrator state, settings, and history. The file
+contains secrets and is **not encrypted**. The endpoint requires an administrator
+session, the current password, and the existing CSRF and Origin checks.
+See the [storage runbook](docs/sqlite-storage.md) for stopped-service restoration
+and the retained password-encrypted CLI backup and restore commands.
 
 ## Claude Code and Codex integrations
 
@@ -765,18 +767,17 @@ Run a command with `--help` to inspect the installed version's current options.
 
 ## Configuration and persistent data
 
-The default database is `copilot-api.sqlite` under `DATA_DIR`, which defaults
+The database is `copilot-api.sqlite` under `DATA_DIR`, which defaults
 to `~/.local/share/copilot-api` (`/app/data` in Docker). Mount the whole directory
-for SQLite's database, WAL, and SHM files. Setting both `TURSO_DATABASE_URL` and
-`TURSO_AUTH_TOKEN` selects remote Turso; setting just one is a configuration
-error. A remote outage never falls back to local SQLite.
+for SQLite's database, WAL, and SHM files. Persistence uses Bun's built-in
+`bun:sqlite`; no separate database server or SQLite package is required.
 
 Accounts, upstream/provider secrets, administrator and gateway/OAuth records,
-settings, IP policy, usage, and bounded diagnostic history share the selected
+settings, IP policy, usage, and routing history share this local
 database. Runtime JSON files are no longer read or written. Existing JSON
 files and selected environment credentials require `storage import-legacy`;
-source files remain untouched. See the [storage runbook](docs/turso-storage.md)
-for preview, apply, backup, restore, readiness, and storage-switch procedures.
+source files remain untouched. See the [storage runbook](docs/sqlite-storage.md)
+for preview, apply, database export, restore, and readiness procedures.
 
 **Gateway credential upgrade (schema 2):** old digest-only gateway keys are
 deleted rather than recovered or accepted through a compatibility fallback.
@@ -793,15 +794,13 @@ environment variables take precedence.
 
 **Upgrading to 5.0.0:** the bundled 1Password/Varlock integration is removed.
 Put actual deployment values in `.env` or the process environment before
-updating the container. In particular, set both Turso values explicitly if
-you use the remote database; neither value being configured selects SQLite.
+updating the container.
 This does not change database-backed account, gateway, provider, or Groq keys.
 
 | Variable | Scope | Purpose |
 | --- | --- | --- |
 | `COPILOT_INTEGRATION_ID` | Direct and Docker | Copilot integration identifier; defaults to `copilot-developer-cli` for the stable Copilot CLI model catalog. Override it when the deployment has its own assigned integration ID. |
-| `DATA_DIR` | Direct and Docker | Local SQLite directory; unused for persistence in Turso mode |
-| `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN` | Direct and Docker | Optional pair selecting remote Turso; neither selects local SQLite |
+| `DATA_DIR` | Direct and Docker | Local SQLite directory; the tracked Compose service fixes this to its `/app/data` volume |
 | `COPILOT_ADMIN_ORIGIN` | Direct and Docker | Exact browser origin allowed for dashboard mutations; set this explicitly for a proxied deployment |
 | `COPILOT_TRUSTED_PROXY_CIDRS` | Direct and Docker | Comma-separated socket-peer CIDRs allowed to supply forwarding headers; defaults to loopback only |
 | `COPILOT_PUBLIC_BASE_URL` | Direct and Docker | Optional externally reachable absolute HTTP(S) base for bridge and Direct Connect callback URLs; may include a deployment path prefix |
@@ -825,7 +824,7 @@ Use `--port` and update the container port mapping when changing the port.
 
 ## Docker
 
-The image defaults to local SQLite in `/app/data`. Its entrypoint accepts
+The image stores SQLite in `/app/data`. Its entrypoint accepts
 `admin`, `storage`, `config`, `auth`, `debug`, and `check-usage` directly; other
 arguments start the server. No runtime GitHub or gateway environment credential
 is required.
@@ -846,7 +845,7 @@ docker compose up -d
 Use the code in `/dashboard` to choose the initial gateway key and password,
 then add accounts and provider credentials. The host port is bound to loopback.
 Configure `COPILOT_ADMIN_ORIGIN` and exact `COPILOT_TRUSTED_PROXY_CIDRS` for an
-external reverse proxy. Store their values and the optional Turso pair directly
+external reverse proxy. Store their values directly
 in `.env`. The container starts the application directly without fetching
 environment values from an external secret manager.
 
@@ -855,9 +854,6 @@ COPILOT_HOST=0.0.0.0
 COPILOT_ADMIN_ORIGIN=https://your-domain.example
 # Replace with the actual reverse-proxy socket peer ranges.
 COPILOT_TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128
-# Leave both unset for local SQLite.
-TURSO_DATABASE_URL=
-TURSO_AUTH_TOKEN=
 ```
 
 Image and Compose healthchecks use `/health/ready`: `200` means the selected
@@ -865,22 +861,27 @@ database is available and no incomplete transfer blocks service; `503` means
 unavailable. `/health` and `/health/health` remain metadata-free liveness
 routes. A healthy container does not prove an upstream account is usable.
 
-### Optional remote mode and read-only root filesystem
+### Direct container with persistent SQLite
 
-With both Turso variables set, the application does not use `/app/data` for
-persistence and needs no data volume. The default Compose volume may remain
-mounted unused. A direct-container example is:
+Use the same mounted data directory for setup and the serving container.
+This example preserves the Compose volume name:
 
 ```sh
-docker run -d --name copilot-api --read-only --restart unless-stopped \
-  -p 127.0.0.1:4141:4141 --env-file ../copilot-api.env copilot-api
+docker build -t copilot-api .
+docker run --rm -it -v copilot-api_copilot-data:/app/data \
+  copilot-api admin --setup-code
+docker run -d --name copilot-api --restart unless-stopped \
+  -p 127.0.0.1:4141:4141 -v copilot-api_copilot-data:/app/data \
+  -e COPILOT_HOST=0.0.0.0 copilot-api
 ```
 
-Build the image first with `docker build -t copilot-api .`; include the paired
-Turso settings and `COPILOT_HOST=0.0.0.0` in that operator-owned environment
-file. Use the same pair when issuing the setup code. The storage runbook covers
-empty-target restore and migration. These examples describe this checkout;
-validate the image and deployment configuration in your environment.
+For an existing configured volume, omit the setup-code command. Add an
+operator-owned `--env-file` for any required origin and proxy settings. Database
+exports use temporary space inside the writable `/app/data` volume. A read-only
+root filesystem also needs a writable `/tmp` mount for transient debug capture
+buffers. The [storage runbook](docs/sqlite-storage.md#restore-a-database-download)
+covers restoring a download into a replacement volume while preserving the
+original for rollback.
 
 ### Updating a Compose checkout
 
@@ -991,10 +992,10 @@ returns `200` with `{ "text": "..." }`.
   keys, OAuth/admin digests, custom headers, routing policy, allowlists, and
   request history. Sensitive files and the directory are created with
   restrictive permissions where the platform supports them.
-- **Exports are sanitized, not backups.** Dashboard ZIP exports redact
-  secret-like configuration and require an authenticated administrator session.
-  Use the password-encrypted logical backup for full recovery; protect the
-  backup password and operator-owned output.
+- **Protect database downloads.** The administrator `.sqlite` download includes
+  credentials, settings, and history without encryption. It requires the current
+  administrator password, a dashboard session, and CSRF/Origin checks. Store it
+  securely; local CLI backup and restore also support password-encrypted archives.
 - **Restrict attachment network authority.** Authenticated callers can cause
   attachment/file recovery to fetch any runtime-valid HTTP(S) destination and
   redirect, including internal and metadata-style targets. Only abort, timeout,
@@ -1052,12 +1053,12 @@ configuration inherited those maximum-duration directives and reload Nginx.
 
 ### The dashboard asks for the administrator password again
 
-Current builds require the gateway key and administrator password only when
-creating or signing into the dashboard session. LLM Debug, sanitized
-configuration export, provider management, and IP policy then use that session
-without a second password prompt. Hard-refresh the dashboard if an older
-bundled script is still cached. A current bundle contains no
-`/dashboard/auth/reauth` request.
+The gateway key and administrator password establish the dashboard session.
+LLM Debug, provider management, and IP policy use that session without another
+password prompt. **Export database** additionally asks for the current
+administrator password because the download contains the complete stored
+database and secrets. Hard-refresh if an older bundle still shows configuration
+ZIP export or the previous backup panel.
 
 ### A model is missing or rejected
 
@@ -1078,8 +1079,9 @@ automatically routed to custom providers.
 
 ### A protected Docker container is unhealthy
 
-Check `/health/ready` and the selected database connection. A partial Turso
-pair, unavailable database, or incomplete import/restore prevents readiness.
+Check `/health/ready`, the `/app/data` volume mount, local disk space, and directory
+permissions. An unavailable SQLite database or incomplete import/restore
+prevents readiness.
 
 ### Authentication or path diagnostics
 

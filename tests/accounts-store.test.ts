@@ -40,8 +40,6 @@ process.stdout.write(JSON.stringify({before,after,credentials,restarted}))
       DATA_DIR: directory,
       GH_TOKEN: "env-secret",
       GITHUB_TOKENS: "env-secret2",
-      TURSO_DATABASE_URL: "",
-      TURSO_AUTH_TOKEN: "",
     },
     stdout: "pipe",
     stderr: "pipe",

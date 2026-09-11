@@ -1,5 +1,9 @@
 # Codex Statsig Feature Flags Implementation Plan
 
+This historical plan's JSON and configuration ZIP steps are superseded by
+SQLite settings and the complete administrator database download. Current
+operation and recovery instructions are in the [storage runbook](../../sqlite-storage.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add separately managed ChatGPT/Codex Statsig overrides to the dashboard and apply them to allowlisted `ab.chatgpt.com` traffic without replacing unrelated upstream flags.

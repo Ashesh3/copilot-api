@@ -1124,10 +1124,7 @@ export async function handleGetSettings(c: Context) {
     multiToken: tokenPool.getAllAccounts().length > 1,
     sentryEnabled: Boolean(process.env.SENTRY_DSN),
     groqEnabled: Boolean(getGroqApiKey()),
-    dataDir:
-      getStorageRuntime().config.kind === "sqlite" ?
-        "Local SQLite"
-      : "Remote Turso",
+    dataDir: "Local SQLite",
     storage: {
       kind: getStorageRuntime().config.kind,
       revision: getStorageRuntime().snapshot.get().revision,

@@ -1,5 +1,9 @@
 # Trusted Codex JWT Digests Design
 
+Current digest storage uses SQLite and is included in complete administrator
+database downloads. This supersedes the historical file/export exclusions in
+this design; see the [storage runbook](../../sqlite-storage.md).
+
 > Historical design for the original digest registry. Current Codex Desktop
 > builds also require the managed refresh procedure in
 > `docs/codex-desktop-managed-auth.md`; where this document describes a random

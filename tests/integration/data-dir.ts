@@ -11,5 +11,3 @@ export const integrationDataDirectory = mkdtempSync(
 )
 // This synchronous preload must run before application modules resolve paths.
 process.env.DATA_DIR = integrationDataDirectory
-delete process.env.TURSO_DATABASE_URL
-delete process.env.TURSO_AUTH_TOKEN

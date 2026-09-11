@@ -1,10 +1,11 @@
 /* eslint-disable max-lines -- one audit file covers the complete compatibility document */
 import * as Sentry from "@sentry/bun"
+import { Database } from "bun:sqlite"
 import { expect, spyOn, test } from "bun:test"
 import consola from "consola"
-import { unzipSync } from "fflate"
 import { Hono } from "hono"
 import { readFile } from "node:fs/promises"
+import { join } from "node:path"
 
 import {
   ATTACHMENT_URL_CONTRACT,
@@ -13,7 +14,6 @@ import {
   SESSION_TOKEN_PRIVACY_CONTRACT,
   STREAM_BEHAVIOR_CONTRACT,
 } from "~/lib/compatibility-contract"
-import { createConfigExportZip } from "~/lib/config-export"
 import {
   type CopilotContractEvent,
   recordCopilotContractEvent,
@@ -22,6 +22,7 @@ import {
   sessionTokenMatchesAccount,
   sessionTokenMatchesModel,
 } from "~/lib/copilot-session-token"
+import { exportDatabaseResponse } from "~/lib/database-export"
 import {
   getModelEndpointSupport,
   selectCopilotEndpoint,
@@ -455,14 +456,25 @@ async function deriveCompatibilityMatrix(): Promise<{
     breadcrumb.mockRestore()
   }
 
-  await withTransferStorage(async (storage) => {
-    await settingsFixture(storage, { "Copilot-Session-Token": token })
-    const archive = await createConfigExportZip({ storage })
-    const config = new TextDecoder().decode(
-      unzipSync(archive.zip)["config.json"],
+  await withTransferStorage(async (storage, directory) => {
+    await settingsFixture(storage, { storedSecret: "fixture-export-secret" })
+    const response = await exportDatabaseResponse(
+      join(directory, "fixture.sqlite"),
     )
-    expect(config).toContain("[REDACTED]")
-    expect(config).not.toContain(token)
+    const bytes = new Uint8Array(await response.arrayBuffer())
+    const database = Database.deserialize(bytes)
+    try {
+      expect(
+        database
+          .query("SELECT value_json FROM capi_settings WHERE namespace='app'")
+          .get(),
+      ).toEqual({
+        value_json: '{"storedSecret":"fixture-export-secret"}',
+      })
+      expect(new TextDecoder().decode(bytes)).not.toContain(token)
+    } finally {
+      database.close()
+    }
   })
 
   expect(

@@ -1,4 +1,4 @@
-/** Shared SQLite/Turso DDL. Keep applied migrations immutable. */
+/** SQLite DDL. Keep applied migrations immutable. */
 export const initialTables = {
   capi_metadata: `
     key TEXT PRIMARY KEY NOT NULL,

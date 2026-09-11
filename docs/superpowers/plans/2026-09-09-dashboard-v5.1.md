@@ -4,7 +4,7 @@
 
 **Goal:** Complete the eleven dashboard/runtime improvements and publish 5.1.0.
 **Architecture:** Keep existing UI and storage boundaries. Compose redirects with fallback resolution through one safety analysis, preserve raw diagnostic capture, and carry account-specific integration identity through the existing lease context.
-**Tech stack:** Bun, TypeScript, Hono, SQLite/Turso, React, Astryx, Vite.
+**Tech stack:** Bun, TypeScript, Hono, SQLite, React, Astryx, Vite.
 **Spec:** ../specs/2026-09-09-dashboard-v5.1-design.md
 
 ## Global constraints
