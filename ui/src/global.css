@@ -12,6 +12,13 @@ body {
   margin: 0;
 }
 
+.llm-fallback-tooltip {
+  display: block;
+  max-width: calc(100vw - 48px);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .replay-header,
 .replay-workspace,
 .replay-pane,
