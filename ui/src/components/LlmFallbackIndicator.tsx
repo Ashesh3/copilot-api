@@ -23,7 +23,13 @@ export function fallbackDescription(fallback: LlmDebugFallback): string {
 
 export function LlmFallbackBadge({ fallback }: { fallback: LlmDebugFallback }) {
   return (
-    <Tooltip content={fallbackDescription(fallback)}>
+    <Tooltip
+      content={
+        <span className="llm-fallback-tooltip">
+          {fallbackDescription(fallback)}
+        </span>
+      }
+    >
       <span>
         <HStack gap={1} vAlign="center">
           <InfoIcon
