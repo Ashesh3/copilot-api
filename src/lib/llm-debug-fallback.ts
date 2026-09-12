@@ -21,7 +21,8 @@ export type LlmDebugFallbackObservation =
     }
 
 const MAX_OBSERVED_MODELS = 16
-const MAX_MODEL_LENGTH = 512
+// Bound optional badge metadata without rejecting or changing the request.
+const MAX_OBSERVED_MODEL_NAME_LENGTH = 512
 
 export function runWithMessagesFallbackObservation<T>(
   options: { request: Request; payload: unknown },
@@ -44,7 +45,7 @@ function modelName(value: unknown): string | undefined {
   return (
       typeof value === "string"
         && value.trim().length > 0
-        && value.length <= MAX_MODEL_LENGTH
+        && value.length <= MAX_OBSERVED_MODEL_NAME_LENGTH
     ) ?
       value
     : undefined
