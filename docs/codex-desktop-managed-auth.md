@@ -12,13 +12,20 @@ The Windows script generates one unsigned, synthetic JWT for the local Codex
 identity. The raw JWT stays in `auth.json`; the gateway stores only its SHA-256
 digest in **Settings → Trusted JWT Digests**.
 
+Codex Desktop `26.908.4834.0` requires a positive integer `exp` claim before it
+can resolve that identity. The script uses `exp: 253402300799`
+(`9999-12-31T23:59:59Z`) as a compatibility sentinel. The gateway still has no
+time-based credential expiry: credentials remain usable until explicitly
+disabled or deleted.
+
 Current Codex builds proactively refresh ChatGPT credentials. The script wraps
 the JWT in a versioned local refresh token. Codex sends that token directly to
 `POST /v1/codex/auth/refresh` because
 `CODEX_REFRESH_TOKEN_URL_OVERRIDE` points at this gateway. The endpoint extracts
 the JWT, validates its expected local shape, and requires an enabled digest
-match before returning it. Disabling or deleting the digest therefore disables
-both refresh and inference.
+match before returning the same ID, access, and refresh token bytes. Refresh is
+repeatable and does not rotate credentials. Disabling or deleting the digest
+therefore disables both refresh and inference.
 
 ## 1. Deploy the gateway and edge route
 
@@ -66,9 +73,9 @@ cookie, or account header, derives nine-card category previews from that documen
 allows strict anonymous public-card detail reads, and returns empty compatible
 responses for account-scoped cloud catalog reads. This restores local and Git
 marketplace browsing, search, installation, removal, and upgrades. It does not
-turn the synthetic JWT into a ChatGPT session: remote cloud installs,
-connectors, personal/workspace cloud directories, and sharing remain
-unsupported.
+turn the synthetic JWT into a ChatGPT session or grant hosted Work access:
+remote cloud installs, connectors, personal/workspace cloud directories, and
+sharing remain unsupported.
 
 The root `update.sh` updates the Compose application only. It does not install or
 reload host Nginx. Render every placeholder, inspect the candidate, retain a
@@ -182,6 +189,18 @@ If `auth.json` already exists, its exact bytes are saved under:
 The script preserves `config.toml` and every unrelated file. It never prints the
 JWT or refresh token.
 
+### Existing identities created without `exp`
+
+Fully quit Desktop, rerun the updated script, register its newly printed digest
+in step 4, then reopen Desktop. Reuse the same name and email inputs to preserve
+the local account identity. The old auth file is backed up automatically; no
+database or conversation-data migration is required.
+
+Updating the gateway alone cannot add claims to the existing client token: the
+server stores only its digest. Editing a JWT by hand also changes that digest
+and requires registration again. After verifying the replacement works, remove
+the old digest entry if it is no longer needed.
+
 ## 4. Register the digest
 
 Copy the value between:
@@ -245,6 +264,11 @@ Codex Desktop only after the intended `auth.json` is in place.
 
 ## Troubleshooting
 
+- **Desktop opens only Work, reports no access, and cannot switch to Codex:**
+  an older generated token without `exp` fails the identity check in Desktop
+  `26.908.4834.0`. Follow the existing-identity steps above to generate and
+  register a compatible token. The local mode fallback does not establish
+  hosted Work entitlement.
 - **`401 token_expired` from `auth.openai.com`:** Codex did not inherit
   `CODEX_REFRESH_TOKEN_URL_OVERRIDE`. Confirm the user-scoped value and fully
   quit/reopen the app.

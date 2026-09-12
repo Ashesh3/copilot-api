@@ -4,6 +4,8 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 
+import { codexDesktopAccountInput } from "./helpers/codex-desktop-auth-contract"
+
 setDefaultTimeout(30_000)
 
 const powershellExecutables = [Bun.which("pwsh"), Bun.which("powershell")]
@@ -165,6 +167,21 @@ for (const executable of powershellExecutables) {
 
       expect(first.exitCode).toBe(0)
       expect(second.exitCode).toBe(0)
+      const payload = codexDesktopAccountInput.parse(
+        getJwtPayload(replacement.auth.tokens.access_token),
+      )
+      const claims = payload["https://api.openai.com/auth"]
+      const expiresAtMs = payload.exp * 1000
+      expect(claims.chatgpt_account_id).toBe(replacement.auth.tokens.account_id)
+      expect(claims.chatgpt_user_id).toBe("engine")
+      if (claims.user_id !== undefined) {
+        expect(claims.user_id).toBe(claims.chatgpt_user_id)
+      }
+      expect(claims.chatgpt_plan_type).toBe("plus")
+      expect(Number.isSafeInteger(expiresAtMs)).toBeTrue()
+      expect(new Date(expiresAtMs).getTime()).toBe(expiresAtMs)
+      expect(expiresAtMs).toBeGreaterThan(Date.UTC(2100, 0, 1))
+      expect(expiresAtMs).toBeGreaterThan(Date.now() + 300_000)
       expect(second.digest).toBe(
         createHash("sha256")
           .update(replacement.auth.tokens.access_token, "utf8")

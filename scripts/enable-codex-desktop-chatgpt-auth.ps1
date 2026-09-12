@@ -275,6 +275,9 @@ if (-not (Test-EmailAddress $Email)) {
 $userId = Get-FriendlyUserId $Email $FullName $windowsIdentity.UserName $hasUserEmail $usedFallbackIdentity
 $accountId = $userId
 $issuedAt = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+# Desktop's account-input identity parser requires a positive integer exp.
+# Year 9999 preserves the static, manually revoked gateway credential contract.
+$compatibilityExpiry = [long]253402300799 # 9999-12-31T23:59:59Z
 
 $header = [ordered]@{
   alg = 'none'
@@ -285,6 +288,7 @@ $payload = [ordered]@{
   aud = 'https://api.openai.com/v1'
   sub = $userId
   iat = $issuedAt
+  exp = $compatibilityExpiry
   email = $Email
   'https://api.openai.com/profile' = [ordered]@{
     email = $Email
@@ -292,6 +296,7 @@ $payload = [ordered]@{
   }
   'https://api.openai.com/auth' = [ordered]@{
     chatgpt_user_id = $userId
+    user_id = $userId
     chatgpt_plan_type = 'plus'
     chatgpt_account_id = $accountId
   }
