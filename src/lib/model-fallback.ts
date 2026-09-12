@@ -10,6 +10,7 @@ import {
   getLoadedModelFallbackConfig,
   type ModelFallbackConfig,
 } from "~/lib/model-fallback-config"
+import { getModelFallbackConversationIdentity } from "~/lib/model-fallback-conversation"
 import { getModelFallbackIdentity } from "~/lib/model-fallback-identity"
 import {
   captureForeignThinking,
@@ -32,10 +33,6 @@ import {
   type ReasoningEffort,
 } from "~/lib/model-suffix"
 import { setCopilotResponseHeader } from "~/lib/request-session"
-import {
-  normalizeRoutingAffinityKey,
-  parseRoutingMetadataRecord,
-} from "~/lib/routing-affinity"
 
 export interface ModelFallbackRequestOptions {
   headers?: Headers
@@ -100,52 +97,6 @@ export function createModelFallbackCredentialScope(
   return createHash("sha256")
     .update(JSON.stringify(extractRequestCredential(request)))
     .digest("hex")
-}
-
-function firstIdentity(values: Array<unknown>): string | undefined {
-  for (const value of values) {
-    const normalized = normalizeRoutingAffinityKey(value)
-    if (normalized) return normalized
-  }
-  return undefined
-}
-
-function getConversationIdentity(
-  options: ModelFallbackRequestOptions,
-): string | undefined {
-  const payload = isRecord(options.payload) ? options.payload : {}
-  const client = parseRoutingMetadataRecord(payload.client_metadata) ?? {}
-  const metadata = parseRoutingMetadataRecord(payload.metadata) ?? {}
-  const claude = parseRoutingMetadataRecord(metadata.user_id) ?? {}
-  const headers = options.headers
-  // A Codex child may share its parent's session and account affinity. Only
-  // the actual child thread identifies this fallback conversation.
-  return firstIdentity([
-    client.thread_id,
-    payload.thread_id,
-    payload.threadId,
-    headers?.get("thread-id"),
-    headers?.get("x-thread-id"),
-    metadata.thread_id,
-    metadata.threadId,
-    headers?.get("x-claude-code-session-id"),
-    headers?.get("x-client-session-id"),
-    headers?.get("session-id"),
-    client.session_id,
-    claude.session_id,
-    payload.conversation_id,
-    payload.conversationId,
-    payload.session_id,
-    payload.sessionId,
-    metadata.conversation_id,
-    metadata.conversationId,
-    metadata.session_id,
-    metadata.sessionId,
-    typeof metadata.user_id === "string" ?
-      metadata.user_id.match(/_session_(.+)$/u)?.[1]
-    : undefined,
-    options.conversationKey,
-  ])
 }
 
 function refreshCache(): void {
@@ -583,7 +534,7 @@ export async function runWithModelFallback<T>(
   const configRevision = getCapturedModelFallbackConfigRevision()
   if (!config.enabled || !getModelRoutingSafety().safe) return await execute()
   refreshCache()
-  const identity = getConversationIdentity(options)
+  const identity = getModelFallbackConversationIdentity(options)
   const credential =
     options.credentialScope
     ?? createModelFallbackCredentialScope(options.headers ?? new Headers())

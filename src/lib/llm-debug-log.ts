@@ -8,6 +8,17 @@ import {
   releaseDebugCaptureMemory,
   type CapturedBody,
 } from "~/lib/debug-capture"
+import {
+  clearClientFallbackObservations,
+  pruneClientFallbackObservations,
+  recordClientFallbackRefusal,
+  releaseClientFallbackCapture,
+} from "~/lib/llm-debug-client-fallback"
+import {
+  nativeMessagesFallbackEvidence,
+  startLlmDebugFallbackCapture,
+  type LlmDebugFallbackObservation,
+} from "~/lib/llm-debug-fallback"
 
 import {
   readDescriptorSnapshotValue,
@@ -49,6 +60,7 @@ export interface LlmDebugLogResponse extends CapturedBody {
 
 export interface LlmDebugLogEntry {
   fallback?: ModelFallbackDebugInfo
+  fallbackObservations?: Array<LlmDebugFallbackObservation>
   upstream?:
     | { kind: "custom"; providerId: string }
     | { kind: "copilot"; accountId?: number }
@@ -70,6 +82,7 @@ export interface LlmDebugLogEntry {
 
 export interface LlmDebugLogSummary {
   fallback?: ModelFallbackDebugInfo
+  fallbackObservations?: Array<LlmDebugFallbackObservation>
   durationMs?: number
   endedAt?: string
   errorMessage?: string
@@ -132,6 +145,7 @@ function releaseCapture(id: string): void {
   const capture = captures.get(id)
   if (!capture) return
   captures.delete(id)
+  releaseClientFallbackCapture(id)
   releaseDebugCaptureMemory(capture.bytes)
   capture.controller.abort()
 }
@@ -168,6 +182,7 @@ function schedulePrune(): void {
 }
 
 function pruneCaptures(now = Date.now()): void {
+  pruneClientFallbackObservations(now)
   for (const [id, { entry }] of captures)
     if (captureDeadline(entry) <= now) releaseCapture(id)
   schedulePrune()
@@ -447,6 +462,9 @@ function toSummary(entry: LlmDebugLogEntry): LlmDebugLogSummary {
   )
   return {
     ...(entry.fallback ? { fallback: { ...entry.fallback } } : {}),
+    ...(entry.fallbackObservations ?
+      { fallbackObservations: structuredClone(entry.fallbackObservations) }
+    : {}),
     durationMs: entry.durationMs,
     endedAt: entry.endedAt,
     errorMessage:
@@ -490,11 +508,21 @@ export function startLlmDebugLog(input: StartLlmDebugLogInput): string {
     ...input.requestCapture,
     body: input.requestBody,
   })
+  const model = inferModel(body.body)
+  const fallbackObservations = startLlmDebugFallbackCapture({
+    id,
+    path: input.path,
+    body: body.body,
+    model,
+    url: input.url,
+    upstream: input.upstream,
+  })
   const entry: LlmDebugLogEntry = {
     id,
     ...(input.fallback ? { fallback: { ...input.fallback } } : {}),
+    ...(fallbackObservations.length > 0 ? { fallbackObservations } : {}),
     ...(input.upstream ? { upstream: { ...input.upstream } } : {}),
-    model: inferModel(body.body),
+    model,
     request: {
       ...body,
       headers: { ...input.requestHeaders },
@@ -523,6 +551,7 @@ export function startLlmDebugLog(input: StartLlmDebugLogInput): string {
   if (reserveCapture(capture)) {
     captures.set(id, capture)
   } else {
+    releaseClientFallbackCapture(id)
     capture.controller.abort()
   }
   pruneCaptures()
@@ -584,6 +613,28 @@ export function finishLlmDebugLog(
     ) ?
       "error"
     : "complete"
+  if (
+    capture.entry.request.path === "/v1/messages"
+    && response.status === 200
+  ) {
+    const { observations, refused } = nativeMessagesFallbackEvidence({
+      body: capture.entry.response.body,
+      contentType: findHeader(response.headers, "content-type") ?? "",
+    })
+    if (observations.length > 0) {
+      capture.entry.fallbackObservations = [
+        ...(capture.entry.fallbackObservations ?? []),
+        ...observations,
+      ]
+    }
+    if (
+      refused
+      && observations.length === 0
+      && capture.entry.status === "complete"
+    ) {
+      recordClientFallbackRefusal(id, endedAtMs)
+    }
+  }
   retainTerminalCapture(capture)
 }
 
@@ -693,6 +744,7 @@ export async function getLlmDebugLog(
 
 // eslint-disable-next-line @typescript-eslint/require-await -- Clear immediately while preserving the awaitable public API.
 export async function clearLlmDebugLogs(): Promise<void> {
+  clearClientFallbackObservations()
   for (const id of captures.keys()) releaseCapture(id)
   schedulePrune()
 }

@@ -42,6 +42,7 @@ import {
   isHTTPError,
   LocalHTTPError,
 } from "~/lib/error"
+import { runWithMessagesFallbackObservation } from "~/lib/llm-debug-fallback"
 import { createHandlerLogger } from "~/lib/logger"
 import {
   applyModelFallbackToPayload,
@@ -285,34 +286,38 @@ export async function handleCompletion(c: Context) {
     parseModelSuffix(anthropicPayload.model).baseModel,
   )
 
-  return await Sentry.startSpan(
-    createSentryInvokeAgentSpanOptions(model, conversationId),
-    async () => {
-      recordCopilotRequestNormalization(
-        "messages",
-        preparedMessages.normalizationClasses,
-      )
-      recordCopilotMessagesBeta(nativeOptions.anthropicBeta)
-      return await runWithModelFallback(
-        {
-          headers: c.req.raw.headers,
-          payload: anthropicPayload,
-          signal: c.req.raw.signal,
-        },
+  return await runWithMessagesFallbackObservation(
+    { request: c.req.raw, payload: rawPayload },
+    () =>
+      Sentry.startSpan(
+        createSentryInvokeAgentSpanOptions(model, conversationId),
         async () => {
-          const response = await handleCompletionInner(
-            c,
-            structuredClone(anthropicPayload),
-            nativeOptions,
+          recordCopilotRequestNormalization(
+            "messages",
+            preparedMessages.normalizationClasses,
           )
-          return await applyMessagesModelFallbackNotice(
-            response,
-            { payload: anthropicPayload, headers: c.req.raw.headers },
-            captureModelFallbackNotice(),
+          recordCopilotMessagesBeta(nativeOptions.anthropicBeta)
+          return await runWithModelFallback(
+            {
+              headers: c.req.raw.headers,
+              payload: anthropicPayload,
+              signal: c.req.raw.signal,
+            },
+            async () => {
+              const response = await handleCompletionInner(
+                c,
+                structuredClone(anthropicPayload),
+                nativeOptions,
+              )
+              return await applyMessagesModelFallbackNotice(
+                response,
+                { payload: anthropicPayload, headers: c.req.raw.headers },
+                captureModelFallbackNotice(),
+              )
+            },
           )
         },
-      )
-    },
+      ),
   )
 }
 

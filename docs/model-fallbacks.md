@@ -24,3 +24,22 @@ Two independent notice settings are off by default:
 - **Show native client fallback notice** uses supported client reroute signals. Codex may describe the switch as cybersecurity routing, and Claude Code may describe it as refusal fallback. These are the clients' existing labels even when a different reason caused HTTP 422. Claude Code must advertise its server fallback capability in the request; clients using a custom base URL may not enable that capability. Display depends on the installed client's capabilities and settings.
 
 The authenticated dashboard API is `GET`/`PUT /dashboard/api/fallbacks`; `PUT` takes the full configuration object. `DELETE /dashboard/api/fallbacks/cache` clears only conversation memory. Mutations require the existing administrator session and CSRF protections.
+
+## Fallback sources in LLM Debug
+
+LLM Debug shows where evidence of a fallback came from, in both the request list and the detail view:
+
+| Badge | Meaning |
+| --- | --- |
+| Configured fallback | A gateway rule retried this request after upstream HTTP 422. A cached badge means the conversation reused its remembered configured target. |
+| Upstream fallback | A native Anthropic response explicitly reported a `fallback` block with source and target models. |
+| Client retry (inferred) | The next incoming Messages request retried the same content on another model after a completed native refusal. The detail view links to the preceding capture. |
+| Fallback requested | The client supplied a `fallbacks` policy. This records the request's intent, including when the provider rejects it; it does not prove that a switch occurred. |
+
+Badges can coexist. For example, a request may include its own fallback policy and also use a configured gateway rule. A gateway-generated native client notice remains a configured fallback; it is added after the upstream capture and is not evidence that the provider performed the switch.
+
+Client retry inference requires the same incoming authentication credential and explicit conversation or child-thread identity, an otherwise identical request body, a different model, and the immediately following logical request within 60 seconds of the refusal. The source and target identify the models requested by the client; a preceding gateway rule or redirect can mean the linked capture used another upstream model. Missing identities, different credentials or child threads, changed content, incomplete responses, and intervening requests prevent the match. This evidence cannot distinguish an automatic harness retry from a manual retry. Observation state is bounded and process-local; clearing or expiring the underlying captures removes pending evidence. Request IDs and shared upstream account credentials do not establish a client identity.
+
+The dashboard's `fallback` object continues to describe configured HTTP 422 behavior. `fallbackObservations` separately records requested policies, explicit upstream blocks, and inferred client retries. These diagnostics do not change routing, retry policy, response bodies, or the retention of debug captures.
+
+Anthropic's beta Messages API supports fields that some compatible providers do not yet accept. Examples include `thinking.display: "updates"`, `fallbacks`, and per-system-message `output_config`. A provider rejecting one of these with HTTP 400 is a compatibility error, not a configured gateway fallback trigger. Removing a beta field can change its meaning; a request-policy badge alone does not establish provider support. See the [Anthropic beta Messages contract](https://github.com/anthropics/anthropic-sdk-typescript/blob/135f71e9297683e14614d4307081c0273ed0a09c/src/resources/beta/messages/messages.ts).

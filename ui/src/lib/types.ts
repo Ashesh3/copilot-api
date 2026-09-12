@@ -383,6 +383,7 @@ export class TrustedJwtDigestInputError extends Error {
 
 export interface LlmDebugEntry {
   fallback?: LlmDebugFallback
+  fallbackObservations?: Array<LlmDebugFallbackObservation>
   id: string
   method: string
   path: string
@@ -439,6 +440,7 @@ export interface LlmDebugLogResponse extends CapturedBodyState {
 
 export interface LlmDebugDetail {
   fallback?: LlmDebugFallback
+  fallbackObservations?: Array<LlmDebugFallbackObservation>
   id: string
   model?: string
   requestId?: string
@@ -471,6 +473,26 @@ export interface LlmDebugFallback {
   cached: boolean
   hop: number
 }
+
+export type LlmDebugFallbackObservation =
+  | {
+      kind: "requested"
+      sourceModel: string
+      targetModels: Array<string> | "default"
+    }
+  | {
+      kind: "upstream"
+      fromModel: string
+      targetModel: string
+    }
+  | {
+      kind: "client"
+      fromModel: string
+      targetModel: string
+      previousLogId: string
+      reason: "refusal"
+      evidence: "inferred"
+    }
 
 export interface ReplayResult {
   body: string

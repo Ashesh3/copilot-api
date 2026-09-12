@@ -1,67 +1,93 @@
 import { Badge } from "@astryxdesign/core/Badge"
 import { Banner } from "@astryxdesign/core/Banner"
-import { HStack } from "@astryxdesign/core/Stack"
+import { Button } from "@astryxdesign/core/Button"
 import { Tooltip } from "@astryxdesign/core/Tooltip"
 
-import type { LlmDebugFallback } from "../lib/types"
+import type { LlmFallbackContext } from "../lib/llm-fallback"
 
 import { InfoIcon } from "../icons"
+import { fallbackIndicators } from "../lib/llm-fallback"
 
-export function fallbackDescription(fallback: LlmDebugFallback): string {
-  const route =
-    fallback.configuredTargetModel === fallback.targetModel ?
-      `${fallback.fromModel} → ${fallback.targetModel}`
-    : `${fallback.fromModel} → ${fallback.configuredTargetModel} → ${fallback.targetModel} (Model Redirect)`
-  const hop =
-    fallback.hop > 1 ?
-      ` Fallback hop ${fallback.hop}, originally requested ${fallback.sourceModel}.`
-    : ""
-  return fallback.cached ?
-      `This request uses the conversation's remembered HTTP 422 fallback: ${route}.${hop} No new HTTP 422 was required for this request.`
-    : `This request was sent because ${fallback.fromModel} returned HTTP 422. ${route}.${hop}`
-}
+export { fallbackDescription } from "../lib/llm-fallback"
 
-export function LlmFallbackBadge({ fallback }: { fallback: LlmDebugFallback }) {
+export function LlmFallbackBadge(context: LlmFallbackContext) {
   return (
-    <Tooltip
-      content={
-        <span className="llm-fallback-tooltip">
-          {fallbackDescription(fallback)}
-        </span>
-      }
-    >
-      <span>
-        <HStack gap={1} vAlign="center">
-          <InfoIcon
-            width={14}
-            height={14}
-            style={{ color: "var(--color-warning)" }}
-            aria-hidden="true"
-          />
-          <Badge
-            variant="warning"
-            label={fallback.cached ? "Cached fallback" : "Fallback"}
-          />
-        </HStack>
-      </span>
-    </Tooltip>
+    <>
+      {fallbackIndicators(context).map((indicator) => (
+        <Tooltip
+          key={indicator.key}
+          focusTrigger="always"
+          content={
+            <span className="llm-fallback-tooltip">
+              {indicator.description}
+            </span>
+          }
+        >
+          <span
+            tabIndex={0}
+            title={indicator.label}
+            style={{ display: "inline-flex", minWidth: 0, maxWidth: "100%" }}
+          >
+            <Badge
+              variant={indicator.tone}
+              style={{
+                boxSizing: "border-box",
+                height: "auto",
+                minHeight: "var(--spacing-5)",
+                minWidth: 0,
+                maxWidth: "100%",
+                whiteSpace: "normal",
+                overflowWrap: "anywhere",
+              }}
+              label={
+                <span
+                  style={{
+                    minWidth: 0,
+                    whiteSpace: "normal",
+                    overflowWrap: "anywhere",
+                    lineHeight: "var(--text-supporting-leading)",
+                  }}
+                >
+                  {indicator.label}
+                </span>
+              }
+              icon={
+                <InfoIcon
+                  width={14}
+                  height={14}
+                  style={{ flexShrink: 0 }}
+                  aria-hidden="true"
+                />
+              }
+            />
+          </span>
+        </Tooltip>
+      ))}
+    </>
   )
 }
 
-export function LlmFallbackBanner({
-  fallback,
-}: {
-  fallback: LlmDebugFallback
-}) {
+export function LlmFallbackBanner(context: LlmFallbackContext) {
   return (
-    <Banner
-      status={fallback.cached ? "info" : "warning"}
-      title={
-        fallback.cached ?
-          "Cached fallback request"
-        : "Fallback request · HTTP 422"
-      }
-      description={fallbackDescription(fallback)}
-    />
+    <>
+      {fallbackIndicators(context).map((indicator) => (
+        <Banner
+          key={indicator.key}
+          status={indicator.tone === "neutral" ? "info" : indicator.tone}
+          title={indicator.label}
+          description={indicator.description}
+          endContent={
+            indicator.previousLogId ?
+              <Button
+                label="Open previous capture"
+                variant="secondary"
+                size="sm"
+                href={`#llm-debug:${encodeURIComponent(indicator.previousLogId)}`}
+              />
+            : undefined
+          }
+        />
+      ))}
+    </>
   )
 }
