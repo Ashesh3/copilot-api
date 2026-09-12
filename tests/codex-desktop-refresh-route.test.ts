@@ -1,10 +1,14 @@
 import "./helpers/auth-misc-data-dir"
 
-import { afterAll, beforeEach, expect, test } from "bun:test"
+import { afterAll, beforeEach, expect, setSystemTime, test } from "bun:test"
 import { createHash } from "node:crypto"
 
+import { resolveCredential } from "../src/lib/credential-resolver"
 import { shouldOmitRequestBodyFromDiagnostics } from "../src/lib/request-diagnostics"
-import { trustedJwtDigestStore } from "../src/lib/trusted-jwt-digests"
+import {
+  trustedJwtDigestStore,
+  type TrustedJwtDigestEntry,
+} from "../src/lib/trusted-jwt-digests"
 import { server } from "../src/server"
 import {
   useProtocolDatabase,
@@ -22,6 +26,7 @@ function base64UrlJson(value: unknown): string {
 function createSyntheticJwt(overrides?: {
   algorithm?: string
   audience?: string
+  expiresAt?: number
   issuer?: string
 }): string {
   const header = base64UrlJson({
@@ -33,6 +38,7 @@ function createSyntheticJwt(overrides?: {
     aud: overrides?.audience ?? "https://api.openai.com/v1",
     sub: "friendly-user",
     iat: 1_788_307_200,
+    ...(overrides?.expiresAt === undefined ? {} : { exp: overrides.expiresAt }),
     email: "friendly@example.com",
     "https://api.openai.com/profile": {
       email: "friendly@example.com",
@@ -42,6 +48,9 @@ function createSyntheticJwt(overrides?: {
       chatgpt_user_id: "friendly-user",
       chatgpt_plan_type: "plus",
       chatgpt_account_id: "friendly-user",
+      ...(overrides?.expiresAt === undefined ?
+        {}
+      : { user_id: "friendly-user" }),
     },
   })
   return `${header}.${payload}.${Buffer.alloc(32, 7).toString("base64url")}`
@@ -51,12 +60,16 @@ function createRefreshToken(jwt: string): string {
   return `local_codex_v1.${Buffer.from(jwt, "utf8").toString("base64url")}`
 }
 
-async function registerJwt(jwt: string, enabled = true): Promise<void> {
+async function registerJwt(
+  jwt: string,
+  enabled = true,
+): Promise<TrustedJwtDigestEntry> {
   const entry = await trustedJwtDigestStore.add({
     label: "Codex Desktop",
     digest: createHash("sha256").update(jwt, "utf8").digest("hex"),
   })
   if (!enabled) await trustedJwtDigestStore.setEnabled(entry.id, false)
+  return entry
 }
 
 async function refreshRequest(
@@ -97,6 +110,56 @@ test("refreshes an enabled managed Codex Desktop JWT without rotating secrets", 
     access_token: jwt,
     refresh_token: refreshToken,
   })
+})
+
+test("preserves Desktop compatibility claims and the registered credential across refreshes", async () => {
+  const jwt = createSyntheticJwt({ expiresAt: 253_402_300_799 })
+  const refreshToken = createRefreshToken(jwt)
+  const entry = await registerJwt(jwt)
+  const body = {
+    client_id: CLIENT_ID,
+    grant_type: "refresh_token",
+    refresh_token: refreshToken,
+  }
+
+  try {
+    // The compatibility expiry must not introduce routine gateway token rollover.
+    setSystemTime(new Date("2100-01-01T00:00:00Z"))
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const response = await refreshRequest(body)
+      expect(response.status).toBe(200)
+      expect(await response.json()).toEqual({
+        id_token: jwt,
+        access_token: jwt,
+        refresh_token: refreshToken,
+      })
+      expect(await resolveCredential(jwt, ["user:inference"])).toEqual({
+        kind: "inference-client",
+        principalId: `inference-managed:${entry.id}`,
+        scopes: new Set(["user:inference"]),
+      })
+      const plugins = await server.request("/ps/plugins/installed", {
+        headers: { authorization: `Bearer ${jwt}` },
+      })
+      expect(plugins.status).toBe(200)
+      expect(await plugins.json()).toEqual({
+        plugins: [],
+        pagination: { next_page_token: null },
+      })
+    }
+    expect(await trustedJwtDigestStore.list()).toEqual([entry])
+    expect(await resolveCredential(jwt, ["org:create_api_key"])).toBeNull()
+
+    await trustedJwtDigestStore.setEnabled(entry.id, false)
+    expect((await refreshRequest(body)).status).toBe(400)
+    expect(await resolveCredential(jwt, ["user:inference"])).toBeNull()
+    const plugins = await server.request("/ps/plugins/installed", {
+      headers: { authorization: `Bearer ${jwt}` },
+    })
+    expect(plugins.status).toBe(401)
+  } finally {
+    setSystemTime()
+  }
 })
 
 test.each([
