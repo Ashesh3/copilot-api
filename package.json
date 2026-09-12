@@ -1,6 +1,6 @@
 {
   "name": "@ashsec/copilot-api",
-  "version": "6.1.0",
+  "version": "6.2.0",
   "description": "Self-hosted GitHub Copilot compatibility gateway for OpenAI, Anthropic, Google AI, Claude Code, and Codex clients.",
   "keywords": [
     "proxy",

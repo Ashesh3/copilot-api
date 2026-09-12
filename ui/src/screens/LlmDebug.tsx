@@ -65,6 +65,7 @@ import {
 import { formatDuration } from "../lib/duration-format"
 import { parseJsonBody } from "../lib/json-tree"
 import { requestPayloadView } from "../lib/llm-debug-detail-view"
+import { fallbackSearchText } from "../lib/llm-fallback"
 import { navigate, useHashRoute } from "../lib/router"
 import { useToast } from "../lib/toast"
 import { useAsyncData, usePolling } from "../lib/usePolling"
@@ -171,7 +172,7 @@ function LlmDebugListView() {
       if (statusFilter !== "all" && entry.status !== statusFilter) return false
       if (!needle) return true
       const haystack =
-        `${entry.method} ${entry.path} ${entry.model ?? ""} ${entry.requestId ?? ""} ${entry.fallback ? `fallback ${entry.fallback.sourceModel} ${entry.fallback.fromModel} ${entry.fallback.targetModel}` : ""}`.toLowerCase()
+        `${entry.method} ${entry.path} ${entry.model ?? ""} ${entry.requestId ?? ""} ${fallbackSearchText(entry)}`.toLowerCase()
       return haystack.includes(needle)
     }) as Array<DebugRow>
   }, [entries, query, statusFilter])
@@ -265,9 +266,10 @@ function LlmDebugListView() {
               —
             </Text>
           }
-          {row.fallback ?
-            <LlmFallbackBadge fallback={row.fallback} />
-          : null}
+          <LlmFallbackBadge
+            fallback={row.fallback}
+            fallbackObservations={row.fallbackObservations}
+          />
         </VStack>
       ),
     },
@@ -669,8 +671,11 @@ function LlmDebugDetailView({ id }: { id: string }) {
           description={captureWarning}
         />
       : null}
-      {data?.fallback ?
-        <LlmFallbackBanner fallback={data.fallback} />
+      {data ?
+        <LlmFallbackBanner
+          fallback={data.fallback}
+          fallbackObservations={data.fallbackObservations}
+        />
       : null}
       {data ?
         <VStack gap={4}>
