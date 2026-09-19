@@ -93,6 +93,33 @@ server {
     proxy_request_buffering off;
   }
 
+  # Workspace discovery is required by current Desktop account reads. Publish
+  # only these exact GET aliases; the application validates the managed bearer
+  # and binds the selected account to its claims. HEAD is intentionally denied.
+  location = /api/codex/accounts/check {
+    if ($request_method != GET) { return 404; }
+    if ($http_authorization = "") { return 404; }
+    access_log off;
+    proxy_pass {{UPSTREAM_URL}};
+    proxy_http_version 1.1;
+  }
+
+  location = /wham/accounts/check {
+    if ($request_method != GET) { return 404; }
+    if ($http_authorization = "") { return 404; }
+    access_log off;
+    proxy_pass {{UPSTREAM_URL}};
+    proxy_http_version 1.1;
+  }
+
+  location = /backend-api/wham/accounts/check {
+    if ($request_method != GET) { return 404; }
+    if ($http_authorization = "") { return 404; }
+    access_log off;
+    proxy_pass {{UPSTREAM_URL}};
+    proxy_http_version 1.1;
+  }
+
   # Codex Desktop's plugin directory uses the ChatGPT base URL even when the
   # actual plugins come from configured local or Git marketplaces. Publish only
   # the read-only compatibility endpoints handled by copilot-api. The

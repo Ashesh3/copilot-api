@@ -37,6 +37,7 @@ import { audioTranscriptionRoutes } from "./routes/audio-transcriptions/route"
 import { completionRoutes } from "./routes/chat-completions/route"
 import { claudeCompatibilityRoutes } from "./routes/claude-compat/route"
 import { codeSessionsRoutes } from "./routes/code-sessions/route"
+import { codexAccountRoutes } from "./routes/codex-accounts/route"
 import { codexAuthRoutes } from "./routes/codex-auth/route"
 import { codexPluginServiceRoutes } from "./routes/codex-plugins/route"
 import { codexResponsesRoutes } from "./routes/codex-responses/route"
@@ -186,6 +187,10 @@ server.get("/code", async (c) => {
   if (!adminSession) return c.redirect("/dashboard", 302)
   return c.redirect("/dashboard#environments")
 })
+// Desktop account discovery must precede the /api OAuth catch-all as well as
+// /wham's unsupported-cloud handler and the inference guards. These exact
+// routes authenticate enabled managed identities internally.
+server.route("", codexAccountRoutes)
 // OAuth fake layer — authorize, token exchange, profile
 server.route("/oauth", oauthBrowserRoutes)
 server.route("/v1/oauth", oauthTokenRoutes)

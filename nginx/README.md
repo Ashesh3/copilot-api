@@ -11,9 +11,9 @@ The canonical application and Docker setup remains in the repository
 
 | Template                                            | Intended hostname                               | Published surface                                                             |
 | --------------------------------------------------- | ----------------------------------------------- | ----------------------------------------------------------------------------- |
-| `sites-available/public-domain.conf.template`       | Normal public API/dashboard hostname            | Inference APIs, scoped OAuth, dashboard, Remote Control, exact health         |
+| `sites-available/public-domain.conf.template`       | Normal public API/dashboard hostname            | Inference APIs, scoped OAuth, Codex account discovery, dashboard, Remote Control, exact health |
 | `sites-available/spoof-domains.conf.template`       | Claude API and platform compatibility hostnames | Claude API/OAuth/session compatibility allowlists                             |
-| `sites-available/codex-desktop-spoof.conf.template` | Locally mapped trusted `*.openai.com` hostname  | Codex dictation, plugin compatibility, managed auth refresh, and URL policy    |
+| `sites-available/codex-desktop-spoof.conf.template` | Locally mapped trusted `*.openai.com` hostname  | Codex dictation, account discovery, plugin compatibility, managed auth refresh, and URL policy |
 | `sites-available/codex-statsig-spoof.conf.template` | Locally mapped `ab.chatgpt.com`                 | Exact Statsig initialize/download/check routes; all other paths denied         |
 
 Do not combine these server blocks onto one broad hostname. Do not add a
@@ -27,7 +27,8 @@ cross-origin SDK calls; authentication remains required. The CORS policy covers
 the Anthropic, OpenAI, and Google SDK headers, including session affinity.
 
 Run `RUN_NGINX_TESTS=1 bun test tests/nginx-public-routes.test.ts` with Docker
-available to verify the rendered public template against a local upstream.
+available to verify the rendered public and Codex spoof templates against a local
+upstream.
 The test creates and removes its own container and leaves deployed vhosts alone.
 
 The Statsig application boundary authorizes managed client IPs. If a shared
@@ -96,6 +97,24 @@ the default location to a real ChatGPT service: unsupported calls should fail
 locally with `404`, without forwarding the synthetic bearer. If a different
 `*.openai.com` label is chosen, use it consistently in `config.toml`, the hosts
 file, the certificate, and `server_name`.
+
+Both the public and Codex spoof templates publish these exact workspace-discovery
+routes:
+
+| GET path | Client use |
+| --- | --- |
+| `/api/codex/accounts/check` | Native account discovery when `chatgpt_base_url` is an origin |
+| `/wham/accounts/check` | Desktop account-directory reads |
+| `/backend-api/wham/accounts/check` | Discovery with an explicit `/backend-api` base prefix |
+
+These locations require an Authorization header, reject every non-GET method
+(including HEAD), and disable access logging. The application validates the enabled
+managed bearer and returns only its claimed account; a conflicting account header
+is rejected. Its no-store response includes workspace routing that retains the
+configured HTTPS backend. This supports local account discovery without granting
+hosted Work access. Keep surrounding `/api/codex/`, `/wham/`, and `/backend-api/`
+paths under the default denial; do not add a catch-all proxy for these families.
+Deploy the application handler and both required vhost locations together.
 
 The template's exact `/backend-api/aura/site_status` location is optional and is
 not required for managed authentication. If retained, the application returns
@@ -208,6 +227,11 @@ Then verify the boundary from outside the origin:
    each TLS proxy server has the maximum-duration client/read/send directives.
 13. The Statsig hostname proxies only `/v1/initialize`, `/v1/download`, and
    `/v1/check`; an unrelated path returns `404`.
+14. Each exact account-discovery GET above returns account/routing JSON for a
+    valid enabled managed bearer on both relevant hostnames. Missing authorization,
+    HEAD, mutation methods, trailing slashes, and neighboring paths are denied by
+    Nginx. An unknown or disabled bearer and a conflicting account header are
+    rejected by the application. Verify the response is no-store.
 
 See [../docs/codex-desktop-managed-auth.md](../docs/codex-desktop-managed-auth.md)
 for the complete Windows client and digest-registration procedure.

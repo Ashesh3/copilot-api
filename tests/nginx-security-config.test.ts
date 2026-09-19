@@ -146,6 +146,40 @@ test("Codex managed auth refresh is an exact POST-only route", async () => {
   }
 })
 
+test.each([
+  "sites-available/public-domain.conf.template",
+  "sites-available/codex-desktop-spoof.conf.template",
+])(
+  "Codex account discovery has exact authenticated GET locations in %s",
+  async (filename) => {
+    const template = await read(filename)
+    for (const route of [
+      "/api/codex/accounts/check",
+      "/wham/accounts/check",
+      "/backend-api/wham/accounts/check",
+    ]) {
+      const location = template.match(
+        new RegExp(`location = ${route} \\{([\\s\\S]*?)\\n {2}\\}`),
+      )?.[1]
+
+      expect(location).toBeDefined()
+      // limit_except GET would also admit HEAD; discovery supports only GET.
+      expect(location).toContain("if ($request_method != GET) { return 404; }")
+      expect(location).toContain(
+        'if ($http_authorization = "") { return 404; }',
+      )
+      expect(location).toContain("access_log off;")
+      expect(location).toContain("proxy_pass {{UPSTREAM_URL}};")
+      expect(location).toContain("proxy_http_version 1.1;")
+      expect(location).not.toContain("proxy_set_header Authorization")
+    }
+    expect(template).not.toMatch(
+      /location (?:\^~ )?\/(?:api\/codex|wham|backend-api\/wham)\//,
+    )
+    expect(template).toContain("location / { return 404; }")
+  },
+)
+
 test("Codex plugin compatibility exposes only read-only catalog paths", async () => {
   const [publicTemplate, codexTemplate] = await Promise.all([
     read("sites-available/public-domain.conf.template"),

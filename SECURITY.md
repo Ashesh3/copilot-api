@@ -43,6 +43,15 @@ affected, include its exact version or digest.
   digest match before returning the same credential. The route is no-store and
   has no gateway, OAuth, profile, or administrator authority.
   Current Nginx templates publish only that exact POST path.
+- Codex workspace discovery is limited to exact GET
+  `/api/codex/accounts/check`, `/wham/accounts/check`, and
+  `/backend-api/wham/accounts/check`. The application requires an enabled managed
+  synthetic bearer, derives the account from its claims, and rejects a conflicting
+  account header. It returns local identity/routing metadata with no-store headers;
+  it does not forward the credential or grant hosted Work access. Both the public
+  and Codex spoof Nginx templates reject missing authorization and non-GET methods,
+  including HEAD, disable access logging, and retain default denial around these
+  exact paths.
 - The dashboard requires the gateway key plus an Argon2id administrator
   password at login. The Argon2id verifier and administrator sessions are stored
   in local SQLite; password changes and owner resets
