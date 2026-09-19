@@ -6,22 +6,18 @@ import {
 export { tapDebugResponse } from "~/lib/debug-response-tap"
 
 /** In-memory working set; large bodies spill to an anonymous temporary file. */
-export const DEBUG_CAPTURE_MEMORY_MAX_BYTES = 128 * 1024 * 1024
+export const DEBUG_CAPTURE_MEMORY_MAX_BYTES = 1024 * 1024 * 1024
 let retainedBytes = 0
 
 export function debugCaptureMemoryUsage(): number {
   return retainedBytes
 }
 
-export function reserveDebugCaptureMemory(
-  bytes: number,
-  allowSingleOversized = false,
-): boolean {
+export function reserveDebugCaptureMemory(bytes: number): boolean {
   if (
     bytes < 0
     || !Number.isFinite(bytes)
-    || (retainedBytes + bytes > DEBUG_CAPTURE_MEMORY_MAX_BYTES
-      && (!allowSingleOversized || retainedBytes !== 0))
+    || retainedBytes + bytes > DEBUG_CAPTURE_MEMORY_MAX_BYTES
   )
     return false
   retainedBytes += bytes

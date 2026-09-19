@@ -4,6 +4,7 @@ import type { ModelFallbackDebugInfo } from "~/lib/model-fallback"
 
 import {
   rawDebugCapture,
+  DEBUG_CAPTURE_MEMORY_MAX_BYTES,
   reserveDebugCaptureMemory,
   releaseDebugCaptureMemory,
   type CapturedBody,
@@ -19,6 +20,7 @@ import {
   startLlmDebugFallbackCapture,
   type LlmDebugFallbackObservation,
 } from "~/lib/llm-debug-fallback"
+import { hasFailedLlmDebugResponse } from "~/lib/llm-debug-outcome"
 
 import {
   readDescriptorSnapshotValue,
@@ -105,6 +107,10 @@ export interface LlmDebugLogSummary {
 }
 
 export interface LlmDebugLogListResponse {
+  capacity: {
+    droppedCaptures: number
+    evictedCaptures: number
+  }
   count: number
   entries: Array<LlmDebugLogSummary>
   generatedAt: string
@@ -140,6 +146,8 @@ const captures = new Map<string, DebugCapture>()
 const MAX_CAPTURES = 2000
 let pruneTimer: ReturnType<typeof setTimeout> | undefined
 let pruneDeadline: number | undefined
+let droppedCaptures = 0
+let evictedCaptures = 0
 
 function releaseCapture(id: string): void {
   const capture = captures.get(id)
@@ -147,7 +155,26 @@ function releaseCapture(id: string): void {
   captures.delete(id)
   releaseClientFallbackCapture(id)
   releaseDebugCaptureMemory(capture.bytes)
+  capture.bytes = 0
   capture.controller.abort()
+}
+
+function evictCapture(): boolean {
+  // Prefer the oldest success; reclaim the oldest remaining entry only when
+  // there are no successful captures left. Map order is admission order.
+  for (const successfulOnly of [true, false]) {
+    for (const [id, capture] of captures) {
+      if (successfulOnly && capture.entry.status !== "complete") continue
+      evictedCaptures = Math.min(Number.MAX_SAFE_INTEGER, evictedCaptures + 1)
+      releaseCapture(id)
+      return true
+    }
+  }
+  return false
+}
+
+function recordDroppedCapture(): void {
+  droppedCaptures = Math.min(Number.MAX_SAFE_INTEGER, droppedCaptures + 1)
 }
 
 function captureDeadline(entry: LlmDebugLogEntry): number {
@@ -196,6 +223,7 @@ export function getLlmDebugCaptureSignal(id: string): AbortSignal {
 
 function reserveCapture(capture: DebugCapture): boolean {
   const { entry } = capture
+  const wasRetained = captures.get(entry.id) === capture
   // Count retained strings as UTF-16 without serializing the raw bodies again.
   const bytes =
     ((entry.request.body?.length ?? 0) + (entry.response?.body?.length ?? 0))
@@ -208,16 +236,17 @@ function reserveCapture(capture: DebugCapture): boolean {
       : {}),
     }).length
       * 2
-  // Replace the whole reservation so a lone entry can grow past the budget
-  // when its response arrives, just as a lone oversized request can.
+  // Replace this entry's old reservation without ever exceeding the shared cap.
   releaseDebugCaptureMemory(capture.bytes)
   capture.bytes = 0
-  let reserved = reserveDebugCaptureMemory(bytes, true)
-  for (const [id, candidate] of captures) {
-    if (reserved) break
-    if (candidate === capture) continue
-    releaseCapture(id)
-    reserved = reserveDebugCaptureMemory(bytes, true)
+  // A capture that cannot fit alone must not evict all other useful captures.
+  if (bytes > DEBUG_CAPTURE_MEMORY_MAX_BYTES) return false
+  let reserved = reserveDebugCaptureMemory(bytes)
+  while (!reserved && evictCapture()) {
+    // A growing terminal capture participates in the same eviction priority as
+    // every other retained entry. Never resurrect it after eviction or clear.
+    if (wasRetained && captures.get(entry.id) !== capture) return false
+    reserved = reserveDebugCaptureMemory(bytes)
   }
   if (reserved) capture.bytes = bytes
   return reserved
@@ -225,7 +254,17 @@ function reserveCapture(capture: DebugCapture): boolean {
 
 function retainTerminalCapture(capture: DebugCapture): void {
   capture.controller.abort()
-  if (!reserveCapture(capture)) releaseCapture(capture.entry.id)
+  if (captures.get(capture.entry.id) !== capture) return
+  if (!reserveCapture(capture)) {
+    if (captures.get(capture.entry.id) === capture) {
+      recordDroppedCapture()
+      releaseCapture(capture.entry.id)
+    }
+  } else if (captures.get(capture.entry.id) !== capture) {
+    // An evicted reader may synchronously clear the store from an abort listener.
+    releaseDebugCaptureMemory(capture.bytes)
+    capture.bytes = 0
+  }
   pruneCaptures()
 }
 
@@ -544,13 +583,12 @@ export function startLlmDebugLog(input: StartLlmDebugLogInput): string {
     bytes: 0,
   }
   while (captures.size >= MAX_CAPTURES) {
-    const oldest = captures.keys().next().value
-    if (!oldest) break
-    releaseCapture(oldest)
+    if (!evictCapture()) break
   }
-  if (reserveCapture(capture)) {
+  if (captures.size < MAX_CAPTURES && reserveCapture(capture)) {
     captures.set(id, capture)
   } else {
+    recordDroppedCapture()
     releaseClientFallbackCapture(id)
     capture.controller.abort()
   }
@@ -595,6 +633,23 @@ function incompleteBody(body: CapturedBody): boolean {
   )
 }
 
+function failedCapture(
+  entry: LlmDebugLogEntry,
+  response: LlmDebugLogResponse,
+): boolean {
+  return Boolean(
+    response.bodyReadError
+      || incompleteBody(entry.request)
+      || incompleteBody(response)
+      || response.status < 200
+      || response.status >= 300
+      || hasFailedLlmDebugResponse({
+        body: response.body,
+        contentType: findHeader(response.headers, "content-type"),
+      }),
+  )
+}
+
 export function finishLlmDebugLog(
   id: string,
   response: Omit<LlmDebugLogResponse, "bodyBytes"> & { bodyBytes?: number },
@@ -604,15 +659,7 @@ export function finishLlmDebugLog(
   if (!capture) return
   capture.entry.response = captureResponse(response, capture)
   capture.entry.status =
-    (
-      response.bodyReadError
-      || incompleteBody(capture.entry.request)
-      || incompleteBody(capture.entry.response)
-      || response.status < 200
-      || response.status >= 300
-    ) ?
-      "error"
-    : "complete"
+    failedCapture(capture.entry, capture.entry.response) ? "error" : "complete"
   if (
     capture.entry.request.path === "/v1/messages"
     && response.status === 200
@@ -721,6 +768,7 @@ export async function listLlmDebugLogs(
   const entries = page.map((entry) => toSummary(entry))
   const last = page.at(-1)
   return {
+    capacity: { droppedCaptures, evictedCaptures },
     count: entries.length,
     entries,
     generatedAt: new Date().toISOString(),
@@ -746,5 +794,7 @@ export async function getLlmDebugLog(
 export async function clearLlmDebugLogs(): Promise<void> {
   clearClientFallbackObservations()
   for (const id of captures.keys()) releaseCapture(id)
+  droppedCaptures = 0
+  evictedCaptures = 0
   schedulePrune()
 }

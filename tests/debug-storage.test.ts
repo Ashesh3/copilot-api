@@ -6,6 +6,8 @@ import {
   captureDebugResponseBody,
   DEBUG_CAPTURE_MEMORY_MAX_BYTES,
   debugCaptureMemoryUsage,
+  releaseDebugCaptureMemory,
+  reserveDebugCaptureMemory,
 } from "../src/lib/debug-capture"
 import {
   clearLlmDebugLogs,
@@ -219,95 +221,101 @@ test("debug remains available while the selected database is unavailable", async
 
 test("completed request and response bodies share the bounded memory budget", async () => {
   const baseline = debugCaptureMemoryUsage()
-  let first: string | undefined
-  const requestBody = '{ "input": "' + "x".repeat(2 * 1024 * 1024) + '" }\r\n'
-  const responseBody =
-    "event: delta\r\ndata: "
-    + "y".repeat(2 * 1024 * 1024)
-    + "\r\n\r\ndata:[DONE]\r\n\r\n"
-  for (let index = 0; index < 18; index++) {
-    const id = startLlmDebugLog({
-      method: "POST",
-      path: "/responses",
-      url: "https://example.test/responses",
-      requestHeaders: {},
-      requestBody,
-    })
-    first ??= id
-    finishLlmDebugLog(id, {
-      body: responseBody,
-      headers: {},
-      status: 200,
-      statusText: "OK",
-    })
-    const entry = await getLlmDebugLog(id)
-    expect(entry?.request.body === requestBody).toBe(true)
-    expect(entry?.response?.body === responseBody).toBe(true)
-    expect(entry?.status).toBe("complete")
-    if (index === 0) {
-      expect(debugCaptureMemoryUsage() - baseline).toBeGreaterThanOrEqual(
-        (requestBody.length + responseBody.length) * 2,
+  // Simulate other captures occupying most of the GiB without allocating it.
+  const reservation =
+    DEBUG_CAPTURE_MEMORY_MAX_BYTES - baseline - 128 * 1024 * 1024
+  expect(reserveDebugCaptureMemory(reservation)).toBe(true)
+  try {
+    let first: string | undefined
+    const requestBody = '{ "input": "' + "x".repeat(2 * 1024 * 1024) + '" }\r\n'
+    const responseBody =
+      "event: delta\r\ndata: "
+      + "y".repeat(2 * 1024 * 1024)
+      + "\r\n\r\ndata:[DONE]\r\n\r\n"
+    for (let index = 0; index < 18; index++) {
+      const id = startLlmDebugLog({
+        method: "POST",
+        path: "/responses",
+        url: "https://example.test/responses",
+        requestHeaders: {},
+        requestBody,
+      })
+      first ??= id
+      finishLlmDebugLog(id, {
+        body: responseBody,
+        headers: {},
+        status: 200,
+        statusText: "OK",
+      })
+      const entry = await getLlmDebugLog(id)
+      expect(entry?.request.body === requestBody).toBe(true)
+      expect(entry?.response?.body === responseBody).toBe(true)
+      expect(entry?.status).toBe("complete")
+      if (index === 0) {
+        expect(
+          debugCaptureMemoryUsage() - baseline - reservation,
+        ).toBeGreaterThanOrEqual((requestBody.length + responseBody.length) * 2)
+      }
+      expect(debugCaptureMemoryUsage()).toBeLessThanOrEqual(
+        DEBUG_CAPTURE_MEMORY_MAX_BYTES,
       )
     }
-    expect(debugCaptureMemoryUsage()).toBeLessThanOrEqual(
-      DEBUG_CAPTURE_MEMORY_MAX_BYTES,
-    )
+    expect(debugCaptureMemoryUsage()).toBeGreaterThan(baseline)
+    if (!first) throw new Error("Expected a debug capture")
+    expect(await getLlmDebugLog(first)).toBeUndefined()
+    expect((await listLlmDebugLogs()).count).toBeGreaterThan(0)
+    await clearLlmDebugLogs()
+  } finally {
+    releaseDebugCaptureMemory(reservation)
   }
-  expect(debugCaptureMemoryUsage()).toBeGreaterThan(baseline)
-  if (!first) throw new Error("Expected a debug capture")
-  expect(await getLlmDebugLog(first)).toBeUndefined()
-  expect((await listLlmDebugLogs()).count).toBeGreaterThan(0)
-  await clearLlmDebugLogs()
   expect(debugCaptureMemoryUsage()).toBe(baseline)
 })
 
 test.each(["request", "response"] as const)(
-  "retains one oversized %s capture and evicts it whole for the next entry",
+  "skips a %s capture that cannot fit the shared budget without exceeding it",
   async (side) => {
     const baseline = debugCaptureMemoryUsage()
     const first = start()
     const signal = getLlmDebugCaptureSignal(first)
-    const oversizedBody = "x".repeat(DEBUG_CAPTURE_MEMORY_MAX_BYTES / 2 + 1)
-    const requestBody = side === "request" ? oversizedBody : "{}"
-    const responseBody = side === "response" ? oversizedBody : "{}"
-    const id = startLlmDebugLog({
-      method: "POST",
-      path: "/responses",
-      url: "https://example.test/responses",
-      requestHeaders: {},
-      requestBody,
-    })
-    if (side === "request") {
-      expect(debugCaptureMemoryUsage()).toBeGreaterThan(
+    const reservation =
+      DEBUG_CAPTURE_MEMORY_MAX_BYTES - debugCaptureMemoryUsage() - 8192
+    expect(reserveDebugCaptureMemory(reservation)).toBe(true)
+    try {
+      const oversizedBody = "x".repeat(16 * 1024)
+      const requestBody = side === "request" ? oversizedBody : "{}"
+      const responseBody = side === "response" ? oversizedBody : "{}"
+      const id = startLlmDebugLog({
+        method: "POST",
+        path: "/responses",
+        url: "https://example.test/responses",
+        requestHeaders: {},
+        requestBody,
+      })
+      finishLlmDebugLog(id, {
+        body: responseBody,
+        headers: {},
+        status: 200,
+        statusText: "OK",
+      })
+      expect(await getLlmDebugLog(id)).toBeUndefined()
+      expect(debugCaptureMemoryUsage()).toBeLessThanOrEqual(
         DEBUG_CAPTURE_MEMORY_MAX_BYTES,
       )
-      expect((await getLlmDebugLog(id))?.request.body === requestBody).toBe(
-        true,
+      expect(getLlmDebugCaptureSignal(id).aborted).toBe(true)
+      expect(signal.aborted).toBe(side === "request")
+      if (side === "request")
+        expect(await getLlmDebugLog(first)).toBeUndefined()
+      else expect((await getLlmDebugLog(first))?.status).toBe("pending")
+      const replacement = start()
+      expect(await getLlmDebugLog(id)).toBeUndefined()
+      expect((await getLlmDebugLog(replacement))?.status).toBe("pending")
+      expect(debugCaptureMemoryUsage()).toBeLessThanOrEqual(
+        DEBUG_CAPTURE_MEMORY_MAX_BYTES,
       )
+      await clearLlmDebugLogs()
+    } finally {
+      releaseDebugCaptureMemory(reservation)
     }
-    finishLlmDebugLog(id, {
-      body: responseBody,
-      headers: {},
-      status: 200,
-      statusText: "OK",
-    })
-    const entry = await getLlmDebugLog(id)
-    expect(entry?.request.body === requestBody).toBe(true)
-    expect(entry?.response?.body === responseBody).toBe(true)
-    expect(entry?.status).toBe("complete")
-    expect(entry?.replayable).toBe(true)
-    expect(debugCaptureMemoryUsage()).toBeGreaterThan(
-      DEBUG_CAPTURE_MEMORY_MAX_BYTES,
-    )
-    expect(signal.aborted).toBe(true)
-    expect(await getLlmDebugLog(first)).toBeUndefined()
-    const replacement = start()
-    expect(await getLlmDebugLog(id)).toBeUndefined()
-    expect((await getLlmDebugLog(replacement))?.status).toBe("pending")
-    expect(debugCaptureMemoryUsage()).toBeLessThanOrEqual(
-      DEBUG_CAPTURE_MEMORY_MAX_BYTES,
-    )
-    await clearLlmDebugLogs()
     expect(debugCaptureMemoryUsage()).toBe(baseline)
   },
 )

@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, expect, jest, test } from "bun:test"
 
-import { DEBUG_CAPTURE_MEMORY_MAX_BYTES } from "~/lib/debug-capture"
+import {
+  DEBUG_CAPTURE_MEMORY_MAX_BYTES,
+  debugCaptureMemoryUsage,
+  releaseDebugCaptureMemory,
+  reserveDebugCaptureMemory,
+} from "~/lib/debug-capture"
 import { runWithMessagesFallbackObservation } from "~/lib/llm-debug-fallback"
 import {
   clearLlmDebugLogs,
@@ -474,11 +479,14 @@ test("clearing captures invalidates an in-flight request before its late refusal
 test("does not link client retries to captures removed by memory pressure", async () => {
   const source = scopedStart()
   refuse(source)
-  start({
-    model: "memory-pressure",
-    filler: "x".repeat(DEBUG_CAPTURE_MEMORY_MAX_BYTES / 2),
-  })
-  expect(await getLlmDebugLog(source)).toBeUndefined()
+  const reserved = DEBUG_CAPTURE_MEMORY_MAX_BYTES - debugCaptureMemoryUsage()
+  expect(reserveDebugCaptureMemory(reserved)).toBe(true)
+  try {
+    start({ model: "memory-pressure" })
+    expect(await getLlmDebugLog(source)).toBeUndefined()
+  } finally {
+    releaseDebugCaptureMemory(reserved)
+  }
   const retry = scopedStart(requestPayload("claude-opus-4.8"))
   expect(await getLlmDebugLog(retry)).not.toHaveProperty("fallbackObservations")
 })

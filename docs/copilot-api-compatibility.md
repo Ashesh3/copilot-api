@@ -187,6 +187,30 @@ size recovery, media normalization, WebP conversion where required, and the
 connection-scoped WebSocket continuation described below. These local features
 do not imply upstream stored-response support.
 
+### Codex collaboration messages
+
+For Copilot Responses requests, the gateway adapts Codex collaboration v2 tools
+whose `message` schema requests `encrypted: true`. Copilot reserves the original
+`collaboration` namespace schema, so the gateway uses an unused
+`copilot_collaboration` namespace upstream with ordinary string messages. It
+restores the client namespace and adds `encrypted_function_args: []` to the
+corresponding plaintext calls in JSON and streamed responses. Codex requires
+that explicit empty list to keep agent messages as text on the next turn.
+
+This translation covers top-level tools, `additional_tools`, named tool choices,
+and replayed function-call namespaces. Tool arguments, call IDs, existing message
+bodies, and caller objects remain intact. Custom-provider dispatch is unchanged.
+An explicit upstream encrypted-argument list is preserved, never relabeled as
+plaintext.
+
+This prevents new collaboration messages from depending on provider encryption
+state. It cannot decrypt encrypted messages already in a conversation. If an old
+conversation receives `Encrypted function output content could not be decrypted
+or decoded`, restarting the client or retrying the same history does not remove
+those messages. Continue through a backend that can read the original ciphertext,
+or start a fresh task with a verified plaintext handoff. The gateway does not
+silently delete agent messages or substitute ciphertext for their contents.
+
 ## Messages body, header, and count-tokens behavior
 
 Messages inference requires a non-empty `model` and at least one usable message
@@ -460,8 +484,18 @@ body forwarding.
 
 Administrator-only LLM Debug stores raw request and response attempts only in
 process memory, including credentials and secret-bearing fields. Captures never enter the database or application backups. Captured
-body text and headers are not filtered. Successful captures expire after ten minutes; failed
-or interrupted captures after one hour, with earlier capacity eviction possible.
+body text and headers are not filtered. Successful captures expire ten minutes
+after request start; failed, aborted, and interrupted captures expire after one
+hour. Explicit protocol failures inside HTTP 200 JSON or SSE responses count as
+failures. Captures and active capture buffers share a 1 GiB (1,024 MiB) reservation
+limit, and the log retains at most 2,000 entries. Capacity pressure removes the
+oldest successful captures first, then the oldest remaining captures, including
+failures. Retention windows can therefore end early at capacity. A capture too
+large to fit alone is skipped, and no single oversized capture may exceed the
+reservation limit. The dashboard reports counts
+of capacity evictions and skipped captures since its last clear or server restart.
+The reservation limit is for diagnostic data, not total server process memory.
+Restart and manual clear remove all captures.
 Replay requires a complete eligible capture and obtains fresh credentials.
 Raw captures can contain sensitive values. Final upstream
 HTTP failure bodies retain their separate passthrough contract above.
