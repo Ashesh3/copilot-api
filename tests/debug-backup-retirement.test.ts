@@ -255,7 +255,7 @@ test("new encrypted backups exclude retired debug data and metadata even if stal
     expect(plain).not.toContain("capi_debug")
     expect(plain).not.toContain("history_debug_generation")
     expect(plain).not.toContain(privatePayload)
-    expect(plain).toContain('"schemaVersion":6')
+    expect(plain).toContain('"schemaVersion":7')
   })
 })
 
@@ -306,7 +306,7 @@ test.each([false, true])(
         }))
         expect(state.metadata).toEqual([
           { key: "config_revision", value: "2" },
-          { key: "schema_version", value: "6" },
+          { key: "schema_version", value: "7" },
         ])
         expect(state.settings).toEqual([{ namespace: "app", revision: 2 }])
         expect(state.activity).toEqual([])

@@ -72,6 +72,12 @@ export class TokenPool {
   private modelIndex: Map<string, Array<Account>> = new Map()
   private readonly onModelsChanged: ModelsSnapshotListener | undefined
   private roundRobinIndex = 0
+  private modelGeneration = 0
+
+  /** Changes to runtime eligibility must invalidate an uncommitted reservation. */
+  get routingGeneration(): number {
+    return this.modelGeneration
+  }
 
   constructor(onModelsChanged?: ModelsSnapshotListener) {
     this.onModelsChanged = onModelsChanged
@@ -224,6 +230,7 @@ export class TokenPool {
    * Rebuild the model-to-accounts index from all healthy accounts.
    */
   rebuildModelIndex(): void {
+    this.modelGeneration++
     this.modelIndex.clear()
     let enabled: ReturnType<typeof getLiveModelRoutingPolicy> | undefined
 

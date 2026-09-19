@@ -329,7 +329,7 @@ async function handleCompletionInner(
     reasoningEffort,
   })
 
-  const routedModel = selectRoutedModel(routableSource.model, {
+  const routedModel = await selectRoutedModel(routableSource.model, {
     copilotSessionToken,
   })
   const selectedModel = routedModel.model

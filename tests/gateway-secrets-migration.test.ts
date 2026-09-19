@@ -89,13 +89,14 @@ test("version two removes old digest-only keys without replacing unrelated state
     { version: 4 },
     { version: 5 },
     { version: 6 },
+    { version: 7 },
   ])
   expect(state.gateways).toEqual([])
   expect(state.settings).toEqual([
     { namespace: "app", value_json: "{}", revision: 7 },
   ])
   expect(state.identity).toEqual([{ value: storeId }])
-  expect(state.version).toEqual([{ value: "6" }])
+  expect(state.version).toEqual([{ value: "7" }])
   expect(
     await storage.read((session) =>
       session.query({ sql: "SELECT * FROM capi_gateway_secrets", args: [] }),

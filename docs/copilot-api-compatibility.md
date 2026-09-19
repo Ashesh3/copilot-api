@@ -353,24 +353,27 @@ moves past the terminal frame, without changing event order or body content.
 
 ## Multi-account and session-token constraints
 
-Hash-only account affinity keeps an identified conversation on a deterministic
-eligible account and derives stable upstream identity without storing a
-conversation-to-account map. Endpoint fallback does not authorize moving
-encrypted or signed history to another account. Eligibility always comes from
-the account's raw current model catalog plus operator routing policy.
+Identified conversations retain a permanent SQLite account assignment, keyed by
+the established effective session/thread affinity (including Codex parent forks).
+Until percentages are explicitly saved, new ownership records use the existing
+equal rendezvous choice. After activation, new records use smooth weighted round
+robin among positive-share accounts eligible for the final model. The scheduler
+is model-specific; ownership is model-independent. Endpoint fallback does not
+authorize moving encrypted or signed history to another account. Eligibility
+comes from the raw current model catalog plus operator routing policy.
 
 In multi-account mode, affinity is necessary but not sufficient for session
-continuity. Separate control-plane and inference calls first use the normal
-deterministic affinity selector. A session token is then forwarded only when
+continuity. Account-binding control-plane calls and inference resolve or reserve
+the same durable owner before endpoint selection. A session token is forwarded only when
 its bounded issuer subject matches the selected account's bounded current
 issuer identity from authenticated user discovery (`analytics_tracking_id`),
-with legacy bearer `tid` assignments retained as a fallback. Health,
-eligibility, account membership, token format, or
-configuration-order changes can therefore lose exact session continuity, but
-they cannot cause cross-account replay: inference omits the token and continues
-ordinarily, while token-required control-plane calls reject locally. Calls
-without affinity retain conservative first-eligible selection and make the
-same issuer-proof check. No session-token-to-account map is stored.
+with legacy bearer `tid` assignments retained as a fallback. A recognized issuer
+can seed a missing assignment even at 0%. A contradictory stored owner or a
+recorded account that is unavailable for the requested model rejects locally
+without switching accounts. An unrecognized/malformed inference token is still
+omitted under the existing compatibility rules. Calls without affinity retain
+conservative first-eligible selection and the existing issuer checks. No raw
+session-token-to-account map is stored.
 
 `POST /models/session` creates or refreshes a model-scoped session and may
 receive an existing `Copilot-Session-Token`.
@@ -384,7 +387,11 @@ operations are routed account-aware; they are not broadcast to every account.
 Complete parseable Auto and intent records are forwarded without projecting
 away future fields. Initial account selection may use bounded session-token
 issuer proof, then endpoint evaluation, dispatch, and any retry share the same
-request-local numeric pin without a persistent session/account map.
+request-local numeric pin backed by the durable conversation assignment.
+Model-policy calls and local count/warmup probes honor recorded owners without
+allocating new conversations. Percentage edits affect new ownership records only;
+0% does not disable existing owners. Clients without a stable affinity key and
+dormant predeployment conversations cannot obtain retrospective ownership guarantees.
 
 The session token is an opaque secret, not gateway authentication, and the
 gateway never persists it. Ordinary logs, telemetry, and Sentry redact

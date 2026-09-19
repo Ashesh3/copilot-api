@@ -2,7 +2,10 @@
 import consola from "consola"
 import { AsyncLocalStorage } from "node:async_hooks"
 
-import type { RoutedAccountPin } from "~/lib/account-routing-selection"
+import type {
+  RoutedAccountPin,
+  RoutedAccountAssignmentMetadata,
+} from "~/lib/account-routing-selection"
 import type { RoutingAffinitySource } from "~/lib/routing-affinity"
 import type { Account } from "~/lib/token-pool"
 import type {
@@ -22,7 +25,7 @@ import {
   withActiveAccount,
 } from "~/lib/account-lease-context"
 import {
-  selectCandidateAccount,
+  selectPersistentCandidateAccount,
   selectModelAccount,
 } from "~/lib/account-routing-selection"
 import { getAccountsService } from "~/lib/accounts-service"
@@ -111,26 +114,38 @@ export interface RoutedModelSelection {
 
 export interface RoutedModelSelectionOptions {
   copilotSessionToken?: string
+  createAssignment?: boolean
 }
 
 /**
  * Select the account before endpoint routing, then expose that account's raw
  * model row as the endpoint authority. The returned mutable pin keeps the
- * later transport dispatch coherent and follows an eligible unidentified
- * failover without retaining any session-to-account mapping.
+ * later transport dispatch coherent. Identified conversations resolve their
+ * permanent account before this account's model catalog is inspected.
  */
-export function selectRoutedModel(
+export async function selectRoutedModel(
   modelId: string,
   options?: RoutedModelSelectionOptions,
-): RoutedModelSelection {
+): Promise<RoutedModelSelection> {
+  if (
+    peekStorageRuntime()
+    && getEffectiveAffinityKey()
+    && !getRequestSnapshot()
+  )
+    await getAccountsService().refreshRuntime()
   const fallbackModel = state.models?.data.find((model) => model.id === modelId)
-  if (!usesPooledAccounts()) return { model: fallbackModel }
+  if (
+    !usesPooledAccounts()
+    && (!peekStorageRuntime() || !getEffectiveAffinityKey())
+  )
+    return { model: fallbackModel }
 
-  const selection = selectRoutedAccount({
+  const selection = await selectRoutedAccount({
     affinityKey: getEffectiveAffinityKey(),
     copilotSessionToken: options?.copilotSessionToken,
     modelId,
     routedAccountPin: undefined,
+    createAssignment: options?.createAssignment,
   })
   const account = selection.account
   if (!account) return { model: fallbackModel }
@@ -140,6 +155,7 @@ export function selectRoutedModel(
       accountId: account.id,
       eligibleAccountIds: selection.eligibleAccountIds,
       selectionMode: selection.selectionMode,
+      ...assignmentMetadata(selection),
     },
     model: tokenPool.getModelForAccount(modelId, account.id) ?? fallbackModel,
   }
@@ -188,12 +204,25 @@ function selectRoutedAccount(options: {
   copilotSessionToken?: string
   modelId: string
   routedAccountPin: RoutedAccountPin | undefined
+  createAssignment?: boolean
 }) {
   return selectModelAccount({
     ...options,
     pinnedAccountId: pinnedRoutedAccountStorage.getStore(),
     selectedAccountPin: selectedRoutedAccountStorage.getStore(),
   })
+}
+
+function assignmentMetadata(
+  selection: RoutedAccountAssignmentMetadata,
+): RoutedAccountAssignmentMetadata {
+  return selection.allocationVersion === undefined ?
+      {}
+    : {
+        assignmentReason: selection.assignmentReason,
+        eligibleAccountWeights: selection.eligibleAccountWeights,
+        allocationVersion: selection.allocationVersion,
+      }
 }
 
 type RoutedFetchResult = {
@@ -238,13 +267,15 @@ function copilotTelemetry(options: {
   }
 }
 
-function recordSelection(options: {
-  accountId: number
-  affinitySource?: RoutingAffinitySource
-  eligibleAccountIds: ReadonlyArray<number>
-  mode: RoutingSelectionMode
-  model: string
-}): void {
+function recordSelection(
+  options: RoutedAccountAssignmentMetadata & {
+    accountId: number
+    affinitySource?: RoutingAffinitySource
+    eligibleAccountIds: ReadonlyArray<number>
+    mode: RoutingSelectionMode
+    model: string
+  },
+): void {
   recordRoutingSelection(options)
 }
 
@@ -662,6 +693,7 @@ async function singleTokenRoutedFetch(options: {
   context: RoutedFetchContext
   modelId: string
   shouldRecordSelection: boolean
+  selection?: RoutedAccountPin
 }): Promise<RoutedFetchResult> {
   const { context, modelId, shouldRecordSelection } = options
   const account = getActiveAccount()
@@ -670,8 +702,9 @@ async function singleTokenRoutedFetch(options: {
     recordRoutingSelection({
       ...(account ? { accountId: account.id } : {}),
       eligibleAccountIds: account ? [account.id] : [],
-      mode: "single",
+      mode: options.selection?.selectionMode ?? "single",
       model: modelId,
+      ...assignmentMetadata(options.selection ?? {}),
     })
   }
   const response = await copilotFetch(
@@ -725,13 +758,68 @@ function controlPlaneRequestInit(
   }
 }
 
+async function selectControlPlaneAccount(
+  options: RoutedControlPlaneFetchOptions,
+  candidates: ReadonlyArray<Account>,
+) {
+  return selectPersistentCandidateAccount({
+    affinityKey: getEffectiveAffinityKey(),
+    candidates,
+    copilotSessionToken: options.copilotSessionToken,
+    modelId: options.modelId ?? "control-plane",
+    createAssignment:
+      options.path === "/models/session"
+      || options.path === "/auto"
+      || Boolean(options.copilotSessionToken),
+  })
+}
+
+async function singleControlPlaneFetch(
+  options: RoutedControlPlaneFetchOptions,
+  retryBudget: RetryBudget,
+): Promise<RoutedControlPlaneFetchResult> {
+  const send = async (
+    account?: Account,
+  ): Promise<RoutedControlPlaneFetchResult> => ({
+    response: await copilotFetch(
+      options.path,
+      controlPlaneRequestInit(
+        options,
+        copilotHeaders({ copilotSessionToken: options.copilotSessionToken }),
+      ),
+      {
+        retryBudget,
+        telemetry: copilotTelemetry({
+          accountId: account?.id,
+          model: options.modelId ?? "control-plane",
+          path: options.path,
+          reason: "initial",
+        }),
+      },
+    ),
+    account,
+  })
+  if (!peekStorageRuntime()) return send()
+  const selected = tokenPool.getFirstHealthyAccount()
+  if (!selected) return createNoControlPlaneAccountResult()
+  try {
+    const selection = await selectControlPlaneAccount(options, [selected])
+    const account = leaseAccount(selection.account ?? selected)
+    setLastUsedRoutedAccountId(account.id)
+    return await withActiveAccount(account, () => send(account))
+  } catch (error) {
+    if (error instanceof LocalHTTPError)
+      return { account: undefined, localError: error, response: error.response }
+    throw error
+  }
+}
+
 /**
  * Perform one account-aware Copilot control-plane call.
  *
- * Selection is deterministic for identified sessions and remains read-only:
- * no session token or affinity mapping is retained. Policy calls select from
- * raw model catalog membership, while session/Auto/intent calls select from
- * all healthy accounts. A selected account is never replaced by failover.
+ * Session creation reserves permanent ownership before the upstream send.
+ * Policy calls honor existing owners without allocating a conversation.
+ * Raw catalog membership remains authoritative for policy enablement.
  */
 export async function routedControlPlaneFetch(
   options: RoutedControlPlaneFetchOptions,
@@ -745,62 +833,15 @@ export async function routedControlPlaneFetch(
   return await routedControlPlaneFetchInner(options)
 }
 
-// eslint-disable-next-line max-lines-per-function -- Preserve the single-account and pooled control-plane continuity branches together.
 async function routedControlPlaneFetchInner(
   options: RoutedControlPlaneFetchOptions,
 ): Promise<RoutedControlPlaneFetchResult> {
-  const affinityKey = getEffectiveAffinityKey()
   const retryBudget = createRetryBudget()
   const telemetryModel = options.modelId ?? "control-plane"
   setLastUsedRoutedAccountId(undefined)
 
-  if (!usesPooledAccounts()) {
-    if (peekStorageRuntime()) {
-      const selected = tokenPool.getFirstHealthyAccount()
-      if (!selected) return createNoControlPlaneAccountResult()
-      const account = leaseAccount(selected)
-      setLastUsedRoutedAccountId(account.id)
-      return await withActiveAccount(account, async () => {
-        const response = await copilotFetch(
-          options.path,
-          controlPlaneRequestInit(
-            options,
-            copilotHeaders({
-              copilotSessionToken: options.copilotSessionToken,
-            }),
-          ),
-          {
-            retryBudget,
-            telemetry: copilotTelemetry({
-              accountId: account.id,
-              model: telemetryModel,
-              path: options.path,
-              reason: "initial",
-            }),
-          },
-        )
-        return { response, account }
-      })
-    }
-    const response = await copilotFetch(
-      options.path,
-      controlPlaneRequestInit(
-        options,
-        copilotHeaders({
-          copilotSessionToken: options.copilotSessionToken,
-        }),
-      ),
-      {
-        retryBudget,
-        telemetry: copilotTelemetry({
-          model: telemetryModel,
-          path: options.path,
-          reason: "initial",
-        }),
-      },
-    )
-    return { response, account: undefined }
-  }
+  if (!usesPooledAccounts())
+    return singleControlPlaneFetch(options, retryBudget)
 
   const candidates = tokenPool
     .getAllAccounts()
@@ -812,16 +853,29 @@ async function routedControlPlaneFetchInner(
         && (options.modelId === undefined
           || account.models.has(options.modelId)),
     )
-  const account = selectCandidateAccount({
-    affinityKey,
-    candidates,
-    copilotSessionToken: options.copilotSessionToken,
-  }).account
+  let selection
+  try {
+    selection = await selectControlPlaneAccount(options, candidates)
+  } catch (error) {
+    if (error instanceof LocalHTTPError)
+      return { account: undefined, localError: error, response: error.response }
+    throw error
+  }
+  const account = selection.account
   if (!account) {
     return createNoControlPlaneAccountResult()
   }
 
   setLastUsedRoutedAccountId(account.id)
+  if (selection.allocationVersion !== undefined)
+    recordSelection({
+      accountId: account.id,
+      eligibleAccountIds: selection.eligibleAccountIds,
+      mode: selection.selectionMode,
+      affinitySource: getRoutingAffinity()?.source,
+      model: telemetryModel,
+      ...assignmentMetadata(selection),
+    })
   const accountOptions: AccountFetchOptions = {
     account,
     enforceEndpointAuthority: false,
@@ -861,7 +915,7 @@ async function routedControlPlaneFetchInner(
  * headers with that account's token. A 421 rediscovery retry stays on that
  * account. Authentication rejections never cross identities; unidentified 429
  * responses may fail over once within the same GitHub instance. Identified
- * conversations never move away from their hash-selected account.
+ * conversations retain their recorded account.
  *
  * Transport failures are NOT failed over. `copilotFetch` retries them in
  * place; every account resolves to the same Copilot host, so switching
@@ -883,7 +937,11 @@ export async function routedFetch(
     const single =
       getTurnAccount(options.modelId)?.single ?? !usesPooledAccounts()
     const result = await routedFetchInner(path, init, options)
-    if (result.account)
+    if (
+      result.account
+      && path !== "/v1/messages/count_tokens"
+      && path !== "/responses/input_tokens"
+    )
       retainTurnAccount(options.modelId, result.account, single)
     return result
   })
@@ -961,7 +1019,7 @@ async function routedFetchInner(
 
   if (!usesPooledAccounts()) {
     if (peekStorageRuntime()) {
-      const account = tokenPool.getFirstHealthyAccount()
+      let account = tokenPool.getFirstHealthyAccount()
       if (!account) throw unavailableAccount()
       const pinnedId =
         routedAccountPin?.accountId
@@ -969,12 +1027,24 @@ async function routedFetchInner(
         ?? selectedAccountPin?.accountId
       if (pinnedId !== undefined && account.id !== pinnedId)
         throw unavailableAccount()
+      const selection = await selectRoutedAccount({
+        affinityKey: getEffectiveAffinityKey(),
+        copilotSessionToken: headerOptions?.copilotSessionToken,
+        modelId,
+        routedAccountPin,
+        createAssignment:
+          path !== "/v1/messages/count_tokens"
+          && path !== "/responses/input_tokens",
+      })
+      if (selection.account) account = selection.account
       const snapshot = leaseAccount(account)
       return await withActiveAccount(snapshot, async () => {
         const result = await singleTokenRoutedFetch({
           context,
           modelId,
           shouldRecordSelection,
+          selection:
+            selection.allocationVersion === undefined ? undefined : selection,
         })
         return { ...result, account: snapshot }
       })
@@ -987,11 +1057,14 @@ async function routedFetchInner(
   }
 
   const affinityKey = getEffectiveAffinityKey()
-  const selection = selectRoutedAccount({
+  const selection = await selectRoutedAccount({
     affinityKey,
     copilotSessionToken: headerOptions?.copilotSessionToken,
     modelId,
     routedAccountPin,
+    createAssignment:
+      path !== "/v1/messages/count_tokens"
+      && path !== "/responses/input_tokens",
   })
   const account = selection.account
   const mutableAccountPin = routedAccountPin ?? selectedAccountPin
@@ -999,6 +1072,7 @@ async function routedFetchInner(
     mutableAccountPin.accountId = account.id
     mutableAccountPin.eligibleAccountIds = [...selection.eligibleAccountIds]
     mutableAccountPin.selectionMode = selection.selectionMode
+    Object.assign(mutableAccountPin, assignmentMetadata(selection))
   }
   if (!account) {
     if (tokenPool.hasKnownModel(modelId)) {
@@ -1024,6 +1098,7 @@ async function routedFetchInner(
     accountSubject: account.copilotAccountSubject,
     accountToken: account.copilotToken,
     headerOptions: context.headerOptions,
+    requireContinuity: selection.assignmentReason === "issuer",
   })
   const boundContext = { ...context, ...binding }
 
@@ -1038,6 +1113,7 @@ async function routedFetchInner(
       eligibleAccountIds: selection.eligibleAccountIds,
       mode: selection.selectionMode,
       model: modelId,
+      ...assignmentMetadata(selection),
     })
   }
 

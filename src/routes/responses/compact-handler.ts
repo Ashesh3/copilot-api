@@ -315,7 +315,7 @@ const handleCompactAttempt = async (c: Context, body: CompactRequestBody) => {
     ...compactFallbackOptions(),
   }
   const customReference = resolveCompactCustomFallback(model)
-  const routedModel = customReference ? {} : selectRoutedModel(model)
+  const routedModel = customReference ? {} : await selectRoutedModel(model)
   const support = getModelEndpointSupport(routedModel.model)
   const { summaryText, usage } = await runWithRoutedModelSelection(
     routedModel,

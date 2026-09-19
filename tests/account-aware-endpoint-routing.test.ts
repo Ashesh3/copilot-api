@@ -345,7 +345,7 @@ test.each([
   },
 )
 
-test("omits a session issued by account A when eligibility moves inference to account B", async () => {
+test("preserves recorded session ownership when its account loses model eligibility", async () => {
   const modelId = "session-continuity-eligibility-change"
   const accountA = registerAccount({
     accountId: 52_401,
@@ -407,12 +407,12 @@ test("omits a session issued by account A when eligibility moves inference to ac
     }),
   )
 
-  expect(response.status).toBe(200)
-  expect(upstreamRequests.at(-1)).toEqual({
-    authorization: "Bearer tid=issuer-b;exp=1900000000",
-    path: "/responses",
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({
+    error: { code: "conversation_account_unavailable" },
   })
-  expect(upstreamSessionTokens).toEqual([{ path: "/responses", token: null }])
+  expect(upstreamRequests).toHaveLength(1)
+  expect(upstreamSessionTokens).toEqual([])
   for (const entry of (await listLlmDebugLogs()).entries) {
     expect(JSON.stringify(await getLlmDebugLog(entry.id))).not.toContain(
       issuedToken,
@@ -420,7 +420,7 @@ test("omits a session issued by account A when eligibility moves inference to ac
   }
 })
 
-test("omits the session token when the issuer becomes unhealthy", async () => {
+test("does not move an identified conversation when its recognized issuer becomes unhealthy", async () => {
   const modelId = "session-continuity-issuer-unhealthy"
   const accountA = registerAccount({
     accountId: 52_401,
@@ -463,8 +463,11 @@ test("omits the session token when the issuer becomes unhealthy", async () => {
     }),
   )
 
-  expect(response.status).toBe(200)
-  expect(upstreamSessionTokens).toEqual([{ path: "/responses", token: null }])
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({
+    error: { code: "conversation_account_unavailable" },
+  })
+  expect(upstreamSessionTokens).toEqual([])
 })
 
 test("preserves issuer selection when adding an account changes the affinity winner", async () => {
@@ -744,7 +747,7 @@ test("inherits the selected account into an empty retry pin and fails closed if 
   })
   tokenPool.rebuildModelIndex()
   const token = sessionToken({ modelId, subject: "issuer-a" })
-  const selection = selectRoutedModel(modelId, {
+  const selection = await selectRoutedModel(modelId, {
     copilotSessionToken: token,
   })
   const retryPin: RoutedAccountPin = {}
@@ -1031,7 +1034,7 @@ test.each(["/chat/completions", "/responses", "/v1/messages"] as const)(
     })
     tokenPool.rebuildModelIndex()
     state.models = tokenPool.getAllModels()
-    const selection = selectRoutedModel(modelId)
+    const selection = await selectRoutedModel(modelId)
     expect(selection.accountPin?.accountId).toBe(account.id)
 
     account.modelsData = [
@@ -1083,7 +1086,7 @@ test("rejects dispatch when the selected account model row disappears", async ()
   })
   tokenPool.rebuildModelIndex()
   state.models = tokenPool.getAllModels()
-  const selection = selectRoutedModel(modelId)
+  const selection = await selectRoutedModel(modelId)
   expect(selection.accountPin?.accountId).toBe(account.id)
   account.modelsData = []
 

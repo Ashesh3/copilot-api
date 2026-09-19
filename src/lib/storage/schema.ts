@@ -18,6 +18,10 @@ import {
   historyRetentionIndexes,
   historyRetentionMigration,
 } from "~/lib/storage/migrations/006-history-retention"
+import {
+  accountDistributionMigration,
+  accountDistributionTables,
+} from "~/lib/storage/migrations/007-account-distribution"
 
 export const storageMigrations = [
   initialMigration,
@@ -26,9 +30,10 @@ export const storageMigrations = [
   accountIntegrationMigration,
   removeActivityMigration,
   historyRetentionMigration,
+  accountDistributionMigration,
 ] as const
 
-export const currentSchemaVersion = historyRetentionMigration.version
+export const currentSchemaVersion = accountDistributionMigration.version
 const versionTwoTables = { ...initialTables, ...gatewaySecretTables }
 const versionThreeTables = Object.fromEntries(
   Object.entries(versionTwoTables).filter(([name]) => name !== "capi_debug"),
@@ -40,7 +45,10 @@ const versionFiveTables = Object.fromEntries(
     ([name]) => name !== "capi_activity",
   ),
 )
-export const currentTables = versionFiveTables
+export const currentTables = {
+  ...versionFiveTables,
+  ...accountDistributionTables,
+}
 const versionThreeIndexes = Object.fromEntries(
   Object.entries(initialIndexes).filter(
     ([, target]) => !target.startsWith("capi_debug("),
@@ -87,9 +95,10 @@ export function storageSchema(version: number) {
         counterKeys: currentCounterKeys,
       }
     }
+    case 6:
     case currentSchemaVersion: {
       return {
-        tables: currentTables,
+        tables: version === 6 ? versionFiveTables : currentTables,
         indexes: currentIndexes,
         counterKeys: currentCounterKeys,
       }

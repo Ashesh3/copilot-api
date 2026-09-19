@@ -78,7 +78,7 @@ export function transferColumns(
   return definition(table, version)
     .split("\n")
     .flatMap((line) => {
-      const match = /^\s*(\w+) (TEXT|INTEGER)\b(.*)/.exec(line)
+      const match = /^\s*(\w+) (TEXT|INTEGER|BLOB)\b(.*)/.exec(line)
       return match ?
           [{ name: match[1], type: match[2], declaration: match[3] }]
         : []
@@ -90,7 +90,11 @@ export function transferKey(
   version: number = currentSchemaVersion,
 ): string {
   return JSON.stringify(
-    transferKeyColumns(table, version).map((name) => value[name]),
+    transferKeyColumns(table, version).map((name) =>
+      value[name] instanceof Uint8Array ?
+        Buffer.from(value[name]).toString("hex")
+      : value[name],
+    ),
   )
 }
 function transferKeyColumns(
@@ -118,7 +122,10 @@ export function completeTransferRecord(
         field =
           fallback.startsWith("'") ? fallback.slice(1, -1) : Number(fallback)
     }
-    value[column.name] = field as JsonValue
+    value[column.name] =
+      field instanceof Uint8Array ?
+        Buffer.from(field).toString("hex")
+      : (field as JsonValue)
   }
   const record = { table, key: transferKey(table, value), value }
   validateTransferRecord(record)
@@ -144,15 +151,31 @@ export function validateTransferRecord(
     || columns.some((column) => !Object.hasOwn(value, column.name))
   )
     throw new StorageSchemaError("Invalid transfer columns")
+  const decoded: Record<string, SqlValue> = {}
   for (const column of columns) {
     const field = value[column.name]
-    if (field === null && !column.declaration.includes("NOT NULL")) continue
+    if (field === null && !column.declaration.includes("NOT NULL")) {
+      decoded[column.name] = null
+      continue
+    }
+    if (column.type === "BLOB") {
+      const length = /length\(\w+\) = (\d+)/.exec(column.declaration)?.[1]
+      if (
+        typeof field !== "string"
+        || !/^(?:[a-f\d]{2})+$/.test(field)
+        || (length !== undefined && field.length !== Number(length) * 2)
+      )
+        throw new StorageSchemaError("Invalid transferred binary field")
+      decoded[column.name] = Buffer.from(field, "hex")
+      continue
+    }
     if (
       column.type === "TEXT" ?
         typeof field !== "string"
       : typeof field !== "number" || !Number.isSafeInteger(field)
     )
       throw new StorageSchemaError("Invalid transfer field")
+    decoded[column.name] = field as SqlValue
     if (column.name.endsWith("_json")) {
       try {
         JSON.parse(field as string)
@@ -189,7 +212,7 @@ export function validateTransferRecord(
     && value.key === "history_collection_lifetime"
   )
     decodeArchivedCollectionStatus(value.value)
-  return value as Record<string, SqlValue>
+  return decoded
 }
 
 function legacyMetadataKey(key: string, version: number): boolean {
@@ -351,7 +374,7 @@ export async function* transferRecords(
       // Probe only keys and byte counts; never fetch 100 potentially huge bodies.
       const estimatedBytes = transferColumns(table)
         .map((column) =>
-          column.type === "TEXT" ?
+          column.type === "TEXT" || column.type === "BLOB" ?
             `COALESCE(length(CAST(${column.name} AS BLOB)),0)`
           : "8",
         )
@@ -374,7 +397,14 @@ export async function* transferRecords(
         const record = {
           table,
           key: transferKey(table, value),
-          value: value as JsonValue,
+          value: Object.fromEntries(
+            Object.entries(value).map(([name, field]) => [
+              name,
+              field instanceof Uint8Array ?
+                Buffer.from(field).toString("hex")
+              : field,
+            ]),
+          ) as JsonValue,
         }
         validateTransferRecord(record)
         after = keys.map((key) => value[key] as SqlValue)

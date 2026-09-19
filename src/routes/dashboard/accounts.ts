@@ -7,6 +7,7 @@ import type {
   CreateAccountInput,
 } from "~/lib/accounts-service"
 import type { GitHubDeviceLoginService } from "~/lib/github-device-login"
+import type { AccountAllocation } from "~/lib/storage/account-distribution-repository"
 import type { MutationContext } from "~/lib/storage/types"
 
 import {
@@ -15,6 +16,7 @@ import {
 } from "~/lib/accounts-service"
 import { HTTPError } from "~/lib/error"
 import { getGitHubDeviceLoginService } from "~/lib/github-device-login"
+import { createAccountDistributionRepository } from "~/lib/storage/account-distribution-repository"
 import { getSettingsActorId } from "~/lib/storage/domain-settings"
 import {
   StorageCommitUnknownError,
@@ -76,6 +78,38 @@ function accountId(c: Context): number {
   const id = Number(value)
   if (!Number.isSafeInteger(id)) throw new TypeError("Invalid account ID")
   return id
+}
+
+function distributionInput(value: unknown): Array<AccountAllocation> {
+  if (!Array.isArray(value) || value.length === 0)
+    throw new TypeError("Provide the allocation for every GitHub account")
+  const seen = new Set<number>()
+  const allocations = value.map((entry: unknown) => {
+    if (
+      !entry
+      || typeof entry !== "object"
+      || !("accountId" in entry)
+      || !("percentage" in entry)
+      || typeof entry.accountId !== "number"
+      || !Number.isSafeInteger(entry.accountId)
+      || entry.accountId < 0
+      || typeof entry.percentage !== "number"
+      || !Number.isInteger(entry.percentage)
+      || entry.percentage < 0
+      || entry.percentage > 100
+      || seen.has(entry.accountId)
+    )
+      throw new TypeError(
+        "Account percentages must be whole numbers from 0 to 100 with unique account IDs",
+      )
+    seen.add(entry.accountId)
+    return { accountId: entry.accountId, percentage: entry.percentage }
+  })
+  if (allocations.reduce((sum, entry) => sum + entry.percentage, 0) !== 100)
+    throw new TypeError(
+      "Account percentages must total exactly 100 before saving",
+    )
+  return allocations.sort((left, right) => left.accountId - right.accountId)
 }
 
 // eslint-disable-next-line max-params -- The request supplies revision and operation identity independently from domain input.
@@ -168,6 +202,26 @@ export function createDashboardAccountRoutes(
   routes.get("/", async (c) => {
     const accounts = options.accounts()
     return c.json(await accounts.listWithRevision())
+  })
+  routes.get("/distribution", async (c) =>
+    c.json(
+      await createAccountDistributionRepository(
+        options.accounts().repository.storage,
+      ).load(),
+    ),
+  )
+  routes.put("/distribution", async (c) => {
+    const accounts = options.accounts()
+    const allocations = distributionInput((await body(c)).allocations)
+    const result = await createAccountDistributionRepository(
+      accounts.repository.storage,
+    ).replace(
+      allocations,
+      await mutation(c, accounts, "account.distribution.replace", {
+        allocations,
+      }),
+    )
+    return c.json({ ...result.value, revision: result.revision })
   })
   routes.post("/", async (c) => {
     const accounts = options.accounts()

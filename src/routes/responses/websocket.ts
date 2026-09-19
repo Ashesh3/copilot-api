@@ -581,7 +581,9 @@ async function handleResponseCreate(
     return
   }
 
-  const routedModel = selectRoutedModel(payload.model)
+  const routedModel = await selectRoutedModel(payload.model, {
+    createAssignment: !isSyntheticWarmupRequest(payload),
+  })
   const selectedModel = routedModel.model
   const selectedCandidate = await waitForWebSocketTurn(
     prepareResponsesWebSocketCandidate({

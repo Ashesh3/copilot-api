@@ -1,9 +1,10 @@
 # Database table review
 
-This source audit covers the 27 application tables in schema 6. Schema 3 removed
+This source audit covers the 31 application tables in schema 7. Schema 3 removed
 `capi_debug`, schema 4 added per-account integration IDs, and schema 5 removed
 `capi_activity`. Schema 6 adds selective receipt indexing and 24-hour detail
-retention without adding a table. The table definitions come from
+retention without adding a table. Schema 7 adds account percentage policy,
+allocations, scheduler state and permanent conversation ownership. The table definitions come from
 [migration 001](../src/lib/storage/migrations/001-initial.ts),
 [migration 002](../src/lib/storage/migrations/002-gateway-secrets.ts), and the
 [current schema](../src/lib/storage/schema.ts).
@@ -28,6 +29,10 @@ installation uses that feature.
 | [capi_settings](../src/lib/storage/settings-repository.ts) | Current app configuration, replacements, model redirects/settings/routing/fallbacks, feature flags, and Statsig overrides, with revisions. | Current values overwritten; persistent. | Keep. Already consolidates eight settings domains. |
 | [capi_accounts](../src/lib/storage/accounts-repository.ts) | Stable upstream account IDs, domain/user/login/label, enabled/deletion state, and validation/credential revisions. Used by account management and routing. | Persistent; deleted accounts leave metadata tombstones. | Keep for Copilot accounts. Stable IDs preserve associations. |
 | [capi_account_credentials](../src/lib/storage/accounts-repository.ts) | Recoverable upstream OAuth token for each account. Loaded into the account pool for upstream authentication. | Replaced on credential changes; deleted on account removal. | Keep data. Separate table permits metadata reads without tokens. |
+| [capi_account_distribution](../src/lib/storage/account-distribution-repository.ts) | Dedicated version of the applied percentage policy. | One row after activation. | Keep separate from request-level writes and global configuration revision. |
+| [capi_account_allocations](../src/lib/storage/account-distribution-repository.ts) | Positive configured percentage per stable account ID; absent accounts have 0%. | Replaced atomically on an explicit save; deleted account metadata remains referentially valid. | Keep. |
+| [capi_conversation_accounts](../src/lib/storage/account-distribution-repository.ts) | 32-byte identity digest and permanent numeric account owner, in a WITHOUT ROWID table. | No automatic expiry or eviction; grows with distinct conversations. | Keep to preserve ownership through percentage edits and restarts. |
+| [capi_account_scheduler](../src/lib/storage/account-distribution-repository.ts) | Small weighted round-robin credits scoped to model, eligible accounts and allocation version. | Cleared on a changed allocation policy; otherwise persists through restart. | Keep atomic with new conversation assignment. |
 | [capi_providers](../src/lib/storage/providers-repository.ts) | Custom provider identity, base URL, model/alias configuration, enabled/deleted state, and revision. Used by routing and provider settings. | Persistent; removal leaves a metadata tombstone. | Keep if custom providers are wanted. |
 | [capi_provider_secrets](../src/lib/storage/providers-repository.ts) | Recoverable provider API key and custom header values. Used for outgoing calls and explicit credential reveal. | Replaced on edit; deleted when provider removed. | Keep data for custom providers; separate metadata/secret access is useful. |
 | [capi_service_secrets](../src/lib/storage/providers-repository.ts) | Service credentials; currently only the Groq transcription key. | Until replaced or explicitly cleared. | Optional feature; possible shared-secret-table candidate. |

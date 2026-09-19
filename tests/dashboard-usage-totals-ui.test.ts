@@ -32,11 +32,12 @@ const usage = {
   },
   collection: { ...collection },
 }
+let routingData: unknown
 
 await mock.module("../ui/src/lib/usePolling", () => ({
   // eslint-disable-next-line @eslint-react/hooks-extra/no-unnecessary-use-prefix
   useAsyncData: (_load: unknown, dependencies: ReadonlyArray<unknown>) => ({
-    data: dependencies.length === 0 ? usage : undefined,
+    data: dependencies.length === 0 ? usage : routingData,
     error: undefined,
     loading: false,
     reload: () => {},
@@ -49,6 +50,7 @@ const { default: UsageScreen } = await import("../ui/src/screens/Usage")
 
 beforeEach(() => {
   usage.collection = { ...collection }
+  routingData = undefined
 })
 
 test("usage renders only last 24 hours and lifetime totals without fabricated limits", () => {
@@ -76,4 +78,50 @@ test("usage surfaces incomplete collection as a warning without another totals c
   expect(markup).toContain("Usage history may be incomplete")
   expect(markup.match(/class="astryx-card /g)).toHaveLength(2)
   expect(markup).toContain("Last 24 hours")
+})
+
+test("account balance shows new assignment targets separately from repeat request counts", () => {
+  routingData = {
+    window: "1h",
+    windowMinutes: 60,
+    retentionMinutes: 1440,
+    generatedAt: 1_700_000_000_000,
+    telemetryStartedAt: 1_700_000_000_000,
+    multiToken: true,
+    totals: { requests: 1000, upstreamCalls: 1000, retries: 0, failovers: 0 },
+    lifetime: { requests: 1000, upstreamCalls: 1000, retries: 0, failovers: 0 },
+    timeSeries: [],
+    models: [],
+    routes: [],
+    selectionModes: { sticky: 1000, default: 0, single: 0 },
+    accounts: [
+      {
+        accountId: 3,
+        label: "Account #3",
+        healthy: true,
+        selected: 905,
+        selectionShare: 0.905,
+        expectedSelections: 905,
+        expectedShare: 0.905,
+        selectionDelta: 0,
+        upstreamCalls: 905,
+        callShare: 0.905,
+        balanceStatus: "within_range",
+        balanceBasis: "new_assignments",
+        newAssignments: 5,
+        expectedNewAssignments: 5,
+        newAssignmentShare: 0.05,
+        expectedNewAssignmentShare: 0.05,
+        newAssignmentDelta: 0,
+      },
+    ],
+  }
+  const markup: string = renderToStaticMarkup(createElement(UsageScreen))
+  expect(markup).toContain("5 new conversations")
+  expect(markup).toContain("5.0% actual")
+  expect(markup).toContain("target 5.0%")
+  expect(markup).toContain("905 selections")
+  expect(markup).toContain("905 calls")
+  expect(markup).toContain("Saved conversations")
+  expect(markup).not.toContain("90.5% actual")
 })
