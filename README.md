@@ -655,13 +655,21 @@ as a compatibility sentinel. Gateway credentials retain their no-expiry
 behavior, refresh returns the same token bytes, and disabling or deleting the
 registered digest revokes access.
 
-If an older generated identity opens only Work with an access error and cannot
-switch to Codex, fully quit Desktop, rerun the updated script with the same
-identity inputs, register the new digest, and reopen Desktop. The script backs
-up the old auth file; no database or conversation migration is needed. The
-gateway cannot repair a token from its digest, and editing token claims by hand
-also requires a new digest registration. This compatibility identity does not
-grant hosted Work access.
+Current Desktop sidecars also require workspace-routing discovery. Deploy the
+authenticated GET handlers and matching exact Nginx locations for
+`/api/codex/accounts/check`, `/wham/accounts/check`, and
+`/backend-api/wham/accounts/check`. They return only the enabled managed token's
+account metadata, with `workspace_backend_origin` and `account_routing_override`
+set to `NO_CONSTRAINT` to preserve the configured HTTPS gateway. Without them,
+`account/read` can fail with `workspace routing discovery failed` even with a
+compatible token. API-key login skips that discovery step.
+
+If an older generated identity is also missing `exp`, fully quit Desktop, rerun
+the updated script with the same identity inputs, register the new digest, and
+reopen Desktop. The script backs up the old auth file; no database or
+conversation migration is needed. The gateway cannot repair a token from its
+digest, and editing token claims by hand also requires a new digest registration.
+This compatibility identity does not grant hosted Work access.
 
 Configure these root-level keys in `%USERPROFILE%\.codex\config.toml` before
 starting Codex Desktop:

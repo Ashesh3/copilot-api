@@ -27,6 +27,23 @@ match before returning the same ID, access, and refresh token bytes. Refresh is
 repeatable and does not rotate credentials. Disabling or deleting the digest
 therefore disables both refresh and inference.
 
+Desktop `26.915.4065.0` (sidecar `0.155.0-alpha.9.2`) also requires successful
+workspace-routing discovery before `account/read` can complete. The gateway
+publishes these exact authenticated GET routes:
+
+- `/api/codex/accounts/check` for a root-origin `chatgpt_base_url`.
+- `/wham/accounts/check` for Desktop's account-directory request.
+- `/backend-api/wham/accounts/check` for an explicit `/backend-api` base prefix.
+
+An enabled managed bearer receives only its own account and user IDs, plan,
+personal-account metadata, and both `workspace_backend_origin` and
+`account_routing_override` set to `NO_CONSTRAINT`. The origin sentinel keeps
+requests on the client's configured HTTPS backend. These no-store responses
+do not enumerate registered identities or grant hosted Work access. A supplied
+`ChatGPT-Account-ID` must match the authenticated token. Missing, invalid, or
+disabled credentials receive `401`; a conflicting account header receives `403`.
+Generic gateway/API keys are not substitutes for this managed identity.
+
 ## 1. Deploy the gateway and edge route
 
 Deploy a reviewed `copilot-api` revision containing the managed refresh route.
@@ -88,9 +105,11 @@ sudo nginx -T
 ```
 
 Confirm `nginx -T` contains the exact spoof `server_name`, an exact POST-only
-location for the refresh route, the anchored GET-only plugin compatibility
-location, the chosen presence or absence of the optional Computer Use location,
-and the default-deny location. Do not add a catch-all proxy.
+location for the refresh route, the three exact GET-only account-discovery
+locations, the anchored GET-only plugin compatibility location, the chosen
+presence or absence of the optional Computer Use location, and the default-deny
+location. Discovery locations reject HEAD and other non-GET methods and require
+an Authorization header. Do not add a catch-all proxy.
 
 ## 2. Configure Codex Desktop on Windows
 
@@ -229,6 +248,8 @@ Verify in this order:
    completes TLS validation and returns `404` from the default-deny location.
 3. `codex login status` reports ChatGPT authentication.
 4. The app continues to show the account after an explicit account refresh.
+   If native logs report `workspace routing discovery failed`, verify the
+   account-discovery handler and its exact Nginx location before retrying.
 5. Gateway logs show `POST /v1/codex/auth/refresh` returning `200` without
    logging credential material or repeating continuously while the app is idle.
 6. A normal authenticated `/v1/responses` request succeeds.
@@ -264,11 +285,19 @@ Codex Desktop only after the intended `auth.json` is in place.
 
 ## Troubleshooting
 
+- **`account/read` fails with `workspace routing discovery failed`:** current
+  sidecars need the account-discovery response. Update both the application and
+  exact Nginx routes above. A root-origin base requests
+  `/api/codex/accounts/check`; adding only `/wham/accounts/check` is insufficient.
+  `Workspace routing is unavailable` on subsequent requests can be a consequence
+  of this failure. API-key auth skips discovery, so a successful API-key login
+  does not validate the managed-auth route.
 - **Desktop opens only Work, reports no access, and cannot switch to Codex:**
-  an older generated token without `exp` fails the identity check in Desktop
-  `26.908.4834.0`. Follow the existing-identity steps above to generate and
-  register a compatible token. The local mode fallback does not establish
-  hosted Work entitlement.
+  separately check the generated token's positive integer `exp`. An older token
+  without it fails Desktop's identity parser even if workspace routing succeeds.
+  Follow the existing-identity steps above when the token needs replacement.
+  Conversely, regenerating a token does not supply a missing discovery endpoint.
+  Neither failure indicates that local conversation files should be deleted.
 - **`401 token_expired` from `auth.openai.com`:** Codex did not inherit
   `CODEX_REFRESH_TOKEN_URL_OVERRIDE`. Confirm the user-scoped value and fully
   quit/reopen the app.

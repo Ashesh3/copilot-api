@@ -187,6 +187,33 @@ server {
     proxy_request_buffering off;
   }
 
+  # Workspace discovery is required by current Desktop account reads. Publish
+  # only these exact GET aliases; the application validates the managed bearer
+  # and binds the selected account to its claims. HEAD is intentionally denied.
+  location = /api/codex/accounts/check {
+    if ($request_method != GET) { return 404; }
+    if ($http_authorization = "") { return 404; }
+    access_log off;
+    proxy_pass {{UPSTREAM_URL}};
+    proxy_http_version 1.1;
+  }
+
+  location = /wham/accounts/check {
+    if ($request_method != GET) { return 404; }
+    if ($http_authorization = "") { return 404; }
+    access_log off;
+    proxy_pass {{UPSTREAM_URL}};
+    proxy_http_version 1.1;
+  }
+
+  location = /backend-api/wham/accounts/check {
+    if ($request_method != GET) { return 404; }
+    if ($http_authorization = "") { return 404; }
+    access_log off;
+    proxy_pass {{UPSTREAM_URL}};
+    proxy_http_version 1.1;
+  }
+
   # Read-only Codex plugin-service compatibility for managed Desktop clients.
   # The application validates the local managed bearer and never forwards it to
   # ChatGPT; account-scoped cloud catalogs return empty JSON contracts.
