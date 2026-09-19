@@ -133,10 +133,11 @@ Responses compaction.
 - Adds OpenAI-compatible custom chat and embedding providers without changing
   the client-facing base URL.
 - Routes by model ID or alias with deterministic collision behavior.
-- Uses multiple GitHub accounts only when at least two tokens are configured.
-- Builds a per-model eligible-account index, supports per-account model
-  enablement, keeps Claude Code sessions on a stable account, and performs one
-  same-instance alternate-account failover for quota and transient failures.
+- Supports per-account percentage allocations for new conversations, filtered
+  by each model's eligible accounts, with permanent SQLite conversation ownership.
+- Builds a per-model eligible-account index and supports per-account model
+  enablement. Identified conversations retain their account; eligible anonymous
+  requests can fail over once on quota errors within the same GitHub instance.
 
 ### Operations
 
@@ -480,18 +481,37 @@ and use that same bearer for model discovery and inference. Each healthy account
 contributes its models to a shared eligibility index. Dashboard model-routing
 overrides can disable a model on a specific account.
 
-Requests carrying `X-Claude-Code-Session-Id` select an eligible account
-deterministically so a session stays on the same account. Without that header,
-the first eligible account is used. Authentication rejections remain on the
-selected account and are not retried with another identity. A `421` response
-refreshes that account's advertised Copilot endpoint and model catalog, then
-retries once on the same identity. Other eligible failover stays within the same
-GitHub instance, so GHE tenant boundaries are never crossed. Accounts that fail
-validation are marked unhealthy, while a runtime `429` does not change
-account health. A known model disabled for every account returns a local `403`;
-an unknown model falls back to the first healthy account. Multi-account mode is
-for availability, model coverage, and session affinity, not unrestricted load
-balancing.
+In **GitHub accounts**, enter each account's percentage or adjust it in five-point
+steps. Confirm a row with its tick to sort accounts by confirmed share. Partial
+edits remain a draft; **Save distribution** publishes the complete allocation
+only when it totals 100%, after a confirmation. New accounts start at 0% once a
+distribution is configured. Zero stops new assignments while allowing existing
+conversations on that account to continue.
+
+New identified conversations use smooth weighted round robin among healthy,
+enabled accounts that can serve their model. The remaining positive percentages
+are proportional: an 80/10/5/5 allocation becomes 50/25/25 for a model the first
+account cannot serve. These are shares of new conversations, not guaranteed
+request, token, concurrent-load or spending shares. The Usage page compares new
+assignments with their eligible weighted targets separately from request counts.
+
+Conversation ownership is stored permanently in SQLite using a compact 32-byte
+identity digest and stable account ID. Percentage edits and restarts do not move
+recorded conversations, including Codex forks that share their parent's account
+affinity. Recognized Claude, Copilot and Codex session/thread identifiers are
+supported; without a stable identifier, the existing first-eligible default
+remains. Existing equal hashing continues until the first percentage save, while
+observed assignments are recorded. Dormant conversations never observed by this
+version cannot be distinguished from new ones at activation.
+
+Disabling/removing a recorded owner, or requesting a model unavailable on it,
+returns an explicit continuity error instead of silently changing accounts.
+Authentication rejections also retain identity. A `421` response refreshes that
+account's endpoint and catalog, then retries once on the same identity. Eligible
+anonymous quota failover stays within the same GitHub instance. An all-zero or
+unavailable eligible set cannot create a new percentage assignment. Mappings have
+no automatic expiration, grow with the number of conversations, and are included
+in database backups; they are separate from the in-memory model-fallback cache.
 
 ## Operator dashboard
 
@@ -505,7 +525,7 @@ Open `/dashboard` on the same host as the API. The dashboard includes:
 - request replacements and ordered model redirects;
 - HTTP 422 model fallback chains and conversation cache controls;
 - per-model settings and per-account model routing;
-- compact GitHub account controls with optional per-account integration IDs;
+- GitHub account percentages, connection controls and per-account integration IDs;
 - custom provider configuration;
 - managed IP allowlists and managed inference-only Codex JWT digests; and
 - settings inspection and complete SQLite database download.

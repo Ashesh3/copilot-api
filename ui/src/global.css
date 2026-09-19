@@ -12,6 +12,252 @@ body {
   margin: 0;
 }
 
+.account-distribution {
+  min-width: 0;
+}
+
+.account-distribution-badge {
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-element);
+  padding: 0 var(--spacing-2);
+  color: var(--color-text-secondary);
+  font-size: var(--text-supporting-size);
+  white-space: nowrap;
+}
+
+.account-distribution-summary {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-element);
+  background: var(--color-background-muted);
+  padding: var(--spacing-4);
+}
+
+.account-distribution-meter {
+  display: flex;
+  height: 8px;
+  overflow: hidden;
+  margin-block: var(--spacing-3);
+  border-radius: var(--radius-full);
+  background: var(--color-border-emphasized);
+}
+
+.account-distribution-meter > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--color-accent);
+  transition: width var(--duration-fast) var(--ease-standard);
+}
+
+.account-distribution-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-3);
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.account-distribution-row {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-element);
+  background: var(--color-background-body);
+  padding: var(--spacing-3);
+}
+
+.account-distribution-row[data-dirty="true"] {
+  border-color: var(--color-border-emphasized);
+}
+
+.account-distribution-identity {
+  display: flex;
+  min-width: min(100%, 220px);
+  flex: 1 1 260px;
+  align-items: center;
+  gap: var(--spacing-3);
+  overflow-wrap: anywhere;
+}
+
+.account-distribution-account-copy {
+  min-width: 0;
+}
+
+.account-distribution-status {
+  display: inline-flex;
+  min-height: 22px;
+  align-items: center;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-full);
+  padding-inline: var(--spacing-2);
+  font-size: var(--text-supporting-size);
+  font-weight: 600;
+}
+
+.account-distribution-status-success {
+  background: var(--color-success-muted);
+  color: var(--color-success);
+}
+
+.account-distribution-status-warning {
+  background: var(--color-warning-muted);
+  color: var(--color-warning);
+}
+
+.account-distribution-status-neutral {
+  background: var(--color-background-muted);
+  color: var(--color-text-secondary);
+}
+
+.account-distribution-avatar {
+  display: inline-flex;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-element);
+  background: var(--color-background-muted);
+  color: var(--color-text-primary);
+  font-weight: 600;
+}
+
+.account-distribution-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+}
+
+.account-distribution-decrease-icon {
+  transform: rotate(180deg);
+}
+
+.account-distribution-input {
+  display: flex;
+  box-sizing: border-box;
+  width: 82px;
+  min-height: 40px;
+  align-items: center;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-element);
+  background: var(--color-background-muted);
+  padding-inline-end: var(--spacing-2);
+  color: var(--color-text-primary);
+  font-weight: 600;
+}
+
+.account-distribution-input:focus-within {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.account-distribution-input input {
+  appearance: textfield;
+  width: 56px;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  padding: var(--spacing-2);
+  color: inherit;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.account-distribution-input input::-webkit-inner-spin-button,
+.account-distribution-input input::-webkit-outer-spin-button {
+  margin: 0;
+  appearance: none;
+}
+
+.account-distribution-input:has(input[aria-invalid="true"]) {
+  border-color: var(--color-error);
+}
+
+.account-distribution-row-error {
+  min-height: 18px;
+  flex-basis: 100%;
+  color: var(--color-error);
+  font-size: var(--text-supporting-size);
+}
+
+.account-distribution-row-error:empty {
+  display: none;
+}
+
+.account-distribution-account-actions {
+  display: flex;
+  flex-basis: 100%;
+  justify-content: flex-end;
+}
+
+.account-distribution-account-content {
+  min-width: 0;
+  flex-basis: 100%;
+  border-top: 1px solid var(--color-border);
+  padding-top: var(--spacing-3);
+}
+
+.account-distribution-review {
+  display: grid;
+  gap: var(--spacing-2);
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.account-distribution-review li {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--spacing-3);
+}
+
+.account-distribution-dialog {
+  overflow-wrap: anywhere;
+}
+
+.account-distribution-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+@media (max-width: 600px) {
+  .account-distribution-controls {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  .account-distribution-controls .astryx-button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .account-distribution-input,
+  .account-distribution-input input {
+    min-height: 44px;
+    font-size: 16px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .account-distribution-meter > span {
+    transition: none;
+  }
+}
+
 .llm-fallback-tooltip {
   display: block;
   max-width: calc(100vw - 48px);

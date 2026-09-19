@@ -293,6 +293,12 @@ export interface RoutingAccountUsage {
   upstreamCalls: number
   callShare: number
   balanceStatus: RoutingBalanceStatus
+  balanceBasis?: "new_assignments"
+  newAssignments?: number
+  expectedNewAssignments?: number
+  newAssignmentShare?: number
+  expectedNewAssignmentShare?: number
+  newAssignmentDelta?: number
 }
 
 export interface RoutingRouteUsage {

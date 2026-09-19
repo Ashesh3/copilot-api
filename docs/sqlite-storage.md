@@ -1,11 +1,19 @@
 # Local SQLite storage
 
 Accounts, provider secrets, settings, administrator and client credentials,
-usage, and routing history live in one local SQLite database. Persistence uses
+usage, routing history, account percentages, and permanent conversation account
+assignments live in one local SQLite database. Persistence uses
 Bun's built-in `bun:sqlite` driver; no database service or external SQLite
 package is required. LLM Debug captures remain process-local. JSON is an API
 format and an explicit legacy import source, not a parallel runtime store.
 See the [table review](database-table-review.md) for table purposes and retention.
+
+Account distribution stores a dedicated policy version and small per-model
+scheduler state. Each identified conversation owns one 32-byte binary lookup key
+and numeric account ID in a `WITHOUT ROWID` table. Mapping and scheduler updates
+commit atomically; percentage saves do not rewrite existing owners. Assignments
+have no automatic expiry and are distinct from the process-local model-fallback
+cache. New accounts receive no percentage until shares are reassigned in the UI.
 
 Commands below use `bun src/main.ts` from a source checkout. An installed build
 exposes the same commands as `copilot-api`; the container entrypoint accepts
@@ -214,10 +222,12 @@ bun src/main.ts storage restore --input /operator-owned/copilot-api.backup
 
 The importer authenticates the archive, validates its schema and relationships,
 and refuses an occupied target. Logical restore preserves account IDs and client
-credential state while invalidating administrator sessions. Schema-5 archives
-include gateway raw-secret records and validate them against their digests.
-Restore also accepts schemas 2, 3, and 4, skipping retired debug and Activity
-records. Schema-1 digest-only gateway archives are rejected.
+credential state while invalidating administrator sessions. Schema-7 archives
+also preserve allocation policy, scheduler credits, and binary conversation
+ownership keys. Raw gateway secrets are validated against their digests.
+Restore also accepts schemas 2 through 6, skipping retired debug and Activity
+records and initializing absent distribution tables. Schema-1 digest-only gateway
+archives are rejected.
 
 An interrupted or definitely rolled-back transfer leaves an incomplete marker
 that blocks readiness. To abandon only that transfer, use the exact reported ID:

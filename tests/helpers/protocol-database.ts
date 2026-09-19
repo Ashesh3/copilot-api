@@ -117,10 +117,15 @@ export async function seedProtocolDatabase(
       sql: "DELETE FROM capi_account_credentials",
       args: [],
     })
-    await session.execute({ sql: "DELETE FROM capi_accounts", args: [] })
+    // Reseeding an existing fixture must preserve durable conversation owners
+    // and account foreign keys between successive turns of the same test.
+    await session.execute({
+      sql: "UPDATE capi_accounts SET enabled=0,deleted_at=?",
+      args: [Date.now()],
+    })
     for (const account of accounts) {
       await session.execute({
-        sql: "INSERT INTO capi_accounts (id,domain,upstream_user_id,login,enabled,credential_revision,validation_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        sql: "INSERT INTO capi_accounts (id,domain,upstream_user_id,login,enabled,credential_revision,validation_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET domain=excluded.domain,upstream_user_id=excluded.upstream_user_id,login=excluded.login,enabled=excluded.enabled,credential_revision=excluded.credential_revision,validation_json=excluded.validation_json,updated_at=excluded.updated_at,deleted_at=NULL,deleting_at=NULL",
         args: [
           account.id,
           account.githubInstanceDomain,

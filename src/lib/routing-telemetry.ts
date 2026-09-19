@@ -14,6 +14,7 @@ const RETENTION_MINUTES = 24 * 60
 const MAX_MODEL_DIMENSIONS = 200
 const MAX_ROUTE_DIMENSIONS = 100
 const MAX_DIMENSION_LENGTH = 160
+const MAX_ALLOCATION_ACCOUNTS = 100
 const OTHER_DIMENSION = "Other"
 const UNKNOWN_DIMENSION = "Unknown"
 
@@ -32,6 +33,12 @@ export type UpstreamSendReason =
   | "token_refresh"
   | "failover"
 export type RoutingSelectionMode = "sticky" | "default" | "single"
+export type RoutingAssignmentReason =
+  | "new"
+  | "existing"
+  | "legacy"
+  | "issuer"
+  | "pinned"
 export type RoutingBalanceStatus =
   | "not_applicable"
   | "insufficient_data"
@@ -60,6 +67,10 @@ export interface RoutingSelectionEvent {
   accountId?: number
   affinitySource?: RoutingAffinitySource
   eligibleAccountIds: ReadonlyArray<number>
+  eligibleAccountWeights?: ReadonlyArray<{ accountId: number; weight: number }>
+  assignmentReason?: RoutingAssignmentReason
+  allocationVersion?: number
+  assignmentOnly?: boolean
   mode: RoutingSelectionMode
   model: string
   timestamp?: number
@@ -123,6 +134,12 @@ export interface RoutingAccountUsage {
   upstreamCalls: number
   callShare: number
   balanceStatus: RoutingBalanceStatus
+  balanceBasis?: "new_assignments"
+  newAssignments?: number
+  expectedNewAssignments?: number
+  newAssignmentShare?: number
+  expectedNewAssignmentShare?: number
+  newAssignmentDelta?: number
 }
 
 export interface RoutingRouteUsage {
@@ -189,6 +206,8 @@ interface AccountCounters {
   selected: number
   expectedSelections: number
   upstreamCalls: number
+  newAssignments: number
+  expectedNewAssignments: number
 }
 
 interface MinuteBucket {
@@ -200,6 +219,7 @@ interface MinuteBucket {
   defaultUpstreamCalls: number
   selectionModes: RoutingSelectionModes
   affinitySources: RoutingAffinitySources
+  allocationSelections: number
 }
 
 const WINDOW_CONFIG: Record<
@@ -231,6 +251,13 @@ const VALID_SELECTION_MODES = new Set<RoutingSelectionMode>([
   "sticky",
   "default",
   "single",
+])
+const VALID_ASSIGNMENT_REASONS = new Set<RoutingAssignmentReason>([
+  "new",
+  "existing",
+  "legacy",
+  "issuer",
+  "pinned",
 ])
 const RETRY_REASONS = new Set<UpstreamSendReason>([
   "compatibility_retry",
@@ -354,6 +381,7 @@ function createBucket(timestamp: number): MinuteBucket {
     defaultUpstreamCalls: 0,
     selectionModes: emptySelectionModes(),
     affinitySources: emptyAffinitySources(),
+    allocationSelections: 0,
   }
 }
 
@@ -413,10 +441,20 @@ function getAccountCounters(
 ): AccountCounters {
   let counters = bucket.accounts.get(accountId)
   if (!counters) {
-    counters = { expectedSelections: 0, selected: 0, upstreamCalls: 0 }
+    counters = emptyAccountCounters()
     bucket.accounts.set(accountId, counters)
   }
   return counters
+}
+
+function emptyAccountCounters(): AccountCounters {
+  return {
+    expectedSelections: 0,
+    selected: 0,
+    upstreamCalls: 0,
+    newAssignments: 0,
+    expectedNewAssignments: 0,
+  }
 }
 
 function validAccountId(value: unknown): value is number {
@@ -521,13 +559,105 @@ export function recordUpstreamCall(event: UpstreamCallEvent): void {
   }
 }
 
+function validAccountWeight(
+  value: unknown,
+): value is { accountId: number; weight: number } {
+  return (
+    value !== null
+    && typeof value === "object"
+    && "accountId" in value
+    && validAccountId(value.accountId)
+    && "weight" in value
+    && typeof value.weight === "number"
+    && Number.isInteger(value.weight)
+    && value.weight >= 0
+    && value.weight <= 100
+  )
+}
+
+function allocationWeights(
+  event: RoutingSelectionEvent,
+  eligible: ReadonlyArray<number>,
+): Map<number, number> | undefined {
+  const weights: unknown = event.eligibleAccountWeights
+  if (!Array.isArray(weights) || weights.length > MAX_ALLOCATION_ACCOUNTS)
+    return undefined
+  const seen = new Set<number>()
+  const normalized = new Map<number, number>()
+  let total = 0
+  for (const candidate of weights as ReadonlyArray<unknown>) {
+    if (!validAccountWeight(candidate) || seen.has(candidate.accountId))
+      return undefined
+    seen.add(candidate.accountId)
+    if (candidate.weight === 0 || !eligible.includes(candidate.accountId))
+      continue
+    total += candidate.weight
+    normalized.set(candidate.accountId, candidate.weight)
+  }
+  if (
+    total <= 0
+    || total > 100
+    || !normalized.has(event.accountId ?? -1)
+    || !event.eligibleAccountIds.includes(event.accountId ?? -1)
+  )
+    return undefined
+  for (const [id, weight] of normalized) normalized.set(id, weight / total)
+  return normalized
+}
+
+function validAssignmentMetadata(event: RoutingSelectionEvent): boolean {
+  return (
+    event.assignmentReason !== undefined
+    && VALID_ASSIGNMENT_REASONS.has(event.assignmentReason)
+    && validAccountId(event.allocationVersion)
+  )
+}
+
+/** Only new percentage assignments are independent allocation samples. */
+function recordAllocationSelection(
+  bucket: MinuteBucket,
+  event: RoutingSelectionEvent,
+  eligible: ReadonlyArray<number>,
+): void {
+  if (!validAccountId(event.accountId)) return
+  const owner = getAccountCounters(bucket, event.accountId)
+  const validMetadata = validAssignmentMetadata(event)
+  const configured =
+    validAccountId(event.allocationVersion) && event.allocationVersion > 0
+  if (validMetadata && event.assignmentReason === "new") {
+    const weights = configured ? allocationWeights(event, eligible) : undefined
+    if (weights) {
+      bucket.allocationSelections++
+      owner.newAssignments++
+      for (const [id, credit] of weights) {
+        const target = getAccountCounters(bucket, id)
+        if (!event.assignmentOnly) target.expectedSelections += credit
+        target.expectedNewAssignments += credit
+      }
+      return
+    }
+  } else if (validMetadata) {
+    if (event.assignmentOnly) return
+    if (configured) bucket.allocationSelections++
+    if (event.assignmentReason !== "legacy") {
+      owner.expectedSelections++
+      return
+    }
+  }
+  if (event.assignmentOnly) return
+  // Older events retain their original equal-eligibility interpretation.
+  const credit = 1 / eligible.length
+  for (const id of eligible)
+    getAccountCounters(bucket, id).expectedSelections += credit
+}
+
 export function recordRoutingSelection(event: RoutingSelectionEvent): void {
   try {
     const timestamp = eventTimestamp(event.timestamp)
     if (timestamp === undefined || !VALID_SELECTION_MODES.has(event.mode)) {
       return
     }
-    if (event.mode === "single") {
+    if (event.mode === "single" && !event.assignmentOnly) {
       const bucket = getBucket(timestamp)
       bucket.selectionModes.single++
       enqueueBucket(bucket, timestamp)
@@ -540,16 +670,18 @@ export function recordRoutingSelection(event: RoutingSelectionEvent): void {
           validAccountId(accountId),
         ),
       ),
-    ].slice(0, 64)
+    ].slice(0, MAX_ALLOCATION_ACCOUNTS)
     if (!eligible.includes(event.accountId)) eligible.push(event.accountId)
     if (eligible.length === 0) return
 
     const bucket = getBucket(timestamp)
-    getAccountCounters(bucket, event.accountId).selected++
-    const credit = 1 / eligible.length
-    for (const accountId of eligible) {
-      getAccountCounters(bucket, accountId).expectedSelections += credit
+    if (event.assignmentOnly) {
+      recordAllocationSelection(bucket, event, eligible)
+      enqueueBucket(bucket, timestamp)
+      return
     }
+    getAccountCounters(bucket, event.accountId).selected++
+    recordAllocationSelection(bucket, event, eligible)
     bucket.selectionModes[event.mode]++
     const affinitySource =
       (
@@ -615,6 +747,7 @@ function aggregateBuckets(source: ReadonlyArray<MinuteBucket>): MinuteBucket {
   for (const bucket of source) {
     addTotals(aggregate.totals, bucket.totals)
     aggregate.defaultUpstreamCalls += bucket.defaultUpstreamCalls
+    aggregate.allocationSelections += bucket.allocationSelections
     for (const [key, model] of bucket.models) {
       aggregateModel(aggregate.models, key, model)
     }
@@ -628,6 +761,8 @@ function aggregateBuckets(source: ReadonlyArray<MinuteBucket>): MinuteBucket {
       target.selected += counters.selected
       target.expectedSelections += counters.expectedSelections
       target.upstreamCalls += counters.upstreamCalls
+      target.newAssignments += counters.newAssignments
+      target.expectedNewAssignments += counters.expectedNewAssignments
     }
     aggregate.selectionModes.sticky += bucket.selectionModes.sticky
     aggregate.selectionModes.default += bucket.selectionModes.default
@@ -731,20 +866,35 @@ function snapshotAccounts(
     (sum, account) => sum + account.upstreamCalls,
     0,
   )
+  const totalNewAssignments = [...aggregate.accounts.values()].reduce(
+    (sum, account) => sum + account.newAssignments,
+    0,
+  )
+  const totalExpectedNew = [...aggregate.accounts.values()].reduce(
+    (sum, account) => sum + account.expectedNewAssignments,
+    0,
+  )
+  const percentageAllocation = aggregate.allocationSelections > 0
 
   return [...configured]
     .sort((left, right) => left.id - right.id)
     .map((account) => {
-      const counters = aggregate.accounts.get(account.id) ?? {
-        expectedSelections: 0,
-        selected: 0,
-        upstreamCalls: 0,
-      }
+      const counters =
+        aggregate.accounts.get(account.id) ?? emptyAccountCounters()
       const selectionShare =
         totalSelections > 0 ? counters.selected / totalSelections : 0
       const expectedShare =
         totalExpected > 0 ? counters.expectedSelections / totalExpected : 0
       const selectionDelta = selectionShare - expectedShare
+      const newAssignmentShare =
+        totalNewAssignments > 0 ?
+          counters.newAssignments / totalNewAssignments
+        : 0
+      const expectedNewAssignmentShare =
+        totalExpectedNew > 0 ?
+          counters.expectedNewAssignments / totalExpectedNew
+        : 0
+      const newAssignmentDelta = newAssignmentShare - expectedNewAssignmentShare
       return {
         accountId: account.id,
         accountType: account.accountType,
@@ -753,8 +903,8 @@ function snapshotAccounts(
         : {}),
         balanceStatus: balanceStatus(
           multiToken,
-          totalSelections,
-          selectionDelta,
+          percentageAllocation ? totalNewAssignments : totalSelections,
+          percentageAllocation ? newAssignmentDelta : selectionDelta,
         ),
         callShare: totalCalls > 0 ? counters.upstreamCalls / totalCalls : 0,
         expectedSelections: counters.expectedSelections,
@@ -765,6 +915,16 @@ function snapshotAccounts(
         selectionDelta,
         selectionShare,
         upstreamCalls: counters.upstreamCalls,
+        ...(percentageAllocation ?
+          {
+            balanceBasis: "new_assignments" as const,
+            newAssignments: counters.newAssignments,
+            expectedNewAssignments: counters.expectedNewAssignments,
+            newAssignmentShare,
+            expectedNewAssignmentShare,
+            newAssignmentDelta,
+          }
+        : {}),
       }
     })
 }
@@ -904,6 +1064,7 @@ function enqueueBucket(bucket: MinuteBucket, timestamp: number): void {
     defaultUpstreamCalls: bucket.defaultUpstreamCalls,
     selectionModes: { ...bucket.selectionModes },
     affinitySources: { ...bucket.affinitySources },
+    allocationSelections: bucket.allocationSelections,
   } as unknown as JsonValue
   getTelemetryWriter()?.enqueue({
     id: randomUUID(),
@@ -922,6 +1083,7 @@ function deserializeBucket(value: JsonValue): MinuteBucket {
     ...historyObject(p.totals),
   } as RoutingTotals
   bucket.defaultUpstreamCalls = Number(p.defaultUpstreamCalls ?? 0)
+  bucket.allocationSelections = allocationCounter(p.allocationSelections, true)
   bucket.selectionModes = {
     ...emptySelectionModes(),
     ...historyObject(p.selectionModes),
@@ -946,12 +1108,39 @@ function deserializeBucket(value: JsonValue): MinuteBucket {
     Object.entries(historyObject(p.routes)),
   ) as unknown as Map<string, RouteCounters>
   bucket.accounts = new Map(
-    Object.entries(historyObject(p.accounts)).map(([id, counts]) => [
-      Number(id),
-      counts,
-    ]),
-  ) as unknown as Map<number, AccountCounters>
+    Object.entries(historyObject(p.accounts)).flatMap(([id, counts]) => {
+      const accountId = Number(id)
+      if (!validAccountId(accountId)) return []
+      const stored = historyObject(counts)
+      return [
+        [
+          accountId,
+          {
+            selected: allocationCounter(stored.selected, true),
+            expectedSelections: allocationCounter(stored.expectedSelections),
+            upstreamCalls: allocationCounter(stored.upstreamCalls, true),
+            newAssignments: allocationCounter(stored.newAssignments, true),
+            expectedNewAssignments: allocationCounter(
+              stored.expectedNewAssignments,
+            ),
+          },
+        ] as const,
+      ]
+    }),
+  )
   return bucket
+}
+
+function allocationCounter(value: unknown, integer = false): number {
+  return (
+      typeof value === "number"
+        && Number.isFinite(value)
+        && value >= 0
+        && value <= Number.MAX_SAFE_INTEGER
+        && (!integer || Number.isSafeInteger(value))
+    ) ?
+      value
+    : 0
 }
 
 export function enableDatabaseRoutingTelemetryForTest(): void {

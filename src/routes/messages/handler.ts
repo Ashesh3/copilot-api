@@ -473,7 +473,7 @@ async function handleCompletionInner(
       inboundSessionToken
     : undefined
 
-  const routedModel = selectRoutedModel(anthropicPayload.model, {
+  const routedModel = await selectRoutedModel(anthropicPayload.model, {
     copilotSessionToken,
   })
   const selectedModel = routedModel.model

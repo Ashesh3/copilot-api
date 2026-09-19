@@ -75,6 +75,7 @@ import {
   type StreamTerminalLifecycle,
   createStreamTerminalLifecycle,
 } from "~/lib/stream-terminal-lifecycle"
+import { tokenPool } from "~/lib/token-pool"
 import { estimateTokenCount, getTokenCount } from "~/lib/tokenizer"
 import {
   createAnthropicMessages,
@@ -534,17 +535,30 @@ async function handleGoogleAIInner(c: Context) {
       reference: customReference,
     })
   }
-  let routedModel = selectRoutedModel(model)
+  // Only token counting needs an early catalog probe. Generation may still
+  // change models through replacements/fallback and binds below afterward.
+  let routedModel =
+    isCount ? await selectRoutedModel(model, { createAssignment: false }) : {}
   let selectedModel = routedModel.model
-  let support = getModelEndpointSupport(selectedModel)
-  const hasInferenceEndpoint =
-    support.chat || support.responses || support.messages
-  if (!isCount && !hasInferenceEndpoint) {
-    throw createEndpointTranslationError({
-      blockers: [],
-      code: "endpoint_translation_unsupported",
-      source: "chat",
-    })
+  if (!isCount) {
+    const advertised = tokenPool
+      .getEligibleAccountsForModel(model)
+      .map((account) => tokenPool.getModelForAccount(model, account.id))
+    if (advertised.length === 0)
+      advertised.push(
+        state.models?.data.find((candidate) => candidate.id === model),
+      )
+    if (
+      !advertised.some((candidate) => {
+        const endpoints = getModelEndpointSupport(candidate)
+        return endpoints.chat || endpoints.responses || endpoints.messages
+      })
+    )
+      throw createEndpointTranslationError({
+        blockers: [],
+        code: "endpoint_translation_unsupported",
+        source: "chat",
+      })
   }
 
   logger.debug("Google AI request")
@@ -611,11 +625,17 @@ async function handleGoogleAIInner(c: Context) {
     model: normalizeModelName(replacedPayload.model),
   }
   applyModelFallbackToPayload(finalPayload)
-  if (finalPayload.model !== model) {
-    routedModel = selectRoutedModel(finalPayload.model)
-    selectedModel = routedModel.model
-    support = getModelEndpointSupport(selectedModel)
-  }
+  // Replacements may change the model. Reserve ownership only after the final
+  // model is known, including when the earlier capability probe chose an account.
+  routedModel = await selectRoutedModel(finalPayload.model)
+  selectedModel = routedModel.model
+  const support = getModelEndpointSupport(selectedModel)
+  if (!support.chat && !support.responses && !support.messages)
+    throw createEndpointTranslationError({
+      blockers: [],
+      code: "endpoint_translation_unsupported",
+      source: "chat",
+    })
 
   // Find the selected model for token counting and capability checks
   const candidates = await prepareChatCandidates({

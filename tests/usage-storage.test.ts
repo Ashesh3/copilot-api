@@ -129,3 +129,136 @@ test("routing persists dimensions, fractions, outcomes and lifetime across resta
   expect(old.totals.requests).toBe(0)
   expect(old.lifetime.requests).toBe(1)
 })
+
+test("new assignment targets survive mixed historical buckets and runtime restart", async () => {
+  const f = await fixture()
+  enableDatabaseRoutingTelemetryForTest()
+  const timestamp = Date.now()
+  const minute = Math.floor(timestamp / 60_000) * 60_000
+  await f.storage.transaction((session) =>
+    session.execute({
+      sql: "INSERT INTO capi_routing_minutes (minute, dimension_key, payload_json) VALUES (?, 'aggregate', ?)",
+      args: [
+        minute - 60_000,
+        JSON.stringify({
+          timestamp: minute - 60_000,
+          accounts: {
+            "0": { selected: 3, expectedSelections: 2, upstreamCalls: 4 },
+            "1": { selected: 1, expectedSelections: 2, upstreamCalls: 1 },
+          },
+        }),
+      ],
+    }),
+  )
+  const eligibleAccountWeights = [
+    { accountId: 0, weight: 80 },
+    { accountId: 1, weight: 20 },
+  ]
+  recordRoutingSelection({
+    accountId: 0,
+    eligibleAccountIds: [0, 1],
+    eligibleAccountWeights,
+    assignmentReason: "new",
+    allocationVersion: 1,
+    assignmentOnly: true,
+    mode: "sticky",
+    model: "a",
+    timestamp,
+  })
+  recordRoutingSelection({
+    accountId: 1,
+    eligibleAccountIds: [0, 1],
+    eligibleAccountWeights,
+    assignmentReason: "existing",
+    allocationVersion: 1,
+    mode: "sticky",
+    model: "a",
+    timestamp,
+  })
+  const options = {
+    accounts: [
+      { id: 0, accountType: "individual", healthy: true },
+      { id: 1, accountType: "individual", healthy: true },
+    ],
+    multiToken: true,
+    now: timestamp,
+    window: "1h" as const,
+  }
+  const before = await getRoutingTelemetrySnapshot(options)
+  expect(before.accounts[0]).toMatchObject({
+    selected: 3,
+    expectedSelections: 2,
+    newAssignments: 1,
+    expectedNewAssignments: 0.8,
+    balanceStatus: "insufficient_data",
+  })
+  expect(before.accounts[1]).toMatchObject({
+    selected: 2,
+    expectedSelections: 3,
+    newAssignments: 0,
+    expectedNewAssignments: 0.2,
+  })
+  await f.restart()
+  const after = await getRoutingTelemetrySnapshot(options)
+  expect(after.accounts).toEqual(before.accounts)
+  const stored = JSON.stringify(await f.runtime.repository.readRouting(0))
+  for (const key of [
+    "eligibleAccountWeights",
+    "assignmentReason",
+    "allocationVersion",
+    "sessionId",
+    "affinityKey",
+  ])
+    expect(stored).not.toContain(key)
+})
+
+test("invalid stored allocation counters are bounded without changing old counters", async () => {
+  const f = await fixture()
+  enableDatabaseRoutingTelemetryForTest()
+  const timestamp = Math.floor(Date.now() / 60_000) * 60_000
+  await f.storage.transaction((session) =>
+    session.execute({
+      sql: "INSERT INTO capi_routing_minutes (minute, dimension_key, payload_json) VALUES (?, 'aggregate', ?)",
+      args: [
+        timestamp,
+        JSON.stringify({
+          timestamp,
+          allocationSelections: 1,
+          accounts: {
+            "0": {
+              selected: 1,
+              expectedSelections: 1,
+              upstreamCalls: 0,
+              newAssignments: -1,
+              expectedNewAssignments: "private-identity",
+            },
+            "1": {
+              newAssignments: 0.5,
+              expectedNewAssignments: Number.MAX_SAFE_INTEGER + 1,
+            },
+          },
+        }),
+      ],
+    }),
+  )
+  const result = await getRoutingTelemetrySnapshot({
+    accounts: [
+      { id: 0, accountType: "individual", healthy: true },
+      { id: 1, accountType: "individual", healthy: true },
+    ],
+    multiToken: true,
+    now: timestamp,
+    window: "1h",
+  })
+  expect(result.accounts[0]).toMatchObject({
+    selected: 1,
+    expectedSelections: 1,
+    newAssignments: 0,
+    expectedNewAssignments: 0,
+  })
+  expect(result.accounts[1]).toMatchObject({
+    newAssignments: 0,
+    expectedNewAssignments: 0,
+  })
+  expect(JSON.stringify(result)).not.toContain("private-identity")
+})

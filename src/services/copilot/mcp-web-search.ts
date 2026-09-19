@@ -10,12 +10,15 @@ import {
   withAccountLeaseScope,
 } from "~/lib/account-lease-context"
 import { getLastUsedAccountId } from "~/lib/account-router"
+import { unavailableConversationAccount } from "~/lib/account-routing-selection"
 import { getAccountsService } from "~/lib/accounts-service"
+import { LocalHTTPError } from "~/lib/error"
 import {
   getClientSessionId,
   setLastUsedRoutedAccountId,
 } from "~/lib/request-session"
 import { state } from "~/lib/state"
+import { createAccountDistributionRepository } from "~/lib/storage/account-distribution-repository"
 import { getRequestSnapshot } from "~/lib/storage/request-snapshot"
 import { peekStorageRuntime } from "~/lib/storage/runtime"
 import { tokenPool } from "~/lib/token-pool"
@@ -114,11 +117,36 @@ function selectMcpAccount(
   return account ?? tokenPool.getFirstHealthyAccount()
 }
 
-const getMcpCredentials = (
+async function recordedMcpAccount(
+  modelId: string | undefined,
+): Promise<Account | undefined> {
+  const runtime = peekStorageRuntime()
+  const affinity = getClientSessionId()
+  if (!runtime || !affinity) return undefined
+  const owner = await createAccountDistributionRepository(
+    runtime.storage,
+  ).lookup(affinity)
+  if (owner === undefined) return undefined
+  const account =
+    modelId ?
+      tokenPool.getEligibleAccountForModel(modelId, owner)
+    : tokenPool.getAllAccounts().find((candidate) => candidate.id === owner)
+  if (
+    !account
+    || !account.healthy
+    || account.enabled === false
+    || account.deleting
+  )
+    throw unavailableConversationAccount()
+  return account
+}
+
+const getMcpCredentials = async (
   options: WebSearchExecutionOptions,
-): McpCredentials => {
+): Promise<McpCredentials> => {
   const databaseAccounts = peekStorageRuntime() !== undefined
   let account = previousMcpAccount(databaseAccounts)
+  account ??= await recordedMcpAccount(options.modelId)
   if (!account && (state.isMultiToken || databaseAccounts))
     account = selectMcpAccount(options)
   if (databaseAccounts) {
@@ -307,6 +335,17 @@ const invalidateSession = (
   }
 }
 
+function isConversationOwnershipError(error: unknown): boolean {
+  if (!(error instanceof LocalHTTPError)) return false
+  const detail = error.clientBody.error
+  return (
+    detail !== null
+    && typeof detail === "object"
+    && "code" in detail
+    && detail.code === "conversation_account_unavailable"
+  )
+}
+
 // --- Web Search Execution ---
 
 export const executeWebSearch = async (
@@ -328,7 +367,7 @@ const executeWebSearchTurn = async (
 ): Promise<string> => {
   try {
     signal?.throwIfAborted()
-    const credentials = getMcpCredentials(options)
+    const credentials = await getMcpCredentials(options)
     // Capture session ID locally so concurrent calls don't interfere
     const sessionId = await ensureSession(credentials)
 
@@ -376,7 +415,8 @@ const executeWebSearchTurn = async (
     return parseSearchResponse(await parseResponseBody(response))
   } catch (error: unknown) {
     if (
-      signal?.aborted
+      isConversationOwnershipError(error)
+      || signal?.aborted
       || (error instanceof Error && error.name === "AbortError")
     ) {
       throw error

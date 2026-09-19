@@ -35,6 +35,7 @@ let delayedStreamController:
   | undefined
 let delayedUpstreamAborted = false
 let lastUpstreamPath: string | undefined
+let upstreamRequested = Promise.withResolvers<undefined>()
 let streamMode:
   | "chat-error-null"
   | "chat-eof"
@@ -345,6 +346,7 @@ const fetchMock = mock((_url: string | URL | Request, init?: RequestInit) => {
   else if (_url instanceof URL) url = _url.href
   else url = _url.url
   lastUpstreamPath = new URL(url).pathname
+  upstreamRequested.resolve(undefined)
   if (streamMode === "stall-fetch") {
     return new Promise<Response>((_resolve, reject) => {
       const rejectAsAborted = (): void => {
@@ -501,6 +503,7 @@ beforeEach(() => {
   closeDelayedStream()
   delayedUpstreamAborted = false
   lastUpstreamPath = undefined
+  upstreamRequested = Promise.withResolvers<undefined>()
   streamMode = "stall-body"
   nativeLateErrorStatus = 429
   state.accountType = "individual"
@@ -544,6 +547,9 @@ test("commits a keepalive before the upstream first SSE event", async () => {
   const responsePromise = Promise.resolve(
     server.request("/v1/messages", createMessagesRequest()),
   )
+  // Measure the stalled-upstream preflush, not cold tokenizer initialization or
+  // asynchronous database admission before the upstream request starts.
+  await Promise.race([upstreamRequested.promise, responsePromise])
   const outcome = await Promise.race([
     responsePromise.then(() => "response" as const),
     new Promise<"timed-out">((resolve) =>

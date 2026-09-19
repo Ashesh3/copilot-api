@@ -451,6 +451,15 @@ function balanceLabel(status: RoutingBalanceStatus): string {
 
 function AccountBalanceRow({ account }: { account: RoutingAccountUsage }) {
   const health = account.healthy ? "Healthy" : "Unhealthy"
+  const allocation = account.balanceBasis === "new_assignments"
+  const actual =
+    allocation ? (account.newAssignmentShare ?? 0) : account.selectionShare
+  const expected =
+    allocation ?
+      (account.expectedNewAssignmentShare ?? 0)
+    : account.expectedShare
+  const delta =
+    allocation ? (account.newAssignmentDelta ?? 0) : account.selectionDelta
   return (
     <div className="usage-account-row">
       <HStack gap={1.5} vAlign="center">
@@ -467,23 +476,30 @@ function AccountBalanceRow({ account }: { account: RoutingAccountUsage }) {
         </VStack>
       </HStack>
       <div className="usage-balance-track">
-        <span style={{ width: fmtPercent(account.selectionShare, 2) }} />
+        <span style={{ width: fmtPercent(actual, 2) }} />
       </div>
       <VStack gap={0} hAlign="end">
         <Text weight="medium">
-          {account.selected.toLocaleString()} selections
+          {allocation ?
+            `${(account.newAssignments ?? 0).toLocaleString()} new conversations`
+          : `${account.selected.toLocaleString()} selections`}
         </Text>
         <Text type="supporting" color="secondary">
-          {fmtPercent(account.selectionShare)} actual · expected{" "}
-          {fmtPercent(account.expectedShare)}
+          {fmtPercent(actual)} actual · {allocation ? "target" : "expected"}{" "}
+          {fmtPercent(expected)}
         </Text>
+        {allocation ?
+          <Text type="supporting" color="secondary">
+            {account.selected.toLocaleString()} selections
+          </Text>
+        : null}
       </VStack>
       <VStack gap={0} hAlign="end">
         <Text>{account.upstreamCalls.toLocaleString()} calls</Text>
         <Text type="supporting" color="secondary">
           {fmtPercent(account.callShare)} call share · delta{" "}
-          {account.selectionDelta >= 0 ? "+" : ""}
-          {fmtPercent(account.selectionDelta)}
+          {delta >= 0 ? "+" : ""}
+          {fmtPercent(delta)}
         </Text>
         <Badge
           variant={balanceVariant(account.balanceStatus)}
@@ -527,7 +543,13 @@ function AccountBalance({ data }: { data: RoutingTelemetrySnapshot }) {
         <VStack gap={0.5}>
           <Heading level={2}>Account balance</Heading>
           <Text type="supporting" color="secondary">
-            Initial selections compared with each model's eligible accounts
+            {(
+              data.accounts.some(
+                (account) => account.balanceBasis === "new_assignments",
+              )
+            ) ?
+              "New conversations compared with eligible account percentages. Saved conversations do not affect this balance; selections and calls include repeats."
+            : "Initial selections compared with each model's eligible accounts"}
           </Text>
         </VStack>
         <VStack gap={0}>
