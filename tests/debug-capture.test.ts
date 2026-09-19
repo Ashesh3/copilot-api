@@ -11,6 +11,22 @@ import {
 } from "../src/lib/debug-capture"
 import { DebugCaptureBuffer } from "../src/lib/debug-capture-buffer"
 
+test("allows a shared one-GiB capture reservation but rejects the next byte", () => {
+  const baseline = debugCaptureMemoryUsage()
+  const available = 1024 * 1024 * 1024 - baseline
+  const reserved = reserveDebugCaptureMemory(available)
+  try {
+    expect(reserved).toBe(true)
+    expect(debugCaptureMemoryUsage()).toBe(1024 * 1024 * 1024)
+    expect(reserveDebugCaptureMemory(1)).toBe(false)
+    expect(reserveDebugCaptureMemory(1024 * 1024 * 1024 + 1)).toBe(false)
+  } finally {
+    if (reserved) releaseDebugCaptureMemory(available)
+  }
+  expect(debugCaptureMemoryUsage()).toBe(baseline)
+  expect(reserveDebugCaptureMemory(1024 * 1024 * 1024 + 1)).toBe(false)
+})
+
 test("retains exact structured credentials, literal echoes, headers and URL", () => {
   const body =
     '{ "input": "hello synthetic-secret", "api_key":"body-secret", "nested": {"refreshToken":"other-secret"} }\r\n'

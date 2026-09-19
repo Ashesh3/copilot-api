@@ -535,6 +535,9 @@ and error details in server memory only, without sensitive-value filtering or
 JSON/SSE reconstruction. Captures never enter SQLite or application backups.
 Successful captures expire after ten minutes; failed or
 interrupted captures after one hour. Capacity limits can evict entries sooner.
+Captures and active buffers share a 1 GiB memory budget. At capacity, the oldest
+successful captures are removed first, then the oldest remaining captures,
+including failures. The dashboard reports eviction and skipped-capture counts.
 Replay supports complete replayable Chat Completions and Responses captures,
 preserves the captured request body, and obtains fresh server-side credentials.
 Incomplete and legacy redacted request bodies can be edited before replay;
@@ -1023,7 +1026,8 @@ returns `200` with `{ "text": "..." }`.
 - **Diagnostic history is raw and memory only.** LLM Debug retains complete
   unfiltered request and response content, including credentials, outside the database and backups. Access requires an administrator
   session; successful captures expire after ten minutes and unsuccessful
-  captures after one hour.
+  captures after one hour, subject to the 1 GiB budget and oldest-success-first
+  capacity eviction.
 - **Use Sentry deliberately.** When `SENTRY_DSN` is set, AI prompt and completion
   content is recorded by default. Set `SENTRY_AI_RECORD_INPUTS=false` before
   handling sensitive data.

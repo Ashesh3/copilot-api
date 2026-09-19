@@ -81,6 +81,10 @@ interface LlmDebugListResponse {
   entries: Array<LlmDebugEntry>
   cursor: string | null
   generatedAt: string
+  capacity?: {
+    evictedCaptures: number
+    droppedCaptures: number
+  }
 }
 
 type DebugRow = LlmDebugEntry & Record<string, unknown>
@@ -165,6 +169,8 @@ function LlmDebugListView() {
   const [isExporting, setIsExporting] = useState(false)
 
   const entries = useMemo(() => data?.entries ?? [], [data])
+  const evictedCaptures = data?.capacity?.evictedCaptures ?? 0
+  const droppedCaptures = data?.capacity?.droppedCaptures ?? 0
 
   const filtered = useMemo<Array<DebugRow>>(() => {
     const needle = query.trim().toLowerCase()
@@ -352,10 +358,29 @@ function LlmDebugListView() {
       }
     >
       <Text type="supporting" color="secondary">
-        Captures stay in server memory for 10 minutes after successful requests
-        start and 1 hour for all other requests. Restarting the server clears
-        them. Older captures may be removed earlier when memory is full.
+        Captures share up to 1 GiB of server memory, with at most 2,000 entries.
+        Successful captures stay for 10 minutes and all other captures for 1
+        hour from request start, unless removed earlier to make space. At
+        capacity, the oldest successful captures are removed first, then the
+        oldest remaining captures, including failures. Captures too large to fit
+        are skipped. Clearing logs or restarting the server removes all
+        captures.
       </Text>
+      {evictedCaptures > 0 || droppedCaptures > 0 ?
+        <Banner
+          status="warning"
+          title="Capture capacity limit reached"
+          description={
+            <>
+              Captures removed early: {evictedCaptures}. Captures skipped:{" "}
+              {droppedCaptures}. Counts are since the last clear or server
+              restart. To stay within the capture limits, the oldest successful
+              captures are removed first, then the oldest remaining captures,
+              including failures.
+            </>
+          }
+        />
+      : null}
       {error ?
         <Banner
           status="error"

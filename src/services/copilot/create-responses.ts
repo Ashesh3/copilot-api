@@ -24,6 +24,12 @@ import {
 import { classifyCompatibilityRetry } from "./compatibility-retry"
 import { normalizeResponsesAttachments } from "./responses-attachments"
 import {
+  prepareResponsesCollaboration,
+  restoreResponsesCollaboration,
+  restoreResponsesCollaborationEvent,
+  type ResponsesCollaboration,
+} from "./responses-collaboration"
+import {
   finalizeResponsesRequest,
   type ResponsesWireBody,
 } from "./responses-contract"
@@ -419,9 +425,15 @@ export interface ResponseTextDoneEvent {
 export type ResponsesStream = ReturnType<typeof events>
 export type CreateResponsesReturn = ResponsesResult | ResponsesStream
 
-async function* sanitizeResponsesStream(response: Response): ResponsesStream {
+async function* sanitizeResponsesStream(
+  response: Response,
+  collaboration: ResponsesCollaboration | undefined,
+): ResponsesStream {
   for await (const event of events(response)) {
-    yield sanitizeResponsesStreamEvent(event)
+    yield restoreResponsesCollaborationEvent(
+      sanitizeResponsesStreamEvent(event),
+      collaboration,
+    )
   }
 }
 
@@ -504,6 +516,7 @@ export const createResponses = async (
   // Zero-data retention enforcement
   body.store = false
   delete body.service_tier
+  const collaboration = prepareResponsesCollaboration(body)
 
   // Completed evaluated candidates have already performed semantic attachment
   // adaptation; unprepared sources still need the transport normalizer here.
@@ -580,8 +593,10 @@ export const createResponses = async (
   }
 
   if (body.stream) {
-    return sanitizeResponsesStream(response)
+    return sanitizeResponsesStream(response, collaboration)
   }
 
-  return (await response.json()) as ResponsesResult
+  const result = (await response.json()) as ResponsesResult
+  restoreResponsesCollaboration(result, collaboration)
+  return result
 }

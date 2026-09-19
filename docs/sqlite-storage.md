@@ -280,8 +280,10 @@ in version 5.1.0. LLM Debug keeps original request/response text, headers, URLs,
 and errors only in the
 serving process's capture store. Successful captures expire ten minutes after
 `startedAt`; other statuses expire after one hour. The store is capped at 2,000
-entries and a shared 128 MiB working budget, with whole-entry eviction and one
-oversized entry allowed alone. Clear and restart remove captures.
+entries and a shared 1 GiB reservation budget. Capacity eviction removes the
+oldest successful entries first, then the oldest remaining entries, including
+failures. A single oversized capture cannot exceed the budget. The dashboard
+reports eviction and skipped-capture counts. Clear and restart remove captures.
 
 Migration `003` removes persistent debug captures, `004` adds account integration
 IDs, `005` drops Activity, and `006` prunes usage/routing detail to 24 hours and
