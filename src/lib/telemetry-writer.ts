@@ -2,15 +2,19 @@ import { randomUUID } from "node:crypto"
 import { setImmediate as yieldToEventLoop } from "node:timers/promises"
 
 import type { HistoryRepository } from "~/lib/storage/history-repository"
-import type { JsonValue, Storage } from "~/lib/storage/types"
+import type { HistoryResetState } from "~/lib/storage/history-reset"
+import type { JsonValue, MutationContext, Storage } from "~/lib/storage/types"
 
 import { StorageUnavailableError } from "~/lib/storage/errors"
 import {
   createHistoryRepository,
   historyObject,
   isHistoryRecordKind,
-  sumHistoryCounters,
 } from "~/lib/storage/history-repository"
+import {
+  historyRecordSurvivesReset,
+  normalizeHistoryRecordAfterReset,
+} from "~/lib/storage/history-reset"
 import { withStorageDeadline } from "~/lib/storage/operation-budget"
 
 export interface HistoryRecord {
@@ -34,6 +38,7 @@ export interface TelemetryStatus {
 export interface TelemetryWriter {
   enqueue(record: HistoryRecord): boolean
   flush(): Promise<void>
+  reset(context: MutationContext): Promise<HistoryResetState>
   status(): TelemetryStatus
   close(deadlineMs: number): Promise<TelemetryStatus>
   read<T>(
@@ -73,34 +78,36 @@ export function reportTelemetryFailure(): void {
   )
 }
 
-function coalesce(records: ReadonlyArray<HistoryRecord>): Array<HistoryRecord> {
-  const counters = new Map<string, HistoryRecord>(),
-    collectionGaps: Array<HistoryRecord> = []
-  for (const record of records) {
-    if (record.kind !== "usage" && record.kind !== "routing") {
-      collectionGaps.push(record)
-      continue
-    }
-    const p = historyObject(record.payload)
-    const key = JSON.stringify([
-      record.kind,
-      p.timestamp,
-      record.kind === "usage" ? (p.model ?? "") : "",
-    ])
-    const prior = counters.get(key)
-    if (!prior) {
-      counters.set(key, structuredClone(record))
-      continue
-    }
-    const old = historyObject(prior.payload)
-    prior.payload = sumHistoryCounters(prior.payload, record.payload)
-    if (record.kind === "usage")
-      historyObject(prior.payload).firstRequestAt = Math.min(
-        Number(old.firstRequestAt ?? prior.recordedAt),
-        Number(p.firstRequestAt ?? record.recordedAt),
-      )
+function mergeGapPayload(
+  incoming: { [key: string]: JsonValue },
+  previous: { [key: string]: JsonValue } | undefined,
+  recordedAt: number,
+): { [key: string]: JsonValue } {
+  const prior = previous ?? {}
+  const payload = structuredClone(incoming)
+  for (const field of ["startedAt", "firstRecordAt", "lastRecordAt"]) {
+    const next = Number(incoming[field] ?? recordedAt)
+    const before = Number(prior[field] ?? next)
+    payload[field] =
+      field === "lastRecordAt" ? Math.max(next, before) : Math.min(next, before)
   }
-  return [...counters.values(), ...collectionGaps]
+  if (incoming.unknown === true) {
+    delete payload.lostRecords
+    delete payload.lostBytes
+    if (prior.reason === "reset-overlapping-collection-gap")
+      payload.reason = prior.reason
+  } else {
+    for (const field of ["lostRecords", "lostBytes"])
+      payload[field] = Number(prior[field] ?? 0) + Number(incoming[field] ?? 0)
+  }
+  if (
+    typeof incoming.discardedRecords === "number"
+    && (!previous || typeof previous.discardedRecords === "number")
+  )
+    payload.discardedRecords =
+      Number(prior.discardedRecords ?? 0) + incoming.discardedRecords
+  else delete payload.discardedRecords
+  return payload
 }
 
 // eslint-disable-next-line max-lines-per-function -- One closure owns queue, retry batch and admission state.
@@ -117,6 +124,9 @@ export function createTelemetryWriter(
   let lastSuccessfulFlush: number | null = null,
     failed = false,
     closed = false
+  let resetState: HistoryResetState | null = null
+  let failedAt = 0,
+    failedGeneration = 0
   let closing: Promise<TelemetryStatus> | undefined
   let flushing: Promise<void> | undefined
   let flushDeadline = Infinity
@@ -127,31 +137,111 @@ export function createTelemetryWriter(
     return result
   }
   const count = () => queue.length + (active?.items.length ?? 0)
-  const loss = (item: Queued, unknown = false) => {
-    const key = JSON.stringify([item.record.kind, unknown])
-    const prior = gaps.get(key)
-    const payload =
-      prior ?
-        historyObject(prior.payload)
-      : {
-          historyKind: item.record.kind,
-          startedAt: item.enqueuedAt,
-          ...(unknown ?
-            { unknown: true, reason: "expired-unconfirmed-batch" }
-          : { lostRecords: 0, lostBytes: 0 }),
-        }
-    if (!unknown) {
-      payload.lostRecords = Number(payload.lostRecords) + 1
-      payload.lostBytes = Number(payload.lostBytes) + item.bytes
+  const markFailed = (
+    at = clock.now(),
+    generation = resetState?.revision ?? 0,
+  ) => {
+    if (!failed || at >= failedAt) {
+      failedAt = at
+      failedGeneration = generation
     }
+    failed = true
+  }
+  const retainGap = (record: HistoryRecord) => {
+    const incoming = historyObject(record.payload)
+    const historyKind =
+      isHistoryRecordKind(incoming.historyKind) ?
+        incoming.historyKind
+      : "collection-gap"
+    const unknown = incoming.unknown === true
+    // Only the current generation needs the same-millisecond exemption.
+    // Older intervals are compared by time and share one bounded partition.
+    const generation =
+      resetState && record.generation >= resetState.revision ?
+        resetState.revision
+      : 0
+    const key = JSON.stringify([historyKind, unknown, generation])
+    const prior = gaps.get(key)
+    const previous = prior ? historyObject(prior.payload) : undefined
+    const payload = mergeGapPayload(incoming, previous, record.recordedAt)
+    payload.historyKind = historyKind
     gaps.set(key, {
-      id: prior?.id ?? randomUUID(),
+      ...record,
+      id: prior?.id ?? record.id,
+      generation,
+      payload,
+    })
+  }
+  const pendingGaps = (): Array<HistoryRecord> =>
+    [
+      ...gaps.values(),
+      ...(active?.records.filter((record) => record.kind === "collection-gap")
+        ?? []),
+    ].flatMap((record) => {
+      const retained = normalizeHistoryRecordAfterReset(record, resetState)
+      return retained ? [retained] : []
+    })
+  const resetActive = (state: HistoryResetState) => {
+    if (!active) return
+    active.items = active.items.filter((item) =>
+      historyRecordSurvivesReset(item.record, state),
+    )
+    // Keep the original records/digest for an uncertain batch's receipt.
+    if (
+      !active.records.some((record) =>
+        historyRecordSurvivesReset(record, state),
+      )
+    )
+      active = undefined
+  }
+  const applyReset = (state: HistoryResetState | null) => {
+    if (!state || state.revision <= (resetState?.revision ?? 0)) return
+    resetState = state
+    for (let i = queue.length - 1; i >= 0; i--)
+      if (!historyRecordSurvivesReset(queue[i].record, state))
+        queue.splice(i, 1)
+    resetActive(state)
+    const previousGaps = [...gaps.values()]
+    gaps.clear()
+    for (const record of previousGaps) {
+      const retained = normalizeHistoryRecordAfterReset(record, state)
+      if (retained) retainGap(retained)
+    }
+    pendingBytes = [...queue, ...(active?.items ?? [])].reduce(
+      (sum, item) => sum + item.bytes,
+      0,
+    )
+    droppedRecords = pendingGaps().reduce(
+      (sum, record) =>
+        sum + Number(historyObject(record.payload).discardedRecords ?? 0),
+      0,
+    )
+    if (failedAt <= state.resetAt && failedGeneration < state.revision)
+      failed = false
+    if (lastSuccessfulFlush !== null && lastSuccessfulFlush <= state.resetAt)
+      lastSuccessfulFlush = null
+  }
+  const syncReset = async () => {
+    applyReset(await repository.resetState())
+  }
+  const loss = (item: Queued, unknown = false) => {
+    retainGap({
+      id: randomUUID(),
       kind: "collection-gap",
       generation: item.record.generation,
       recordedAt: clock.now(),
-      payload,
+      payload: {
+        historyKind: item.record.kind,
+        startedAt: item.enqueuedAt,
+        firstRecordAt: item.record.recordedAt,
+        lastRecordAt: item.record.recordedAt,
+        discardedRecords: 1,
+        ...(unknown ?
+          { unknown: true, reason: "expired-unconfirmed-batch" }
+        : { lostRecords: 1, lostBytes: item.bytes }),
+      },
     })
-    failed = true
+    markFailed(item.record.recordedAt, item.record.generation)
   }
   const drop = (item: Queued) => {
     pendingBytes -= item.bytes
@@ -171,9 +261,11 @@ export function createTelemetryWriter(
       // A response may have been lost after commit. Never assert an exact loss.
       for (const record of active.records)
         if (record.kind === "collection-gap") {
-          const payload = historyObject(record.payload)
-          gaps.set(record.id, {
-            ...record,
+          const retained = normalizeHistoryRecordAfterReset(record, resetState)
+          if (!retained) continue
+          const payload = historyObject(retained.payload)
+          retainGap({
+            ...retained,
             id: randomUUID(),
             recordedAt: clock.now(),
             payload: {
@@ -183,7 +275,7 @@ export function createTelemetryWriter(
             },
           })
         }
-      failed = true
+      markFailed()
       active = undefined
     }
   }
@@ -196,13 +288,17 @@ export function createTelemetryWriter(
   })
   const flushOnce = async () => {
     try {
+      await withStorageDeadline(
+        Math.min(Date.now() + 5000, flushDeadline),
+        syncReset,
+      )
       if (options.beforeFlush)
         await withStorageDeadline(
           Math.min(Date.now() + 5000, flushDeadline),
           options.beforeFlush,
         )
     } catch {
-      failed = true
+      markFailed()
       reportTelemetryFailure()
       return
     }
@@ -224,7 +320,9 @@ export function createTelemetryWriter(
         failed = false
         return
       }
-      const records = coalesce(items.map((item) => item.record))
+      // The database filters individual events against a concurrent reset
+      // before aggregating events in the same minute.
+      const records = items.map((item) => item.record)
       records.push(...gaps.values())
       gaps.clear()
       active = { id: randomUUID(), items, records, createdAt: clock.now() }
@@ -240,7 +338,7 @@ export function createTelemetryWriter(
       lastSuccessfulFlush = clock.now()
       failed = false
     } catch {
-      failed = true
+      markFailed()
       reportTelemetryFailure()
     }
   }
@@ -255,7 +353,10 @@ export function createTelemetryWriter(
     enqueue(record) {
       if (closed || !isHistoryRecordKind(record.kind)) return false
       try {
-        const serialized = JSON.stringify(record)
+        const serialized = JSON.stringify({
+          ...record,
+          generation: resetState?.revision ?? record.generation,
+        })
         const bytes = Buffer.byteLength(serialized)
         const item: Queued = {
           record: JSON.parse(serialized) as HistoryRecord,
@@ -282,7 +383,7 @@ export function createTelemetryWriter(
           void writer.flush()
         return true
       } catch {
-        failed = true
+        markFailed()
         reportTelemetryFailure()
         return false
       }
@@ -299,10 +400,19 @@ export function createTelemetryWriter(
       })
       return flushing
     },
+    reset(context) {
+      return serialize(async () => {
+        if (closed) throw new StorageUnavailableError()
+        const state = await repository.reset(context)
+        applyReset(state)
+        return state
+      })
+    },
     status: snapshot,
     read(work) {
-      return serialize(() =>
-        work([
+      return serialize(async () => {
+        await syncReset()
+        return work([
           ...(active?.items.map((item) => ({
             record: structuredClone(item.record),
             batchId: active?.id,
@@ -310,15 +420,20 @@ export function createTelemetryWriter(
           ...queue.map((item) => ({ record: structuredClone(item.record) })),
           ...(active?.records
             .filter((record) => record.kind === "collection-gap")
-            .map((record) => ({
-              record: structuredClone(record),
-              batchId: active?.id,
-            })) ?? []),
+            .flatMap((record) => {
+              const retained = normalizeHistoryRecordAfterReset(
+                record,
+                resetState,
+              )
+              return retained ?
+                  [{ record: structuredClone(retained), batchId: active?.id }]
+                : []
+            }) ?? []),
           ...[...gaps.values()].map((record) => ({
             record: structuredClone(record),
           })),
-        ]),
-      )
+        ])
+      })
     },
     close(deadlineMs) {
       if (closing) return closing
@@ -342,7 +457,7 @@ export function createTelemetryWriter(
         ])
         if (deadline) clearTimeout(deadline)
         if (count() || gaps.size > 0 || active) {
-          failed = true
+          markFailed()
           reportTelemetryFailure()
         }
         return snapshot()

@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto"
 
+import type { HistoryResetState } from "~/lib/storage/history-reset"
 import type {
   JsonValue,
+  MutationContext,
   SqlSession,
   SqlValue,
   Storage,
@@ -13,6 +15,11 @@ import type {
 
 import { decodeArchivedCollectionStatus } from "~/lib/storage/history-bookkeeping"
 import { reconcileRuns, renewRun } from "~/lib/storage/history-lifecycle"
+import {
+  normalizeHistoryRecordAfterReset,
+  readHistoryReset,
+  resetHistory,
+} from "~/lib/storage/history-reset"
 import { pruneHistoryCounters } from "~/lib/storage/history-retention"
 
 export function isHistoryRecordKind(
@@ -49,6 +56,8 @@ export interface CollectionStatusOptions {
   until?: number
 }
 export interface HistoryRepository {
+  reset(context: MutationContext): Promise<HistoryResetState>
+  resetState(): Promise<HistoryResetState | null>
   applyBatch(
     batchId: string,
     records: ReadonlyArray<HistoryRecord>,
@@ -114,6 +123,8 @@ async function uncommitted(
   session: SqlSession,
   pending: ReadonlyArray<PendingHistoryRecord>,
 ) {
+  if (pending.length === 0) return []
+  const reset = await readHistoryReset(session)
   const batchIds = [
     ...new Set(pending.flatMap((item) => (item.batchId ? [item.batchId] : []))),
   ]
@@ -127,7 +138,41 @@ async function uncommitted(
   }
   return pending
     .filter((item) => !item.batchId || !applied.has(item.batchId))
-    .map((item) => item.record)
+    .flatMap((item) => {
+      const record = normalizeHistoryRecordAfterReset(item.record, reset)
+      return record ? [record] : []
+    })
+}
+
+/** Filter raw events before coalescing so a reset can split the current minute. */
+function coalesce(records: ReadonlyArray<HistoryRecord>): Array<HistoryRecord> {
+  const counters = new Map<string, HistoryRecord>()
+  const gaps: Array<HistoryRecord> = []
+  for (const record of records) {
+    if (record.kind === "collection-gap") {
+      gaps.push(record)
+      continue
+    }
+    const payload = historyObject(record.payload)
+    const key = JSON.stringify([
+      record.kind,
+      minute(number(payload.timestamp ?? record.recordedAt)),
+      record.kind === "usage" ? (payload.model ?? "") : "",
+    ])
+    const prior = counters.get(key)
+    if (!prior) {
+      counters.set(key, structuredClone(record))
+      continue
+    }
+    const old = historyObject(prior.payload)
+    prior.payload = sumHistoryCounters(prior.payload, record.payload)
+    if (record.kind === "usage")
+      historyObject(prior.payload).firstRequestAt = Math.min(
+        Number(old.firstRequestAt ?? prior.recordedAt),
+        Number(payload.firstRequestAt ?? record.recordedAt),
+      )
+  }
+  return [...counters.values(), ...gaps]
 }
 function addUsage(data: UsageHistory, record: HistoryRecord, cutoff: number) {
   const p = historyObject(record.payload)
@@ -340,6 +385,9 @@ export function createHistoryRepository(
 ): HistoryRepository {
   const clock = options.now ?? Date.now
   return {
+    reset: (context) =>
+      resetHistory(storage, context, { runId: options.runId, now: clock }),
+    resetState: () => storage.read(readHistoryReset),
     async applyBatch(batchId, records) {
       if (records.some((record) => !isHistoryRecordKind(record.kind)))
         throw new Error("Unsupported history record kind")
@@ -356,9 +404,16 @@ export function createHistoryRepository(
             throw new Error("History batch identity conflict")
           return
         }
-        await applyUsageBatch(session, records)
-        await applyRoutingBatch(session, records)
-        for (const record of records) {
+        const reset = await readHistoryReset(session)
+        const accepted = coalesce(
+          records.flatMap((record) => {
+            const normalized = normalizeHistoryRecordAfterReset(record, reset)
+            return normalized ? [normalized] : []
+          }),
+        )
+        await applyUsageBatch(session, accepted)
+        await applyRoutingBatch(session, accepted)
+        for (const record of accepted) {
           if (record.kind !== "collection-gap") continue
           const p = historyObject(record.payload)
           await session.execute({
@@ -380,10 +435,10 @@ export function createHistoryRepository(
           sql: "INSERT INTO capi_applied_operations (id, kind, actor_id, input_digest, committed_revision, result_json, created_at) VALUES (?, 'history_batch', 'telemetry', ?, 0, '{}', ?)",
           args: [batchId, digest, now],
         })
-        if (options.runId)
+        if (options.runId && accepted.length > 0)
           await session.execute({
-            sql: "UPDATE capi_process_runs SET last_flush_at = ? WHERE id = ?",
-            args: [now, options.runId],
+            sql: "UPDATE capi_process_runs SET last_flush_at=?,ended_at=NULL,payload_json=json_set(payload_json,'$.heartbeatAt',?) WHERE id=? AND clean=0",
+            args: [now, now, options.runId],
           })
       })
     },

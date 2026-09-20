@@ -530,7 +530,7 @@ export async function discardIncompleteTransfer(
       args: [randomUUID()],
     })
     await session.execute({
-      sql: "DELETE FROM capi_metadata WHERE key IN ('history_routing_lifetime','history_routing_started_at','history_collection_lifetime')",
+      sql: "DELETE FROM capi_metadata WHERE key IN ('history_routing_lifetime','history_routing_started_at','history_collection_lifetime','history_usage_reset')",
       args: [],
     })
     await session.execute({

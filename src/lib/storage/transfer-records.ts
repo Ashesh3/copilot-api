@@ -10,6 +10,10 @@ import type {
 import { StorageSchemaError } from "~/lib/storage/errors"
 import { decodeArchivedCollectionStatus } from "~/lib/storage/history-bookkeeping"
 import {
+  decodeHistoryReset,
+  HISTORY_USAGE_RESET_KEY,
+} from "~/lib/storage/history-reset"
+import {
   currentSchemaVersion,
   currentTables,
   storageSchema,
@@ -60,6 +64,7 @@ const metadataKeys = [
   "history_routing_lifetime",
   "history_routing_started_at",
   "history_collection_lifetime",
+  HISTORY_USAGE_RESET_KEY,
 ]
 
 function definition(
@@ -212,6 +217,8 @@ export function validateTransferRecord(
     && value.key === "history_collection_lifetime"
   )
     decodeArchivedCollectionStatus(value.value)
+  if (record.table === "capi_metadata" && value.key === HISTORY_USAGE_RESET_KEY)
+    decodeHistoryReset(value.value)
   return decoded
 }
 
