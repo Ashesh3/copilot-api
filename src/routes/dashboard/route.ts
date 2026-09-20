@@ -76,6 +76,7 @@ import {
 } from "./fallbacks"
 import { handleReplayLlmDebugLog } from "./llm-debug-replay"
 import { DASHBOARD_HTML } from "./page-generated"
+import { handleResetUsage } from "./usage-reset"
 
 export const dashboardRoutes = new Hono()
 
@@ -199,6 +200,7 @@ dashboardRoutes.post("/api/model-routing", handleSetModelRouting)
 
 // Usage
 dashboardRoutes.get("/api/usage", handleGetUsage)
+dashboardRoutes.delete("/api/usage", handleResetUsage)
 dashboardRoutes.get("/api/usage-routing", handleGetUsageRouting)
 
 // IP Allowlist

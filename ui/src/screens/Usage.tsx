@@ -31,6 +31,7 @@ import type {
 } from "../lib/types"
 
 import {
+  ConfirmButton,
   DataTable,
   EmptyState,
   fmtRelative,
@@ -38,8 +39,9 @@ import {
 } from "../components/common"
 import { Page } from "../components/Page"
 import { ResponsivePair } from "../components/ResponsivePair"
-import { SearchIcon } from "../icons"
-import { get } from "../lib/api"
+import { SearchIcon, Trash2Icon } from "../icons"
+import { del, get } from "../lib/api"
+import { useToast } from "../lib/toast"
 import { useAsyncData, useDelayedPolling } from "../lib/usePolling"
 
 const ROUTING_POLL_INTERVAL_MS = 10_000
@@ -643,6 +645,7 @@ function RoutingSurface({
 }
 
 export default function UsageScreen() {
+  const toast = useToast()
   const [window, setWindow] = useState<RoutingWindow>("1h")
   const [filter, setFilter] = useState("")
   const usage = useAsyncData(loadUsage, [])
@@ -682,11 +685,33 @@ export default function UsageScreen() {
     routing.reload()
   }
 
+  async function resetUsage() {
+    try {
+      await del("/dashboard/api/usage")
+      refreshAll()
+      toast.success("Usage history reset. Collection is starting fresh.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error))
+    }
+  }
+
   return (
     <Page
       kicker="Monitor"
       title="Usage"
-      actions={actions}
+      actions={
+        <>
+          {actions}
+          <ConfirmButton
+            label="Reset usage"
+            variant="destructive"
+            icon={<Trash2Icon />}
+            confirmTitle="Reset all usage history?"
+            confirmDescription="Permanently clear 24-hour and lifetime token and request totals, routing statistics, and historical collection warnings. Usage collection will restart from zero. This cannot be undone."
+            onConfirm={resetUsage}
+          />
+        </>
+      }
       onRefresh={refreshAll}
       isRefreshing={usage.loading || routing.loading}
     >

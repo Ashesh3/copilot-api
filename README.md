@@ -586,6 +586,13 @@ LLM Debug has its own process-local count and memory budget; pressure evicts
 whole captures instead of rewriting captured bodies. Collection-gap indicators
 report known loss and uncertainty instead of claiming complete history.
 
+The Usage page's **Reset usage** action permanently clears the last-24-hour and
+lifetime token/request totals, routing statistics, and historical collection
+gaps after confirmation. Collection starts fresh immediately; buffered records
+from before the reset cannot restore cleared history. Accounts, routing settings,
+saved conversation assignments, and LLM Debug captures are preserved. New
+collection failures can still display a warning after a reset.
+
 Settings provides **Export database**. Enter the current administrator password
 to download a consistent `.sqlite` snapshot of all committed database state,
 including credentials, administrator state, settings, and history. The file
