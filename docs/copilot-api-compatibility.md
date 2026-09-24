@@ -298,6 +298,10 @@ Messages normalization includes:
   consumed while instruction text and nested tool arguments remain intact;
 - detecting tool continuations before trailing instruction/control messages so
   their initiator remains `agent` on all translated endpoints;
+- adapting tool input schemas with root `oneOf`, `anyOf`, or `allOf` through a
+  referenced definition, retaining the complete validation body, branch
+  constraints, definitions, resource scopes and recursive references; tool
+  names and call arguments keep their original shape;
 - reducing every ephemeral `cache_control` object to `type` plus a valid `5m`
   or `1h` TTL;
 - filtering, trimming, and deduplicating `Anthropic-Beta` per token;
@@ -306,6 +310,13 @@ Messages normalization includes:
 - forwarding a valid `X-Model-Provider-Preference`; and
 - preserving valid sampling and effort controls for upstream model/provider
   handling.
+
+Root tool-schema composition is normalized at the final Messages serialization
+boundary, covering native and translated inference, retries and token counting.
+Ordinary schemas and opaque example/default values are unchanged. Explicit
+Draft 4/6/7 schemas use `definitions`; newer schemas use `$defs`. This avoids
+the provider's top-level composition rejection without flattening alternative
+branches or adding a wrapper field to the tool's arguments.
 
 Before each Copilot inference, control-plane or model-catalog network attempt,
 including retries and LLM Debug replay, the gateway applies the header allowlist in
