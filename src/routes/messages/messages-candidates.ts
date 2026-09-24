@@ -22,7 +22,10 @@ import {
   getModelEndpointSupport,
 } from "~/lib/endpoint-routing"
 import { normalizeModelName } from "~/lib/model-resolver"
-import { usesImplicitReasoningDefault } from "~/lib/model-suffix"
+import {
+  parseReasoningEffort,
+  usesImplicitReasoningDefault,
+} from "~/lib/model-suffix"
 import {
   isAnthropicTextBlock,
   isAnthropicToolResultBlock,
@@ -283,6 +286,8 @@ function adaptMessagesToChat(options: {
   applyCopilotSemantics?: boolean
 }): MessagesChatCandidate {
   const source = structuredClone(options.source)
+  const effort =
+    options.effortOverride ?? parseReasoningEffort(source.output_config?.effort)
   mergeToolResultForCandidate(source)
   const findings: Array<TranslationFinding> = []
   rewriteSourceToolHistoryForTarget(source, findings)
@@ -298,7 +303,7 @@ function adaptMessagesToChat(options: {
   applyTranslatedToolFindings(source, findings)
   if (options.applyCopilotSemantics !== false)
     degradeChatFileParts(payload, findings)
-  const reasoningEnabled = isReasoningEnabled(source, options.effortOverride)
+  const reasoningEnabled = isReasoningEnabled(source, effort)
   if (reasoningEnabled) {
     payload.temperature = 1
     if (payload.top_p !== undefined) {
@@ -306,7 +311,7 @@ function adaptMessagesToChat(options: {
       findings.push({ class: "sampling", severity: "omitted" })
     }
     if (!usesImplicitReasoningDefault(payload.model)) {
-      payload.reasoning_effort = options.effortOverride ?? "medium"
+      payload.reasoning_effort = effort ?? "medium"
     } else {
       delete payload.reasoning_effort
     }

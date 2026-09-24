@@ -1107,7 +1107,7 @@ describe("Messages translation fidelity", () => {
   })
 
   test.each([true, false])(
-    "Chat tool-result conversion drops is_error=%s",
+    "Chat tool-result conversion preserves is_error=%s in result text",
     (isError) => {
       const translated = translateToOpenAI({
         model: "chat-only",
@@ -1130,7 +1130,7 @@ describe("Messages translation fidelity", () => {
       expect(translated.messages[0]).toEqual({
         role: "tool",
         tool_call_id: "toolu_1",
-        content: "result",
+        content: isError ? "[Tool execution failed]\nresult" : "result",
       })
     },
   )

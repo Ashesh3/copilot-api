@@ -8,6 +8,7 @@ import {
   REQUEST_SNAPSHOT_MAX_ARRAY_LENGTH,
   snapshotRequestPlainDataRecord,
 } from "~/lib/plain-data-snapshot"
+import { ANTHROPIC_REASONING_ENVELOPE_PREFIX } from "~/routes/responses/messages-reasoning-provenance"
 
 import type { ResponseInputMessage, ResponsesPayload } from "./create-responses"
 
@@ -99,6 +100,7 @@ export function finalizeResponsesRequest(
   options: FinalizeResponsesRequestOptions,
 ): PreparedResponsesRequest {
   const prepared = prepareLegacyResponsesRequest(payload)
+  stripForeignReasoningEnvelopes(prepared.body)
   if (
     shouldFinalizeResponsesReasoning(prepared.body, options)
     && applyResponsesReasoningDefaults({
@@ -133,6 +135,7 @@ export function finalizeNativeResponsesRequest(
   body.model = options.model
   body.store = false
   delete body.service_tier
+  stripForeignReasoningEnvelopes(body)
 
   const toolsClass = finalizeNativeResponsesTools(body)
   if (toolsClass) normalizationClasses.push(toolsClass)
@@ -164,6 +167,20 @@ export function finalizeNativeResponsesRequest(
   const samplingClass = removeUnsupportedResponsesRequestParameters(body)
   if (samplingClass) normalizationClasses.push(samplingClass)
   return { body, normalizationClasses }
+}
+
+function stripForeignReasoningEnvelopes(body: ResponsesWireBody): void {
+  if (!Array.isArray(body.input)) return
+  for (const item of body.input) {
+    if (
+      item.type === "reasoning"
+      && "encrypted_content" in item
+      && typeof item.encrypted_content === "string"
+      && item.encrypted_content.startsWith(ANTHROPIC_REASONING_ENVELOPE_PREFIX)
+    ) {
+      Reflect.deleteProperty(item, "encrypted_content")
+    }
+  }
 }
 
 function shouldFinalizeResponsesReasoning(

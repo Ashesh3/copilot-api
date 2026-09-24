@@ -152,6 +152,72 @@ to Chat normalization:
 The `ws:/responses` value in a gateway model listing describes the gateway's
 local compatibility transport and does not promise direct upstream WebSocket use.
 
+### Cross-model coding harnesses
+
+The client dialect and selected model are independent. Codex Desktop and Codex
+CLI can send Responses requests for a model that advertises only Messages;
+Claude Code can send Messages requests for a model that advertises Responses
+or Chat. The gateway translates requests and returns the caller's dialect.
+
+For Responses-to-Messages routing, ordinary functions, namespace members, custom
+tools and client-side tool search receive reversible Anthropic tool names. Tool
+definitions are collected from `tools`, `additional_tools` and prior
+`tool_search_output` items, retaining namespace instructions. Custom tools use
+an object with an `input` string;
+returned calls recover their original kind, namespace, name and raw input.
+Tool-search calls retain object arguments, discovered tools remain callable on
+the next turn, and paired results retain call IDs and supported images/files.
+Custom grammar instructions are carried in the tool description; this does not
+provide provider-side constrained grammar decoding.
+
+If a Messages model rejects forced `tool`/`any` selection with the recognized
+unsupported-choice error, the gateway uses its one compatibility retry with
+automatic selection and an instruction retaining the requested tool intent.
+Tool definitions, history and parallel-call controls remain intact. Selection
+is advisory on that retry because the provider cannot enforce the original
+forced choice. Other errors and exhausted retry budgets retain their normal
+error behavior.
+
+Claude thinking and redacted-thinking history produced by this bridge travels
+in a versioned, model-bound envelope under Responses `encrypted_content`.
+Only recognized envelopes for the routed model are restored as Anthropic
+blocks. The tag identifies the encoding, not trusted or authenticated content;
+the upstream provider still verifies its signatures. The native Responses
+candidate removes these envelopes while retaining readable summaries.
+
+For Messages-to-Responses/Chat routing, system and developer instructions retain
+their roles and position. Request effort and structured output are translated.
+Claude's `DeferredToolPlaceholder` sentinel is omitted while discovered real
+functions are exposed eagerly; tool references retain their names in textual
+context. Tool errors preserve their content and media with an explicit error
+marker, while their delivery is recorded as complete. Native Claude signatures
+are not forwarded as GPT opaque reasoning state.
+
+HTTP and WebSocket clients receive matching Responses item lifecycles,
+including function arguments and custom-input events. WebSocket continuation
+restores the available tools and original call types from the connection's
+history. The Messages upstream call is currently buffered before those events
+are emitted; this provides protocol compatibility rather than incremental
+upstream token delivery.
+
+Installed-client inspection and local acceptance on 2026-09-24 covered Codex
+Desktop Appx `26.915.4065.0` with sidecar `0.155.0-alpha.9.2`, Codex CLI `0.149.0`,
+and Claude Code `2.1.281`. Both Codex binaries completed custom execution and
+client tool-search workflows over HTTP and WebSocket through the gateway and a
+local Messages mock. Claude Code completed a tool-search, MCP-tool and final
+response workflow through the gateway and a local Responses mock, including
+fragmented arguments and reasoning replay. These tests prove actual client
+consumption of the translated protocol; provider availability remains subject
+to the live model catalog and account.
+
+Live synthetic checks on the same date also completed translated tool-call and
+tool-result workflows against GPT and Claude. The original per-turn control
+shape passed Claude schema validation after normalization. A separate forced
+choice probe confirmed the targeted error and a successful automatic-selection
+retry. History-only custom calls/results without current tool definitions were
+accepted by the checked Claude provider. These checks did not execute external
+tools, replay private conversations, or deploy the worktree.
+
 ## Responses accepted, normalized, rejected, and local fields
 
 Native Responses preparation preserves the caller's detached JSON surface,
@@ -226,6 +292,12 @@ Messages normalization includes:
 
 - retaining usable content, tool history, future roles/blocks, metadata, output
   configuration, and media without mutating the caller's body;
+- moving supported current-turn system/developer `output_config` controls to
+  request defaults, beneath explicit request-level controls, and removing the
+  unsupported message-level field; timing-only/empty control carriers are
+  consumed while instruction text and nested tool arguments remain intact;
+- detecting tool continuations before trailing instruction/control messages so
+  their initiator remains `agent` on all translated endpoints;
 - reducing every ephemeral `cache_control` object to `type` plus a valid `5m`
   or `1h` TTL;
 - filtering, trimming, and deduplicating `Anthropic-Beta` per token;

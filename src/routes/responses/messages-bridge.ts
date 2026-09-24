@@ -35,7 +35,6 @@ import {
   assertEndpointTranslationSupported,
   createEndpointTranslationError,
 } from "~/lib/error"
-import { isModelFallbackActive } from "~/lib/model-fallback"
 import { createNativeMessages } from "~/routes/messages/native-handler"
 import { createWebSearchAnthropicTool } from "~/services/copilot/mcp-web-search"
 
@@ -51,6 +50,14 @@ import {
   isAnthropicToolResultBlock,
   isAnthropicUserMessage,
 } from "../messages/anthropic-types"
+import {
+  decodeAnthropicReasoningEnvelope,
+  encodeAnthropicReasoningEnvelope,
+} from "./messages-reasoning-provenance"
+import {
+  createResponsesMessagesToolMap,
+  type ResponsesMessagesToolMap,
+} from "./messages-tool-map"
 import { associateResponsesFunctionCalls } from "./tool-call-association"
 import { checkResponsesToMessagesTranslation } from "./translation-fidelity"
 
@@ -128,12 +135,12 @@ async function convertTolerantResponsesContent(
   findings: Array<TranslationFinding>,
   signal: AbortSignal | undefined,
   resolveAttachment: ResponsesAttachmentCache["resolve"],
-): Promise<Array<AnthropicUserContentBlock>> {
+): Promise<Array<AnthropicInlineContentBlock>> {
   if (typeof content === "string") {
     return content ? [{ type: "text", text: content }] : []
   }
   if (!Array.isArray(content)) return []
-  const blocks: Array<AnthropicUserContentBlock> = []
+  const blocks: Array<AnthropicInlineContentBlock> = []
   for (const raw of content) {
     if (!isRecord(raw)) {
       addTranslationFinding(findings, {
@@ -329,7 +336,15 @@ async function convertTolerantResponsesInput(
         appendUserBlock(messages, {
           type: "tool_result",
           tool_use_id: callId,
-          content: stringifyTolerantValue(raw.output),
+          content:
+            Array.isArray(raw.output) ?
+              await convertTolerantResponsesContent(
+                raw.output,
+                state.findings,
+                signal,
+                resolveAttachment,
+              )
+            : stringifyTolerantValue(raw.output),
         })
       } else {
         addTranslationFinding(state.findings, {
@@ -347,21 +362,12 @@ async function convertTolerantResponsesInput(
     }
     if (type === "reasoning") {
       const summary = Array.isArray(raw.summary) ? raw.summary : []
-      if (
-        isModelFallbackActive()
-        && typeof raw.encrypted_content === "string"
-      ) {
-        appendAssistantBlock(messages, {
-          type: "thinking",
-          thinking: summary
-            .flatMap((entry) =>
-              isRecord(entry) && typeof entry.text === "string" ?
-                [entry.text]
-              : [],
-            )
-            .join(""),
-          signature: raw.encrypted_content,
-        })
+      const thinking = decodeAnthropicReasoningEnvelope(
+        raw.encrypted_content,
+        source.model,
+      )
+      if (thinking) {
+        for (const block of thinking) appendAssistantBlock(messages, block)
         continue
       }
       for (const entry of summary) {
@@ -568,7 +574,7 @@ export async function adaptResponsesToMessagesCandidate(options: {
   readonly signal?: AbortSignal
   readonly source: ResponsesWireBody
 }): Promise<ResponsesMessagesCandidate> {
-  const source = structuredClone(options.source)
+  const source = createResponsesMessagesToolMap(options.source).source
   source.model = options.finalModel ?? source.model
   if (options.finalReasoningEffort !== undefined) {
     source.reasoning = {
@@ -1157,7 +1163,11 @@ export function anthropicResponseToResponsesResult(
   requestedModel: string,
   request?: ResponsesPayload,
 ): ResponsesResult {
-  const { output, text } = convertAnthropicOutput(response)
+  const { output, text } = convertAnthropicOutput(
+    response,
+    request ? createResponsesMessagesToolMap(request) : undefined,
+    request?.model ?? response.model,
+  )
   const incompleteDetails = mapStopReason(response.stop_reason)
   return {
     id: response.id,
@@ -1212,7 +1222,11 @@ function getResponsesRequestContext(
   }
 }
 
-function convertAnthropicOutput(response: AnthropicResponse): {
+function convertAnthropicOutput(
+  response: AnthropicResponse,
+  toolMap?: ResponsesMessagesToolMap,
+  reasoningModel = response.model,
+): {
   output: Array<ResponseOutputItem>
   text: string
 } {
@@ -1244,8 +1258,25 @@ function convertAnthropicOutput(response: AnthropicResponse): {
             { type: "thinking" }
           >,
           reasoningIndex,
+          reasoningModel,
         ),
       )
+      reasoningIndex += 1
+      continue
+    }
+    if (type === "redacted_thinking" && typeof block.data === "string") {
+      output.push({
+        id:
+          reasoningIndex === 0 ?
+            `rs_${response.id}`
+          : `rs_${response.id}_${reasoningIndex}`,
+        type: "reasoning",
+        summary: [],
+        encrypted_content: encodeAnthropicReasoningEnvelope(reasoningModel, [
+          { type: "redacted_thinking", data: block.data },
+        ]),
+        status: "completed",
+      })
       reasoningIndex += 1
       continue
     }
@@ -1284,14 +1315,26 @@ function convertAnthropicOutput(response: AnthropicResponse): {
         text = converted.text
         continue
       }
-      output.push(
-        createFunctionCallOutput(
-          block as unknown as Extract<
-            AnthropicResponse["content"][number],
-            { type: "tool_use" }
-          >,
-        ),
-      )
+      const toolBlock = block as unknown as Extract<
+        AnthropicResponse["content"][number],
+        { type: "tool_use" }
+      >
+      const converted =
+        toolMap ?
+          toolMap.restoreToolCall(toolBlock)
+        : createFunctionCallOutput(toolBlock)
+      if (converted) output.push(converted)
+      else {
+        const fallback = appendAssistantBlockFallback({
+          block,
+          messageIndex,
+          output,
+          responseId: response.id,
+          text,
+        })
+        messageIndex = fallback.messageIndex
+        text = fallback.text
+      }
       continue
     }
     if (!type) {
@@ -1359,13 +1402,16 @@ function createReasoningOutput(
   responseId: string,
   block: Extract<AnthropicResponse["content"][number], { type: "thinking" }>,
   index: number,
+  model: string,
 ): ResponseOutputItem {
   return {
     id: index === 0 ? `rs_${responseId}` : `rs_${responseId}_${index}`,
     type: "reasoning",
     summary:
       block.thinking ? [{ type: "summary_text", text: block.thinking }] : [],
-    ...(block.signature ? { encrypted_content: block.signature } : {}),
+    ...(block.signature ?
+      { encrypted_content: encodeAnthropicReasoningEnvelope(model, [block]) }
+    : {}),
     status: "completed",
   }
 }

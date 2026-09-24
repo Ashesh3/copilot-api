@@ -744,7 +744,12 @@ const emitResponsesOutputItem = async (
     event: "response.output_item.added",
     data: JSON.stringify({
       type: "response.output_item.added",
-      item: { ...itemWithId, status: "in_progress" },
+      item: {
+        ...itemWithId,
+        status: "in_progress",
+        ...(item.type === "function_call" ? { arguments: "" } : {}),
+        ...(item.type === "custom_tool_call" ? { input: "" } : {}),
+      },
       output_index: ctx.outputIndex,
       sequence_number: seq++,
     }),
@@ -768,17 +773,12 @@ const emitResponsesOutputItem = async (
     })
   }
 
-  if (item.type === "function_call") {
-    await ctx.stream.writeSSE({
-      event: "response.function_call_arguments.done",
-      data: JSON.stringify({
-        type: "response.function_call_arguments.done",
-        item_id: itemId,
-        output_index: ctx.outputIndex,
-        arguments: item.arguments,
-        name: item.name,
-        sequence_number: seq++,
-      }),
+  if (item.type === "function_call" || item.type === "custom_tool_call") {
+    seq = await emitResponsesToolCallInput(item, {
+      stream: ctx.stream,
+      itemId,
+      outputIndex: ctx.outputIndex,
+      seqNum: seq,
     })
   }
 
@@ -792,6 +792,44 @@ const emitResponsesOutputItem = async (
     }),
   })
 
+  return seq
+}
+
+async function emitResponsesToolCallInput(
+  item: Extract<
+    ResponseOutputItem,
+    { type: "function_call" | "custom_tool_call" }
+  >,
+  ctx: MessageContentEmitContext,
+): Promise<number> {
+  const isFunction = item.type === "function_call"
+  const prefix =
+    isFunction ?
+      "response.function_call_arguments"
+    : "response.custom_tool_call_input"
+  const value = isFunction ? item.arguments : item.input
+  let seq = ctx.seqNum
+  await ctx.stream.writeSSE({
+    event: `${prefix}.delta`,
+    data: JSON.stringify({
+      type: `${prefix}.delta`,
+      item_id: ctx.itemId,
+      output_index: ctx.outputIndex,
+      delta: value,
+      sequence_number: seq++,
+    }),
+  })
+  await ctx.stream.writeSSE({
+    event: `${prefix}.done`,
+    data: JSON.stringify({
+      type: `${prefix}.done`,
+      item_id: ctx.itemId,
+      output_index: ctx.outputIndex,
+      [isFunction ? "arguments" : "input"]: value,
+      ...(isFunction ? { name: item.name } : {}),
+      sequence_number: seq++,
+    }),
+  })
   return seq
 }
 

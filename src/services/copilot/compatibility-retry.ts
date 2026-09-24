@@ -9,6 +9,7 @@ export type CompatibilityRetryKind =
   | "unsupported_temperature"
   | "unsupported_top_p"
   | "invalid_thinking_signature"
+  | "unsupported_forced_tool_choice"
 
 export type CompatibilityRetryDecision =
   | { kind: "none" }
@@ -23,6 +24,8 @@ const UNSUPPORTED_TEMPERATURE_MESSAGE =
   "Unsupported parameter: 'temperature' is not supported with this model."
 const UNSUPPORTED_TOP_P_MESSAGE =
   "Unsupported parameter: 'top_p' is not supported with this model."
+const UNSUPPORTED_FORCED_TOOL_CHOICE_MESSAGE =
+  'tool_choice: type "tool" and "any" are not supported for this model.'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -81,6 +84,41 @@ function removeToolChoiceWithoutTools(body: Record<string, unknown>): boolean {
   return true
 }
 
+function hasForcedAnthropicToolChoice(body: Record<string, unknown>): boolean {
+  return (
+    isRecord(body.tool_choice)
+    && (body.tool_choice.type === "tool" || body.tool_choice.type === "any")
+    && Array.isArray(body.tools)
+    && body.tools.length > 0
+  )
+}
+
+function relaxUnsupportedForcedToolChoice(
+  body: Record<string, unknown>,
+): boolean {
+  if (!hasForcedAnthropicToolChoice(body) || !isRecord(body.tool_choice))
+    return false
+  const choice = body.tool_choice
+  const instruction =
+    choice.type === "tool" && typeof choice.name === "string" ?
+      `For this response, call the tool ${JSON.stringify(choice.name)} as requested.`
+    : "For this response, call at least one of the provided tools as requested."
+  body.tool_choice = {
+    type: "auto",
+    ...(typeof choice.disable_parallel_tool_use === "boolean" ?
+      { disable_parallel_tool_use: choice.disable_parallel_tool_use }
+    : {}),
+  }
+  if (Array.isArray(body.system)) {
+    body.system.push({ type: "text", text: instruction })
+  } else if (typeof body.system === "string") {
+    body.system = `${body.system}\n\n${instruction}`
+  } else {
+    body.system = [{ type: "text", text: instruction }]
+  }
+  return true
+}
+
 export function stripAssistantThinkingBlocks(
   body: Record<string, unknown>,
 ): boolean {
@@ -134,6 +172,17 @@ function classifyParsedCompatibilityRetry(options: {
 }): CompatibilityRetryDecision {
   if (!isRecord(options.parsed.error)) return { kind: "none" }
   const error = options.parsed.error
+  if (
+    options.endpoint === "/v1/messages"
+    && error.type === "invalid_request_error"
+    && error.message === UNSUPPORTED_FORCED_TOOL_CHOICE_MESSAGE
+    && hasForcedAnthropicToolChoice(options.body)
+  ) {
+    return {
+      kind: "unsupported_forced_tool_choice",
+      normalize: relaxUnsupportedForcedToolChoice,
+    }
+  }
   if (
     options.endpoint === "/responses"
     && hasEncryptedCompaction(options.body)

@@ -172,7 +172,7 @@ test("Responses document conversion proves context and citations have no mapping
 })
 
 test.each([true, false])(
-  "Responses maps tool_result.is_error=%s to item status",
+  "Responses preserves tool_result.is_error=%s as a delivered result",
   (isError) => {
     const translated = translateAnthropicMessagesToResponsesPayload({
       model: "gpt-current",
@@ -196,8 +196,8 @@ test.each([true, false])(
       {
         type: "function_call_output",
         call_id: "toolu_1",
-        output: "result",
-        status: isError ? "incomplete" : "completed",
+        output: isError ? "[Tool execution failed]\nresult" : "result",
+        status: "completed",
       },
     ])
   },

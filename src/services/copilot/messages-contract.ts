@@ -492,6 +492,70 @@ function normalizeOutputConfig(payload: AnthropicMessagesPayload): void {
   normalizeOutputTaskBudget(outputConfig)
 }
 
+function mergeCurrentMessageControls(
+  target: Record<string, unknown>,
+  value: unknown,
+): void {
+  if (!isRecord(value)) return
+  for (const field of ["effort", "format", "task_budget"]) {
+    if (Object.hasOwn(value, field)) target[field] = value[field]
+  }
+}
+
+function hasEmptyMessageContent(message: AnthropicMessage): boolean {
+  return (
+    message.content === ""
+    || (Array.isArray(message.content) && message.content.length === 0)
+  )
+}
+
+/** Adapt Claude Code's per-turn beta controls to Copilot request controls. */
+function normalizeMessageOutputControls(
+  payload: AnthropicMessagesPayload,
+): boolean {
+  if (!Array.isArray(payload.messages)) return false
+  let changed = false
+  let currentControls: Record<string, unknown> = {}
+  const emptyControlCarriers = new Set<AnthropicMessage>()
+  for (const message of payload.messages) {
+    if (!isRecord(message)) continue
+    // Completed assistant turns must not set controls for a later request.
+    if (message.role === "assistant") currentControls = {}
+    if (!Object.hasOwn(message, "output_config")) continue
+    const controls = message.output_config
+    const instruction =
+      message.role === "system" || message.role === "developer"
+    if (instruction) mergeCurrentMessageControls(currentControls, controls)
+    if (instruction && hasEmptyMessageContent(message)) {
+      emptyControlCarriers.add(message)
+    }
+    // Only the message-level control is unsupported; preserve the role,
+    // content and opaque tool arguments verbatim.
+    Reflect.deleteProperty(message, "output_config")
+    changed = true
+  }
+  if (emptyControlCarriers.size > 0) {
+    payload.messages = payload.messages.filter(
+      (message) => !emptyControlCarriers.has(message),
+    )
+  }
+  if (
+    typeof currentControls.effort !== "string"
+    || !REASONING_EFFORTS.has(currentControls.effort)
+  ) {
+    delete currentControls.effort
+  }
+  normalizeOutputFormat(currentControls)
+  normalizeOutputTaskBudget(currentControls)
+  if (Object.keys(currentControls).length > 0) {
+    payload.output_config = {
+      ...currentControls,
+      ...(isRecord(payload.output_config) ? payload.output_config : {}),
+    }
+  }
+  return changed
+}
+
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0
 }
@@ -974,8 +1038,10 @@ export function prepareAnthropicMessagesRequest(options: {
   const body = cloneAnthropicMessagesBody(options.payload)
   if (body.max_tokens === null) deleteOwnField(body, "max_tokens")
   validateAnthropicMessagesPayload(body)
+  const messageControlsNormalized = normalizeMessageOutputControls(body)
   normalizeOptionalPayloadFields(body)
   const normalizationClasses: Array<CopilotContractNormalizationClass> = []
+  if (messageControlsNormalized) normalizationClasses.push("message_controls")
   let removedGatewayField = false
   for (const field of GATEWAY_ONLY_MESSAGES_FIELDS) {
     if (!Object.hasOwn(body, field)) continue
@@ -1144,6 +1210,7 @@ export function normalizeAnthropicMessagesRequest(
 ): Record<string, unknown> {
   const normalized = cloneAnthropicMessagesBody(body)
   Reflect.deleteProperty(normalized, "diagnostics")
+  normalizeMessageOutputControls(normalized)
   normalizeCacheControls(normalized)
   return normalized
 }

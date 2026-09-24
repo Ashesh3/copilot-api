@@ -104,6 +104,7 @@ import {
   translateResponsesResultToAnthropic,
 } from "~/routes/messages/responses-translation"
 import { getResponsesRequestOptions } from "~/routes/responses/utils"
+import { detectAnthropicInitiator } from "~/services/copilot/create-anthropic-messages"
 import {
   createChatCompletions,
   type ChatCompletionChunk,
@@ -396,7 +397,10 @@ async function handleCompletionInner(
   anthropicPayload.model = redirect.model
 
   const subagentMarker = parseSubagentMarkerFromFirstUser(anthropicPayload)
-  const initiatorOverride = subagentMarker ? "agent" : undefined
+  const initiatorOverride =
+    subagentMarker ? "agent" : (
+      detectAnthropicInitiator(anthropicPayload.messages)
+    )
   if (subagentMarker) logger.debug("Detected Subagent marker")
 
   // claude code and opencode compact request detection
@@ -568,7 +572,7 @@ async function handleCompletionInner(
         toolsPrepared: true,
         compaction: candidate.compaction,
         copilotSessionToken,
-        ...(initiatorOverride ? { initiatorOverride } : {}),
+        initiatorOverride,
       }
       return await handleWithNativeMessages(
         c,

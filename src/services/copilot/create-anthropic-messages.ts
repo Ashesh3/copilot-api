@@ -65,7 +65,9 @@ export type CreateAnthropicMessagesReturn =
 export function detectAnthropicInitiator(
   messages: Array<AnthropicMessage>,
 ): "agent" | "user" {
-  const last = messages.at(-1)
+  const last = messages.findLast(
+    (message) => message.role !== "system" && message.role !== "developer",
+  )
   if (!last) return "user"
   if (last.role === "assistant") return "agent"
   if (

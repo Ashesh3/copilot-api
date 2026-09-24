@@ -19,6 +19,7 @@ import {
   executeResponsesMessagesBridge,
   responsesPayloadToAnthropic,
 } from "~/routes/responses/messages-bridge"
+import { decodeAnthropicReasoningEnvelope } from "~/routes/responses/messages-reasoning-provenance"
 
 import {
   seedProtocolDatabase,
@@ -1147,6 +1148,9 @@ test("converts Anthropic text thinking tools usage stop and model alias", () => 
   }
 
   const result = anthropicResponseToResponsesResult(response, "claude-current")
+  const encryptedContent = result.output.find(
+    (item) => item.type === "reasoning",
+  )?.encrypted_content
   expect(typeof result.created_at).toBe("number")
   expect({ ...result, created_at: 1 }).toEqual({
     id: "msg_native_1",
@@ -1158,7 +1162,7 @@ test("converts Anthropic text thinking tools usage stop and model alias", () => 
         id: "rs_msg_native_1",
         type: "reasoning",
         summary: [{ type: "summary_text", text: "considering" }],
-        encrypted_content: "sig-native",
+        encrypted_content: encryptedContent,
         status: "completed",
       },
       {
@@ -1196,6 +1200,15 @@ test("converts Anthropic text thinking tools usage stop and model alias", () => 
     tools: [],
     top_p: null,
   })
+  const reasoning = result.output.find((item) => item.type === "reasoning")
+  expect(
+    decodeAnthropicReasoningEnvelope(
+      reasoning?.encrypted_content,
+      "resolved-claude-model",
+    ),
+  ).toEqual([
+    { type: "thinking", thinking: "considering", signature: "sig-native" },
+  ])
 })
 
 test("preserves interleaved Anthropic blocks and every thinking signature", () => {
@@ -1233,7 +1246,6 @@ test("preserves interleaved Anthropic blocks and every thinking signature", () =
   expect(result.output).toMatchObject([
     {
       id: "rs_msg_interleaved",
-      encrypted_content: "sig-first",
       summary: [{ type: "summary_text", text: "first" }],
     },
     {
@@ -1243,13 +1255,24 @@ test("preserves interleaved Anthropic blocks and every thinking signature", () =
     { id: "fc_call_1", call_id: "call_1" },
     {
       id: "rs_msg_interleaved_1",
-      encrypted_content: "sig-second",
       summary: [{ type: "summary_text", text: "second" }],
     },
     {
       id: "msg_msg_interleaved_1",
       content: [{ type: "output_text", text: "omega", annotations: [] }],
     },
+  ])
+  expect(
+    result.output
+      .filter((item) => item.type === "reasoning")
+      .flatMap(
+        (item) =>
+          decodeAnthropicReasoningEnvelope(item.encrypted_content, "resolved")
+          ?? [],
+      ),
+  ).toEqual([
+    { type: "thinking", thinking: "first", signature: "sig-first" },
+    { type: "thinking", thinking: "second", signature: "sig-second" },
   ])
 })
 
