@@ -34,6 +34,7 @@ import {
   type AnthropicRequestHeaders,
   sanitizeAnthropicRequestHeaderOptions,
 } from "./anthropic-request-headers"
+import { normalizeAnthropicToolSchemas } from "./anthropic-tool-schema"
 
 export {
   type AnthropicRequestHeaderOptions,
@@ -1212,6 +1213,7 @@ export function normalizeAnthropicMessagesRequest(
   Reflect.deleteProperty(normalized, "diagnostics")
   normalizeMessageOutputControls(normalized)
   normalizeCacheControls(normalized)
+  normalizeAnthropicToolSchemas(normalized)
   return normalized
 }
 
