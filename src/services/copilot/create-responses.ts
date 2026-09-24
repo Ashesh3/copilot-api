@@ -129,6 +129,8 @@ export interface ResponseFunctionToolCallItem {
   type: "function_call"
   call_id: string
   name: string
+  namespace?: string
+  encrypted_function_args?: Array<string>
   arguments: string
   status?: "in_progress" | "completed" | "incomplete"
 }
@@ -229,6 +231,8 @@ export type ResponseOutputItem =
   | ResponseOutputMessage
   | ResponseOutputReasoning
   | ResponseOutputFunctionCall
+  | ResponseOutputCustomToolCall
+  | ResponseOutputToolSearchCall
   | ResponseOutputWebSearchCall
 
 export interface ResponseOutputWebSearchCall {
@@ -266,7 +270,28 @@ export interface ResponseOutputFunctionCall {
   type: "function_call"
   call_id: string
   name: string
+  namespace?: string
+  encrypted_function_args?: Array<string>
   arguments: string
+  status?: "in_progress" | "completed" | "incomplete"
+}
+
+export interface ResponseOutputCustomToolCall {
+  id?: string
+  type: "custom_tool_call"
+  call_id: string
+  name: string
+  namespace?: string
+  input: string
+  status?: "in_progress" | "completed" | "incomplete"
+}
+
+export interface ResponseOutputToolSearchCall {
+  id?: string
+  type: "tool_search_call"
+  call_id: string
+  execution: "client"
+  arguments: Record<string, unknown>
   status?: "in_progress" | "completed" | "incomplete"
 }
 

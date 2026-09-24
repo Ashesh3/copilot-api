@@ -64,6 +64,24 @@ beforeEach(async () => {
   await seedProtocolDatabase()
 })
 
+test("counts per-turn Claude control messages without inference-only fields", async () => {
+  const payload = {
+    model: "claude-opus-5.5",
+    messages: [
+      { role: "user", content: "hello" },
+      { role: "system", content: [], output_config: { effort: "max" } },
+    ],
+  } as unknown as AnthropicMessagesPayload
+  const original = structuredClone(payload)
+
+  expect(await countAnthropicTokens(payload)).toEqual({ input_tokens: 42 })
+  expect(capturedBody).toEqual({
+    model: "claude-opus-5.5",
+    messages: [{ role: "user", content: "hello" }],
+  })
+  expect(payload).toEqual(original)
+})
+
 test("posts the exact native count-tokens body with request context", async () => {
   const controller = new AbortController()
   const affinity: RoutingAffinity = {

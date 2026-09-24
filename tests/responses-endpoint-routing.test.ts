@@ -1630,7 +1630,7 @@ test("shares one translated attachment fetch before the selected native transfor
   expect(attachmentFetchCount).toBe(1)
 })
 
-test("routes Responses compaction through the existing Chat preservation path", async () => {
+test("preserves custom tool history in Messages during Responses compaction", async () => {
   installModel({ supported_endpoints: ["/v1/messages", "/chat/completions"] })
 
   const response = await postResponses({
@@ -1653,8 +1653,18 @@ test("routes Responses compaction through the existing Chat preservation path", 
   })
 
   expect(response.status).toBe(200)
-  expect(lastUpstreamPath).toBe("/chat/completions")
-  expect(JSON.stringify(lastUpstreamPayload)).toContain("call_compact")
+  expect(lastUpstreamPath).toBe("/v1/messages")
+  expect(lastUpstreamPayload).toHaveProperty("messages.0.content.0", {
+    type: "tool_use",
+    id: "call_compact",
+    name: "exec",
+    input: { input: "run compact diagnostic" },
+  })
+  expect(lastUpstreamPayload).toHaveProperty("messages.1.content.0", {
+    type: "tool_result",
+    tool_use_id: "call_compact",
+    content: "done",
+  })
 })
 
 test("approves an adapted Responses translation before dispatch", async () => {

@@ -65,6 +65,7 @@ import {
 import { state } from "~/lib/state"
 import { withRequestSnapshot } from "~/lib/storage/request-snapshot"
 import { admitWebSocketTurn } from "~/lib/storage/websocket-admission"
+import { emitResponsesResultAsStream } from "~/routes/messages/web-search-helpers"
 import { isResponsesCompactionRequest } from "~/services/copilot/compaction-payload"
 import {
   createChatCompletions,
@@ -1319,35 +1320,28 @@ async function streamAnthropicMessagesOverWs(options: {
   const wsStream = {
     writeSSE: async (data: { event?: string; data: string }) => {
       if (data.data === "[DONE]") return
-      await emitTurnFrame(ws, turn, responseContext, data.data, data.event)
+      const emitted = await emitTurnFrame(
+        ws,
+        turn,
+        responseContext,
+        data.data,
+        data.event,
+      )
+      if (emitted && !ws.data.closed && data.event === "response.incomplete") {
+        storeResponseSnapshot(
+          ws.data.responseSnapshots,
+          result.id,
+          createCompletedResponseSnapshot(
+            turn.continuationModel ?
+              { ...responseContext, model: turn.continuationModel }
+            : responseContext,
+            { response: result },
+          ),
+        )
+      }
     },
   }
-  await emitResponsesResultAsWebSocketFrames(wsStream, result)
-}
-
-async function emitResponsesResultAsWebSocketFrames(
-  stream: {
-    writeSSE: (data: { event?: string; data: string }) => Promise<void>
-  },
-  result: ResponsesResult,
-): Promise<void> {
-  const created = { ...result, status: "in_progress" as const }
-  await stream.writeSSE({
-    event: "response.created",
-    data: JSON.stringify({
-      type: "response.created",
-      sequence_number: 0,
-      response: created,
-    }),
-  })
-  await stream.writeSSE({
-    event: "response.completed",
-    data: JSON.stringify({
-      type: "response.completed",
-      sequence_number: 1,
-      response: result,
-    }),
-  })
+  await emitResponsesResultAsStream(wsStream, result)
 }
 
 async function streamChatCompletionsOverWs(options: {

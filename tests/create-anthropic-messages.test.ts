@@ -87,6 +87,39 @@ beforeEach(async () => {
   await seedProtocolDatabase()
 })
 
+test.each([
+  { name: "normal", options: {} },
+  { name: "already adapted", options: { alreadyAdapted: true } },
+  { name: "validated controls", options: { preserveValidatedControls: true } },
+])(
+  "normalizes Claude per-turn effort on the $name transport",
+  async ({ options }) => {
+    const payload: AnthropicMessagesPayload = {
+      model: "claude-opus-5.5",
+      max_tokens: 128000,
+      messages: [
+        { role: "user", content: "Review the supplied component." },
+        {
+          role: asAnthropicUnknownRole("system"),
+          content: [{ type: "text", text: "Current turn instructions." }],
+          output_config: { effort: "max" },
+        },
+      ],
+      thinking: { type: "adaptive" },
+      output_config: { effort: "max" },
+    }
+    const original = structuredClone(payload)
+
+    await createAnthropicMessages(payload, options)
+
+    expect(capturedBodies).toHaveLength(1)
+    expect(capturedBody).not.toHaveProperty("messages.1.output_config")
+    expect(capturedBody).toHaveProperty("messages.1.role", "system")
+    expect(capturedBody).toHaveProperty("output_config.effort", "max")
+    expect(payload).toEqual(original)
+  },
+)
+
 test("retries exact native thinking signature failure after stripping only thinking", async () => {
   queuedResponses.push(
     Response.json(
@@ -147,6 +180,51 @@ test("retries exact native thinking signature failure after stripping only think
       headers.get("copilot-session-token"),
     ),
   ).toEqual(["messages-session-fixed", "messages-session-fixed"])
+})
+
+test("retries an observed unsupported forced choice on the same native request", async () => {
+  queuedResponses.push(
+    Response.json(
+      {
+        type: "error",
+        error: {
+          type: "invalid_request_error",
+          message:
+            'tool_choice: type "tool" and "any" are not supported for this model.',
+        },
+      },
+      { status: 400 },
+    ),
+  )
+  const payload: AnthropicMessagesPayload = {
+    model: "claude-opus-5.5",
+    max_tokens: 64,
+    messages: [{ role: "user", content: "Call the synthetic echo." }],
+    tools: [
+      {
+        name: "synthetic_echo",
+        input_schema: { type: "object", properties: {} },
+      },
+    ],
+    tool_choice: {
+      type: "tool",
+      name: "synthetic_echo",
+      disable_parallel_tool_use: true,
+    },
+  }
+  const source = structuredClone(payload)
+
+  await createAnthropicMessages(payload, { alreadyAdapted: true })
+
+  expect(capturedBodies).toHaveLength(2)
+  expect(capturedBodies[0]).toEqual(source)
+  expect(capturedBodies[1]).toHaveProperty("tool_choice", {
+    type: "auto",
+    disable_parallel_tool_use: true,
+  })
+  expect(capturedBodies[1]?.tools).toEqual(source.tools)
+  expect(JSON.stringify(capturedBodies[1]?.system)).toContain("synthetic_echo")
+  expect(payload).toEqual(source)
 })
 
 test("serializes native cache controls using Copilot's supported wire shape", async () => {

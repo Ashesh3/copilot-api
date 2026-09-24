@@ -29,6 +29,7 @@ export type CopilotContractNormalizationClass =
   | "json_object_instruction"
   | "json_schema"
   | "max_output_tokens"
+  | "message_controls"
   | "reasoning_defaults"
   | "stateless_controls"
   | "unsupported_sampling"
@@ -105,6 +106,7 @@ const NORMALIZATION_CLASSES = new Set<CopilotContractNormalizationClass>([
   "json_object_instruction",
   "json_schema",
   "max_output_tokens",
+  "message_controls",
   "reasoning_defaults",
   "stateless_controls",
   "unsupported_sampling",

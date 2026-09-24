@@ -6,6 +6,7 @@ import {
   getExtraPromptForModel,
   getReasoningEffortForModel,
 } from "~/lib/config"
+import { ANTHROPIC_REASONING_ENVELOPE_PREFIX } from "~/routes/responses/messages-reasoning-provenance"
 import {
   type ResponsesPayload,
   type ResponseInputContent,
@@ -56,7 +57,11 @@ import {
   isAnthropicToolResultBlock,
   isAnthropicToolUseBlock,
 } from "./anthropic-types"
-import { sanitizeAnthropicMessages } from "./non-stream-translation"
+import {
+  isDeferredToolPlaceholder,
+  sanitizeAnthropicMessages,
+  toolResultContentWithError,
+} from "./non-stream-translation"
 
 const MESSAGE_TYPE = "message"
 const CODEX_PHASE_MODEL = "gpt-5.3-codex"
@@ -116,7 +121,10 @@ export const translateAnthropicMessagesToResponsesPayload = (
       : undefined,
     task_budget: payload.output_config?.task_budget,
     reasoning: {
-      effort: getReasoningEffortForModel(payload.model, effortOverride),
+      effort: getReasoningEffortForModel(
+        payload.model,
+        effortOverride ?? payload.output_config?.effort,
+      ),
       summary: "auto",
     },
     include: ["reasoning.encrypted_content"],
@@ -131,6 +139,21 @@ const translateMessage = (
 ): Array<ResponseInputItem> => {
   if (isAnthropicAssistantMessage(message)) {
     return translateAssistantMessage(message, model)
+  }
+  if (message.role === "system" || message.role === "developer") {
+    const content =
+      typeof message.content === "string" ?
+        message.content
+      : message.content.flatMap((block) => {
+          const translated = translateUserContentBlock(block)
+          return translated ? [translated] : []
+        })
+    return [
+      createMessage(
+        message.role === "system" ? "system" : "developer",
+        content,
+      ),
+    ]
   }
 
   return translateUserMessage(message)
@@ -359,7 +382,13 @@ const createReasoningContent = (
   const thinking = block.thinking === THINKING_TEXT ? "" : block.thinking
   const summary =
     thinking ? [{ type: "summary_text" as const, text: thinking }] : []
-  if (!signature || !id || signatureParts.length !== 2) {
+  if (
+    !signature
+    || !id
+    || signatureParts.length !== 2
+    || !/^rs[_-]/.test(id)
+    || signature.startsWith(ANTHROPIC_REASONING_ENVELOPE_PREFIX)
+  ) {
     return thinking ? createOutPutTextContent(thinking) : undefined
   }
   return {
@@ -385,8 +414,8 @@ const createFunctionCallOutput = (
 ): ResponseFunctionCallOutputItem => ({
   type: "function_call_output",
   call_id: block.tool_use_id,
-  output: convertToolResultContent(block.content),
-  status: block.is_error ? "incomplete" : "completed",
+  output: convertToolResultContent(toolResultContentWithError(block)),
+  status: "completed",
 })
 
 const translateSystemPrompt = (
@@ -428,6 +457,7 @@ const convertAnthropicTools = (
   const result: Array<Tool> = []
 
   for (const tool of tools) {
+    if (isDeferredToolPlaceholder(tool)) continue
     // Convert web_search server-side tool to a function tool
     if (isWebSearchToolType(tool)) {
       result.push(createWebSearchResponsesTool(tool))

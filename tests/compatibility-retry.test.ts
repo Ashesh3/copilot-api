@@ -28,6 +28,94 @@ async function normalize(options: {
   return { kind: decision.kind, retry }
 }
 
+describe("native forced tool choice compatibility", () => {
+  test.each([
+    { type: "tool", name: "synthetic_echo", disable_parallel_tool_use: true },
+    { type: "any", disable_parallel_tool_use: false },
+  ])(
+    "adapts unsupported native forced choice $type without dropping tools",
+    async (choice) => {
+      const body = {
+        model: "claude-opus-5.5",
+        messages: [{ role: "user", content: "Use a tool." }],
+        system: [
+          {
+            type: "text",
+            text: "Original instructions.",
+            cache_control: { type: "ephemeral" },
+          },
+        ],
+        tools: [
+          {
+            name: "synthetic_echo",
+            input_schema: { type: "object", properties: {} },
+          },
+        ],
+        tool_choice: choice,
+      }
+      const result = await normalize({
+        body,
+        endpoint: "/v1/messages",
+        response: Response.json(
+          {
+            type: "error",
+            error: {
+              type: "invalid_request_error",
+              message:
+                'tool_choice: type "tool" and "any" are not supported for this model.',
+            },
+          },
+          { status: 400 },
+        ),
+      })
+      expect(result.kind).toBe("unsupported_forced_tool_choice")
+      expect(result.retry.tool_choice).toEqual({
+        type: "auto",
+        disable_parallel_tool_use: choice.disable_parallel_tool_use,
+      })
+      expect(result.retry.tools).toEqual(body.tools)
+      expect(result.retry.messages).toEqual(body.messages)
+      expect(result.retry).toHaveProperty("system.0", body.system[0])
+      expect(result.retry).toHaveProperty("system.1.type", "text")
+      expect(JSON.stringify(result.retry.system)).toContain(
+        choice.type === "tool" ? "synthetic_echo" : "at least one",
+      )
+    },
+  )
+
+  test.each([
+    {
+      status: 403,
+      type: "tool",
+      message:
+        'tool_choice: type "tool" and "any" are not supported for this model.',
+    },
+    {
+      status: 400,
+      type: "auto",
+      message:
+        'tool_choice: type "tool" and "any" are not supported for this model.',
+    },
+    { status: 400, type: "tool", message: "tool_choice is invalid" },
+  ])(
+    "does not relax choice for an unrelated error or already-auto request",
+    async ({ status, type, message }) => {
+      const decision = await classifyCompatibilityRetry({
+        body: {
+          tools: [{ name: "tool" }],
+          tool_choice: { type, name: "tool" },
+        },
+        endpoint: "/v1/messages",
+        response: Response.json(
+          { type: "error", error: { type: "invalid_request_error", message } },
+          { status },
+        ),
+      })
+      expect(decision.kind).toBe("none")
+    },
+  )
+})
+
 describe("compatibility retry classifier", () => {
   test("removes only unsupported temperature from a Chat wire clone", async () => {
     const body = { model: "m", temperature: 0, top_p: 0.5, messages: [] }

@@ -1,3 +1,4 @@
+import { ANTHROPIC_REASONING_ENVELOPE_PREFIX } from "~/routes/responses/messages-reasoning-provenance"
 import {
   type ChatCompletionResponse,
   type ChatCompletionsPayload,
@@ -51,6 +52,7 @@ export function translateToOpenAI(
     messages: translateAnthropicMessagesToOpenAI(
       payload.messages,
       payload.system,
+      payload.model,
     ),
     max_tokens: payload.max_tokens,
     stop: payload.stop_sequences,
@@ -120,13 +122,14 @@ export function sanitizeAnthropicMessages(
 function translateAnthropicMessagesToOpenAI(
   anthropicMessages: Array<AnthropicMessage>,
   system: AnthropicMessagesPayload["system"],
+  model: string,
 ): Array<Message> {
   const systemMessages = handleSystemPrompt(system)
   const sanitizedMessages = sanitizeAnthropicMessages(anthropicMessages)
 
   const otherMessages = sanitizedMessages.flatMap((message) => {
     if (isAnthropicAssistantMessage(message)) {
-      return handleAssistantMessage(message)
+      return handleAssistantMessage(message, model)
     }
     if (isAnthropicUserMessage(message)) {
       return handleUserMessage(message)
@@ -175,7 +178,7 @@ function handleNonAssistantMessageContent(
       newMessages.push({
         role: "tool",
         tool_call_id: block.tool_use_id,
-        content: mapContent(block.content),
+        content: mapContent(toolResultContentWithError(block)),
       })
     }
 
@@ -202,11 +205,20 @@ function handleUserMessage(message: AnthropicUserMessage): Array<Message> {
 function handleCustomRoleMessage(
   message: AnthropicCustomMessage,
 ): Array<Message> {
+  if (message.role === "system" || message.role === "developer") {
+    return [
+      {
+        role: message.role === "system" ? "system" : "developer",
+        content: mapContent(message.content),
+      },
+    ]
+  }
   return handleNonAssistantMessageContent(message.content)
 }
 
 function handleAssistantMessage(
   message: AnthropicAssistantMessage,
+  model: string,
 ): Array<Message> {
   if (!Array.isArray(message.content)) {
     return [
@@ -267,7 +279,9 @@ function handleAssistantMessage(
       role: "assistant",
       content: textContent || null,
       ...(reasoningText ? { reasoning_text: reasoningText } : {}),
-      ...(reasoningOpaque ? { reasoning_opaque: reasoningOpaque } : {}),
+      ...(reasoningOpaque && model.toLowerCase().startsWith("claude-") ?
+        { reasoning_opaque: reasoningOpaque }
+      : {}),
       ...(toolUseBlocks.length > 0 ?
         {
           tool_calls: toolUseBlocks.map((toolUse) => ({
@@ -314,7 +328,26 @@ export function hasUnrepresentableChatThinkingHistory(
 function isValidReasoningSignature(
   signature: string | undefined,
 ): signature is string {
-  return Boolean(signature && signature.length > 0 && !signature.includes("@"))
+  return Boolean(
+    signature
+      && signature.length > 0
+      && !signature.includes("@")
+      && !signature.startsWith(ANTHROPIC_REASONING_ENVELOPE_PREFIX),
+  )
+}
+
+export function toolResultContentWithError(
+  block: AnthropicToolResultBlock,
+): AnthropicToolResultBlock["content"] {
+  if (!block.is_error) return block.content
+  const marker = "[Tool execution failed]"
+  return typeof block.content === "string" ?
+      `${marker}\n${block.content}`
+    : [{ type: "text", text: marker }, ...block.content]
+}
+
+export function isDeferredToolPlaceholder(tool: AnthropicTool): boolean {
+  return tool.name === "DeferredToolPlaceholder" && tool.defer_loading === true
 }
 
 function mapContent(
@@ -398,6 +431,7 @@ function translateAnthropicToolsToOpenAI(
   const result: Array<Tool> = []
 
   for (const tool of anthropicTools) {
+    if (isDeferredToolPlaceholder(tool)) continue
     // Convert web_search server-side tool to a function tool
     if (isWebSearchToolType(tool)) {
       result.push(createWebSearchFunctionTool(tool))

@@ -18,6 +18,7 @@ import type { Model, ModelsResponse } from "~/services/copilot/get-models"
 import { parseFetchableHttpUrl } from "~/lib/attachments"
 import { state } from "~/lib/state"
 import { tokenPool } from "~/lib/token-pool"
+import { asAnthropicUnknownRole } from "~/routes/messages/anthropic-types"
 import { selectMessagesUpstreamEndpoint } from "~/routes/messages/handler"
 import {
   checkMessagesToChatTranslation,
@@ -273,6 +274,42 @@ beforeEach(() => {
   state.sessionId = "messages-routing-test"
   removeTestAccounts()
 })
+
+test.each(["/v1/messages", "/responses", "/chat/completions"])(
+  "preserves the agent initiator through trailing Claude instructions on %s",
+  async (endpoint) => {
+    installModel({ supported_endpoints: [endpoint] })
+    const response = await postMessages({
+      tools: [
+        { name: "echo", input_schema: { type: "object", properties: {} } },
+      ],
+      messages: [
+        { role: "user", content: "Call echo." },
+        {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "call_echo", name: "echo", input: {} },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "call_echo", content: "done" },
+          ],
+        },
+        {
+          role: asAnthropicUnknownRole("system"),
+          content: "Current turn instruction.",
+          output_config: { effort: "low" },
+        },
+      ],
+    })
+
+    expect(response.status).toBe(200)
+    expect(upstreamPaths).toEqual([endpoint])
+    expect(upstreamHeaders[0]?.get("x-initiator")).toBe("agent")
+  },
+)
 
 test.each([
   {
