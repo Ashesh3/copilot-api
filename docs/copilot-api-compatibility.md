@@ -269,6 +269,19 @@ bodies, and caller objects remain intact. Custom-provider dispatch is unchanged.
 An explicit upstream encrypted-argument list is preserved, never relabeled as
 plaintext.
 
+Codex delivers initial subagent tasks, followups, and agent results as
+`agent_message` input items. On Responses-to-Messages and Responses-to-Chat
+routes, the gateway translates their readable content into user-context
+messages in place, preserving text and supported attachments. The task/sender
+envelope already carried in the text is retained; author fields never promote
+it to a system/developer instruction. Internal IDs are not added to prompts.
+Initiator headers still use the original Responses source, and native Responses
+input and WebSocket continuation snapshots retain their original items.
+
+An `encrypted_content` block inside an agent message cannot be translated.
+Messages and Chat candidates are rejected rather than dispatching a placeholder
+or a partially readable task. Native Responses remains available when supported.
+
 This prevents new collaboration messages from depending on provider encryption
 state. It cannot decrypt encrypted messages already in a conversation. If an old
 conversation receives `Encrypted function output content could not be decrypted
