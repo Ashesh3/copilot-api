@@ -318,6 +318,15 @@ Draft 4/6/7 schemas use `definitions`; newer schemas use `$defs`. This avoids
 the provider's top-level composition rejection without flattening alternative
 branches or adding a wrapper field to the tool's arguments.
 
+An interrupted Responses continuation can end in an assistant `thinking` block
+with no answer or tool call. Messages dispatch removes only this unfinished
+terminal reasoning suffix, dropping emptied assistant records and preserving
+readable orphaned thought as labeled continuation context. Partial assistant
+text remains available, with a user continuation marker when needed to avoid
+unsupported assistant prefill. Earlier thinking-only turns, completed signed
+thinking, tool-call/result pairs and request-level thinking settings are
+preserved. System/developer updates do not hide an unfinished terminal suffix.
+
 Before each Copilot inference, control-plane or model-catalog network attempt,
 including retries and LLM Debug replay, the gateway applies the header allowlist in
 `src/services/copilot/copilot-request-headers.ts`. It retains the gateway's
