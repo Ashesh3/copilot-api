@@ -1046,6 +1046,7 @@ const handleResponsesInner = async (
 
   if (state.manualApprove) await awaitApproval()
 
+  const sourceInitiator = getResponsesRequestOptions(payload).initiator
   return await runWithRoutedModelSelection(routedModel, async () => {
     if (candidate.endpoint === "/v1/messages") {
       reportResponsesEndpointFallback(c, payload.model, decision)
@@ -1057,6 +1058,9 @@ const handleResponsesInner = async (
           ...nativeOptions,
           requestedModel,
           copilotSessionToken,
+          initiatorOverride:
+            nativeOptions.initiatorOverride
+            ?? (sourceInitiator === "agent" ? "agent" : undefined),
         },
       })
     }
@@ -1067,6 +1071,7 @@ const handleResponsesInner = async (
       return await handleWithChatCompletions(c, candidate.payload, {
         requestedModel,
         copilotSessionToken,
+        initiator: sourceInitiator,
         webSearchMaxUses: getResponsesChatWebSearchMaxUses(payload),
       })
     }
@@ -2543,6 +2548,7 @@ export const handleWithChatCompletions = async (
     completionFactory?: ResponsesChatCompletionFactory
     requestedModel?: string
     copilotSessionToken?: string
+    initiator?: "agent" | "user"
     webSearchMaxUses?: number
   } = {},
 ) => {
@@ -2554,6 +2560,9 @@ export const handleWithChatCompletions = async (
         allowCompatibilityRetry: factoryOptions.allowCompatibilityRetry,
         candidatePrepared: true,
         copilotSessionToken: options.copilotSessionToken,
+        // Keep translated agent tasks agent-originated; ordinary user requests
+        // still auto-detect agent-origin tool-result followups after web search.
+        initiator: options.initiator === "agent" ? "agent" : undefined,
         signal: factoryOptions.signal,
       })
       return {

@@ -50,6 +50,7 @@ import {
   isAnthropicToolResultBlock,
   isAnthropicUserMessage,
 } from "../messages/anthropic-types"
+import { normalizeResponsesAgentMessage } from "./agent-message"
 import {
   decodeAnthropicReasoningEnvelope,
   encodeAnthropicReasoningEnvelope,
@@ -266,9 +267,9 @@ async function convertTolerantResponsesInput(
     (itemIndex) => `responses_messages_call_${itemIndex}`,
   )
 
-  for (const [itemIndex, raw] of source.input.entries()) {
-    if (!isRecord(raw)) {
-      if (stringifyTolerantValue(raw)) {
+  for (const [itemIndex, item] of source.input.entries()) {
+    if (!isRecord(item)) {
+      if (stringifyTolerantValue(item)) {
         addTranslationFinding(state.findings, {
           class: "unknown_item",
           severity: "adapted",
@@ -281,6 +282,8 @@ async function convertTolerantResponsesInput(
       }
       continue
     }
+    const raw = normalizeResponsesAgentMessage(item, state.findings)
+    if (!raw) continue
     const type = typeof raw.type === "string" ? raw.type : undefined
     if (type === "function_call") {
       const id = associations.callIdByIndex.get(itemIndex)
@@ -682,7 +685,9 @@ export async function adaptResponsesToMessagesCandidate(options: {
     })
   }
   const meaningful =
-    converted.messages.length > 0 || converted.system.length > 0
+    converted.messages.length > 0
+    || converted.system.length > 0
+    || state.findings.some((finding) => finding.severity === "fatal")
   const findings: Array<TranslationFinding> =
     meaningful ?
       state.findings
@@ -755,17 +760,36 @@ export async function responsesPayloadToAnthropic(
   signal?: AbortSignal,
   options?: ResponsesMessagesBridgeOptions,
 ): Promise<AnthropicMessagesPayload> {
+  const findings: Array<TranslationFinding> = []
+  const translatedPayload = {
+    ...payload,
+    input:
+      Array.isArray(payload.input) ?
+        payload.input.flatMap<ResponseInputItem>((item) => {
+          if (!isRecord(item)) return [item]
+          const translated = normalizeResponsesAgentMessage(item, findings)
+          return translated ? [translated] : []
+        })
+      : payload.input,
+  }
+  if (findings.some((finding) => finding.severity === "fatal")) {
+    throw createEndpointTranslationError({
+      blockers: ["content_part"],
+      code: "endpoint_translation_unsupported",
+      source: "responses",
+    })
+  }
   assertEndpointTranslationSupported(
     {
       blockers: [],
       code: "endpoint_translation_unsupported",
       source: "responses",
     },
-    checkResponsesToMessagesTranslation(payload),
+    checkResponsesToMessagesTranslation(translatedPayload),
   )
 
   const { messages, systemTexts } = await convertResponsesInput(
-    payload.input,
+    translatedPayload.input,
     signal,
     options,
   )

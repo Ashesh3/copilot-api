@@ -23,6 +23,7 @@ import { createWebSearchFunctionTool } from "~/services/copilot/mcp-web-search"
 
 import type { ResponsesAttachmentCache } from "./attachment-cache"
 
+import { normalizeResponsesAgentMessage } from "./agent-message"
 import { associateResponsesFunctionCalls } from "./tool-call-association"
 
 export type ResponsesChatCandidate = EvaluatedEndpointCandidate<
@@ -236,9 +237,9 @@ async function convertInput(
     (itemIndex) => `responses_call_${itemIndex}_0`,
   )
 
-  for (const [itemIndex, raw] of source.input.entries()) {
-    if (!isRecord(raw)) {
-      if (stringifyUseful(raw)) {
+  for (const [itemIndex, item] of source.input.entries()) {
+    if (!isRecord(item)) {
+      if (stringifyUseful(item)) {
         addFinding(state.findings, {
           class: "unknown_item",
           severity: "adapted",
@@ -247,6 +248,8 @@ async function convertInput(
       }
       continue
     }
+    const raw = normalizeResponsesAgentMessage(item, state.findings)
+    if (!raw) continue
     const type = typeof raw.type === "string" ? raw.type : undefined
     if (type === "function_call") {
       const id = associations.callIdByIndex.get(itemIndex)
@@ -752,7 +755,9 @@ export async function adaptResponsesToChatCandidate(
     isResponsesCompactionRequest(source) ?
       fitChatCompletionsCompactionPayload(payload).payload
     : payload
-  const meaningful = finalizedPayload.messages.length > 0
+  const meaningful =
+    finalizedPayload.messages.length > 0
+    || state.findings.some((finding) => finding.severity === "fatal")
   const findings: Array<TranslationFinding> =
     meaningful ?
       state.findings
