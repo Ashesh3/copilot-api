@@ -34,6 +34,7 @@ import {
   type AnthropicRequestHeaders,
   sanitizeAnthropicRequestHeaderOptions,
 } from "./anthropic-request-headers"
+import { normalizeAnthropicThinkingTail } from "./anthropic-thinking-tail"
 import { normalizeAnthropicToolSchemas } from "./anthropic-tool-schema"
 
 export {
@@ -1214,6 +1215,12 @@ export function normalizeAnthropicMessagesRequest(
   normalizeMessageOutputControls(normalized)
   normalizeCacheControls(normalized)
   normalizeAnthropicToolSchemas(normalized)
+  if (
+    normalizeAnthropicThinkingTail(normalized)
+    && normalized.messages.length === 0
+  ) {
+    throw createMessagesValidationError("messages")
+  }
   return normalized
 }
 
