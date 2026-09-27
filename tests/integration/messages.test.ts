@@ -323,18 +323,89 @@ const NATIVE_WEB_SEARCH_MODELS = [
   "claude-sonnet-4.5",
   "claude-sonnet-4",
 ]
+// Claude Code's catalog marks these models `rejects_disabled_thinking`.
+const ALWAYS_THINKING_MODELS = [
+  "claude-opus-5.5",
+  "claude-fable-5.1",
+  "claude-fable-5",
+]
 
-function findNativeMessagesModel(): string | undefined {
-  const native = (state.models?.data ?? []).filter(
+function nativeMessagesModels() {
+  return (state.models?.data ?? []).filter(
     (model) =>
       model.id.startsWith("claude-")
       && model.supported_endpoints?.includes("/v1/messages"),
   )
+}
+
+function findNativeMessagesModel(): string | undefined {
+  const native = nativeMessagesModels()
   return (
     NATIVE_WEB_SEARCH_MODELS.find((id) =>
       native.some((model) => model.id === id),
     ) ?? native[0]?.id
   )
+}
+
+function findAlwaysThinkingModel(): string | undefined {
+  const native = nativeMessagesModels()
+  return ALWAYS_THINKING_MODELS.find((id) =>
+    native.some((model) => model.id === id),
+  )
+}
+
+// Request shape sent by the WebSearch tool in Claude Code 2.1.281.
+function claudeCodeWebSearchRequest(
+  model: string,
+  extra: Record<string, unknown> = {},
+) {
+  return {
+    model,
+    max_tokens: 1024,
+    system: [
+      {
+        type: "text",
+        text: "You are an assistant for performing a web search tool use",
+      },
+    ],
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: "Perform a web search for the query: GitHub Copilot changelog",
+          },
+        ],
+      },
+    ],
+    tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 8 }],
+    tool_choice: { type: "tool", name: "web_search" },
+    thinking: { type: "disabled" },
+    stream: true,
+    ...extra,
+  }
+}
+
+async function expectStreamedAnswer(res: Response): Promise<void> {
+  const raw = await res.text()
+  expect({ status: res.status, body: raw.slice(0, 1000) }).toMatchObject({
+    status: 200,
+  })
+  const events = await collectSSEEvents(new Response(raw))
+  const eventTypes = events.map((event) => event.event)
+  const text = events
+    .flatMap((event) => {
+      if (event.event !== "content_block_delta") return []
+      const data = JSON.parse(event.data) as AnthropicStreamEvent
+      return data.delta?.type === "text_delta" ? [data.delta.text ?? ""] : []
+    })
+    .join("")
+
+  expect(eventTypes).toContain("message_start")
+  expect(eventTypes).toContain("message_stop")
+  expect(eventTypes).not.toContain("error")
+  expect(text.trim().length).toBeGreaterThan(0)
 }
 
 describe("POST /v1/messages - web search", () => {
@@ -347,54 +418,30 @@ describe("POST /v1/messages - web search", () => {
         return
       }
 
-      // Request shape sent by the WebSearch tool in Claude Code 2.1.281.
-      const res = await postJSON("/v1/messages", {
-        model,
-        max_tokens: 1024,
-        system: [
-          {
-            type: "text",
-            text: "You are an assistant for performing a web search tool use",
-          },
-        ],
-        messages: [
-          {
-            role: "user",
-            content: [
-              {
-                type: "text",
-                text: "Perform a web search for the query: GitHub Copilot changelog",
-              },
-            ],
-          },
-        ],
-        tools: [
-          { type: "web_search_20250305", name: "web_search", max_uses: 8 },
-        ],
-        tool_choice: { type: "tool", name: "web_search" },
-        thinking: { type: "disabled" },
-        stream: true,
-      })
-      const raw = await res.text()
-      expect({ status: res.status, body: raw.slice(0, 1000) }).toMatchObject({
-        status: 200,
-      })
-      const events = await collectSSEEvents(new Response(raw))
-      const eventTypes = events.map((event) => event.event)
-      const text = events
-        .flatMap((event) => {
-          if (event.event !== "content_block_delta") return []
-          const data = JSON.parse(event.data) as AnthropicStreamEvent
-          return data.delta?.type === "text_delta" ?
-              [data.delta.text ?? ""]
-            : []
-        })
-        .join("")
+      await expectStreamedAnswer(
+        await postJSON("/v1/messages", claudeCodeWebSearchRequest(model)),
+      )
+    },
+    TEST_TIMEOUT,
+  )
 
-      expect(eventTypes).toContain("message_start")
-      expect(eventTypes).toContain("message_stop")
-      expect(eventTypes).not.toContain("error")
-      expect(text.trim().length).toBeGreaterThan(0)
+  test(
+    "completes the Claude Code WebSearch side query on a model that always thinks",
+    async () => {
+      const model = findAlwaysThinkingModel()
+      if (!model) {
+        console.log("Skipping — no always-thinking Claude model available")
+        return
+      }
+
+      await expectStreamedAnswer(
+        await postJSON(
+          "/v1/messages",
+          claudeCodeWebSearchRequest(model, {
+            output_config: { effort: "high" },
+          }),
+        ),
+      )
     },
     TEST_TIMEOUT,
   )

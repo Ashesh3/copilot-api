@@ -25,6 +25,7 @@ import {
   checkMessagesToResponsesTranslation,
 } from "~/routes/messages/translation-fidelity"
 import { server } from "~/server"
+import { resetDisabledThinkingRejectionsForTest } from "~/services/copilot/disabled-thinking-support"
 import { resetWebSearchSessionsForTest } from "~/services/copilot/mcp-web-search"
 
 import {
@@ -43,6 +44,7 @@ const queuedMessagesResults: Array<Error | Response> = []
 const queuedChatResults: Array<Response> = []
 const queuedResponsesResults: Array<Response> = []
 let attachmentFetchCount = 0
+let alwaysThinkingModel = false
 const TEST_ACCOUNT_IDS = [91_001, 91_002, 92_001, 92_002, 93_001, 93_002]
 const INVALID_TRANSLATED_DOCUMENT_URLS = [
   "ftp://example.test/report.pdf",
@@ -173,6 +175,38 @@ function rejectCustomToolServerControls(
   return undefined
 }
 
+function anthropicInvalidRequest(message: string): Response {
+  return Response.json(
+    {
+      type: "error",
+      error: { type: "invalid_request_error", message },
+      request_id: "req_model_contract",
+    },
+    { status: 400 },
+  )
+}
+
+// Models such as Claude Opus 5.5 always think. Upstream rejects disabled
+// thinking first, then any forced tool use.
+function rejectAlwaysThinkingControls(
+  body: Record<string, unknown> | undefined,
+): Response | undefined {
+  if (!alwaysThinkingModel) return undefined
+  const thinking = body?.thinking as { type?: unknown } | undefined
+  if (thinking?.type === "disabled") {
+    return anthropicInvalidRequest(
+      '"thinking.type.disabled" is not supported for this model. Use "thinking.type.adaptive" and "output_config.effort" to control thinking behavior.',
+    )
+  }
+  const choice = body?.tool_choice as { type?: unknown } | undefined
+  if (choice?.type === "tool" || choice?.type === "any") {
+    return anthropicInvalidRequest(
+      'tool_choice: type "tool" and "any" are not supported for this model.',
+    )
+  }
+  return undefined
+}
+
 const fetchMock = mock(
   // eslint-disable-next-line complexity -- fixture branches mirror independent upstream protocols
   (url: string | URL | Request, init?: RequestInit): Response => {
@@ -194,6 +228,10 @@ const fetchMock = mock(
         upstreamBodies.at(-1),
       )
       if (contractError) return contractError
+      const modelContractError = rejectAlwaysThinkingControls(
+        upstreamBodies.at(-1),
+      )
+      if (modelContractError) return modelContractError
       const queued = queuedMessagesResults.shift()
       if (queued instanceof Error) throw queued
       if (queued) return queued
@@ -304,6 +342,8 @@ beforeEach(() => {
   queuedChatResults.length = 0
   queuedResponsesResults.length = 0
   resetWebSearchSessionsForTest()
+  resetDisabledThinkingRejectionsForTest()
+  alwaysThinkingModel = false
   attachmentFetchCount = 0
   state.accountType = "individual"
   state.copilotToken = "copilot-token"
@@ -1579,54 +1619,61 @@ test.each([
   },
 )
 
+// The WebSearch tool in Claude Code 2.1.281 (run by Claude Desktop 2.9939.2
+// for Cowork and Code sessions) sends this side query.
+const CLAUDE_CODE_WEB_SEARCH_REQUEST = {
+  stream: true,
+  system: [
+    {
+      type: "text",
+      text: "You are an assistant for performing a web search tool use",
+    },
+  ],
+  messages: [
+    {
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: "Perform a web search for the query: current facts",
+        },
+      ],
+    },
+  ],
+  tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 8 }],
+  tool_choice: { type: "tool", name: "web_search" },
+  thinking: { type: "disabled" },
+  output_config: { effort: "high" },
+}
+
+function nativeWebSearchCall(id: string): Response {
+  return Response.json({
+    id: `msg_${id}`,
+    type: "message",
+    role: "assistant",
+    model: "route-model",
+    content: [
+      {
+        type: "tool_use",
+        id: `toolu_${id}`,
+        name: "web_search",
+        input: { query: "current facts" },
+      },
+    ],
+    stop_reason: "tool_use",
+    stop_sequence: null,
+    usage: { input_tokens: 1, output_tokens: 1 },
+  })
+}
+
 test("completes a Claude Code WebSearch request through native Messages", async () => {
   installModel({ supported_endpoints: ["/v1/messages"] })
   queuedMessagesResults.push(
-    Response.json({
-      id: "msg_claude_code_search",
-      type: "message",
-      role: "assistant",
-      model: "route-model",
-      content: [
-        {
-          type: "tool_use",
-          id: "toolu_claude_code_search",
-          name: "web_search",
-          input: { query: "current facts" },
-        },
-      ],
-      stop_reason: "tool_use",
-      stop_sequence: null,
-      usage: { input_tokens: 1, output_tokens: 1 },
-    }),
+    nativeWebSearchCall("claude_code_search"),
     nativeSuccess("searched-answer"),
   )
 
-  // The WebSearch tool in Claude Code 2.1.281 (run by Claude Desktop
-  // 2.9939.2 for Cowork and Code sessions) sends this side query.
-  const response = await postMessages({
-    stream: true,
-    system: [
-      {
-        type: "text",
-        text: "You are an assistant for performing a web search tool use",
-      },
-    ],
-    messages: [
-      {
-        role: "user",
-        content: [
-          {
-            type: "text",
-            text: "Perform a web search for the query: current facts",
-          },
-        ],
-      },
-    ],
-    tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 8 }],
-    tool_choice: { type: "tool", name: "web_search" },
-    thinking: { type: "disabled" },
-  })
+  const response = await postMessages(CLAUDE_CODE_WEB_SEARCH_REQUEST)
   const body = await response.text()
   const messageBodies = upstreamPaths.flatMap((path, index) =>
     path === "/v1/messages" ? [upstreamBodies[index]] : [],
@@ -1640,6 +1687,10 @@ test("completes a Claude Code WebSearch request through native Messages", async 
     upstreamBodies.filter((entry) => entry.method === "tools/call"),
   ).toHaveLength(1)
   expect(messageBodies).toHaveLength(2)
+  expect(messageBodies[0]).toMatchObject({
+    thinking: { type: "disabled" },
+    tool_choice: { type: "tool", name: "web_search" },
+  })
   for (const messageBody of messageBodies) {
     const [tool] = messageBody.tools as Array<Record<string, unknown>>
     expect(Object.keys(tool).sort()).toEqual([
@@ -1652,6 +1703,55 @@ test("completes a Claude Code WebSearch request through native Messages", async 
       input_schema: { required: ["query"] },
     })
   }
+})
+
+test("completes a Claude Code WebSearch request on a model that always thinks", async () => {
+  alwaysThinkingModel = true
+  installModel({ supported_endpoints: ["/v1/messages"] })
+  queuedMessagesResults.push(
+    nativeWebSearchCall("adaptive_search"),
+    nativeSuccess("adaptive-answer"),
+  )
+
+  const response = await postMessages(CLAUDE_CODE_WEB_SEARCH_REQUEST)
+  const body = await response.text()
+  const messageBodies = upstreamPaths.flatMap((path, index) =>
+    path === "/v1/messages" ? [upstreamBodies[index]] : [],
+  )
+
+  expect(response.status).toBe(200)
+  expect(body).toContain("adaptive-answer")
+  expect(body).toContain("event: message_stop")
+  expect(
+    upstreamBodies.filter((entry) => entry.method === "tools/call"),
+  ).toHaveLength(1)
+  expect(messageBodies).toHaveLength(3)
+  expect(messageBodies[0]).toHaveProperty("thinking", { type: "disabled" })
+  for (const accepted of messageBodies.slice(1)) {
+    expect(accepted).not.toHaveProperty("thinking")
+    expect(accepted).toHaveProperty("tool_choice.type", "auto")
+    expect(accepted).toHaveProperty("output_config", { effort: "high" })
+  }
+  expect(JSON.stringify(messageBodies[1]?.system)).toContain("web_search")
+})
+
+test("omits disabled thinking up front once a model rejects it", async () => {
+  alwaysThinkingModel = true
+  installModel({ supported_endpoints: ["/v1/messages"] })
+
+  const first = await postMessages({ thinking: { type: "disabled" } })
+  const second = await postMessages({ thinking: { type: "disabled" } })
+  const messageBodies = upstreamPaths.flatMap((path, index) =>
+    path === "/v1/messages" ? [upstreamBodies[index]] : [],
+  )
+
+  expect(first.status).toBe(200)
+  expect(second.status).toBe(200)
+  expect(
+    messageBodies.map(
+      (body) => (body.thinking as { type?: string } | undefined)?.type ?? null,
+    ),
+  ).toEqual(["disabled", null, null])
 })
 
 test("enforces native Messages max_uses without wire metadata", async () => {

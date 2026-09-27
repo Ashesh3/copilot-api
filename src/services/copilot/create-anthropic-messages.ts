@@ -21,8 +21,15 @@ import {
 } from "~/services/copilot/transport-retry"
 
 import { fitAnthropicCompactionPayload } from "./compaction-payload"
-import { classifyCompatibilityRetry } from "./compatibility-retry"
+import {
+  classifyCompatibilityRetry,
+  omitUnsupportedDisabledThinking,
+} from "./compatibility-retry"
 import { hasVisionContent } from "./copilot-client"
+import {
+  rejectsDisabledThinking,
+  rememberDisabledThinkingRejection,
+} from "./disabled-thinking-support"
 import {
   createMissingAnthropicMessagesMaxTokensError,
   normalizeAnthropicMessagesRequest,
@@ -246,13 +253,22 @@ async function retryAnthropicCompatibility(
   options: AnthropicDispatchOptions,
   attempt: AnthropicAttempt,
 ): Promise<AnthropicAttempt> {
-  if (options.options?.allowCompatibilityRetry === false) return attempt
   const decision = await classifyCompatibilityRetry({
     body: attempt.body,
     endpoint: ANTHROPIC_MESSAGES_ENDPOINT,
     response: attempt.response,
   })
-  if (decision.kind === "none") return attempt
+  // Remember the model even when this call may not resend, so later requests
+  // (including later web-search iterations) avoid the rejected control.
+  if (decision.kind === "unsupported_disabled_thinking") {
+    rememberDisabledThinkingRejection(options.modelId)
+  }
+  if (
+    decision.kind === "none"
+    || options.options?.allowCompatibilityRetry === false
+  ) {
+    return attempt
+  }
   const retryBody = structuredClone(attempt.body)
   if (
     !decision.normalize(retryBody)
@@ -267,6 +283,22 @@ async function retryAnthropicCompatibility(
   }
 }
 
+function omitLearnedDisabledThinking(
+  body: Record<string, unknown>,
+  modelId: string,
+): Record<string, unknown> {
+  const thinking = body.thinking as { type?: unknown } | undefined
+  if (thinking?.type !== "disabled" || !rejectsDisabledThinking(modelId)) {
+    return body
+  }
+  const adapted = structuredClone(body)
+  omitUnsupportedDisabledThinking(adapted)
+  consola.debug("Omitted disabled thinking for a model that rejects it", {
+    model: modelId,
+  })
+  return adapted
+}
+
 async function dispatchAnthropicMessages(
   options: AnthropicDispatchOptions,
 ): Promise<CreateAnthropicMessagesReturn> {
@@ -276,7 +308,10 @@ async function dispatchAnthropicMessages(
     options.options?.compaction ?
       fitAnthropicCompactionPayload(preparedBody)
     : null
-  const body = fitted?.payload ?? preparedBody
+  const body = omitLearnedDisabledThinking(
+    fitted?.payload ?? preparedBody,
+    options.modelId,
+  )
   if (fitted?.reduced) {
     consola.warn("Reduced oversized native Messages compaction payload", {
       originalBytes: fitted.originalBytes,
