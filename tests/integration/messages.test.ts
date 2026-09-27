@@ -2,6 +2,8 @@ import "./data-dir"
 
 import { describe, test, expect, beforeAll } from "bun:test"
 
+import { state } from "~/lib/state"
+
 import {
   useIntegrationFixture,
   initializeTestState,
@@ -311,6 +313,88 @@ describe("POST /v1/messages - tools and params", () => {
     async () => {
       const res = await postJSON("/v1/messages", { max_tokens: 10 })
       expect(res.status).toBeGreaterThanOrEqual(400)
+    },
+    TEST_TIMEOUT,
+  )
+})
+
+const NATIVE_WEB_SEARCH_MODELS = [
+  "claude-haiku-4.5",
+  "claude-sonnet-4.5",
+  "claude-sonnet-4",
+]
+
+function findNativeMessagesModel(): string | undefined {
+  const native = (state.models?.data ?? []).filter(
+    (model) =>
+      model.id.startsWith("claude-")
+      && model.supported_endpoints?.includes("/v1/messages"),
+  )
+  return (
+    NATIVE_WEB_SEARCH_MODELS.find((id) =>
+      native.some((model) => model.id === id),
+    ) ?? native[0]?.id
+  )
+}
+
+describe("POST /v1/messages - web search", () => {
+  test(
+    "completes the Claude Code WebSearch side query on native Messages",
+    async () => {
+      const model = findNativeMessagesModel()
+      if (!model) {
+        console.log("Skipping — no native Messages Claude model available")
+        return
+      }
+
+      // Request shape sent by the WebSearch tool in Claude Code 2.1.281.
+      const res = await postJSON("/v1/messages", {
+        model,
+        max_tokens: 1024,
+        system: [
+          {
+            type: "text",
+            text: "You are an assistant for performing a web search tool use",
+          },
+        ],
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: "Perform a web search for the query: GitHub Copilot changelog",
+              },
+            ],
+          },
+        ],
+        tools: [
+          { type: "web_search_20250305", name: "web_search", max_uses: 8 },
+        ],
+        tool_choice: { type: "tool", name: "web_search" },
+        thinking: { type: "disabled" },
+        stream: true,
+      })
+      const raw = await res.text()
+      expect({ status: res.status, body: raw.slice(0, 1000) }).toMatchObject({
+        status: 200,
+      })
+      const events = await collectSSEEvents(new Response(raw))
+      const eventTypes = events.map((event) => event.event)
+      const text = events
+        .flatMap((event) => {
+          if (event.event !== "content_block_delta") return []
+          const data = JSON.parse(event.data) as AnthropicStreamEvent
+          return data.delta?.type === "text_delta" ?
+              [data.delta.text ?? ""]
+            : []
+        })
+        .join("")
+
+      expect(eventTypes).toContain("message_start")
+      expect(eventTypes).toContain("message_stop")
+      expect(eventTypes).not.toContain("error")
+      expect(text.trim().length).toBeGreaterThan(0)
     },
     TEST_TIMEOUT,
   )

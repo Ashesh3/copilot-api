@@ -53,6 +53,7 @@ import {
   createMessagesTerminalAdapter,
   type MessagesTerminalAdapter,
 } from "./stream-lifecycle"
+import { readPositiveWebSearchLimit } from "./web-search-budget"
 import { emitAnthropicResponseAsStream } from "./web-search-helpers"
 
 const logger = createHandlerLogger("messages-native-handler")
@@ -334,7 +335,7 @@ export async function handleWithNativeMessages(
       {
         payload: structuredClone(anthropicPayload),
         usesWebSearch: hasPreparedWebSearchTool(anthropicPayload.tools),
-        webSearchMaxUses: getNativeWebSearchLimit(anthropicPayload.tools),
+        webSearchMaxUses: options.webSearchMaxUses,
       }
     : prepareNativeTools(anthropicPayload)
 
@@ -609,8 +610,13 @@ export async function resolveNativeWebSearch(
   const routedAccountPin = options.routedAccountPin ?? {}
   const retryBudget = options.retryBudget ?? createRetryBudget()
   const loopOptions = { ...options, retryBudget }
-  const maxSearchUses =
-    options.webSearchMaxUses ?? getNativeWebSearchLimit(initialPayload.tools)
+  // Prepared tools cannot carry `max_uses` upstream, so the caller limit may
+  // arrive out of band. Every source stays under the defensive maximum.
+  const maxSearchUses = Math.min(
+    getNativeWebSearchLimit(initialPayload.tools),
+    readPositiveWebSearchLimit(options.webSearchMaxUses)
+      ?? MAX_NATIVE_WEB_SEARCH_USES,
+  )
   let searchUses = 0
 
   while (true) {
