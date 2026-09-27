@@ -10,6 +10,7 @@ export type CompatibilityRetryKind =
   | "unsupported_top_p"
   | "invalid_thinking_signature"
   | "unsupported_forced_tool_choice"
+  | "unsupported_disabled_thinking"
 
 export type CompatibilityRetryDecision =
   | { kind: "none" }
@@ -26,6 +27,8 @@ const UNSUPPORTED_TOP_P_MESSAGE =
   "Unsupported parameter: 'top_p' is not supported with this model."
 const UNSUPPORTED_FORCED_TOOL_CHOICE_MESSAGE =
   'tool_choice: type "tool" and "any" are not supported for this model.'
+const UNSUPPORTED_DISABLED_THINKING_MESSAGE =
+  '"thinking.type.disabled" is not supported for this model. Use "thinking.type.adaptive" and "output_config.effort" to control thinking behavior.'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -119,6 +122,24 @@ function relaxUnsupportedForcedToolChoice(
   return true
 }
 
+function hasDisabledThinking(body: Record<string, unknown>): boolean {
+  return isRecord(body.thinking) && body.thinking.type === "disabled"
+}
+
+/**
+ * Models that always think reject disabled thinking. Omitting `thinking` lets
+ * them think adaptively under `output_config.effort`; forced tool use is not
+ * allowed while thinking, so a forced choice becomes an instructed auto choice.
+ */
+export function omitUnsupportedDisabledThinking(
+  body: Record<string, unknown>,
+): boolean {
+  if (!hasDisabledThinking(body)) return false
+  delete body.thinking
+  relaxUnsupportedForcedToolChoice(body)
+  return true
+}
+
 export function stripAssistantThinkingBlocks(
   body: Record<string, unknown>,
 ): boolean {
@@ -181,6 +202,17 @@ function classifyParsedCompatibilityRetry(options: {
     return {
       kind: "unsupported_forced_tool_choice",
       normalize: relaxUnsupportedForcedToolChoice,
+    }
+  }
+  if (
+    options.endpoint === "/v1/messages"
+    && error.type === "invalid_request_error"
+    && error.message === UNSUPPORTED_DISABLED_THINKING_MESSAGE
+    && hasDisabledThinking(options.body)
+  ) {
+    return {
+      kind: "unsupported_disabled_thinking",
+      normalize: omitUnsupportedDisabledThinking,
     }
   }
   if (

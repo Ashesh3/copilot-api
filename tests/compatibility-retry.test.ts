@@ -116,6 +116,128 @@ describe("native forced tool choice compatibility", () => {
   )
 })
 
+const UNSUPPORTED_DISABLED_THINKING =
+  '"thinking.type.disabled" is not supported for this model. Use "thinking.type.adaptive" and "output_config.effort" to control thinking behavior.'
+
+const disabledThinkingRejection = (message = UNSUPPORTED_DISABLED_THINKING) =>
+  Response.json(
+    {
+      type: "error",
+      error: { type: "invalid_request_error", message },
+      request_id: "req_disabled_thinking",
+    },
+    { status: 400 },
+  )
+
+describe("native disabled thinking compatibility", () => {
+  test("omits disabled thinking and relaxes a forced tool for a model that always thinks", async () => {
+    const body = {
+      model: "claude-opus-5.5",
+      system: [{ type: "text", text: "Search instructions." }],
+      messages: [{ role: "user", content: "Perform a web search." }],
+      tools: [
+        {
+          name: "web_search",
+          input_schema: { type: "object", properties: {} },
+        },
+      ],
+      tool_choice: {
+        type: "tool",
+        name: "web_search",
+        disable_parallel_tool_use: true,
+      },
+      thinking: { type: "disabled" },
+      output_config: { effort: "high" },
+    }
+    const result = await normalize({
+      body,
+      endpoint: "/v1/messages",
+      response: disabledThinkingRejection(),
+    })
+
+    expect(result.kind).toBe("unsupported_disabled_thinking")
+    expect(result.retry).not.toHaveProperty("thinking")
+    expect(result.retry.tool_choice).toEqual({
+      type: "auto",
+      disable_parallel_tool_use: true,
+    })
+    expect(result.retry.output_config).toEqual({ effort: "high" })
+    expect(result.retry.tools).toEqual(body.tools)
+    expect(result.retry.messages).toEqual(body.messages)
+    expect(result.retry).toHaveProperty("system.0", body.system[0])
+    expect(result.retry).toHaveProperty("system.1.type", "text")
+    expect(JSON.stringify(result.retry.system)).toContain("web_search")
+  })
+
+  test("keeps an automatic tool choice while omitting disabled thinking", async () => {
+    const body = {
+      model: "claude-opus-5.5",
+      messages: [{ role: "user", content: "Name this session." }],
+      tools: [{ name: "lookup", input_schema: { type: "object" } }],
+      tool_choice: { type: "auto" },
+      thinking: { type: "disabled" },
+    }
+    const result = await normalize({
+      body,
+      endpoint: "/v1/messages",
+      response: disabledThinkingRejection(),
+    })
+
+    expect(result.retry).toEqual({
+      model: "claude-opus-5.5",
+      messages: body.messages,
+      tools: body.tools,
+      tool_choice: { type: "auto" },
+    })
+  })
+
+  test.each([
+    {
+      name: "adaptive thinking",
+      thinking: { type: "adaptive" },
+      endpoint: "/v1/messages",
+      response: disabledThinkingRejection(),
+    },
+    {
+      name: "an unrelated thinking error",
+      thinking: { type: "disabled" },
+      endpoint: "/v1/messages",
+      response: disabledThinkingRejection("thinking is invalid"),
+    },
+    {
+      name: "a non-400 status",
+      thinking: { type: "disabled" },
+      endpoint: "/v1/messages",
+      response: Response.json(
+        {
+          type: "error",
+          error: {
+            type: "invalid_request_error",
+            message: UNSUPPORTED_DISABLED_THINKING,
+          },
+        },
+        { status: 403 },
+      ),
+    },
+    {
+      name: "a translated endpoint",
+      thinking: { type: "disabled" },
+      endpoint: "/responses",
+      response: disabledThinkingRejection(),
+    },
+  ] as const)(
+    "does not change thinking for $name",
+    async ({ thinking, endpoint, response }) => {
+      const decision = await classifyCompatibilityRetry({
+        body: { model: "claude-opus-5.5", messages: [], thinking },
+        endpoint,
+        response,
+      })
+      expect(decision.kind).toBe("none")
+    },
+  )
+})
+
 describe("compatibility retry classifier", () => {
   test("removes only unsupported temperature from a Chat wire clone", async () => {
     const body = { model: "m", temperature: 0, top_p: 0.5, messages: [] }
