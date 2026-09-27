@@ -571,6 +571,7 @@ async function handleCompletionInner(
         routedAccountPin,
         toolsPrepared: true,
         compaction: candidate.compaction,
+        webSearchMaxUses: candidate.webSearchMaxUses,
         copilotSessionToken,
         initiatorOverride,
       }

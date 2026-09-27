@@ -137,6 +137,42 @@ function createAttachmentResponse(
   )
 }
 
+// Copilot forwards Messages tools to Anthropic, which rejects web-search
+// server-tool controls on a custom tool (a tool without a server `type`).
+const WEB_SEARCH_SERVER_TOOL_CONTROLS = [
+  "max_uses",
+  "allowed_domains",
+  "blocked_domains",
+  "user_location",
+]
+
+function rejectCustomToolServerControls(
+  body: Record<string, unknown> | undefined,
+): Response | undefined {
+  const tools = Array.isArray(body?.tools) ? (body.tools as Array<unknown>) : []
+  for (const [index, tool] of tools.entries()) {
+    if (typeof tool !== "object" || tool === null) continue
+    const record = tool as Record<string, unknown>
+    if (record.type !== undefined && record.type !== "custom") continue
+    const control = WEB_SEARCH_SERVER_TOOL_CONTROLS.find((key) =>
+      Object.hasOwn(record, key),
+    )
+    if (control === undefined) continue
+    return Response.json(
+      {
+        type: "error",
+        error: {
+          type: "invalid_request_error",
+          message: `tools.${index}.custom.${control}: Extra inputs are not permitted`,
+        },
+        request_id: "req_custom_tool_contract",
+      },
+      { status: 400 },
+    )
+  }
+  return undefined
+}
+
 const fetchMock = mock(
   // eslint-disable-next-line complexity -- fixture branches mirror independent upstream protocols
   (url: string | URL | Request, init?: RequestInit): Response => {
@@ -154,6 +190,10 @@ const fetchMock = mock(
     )
 
     if (path === "/v1/messages") {
+      const contractError = rejectCustomToolServerControls(
+        upstreamBodies.at(-1),
+      )
+      if (contractError) return contractError
       const queued = queuedMessagesResults.shift()
       if (queued instanceof Error) throw queued
       if (queued) return queued
@@ -1538,6 +1578,120 @@ test.each([
     expect(JSON.stringify(inferenceBodies)).not.toContain("max_uses")
   },
 )
+
+test("completes a Claude Code WebSearch request through native Messages", async () => {
+  installModel({ supported_endpoints: ["/v1/messages"] })
+  queuedMessagesResults.push(
+    Response.json({
+      id: "msg_claude_code_search",
+      type: "message",
+      role: "assistant",
+      model: "route-model",
+      content: [
+        {
+          type: "tool_use",
+          id: "toolu_claude_code_search",
+          name: "web_search",
+          input: { query: "current facts" },
+        },
+      ],
+      stop_reason: "tool_use",
+      stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    }),
+    nativeSuccess("searched-answer"),
+  )
+
+  // The WebSearch tool in Claude Code 2.1.281 (run by Claude Desktop
+  // 2.9939.2 for Cowork and Code sessions) sends this side query.
+  const response = await postMessages({
+    stream: true,
+    system: [
+      {
+        type: "text",
+        text: "You are an assistant for performing a web search tool use",
+      },
+    ],
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: "Perform a web search for the query: current facts",
+          },
+        ],
+      },
+    ],
+    tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 8 }],
+    tool_choice: { type: "tool", name: "web_search" },
+    thinking: { type: "disabled" },
+  })
+  const body = await response.text()
+  const messageBodies = upstreamPaths.flatMap((path, index) =>
+    path === "/v1/messages" ? [upstreamBodies[index]] : [],
+  )
+
+  expect(response.status).toBe(200)
+  expect(body).toContain("event: message_start")
+  expect(body).toContain("searched-answer")
+  expect(body).toContain("event: message_stop")
+  expect(
+    upstreamBodies.filter((entry) => entry.method === "tools/call"),
+  ).toHaveLength(1)
+  expect(messageBodies).toHaveLength(2)
+  for (const messageBody of messageBodies) {
+    const [tool] = messageBody.tools as Array<Record<string, unknown>>
+    expect(Object.keys(tool).sort()).toEqual([
+      "description",
+      "input_schema",
+      "name",
+    ])
+    expect(tool).toMatchObject({
+      name: "web_search",
+      input_schema: { required: ["query"] },
+    })
+  }
+})
+
+test("enforces native Messages max_uses without wire metadata", async () => {
+  installModel({ supported_endpoints: ["/v1/messages"] })
+  queuedMessagesResults.push(
+    Response.json({
+      id: "msg_search_limit",
+      type: "message",
+      role: "assistant",
+      model: "route-model",
+      content: Array.from({ length: 3 }, (_, index) => ({
+        type: "tool_use",
+        id: `toolu_limit_${index}`,
+        name: "web_search",
+        input: { query: `query ${index}` },
+      })),
+      stop_reason: "tool_use",
+      stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    }),
+  )
+
+  const response = await postMessages({
+    tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 2 }],
+  })
+  const body = await response.json()
+  const messageBodies = upstreamPaths.flatMap((path, index) =>
+    path === "/v1/messages" ? [upstreamBodies[index]] : [],
+  )
+
+  expect(response.status).toBe(400)
+  expect(body).toMatchObject({
+    error: { code: "web_search_limit_exceeded" },
+  })
+  expect(
+    upstreamBodies.filter((entry) => entry.method === "tools/call"),
+  ).toHaveLength(0)
+  expect(messageBodies).toHaveLength(1)
+  expect(JSON.stringify(messageBodies)).not.toContain("max_uses")
+})
 
 test("native web-search follow-ups keep an issuer-matched session token on one account", async () => {
   installModel({ supported_endpoints: ["/v1/messages"] })

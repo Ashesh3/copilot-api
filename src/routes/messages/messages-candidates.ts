@@ -80,6 +80,7 @@ export interface PreparedMessagesCandidates {
 export interface PreparedMessagesNativeCandidate
   extends MessagesNativeCandidate {
   readonly compaction: boolean
+  readonly webSearchMaxUses?: number
 }
 
 const ORPHAN_TOOL_RESULT_PREFIX = "[Orphaned tool result]"
@@ -607,9 +608,11 @@ export async function prepareMessagesCandidates(
     payload: finalizedNative,
     meaningful: hasMeaningfulMessages(options.source),
   })
+  const webSearchMaxUses = getMessagesWebSearchMaxUses(options.source)
   const native: PreparedMessagesNativeCandidate = {
     ...nativeCandidate,
     compaction: options.isCompact === true,
+    ...(webSearchMaxUses === undefined ? {} : { webSearchMaxUses }),
   }
   const responses =
     support.responses ?

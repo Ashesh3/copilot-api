@@ -390,62 +390,69 @@ test("rejects an over-budget search batch before executing any call", async () =
   expect(nativeAttempt).toBe(1)
 })
 
-test("enforces the public native web-search limit after tool rewriting", async () => {
-  repeatNativeSearch = true
-  state.models = {
-    object: "list",
-    data: [
-      {
-        id: "claude-current",
-        name: "claude-current",
-        object: "model",
-        version: "1",
-        supported_endpoints: ["/v1/messages"],
-        capabilities: {
-          family: "claude",
-          limits: { max_output_tokens: 1024 },
-          object: "model_capabilities",
-          supports: {},
-          tokenizer: "cl100k_base",
-          type: "chat",
-        },
-      },
-    ],
-  }
-
-  const response = await seedProtocolDatabase().then(() =>
-    server.request("/v1/messages", {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${PROTOCOL_GATEWAY_KEY}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "claude-current",
-        max_tokens: 64,
-        messages: [{ role: "user", content: "Keep searching." }],
-        tools: [
-          {
-            type: "web_search_20250305",
-            name: "web_search",
-            max_uses: 1,
+test.each([
+  { name: "caller maximum", maxUses: 1, expectedSearches: 1 },
+  { name: "defensive maximum", maxUses: 20, expectedSearches: 8 },
+])(
+  "enforces the public native web-search $name after tool rewriting",
+  async ({ maxUses, expectedSearches }) => {
+    repeatNativeSearch = true
+    state.models = {
+      object: "list",
+      data: [
+        {
+          id: "claude-current",
+          name: "claude-current",
+          object: "model",
+          version: "1",
+          supported_endpoints: ["/v1/messages"],
+          capabilities: {
+            family: "claude",
+            limits: { max_output_tokens: 1024 },
+            object: "model_capabilities",
+            supports: {},
+            tokenizer: "cl100k_base",
+            type: "chat",
           },
-        ],
+        },
+      ],
+    }
+
+    const response = await seedProtocolDatabase().then(() =>
+      server.request("/v1/messages", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${PROTOCOL_GATEWAY_KEY}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "claude-current",
+          max_tokens: 64,
+          messages: [{ role: "user", content: "Keep searching." }],
+          tools: [
+            {
+              type: "web_search_20250305",
+              name: "web_search",
+              max_uses: maxUses,
+            },
+          ],
+        }),
       }),
-    }),
-  )
+    )
 
-  const body = await response.json()
+    const body = await response.json()
 
-  expect(searchInvocationCount).toBe(1)
-  expect(nativeAttempt).toBe(2)
-  expect(response.status).toBe(400)
-  expect(body).toMatchObject({
-    type: "error",
-    error: {
-      code: "web_search_limit_exceeded",
-      param: "web_search_limit",
-      type: "invalid_request_error",
-    },
-  })
-})
+    expect(searchInvocationCount).toBe(expectedSearches)
+    expect(nativeAttempt).toBe(expectedSearches + 1)
+    expect(response.status).toBe(400)
+    expect(body).toMatchObject({
+      type: "error",
+      error: {
+        code: "web_search_limit_exceeded",
+        param: "web_search_limit",
+        type: "invalid_request_error",
+      },
+    })
+    expect(JSON.stringify(nativeBodies)).not.toContain("max_uses")
+  },
+)

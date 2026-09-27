@@ -122,8 +122,12 @@ describe("Chat endpoint candidates", () => {
 
     expect(candidates.chat.webSearchMaxUses).toBe(2)
     expect(candidates.responses.webSearchMaxUses).toBe(2)
+    expect(candidates.messages.webSearchMaxUses).toBe(2)
     expect(JSON.stringify(candidates.chat.payload)).not.toContain("max_uses")
     expect(JSON.stringify(candidates.responses.payload)).not.toContain(
+      "max_uses",
+    )
+    expect(JSON.stringify(candidates.messages.payload)).not.toContain(
       "max_uses",
     )
   })
