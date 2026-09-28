@@ -1475,7 +1475,7 @@ test("routes ToolSearch references to native messages without a PDF", async () =
   expect(lastUpstreamUrl).toContain("/v1/messages")
 })
 
-test("continues merging sibling text into ordinary tool results", async () => {
+test("preserves sibling user instructions after translated tool results", async () => {
   const response = await seedProtocolDatabase().then(() =>
     server.request("/v1/messages", {
       method: "POST",
@@ -1521,7 +1521,11 @@ test("continues merging sibling text into ordinary tool results", async () => {
     (message) =>
       message.role === "tool" && message.tool_call_id === "toolu_parser",
   )
-  expect(toolMessage?.content).toBe("parsed\n\nUse that result.")
+  expect(toolMessage?.content).toBe("parsed")
+  expect(messages.at(-1)).toMatchObject({
+    role: "user",
+    content: "Use that result.",
+  })
 })
 
 function isToolResultBlock(
