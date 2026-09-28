@@ -104,7 +104,7 @@ test("builds detached endpoint-correlated Messages candidates", async () => {
   )
 })
 
-test("appends text after existing array tool-result content without losing metadata", async () => {
+test("preserves sibling user text and tool-result metadata in native Messages", async () => {
   const existingContent: Array<AnthropicToolResultContentBlock> = [
     {
       type: "text" as const,
@@ -143,9 +143,10 @@ test("appends text after existing array tool-result content without losing metad
     {
       type: "tool_result",
       tool_use_id: "toolu_array",
-      content: [...existingContent, { type: "text", text: "Use this result." }],
+      content: existingContent,
       cache_control: { type: "ephemeral", ttl: "5m" },
     },
+    { type: "text", text: "Use this result." },
   ])
   expect(source).toEqual(snapshot)
 })

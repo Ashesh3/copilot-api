@@ -433,6 +433,96 @@ test.each([
   },
 )
 
+test.each(["/v1/messages", "/chat/completions", "/responses"])(
+  "preserves a forked compaction instruction after image results on %s",
+  async (endpoint) => {
+    installModel({ supported_endpoints: [endpoint] })
+    const summaryInstruction =
+      "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n\n"
+      + "Your task is to create a detailed summary of the conversation so far."
+    const image = {
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: "image/png",
+        data: "iVBORw0KGgo=",
+      },
+    }
+    const response = await postMessages({
+      system: [
+        { type: "text", text: "You are an assistant checking page layouts." },
+      ],
+      messages: [
+        {
+          role: "user",
+          content: "Read these two pages, then adjust their layout.",
+        },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "read_a",
+              name: "Read",
+              input: { file_path: "a.png" },
+            },
+            {
+              type: "tool_use",
+              id: "read_b",
+              name: "Read",
+              input: { file_path: "b.png" },
+            },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "read_a", content: [image] },
+            { type: "tool_result", tool_use_id: "read_b", content: [image] },
+            { type: "text", text: summaryInstruction },
+          ],
+        },
+      ],
+      tools: [
+        { name: "Read", input_schema: { type: "object", properties: {} } },
+      ],
+    })
+
+    expect(response.status).toBe(200)
+    expect(upstreamPaths).toEqual([endpoint])
+    const wire = upstreamBodies[0]
+    if (endpoint === "/v1/messages") {
+      expect(wire).toHaveProperty("messages.2.content", [
+        { type: "tool_result", tool_use_id: "read_a", content: [image] },
+        { type: "tool_result", tool_use_id: "read_b", content: [image] },
+        { type: "text", text: summaryInstruction },
+      ])
+    } else if (endpoint === "/chat/completions") {
+      expect(wire).toHaveProperty("messages.4", {
+        role: "tool",
+        tool_call_id: "read_b",
+        content: [
+          {
+            type: "image_url",
+            image_url: { url: "data:image/png;base64,iVBORw0KGgo=" },
+          },
+        ],
+      })
+      expect(wire).toHaveProperty("messages.5", {
+        role: "user",
+        content: summaryInstruction,
+      })
+    } else {
+      expect(wire).toHaveProperty("input.5", {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: summaryInstruction }],
+      })
+    }
+    expect(upstreamHeaders[0]?.get("x-initiator")).toBe("agent")
+  },
+)
+
 test.each([
   {
     endpoint: "/v1/messages",
@@ -1257,7 +1347,7 @@ test("rebuilds native image preparation before signature recovery dispatch", asy
   expect(JSON.stringify(upstreamBodies[1])).not.toContain("native-signature")
 })
 
-test("finalizes native tool-result merging before the selected first wire", async () => {
+test("preserves native user instructions beside tool results on the first wire", async () => {
   installModel({ supported_endpoints: ["/v1/messages"] })
 
   const response = await postMessages({
@@ -1277,10 +1367,10 @@ test("finalizes native tool-result merging before the selected first wire", asyn
   })
 
   expect(response.status).toBe(200)
-  expect(upstreamBodies[0]).toHaveProperty(
-    "messages.0.content.0.content",
-    "parsed\n\nUse that result.",
-  )
+  expect(upstreamBodies[0]).toHaveProperty("messages.0.content", [
+    { type: "tool_result", tool_use_id: "toolu_review", content: "parsed" },
+    { type: "text", text: "Use that result." },
+  ])
 })
 
 test("keeps native signature recovery on the account used by the first send", async () => {

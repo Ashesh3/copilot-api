@@ -7,9 +7,7 @@ import type { ReasoningEffort } from "~/lib/model-suffix"
 import type {
   AnthropicMessagesPayload,
   AnthropicContentBlock,
-  AnthropicTextBlock,
   AnthropicToolResultBlock,
-  AnthropicUserContentBlock,
   AnthropicToolUseBlock,
 } from "~/routes/messages/anthropic-types"
 import type { ChatCompletionsPayload } from "~/services/copilot/create-chat-completions"
@@ -27,7 +25,6 @@ import {
   usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
 import {
-  isAnthropicTextBlock,
   isAnthropicToolResultBlock,
   isAnthropicToolUseBlock,
 } from "~/routes/messages/anthropic-types"
@@ -289,7 +286,6 @@ function adaptMessagesToChat(options: {
   const source = structuredClone(options.source)
   const effort =
     options.effortOverride ?? parseReasoningEffort(source.output_config?.effort)
-  mergeToolResultForCandidate(source)
   const findings: Array<TranslationFinding> = []
   rewriteSourceToolHistoryForTarget(source, findings)
   const payload = translateToOpenAI(source)
@@ -401,59 +397,6 @@ function degradeChatFileParts(
       addFinding(findings, { class: "attachment", severity: "omitted" })
       return [{ type: "text" as const, text: "[File attachment unavailable]" }]
     })
-  }
-}
-
-function mergeToolResultForCandidate(payload: AnthropicMessagesPayload): void {
-  for (const message of payload.messages) {
-    if (message.role !== "user" || !Array.isArray(message.content)) continue
-    const toolResults: Array<AnthropicToolResultBlock> = []
-    const textBlocks: Array<AnthropicTextBlock> = []
-    let supported = true
-    for (const block of message.content) {
-      if (isAnthropicToolResultBlock(block)) {
-        toolResults.push(block)
-      } else if (isAnthropicTextBlock(block)) {
-        textBlocks.push(block)
-      } else {
-        supported = false
-      }
-    }
-    if (toolResults.length === 0 || textBlocks.length === 0) continue
-    if (!supported) continue
-    if (
-      toolResults.some(
-        (block) =>
-          Array.isArray(block.content)
-          && block.content.some((content) => content.type === "tool_reference"),
-      )
-    ) {
-      continue
-    }
-    const text = textBlocks.map((block) => block.text).join("\n\n")
-    const last = toolResults.length - 1
-    const mergedToolResults: Array<AnthropicToolResultBlock> = []
-    for (const [index, block] of toolResults.entries()) {
-      if (index !== last) {
-        mergedToolResults.push(block)
-        continue
-      }
-      let mergedContent: AnthropicToolResultBlock["content"] = textBlocks
-      if (typeof block.content === "string") {
-        mergedContent = `${block.content}\n\n${text}`
-      } else if (Array.isArray(block.content)) {
-        mergedContent = [...block.content, ...textBlocks]
-      }
-      const merged: AnthropicToolResultBlock = {
-        ...block,
-        type: "tool_result",
-        tool_use_id: block.tool_use_id,
-        content: mergedContent,
-      }
-      mergedToolResults.push(merged)
-    }
-    const mergedContent: Array<AnthropicUserContentBlock> = mergedToolResults
-    message.content = mergedContent
   }
 }
 
@@ -591,7 +534,8 @@ export async function prepareMessagesCandidates(
     )
   }
   const finalizedNative = prepareNativeTools(nativePayload).payload
-  if (!options.isCompact) mergeToolResultForCandidate(finalizedNative)
+  // Sibling text is a user instruction, including cache-sharing compaction
+  // prompts. Nesting it in a tool result changes its meaning and authority.
   if (
     finalizedNative.max_tokens === undefined
     && Number.isInteger(
