@@ -62,6 +62,7 @@ import {
   parseModelSuffix,
   usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
+import { resolvePermissionReviewRedirect } from "~/lib/permission-review"
 import {
   hasNonNullStreamError,
   parseRecoverableStreamJson,
@@ -582,12 +583,15 @@ async function resolveResponsesRedirect(
     effectiveEffort: requestedEffort,
   })
 
-  const redirect = await applyModelRedirect({
-    model: request.model,
-    effort: requestedEffort,
-    verbosity: request.verbosity,
-    modelOnly: typeof request.effectiveEffort === "number",
-  })
+  const redirect = resolvePermissionReviewRedirect(
+    await applyModelRedirect({
+      model: request.model,
+      effort: requestedEffort,
+      verbosity: request.verbosity,
+      modelOnly: typeof request.effectiveEffort === "number",
+    }),
+    request.model === "codex-auto-review" ? "codex" : undefined,
+  )
   if (redirect.redirected) {
     const numericEffort = typeof request.effectiveEffort === "number"
     recordNonDefaultBehavior(c, {

@@ -65,6 +65,10 @@ import {
   usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
 import {
+  isClaudePermissionReviewRequest,
+  resolvePermissionReviewRedirect,
+} from "~/lib/permission-review"
+import {
   hasNonNullStreamError,
   parseRecoverableStreamJson,
 } from "~/lib/recoverable-stream-json"
@@ -359,10 +363,13 @@ async function handleCompletionInner(
   }
 
   // Apply silent model redirect (response will still report requestedModel)
-  const redirect = await applyModelRedirect({
-    model: normalized,
-    effort: requestedEffort,
-  })
+  const redirect = resolvePermissionReviewRedirect(
+    await applyModelRedirect({
+      model: normalized,
+      effort: requestedEffort,
+    }),
+    isClaudePermissionReviewRequest(anthropicPayload) ? "claude" : undefined,
+  )
   if (redirect.redirected) {
     recordNonDefaultBehavior(c, {
       kind: "model_redirect",
@@ -393,7 +400,7 @@ async function handleCompletionInner(
       },
     })
   }
-  // eslint-disable-next-line require-atomic-updates
+
   anthropicPayload.model = redirect.model
 
   const subagentMarker = parseSubagentMarkerFromFirstUser(anthropicPayload)

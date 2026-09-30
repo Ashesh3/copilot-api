@@ -608,6 +608,12 @@ These are compatibility implementations, not hosted identity or cloud services.
 ### Claude Code
 
 - The Anthropic Messages endpoint supports normal Claude Code model traffic.
+- Claude Desktop and CLI automatic permission reviews retain their security
+  policy, transcript, and XML classification format. When the classifier asks
+  for a model absent from the Copilot catalog, the gateway uses Copilot's
+  assisted-approval judge, `gpt-6-luna`, with low reasoning by default. The
+  compatibility path gives short classifier passes at least 1,024 output
+  tokens so reasoning can finish before the visible verdict.
 - The local OAuth facade implements opaque, scoped Claude Code credentials with
   one-use authorization codes, S256 PKCE, reusable refresh, and revocation. It
   is local gateway identity, not GitHub or Anthropic identity.
@@ -640,6 +646,11 @@ inference.
 
 ### Codex Desktop
 
+- **Approve for me** resolves the private `codex-auto-review` model to
+  `gpt-6-luna` when the private model is absent from the Copilot catalog. HTTP,
+  SSE, and WebSocket requests retain the review policy, JSON schema, tools,
+  parent metadata, and original response model name. This uses ordinary
+  Copilot inference, matching Copilot's assisted-approval transport.
 - `POST /transcribe` provides dictation through Groq speech-to-text.
 - `POST /v1/audio/transcriptions` provides the separately authenticated
   OpenAI-compatible transcription API.
@@ -654,6 +665,14 @@ inference.
   Statsig proxy middleware. The dedicated nginx template publishes only
   `/v1/initialize`, `/v1/download`, and `/v1/check`; every other path remains
   default-denied.
+
+Permission-review compatibility honors existing Model Redirects, custom
+provider mappings, account allocations, and disabled-model controls. It does
+not grant approval itself: the client interprets the model's decision and
+handles errors. If `gpt-6-luna` is unavailable, configure a Model Redirect for
+the review model to an available model that supports the client's request.
+Claude's separate server-side `dangerous_tool_use` safeguard API is outside
+this local-classifier compatibility path.
 
 From a repository checkout on Windows, generate the local ChatGPT-shaped
 compatibility identity with:
