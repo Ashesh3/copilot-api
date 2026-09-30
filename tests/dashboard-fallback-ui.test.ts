@@ -64,7 +64,15 @@ await mock.module("../ui/src/lib/usePolling", () => ({
           id: "redirect-1",
           sourceModel: "claude-gpt-5.6-sol",
           sourceEffort: "all",
-          targetModel: "gpt-6-astra",
+          targetModel: "gpt-6-sol",
+          enabled: true,
+          conflicts: [],
+        },
+        {
+          id: "redirect-unrelated",
+          sourceModel: "unrelated-redirect",
+          sourceEffort: "all",
+          targetModel: "unrelated-target",
           enabled: true,
           conflicts: [],
         },
@@ -88,16 +96,93 @@ const { default: FallbacksScreen } = await import("../ui/src/screens/Fallbacks")
 test("fallback screen shows unlimited configured chains and keeps disabled rules visible", () => {
   const markup: string = renderToStaticMarkup(createElement(FallbacksScreen))
 
-  expect(markup).toContain("Chain overview")
+  expect(markup).toContain("Configured chains")
   expect(markup).toContain("5 possible attempts")
   expect(markup).toContain("Joins the shared continuation at")
   expect(markup).toContain("Additional configured rules")
   expect(markup).toContain("claude-sonnet-5")
-  expect(markup).toContain("Model Redirects that may feed these paths")
+  expect(markup).toContain("Also redirects here:")
   expect(markup).toContain("configured fallback links only")
   expect(markup).not.toContain("Conversation affinity")
   expect(markup).not.toContain("Cache lifetime")
   expect(markup).not.toMatch(/3[- ]hop|4 model attempt/i)
+})
+
+function elementCount(markup: string, selector: string): number {
+  let count = 0
+  new HTMLRewriter().on(selector, { element: () => count++ }).transform(markup)
+  return count
+}
+
+test("the primary add action is in the header before fallback content", () => {
+  const markup: string = renderToStaticMarkup(createElement(FallbacksScreen))
+
+  expect(markup.indexOf("Add fallback")).toBeGreaterThan(-1)
+  expect(markup.indexOf("Add fallback")).toBeLessThan(
+    markup.indexOf("Enable fallbacks"),
+  )
+  expect(elementCount(markup, 'button[aria-label="Add fallback"]')).toBe(1)
+})
+
+test("both client notice controls are visible without opening a disclosure", () => {
+  const markup: string = renderToStaticMarkup(createElement(FallbacksScreen))
+
+  expect(
+    elementCount(markup, ".fallback-notices details, details.fallback-notices"),
+  ).toBe(0)
+  expect(elementCount(markup, '.fallback-notices [role="switch"]')).toBe(2)
+  expect(markup).toContain("Include diagnostic response headers")
+  expect(markup).toContain("Show native client fallback notice")
+})
+
+test("redirect aliases appear inline under only the matching chain", () => {
+  const markup: string = renderToStaticMarkup(createElement(FallbacksScreen))
+
+  expect(
+    elementCount(
+      markup,
+      '.fallback-chain[data-start-model="gpt-6-sol"] .fallback-redirect-context',
+    ),
+  ).toBe(1)
+  expect(
+    elementCount(
+      markup,
+      '.fallback-chain[data-start-model="gpt-6-astra"] .fallback-redirect-context',
+    ),
+  ).toBe(0)
+  expect(
+    elementCount(
+      markup,
+      '.fallback-redirect-context a[href="#model-redirects"]',
+    ),
+  ).toBe(1)
+  expect(markup).not.toContain("unrelated-redirect")
+})
+
+test("the train uses aligned visual connectors and can be extended at its terminal model", () => {
+  const markup: string = renderToStaticMarkup(createElement(FallbacksScreen))
+
+  expect(
+    elementCount(markup, '.fallback-connector[aria-hidden="true"]'),
+  ).toBeGreaterThan(3)
+  expect(
+    elementCount(markup, 'button[aria-label="Add fallback for gpt-5.2-codex"]'),
+  ).toBe(1)
+  expect(elementCount(markup, ".fallback-chain h3")).toBe(0)
+})
+
+test("duplicate-source rules expose distinct edit actions", () => {
+  const markup: string = renderToStaticMarkup(createElement(FallbacksScreen))
+
+  expect(
+    elementCount(markup, 'button[aria-label="Edit fallback for gpt-6-astra"]'),
+  ).toBe(1)
+  expect(
+    elementCount(
+      markup,
+      'button[aria-label="Edit disabled fallback from gpt-6-astra to claude-sonnet-5"]',
+    ),
+  ).toBe(1)
 })
 
 test("every rendered model selector uses native button semantics and pressed state", () => {
