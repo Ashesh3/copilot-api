@@ -483,22 +483,22 @@ test("a judge redirect back to the review alias fails without inference", async 
   expect(requests).toHaveLength(0)
 })
 
-test("an advertised Claude classifier model remains authoritative", async () => {
+test("the default reviewer applies even when Claude's original classifier is advertised", async () => {
   state.models?.data.push(reviewModel("claude-sonnet-5", "/v1/messages"))
   const response = await post("/v1/messages", claudeReview())
   expect(response.status).toBe(200)
   expect(requests[0]?.body).toMatchObject({
-    model: "claude-sonnet-5",
-    max_tokens: 64,
+    model: "gpt-6-luna",
+    max_output_tokens: 1024,
   })
 })
 
-test("an advertised but disabled Claude classifier does not bypass model routing", async () => {
+test("review eligibility is determined by the configured judge rather than the classifier's model", async () => {
   state.models?.data.push(reviewModel("claude-sonnet-5", "/v1/messages"))
   setModelRoutingOverridesForTest({ "claude-sonnet-5": { "0": false } })
   const response = await post("/v1/messages", claudeReview())
-  expect(response.status).toBe(503)
-  expect(requests).toHaveLength(0)
+  expect(response.status).toBe(200)
+  expect(requests[0]?.body.model).toBe("gpt-6-luna")
 })
 
 test.each(["tools", "assistant", "policy", "transcript"])(

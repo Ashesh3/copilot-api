@@ -53,7 +53,12 @@ import {
   parseModelSuffix,
   usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
-import { resolvePermissionReviewRedirect } from "~/lib/permission-review"
+import {
+  normalizePermissionReviewTarget,
+  resolvePermissionReviewRedirect,
+  shouldAllowAllCodexPermissionReviews,
+  isCodexPermissionReviewModel,
+} from "~/lib/permission-review"
 import { resolveProtectedCredential } from "~/lib/protected-credential"
 import { parseRecoverableStreamJson } from "~/lib/recoverable-stream-json"
 import { reportNonDefaultBehavior } from "~/lib/request-logger"
@@ -67,6 +72,7 @@ import { state } from "~/lib/state"
 import { withRequestSnapshot } from "~/lib/storage/request-snapshot"
 import { admitWebSocketTurn } from "~/lib/storage/websocket-admission"
 import { emitResponsesResultAsStream } from "~/routes/messages/web-search-helpers"
+import { createAllowedReviewResponse } from "~/routes/permission-review"
 import { isResponsesCompactionRequest } from "~/services/copilot/compaction-payload"
 import {
   createChatCompletions,
@@ -149,6 +155,7 @@ export interface ResponsesWebSocketData {
   nativeMessagesOptions: NativeMessagesRequestOptions
   effectiveNativeMessagesOptions: NativeMessagesRequestOptions
   responseSnapshots: Map<string, ResponsesPayload>
+  permissionReviewModels?: Map<string, string>
   fallbackHeaders?: Headers
   fallbackCredentialScope?: string
 }
@@ -329,12 +336,29 @@ async function handleResponsesWebSocketMessage(
   })
 
   try {
-    const { affinity, payload } = await prepareResponseCreate(
+    const { affinity, payload, reviewModel } = await prepareResponseCreate(
       ws.data,
       parsedPayload,
     )
     await runWithWebSocketRequestContext(affinity, attribution, turn, () =>
       withAccountLeaseScope(turn.abortController.signal, async () => {
+        const execute = async () => {
+          await handleResponseCreate(ws, {
+            initiator,
+            payload: structuredClone(payload),
+            requestedModel: requestedModel ?? reviewModel,
+            nativeMessagesOptions: turnNativeMessagesOptions,
+            turn,
+          })
+        }
+        if (
+          shouldAllowAllCodexPermissionReviews(
+            requestedModel ?? reviewModel ?? payload.model,
+          )
+        ) {
+          await execute()
+          return
+        }
         await runWithModelFallback(
           {
             headers: mergeFallbackIdentityHeaders(
@@ -347,15 +371,7 @@ async function handleResponsesWebSocketMessage(
             canRetry: () =>
               !turn.outputStarted && turn.terminal.state === "open",
           },
-          async () => {
-            await handleResponseCreate(ws, {
-              initiator,
-              payload: structuredClone(payload),
-              requestedModel,
-              nativeMessagesOptions: turnNativeMessagesOptions,
-              turn,
-            })
-          },
+          execute,
         )
       }),
     )
@@ -435,10 +451,41 @@ function closeResponsesWebSocket(ws: { data: ResponsesWebSocketData }) {
     })
   }
   ws.data.responseSnapshots.clear()
+  ws.data.permissionReviewModels?.clear()
   ws.data.effectiveNativeMessagesOptions = {}
   ws.data.fallbackHeaders = undefined
   ws.data.authenticationRequest = undefined
   consola.debug("[responses-ws] WebSocket closed")
+}
+
+async function normalizeContinuationReview(
+  data: ResponsesWebSocketData,
+  rawPayload: ResponsesPayload,
+): Promise<{ payload: ResponsesPayload; reviewModel?: string }> {
+  const previousId = rawPayload.previous_response_id
+  if (typeof previousId !== "string") return { payload: rawPayload }
+  const snapshot = data.responseSnapshots.get(previousId)
+  const previousReview = data.permissionReviewModels?.get(previousId)
+  const incomingModel: unknown = rawPayload.model
+  if (
+    previousReview
+    && snapshot
+    && (incomingModel === undefined
+      || isCodexPermissionReviewModel(incomingModel))
+  ) {
+    return {
+      payload: { ...rawPayload, model: snapshot.model },
+      reviewModel:
+        typeof incomingModel === "string" ? incomingModel : previousReview,
+    }
+  }
+  if (typeof incomingModel !== "string") return { payload: rawPayload }
+  return {
+    payload: {
+      ...rawPayload,
+      model: await normalizeRequestedWebSocketModel(rawPayload),
+    },
+  }
 }
 
 async function prepareResponseCreate(
@@ -447,18 +494,10 @@ async function prepareResponseCreate(
 ): Promise<{
   affinity: RoutingAffinity | undefined
   payload: ResponsesPayload
+  reviewModel?: string
 }> {
-  const previousResponseId = rawPayload.previous_response_id
-  const payloadForResolution =
-    (
-      typeof previousResponseId === "string"
-      && typeof rawPayload.model === "string"
-    ) ?
-      {
-        ...rawPayload,
-        model: await normalizeRequestedWebSocketModel(rawPayload),
-      }
-    : rawPayload
+  const { payload: payloadForResolution, reviewModel } =
+    await normalizeContinuationReview(data, rawPayload)
   const resolution = resolveResponsesContinuation(
     data.responseSnapshots,
     payloadForResolution,
@@ -485,13 +524,20 @@ async function prepareResponseCreate(
       : "rehydrated",
   })
   const payload = resolution.payload
+  // Retain the review identity separately from the resolved upstream model, so
+  // a settings change takes effect on the next admitted turn, including warmup.
+  if (reviewModel) payload.model = reviewModel
   const forkAffinity = resolveResponsesForkRoutingAffinity(
     payload.client_metadata,
     data.affinity,
   )
   if (forkAffinity) data.affinity = forkAffinity
   const frameAffinity = resolveResponsesRoutingAffinity(payload.client_metadata)
-  return { affinity: forkAffinity ?? data.affinity ?? frameAffinity, payload }
+  return {
+    affinity: forkAffinity ?? data.affinity ?? frameAffinity,
+    payload,
+    reviewModel,
+  }
 }
 
 function storeResponseSnapshot(
@@ -504,7 +550,7 @@ function storeResponseSnapshot(
 
 // Routing preparation and dispatch remain together to preserve the per-turn
 // request context through native and translated writers.
-// eslint-disable-next-line max-lines-per-function
+// eslint-disable-next-line max-lines-per-function, complexity -- Routing, bypass and model fallback share one admitted WebSocket turn.
 async function handleResponseCreate(
   ws: ResponsesWebSocketState,
   options: {
@@ -524,6 +570,27 @@ async function handleResponseCreate(
   } = options
   turn.requestedModel = requestedModel
   turn.model = requestedModel
+
+  if (shouldAllowAllCodexPermissionReviews(requestedModel ?? payload.model)) {
+    throwIfWebSocketTurnAborted(turn)
+    turn.continuationModel = payload.model
+    reportNonDefaultBehavior({
+      kind: "permission_review_allow_all",
+      message:
+        "Permission review allowed by the dashboard allow-all setting; no model was called.",
+      data: { transport: "websocket" },
+    })
+    const result = createAllowedReviewResponse(payload)
+    await emitResponsesResultAsStream(
+      {
+        writeSSE: async (frame) => {
+          await emitTurnFrame(ws, turn, payload, frame.data, frame.event)
+        },
+      },
+      result,
+    )
+    return
+  }
 
   const routing = await waitForWebSocketTurn(
     applyResponsesWebSocketRouting(payload),
@@ -564,7 +631,10 @@ async function handleResponseCreate(
   throwIfWebSocketTurnAborted(turn)
 
   const customReference =
-    isModelFallbackActive() ?
+    (
+      isModelFallbackActive()
+      || isCodexPermissionReviewModel(requestedModel ?? payload.model)
+    ) ?
       resolveCustomProviderModel({
         model: payload.model,
         kind: "chat",
@@ -947,6 +1017,7 @@ async function emitTurnFrame(
         : payload,
         processed,
       )
+      rememberPermissionReviewModel(ws.data, turn, payload, parsed)
     }
     if (responseStatus === "failed") {
       return await turn.terminal.succeed({
@@ -983,6 +1054,21 @@ async function emitTurnFrame(
     })
   }
   return true
+}
+
+// eslint-disable-next-line max-params -- The snapshot store, current turn, request and terminal frame have distinct roles.
+function rememberPermissionReviewModel(
+  data: ResponsesWebSocketData,
+  turn: ResponsesWebSocketTurn,
+  payload: ResponsesPayload,
+  frame: { response?: { id?: unknown } },
+): void {
+  const model = turn.requestedModel ?? payload.model
+  const responseId = frame.response?.id
+  if (typeof responseId !== "string" || !isCodexPermissionReviewModel(model))
+    return
+  data.permissionReviewModels ??= new Map<string, string>()
+  data.permissionReviewModels.set(responseId, model)
 }
 
 function addWebSocketCompletedOutputText(
@@ -1064,7 +1150,10 @@ async function applyResponsesWebSocketRouting(
   )
 
   // eslint-disable-next-line require-atomic-updates
-  payload.model = normalizeModelName(redirect.model)
+  payload.model =
+    isCodexPermissionReviewModel(baseModel) ?
+      normalizePermissionReviewTarget(redirect.model)
+    : normalizeModelName(redirect.model)
   const redirectedEffort = normalizeReasoningEffortForModel(
     payload.model,
     redirect.effort,
@@ -1089,6 +1178,7 @@ async function applyResponsesWebSocketRouting(
 async function normalizeRequestedWebSocketModel(
   payload: ResponsesPayload,
 ): Promise<string> {
+  if (shouldAllowAllCodexPermissionReviews(payload.model)) return payload.model
   const { baseModel, reasoningEffort: suffixEffort } = parseModelSuffix(
     payload.model,
   )
@@ -1106,7 +1196,10 @@ async function normalizeRequestedWebSocketModel(
     normalizedModel === "codex-auto-review" ? "codex" : undefined,
   )
   const normalizedPayload = structuredClone(payload)
-  normalizedPayload.model = normalizeModelName(redirect.model)
+  normalizedPayload.model =
+    isCodexPermissionReviewModel(baseModel) ?
+      normalizePermissionReviewTarget(redirect.model)
+    : normalizeModelName(redirect.model)
   applyResponsesServiceTierRouting(undefined, normalizedPayload, {
     allowCustomProvider: false,
   })

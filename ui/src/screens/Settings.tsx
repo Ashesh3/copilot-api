@@ -22,6 +22,7 @@ import {
 } from "../components/common"
 import { DatabaseExport } from "../components/DatabaseExport"
 import { Page } from "../components/Page"
+import { PermissionReviewSettings } from "../components/PermissionReviewSettings"
 import { StoredCredentials } from "../components/StoredCredentials"
 import { PlusIcon, Trash2Icon } from "../icons"
 import { ApiError, del, get, patch, post, put } from "../lib/api"
@@ -461,6 +462,11 @@ export default function SettingsScreen() {
               <Heading level={2} id="settings-access-heading">
                 Access controls
               </Heading>
+              <PermissionReviewSettings
+                key={`${data.settings.permissionReviewModel}:${data.settings.permissionReviewAllowAll}`}
+                settings={data.settings}
+                onSaved={reload}
+              />
               <Card className="settings-card">
                 <VStack gap={3}>
                   <HStack gap={2} vAlign="center" wrap="wrap">

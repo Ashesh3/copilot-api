@@ -3,10 +3,13 @@ import { afterEach, expect, test } from "bun:test"
 
 import {
   getConfig,
+  getPermissionReviewSettings,
   mergeConfigWithDefaults,
   setConfigForTest,
+  setPermissionReviewSettings,
   updateConfig,
   writeConfig,
+  type AppConfig,
 } from "~/lib/config"
 import { StorageSchemaError } from "~/lib/storage/errors"
 import {
@@ -107,6 +110,57 @@ test("invalid app writes reject but supported extension fields survive", async (
   ).rejects.toBeInstanceOf(StorageSchemaError)
   expect(getConfig()).toEqual(extended)
 })
+
+test("failed permission review save preserves both fields and other configuration", async () => {
+  const db = await fixture()
+  await initializeStorageRuntime(db)
+  await writeConfig({
+    smallModel: "keep",
+    permissionReviewModel: "previous",
+    permissionReviewAllowAll: false,
+  })
+  db.failCommits()
+  await expect(
+    setPermissionReviewSettings({ model: "next", allowAll: true }),
+  ).rejects.toThrow()
+  expect(getPermissionReviewSettings()).toEqual({
+    model: "previous",
+    allowAll: false,
+  })
+  expect(getConfig().smallModel).toBe("keep")
+})
+
+test("permission review trims stored custom model IDs and defaults blank legacy values", () => {
+  setConfigForTest({ permissionReviewModel: "  custom-reviewer  " })
+  expect(getPermissionReviewSettings()).toEqual({
+    model: "custom-reviewer",
+    allowAll: false,
+  })
+  setConfigForTest({ permissionReviewModel: "   " })
+  expect(getPermissionReviewSettings()).toEqual({
+    model: "gpt-6-luna",
+    allowAll: false,
+  })
+})
+
+test.each([
+  { permissionReviewModel: 1 },
+  { permissionReviewModel: "reviewer\n" },
+  { permissionReviewModel: "x".repeat(257) },
+  { permissionReviewAllowAll: "true" },
+  { permissionReviewAllowAll: 1 },
+])(
+  "malformed permission review config %p cannot enable bypass",
+  async (invalid) => {
+    const db = await fixture()
+    await initializeStorageRuntime(db)
+    await writeConfig({ smallModel: "before" })
+    await expect(
+      writeConfig(invalid as unknown as AppConfig),
+    ).rejects.toBeInstanceOf(StorageSchemaError)
+    expect(getConfig()).toEqual({ smallModel: "before" })
+  },
+)
 
 test("explicit test config remains isolated and clearing it restores storage authority", async () => {
   setConfigForTest({ smallModel: "test-only" })

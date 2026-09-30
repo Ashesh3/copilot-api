@@ -76,6 +76,7 @@ import {
 } from "./fallbacks"
 import { handleReplayLlmDebugLog } from "./llm-debug-replay"
 import { DASHBOARD_HTML } from "./page-generated"
+import { handleSetPermissionReview } from "./permission-review-settings"
 import { handleResetUsage } from "./usage-reset"
 
 export const dashboardRoutes = new Hono()
@@ -234,6 +235,10 @@ dashboardRoutes.delete("/api/llm-debug", handleClearLlmDebugLogs)
 
 // Settings
 dashboardRoutes.get("/api/settings", handleGetSettings)
+dashboardRoutes.post(
+  "/api/settings/permission-review",
+  handleSetPermissionReview,
+)
 dashboardRoutes.post("/api/database/export", handleExportDatabase)
 dashboardRoutes.post(
   "/api/settings/codex-cleanup-model",

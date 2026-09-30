@@ -513,7 +513,12 @@ export interface ReplayResult {
   usage: unknown
 }
 
-export interface SettingsData {
+export interface PermissionReviewSettingsData {
+  permissionReviewModel: string
+  permissionReviewAllowAll: boolean
+}
+
+export interface SettingsData extends PermissionReviewSettingsData {
   version: string
   port: string
   host: string

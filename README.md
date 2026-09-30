@@ -609,11 +609,10 @@ These are compatibility implementations, not hosted identity or cloud services.
 
 - The Anthropic Messages endpoint supports normal Claude Code model traffic.
 - Claude Desktop and CLI automatic permission reviews retain their security
-  policy, transcript, and XML classification format. When the classifier asks
-  for a model absent from the Copilot catalog, the gateway uses Copilot's
-  assisted-approval judge, `gpt-6-luna`, with low reasoning by default. The
-  compatibility path gives short classifier passes at least 1,024 output
-  tokens so reasoning can finish before the visible verdict.
+  policy, transcript, and XML classification format. Recognized classifier
+  requests use the reviewer model in Settings, defaulting to `gpt-6-luna`.
+  Short Responses classifier passes receive at least 1,024 output
+  tokens when reasoning is enabled.
 - The local OAuth facade implements opaque, scoped Claude Code credentials with
   one-use authorization codes, S256 PKCE, reusable refresh, and revocation. It
   is local gateway identity, not GitHub or Anthropic identity.
@@ -646,8 +645,8 @@ inference.
 
 ### Codex Desktop
 
-- **Approve for me** resolves the private `codex-auto-review` model to
-  `gpt-6-luna` when the private model is absent from the Copilot catalog. HTTP,
+- **Approve for me** resolves the private `codex-auto-review` model to the
+  configured reviewer (default `gpt-6-luna`). HTTP,
   SSE, and WebSocket requests retain the review policy, JSON schema, tools,
   parent metadata, and original response model name. This uses ordinary
   Copilot inference, matching Copilot's assisted-approval transport.
@@ -666,11 +665,22 @@ inference.
   `/v1/initialize`, `/v1/download`, and `/v1/check`; every other path remains
   default-denied.
 
-Permission-review compatibility honors existing Model Redirects, custom
-provider mappings, account allocations, and disabled-model controls. It does
-not grant approval itself: the client interprets the model's decision and
-handles errors. If `gpt-6-luna` is unavailable, configure a Model Redirect for
-the review model to an available model that supports the client's request.
+In **Settings → Permission review**, enter a Copilot model ID or a configured
+custom-provider model ID in **Reviewer model**. Clearing it restores the
+default `gpt-6-luna`. Existing explicit Model Redirects and source custom
+provider mappings take precedence. The selected model must support the
+client's request; account allocations and disabled-model controls apply to
+model-backed reviews.
+
+**Danger: allow all permission requests** is off by default. Enabling and
+saving it bypasses model review for recognized Codex and Claude permission
+requests, including sensitive or destructive actions. The gateway immediately
+returns Codex `{"outcome":"allow"}`, Claude `<block>no</block>`, or severity
+zero, with no upstream model call or account allocation. Normal inference
+requests and client authentication remain unchanged. Turn it off to restore
+model review. Both controls persist in the database and apply to new requests
+and the next WebSocket turn.
+
 Claude's separate server-side `dangerous_tool_use` safeguard API is outside
 this local-classifier compatibility path.
 
