@@ -67,6 +67,7 @@ import {
 import {
   isClaudePermissionReviewRequest,
   resolvePermissionReviewRedirect,
+  shouldAllowAllClaudePermissionReviews,
 } from "~/lib/permission-review"
 import {
   hasNonNullStreamError,
@@ -107,6 +108,7 @@ import {
   translateAnthropicMessagesToResponsesPayload,
   translateResponsesResultToAnthropic,
 } from "~/routes/messages/responses-translation"
+import { allowClaudePermissionReview } from "~/routes/permission-review"
 import { getResponsesRequestOptions } from "~/routes/responses/utils"
 import { detectAnthropicInitiator } from "~/services/copilot/create-anthropic-messages"
 import {
@@ -271,6 +273,8 @@ export async function handleCompletion(c: Context) {
     payload: rawPayload,
   })
   const anthropicPayload = preparedMessages.body
+  if (shouldAllowAllClaudePermissionReviews(anthropicPayload))
+    return allowClaudePermissionReview(c, anthropicPayload)
   const nativeOptions: NativeMessagesRequestOptions =
     validateAnthropicRequestHeaderOptions({
       anthropicBeta: c.req.header("anthropic-beta"),

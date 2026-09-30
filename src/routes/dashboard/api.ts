@@ -11,6 +11,7 @@ import {
 import { revokeEnvironmentCapabilities } from "~/lib/bridge-capabilities"
 import {
   getCodexCleanupModel,
+  getPermissionReviewSettings,
   getSmallModel,
   setCodexCleanupModel,
 } from "~/lib/config"
@@ -1115,6 +1116,7 @@ export async function handleGetSettings(c: Context) {
       .sort() ?? []
 
   const adminAuthStatus = await getAdminAuthStatus()
+  const permissionReview = getPermissionReviewSettings()
 
   return c.json({
     version: packageJson.version,
@@ -1135,6 +1137,8 @@ export async function handleGetSettings(c: Context) {
     passwordManagedExternally: adminAuthStatus.passwordManagedExternally,
     codexCleanupModel: getCodexCleanupModel(),
     codexCleanupModelDefault: getSmallModel(),
+    permissionReviewModel: permissionReview.model,
+    permissionReviewAllowAll: permissionReview.allowAll,
     availableModels,
   })
 }

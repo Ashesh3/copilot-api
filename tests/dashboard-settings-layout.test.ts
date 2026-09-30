@@ -24,6 +24,8 @@ const settingsBundle = {
     passwordManagedExternally: true,
     codexCleanupModel: null,
     codexCleanupModelDefault: undefined,
+    permissionReviewModel: "gpt-6-luna",
+    permissionReviewAllowAll: false,
     availableModels: [],
   },
   allowlist: [
@@ -68,10 +70,46 @@ await mock.module("../ui/src/lib/toast", () => ({
 }))
 
 const { default: SettingsScreen } = await import("../ui/src/screens/Settings")
+const { PermissionReviewSettings } = await import(
+  "../ui/src/components/PermissionReviewSettings"
+)
 
 function renderSettings(): string {
   return renderToStaticMarkup(createElement(SettingsScreen))
 }
+
+test("permission review has a free-text model and an unchecked danger option", () => {
+  const markup = renderSettings()
+  const review = markup.slice(markup.indexOf("Permission review"))
+  expect(markup).toContain("Permission review")
+  expect(review).toContain("Reviewer model")
+  expect(review).toContain('value="gpt-6-luna"')
+  expect(review).toContain('type="checkbox"')
+  const checkbox = review.match(/<input[^>]+type="checkbox"[^>]*>/)?.[0]
+  expect(checkbox).not.toContain('checked=""')
+  expect(review).toContain("Danger: allow all permission requests")
+  expect(review).toContain("sensitive or destructive")
+  expect(review).toContain("Save permission review")
+})
+
+test("permission review displays a saved custom model and enabled bypass warning", () => {
+  const markup: string = renderToStaticMarkup(
+    createElement(PermissionReviewSettings, {
+      settings: {
+        permissionReviewModel: "provider/custom-reviewer",
+        permissionReviewAllowAll: true,
+      },
+      onSaved: () => {},
+    }),
+  )
+  expect(markup).toContain('value="provider/custom-reviewer"')
+  expect(markup.match(/<input[^>]+type="checkbox"[^>]*>/)?.[0]).toContain(
+    'checked=""',
+  )
+  expect(markup).toContain('role="alert"')
+  expect(markup).toContain("reviewer model is bypassed")
+  expect(markup).not.toContain('role="combobox"')
+})
 
 test("settings groups credentials, access controls and administration after a compact server summary", () => {
   const markup = renderSettings()

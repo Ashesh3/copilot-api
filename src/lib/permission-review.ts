@@ -2,19 +2,20 @@ import type { ModelRedirectResult } from "~/lib/model-redirect"
 import type { AnthropicMessagesPayload } from "~/routes/messages/anthropic-types"
 import type { ResponsesPayload } from "~/services/copilot/create-responses"
 
-import { getConfigForTest } from "~/lib/config"
+import { getConfigForTest, getPermissionReviewSettings } from "~/lib/config"
 import { resolveCustomProviderModel } from "~/lib/custom-providers"
 import { LocalHTTPError } from "~/lib/error"
 import { getLoadedModelRedirects } from "~/lib/model-redirect"
 import { resolveModelRedirectRules } from "~/lib/model-redirect-resolver"
+import { normalizeModelName } from "~/lib/model-resolver"
 import { getModelRoutingSafety } from "~/lib/model-routing-safety"
+import { parseModelSuffix } from "~/lib/model-suffix"
 import { state } from "~/lib/state"
 import { peekStorageRuntime } from "~/lib/storage/runtime"
 import { tokenPool } from "~/lib/token-pool"
 
 // Copilot's assisted-approval runtime uses ordinary inference with this judge.
 // Keep the calling client's policy and verdict format, not Copilot's ALLOW/DENY prompt.
-const PERMISSION_REVIEW_MODEL = "gpt-6-luna"
 const PERMISSION_REVIEW_RULE = "builtin:permission-review"
 const PERMISSION_REVIEW_MIN_OUTPUT_TOKENS = 1024
 
@@ -85,44 +86,65 @@ function isAdvertisedModel(model: string): boolean {
   )
 }
 
-/** Resolve only recognized, unavailable client review models, before allocation. */
+function isCustomReviewModel(model: string): boolean {
+  return Boolean(
+    (peekStorageRuntime() || getConfigForTest())
+      && resolveCustomProviderModel({ model, kind: "chat" }),
+  )
+}
+
+function requireReviewModel(model: string, kind: "codex" | "claude"): void {
+  if (isAdvertisedModel(model) || isCustomReviewModel(model)) return
+  const body = {
+    ...(kind === "claude" ? { type: "error" } : {}),
+    error: {
+      code: "permission_review_model_unavailable",
+      type: "api_error",
+      message: `The permission-review model (${model}) is unavailable. Select an available model in Settings, configure a custom provider, or add a Model Redirect.`,
+    },
+  }
+  throw new LocalHTTPError(
+    body.error.message,
+    Response.json(body, { status: 503 }),
+    body,
+  )
+}
+
+function getReviewerRouteRequest(redirect: ModelRedirectResult) {
+  const parsed = parseModelSuffix(getPermissionReviewSettings().model)
+  return {
+    model:
+      isCustomReviewModel(parsed.baseModel) ?
+        parsed.baseModel
+      : normalizeModelName(parsed.baseModel),
+    effort: parsed.reasoningEffort ?? redirect.effort ?? "low",
+    verbosity: redirect.verbosity,
+  } as const
+}
+
+export function normalizePermissionReviewTarget(model: string): string {
+  return isCustomReviewModel(model) ? model : normalizeModelName(model)
+}
+
+/** Resolve recognized review requests to the configured judge before allocation. */
 export function resolvePermissionReviewRedirect(
   redirect: ModelRedirectResult,
   kind: "codex" | "claude" | undefined,
 ): ModelRedirectResult {
-  if (!kind || redirect.redirected || isAdvertisedModel(redirect.model))
-    return redirect
+  if (!kind || redirect.redirected) return redirect
   if (!getModelRoutingSafety().safe) return redirect
-  if (
-    (peekStorageRuntime() || getConfigForTest())
-    && resolveCustomProviderModel({ model: redirect.model, kind: "chat" })
-  )
-    return redirect
-  const effort = redirect.effort ?? "low"
+  if (isCustomReviewModel(redirect.model)) return redirect
+  const reviewer = getReviewerRouteRequest(redirect)
+  const { model: reviewerModel, effort } = reviewer
   // The caller already loaded and applied the source's configured rules. Apply
   // the judge's rules too, so HTTP and rehydrated WebSocket turns resolve alike.
-  const target = resolveModelRedirectRules(getLoadedModelRedirects(), {
-    model: PERMISSION_REVIEW_MODEL,
-    effort,
-    verbosity: redirect.verbosity,
-  })
-  if (target.loop || target.model === redirect.model) return redirect
-  if (!target.redirected && !isAdvertisedModel(PERMISSION_REVIEW_MODEL)) {
-    const body = {
-      ...(kind === "claude" ? { type: "error" } : {}),
-      error: {
-        code: "permission_review_model_unavailable",
-        type: "api_error",
-        message:
-          "The Copilot permission-review model (gpt-6-luna) is unavailable. Configure a Model Redirect for this review request to an available model.",
-      },
-    }
-    throw new LocalHTTPError(
-      body.error.message,
-      Response.json(body, { status: 503 }),
-      body,
-    )
-  }
+  const target = resolveModelRedirectRules(getLoadedModelRedirects(), reviewer)
+  if (
+    target.loop
+    || (target.model === redirect.model && !isAdvertisedModel(target.model))
+  )
+    return redirect
+  if (!target.redirected) requireReviewModel(reviewerModel, kind)
   return {
     ...redirect,
     model: target.model,
@@ -140,7 +162,7 @@ export function resolvePermissionReviewRedirect(
         sourceModel: redirect.model,
         sourceEffort: redirect.effort,
         sourceVerbosity: redirect.verbosity,
-        targetModel: PERMISSION_REVIEW_MODEL,
+        targetModel: reviewerModel,
         targetEffort: effort,
         targetVerbosity: redirect.verbosity,
       },
@@ -153,11 +175,7 @@ export function preparePermissionReviewResponsesCandidate(
   source: AnthropicMessagesPayload,
   payload: ResponsesPayload,
 ): void {
-  if (
-    source.model !== PERMISSION_REVIEW_MODEL
-    || !isClaudePermissionReviewRequest(source)
-  )
-    return
+  if (!isClaudePermissionReviewRequest(source)) return
   // Native Copilot's Responses judge omits sampling controls. The normal
   // Messages adapter otherwise injects temperature=1 when enabling reasoning.
   delete payload.temperature
@@ -170,4 +188,38 @@ export function preparePermissionReviewResponsesCandidate(
     && payload.max_output_tokens < PERMISSION_REVIEW_MIN_OUTPUT_TOKENS
   )
     payload.max_output_tokens = PERMISSION_REVIEW_MIN_OUTPUT_TOKENS
+}
+
+export function isCodexPermissionReviewModel(model: unknown): model is string {
+  return (
+    typeof model === "string"
+    && parseModelSuffix(model).baseModel === "codex-auto-review"
+  )
+}
+
+export function shouldAllowAllCodexPermissionReviews(model: string): boolean {
+  return (
+    isCodexPermissionReviewModel(model)
+    && getPermissionReviewSettings().allowAll
+  )
+}
+
+export function shouldAllowAllClaudePermissionReviews(
+  payload: AnthropicMessagesPayload,
+): boolean {
+  return (
+    isClaudePermissionReviewRequest(payload)
+    && getPermissionReviewSettings().allowAll
+  )
+}
+
+export function claudePermissionReviewAllowText(
+  payload: AnthropicMessagesPayload,
+): string {
+  // The format comes from the classifier policy, never from quoted transcript.
+  const system = textContent(payload.system)
+  const outputFormat = system.slice(system.lastIndexOf("## Output Format"))
+  return outputFormat.includes("<severity>") ?
+      "<severity>0</severity>"
+    : "<block>no</block>"
 }

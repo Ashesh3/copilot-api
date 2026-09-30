@@ -23,6 +23,8 @@ const settings: SettingsData = {
   passwordManagedExternally: false,
   codexCleanupModel: null,
   codexCleanupModelDefault: undefined,
+  permissionReviewModel: "gpt-6-luna",
+  permissionReviewAllowAll: false,
   availableModels: [],
 }
 

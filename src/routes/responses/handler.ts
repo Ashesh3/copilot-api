@@ -62,7 +62,11 @@ import {
   parseModelSuffix,
   usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
-import { resolvePermissionReviewRedirect } from "~/lib/permission-review"
+import {
+  normalizePermissionReviewTarget,
+  resolvePermissionReviewRedirect,
+  shouldAllowAllCodexPermissionReviews,
+} from "~/lib/permission-review"
 import {
   hasNonNullStreamError,
   parseRecoverableStreamJson,
@@ -89,6 +93,7 @@ import {
 import { state } from "~/lib/state"
 import { tokenPool } from "~/lib/token-pool"
 import { emitResponsesToolSpans } from "~/lib/tool-spans"
+import { allowResponsesPermissionReview } from "~/routes/permission-review"
 import { isResponsesCompactionRequest } from "~/services/copilot/compaction-payload"
 import {
   createChatCompletionsWithProcessedPayload,
@@ -789,6 +794,8 @@ export const handleResponses = async (c: Context) => {
   const payload = await parseResponsesRequestBody(c)
   const preparedSource = prepareResponsesRequest(payload)
   const sourcePayload = preparedSource.source
+  if (shouldAllowAllCodexPermissionReviews(sourcePayload.model))
+    return allowResponsesPermissionReview(c, sourcePayload)
   const nativeOptions: NativeMessagesRequestOptions = {
     anthropicBeta: c.req.header("anthropic-beta"),
     anthropicVersion: c.req.header("anthropic-version"),
@@ -895,7 +902,10 @@ const handleResponsesInner = async (
     verbosity: getResponsesVerbosity(payload),
   })
   // eslint-disable-next-line require-atomic-updates
-  payload.model = normalizeModelName(redirect.model)
+  payload.model =
+    baseModel === "codex-auto-review" ?
+      normalizePermissionReviewTarget(redirect.model)
+    : normalizeModelName(redirect.model)
   const redirectedEffort =
     typeof effectiveEffort === "number" ? undefined : (
       normalizeReasoningEffortForModel(payload.model, redirect.effort)

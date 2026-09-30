@@ -26,6 +26,18 @@ export interface AppConfig {
   groqApiKey?: string
   groqModel?: string
   codexCleanupModel?: string
+  permissionReviewModel?: string
+  permissionReviewAllowAll?: boolean
+}
+
+export const DEFAULT_PERMISSION_REVIEW_MODEL = "gpt-6-luna"
+
+export function isValidPermissionReviewModel(value: unknown): value is string {
+  return (
+    typeof value === "string"
+    && value.length <= 256
+    && !/[\p{Cc}\p{Zl}\p{Zp}]/u.test(value)
+  )
 }
 
 export interface CustomProviderModelConfig {
@@ -159,6 +171,11 @@ const appConfigSchema = z.looseObject({
   groqApiKey: z.string().optional(),
   groqModel: z.string().optional(),
   codexCleanupModel: z.string().optional(),
+  permissionReviewModel: z
+    .string()
+    .refine(isValidPermissionReviewModel)
+    .optional(),
+  permissionReviewAllowAll: z.boolean().optional(),
 })
 
 export function validateAppConfigJson(value: unknown): JsonValue {
@@ -288,4 +305,40 @@ export function setCodexCleanupModel(model: string | null): Promise<AppConfig> {
     }
     return { ...config, codexCleanupModel: model.trim() }
   })
+}
+
+export function getPermissionReviewSettings(): {
+  model: string
+  allowAll: boolean
+} {
+  return permissionReviewSettingsFromConfig(getConfig())
+}
+
+function permissionReviewSettingsFromConfig(config: AppConfig) {
+  return {
+    model:
+      config.permissionReviewModel?.trim() || DEFAULT_PERMISSION_REVIEW_MODEL,
+    allowAll: config.permissionReviewAllowAll === true,
+  }
+}
+
+export async function setPermissionReviewSettings(settings: {
+  model: string | null
+  allowAll: boolean
+}): Promise<{ model: string; allowAll: boolean }> {
+  if (
+    (settings.model !== null && !isValidPermissionReviewModel(settings.model))
+    || typeof settings.allowAll !== "boolean"
+  )
+    throw new StorageSchemaError("Invalid permission review settings")
+  const committed = await updateConfig((config) => {
+    const { permissionReviewModel: _omit, ...rest } = config
+    const model = settings.model?.trim()
+    return {
+      ...rest,
+      ...(model ? { permissionReviewModel: model } : {}),
+      permissionReviewAllowAll: settings.allowAll,
+    }
+  })
+  return permissionReviewSettingsFromConfig(committed)
 }
