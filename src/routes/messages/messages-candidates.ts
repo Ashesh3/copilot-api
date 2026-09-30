@@ -24,6 +24,7 @@ import {
   parseReasoningEffort,
   usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
+import { preparePermissionReviewResponsesCandidate } from "~/lib/permission-review"
 import {
   isAnthropicToolResultBlock,
   isAnthropicToolUseBlock,
@@ -450,6 +451,7 @@ function adaptMessagesToResponses(options: {
       )
     }
   }
+  preparePermissionReviewResponsesCandidate(source, payload)
   const usesWebSearch = payload.tools?.some(
     (tool) =>
       (tool as { name?: string; type?: string }).name === "web_search"

@@ -53,6 +53,7 @@ import {
   parseModelSuffix,
   usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
+import { resolvePermissionReviewRedirect } from "~/lib/permission-review"
 import { resolveProtectedCredential } from "~/lib/protected-credential"
 import { parseRecoverableStreamJson } from "~/lib/recoverable-stream-json"
 import { reportNonDefaultBehavior } from "~/lib/request-logger"
@@ -1096,11 +1097,14 @@ async function normalizeRequestedWebSocketModel(
     structuredClone(payload),
     suffixEffort,
   )
-  const redirect = await applyModelRedirect({
-    model: normalizedModel,
-    effort: getRedirectReasoningEffort(effectiveEffort),
-    verbosity: getResponsesVerbosity(payload),
-  })
+  const redirect = resolvePermissionReviewRedirect(
+    await applyModelRedirect({
+      model: normalizedModel,
+      effort: getRedirectReasoningEffort(effectiveEffort),
+      verbosity: getResponsesVerbosity(payload),
+    }),
+    normalizedModel === "codex-auto-review" ? "codex" : undefined,
+  )
   const normalizedPayload = structuredClone(payload)
   normalizedPayload.model = normalizeModelName(redirect.model)
   applyResponsesServiceTierRouting(undefined, normalizedPayload, {
@@ -1127,11 +1131,14 @@ async function resolveResponsesWebSocketRedirect(
     effectiveEffort: requestedEffort,
   })
 
-  const redirect = await applyModelRedirect({
-    model,
-    effort: requestedEffort,
-    verbosity,
-  })
+  const redirect = resolvePermissionReviewRedirect(
+    await applyModelRedirect({
+      model,
+      effort: requestedEffort,
+      verbosity,
+    }),
+    model === "codex-auto-review" ? "codex" : undefined,
+  )
   if (redirect.redirected) {
     reportNonDefaultBehavior({
       kind: "model_redirect",
