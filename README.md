@@ -403,12 +403,13 @@ The dashboard is the recommended interface for these controls:
 
 - **Redirects** map an exact source model/effort to a target model/effort. Rules
   are ordered and can chain only through later rules.
-- **Fallbacks** switch models only after upstream HTTP 422, with up to three
-  hops. Each target also follows Model Redirects, including effort and verbosity
-  overrides. A cycle in redirects, fallbacks, or their combination pauses both
-  features until the conflicting rules are fixed; the dashboard shows the loop.
-  Conversation routes and old-thinking fingerprints
-  stay in memory; optional client notices are configurable. See the
+- **Fallbacks** switch models only after upstream HTTP 422 and can continue
+  through every enabled rule in a chain. Each target also follows Model
+  Redirects, including effort and verbosity overrides. A cycle in redirects,
+  fallbacks, or their combination pauses both features until the conflicting
+  rules are fixed; the dashboard shows the loop.
+  Successful conversation routes and hashed old-thinking fingerprints persist
+  in SQLite; optional client notices are configurable. See the
   [fallback configuration guide](docs/model-fallbacks.md).
 - **Model settings** override capability assumptions and discovery behavior for
   a model.
@@ -511,7 +512,7 @@ account's endpoint and catalog, then retries once on the same identity. Eligible
 anonymous quota failover stays within the same GitHub instance. An all-zero or
 unavailable eligible set cannot create a new percentage assignment. Mappings have
 no automatic expiration, grow with the number of conversations, and are included
-in database backups; they are separate from the in-memory model-fallback cache.
+in database backups; they are separate from stored model-fallback routes.
 
 ## Operator dashboard
 
@@ -523,7 +524,7 @@ Open `/dashboard` on the same host as the API. The dashboard includes:
 - replay for logged Chat Completions and Responses attempts;
 - GrowthBook feature flags and Codex/ChatGPT Statsig overrides;
 - request replacements and ordered model redirects;
-- HTTP 422 model fallback chains and conversation cache controls;
+- HTTP 422 model fallback chains and stored conversation routing;
 - per-model settings and per-account model routing;
 - GitHub account percentages, connection controls and per-account integration IDs;
 - custom provider configuration;

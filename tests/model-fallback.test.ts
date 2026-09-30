@@ -1,18 +1,14 @@
 /* eslint-disable @typescript-eslint/require-await, @typescript-eslint/await-thenable, @typescript-eslint/no-confusing-void-expression -- async attempt callbacks and Bun rejection assertions model upstream outcomes */
 import { afterEach, expect, spyOn, test } from "bun:test"
 
+import { setConfigForTest } from "~/lib/config"
 import { HTTPError, LocalHTTPError } from "~/lib/error"
 import {
   applyModelFallbackToPayload,
-  clearModelFallbackCache,
-  getModelFallbackCacheStats,
   recordModelFallbackResponse,
   runWithModelFallback,
 } from "~/lib/model-fallback"
-import {
-  setModelFallbackConfig,
-  setModelFallbackConfigForTest,
-} from "~/lib/model-fallback-config"
+import { setModelFallbackConfigForTest } from "~/lib/model-fallback-config"
 import { copilotResponseHeadersStorage } from "~/lib/request-session"
 
 import { useProtocolDatabase } from "./helpers/protocol-database"
@@ -21,11 +17,8 @@ useProtocolDatabase()
 
 const config = {
   enabled: true,
-  conversationAffinity: true,
   notifyClient: false,
   nativeClientNotice: false,
-  affinityTtlSeconds: 86400,
-  affinityMaxEntries: 10000,
   rules: [
     { id: "test", sourceModel: "source", targetModel: "target", enabled: true },
   ],
@@ -41,7 +34,7 @@ async function fakeRequest(
     const response = new Response(null, {
       status: payload.model === "source" ? 422 : 200,
     })
-    recordModelFallbackResponse(response)
+    await recordModelFallbackResponse(response)
     if (!response.ok) throw new HTTPError("upstream", response)
     return payload.model
   })
@@ -55,7 +48,7 @@ test("ordinary source successes do not claim fallback diagnostic headers", async
     async () =>
       await runWithModelFallback({}, async () => {
         applyModelFallbackToPayload({ model: "source" })
-        recordModelFallbackResponse(new Response(null, { status: 200 }))
+        await recordModelFallbackResponse(new Response(null, { status: 200 }))
       }),
   )
   expect(headers).toEqual({})
@@ -68,12 +61,12 @@ test("final upstream 422 after existing compatibility retry remains eligible", a
     attempts++
     const payload = applyModelFallbackToPayload({ model: "source" })
     if (payload.model === "source") {
-      recordModelFallbackResponse(new Response(null, { status: 400 }))
+      await recordModelFallbackResponse(new Response(null, { status: 400 }))
       const response = new Response(null, { status: 422 })
-      recordModelFallbackResponse(response)
+      await recordModelFallbackResponse(response)
       throw new HTTPError("upstream", response)
     }
-    recordModelFallbackResponse(new Response(null, { status: 200 }))
+    await recordModelFallbackResponse(new Response(null, { status: 200 }))
   })
   expect(attempts).toBe(2)
 })
@@ -85,77 +78,114 @@ test("a later 422 after accepted output cannot restart the request", async () =>
     runWithModelFallback({}, async () => {
       attempts++
       applyModelFallbackToPayload({ model: "source" })
-      recordModelFallbackResponse(new Response(null, { status: 200 }))
+      await recordModelFallbackResponse(new Response(null, { status: 200 }))
       const response = new Response(null, { status: 422 })
-      recordModelFallbackResponse(response)
+      await recordModelFallbackResponse(response)
       throw new HTTPError("later tool loop", response)
     }),
   ).rejects.toBeInstanceOf(HTTPError)
   expect(attempts).toBe(1)
 })
 
-test.each(["clear", "config"])(
-  "in-flight accepted fallback does not repopulate after %s change",
-  async (change) => {
+test("an in-flight accepted fallback does not publish after its configuration changes", async () => {
+  setModelFallbackConfigForTest(config)
+  await fakeRequest({ conversationKey: "thread" }, () => {
     setModelFallbackConfigForTest(config)
-    await fakeRequest({ conversationKey: "thread" }, () => {
-      if (change === "clear") clearModelFallbackCache()
-      else setModelFallbackConfigForTest(config)
-    })
-    expect(getModelFallbackCacheStats().entries).toBe(0)
-  },
-)
-
-test("cache disabled still retries without remembering", async () => {
-  setModelFallbackConfigForTest({ ...config, conversationAffinity: false })
-  await fakeRequest({ conversationKey: "thread" })
-  expect(getModelFallbackCacheStats().entries).toBe(0)
+  })
+  await runWithModelFallback({ conversationKey: "thread" }, async () => {
+    expect(applyModelFallbackToPayload({ model: "source" }).model).toBe(
+      "source",
+    )
+  })
 })
 
-test("cache capacity evicts the oldest remembered conversation", async () => {
-  setModelFallbackConfigForTest({ ...config, affinityMaxEntries: 1 })
+test("new conversations retain previously stored conversation models", async () => {
+  setModelFallbackConfigForTest(config)
   await fakeRequest({ conversationKey: "first" })
   await fakeRequest({ conversationKey: "second" })
-  expect(getModelFallbackCacheStats().entries).toBe(1)
   let source: string | undefined
   await runWithModelFallback({ conversationKey: "first" }, async () => {
     source = applyModelFallbackToPayload({ model: "source" }).model
   })
-  expect(source).toBe("source")
+  expect(source).toBe("target")
 })
 
-test("expired mappings are removed before dispatch", async () => {
-  setModelFallbackConfigForTest({ ...config, affinityTtlSeconds: 60 })
+test("stored conversation models do not expire with elapsed time", async () => {
+  setModelFallbackConfigForTest(config)
   await fakeRequest({ conversationKey: "thread" })
-  const future = Date.now() + 61_000
+  const future = Date.now() + 365 * 24 * 60 * 60 * 1000
   const now = spyOn(Date, "now").mockReturnValue(future)
   try {
-    expect(getModelFallbackCacheStats().entries).toBe(0)
     let source: string | undefined
     await runWithModelFallback({ conversationKey: "thread" }, async () => {
       source = applyModelFallbackToPayload({ model: "source" }).model
     })
-    expect(source).toBe("source")
+    expect(source).toBe("target")
   } finally {
     now.mockRestore()
   }
 })
 
-test("queued config updates keep the captured TTL and revision consistent", async () => {
+test("changing a fallback rule re-evaluates its stored conversation route", async () => {
   setModelFallbackConfigForTest(config)
-  const pendingUpdate = setModelFallbackConfig({
-    ...config,
-    affinityTtlSeconds: 60,
-  })
-  await Promise.resolve()
   await fakeRequest({ conversationKey: "thread" })
-  await pendingUpdate
-  const now = spyOn(Date, "now").mockReturnValue(Date.now() + 61_000)
-  try {
-    expect(getModelFallbackCacheStats().entries).toBe(0)
-  } finally {
-    now.mockRestore()
-  }
+  setModelFallbackConfigForTest({
+    ...config,
+    rules: [
+      {
+        id: "test",
+        sourceModel: "source",
+        targetModel: "new-target",
+        enabled: true,
+      },
+    ],
+  })
+  await runWithModelFallback({ conversationKey: "thread" }, async () => {
+    expect(applyModelFallbackToPayload({ model: "source" }).model).toBe(
+      "source",
+    )
+  })
+})
+
+test("notice and unrelated rule changes preserve the stored model and foreign history", async () => {
+  setModelFallbackConfigForTest(config)
+  await runWithModelFallback({ conversationKey: "stable-route" }, async () => {
+    const payload = applyModelFallbackToPayload({
+      model: "source",
+      input: [{ type: "reasoning", encrypted_content: "old-source" }],
+    })
+    const response = new Response(null, {
+      status: payload.model === "source" ? 422 : 200,
+    })
+    await recordModelFallbackResponse(response)
+    if (!response.ok) throw new HTTPError("upstream", response)
+  })
+  setModelFallbackConfigForTest({
+    ...config,
+    notifyClient: true,
+    rules: [
+      ...config.rules,
+      {
+        id: "unrelated",
+        sourceModel: "other",
+        targetModel: "other-target",
+        enabled: true,
+      },
+    ],
+  })
+  await runWithModelFallback({ conversationKey: "stable-route" }, async () => {
+    const payload = applyModelFallbackToPayload({
+      model: "source",
+      input: [
+        { type: "reasoning", encrypted_content: "old-source" },
+        { type: "reasoning", encrypted_content: "new-target" },
+      ],
+    })
+    expect(payload.model).toBe("target")
+    expect(payload.input).toEqual([
+      { type: "reasoning", encrypted_content: "new-target" },
+    ])
+  })
 })
 
 test("concurrent successful transitions merge all known foreign signatures", async () => {
@@ -188,7 +218,7 @@ test("concurrent successful transitions merge all known foreign signatures", asy
         const response = new Response(null, {
           status: payload.model === "source" ? 422 : 200,
         })
-        recordModelFallbackResponse(response)
+        await recordModelFallbackResponse(response)
         if (!response.ok) throw new HTTPError("upstream", response)
       },
     )
@@ -208,8 +238,52 @@ test("concurrent successful transitions merge all known foreign signatures", asy
 })
 
 afterEach(() => {
-  clearModelFallbackCache()
   setModelFallbackConfigForTest(null)
+  setConfigForTest(null)
+})
+
+function remappedProvider(upstreamModel: string) {
+  return {
+    customProviders: [
+      {
+        id: "remapped-provider",
+        name: "Remapped provider",
+        type: "openai-compatible" as const,
+        baseUrl: "https://provider.example/v1",
+        models: [
+          { id: upstreamModel, aliases: ["target"], kind: "chat" as const },
+        ],
+      },
+    ],
+  }
+}
+
+test("repointing a provider alias re-evaluates a stored route before forwarding old target thinking", async () => {
+  setConfigForTest(remappedProvider("old-upstream"))
+  setModelFallbackConfigForTest(config)
+  await fakeRequest({ conversationKey: "alias-remap" })
+  setConfigForTest(remappedProvider("new-upstream"))
+  const sent: Array<{ model: string; input: Array<Record<string, unknown>> }> =
+    []
+  await runWithModelFallback({ conversationKey: "alias-remap" }, async () => {
+    const payload = applyModelFallbackToPayload({
+      model: "source",
+      input: [
+        {
+          type: "reasoning",
+          encrypted_content: "thinking-issued-by-old-upstream",
+        },
+      ],
+    })
+    sent.push(payload)
+    const response = new Response(null, {
+      status: payload.model === "source" ? 422 : 200,
+    })
+    await recordModelFallbackResponse(response)
+    if (!response.ok) throw new HTTPError("upstream", response)
+  })
+  expect(sent.map((payload) => payload.model)).toEqual(["source", "target"])
+  expect(sent[1]?.input).toEqual([])
 })
 
 test("switches any upstream HTTP 422 once and preserves fallback thinking on the next turn", async () => {
@@ -243,7 +317,7 @@ test("switches any upstream HTTP 422 once and preserves fallback thinking on the
           payload.model === "source" ?
             new Response("arbitrary", { status: 422 })
           : Response.json({ ok: true })
-        recordModelFallbackResponse(response)
+        await recordModelFallbackResponse(response)
         if (!response.ok) throw new HTTPError("upstream", response)
         return payload.model
       },
@@ -257,7 +331,6 @@ test("switches any upstream HTTP 422 once and preserves fallback thinking on the
   ])
   expect(sent[1].messages[0]).toEqual({ role: "assistant", content: "answer" })
   expect(sent[2].messages[0].reasoning_opaque).toBe("fallback-signature")
-  expect(getModelFallbackCacheStats()).toEqual({ entries: 1 })
 })
 
 test.each([400, 401, 403, 408, 429, 500, 502, 503, 504])(
@@ -270,7 +343,7 @@ test.each([400, 401, 403, 408, 429, 500, 502, 503, 504])(
         attempts++
         applyModelFallbackToPayload({ model: "source" })
         const response = new Response("failure", { status })
-        recordModelFallbackResponse(response)
+        await recordModelFallbackResponse(response)
         throw new HTTPError("upstream", response)
       }),
     ).rejects.toBeInstanceOf(HTTPError)
@@ -330,7 +403,7 @@ test("isolates child threads and credentials despite a shared parent session", a
         const response = new Response(null, {
           status: payload.model === "source" ? 422 : 200,
         })
-        recordModelFallbackResponse(response)
+        await recordModelFallbackResponse(response)
         if (!response.ok) throw new HTTPError("upstream", response)
         return payload.model
       },
@@ -348,10 +421,9 @@ test("isolates child threads and credentials despite a shared parent session", a
     "source",
     "target",
   ])
-  expect(getModelFallbackCacheStats().entries).toBe(3)
 })
 
-test("without identity repeats the 422 attempt on each request and never caches", async () => {
+test("without identity repeats the 422 attempt on each request", async () => {
   setModelFallbackConfigForTest(config)
   const sent: Array<string> = []
   const request = () =>
@@ -361,12 +433,11 @@ test("without identity repeats the 422 attempt on each request and never caches"
       const response = new Response(null, {
         status: payload.model === "source" ? 422 : 200,
       })
-      recordModelFallbackResponse(response)
+      await recordModelFallbackResponse(response)
       if (!response.ok) throw new HTTPError("upstream", response)
       return payload.model
     })
   await request()
   await request()
   expect(sent).toEqual(["source", "target", "source", "target"])
-  expect(getModelFallbackCacheStats().entries).toBe(0)
 })

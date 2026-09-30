@@ -3,8 +3,6 @@ import { afterEach, beforeEach, expect, test } from "bun:test"
 import { HTTPError } from "~/lib/error"
 import {
   applyModelFallbackToPayload,
-  clearModelFallbackCache,
-  getModelFallbackCacheStats,
   getModelFallbackRedirect,
   recordModelFallbackResponse,
   runWithModelFallback,
@@ -51,13 +49,11 @@ function fallbacks(edges: Array<[string, string]>) {
 beforeEach(() => {
   setModelRedirectsForTest([])
   fallbacks([])
-  clearModelFallbackCache()
 })
 
 afterEach(() => {
   setModelRedirectsForTest([])
   setModelFallbackConfigForTest(null)
-  clearModelFallbackCache()
 })
 
 async function request(failing: Set<string>, conversationKey?: string) {
@@ -71,7 +67,7 @@ async function request(failing: Set<string>, conversationKey?: string) {
       const response = new Response(null, {
         status: failing.has(payload.model) ? 422 : 200,
       })
-      recordModelFallbackResponse(response)
+      await recordModelFallbackResponse(response)
       if (!response.ok) throw new HTTPError("upstream", response)
     })
   } catch (error) {
@@ -141,9 +137,7 @@ test("redirect edits invalidate conversation fallback targets", async () => {
   setModelRedirectsForTest([redirect("gpt-5.6-sol", "fast-a")])
   fallbacks([["gpt-6-astra", "gpt-5.6-sol"]])
   await request(new Set(["gpt-6-astra"]), "conversation")
-  expect(getModelFallbackCacheStats().entries).toBe(1)
   setModelRedirectsForTest([redirect("gpt-5.6-sol", "fast-b")])
-  expect(getModelFallbackCacheStats().entries).toBe(0)
   expect(
     (await request(new Set(["gpt-6-astra"]), "conversation")).attempts,
   ).toEqual(["gpt-6-astra", "fast-b"])
@@ -162,7 +156,7 @@ test("cached fallback redirects preserve the effort of each new request", async 
       const response = new Response(null, {
         status: payload.model === "gpt-6-astra" ? 422 : 200,
       })
-      recordModelFallbackResponse(response)
+      await recordModelFallbackResponse(response)
       if (!response.ok) throw new HTTPError("upstream", response)
       await Promise.resolve()
       observed.push(getModelFallbackRedirect()?.effort)
@@ -190,7 +184,7 @@ test("cached multi-hop fallbacks retain all earlier redirect effort overrides", 
         const response = new Response(null, {
           status: payload.model === "d" ? 200 : 422,
         })
-        recordModelFallbackResponse(response)
+        await recordModelFallbackResponse(response)
         if (!response.ok) throw new HTTPError("upstream", response)
         observed.push({
           model: payload.model,
@@ -231,7 +225,7 @@ test("a cached target normalizes its effort before following its next fallback",
               422
             : 200,
         })
-        recordModelFallbackResponse(response)
+        await recordModelFallbackResponse(response)
         if (!response.ok) throw new HTTPError("upstream", response)
       },
     )
@@ -264,7 +258,7 @@ test("effort-changing mixed cycles are unsafe but effort-specific escape paths a
   expect(analyzeModelRoutingSafety(escaping, config).safe).toBe(true)
 })
 
-test("combined analysis detects cycles longer than the per-request hop limit", () => {
+test("combined analysis detects long cycles across redirects and fallbacks", () => {
   const config = validateModelFallbackConfig({
     enabled: true,
     rules: [

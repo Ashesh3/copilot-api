@@ -4,7 +4,6 @@ import type { Model } from "~/services/copilot/get-models"
 
 import { setConfigForTest } from "~/lib/config"
 import { getLlmDebugLog, listLlmDebugLogs } from "~/lib/llm-debug-log"
-import { clearModelFallbackCache } from "~/lib/model-fallback"
 import {
   setModelFallbackConfigForTest,
   validateModelFallbackConfig,
@@ -157,7 +156,6 @@ beforeEach(async () => {
   setConfigForTest({})
   setModelRedirectsForTest([])
   setModelSettingsForTest([])
-  clearModelFallbackCache()
   setModelFallbackConfigForTest(
     validateModelFallbackConfig({ enabled: false, rules: [] }),
   )
@@ -184,7 +182,6 @@ afterEach(async () => {
   setModelRedirectsForTest([])
   setModelSettingsForTest([])
   setModelFallbackConfigForTest(null)
-  clearModelFallbackCache()
   await resetTestAdminSession()
 })
 

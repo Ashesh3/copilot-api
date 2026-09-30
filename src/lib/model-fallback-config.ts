@@ -5,8 +5,9 @@ import {
   getLoadedSettingRevision,
   getLiveSettingRevision,
   readSetting,
-  writeSetting,
+  updateSetting,
 } from "~/lib/storage/domain-settings"
+import { StorageConflictError } from "~/lib/storage/errors"
 import { getRequestSnapshot } from "~/lib/storage/request-snapshot"
 import { peekStorageRuntime } from "~/lib/storage/runtime"
 
@@ -34,11 +35,11 @@ const fallbackRuleSchema = z
 const fallbackConfigSchema = z
   .object({
     enabled: z.boolean().default(false),
-    conversationAffinity: z.boolean().default(true),
+    conversationAffinity: z.unknown().optional(),
     notifyClient: z.boolean().default(false),
     nativeClientNotice: z.boolean().default(false),
-    affinityTtlSeconds: z.number().int().min(60).max(604800).default(86400),
-    affinityMaxEntries: z.number().int().min(1).max(100000).default(10000),
+    affinityTtlSeconds: z.unknown().optional(),
+    affinityMaxEntries: z.unknown().optional(),
     rules: z.array(fallbackRuleSchema).max(1000).default([]),
   })
   .strict()
@@ -62,6 +63,12 @@ const fallbackConfigSchema = z
       if (rule.enabled) sources.add(rule.sourceModel)
     }
   })
+  .transform(({ enabled, notifyClient, nativeClientNotice, rules }) => ({
+    enabled,
+    notifyClient,
+    nativeClientNotice,
+    rules,
+  }))
 
 export type ModelFallbackConfig = z.infer<typeof fallbackConfigSchema>
 export type ModelFallbackRule = ModelFallbackConfig["rules"][number]
@@ -104,15 +111,29 @@ export async function getModelFallbackConfig(): Promise<ModelFallbackConfig> {
 
 export async function setModelFallbackConfig(
   value: unknown,
+  expectedRevision?: number,
 ): Promise<ModelFallbackConfig> {
   const next = validateModelFallbackConfig(value)
   if (testConfig) {
+    assertFallbackRevision(expectedRevision)
     testConfig = next
     testRevision++
   } else {
-    await writeSetting("model_fallbacks", next)
+    await updateSetting("model_fallbacks", () => {
+      // updateSetting refreshes the snapshot inside its serialized write slot.
+      // The transaction also guards the global revision against peer writers.
+      assertFallbackRevision(expectedRevision)
+      return next
+    })
   }
   return structuredClone(next)
+}
+
+function assertFallbackRevision(expected: number | undefined): void {
+  if (expected !== undefined && expected !== getModelFallbackConfigRevision())
+    throw new StorageConflictError(
+      "Fallback settings changed. Refresh and review your draft before saving.",
+    )
 }
 
 export function setModelFallbackConfigForTest(

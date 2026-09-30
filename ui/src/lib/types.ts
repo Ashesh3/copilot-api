@@ -90,18 +90,15 @@ export interface ModelFallbackRule {
 
 export interface ModelFallbackConfig {
   enabled: boolean
-  conversationAffinity: boolean
   notifyClient: boolean
   nativeClientNotice: boolean
-  affinityTtlSeconds: number
-  affinityMaxEntries: number
   rules: Array<ModelFallbackRule>
 }
 
 export interface ModelFallbackSettings {
-  safety?: ModelRoutingSafety
   config: ModelFallbackConfig
-  cache: { entries: number }
+  safety: ModelRoutingSafety
+  revision: number
 }
 
 export interface ModelRoutingSafety {

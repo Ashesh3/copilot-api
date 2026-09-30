@@ -490,8 +490,10 @@ async function fetchCustomProvider(
         AbortSignal.any([options.signal, captureSignal])
       : captureSignal,
     )
-    const response = tapped.response
-    if (path === "/chat/completions") recordModelFallbackResponse(response)
+    const response =
+      path === "/chat/completions" ?
+        await recordModelFallbackResponse(tapped.response)
+      : tapped.response
     void captureCustomProviderDebugResponse(logId, response, tapped.capture)
     recordCustomProviderCall({
       outcome: customProviderOutcome(response),

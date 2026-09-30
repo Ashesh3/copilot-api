@@ -3,10 +3,8 @@ import { afterEach, expect, test } from "bun:test"
 import { HTTPError } from "~/lib/error"
 import {
   applyModelFallbackToPayload,
-  getModelFallbackCacheStats,
   recordModelFallbackResponse,
   runWithModelFallback,
-  clearModelFallbackCache,
 } from "~/lib/model-fallback"
 import {
   setModelFallbackConfig,
@@ -30,7 +28,6 @@ useProtocolDatabase()
 afterEach(() => {
   setModelFallbackConfigForTest(null)
   setModelRedirectsForTest([])
-  clearModelFallbackCache()
 })
 
 test("admitted requests keep their redirect snapshot while later requests bypass newly introduced loops", async () => {
@@ -61,12 +58,11 @@ test("admitted requests keep their redirect snapshot while later requests bypass
       const response = new Response(null, {
         status: payload.model === "astra" ? 422 : 200,
       })
-      recordModelFallbackResponse(response)
+      await recordModelFallbackResponse(response)
       if (!response.ok) throw new HTTPError("upstream", response)
     }),
   )
   expect(sent).toEqual(["astra", "sol-fast"])
-  expect(getModelFallbackCacheStats().entries).toBe(0)
   expect((await applyModelRedirect("sol")).model).toBe("sol")
   const latest: Array<string> = []
   // Bun's rejection matcher waits for the Promise but its declaration returns void.
@@ -77,7 +73,7 @@ test("admitted requests keep their redirect snapshot while later requests bypass
       const payload = applyModelFallbackToPayload({ model: "astra" })
       latest.push(payload.model)
       const response = new Response(null, { status: 422 })
-      recordModelFallbackResponse(response)
+      await recordModelFallbackResponse(response)
       throw new HTTPError("upstream", response)
     }),
   ).rejects.toBeInstanceOf(HTTPError)

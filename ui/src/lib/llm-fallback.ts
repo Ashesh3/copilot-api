@@ -23,7 +23,7 @@ export function fallbackDescription(fallback: LlmDebugFallback): string {
       ` Fallback hop ${fallback.hop}, originally requested ${fallback.sourceModel}.`
     : ""
   return fallback.cached ?
-      `This request uses the conversation's remembered configured HTTP 422 fallback: ${route}.${hop} No new HTTP 422 was required for this request.`
+      `This request resumed the stored conversation model from a configured HTTP 422 fallback: ${route}.${hop} No new HTTP 422 was required for this request.`
     : `A configured gateway rule sent this request because ${fallback.fromModel} returned HTTP 422. ${route}.${hop}`
 }
 
@@ -75,7 +75,7 @@ export function fallbackIndicators({
       key: "configured",
       label:
         fallback.cached ?
-          "Configured fallback · cached"
+          "Configured fallback · conversation route"
         : "Configured fallback",
       description: fallbackDescription(fallback),
       tone: "warning",

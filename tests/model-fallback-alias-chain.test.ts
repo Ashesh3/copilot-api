@@ -3,7 +3,6 @@ import { afterEach, beforeEach, expect, test } from "bun:test"
 import type { Model } from "~/services/copilot/get-models"
 
 import { setConfigForTest } from "~/lib/config"
-import { clearModelFallbackCache } from "~/lib/model-fallback"
 import {
   setModelFallbackConfigForTest,
   validateModelFallbackConfig,
@@ -122,7 +121,6 @@ beforeEach(() => {
   })
   setModelRedirectsForTest([])
   setModelSettingsForTest([])
-  clearModelFallbackCache()
   globalThis.fetch = (async (
     input: string | URL | Request,
     init?: RequestInit,
@@ -164,7 +162,6 @@ afterEach(() => {
   setModelRedirectsForTest([])
   setModelSettingsForTest([])
   setModelFallbackConfigForTest(null)
-  clearModelFallbackCache()
 })
 
 test("Chat stops before an alias repeats the same custom provider model", async () => {

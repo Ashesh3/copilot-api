@@ -3,11 +3,9 @@ import type { Context } from "hono"
 import { ZodError } from "zod"
 
 import {
-  clearModelFallbackCache,
-  getModelFallbackCacheStats,
-} from "~/lib/model-fallback"
-import {
   getModelFallbackConfig,
+  getCapturedModelFallbackConfigRevision,
+  getModelFallbackConfigRevision,
   setModelFallbackConfig,
   validateModelFallbackConfig,
 } from "~/lib/model-fallback-config"
@@ -16,12 +14,19 @@ import { getModelRoutingSafety } from "~/lib/model-routing-safety"
 export async function handleGetFallbacks(c: Context) {
   return c.json({
     config: await getModelFallbackConfig(),
-    cache: getModelFallbackCacheStats(),
+    revision: getCapturedModelFallbackConfigRevision(),
     safety: getModelRoutingSafety(),
   })
 }
 
 export async function handleSetFallbacks(c: Context) {
+  const match = c.req.header("If-Match")
+  const revision = match?.replace(/^"(\d+)"$/, "$1")
+  if (
+    revision !== undefined
+    && (!/^\d+$/.test(revision) || !Number.isSafeInteger(Number(revision)))
+  )
+    return c.json({ error: "Invalid fallback configuration revision" }, 400)
   let body: unknown
   try {
     body = await c.req.json<unknown>()
@@ -49,14 +54,13 @@ export async function handleSetFallbacks(c: Context) {
     )
   }
 
-  const committed = await setModelFallbackConfig(config)
+  const committed = await setModelFallbackConfig(
+    config,
+    revision === undefined ? undefined : Number(revision),
+  )
   return c.json({
     config: committed,
-    cache: getModelFallbackCacheStats(),
+    revision: getModelFallbackConfigRevision(),
     safety: getModelRoutingSafety(committed),
   })
-}
-
-export function handleClearFallbackCache(c: Context) {
-  return c.json({ success: true, cleared: clearModelFallbackCache() })
 }

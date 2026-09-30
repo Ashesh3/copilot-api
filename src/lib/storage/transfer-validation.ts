@@ -11,6 +11,7 @@ import { validateStoredModelRedirects } from "~/lib/model-redirect"
 import { validateStoredModelRouting } from "~/lib/model-routing"
 import { validateStoredModelSettings } from "~/lib/model-settings"
 import { validateAccountDistributionState } from "~/lib/storage/account-distribution-repository"
+import { validateConversationModelsState } from "~/lib/storage/conversation-models-repository"
 import { credentialDigest } from "~/lib/storage/credentials-repository"
 import { StorageSchemaError } from "~/lib/storage/errors"
 import { loadCustomProviderSnapshotFromSession } from "~/lib/storage/providers-repository"
@@ -147,4 +148,5 @@ export async function validateTransferDomains(
       throw new StorageSchemaError("Invalid imported IP allowlist")
   await loadCustomProviderSnapshotFromSession(session)
   await validateAccountDistributionState(session)
+  await validateConversationModelsState(session)
 }

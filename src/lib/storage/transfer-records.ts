@@ -7,6 +7,7 @@ import type {
   Storage,
 } from "~/lib/storage/types"
 
+import { decodeStoredConversationModel } from "~/lib/storage/conversation-models-repository"
 import { StorageSchemaError } from "~/lib/storage/errors"
 import { decodeArchivedCollectionStatus } from "~/lib/storage/history-bookkeeping"
 import {
@@ -219,6 +220,8 @@ export function validateTransferRecord(
     decodeArchivedCollectionStatus(value.value)
   if (record.table === "capi_metadata" && value.key === HISTORY_USAGE_RESET_KEY)
     decodeHistoryReset(value.value)
+  if (record.table === "capi_conversation_models")
+    decodeStoredConversationModel(decoded)
   return decoded
 }
 

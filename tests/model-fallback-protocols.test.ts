@@ -5,7 +5,6 @@ import type { Model } from "~/services/copilot/get-models"
 
 import { setConfigForTest } from "~/lib/config"
 import { listLlmDebugLogs } from "~/lib/llm-debug-log"
-import { clearModelFallbackCache } from "~/lib/model-fallback"
 import {
   setModelFallbackConfigForTest,
   validateModelFallbackConfig,
@@ -303,7 +302,6 @@ beforeEach(() => {
   setConfigForTest({})
   setModelRedirectsForTest([])
   setModelSettingsForTest([])
-  clearModelFallbackCache()
   configure()
   globalThis.fetch = (async (
     input: string | Request | URL,
@@ -329,7 +327,6 @@ afterEach(() => {
   setModelRedirectsForTest([])
   setModelSettingsForTest([])
   setModelFallbackConfigForTest(null)
-  clearModelFallbackCache()
   setSsePreflushDeadlineForTest()
   if (originalInferenceDigests === undefined)
     delete process.env.COPILOT_INFERENCE_CREDENTIAL_SHA256S

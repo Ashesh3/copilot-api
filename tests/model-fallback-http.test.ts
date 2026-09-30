@@ -4,7 +4,6 @@ import type { Model } from "~/services/copilot/get-models"
 
 import { setConfigForTest } from "~/lib/config"
 import { getLlmDebugLog, listLlmDebugLogs } from "~/lib/llm-debug-log"
-import { clearModelFallbackCache } from "~/lib/model-fallback"
 import {
   setModelFallbackConfigForTest,
   validateModelFallbackConfig,
@@ -240,7 +239,6 @@ beforeEach(() => {
   })
   setModelRedirectsForTest([])
   setModelSettingsForTest([])
-  clearModelFallbackCache()
   configure()
   globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(input instanceof Request ? input.url : String(input))
@@ -271,7 +269,6 @@ afterEach(() => {
   setModelRedirectsForTest([])
   setModelSettingsForTest([])
   setModelFallbackConfigForTest(null)
-  clearModelFallbackCache()
   setConfigForTest(null)
 })
 
