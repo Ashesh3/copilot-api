@@ -1,14 +1,14 @@
-import { Badge } from "@astryxdesign/core/Badge"
+import { AlertDialog } from "@astryxdesign/core/AlertDialog"
 import { Banner } from "@astryxdesign/core/Banner"
 import { Button } from "@astryxdesign/core/Button"
-import { Card } from "@astryxdesign/core/Card"
-import { FormLayout } from "@astryxdesign/core/FormLayout"
+import { Dialog, DialogHeader } from "@astryxdesign/core/Dialog"
+import { Layout, LayoutContent, LayoutFooter } from "@astryxdesign/core/Layout"
 import { Skeleton } from "@astryxdesign/core/Skeleton"
 import { HStack, VStack } from "@astryxdesign/core/Stack"
 import { Switch } from "@astryxdesign/core/Switch"
 import { Heading, Text } from "@astryxdesign/core/Text"
 import { TextInput } from "@astryxdesign/core/TextInput"
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 
 import type {
   ModelFallbackConfig,
@@ -17,23 +17,19 @@ import type {
   ModelRedirect,
 } from "../lib/types"
 
-import { ConfirmButton, EmptyState, IconAction } from "../components/common"
+import { ConfirmButton, EmptyState } from "../components/common"
+import { FallbackChains } from "../components/FallbackChains"
 import { ModelRoutingWarning } from "../components/ModelRoutingWarning"
 import { Page } from "../components/Page"
 import { ResponsivePair } from "../components/ResponsivePair"
-import {
-  AlertTriangleIcon,
-  FallbackIcon,
-  PencilIcon,
-  Trash2Icon,
-} from "../icons"
+import { FallbackIcon, PlusIcon, Trash2Icon } from "../icons"
 import { api, ApiError, get } from "../lib/api"
 import {
   applyFallbackDraft,
-  buildFallbackGraph,
   findImpactedStarts,
   traceFallbackPath,
 } from "../lib/fallback-graph"
+import { shouldApplyFallbackSnapshot } from "../lib/fallback-settings-snapshot"
 import { useToast } from "../lib/toast"
 import { useAsyncData } from "../lib/usePolling"
 
@@ -41,6 +37,7 @@ interface RuleForm {
   id: string | null
   sourceModel: string
   targetModel: string
+  enabled: boolean
 }
 
 interface FallbackPageData extends ModelFallbackSettings {
@@ -48,7 +45,12 @@ interface FallbackPageData extends ModelFallbackSettings {
   redirectsUnavailable: boolean
 }
 
-const EMPTY_RULE: RuleForm = { id: null, sourceModel: "", targetModel: "" }
+const EMPTY_RULE: RuleForm = {
+  id: null,
+  sourceModel: "",
+  targetModel: "",
+  enabled: true,
+}
 
 async function loadFallbacks(): Promise<FallbackPageData> {
   const settings = await get<ModelFallbackSettings>("/dashboard/api/fallbacks")
@@ -70,88 +72,127 @@ function fieldError(message: string | undefined) {
   return message ? { type: "error" as const, message } : undefined
 }
 
-function createDraftRule(
-  form: RuleForm,
-  current: ModelFallbackRule | undefined,
-): ModelFallbackRule {
+function formForRule(rule: ModelFallbackRule): RuleForm {
+  return {
+    id: rule.id,
+    sourceModel: rule.sourceModel,
+    targetModel: rule.targetModel,
+    enabled: rule.enabled,
+  }
+}
+
+function draftRule(form: RuleForm): ModelFallbackRule {
   return {
     id: form.id ?? "fallback-draft",
     sourceModel: form.sourceModel.trim(),
     targetModel: form.targetModel.trim(),
-    enabled: current?.enabled ?? true,
+    enabled: form.enabled,
   }
 }
 
-function FallbackControls({
+function requestStatusMessage(
+  enabled: boolean,
+  safe: boolean,
+): string | undefined {
+  if (!safe)
+    return "Routing safety is paused by a loop and uses only its original starting model until the conflicting rules are corrected."
+  if (!enabled)
+    return "Automatic fallback is off; only the starting model is attempted."
+  return undefined
+}
+
+function FallbackWorkspace({
   initial,
-  onBusyChange,
+  refreshError,
+  loading,
+  reload,
 }: {
   initial: FallbackPageData
-  onBusyChange: (busy: boolean) => void
+  refreshError?: Error
+  loading: boolean
+  reload: () => void
 }) {
   const toast = useToast()
   const [settings, setSettings] = useState(initial)
   const [form, setForm] = useState<RuleForm>(EMPTY_RULE)
-  const [selectedStart, setSelectedStart] = useState(
-    initial.config.rules[0]?.sourceModel ?? "",
-  )
+  const [isDialogOpen, setIsDialogOpen] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const [saveError, setSaveError] = useState<string>()
+  const [dialogError, setDialogError] = useState<string>()
   const [refreshConflict, setRefreshConflict] = useState<string>()
   const [ruleErrors, setRuleErrors] = useState<{
     sourceModel?: string
     targetModel?: string
   }>({})
+  const [selectedStart, setSelectedStart] = useState(
+    initial.config.rules[0]?.sourceModel ?? "",
+  )
+  const [isPathOpen, setIsPathOpen] = useState(false)
+  const [isDiscardOpen, setIsDiscardOpen] = useState(false)
+  const originalRuleRef = useRef<ModelFallbackRule | null>(null)
+  const originalFormRef = useRef<RuleForm>(EMPTY_RULE)
   const sourceRef = useRef<HTMLInputElement>(null)
   const targetRef = useRef<HTMLInputElement>(null)
   const busyRef = useRef(false)
+  const latestRevisionRef = useRef(initial.revision)
   const config = settings.config
-  const graph = useMemo(() => buildFallbackGraph(config.rules), [config.rules])
-  const requestPath =
-    selectedStart ? traceFallbackPath(selectedStart, config.rules) : undefined
-  const currentRule = config.rules.find((rule) => rule.id === form.id)
-  const draftRule = createDraftRule(form, currentRule)
+  const currentRule =
+    form.id ? config.rules.find((rule) => rule.id === form.id) : undefined
+  const ruleDraft = draftRule(form)
   const draftRules =
-    form.id ?
-      applyFallbackDraft(config.rules, draftRule)
-    : [...config.rules, draftRule]
+    isDialogOpen ? applyFallbackDraft(config.rules, ruleDraft) : config.rules
   const impactedStarts =
-    form.sourceModel.trim() && form.targetModel.trim() ?
+    isDialogOpen && form.sourceModel.trim() && form.targetModel.trim() ?
       findImpactedStarts(config.rules, draftRules)
     : []
-  const enabledRedirects = settings.redirects.filter(
-    (redirect) => redirect.enabled,
+  const requestPath =
+    selectedStart ? traceFallbackPath(selectedStart, config.rules) : undefined
+  let visiblePath: Array<string> = []
+  if (requestPath)
+    visiblePath =
+      config.enabled && settings.safety.safe ?
+        requestPath.models
+      : [requestPath.start]
+  const statusMessage = requestStatusMessage(
+    config.enabled,
+    settings.safety.safe,
   )
+  const isDirty =
+    isDialogOpen
+    && JSON.stringify(form) !== JSON.stringify(originalFormRef.current)
 
   useEffect(() => {
-    if (form.id) sourceRef.current?.focus()
-  }, [form.id])
-
-  useEffect(() => {
-    if (form.id) {
-      const before = settings.config.rules.find((rule) => rule.id === form.id)
-      const after = initial.config.rules.find((rule) => rule.id === form.id)
-      if (!after || JSON.stringify(before) !== JSON.stringify(after))
-        // eslint-disable-next-line @eslint-react/hooks-extra/no-direct-set-state-in-use-effect -- Preserve the draft while marking the refreshed backing rule stale.
+    if (
+      !shouldApplyFallbackSnapshot(latestRevisionRef.current, initial.revision)
+    )
+      return
+    latestRevisionRef.current = initial.revision
+    if (isDialogOpen && form.id) {
+      const original = originalRuleRef.current
+      const refreshed = initial.config.rules.find((rule) => rule.id === form.id)
+      if (
+        !refreshed
+        || !original
+        || JSON.stringify(refreshed) !== JSON.stringify(original)
+      )
+        // eslint-disable-next-line @eslint-react/hooks-extra/no-direct-set-state-in-use-effect -- Refresh preserves the draft and marks its captured backing rule stale.
         setRefreshConflict(
-          "This rule changed or was removed while you were editing. Your draft is preserved; cancel and reopen the latest rule before saving.",
+          "This rule changed or was removed while you were editing. Your draft is preserved; review the latest settings before saving.",
         )
     }
     // eslint-disable-next-line @eslint-react/hooks-extra/no-direct-set-state-in-use-effect -- Explicit refresh replaces only the backing server snapshot.
     setSettings(initial)
-    // eslint-disable-next-line @eslint-react/hooks-extra/no-direct-set-state-in-use-effect -- Preserve the selected start unless the initial load had no selection.
+    // eslint-disable-next-line @eslint-react/hooks-extra/no-direct-set-state-in-use-effect -- Preserve the operator's selected preview start.
     setSelectedStart(
       (current) => current || initial.config.rules[0]?.sourceModel || "",
     )
-    // Only a refreshed settings payload should update the backing snapshot.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- Only a new server payload should reconcile backing state.
   }, [initial])
 
-  function startMutation() {
+  function startMutation(): boolean {
     if (busyRef.current) return false
     busyRef.current = true
     setIsSaving(true)
-    onBusyChange(true)
     setSaveError(undefined)
     return true
   }
@@ -159,11 +200,15 @@ function FallbackControls({
   function finishMutation() {
     busyRef.current = false
     setIsSaving(false)
-    onBusyChange(false)
   }
 
-  async function save(next: ModelFallbackConfig, message: string) {
+  async function saveConfig(
+    next: ModelFallbackConfig,
+    message: string,
+    errorTarget: "page" | "dialog" = "page",
+  ): Promise<boolean> {
     if (!startMutation()) return false
+    if (errorTarget === "dialog") setDialogError(undefined)
     try {
       const result = await api<ModelFallbackSettings>(
         "PUT",
@@ -171,15 +216,21 @@ function FallbackControls({
         next,
         { expectedRevision: settings.revision },
       )
-      setSettings((current) => ({ ...current, ...result }))
+      if (
+        shouldApplyFallbackSnapshot(latestRevisionRef.current, result.revision)
+      ) {
+        latestRevisionRef.current = result.revision
+        setSettings((current) => ({ ...current, ...result }))
+      }
       toast.success(message)
       return true
     } catch (error) {
       const message =
         error instanceof ApiError && error.status === 409 ?
-          "Fallback settings changed on the server. Refresh, review the latest paths, and apply your edit again."
+          "Fallback settings changed on the server. Refresh and review the latest paths before saving this draft."
         : errorMessage(error, "Failed to save fallback settings")
-      setSaveError(message)
+      if (errorTarget === "dialog") setDialogError(message)
+      else setSaveError(message)
       toast.error(message)
       return false
     } finally {
@@ -187,23 +238,52 @@ function FallbackControls({
     }
   }
 
-  function editRule(rule: ModelFallbackRule) {
-    setForm({
-      id: rule.id,
-      sourceModel: rule.sourceModel,
-      targetModel: rule.targetModel,
-    })
+  function openAdd(sourceModel = "") {
+    const next = { ...EMPTY_RULE, sourceModel }
+    originalRuleRef.current = null
+    originalFormRef.current = next
+    setForm(next)
     setRuleErrors({})
+    setDialogError(undefined)
     setRefreshConflict(undefined)
+    setIsDialogOpen(true)
   }
 
-  function cancelEdit() {
+  function openEdit(rule: ModelFallbackRule) {
+    const next = formForRule(rule)
+    originalRuleRef.current = structuredClone(rule)
+    originalFormRef.current = next
+    setForm(next)
+    setRuleErrors({})
+    setDialogError(undefined)
+    setRefreshConflict(undefined)
+    setIsDialogOpen(true)
+  }
+
+  function closeDialog() {
+    setIsDialogOpen(false)
     setForm(EMPTY_RULE)
     setRuleErrors({})
+    setDialogError(undefined)
     setRefreshConflict(undefined)
+    originalRuleRef.current = null
+    originalFormRef.current = EMPTY_RULE
+  }
+
+  function requestDialogClose(open: boolean) {
+    if (open || isSaving) return
+    if (isDirty) setIsDiscardOpen(true)
+    else closeDialog()
   }
 
   async function saveRule() {
+    if (busyRef.current || isSaving || refreshConflict) return
+    if (form.id && !currentRule) {
+      setRefreshConflict(
+        "This rule was removed while you were editing. Refresh and reopen the latest settings before saving.",
+      )
+      return
+    }
     const sourceModel = form.sourceModel.trim()
     const targetModel = form.targetModel.trim()
     const duplicate = config.rules.some(
@@ -215,9 +295,9 @@ function FallbackControls({
     if (!sourceModel) sourceError = "Enter the model that may return HTTP 422."
     else if (sourceModel.length > 256)
       sourceError = "Use a model ID with at most 256 characters."
-    else if (duplicate && (currentRule?.enabled ?? true))
+    else if (duplicate && form.enabled)
       sourceError = "This source model already has an enabled fallback."
-    if (!targetModel) targetError = "Enter the alternate model."
+    if (!targetModel) targetError = "Enter the fallback model."
     else if (targetModel.length > 256)
       targetError = "Use a model ID with at most 256 characters."
     else if (sourceModel === targetModel)
@@ -228,10 +308,9 @@ function FallbackControls({
       else targetRef.current?.focus()
       return
     }
-    if (refreshConflict) return
 
     const rule: ModelFallbackRule = {
-      ...draftRule,
+      ...ruleDraft,
       id: form.id ?? `fallback-${crypto.randomUUID()}`,
     }
     const rules =
@@ -240,221 +319,43 @@ function FallbackControls({
           existing.id === form.id ? rule : existing,
         )
       : [...config.rules, rule]
-    if (
-      await save(
-        { ...config, rules },
-        form.id ? "Fallback updated" : "Fallback added",
-      )
-    ) {
-      if (!form.id) setSelectedStart(sourceModel)
-      cancelEdit()
-    }
+    const saved = await saveConfig(
+      { ...config, rules },
+      form.id ? "Fallback updated" : "Fallback added",
+      "dialog",
+    )
+    if (!saved) return
+    if (!form.id) setSelectedStart(sourceModel)
+    closeDialog()
   }
 
   async function deleteRule(id: string) {
-    const success = await save(
+    const saved = await saveConfig(
       { ...config, rules: config.rules.filter((rule) => rule.id !== id) },
       "Fallback deleted",
+      "dialog",
     )
-    if (!success) throw new Error("Failed to delete fallback")
-    if (form.id === id) cancelEdit()
-  }
-
-  async function toggleRule(rule: ModelFallbackRule, enabled: boolean) {
-    await save(
-      {
-        ...config,
-        rules: config.rules.map((current) =>
-          current.id === rule.id ? { ...current, enabled } : current,
-        ),
-      },
-      enabled ? "Fallback rule enabled" : "Fallback rule disabled",
-    )
-  }
-
-  function routeStop(route: (typeof graph)[number]["routes"][number]) {
-    if (route.stop === "shared")
-      return (
-        <p className="fallback-route-stop">
-          Joins the shared continuation at{" "}
-          <button
-            type="button"
-            className="fallback-inline-model"
-            onClick={() => setSelectedStart(route.joinsAt ?? "")}
-          >
-            {route.joinsAt}
-          </button>
-          , shown from {route.sharedWith}.
-        </p>
-      )
-    if (route.stop === "loop")
-      return (
-        <p className="fallback-route-stop fallback-route-loop">
-          <AlertTriangleIcon width={16} height={16} aria-hidden="true" />
-          Loop detected at {route.loopAt}. Routing safety pauses all redirects
-          and fallbacks until it is corrected.
-        </p>
-      )
-    return <p className="fallback-route-stop">End of configured path.</p>
-  }
-
-  function requestPathDescription(): string {
-    if (!config.enabled)
-      return "Automatic fallback is off, so only the starting model is attempted."
-    if (requestPath?.stop === "loop")
-      return "Stops at the repeated model because a loop was detected."
-    return "This shows configured fallback links only. Runtime provider aliases, effort routing, success, and non-422 responses can stop or alter the effective route."
-  }
-
-  function inlineRuleEditor(rule: ModelFallbackRule) {
-    if (form.id !== rule.id) return null
-    return (
-      <div className="fallback-inline-editor" aria-label="Edit fallback rule">
-        <ResponsivePair minWidth={220}>
-          <TextInput
-            ref={sourceRef}
-            label="Source model"
-            description="Exact model ID after applicable redirects."
-            value={form.sourceModel}
-            onChange={(sourceModel) =>
-              setForm((current) => ({ ...current, sourceModel }))
-            }
-            isRequired
-            isDisabled={isSaving}
-            status={fieldError(ruleErrors.sourceModel)}
-          />
-          <TextInput
-            ref={targetRef}
-            label="Alternate model"
-            description="The model to try after HTTP 422."
-            value={form.targetModel}
-            onChange={(targetModel) =>
-              setForm((current) => ({ ...current, targetModel }))
-            }
-            isRequired
-            isDisabled={isSaving}
-            status={fieldError(ruleErrors.targetModel)}
-          />
-        </ResponsivePair>
-        {impactedStarts.length > 0 ?
-          <details className="fallback-impact" open>
-            <summary>
-              {impactedStarts.length} request start
-              {impactedStarts.length === 1 ? "" : "s"} would change
-            </summary>
-            <ul>
-              {impactedStarts.map((start) => (
-                <li key={start}>
-                  <code>{start}</code>:{" "}
-                  {traceFallbackPath(start, draftRules).models.join(" → ")}
-                </li>
-              ))}
-            </ul>
-          </details>
-        : null}
-        <HStack hAlign="between" gap={2} wrap="wrap">
-          <HStack gap={2} vAlign="center" wrap="wrap">
-            <Switch
-              label={`Enable fallback for ${rule.sourceModel}`}
-              value={rule.enabled}
-              isDisabled={isSaving}
-              changeAction={async (enabled) => toggleRule(rule, enabled)}
-            />
-            <ConfirmButton
-              label="Delete rule"
-              confirmTitle="Delete fallback rule?"
-              confirmDescription={`Remove the fallback from ${rule.sourceModel} to ${rule.targetModel}.`}
-              confirmActionLabel="Delete"
-              variant="destructive"
-              size="sm"
-              icon={<Trash2Icon />}
-              isDisabled={isSaving}
-              onConfirm={() => deleteRule(rule.id)}
-            />
-          </HStack>
-          <HStack gap={2}>
-            <Button
-              label="Cancel"
-              variant="ghost"
-              isDisabled={isSaving}
-              onClick={cancelEdit}
-            />
-            <Button
-              label="Save fallback"
-              variant="primary"
-              isDisabled={isSaving || Boolean(refreshConflict)}
-              clickAction={saveRule}
-            />
-          </HStack>
-        </HStack>
-      </div>
-    )
-  }
-
-  function detachedDraftEditor() {
-    if (!form.id || currentRule) return null
-    return (
-      <Card>
-        <VStack gap={4}>
-          <VStack gap={1}>
-            <Heading level={2}>Unsaved edit for removed rule</Heading>
-            <Text type="supporting" color="secondary">
-              The server no longer contains this rule. Your draft remains below
-              for review. Cancel it, then add or reopen a rule from the
-              refreshed settings.
-            </Text>
-          </VStack>
-          <ResponsivePair minWidth={220}>
-            <TextInput
-              ref={sourceRef}
-              label="Draft source model"
-              value={form.sourceModel}
-              onChange={(sourceModel) =>
-                setForm((current) => ({ ...current, sourceModel }))
-              }
-              isDisabled={isSaving}
-            />
-            <TextInput
-              ref={targetRef}
-              label="Draft alternate model"
-              value={form.targetModel}
-              onChange={(targetModel) =>
-                setForm((current) => ({ ...current, targetModel }))
-              }
-              isDisabled={isSaving}
-            />
-          </ResponsivePair>
-          {impactedStarts.length > 0 ?
-            <details className="fallback-impact" open>
-              <summary>
-                Draft path review · {impactedStarts.length} affected start
-                {impactedStarts.length === 1 ? "" : "s"}
-              </summary>
-              <ul>
-                {impactedStarts.map((start) => (
-                  <li key={start}>
-                    <code>{start}</code>:{" "}
-                    {traceFallbackPath(start, draftRules).models.join(" → ")}
-                  </li>
-                ))}
-              </ul>
-            </details>
-          : null}
-          <HStack hAlign="end">
-            <Button
-              label="Cancel removed-rule draft"
-              variant="secondary"
-              isDisabled={isSaving}
-              onClick={cancelEdit}
-            />
-          </HStack>
-        </VStack>
-      </Card>
-    )
+    if (!saved) throw new Error("Failed to delete fallback")
+    closeDialog()
   }
 
   return (
-    <>
+    <Page
+      kicker="Control"
+      title="Fallbacks"
+      onRefresh={reload}
+      isRefreshing={loading || isSaving}
+      actions={
+        <Button
+          aria-label="Add fallback"
+          label="Add fallback"
+          variant="primary"
+          icon={<PlusIcon />}
+          isDisabled={isSaving}
+          onClick={() => openAdd()}
+        />
+      }
+    >
       <ModelRoutingWarning safety={settings.safety} />
       {saveError ?
         <Banner
@@ -463,343 +364,393 @@ function FallbackControls({
           description={saveError}
         />
       : null}
-      {refreshConflict ?
+      {refreshError && !isDialogOpen ?
         <Banner
-          status="warning"
-          title="Rule changed while editing"
-          description={refreshConflict}
+          status="error"
+          title="Refresh failed"
+          description={refreshError.message}
+          endContent={
+            <Button label="Retry" variant="secondary" onClick={reload} />
+          }
         />
       : null}
 
-      <Card>
-        <VStack gap={4}>
-          <HStack hAlign="between" vAlign="center" wrap="wrap" gap={3}>
-            <VStack gap={1}>
-              <Heading level={2}>Automatic fallback</Heading>
-              <Text color="secondary">
-                Follow the complete configured path while each model returns
-                HTTP 422.
-              </Text>
-            </VStack>
-            <Badge label="HTTP 422 only" variant="neutral" />
-          </HStack>
-          <Switch
-            label="Enable fallbacks"
-            value={config.enabled}
-            isDisabled={isSaving}
-            changeAction={async (enabled) => {
-              await save(
-                { ...config, enabled },
-                enabled ? "Fallbacks enabled" : "Fallbacks disabled",
-              )
-            }}
-          />
-          <Text type="supporting" color="secondary">
-            Each hop requires HTTP 422. A request stops on success, any non-422
-            response, a model without an enabled rule, or a detected loop.
-          </Text>
-        </VStack>
-      </Card>
+      <HStack hAlign="between" vAlign="center" wrap="wrap" gap={3}>
+        <Switch
+          label="Enable fallbacks"
+          value={config.enabled}
+          isDisabled={isSaving}
+          changeAction={async (enabled) => {
+            await saveConfig(
+              { ...config, enabled },
+              enabled ? "Fallbacks enabled" : "Fallbacks disabled",
+            )
+          }}
+        />
+        <Text type="supporting" color="secondary">
+          Each connection requires HTTP 422; success, another error, an
+          unconfigured model, or a loop ends the path.
+        </Text>
+      </HStack>
 
       <section
         className="fallback-overview"
-        aria-labelledby="fallback-overview-heading"
+        aria-labelledby="fallback-chains-heading"
       >
-        <HStack hAlign="between" vAlign="center" wrap="wrap" gap={2}>
-          <VStack gap={0.5}>
-            <Heading level={2} id="fallback-overview-heading">
-              Chain overview
+        <VStack gap={0.5}>
+          <HStack vAlign="center" wrap="wrap" gap={2}>
+            <Heading level={2} id="fallback-chains-heading">
+              Configured chains
             </Heading>
             <Text type="supporting" color="secondary">
-              Grouped by connected models. Select any model as the request
-              start.
+              {config.rules.length} configured rule
+              {config.rules.length === 1 ? "" : "s"}
             </Text>
-          </VStack>
-          <Badge variant="neutral" label={`${config.rules.length} rules`} />
-        </HStack>
-
+          </HStack>
+          <Text type="supporting" color="secondary">
+            Select any model to inspect its configured request path.
+          </Text>
+        </VStack>
         {!config.enabled && config.rules.length > 0 ?
           <Banner
             status="info"
             title="Fallbacks are disabled"
-            description="Configured paths remain visible and editable, but requests will stop at their starting model."
+            description="Configured chains remain editable, but requests currently stop at their starting model."
           />
         : null}
-
-        {graph.length === 0 ?
+        {config.rules.length === 0 ?
           <EmptyState
             title="No fallback rules"
-            description="Add a source model and the alternate to try when it returns HTTP 422."
+            description="Add a source model and the fallback to try after HTTP 422."
             icon={<FallbackIcon width={28} height={28} />}
+            actions={
+              <Button
+                label="Add fallback"
+                variant="primary"
+                icon={<PlusIcon />}
+                onClick={() => openAdd()}
+              />
+            }
           />
-        : <div className="fallback-groups">
-            {graph.flatMap((group) => {
-              const routedRuleIds = new Set(
-                group.routes.flatMap((route) => route.ruleIds),
-              )
-              const extraRules = group.rules.filter(
-                (rule) => !routedRuleIds.has(rule.id),
-              )
-              const routeCards = group.routes.map((route) => (
-                <Card key={`${group.id}-${route.start}`}>
-                  <VStack gap={3}>
-                    <HStack
-                      hAlign="between"
-                      vAlign="center"
-                      wrap="wrap"
-                      gap={2}
-                    >
-                      <Heading level={3}>
-                        From <code>{route.start}</code>
-                      </Heading>
-                      <Text type="supporting" color="secondary">
-                        {route.ruleIds.length} link
-                        {route.ruleIds.length === 1 ? "" : "s"}
-                      </Text>
-                    </HStack>
-                    <ol
-                      className="fallback-chain-list"
-                      aria-label={`Configured path from ${route.start}`}
-                    >
-                      {route.models.map((model, index) => {
-                        const ruleId = route.ruleIds[index]
-                        const rule = group.rules.find(
-                          (candidate) => candidate.id === ruleId,
-                        )
-                        return (
-                          <li key={`${route.start}-${model}`}>
-                            <div className="fallback-chain-node">
-                              <button
-                                type="button"
-                                className="fallback-model-button"
-                                aria-pressed={selectedStart === model}
-                                onClick={() => setSelectedStart(model)}
-                              >
-                                <span>{model}</span>
-                                {selectedStart === model ?
-                                  <small>Start</small>
-                                : null}
-                              </button>
-                              {rule ?
-                                <IconAction
-                                  label={`Edit fallback for ${rule.sourceModel}`}
-                                  icon={<PencilIcon />}
-                                  isDisabled={isSaving}
-                                  onClick={() => editRule(rule)}
-                                />
-                              : null}
-                            </div>
-                            {rule ? inlineRuleEditor(rule) : null}
-                          </li>
-                        )
-                      })}
-                    </ol>
-                    {routeStop(route)}
-                  </VStack>
-                </Card>
-              ))
-              const extraCard =
-                extraRules.length > 0 ?
-                  <Card key={`${group.id}-extra-rules`}>
-                    <VStack gap={3}>
-                      <Heading level={3}>Additional configured rules</Heading>
-                      <Text type="supporting" color="secondary">
-                        Disabled, duplicate, or malformed links remain visible.
-                      </Text>
-                      <ul className="fallback-extra-rules">
-                        {extraRules.map((rule) => (
-                          <li key={rule.id}>
-                            <div
-                              className="fallback-rule-chip"
-                              data-enabled={rule.enabled}
-                            >
-                              <span>
-                                <code>{rule.sourceModel}</code> →{" "}
-                                <code>{rule.targetModel}</code>
-                                {rule.enabled ? "" : " · Disabled"}
-                              </span>
-                              <IconAction
-                                label={`Edit fallback for ${rule.sourceModel}`}
-                                icon={<PencilIcon />}
-                                isDisabled={isSaving}
-                                onClick={() => editRule(rule)}
-                              />
-                              {inlineRuleEditor(rule)}
-                            </div>
-                          </li>
-                        ))}
-                      </ul>
-                    </VStack>
-                  </Card>
-                : null
-              return extraCard ? [...routeCards, extraCard] : routeCards
-            })}
-          </div>
+        : <FallbackChains
+            rules={config.rules}
+            redirects={settings.redirects}
+            selectedStart={selectedStart}
+            isSaving={isSaving}
+            onSelect={setSelectedStart}
+            onEdit={openEdit}
+            onAdd={openAdd}
+          />
         }
       </section>
-
-      {requestPath ?
-        <Card>
-          <VStack gap={3}>
-            <HStack hAlign="between" vAlign="center" wrap="wrap" gap={2}>
-              <Heading level={2}>Request path from {requestPath.start}</Heading>
-              <Badge
-                variant="neutral"
-                label={`${config.enabled && settings.safety.safe ? requestPath.models.length : 1} possible attempt${config.enabled && settings.safety.safe && requestPath.models.length !== 1 ? "s" : ""}`}
-              />
-            </HStack>
-            <ol className="fallback-attempts">
-              {(config.enabled && settings.safety.safe ?
-                requestPath.models
-              : [requestPath.start]
-              ).map((model, index) => (
-                <li key={model}>
-                  <small>{index + 1}</small>
-                  <button
-                    type="button"
-                    className="fallback-model-button"
-                    aria-pressed={selectedStart === model}
-                    onClick={() => setSelectedStart(model)}
-                  >
-                    <span>{model}</span>
-                  </button>
-                </li>
-              ))}
-            </ol>
-            <Text type="supporting" color="secondary">
-              {settings.safety.safe ?
-                requestPathDescription()
-              : "Routing safety is paused by a loop, so this request uses only its original starting model until the conflicting rules are corrected."
-              }
-            </Text>
-          </VStack>
-        </Card>
-      : null}
-
-      {enabledRedirects.length > 0 ?
-        <details className="fallback-redirect-disclosure">
-          <summary>Model Redirects that may feed these paths</summary>
-          <Text type="supporting" color="secondary">
-            Enabled redirect sources are shown for context. Redirect matching
-            can also depend on effort and preserves the Model Redirects rule
-            order.
-          </Text>
-          <ul>
-            {enabledRedirects.map((redirect) => (
-              <li key={redirect.id}>
-                <code>{redirect.sourceModel}</code> →{" "}
-                <code>{redirect.targetModel}</code> ({redirect.sourceEffort})
-              </li>
-            ))}
-          </ul>
-        </details>
-      : null}
 
       {settings.redirectsUnavailable ?
         <Banner
           status="warning"
           title="Model Redirects are unavailable"
-          description="The fallback-only preview remains editable, but it cannot show which redirected requests may enter these paths. Refresh to retry both settings."
+          description="Fallback chains remain editable, but the page cannot show which redirected requests may enter them. Refresh to retry."
         />
       : null}
 
-      {detachedDraftEditor()}
-
-      {!form.id ?
-        <Card>
-          <VStack gap={4}>
-            <Heading level={2}>Add fallback</Heading>
-            <FormLayout>
-              <ResponsivePair minWidth={260}>
-                <TextInput
-                  ref={sourceRef}
-                  label="Source model"
-                  description="Exact model ID after applicable redirects."
-                  value={form.sourceModel}
-                  onChange={(sourceModel) =>
-                    setForm((current) => ({ ...current, sourceModel }))
-                  }
-                  isRequired
-                  isDisabled={isSaving}
-                  status={fieldError(ruleErrors.sourceModel)}
-                />
-                <TextInput
-                  ref={targetRef}
-                  label="Alternate model"
-                  description="The model to try after HTTP 422."
-                  value={form.targetModel}
-                  onChange={(targetModel) =>
-                    setForm((current) => ({ ...current, targetModel }))
-                  }
-                  isRequired
-                  isDisabled={isSaving}
-                  status={fieldError(ruleErrors.targetModel)}
-                />
-              </ResponsivePair>
-            </FormLayout>
-            <HStack hAlign="end" gap={2}>
+      {requestPath ?
+        <section
+          className="fallback-preview"
+          aria-label="Configured path preview"
+        >
+          <VStack gap={3}>
+            <div className="fallback-preview-heading">
+              <div className="fallback-preview-summary" aria-live="polite">
+                <span className="fallback-secondary">Preview start</span>
+                <code>{requestPath.start}</code>
+                <span className="fallback-secondary">
+                  {visiblePath.length} possible attempt
+                  {visiblePath.length === 1 ? "" : "s"}
+                </span>
+              </div>
               <Button
-                label="Add fallback"
-                variant="primary"
-                isDisabled={isSaving}
-                clickAction={saveRule}
+                aria-controls="fallback-path-details"
+                aria-expanded={isPathOpen}
+                label={isPathOpen ? "Hide path" : "Inspect path"}
+                variant="secondary"
+                onClick={() => setIsPathOpen((open) => !open)}
               />
-            </HStack>
+            </div>
+            {statusMessage ?
+              <Text type="supporting" color="secondary">
+                {statusMessage}
+              </Text>
+            : null}
+            <div id="fallback-path-details" hidden={!isPathOpen}>
+              <VStack gap={2}>
+                <ol className="fallback-attempts">
+                  {visiblePath.map((model) => (
+                    <li key={model}>
+                      <Text type="code">{model}</Text>
+                    </li>
+                  ))}
+                </ol>
+                <Text type="supporting" color="secondary">
+                  This shows configured fallback links only. Runtime provider
+                  aliases, effort routing, success, and non-422 responses can
+                  alter or stop the effective path.
+                </Text>
+              </VStack>
+            </div>
           </VStack>
-        </Card>
+        </section>
       : null}
 
-      <details className="fallback-notices">
-        <summary>Client notices</summary>
+      <section
+        className="fallback-notices"
+        aria-labelledby="fallback-notices-heading"
+      >
         <VStack gap={4}>
-          <Switch
-            label="Include diagnostic response headers"
-            value={config.notifyClient}
-            isDisabled={isSaving}
-            changeAction={async (notifyClient) => {
-              await save(
-                { ...config, notifyClient },
-                notifyClient ?
-                  "Diagnostic headers enabled"
-                : "Diagnostic headers disabled",
-              )
-            }}
-          />
-          <Text type="supporting" color="secondary">
-            Adds fallback source, target, and trigger headers for compatible
-            clients and debugging.
-          </Text>
-          <Switch
-            label="Show native client fallback notice"
-            value={config.nativeClientNotice}
-            isDisabled={isSaving}
-            changeAction={async (nativeClientNotice) => {
-              await save(
-                { ...config, nativeClientNotice },
-                nativeClientNotice ?
-                  "Native client notice enabled"
-                : "Native client notice disabled",
-              )
-            }}
-          />
-          <Text type="supporting" color="secondary">
-            Availability and wording depend on client support.
-          </Text>
+          <VStack gap={0.5}>
+            <Heading level={2} id="fallback-notices-heading">
+              Client notices
+            </Heading>
+            <Text type="supporting" color="secondary">
+              Control the fallback details exposed to compatible clients.
+            </Text>
+          </VStack>
+          <div className="fallback-notice-controls">
+            <VStack gap={1}>
+              <Switch
+                label="Include diagnostic response headers"
+                value={config.notifyClient}
+                isDisabled={isSaving}
+                changeAction={async (notifyClient) => {
+                  await saveConfig(
+                    { ...config, notifyClient },
+                    notifyClient ?
+                      "Diagnostic headers enabled"
+                    : "Diagnostic headers disabled",
+                  )
+                }}
+              />
+              <Text type="supporting" color="secondary">
+                Adds fallback source, target, and trigger headers for compatible
+                clients and debugging.
+              </Text>
+            </VStack>
+            <VStack gap={1}>
+              <Switch
+                label="Show native client fallback notice"
+                value={config.nativeClientNotice}
+                isDisabled={isSaving}
+                changeAction={async (nativeClientNotice) => {
+                  await saveConfig(
+                    { ...config, nativeClientNotice },
+                    nativeClientNotice ?
+                      "Native client notice enabled"
+                    : "Native client notice disabled",
+                  )
+                }}
+              />
+              <Text type="supporting" color="secondary">
+                Availability and wording depend on client support.
+              </Text>
+            </VStack>
+          </div>
         </VStack>
-      </details>
-    </>
+      </section>
+
+      <Dialog
+        className="fallback-editor-dialog"
+        isOpen={isDialogOpen}
+        onOpenChange={requestDialogClose}
+        purpose="form"
+        width={640}
+        maxHeight="min(85vh, 760px)"
+      >
+        <Layout
+          header={
+            <DialogHeader
+              title={form.id ? "Edit fallback" : "Add fallback"}
+              onOpenChange={requestDialogClose}
+            />
+          }
+          content={
+            <LayoutContent>
+              <VStack className="fallback-editor-form" gap={4}>
+                {dialogError ?
+                  <Banner
+                    status="error"
+                    title="Fallback was not saved"
+                    description={dialogError}
+                    endContent={
+                      <Button
+                        label="Refresh settings"
+                        variant="secondary"
+                        isDisabled={isSaving}
+                        onClick={reload}
+                      />
+                    }
+                  />
+                : null}
+                {refreshError ?
+                  <Banner
+                    status="error"
+                    title="Refresh failed"
+                    description={refreshError.message}
+                    endContent={
+                      <Button
+                        label="Retry refresh"
+                        variant="secondary"
+                        isDisabled={isSaving}
+                        onClick={reload}
+                      />
+                    }
+                  />
+                : null}
+                {refreshConflict ?
+                  <Banner
+                    status="warning"
+                    title={
+                      currentRule ?
+                        "Rule changed while editing"
+                      : "Rule was removed while editing"
+                    }
+                    description={refreshConflict}
+                  />
+                : null}
+                <form
+                  id="fallback-editor-form"
+                  onSubmit={(event) => {
+                    event.preventDefault()
+                    void saveRule()
+                  }}
+                >
+                  <ResponsivePair minWidth={250}>
+                    <TextInput
+                      ref={sourceRef}
+                      hasAutoFocus
+                      label="Source model"
+                      description="Exact model ID after applicable redirects."
+                      value={form.sourceModel}
+                      onChange={(sourceModel) =>
+                        setForm((current) => ({ ...current, sourceModel }))
+                      }
+                      isRequired
+                      isDisabled={isSaving}
+                      status={fieldError(ruleErrors.sourceModel)}
+                    />
+                    <TextInput
+                      ref={targetRef}
+                      label="Fallback model"
+                      description="The model to try after HTTP 422."
+                      value={form.targetModel}
+                      onChange={(targetModel) =>
+                        setForm((current) => ({ ...current, targetModel }))
+                      }
+                      isRequired
+                      isDisabled={isSaving}
+                      status={fieldError(ruleErrors.targetModel)}
+                    />
+                  </ResponsivePair>
+                </form>
+                <Switch
+                  label="Enable this fallback"
+                  value={form.enabled}
+                  isDisabled={isSaving}
+                  changeAction={(enabled) =>
+                    setForm((current) => ({ ...current, enabled }))
+                  }
+                />
+                {impactedStarts.length > 0 ?
+                  <div className="fallback-impact">
+                    <Text type="label">
+                      {impactedStarts.length} request start
+                      {impactedStarts.length === 1 ? "" : "s"} affected
+                    </Text>
+                    <ul>
+                      {impactedStarts.map((start) => (
+                        <li key={start}>
+                          <Text type="code">{start}</Text>
+                          <Text type="supporting" color="secondary">
+                            {traceFallbackPath(start, draftRules).models.join(
+                              " → ",
+                            )}
+                          </Text>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                : null}
+              </VStack>
+            </LayoutContent>
+          }
+          footer={
+            <LayoutFooter>
+              <HStack hAlign="between" gap={2} wrap="wrap">
+                {form.id && currentRule ?
+                  <ConfirmButton
+                    label="Delete fallback"
+                    confirmTitle="Delete fallback rule?"
+                    confirmDescription={`Remove the fallback from ${currentRule.sourceModel} to ${currentRule.targetModel}.`}
+                    confirmActionLabel="Delete fallback"
+                    variant="destructive"
+                    icon={<Trash2Icon />}
+                    isDisabled={isSaving}
+                    onConfirm={() => deleteRule(currentRule.id)}
+                  />
+                : <span />}
+                <HStack gap={2}>
+                  <Button
+                    label="Cancel"
+                    variant="secondary"
+                    isDisabled={isSaving}
+                    onClick={closeDialog}
+                  />
+                  <Button
+                    label={form.id ? "Save fallback" : "Add fallback"}
+                    form="fallback-editor-form"
+                    type="submit"
+                    variant="primary"
+                    isLoading={isSaving}
+                    isDisabled={Boolean(refreshConflict)}
+                  />
+                </HStack>
+              </HStack>
+            </LayoutFooter>
+          }
+        />
+      </Dialog>
+
+      <AlertDialog
+        isOpen={isDiscardOpen}
+        onOpenChange={setIsDiscardOpen}
+        title="Discard fallback changes?"
+        description="Your unsaved fallback changes will be lost."
+        actionLabel="Discard changes"
+        actionVariant="destructive"
+        onAction={() => {
+          setIsDiscardOpen(false)
+          closeDialog()
+        }}
+        width="min(400px, calc(100vw - 32px))"
+      />
+    </Page>
   )
 }
 
 export default function FallbacksScreen() {
   const { data, error, loading, reload } = useAsyncData(loadFallbacks, [])
-  const [saving, setSaving] = useState(false)
+  if (data)
+    return (
+      <FallbackWorkspace
+        initial={data}
+        refreshError={error}
+        loading={loading}
+        reload={reload}
+      />
+    )
   return (
     <Page
       kicker="Control"
       title="Fallbacks"
       onRefresh={reload}
-      isRefreshing={loading || saving}
+      isRefreshing={loading}
     >
       {error ?
         <Banner
@@ -810,13 +761,7 @@ export default function FallbacksScreen() {
             <Button label="Retry" variant="secondary" onClick={reload} />
           }
         />
-      : null}
-      {!data && loading ?
-        <Skeleton height={220} />
-      : null}
-      {data ?
-        <FallbackControls initial={data} onBusyChange={setSaving} />
-      : null}
+      : <Skeleton height={220} />}
     </Page>
   )
 }
