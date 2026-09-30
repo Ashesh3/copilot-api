@@ -22,15 +22,29 @@ const rule = {
 }
 
 describe("model fallback configuration", () => {
-  test("defaults to disabled fallbacks with bounded in-memory conversation routing", () => {
+  test("defaults to disabled fallbacks without legacy affinity controls", () => {
     expect(validateModelFallbackConfig({})).toEqual({
       enabled: false,
-      conversationAffinity: true,
       notifyClient: false,
       nativeClientNotice: false,
-      affinityTtlSeconds: 86400,
-      affinityMaxEntries: 10000,
       rules: [],
+    })
+  })
+
+  test("accepts and strips the three legacy affinity settings", () => {
+    expect(
+      validateModelFallbackConfig({
+        enabled: true,
+        conversationAffinity: false,
+        affinityTtlSeconds: 0,
+        affinityMaxEntries: "unbounded",
+        rules: [rule],
+      }),
+    ).toEqual({
+      enabled: true,
+      notifyClient: false,
+      nativeClientNotice: false,
+      rules: [rule],
     })
   })
 
@@ -60,13 +74,11 @@ describe("model fallback configuration", () => {
     ).toHaveLength(2)
   })
 
-  test("rejects unknown options and invalid memory limits", () => {
+  test("rejects unknown options other than the three legacy affinity settings", () => {
     for (const value of [
-      { affinityTtlSeconds: 59 },
-      { affinityTtlSeconds: 604801 },
-      { affinityMaxEntries: 0 },
-      { affinityMaxEntries: 100001 },
-      { affinityMaxEntries: 1.5 },
+      { conversationAffinityEnabled: true },
+      { affinityTtl: 86400 },
+      { affinityEntries: 10000 },
       { statusCodes: [500] },
       { enabled: "true" },
     ]) {

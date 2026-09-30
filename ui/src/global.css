@@ -12,6 +12,229 @@ body {
   margin: 0;
 }
 
+.fallback-overview {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--spacing-3);
+}
+
+.fallback-groups {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--spacing-3);
+}
+
+.fallback-chain-list,
+.fallback-attempts,
+.fallback-extra-rules,
+.fallback-impact ul,
+.fallback-redirect-disclosure ul {
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.fallback-chain-list {
+  display: grid;
+  gap: var(--spacing-3);
+}
+
+.fallback-chain-list > li {
+  position: relative;
+  min-width: 0;
+}
+
+.fallback-chain-list > li:not(:last-child)::after {
+  position: absolute;
+  bottom: calc(var(--spacing-3) * -0.82);
+  left: var(--spacing-3);
+  color: var(--color-text-secondary);
+  content: "↓";
+}
+
+.fallback-chain-node {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--spacing-2);
+  align-items: center;
+}
+
+.fallback-model-button,
+.fallback-inline-model {
+  appearance: none;
+  border: 1px solid var(--color-border);
+  color: var(--color-text-primary);
+  cursor: pointer;
+  font: inherit;
+}
+
+.fallback-model-button {
+  display: flex;
+  min-width: 0;
+  min-height: 42px;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-2);
+  border-radius: var(--radius-element);
+  background: var(--color-background-body);
+  padding: var(--spacing-2) var(--spacing-3);
+  font-family: var(--font-family-code);
+  overflow-wrap: anywhere;
+  text-align: start;
+}
+
+.fallback-model-button:hover,
+.fallback-inline-model:hover {
+  background: var(--color-overlay-hover);
+}
+
+.fallback-model-button:focus-visible,
+.fallback-inline-model:focus-visible,
+.fallback-notices summary:focus-visible,
+.fallback-disabled-rules summary:focus-visible,
+.fallback-impact summary:focus-visible,
+.fallback-redirect-disclosure summary:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.fallback-model-button[aria-pressed="true"] {
+  border-color: var(--color-accent);
+  background: var(--color-accent-muted);
+}
+
+.fallback-model-button small {
+  color: var(--color-text-secondary);
+  font-family: var(--font-family-body);
+}
+
+.fallback-rule-chip {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-2);
+  border-inline-start: 2px solid var(--color-accent);
+  padding-inline-start: var(--spacing-2);
+  color: var(--color-text-secondary);
+  font-size: var(--text-supporting-size);
+  overflow-wrap: anywhere;
+}
+
+.fallback-inline-editor {
+  display: grid;
+  flex-basis: 100%;
+  gap: var(--spacing-3);
+  border-block-start: 1px solid var(--color-border);
+  margin-block-start: var(--spacing-2);
+  padding-block-start: var(--spacing-3);
+}
+
+.fallback-rule-chip[data-enabled="false"] {
+  border-inline-start-color: var(--color-border-emphasized);
+  opacity: 0.78;
+}
+
+.fallback-route-stop {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-1);
+  margin-block-end: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--text-supporting-size);
+}
+
+.fallback-route-loop {
+  color: var(--color-warning);
+}
+
+.fallback-inline-model {
+  border: 0;
+  border-radius: var(--radius-small);
+  background: transparent;
+  padding: 2px 4px;
+  font-family: var(--font-family-code);
+}
+
+.fallback-attempts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+  gap: var(--spacing-2);
+  counter-reset: fallback-attempt;
+}
+
+.fallback-attempts li {
+  display: grid;
+  min-width: 0;
+  gap: var(--spacing-1);
+}
+
+.fallback-attempts li small {
+  color: var(--color-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.fallback-disabled-rules,
+.fallback-impact,
+.fallback-redirect-disclosure,
+.fallback-notices {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-element);
+  background: var(--color-background-muted);
+  padding: var(--spacing-3);
+}
+
+.fallback-impact summary,
+.fallback-redirect-disclosure summary,
+.fallback-notices summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.fallback-impact ul,
+.fallback-redirect-disclosure ul {
+  display: grid;
+  gap: var(--spacing-2);
+  margin-block-start: var(--spacing-3);
+}
+
+.fallback-extra-rules {
+  display: grid;
+  gap: var(--spacing-2);
+}
+
+.fallback-extra-rules code,
+.fallback-impact code,
+.fallback-redirect-disclosure code {
+  overflow-wrap: anywhere;
+}
+
+.fallback-notices[open] > summary,
+.fallback-redirect-disclosure[open] > summary {
+  margin-block-end: var(--spacing-3);
+}
+
+@media (max-width: 760px) {
+  .fallback-groups {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .fallback-model-button {
+    min-height: 44px;
+    font-size: 16px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fallback-model-button,
+  .fallback-inline-model {
+    scroll-behavior: auto;
+  }
+}
+
 .account-distribution {
   min-width: 0;
 }

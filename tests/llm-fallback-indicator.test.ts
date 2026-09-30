@@ -30,7 +30,7 @@ test("configured fallback badges name their source and expose keyboard focus", (
   expect(markup).toContain('aria-hidden="true"')
 })
 
-test("remembered configured fallback stays explicit in the badge and detail", () => {
+test("stored conversation route stays explicit in the badge and detail", () => {
   const fallback = { ...configured, cached: true }
   const badge: string = renderToStaticMarkup(
     createElement(LlmFallbackBadge, { fallback }),
@@ -38,9 +38,12 @@ test("remembered configured fallback stays explicit in the badge and detail", ()
   const banner: string = renderToStaticMarkup(
     createElement(LlmFallbackBanner, { fallback }),
   )
-  expect(badge).toContain("Configured fallback · cached")
-  expect(banner).toContain("Configured fallback · cached")
+  expect(badge).toContain("Configured fallback · conversation route")
+  expect(banner).toContain("Configured fallback · conversation route")
+  expect(banner).toContain("resumed the stored conversation model")
   expect(banner).toContain("No new HTTP 422 was required")
+  expect(badge).not.toContain("cached")
+  expect(banner).not.toContain("remembered")
 })
 
 test("a requested fallback policy does not imply a model switch", () => {

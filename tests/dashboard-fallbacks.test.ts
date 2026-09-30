@@ -16,6 +16,7 @@ import {
   adminHeaders,
   createTestAdminSession,
   resetTestAdminSession,
+  TEST_GATEWAY_KEY,
   type TestAdminSession,
 } from "./helpers/admin-session"
 
@@ -110,37 +111,73 @@ test("fallback settings require dashboard authentication", async () => {
   expect(response.status).toBe(401)
 })
 
-test("authenticated fallback settings include configuration and cache size", async () => {
+test("authenticated fallback settings include configuration and safety only", async () => {
   const response = await server.request("/dashboard/api/fallbacks", {
     headers: adminHeaders(adminSession, false),
   })
   expect(response.status).toBe(200)
   const body = (await response.json()) as {
     config: { enabled: boolean; rules: Array<unknown> }
-    cache: { entries: number }
+    safety: { safe: boolean }
   }
   expect(typeof body.config.enabled).toBe("boolean")
   expect(Array.isArray(body.config.rules)).toBe(true)
-  expect(body.cache.entries).toBe(0)
+  expect(typeof body.safety.safe).toBe("boolean")
+  expect(body).not.toHaveProperty("cache")
 })
 
 test("fallback mutations require the admin CSRF header", async () => {
-  for (const [method, path] of [
-    ["PUT", "/dashboard/api/fallbacks"],
-    ["DELETE", "/dashboard/api/fallbacks/cache"],
-  ]) {
-    const response = await server.request(path, {
-      method,
-      headers: adminHeaders(adminSession, false),
-      ...(method === "PUT" ? { body: JSON.stringify({ enabled: true }) } : {}),
-    })
-    expect(response.status).toBe(401)
-  }
+  const response = await server.request("/dashboard/api/fallbacks", {
+    method: "PUT",
+    headers: adminHeaders(adminSession, false),
+    body: JSON.stringify({ enabled: true }),
+  })
+  expect(response.status).toBe(401)
   expect(getLoadedModelFallbackConfig().enabled).toBe(false)
 })
 
-test("fallback PUT saves rules and settings and GET returns them", async () => {
-  const config = validateModelFallbackConfig({
+test("stale dashboard revisions cannot overwrite a newer fallback configuration", async () => {
+  setModelFallbackConfigForTest(null)
+  const original = await server.request("/dashboard/api/fallbacks", {
+    headers: adminHeaders(adminSession, false),
+  })
+  const before = (await original.json()) as {
+    config: ReturnType<typeof validateModelFallbackConfig>
+    revision: number
+  }
+  expect(Number.isSafeInteger(before.revision)).toBe(true)
+  const headers = {
+    ...adminHeaders(adminSession),
+    "if-match": JSON.stringify(String(before.revision)),
+  }
+  const first = await server.request("/dashboard/api/fallbacks", {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({
+      ...before.config,
+      notifyClient: !before.config.notifyClient,
+    }),
+  })
+  expect(first.status).toBe(200)
+  const committed = (await first.json()) as {
+    config: unknown
+    revision: number
+  }
+  expect(committed.revision).toBeGreaterThan(before.revision)
+  const stale = await server.request("/dashboard/api/fallbacks", {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({ ...before.config, rules: [] }),
+  })
+  expect(stale.status).toBe(409)
+  const current = await server.request("/dashboard/api/fallbacks", {
+    headers: adminHeaders(adminSession, false),
+  })
+  expect(await current.json()).toMatchObject(committed)
+})
+
+test("fallback PUT strips legacy affinity settings and GET returns canonical settings", async () => {
+  const requestConfig = {
     enabled: true,
     conversationAffinity: false,
     notifyClient: true,
@@ -155,27 +192,25 @@ test("fallback PUT saves rules and settings and GET returns them", async () => {
         enabled: true,
       },
     ],
-  })
+  }
+  const config = validateModelFallbackConfig(requestConfig)
   const update = await server.request("/dashboard/api/fallbacks", {
     method: "PUT",
     headers: adminHeaders(adminSession),
-    body: JSON.stringify(config),
+    body: JSON.stringify(requestConfig),
   })
   expect(update.status).toBe(200)
-  expect(await update.json()).toEqual({
+  const updated = (await update.json()) as { revision: number }
+  expect(Number.isSafeInteger(updated.revision)).toBe(true)
+  expect(updated).toMatchObject({
     config,
-    cache: { entries: 0 },
     safety: { safe: true },
   })
 
   const read = await server.request("/dashboard/api/fallbacks", {
     headers: adminHeaders(adminSession, false),
   })
-  expect(await read.json()).toEqual({
-    config,
-    cache: { entries: 0 },
-    safety: { safe: true },
-  })
+  expect(await read.json()).toEqual(updated)
 })
 
 test("invalid fallback requests cannot replace the active configuration", async () => {
@@ -184,8 +219,8 @@ test("invalid fallback requests cannot replace the active configuration", async 
     null,
     [],
     { enabled: "true" },
-    { affinityTtlSeconds: 0 },
-    { affinityMaxEntries: 100001 },
+    { affinityTtl: 0 },
+    { affinityEntries: 100001 },
     { rules: [{ id: "invalid", sourceModel: "same", targetModel: "same" }] },
     {
       rules: [
@@ -224,38 +259,34 @@ test("fallback validation errors identify the field without raw validator JSON",
   const response = await server.request("/dashboard/api/fallbacks", {
     method: "PUT",
     headers: adminHeaders(adminSession),
-    body: JSON.stringify({ affinityTtlSeconds: 0 }),
+    body: JSON.stringify({
+      rules: [{ id: "", sourceModel: "a", targetModel: "b" }],
+    }),
   })
   const body = (await response.json()) as { error: string }
   expect(response.status).toBe(400)
-  expect(body.error).toContain("affinityTtlSeconds:")
+  expect(body.error).toContain("rules.0.id:")
   expect(body.error).not.toContain('"code"')
 })
 
-test("clearing fallback affinity preserves configured rules", async () => {
-  const baseline = getLoadedModelFallbackConfig()
+test("removed fallback cache endpoint returns not found", async () => {
   const response = await server.request("/dashboard/api/fallbacks/cache", {
-    method: "DELETE",
-    headers: adminHeaders(adminSession),
+    headers: {
+      ...adminHeaders(adminSession, false),
+      authorization: `Bearer ${TEST_GATEWAY_KEY}`,
+    },
   })
-  expect(response.status).toBe(200)
-  expect(await response.json()).toEqual({ success: true, cleared: 0 })
-  expect(getLoadedModelFallbackConfig()).toEqual(baseline)
+  expect(response.status).toBe(404)
 })
 
-test("dashboard bundle exposes fallback settings, bounded chains, and notice limitations", () => {
+test("dashboard bundle exposes full chains and client notice controls without cache controls", () => {
   expect(DASHBOARD_HTML).toContain("/dashboard/api/fallbacks")
-  expect(DASHBOARD_HTML).toContain("/dashboard/api/fallbacks/cache")
+  expect(DASHBOARD_HTML).not.toContain("/dashboard/api/fallbacks/cache")
   expect(DASHBOARD_HTML).toContain("Enable fallbacks")
-  expect(DASHBOARD_HTML).toContain("3 fallback hops (4 model attempts)")
+  expect(DASHBOARD_HTML).not.toContain("3 fallback hops (4 model attempts)")
   expect(DASHBOARD_HTML).toContain("Each hop requires HTTP 422")
   expect(DASHBOARD_HTML).toContain("pauses all redirects and fallbacks")
   expect(DASHBOARD_HTML).not.toContain("fallback rules do not form a chain")
-  expect(DASHBOARD_HTML).toContain(
-    "Keep using the fallback for the same conversation",
-  )
   expect(DASHBOARD_HTML).toContain("Include diagnostic response headers")
   expect(DASHBOARD_HTML).toContain("Show native client fallback notice")
-  expect(DASHBOARD_HTML).toContain("cybersecurity routing")
-  expect(DASHBOARD_HTML).toContain("generic fallback notice")
 })

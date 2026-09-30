@@ -42,11 +42,8 @@ beforeEach(() => {
   setConfigForTest({})
   setModelFallbackConfigForTest({
     enabled: true,
-    conversationAffinity: true,
     notifyClient: false,
     nativeClientNotice: false,
-    affinityTtlSeconds: 86400,
-    affinityMaxEntries: 10000,
     rules: [{ id: "ws", sourceModel, targetModel, enabled: true }],
   })
   state.apiKeyAuth = "ws-client-secret"

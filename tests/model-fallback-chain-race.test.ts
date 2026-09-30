@@ -3,7 +3,6 @@ import { afterEach, expect, test } from "bun:test"
 import { HTTPError } from "~/lib/error"
 import {
   applyModelFallbackToPayload,
-  clearModelFallbackCache,
   recordModelFallbackResponse,
   runWithModelFallback,
 } from "~/lib/model-fallback"
@@ -27,7 +26,6 @@ function history(signatures: Array<string>) {
 }
 
 afterEach(() => {
-  clearModelFallbackCache()
   setModelFallbackConfigForTest(null)
 })
 
@@ -76,7 +74,7 @@ test("an older fallback success cannot replace a newer chain destination or disc
               422
             : 200,
         })
-        recordModelFallbackResponse(response)
+        await recordModelFallbackResponse(response)
         if (!response.ok) throw new HTTPError("upstream", response)
       },
     )

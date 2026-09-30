@@ -266,7 +266,7 @@ test("version two encrypted backups restore with the default override under the 
             args: [],
           }),
         ),
-      ).toEqual([{ value: "7" }])
+      ).toEqual([{ value: "8" }])
     })
   })
 })

@@ -5,7 +5,6 @@ import type { Model } from "~/services/copilot/get-models"
 
 import { setConfigForTest } from "~/lib/config"
 import { listLlmDebugLogs } from "~/lib/llm-debug-log"
-import { clearModelFallbackCache } from "~/lib/model-fallback"
 import {
   setModelFallbackConfigForTest,
   validateModelFallbackConfig,
@@ -193,7 +192,6 @@ beforeEach(() => {
   setConfigForTest({})
   setModelRedirectsForTest([])
   setModelSettingsForTest([])
-  clearModelFallbackCache()
   configure([
     ["chain-a", "chain-b"],
     ["chain-b", "chain-c"],
@@ -236,7 +234,6 @@ afterEach(() => {
   setModelSettingsForTest([])
   setModelFallbackConfigForTest(null)
   setSsePreflushDeadlineForTest()
-  clearModelFallbackCache()
 })
 
 test("Responses follows consecutive 422 rules and remembers the final model under the original source", async () => {
@@ -284,16 +281,19 @@ test("Responses allows the third fallback hop to succeed", async () => {
   })
 })
 
-test("Responses stops after three fallback hops and never tries a fifth model", async () => {
+test("Responses follows the configured chain beyond four attempts to its end", async () => {
   statuses.set("chain-c", 422)
   statuses.set("chain-d", 422)
+  statuses.set("chain-e", 422)
   const response = await post()
-  expect(response.status).toBe(422)
+  expect(response.status).toBe(200)
   expect(calls.map((call) => call.body.model)).toEqual([
     "chain-a",
     "chain-b",
     "chain-c",
     "chain-d",
+    "chain-e",
+    "chain-f",
   ])
 })
 
@@ -321,7 +321,7 @@ test("Responses bypasses all fallbacks when an intermediate cycle is configured"
 })
 
 test.each([200, 422])(
-  "a cached target gets at most three additional fallback hops when the fourth attempt returns %i",
+  "a stored conversation model follows every remaining fallback until HTTP %i",
   async (status) => {
     statuses.delete("chain-b")
     expect((await post({}, "cached-hop-bound")).status).toBe(200)
@@ -331,12 +331,13 @@ test.each([200, 422])(
     statuses.set("chain-d", 422)
     statuses.set("chain-e", status)
 
-    expect((await post({}, "cached-hop-bound")).status).toBe(status)
+    expect((await post({}, "cached-hop-bound")).status).toBe(200)
     expect(calls.map((call) => call.body.model)).toEqual([
       "chain-b",
       "chain-c",
       "chain-d",
       "chain-e",
+      ...(status === 422 ? ["chain-f"] : []),
     ])
   },
 )
@@ -516,11 +517,16 @@ test("accepted B streaming output is never replayed after an in-stream 422 error
       },
     },
   ])
-  const response = await post({ stream: true })
+  const response = await post({ stream: true }, "failed-stream-route")
   const wire = await response.text()
   expect(response.status).toBe(200)
   expect(wire).toContain("partial answer")
   expect(wire).toContain("response.failed")
+  expect(calls.map((call) => call.body.model)).toEqual(["chain-a", "chain-b"])
+  calls.length = 0
+  streams.delete("chain-b")
+  statuses.delete("chain-b")
+  expect((await post({}, "failed-stream-route")).status).toBe(200)
   expect(calls.map((call) => call.body.model)).toEqual(["chain-a", "chain-b"])
 })
 
