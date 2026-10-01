@@ -4,10 +4,12 @@ import { expect, test } from "bun:test"
 
 import { state } from "~/lib/state"
 
+import { probeResponsesCacheControl } from "./cache-control-probe"
 import {
   useIntegrationFixture,
   initializeTestState,
   postJSON,
+  request,
   TEST_TIMEOUT,
 } from "./setup"
 
@@ -27,33 +29,35 @@ const longStablePrefix = "Stable explicit cache prefix. ".repeat(128)
 test.skipIf(responsesModels.length === 0)(
   "accepts Responses explicit cache controls",
   async () => {
-    let accepted = false
-    for (const model of firstModelByProvider(responsesModels)) {
-      const response = await postJSON("/v1/responses", {
-        model: model.id,
-        input: [
-          {
-            role: "user",
-            content: [
+    const response = await probeResponsesCacheControl({
+      models: responsesModels,
+      request: async (model, signal) =>
+        request("/v1/responses", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal,
+          body: JSON.stringify({
+            model: model.id,
+            input: [
               {
-                type: "input_text",
-                text: longStablePrefix,
-                prompt_cache_breakpoint: { mode: "explicit" },
+                role: "user",
+                content: [
+                  {
+                    type: "input_text",
+                    text: longStablePrefix,
+                    prompt_cache_breakpoint: { mode: "explicit" },
+                  },
+                  { type: "input_text", text: "Reply with OK." },
+                ],
               },
-              { type: "input_text", text: "Reply with OK." },
             ],
-          },
-        ],
-        prompt_cache_options: { mode: "explicit", ttl: "30m" },
-        max_output_tokens: 32,
-      })
-      await response.arrayBuffer()
-      if (response.status !== 200) continue
-      accepted = true
-      break
-    }
+            prompt_cache_options: { mode: "explicit", ttl: "30m" },
+            max_output_tokens: 32,
+          }),
+        }),
+    })
 
-    expect(accepted).toBe(true)
+    expect(response.status).toBe(200)
   },
   TEST_TIMEOUT,
 )
@@ -74,19 +78,3 @@ test.skipIf(messagesModel === undefined)(
   },
   TEST_TIMEOUT,
 )
-
-function firstModelByProvider<T extends { vendor?: string }>(
-  models: ReadonlyArray<T>,
-): Array<T> {
-  const firstByProvider: Array<T> = []
-  const providers = new Set<string>()
-
-  for (const model of models) {
-    const provider = model.vendor ?? ""
-    if (providers.has(provider)) continue
-    providers.add(provider)
-    firstByProvider.push(model)
-  }
-
-  return firstByProvider
-}
