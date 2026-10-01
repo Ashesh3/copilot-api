@@ -12,6 +12,11 @@ import {
 } from "~/lib/model-fallback-config"
 import { getModelFallbackConversationIdentity } from "~/lib/model-fallback-conversation"
 import { getModelFallbackIdentity } from "~/lib/model-fallback-identity"
+import {
+  inspectModelFallbackResponse,
+  ModelFallbackResponseError,
+  type ModelFallbackReason,
+} from "~/lib/model-fallback-response"
 import { observeModelFallbackStream } from "~/lib/model-fallback-stream"
 import {
   captureForeignThinking,
@@ -107,7 +112,10 @@ function recordNotice(attempt: FallbackAttempt): void {
   if (!attempt.config.notifyClient) return
   setCopilotResponseHeader("x-copilot-api-fallback-from", attempt.sourceModel)
   setCopilotResponseHeader("x-copilot-api-fallback-to", attempt.targetModel)
-  setCopilotResponseHeader("x-copilot-api-fallback-reason", "http_422")
+  setCopilotResponseHeader(
+    "x-copilot-api-fallback-reason",
+    attempt.route.at(-1)?.reason ?? "http_422",
+  )
   setCopilotResponseHeader(
     "x-copilot-api-fallback-cached",
     String(attempt.resumed),
@@ -127,7 +135,7 @@ export function getModelFallbackNotice():
 }
 
 export interface ModelFallbackDebugInfo {
-  reason: "http_422"
+  reason: ModelFallbackReason
   sourceModel: string
   fromModel: string
   configuredTargetModel: string
@@ -151,7 +159,7 @@ export function getModelFallbackDebugInfo():
   )
     return undefined
   return {
-    reason: "http_422",
+    reason: hop.reason ?? "http_422",
     sourceModel: attempt.sourceModel,
     fromModel: hop.source,
     configuredTargetModel: hop.target,
@@ -199,6 +207,7 @@ export function applyModelFallbackTransition(payload: unknown): void {
 /** Called only with actual inference HTTP responses, never local errors. */
 export async function recordModelFallbackResponse(
   response: Response,
+  options: { endpoint?: string; signal?: AbortSignal | null } = {},
 ): Promise<Response> {
   const attempt = attemptStorage.getStore()
   if (!attempt || attempt.accepted) return response
@@ -206,9 +215,36 @@ export async function recordModelFallbackResponse(
   if (currentModel)
     attempt.visitedModels.add(getModelFallbackIdentity(currentModel))
   attempt.firstResponse = response
+  const outcome =
+    response.ok && (attempt.targetModel || nextFallbackModel(attempt)) ?
+      await inspectModelFallbackResponse(
+        response,
+        options.endpoint,
+        options.signal,
+      )
+    : undefined
+  // An overlapping operation must not retry after another response commits.
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- The awaited body read can overlap another operation in this attempt.
+  if (attempt.accepted || attempt.firstResponse !== response) return response
+  if (outcome?.reason && nextFallbackModel(attempt)) {
+    throw new ModelFallbackResponseError(response, outcome.reason)
+  }
+  return await acceptModelFallbackResponse(
+    attempt,
+    response,
+    outcome?.successful !== false,
+  )
+}
+
+async function acceptModelFallbackResponse(
+  attempt: FallbackAttempt,
+  response: Response,
+  successful: boolean,
+): Promise<Response> {
   attempt.accepted = response.ok
   if (!response.ok || !attempt.targetModel) return response
   recordNotice(attempt)
+  if (!successful) return response
   if (
     response.headers
       .get("content-type")
@@ -556,7 +592,7 @@ export async function runWithModelFallback<T>(
       options.signal?.throwIfAborted()
       const route = [
         ...attempt.route,
-        fallbackRouteHop(attempt, targetRedirect),
+        fallbackRouteHop(attempt, targetRedirect, error),
       ]
       attempt = {
         ...attempt,
@@ -595,11 +631,15 @@ function activeModel(attempt: FallbackAttempt): string | undefined {
 function fallbackRouteHop(
   attempt: FallbackAttempt,
   redirect: ModelRedirectResult,
+  error: unknown,
 ): StoredConversationModel["route"][number] {
   return {
     source: activeModel(attempt) ?? "",
     target: redirect.originalModel ?? redirect.model,
     resolved: redirect.model,
+    ...(error instanceof ModelFallbackResponseError ?
+      { reason: error.reason }
+    : {}),
   }
 }
 
@@ -633,8 +673,10 @@ function nextFallbackRedirect(
 function canRetryFallback(attempt: FallbackAttempt, error: unknown): boolean {
   return (
     !attempt.accepted
-    && attempt.firstResponse?.status === 422
-    && isHTTPError(error)
-    && error.response === attempt.firstResponse
+    && ((error instanceof ModelFallbackResponseError
+      && error.response === attempt.firstResponse)
+      || (attempt.firstResponse?.status === 422
+        && isHTTPError(error)
+        && error.response === attempt.firstResponse))
   )
 }

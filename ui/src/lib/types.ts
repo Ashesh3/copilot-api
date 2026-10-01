@@ -468,7 +468,7 @@ export interface ReplayStreamEvent {
 }
 
 export interface LlmDebugFallback {
-  reason: "http_422"
+  reason: "http_422" | "refusal" | "content_filter"
   sourceModel: string
   fromModel: string
   configuredTargetModel: string

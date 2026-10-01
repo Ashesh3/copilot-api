@@ -292,7 +292,8 @@ function FallbackWorkspace({
     )
     let sourceError: string | undefined
     let targetError: string | undefined
-    if (!sourceModel) sourceError = "Enter the model that may return HTTP 422."
+    if (!sourceModel)
+      sourceError = "Enter the model to configure a fallback for."
     else if (sourceModel.length > 256)
       sourceError = "Use a model ID with at most 256 characters."
     else if (duplicate && form.enabled)
@@ -388,8 +389,9 @@ function FallbackWorkspace({
           }}
         />
         <Text type="supporting" color="secondary">
-          Each connection requires HTTP 422; success, another error, an
-          unconfigured model, or a loop ends the path.
+          Each connection requires HTTP 422 or a supported buffered refusal;
+          success, another error, an unconfigured model, or a loop ends the
+          path.
         </Text>
       </HStack>
 
@@ -421,7 +423,7 @@ function FallbackWorkspace({
         {config.rules.length === 0 ?
           <EmptyState
             title="No fallback rules"
-            description="Add a source model and the fallback to try after HTTP 422."
+            description="Add a source model and the fallback to try after HTTP 422 or a supported buffered refusal."
             icon={<FallbackIcon width={28} height={28} />}
             actions={
               <Button
@@ -491,8 +493,10 @@ function FallbackWorkspace({
                 </ol>
                 <Text type="supporting" color="secondary">
                   This shows configured fallback links only. Runtime provider
-                  aliases, effort routing, success, and non-422 responses can
-                  alter or stop the effective path.
+                  aliases, effort routing, success, and other errors can alter
+                  or stop the effective path. Buffered Messages refusal and
+                  Responses content_filter results can trigger a fallback before
+                  output starts. Responses already streaming are not replayed.
                 </Text>
               </VStack>
             </div>
@@ -638,7 +642,7 @@ function FallbackWorkspace({
                     <TextInput
                       ref={targetRef}
                       label="Fallback model"
-                      description="The model to try after HTTP 422."
+                      description="The model to try after HTTP 422 or a supported buffered refusal."
                       value={form.targetModel}
                       onChange={(targetModel) =>
                         setForm((current) => ({ ...current, targetModel }))

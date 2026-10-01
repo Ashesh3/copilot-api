@@ -950,7 +950,10 @@ export async function routedFetch(
     || path === "/responses"
     || path === "/v1/messages"
   ) {
-    result.response = await recordModelFallbackResponse(result.response)
+    result.response = await recordModelFallbackResponse(result.response, {
+      endpoint: path,
+      signal: init?.signal,
+    })
   }
   return result
 }
