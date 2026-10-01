@@ -393,6 +393,52 @@ test("Responses 422 strips original reasoning once and routes future thread turn
   expect(JSON.stringify(calls[2].body)).toContain("fallback-signature")
 })
 
+test("buffered Responses content_filter follows the configured rule and remembers its reason", async () => {
+  configure({ notifyClient: true })
+  const successfulFetch = globalThis.fetch
+  globalThis.fetch = (async (
+    input: string | URL | Request,
+    init?: RequestInit,
+  ) => {
+    if (typeof init?.body !== "string") throw new Error("Expected JSON body")
+    const body = JSON.parse(init.body) as Record<string, unknown>
+    if (body.model !== "source-model") return await successfulFetch(input, init)
+    calls.push({ path: "/responses", body })
+    return Response.json({
+      id: "resp_filtered",
+      object: "response",
+      model: "source-model",
+      status: "incomplete",
+      output: [],
+      incomplete_details: { reason: "content_filter" },
+    })
+  }) as typeof fetch
+  for (const cached of [false, true]) {
+    const response = await post(
+      { stream: false, input: reasoningInput("filtered-history") },
+      { "thread-id": "buffered-filter-thread" },
+    )
+    expect(response.status).toBe(200)
+    expect(response.headers.get("x-copilot-api-fallback-reason")).toBe(
+      "content_filter",
+    )
+    expect(response.headers.get("x-copilot-api-fallback-cached")).toBe(
+      String(cached),
+    )
+    expect(await response.json()).toMatchObject({
+      status: "completed",
+      model: "source-model",
+      output: [expect.objectContaining({ type: "message" })],
+    })
+  }
+  expect(calls.map((call) => call.body.model)).toEqual([
+    "source-model",
+    "target-model",
+    "target-model",
+  ])
+  expect(JSON.stringify(calls.slice(1))).not.toContain("filtered-history")
+})
+
 test("Responses full-history replay removes known source signatures and preserves new fallback signatures", async () => {
   const originalInput = reasoningInput("foreign-source-signature")
   const first = await post(

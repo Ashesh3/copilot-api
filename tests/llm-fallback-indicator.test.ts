@@ -46,6 +46,49 @@ test("stored conversation route stays explicit in the badge and detail", () => {
   expect(banner).not.toContain("remembered")
 })
 
+test.each([
+  { reason: "refusal", trigger: "Messages refusal" },
+  { reason: "content_filter", trigger: "Responses content_filter" },
+])(
+  "a fresh $reason fallback describes its buffered trigger",
+  ({ reason, trigger }) => {
+    const fallback = { ...configured, reason }
+    const badge: string = renderToStaticMarkup(
+      createElement(LlmFallbackBadge, { fallback }),
+    )
+    const banner: string = renderToStaticMarkup(
+      createElement(LlmFallbackBanner, { fallback }),
+    )
+    expect(badge).toContain("Configured fallback")
+    expect(banner).toContain(`buffered ${trigger}`)
+    expect(banner).toContain("source-model → target-model")
+    expect(banner).not.toContain("HTTP 422")
+    expect(banner).not.toContain("resumed")
+  },
+)
+
+test.each([
+  { reason: "refusal", trigger: "Messages refusal" },
+  { reason: "content_filter", trigger: "Responses content_filter" },
+])(
+  "a stored $reason fallback retains its original trigger",
+  ({ reason, trigger }) => {
+    const fallback = { ...configured, reason, cached: true }
+    const badge: string = renderToStaticMarkup(
+      createElement(LlmFallbackBadge, { fallback }),
+    )
+    const banner: string = renderToStaticMarkup(
+      createElement(LlmFallbackBanner, { fallback }),
+    )
+    expect(badge).toContain("Configured fallback · conversation route")
+    expect(banner).toContain("resumed the stored conversation model")
+    expect(banner).toContain(`configured ${trigger} fallback`)
+    expect(banner).toContain(`No new ${trigger} was required`)
+    expect(banner).not.toContain("HTTP 422")
+    expect(banner).not.toContain("source-model returned")
+  },
+)
+
 test("a requested fallback policy does not imply a model switch", () => {
   const markup: string = renderToStaticMarkup(
     createElement(LlmFallbackBanner, {

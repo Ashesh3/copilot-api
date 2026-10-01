@@ -1,3 +1,4 @@
+import type { ModelFallbackReason } from "~/lib/model-fallback-response"
 import type { ForeignThinkingState } from "~/lib/model-fallback-thinking"
 import type { SqlSession, Storage } from "~/lib/storage/types"
 
@@ -8,6 +9,7 @@ export interface ConversationModelRoute {
   source: string
   target: string
   resolved: string
+  reason?: ModelFallbackReason
 }
 
 export interface ConversationModelBinding {
@@ -76,6 +78,12 @@ function decodeJson(value: unknown): unknown {
   }
 }
 
+function fallbackReason(value: unknown): ModelFallbackReason {
+  if (value === "http_422" || value === "refusal" || value === "content_filter")
+    return value
+  return invalid()
+}
+
 function decodeRoute(
   value: unknown,
   source: string,
@@ -90,17 +98,20 @@ function decodeRoute(
       !item
       || typeof item !== "object"
       || Array.isArray(item)
-      || Object.keys(item).sort().join(",") !== "resolved,source,target"
+      || !["reason,resolved,source,target", "resolved,source,target"].includes(
+        Object.keys(item).sort().join(","),
+      )
       || !("source" in item)
       || !("target" in item)
       || !("resolved" in item)
     )
       invalid()
-    const hop = {
+    const hop: ConversationModelRoute = {
       source: model(item.source),
       target: model(item.target),
       resolved: model(item.resolved),
     }
+    if ("reason" in item) hop.reason = fallbackReason(item.reason)
     if (hop.source !== current || visited.has(hop.resolved)) invalid()
     visited.add(hop.resolved)
     current = hop.resolved
@@ -163,6 +174,23 @@ async function currentBinding(
   )
 }
 
+function sameRoute(
+  left: Array<ConversationModelRoute>,
+  right: Array<ConversationModelRoute>,
+): boolean {
+  return (
+    left.length === right.length
+    && left.every((hop, index) => {
+      const candidate = right[index]
+      return (
+        hop.source === candidate.source
+        && hop.target === candidate.target
+        && hop.resolved === candidate.resolved
+      )
+    })
+  )
+}
+
 async function remember(
   session: SqlSession,
   input: RememberedConversationModel,
@@ -189,7 +217,7 @@ async function remember(
     (
       previous?.targetModel === input.targetModel
       && previous.identitySignature === input.identitySignature
-      && JSON.stringify(previous.route) === JSON.stringify(input.route)
+      && sameRoute(previous.route, input.route)
     ) ?
       previous
     : undefined

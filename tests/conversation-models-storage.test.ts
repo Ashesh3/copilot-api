@@ -124,6 +124,37 @@ test("concurrent same-target writers retain both sets of foreign fingerprints", 
   }
 })
 
+test.each([true, false])(
+  "concurrent same-route writers merge thinking across different fallback reasons (newer first: %s)",
+  async (newerFirst) => {
+    const value = await fixture()
+    const older = await value.repository.begin(conversationKey, binding)
+    const newer = await value.repository.begin(conversationKey, binding)
+    const earlier = accepted(older.requestSequence, "model-b", ["c"])
+    const later = {
+      ...accepted(newer.requestSequence, "model-b", ["d"]),
+      route: [
+        {
+          source: "model-a",
+          target: "model-b",
+          resolved: "model-b",
+          reason: "refusal" as const,
+        },
+      ],
+    }
+    for (const entry of newerFirst ? [later, earlier] : [earlier, later])
+      await value.repository.remember(entry)
+    const next = await value.repository.begin(conversationKey, binding)
+    expect(next.routes.get("model-a")?.foreignThinking.fingerprints).toEqual(
+      new Set(["c".repeat(64), "d".repeat(64)]),
+    )
+    expect(next.routes.get("model-a")?.route).toEqual(later.route)
+    expect(next.routes.get("model-a")?.requestSequence).toBe(
+      newer.requestSequence,
+    )
+  },
+)
+
 test.each(["model_fallbacks", "model_redirects"])(
   "peer changes to %s reject stale writers while current requests recover route candidates",
   async (namespace) => {

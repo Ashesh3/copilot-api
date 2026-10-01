@@ -403,11 +403,12 @@ The dashboard is the recommended interface for these controls:
 
 - **Redirects** map an exact source model/effort to a target model/effort. Rules
   are ordered and can chain only through later rules.
-- **Fallbacks** switch models only after upstream HTTP 422 and can continue
-  through every enabled rule in a chain. Each target also follows Model
-  Redirects, including effort and verbosity overrides. A cycle in redirects,
-  fallbacks, or their combination pauses both features until the conflicting
-  rules are fixed; the dashboard shows the loop.
+- **Fallbacks** switch models after upstream HTTP 422 or a buffered native
+  Messages refusal or Responses `content_filter` result, before client output
+  starts. They can continue through every enabled rule in a chain. Each target
+  also follows Model Redirects, including effort and verbosity overrides. A cycle
+  in redirects, fallbacks, or their combination pauses both features until the
+  conflicting rules are fixed; the dashboard shows the loop.
   Successful conversation routes and hashed old-thinking fingerprints persist
   in SQLite; optional client notices are configurable. See the
   [fallback configuration guide](docs/model-fallbacks.md).
@@ -524,7 +525,7 @@ Open `/dashboard` on the same host as the API. The dashboard includes:
 - replay for logged Chat Completions and Responses attempts;
 - GrowthBook feature flags and Codex/ChatGPT Statsig overrides;
 - request replacements and ordered model redirects;
-- HTTP 422 model fallback chains and stored conversation routing;
+- HTTP 422 and buffered refusal fallback chains with stored conversation routing;
 - per-model settings and per-account model routing;
 - GitHub account percentages, connection controls and per-account integration IDs;
 - custom provider configuration;

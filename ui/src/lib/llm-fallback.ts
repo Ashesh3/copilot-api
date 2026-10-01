@@ -22,9 +22,15 @@ export function fallbackDescription(fallback: LlmDebugFallback): string {
     fallback.hop > 1 ?
       ` Fallback hop ${fallback.hop}, originally requested ${fallback.sourceModel}.`
     : ""
+  let trigger = "HTTP 422"
+  if (fallback.reason === "refusal") trigger = "Messages refusal"
+  else if (fallback.reason === "content_filter")
+    trigger = "Responses content_filter"
+  const outcome =
+    trigger === "HTTP 422" ? trigger : `a buffered ${trigger} response`
   return fallback.cached ?
-      `This request resumed the stored conversation model from a configured HTTP 422 fallback: ${route}.${hop} No new HTTP 422 was required for this request.`
-    : `A configured gateway rule sent this request because ${fallback.fromModel} returned HTTP 422. ${route}.${hop}`
+      `This request resumed the stored conversation model from a configured ${trigger} fallback: ${route}.${hop} No new ${trigger} was required for this request.`
+    : `A configured gateway rule sent this request because ${fallback.fromModel} returned ${outcome}. ${route}.${hop}`
 }
 
 function observationIndicator(
