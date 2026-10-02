@@ -11,6 +11,7 @@ export type CompatibilityRetryKind =
   | "invalid_thinking_signature"
   | "unsupported_forced_tool_choice"
   | "unsupported_disabled_thinking"
+  | "unsupported_fallbacks"
 
 export type CompatibilityRetryDecision =
   | { kind: "none" }
@@ -29,6 +30,8 @@ const UNSUPPORTED_FORCED_TOOL_CHOICE_MESSAGE =
   'tool_choice: type "tool" and "any" are not supported for this model.'
 const UNSUPPORTED_DISABLED_THINKING_MESSAGE =
   '"thinking.type.disabled" is not supported for this model. Use "thinking.type.adaptive" and "output_config.effort" to control thinking behavior.'
+const UNSUPPORTED_FALLBACKS_MESSAGE =
+  "fallbacks: Extra inputs are not permitted"
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -74,6 +77,12 @@ function removeTemperature(body: Record<string, unknown>): boolean {
 function removeTopP(body: Record<string, unknown>): boolean {
   if (!hasOwn(body, "top_p")) return false
   delete body.top_p
+  return true
+}
+
+function removeUnsupportedFallbacks(body: Record<string, unknown>): boolean {
+  if (!hasOwn(body, "fallbacks")) return false
+  delete body.fallbacks
   return true
 }
 
@@ -184,6 +193,17 @@ function isNativeThinkingSignatureError(
   )
 }
 
+function isUnsupportedFallbacksError(
+  parsed: Record<string, unknown>,
+  error: Record<string, unknown>,
+): boolean {
+  return (
+    parsed.type === "error"
+    && error.type === "invalid_request_error"
+    && error.message === UNSUPPORTED_FALLBACKS_MESSAGE
+  )
+}
+
 // Closed decision tables naturally branch once per permitted retry class.
 // eslint-disable-next-line complexity
 function classifyParsedCompatibilityRetry(options: {
@@ -193,6 +213,16 @@ function classifyParsedCompatibilityRetry(options: {
 }): CompatibilityRetryDecision {
   if (!isRecord(options.parsed.error)) return { kind: "none" }
   const error = options.parsed.error
+  if (
+    options.endpoint === "/v1/messages"
+    && isUnsupportedFallbacksError(options.parsed, error)
+    && hasOwn(options.body, "fallbacks")
+  ) {
+    return {
+      kind: "unsupported_fallbacks",
+      normalize: removeUnsupportedFallbacks,
+    }
+  }
   if (
     options.endpoint === "/v1/messages"
     && error.type === "invalid_request_error"

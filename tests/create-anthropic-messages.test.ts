@@ -120,6 +120,102 @@ test.each([
   },
 )
 
+test.each([false, true])(
+  "retries rejected native fallbacks before returning a stream (%s)",
+  async (stream) => {
+    queuedResponses.push(
+      Response.json(
+        {
+          type: "error",
+          error: {
+            type: "invalid_request_error",
+            message: "fallbacks: Extra inputs are not permitted",
+          },
+        },
+        { status: 400 },
+      ),
+    )
+    if (stream) {
+      queuedResponses.push(
+        new Response('event: message_stop\ndata: {"type":"message_stop"}\n\n', {
+          headers: { "content-type": "text/event-stream" },
+        }),
+      )
+    }
+    const payload: AnthropicMessagesPayload & { fallbacks: unknown } = {
+      model: "claude-fable-5.1",
+      max_tokens: 64000,
+      messages: [{ role: "user", content: "hello" }],
+      thinking: { type: "adaptive" },
+      output_config: { effort: "max" },
+      fallbacks: [{ model: "claude-opus-5" }],
+      stream,
+    }
+    const original = structuredClone(payload)
+    const result = await createAnthropicMessages(payload, {
+      anthropicBeta: "fallbacks-2026-01-01",
+    })
+    if (stream) {
+      const chunks = []
+      for await (const chunk of result as AsyncIterable<{ data?: string }>) {
+        chunks.push(chunk)
+      }
+      expect(chunks).toHaveLength(1)
+      expect(chunks[0]?.data).toBe('{"type":"message_stop"}')
+    } else {
+      expect(result).toHaveProperty("content.0.text", "ok")
+    }
+    expect(capturedBodies).toHaveLength(2)
+    expect(capturedBodies[0]).toHaveProperty("fallbacks", payload.fallbacks)
+    const { fallbacks: rejectedPolicy, ...firstBody } = capturedBodies[0]
+    expect(rejectedPolicy).toEqual(payload.fallbacks)
+    expect(capturedBodies[1]).toEqual(firstBody)
+    expect(capturedHeaderAttempts[1]?.get("anthropic-beta")).toBe(
+      capturedHeaderAttempts[0]?.get("anthropic-beta"),
+    )
+    expect(payload).toEqual(original)
+  },
+)
+
+test.each([
+  { name: "provider accepts fallbacks", rejected: false, allowRetry: true },
+  { name: "retry disabled", rejected: true, allowRetry: false },
+  { name: "repeated rejection", rejected: true, allowRetry: true },
+])(
+  "bounds fallback policy compatibility: $name",
+  async ({ rejected, allowRetry }) => {
+    if (rejected) {
+      const rejection = {
+        type: "error",
+        error: {
+          type: "invalid_request_error",
+          message: "fallbacks: Extra inputs are not permitted",
+        },
+      }
+      queuedResponses.push(
+        Response.json(rejection, { status: 400 }),
+        Response.json(rejection, { status: 400 }),
+      )
+    }
+    const payload = {
+      model: "claude-fable-5.1",
+      max_tokens: 64,
+      messages: [{ role: "user" as const, content: "hello" }],
+      fallbacks: [{ model: "claude-opus-5" }],
+    }
+    const result = createAnthropicMessages(payload, {
+      allowCompatibilityRetry: allowRetry,
+    })
+    if (rejected) {
+      expect(result).rejects.toBeInstanceOf(HTTPError)
+    } else {
+      expect(await result).toHaveProperty("content.0.text", "ok")
+    }
+    expect(capturedBodies).toHaveLength(rejected && allowRetry ? 2 : 1)
+    expect(capturedBodies[0]).toHaveProperty("fallbacks", payload.fallbacks)
+  },
+)
+
 test("retries exact native thinking signature failure after stripping only thinking", async () => {
   queuedResponses.push(
     Response.json(

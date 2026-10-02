@@ -12,6 +12,80 @@ import {
 const errorResponse = (code: string, message: string, extra?: object) =>
   Response.json({ ...extra, error: { code, message } }, { status: 400 })
 
+describe("native fallback policy compatibility", () => {
+  test.each([
+    { fallbacks: "default" },
+    { fallbacks: [{ model: "claude-opus-5" }] },
+    { fallbacks: [] },
+  ])(
+    "removes only an explicitly rejected fallback policy",
+    async ({ fallbacks }) => {
+      const body = {
+        model: "claude-fable-5.1",
+        messages: [{ role: "user", content: "hello" }],
+        thinking: { type: "adaptive" },
+        output_config: { effort: "max" },
+        fallbacks,
+      }
+      const response = Response.json(
+        {
+          type: "error",
+          error: {
+            type: "invalid_request_error",
+            message: "fallbacks: Extra inputs are not permitted",
+          },
+        },
+        { status: 400 },
+      )
+      const result = await normalize({
+        body,
+        endpoint: "/v1/messages",
+        response,
+      })
+      expect(result.kind).toBe("unsupported_fallbacks")
+      expect(result.retry).toEqual({
+        model: body.model,
+        messages: body.messages,
+        thinking: body.thinking,
+        output_config: body.output_config,
+      })
+      expect(response.bodyUsed).toBe(false)
+    },
+  )
+
+  test.each([
+    { status: 422 },
+    { endpoint: "/responses" },
+    { type: "other_error" },
+    { message: "fallbacks.0.model: Extra inputs are not permitted" },
+    { message: "fallbacks: Extra inputs are not permitted extra" },
+    { body: { model: "claude-fable-5.1" } },
+  ] as Array<{
+    status?: number
+    endpoint?: CompatibilityRetryEndpoint
+    type?: string
+    message?: string
+    body?: Record<string, unknown>
+  }>)("does not retry a near miss %j", async (variation) => {
+    const decision = await classifyCompatibilityRetry({
+      body: variation.body ?? { fallbacks: [{ model: "claude-opus-5" }] },
+      endpoint: variation.endpoint ?? "/v1/messages",
+      response: Response.json(
+        {
+          type: "error",
+          error: {
+            type: variation.type ?? "invalid_request_error",
+            message:
+              variation.message ?? "fallbacks: Extra inputs are not permitted",
+          },
+        },
+        { status: variation.status ?? 400 },
+      ),
+    })
+    expect(decision.kind).toBe("none")
+  })
+})
+
 async function normalize(options: {
   body: Record<string, unknown>
   endpoint: CompatibilityRetryEndpoint
