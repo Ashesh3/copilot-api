@@ -296,8 +296,16 @@ test("exposes requested fallback policy on a rejected request without claiming e
   })
   expect(response.status).toBe(400)
   await response.text()
-  expect(calls).toHaveLength(1)
-  const entry = (await listLlmDebugLogs()).entries[0]
+  expect(calls).toHaveLength(2)
+  expect(calls[0]).toHaveProperty("fallbacks", [{ model: "claude-opus-5" }])
+  expect(calls[1]).not.toHaveProperty("fallbacks")
+  expect(calls[1]?.model).toBe(SOURCE_MODEL)
+  const entries = (await listLlmDebugLogs()).entries
+  const entry = entries.find((item) =>
+    item.fallbackObservations?.some(
+      (observation) => observation.kind === "requested",
+    ),
+  )
   expect(entry).toMatchObject({
     status: "error",
     fallbackObservations: [
@@ -308,7 +316,8 @@ test("exposes requested fallback policy on a rejected request without claiming e
       },
     ],
   })
-  expect(entry.fallback).toBeUndefined()
+  expect(entry?.fallback).toBeUndefined()
+  expect(entries.every((item) => item.fallback === undefined)).toBe(true)
 })
 
 test("dashboard list and detail expose explicit upstream fallback evidence", async () => {
