@@ -780,6 +780,8 @@ async function handleCustomGoogleRequest(
   }
   const { payload: replacedPayload, appliedRules } =
     await applyReplacementsToPayload(candidate.payload)
+  // The shared translator's Copilot-only default is not a custom-provider field.
+  delete replacedPayload.snippy
   applyModelFallbackTransition(replacedPayload)
   recordCopilotTranslationFindings("chat", candidate.endpoint, candidate.check)
   setRequestContext(c, {

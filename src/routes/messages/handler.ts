@@ -1294,12 +1294,15 @@ async function executeCustomProviderChatCompletions(
 ) {
   const {
     reference,
-    payload,
+    payload: translatedPayload,
     requestedModel,
     appliedRules,
     reasoningEffort,
     webSearchMaxUses,
   } = options
+  // Translation adds this Copilot-only control; custom providers may reject it.
+  const payload = { ...translatedPayload }
+  delete payload.snippy
   const responseModel = requestedModel ?? payload.model
 
   logger.debug(
