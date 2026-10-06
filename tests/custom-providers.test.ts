@@ -456,6 +456,7 @@ test("custom Google applies detached replacements exactly once", async () => {
   expect(JSON.stringify(requests[0]?.body)).toContain(
     "PUBLIC_GOOGLE_REPLACEMENT",
   )
+  expect(requests[0]?.body).not.toHaveProperty("snippy")
 })
 
 function restoreEnv(name: string, value: string | undefined): void {
@@ -1413,6 +1414,7 @@ test("custom Chat receives the tolerant native candidate without Copilot caching
         content: { type: "future-private-part", payload: true },
       },
       tools: { type: "future-private-tool", payload: true },
+      snippy: { enabled: true },
       stream: false,
     }),
   })
@@ -1427,6 +1429,7 @@ test("custom Chat receives the tolerant native candidate without Copilot caching
   expect(requests[0]?.body.tools).toEqual([
     { type: "future-private-tool", payload: true },
   ])
+  expect(requests[0]?.body.snippy).toEqual({ enabled: true })
   expect(JSON.stringify(requests[0]?.body)).not.toContain(
     "copilot_cache_control",
   )
@@ -1457,6 +1460,7 @@ test("Anthropic messages request routes to custom chat provider by model id", as
   expect(requests[0]?.url).toBe("https://custom.example/v1/chat/completions")
   expect(requests[0]?.body.model).toBe("glm-5.2")
   expect(requests[0]?.body.max_tokens).toBe(1)
+  expect(requests[0]?.body).not.toHaveProperty("snippy")
   expect(requests[0]?.body.reasoning_effort).toBe("high")
   expect(requests[0]?.headers.get("authorization")).toBe("Bearer custom-key")
   expect(requests[0]?.headers.get("x-custom-trace")).toBe(CUSTOM_HEADER_VALUE)
@@ -1475,6 +1479,92 @@ test("Anthropic messages request routes to custom chat provider by model id", as
     },
   })
 })
+
+test.each([
+  {
+    name: "Messages",
+    path: "/v1/messages",
+    body: {
+      model: "custom-chat-alias",
+      max_tokens: 16,
+      messages: [{ role: "user", content: "hello" }],
+      tools: [{ name: "lookup", input_schema: { type: "object" } }],
+    },
+    terminal: "event: message_stop",
+  },
+  {
+    name: "Google",
+    path: "/v1beta/models/custom-chat-alias:streamGenerateContent?alt=sse",
+    body: {
+      contents: [{ role: "user", parts: [{ text: "hello" }] }],
+      tools: [
+        {
+          functionDeclarations: [
+            { name: "lookup", parameters: { type: "object" } },
+          ],
+        },
+      ],
+    },
+    terminal: '"finishReason":"STOP"',
+  },
+])(
+  "$name custom streams omit injected Copilot controls",
+  async ({ path, body, terminal }) => {
+    fetchMock.mockImplementationOnce((url: string, init?: RequestInit) => {
+      const outgoing =
+        typeof init?.body === "string" ?
+          (JSON.parse(init.body) as Record<string, unknown>)
+        : {}
+      requests.push({
+        url,
+        body: outgoing,
+        headers: new Headers(init?.headers),
+      })
+      if (Object.hasOwn(outgoing, "snippy")) {
+        return Response.json(
+          {
+            error: {
+              message:
+                "The parameter 'snippy' is not supported by this gateway profile.",
+              type: "invalid_request_error",
+              code: "unsupported_parameter",
+            },
+          },
+          { status: 400 },
+        )
+      }
+      return new Response(
+        [
+          createCustomProviderStreamChunk(null, "custom streamed"),
+          createCustomProviderStreamChunk("stop"),
+        ]
+          .map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`)
+          .join("") + "data: [DONE]\n\n",
+        { headers: { "content-type": "text/event-stream" } },
+      )
+    })
+
+    const response = await protocolRequest(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...body, stream: true }),
+    })
+    const output = await response.text()
+
+    expect(response.status).toBe(200)
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.body).not.toHaveProperty("snippy")
+    expect(requests[0]?.body).toMatchObject({
+      model: "custom-chat-model",
+      stream: true,
+      tools: [{ type: "function", function: { name: "lookup" } }],
+    })
+    expect(output).toContain("custom streamed")
+    expect(output).toContain(terminal)
+    expect(output).toContain("custom-chat-alias")
+    expect(output).not.toContain("unsupported_parameter")
+  },
+)
 
 test("streams custom-provider data before raw debug capture completes", async () => {
   const chunk = JSON.stringify({

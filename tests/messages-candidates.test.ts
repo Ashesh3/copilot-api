@@ -86,6 +86,7 @@ test("builds detached endpoint-correlated Messages candidates", async () => {
     candidates.native.payload.messages,
   )
   expect(candidates.chat?.payload.messages[0]?.content).toBe("hello")
+  expect(candidates.chat?.payload.snippy).toEqual({ enabled: false })
   expect(source).toEqual(snapshot)
 
   const selection = selectEvaluatedCopilotCandidate({
