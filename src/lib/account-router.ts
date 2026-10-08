@@ -241,6 +241,15 @@ function destinationForPath(path: string): string {
     case "/embeddings": {
       return "Embeddings"
     }
+    case "/v1/decisions": {
+      return "Decisions"
+    }
+    case "/v1/images/generations": {
+      return "Image Generations"
+    }
+    case "/v1/images/edits": {
+      return "Image Edits"
+    }
     case "/v1/messages": {
       return "Anthropic Messages"
     }

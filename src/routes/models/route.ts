@@ -4,6 +4,7 @@ import type { Model } from "~/services/copilot/get-models"
 
 import { getLastUsedAccountId } from "~/lib/account-router"
 import { getCustomProviderModels } from "~/lib/custom-providers"
+import { getModelEndpointSupport } from "~/lib/endpoint-routing"
 import { forwardError } from "~/lib/error"
 import { modelHasOneMillionContext } from "~/lib/model-capabilities"
 import { applyModelRedirect, getAllModelRedirects } from "~/lib/model-redirect"
@@ -81,6 +82,12 @@ function supportedEndpointsForClient(model: {
   return [...new Set([...endpoints, "ws:/responses"])]
 }
 
+/** Long-context aliases are chat-client names; Decisions-only rows get none. */
+function supportsConversation(model: Model): boolean {
+  const support = getModelEndpointSupport(model)
+  return support.chat || support.messages || support.responses
+}
+
 function toThinkingOption(
   effort: ReasoningEffort,
   defaultEffort: ReasoningEffort | undefined,
@@ -117,7 +124,9 @@ function toCopilotModelListing(model: Model): ModelDiscoveryListing {
     owned_by: model.vendor ?? "unknown",
     display_name: model.name,
     ...(supportedEndpoints ? { supported_endpoints: supportedEndpoints } : {}),
-    ...(modelHasOneMillionContext(model) ? { supports_1m_context: true } : {}),
+    ...(modelHasOneMillionContext(model) && supportsConversation(model) ?
+      { supports_1m_context: true }
+    : {}),
     ...(thinking ? { thinking } : {}),
   }
 }

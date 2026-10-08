@@ -47,6 +47,19 @@ const INFERENCE_ROUTES: Array<InferenceCorsRoute> = [
   },
   {
     method: "POST",
+    matches: exactPath("/decisions", "/v1/decisions"),
+  },
+  {
+    method: "POST",
+    matches: exactPath(
+      "/images/generations",
+      "/v1/images/generations",
+      "/images/edits",
+      "/v1/images/edits",
+    ),
+  },
+  {
+    method: "POST",
     matches: exactPath("/v1/messages", "/v1/messages/count_tokens"),
   },
   {

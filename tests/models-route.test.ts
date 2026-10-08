@@ -864,3 +864,45 @@ test("advertises Claude dash aliases for dotted Claude model IDs", async () => {
     name: "Claude Haiku 4.5",
   })
 })
+
+test("lists Copilot Decisions models without chat long-context aliases", async () => {
+  state.models = {
+    object: "list",
+    data: [
+      {
+        id: "gpt-6-luna-decisions",
+        name: "GPT-6 Luna Decisions",
+        object: "model",
+        preview: true,
+        vendor: "Experimental",
+        version: "gpt-6-luna-decisions",
+        model_picker_enabled: false,
+        is_chat_default: false,
+        is_chat_fallback: false,
+        capabilities: {
+          family: "gpt-6-luna",
+          limits: {
+            max_context_window_tokens: 1_000_000,
+            max_prompt_tokens: 872_000,
+          },
+          object: "model_capabilities",
+          supports: {},
+          tokenizer: "o200k_base",
+          type: "decisions",
+        },
+        supported_endpoints: ["/v1/decisions"],
+      },
+    ],
+  }
+
+  const listings = await buildModelDiscoveryListings({ includeHidden: true })
+  const decisions = listings.find(
+    (entry) => entry.id === "gpt-6-luna-decisions",
+  )
+
+  expect(decisions?.supported_endpoints).toEqual(["/v1/decisions"])
+  expect(decisions?.supports_1m_context).toBeUndefined()
+  expect(listings.map((entry) => entry.id)).not.toContain(
+    "gpt-6-luna-decisions[1m]",
+  )
+})
