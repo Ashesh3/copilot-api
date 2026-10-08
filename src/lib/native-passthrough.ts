@@ -72,10 +72,13 @@ function createUnsupportedModelError(
 /** Routes one native Copilot call and relays the upstream body unchanged. */
 export async function dispatchNativeCopilotRequest(
   c: Context,
-  request: Omit<NativeCopilotRequest, "signal">,
+  {
+    requestedModel,
+    ...request
+  }: Omit<NativeCopilotRequest, "signal"> & { requestedModel?: string },
 ): Promise<Response> {
   setRequestContext(c, {
-    requestedModel: request.model,
+    requestedModel: requestedModel ?? request.model,
     provider: ENDPOINTS[request.endpoint].provider,
     model: request.model,
   })

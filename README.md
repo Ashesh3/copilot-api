@@ -298,12 +298,18 @@ and Copilot's `copilot_usage` billing details. Edits also accept a JSON body
 whose `images` array holds `image_url` data URLs. Copilot rejects
 `stream: true` and limits an edit request to 32 MiB.
 
+Codex's built-in image tool always requests `gpt-image-2`, which Copilot does
+not serve. While no live catalog lists that name, image requests naming it use
+the first live model that advertises the requested route, currently
+`gpt-image-2.5-sunburst`, so Codex generates and edits images through the
+gateway without configuration. No other model name is substituted.
+
 Copilot currently marks Decisions and image models picker-hidden, so generic
 `GET /v1/models` omits them. Send a `Copilot-Integration-Id` header to list the
 full catalog, where each model advertises its route in `supported_endpoints`.
-Request fields, multipart upload bytes, and response bytes pass through
-unchanged. A model whose live record lacks the requested route receives a
-local `400`.
+Apart from that `gpt-image-2` substitution, request fields, multipart upload
+bytes, and response bytes pass through unchanged. A model whose live record
+lacks the requested route receives a local `400`.
 
 ### Anthropic-compatible clients and Claude Code
 

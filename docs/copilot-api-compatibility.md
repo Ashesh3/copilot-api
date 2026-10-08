@@ -102,13 +102,20 @@ with non-blank `type` and unique non-blank `name` values. Image edits accept
 JSON or `multipart/form-data`; any other content type receives a local `400`.
 Failures return a local `400` naming the field. Multipart uploads are parsed
 only to read `model` and are forwarded byte for byte with their original
-boundary. JSON fields are forwarded unchanged. The upstream service validates
-prompts, image references, options, streaming, and its edit size limit.
+boundary. JSON fields are forwarded unchanged. The one exception is the OpenAI
+image model name that Codex's built-in image tool always requests, which
+Copilot does not serve: while no live catalog lists that name, an image request
+naming it resolves to the first live model that advertises the requested route.
+Only the JSON `model` value changes; a multipart edit is re-encoded under a new
+boundary with the new `model` part, keeping each upload's bytes, file name, and
+type. Request logs show both names. The upstream service validates prompts,
+image references, options, streaming, and its edit size limit.
 
 Endpoint authority follows live metadata. When the selected account's model
 record omits the requested route from `supported_endpoints`, the gateway returns
-a local `400` with `model_not_supported` before dispatch. A model absent from
-every live catalog is still forwarded, and the upstream service decides.
+a local `400` with `model_not_supported` before dispatch. Any other model absent
+from every live catalog, including Codex's image model name when no live model
+advertises the route, is still forwarded, and the upstream service decides.
 Successful response bytes and content type are returned unchanged, including
 the upstream `model` value and decimal spellings. Reported input and output
 tokens count toward gateway usage, and attempts appear in LLM Debug without
