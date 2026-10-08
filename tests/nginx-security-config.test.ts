@@ -308,6 +308,16 @@ test("WebSocket locations keep exact methods without local lifetimes", async () 
   )
 })
 
+test("public template publishes Decisions as a POST-only JSON route", async () => {
+  const publicTemplate = await read(
+    "sites-available/public-domain.conf.template",
+  )
+
+  expect(publicTemplate).toMatch(
+    /location ~ \^\/\(\?:v1\/\)\?decisions\/\?\$ \{[^{}]*limit_except POST OPTIONS \{ deny all; \}[^{}]*proxy_pass \{\{UPSTREAM_URL\}\};/,
+  )
+})
+
 test("authenticated generation streams disable buffering without timeouts", async () => {
   const [publicTemplate, spoofTemplate] = await Promise.all([
     read("sites-available/public-domain.conf.template"),

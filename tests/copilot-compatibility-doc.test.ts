@@ -100,6 +100,7 @@ const routeMatrix = [
   { method: "POST", canonical: "/v1/messages" },
   { method: "POST", canonical: "/v1/messages/count_tokens" },
   { method: "POST", canonical: "/v1/embeddings", alias: "/embeddings" },
+  { method: "POST", canonical: "/v1/decisions", alias: "/decisions" },
   {
     method: "POST",
     canonical: "/v1/alpha/search",

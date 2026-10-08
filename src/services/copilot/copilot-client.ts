@@ -324,6 +324,7 @@ function isLlmDebugPath(path: string): boolean {
     path === "/chat/completions"
     || path === "/responses"
     || path === "/embeddings"
+    || path === "/v1/decisions"
     || path === "/v1/messages"
   )
 }

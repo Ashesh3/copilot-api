@@ -43,6 +43,7 @@ authentication model is documented in the main README.
 | Anthropic Messages | `POST /v1/messages` | No prefix-free alias |
 | Anthropic token count | `POST /v1/messages/count_tokens` | No prefix-free alias |
 | Embeddings | `POST /v1/embeddings` | `POST /embeddings` |
+| Decisions | `POST /v1/decisions` | `POST /decisions`; native JSON passthrough, no dialect translation |
 | Audio transcriptions | `POST /v1/audio/transcriptions` | No prefix-free alias; Groq-backed Whisper compatibility |
 | Search compatibility | `POST /v1/alpha/search` | `POST /alpha/search` |
 | Google-style generation | `POST /v1beta/models/:model:generateContent` | `POST /v1/models/:model:generateContent`; `POST /models/:model:generateContent` |
@@ -81,6 +82,33 @@ a local Google `400` before body parsing or upstream dispatch. Ordinary request,
 authentication, console, and Sentry diagnostics use the Google route template
 instead of the model/action segment, and debug logging does not inspect bodies
 for unsupported actions.
+
+## Decisions compatibility
+
+`POST /v1/decisions` forwards Copilot's native Decisions API. A request
+evaluates one `input` against named `predicate`, `choice`, and `score`
+questions; the response contains structured `answers` with probabilities and
+token `usage`. It is not a generation API, so the gateway never translates it
+to or from Chat, Responses, Messages, or Google requests.
+
+Local validation is limited to routing needs and to checks the upstream service
+rejects with a bare `Bad Request`: the body must be a JSON object with a
+non-blank `model` and a nonempty `questions` array whose entries are objects
+with non-blank `type` and unique non-blank `name` values. Failures return a
+local `400` naming the field. Instructions, choices, levels, `input`, and any
+other fields are forwarded unchanged.
+
+Endpoint authority follows live metadata. When the selected account's model
+record omits `/v1/decisions` from `supported_endpoints`, the gateway returns a
+local `400` with `model_not_supported` before dispatch. A model absent from
+every live catalog is still forwarded, and the upstream service decides.
+Successful response bytes and content type are returned unchanged, including
+the upstream `model` value and decimal spellings. Reported input and output
+tokens count toward gateway usage, and attempts appear in LLM Debug without
+replay. Generic discovery follows the picker flag, which currently hides
+Decisions models; Copilot catalog requests list them without long-context
+aliases. Model redirects, fallbacks, replacements, and custom providers do not
+apply.
 
 ## Model discovery and endpoint routing
 

@@ -119,6 +119,12 @@ server {
     proxy_pass {{UPSTREAM_URL}};
   }
 
+  # Copilot Decisions returns one JSON body for structured questions.
+  location ~ ^/(?:v1/)?decisions/?$ {
+    limit_except POST OPTIONS { deny all; }
+    proxy_pass {{UPSTREAM_URL}};
+  }
+
   location = /v1/audio/transcriptions {
     limit_except POST OPTIONS { deny all; }
     proxy_pass {{UPSTREAM_URL}};

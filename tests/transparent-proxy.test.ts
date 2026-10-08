@@ -354,3 +354,19 @@ test("does not let whitelisted redirected hosts bypass owned API route auth", as
   expect(response.status).toBe(401)
   expect(fetchMock).not.toHaveBeenCalled()
 })
+
+test.each(["/v1/decisions", "/decisions"])(
+  "does not let whitelisted redirected hosts bypass %s auth",
+  async (path) => {
+    const ip = "198.51.100.15"
+    whitelistIp(ip)
+
+    const response = await server.request(path, {
+      method: "POST",
+      headers: { host: "api.anthropic.com", ...trustedHeaders(ip) },
+    })
+
+    expect(response.status).toBe(401)
+    expect(fetchMock).not.toHaveBeenCalled()
+  },
+)

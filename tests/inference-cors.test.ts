@@ -203,6 +203,8 @@ test.each([
   ["POST", "/v1/chat/completions"],
   ["POST", "/embeddings"],
   ["POST", "/v1/embeddings"],
+  ["POST", "/decisions"],
+  ["POST", "/v1/decisions"],
   ["POST", "/v1/messages"],
   ["POST", "/v1/messages/count_tokens"],
   ["POST", "/responses"],

@@ -45,6 +45,7 @@ import { codexSearchRoutes } from "./routes/codex-search/route"
 import { computerUsePolicyRoutes } from "./routes/computer-use-policy/route"
 import { copilotControlPlaneRoutes } from "./routes/copilot-control-plane/route"
 import { dashboardRoutes } from "./routes/dashboard/route"
+import { decisionRoutes } from "./routes/decisions/route"
 import { directConnectRoutes } from "./routes/direct-connect/route"
 import { embeddingRoutes } from "./routes/embeddings/route"
 import { environmentsRoutes } from "./routes/environments/route"
@@ -81,6 +82,7 @@ export function getRoutingSourceProtocol(path: string): string {
   if (path.includes("/responses")) return "Responses"
   if (path.includes("/chat/completions")) return "Chat Completions"
   if (path.includes("/embeddings")) return "Embeddings"
+  if (/^\/(?:v1\/)?decisions\/?$/.test(path)) return "Decisions"
   if (path.includes("/audio/transcriptions")) return "Audio Transcriptions"
   if (path.endsWith("/complete")) return "Legacy Complete"
   if (path.includes("/search")) return "Search"
@@ -254,6 +256,7 @@ server.route("", copilotControlPlaneRoutes)
 server.route("/chat/completions", completionRoutes)
 server.route("/models", modelRoutes)
 server.route("/embeddings", embeddingRoutes)
+server.route("/decisions", decisionRoutes)
 server.route("/usage", usageRoute)
 // Traffic-shaping config (replacements / model-redirects) is admin-only via
 // /dashboard/api/* (admin session cookie + CSRF). Do not re-expose under
@@ -266,6 +269,7 @@ server.route("/v1/chat/completions", completionRoutes)
 server.route("/v1/models", modelRoutes)
 server.route("/v1beta/models", modelRoutes)
 server.route("/v1/embeddings", embeddingRoutes)
+server.route("/v1/decisions", decisionRoutes)
 server.route("/v1/audio/transcriptions", audioTranscriptionRoutes)
 server.route("/v1/responses", responsesRoutes)
 server.route("/v1/alpha/search", codexSearchRoutes)
