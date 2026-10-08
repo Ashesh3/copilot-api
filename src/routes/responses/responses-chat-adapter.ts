@@ -24,6 +24,7 @@ import { createWebSearchFunctionTool } from "~/services/copilot/mcp-web-search"
 import type { ResponsesAttachmentCache } from "./attachment-cache"
 
 import { normalizeResponsesAgentMessage } from "./agent-message"
+import { toCompactionSummaryRequest } from "./compaction-trigger"
 import { associateResponsesFunctionCalls } from "./tool-call-association"
 
 export type ResponsesChatCandidate = EvaluatedEndpointCandidate<
@@ -690,7 +691,7 @@ function addUnsupportedTopLevelFindings(
 export async function adaptResponsesToChatCandidate(
   options: AdaptResponsesToChatOptions,
 ): Promise<ResponsesChatCandidate> {
-  const source = clone(options.source)
+  const source = toCompactionSummaryRequest(clone(options.source))
   source.model = options.finalModel ?? source.model
   if (options.finalReasoningEffort !== undefined) {
     source.reasoning = {

@@ -49,6 +49,7 @@ import {
 } from "~/services/copilot/create-chat-completions"
 import {
   type ResponseInputItem,
+  type ResponseOutputCompaction,
   type ResponseUsage,
   type ResponsesPayload,
   type ResponsesResult,
@@ -62,7 +63,11 @@ import {
   messagesCompactionSummary,
   responsesCompactionSummary,
 } from "./compact-summary"
-import { adaptResponsesToMessagesCandidate } from "./messages-bridge"
+import { createProxyCompactionItem } from "./compaction-trigger"
+import {
+  adaptResponsesToMessagesCandidate,
+  anthropicResponseToResponsesResult,
+} from "./messages-bridge"
 import { readResponsesRequestJson } from "./request-json"
 import { expandCompactionItems, getResponsesRequestOptions } from "./utils"
 
@@ -77,17 +82,11 @@ interface CompactRequestBody {
   prompt_cache_key?: string
 }
 
-interface CompactionItem {
-  id: string
-  type: "compaction"
-  encrypted_content: string
-}
-
 interface CompactedResponse {
   id: string
   object: "response.compaction"
   created_at: number
-  output: Array<CompactionItem>
+  output: Array<ResponseOutputCompaction>
   usage: ResponseUsage | null
 }
 
@@ -98,19 +97,11 @@ const buildCompactedResponse = (
   summaryText: string,
   usage: ResponseUsage | null,
 ): CompactedResponse => {
-  const encoded = Buffer.from(summaryText, "utf8").toString("base64")
-
   return {
     id: `resp_compact_${randomUUID().replaceAll("-", "").slice(0, 24)}`,
     object: "response.compaction",
     created_at: Math.floor(Date.now() / 1000),
-    output: [
-      {
-        id: `cmp_${randomUUID().replaceAll("-", "").slice(0, 24)}`,
-        type: "compaction",
-        encrypted_content: encoded,
-      },
-    ],
+    output: [createProxyCompactionItem(summaryText)],
     usage,
   }
 }
@@ -263,7 +254,14 @@ async function compactWithMessages(
     },
     { compaction: true, signal: c.req.raw.signal },
   )
-  return messagesCompactionSummary(response as AnthropicResponse)
+  const anthropicResponse = response as AnthropicResponse
+  return messagesCompactionSummary(
+    anthropicResponse,
+    anthropicResponseToResponsesResult(
+      anthropicResponse,
+      anthropicResponse.model,
+    ),
+  )
 }
 
 export const handleCompact = async (c: Context) => {
