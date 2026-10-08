@@ -234,6 +234,14 @@ export type ResponseOutputItem =
   | ResponseOutputCustomToolCall
   | ResponseOutputToolSearchCall
   | ResponseOutputWebSearchCall
+  | ResponseOutputCompaction
+
+/** Replacement history returned for a Codex compaction request. */
+export interface ResponseOutputCompaction {
+  id: string
+  type: "compaction"
+  encrypted_content: string
+}
 
 export interface ResponseOutputWebSearchCall {
   id: string

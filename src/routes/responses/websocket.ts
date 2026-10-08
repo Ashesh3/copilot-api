@@ -94,12 +94,14 @@ import {
   resolvePreparedResponsesWebSearchCalls,
   type ResponsesChatCompletionFactory,
 } from "./chat-fallback-completion"
+import { hasCompactionTrigger } from "./compaction-trigger"
 import {
   prepareResponsesCandidates,
   type ResponsesEndpointCandidate,
   selectResponsesCandidate,
 } from "./fallback-candidates"
 import {
+  chatCompactionTriggerResult,
   disableParallelWebSearch,
   normalizeResponsesReasoning,
   rewriteResponseModelInEvent,
@@ -1457,6 +1459,17 @@ async function streamChatCompletionsOverWs(options: {
   const { initiator, payload, responseContext, turn, ws } = options
   const compaction = isResponsesCompactionRequest(responseContext)
   const ccPayload = structuredClone(payload)
+  if (hasCompactionTrigger(responseContext)) {
+    await streamChatCompactionOverWs({
+      ccPayload,
+      compaction,
+      initiator,
+      responseContext,
+      turn,
+      ws,
+    })
+    return
+  }
   const needsWebSearch =
     ccPayload.tools?.some((tool) => tool.function.name === "web_search")
     ?? false
@@ -1500,6 +1513,67 @@ async function streamChatCompletionsOverWs(options: {
     wsStream,
     ccStream,
     responseContext.model,
+  )
+}
+
+/** Answer a Codex compaction trigger on Chat Completions with one item. */
+async function streamChatCompactionOverWs(options: {
+  ccPayload: Extract<
+    ResponsesEndpointCandidate,
+    { endpoint: "/chat/completions" }
+  >["payload"]
+  compaction: boolean
+  initiator: "agent" | "user"
+  responseContext: ResponsesPayload
+  turn: ResponsesWebSocketTurn
+  ws: ResponsesWebSocketState
+}): Promise<void> {
+  const { ccPayload, compaction, initiator, responseContext, turn, ws } =
+    options
+  ccPayload.stream = false
+  delete ccPayload.stream_options
+  const response = await waitForWebSocketTurn(
+    createChatCompletions(ccPayload, {
+      allowCompatibilityRetry: false,
+      candidatePrepared: true,
+      compaction,
+      initiator,
+      signal: turn.abortController.signal,
+    }),
+    turn,
+  )
+  throwIfWebSocketTurnAborted(turn)
+  await emitChatCompactionOverWs({
+    model: responseContext.model,
+    payload: responseContext,
+    response,
+    turn,
+    ws,
+  })
+}
+
+async function emitChatCompactionOverWs(options: {
+  model: string
+  payload: ResponsesPayload
+  response: unknown
+  turn: ResponsesWebSocketTurn
+  ws: ResponsesWebSocketState
+}): Promise<void> {
+  const { model, payload, response, turn, ws } = options
+  if (
+    typeof response !== "object"
+    || response === null
+    || !Object.hasOwn(response, "choices")
+  ) {
+    throw new TypeError("Chat compaction requires a buffered completion")
+  }
+  await emitResponsesResultAsStream(
+    {
+      writeSSE: async (frame) => {
+        await emitTurnFrame(ws, turn, payload, frame.data, frame.event)
+      },
+    },
+    chatCompactionTriggerResult(response as ChatCompletionResponse, model),
   )
 }
 
@@ -1551,6 +1625,17 @@ async function streamCustomFallbackOverWs(options: {
     }),
     turn,
   )
+  if (hasCompactionTrigger(payload)) {
+    throwIfWebSocketTurnAborted(turn)
+    await emitChatCompactionOverWs({
+      model: payload.model,
+      payload,
+      response: initial.response,
+      turn,
+      ws,
+    })
+    return
+  }
   const response = await waitForWebSocketTurn(
     resolvePreparedResponsesWebSearchCalls({
       completionFactory,

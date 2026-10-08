@@ -138,6 +138,11 @@ import {
   resolvePreparedResponsesWebSearchCalls,
   type ResponsesChatCompletionFactory,
 } from "./chat-fallback-completion"
+import { chatCompactionSummary } from "./compact-summary"
+import {
+  hasCompactionTrigger,
+  toRemoteCompactionResult,
+} from "./compaction-trigger"
 import {
   prepareResponsesCandidates,
   selectResponsesCandidate,
@@ -1083,6 +1088,7 @@ const handleResponsesInner = async (
       reportResponsesEndpointFallback(c, candidate.payload.model, decision)
       setRequestContext(c, { provider: "Responses→ChatCompletions" })
       return await handleWithChatCompletions(c, candidate.payload, {
+        compactionTrigger: hasCompactionTrigger(payload),
         requestedModel,
         copilotSessionToken,
         initiator: sourceInitiator,
@@ -1352,6 +1358,7 @@ async function dispatchCustomResponsesRequest(
     ),
   })
   return await handleWithChatCompletions(c, candidate.payload, {
+    compactionTrigger: hasCompactionTrigger(options.payload),
     completionFactory,
     requestedModel: options.requestedModel,
     webSearchMaxUses: getResponsesChatWebSearchMaxUses(options.payload),
@@ -2480,27 +2487,43 @@ const handleWithAnthropicMessages = async (options: {
   const requestedModel = nativeOptions.requestedModel ?? responseContext.model
   setRequestContext(c, { provider: "Responses→AnthropicMessages" })
   const compaction = isResponsesCompactionRequest(responseContext)
-  if (!responseContext.stream) {
-    const result = await executePreparedResponsesMessagesBridge({
-      compaction,
-      nativeOptions,
-      payload: preparedPayload,
-      responseContext,
-      signal: c.req.raw.signal,
-    })
+  return await respondWithBufferedResponsesResult(c, {
+    requestedModel,
+    stream: Boolean(responseContext.stream),
+    execute: async (signal) =>
+      await executePreparedResponsesMessagesBridge({
+        compaction,
+        nativeOptions,
+        payload: preparedPayload,
+        responseContext,
+        signal,
+      }),
+  })
+}
+
+/**
+ * Answer with a Responses result produced by one buffered upstream call:
+ * JSON for non-streaming clients, or a synthesized SSE stream that sends
+ * heartbeats while the upstream call is pending.
+ */
+async function respondWithBufferedResponsesResult(
+  c: Context,
+  options: {
+    execute: (signal: AbortSignal) => Promise<ResponsesResult>
+    requestedModel: string
+    stream: boolean
+  },
+): Promise<Response> {
+  const { execute, requestedModel } = options
+  if (!options.stream) {
+    const result = await execute(c.req.raw.signal)
     setResponsesResultContext(c, result)
     return c.json(result)
   }
 
   const upstreamController = new AbortController()
   const signal = AbortSignal.any([c.req.raw.signal, upstreamController.signal])
-  const pendingResult = executePreparedResponsesMessagesBridge({
-    compaction,
-    nativeOptions,
-    payload: preparedPayload,
-    responseContext,
-    signal,
-  })
+  const pendingResult = execute(signal)
   const preflush = await raceSsePreflush(pendingResult)
 
   return streamSSE(c, async (stream) => {
@@ -2559,6 +2582,8 @@ export const handleWithChatCompletions = async (
   c: Context,
   ccPayload: ChatCompletionsPayload,
   options: {
+    /** Answer a Codex `compaction_trigger` with one compaction item. */
+    compactionTrigger?: boolean
     completionFactory?: ResponsesChatCompletionFactory
     requestedModel?: string
     copilotSessionToken?: string
@@ -2584,6 +2609,19 @@ export const handleWithChatCompletions = async (
         accountId: getLastUsedAccountId(),
       }
     })
+  if (options.compactionTrigger) {
+    return await respondWithBufferedResponsesResult(c, {
+      requestedModel: responseModel,
+      stream: Boolean(ccPayload.stream),
+      execute: async (signal) =>
+        await completeChatCompactionTrigger(c, {
+          ccPayload,
+          completionFactory,
+          responseModel,
+          signal,
+        }),
+    })
+  }
   const needsWebSearch =
     ccPayload.tools?.some((tool) => tool.function.name === "web_search")
     ?? false
@@ -2805,6 +2843,40 @@ export const handleWithChatCompletions = async (
         throw error
       }
     },
+  )
+}
+
+async function completeChatCompactionTrigger(
+  c: Context,
+  options: {
+    ccPayload: ChatCompletionsPayload
+    completionFactory: ResponsesChatCompletionFactory
+    responseModel: string
+    signal: AbortSignal
+  },
+): Promise<ResponsesResult> {
+  const { stream_options: _streamOptions, ...request } = options.ccPayload
+  const initial = await options.completionFactory(
+    { ...request, stream: false },
+    { signal: options.signal },
+  )
+  if (initial.accountId !== undefined) {
+    setRequestContext(c, { accountId: initial.accountId })
+  }
+  if (!isNonStreaming(initial.response)) {
+    throw new TypeError("Chat compaction requires a buffered completion")
+  }
+  return chatCompactionTriggerResult(initial.response, options.responseModel)
+}
+
+/** Convert a Chat summary turn into the compaction item Codex expects. */
+export function chatCompactionTriggerResult(
+  response: ChatCompletionResponse,
+  model: string,
+): ResponsesResult {
+  return toRemoteCompactionResult(
+    chatCompletionToResponsesResult(response, model),
+    chatCompactionSummary(response),
   )
 }
 
